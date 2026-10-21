@@ -217,8 +217,8 @@ def test_infera_forwards_patch_set(monkeypatch):
     monkeypatch.setattr(inf._mn_cli, "_poll_timeout_from_args", lambda args: 1)
     op_args: list[str] = []
 
-    def _ssh(st, ip, script, python, args, **kw):
-        op_args.append(args)
+    def _ssh(st, ip, script, **kw):
+        op_args.append(script.args)
         stdout = '{"status":"applied","per_pod":[{"status":"applied"}]}'
         return types.SimpleNamespace(returncode=0, stdout=stdout, stderr="")
 
@@ -276,3 +276,36 @@ def test_gc_fan_out_waits_for_a_profiling_round(monkeypatch, tmp_path):
 
 def test_roofline_fan_out_still_runs_on_every_restart(monkeypatch, tmp_path):
     assert _fan_out_calls(monkeypatch, tmp_path, patch_set="roofline", torch_profiler_dir="") == ["roofline"]
+
+
+def test_a_failed_restart_restores_the_round_env(monkeypatch, tmp_path):
+    """Everything after the mutation can raise; the next round's launcher must not inherit this round's forwarding."""
+    from hyperloom.inference_optimizer.multi_node._internal import external_state
+    from hyperloom.orchestrator.actions.executors import _multi_node_server_lifecycle as lifecycle
+    from hyperloom.orchestrator.actions.executors import _server_patcher
+
+    def _boom() -> str:
+        raise RuntimeError("patch set unresolved")
+
+    monkeypatch.setattr(os, "environ", os.environ.copy())
+    monkeypatch.setenv("HYPERLOOM_MN_EXTRA_FWD_ENV", "sentinel")
+    monkeypatch.setattr(lifecycle, "is_multi_node", lambda: True)
+    monkeypatch.setattr(external_state, "external_service_url", lambda: "")
+    monkeypatch.setattr(_server_patcher, "resolve_sglang_patch_set", _boom)
+
+    with pytest.raises(RuntimeError):
+        asyncio.run(
+            lifecycle.restart_server_for_round(
+                framework="sglang",
+                model_path="/m",
+                tp=8,
+                ep=1,
+                torch_profiler_dir=str(tmp_path / "trace"),
+                extra_env={"HYPERLOOM_TEST_FWD": "1"},
+                unset_env=["HYPERLOOM_TEST_DROP"],
+            )
+        )
+
+    assert os.environ["HYPERLOOM_MN_EXTRA_FWD_ENV"] == "sentinel"
+    assert "HYPERLOOM_MN_PROFILE_TRACE_DIR" not in os.environ
+    assert "HYPERLOOM_MN_UNSET_FWD_ENV" not in os.environ

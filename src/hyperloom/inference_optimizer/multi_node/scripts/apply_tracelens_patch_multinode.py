@@ -200,6 +200,95 @@ def _run_git(args: tuple[str, ...], cwd: Path) -> tuple[int, str, str]:
     return proc.returncode, proc.stdout, proc.stderr
 
 
+def _installed_sglang_version(sglang_module: Any) -> str:
+    """The installed SGLang version: ``sglang.version``, then pip metadata, then the module attribute."""
+    try:
+        from sglang.version import __version__ as module_version  # type: ignore[import-not-found]
+
+        version = (module_version or "").strip()
+    except ImportError:
+        version = ""
+    if not version:
+        try:
+            import importlib.metadata as _md
+
+            version = (_md.version("sglang") or "").strip()
+        except _md.PackageNotFoundError:
+            version = ""
+    if not version:
+        version = (getattr(sglang_module, "__version__", "") or "").strip()
+    return version
+
+
+def _sglang_anchor_path(sglang_module: Any) -> Path | None:
+    """A file inside the sglang install, which its layout is resolved from.
+
+    ``sglang.__file__`` in an editable layout, else the scheduler profiler
+    mixin, else the first entry of ``__path__``.
+    """
+    if sglang_module.__file__:  # editable layout
+        return Path(sglang_module.__file__)
+    try:
+        import sglang.srt.managers.scheduler_profiler_mixin as _spm  # type: ignore[import-not-found]
+
+        if _spm.__file__:
+            return Path(_spm.__file__)
+    except ImportError:
+        pass
+    search_path = list(getattr(sglang_module, "__path__", []) or [])
+    return Path(search_path[0]) if search_path else None
+
+
+def _resolve_patches_dir(tracelens_root: str, version: str, *, graph_capture: bool) -> tuple[Path | None, str, str]:
+    """The patch directory for this SGLang version, as ``(dir, skip_reason, error)``.
+
+    A skip reason is not a failure: a release with no TraceLens graph-capture
+    set runs unpatched.
+    """
+    if graph_capture:
+        tree = Path(tracelens_root, *_GC_PATCH_TREE_REL)
+        patches_dir = _resolve_gc_patches_dir(tree, version)
+        if patches_dir is None:
+            return None, f"no sglang_gc_patch set for SGLang {version!r} under {tree}", ""
+        return patches_dir, "", ""
+    subdir = _versioned_patches_subdir_name(version)
+    if subdir is None:
+        return None, "", f"cannot derive per-version patches subdir from version {version!r}"
+    patches_dir = Path(tracelens_root, *_PATCH_TREE_REL, subdir)
+    if not patches_dir.is_dir():
+        return (
+            None,
+            "",
+            f"TraceLens patches dir missing: {patches_dir} (upgrade TraceLens to Hyperloom_integration_v0.3.1+)",
+        )
+    return patches_dir, "", ""
+
+
+def _apply_patch_set(patches: tuple[Path, ...], apply_root: Path, strip: int) -> tuple[list[str], str]:
+    """Apply every patch or none, and say which landed.
+
+    The whole set is pre-checked first, then applied; a failure mid-set rolls
+    back what landed, because a half-patched install runs a mix of two SGLang
+    versions.
+    """
+    strip_arg = f"-p{strip}"
+    for patch in patches:
+        rc, _, stderr = _run_git(("apply", "--check", strip_arg, str(patch)), apply_root)
+        if rc != 0:
+            return [], f"git apply --check {strip_arg} {patch.name} failed (rc={rc}): {stderr.strip()[:240]}"
+    applied: list[Path] = []
+    for patch in patches:
+        rc, _, stderr = _run_git(("apply", strip_arg, str(patch)), apply_root)
+        if rc != 0:
+            _log(f"apply failed at {patch.name} (rc={rc}); rolling back {len(applied)} patches")
+            for previous in reversed(applied):
+                _run_git(("apply", "-R", strip_arg, str(previous)), apply_root)
+            error = f"git apply {strip_arg} {patch.name} failed (rc={rc}): {stderr.strip()[:240]}"
+            return [path.name for path in applied], error
+        applied.append(patch)
+    return [path.name for path in applied], ""
+
+
 def _apply_on_pod(
     *,
     tracelens_root: str,
@@ -225,48 +314,17 @@ def _apply_on_pod(
     try:
         try:
             import sglang  # type: ignore[import-not-found]
-        except Exception as e:  # noqa: BLE001
+        except (ImportError, OSError) as e:
             result["status"] = "failed"
             result["error"] = f"sglang not importable: {e}"
             return result
 
-        # Version resolution: sglang.version, then pip metadata, then attr.
-        version = ""
-        try:
-            from sglang.version import __version__ as _sv  # type: ignore[import-not-found]
-
-            version = (_sv or "").strip()
-        except Exception:  # noqa: BLE001
-            pass
-        if not version:
-            try:
-                import importlib.metadata as _md
-
-                version = (_md.version("sglang") or "").strip()
-            except Exception:  # noqa: BLE001
-                pass
-        if not version:
-            version = (getattr(sglang, "__version__", "") or "").strip()
+        version = _installed_sglang_version(sglang)
         result["sglang_version"] = version or None
         if sglang_version_pin and version and version != sglang_version_pin:
             _log(f"version pin {sglang_version_pin!r} != installed {version!r} — proceeding (pin is advisory)")
 
-        # Install-root anchor: sglang.__file__, else the scheduler_profiler_mixin file, else sglang.__path__[0].
-        anchor_path: Path | None = None
-        if sglang.__file__:  # editable layout
-            anchor_path = Path(sglang.__file__)
-        else:
-            try:
-                import sglang.srt.managers.scheduler_profiler_mixin as _spm  # type: ignore[import-not-found]
-
-                if _spm.__file__:
-                    anchor_path = Path(_spm.__file__)
-            except Exception:  # noqa: BLE001
-                pass
-        if anchor_path is None:
-            sp = list(getattr(sglang, "__path__", []) or [])
-            if sp:
-                anchor_path = Path(sp[0])
+        anchor_path = _sglang_anchor_path(sglang)
         if anchor_path is None:
             result["status"] = "failed"
             result["error"] = (
@@ -284,10 +342,7 @@ def _apply_on_pod(
             )
             return result
         apply_root, strip = layout
-        if patch_set:
-            graph_capture = patch_set == _PATCH_SET_GRAPH_CAPTURE
-        else:
-            graph_capture = _uses_gc_patch(version)
+        graph_capture = (patch_set == _PATCH_SET_GRAPH_CAPTURE) if patch_set else _uses_gc_patch(version)
         result["patch_set"] = _PATCH_SET_GRAPH_CAPTURE if graph_capture else _PATCH_SET_ROOFLINE
         sentinel_rel = _GC_SENTINEL_RELPATH if graph_capture else _SENTINEL_RELPATH
         sentinel_markers = _GC_SENTINEL_MARKERS if graph_capture else _SENTINEL_MARKERS
@@ -305,72 +360,34 @@ def _apply_on_pod(
             result["patches_skipped_already_present"] = True
             return result
 
-        if graph_capture:
-            patches_dir = _resolve_gc_patches_dir(Path(tracelens_root, *_GC_PATCH_TREE_REL), version)
-            if patches_dir is None:
-                # Not an error: releases without a TraceLens gc set run unpatched.
-                result["status"] = "skipped"
-                result["skip_reason"] = (
-                    f"no sglang_gc_patch set for SGLang {version!r} under {Path(tracelens_root, *_GC_PATCH_TREE_REL)}"
-                )
-                _log(f"{result['skip_reason']}; continuing unpatched")
-                return result
-        else:
-            subdir = _versioned_patches_subdir_name(version)
-            if subdir is None:
-                result["status"] = "failed"
-                result["error"] = f"cannot derive per-version patches subdir from version {version!r}"
-                return result
-            patches_dir = Path(tracelens_root, *_PATCH_TREE_REL, subdir)
-            if not patches_dir.is_dir():
-                result["status"] = "failed"
-                result["error"] = (
-                    f"TraceLens patches dir missing: {patches_dir} (upgrade TraceLens to Hyperloom_integration_v0.3.1+)"
-                )
-                return result
+        patches_dir, skip_reason, error = _resolve_patches_dir(tracelens_root, version, graph_capture=graph_capture)
+        if skip_reason:
+            result["status"] = "skipped"
+            result["skip_reason"] = skip_reason
+            _log(f"{skip_reason}; continuing unpatched")
+            return result
+        if patches_dir is None:
+            result["status"] = "failed"
+            result["error"] = error
+            return result
         patches = tuple(sorted(patches_dir.glob("*.patch")))
         if not patches:
             result["status"] = "failed"
             result["error"] = f"no *.patch files in {patches_dir}"
             return result
 
-        # Pre-check every patch (atomic-transaction policy: all or none).
-        strip_arg = f"-p{strip}"
-        for p in patches:
-            rc, _, stderr = _run_git(
-                ("apply", "--check", strip_arg, str(p)),
-                apply_root,
-            )
-            if rc != 0:
-                result["status"] = "failed"
-                result["error"] = f"git apply --check {strip_arg} {p.name} failed (rc={rc}): {stderr.strip()[:240]}"
-                return result
-
-        # Apply for real; track applied for rollback on mid-set failure.
-        applied: list[Path] = []
-        for p in patches:
-            rc, _, stderr = _run_git(
-                ("apply", strip_arg, str(p)),
-                apply_root,
-            )
-            if rc != 0:
-                _log(f"apply failed at {p.name} (rc={rc}); rolling back {len(applied)} patches")
-                for prev in reversed(applied):
-                    _run_git(
-                        ("apply", "-R", strip_arg, str(prev)),
-                        apply_root,
-                    )
-                result["status"] = "failed"
-                result["error"] = f"git apply {strip_arg} {p.name} failed (rc={rc}): {stderr.strip()[:240]}"
-                return result
-            applied.append(p)
-            result["patches_applied"].append(p.name)
-
+        applied, apply_error = _apply_patch_set(patches, apply_root, strip)
+        result["patches_applied"] = applied
+        if apply_error:
+            result["status"] = "failed"
+            result["error"] = apply_error
+            return result
         result["status"] = "applied"
         return result
     except Exception as e:  # noqa: BLE001 - actor must never raise
         result["status"] = "failed"
         result["error"] = f"unexpected: {type(e).__name__}: {e}"
+        _log(result["error"])
         return result
     finally:
         result["elapsed_sec"] = round(time.time() - started, 3)

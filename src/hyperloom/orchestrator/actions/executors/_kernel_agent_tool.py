@@ -14,9 +14,10 @@ import re
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 from hyperloom.common.git_safety import safe_directory_args
+from hyperloom.common.unified_diff import PatchOp, repo_relative_manifest
 from hyperloom.inference_optimizer.trace.task_progress import heartbeat_while_output_flows
 from hyperloom.orchestrator.kernel import apply_kernel_patch
 
@@ -71,11 +72,9 @@ def _final_content_snapshot(
     if not (patch_path.endswith(".patch") and repo_root):
         return snapshot_dir
     try:
-        descriptors = apply_kernel_patch.parse_patch_manifest(
-            Path(patch_path).read_text(encoding="utf-8", errors="replace")
-        )
-        writes = [str(d.get("path") or "") for d in descriptors if d.get("op") == "write"]
-    except Exception:  # noqa: BLE001 — an unreadable patch is apply's error to report.
+        targets = repo_relative_manifest(Path(patch_path).read_text(encoding="utf-8", errors="replace"))
+        writes = [t.path for t in targets if t.op is PatchOp.WRITE]
+    except (OSError, ValueError):
         return snapshot_dir
     if not writes:
         return snapshot_dir
@@ -87,7 +86,7 @@ def _final_content_snapshot(
             repo_root=repo_root,
             snapshot_dir=Path(patch_path).parent / "integrate_snapshot",
         )
-    except Exception:
+    except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired):
         log.exception("integrate: could not materialize a final-content snapshot for %s", patch_path)
         return snapshot_dir
 
@@ -137,18 +136,20 @@ def _maybe_apply_kernel_patch(
         repo_root=repo_root,
     )
     return apply_kernel_patch.apply_kernel_patch(
-        patch_path=patch_path,
-        target_file=target_file,
-        backup_root=backup_root,
-        kernel_id=kid,
-        artifact_paths=_artifact_paths_from_payload(payload),
-        rebuild_command=payload.get("rebuild_command"),
-        rebuild_timeout_sec=int(payload.get("rebuild_timeout_sec", 1800)),
-        skip_rebuild=bool(payload.get("skip_rebuild", False)),
-        dry_run=bool(payload.get("dry_run_patch", False)),
-        snapshot_dir=snapshot_dir,
-        repo_root=repo_root,
-        producer_manifest=(str(payload.get("producer_manifest") or "").strip() or None),
+        apply_kernel_patch.KernelPatchRequest(
+            patch_path=patch_path,
+            target_file=target_file,
+            backup_root=backup_root,
+            kernel_id=kid,
+            artifact_paths=_artifact_paths_from_payload(payload),
+            rebuild_command=payload.get("rebuild_command"),
+            rebuild_timeout_sec=int(payload.get("rebuild_timeout_sec", 1800)),
+            skip_rebuild=bool(payload.get("skip_rebuild", False)),
+            dry_run=bool(payload.get("dry_run_patch", False)),
+            snapshot_dir=snapshot_dir,
+            repo_root=repo_root,
+            producer_manifest=str(payload.get("producer_manifest") or "").strip() or None,
+        )
     )
 
 
@@ -172,27 +173,15 @@ def materialize_unified_patch_snapshot(
         raise FileNotFoundError(f"kernel repo does not exist: {root}")
 
     patch_text = patch.read_text(encoding="utf-8", errors="replace")
-    descriptors = apply_kernel_patch.parse_patch_manifest(patch_text)
-    if not descriptors:
-        raise ValueError(f"patch has no file operations: {patch}")
-
-    # Paths the patch CREATES: these must be produced by ``git apply``, never
-    # pre-seeded with a base, or apply fails "already exists". Everything else
-    # is a modify whose base we must supply. ``is_new`` comes from
-    # ``parse_patch_manifest`` (single source of truth for both the path
-    # normalization and the create/modify disposition), which avoids a second,
-    # drift-prone parse of the raw patch text.
-    _new_file_paths = {
-        str(desc.get("path") or "") for desc in descriptors if desc.get("op") == "write" and desc.get("is_new")
-    }
+    targets = repo_relative_manifest(patch_text)
 
     snap = Path(snapshot_dir) if snapshot_dir is not None else patch.parent / "fusion_snapshot"
     if snap.exists():
         shutil.rmtree(snap)
     snap.mkdir(parents=True, exist_ok=True)
 
-    for desc in descriptors:
-        rel = Path(str(desc.get("path") or ""))
+    for target in targets:
+        rel = Path(target.path)
         if not rel.parts or rel.is_absolute() or ".." in rel.parts:
             raise ValueError(f"unsafe patch path: {rel}")
         dst = snap / rel
@@ -204,7 +193,7 @@ def materialize_unified_patch_snapshot(
         if base.returncode == 0:
             dst.parent.mkdir(parents=True, exist_ok=True)
             dst.write_bytes(base.stdout)
-        elif rel.as_posix() not in _new_file_paths:
+        elif not target.is_new:
             # ``git show HEAD:`` failed and this is a MODIFY (not a create):
             # non-git repo_root (e.g. vLLM/sglang under site-packages/
             # dist-packages) or an untracked-but-present file. Fall back to the
@@ -254,9 +243,9 @@ def materialize_unified_patch_snapshot(
         msg = (proc.stderr or proc.stdout or "").strip()
         raise RuntimeError(f"could not materialize patch snapshot: {msg[:500]}")
 
-    for desc in descriptors:
-        if desc.get("op") == "write" and not (snap / str(desc["path"])).is_file():
-            raise RuntimeError(f"snapshot missing final content for {desc['path']}")
+    for target in targets:
+        if target.op is PatchOp.WRITE and not (snap / target.path).is_file():
+            raise RuntimeError(f"snapshot missing final content for {target.path}")
     return str(snap)
 
 
@@ -327,12 +316,16 @@ async def _run_subprocess(
     cmd: list[str],
     *,
     timeout_sec: int,
+    env: Mapping[str, str] | None = None,
+    label: str = "",
 ) -> tuple[int, str, str]:
     """Run a bounded subprocess without blocking the reactor.
 
     Args:
         cmd: The command and arguments to run.
         timeout_sec: Per-run timeout in seconds.
+        env: Base environment for the child; this process's environment when omitted.
+        label: Name the liveness heartbeat reports; derived from ``cmd`` when empty.
 
     Returns:
         A tuple of ``(returncode, stdout, stderr)``.
@@ -344,6 +337,8 @@ async def _run_subprocess(
         or timeout_sec <= 0
     ):
         raise ValueError("timeout_sec must be finite and positive")
+
+    base_env = dict(env) if env is not None else None
 
     def _run(on_output: Callable[[], None]) -> tuple[int, str, str]:
         """Run the command synchronously in a worker thread.
@@ -363,7 +358,7 @@ async def _run_subprocess(
         Raises:
             subprocess.TimeoutExpired: When the command exceeds ``timeout_sec``.
         """
-        env = os.environ.copy()
+        child_env = dict(base_env) if base_env is not None else os.environ.copy()
         from ._multi_node_env import (
             is_multi_node,
             ray_gcs_address_from_state,
@@ -377,26 +372,26 @@ async def _run_subprocess(
             # the RAY_ADDRESS path below is unchanged for those.
             ssh_env = infera_ssh_env_from_state()
             if ssh_env:
-                env.update(ssh_env)
+                child_env.update(ssh_env)
             addr = "" if ssh_env else ray_gcs_address_from_state()
             if addr:
-                env.setdefault("RAY_ADDRESS", addr)
-        env["PATH"] = f"/opt/venv/bin:{env.get('PATH', '')}"
+                child_env.setdefault("RAY_ADDRESS", addr)
+        child_env["PATH"] = f"/opt/venv/bin:{child_env.get('PATH', '')}"
         # The heartbeat around this call is only as honest as the child's
         # flushing: block-buffered on a pipe, it looks dead between flushes.
         # ``setdefault`` so an operator who set this deliberately still wins.
-        env.setdefault("PYTHONUNBUFFERED", "1")
+        child_env.setdefault("PYTHONUNBUFFERED", "1")
         # ``run_with_session_kill`` reaps the whole descendant tree on every exit path.
         cp = run_with_session_kill(
             cmd,
-            env=env,
+            env=child_env,
             timeout=timeout_sec,
             text=True,
             on_output=on_output,
         )
         return cp.returncode, cp.stdout or "", cp.stderr or ""
 
-    async with heartbeat_while_output_flows(unit="kernel_tool", label=_tool_label(cmd)) as activity:
+    async with heartbeat_while_output_flows(unit="kernel_tool", label=label or _tool_label(cmd)) as activity:
         return await asyncio.to_thread(_run, activity.note)
 
 

@@ -66,17 +66,14 @@ def _write_reports_for(tmp_path, framework):
         model_name="whatever-the-operator-shipped",
         framework=framework,
         target_platform="MI300X",
-        analysis_mode="inference",
-        runtime_env="local",
         dry_run=False,
     )
     return tl.write_reports(
         run_dir,
-        trace_input_type="file",
-        trace_files=[trace],
+        tl.TraceInputs(input_type="file", files=[trace]),
         candidates=[],
         args=args,
-        existing_report_path=analysis_md,
+        outcome=tl.OrchestratorOutcome(report_path=analysis_md),
     )
 
 
@@ -144,8 +141,6 @@ class TestTheTwoRoutesAgree:
             "MI300X",
             "--model-name",
             "utest",
-            "--top-k",
-            "8",
         ]
         assert bta.main(argv) == 0
         lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.strip()]

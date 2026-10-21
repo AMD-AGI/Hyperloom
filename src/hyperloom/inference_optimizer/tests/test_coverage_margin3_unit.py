@@ -14,7 +14,7 @@ def test_common_io_bytes_and_safe_mtime_edges(monkeypatch, tmp_path) -> None:
     from hyperloom.common import io
 
     path = tmp_path / "nested" / "payload.bin"
-    io.atomic_write_bytes(path, b"abc", make_parents=True, fsync=True, mode=0o777)
+    io.atomic_write_bytes(path, b"abc", options=io.WriteOptions(make_parents=True, fsync=True, mode=0o777))
     assert path.read_bytes() == b"abc"
     assert path.stat().st_mode & 0o777 == 0o700
 
@@ -85,40 +85,36 @@ def test_retry_policy_env_and_on_retry_error(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_retry_with_backoff_swallows_on_retry_callback_error() -> None:
+async def test_retry_with_backoff_propagates_on_retry_callback_error() -> None:
     from hyperloom.orchestrator.roles.base import RetryPolicy, retry_with_backoff
 
-    calls = {"n": 0}
-    slept: list[float] = []
-
     async def _flaky():
-        calls["n"] += 1
-        if calls["n"] == 1:
-            raise ConnectionError("transient")
-        return "ok"
+        raise ConnectionError("transient")
 
     async def _sleep(delay: float) -> None:
-        slept.append(delay)
+        raise AssertionError("must not sleep after the callback raised")
 
     def _bad_on_retry(*_args):
         raise RuntimeError("telemetry failed")
 
-    out = await retry_with_backoff(
-        _flaky,
-        policy=RetryPolicy(max_attempts=2, base_delay_s=0.0, jitter_s=0.0),
-        retry_on=(ConnectionError,),
-        sleep=_sleep,
-        on_retry=_bad_on_retry,
-    )
-    assert out == "ok"
-    assert slept == [0.0]
+    with pytest.raises(RuntimeError, match="telemetry failed"):
+        await retry_with_backoff(
+            _flaky,
+            policy=RetryPolicy(max_attempts=2, base_delay_s=0.0, jitter_s=0.0),
+            retry_on=(ConnectionError,),
+            sleep=_sleep,
+            on_retry=_bad_on_retry,
+        )
 
 
 def test_gpu_type_resolution_env_probe_and_runner(monkeypatch) -> None:
     from hyperloom.inference_optimizer import gpu_types
 
-    assert gpu_types._gpu_runner_type("MI325X") == "mi300x"
-    assert gpu_types._gpu_runner_type("mi355x") == "mi355x"
+    assert gpu_types.gpu_runner_type("MI325X") == "mi300x"
+    assert gpu_types.gpu_runner_type("mi355x") == "mi355x"
+    assert gpu_types.gpu_runner_type("r9700") == "gfx12"
+    assert gpu_types._runner_framework_error("r9700", "vllm") is None
+    assert "no validated gfx12 runner" in gpu_types._runner_framework_error("r9700", "sglang")
 
     resolved, warnings = gpu_types._resolve_gpu_type("mi300x", "mi355x")
     assert resolved == "mi355x"
@@ -137,6 +133,14 @@ def test_gpu_type_resolution_env_probe_and_runner(monkeypatch) -> None:
     assert gpu_types._resolve_amd_gpu_type() == "mi325x"
     monkeypatch.delenv("TARGET_GPU_TYPE")
     monkeypatch.setenv("GPU_TYPE", "unknown")
+    assert gpu_types._resolve_amd_gpu_type() is None
+
+    monkeypatch.setenv("TARGET_GPU_TYPE", "r9700")
+    monkeypatch.setenv("GPU_TYPE", "gfx12")
+    assert gpu_types._resolve_amd_gpu_type() == "r9700"
+
+    monkeypatch.delenv("TARGET_GPU_TYPE", raising=False)
+    monkeypatch.setenv("GPU_TYPE", "gfx1201")
     assert gpu_types._resolve_amd_gpu_type() is None
 
     monkeypatch.delenv("GPU_TYPE", raising=False)
@@ -175,18 +179,26 @@ def test_gpu_type_autodetect_rocm_and_torch_fallback(monkeypatch) -> None:
     fake_torch.cuda.get_device_properties = lambda _idx: (_ for _ in ()).throw(RuntimeError("no gpu"))
     assert gpu_types._autodetect_gpu_type() is None
 
+    fake_torch.cuda.get_device_properties = lambda _idx: (_ for _ in ()).throw(KeyError("device"))
+    with pytest.raises(KeyError, match="device"):
+        gpu_types._autodetect_gpu_type()
 
-def test_kernel_decision_retry_budget_env(monkeypatch) -> None:
-    from hyperloom.orchestrator.state import kernel_decision_settings as settings
 
-    monkeypatch.delenv("INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_FAILURES", raising=False)
-    assert settings.resolve_kernel_opt_max_failures() == 2
+def test_r9700_autodetect_requires_exact_product_not_gfx1201(monkeypatch) -> None:
+    from hyperloom.inference_optimizer import gpu_types
 
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_FAILURES", "0")
-    assert settings.resolve_kernel_opt_max_failures() == 1
+    class _Completed:
+        stdout = "GPU[0] : Card series: AMD Radeon AI PRO R9700"
 
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_FAILURES", "bad")
-    assert settings.resolve_kernel_opt_max_failures() == 2
+    monkeypatch.setattr(subprocess, "run", lambda *_args, **_kwargs: _Completed())
+    assert gpu_types._autodetect_gpu_type() == "r9700"
+
+    _Completed.stdout = "GPU[0] : Card series: AMD Radeon AI PRO R9700S"
+    fake_torch = SimpleNamespace(
+        cuda=SimpleNamespace(get_device_properties=lambda _idx: SimpleNamespace(gcnArchName="gfx1201"))
+    )
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+    assert gpu_types._autodetect_gpu_type() is None
 
 
 def test_multi_node_state_paths_resolution_and_binding(monkeypatch, tmp_path) -> None:

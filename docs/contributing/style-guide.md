@@ -79,6 +79,7 @@ Two layers. The **gate** is the `code-metrics` CI job (`scripts/code_metrics.py`
 | Cognitive complexity | > 30 | Twice SonarSource's S3776 default of 15, the same step as the ceiling; it weights nesting, so past 30 a function has to be re-read rather than read | complexipy |
 | Function length | > 80 lines | A function past one screen; counted as below, `def` line through the last line | the script |
 | Nested block depth | > 5 | pylint `R1702` default: past five levels the innermost line depends on six conditions at once | ruff `PLR1702` |
+| Parameter count | > 5 | pylint `R0913` default: past five, the call site stops reading as a sentence and the values travel together anyway — pass the object they come from, or name them in a dataclass (A8). `self`/`cls` and `*args`/`**kwargs` do not count; keyword-only parameters do | ruff `PLR0913` |
 | Module length | > 1200 lines (over 800 is a report-only warning) | Half again the 800-line review trigger; at that size a module almost always holds more than one job | the script |
 | Duplicated code | any clone of >= 100 tokens and >= 10 lines | SonarSource CPD defaults | jscpd |
 | Dead code | any finding at >= 80% confidence | vulture's recommended CI setting | vulture |
@@ -203,13 +204,16 @@ Imports between packages point one way, and CI enforces it: the `import-linter (
 |----------|------|
 | `hl-top-layers` | `hyperloom.cli` > `orchestrator` > `agents` > `inference_optimizer` > `common`: a package imports only from layers below it |
 | `kf-only-common` | `kernelforge` imports nothing from `hyperloom` except `hyperloom.common` |
+| `kf-evaluation-foundation` | `kernelforge.evaluation` imports no kernelforge product or entry package |
+| `kf-tools-foundation` | `kernelforge.tools` imports neither `kernelforge.evaluation` nor any kernelforge product or entry package |
+| `kf-mcp-servers-light` | the stdio MCP server modules (`knowledge.pr_knowledge.mcp_server`, `orchestrator.specialist_probe_server`) do not reach `agent_backends`, `cli` or `loop`, so a server starts without the agent runtime |
 | `common-is-leaf` | `hyperloom.common` imports nothing else from the project, `kernelforge` included |
 | `agents-independent` | `hyperloom.agents.*` packages do not import each other |
 | `kf-backends-independent` | `kernelforge.kernel_backends.*` packages do not import each other |
 | `kf-entry-protected` | `hyperloom.agents`, `inference_optimizer` and `common` do not import `kernelforge` directly; the orchestrator and `hyperloom.cli` are the way in |
 | `acyclic` | no import cycle between sibling packages anywhere under `hyperloom` or `kernelforge` |
 
-Imports inside functions count; imports under `if TYPE_CHECKING:` and test code do not. A new package under `hyperloom/agents/` or `kernelforge/kernel_backends/` is added to its independence list in the same PR.
+Imports inside functions count; imports under `if TYPE_CHECKING:` and test code do not. A new package under `hyperloom/agents/` or `kernelforge/kernel_backends/` is added to its independence list in the same PR, and a new stdio MCP server module is added to the `kf-mcp-servers-light` sources.
 
 Two contracts carry the violations that existed when the gate landed, as exact `importer -> imported` lines under `ignore_imports`: `hl-top-layers` lists the upward imports of `hyperloom.inference_optimizer.cli` (an entry point that sits inside the core layer), and `acyclic` lists the imports that break today's cycles. These baselines only shrink. The contracts fail on an `ignore_imports` line that no longer matches an import, so a PR that removes one of those imports deletes its line in the same commit. Do not add a line to get a new import through: move the code to the layer it belongs in, or invert the dependency (pass a callable or a protocol down instead of importing up). The baseline is per module pair, so another import between two modules already listed is not caught; do not lean on that.
 
@@ -259,7 +263,7 @@ CI runs `pylint --errors-only` on core packages (fatal/error severity only). Fix
 
 **E2E markers** (skipped in CI by default):
 
-- `critic_agent_e2e`, `targeted_build_e2e`
+- `targeted_build_e2e`
 
 **What to test:** Pin the **exported surface** — CLI flags, public functions, persisted schemas, artifact layouts — with tests that state the contract *and* its failure modes; those are what callers outside this repo depend on. Pick the boundary by what is being protected: a focused unit test for deterministic logic, or a CLI/filesystem/serialization integration test where that pins the contract more directly. Internal functions that only thread a business flow together do not each need one: per-function tests there assert the current implementation and break on the next refactor. Prefer covering those flows through their entry point, and unit-test an internal helper when it carries real logic of its own.
 
@@ -333,7 +337,7 @@ pip install pre-commit ruff mypy reuse
 pre-commit install
 pre-commit run --all-files   # first-time baseline
 
-pytest -m "not critic_agent_e2e and not targeted_build_e2e"
+pytest -m "not targeted_build_e2e"
 ruff check . && ruff format --check .
 mypy src/hyperloom
 reuse lint

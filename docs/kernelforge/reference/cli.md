@@ -79,8 +79,6 @@ and passing one alongside `--resume` is refused rather than silently ignored.
 | `--resume` | off | Continue the campaign already stored in that exact workspace. |
 | `--kernel <file>` | none | The kernel file to optimize. This is the anchor the loop edits. |
 | `--driver <file>` | none | The validation/bench driver. |
-| `--auto` | off | Pick the kernel here instead of being handed one. Requires `--nomination-input`, refuses `--kernel` and `--resume`, and makes the result carry a `patches` array plus nomination counts. Off by default, so a run without it is unchanged. |
-| `--nomination-input <file>` | `''` | Nomination request JSON: raw trace path, candidate list path, lane budget and target ceiling. Read only under `--auto`. |
 | `--git-branch <name>` | none | Development branch to optimize on, checked out before the campaign config is snapshotted. |
 | `--program-md-file <file>` | none | Optional task context copied into the campaign. |
 | `--invocation-spec-file <file>` | none | Hyperloom invocation-spec JSON used by task preparation. |
@@ -133,13 +131,13 @@ and passing one alongside `--resume` is refused rather than silently ignored.
 
 | Option | Default | Meaning |
 |:--|:--|:--|
-| `--agent-backend <name>` | provider default | Registered local Agent provider for the Implementer. |
-| `--supervisor-backend <name>` | follows Implementer | Registered provider for the stalled-search (AVO) supervisor. Omit it so one `--agent-backend` controls every local agent. |
+| `--agent-backend <name>` | provider default | Registered local Agent provider; the model-relay primary of a new campaign. A resumed campaign refuses a different provider. |
+| `--supervisor-backend <name>` | follows the active Agent profile | Registered provider for the AVO supervisor, run at a model-relay blockage when no other Agent profile is available. Omit it so one `--agent-backend` controls every local agent. |
 | `--agent-cli <path>` | provider default | Provider executable path or command. |
-| `--model <name>` | provider default | Selected provider model. |
+| `--model <name>` | provider default | Model of the primary Agent profile for this session, on resume as well. |
 | `--agent-reasoning-effort <v>` | provider default | Provider reasoning effort value. |
 | `--agent-sandbox-mode <v>` | provider default | Provider sandbox mode. |
-| `--agent-fallback-provider <name>` | provider default | Fallback provider name, or `none` to refuse a fallback. |
+| `--agent-fallback-provider <name>` | provider default | Fallback provider name, or `none`. Under model relay it is the member a session prefers when the primary cannot run, and `none` refuses to start a session that has no profile to resume on any other member. |
 | `--agent-precheck` / `--no-agent-precheck` | on | Provider preflight and capability probe. |
 | `--agent-options-json <json>` | none | Provider extension options as a JSON object. |
 | `--permission-mode <v>` | provider default | Provider permission mode, where the provider supports one. |
@@ -150,7 +148,6 @@ and passing one alongside `--resume` is refused rather than silently ignored.
 |:--|:--|:--|
 | `--experience-kb` / `--no-experience-kb` | on | Read and publish forge-loop experience KB entries. Internal callers with their own KB lifecycle, such as `forge-rewrite-by-flydsl`, disable this explicitly. |
 | `--kb-warmstart` / `--no-kb-warmstart` | on | Apply the best matching KB solution before iteration 1. Only meaningful with `--experience-kb`. A caller that prepares the workspace itself, such as `forge-fuse`, turns this off to keep publishing while never replaying a stored patch over a tree it already staged. |
-| `--return-after-read-kb` / `--return-after-read-KB` | off | Return before iteration 1 when a KB solution applies cleanly, passes current correctness and improves current performance. |
 | `--producer <name>` | forge-loop's own | System owning the candidate stream these records belong to. A producer has its own index in the KB identity scheme, so a pipeline driving this command as a subprocess keeps its records out of the kernel campaigns' ranking. |
 | `--pr-kb` / `--no-pr-kb` | off | Inject upstream pull-request references from the PR Monitor co-hosted at `${KB_STORE_URL}/pr-monitor/v1`. Falls back to `PR_KB_ENABLE`. |
 | `--experience-id <id>` | `''` | Unique KB run identity, independent of the checkpoint experiment ID. |

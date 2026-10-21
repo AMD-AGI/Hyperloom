@@ -17,12 +17,17 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import TextIO
 
+from kernelforge.loop.agent_relay import (
+    AgentAvailabilitySnapshot,
+    AgentRelayState,
+    migrate_run_state_relay_fields,
+)
 from kernelforge.loop.search_policy import (
     OBJECTIVE_IMMEDIATE_CANONICAL_GAIN,
     SEARCH_MODE_EXPLOIT,
     SEARCH_MODES,
 )
-from kernelforge.durable_io import atomic_write_text
+from kernelforge.tools.durable_io import atomic_write_text
 
 log = logging.getLogger(__name__)
 
@@ -90,8 +95,6 @@ class CumulativeCounters:
     iterations: int = 0
     kept: int = 0
     reverted: int = 0
-    api_errors: int = 0
-    orchestration_errors: int = 0
 
 
 @dataclass
@@ -191,6 +194,8 @@ class RunState:
     orchestration_error_streak: int = 0
     orchestration_circuit_state: str = ORCHESTRATION_CIRCUIT_CLOSED
     intervention_count: int = 0
+    agent_relay: AgentRelayState = field(default_factory=AgentRelayState)
+    agent_availability_snapshot: AgentAvailabilitySnapshot = field(default_factory=AgentAvailabilitySnapshot)
     phase: str = PHASE_EXPLORE
     search_mode: str = SEARCH_MODE_EXPLOIT
     search_reason_codes: list[str] = field(default_factory=list)
@@ -286,6 +291,15 @@ class RunState:
             nested(entry, RoundCost, f"round_costs.recent[{index}]") for index, entry in enumerate(round_costs.recent)
         ]
         payload["round_costs"] = round_costs
+        payload["agent_relay"] = nested(
+            payload["agent_relay"],
+            AgentRelayState,
+            "agent_relay",
+        )
+        payload["agent_relay"].validate()
+        payload["agent_availability_snapshot"] = AgentAvailabilitySnapshot.from_dict(
+            payload["agent_availability_snapshot"]
+        )
         state = cls(**payload)
         _validate_round_costs(state.round_costs)
         if state.search_mode not in SEARCH_MODES:
@@ -397,24 +411,46 @@ def _phase_for(state: "RunState", stall_threshold: int) -> str:
     return PHASE_EXPLORE
 
 
+@dataclass(frozen=True)
+class IterationVerdict:
+    """One finished iteration: its decision, whether it was kept, what it measured, its commit and plan."""
+
+    iteration: int
+    decision: str
+    kept: bool
+    wall_ms: float | None
+    commit_hash: str
+    plan: str
+    mean_case_speedup: float | None = None
+
+
+@dataclass(frozen=True)
+class LoopStanding:
+    """The loop's baseline and incumbent best once an iteration has been decided."""
+
+    baseline_wall_ms: float | None
+    best_wall_ms: float | None
+    best_mean_case_speedup: float | None = None
+
+
+@dataclass(frozen=True)
+class StallPolicy:
+    """How many stalled iterations make the stalled phase, and how many orchestration errors open the circuit."""
+
+    stall_threshold: int = _DEFAULT_STALL_PHASE_THRESHOLD
+    orchestration_error_threshold: int = 3
+
+
 def apply_iteration(
     state: "RunState",
-    *,
-    iteration: int,
-    decision: str,
-    kept: bool,
-    wall_ms: float | None,
-    mean_case_speedup: float | None = None,
-    commit_hash: str,
-    plan: str,
-    baseline_wall_ms: float | None,
-    best_wall_ms: float | None,
-    best_mean_case_speedup: float | None = None,
-    stall_threshold: int = _DEFAULT_STALL_PHASE_THRESHOLD,
-    orchestration_error_threshold: int = 3,
-    max_pinned: int = 8,
+    verdict: IterationVerdict,
+    standing: LoopStanding,
+    policy: StallPolicy = StallPolicy(),
 ) -> "RunState":
     """Reduce one finished iteration's outcome into the run state (in place)."""
+    iteration, decision, kept = verdict.iteration, verdict.decision, verdict.kept
+    wall_ms, mean_case_speedup = verdict.wall_ms, verdict.mean_case_speedup
+    best_wall_ms, best_mean_case_speedup = standing.best_wall_ms, standing.best_mean_case_speedup
     if iteration < state.next_iteration:
         raise ValueError(
             f"iteration {iteration} would reuse completed iteration; next iteration is {state.next_iteration}"
@@ -425,28 +461,23 @@ def apply_iteration(
     state.cumulative.iterations += 1
     if kept:
         state.cumulative.kept += 1
-    elif infrastructure:
-        if str(decision or "").strip().upper() == "API_ERROR":
-            state.cumulative.api_errors += 1
-        else:
-            state.cumulative.orchestration_errors += 1
-    else:
+    elif not infrastructure:
         state.cumulative.reverted += 1
-    if baseline_wall_ms is not None:
-        state.baseline_wall_ms = baseline_wall_ms
+    if standing.baseline_wall_ms is not None:
+        state.baseline_wall_ms = standing.baseline_wall_ms
 
     if kept:
         state.best = BestRecord(
             iteration=iteration,
             wall_ms=wall_ms if wall_ms is not None else best_wall_ms,
             mean_case_speedup=(mean_case_speedup if mean_case_speedup is not None else best_mean_case_speedup),
-            commit_hash=commit_hash or state.best.commit_hash,
-            plan=(plan or "").strip()[:120],
+            commit_hash=verdict.commit_hash or state.best.commit_hash,
+            plan=(verdict.plan or "").strip()[:120],
             source="iteration",
         )
         state.stall.no_improvement_iters = 0
         state.stall.unresolved_stall_iters = 0
-        pin_iteration(state, iteration, max_pinned=max_pinned)
+        pin_iteration(state, iteration)
     elif not infrastructure:
         state.stall.no_improvement_iters += 1
         state.stall.unresolved_stall_iters += 1
@@ -454,7 +485,7 @@ def apply_iteration(
         state.orchestration_error_streak += 1
         if (
             state.orchestration_circuit_state == ORCHESTRATION_CIRCUIT_HALF_OPEN
-            or state.orchestration_error_streak >= max(1, orchestration_error_threshold)
+            or state.orchestration_error_streak >= max(1, policy.orchestration_error_threshold)
         ):
             state.orchestration_circuit_state = ORCHESTRATION_CIRCUIT_OPEN
     else:
@@ -470,25 +501,15 @@ def apply_iteration(
         state.best.mean_case_speedup = best_mean_case_speedup
         state.best.wall_ms = best_wall_ms
 
-    state.phase = _phase_for(state, stall_threshold)
+    state.phase = _phase_for(state, policy.stall_threshold)
     return state
 
 
-def apply_round_cost(
-    state: "RunState",
-    *,
-    iteration: int,
-    lanes: int,
-    planning_sec: float,
-    total_sec: float,
-    campaign_sec: float,
-    measurement_sec: float = 0.0,
-    window: int = ROUND_COST_WINDOW,
-) -> "RunState":
+def apply_round_cost(state: "RunState", cost: RoundCost, *, campaign_sec: float) -> "RunState":
     """Record what one finished round cost (in place)."""
-    planning = max(0.0, float(planning_sec))
-    total = max(planning, float(total_sec))
-    measurement = max(0.0, float(measurement_sec))
+    planning = max(0.0, float(cost.planning_sec))
+    total = max(planning, float(cost.total_sec))
+    measurement = max(0.0, float(cost.measurement_sec))
     if planning <= 0:
         raise ValueError("a round that did not plan has no cost to record")
     costs = state.round_costs
@@ -502,14 +523,14 @@ def apply_round_cost(
     )
     costs.recent.append(
         RoundCost(
-            iteration=iteration,
-            lanes=max(1, int(lanes)),
+            iteration=cost.iteration,
+            lanes=max(1, int(cost.lanes)),
             planning_sec=planning,
             total_sec=total,
             measurement_sec=measurement,
         )
     )
-    costs.recent = costs.recent[-max(1, window) :]
+    costs.recent = costs.recent[-ROUND_COST_WINDOW:]
     return state
 
 
@@ -629,6 +650,17 @@ class WorkspaceLock:
         self.release()
 
 
+def read_run_state(state_path: Path) -> RunState:
+    """Read one ``run_state.json`` checkpoint, or a fresh state when absent."""
+    if not state_path.exists():
+        return RunState()
+    try:
+        payload = json.loads(state_path.read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"invalid run state checkpoint: {state_path}") from error
+    return RunState.from_dict(migrate_run_state_relay_fields(payload))
+
+
 class LoopStateStore:
     """Best-effort file store for ``run_state.json`` + ``events.jsonl``."""
 
@@ -646,7 +678,7 @@ class LoopStateStore:
         self._recent_results: collections.deque[dict] = collections.deque(maxlen=_RECENT_RESULT_CACHE)
         try:
             self.root.mkdir(parents=True, exist_ok=True)
-        except Exception as e:  # noqa: BLE001 - best-effort
+        except OSError as e:
             self._mark_degraded("create root", e)
         self._prime_recent()
 
@@ -664,27 +696,18 @@ class LoopStateStore:
 
     def _prime_recent(self) -> None:
         """Seed the in-memory recent-event caches from disk (once, at init)."""
-        try:
-            events = self.read_events()
-            for event in events[-_RECENT_CACHE:]:
-                self._recent.append(event)
-            # Scanned in full rather than from the tail above: an outcome older than the last ``_RECENT_CACHE`` events
-            # is still inside the outcome window, and the deque keeps only what fits.
-            for event in events:
-                if event.get("type") == "iteration_result":
-                    self._recent_results.append(event)
-        except Exception as e:  # noqa: BLE001 - best-effort
-            self._mark_degraded("prime recent cache", e)
+        events = self.read_events()
+        for event in events[-_RECENT_CACHE:]:
+            self._recent.append(event)
+        # Scanned in full rather than from the tail above: an outcome older than the last ``_RECENT_CACHE`` events
+        # is still inside the outcome window, and the deque keeps only what fits.
+        for event in events:
+            if event.get("type") == "iteration_result":
+                self._recent_results.append(event)
 
     def load(self) -> RunState:
         """Load the current persisted state, or a fresh state when absent."""
-        if not self.state_path.exists():
-            return RunState()
-        try:
-            payload = json.loads(self.state_path.read_text())
-        except (OSError, json.JSONDecodeError) as error:
-            raise ValueError(f"invalid run state checkpoint: {self.state_path}") from error
-        return RunState.from_dict(payload)
+        return read_run_state(self.state_path)
 
     def save(self, state: RunState) -> None:
         """Atomically overwrite ``run_state.json``."""
@@ -693,7 +716,7 @@ class LoopStateStore:
                 self.state_path,
                 json.dumps(state.to_dict(), indent=2, sort_keys=True),
             )
-        except Exception as e:  # noqa: BLE001 - best-effort
+        except (OSError, TypeError, ValueError) as e:
             self._mark_degraded(f"save {self.state_path}", e)
 
     def append_event(self, event: dict) -> None:
@@ -709,7 +732,7 @@ class LoopStateStore:
                 f.write(json.dumps(event, sort_keys=True) + "\n")
                 f.flush()
                 os.fsync(f.fileno())
-        except Exception as e:  # noqa: BLE001 - best-effort
+        except (OSError, TypeError, ValueError) as e:
             self._mark_degraded(f"append {self.events_path}", e)
 
     def read_events(self) -> list[dict]:
@@ -724,7 +747,7 @@ class LoopStateStore:
                     continue
                 try:
                     event = json.loads(line)
-                except Exception as e:  # noqa: BLE001 - skip a bad line
+                except ValueError as e:  # skip a bad line
                     log.debug("run_state: skipping malformed event line: %s", e)
                     continue
                 event_type = event.get("type") if isinstance(event, dict) else None
@@ -743,7 +766,7 @@ class LoopStateStore:
                         "run_state: skipping invalid event record: %r",
                         event,
                     )
-        except Exception as e:  # noqa: BLE001 - best-effort
+        except (OSError, ValueError) as e:
             self._mark_degraded(f"read {self.events_path}", e)
         return out
 

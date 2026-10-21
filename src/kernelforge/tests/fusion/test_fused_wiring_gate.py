@@ -6,7 +6,7 @@
 from pathlib import Path
 from types import SimpleNamespace
 
-from kernelforge.fusion import command as command_mod
+from kernelforge.fusion import serving_gate
 from kernelforge.fusion.validate import SmokeVerdict
 from kernelforge.fusion.validate import fused_symbol_invocation_evidence as evidence
 
@@ -102,7 +102,7 @@ class TestTheArtifactRepeatsTheVerdict:
 
     def _smoke(self, tmp_path, monkeypatch, source_file: str):
         monkeypatch.setattr(
-            command_mod,
+            serving_gate,
             "serving_smoke_verdict",
             lambda *a, **k: SmokeVerdict(True, "decoded 128 tokens"),
         )
@@ -111,15 +111,11 @@ class TestTheArtifactRepeatsTheVerdict:
             env_flag="LFM2_FUSED_RESIDUAL",
             source_file=source_file,
         )
-        return command_mod._run_serving_smoke(
+        return serving_gate._run_serving_smoke(
             recipe,
-            base_note="MICRO KEEP 1.31x",
-            framework="sglang",
-            out=tmp_path,
-            gpu="gfx950",
-            model_path="/models/lfm2",
-            isl=128,
-            osl=128,
+            "MICRO KEEP 1.31x",
+            serving_gate.ServingSession(framework="sglang", model_path="/models/lfm2", gpu="gfx950", isl=128, osl=128),
+            tmp_path,
         )
 
     def test_an_unchecked_wiring_is_named_in_the_note(self, tmp_path, monkeypatch):

@@ -89,10 +89,17 @@ filter, not the set the LLM can propose. The LLM-proposable set is
 refreshes and close sequencing may be enqueued internally even when the LLM
 is not allowed to propose them.
 
-Every phase transition is a GPU barrier: the Coordinator stops every running
-action and drops queued work the next phase does not support, and commits the
-transition only once no task is left running. Each phase therefore starts on
-quiet GPUs, and its entry hook runs on the transition itself.
+Every phase transition is a GPU barrier: the Coordinator stops admitting new
+work, drops queued work the next phase does not support, and commits the
+transition only once the actions already running have finished and been
+booked. A phase budget never cancels running work -- the last action in
+flight, such as a GEAK rebench, completes and settles its result. Running
+work is cancelled only when the run is already over: a terminal transition to
+CLOSE (a recorded stop reason such as an unhealthy backend, a failed baseline,
+convergence or `skip_to_close`), an exhausted session budget, a shutdown or an
+operator interrupt. Each
+phase therefore starts on quiet GPUs, and its entry hook runs on the
+transition itself.
 
 ## PRELUDE
 
@@ -133,6 +140,11 @@ revalidation window is closed, and all in-flight enablement work is drained.
 It exits terminally on `server_argv_invalid`, `environment_fault`, or
 `enablement_attempts_exhausted` (eight consecutive failed rounds).
 
+A KEEP or an advance ends the held round whoever authored it, since the wall
+that round was aimed at is behind the boot. A specialist still queued under that
+round is cancelled rather than left to author against the old wall; one already
+running reports normally.
+
 ### Enablement escalation ladder
 
 Enablement admission is controlled by `--enablement {off,launch,eval,all}`,
@@ -169,24 +181,37 @@ authoring specialist's prompt. The rungs, in increasing complexity:
 2. **Rung 2 — in-tree source patch.** A unified diff against the source tree
    the server imports: register the arch, a small forward/config/tokenizer
    bridge, or backport a merged PR. Pure Python, no compile.
-3. **Rung 3 — attempt-scoped runtime.** Acquire a runtime (a published
-   wheel, an editable checkout at a ref, or a local source tree) into an
-   isolated per-attempt venv. That venv is activated only through the
+3. **Rung 3 — attempt-scoped runtime.** The specialist names the version
+   that carries the fix as a `needs_runtime` request in its
+   `specialist_done`: a framework ref (PR, tag, branch or sha) installed
+   editable, pip packages, or both. No operator setting or failure kind
+   gates it, and vLLM accepts packages only, since a vLLM checkout compiles
+   (Rung 5). `integrate_patch` installs the request into an isolated
+   per-attempt venv that sees the installed stack, with pip held to the
+   image's ROCm builds — torch, torchvision, torchaudio, triton and every
+   distribution whose version carries a ROCm label — so a request that needs
+   a different torch fails provision instead of pulling a CUDA build. That
+   venv is activated only through the
    per-variant YAML benchmark envs; the Coordinator never mutates its own
    process environment to point at an attempt runtime. While one is active,
    the source tree the server imports is that runtime's own — the editable
-   checkout, or the venv's site-packages — so Rung 2 and Rung 4 patches land
-   there. A kept runtime is re-provisioned for every later round, whatever
-   that round's failure.
+   checkout, or the venv's site-packages when the framework itself was
+   installed there — so Rung 2 and Rung 4 patches land there. A kept runtime
+   is re-provisioned for every later round, whatever that round's failure or
+   request.
 4. **Rung 4 — source localization.** Localize a merged-PR or vendored
-   closure into the source tree the server imports. A change that touches
-   compiled or build-backend files cannot be satisfied by a plain source
-   edit, so it defers to Rung 5.
+   closure into the source tree the server imports. Only the files under the
+   framework's package are localized. A change that touches compiled or
+   build-backend files cannot be satisfied by a plain source edit, and one
+   that is oversize or does not apply to the tree is not backported either;
+   in each case the round runs on its own patches, and a compiled gap is
+   left to Rung 5.
 5. **Rung 5 — off-loop compiled build.** Perform a compiled-component build
    (AITER kernels, sgl-kernel, or vLLM-from-source). Builds run *off* the
    coordinator tick loop on a dedicated single-slot build lane: each build
    is spawned detached and reaped across later ticks against a wall-clock
-   budget, so a long compile never blocks the loop. Auto-escalation into
+   budget, so a long compile never blocks the loop. A build installs under
+   the same ROCm pins as Rung 3, minus the component it builds. Auto-escalation into
    Rung 5 can be disabled with the `HYPERLOOM_ENABLEMENT_DISABLE_TARGETED_BUILD`
    environment variable (see
    [Targeted builds (Rung 5)](../reference/environment-variables.md#targeted-builds-rung-5)).
@@ -227,7 +252,7 @@ unset.
 ### GPU power: measured and asserted
 
 Each round's GPU power is sampled by Hyperloom itself, with read-only
-`amd-smi metric --power --mem-usage` every 2 s, only while the round is in its
+`amd-smi metric --power --mem-usage --clock` every 2 s, only while the round is in its
 measured phase (from server ready, and from AIPerf's measured-phase line under
 AgentX, until the client exits or the eval starts). It is averaged over the
 serving cards: those in the visible-device mask that held at least 10% of VRAM
@@ -239,16 +264,176 @@ serving card or no power reading stays unmeasured. The benchmark report's
 sampler ran on: on one node it reads a single card over the whole process
 lifetime, boot and idle tail included.
 
-The optimizer never changes power settings. The power cap and DPM performance
-level decide how much of the card's throughput is available at what power, so
-they are part of the measurement contract, and setting them is privileged and
-card-wide. Set them with `amd-smi set --power-cap` / `--perf-level` before
-launch; `--gpu-power-cap-w` and `--gpu-perf-level` then assert them, the way
-`--compute-partition-mode` asserts a partition mode: the session refuses to
-start (and to resume) if a card it uses is at a different value. The observed
-cap and perf level are recorded in the platform fingerprint whether or not
-they are asserted. Neither can be checked on a multi-node session, so asserting
-one there refuses.
+The sampler also reports how the cards ran under their power cap. Each card in
+`gpu_power.json` carries its mean graphics clock over the measured phase while
+busy (`sclk_mean_mhz`; an XCD in deep sleep, below its `min_clk`, is idle time
+and left out), its clock limit (`sclk_max_mhz`, unread when the limit changed
+during the phase), and the share of the measured phase it spent held back by its
+power limit (`power_throttle_fraction`, from the `amd-smi metric --violation`
+accumulators read as each measured window opens and closes; idle stretches in
+the phase count toward that share's whole). A window whose counters could not be
+read leaves the share unread rather than counting only the windows that were:
+every card's when the read failed (counted in `throttle_query_errors`, apart
+from the power reads' `query_errors`), one card's when it was missing from
+either end or both, or its counters went back or stopped advancing, and every
+card's when the sampler was still blocked in `amd-smi` as the round closed. A
+serving card power throttled for at least 10% of the phase is listed in
+`power_throttled_gpus`, and the round logs a warning naming each such card's
+throttled share and mean clock: its throughput was set by the power cap, not by
+its clock limit. This is only reported; nothing changes the cards.
+
+The optimizer never changes power settings during a session. The power cap and
+DPM performance level decide how much of the card's throughput is available at
+what power, so they are part of the measurement contract, and setting them is
+privileged and card-wide. By default, set them with `amd-smi set --power-cap` /
+`--perf-level` before launch; `--gpu-power-cap-w` and `--gpu-perf-level` then
+assert them, the way `--compute-partition-mode` asserts a partition mode: the
+session refuses to start (and to resume) if a card it uses is at a different
+value. The observed cap and perf level are recorded in the platform
+fingerprint whether or not they are asserted. Neither can be checked on a
+multi-node session, so asserting one there refuses.
+
+### Applying the power settings (opt-in)
+
+`--apply-gpu-power-settings` permits the session to set the declared
+`--gpu-power-cap-w` / `--gpu-perf-level` itself, once at launch, and to keep
+them for the whole session. The same read-back check then verifies them, and
+the fingerprint records them as applied by Hyperloom along with the originals.
+It needs root, as `amd-smi set` does: a launch without root refuses (exit 2)
+before it writes any power-settings record, with the cards unchanged. It also
+refuses, with nothing left changed:
+
+- without an integer `ROCR_VISIBLE_DEVICES` / `HIP_VISIBLE_DEVICES` mask. It
+  sets exactly the masked cards, never the whole host. A mask number is a ROCm
+  number, not an amd-smi index: ROCm numbers cards in KFD node order and amd-smi
+  in PCI order, and on MI300X/MI355X boards the two differ, so each masked card
+  is matched to amd-smi through the KFD node id `amd-smi list` reports, with
+  `HIP_VISIBLE_DEVICES` (or `CUDA_VISIBLE_DEVICES`) indexing into what
+  `ROCR_VISIBLE_DEVICES` left; `HSA_VISIBLE_DEVICES` and `GPU_DEVICE_ORDINAL`,
+  which ROCm ignores, are not read. The read-only assertion, the per-GPU budget
+  and the power sampler use the same translation. A mask that is set but empty,
+  is not written as plain comma-separated numbers (GPU UUIDs, spaces, `;`,
+  leading zeros, which HIP reads differently), repeats a card or names
+  one that does not exist is refused;
+- on a card not in SPX compute-partition mode: a cap is per socket, so it would
+  change the sibling partitions, which other sessions may use;
+- when the declared cap is not a whole number of watts, which `amd-smi set`
+  does not take;
+- on multi-node;
+- on a masked card `amd-smi` does not report, or whose current value cannot be
+  read, since nothing could restore it;
+- on a card that already holds more than 2 GB of VRAM before the session
+  starts (someone else's resident model, which a card-wide cap would change
+  too), or whose VRAM use cannot be read;
+- when a set fails.
+
+Only the declared settings are set, and only the settings they change are put
+back. A perf-level apply is refused before anything is set on a card that
+starts at a level a restore could not bring back: `determinism` (its clock
+soft-max is set with `amd-smi set -d`, which a level restore does not carry) and
+`manual` (its hand-tuned clock limits are reset by setting another level). A
+setting a card already has is left alone instead: neither set nor put back, so
+a card asked to stay at its level needs no refusal. A cap-only apply is allowed
+on such cards. After every restore the cards are read
+back, and that reading decides: a card not back at its recorded values is
+reported and its record kept, so the next launch warns or recovers it, while
+each card that reads back at its originals has its record cleared, even if a
+restore command failed (an apply refused for lack of privilege changed
+nothing).
+
+The originals are written to a per-card record under
+`/var/tmp/hyperloom/gpu_power_settings/` before anything is set. That path is
+host-local and fixed, whatever `HYPERLOOM_RUNTIME_DIR` or `USER_DATA_PATH` say,
+so every session on the host finds the same records. Inside a container it is
+the container's own `/var/tmp`, so mount the host's `/var/tmp/hyperloom` into
+every container that applies settings, or sessions in different containers will
+not see each other's records. Each record is stamped with the host's boot id, so
+one written before a reboot is ignored. The session holds an exclusive `flock`
+on each record until it restores the card, which keeps two sessions from setting
+the same card. A restore sets whatever a record says, as root, so the record
+directory and its parent are writable only by root, and records are readable by
+every account (for the warning below) but writable only by root; a launch with
+the flag creates both directories at mode 0755, and sets an existing one root
+owns (such as a mounted host directory) to 0755 unless other accounts can write
+it, which is refused instead. A record that is a symlink or a hard link, or a
+record or directory owned by another unprivileged account or writable by others,
+is refused rather than read. Any local account can still make a flagged launch
+refuse: by holding a lock on a card's record, which reads as a live session
+holding the card, or by creating `/var/tmp/hyperloom` first, which is then not
+root's and refused. Both fail safe, with nothing set, until an administrator
+removes them.
+
+The originals are restored when the session ends: at a stop reason, an operator
+stop, an error exit, or a SIGTERM / SIGHUP at any point after the cards were
+set, including startup and the close sequence. A stop signal during the restore
+itself is ignored so it cannot cut it short. A SIGKILL (an OOM kill, or a
+scheduler escalating after its grace period, such as Slurm's `KillWait`) cannot
+be caught: the cards stay at the applied settings, and the record is left with
+its lock free. The next launch on that host that passes the flag with those
+cards in its mask restores them before setting anything; a launch without the
+flag warns that the cards were left changed and names their original values.
+Records are judged setting by setting: a setting that still reads at the applied
+value is put back (a restore that put back the cap but not the level gets the
+level restored), while a setting the card no longer reads at (an operator put it
+back, or set a value of their own) is left alone. A setting whose reading is
+missing is not taken as moved: the launch with the flag refuses with the record
+kept and names the record file to remove once the card has been checked by hand,
+and the warning reports the card as possibly still changed. A record none of
+whose settings still reads as applied is stale: it is cleared, not restored, and
+not warned about. Give a scheduler's grace period enough time for the session to
+close. On resume the flag must be passed again, since the settings were restored
+when the previous leg exited. A resume first stops the serving
+processes its previous leg left running (a leg that was SIGKILLed leaves its
+server up), so the check for other tenants' models does not refuse on the
+session's own server.
+
+### Power budget (constraint on KEEP)
+
+Two budgets bound a round's GPU power, for the serving frameworks:
+
+- `--max-power-w N` caps the serving GPUs' total: the sum of each serving
+  card's mean power over the measured phase (for example 2800 W for four cards
+  budgeted at 700 W each).
+- `--max-per-gpu-power-w GPU_ID W`, repeated once per card, caps one card by
+  its physical `amd-smi` index. A serving card with no entry is bound only by
+  the total, and a listed card that did not serve a round is not judged on it.
+
+The session refuses to start (exit 2) if a listed GPU is not one it can use
+(its visible-device mask, or every card `amd-smi` reports when there is no
+mask), or if the per-GPU limits add up to more than `--max-power-w`. Either
+budget is refused, at launch and on resume, when no round could be measured: on
+a multi-node session (the sampler reads only its own host's cards), on a
+scriptable framework (`xdit`, `custom`: the sampler follows a server's measured
+phase, and a scriptable round runs no server), with
+`HYPERLOOM_GPU_POWER_SAMPLING=0`, or without `amd-smi` on `PATH`. Resuming with
+different values is refused.
+
+Both ride the same verdict as `--max-latency-ms`: a candidate that would
+otherwise KEEP is a REVERT with `veto_reason` `gpu_power_budget_exceeded` when a
+card is over its own limit, `power_budget_exceeded` when the total is over, or
+`power_unmeasured` when its round reported no per-GPU power (fail closed).
+Every KEEP decision point reads that verdict, so a lane reverts its own
+over-budget change; the correctness-fix route, which can KEEP a verified fix
+after that verdict reverted it, applies the same budgets itself. If the baseline itself breaks a budget, or reported no
+power, the run stops with `baseline_over_power_budget`. The reading is the
+measured-phase per-GPU figure described above, carried as `gpu_power_by_gpu_w`;
+only Hyperloom's own sampler reads every serving card, so a round it did not
+sample counts as unmeasured. So does a round in which a card that may be
+serving could not be read: one holding a model with no power reading (`N/A`, or
+a 0 W or negative socket power, which no working sensor reports), or one in
+scope (the visible-device mask, or every card `amd-smi` reported) whose VRAM was
+never read. Such cards are listed as `unread_gpus` in `gpu_power.json`, since a
+card missing from the readings would drop out of the total and escape its own
+limit. A GEAK replay boots its own server once per
+replica, so its phases are read from the server logs the replay writes, with
+the same markers, and each new log counts as a fresh boot.
+
+The budgets are on average draw at the deployed cap, the shape of a
+power-provisioned rack where cards keep their full cap for headroom: the total
+is the rack's share, and a per-GPU limit covers a card with less headroom, such
+as one in a hotter slot. To tune
+for a lower hardware cap instead, set that cap with `amd-smi set` and assert it
+with `--gpu-power-cap-w`; no ceiling is needed.
 
 ### Runnable gate (earned KEEP)
 
@@ -275,11 +460,11 @@ breakdown's `installed_versions` map (`source_pr_url`); see the
 
 ### Novelty and crash safety
 
-- **Novelty-ledger stall gate.** Repeated identical build attempts — same
-  component, ref, GPU arch, and build command — are treated as a stall and
-  revert. A novel attempt, or a time-based failure such as a timeout,
-  advances instead, so the loop keeps making forward progress rather than
-  looping on an identical failing build.
+- **A build answers no round.** A build runs beside the authoring round
+  that asked for it, and that round is settled by its own integrate. A
+  failed build boots nothing, so it settles no round and stacks nothing; its
+  failure reaches the next round's mandate. An identical build — same
+  component, ref, GPU arch, and build command — is never run twice.
 - **Crash / resume.** An in-flight build is tracked by a durable sentinel,
   so a crash or resume reclaims the running build or cleans up the orphaned
   one rather than leaking it.
@@ -301,8 +486,22 @@ One phase, two levers worked in parallel:
 `specialist` serves both levers — investigation, patch authoring, and
 candidate discovery are all dispatches of the one specialist action. An
 operator can add one domain of their own, `custom_specialist`, whose focus is
-the text they supply at launch; until one has started, the Coordinator
-requests it at most once per macro cycle in this phase.
+the text they supply at launch. The Coordinator alone dispatches it, once per
+macro cycle on entering this phase; it and the grid benching its proposals run
+ahead of all other queued work, and a plateau exit waits for both within the
+phase budget.
+
+With a [PrimaTune](../reference/primatune-predictor.md) endpoint configured,
+the phase also asks that predictor for a launch recipe once per decision point:
+the macro cycle, the stack depth, and the number of profiles taken. At entry it
+asks after the phase's own first dispatch and, in `active` mode, waits up to
+five minutes for the answer before Orchestration's first turn, so the first
+grid can carry it. Every tick then files an answer that has arrived and asks
+again once a KEEP or a new profile has moved the decision point. The answer
+joins the untested-proposal queue ahead of the specialists' rows and counts as
+the phase's work; a source change it proposes is offered as a mandate a patch
+specialist takes by id. `shadow` asks and only logs; without an endpoint, or in
+`off`, nothing is asked and nothing waits.
 
 The phase advances to KERNEL_AGENT only when **both** levers are dry
 (`optimize_no_more_leverage`). Either arm going quiet raises
@@ -332,8 +531,11 @@ look very different from Orchestration's side:
   taking a turn in it.
 - **On a GEAK win**, the same `kernel_agent` task re-measures the candidate on
   the orchestrator's own harness under the lanes it already holds, and writes
-  the headline from that measurement before it returns. KERNEL leaves once the
-  task settles, or when its phase budget runs out.
+  the headline from that measurement before it returns. A candidate whose
+  launch config, applied over `current_best`, launches what `current_best`
+  already runs, and that carries no loadable overlay, is settled as
+  `no_material` without being measured. KERNEL leaves once the task settles, or
+  when its phase budget runs out.
 - **Forge (`KERNEL_OPT_BACKEND_ORDER=forge`)**: the phase runs the deterministic
   KERNEL-entry ladder — GEMM tuning, then the fusion lane, then the kernel
   rewrite controller, which selects its own operators and publishes patches
@@ -369,17 +571,28 @@ interactivity curve. The ladder is sized for the workload: powers of two
 down from 256 for a synthetic run, `1,4,8,10,14,20,28` for an agentic one,
 where a request carries orders of magnitude more prompt and the same card
 saturates far lower. Override either with `--conc-sweep-concs`. Under
-AgentX the sweep is off unless `--enable-conc-sweep` is passed, since each
-rung is a 3600 s window and the session grades at a fixed CONC; SWEEP then
-records a disabled skip.
+native Magpie AgentX, concurrency is fixed for the session and
+`--enable-conc-sweep` is rejected at startup. Start a separate session for each
+CONC. The independent MLPerf backend keeps its optional sweep, disabled by
+default. See the [AgentX workflow](../how-to/optimize.md#optimize-an-agentx-workload)
+for supported workload controls.
 
 Results update `last_conc_sweep` and feed the final report and breakdown.
-The phase exits on `sweep_done` (or `sweep_failed`). While the sweep it
+A ladder that fails closes the phase as `sweep_failed`; one that finishes
+(`sweep_done`) loops back or closes on the reason below. While the sweep it
 enqueued is still running, SWEEP's own budget and cap wait for the budget the
 sweep was granted (plus its lease grace); the session deadline does not. A
 sweep the orchestrator cancels stops its ladder at once and records
 `cancelled`, so the phase closes on whatever ordered the cancel rather than on
 `sweep_failed`.
+
+When SWEEP does not loop back, the close names what refused the next
+macro-cycle: `target_reached`, `global_converged` (consecutive cycles without
+gain, or every direction saturated) or `time_exhausted` (less session time
+left than the reloop floor). The refusing rule is kept in the transition
+evidence as `reloop_blocked`. A run without `FRAMEWORK_AGENT` has no next
+cycle to refuse, so it closes on the ladder's own reason unless the target was
+reached.
 
 ## CLOSE
 
@@ -425,8 +638,10 @@ turn never depends on what an earlier turn happened to remember.
 
 Critic is likewise reactive and stateless per tick. Runtime RCA and automatic
 supervision are not roles in this loop. Stopped sessions require an explicit
-operator `--resume-from` decision; `recover` only reconstructs artifacts
-offline.
+operator `--resume-from` decision; `recover` reconstructs artifacts offline
+or, with `--confirm-scope-gone` / `--confirm-stopped`, records the cleanup
+confirmation a refused resume asks for (see
+[Scenario A](../reference/operations.md#scenario-a-pod-was-oom-killed-mid-session)).
 
 ## Feedback loops
 
@@ -438,8 +653,16 @@ The loop adapts through facts, not through retired score tables:
 - Critic verdicts gate risky patches and framework candidates.
 - PolicyGate blocks unsafe paths, invalid envelopes, and actions whose
   structural requirements are not met before they mutate runtime state.
-  Phase fit is guided by the prompt and enforced at the phase transition
-  by dropping incompatible queued tasks.
+  Phase fit is enforced at admission: a proposal or delegate whose action
+  the current phase does not offer is refused (`phase_incompatible`)
+  before a task exists, and the phase transition drops incompatible tasks
+  still queued from the previous phase.
+- The baseline anchor every gain is measured against moves only to a
+  higher re-baseline (or a hot pass correcting a cold anchor), and only
+  until a cumulative gain has been validated
+  against it; after that a re-baseline is recorded (`anchor_held`) but the
+  anchor stays, except for an ENABLEMENT revalidation, whose patch changed
+  what the anchor measures.
 
 ## What is retired
 

@@ -14,6 +14,7 @@ import pytest
 from hyperloom.common.timeutil import iso_z
 from hyperloom.inference_optimizer.breakdown import exporter as ex
 from hyperloom.inference_optimizer.breakdown.collectors import sessions
+from hyperloom.inference_optimizer.trace import decision_trace
 
 # ---- _load_session_json ----
 
@@ -107,6 +108,31 @@ def test_write_breakdown_json(tmp_path):
     assert data["exporter_version"] == ex.EXPORTER_VERSION
 
 
+# ---- decision trace failure ----
+
+
+def test_decision_trace_failure_reaches_the_caller(monkeypatch, tmp_path):
+    def explode(_session_dir, _state, _warnings):
+        raise RuntimeError("join failed")
+
+    monkeypatch.setattr(decision_trace, "write_decision_trace", explode)
+
+    with pytest.raises(RuntimeError, match="join failed"):
+        decision_trace.write_session_decision_trace(tmp_path)
+
+
+def test_breakdown_is_still_written_when_the_decision_trace_fails(monkeypatch, tmp_path):
+    def explode(_session_dir):
+        raise RuntimeError("join failed")
+
+    monkeypatch.setattr(decision_trace, "write_session_decision_trace", explode)
+
+    target = ex.write_breakdown_json(tmp_path)
+
+    assert target == (tmp_path / ex.BREAKDOWN_FILENAME).resolve()
+    assert target.is_file()
+
+
 def test_write_breakdown_json_custom_output(tmp_path):
     out = tmp_path / "sub" / "bd.json"
     target = ex.write_breakdown_json(tmp_path, output_path=out)
@@ -167,29 +193,15 @@ def test_write_minimal_final_json_creates(tmp_path):
         assert key in data
 
 
-@pytest.mark.parametrize("producer", [ex.FINAL_PRODUCER_COORDINATOR, ex.FINAL_PRODUCER_SUPERVISOR])
-def test_fallback_never_replaces_a_complete_report(tmp_path, producer):
+def test_fallback_never_replaces_a_complete_report(tmp_path):
     target = tmp_path / "reports" / "final.json"
     target.parent.mkdir(parents=True)
     report = {"report_complete": True, "stop_reason": "target_reached"}
     target.write_text(json.dumps(report), encoding="utf-8")
 
-    ex.write_minimal_final_json(tmp_path, producer=producer, extra={"stop_reason": "supervisor_coordinator_died"})
+    ex.write_minimal_final_json(tmp_path)
 
     assert json.loads(target.read_text(encoding="utf-8")) == report
-
-
-def test_coordinator_fallback_preserves_historical_supervisor_priority(tmp_path):
-    target = ex.write_minimal_final_json(
-        tmp_path,
-        producer=ex.FINAL_PRODUCER_SUPERVISOR,
-        extra={"stop_reason": "supervisor_coordinator_died"},
-    )
-    ex.write_minimal_final_json(tmp_path, producer=ex.FINAL_PRODUCER_COORDINATOR)
-
-    final = json.loads(target.read_text(encoding="utf-8"))
-    assert final["producer"] == ex.FINAL_PRODUCER_SUPERVISOR
-    assert final["stop_reason"] == "supervisor_coordinator_died"
 
 
 def test_historical_stop_reasons_do_not_depend_on_supervisor_runtime():
@@ -198,7 +210,7 @@ def test_historical_stop_reasons_do_not_depend_on_supervisor_runtime():
     assert stop_reasons.SUPERVISOR_RESTART_REASON == "supervisor_restart_requested"
     assert stop_reasons.outcome_status("supervisor_coordinator_died", 1.0) == "aborted"
     assert stop_reasons.outcome_status("supervisor_tick_stalled", 1.0) == "aborted"
-    assert stop_reasons.outcome_status("robustness_escalated", 1.0) == "completed"
+    assert stop_reasons.outcome_status("target_reached", 1.0) == "completed"
 
 
 def test_write_minimal_final_json_idempotent(tmp_path):
@@ -330,7 +342,7 @@ def test_final_is_projected_from_the_recipe_the_close_out_settled(tmp_path):
 
     bd = ex.build(sd)
     final_sec = bd.get("outcome", {}).get("final", {})
-    assert final_sec.get("throughput_tok_s_per_gpu") == pytest.approx(123.0), "recorded recipe lost"
+    assert final_sec.get("output_throughput") == pytest.approx(123.0), "recorded recipe lost"
     assert final_sec.get("action_path") == ["baseline"]
     invocation = final_sec.get("invocation")
     assert invocation is not None, "the final block must always carry an invocation"
@@ -508,10 +520,12 @@ def test_a_resumed_session_is_not_reported_as_stopped_by_the_previous_legs_close
         state,
         to_phase="CLOSE",
         reason="time_exhausted",
-        ts=(now - timedelta(days=6)).isoformat(timespec="seconds"),
+        at=machine_state.PhaseClock(ts=(now - timedelta(days=6)).isoformat(timespec="seconds")),
     )
     state.start_ts = (now - timedelta(minutes=30)).isoformat(timespec="microseconds")
-    machine_state.record_phase_transition(state, to_phase="PRELUDE", reason="resumed", ts=state.start_ts)
+    machine_state.record_phase_transition(
+        state, to_phase="PRELUDE", reason="resumed", at=machine_state.PhaseClock(ts=state.start_ts)
+    )
     state.save(tmp_path)
 
     bd = ex.build(tmp_path)

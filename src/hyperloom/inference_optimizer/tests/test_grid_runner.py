@@ -21,6 +21,13 @@ import yaml
 
 from hyperloom.orchestrator.actions.executors import _grid_runner
 from hyperloom.orchestrator.actions.executors import _grid_runner as gr
+from hyperloom.inference_optimizer.grid_server_args import (
+    compact_json_server_args,
+    dedup_vllm_server_args,
+    remove_server_args,
+)
+from hyperloom.orchestrator.actions.executors._grid_base import coerce_extra_envs
+from hyperloom.orchestrator.actions.executors._grid_variant_filter import _parse_skip_spec
 from hyperloom.orchestrator.actions.executors._subprocess_kill import (
     ORCHESTRATOR_CANCELLED_RETURNCODE,
     SESSION_TIME_EXHAUSTED_RETURNCODE,
@@ -32,11 +39,9 @@ from hyperloom.orchestrator.actions.executors._grid_runner import (
     GridVariant,
     VariantResult,
     _build_variant_yaml,
-    _parse_skip_spec,
     _run_magpie,
     apply_runtime_benchmark_overrides,
     apply_user_skip_list,
-    coerce_extra_envs,
     reorder_grid_for_multi_node,
     resolve_skip_spec,
     run_grid,
@@ -880,6 +885,13 @@ def test_apply_runtime_overrides_pins_benchmark_script_after_gpu_pop():
     assert bench["runner_type"] == "mi300x"
 
 
+def test_apply_runtime_overrides_routes_r9700_vllm_to_gfx12():
+    bench = {"framework": "vllm", "envs": {}}
+    apply_runtime_benchmark_overrides(bench, gpu_type="r9700")
+    assert bench["runner_type"] == "gfx12"
+    assert bench["benchmark_script"] == "vllm_gfx12.sh"
+
+
 def test_apply_runtime_overrides_yaml_tp_wins_over_env_on_resume(monkeypatch):
     """A stale ``state.tp`` re-exported as ``os.environ['TP']`` on resume must not downgrade a YAML-pinned TP."""
     monkeypatch.setenv("TP", "1")
@@ -1392,7 +1404,7 @@ class TestDedupVllmServerArgs:
 
     def test_duplicate_attention_backend_keeps_last(self):
         # YAML base + variant both inject the flag.
-        out = _grid_runner.dedup_vllm_server_args(
+        out = dedup_vllm_server_args(
             "--attention-backend ROCM_AITER_FA --attention-backend ROCM_FLASH",
             "vllm",
         )
@@ -1400,14 +1412,14 @@ class TestDedupVllmServerArgs:
         assert out.count("--attention-backend") == 1
 
     def test_identical_duplicate_collapses_to_single(self):
-        out = _grid_runner.dedup_vllm_server_args(
+        out = dedup_vllm_server_args(
             "--attention-backend ROCM_AITER_FA --attention-backend ROCM_AITER_FA",
             "vllm",
         )
         assert out == "--attention-backend ROCM_AITER_FA"
 
     def test_preserves_surrounding_and_unknown_flags_in_order(self):
-        out = _grid_runner.dedup_vllm_server_args(
+        out = dedup_vllm_server_args(
             "--enforce-eager --attention-backend A --max-model-len 4096 --attention-backend B --trust-remote-code",
             "vllm",
         )
@@ -1423,26 +1435,26 @@ class TestDedupVllmServerArgs:
             '--compilation-config {"cudagraph_mode":"PIECEWISE"} '
             "--block-size 128 --block-size 128 --gpu-memory-utilization 0.95"
         )
-        out = _grid_runner.dedup_vllm_server_args(raw, "vllm")
+        out = dedup_vllm_server_args(raw, "vllm")
         assert '{"cudagraph_mode":"PIECEWISE"}' in out
         assert "{cudagraph_mode:PIECEWISE}" not in out
         assert out.count("--block-size") == 1
 
     def test_speculative_config_quotes_survive_dedup(self):
         raw = '--speculative-config {"method":"eagle"} --max-num-seqs 256 --max-num-seqs 256'
-        out = _grid_runner.dedup_vllm_server_args(raw, "vllm")
+        out = dedup_vllm_server_args(raw, "vllm")
         assert '{"method":"eagle"}' in out
         assert out.count("--max-num-seqs") == 1
 
     def test_equals_form_is_deduped(self):
-        out = _grid_runner.dedup_vllm_server_args(
+        out = dedup_vllm_server_args(
             "--gpu-memory-utilization=0.9 --gpu-memory-utilization=0.85",
             "vllm",
         )
         assert out == "--gpu-memory-utilization=0.85"
 
     def test_atom_framework_also_deduped(self):
-        out = _grid_runner.dedup_vllm_server_args(
+        out = dedup_vllm_server_args(
             "--attention-backend A --attention-backend B",
             "atom",
         )
@@ -1451,28 +1463,28 @@ class TestDedupVllmServerArgs:
     def test_sglang_is_noop_repeats_preserved(self):
         # sglang tolerates repeats (last-wins at the server); do not mangle.
         raw = "--attention-backend aiter --attention-backend triton"
-        assert _grid_runner.dedup_vllm_server_args(raw, "sglang") == raw
+        assert dedup_vllm_server_args(raw, "sglang") == raw
 
     def test_no_duplicates_returns_unchanged(self):
         raw = "--attention-backend ROCM_AITER_FA --max-model-len 8192"
-        assert _grid_runner.dedup_vllm_server_args(raw, "vllm") == raw
+        assert dedup_vllm_server_args(raw, "vllm") == raw
 
     def test_empty_and_none_safe(self):
-        assert _grid_runner.dedup_vllm_server_args("", "vllm") == ""
-        assert _grid_runner.dedup_vllm_server_args(None, "vllm") == ""
+        assert dedup_vllm_server_args("", "vllm") == ""
+        assert dedup_vllm_server_args(None, "vllm") == ""
 
     def test_unparseable_string_returned_as_is(self):
         # Unbalanced quote: leave it for vLLM to report rather than mangling.
         raw = "--attention-backend 'unterminated"
-        assert _grid_runner.dedup_vllm_server_args(raw, "vllm") == raw.strip()
+        assert dedup_vllm_server_args(raw, "vllm") == raw.strip()
 
     def test_distinct_single_value_flags_untouched(self):
         raw = "--max-num-seqs 256 --block-size 16 --kv-cache-dtype fp8"
-        assert _grid_runner.dedup_vllm_server_args(raw, "vllm") == raw
+        assert dedup_vllm_server_args(raw, "vllm") == raw
 
     def test_mixed_equals_and_space_forms_dedup_last_wins(self):
         # `--flag value` (YAML base) then `--flag=value` (variant): last wins.
-        out = _grid_runner.dedup_vllm_server_args(
+        out = dedup_vllm_server_args(
             "--attention-backend ROCM_AITER_FA --attention-backend=ROCM_FLASH",
             "vllm",
         )
@@ -1480,14 +1492,14 @@ class TestDedupVllmServerArgs:
 
     def test_mixed_equals_then_space_form_dedup_last_wins(self):
         # Reverse order: `--flag=value` then `--flag value`.
-        out = _grid_runner.dedup_vllm_server_args(
+        out = dedup_vllm_server_args(
             "--attention-backend=ROCM_AITER_FA --attention-backend ROCM_FLASH",
             "vllm",
         )
         assert out == "--attention-backend ROCM_FLASH"
 
     def test_three_occurrences_keep_only_last(self):
-        out = _grid_runner.dedup_vllm_server_args(
+        out = dedup_vllm_server_args(
             "--attention-backend A --attention-backend B --attention-backend C",
             "vllm",
         )
@@ -1495,21 +1507,21 @@ class TestDedupVllmServerArgs:
 
     def test_json_flag_does_not_disable_other_flag_dedup(self):
         raw = "--attention-backend A --attention-backend B --override-generation-config '{\"temperature\": 0.7}'"
-        out = _grid_runner.dedup_vllm_server_args(raw, "vllm")
+        out = dedup_vllm_server_args(raw, "vllm")
         assert out == '--attention-backend B --override-generation-config {"temperature":0.7}'
 
     def test_json_string_with_internal_space_fails_closed(self):
         raw = '--attention-backend A --attention-backend B --speculative-config \'{"model":"draft model"}\''
-        assert _grid_runner.dedup_vllm_server_args(raw, "vllm") == raw
+        assert dedup_vllm_server_args(raw, "vllm") == raw
 
     def test_quoted_non_json_operand_fragments_fail_closed(self):
         raw = '--tool-call-parser "my parser" --max-num-seqs 512 --max-num-seqs 1024'
-        assert _grid_runner.dedup_vllm_server_args(raw, "vllm") == raw
+        assert dedup_vllm_server_args(raw, "vllm") == raw
 
     def test_multi_value_flag_left_untouched(self):
         # cuda-graph-bs takes a list; never collapse a string that carries one.
         raw = "--attention-backend A --cuda-graph-bs 1 2 4 8 --attention-backend B"
-        assert _grid_runner.dedup_vllm_server_args(raw, "vllm") == raw
+        assert dedup_vllm_server_args(raw, "vllm") == raw
 
 
 @pytest.mark.asyncio
@@ -2294,13 +2306,13 @@ class TestCompactJsonServerArgs:
     """JSON-valued flags must be space-free to survive Magpie's unquoted ``$EXTRA_VLLM_ARGS`` splice (otherwise spec-decode / compilation-config explore variants always crash the server at boot)."""
 
     def test_compilation_config_separator_space_removed(self):
-        out = _grid_runner.compact_json_server_args('--compilation-config {"full_cuda_graph": true}', "vllm")
+        out = compact_json_server_args('--compilation-config {"full_cuda_graph": true}', "vllm")
         assert out == '--compilation-config {"full_cuda_graph":true}'
         # the JSON value is now a single shell word under bash word-splitting
         assert len(out.split()) == 2
 
     def test_speculative_config_multikey(self):
-        out = _grid_runner.compact_json_server_args(
+        out = compact_json_server_args(
             '--speculative-config {"method": "eagle", "num_speculative_tokens": 3}',
             "vllm",
         )
@@ -2310,7 +2322,7 @@ class TestCompactJsonServerArgs:
     def test_compact_json_server_args_internal_space_unsupported(self):
         # Spaces inside JSON string values are not collapsed, so the value is not a single shell word under Magpie's
         # unquoted expansion; this flag shape is unsupported.
-        out = _grid_runner.compact_json_server_args('--speculative-config {"model": "draft model name"}', "vllm")
+        out = compact_json_server_args('--speculative-config {"model": "draft model name"}', "vllm")
         # Value is preserved verbatim (separator space after ':' removed only).
         assert out == '--speculative-config {"model":"draft model name"}'
         # ...but it still splits into MORE than the ideal 2 words: the two internal spaces of "draft model name"
@@ -2322,7 +2334,7 @@ class TestCompactJsonServerArgs:
         # stored-valid ``{"method":"ngram",...}`` into ``{method:ngram,...}`` which vLLM's ``json.loads`` rejects at
         # boot (observed: shape_capture server never boots -> shape_capture_failed). compact must repair the barewords
         # back to valid JSON.
-        out = _grid_runner.compact_json_server_args(
+        out = compact_json_server_args(
             "--speculative-config {method:ngram,num_speculative_tokens:7,prompt_lookup_min:2,prompt_lookup_max:8}",
             "vllm",
         )
@@ -2335,7 +2347,7 @@ class TestCompactJsonServerArgs:
 
     def test_quote_stripped_json_with_path_value_repaired(self):
         # Bareword string values containing ``/``, ``.``, ``-`` (e.g. a model id) must also be re-quoted.
-        out = _grid_runner.compact_json_server_args(
+        out = compact_json_server_args(
             "--speculative-config {method:eagle3,model:RedHatAI/Llama-3.1-8B-Instruct-speculator}",
             "vllm",
         )
@@ -2346,7 +2358,7 @@ class TestCompactJsonServerArgs:
         }
 
     def test_quote_stripped_nested_json_is_repaired(self):
-        out = _grid_runner.compact_json_server_args(
+        out = compact_json_server_args(
             "--compilation-config {method:ngram,nested:{a:1}}",
             "vllm",
         )
@@ -2357,7 +2369,7 @@ class TestCompactJsonServerArgs:
         }
 
     def test_shell_single_quote_wrappers_are_removed(self):
-        out = _grid_runner.compact_json_server_args(
+        out = compact_json_server_args(
             """--speculative-config '{"method":"ngram","num_speculative_tokens":7}' """,
             "vllm",
         )
@@ -2368,38 +2380,38 @@ class TestCompactJsonServerArgs:
         # Genuinely broken blobs that cannot be repaired to valid JSON are left verbatim (no worse than before), never
         # raising.
         raw = "--compilation-config {this is : not ] json"
-        out = _grid_runner.compact_json_server_args(raw, "vllm")
+        out = compact_json_server_args(raw, "vllm")
         assert "{this is" in out
 
     def test_other_flags_around_json_untouched(self):
-        out = _grid_runner.compact_json_server_args('--kv-cache-dtype fp8 --compilation-config {"level": 3}', "vllm")
+        out = compact_json_server_args('--kv-cache-dtype fp8 --compilation-config {"level": 3}', "vllm")
         assert out == '--kv-cache-dtype fp8 --compilation-config {"level":3}'
 
     def test_sglang_json_is_normalized_for_unquoted_transport(self):
         raw = '--speculative-config {"method": "eagle"}'
-        assert _grid_runner.compact_json_server_args(raw, "sglang") == ('--speculative-config {"method":"eagle"}')
+        assert compact_json_server_args(raw, "sglang") == ('--speculative-config {"method":"eagle"}')
 
     def test_sglang_and_missing_framework_remove_legacy_shell_wrappers(self):
         raw = """--json-model-override-args '{"rope_scaling":null}'"""
         expected = '--json-model-override-args {"rope_scaling":null}'
-        assert _grid_runner.compact_json_server_args(raw, "sglang") == expected
-        assert _grid_runner.compact_json_server_args(raw, None) == expected
+        assert compact_json_server_args(raw, "sglang") == expected
+        assert compact_json_server_args(raw, None) == expected
 
     def test_no_json_is_noop(self):
         raw = "--block-size 128 --no-enable-prefix-caching"
-        assert _grid_runner.compact_json_server_args(raw, "vllm") == raw
+        assert compact_json_server_args(raw, "vllm") == raw
 
     def test_malformed_json_left_verbatim(self):
         raw = "--compilation-config {not json}"
-        assert _grid_runner.compact_json_server_args(raw, "vllm") == raw
+        assert compact_json_server_args(raw, "vllm") == raw
 
     def test_malformed_wrapped_json_keeps_both_shell_wrappers(self):
         raw = "--compilation-config '{not json}'"
-        assert _grid_runner.compact_json_server_args(raw, "vllm") == raw
+        assert compact_json_server_args(raw, "vllm") == raw
 
     def test_empty_is_noop(self):
-        assert _grid_runner.compact_json_server_args("", "vllm") == ""
-        assert _grid_runner.compact_json_server_args(None, "vllm") == ""
+        assert compact_json_server_args("", "vllm") == ""
+        assert compact_json_server_args(None, "vllm") == ""
 
 
 class TestRemoveServerArgsPreservesJson:
@@ -2407,20 +2419,20 @@ class TestRemoveServerArgsPreservesJson:
 
     def test_remove_port_keeps_sibling_json_valid(self):
         raw = '--compilation-config {"cudagraph_mode":"FULL"} --port 8888'
-        out = _grid_runner.remove_server_args(raw, ["--port"])
+        out = remove_server_args(raw, ["--port"])
         assert "--port" not in out
         blob = out.split("--compilation-config ", 1)[1].strip()
         assert json.loads(blob) == {"cudagraph_mode": "FULL"}
 
     def test_remove_keeps_multikey_speculative_config_valid(self):
         raw = '--speculative-config {"method":"ngram","num_speculative_tokens":7} --port 8888'
-        out = _grid_runner.remove_server_args(raw, ["--port"])
+        out = remove_server_args(raw, ["--port"])
         blob = out.split("--speculative-config ", 1)[1].strip()
         assert json.loads(blob) == {"method": "ngram", "num_speculative_tokens": 7}
 
     def test_remove_noop_when_nothing_matches_keeps_json(self):
         raw = '--compilation-config {"cudagraph_mode":"FULL"}'
-        out = _grid_runner.remove_server_args(raw, ["--port"])
+        out = remove_server_args(raw, ["--port"])
         assert json.loads(out.split("--compilation-config ", 1)[1].strip()) == {"cudagraph_mode": "FULL"}
 
     def test_sign_prefixed_custom_op_survives_removal(self):
@@ -2430,7 +2442,7 @@ class TestRemoveServerArgsPreservesJson:
             '{"mode":3,"custom_ops":["+fused_rms_norm_gated"],'
             '"cudagraph_capture_sizes":[1,2,3]} --port 8888'
         )
-        out = _grid_runner.remove_server_args(raw, ["--port"])
+        out = remove_server_args(raw, ["--port"])
         assert "--port" not in out
         blob = json.loads(out.split("--compilation-config ", 1)[1].strip())
         assert blob["custom_ops"] == ["+fused_rms_norm_gated"]
@@ -2467,7 +2479,7 @@ class TestRemoveServerArgsPreservesJson:
 
     def test_shell_quoted_plain_operand_loses_its_wrappers(self):
         """Magpie expands ``EXTRA_*_ARGS`` unquoted, so wrappers must not persist."""
-        out = _grid_runner.remove_server_args("--tool-call-parser 'kimi_k3' --port 8888", ["--port"])
+        out = remove_server_args("--tool-call-parser 'kimi_k3' --port 8888", ["--port"])
         assert out == "--tool-call-parser kimi_k3"
 
 
@@ -2556,7 +2568,7 @@ async def test_report_read_does_not_wait_when_the_process_already_failed(tmp_pat
 
 
 class TestServerArgTokenizerOnTheSyntheticPath:
-    """``strip_benchmark_harness_flags`` runs for every variant, AgentX or not."""
+    """Every variant's args go through the JSON-preserving tokenizer, AgentX or not, and normalizing them drops no flag."""
 
     def _off(self, monkeypatch):
         monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
@@ -2566,11 +2578,11 @@ class TestServerArgTokenizerOnTheSyntheticPath:
         args = "--tensor-parallel-size 8 --gpu-memory-utilization 0.9 --max-num-seqs 512"
         assert _grid_runner.compose_server_args(base_extra_args=args) == args
 
-    def test_the_denylisted_flag_is_still_dropped(self, monkeypatch):
+    def test_the_harness_flag_reaches_the_launch(self, monkeypatch):
+        """The baseline keeps the operator's flags, so a variant must launch with them too."""
         self._off(monkeypatch)
         out = _grid_runner.compose_server_args(base_extra_args="--no-enable-prefix-caching --max-num-seqs 512")
-        assert "--no-enable-prefix-caching" not in out
-        assert "--max-num-seqs 512" in out
+        assert out == "--no-enable-prefix-caching --max-num-seqs 512"
 
     def test_quoted_operands_do_not_keep_their_wrappers(self, monkeypatch):
         """Magpie expands EXTRA_*_ARGS unquoted, so a wrapper reaches argv literally."""
@@ -2582,13 +2594,13 @@ class TestServerArgTokenizerOnTheSyntheticPath:
         """Untokenizable input is returned untouched rather than guessed at."""
         self._off(monkeypatch)
         broken = "--served-model-name 'oops --max-num-seqs 512"
-        assert _grid_runner.remove_server_args(broken, ["--max-num-seqs"]) == broken
+        assert remove_server_args(broken, ["--max-num-seqs"]) == broken
 
     def test_a_synthetic_json_value_survives_a_removal(self, monkeypatch):
         """Synthetic runs carry JSON flags too (compilation-config, and friends)."""
         self._off(monkeypatch)
         args = '--compilation-config {"mode":3} --max-num-seqs 512'
-        out = _grid_runner.remove_server_args(args, ["--max-num-seqs"])
+        out = remove_server_args(args, ["--max-num-seqs"])
         assert out == '--compilation-config {"mode":3}'
 
 
@@ -2600,7 +2612,8 @@ def test_the_json_tripwire_sees_damage_from_the_removal_pass(caplog):
 
     def _lossy(server_args, remove_args):
         out = real(server_args, remove_args)
-        return out.replace('{"mode":3}', "{mode:3}")
+        # A wildcard is damage normalization cannot repair, unlike a bareword key.
+        return out.replace('{"mode":3}', '{"ignore":[*.mlp.gate]}')
 
     args = '--compilation-config {"mode":3} --max-num-seqs 512'
     with patch.object(gsa, "remove_server_args", side_effect=_lossy):

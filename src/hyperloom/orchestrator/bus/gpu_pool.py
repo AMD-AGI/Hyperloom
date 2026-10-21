@@ -25,7 +25,7 @@ DEFAULT_GPU_LEASE_TTL_SEC = 1800
 # Reserved synthetic gpu_id base for single-node Ray pending-observation slots.
 _RAY_OBS_ID_BASE = 100000
 
-# GPU-lease / gpu_research_lane TTL grace over the agent wall budget.
+# Lease TTL grace over how long the holder is expected to run: a GPU agent's wall budget, or an action's expected cost.
 GPU_LEASE_TTL_GRACE = 0.1
 
 
@@ -260,17 +260,6 @@ class SpecialistGpuPool:
                 f"DELETE FROM gpu_leases WHERE gpu_id IN ({placeholders}) AND holder_id=?",  # nosec B608 - generated placeholders only.
                 params,
             )
-
-    async def extend(self, task_id: str, ttl_sec: int) -> int:
-        """Push a task's GPU rows out to ``ttl_sec`` from now."""
-        expires_iso = datetime.fromtimestamp(time.time() + max(0, int(ttl_sec)), tz=timezone.utc).isoformat()
-        stamp = now_iso()
-        async with self.db.transaction() as cur:
-            cur.execute(
-                "UPDATE gpu_leases SET expires_at=?, heartbeat_at=? WHERE task_id=?",
-                (expires_iso, stamp, task_id),
-            )
-            return int(cur.rowcount or 0)
 
 
 __all__ = [

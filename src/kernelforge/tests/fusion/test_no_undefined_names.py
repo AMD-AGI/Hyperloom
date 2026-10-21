@@ -10,19 +10,29 @@ import builtins
 import inspect
 from pathlib import Path
 
+import kernelforge.fusion.agent_selection
 import kernelforge.fusion.author
 import kernelforge.fusion.command
+import kernelforge.fusion.compile_pass_claim
 import kernelforge.fusion.discover
 import kernelforge.fusion.emit
+import kernelforge.fusion.harness_authoring
 import kernelforge.fusion.locate
+import kernelforge.fusion.serving_gate
+import kernelforge.fusion.source_snapshot
 import kernelforge.fusion.validate
 
 MODULES = (
+    kernelforge.fusion.agent_selection,
     kernelforge.fusion.author,
     kernelforge.fusion.command,
+    kernelforge.fusion.compile_pass_claim,
     kernelforge.fusion.discover,
     kernelforge.fusion.emit,
+    kernelforge.fusion.harness_authoring,
     kernelforge.fusion.locate,
+    kernelforge.fusion.serving_gate,
+    kernelforge.fusion.source_snapshot,
     kernelforge.fusion.validate,
 )
 

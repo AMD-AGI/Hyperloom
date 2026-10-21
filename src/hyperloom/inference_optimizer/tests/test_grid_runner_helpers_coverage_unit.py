@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from hyperloom.inference_optimizer.grid_server_args import remove_server_args
 from hyperloom.orchestrator.actions.executors import _grid_runner as gr
 from hyperloom.orchestrator.actions.executors import _benchmark_interpreter as bi
 
@@ -58,6 +59,74 @@ def test_compatibility_filter_no_model_path_assumes_compatible() -> None:
     grid = [_variant("moe", "--enable-ep-moe")]
     kept, dropped = gr.apply_compatibility_filter(grid, framework="sglang", model_path="")
     assert [v.name for v in kept] == ["moe"] and dropped == []
+
+
+# -- ungrounded_env_file_reason (env-value file grounding) ----------------
+def test_ungrounded_env_file_reason_drops_missing_config_path(tmp_path) -> None:
+    # A proposal may point a config env at an artifact no stage authored; the server would read it
+    # unconditionally and die at config load, so the variant must be dropped with a reason.
+    v = _variant("gemm", envs={"AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE": str(tmp_path / "nope.csv")})
+    reason = gr.ungrounded_env_file_reason(v.extra_envs)
+    assert reason and "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE" in reason
+    assert str(tmp_path / "nope.csv") in reason
+
+
+def test_ungrounded_env_file_reason_passes_authored_file(tmp_path) -> None:
+    csv = tmp_path / "tuned.csv"
+    csv.write_text("gfx,M,N,K,splitK\ngfx950,64,5120,5120,2\n", encoding="utf-8")
+    v = _variant("gemm", envs={"AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE": str(csv)})
+    assert gr.ungrounded_env_file_reason(v.extra_envs) is None
+
+
+def test_ungrounded_env_file_reason_accepts_colon_joined_existing_files(tmp_path) -> None:
+    # A set AITER_CONFIG_* is aiter's SET form: a `:`-joined list, each element loaded (csvs_aiter_will_load).
+    # Both files on disk is a valid variant and must not be dropped.
+    a = tmp_path / "t.csv"
+    a.write_text("gfx,M,N,K\ngfx950,1,2,3\n", encoding="utf-8")
+    b = tmp_path / "t2.csv"
+    b.write_text("gfx,M,N,K\ngfx950,4,5,6\n", encoding="utf-8")
+    v = _variant("gemm", envs={"AITER_CONFIG_GEMM_BF16": f"{a}:{b}"})
+    assert gr.ungrounded_env_file_reason(v.extra_envs) is None
+
+
+def test_ungrounded_env_file_reason_drops_colon_joined_missing_element(tmp_path) -> None:
+    a = tmp_path / "t.csv"
+    a.write_text("gfx,M,N,K\ngfx950,1,2,3\n", encoding="utf-8")
+    missing = str(tmp_path / "never_authored.csv")
+    v = _variant("gemm", envs={"AITER_CONFIG_GEMM_BF16": f"{a}:{missing}"})
+    reason = gr.ungrounded_env_file_reason(v.extra_envs)
+    assert reason and missing in reason and str(a) not in reason.split("element(s)")[1].split(" do not exist")[0]
+
+
+def test_ungrounded_env_file_reason_treats_an_unreadable_path_as_missing(monkeypatch) -> None:
+    # An unreadable parent or an overlong name makes Path.is_file() raise; the variant is dropped, the grid runs on.
+    def raise_eacces(self):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(gr.Path, "is_file", raise_eacces)
+    v = _variant("gemm", envs={"AITER_CONFIG_GEMM_BF16": "/root/private/tuned.csv"})
+    reason = gr.ungrounded_env_file_reason(v.extra_envs)
+    assert reason and "/root/private/tuned.csv" in reason
+
+
+def test_run_grid_fast_fail_drops_a_variant_whose_config_file_is_missing(tmp_path, monkeypatch) -> None:
+    # The backstop of the admission check: run_grid's fast-fail drops it before boot, whatever the framework.
+    monkeypatch.setenv("FRAMEWORK", "sglang")
+    v = _variant("gemm", envs={"AITER_CONFIG_GEMM_BF16": str(tmp_path / "never_written.csv")})
+    assert "AITER_CONFIG_GEMM_BF16" in (gr.unsupported_capability_reason(v) or "")
+
+
+def test_ungrounded_env_file_reason_noop_without_config_envs(tmp_path) -> None:
+    # Non-file envs (even under aiter-ish prefixes like the JSON-payload AITER_CONFIG) must stay untouched.
+    v = _variant(
+        "plain",
+        envs={
+            "AITER_CONFIG": '{"path": "/tmp/never_scanned.json"}',
+            "SGLANG_USE_AITER": "1",
+            "AITER_CONFIG_GEMM_A8W8": "",
+        },
+    )
+    assert gr.ungrounded_env_file_reason(v.extra_envs) is None
 
 
 # -- unsupported_capability_reason (env-flag build probe) -----------------
@@ -416,29 +485,37 @@ def test_compose_server_args_replace_still_applies_remove_args() -> None:
     assert out == "--also-bad 2 --keep 4"
 
 
-def test_compose_server_args_strips_denylisted_harness_flag_from_every_layer() -> None:
+def test_compose_server_args_launches_with_the_harness_flags_the_baseline_ran_with() -> None:
     out = gr.compose_server_args(
         inherited_args="--no-enable-prefix-caching --block-size 128",
         base_extra_args="--no-enable-prefix-caching",
         variant_extra_args="--kv-cache-dtype fp8 --no-enable-prefix-caching",
     )
-    assert "--no-enable-prefix-caching" not in out
+    assert "--no-enable-prefix-caching" in out
     assert "--block-size 128" in out
     assert "--kv-cache-dtype fp8" in out
 
 
-def test_compose_server_args_strips_denylisted_flag_in_replace_mode() -> None:
+def test_compose_server_args_keeps_the_harness_flag_in_replace_mode() -> None:
     out = gr.compose_server_args(
         inherited_args="--ignored",
         base_extra_args="--no-enable-prefix-caching --max-num-seqs 256",
         variant_extra_args="--kv-cache-dtype fp8",
         args_mode="replace",
     )
-    assert out == "--max-num-seqs 256 --kv-cache-dtype fp8"
+    assert out == "--no-enable-prefix-caching --max-num-seqs 256 --kv-cache-dtype fp8"
+
+
+def test_launch_keeps_what_the_persisted_recipe_strips() -> None:
+    from hyperloom.inference_optimizer.grid_server_args import strip_benchmark_harness_flags
+
+    launched = gr.compose_server_args(base_extra_args="--no-enable-prefix-caching --max-num-seqs 256")
+    assert "--no-enable-prefix-caching" in launched
+    assert strip_benchmark_harness_flags(launched) == "--max-num-seqs 256"
 
 
 def test_remove_server_args_accepts_multi_flag_string() -> None:
-    out = gr.remove_server_args(
+    out = remove_server_args(
         "--flag-a --flag-b --flag-c 3 --keep 4",
         "--flag-a --flag-b --flag-c",
     )
@@ -452,7 +529,7 @@ def test_remove_server_args_keeps_a_sibling_json_value_parseable() -> None:
         '"exclude_layer":["*.mlp.gate","*expert*"]} '
         "--no-enable-prefix-caching --tp 8"
     )
-    out = gr.remove_server_args(args, ["--no-enable-prefix-caching"])
+    out = remove_server_args(args, ["--no-enable-prefix-caching"])
     tokens = out.split(" ")
     assert tokens[0] == "--online_quant_config"
     assert json.loads(tokens[1]) == {
@@ -464,5 +541,5 @@ def test_remove_server_args_keeps_a_sibling_json_value_parseable() -> None:
 
 def test_remove_server_args_unbalanced_brace_drops_only_its_own_flag() -> None:
     """A stray ``}`` is not a JSON blob and must not take the tail with it."""
-    out = gr.remove_server_args("--foo a} --tp 8 --max-num-seqs 64", ["--foo"])
+    out = remove_server_args("--foo a} --tp 8 --max-num-seqs 64", ["--foo"])
     assert out == "--tp 8 --max-num-seqs 64"

@@ -591,7 +591,7 @@ async def _run_rewrite_integrate(
     benched_envs: dict[str, str] = {}
     legs: list[dict[str, Any]] = []
 
-    async def _fake_bench(**kwargs):
+    async def _fake_bench(bench, **kwargs):
         legs.append(dict(kwargs))
         is_parity = bool(kwargs.get("unset_envs"))
         if is_parity:
@@ -610,7 +610,7 @@ async def _run_rewrite_integrate(
             {"accuracy_pass": accuracy_pass, "timed_out": False},
         )
 
-    async def _noop_kb(**_kwargs):
+    async def _noop_kb(*_args, **_kwargs):
         return None
 
     monkeypatch.setattr(executor, "_bench_patch", _fake_bench)
@@ -667,6 +667,34 @@ async def test_an_unprofitable_bundle_is_kept_inert_with_levers_registered(tmp_p
     # The code is still on disk, just dormant.
     assert (repo / "src.py").read_text().endswith("return 2\n")
     assert "enabler" in result["reason"]
+
+
+@pytest.mark.asyncio
+async def test_an_inert_keep_is_committed_so_the_next_revert_keeps_it(tmp_path, monkeypatch):
+    """Revert is a reset to HEAD; uncommitted inert code would be stashed as user changes."""
+    import subprocess
+
+    result, repo, _, _ = await _run_rewrite_integrate(tmp_path, monkeypatch, delta_pct=0.2)
+    assert result["status"] == "kept_inert"
+    status = subprocess.run(["git", "-C", str(repo), "status", "--porcelain"], capture_output=True, text=True)
+    assert status.stdout.strip() == ""
+    head_src = subprocess.run(["git", "-C", str(repo), "show", "HEAD:src.py"], capture_output=True, text=True)
+    assert head_src.stdout.endswith("return 2\n")
+
+
+@pytest.mark.asyncio
+async def test_without_a_base_an_unprofitable_bundle_reverts_instead_of_keeping_inert(tmp_path, monkeypatch):
+    """Before anything boots there is no base, so inertness cannot be shown and the code must not stay."""
+    result, repo, _, legs = await _run_rewrite_integrate(
+        tmp_path,
+        monkeypatch,
+        delta_pct=0.2,
+        extra_params={"base_tput": 0.0},
+    )
+    assert result["status"] == "reverted"
+    assert result["error_class"] == "switch_off_parity_inconclusive"
+    assert not [leg for leg in legs if leg.get("unset_envs")]
+    assert (repo / "src.py").read_text().endswith("return 1\n")
 
 
 @pytest.mark.asyncio
@@ -950,20 +978,16 @@ async def test_a_patch_without_switches_spends_no_parity_leg(tmp_path, monkeypat
 @pytest.mark.asyncio
 async def test_a_raising_parity_leg_does_not_read_as_a_pass(tmp_path, monkeypatch):
     """A probe that cannot run has proved nothing, so it must not wave the patch through."""
-    from hyperloom.orchestrator.actions.executors.integrate_patch import IntegratePatchExecutor
+    from hyperloom.orchestrator.actions.executors.integrate_patch import IntegratePatchExecutor, _PatchBench
 
     executor = IntegratePatchExecutor(session_dir=tmp_path)
 
-    async def _raising_bench(**_kwargs):
-        raise RuntimeError("bench harness exploded")
+    async def _raising_bench(*_args, **_kwargs):
+        raise OSError("bench harness exploded")
 
     monkeypatch.setattr(executor, "_bench_patch", _raising_bench)
     verdict = await executor._switch_off_parity(
-        params={},
-        output_root=tmp_path,
-        specialist_task_id="t",
-        switch_manifest=_chain(),
-        base_tput=100.0,
+        _PatchBench(params={}, output_root=tmp_path, specialist_task_id="t"), switch_manifest=_chain(), base_tput=100.0
     )
     assert verdict["ran"] is True
     assert verdict["ok"] is False
@@ -973,14 +997,10 @@ async def test_a_raising_parity_leg_does_not_read_as_a_pass(tmp_path, monkeypatc
 @pytest.mark.asyncio
 async def test_parity_without_a_base_is_reported_as_not_run(tmp_path):
     """No base to compare against means the check was skipped, not that it passed."""
-    from hyperloom.orchestrator.actions.executors.integrate_patch import IntegratePatchExecutor
+    from hyperloom.orchestrator.actions.executors.integrate_patch import IntegratePatchExecutor, _PatchBench
 
     verdict = await IntegratePatchExecutor(session_dir=tmp_path)._switch_off_parity(
-        params={},
-        output_root=tmp_path,
-        specialist_task_id="t",
-        switch_manifest=_chain(),
-        base_tput=0.0,
+        _PatchBench(params={}, output_root=tmp_path, specialist_task_id="t"), switch_manifest=_chain(), base_tput=0.0
     )
     assert verdict["ran"] is False
     assert "no positive base throughput" in verdict["reason"]
@@ -989,12 +1009,10 @@ async def test_parity_without_a_base_is_reported_as_not_run(tmp_path):
 @pytest.mark.asyncio
 async def test_parity_can_be_switched_off_explicitly(tmp_path):
     """An operator debugging the harness can take the extra leg out."""
-    from hyperloom.orchestrator.actions.executors.integrate_patch import IntegratePatchExecutor
+    from hyperloom.orchestrator.actions.executors.integrate_patch import IntegratePatchExecutor, _PatchBench
 
     verdict = await IntegratePatchExecutor(session_dir=tmp_path)._switch_off_parity(
-        params={"enable_switch_off_parity": False},
-        output_root=tmp_path,
-        specialist_task_id="t",
+        _PatchBench(params={"enable_switch_off_parity": False}, output_root=tmp_path, specialist_task_id="t"),
         switch_manifest=_chain(),
         base_tput=100.0,
     )

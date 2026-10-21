@@ -19,7 +19,6 @@ from hyperloom.orchestrator.trace_analysis._nccl_summary_candidates import (
     collective_symbol,
     extract_collective_candidates,
     index_device_symbols,
-    locate_device_symbol,
 )
 
 
@@ -64,6 +63,11 @@ class CollectiveSymbolTests(unittest.TestCase):
         self.assertEqual(collective_symbol("   "), "")
 
 
+def _locate_device_symbol(symbol: str, roots: list[str]) -> tuple[str, int, str] | None:
+    index, _ = index_device_symbols([symbol], roots)
+    return index.get(symbol)
+
+
 class SymbolLocationTests(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
@@ -83,7 +87,7 @@ class SymbolLocationTests(unittest.TestCase):
             "__global__ void cross_device_reduce_2stage_naive(RankData* d) {}\n"
             "__global__ void cross_device_reduce_2stage(RankData* d) {}\n",
         )
-        located = locate_device_symbol("cross_device_reduce_2stage", [str(self.root)])
+        located = _locate_device_symbol("cross_device_reduce_2stage", [str(self.root)])
         self.assertIsNotNone(located)
         assert located is not None
         self.assertEqual(located[1], 2)
@@ -94,7 +98,7 @@ class SymbolLocationTests(unittest.TestCase):
             "include/k.cuh",
             "__global__ void __launch_bounds__(512, 1)\n    my_collective(int* p) {}\n",
         )
-        located = locate_device_symbol("my_collective", [str(self.root)])
+        located = _locate_device_symbol("my_collective", [str(self.root)])
         self.assertIsNotNone(located)
         assert located is not None
         self.assertEqual(located[1], 2)
@@ -102,24 +106,24 @@ class SymbolLocationTests(unittest.TestCase):
     def test_global_definition_preferred_over_call_site(self) -> None:
         self._write("a/call.cu", "void host() { my_collective(p); }\n")
         self._write("b/def.cuh", "__global__ void my_collective(int* p) {}\n")
-        located = locate_device_symbol("my_collective", [str(self.root)])
+        located = _locate_device_symbol("my_collective", [str(self.root)])
         self.assertIsNotNone(located)
         assert located is not None
         self.assertTrue(located[0].endswith("def.cuh"))
 
     def test_call_site_is_not_a_device_definition(self) -> None:
         self._write("a/call.cu", "void host() { my_collective(p); }\n")
-        self.assertIsNone(locate_device_symbol("my_collective", [str(self.root)]))
+        self.assertIsNone(_locate_device_symbol("my_collective", [str(self.root)]))
 
     def test_unknown_symbol_returns_none(self) -> None:
         self._write("a/def.cuh", "__global__ void other(int* p) {}\n")
-        self.assertIsNone(locate_device_symbol("missing_kernel", [str(self.root)]))
+        self.assertIsNone(_locate_device_symbol("missing_kernel", [str(self.root)]))
 
     def test_empty_symbol_returns_none(self) -> None:
-        self.assertIsNone(locate_device_symbol("", [str(self.root)]))
+        self.assertIsNone(_locate_device_symbol("", [str(self.root)]))
 
     def test_missing_root_is_skipped(self) -> None:
-        self.assertIsNone(locate_device_symbol("x", [str(self.root / "nope")]))
+        self.assertIsNone(_locate_device_symbol("x", [str(self.root / "nope")]))
 
     def test_multiple_symbols_read_each_source_once(self) -> None:
         """One index pass must not reread a file for each requested symbol."""
@@ -224,6 +228,12 @@ class ExtractCollectiveCandidatesTests(unittest.TestCase):
             "__global__ void cross_device_reduce_2stage(RankData* d) {}\n"
         )
         self.addCleanup(self._tmp.cleanup)
+        aiter_root = unittest.mock.patch(
+            "hyperloom.orchestrator.trace_analysis.tracelens_analysis._aiter_csrc_root",
+            return_value=str(self.src_root),
+        )
+        aiter_root.start()
+        self.addCleanup(aiter_root.stop)
 
     def _write_metrics(self, payload: object) -> None:
         (self.tl / "category_data" / "multi_kernel_metrics.json").write_text(json.dumps(payload))
@@ -313,7 +323,6 @@ class ExtractCollectiveCandidatesTests(unittest.TestCase):
         out = _inject_collective_candidates(
             self.tl,
             existing,
-            source_roots=[str(self.src_root)],
         )
         self.assertEqual(out, existing)
 
@@ -336,7 +345,6 @@ class ExtractCollectiveCandidatesTests(unittest.TestCase):
             out = _inject_collective_candidates(
                 self.tl,
                 [donor],
-                source_roots=[str(self.src_root)],
             )
 
         self.assertEqual(out, [donor])
@@ -371,7 +379,6 @@ class ExtractCollectiveCandidatesTests(unittest.TestCase):
             out = _inject_collective_candidates(
                 self.tl,
                 [exact],
-                source_roots=[str(self.src_root)],
                 health_warnings=warnings,
             )
 
@@ -393,7 +400,6 @@ class ExtractCollectiveCandidatesTests(unittest.TestCase):
         out = _inject_collective_candidates(
             self.tl,
             [{"name": "compute_kernel", "duration_us": 1000.0}],
-            source_roots=[str(self.src_root)],
             health_warnings=warnings,
         )
 
@@ -413,7 +419,6 @@ class ExtractCollectiveCandidatesTests(unittest.TestCase):
             tla._inject_collective_candidates(
                 self.tl,
                 [],
-                source_roots=[],
                 health_warnings=warnings,
             )
 
@@ -440,7 +445,6 @@ class ExtractCollectiveCandidatesTests(unittest.TestCase):
             out = _inject_collective_candidates(
                 self.tl,
                 [donor],
-                source_roots=[str(self.src_root)],
             )
 
         self.assertEqual(len(out), 2)
@@ -482,7 +486,6 @@ class ExtractCollectiveCandidatesTests(unittest.TestCase):
             out = _inject_collective_candidates(
                 self.tl,
                 donors,
-                source_roots=[str(self.src_root)],
             )
 
         self.assertEqual(len(out), 3)
@@ -526,7 +529,6 @@ class ExtractCollectiveCandidatesTests(unittest.TestCase):
             out = _inject_collective_candidates(
                 self.tl,
                 donors,
-                source_roots=[str(self.src_root)],
             )
 
         self.assertEqual(out, donors)
@@ -542,7 +544,6 @@ class ExtractCollectiveCandidatesTests(unittest.TestCase):
         out = _inject_collective_candidates(
             self.tl,
             existing,
-            source_roots=[str(self.src_root)],
             log_path=log_path,
         )
 
@@ -558,7 +559,6 @@ class ExtractCollectiveCandidatesTests(unittest.TestCase):
         out = _inject_collective_candidates(
             self.tl,
             existing,
-            source_roots=[str(self.src_root)],
         )
         self.assertEqual(len(out), 1)
         self.assertEqual(out[0]["name"], AITER_2STAGE)

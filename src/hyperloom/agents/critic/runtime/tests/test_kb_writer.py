@@ -187,9 +187,9 @@ class _FlakyKBClient(InMemoryKBClient):
             self._fail_count[endpoint] = remaining - 1
             raise KBTransportError(f"{endpoint}: simulated transport error")
 
-    def list(self, **kwargs):
+    def list(self, query):
         self._consume("list")
-        return super().list(**kwargs)
+        return super().list(query)
 
     def upsert(self, payload):
         self._consume("upsert")
@@ -242,7 +242,7 @@ def test_list_priors_short_circuits_after_first_transport_error(breaker_writer):
 def test_list_priors_validation_error_does_not_open_breaker(breaker_writer):
     w, kb, _, _ = breaker_writer
 
-    def boom(**kwargs):
+    def boom(_query):
         raise KBValidationError("422 bad scope")
 
     kb.list = boom  # type: ignore[method-assign]
@@ -534,3 +534,21 @@ def test_breaker_reflects_per_request_failures_in_bundle(tmp_path):
     )
     assert bundle.kb_read_skipped_reason == "kb_unreachable"
     assert bundle.kb_priors_by_proposal["mmm"] == []
+
+
+def test_a_topic_that_cannot_be_slugged_is_skipped_or_rejected(writer, packet_context):
+    w, _, _, _ = writer
+    topic = "\ud800 lone surrogate topic"
+    error = "'utf-8' codec can't encode character '\\ud800' in position 0: surrogates not allowed"
+    ctx = WriteContext(session_id="s")
+
+    verdict = {"verdict": "reject", "topic": topic, "reasoning": "r", "packet_evidence": ["e"]}
+    skipped = w.write_verdict(verdict=verdict, packet_context=packet_context, ctx=ctx)
+    draft = {"category": "kernel_optimization", "action": topic}
+    rejected = w.write_kb_drafts(kb_drafts=[draft], packet_context=packet_context, ctx=ctx)
+
+    assert skipped.to_dict() == {"status": "skipped", "detail": {"reason": "slug_failed", "error": error}}
+    assert rejected.to_dict() == {
+        "status": "skipped",
+        "detail": {"reason": "all_rejected", "rejected": [{"draft": draft, "reason": f"slug_failed: {error}"}]},
+    }

@@ -29,6 +29,7 @@ import click
 import pytest
 
 import kernelforge.loop.insession_gate as gate_module
+from kernelforge.loop.gate_settings import GateMeasurement, GateScope
 import kernelforge.orchestrator.agent as agent_module
 from kernelforge.agent_backends.base import (
     AgentCapabilities,
@@ -36,7 +37,7 @@ from kernelforge.agent_backends.base import (
     AgentRunSpec,
 )
 from kernelforge.agent_backends.registry import AgentProvider, register_agent_provider
-from kernelforge import cli
+from kernelforge.cli import lanes as cli_lanes
 from kernelforge.config import Config
 from kernelforge.loop import fanout
 
@@ -96,16 +97,18 @@ def _record_backend_specs(monkeypatch, *, stop_hooks: bool = True) -> list[Agent
 def _lane_factory(tmp_path: Path):
     """Build the factory a round uses to bind one session to one lane."""
     config, workspace = _campaign(tmp_path)
-    return cli._make_lane_agent_factory(
+    return cli_lanes._make_lane_agent_factory(
         make_agent=agent_module.make_agent_fn,
         config=config,
-        workspace_dir=str(workspace),
-        driver=str(workspace / "forge_driver.py"),
-        source_files=[str(workspace / "src" / "kernel.py")],
-        session_kwargs={
-            "program_md": "Optimize VALUE.",
-            "agent_backend": "claude",
-        },
+        binding=cli_lanes.LaneBinding(
+            workspace_dir=str(workspace),
+            driver=str(workspace / "forge_driver.py"),
+            source_files=[str(workspace / "src" / "kernel.py")],
+        ),
+        setup=agent_module.ImplementerSetup(
+            agent_module.ImplementerTask(program_md="Optimize VALUE."),
+            session=agent_module.SessionOptions(agent_backend="claude"),
+        ),
     )
 
 
@@ -375,16 +378,17 @@ def test_the_canonical_session_keeps_its_benchmarking_stop_hook(tmp_path, monkey
     workspace = _tree(tmp_path / "workspace")
 
     agent_fn = agent_module.make_agent_fn(
-        config=Config(
+        Config(
             workspace=str(workspace),
             agent_backend="claude",
             agent_model="claude-test",
             agent_precheck=False,
         ),
-        program_md="Optimize VALUE.",
-        agent_backend="claude",
-        insession_gate=True,
-        driver_script=str(workspace / "forge_driver.py"),
+        agent_module.ImplementerSetup(
+            agent_module.ImplementerTask(program_md="Optimize VALUE."),
+            measurement=agent_module.GateMeasurement(driver_script=str(workspace / "forge_driver.py")),
+            session=agent_module.SessionOptions(agent_backend="claude", insession_gate=True),
+        ),
     )
     asyncio.run(agent_fn(str(workspace / "src" / "kernel.py"), ""))
 
@@ -399,9 +403,8 @@ def test_both_gate_modes_share_one_protected_path_rule(tmp_path, stop_check):
     """Neither mode may re-derive what counts as the measurement surface."""
     workspace = _tree(tmp_path / "workspace")
     gate = gate_module.InSessionGate(
-        driver_script=str(workspace / "forge_driver.py"),
-        snr_threshold=30.0,
-        kernel_file=str(workspace / "src" / "kernel.py"),
+        GateMeasurement(driver_script=str(workspace / "forge_driver.py"), snr_threshold=30.0),
+        GateScope(kernel_file=str(workspace / "src" / "kernel.py")),
     )
 
     hooks = gate.make_agent_hooks(stop_check=stop_check)
@@ -450,7 +453,7 @@ def test_lanes_warn_but_run_on_a_provider_that_does_not_run_our_hooks(capsys):
     """
     _register_provider("hooklesscli", session_env=True)
 
-    assert cli._require_lane_provider_capabilities("hooklesscli", 2) is None
+    assert cli_lanes._require_lane_provider_capabilities("hooklesscli", 2) is None
 
     warning = capsys.readouterr().out
     assert "hooklesscli" in warning
@@ -467,7 +470,7 @@ def test_lanes_are_refused_on_a_provider_that_ignores_the_session_environment():
     _register_provider("sharedenvcli", stop_hooks=True)
 
     with pytest.raises(click.ClickException) as refusal:
-        cli._require_lane_provider_capabilities("sharedenvcli", 2)
+        cli_lanes._require_lane_provider_capabilities("sharedenvcli", 2)
 
     message = str(refusal.value)
     assert "sharedenvcli" in message
@@ -485,7 +488,7 @@ def test_a_lane_refusal_names_every_missing_guarantee(capsys):
     _register_provider("plaincli")
 
     with pytest.raises(click.ClickException) as refusal:
-        cli._require_lane_provider_capabilities("plaincli", 4)
+        cli_lanes._require_lane_provider_capabilities("plaincli", 4)
 
     message = str(refusal.value)
     assert "session_env" in message
@@ -505,7 +508,7 @@ def test_lanes_are_refused_rather_than_quietly_reduced():
     _register_provider("plaincli")
 
     with pytest.raises(click.ClickException):
-        cli._require_lane_provider_capabilities("plaincli", 8)
+        cli_lanes._require_lane_provider_capabilities("plaincli", 8)
 
 
 def test_one_lane_is_never_refused():
@@ -516,21 +519,21 @@ def test_one_lane_is_never_refused():
     """
     _register_provider("plaincli")
 
-    assert cli._require_lane_provider_capabilities("plaincli", 1) is None
+    assert cli_lanes._require_lane_provider_capabilities("plaincli", 1) is None
 
 
 def test_lanes_run_on_a_provider_that_declares_both():
     """The check reads what a provider declares, not who wrote it."""
     _register_provider("fullcli", stop_hooks=True, session_env=True)
 
-    assert cli._require_lane_provider_capabilities("fullcli", 2) is None
+    assert cli_lanes._require_lane_provider_capabilities("fullcli", 2) is None
 
 
 def test_a_provider_that_declares_both_is_warned_about_nothing(capsys):
     """The advisory is about a missing guarantee, not a note on every run."""
     _register_provider("fullcli", stop_hooks=True, session_env=True)
 
-    cli._require_lane_provider_capabilities("fullcli", 2)
+    cli_lanes._require_lane_provider_capabilities("fullcli", 2)
 
     assert capsys.readouterr().out == ""
 
@@ -542,12 +545,12 @@ def test_the_builtin_hook_capable_provider_passes_the_lane_check():
     declaration were dropped, concurrent lanes would stop being available at all
     rather than quietly losing a guarantee.
     """
-    assert cli._require_lane_provider_capabilities("claude", 2) is None
+    assert cli_lanes._require_lane_provider_capabilities("claude", 2) is None
 
 
 def test_the_builtin_codex_provider_runs_concurrent_lanes(capsys):
     """Codex applies the session environment; hooks stay off the lane path."""
-    assert cli._require_lane_provider_capabilities("codex", 2) is None
+    assert cli_lanes._require_lane_provider_capabilities("codex", 2) is None
     warning = capsys.readouterr().out
     assert "codex" in warning
     assert "stop_hooks" in warning

@@ -19,6 +19,7 @@ from ..bus.resource_lock import BRINGUP_ROUND_LANE, ResourceLockManager
 from ..state.round_store import (
     EXPIRED_REAPED,
     Round,
+    RoundRequest,
     RoundStore,
 )
 from ..state.task_registry import TERMINAL_STATES, Task, TaskNotFound, TaskRegistry
@@ -73,9 +74,63 @@ _TIMEOUT_DENY_SQL = """
 
 __all__ = [
     "TIMEOUT_VERDICT",
+    "ReconcileLimits",
+    "ReconcileLinks",
     "ReconcileReport",
+    "ReconcileStores",
     "Reconciler",
 ]
+
+
+@dataclass(frozen=True)
+class ReconcileStores:
+    """The durable stores the pass repairs.
+
+    Attributes:
+        rounds: The durable round store.
+        tasks: The task registry.
+        locks: The lease manager; this pass is its only sweeper.
+    """
+
+    rounds: RoundStore
+    tasks: TaskRegistry
+    locks: ResourceLockManager
+
+
+@dataclass(frozen=True)
+class ReconcileLinks:
+    """The running loop's state the pass reads and writes, each optional.
+
+    Attributes:
+        resources: The gate's resource facts; ``None`` skips the update.
+        proposals: Returns the in-memory pending proposals, so a durable
+            timeout deny also reaches the copy the loop consults.
+        drop_proposal: Settles a timed-out pending proposal as dropped on the
+            framework timeline, as a Critic reject would.
+        session_dir: Where SharedState is saved after a terminal is set.
+        result_pending: Whether a terminal task's result is still to be
+            booked by the dispatcher; ``None`` treats every terminal row
+            as booked.
+    """
+
+    resources: Any = None
+    proposals: Callable[[], Mapping[str, Any]] | None = None
+    drop_proposal: Callable[[Any, str], None] | None = None
+    session_dir: Any = None
+    result_pending: Callable[[str], bool] | None = None
+
+
+@dataclass(frozen=True)
+class ReconcileLimits:
+    """How long the pass waits before it settles a round or denies a review.
+
+    Attributes:
+        terminal_holder_cap_sec: Cap for a round whose holder went terminal.
+        review_ttl_sec: TTL for an undecided review.
+    """
+
+    terminal_holder_cap_sec: float = TERMINAL_HOLDER_CAP_SEC
+    review_ttl_sec: float = REVIEW_TTL_SEC
 
 
 @dataclass
@@ -93,7 +148,6 @@ class ReconcileReport:
         settled: ``(round_id, outcome)`` for every round this pass ended.
         handed_off: Rounds moved onto the successor that owes their result.
         failed_tasks: Task ids marked failed on proof their process is gone.
-        denied_reviews: Proposal ids denied on the review TTL.
         closed_windows: Revalidation task ids whose window the pass closed.
         failures: Rules that raised, by name.
     """
@@ -103,14 +157,13 @@ class ReconcileReport:
     settled: list[tuple[str, str]] = field(default_factory=list)
     handed_off: list[str] = field(default_factory=list)
     failed_tasks: list[str] = field(default_factory=list)
-    denied_reviews: list[str] = field(default_factory=list)
     closed_windows: list[str] = field(default_factory=list)
     failures: list[str] = field(default_factory=list)
 
     @property
     def acted(self) -> bool:
-        """bool: Whether the pass changed anything worth logging."""
-        return bool(self.settled or self.handed_off or self.failed_tasks or self.denied_reviews or self.closed_windows)
+        """bool: Whether the pass changed a round, task or window; a review deny logs itself."""
+        return bool(self.settled or self.handed_off or self.failed_tasks or self.closed_windows)
 
 
 class Reconciler:
@@ -126,49 +179,35 @@ class Reconciler:
 
     def __init__(
         self,
-        *,
-        rounds: RoundStore,
-        tasks: TaskRegistry,
-        locks: ResourceLockManager,
+        stores: ReconcileStores,
         shared_state: Any,
-        resources: Any = None,
-        proposals: Callable[[], Mapping[str, Any]] | None = None,
-        session_dir: Any = None,
-        result_pending: Callable[[str], bool] | None = None,
-        terminal_holder_cap_sec: float = TERMINAL_HOLDER_CAP_SEC,
-        review_ttl_sec: float = REVIEW_TTL_SEC,
+        *,
+        links: ReconcileLinks = ReconcileLinks(),
+        limits: ReconcileLimits = ReconcileLimits(),
     ):
         """Initialise the reconciler.
 
         Args:
-            rounds: The durable round store.
-            tasks: The task registry.
-            locks: The lease manager; this pass is its only sweeper.
+            stores: The durable stores the pass repairs.
             shared_state: SharedState, read for the projection and written when
                 an unreaped round stops the session.
-            resources: The gate's resource facts; ``None`` skips the update.
-            proposals: Returns the in-memory pending proposals, so a durable
-                timeout deny also reaches the copy the loop consults.
-            session_dir: Where SharedState is saved after a terminal is set.
-            result_pending: Whether a terminal task's result is still to be
-                booked by the dispatcher; ``None`` treats every terminal row
-                as booked.
-            terminal_holder_cap_sec: Cap for a round whose holder went terminal.
-            review_ttl_sec: TTL for an undecided review.
+            links: The running loop's state the pass reads and writes.
+            limits: How long a round or a review may wait.
         """
-        self._rounds = rounds
+        self._rounds = stores.rounds
         # One connection serves the whole session; a second would have to be
         # arbitrated against this one by the database's busy timeout.
-        self._db = rounds.db
-        self._tasks = tasks
-        self._locks = locks
+        self._db = stores.rounds.db
+        self._tasks = stores.tasks
+        self._locks = stores.locks
         self._shared_state = shared_state
-        self._resources = resources
-        self._proposals = proposals
-        self._session_dir = session_dir
-        self._result_pending = result_pending
-        self.terminal_holder_cap_sec = max(0.0, float(terminal_holder_cap_sec))
-        self.review_ttl_sec = max(0.0, float(review_ttl_sec))
+        self._resources = links.resources
+        self._proposals = links.proposals
+        self._drop_proposal = links.drop_proposal
+        self._session_dir = links.session_dir
+        self._result_pending = links.result_pending
+        self.terminal_holder_cap_sec = max(0.0, float(limits.terminal_holder_cap_sec))
+        self.review_ttl_sec = max(0.0, float(limits.review_ttl_sec))
         self.last_report = ReconcileReport()
 
     async def run(self, now_unix: float) -> ReconcileReport:
@@ -197,11 +236,10 @@ class Reconciler:
         self.last_report = report
         if report.acted:
             log.info(
-                "RECONCILE: settled=%s handed_off=%s failed_tasks=%d denied_reviews=%d leases_reaped=%d",
+                "RECONCILE: settled=%s handed_off=%s failed_tasks=%d leases_reaped=%d",
                 report.settled,
                 report.handed_off,
                 len(report.failed_tasks),
-                len(report.denied_reviews),
                 report.leases_reaped,
             )
         return report
@@ -217,16 +255,10 @@ class Reconciler:
             age = float(now_unix) - _unix_of(row["ts"])
             if age < self.review_ttl_sec:
                 continue
-            msg_id = str(row["msg_id"])
-            if await self._author_timeout_deny(msg_id, str(row["from_agent"]), age=age, now_unix=now_unix):
-                report.denied_reviews.append(msg_id)
+            await self._author_timeout_deny(str(row["msg_id"]), str(row["from_agent"]), age=age, now_unix=now_unix)
 
-    async def _author_timeout_deny(self, msg_id: str, to_agent: str, *, age: float, now_unix: float) -> bool:
-        """Write the coordinator's timeout deny, unless a verdict beat it there.
-
-        Returns:
-            bool: Whether this call wrote the verdict.
-        """
+    async def _author_timeout_deny(self, msg_id: str, to_agent: str, *, age: float, now_unix: float) -> None:
+        """Write the coordinator's timeout deny, unless a verdict beat it there."""
         payload = json.dumps(
             {
                 "target_proposal_msg_id": msg_id,
@@ -246,16 +278,16 @@ class Reconciler:
                 (uuid.uuid4().hex, "coordinator", to_agent, payload, now_iso(), msg_id),
             )
             applied = cur.rowcount == 1
-        if applied:
-            log.warning("RECONCILE: review timeout denied proposal %s after %.0fs", msg_id, age)
-            self._record_timeout_terminal(msg_id, age=age)
-            if self._proposals is not None:
-                self._proposals().pop(msg_id, None)
-        return applied
+        if not applied:
+            return
+        log.warning("RECONCILE: review timeout denied proposal %s after %.0fs", msg_id, age)
+        pending = self._proposals().pop(msg_id, None) if self._proposals is not None else None
+        self._record_timeout_terminal(msg_id, pending, age=age)
+        if pending is not None and self._drop_proposal is not None:
+            self._drop_proposal(pending, "review_timeout")
 
-    def _record_timeout_terminal(self, msg_id: str, *, age: float) -> None:
+    def _record_timeout_terminal(self, msg_id: str, pending: Any, *, age: float) -> None:
         """Close the proposal's trajectory span: a timeout deny never passes through the verdict handler."""
-        pending = self._proposals().get(msg_id) if self._proposals is not None else None
         action_name = str(getattr(pending, "action_name", "") or "") or None
         record_event(
             EVENT_PROPOSAL,
@@ -360,12 +392,14 @@ class Reconciler:
         if successor is not None:
             moved = await self._rounds.handoff(
                 round_row,
+                RoundRequest(
+                    now_unix=now_unix,
+                    request_id=f"reconcile:handoff:{successor.task_id}",
+                    evidence={"reason": "holder_terminal_with_successor"},
+                ),
                 new_holder_task_id=successor.task_id,
                 # A successor that declares no TTL inherits what the round has left.
                 lease_sec=float(successor.lease_ttl_sec) or (round_row.expires_unix - round_row.renewed_unix),
-                now_unix=now_unix,
-                request_id=f"reconcile:handoff:{successor.task_id}",
-                evidence={"reason": "holder_terminal_with_successor"},
             )
             if moved.ok:
                 report.handed_off.append(round_row.round_id)
@@ -381,10 +415,12 @@ class Reconciler:
         outcome = EXPIRED_REAPED
         result = await self._rounds.settle(
             round_row,
+            RoundRequest(
+                now_unix=now_unix,
+                request_id=f"reconcile:{why}:{round_row.round_id}:{round_row.fence}",
+                evidence={"reason": why, "cleanup": "holder_terminal_without_resources"},
+            ),
             outcome=outcome,
-            now_unix=now_unix,
-            request_id=f"reconcile:{why}:{round_row.round_id}:{round_row.fence}",
-            evidence={"reason": why, "cleanup": "holder_terminal_without_resources"},
         )
         if not result.ok:
             return

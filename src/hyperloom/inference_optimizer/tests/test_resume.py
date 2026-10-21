@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import time
+
 import pytest
 
 from hyperloom.orchestrator.roles import (
@@ -287,7 +289,10 @@ async def test_replay_mixed_pending_and_decided(session_dir):
         }
         c1.shared_state.save(session_dir)
         proposal_ids = []
-        for action in ("baseline", "profile", "explore"):
+        for action in ("baseline", "target_analysis", "explore"):
+            if action == "explore":
+                # Admission holds each proposal to its phase's actions; explore is FRAMEWORK_AGENT's.
+                c1.shared_state.phase = "FRAMEWORK_AGENT"
             await c1.router.handle_intent(
                 "orchestration",
                 Intent(
@@ -756,3 +761,133 @@ async def test_resume_preserves_custom_workload_paths(session_dir):
         assert state.benchmark_backend == "bypass"
     finally:
         await coordinator.stop()
+
+
+class TestASweepCancelledByRecoverIsRedispatchedOnResume:
+    """``recover`` cancels the in-flight conc_sweep out of band, so nothing ever records its outcome.
+
+    SWEEP's only work is that sweep, and its entry hook fires on a transition, not on a resume; without a fresh
+    dispatch the resumed leg waits in SWEEP for a result no task will ever write.
+    """
+
+    #: The execution environment the resumed leg runs in, as ``recover`` is told it.
+    _NEW_SCOPE = "0b0b0b0b-2222-4222-8222-000000000002:4026531002"
+
+    @staticmethod
+    async def _enter_sweep(session_dir, *, start: bool):
+        from hyperloom.orchestrator.phases.machine import Transition
+
+        first = Coordinator(session_dir, backends=_backends_full())
+        try:
+            first.shared_state.phase = "SWEEP"
+            first.shared_state.baseline_tput = 800.0
+            await first.phase_sweep.on_enter_sweep(
+                Transition(from_phase="KERNEL_AGENT", to_phase="SWEEP", reason="test", evidence={})
+            )
+            [sweep] = await first.tasks.queued()
+            assert sweep.kind == "conc_sweep"
+            if start:
+                # Running, holding its lanes under this environment, as the dispatcher leaves it.
+                await first.locks.acquire_many(
+                    list(sweep.requires_lanes),
+                    holder_id=sweep.task_id,
+                    task_id=sweep.task_id,
+                    action="conc_sweep",
+                    ttl_sec=600,
+                )
+                await first.tasks.transition(sweep.task_id, "running")
+            first.shared_state.save(session_dir)
+        finally:
+            await first.stop()
+        return sweep
+
+    @staticmethod
+    async def _resume(coordinator) -> None:
+        """What a resumed leg does before its first tick admits anything: replay, then the first phase decision."""
+        await coordinator.writeback.replay_resume_if_needed()
+        await coordinator.phase_machine.advance_phase_if_needed()
+
+    @staticmethod
+    async def _live_sweeps(coordinator) -> list:
+        live = (*await coordinator.tasks.queued(), *await coordinator.tasks.running())
+        return [task for task in live if task.kind == "conc_sweep"]
+
+    @pytest.mark.asyncio
+    async def test_a_resume_after_recover_starts_the_sweep_again(self, session_dir):
+        from hyperloom.common.owner_scope import local_owner_scope
+        from hyperloom.inference_optimizer.session.resume_guard import confirm_scope_gone
+
+        lost = await self._enter_sweep(session_dir, start=True)
+        assert lost.requires_lanes, "the sweep must hold lanes for recover to find it"
+        confirmed = confirm_scope_gone(
+            session_dir,
+            owner_scope=local_owner_scope(),
+            reason="the machine is gone",
+            current_scope=self._NEW_SCOPE,
+        )
+        assert confirmed["cancelled_tasks"] == [lost.task_id]
+
+        resumed = Coordinator(session_dir, backends=_backends_full())
+        try:
+            assert (await resumed.tasks.get(lost.task_id)).state == "cancelled"
+            assert resumed.shared_state.last_conc_sweep == {}
+            await self._resume(resumed)
+
+            live = await self._live_sweeps(resumed)
+            assert [t.task_id for t in live] != [], "no conc_sweep was dispatched; SWEEP would wait out its grant"
+            assert lost.task_id not in {t.task_id for t in live}
+            assert resumed.shared_state.conc_sweep_granted_until_unix > time.time()
+        finally:
+            await resumed.stop()
+
+    @pytest.mark.asyncio
+    async def test_a_resume_with_the_sweep_still_queued_does_not_start_a_second_one(self, session_dir):
+        queued = await self._enter_sweep(session_dir, start=False)
+
+        resumed = Coordinator(session_dir, backends=_backends_full())
+        try:
+            await self._resume(resumed)
+            assert [t.task_id for t in await self._live_sweeps(resumed)] == [queued.task_id]
+        finally:
+            await resumed.stop()
+
+    @pytest.mark.asyncio
+    async def test_a_queued_sweep_whose_grant_ran_out_while_the_session_was_down_is_owed_it_again(
+        self,
+        session_dir,
+    ):
+        """Otherwise the resumed leg's first decision leaves SWEEP on its spent budget and cancels the sweep unrun."""
+        queued = await self._enter_sweep(session_dir, start=False)
+        state = SharedState.load_or_init(session_dir)
+        now = time.time()
+        # A three-hour session whose SWEEP share is long spent, resumed after the grant ran out.
+        state.max_minutes = 180
+        state.start_ts = "2026-06-02T10:00:00+00:00"
+        state.phase_budget_pct = {"SWEEP": 0.05, "CLOSE": 0.02}
+        state.phase_started_unix = now - 600.0
+        state.elapsed_charged_sec = 7000.0
+        state.conc_sweep_granted_until_unix = now - 60.0
+        state.save(session_dir)
+
+        resumed = Coordinator(session_dir, backends=_backends_full())
+        try:
+            await self._resume(resumed)
+            assert resumed.shared_state.phase == "SWEEP"
+            assert [t.task_id for t in await self._live_sweeps(resumed)] == [queued.task_id]
+            assert resumed.shared_state.conc_sweep_granted_until_unix >= now + queued.lease_ttl_sec - 60.0
+        finally:
+            await resumed.stop()
+
+    @pytest.mark.asyncio
+    async def test_a_resumed_leg_that_reaches_sweep_later_enters_it_only_through_the_transition(self, session_dir):
+        """The resume check belongs to the process's first decision; a later SWEEP has its own entry hook."""
+        SharedState(session_id="mid", phase="KERNEL_AGENT").save(session_dir)
+
+        resumed = Coordinator(session_dir, backends=_backends_full())
+        try:
+            await resumed.phase_sweep.resume_unsettled_sweep()
+            resumed.shared_state.phase = "SWEEP"
+            await resumed.phase_sweep.resume_unsettled_sweep()
+            assert await self._live_sweeps(resumed) == []
+        finally:
+            await resumed.stop()

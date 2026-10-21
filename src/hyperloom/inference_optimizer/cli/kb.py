@@ -6,19 +6,14 @@
 from __future__ import annotations
 
 import argparse
-import fcntl
 import json
 import logging
 import os
-import shutil
 import sys
-import warnings
-from contextlib import contextmanager, suppress
-from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Iterator, Mapping
+from typing import TYPE_CHECKING, Any
 
-from hyperloom.common.io import append_jsonl, atomic_write_json
+from hyperloom.common.io import JsonLineFormat, append_jsonl
 from hyperloom.orchestrator.knowledge.recipe_kb_t0 import run_t0_anchor
 from hyperloom.orchestrator.state.shared_state import SharedState
 
@@ -27,184 +22,6 @@ if TYPE_CHECKING:  # pragma: no cover - type-only import
 
 
 log = logging.getLogger(__name__)
-
-_LEGACY_WORKSPACE_KB_ROOT = Path("/workspace/hyperloom/kb")
-_RECIPE_MIGRATION_MARKER = ".recipe-kb-migration-v1.json"
-_RECIPE_MIGRATION_LOCK = ".recipe-kb-migration.lock"
-_RECIPE_DATA_FILES = frozenset({"recipe.json", "attempts.ndjson"})
-
-
-def _recipe_live_paths(root: Path) -> list[Path]:
-    """Return valid seven-component Recipe live rows below *root*."""
-
-    if not root.exists():
-        return []
-    if not root.is_dir():
-        raise RuntimeError(f"legacy Recipe KB source is not a directory: {root}")
-    rows: list[Path] = []
-    try:
-        for path in root.rglob("recipe.json"):
-            if path.is_symlink() or not path.is_file():
-                continue
-            if len(path.parent.relative_to(root).parts) == 7:
-                rows.append(path)
-    except OSError as exc:
-        raise RuntimeError(f"could not inspect legacy Recipe KB source {root}: {exc}") from exc
-    return sorted(rows)
-
-
-def _is_migratable_recipe_file(path: Path, recipe_dir: Path) -> bool:
-    """Select durable Recipe data while excluding live lock/temporary files."""
-
-    if path.is_symlink() or not path.is_file():
-        return False
-    relative = path.relative_to(recipe_dir)
-    if any(part == ".lock" or part.endswith(".tmp") or part.startswith(".tmp") for part in relative.parts):
-        return False
-    return relative.name in _RECIPE_DATA_FILES or relative.parts[0] == "history" or not relative.name.startswith(".")
-
-
-@contextmanager
-def _recipe_migration_lock(destination: Path) -> Iterator[None]:
-    """Serialize one-time migration among concurrent local-mode startups."""
-
-    destination.mkdir(parents=True, exist_ok=True)
-    lock_path = destination / _RECIPE_MIGRATION_LOCK
-    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0), 0o600)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        yield
-    finally:
-        with suppress(OSError):
-            fcntl.flock(fd, fcntl.LOCK_UN)
-        os.close(fd)
-
-
-def _copy_recipe_corpus(
-    source: Path,
-    destination: Path,
-    live_paths: list[Path],
-) -> tuple[int, list[Path], list[Path]]:
-    """Copy complete Recipe directories without clobbering destination files."""
-
-    files: list[tuple[Path, Path]] = []
-    seen: set[Path] = set()
-    for live_path in live_paths:
-        recipe_dir = live_path.parent
-        for source_path in recipe_dir.rglob("*"):
-            if not _is_migratable_recipe_file(source_path, recipe_dir):
-                continue
-            target = destination / source_path.relative_to(source)
-            if target in seen:
-                continue
-            seen.add(target)
-            if target.exists():
-                raise RuntimeError(f"legacy Recipe migration would clobber existing file: {target}")
-            files.append((source_path, target))
-
-    created_files: list[Path] = []
-    created_dirs: list[Path] = []
-    completed = False
-    try:
-        for source_path, target in sorted(files, key=lambda pair: pair[1].as_posix()):
-            missing_parents: list[Path] = []
-            parent = target.parent
-            while parent != destination and not parent.exists():
-                missing_parents.append(parent)
-                parent = parent.parent
-            for directory in reversed(missing_parents):
-                directory.mkdir()
-                created_dirs.append(directory)
-            with source_path.open("rb") as source_stream, target.open("xb") as target_stream:
-                created_files.append(target)
-                shutil.copyfileobj(source_stream, target_stream)
-                target_stream.flush()
-                os.fsync(target_stream.fileno())
-            shutil.copystat(source_path, target, follow_symlinks=False)
-        completed = True
-    finally:
-        if not completed:
-            for path in reversed(created_files):
-                with suppress(OSError):
-                    path.unlink()
-            for path in reversed(created_dirs):
-                with suppress(OSError):
-                    path.rmdir()
-    return len(live_paths), created_files, created_dirs
-
-
-def _legacy_recipe_root(env: Mapping[str, str]) -> Path:
-    """Resolve the legacy implicit source without changing the new default."""
-
-    user_data_path = str(env.get("USER_DATA_PATH") or "").strip()
-    return Path(user_data_path).expanduser() / "kb" if user_data_path else _LEGACY_WORKSPACE_KB_ROOT
-
-
-def _migrate_legacy_recipe_kb_once(*, destination: Path, source: Path) -> bool:
-    """Migrate legacy Recipe data once, failing startup on a real copy error."""
-
-    destination = destination.expanduser()
-    source = source.expanduser()
-    marker = destination / _RECIPE_MIGRATION_MARKER
-    if marker.exists() or _recipe_live_paths(destination):
-        return False
-    live_paths = _recipe_live_paths(source)
-    if not live_paths:
-        return False
-    with _recipe_migration_lock(destination):
-        if marker.exists() or _recipe_live_paths(destination):
-            return False
-        live_paths = _recipe_live_paths(source)
-        if not live_paths:
-            return False
-        created_files: list[Path] = []
-        created_dirs: list[Path] = []
-        completed = False
-        try:
-            recipe_count, created_files, created_dirs = _copy_recipe_corpus(source, destination, live_paths)
-            atomic_write_json(
-                marker,
-                {"version": 1, "source": str(source), "recipes": recipe_count},
-                fsync=True,
-                mode=0o600,
-            )
-            directory_fd = os.open(destination, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-            try:
-                os.fsync(directory_fd)
-            finally:
-                os.close(directory_fd)
-            completed = True
-        except Exception as exc:
-            raise RuntimeError(
-                f"legacy Recipe KB data exists at {source}, but migration into {destination} failed: {exc}"
-            ) from exc
-        finally:
-            if not completed:
-                with suppress(OSError):
-                    marker.unlink()
-                for path in reversed(created_files):
-                    with suppress(OSError):
-                        path.unlink()
-                for path in reversed(created_dirs):
-                    with suppress(OSError):
-                        path.rmdir()
-    log.info("migrated %d legacy Recipe row(s) from %s into %s", recipe_count, source, destination)
-    return True
-
-
-def _resolve_local_kb_root(args: argparse.Namespace) -> Path:
-    """Resolve the shared local knowledge root without creating it."""
-    from hyperloom.orchestrator.knowledge.config import KnowledgeConfig
-
-    explicit = getattr(args, "local_kb_root", None) or os.environ.get("HYPERLOOM_LOCAL_KB_ROOT", "")
-    if explicit and "KNOWLEDGE_LOCAL_ROOT" not in os.environ:
-        warnings.warn(
-            "--local-kb-root/HYPERLOOM_LOCAL_KB_ROOT is deprecated; use KNOWLEDGE_LOCAL_ROOT",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return Path(str(explicit).strip())
-    return Path(KnowledgeConfig.from_env().local_root)
 
 
 def _publish_section_dirs(session_dir: Path, warm_start_dir: Path) -> None:
@@ -237,8 +54,8 @@ def _attach_recipe_audit_hook(kb: Any, session_dir: Path | None) -> None:
                 "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                 **event,
             }
-            append_jsonl(audit_path, row, make_parents=True, sort_keys=True)
-        except Exception:
+            append_jsonl(audit_path, row, make_parents=True, fmt=JsonLineFormat(sort_keys=True))
+        except (OSError, TypeError, ValueError):
             log.debug("recipe_snapshot audit append failed", exc_info=True)
         # The same hook feeds the warm_start event, which claims only the reads
         # served while T0's own lookup is open. Kept separate from the append
@@ -263,15 +80,6 @@ def _build_recipe_kb_dispatcher(
         return None
 
     # No remote client is constructed in local mode, even when ambient KB Store or GBrain credentials are present.
-    explicit_compatibility_root = getattr(args, "local_kb_root", None) or os.environ.get("HYPERLOOM_LOCAL_KB_ROOT")
-    explicit_knowledge_root = str(os.environ.get("KNOWLEDGE_LOCAL_ROOT") or "").strip()
-    if not explicit_knowledge_root and explicit_compatibility_root:
-        config = replace(config, local_root=str(_resolve_local_kb_root(args)))
-    if not explicit_knowledge_root and not explicit_compatibility_root:
-        _migrate_legacy_recipe_kb_once(
-            destination=Path(config.local_root),
-            source=_legacy_recipe_root(os.environ),
-        )
     store: Any = LocalRecipeStore(root=Path(config.local_root))
     kb = RecipeKB(
         local=store,
@@ -366,7 +174,8 @@ def _bootstrap_recipe_kb(
         )
         if kb is None:
             print("Recipe KB       : REMOTE (KB Store current Recipe warm replay)")
-    except Exception as exc:  # noqa: BLE001 — defensive
+    except Exception as exc:
+        log.warning("T0 recipe-snapshot anchor failed mid-flight: %s", exc, exc_info=True)
         print(
             f"WARNING: T0 recipe-snapshot anchor failed mid-flight: {exc}\nContinuing without warm-start.",
             file=sys.stderr,

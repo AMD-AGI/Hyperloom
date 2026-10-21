@@ -6,6 +6,8 @@ import subprocess
 from pathlib import Path
 
 from kernelforge.loop import knowledge_integration as integ
+from kernelforge.knowledge.kb_store.identity.run import LoopKernel
+from kernelforge.loop.knowledge_integration import ExperiencePublication, WarmStartHarness
 import pytest
 
 
@@ -78,7 +80,7 @@ def test_git_cumulative_diff_empty_on_exception(monkeypatch, tmp_path):
     def boom(*_a, **_k):
         raise OSError("git missing")
 
-    monkeypatch.setattr(integ, "git", boom)
+    monkeypatch.setattr(integ, "git_bytes", boom)
     assert integ._git_cumulative_diff(str(tmp_path), "base") == ""
 
 
@@ -100,6 +102,42 @@ def test_git_commit_all_and_discard(tmp_path):
     (repo / "kernel.py").write_text("dirty\n")
     assert integ._git_discard_worktree(str(repo)) is True
     assert (repo / "kernel.py").read_text() == "changed\n"
+
+
+def _adopt_with_failing_commit(monkeypatch, tmp_path, failure):
+    repo = _init_repo(tmp_path)
+    monkeypatch.setattr(integ, "_apply_candidate_patch", lambda *_a, **_k: "")
+    monkeypatch.setattr(integ, "_force_jit_rebuild", lambda *_a, **_k: None)
+
+    def fail(*_args, **_kwargs):
+        raise failure
+
+    monkeypatch.setattr(integ, "_git_commit_all", fail)
+    return integ._adopt_measured_candidate(
+        {"solution_slug": "s"},
+        kernel="kernel.py",
+        workspace_dir=str(repo),
+        source_files=[],
+        allowed_paths={"kernel.py"},
+    )
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        RuntimeError("git commit failed: hook rejected"),
+        subprocess.CalledProcessError(1, ["git", "commit"]),
+        OSError("git is not installed"),
+    ],
+    ids=lambda failure: type(failure).__name__,
+)
+def test_a_candidate_whose_commit_fails_is_rejected(monkeypatch, tmp_path, failure):
+    assert _adopt_with_failing_commit(monkeypatch, tmp_path, failure) == ("", "commit_failed")
+
+
+def test_an_unexpected_commit_error_propagates(monkeypatch, tmp_path):
+    with pytest.raises(TypeError, match="^commit signature drifted$"):
+        _adopt_with_failing_commit(monkeypatch, tmp_path, TypeError("commit signature drifted"))
 
 
 def test_git_commit_all_forces_the_approved_pathspec(monkeypatch):
@@ -141,10 +179,10 @@ def test_git_discard_removes_symlink_without_touching_target(tmp_path):
 # --------------------------------------------------------------------------- # _bench_once / _correctness_once
 # --------------------------------------------------------------------------- #
 def test_bench_once_returns_complete_suite(monkeypatch):
-    import kernelforge.mcp_server.tools.bench as bench
+    import kernelforge.evaluation.benchmark.runner as bench
 
-    async def fake(driver_script, driver_args):
-        assert driver_args == []
+    async def fake(run):
+        assert run.driver_args == []
         return {
             "success": True,
             "median_ms": 7.5,
@@ -160,9 +198,9 @@ def test_bench_once_returns_complete_suite(monkeypatch):
 
 
 def test_bench_once_rejects_scalar_only_result(monkeypatch):
-    import kernelforge.mcp_server.tools.bench as bench
+    import kernelforge.evaluation.benchmark.runner as bench
 
-    async def fake(driver_script, driver_args):
+    async def fake(run):
         return {"success": True, "median_ms": 7.5}
 
     monkeypatch.setattr(bench, "bench_wallclock", fake)
@@ -170,17 +208,17 @@ def test_bench_once_rejects_scalar_only_result(monkeypatch):
 
 
 def test_bench_once_none_on_exception(monkeypatch):
-    import kernelforge.mcp_server.tools.bench as bench
+    import kernelforge.evaluation.benchmark.runner as bench
 
-    async def boom(**_k):
-        raise RuntimeError("bench failed")
+    async def boom(*_a, **_k):
+        raise ValueError("bench failed")
 
     monkeypatch.setattr(bench, "bench_wallclock", boom)
     assert integ._bench_once("drv.py") is None
 
 
 def test_correctness_once_true(monkeypatch):
-    import kernelforge.mcp_server.tools.test as test_mod
+    import kernelforge.evaluation.correctness.driver as test_mod
 
     async def fake(driver_script, driver_args, snr_threshold):
         assert driver_args == []
@@ -191,10 +229,10 @@ def test_correctness_once_true(monkeypatch):
 
 
 def test_correctness_once_false_on_exception(monkeypatch):
-    import kernelforge.mcp_server.tools.test as test_mod
+    import kernelforge.evaluation.correctness.driver as test_mod
 
     async def boom(**_k):
-        raise RuntimeError("correctness failed")
+        raise ValueError("correctness failed")
 
     monkeypatch.setattr(test_mod, "test_correctness", boom)
     assert integ._correctness_once("drv.py", 30.0) is False
@@ -270,7 +308,9 @@ def test_kb_warmstart_reference_only_when_patch_empty(monkeypatch, tmp_path):
     )
 
     warm = integ.kb_warmstart(
-        config=object(), kernel=str(repo / "kernel.py"), driver="d.py", workspace_dir=str(repo), kernel_backend="triton"
+        config=object(),
+        kernel=LoopKernel(kernel_path=str(repo / "kernel.py"), kernel_backend="triton", workspace=str(repo)),
+        harness=WarmStartHarness(driver="d.py"),
     )
     assert warm["candidate"] is True
     assert warm["applied"] is False
@@ -301,17 +341,14 @@ def test_write_experience_to_kb_does_not_synthesize_speedup(monkeypatch, tmp_pat
     status = integ.write_experience_to_kb(
         config=object(),
         loop_runner=_LR(),
-        workspace_dir=str(tmp_path),
-        kernel=str(kernel),
-        kernel_backend="triton",
-        gpu_target="gfx942",
-        base_sha="base",
+        kernel=LoopKernel(kernel_path=str(kernel), kernel_backend="triton", workspace=str(tmp_path)),
+        publication=ExperiencePublication(base_sha="base", gpu_target="gfx942"),
     )
     assert status == {
         "written": False,
         "reason": "missing_mean_case_speedup",
     }
-    assert captured["mean_case_speedup"] is None
+    assert captured["outcome"].mean_case_speedup is None
 
 
 def test_kb_warmstart_swallows_reader_error(monkeypatch, tmp_path):
@@ -322,7 +359,9 @@ def test_kb_warmstart_swallows_reader_error(monkeypatch, tmp_path):
 
     monkeypatch.setattr("kernelforge.knowledge.kb_store.reader.read_top_solutions", boom)
     warm = integ.kb_warmstart(
-        config=object(), kernel=str(repo / "kernel.py"), driver="d.py", workspace_dir=str(repo), kernel_backend="triton"
+        config=object(),
+        kernel=LoopKernel(kernel_path=str(repo / "kernel.py"), kernel_backend="triton", workspace=str(repo)),
+        harness=WarmStartHarness(driver="d.py"),
     )
     assert warm == {
         "candidate": False,

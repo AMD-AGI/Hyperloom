@@ -53,20 +53,19 @@ def observe_bringup(
         selected.
     """
     from hyperloom.common.failure_signature import classify_failure
-
     from hyperloom.orchestrator.bringup.ladder import (
         SERVER_LOG,
         WRAPPER_STDERR,
         WRAPPER_STDOUT,
+        BootStreams,
         classify,
+        failure_region,
     )
     from hyperloom.orchestrator.bringup.trees import read_trees
 
     observation = classify(
-        server_log=server_log,
+        BootStreams(server_log, wrapper_stderr, wrapper_stdout),
         server_elapsed_sec=server_elapsed_sec,
-        wrapper_stderr=wrapper_stderr,
-        wrapper_stdout=wrapper_stdout,
         trees=read_trees(session_dir) if session_dir is not None else (),
         session_root=str(session_dir) if session_dir is not None else "",
     )
@@ -78,7 +77,7 @@ def observe_bringup(
     # An unset ``evidence_ref`` means no stream carried anything; any other
     # value names one of the slots above.
     evidence = streams[observation.evidence_ref] if observation.evidence_ref else ""
-    return BringupVerdict(observation=observation, signature=classify_failure(evidence))
+    return BringupVerdict(observation=observation, signature=classify_failure(failure_region(evidence)))
 
 
 def verdict_of(observation: "BootObservation") -> BringupVerdict:

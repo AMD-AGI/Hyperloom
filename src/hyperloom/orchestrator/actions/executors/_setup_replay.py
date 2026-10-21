@@ -5,17 +5,24 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import subprocess
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+from hyperloom.inference_optimizer.session.session_paths import runs_dir
 
 from ...enablement.recipe.credentials import sanitize_command_text
 from ...enablement.recipe.setup_allowlist import is_allowlisted_setup_command
-from ...enablement.recipe.setup_ledger import CMD_SANITIZED_CHARS, build_execution_row
+from ...enablement.recipe.setup_ledger import CMD_SANITIZED_CHARS, SetupExecution, build_execution_row
 from ..cancel_channel import cancel_scope_listener, stop_was_asked_for
+
+if TYPE_CHECKING:
+    from ._integrate_attempt import IntegrateAttempt
 
 log = logging.getLogger(__name__)
 
@@ -23,27 +30,18 @@ SETUP_CMD_MAX = 12  # cap on distinct setup commands per integrate
 SETUP_CMD_TIMEOUT_SEC = 1800  # 30 min per install command
 
 
-def setup_report_fields(reason: str, setup_result: dict[str, Any]) -> dict[str, Any]:
-    """The ``reason`` and ``setup_commands_*`` fields of a round's result.
+def refused_setup_commands(commands: list[tuple[str, str]]) -> list[str]:
+    """The commands the install-only allowlist refuses, in replay order.
 
-    Allowlist rejections are named in the reason, not only logged. A rejection
-    that was only a ``log.warning`` left downstream with the round's outcome and
-    no link to the cause, so the same proposal was re-authored and re-dropped
-    until the budget ran out.
-
-    Args:
-        reason: The round's own reason text.
-        setup_result: The :func:`run_setup_commands` result.
+    Sanitized because a refused command is LLM-written text that can hold a
+    bearer token, and this list reaches the result payload, the journal and the
+    next round's mandate.
     """
-    applied = list(setup_result.get("applied") or [])
-    skipped = list(setup_result.get("skipped") or [])
-    if skipped:
-        note = (
-            f"{len(skipped)} setup command(s) were REJECTED by the install-only allowlist "
-            f"and never ran: {'; '.join(skipped)}"
-        )
-        reason = f"{reason} ({note})" if reason else note
-    return {"reason": reason, "setup_commands_applied": applied, "setup_commands_skipped": skipped}
+    return [
+        sanitize_command_text(cmd, clip=CMD_SANITIZED_CHARS)
+        for cmd, _ in commands
+        if not is_allowlisted_setup_command(cmd)
+    ]
 
 
 def resolve_setup_commands(*, params: dict[str, Any], done_payload: dict[str, Any] | None) -> list[tuple[str, str]]:
@@ -103,69 +101,79 @@ def execute_setup_command(cmd: str, *, cwd: Path, env: dict[str, str], log_path:
     return proc.returncode == 0
 
 
+@dataclass(frozen=True)
+class SetupLedger:
+    """The durable ledger a replay records its executions in."""
+
+    round_task_id: str
+    seq_start: int
+    on_execution: Callable[[dict[str, Any]], None]
+
+
 def run_setup_commands(
     commands: list[tuple[str, str]],
     *,
     cwd: Path,
     log_dir: Path,
-    round_task_id: str,
-    seq_start: int,
-    on_execution: Callable[[dict[str, Any]], None],
-) -> dict[str, Any]:
-    """Replay allowlisted enablement setup commands (installs) before boot.
+    ledger: SetupLedger,
+) -> list[str]:
+    """Replay enablement setup commands (installs) before boot.
 
     Blocking (serial ``subprocess.run``, 1800s cap); call via ``asyncio.to_thread``.
     Cancel is checked between commands; a command already in ``subprocess.run``
     is not killed. Cancelling the await unwinds integrate and does not continue
     to apply patches.
 
-    Runs each allowlisted command non-interactively with a per-command timeout,
-    appending combined output to ``<log_dir>/enablement_setup.log``. Commands
-    that fail the allowlist are skipped (never executed). A non-zero install is
+    Runs each command non-interactively with a per-command timeout, appending
+    combined output to ``<log_dir>/enablement_setup.log``. A non-zero install is
     recorded but does NOT hard-fail the integration — the subsequent boot/gate
     is the source of truth for runnability.
 
     Args:
-        commands: :func:`resolve_setup_commands` output.
+        commands: :func:`resolve_setup_commands` output, already cleared by
+            :func:`refused_setup_commands`.
         cwd: Working directory for the commands.
         log_dir: Directory to write ``enablement_setup.log`` into.
-        round_task_id: The round the executions belong to.
-        seq_start: Highest ledger ``seq`` already durable, so occurrence
-            identity stays monotonic across rounds.
-        on_execution: Persists one ledger row as its command finishes.
+        ledger: The round the executions belong to, the highest ledger
+            ``seq`` already durable (so occurrence identity stays monotonic
+            across rounds), and the callback persisting one ledger row as its
+            command finishes.
 
     Returns:
-        dict[str, Any]: ``{"applied", "skipped", "failed", "executions"}`` where
-        ``applied`` are the allowlisted commands that ran (rc==0), ``skipped``
-        the rejected ones in sanitized form, and ``executions`` one ledger row
-        per ATTEMPTED command.
+        list[str]: The commands that ran with rc==0, in replay order. Every
+        ATTEMPTED command reaches ``on_execution`` as a ledger row, which is
+        where a failed one is recorded.
     """
+    round_task_id = ledger.round_task_id
+    seq_start = ledger.seq_start
+    on_execution = ledger.on_execution
     applied: list[str] = []
-    skipped: list[str] = []
-    failed: list[str] = []
-    executions: list[dict[str, Any]] = []
+    recorded = 0
     log_path = log_dir / "enablement_setup.log"
     env = dict(os.environ)
     env.setdefault("DEBIAN_FRONTEND", "noninteractive")
     env.setdefault("PIP_DISABLE_PIP_VERSION_CHECK", "1")
 
     def _record(cmd: str, index: int, source: str, outcome: str) -> None:
-        row = build_execution_row(
-            seq=seq_start + len(executions) + 1,
-            round_task_id=round_task_id,
-            cmd_index=index,
-            cmd=cmd,
-            source=source,
-            outcome=outcome,
-            env=env,
-        )
-        executions.append(row)
-        # Persisted HERE, not after the await returns. Cancelling the await
+        nonlocal recorded
+        recorded += 1
+        # Persisted HERE, not after the await returns: cancelling the await
         # unwinds the caller while this thread and its in-flight subprocess
-        # carry on, so a row handed back through the return value is lost
-        # for a command that actually ran -- and the ledger is what says a
-        # round installed into the shared venv at all.
-        on_execution(row)
+        # carry on, and the ledger is what says a round installed into the
+        # shared venv at all.
+        on_execution(
+            build_execution_row(
+                SetupExecution(
+                    seq=seq_start + recorded,
+                    round_task_id=round_task_id,
+                    cmd_index=index,
+                    cmd=cmd,
+                    source=source,
+                    outcome=outcome,
+                ),
+                env=env,
+            )
+        )
 
     with cancel_scope_listener():
         for cmd_index, (cmd, source) in enumerate(commands):
@@ -175,20 +183,66 @@ def run_setup_commands(
             if stop_was_asked_for():
                 log.info("integrate_patch: enablement setup replay stopped after cancel")
                 break
-            if not is_allowlisted_setup_command(cmd):
-                # A rejected command is LLM-written text that can hold a bearer
-                # token or a credentialed URL, and this list is copied into every
-                # result payload and from there into the journal, the report and
-                # the KB, so it is only ever stored sanitized.
-                safe_cmd = sanitize_command_text(cmd, clip=CMD_SANITIZED_CHARS)
-                skipped.append(safe_cmd)
-                log.warning("integrate_patch: skipping non-allowlisted enablement setup command: %s", safe_cmd)
-                _record(cmd, cmd_index, source, "skipped")
-                continue
             if execute_setup_command(cmd, cwd=cwd, env=env, log_path=log_path):
                 applied.append(cmd)
                 _record(cmd, cmd_index, source, "applied")
             else:
-                failed.append(cmd)
                 _record(cmd, cmd_index, source, "failed")
-    return {"applied": applied, "skipped": skipped, "failed": failed, "executions": executions}
+    return applied
+
+
+def _append_setup_execution(shared_state: Any, row: dict[str, Any], *, session_dir: Path) -> None:
+    """Append one execution row to the durable, append-only ledger."""
+    shared_state.enablement.append_setup_execution(row)
+    try:
+        shared_state.save(session_dir)
+    except OSError:
+        # The rows are on the in-memory state either way, and the rearm saves again.
+        log.debug("integrate_patch: save after setup ledger append failed", exc_info=True)
+
+
+async def replay_setup_commands(
+    attempt: IntegrateAttempt,
+    *,
+    params: dict[str, Any],
+    session_dir: Path,
+) -> dict[str, Any] | None:
+    """Replay this round's setup commands, recording on ``attempt`` the ones that ran.
+
+    Returns an ``apply_failed`` result when any command is not package/tool
+    installation, in which case none of them ran: a partial replay would boot an
+    environment the round never proposed and grade its patches against it.
+    ``None`` means the round is clear to apply its patches.
+    """
+    commands = resolve_setup_commands(params=params, done_payload=attempt.done_payload)
+    refused = refused_setup_commands(commands)
+    if refused:
+        return {
+            "status": "apply_failed",
+            "enablement": True,
+            "error_class": "setup_commands_refused",
+            "error": (
+                f"{len(refused)} setup command(s) are not package/tool installation and were "
+                f"refused by the install-only allowlist; none of this round's setup commands "
+                f"ran: {'; '.join(refused)}"
+            ),
+            "reason": "setup commands refused by the install-only allowlist",
+            "setup_commands_refused": refused,
+            "specialist_task_id": attempt.specialist_task_id,
+            "patches_applied": [],
+            "patches_reverted": [],
+        }
+    if commands:
+        shared_state = attempt.shared_state
+        attempt.setup_commands_applied = await asyncio.to_thread(
+            run_setup_commands,
+            commands,
+            cwd=session_dir,
+            log_dir=runs_dir(session_dir, "integrate_patch", attempt.task_id),
+            ledger=SetupLedger(
+                round_task_id=attempt.specialist_task_id,
+                seq_start=shared_state.enablement.last_execution_seq(),
+                on_execution=lambda row: _append_setup_execution(shared_state, row, session_dir=session_dir),
+            ),
+        )
+    return None

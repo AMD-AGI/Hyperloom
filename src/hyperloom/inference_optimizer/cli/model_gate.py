@@ -26,7 +26,6 @@ from ..model_config_utils import (
     _MAXPOS_CONFIG_KEYS,
     _MX_FP4_GROUP_SIZE,
     _NATIVE_MOE_RUNNER_QUANT_METHODS,
-    _QUARK_LAYER_CONFIG_KEYS,
     _config_architectures,
     _is_quark_mx_fp4_entry,
     _load_model_config_dict,
@@ -43,7 +42,6 @@ __all__ = [
     "_MAXPOS_CONFIG_KEYS",
     "_MX_FP4_GROUP_SIZE",
     "_NATIVE_MOE_RUNNER_QUANT_METHODS",
-    "_QUARK_LAYER_CONFIG_KEYS",
     "_config_architectures",
     "_is_quark_mx_fp4_entry",
     "_load_model_config_dict",
@@ -1218,15 +1216,9 @@ def _load_model_gate_event(args: argparse.Namespace, session_dir: Path) -> dict[
 
 
 def _write_model_gate_event(session_dir: Path, event: dict[str, Any]) -> bool:
-    from ..session.sbd_v6 import record_write_warning, write_timeline_event_at
+    from ..session.sbd_v6 import write_timeline_event_at
 
-    try:
-        write_timeline_event_at(session_dir, event)
-    except Exception as exc:
-        log.warning("failed to persist SBD V6 model-gate event", exc_info=True)
-        if not record_write_warning(session_dir, component="model_gate.event", exc=exc):
-            log.debug("failed to persist SBD V6 model-gate write warning", exc_info=True)
-        return False
+    write_timeline_event_at(session_dir, event)
     return True
 
 
@@ -1741,7 +1733,7 @@ def _preflight_unsupported_model_arch(
                 }
             ]
             state.save(session_dir)
-        except Exception as exc:  # noqa: BLE001 — never block the run on advisory write
+        except (OSError, ValueError) as exc:  # the marker is advisory; the run proceeds without it
             print(
                 f"WARNING: failed to persist degraded-mode marker: {exc!r}",
                 file=sys.stderr,

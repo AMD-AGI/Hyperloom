@@ -30,6 +30,7 @@ _OFFICIAL_OPENAI_BASE_URL = "https://api.openai.com/v1"
 # gateway actually serves, so the order is the fallback ladder.
 _CLAUDE_ALLOWED_MODELS = (
     DEFAULT_CLAUDE_MODEL,
+    "claude-opus-5",
     "claude-opus-4-8",
     "claude-opus-4-7",
     "claude-opus-4-6",
@@ -38,6 +39,7 @@ _CLAUDE_ALLOWED_MODELS = (
 # Codex-side counterpart, also ordered best-first.
 _CODEX_FALLBACK_MODELS = (
     DEFAULT_CODEX_MODEL,
+    "gpt-5.6-sol",
     "gpt-5.5",
     "gpt-5.4",
 )

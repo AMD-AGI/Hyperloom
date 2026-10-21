@@ -8,17 +8,15 @@ import click
 import pytest
 from click.testing import CliRunner
 
-from kernelforge.cli import (
-    LONG_HORIZON_THRESHOLD_HOURS,
-    MIN_MAX_HOURS,
-    _is_long_horizon,
+from kernelforge.cli import main
+from kernelforge.cli.options import MIN_MAX_HOURS, _validate_max_hours
+from kernelforge.cli.publication import (
     _initial_remote_publication_state,
     _record_remote_publication_result,
     _remote_publication_view,
     _warm_start_publication_covers,
-    _validate_max_hours,
-    main,
 )
+from kernelforge.cli.session_budget import LONG_HORIZON_THRESHOLD_HOURS, _is_long_horizon
 
 
 def test_validate_max_hours_rejects_below_minimum():
@@ -104,25 +102,6 @@ def test_forge_loop_rejects_an_unregistered_producer():
     assert result.exit_code != 0
     assert "--producer must be one of" in result.output
     assert "fusion" in result.output
-
-
-def test_forge_loop_refuses_to_return_after_a_read_it_was_told_not_to_do():
-    result = CliRunner().invoke(
-        main,
-        [
-            "forge-loop",
-            "--kernel",
-            "k.py",
-            "--driver",
-            "d.py",
-            "--workspace",
-            ".",
-            "--no-kb-warmstart",
-            "--return-after-read-kb",
-        ],
-    )
-    assert result.exit_code != 0
-    assert "--no-kb-warmstart" in result.output
 
 
 def test_legacy_loop_command_is_removed():

@@ -10,6 +10,8 @@ import math
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable
 
+from hyperloom.common.coerce import to_float
+
 log = logging.getLogger(__name__)
 
 __all__ = [
@@ -25,7 +27,6 @@ __all__ = [
     "outcome_of",
     "register_renderer",
     "render_section",
-    "robustness_turns_of",
     "session_of",
     "stop_reason_of",
     "task_config_of",
@@ -103,6 +104,42 @@ def task_config_of(breakdown: Any) -> dict[str, Any]:
     return as_dict(as_dict(breakdown).get("metadata")).get("task_config") or {}
 
 
+def _target_label(target: dict[str, Any]) -> str:
+    """One target as ``kind>=value`` (numeric), ``kind=value`` (e.g. a directory) or bare ``kind``."""
+    kind = str(target.get("kind") or "")
+    raw = target.get("value")
+    value = to_float(raw)
+    if not kind:
+        return ""
+    if value is not None:
+        return f"{kind}>={value:g}"
+    return f"{kind}={raw}" if raw not in (None, "") else kind
+
+
+def stop_target_text(objective: Any) -> str:
+    """The session's stop targets, one label per target joined by ``", "``.
+
+    Args:
+        objective: ``metadata.task_config.objective``; several targets arrive as
+            the first one plus an ``objectives`` list holding all of them.
+
+    Returns:
+        The label, or ``""`` when no target was recorded.
+    """
+    target = as_dict(objective)
+    targets = [as_dict(t) for t in target.get("objectives") or []] if isinstance(target.get("objectives"), list) else []
+    return ", ".join(label for t in targets or [target] if (label := _target_label(t)))
+
+
+def measured_ms(value: Any) -> float | None:
+    """A latency reading in milliseconds, or ``None`` when the round measured none.
+
+    A workload that measures no request latency records ``0``, which is not a real reading.
+    """
+    ms = to_float(value)
+    return ms if ms is not None and ms > 0 else None
+
+
 def outcome_of(breakdown: Any) -> dict[str, Any]:
     """The session result block.
 
@@ -149,18 +186,6 @@ def critic_iterations_of(breakdown: Any) -> list[dict[str, Any]]:
         ``critic.iterations``, or ``[]`` when the critic never ran.
     """
     return dict_rows(as_dict(as_dict(breakdown).get("critic")).get("iterations"))
-
-
-def robustness_turns_of(breakdown: Any) -> list[dict[str, Any]]:
-    """The robustness agent's turns, in turn order.
-
-    Args:
-        breakdown: The full ``session_breakdown.json`` dict.
-
-    Returns:
-        ``robustness.turns``, or ``[]`` when the agent never took a turn.
-    """
-    return dict_rows(as_dict(as_dict(breakdown).get("robustness")).get("turns"))
 
 
 def stop_reason_of(breakdown: Any) -> str:

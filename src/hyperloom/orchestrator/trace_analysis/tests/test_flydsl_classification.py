@@ -12,6 +12,7 @@ import tempfile
 import unittest
 import unittest.mock as mock
 
+from hyperloom.inference_optimizer.framework_paths import resolve_known_source_prefixes
 from hyperloom.orchestrator.trace_analysis.tracelens_analysis import (
     _defines_traced_triton_kernel,
     _flydsl_kernel_params,
@@ -340,8 +341,6 @@ class TestFlyDSLKernelParams(unittest.TestCase):
         args = argparse.Namespace(
             framework="sglang",
             model_name="",
-            analysis_mode="inference",
-            runtime_env="local",
             target_platform="mi355x",
         )
         flydsl_cand = {
@@ -394,13 +393,8 @@ class TestCandidateEnvForwarding(unittest.TestCase):
 class TestOrchestratorReusableRootsInSync(unittest.TestCase):
     """Orchestrator-side allowlist must stay in sync with the classifier."""
 
-    def setUp(self) -> None:
-        from hyperloom.orchestrator.kernel import request_handlers as kernel_request_handlers
-
-        self.handlers = kernel_request_handlers
-
     def test_orchestrator_allowlist_has_flydsl(self) -> None:
-        roots = self.handlers._reusable_source_roots()
+        roots = resolve_known_source_prefixes()
         self.assertIn("/sgl-workspace/flydsl/", roots)
 
     def test_orchestrator_honours_dsl2_root_env(self) -> None:
@@ -408,7 +402,7 @@ class TestOrchestratorReusableRootsInSync(unittest.TestCase):
         with mock.patch.dict(os.environ, {"DSL2_ROOT": extra}):
             self.assertIn(
                 "/path/user-local/flydsl/",
-                self.handlers._reusable_source_roots(),
+                resolve_known_source_prefixes(),
             )
 
 

@@ -11,7 +11,6 @@ import logging
 import math
 import os
 import time
-import traceback
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from functools import partial
@@ -49,6 +48,7 @@ from ..bus.storage.connection import SqliteConnection, resolve_journal_mode
 from hyperloom.inference_optimizer.protocol.intent import NoIntentEmitted
 from ..bus.message_bus import MessageBus
 from ..state.objective import Objective, TimeOnlyObjective
+from ..policy.custom_specialist import skips_reactor_turn
 from ..policy.gate import PolicyGate
 from ..state.round_store import RoundStore
 from ..bus.gpu_pool import (
@@ -66,7 +66,7 @@ from .intent_router import IntentRouter
 from .sub_agent_runner import SubAgentRunner
 from ..state.task_registry import TaskRegistry, task_dispatch_origin
 from ..collaborator import OrchestrationPrompt
-from hyperloom.inference_optimizer.trace.llm_trace import LLMCallRecord, append_llm_call, new_call_id
+from hyperloom.inference_optimizer.trace.llm_trace import LLMCallRecord, LLMCallSite, append_llm_call, new_call_id
 from hyperloom.inference_optimizer.trace.context_events import PromptSnapshotTracker, record_prompt_snapshot
 from hyperloom.inference_optimizer.trace.trajectory_trace import (
     EVENT_LLM_CALL,
@@ -210,11 +210,87 @@ if TYPE_CHECKING:
     from .proposals import PendingProposal
 
 
+def reap_orphaned_servers_best_effort(session_dir: Path, *, phase: str) -> None:
+    """Reap leftover single-node serving processes via this session's pidfiles.
+
+    Runs at boot, at shutdown and on resume. Every other teardown is in-band (a wrapper's signal trap, a ``killpg`` on
+    a handle still held), so none of it runs when the owner dies without getting to; this is the backstop, and with no
+    cgroup or pid namespace the only one: the pidfile outlives its writer. Scoped to this session's own pidfiles and
+    gated on a cmdline match, so a co-located session's server and a recycled pid are never touched.
+    """
+    try:
+        from ..actions.executors._multi_node_env import is_multi_node
+
+        if is_multi_node():
+            return
+        from ..actions.executors._server_lifecycle import reap_orphaned_servers
+
+        reaped = reap_orphaned_servers(session_dir)
+        if reaped:
+            log.warning(
+                "coordinator: reaped %d orphaned serving process(es) at %s: %s",
+                len(reaped),
+                phase,
+                reaped,
+            )
+    except Exception:
+        log.exception("coordinator: orphan server reaper failed at %s (ignored)", phase)
+
+
 @dataclass
 class CoordinatorState:
     """In-memory ephemeral state for the reactor + dispatcher."""
 
     pending_proposals: dict[str, PendingProposal] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class CoordinatorSettings:
+    """Boot-time choices the launcher makes for a session.
+
+    Attributes:
+        model_class: Model class to record when the session has none yet.
+        phase_budget_pct: Per-phase budget percentages; library defaults when absent.
+    """
+
+    model_class: str | None = None
+    phase_budget_pct: dict[str, float] | None = None
+
+
+@dataclass(frozen=True)
+class AdvisoryServices:
+    """Optional advisory collaborators the session consults.
+
+    Attributes:
+        knowledge_plane: KnowledgePlane facade; pre-warms PR feed + advisory context.
+        proposal_scorer: Advisory multi-model specialist-proposal scorer.
+    """
+
+    knowledge_plane: Any = None
+    proposal_scorer: Any = None
+
+
+@dataclass(frozen=True)
+class RunOptions:
+    """How long and how a Coordinator run ticks, and what stops it early.
+
+    Attributes:
+        max_minutes: Session wall-clock bound; unbounded when ``None``.
+        tick_interval_sec: Pause between ticks.
+        max_ticks: Stop after this many ticks, when set.
+        stop_when: Custom stop predicate, asked after every tick.
+        install_signal_handlers: Whether to arm the stop-signal drain.
+        crash_emergency_threshold: Coordinator exceptions within the trailing 24 hours that end the run as ``emergency``.
+        closing_grace_sec: Bound on the closing phase; the default when ``None``.
+    """
+
+    max_minutes: float | None = None
+    tick_interval_sec: float = 0.0
+    max_ticks: int | None = None
+    stop_when: Callable[["Coordinator"], Awaitable[bool] | bool] | None = None
+    install_signal_handlers: bool = False
+    crash_emergency_threshold: int = 25
+    closing_grace_sec: float | None = None
 
 
 class Coordinator:
@@ -226,12 +302,8 @@ class Coordinator:
         *,
         backends: dict[str, Backend],
         role_registry: dict[str, AgentRole] | None = None,
-        sub_agent_runner: SubAgentRunner | None = None,
-        bus_class: type[MessageBus] = MessageBus,
-        model_class: str | None = None,
-        phase_budget_pct: dict[str, float] | None = None,
-        knowledge_plane: Any = None,
-        proposal_scorer: Any = None,
+        settings: CoordinatorSettings = CoordinatorSettings(),
+        advisory: AdvisoryServices = AdvisoryServices(),
     ):
         """Construct the per-session Coordinator and wire persistence, policy, and agents."""
         self.session_dir = Path(session_dir)
@@ -242,13 +314,14 @@ class Coordinator:
         # Orchestration prompt overrides, rebuild closure, and snapshot writes.
         self.orch_prompt = OrchestrationPrompt(overrides={})
         # KnowledgePlane facade; pre-warms PR feed + advisory context.
-        self.knowledge_plane: Any = knowledge_plane
+        self.knowledge_plane: Any = advisory.knowledge_plane
         from ..specialists.dispatch import SpecialistDispatchCollaborator
 
         self._collaborator(
-            "_specialist_dispatch", partial(SpecialistDispatchCollaborator, proposal_scorer=proposal_scorer)
+            "_specialist_dispatch",
+            partial(SpecialistDispatchCollaborator, proposal_scorer=advisory.proposal_scorer),
         )
-        self._model_class_override: str = (model_class or "").strip()
+        self._model_class_override: str = (settings.model_class or "").strip()
 
         # Validate every reactor has a backend wired.
         for name in self.role_registry:
@@ -264,14 +337,14 @@ class Coordinator:
         # before the file is opened.
         self.db = SqliteConnection(db_path, journal_mode=resolve_journal_mode())
 
-        self.bus = bus_class(self.db)
+        self.bus = MessageBus(self.db)
         self.locks = ResourceLockManager(SqliteLeaseBackend(self.db))
         self.tasks = TaskRegistry(
             self.db,
             dispatch_origin_provider=lambda: task_dispatch_origin(self.shared_state),
         )
         self.cursors = CursorStore(self.db)
-        self.sub = sub_agent_runner or SubAgentRunner(
+        self.sub = SubAgentRunner(
             self.locks,
             self.tasks,
             session_dir=self.session_dir,
@@ -296,14 +369,11 @@ class Coordinator:
             gpu_ids=resolve_whole_machine_devices(),
         )
         # Sync research_lane capacity into lane_capacity so acquire_many honours the cap.
-        try:
-            from ..bus.storage.schema import set_lane_capacity as _set_lane_capacity
+        from ..bus.storage.schema import set_lane_capacity as _set_lane_capacity
 
-            cap = int(self.shared_state.research_lane_capacity or 0)
-            if cap >= 0:
-                _set_lane_capacity(self.db.raw, "research_lane", cap)
-        except Exception:
-            log.exception("failed to sync research_lane_capacity to leases DB")
+        cap = int(self.shared_state.research_lane_capacity or 0)
+        if cap >= 0:
+            _set_lane_capacity(self.db.raw, "research_lane", cap)
         # gpu_research_lane stays capacity-1 (strictly serial GPU specialists);
         # the GPU pool partitions physical cards within that one lease.
         # `strict_paths` defers to the env flag.
@@ -323,7 +393,7 @@ class Coordinator:
         self.writeback.detect_resume_state()
         # Reap serving processes orphaned by a prior monitor-process crash (e.g. a raylet death that took the
         # optimizer down mid-benchmark), scoped strictly to this session's own pidfiles.
-        self._reap_orphaned_servers_best_effort(phase="boot")
+        reap_orphaned_servers_best_effort(self.session_dir, phase="boot")
         # Before any bring-up can dispatch: an attempt classified against a
         # different pin is not comparable with its neighbours.
         self._pin_source_trees()
@@ -375,7 +445,7 @@ class Coordinator:
         self._current_objective: Objective | None = None
 
         # Initialise phase machine (fresh session enters PRELUDE). Idempotent.
-        self.phase_machine.ensure_phase_initialised(phase_budget_pct)
+        self.phase_machine.ensure_phase_initialised(settings.phase_budget_pct)
         # Recipe KB T0 defensive fallback for direct SDK/test callers; best-effort.
         self.phase_machine.ensure_recipe_kb_t0_anchored()
 
@@ -533,21 +603,21 @@ class Coordinator:
         """
         r = self.__dict__.get("_reconciler")
         if r is None:
-            from ..bringup.reconcile import Reconciler
+            from ..bringup.reconcile import ReconcileLinks, Reconciler, ReconcileStores
 
             r = Reconciler(
-                rounds=self.rounds,
-                tasks=self.tasks,
-                locks=self.locks,
-                shared_state=self.shared_state,
-                resources=self.policy.resources,
-                # A callable, not a captured mapping: the resume replay rebuilds
-                # its contents, so a snapshot taken here would be pre-replay.
-                proposals=lambda: self.state.pending_proposals,
-                session_dir=self.session_dir,
-                # The window a revalidation holds is closed by the writeback when
-                # its result is booked; this pass only closes one nobody will.
-                result_pending=lambda task_id: self.dispatcher.owes_result(task_id),
+                ReconcileStores(rounds=self.rounds, tasks=self.tasks, locks=self.locks),
+                self.shared_state,
+                links=ReconcileLinks(
+                    resources=self.policy.resources,
+                    # Callables, not snapshots: the resume replay rebuilds the pending proposals after this runs.
+                    proposals=lambda: self.state.pending_proposals,
+                    drop_proposal=lambda pending, reason: self.router.settle_dropped_proposal(pending, reason),
+                    session_dir=self.session_dir,
+                    # The window a revalidation holds is closed by the writeback when
+                    # its result is booked; this pass only closes one nobody will.
+                    result_pending=lambda task_id: self.dispatcher.owes_result(task_id),
+                ),
             )
             self.__dict__["_reconciler"] = r
         return r
@@ -594,33 +664,6 @@ class Coordinator:
         from .build_lifecycle import BuildLifecycleCollaborator
 
         return self._collaborator("_build_lifecycle", BuildLifecycleCollaborator)
-
-    def _reap_orphaned_servers_best_effort(self, *, phase: str) -> None:
-        """Reap leftover single-node serving processes via this session's pidfiles.
-
-        Runs at boot and again at shutdown. Every other teardown here is in-band -- a benchmark wrapper's own signal
-        trap, or a ``killpg`` on a handle we still hold -- so none of it runs when the owner dies without getting to
-        execute. This is the backstop for that case, and with no cgroup or pid-namespace available it is the only one:
-        the pidfile outlives whatever wrote it. Scoped to this session's own pidfiles and gated on a cmdline match, so
-        a co-located session's server and a recycled pid are never touched.
-        """
-        try:
-            from ..actions.executors._multi_node_env import is_multi_node
-
-            if is_multi_node():
-                return
-            from ..actions.executors._server_lifecycle import reap_orphaned_servers
-
-            reaped = reap_orphaned_servers(self.session_dir)
-            if reaped:
-                log.warning(
-                    "coordinator: reaped %d orphaned serving process(es) at %s: %s",
-                    len(reaped),
-                    phase,
-                    reaped,
-                )
-        except Exception:
-            log.exception("coordinator: orphan server reaper failed at %s (ignored)", phase)
 
     def _pin_source_trees(self) -> None:
         """Pin the source trees this session observes and patches, once at boot.
@@ -714,7 +757,7 @@ class Coordinator:
         self.recipe_journal.ensure_recipe_finalized(source="t4_fallback")
         try:
             self.shared_state.save(self.session_dir)
-        except Exception:
+        except OSError:
             log.exception("recipe KB T4 SharedState.save failed")
 
     async def tick(self, n: int = 1) -> None:
@@ -740,17 +783,16 @@ class Coordinator:
             log.exception("phase advance before reactors failed")
             self.record_exception(stage="advance_phase_pre_reactor", exc=exc)
         in_closing = bool(self.shared_state.closing_phase)
-        # One reactor + dispatcher pass; during closing skip LLM passes.
+        # One reactor + dispatcher pass; during closing skip LLM passes, and any turn that would only hold dispatch back.
         if not in_closing:
             for name in self._tick_roles:
                 if self.stop_requested():
                     break
                 if time.monotonic() < self._backend_retry_at.get(name, 0.0):
                     continue
-                await self.await_within_session_bound(
-                    lambda n=name: self.reactor_pass(n),
-                    stage=f"reactor:{name}",
-                )
+                if skips_reactor_turn(name, self.shared_state):
+                    continue
+                await self.await_within_session_bound(lambda n=name: self.reactor_pass(n), stage=f"reactor:{name}")
         if not self.stop_requested():
             await self.dispatcher.pump_dispatcher_once()
         if not in_closing:
@@ -792,9 +834,7 @@ class Coordinator:
                 tick=int(self.shared_state.tick or 0),
                 stage=stage,
                 agent=agent,
-                exc_type=type(exc).__name__,
-                message=str(exc),
-                traceback_text="".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
+                exc=exc,
             )
             self.shared_state.increment_crash_count()
             self.shared_state.save(self.session_dir)
@@ -913,18 +953,7 @@ class Coordinator:
                 self.record_exception(stage=stage, exc=exc, agent=stage.removeprefix("reactor:"))
 
     # Long-run interface
-    async def run(
-        self,
-        *,
-        objective: Objective | None = None,
-        max_minutes: float | None = None,
-        tick_interval_sec: float = 0.0,
-        max_ticks: int | None = None,
-        stop_when: Callable[["Coordinator"], Awaitable[bool] | bool] | None = None,
-        install_signal_handlers: bool = False,
-        crash_emergency_threshold: int = 25,
-        closing_grace_sec: float | None = None,
-    ) -> str:
+    async def run(self, *, objective: Objective | None = None, options: RunOptions = RunOptions()) -> str:
         """Run reactor + dispatcher until a stop condition fires (priority order): signal, a stop_reason the phase machine recorded (a met target closes through SWEEP as one), time_exhausted (via closing phase), emergency, custom, max_ticks. Sets + saves + returns shared_state.stop_reason.
 
         The whole run is one ``session`` trajectory span, and every trajectory event recorded beneath it inherits this
@@ -938,16 +967,7 @@ class Coordinator:
             ),
             trajectory_span(EVENT_SESSION, attributes={"name": self.session_dir.name}) as span,
         ):
-            stop_reason = await self._run_ticks(
-                objective=objective,
-                max_minutes=max_minutes,
-                tick_interval_sec=tick_interval_sec,
-                max_ticks=max_ticks,
-                stop_when=stop_when,
-                install_signal_handlers=install_signal_handlers,
-                crash_emergency_threshold=crash_emergency_threshold,
-                closing_grace_sec=closing_grace_sec,
-            )
+            stop_reason = await self._run_ticks(objective=objective, options=options)
             self._close_undecided_proposals(stop_reason)
             span.finish(stop_reason=stop_reason)
             return stop_reason
@@ -994,24 +1014,13 @@ class Coordinator:
         """Live ``(phase, tick)`` for trajectory events recorded inside :meth:`run`."""
         return (self.shared_state.phase or None), int(self.shared_state.tick or 0)
 
-    async def _run_ticks(
-        self,
-        *,
-        objective: Objective | None,
-        max_minutes: float | None,
-        tick_interval_sec: float,
-        max_ticks: int | None,
-        stop_when: Callable[["Coordinator"], Awaitable[bool] | bool] | None,
-        install_signal_handlers: bool,
-        crash_emergency_threshold: int,
-        closing_grace_sec: float | None,
-    ) -> str:
+    async def _run_ticks(self, *, objective: Objective | None, options: RunOptions) -> str:
         """Tick loop and shutdown sequence behind :meth:`run`."""
         objective = objective or TimeOnlyObjective()
         self._current_objective = objective
         # A dedicated thread reading the interpreter's wakeup pipe, not a loop
         # callback: a TERM has to be recorded while the loop is busy.
-        if install_signal_handlers:
+        if options.install_signal_handlers:
             self._signals = SignalDrain(
                 loop=asyncio.get_running_loop(),
                 stop_event=self._stop,
@@ -1020,8 +1029,8 @@ class Coordinator:
 
         await self.writeback.replay_resume_if_needed()
         grace_sec, deadline, max_minutes_value = self._bind_session_deadline(
-            max_minutes=max_minutes,
-            closing_grace_sec=closing_grace_sec,
+            max_minutes=options.max_minutes,
+            closing_grace_sec=options.closing_grace_sec,
         )
 
         tick_n = 0
@@ -1081,15 +1090,15 @@ class Coordinator:
                     self.shared_state.recent_crash_count(
                         window_sec=_CRASH_EMERGENCY_WINDOW_SEC,
                     )
-                    >= crash_emergency_threshold
+                    >= options.crash_emergency_threshold
                 ):
                     stop_reason = "emergency"
                     break
-                if max_ticks is not None and tick_n >= max_ticks:
+                if options.max_ticks is not None and tick_n >= options.max_ticks:
                     stop_reason = "max_ticks"
                     break
-                if stop_when is not None:
-                    triggered = stop_when(self)
+                if options.stop_when is not None:
+                    triggered = options.stop_when(self)
                     if asyncio.iscoroutine(triggered):
                         triggered = await triggered
                     if bool(triggered):
@@ -1097,7 +1106,11 @@ class Coordinator:
                         break
 
                 # Brief wait between ticks to avoid CPU spin while staying signal-responsive; 0.0 keeps tests fast.
-                wait_sec = tick_interval_sec if in_closing else max(tick_interval_sec, self._backend_retry_wait_sec())
+                wait_sec = (
+                    options.tick_interval_sec
+                    if in_closing
+                    else max(options.tick_interval_sec, self._backend_retry_wait_sec())
+                )
                 if wait_sec > 0:
                     try:
                         await asyncio.wait_for(self._stop.wait(), timeout=wait_sec)
@@ -1141,7 +1154,7 @@ class Coordinator:
             # A server outliving the run holds every GPU it was given, so the
             # session's last act is to reap its own pidfiles.
             with timed_teardown_step(self.shared_state, "reap_orphaned_servers"):
-                await asyncio.to_thread(self._reap_orphaned_servers_best_effort, phase="shutdown")
+                await asyncio.to_thread(reap_orphaned_servers_best_effort, self.session_dir, phase="shutdown")
             self.shared_state.save(self.session_dir)
         return stop_reason or self.shared_state.stop_reason
 
@@ -1298,15 +1311,14 @@ class Coordinator:
             )
             if not has_tokens:
                 return
-            record = LLMCallRecord.from_metadata(
+            site = LLMCallSite(
                 session_id=self.session_dir.name,
                 component=agent_name,
                 role=agent_name,
-                metadata=metadata,
                 tick=int(self.shared_state.tick or 0),
                 phase=(self.shared_state.phase or "") or None,
-                latency_ms=latency_ms,
             )
+            record = LLMCallRecord.from_metadata(site, metadata, latency_ms=latency_ms)
             append_llm_call(session_dir=self.session_dir, record=record)
         except Exception:
             log.debug(
@@ -1325,17 +1337,15 @@ class Coordinator:
     ) -> None:
         """Append one ``status=\"error\"`` ``llm_calls.jsonl`` row for a failed turn."""
         try:
-            record = LLMCallRecord.for_failure(
+            site = LLMCallSite(
                 session_id=self.session_dir.name,
                 component=agent_name,
                 role=agent_name,
-                error=error,
-                call_id=call_id,
-                model=getattr(self.backends.get(agent_name), "model", None),
                 tick=int(self.shared_state.tick or 0),
                 phase=(self.shared_state.phase or "") or None,
-                latency_ms=latency_ms,
             )
+            model = getattr(self.backends.get(agent_name), "model", None)
+            record = LLMCallRecord.for_failure(site, error, model=model, call_id=call_id, latency_ms=latency_ms)
             append_llm_call(session_dir=self.session_dir, record=record)
         except Exception:
             log.debug(
@@ -1344,11 +1354,7 @@ class Coordinator:
                 exc_info=True,
             )
 
-    async def _track_backend_error_streak(
-        self,
-        agent_name: str,
-        exc: BackendError,
-    ) -> None:
+    async def _track_backend_error_streak(self, agent_name: str, exc: BackendError) -> None:
         """Extend the per-agent ``BackendError`` streak and back the agent off.
 
         A streak that has lasted ``_BACKEND_UNHEALTHY_STOP_SEC`` stops the session unless something else already has.
@@ -1359,6 +1365,7 @@ class Coordinator:
         now = time.monotonic()
         new_value = self._backend_error_streak.get(agent_name, 0) + 1
         self._backend_error_streak[agent_name] = new_value
+        log.warning("Coordinator: %s backend turn failed (%d in a row): %s", agent_name, new_value, exc)
         failing_sec = now - self._backend_error_since.setdefault(agent_name, now)
         self._backend_retry_at[agent_name] = now + min(
             _BACKEND_RETRY_MAX_SEC, _BACKEND_RETRY_BASE_SEC * 2 ** (new_value - 1)

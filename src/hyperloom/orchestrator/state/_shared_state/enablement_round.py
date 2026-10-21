@@ -9,6 +9,8 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, fields
 from typing import Any
 
+from hyperloom.inference_optimizer.grid_server_args import dedupe_extra_server_args
+
 #: Identity and payload of the accepted stack, accumulated across the rounds
 #: that contributed to it: a round that contributes none leaves the standing
 #: records alone.
@@ -94,11 +96,14 @@ class EnablementRound:
     # Off-loop targeted-build state.
     build_manifest: list = field(default_factory=list)
     last_build_failure: dict = field(default_factory=dict)
-    build_novelty: list = field(default_factory=list)
     candidate_refs: list = field(default_factory=list)
     # Why the last round's patches were all dropped for absent targets; injected into the next round's mandate so it
     # stops writing diffs that cannot apply.
     last_grounding_drop_reason: list = field(default_factory=list)
+    # Sanitized setup commands the last round proposed that are not package/tool
+    # installation; injected into the next round's mandate so it stops
+    # re-authoring a command the replay refuses to run.
+    last_setup_refusals: list = field(default_factory=list)
     # Serialized ApplyFeedback records from the last round's failed ``git apply``
     # (stderr, reject hunks, target source window), injected into the next
     # round's mandate so it re-grounds instead of resubmitting the same diff.
@@ -185,6 +190,53 @@ class EnablementRound:
         self.environment_closure_baseline = dict(closure)
         return True
 
+    def record_accepted_config(self, config: Mapping[str, Any], *, source: str) -> None:
+        """Record the configuration the accepted launch runs with, and what produced it.
+
+        ``extra_server_args`` is deduped here rather than at each writer: the
+        server hard-errors on a repeated flag.
+        """
+        cfg = dict(config)
+        if cfg.get("extra_server_args"):
+            cfg["extra_server_args"] = dedupe_extra_server_args(str(cfg["extra_server_args"]))
+        self.accepted_config = cfg
+        self.accepted_config_source = source
+
+    def record_round_defects(self, result: Mapping[str, Any]) -> None:
+        """Record the structural defects of the round just settled, for the next mandate.
+
+        Written from a clean round too, so no defect outlives its own round.
+        """
+        self.last_grounding_drop_reason = [str(d) for d in (result.get("patches_dropped_by_grounding") or [])[:8]]
+        self.last_apply_feedback = [fb for fb in (result.get("retry_feedback") or [])[:5] if isinstance(fb, dict)]
+        self.last_setup_refusals = [str(c) for c in (result.get("setup_commands_refused") or [])[:8]]
+        self.patches_span_multiple_roots = bool(result.get("patches_span_multiple_roots"))
+
+    def record_launch_observation(self, *, log: str, observation_path: str) -> None:
+        """Record the boot the next enablement round authors against.
+
+        Text and path are written together because integrate_patch grades a
+        round against this observation; a path left from an earlier boot would
+        grade it against someone else's wall.
+        """
+        self.launch_log = log
+        self.launch_observation_path = observation_path
+
+    @property
+    def accepts_rounds(self) -> bool:
+        """Whether a result can still advance the lane: it has neither succeeded nor opened its revalidation."""
+        return not self.succeeded and not self.validation_pending
+
+    @property
+    def accepted_extra_envs(self) -> dict[str, str]:
+        """The env overrides every launch re-applies on top of the base config."""
+        return dict((self.accepted_config or {}).get("extra_envs") or {})
+
+    @property
+    def accepted_extra_server_args(self) -> str:
+        """The server args every launch re-applies on top of the base config."""
+        return str((self.accepted_config or {}).get("extra_server_args") or "").strip()
+
     def record_patch_roots(self, roots: Mapping[str, str]) -> None:
         """Bind each patch to the tree it applied to, first writer wins.
 
@@ -250,6 +302,10 @@ class EnablementRound:
             self.base_sha_by_root,
             {record["path"]: record["base_sha"] for record in self.roots if record["base_sha"]},
         )
+
+    def stack_files(self) -> set[str]:
+        """Every file the accepted stack still reads: its patches and the sources of its artifacts."""
+        return {*(str(p) for p in self.kept_patches), *(str(a["source"]) for a in self.kept_artifacts)}
 
     def accepted_stack(self, applied: Iterable[Any]) -> list[str]:
         """Every kept patch, then this round's ``applied``: the order the stack was built and is replayed in."""

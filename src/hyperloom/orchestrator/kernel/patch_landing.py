@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Iterable, Mapping
 
 #: How many patches one nomination round may land by default. The integrate lane
@@ -28,12 +29,78 @@ VERDICT_STATUSES = frozenset({"integrated", "rejected"})
 #: only live state; everything else is eligible for eviction.
 TERMINAL_STATUSES = VERDICT_STATUSES | {"dispatch_failed"}
 
+#: Stack labels whose KEEP overwrote a whole kernel source file, so a queued
+#: patch on that file can no longer be measured on its own. Writeback labels a
+#: lane's KEEP by its own name, so a label missing here re-drains a spent patch.
+INTEGRATING_STACK_ACTIONS = frozenset({"integrate", "fusion"})
+
 
 def record_source_path(record: Mapping[str, Any]) -> str:
     """The one spelling of a record's source path, read the same everywhere."""
     if not isinstance(record, Mapping):
         return ""
     return str(record.get("target_file") or record.get("source_file") or "").strip()
+
+
+def record_matches_task(
+    record: Mapping[str, Any],
+    *,
+    kernel_id: str,
+    task_group_key: str,
+    source_file: str,
+    task_group_aliases: set[str] | None = None,
+) -> bool:
+    """Match persisted integration state to the current stable task identity."""
+    recorded_key = str(record.get("task_group_key") or "")
+    if task_group_key and recorded_key:
+        accepted_keys = {task_group_key, *(task_group_aliases or set())}
+        return recorded_key in accepted_keys
+    if str(record.get("kernel_id") or "") != kernel_id:
+        return False
+    recorded_source = record_source_path(record)
+    if source_file and recorded_source:
+        return source_file == recorded_source
+    return True
+
+
+@dataclass(frozen=True)
+class IntegratedStack:
+    """The optimization_stack rows whose KEEP already landed a whole kernel source file."""
+
+    _entries: tuple[Mapping[str, Any], ...]
+    _source_files: frozenset[str]
+
+    @classmethod
+    def of(cls, optimization_stack: Iterable[Any] | None) -> IntegratedStack:
+        entries = tuple(
+            entry
+            for entry in (optimization_stack or [])
+            if isinstance(entry, Mapping) and entry.get("action") in INTEGRATING_STACK_ACTIONS
+        )
+        return cls(entries, frozenset(path for path in map(record_source_path, entries) if path))
+
+    def covers(
+        self,
+        *,
+        kernel_ids: Iterable[str],
+        task_group_key: str,
+        source_file: str,
+        task_group_aliases: set[str] | None = None,
+    ) -> bool:
+        """Whether a landed row already retired this task, by identity or by owning its source file."""
+        if source_file and source_file in self._source_files:
+            return True
+        return any(
+            record_matches_task(
+                entry,
+                kernel_id=kernel_id,
+                task_group_key=task_group_key,
+                source_file=source_file,
+                task_group_aliases=task_group_aliases,
+            )
+            for kernel_id in kernel_ids
+            for entry in self._entries
+        )
 
 
 def patch_budget(configured: object = None, *, default: int = DEFAULT_PATCH_BUDGET) -> int:

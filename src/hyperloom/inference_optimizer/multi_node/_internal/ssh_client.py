@@ -6,10 +6,10 @@ import base64
 import shlex
 import subprocess
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 
 from .env_safety import assert_env_key_shapes, assert_forward_env_keys
-from .log import info, warn
 
 # Default sshd port baked into the image's mn-sshd-init.sh.
 DEFAULT_SSH_PORT = 2233
@@ -44,73 +44,44 @@ def _ssh_identity(key_path: Path | str) -> str:
     return str(key_path)
 
 
-def generate_session_keypair(dest_dir: Path) -> tuple[Path, str]:
-    """Generate (or reuse) an ed25519 keypair under ``dest_dir``."""
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    try:
-        dest_dir.chmod(0o700)
-    except OSError as exc:
-        warn(f"could not chmod SSH key dir {dest_dir} to 0700: {exc}")
-    priv = dest_dir / "mn_id_ed25519"
-    pub = dest_dir / "mn_id_ed25519.pub"
-    if priv.is_file() and pub.is_file():
-        return priv, pub.read_text(encoding="utf-8").strip()
-    # Remove any half-written remnant before regenerating.
-    for p in (priv, pub):
-        try:
-            p.unlink()
-        except FileNotFoundError:
-            pass
-    proc = subprocess.run(
-        [
-            "ssh-keygen",
-            "-t",
-            "ed25519",
-            "-N",
-            "",
-            "-q",
-            "-C",
-            "hyperloom-mn-infera",
-            "-f",
-            str(priv),
-        ],
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
-    if proc.returncode != 0:
-        raise RuntimeError(f"ssh-keygen failed rc={proc.returncode}: {proc.stderr.strip()}")
-    priv.chmod(0o600)
-    pub_str = pub.read_text(encoding="utf-8").strip()
-    info(f"generated session SSH keypair at {priv}")
-    return priv, pub_str
+@dataclass(frozen=True)
+class SshTarget:
+    """One pod reachable over SSH as root: its address, identity file and session known_hosts."""
+
+    host: str
+    key_path: Path | str
+    known_hosts: Path
+    port: int = DEFAULT_SSH_PORT
+
+    def argv(self) -> list[str]:
+        """The ``ssh`` argv up to and including ``root@host``."""
+        return [
+            "ssh",
+            *_ssh_common_opts(self.known_hosts),
+            "-o",
+            "IdentitiesOnly=yes",
+            "-i",
+            _ssh_identity(self.key_path),
+            "-p",
+            str(self.port),
+            f"root@{self.host}",
+        ]
 
 
-def ssh_run(
-    host: str,
-    command: str,
-    *,
-    key_path: Path | str,
-    known_hosts: Path,
-    port: int = DEFAULT_SSH_PORT,
-    user: str = "root",
-    timeout: int = 120,
-) -> subprocess.CompletedProcess:
-    """Run ``command`` on ``host`` over SSH and return the CompletedProcess."""
-    argv = [
-        "ssh",
-        *_ssh_common_opts(known_hosts),
-        "-o",
-        "IdentitiesOnly=yes",
-        "-i",
-        _ssh_identity(key_path),
-        "-p",
-        str(port),
-        f"{user}@{host}",
-        "bash",
-        "-lc",
-        shlex.quote(command),
-    ]
+@dataclass(frozen=True)
+class RemoteScript:
+    """A script shipped to a pod and run there as ``[env] interpreter remote_path args``."""
+
+    text: str
+    interpreter: str
+    args: str
+    env: dict[str, str] | None = None
+    remote_path: str = str(Path(tempfile.gettempdir()) / "mn_infera_launch")
+
+
+def ssh_run(target: SshTarget, command: str, *, timeout: int = 120) -> subprocess.CompletedProcess:
+    """Run ``command`` on the target over SSH and return the CompletedProcess."""
+    argv = [*target.argv(), "bash", "-lc", shlex.quote(command)]
     return subprocess.run(
         argv,
         capture_output=True,
@@ -119,70 +90,29 @@ def ssh_run(
     )
 
 
-def ssh_run_script(
-    host: str,
-    script_text: str,
-    interpreter: str,
-    script_args: str,
-    *,
-    key_path: Path | str,
-    known_hosts: Path,
-    port: int = DEFAULT_SSH_PORT,
-    user: str = "root",
-    timeout: int = 600,
-    remote_path: str = str(Path(tempfile.gettempdir()) / "mn_infera_launch"),
-    env: dict[str, str] | None = None,
-) -> subprocess.CompletedProcess:
-    """Ship ``script_text`` to the pod (base64 over the command line) and run it."""
-    enc = base64.b64encode(script_text.encode("utf-8")).decode("ascii")
+def ssh_run_script(target: SshTarget, script: RemoteScript, *, timeout: int = 600) -> subprocess.CompletedProcess:
+    """Ship ``script`` to the pod (base64 over the command line) and run it."""
+    enc = base64.b64encode(script.text.encode("utf-8")).decode("ascii")
     env_prefix = ""
-    if env:
-        assert_forward_env_keys(env)
-        env_prefix = "".join(f"{k}={shlex.quote(str(v))} " for k, v in env.items())
+    if script.env:
+        assert_forward_env_keys(script.env)
+        env_prefix = "".join(f"{k}={shlex.quote(str(v))} " for k, v in script.env.items())
+    remote_path = shlex.quote(script.remote_path)
     remote_cmd = (
-        f"echo {enc} | base64 -d > {shlex.quote(remote_path)} && "
-        f"{env_prefix}{interpreter} {shlex.quote(remote_path)} {script_args}"
+        f"echo {enc} | base64 -d > {remote_path} && {env_prefix}{script.interpreter} {remote_path} {script.args}"
     )
-    return ssh_run(
-        host,
-        remote_cmd,
-        key_path=key_path,
-        known_hosts=known_hosts,
-        port=port,
-        user=user,
-        timeout=timeout,
-    )
+    return ssh_run(target, remote_cmd, timeout=timeout)
 
 
 def ssh_run_bash_with_env(
-    host: str,
-    script_text: str,
-    env: dict[str, str] | None,
-    *,
-    key_path: Path | str,
-    known_hosts: Path,
-    port: int = DEFAULT_SSH_PORT,
-    user: str = "root",
-    timeout: int = 600,
+    target: SshTarget, script_text: str, env: dict[str, str] | None, *, timeout: int = 600
 ) -> subprocess.CompletedProcess:
-    """Run ``script_text`` on ``host`` via ``bash -s`` with ``env`` exported."""
+    """Run ``script_text`` on the target via ``bash -s`` with ``env`` exported."""
     if env:
         assert_env_key_shapes(env)
     prologue = "\n".join(f"export {k}={shlex.quote(str(v))}" for k, v in (env or {}).items())
     full = f"set -uo pipefail\n{prologue}\n{script_text}\n"
-    argv = [
-        "ssh",
-        *_ssh_common_opts(known_hosts),
-        "-o",
-        "IdentitiesOnly=yes",
-        "-i",
-        _ssh_identity(key_path),
-        "-p",
-        str(port),
-        f"{user}@{host}",
-        "bash",
-        "-s",
-    ]
+    argv = [*target.argv(), "bash", "-s"]
     return subprocess.run(
         argv,
         input=full,

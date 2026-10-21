@@ -11,8 +11,11 @@ import json
 import logging
 import os
 import shlex
+import subprocess
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Iterator, Mapping
 
 from hyperloom.common.timeutil import format_exc_brief
 from hyperloom.common.env import env_flag, env_int
@@ -27,10 +30,36 @@ from ._multi_node_env import _read_state, is_multi_node
 # dp-size from prefill+decode+shared server args, so the profiled server runs single-rank full-batch (compute-bound).
 _COMPUTE_BOUND_PROFILE_ENV = "HYPERLOOM_MN_PROFILE_COMPUTE_BOUND"
 
+# Control variables the multi-node launcher reads out of this process' environment for one restart.
+_PROFILE_TRACE_DIR_ENV = "HYPERLOOM_MN_PROFILE_TRACE_DIR"
+_EXTRA_FWD_ENV = "HYPERLOOM_MN_EXTRA_FWD_ENV"
+_UNSET_FWD_ENV = "HYPERLOOM_MN_UNSET_FWD_ENV"
+_RESUME_RUNNING_ENV = "MULTI_NODE_RESTART_RESUME_RUNNING"
+
 # Gate for the reclaim-and-retry path in ``restart_server_for_round``: when a restart fails, best-effort remote
 # ``kill-inference`` (Infera SSH fan-out / RayJob Dashboard kill job) reclaims VRAM pinned by a crashed prior server,
 # then exactly one forced fresh restart is retried.
 _MN_RESTART_RECLAIM_RETRY_ENV = "HYPERLOOM_MN_RESTART_RECLAIM_RETRY"
+
+
+def _apply_env(values: Mapping[str, str | None]) -> None:
+    """Set each variable, removing the ones whose value is ``None``."""
+    for name, value in values.items():
+        if value is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = value
+
+
+@contextmanager
+def _scoped_env(values: Mapping[str, str | None]) -> Iterator[None]:
+    """Apply each variable for the block, restoring what was there on exit."""
+    saved: dict[str, str | None] = {name: os.environ.get(name) for name in values}
+    try:
+        _apply_env(values)
+        yield
+    finally:
+        _apply_env(saved)
 
 
 def _strip_dp_parallel_flags(extra_args: str) -> str:
@@ -62,6 +91,7 @@ log = logging.getLogger(__name__)
 
 # Default /health poll timeout; override per-run via HYPERLOOM_MN_HEALTH_WAIT_S.
 DEFAULT_HEALTH_TIMEOUT_S = 900  # 15 min.
+_POLL_INTERVAL_S = 6
 
 # Magpie's sglang_mi*x.sh DEFAULT_ARGS, re-applied in multi-node so tput stays comparable to single-node.
 # --mem-fraction-static is 0.75 (vs 0.8) because cross-node RDMA buffers eat headroom.
@@ -86,22 +116,10 @@ class ServerRestartFailed(RuntimeError):
     """Raised when the per-round multi-node server restart did not succeed."""
 
 
-def _resolve_pd_args(
-    pd_mode: str | None,
-    pd_prefill_nodes: int | None,
-    pd_decode_nodes: int | None,
-    pd_prefill_tp: int | None,
-    pd_decode_tp: int | None,
-    pd_transfer_backend: str | None,
-    pd_ib_device: str | None,
-    *,
-    tp_int: int,
-) -> dict:
+def _resolve_pd_args(*, tp_int: int) -> dict:
     """Resolve PD knobs with state.json + env fallback."""
     state = _read_state()
-    mode = (
-        (pd_mode or state.get("last_restart_pd_mode") or os.environ.get("PD_MODE", "") or "aggregated").strip().lower()
-    )
+    mode = (state.get("last_restart_pd_mode") or os.environ.get("PD_MODE", "") or "aggregated").strip().lower()
     if mode not in ("aggregated", "disaggregated"):
         raise ServerRestartFailed(f"unsupported pd_mode {mode!r}; expected 'aggregated' or 'disaggregated'")
 
@@ -118,10 +136,8 @@ def _resolve_pd_args(
             "with `--nodes >=2` or drop --pd-mode."
         )
 
-    def _intf(kw, sk, ek):
-        """Resolve an int field from kwarg > state key > env var."""
-        if kw is not None:
-            return int(kw)
+    def _intf(sk, ek):
+        """Resolve an int field from state key > env var."""
         v = state.get(sk)
         if v:
             try:
@@ -136,8 +152,8 @@ def _resolve_pd_args(
                 pass
         return 0
 
-    pn = _intf(pd_prefill_nodes, "last_restart_pd_prefill_nodes", "PD_PREFILL_NODES")
-    dn = _intf(pd_decode_nodes, "last_restart_pd_decode_nodes", "PD_DECODE_NODES")
+    pn = _intf("last_restart_pd_prefill_nodes", "PD_PREFILL_NODES")
+    dn = _intf("last_restart_pd_decode_nodes", "PD_DECODE_NODES")
     # Resume fallback: the restart path launches with ``pn or len(pods)`` but persists the raw arg (often 0), so a
     # resume that also lost the ``$PD_*_NODES`` env would leave pn/dn at 0 and wrongly fail the disaggregated gate
     # below (e.g. auto-roofline after resume).
@@ -145,19 +161,13 @@ def _resolve_pd_args(
         pn = len(state.get("prefill_pod_ips") or state.get("prefill_pods") or [])
     if dn <= 0:
         dn = len(state.get("decode_pod_ips") or state.get("decode_pods") or [])
-    ptp = _intf(pd_prefill_tp, "last_restart_pd_prefill_tp", "PD_PREFILL_TP") or tp_int
-    dtp = _intf(pd_decode_tp, "last_restart_pd_decode_tp", "PD_DECODE_TP") or tp_int
-    tb = (
-        pd_transfer_backend
-        or state.get("last_restart_pd_transfer_backend")
-        or os.environ.get("PD_TRANSFER_BACKEND", "")
-        or ""
-    ).strip()
-    ib = (pd_ib_device or state.get("last_restart_pd_ib_device") or os.environ.get("PD_IB_DEVICE", "") or "").strip()
-    # Per-role EP / extra server args, resolved from state + env only (no kwarg). 0 / "" falls back to the shared --ep
-    # / --extra-args.
-    pep = _intf(None, "last_restart_pd_prefill_ep", "PD_PREFILL_EP")
-    dep = _intf(None, "last_restart_pd_decode_ep", "PD_DECODE_EP")
+    ptp = _intf("last_restart_pd_prefill_tp", "PD_PREFILL_TP") or tp_int
+    dtp = _intf("last_restart_pd_decode_tp", "PD_DECODE_TP") or tp_int
+    tb = (state.get("last_restart_pd_transfer_backend") or os.environ.get("PD_TRANSFER_BACKEND", "") or "").strip()
+    ib = (state.get("last_restart_pd_ib_device") or os.environ.get("PD_IB_DEVICE", "") or "").strip()
+    # Per-role EP / extra server args; 0 / "" falls back to the shared --ep / --extra-args.
+    pep = _intf("last_restart_pd_prefill_ep", "PD_PREFILL_EP")
+    dep = _intf("last_restart_pd_decode_ep", "PD_DECODE_EP")
     prefill_extra = (
         state.get("last_restart_pd_prefill_extra_args") or os.environ.get("PD_PREFILL_EXTRA_ARGS", "") or ""
     ).strip()
@@ -273,15 +283,6 @@ async def restart_server_for_round(
     model_path: str | None = None,
     tp: int | None = None,
     ep: int | None = None,
-    pd_mode: str | None = None,
-    pd_prefill_nodes: int | None = None,
-    pd_decode_nodes: int | None = None,
-    pd_prefill_tp: int | None = None,
-    pd_decode_tp: int | None = None,
-    pd_transfer_backend: str | None = None,
-    pd_ib_device: str | None = None,
-    health_timeout_s: int = DEFAULT_HEALTH_TIMEOUT_S,
-    poll_interval_s: int = 6,
     force_full_restart: bool = False,
 ) -> None:
     """Restart the multi-node inference server for the next Magpie round."""
@@ -302,16 +303,7 @@ async def restart_server_for_round(
         return
 
     fw, mdl, tp_int, ep_int = _resolve_round_args(framework, model_path, tp, ep)
-    pd = _resolve_pd_args(
-        pd_mode,
-        pd_prefill_nodes,
-        pd_decode_nodes,
-        pd_prefill_tp,
-        pd_decode_tp,
-        pd_transfer_backend,
-        pd_ib_device,
-        tp_int=tp_int,
-    )
+    pd = _resolve_pd_args(tp_int=tp_int)
 
     # PD-disaggregated x EP cross-check: ep must not exceed either group's TP.
     if pd["pd_mode"] == "disaggregated" and ep_int > 1:
@@ -345,95 +337,88 @@ async def restart_server_for_round(
         raise ServerRestartFailed(str(exc)) from exc
 
     async with _get_restart_lock():
-        saved_trace_env = os.environ.get("HYPERLOOM_MN_PROFILE_TRACE_DIR")
         if torch_profiler_dir:
             try:
                 Path(torch_profiler_dir).mkdir(parents=True, exist_ok=True)
             except OSError as exc:
                 raise ServerRestartFailed(f"cannot mkdir torch_profiler_dir {torch_profiler_dir!r}: {exc}") from exc
-            os.environ["HYPERLOOM_MN_PROFILE_TRACE_DIR"] = torch_profiler_dir
-        else:
-            # No profiler this round — drop stale env so the launcher doesn't reuse a previous round's path.
-            os.environ.pop("HYPERLOOM_MN_PROFILE_TRACE_DIR", None)
-
-        # Per-variant env overrides → forwarded to the SSH-launched sglang via
-        # ``multi_node/commands/infera.py::_collect_forward_env`` (reads this control env).
-        saved_fwd_env = os.environ.get("HYPERLOOM_MN_EXTRA_FWD_ENV")
-        saved_unset_fwd_env = os.environ.get("HYPERLOOM_MN_UNSET_FWD_ENV")
+        # Per-variant env overrides -> forwarded to the SSH-launched sglang via
+        # ``multi_node/commands/infera.py::_collect_forward_env`` (reads these control envs).
+        forwarded = (
+            json.dumps(filter_forward_env({str(k): str(v) for k, v in extra_env.items()}, warn_on_drop=True))
+            if extra_env
+            else None
+        )
         unset_keys = [str(k).strip() for k in (unset_env or []) if str(k).strip()]
-        if extra_env:
-            safe_env = filter_forward_env({str(k): str(v) for k, v in extra_env.items()}, warn_on_drop=True)
-            os.environ["HYPERLOOM_MN_EXTRA_FWD_ENV"] = json.dumps(safe_env)
-        else:
-            os.environ.pop("HYPERLOOM_MN_EXTRA_FWD_ENV", None)
-        if unset_keys:
-            os.environ["HYPERLOOM_MN_UNSET_FWD_ENV"] = json.dumps(unset_keys)
-        else:
-            os.environ.pop("HYPERLOOM_MN_UNSET_FWD_ENV", None)
+        with _scoped_env(
+            {
+                _PROFILE_TRACE_DIR_ENV: torch_profiler_dir or None,
+                _EXTRA_FWD_ENV: forwarded,
+                _UNSET_FWD_ENV: json.dumps(unset_keys) if unset_keys else None,
+            }
+        ):
+            # Multi-node TraceLens SGLang patch fan-out (fail-soft). The patch set
+            # (roofline vs sglang_gc_patch) follows this controller's shape mode;
+            # sglang_gc_patch only matters while capturing, so it waits for a profiling round.
+            from ._server_patcher import resolve_sglang_patch_set
+            from ._workload_envs import _tracelens_patch_enabled
 
-        # Multi-node TraceLens SGLang patch fan-out (fail-soft). The patch set
-        # (roofline vs sglang_gc_patch) follows this controller's shape mode;
-        # sglang_gc_patch only matters while capturing, so it waits for a profiling round.
-        from ._server_patcher import resolve_sglang_patch_set
-        from ._workload_envs import _tracelens_patch_enabled
+            patch_set = resolve_sglang_patch_set()
+            if patch_set == "graph-capture" and not torch_profiler_dir:
+                log.info("restart_server_for_round: not a profiling round; skipping sglang_gc_patch fan-out")
+            elif _tracelens_patch_enabled() and (os.environ.get("TRACELENS_ROOT", "").strip()):
+                try:
+                    from hyperloom.inference_optimizer.multi_node.cli import cmd_apply_tracelens_patch
 
-        patch_set = resolve_sglang_patch_set()
-        if patch_set == "graph-capture" and not torch_profiler_dir:
-            log.info("restart_server_for_round: not a profiling round; skipping sglang_gc_patch fan-out")
-        elif _tracelens_patch_enabled() and (os.environ.get("TRACELENS_ROOT", "").strip()):
-            try:
-                from hyperloom.inference_optimizer.multi_node.cli import cmd_apply_tracelens_patch
-
-                patch_ns = argparse.Namespace(
-                    tracelens_root=os.environ.get("TRACELENS_ROOT", "").strip(),
-                    sglang_version_pin=os.environ.get(
-                        "HYPERLOOM_SGLANG_VERSION_PIN",
-                        "",
-                    ).strip()
-                    or None,
-                    patch_set=patch_set,
-                    print_logs=False,
-                    poll_interval=poll_interval_s,
-                    poll_timeout=int(
-                        os.environ.get(
-                            "HYPERLOOM_MN_POLL_TIMEOUT_S",
-                            str(health_timeout_s),
-                        )
-                        or health_timeout_s
-                    ),
-                )
-                patch_rc = await asyncio.to_thread(cmd_apply_tracelens_patch, patch_ns)
-                if patch_rc != 0:
-                    log.warning(
-                        "restart_server_for_round: TraceLens SGLang patch fan-out "
-                        "returned rc=%d; proceeding with restart (trace may be "
-                        "unannotated, or CUDA-graph capture may IndexError on "
-                        ">= 0.5.18, until patches succeed)",
-                        patch_rc,
+                    patch_ns = argparse.Namespace(
+                        tracelens_root=os.environ.get("TRACELENS_ROOT", "").strip(),
+                        sglang_version_pin=os.environ.get(
+                            "HYPERLOOM_SGLANG_VERSION_PIN",
+                            "",
+                        ).strip()
+                        or None,
+                        patch_set=patch_set,
+                        print_logs=False,
+                        poll_interval=_POLL_INTERVAL_S,
+                        poll_timeout=int(
+                            os.environ.get(
+                                "HYPERLOOM_MN_POLL_TIMEOUT_S",
+                                str(DEFAULT_HEALTH_TIMEOUT_S),
+                            )
+                            or DEFAULT_HEALTH_TIMEOUT_S
+                        ),
                     )
-            except Exception as exc:  # noqa: BLE001 - fail-soft envelope
-                log.warning(
-                    "restart_server_for_round: TraceLens patch fan-out raised (%s); proceeding with restart (fail-soft)",
-                    exc,
-                )
+                    patch_rc = await asyncio.to_thread(cmd_apply_tracelens_patch, patch_ns)
+                    if patch_rc != 0:
+                        log.warning(
+                            "restart_server_for_round: TraceLens SGLang patch fan-out "
+                            "returned rc=%d; proceeding with restart (trace may be "
+                            "unannotated, or CUDA-graph capture may IndexError on "
+                            ">= 0.5.18, until patches succeed)",
+                            patch_rc,
+                        )
+                except Exception as exc:  # noqa: BLE001 - fail-soft envelope
+                    log.warning(
+                        "restart_server_for_round: TraceLens patch fan-out raised (%s); proceeding with restart (fail-soft)",
+                        exc,
+                    )
 
-        try:
             # Local import to keep httpx out of the single-node import path.
             from hyperloom.inference_optimizer.multi_node.cli import cmd_restart_server, _resolve_poll_timeout_s
 
             poll_timeout_s = int(
                 os.environ.get(
                     "HYPERLOOM_MN_POLL_TIMEOUT_S",
-                    str(health_timeout_s),
+                    str(DEFAULT_HEALTH_TIMEOUT_S),
                 )
-                or health_timeout_s
+                or DEFAULT_HEALTH_TIMEOUT_S
             )
             health_wait_s = int(
                 os.environ.get(
                     "HYPERLOOM_MN_HEALTH_WAIT_S",
-                    str(health_timeout_s),
+                    str(DEFAULT_HEALTH_TIMEOUT_S),
                 )
-                or health_timeout_s
+                or DEFAULT_HEALTH_TIMEOUT_S
             )
             # Align launch-driver poll with /health wait for JIT-heavy MoE runs.
             poll_timeout_s = max(poll_timeout_s, _resolve_poll_timeout_s())
@@ -465,7 +450,7 @@ async def restart_server_for_round(
                 log_file=None,
                 no_wait_health=False,
                 print_logs=False,
-                poll_interval=poll_interval_s,
+                poll_interval=_POLL_INTERVAL_S,
                 poll_timeout=poll_timeout_s,
                 # PD knobs; aggregated mode passes only pd_mode.
                 pd_mode=pd.get("pd_mode", "aggregated"),
@@ -516,19 +501,11 @@ async def restart_server_for_round(
             # One kill+launch attempt + post-launch /health wait.
             async def _restart_and_wait(force_full: bool) -> None:
                 """Run one restart attempt and wait for /health readiness."""
-                prev_resume = os.environ.get("MULTI_NODE_RESTART_RESUME_RUNNING")
-                if force_full:
-                    os.environ["MULTI_NODE_RESTART_RESUME_RUNNING"] = "0"
-                try:
-                    rc = await asyncio.to_thread(cmd_restart_server, ns)
-                except Exception as exc:
-                    raise ServerRestartFailed(f"cmd_restart_server raised: {exc!r}") from exc
-                finally:
-                    if force_full:
-                        if prev_resume is None:
-                            os.environ.pop("MULTI_NODE_RESTART_RESUME_RUNNING", None)
-                        else:
-                            os.environ["MULTI_NODE_RESTART_RESUME_RUNNING"] = prev_resume
+                with _scoped_env({_RESUME_RUNNING_ENV: "0"} if force_full else {}):
+                    try:
+                        rc = await asyncio.to_thread(cmd_restart_server, ns)
+                    except Exception as exc:
+                        raise ServerRestartFailed(f"cmd_restart_server raised: {exc!r}") from exc
 
                 if rc != 0:
                     raise ServerRestartFailed(
@@ -587,21 +564,6 @@ async def restart_server_for_round(
                     await _restart_and_wait(force_full=True)
                 except ServerRestartFailed as retry_exc:
                     raise retry_exc from first_exc
-        finally:
-            # Restore env so this round's profiler path doesn't leak forward.
-            if saved_trace_env is None:
-                os.environ.pop("HYPERLOOM_MN_PROFILE_TRACE_DIR", None)
-            else:
-                os.environ["HYPERLOOM_MN_PROFILE_TRACE_DIR"] = saved_trace_env
-            # Symmetric restore for the per-variant env forwarding control var.
-            if saved_fwd_env is None:
-                os.environ.pop("HYPERLOOM_MN_EXTRA_FWD_ENV", None)
-            else:
-                os.environ["HYPERLOOM_MN_EXTRA_FWD_ENV"] = saved_fwd_env
-            if saved_unset_fwd_env is None:
-                os.environ.pop("HYPERLOOM_MN_UNSET_FWD_ENV", None)
-            else:
-                os.environ["HYPERLOOM_MN_UNSET_FWD_ENV"] = saved_unset_fwd_env
 
 
 # Infera frontend profiling API (infera.server --enable-profiling).
@@ -645,13 +607,8 @@ async def trigger_infera_engine_profile(
                 url,
                 resp.status_code,
             )
-        except Exception as exc:  # noqa: BLE001 — fail-soft
-            log.warning(
-                "infera profile %s -> %s failed (%s); continuing",
-                route,
-                url,
-                exc,
-            )
+        except _httpx.HTTPError as exc:
+            log.warning("infera profile %s -> %s failed (%s); continuing", route, url, exc)
 
 
 def _probe_generated_tokens(data: object) -> int:
@@ -774,7 +731,7 @@ async def _wait_for_workers_ready_async(timeout_s: int, poll_every_s: int = 10) 
                         log.info(
                             "worker /health OK (%s %s) after %ds [%d/%d]", role, ip, elapsed, len(ready), len(targets)
                         )
-                except Exception:  # noqa: BLE001
+                except _httpx.HTTPError:
                     pass
             if len(ready) == len(targets):
                 log.info(
@@ -873,7 +830,7 @@ def _collect_worker_server_logs(state: dict, reason: str) -> None:
     default_port = int(state.get("ssh_port") or 2233)
     ssh_run = None
     if key_path and known_hosts:
-        from hyperloom.inference_optimizer.multi_node._internal.ssh_client import ssh_run as _ssh_run
+        from hyperloom.inference_optimizer.multi_node import SshTarget, ssh_run as _ssh_run
 
         ssh_run = _ssh_run
     for role in ("prefill", "decode", "worker"):
@@ -894,18 +851,15 @@ def _collect_worker_server_logs(state: dict, reason: str) -> None:
                 try:
                     port = int(pod.get("sshPort") or default_port)
                     cp = ssh_run(
-                        ip,
+                        SshTarget(host=ip, key_path=key_path, known_hosts=known_hosts, port=port),
                         "tail -c 2000000 " + remote + " 2>/dev/null",
-                        key_path=key_path,
-                        known_hosts=known_hosts,
-                        port=port,
                         timeout=60,
                     )
                     body = cp.stdout or ""
                     if cp.stderr:
                         body += "\n--- ssh stderr ---\n" + cp.stderr
                     source = "ssh:" + str(remote)
-                except Exception:  # noqa: BLE001 - one pod's SSH must not stop the sweep
+                except (OSError, subprocess.TimeoutExpired, ValueError):
                     continue
             else:
                 continue
@@ -1060,7 +1014,7 @@ async def _wait_for_server_health_async(
                                         else:
                                             consecutive_completion_ok = 0
                                             last_err = f"completion_probe_http={cresp.status_code}"
-                                    except Exception as cexc:  # noqa: BLE001
+                                    except _httpx.HTTPError as cexc:
                                         consecutive_completion_ok = 0
                                         last_err = f"completion_probe {format_exc_brief(cexc, limit=80)}"
                             else:
@@ -1068,11 +1022,11 @@ async def _wait_for_server_health_async(
                                 consecutive_completion_ok = 0
                         else:
                             last_err = f"models_http_status={mresp.status_code}"
-                    except Exception as mexc:  # noqa: BLE001
+                    except _httpx.HTTPError as mexc:
                         last_err = f"models_probe {format_exc_brief(mexc, limit=80)}"
                 else:
                     last_err = f"http_status={resp.status_code}"
-            except Exception as exc:  # noqa: BLE001
+            except _httpx.HTTPError as exc:
                 last_err = format_exc_brief(exc, limit=120)
             if _models_empty_too_long(
                 elapsed=elapsed,
@@ -1203,7 +1157,7 @@ async def _wait_for_published_service_ready_async(
                 else:
                     ok_streak = 0
                     last_err = f"http_status={resp.status_code}"
-            except Exception as exc:  # noqa: BLE001
+            except _httpx.HTTPError as exc:
                 if _is_name_resolution_error(exc):
                     dns_failures += 1
                     if dns_failures >= dns_skip_after:

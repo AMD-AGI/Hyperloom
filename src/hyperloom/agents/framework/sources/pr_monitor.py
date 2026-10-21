@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import http.client
 import json
 import urllib.error
 import urllib.parse
@@ -14,6 +15,7 @@ from typing import Any
 from hyperloom.common.github_urls import repo_slug
 from hyperloom.common.url_safety import require_http_url as _base_require_http_url
 
+from ..models import PRMonitorConfig
 from ._shared import GitHubPr
 
 
@@ -71,7 +73,7 @@ def _http_get(url: str, *, timeout_sec: float) -> tuple[int, bytes, str]:
     except urllib.error.HTTPError as exc:
         try:
             err_body = exc.read().decode("utf-8", errors="replace")[:512]
-        except Exception:  # noqa: BLE001 - read can raise OSError on closed body
+        except (OSError, http.client.HTTPException):  # the error body may be unreadable or truncated
             err_body = ""
         raise PRMonitorError(f"pr_monitor HTTP {exc.code} at {url}: {err_body}") from exc
     except urllib.error.URLError as exc:
@@ -142,10 +144,9 @@ def _extract_pr_list(payload: Any, *, source_url: str) -> list[dict[str, Any]]:
 def list_perf_prs(
     repo_url: str,
     *,
-    base_url: str,
+    monitor: PRMonitorConfig,
     limit: int = 5,
     state: str = "open",
-    timeout_sec: float = 10.0,
 ) -> list[GitHubPr]:
     """List PRs from pr_monitor."""
     try:
@@ -154,8 +155,8 @@ def list_perf_prs(
         raise PRMonitorError(f"cannot derive repo slug from repo_url={repo_url!r}: {exc}") from exc
 
     query: dict[str, Any] = {"state": state, "limit": limit}
-    url = _build_url(base_url, f"/v1/repos/{slug}/prs", query)
-    payload = _http_get_json(url, timeout_sec=timeout_sec)
+    url = _build_url(monitor.base_url, f"/v1/repos/{slug}/prs", query)
+    payload = _http_get_json(url, timeout_sec=monitor.timeout_sec)
     items = _extract_pr_list(payload, source_url=url)
     out: list[GitHubPr] = []
     for item in items[:limit]:
@@ -166,11 +167,10 @@ def list_perf_prs(
 def search_perf_prs_via_pr_monitor_search(
     repo_url: str,
     *,
-    base_url: str,
+    monitor: PRMonitorConfig,
     query: str,
     limit: int = 5,
     state: str = "open",
-    timeout_sec: float = 10.0,
 ) -> list[GitHubPr]:
     """Free-text search via ``/v1/search/prs``; alternate to ``list_perf_prs``."""
     try:
@@ -179,11 +179,11 @@ def search_perf_prs_via_pr_monitor_search(
         raise PRMonitorError(f"cannot derive repo slug from repo_url={repo_url!r}: {exc}") from exc
 
     url = _build_url(
-        base_url,
+        monitor.base_url,
         "/v1/search/prs",
         {"q": query, "repo": slug, "state": state, "limit": limit},
     )
-    payload = _http_get_json(url, timeout_sec=timeout_sec)
+    payload = _http_get_json(url, timeout_sec=monitor.timeout_sec)
     items = _extract_pr_list(payload, source_url=url)
     return [_coerce_pr_item(item, source_url=url) for item in items[:limit]]
 

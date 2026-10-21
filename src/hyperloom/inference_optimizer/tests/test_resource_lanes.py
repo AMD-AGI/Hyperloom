@@ -30,7 +30,6 @@ from hyperloom.orchestrator.bus.storage.schema import (
     DEFAULT_LANE_CAPACITIES,
     SCHEMA_VERSION,
     ensure_schema,
-    get_lane_capacity,
     set_lane_capacity,
 )
 
@@ -54,7 +53,7 @@ def locks(conn):
 
 
 def test_schema_version_records_owner_provenance():
-    assert SCHEMA_VERSION == 6
+    assert SCHEMA_VERSION == 7
 
 
 def test_fresh_db_has_composite_pk(conn):
@@ -79,10 +78,13 @@ def test_fresh_db_has_gpu_leases_table(conn):
 
 
 def test_set_lane_capacity_upserts(conn):
+    def _stored() -> int:
+        return conn.raw.execute("SELECT capacity FROM lane_capacity WHERE lane = 'research_lane'").fetchone()[0]
+
     set_lane_capacity(conn.raw, "research_lane", 6)
-    assert get_lane_capacity(conn.raw, "research_lane") == 6
+    assert _stored() == 6
     set_lane_capacity(conn.raw, "research_lane", 1)
-    assert get_lane_capacity(conn.raw, "research_lane") == 1
+    assert _stored() == 1
 
 
 def test_v2_ensure_schema_is_idempotent(conn):
@@ -380,35 +382,6 @@ async def test_try_acquire_many_returns_none_on_full(conn, locks):
     assert result is None
     for l in leases:
         await locks.release(l)
-
-
-@pytest.mark.asyncio
-async def test_heartbeat_only_extends_own_holder_row(conn, locks):
-    set_lane_capacity(conn.raw, "research_lane", 2)
-    a = await locks.acquire_many(
-        ["research_lane"],
-        holder_id="s0",
-        task_id="t0",
-        action="specialist",
-        ttl_sec=30,
-    )
-    b = await locks.acquire_many(
-        ["research_lane"],
-        holder_id="s1",
-        task_id="t1",
-        action="specialist",
-        ttl_sec=30,
-    )
-    await locks.heartbeat(a, ttl_sec=999)
-    cur = conn.raw.execute(
-        "SELECT holder_id, expires_at FROM leases WHERE lane=? ORDER BY holder_id",
-        ("research_lane",),
-    )
-    rows = list(cur.fetchall())
-    by_holder = {r["holder_id"]: r["expires_at"] for r in rows}
-    assert by_holder["s0"] > by_holder["s1"]
-    await locks.release(a)
-    await locks.release(b)
 
 
 @pytest.mark.asyncio
@@ -1078,25 +1051,6 @@ async def test_dead_coordinator_does_not_release_specialist_gpu_lanes(conn, lock
     await pool.try_acquire(count=1, holder_id="specialist", task_id="specialist")
     assert await locks.reap_dead_holders() == []
     assert (await locks.lane_holders())["gpu_research_lane"] == 1
-
-
-def test_legacy_db_gains_unknown_owner_scope(tmp_path):
-    import sqlite3
-
-    path = tmp_path / "legacy.db"
-    with sqlite3.connect(path) as raw:
-        raw.execute(
-            "CREATE TABLE leases (lane TEXT, holder_id TEXT, task_id TEXT, action TEXT, pid INTEGER, "
-            "acquired_at TEXT, expires_at TEXT, heartbeat_at TEXT, PRIMARY KEY (lane, holder_id))"
-        )
-        raw.execute("INSERT INTO leases VALUES ('research_lane','old','old','specialist',123,'old','old','old')")
-    db = SqliteConnection(path)
-    try:
-        ensure_schema(db.raw)
-        row = db.raw.execute("SELECT owner_scope FROM leases").fetchone()
-        assert row["owner_scope"] == ""
-    finally:
-        db.close()
 
 
 def test_gpu_research_lane_seeded_capacity_one():

@@ -21,7 +21,7 @@ from hyperloom.orchestrator.actions.executors._server_patcher import (
     _versioned_patches_subdir_names,
 )
 
-# The two version strings the pre-release legs actually report: a bare point
+# The two version strings SGLang installs report: a bare point
 # release from SGLANG_PRETEND_VERSION, and an image built off the release branch.
 POINT_RELEASE = "0.5.18"
 BRANCH_BUILD = "0.5.18.dev20260825+g0c7ff19e3b"

@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import collections
 import math
+import sqlite3
 import time
 from collections.abc import Awaitable, Callable, Collection
 from functools import partial
@@ -17,6 +18,7 @@ from hyperloom.common.framework_arm import verdict_subject
 from hyperloom.common.llm_attribution import current_action_scope
 from hyperloom.inference_optimizer.protocol.action_surfaces import (
     KERNEL_AGENT_OWNED_ACTIONS,
+    REQUEST_KIND_TO_OWNED_ACTION,
 )
 from hyperloom.inference_optimizer.session.optimization_journal import Verdict
 from hyperloom.inference_optimizer.trace.trajectory_trace import trajectory_scope
@@ -30,7 +32,7 @@ from ..actions.executors._subprocess_kill import (
     STOP_GATE_POLL_SECONDS,
     TERM_GRACE_SECONDS,
 )
-from ..phases import machine_state as _phase_state
+from ..phases import dispatch_order, machine_state as _phase_state
 from ..bus.message_bus import Message
 from ..kernel.request_handlers import get_handler
 from ..policy.gate import (
@@ -38,6 +40,7 @@ from ..policy.gate import (
     PolicyDenied,
     SPECIALIST_FROM_AGENT_PREFIX,
 )
+from ..policy.specialist_in_flight import specialist_in_flight_denial
 from ..bus.gpu_pool import (
     GPU_LEASE_TTL_GRACE,
 )
@@ -46,13 +49,17 @@ from ..bus.resource_lock import (
     _expand_lanes,
 )
 from .sub_agent_runner import SubAgentResult
-from ..specialists.domains import is_custom_specialist_dispatch
-from ..state.task_registry import Task, TaskNotFound
+from ..specialists.wall_budget import limit_wall_budget_extension
+from ..state.task_registry import IllegalTransition, Task, TaskNotFound
 from .time_budget import (
     TIME_BUDGET_EXEMPT_ACTIONS,
-    action_fits_time_budget,
     expected_action_cost_minutes,
+    gated_phase_remaining_sec,
+    lease_ttl_sec,
     measured_baseline_runtime_sec,
+    phase_deadline,
+    specialist_admission_minutes,
+    time_budget_denial,
 )
 
 from ..collaborator import CoordinatorCollaborator
@@ -88,14 +95,7 @@ log = _logging.getLogger(__name__)
 # closing its lease, it is what it does first.
 #
 # The enumeration above has to stay exhaustive, so a serial step the unwind takes
-# and this sum does not name has to be removed from the unwind instead. One is:
-# ``run_grid`` fires a robustness tick at each variant boundary, and a cooperative
-# stop reaches that boundary the ordinary way, so the tick would sit between
-# recording the round's row and releasing what the round held -- eight more
-# seconds, spent observing the reap this cancel just ordered. It is skipped
-# whenever the scope is already cancelled rather than budgeted for, because the
-# rows the grid has already built are what a window short by those eight seconds
-# throws away, and they are worth more than one tick.
+# and this sum does not name has to be removed from the unwind instead.
 #
 # Past this window the coroutine is cancelled anyway, and the window is only ever
 # spent when work is still unwinding: the wait ends the moment the last victim is
@@ -122,6 +122,18 @@ _CANCEL_NOTICE_SEC: float = STOP_GATE_POLL_SECONDS
 _SELF_SETTLING_KINDS: frozenset[str] = frozenset({"targeted_build", "kernel_agent"})
 
 
+class HeldLeases(NamedTuple):
+    """Leases a caller already holds for a task, released when the task's run ends.
+
+    ``prebound_lease`` is the lanes; ``gpu_lease`` the SQLite GPU-specialist accounting lease; ``gpu_specialist_lease``
+    the Ray ``GpuSpecialistLease`` to close.
+    """
+
+    prebound_lease: Any = None
+    gpu_lease: Any = None
+    gpu_specialist_lease: Any = None
+
+
 class _InflightAction(NamedTuple):
     """A running action's handle: what it is, its task, and how to ask it to stop."""
 
@@ -132,9 +144,6 @@ class _InflightAction(NamedTuple):
 
 class DispatcherCollaborator(CoordinatorCollaborator):
     """Handles specialist dispatch: budget gating, action routing, and task enqueue."""
-
-    # Long, serially drained GPU grids in these phases must not starve the per-phase cyclic budget exit.
-    _BUDGET_GATED_DISPATCH_PHASES: frozenset[str] = frozenset({"FRAMEWORK_AGENT", "KERNEL_AGENT"})
 
     def __init__(self, coordinator) -> None:
         super().__init__(coordinator)
@@ -240,7 +249,10 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         return count
 
     def registry_lanes_ttl(self, kind: str) -> tuple[list[str], int]:
-        """Resolve ``(requires_lanes, lease_ttl_sec)`` from the action catalogue; lanes filtered to KNOWN_LANES.
+        """Resolve an action's lanes, filtered to KNOWN_LANES, and the lease it is granted.
+
+        The lease is the catalogue ``lease_ttl_sec`` floored by the cost this session admits the action at
+        (``time_budget.lease_ttl_sec``), so it can exceed the catalogue value once a baseline round is measured.
 
         Args:
             kind: The action name to resolve.
@@ -253,7 +265,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         if meta is None:
             return [], 0
         lanes = [lane for lane in meta.requires_lanes if lane in KNOWN_LANES]
-        return lanes, meta.lease_ttl_sec
+        return lanes, lease_ttl_sec(meta, measured_baseline_sec=measured_baseline_runtime_sec(self.shared_state))
 
     def cycle_idem_suffix(self) -> str:
         """Idempotency-key suffix scoping a per-cycle internal singleton to the
@@ -268,21 +280,15 @@ class DispatcherCollaborator(CoordinatorCollaborator):
     def dispatch_paused_for_phase_budget(self) -> bool:
         """True when the current phase's budget is spent, so the dispatcher should stop launching NEW phase-scoped variants.
 
-        In-flight tasks keep running; the phase advance decides whether they
-        are cancelled. Scoped to the discretionary search
-        phases. Applies to every session budget: the pause is driven purely by
-        the phase budget remaining (charge-back for short bounded runs, the
-        per-cycle window for long/unbounded runs), keeping dispatch consistent
-        with the phase-advance gates that consume the same helper.
+        In-flight tasks keep running; the phase advance decides whether they are cancelled. Scoped to the phases whose
+        own budget bounds their search. Applies to every session budget: the pause is driven purely by the phase budget
+        remaining (charge-back for short bounded runs, the per-cycle window for long/unbounded runs), keeping dispatch
+        consistent with the phase-advance gates that consume the same helper.
 
         Returns:
             ``True`` when new phase-scoped dispatch should pause for budget.
         """
-        state = self.shared_state
-        phase = (state.phase or "").upper()
-        if phase not in self._BUDGET_GATED_DISPATCH_PHASES:
-            return False
-        remaining = _phase_state.phase_budget_remaining_seconds(state)
+        remaining = gated_phase_remaining_sec(self.shared_state)
         return remaining is not None and remaining <= 0.0
 
     async def cancel_inflight_actions(
@@ -547,7 +553,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         Tasks already in ``_inflight_actions`` are skipped so a task is never
         dispatched twice across pump calls.
         """
-        queued = await self.tasks.queued()
+        queued = dispatch_order.in_dispatch_order(await self.tasks.queued(), self.shared_state.phase)
         if not queued:
             return
         holders = await self.locks.lane_holders()
@@ -556,29 +562,24 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         # once per pass (a pure env-var read, zero cost). The actual slot probe
         # (serving_slot_busy()) is deferred to just before each GPU specialist
         # admit so we don't miss a serving start that happened after the pass
-        # began. Both reads are best-effort — any failure leaves the check False
-        # (no pause) so dispatch is never blocked.
+        # began.
         _ray_serving_priority_enabled = False
         _serving_slot_busy_fn = None
-        try:
-            from ..actions.executors._ray_backend import (
-                ray_serving_priority_enabled as _rsp_enabled,
-                serving_slot_busy as _ssb,
-            )
+        from ..actions.executors._ray_backend import (
+            ray_serving_priority_enabled as _rsp_enabled,
+            serving_slot_busy as _ssb,
+        )
 
-            if _rsp_enabled():
-                _ray_serving_priority_enabled = True
-                _serving_slot_busy_fn = _ssb
-        except Exception:  # noqa: BLE001 — never block dispatch on the probe
-            pass
+        if _rsp_enabled():
+            _ray_serving_priority_enabled = True
+            _serving_slot_busy_fn = _ssb
         for task in queued:
             if task.task_id in self._inflight_actions:
                 continue
             self_settling = task.kind in _SELF_SETTLING_KINDS
-            retired = task.kind == "recover" and task.kind not in self.sub.executor_registry
-            if not retired and await self._cancel_queued_task_over_budget(task):
+            if await self._cancel_queued_task_over_budget(task):
                 continue
-            lanes_needed = [] if retired else list(task.requires_lanes or [])
+            lanes_needed = list(task.requires_lanes or [])
             if lanes_needed:
                 # SQLite lane gate. Under single-node Ray execution the
                 # authoritative GPU mutex is Ray's custom
@@ -614,21 +615,18 @@ class DispatcherCollaborator(CoordinatorCollaborator):
                 lease = None
             gpu_lease = None
             gpu_specialist_lease: Any = None
-            extra_context: dict[str, Any] = {}
+            extra_context = self._dispatch_context(task)
             if task.kind == "specialist":
                 params = task.params or {}
                 from ..specialists.profile import requires_gpu
 
                 needs_gpu = requires_gpu(params)
-                # Absolute stop instant, tightened by the session bound.
-                specialist_deadline = self._specialist_deadline(params=params)
-                extra_context["specialist_deadline"] = specialist_deadline
-                extra_context["specialist_progress_cb"] = self._specialist_progress_publisher(task)
+                specialist_deadline = extra_context["specialist_deadline"]
                 if needs_gpu:
                     # Probe serving-slot state immediately before admitting
                     # this GPU specialist (not once per pass) so a serving start
-                    # that races the pass does not slip through. Still best-effort:
-                    # any probe failure is treated as False (no pause).
+                    # that races the pass does not slip through. A Ray or OS error
+                    # in the probe is treated as False (no pause).
                     _immediate_pause = False
                     if _ray_serving_priority_enabled and _serving_slot_busy_fn is not None:
                         _immediate_pause = _serving_slot_busy_fn()
@@ -684,8 +682,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
                             serving_tp,
                         )
                         gpu_count = serving_tp
-                    # Iron law: kill <= gpu_lease TTL <= gpu_research_lane TTL,
-                    # measured from the same deadline carried down to the reaper.
+                    # Timed from the same deadline carried down to the reaper.
                     gpu_ttl_sec = self.gpu_lease_ttl_sec(
                         int(task.lease_ttl_sec or 0),
                         deadline=specialist_deadline,
@@ -768,10 +765,8 @@ class DispatcherCollaborator(CoordinatorCollaborator):
             atask = asyncio.create_task(
                 self.run_task_registered(
                     task,
-                    prebound_lease=lease,
+                    HeldLeases(prebound_lease=lease, gpu_lease=gpu_lease, gpu_specialist_lease=gpu_specialist_lease),
                     extra_context=extra_context,
-                    gpu_lease=gpu_lease,
-                    gpu_specialist_lease=gpu_specialist_lease,
                     cancel_scope=cancel_scope,
                     on_complete=None if self_settling else partial(self._queue_completion, task),
                 ),
@@ -780,7 +775,6 @@ class DispatcherCollaborator(CoordinatorCollaborator):
             atask.add_done_callback(self._report_spawned_failure(task))
             if task.kind == "specialist":
                 self.shared_state.note_specialist_dispatched(str((task.params or {}).get("domain") or ""))
-                self.shared_state.custom_specialist_dispatched |= is_custom_specialist_dispatch(task.params or {})
 
     @staticmethod
     def _report_spawned_failure(task: Task) -> "Callable[[asyncio.Task[Any]], None]":
@@ -806,11 +800,9 @@ class DispatcherCollaborator(CoordinatorCollaborator):
     async def run_task_registered(
         self,
         task: Task,
+        held: HeldLeases = HeldLeases(),
         *,
-        prebound_lease: Any = None,
         extra_context: dict[str, Any] | None = None,
-        gpu_lease: Any = None,
-        gpu_specialist_lease: Any = None,
         cancel_scope: CancelScope | None = None,
         on_complete: Callable[[SubAgentResult], Awaitable[None]] | None = None,
     ) -> "SubAgentResult | None":
@@ -823,11 +815,10 @@ class DispatcherCollaborator(CoordinatorCollaborator):
 
         Args:
             task: The task row to run.
-            prebound_lease: Lanes the caller already holds; when ``None`` and
-                the task needs lanes they are taken here, non-blocking.
+            held: Leases the caller already holds and this call releases; when
+                no lanes are held and the task needs lanes they are taken
+                here, non-blocking.
             extra_context: Per-task extras (wall budget, gpu ids, …).
-            gpu_lease: SQLite GPU-specialist accounting lease to release, if any.
-            gpu_specialist_lease: Ray ``GpuSpecialistLease`` to close, if any.
             cancel_scope: The caller's cancel channel. The pump passes one
                 because it registers its handle before this coroutine starts;
                 other callers leave it ``None`` and are registered here.
@@ -838,9 +829,8 @@ class DispatcherCollaborator(CoordinatorCollaborator):
             The runner's result, or ``None`` when the task's lanes were busy, in
             which case the row is untouched and still queued.
         """
-        lease = prebound_lease
-        retired = task.kind == "recover" and task.kind not in self.sub.executor_registry and task.state == "queued"
-        if lease is None and task.requires_lanes and not retired:
+        lease = held.prebound_lease
+        if lease is None and task.requires_lanes:
             lease = await self.locks.try_acquire_many(
                 list(task.requires_lanes),
                 holder_id=task.task_id,
@@ -863,33 +853,35 @@ class DispatcherCollaborator(CoordinatorCollaborator):
                 self._inflight_actions[task.task_id] = _InflightAction(task.kind, handle, cancel_scope)
 
         async def release_resources() -> bool:
-            if gpu_specialist_lease is not None:
-                closed = await asyncio.to_thread(gpu_specialist_lease.close)
+            if held.gpu_specialist_lease is not None:
+                closed = await asyncio.to_thread(held.gpu_specialist_lease.close)
                 if closed is not True:
                     log.warning("dispatcher: task=%s GPU cleanup unconfirmed; retaining capacity", task.task_id)
                     return False
-            if gpu_lease is not None:
-                await self.gpu_specialist_pool.release(gpu_lease)
+            if held.gpu_lease is not None:
+                await self.gpu_specialist_pool.release(held.gpu_lease)
             return True
 
         # Fresh tasks carry the phase coordinates frozen when their row was
         # authored. Legacy rows have no record and remain legacy on resume.
         from hyperloom.inference_optimizer.breakdown.recorder import phase_event
+        from hyperloom.inference_optimizer.breakdown.recorder.phase_records import ActionDispatch, PhaseCycle
         from hyperloom.orchestrator.state.task_registry import task_dispatch_record
 
         dispatch_record = task_dispatch_record(task)
         if dispatch_record is not None:
             try:
                 recorded = phase_event.record_dispatch(
-                    action=str(task.kind or ""),
-                    task_id=str(task.task_id or ""),
-                    phase=str(dispatch_record["phase"]),
-                    macro_cycle=int(dispatch_record["macro_cycle"]),
-                    tick=int(dispatch_record["tick"]),
-                    dispatch_class=str(dispatch_record["dispatch_class"]),
-                    allowed=bool(dispatch_record["allowed"]),
-                    denial_rule=dispatch_record["denial_rule"],
-                    dispatched_unix=time.time(),
+                    ActionDispatch(
+                        at=PhaseCycle(str(dispatch_record["phase"]), int(dispatch_record["macro_cycle"])),
+                        action=str(task.kind or ""),
+                        task_id=str(task.task_id or ""),
+                        tick=int(dispatch_record["tick"]),
+                        dispatch_class=str(dispatch_record["dispatch_class"]),
+                        allowed=bool(dispatch_record["allowed"]),
+                        denial_rule=dispatch_record["denial_rule"],
+                        dispatched_unix=time.time(),
+                    )
                 )
                 if not recorded:
                     raise RuntimeError("dispatch evidence was not durably recorded")
@@ -988,7 +980,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         """How long a specialist of this shape is worth running, ignoring the session.
 
         A mode-tiered base (research 10min / patch 60min) amplified by the macro-cycle
-        count and hard-capped at 4h. Bench-capable patch specialists are floored
+        count and hard-capped at 4h; a no-lease-extension dispatch gets the cap. Bench-capable patch specialists are floored
         at the rebench helper's timeout plus a 10-minute startup allowance, since
         a budget under that guarantees the kill lands mid-benchmark::
 
@@ -1007,11 +999,13 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         Returns:
             float: A positive wall-clock budget in seconds.
         """
-        from ..specialists.profile import resolve_specialist_profile, wall_budget_base_min
+        from ..specialists.profile import NO_LEASE_EXTENSION, resolve_specialist_profile, wall_budget_base_min
         from ..actions.executors._subprocess_kill import resolve_benchmark_timeouts
 
         macro_cycle = int(self.shared_state.macro_cycle or 0)
-        budget_sec = min(wall_budget_base_min(params) * (macro_cycle + 1), 240.0) * 60.0
+        cap_min = 240.0
+        base_min = wall_budget_base_min(params) * (macro_cycle + 1)
+        budget_sec = (cap_min if (params or {}).get(NO_LEASE_EXTENSION) else min(base_min, cap_min)) * 60.0
         if resolve_specialist_profile(params).reserves_benchmark_lane:
             budget_sec = max(budget_sec, resolve_benchmark_timeouts()[1] + 10 * 60)
         return budget_sec
@@ -1027,10 +1021,20 @@ class DispatcherCollaborator(CoordinatorCollaborator):
             params: Specialist dispatch parameters.
 
         Returns:
-            Deadline: The earlier of the shape budget and the session bound.
+            Deadline: The earliest of the shape budget, the session bound and the gated phase's end.
         """
         shape = Deadline.after(self._specialist_wall_budget_sec(params=params))
-        return shape.tightened_to(self.shared_state.session_deadline())
+        return shape.tightened_to(self.shared_state.session_deadline()).tightened_to(phase_deadline(self.shared_state))
+
+    def _dispatch_context(self, task: Task) -> dict[str, Any]:
+        """The bounds a dispatched task runs under: its phase's end and, for a specialist, its own stop instant."""
+        context: dict[str, Any] = {"phase_deadline": phase_deadline(self.shared_state)}
+        if task.kind == "specialist":
+            stop = self._specialist_deadline(params=task.params or {})
+            ceiling = context["phase_deadline"]
+            limit_wall_budget_extension(task.task_id, None if ceiling is None else ceiling.at - stop.at)
+            context.update(specialist_deadline=stop, specialist_progress_cb=self._specialist_progress_publisher(task))
+        return context
 
     def resolve_serving_tp(self) -> int:
         """Resolve the live serving process's TP size (cards it holds).
@@ -1054,11 +1058,13 @@ class DispatcherCollaborator(CoordinatorCollaborator):
     ) -> int:
         """Single source for the GPU-specialist lease / ``gpu_research_lane`` TTL.
 
-        The iron law is ``kill ≤ gpu_lease TTL ≤ gpu_research_lane TTL`` — both the
-        GPU-pool lease (dispatch) and the lane lease (intent_router) must outlive
-        the kill the reaper performs at the specialist's deadline. A caller that
-        has already anchored that deadline passes it in, so the kill and the
-        lease are not timed from two different readings of the clock.
+        Nothing releases a lease when this TTL passes; the reaper stops the
+        specialist at its deadline. The lane expiry feeds the in-flight
+        ``lease_expires_in_sec`` countdown and ``recover --confirm-scope-gone``'s
+        liveness check, so covering the deadline keeps both from calling a lease
+        lapsed while its specialist can still run. A caller that has already
+        anchored the deadline passes it in, so the kill and the lease are timed
+        from one reading of the clock.
 
         Args:
             floor_ttl_sec: A lower bound (e.g. the registry / existing
@@ -1222,17 +1228,17 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         # Settle the dispatch row on the phase that ordered it, whichever way
         # the promotion above ended.
         from hyperloom.inference_optimizer.breakdown.recorder import phase_event
+        from hyperloom.inference_optimizer.breakdown.recorder.phase_records import ActionSettlement
 
         phase_event.record_settle(
-            task_id=str(task.task_id or ""),
-            status=str(result.state or ""),
-            decision=verdict.value,
-            error_class=result_payload.get("error_class") or result.error_class,
-            workspace=result_payload.get("workspace"),
-            settled_unix=time.time(),
-            phase=str(self.shared_state.phase or ""),
-            macro_cycle=int(self.shared_state.macro_cycle or 0),
-            action=str(task.kind or ""),
+            ActionSettlement(
+                task_id=str(task.task_id or ""),
+                status=str(result.state or ""),
+                decision=verdict.value,
+                error_class=result_payload.get("error_class") or result.error_class,
+                workspace=result_payload.get("workspace"),
+                settled_unix=time.time(),
+            )
         )
         if task.kind in ("explore", "integrate_patch"):
             self._coord.writeback.record_intervention_for_task(task, result.result, verdict)
@@ -1298,27 +1304,27 @@ class DispatcherCollaborator(CoordinatorCollaborator):
                 return False
         return True
 
-    def _phase_denial_for_action(
-        self,
-        action_name: str,
-    ) -> PolicyDenied | None:
-        """Refuse an action the current phase reserves for the Coordinator.
+    def _phase_denial_for_action(self, action_name: str) -> PolicyDenied | None:
+        """Refuse an action the current phase does not let an agent propose.
+
+        Before the phase machine has entered its first phase there is no
+        contract to hold the action to, so the gate abstains.
 
         Args:
             action_name: The proposed/delegated action name.
 
         Returns:
-            A :class:`PolicyDenied` when the phase reserves the action, else
-            ``None``.
+            A :class:`PolicyDenied` when the phase does not offer the action, else ``None``.
         """
         action = str(action_name or "").strip()
         phase = str(self.shared_state.phase or "").strip().upper()
-        if not _phase_state.coordinator_reserved_in_phase(action, phase):
+        proposable = _phase_state.allowed_actions_for(phase)
+        if not phase or action in proposable:
             return None
         return PolicyDenied(
-            f"action={action!r} is Coordinator-dispatched while the phase is {phase!r}",
+            f"action={action!r} is not proposable while the phase is {phase!r}",
             rule="phase_incompatible",
-            hint=f"{phase} proposes: {', '.join(_phase_state.allowed_actions_for(phase)) or '(none)'}",
+            hint=f"{phase} proposes: {', '.join(proposable) or '(none)'}",
         )
 
     def _sequence_denial_for_action(
@@ -1362,8 +1368,9 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         action_name: str,
         *,
         fallback_cost_minutes: float | None = None,
+        params: dict[str, Any] | None = None,
     ) -> PolicyDenied | None:
-        """Refuse an action whose expected cost cannot fit the remaining session budget.
+        """Refuse an action whose expected cost cannot fit the remaining session budget or gated phase budget.
 
         The first of the wall-clock defences: cheaper to never start a 60-minute
         action with 20 minutes left than to reap it half-done, because a reaped
@@ -1381,6 +1388,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
             fallback_cost_minutes: What to price the action at when the
                 catalogue does not carry it. Without it, a kind deliberately
                 kept out of the catalogue is admitted at any remaining budget.
+            params: The action's parameters; a specialist is priced at no less than the shortest run worth starting.
 
         Returns:
             A :class:`PolicyDenied` when the budget cannot fit the action, else
@@ -1401,26 +1409,15 @@ class DispatcherCollaborator(CoordinatorCollaborator):
                 meta,
                 measured_baseline_sec=measured_baseline_runtime_sec(self.shared_state),
             )
-        usable_sec = self.shared_state.session_budget_usable_sec()
-        if action_fits_time_budget(
-            usable_sec=usable_sec,
-            expected_cost_minutes=expected_min,
-        ):
-            return None
-        remaining_min = (usable_sec or 0.0) / 60.0
-        return PolicyDenied(
-            f"action={action!r} denied: needs ~{expected_min:.0f} min but only "
-            f"{remaining_min:.0f} min of the session budget is left",
-            rule="time_budget",
-            hint=(
-                "the wall-clock budget cannot fit this action; delegate `report` "
-                "to close the session, or pick an action that fits the time left"
-            ),
-        )
+        if action == "specialist":
+            expected_min = max(expected_min, specialist_admission_minutes(self.shared_state, params))
+        return time_budget_denial(action, expected_min, self.shared_state)
 
     def admission_denial_for_action(
         self,
         action_name: str,
+        *,
+        params: dict[str, Any] | None = None,
     ) -> PolicyDenied | None:
         """Run every pre-dispatch gate for an action name, first denial wins.
 
@@ -1429,17 +1426,17 @@ class DispatcherCollaborator(CoordinatorCollaborator):
 
         Args:
             action_name: The proposed/delegated action name.
+            params: The proposal's parameters, which price a specialist.
 
         Returns:
             The first :class:`PolicyDenied` that fires, else ``None``.
         """
-        denied = self._phase_denial_for_action(action_name)
-        if denied is not None:
-            return denied
-        denied = self._sequence_denial_for_action(action_name)
-        if denied is not None:
-            return denied
-        return self.time_budget_denial_for_action(action_name)
+        return (
+            self._phase_denial_for_action(action_name)
+            or self._sequence_denial_for_action(action_name)
+            or specialist_in_flight_denial(action_name, params, self.tasks, self.shared_state.find_gap)
+            or self.time_budget_denial_for_action(action_name, params=params)
+        )
 
     async def _cancel_queued_task_over_budget(self, task: Task) -> bool:
         """Drop a queued task the budget can no longer fit, before it takes a lane.
@@ -1463,6 +1460,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         denied = self.time_budget_denial_for_action(
             task.kind,
             fallback_cost_minutes=(ttl_sec / 60.0) if ttl_sec > 0 else None,
+            params=task.params,
         )
         if denied is None:
             return False
@@ -1470,9 +1468,9 @@ class DispatcherCollaborator(CoordinatorCollaborator):
             await self.tasks.transition(
                 task.task_id,
                 "cancelled",
-                evidence={"reason": "time_budget", "error": str(denied)},
+                evidence={"reason": denied.rule, "error": str(denied)},
             )
-        except Exception:
+        except (sqlite3.Error, TaskNotFound, IllegalTransition):
             log.exception(
                 "dispatcher: could not cancel over-budget task=%s kind=%s",
                 task.task_id,
@@ -1497,17 +1495,20 @@ class DispatcherCollaborator(CoordinatorCollaborator):
             },
         )
         # A cancelled conc_sweep never writes last_conc_sweep on its own, so SWEEP
-        # would idle. Stamp the skip here so the phase machine closes on sweep_done.
+        # would idle. Stamp the skip here so SWEEP can exit.
         if str(task.kind or "") == "conc_sweep":
             self._coord.phase_sweep.record_session_budget_conc_sweep_skip(denied=denied)
         return True
 
-    def sequence_denial_for_request(
+    def admission_denial_for_request(
         self,
         target_agent: str,
         kind: str,
     ) -> PolicyDenied | None:
-        """Reject kernel requests that skip the baseline prerequisite (invariant: nothing kernel-side runs before baseline_tput > 0).
+        """Reject kernel requests that skip the baseline prerequisite or that the wall-clock budget cannot fit.
+
+        Nothing kernel-side runs before baseline_tput > 0, and a request runs its handler inline, so the time gate of
+        the action it gates as is its only chance to be refused.
 
         Args:
             target_agent: The request's target agent; only ``"kernel_agent"`` is
@@ -1517,7 +1518,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
 
         Returns:
             A :class:`PolicyDenied` when the kernel request must wait for
-            baseline, else ``None``.
+            baseline or does not fit the time left, else ``None``.
         """
         target = str(target_agent or "").strip()
         req_kind = str(kind or "").strip()
@@ -1533,7 +1534,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
                 rule="execution_order",
                 hint="propose/delegate `baseline` before kernel requests",
             )
-        return None
+        return self.time_budget_denial_for_action(REQUEST_KIND_TO_OWNED_ACTION.get(req_kind, req_kind))
 
 
 def _dispatch_policy_denied_evidence(task: Task) -> dict[str, Any]:

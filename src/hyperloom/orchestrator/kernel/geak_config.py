@@ -123,55 +123,21 @@ def _geak_revalidation_decision(
     return "validated"
 
 
-def _geak_result_has_material(
-    result: Any,
-    *,
-    prev_best_flags: str = "",
-    prev_best_envs: Any = None,
-    prev_best_controls: Any = None,
-) -> bool:
-    """Decide whether a GEAK result carries a material optimization product."""
-    from hyperloom.inference_optimizer.canonical_fingerprint import (
-        canonical_fingerprint,
-    )
+def _geak_result_has_artifact(result: dict[str, Any]) -> bool:
+    """Whether a GEAK result carries an authored kernel, head, overlay or patch."""
 
     def _has_nonempty(entries: Any) -> bool:
-        # A list whose items are all empty/blank (e.g. ``[""]``) is not material.
+        # A list whose items are all empty/blank (e.g. ``[""]``) carries nothing.
         if not isinstance(entries, (list, tuple, set)):
             return bool(entries)
         return any(str(e).strip() for e in entries)
 
-    if not isinstance(result, dict) or not result:
-        return True
-    if _has_nonempty(result.get("accepted_kernels")):
-        return True
-    if _has_nonempty(result.get("accepted_heads")):
-        return True
-    if str(result.get("final_overlay") or "").strip():
-        return True
-    if str(result.get("final_patch") or "").strip():
-        return True
-    accepted_flags, parsed_envs = _accepted_config_as_variant(result.get("accepted_config"))
-    prior_controls = _accepted_config_controls(prev_best_controls)
-    controls = _accepted_config_controls(
-        result.get("accepted_config"), inherited_remove_args=prior_controls.get("remove_args")
+    return (
+        _has_nonempty(result.get("accepted_kernels"))
+        or _has_nonempty(result.get("accepted_heads"))
+        or bool(str(result.get("final_overlay") or "").strip())
+        or bool(str(result.get("final_patch") or "").strip())
     )
-    # A missing / all-empty accepted_config carries no config optimization; a
-    # bare fingerprint mismatch against a non-empty current_best is NOT material
-    # (promoting it would wipe the existing config to empty).
-    if not accepted_flags and not parsed_envs and not controls:
-        return False
-    # Both sides go through the same guard: a resume can hand current_best the raw accepted_config, and an untrusted
-    # key on one side only reads as a diff.
-    prev_envs, _dropped = filter_untrusted_env_mapping(
-        dict(prev_best_envs or {}),
-        allow_predicate=is_allowed_variant_env_key,
-    )
-    got_fp = canonical_fingerprint(accepted_flags, parsed_envs, **controls)
-    prev_fp = canonical_fingerprint(
-        str(prev_best_flags or ""), prev_envs, **(_accepted_config_controls(prev_best_controls) if controls else {})
-    )
-    return got_fp != prev_fp
 
 
 def _normalize_geak_overlay_dir(overlay: str) -> str:
@@ -225,7 +191,12 @@ def geak_spec_is_env(spec: Any) -> bool:
 
 
 def _geak_accepted_kernel_specs(result: Any) -> list[dict[str, Any]]:
-    """Return the authored kernels a GEAK result accepted, both lanes, deduped."""
+    """Return the authored kernels a GEAK result accepted, both lanes, deduped.
+
+    GEAK's own ``e2e_delta_pct`` never decides whether a kernel counts: the rebench
+    measures it. The delta is read only as twin evidence -- a slot tag and the symbol
+    it produced report the same number -- and an absent or unreadable one is none.
+    """
     if not isinstance(result, dict):
         return []
     out: list[dict[str, Any]] = []
@@ -236,14 +207,13 @@ def _geak_accepted_kernel_specs(result: Any) -> list[dict[str, Any]]:
             continue
         if geak_spec_is_env(k):
             continue
-        try:
-            delta = float(k.get("e2e_delta_pct") or 0.0)
-        except (TypeError, ValueError):
-            continue
-        if delta <= 0.0:
-            continue
-        name = str(k.get("short_name") or k.get("kernel_id") or k.get("cand_tag") or "").strip()
+        name = geak_spec_name(k)
         if not name:
+            continue
+        try:
+            delta = float(k.get("e2e_delta_pct"))
+        except (TypeError, ValueError):
+            out.append(k)
             continue
         twin = (str(k.get("op_kind") or ""), f"{delta:.4f}")
         pos = index.get(twin)
@@ -264,11 +234,11 @@ def _geak_accepted_kernel_specs(result: Any) -> list[dict[str, Any]]:
 
 
 def _geak_has_accepted_kernel(result: Any) -> bool:
-    """Report whether a GEAK result carries an accepted kernel that gained."""
+    """Report whether a GEAK result names an authored kernel for the rebench to measure."""
     return bool(_geak_accepted_kernel_specs(result))
 
 
-def _geak_overlay_is_loadable(overlay: str) -> bool:
+def geak_overlay_is_loadable(overlay: str) -> bool:
     """Report whether an overlay dir can actually install an authored kernel."""
     from hyperloom.common.overlay import overlay_is_loadable
 
@@ -308,11 +278,18 @@ def _geak_overlay_digest(overlay: str) -> str:
 
 
 def _geak_sweep_measured_tput(res: dict[str, Any]) -> float | None:
-    """The measured throughput a ``sweep_via_geak`` replay produced, or None."""
+    """The value a ``sweep_via_geak`` replay measured on its requested axis, or None.
+
+    ``measured_value`` is the axis-neutral field; the ``output_throughput`` fallback keeps results recorded before it
+    existed readable. Off the output axis only the neutral field is populated, because there the number is not a
+    throughput.
+    """
     if not isinstance(res, dict):
         return None
     best = res.get("promotion_measurement")
     if not isinstance(best, dict):
         return None
-    tput = best.get("output_throughput")
+    tput = best.get("measured_value")
+    if not isinstance(tput, (int, float)):
+        tput = best.get("output_throughput")
     return float(tput) if isinstance(tput, (int, float)) and tput > 0 else None

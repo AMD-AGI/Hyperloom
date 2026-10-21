@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from hyperloom.orchestrator.actions.executors._server_lifecycle import GpuHandoff
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.state.task_registry import Task
@@ -85,7 +86,7 @@ async def test_geak_kernel_phase_recovers_existing_ok_result_on_resume(
 
     revalidations: list[str] = []
 
-    async def _record_revalidation(*, reason: str) -> None:
+    async def _record_revalidation(*, reason: str, handoff_cards: list[int] | None) -> None:
         revalidations.append(reason)
 
     phase._revalidate_geak_candidate = _record_revalidation  # type: ignore[method-assign]
@@ -188,6 +189,10 @@ async def test_a_baseline_reproduction_failure_keeps_the_absent_backends(
     coord.phase_kernel._record_geak_kernel_journey = lambda _result: None
     monkeypatch.setattr("hyperloom.orchestrator.phases.kernel._GEAK_RUNNER_MODULE", runner.stem)
     monkeypatch.setenv("PYTHONPATH", os.pathsep.join(filter(None, [str(tmp_path), os.environ.get("PYTHONPATH")])))
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.actions.executors._server_lifecycle.free_gpus_for_handoff",
+        lambda *_args, **_kwargs: GpuHandoff(reaped=[], busy=[], holders=[], unverified=""),
+    )
 
     await coord.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
 
@@ -241,7 +246,7 @@ async def test_geak_handoff_preserves_serving_fidelity_knobs_and_output_metric(
 
 
 @pytest.mark.asyncio
-async def test_an_agentx_handoff_names_the_server_script_not_the_aiperf_client(
+async def test_an_agentx_handoff_names_the_server_script_not_the_mlperf_client(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -254,7 +259,7 @@ async def test_an_agentx_handoff_names_the_server_script_not_the_aiperf_client(
     """
     benchmarks = tmp_path / "InferenceX" / "benchmarks"
     benchmarks.mkdir(parents=True)
-    for name in ("benchmark_lib.sh", "vllm_mi355x.sh", "aiperf_client.sh"):
+    for name in ("benchmark_lib.sh", "vllm_mi355x.sh", "mlperf_agentic_client.sh"):
         (benchmarks / name).write_text("# stub\n", encoding="utf-8")
     recipe = tmp_path / "baseline_config.with_envs.yaml"
     recipe.write_text(
@@ -264,7 +269,7 @@ async def test_an_agentx_handoff_names_the_server_script_not_the_aiperf_client(
                     "framework": "vllm",
                     "runner_type": "mi355x",
                     "envs": {"FRAMEWORK": "vllm", "AGENTX_DURATION": "3600"},
-                    "benchmark_script": "aiperf_client.sh",
+                    "benchmark_script": "mlperf_agentic_client.sh",
                     "inferencex_path": str(benchmarks.parent),
                     "workload_spec": {
                         "kind": "agentx_trace_replay",

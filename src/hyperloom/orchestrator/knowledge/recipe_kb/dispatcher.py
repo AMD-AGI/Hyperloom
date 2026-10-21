@@ -9,6 +9,8 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
+from .local_store import RecipeFilters
+
 
 log = logging.getLogger(__name__)
 
@@ -29,6 +31,15 @@ def _prefer_score(row: dict[str, Any], prefer: dict[str, Any]) -> int:
         elif str(actual or "").strip().lower() == str(wanted).strip().lower():
             score += 1
     return score
+
+
+@dataclass(frozen=True)
+class _ReadRequest:
+    """What a read asked for, as the audit event's request block records it."""
+
+    canonical_id: str = ""
+    label_match: dict[str, Any] | None = None
+    prefer: dict[str, Any] | None = None
 
 
 @dataclass
@@ -55,19 +66,17 @@ class RecipeKB:
 
     def _read_event(
         self,
-        *,
         method: str,
         row: dict[str, Any] | None,
-        canonical_id: str = "",
-        label_match: dict[str, Any] | None = None,
-        prefer: dict[str, Any] | None = None,
+        request: _ReadRequest = _ReadRequest(),
+        *,
         candidates: int = 0,
     ) -> dict[str, Any]:
         result = None
         if isinstance(row, dict):
             result = {
                 "canonical_id": str(row.get("canonical_id") or ""),
-                "exact": bool(canonical_id and str(row.get("canonical_id") or "") == canonical_id),
+                "exact": bool(request.canonical_id and str(row.get("canonical_id") or "") == request.canonical_id),
                 "best_throughput": float(row.get("best_throughput") or 0.0),
                 "best_config_nonempty": bool(row.get("best_config")),
             }
@@ -81,9 +90,9 @@ class RecipeKB:
             "hit": row is not None,
             "candidates": int(candidates),
             "request": {
-                "canonical_id": canonical_id or None,
-                "prefer_keys": sorted((prefer or {}).keys()),
-                "label_match": label_match or None,
+                "canonical_id": request.canonical_id or None,
+                "prefer_keys": sorted((request.prefer or {}).keys()),
+                "label_match": request.label_match or None,
             },
             "result": result,
             "provenance": {
@@ -173,14 +182,7 @@ class RecipeKB:
         """Read one exact local Recipe row."""
 
         row = self.local.get_recipe(canonical_id=canonical_id, version=version)
-        self._emit_audit(
-            self._read_event(
-                method="get_recipe",
-                row=row,
-                canonical_id=canonical_id,
-                prefer=prefer,
-            )
-        )
+        self._emit_audit(self._read_event("get_recipe", row, _ReadRequest(canonical_id=canonical_id, prefer=prefer)))
         return row
 
     def get_authoritative_recipe(
@@ -192,34 +194,20 @@ class RecipeKB:
         """Read the exact authoritative local row."""
 
         row = self.local.get_recipe(canonical_id=canonical_id, version=version)
-        self._emit_audit(
-            self._read_event(
-                method="get_authoritative_recipe",
-                row=row,
-                canonical_id=canonical_id,
-            )
-        )
+        self._emit_audit(self._read_event("get_authoritative_recipe", row, _ReadRequest(canonical_id=canonical_id)))
         return row
 
     def search(
         self,
         *,
         label_match: dict[str, Any] | None = None,
-        metric_filters: dict[str, Any] | None = None,
-        updated_since: str | None = None,
-        order_by: str = "updated_at DESC",
         limit: int = 50,
         prefer: dict[str, Any] | None = None,
+        filters: RecipeFilters = RecipeFilters(),
     ) -> list[dict[str, Any]]:
         """Search local Recipe rows and optionally rerank by workload hints."""
 
-        rows = self.local.search(
-            label_match=label_match,
-            metric_filters=metric_filters,
-            updated_since=updated_since,
-            order_by=order_by,
-            limit=limit,
-        )
+        rows = self.local.search(label_match=label_match, limit=limit, filters=filters)
         if prefer:
             rows = sorted(
                 rows,
@@ -228,32 +216,13 @@ class RecipeKB:
             )
         self._emit_audit(
             self._read_event(
-                method="search",
-                row=rows[0] if rows else None,
-                label_match=label_match,
-                prefer=prefer,
+                "search",
+                rows[0] if rows else None,
+                _ReadRequest(label_match=label_match, prefer=prefer),
                 candidates=len(rows),
             )
         )
         return rows
-
-    def append_attempt(self, **kwargs: Any) -> dict[str, Any]:
-        """Append one local attempt row."""
-
-        return self.local.append_attempt(**kwargs)
-
-    def list_attempts(
-        self,
-        *,
-        canonical_id: str,
-        session_id: str | None = None,
-    ) -> list[dict[str, Any]]:
-        """List local attempts, optionally filtered by session id."""
-
-        return self.local.list_attempts(
-            canonical_id=canonical_id,
-            session_id=session_id,
-        )
 
     def close(self) -> None:
         """Close the local store when it exposes a transport."""
@@ -261,10 +230,7 @@ class RecipeKB:
         close = getattr(self.local, "close", None)
         if not callable(close):
             return
-        try:
-            close()
-        except Exception:
-            log.exception("recipe_kb: local store close raised")
+        close()
 
 
 __all__ = ["RecipeKB"]

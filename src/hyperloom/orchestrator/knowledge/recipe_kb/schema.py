@@ -6,7 +6,26 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping, TypeVar
+
+
+_Row = TypeVar("_Row")
+
+
+def _text(d: Mapping[str, Any], key: str) -> str:
+    """Read one text field, mapping a missing or empty value to ``""``."""
+
+    return str(d.get(key) or "")
+
+
+def _rows(
+    d: Mapping[str, Any],
+    key: str,
+    build: Callable[[Mapping[str, Any]], _Row],
+) -> list[_Row]:
+    """Read one list-valued field, building every dict-shaped row and dropping the rest."""
+
+    return [build(row) for row in (d.get(key) or []) if isinstance(row, dict)]
 
 
 def _coerce_server_args(value: Any) -> str:
@@ -103,6 +122,11 @@ class Gap:
     description: str
     metrics: str
 
+    @classmethod
+    def from_dict(cls, d: Mapping[str, Any]) -> Gap:
+        """Build a gap from a (possibly partial) dict."""
+        return cls(description=_text(d, "description"), metrics=_text(d, "metrics"))
+
 
 @dataclass
 class Pitfall:
@@ -111,6 +135,11 @@ class Pitfall:
     description: str
     severity: str = ""
 
+    @classmethod
+    def from_dict(cls, d: Mapping[str, Any]) -> Pitfall:
+        """Build a pitfall from a (possibly partial) dict."""
+        return cls(description=_text(d, "description"), severity=_text(d, "severity"))
+
 
 @dataclass
 class Lesson:
@@ -118,6 +147,12 @@ class Lesson:
 
     statement: str
     measured_impact: Any = ""
+
+    @classmethod
+    def from_dict(cls, d: Mapping[str, Any]) -> Lesson:
+        """Build a lesson from a (possibly partial) dict."""
+        # ``measured_impact`` is free-form; keep it verbatim rather than coercing it to text.
+        return cls(statement=_text(d, "statement"), measured_impact=d.get("measured_impact") or "")
 
 
 @dataclass
@@ -137,12 +172,12 @@ class StackFingerprint:
         }
 
     @classmethod
-    def from_dict(cls, d: dict[str, Any]) -> StackFingerprint:
+    def from_dict(cls, d: Mapping[str, Any]) -> StackFingerprint:
         """Build a fingerprint from a (possibly partial) dict."""
         return cls(
-            vllm_version=str(d.get("vllm_version") or ""),
-            aiter_commit=str(d.get("aiter_commit") or ""),
-            rocm_version=str(d.get("rocm_version") or ""),
+            vllm_version=_text(d, "vllm_version"),
+            aiter_commit=_text(d, "aiter_commit"),
+            rocm_version=_text(d, "rocm_version"),
         )
 
 
@@ -178,19 +213,19 @@ class KernelOptimization:
         }
 
     @classmethod
-    def from_dict(cls, d: dict[str, Any]) -> KernelOptimization:
+    def from_dict(cls, d: Mapping[str, Any]) -> KernelOptimization:
         """Build a kernel-optimization record from a dict."""
         return cls(
-            kernel_id=str(d.get("kernel_id") or ""),
-            source_file=str(d.get("source_file") or ""),
-            artifact_path=str(d.get("artifact_path") or ""),
+            kernel_id=_text(d, "kernel_id"),
+            source_file=_text(d, "source_file"),
+            artifact_path=_text(d, "artifact_path"),
             micro_speedup=float(d.get("micro_speedup") or 0.0),
-            decision=str(d.get("decision") or ""),
+            decision=_text(d, "decision"),
             e2e_gain_pct=float(d.get("e2e_gain_pct") or 0.0),
             e2e_tput=float(d.get("e2e_tput") or 0.0),
-            e2e_decision=str(d.get("e2e_decision") or ""),
+            e2e_decision=_text(d, "e2e_decision"),
             integrated=bool(d.get("integrated") or False),
-            ts=str(d.get("ts") or ""),
+            ts=_text(d, "ts"),
         )
 
 
@@ -205,6 +240,19 @@ class SessionSummary:
     session_id: str = ""
     gain_pct: float = 0.0
     stack_len: int = 0
+
+    @classmethod
+    def from_dict(cls, d: Mapping[str, Any]) -> SessionSummary:
+        """Build a session summary from a (possibly partial) dict."""
+        return cls(
+            date=_text(d, "date"),
+            throughput_before=float(d.get("throughput_before") or 0.0),
+            throughput_after=float(d.get("throughput_after") or 0.0),
+            actions_taken=list(d.get("actions_taken") or []),
+            session_id=_text(d, "session_id"),
+            gain_pct=float(d.get("gain_pct") or 0.0),
+            stack_len=int(d.get("stack_len") or 0),
+        )
 
 
 # Recipe — arbor superset
@@ -333,65 +381,30 @@ class Recipe:
         }
         extras = {k: v for k, v in d.items() if k not in well_known}
         return cls(
-            canonical_id=str(d.get("canonical_id") or ""),
+            canonical_id=_text(d, "canonical_id"),
             version=int(d.get("version") or 1),
-            created_at=str(d.get("created_at") or ""),
-            updated_at=str(d.get("updated_at") or ""),
-            model=str(d.get("model") or ""),
-            hardware=str(d.get("hardware") or ""),
+            created_at=_text(d, "created_at"),
+            updated_at=_text(d, "updated_at"),
+            model=_text(d, "model"),
+            hardware=_text(d, "hardware"),
             # Fall back to the legacy ``framework`` key.
-            framework_name=str(d.get("framework_name") or d.get("framework") or ""),
-            framework_version=str(d.get("framework_version") or ""),
-            precision=str(d.get("precision") or ""),
+            framework_name=_text(d, "framework_name") or _text(d, "framework"),
+            framework_version=_text(d, "framework_version"),
+            precision=_text(d, "precision"),
             best_config=_normalize_best_config(d.get("best_config") or {}),
             best_throughput=float(d.get("best_throughput") or 0.0),
-            what_worked=[_experience_row(f) for f in (d.get("what_worked") or []) if isinstance(f, dict)],
-            what_failed=[_experience_row(f) for f in (d.get("what_failed") or []) if isinstance(f, dict)],
-            remaining_gaps=[
-                Gap(
-                    description=str(g.get("description") or ""),
-                    metrics=str(g.get("metrics") or ""),
-                )
-                for g in (d.get("remaining_gaps") or [])
-                if isinstance(g, dict)
-            ],
-            pitfalls=[
-                Pitfall(
-                    description=str(p.get("description") or ""),
-                    severity=str(p.get("severity") or ""),
-                )
-                for p in (d.get("pitfalls") or [])
-                if isinstance(p, dict)
-            ],
-            lessons=[
-                Lesson(
-                    statement=str(l.get("statement") or ""),
-                    measured_impact=l.get("measured_impact") or "",
-                )
-                for l in (d.get("lessons") or [])
-                if isinstance(l, dict)
-            ],
-            last_profiled=str(d.get("last_profiled") or ""),
+            what_worked=_rows(d, "what_worked", _experience_row),
+            what_failed=_rows(d, "what_failed", _experience_row),
+            remaining_gaps=_rows(d, "remaining_gaps", Gap.from_dict),
+            pitfalls=_rows(d, "pitfalls", Pitfall.from_dict),
+            lessons=_rows(d, "lessons", Lesson.from_dict),
+            last_profiled=_text(d, "last_profiled"),
             stack_fingerprint=StackFingerprint.from_dict(
                 d.get("stack_fingerprint") or {},
             ),
-            sessions=[
-                SessionSummary(
-                    date=str(s.get("date") or ""),
-                    throughput_before=float(s.get("throughput_before") or 0.0),
-                    throughput_after=float(s.get("throughput_after") or 0.0),
-                    actions_taken=list(s.get("actions_taken") or []),
-                    session_id=str(s.get("session_id") or ""),
-                    gain_pct=float(s.get("gain_pct") or 0.0),
-                    stack_len=int(s.get("stack_len") or 0),
-                )
-                for s in (d.get("sessions") or [])
-                if isinstance(s, dict)
-            ],
-            kernel_optimizations=[
-                KernelOptimization.from_dict(k) for k in (d.get("kernel_optimizations") or []) if isinstance(k, dict)
-            ],
-            authority=str(d.get("authority") or "EXPERIENTIAL"),
+            sessions=_rows(d, "sessions", SessionSummary.from_dict),
+            kernel_optimizations=_rows(d, "kernel_optimizations", KernelOptimization.from_dict),
+            authority=_text(d, "authority") or "EXPERIENTIAL",
             confidence=float(d.get("confidence") or 0.85),
             evidence_refs=list(d.get("evidence_refs") or []),
             provenance=dict(d.get("provenance") or {}),
@@ -399,59 +412,7 @@ class Recipe:
         )
 
 
-# Attempt — append-only optimization-attempt record
-@dataclass
-class Attempt:
-    """One append-only evolutionary attempt against a recipe."""
-
-    id: int = 0
-    recipe_canonical_id: str = ""
-    session_id: str = ""
-    attempt_at: str = ""
-    diff: dict[str, Any] = field(default_factory=dict)
-    predicted_delta: dict[str, Any] = field(default_factory=dict)
-    measured_metrics: dict[str, Any] = field(default_factory=dict)
-    fitness: float | None = None
-    outcome: str = ""
-    rationale: str = ""
-
-    def to_dict(self) -> dict[str, Any]:
-        """Serialise the attempt to a plain dict."""
-        out: dict[str, Any] = {
-            "id": int(self.id),
-            "recipe_canonical_id": str(self.recipe_canonical_id),
-            "session_id": str(self.session_id),
-            "attempt_at": str(self.attempt_at),
-            "diff": dict(self.diff),
-            "predicted_delta": dict(self.predicted_delta),
-            "measured_metrics": dict(self.measured_metrics),
-            "outcome": str(self.outcome),
-            "rationale": str(self.rationale),
-        }
-        if self.fitness is not None:
-            out["fitness"] = float(self.fitness)
-        return out
-
-    @classmethod
-    def from_dict(cls, d: dict[str, Any]) -> Attempt:
-        """Build an attempt from a dict."""
-        fitness = d.get("fitness")
-        return cls(
-            id=int(d.get("id") or 0),
-            recipe_canonical_id=str(d.get("recipe_canonical_id") or ""),
-            session_id=str(d.get("session_id") or ""),
-            attempt_at=str(d.get("attempt_at") or ""),
-            diff=dict(d.get("diff") or {}),
-            predicted_delta=dict(d.get("predicted_delta") or {}),
-            measured_metrics=dict(d.get("measured_metrics") or {}),
-            fitness=float(fitness) if fitness is not None else None,
-            outcome=str(d.get("outcome") or ""),
-            rationale=str(d.get("rationale") or ""),
-        )
-
-
 __all__ = [
-    "Attempt",
     "Gap",
     "KernelOptimization",
     "Lesson",

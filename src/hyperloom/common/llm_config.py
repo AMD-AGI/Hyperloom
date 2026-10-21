@@ -163,10 +163,8 @@ AGENT_BACKEND_CODEX = "codex"
 
 # The model each backend runs when neither the operator nor a known gateway host names one. This is the last rung of
 # every model ladder in both packages, so it lives beside the backend names it is keyed by.
-DEFAULT_CLAUDE_MODEL = "claude-opus-5"
-# The gateway publishes both ``gpt-5.6`` and ``gpt-5.6-sol`` in ``/v1/models``, but only the latter has a deployment
-# behind it: a bare ``gpt-5.6`` answers 400 "Deployment ... is not found" on both ChatCompletions and Responses.
-DEFAULT_CODEX_MODEL = "gpt-5.6-sol"
+DEFAULT_CLAUDE_MODEL = "claude-opus-5-5"
+DEFAULT_CODEX_MODEL = "gpt-6-astra"
 
 
 def has_anthropic_side(env: Mapping[str, str] | None = None) -> bool:
@@ -800,48 +798,6 @@ def _anthropic_usage_counts(usage: object) -> dict[str, int]:
     }
 
 
-@dataclass(frozen=True)
-class ResponsesResult:
-    """One Responses-API result, flattened for Hyperloom callers."""
-
-    text: str
-    citations: list[str]
-    status: str | None
-    input_tokens: int
-    output_tokens: int
-
-
-async def aresponse(
-    client: object,
-    **params: object,
-) -> ResponsesResult:
-    """Async Responses-API call; returns text, citations, status and token counts."""
-    resp = await client.responses.create(**params)  # type: ignore[union-attr]
-    texts: list[str] = []
-    citations: list[str] = []
-    for item in _sdk_field(resp, "output") or []:  # type: ignore[union-attr]
-        if _sdk_field(item, "type") != "message":
-            continue
-        for block in _sdk_field(item, "content") or []:  # type: ignore[union-attr]
-            if _sdk_field(block, "type") != "output_text":
-                continue
-            chunk = _sdk_field(block, "text") or ""
-            if chunk:
-                texts.append(str(chunk))
-            for ann in _sdk_field(block, "annotations") or []:  # type: ignore[union-attr]
-                url = _sdk_field(ann, "url")
-                if isinstance(url, str) and url:
-                    citations.append(url)
-    usage = _sdk_field(resp, "usage")
-    return ResponsesResult(
-        text="\n".join(texts),
-        citations=citations,
-        status=_sdk_field(resp, "status"),  # type: ignore[arg-type]
-        input_tokens=_sdk_token_count(usage, "input_tokens"),
-        output_tokens=_sdk_token_count(usage, "output_tokens"),
-    )
-
-
 def _anthropic_text_from_content(content: object) -> str:
     """Concatenate the ``text`` blocks of an Anthropic Messages ``content`` array."""
     if not isinstance(content, list):
@@ -857,6 +813,35 @@ class AnthropicMessageResult:
     text: str
     stop_reason: str | None
     usage: object | None
+
+
+@dataclass(frozen=True)
+class AnthropicCompletionRequest:
+    """One single-shot Anthropic completion: the Messages body and the time budget it may take.
+
+    ``timeout`` is the HTTP client timeout (``timeout_s`` when unset); the Claude CLI transport uses ``timeout_s``.
+    """
+
+    model: str
+    messages: Sequence[Mapping[str, object]]
+    max_tokens: int
+    system: str | None = None
+    temperature: float | None = None
+    timeout: object | None = None
+    timeout_s: float | None = None
+
+    def http_params(self) -> dict[str, object]:
+        """Assemble the Messages request body, omitting an absent system prompt."""
+        params: dict[str, object] = {
+            "model": self.model,
+            "messages": list(self.messages),
+            "max_tokens": int(self.max_tokens),
+        }
+        if self.system:
+            params["system"] = self.system
+        if self.temperature is not None:
+            params["temperature"] = float(self.temperature)
+        return params
 
 
 def _attribution_tag_kwargs(component: str, operation: str = "") -> dict[str, object]:
@@ -886,11 +871,6 @@ def _anthropic_body_result(body: Mapping[str, object]) -> AnthropicMessageResult
         stop_reason=body.get("stop_reason"),  # type: ignore[arg-type]
         usage=body.get("usage"),
     )
-
-
-def _anthropic_message_result(resp: object) -> AnthropicMessageResult:
-    """Check one Messages response for failure, then flatten it."""
-    return _anthropic_body_result(_anthropic_message_body(resp))
 
 
 def _observe_anthropic(observation: RequestObservation, resp: object) -> AnthropicMessageResult:
@@ -973,27 +953,6 @@ def anthropic_transport_ready(env: Mapping[str, str] | None = None) -> bool:
     return True
 
 
-def _anthropic_http_params(
-    *,
-    model: str,
-    messages: Sequence[Mapping[str, object]],
-    system: str | None,
-    max_tokens: int,
-    temperature: float | None = None,
-) -> dict[str, object]:
-    """Assemble the Messages request body, omitting an absent system prompt."""
-    params: dict[str, object] = {
-        "model": model,
-        "messages": list(messages),
-        "max_tokens": int(max_tokens),
-    }
-    if system:
-        params["system"] = system
-    if temperature is not None:
-        params["temperature"] = float(temperature)
-    return params
-
-
 def _one_shot_client(
     timeout_s: float | None,
     env: Mapping[str, str] | None,
@@ -1015,116 +974,54 @@ def _one_shot_client(
 
 def anthropic_completion(
     *,
-    model: str,
-    messages: Sequence[Mapping[str, object]],
-    max_tokens: int,
-    system: str | None = None,
-    temperature: float | None = None,
+    request: AnthropicCompletionRequest,
     env: Mapping[str, str] | None = None,
-    timeout: object | None = None,
-    timeout_s: float | None = None,
     component: str = "",
     operation: str = "",
 ) -> AnthropicMessageResult:
     """Issue one single-shot Anthropic completion over whichever transport works."""
     transport = anthropic_transport(env)
     if transport == ANTHROPIC_TRANSPORT_SDK:
-        client = _one_shot_client(timeout_s, env, component, operation)
+        client = _one_shot_client(request.timeout_s, env, component, operation)
         return client.messages(  # type: ignore[attr-defined]
-            model=model,
-            messages=messages,
-            system=system,
-            max_tokens=max_tokens,
+            model=request.model,
+            messages=request.messages,
+            system=request.system,
+            max_tokens=request.max_tokens,
         )
     if not transport:
         raise LLMConfigError(_ANTHROPIC_NO_CREDENTIAL)
-    http_client = get_anthropic_client(env=dict(env) if env is not None else None, timeout=timeout)
+    http_client = get_anthropic_client(
+        env=dict(env) if env is not None else None, timeout=request.timeout or request.timeout_s
+    )
     with http_client:  # type: ignore[attr-defined]
-        return anthropic_messages(
-            http_client,
-            component=component,
-            operation=operation,
-            **_anthropic_http_params(
-                model=model,
-                messages=messages,
-                system=system,
-                max_tokens=max_tokens,
-                temperature=temperature,
-            ),
-        )
+        return anthropic_messages(http_client, component=component, operation=operation, **request.http_params())
 
 
 async def aanthropic_completion(
     *,
-    model: str,
-    messages: Sequence[Mapping[str, object]],
-    max_tokens: int,
-    system: str | None = None,
-    temperature: float | None = None,
+    request: AnthropicCompletionRequest,
     env: Mapping[str, str] | None = None,
-    timeout: object | None = None,
-    timeout_s: float | None = None,
     component: str = "",
     operation: str = "",
 ) -> AnthropicMessageResult:
     """Async twin of :func:`anthropic_completion`; see it for the full contract."""
     transport = anthropic_transport(env)
     if transport == ANTHROPIC_TRANSPORT_SDK:
-        client = _one_shot_client(timeout_s, env, component, operation)
+        client = _one_shot_client(request.timeout_s, env, component, operation)
         return await client.amessages(  # type: ignore[attr-defined]
-            model=model,
-            messages=messages,
-            system=system,
-            max_tokens=max_tokens,
+            model=request.model,
+            messages=request.messages,
+            system=request.system,
+            max_tokens=request.max_tokens,
         )
     if not transport:
         raise LLMConfigError(_ANTHROPIC_NO_CREDENTIAL)
-    http_client = get_async_anthropic_client(env=dict(env) if env is not None else None, timeout=timeout)
+    http_client = get_async_anthropic_client(
+        env=dict(env) if env is not None else None, timeout=request.timeout or request.timeout_s
+    )
     async with http_client:  # type: ignore[attr-defined]
-        return await aanthropic_messages(
-            http_client,
-            component=component,
-            operation=operation,
-            **_anthropic_http_params(
-                model=model,
-                messages=messages,
-                system=system,
-                max_tokens=max_tokens,
-                temperature=temperature,
-            ),
-        )
-
-
-def stream_chat_completion_text(
-    client: object,
-    *,
-    component: str = "",
-    operation: str = "",
-    **params: object,
-) -> "tuple[str, object | None]":
-    """Streamed chat completion; returns ``(text, usage)``."""
-    params["stream"] = True
-    params["stream_options"] = {"include_usage": True}
-    parts: list[str] = []
-    usage_obj: object | None = None
-    with observed_request(
-        protocol=PROTOCOL_OPENAI_CHAT,
-        component=component,
-        operation=operation,
-        model=params.get("model"),
-        streamed=True,
-    ) as observation:
-        stream = client.chat.completions.create(**_tag_request(params, component, operation))  # type: ignore[union-attr]
-        for chunk in stream:
-            _observe_stream_chunk(observation, chunk)
-            if getattr(chunk, "usage", None) is not None:
-                usage_obj = chunk.usage
-            if chunk.choices:
-                delta = chunk.choices[0].delta
-                if delta is not None and delta.content:
-                    parts.append(delta.content)
-        observation.update(usage=_openai_usage_counts(usage_obj))
-    return "".join(parts), usage_obj
+        return await aanthropic_messages(http_client, component=component, operation=operation, **request.http_params())
 
 
 async def astream_chat_completion_text(
@@ -1180,6 +1077,7 @@ __all__ = [
     "ANTHROPIC_SYNTHESIZABLE_KEY_ENVS",
     "ANTHROPIC_TRANSPORT_HTTP",
     "ANTHROPIC_TRANSPORT_SDK",
+    "AnthropicCompletionRequest",
     "AnthropicMessageResult",
     "CLAUDE_GATEWAY_SIGNAL_KEYS",
     "CLAUDE_OAUTH_TOKEN_ENV",
@@ -1191,7 +1089,6 @@ __all__ = [
     "LEGACY_DEEPSEEK_ENV_KEYS",
     "LLMConfigError",
     "OpenAIClientConfig",
-    "ResponsesResult",
     "UNRUNNABLE_AGENT_RANK",
     "aanthropic_completion",
     "aanthropic_messages",
@@ -1204,7 +1101,6 @@ __all__ = [
     "anthropic_transport",
     "anthropic_transport_ready",
     "apply_reasoning_effort",
-    "aresponse",
     "astream_chat_completion_text",
     "build_http_timeout",
     "chat_completion",
@@ -1230,6 +1126,5 @@ __all__ = [
     "provider_model_defaults",
     "resolve_forge_llm_model",
     "resolve_openai_client_config",
-    "stream_chat_completion_text",
     "with_synthesized_anthropic_keys",
 ]

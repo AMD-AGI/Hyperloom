@@ -139,7 +139,7 @@ def test_prelude_blocked_while_warm_replay_in_flight():
 
 
 def test_prelude_waits_for_the_initial_analysis():
-    """The transition barrier stops running actions, so leaving early kills the roofline the baseline enqueued."""
+    """Leaving before the initial roofline is booked hands that analysis to the next phase instead of seeding this one."""
     state = SharedState(
         phase="PRELUDE",
         phase_budget_pct={},
@@ -224,7 +224,7 @@ def test_prelude_budget_policy_is_inert_without_a_clock():
 def test_time_exhausted_during_prelude_finally_has_a_producer():
     """The reason was in the vocabulary and in the report glossary with no code path to it."""
     state = _prelude_state(spent_sec=10_800.0, usable_sec=0.0)
-    out = phase_state.compute_next_phase(state, kernel_enabled=True)
+    out = phase_state.compute_next_phase(state, flags=phase_state.PhaseFlags(kernel_enabled=True))
     assert out is not None
     next_phase, reason, evidence = out
     assert (next_phase, reason) == ("CLOSE", "time_exhausted_during_prelude")
@@ -236,16 +236,16 @@ def test_time_exhausted_during_prelude_finally_has_a_producer():
 def test_a_landed_baseline_outranks_the_exhausted_clock():
     """With a baseline in hand the run has something to optimize; the later phases judge for themselves."""
     state = _prelude_state(spent_sec=10_800.0, usable_sec=0.0, baseline_tput=1074.7)
-    out = phase_state.compute_next_phase(state, kernel_enabled=True)
+    out = phase_state.compute_next_phase(state, flags=phase_state.PhaseFlags(kernel_enabled=True))
     assert out is not None
     assert out[1] == "prelude_done"
 
 
 def test_prelude_holds_while_the_initial_roofline_is_pending():
     state = _prelude_state(usable_sec=10_000.0, baseline_tput=1074.7, auto_roofline_pending_task_id="rl-1")
-    assert phase_state.compute_next_phase(state, kernel_enabled=True) is None
+    assert phase_state.compute_next_phase(state, flags=phase_state.PhaseFlags(kernel_enabled=True)) is None
     state.auto_roofline_pending_task_id = ""
-    out = phase_state.compute_next_phase(state, kernel_enabled=True)
+    out = phase_state.compute_next_phase(state, flags=phase_state.PhaseFlags(kernel_enabled=True))
     assert out is not None and out[1] == "prelude_done"
     assert phase_state.replay_next_phase(out[2]["predicate_inputs"]) == out
 
@@ -254,18 +254,18 @@ def test_a_spent_clock_does_not_wait_for_the_initial_roofline():
     state = _prelude_state(
         spent_sec=10_800.0, usable_sec=0.0, baseline_tput=1074.7, auto_roofline_pending_task_id="rl-1"
     )
-    out = phase_state.compute_next_phase(state, kernel_enabled=True)
+    out = phase_state.compute_next_phase(state, flags=phase_state.PhaseFlags(kernel_enabled=True))
     assert out is not None and out[1] == "prelude_done"
 
 
 def test_the_initial_roofline_wait_stops_at_the_optimization_reserve():
     # 180 min session reserves 5400 s for optimization; 5000 s usable means PRELUDE's own allowance is spent.
     state = _prelude_state(usable_sec=5_000.0, baseline_tput=1074.7, auto_roofline_pending_task_id="rl-1")
-    out = phase_state.compute_next_phase(state, kernel_enabled=True)
+    out = phase_state.compute_next_phase(state, flags=phase_state.PhaseFlags(kernel_enabled=True))
     assert out is not None and out[1] == "prelude_done"
     assert phase_state.replay_next_phase(out[2]["predicate_inputs"]) == out
     state.session_budget_usable_sec = lambda: 6_000.0
-    assert phase_state.compute_next_phase(state, kernel_enabled=True) is None
+    assert phase_state.compute_next_phase(state, flags=phase_state.PhaseFlags(kernel_enabled=True)) is None
 
 
 def test_prelude_exit_states_whether_one_optimization_round_still_fits():
@@ -318,7 +318,7 @@ class TestAColdAnchorIsNotAFinishedPrelude:
             usable_sec=1200.0,
         )
 
-        out = phase_state.compute_next_phase(state, kernel_enabled=True)
+        out = phase_state.compute_next_phase(state, flags=phase_state.PhaseFlags(kernel_enabled=True))
 
         assert out is not None
         next_phase, reason, evidence = out
@@ -336,7 +336,7 @@ class TestAColdAnchorIsNotAFinishedPrelude:
             usable_sec=_RETRY_COST_SEC + 60.0,
         )
 
-        assert phase_state.compute_next_phase(state, kernel_enabled=True) is None
+        assert phase_state.compute_next_phase(state, flags=phase_state.PhaseFlags(kernel_enabled=True)) is None
 
     def test_a_single_round_baseline_is_not_mistaken_for_a_dropped_one(self):
         """A cold figure by configuration is consistent with what follows it."""
@@ -405,12 +405,12 @@ def test_compute_next_phase_no_kernel_skips_kernel_phase():
         specialist_rounds=[{"proposals_total": 1, "proposals_kept": 0}],
         optimization_stack=[{"action": "explore"}],
     )
-    out = phase_state.compute_next_phase(state, kernel_enabled=False)
+    out = phase_state.compute_next_phase(state, flags=phase_state.PhaseFlags(kernel_enabled=False))
     assert out is not None
     next_phase, reason, evidence = out
     assert next_phase == "SWEEP"
-    assert reason == "no_kernel_skipped"
-    assert evidence.get("passed_through_reason") == "optimize_no_more_leverage"
+    assert reason == "optimize_no_more_leverage"
+    assert evidence["kernel_skipped"] is True
 
 
 def test_skip_to_kernel_requires_a_tested_round():
@@ -500,7 +500,7 @@ def test_compute_next_phase_terminal_overrides_phase():
         explore_search={},
         optimization_stack=[],
     )
-    out = phase_state.compute_next_phase(state, kernel_enabled=True)
+    out = phase_state.compute_next_phase(state, flags=phase_state.PhaseFlags(kernel_enabled=True))
     assert out is not None
     assert out[0] == "CLOSE" and out[1] == "target_reached"
     assert out[2].get("terminal") is True
@@ -533,7 +533,7 @@ class TestAMetTargetDoesNotOutrankTheGuards:
     def test_a_coordinator_stop_reason_still_wins(self):
         out = phase_state.compute_next_phase(
             self._state(phase_state.PHASE_KERNEL_AGENT, stop_reason="baseline_failed"),
-            kernel_enabled=True,
+            flags=phase_state.PhaseFlags(kernel_enabled=True),
         )
         assert out is not None
         assert out[0] == phase_state.PHASE_CLOSE and out[1] == "baseline_failed"
@@ -541,18 +541,22 @@ class TestAMetTargetDoesNotOutrankTheGuards:
     def test_the_closing_phase_still_wins(self):
         out = phase_state.compute_next_phase(
             self._state(phase_state.PHASE_KERNEL_AGENT, closing_phase=True),
-            kernel_enabled=True,
+            flags=phase_state.PhaseFlags(kernel_enabled=True),
         )
         assert out is not None
         assert out[0] == phase_state.PHASE_CLOSE and out[1] == "time_exhausted"
 
     def test_prelude_keeps_its_own_guards(self):
         """A baseline PRELUDE has not accepted is not one SWEEP can measure."""
-        out = phase_state.compute_next_phase(self._state(phase_state.PHASE_PRELUDE), kernel_enabled=True)
+        out = phase_state.compute_next_phase(
+            self._state(phase_state.PHASE_PRELUDE), flags=phase_state.PhaseFlags(kernel_enabled=True)
+        )
         assert out is None or out[0] != phase_state.PHASE_SWEEP
 
     def test_a_later_phase_does_jump(self):
-        out = phase_state.compute_next_phase(self._state(phase_state.PHASE_KERNEL_AGENT), kernel_enabled=True)
+        out = phase_state.compute_next_phase(
+            self._state(phase_state.PHASE_KERNEL_AGENT), flags=phase_state.PhaseFlags(kernel_enabled=True)
+        )
         assert out is not None
         assert out[0] == phase_state.PHASE_SWEEP and out[1] == "target_reached"
         assert out[2].get("terminal") is not True
@@ -579,7 +583,7 @@ def test_a_met_target_renames_a_budget_limited_sweep_exit():
         no_gain_cycle_streak=0,
         resumed_ts="",
     )
-    out = phase_state.compute_next_phase(state, kernel_enabled=True)
+    out = phase_state.compute_next_phase(state, flags=phase_state.PhaseFlags(kernel_enabled=True))
     assert out is not None
     assert out[0] == phase_state.PHASE_CLOSE and out[1] == "target_reached"
     assert out[2].get("terminal") is True
@@ -601,8 +605,7 @@ def test_record_phase_transition_writes_row_and_updates_phase():
         to_phase="PRELUDE",
         reason="phase_entered",
         evidence={"trigger": "fresh_session"},
-        ts="2026-05-19T00:00:00+00:00",
-        ts_unix=1747600000.0,
+        at=phase_state.PhaseClock(ts="2026-05-19T00:00:00+00:00", ts_unix=1747600000.0),
     )
     assert s.phase == "PRELUDE"
     assert s.phase_started_ts == "2026-05-19T00:00:00+00:00"
@@ -615,8 +618,7 @@ def test_record_phase_transition_writes_row_and_updates_phase():
         to_phase=phase_state.PHASE_FRAMEWORK_AGENT,
         reason="prelude_done",
         evidence={"baseline_tput": 100.0},
-        ts="2026-05-19T00:01:00+00:00",
-        ts_unix=1747600060.0,
+        at=phase_state.PhaseClock(ts="2026-05-19T00:01:00+00:00", ts_unix=1747600060.0),
     )
     assert s.phase == phase_state.PHASE_FRAMEWORK_AGENT
     assert len(s.phase_history) == 2
@@ -631,16 +633,14 @@ def test_explore_elapsed_accumulates_completed_and_live_segments():
         to_phase=phase_state.PHASE_FRAMEWORK_AGENT,
         reason="phase_entered",
         evidence={},
-        ts="2026-05-19T00:00:00+00:00",
-        ts_unix=100.0,
+        at=phase_state.PhaseClock(ts="2026-05-19T00:00:00+00:00", ts_unix=100.0),
     )
     phase_state.record_phase_transition(
         s,
         to_phase="KERNEL_AGENT",
         reason="optimize_no_more_leverage",
         evidence={},
-        ts="2026-05-19T00:02:00+00:00",
-        ts_unix=220.0,
+        at=phase_state.PhaseClock(ts="2026-05-19T00:02:00+00:00", ts_unix=220.0),
     )
     assert s.phase_elapsed_totals[phase_state.PHASE_FRAMEWORK_AGENT] == 120.0
     assert phase_state.phase_cumulative_seconds(s, phase=phase_state.PHASE_FRAMEWORK_AGENT, now_unix=300.0) == 120.0
@@ -650,8 +650,7 @@ def test_explore_elapsed_accumulates_completed_and_live_segments():
         to_phase=phase_state.PHASE_FRAMEWORK_AGENT,
         reason="sweep_reloop",
         evidence={},
-        ts="2026-05-19T00:03:00+00:00",
-        ts_unix=280.0,
+        at=phase_state.PhaseClock(ts="2026-05-19T00:03:00+00:00", ts_unix=280.0),
     )
     assert phase_state.phase_cumulative_seconds(s, phase=phase_state.PHASE_FRAMEWORK_AGENT, now_unix=310.0) == 150.0
 
@@ -685,8 +684,7 @@ def test_policy_gate_phase_strict_allows_in_phase_action():
         to_phase="PRELUDE",
         reason="phase_entered",
         evidence={},
-        ts="2026-05-19T00:00:00+00:00",
-        ts_unix=1.0,
+        at=phase_state.PhaseClock(ts="2026-05-19T00:00:00+00:00", ts_unix=1.0),
     )
     gate = PolicyGate(
         role_registry=_make_role_registry(),
@@ -745,8 +743,37 @@ def test_a_session_recorded_at_an_unknown_phase_refuses_to_resume(coordinator_wi
     assert c.shared_state.phase == "EXPLORE"
 
 
+def _fail_phase_init_save(monkeypatch, c, exc: BaseException) -> None:
+    c.shared_state.phase = ""
+    c.shared_state.phase_history = []
+
+    def _save(session_dir=None) -> None:
+        raise exc
+
+    monkeypatch.setattr(c.shared_state, "save", _save)
+
+
+def test_a_failed_save_after_phase_init_is_logged_and_the_phase_stands(coordinator_with_mocks, monkeypatch, caplog):
+    c = coordinator_with_mocks
+    err = OSError("disk full")
+    _fail_phase_init_save(monkeypatch, c, err)
+
+    with caplog.at_level("ERROR", logger="hyperloom.orchestrator.phases.machine"):
+        c.phase_machine.ensure_phase_initialised(None)
+
+    assert c.shared_state.phase == "PRELUDE"
+    assert [r.exc_info[1] for r in caplog.records if r.exc_info] == [err]
+
+
+def test_a_serialization_defect_on_the_phase_init_save_is_not_swallowed(coordinator_with_mocks, monkeypatch):
+    c = coordinator_with_mocks
+    _fail_phase_init_save(monkeypatch, c, TypeError("not JSON serializable"))
+
+    with pytest.raises(TypeError, match="not JSON serializable"):
+        c.phase_machine.ensure_phase_initialised(None)
+
+
 _NO_KERNEL_CYCLE_SEC = 600 * 60.0
-# Low enough that one extend hint stays under the bump cap after the KERNEL share is redistributed.
 _NO_KERNEL_CLI_BUDGET_PCT = {phase_state.PHASE_FRAMEWORK_AGENT: 0.2}
 
 
@@ -754,7 +781,7 @@ _NO_KERNEL_CLI_BUDGET_PCT = {phase_state.PHASE_FRAMEWORK_AGENT: 0.2}
 def no_kernel_coordinator(session_dir):
     """A real Coordinator on an unbounded ``--no-kernel`` session, so FRAMEWORK owns a flat share of the cycle."""
     from hyperloom.orchestrator.roles import MockBackend, MockCriticBackend, ScriptedPlan
-    from hyperloom.orchestrator.loop.coordinator import Coordinator
+    from hyperloom.orchestrator.loop.coordinator import Coordinator, CoordinatorSettings
 
     SharedState(
         kernel_enabled=False,
@@ -769,7 +796,7 @@ def no_kernel_coordinator(session_dir):
     return Coordinator(
         session_dir,
         backends={"orchestration": MockBackend(silent, name="orch"), "critic": MockCriticBackend()},
-        phase_budget_pct=dict(_NO_KERNEL_CLI_BUDGET_PCT),
+        settings=CoordinatorSettings(phase_budget_pct=dict(_NO_KERNEL_CLI_BUDGET_PCT)),
     )
 
 
@@ -781,7 +808,7 @@ def _enter_framework_for(c, elapsed_sec: float) -> None:
         to_phase=phase_state.PHASE_FRAMEWORK_AGENT,
         reason="prelude_done",
         evidence={},
-        ts_unix=time.time() - elapsed_sec,
+        at=phase_state.PhaseClock(ts_unix=time.time() - elapsed_sec),
     )
 
 
@@ -815,39 +842,8 @@ async def test_no_kernel_framework_share_is_the_same_for_machine_dispatch_and_pr
         await c.phase_machine.advance_phase_if_needed()
         framework_exit = c.shared_state.phase_history[-1]
         assert framework_exit["from_phase"] == phase_state.PHASE_FRAMEWORK_AGENT
-        assert framework_exit["evidence"]["passed_through_reason"] == "optimize_phase_budget_exhausted"
-    finally:
-        await c.stop()
-
-
-@pytest.mark.asyncio
-async def test_extend_explore_budget_moves_the_share_every_reader_uses(no_kernel_coordinator):
-    from hyperloom.orchestrator.state.shared_state import ESCALATE_HINT_EXTEND_EXPLORE_BUDGET
-
-    c = no_kernel_coordinator
-    share = c.shared_state.phase_budget_pct[phase_state.PHASE_FRAMEWORK_AGENT]
-    bumped = share + phase_state.ESCALATE_HINT_BUDGET_BUMP_DELTA
-    try:
-        _enter_framework_for(c, _NO_KERNEL_CYCLE_SEC * (share + bumped) / 2)
-        assert c.dispatcher.dispatch_paused_for_phase_budget() is True
-        assert "remaining_sec=0" in await _phase_block(c)
-
-        await c.router._handle_escalate_strategy_change(
-            "orchestration",
-            Intent(
-                type=IntentType.ESCALATE_STRATEGY_CHANGE,
-                payload={"summary": "s", "next_action_hint": ESCALATE_HINT_EXTEND_EXPLORE_BUDGET},
-            ),
-        )
-
-        assert c.shared_state.phase_budget_pct[phase_state.PHASE_FRAMEWORK_AGENT] == pytest.approx(bumped)
-        assert SharedState.load_or_init(c.session_dir).phase_budget_pct == c.shared_state.phase_budget_pct
-        assert c.dispatcher.dispatch_paused_for_phase_budget() is False
-        block = await _phase_block(c)
-        assert f"pct={bumped:.2f}" in block
-        assert "remaining_sec=0 " not in block
-        await c.phase_machine.advance_phase_if_needed()
-        assert c.shared_state.phase == phase_state.PHASE_FRAMEWORK_AGENT
+        assert framework_exit["reason"] == "optimize_phase_budget_exhausted"
+        assert framework_exit["evidence"]["kernel_skipped"] is True
     finally:
         await c.stop()
 
@@ -917,7 +913,7 @@ def _enablement_state(phase, *, tput=0.0, streak=1, validation_pending=False, au
 def test_prelude_enters_enablement_on_a_baseline_failure_streak():
     """A failed baseline routes PRELUDE to ENABLEMENT when the lane is admitted."""
     state = _enablement_state("PRELUDE")
-    phase, reason, _ = phase_state.compute_next_phase(state, enablement_enabled=True)
+    phase, reason, _ = phase_state.compute_next_phase(state, flags=phase_state.PhaseFlags(enablement_enabled=True))
     assert phase == phase_state.PHASE_ENABLEMENT
     assert reason == "enablement_entered"
 
@@ -925,13 +921,13 @@ def test_prelude_enters_enablement_on_a_baseline_failure_streak():
 def test_prelude_skips_enablement_when_the_lane_is_not_admitted():
     """An unadmitted lane leaves PRELUDE waiting for a baseline rather than entering the phase."""
     state = _enablement_state("PRELUDE")
-    assert phase_state.compute_next_phase(state, enablement_enabled=False) is None
+    assert phase_state.compute_next_phase(state, flags=phase_state.PhaseFlags(enablement_enabled=False)) is None
 
 
 def test_enablement_exits_once_the_baseline_lands_and_work_drains():
     """All three conjuncts satisfied is the only way out through the normal exit."""
     state = _enablement_state("ENABLEMENT", tput=1000.0)
-    out = phase_state.compute_next_phase(state, enablement_enabled=True)
+    out = phase_state.compute_next_phase(state, flags=phase_state.PhaseFlags(enablement_enabled=True))
     assert out is not None
     phase, reason, evidence = out
     assert phase != phase_state.PHASE_ENABLEMENT
@@ -942,17 +938,24 @@ def test_enablement_exits_once_the_baseline_lands_and_work_drains():
 def test_enablement_holds_while_work_is_in_flight():
     """A build outliving its round must not let a later phase reopen validation."""
     state = _enablement_state("ENABLEMENT", tput=1000.0)
-    assert phase_state.compute_next_phase(state, enablement_enabled=True, enablement_in_flight=True) is None
-    inputs = phase_state.workflow_predicate_inputs(state, enablement_enabled=True, enablement_in_flight=True)
+    assert (
+        phase_state.compute_next_phase(
+            state, enablement_in_flight=True, flags=phase_state.PhaseFlags(enablement_enabled=True)
+        )
+        is None
+    )
+    inputs = phase_state.workflow_predicate_inputs(
+        state, enablement_in_flight=True, flags=phase_state.PhaseFlags(enablement_enabled=True)
+    )
     assert phase_state.replay_next_phase(inputs) is None
 
 
 def test_enablement_waits_for_the_initial_analysis_like_prelude_does():
     """The first anchor of a session whose baseline failed is promoted here, and that enqueues the roofline."""
     state = _enablement_state("ENABLEMENT", tput=1000.0, auto_roofline_pending_task_id="rl-1")
-    assert phase_state.compute_next_phase(state, enablement_enabled=True) is None
+    assert phase_state.compute_next_phase(state, flags=phase_state.PhaseFlags(enablement_enabled=True)) is None
     state.auto_roofline_pending_task_id = ""
-    out = phase_state.compute_next_phase(state, enablement_enabled=True)
+    out = phase_state.compute_next_phase(state, flags=phase_state.PhaseFlags(enablement_enabled=True))
     assert out is not None and out[1] == "enablement_done"
     assert phase_state.replay_next_phase(out[2]["predicate_inputs"]) == out
 
@@ -963,17 +966,17 @@ def test_the_enablement_wait_stops_at_the_optimization_reserve():
     # 180 min session reserves 5400 s for optimization; 5000 s usable leaves nothing to hold with.
     state.max_minutes = 180
     state.session_budget_usable_sec = lambda: 5_000.0
-    out = phase_state.compute_next_phase(state, enablement_enabled=True)
+    out = phase_state.compute_next_phase(state, flags=phase_state.PhaseFlags(enablement_enabled=True))
     assert out is not None and out[1] == "enablement_done"
     assert phase_state.replay_next_phase(out[2]["predicate_inputs"]) == out
     state.session_budget_usable_sec = lambda: 6_000.0
-    assert phase_state.compute_next_phase(state, enablement_enabled=True) is None
+    assert phase_state.compute_next_phase(state, flags=phase_state.PhaseFlags(enablement_enabled=True)) is None
 
 
 def test_enablement_holds_while_revalidation_is_pending():
     """An eval-origin KEEP owes a genuine baseline before the run counts as enabled."""
     state = _enablement_state("ENABLEMENT", tput=1000.0, validation_pending=True)
-    assert phase_state.compute_next_phase(state, enablement_enabled=True) is None
+    assert phase_state.compute_next_phase(state, flags=phase_state.PhaseFlags(enablement_enabled=True)) is None
 
 
 def test_replay_recomputes_from_primitive_baseline_facts():

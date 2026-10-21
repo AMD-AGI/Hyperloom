@@ -7,14 +7,13 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from kernelforge.fusion import command as cli_module
+from kernelforge.fusion import serving_gate
 from kernelforge.fusion.validate import (
     SMOKE_STAGE_STARTUP_CRASH,
     SmokeVerdict,
     _explicit_fatal_error,
     _is_hard_gpu_fault,
     _serving_crash_reason,
-    serving_failure_blames_kernel,
 )
 
 # The failure that prompted this: an install that needs an env var it was not given.
@@ -38,17 +37,6 @@ def test_engine_start_failure_is_reported_not_guessed_at() -> None:
     assert "no explicit GPU-fault line" not in reason
 
 
-def test_engine_start_failure_does_not_accuse_the_kernel() -> None:
-    assert serving_failure_blames_kernel(_serving_crash_reason(AITER_LOG)) is False
-
-
-def test_a_gpu_fault_still_accuses_the_kernel() -> None:
-    reason = _serving_crash_reason(FAULT_LOG)
-
-    assert "Memory access fault" in reason
-    assert serving_failure_blames_kernel(reason) is True
-
-
 def test_a_fault_marker_outranks_a_later_exception_line() -> None:
     mixed = FAULT_LOG + "\nRuntimeError: some later noise\n"
 
@@ -59,7 +47,6 @@ def test_silence_stays_silence() -> None:
     reason = _serving_crash_reason("nothing interesting here\n")
 
     assert reason == "server exited unexpectedly (no explicit GPU-fault line)"
-    assert serving_failure_blames_kernel(reason) is False
 
 
 def test_prefixes_are_stripped_from_the_reported_line() -> None:
@@ -73,14 +60,14 @@ def test_the_root_cause_outranks_the_wrapper_that_points_at_it() -> None:
 
 def _gate_verdict(monkeypatch, tmp_path, server_log: str):
     """Run the serving gate against a failed boot and return the resulting verdict."""
-    monkeypatch.setattr(cli_module, "_serving_check_enabled", lambda: True)
+    monkeypatch.setattr(serving_gate, "_serving_check_enabled", lambda: True)
     verdict = SmokeVerdict(
         ok=False,
         reason=_serving_crash_reason(server_log),
         stage=SMOKE_STAGE_STARTUP_CRASH,
         blames_kernel=_is_hard_gpu_fault(server_log),
     )
-    monkeypatch.setattr(cli_module, "serving_smoke_verdict", lambda *a, **k: verdict)
+    monkeypatch.setattr(serving_gate, "serving_smoke_verdict", lambda *a, **k: verdict)
     vr = SimpleNamespace(note="", kept=True, correctness_passed=True, kernel_speedup=1.5)
     result = SimpleNamespace(
         kept=True,
@@ -93,14 +80,8 @@ def _gate_verdict(monkeypatch, tmp_path, server_log: str):
         termination_reason="",
     )
 
-    cli_module.apply_serving_gate(
-        result,
-        framework="vllm",
-        out=tmp_path,
-        gpu="0",
-        model_path="/m",
-        isl=8,
-        osl=8,
+    serving_gate.apply_serving_gate(
+        result, serving_gate.ServingSession(framework="vllm", model_path="/m", gpu="0", isl=8, osl=8), tmp_path
     )
     return result
 

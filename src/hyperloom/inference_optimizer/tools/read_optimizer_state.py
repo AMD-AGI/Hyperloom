@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.jsonio import read_json
+from hyperloom.common.jsonio import read_json_strict
 from hyperloom.inference_optimizer.session.session_paths import manifest_path, state_path
 
 
@@ -22,7 +22,6 @@ SUMMARY_KEYS = (
     "baseline_tput",
     "cumulative_gain_validated",
     "current_best",
-    "last_kernel_opt",
     "last_trace_analyze",
 )
 
@@ -58,11 +57,11 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     if manifest_file.is_file():
-        manifest = read_json(manifest_file, require_dict=True, strict=True)
+        manifest = read_json_strict(manifest_file, require_dict=True)
         print("session_id:", manifest.get("session_id"))
     print("session_dir:", session_dir)
 
-    state = read_json(state_file, require_dict=True, strict=True)
+    state = read_json_strict(state_file, require_dict=True)
     for key in SUMMARY_KEYS:
         print(f"{key}: {state.get(key)}")
     print("explore_last_round:", state.get("explore_search", {}).get("last_round"))

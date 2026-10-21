@@ -50,7 +50,7 @@ the rules listed. Rows overlap; a rule listed twice is read once.
 | adds a new module, or adds methods, fields or imports to a module or class already over a size trigger | A5 |
 | extracts a function from a long one, or cites the complexity or size trigger as the reason for a split | A6 |
 | branches on a framework, backend, arch, decision, status or phase name, or adds a dict keyed by one | A7 A10 |
-| adds or changes a function signature or return annotation, writes a key or attribute on a parameter, or changes call sites that unpack one object | A8 A9 A11 |
+| adds or changes a function signature or return annotation, writes a key or attribute on a parameter, or changes call sites that unpack one object | D14 A8 A9 A11 |
 | adds a `Protocol`, `ABC`, base class, factory, registry, or a function whose body is one forwarding call | A12 |
 | adds an `isinstance`/`is None`/`or {}` guard on an internal value, a renaming local, or an `except ...: raise` | A13 |
 | adds or renames a function, parameter, module binding or import alias | A14 |
@@ -235,7 +235,7 @@ file-shaped row would miss.
 ### X5 -- A new operator knob must land in the reference docs, the env template, the prompts and the launcher argv
 
 **Severity:** blocking
-**Fires when:** an added line matches `os\.environ(\.get)?[\[\(]\s*['"][A-Z][A-Z0-9_]{2,}` or `add_argument\(\s*['"]--` for a name absent from the base tree, or `files.txt` touches `src/hyperloom/inference_optimizer/cli/**` or `src/kernelforge/cli.py`.
+**Fires when:** an added line matches `os\.environ(\.get)?[\[\(]\s*['"][A-Z][A-Z0-9_]{2,}` or `add_argument\(\s*['"]--` for a name absent from the base tree, or `files.txt` touches `src/hyperloom/inference_optimizer/cli/**` or `src/kernelforge/cli/**`.
 **The rule:** Nothing enforces the sync between `os.environ` keys and `docs/reference/environment-variables.md` / `.env.template`, so the reviewer is the gate. Each new env var or flag is one of two kinds and the PR must say which: operator-facing config, documented with its unset default, or internal subprocess handoff, deliberately undocumented. An added or renamed flag must also reach the launcher that assembles the argv, the SKILL.md and examples that tell the agent to use it, and the how-to docs. Whether the knob should exist at all is `AGENTS.md`'s question, not this rule's.
 **Seen in:** PR #1472 -- `docs/reference/environment-variables.md`, touched by the same PR, still said `OPENAI_BASE_URL` was required together with `OPENAI_API_KEY`.
 **Not a finding when:** the variable is only written by a parent process and read by its own child (pure subprocess handoff) and the PR says so, or the flag is already present in the base tree and only its default moved.
@@ -245,7 +245,7 @@ file-shaped row would miss.
 ### X6 -- A persisted schema change needs a version bump and a migration
 
 **Severity:** blocking
-**Fires when:** a field is added, removed or retyped on a type carrying `SCHEMA_VERSION`, `from_dict`, `ensure_schema`, or `files.txt` touches `src/hyperloom/inference_optimizer/breakdown/**` or `src/kernelforge/durable_io.py`, or the diff contains `CREATE TABLE`.
+**Fires when:** a field is added, removed or retyped on a type carrying `SCHEMA_VERSION`, `from_dict`, `ensure_schema`, or `files.txt` touches `src/hyperloom/inference_optimizer/breakdown/**` or `src/kernelforge/tools/durable_io.py`, or the diff contains `CREATE TABLE`.
 **The rule:** Any added, removed or renamed field in a persisted record -- run state, session state, sqlite schema, SBD document -- comes with a schema-version bump and a migration step following the file's existing convention. The check is to load a payload written at the previous version: strict field-set validation in `from_dict` and `CREATE TABLE IF NOT EXISTS` both fail to save you, and the symptom is that every existing workspace dies at startup, `--resume` included.
 **Seen in:** PR #1497 -- `search_start_mean_case_speedup` was added to `RunState` with `SCHEMA_VERSION` left at 19 and no migration, killing every campaign with an existing workspace at startup.
 **Not a finding when:** the field is optional with a default and the loader tolerates unknown or missing keys on the old-version path -- verify by reading the loader, not by assuming `total=False` is enough.
@@ -907,6 +907,51 @@ existing resolver, ladder or owner of the same shape.
 **Report as:** `D13 -- <N> mechanisms added to keep <A> from colliding with <B>; <existing form>:<line> already
 resolves this shape -- reuse it`
 
+### D14 -- A function this diff adds, or whose signature it widens, may not exceed five parameters
+
+**Severity:** blocking
+**Fires when:** the diff adds a `def` or `async def` under `src/` outside a `tests/` directory, or
+adds a parameter to an existing one, and the measurement below puts that function above five
+parameters at the head while the merge base had it at five or fewer, absent, or with fewer.
+**The rule:** measure, do not estimate. `self`/`cls` and `*args`/`**kwargs` do not count,
+keyword-only parameters do. Run the limit against the changed files at the head, then against the
+same paths at `base.txt`, and match per function name:
+
+```bash
+ruff check --select PLR0913 --config "lint.pylint.max-args=5" --force-exclude \
+  --output-format concise $(cut -f3 "$WORK/numstat.txt" | grep '^src/.*\.py$' | grep -v '/tests/')
+
+git show "$(cat "$WORK/base.txt")":<path> > "$WORK/base-<name>.py"
+ruff check --select PLR0913 --config "lint.pylint.max-args=5" --isolated \
+  --output-format concise "$WORK/base-<name>.py"
+```
+
+Present at head and absent at base, or a higher number at head than at base, fires; the same number
+on both sides is backlog and is silent (the two switches do what D12's paragraph says they do). The
+fix is not a shorter name: the values that travel together become one frozen keyword-only dataclass
+built where they are resolved, or the callee takes the object its callers unpack -- A8's clump, and
+A6 when the long list is a caller's local variable table threaded into an extracted slice. The
+`code-metrics` CI job measures the same two cases, but its `baseline-raise` label waives them, so
+the rule stays for the one question CI cannot answer: whether a labelled PR gives the reason.
+**Seen in:** no single PR -- this is the gate written into the style guide's *Size and complexity*
+table rather than a shape clustered from review history. The tree held 563 units above five when it
+was introduced, which is the backlog the comparison exists to keep out of the finding; PR #1366's
+26-keyword `_run_multi_patch_nomination` and PR #1660's 28-parameter
+`_sweep_one_arm_single_server` are what that backlog looks like.
+**Not a finding when:** the base number equals the head number (the signature was already over and
+this diff did not widen it); the file is a test, or sits in `extend-exclude`, which
+`--force-exclude` already settles; the parameters are a typed parameter object; the function is a
+CLI entry point whose parameters are the operator's flags, or its signature is fixed by a
+`Protocol`, a callback or a sibling implementation of one interface -- A8's exemptions, which this
+rule counts but does not overrule.
+**Evidence:** both Ruff invocations above, with the head and base numbers quoted; `$WORK/diff.txt`
+for the parameters the diff added.
+**Report as:** `D14 <file>:<line> -- <fn> takes <head> parameters (base: <base|absent>), over the
+limit of 5; pass <object> or group <names> into <Type>`
+**CI:** the `code-metrics` job fails this limit on the files a PR touches (style guide § *Size and
+complexity*). The `baseline-raise` label waives that CI check; D14 then accepts the override only
+when the PR description gives the reason the signature stays above five, and fires otherwise.
+
 ## A -- Abstraction, boundaries and shape
 
 `AGENTS.md` *Code shape* states the principles this family checks; each rule is the concrete
@@ -1002,7 +1047,7 @@ that a shape defect causes is still blocking, under the C or S rule it breaks, n
 
 **Severity:** blocking for (a): no fire in a 30-PR replay, 2026-10-11, so it keeps its first-landing severity (`AGENTS.md` *Code shape*: "no flag argument that selects between two bodies"; *Simplify by removing a mechanism*: "rather than become one function with modes"). Blocking for (d), and for (c)'s parameter only tests set to a non-default value: blocking by owner decision 2026-10-12 on a 1/1 replay; demote back to advisory on the first confirmed false-positive block (*Code shape*: "no parameter that is derivable, unread or set only by tests"). (b) and (c)'s derivable parameter are advisory: 1/1 real (a parameter no caller sets), below the two real findings promotion needs (no `AGENTS.md` sentence names a clump).
 **Fires when:** the diff adds a parameter to, or adds a `def` under `src/` with: (a) a `bool` (or two-value `Literal`) that selects between two bodies -- its first use is `if <param>:` ending in `return` -- and a production caller passing one value also passes dummies (`""`, `0`, `None`) for parameters only the other body reads; a flag with no such dummy-passing caller is advisory; (b) a group of three or more names passed together in the same order to more than one function, or unpacked from one object at every call site; (c) a parameter every production caller derives from another argument, or that only tests set to a non-default value; (d) a parameter the body never reads.
-**The rule:** a signature states the callee's real inputs once. A flag that selects a behaviour is two functions sharing a name: split them, so neither caller supplies dummies for the other branch. Values that always travel together become one frozen, keyword-only dataclass built once where they are resolved (`_SweepRun`, `_Round` are the house pattern). When every caller unpacks the same object to feed the callee, pass the object -- unless taking it would make the callee import a type from a layer above it, in which case pass the fields. A parameter that is derivable, unread or varied only by tests is plumbing the change introduced. Parameter count alone is not this rule's finding.
+**The rule:** a signature states the callee's real inputs once. A flag that selects a behaviour is two functions sharing a name: split them, so neither caller supplies dummies for the other branch. Values that always travel together become one frozen, keyword-only dataclass built once where they are resolved (`_SweepRun`, `_Round` are the house pattern). When every caller unpacks the same object to feed the callee, pass the object -- unless taking it would make the callee import a type from a layer above it, in which case pass the fields. A parameter that is derivable, unread or varied only by tests is plumbing the change introduced. Parameter count alone is not this rule's finding: D14 counts, and this rule names which parameters go.
 **Seen in:** PR #1660 -- "_sweep_one_arm_single_server took 28 parameters ... and 18 of them were the same sweep-wide values threaded through every call" (clump -> `_SweepRun`); "has_budget was always total_budget_sec is not None" (derivable); "The partial flush's partial flag had no caller that passed False" and "write_reports=False, passed only by tests" (test-only). PR #1707 -- "_reject took eleven positional parameters, four consecutive str among them"; the callers in `enablement/lane.py` now pass `round_row` instead of unpacking it. `inference_optimizer/multi_node/_internal/infera_support.py::build_node_launch_args(..., kill_only=False)` (the flag dates from PR #548, in what was then `dynamo_support.py`; PR #893 renamed the module) branches on `if kill_only: ... return`, and `inference_optimizer/multi_node/commands/infera.py::_infera_kill_inference` passes `model=""`, `tp=0`, `kill_only=True` to satisfy the other branch's signature.
 **Not a finding when:** the function is a CLI entry point whose parameters are the operator's flags; the bool tunes a detail inside one behaviour (`verbose`, `exist_ok`); passing the owning object would invert a layer; the parameter is an existing test seam on the merge base; the diff only forwards an existing parameter; the parameter is required by a Protocol or callback signature, or keeps the call shape of a sibling implementation of one interface (a no-op or null-object alternate in a union, a subclass override) that reads it, as `hyperloom_kb/runtime.py::NoOpExperienceKB.read` does for `hyperloom_kb/remote.py::RemoteExperienceKB.read`; a static gate in CI already reports the unread parameter.
 **Evidence:** `$WORK/diff.txt` for the signature; `git grep` for the production call sites and what they pass.
@@ -1043,7 +1088,7 @@ that a shape defect causes is still blocking, under the C or S rule it breaks, n
 **Severity:** blocking for the pure forwarding `def` (the third shape below): 2/2 real in a 30-PR replay, 2026-10-11 (`AGENTS.md` *Simplify by removing a mechanism*: "a forwarding layer with no job of its own"). The single-implementation abstraction and the memberless base class are advisory: no fire, so no evidence either way (*Code shape*: "An abstraction — Protocol, ABC, base class, factory, registry — arrives with its second implementation, not before"; *Simplify by removing a mechanism* for the memberless base). A config knob with one value is C3's. A forwarder or single-caller helper that exists only to keep another part of the same fix from colliding is one of D13's counted mechanisms: report the set once under D13, not each part here.
 **Fires when:** the diff adds a `Protocol`, `ABC`, factory whose job is to choose an implementation (`select_*`, or a `make_*`/`build_*` typed to return an abstraction), registry or strategy dict with fewer than two production implementations or entries in the head tree; or adds a base class that declares no members of its own, whatever its subclass count; or adds a `def` whose body after the docstring is one `return`/`await` of another callable with the same arguments in the same order -- an `_impl` twin, a private alias of an imported function, a method forwarding to one collaborator method.
 **The rule:** an abstraction is paid for by its second user. A Protocol, base class, factory or registry with one production implementation gives the reader an extra hop that decides nothing, and agents copying the file add more of the same seam. Use the concrete class, and introduce the seam in the PR that adds the second implementation. A function that only renames and forwards its arguments is a forwarding layer: call the target by its own name. The finding names the abstraction or forwarder, the single implementation or target, and the call sites that would bind to it directly.
-**Seen in:** PR #1665 deleted `phases/base.py`'s `class PhaseHandler(CoordinatorCollaborator)`, which declared no members, so "every phase that named it reached its collaborator through one hop that decided nothing". PR #1642 -- "`_write_variant_abort_marker` forwarded to `_write_variant_abort_marker_impl` with the same signature", and the one-line `BaselineExecutor._resolve_lifecycle_params` was inlined into its only caller. `orchestrator/bringup/reap.py::ReapBackend` (PR #1409): `class ReapBackend(Protocol)` with one implementation, `reap.py::ProcessGroupReaper`, and `reap.py::select_reaper() -> ReapBackend` that returns it; nothing under `src/` outside its tests uses either. `orchestrator/actions/executors/profile.py::_is_capture_trace(path, root=None)` (PR #1249) only returns `_shared_is_capture_fragment(path, root)`, with the same private wrapper at `orchestrator/trace_analysis/_bypass_trace_reader.py::_is_capture_fragment` and `orchestrator/trace_analysis/tracelens_analysis.py::_is_capture_fragment`.
+**Seen in:** PR #1665 deleted `phases/base.py`'s `class PhaseHandler(CoordinatorCollaborator)`, which declared no members, so "every phase that named it reached its collaborator through one hop that decided nothing". PR #1642 -- "`_write_variant_abort_marker` forwarded to `_write_variant_abort_marker_impl` with the same signature", and the one-line `BaselineExecutor._resolve_lifecycle_params` was inlined into its only caller. `orchestrator/actions/executors/profile.py::_is_capture_trace(path, root=None)` (PR #1249) only returns `_shared_is_capture_fragment(path, root)`, with the same private wrapper at `orchestrator/trace_analysis/_bypass_trace_reader.py::_is_capture_fragment` and `orchestrator/trace_analysis/tracelens_analysis.py::_is_capture_fragment`.
 **Not a finding when:** the memberless base is an exception family that callers catch to handle its subclasses together; a builder does real construction work (assembles a parser, a config, an argv) rather than choosing an implementation; the seam is an exported contract consumed out of tree or by plugins (`agent_backends/registry.py`, a client interface with HTTP and in-memory implementations); the second implementation lands in the same PR; the Protocol is declared by a lower layer so a higher layer can implement it without an upward import (dependency inversion, A2); the forwarder adapts something (adds a default, converts or checks a type at runtime, binds `self` state, converts units, computes an argument) -- narrowing only the annotation is not adapting; it is a staged-migration adapter that names its remaining consumer (*Finish the replacement*); it is a documented test monkeypatch point.
 **Evidence:** `$WORK/diff.txt` for the new class or def; `git grep` over the head tree, excluding tests, for implementations and callers.
 **Report as:** `A12 <file>:<line> -- <abstraction> has one implementation <impl>|<fn> only forwards to <target>; use <impl|target> directly at <call sites>`
@@ -1150,9 +1195,13 @@ rewrote the `record_kernel_discovery` call contract, so landing this one first w
 #1397's premise.
 **Not a finding when:** the overlapping files are only lockfiles or test
 fixtures, or the other PR is a draft the author has already stacked on this one.
-**Evidence:** `$WORK/openprs.txt` -- other open PRs and the files they share.
+**Evidence:** `$WORK/openprs.txt` -- other open PRs and the files they share. A `# PARTIAL:` line
+names what was never compared: the open PRs past the list limit, or a PR's files past its first
+100. Overlap there is unchecked, not absent: each such line goes into `verdicts.txt` and onto the
+card under SKILL.md's SKIPPED protocol, and a `FIRE` or `CLEAR` covers only the rows compared.
 **Report as:** `V4: #<N> touches <K> of the same files and <how the premises conflict> --
-land <which> first`
+land <which> first`; for each `# PARTIAL:` line, also `SKIPPED: V4 -- <that line, quoted>, overlap
+there unchecked`
 
 ### V5 -- CI must be green at the current head, proportional to the diff, and free of base conflicts
 

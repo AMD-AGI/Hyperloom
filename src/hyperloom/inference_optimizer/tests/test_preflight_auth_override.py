@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import logging
 import os
 import re
@@ -14,9 +15,12 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Any
+from unittest.mock import Mock
 
+import httpx
 import pytest
 
+from hyperloom.common import claude_oneshot
 from hyperloom.common.env import EnvValueError
 from hyperloom.common.llm_config import deepseek_compat_env
 from hyperloom.common.llm_headers import parse_custom_headers
@@ -39,7 +43,7 @@ def stub_install_steps(monkeypatch, tmp_path):
     (inferencex_dir / "benchmarks").mkdir(parents=True)
     (inferencex_dir / "benchmarks" / "benchmark_lib.sh").write_text("# stub", encoding="utf-8")
     monkeypatch.setenv("INFERENCEX_PATH", str(inferencex_dir))
-    monkeypatch.setattr(cli_preflight, "_clone_inferencex", lambda dest: str(inferencex_dir))
+    monkeypatch.setattr(cli_preflight.inferencex_checkout, "clone", lambda dest: str(inferencex_dir))
 
     def _fake_which(name: str):
         return f"/usr/bin/{name}"
@@ -1876,10 +1880,14 @@ def test_probe_llm_catalog_retries_on_transient_error_then_succeeds(monkeypatch)
     def _flaky_get(url, **kwargs):
         attempt[0] += 1
         if attempt[0] <= 2:
-            raise RuntimeError(f"transient {attempt[0]}")
+            raise httpx.ConnectError(f"transient {attempt[0]}")
         return _FakeResp(200, {"data": [{"id": "claude-opus-4-7"}]})
 
-    fake_httpx = type("FakeHttpx", (), {"get": staticmethod(_flaky_get)})
+    fake_httpx = type(
+        "FakeHttpx",
+        (),
+        {"get": staticmethod(_flaky_get), "HTTPError": httpx.HTTPError, "InvalidURL": httpx.InvalidURL},
+    )
     monkeypatch.setitem(sys.modules, "httpx", fake_httpx)
 
     ids = cli._probe_llm_catalog(
@@ -2053,6 +2061,14 @@ def test_smoke_test_codex_model_falls_back_to_next_rung(monkeypatch, capsys):
     assert "falling back" in out
 
 
+def test_smoke_test_codex_model_falls_back_from_the_default_to_the_previous_default(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "_probe_llm_catalog", lambda **kw: {"gpt-5.6-sol", "gpt-5.5"})
+    args = _make_args(codex_model="gpt-6-astra", critic_mock=False)
+    cli._smoke_test_codex_model(args, ("https://anthropic", "https://openai/v1"))
+
+    assert args.codex_model == "gpt-5.6-sol"
+
+
 def test_smoke_test_codex_model_ladder_skips_missing_rungs(monkeypatch, capsys):
     monkeypatch.setattr(cli, "_probe_llm_catalog", lambda **kw: {"gpt-5.4", "gpt-4.1"})
     args = _make_args(codex_model="gpt-5.6-sol", critic_mock=False)
@@ -2135,7 +2151,7 @@ def _record_critic_probes(monkeypatch, *, fail: bool = False) -> list[tuple[str,
     sent: list[tuple[str, str]] = []
 
     def _anthropic(**kw):
-        sent.append(("anthropic", kw["model"]))
+        sent.append(("anthropic", kw["request"].model))
         if fail:
             raise RuntimeError("AuthenticationError")
 
@@ -2738,3 +2754,35 @@ def test_session_framework_unregistered_exits(capsys):
     err = capsys.readouterr().err
     assert "'tensorrt'" in err
     assert "it comes from the resumed session" in err
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="CLI imports require POSIX fcntl")
+def test_model_preflight_runs_off_the_event_loop_so_a_subscription_token_can_answer(monkeypatch):
+    """The OAuth one-shot client refuses a synchronous call inside a running loop; model preflight must not be one."""
+
+    async def _answer(self, **_kwargs):
+        return "OK"
+
+    monkeypatch.setattr(claude_oneshot.ClaudeOneShotClient, "amessages", _answer)
+    answers: list[str] = []
+
+    class PreflightDone(Exception):
+        pass
+
+    def _resolve(args, resolved_urls, **_kwargs):
+        reply = claude_oneshot.ClaudeOneShotClient().messages(
+            model="claude-opus-5-5", messages=[{"role": "user", "content": "Reply with OK."}], max_tokens=16
+        )
+        answers.append(reply)
+        raise PreflightDone
+
+    monkeypatch.setattr(cli, "clean_stale_aiter_locks", lambda: {"dir": ""})
+    monkeypatch.setattr(cli, "_claude_model_should_follow_codex", lambda: False)
+    monkeypatch.setattr(cli, "_codex_model_should_follow_claude", lambda: False)
+    monkeypatch.setattr(cli, "_preflight", Mock(return_value={}))
+    monkeypatch.setattr(cli, "_resolve_models_for_run", _resolve)
+    args = cli._build_parser().parse_args(["optimize", "--model", "/models/m"])
+
+    with pytest.raises(PreflightDone):
+        asyncio.run(cli._run_optimize(args))
+    assert answers == ["OK"]

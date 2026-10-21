@@ -11,16 +11,39 @@ import inspect
 import logging
 import os
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional, Sequence
 
-from .calibration import DEFAULT_MIN_PREDICTED_GAIN, predict_cuda_graph_on_gain
+from .calibration import predict_cuda_graph_on_gain
 from .models import Diagnosis, FusionPattern, Recipe
 from .patterns import match_patterns
 from .shapes import load_model_config, resolve_decode_shapes
 from .vllm_passes import PassState, TargetRuntime, probe_pass_states, resolve_target_runtime
 
 PassProbe = Callable[[str], PassState]
+
+
+@dataclass(frozen=True)
+class FrameworkInstall:
+    """The framework install a run targets, and how its compile-pass state is probed."""
+
+    framework: str
+    framework_root: str = ""
+    pass_probe: Optional[PassProbe] = None
+
+
+@dataclass(frozen=True)
+class _PatternEvidence:
+    """What the trace and source say about one matched pattern."""
+
+    shapes: dict[str, Any]
+    matched_categories: list[str]
+    trigger_share: float
+    predicted_gain: float
+    mem_share: Optional[float]
+    source_confirmed: Optional[bool]
+
 
 log = logging.getLogger("kernelforge.fusion.locate")
 
@@ -474,17 +497,7 @@ def rank_recipes(recipes: list[Recipe]) -> list[Recipe]:
     return sorted(recipes, key=lambda r: 0 if r.candidate_kind == "compile_pass" else 1)
 
 
-def _compile_pass_recipe(
-    pat: FusionPattern,
-    state: PassState,
-    *,
-    shapes: dict[str, Any],
-    matched_categories: list[str],
-    trigger_share: float,
-    predicted_gain: float,
-    mem_share: Optional[float],
-    source_confirmed: Optional[bool],
-) -> Recipe:
+def _compile_pass_recipe(pat: FusionPattern, state: PassState, evidence: _PatternEvidence) -> Recipe:
     """Recipe that claims the framework's own disabled fusion pass."""
     return Recipe(
         pattern_id=f"compile_pass:{state.flag}",
@@ -498,14 +511,14 @@ def _compile_pass_recipe(
         source_hints=[state.flag],
         fusion_math=pat.fusion_math,
         eager_reference_hint="",
-        shapes=shapes,
-        matched_categories=matched_categories,
-        trigger_share=trigger_share,
+        shapes=evidence.shapes,
+        matched_categories=evidence.matched_categories,
+        trigger_share=evidence.trigger_share,
         rocm_native=pat.rocm_native,
-        source_confirmed=source_confirmed,
+        source_confirmed=evidence.source_confirmed,
         already_satisfied=False,
-        predicted_gain=predicted_gain,
-        mem_share=float(mem_share or 0.0),
+        predicted_gain=evidence.predicted_gain,
+        mem_share=float(evidence.mem_share or 0.0),
         candidate_kind="compile_pass",
         compile_pass_flag=state.flag,
     )
@@ -515,14 +528,12 @@ def build_recipes(
     diagnosis: Diagnosis,
     *,
     model_path: str,
-    framework: str,
-    framework_root: str = "",
+    install: FrameworkInstall,
     decode_batch: int = 16,
-    min_predicted_gain: float = DEFAULT_MIN_PREDICTED_GAIN,
     include_unconfirmed: bool = False,
-    pass_probe: Optional[PassProbe] = None,
 ) -> list[Recipe]:
     """Instantiate localized recipes from a diagnosis (deterministic skeleton)."""
+    framework, framework_root = install.framework, install.framework_root
     matched = match_patterns(diagnosis, framework)
     if not matched:
         return []
@@ -562,7 +573,9 @@ def build_recipes(
             text=" ".join((pat.id, pat.fusion_math, pat.env_flag)),
             framework=framework,
         )
-        state = vllm_compile_pass_state(compile_pass, probe=pass_probe, runtime=runtime) if compile_pass else None
+        state = (
+            vllm_compile_pass_state(compile_pass, probe=install.pass_probe, runtime=runtime) if compile_pass else None
+        )
         # ONLY an enabled pass makes the candidate a no-op.
         covered = state is not None and state.enabled is True
         pass_note = "" if state is None or state.claimable or covered else _unclaimable_note(state)
@@ -576,20 +589,17 @@ def build_recipes(
             # Drop no-op patterns (source already fuses OR an ENABLED vLLM pass covers).
             continue
         if state is not None and state.claimable:
-            recipes.append(
-                _compile_pass_recipe(
-                    pat,
-                    state,
-                    shapes=shapes,
-                    trigger_share=trigger_share,
-                    predicted_gain=predicted_gain,
-                    mem_share=mem_share,
-                    source_confirmed=confirmed,
-                    matched_categories=sorted(
-                        c for c in pat.trigger_categories if diagnosis.category_shares.get(c, 0.0) > 0
-                    ),
-                )
+            evidence = _PatternEvidence(
+                shapes=shapes,
+                matched_categories=sorted(
+                    c for c in pat.trigger_categories if diagnosis.category_shares.get(c, 0.0) > 0
+                ),
+                trigger_share=trigger_share,
+                predicted_gain=predicted_gain,
+                mem_share=mem_share,
+                source_confirmed=confirmed,
             )
+            recipes.append(_compile_pass_recipe(pat, state, evidence))
             continue
         recipes.append(
             Recipe(

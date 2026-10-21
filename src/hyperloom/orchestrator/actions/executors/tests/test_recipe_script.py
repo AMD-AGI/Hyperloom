@@ -44,7 +44,7 @@ def _config(tmp_path: Path, **bench) -> Path:
 def test_the_agentx_client_resolves_to_the_builtin_beside_it_not_a_same_named_one_below(checkout):
     (checkout / "single_node").mkdir()
     (checkout / "single_node" / "vllm_mi355x.sh").write_text("# a different script\n", encoding="utf-8")
-    bench = {"benchmark_script": "aiperf_client.sh", "framework": "vllm", "runner_type": "mi355x"}
+    bench = {"benchmark_script": "mlperf_agentic_client.sh", "framework": "vllm", "runner_type": "mi355x"}
 
     assert resolve_launch_server_script(bench) == str(checkout / "vllm_mi355x.sh")
 

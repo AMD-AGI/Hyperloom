@@ -13,23 +13,81 @@ from hyperloom.common.env import env_bool
 
 from ..state.task_registry import Task
 from ..collaborator import CoordinatorCollaborator
+from . import machine_state as _phase_state
 
 log = _logging.getLogger(__name__)
+
+
+def _bridge_symptom(cand: dict[str, Any], predicate_file: str, why: str) -> str:
+    """The operator-readable account of one un-bridged switch."""
+    predicate_name = str(cand.get("predicate_name") or "").strip()
+    parts = [
+        f"Un-bridged switch in {predicate_file}" + (f" ({predicate_name})" if predicate_name else "") + f": {why}",
+    ]
+    consequence = str(cand.get("consequence") or "").strip()
+    if consequence:
+        parts.append(f"Consequence: {consequence}")
+    bridge_sketch = str(cand.get("bridge_sketch") or "").strip()
+    if bridge_sketch:
+        parts.append(f"Bridge: {bridge_sketch}")
+    return " ".join(parts)[:1200]
+
+
+def _bridge_candidate_gap(cand: dict[str, Any], idx: int) -> dict[str, Any] | None:
+    """The gap row a static-recon bridge candidate seeds, or None when it is not actionable."""
+    predicate_file = str(cand.get("predicate_file") or "").strip()
+    why = str(cand.get("why_disabled_here") or "").strip()
+    # A candidate without a source anchor + explanation is not actionable.
+    if not predicate_file or not why:
+        return None
+    raw_id = str(cand.get("id") or f"cand{idx}").strip() or f"cand{idx}"
+    slug = "".join(c if (c.isalnum() or c in "._-") else "_" for c in raw_id)[:80]
+    return {
+        "canonical_id": f"gap.static_recon.{slug}",
+        "symptom": _bridge_symptom(cand, predicate_file, why),
+        "layer": "static_recon",
+        "severity": "medium",
+        "domain_hint": str(cand.get("domain_hint") or "freeform").strip() or "freeform",
+        "source": "static_recon",
+        "provenance": predicate_file,
+    }
 
 
 class InternalTasksPhase(CoordinatorCollaborator):
     """Handles internal task execution: report, session breakdown, and internal bookkeeping tasks."""
 
-    async def _enqueue_internal_research_scout_task(
-        self,
-        *,
-        reason: str,
-        round_id: int,
-    ) -> "Task | None":
-        """Enqueue a Coordinator-owned read-only research-scout specialist task; idempotency keyed by round, returns None when the scout is disabled."""
-        if not bool(self.shared_state.research_scout_enabled):
-            return None
-        idempotency_key = f"internal-research-scout-round{int(round_id)}"
+    def _research_scout_already_proven(self) -> list[dict[str, str]]:
+        """Priors this session has already validated, so the scout does not re-propose them."""
+        proven = list(self._coord.phase_prelude.warm_recipe_proven_items())
+        search = self.shared_state.explore_search or {}
+        accepted = search.get("accepted") if isinstance(search, dict) else []
+        if not isinstance(accepted, list):
+            return proven
+        for variant in accepted:
+            if not isinstance(variant, dict):
+                continue
+            name = str(variant.get("name") or variant.get("fingerprint") or "").strip()
+            if not name:
+                continue
+            sources = variant.get("source_evidence") or variant.get("pr_evidence") or []
+            source = str(sources[0]).strip() if isinstance(sources, list) and sources else ""
+            proven.append({"name": name, "source": source})
+        return proven
+
+    def _research_scout_residual_questions(self) -> str:
+        """The open questions the latest scout round left behind, as a note block."""
+        rounds = self.shared_state.specialist_rounds or []
+        if not isinstance(rounds, list):
+            return ""
+        for row in reversed(rounds):
+            if not isinstance(row, dict) or row.get("domain") != "research_scout_specialist":
+                continue
+            questions = [str(item).strip() for item in (row.get("residual_questions") or []) if str(item).strip()]
+            return "\n".join(f"- {question}" for question in questions)
+        return ""
+
+    def _research_scout_params(self, *, reason: str, round_id: int) -> dict[str, Any]:
+        """The specialist params for one research-scout round."""
         seen = sorted(
             {str(item).strip() for item in (self.shared_state.research_scout_seen_pr_ids or []) if str(item).strip()}
         )
@@ -50,18 +108,7 @@ class InternalTasksPhase(CoordinatorCollaborator):
             "seen_pr_ids": seen,
             "mode": "research",
         }
-        proven = list(self._coord.phase_prelude.warm_recipe_proven_items())
-        search = self.shared_state.explore_search or {}
-        accepted = search.get("accepted") if isinstance(search, dict) else []
-        if isinstance(accepted, list):
-            for variant in accepted:
-                if not isinstance(variant, dict):
-                    continue
-                name = str(variant.get("name") or variant.get("fingerprint") or "").strip()
-                if name:
-                    sources = variant.get("source_evidence") or variant.get("pr_evidence") or []
-                    source = str(sources[0]).strip() if isinstance(sources, list) and sources else ""
-                    proven.append({"name": name, "source": source})
+        proven = self._research_scout_already_proven()
         if proven:
             params["already_proven"] = proven
         recipe_sites = [
@@ -69,21 +116,27 @@ class InternalTasksPhase(CoordinatorCollaborator):
         ]
         if recipe_sites:
             params["recipe_sites"] = recipe_sites
-        rounds = self.shared_state.specialist_rounds or []
-        if isinstance(rounds, list):
-            for row in reversed(rounds):
-                if not isinstance(row, dict) or row.get("domain") != "research_scout_specialist":
-                    continue
-                questions = [str(item).strip() for item in (row.get("residual_questions") or []) if str(item).strip()]
-                if questions:
-                    params["notes"] = "\n".join(f"- {question}" for question in questions)
-                break
+        notes = self._research_scout_residual_questions()
+        if notes:
+            params["notes"] = notes
+        return params
+
+    async def _enqueue_internal_research_scout_task(
+        self,
+        *,
+        reason: str,
+        round_id: int,
+    ) -> "Task | None":
+        """Enqueue a Coordinator-owned read-only research-scout specialist task; idempotency keyed by round, returns None when the scout is disabled."""
+        if not bool(self.shared_state.research_scout_enabled):
+            return None
+        params = self._research_scout_params(reason=reason, round_id=round_id)
         await self._coord.specialist_dispatch.warm_specialist_params(params)
         lanes, ttl = self._coord.gpu_lanes.framework_authoring_lanes_ttl(params, base_ttl_sec=1800)
         task, was_existing = await self.tasks.create_or_return_existing(
             kind="specialist",
             params=params,
-            idempotency_key=idempotency_key,
+            idempotency_key=f"internal-research-scout-round{int(round_id)}",
             requires_lanes=lanes,
             side_effects=["writes_results"],
             lease_ttl_sec=ttl,
@@ -108,7 +161,7 @@ class InternalTasksPhase(CoordinatorCollaborator):
             from hyperloom.inference_optimizer.baseline_comparison import research_hints as _research_hints
 
             _research_hints.write_hints_skeleton(self.session_dir)
-        except Exception:
+        except OSError:
             log.exception("research-scout: hints skeleton write failed")
         if not bool(self.shared_state.research_scout_enabled):
             return
@@ -137,16 +190,17 @@ class InternalTasksPhase(CoordinatorCollaborator):
         self,
         *,
         reason: str,
+        slug: str,
     ) -> "Task | None":
-        """Enqueue the Coordinator-owned read-only static-recon specialist task."""
+        """Enqueue the Coordinator-owned read-only static-recon specialist task; ``slug`` scopes the idempotency key so a later pass is not deduplicated against the first."""
         state = self.shared_state
         if not bool(state.static_recon_enabled):
             return None
-        idempotency_key = "internal-static-recon-prelude"
+        idempotency_key = f"internal-static-recon-{slug}"
         params: dict[str, Any] = {
             "domain": "static_recon_specialist",
             "source_phase": str(state.phase or "PRELUDE").strip().upper(),
-            "gap_canonical_id": "gap.static_recon.prelude",
+            "gap_canonical_id": f"gap.static_recon.{slug}",
             "gap_symptom": (
                 "Grep the framework source for un-bridged capability switches "
                 "(predicates that silently disable a faster path for this "
@@ -159,24 +213,21 @@ class InternalTasksPhase(CoordinatorCollaborator):
             "scope": "domain",
             "mode": "research",
         }
-        # Seed the curated checklist + rendered prompt block; best-effort.
-        try:
-            from ..knowledge import static_recon_checklist as _src_recon
+        # Seed the curated checklist + rendered prompt block.
+        from ..knowledge import static_recon_checklist as _src_recon
 
-            _entries = _src_recon.entries_for(
-                model_class=str(state.model_class or ""),
-                gpu_type=str(state.gpu_type or ""),
-                precision=_src_recon.workload_precision(state),
-            )
-            _entries = _src_recon.filter_entries_for_model(_entries, dict(state.model_info or {}))
-            _rendered = _src_recon.render_checklist_for_prompt(_entries)
-            if _rendered:
-                params["static_recon_checklist"] = _rendered
-            _dicts = _src_recon.checklist_as_dicts(_entries)
-            if _dicts:
-                params["static_recon_checklist_entries"] = _dicts
-        except Exception:
-            log.exception("static-recon: checklist seeding failed")
+        _entries = _src_recon.entries_for(
+            model_class=str(state.model_class or ""),
+            gpu_type=str(state.gpu_type or ""),
+            precision=_src_recon.workload_precision(state),
+        )
+        _entries = _src_recon.filter_entries_for_model(_entries, dict(state.model_info or {}))
+        _rendered = _src_recon.render_checklist_for_prompt(_entries)
+        if _rendered:
+            params["static_recon_checklist"] = _rendered
+        _dicts = _src_recon.checklist_as_dicts(_entries)
+        if _dicts:
+            params["static_recon_checklist_entries"] = _dicts
         await self._coord.specialist_dispatch.warm_specialist_params(params)
         lanes, ttl = self._coord.gpu_lanes.framework_authoring_lanes_ttl(params, base_ttl_sec=1800)
         task, was_existing = await self.tasks.create_or_return_existing(
@@ -192,7 +243,7 @@ class InternalTasksPhase(CoordinatorCollaborator):
             try:
                 state.static_recon_runs = int(state.static_recon_runs or 0) + 1
                 self.shared_state.save(self.session_dir)
-            except Exception:
+            except OSError:
                 log.exception("static-recon: bookkeeping save failed")
             log.info(
                 "static-recon dispatched: task_id=%s reason=%s",
@@ -207,6 +258,27 @@ class InternalTasksPhase(CoordinatorCollaborator):
             return
         await self._enqueue_internal_static_recon_task(
             reason="prelude_initial",
+            slug="prelude",
+        )
+
+    async def maybe_enqueue_config_plateau_static_recon(self) -> None:
+        """Re-run static recon once per macro-cycle when the config arm goes dry.
+
+        The PRELUDE pass greps the source before any measurement exists. Once
+        the grids stop paying, the profile says which subsystem to look at, so a
+        second pass reads the predicates that matter rather than all of them.
+        """
+        state = self.shared_state
+        if not bool(state.static_recon_enabled):
+            return
+        if str(state.phase or "").strip().upper() != _phase_state.PHASE_FRAMEWORK_AGENT:
+            return
+        _, evidence = _phase_state.per_lever_dryness(state)
+        if not bool(evidence.get("config_arm_plateaued")):
+            return
+        await self._enqueue_internal_static_recon_task(
+            reason="config_arm_plateau",
+            slug=f"cycle{int(state.macro_cycle or 0)}",
         )
 
     async def maybe_enqueue_trajectory_reviewer(self) -> None:
@@ -225,7 +297,8 @@ class InternalTasksPhase(CoordinatorCollaborator):
                 self.session_dir,
                 state,
             )
-        except Exception:  # noqa: BLE001 — defensive
+        except Exception:
+            log.exception("Coordinator: trajectory review digest failed")
             digest = ""
         direction, _pct = self._coord.conversation.dominant_roofline_direction()
         from hyperloom.inference_optimizer.roofline_snapshot import BOTTLENECK_DOMAIN_HINTS
@@ -278,45 +351,14 @@ class InternalTasksPhase(CoordinatorCollaborator):
             return
         seeded = 0
         for idx, cand in enumerate(candidates):
-            if not isinstance(cand, dict):
+            gap = _bridge_candidate_gap(cand, idx) if isinstance(cand, dict) else None
+            if gap is None:
                 continue
-            predicate_file = str(cand.get("predicate_file") or "").strip()
-            why = str(cand.get("why_disabled_here") or "").strip()
-            # A candidate without a source anchor + explanation is not actionable.
-            if not predicate_file or not why:
-                continue
-            raw_id = str(cand.get("id") or f"cand{idx}").strip() or f"cand{idx}"
-            slug = "".join(c if (c.isalnum() or c in "._-") else "_" for c in raw_id)[:80]
-            cid = f"gap.static_recon.{slug}"
-            predicate_name = str(cand.get("predicate_name") or "").strip()
-            consequence = str(cand.get("consequence") or "").strip()
-            bridge_sketch = str(cand.get("bridge_sketch") or "").strip()
-            domain_hint = str(cand.get("domain_hint") or "freeform").strip() or "freeform"
-            symptom_parts = [
-                f"Un-bridged switch in {predicate_file}"
-                + (f" ({predicate_name})" if predicate_name else "")
-                + f": {why}",
-            ]
-            if consequence:
-                symptom_parts.append(f"Consequence: {consequence}")
-            if bridge_sketch:
-                symptom_parts.append(f"Bridge: {bridge_sketch}")
-            symptom = " ".join(symptom_parts)[:1200]
-            self.shared_state.upsert_gap(
-                {
-                    "canonical_id": cid,
-                    "symptom": symptom,
-                    "layer": "static_recon",
-                    "severity": "medium",
-                    "domain_hint": domain_hint,
-                    "source": "static_recon",
-                    "provenance": predicate_file,
-                }
-            )
+            self.shared_state.upsert_gap(gap)
             seeded += 1
         if seeded:
             try:
                 self.shared_state.save(self.session_dir)
-            except Exception:
+            except OSError:
                 log.exception("static-recon: SharedState.save after seeding failed")
         log.info("static-recon consumed: bridge_candidates_seeded=%d", seeded)

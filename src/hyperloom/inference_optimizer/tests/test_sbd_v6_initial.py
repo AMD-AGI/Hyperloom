@@ -15,10 +15,14 @@ from hyperloom.inference_optimizer.breakdown.collectors.v6 import collect_v6_tim
 from hyperloom.inference_optimizer.breakdown.critic_reviews import normalize_framework_reviews
 from hyperloom.inference_optimizer.session.sbd_v6 import (
     SCHEMA_VERSION_V6,
-    read_timeline_event,
     read_timeline_events,
     write_timeline_event_at,
 )
+
+
+def read_timeline_event(session_dir: Path, event_type: str) -> dict | None:
+    matching = [event for event in read_timeline_events(session_dir) if event["type"] == event_type]
+    return matching[-1] if matching else None
 
 
 def _write_json(path: Path, payload: dict) -> None:
@@ -57,6 +61,7 @@ def _write_model_config(model: Path, payload: dict) -> None:
 def _model_gate_from_breakdown(session_dir: Path) -> dict:
     breakdown = json.loads((session_dir / "session_breakdown.json").read_text(encoding="utf-8"))
     assert breakdown["schema_version"] == SCHEMA_VERSION_V6
+    assert breakdown["schema_version"] == "hyperloom.session_breakdown.v6.1"
     assert breakdown["outcome"]["status"] == "failed"
     assert breakdown["outcome"]["stage_reached"] == "model_gate"
     return next(event for event in breakdown["timeline"] if event["type"] == "model_gate")
@@ -255,11 +260,13 @@ def test_install_event_stays_pending_until_session_creation(tmp_path):
     preflight._finish_install_event(
         event,
         args=args,
-        benchmark_backend="bypass",
-        benchmark_python="python",
-        magpie_python="python",
-        inferencex_path="/opt/InferenceX",
-        resolved_urls=("", "https://api.openai.com/v1"),
+        runtime=preflight.PreflightRuntime(
+            benchmark_backend="bypass",
+            benchmark_python="python",
+            magpie_python="python",
+            inferencex_path="/opt/InferenceX",
+            resolved_urls=("", "https://api.openai.com/v1"),
+        ),
     )
 
     assert not (tmp_path / "reports" / "sbd_v6" / "timeline").exists()
@@ -704,10 +711,9 @@ def test_timeline_writer_does_not_migrate_flat_files(tmp_path):
     assert json.loads((tmp_path / "reports" / "sbd_v6" / "install.json").read_text(encoding="utf-8")) == (fresh_install)
 
 
-def test_preflight_records_install_steps_in_execution_order(tmp_path, monkeypatch):
+def _stub_preflight_steps(tmp_path, monkeypatch):
     from hyperloom.agents.framework import kb as framework_kb
     from hyperloom.inference_optimizer.cli import preflight
-    from hyperloom.inference_optimizer.session.sbd_v6 import pending_install_event
     from hyperloom.orchestrator.actions.executors import benchmark_backend
 
     inferencex = tmp_path / "InferenceX"
@@ -734,10 +740,10 @@ def test_preflight_records_install_steps_in_execution_order(tmp_path, monkeypatc
     monkeypatch.setattr(preflight, "_ensure_lm_eval_dep", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(preflight, "_ensure_framework_deps", lambda *_args: None)
     monkeypatch.setattr(preflight, "_check_serving_framework", lambda *_args: None)
-    monkeypatch.setattr(preflight, "_inferencex_checkout_ok", lambda *_args, **_kwargs: True)
-    monkeypatch.setattr(preflight, "_inferencex_head_sha", lambda *_args: "abc123")
+    monkeypatch.setattr(preflight.inferencex_checkout, "checkout_ok", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(preflight.inferencex_checkout, "head_sha", lambda *_args: "abc123")
     monkeypatch.setattr(preflight, "_report_inferencex_patch_anchors", lambda *_args: True)
-    monkeypatch.setattr(preflight, "_check_node_claude_cli", lambda: None)
+    monkeypatch.setattr(preflight, "_check_agent_cli", lambda: None)
     monkeypatch.setattr(preflight.shutil, "which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(
         preflight,
@@ -749,14 +755,20 @@ def test_preflight_records_install_steps_in_execution_order(tmp_path, monkeypatc
         "_emit_preflight_diagnostics",
         lambda **_kwargs: {"status": "applied", "skip_reason": None},
     )
-    args = argparse.Namespace(
+    return argparse.Namespace(
         resume_from=None,
         degraded_kb=True,
         framework="sglang",
-        no_eval=True,
         no_kernel=True,
         enable_roofline=False,
     )
+
+
+def test_preflight_records_install_steps_in_execution_order(tmp_path, monkeypatch):
+    from hyperloom.inference_optimizer.cli import preflight
+    from hyperloom.inference_optimizer.session.sbd_v6 import pending_install_event
+
+    args = _stub_preflight_steps(tmp_path, monkeypatch)
 
     preflight._preflight(args)
 
@@ -765,6 +777,7 @@ def test_preflight_records_install_steps_in_execution_order(tmp_path, monkeypatc
     assert [step["step_id"] for step in event["ext"]["steps"]] == [
         "load_dotenv",
         "load_kernel_agent_env",
+        "validate_server_args",
         "normalize_legacy_deepseek_env",
         "validate_credentials",
         "prepare_kb_environment",
@@ -792,6 +805,59 @@ def test_preflight_records_install_steps_in_execution_order(tmp_path, monkeypatc
     assert steps["check_kernel_tuning_clis"]["status"] == "skipped"
     assert steps["check_kernel_tuning_clis"]["skip_reason"] == "no_kernel"
     assert steps["ensure_magpie"]["message"] == "benchmark backend is 'bypass'"
+
+
+def test_preflight_propagates_install_event_finalize_failure(tmp_path, monkeypatch):
+    from hyperloom.inference_optimizer.cli import preflight
+
+    args = _stub_preflight_steps(tmp_path, monkeypatch)
+
+    def finish_fails(*_args, **_kwargs):
+        raise KeyError("install event finalize")
+
+    monkeypatch.setattr(preflight, "_finish_install_event", finish_fails)
+
+    with pytest.raises(KeyError):
+        preflight._preflight(args)
+
+
+def test_begin_install_event_propagates_pending_event_failure(monkeypatch):
+    from hyperloom.inference_optimizer.cli import preflight
+    from hyperloom.inference_optimizer.session import sbd_v6
+
+    def attach_fails(*_args, **_kwargs):
+        raise RuntimeError("cannot attach install event")
+
+    monkeypatch.setattr(sbd_v6, "set_pending_install_event", attach_fails)
+
+    with pytest.raises(RuntimeError):
+        preflight._begin_install_event(argparse.Namespace(resume_from=None))
+
+
+def test_mark_pending_install_event_failed_propagates_lookup_failure(monkeypatch):
+    from hyperloom.inference_optimizer.cli import preflight
+    from hyperloom.inference_optimizer.session import sbd_v6
+
+    def lookup_fails(*_args, **_kwargs):
+        raise RuntimeError("cannot read install event")
+
+    monkeypatch.setattr(sbd_v6, "pending_install_event", lookup_fails)
+
+    with pytest.raises(RuntimeError):
+        preflight._mark_pending_install_event_failed(argparse.Namespace(resume_from=None), ValueError("boom"))
+
+
+def test_write_model_gate_event_propagates_write_failure(tmp_path, monkeypatch):
+    from hyperloom.inference_optimizer.cli import model_gate
+    from hyperloom.inference_optimizer.session import sbd_v6
+
+    def write_fails(*_args, **_kwargs):
+        raise OSError("disk unavailable")
+
+    monkeypatch.setattr(sbd_v6, "write_timeline_event_at", write_fails)
+
+    with pytest.raises(OSError):
+        model_gate._write_model_gate_event(tmp_path, {"type": "model_gate"})
 
 
 def test_ir3_unreachable_uses_v6_reason_without_changing_v5_state_reason(tmp_path, monkeypatch):
@@ -939,7 +1005,7 @@ def test_model_gate_event_write_failure_does_not_change_gate_result(tmp_path, mo
 
     assert model_gate._preflight_unsupported_model_arch(args, tmp_path) is False
     breakdown = exporter.build(tmp_path)
-    assert any("sbd_v6.write.model_gate.event" in warning for warning in breakdown["metadata"]["warnings"])
+    assert any("sbd_v6.write.model_gate.start" in warning for warning in breakdown["metadata"]["warnings"])
 
 
 def test_model_gate_fail_fast_writes_breakdown_once(tmp_path, monkeypatch):
@@ -1091,3 +1157,31 @@ def test_framework_review_does_not_parse_macro_cycle_from_prompt():
     )
 
     assert reviews[0]["macro_cycle"] is None
+
+
+def test_preflight_failure_session_dir_error_reaches_the_caller(monkeypatch, tmp_path):
+    import hyperloom.inference_optimizer.cli as optimizer_cli
+
+    def new_session_dir(*_a, **_k):
+        raise OSError("no space left")
+
+    monkeypatch.setattr(optimizer_cli, "_mark_pending_install_event_failed", lambda args, exc: {})
+    monkeypatch.setattr(optimizer_cli, "_new_preflight_failure_session_dir", new_session_dir)
+
+    with pytest.raises(OSError, match="no space left"):
+        optimizer_cli._persist_preflight_failure_artifacts(argparse.Namespace(), RuntimeError("preflight"))
+
+
+def test_preflight_failure_breakdown_error_reaches_the_caller(monkeypatch, tmp_path):
+    import hyperloom.inference_optimizer.cli as optimizer_cli
+
+    def write_breakdown_json(*_a, **_k):
+        raise RuntimeError("breakdown writer bug")
+
+    monkeypatch.setattr(optimizer_cli, "_mark_pending_install_event_failed", lambda args, exc: {})
+    monkeypatch.setattr(optimizer_cli, "_new_preflight_failure_session_dir", lambda *_a, **_k: tmp_path)
+    monkeypatch.setattr(optimizer_cli, "_persist_install_event", lambda *_a, **_k: None)
+    monkeypatch.setattr("hyperloom.inference_optimizer.breakdown.write_breakdown_json", write_breakdown_json)
+
+    with pytest.raises(RuntimeError, match="breakdown writer bug"):
+        optimizer_cli._persist_preflight_failure_artifacts(argparse.Namespace(), RuntimeError("preflight"))

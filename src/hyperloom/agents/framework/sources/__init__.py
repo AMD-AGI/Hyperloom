@@ -57,33 +57,22 @@ def _pr_to_candidate(
 _log = logging.getLogger(__name__)
 
 
-# Error policies for a search backend.
-_HARD_FAIL = "hard_fail"
-_BEST_EFFORT = "best_effort"
-
-
 @dataclass(frozen=True)
 class BackendSpec:
-    """A PR-source backend: its mode name, runner, and error policy."""
+    """A PR-source backend: its mode name and runner."""
 
     name: str
     run: Callable[[CandidateSearchRequest], list[Candidate]]
-    error_policy: str
 
     def invoke(self, request: CandidateSearchRequest) -> list[Candidate]:
-        """Run the backend under its error policy."""
-        if self.error_policy == _BEST_EFFORT:
-            try:
-                return self.run(request)
-            except Exception:  # noqa: BLE001 — best-effort source degrades to []
-                return []
+        """Run the backend."""
         return self.run(request)
 
 
 # Registry of PR-source backends keyed by ``search_mode``.
 _SEARCH_BACKENDS: dict[str, BackendSpec] = {
-    "pr_monitor": BackendSpec("pr_monitor", lambda req: _run_pr_monitor(req), _HARD_FAIL),
-    "github": BackendSpec("github", lambda req: _run_github(req), _BEST_EFFORT),
+    "pr_monitor": BackendSpec("pr_monitor", lambda req: _run_pr_monitor(req)),
+    "github": BackendSpec("github", lambda req: _run_github(req)),
 }
 
 
@@ -108,7 +97,7 @@ def enumerate_candidates(request: CandidateSearchRequest) -> list[Candidate]:
 
 
 def _run_github(request: CandidateSearchRequest) -> list[Candidate]:
-    """Query anonymous GitHub Search; best-effort - empty list on failure."""
+    """Query anonymous GitHub Search; network failures yield an empty list."""
     # A request that names the failure searches for it; perf discovery names
     # nothing and takes the perf terms.
     terms = tuple(_resolve_keywords(request)) or github_backend.PERF_TERMS
@@ -157,9 +146,8 @@ def _run_pr_monitor(request: CandidateSearchRequest) -> list[Candidate]:
     if not keywords:
         prs = list_perf_prs(
             request.repo_url,
-            base_url=cfg.base_url,
+            monitor=cfg,
             limit=requested,
-            timeout_sec=cfg.timeout_sec,
             **list_state_kwargs,
         )
         return [_pr_to_candidate(pr, request.repo_url, "pr_monitor") for pr in prs]
@@ -169,19 +157,17 @@ def _run_pr_monitor(request: CandidateSearchRequest) -> list[Candidate]:
     try:
         prs = search_perf_prs_via_pr_monitor_search(
             request.repo_url,
-            base_url=cfg.base_url,
+            monitor=cfg,
             query=query,
             limit=over_fetch,
             state=search_state,
-            timeout_sec=cfg.timeout_sec,
         )
     except PRMonitorError:
         # Service may not implement /v1/search/prs; fall back to the plain listing.
         prs = list_perf_prs(
             request.repo_url,
-            base_url=cfg.base_url,
+            monitor=cfg,
             limit=over_fetch,
-            timeout_sec=cfg.timeout_sec,
             **list_state_kwargs,
         )
 
@@ -190,9 +176,8 @@ def _run_pr_monitor(request: CandidateSearchRequest) -> list[Candidate]:
     if not prs:
         prs = list_perf_prs(
             request.repo_url,
-            base_url=cfg.base_url,
+            monitor=cfg,
             limit=over_fetch,
-            timeout_sec=cfg.timeout_sec,
             **list_state_kwargs,
         )
 

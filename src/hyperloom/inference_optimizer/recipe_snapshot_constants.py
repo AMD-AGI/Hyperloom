@@ -6,7 +6,10 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import Final
+
+from hyperloom.common.provenance import framework_distribution_version
 
 log = logging.getLogger(__name__)
 
@@ -222,7 +225,7 @@ def canonical_labels(
     }
 
 
-# framework_name slug -> python package whose __version__ is authoritative.
+# framework_name slug -> python package whose __version__ answers when the serving interpreter does not.
 _FRAMEWORK_VERSION_MODULES: Final[dict[str, str]] = {
     "sglang": "sglang",
     "vllm": "vllm",
@@ -231,18 +234,26 @@ _FRAMEWORK_VERSION_MODULES: Final[dict[str, str]] = {
 
 
 def detect_framework_version(framework_name: str) -> str:
-    """Best-effort installed version of ``framework_name`` via importing its top-level package and reading ``__version__``."""
+    """Best-effort installed version of ``framework_name``.
+
+    Read from the interpreter preflight resolved to serve it, else by importing its top-level package and reading
+    ``__version__``.
+    """
     fw_slug = _slug(framework_name, "")
     if not fw_slug:
         return DEFAULT_FRAMEWORK_VERSION_SLUG
     module_name = _FRAMEWORK_VERSION_MODULES.get(fw_slug)
     if not module_name:
         return DEFAULT_FRAMEWORK_VERSION_SLUG
+    # An isolated framework venv is not importable from this interpreter.
+    served = framework_distribution_version(os.environ, fw_slug)
+    if served:
+        return _slug(served, DEFAULT_FRAMEWORK_VERSION_SLUG)
     try:
         import importlib
 
         mod = importlib.import_module(module_name)
-    except Exception as exc:  # noqa: BLE001 — broad on purpose
+    except (ImportError, OSError) as exc:
         log.debug(
             "detect_framework_version: import %r failed (%s); falling back to %r",
             module_name,

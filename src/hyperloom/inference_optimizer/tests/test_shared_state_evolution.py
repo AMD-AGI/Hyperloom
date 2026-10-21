@@ -8,6 +8,8 @@ from __future__ import annotations
 import dataclasses
 import json
 
+import pytest
+
 from hyperloom.orchestrator.state.shared_state import (
     LATEST_STATE_SCHEMA_VERSION,
     SharedState,
@@ -136,6 +138,12 @@ def test_legacy_dict_with_unknown_scoreboard_keys_loads_and_stamps():
         assert key in loaded.explore_search
 
 
+@pytest.mark.parametrize("raw", [None, [], "880.0", 880.0])
+def test_a_non_object_current_best_loads_as_empty(raw):
+    """Readers rely on ``current_best`` being a dict, so any other stored shape loads as ``{}``."""
+    assert SharedState.from_dict({"session_id": "legacy", "current_best": raw}).current_best == {}
+
+
 # 3. Inv-10.3 — migration idempotence
 def test_migration_is_idempotent(tmp_path):
     """Re-loading an already-migrated state.json produces the identical SharedState."""
@@ -152,25 +160,6 @@ def test_migration_is_idempotent(tmp_path):
     snap2 = {k: getattr(third, k) for k in _FACT_LAYER_PAYLOAD}
     assert snap1 == snap2
     assert second.schema_version == third.schema_version == LATEST_STATE_SCHEMA_VERSION
-
-
-def test_v2_kernel_keep_populates_stable_task_and_pending_patch():
-    state = SharedState()
-    state.kernel_opt_task_attempts["legacy-task"] = {
-        "kernel_id": "k002",
-        "current_kernel_id": "k002",
-        "stable_task_key": "legacy-task",
-        "task_group_key": "legacy-task",
-        "last_decision": "KEEP",
-        "last_source_file": "/repo/operator.py",
-        "last_artifact_path": "/artifacts/operator.py",
-        "last_micro_speedup": 1.2,
-    }
-    assert state.kernel_opt_task_attempts["legacy-task"]["current_kernel_id"] == "k002"
-    pending = state.pending_kernel_integration_records()
-    assert len(pending) == 1
-    assert pending[0]["task_key"] == "legacy-task"
-    assert pending[0]["artifact_path"] == "/artifacts/operator.py"
 
 
 # 4. --reset-state behavior
@@ -321,71 +310,28 @@ def _applyback_evidence():
 
 
 def _record_applyback_keep(state, **overrides):
-    """Queue one apply-back KEEP the way its surviving producer does."""
-    from hyperloom.orchestrator.kernel._kernel_decisions import (
-        _queue_kernel_keep,
-        _stable_kernel_task_key,
-    )
-
-    entry = {
-        "current_kernel_id": "k007",
+    """Put one apply-back KEEP on the integration queue."""
+    record = {
+        "integration_id": "kernel-integration:applyback-k007",
+        "task_key": "tg-fused-gemm",
         "task_group_key": "tg-fused-gemm",
-        "last_decision": "KEEP",
-        "last_status": "ok",
-        "last_micro_speedup": 1.6,
-        "last_source_file": "/repo/fused_gemm.py",
-        "last_correctness_source": "forge_rewrite_reference",
-        "last_integration_validation_status": "pending",
-        "last_framework_applyback": _applyback_evidence(),
-        "last_artifact_path": "/artifacts/flydsl_kernel.py",
-        "last_deploy_patch_path": "/artifacts/forge.patch",
-        "last_deploy_repo_root": "/repo",
-        "last_snapshot_dir": "/artifacts/snapshot",
-        "attempts": 1,
+        "kernel_id": "k007",
+        "source_file": "/repo/fused_gemm.py",
+        "artifact_path": "/artifacts/flydsl_kernel.py",
+        "artifact_bundle": {},
+        "snapshot_dir": "/artifacts/snapshot",
+        "deploy_patch_path": "/artifacts/forge.patch",
+        "deploy_repo_root": "/repo",
+        "micro_speedup": 1.6,
+        "optimization_decision": "KEEP",
+        "status": "pending",
+        "correctness_source": "forge_rewrite_reference",
+        "artifact_kind": "framework_applyback",
+        "integration_validation_status": "pending",
+        "framework_applyback": _applyback_evidence(),
+        **overrides,
     }
-    for key, value in overrides.items():
-        entry[f"last_{key}"] = value
-    task_key = _stable_kernel_task_key(
-        task_group_key="tg-fused-gemm",
-        kernel_id="k007",
-        source_file="/repo/fused_gemm.py",
-    )
-    state.kernel_opt_task_attempts[task_key] = entry
-    _queue_kernel_keep(state, task_key=task_key, kernel_id="k007", entry=entry)
-
-
-def test_reference_verified_applyback_queues_with_its_provenance():
-    state = SharedState()
-
-    _record_applyback_keep(state)
-
-    pending = state.pending_kernel_integration_records()
-    assert len(pending) == 1
-    record = pending[0]
-    assert record["status"] == "pending"
-    assert record["artifact_kind"] == "framework_applyback"
-    assert record["integration_validation_status"] == "pending"
-    assert record["correctness_source"] == "forge_rewrite_reference"
-    assert record["framework_applyback"]["changed_files"] == [
-        "flydsl_kernel.py",
-        "kernel.py",
-    ]
-
-
-def test_a_plain_keep_queues_without_applyback_provenance():
-    state = SharedState()
-
-    _record_applyback_keep(
-        state,
-        correctness_source="report_scan",
-        integration_validation_status="",
-        framework_applyback={},
-    )
-
-    record = state.pending_kernel_integration_records()[0]
-    assert record["artifact_kind"] == ""
-    assert record["integration_validation_status"] == ""
-    assert record["framework_applyback"] == {}
+    state.pending_kernel_integrations[record["integration_id"]] = record
 
 
 def test_serving_accuracy_settles_the_pending_applyback_verdict():
@@ -415,17 +361,13 @@ def test_serving_accuracy_settles_the_pending_applyback_verdict():
     assert record["integration_validation_status"] == "passed"
     assert record["validation_tier"] == "integrate_e2e_accuracy"
 
-    attempt = state.kernel_opt_attempts["k007"]
-    assert attempt["integration_status"] == "integrated"
-    assert attempt["last_integration_validation_status"] == "passed"
-    assert attempt["validation_tier"] == "integrate_e2e_accuracy"
-
 
 def test_a_plain_integrated_keep_records_no_applyback_verdict():
     state = SharedState()
     _record_applyback_keep(
         state,
         correctness_source="report_scan",
+        artifact_kind="",
         integration_validation_status="",
         framework_applyback={},
     )

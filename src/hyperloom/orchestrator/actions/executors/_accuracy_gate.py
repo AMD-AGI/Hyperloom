@@ -129,8 +129,6 @@ def launch_enablement_allowed(shared_state: Any) -> bool:
 
 def eval_enablement_allowed(shared_state: Any) -> bool:
     """Whether a baseline accuracy-eval failure may route into enablement."""
-    if bool(getattr(shared_state, "eval_disabled", False)):
-        return False
     return resolve_enablement_mode(shared_state) in (ENABLEMENT_MODE_EVAL, ENABLEMENT_MODE_ALL)
 
 
@@ -165,13 +163,11 @@ def _extract_eval_contract_fields(config_path: str | Path | None) -> dict[str, s
     if not config_path:
         return {}
     try:
-        import yaml as _yaml
-
         p = Path(config_path)
         if not p.is_file():
             return {}
-        data = _yaml.safe_load(p.read_text(encoding="utf-8")) or {}
-    except Exception:  # noqa: BLE001 — best-effort
+        data = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+    except (OSError, ValueError, yaml.YAMLError):
         return {}
 
     bench = data.get("benchmark") or {}
@@ -339,6 +335,14 @@ def parse_quality_gate(workspace: Path | str) -> dict[str, Any]:
 
 def _latest_agentx_result(workspace: Path | str) -> dict[str, Any] | None:
     """The newest ``inferencex_result.json`` under *workspace*, or None."""
+    from hyperloom.common.benchmark_config import configured_benchmark, is_magpie_agentx
+    from hyperloom.inference_optimizer.agentx.report import read_agentx_report
+
+    native = read_agentx_report(Path(workspace))
+    if native is not None:
+        return native
+    if is_magpie_agentx(configured_benchmark()):
+        return None
     results = [Path(f) for f in glob.glob(str(Path(workspace) / "**" / "inferencex_result.json"), recursive=True)]
     if not results:
         return None
@@ -406,6 +410,37 @@ def quality_gate_passed(
     return True
 
 
+def _agentx_accuracy_result(workspace: Path) -> dict[str, Any]:
+    """Grade an AgentX run on the request error rate upstream gates a submission on.
+
+    Fails closed like the scriptable gate: a run that reported no rate is not comparable, and treating that as a
+    pass is how an incomparable measurement reaches the leaderboard set.
+    """
+    rate = parse_agentx_error_rate(workspace)
+    passed = rate is not None and rate <= AGENTX_ERROR_RATE_THRESHOLD_PCT
+    log.info("accuracy_gate: agentx request_error_rate=%s passed=%s", rate, passed)
+
+    from hyperloom.common.agentx_workload import is_mlperf_backend
+
+    if not is_mlperf_backend():
+        return {
+            "accuracy": 1.0 if passed else 0.0,
+            "task": "agentx_error_rate",
+            "metric": "request_error_rate",
+            "error_rate": rate,
+        }
+    # The harness scores every smoke run inline, so each KEEP is gated on that score against the baseline's, the
+    # same way lm-eval accuracy is. Over the error-rate ceiling, an unscored turn or no scores.json is a drop
+    # outright: 0.0, not None, which a lane without a required gate reads as "no eval ran" and skips.
+    score = _mlperf_inline_accuracy(_latest_agentx_result(workspace)) if passed else None
+    return {
+        "accuracy": 0.0 if score is None else score,
+        "task": "mlperf_agentic_inline",
+        "metric": "score",
+        "error_rate": rate,
+    }
+
+
 def parse_eval_results(
     workspace: Path | str,
     framework: str | None = None,
@@ -418,34 +453,9 @@ def parse_eval_results(
 
     scriptable = framework_registry.is_scriptable(framework)
 
-    # AgentX has no lm-eval; its correctness signal is the error rate upstream
-    # gates a submission on. Fails closed like the scriptable gate below: a run
-    # that reported no rate is not comparable, and treating that as a pass is
-    # how an incomparable measurement reaches the leaderboard set.
+    # AgentX has no lm-eval; its correctness signal is the request error rate.
     if is_agentx_mode(benchmark_mode):
-        rate = parse_agentx_error_rate(workspace)
-        passed = rate is not None and rate <= AGENTX_ERROR_RATE_THRESHOLD_PCT
-        log.info("accuracy_gate: agentx request_error_rate=%s passed=%s", rate, passed)
-        from hyperloom.common.agentx_workload import is_mlperf_backend
-
-        if is_mlperf_backend():
-            # The harness scores every smoke run inline, so each KEEP is gated on that score against the
-            # baseline's, the same way lm-eval accuracy is. Over the error-rate ceiling, an unscored turn or no
-            # scores.json is a drop outright: 0.0, not None, which a lane without a required gate reads as
-            # "no eval ran" and skips.
-            score = _mlperf_inline_accuracy(_latest_agentx_result(workspace)) if passed else None
-            return {
-                "accuracy": 0.0 if score is None else score,
-                "task": "mlperf_agentic_inline",
-                "metric": "score",
-                "error_rate": rate,
-            }
-        return {
-            "accuracy": 1.0 if passed else 0.0,
-            "task": "agentx_error_rate",
-            "metric": "request_error_rate",
-            "error_rate": rate,
-        }
+        return _agentx_accuracy_result(workspace)
 
     # Scriptable quality gate first: map passed->1.0 / fail->0.0.
     qg_out = parse_quality_gate(workspace)
@@ -618,14 +628,10 @@ def framework_run_eval_envs(params: dict[str, Any]) -> dict[str, Any] | None:
         params: The integrate_patch task params.
 
     Returns:
-        ``{"RUN_EVAL": "false"}`` when the session disabled evals,
         ``{"RUN_EVAL": "true"}`` for eval-origin enablement patches or for
         framework-authored perf patches with a positive baseline accuracy
         to compare against; else ``None``.
     """
-    # The session's opt-out outranks every force-on below.
-    if is_truthy(params.get("disable_run_eval")):
-        return {"RUN_EVAL": "false"}
     if bool(params.get("enablement")):
         return {"RUN_EVAL": "true"} if is_eval_origin(params) else None
     fw_authored = bool(params.get("framework_agent_authoring") or params.get("framework_agent_candidate_id"))

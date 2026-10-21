@@ -4,13 +4,12 @@
 """ExploreExecutor."""
 
 from __future__ import annotations
-
+from hyperloom.orchestrator.actions.executors._workload_envs import prepare_grid_benchmark_config
+from hyperloom.common.benchmark_config import is_magpie_agentx
 import functools
 import logging
 import os
-import shlex
 import tempfile
-import time
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -18,9 +17,8 @@ from typing import Any
 import yaml
 
 from hyperloom.common.coerce import to_str_list
-from hyperloom.common.env import is_truthy
 from hyperloom.common.gain_math import gain_pct
-from hyperloom.common.launch_log_evidence import launch_flag_setting_name, settings_the_engine_rewrote
+from hyperloom.common.launch_log_evidence import settings_the_engine_rewrote
 from hyperloom.common.model_paths import resolve_session_model_path
 from hyperloom.common.perf_metric import (
     GRADED_DURATION,
@@ -29,6 +27,8 @@ from hyperloom.common.perf_metric import (
     GRADED_INTVTY_P50,
     GRADED_OUTPUT,
     VERDICT_REVERT,
+    agentx_active,
+    constraint_fields,
     graded_axes_of,
     perf_snapshot_from_mapping,
     resolve_grading_anchor_perf,
@@ -52,10 +52,9 @@ from ...state.shared_state import (
     stack_base_params,
 )
 from ..stop_attribution import (
-    SESSION_TIME_EXHAUSTED_CLASS,
-    STOPPED_BY_THE_RUN,
     StoppedByTheRun,
     stopped_by_the_run_class,
+    variant_budget_stop,
 )
 from ._accuracy_gate import (
     accuracy_passed,
@@ -64,6 +63,7 @@ from ._accuracy_gate import (
 from . import _framework_switch_manifest as _switch_manifest
 from hyperloom.inference_optimizer.canonical_fingerprint import workload_signature
 from ._proposal_identity import effective_fingerprint, normalize_proposal
+from .measured_variants import GAIN_BELOW_THRESHOLD, MeasuredOn, measured_verdict, stack_of_measured
 from ._grid_base import (
     TS_FAILED,
     TS_KILLED_OVERTIME,
@@ -95,8 +95,10 @@ from hyperloom.inference_optimizer.grid_server_args import (
     server_args_env_name,
 )
 from ._ray_serving import maybe_serving_lease
+from ._spec_decode_context_copy import CONTEXT_COPY_REFUSAL, context_copy_refusal
 
-from ._server_argv import config_server_argv
+from ._launch_restatement import config_envs, named_settings, observed_launch_after, restates_the_baseline
+from ._server_argv import ConfigUnreadable, config_server_argv
 from ._server_lifecycle import (
     resolve_lifecycle_params,
     teardown_lifecycle_server,
@@ -104,7 +106,6 @@ from ._server_lifecycle import (
 from ._workload_envs import (
     FrameworkScriptMismatchError,
     default_baseline_config,
-    materialize_config_with_envs,
 )
 
 
@@ -114,6 +115,9 @@ log = logging.getLogger(__name__)
 _now_iso = functools.partial(now_iso, "auto")
 
 STACK_REVALIDATE_SOURCE: str = "stack_revalidate"
+
+# ``skipped_dup`` reason for a variant whose launch the session already measured on the same stack.
+ALREADY_MEASURED: str = "already_measured"
 
 
 def is_stack_revalidation(params: dict | None) -> bool:
@@ -127,9 +131,6 @@ _CARRIED_VARIANT_ATTRS: tuple[str, ...] = (
     "scope",
     "overlay_pythonpath",
     "accepted_kernels",
-    "kb_evidence",
-    "pr_evidence",
-    "source_evidence",
     "experience_citations",
 )
 
@@ -143,23 +144,11 @@ def _decision_fields(gv: Any) -> dict[str, Any]:
     }
 
 
-def _explore_eval_disabled(shared_state: Any, params: dict[str, Any]) -> bool:
-    """Whether Magpie lm_eval is opted out for this explore run.
-
-    ``--no-eval`` persists on ``SharedState.eval_disabled``. Task param
-    ``disable_run_eval`` is the same opt-out for internally queued explores.
-    """
-    if is_truthy(params.get("disable_run_eval")):
-        return True
-    return bool(getattr(shared_state, "eval_disabled", False))
-
-
 def _variant_with_eval_off(gv: Any) -> Any:
     """Return a copy of ``gv`` with ``RUN_EVAL`` forced off.
 
     The variant layer is the last one :func:`run_grid` applies over the
-    accumulated stack, so forcing the key here is what makes a session-level
-    ``--no-eval`` hold whatever the stack carries.
+    accumulated stack, so forcing the key here holds whatever the stack carries.
     """
     envs = dict(gv.extra_envs)
     envs["RUN_EVAL"] = "false"
@@ -200,6 +189,17 @@ def _variant_control_fields(variant: Any) -> dict[str, Any]:
     return out
 
 
+def _keep_uses_effective_args(
+    benchmark: dict[str, Any], base_mode: str, variant_mode: str, remove_args: list[str], unset_envs: list[str]
+) -> bool:
+    """Native KEEP edits remain relative to the verified recipe unless explicitly replaced."""
+    return (
+        base_mode == "replace"
+        or variant_mode == "replace"
+        or (not is_magpie_agentx(benchmark) and bool(remove_args or unset_envs))
+    )
+
+
 def _action_reasoning(raw: dict[str, Any]) -> tuple[str, str]:
     """Return the action-authored rationale and the payload field that supplied it."""
     for field in ("reasoning", "rationale", "reason", "note"):
@@ -226,7 +226,7 @@ def _grid_variants_from_payload(payload: list[Any]) -> list[GridVariant]:
             unset_envs=fields["unset_envs"],
             args_mode=fields["args_mode"],
         )
-        # Stash extra metadata on the GridVariant so the ledger writer can pull provenance/evidence.
+        # Stash extra metadata on the GridVariant so the ledger writer can pull provenance.
         gv.provenance = str(raw.get("provenance") or "default_grid")  # type: ignore[attr-defined]
         gv.reasoning_origin = reasoning_origin  # type: ignore[attr-defined]
         gv.scope = str(raw.get("scope") or "")  # type: ignore[attr-defined]
@@ -236,9 +236,6 @@ def _grid_variants_from_payload(payload: list[Any]) -> list[GridVariant]:
         gv.accepted_kernels = [  # type: ignore[attr-defined]
             str(k).strip() for k in (raw.get("accepted_kernels") or []) if str(k).strip()
         ]
-        gv.kb_evidence = list(raw.get("kb_evidence") or [])  # type: ignore[attr-defined]
-        gv.pr_evidence = list(raw.get("pr_evidence") or [])  # type: ignore[attr-defined]
-        gv.source_evidence = list(raw.get("source_evidence") or [])  # type: ignore[attr-defined]
         # Validated against what the proposing agent was shown before the grid reached this executor.
         gv.experience_citations = [  # type: ignore[attr-defined]
             dict(item) for item in (raw.get("experience_citations") or []) if isinstance(item, dict)
@@ -435,40 +432,6 @@ def observed_launch_from_state(state: Any) -> tuple[dict[str, Any], dict[str, st
     return config, env
 
 
-def _config_envs(config_path: Path) -> dict[str, str]:
-    """Read ``benchmark.envs`` out of a built config file as a ``str -> str`` dict.
-
-    Drops the framework's server-args key (``EXTRA_SGLANG_ARGS`` and friends),
-    which holds the launch argv rather than an env value. Returns an empty dict
-    when the file carries no ``benchmark.envs`` mapping.
-    """
-    cfg = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
-    bench = cfg.get("benchmark") if isinstance(cfg, Mapping) else None
-    envs = bench.get("envs") if isinstance(bench, Mapping) else None
-    if not isinstance(envs, Mapping):
-        return {}
-    args_env = server_args_env_name(str(bench.get("framework") or ""))
-    return {str(k): str(v) for k, v in envs.items() if str(k) != args_env}
-
-
-def _named_settings(argv_text: str, framework: str) -> dict[str, list[str]]:
-    """Map each setting ``argv_text`` names to its value tokens, last occurrence winning like the engine."""
-    try:
-        tokens = shlex.split(argv_text)
-    except ValueError:
-        return {}
-    settings: dict[str, list[str]] = {}
-    current = ""
-    for token in tokens:
-        if token.startswith("-"):
-            name, separator, attached = token.partition("=")
-            current = launch_flag_setting_name(name, framework)
-            settings[current] = [attached] if separator else []
-        elif current:
-            settings[current].append(token)
-    return settings
-
-
 def _setting_already_holds(proposed: list[str], observed: Any) -> bool:
     """Whether ``observed`` is already the value ``proposed`` asks for."""
     if not proposed:
@@ -506,10 +469,10 @@ def _launch_delta(
     resolves to ``3600.0`` -- so weighing it would reject every variant. Those
     rewrites hit base and variant alike, so the delta cancels them.
     """
-    base_settings = _named_settings(base_argv, framework)
+    base_settings = named_settings(base_argv, framework)
     settings = {
         name: values
-        for name, values in _named_settings(variant_argv, framework).items()
+        for name, values in named_settings(variant_argv, framework).items()
         if base_settings.get(name) != values
     }
     envs = {name: value for name, value in variant_envs.items() if base_envs.get(name) != value}
@@ -558,6 +521,54 @@ def _is_noop_filter_exempt(variant: GridVariant) -> bool:
     return str(getattr(variant, "provenance", "") or "").strip() in _NOOP_FILTER_ALWAYS_RUNS
 
 
+def _materialized_launch(
+    base_yaml_path: Path, base_extra_args: str, gv: GridVariant, output_subdir: Path, **build: Any
+) -> tuple[str, dict[str, str]]:
+    """The server argv and benchmark envs ``run_grid`` would launch *gv* with."""
+    out_path = _build_variant_yaml(base_yaml_path, base_extra_args, gv, output_subdir=output_subdir, **build)
+    return config_server_argv(out_path).text, config_envs(out_path)
+
+
+def filter_context_copy_drafts(
+    grid: list[GridVariant], *, base_yaml_path: Path, base_extra_args: str, **build: Any
+) -> tuple[list[GridVariant], list[tuple[str, str]]]:
+    """Drop variants that introduce or change a context-copying speculative-decoding draft (synthetic sessions only).
+
+    Each variant and its base are materialized through ``_build_variant_yaml``, the way ``run_grid`` builds the round,
+    so a draft reached through args, replace mode, envs or a server-args env counts. A launch that cannot be
+    materialized is judged on the variant's own args and envs against an empty base.
+
+    Returns the variants still to run, plus ``(name, reason)`` for each drop.
+    """
+    if not grid:
+        return [], []
+    kept: list[GridVariant] = []
+    dropped: list[tuple[str, str]] = []
+    with tempfile.TemporaryDirectory(prefix="explore_spec_probe_") as tmp_dir:
+        tmp_root = Path(tmp_dir)
+        try:
+            base = _materialized_launch(
+                base_yaml_path, base_extra_args, GridVariant(_NOOP_PROBE_BASE_NAME), tmp_root / "base", **build
+            )
+        except (OSError, ValueError, yaml.YAMLError, ConfigUnreadable) as exc:
+            log.warning("explore: could not materialize the base to read its speculative decoding (%s)", exc)
+            base = ("", {})
+        for idx, gv in enumerate(grid):
+            against = base
+            try:
+                launch = _materialized_launch(base_yaml_path, base_extra_args, gv, tmp_root / f"v{idx}", **build)
+            except (OSError, ValueError, yaml.YAMLError, ConfigUnreadable) as exc:
+                log.warning("explore: could not materialize %s to read its speculative decoding (%s)", gv.name, exc)
+                launch = (str(gv.extra_server_args or ""), {str(k): str(v) for k, v in (gv.extra_envs or {}).items()})
+                against = ("", {})
+            reason = context_copy_refusal(against[0], against[1], launch[0], launch[1])
+            if reason:
+                dropped.append((gv.name, reason))
+            else:
+                kept.append(gv)
+    return kept, dropped
+
+
 def filter_baseline_noop_variants(
     grid: list[GridVariant],
     *,
@@ -577,10 +588,21 @@ def filter_baseline_noop_variants(
     """Drop variants that would launch the server the stack is already running.
 
     The baseline and each variant are materialized through ``_build_variant_yaml``
-    into throwaway configs, and only what the variant *changes* about the baseline
-    is judged: those settings against ``observed_server_config`` -- the engine's
-    own resolved settings -- and those envs against ``observed_server_env``. A
-    variant is dropped only when both halves are already in effect.
+    into throwaway configs, and which rule applies depends on whether the computed
+    settings and env delta of the variant against the baseline (``_launch_delta``)
+    is empty. That delta lists only what the variant sets differently, so a
+    ``"replace"`` variant that drops a baseline flag can still have an empty one:
+
+    1. Empty delta: the variant is dropped only when its ``args_mode`` is
+       ``"append"`` and its own request names only settings and envs the baseline
+       launch already holds (``restates_the_baseline``). This rule reads the
+       baseline config, not the observed launch. Every other empty-delta variant
+       -- a ``"replace"`` request, an empty request, or a change the merged config
+       hides -- is kept without consulting the observed launch.
+    2. Non-empty delta: only what the variant *changes* about the baseline is
+       judged, those settings against ``observed_server_config`` -- the engine's
+       own resolved settings -- and those envs against ``observed_server_env``.
+       The variant is dropped when both halves are already in effect.
 
     A variant that removes something, or names a list-valued flag, is exempt:
     neither is visible here, so both would read as a restatement of the stack.
@@ -611,7 +633,7 @@ def filter_baseline_noop_variants(
                 base_unset_envs=base_unset_envs,
             )
             base_argv = config_server_argv(base_path).text
-            base_envs = _config_envs(base_path)
+            base_envs = config_envs(base_path)
         except (OSError, ValueError, yaml.YAMLError) as exc:
             log.warning(
                 "explore: baseline-noop probe could not materialize the baseline (%s); keeping every variant", exc
@@ -639,17 +661,19 @@ def filter_baseline_noop_variants(
                     base_unset_envs=base_unset_envs,
                 )
                 variant_argv = config_server_argv(out_path).text
-                variant_envs = _config_envs(out_path)
+                variant_envs = config_envs(out_path)
             except (OSError, ValueError, yaml.YAMLError) as exc:
                 log.warning("explore: baseline-noop probe failed for variant %s (%s); keeping it", gv.name, exc)
                 kept.append(gv)
                 continue
             delta_settings, delta_envs = _launch_delta(variant_argv, variant_envs, base_argv, base_envs, framework)
             if not delta_settings and not delta_envs:
-                # A change the merged config does not express leaves no delta, and
-                # so does a variant that only restates the baseline. The two are
-                # indistinguishable here, so the variant runs rather than risk
-                # dropping a real experiment for a missed drop.
+                # A change the merged config hides leaves no delta either: only a request
+                # that itself restates the baseline marks the variant as a noop.
+                restated = restates_the_baseline(gv.extra_server_args, gv.extra_envs, base_argv, base_envs, framework)
+                if restated and gv.args_mode == "append":
+                    dropped.append((gv.name, "names only settings the baseline launch already holds (baseline noop)"))
+                    continue
                 kept.append(gv)
                 continue
             if _settings_already_hold(delta_settings, observed_config) and _envs_already_hold(delta_envs, observed_env):
@@ -657,6 +681,12 @@ def filter_baseline_noop_variants(
                 continue
             kept.append(gv)
     return kept, dropped
+
+
+def _skip_baseline_noop(name: str, reason: str, skipped: list[dict[str, Any]]) -> None:
+    """Record a variant skipped because it launches the server the stack is already running."""
+    log.info("explore: skipping baseline-noop variant %s (%s)", name, reason)
+    skipped.append({"name": name, "reason": "baseline_noop", "detail": reason})
 
 
 def filter_operator_pinned_envs(
@@ -728,6 +758,39 @@ class ExploreExecutor:
         self.session_dir = session_dir
         self.keep_threshold_pct = float(keep_threshold_pct)
 
+    @staticmethod
+    def _already_measured(
+        gv: GridVariant,
+        ss: Any,
+        params: dict[str, Any],
+        now: MeasuredOn,
+        skipped: list[dict[str, Any]],
+    ) -> bool:
+        """Whether the session ledger already holds a verdict for ``gv`` under ``now``, recording the skip if so.
+
+        ``now.stack`` is what the variant would launch on: a KEEP earlier in the round advances it, so the check runs
+        per variant rather than once for the round. A stack revalidation exists to re-measure, and a kernel
+        overlay changes the launch without changing the fingerprint, so neither is ever skipped.
+        """
+        if ss is None or is_stack_revalidation(params) or getattr(gv, "overlay_pythonpath", ""):
+            return False
+        fp = str(getattr(gv, "canonical_fp", "") or "")
+        prior = measured_verdict(
+            getattr(ss, "explore_search", None),
+            fp,
+            variant={"extra_args": gv.extra_server_args, "extra_envs": gv.extra_envs, **_variant_control_fields(gv)},
+            now=now,
+        )
+        if prior is None:
+            return False
+        detail = (
+            f"measured as {prior.get('name') or fp} in {prior.get('round_id') or 'an earlier round'} on this "
+            f"stack: {prior.get('outcome')}"
+        )
+        log.info("explore: skipping already-measured variant %s (%s)", gv.name, detail)
+        skipped.append({"name": gv.name, "fingerprint": fp, "reason": ALREADY_MEASURED, "detail": detail})
+        return True
+
     async def __call__(self, ctx) -> dict[str, Any]:
         """Run the merged ``explore`` action for one task."""
         params = dict(ctx.task.params or {})
@@ -741,7 +804,6 @@ class ExploreExecutor:
             }
         extra = getattr(ctx, "extra", None) or {}
         shared_state = extra.get("shared_state") or extra.get("state")
-        eval_disabled = _explore_eval_disabled(shared_state, params)
         output_root = Path(
             params.get("output_dir")
             or extra.get("workspace")
@@ -769,13 +831,12 @@ class ExploreExecutor:
                 "error": str(exc),
             }
         try:
-            config_path = materialize_config_with_envs(
+            config_path = prepare_grid_benchmark_config(
                 config_path,
                 output_root,
                 model_path=resolved_model or None,
                 gpu_type=resolved_gpu or None,
                 benchmark_script=override_script,
-                extra_envs={"RUN_EVAL": "false"} if eval_disabled else None,
                 out_name="explore_base.with_envs.yaml",
                 grading=getattr(shared_state, "grading", None),
             )
@@ -840,6 +901,7 @@ class ExploreExecutor:
         except (TypeError, ValueError):
             baseline_warm_runtime_sec = 0.0
         # Resolve framework from materialized YAML (for the ledger + the atom seed-grid fallback below).
+        _cfg = {}
         try:
             with config_path.open(encoding="utf-8") as _f:
                 _cfg = yaml.safe_load(_f) or {}
@@ -942,32 +1004,12 @@ class ExploreExecutor:
         # Attach the per-variant fingerprint as an attribute so the result loop needn't recompute.
         ws_sig = workload_signature()
 
-        # Drop variants that already match the current stack's observed launch.
-        _pre_noop_grid_len = len(grid)
-        observed_config, observed_env = observed_launch_from_state(ss)
-        grid, _noop_dropped = filter_baseline_noop_variants(
-            grid,
-            framework=framework,
-            base_yaml_path=config_path,
-            base_extra_args=base_extra_args,
-            base_extra_envs=base_extra_envs,
-            base_remove_args=base_remove_args,
-            base_unset_envs=base_unset_envs,
-            base_args_mode=base_args_mode,
-            model_path=resolved_model,
-            gpu_type=resolved_gpu,
-            benchmark_script=override_script,
-            observed_server_config=observed_config,
-            observed_server_env=observed_env,
-        )
-
-        unique_in_round: dict[str, GridVariant] = {}
+        # Every variant carries its fingerprint, so the result loop needn't recompute it. In-round duplicates are
+        # judged at their turn, against what this round has actually launched: a twin that was only skipped (a
+        # restatement of the stack) has not claimed the launch.
         skipped_dup: list[dict[str, Any]] = []
-        for _nm, _reason in _noop_dropped:
-            log.info("explore: skipping baseline-noop variant %s (%s)", _nm, _reason)
-            skipped_dup.append({"name": _nm, "reason": "baseline_noop", "detail": _reason})
         for gv in grid:
-            fp = effective_fingerprint(
+            gv.canonical_fp = effective_fingerprint(  # type: ignore[attr-defined]
                 gv.extra_server_args,
                 gv.extra_envs,
                 controls=_variant_control_fields(gv),
@@ -975,28 +1017,8 @@ class ExploreExecutor:
                 base_unset_envs=base_unset_envs,
                 base_args_mode=base_args_mode,
             )
-            gv.canonical_fp = fp  # type: ignore[attr-defined]
-            if fp in unique_in_round:
-                # In-round duplicate — keep the first occurrence.
-                skipped_dup.append(
-                    {
-                        "name": gv.name,
-                        "fingerprint": fp,
-                        "reason": "round_dup",
-                    }
-                )
-                continue
-            unique_in_round[fp] = gv
-
-        runnable: list[GridVariant] = list(unique_in_round.values())
-
-        log.info(
-            "explore dedup: payload=%d → runnable=%d (round_dup=%d baseline_noop=%d)",
-            _pre_noop_grid_len,
-            len(runnable),
-            sum(1 for sd in skipped_dup if sd.get("reason") == "round_dup"),
-            len(_noop_dropped),
-        )
+        runnable: list[GridVariant] = list(grid)
+        observed_config, observed_env = observed_launch_from_state(ss)
 
         # Multi-node grid shaping.
         if runnable:
@@ -1036,6 +1058,38 @@ class ExploreExecutor:
                 priority_tags=_MN_PARAMS_PRIORITY + _MN_BACKENDS_PRIORITY,
             )
 
+        # A variant that restates the stack's observed launch changes nothing while the stack stays as observed. The
+        # ones ahead of every other variant left by the grid-shaping filters can only launch on it, and are dropped here
+        # before a serving lease is taken; any other is judged at its turn, against the stack a KEEP has moved.
+        _pre_noop_len = len(runnable)
+        if runnable:
+            _noop_kept, _noop_dropped = filter_baseline_noop_variants(
+                runnable,
+                framework=framework,
+                base_yaml_path=config_path,
+                base_extra_args=base_extra_args,
+                base_extra_envs=base_extra_envs,
+                base_remove_args=base_remove_args,
+                base_unset_envs=base_unset_envs,
+                base_args_mode=base_args_mode,
+                model_path=resolved_model,
+                gpu_type=resolved_gpu,
+                benchmark_script=override_script,
+                observed_server_config=observed_config,
+                observed_server_env=observed_env,
+            )
+            _kept_ids = {id(gv) for gv in _noop_kept}
+            _leading = next((i for i, gv in enumerate(runnable) if id(gv) in _kept_ids), len(runnable))
+            for _nm, _reason in _noop_dropped[:_leading]:
+                _skip_baseline_noop(_nm, _reason, skipped_dup)
+            runnable = runnable[_leading:]
+        log.info(
+            "explore grid: payload=%d → runnable=%d (leading baseline_noop=%d)",
+            len(grid),
+            len(runnable),
+            _pre_noop_len - len(runnable),
+        )
+
         # Seeded by the Coordinator from the durable cursor: this executor holds no
         # history of its own, so it cannot count the rounds before this one.
         round_id_seed = int(params.get("explore_search_cursor") or 0) + 1
@@ -1058,6 +1112,10 @@ class ExploreExecutor:
         stack_remove_args = list(dict.fromkeys(base_remove_args))
         stack_unset_envs = list(dict.fromkeys(base_unset_envs))
         stack_base_args_mode = base_args_mode
+        # A context-copying draft is refused on the synthetic benchmark, whose repetition loops it would copy.
+        refuse_context_copy = not agentx_active(benchmark_mode=getattr(ss, "benchmark_mode", "")) and not (
+            is_stack_revalidation(params)
+        )
         running_base_tput = base_tput
 
         def _measured_against() -> dict[str, Any]:
@@ -1079,6 +1137,49 @@ class ExploreExecutor:
                 "unset_envs": list(stack_unset_envs),
                 "args_mode": stack_base_args_mode,
             }
+
+        def _launched_stack() -> dict[str, Any]:
+            """The stack as it launches: its args with the recipe's inherited ones and the removals applied.
+
+            A KEEP can switch the stack to ``replace`` mode, which carries those inherited args in its own, so only
+            the composed args say which settings a KEEP changed.
+            """
+            stack = stack_of_measured(_measured_against())
+            stack["extra_server_args"] = compose_server_args(
+                inherited_args=_effective_inherited_args,
+                base_extra_args=stack_extra_args,
+                remove_args=stack_remove_args,
+                args_mode=stack_base_args_mode,
+            )
+            return stack
+
+        opening_stack = _launched_stack()
+
+        def _restates_stack(gv: GridVariant) -> str:
+            """Why ``gv`` only restates the launch the stack runs as it stands now, or ``""`` when it changes it.
+
+            The observed launch is what the server ran when the round opened; a KEEP since then has made the observed
+            value of whatever it changed stale, and ``observed_launch_after`` leaves that out.
+            """
+            config, env = observed_launch_after(
+                observed_config, observed_env, opening_stack, _launched_stack(), framework
+            )
+            _, restated = filter_baseline_noop_variants(
+                [gv],
+                framework=framework,
+                base_yaml_path=config_path,
+                base_extra_args=stack_extra_args,
+                base_extra_envs=dict(stack_extra_envs),
+                base_remove_args=list(stack_remove_args),
+                base_unset_envs=list(stack_unset_envs),
+                base_args_mode=stack_base_args_mode,
+                model_path=resolved_model,
+                gpu_type=resolved_gpu,
+                benchmark_script=override_script,
+                observed_server_config=config,
+                observed_server_env=env,
+            )
+            return restated[0][1] if restated else ""
 
         # Round-local grading anchor. Variants stack within a round, so a KEEP
         # advances the figure the next variant is graded against; the session
@@ -1140,8 +1241,31 @@ class ExploreExecutor:
             )
             return True
 
+        # Fingerprints this round launched, and the variants that reached the measured check and were answered by the
+        # stack or the ledger instead (a restatement of the stack, or a verdict the session already holds).
+        launched_fps: set[str] = set()
+        judged_without_measuring = 0
+
         try:
             for idx, gv in enumerate(runnable):
+                if getattr(gv, "canonical_fp", "") in launched_fps:
+                    skipped_dup.append(
+                        {"name": gv.name, "fingerprint": gv.canonical_fp, "reason": "round_dup"}  # type: ignore[attr-defined]
+                    )
+                    continue
+                if restated := _restates_stack(gv):
+                    _skip_baseline_noop(gv.name, restated, skipped_dup)
+                    judged_without_measuring += 1
+                    continue
+                if self._already_measured(
+                    gv,
+                    ss,
+                    params,
+                    MeasuredOn(stack_of_measured(_measured_against()), ws_sig, keep_threshold_pct),
+                    skipped_dup,
+                ):
+                    judged_without_measuring += 1
+                    continue
                 # A warm-decision variant pays for both rounds, so admitting it on the decision round alone would let
                 # it in and then strand it mid-variant with a discarded warmup and no measurement.
                 if decision_expected_sec is not None:
@@ -1152,19 +1276,40 @@ class ExploreExecutor:
                     from ._subprocess_kill import resolve_benchmark_timeouts
 
                     fit_required_sec = resolve_benchmark_timeouts()[1]
-                if session_deadline_sec is not None and (session_deadline_sec - time.monotonic()) < fit_required_sec:
-                    run_stop = STOPPED_BY_THE_RUN[SESSION_TIME_EXHAUSTED_CLASS]
+                run_stop = variant_budget_stop(session_deadline_sec, extra.get("phase_deadline"), fit_required_sec)
+                if run_stop is not None:
                     run_stop_detail = run_stop.never_started
                     session_budget_untested = len(runnable) - idx
                     log.warning(
-                        "explore: session budget cannot fit another variant "
-                        "(needs %.0fs); stopping after %d/%d variant(s)",
+                        "explore: cannot fit another variant (%s, needs %.0fs); stopping after %d/%d variant(s)",
+                        run_stop.error_class,
                         fit_required_sec,
                         idx,
                         len(runnable),
                     )
                     break
+                if refuse_context_copy:
+                    # Judged against the stack as it stands now: a KEEP earlier in this round may have changed it.
+                    _, _copy_refused = filter_context_copy_drafts(
+                        [gv],
+                        base_yaml_path=config_path,
+                        base_extra_args=stack_extra_args,
+                        model_path=resolved_model,
+                        gpu_type=resolved_gpu,
+                        benchmark_script=override_script,
+                        base_args_mode=stack_base_args_mode,
+                        base_extra_envs=dict(stack_extra_envs),
+                        base_remove_args=list(stack_remove_args),
+                        base_unset_envs=list(stack_unset_envs),
+                    )
+                    if _copy_refused:
+                        log.warning("explore: refusing variant %s (%s)", gv.name, _copy_refused[0][1])
+                        skipped_dup.append(
+                            {"name": gv.name, "reason": CONTEXT_COPY_REFUSAL, "detail": _copy_refused[0][1]}
+                        )
+                        continue
                 fp = getattr(gv, "canonical_fp", "")
+                launched_fps.add(fp)
                 provenance = getattr(gv, "provenance", "llm_direct")
                 scope = str(getattr(gv, "scope", "") or "")
                 control_fields = _variant_control_fields(gv)
@@ -1184,19 +1329,16 @@ class ExploreExecutor:
                     extra_server_args=gv.extra_server_args,
                     extra_envs=run_extra_envs,
                     note=gv.note,
-                    remove_args=run_remove_args,
+                    remove_args=list(gv.remove_args),
                     unset_envs=run_unset_envs,
                     args_mode=str(getattr(gv, "args_mode", "append") or "append"),
                 )
                 _carry_variant_metadata(gv, run_gv)
-                # ``--no-eval`` opted the session out of accuracy entirely, so it
-                # holds for every round. The decision round additionally skips
-                # eval when a warmup preceded it: it is timed against a
+                # The decision round skips eval when a warmup preceded it: it is timed against a
                 # throughput-only anchor, and ``parse_eval_results`` falls back
                 # to the score the warmup took. Without a warmup there is nothing
                 # to fall back to, so the decision round keeps its own eval.
-                warmup_gv = _variant_with_eval_off(run_gv) if eval_disabled else run_gv
-                decision_gv = _variant_with_eval_off(run_gv) if (use_warm_decision or eval_disabled) else run_gv
+                decision_gv = _variant_with_eval_off(run_gv) if use_warm_decision else run_gv
                 slot = output_root / f"v{idx:02d}_{_safe(gv.name)}"
                 slot.mkdir(parents=True, exist_ok=True)
                 # The warmup and decision rounds share this slot as the lifecycle pid_dir so the decision round
@@ -1215,7 +1357,7 @@ class ExploreExecutor:
                         warmup_results = await run_grid(
                             base_yaml_path=config_path,
                             base_extra_args=stack_extra_args,
-                            grid=[warmup_gv],
+                            grid=[run_gv],
                             output_root=warmup_slot,
                             model_path=resolved_model,
                             gpu_type=resolved_gpu,
@@ -1351,8 +1493,7 @@ class ExploreExecutor:
                         GRADED_INTVTY_P50: r.intvty_p50,
                         GRADED_DURATION: r.duration_seconds,
                         GRADED_ERROR_RATE: r.request_error_rate,
-                        # Graded against the session latency budget when one is set.
-                        "e2el_mean_ms": r.e2el_mean_ms,
+                        **constraint_fields(r),
                     }
                     stamp_output_per_gpu(variant_meas, getattr(ss, "tp", None))
                     graded = resolve_graded_comparison(
@@ -1408,7 +1549,7 @@ class ExploreExecutor:
                         elif _graded_on_intvty:
                             reason = f"{graded.refused_by} ({axes})"
                         else:
-                            reason = "gain_below_threshold"
+                            reason = GAIN_BELOW_THRESHOLD
                     else:
                         gain = gain_pct(graded.candidate, graded.reference)
                     if r.status == "succeeded":
@@ -1418,7 +1559,7 @@ class ExploreExecutor:
                         decision_gates.append(
                             {
                                 "gate": (
-                                    "latency_budget"
+                                    graded.vetoed_by
                                     if graded.veto_reason
                                     else (
                                         "graded_axes"
@@ -1541,45 +1682,30 @@ class ExploreExecutor:
 
                     # ---- KEEP path ----
                     if outcome == "KEEP":
-                        # Layer onto the running stack. For
-                        # removal variants, next_args/next_envs are the
-                        # effective launch config that must persist if the KEEP
-                        # survives; gv.extra_* remain only the candidate delta.
-                        _keep_remove_args = (
-                            to_str_list(getattr(gv, "remove_args", []))
-                            if stack_base_args_mode == "replace"
-                            else list(dict.fromkeys(stack_remove_args + to_str_list(getattr(gv, "remove_args", []))))
-                        )
-                        _keep_unset_envs = list(
-                            dict.fromkeys(stack_unset_envs + to_str_list(getattr(gv, "unset_envs", [])))
-                        )
                         next_effective_args = compose_server_args(
                             inherited_args=_effective_inherited_args,
                             base_extra_args=stack_extra_args,
                             variant_extra_args=gv.extra_server_args,
-                            remove_args=_keep_remove_args,
-                            args_mode="replace"
-                            if stack_base_args_mode == "replace"
-                            else getattr(gv, "args_mode", "append"),
+                            remove_args=run_remove_args,
+                            args_mode="replace" if stack_base_args_mode == "replace" else gv.args_mode,
                         )
                         next_stack_args = compose_server_args(
-                            inherited_args="",
                             base_extra_args=stack_extra_args,
                             variant_extra_args=gv.extra_server_args,
-                            remove_args=to_str_list(getattr(gv, "remove_args", [])),
-                            args_mode=getattr(gv, "args_mode", "append"),
+                            remove_args=gv.remove_args,
+                            args_mode=gv.args_mode,
                         )
-                        next_envs = dict(run_extra_envs)
                         effective_control_fields = dict(control_fields)
-                        if _keep_remove_args:
-                            effective_control_fields["remove_args"] = list(_keep_remove_args)
-                        if _keep_unset_envs:
-                            effective_control_fields["unset_envs"] = list(_keep_unset_envs)
-                        persist_effective_args = bool(
-                            run_remove_args
-                            or run_unset_envs
-                            or str(getattr(gv, "args_mode", "append") or "append").strip().lower() == "replace"
-                            or stack_base_args_mode == "replace"
+                        if run_remove_args:
+                            effective_control_fields["remove_args"] = list(run_remove_args)
+                        if run_unset_envs:
+                            effective_control_fields["unset_envs"] = list(run_unset_envs)
+                        persist_effective_args = _keep_uses_effective_args(
+                            _cfg.get("benchmark") or {},
+                            stack_base_args_mode,
+                            gv.args_mode,
+                            run_remove_args,
+                            run_unset_envs,
                         )
                         if persist_effective_args:
                             effective_control_fields["args_mode"] = "replace"
@@ -1595,7 +1721,7 @@ class ExploreExecutor:
                             },
                             "extra_server_args": next_effective_args if persist_effective_args else next_stack_args,
                             "effective_extra_server_args": next_effective_args,
-                            "extra_envs": dict(next_envs),
+                            "extra_envs": dict(run_extra_envs),
                             **effective_control_fields,
                             **_decision_fields(gv),
                             "provenance": provenance,
@@ -1611,8 +1737,8 @@ class ExploreExecutor:
                             # The axes this KEEP was graded on travel with it: current_best becomes the next round's
                             # anchor, and an anchor without them degrades the session.
                             **graded_axes_of(variant_meas),
-                            # Promotion re-checks the latency budget against this row, not the round's measurement.
-                            "e2el_mean_ms": r.e2el_mean_ms,
+                            # Promotion re-checks the budgets against this row, not the round's measurement.
+                            **constraint_fields(r),
                             "single_workspace": r.workspace,
                             "launch_evidence": dict(r.launch_evidence or {}),
                             "launch_evidence_path": r.launch_evidence_path,
@@ -1622,9 +1748,9 @@ class ExploreExecutor:
                         }
                         # The variant KEEPs on the round that graded it.
                         stack_extra_args = next_effective_args if persist_effective_args else next_stack_args
-                        stack_extra_envs = next_envs
-                        stack_remove_args = list(_keep_remove_args)
-                        stack_unset_envs = list(_keep_unset_envs)
+                        stack_extra_envs = dict(run_extra_envs)
+                        stack_remove_args = list(run_remove_args)
+                        stack_unset_envs = list(run_unset_envs)
                         stack_base_args_mode = "replace" if persist_effective_args else "append"
                         if decision_tput and decision_tput > 0:
                             running_base_tput = decision_tput
@@ -1861,7 +1987,9 @@ class ExploreExecutor:
         produced_measurement = any(
             t.get("outcome") in ("KEEP", "REVERT", TS_KILLED_OVERTIME) for t in tested_update.values()
         )
-        status = "succeeded" if produced_measurement or winners else "failed"
+        # A round whose every variant already had its verdict, or only restated the stack, is answered, as if measured again.
+        answered = bool(runnable) and judged_without_measuring == len(runnable)
+        status = "succeeded" if produced_measurement or winners or answered else "failed"
         # A round that measured nothing because the run stopped it is not the same as one whose variants failed. As a
         # bare ``failed`` with no error_class nothing downstream could tell the two apart, and the KB would learn that
         # these variants are bad.

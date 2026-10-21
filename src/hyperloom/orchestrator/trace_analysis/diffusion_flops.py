@@ -14,15 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common.jsonio import read_json
-
-# Hardware matrix-core peak TFLOPS (self-contained; mirrors roofline_ceiling.HW_SPECS so this tool runs standalone in
-# kernel-agent).
-_PEAK_TFLOPS: dict[str, dict[str, float]] = {
-    "mi300x": {"bf16": 1307.4, "fp16": 1307.4, "fp8": 2614.9, "fp32": 163.4},
-    "mi308x": {"bf16": 1307.4, "fp16": 1307.4, "fp8": 2614.9, "fp32": 163.4},
-    "mi325x": {"bf16": 1307.4, "fp16": 1307.4, "fp8": 2614.9, "fp32": 163.4},
-    "mi355x": {"bf16": 2516.6, "fp16": 2516.6, "fp8": 5033.2, "mxfp4": 10066.4, "fp32": 157.3},
-}
+from hyperloom.inference_optimizer.roofline_ceiling import HW_SPECS
 
 #: Precision tag -> canonical peak-table key.
 _PRECISION_ALIASES: dict[str, str] = {
@@ -44,7 +36,7 @@ _PRECISION_ALIASES: dict[str, str] = {
 
 def peak_tflops(gpu_type: str, precision: str) -> float:
     """Matrix-core peak TFLOPS for ``(gpu, precision)``; 0.0 on any miss."""
-    table = _PEAK_TFLOPS.get((gpu_type or "").strip().lower())
+    table = (HW_SPECS.get((gpu_type or "").strip().lower()) or {}).get("peak_tflops")
     if not table:
         return 0.0
     key = _PRECISION_ALIASES.get((precision or "").strip().lower(), (precision or "").strip().lower())
@@ -524,13 +516,10 @@ def analytic_ceiling(
     *,
     gpu_type: str = "mi355x",
     precision: str = "bf16",
-    height: int = 1024,
-    width: int = 1024,
     num_steps: int | None = None,
-    cfg_batch: int | None = None,
 ) -> dict[str, Any] | None:
     """Analytic compute-bound ceiling (ideal ms) for one image."""
-    est = estimate_image_flops(model_dir, height=height, width=width, num_steps=num_steps, cfg_batch=cfg_batch)
+    est = estimate_image_flops(model_dir, num_steps=num_steps)
     if est is None:
         return None
     pk = peak_tflops(gpu_type, precision)

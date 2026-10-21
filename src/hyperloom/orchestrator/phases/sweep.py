@@ -6,7 +6,7 @@
 from __future__ import annotations
 import logging as _logging
 from typing import TYPE_CHECKING, Any
-from ..state.task_registry import Task
+from ..state.task_registry import TERMINAL_STATES, Task
 from ..state.orchestration_memory import CYCLE_DIRECTIVE_REQUEST, build_cycle_memory
 from ..collaborator import CoordinatorCollaborator
 from . import machine_state as _phase_state
@@ -18,10 +18,12 @@ log = _logging.getLogger(__name__)
 
 
 #: Slack added to a conc_sweep lease on top of the task's own budget, covering
-#: server teardown and the report flush that happen after the last variant. The
-#: lease must outlive the work or the TTL watchdog fails a task that is still
-#: making progress.
+#: server teardown and the report flush that happen after the last variant, so
+#: the lease and the phase's grant to the sweep outlive the work.
 _CONC_SWEEP_LEASE_GRACE_SEC = 600
+
+#: The ``from_phase`` and reason of the entry a resumed session replays, as KERNEL's resume re-entry names it.
+_RESUME = "resume"
 
 
 def _conc_sweep_lease_ttl_sec(clamped_budget: int | None) -> int:
@@ -33,6 +35,9 @@ def _conc_sweep_lease_ttl_sec(clamped_budget: int | None) -> int:
 
 class SweepPhase(CoordinatorCollaborator):
     """SWEEP phase handler: drives concurrency sweep and roofline analysis."""
+
+    #: Set once this process has checked a resumed SWEEP for a sweep that left no outcome.
+    _resume_checked: bool = False
 
     async def pump(self) -> None:
         """Ask Orchestration, once per macro-cycle, how the next cycle should open."""
@@ -185,21 +190,8 @@ class SweepPhase(CoordinatorCollaborator):
             "concs": list(state.conc_sweep_concs) if state.conc_sweep_concs else None,
             "total_budget_sec": clamped_budget,
         }
-        lanes, _ = self._coord.dispatcher.registry_lanes_ttl("conc_sweep")
-        task, was_existing = await self.tasks.create_or_return_existing(
-            kind="conc_sweep",
-            params=params,
-            requires_lanes=lanes,
-            idempotency_key=f"internal-conc_sweep-{reason}{self._coord.dispatcher.cycle_idem_suffix()}",
-            lease_ttl_sec=_conc_sweep_lease_ttl_sec(clamped_budget),
-            dispatch_class="coordinator",
-        )
-        if not was_existing and clamped_budget is not None and clamped_budget > 0:
-            # The phase granted this budget, so its own budget exits must not cut the sweep short of it: they defer
-            # until the grant (and the lease grace that bounds the task anyway) runs out.
-            state.conc_sweep_granted_until_unix = _phase_state._now_unix(state) + _conc_sweep_lease_ttl_sec(
-                clamped_budget
-            )
+        task, was_existing = await self._live_conc_sweep_row(reason=reason, params=params, budget=clamped_budget)
+        self._grant_conc_sweep(task, was_existing=was_existing, budget=clamped_budget)
         if was_existing:
             log.info(
                 "internal-conc_sweep task already exists (idempotent: task_id=%s, state=%s)",
@@ -215,6 +207,88 @@ class SweepPhase(CoordinatorCollaborator):
                 params["total_budget_sec"],
             )
         return task
+
+    async def _live_conc_sweep_row(
+        self,
+        *,
+        reason: str,
+        params: dict[str, Any],
+        budget: int | None,
+    ) -> tuple[Task, bool]:
+        """Return the cycle's live ``conc_sweep`` row, enqueueing one when the keyed row is absent or settled.
+
+        A resumed SWEEP re-enters a cycle whose earlier sweep may already have settled without its outcome being
+        recorded (``recover`` cancels it out of band), so only a live row is reused.
+        """
+        lanes, _ = self._coord.dispatcher.registry_lanes_ttl("conc_sweep")
+        base_key = f"internal-conc_sweep-{reason}{self._coord.dispatcher.cycle_idem_suffix()}"
+        attempt = 0
+        while True:
+            task, was_existing = await self.tasks.create_or_return_existing(
+                kind="conc_sweep",
+                params=params,
+                requires_lanes=lanes,
+                idempotency_key=base_key if attempt == 0 else f"{base_key}-r{attempt}",
+                lease_ttl_sec=_conc_sweep_lease_ttl_sec(budget),
+                dispatch_class="coordinator",
+            )
+            if not (was_existing and task.state in TERMINAL_STATES):
+                return task, was_existing
+            attempt += 1
+
+    def _grant_conc_sweep(self, task: Task, *, was_existing: bool, budget: int | None) -> None:
+        """Grant the phase's budget exits' deferral to the sweep it is waiting on."""
+        state = self.shared_state
+        now_unix = _phase_state._now_unix(state)
+        if not was_existing and budget is not None and budget > 0:
+            # The phase granted this budget, so its own budget exits must not cut the sweep short of it: they defer
+            # until the grant (and the lease grace that bounds the task anyway) runs out.
+            state.conc_sweep_granted_until_unix = now_unix + _conc_sweep_lease_ttl_sec(budget)
+        elif (
+            task.state == "queued"
+            and int(task.lease_ttl_sec or 0) > 0
+            and float(state.conc_sweep_granted_until_unix or 0.0) <= now_unix
+        ):
+            # A sweep that never started is still owed its budget: a resume after a long gap finds its grant spent
+            # by the time the session was down, and the phase would otherwise leave SWEEP before dispatching it.
+            state.conc_sweep_granted_until_unix = now_unix + int(task.lease_ttl_sec)
+
+    async def resume_unsettled_sweep(self) -> None:
+        """Re-fire the SWEEP entry hook, once per resumed process, when the phase's conc_sweep left no outcome.
+
+        SWEEP's only work is the ``conc_sweep`` its entry hook enqueues, and only that task's own completion records
+        ``last_conc_sweep``. A sweep cancelled out of band (``hyperloom recover`` cancels every task of a vanished
+        owner scope) records nothing, and a resume never re-enters the current phase, so the resumed leg would wait
+        in SWEEP for a result no task will write, until the grant the lost sweep held runs out. The entry hook is
+        idempotent: a live sweep row is reused, and a settled one is replaced by a fresh dispatch that restarts the
+        sweep (it keeps no per-point progress to resume from).
+
+        Acts on the process's first phase decision only, before it is taken, so the decision sees the sweep and its
+        grant. A session that reaches SWEEP later in the process enters it through the transition's own hook, and
+        re-firing that hook under a running sweep would apply pending KEEPs underneath its measurement.
+        """
+        if self._resume_checked:
+            return
+        self._resume_checked = True
+        state = self.shared_state
+        if not self._coord.writeback.resumed_from.get("is_resume"):
+            return
+        if (state.phase or "").strip().upper() != _phase_state.PHASE_SWEEP:
+            return
+        last = state.last_conc_sweep
+        if isinstance(last, dict) and str(last.get("status") or "").strip():
+            return
+        log.info("resume: SWEEP has no recorded conc_sweep outcome; re-entering SWEEP to dispatch it.")
+        from .machine import Transition
+
+        await self.on_enter_sweep(
+            Transition(
+                from_phase=_RESUME,
+                to_phase=_phase_state.PHASE_SWEEP,
+                reason=_RESUME,
+                evidence={},
+            )
+        )
 
     def record_session_budget_conc_sweep_skip(self, *, denied: object) -> None:
         """Stamp last_conc_sweep skipped when the session clock refused conc_sweep."""

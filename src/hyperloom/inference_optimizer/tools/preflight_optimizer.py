@@ -39,8 +39,6 @@ STALE_PROCESS_PATTERNS = (
     "VLLM::",
 )
 
-VRAM_BUSY_FRACTION = 0.01
-
 
 def _read_cmdline(pid: str) -> str:
     """Read and decode the ``/proc/<pid>/cmdline`` for the given pid."""
@@ -101,7 +99,7 @@ def _check_gpu_occupancy() -> bool:
 
     idle = True
     for idx, snap in enumerate(snapshots):
-        busy = snap.used_mib > snap.total_mib * VRAM_BUSY_FRACTION
+        busy = rocm_smi.vram_busy(snap)
         print(
             f"gpu{idx}_vram_used={snap.used_mib:.1f}/{snap.total_mib:.1f} MiB"
             f" ({snap.used_mib / snap.total_mib:.2%}) {'BUSY' if busy else 'idle'}"

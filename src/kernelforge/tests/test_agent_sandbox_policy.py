@@ -104,10 +104,11 @@ def test_prepare_agent_never_downgrades_the_configured_sandbox(
     asyncio.run(
         task_preparer._run_prepare_agent(
             config=config,
-            workspace=tmp_path,
-            system_prompt="Author the driver.",
-            prompt="Write driver.py.",
-            timeout_sec=5,
+            turn=task_preparer._AuthoringTurn(
+                workspace=tmp_path,
+                prompt="Write driver.py.",
+                timeout_sec=5,
+            ),
         )
     )
 
@@ -138,12 +139,14 @@ def test_flydsl_driver_preparation_never_downgrades_the_configured_sandbox(
     asyncio.run(
         driver_preparation._run_agent(
             config=config,
-            stage=tmp_path,
-            stage_driver=tmp_path / "driver.py",
-            evidence_paths=set(),
-            prompt="Write driver.py.",
-            timeout_sec=5,
-            progress_log=[],
+            turn=driver_preparation._AuthoringTurn(
+                stage=tmp_path,
+                stage_driver=tmp_path / "driver.py",
+                evidence_paths=set(),
+                prompt="Write driver.py.",
+                timeout_sec=5,
+                progress_log=[],
+            ),
         )
     )
 

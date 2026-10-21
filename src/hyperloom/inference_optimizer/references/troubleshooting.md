@@ -57,7 +57,7 @@ Transient SDK errors retry/resume up to the Coordinator emergency threshold.
 Custom orchestration models are enabled by default and are validated against the
 configured gateway catalog. Set `INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=0`
 only when you intentionally want the strict AMD Claude allowlist
-(`claude-opus-5` / `claude-opus-4-8` / `claude-opus-4-7` / `claude-opus-4-6`).
+(`claude-opus-5-5` / `claude-opus-5` / `claude-opus-4-8` / `claude-opus-4-7` / `claude-opus-4-6`).
 
 | Symptom | Fix |
 |---|---|
@@ -87,7 +87,8 @@ Bypass with `--critic-mock` for offline / smoke runs. See
 - `correctness_passed=false`: do not integrate; the kernel-agent report must
   contain explicit correctness evidence.
 - `stop_reason=global_converged`: the cyclic phase machine exhausted leverage
-  across macro-cycles for the current budget (R7: consecutive no-gain cycles);
+  across macro-cycles for the current budget (R7: consecutive no-gain cycles,
+  or every steering direction saturated);
   stop and report, only resume if the user changes workload / search space /
   model / strategy.
   (Leverage exhaustion *within* a single phase is now the non-terminal

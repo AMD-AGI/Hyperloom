@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.coerce import to_int
 from hyperloom.common.env import env_flag
 from hyperloom.common.gpu_partition import published_shape
 from hyperloom.inference_optimizer.multi_node._internal.external_state import (
@@ -53,27 +54,25 @@ def is_multi_node() -> bool:
     return env_n >= 2
 
 
+def _compute_partition_mode(state: dict[str, Any]) -> str:
+    """The compute-partition mode a rank actually gets: state wins on resume, the live shape is the launch source.
+
+    ``kb_hardware_slug`` drops SPX and an unpublished mode, so this stays "" for the overwhelming majority of runs.
+    """
+    partition = state.get("compute_partition")
+    mode = str((partition or {}).get("mode") or "").strip().upper() if isinstance(partition, dict) else ""
+    return mode or str((published_shape() or {}).get("mode") or "").strip().upper()
+
+
 def resolve_kb_topology() -> dict[str, Any]:
     """Resolve the node/GPU and PD-disaggregation topology for the KB hardware suffix."""
     state = _read_state()
-    try:
-        nodes = int(state.get("nodes") or 0)
-    except (TypeError, ValueError):
-        nodes = 0
+    nodes = to_int(state.get("nodes"), 0)
     if nodes < 2:
-        try:
-            nodes = int(os.environ.get("INFERENCE_OPTIMIZER_NODES", "1") or 1)
-        except ValueError:
-            nodes = 1
-    try:
-        gpn = int(state.get("gpus_per_node") or 0)
-    except (TypeError, ValueError):
-        gpn = 0
+        nodes = to_int(os.environ.get("INFERENCE_OPTIMIZER_NODES"), 1)
+    gpn = to_int(state.get("gpus_per_node"), 0)
     if gpn <= 0:
-        try:
-            gpn = int(os.environ.get("INFERENCE_OPTIMIZER_GPUS_PER_NODE", "8") or 8)
-        except ValueError:
-            gpn = 8
+        gpn = to_int(os.environ.get("INFERENCE_OPTIMIZER_GPUS_PER_NODE"), 8)
 
     # PD topology: env (PD_MODE / PD_PREFILL_NODES / PD_DECODE_NODES) is exported before T0 and stable across the run,
     # so it wins; state fields (persisted at create / restart) are the resume fallback.
@@ -106,14 +105,6 @@ def resolve_kb_topology() -> dict[str, Any]:
     tp = _int_pref_env("TP", "tp", "last_restart_tp")
     ep = _int_pref_env("EP", "ep", "last_restart_ep")
 
-    # Compute-partition mode. Fixed at launch like tp/ep, and it decides how much card a rank actually gets, so it
-    # belongs in the key. State wins on resume; the launch env is the live source. ``kb_hardware_slug`` drops SPX and
-    # an unpublished mode, so this stays "" for the overwhelming majority of runs.
-    partition = state.get("compute_partition")
-    partition_mode = str((partition or {}).get("mode") or "").strip().upper() if isinstance(partition, dict) else ""
-    if not partition_mode:
-        partition_mode = str((published_shape() or {}).get("mode") or "").strip().upper()
-
     # Multi-node backend (rayjob / infera): the CLI exports the resolved value; state is the resume fallback; default
     # to the CLI's own multi-node default.
     backend = (os.environ.get("INFERENCE_OPTIMIZER_MN_BACKEND", "") or "").strip().lower()
@@ -128,7 +119,7 @@ def resolve_kb_topology() -> dict[str, Any]:
         "pd_decode_nodes": dn,
         "tp": tp,
         "ep": ep,
-        "partition_mode": partition_mode,
+        "partition_mode": _compute_partition_mode(state),
         "backend": backend,
     }
 

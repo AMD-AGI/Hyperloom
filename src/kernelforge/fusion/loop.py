@@ -12,12 +12,12 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from .models import Recipe, ValidationResult
-from kernelforge.experience_distillation import (
+from kernelforge.knowledge.experience.distillation import (
     ConstraintMemory,
     extract_signature,
     render_ledger,
 )
-from kernelforge.loop.scoring import DEFAULT_SNR_THRESHOLD_DB
+from kernelforge.evaluation.scoring import DEFAULT_SNR_THRESHOLD_DB
 
 from .validate import DEFAULT_TARGET_SPEEDUP
 
@@ -343,12 +343,11 @@ def run_fusion_loop(
     framework: str,
     campaign_fn: CampaignFn,
     config: Optional[LoopConfig] = None,
-    ledger: Optional[FusionExperienceLedger] = None,
     on_keep: Optional[OnKeepFn] = None,
 ) -> LoopResult:
     """Try each ranked recipe as one forge-loop campaign, best first."""
     cfg = config or LoopConfig()
-    ledger = ledger or FusionExperienceLedger(cfg.output_dir)
+    ledger = FusionExperienceLedger(cfg.output_dir)
 
     history: list[LoopIteration] = []
     best_result: Optional[ValidationResult] = None

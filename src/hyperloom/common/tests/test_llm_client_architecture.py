@@ -26,7 +26,7 @@ _GUIDANCE = (
     "Sanctioned LLM paths:\n"
     "  * single-shot inference -> hyperloom.common.llm_config: build the client with\n"
     "    get_openai_client() / get_async_openai_client() and issue the call with\n"
-    "    stream_chat_completion_text() / astream_chat_completion_text().\n"
+    "    chat_completion() / astream_chat_completion_text().\n"
     "  * agentic work -> an agent runtime: hyperloom.common.codex_session (Codex SDK)\n"
     "    or the Claude Agent SDK backends in hyperloom/orchestrator/roles/.\n"
     "Provider client construction lives in hyperloom/common/llm_config.py and nowhere else."
@@ -413,7 +413,7 @@ def test_ignores_sanctioned_and_unrelated_code() -> None:
     assert _codes("from claude_agent_sdk import query\n") == []
     # llm_config's streaming helpers are the sanctioned single-shot call path.
     assert _codes("from hyperloom.common import llm_config\nllm_config.get_openai_client()\n") == []
-    assert _codes("text, _ = llm_config.stream_chat_completion_text(client, model='m')\n") == []
+    assert _codes("text, _ = llm_config.astream_chat_completion_text(client, model='m')\n") == []
     # Workload probes POST to the inference server under optimization.
     assert _codes("client.post(front + '/v1/completions', json=body)\n") == []
     # A route named in prose must not trip the endpoint rules.

@@ -210,28 +210,55 @@ def project_runtime_provenance(enablement: Mapping[str, Any]) -> dict[str, Any] 
     }
 
 
+def _acquisition_credential_class(action: Mapping[str, Any]) -> str | None:
+    """The credential class carried by the acquisition's URLs and package specs.
+
+    The first class any of them carries, there being one operator secret to
+    supply either way; ``None`` when none of them names a channel.
+    """
+    found = classify_credential_value(str(action.get("repo_url") or "")) or classify_credential_value(
+        str(action.get("index_url") or ""), option="--index-url"
+    )
+    for package in action.get("packages") or []:
+        found = found or classify_credential_value(str(package))
+    return found
+
+
 def _project_acquisition(action: Any) -> dict[str, Any] | None:
     """Reduce the kept stack action to the inputs that re-create its venv."""
     if not isinstance(action, dict) or not action:
         return None
-    credential_class = classify_credential_value(str(action.get("repo_url") or "")) or classify_credential_value(
-        str(action.get("index_url") or ""), option="--index-url"
-    )
-    packages = [str(p) for p in (action.get("packages") or [])]
-    for package in packages:
-        credential_class = credential_class or classify_credential_value(package)
     resolved = action.get("resolved_packages")
     return {
         "acquisition_method": str(action.get("acquisition_method") or ""),
         "repo_url": strip_url_userinfo(str(action.get("repo_url") or "")),
         "ref": str(action.get("ref") or ""),
         "index_url": strip_url_userinfo(str(action.get("index_url") or "")),
-        "packages": [strip_url_userinfo(p) for p in packages],
+        "packages": [strip_url_userinfo(str(p)) for p in (action.get("packages") or [])],
         "resolved_ref": str(action.get("resolved_ref") or "") or None,
         "resolved_packages": dict(resolved) if isinstance(resolved, dict) and resolved else None,
-        "credential_class": credential_class,
+        "credential_class": _acquisition_credential_class(action),
         "credential_channels": [str(c) for c in (action.get("credential_channels") or [])],
     }
+
+
+def _project_observed_identity(evidence: Mapping[str, Any], identity: Mapping[str, Any]) -> Any:
+    """Project the engine's observed identity onto what the recipe may publish.
+
+    vLLM's identity is its whole record, which can carry any setting the engine
+    resolved. Only the settings the launch asked for are published: they are
+    what the verdict confirms, and they disclose no more than the requested
+    argv itself.
+    """
+    from ...knowledge.remote_recipe.sanitize import HOST_ORIGIN_KEY, sanitize_shared_knowledge
+
+    fields = {str(k): v for k, v in identity.items() if str(k) not in _IDENTITY_PATH_FIELDS}
+    if str(evidence.get("framework") or "").strip().lower() == "vllm":
+        asked = requested_setting_names(str(evidence.get("requested_server_args") or ""))
+        fields = {k: v for k, v in fields.items() if k in asked}
+    # The sanitizer exempts a ``host_origin`` subtree from path removal;
+    # nothing in an engine's record is that, so it is dropped first.
+    return sanitize_shared_knowledge(_without_key(fields, HOST_ORIGIN_KEY))
 
 
 def project_launch_evidence(evidence: Mapping[str, Any] | None) -> tuple[dict[str, Any] | None, bool]:
@@ -248,11 +275,7 @@ def project_launch_evidence(evidence: Mapping[str, Any] | None) -> tuple[dict[st
     """
     if not isinstance(evidence, Mapping) or not evidence:
         return None, False
-    from ...knowledge.remote_recipe.sanitize import (
-        HOST_ORIGIN_KEY,
-        sanitize_publish_server_args,
-        sanitize_shared_knowledge,
-    )
+    from ...knowledge.remote_recipe.sanitize import sanitize_publish_server_args
 
     out: dict[str, Any] = {}
     argv_refused = False
@@ -266,17 +289,7 @@ def project_launch_evidence(evidence: Mapping[str, Any] | None) -> tuple[dict[st
             except ValueError:
                 argv_refused = True
         elif key == "observed_server_identity" and isinstance(value, Mapping):
-            identity = {str(k): v for k, v in value.items() if str(k) not in _IDENTITY_PATH_FIELDS}
-            if str(evidence.get("framework") or "").strip().lower() == "vllm":
-                # vLLM's identity is its whole record, which can carry any
-                # setting the engine resolved. Only the settings the launch
-                # asked for are published: they are what the verdict confirms,
-                # and they disclose no more than the requested argv itself.
-                asked = requested_setting_names(str(evidence.get("requested_server_args") or ""))
-                identity = {k: v for k, v in identity.items() if k in asked}
-            # The sanitizer exempts a ``host_origin`` subtree from path removal;
-            # nothing in an engine's record is that, so it is dropped first.
-            out[key] = sanitize_shared_knowledge(_without_key(identity, HOST_ORIGIN_KEY))
+            out[key] = _project_observed_identity(evidence, value)
         else:
             out[key] = dict(value) if isinstance(value, Mapping) else value
     requested_env = evidence.get("requested_server_env")

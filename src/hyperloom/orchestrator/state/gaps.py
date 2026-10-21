@@ -27,6 +27,22 @@ _GAPS_MAX_ENTRIES = 50
 _GAPS_ATTEMPTS_HISTORY = 20
 
 
+def _merge_gap_attempts(existing: list[Any], incoming: list[Any]) -> list[Any]:
+    """Merge ``incoming`` attempts into ``existing`` once each, newest-last, capped at the history limit.
+
+    ``refresh_gaps`` re-derives every attempt from the whole failure log on each call, so an equal attempt (same
+    failure: action, error class, variant and ts) is the same one, not a new one. Equal rows take the incoming
+    position so a re-derived log keeps its newest-last order under the cap.
+    """
+    older = [a for a in existing if a not in incoming]
+    merged: list[Any] = []
+    for attempt in older + incoming:
+        if attempt not in merged:
+            merged.append(attempt)
+    # Capped tail; callers supply newest-last lists (convention).
+    return merged[-_GAPS_ATTEMPTS_HISTORY:]
+
+
 class GapsStateMixin:
     """Gap ledger read/write helpers mixed into SharedState."""
 
@@ -76,11 +92,7 @@ class GapsStateMixin:
             existing["last_updated_ts"] = now
             incoming_attempts = list(entry.get("attempts") or [])
             if incoming_attempts:
-                merged_attempts = list(existing.get("attempts") or []) + incoming_attempts
-                # Capped tail; callers supply newest-last lists (convention).
-                if len(merged_attempts) > _GAPS_ATTEMPTS_HISTORY:
-                    merged_attempts = merged_attempts[-_GAPS_ATTEMPTS_HISTORY:]
-                existing["attempts"] = merged_attempts
+                existing["attempts"] = _merge_gap_attempts(list(existing.get("attempts") or []), incoming_attempts)
             merged = existing
         # Enforce global cap, trimming oldest after the upsert so the just-touched gap is retained.
         if len(self.gaps) > _GAPS_MAX_ENTRIES:
@@ -141,27 +153,6 @@ class GapRefreshCollaborator(CoordinatorCollaborator):
             state.upsert_gap(entry)
         for entry in self._extract_gaps_from_profile(workload_id):
             state.upsert_gap(entry)
-
-        plane = self.knowledge_plane
-        if plane is not None and hasattr(plane, "recipe_kb_traverse_issues"):
-            try:
-                traverse = getattr(plane, "recipe_kb_traverse_issues")
-                rows = traverse(
-                    model_class=getattr(state, "model_class", "") or "",
-                    gpu_type=getattr(state, "gpu_type", "") or "",
-                )
-                if isinstance(rows, list):
-                    for entry in rows:
-                        if isinstance(entry, dict):
-                            entry = dict(entry)
-                            entry.setdefault("source", "recipe_kb")
-                            state.upsert_gap(entry)
-            except Exception:
-                log.warning(
-                    "gaps refresh: recipe_kb_traverse_issues failed (reason=%s)",
-                    reason,
-                    exc_info=True,
-                )
         log.debug(
             "gaps refresh (reason=%s): %d gaps after merge",
             reason,

@@ -5,9 +5,11 @@ from __future__ import annotations
 
 import hashlib
 import inspect
+from io import BytesIO
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.error import HTTPError, URLError
 
 import pytest
 
@@ -31,7 +33,6 @@ from hyperloom.orchestrator.knowledge.remote_recipe import (
     read_remote_recipe as _read_remote_recipe,
     write_final_remote_recipe,
 )
-from hyperloom.orchestrator.knowledge.remote_recipe.values import _Files, merge_staged_sections
 from hyperloom.orchestrator.knowledge.remote_recipe._vendor import kb_store_client
 from hyperloom.orchestrator.knowledge.remote_recipe.client import (
     _champion,
@@ -213,15 +214,15 @@ def _state(tmp_path: Path) -> SimpleNamespace:
             "kernel_speedup": 1.2,
         },
         last_fusion_integrate={"decision": "KEEP", "new_tput": 130.0, "patch_path": str(fusion)},
-        kernel_opt_task_attempts={
-            "rmsnorm": {
-                "last_decision": "KEEP",
+        pending_kernel_integrations={
+            "integration-rmsnorm-1": {
+                "integration_id": "integration-rmsnorm-1",
                 "task_group_key": "group-rmsnorm",
-                "current_kernel_id": "rmsnorm",
-                "kernel_name": "rmsnorm",
-                "last_micro_speedup": 1.5,
-                "last_artifact_path": str(rewrite),
-                "last_source_file": str(source),
+                "kernel_id": "rmsnorm",
+                "micro_speedup": 1.5,
+                "artifact_path": str(rewrite),
+                "source_file": str(source),
+                "status": "integrated",
             }
         },
         last_action_failures=[{"action": "explore", "reason": "OOM"}],
@@ -473,6 +474,15 @@ def test_kernel_items_record_the_checkout_they_were_applied_into(tmp_path: Path)
 
     assert roots, "fusion and rewrite each publish an item"
     assert all(root == str(tmp_path) for root in roots)
+
+
+def test_a_rewrite_records_the_checkout_its_queued_keep_was_deployed_into(tmp_path: Path) -> None:
+    state = _state(tmp_path)
+    state.pending_kernel_integrations["integration-rmsnorm-1"]["deploy_repo_root"] = "/opt/kernels"
+
+    rewrite = _build(state, tmp_path / "files-deploy-root").knowledge["value"]["kernel"]["rewrite"]["items"][0]
+
+    assert rewrite["host_origin"]["apply_root"] == "/opt/kernels"
 
 
 def test_kernel_fusion_that_cannot_name_its_checkout_is_dropped(tmp_path: Path) -> None:
@@ -748,7 +758,6 @@ def test_prior_kernel_adoption_requires_successful_kernel_replay(
     state.last_gemm_tuning = {}
     state.last_fusion = {}
     state.last_fusion_integrate = {}
-    state.kernel_opt_task_attempts = {}
     state.warm_replay_outcome = warm_replay_outcome
     state.warm_kernel_kb_plan = [
         {
@@ -851,8 +860,8 @@ def test_integrate_stack_is_authoritative_for_rewrite_patch(tmp_path: Path) -> N
     state = _state(tmp_path)
     unintegrated_patch = tmp_path / "micro-only.cu"
     unintegrated_patch.write_text("// micro only", encoding="utf-8")
-    attempt = state.kernel_opt_task_attempts["rmsnorm"]
-    attempt["last_artifact_path"] = str(unintegrated_patch)
+    queued = state.pending_kernel_integrations["integration-rmsnorm-1"]
+    queued["artifact_path"] = str(unintegrated_patch)
     bundle = _build(state, tmp_path / "files-integrated")
     rewrite = bundle.knowledge["value"]["kernel"]["rewrite"]["items"][0]
     assert rewrite["patch"].endswith("/rewrite.cu")
@@ -864,7 +873,7 @@ def test_integrated_rewrite_missing_artifact_fails_closed(tmp_path: Path) -> Non
     state = _state(tmp_path)
     integrate = next(row for row in state.optimization_stack if row.get("action") == "integrate")
     integrate["patch_path"] = str(tmp_path / "missing-rewrite.cu")
-    state.kernel_opt_task_attempts["rmsnorm"]["last_artifact_path"] = ""
+    state.pending_kernel_integrations["integration-rmsnorm-1"]["artifact_path"] = ""
     with pytest.raises(RemoteRecipeValidationError, match="kernel/rewrite"):
         _build(state, tmp_path / "files-missing-rewrite")
 
@@ -1055,7 +1064,6 @@ def test_warm_replay_and_non_keep_actions_do_not_enable_write(tmp_path: Path) ->
         {"action": "roofline"},
         {"action": "conc_sweep"},
     ]
-    state.kernel_opt_task_attempts = {}
     assert has_new_keep(state) is False
 
 
@@ -1319,9 +1327,30 @@ def test_remote_close_writes_new_kb_once_and_skips_legacy_finalize(
     assert audit_rows[-1]["result"]["best_throughput"] == 10.0
 
 
+@pytest.mark.parametrize(
+    "cause, expected_error",
+    [
+        (None, {"type": "OSError"}),
+        (
+            HTTPError("https://private.invalid/secret", 403, "private body", {}, None),
+            {"type": "KBStoreError", "cause_type": "HTTPError", "http_status": 403},
+        ),
+        (
+            URLError(ConnectionRefusedError(111, "private host")),
+            {"type": "KBStoreError", "cause_type": "URLError", "reason_type": "ConnectionRefusedError", "errno": 111},
+        ),
+        (
+            b"private non-JSON response",
+            {"type": "KBStoreError", "cause_type": "JSONDecodeError"},
+        ),
+        (KBStoreError("private error"), {"type": "KBStoreError"}),
+    ],
+)
 def test_remote_close_transport_failure_is_nonfatal(
     tmp_path: Path,
     monkeypatch,
+    cause,
+    expected_error,
 ) -> None:
     class _Journal:
         def finalize(self, **kwargs) -> None:
@@ -1329,7 +1358,23 @@ def test_remote_close_transport_failure_is_nonfatal(
 
     coordinator = SimpleNamespace(
         session_dir=tmp_path,
-        shared_state=SharedState(),
+        shared_state=SharedState(
+            current_best={"tput": 130.0, "extra_server_args": "--page-size 32"},
+            cumulative_gain_validated=30.0,
+            optimization_stack=[
+                {
+                    "action": "explore",
+                    "candidate_extra_server_args": "--page-size 32",
+                    "recipe_delta": {"extra_server_args": "--page-size 32", "args_mode": "append"},
+                }
+            ],
+            cumulative_gain_validated_stack_len=1,
+            kernel_optimizer="native",
+            tp=8,
+            conc=64,
+            isl=1024,
+            osl=256,
+        ),
         recipe_kb=None,
         knowledge_plane=None,
     )
@@ -1338,26 +1383,31 @@ def test_remote_close_transport_failure_is_nonfatal(
     monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "remote")
     monkeypatch.setenv("KB_STORE_URL", "https://kb.example")
     monkeypatch.setenv("KB_STORE_TOKEN", "token")
-    monkeypatch.setattr(
-        remote_recipe.HyperloomRemoteKB,
-        "from_env",
-        classmethod(lambda cls: (_ for _ in ()).throw(OSError("transport down"))),
-    )
+
+    def respond(request, **kwargs):
+        if isinstance(cause, bytes):
+            return BytesIO(cause)
+        raise cause
+
+    monkeypatch.setattr(kb_store_client.urllib.request, "urlopen", respond)
+    if cause is None or isinstance(cause, KBStoreError):
+
+        def fail_publish(cls):
+            raise cause if cause is not None else OSError("transport down")
+
+        monkeypatch.setattr(remote_recipe.HyperloomRemoteKB, "from_env", classmethod(fail_publish))
     journal = RecipeJournalCollaborator(coordinator)
     journal.ensure_journal = lambda: _Journal()
     journal.workload_canonical_id = lambda: "inference:m:h:f:mt:a:v:p"
     outcome = journal.finalize_recipe_and_journal()
     assert outcome == {
         "status": "error",
-        "reason": "OSError",
+        "reason": expected_error["type"],
         "backend": "kb-store",
         "canonical_id": "inference:m:h:f:mt:a:v:p",
         "session_id": tmp_path.name,
-        # The publisher reports the failure as a bare exception class name, so
-        # the class is carried in a field of its own rather than left for a
-        # reader to recover from ``reason``.
         "result_type": "transport_failed",
-        "error_class": "OSError",
+        "error_class": expected_error["type"],
     }
     from hyperloom.inference_optimizer.session.session_paths import (
         recipe_snapshot_audit_jsonl,
@@ -1365,7 +1415,65 @@ def test_remote_close_transport_failure_is_nonfatal(
 
     row = json.loads(recipe_snapshot_audit_jsonl(tmp_path).read_text(encoding="utf-8"))
     assert row["status"] == "error"
-    assert row["error"]["type"] == "OSError"
+    assert row["error"] == expected_error
+    assert "private" not in json.dumps(row)
+
+
+def _remote_journal_failing_with(tmp_path: Path, monkeypatch, failure: Exception) -> RecipeJournalCollaborator:
+    from hyperloom.orchestrator.knowledge import remote_recipe
+
+    coordinator = SimpleNamespace(
+        session_dir=tmp_path,
+        shared_state=SharedState(current_best={"tput": 130.0}, cumulative_gain_validated=30.0),
+        recipe_kb=None,
+        knowledge_plane=None,
+    )
+    monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "remote")
+    monkeypatch.setenv("KB_STORE_URL", "https://kb.example")
+    monkeypatch.setenv("KB_STORE_TOKEN", "token")
+
+    def fail_publish(cls):
+        raise failure
+
+    monkeypatch.setattr(remote_recipe.HyperloomRemoteKB, "from_env", classmethod(fail_publish))
+    journal = RecipeJournalCollaborator(coordinator)
+    journal.ensure_journal = lambda: SimpleNamespace(finalize=lambda **_kwargs: None)
+    journal.workload_canonical_id = lambda: "inference:m:h:f:mt:a:v:p"
+    return journal
+
+
+@pytest.mark.parametrize(
+    ("failure", "result_type"),
+    [
+        (ValueError("extra_server_args contains a whitespace-bearing value"), "transport_failed"),
+        (RemoteRecipeValidationError("staged section is invalid"), "bundle_build_failed"),
+        (PermissionError("cannot read accepted patch"), "transport_failed"),
+    ],
+    ids=["publish-sanitizer", "bundle-validation", "oserror"],
+)
+def test_remote_close_records_a_publish_failure_it_expects(
+    tmp_path: Path, monkeypatch, failure: Exception, result_type: str
+) -> None:
+    journal = _remote_journal_failing_with(tmp_path, monkeypatch, failure)
+
+    outcome = journal.finalize_recipe_and_journal()
+
+    assert outcome == {
+        "status": "error",
+        "reason": type(failure).__name__,
+        "backend": "kb-store",
+        "canonical_id": "inference:m:h:f:mt:a:v:p",
+        "session_id": tmp_path.name,
+        "result_type": result_type,
+        "error_class": type(failure).__name__,
+    }
+
+
+def test_remote_close_propagates_an_unexpected_publish_failure(tmp_path: Path, monkeypatch) -> None:
+    journal = _remote_journal_failing_with(tmp_path, monkeypatch, TypeError("bundle is not a mapping"))
+
+    with pytest.raises(TypeError, match="bundle is not a mapping"):
+        journal.finalize_recipe_and_journal()
 
 
 def test_remote_close_never_sends_an_unvalidated_working_recipe(tmp_path: Path, monkeypatch) -> None:
@@ -1422,7 +1530,7 @@ def test_unvalidated_write_back_audit_omits_mismatched_metrics(tmp_path: Path, m
     )
     monkeypatch.setattr(
         "hyperloom.orchestrator.knowledge.recipe_journal._close_out.record_write_back_settled",
-        lambda *args, **kwargs: captured.update(kwargs),
+        lambda _session_dir, settlement: captured.update(vars(settlement)),
     )
 
     collaborator._record_write_back_settled(
@@ -1664,13 +1772,13 @@ def test_write_boundary_sanitizes_directly_constructed_bundle(tmp_path: Path) ->
         }
     )
 
-    result = RemoteRecipeClient(store).write_if_better(  # type: ignore[arg-type]
+    result = RemoteRecipeClient(store).write_if_better(
         "inference:m:h:f:mt:a:v:p",
         "session-1",
         bundle,
-        scope=_SCOPE,
-        primary_metric="optimized_throughput",
-        primary_value=130.0,
+        KBSelectionProfile(
+            scope=_SCOPE, primary_metric="optimized_throughput", primary_value=130.0, objective_schema="", metrics={}
+        ),
         files_dir=tmp_path,
     )
 
@@ -1710,13 +1818,13 @@ def test_empty_replay_material_skips_even_when_throughput_beats_champion(
             },
         }
     )
-    result = RemoteRecipeClient(store).write_if_better(  # type: ignore[arg-type]
+    result = RemoteRecipeClient(store).write_if_better(
         "inference:m:h:f:mt:a:v:p",
         "session-1",
         bundle,
-        scope=_SCOPE,
-        primary_metric="optimized_throughput",
-        primary_value=200.0,
+        KBSelectionProfile(
+            scope=_SCOPE, primary_metric="optimized_throughput", primary_value=200.0, objective_schema="", metrics={}
+        ),
         files_dir=tmp_path,
     )
     assert result.status == "skipped"
@@ -2261,32 +2369,6 @@ def test_a_staged_file_is_published_under_its_own_section(tmp_path: Path) -> Non
     assert (tmp_path / "files" / refs[0]).is_file()
 
 
-def test_merge_staged_sections_unions_and_dedups_prior_refs(tmp_path: Path) -> None:
-    """Replay refs already on the section must union with newly staged refs, without duplicates."""
-    patch_a = tmp_path / "authored_a.patch"
-    patch_b = tmp_path / "authored_b.patch"
-    patch_a.write_text("authored_a", encoding="utf-8")
-    patch_b.write_text("authored_b", encoding="utf-8")
-    sections = _sections(tmp_path)
-    staged_refs = PatchKB(sections).stage_patches([patch_a, patch_b], stack_index=2)
-    staged_ref_a, staged_ref_b = staged_refs[0], staged_refs[1]
-    prior_patch = "patch/overlays/000000/00-replayed.patch"
-    prior_artifact = "patch/artifacts/prior.bin"
-    # before = [prior, staged_ref_a]; after = [staged_ref_a, staged_ref_b].
-    after_patches = list(sections.staged("patch").knowledge.get("patches") or [])
-    assert after_patches == [staged_ref_a, staged_ref_b]
-    value = {
-        "patch": {
-            "patches": [prior_patch, staged_ref_a],
-            "artifacts": [prior_artifact],
-        }
-    }
-    merged = merge_staged_sections(value, sections, _Files(tmp_path / "files"))
-    assert merged == ["patch"]
-    assert value["patch"]["patches"] == [prior_patch, staged_ref_a, staged_ref_b]
-    assert value["patch"]["artifacts"] == [prior_artifact]
-
-
 def test_non_overlay_owner_patch_ref_fails_before_publish(
     tmp_path: Path,
 ) -> None:
@@ -2798,13 +2880,16 @@ def test_remote_adapter_pages_history_then_materializes_l2_donor(
     row, tier, confidence = _cascade_warm_start_search(
         adapter,  # type: ignore[arg-type]
         cid=exact,
-        hw="mi300x",
-        framework="sglang",
-        model_type_val="qwen",
-        architectures_val=["QwenArch"],
-        arch_slug="qwenarch",
-        fw_version="1.0",
-        precision="fp8",
+        identity={
+            "canonical_id": exact,
+            "hardware": "mi300x",
+            "framework_name": "sglang",
+            "model_type": "qwen",
+            "architectures": "qwenarch",
+            "framework_version": "1.0",
+            "precision": "fp8",
+        },
+        shape={},
         warm_prefer=None,
     )
 

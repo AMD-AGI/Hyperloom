@@ -86,7 +86,7 @@ def _entrypoint_markers(framework: str) -> tuple[str, ...]:
         return ("atom.entrypoints",)
     if "vllm" in fw:
         return ("vllm serve",)
-    return ("sglang.launch_server",)
+    return ("sglang.launch_server", "sglang serve")
 
 
 def _join_continuations(text: str) -> list[str]:
@@ -178,7 +178,7 @@ def parse_reference_script(source: str, *, framework: str) -> ReferenceRecipe:
         )
         return ReferenceRecipe(server_args="", envs=envs, model=None, launch_controls=controls)
 
-    server_args, model = _extract_server_args(shlex.split(line), framework)
+    server_args, model = _extract_server_args(shlex.split(line))
     return ReferenceRecipe(server_args=server_args, envs=envs, model=model, launch_controls=controls)
 
 
@@ -256,27 +256,23 @@ def _resolve_self_default(key: str, val: str) -> str | None:
     return None if _has_shell_expansion(default) else default
 
 
-def _extract_server_args(
-    tokens: list[str],
-    framework: str,
-) -> tuple[str, str | None]:
+_SERVE_CLIS = frozenset({"vllm", "sglang"})
+
+
+def _flags_start(tokens: list[str]) -> int:
+    """Index of the first token after the entrypoint: ``python3 -m <module>`` or ``<vllm|sglang> serve``."""
+    for i, t in enumerate(tokens):
+        if t == "-m" and i + 1 < len(tokens):
+            return i + 2
+        if t == "serve" and i > 0 and Path(tokens[i - 1]).name in _SERVE_CLIS:
+            return i + 1
+    return 0
+
+
+def _extract_server_args(tokens: list[str]) -> tuple[str, str | None]:
     """Walk entrypoint tokens as (flag, value) pairs; keep static flags only."""
     tokens = _strip_redirection(tokens)
-    # Skip the entrypoint prefix itself.
-    fw = str(framework or "").strip().lower()
-    start = 0
-    if "vllm" in fw and "atom" not in fw:
-        # ``vllm serve <model> ...`` → entrypoint is the first two tokens.
-        for i, t in enumerate(tokens):
-            if t == "serve":
-                start = i + 1
-                break
-    else:
-        # ``python3 -m <module> ...``: flags follow the ``-m module`` run.
-        for i, t in enumerate(tokens):
-            if t == "-m" and i + 1 < len(tokens):
-                start = i + 2
-                break
+    start = _flags_start(tokens)
 
     model: str | None = None
     kept: list[str] = []
@@ -359,19 +355,33 @@ def _shell_ready_server_args(server_args: Any) -> str:
     return " ".join(shlex.quote(tok) for tok in tokens)
 
 
+@dataclass(frozen=True)
+class LaunchSettings:
+    """The launch configuration a script replays: server args, envs and the launch controls applied with them."""
+
+    server_args: str
+    envs: dict[str, str] | None = None
+    overlay_pythonpath: str | None = None
+    unset_envs: list[str] | None = None
+    remove_args: list[str] | None = None
+    args_mode: str = "append"
+
+
+@dataclass(frozen=True)
+class ServingTarget:
+    """What a rendered script serves: the model and the TP, context length and GPU type it exports."""
+
+    model: str | None = None
+    tp: int | None = None
+    max_model_len: int | None = None
+    gpu_type: str | None = None
+
+
 def render_reference_script(
     *,
     framework: str,
-    server_args: str,
-    envs: dict[str, str] | None = None,
-    overlay_pythonpath: str | None = None,
-    unset_envs: list[str] | None = None,
-    remove_args: list[str] | None = None,
-    args_mode: str = "append",
-    model: str | None = None,
-    tp: int | None = None,
-    max_model_len: int | None = None,
-    gpu_type: str | None = None,
+    launch: LaunchSettings,
+    target: ServingTarget = ServingTarget(),
     setup_script: str | None = None,
 ) -> str:
     """Render a runnable ``*.sh`` artifact from a launch recipe.
@@ -382,14 +392,16 @@ def render_reference_script(
     """
     fw = str(framework or "sglang").strip().lower()
     has_enablement = bool(setup_script)
+    overlay_pythonpath, unset_envs = launch.overlay_pythonpath, launch.unset_envs
+    model, tp, max_model_len, gpu_type = target.model, target.tp, target.max_model_len, target.gpu_type
 
     lines: list[str] = ["#!/usr/bin/env bash"]
     controls = _validate_launch_controls(
         {
             **({"overlay_pythonpath": overlay_pythonpath} if overlay_pythonpath else {}),
             **({"unset_envs": unset_envs} if unset_envs else {}),
-            **({"remove_args": remove_args} if remove_args else {}),
-            **({"args_mode": args_mode} if args_mode == "replace" else {}),
+            **({"remove_args": launch.remove_args} if launch.remove_args else {}),
+            **({"args_mode": launch.args_mode} if launch.args_mode == "replace" else {}),
         }
     )
     if controls:
@@ -423,7 +435,7 @@ def render_reference_script(
         lines.append(f"export MAX_MODEL_LEN={int(max_model_len)}")
     if gpu_type:
         lines.append(f"export GPU_TYPE={shlex.quote(str(gpu_type))}")
-    for k, v in (envs or {}).items():
+    for k, v in (launch.envs or {}).items():
         if not str(k).strip():
             continue
         # The artifact is archived and uploaded, so a credential-shaped value is named but never written out.
@@ -435,7 +447,7 @@ def render_reference_script(
         prefix = shlex.quote(str(overlay_pythonpath))
         lines.append(f'export PYTHONPATH={prefix}"${{PYTHONPATH:+:$PYTHONPATH}}"')
 
-    args = _shell_ready_server_args(server_args)
+    args = _shell_ready_server_args(launch.server_args)
     lines.append("")
     if "atom" in fw:
         entry = f"python3 -m atom.entrypoints.openai_server {args}".rstrip()
@@ -448,7 +460,9 @@ def render_reference_script(
 
 
 __all__ = [
+    "LaunchSettings",
     "ReferenceRecipe",
+    "ServingTarget",
     "parse_reference_script",
     "render_reference_script",
 ]

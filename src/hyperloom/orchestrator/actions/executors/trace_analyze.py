@@ -12,6 +12,7 @@ import shlex
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +22,7 @@ from ._kernel_agent_tool import (
     _shape_tool_result,
 )
 from .._recorder_trace import trace_recording_skipped
+from hyperloom.common.coerce import optional_positive_int
 from hyperloom.inference_optimizer.trace.trajectory_trace import inherited_scope_fields
 
 log = logging.getLogger(__name__)
@@ -101,8 +103,8 @@ def _maybe_selfheal_tracelens_root(root: Path, *, log: Any = None) -> None:
     """Rebuild the pod-local TraceLens checkout if it vanished mid-run.
 
     Only the installer-managed default path is healed; an explicit
-    ``TRACELENS_ROOT`` override must fail fast when missing. Best-effort: any
-    failure is swallowed so the caller's validation produces the error.
+    ``TRACELENS_ROOT`` override must fail fast when missing. A heal that cannot
+    load or fails is logged and the caller's validation reports the error.
     """
     from hyperloom.inference_optimizer.session import paths
 
@@ -125,7 +127,8 @@ def _maybe_selfheal_tracelens_root(root: Path, *, log: Any = None) -> None:
         heal_log = getattr(log, "warning", None) or (lambda *_a, **_k: None)
         heal_log("trace_analyze: TraceLens root %s missing; attempting self-heal", root)
         _tla._ensure_tracelens_checkout(root, log_path=Path(os.devnull))
-    except Exception as exc:  # noqa: BLE001  # heal is best-effort; validation reports the real error
+    except (ImportError, OSError, subprocess.TimeoutExpired) as exc:
+        # tracelens_analysis imports TraceLens at top level, so a vanished checkout fails the import.
         _log = getattr(log, "warning", None)
         if _log:
             _log("trace_analyze: TraceLens self-heal failed: %s", exc)
@@ -213,11 +216,11 @@ def _load_materialized_workload_metadata(config_path: str) -> dict[str, Any]:
     path = Path(config_path)
     if not path.exists():
         return {}
-    try:
-        import yaml  # type: ignore[import-untyped]
+    import yaml  # type: ignore[import-untyped]
 
+    try:
         cfg = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    except Exception as exc:  # noqa: BLE001
+    except (OSError, ValueError, yaml.YAMLError) as exc:
         log.warning("failed to read materialized workload config %s: %s", path, exc)
         return {}
     bench = cfg.get("benchmark") if isinstance(cfg.get("benchmark"), dict) else {}
@@ -342,7 +345,7 @@ def _enrich_candidates_artifact(
         return
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except Exception as exc:  # noqa: BLE001
+    except (OSError, ValueError) as exc:
         log.warning("failed to read candidates artifact %s: %s", path, exc)
         return
     if not isinstance(data, dict):
@@ -367,115 +370,115 @@ _TRACELENS_ANALYSIS_MODULE = "hyperloom.orchestrator.trace_analysis.tracelens_an
 _BYPASS_TRACE_ANALYSIS_MODULE = "hyperloom.orchestrator.trace_analysis.bypass_trace_analysis"
 
 
+def _optional_flags(*pairs: tuple[str, Any]) -> list[str]:
+    """The ``flag value`` argv tokens of every pair whose value is set, in order."""
+    tokens: list[str] = []
+    for flag, value in pairs:
+        if value:
+            tokens += [flag, str(value)]
+    return tokens
+
+
+@dataclass(frozen=True)
+class _AnalysisRun:
+    """What the handler resolved for one analysis run: the trace, workspace, tool and the workload it describes."""
+
+    trace_input: Any
+    workspace_path: str
+    tracelens_root: "Path | None"
+    is_bypass: bool
+    scriptable: bool
+    model_name: str
+    framework: str
+    target_platform: str
+    analysis_mode: str
+
+
+def _bypass_flags(state: Any, analysis_mode: str) -> list[str]:
+    """Flags only the bypass route reads; the analysis-mode hint retires with the bypass route."""
+    flags = _optional_flags(("--analysis-mode", analysis_mode))
+    if str(getattr(state, "benchmark_mode", "") or "").strip().lower() == "agentx":
+        flags += ["--require-single-rank"]
+        flags += _optional_flags(("--tensor-parallel-size", optional_positive_int(getattr(state, "tp", None))))
+    return flags
+
+
 def _build_trace_analyze_cmd(
     payload: dict,
+    run: _AnalysisRun,
     *,
     session_dir: Path,
     state: Any,
-    workspace_path: str,
-    trace_input: Any,
-    tracelens_root: "Path | None",
-    is_bypass: bool,
-    scriptable: bool,
     workload: dict,
-    model_name: str,
-    framework: str,
-    target_platform: str,
-    analysis_mode: str,
 ) -> "tuple[list[str], str]":
     """Assemble the trace-analysis tool argv (TraceLens or bypass); returns
     ``(cmd, steady_state_mode)`` so the caller can record discovery provenance."""
+    is_bypass = run.is_bypass
+    scriptable = run.scriptable
     # Both tools share the CLI surface below except ``--tracelens-root``.
     cmd = [
         sys.executable,
         "-m",
         _BYPASS_TRACE_ANALYSIS_MODULE if is_bypass else _TRACELENS_ANALYSIS_MODULE,
         "--trace-input",
-        str(trace_input),
+        str(run.trace_input),
         "--session-id",
         str(payload.get("session_id") or session_dir.name),
         "--workspace-path",
-        workspace_path,
+        run.workspace_path,
     ]
     if not is_bypass:
         # Pass the resolved root explicitly so the tool never relies on inherited env.
-        cmd += ["--tracelens-root", str(tracelens_root)]
+        cmd += ["--tracelens-root", str(run.tracelens_root)]
         # The tool's SDK run books its model requests onto this session's trajectory ledger.
         for key, value in inherited_scope_fields().items():
             cmd += [f"--trajectory-{key.replace('_', '-')}", str(value)]
-    elif str(getattr(state, "benchmark_mode", "") or "").strip().lower() == "agentx":
-        cmd += ["--require-single-rank"]
-        try:
-            state_tp = int(getattr(state, "tp", 0) or 0)
-        except (TypeError, ValueError):
-            state_tp = 0
-        if state_tp > 0:
-            cmd += ["--tensor-parallel-size", str(state_tp)]
-    if model_name:
-        cmd += ["--model-name", str(model_name)]
-    if framework:
-        cmd += ["--framework", str(framework)]
-    if target_platform:
-        cmd += ["--target-platform", str(target_platform)]
-    if analysis_mode:
-        cmd += ["--analysis-mode", str(analysis_mode)]
+    else:
+        cmd += _bypass_flags(state, run.analysis_mode)
 
-    # Model identity informs source resolution for every framework, not only the
-    # diffusion roofline. Keep the standard payload > state > environment
-    # precedence so ordinary sglang/vLLM production requests carry config.json
-    # selectors into the bounded model context.
     model_path = str(
         payload.get("model_path") or getattr(state, "model_path", "") or os.environ.get("MODEL_PATH") or ""
     ).strip()
-    if model_path:
-        cmd += ["--model-path", model_path]
     precision = str(
         payload.get("precision") or getattr(state, "precision", "") or workload.get("precision") or ""
     ).strip()
-    if precision:
-        cmd += ["--precision", precision]
+    cmd += _optional_flags(
+        ("--model-name", run.model_name),
+        ("--framework", run.framework),
+        ("--target-platform", run.target_platform),
+        ("--model-path", model_path),
+        ("--precision", precision),
+    )
 
     if scriptable:
-        # --skip-split is TraceLens-only; the bypass backend has its own windowing.
-        if not is_bypass:
-            cmd += ["--skip-split"]
-        # Forward the denoise-step count for per-step roofline timings.
-        # Priority: payload override > baseline workload metadata.
-        num_denoise = payload.get("num_denoise_steps") or workload.get("num_inference_steps")
-        if num_denoise not in (None, ""):
-            try:
-                if int(num_denoise) > 0:
-                    cmd += ["--num-denoise-steps", str(int(num_denoise))]
-            except (TypeError, ValueError):
-                pass
-    else:
-        # Splitter workload hints. Priority: payload override > baseline metadata
-        # > drop the flag.
-        split_conc = payload.get("split_conc") or workload.get("conc")
-        if split_conc not in (None, ""):
-            cmd += ["--split-conc", str(split_conc).strip()]
-        split_osl = payload.get("split_osl") or workload.get("osl")
-        if split_osl not in (None, ""):
-            cmd += ["--split-osl", str(split_osl).strip()]
-        split_r = payload.get("split_r") or workload.get("random_range_ratio")
-        if split_r not in (None, ""):
-            cmd += ["--split-r", str(split_r).strip()]
+        num_denoise = optional_positive_int(payload.get("num_denoise_steps") or workload.get("num_inference_steps"))
+        cmd += _optional_flags(("--num-denoise-steps", num_denoise))
+    elif not is_bypass:
+        cmd += ["--split-llm-inference"]
+        for flag, payload_key, workload_key in (
+            ("--split-conc", "split_conc", "conc"),
+            ("--split-osl", "split_osl", "osl"),
+            ("--split-r", "split_r", "random_range_ratio"),
+        ):
+            hint = payload.get(payload_key) or workload.get(workload_key)
+            if hint not in (None, ""):
+                cmd += [flag, str(hint).strip()]
 
     capture_folder = (
         payload.get("capture_folder") or payload.get("graph_capture_path") or payload.get("capture_folder_path")
     )
-    if capture_folder:
-        cmd += ["--capture-folder", str(capture_folder)]
-    # Forward TraceLens splitter steady-state mode via payload or env.
-    steady_state_mode = payload.get("steady_state_mode") or os.environ.get("INFERENCE_OPTIMIZER_STEADY_STATE_MODE", "")
-    steady_state_mode = str(steady_state_mode).strip()
-    if steady_state_mode:
-        cmd += ["--steady-state-mode", steady_state_mode]
-    # Post-kernel-opt roofline writes a separate report so it never overwrites
-    # the baseline kernel_roofline.json.
+    if scriptable and not is_bypass:
+        steady_state_mode = "generic"
+    else:
+        steady_state_mode = str(
+            payload.get("steady_state_mode") or os.environ.get("INFERENCE_OPTIMIZER_STEADY_STATE_MODE", "")
+        ).strip()
     roofline_output_name = str(payload.get("roofline_output_name") or "").strip()
-    if roofline_output_name:
-        cmd += ["--roofline-output-name", roofline_output_name]
+    cmd += _optional_flags(
+        ("--capture-folder", capture_folder),
+        ("--steady-state-mode", steady_state_mode),
+        ("--roofline-output-name", roofline_output_name),
+    )
     if payload.get("dry_run"):
         cmd += ["--dry-run"]
     return cmd, steady_state_mode
@@ -527,11 +530,15 @@ def _analysis_steady_state(
     }
 
 
+def _analysis_tool(route: str) -> str:
+    """The tool a route runs: agent runs TraceLens, bypass its standalone reader."""
+    return "bypass" if route == "bypass" else "tracelens"
+
+
 def _build_analysis_meta(
     result: dict[str, Any],
     *,
     route: str,
-    tool: str,
     requested_mode: str,
     trace_input: str,
     duration_sec: float,
@@ -546,8 +553,8 @@ def _build_analysis_meta(
 
     Args:
         result: The analysis tool's result dict.
-        route: The requested analysis route (``agent`` / ``bypass``).
-        tool: The tool that actually ran (``tracelens`` / ``bypass``).
+        route: The requested analysis route (``agent`` / ``bypass``); it names
+            the tool that ran (``tracelens`` / ``bypass``).
         requested_mode: The steady-state mode asked of the tool.
         trace_input: The trace the run analyzed.
         duration_sec: Wall-clock seconds the subprocess took.
@@ -555,6 +562,7 @@ def _build_analysis_meta(
     Returns:
         The analysis metadata dict.
     """
+    tool = _analysis_tool(route)
     run_meta = result.get("run_meta") if isinstance(result.get("run_meta"), dict) else {}
     steps = run_meta.get("steps")
     return {
@@ -694,18 +702,20 @@ async def trace_analyze_handler(
 
     cmd, steady_state_mode = _build_trace_analyze_cmd(
         payload,
+        _AnalysisRun(
+            trace_input=trace_input,
+            workspace_path=workspace_path,
+            tracelens_root=tracelens_root,
+            is_bypass=is_bypass,
+            scriptable=scriptable,
+            model_name=model_name,
+            framework=framework,
+            target_platform=target_platform,
+            analysis_mode=analysis_mode,
+        ),
         session_dir=session_dir,
         state=state,
-        workspace_path=workspace_path,
-        trace_input=trace_input,
-        tracelens_root=tracelens_root,
-        is_bypass=is_bypass,
-        scriptable=scriptable,
         workload=workload,
-        model_name=model_name,
-        framework=framework,
-        target_platform=target_platform,
-        analysis_mode=analysis_mode,
     )
     timeout_sec = int(payload.get("budget_minutes", 60)) * 60
 
@@ -775,14 +785,12 @@ async def trace_analyze_handler(
 
         # Route and tool are one-to-one after the no-LLM TraceLens route was
         # removed: agent runs TraceLens, while bypass runs its standalone reader.
-        _disc_route = analysis_route
-        _disc_tool = "bypass" if is_bypass else "tracelens"
+        _disc_tool = _analysis_tool(analysis_route)
         # Surfaced for the caller's SBD V6 roofline event, which records the run
         # as it happens rather than re-deriving it at export time.
         result["analysis_meta"] = _build_analysis_meta(
             result,
-            route=_disc_route,
-            tool=_disc_tool,
+            route=analysis_route,
             requested_mode=steady_state_mode,
             trace_input=str(trace_input),
             duration_sec=_disc_duration_sec,
@@ -791,11 +799,11 @@ async def trace_analyze_handler(
         # session's hot kernels is in scope. Nothing downstream can recover it,
         # so it is recorded here even though the rest of the discovery run is
         # already on the roofline event.
-        try:
-            from hyperloom.inference_optimizer.breakdown.recorder import tool_versions
+        from hyperloom.inference_optimizer.breakdown.recorder import recorder_warnings, tool_versions
 
+        try:
             tool_versions.record_tool_version(session_dir, tool=_disc_tool)
-        except Exception as exc:  # noqa: BLE001
+        except recorder_warnings.RECORDING_ERRORS as exc:
             trace_recording_skipped(
                 "versions",
                 reason="caller raised before the recorder",

@@ -7,14 +7,16 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 from ..bus.gpu_pool import gpus_by_task_sync
 from ..phases import machine_state as _phase_state
 from ..policy.projection import resource_pools_summary
+from ..specialists.in_flight import in_flight_domains
 from ..roles.base import BackendTurnResult
 from ..bus.message_bus import Message
 from hyperloom.inference_optimizer.trace.conversation_trace import ConversationRecord, append_conversation
 from ..state.failure_evidence import UNMEASURED_OUTCOMES, render_failure_line
+from ..state.shared_state import KbInjection
 from hyperloom.common.prompt_safety import defang_prompt_structure as _defang_prompt_structure
 from hyperloom.common.prompt_safety import flatten_for_prompt as _flatten_for_inbox
 
@@ -214,6 +216,42 @@ def _format_inbox_event(m: "Message", *, max_variant_rows: int = 3) -> str:
     return f"{head} payload={payload}"
 
 
+#: A prompt section: the heading it goes under, or ``None`` for a block that carries its own, and what renders it.
+_AdvisoryRow = tuple[str | None, Callable[["ConversationCollaborator"], str]]
+
+#: The orchestration advisories that precede the plateau pair. Row order is the order the model reads the
+#: sections in, so it is content.
+_ADVISORY_BLOCKS: tuple[_AdvisoryRow, ...] = (
+    ("=== Warm start (Recipe KB T0) ===", lambda c: c.shared_state.to_warm_start_summary()),
+    ("=== Current gaps ===", lambda c: c.shared_state.to_gaps_summary()),
+    (None, lambda c: c._specialist_findings_block()),
+    ("=== External target gap (advisory) ===", lambda c: c.target_gap_advisory_block()),
+    ("=== Specialist proposal scores (advisory) ===", lambda c: c.shared_state.to_proposal_scores_summary()),
+    ("=== Priors-match (advisory ordering) ===", lambda c: c._priors_match_advisory_block()),
+    ("=== Intervention mix (telemetry) ===", lambda c: c.shared_state.to_intervention_mix_summary()),
+)
+
+#: The orchestration advisories that follow the plateau pair; see :data:`_ADVISORY_BLOCKS`.
+_POST_PLATEAU_ADVISORY_BLOCKS: tuple[_AdvisoryRow, ...] = (
+    ("=== Bottleneck redirect (advisory) ===", lambda c: c._bottleneck_redirect_advisory_block()),
+    ("=== Acceptance threshold (advisory) ===", lambda c: c._acceptance_threshold_advisory_block()),
+    ("=== Discarded escalation hint (advisory) ===", lambda c: c._discarded_escalate_hint_advisory_block()),
+)
+
+
+def _advisory_sections(owner: "ConversationCollaborator", blocks: tuple[_AdvisoryRow, ...]) -> list[str]:
+    """Render the advisories that produced something, each under its heading."""
+    sections: list[str] = []
+    for heading, produce in blocks:
+        block = produce(owner)
+        if not block:
+            continue
+        if heading:
+            sections.append(heading)
+        sections.append(block)
+    return sections
+
+
 class ConversationCollaborator(CoordinatorCollaborator):
     """Manages conversation rounds: context tools, prompt injection, and round history."""
 
@@ -249,11 +287,13 @@ class ConversationCollaborator(CoordinatorCollaborator):
             )
         )
         self.shared_state.record_experience_kb_injection(
-            consumer="orchestration",
-            read_id=evidence.read_id,
-            experience_ids=[str(ref.get("id") or "") for ref in evidence.rendered_refs],
-            experiences=[dict(item) for item in evidence.experiences],
-            prompt_block=block,
+            KbInjection(
+                consumer="orchestration",
+                read_id=evidence.read_id,
+                experience_ids=[str(ref.get("id") or "") for ref in evidence.rendered_refs],
+                experiences=[dict(item) for item in evidence.experiences],
+                prompt_block=block,
+            )
         )
         return block
 
@@ -263,20 +303,17 @@ class ConversationCollaborator(CoordinatorCollaborator):
         setter = getattr(backend, "set_context_provider", None)
         if setter is None:
             return
-        try:
-            from ..roles.mcp_context_tools import ContextProvider
+        from ..roles.mcp_context_tools import ContextProvider
 
-            provider = ContextProvider(
-                shared_state=self.shared_state,
-                inbox_reader=self._context_inbox_reader,
-                analysis_reader=self._context_analysis_reader,
-                recent_outcomes_reader=self._context_recent_outcomes_reader,
-                running_tasks_reader=self._context_running_tasks_reader,
-                reference_reader=self._context_reference_reader,
-            )
-            setter(provider)
-        except Exception:
-            log.exception("Coordinator: failed to attach orchestration context tools")
+        provider = ContextProvider(
+            shared_state=self.shared_state,
+            inbox_reader=self._context_inbox_reader,
+            analysis_reader=self._context_analysis_reader,
+            recent_outcomes_reader=self._context_recent_outcomes_reader,
+            running_tasks_reader=self._context_running_tasks_reader,
+            reference_reader=self._context_reference_reader,
+        )
+        setter(provider)
 
     def _context_reference_reader(self, name: str = "") -> str:
         """Resolve a reference doc by stem; reject path traversal."""
@@ -329,7 +366,7 @@ class ConversationCollaborator(CoordinatorCollaborator):
     def _context_running_tasks_reader(self) -> str:
         """Project in-flight tasks and their held resources from three reads, not one snapshot."""
         tasks = self.tasks.running_context_sync()
-        backlog = self._queued_backlog_line()
+        backlog = "\n".join(line for line in (self._queued_backlog_line(), self._queued_specialists_line()) if line)
         if not tasks:
             return "\n".join(line for line in ("(no tasks in flight)", backlog) if line)
 
@@ -383,6 +420,15 @@ class ConversationCollaborator(CoordinatorCollaborator):
             if counts.get(kind)
         ]
         return "queued backlog: " + ", ".join(parts) if parts else ""
+
+    def _queued_specialists_line(self) -> str:
+        """Domains a queued specialist holds: a specialist delegate for one of them is refused until it finishes."""
+        held = in_flight_domains(self.tasks.queued_context_sync())
+        if not held:
+            return ""
+        return "queued specialists (each holds its domain): " + ", ".join(
+            f"{domain} task_id={task.task_id}" for domain, task in held.items()
+        )
 
     def _task_heartbeat_age_sec(self, task: "Task", *, now_unix: float) -> float | None:
         """Age of a specialist's freshest liveness file, mirroring the reaper."""
@@ -443,6 +489,18 @@ class ConversationCollaborator(CoordinatorCollaborator):
         )
         append_conversation(session_dir=self.session_dir, record=record)
 
+    async def _explore_grid_fingerprints(self) -> set[str]:
+        """Content fingerprints of the variants in every queued or running explore grid."""
+        from ..actions.executors._proposal_identity import content_fingerprint
+
+        return {
+            content_fingerprint(variant)
+            for task in (*await self.tasks.queued(), *await self.tasks.running())
+            if task.kind == "explore"
+            for variant in (task.params or {}).get("grid") or ()
+            if isinstance(variant, dict)
+        }
+
     async def compose_prompt(self, agent_name: str) -> str:
         """Compose the prompt for *agent_name*: session context + inbox tail (with canonical msg_id per inbox row)."""
         sections: list[str] = []
@@ -485,10 +543,7 @@ class ConversationCollaborator(CoordinatorCollaborator):
         # Not wrapped, unlike the advisory blocks below: a latency budget changes
         # what a KEEP means, so losing it silently would have the model route as
         # if the session were unconstrained. Pure string assembly, no I/O.
-        latency_block = self.shared_state.to_latency_budget_summary()
-        if latency_block:
-            sections.append("=== Latency budget (constraint) ===")
-            sections.append(latency_block)
+        sections.extend(self.shared_state.to_constraint_sections())
         sections.append("=== Resource pools ===")
         sections.append(resource_pools_summary(self.shared_state))
         if agent_name == "orchestration":
@@ -496,7 +551,15 @@ class ConversationCollaborator(CoordinatorCollaborator):
             if denial_summary:
                 sections.append(denial_summary)
             if (self.shared_state.phase or "").strip().upper() == _phase_state.PHASE_FRAMEWORK_AGENT:
-                untested_block = self.shared_state.to_untested_proposals_summary()
+                from ..predictor.prompt import queue_block
+                from ..predictor.rows import PROVENANCE
+
+                # The predictor's rows lead the queue, so its block comes first, under the same section.
+                blocks = (
+                    queue_block(self.shared_state, in_grids=await self._explore_grid_fingerprints()),
+                    self.shared_state.to_untested_proposals_summary(skip_provenance=PROVENANCE),
+                )
+                untested_block = "\n\n".join(block for block in blocks if block)
                 if untested_block:
                     sections.append("=== Untested proposals (current cycle) ===")
                     sections.append(untested_block)
@@ -504,47 +567,13 @@ class ConversationCollaborator(CoordinatorCollaborator):
                 if kb_block:
                     sections.append(kb_block)
 
-        # Recipe KB T0 warm-start snapshot + structured gaps[] ledger.
-        if agent_name == "orchestration":
-            warm_block = self.shared_state.to_warm_start_summary()
-            if warm_block:
-                sections.append("=== Warm start (Recipe KB T0) ===")
-                sections.append(warm_block)
-            gaps_block = self.shared_state.to_gaps_summary()
-            if gaps_block:
-                sections.append("=== Current gaps ===")
-                sections.append(gaps_block)
-            research_block = self._specialist_findings_block()
-            if research_block:
-                sections.append(research_block)
-            gap_block = self.target_gap_advisory_block()
-            if gap_block:
-                sections.append("=== External target gap (advisory) ===")
-                sections.append(gap_block)
-            # Advisory multi-model proposal scores (ProposalScorer); not a ranking directive.
-            scores_block = self.shared_state.to_proposal_scores_summary()
-            if scores_block:
-                sections.append("=== Specialist proposal scores (advisory) ===")
-                sections.append(scores_block)
-            # Priors-match: recently proposed variants aligning with research hints/external gap (advisory only).
-            priors_block = self._priors_match_advisory_block()
-            if priors_block:
-                sections.append("=== Priors-match (advisory ordering) ===")
-                sections.append(priors_block)
-
-            # Surface the intervention-mix ledger (config vs code_patch counts) as neutral telemetry.
-            mix_block = self.shared_state.to_intervention_mix_summary()
-            if mix_block:
-                sections.append("=== Intervention mix (telemetry) ===")
-                sections.append(mix_block)
+            sections.extend(_advisory_sections(self, _ADVISORY_BLOCKS))
 
             plateau_block = self.plateau_advisory_block()
             if plateau_block:
                 sections.append("=== Plateau advisory ===")
                 sections.append(plateau_block)
-
-            # On a plateau, surface candidate directions (advisory).
-            if plateau_block:
+                # Candidate directions are worth the digest's cost only once the session has stopped gaining.
                 try:
                     from ..knowledge import trajectory_reviewer as _trajectory_reviewer
 
@@ -559,22 +588,7 @@ class ConversationCollaborator(CoordinatorCollaborator):
                     sections.append("=== Trajectory review (advisory) ===")
                     sections.append(trajectory_block)
 
-            # Cyclic bottleneck-redirect advisory (next-cycle re-targeting).
-            redirect_block = self._bottleneck_redirect_advisory_block()
-            if redirect_block:
-                sections.append("=== Bottleneck redirect (advisory) ===")
-                sections.append(redirect_block)
-
-            # Decaying acceptance bar + prior variants now re-testable under it.
-            accept_block = self._acceptance_threshold_advisory_block()
-            if accept_block:
-                sections.append("=== Acceptance threshold (advisory) ===")
-                sections.append(accept_block)
-
-            discarded_escalate_block = self._discarded_escalate_hint_advisory_block()
-            if discarded_escalate_block:
-                sections.append("=== Discarded escalation hint (advisory) ===")
-                sections.append(discarded_escalate_block)
+            sections.extend(_advisory_sections(self, _POST_PLATEAU_ADVISORY_BLOCKS))
 
         # NOTE: there is deliberately no "=== Specialist health ===" block.
 
@@ -626,10 +640,7 @@ class ConversationCollaborator(CoordinatorCollaborator):
             pid = str(getattr(p, "proposal_msg_id", "") or "")
             if not pid or pid in seen:
                 continue
-            try:
-                pm = await self.bus.lookup_by_id(pid)
-            except Exception:  # noqa: BLE001 — defensive
-                pm = None
+            pm = await self.bus.lookup_by_id(pid)
             if pm is not None:
                 extra.append(pm)
                 seen.add(pid)
@@ -821,19 +832,16 @@ class ConversationCollaborator(CoordinatorCollaborator):
         return _research_hints.full_gap_summary(gap)
 
     def _current_primary_gap(self) -> str | None:
-        """Resolve latency/throughput; None when advisory is off or unavailable. Fail-soft."""
+        """Resolve latency/throughput; None when advisory is off or no competitor target is set."""
         state = self.shared_state
         if not bool(state.target_advisory_enabled):
             return None
-        try:
-            from hyperloom.inference_optimizer.baseline_comparison import research_hints as _research_hints
+        from hyperloom.inference_optimizer.baseline_comparison import research_hints as _research_hints
 
-            target = _research_hints.load_competitor_target(self.session_dir)
-            if not target:
-                return None
-            gap = _research_hints.gap_for_state(target, state)
-        except Exception:  # noqa: BLE001 — defensive
+        target = _research_hints.load_competitor_target(self.session_dir)
+        if not target:
             return None
+        gap = _research_hints.gap_for_state(target, state)
         if not isinstance(gap, dict):
             return None
         return str(gap.get("primary_gap") or "").strip() or None
@@ -909,7 +917,10 @@ class ConversationCollaborator(CoordinatorCollaborator):
         return "\n".join(lines)
 
     def _priors_match_advisory_block(self) -> str:
-        """Flag recently proposed variants aligning with proven priors / dominant external gap (advisory ordering, fail-soft)."""
+        """Flag recently proposed variants aligning with proven priors / dominant external gap (advisory ordering).
+
+        A failure is logged and the prompt goes out without this block.
+        """
         try:
             from hyperloom.inference_optimizer.baseline_comparison import research_hints as _research_hints
 
@@ -923,7 +934,8 @@ class ConversationCollaborator(CoordinatorCollaborator):
                 hints,
                 primary_gap=primary_gap,
             )
-        except Exception:  # noqa: BLE001 — defensive
+        except Exception:
+            log.exception("Coordinator: priors-match advisory failed")
             return ""
 
     def _discarded_escalate_hint_advisory_block(self) -> str:

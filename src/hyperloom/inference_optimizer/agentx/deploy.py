@@ -10,17 +10,11 @@ import shutil
 import tempfile
 from pathlib import Path
 
-from hyperloom.common.agentx_workload import AIPERF_CLIENT_SCRIPT, MLPERF_CLIENT_SCRIPT
+from hyperloom.common.agentx_workload import MLPERF_CLIENT_SCRIPT
 
-_ASSET_FILES = (
-    AIPERF_CLIENT_SCRIPT,
-    MLPERF_CLIENT_SCRIPT,
-    "map_aiperf.py",
-    "map_mlperf.py",
-    "aiperf_phase_gate.py",
-)
+_ASSET_FILES = (MLPERF_CLIENT_SCRIPT, "map_mlperf.py")
 
-# map_aiperf.py / map_mlperf.py import the mapping from their own directory under
+# map_mlperf.py imports the mapping from its own directory under
 # this name; the prefix keeps it from clobbering an InferenceX file in the shared
 # benchmarks dir.
 _MAPPING_MODULE = "agentx_mapping.py"

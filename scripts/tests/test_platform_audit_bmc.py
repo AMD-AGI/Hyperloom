@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import importlib.util
+import subprocess
 import sys
 from pathlib import Path
 
@@ -18,6 +19,7 @@ def _load():
     spec = importlib.util.spec_from_file_location("platform_audit_bmc", _SCRIPT)
     assert spec and spec.loader
     mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod
     spec.loader.exec_module(mod)
     return mod
 
@@ -324,3 +326,29 @@ def test_exit_code_ranks_credentials_above_everything(bmc):
     rows = [{"verdict": "FAIL"}]
     assert bmc.exit_code(rows) == bmc.EXIT_FAIL
     assert bmc.exit_code(rows, ["left enabled"]) == bmc.EXIT_CREDENTIAL
+
+
+@pytest.mark.parametrize(
+    ("failure", "message"),
+    [
+        (FileNotFoundError(2, "No such file or directory"), "[Errno 2] No such file or directory"),
+        (subprocess.TimeoutExpired(["ipmitool"], 30), "Command '['ipmitool']' timed out after 30 seconds"),
+    ],
+)
+def test_run_reports_a_spawn_failure_or_timeout_as_a_failed_command(bmc, monkeypatch, failure, message):
+    def fake_run(*_args, **_kwargs):
+        raise failure
+
+    monkeypatch.setattr(bmc.subprocess, "run", fake_run)
+
+    assert bmc.run(["ipmitool", "-V"]) == (False, "", message)
+
+
+def test_run_lets_an_unexpected_error_propagate(bmc, monkeypatch):
+    def fake_run(*_args, **_kwargs):
+        raise ValueError("embedded null byte")
+
+    monkeypatch.setattr(bmc.subprocess, "run", fake_run)
+
+    with pytest.raises(ValueError, match="embedded null byte"):
+        bmc.run(["ipmitool", "-V"])

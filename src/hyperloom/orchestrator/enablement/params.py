@@ -5,9 +5,11 @@
 
 from __future__ import annotations
 
+import http.client
 from pathlib import Path
 from typing import Any
 
+from hyperloom.agents.framework.sources.pr_monitor import PRMonitorError
 from hyperloom.common.deadline import Deadline
 from hyperloom.orchestrator.lever import LEVER_ENABLEMENT
 
@@ -39,6 +41,136 @@ def _enablement_carrier_params(state: Any) -> dict[str, Any]:
     if cfg:
         out["enablement_probe_config_path"] = cfg
     return out
+
+
+def _prior_progress_note(enablement: Any) -> str:
+    """What earlier rounds already banked, so this round composes instead of redoing it."""
+    prior_patches = [str(p) for p in (enablement.kept_patches or [])]
+    prior_artifacts = list(enablement.kept_artifacts or [])
+    base_setup = [str(c) for c in (enablement.setup_commands or [])]
+    acc_envs = enablement.accepted_extra_envs
+    acc_args = enablement.accepted_extra_server_args
+    bits = []
+    if prior_patches:
+        bits.append(f"{len(prior_patches)} prior patch(es) already in the tree: {prior_patches}")
+    if prior_artifacts:
+        art_targets = [a["target"] for a in prior_artifacts[:4]]
+        bits.append(f"{len(prior_artifacts)} prior artifact(s) already in the tree: {art_targets}")
+    if base_setup:
+        bits.append(f"{len(base_setup)} prior setup command(s): {base_setup}")
+    if acc_envs or acc_args:
+        cfg_bits = ([f"envs={acc_envs}"] if acc_envs else []) + ([f"args={acc_args!r}"] if acc_args else [])
+        bits.append("accumulated config (re-applied on every launch): " + "; ".join(cfg_bits))
+    if not bits:
+        return ""
+    return (
+        "PRIOR ENABLEMENT PROGRESS: the following already cleared earlier "
+        "boot crashes. Patches and artifacts are permanently in the tree; "
+        "setup commands and config are re-run on every launch. Do NOT redo "
+        "them; fix only the CURRENT (deeper) failure, composing on top. " + "; ".join(bits)
+    )
+
+
+def _apply_feedback_note(enablement: Any) -> str:
+    """The conflicts that kept the prior round's diff out of the framework tree."""
+    feedback = [fb for fb in (enablement.last_apply_feedback or []) if isinstance(fb, dict)]
+    if not feedback:
+        return ""
+    from ..actions.executors._apply_feedback import ApplyFeedback
+
+    blocks = [
+        "APPLY FAILURE FEEDBACK: the prior round's patch never reached the "
+        "framework tree. Re-ground the diff against the target file as it "
+        "reads now \u2014 the errors below name the conflict."
+    ]
+    blocks.extend(ApplyFeedback.from_dict(fb).format_for_mandate() for fb in feedback[:5])
+    return "\n\n".join(blocks)
+
+
+def _build_failure_note(enablement: Any) -> str:
+    """The last targeted build's verdict, so the round picks a different ref or scope."""
+    failure = enablement.last_build_failure or {}
+    fc = str(failure.get("failure_class") or "")
+    fs = str(failure.get("failure_summary") or "")
+    if not (fc or fs):
+        return ""
+    return (
+        f"PREVIOUS TARGETED-BUILD ATTEMPT: failure_class={fc!r}"
+        + (f"; {fs}" if fs else "")
+        + "\nIf the build ran out of time (failure_class='timeout' or "
+        "'preflight_budget'), request more build_budget_sec or a smaller "
+        "component scope.  For compile/symbol defects, choose a different "
+        "ref or narrow the build target."
+    )
+
+
+def _mandate_notes(enablement: Any, *, attempt: int) -> str:
+    """The per-dispatch dynamic context the static playbook section cannot provide.
+
+    Ordered most-corrective first, so a stalled round that also banked progress
+    does not read as "all good so far, go deeper".
+    """
+    grounding_drops = [str(d) for d in (enablement.last_grounding_drop_reason or [])]
+    setup_refusals = [str(c) for c in (enablement.last_setup_refusals or [])]
+    blocks = [_build_failure_note(enablement)]
+    if enablement.patches_span_multiple_roots:
+        blocks.append(
+            "CROSS-TREE PATCH SET: the prior round's patches targeted more "
+            "than one framework source tree, which integrate_patch cannot "
+            "apply as one set. Submit patches for a single tree per round."
+        )
+    if setup_refusals:
+        blocks.append(
+            "SETUP COMMAND REFUSED: setup_commands are replayed before every "
+            "boot and are limited to package/tool installation, so the prior "
+            "round was failed WITHOUT running any of them. Refused: "
+            + "; ".join(setup_refusals[:4])
+            + ". Re-author these as installer invocations, or carry the work "
+            "in a patch instead."
+        )
+    if grounding_drops:
+        blocks.append(
+            "PATCH GROUNDING FAILURE: the patches the prior round submitted "
+            "were dropped because their target file(s) do not exist in ANY "
+            "allowlisted framework source tree. Targets: "
+            + "; ".join(grounding_drops[:4])
+            + ". Verify the target path with Glob/Read inside the worktree "
+            "before authoring the diff."
+        )
+    blocks.append(_apply_feedback_note(enablement))
+    if attempt:
+        blocks.append(
+            f"RETRY ({attempt} prior round(s) cleared nothing): the last enablement "
+            f"patch for this failure never made the combo runnable \u2014 it failed to apply "
+            f"or did not advance the boot. Try a DIFFERENT bridging approach / candidate than before."
+        )
+    blocks.append(_prior_progress_note(enablement))
+    return "\n\n".join(block for block in blocks if block)
+
+
+def _round_carriers(state: Any, signature: Any) -> dict[str, Any]:
+    """What an integrate_patch needs to be graded as this enablement round.
+
+    Shared by the lane's own specialist dispatch, whose integrate inherits it,
+    and by an integrate the round did not dispatch but that executes in its phase.
+    """
+    return {
+        "enablement": True,
+        # The verdict this round was dispatched on. The prompt builder renders
+        # it; nothing downstream re-classifies a log to recover it.
+        "enablement_failure_signature": signature.to_dict(),
+        # The before half of integrate_patch's gate.
+        "enablement_before_observation_path": state.enablement.launch_observation_path,
+        # Only prior rounds' *actually-applied* setup commands (recorded by the
+        # specialist and replayed by integrate_patch) stack as a base. No install
+        # command is ever auto-seeded here: an unpinned upgrade of the shared
+        # serving venv is unsafe (CUDA-wheel clobber of ROCm vLLM/torch,
+        # transformers-major skew) and environment/build acquisition is owned by
+        # the isolated targeted-build path + the specialist's own setup_commands.
+        "enablement_setup_commands": [str(c) for c in (state.enablement.setup_commands or [])],
+        # eval-origin trigger context (empty for boot-origin enablement).
+        **_enablement_carrier_params(state),
+    }
 
 
 class EnablementParams(CoordinatorCollaborator):
@@ -123,83 +255,9 @@ class EnablementParams(CoordinatorCollaborator):
         weight_facts = self._derive_checkpoint_weight_facts(text)
         if weight_facts:
             source_context = (weight_facts + "\n\n" + source_context) if source_context else weight_facts
-        prior_patches = [str(p) for p in (state.enablement.kept_patches or [])]
-        prior_artifacts = list(state.enablement.kept_artifacts or [])
-        # Only prior rounds' *actually-applied* setup commands (recorded by the
-        # specialist and replayed by integrate_patch) stack as a base. No install
-        # command is ever auto-seeded here: an unpinned upgrade of the shared
-        # serving venv is unsafe (CUDA-wheel clobber of ROCm vLLM/torch,
-        # transformers-major skew) and environment/build acquisition is owned by
-        # the isolated targeted-build path + the specialist's own setup_commands.
-        base_setup = [str(c) for c in (state.enablement.setup_commands or [])]
         # §1b ENABLEMENT PLAYBOOK renders mandate.task_description via _section_enablement_playbook.
         # notes carries only per-dispatch dynamic context that §1b cannot provide.
-        notes = ""
-        grounding_drops = list(state.enablement.last_grounding_drop_reason or [])
-        apply_feedback = [fb for fb in (state.enablement.last_apply_feedback or []) if isinstance(fb, dict)]
-        spanned_roots = bool(state.enablement.patches_span_multiple_roots)
-        acc_envs = dict((state.enablement.accepted_config or {}).get("extra_envs") or {})
-        acc_args = str((state.enablement.accepted_config or {}).get("extra_server_args") or "").strip()
-        if prior_patches or base_setup or prior_artifacts or acc_envs or acc_args:
-            progress_bits = []
-            if prior_patches:
-                progress_bits.append(f"{len(prior_patches)} prior patch(es) already in the tree: {prior_patches}")
-            if prior_artifacts:
-                art_targets = [a["target"] for a in prior_artifacts[:4]]
-                progress_bits.append(f"{len(prior_artifacts)} prior artifact(s) already in the tree: {art_targets}")
-            if base_setup:
-                progress_bits.append(f"{len(base_setup)} prior setup command(s): {base_setup}")
-            if acc_envs or acc_args:
-                cfg_bits = []
-                if acc_envs:
-                    cfg_bits.append(f"envs={acc_envs}")
-                if acc_args:
-                    cfg_bits.append(f"args={acc_args!r}")
-                progress_bits.append("accumulated config (re-applied on every launch): " + "; ".join(cfg_bits))
-            notes = (
-                "PRIOR ENABLEMENT PROGRESS: the following already cleared earlier "
-                "boot crashes. Patches and artifacts are permanently in the tree; "
-                "setup commands and config are re-run on every launch. Do NOT redo "
-                "them; fix only the CURRENT (deeper) failure, composing on top. " + "; ".join(progress_bits)
-            )
-        # Composed rather than an ``elif``: a stalled round that already banked
-        # progress needs both halves, and the stacked note alone reads as "all
-        # good so far, go deeper" while the round in fact cleared nothing.
-        if attempt:
-            retry_note = (
-                f"RETRY ({attempt} prior round(s) cleared nothing): the last enablement "
-                f"patch for this failure never made the combo runnable — it failed to apply "
-                f"or did not advance the boot. Try a DIFFERENT bridging approach / candidate than before."
-            )
-            notes = (retry_note + "\n\n" + notes).strip() if notes else retry_note
-        if apply_feedback:
-            from ..actions.executors._apply_feedback import ApplyFeedback
-
-            blocks = [
-                "APPLY FAILURE FEEDBACK: the prior round's patch never reached the "
-                "framework tree. Re-ground the diff against the target file as it "
-                "reads now — the errors below name the conflict."
-            ]
-            blocks.extend(ApplyFeedback.from_dict(fb).format_for_mandate() for fb in apply_feedback[:5])
-            apply_note = "\n\n".join(blocks)
-            notes = (apply_note + "\n\n" + notes).strip() if notes else apply_note
-        if grounding_drops:
-            drop_note = (
-                "PATCH GROUNDING FAILURE: the patches the prior round submitted "
-                "were dropped because their target file(s) do not exist in ANY "
-                "allowlisted framework source tree. Targets: "
-                + "; ".join(grounding_drops[:4])
-                + ". Verify the target path with Glob/Read inside the worktree "
-                "before authoring the diff."
-            )
-            notes = (drop_note + "\n\n" + notes).strip() if notes else drop_note
-        if spanned_roots:
-            span_note = (
-                "CROSS-TREE PATCH SET: the prior round's patches targeted more "
-                "than one framework source tree, which integrate_patch cannot "
-                "apply as one set. Submit patches for a single tree per round."
-            )
-            notes = (span_note + "\n\n" + notes).strip() if notes else span_note
+        notes = _mandate_notes(state.enablement, attempt=attempt)
         gap_cid = f"gap.enablement.{signature.kind}"
 
         params_out: dict[str, Any] = {
@@ -210,49 +268,26 @@ class EnablementParams(CoordinatorCollaborator):
             "gap_layer": "framework",
             "gap_evidence": {"model": model, "failure_kind": signature.kind},
             "framework": framework,
-            "enablement": True,
             "lever_kind": LEVER_ENABLEMENT,
             "enablement_attempt": attempt,
             "enablement_failure_kind": signature.kind,
-            # The verdict this round was dispatched on. The prompt builder renders
-            # it; nothing downstream re-classifies a log to recover it.
-            "enablement_failure_signature": signature.to_dict(),
             "enablement_search_repos": list(plan.repos),
-            # The before half of integrate_patch's gate.
-            "enablement_before_observation_path": state.enablement.launch_observation_path,
             "enablement_candidate_refs": list(candidate_refs),
             # Source lines near the offending site, plus (on a weight-init
             # failure) the checkpoint's per-layer weight inventory. Rendered
             # into the mandate by _section_enablement_playbook.
             "enablement_source_context": source_context,
-            # Allowlisted setup commands from prior rounds, replayed before boot.
-            "enablement_setup_commands": base_setup,
             # Config accumulated by prior advanced rounds. The bench variant
             # layers this round's proposal on top, so a KEEP is graded on the
             # whole stack and its effective_config records the whole stack.
-            "base_extra_envs": acc_envs,
-            "base_extra_args": acc_args,
+            "base_extra_envs": state.enablement.accepted_extra_envs,
+            "base_extra_args": state.enablement.accepted_extra_server_args,
             "source": "coordinator_internal",
             "notes": notes,
-            # eval-origin trigger context (empty for boot-origin enablement).
-            **_enablement_carrier_params(state),
+            **_round_carriers(state, signature),
         }
-        # Inject the last targeted-build failure into the mandate.
         last_build_failure = state.enablement.last_build_failure or {}
-        if isinstance(last_build_failure, dict) and last_build_failure:
-            fc = str(last_build_failure.get("failure_class") or "")
-            fs = str(last_build_failure.get("failure_summary") or "")
-            if fc or fs:
-                build_note = (
-                    f"PREVIOUS TARGETED-BUILD ATTEMPT: failure_class={fc!r}"
-                    + (f"; {fs}" if fs else "")
-                    + "\nIf the build ran out of time (failure_class='timeout' or "
-                    "'preflight_budget'), request more build_budget_sec or a smaller "
-                    "component scope.  For compile/symbol defects, choose a different "
-                    "ref or narrow the build target."
-                )
-                notes = build_note + "\n\n" + notes
-                params_out["notes"] = notes
+        if last_build_failure:
             params_out["enablement_last_build_failure"] = dict(last_build_failure)
         return params_out
 
@@ -409,7 +444,7 @@ class EnablementParams(CoordinatorCollaborator):
                 "never executed and the SAME weights stayed uninitialized."
             )
             return header + "\n" + "\n".join(lines) + "\n" + footer
-        except Exception:
+        except (OSError, ValueError):
             log.debug("enablement: checkpoint weight-facts derivation failed", exc_info=True)
             return ""
 
@@ -475,7 +510,7 @@ class EnablementParams(CoordinatorCollaborator):
                     pr_monitor=pr_monitor,
                 )
                 collected.extend(enumerate_candidates(search))
-            except Exception:
+            except (PRMonitorError, http.client.HTTPException):
                 log.debug(
                     "enablement: candidate discovery failed for repo=%s",
                     repo,

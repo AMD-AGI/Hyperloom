@@ -14,12 +14,12 @@ from typing import Any
 
 import pytest
 
-from hyperloom.common import llm_config
+from hyperloom.common import agent_cli, llm_config
 from hyperloom.common.deadline import Deadline
 
-import hyperloom.orchestrator.roles.claude as claude_role
 import hyperloom.orchestrator.specialists.subprocess_ as sp
 from hyperloom.inference_optimizer.trace import parse_usage as pu
+from hyperloom.orchestrator.specialists.subprocess_ import SpecialistSpawn
 
 AGENT_BACKEND_CLAUDE = llm_config.AGENT_BACKEND_CLAUDE
 AGENT_BACKEND_CODEX = llm_config.AGENT_BACKEND_CODEX
@@ -27,7 +27,6 @@ SpecialistAgentUnavailableError = sp.SpecialistAgentUnavailableError
 SpecialistSubprocessConfig = sp.SpecialistSubprocessConfig
 SpecialistSubprocessDispatcher = sp.SpecialistSubprocessDispatcher
 _build_specialist_env = sp._build_specialist_env
-resolve_codex_executable = sp.resolve_codex_executable
 preferred_agent_backend = llm_config.preferred_agent_backend
 
 # Every provider-shape signal ``llm_config`` consults, so a test can pin an exact deployment shape instead of
@@ -155,15 +154,17 @@ async def test_openai_only_deployment_runs_the_specialist_on_the_codex_cli(
         )
     )
     result = await dispatcher.run(
-        task_id="t-openai-only",
-        workspace=workspace,
-        worktree=None,
-        worktree_base=None,
-        system_prompt="be a research scout",
-        user_prompt="find the gap",
-        disallowed_tools=frozenset(),
-        max_turns=2,
-        deadline=Deadline.after(60.0),
+        SpecialistSpawn(
+            task_id="t-openai-only",
+            workspace=workspace,
+            worktree=None,
+            worktree_base=None,
+            system_prompt="be a research scout",
+            user_prompt="find the gap",
+            disallowed_tools=frozenset(),
+            max_turns=2,
+            deadline=Deadline.after(60.0),
+        )
     )
 
     assert result.exit_code == 0, (
@@ -207,15 +208,17 @@ async def test_codex_home_is_per_task_and_outside_any_temp_dir(
         )
     )
     result = await dispatcher.run(
-        task_id="t-codex-home",
-        workspace=workspace,
-        worktree=None,
-        worktree_base=None,
-        system_prompt="sys",
-        user_prompt="usr",
-        disallowed_tools=frozenset(),
-        max_turns=1,
-        deadline=Deadline.after(60.0),
+        SpecialistSpawn(
+            task_id="t-codex-home",
+            workspace=workspace,
+            worktree=None,
+            worktree_base=None,
+            system_prompt="sys",
+            user_prompt="usr",
+            disallowed_tools=frozenset(),
+            max_turns=1,
+            deadline=Deadline.after(60.0),
+        )
     )
 
     assert result.done_payload is not None
@@ -474,12 +477,12 @@ def test_resolve_codex_executable_prefers_explicit_then_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Explicit config wins, then ``codex`` on PATH, then the SDK's runtime."""
-    assert resolve_codex_executable("/opt/custom/codex") == "/opt/custom/codex"
+    assert agent_cli.resolve_codex_executable("/opt/custom/codex") == "/opt/custom/codex"
 
     bin_dir = tmp_path / "bin"
     on_path = _write_executable(bin_dir / "codex", "#!/usr/bin/env bash\nexit 0\n")
     monkeypatch.setenv("PATH", str(bin_dir))
-    assert resolve_codex_executable() == str(on_path)
+    assert agent_cli.resolve_codex_executable() == str(on_path)
 
 
 def test_resolve_claude_executable_prefers_the_pin_then_the_record_then_path(
@@ -493,13 +496,13 @@ def test_resolve_claude_executable_prefers_the_pin_then_the_record_then_path(
     monkeypatch.setenv("PATH", str(on_path.parent))
     monkeypatch.setenv("HYPERLOOM_CLAUDE_CLI_PATH", str(pinned))
     monkeypatch.setenv("GEAK_CLAUDE_BIN", str(recorded))
-    assert claude_role.resolve_claude_executable() == str(pinned)
+    assert agent_cli.resolve_claude_executable() == str(pinned)
 
     monkeypatch.delenv("HYPERLOOM_CLAUDE_CLI_PATH")
-    assert claude_role.resolve_claude_executable() == str(recorded)
+    assert agent_cli.resolve_claude_executable() == str(recorded)
 
     monkeypatch.delenv("GEAK_CLAUDE_BIN")
-    assert claude_role.resolve_claude_executable() == str(on_path)
+    assert agent_cli.resolve_claude_executable() == str(on_path)
 
 
 def test_resolve_claude_executable_reports_absence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -507,13 +510,13 @@ def test_resolve_claude_executable_reports_absence(tmp_path: Path, monkeypatch: 
     monkeypatch.setenv("PATH", "/nonexistent")
     monkeypatch.delenv("HYPERLOOM_CLAUDE_CLI_PATH", raising=False)
     monkeypatch.delenv("GEAK_CLAUDE_BIN", raising=False)
-    assert claude_role.resolve_claude_executable() == ""
+    assert agent_cli.resolve_claude_executable() == ""
 
     not_executable = tmp_path / "claude"
     not_executable.write_text("", encoding="utf-8")
     monkeypatch.setenv("HYPERLOOM_CLAUDE_CLI_PATH", str(not_executable))
     monkeypatch.setenv("GEAK_CLAUDE_BIN", str(not_executable))
-    assert claude_role.resolve_claude_executable() == ""
+    assert agent_cli.resolve_claude_executable() == ""
 
 
 def test_resolve_codex_executable_falls_back_to_the_sdk_runtime(
@@ -521,7 +524,7 @@ def test_resolve_codex_executable_falls_back_to_the_sdk_runtime(
 ) -> None:
     """A pod that never ran the npm install still finds the pinned runtime."""
     monkeypatch.setenv("PATH", "/nonexistent")
-    resolved = resolve_codex_executable()
+    resolved = agent_cli.resolve_codex_executable()
     # The SDK runtime is an install-time dependency of ``openai-codex``; when it is absent the resolver reports that
     # rather than guessing a name.
     if resolved:
@@ -550,15 +553,17 @@ async def test_missing_codex_runtime_fails_the_task_instead_of_spawning_claude(
 
     dispatcher = SpecialistSubprocessDispatcher(SpecialistSubprocessConfig(poll_interval_seconds=0.05))
     result = await dispatcher.run(
-        task_id="t-no-codex",
-        workspace=tmp_path / "workspace",
-        worktree=None,
-        worktree_base=None,
-        system_prompt="sys",
-        user_prompt="usr",
-        disallowed_tools=frozenset(),
-        max_turns=1,
-        deadline=Deadline.after(60.0),
+        SpecialistSpawn(
+            task_id="t-no-codex",
+            workspace=tmp_path / "workspace",
+            worktree=None,
+            worktree_base=None,
+            system_prompt="sys",
+            user_prompt="usr",
+            disallowed_tools=frozenset(),
+            max_turns=1,
+            deadline=Deadline.after(60.0),
+        )
     )
 
     assert result.done_payload is None
@@ -578,15 +583,17 @@ async def test_unconfigured_codex_gateway_fails_the_task(
         SpecialistSubprocessConfig(codex_executable="/usr/bin/codex", poll_interval_seconds=0.05)
     )
     result = await dispatcher.run(
-        task_id="t-no-gateway",
-        workspace=tmp_path / "workspace",
-        worktree=None,
-        worktree_base=None,
-        system_prompt="sys",
-        user_prompt="usr",
-        disallowed_tools=frozenset(),
-        max_turns=1,
-        deadline=Deadline.after(60.0),
+        SpecialistSpawn(
+            task_id="t-no-gateway",
+            workspace=tmp_path / "workspace",
+            worktree=None,
+            worktree_base=None,
+            system_prompt="sys",
+            user_prompt="usr",
+            disallowed_tools=frozenset(),
+            max_turns=1,
+            deadline=Deadline.after(60.0),
+        )
     )
     assert result.done_payload is None
     assert "not configured" in result.error
@@ -600,10 +607,7 @@ def test_cli_refuses_to_boot_an_openai_only_run_without_a_codex_runtime(
     from hyperloom.inference_optimizer.cli import executors
 
     _pin_provider_env(monkeypatch, _OPENAI_ONLY_ENV)
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.specialists.subprocess_.resolve_codex_executable",
-        lambda explicit="": "",
-    )
+    monkeypatch.setattr(agent_cli, "resolve_codex_executable", lambda explicit="": "")
     args = argparse.Namespace(
         claude_model="claude-opus-5",
         codex_model="gpt-5.5",
@@ -865,16 +869,18 @@ async def test_codex_secret_opt_out_masks_parent_provider_secrets_before_resolut
             poll_interval_seconds=0.01,
         )
     ).run(
-        task_id="secret-opt-out",
-        workspace=workspace,
-        worktree=None,
-        worktree_base=None,
-        system_prompt="system",
-        user_prompt="user",
-        disallowed_tools=frozenset(),
-        max_turns=1,
-        deadline=Deadline.after(10.0),
-        gpu_lease=lease,
+        SpecialistSpawn(
+            task_id="secret-opt-out",
+            workspace=workspace,
+            worktree=None,
+            worktree_base=None,
+            system_prompt="system",
+            user_prompt="user",
+            disallowed_tools=frozenset(),
+            max_turns=1,
+            deadline=Deadline.after(10.0),
+            gpu_lease=lease,
+        )
     )
 
     assert resolver_overlays
@@ -928,15 +934,17 @@ async def test_codex_child_receives_provider_env_without_secrets_or_prompt_in_ar
             poll_interval_seconds=0.01,
         )
     ).run(
-        task_id="provider-env",
-        workspace=workspace,
-        worktree=None,
-        worktree_base=None,
-        system_prompt="SYSTEM_ROLE_SENTINEL",
-        user_prompt="FULL_USER_PROMPT_SENTINEL",
-        disallowed_tools=frozenset(),
-        max_turns=1,
-        deadline=Deadline.after(10.0),
+        SpecialistSpawn(
+            task_id="provider-env",
+            workspace=workspace,
+            worktree=None,
+            worktree_base=None,
+            system_prompt="SYSTEM_ROLE_SENTINEL",
+            user_prompt="FULL_USER_PROMPT_SENTINEL",
+            disallowed_tools=frozenset(),
+            max_turns=1,
+            deadline=Deadline.after(10.0),
+        )
     )
 
     assert result.exit_code == 0
@@ -983,15 +991,17 @@ async def test_workspace_write_fails_closed_when_bwrap_probe_fails(
             poll_interval_seconds=0.01,
         )
     ).run(
-        task_id="probe-failure",
-        workspace=tmp_path / "workspace",
-        worktree=None,
-        worktree_base=None,
-        system_prompt="system",
-        user_prompt="user",
-        disallowed_tools=frozenset(),
-        max_turns=1,
-        deadline=Deadline.after(10.0),
+        SpecialistSpawn(
+            task_id="probe-failure",
+            workspace=tmp_path / "workspace",
+            worktree=None,
+            worktree_base=None,
+            system_prompt="system",
+            user_prompt="user",
+            disallowed_tools=frozenset(),
+            max_turns=1,
+            deadline=Deadline.after(10.0),
+        )
     )
 
     assert "bubblewrap" in result.error
@@ -1047,17 +1057,19 @@ async def test_ray_codex_launch_uses_replace_env_and_prompt_file_stdin(
             poll_interval_seconds=0.01,
         )
     ).run(
-        task_id="ray-stdin",
-        workspace=workspace,
-        worktree=None,
-        worktree_base=None,
-        system_prompt="ray system",
-        user_prompt="ray user prompt",
-        disallowed_tools=frozenset(),
-        max_turns=1,
-        gpu_ids=(0,),
-        deadline=Deadline.after(10.0),
-        gpu_lease=lease,
+        SpecialistSpawn(
+            task_id="ray-stdin",
+            workspace=workspace,
+            worktree=None,
+            worktree_base=None,
+            system_prompt="ray system",
+            user_prompt="ray user prompt",
+            disallowed_tools=frozenset(),
+            max_turns=1,
+            gpu_ids=(0,),
+            deadline=Deadline.after(10.0),
+            gpu_lease=lease,
+        )
     )
 
     assert result.exit_code == 0
@@ -1121,15 +1133,17 @@ async def test_codex_mcp_config_is_translated_without_credentials_in_config_or_a
             poll_interval_seconds=0.01,
         )
     ).run(
-        task_id="mcp-translation",
-        workspace=workspace,
-        worktree=None,
-        worktree_base=None,
-        system_prompt="mcp system",
-        user_prompt="mcp user",
-        disallowed_tools=frozenset(),
-        max_turns=1,
-        deadline=Deadline.after(10.0),
+        SpecialistSpawn(
+            task_id="mcp-translation",
+            workspace=workspace,
+            worktree=None,
+            worktree_base=None,
+            system_prompt="mcp system",
+            user_prompt="mcp user",
+            disallowed_tools=frozenset(),
+            max_turns=1,
+            deadline=Deadline.after(10.0),
+        )
     )
 
     assert result.exit_code == 0
@@ -1215,16 +1229,18 @@ async def test_codex_mcp_env_rejects_control_and_provider_collisions_before_laun
             poll_interval_seconds=0.01,
         )
     ).run(
-        task_id=f"mcp-collision-{collision_key.lower()}",
-        workspace=workspace,
-        worktree=None,
-        worktree_base=None,
-        system_prompt="system",
-        user_prompt="user",
-        disallowed_tools=frozenset(),
-        max_turns=1,
-        deadline=Deadline.after(10.0),
-        gpu_lease=lease,
+        SpecialistSpawn(
+            task_id=f"mcp-collision-{collision_key.lower()}",
+            workspace=workspace,
+            worktree=None,
+            worktree_base=None,
+            system_prompt="system",
+            user_prompt="user",
+            disallowed_tools=frozenset(),
+            max_turns=1,
+            deadline=Deadline.after(10.0),
+            gpu_lease=lease,
+        )
     )
 
     assert collision_key in result.error
@@ -1317,15 +1333,17 @@ async def test_codex_structured_failure_is_propagated_and_redacted(
             poll_interval_seconds=0.01,
         )
     ).run(
-        task_id="structured-error",
-        workspace=tmp_path / "workspace",
-        worktree=None,
-        worktree_base=None,
-        system_prompt="system",
-        user_prompt="user",
-        disallowed_tools=frozenset(),
-        max_turns=1,
-        deadline=Deadline.after(10.0),
+        SpecialistSpawn(
+            task_id="structured-error",
+            workspace=tmp_path / "workspace",
+            worktree=None,
+            worktree_base=None,
+            system_prompt="system",
+            user_prompt="user",
+            disallowed_tools=frozenset(),
+            max_turns=1,
+            deadline=Deadline.after(10.0),
+        )
     )
 
     assert result.exit_code == 7

@@ -10,10 +10,12 @@ import json
 import os
 import sys
 import types
+from dataclasses import asdict
 from pathlib import Path
 
 import pytest
 
+from hyperloom.common.unified_diff import PatchOp, PatchTarget
 from hyperloom.orchestrator.kernel import apply_kernel_patch as akp
 
 
@@ -343,11 +345,13 @@ def test_unknown_snapshot_layout_keeps_fail_fast_root(
     snapshot_target.write_text(optimized, encoding="utf-8")
 
     result = akp.apply_kernel_patch(
-        patch_path=patch,
-        target_file=target,
-        backup_root=tmp_path / "backups",
-        snapshot_dir=tmp_path / "snapshot",
-        kernel_id="k-unknown-layout",
+        akp.KernelPatchRequest(
+            patch_path=patch,
+            target_file=target,
+            backup_root=tmp_path / "backups",
+            snapshot_dir=tmp_path / "snapshot",
+            kernel_id="k-unknown-layout",
+        )
     )
 
     assert result["status"] == "failed"
@@ -368,15 +372,7 @@ def test_apply_snapshot_keeps_legacy_optional_deploy_roots(
     (snapshot / "kernel.py").write_text("VALUE = 2\n", encoding="utf-8")
 
     result = akp.apply_snapshot(
-        descriptors=[
-            {
-                "op": "write",
-                "path": "kernel.py",
-                "mode": "",
-                "binary": False,
-                "is_new": False,
-            }
-        ],
+        descriptors=[PatchTarget(PatchOp.WRITE, "kernel.py")],
         snapshot_dir=snapshot,
         repo_root=repo_root,
         backup_dir=tmp_path / "backups",
@@ -412,10 +408,9 @@ def test_runtime_jit_invalidates_for_compiled_sources_outside_csrc(
     )
 
     result = akp.apply_kernel_patch(
-        patch_path=patch,
-        target_file=target,
-        backup_root=tmp_path / "backups",
-        kernel_id="k-outside-csrc",
+        akp.KernelPatchRequest(
+            patch_path=patch, target_file=target, backup_root=tmp_path / "backups", kernel_id="k-outside-csrc"
+        )
     )
 
     assert result["status"] == "ok", result
@@ -447,10 +442,7 @@ def test_apply_isolated_aiter_meta_csrc_defers_to_runtime_jit(
     )
 
     result = akp.apply_kernel_patch(
-        patch_path=patch,
-        target_file=target,
-        backup_root=tmp_path / "backups",
-        kernel_id="k003",
+        akp.KernelPatchRequest(patch_path=patch, target_file=target, backup_root=tmp_path / "backups", kernel_id="k003")
     )
 
     assert result["status"] == "ok", result
@@ -504,11 +496,13 @@ def test_apply_isolated_aiter_snapshot_invalidates_jit_for_python_codegen(
     )
 
     result = akp.apply_kernel_patch(
-        patch_path=patch,
-        target_file=target,
-        backup_root=tmp_path / "backups",
-        snapshot_dir=snapshot,
-        kernel_id="k006",
+        akp.KernelPatchRequest(
+            patch_path=patch,
+            target_file=target,
+            backup_root=tmp_path / "backups",
+            snapshot_dir=snapshot,
+            kernel_id="k006",
+        )
     )
 
     assert result["status"] == "ok", result
@@ -545,10 +539,7 @@ def test_revert_exposes_runtime_jit_restore_failure(
         encoding="utf-8",
     )
     applied = akp.apply_kernel_patch(
-        patch_path=patch,
-        target_file=target,
-        backup_root=tmp_path / "backups",
-        kernel_id="k003",
+        akp.KernelPatchRequest(patch_path=patch, target_file=target, backup_root=tmp_path / "backups", kernel_id="k003")
     )
     assert applied["status"] == "ok", applied
     monkeypatch.setattr(
@@ -589,10 +580,9 @@ def test_finalize_keeps_patch_and_deletes_local_backups(
         encoding="utf-8",
     )
     applied = akp.apply_kernel_patch(
-        patch_path=patch,
-        target_file=target,
-        backup_root=tmp_path / "backups",
-        kernel_id="k-finalize",
+        akp.KernelPatchRequest(
+            patch_path=patch, target_file=target, backup_root=tmp_path / "backups", kernel_id="k-finalize"
+        )
     )
     manifest = json.loads(Path(applied["manifest_path"]).read_text())
     source_backup = Path(manifest["source_backup"]["backup_path"])
@@ -622,10 +612,9 @@ def test_finalize_rejects_reverted_manifest(
         encoding="utf-8",
     )
     applied = akp.apply_kernel_patch(
-        patch_path=patch,
-        target_file=target,
-        backup_root=tmp_path / "backups",
-        kernel_id="k-reverted",
+        akp.KernelPatchRequest(
+            patch_path=patch, target_file=target, backup_root=tmp_path / "backups", kernel_id="k-reverted"
+        )
     )
     assert akp.revert_kernel_patch(applied["manifest_path"])["status"] == "ok"
 
@@ -708,20 +697,20 @@ def test_installed_snapshot_can_span_aiter_and_vllm(
     if multinode:
         monkeypatch.setattr(akp, "_is_multi_node", lambda: True)
 
-        def _fake_dispatch(**kwargs):
+        def _fake_dispatch(apply):
             return {
                 "status": "ok",
                 "per_node": [
                     {
                         "host": "pod-a",
-                        "target_path": str(kwargs["target_file"]),
-                        "backup_path": (f"/var/kernel_patch_backups/{Path(kwargs['target_file']).name}.bak"),
+                        "target_path": str(apply.target_file),
+                        "backup_path": (f"/var/kernel_patch_backups/{Path(apply.target_file).name}.bak"),
                         "jit_backup": (
                             {
                                 "status": "clean",
-                                "src": kwargs["jit_build_dir"],
+                                "src": apply.jit_build_dir,
                             }
-                            if kwargs["jit_build_dir"]
+                            if apply.jit_build_dir
                             else {
                                 "status": "skipped",
                                 "reason": "not requested",
@@ -738,11 +727,13 @@ def test_installed_snapshot_can_span_aiter_and_vllm(
         )
 
     result = akp.apply_kernel_patch(
-        patch_path=patch,
-        target_file=aiter_target,
-        backup_root=tmp_path / "backups",
-        snapshot_dir=snapshot,
-        kernel_id="k-cross-framework",
+        akp.KernelPatchRequest(
+            patch_path=patch,
+            target_file=aiter_target,
+            backup_root=tmp_path / "backups",
+            snapshot_dir=snapshot,
+            kernel_id="k-cross-framework",
+        )
     )
 
     assert result["status"] == "ok", result
@@ -759,6 +750,7 @@ def test_installed_snapshot_can_span_aiter_and_vllm(
         assert len(records) == 2
         assert len({record["backup_path"] for record in records}) == 2
         assert sum((record.get("jit_backup") or {}).get("status") == "clean" for record in records) == 1
+        assert manifest["jit_build_backup"] == {"status": "remote"}
 
 
 @pytest.mark.parametrize("explicit_repo_root", (False, True))
@@ -803,12 +795,14 @@ def test_installed_snapshot_rejects_other_site_packages(
         destination.write_text(content, encoding="utf-8")
 
     result = akp.apply_kernel_patch(
-        patch_path=patch,
-        target_file=aiter_target,
-        backup_root=tmp_path / "backups",
-        snapshot_dir=snapshot,
-        repo_root=site if explicit_repo_root else None,
-        kernel_id="k-forbidden-package",
+        akp.KernelPatchRequest(
+            patch_path=patch,
+            target_file=aiter_target,
+            backup_root=tmp_path / "backups",
+            snapshot_dir=snapshot,
+            repo_root=site if explicit_repo_root else None,
+            kernel_id="k-forbidden-package",
+        )
     )
 
     assert result["status"] == "failed"
@@ -842,11 +836,13 @@ def test_installed_snapshot_rejects_symlink_to_other_package(
     snapshot_link.symlink_to("../../../torch/runtime.py")
 
     result = akp.apply_kernel_patch(
-        patch_path=patch,
-        target_file=target,
-        backup_root=tmp_path / "backups",
-        snapshot_dir=tmp_path / "snapshot",
-        kernel_id="k-forbidden-symlink",
+        akp.KernelPatchRequest(
+            patch_path=patch,
+            target_file=target,
+            backup_root=tmp_path / "backups",
+            snapshot_dir=tmp_path / "snapshot",
+            kernel_id="k-forbidden-symlink",
+        )
     )
 
     assert result["status"] == "failed"
@@ -882,10 +878,7 @@ def test_runtime_jit_uses_target_root_not_importable_aiter(
     )
 
     result = akp.apply_kernel_patch(
-        patch_path=patch,
-        target_file=target,
-        backup_root=tmp_path / "backups",
-        kernel_id="k003",
+        akp.KernelPatchRequest(patch_path=patch, target_file=target, backup_root=tmp_path / "backups", kernel_id="k003")
     )
 
     assert result["status"] == "ok", result
@@ -951,7 +944,9 @@ def test_installed_custom_cache_requires_restore_trust_before_mutation(
         return real_copy(src, dst, **options)
 
     monkeypatch.setattr(akp.shutil, "copy2", observe_copy)
-    result = akp.apply_kernel_patch(patch_path=patch, target_file=target, backup_root=tmp_path / "backups", **kwargs)
+    result = akp.apply_kernel_patch(
+        akp.KernelPatchRequest(patch_path=patch, target_file=target, backup_root=tmp_path / "backups", **kwargs)
+    )
 
     if discoverable:
         assert result["status"] == "ok", result
@@ -1009,10 +1004,7 @@ def test_runtime_jit_rejects_unverified_cache_invalidation(
     )
 
     result = akp.apply_kernel_patch(
-        patch_path=patch,
-        target_file=target,
-        backup_root=tmp_path / "backups",
-        kernel_id="k003",
+        akp.KernelPatchRequest(patch_path=patch, target_file=target, backup_root=tmp_path / "backups", kernel_id="k003")
     )
 
     assert result["status"] == "failed"
@@ -1020,18 +1012,18 @@ def test_runtime_jit_rejects_unverified_cache_invalidation(
     assert target.read_text(encoding="utf-8") == original
 
 
-def test_multinode_runtime_jit_is_invalidated_on_every_pod(
+@pytest.mark.parametrize("pod_b_jit", ("clean", "skipped"))
+def test_multinode_runtime_jit_must_be_invalidated_on_every_pod(
     tmp_path,
     monkeypatch,
+    pod_b_jit,
 ):
     _venv_root, aiter_pkg = _make_isolated_aiter(tmp_path)
     site = aiter_pkg.parent
     monkeypatch.setattr(akp, "_is_multi_node", lambda: True)
     target = site / "aiter_meta" / "csrc" / "kernels" / "foo.cu"
-    target.write_text(
-        '#include <hip/hip_runtime.h>\nextern "C" void kernel() {}\n',
-        encoding="utf-8",
-    )
+    original = '#include <hip/hip_runtime.h>\nextern "C" void kernel() {}\n'
+    target.write_text(original, encoding="utf-8")
     patch = tmp_path / "v1_forge.cu"
     patch.write_text(
         '#include <hip/hip_runtime.h>\nextern "C" void kernel() { int x = 2; }\n',
@@ -1040,9 +1032,10 @@ def test_multinode_runtime_jit_is_invalidated_on_every_pod(
     local_stale = aiter_pkg / "jit" / "build" / "local.so"
     local_stale.write_text("local", encoding="utf-8")
     captured = {}
+    reverted = []
 
-    def _fake_dispatch(**kwargs):
-        captured.update(kwargs)
+    def _fake_dispatch(apply):
+        captured.update(asdict(apply))
         return {
             "status": "ok",
             "per_node": [
@@ -1051,28 +1044,40 @@ def test_multinode_runtime_jit_is_invalidated_on_every_pod(
                     "target_path": str(target),
                     "backup_path": f"/var/kernel_patch_backups/{host}.bak",
                     "jit_backup": {
-                        "status": "clean",
-                        "src": kwargs["jit_build_dir"],
+                        "status": status,
+                        "src": apply.jit_build_dir,
                     },
                 }
-                for host in ("pod-a", "pod-b")
+                for host, status in (("pod-a", "clean"), ("pod-b", pod_b_jit))
             ],
         }
 
+    def _fake_revert(**kwargs):
+        reverted.append(kwargs)
+        return {"status": "ok"}
+
     monkeypatch.setattr(akp, "_dispatch_multinode_apply", _fake_dispatch)
+    monkeypatch.setattr(akp, "_dispatch_multinode_revert", _fake_revert)
 
     result = akp.apply_kernel_patch(
-        patch_path=patch,
-        target_file=target,
-        backup_root=tmp_path / "backups",
-        kernel_id="k-multinode",
+        akp.KernelPatchRequest(
+            patch_path=patch, target_file=target, backup_root=tmp_path / "backups", kernel_id="k-multinode"
+        )
     )
 
-    assert result["status"] == "ok", result
     assert captured["jit_build_dir"] == str(aiter_pkg / "jit" / "build")
-    assert result["jit_build_backup"]["status"] == "remote"
-    assert set(result["multinode"]["records_by_host"]) == {"pod-a", "pod-b"}
+    assert result["jit_build_backup"] == {"status": "remote"}
     assert local_stale.is_file()
+    if pod_b_jit == "clean":
+        assert result["status"] == "ok", result
+        assert set(result["multinode"]["records_by_host"]) == {"pod-a", "pod-b"}
+        assert not reverted
+    else:
+        assert result["status"] == "failed", result
+        assert result["error_class"] == "aiter_jit_invalidation_failed"
+        assert "['pod-b']" in result["error"]
+        assert set(reverted[0]["records_by_host"]) == {"pod-a", "pod-b"}
+        assert target.read_text(encoding="utf-8") == original
 
 
 def _make_importable_checkout(tmp_path, monkeypatch):
@@ -1150,12 +1155,14 @@ def test_importable_checkout_native_snapshot_invalidates_served_modules(tmp_path
     )
 
     result = akp.apply_kernel_patch(
-        patch_path=patch,
-        target_file=target,
-        backup_root=tmp_path / "backups",
-        snapshot_dir=snapshot,
-        repo_root=checkout,
-        kernel_id="checkout-native",
+        akp.KernelPatchRequest(
+            patch_path=patch,
+            target_file=target,
+            backup_root=tmp_path / "backups",
+            snapshot_dir=snapshot,
+            repo_root=checkout,
+            kernel_id="checkout-native",
+        )
     )
 
     assert result["status"] == "ok", result
@@ -1279,11 +1286,13 @@ def test_checkout_native_rebuild_failure_and_finalize(tmp_path, monkeypatch, fai
     monkeypatch.setattr(akp, "_run_rebuild", lambda *args: {"status": "failed", "returncode": 1})
 
     result = akp.apply_kernel_patch(
-        patch_path=patch,
-        target_file=target,
-        backup_root=tmp_path / "backups",
-        kernel_id="native-outcome",
-        rebuild_command=["python", "build.py"] if failed_rebuild else None,
+        akp.KernelPatchRequest(
+            patch_path=patch,
+            target_file=target,
+            backup_root=tmp_path / "backups",
+            kernel_id="native-outcome",
+            rebuild_command=["python", "build.py"] if failed_rebuild else None,
+        )
     )
 
     if failed_rebuild:
@@ -1390,7 +1399,9 @@ def test_checkout_cpp_itfs_invalidates_and_requires_fresh_runtime_build(tmp_path
     _write_lib_so(baseline, mtime=1_700_000_000)
 
     result = akp.apply_kernel_patch(
-        patch_path=patch, target_file=target, backup_root=tmp_path / "backups", kernel_id="checkout-cpp-itfs"
+        akp.KernelPatchRequest(
+            patch_path=patch, target_file=target, backup_root=tmp_path / "backups", kernel_id="checkout-cpp-itfs"
+        )
     )
 
     assert result["status"] == "ok", result
@@ -1466,7 +1477,13 @@ def test_uninitialized_home_jit_fallback_refuses_source_patch(tmp_path, monkeypa
         )
         kwargs = {"snapshot_dir": snapshot, "repo_root": checkout}
     result = akp.apply_kernel_patch(
-        patch_path=patch, target_file=target, backup_root=tmp_path / "backups", kernel_id="uninitialized-home", **kwargs
+        akp.KernelPatchRequest(
+            patch_path=patch,
+            target_file=target,
+            backup_root=tmp_path / "backups",
+            kernel_id="uninitialized-home",
+            **kwargs,
+        )
     )
 
     assert result["status"] == "failed", result

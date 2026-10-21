@@ -39,7 +39,7 @@ patch *files*; this action produces *outcomes*.
 | `specialist_task_id` | string   | yes      | Task id of the specialist whose worktree carries the patches. |
 | `patches`            | list[str]| no       | Explicit patch path list (relative to specialist workspace or absolute under `SESSION_DIR`). Defaults to `specialist_done.patches_written`. |
 | `config_changes`     | object   | no       | `env_var -> value` map layered onto the server-launch env before restart. Reverted with the patches on gate failure. |
-| `keep_threshold_pct` | float    | no       | KEEP threshold over baseline_tput; defaults to the session's decaying per-cycle bar (read from `SharedState`). |
+| `keep_threshold_pct` | float    | no       | KEEP threshold over baseline_tput. The session's decaying per-cycle bar (read from `SharedState`) is the floor: a higher finite value raises the bar, anything lower or non-numeric is replaced by it. |
 | `accuracy_baseline`  | float    | no       | Baseline accuracy score (0-1). Backfilled from `SharedState.baseline_accuracy` when omitted; `<= 0` skips the gate. |
 
 ## EMIT format
@@ -61,10 +61,12 @@ delegate{
    `patches_written` (when params.patches omitted).
 2. Acquire `server_lifecycle + workspace_mutation + benchmark_lane`
    triple-lock.
-3. `git apply -p1` each patch against the framework source roots
-   (`framework_source_roots[0]`). On conflict,
-   retry once with `git apply -3 -p1`. On second failure, mark the
-   patch as REVERT-immediate (record `apply_failed`).
+3. `git apply` each patch against the framework source roots
+   (`framework_source_roots[0]`), at the first `-p` level that checks
+   cleanly. A patch that does not apply, and is not already in the tree,
+   is REVERT-immediate (record `apply_failed`); a failed apply leaves the
+   tree untouched, and the revert resets it to the HEAD recorded before
+   the attempt.
 4. Layer `config_changes` onto the server-launch env.
 5. Stop the server this session launched, by the pid and process group it
    recorded; wait for VRAM to drain. No pattern-based kill runs.

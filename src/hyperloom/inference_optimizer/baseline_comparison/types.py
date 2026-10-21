@@ -23,6 +23,23 @@ BaselineReason = Literal[
 ]
 
 
+@dataclass(frozen=True)
+class TargetAnalysisRequest:
+    """The session's workload as configured; analysis maps it onto an InferenceX :class:`BaselineQuery`.
+
+    ``compare_against_gpu`` empty skips the lookup; ``framework`` is query metadata, not a row filter;
+    ``isl`` / ``osl`` are ignored in agentx mode.
+    """
+
+    model_path: str
+    compare_against_gpu: str
+    framework: str = ""
+    precision: str = ""
+    isl: int | None = 0
+    osl: int | None = 0
+    benchmark_mode: BenchmarkMode = "synthetic"
+
+
 @dataclass
 class BaselineQuery:
     """Fully-resolved query against the InferenceX upstream."""
@@ -114,4 +131,5 @@ __all__ = [
     "BaselineQuery",
     "BaselinePoint",
     "BaselineSummary",
+    "TargetAnalysisRequest",
 ]

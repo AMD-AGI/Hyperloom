@@ -4,19 +4,16 @@ from __future__ import annotations
 
 import shlex
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from .server_args_safety import prepare_shell_safe_extra_args
 from .ssh_client import DEFAULT_SSH_PORT
 
-# Frontend HTTP port (SaFE common.InferaFrontendPort).
-INFERA_FRONTEND_PORT = 8000
-
 # SSH control plane: hostNetwork pods on the same node share one IP, so each GPU role binds a distinct MN_SSH_PORT
 # (decode offset by ROLE_STRIDE).
 INFERA_SSH_PORT_ROLE_STRIDE = 10
-_INFERA_IDLE_SCRIPT = "/usr/local/bin/mn-idle.sh"
 
 
 def ssh_role_port_offset(role: str) -> int:
@@ -24,23 +21,6 @@ def ssh_role_port_offset(role: str) -> int:
     if (role or "").lower() == "decode":
         return INFERA_SSH_PORT_ROLE_STRIDE
     return 0
-
-
-def ssh_port_for_pod(
-    role: str,
-    lws_index: int | None,
-    *,
-    ssh_port_base: int = DEFAULT_SSH_PORT,
-) -> int:
-    """Compute the sshd port a pod listens on."""
-    idx = lws_index if isinstance(lws_index, int) else 0
-    return int(ssh_port_base) + ssh_role_port_offset(role) + idx
-
-
-def idle_worker_entrypoint(*, role: str, ssh_port_base: int = DEFAULT_SSH_PORT) -> str:
-    """Build the idle worker entryPoint with a role-scoped ``MN_SSH_PORT``."""
-    role_base = int(ssh_port_base) + ssh_role_port_offset(role)
-    return f"export MN_SSH_PORT=$(( {role_base} + ${{LWS_WORKER_INDEX:-0}} )); exec {_INFERA_IDLE_SCRIPT}"
 
 
 def pod_targets_from_lists(
@@ -110,56 +90,56 @@ def disagg_flags(mode: str, kv_transfer_backend: str, *, bootstrap_port: int = I
     return " ".join(parts)
 
 
-def build_node_launch_args(
-    *,
-    framework: str,
-    model: str,
-    tp: int,
-    nnodes: int,
-    ep: int = 1,
-    dist_init_port: int = 5000,
-    pid_file: str = str(Path(tempfile.gettempdir()) / "mn_infera_server.pid"),
-    log_file: str = str(Path(tempfile.gettempdir()) / "mn_infera_server.log"),
-    extra_args: str = "",
-    health_port: int = INFERA_FRONTEND_PORT,
-    health_wait_sec: int = 0,
-    kill_only: bool = False,
-    disagg_mode: str = "",
-    kv_transfer_backend: str = "",
-) -> str:
+_INFERA_PID_FILE = str(Path(tempfile.gettempdir()) / "mn_infera_server.pid")
+_INFERA_LOG_FILE = str(Path(tempfile.gettempdir()) / "mn_infera_server.log")
+_INFERA_DIST_INIT_PORT = 5000
+
+
+@dataclass(frozen=True)
+class NodeLaunch:
+    """One server group launch_infera_node.py starts on each pod; ``disagg_mode`` names its PD role, if any."""
+
+    framework: str
+    model: str
+    tp: int
+    nnodes: int
+    ep: int = 1
+    extra_args: str = ""
+    disagg_mode: str = ""
+    kv_transfer_backend: str = ""
+
+
+def build_node_kill_args(framework: str) -> str:
+    """Build the launch_infera_node.py argv string that only kills the server behind the session PID file."""
+    parts = ["--framework", framework, "--kill-only", "--pid-file", _INFERA_PID_FILE]
+    return " ".join(shlex.quote(x) for x in parts)
+
+
+def build_node_launch_args(launch: NodeLaunch) -> str:
     """Build the argv string for launch_infera_node.py (shipped over SSH)."""
-    parts = ["--framework", framework]
-    if kill_only:
-        parts.append("--kill-only")
-        # kill-only still needs framework and the pid-file path.
-        parts.extend(["--pid-file", pid_file])
-        return " ".join(shlex.quote(x) for x in parts)
-    parts.extend(
-        [
-            "--model",
-            model,
-            "--tp",
-            str(tp),
-            "--nnodes",
-            str(nnodes),
-            "--dist-init-port",
-            str(dist_init_port),
-            "--pid-file",
-            pid_file,
-            "--log-file",
-            log_file,
-            "--health-port",
-            str(health_port),
-            "--health-wait-sec",
-            str(health_wait_sec),
-        ]
-    )
+    parts = [
+        "--framework",
+        launch.framework,
+        "--model",
+        launch.model,
+        "--tp",
+        str(launch.tp),
+        "--nnodes",
+        str(launch.nnodes),
+        "--dist-init-port",
+        str(_INFERA_DIST_INIT_PORT),
+        "--pid-file",
+        _INFERA_PID_FILE,
+        "--log-file",
+        _INFERA_LOG_FILE,
+    ]
+    ep = launch.ep
     if ep and int(ep) > 1:
         parts.extend(["--ep", str(ep)])
     quoted = " ".join(shlex.quote(x) for x in parts)
     # Fold the PD disaggregation flags into extra_args.
-    merged_extra = (extra_args or "").strip()
-    df = disagg_flags(disagg_mode, kv_transfer_backend)
+    merged_extra = (launch.extra_args or "").strip()
+    df = disagg_flags(launch.disagg_mode, launch.kv_transfer_backend)
     if df:
         merged_extra = (merged_extra + " " + df).strip()
     if merged_extra:

@@ -14,7 +14,7 @@ import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from kernelforge.durable_io import atomic_write_text, fsync_directory
+from kernelforge.tools.durable_io import atomic_write_text, fsync_directory
 
 log = logging.getLogger(__name__)
 
@@ -52,6 +52,10 @@ class CandidateRecord:
     # Why the agent session ended + turns spent (for end-reason analysis).
     session_end_reason: str = ""
     turns: int | None = None
+    agent_profile_id: str = ""
+    agent_provider: str = ""
+    agent_model: str = ""
+    blockage_epoch: int = 0
 
     # Context
     kernel_file: str = ""
@@ -173,10 +177,6 @@ class CandidateArchive:
                 return "incomplete", None
         return "complete", meta
 
-    def _complete_meta(self, directory: Path, iteration: int) -> dict | None:
-        status, meta = self._inspect_complete_meta(directory, iteration)
-        return meta if status == "complete" else None
-
     def _quarantine_incomplete(self, directory: Path) -> bool:
         quarantine = self.root / (f".{directory.name}.incomplete-{os.getpid()}-{time.time_ns()}")
         try:
@@ -200,6 +200,10 @@ class CandidateArchive:
             "plan": meta.get("plan", ""),
             "session_end_reason": meta.get("session_end_reason", ""),
             "turns": meta.get("turns"),
+            "agent_profile_id": meta.get("agent_profile_id", ""),
+            "agent_provider": meta.get("agent_provider", ""),
+            "agent_model": meta.get("agent_model", ""),
+            "blockage_epoch": meta.get("blockage_epoch", 0),
             "dir": directory.name,
         }
 
@@ -311,6 +315,49 @@ class CandidateArchive:
             return None
         return round((mean_case_speedup / best - 1.0) * 100.0, 3)
 
+    def _metadata(self, rec: CandidateRecord) -> dict:
+        """The meta.json record of one candidate: measurements, provenance, and which blobs were written."""
+        delta_vs_best = self._mean_case_speedup_delta_pct(
+            rec.mean_case_speedup,
+            rec.best_mean_case_speedup_before,
+        )
+        return {
+            "complete": True,
+            "iteration": rec.iteration,
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "commit_hash": rec.commit_hash,
+            "decision": rec.decision,
+            "kept": rec.kept,
+            "validation_passed": rec.validation_passed,
+            "wall_ms": rec.wall_ms,
+            "mean_case_speedup": rec.mean_case_speedup,
+            "bench": rec.bench_detail or {},
+            "snr_db": rec.snr_db,
+            "vgpr": rec.vgpr,
+            "pmc_diagnosis": rec.pmc_diagnosis,
+            "profile": rec.profile_meta or {},
+            "baseline_wall_ms": rec.baseline_wall_ms,
+            "best_wall_ms_before": rec.best_wall_ms_before,
+            "best_mean_case_speedup_before": rec.best_mean_case_speedup_before,
+            "delta_vs_best_pct": delta_vs_best,
+            "plan": rec.plan,
+            "rationale": rec.rationale,
+            "session_end_reason": rec.session_end_reason,
+            "turns": rec.turns,
+            "agent_profile_id": rec.agent_profile_id,
+            "agent_provider": rec.agent_provider,
+            "agent_model": rec.agent_model,
+            "blockage_epoch": rec.blockage_epoch,
+            "kernel_file": self.kernel_basename,
+            "shape": rec.shape or {},
+            "files": {
+                "kernel": self.kernel_basename if rec.kernel_source else None,
+                "diff": "change.diff" if rec.change_diff else None,
+                "profile": "profile.txt" if rec.pmc_full else None,
+                "validation": "validation.txt" if rec.validation_text else None,
+            },
+        }
+
     def record(self, rec: CandidateRecord) -> Path | None:
         """Atomically persist one iteration's full solution + measurements."""
         temp_dir: Path | None = None
@@ -361,48 +408,13 @@ class CandidateArchive:
                 self._write_text(temp_dir / "validation.txt", rec.validation_text)
 
             # 5) Structured metadata.
-            delta_vs_best = self._mean_case_speedup_delta_pct(
-                rec.mean_case_speedup,
-                rec.best_mean_case_speedup_before,
-            )
-            meta = {
-                "complete": True,
-                "iteration": rec.iteration,
-                "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-                "commit_hash": rec.commit_hash,
-                "decision": rec.decision,
-                "kept": rec.kept,
-                "validation_passed": rec.validation_passed,
-                "wall_ms": rec.wall_ms,
-                "mean_case_speedup": rec.mean_case_speedup,
-                "bench": rec.bench_detail or {},
-                "snr_db": rec.snr_db,
-                "vgpr": rec.vgpr,
-                "pmc_diagnosis": rec.pmc_diagnosis,
-                "profile": rec.profile_meta or {},
-                "baseline_wall_ms": rec.baseline_wall_ms,
-                "best_wall_ms_before": rec.best_wall_ms_before,
-                "best_mean_case_speedup_before": rec.best_mean_case_speedup_before,
-                "delta_vs_best_pct": delta_vs_best,
-                "plan": rec.plan,
-                "rationale": rec.rationale,
-                "session_end_reason": rec.session_end_reason,
-                "turns": rec.turns,
-                "kernel_file": self.kernel_basename,
-                "shape": rec.shape or {},
-                "files": {
-                    "kernel": self.kernel_basename if rec.kernel_source else None,
-                    "diff": "change.diff" if rec.change_diff else None,
-                    "profile": "profile.txt" if rec.pmc_full else None,
-                    "validation": "validation.txt" if rec.validation_text else None,
-                },
-            }
+            meta = self._metadata(rec)
             self._write_text(temp_dir / "meta.json", json.dumps(meta, indent=2))
             fsync_directory(temp_dir)
             os.rename(temp_dir, d)
             temp_dir = None
             fsync_directory(self.root)
-        except Exception as e:  # noqa: BLE001
+        except (OSError, TypeError, ValueError) as e:
             self._mark_degraded(f"record iteration {rec.iteration}", e)
             return None
         finally:

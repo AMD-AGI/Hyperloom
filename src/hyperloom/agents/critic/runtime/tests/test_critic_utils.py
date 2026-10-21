@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from hyperloom.agents.critic.runtime.category_mapping import filter_supported_categories, map_category_to_kind
+from hyperloom.agents.critic.runtime.category_mapping import map_category_to_kind
 from hyperloom.agents.critic.runtime.errors import (
     IntentEnvelopeValidationError,
     RuntimeAdapterError,
@@ -30,12 +30,6 @@ def test_map_category_to_kind() -> None:
         map_category_to_kind(123)  # type: ignore[arg-type]
     with pytest.raises(RuntimeAdapterError):
         map_category_to_kind("no_such_category")
-
-
-def test_filter_supported_categories() -> None:
-    supported, rejected = filter_supported_categories(["pitfall", "bogus", "server_params"])
-    assert supported == ["pitfall", "server_params"]
-    assert rejected == ["bogus"]
 
 
 # importance_mapping tests
@@ -78,20 +72,9 @@ def test_slugify_safe_paths() -> None:
     with pytest.raises(SlugifyError):
         slugify_safe("   ")
 
-    # translate_fn that raises -> deterministic fallback.
-    def _boom(_t: str) -> str:
-        raise RuntimeError("translate failed")
-
-    out = slugify_safe("Ελληνικά θέματα", _boom, fallback_prefix="auto")
-    assert out.startswith("auto-")
-
-    # No translate_fn for non-ascii -> hash fallback.
+    # Non-ascii -> hash fallback.
     out2 = slugify_safe("Ελληνικά θέματα")
     assert out2.startswith("auto-")
-
-    # translate_fn returning too-short text -> SlugifyError caught -> fallback.
-    out3 = slugify_safe("Ελληνικά", lambda _t: "x", fallback_prefix="p")
-    assert out3.startswith("p-")
 
 
 # intent_envelope.validate_envelope

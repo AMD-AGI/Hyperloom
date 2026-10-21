@@ -20,7 +20,6 @@ recipe audit log also carries KB writes and the mid-session reads from
 from __future__ import annotations
 
 import logging
-import time
 from collections.abc import Mapping
 from contextvars import ContextVar, Token
 from pathlib import Path
@@ -37,7 +36,7 @@ from .event_fields import (
 from .event_ids import event_id
 from .event_rows import rows_for_event, sort_rows, wire_rows
 from .event_sink import RecordSink, make_sink
-from .event_timeline import finish_event, open_event
+from .event_timeline import EventHeader, finish_event, open_event
 
 log = logging.getLogger(__name__)
 
@@ -168,7 +167,6 @@ class WarmStartEventRecorder:
         self._token: Token[WarmStartEventRecorder | None] | None = None
         self._reads = 0
         self._start_time = start_time
-        self._t0 = time.monotonic()
         self._request = {
             # The identity T0 actually queried. Its hardware dimension is
             # topology-aware and resolved from the runtime environment, so
@@ -224,12 +222,9 @@ class WarmStartEventRecorder:
         is what says how far it got.
         """
         self._sequence = open_event(
-            event_type=EVENT_TYPE,
-            event=self.event_id,
+            EventHeader(EVENT_TYPE, self.event_id, EVENT_KIND, self._start_time),
             event_section=SECTION_EVENT,
             producer=PRODUCER,
-            kind=EVENT_KIND,
-            start_time=self._start_time,
             ext={"request": dict(self._request)},
         )
         self._token = _ACTIVE.set(self)
@@ -261,7 +256,6 @@ class WarmStartEventRecorder:
             "status": status,
             "match_status": found,
             "end_time": end_time,
-            "duration_sec": round(time.monotonic() - self._t0, 3),
         }
         if matched:
             payload["matched"] = dict(matched)
@@ -277,13 +271,10 @@ class WarmStartEventRecorder:
         try:
             ext, derived = assemble_warm_start_ext(warm_start_event_parts(self.event_id), event=self.event_id)
             finish_event(
-                event_type=EVENT_TYPE,
-                event=self.event_id,
+                EventHeader(EVENT_TYPE, self.event_id, EVENT_KIND, self._start_time),
                 sequence=self._sequence,
                 status=derived or status,
                 ext=ext,
-                kind=EVENT_KIND,
-                start_time=self._start_time,
                 end_time=end_time,
             )
         except RECORDING_ERRORS as exc:

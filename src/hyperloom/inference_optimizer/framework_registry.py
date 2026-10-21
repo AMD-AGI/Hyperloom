@@ -175,26 +175,21 @@ def throughput_unit(framework: str | None) -> str:
 
 def primary_metric_unit(framework: str | None) -> str:
     """Return the human-readable unit for a session's primary display metric."""
-    return "ms" if is_scriptable(framework) else "tok/s/GPU"
+    return "ms" if is_scriptable(framework) else throughput_unit(framework)
 
 
-def primary_metric_name(framework: str | None) -> str:
-    """Return the state field name holding a session's primary result metric."""
-    return "e2el_mean_ms" if is_scriptable(framework) else "throughput_tok_s_per_gpu"
-
-
-def primary_metric_value(framework: str | None, tput_per_gpu: float | int | None) -> float | None:
-    """Convert stored per-GPU throughput into the value shown for ``framework``."""
-    tput = float(tput_per_gpu or 0.0)
+def primary_metric_value(framework: str | None, tput: float | int | None) -> float | None:
+    """Convert a session's stored throughput (the server aggregate, not per GPU) into the value shown."""
+    tput = float(tput or 0.0)
     if is_scriptable(framework):
         return (1000.0 / tput) if tput > 0 else None
     return tput
 
 
-def format_primary_metric(framework: str | None, tput_per_gpu: float | int | None, *, precision: int = 1) -> str:
+def format_primary_metric(framework: str | None, tput: float | int | None, *, precision: int = 1) -> str:
     """Format a session's primary performance metric for human-readable display."""
     unit = primary_metric_unit(framework)
-    value = primary_metric_value(framework, tput_per_gpu)
+    value = primary_metric_value(framework, tput)
     if value is None:
         return f"n/a {unit}"
     return f"{value:.{precision}f} {unit}"

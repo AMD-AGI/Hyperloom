@@ -12,16 +12,22 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.agents.framework.sources.pr_monitor import PRMonitorError
 from hyperloom.common.bringup import BootObservation, Excerpt, LadderStage, TerminalFrame
 from hyperloom.common.failure_signature import FailureSignature
 from hyperloom.orchestrator.bringup import observation_summary
 from hyperloom.orchestrator.state._shared_state.enablement_round import EnablementRound
+from hyperloom.orchestrator.state.round_store import RoundRequest
 from hyperloom.orchestrator.state.shared_state import SharedState
-from hyperloom.orchestrator.state.task_registry import create_in_cursor
+from hyperloom.orchestrator.state.task_registry import TaskSpec, create_in_cursor
 
+from hyperloom.orchestrator.actions.executors._ray_serving import RAY_INFEASIBLE_MARKER
+from hyperloom.orchestrator.actions.executors._subprocess_kill import AGENTX_PREFLIGHT_ERROR_CLASS
+from hyperloom.orchestrator.actions.stop_attribution import SESSION_TIME_EXHAUSTED_CLASS
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.loop.proposals import PendingProposal
-from hyperloom.orchestrator.loop.writeback import _extract_enablement_launch_log
+from hyperloom.orchestrator.loop.writeback import _authorable_launch_log
+from hyperloom.orchestrator.enablement.lane import bind_integrate_to_lane
 from hyperloom.orchestrator.enablement.params import EnablementParams
 
 from .conftest import make_coordinator
@@ -33,26 +39,44 @@ _MISSING_ARCH_LOG = (
 )
 
 
-# ---- _extract_enablement_launch_log (pure) ----
+# ---- _authorable_launch_log (pure) ----
 
 
 def test_extract_launch_log_joins_error_fields():
     payload = {"error": "boom", "stderr": "trace here", "status": "failed"}
-    out = _extract_enablement_launch_log(payload)
+    out = _authorable_launch_log(payload, err_class="subprocess_nonzero")
     assert "boom" in out
     assert "trace here" in out
 
 
 def test_extract_launch_log_handles_list_fields():
     payload = {"log_tail": ["line1", "", "line2"]}
-    out = _extract_enablement_launch_log(payload)
+    out = _authorable_launch_log(payload, err_class="")
     assert "line1" in out and "line2" in out
 
 
 def test_extract_launch_log_empty_on_none_or_blank():
-    assert _extract_enablement_launch_log(None) == ""
-    assert _extract_enablement_launch_log({}) == ""
-    assert _extract_enablement_launch_log({"error": "   "}) == ""
+    assert _authorable_launch_log(None, err_class="") == ""
+    assert _authorable_launch_log({}, err_class="") == ""
+    assert _authorable_launch_log({"error": "   "}, err_class="") == ""
+
+
+@pytest.mark.parametrize(
+    "payload, err_class",
+    [
+        ({"error": "bad --flag"}, "fast_exit_arg_error"),
+        ({"error": "pinned dependency missing"}, AGENTX_PREFLIGHT_ERROR_CLASS),
+        ({"error": f"{RAY_INFEASIBLE_MARKER}: cluster has 0 GPU(s), 8 requested"}, "subprocess_nonzero"),
+        ({"error": "budget reached"}, SESSION_TIME_EXHAUSTED_CLASS),
+    ],
+)
+def test_a_boot_that_never_reached_a_framework_failure_is_not_authorable(payload, err_class):
+    """Each of these would otherwise become integrate_patch's "before" wall.
+
+    The wall grades the next round's patch, and one any server start clears
+    passes a patch that enabled nothing.
+    """
+    assert _authorable_launch_log(payload, err_class=err_class) == ""
 
 
 # ---- build_enablement_specialist_params (uses build_mandate) ----
@@ -183,7 +207,7 @@ def test_build_params_feeds_ranked_candidate_refs_into_mandate(monkeypatch, tmp_
 
 
 def test_build_params_degrades_gracefully_when_discovery_raises(monkeypatch, tmp_path):
-    _stub_enumerate(monkeypatch, RuntimeError("network down"))
+    _stub_enumerate(monkeypatch, PRMonitorError("network down"))
     fake = _enqueue_self(tmp_path)
     params = fake.enablement_params.build_enablement_specialist_params(_MISSING_ARCH_LOG)
     assert params is not None
@@ -216,11 +240,7 @@ async def _seed_task(fake, task_id: str, *, kind: str, state: str = "queued", pa
     """Put a real registry row in the state a case needs, under a chosen id."""
     async with fake.db.transaction() as cur:
         create_in_cursor(
-            cur,
-            kind=kind,
-            params=params or {},
-            idempotency_key=f"seed:{task_id}",
-            task_id=task_id,
+            cur, TaskSpec(kind=kind, params=params or {}, idempotency_key=f"seed:{task_id}", task_id=task_id)
         )
     if state != "queued":
         if state != "running":
@@ -238,10 +258,9 @@ async def _hold_round(fake, holder: str, *, holder_state: str = ""):
         await _seed_task(fake, holder, kind="specialist", state=holder_state)
     acquired = await fake.rounds.open(
         f"enablement-{holder}",
+        RoundRequest(now_unix=time.time(), request_id=f"seed:{holder}"),
         holder_task_id=holder,
         lease_sec=3600.0,
-        now_unix=time.time(),
-        request_id=f"seed:{holder}",
     )
     assert acquired.ok, acquired.reason
 
@@ -441,7 +460,7 @@ async def test_the_repair_pass_ends_a_round_whose_holder_finished_silently(monke
     """
     from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
 
-    from hyperloom.orchestrator.bringup.reconcile import Reconciler
+    from hyperloom.orchestrator.bringup.reconcile import ReconcileLinks, Reconciler, ReconcileStores
     from hyperloom.orchestrator.bus.resource_lock import ResourceLockManager, SqliteLeaseBackend
 
     monkeypatch.setattr(mne, "is_multi_node", lambda: False)
@@ -449,11 +468,11 @@ async def test_the_repair_pass_ends_a_round_whose_holder_finished_silently(monke
     fake = _enqueue_self(tmp_path)
     await _hold_round(fake, "spec-stuck", holder_state="succeeded")
     reconciler = Reconciler(
-        rounds=fake.rounds,
-        tasks=fake.tasks,
-        locks=ResourceLockManager(SqliteLeaseBackend(fake.rounds.db)),
-        shared_state=fake.shared_state,
-        proposals=lambda: fake.state.pending_proposals,
+        ReconcileStores(
+            rounds=fake.rounds, tasks=fake.tasks, locks=ResourceLockManager(SqliteLeaseBackend(fake.rounds.db))
+        ),
+        fake.shared_state,
+        links=ReconcileLinks(proposals=lambda: fake.state.pending_proposals),
     )
 
     await reconciler.run(time.time() + 3600.0)
@@ -461,8 +480,6 @@ async def test_the_repair_pass_ends_a_round_whose_holder_finished_silently(monke
     settled = await fake.rounds.get("enablement-spec-stuck")
     assert settled.state == "settled"
     assert settled.outcome == "expired_reaped", "the holder's own row records the end of its work"
-    # And the machine comes back with the settle: a settled round holds nothing.
-    assert settled.excludes_at(time.time() + 3600.0) is False
 
 
 @pytest.mark.asyncio
@@ -569,8 +586,33 @@ async def test_revalidation_enqueues_genuine_baseline(tmp_path):
     created = await fake.tasks.get(tid)
     assert created.kind == "baseline"
     assert created.params["config_path"] == "/runs/baseline/materialized.yaml"
-    assert created.params["disable_run_eval"] is False
     assert created.params["enablement_origin"] == "eval"
+
+
+@pytest.mark.asyncio
+async def test_revalidation_keeps_the_task_id_when_its_save_hits_an_os_error(tmp_path, monkeypatch):
+    fake = _enqueue_self(tmp_path, enablement_validation_pending=True, enablement_origin="eval")
+    monkeypatch.setattr(fake.shared_state, "save", _raise(OSError("no space left on device")))
+
+    tid = await fake.enablement_revalidation.maybe_enqueue_enablement_baseline_revalidation()
+
+    assert fake.shared_state.enablement.revalidation_task_id == tid
+
+
+@pytest.mark.asyncio
+async def test_revalidation_save_propagates_a_serialization_defect(tmp_path, monkeypatch):
+    fake = _enqueue_self(tmp_path, enablement_validation_pending=True, enablement_origin="eval")
+    monkeypatch.setattr(fake.shared_state, "save", _raise(TypeError("Object of type set is not JSON serializable")))
+
+    with pytest.raises(TypeError, match="not JSON serializable"):
+        await fake.enablement_revalidation.maybe_enqueue_enablement_baseline_revalidation()
+
+
+def _raise(error: Exception):
+    def _fail(_session_dir):
+        raise error
+
+    return _fail
 
 
 @pytest.mark.asyncio
@@ -686,6 +728,47 @@ async def test_rearm_kept_stores_accepted_config(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_rearm_kept_dedupes_the_accepted_server_args(tmp_path):
+    """A KEEP bench composing two rounds that each named a flag is stored with one occurrence.
+
+    The bench's own effective config carries the repeat, and this config is
+    published verbatim into the setting script an operator copies.
+    """
+    fake = _enqueue_self(tmp_path, enablement_origin="eval")
+    await _hold_round(fake, "spec-1")
+    await fake.enablement_lane.maybe_rearm_enablement(
+        {
+            "status": "kept",
+            "enablement": True,
+            "enablement_accepted_config_path": "/runs/specialist/accepted.yaml",
+            "enablement_effective_config": {
+                "extra_server_args": "--reasoning-parser glm47 --reasoning-parser glm47",
+                "args_mode": "append",
+            },
+        }
+    )
+    assert fake.shared_state.enablement.accepted_config["extra_server_args"] == "--reasoning-parser glm47"
+
+
+@pytest.mark.asyncio
+async def test_rearm_records_the_refused_setup_commands_of_the_round_that_failed(tmp_path):
+    """The refusal is the round's whole cause, and the next author is the only one who can fix it."""
+    fake = _enqueue_self(tmp_path, enablement_origin="eval")
+    await _hold_round(fake, "spec-1")
+    await fake.enablement_lane.maybe_rearm_enablement(
+        {
+            "status": "apply_failed",
+            "enablement": True,
+            "specialist_task_id": "spec-1",
+            "error_class": "setup_commands_refused",
+            "setup_commands_refused": ["ln -sf /a /b"],
+        }
+    )
+    assert fake.shared_state.enablement.last_setup_refusals == ["ln -sf /a /b"]
+    assert fake.shared_state.enablement.succeeded is False
+
+
+@pytest.mark.asyncio
 async def test_rearm_kept_replaces_the_observations_a_probe_could_not_make(tmp_path):
     """A KEEP that observed nothing must not inherit the previous KEEP's map.
 
@@ -793,6 +876,147 @@ async def test_rearm_ignores_non_enablement(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_a_failed_integrate_the_lane_did_not_dispatch_leaves_its_round_alone(tmp_path):
+    """Another specialist's dead end neither ends the lane's round nor feeds its mandate."""
+    fake = _enqueue_self(tmp_path)
+    await _hold_round(fake, "spec-lane")
+    fake.shared_state.enablement.last_specialist_task_id = "spec-lane"
+
+    await fake.enablement_lane.maybe_rearm_enablement(
+        {
+            "enablement": True,
+            "status": "apply_failed",
+            "specialist_task_id": "spec-llm",
+            "retry_feedback": [{"target": "srt/model.py", "error": "hunk failed"}],
+        }
+    )
+
+    held = await fake.rounds.held()
+    assert held is not None and held.round_id == "enablement-spec-lane"
+    assert await fake.rounds.consecutive_stalled() == 0
+    assert fake.shared_state.enablement.last_specialist_task_id == "spec-lane"
+    assert fake.shared_state.enablement.last_apply_feedback == []
+
+
+@pytest.mark.asyncio
+async def test_an_advance_the_lane_did_not_dispatch_is_stacked_and_ends_the_round(tmp_path):
+    """The wall moved, so the lane's round is aimed at a gap the boot is already past."""
+    fake = _enqueue_self(tmp_path)
+    await _hold_round(fake, "spec-lane")
+
+    await fake.enablement_lane.maybe_rearm_enablement(
+        {
+            "enablement": True,
+            "status": "advanced",
+            "advanced": True,
+            "specialist_task_id": "spec-llm",
+            "patches_applied": ["/s/runs/specialist/spec-llm/patches/001_deep_gemm.patch"],
+            "enablement_launch_log": "RuntimeError: a deeper gap",
+        }
+    )
+
+    assert fake.shared_state.enablement.kept_patches == ["/s/runs/specialist/spec-llm/patches/001_deep_gemm.patch"]
+    assert "a deeper gap" in fake.shared_state.enablement.launch_log
+    assert await fake.rounds.held() is None
+    assert (await fake.rounds.get("enablement-spec-lane")).outcome == "advanced"
+    assert await fake.rounds.consecutive_stalled() == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("holder_state", "after"), [("queued", "cancelled"), ("running", "running")])
+async def test_an_advance_that_ends_the_round_retires_a_holder_that_never_started(tmp_path, holder_state, after):
+    """A queued holder would author against a wall the boot is past; a running one is left to report."""
+    fake = _enqueue_self(tmp_path)
+    await _hold_round(fake, "spec-lane", holder_state=holder_state)
+
+    await fake.enablement_lane.maybe_rearm_enablement(
+        {
+            "enablement": True,
+            "status": "advanced",
+            "advanced": True,
+            "specialist_task_id": "spec-llm",
+            "enablement_launch_log": "RuntimeError: a deeper gap",
+        }
+    )
+
+    assert (await fake.rounds.get("enablement-spec-lane")).outcome == "advanced"
+    assert (await fake.tasks.get("spec-lane")).state == after
+
+
+@pytest.mark.asyncio
+async def test_a_late_failure_from_an_ended_round_does_not_charge_the_next_one(tmp_path):
+    fake = _enqueue_self(tmp_path)
+    await _hold_round(fake, "spec-old")
+    await fake.enablement_lane.settle_enablement_round("advanced")
+    await _hold_round(fake, "spec-new")
+
+    await fake.enablement_lane.maybe_rearm_enablement(
+        {"enablement": True, "status": "reverted", "specialist_task_id": "spec-old"}
+    )
+
+    held = await fake.rounds.held()
+    assert held is not None and held.round_id == "enablement-spec-new"
+
+
+def _bind(fake, **params):
+    bind_integrate_to_lane(params, fake.shared_state, session_dir=Path(fake.session_dir))
+    return params
+
+
+def test_an_integrate_executing_in_enablement_is_graded_as_the_round(tmp_path):
+    """An integrate the lane did not dispatch still carries the round's context.
+
+    Without it the executor grades the patch on a throughput ENABLEMENT never
+    measured and reverts a boot that advanced.
+    """
+    fake = _enqueue_self(tmp_path)
+    fake.shared_state.enablement.launch_observation_path = "/s/reports/bringup/round-abc-000.json"
+    fake.shared_state.enablement.setup_commands = ["pip install deep_gemm==2.1"]
+
+    params = _bind(fake, specialist_task_id="spec-llm", extra_envs={"SGLANG_X": "1"})
+
+    assert params["enablement"] is True
+    assert params["enablement_before_observation_path"] == "/s/reports/bringup/round-abc-000.json"
+    assert params["enablement_setup_commands"] == ["pip install deep_gemm==2.1"]
+    assert FailureSignature.from_dict(params["enablement_failure_signature"]).kind == "missing_model_arch"
+    assert params["extra_envs"] == {"SGLANG_X": "1"}
+
+
+def test_the_lanes_own_integrate_keeps_the_context_its_specialist_carried(tmp_path):
+    fake = _enqueue_self(tmp_path)
+    fake.shared_state.enablement.launch_observation_path = "/s/reports/bringup/round-new.json"
+
+    params = _bind(fake, enablement=True, enablement_before_observation_path="/s/reports/bringup/round-old.json")
+
+    assert params["enablement_before_observation_path"] == "/s/reports/bringup/round-old.json"
+    assert "enablement_failure_signature" not in params
+
+
+def test_an_integrate_outside_enablement_is_not_an_enablement_round(tmp_path):
+    fake = _enqueue_self(tmp_path, phase="FRAMEWORK_AGENT", baseline_tput=100.0)
+
+    assert "enablement" not in _bind(fake, specialist_task_id="spec-llm")
+
+
+@pytest.mark.parametrize("closed", ["enablement_succeeded", "enablement_validation_pending"])
+def test_a_closed_lane_takes_no_round_from_an_integrate_that_was_tagged_earlier(tmp_path, closed):
+    """The round was admitted when the lane was open; it executes after the lane moved on."""
+    fake = _enqueue_self(tmp_path, **{closed: True})
+
+    params = _bind(
+        fake,
+        specialist_task_id="spec-late",
+        enablement=True,
+        enablement_failure_signature={"kind": "missing_model_arch"},
+        enablement_before_observation_path="/s/reports/bringup/round-old.json",
+        enablement_setup_commands=["pip install x"],
+        extra_envs={"A": "1"},
+    )
+
+    assert params == {"specialist_task_id": "spec-late", "extra_envs": {"A": "1"}}
+
+
+@pytest.mark.asyncio
 async def test_rearm_advanced_stacks_patch_and_reclassifies(monkeypatch, tmp_path):
     """A patch that clears one gap and reveals a new gap is STACKED, not reverted."""
     fake = _enqueue_self(tmp_path)
@@ -893,6 +1117,17 @@ def test_build_params_threads_base_setup_commands_when_stacked(monkeypatch, tmp_
     assert params["enablement_setup_commands"] == ["pip install -U transformers"]
     assert "PRIOR ENABLEMENT PROGRESS" in params["notes"]
     assert "setup command" in params["notes"]
+
+
+def test_build_params_tells_the_next_round_which_setup_commands_were_refused(monkeypatch, tmp_path):
+    """A refusal the author cannot see is re-authored until the budget runs out."""
+    _stub_enumerate(monkeypatch, [])
+    fake = _enqueue_self(tmp_path)
+    fake.shared_state.enablement.last_setup_refusals = ["ln -sf /a /b"]
+    params = fake.enablement_params.build_enablement_specialist_params(_MISSING_ARCH_LOG)
+    assert params is not None
+    assert "SETUP COMMAND REFUSED" in params["notes"]
+    assert "ln -sf /a /b" in params["notes"]
 
 
 def test_build_params_notes_prior_patches_for_mandate(monkeypatch, tmp_path):
@@ -1353,17 +1588,20 @@ async def test_rearm_records_the_rounds_disposition_on_the_executions_it_perform
     A discarded round still mutated the shared venv, so its rows stay in the
     ledger carrying the outcome the lane reported for them.
     """
-    from hyperloom.orchestrator.enablement.recipe.setup_ledger import build_execution_row
+    from hyperloom.orchestrator.enablement.recipe.setup_ledger import SetupExecution, build_execution_row
 
     fake = _enqueue_self(tmp_path)
+    await _hold_round(fake, "spec-1")
     fake.shared_state.enablement.setup_executions = [
         build_execution_row(
-            seq=1,
-            round_task_id="spec-1",
-            cmd_index=0,
-            cmd="pip install -U transformers",
-            source="proposed",
-            outcome="applied",
+            SetupExecution(
+                seq=1,
+                round_task_id="spec-1",
+                cmd_index=0,
+                cmd="pip install -U transformers",
+                source="proposed",
+                outcome="applied",
+            ),
             env={},
             fs_root="/nonexistent-probe-root",
         )

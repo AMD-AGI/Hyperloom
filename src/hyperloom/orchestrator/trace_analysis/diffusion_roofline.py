@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import csv
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -91,62 +92,10 @@ def top_kernels(rows: list[dict[str, str]], k: int) -> list[dict[str, Any]]:
     return out
 
 
-def dit_analytic_flops(
-    hidden_size: int,
-    num_layers: int,
-    num_tokens: int,
-    num_denoise_steps: int,
-    ffn_ratio: float = 4.0,
-) -> dict[str, float]:
-    """A-priori forward FLOPs for a DiT-style transformer denoise run."""
-    h = float(hidden_size)
-    per_token_linear = 2.0 * (4.0 + 2.0 * ffn_ratio) * h * h
-    per_token_attention = 2.0 * (2.0 * float(num_tokens) * h)
-    scale = float(num_layers) * float(num_tokens) * float(num_denoise_steps)
-    linear = per_token_linear * scale
-    attention = per_token_attention * scale
-    return {
-        "linear_flops": linear,
-        "attention_flops": attention,
-        "total_flops": linear + attention,
-    }
-
-
-def dit_analytic_ceiling(flops: dict[str, float], achievable_tflops: float) -> dict[str, Any]:
-    """Convert a-priori FLOPs into an achievable-compute time ceiling."""
-    total = flops.get("total_flops", 0.0)
-    if total <= 0 or achievable_tflops <= 0:
-        return {}
-    ideal_us = total / (achievable_tflops * 1e12) * 1e6
-    return {
-        "total_flops": total,
-        "achievable_tflops": achievable_tflops,
-        "ideal_compute_us": ideal_us,
-    }
-
-
-def reconcile(totals: dict[str, Any], analytic: dict[str, Any]) -> dict[str, Any]:
-    """Cross-check the a-priori DiT ceiling against the trace-derived roofline."""
-    ideal_us = analytic.get("ideal_compute_us", 0.0)
-    if ideal_us <= 0:
-        return {}
-    trace_ideal = totals.get("sigma_ideal_roofline_us", 0.0)
-    trace_actual = totals.get("sigma_actual_kernel_us", 0.0)
-    out: dict[str, Any] = {"analytic_ideal_compute_us": ideal_us}
-    if trace_ideal > 0:
-        out["analytic_vs_trace_ideal_ratio"] = ideal_us / trace_ideal
-    if trace_actual > 0:
-        out["analytic_achieved_efficiency"] = ideal_us / trace_actual
-    return out
-
-
 def build_report(
     csv_dir: Path,
     num_denoise_steps: int | None,
     top_k: int,
-    *,
-    dit_geometry: dict[str, Any] | None = None,
-    achievable_tflops: float | None = None,
 ) -> dict[str, Any]:
     """Assemble the workload-level roofline report from a TraceLens CSV dir."""
     unified_path = csv_dir / UNIFIED_CSV
@@ -161,8 +110,6 @@ def build_report(
         timeline,
         num_denoise_steps,
         top_kernels(unified_rows, top_k),
-        dit_geometry=dit_geometry,
-        achievable_tflops=achievable_tflops,
         source="tracelens_csv",
     )
     report["source_csv_dir"] = str(csv_dir)
@@ -175,8 +122,6 @@ def assemble_report(
     num_denoise_steps: int | None,
     top_kernels_list: list[dict[str, Any]],
     *,
-    dit_geometry: dict[str, Any] | None = None,
-    achievable_tflops: float | None = None,
     source: str = "tracelens_csv",
 ) -> dict[str, Any]:
     """Assemble the workload roofline report from pre-aggregated inputs."""
@@ -201,25 +146,6 @@ def assemble_report(
             "ideal_roofline_us": totals["sigma_ideal_roofline_us"] / num_denoise_steps,
         }
 
-    # Optional a-priori DiT compute ceiling + reconciliation cross-check, only when model geometry + achievable TFLOPS
-    # are supplied.
-    if dit_geometry and achievable_tflops and num_denoise_steps and num_denoise_steps > 0:
-        try:
-            flops = dit_analytic_flops(
-                hidden_size=int(dit_geometry["hidden_size"]),
-                num_layers=int(dit_geometry["num_layers"]),
-                num_tokens=int(dit_geometry["num_tokens"]),
-                num_denoise_steps=int(num_denoise_steps),
-                ffn_ratio=float(dit_geometry.get("ffn_ratio", 4.0)),
-            )
-            ceiling = dit_analytic_ceiling(flops, float(achievable_tflops))
-            if ceiling:
-                report["analytic_dit_ceiling"] = ceiling
-                recon = reconcile(totals, ceiling)
-                if recon:
-                    report["reconciliation"] = recon
-        except (KeyError, TypeError, ValueError):
-            pass
     return report
 
 
@@ -272,21 +198,25 @@ def _top_bypass_kernels(hot_kernels: list[dict[str, Any]], k: int) -> list[dict[
     ]
 
 
+@dataclass(frozen=True)
+class WorkloadTotals:
+    """Roofline totals aggregated over every analyzed device kernel, and how many kernels they cover."""
+
+    totals: dict[str, Any]
+    kernel_count: int
+
+
 def build_report_from_bypass(
     hot_kernels: list[dict[str, Any]],
     timeline: dict[str, Any],
     num_denoise_steps: int | None,
     top_k: int,
     *,
-    dit_geometry: dict[str, Any] | None = None,
-    achievable_tflops: float | None = None,
-    totals: dict[str, Any] | None = None,
-    kernels_aggregated: int | None = None,
+    workload: WorkloadTotals | None = None,
 ) -> dict[str, Any]:
     """Build the workload roofline report from the bypass candidate set."""
-    full_scope = totals is not None
-    if totals is None:
-        totals = aggregate_bypass_candidates(hot_kernels)
+    full_scope = workload is not None
+    totals = workload.totals if workload is not None else aggregate_bypass_candidates(hot_kernels)
     timeline_pct: dict[str, float] = {}
     if isinstance(timeline, dict):
         if timeline.get("busy_pct") is not None:
@@ -298,11 +228,9 @@ def build_report_from_bypass(
         timeline_pct,
         num_denoise_steps,
         _top_bypass_kernels(hot_kernels, top_k),
-        dit_geometry=dit_geometry,
-        achievable_tflops=achievable_tflops,
         source="bypass_analytical",
     )
     # Scope + count reflect all kernels under full scope, else the top-k subset.
     report["kernel_scope"] = "all_device_kernels" if full_scope else "analyzed_candidates"
-    report["kernels_aggregated"] = int(kernels_aggregated) if kernels_aggregated is not None else len(hot_kernels)
+    report["kernels_aggregated"] = int(workload.kernel_count) if workload is not None else len(hot_kernels)
     return report

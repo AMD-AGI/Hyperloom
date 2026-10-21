@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Compatibility patches for pinned Magpie/InferenceX benchmark scripts (SGLang trust, eval concurrency, client tokenizer hook)."""
+"""Compatibility patches for pinned Magpie/InferenceX benchmark scripts (SGLang trust, eval concurrency)."""
 
 from __future__ import annotations
 
@@ -61,27 +61,13 @@ _LOCAL_CLIENT_PATCHED_BLOCK = (
     "        --result-dir ${RESULT_DIR:-/workspace/} || exit $?\n"
 )
 
-# The generic vLLM client argv (``vllm_mi300x.sh``) names no tokenizer, so the benchmark client loads
-# the checkpoint through HF ``AutoConfig``. A model whose ``model_type`` transformers does not know --
-# DeepSeek-V4 is one -- dies there with ``KeyError: 'deepseek_v4'`` before issuing a single request, so
-# no ``inferencex_result.json`` is written and the whole round is graded a boot failure even when the
-# server is up and serving. InferenceX already carries the fix (``benchmark_serving.py`` routes
-# ``--tokenizer-mode`` to vLLM's own loader) and its DSV4-specific recipes pass the flag; the generic
-# script this path uses does not, and exposes no hook for it. This adds one.
+# A model whose ``model_type`` transformers does not know -- DeepSeek-V4 is one -- dies in the benchmark
+# client's HF ``AutoConfig`` load with ``KeyError: 'deepseek_v4'`` before issuing a single request, unless
+# the client script can be told which tokenizer to load. Magpie's client scripts carry that hook themselves
+# (``HYPERLOOM_CLIENT_TOKENIZER_MODE`` is still honoured); a script without it cannot run such a model.
 _CLIENT_TOKENIZER_MODE_SENTINEL = "HYPERLOOM_CLIENT_TOKENIZER_MODE"
-#: Marks a script carrying the generic vLLM local-client shape this patch targets.
+#: Marks a script carrying a benchmark client call.
 _CLIENT_TOKENIZER_PATH_MARKER = '--result-dir "$WORKSPACE_DIR/"'
-_CLIENT_TOKENIZER_LEGACY_BLOCK = '        "${SERVER_MONITOR_ARGS[@]}" \\\n        --trust-remote-code || exit $?\n'
-# ``${VAR:+...}`` leaves the line empty when unset, so an unpatched workload is byte-for-byte
-# unchanged in behaviour. A tokenizer mode is a bare identifier, so the unquoted expansion is safe.
-# No comment line inside the continuation: after a trailing backslash a ``#`` is an argument, not a
-# comment, and would be handed to the client. The variable name is the sentinel.
-_CLIENT_TOKENIZER_PATCHED_BLOCK = (
-    '        "${SERVER_MONITOR_ARGS[@]}" \\\n'
-    "        ${HYPERLOOM_CLIENT_TOKENIZER_MODE:+--tokenizer-mode} "
-    "${HYPERLOOM_CLIENT_TOKENIZER_MODE:+$HYPERLOOM_CLIENT_TOKENIZER_MODE} \\\n"
-    "        --trust-remote-code || exit $?\n"
-)
 
 
 # Strip the redundant, fatal ``--concurrent-requests <CONC>`` flag from Magpie's generic benchmark scripts:
@@ -312,17 +298,6 @@ def _apply_run_lm_eval_arg_patch_atomic(benchmark_lib: Path) -> bool:
     return True
 
 
-def _apply_client_tokenizer_patch_dir(scripts_dir: Path) -> bool:
-    """Give every generic client script under ``scripts_dir`` a tokenizer-mode hook."""
-    ok = True
-    for script in sorted(scripts_dir.glob("*.sh")):
-        if script.name == "benchmark_lib.sh":
-            continue
-        if not _apply_client_tokenizer_mode_patch_atomic(script):
-            ok = False
-    return ok
-
-
 def _script_dirs(magpie_dir: Path | str | None, inferencex_dir: Path | str | None) -> Iterator[Path]:
     """The benchmark script directories to patch, each yielded once.
 
@@ -368,53 +343,29 @@ def _apply_eval_concurrency_fixes(
     return ok
 
 
-def _client_tokenizer_hook_installed(
-    magpie_dir: Path | str | None,
-    inferencex_dir: Path | str | None,
-    script_name: str | None = None,
+def client_tokenizer_hook_installed(
+    script_name: str,
+    *,
+    magpie_dir: Path | str | None = None,
+    inferencex_dir: Path | str | None = None,
 ) -> bool:
-    """Whether the client script this round will run now carries the hook.
+    """Whether the client script this round will run carries the tokenizer-mode hook.
 
     Deliberately NOT folded into the eval-concurrency result: that one is
     fail-soft by design (a patch that could not be applied is fine as long as no
     live flag survives), and reusing it here would let a missing tokenizer hook
     report success while the client still dies in HF AutoConfig.
 
-    ``script_name`` narrows the question to the one script that matters. Asking
-    it of every sibling instead makes an unrelated shape veto the round: the
-    multimodal variants carry the same ``--result-dir`` marker with a different
-    client call, and judging them would refuse a workload whose own script is
-    patched and correct.
+    Only ``script_name`` is judged. Its siblings -- the multimodal ``*_mm.sh``
+    carry the same ``--result-dir`` marker with a different client call and no
+    hook -- must not veto a workload whose own script is fine.
     """
     for script in _client_scripts(magpie_dir, inferencex_dir):
-        if script_name is not None and script.name != script_name:
-            continue
-        if not _is_client_tokenizer_mode_patched(script):
+        if script.name == script_name and not _is_client_tokenizer_mode_patched(script):
             return False
-    # A named script that exists nowhere is not this patcher's to judge -- the
+    # A named script that exists nowhere is not this check's to judge -- the
     # launcher fails on the missing script with a clearer message than this one.
     return True
-
-
-def _install_client_tokenizer_hook(
-    magpie_dir: Path | str | None,
-    inferencex_dir: Path | str | None,
-    script_name: str | None = None,
-) -> bool:
-    """Apply the hook, then report the post-condition. Caller must hold the lock."""
-    for scripts_dir in _script_dirs(magpie_dir, inferencex_dir):
-        _apply_client_tokenizer_patch_dir(scripts_dir)
-    return _client_tokenizer_hook_installed(magpie_dir, inferencex_dir, script_name)
-
-
-def ensure_client_tokenizer_hook(
-    magpie_dir: Path | str | None = None,
-    inferencex_dir: Path | str | None = None,
-    script_name: str | None = None,
-) -> bool:
-    """Install the client tokenizer-mode hook and report whether it is really there."""
-    with _file_lock(_LOCK_PATH):
-        return _install_client_tokenizer_hook(magpie_dir, inferencex_dir, script_name)
 
 
 def _inferencex_tolerates_eval_flag(inferencex_dir: Path | str | None) -> bool:
@@ -458,11 +409,6 @@ def ensure_eval_concurrency_compat(
     """Public, run-time-safe entry point for the eval-concurrency fixes."""
     with _file_lock(_LOCK_PATH):
         applied_ok = _apply_eval_concurrency_fixes(magpie_dir, inferencex_dir)
-        # Install the client tokenizer hook on the same sweep: this is the entry point the
-        # run actually calls, so a hook installed anywhere else would never reach a launch.
-        # Its result deliberately does NOT ride on this return value, which is fail-soft by
-        # design; a missing hook is reported through ``MagpiePatchStatus.client_tokenizer_ok``.
-        _install_client_tokenizer_hook(magpie_dir, inferencex_dir)
         return _eval_concurrency_unblocked(applied_ok, magpie_dir, inferencex_dir)
 
 
@@ -507,7 +453,7 @@ def _file_lock(lock_path: str) -> Iterator[None]:
 def atomic_write_text(src: Path, content: str, *, log_prefix: str) -> bool:
     """Atomically replace ``src`` with ``content``, keeping its permission bits; log and return False on OSError."""
     try:
-        _common_io.atomic_write_text(src, content, preserve_mode=True)
+        _common_io.atomic_write_text(src, content, options=_common_io.WriteOptions(preserve_mode=True))
     except OSError as e:
         log.warning("%s: cannot write %s: %s", log_prefix, src, e)
         return False
@@ -669,15 +615,6 @@ class MagpiePatchStatus:
     # Whether the redundant ``--concurrent-requests`` eval flag was stripped from every generic benchmark script (or
     # none needed it).
     eval_flag_ok: bool = True
-    # Whether every generic client script can be told which tokenizer to load. Reported, and
-    # deliberately NOT part of ``ok``: the hook is workload-specific, and a Magpie layout carries
-    # sibling scripts -- the multimodal ``*_mm.sh`` among them -- whose client shape it does not fit
-    # and was never meant to. Folding it in failed install for a layout the run would never touch,
-    # over a script the run would never execute. The hard failure lives where the materialized config
-    # names both the model that needs the hook and the one script that will run it
-    # (``BaselineExecutor`` -> ``client_tokenizer_unpatchable``), which is the only place the two
-    # facts are known together.
-    client_tokenizer_ok: bool = True
 
     @property
     def ok(self) -> bool:
@@ -686,40 +623,12 @@ class MagpiePatchStatus:
 
 
 def _is_client_tokenizer_mode_patched(src: Path) -> bool:
-    """Whether ``src`` already names a tokenizer, or has no client shape to patch."""
+    """Whether ``src`` can name a tokenizer, or has no client call that needs it."""
     try:
         text = src.read_text(encoding="utf-8")
     except OSError:
         return False
     return _CLIENT_TOKENIZER_MODE_SENTINEL in text or _CLIENT_TOKENIZER_PATH_MARKER not in text
-
-
-def _apply_client_tokenizer_mode_patch_atomic(src: Path) -> bool:
-    """Give the generic vLLM client a way to be told which tokenizer to load."""
-    try:
-        original = src.read_text(encoding="utf-8")
-    except OSError as e:
-        log.warning("_magpie_patcher: cannot read %s: %s", src, e)
-        return False
-
-    if _CLIENT_TOKENIZER_MODE_SENTINEL in original or _CLIENT_TOKENIZER_PATH_MARKER not in original:
-        return True
-    if _CLIENT_TOKENIZER_LEGACY_BLOCK not in original:
-        log.warning(
-            "_magpie_patcher: generic vLLM client block not found in %s; tokenizer-mode patch could not be applied",
-            src,
-        )
-        return False
-
-    patched = original.replace(
-        _CLIENT_TOKENIZER_LEGACY_BLOCK,
-        _CLIENT_TOKENIZER_PATCHED_BLOCK,
-        1,
-    )
-    if not atomic_write_text(src, patched, log_prefix="_magpie_patcher"):
-        return False
-    log.info("_magpie_patcher: applied client tokenizer-mode patch to %s", src)
-    return True
 
 
 def magpie_scripts_patch_status(
@@ -769,14 +678,13 @@ def magpie_scripts_patch_status(
         return MagpiePatchStatus(
             remote_trust_ok=remote_trust_ok,
             eval_flag_ok=eval_flag_ok,
-            client_tokenizer_ok=_install_client_tokenizer_hook(magpie_dir, inferencex_dir),
         )
 
 
 __all__ = [
     "MagpiePatchStatus",
     "atomic_write_text",
-    "ensure_client_tokenizer_hook",
+    "client_tokenizer_hook_installed",
     "ensure_eval_concurrency_compat",
     "ensure_client_trust_compat",
     "live_eval_concurrency_flag_scripts",

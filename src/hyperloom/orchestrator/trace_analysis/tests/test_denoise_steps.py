@@ -79,8 +79,6 @@ class TestCallSiteBinding:
                 "MI300X",
                 "--model-name",
                 "m",
-                "--top-k",
-                "4",
                 "--num-denoise-steps",
                 "9",
             ]
@@ -115,18 +113,15 @@ class TestCallSiteBinding:
             model_name="m",
             framework="xdit",
             target_platform="MI300X",
-            analysis_mode="inference",
-            runtime_env="local",
             dry_run=False,
             num_denoise_steps=9,
         )
         tl.write_reports(
             run_dir,
-            trace_input_type="file",
-            trace_files=[trace],
+            tl.TraceInputs(input_type="file", files=[trace]),
             candidates=[],
             args=args,
-            existing_report_path=md,
+            outcome=tl.OrchestratorOutcome(report_path=md),
         )
         assert seen, "the TraceLens route never reached resolve_perstep_divisor"
         assert seen["requested_steps"] == 9, "the declared count must bind to requested_steps"

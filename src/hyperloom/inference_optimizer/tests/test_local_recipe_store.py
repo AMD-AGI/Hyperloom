@@ -13,7 +13,6 @@ from typing import Any
 import pytest
 
 from hyperloom.orchestrator.knowledge.recipe_kb import (
-    ATTEMPTS_FILENAME,
     HISTORY_DIRNAME,
     InvalidCanonicalIdError,
     LocalRecipeStore,
@@ -24,7 +23,7 @@ from hyperloom.orchestrator.knowledge.recipe_kb import (
     cid_to_path_components,
     recipe_canonical_id,
 )
-from hyperloom.orchestrator.knowledge.recipe_kb.local_store import _list_jsonl, _matches_labels
+from hyperloom.orchestrator.knowledge.recipe_kb.local_store import RecipeFilters, _matches_labels
 
 
 def test_from_dict_reads_legacy_framework_key() -> None:
@@ -70,10 +69,6 @@ def _cid(
         framework_version=framework_version,
         precision=precision,
     )
-
-
-def _list_attempt_rows(store: LocalRecipeStore, canonical_id: str) -> list[dict[str, Any]]:
-    return _list_jsonl(store._attempts_path(canonical_id))
 
 
 def test_cid_to_path_components_roundtrip() -> None:
@@ -375,6 +370,12 @@ def test_put_recipe_rejects_empty_canonical_id(tmp_path: Path) -> None:
         store.put_recipe(canonical_id="")
 
 
+def test_get_recipe_rejects_empty_canonical_id(tmp_path: Path) -> None:
+    store = LocalRecipeStore(root=tmp_path)
+    with pytest.raises(ValueError):
+        store.get_recipe(canonical_id="")
+
+
 def test_put_recipe_rejects_malformed_canonical_id(tmp_path: Path) -> None:
     store = LocalRecipeStore(root=tmp_path)
     with pytest.raises(InvalidCanonicalIdError):
@@ -510,23 +511,21 @@ def test_search_with_two_labels_uses_AND_semantics(tmp_path: Path) -> None:
 def test_search_with_metric_filters_lower_bound(tmp_path: Path) -> None:
     store = LocalRecipeStore(root=tmp_path)
     cids = _seed_diverse_recipes(store)
-    rows = store.search(metric_filters={"throughput": {"min": 10000}})
+    rows = store.search(filters=RecipeFilters(metric_filters={"throughput": {"min": 10000}}))
     assert {r["canonical_id"] for r in rows} == {cids["a"], cids["b"]}
 
 
 def test_search_with_metric_filters_upper_bound(tmp_path: Path) -> None:
     store = LocalRecipeStore(root=tmp_path)
     cids = _seed_diverse_recipes(store)
-    rows = store.search(metric_filters={"throughput": {"max": 6000}})
+    rows = store.search(filters=RecipeFilters(metric_filters={"throughput": {"max": 6000}}))
     assert {r["canonical_id"] for r in rows} == {cids["c"]}
 
 
 def test_search_with_metric_filters_two_bounds(tmp_path: Path) -> None:
     store = LocalRecipeStore(root=tmp_path)
     cids = _seed_diverse_recipes(store)
-    rows = store.search(
-        metric_filters={"throughput": {"min": 7500, "max": 12000}},
-    )
+    rows = store.search(filters=RecipeFilters(metric_filters={"throughput": {"min": 7500, "max": 12000}}))
     assert {r["canonical_id"] for r in rows} == {cids["a"]}
 
 
@@ -536,17 +535,14 @@ def test_search_excludes_rows_missing_the_metric_key(tmp_path: Path) -> None:
     cid = _cid(model="no-tput")
     # ``best_throughput`` defaults to 0.0; a high min trips the missing-key path.
     store.put_recipe(canonical_id=cid, extras={"mfu": 0.5})
-    rows = store.search(metric_filters={"throughput": {"min": 100}})
+    rows = store.search(filters=RecipeFilters(metric_filters={"throughput": {"min": 100}}))
     assert rows == []
 
 
 def test_search_combined_label_and_metric(tmp_path: Path) -> None:
     store = LocalRecipeStore(root=tmp_path)
     cids = _seed_diverse_recipes(store)
-    rows = store.search(
-        label_match={"task": "pretrain"},
-        metric_filters={"mfu": {"min": 0.35}},
-    )
+    rows = store.search(label_match={"task": "pretrain"}, filters=RecipeFilters(metric_filters={"mfu": {"min": 0.35}}))
     assert [r["canonical_id"] for r in rows] == [cids["a"]]
 
 
@@ -562,14 +558,14 @@ def test_search_updated_since_filters_old_rows(tmp_path: Path) -> None:
 
     time.sleep(0.001)
     store.put_recipe(canonical_id=cid_new)
-    rows = store.search(updated_since=cutoff)
+    rows = store.search(filters=RecipeFilters(updated_since=cutoff))
     assert [r["canonical_id"] for r in rows] == [cid_new, cid_old]
 
 
 def test_search_order_by_invalid_raises(tmp_path: Path) -> None:
     store = LocalRecipeStore(root=tmp_path)
     with pytest.raises(ValueError):
-        store.search(order_by="banana ASC")
+        store.search(filters=RecipeFilters(order_by="banana ASC"))
 
 
 def test_search_supports_all_six_order_by_values(tmp_path: Path) -> None:
@@ -584,7 +580,7 @@ def test_search_supports_all_six_order_by_values(tmp_path: Path) -> None:
         "version DESC",
         "version ASC",
     ):
-        rows = store.search(order_by=ob)
+        rows = store.search(filters=RecipeFilters(order_by=ob))
         assert len(rows) == 3, f"order_by={ob!r}"
 
 
@@ -593,51 +589,6 @@ def test_search_limit_is_clamped_to_1_to_1000(tmp_path: Path) -> None:
     _seed_diverse_recipes(store)
     rows = store.search(limit=2)
     assert len(rows) == 2
-
-
-def test_append_attempt_creates_attempts_file(tmp_path: Path) -> None:
-    store = LocalRecipeStore(root=tmp_path)
-    cid = _cid()
-    out = store.append_attempt(
-        canonical_id=cid,
-        session_id="sess-1",
-        diff={"tp": [8, 16]},
-        outcome="kept",
-        fitness=0.83,
-    )
-    assert out["id"] == 1
-    assert out["recipe_canonical_id"] == cid
-    rows = _list_attempt_rows(store, cid)
-    assert len(rows) == 1
-    assert rows[0]["outcome"] == "kept"
-    assert rows[0]["fitness"] == 0.83
-
-
-def test_append_attempt_does_not_require_parent_recipe(tmp_path: Path) -> None:
-    """Attempts are filed even if the recipe row doesn't exist (no FK)."""
-    store = LocalRecipeStore(root=tmp_path)
-    cid = _cid(model="orphan")
-    out = store.append_attempt(
-        canonical_id=cid,
-        session_id="sess-1",
-        outcome="kept",
-    )
-    assert out["id"] == 1
-    assert store.get_recipe(canonical_id=cid) is None
-
-
-def test_append_attempt_id_is_monotonic_per_cid(tmp_path: Path) -> None:
-    store = LocalRecipeStore(root=tmp_path)
-    cid = _cid()
-    ids = [
-        store.append_attempt(
-            canonical_id=cid,
-            session_id="s",
-            outcome="kept",
-        )["id"]
-        for _ in range(3)
-    ]
-    assert ids == [1, 2, 3]
 
 
 def test_put_recipe_concurrent_writers_keep_versions_monotonic(
@@ -664,24 +615,6 @@ def test_put_recipe_concurrent_writers_keep_versions_monotonic(
     assert [store.get_recipe(canonical_id=cid, version=i)["version"] for i in range(1, n)] == list(range(1, n))
 
 
-def test_append_attempt_concurrent_keeps_ids_unique(tmp_path: Path) -> None:
-    """No two concurrent appenders may produce the same ``id``."""
-    store = LocalRecipeStore(root=tmp_path)
-    cid = _cid()
-
-    def append_once(_: int) -> int:
-        return store.append_attempt(
-            canonical_id=cid,
-            session_id="s",
-            outcome="kept",
-        )["id"]
-
-    n = 16
-    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
-        ids = list(ex.map(append_once, range(n)))
-    assert sorted(ids) == list(range(1, n + 1))
-
-
 def test_search_skips_directories_with_corrupt_recipe_json(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
@@ -695,36 +628,6 @@ def test_search_skips_directories_with_corrupt_recipe_json(
 
     with pytest.raises(LocalRecipeStoreError):
         store.search()
-
-
-def test_list_attempts_skips_malformed_lines(tmp_path: Path) -> None:
-    """A single corrupt line in attempts.ndjson must not lose valid rows after it."""
-    store = LocalRecipeStore(root=tmp_path)
-    cid = _cid()
-    store.append_attempt(
-        canonical_id=cid,
-        session_id="s",
-        outcome="kept",
-    )
-    attempts_path = tmp_path.joinpath(*cid_to_path_components(cid)) / ATTEMPTS_FILENAME
-    with attempts_path.open("a", encoding="utf-8") as f:
-        f.write("not json at all\n")
-        f.write(
-            json.dumps(
-                {
-                    "id": 99,
-                    "recipe_canonical_id": cid,
-                    "session_id": "s",
-                    "attempt_at": "2026-05-28T10:00:00.000000+00:00",
-                    "outcome": "reverted",
-                }
-            )
-            + "\n"
-        )
-    rows = _list_attempt_rows(store, cid)
-    outcomes = [r["outcome"] for r in rows]
-    assert "kept" in outcomes
-    assert "reverted" in outcomes
 
 
 def test_walk_skips_non_5level_directories(tmp_path: Path) -> None:

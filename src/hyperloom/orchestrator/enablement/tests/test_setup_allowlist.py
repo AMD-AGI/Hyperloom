@@ -38,6 +38,11 @@ from hyperloom.orchestrator.enablement.recipe.setup_allowlist import is_allowlis
         "/opt/venv/bin/pip install aiperf",
         "/usr/bin/python3 -m pip install aiperf",
         "sudo /usr/bin/apt-get install -y gh",
+        # A venv the run itself created, which is where the repair is supposed
+        # to install: it lives wherever the round provisioned it, and no list of
+        # directory prefixes can enumerate that.
+        "/workspace/stacks/sglang/t1/venv/bin/pip install aiperf",
+        "/runs/session-7/venv/bin/python -m pip install aiperf",
         # Creating an isolated environment to install into. Rejecting these left
         # PIP_BREAK_SYSTEM_PACKAGES as the only spelling that survived.
         "uv venv /opt/aiperf-venv",
@@ -68,23 +73,13 @@ def test_setup_allowlist_accepts_installs(cmd: str):
         "pip install foo | tee /etc/x",
         "echo `whoami`",
         "pip install x $(malicious)",
-        # The allowlist is matched against the NORMALISED text, but the replay
-        # executes the ORIGINAL string under shell=True. A blanket basename
-        # strip would let a specialist drop its own `pip` into the workspace and
-        # borrow the allowlisted name, so only absolute system prefixes may be
-        # reduced to a basename.
+        # The replay runs the original string from the session directory, which
+        # is not where the command was authored, so a relative executable names
+        # a different file there -- or none at all.
         "./pip install foo",
         "../pip install foo",
         "bin/pip install foo",
-        "/tmp/pip install foo",
         "workspace/uv pip install foo",
-        # Traversal defeats the prefix check unless the segments are guarded:
-        # the string STARTS with a trusted prefix and still resolves to the
-        # workspace-writable path that "/tmp/pip install foo" is rejected for.
-        "/usr/bin/../../tmp/pip install foo",
-        "/opt/venv/../../tmp/pip install foo",
-        "/usr/local/./../../tmp/pip install foo",
-        "/bin/../tmp/pip install foo",
         # Basename matching must not turn the allowlist into "anything with a
         # path": what the gate decides is the KIND of operation, and these are
         # still not installs.

@@ -14,6 +14,7 @@ import socket
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 import ray
@@ -30,6 +31,9 @@ _DEFAULT_DIST_INIT_PORT = 29500
 # to K*grace in the grace phase. main() does not know K per node (each actor globs its own remote pid_dir), so budget
 # the ray.get timeout for this many pid files/node (ranks + prefill/decode/router).
 _GRACE_PID_BUDGET = 16
+
+# Per-card VRAM wait when this pod's footprint cannot be attributed.
+_GPU_FALLBACK_TIMEOUT_S = 45.0
 
 
 def _log(msg: str) -> None:
@@ -212,15 +216,167 @@ def _wait_gpu_reclaimed(target_used_mb: float, slack_mb: float, timeout_s: float
         time.sleep(2.0)
 
 
+def _unlink_quietly(path: Path) -> None:
+    """Remove a PID file that may already be gone."""
+    try:
+        path.unlink()
+    except OSError:
+        # Already removed, or never written: either way there is nothing to clean up.
+        pass
+
+
+def _read_pid(pid_file: Path) -> int | None:
+    """The PID a file names, or None when it names none.
+
+    An unreadable file, a non-numeric body and the sentinel ``0`` are all "no
+    real process"; the caller decides which of those is stale and which is
+    missing.
+    """
+    try:
+        text = pid_file.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    if not text.isdigit():
+        return None
+    pid = int(text)
+    return pid if pid > 0 else None
+
+
+def _process_alive(pid: int) -> bool:
+    """Whether a signal can still reach this process."""
+    try:
+        os.kill(pid, 0)
+    except (ProcessLookupError, PermissionError):
+        return False
+    return True
+
+
+def _signal_group(pid: int, sig: int) -> None:
+    """Signal the process group this PID leads, falling back to the process itself.
+
+    Each launcher is a group leader via ``setsid``, so the group is what carries
+    its children; a process that has already exited is nothing to signal.
+    """
+    try:
+        os.killpg(os.getpgid(pid), sig)
+    except (ProcessLookupError, PermissionError):
+        try:
+            os.kill(pid, sig)
+        except (ProcessLookupError, PermissionError):
+            # Process already exited; nothing to signal.
+            pass
+
+
+def _pre_kill_pgids(pid_files: list[Path]) -> set[int]:
+    """The process groups this pod is about to kill, for attributing the VRAM they hold."""
+    pgids: set[int] = set()
+    for pid_file in pid_files:
+        pid = _read_pid(pid_file)
+        if pid is None:
+            continue
+        try:
+            pgids.add(os.getpgid(pid))
+        except OSError:
+            # The process is already gone, so it leads no group this kill has to spare.
+            pass
+    return pgids
+
+
+def _kill_pid_file(pid_file: Path, grace_sec: int, summary: dict[str, list]) -> int | None:
+    """Kill what one PID file names, booking it under the heading it belongs to.
+
+    Returns the PID that was signalled, or None when the file named no live
+    process.
+    """
+    try:
+        text = pid_file.read_text(encoding="utf-8").strip()
+    except OSError:
+        summary["missing"].append(pid_file.name)
+        return None
+    if not text.isdigit():
+        summary["stale"].append(pid_file.name)
+        _unlink_quietly(pid_file)
+        return None
+    pid = int(text)
+    # Sentinel 0 = "no real process"; treat as stale, as for a process no signal reaches.
+    if pid <= 0 or not _process_alive(pid):
+        summary["stale"].append(f"{pid_file.name}:{pid}")
+        _unlink_quietly(pid_file)
+        return None
+    _signal_group(pid, signal.SIGTERM)
+    time.sleep(grace_sec)
+    if _process_alive(pid):
+        _signal_group(pid, signal.SIGKILL)
+    summary["killed"].append(f"{pid_file.name}:{pid}")
+    _unlink_quietly(pid_file)
+    return pid
+
+
+def _clean_legacy_rayjoin(pid_dir: Path) -> None:
+    """Terminate and remove the legacy rayjoin PID files.
+
+    A file that cannot be read is left in place: it may still name a live
+    process, and removing it would lose the only handle on one.
+    """
+    for pid_file in sorted(pid_dir.glob("rank_*_rayjoin.pid")):
+        try:
+            pid_file.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        pid = _read_pid(pid_file)
+        if pid is not None:
+            try:
+                os.killpg(os.getpgid(pid), signal.SIGTERM)
+            except (ProcessLookupError, PermissionError):
+                # Process already exited; nothing to signal.
+                pass
+        _unlink_quietly(pid_file)
+
+
+def _wait_gpu_reclaim(
+    summary: dict[str, list],
+    *,
+    gpu_total_before_mb: float | None,
+    gpu_footprint_mb: float,
+    gpu_free_threshold_mb: float,
+    gpu_free_timeout_s: float,
+) -> None:
+    """Wait for the VRAM this pod held to come back, and record what did not."""
+    if gpu_total_before_mb is not None and gpu_footprint_mb:
+        # Primary: wait only for OUR footprint to be reclaimed system-wide; a co-tenant's static VRAM on other
+        # GPUs is already in the target.
+        target_mb = gpu_total_before_mb - gpu_footprint_mb
+        residual = _wait_gpu_reclaimed(target_mb, gpu_free_threshold_mb, gpu_free_timeout_s)
+        if residual is not None:
+            summary["gpu_busy"] = [str(residual)]
+            _log(
+                f"WARN {residual:.0f} MiB used VRAM still above reclaim target "
+                f"{target_mb:.0f}+{gpu_free_threshold_mb:.0f} MiB after {gpu_free_timeout_s:.0f}s"
+            )
+        return
+    # Fallback (footprint unattributable): coarse per-card threshold wait, time-boxed at
+    # _GPU_FALLBACK_TIMEOUT_S so an unrelated co-tenant GPU cannot stall teardown.
+    busy = _wait_gpu_free(gpu_free_threshold_mb, _GPU_FALLBACK_TIMEOUT_S)
+    if busy:
+        summary["gpu_busy"] = [str(mb) for mb in busy]
+        _log(f"WARN GPUs still hold VRAM after {_GPU_FALLBACK_TIMEOUT_S:.0f}s (MiB): {busy}")
+
+
+@dataclass(frozen=True)
+class KillWaits:
+    """How long a pod's kill waits for its pids to exit, its ports to drain and its VRAM to come back."""
+
+    death_timeout_s: float = 30.0
+    port_timeout_s: float = 60.0
+    gpu_free_threshold_mb: float = 2048.0
+    gpu_free_timeout_s: float = 120.0
+
+
 def _kill_remote(
     pid_dir: str,
     grace_sec: int,
     drain_ports: list[int] | None = None,
-    death_timeout_s: float = 30.0,
-    port_timeout_s: float = 60.0,
-    gpu_free_threshold_mb: float = 2048.0,
-    gpu_free_timeout_s: float = 120.0,
-    gpu_fallback_timeout_s: float = 45.0,
+    waits: KillWaits = KillWaits(),
 ) -> dict:
     """Kill the rank_*/prefill_*/decode_*/router* PID-file processes under ``pid_dir`` on this pod; returns a per-PID summary."""
     summary: dict[str, list] = {
@@ -231,154 +387,45 @@ def _kill_remote(
         "ports_busy": [],
         "gpu_busy": [],
     }
-    p = Path(pid_dir)
-    if not p.is_dir():
+    pid_dir_path = Path(pid_dir)
+    if not pid_dir_path.is_dir():
         return summary
-    killed_pids: list[int] = []
 
     pid_files = sorted(
-        list(p.glob("rank_*.pid"))
-        + list(p.glob("prefill_*.pid"))
-        + list(p.glob("decode_*.pid"))
-        + list(p.glob("router*.pid"))
+        list(pid_dir_path.glob("rank_*.pid"))
+        + list(pid_dir_path.glob("prefill_*.pid"))
+        + list(pid_dir_path.glob("decode_*.pid"))
+        + list(pid_dir_path.glob("router*.pid"))
     )
 
     # Pre-kill GPU snapshot: record OUR process groups + system-wide used VRAM so the post-kill wait targets only our
     # reclaim.
-    pre_pgids: set[int] = set()
-    for pf in pid_files:
-        try:
-            t = pf.read_text(encoding="utf-8").strip()
-        except OSError:
-            continue
-        if t.isdigit() and int(t) > 0:
-            try:
-                pre_pgids.add(os.getpgid(int(t)))
-            except OSError:
-                pass
+    pre_pgids = _pre_kill_pgids(pid_files)
     gpu_total_before_mb = _gpu_total_used_mb()
     gpu_footprint_mb = _gpu_used_mb_for_pgids(pre_pgids)
 
-    for pid_file in pid_files:
-        try:
-            text = pid_file.read_text(encoding="utf-8").strip()
-        except OSError:
-            summary["missing"].append(pid_file.name)
-            continue
-        if not text.isdigit():
-            summary["stale"].append(pid_file.name)
-            try:
-                pid_file.unlink()
-            except OSError:
-                # Stale PID file already removed; nothing to clean up.
-                pass
-            continue
-
-        pid = int(text)
-        # Sentinel 0 = "no real process"; treat as stale.
-        if pid <= 0:
-            summary["stale"].append(f"{pid_file.name}:{pid}")
-            try:
-                pid_file.unlink()
-            except OSError:
-                # Stale PID file already removed; nothing to clean up.
-                pass
-            continue
-        try:
-            os.kill(pid, 0)
-        except (ProcessLookupError, PermissionError):
-            summary["stale"].append(f"{pid_file.name}:{pid}")
-            try:
-                pid_file.unlink()
-            except OSError:
-                # Stale PID file already removed; nothing to clean up.
-                pass
-            continue
-
-        # SIGTERM the whole process group (each launcher is a pg leader via setsid).
-        try:
-            os.killpg(os.getpgid(pid), signal.SIGTERM)
-        except (ProcessLookupError, PermissionError):
-            try:
-                os.kill(pid, signal.SIGTERM)
-            except (ProcessLookupError, PermissionError):
-                # Process already exited; nothing to signal.
-                pass
-
-        time.sleep(grace_sec)
-
-        try:
-            os.kill(pid, 0)
-        except (ProcessLookupError, PermissionError):
-            pass
-        else:
-            try:
-                os.killpg(os.getpgid(pid), signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                try:
-                    os.kill(pid, signal.SIGKILL)
-                except (ProcessLookupError, PermissionError):
-                    # Process already exited; nothing to signal.
-                    pass
-
-        summary["killed"].append(f"{pid_file.name}:{pid}")
-        killed_pids.append(pid)
-        try:
-            pid_file.unlink()
-        except OSError:
-            # PID file already gone; nothing to clean up.
-            pass
-
-    # Clean up legacy rayjoin pid files.
-    for pid_file in sorted(p.glob("rank_*_rayjoin.pid")):
-        try:
-            text = pid_file.read_text(encoding="utf-8").strip()
-        except OSError:
-            continue
-        if text.isdigit():
-            pid = int(text)
-            if pid > 0:  # skip sentinel 0
-                try:
-                    os.killpg(os.getpgid(pid), signal.SIGTERM)
-                except (ProcessLookupError, PermissionError):
-                    # Process already exited; nothing to signal.
-                    pass
-        try:
-            pid_file.unlink()
-        except OSError:
-            # PID file already gone; nothing to clean up.
-            pass
+    killed_pids = [pid for pid in (_kill_pid_file(f, grace_sec, summary) for f in pid_files) if pid is not None]
+    _clean_legacy_rayjoin(pid_dir_path)
 
     # Block until the signalled processes truly exit, then until the rendezvous/serving ports drain.
     if killed_pids:
-        still = _wait_pids_gone(killed_pids, death_timeout_s)
+        still = _wait_pids_gone(killed_pids, waits.death_timeout_s)
         if still:
             summary["still_alive"] = [str(pid) for pid in still]
-            _log(f"WARN pids still alive after {death_timeout_s:.0f}s: {still}")
+            _log(f"WARN pids still alive after {waits.death_timeout_s:.0f}s: {still}")
     if drain_ports:
-        busy = _wait_ports_free(list(drain_ports), port_timeout_s)
+        busy = _wait_ports_free(list(drain_ports), waits.port_timeout_s)
         if busy:
             summary["ports_busy"] = [str(port) for port in busy]
-            _log(f"WARN ports still bound after {port_timeout_s:.0f}s: {busy}")
+            _log(f"WARN ports still bound after {waits.port_timeout_s:.0f}s: {busy}")
     if killed_pids:
-        if gpu_total_before_mb is not None and gpu_footprint_mb:
-            # Primary: wait only for OUR footprint to be reclaimed system-wide; a co-tenant's static VRAM on other
-            # GPUs is already in the target.
-            target_mb = gpu_total_before_mb - gpu_footprint_mb
-            residual = _wait_gpu_reclaimed(target_mb, gpu_free_threshold_mb, gpu_free_timeout_s)
-            if residual is not None:
-                summary["gpu_busy"] = [str(residual)]
-                _log(
-                    f"WARN {residual:.0f} MiB used VRAM still above reclaim target "
-                    f"{target_mb:.0f}+{gpu_free_threshold_mb:.0f} MiB after {gpu_free_timeout_s:.0f}s"
-                )
-        else:
-            # Fallback (footprint unattributable): coarse per-card threshold wait, time-boxed at
-            # gpu_fallback_timeout_s so an unrelated co-tenant GPU cannot stall teardown.
-            busy = _wait_gpu_free(gpu_free_threshold_mb, gpu_fallback_timeout_s)
-            if busy:
-                summary["gpu_busy"] = [str(mb) for mb in busy]
-                _log(f"WARN GPUs still hold VRAM after {gpu_fallback_timeout_s:.0f}s (MiB): {busy}")
+        _wait_gpu_reclaim(
+            summary,
+            gpu_total_before_mb=gpu_total_before_mb,
+            gpu_footprint_mb=gpu_footprint_mb,
+            gpu_free_threshold_mb=waits.gpu_free_threshold_mb,
+            gpu_free_timeout_s=waits.gpu_free_timeout_s,
+        )
 
     return summary
 
@@ -450,10 +497,7 @@ def main() -> int:
             args.pid_dir,
             args.grace_sec,
             drain_ports,
-            args.death_timeout,
-            args.port_timeout,
-            args.gpu_free_threshold_mb,
-            args.gpu_free_timeout,
+            KillWaits(args.death_timeout, args.port_timeout, args.gpu_free_threshold_mb, args.gpu_free_timeout),
         )
         refs.append((node_id[:16], ref))
 

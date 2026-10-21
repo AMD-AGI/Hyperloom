@@ -104,9 +104,9 @@ def _setup_steps(enablement: Mapping[str, Any]) -> list[dict[str, Any]]:
     occurrences = _digest_occurrences(ledger)
     steps: list[dict[str, Any]] = []
     for row in sorted(ledger, key=lambda r: int(r.get("seq") or 0)):
-        # ``setup.cmd`` means "run this": a skipped command never ran and a
-        # failed one did not satisfy the applied contract, so neither becomes a
-        # step. Both stay in the ledger, which is audit data.
+        # ``setup.cmd`` means "run this", and a failed command did not satisfy
+        # the applied contract, so it becomes no step. It stays in the ledger,
+        # which is audit data.
         if str(row.get("outcome") or "") != "applied":
             continue
         cmd = by_digest.get(str(row.get("cmd_digest") or ""))

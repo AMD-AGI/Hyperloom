@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import dataclasses
+
 import pytest
 
 from kernelforge.config import Config
@@ -16,11 +18,12 @@ from kernelforge.knowledge.kb_store.reader import (
 )
 from kernelforge.knowledge.kb_store.writer import (
     hash_implementation_identity,
-    write_run_experience,
 )
+from kernelforge.knowledge.kb_store.identity.run import LoopKernel
 from kernelforge.knowledge.kb_store.config import KnowledgeConfig, KnowledgeStoreMode
 from kernelforge.knowledge.kb_store.identity import run as run_identity
 from kernelforge.knowledge.kb_store import record_store
+from kernelforge.tests.knowledge.kb_store.test_writer import write_flat_experience
 from kernelforge.tests.test_rewrite_by_flydsl_kb import InMemoryKBStore
 
 DIFF = "diff --git a/kernel.py b/kernel.py\n--- a/kernel.py\n+++ b/kernel.py\n@@ -1 +1 @@\n-old\n+new\n"
@@ -55,7 +58,6 @@ def config(tmp_path, workspace):
 
 def _seed(config, workspace, **overrides):
     kwargs = {
-        "config": config,
         "workspace": str(workspace),
         "kernel_path": str(workspace / "kernel.py"),
         "kernel_source": KERNEL_SOURCE,
@@ -69,23 +71,21 @@ def _seed(config, workspace, **overrides):
         "digest": "d",
         "snr_db": 42.0,
         "framework": "standalone",
-        "summary_override": SUMMARY,
     }
     kwargs.update(overrides)
-    return write_run_experience(**kwargs)
+    return write_flat_experience(config, {"summary_override": SUMMARY, **kwargs})
 
 
 def _read_args(config, workspace, **overrides):
-    args = {
-        "config": config,
+    kernel = {
         "kernel_path": str(workspace / "kernel.py"),
         "kernel_source": KERNEL_SOURCE,
         "kernel_backend": "triton",
         "framework": "standalone",
         "workspace": str(workspace),
     }
-    args.update(overrides)
-    return args
+    kernel.update(overrides)
+    return {"config": config, "kernel": LoopKernel(**kernel)}
 
 
 # --- the paths that yield no candidate ------------------------------------- #
@@ -128,7 +128,7 @@ def test_a_transport_failure_is_not_reported_as_an_empty_store(config, workspace
     _seed(config, workspace)
 
     def boom(*_args, **_kwargs):
-        raise RuntimeError("kaboom")
+        raise record_store.KBStoreError("kaboom")
 
     monkeypatch.setattr(record_store.LocalRewriteRecords, "candidates", boom)
     status: dict[str, str] = {}
@@ -138,13 +138,38 @@ def test_a_transport_failure_is_not_reported_as_an_empty_store(config, workspace
     assert "kaboom" in status["read_error"]
 
 
-def test_an_unexpected_failure_cold_starts_instead_of_raising(config, workspace, monkeypatch):
+@pytest.mark.parametrize(
+    "failure",
+    [
+        record_store.KBStoreError("link down"),
+        record_store.RewriteRecordError("unusable canonical id"),
+        OSError("disk gone"),
+        ValueError("bad identity"),
+    ],
+    ids=lambda failure: type(failure).__name__,
+)
+def test_an_expected_read_failure_cold_starts_instead_of_raising(config, workspace, monkeypatch, failure):
     def boom(*_args, **_kwargs):
-        raise RuntimeError("kaboom")
+        raise failure
+
+    monkeypatch.setattr(reader, "implementation_signature", boom)
+    status: dict[str, str] = {}
+
+    assert read_best_solution(**_read_args(config, workspace)) is None
+    assert read_top_solutions(**_read_args(config, workspace), read_status=status) == []
+    assert status == {"read_reason": "read_error", "read_error": f"{type(failure).__name__}: {failure}"}
+
+
+def test_an_unexpected_read_failure_propagates(config, workspace, monkeypatch):
+    def boom(*_args, **_kwargs):
+        raise TypeError("signature drifted")
 
     monkeypatch.setattr(reader, "implementation_signature", boom)
 
-    assert read_best_solution(**_read_args(config, workspace)) is None
+    with pytest.raises(TypeError, match="signature drifted"):
+        read_best_solution(**_read_args(config, workspace))
+    with pytest.raises(TypeError, match="signature drifted"):
+        read_top_solutions(**_read_args(config, workspace))
 
 
 # --- what a hit carries ----------------------------------------------------- #
@@ -235,8 +260,8 @@ def test_a_foreign_implementation_stays_reference_only(config, workspace):
     _seed(
         config,
         workspace,
-        implementation_signature_override=hash_implementation_identity(foreign_identity),
-        implementation_identity_override=foreign_identity,
+        implementation_signature=hash_implementation_identity(foreign_identity),
+        implementation_identity=foreign_identity,
     )
 
     best = read_best_solution(**_read_args(config, workspace))
@@ -322,7 +347,7 @@ def test_without_a_workspace_nothing_is_written_beside_the_kernel(config, worksp
     """A kernel usually lives in site-packages; a read may not write there."""
     _seed(config, workspace)
     args = _read_args(config, workspace)
-    args.pop("workspace")
+    args["kernel"] = dataclasses.replace(args["kernel"], workspace="")
 
     solutions = read_top_solutions(**args)
 
@@ -362,7 +387,7 @@ def test_a_failed_read_does_not_leak_the_kb_store_token(tmp_path, workspace, mon
     )
 
     def _fail(**_kwargs):
-        raise RuntimeError("store rejected kb-secret-value")
+        raise record_store.KBStoreError("store rejected kb-secret-value")
 
     monkeypatch.setattr(reader, "_read_top_solutions_impl", _fail)
     status: dict[str, str] = {}

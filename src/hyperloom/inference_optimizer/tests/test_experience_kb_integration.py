@@ -4,18 +4,14 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import http.client
 import json
 import logging
 import sys
 from types import SimpleNamespace
 
-import pytest
-
-from hyperloom.inference_optimizer.experience_collect import mapping_schema_ref
+from hyperloom.inference_optimizer.experience_kb_service import mapping_schema_ref
 from hyperloom.inference_optimizer.experience_kb import (
-    CONTENT_INLINE_LIMIT,
     RENDER_BUDGET_CHARS,
     ExperienceKBEvidence,
     ExperienceKBIntegration,
@@ -28,7 +24,7 @@ from hyperloom.orchestrator.prompts.specialist_prompt_builder import (
     build_specialist_prompts,
 )
 from hyperloom.orchestrator.specialists.domains import get_domain
-from hyperloom.orchestrator.state.shared_state import _KB_INJECTIONS_CAP, SharedState
+from hyperloom.orchestrator.state.shared_state import _KB_INJECTIONS_CAP, KbInjection, SharedState
 from hyperloom_kb import RemoteClient, RemoteConfig
 
 _FIRST = "exp-00000000000000000000000000000001"
@@ -45,10 +41,9 @@ class FakeClient:
     def __init__(self) -> None:
         self.calls = []
 
-    def read(self, decision, context, *, schema_ref, content_inline_limit, render_budget_chars):
-        assert schema_ref == _SCHEMA
-        assert (content_inline_limit, render_budget_chars) == (CONTENT_INLINE_LIMIT, RENDER_BUDGET_CHARS)
-        self.calls.append((decision, context))
+    def read(self, query):
+        assert (query.schema_ref, query.render_budget_chars) == (_SCHEMA, RENDER_BUDGET_CHARS)
+        self.calls.append((query.decision, query.context))
         return SimpleNamespace(
             read_id=f"read-{len(self.calls)}",
             status="completed",
@@ -56,7 +51,6 @@ class FakeClient:
             rendered_refs=(FakeRef(),),
             warnings=(),
             experiences=({"experience_id": _FIRST, "decision": "keep"},),
-            contents=(),
         )
 
 
@@ -201,12 +195,8 @@ def test_reads_speak_the_service_read_contract_through_the_real_sdk(tmp_path) ->
     assert request.full_url == "https://kb.example/v1/read"
     assert request.get_header("Authorization") == "Bearer service-token"
     body = json.loads(request.data)
-    assert set(body) == {"decision", "context", "schema_ref", "content_inline_limit", "render_budget_chars"}
-    assert (body["schema_ref"], body["content_inline_limit"], body["render_budget_chars"]) == (
-        _SCHEMA,
-        CONTENT_INLINE_LIMIT,
-        RENDER_BUDGET_CHARS,
-    )
+    assert set(body) == {"decision", "context", "schema_ref", "render_budget_chars"}
+    assert (body["schema_ref"], body["render_budget_chars"]) == (_SCHEMA, RENDER_BUDGET_CHARS)
     assert evidence.status == "completed"
     assert evidence.read_id == response["read_id"]
     assert evidence.prompt_block == response["prompt_block"]
@@ -214,69 +204,21 @@ def test_reads_speak_the_service_read_contract_through_the_real_sdk(tmp_path) ->
     assert evidence.experiences == tuple(response["experiences"])
 
 
-def test_a_referenced_change_reaches_the_prompt_as_session_files(tmp_path) -> None:
+def test_a_change_reaches_the_prompt_whole_as_the_service_rendered_it(tmp_path) -> None:
     patch = "--- a/vllm/x.py\n+++ b/vllm/x.py\n@@ -1 +1 @@\n-a = 1\n+a = 2\n" * 60
     content = json.dumps({"patches": [{"path": "patches/fuse attn.diff", "sha256": "0" * 64, "content": patch}]})
-    ref = "sha256:" + hashlib.sha256(content.encode()).hexdigest()
-    block = f"=== Relevant Experience KB ===\nExperience {_FIRST}\nRecord:\n<external content {ref}, 9 bytes>"
-    contents = ({"ref": ref, "bytes": len(content.encode()), "content": content},)
-    reads = []
+    record = json.dumps({"change": {"content": content}}, indent=2)
+    block = f"=== Relevant Experience KB ===\nExperience {_FIRST}\nRecord:\n{record}"
 
     class _Client:
-        def read(self, decision, context, *, schema_ref, content_inline_limit, render_budget_chars):
-            reads.append(content_inline_limit)
+        def read(self, _query):
             return SimpleNamespace(
-                read_id=f"read-{len(reads)}",
+                read_id="read-1",
                 status="completed",
                 prompt_block=block,
                 rendered_refs=(FakeRef(),),
                 warnings=(),
                 experiences=(),
-                contents=contents,
-            )
-
-    integration = ExperienceKBIntegration(_Client(), tmp_path, _SCHEMA)
-    evidence = integration.read_for_framework(_state(tick=1))
-    again = integration.read_for_framework(_state(tick=2))
-
-    content_file = tmp_path / "experience_kb" / "contents" / f"{ref.removeprefix('sha256:')}.txt"
-    patch_file = content_file.with_suffix("") / "1-fuse_attn.diff"
-    assert content_file.read_text(encoding="utf-8") == content
-    assert patch_file.read_text(encoding="utf-8") == patch
-    assert evidence.prompt_block.startswith(block)
-    assert f"- {ref} ({len(content.encode())} bytes): {content_file}" in evidence.prompt_block
-    assert f"  - patch: {patch_file}" in evidence.prompt_block
-    assert patch not in evidence.prompt_block
-    assert again.prompt_block == evidence.prompt_block
-    assert reads == [CONTENT_INLINE_LIMIT, CONTENT_INLINE_LIMIT]
-
-
-_UNWRITABLE_PATCH = json.dumps(
-    {"patches": [{"path": "a.diff", "content": "\ud800+x = 1\n"}, {"path": "b.diff", "content": "+y = 2\n"}]}
-)
-
-
-@pytest.mark.parametrize(
-    ("content", "patch_files"),
-    [("[" * 100_000 + "]" * 100_000, []), (_UNWRITABLE_PATCH, ["2-b.diff"])],
-    ids=["too-deeply-nested-to-parse", "patch-with-a-lone-surrogate"],
-)
-def test_a_content_hyperloom_cannot_split_never_stops_a_turn_or_a_dispatch(tmp_path, content, patch_files) -> None:
-    ref = "sha256:" + hashlib.sha256(content.encode()).hexdigest()
-    block = (
-        f"=== Relevant Experience KB ===\nExperience {_FIRST}\nRecord:\n<external content {ref}, {len(content)} bytes>"
-    )
-
-    class _Client:
-        def read(self, decision, context, **_options):
-            return SimpleNamespace(
-                read_id="read-deep",
-                status="completed",
-                prompt_block=block,
-                rendered_refs=(FakeRef(),),
-                warnings=(),
-                experiences=(),
-                contents=({"ref": ref, "bytes": len(content.encode()), "content": content},),
             )
 
     state = SharedState(tick=3, phase="FRAMEWORK_AGENT")
@@ -286,15 +228,9 @@ def test_a_content_hyperloom_cannot_split_never_stops_a_turn_or_a_dispatch(tmp_p
     orchestration_block = asyncio.run(coordinator.conversation._kb_prompt_block("proposal"))
     asyncio.run(coordinator.specialist_dispatch.warm_specialist_params(params))
 
-    content_file = tmp_path / "experience_kb" / "contents" / f"{ref.removeprefix('sha256:')}.txt"
-    patch_dir = content_file.with_suffix("")
-    assert content_file.read_text(encoding="utf-8") == content
-    assert f"- {ref} ({len(content.encode())} bytes): {content_file}" in orchestration_block
-    assert sorted(path.name for path in patch_dir.glob("*")) == patch_files
-    assert [line for line in orchestration_block.splitlines() if "- patch:" in line] == [
-        f"  - patch: {patch_dir / name}" for name in patch_files
-    ]
-    assert params["kb_read_id"] == "read-deep"
+    assert block in orchestration_block
+    assert params["experience_kb_block"] == block
+    assert not (tmp_path / "experience_kb").exists()
 
 
 def test_bootstrap_uses_only_service_url_and_token(tmp_path) -> None:
@@ -319,8 +255,8 @@ def test_a_service_that_keeps_failing_reads_stops_being_read_for_the_session(tmp
     calls = []
 
     class _Client:
-        def read(self, decision, context, **_options):
-            calls.append(decision)
+        def read(self, query):
+            calls.append(query.decision)
             status = next(statuses)
             return SimpleNamespace(
                 read_id=f"read-{len(calls)}",
@@ -329,7 +265,6 @@ def test_a_service_that_keeps_failing_reads_stops_being_read_for_the_session(tmp
                 rendered_refs=(),
                 warnings=() if status == "completed" else ("planner gateway timed out",),
                 experiences=(),
-                contents=(),
             )
 
     integration = ExperienceKBIntegration(_Client(), tmp_path, _SCHEMA)
@@ -412,13 +347,15 @@ def test_orchestration_injection_is_recorded_once_per_injected_experience_set(tm
         integration.evidence = evidence
         asyncio.run(coordinator.conversation._kb_prompt_block("proposal"))
         state.record_experience_kb_injection(
-            consumer="specialist",
-            domain="serving_specialist",
-            gap_canonical_id="gap.x",
-            read_id=f"specialist-{tick}",
-            experience_ids=[_FIRST],
-            experiences=[],
-            prompt_block="x",
+            KbInjection(
+                consumer="specialist",
+                domain="serving_specialist",
+                gap_canonical_id="gap.x",
+                read_id=f"specialist-{tick}",
+                experience_ids=[_FIRST],
+                experiences=[],
+                prompt_block="x",
+            )
         )
     integration.evidence = ExperienceKBEvidence(
         tick=4, read_id="read-4", status="unavailable", prompt_block="", rendered_refs=(), warnings=("offline",)
@@ -438,11 +375,13 @@ def test_injection_record_is_capped_and_survives_resume(tmp_path) -> None:
     for index in range(_KB_INJECTIONS_CAP + 5):
         state.tick = index
         state.record_experience_kb_injection(
-            consumer="orchestration",
-            read_id=f"read-{index}",
-            experience_ids=[f"exp-{index}"],
-            experiences=[],
-            prompt_block="x",
+            KbInjection(
+                consumer="orchestration",
+                read_id=f"read-{index}",
+                experience_ids=[f"exp-{index}"],
+                experiences=[],
+                prompt_block="x",
+            )
         )
     state.save(tmp_path)
 
@@ -668,23 +607,27 @@ def test_state_reader_prints_each_consumers_latest_injection(tmp_path, monkeypat
 
     state = SharedState(tick=5, phase="FRAMEWORK_AGENT")
     state.record_experience_kb_injection(
-        consumer="orchestration",
-        read_id="read-5",
-        experience_ids=[_FIRST, _SECOND],
-        experiences=[
-            {"experience_id": _SECOND, "decision": "revert", "change_summary": "compile", "source_run_id": "run-a"},
-            {"experience_id": _FIRST, "decision": "keep", "change_summary": "chunk-8192", "source_run_id": "run-a"},
-        ],
-        prompt_block=f"Experience {_FIRST}\n...\nExperience {_SECOND}\n...",
+        KbInjection(
+            consumer="orchestration",
+            read_id="read-5",
+            experience_ids=[_FIRST, _SECOND],
+            experiences=[
+                {"experience_id": _SECOND, "decision": "revert", "change_summary": "compile", "source_run_id": "run-a"},
+                {"experience_id": _FIRST, "decision": "keep", "change_summary": "chunk-8192", "source_run_id": "run-a"},
+            ],
+            prompt_block=f"Experience {_FIRST}\n...\nExperience {_SECOND}\n...",
+        )
     )
     state.record_experience_kb_injection(
-        consumer="specialist",
-        domain="kernel_switch_specialist",
-        gap_canonical_id="gap.x",
-        read_id="read-6",
-        experience_ids=[_SECOND],
-        experiences=[{"experience_id": _SECOND, "decision": "revert", "change_summary": "compile"}],
-        prompt_block=f"Experience {_SECOND}\n...",
+        KbInjection(
+            consumer="specialist",
+            domain="kernel_switch_specialist",
+            gap_canonical_id="gap.x",
+            read_id="read-6",
+            experience_ids=[_SECOND],
+            experiences=[{"experience_id": _SECOND, "decision": "revert", "change_summary": "compile"}],
+            prompt_block=f"Experience {_SECOND}\n...",
+        )
     )
     state.save(tmp_path)
     monkeypatch.setattr(sys, "argv", ["read_optimizer_state.py", str(tmp_path)])

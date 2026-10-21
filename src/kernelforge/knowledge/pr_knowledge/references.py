@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
-from kernelforge.durable_io import atomic_write_text
+from kernelforge.tools.durable_io import atomic_write_text
 from kernelforge.knowledge.pr_knowledge.client import (
     PRContractError,
     PRMonitorClient,
@@ -22,6 +22,7 @@ from kernelforge.knowledge.pr_knowledge.client import (
 from kernelforge.knowledge.pr_knowledge.search import (
     HIT_FILE_PATH,
     HIT_SEARCH,
+    PRLifecycle,
     PRReference,
     components_of_interest,
     discover,
@@ -36,6 +37,7 @@ from kernelforge.knowledge.pr_knowledge.context import (
     REASON_SERVICE_UNREACHABLE,
     REASON_SKIPPED_DEADLINE,
     PRQueryContext,
+    PrReferenceQuery,
     build_context,
     check_whitelist,
 )
@@ -91,10 +93,16 @@ def byte_len(text: str) -> int:
     return len(text.encode("utf-8"))
 
 
+def _state_label(lifecycle: PRLifecycle) -> str:
+    """The state as a reader sees it: ``unknown`` when the service did not report one, a draft marked."""
+    label = "unknown" if lifecycle.state is None else lifecycle.state.value
+    return f"{label}, draft" if lifecycle.draft else label
+
+
 def render_entry(reference: PRReference) -> str:
     """Render every populated field within one shared byte budget."""
     worth = "unknown" if reference.worth_trying is None else f"{reference.worth_trying:.2f}"
-    state = "merged" if reference.is_merged else "open"
+    state = _state_label(reference.lifecycle)
     header = (
         f"- {reference.repo}#{reference.number} ({state}, worth {worth}, "
         f"via {'+'.join(reference.hit_via) or 'unknown'}, {reference.n_files} files)"
@@ -200,7 +208,7 @@ def reference_to_entry(reference: PRReference) -> dict[str, Any]:
         "number": reference.number,
         "title": reference.title,
         "hit_via": list(reference.hit_via),
-        "is_merged": reference.is_merged,
+        **reference.lifecycle.to_record(),
         "worth_trying": reference.worth_trying,
         "components": list(reference.components),
         "mechanisms": list(reference.mechanisms),
@@ -233,7 +241,7 @@ def entry_to_reference(entry: dict[str, Any]) -> PRReference | None:
         number=number,
         title=str(entry.get("title") or ""),
         hit_via=tuple(entry.get("hit_via") or ()),
-        is_merged=bool(entry.get("is_merged")),
+        lifecycle=PRLifecycle.from_record(entry),
         worth_trying=float(worth) if isinstance(worth, (int, float)) else None,
         components=tuple(entry.get("components") or ()),
         mechanisms=tuple(entry.get("mechanisms") or ()),
@@ -314,18 +322,18 @@ def render_index(snapshot: Snapshot) -> str:
         "",
         f"entries: {len(snapshot.entries)}   empty queries cached: {len(snapshot.empty_queries)}",
         "",
-        "| PR | worth | merged | files | hit_via | head | fetched |",
+        "| PR | worth | state | files | hit_via | head | fetched |",
         "| --- | --- | --- | --- | --- | --- | --- |",
     ]
     for key in sorted(snapshot.entries):
         entry = snapshot.entries[key]
         worth = entry.get("worth_trying")
         lines.append(
-            "| {repo}#{number} | {worth} | {merged} | {files} | {via} | {head} | {at} |".format(
+            "| {repo}#{number} | {worth} | {state} | {files} | {via} | {head} | {at} |".format(
                 repo=entry.get("repo", ""),
                 number=entry.get("number", ""),
                 worth="unknown" if worth is None else f"{float(worth):.2f}",
-                merged="yes" if entry.get("is_merged") else "no",
+                state=_state_label(PRLifecycle.from_record(entry)),
                 files=entry.get("n_files", 0),
                 via="+".join(entry.get("hit_via") or []),
                 head=str(entry.get("head_sha") or "")[:12],
@@ -430,17 +438,37 @@ def _filter_cached_empties(context: PRQueryContext, snapshot: Snapshot) -> tuple
     return replace(context, file_paths=paths, keywords=keywords), skipped
 
 
+class _PreflightFailed(Exception):
+    """pr-monitor could not list its repositories within the cutoff; ``args[0]`` is the reason the lookup reports."""
+
+
+def _tracked_repos(client: PRMonitorClient, deadline: float) -> tuple[str, ...]:
+    """The repositories pr-monitor tracks, read within the shared cutoff; raises _PreflightFailed when it cannot say."""
+    healthy = remaining_sec(deadline) > 0 and client.healthz(timeout_sec=remaining_sec(deadline))
+    if not healthy or remaining_sec(deadline) <= 0:
+        raise _PreflightFailed(REASON_SKIPPED_DEADLINE if remaining_sec(deadline) <= 0 else REASON_SERVICE_UNREACHABLE)
+    try:
+        repos_payload = client.list_repos(timeout_sec=remaining_sec(deadline))
+    except PRMonitorError as error:
+        log.warning("pr-monitor repository lookup failed: %s", error)
+        reason = REASON_SKIPPED_DEADLINE if remaining_sec(deadline) <= 0 else REASON_SERVICE_UNREACHABLE
+        raise _PreflightFailed(reason) from None
+    drift = check_whitelist(repos_payload)
+    if not drift.clean:
+        log.warning(
+            "pr_refs: tracked repo drift (missing=%s unexpected=%s inactive=%s)",
+            drift.missing,
+            drift.unexpected,
+            drift.inactive,
+        )
+    return tuple(str(entry.get("repo_name")) for entry in repos_payload if entry.get("repo_name"))
+
+
 def collect_references(
     *,
     workspace_dir: str,
+    query: PrReferenceQuery,
     client: PRMonitorClient | None = None,
-    kernel_backend: str = "",
-    git_remote: str = "",
-    source_files: Iterable[str] = (),
-    operator_name: str = "",
-    target_functions: Iterable[str] = (),
-    bottleneck: str = "",
-    top_k: int = 0,
     budget_sec: float = 0.0,
     persist: bool = True,
 ) -> PRRefsResult:
@@ -453,92 +481,35 @@ def collect_references(
     # Load after starting the clock so a slow filesystem cannot silently extend the lookup beyond the caller's
     # finalization reserve.
     snapshot = load_snapshot(workspace_dir)
-
-    def expired() -> bool:
-        """True once the shared cutoff leaves no time for another stage."""
-        return remaining_sec(deadline) <= 0
-
-    if expired():
-        return _degraded(snapshot, REASON_SKIPPED_DEADLINE, top_k=top_k)
-
-    if not client.healthz(timeout_sec=remaining_sec(deadline)):
-        reason = REASON_SKIPPED_DEADLINE if expired() else REASON_SERVICE_UNREACHABLE
-        return _degraded(snapshot, reason, top_k=top_k)
-
-    if expired():
-        return _degraded(snapshot, REASON_SKIPPED_DEADLINE, top_k=top_k)
-
     try:
-        repos_payload = client.list_repos(timeout_sec=remaining_sec(deadline))
-    except PRMonitorError as error:
-        log.warning("pr-monitor repository lookup failed: %s", error)
-        reason = REASON_SKIPPED_DEADLINE if expired() else REASON_SERVICE_UNREACHABLE
-        return _degraded(snapshot, reason, top_k=top_k)
-    drift = check_whitelist(repos_payload)
-    if not drift.clean:
-        log.warning(
-            "pr_refs: tracked repo drift (missing=%s unexpected=%s inactive=%s)",
-            drift.missing,
-            drift.unexpected,
-            drift.inactive,
-        )
-    tracked = tuple(str(entry.get("repo_name")) for entry in repos_payload if entry.get("repo_name"))
+        tracked = _tracked_repos(client, deadline)
+    except _PreflightFailed as failed:
+        return _degraded(snapshot, failed.args[0])
 
     workspace = Path(workspace_dir).resolve()
     context = build_context(
-        kernel_backend=kernel_backend,
-        git_remote=git_remote,
-        tracked=tracked,
-        source_files=tuple(source_files),
-        workspace=str(workspace),
-        exists=lambda rel: (workspace / rel).exists(),
-        operator_name=operator_name,
-        target_functions=tuple(target_functions),
-        bottleneck=bottleneck,
+        query, tracked=tracked, workspace=str(workspace), exists=lambda rel: (workspace / rel).exists()
     )
     probes = 0
     probe_reason = ""
     if context.reason == REASON_REPO_UNTRACKED and context.file_paths:
-        if expired():
-            return _degraded(snapshot, REASON_SKIPPED_DEADLINE, top_k=top_k)
+        if remaining_sec(deadline) <= 0:
+            return _degraded(snapshot, REASON_SKIPPED_DEADLINE)
         # Probe source ownership within the shared end-to-end budget.
         identified, probes, probe_reason = identify_repo_by_path(
-            client,
-            context.file_paths[0],
-            tracked,
-            hint=context.repo,
-            budget_sec=remaining_sec(deadline),
+            client, context.file_paths[0], tracked, hint=context.repo, budget_sec=remaining_sec(deadline)
         )
-        if not identified and expired():
-            return _degraded(
-                snapshot,
-                REASON_SKIPPED_DEADLINE,
-                top_k=top_k,
-                http_calls=probes,
-            )
         if identified:
-            log.info(
-                "pr_refs: %s is untracked; identified %s by source path",
-                context.repo,
-                identified,
-            )
+            log.info("pr_refs: %s is untracked; identified %s by source path", context.repo, identified)
             context = replace(context, repo=identified, reason="")
+        elif remaining_sec(deadline) <= 0:
+            return _degraded(snapshot, REASON_SKIPPED_DEADLINE, http_calls=probes)
         elif probe_reason:
-            return _degraded(
-                snapshot,
-                probe_reason,
-                top_k=top_k,
-                http_calls=probes,
-            )
+            return _degraded(snapshot, probe_reason, http_calls=probes)
 
     if context.reason:
-        return _degraded(
-            snapshot,
-            context.reason,
-            repo="" if context.reason == REASON_REPO_UNTRACKED else context.repo,
-            top_k=top_k,
-            http_calls=probes,
-        )
+        repo = "" if context.reason == REASON_REPO_UNTRACKED else context.repo
+        return _degraded(snapshot, context.reason, repo=repo, http_calls=probes)
 
     narrowed, skipped = _filter_cached_empties(context, snapshot)
     stats: dict[str, Any] = {"skipped_cached_empty": skipped, "http_calls": probes}
@@ -546,16 +517,13 @@ def collect_references(
     pending: dict[str, Any] = {}
 
     if narrowed.file_paths or narrowed.keywords:
-        outcome = discover(client, narrowed, top_k=top_k, deadline=deadline)
+        outcome = discover(client, narrowed, deadline=deadline)
         stats.update(outcome.stats)
         stats["http_calls"] = stats.get("http_calls", 0) + probes
         reason = outcome.reason
         for kind, value in stats.pop("empty_queries", []):
             record_empty_query(snapshot, query_key(kind, context.repo, value))
-        merge_references(
-            snapshot,
-            outcome.surfaced_references or outcome.references,
-        )
+        merge_references(snapshot, outcome.surfaced_references or outcome.references)
         if persist:
             save_snapshot(workspace_dir, snapshot)
             write_index(workspace_dir, snapshot)
@@ -566,15 +534,23 @@ def collect_references(
 
     if probe_reason == REASON_CONTRACT_ERROR or (probe_reason and not stats.get("degraded_reason")):
         stats["degraded_reason"] = probe_reason
+    return _rendered_result(snapshot, context, reason, stats, pending)
 
-    # Re-render cached references so refreshes never retract prior context.
-    shown = _ranked_from_snapshot(snapshot, context, top_k=top_k)
+
+def _rendered_result(
+    snapshot: Snapshot, context: PRQueryContext, reason: str, stats: dict[str, Any], pending: dict[str, Any]
+) -> PRRefsResult:
+    """Render the snapshot's references for the query; re-rendering the cache means a refresh never retracts them."""
+    shown = _ranked_from_snapshot(snapshot, context)
     prompt_context = render_reference_set(shown)
     injected_entries = prompt_context.count("\n- ")
     shown = shown[:injected_entries]
-    stats["injected_entries"] = injected_entries
-    stats["injected_bytes"] = byte_len(prompt_context)
-    stats["from_snapshot"] = len(snapshot.entries)
+    stats = {
+        **stats,
+        "injected_entries": injected_entries,
+        "injected_bytes": byte_len(prompt_context),
+        "from_snapshot": len(snapshot.entries),
+    }
     if (
         shown
         and reason
@@ -597,11 +573,10 @@ def _degraded(
     reason: str,
     *,
     repo: str = "",
-    top_k: int = 0,
     http_calls: int = 0,
 ) -> PRRefsResult:
     """Return an explicit failure while retaining cached references."""
-    shown = _ranked_from_snapshot(snapshot, PRQueryContext(repo=repo), top_k=top_k)
+    shown = _ranked_from_snapshot(snapshot, PRQueryContext(repo=repo))
     if not shown:
         return PRRefsResult(
             reason=reason,
@@ -626,14 +601,14 @@ def _degraded(
     )
 
 
-def _ranked_from_snapshot(snapshot: Snapshot, context: PRQueryContext, *, top_k: int) -> list[PRReference]:
+def _ranked_from_snapshot(snapshot: Snapshot, context: PRQueryContext) -> list[PRReference]:
     """Best TOP_K references the snapshot holds, ranked for this query."""
     references = [
         reference for reference in (entry_to_reference(e) for e in snapshot.entries.values()) if reference is not None
     ]
     if not references:
         return []
-    limit = top_k or int(os.environ.get("PR_KB_TOP_K", "5") or 5)
+    limit = int(os.environ.get("PR_KB_TOP_K", "5") or 5)
     interest = components_of_interest(context)
     relevant = filter_references_by_relevance(references, interest)
     ranked = rank_references(relevant, components_of_interest=interest)

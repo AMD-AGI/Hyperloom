@@ -19,10 +19,12 @@ import pytest
 from hyperloom.inference_optimizer.session.optimization_journal import Verdict
 from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
 from hyperloom.inference_optimizer.session.session_binding import session_scope
-from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.actions.executors.integrate_patch import RESULT_BENCHED
+from hyperloom.orchestrator.loop.coordinator import AdvisoryServices, Coordinator
 from hyperloom.orchestrator.phases.machine import Transition
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.orchestrator.roles.mock_backend import MockBackend, MockTurn, ScriptedPlan
+from hyperloom.orchestrator.phases.framework import ProgressStamp
 
 
 def _tr(reason: str) -> Transition:
@@ -32,7 +34,6 @@ def _tr(reason: str) -> Transition:
         to_phase="SWEEP",
         reason=reason,
         evidence={},
-        loopback=False,
     )
 
 
@@ -46,7 +47,7 @@ def _coordinator(session_dir: Path) -> Coordinator:
             "critic": MockBackend(idle),
         },
         role_registry=default_role_registry(),
-        knowledge_plane=None,
+        advisory=AdvisoryServices(knowledge_plane=None),
     )
 
 
@@ -77,25 +78,14 @@ def test_open_records_the_resolved_policy(session_dir: Path, legacy_timeout_over
     coord.phase_framework.close_framework_timeline(_tr("optimize_budget_cap"))
 
     policy = _events(session_dir)[0]["ext"]["policy"]
+    assert set(policy) == {"keep_threshold_pct", "config", "source"}
     assert policy["keep_threshold_pct"] is not None
-    # Invocation caps are not phase policy; legacy state must not fabricate one.
-    assert policy["variant_timeout_sec"] is None
-    assert policy["overtime_kill_ratio"] is None
     assert policy["config"]["lookback"] == 7
     assert policy["config"]["keep_gain_threshold_pct"] == 1.25
     # Not overridden, so the library default the phase will actually apply.
     assert policy["config"]["empty_streak_threshold"] is not None
     assert policy["source"]["no_keep_streak_threshold"] is not None
     assert policy["source"]["discovery_retry_limit"] == 3
-
-
-def test_force_exit_budget_pct_is_reported_unresolved(session_dir: Path):
-    coord = _coordinator(session_dir)
-    coord.shared_state.phase = "FRAMEWORK_AGENT"
-    coord.phase_framework._open_framework_timeline()
-    coord.phase_framework.close_framework_timeline(_tr("optimize_budget_cap"))
-
-    assert _events(session_dir)[0]["ext"]["policy"]["force_exit_budget_pct"] is None
 
 
 @pytest.mark.asyncio
@@ -265,11 +255,13 @@ def test_terminal_row_settles_the_proposal(session_dir: Path):
     coord.phase_framework._open_framework_timeline()
 
     coord.phase_framework._stamp_framework_progress(
-        candidate_id="cand-1",
-        batch_id="b1",
-        status="apply_failed",
-        rationale="patch did not apply",
-        provenance="pump",
+        ProgressStamp(
+            candidate_id="cand-1",
+            batch_id="b1",
+            status="apply_failed",
+            rationale="patch did not apply",
+            provenance="pump",
+        )
     )
     coord.phase_framework.close_framework_timeline(_tr("optimize_no_more_leverage"))
 
@@ -357,6 +349,7 @@ def test_config_attempts_record_the_pair_and_the_verbatim_outcome(session_dir: P
                 "outcome": "KILLED_OVERTIME",
                 "fingerprint": "fp2",
                 "provenance": "default_grid",
+                "failure_attribution": "unknown",
                 "metrics": {"base_tput": 112.0, "estimated_output_throughput": 40.0},
                 "variant": {},
             },
@@ -368,6 +361,7 @@ def test_config_attempts_record_the_pair_and_the_verbatim_outcome(session_dir: P
                 "reason": "warmup_failed",
                 "error_class": "capability_unsupported",
                 "error_excerpt": "the requested attention backend is unsupported",
+                "failure_attribution": "candidate_caused",
                 "metrics": {"base_tput": 112.0},
                 "variant": {
                     "extra_server_args": "--attention-backend unsupported",
@@ -397,6 +391,7 @@ def test_config_attempts_record_the_pair_and_the_verbatim_outcome(session_dir: P
     assert keep["measurement"]["after_tput"] == 112.0
     assert keep["adopted"] is True
     assert keep["attribution_eligible"] is True
+    assert all(row["benched"] is True for row in attempts.values())
     assert keep["config_delta"]["extra_server_args"] == "--foo 2"
     assert keep["config_delta"]["remove_args"] == ["--old-flag"]
     assert keep["config_delta"]["unset_envs"] == ["OLD_ENV"]
@@ -601,6 +596,7 @@ def test_source_attempt_records_its_pair_gate_and_lifecycle_step(session_dir: Pa
         task=task,
         result={
             "status": "kept",
+            RESULT_BENCHED: True,
             "base_tput": 100.0,
             "output_throughput": 108.0,
             "delta_pct": 8.0,
@@ -652,6 +648,7 @@ def test_source_attempt_records_its_pair_gate_and_lifecycle_step(session_dir: Pa
         "args_mode": "append",
     }
     assert attempt["adopted"] is True
+    assert attempt["benched"] is True
     assert attempt["attribution_eligible"] is True
     assert attempt["target_files"] == ["vllm/attention.py"]
     assert [gate["gate"] for gate in attempt["gates"]] == [
@@ -791,6 +788,18 @@ def test_an_attempt_that_never_measured_claims_no_stack(session_dir: Path):
         {"status": "failed", "error_class": "patch_apply_failed", "error": "does not apply"},
     )
     assert "measured_against" not in attempt
+
+
+@pytest.mark.parametrize(
+    ("result", "benched"),
+    [
+        pytest.param({"status": "reverted", "error_class": "bench_exception", RESULT_BENCHED: True}, True, id="gate"),
+        pytest.param({"status": "failed", "error_class": "framework_root_unresolved"}, False, id="earlier-stage"),
+    ],
+)
+def test_a_source_attempt_says_whether_it_reached_the_bench(session_dir: Path, result: dict, benched: bool):
+    """The executor's bench-and-gate stage marks its result whatever the verdict, and no earlier stage does."""
+    assert _authored_outcome(_coordinator(session_dir), result)["benched"] is benched
 
 
 def test_absent_accuracy_gate_writes_no_gate_row(session_dir: Path):
@@ -1072,6 +1081,27 @@ def test_a_rejected_grid_is_reviewed_and_dropped(session_dir: Path):
     assert proposal["terminal"]["disposition"] == "dropped"
     # A denial is a review plus a disposition; the drop is not a lifecycle step of its own.
     assert [step["step"] for step in proposal["lifecycle"]] == ["proposed", "reviewed"]
+
+
+def test_a_grid_denied_on_the_review_timeout_is_dropped(session_dir: Path):
+    """The timeout deny bypasses the verdict handler, and must still settle what the event log calls rejected."""
+    import asyncio
+    import time
+
+    from hyperloom.orchestrator.bringup.reconcile import REVIEW_TTL_SEC
+
+    coord = _coordinator(session_dir)
+    coord.shared_state.phase = "FRAMEWORK_AGENT"
+    coord.phase_framework._open_framework_timeline()
+
+    msg_id = _propose_grid(coord, [{"provenance": "llm_direct"}])
+    asyncio.run(coord.reconciler.run(time.time() + REVIEW_TTL_SEC + 60.0))
+    coord.phase_framework.close_framework_timeline(_tr("optimize_no_more_leverage"))
+
+    assert msg_id not in coord.state.pending_proposals
+    proposal = _events(session_dir)[0]["ext"]["proposals"][0]
+    assert proposal["terminal"]["disposition"] == "dropped"
+    assert proposal["terminal"]["reason"] == "review_timeout"
 
 
 def _review(coord: Coordinator, msg_id: str, payload: dict[str, Any]) -> None:

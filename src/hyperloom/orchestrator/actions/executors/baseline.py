@@ -9,9 +9,10 @@ InferenceX eval patching.
 """
 
 from __future__ import annotations
-
+from hyperloom.orchestrator.actions.executors._workload_envs import materialize_benchmark_config
 import asyncio
 import gzip
+import hashlib
 import json
 import logging
 import os
@@ -24,7 +25,7 @@ from contextlib import ExitStack, suppress
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, BinaryIO, Iterable, Iterator, Mapping, Sequence
+from typing import Any, Iterable, Iterator, Mapping, Sequence
 
 import yaml
 
@@ -32,19 +33,20 @@ from hyperloom.common.env import is_truthy
 from hyperloom.common.env_safety import redact_secret_values, scrub_benchmark_process_env
 from hyperloom.common.git_safety import safe_directory_args
 from hyperloom.common.model_paths import resolve_session_model_path
-from hyperloom.common.perf_metric import is_agentx_mode
+from hyperloom.common.perf_metric import is_agentx_mode, with_output_per_gpu
 from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import (
     ROUND_ACCURACY,
     ROUND_MEASURE,
     ROUND_SINGLE,
     ROUND_WARMUP,
-    RUN_AFTER_EVAL_FAILURE,
     RUN_AFTER_MOE_RUNNER_FAILURE,
     RUN_INITIAL,
     make_baseline_recorder,
 )
 from hyperloom.inference_optimizer.breakdown.recorder.event_ids import INLINE_EVENT_PARAM
+from hyperloom.inference_optimizer import inferencex_checkout
+from hyperloom.inference_optimizer.grid_server_args import with_capture_disabled
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ...loop.sub_agent_runner import RunnerContext
 from ...measurement.integrate_performance import assess_integrate_performance
@@ -57,12 +59,7 @@ from ..stop_attribution import (
     StoppedByTheRun,
 )
 from . import _server_lifecycle as _lifecycle
-from ._aiter_jit import (
-    AITER_JIT_PROBE_PATHS,
-    BASELINE_COLD_START_TIMEOUT_SEC,
-    COLD_START_KERNEL_THRESHOLD,
-    is_aiter_jit_registry_mismatch,
-)
+from ._aiter_jit import is_aiter_jit_registry_mismatch
 from ._launch_evidence import build_launch_evidence, persist_launch_evidence
 
 # The grid module is the namespace the helpers both benching arms share ended up in: how a sentinel returncode reads
@@ -90,12 +87,7 @@ from ._subprocess_kill import (
 from ._accuracy_gate import (
     materialized_run_eval_disabled,
 )
-from ._agentx_timeouts import (
-    AGENTX_CANON_WARMUP_GRACE_SEC as AGENTX_CANON_WARMUP_GRACE_SEC,
-    AGENTX_CANON_WARMUP_CONC as AGENTX_CANON_WARMUP_CONC,
-    agentx_warmup_grace_conc as agentx_warmup_grace_conc,
-    agentx_warmup_grace_sec as agentx_warmup_grace_sec,
-)
+
 from ._workload_envs import (
     VLLM_SOURCE_ROOT_ENVS,
     _client_tokenizer_mode,
@@ -103,7 +95,6 @@ from ._workload_envs import (
     FrameworkScriptMismatchError,
     agentx_active,
     default_baseline_config,
-    materialize_config_with_envs,
     prepare_agentx_runtime,
 )
 from ._inferencex_patcher import (
@@ -116,7 +107,8 @@ from ._inferencex_patcher import (
     failed_patch_anchors_in,
 )
 from ._git import _git_head_sha
-from ._magpie_patcher import ensure_client_tokenizer_hook, ensure_eval_concurrency_compat
+from ._agentx_prefix_cache import refuse_cacheless_agentx_baseline
+from ._magpie_patcher import client_tokenizer_hook_installed, ensure_eval_concurrency_compat
 from ._patch_snapshot import (
     _create_patch_snapshot,
     _patch_touched_paths_from_text,
@@ -131,6 +123,7 @@ from .benchmark_result import (
     snapshot_workspaces,
 )
 from .benchmark_backend import build_benchmark_command
+from .magpie_agentx import ServerArgvInvalidError
 
 
 log = logging.getLogger(__name__)
@@ -183,8 +176,11 @@ _MOE_SCHEME_CONTEXT_MARKERS = (
 )
 
 
-# Fast-exit arg errors (vLLM/sglang exits in <30s on bad CLI args) should not consume the slow-baseline retry budget.
+# Time limit for heuristic CLI-error matching; explicit configuration validation is independent of runtime.
 FAST_EXIT_THRESHOLD_SEC = 30.0
+# The error class of a subprocess that exited nonzero for no recognised cause.
+_SUBPROCESS_NONZERO = "subprocess_nonzero"
+_ARG_ERROR_CLASS = "fast_exit_arg_error"
 _ARG_ERROR_PATTERNS = (
     "unrecognized arguments",
     "invalid choice",
@@ -242,13 +238,6 @@ _NON_RECOVERABLE_MARKERS = (
 _STRONG_OOM_CONTEXT_RADIUS = 1
 
 
-#: Bytes read from each end of a ``server.log`` when observing a bring-up.
-_BRINGUP_LOG_EDGE_BYTES = 65_536
-
-#: Cap on milestone lines carried out of the unread middle; the ladder needs
-#: one witness per milestone.
-_BRINGUP_MIDDLE_MARKER_LINES = 200
-
 #: Subdirectory of a round slot holding earlier attempts' server logs.
 _ATTEMPTS_DIRNAME = "attempts"
 
@@ -271,8 +260,8 @@ class BringupLog:
     """One bring-up log as far as it could be read.
 
     Attributes:
-        text: The decoded head-and-tail text; empty when no log was written and
-            empty when the log could not be read.
+        text: The decoded log; empty when no log was written and empty when
+            the log could not be read.
         degraded: Empty when the read answered for the log's contents;
             :data:`~hyperloom.orchestrator.bringup.DEGRADED_UNREADABLE` when a
             log that exists could not be read back.
@@ -282,39 +271,14 @@ class BringupLog:
     degraded: str = ""
 
 
-def _middle_marker_lines(handle: BinaryIO, *, start: int, stop: int) -> list[str]:
-    """Return the milestone-bearing lines in ``[start, stop)`` of an open log."""
-    from ...bringup.ladder import PROGRESS_MARKER_SUBSTRINGS
+def read_bringup_log(path: Path) -> BringupLog:
+    """Read a server log whole for bring-up classification.
 
-    handle.seek(start)
-    remaining = max(0, stop - start)
-    kept: list[str] = []
-    carry = b""
-    while remaining > 0 and len(kept) < _BRINGUP_MIDDLE_MARKER_LINES:
-        chunk = handle.read(min(1 << 20, remaining))
-        if not chunk:
-            break
-        remaining -= len(chunk)
-        lines = (carry + chunk).split(b"\n")
-        carry = lines.pop()
-        for raw in lines:
-            text = raw.decode("utf-8", "replace")
-            lowered = text.lower()
-            if any(marker in lowered for marker in PROGRESS_MARKER_SUBSTRINGS):
-                kept.append(text)
-                if len(kept) >= _BRINGUP_MIDDLE_MARKER_LINES:
-                    break
-    return kept
-
-
-def read_bringup_log(path: Path, *, edge_bytes: int = _BRINGUP_LOG_EDGE_BYTES) -> BringupLog:
-    """Read a server log for bring-up classification: both edges, plus milestones.
-
-    The edges carry the failure excerpt. The ladder needs a witness for every
-    milestone the boot passed, and those are not all near one: a build that logs
-    per kernel shape pushes the later rungs megabytes in, which would understate
-    ``stage_reached`` and make two unequal boots compare as equal. So the middle
-    is streamed for milestone lines and they are carried between the edges.
+    Neither what the ladder looks for nor where it lies is bounded: a build that
+    logs per kernel shape pushes the later milestones megabytes in, and a worker's
+    root traceback can sit megabytes above the engine-dead consequence that ends
+    the log. The read is linear in the log's size, so callers run it off the
+    event loop.
 
     A log that was never written and a log the mount refuses to serve are
     different answers, and both are answers: an ESTALE or EIO on the session
@@ -322,34 +286,21 @@ def read_bringup_log(path: Path, *, edge_bytes: int = _BRINGUP_LOG_EDGE_BYTES) -
 
     Args:
         path: The log file to read.
-        edge_bytes: Bytes taken from each end; a log no larger than twice this
-            is read whole.
 
     Returns:
-        BringupLog: The decoded text, head first, and the degraded outcome when
-        a log that exists could not be read.
+        BringupLog: The decoded text and the degraded outcome when a log that
+        exists could not be read.
     """
     from ...bringup import DEGRADED_UNREADABLE
 
     try:
-        with open(path, "rb") as handle:
-            handle.seek(0, 2)
-            size = handle.tell()
-            if size <= edge_bytes * 2:
-                handle.seek(0)
-                return BringupLog(handle.read().decode("utf-8", "replace"))
-            handle.seek(0)
-            head = handle.read(edge_bytes)
-            middle = _middle_marker_lines(handle, start=edge_bytes, stop=size - edge_bytes)
-            handle.seek(size - edge_bytes)
-            tail = handle.read(edge_bytes)
+        data = path.read_bytes()
     except FileNotFoundError:
         return BringupLog("")
     except OSError as exc:
         log.warning("bringup: server log %s could not be read (%s)", path, exc)
         return BringupLog("", DEGRADED_UNREADABLE)
-    segments = [head.decode("utf-8", "replace"), *middle, tail.decode("utf-8", "replace")]
-    return BringupLog("\n".join(segments))
+    return BringupLog(data.decode("utf-8", "replace"))
 
 
 def server_child_elapsed_sec(server_log_text: str) -> float:
@@ -483,27 +434,11 @@ def _is_cuda_graph_capture_failure(*texts: str) -> bool:
     return bool(_classify_cuda_graph_capture_failure(*texts)[0])
 
 
-# Startup-time "the GPUs are already occupied" refusals.
-_GPU_PREOCCUPIED_MARKERS: tuple[str, ...] = (
-    # vLLM: "Free memory on device cuda:0 (84.11/287.98 GiB) on startup is less than desired GPU memory utilization
-    # (0.95, 273.59 GiB).
-    "on startup is less than desired gpu memory utilization",
-    "reduce gpu memory used by other processes",
-    # sglang says "Not enough memory. Please try to increase --mem-fraction-static."
-    "not enough memory. please try to increase --mem-fraction-static",
-)
-
-
-def _is_insufficient_gpu_memory(*texts: str) -> bool:
-    """True when a server refused to boot because VRAM was already occupied."""
-    blob = "\n".join(t for t in texts if t).lower()
-    return any(m in blob for m in _GPU_PREOCCUPIED_MARKERS)
-
-
-# Disable cuda-graph capture per framework: sglang uses --disable-cuda-graph, vllm and atom use --enforce-eager.
+# Disable cuda-graph capture per framework: sglang uses --disable-cuda-graph, vllm uses the dotted
+# --compilation-config.cudagraph_mode NONE (which keeps inductor), atom still uses --enforce-eager.
 _DISABLE_CUDA_GRAPH_FLAGS = {
     "sglang": "--disable-cuda-graph",
-    "vllm": "--enforce-eager",
+    "vllm": "--compilation-config.cudagraph_mode NONE",
     "atom": "--enforce-eager",
 }
 
@@ -571,6 +506,13 @@ def _attach_baseline_launch_evidence(
     workspace = Path(str(result.get("workspace") or "")) if result.get("workspace") else None
     actual_log = _measurement_server_log_path(output_dir / "server.log", workspace, slot=output_dir)
     result["server_log_path"] = actual_log or ""
+    if result.get("benchmark_backend") == "magpie_agentx":
+        from hyperloom.inference_optimizer.agentx.report import native_launch_evidence
+
+        evidence = native_launch_evidence(result, config_path, actual_server_log=actual_log)
+        result["launch_evidence"] = evidence
+        result["launch_evidence_path"] = persist_launch_evidence(evidence, slot=output_dir)
+        return
     evidence = build_launch_evidence(
         config_path=config_path,
         actual_server_log=actual_log,
@@ -699,11 +641,8 @@ def _disable_cuda_graph_flag(framework: str) -> str:
 
 
 def _with_cuda_graph_disabled(extra_server_args: str, framework: str) -> str:
-    """Append the framework-correct disable-cuda-graph flag once (idempotent)."""
-    flag = _disable_cuda_graph_flag(framework)
-    if flag in (extra_server_args or "").split():
-        return extra_server_args or ""
-    return f"{extra_server_args} {flag}".strip()
+    """Apply the framework-correct disable-cuda-graph flag once (idempotent)."""
+    return with_capture_disabled(extra_server_args or "", _disable_cuda_graph_flag(framework))
 
 
 def _classify_subprocess_error(
@@ -711,40 +650,54 @@ def _classify_subprocess_error(
     stderr_tail: str,
     returncode: int | None = None,
 ) -> str:
-    """Return 'fast_exit_arg_error' when the subprocess died fast on an arg
-    validation error, else 'subprocess_nonzero'.
-
-    Args:
-        elapsed_sec: Subprocess wall-clock runtime in seconds.
-        stderr_tail: Tail of the subprocess stderr used for marker matching.
-        returncode: The subprocess returncode, read for the sentinels that
-            name their own cause.
-
-    Returns:
-        The named class for a recognised sentinel, ``"fast_exit_arg_error"``
-        for a fast exit caused by argument validation, else
-        ``"subprocess_nonzero"``.
-    """
+    """Recognize KV-cache OOM, configuration validation, and fast argument failures."""
     tail = (stderr_tail or "").lower()
     # KV-cache OOM can surface long after weight load; match before the fast-exit elapsed gate below.
     if any(m in tail for m in _KV_CACHE_OOM_MARKERS):
         return "kv_cache_oom"
+    # Config validation can follow slow framework imports; elapsed time does not change its cause.
+    if re.search(r"\bvalidation errors? for cacheconfig\b", tail):
+        return _ARG_ERROR_CLASS
     if elapsed_sec >= FAST_EXIT_THRESHOLD_SEC:
-        return "subprocess_nonzero"
+        return _SUBPROCESS_NONZERO
     if any(p.lower() in tail for p in _ARG_ERROR_PATTERNS):
-        return "fast_exit_arg_error"
+        return _ARG_ERROR_CLASS
     if "valueerror:" in tail and any(p in tail for p in _ARG_ERROR_CONTEXT_PATTERNS):
-        return "fast_exit_arg_error"
-    return "subprocess_nonzero"
+        return _ARG_ERROR_CLASS
+    return _SUBPROCESS_NONZERO
 
 
-# Cold-start settings and probes live in ``_aiter_jit`` and are re-exported above for callers/tests that import them
-# from this module.
+_SIGNATURE_VOLATILE_RE = re.compile(r"0x[0-9a-f]+|[0-9a-f]{8,}|\d+")
 
 
-# Underscore-prefixed aliases re-exported for callers/tests; canonical names live in `_workload_envs`.
-_default_baseline_config = default_baseline_config
-_materialize_config_with_envs = materialize_config_with_envs
+def nonzero_output_signature(err_class: str, proc_stdout: str | None, proc_stderr: str | None) -> str:
+    """Identify a ``subprocess_nonzero`` failure by the process's whole output, ignoring numbers.
+
+    The result's ``error`` is only the last 2000 characters of one stream, and two
+    different causes (a HIP OOM, an NCCL timeout) can end in the same engine-death
+    traceback that long, or differ only in the stream ``error`` leaves out, so the
+    signature is taken from both full, redacted streams instead. Numbers (pids,
+    ports, timestamps, durations) and hex ids differ between two attempts that failed
+    for the same reason, so they are folded away.
+
+    Args:
+        err_class: The class the failure was given; only ``subprocess_nonzero`` gets a
+            signature, because other classes carry a fixed sentence that unrelated
+            failures share.
+        proc_stdout: The process's whole stdout.
+        proc_stderr: The process's whole stderr.
+
+    Returns:
+        ``"<class>|<sha256>"``, or ``""`` when there is no signature (another class, or
+        no output: two failures that said nothing are not known to be the same failure).
+    """
+    if err_class != _SUBPROCESS_NONZERO:
+        return ""
+    text = redact_secret_values(f"{proc_stderr or ''}\n{proc_stdout or ''}").strip().lower()
+    if not text:
+        return ""
+    text = " ".join(_SIGNATURE_VOLATILE_RE.sub("#", text).split())
+    return f"{err_class}|{hashlib.sha256(text.encode('utf-8')).hexdigest()}"
 
 
 def _set_materialized_run_eval(config_path: Path, *, enabled: bool) -> None:
@@ -766,6 +719,24 @@ def _resolve_result_dir(output_dir: Path, override_result_dir: str | None) -> Pa
     if result_dir.is_absolute():
         return result_dir
     return (output_dir / result_dir).resolve()
+
+
+def _benchmark_process_env(
+    config_path: Path, output_dir: Path, result_dir: Path, inferencex_path: str
+) -> dict[str, str]:
+    """Build the client environment without overriding Magpie's native checkout selection."""
+    from .magpie_agentx import native_config
+
+    env = scrub_benchmark_process_env(os.environ.copy())
+    env["PATH"] = f"/opt/venv/bin:{env.get('PATH', '')}"
+    if inferencex_path and not native_config(config_path):
+        env["MAGPIE_INFERENCEX_PATH"] = inferencex_path
+    env["RESULT_DIR"] = str(result_dir)
+    # InferenceX removes EVAL_RESULT_DIR after processing lm-eval output.
+    env["EVAL_RESULT_DIR"] = str(result_dir / "eval_output")
+    env["SERVER_LOG"] = str(output_dir / "server.log")
+    env["GPU_METRICS_CSV"] = str(output_dir / "gpu_metrics.csv")
+    return env
 
 
 def _should_establish_quality_ref(task_kind: str | None, params: dict[str, Any] | None = None) -> bool:
@@ -1634,6 +1605,7 @@ class BenchmarkRunExecutor:
     """One benchmark action: materialize the config, launch the backend, retry, parse the report."""
 
     benchmark_watchdog = False
+    runs_accuracy_eval = True
     session_dir = SessionDirField()
 
     def __init__(
@@ -1702,6 +1674,9 @@ class BenchmarkRunExecutor:
             )
             return False
 
+    def _measurement_succeeded(self, measurement: dict[str, Any]) -> bool:
+        return measurement.get("valid_measurement") is True
+
     def _resolve_timeout(self, params: dict[str, Any]) -> float:
         """Benchmark rounds share one cap; other executor purposes keep their budgets."""
         if self.benchmark_watchdog:
@@ -1747,35 +1722,28 @@ class BenchmarkRunExecutor:
         return any(_hit(tail) for _, tail in _iter_log_tails(root, max_bytes=_LOG_SCAN_MAX_BYTES))
 
     @staticmethod
-    def _record_baseline_convergence(
+    def _warn_on_cold_start_delta(
         result: dict[str, Any],
         warmup_tput: Any,
     ) -> None:
-        """Record how steady the baseline anchor actually is."""
-        try:
-            from hyperloom.orchestrator.measurement.convergence import assess_convergence
-
-            warm = float(warmup_tput or 0.0)
-            measured = float(result.get("output_throughput") or 0.0)
-            verdict = assess_convergence([warm, measured])
-            record: dict[str, Any] = verdict.to_dict()
-            if warm > 0 and measured > 0:
-                delta_pct = (measured - warm) / warm * 100.0
-                record["cold_start_delta_pct"] = round(delta_pct, 2)
-                if delta_pct > _COLD_START_DELTA_WARN_PCT:
-                    result.setdefault("nonfatal_warnings", [])
-                    result["nonfatal_warnings"].append("baseline_cold_start_delta_high")
-                    log.warning(
-                        "baseline_executor: measured round is %.1f%% above the warm-up round "
-                        "(%.1f -> %.1f tok/s); the server may still have been ramping, so the "
-                        "anchor every later gain is graded against may be low",
-                        delta_pct,
-                        warm,
-                        measured,
-                    )
-            result["baseline_convergence"] = record
-        except Exception:
-            log.debug("baseline convergence record failed", exc_info=True)
+        """Warn when the measured round climbed far enough above the warm-up to suggest a server still ramping."""
+        warm = float(warmup_tput or 0.0)
+        measured = float(result.get("output_throughput") or 0.0)
+        if warm <= 0 or measured <= 0:
+            return
+        delta_pct = (measured - warm) / warm * 100.0
+        if delta_pct <= _COLD_START_DELTA_WARN_PCT:
+            return
+        result.setdefault("nonfatal_warnings", [])
+        result["nonfatal_warnings"].append("baseline_cold_start_delta_high")
+        log.warning(
+            "baseline_executor: measured round is %.1f%% above the warm-up round "
+            "(%.1f -> %.1f tok/s); the server may still have been ramping, so the "
+            "anchor every later gain is graded against may be low",
+            delta_pct,
+            warm,
+            measured,
+        )
 
     @staticmethod
     def _eval_failure_evidence(result: dict[str, Any]) -> tuple[bool, str]:
@@ -1896,21 +1864,15 @@ class BenchmarkRunExecutor:
         return result
 
     async def _run_retrying(self, ctx: RunnerContext, *, recorder: Any = None) -> dict[str, Any]:
-        """Run the Magpie baseline, with a one-shot eval-failure fallback."""
+        """Run the Magpie baseline; an eval-rooted failure fails the round, a MoE-runner failure retries once."""
         result = await self._run_pass(ctx, recorder=recorder, attempt_reason=RUN_INITIAL)
-        params = ctx.task.params or {}
-        # A failed required patch timeline means the donor is incompatible with the current tree.
-        _extra_envs = params.get("extra_envs") or {}
-        _explicit_run_eval = not is_truthy(_extra_envs.get("RUN_EVAL"), default=True)
-        eval_already_off = is_truthy(params.get("disable_run_eval")) or _explicit_run_eval or self._eval_disabled(ctx)
-        eval_disabled_by_fallback = False
         # An eval that never reached a verdict because the server was gone is a broken measurement, not a statement
         # about accuracy or about a missing framework capability. Leaving it in the eval-rooted branch stamps it as an
         # eval-failure contract and hands it to the enablement lane, which then spends rounds looking for a capability
         # gap that the evidence does not support. It stays a failed baseline either way -- nothing is salvaged and the
         # accuracy gate is untouched -- but it is counted as an ordinary baseline failure, so the existing
         # ``_BASELINE_MAX_TOTAL_FAILURES`` backstop ends the run with the cause it actually had.
-        if result.get("status") != "succeeded" and not eval_already_off and self._is_eval_rooted_failure(result):
+        if result.get("status") != "succeeded" and self._is_eval_rooted_failure(result):
             if self._is_server_unreachable_eval_failure(result):
                 log.warning(
                     "baseline_executor: the accuracy eval failed because the server was unreachable, not because "
@@ -1932,41 +1894,22 @@ class BenchmarkRunExecutor:
                         ctx, result, kind=EVAL_KIND_RUNTIME_FAILURE, observed_accuracy=None, evidence=evidence
                     )
                     return result
+                result.setdefault("nonfatal_warnings", [])
+                result["accuracy_source"] = "eval_unavailable"
                 if _should_establish_quality_ref(getattr(ctx.task, "kind", ""), ctx.task.params or {}):
                     log.error(
-                        "baseline_executor: failure is eval-rooted (InferenceX "
-                        "run_eval aborted the benchmark) on a genuine baseline, "
-                        "whose whole purpose is to establish the accuracy "
-                        "reference. NOT retrying with RUN_EVAL=false: a "
-                        "throughput-only baseline cannot satisfy the accuracy gate, "
-                        "so the retry would burn a second full benchmark and the "
-                        "run would stop anyway. Stopping now — fix the accuracy "
-                        "eval (see the benchmark stdout/stderr for the run_eval "
-                        "error) rather than disabling RUN_EVAL."
+                        "baseline_executor: failure is eval-rooted (InferenceX run_eval aborted the benchmark) on a "
+                        "genuine baseline, whose whole purpose is to establish the accuracy reference. Stopping now "
+                        "-- fix the accuracy eval (see the benchmark stdout/stderr for the run_eval error)."
                     )
-                    result.setdefault("nonfatal_warnings", [])
                     result["nonfatal_warnings"].append("eval_failed_no_fallback_baseline_requires_accuracy")
-                    result["accuracy_source"] = "eval_unavailable"
                     self._request_eval_rooted_baseline_stop(ctx, result)
-                    return result
-                log.warning(
-                    "baseline_executor: failure looks eval-rooted (InferenceX "
-                    "run_eval aborted the benchmark); retrying once with "
-                    "RUN_EVAL=false to salvage the throughput baseline without "
-                    "the accuracy gate."
-                )
-                retry = await self._run_pass(
-                    ctx,
-                    recorder=recorder,
-                    attempt_reason=RUN_AFTER_EVAL_FAILURE,
-                    force_disable_eval=True,
-                )
-                retry.setdefault("nonfatal_warnings", [])
-                retry["nonfatal_warnings"].append("eval_failed_fallback_no_accuracy")
-                if retry.get("status") == "succeeded":
-                    retry["accuracy_source"] = "eval_unavailable"
-                eval_disabled_by_fallback = True
-                result = retry
+                else:
+                    log.error(
+                        "baseline_executor: failure is eval-rooted (InferenceX run_eval aborted the benchmark); "
+                        "the round fails with no throughput-only retry."
+                    )
+                return result
         if result.get("status") != "succeeded" and self._is_moe_runner_rooted_failure(result):
             log.warning(
                 "baseline_executor: the server died on a MoE runner backend "
@@ -1974,30 +1917,17 @@ class BenchmarkRunExecutor:
                 "scheme; retrying once without --moe-runner-backend so the "
                 "framework picks the backend itself."
             )
-            # Carry the eval fallback forward: the eval that broke above must stay off, and its bookkeeping must
-            # survive onto this result.
             retry = await self._run_pass(
                 ctx,
                 recorder=recorder,
                 attempt_reason=RUN_AFTER_MOE_RUNNER_FAILURE,
-                force_disable_eval=eval_disabled_by_fallback,
                 force_drop_moe_runner_backend=True,
             )
             retry.setdefault("nonfatal_warnings", [])
-            if eval_disabled_by_fallback:
-                retry["nonfatal_warnings"].append("eval_failed_fallback_no_accuracy")
-                if retry.get("status") == "succeeded":
-                    retry["accuracy_source"] = "eval_unavailable"
             retry["nonfatal_warnings"].append("moe_runner_backend_fallback_dropped_flag")
             result = retry
         self._maybe_stop_on_missing_baseline_accuracy(ctx, result)
         return result
-
-    def _eval_disabled(self, ctx: RunnerContext) -> bool:
-        """Whether ``--no-eval`` turned the accuracy eval off for this session."""
-        extra = getattr(ctx, "extra", None) or {}
-        state = self._resolve_shared_state(extra.get("shared_state"))
-        return bool(getattr(state, "eval_disabled", False))
 
     @staticmethod
     def _accuracy_stop_death_evidence(result: dict[str, Any]) -> str:
@@ -2119,8 +2049,6 @@ class BenchmarkRunExecutor:
     ) -> None:
         """Halt the run when a genuine baseline produced no accuracy result."""
         if not _should_establish_quality_ref(getattr(ctx.task, "kind", ""), ctx.task.params or {}):
-            return
-        if self._eval_disabled(ctx):
             return
         # A failed status must NOT skip straight past the salvage below.
         if result.get("status") != "succeeded" and not self._is_eval_rooted_failure(result):
@@ -2291,7 +2219,6 @@ class BenchmarkRunExecutor:
         self,
         ctx: RunnerContext,
         *,
-        force_disable_eval: bool = False,
         force_drop_moe_runner_backend: bool = False,
         recorder: Any = None,
         run_index: int = 0,
@@ -2365,19 +2292,13 @@ class BenchmarkRunExecutor:
                 "error": str(exc),
                 "output_dir": str(output_dir),
             }
-        # Accuracy eval (GSM8K) opt-out: ``--no-eval``, the ``disable_run_eval`` param and the eval-failure fallback
-        # force ``RUN_EVAL=false``.
         base_extra_envs = dict(params.get("extra_envs") or {})
-        eval_disabled = self._eval_disabled(ctx)
-        # The staged accuracy round is itself an eval, so ``--no-eval`` cancels it.
-        defer_accuracy_until_after_measure = not eval_disabled and is_truthy(
-            params.get("defer_accuracy_until_after_measure")
-        )
-        if force_disable_eval or is_truthy(params.get("disable_run_eval")) or eval_disabled:
+        if not self.runs_accuracy_eval:
             base_extra_envs["RUN_EVAL"] = "false"
+        defer_accuracy_until_after_measure = is_truthy(params.get("defer_accuracy_until_after_measure"))
         await _prepare_aiter_serving_so(base_extra_envs)
         try:
-            config_path = materialize_config_with_envs(
+            config_path = materialize_benchmark_config(
                 config_path,
                 output_dir,
                 extra_server_args=effective_extra_server_args,
@@ -2394,33 +2315,19 @@ class BenchmarkRunExecutor:
                 agentx_mode=agentx_active(live_shared_state),
                 grading=getattr(live_shared_state, "grading", None),
             )
-        except FrameworkScriptMismatchError as exc:
-            # Cross-framework script override: return a structured failure.
+        except (FrameworkScriptMismatchError, ServerArgvInvalidError) as exc:
             return {
                 "status": "failed",
-                "error_class": "framework_script_mismatch",
+                "error_class": getattr(exc, "error_class", "framework_script_mismatch"),
                 "error": str(exc),
                 "output_dir": str(output_dir),
             }
         # Stash for the result so Coordinator can reuse it downstream.
         materialized_config_path = config_path
         effective_inferencex_path = os.environ.get("INFERENCEX_PATH", "").strip()
-        # Apply runtime_override from params into the materialized YAML so the revalidation baseline boots under the
-        # same framework runtime as the KEEP'd candidate (PATH/PYTHONPATH/framework_bin etc.).
-        _rt_from_params = params.get("runtime_override")
-        if isinstance(_rt_from_params, dict) and _rt_from_params:
-            try:
-                import yaml as _yaml
+        from .magpie_agentx import activate_runtime
 
-                from ._grid_runner import apply_runtime_override
-
-                _cfg_data = _yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
-                _cfg_bench = _cfg_data.setdefault("benchmark", {})
-                _cfg_envs = _cfg_bench.setdefault("envs", {})
-                apply_runtime_override(_cfg_envs, _rt_from_params)
-                config_path.write_text(_yaml.safe_dump(_cfg_data), encoding="utf-8")
-            except Exception:
-                log.debug("baseline_executor: runtime_override application failed", exc_info=True)
+        activate_runtime(config_path, params.get("runtime_override") or {})
         # Report the invocation now, with the config final and the server not
         # yet booted. This frame is the only one that knows the args as a fact:
         # the one-shot eager fallback and the MoE-runner drop have both had
@@ -2436,18 +2343,7 @@ class BenchmarkRunExecutor:
                 model_path=resolved_model,
                 args_mode=str(params.get("args_mode") or "append"),
             )
-        # AgentX: deploy the aiperf client into InferenceX benchmarks/ and
-        # capability-preflight aiperf before Magpie runs the materialized config.
-        # Baseline/profile shell out here (not via _run_magpie), so without this the
-        # materialize-time swap to aiperf_client.sh would point at a script that was
-        # never deployed. No-op when HYPERLOOM_AGENTX is off.
-        #
-        # Off-loop: this call can shell out to the installer (the runtime aiperf
-        # repair, bounded at REPAIR_TIMEOUT_SEC) and that installer waits on a
-        # cross-process ``flock`` with no timeout of its own. Run inline it would
-        # freeze the whole orchestrator for as long as that takes -- heartbeats,
-        # cancellation, the wall-clock budget and every bus write stop with it.
-        # ``_grid_runner`` already runs its copy of this through ``to_thread``.
+        # MLPerf prepares its delegated client off-loop; native AgentX is entirely managed by Magpie.
         _agx_err = await asyncio.to_thread(
             prepare_agentx_runtime,
             env=os.environ,
@@ -2718,6 +2614,7 @@ class BenchmarkRunExecutor:
                 # reverting here handed prelude a clean tree and silently lost the replay.
                 if applied_patches and not isinstance(patch_application, dict):
                     _revert_legacy_warm_patch_trees(params)
+                _lifecycle.stop_agentx_servers(output_dir)
                 if bench_lease is not None:
                     bench_lease.close()
 
@@ -2734,8 +2631,6 @@ class BenchmarkRunExecutor:
             force_warmup_eval = (
                 str(getattr(ctx.task, "kind", "") or "") == "replay_warm_recipe"
                 and not defer_accuracy_until_after_measure
-                and not force_disable_eval
-                and not eval_disabled
             )
             warmup_cfg = self._write_lifecycle_config(
                 materialized_config_path,
@@ -2884,7 +2779,7 @@ class BenchmarkRunExecutor:
                     }
                     result["launch_evidence"] = measured_evidence
                 result["warmup_round_tput"] = warmup_tput
-                self._record_baseline_convergence(result, warmup_tput)
+                self._warn_on_cold_start_delta(result, warmup_tput)
                 # The Coordinator promotes ``subprocess_runtime_sec`` into the explore soft-kill anchor.
                 if isinstance(warmup_runtime, (int, float)) and warmup_runtime > 0:
                     result["measure_round_runtime_sec"] = result.get(
@@ -3256,10 +3151,6 @@ class BenchmarkRunExecutor:
     ) -> dict[str, Any] | None:
         """Ask the installed framework's parser about this round's argv.
 
-        The argv is read out of the rendered YAML and probed in that file's own
-        benchmark envs, which are what the launch reads. A repaired argv is
-        written back through the same seal.
-
         Args:
             config_path: The materialised YAML this round launches.
             framework: Framework the config serves.
@@ -3273,6 +3164,10 @@ class BenchmarkRunExecutor:
             ``None`` when the round may proceed -- including every unavailable
             verdict, which must never cost a round.
         """
+        from .magpie_agentx import native_config
+
+        if native_config(config_path):
+            return None
         from ...bringup import (
             ARGV_INVALID,
             argv_invalid_observation,
@@ -3366,23 +3261,16 @@ class BenchmarkRunExecutor:
         server_already_ready: bool = False,
     ) -> dict[str, Any]:
         """Run one Magpie benchmark subprocess and parse its result."""
+        from .magpie_agentx import bind_source_evidence
+
+        await asyncio.to_thread(bind_source_evidence, config_path, params.get("patches") or [])
         cmd = build_benchmark_command(
             python_exe=self.magpie_python,
             config_path=config_path,
             output_dir=output_dir,
         )
-        env = scrub_benchmark_process_env(os.environ.copy())
-        # Put the venv first in PATH so the benchmark script's `python3` resolves to one with torch+rocm (defense in
-        # depth vs Magpie YAML).
-        env["PATH"] = f"/opt/venv/bin:{env.get('PATH', '')}"
-        # Pin Magpie's InferenceX resolution to the same per-task checkout rendered into benchmark.inferencex_path and
-        # patched by the ``_after_materialize_config`` hook.
-        if inferencex_path:
-            env["MAGPIE_INFERENCEX_PATH"] = inferencex_path
-        # Always-on ``$RESULT_DIR`` default for scripts that respect it; scripts that ignore it are caught by the
-        # salvage pass.
         result_dir = _resolve_result_dir(output_dir, override_result_dir)
-        env["RESULT_DIR"] = str(result_dir)
+        env = _benchmark_process_env(config_path, output_dir, result_dir, inferencex_path)
         # Config/eval-contract facts echoed onto every failure result so an eval-rooted failure can be fingerprinted
         # and re-run by enablement.
         capture_meta = {
@@ -3390,13 +3278,6 @@ class BenchmarkRunExecutor:
             "result_dir": str(result_dir),
             "run_eval_disabled": bool(run_eval_disabled),
         }
-        # InferenceX ``run_lm_eval`` cleans ``$EVAL_RESULT_DIR`` after processing lm-eval output.
-        env["EVAL_RESULT_DIR"] = str(result_dir / "eval_output")
-        # Pin SERVER_LOG / GPU_METRICS_CSV per-task so wrappers write into the task workspace;
-        # ``harvest_leaked_artifacts`` is the defense-in-depth net.
-        env["SERVER_LOG"] = str(output_dir / "server.log")
-        env["GPU_METRICS_CSV"] = str(output_dir / "gpu_metrics.csv")
-
         # The materialized YAML is authoritative for the framework: params and $FRAMEWORK are both optional on a
         # baseline task.
         framework = (
@@ -3433,9 +3314,9 @@ class BenchmarkRunExecutor:
                 # Merge the reference base UNDER the per-task args (last-wins) so a multi-node per-round restart
                 # carries the same reference flags the single-node materialized YAML does.
                 from ._grid_runner import merge_server_args
-                from ._workload_envs import resolve_reference_base
+                from ._workload_envs import resolve_reference_launch
 
-                _mn_ref_args, _mn_ref_envs = resolve_reference_base()
+                _mn_ref_args, _mn_ref_envs, _ = resolve_reference_launch()
                 # Base on effective_extra_server_args (carries the one-shot cuda-graph eager-fallback flag when armed)
                 # so the MN per-round restart keeps that fallback too.
                 _mn_task_args = effective_extra_server_args
@@ -3614,7 +3495,7 @@ class BenchmarkRunExecutor:
         except subprocess.TimeoutExpired as exc:
             # A reaped timeout carries no wrapper streams; the server log is
             # the whole of the evidence.
-            record_bringup()
+            await asyncio.to_thread(record_bringup)
             timeout_destination = select_run_workspace(output_dir, known_before=workspaces_before) or output_dir
             timeout_harvested = harvest_leaked_artifacts(
                 timeout_destination,
@@ -3630,9 +3511,8 @@ class BenchmarkRunExecutor:
                 **capture_meta,
             }
 
-        server_log_text = record_bringup(
-            wrapper_stderr=proc_stderr or "",
-            wrapper_stdout=proc_stdout or "",
+        server_log_text = await asyncio.to_thread(
+            record_bringup, wrapper_stderr=proc_stderr or "", wrapper_stdout=proc_stdout or ""
         )
         boot_observation_ref = capture_meta["boot_observation_path"]
 
@@ -3780,6 +3660,7 @@ class BenchmarkRunExecutor:
                     "returncode": proc_returncode,
                     "subprocess_runtime_sec": round(subprocess_runtime_sec, 2),
                     "error": tail,
+                    "output_signature": nonzero_output_signature(err_class, proc_stdout, proc_stderr),
                     **failure_extras,
                 }
             return {
@@ -3800,6 +3681,7 @@ class BenchmarkRunExecutor:
 
         measurement = extract_benchmark_measurement(
             report,
+            config_path=config_path,
             workspace=workspace,
             subprocess_started_unix=subprocess_started_unix,
         )
@@ -3807,7 +3689,7 @@ class BenchmarkRunExecutor:
         for leak_src, _ in harvested:
             warnings.append(f"harvested_leaked_artifact:{leak_src}")
 
-        if not measurement.get("valid_measurement"):
+        if not self._measurement_succeeded(measurement):
             if registry_mismatch:
                 error_class = "aiter_jit_registry_mismatch"
                 error = server_init_dead_error if server_init_dead else ((proc_stderr or proc_stdout or "")[-2000:])
@@ -3837,6 +3719,7 @@ class BenchmarkRunExecutor:
                 "error_class": error_class,
                 "returncode": proc_returncode,
                 "error": error,
+                "output_signature": nonzero_output_signature(error_class, proc_stdout, proc_stderr),
                 "output_dir": str(output_dir),
                 "workspace": str(workspace),
                 "report_path": str(report_path) if report_path.exists() else None,
@@ -3918,7 +3801,7 @@ class BenchmarkRunExecutor:
         shared_state = (getattr(ctx, "extra", None) or {}).get("shared_state") or self.shared_state
         benchmark_mode = str(getattr(shared_state, "benchmark_mode", "") or "")
         if run_eval_disabled and not eval_scriptable and not is_agentx_mode(benchmark_mode):
-            # Serving RUN_EVAL was off this run (eval-failure fallback or ``disable_run_eval``), so lm-eval did not
+            # Serving RUN_EVAL was off this run (a profile round or a staged warmup round), so lm-eval did not
             # execute and there is no fresh accuracy to read.
             log.info(
                 "baseline_executor: RUN_EVAL disabled this run (serving); skipping accuracy parse (no lm-eval executed)"
@@ -3965,7 +3848,7 @@ class BaselineExecutor(BenchmarkRunExecutor):
 
     def _resolve_default_config(self) -> Path:
         """Resolve the benchmark YAML the round runs when the task names none."""
-        return _default_baseline_config()
+        return default_baseline_config()
 
     @staticmethod
     def _client_script_from_config(config_path: Path) -> str | None:
@@ -4017,31 +3900,26 @@ class BaselineExecutor(BenchmarkRunExecutor):
         output_dir: Path,
     ) -> dict[str, Any] | None:
         """Hook after YAML materialization, before launch."""
+        from .magpie_agentx import native_config
+
+        if native_config(config_path):
+            return None
         ix_root = self._inferencex_root_from_config(config_path)
         if ix_root:
+            if invalid := inferencex_checkout.unusable_reason(ix_root):
+                return {"status": "failed", "error_class": "inferencex_checkout_invalid", "error": invalid}
             ensure_benchmark_lib_eval_dest_patched(Path(ix_root))
             ensure_benchmark_lib_eval_start_patched(Path(ix_root))
-        # Runs for EVERY workload, not just eval ones: this hook fixes the throughput
-        # client, which runs whether or not lm-eval does. Independent of the fail-soft
-        # eval-concurrency result: a missing tokenizer hook is
-        # fatal only for a model whose tokenizer has to be named, and for that model it is
-        # fatal outright -- the client dies in HF AutoConfig before its first request, writes
-        # no throughput result, and the round is graded a boot failure with the server serving.
+        # Required custom tokenizers must reach the throughput client as well as eval.
         tok_mode = _client_tokenizer_mode(self._model_from_config(config_path))
         if tok_mode:
-            try:
-                hook_ok = ensure_client_tokenizer_hook(
-                    inferencex_dir=ix_root or None,
-                    script_name=self._client_script_from_config(config_path),
-                )
-            except OSError as exc:
-                log.error("baseline_executor: client tokenizer hook raised for %s: %s", ix_root, exc)
-                hook_ok = False
-            if not hook_ok:
+            script_name = self._client_script_from_config(config_path)
+            if not script_name or not client_tokenizer_hook_installed(script_name, inferencex_dir=ix_root or None):
                 msg = (
-                    f"the benchmark client cannot be told to load the {tok_mode!r} tokenizer: "
-                    f"the hook could not be installed in InferenceX's benchmark scripts "
-                    f"(inferencex={ix_root or '<unset>'}). This model's client resolves the "
+                    f"the benchmark client script {script_name or '<unresolved>'!r} cannot be told to load the "
+                    f"{tok_mode!r} tokenizer: it has no --tokenizer-mode hook "
+                    f"(inferencex={ix_root or '<unset>'}). Use a Magpie revision at or above "
+                    "1eb3df69de9cb26cb5c8109e43371dd1abb9bbed. This model's client resolves the "
                     "checkpoint through HF AutoConfig, which cannot map its model_type, so it "
                     "would die before issuing a request and the round would be graded a boot "
                     "failure with the server up."
@@ -4187,12 +4065,15 @@ class BaselineExecutor(BenchmarkRunExecutor):
         )
         try:
             result = await self._run_retrying(ctx, recorder=recorder)
+            shared_state = (getattr(ctx, "extra", None) or {}).get("shared_state")
+            if _should_establish_quality_ref(getattr(ctx.task, "kind", ""), params) and agentx_active(shared_state):
+                refuse_cacheless_agentx_baseline(result)
         except BaseException as exc:
             if recorder is not None:
                 recorder.finish_crashed(exc)
             raise
         if recorder is not None:
-            recorder.finish(result)
+            recorder.finish(with_output_per_gpu(result, getattr(shared_state, "tp", None)))
         return result
 
     def _resolve_sink(self, ctx: RunnerContext) -> Any:
@@ -4257,14 +4138,7 @@ baseline_executor = BaselineExecutor()
 
 
 __all__ = [
-    "AITER_JIT_PROBE_PATHS",
-    "BASELINE_COLD_START_TIMEOUT_SEC",
-    "AGENTX_CANON_WARMUP_GRACE_SEC",
-    "AGENTX_CANON_WARMUP_CONC",
-    "agentx_warmup_grace_conc",
-    "agentx_warmup_grace_sec",
     "BaselineExecutor",
     "BenchmarkRunExecutor",
-    "COLD_START_KERNEL_THRESHOLD",
     "baseline_executor",
 ]

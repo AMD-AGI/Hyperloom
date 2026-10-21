@@ -19,7 +19,9 @@ from hyperloom.orchestrator.roles import (
     build_emit_intent_server,
     validate_emit_intent_input,
 )
+from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.orchestrator.roles.base import BackendError, LLMCallFailed, RetryPolicy
+from hyperloom.orchestrator.roles.mcp_emit_intent import build_emit_intent_tool_input_schema
 from hyperloom.inference_optimizer.protocol.intent import (
     IntentType,
     IntentValidationError,
@@ -228,6 +230,114 @@ def test_build_emit_intent_server_uses_factories():
     assert captured["server_name"] == "inference_optimizer"
     assert captured["version"] == "1.0.0"
     assert len(captured["tools"]) == 1
+
+
+_ORCHESTRATION_INTENTS = default_role_registry()["orchestration"].allowed_intents
+_CRITIC_INTENTS = default_role_registry()["critic"].allowed_intents
+_REVIEW_VERDICT_EMIT = {
+    "intent_type": "review_verdict",
+    "payload": {"target_proposal_msg_id": "p1", "verdict": "approve"},
+}
+
+
+def _capturing_tool_factory(captured: dict[str, Any]):
+    def fake_tool(name, desc, schema):
+        captured["schema"] = schema
+
+        def deco(handler):
+            captured["handler"] = handler
+            return handler
+
+        return deco
+
+    return fake_tool
+
+
+def _registered_emit_intent(**kwargs: Any) -> dict[str, Any]:
+    """The schema and handler ``build_emit_intent_server`` registers."""
+    captured: dict[str, Any] = {}
+    build_emit_intent_server(
+        tool_factory=_capturing_tool_factory(captured),
+        server_factory=lambda name, version, tools: {"server": name},
+        **kwargs,
+    )
+    return captured
+
+
+def _offered_intent_types(schema: dict[str, Any]) -> set[str]:
+    return set(schema["properties"]["intent_type"]["enum"])
+
+
+def test_emit_intent_schema_offers_only_the_roles_intents():
+    """A role is offered only the intent types the PolicyGate lets it emit."""
+    orchestration = _registered_emit_intent(allowed_intents=_ORCHESTRATION_INTENTS)["schema"]
+    critic = _registered_emit_intent(allowed_intents=_CRITIC_INTENTS)["schema"]
+
+    assert _offered_intent_types(orchestration) == {t.value for t in _ORCHESTRATION_INTENTS}
+    assert "review_verdict" not in _offered_intent_types(orchestration)
+    assert "review_verdict" not in orchestration["properties"]["payload"]["description"]
+    assert _offered_intent_types(critic) == {t.value for t in _CRITIC_INTENTS}
+    assert not _offered_intent_types(critic) & {t.value for t in _ORCHESTRATION_INTENTS - _CRITIC_INTENTS}
+    assert "delegate" not in critic["properties"]["payload"]["description"]
+    assert "__unparsedToolInput" in orchestration["properties"]
+
+
+def test_emit_intent_schema_without_a_role_offers_every_intent():
+    schema = _registered_emit_intent()["schema"]
+
+    assert schema == build_emit_intent_tool_input_schema(IntentType)
+    assert _offered_intent_types(schema) == {t.value for t in IntentType}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("wrapped", [False, True], ids=["native-if-schema-bypassed", "unparsed-wrapper"])
+async def test_the_emit_intent_handler_refuses_an_intent_outside_the_role(wrapped):
+    """The handler refuses by the decoded type and names the types the role may emit.
+
+    Under the real SDK only the wrapped form reaches the handler: the schema's enum refuses a native out-of-role
+    call first (pinned in test_claude_unparsed_tool_input_unit). The native case pins the handler's own check.
+    """
+    handler = _registered_emit_intent(allowed_intents=_ORCHESTRATION_INTENTS)["handler"]
+    arguments: dict[str, Any] = _REVIEW_VERDICT_EMIT
+    if wrapped:
+        raw = json.dumps(_REVIEW_VERDICT_EMIT)
+        arguments = {"__unparsedToolInput": {"raw": raw, "len": len(raw)}}
+
+    result = await handler(arguments)
+
+    assert result["is_error"] is True
+    text = result["content"][0]["text"]
+    assert "'review_verdict'" in text
+    for intent_type in _ORCHESTRATION_INTENTS:
+        assert intent_type.value in text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("wrapped", [False, True], ids=["native", "unparsed-wrapper"])
+async def test_the_emit_intent_tool_acks_an_intent_the_role_may_emit(wrapped):
+    handler = _registered_emit_intent(allowed_intents=_CRITIC_INTENTS)["handler"]
+    arguments: dict[str, Any] = _REVIEW_VERDICT_EMIT
+    if wrapped:
+        raw = json.dumps(_REVIEW_VERDICT_EMIT)
+        arguments = {"__unparsedToolInput": {"raw": raw, "len": len(raw)}}
+
+    result = await handler(arguments)
+
+    assert "is_error" not in result
+    assert result["content"][0]["text"] == "ok"
+
+
+def test_claude_backend_registers_emit_intent_for_its_role():
+    captured: dict[str, Any] = {}
+    ClaudeBackend(
+        sdk_query_factory=_make_query_factory([]),
+        sdk_options_cls=FakeOptions,
+        mcp_tool_factory=_capturing_tool_factory(captured),
+        mcp_server_factory=lambda name, version, tools: {"server": name},
+        allowed_intents=_ORCHESTRATION_INTENTS,
+    )
+
+    assert _offered_intent_types(captured["schema"]) == {t.value for t in _ORCHESTRATION_INTENTS}
 
 
 def test_claude_backend_raises_without_sdk_or_seams(monkeypatch):
@@ -517,6 +627,22 @@ async def test_mcp_setup_diagnostic_reports_what_the_cli_offered(offered_tools, 
     assert setup["emit_intent"]["offered"] is offered
 
 
+def test_mcp_setup_diagnostic_hashes_the_role_scoped_schema():
+    """The recorded schema hash identifies the schema this role registers, not the full intent contract."""
+    import hashlib
+
+    backend = ClaudeBackend(enable_mcp_emit_intent=False, allowed_intents=_ORCHESTRATION_INTENTS)
+    expected = json.dumps(
+        build_emit_intent_tool_input_schema(_ORCHESTRATION_INTENTS), sort_keys=True, separators=(",", ":")
+    )
+
+    recorded = backend.get_mcp_setup_diagnostic()["emit_intent"]["schema_sha256"]
+
+    assert recorded == hashlib.sha256(expected.encode("utf-8")).hexdigest()
+    full = json.dumps(build_emit_intent_tool_input_schema(IntentType), sort_keys=True, separators=(",", ":"))
+    assert recorded != hashlib.sha256(full.encode("utf-8")).hexdigest()
+
+
 @pytest.mark.asyncio
 async def test_run_invalid_tool_use_input_drops_block_silently():
     """Bad tool_use input shouldn't crash the run — just drop the bad block."""
@@ -803,6 +929,7 @@ async def test_options_includes_system_prompt_and_max_turns():
     assert captured["options_kwargs"]["max_turns"] == 8
     assert captured["options_kwargs"]["system_prompt"] == "sys"
     assert "Read" in captured["options_kwargs"]["allowed_tools"]
+    assert captured["options_kwargs"]["tools"] == ["Read"]
     # Output instructions appended to prompt
     assert "OUTPUT FORMAT" in captured["prompt"]
 
@@ -834,9 +961,10 @@ async def test_options_includes_mcp_server_when_emit_intent_enabled():
     )
     assert backend.mcp_server_config is not None
     assert backend.mcp_tool_name == EMIT_INTENT_TOOL_QUALIFIED
-    await backend.run("p", tools=["Read"])
+    await backend.run("p", tools=["Read", "emit_intent", "get_failure"])
     kw = captured["options_kwargs"]
     assert "mcp_servers" in kw
     assert "inference_optimizer" in kw["mcp_servers"]
     # emit_intent qualified tool name auto-added to allowed_tools
     assert EMIT_INTENT_TOOL_QUALIFIED in kw["allowed_tools"]
+    assert kw["tools"] == ["Read"]

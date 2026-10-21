@@ -1,26 +1,23 @@
-#!/usr/bin/env python3
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Run KernelForge's kernel fusion as a Hyperloom kernel-agent tool."""
+"""Run KernelForge's kernel fusion (``kernelforge.cli forge-fuse``) for a Hyperloom fusion request."""
 
 from __future__ import annotations
 
-import argparse
 import ast
 import json
 import os
 import re
-import signal
 import subprocess
 import sys
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.codex_session import CodexSessionError
 from hyperloom.common.env import is_truthy
 
-RESULT_BEGIN = "FORGE_FUSION_RESULT_BEGIN"
-RESULT_END = "FORGE_FUSION_RESULT_END"
+from ..actions.executors._kernel_agent_tool import _run_subprocess
 
 # The manifest verdict for "discovery never reached the model", added in manifest schema v2 alongside the ``error``
 # block.
@@ -53,15 +50,16 @@ def _validated_agent_sandbox_mode(value: Any) -> str:
     return resolve_codex_sandbox_mode(sandbox_mode=stated)
 
 
-def _inject_author_gateway_env(agent_backend: str) -> None:
-    """Prepare the selected author runtime without crossing provider shapes."""
+def _author_env(agent_backend: str) -> dict[str, str]:
+    """The environment forge-fuse runs its author under, without crossing provider shapes."""
+    env = dict(os.environ)
     if _validated_agent_backend(agent_backend) == "codex":
-        return
+        return env
 
     from hyperloom.common import llm_config
 
     options = llm_config.claude_sdk_env_options(
-        env=os.environ,
+        env=env,
         component="forge",
         operation="author_kernel",
     )
@@ -72,26 +70,18 @@ def _inject_author_gateway_env(agent_backend: str) -> None:
         for name in llm_config.ANTHROPIC_SYNTHESIZABLE_KEY_ENVS:
             value = str(resolved_env.get(name) or "").strip()
             if value:
-                os.environ.setdefault(name, value)
-    # The authoring child inherits this process's environment, not the resolved copy above, so the tag has to be
-    # merged in here or the run arrives at the gateway anonymous.
+                env.setdefault(name, value)
+    # The authoring child gets this environment, not the resolved copy above, so the tag has to be merged in here or
+    # the run arrives at the gateway anonymous.
     from hyperloom.common.llm_attribution import inject_env
     from hyperloom.common.llm_stability_env import apply_llm_stability_env
 
-    inject_env(os.environ, component="forge", operation="author_kernel")
+    inject_env(env, component="forge", operation="author_kernel", source=env)
     # claude's bypassPermissions refuses to start under root unless IS_SANDBOX=1.
     if hasattr(os, "geteuid") and os.geteuid() == 0:
-        os.environ.setdefault("IS_SANDBOX", "1")
-    apply_llm_stability_env(os.environ)
-
-
-def _load_input_json(path: str) -> dict[str, Any]:
-    if not path:
-        return {}
-    data = json.loads(Path(path).read_text(encoding="utf-8", errors="replace"))
-    if not isinstance(data, dict):
-        raise ValueError(f"--input-json must contain a JSON object: {path}")
-    return data
+        env.setdefault("IS_SANDBOX", "1")
+    apply_llm_stability_env(env)
+    return env
 
 
 def _add_opt(cmd: list[str], args: dict[str, Any], key: str, flag: str, *, required: bool = False) -> None:
@@ -145,68 +135,6 @@ def _timeout_sec(args: dict[str, Any]) -> int:
         return max(1, int(float(raw or DEFAULT_TIMEOUT_SEC)))
     except (OverflowError, TypeError, ValueError):
         return DEFAULT_TIMEOUT_SEC
-
-
-def _new_session_kwargs() -> dict[str, bool]:
-    """Popen kwargs that isolate the child into its own killable session."""
-    return {"start_new_session": True} if os.name == "posix" else {}
-
-
-def _terminate_process_tree(proc: subprocess.Popen, *, grace_seconds: float = 5.0) -> None:
-    """Best-effort teardown for the forge-fusion subprocess and descendants."""
-    if proc.poll() is not None:
-        return
-    if os.name == "posix":
-        try:
-            pgid = os.getpgid(proc.pid)
-            own_pgid = os.getpgid(0)
-        except OSError:
-            pgid = None
-            own_pgid = None
-        if pgid is not None and pgid != own_pgid:
-            try:
-                os.killpg(pgid, signal.SIGTERM)
-            except OSError:
-                pass
-            try:
-                proc.wait(timeout=grace_seconds)
-                return
-            except subprocess.TimeoutExpired:
-                try:
-                    os.killpg(pgid, signal.SIGKILL)
-                except OSError:
-                    pass
-                return
-    try:
-        proc.terminate()
-        proc.wait(timeout=grace_seconds)
-    except (OSError, subprocess.TimeoutExpired):
-        try:
-            proc.kill()
-        except OSError:
-            pass
-
-
-def _run_with_tree_timeout(cmd: list[str], timeout_sec: int) -> subprocess.CompletedProcess:
-    """Run forge-fusion in a killable process group and reap it on timeout."""
-    proc = subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        **_new_session_kwargs(),
-    )
-    try:
-        stdout, stderr = proc.communicate(timeout=timeout_sec)
-        return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
-    except subprocess.TimeoutExpired:
-        _terminate_process_tree(proc)
-        try:
-            stdout, stderr = proc.communicate(timeout=1.0)
-        except subprocess.TimeoutExpired:
-            stdout = ""
-            stderr = ""
-        raise subprocess.TimeoutExpired(cmd, timeout_sec, output=stdout, stderr=stderr)
 
 
 def _attempted(loop: dict[str, Any]) -> bool:
@@ -599,64 +527,22 @@ def _timeout_result(output_dir: str, timeout_sec: int, exc: subprocess.TimeoutEx
     }
 
 
-def _as_text(data: Any) -> str:
-    if data is None:
-        return ""
-    if isinstance(data, bytes):
-        return data.decode("utf-8", errors="replace")
-    return str(data)
-
-
-def _relay_streams(stdout: Any, stderr: Any) -> None:
-    out = _as_text(stdout)
-    err = _as_text(stderr)
-    if out:
-        sys.stdout.write(out)
-    if err:
-        sys.stderr.write(err)
-
-
-def _emit(result: dict[str, Any], output_dir: str) -> None:
-    """Write result.json (disk fallback) + print the stdout sentinel."""
-    if output_dir:
-        try:
-            (Path(output_dir) / "result.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
-        except OSError:
-            pass
-    print(f"\n{RESULT_BEGIN}\n{json.dumps(result, sort_keys=True)}\n{RESULT_END}", flush=True)
-
-
-def _parse_args(argv: list[str]) -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Hyperloom wrapper for forge-fusion")
-    p.add_argument("--input-json", required=True)
-    return p.parse_args(argv)
-
-
-def main(argv: list[str] | None = None) -> int:
+async def run_forge_fusion(args: dict[str, Any]) -> dict[str, Any]:
+    """Run forge-fuse for ``args`` and return its result in Hyperloom's fusion contract."""
     try:
-        args = _parse_args(list(argv or sys.argv[1:]))
-        payload = _load_input_json(args.input_json)
-        cmd = _build_cmd(payload)
-    except Exception as exc:  # noqa: BLE001 - structured wrapper failure
-        print(
-            json.dumps(
-                {
-                    "status": "failed",
-                    "engine": "forge_fusion",
-                    "micro_decision": "failed",
-                    "decision": "REVERT",
-                    "kept": False,
-                    "error_class": exc.__class__.__name__,
-                    "error": repr(exc),
-                },
-                sort_keys=True,
-            ),
-            flush=True,
-        )
-        return 2
-
-    _inject_author_gateway_env(str(payload.get("agent_backend") or ""))
-    output_dir = str(payload.get("output_dir") or "")
+        cmd = _build_cmd(args)
+    except (ValueError, CodexSessionError) as exc:
+        return {
+            "status": "failed",
+            "engine": "forge_fusion",
+            "micro_decision": "failed",
+            "decision": "REVERT",
+            "kept": False,
+            "error_class": exc.__class__.__name__,
+            "error": repr(exc),
+        }
+    env = _author_env(str(args.get("agent_backend") or ""))
+    output_dir = str(args.get("output_dir") or "")
     # The output dir is keyed on the task, so a run that dies before writing new artifacts must not salvage the
     # previous run's KEEP as its own.
     output_root = Path(output_dir or ".")
@@ -669,21 +555,9 @@ def main(argv: list[str] | None = None) -> int:
     for stale_glob in ("fusion_*.patch", "forge_loop_*.json"):
         for stale in output_root.glob(stale_glob):
             stale.unlink(missing_ok=True)
-    timeout_sec = _timeout_sec(payload)
+    timeout_sec = _timeout_sec(args)
     try:
-        proc = _run_with_tree_timeout(cmd, timeout_sec)
+        rc, _stdout, _stderr = await _run_subprocess(cmd, timeout_sec=timeout_sec, env=env, label="forge_fusion")
     except subprocess.TimeoutExpired as exc:
-        _relay_streams(getattr(exc, "stdout", None), getattr(exc, "stderr", None))
-        result = _timeout_result(output_dir, timeout_sec, exc)
-        _emit(result, output_dir)
-        return 124
-
-    _relay_streams(proc.stdout, proc.stderr)
-    result = _normalize_manifest(output_dir, proc.returncode)
-    _emit(result, output_dir)
-    # Mirror the subprocess exit: non-zero only when the subprocess itself failed.
-    return int(proc.returncode)
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
+        return _timeout_result(output_dir, timeout_sec, exc)
+    return _normalize_manifest(output_dir, rc)

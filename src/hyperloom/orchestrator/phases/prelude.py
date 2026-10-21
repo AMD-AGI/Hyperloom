@@ -8,7 +8,7 @@ import logging as _logging
 from pathlib import Path
 from collections.abc import Mapping, Sequence
 from typing import Any
-from hyperloom.common.perf_metric import VERDICT_KEEP, graded_axes_of
+from hyperloom.common.perf_metric import VERDICT_KEEP, constraint_fields, graded_axes_of
 from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.breakdown.recorder.warm_replay_event import (
     GATE_ACCURACY,
@@ -27,18 +27,22 @@ from hyperloom.inference_optimizer.breakdown.recorder.warm_replay_event import (
     SKIP_NO_WARM_START_RECIPE,
     SKIP_RECIPE_NOT_REPLAYABLE,
     SKIP_RECIPE_READ_FAILED,
+    SKIP_RESTATES_BASELINE,
     SKIP_WORKLOAD_CONFIG_INCOMPATIBLE,
 )
 
 from . import machine_state as _phase_state
 from hyperloom.inference_optimizer.grid_server_args import merge_cumulative_extra_server_args
+from hyperloom.inference_optimizer.inferencex_checkout import pick_tree
 from hyperloom.inference_optimizer.session.optimization_journal import (
     KIND_OTHER,
     derive_journal_outcome,
     JournalEntry,
     Verdict,
 )
+from ..actions.executors._launch_restatement import config_launch_restated_by
 from ..actions.executors.baseline import _revert_warm_patch_state, revert_warm_kernel_patches
+from ..state.analysis_failures import RECIPE_PARAM, repeated_roofline_failure, roofline_recipe
 from ..state.shared_state import inject_stack_base_params, resolve_graded_comparison
 from ..state.task_registry import Task
 from ..loop.time_budget import (
@@ -1359,6 +1363,13 @@ class PreludePhase(CoordinatorCollaborator):
             )
             combined_envs = dict(bc_envs)
             combined_envs.update(kernel_envs)
+        if self._skip_restated_replay(
+            combined_args,
+            combined_envs,
+            [*wsc_patches, *kernel_pending],
+            {"warm_recipe_tier": tier, "warm_recipe_conf": conf, **donor_metadata},
+        ):
+            return None
         try:
             from hyperloom.inference_optimizer.grid_server_args import (
                 validate_warm_replay_context_length,
@@ -1981,6 +1992,33 @@ class PreludePhase(CoordinatorCollaborator):
             open_event_on_timeline=False,
         )
 
+    def _skip_restated_replay(
+        self,
+        args: str,
+        envs: Mapping[str, Any],
+        code_changes: Sequence[Any],
+        identity: Mapping[str, Any],
+    ) -> bool:
+        """Skip a replay whose launch would be the baseline's own; True when it did.
+
+        Patches and kernel items change the code, which no argv comparison sees,
+        so a replay carrying any of them always runs. So does one under reference
+        launch controls: materialization re-applies them to the baseline config,
+        so the replay's launch is not that config's argv plus the request.
+        """
+        state = self.shared_state
+        if code_changes or state.reference_launch_controls:
+            return False
+        if not config_launch_restated_by(str(state.baseline_config_path or ""), args, envs, str(state.framework or "")):
+            return False
+        log.info("PRELUDE: warm replay skipped: %r %s only restate the baseline launch", args, sorted(envs))
+        self._skip_warm_replay(
+            code=SKIP_RESTATES_BASELINE,
+            outcome={"status": "skipped", "reason": SKIP_RESTATES_BASELINE, **identity},
+            details={"extra_server_args": args, "extra_envs": sorted(envs)},
+        )
+        return True
+
     def _skip_warm_replay(
         self,
         *,
@@ -2240,9 +2278,9 @@ class PreludePhase(CoordinatorCollaborator):
         reproduced = graded.verdict == VERDICT_KEEP
         outcome["keep_threshold_pct"] = keep_threshold
         if graded.veto_reason:
-            # The grading applies the session's latency ceiling, so the drift branch below rolls the replay back
-            # rather than leaving a config the budget refused promoted on disk.
-            outcome["latency_veto"] = graded.veto_reason
+            # The grading applies the session's constraints (latency, power), so the drift branch below rolls the
+            # replay back rather than leaving a config a budget refused promoted on disk.
+            outcome["constraint_veto"] = graded.veto_reason
         if recorder is not None:
             recorder.record_gate(
                 GATE_KEEP_THRESHOLD,
@@ -2376,8 +2414,8 @@ class PreludePhase(CoordinatorCollaborator):
                 {
                     "name": "warm_replay",
                     **graded_axes_of(result),
-                    # The latency budget grades on this and fails closed without it.
-                    "e2el_mean_ms": result.get("e2el_mean_ms"),
+                    # The latency and power budgets grade on these and fail closed without them.
+                    **constraint_fields(result),
                     "candidate_extra_server_args": warm_args,
                     "candidate_extra_envs": warm_envs,
                     "recipe_delta": {
@@ -2405,8 +2443,7 @@ class PreludePhase(CoordinatorCollaborator):
                 )
             if promoted_checkout:
                 outcome["active_framework_root"] = promoted_checkout
-                # Resume re-points $INFERENCEX_PATH at this checkout, and stops the run when it has since vanished.
-                state.active_inferencex_path = promoted_checkout
+                state.active_inferencex_path = pick_tree(promotion["target_repos"], state.active_inferencex_path)
             outcome["status"] = "reproduced"
             outcome.pop("replayed_patch_refs", None)
             if replayed_patch_refs:
@@ -2615,10 +2652,22 @@ class PreludePhase(CoordinatorCollaborator):
                 {"reason": reason, "gpu_trace_unsupported_reason": unsupported},
             )
             return None
-        params: dict[str, Any] = {
-            "source": "coordinator_internal",
-            "reason": str(reason),
-        }
+        recipe = roofline_recipe(state, reason)
+        repeated = repeated_roofline_failure(state, recipe)
+        if repeated is not None:
+            log.warning(
+                "internal-analysis (%s): not run -- the roofline on %s already failed with %s, which recurs on the "
+                "same input; a KEEP that changes the recipe re-arms it",
+                reason,
+                recipe,
+                repeated.get("failure"),
+            )
+            self._record_prelude_arm_dropped(
+                "internal_analysis",
+                {"reason": reason, "recipe": recipe, "repeated_failure": dict(repeated)},
+            )
+            return None
+        params: dict[str, Any] = {"source": "coordinator_internal", "reason": str(reason), RECIPE_PARAM: recipe}
         if inline_event:
             params[INLINE_EVENT_PARAM] = str(inline_event)
         if reason != "prelude_initial":
@@ -2626,6 +2675,7 @@ class PreludePhase(CoordinatorCollaborator):
         else:
             # PRELUDE roofline profiles the baseline arm: inject baseline's own server args (never current_best's) so
             # a later warm-replay can't swap in flags that skew the baseline ceiling.
+            params.update(self._coord.enablement_revalidation.baseline_launch_params())
             try:
                 from hyperloom.inference_optimizer.roofline_ceiling import read_baseline_server_args
 

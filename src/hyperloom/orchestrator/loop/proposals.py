@@ -8,11 +8,15 @@ import hashlib
 import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Mapping
+from hyperloom.common.coerce import to_float
 from hyperloom.common.framework_arm import is_upstream_pr_prescreen
 from hyperloom.orchestrator.lever import LEVER_CONFIG
 from hyperloom.inference_optimizer.trace.trajectory_trace import EVENT_PROPOSAL, STATUS_QUEUED, record_event
 from ..phases import machine_state as _phase_state
 from ..bus.message_bus import Message
+from ..policy.gate import SPECIALIST_ACTION_NAME
+from ..policy.specialist_in_flight import specialist_in_flight_denial
+from ..specialists.domains import gap_backfilled_domain
 from ..state.shared_state import inject_stack_base_params
 from ..state.task_registry import TERMINAL_STATES
 from ..collaborator import CoordinatorCollaborator
@@ -38,6 +42,15 @@ class PendingProposal:
     payload: dict[str, Any]
     #: The task this proposal materialized into, once the Critic approved it.
     task_id: str | None = None
+
+
+def integrate_review_in_flight(pending_proposals: Mapping[str, PendingProposal], specialist_task_id: str) -> bool:
+    """Whether a synthetic integrate_patch review for this specialist task awaits a ruling."""
+    return any(
+        proposal.action_name == "integrate_patch"
+        and (proposal.payload.get("params") or {}).get("specialist_task_id") == specialist_task_id
+        for proposal in pending_proposals.values()
+    )
 
 
 async def record_proposal(
@@ -94,21 +107,24 @@ def _record_phase_proposal(coord: "Coordinator", pending: PendingProposal) -> No
     the Critic's ruling is filed on.
     """
     from hyperloom.inference_optimizer.breakdown.recorder import phase_event
+    from hyperloom.inference_optimizer.breakdown.recorder.phase_records import PhaseCycle, PhaseProposal
 
     state = coord.shared_state
     if not pending.proposal_msg_id or not state.phase:
         return
     params = pending.payload.get("params") if isinstance(pending.payload.get("params"), dict) else {}
     phase_event.record_proposal(
-        proposal_msg_id=pending.proposal_msg_id,
-        action=pending.action_name,
-        phase=state.phase,
-        macro_cycle=state.macro_cycle,
-        from_agent=pending.from_agent,
-        tick=state.tick,
-        predicted_gain_pct=pending.predicted_gain_pct,
-        candidate_id=pending.payload.get("framework_agent_candidate_id") or params.get("framework_agent_candidate_id"),
-        variant_name=pending.payload.get("variant_name") or params.get("variant_name"),
+        PhaseProposal(
+            at=PhaseCycle(state.phase, state.macro_cycle),
+            proposal_msg_id=pending.proposal_msg_id,
+            action=pending.action_name,
+            from_agent=pending.from_agent,
+            tick=state.tick,
+            predicted_gain_pct=pending.predicted_gain_pct,
+            candidate_id=pending.payload.get("framework_agent_candidate_id")
+            or params.get("framework_agent_candidate_id"),
+            variant_name=pending.payload.get("variant_name") or params.get("variant_name"),
+        )
     )
 
 
@@ -218,16 +234,13 @@ def _record_proposal_materialized(proposal_msg_id: str, task_id: str) -> None:
     """
     if not proposal_msg_id or not task_id:
         return
-    try:
-        from hyperloom.inference_optimizer.breakdown.recorder import phase_event
+    from hyperloom.inference_optimizer.breakdown.recorder import phase_event
 
-        phase_event.record_proposal_outcome(
-            proposal_msg_id=str(proposal_msg_id),
-            materialized=True,
-            task_id=str(task_id),
-        )
-    except Exception:
-        log.debug("phase timeline: proposal task link failed for %s", proposal_msg_id, exc_info=True)
+    phase_event.record_proposal_outcome(
+        proposal_msg_id=str(proposal_msg_id),
+        materialized=True,
+        task_id=str(task_id),
+    )
 
 
 def _record_config_routed(coll: Any, pending: Any, *, task_id: str) -> None:
@@ -275,6 +288,12 @@ def _record_config_dropped(coll: Any, pending: Any, *, reason: str) -> None:
 class ProposalsCollaborator(CoordinatorCollaborator):
     """Turns approved proposals into queued tasks."""
 
+    def register_review_proposal(self, message: Message, payload: dict[str, Any]) -> None:
+        """Register a coordinator proposal before publishing it for Critic review."""
+        pending = PendingProposal(message.msg_id, "coordinator", payload["action_name"], 0.0, payload)
+        self.state.pending_proposals[message.msg_id] = pending
+        _record_phase_proposal(self._coord, pending)
+
     def _approved_idempotency_key(self, action_name: str, params: dict[str, Any]) -> str:
         """Content-addressed idempotency key for an approved proposal."""
         payload: Any = (
@@ -285,8 +304,29 @@ class ProposalsCollaborator(CoordinatorCollaborator):
         ).hexdigest()[:16]
         return f"approved:{action_name}:{digest}"
 
+    def credit_predictor_proposals(self, params: dict) -> None:
+        """Credit the predictor for an orchestration grid's copies of its rows (see ``predictor.attribution``)."""
+        grid = params.get("grid")
+        if not isinstance(grid, list) or not grid:
+            return
+        from ..predictor.attribution import stamp_predictor_provenance
+
+        stamped = stamp_predictor_provenance(grid, self.shared_state.specialist_rounds or [])
+        if stamped:
+            log.info("explore grid: %d/%d variant(s) credited to the predictor", stamped, len(grid))
+
+    def floor_keep_threshold(self, params: dict[str, Any]) -> None:
+        """Set ``keep_threshold_pct`` to the session's bar, or to the agent's value when that is a finite higher one.
+
+        An agent may only raise the bar: a lower value would KEEP gains the session refuses, a negative one would KEEP
+        regressions, and the stamped value also decides which earlier REVERTs a lower bar reopens.
+        """
+        session_pct = _phase_state.resolve_keep_threshold(self.shared_state)
+        proposed = to_float(params.get("keep_threshold_pct"))
+        params["keep_threshold_pct"] = session_pct if proposed is None else max(proposed, session_pct)
+
     def inject_explore_runtime_params(self, params: dict) -> None:
-        """Inject explore-task operational knobs from SharedState into ``params`` (single source of truth for both propose/Critic and direct-delegate paths). setdefault preserves LLM overrides."""
+        """Inject explore-task operational knobs from SharedState into ``params`` (single source of truth for both propose/Critic and direct-delegate paths). setdefault preserves LLM overrides, except the KEEP bar, which an agent may only raise."""
         br = float(self.shared_state.baseline_runtime_sec or 0.0)
         if br > 0:
             params.setdefault("baseline_runtime_sec", br)
@@ -297,8 +337,7 @@ class ProposalsCollaborator(CoordinatorCollaborator):
         bwr = float(self.shared_state.baseline_warm_runtime_sec or 0.0)
         if bwr > 0:
             params.setdefault("baseline_warm_runtime_sec", bwr)
-        keep = _phase_state.resolve_keep_threshold(self.shared_state)
-        params.setdefault("keep_threshold_pct", keep)
+        self.floor_keep_threshold(params)
         # The round-id seed: the executor holds no cross-round state, so the round
         # it labels itself with has to come from the durable cursor.
         cursor = int((self.shared_state.explore_search or {}).get("cursor") or 0)
@@ -321,46 +360,8 @@ class ProposalsCollaborator(CoordinatorCollaborator):
                 "predicted_gain_pct",
                 float(pending.predicted_gain_pct),
             )
-        # Filter the grid to the Critic-approved subset.
-        if pending.action_name == "explore" and isinstance(params.get("grid"), list):
-            original_grid = list(params["grid"])
-            if not apply_critic_grid_filter(
-                params,
-                original_grid=original_grid,
-                approved_variant_names=approved_variant_names,
-            ):
-                await self.bus.record_observation(
-                    "coordinator",
-                    "observation",
-                    {
-                        "kind": "proposal_materialize_skipped",
-                        "reason": "critic_filter_empty_grid",
-                        "proposal_msg_id": pending.proposal_msg_id,
-                        "action_name": pending.action_name,
-                        "from_agent": pending.from_agent,
-                    },
-                )
-                _record_config_dropped(self, pending, reason="critic_filter_empty_grid")
-                return
-        if pending.action_name == "profile":
-            # Stamp the server config that produced this trace.
-            inject_stack_base_params(params, self.shared_state)
-        if pending.action_name == "sweep":
-            inject_stack_base_params(params, self.shared_state, anchor=True)
-            if self.shared_state.baseline_config_path:
-                params.setdefault("config_path", self.shared_state.baseline_config_path)
-        if pending.action_name == "explore":
-            self.inject_explore_runtime_params(params)
-            inject_stack_base_params(params, self.shared_state, anchor=True)
-        if pending.action_name == "integrate_patch":
-            # ``source_phase`` is stamped where the specialist is created and carried from there; a
-            # second derivation here would be a second decision, and could write an empty owner.
-            params.setdefault("keep_threshold_pct", _phase_state.resolve_keep_threshold(self.shared_state))
-            # Seed the patched-eval server with the same base args/config every other eval server uses, else it
-            # launches on bare framework defaults and crashes at startup regardless of the patch.
-            inject_stack_base_params(params, self.shared_state, anchor=True)
-            if self.shared_state.baseline_config_path:
-                params.setdefault("config_path", self.shared_state.baseline_config_path)
+        if not await self._seed_materialized_params(pending, params, approved_variant_names):
+            return
         lanes, ttl = self._coord.dispatcher.registry_lanes_ttl(pending.action_name)
         # Content-addressed so a batch of proposals that would launch identical work collapses to one task; a
         # terminated twin still gets a fresh key so a legitimate retry after failure is never locked out.
@@ -384,33 +385,16 @@ class ProposalsCollaborator(CoordinatorCollaborator):
             if not was_existing:
                 break
             if task.state not in TERMINAL_STATES:
-                await self.bus.record_observation(
-                    "coordinator",
-                    "observation",
-                    {
-                        "kind": "proposal_materialize_skipped",
-                        "reason": "duplicate_proposal_content",
-                        "proposal_msg_id": pending.proposal_msg_id,
-                        "task_id": task.task_id,
-                        "task_state": task.state,
-                        "action_name": pending.action_name,
-                        "from_agent": pending.from_agent,
-                    },
+                await self._record_materialize_skipped(
+                    pending, "duplicate_proposal_content", task_id=task.task_id, task_state=task.state
                 )
                 return
         else:
-            await self.bus.record_observation(
-                "coordinator",
-                "observation",
-                {
-                    "kind": "proposal_materialize_skipped",
-                    "reason": "idempotency_key_exhausted",
-                    "proposal_msg_id": pending.proposal_msg_id,
-                    "task_id": task.task_id if task is not None else "",
-                    "task_state": task.state if task is not None else "",
-                    "action_name": pending.action_name,
-                    "from_agent": pending.from_agent,
-                },
+            await self._record_materialize_skipped(
+                pending,
+                "idempotency_key_exhausted",
+                task_id=task.task_id if task is not None else "",
+                task_state=task.state if task is not None else "",
             )
             return
         # The round the authoring specialist opened runs on under this task id.
@@ -436,13 +420,86 @@ class ProposalsCollaborator(CoordinatorCollaborator):
         _record_proposal_materialized(pending.proposal_msg_id, task.task_id)
         _record_config_routed(self, pending, task_id=task.task_id)
 
+    async def _seed_materialized_params(
+        self,
+        pending: PendingProposal,
+        params: dict[str, Any],
+        approved_variant_names: set[str] | None,
+    ) -> bool:
+        """Seed an approved proposal's params for its action; ``False`` (skip recorded) when it must not run."""
+        action = pending.action_name
+        # Filter the grid to the Critic-approved subset.
+        if action == "explore" and isinstance(params.get("grid"), list):
+            original_grid = list(params["grid"])
+            if not apply_critic_grid_filter(
+                params,
+                original_grid=original_grid,
+                approved_variant_names=approved_variant_names,
+            ):
+                await self._record_materialize_skipped(pending, "critic_filter_empty_grid")
+                _record_config_dropped(self, pending, reason="critic_filter_empty_grid")
+                return False
+        if action == "profile":
+            # Stamp the server config that produced this trace.
+            inject_stack_base_params(params, self.shared_state)
+        if action == "sweep":
+            inject_stack_base_params(params, self.shared_state, anchor=True)
+            if self.shared_state.baseline_config_path:
+                params.setdefault("config_path", self.shared_state.baseline_config_path)
+        if action == "explore":
+            self.inject_explore_runtime_params(params)
+            self.credit_predictor_proposals(params)
+            inject_stack_base_params(params, self.shared_state, anchor=True)
+        if action == "integrate_patch":
+            self._seed_integrate_patch_params(params)
+        if action == SPECIALIST_ACTION_NAME:
+            return await self._specialist_domain_free(pending, params)
+        return True
+
+    async def _specialist_domain_free(self, pending: PendingProposal, params: dict[str, Any]) -> bool:
+        """Re-judge an approved specialist against the domains held now: admission judged it when it was proposed."""
+        find_gap = self.shared_state.find_gap
+        if backfilled := gap_backfilled_domain(params, find_gap):
+            params["domain"] = backfilled
+        denied = specialist_in_flight_denial(pending.action_name, params, self.tasks, find_gap)
+        if denied is None:
+            return True
+        await self._record_materialize_skipped(pending, denied.rule, detail=str(denied))
+        return False
+
+    async def _record_materialize_skipped(self, pending: PendingProposal, reason: str, **fields: Any) -> None:
+        """Record that an approved proposal was not turned into a task, and why."""
+        await self.bus.record_observation(
+            "coordinator",
+            "observation",
+            {
+                "kind": "proposal_materialize_skipped",
+                "reason": reason,
+                "proposal_msg_id": pending.proposal_msg_id,
+                **fields,
+                "action_name": pending.action_name,
+                "from_agent": pending.from_agent,
+            },
+        )
+
+    def _seed_integrate_patch_params(self, params: dict[str, Any]) -> None:
+        """Default an approved integrate_patch's grading context and its patched-eval server."""
+        # ``source_phase`` is stamped where the specialist is created and carried from there; a
+        # second derivation here would be a second decision, and could write an empty owner.
+        self.floor_keep_threshold(params)
+        # Seed the patched-eval server with the same base args/config every other eval server uses, else it
+        # launches on bare framework defaults and crashes at startup regardless of the patch.
+        inject_stack_base_params(params, self.shared_state, anchor=True)
+        if self.shared_state.baseline_config_path:
+            params.setdefault("config_path", self.shared_state.baseline_config_path)
+
     def _record_proposal_task_map(self, proposal_msg_id: str, task_id: str) -> None:
         """Append one ``{proposal_msg_id -> task_id}`` row to the trace map."""
         if not proposal_msg_id or not task_id:
             return
         try:
             from hyperloom.common.timeutil import now_iso
-            from hyperloom.common.io import append_jsonl
+            from hyperloom.common.io import JsonLineFormat, append_jsonl
             from hyperloom.inference_optimizer.session.session_paths import proposal_task_map_path
 
             path = proposal_task_map_path(self.session_dir)
@@ -451,8 +508,8 @@ class ProposalsCollaborator(CoordinatorCollaborator):
                 "proposal_msg_id": str(proposal_msg_id),
                 "task_id": str(task_id),
             }
-            append_jsonl(path, row, make_parents=True, sort_keys=True)
-        except Exception:
+            append_jsonl(path, row, make_parents=True, fmt=JsonLineFormat(sort_keys=True))
+        except OSError:
             log.debug(
                 "full-trace: proposal_task_map append failed for msg_id=%s task_id=%s",
                 proposal_msg_id,

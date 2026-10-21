@@ -24,7 +24,9 @@ from hyperloom.inference_optimizer.breakdown.stop_reasons import (
     BACKEND_UNHEALTHY_STOP_REASON,
     PATCH_RECOVERY_INCOMPLETE_STOP_REASON,
 )
+from hyperloom.inference_optimizer.session.optimization_journal import read_journal_entries
 from hyperloom.inference_optimizer.session.paths import db_path_for
+from ...measurement.baseline_budget import BASELINE_BUDGET_STOP_EXPLANATIONS
 from ...state.shared_state import SharedState
 
 
@@ -35,15 +37,7 @@ def _count_server_boot_failures(session_dir: Path | None) -> int:
     """Count ``warmup_failed`` variants (server boot failures) from the journal."""
     if session_dir is None:
         return 0
-    path = Path(session_dir) / "reports" / "optimization_journal.json"
-    try:
-        blob = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return 0
-    entries = blob.get("entries") if isinstance(blob, dict) else None
-    if not isinstance(entries, list):
-        return 0
-    return sum(1 for e in entries if isinstance(e, dict) and str(e.get("reason") or "").strip() == "warmup_failed")
+    return sum(1 for e in read_journal_entries(session_dir) if str(e.reason or "").strip() == "warmup_failed")
 
 
 def _safe_call(state: Any, method: str, default: Any) -> Any:
@@ -181,13 +175,9 @@ def _build_failure_summary(
         server_log_abs = _resolve_attempt_server_log(attempt)
         # Only the benign WARN (or nothing) survived: dig the real terminal marker out of server.log when available.
         if not error_text and server_log_abs is not None:
-            try:
-                from ._subprocess_kill import server_log_death_excerpt
+            from ._subprocess_kill import server_log_death_excerpt
 
-                excerpt = server_log_death_excerpt(str(server_log_abs))
-            except Exception:
-                log.debug("server_log_death_excerpt failed", exc_info=True)
-                excerpt = None
+            excerpt = server_log_death_excerpt(str(server_log_abs))
             if excerpt:
                 error_text = excerpt.strip()
                 if error_class in ("", "unknown"):
@@ -227,7 +217,10 @@ def _build_failure_summary(
 _STOP_REASON_EXPLANATIONS: dict[str, str] = {
     # Terminal reasons the coordinator loop sets directly.
     "target_reached": "Target reached: a requested --target-gain / --target-tput / --target-roofline was met.",
-    "time_exhausted": "Wall-clock budget (--max-hours) was exhausted; the best validated result was kept.",
+    "time_exhausted": (
+        "Wall-clock budget (--max-hours) was exhausted, or too little of it remained for another macro-cycle; "
+        "the best validated result was kept."
+    ),
     "max_ticks": "The coordinator hit its max-ticks safety cap; the best validated result was kept.",
     "signal": "Stopped on an OS stop signal (e.g. SIGINT / SIGTERM).",
     "emergency": (
@@ -237,18 +230,11 @@ _STOP_REASON_EXPLANATIONS: dict[str, str] = {
     "coordinator_exception": "The coordinator loop raised an unhandled exception; the last validated result was preserved.",
     "custom": "A caller-supplied stop condition (stop_when) fired.",
     "unknown": "No specific stop reason was recorded (e.g. a terminal session was resumed); treat as unclassified.",
-    # Policy / robustness governor.
-    "robustness_escalated": (
-        "Robustness escalated: the run closed early with budget still on the clock (not a target hit). "
-        "Common triggers are a validated-gain plateau, rising crash_count, or a stale aiter JIT build. "
-        "A close driven by the remaining budget reports time_exhausted instead. "
-        "The best validated result was locked in before exit."
-    ),
     "baseline_failed": "Baseline never produced a valid measurement; see the failure summary / server log.",
     "server_argv_invalid": (
-        "The installed framework's own argument parser refused the composed server argv before any "
-        "server was launched. Nothing in the framework source is at fault: correct the offending flag "
-        "in --server-args / the recipe for the installed version, then re-run."
+        "The composed server argv was refused before any server was launched: the installed framework's parser "
+        "rejected a flag, or Hyperloom could not split the args into argv tokens intact. Nothing in the framework "
+        "source is at fault: correct the offending flag or value in --server-args / the recipe, then re-run."
     ),
     "environment_fault": (
         "This host cannot run the combination as installed - the framework is missing from the serving "
@@ -270,16 +256,7 @@ _STOP_REASON_EXPLANATIONS: dict[str, str] = {
         "an improvement over a baseline that was never the baseline, so the run stopped with the figure kept and "
         "marked. Resume with more budget to measure a comparable baseline."
     ),
-    "baseline_over_latency_budget": (
-        "The baseline's own mean end-to-end latency exceeded --max-latency-ms, or the baseline reported no "
-        "end-to-end latency at all, so the run stopped before optimizing. The budget refuses any KEEP over the "
-        "ceiling or without a measured latency, and the reference the run is measured against already fails it — no "
-        "candidate built on it could have been promoted, so continuing would have spent the whole time budget "
-        "refusing every winner in turn. If the baseline reported no latency, make the workload's entrypoint write "
-        "e2el_mean_ms; otherwise either the ceiling is lower than this workload's floor on this hardware, or the "
-        "baseline configuration itself is the thing to fix. Relaunch with a ceiling the baseline can meet, or "
-        "without one, to see what the search finds."
-    ),
+    **BASELINE_BUDGET_STOP_EXPLANATIONS,
     # Recipe KB knowledge-plane bootstrap failures.
     "warm_replay_rollback_failed": (
         "Warm replay rollback could not restore every Recipe/Kernel mutation; "
@@ -290,7 +267,6 @@ _STOP_REASON_EXPLANATIONS: dict[str, str] = {
         "resume; the run stopped instead of falling back to a different tree."
     ),
     # Search / phase plateaus and completions.
-    "no_kernel_skipped": "No kernel candidates were available, so the kernel phase was skipped and the run closed.",
     "sweep_done": "SWEEP finished the concurrency ladder.",
     "sweep_failed": "The concurrency sweep reached a failed terminal result.",
     "optimize_no_more_leverage": (
@@ -302,7 +278,10 @@ _STOP_REASON_EXPLANATIONS: dict[str, str] = {
     # sit in STOP_REASON_VOCAB at all, so these keys are a superset of the vocabulary rather than a mirror of it.
     "framework_agent_phase_done": "The framework-enablement agent completed its phase.",
     "framework_agent_plateau": "The framework-enablement agent plateaued with no further progress.",
-    "global_converged": "Cyclic phases converged: repeated macro-cycles stopped yielding new validated gain.",
+    "global_converged": (
+        "Cyclic phases converged: repeated macro-cycles stopped yielding new validated gain, or every steering "
+        "direction is saturated."
+    ),
     "enablement_stalled": "The enablement loop stopped without a baseline that boots: a revalidation the round depended on never promoted.",
     "plateau_explore": "The configuration search plateaued: no new leverage was found in the search space.",
     # Pre-flight gates (fail fast before booting a server).
@@ -312,16 +291,12 @@ _STOP_REASON_EXPLANATIONS: dict[str, str] = {
         "Preflight gate: config.json is corrupt or declares RoPE scaling without a max-position field, "
         "which would crash engine init."
     ),
-    "baseline_arg_error": "Two or more baseline attempts fast-exited on a bad CLI arg (deterministic), so the slow-baseline retry budget was not burned.",
+    "baseline_arg_error": "Two or more baseline attempts failed argument or configuration validation, so further baseline retries were stopped.",
     "enablement_attempts_exhausted": "The enablement loop stopped after too many consecutive rounds bought no ground. A bring-up that is still clearing new boot failures is bounded by the run's wall clock instead.",
     "baseline_accuracy_failed": "The baseline produced no accuracy result even though the accuracy test was expected to run (broken eval or missing quality gate). The run stopped rather than optimize against an unvalidated baseline.",
     AGENTX_PREFLIGHT_STOP_REASON: (
-        "HYPERLOOM_AGENTX is on but its benchmark client (aiperf) is missing or is not the pinned "
-        "AIPERF_REF build, and the automatic install did not resolve it. This is an environment gap, "
-        "not something a framework patch can close, so the run stopped on the first occurrence rather "
-        "than spending its budget in the enablement lane. Fix: run "
-        "src/hyperloom/inference_optimizer/assets/install.sh --only-aiperf (the failure it prints is "
-        "the real cause), or point AIPERF_BIN at an existing pinned build."
+        "The MLPerf agentic client failed its execution preflight. Check the named missing dependency "
+        "and rerun setup before resuming; a framework patch cannot repair this environment gap."
     ),
     PATCH_RECOVERY_INCOMPLETE_STOP_REASON: (
         "A patch lifecycle owed the framework tree a revert and could not finish it, so the tree still "
@@ -374,17 +349,15 @@ def _explain_conc_sweep_skip(state) -> str:
 
 def _platform_fingerprint(gpu_type: str | None = None) -> dict[str, Any]:
     """Platform record for the run report, scoped to this session's node count."""
-    try:  # local import keeps this free of executor import order
-        from ._multi_node_env import is_multi_node
+    # Local import keeps this free of executor import order.
+    from ._multi_node_env import is_multi_node
 
-        multi_node: bool | None = bool(is_multi_node())
-    except Exception:  # noqa: BLE001 - scope marker only; unknown is not False
-        multi_node = None
-    return platform_fingerprint(gpu_type, multi_node=multi_node)
+    return platform_fingerprint(gpu_type, multi_node=is_multi_node())
 
 
-def _append_composite_perf_section(lines: list[str], summary: dict[str, Any]) -> None:
+def _format_composite_perf_section(summary: dict[str, Any]) -> list[str]:
     """Render recorded grading; summaries predating the snapshot keep their legacy layout."""
+    lines: list[str] = []
     comparison = summary.get("performance_comparison")
     if comparison is not None:
         from hyperloom.common.perf_metric import GRADED_OUTPUT, INTVTY_OBJECTIVES, INTVTY_V1
@@ -407,12 +380,13 @@ def _append_composite_perf_section(lines: list[str], summary: dict[str, Any]) ->
         if graded_on_intvty:
             lines.append(f"- reference tput      : `{comparison['tput_reference']:.1f}` tok/s (total, diagnostic)")
             lines.append(f"- candidate tput      : `{comparison['tput_candidate']:.1f}` tok/s (total, diagnostic)")
-        return
+        return lines
 
     from hyperloom.common.gain_math import gain_pct
     from hyperloom.common.perf_metric import (
         GRADED_INTVTY,
         INTVTY_V1,
+        intvty_grading_enabled,
         intvty_of,
         parse_intvty_noise_pct,
         perf_snapshot_from_mapping,
@@ -421,11 +395,10 @@ def _append_composite_perf_section(lines: list[str], summary: dict[str, Any]) ->
 
     baseline = perf_snapshot_from_mapping(summary.get("baseline_perf"))
     if not baseline:
-        return
+        return lines
     cb = summary.get("current_best") or {}
     cb_snap = perf_snapshot_from_mapping(cb) if isinstance(cb, dict) else None
-    lines.append("## AgentX perf (interactivity objective, per-chip tput guard)")
-    lines.append("")
+    lines.extend(["## AgentX perf (interactivity objective, per-chip tput guard)", ""])
     lines.append(f"- baseline intvty P90 : `{intvty_of(baseline):.1f}` tok/s/user (slow tail)")
     lines.append(f"- baseline total tput : `{total_tput_of(baseline):.1f}` tok/s")
     if cb_snap:
@@ -446,12 +419,11 @@ def _append_composite_perf_section(lines: list[str], summary: dict[str, Any]) ->
     elif objective:
         lines.append(f"- grading mode        : `{objective}`")
     else:
-        from hyperloom.common.perf_metric import intvty_grading_enabled
-
         if intvty_grading_enabled(benchmark_mode=str(summary.get("benchmark_mode") or "")):
             lines.append(f"- grading mode        : `{INTVTY_V1}` (noise band `{parse_intvty_noise_pct():.1f}%`)")
         else:
             lines.append("- grading mode        : `output_throughput` (AgentX grading not in effect)")
+    return lines
 
 
 def _cumulative_validation_status(summary: dict[str, Any]) -> str:
@@ -598,7 +570,7 @@ def _format_md(summary: dict[str, Any]) -> str:
     lines.append(f"- **Budget**: {summary['max_minutes']} minutes")
     lines.append(f"- **Generated**: {summary['report_generated_at']}")
     lines.append("")
-    # Per-framework primary metric: serving reports throughput (tok/s/GPU), scriptable xDiT reports per-image latency
+    # Per-framework primary metric: serving reports throughput (tok/s), scriptable xDiT reports per-image latency
     # (e2el_mean_ms).
     from hyperloom.inference_optimizer import framework_registry
 
@@ -642,7 +614,7 @@ def _format_md(summary: dict[str, Any]) -> str:
         lines.append(f"- ttft_mean      : `{cb.get('ttft_mean_ms'):.1f}` ms")
     if cb.get("e2el_mean_ms") is not None:
         lines.append(f"- e2el_mean      : `{cb.get('e2el_mean_ms'):.1f}` ms")
-    _append_composite_perf_section(lines, summary)
+    lines.extend(_format_composite_perf_section(summary))
     lines.append("")
     lines.extend(_format_completeness_annotations(summary))
     lines.append("## Run summary")
@@ -812,7 +784,7 @@ def _format_completeness_annotations(summary: dict[str, Any]) -> list[str]:
     if pending_keeps:
         lines.append(f"- ⚠ kernel_opt KEEPs awaiting integrate: {', '.join(pending_keeps)}.")
     if untried:
-        lines.append(f"- ⚠ reusable hot kernels with no kernel_opt attempt: {', '.join(untried)}.")
+        lines.append(f"- ⚠ reusable hot kernels no backend produced a patch for: {', '.join(untried)}.")
     lines.append("")
     return lines
 
@@ -888,7 +860,7 @@ def _format_roofline_comparison_section(cmp: dict[str, Any]) -> list[str]:
             "_The **Theoretical peak** below is the decode "
             "memory-roofline ceiling derived from the GPU's HBM "
             "bandwidth and the model's weight + KV-cache traffic per "
-            "token (see `roofline_ceiling.compute_peak_from_state`). "
+            "token (see `roofline_ceiling.compute_roofline_breakdown_from_state`). "
             "It is an upper bound: real `output_throughput` always "
             "stays under it because of comm overhead, kernel "
             "efficiency < 100%, and KV-cache fragmentation. **Within "
@@ -929,7 +901,7 @@ def _format_roofline_comparison_section(cmp: dict[str, Any]) -> list[str]:
         "_The **Theoretical peak** below is the decode "
         "memory-roofline ceiling derived from the GPU's HBM "
         "bandwidth and the model's weight + KV-cache traffic per "
-        "token (see `roofline_ceiling.compute_peak_from_state`). "
+        "token (see `roofline_ceiling.compute_roofline_breakdown_from_state`). "
         "It is an upper bound: real `output_throughput` always "
         "stays under it because of comm overhead, kernel "
         "efficiency < 100%, and KV-cache fragmentation. **Within "
@@ -1091,7 +1063,7 @@ def _render_conc_sweep_curve_for_report(
 ) -> Path | None:
     """Render the concurrency-sweep curve PNG into the reports directory."""
     from hyperloom.inference_optimizer.session.session_paths import reports_dir as _reports_dir
-    from hyperloom.orchestrator.kernel.conc_sweep_plot import render_conc_sweep_curve
+    from hyperloom.orchestrator.kernel.conc_sweep_plot import ConcCurveOptions, render_conc_sweep_curve
 
     json_path = _reports_dir(session_dir) / "conc_sweep_summary.json"
     try:
@@ -1109,14 +1081,7 @@ def _render_conc_sweep_curve_for_report(
     osl = int(payload.get("osl") or 0)
 
     return render_conc_sweep_curve(
-        payload,
-        png_path,
-        model_label=model_label,
-        gpu_label=gpu_label,
-        tp=tp,
-        isl=isl,
-        osl=osl,
-        draw_ceiling=False,
+        payload, png_path, ConcCurveOptions(model_label=model_label, gpu_label=gpu_label, tp=tp, isl=isl, osl=osl)
     )
 
 
@@ -1129,7 +1094,7 @@ def _load_external_baseline(session_dir: Path) -> dict[str, Any] | None:
         if not path.exists():
             return None
         return json.loads(path.read_text(encoding="utf-8"))
-    except Exception as exc:  # noqa: BLE001
+    except (OSError, ValueError) as exc:
         log.warning(
             "report_executor: failed to load external baseline from %s: %s",
             session_dir,

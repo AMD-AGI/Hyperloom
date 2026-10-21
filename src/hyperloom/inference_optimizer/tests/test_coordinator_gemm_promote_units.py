@@ -912,6 +912,39 @@ class TestForgeGemmRuntimeConfigMerge:
         assert coord.shared_state.optimization_stack == []
 
     @pytest.mark.asyncio
+    async def test_a_round_the_phase_cannot_fit_is_never_started(self, tmp_path, monkeypatch):
+        """With less KERNEL time left than one measured round, no candidate is measured and none is judged."""
+        from hyperloom.orchestrator.phases import machine_state
+
+        coord = _coord(tmp_path, baseline_tput=100.0, baseline_runtime_sec=600.0, framework="sglang")
+        phase = KernelPhase(coord)
+        candidate = tmp_path / "dense.csv"
+        candidate.write_text("M,N,K\n1,2,3\n", encoding="utf-8")
+        fake = _make_integrate([{"status": "ok", "decision": "KEEP", "new_tput": 120.0, "gain_pct": 20.0}])
+        monkeypatch.setattr(krh_mod, "integrate_handler", fake)
+        monkeypatch.setattr(machine_state, "phase_budget_remaining_seconds", lambda _state, **_kw: 60.0)
+        monkeypatch.setattr(phase, "_merge_gemm_candidate_with_runtime", lambda _env_var, env_value: env_value)
+        result = {
+            "backend": "forge",
+            "tuners_run": [
+                {
+                    "status": "ok",
+                    "tuner": "dense_bf16",
+                    "improved_shapes": 1,
+                    "env_var": "AITER_CONFIG_DENSE",
+                    "env_value": str(candidate),
+                }
+            ],
+        }
+
+        await phase._validate_gemm_tuning_e2e(result)
+
+        assert fake.calls == []
+        assert result["e2e_results"]["kept"] == []
+        assert result["e2e_results"]["reverted"] == []
+        assert coord.shared_state.optimization_stack == []
+
+    @pytest.mark.asyncio
     async def test_stacks_keeps_and_reverts(self, tmp_path, monkeypatch):
         coord = _coord(
             tmp_path,
@@ -1643,11 +1676,8 @@ class TestKernelE2EMeasurementPromotion:
 
         monkeypatch.setenv("FRAMEWORK", "sglang")
         monkeypatch.setattr(krh_mod, "_resolve_integrate_payload", unexpected)
-        monkeypatch.setattr(
-            krh_mod,
-            "apply_kernel_patch",
-            SimpleNamespace(parse_patch_manifest=unexpected, verify_cpp_itfs_rebuilt=unexpected),
-        )
+        monkeypatch.setattr(krh_mod, "repo_relative_manifest", unexpected)
+        monkeypatch.setattr(krh_mod, "apply_kernel_patch", SimpleNamespace(verify_cpp_itfs_rebuilt=unexpected))
         monkeypatch.setattr(krh_mod, "_grade_integrate_accuracy", unexpected)
         monkeypatch.setattr(krh_mod, "_maybe_finalize_kernel_patch", unexpected)
         monkeypatch.setattr(krh_mod, "_sweep_integrate_aiter_locks", lambda **kwargs: {})
@@ -1660,11 +1690,6 @@ class TestKernelE2EMeasurementPromotion:
         state = coord.shared_state
         state.current_best.update(extra_server_args="--page-size 32", extra_envs={"TUNED_ENV": "1"})
         state.baseline_config_path = "/live/base.yaml"
-        state.last_kernel_opt = {
-            "kernel_id": "unrelated",
-            "patch_path": "/unrelated.patch",
-            "target_file": "/unrelated.py",
-        }
         state.save(coord.session_dir)
         return {
             "source": "forge_gemm_paired",

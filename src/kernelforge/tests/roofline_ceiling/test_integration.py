@@ -14,8 +14,11 @@ import click
 import pytest
 
 from kernelforge import cli as cli_module
+from kernelforge.cli.forge_loop_command import _make_ceiling_estimator
+from kernelforge.cli.options import _validate_roofline_target
 from kernelforge.agent_backends.base import AgentProviderUnavailableError
-from kernelforge.roofline_ceiling.analyst import CeilingAnalysisError
+from kernelforge.roofline_ceiling.analyst import AnalystSession, CeilingAnalysisError
+from kernelforge.roofline_ceiling.command import AnalystAgent
 from kernelforge.roofline_ceiling.contract import load_report
 from kernelforge.roofline_ceiling.estimate import estimate_ceiling as real_estimate_ceiling
 from kernelforge.roofline_ceiling.report import REPORT_FILENAME, WORKSPACE_SUBDIR
@@ -110,7 +113,7 @@ def test_the_ceiling_never_reaches_the_keep_decision():
     Matched on the identifiers rather than the word, because ``scoring`` uses
     "ceiling" in its own unrelated sense for the variance-share cap.
     """
-    from kernelforge.loop import scoring
+    from kernelforge.evaluation import scoring
 
     forbidden = ("kernelforge.roofline_ceiling", "ceiling_report", "_render_ceiling_advisory")
     decision_sites = (
@@ -289,28 +292,12 @@ def test_the_attainment_target_is_off_unless_an_operator_asks_for_it():
 
 def test_a_target_above_one_is_refused_because_attainment_cannot_exceed_the_ceiling():
     with pytest.raises(click.BadParameter, match="cannot exceed 1.0"):
-        cli_module._validate_roofline_target(86.0, True)
+        _validate_roofline_target(86.0, True)
 
 
 def test_a_target_without_a_ceiling_is_refused_rather_than_never_firing():
     with pytest.raises(click.BadParameter, match="pass --roofline-ceiling on"):
-        cli_module._validate_roofline_target(0.86, False)
-
-
-def test_no_estimator_is_built_while_the_ceiling_is_off():
-    assert (
-        cli_module._make_ceiling_estimator(
-            enabled=False,
-            workspace_dir=".",
-            driver_script="driver.py",
-            source_files=["kernel.py"],
-            agent_provider="",
-            agent_model="",
-            session_timeout_sec=60,
-            sandbox_mode="bypass",
-        )
-        is None
-    )
+        _validate_roofline_target(0.86, False)
 
 
 def test_the_estimator_calls_estimate_ceiling_with_arguments_it_accepts(monkeypatch):
@@ -322,40 +309,33 @@ def test_the_estimator_calls_estimate_ceiling_with_arguments_it_accepts(monkeypa
     """
     seen = {}
 
-    async def _estimate(backend, **kwargs):
-        seen.update(kwargs)
+    async def _estimate(*args, **kwargs):
+        bound = inspect.signature(real_estimate_ceiling).bind(*args, **kwargs).arguments
+        seen["task"] = bound["task"]
+        seen["session"] = bound["session"]
         return "outcome"
 
-    from kernelforge.roofline_ceiling.command import resolve_analyst_backend as real_resolve
-
-    def _resolve(*args, **kwargs):
-        seen["resolver"] = inspect.signature(real_resolve).bind(*args, **kwargs).arguments
+    def _resolve(agent):
+        seen["resolver"] = agent
         return SimpleNamespace()
 
     monkeypatch.setattr("kernelforge.roofline_ceiling.estimate.estimate_ceiling", _estimate)
     monkeypatch.setattr("kernelforge.roofline_ceiling.command.resolve_analyst_backend", _resolve)
 
-    estimator = cli_module._make_ceiling_estimator(
-        enabled=True,
+    estimator = _make_ceiling_estimator(
         workspace_dir=".",
         driver_script="driver.py",
         source_files=["kernel.py"],
-        agent_provider="",
-        agent_model="",
-        session_timeout_sec=60,
-        sandbox_mode="read-only",
+        analyst=AnalystAgent(provider="", model="", timeout_sec=60, sandbox_mode="read-only"),
     )
-    assert estimator is not None
 
     result = asyncio.run(estimator(case_ids=["decode-t1"], case_ms={"decode-t1": 14.0}))
 
-    resolver = seen.pop("resolver")
     assert result == "outcome"
-    assert resolver["sandbox_mode"] == "read-only"
-    assert seen["known_case_ids"] == ["decode-t1"]
-    # Every keyword the estimator sends has to be one the signature declares.
-    accepted = set(inspect.signature(real_estimate_ceiling).parameters)
-    assert set(seen) <= accepted, sorted(set(seen) - accepted)
+    assert seen["resolver"].sandbox_mode == "read-only"
+    assert seen["task"].known.case_ids == ["decode-t1"]
+    assert seen["task"].known.case_ms == {"decode-t1": 14.0}
+    assert seen["session"] == AnalystSession(model="", timeout_sec=60)
 
 
 @pytest.mark.parametrize(("deployment", "analyst"), [("bypass", "bypass"), ("read-only", "workspace-write")])
@@ -366,7 +346,7 @@ def test_the_analyst_runs_in_the_deployments_sandbox_widened_only_to_write(monke
     built = {}
     monkeypatch.setattr(command_module, "create_registered_backend", lambda runtime: built.setdefault("rt", runtime))
 
-    command_module.resolve_analyst_backend("claude", "", 600, sandbox_mode=deployment)
+    command_module.resolve_analyst_backend(command_module.AnalystAgent("claude", "", 600, deployment))
 
     assert built["rt"].provider == "claude"
     assert built["rt"].sandbox_mode == analyst
@@ -466,7 +446,7 @@ def test_a_ceiling_with_no_usable_case_logs_that_instead_of_a_figure(tmp_path):
 
 
 def test_the_progress_is_logged_with_each_iteration_header():
-    source = inspect.getsource(IterationLoop._run_locked)
+    source = inspect.getsource(IterationLoop._open_iteration)
     header_at = source.index('f"--- Iteration {iteration} "')
 
     assert header_at < source.index("self._render_roofline_progress()")

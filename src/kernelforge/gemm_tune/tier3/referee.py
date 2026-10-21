@@ -108,6 +108,7 @@ def time_paired(
             candidate()
         sync()
     except Exception as exc:  # noqa: BLE001 - a candidate that cannot run is data
+        log.warning("tier3: candidate warmup raised, no timing: %r", exc)
         return PairedTiming(0.0, 0.0, None, f"{type(exc).__name__}: {exc}")
 
     base_s: list[float] = []
@@ -116,7 +117,8 @@ def time_paired(
         for _ in range(max(repeats, 1)):
             base_s.append(_sample(baseline, sync))
             cand_s.append(_sample(candidate, sync))
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 - a candidate that cannot run is data
+        log.warning("tier3: candidate timing raised, no timing: %r", exc)
         return PairedTiming(0.0, 0.0, None, f"{type(exc).__name__}: {exc}")
 
     mb, mc = min(base_s), min(cand_s)
@@ -135,27 +137,29 @@ def time_paired(
     return PairedTiming(mb, mc, best_ratio)
 
 
-def judge_candidates(
-    shape: str,
-    candidates: list[dict[str, Any]],
-    *,
-    baseline: Callable[[], Any],
-    dispatch: Callable[[dict[str, Any]], Callable[[], Any] | None],
-    is_correct: Callable[[Callable[[], Any]], bool] | None = None,
-    sync: Callable[[], Any] | None = None,
-) -> Judgement:
+@dataclass(frozen=True)
+class ShapeHarness:
+    """The calls that re-time one shape: its baseline, a candidate dispatcher, a correctness check and a device sync."""
+
+    baseline: Callable[[], Any]
+    dispatch: Callable[[dict[str, Any]], Callable[[], Any] | None]
+    is_correct: Callable[[Callable[[], Any]], bool] | None = None
+    sync: Callable[[], Any] | None = None
+
+
+def judge_candidates(shape: str, candidates: list[dict[str, Any]], harness: ShapeHarness) -> Judgement:
     """Re-time one shape's candidates and pick the best that stands up."""
     result = Judgement(shape=shape)
     for cand in candidates:
-        call = dispatch(cand)
+        call = harness.dispatch(cand)
         if call is None:
             result.timings.append((cand, PairedTiming(0.0, 0.0, None, "not dispatchable")))
             continue
-        if is_correct is not None and not is_correct(call):
+        if harness.is_correct is not None and not harness.is_correct(call):
             result.rejected_incorrect += 1
             result.timings.append((cand, PairedTiming(0.0, 0.0, None, "failed the correctness check")))
             continue
-        timing = time_paired(baseline, call, sync=sync)
+        timing = time_paired(harness.baseline, call, sync=harness.sync)
         result.timings.append((cand, timing))
         if timing.usable and (
             result.best_timing is None

@@ -34,7 +34,7 @@ from .event_fields import (
 from .event_ids import event_id
 from .event_rows import rows_for_event, sort_rows, wire_rows
 from .event_sink import EventSink, make_sink
-from .event_timeline import finish_event, open_event
+from .event_timeline import EventHeader, finish_event, open_event
 
 # Every section a stack event assembles from. Named from the leaf module the
 # assembler shares, so this writer reads its parts without an import cycle.
@@ -165,12 +165,9 @@ def _open(*, baseline_tput: Any = None, objective: str = "", start_time: str = "
         if sink is not None:
             sink.record(SECTION_EVENT, dict(shell))
     return open_event(
-        event_type=EVENT_TYPE,
-        event=stack_event_id(),
+        EventHeader(EVENT_TYPE, stack_event_id(), EVENT_KIND, start_time or _now()),
         event_section=SECTION_EVENT,
         producer=PRODUCER,
-        kind=EVENT_KIND,
-        start_time=start_time or _now(),
         ext=shell,
     )
 
@@ -337,12 +334,10 @@ def finish(*, end_time: str = "") -> None:
             event=stack_event_id(),
         )
         finish_event(
-            event_type=EVENT_TYPE,
-            event=stack_event_id(),
+            EventHeader(EVENT_TYPE, stack_event_id(), EVENT_KIND),
             sequence=sequence,
             status=status or STATUS_SKIPPED,
             ext=ext,
-            kind=EVENT_KIND,
             end_time=closed,
         )
     except RECORDING_ERRORS as exc:
@@ -386,7 +381,7 @@ def assemble_stack_ext(
     )
     baseline = _float_or_none(header.get("baseline_tput"))
     measured = [row for row in adoptions if _float_or_none(row.get("contribution_pct")) is not None]
-    attributed = round(sum(float(row["contribution_pct"]) for row in measured), 6) if measured else 0.0
+    attributed = round(sum(float(row["contribution_pct"]) for row in measured), 6) if measured else None
     # Not a sum: asking two figures the same question is how the ledger checks
     # itself below.
     chain_total = _last_cumulative(adoptions)
@@ -415,13 +410,17 @@ def assemble_stack_ext(
         "attributed_gain_pct": attributed,
         # Adoptions kept for a reason other than a gain (a correctness fix) are
         # not throughput wins, so this caliber leaves them out.
-        "attributed_gain_pct_excluding_fixes": round(
-            attributed - sum(float(b["total_gain_pct"]) for b in by_keep_reason.values()), 6
+        "attributed_gain_pct_excluding_fixes": (
+            round(attributed - sum(float(b["total_gain_pct"]) for b in by_keep_reason.values()), 6)
+            if attributed is not None
+            else None
         ),
         "chain_total_gain_pct": chain_total,
         # Throughput no adoption claims, the anchor having moved between two
         # measurements. An identity: the sum of the chain breaks below.
-        "unattributed_gain_pct": (round(chain_total - attributed, 6) if chain_total is not None and measured else None),
+        "unattributed_gain_pct": (
+            round(chain_total - attributed, 6) if chain_total is not None and attributed is not None else None
+        ),
         "validated_total_gain_pct": recorded_total,
         # The ledger against the one figure measured on the whole stack: the
         # parts and the whole disagreeing means one of them is wrong.

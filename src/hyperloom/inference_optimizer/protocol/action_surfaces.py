@@ -303,7 +303,8 @@ ACTION_CATALOGUE: Mapping[str, ActionMetadata] = MappingProxyType(
             side_effects=("writes_results",),
             description=(
                 "Write final.md / final.json under reports/. Coordinator auto-flushes deterministic report at the "
-                "deadline (invariant); LLM may propose earlier on stop_reason or low remaining."
+                "deadline (invariant); the LLM may propose it only in CLOSE, where the Coordinator routes a stopped "
+                "or out-of-time run."
             ),
         ),
         "roofline": ActionMetadata(

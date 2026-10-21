@@ -56,10 +56,6 @@ _PROGRESS_MARKERS: tuple[tuple[LadderStage, str], ...] = (
     (LadderStage.HTTP_READY, "the server is fired up and ready to roll"),
 )
 
-#: The marker substrings alone, for a reader that must guarantee its text still
-#: witnesses every milestone after it drops the bulk of a log.
-PROGRESS_MARKER_SUBSTRINGS: tuple[str, ...] = tuple(marker for _stage, marker in _PROGRESS_MARKERS)
-
 #: Where each enablement failure kind sits on the ladder. Kinds absent here
 #: carry no fixed position and are placed relative to observed progress.
 _KIND_STAGE: Mapping[str, LadderStage] = {
@@ -194,6 +190,31 @@ def _terminal_frame(root: _Traceback | None, roots: Sequence[str]) -> TerminalFr
     return TerminalFrame(exc_type=root.exc_type, module=module, file_rel=file_rel, line=int(line))
 
 
+def _region_start(text: str, root: _Traceback | None) -> int:
+    """Return where the failure rules start: the first line of the furthest milestone before the root traceback."""
+    end = root.anchor if root is not None else len(text)
+    # Lowering keeps every offset but past U+0130, which lowers to two code points.
+    lowered = text[:end].replace("\u0130", "i").lower()
+    reached = [(stage, at) for stage, marker in _PROGRESS_MARKERS if (at := lowered.find(marker)) >= 0]
+    if not reached:
+        return 0
+    furthest = max(stage for stage, _at in reached)
+    first = min(at for stage, at in reached if stage == furthest)
+    return text.rfind("\n", 0, first) + 1
+
+
+def failure_region(text: str) -> str:
+    """Return the stretch of a stream the failure rules read.
+
+    The process carried on past every line before the furthest milestone it
+    reached, so a rule match there (an autotuner rejecting a config, an allocation
+    it retried) is not what failed. That milestone's first line marks the stage:
+    its markers repeat per rank and while serving, after the line that failed.
+    The lines a failure prints natively before Python raises stay in the region.
+    """
+    return text[_region_start(text, _root_traceback(text)) :]
+
+
 def _failure_site(text: str, signature: rules.FailureSignature, root: _Traceback | None) -> tuple[int, str]:
     """Return where the excerpt is anchored and the line that states the failure.
 
@@ -204,8 +225,8 @@ def _failure_site(text: str, signature: rules.FailureSignature, root: _Traceback
     if head:
         # ``raw_excerpt`` is whitespace-collapsed; match it back with a
         # whitespace-flexible pattern so the anchor lands on the real line.
-        pattern = r"\s+".join(re.escape(tok) for tok in head.split())
-        found = re.search(pattern, text)
+        pattern = re.compile(r"\s+".join(re.escape(tok) for tok in head.split()))
+        found = pattern.search(text, _region_start(text, root))
         if found is not None:
             return found.start(), text[found.start() :].partition("\n")[0].strip()
     if root is None:
@@ -213,40 +234,95 @@ def _failure_site(text: str, signature: rules.FailureSignature, root: _Traceback
     return root.anchor, root.exc_line
 
 
-def _classified_streams(
-    server_log: str,
-    wrapper_stderr: str,
-    wrapper_stdout: str,
-) -> tuple[tuple[str, str, rules.FailureSignature], ...]:
+@dataclass(frozen=True)
+class BootStreams:
+    """The text streams one bring-up attempt produced.
+
+    Attributes:
+        server_log: Full text of the server child's log.
+        wrapper_stderr: Launcher stderr, used only as fallback.
+        wrapper_stdout: Launcher stdout, used only as fallback.
+    """
+
+    server_log: str
+    wrapper_stderr: str = ""
+    wrapper_stdout: str = ""
+
+
+def _classified_streams(streams: BootStreams) -> tuple[tuple[str, str, rules.FailureSignature], ...]:
     """Return ``(stream_name, text, signature)`` per non-empty stream."""
     out: list[tuple[str, str, rules.FailureSignature]] = []
     for name, text in (
-        (SERVER_LOG, server_log),
-        (WRAPPER_STDERR, wrapper_stderr),
-        (WRAPPER_STDOUT, wrapper_stdout),
+        (SERVER_LOG, streams.server_log),
+        (WRAPPER_STDERR, streams.wrapper_stderr),
+        (WRAPPER_STDOUT, streams.wrapper_stdout),
     ):
         if text.strip():
-            out.append((name, text, rules.classify_failure(text)))
+            out.append((name, text, rules.classify_failure(failure_region(text))))
     return tuple(out)
 
 
+def _progress_across(
+    streams: Sequence[tuple[str, str, rules.FailureSignature]],
+) -> tuple[LadderStage | None, dict[str, str]]:
+    """Return the highest milestone any stream witnessed and the markers proving it.
+
+    The first stream to carry a marker owns it: streams arrive in precedence
+    order, so a later one restating a milestone does not overwrite the witness.
+    """
+    witnessed: LadderStage | None = None
+    markers: dict[str, str] = {}
+    for _name, text, _sig in streams:
+        stage, witness = _witness_progress(text)
+        for key, marker in witness.items():
+            markers.setdefault(key, marker)
+        if stage is not None and (witnessed is None or stage > witnessed):
+            witnessed = stage
+    return witnessed, markers
+
+
+def _failing_stream(
+    streams: Sequence[tuple[str, str, rules.FailureSignature]],
+) -> tuple[str, str, rules.FailureSignature] | None:
+    """Return the stream a rule fired on, else the highest-precedence one with content.
+
+    When no rule fires anywhere the observation still needs a frame and an
+    excerpt, so the first stream stands in rather than nothing.
+    """
+    for entry in streams:
+        if entry[2].is_actionable:
+            return entry
+    return streams[0] if streams else None
+
+
+def _placed_stage(kind: str, witnessed: LadderStage | None, floor: LadderStage) -> LadderStage:
+    """Return the ladder stage a failure of *kind* sits on.
+
+    A milestone the run witnessed puts the failure above it however the rule is
+    normally placed, and a kind the vocabulary does not place falls to the first
+    milestone not yet witnessed.
+    """
+    mapped = _KIND_STAGE.get(kind)
+    if mapped is None:
+        return _next_stage(witnessed if witnessed is not None else floor)
+    if witnessed is not None and mapped <= witnessed:
+        return _next_stage(witnessed)
+    return mapped
+
+
 def classify(
+    streams: BootStreams,
     *,
-    server_log: str,
     server_elapsed_sec: float,
-    wrapper_stderr: str = "",
-    wrapper_stdout: str = "",
     trees: Sequence[TreeIdentity] | Sequence[str] | None = None,
     session_root: str = "",
 ) -> BootObservation:
     """Classify one bring-up attempt into a :class:`BootObservation`.
 
     Args:
-        server_log: Full text of the server child's log.
+        streams: The server log and the launcher's fallback streams.
         server_elapsed_sec: Seconds from server start to this observation, on
             the server child's clock.
-        wrapper_stderr: Launcher stderr, used only as fallback.
-        wrapper_stdout: Launcher stdout, used only as fallback.
         trees: Pinned trees (or roots) frames are normalised against.
         session_root: Absolute session root redacted out of the excerpt.
 
@@ -256,28 +332,12 @@ def classify(
     """
     roots = _roots_of(trees)
     redact_roots = (session_root,) if session_root.strip() else ()
-    streams = _classified_streams(server_log, wrapper_stderr, wrapper_stdout)
+    classified = _classified_streams(streams)
 
-    witnessed: LadderStage | None = None
-    progress_witness: dict[str, str] = {}
-    for _name, text, _sig in streams:
-        stage, witness = _witness_progress(text)
-        for key, marker in witness.items():
-            progress_witness.setdefault(key, marker)
-        if stage is not None and (witnessed is None or stage > witnessed):
-            witnessed = stage
+    witnessed, progress_witness = _progress_across(classified)
+    chosen = _failing_stream(classified)
 
-    chosen: tuple[str, str, rules.FailureSignature] | None = None
-    for entry in streams:
-        if entry[2].is_actionable:
-            chosen = entry
-            break
-    if chosen is None:
-        # No rule fired anywhere: keep the highest-precedence stream with
-        # content so the observation still carries a frame and an excerpt.
-        chosen = streams[0] if streams else None
-
-    floor = LadderStage.PROCESS_START if streams else LadderStage.ARGV_PARSE
+    floor = LadderStage.PROCESS_START if classified else LadderStage.ARGV_PARSE
     stage_reached = witnessed if witnessed is not None else floor
 
     if chosen is None:
@@ -304,15 +364,7 @@ def classify(
             server_elapsed_sec=server_elapsed_sec,
         )
 
-    mapped = _KIND_STAGE.get(signature.kind)
-    if mapped is None:
-        # Unplaced by the vocabulary: the first milestone not witnessed.
-        mapped = _next_stage(witnessed) if witnessed is not None else _next_stage(floor)
-    elif witnessed is not None and mapped <= witnessed:
-        # A witnessed milestone completed, so the failure is above it however
-        # the rule is normally placed.
-        mapped = _next_stage(witnessed)
-
+    mapped = _placed_stage(signature.kind, witnessed, floor)
     anchor, failure_line = _failure_site(text, signature, root)
     excerpt: Excerpt = render_excerpt(
         text,
@@ -358,5 +410,6 @@ __all__ = [
     "WRAPPER_STDERR",
     "WRAPPER_STDOUT",
     "classify",
+    "failure_region",
     "observation_summary",
 ]

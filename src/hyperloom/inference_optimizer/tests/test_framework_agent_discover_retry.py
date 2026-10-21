@@ -78,6 +78,10 @@ class _CoordinatorStub:
             def action_registry(self):
                 return outer_self.action_registry
 
+            @property
+            def shared_state(self):
+                return outer_self.shared_state
+
             registry_lanes_ttl = DispatcherCollaborator.registry_lanes_ttl
 
         dispatcher_stub = _DispatcherStub()

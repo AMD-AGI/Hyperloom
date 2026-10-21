@@ -2,10 +2,11 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for the forge-fusion kernel-agent wrapper."""
+"""Unit tests for the forge-fusion runner."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import subprocess
@@ -47,10 +48,16 @@ def _payload(output_dir: Path) -> dict:
     }
 
 
-def _sentinel_payload(text: str) -> dict:
-    start = text.index(forge_fusion.RESULT_BEGIN) + len(forge_fusion.RESULT_BEGIN)
-    end = text.index(forge_fusion.RESULT_END)
-    return json.loads(text[start:end].strip())
+def _run(monkeypatch, payload: dict, fake_run_subprocess) -> dict:
+    monkeypatch.setattr(forge_fusion, "_run_subprocess", fake_run_subprocess)
+    return asyncio.run(forge_fusion.run_forge_fusion(payload))
+
+
+def _timing_out(output="", stderr=""):
+    async def fake(cmd, *, timeout_sec, env, label):
+        raise subprocess.TimeoutExpired(cmd, timeout_sec, output=output, stderr=stderr)
+
+    return fake
 
 
 def test_build_cmd_maps_core_options(tmp_path):
@@ -95,7 +102,7 @@ def test_build_cmd_forwards_session_serve_args(tmp_path):
     assert cmd[cmd.index("--max-model-len") + 1] == "13312"
 
 
-def test_inject_author_gateway_env_adds_stability_defaults(monkeypatch):
+def test_author_env_adds_stability_defaults(monkeypatch):
     for name in (
         "ANTHROPIC_BASE_URL",
         "ANTHROPIC_API_KEY",
@@ -110,19 +117,22 @@ def test_inject_author_gateway_env_adds_stability_defaults(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-token")
     # IS_SANDBOX is only set when running as root (SWSPLAT-42390): simulate root so the sandbox default is exercised.
     monkeypatch.setattr(forge_fusion.os, "geteuid", lambda: 0, raising=False)
+    before = dict(os.environ)
 
-    forge_fusion._inject_author_gateway_env("claude")
+    env = forge_fusion._author_env("claude")
 
-    assert os.environ["ANTHROPIC_BASE_URL"] == "https://gateway.example/api/v1/llm-proxy"
-    assert os.environ["ANTHROPIC_API_KEY"] == "anthropic-token"
-    assert os.environ["ANTHROPIC_AUTH_TOKEN"] == "anthropic-token"
-    assert os.environ["IS_SANDBOX"] == "1"
-    assert os.environ["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] == "1"
-    assert os.environ["DISABLE_AUTOUPDATER"] == "1"
-    assert "API_TIMEOUT_MS" not in os.environ
+    assert env["ANTHROPIC_BASE_URL"] == "https://gateway.example/api/v1/llm-proxy"
+    assert env["ANTHROPIC_API_KEY"] == "anthropic-token"
+    assert env["ANTHROPIC_AUTH_TOKEN"] == "anthropic-token"
+    assert env["IS_SANDBOX"] == "1"
+    assert env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] == "1"
+    assert env["DISABLE_AUTOUPDATER"] == "1"
+    assert "API_TIMEOUT_MS" not in env
+    # The orchestrator's own environment is the parent of every later child; the author env stays a copy.
+    assert dict(os.environ) == before
 
 
-def test_inject_author_gateway_env_skips_sandbox_when_non_root(monkeypatch):
+def test_author_env_skips_sandbox_when_non_root(monkeypatch):
     # SWSPLAT-42390: as a non-root user, IS_SANDBOX must NOT be set (we do not defeat claude's bypassPermissions guard
     # for sessions that never needed it).
     for name in ("ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "IS_SANDBOX"):
@@ -131,12 +141,10 @@ def test_inject_author_gateway_env_skips_sandbox_when_non_root(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "safe-token")
     monkeypatch.setattr(forge_fusion.os, "geteuid", lambda: 1000, raising=False)
 
-    forge_fusion._inject_author_gateway_env("claude")
-
-    assert "IS_SANDBOX" not in os.environ
+    assert "IS_SANDBOX" not in forge_fusion._author_env("claude")
 
 
-def test_inject_author_gateway_env_leaves_codex_environment_untouched(monkeypatch):
+def test_author_env_leaves_codex_environment_untouched(monkeypatch):
     """Codex must not inherit Claude auth aliases, sandboxing, or stability knobs."""
     for name in (
         "ANTHROPIC_BASE_URL",
@@ -151,11 +159,7 @@ def test_inject_author_gateway_env_leaves_codex_environment_untouched(monkeypatc
     monkeypatch.setenv("OPENAI_BASE_URL", "https://gateway.example/Unified/v1")
     monkeypatch.setenv("OPENAI_API_KEY", "openai-token")
     monkeypatch.setattr(forge_fusion.os, "geteuid", lambda: 0, raising=False)
-    before = dict(os.environ)
-
-    forge_fusion._inject_author_gateway_env("codex")
-
-    assert dict(os.environ) == before
+    assert forge_fusion._author_env("codex") == dict(os.environ)
 
 
 def test_build_cmd_rejects_invalid_agent_backend(tmp_path):
@@ -208,7 +212,7 @@ def test_build_cmd_rejects_invalid_agent_sandbox_mode(tmp_path):
         forge_fusion._build_cmd(payload)
 
 
-def test_main_passes_timeout_to_tree_runner(tmp_path, monkeypatch, capsys):
+def test_run_passes_timeout_and_author_env_to_the_subprocess(tmp_path, monkeypatch):
     output_dir = tmp_path / "out"
     output_dir.mkdir()
     manifest = {
@@ -219,31 +223,20 @@ def test_main_passes_timeout_to_tree_runner(tmp_path, monkeypatch, capsys):
         "validation": {},
         "artifacts": {},
     }
-    (output_dir / "fusion_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
-    input_json = tmp_path / "input.json"
-    input_json.write_text(json.dumps(_payload(output_dir)), encoding="utf-8")
     captured: dict[str, object] = {}
 
-    class Proc:
-        returncode = 0
-        stdout = "OUT\n"
-        stderr = "ERR\n"
+    async def fake_run(cmd, *, timeout_sec, env, label):
+        # forge-fuse writes its manifest during the run; the runner clears stale ones before starting it.
+        (output_dir / "fusion_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        captured.update(cmd=cmd, timeout=timeout_sec, env=env, label=label)
+        return 0, "OUT\n", "ERR\n"
 
-    def fake_run(cmd, timeout):
-        captured["cmd"] = cmd
-        captured["timeout"] = timeout
-        return Proc()
+    result = _run(monkeypatch, _payload(output_dir), fake_run)
 
-    monkeypatch.setattr(forge_fusion, "_run_with_tree_timeout", fake_run)
-
-    rc = forge_fusion.main(["--input-json", str(input_json)])
-
-    out = capsys.readouterr()
-    assert rc == 0
-    assert out.out.startswith("OUT\n")
-    assert out.err == "ERR\n"
     assert captured["timeout"] == 9
-    result = _sentinel_payload(out.out)
+    assert captured["label"] == "forge_fusion"
+    assert captured["cmd"][3] == "forge-fuse"
+    assert captured["env"]["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] == "1"
     assert result["decision"] == "REVERT"
     assert result["kept"] is False
 
@@ -254,46 +247,25 @@ def test_timeout_sec_invalid_value_falls_back_to_default(monkeypatch):
     assert forge_fusion._timeout_sec({}) == forge_fusion.DEFAULT_TIMEOUT_SEC
 
 
-def test_main_timeout_emits_revert_result(tmp_path, monkeypatch, capsys):
+def test_run_timeout_returns_revert_result(tmp_path, monkeypatch):
     output_dir = tmp_path / "out"
     output_dir.mkdir()
-    input_json = tmp_path / "input.json"
-    input_json.write_text(json.dumps(_payload(output_dir)), encoding="utf-8")
 
-    def fake_run(cmd, timeout):
-        raise subprocess.TimeoutExpired(
-            cmd,
-            timeout,
-            output="PARTIAL OUT\n",
-            stderr=b"PARTIAL ERR\n",
-        )
+    result = _run(monkeypatch, _payload(output_dir), _timing_out(output="PARTIAL OUT\n", stderr=b"PARTIAL ERR\n"))
 
-    monkeypatch.setattr(forge_fusion, "_run_with_tree_timeout", fake_run)
-
-    rc = forge_fusion.main(["--input-json", str(input_json)])
-
-    out = capsys.readouterr()
-    assert rc == 124
-    assert out.out.startswith("PARTIAL OUT\n")
-    assert out.err == "PARTIAL ERR\n"
-    result = _sentinel_payload(out.out)
     assert result["status"] == "failed"
     assert result["error_class"] == "subprocess_timeout"
     assert result["decision"] == "REVERT"
     assert result["kept"] is False
     assert result["requires_e2e_validation"] is False
-    assert json.loads((output_dir / "result.json").read_text(encoding="utf-8")) == result
 
 
-def test_main_timeout_salvages_micro_keep_and_patch(tmp_path, monkeypatch, capsys):
+def test_run_timeout_salvages_micro_keep_and_patch(tmp_path, monkeypatch):
     output_dir = tmp_path / "out"
     output_dir.mkdir()
     patch = output_dir / "fusion.patch"
-    input_json = tmp_path / "input.json"
-    payload = _payload(output_dir)
-    input_json.write_text(json.dumps(payload), encoding="utf-8")
 
-    def fake_run(cmd, timeout):
+    async def fake_run(cmd, *, timeout_sec, env, label):
         (output_dir / "kernel_keep_checkpoint.json").write_text(
             json.dumps(
                 {
@@ -307,15 +279,10 @@ def test_main_timeout_salvages_micro_keep_and_patch(tmp_path, monkeypatch, capsy
             encoding="utf-8",
         )
         patch.write_text("diff --git a/model.py b/model.py\n", encoding="utf-8")
-        raise subprocess.TimeoutExpired(cmd, timeout, output="", stderr="")
+        raise subprocess.TimeoutExpired(cmd, timeout_sec, output="", stderr="")
 
-    monkeypatch.setattr(forge_fusion, "_run_with_tree_timeout", fake_run)
+    result = _run(monkeypatch, _payload(output_dir), fake_run)
 
-    rc = forge_fusion.main(["--input-json", str(input_json)])
-
-    out = capsys.readouterr()
-    assert rc == 124
-    result = _sentinel_payload(out.out)
     assert result["kept"] is True
     assert result["decision"] == "KEEP"
     assert result["requires_e2e_validation"] is True
@@ -324,7 +291,7 @@ def test_main_timeout_salvages_micro_keep_and_patch(tmp_path, monkeypatch, capsy
     assert result["kernel_speedup"] == 2.69
 
 
-def test_main_timeout_does_not_salvage_stale_previous_run(tmp_path, monkeypatch, capsys):
+def test_run_timeout_does_not_salvage_stale_previous_run(tmp_path, monkeypatch):
     output_dir = tmp_path / "out"
     output_dir.mkdir()
     (output_dir / "kernel_keep_checkpoint.json").write_text(
@@ -340,23 +307,14 @@ def test_main_timeout_does_not_salvage_stale_previous_run(tmp_path, monkeypatch,
         encoding="utf-8",
     )
     (output_dir / "fusion.patch").write_text("diff --git a/stale.py b/stale.py\n", encoding="utf-8")
-    input_json = tmp_path / "input.json"
-    input_json.write_text(json.dumps(_payload(output_dir)), encoding="utf-8")
 
-    def fake_run(cmd, timeout):
-        raise subprocess.TimeoutExpired(cmd, timeout, output="", stderr="")
+    result = _run(monkeypatch, _payload(output_dir), _timing_out())
 
-    monkeypatch.setattr(forge_fusion, "_run_with_tree_timeout", fake_run)
-
-    rc = forge_fusion.main(["--input-json", str(input_json)])
-
-    result = _sentinel_payload(capsys.readouterr().out)
-    assert rc == 124
     assert result["kept"] is False
     assert result["decision"] == "REVERT"
 
 
-def test_main_timeout_does_not_salvage_a_stale_campaign_patch(tmp_path, monkeypatch, capsys):
+def test_run_timeout_does_not_salvage_a_stale_campaign_patch(tmp_path, monkeypatch):
     """The output dir is keyed on the task, so the previous run's per-campaign work is still there.
 
     The stale sweep predates the per-campaign fallback and only names the aggregate
@@ -369,23 +327,14 @@ def test_main_timeout_does_not_salvage_a_stale_campaign_patch(tmp_path, monkeypa
     (output_dir / "forge_loop_llm_stale.json").write_text(
         json.dumps(_campaign_loop_result(total_speedup=9.99)), encoding="utf-8"
     )
-    input_json = tmp_path / "input.json"
-    input_json.write_text(json.dumps(_payload(output_dir)), encoding="utf-8")
 
-    def fake_run(cmd, timeout):
-        raise subprocess.TimeoutExpired(cmd, timeout, output="", stderr="")
+    result = _run(monkeypatch, _payload(output_dir), _timing_out())
 
-    monkeypatch.setattr(forge_fusion, "_run_with_tree_timeout", fake_run)
-
-    rc = forge_fusion.main(["--input-json", str(input_json)])
-
-    result = _sentinel_payload(capsys.readouterr().out)
-    assert rc == 124
     assert result["kept"] is False, "a stale campaign patch is not this run's result"
     assert result["decision"] == "REVERT"
 
 
-def test_main_timeout_does_not_salvage_a_stale_published_best(tmp_path, monkeypatch, capsys):
+def test_run_timeout_does_not_salvage_a_stale_published_best(tmp_path, monkeypatch):
     """A loop result left pointing at the shadow repo's published best is stale the same way."""
     output_dir = tmp_path / "out"
     output_dir.mkdir()
@@ -393,43 +342,11 @@ def test_main_timeout_does_not_salvage_a_stale_published_best(tmp_path, monkeypa
     loop = _campaign_loop_result(total_speedup=9.99)
     loop["best_manifest"] = str(manifest)
     (output_dir / "forge_loop_llm_stale.json").write_text(json.dumps(loop), encoding="utf-8")
-    input_json = tmp_path / "input.json"
-    input_json.write_text(json.dumps(_payload(output_dir)), encoding="utf-8")
 
-    def fake_run(cmd, timeout):
-        raise subprocess.TimeoutExpired(cmd, timeout, output="", stderr="")
+    result = _run(monkeypatch, _payload(output_dir), _timing_out())
 
-    monkeypatch.setattr(forge_fusion, "_run_with_tree_timeout", fake_run)
-
-    rc = forge_fusion.main(["--input-json", str(input_json)])
-
-    result = _sentinel_payload(capsys.readouterr().out)
-    assert rc == 124
     assert result["kept"] is False, "a stale published best is not this run's result"
     assert result["decision"] == "REVERT"
-
-
-def test_run_with_tree_timeout_captures_output():
-    cp = forge_fusion._run_with_tree_timeout(
-        [
-            forge_fusion.sys.executable,
-            "-c",
-            "import sys; print('hi'); sys.stderr.write('err')",
-        ],
-        timeout_sec=30,
-    )
-
-    assert cp.returncode == 0
-    assert "hi" in (cp.stdout or "")
-    assert "err" in (cp.stderr or "")
-
-
-def test_run_with_tree_timeout_reaps_on_timeout():
-    with pytest.raises(subprocess.TimeoutExpired):
-        forge_fusion._run_with_tree_timeout(
-            [forge_fusion.sys.executable, "-c", "import time; time.sleep(30)"],
-            timeout_sec=1,
-        )
 
 
 def _patch_file(output_dir) -> str:
@@ -1011,19 +928,12 @@ def test_an_abort_never_discards_a_measured_compile_pass(tmp_path):
     assert "error_class" not in result
 
 
-def test_main_relays_the_outage_sentinel_despite_a_non_zero_exit(tmp_path, monkeypatch, capsys):
+def test_run_reports_the_outage_despite_a_non_zero_exit(tmp_path, monkeypatch):
     """forge-fusion exits 3 for an unreachable LLM, which is the first non-zero exit that still carries a valid manifest."""
     output_dir = tmp_path / "out"
     output_dir.mkdir()
-    input_json = tmp_path / "input.json"
-    input_json.write_text(json.dumps(_payload(output_dir)), encoding="utf-8")
 
-    class Proc:
-        returncode = 3  # kernelforge.fusion.command.EXIT_LLM_UNAVAILABLE
-        stdout = ""
-        stderr = ""
-
-    def fake_run(_cmd, _timeout):
+    async def fake_run(cmd, *, timeout_sec, env, label):
         (output_dir / "fusion_manifest.json").write_text(
             json.dumps(
                 {
@@ -1034,19 +944,13 @@ def test_main_relays_the_outage_sentinel_despite_a_non_zero_exit(tmp_path, monke
             ),
             encoding="utf-8",
         )
-        return Proc()
+        return 3, "", ""  # kernelforge.fusion.command.EXIT_LLM_UNAVAILABLE
 
-    monkeypatch.setattr(forge_fusion, "_run_with_tree_timeout", fake_run)
+    result = _run(monkeypatch, _payload(output_dir), fake_run)
 
-    rc = forge_fusion.main(["--input-json", str(input_json)])
-
-    assert rc == 3, "the child's exit code is mirrored, not swallowed"
-    result = _sentinel_payload(capsys.readouterr().out)
     assert result["status"] == "failed"
     assert result["error_class"] == "llm_unavailable"
     assert result["kept"] is False
-    # The on-disk fallback has to agree with the sentinel.
-    assert json.loads((output_dir / "result.json").read_text(encoding="utf-8")) == result
 
 
 def test_normalize_manifest_still_reports_a_real_no_opportunity(tmp_path):
@@ -1106,7 +1010,7 @@ def test_normalize_manifest_parse_error_reports_error(tmp_path):
     assert "parse error" in result["error"]
 
 
-def test_main_kept_manifest_emits_keep_result(tmp_path, monkeypatch, capsys):
+def test_run_kept_manifest_returns_keep_result(tmp_path, monkeypatch):
     output_dir = tmp_path / "out"
     output_dir.mkdir()
     manifest = {
@@ -1119,33 +1023,21 @@ def test_main_kept_manifest_emits_keep_result(tmp_path, monkeypatch, capsys):
         },
         "fusion": {"source_file": str(output_dir / "foo.py")},
     }
-    input_json = tmp_path / "input.json"
-    input_json.write_text(json.dumps(_payload(output_dir)), encoding="utf-8")
 
-    class Proc:
-        returncode = 0
-        stdout = ""
-        stderr = ""
-
-    def fake_run(_cmd, _timeout):
-        # The run writes its own manifest; main() clears any stale one first.
+    async def fake_run(cmd, *, timeout_sec, env, label):
+        # The run writes its own manifest; the runner clears any stale one first.
         _patch_file(output_dir)
         (output_dir / "fusion_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
-        return Proc()
+        return 0, "", ""
 
-    monkeypatch.setattr(forge_fusion, "_run_with_tree_timeout", fake_run)
+    result = _run(monkeypatch, _payload(output_dir), fake_run)
 
-    rc = forge_fusion.main(["--input-json", str(input_json)])
-
-    out = capsys.readouterr()
-    assert rc == 0
-    result = _sentinel_payload(out.out)
     assert result["decision"] == "KEEP"
     assert result["kept"] is True
     assert result["requires_e2e_validation"] is True
 
 
-def test_main_does_not_report_a_previous_runs_manifest(tmp_path, monkeypatch, capsys):
+def test_run_does_not_report_a_previous_runs_manifest(tmp_path, monkeypatch):
     """The output dir is keyed on the task, so the file outlives the run."""
     output_dir = tmp_path / "out"
     output_dir.mkdir()
@@ -1159,44 +1051,27 @@ def test_main_does_not_report_a_previous_runs_manifest(tmp_path, monkeypatch, ca
         ),
         encoding="utf-8",
     )
-    input_json = tmp_path / "input.json"
-    input_json.write_text(json.dumps(_payload(output_dir)), encoding="utf-8")
 
-    class Proc:
-        returncode = 1
-        stdout = ""
-        stderr = ""
+    async def fake_run(cmd, *, timeout_sec, env, label):
+        return 1, "", ""
 
-    monkeypatch.setattr(forge_fusion, "_run_with_tree_timeout", lambda _cmd, _timeout: Proc())
+    result = _run(monkeypatch, _payload(output_dir), fake_run)
 
-    forge_fusion.main(["--input-json", str(input_json)])
-
-    result = _sentinel_payload(capsys.readouterr().out)
     assert result["kept"] is False
     assert result["decision"] == "REVERT"
     assert "no fusion_manifest.json" in result["error"]
 
 
-def test_main_invalid_json_returns_2(tmp_path, capsys):
-    bad = tmp_path / "bad.json"
-    bad.write_text("[]", encoding="utf-8")
+def test_run_missing_required_field_fails_without_starting_forge(tmp_path, monkeypatch):
+    async def fake_run(cmd, *, timeout_sec, env, label):
+        raise AssertionError("forge-fuse must not start without its required inputs")
 
-    rc = forge_fusion.main(["--input-json", str(bad)])
+    payload = {"model_path": "/m", "framework": "sglang", "output_dir": str(tmp_path)}
+    result = _run(monkeypatch, payload, fake_run)
 
-    assert rc == 2
-    assert "failed" in capsys.readouterr().out
-
-
-def test_main_missing_required_field_returns_2(tmp_path, capsys):
-    input_json = tmp_path / "input.json"
-    input_json.write_text(
-        json.dumps({"model_path": "/m", "framework": "sglang", "output_dir": "/o"}),
-        encoding="utf-8",
-    )
-
-    rc = forge_fusion.main(["--input-json", str(input_json)])
-
-    assert rc == 2
+    assert result["status"] == "failed"
+    assert result["decision"] == "REVERT"
+    assert result["error_class"] == "ValueError"
 
 
 def test_build_cmd_optional_and_disabled_flags(tmp_path):
@@ -1247,205 +1122,6 @@ def test_timeout_sec_infinite_value_falls_back_to_default(monkeypatch):
     monkeypatch.setenv("FORGE_FUSION_TIMEOUT", "inf")
 
     assert forge_fusion._timeout_sec({}) == forge_fusion.DEFAULT_TIMEOUT_SEC
-
-
-def test_terminate_process_tree_uses_process_group_on_posix(monkeypatch):
-    killed: list[tuple[int, int]] = []
-
-    class FakeProc:
-        pid = 1234
-
-        def poll(self):
-            return None
-
-        def wait(self, timeout=None):
-            return 0
-
-    monkeypatch.setattr(forge_fusion.os, "name", "posix")
-    monkeypatch.setattr(
-        forge_fusion.os,
-        "getpgid",
-        lambda pid: 9999 if pid == 1234 else 1111,
-        raising=False,
-    )
-    monkeypatch.setattr(
-        forge_fusion.os,
-        "killpg",
-        lambda pgid, sig: killed.append((pgid, sig)),
-        raising=False,
-    )
-    monkeypatch.setattr(forge_fusion.signal, "SIGTERM", 15, raising=False)
-
-    forge_fusion._terminate_process_tree(FakeProc())
-
-    assert killed == [(9999, 15)]
-
-
-def test_terminate_process_tree_escalates_to_sigkill_on_posix(monkeypatch):
-    killed: list[tuple[int, int]] = []
-
-    class FakeProc:
-        pid = 1234
-
-        def poll(self):
-            return None
-
-        def wait(self, timeout=None):
-            raise forge_fusion.subprocess.TimeoutExpired("cmd", 5)
-
-    monkeypatch.setattr(forge_fusion.os, "name", "posix")
-    monkeypatch.setattr(
-        forge_fusion.os,
-        "getpgid",
-        lambda pid: 9999 if pid == 1234 else 1111,
-        raising=False,
-    )
-    monkeypatch.setattr(
-        forge_fusion.os,
-        "killpg",
-        lambda pgid, sig: killed.append((pgid, sig)),
-        raising=False,
-    )
-    monkeypatch.setattr(forge_fusion.signal, "SIGTERM", 15, raising=False)
-    monkeypatch.setattr(forge_fusion.signal, "SIGKILL", 9, raising=False)
-
-    forge_fusion._terminate_process_tree(FakeProc())
-
-    assert killed == [(9999, 15), (9999, 9)]
-
-
-def test_terminate_process_tree_noop_when_already_exited():
-    class FakeProc:
-        def poll(self):
-            return 0
-
-    forge_fusion._terminate_process_tree(FakeProc())
-
-
-def test_terminate_process_tree_falls_back_when_same_pgid(monkeypatch):
-    terminated: list[bool] = []
-
-    class FakeProc:
-        pid = 1234
-
-        def poll(self):
-            return None
-
-        def wait(self, timeout=None):
-            return 0
-
-        def terminate(self):
-            terminated.append(True)
-
-        def kill(self):
-            pass
-
-    monkeypatch.setattr(forge_fusion.os, "name", "posix")
-    monkeypatch.setattr(forge_fusion.os, "getpgid", lambda _pid: 42, raising=False)
-
-    forge_fusion._terminate_process_tree(FakeProc())
-
-    assert terminated == [True]
-
-
-def test_emit_swallows_write_errors(tmp_path, monkeypatch, capsys):
-    def _raise_oserror(*_args, **_kwargs):
-        raise OSError("denied")
-
-    monkeypatch.setattr(forge_fusion.Path, "write_text", _raise_oserror)
-
-    forge_fusion._emit({"status": "ok"}, str(tmp_path))
-
-    assert forge_fusion.RESULT_BEGIN in capsys.readouterr().out
-
-
-def test_new_session_kwargs_empty_on_windows(monkeypatch):
-    monkeypatch.setattr(forge_fusion.os, "name", "nt")
-    assert forge_fusion._new_session_kwargs() == {}
-
-
-def test_load_input_json_empty_path_returns_empty_dict():
-    assert forge_fusion._load_input_json("") == {}
-
-
-def test_emit_without_output_dir_only_prints(capsys):
-    forge_fusion._emit({"status": "ok"}, "")
-    assert forge_fusion.RESULT_BEGIN in capsys.readouterr().out
-
-
-def test_terminate_process_tree_handles_getpgid_oserror(monkeypatch):
-    terminated: list[bool] = []
-
-    class FakeProc:
-        pid = 1
-
-        def poll(self):
-            return None
-
-        def terminate(self):
-            terminated.append(True)
-
-        def wait(self, timeout=None):
-            return 0
-
-        def kill(self):
-            pass
-
-    monkeypatch.setattr(forge_fusion.os, "name", "posix")
-    monkeypatch.setattr(
-        forge_fusion.os,
-        "getpgid",
-        lambda _pid: (_ for _ in ()).throw(OSError("nope")),
-        raising=False,
-    )
-
-    forge_fusion._terminate_process_tree(FakeProc())
-    assert terminated == [True]
-
-
-def test_as_text_decodes_bytes():
-    assert forge_fusion._as_text(b"abc") == "abc"
-
-
-def test_relay_streams_writes_stdout_and_stderr(capsys):
-    forge_fusion._relay_streams("hello", "err")
-    captured = capsys.readouterr()
-    assert captured.out == "hello"
-    assert captured.err == "err"
-
-
-def test_terminate_process_tree_windows_uses_terminate(monkeypatch):
-    terminated: list[bool] = []
-
-    class FakeProc:
-        def poll(self):
-            return None
-
-        def terminate(self):
-            terminated.append(True)
-
-        def wait(self, timeout=None):
-            return 0
-
-    monkeypatch.setattr(forge_fusion.os, "name", "nt")
-    forge_fusion._terminate_process_tree(FakeProc())
-    assert terminated == [True]
-
-
-def test_run_with_tree_timeout_clears_output_when_reap_times_out(monkeypatch):
-    class FakeProc:
-        def communicate(self, timeout=None):
-            if timeout == 1.0:
-                raise forge_fusion.subprocess.TimeoutExpired("cmd", 1)
-            raise forge_fusion.subprocess.TimeoutExpired("cmd", 30)
-
-    monkeypatch.setattr(forge_fusion.subprocess, "Popen", lambda *args, **kwargs: FakeProc())
-    monkeypatch.setattr(forge_fusion, "_terminate_process_tree", lambda _proc: None)
-
-    with pytest.raises(subprocess.TimeoutExpired) as excinfo:
-        forge_fusion._run_with_tree_timeout(["echo"], timeout_sec=30)
-
-    assert excinfo.value.output == ""
 
 
 def test_build_cmd_forwards_the_recipe_ceiling(tmp_path):

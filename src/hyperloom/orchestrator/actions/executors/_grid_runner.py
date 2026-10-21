@@ -13,20 +13,22 @@ import re
 import shutil
 import subprocess
 import time
+from enum import Enum, auto
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, NamedTuple, NoReturn
 
 import yaml
 
 from hyperloom.common.coerce import to_str_list
+from hyperloom.common.benchmark_config import is_magpie_agentx
 from hyperloom.common.env import env_flag, is_truthy
+from hyperloom.common.perf_metric import constraint_fields
 from hyperloom.common.env_safety import (
-    BLOCKED_CHILD_ENV_NAMES,
     BLOCKED_EXTERNAL_ENV_NAMES,
-    _ENV_KEY_RE,
     is_python_package_root,
     redact_secret_values,
     scrub_benchmark_process_env,
+    ungrounded_env_file_reason,
 )
 
 from ...phases import machine_state as _phase_state
@@ -39,16 +41,14 @@ from ..stop_attribution import (
 )
 from ._benchmark_runtime import apply_runtime_benchmark_overrides as apply_runtime_benchmark_overrides
 from ._benchmark_interpreter import (
-    _resolve_magpie_python as _resolve_magpie_python,
     _resolve_probe_python as _resolve_probe_python,
 )
-from ._accuracy_gate import materialized_run_eval_disabled
 from ._recipe_script import launcher_overwritten_envs
 from ._subprocess_kill import (
     AGENTX_PREFLIGHT_ERROR_CLASS,
     AGENTX_PREFLIGHT_RETURNCODE,
-    DETOKENIZER_STALL_RETURNCODE,
     EVAL_PROBE_UNPATCHABLE_RETURNCODE,
+    DETOKENIZER_STALL_RETURNCODE,
     ORCHESTRATOR_CANCELLED_RETURNCODE,
     SERVER_DEAD_RETURNCODE,
     SESSION_TIME_EXHAUSTED_RETURNCODE,
@@ -56,6 +56,7 @@ from ._subprocess_kill import (
     run_with_session_kill,
     server_log_death_excerpt,
     session_deadline_to_remaining_sec,
+    sync_agentx_phase_wait,
 )
 from .benchmark_result import (
     extract_benchmark_measurement,
@@ -66,73 +67,36 @@ from .benchmark_result import (
 )
 from ._gpu_metrics import write_gpu_metrics_from_report
 from .benchmark_backend import build_benchmark_command
-from ._inferencex_patcher import (
-    ensure_benchmark_lib_eval_start_patched,
-    ensure_eval_probe_patched,
-    ensure_eval_unbound_outputs_patched,
-    eval_probe_targets_exist,
-)
+from .benchmark_config import prepare_benchmark_runtime
+from .magpie_agentx import LaunchChanges, ServerArgvInvalidError, materialize_variant
+from hyperloom.inference_optimizer.runtime_environment import apply_runtime_override
+
 from ._launch_evidence import build_launch_evidence, persist_launch_evidence
 from ...measurement.runtime_findings import persist_runtime_findings, scan_server_log
 from ._server_argv import seal_server_argv
+from ._spec_decode_pin import SPECULATIVE_DECODING_PINNED, refuse_unpinned_speculative_change
 
 # Re-exported from sibling modules to keep the module namespace intact.
 from ._grid_base import (
     DEFAULT_KEEP_THRESHOLD_PCT as DEFAULT_KEEP_THRESHOLD_PCT,
     GridVariant as GridVariant,
-    coerce_extra_envs as coerce_extra_envs,
     VariantResult as VariantResult,
 )
 from hyperloom.inference_optimizer.grid_server_args import (
     server_args_env_name as server_args_env_name,
     merge_server_args as merge_server_args,
     compose_server_args as compose_server_args,
-    remove_server_args as remove_server_args,
-    compact_json_server_args as compact_json_server_args,
-    _SPACE_VALUE_FLAGS as _SPACE_VALUE_FLAGS,
-    _MULTI_VALUE_FLAGS as _MULTI_VALUE_FLAGS,
-    _VLLM_SINGLE_VALUE_FLAGS as _VLLM_SINGLE_VALUE_FLAGS,
-    dedup_vllm_server_args as dedup_vllm_server_args,
     _shell_safe_dedupe as _shell_safe_dedupe,
-    DEFAULT_SGLANG_WATCHDOG_TIMEOUT_SEC as DEFAULT_SGLANG_WATCHDOG_TIMEOUT_SEC,
-    SGLANG_WATCHDOG_TIMEOUT_ENV as SGLANG_WATCHDOG_TIMEOUT_ENV,
-    _SGLANG_WATCHDOG_FLAG as _SGLANG_WATCHDOG_FLAG,
-    _SGLANG_WATCHDOG_RE as _SGLANG_WATCHDOG_RE,
-    resolve_sglang_watchdog_timeout as resolve_sglang_watchdog_timeout,
-    inject_sglang_watchdog_timeout as inject_sglang_watchdog_timeout,
-    DEFAULT_SGLANG_CONTEXT_HEADROOM_TOKENS as DEFAULT_SGLANG_CONTEXT_HEADROOM_TOKENS,
-    DEFAULT_SGLANG_CONTEXT_FLOOR_TOKENS as DEFAULT_SGLANG_CONTEXT_FLOOR_TOKENS,
-    SGLANG_CONTEXT_HEADROOM_ENV as SGLANG_CONTEXT_HEADROOM_ENV,
-    SGLANG_CONTEXT_FLOOR_ENV as SGLANG_CONTEXT_FLOOR_ENV,
-    _SGLANG_CONTEXT_LENGTH_FLAG as _SGLANG_CONTEXT_LENGTH_FLAG,
-    _SGLANG_CONTEXT_LENGTH_RE as _SGLANG_CONTEXT_LENGTH_RE,
-    _SGLANG_ATTN_BACKEND_FLAG as _SGLANG_ATTN_BACKEND_FLAG,
-    _SGLANG_ATTN_BACKEND_RE as _SGLANG_ATTN_BACKEND_RE,
-    _SGLANG_DUAL_CHUNK_BACKEND as _SGLANG_DUAL_CHUNK_BACKEND,
-    _resolve_nonneg_int_env as _resolve_nonneg_int_env,
-    resolve_sglang_context_cap as resolve_sglang_context_cap,
-    inject_sglang_context_length as inject_sglang_context_length,
-    _resolve_dual_chunk_backend as _resolve_dual_chunk_backend,
-    inject_sglang_attention_backend as inject_sglang_attention_backend,
-    _SGLANG_MOE_RUNNER_BACKEND_FLAG as _SGLANG_MOE_RUNNER_BACKEND_FLAG,
     _SGLANG_MOE_RUNNER_BACKEND_RE as _SGLANG_MOE_RUNNER_BACKEND_RE,
     moe_runner_requires_aiter as moe_runner_requires_aiter,
 )
 from ._grid_variant_filter import (
     resolve_skip_spec as resolve_skip_spec,
-    _parse_skip_spec as _parse_skip_spec,
-    _RE_CUDA_GRAPH_MAX_BS as _RE_CUDA_GRAPH_MAX_BS,
     _MN_PARAMS_PRIORITY as _MN_PARAMS_PRIORITY,
     _MN_BACKENDS_PRIORITY as _MN_BACKENDS_PRIORITY,
-    _mn_priority_index as _mn_priority_index,
     reorder_grid_for_multi_node as reorder_grid_for_multi_node,
     apply_multi_node_invalid_variants as apply_multi_node_invalid_variants,
     apply_aiter_moe_pin_filter as apply_aiter_moe_pin_filter,
-    _COMPATIBILITY_FLAG_RULES as _COMPATIBILITY_FLAG_RULES,
-    _XDIT_ENV_BLACKLIST as _XDIT_ENV_BLACKLIST,
-    _XDIT_ENV_COMBO_BLACKLIST as _XDIT_ENV_COMBO_BLACKLIST,
-    xdit_blacklist_reason as xdit_blacklist_reason,
-    _detect_model_class as _detect_model_class,
     apply_compatibility_filter as apply_compatibility_filter,
     apply_user_skip_list as apply_user_skip_list,
 )
@@ -159,6 +123,26 @@ def _validate_magpie_python_override(value: str) -> str:
     if not resolved.name.lower().startswith("python"):
         raise ValueError(f"magpie_python must point to a Python interpreter, got: {raw}")
     return str(resolved)
+
+
+class _Halt(Enum):
+    """What one variant's end means for the rest of the grid: walk on, stop unless told otherwise, or stop."""
+
+    CONTINUE = auto()
+    ON_FAILURE = auto()
+    STOP = auto()
+
+
+class _VariantAborted(Exception):
+    """A variant ended before its result was assembled, carrying what the grid records for it."""
+
+    def __init__(
+        self, result: VariantResult, *, halt: _Halt = _Halt.ON_FAILURE, never_started: str | None = None
+    ) -> None:
+        super().__init__(result.error_class)
+        self.result = result
+        self.halt = halt
+        self.never_started = never_started
 
 
 def _resolve_session_dir() -> Path:
@@ -266,11 +250,12 @@ def _probe_vllm_aiter_shared_expert_unsupported() -> str | None:
 
 
 def unsupported_capability_reason(variant: "GridVariant") -> str | None:
-    """Return a drop reason if a variant sets an env flag the installed framework build cannot honour, else ``None``."""
-    fw = (os.environ.get("FRAMEWORK", "") or "sglang").strip().lower()
-    if fw != "vllm":
-        return None
+    """Return why a variant cannot boot (a config file not on disk, an env flag the build lacks), else ``None``."""
     envs = {str(k): str(v) for k, v in (getattr(variant, "extra_envs", None) or {}).items()}
+    if missing_file := ungrounded_env_file_reason(envs):
+        return missing_file
+    if (os.environ.get("FRAMEWORK", "") or "sglang").strip().lower() != "vllm":
+        return None
     val = envs.get("VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS")
     if val is None or not is_truthy(val, default=True):
         return None
@@ -313,81 +298,26 @@ def sanitize_result_dir(value: Any) -> str | None:
     return text
 
 
-def _is_safe_path_entry(entry: str) -> bool:
-    """A single path entry is safe iff it has no ``:``, no ``..``, no control chars."""
-    return (
-        bool(entry)
-        and ":" not in entry
-        and ".." not in Path(entry).parts
-        and not any(c in entry for c in ("\n", "\r", "\x00"))
-    )
-
-
-# Reserved keys carried by dedicated override fields; never accepted via runtime_env.
-_RUNTIME_ENV_RESERVED: frozenset[str] = frozenset({"PATH", "PYTHONPATH", "LD_LIBRARY_PATH"})
-
-
-def apply_runtime_override(envs: dict[str, str], override: dict[str, Any]) -> None:
-    """Inject an attempt runtime override into the materialized YAML envs dict."""
-    if not override:
-        return
-    from ._workload_envs import prepend_launch_path
-
-    path_prefix = str(override.get("path_prefix") or "").strip()
-    if path_prefix:
-        prepend_launch_path(envs, "PATH", path_prefix)
-    entrypoint_bin = str(override.get("entrypoint_bin_dir") or "").strip()
-    if entrypoint_bin:
-        if _is_safe_path_entry(entrypoint_bin):
-            prepend_launch_path(envs, "PATH", entrypoint_bin)
-        else:
-            log.warning("apply_runtime_override: dropping unsafe entrypoint_bin_dir %r", entrypoint_bin)
-    pp_prefix = str(override.get("pythonpath_prefix") or "").strip()
-    if pp_prefix:
-        if _is_safe_path_entry(pp_prefix):
-            prepend_launch_path(envs, "PYTHONPATH", pp_prefix)
-        else:
-            log.warning("apply_runtime_override: dropping unsafe pythonpath_prefix %r", pp_prefix)
-    # Multi-entry prefixes: prepend in order so the first entry wins, ahead of any single-dir pythonpath_prefix and
-    # the inherited value.
-    for entry in reversed(_coerce_prefix_list(override.get("pythonpath_prefixes"))):
-        if _is_safe_path_entry(entry):
-            prepend_launch_path(envs, "PYTHONPATH", entry)
-        else:
-            log.warning("apply_runtime_override: dropping unsafe pythonpath entry %r", entry)
-    # Native loader path: prepend attempt entries while preserving any inherited entries (e.g. /opt/rocm/lib).
-    for entry in reversed(_coerce_prefix_list(override.get("ld_library_path_prefix"))):
-        if _is_safe_path_entry(entry):
-            prepend_launch_path(envs, "LD_LIBRARY_PATH", entry)
-        else:
-            log.warning("apply_runtime_override: dropping unsafe ld_library_path entry %r", entry)
-    _runtime_env = override.get("runtime_env")
-    if isinstance(_runtime_env, dict):
-        for raw_k, raw_v in _runtime_env.items():
-            key = str(raw_k)
-            if not _ENV_KEY_RE.match(key) or key in BLOCKED_CHILD_ENV_NAMES or key in _RUNTIME_ENV_RESERVED:
-                log.warning("apply_runtime_override: dropping unsafe runtime_env key %r", key)
-                continue
-            envs[key] = str(raw_v)
-    for key in ("framework_bin", "framework_python", "framework_venv_root"):
-        val = str(override.get(key) or "").strip()
-        if val:
-            envs[f"HYPERLOOM_{key.upper()}"] = val
-    # runtime_python_exe takes priority over framework_python as the launch interpreter.
-    rpe = str(override.get("runtime_python_exe") or "").strip()
-    if rpe:
-        envs["HYPERLOOM_FRAMEWORK_PYTHON"] = rpe
-
-
-def _coerce_prefix_list(value: Any) -> list[str]:
-    """Normalize a runtime-prefix field (list/tuple/str) to a list of entries."""
-    if value is None:
-        return []
-    if isinstance(value, str):
-        return [value.strip()] if value.strip() else []
-    if isinstance(value, (list, tuple)):
-        return [str(v).strip() for v in value if str(v).strip()]
-    return []
+def _apply_variant_env(envs, variant, base_extra_envs, base_unset_envs):
+    """Apply accepted environment edits before the candidate's set/unset operations."""
+    # Composed base-then-variant, so a variant unsetting a key the base sets
+    # removes it: the last layer to name a key is the one that decides it.
+    for k in to_str_list(base_unset_envs):
+        if k.strip().upper() in BLOCKED_EXTERNAL_ENV_NAMES:
+            continue
+        envs.pop(k, None)
+    for k, v in (base_extra_envs or {}).items():
+        envs[str(k)] = str(v)
+    base_envs = dict(envs)
+    for k in getattr(variant, "unset_envs", []) or []:
+        # Unsetting a pin retargets the benchmark rather than toggling a knob.
+        if str(k).strip().upper() in BLOCKED_EXTERNAL_ENV_NAMES:
+            log.warning("grid: refusing to unset pinned env %s for variant %s", k, variant.name)
+            continue
+        envs.pop(str(k), None)
+    for k, v in variant.extra_envs.items():
+        envs[str(k)] = str(v)
+    return base_envs
 
 
 def _build_variant_yaml(
@@ -406,9 +336,22 @@ def _build_variant_yaml(
     base_unset_envs: list[str] | None = None,
 ) -> Path:
     """Materialize a per-variant Magpie YAML on disk."""
-    with base_yaml_path.open(encoding="utf-8") as f:
-        cfg = yaml.safe_load(f)
+    cfg = yaml.safe_load(base_yaml_path.read_text(encoding="utf-8"))
     bench = cfg.setdefault("benchmark", {})
+    if is_magpie_agentx(bench):
+        return materialize_variant(
+            base_yaml_path,
+            variant,
+            output_subdir,
+            model_path=model_path,
+            base=LaunchChanges(
+                base_extra_args,
+                base_extra_envs or {},
+                base_remove_args or [],
+                base_unset_envs or [],
+                base_args_mode == "replace",
+            ),
+        )
     replacing = str(base_args_mode).strip().lower() == "replace"
     envs = apply_runtime_benchmark_overrides(
         bench,
@@ -419,17 +362,14 @@ def _build_variant_yaml(
     )
     extra_args_env = server_args_env_name(bench.get("framework"))
 
-    variant_remove = to_str_list(getattr(variant, "remove_args", []))
-    # A replacing base drops the inherited string wholesale, so only the
-    # variant's own removals still name flags that survive to be stripped.
-    effective_remove = (
-        variant_remove if replacing else list(dict.fromkeys(to_str_list(base_remove_args) + variant_remove))
-    )
+    # A replacing base drops the inherited string wholesale, so its own removals have nothing left to strip.
+    inherited, base_remove = ("", []) if replacing else (str(envs.get(extra_args_env, "")), base_remove_args)
+    base_args = compose_server_args(inherited_args=inherited, base_extra_args=base_extra_args, remove_args=base_remove)
     combined = compose_server_args(
-        inherited_args="" if replacing else str(envs.get(extra_args_env, "")),
+        inherited_args=inherited,
         base_extra_args=base_extra_args,
         variant_extra_args=variant.extra_server_args,
-        remove_args=effective_remove,
+        remove_args=to_str_list(base_remove) + to_str_list(getattr(variant, "remove_args", [])),
         args_mode=getattr(variant, "args_mode", "append"),
     )
     # A grid variant never injects a MoE runner backend itself, but it does inherit one -- from the baseline recipe it
@@ -449,23 +389,9 @@ def _build_variant_yaml(
         envs[extra_args_env] = _shell_safe_dedupe(combined)
     elif extra_args_env in envs or variant.args_mode == "replace" or base_args_mode == "replace":
         envs[extra_args_env] = ""
-    # Composed base-then-variant, so a variant unsetting a key the base sets
-    # removes it: the last layer to name a key is the one that decides it.
-    for k in to_str_list(base_unset_envs):
-        if k.strip().upper() in BLOCKED_EXTERNAL_ENV_NAMES:
-            continue
-        envs.pop(k, None)
-    for k, v in (base_extra_envs or {}).items():
-        envs[str(k)] = str(v)
-    for k in getattr(variant, "unset_envs", []) or []:
-        # Unsetting a pin retargets the benchmark rather than toggling a knob.
-        if str(k).strip().upper() in BLOCKED_EXTERNAL_ENV_NAMES:
-            log.warning("grid: refusing to unset pinned env %s for variant %s", k, variant.name)
-            continue
-        envs.pop(str(k), None)
-    for k, v in variant.extra_envs.items():
-        envs[str(k)] = str(v)
-    from ._workload_envs import pin_mlperf_round_concurrency, prepend_launch_path
+    base_envs = _apply_variant_env(envs, variant, base_extra_envs, base_unset_envs)
+    from ._workload_envs import pin_mlperf_round_concurrency
+    from hyperloom.inference_optimizer.runtime_environment import prepend_launch_path
 
     pin_mlperf_round_concurrency(envs)
     # The launcher re-exports these unconditionally, so a value carried here is
@@ -500,6 +426,7 @@ def _build_variant_yaml(
     _rt_override = getattr(variant, "runtime_override", None) or {}
     if _rt_override:
         apply_runtime_override(envs, _rt_override)
+    refuse_unpinned_speculative_change(base_args, base_envs, combined, envs)
 
     # PATH guard: the xdit wrapper needs both `/venv/bin` (the `xdit` console script) and `/opt/rocm/bin` (`hipcc`);
     # force-prepend both so an LLM-supplied PATH can't drop one.
@@ -552,6 +479,7 @@ async def _settled_measurement(
     workspace: Path,
     *,
     subprocess_started_unix: float | None,
+    config_path: Path | None = None,
     settle_seconds: float = REPORT_SETTLE_SECONDS,
     poll_seconds: float = REPORT_SETTLE_POLL_SECONDS,
 ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
@@ -562,6 +490,7 @@ async def _settled_measurement(
         report = _parse_report(workspace)
         measurement = extract_benchmark_measurement(
             report,
+            config_path=config_path,
             workspace=workspace,
             subprocess_started_unix=subprocess_started_unix,
         )
@@ -603,8 +532,7 @@ def sync_benchmark_timeout(config_path: Path, timeout_sec: float) -> None:
         bench["server_lifecycle"]["server_ready_timeout_s"] = timeout_sec
     envs = bench.setdefault("envs", {})
     envs["PYTHONUNBUFFERED"] = "1"
-    if "AGENTX_PHASE_WAIT_TIMEOUT_S" in envs:
-        envs["AGENTX_PHASE_WAIT_TIMEOUT_S"] = str(timeout_sec)
+    sync_agentx_phase_wait(envs, timeout_sec)
     config_path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
 
 
@@ -651,41 +579,9 @@ def _run_magpie(
 
     env.update(magpie_remote_env())
 
-    # Pin Magpie's InferenceX resolution to ``$INFERENCEX_PATH`` (its highest-precedence rung) so it loads the patched
-    # checkout, not a stale copy.
-    inferencex_path = os.environ.get("INFERENCEX_PATH", "").strip()
-    if inferencex_path:
-        env["MAGPIE_INFERENCEX_PATH"] = inferencex_path
-        # Baseline patches its own checkout, but explore / sweep never pass through that hook: re-assert here so a
-        # resumed session or a re-cloned checkout still emits the eval-start marker.
-        ensure_benchmark_lib_eval_start_patched(Path(inferencex_path))
-
-    # The generation bounds + pathology probe are asserted whether or not ``$INFERENCEX_PATH`` is set: unset falls
-    # back to the same env discovery the baseline arm uses ($MAGPIE_PATH/InferenceX).
-    probe_root = Path(inferencex_path) if inferencex_path else None
-    # Best-effort, unlike the probe below: a missing guard only costs the reason a failed round reports.
-    ensure_eval_unbound_outputs_patched(probe_root)
-    if not ensure_eval_probe_patched(probe_root) and not materialized_run_eval_disabled(config_path):
-        eval_bounds_msg = (
-            "eval generation bounds + pathology probe are not installed "
-            "(utils/evals/patches/lm_eval_sitecustomize.py, inferencex="
-            f"{inferencex_path or '<unset>'}, INFERENCEX_PATH="
-            f"{os.environ.get('INFERENCEX_PATH', '') or '<unset>'}); this "
-            "variant runs eval, so it would be scored against a baseline that "
-            "truncated at a different point"
-        )
-        if eval_probe_targets_exist(probe_root):
-            log.error("grid_runner: %s; failing this benchmark", eval_bounds_msg)
-            return (EVAL_PROBE_UNPATCHABLE_RETURNCODE, "", eval_bounds_msg)
-        log.warning("grid_runner: %s", eval_bounds_msg)
-    # AgentX: deploy the aiperf client into InferenceX ``benchmarks/`` + preflight aiperf right before Magpie runs it,
-    # via the shared helper (also used by the baseline/profile shell-out).
-    from ._workload_envs import prepare_agentx_runtime
-
-    _agx_err = prepare_agentx_runtime(env=env, inferencex_path=inferencex_path, config_path=config_path)
-    if _agx_err:
-        log.error("%s; failing this benchmark", _agx_err)
-        return (AGENTX_PREFLIGHT_RETURNCODE, "", _agx_err)
+    preparation_failure = prepare_benchmark_runtime(config_path, env)
+    if preparation_failure is not None:
+        return preparation_failure.returncode, "", preparation_failure.error
     # RESULT_DIR default; leaks are picked up by the salvage path.
     env["RESULT_DIR"] = result_dir or str(output_dir)
     # InferenceX ``run_lm_eval`` cleans ``$EVAL_RESULT_DIR`` after processing lm-eval output.
@@ -860,6 +756,15 @@ def session_grid_bounds(shared_state: Any) -> tuple[float | None, float | None]:
     return (deadline, variant_sec)
 
 
+class _RoundAttempt(NamedTuple):
+    """What one round of the current variant left behind: its exit, its timing and its servers."""
+
+    returncode: int | None
+    started_unix: float
+    server_log: Path
+    server_survivors: list[int]
+
+
 async def run_grid(
     *,
     base_yaml_path: Path,
@@ -928,9 +833,9 @@ async def run_grid(
 
     _mn_ref_envs: dict[str, str] = {}
     if _mn_is_multi_node():
-        from ._workload_envs import resolve_reference_base
+        from ._workload_envs import resolve_reference_launch
 
-        _, _mn_ref_envs = resolve_reference_base()
+        _, _mn_ref_envs, _ = resolve_reference_launch()
 
     # Reported on entry, not on completion: ``_report_finished_variant`` only runs once a result has been appended, so
     # a first variant that hangs — or a branch that raises before reaching it — would emit nothing at all, which is
@@ -964,55 +869,52 @@ async def run_grid(
         """Report the variant that just landed."""
         await report_progress(**_variant_progress_note(grid, results, idx))
 
-    def _record_round_stop(
+    def _abort_on_round_stop(
         stopped: StoppedByTheRun,
+        attempt: _RoundAttempt,
         *,
-        idx: int,
-        variant: GridVariant,
-        slot: Path,
         round_label: str,
-        returncode: int | None,
-        started_unix: float,
-        server_log: Path,
-    ) -> bool:
-        """Record a round the run stopped and say whether the grid is over."""
-        if returncode == SESSION_TIME_EXHAUSTED_RETURNCODE:
+    ) -> NoReturn:
+        """End the variant the loop is on, on a round the run stopped."""
+        if attempt.returncode == SESSION_TIME_EXHAUSTED_RETURNCODE:
             stopped = deadline_stop
-        runtime_sec = round(max(0.0, time.time() - started_unix), 2)
+        runtime_sec = round(max(0.0, time.time() - attempt.started_unix), 2)
         log.warning(
             "grid_runner: variant %d/%d name=%s %s round reaped after %.1fs: %s; recorded as skipped, not failed",
-            idx + 1,
+            i + 1,
             len(grid),
             variant.name,
             round_label,
             runtime_sec,
             stopped.interrupted,
         )
+        teardown = "tree reaped"
+        if attempt.server_survivors:
+            teardown += f", but server pid(s) {', '.join(map(str, attempt.server_survivors))} survived SIGKILL"
         _write_variant_abort_marker(
             slot,
             variant_name=variant.name,
             error_class=stopped.error_class,
-            error_summary=f"{stopped.interrupted}; tree reaped",
+            error_summary=f"{stopped.interrupted}; {teardown}",
             extra_args=variant.extra_server_args,
         )
-        results.append(
+        raise _VariantAborted(
             VariantResult(
                 name=variant.name,
                 extra_server_args=variant.extra_server_args,
                 extra_envs=dict(variant.extra_envs),
                 status="skipped",
-                returncode=returncode,
+                returncode=attempt.returncode,
                 runtime_sec=runtime_sec,
                 error=stopped.interrupted,
                 error_class=stopped.error_class,
-                server_log_path=_measurement_server_log_path(server_log, slot=slot),
+                server_log_path=_measurement_server_log_path(attempt.server_log, slot=slot),
                 note=variant.note,
-            )
+                nonfatal_warnings=[f"server_survived_teardown:{pid}" for pid in attempt.server_survivors],
+            ),
+            halt=_Halt.STOP if stopped.ends_the_batch else _Halt.ON_FAILURE,
+            never_started=stopped.never_started,
         )
-        if stopped.ends_the_batch:
-            results.extend(_not_run_skip_result(rest, stopped) for rest in grid[idx + 1 :])
-            return True
-        return not keep_going_on_failure
 
     # How many full benchmark passes one variant costs.
     _mn_warmup_rounds = 0
@@ -1042,173 +944,374 @@ async def run_grid(
             spent_on,
             len(grid) - idx,
         )
-        results.extend(_not_run_skip_result(variant, deadline_stop) for variant in grid[idx:])
+        results.extend(
+            _not_run_skip_result(v, error=deadline_stop.never_started, error_class=deadline_stop.error_class)
+            for v in grid[idx:]
+        )
         return True
 
     for i, variant in enumerate(grid):
-        # Session-budget stop: skip the remaining variants once the wall-clock deadline is reached or the remaining
-        # budget cannot fit another variant, so a timeout halts the grid instead of draining it (and the last variant
-        # cannot overrun the close window).
-        if _skip_rest_for_budget(i, spent_on="the variants before this one"):
-            break
-        await _unit_started(i, "variant")
-        slot = output_root / f"variant_{i:02d}_{_safe(variant.name)}"
-        server_log = slot / "server.log"
-        # Capability fast-fail: drop a variant whose env flag the build cannot honour before booting a doomed server,
-        # still recording the failure so the LLM learns not to re-pick it.
-        cap_reason = unsupported_capability_reason(variant)
-        if cap_reason:
-            log.warning(
-                "grid_runner: variant %d/%d name=%s aborted: capability_unsupported: %s",
-                i + 1,
-                len(grid),
-                variant.name,
-                cap_reason,
-            )
-            _write_variant_abort_marker(
-                slot,
-                variant_name=variant.name,
-                error_class="capability_unsupported",
-                error_summary=cap_reason,
-                extra_args=variant.extra_server_args,
-            )
-            results.append(
-                VariantResult(
-                    name=variant.name,
-                    extra_server_args=variant.extra_server_args,
-                    extra_envs=dict(variant.extra_envs),
-                    status="failed",
-                    error=cap_reason,
-                    error_class="capability_unsupported",
-                    note=variant.note,
-                )
-            )
-            await _report_finished_variant(i)
-            if not keep_going_on_failure:
-                break
-            continue
-        lifecycle: dict[str, Any] = {"eligible": False}
-        auto_warmup = False
         try:
-            cfg_path = _build_variant_yaml(
-                base_yaml_path,
-                base_extra_args,
-                variant,
-                output_subdir=slot,
-                model_path=model_path,
-                gpu_type=gpu_type,
-                benchmark_script=benchmark_script,
-                server_lifecycle=server_lifecycle,
-                base_args_mode=base_args_mode,
-                base_extra_envs=base_extra_envs,
-                base_remove_args=base_remove_args,
-                base_unset_envs=base_unset_envs,
-            )
-        except Exception as exc:  # noqa: BLE001
-            build_error = "yaml_build_error"
-            log.warning(
-                "grid_runner: variant %d/%d name=%s aborted: %s: %r",
-                i + 1,
-                len(grid),
-                variant.name,
-                build_error,
-                exc,
-            )
-            _write_variant_abort_marker(
-                slot,
-                variant_name=variant.name,
-                error_class=build_error,
-                error_summary=repr(exc),
-                extra_args=variant.extra_server_args,
-            )
-            results.append(
-                VariantResult(
-                    name=variant.name,
-                    extra_server_args=variant.extra_server_args,
-                    extra_envs=dict(variant.extra_envs),
-                    status="failed",
-                    error=f"{build_error}: {exc!r}",
-                    error_class=build_error,
-                    note=variant.note,
-                )
-            )
-            await _report_finished_variant(i)
-            if not keep_going_on_failure:
+            # Session-budget stop: skip the remaining variants once the wall-clock deadline is reached or the remaining
+            # budget cannot fit another variant, so a timeout halts the grid instead of draining it (and the last variant
+            # cannot overrun the close window).
+            if _skip_rest_for_budget(i, spent_on="the variants before this one"):
                 break
-            continue
-
-        _mn_effective_args = _resolve_mn_effective_server_args(
-            cfg_path,
-            base_yaml_path,
-            variant,
-            base_extra_args=base_extra_args,
-            base_args_mode=base_args_mode,
-        )
-
-        if auto_warmup_requested:
-            try:
-                from ._server_lifecycle import resolve_lifecycle_params
-
-                lifecycle = resolve_lifecycle_params(cfg_path)
-                auto_warmup = bool(lifecycle.get("eligible"))
-                if auto_warmup:
-                    cfg_path = _build_variant_yaml(
-                        base_yaml_path,
-                        base_extra_args,
-                        variant,
-                        output_subdir=slot,
-                        model_path=model_path,
-                        gpu_type=gpu_type,
-                        benchmark_script=benchmark_script,
-                        server_lifecycle={
-                            "cleanup": True,
-                            "pid_dir": str(slot),
-                            "port": int(lifecycle.get("port") or 0),
-                        },
-                        base_args_mode=base_args_mode,
-                        base_extra_envs=base_extra_envs,
-                        base_remove_args=base_remove_args,
-                        base_unset_envs=base_unset_envs,
-                    )
-                else:
-                    log.info(
-                        "grid_runner: warmup-before-measure not eligible (%s); running single measured round.",
-                        lifecycle.get("reason") or "unknown",
-                    )
-            except Exception as exc:  # noqa: BLE001
+            await _unit_started(i, "variant")
+            slot = output_root / f"variant_{i:02d}_{_safe(variant.name)}"
+            server_log = slot / "server.log"
+            cap_reason = unsupported_capability_reason(variant)
+            if cap_reason:
                 log.warning(
-                    "grid_runner: warmup-before-measure eligibility/materialization failed (%r); running single measured round.",
-                    exc,
+                    "grid_runner: variant %d/%d name=%s aborted: capability_unsupported: %s",
+                    i + 1,
+                    len(grid),
+                    variant.name,
+                    cap_reason,
                 )
-                auto_warmup = False
-
-        warmup_tput: float | None = None
-        if auto_warmup:
-            warmup_slot = slot / "warmup_round"
-            warmup_server_log = warmup_slot / "server.log"
-            warmup_lifecycle = {
-                "cleanup": False,
-                "pid_dir": str(slot),
-                "port": int(lifecycle.get("port") or 0),
-            }
+                _write_variant_abort_marker(
+                    slot,
+                    variant_name=variant.name,
+                    error_class="capability_unsupported",
+                    error_summary=cap_reason,
+                    extra_args=variant.extra_server_args,
+                )
+                raise _VariantAborted(
+                    VariantResult(
+                        name=variant.name,
+                        extra_server_args=variant.extra_server_args,
+                        extra_envs=dict(variant.extra_envs),
+                        status="failed",
+                        error=cap_reason,
+                        error_class="capability_unsupported",
+                        note=variant.note,
+                    )
+                )
+            lifecycle: dict[str, Any] = {"eligible": False}
+            auto_warmup = False
             try:
-                warmup_cfg_path = _build_variant_yaml(
+                cfg_path = await asyncio.to_thread(
+                    _build_variant_yaml,
                     base_yaml_path,
                     base_extra_args,
                     variant,
-                    output_subdir=warmup_slot,
+                    output_subdir=slot,
                     model_path=model_path,
                     gpu_type=gpu_type,
                     benchmark_script=benchmark_script,
-                    server_lifecycle=warmup_lifecycle,
+                    server_lifecycle=server_lifecycle,
                     base_args_mode=base_args_mode,
                     base_extra_envs=base_extra_envs,
                     base_remove_args=base_remove_args,
                     base_unset_envs=base_unset_envs,
                 )
             except Exception as exc:  # noqa: BLE001
+                build_error = getattr(exc, "error_class", "yaml_build_error")
                 log.warning(
-                    "grid_runner: variant %d/%d name=%s aborted: warmup_yaml_build_error: %r",
+                    "grid_runner: variant %d/%d name=%s aborted: %s: %r",
+                    i + 1,
+                    len(grid),
+                    variant.name,
+                    build_error,
+                    exc,
+                )
+                _write_variant_abort_marker(
+                    slot,
+                    variant_name=variant.name,
+                    error_class=build_error,
+                    error_summary=repr(exc),
+                    extra_args=variant.extra_server_args,
+                )
+                raise _VariantAborted(
+                    VariantResult(
+                        name=variant.name,
+                        extra_server_args=variant.extra_server_args,
+                        extra_envs=dict(variant.extra_envs),
+                        status="failed",
+                        error=f"{build_error}: {exc!r}",
+                        error_class=build_error,
+                        note=variant.note,
+                    )
+                )
+
+            _mn_effective_args = _resolve_mn_effective_server_args(
+                cfg_path,
+                base_yaml_path,
+                variant,
+                base_extra_args=base_extra_args,
+                base_args_mode=base_args_mode,
+            )
+
+            if auto_warmup_requested:
+                try:
+                    from ._server_lifecycle import resolve_lifecycle_params
+
+                    lifecycle = resolve_lifecycle_params(cfg_path)
+                    auto_warmup = bool(lifecycle.get("eligible"))
+                    if auto_warmup:
+                        cfg_path = await asyncio.to_thread(
+                            _build_variant_yaml,
+                            base_yaml_path,
+                            base_extra_args,
+                            variant,
+                            output_subdir=slot,
+                            model_path=model_path,
+                            gpu_type=gpu_type,
+                            benchmark_script=benchmark_script,
+                            server_lifecycle={
+                                "cleanup": True,
+                                "pid_dir": str(slot),
+                                "port": int(lifecycle.get("port") or 0),
+                            },
+                            base_args_mode=base_args_mode,
+                            base_extra_envs=base_extra_envs,
+                            base_remove_args=base_remove_args,
+                            base_unset_envs=base_unset_envs,
+                        )
+                    else:
+                        log.info(
+                            "grid_runner: warmup-before-measure not eligible (%s); running single measured round.",
+                            lifecycle.get("reason") or "unknown",
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    log.warning(
+                        "grid_runner: warmup-before-measure eligibility/materialization failed (%r); running single measured round.",
+                        exc,
+                    )
+                    auto_warmup = False
+
+            warmup_tput: float | None = None
+            if auto_warmup:
+                warmup_slot = slot / "warmup_round"
+                warmup_server_log = warmup_slot / "server.log"
+                warmup_lifecycle = {
+                    "cleanup": False,
+                    "pid_dir": str(slot),
+                    "port": int(lifecycle.get("port") or 0),
+                }
+                try:
+                    warmup_cfg_path = await asyncio.to_thread(
+                        _build_variant_yaml,
+                        base_yaml_path,
+                        base_extra_args,
+                        variant,
+                        output_subdir=warmup_slot,
+                        model_path=model_path,
+                        gpu_type=gpu_type,
+                        benchmark_script=benchmark_script,
+                        server_lifecycle=warmup_lifecycle,
+                        base_args_mode=base_args_mode,
+                        base_extra_envs=base_extra_envs,
+                        base_remove_args=base_remove_args,
+                        base_unset_envs=base_unset_envs,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    log.warning(
+                        "grid_runner: variant %d/%d name=%s aborted: warmup_yaml_build_error: %r",
+                        i + 1,
+                        len(grid),
+                        variant.name,
+                        exc,
+                    )
+                    _write_variant_abort_marker(
+                        slot,
+                        variant_name=variant.name,
+                        error_class="warmup_yaml_build_error",
+                        error_summary=repr(exc),
+                        extra_args=variant.extra_server_args,
+                    )
+                    raise _VariantAborted(
+                        VariantResult(
+                            name=variant.name,
+                            extra_server_args=variant.extra_server_args,
+                            extra_envs=dict(variant.extra_envs),
+                            status="failed",
+                            error=f"warmup_yaml_build_error: {exc!r}",
+                            error_class="warmup_yaml_build_error",
+                            note=variant.note,
+                        )
+                    )
+
+                warmup_workspaces_before = snapshot_workspaces(warmup_slot)
+                warmup_started_unix = time.time()
+                # Held in a local because the abort line below has to name the cap the round was actually granted: the
+                # declared one is a hang backstop, and a round killed at the reserved cap logged as a two-hour timeout
+                # reads as a variant that hangs rather than a budget that ran out.
+                warmup_cap_sec = benchmark_timeout_sec
+                try:
+                    warmup_rc, warmup_stdout, warmup_stderr = await _reported_magpie(
+                        i,
+                        "warmup",
+                        magpie_python=magpie_python,
+                        config_path=warmup_cfg_path,
+                        output_dir=warmup_slot,
+                        timeout_sec=warmup_cap_sec,
+                        silence_timeout_sec=silence_timeout_sec,
+                        cwd=cwd,
+                        result_dir=result_dir,
+                        serving_lease=serving_lease,
+                        session_deadline_sec=session_deadline_sec,
+                    )
+                except subprocess.TimeoutExpired as exc:
+                    _teardown_variant_server(slot, lifecycle)
+                    log.warning(
+                        "grid_runner: variant %d/%d name=%s aborted: warmup timeout (timeout_sec=%d): %s",
+                        i + 1,
+                        len(grid),
+                        variant.name,
+                        warmup_cap_sec,
+                        exc,
+                    )
+                    _write_variant_abort_marker(
+                        slot,
+                        variant_name=variant.name,
+                        error_class="warmup_magpie_timeout",
+                        error_summary=str(exc),
+                        extra_args=variant.extra_server_args,
+                    )
+                    raise _VariantAborted(
+                        VariantResult(
+                            name=variant.name,
+                            extra_server_args=variant.extra_server_args,
+                            extra_envs=dict(variant.extra_envs),
+                            status="failed",
+                            error=f"warmup_timeout: {exc}",
+                            error_class="warmup_magpie_timeout",
+                            server_log_path=_existing_log_path(warmup_server_log),
+                            note=variant.note,
+                            runtime_sec=round(max(0.0, time.time() - warmup_started_unix), 2),
+                            nonfatal_warnings=["run_grid_warmup_round_failed"],
+                        )
+                    )
+
+                warmup_stopped = stopped_by_the_run(warmup_rc)
+                if warmup_stopped is not None:
+                    warmup_survivors = _teardown_variant_server(slot, lifecycle)
+                    _abort_on_round_stop(
+                        warmup_stopped,
+                        _RoundAttempt(
+                            returncode=warmup_rc,
+                            started_unix=warmup_started_unix,
+                            server_log=warmup_server_log,
+                            server_survivors=warmup_survivors,
+                        ),
+                        round_label="warmup",
+                    )
+
+                warmup_run_ws = select_run_workspace(warmup_slot, known_before=warmup_workspaces_before)
+                warmup_workspace = warmup_run_ws if warmup_run_ws is not None else warmup_slot
+                warmup_harvested = harvest_leaked_artifacts(
+                    warmup_workspace,
+                    subprocess_started_unix=warmup_started_unix,
+                )
+                if warmup_run_ws is not None:
+                    _, warmup_measurement = await _settled_measurement(
+                        warmup_workspace,
+                        config_path=warmup_cfg_path,
+                        subprocess_started_unix=warmup_started_unix,
+                        settle_seconds=REPORT_SETTLE_SECONDS if warmup_rc == 0 else 0.0,
+                    )
+                else:
+                    warmup_measurement = extract_benchmark_measurement(
+                        None,
+                        config_path=warmup_cfg_path,
+                        workspace=warmup_workspace,
+                        subprocess_started_unix=warmup_started_unix,
+                    )
+                if warmup_rc != 0 or not warmup_measurement.get("valid_measurement"):
+                    _teardown_variant_server(slot, lifecycle)
+                    warmup_error = (
+                        server_log_death_excerpt(str(warmup_server_log))
+                        or redact_secret_values((warmup_stderr or warmup_stdout)[-2000:])
+                        if warmup_rc != 0
+                        else "warmup benchmark_report missing valid throughput/completed requests"
+                    )
+                    log.warning(
+                        "grid_runner: variant %d/%d name=%s aborted: warmup_round_failed (rc=%s): %s",
+                        i + 1,
+                        len(grid),
+                        variant.name,
+                        warmup_rc,
+                        warmup_error[:200],
+                    )
+                    _write_variant_abort_marker(
+                        slot,
+                        variant_name=variant.name,
+                        error_class="warmup_round_failed",
+                        error_summary=warmup_error,
+                        extra_args=variant.extra_server_args,
+                    )
+                    raise _VariantAborted(
+                        VariantResult(
+                            name=variant.name,
+                            extra_server_args=variant.extra_server_args,
+                            extra_envs=dict(variant.extra_envs),
+                            status="failed",
+                            workspace=str(warmup_workspace) if warmup_run_ws is not None else None,
+                            report_path=(
+                                str(warmup_workspace / "benchmark_report.json")
+                                if (warmup_workspace / "benchmark_report.json").exists()
+                                else None
+                            ),
+                            raw_result_path=warmup_measurement.get("raw_result_path"),
+                            reported_success=warmup_measurement.get("reported_success"),
+                            returncode=warmup_rc,
+                            error=warmup_error,
+                            error_class="warmup_round_failed",
+                            server_log_path=_existing_log_path(warmup_server_log),
+                            note=variant.note,
+                            runtime_sec=round(max(0.0, time.time() - warmup_started_unix), 2),
+                            nonfatal_warnings=[
+                                "run_grid_warmup_round_failed",
+                                *[f"harvested_leaked_artifact:{src}" for src, _ in warmup_harvested],
+                            ],
+                        )
+                    )
+                warmup_tput = warmup_measurement.get("output_throughput")
+                log.info(
+                    "grid_runner: variant %s warmup tput=%.1f tok/s discarded; measuring hot round next",
+                    variant.name,
+                    warmup_tput or 0.0,
+                )
+
+            from ._multi_node_env import log_mn_banner
+
+            log_mn_banner(
+                "grid_runner",
+                log,
+                variant=f"{i + 1}/{len(grid)}:{variant.name}",
+            )
+            log.info(
+                "grid_runner: variant %d/%d name=%s args=%s",
+                i + 1,
+                len(grid),
+                variant.name,
+                variant.extra_server_args,
+            )
+
+            # Multi-node only: restart sglang/vllm with this variant's flags so each row runs against a fresh server.
+            from ._multi_node_server_lifecycle import (
+                ServerRestartFailed,
+                restart_server_for_round,
+            )
+
+            try:
+                # PD knobs auto-resolved from $PD_* env; PD config stays constant across variants within one run.
+                _variant_unset = [str(k) for k in getattr(variant, "unset_envs", []) or [] if str(k).strip()]
+                _restart_env = _mn_restart_env(_mn_ref_envs, variant, _variant_unset)
+                await restart_server_for_round(
+                    extra_server_args=_mn_effective_args,
+                    # Reference recipe envs under this variant's own overrides (e.g. MORI_* MoE-dispatch tuning) so
+                    # server-side env knobs proposed by specialists take effect on the restarted sglang without dropping
+                    # the envs the baseline was measured with.
+                    extra_env=_restart_env,
+                    unset_env=_variant_unset,
+                    model_path=model_path,
+                    ep=int(os.environ.get("EP") or 0) or None,
+                )
+            except ServerRestartFailed as exc:
+                log.warning(
+                    "grid_runner: variant %d/%d name=%s aborted: mn_server_restart_failed: %s",
                     i + 1,
                     len(grid),
                     variant.name,
@@ -1217,743 +1320,423 @@ async def run_grid(
                 _write_variant_abort_marker(
                     slot,
                     variant_name=variant.name,
-                    error_class="warmup_yaml_build_error",
-                    error_summary=repr(exc),
+                    error_class="mn_server_restart_failed",
+                    error_summary=str(exc),
                     extra_args=variant.extra_server_args,
                 )
-                results.append(
+                raise _VariantAborted(
                     VariantResult(
                         name=variant.name,
                         extra_server_args=variant.extra_server_args,
                         extra_envs=dict(variant.extra_envs),
                         status="failed",
-                        error=f"warmup_yaml_build_error: {exc!r}",
-                        error_class="warmup_yaml_build_error",
+                        error=f"mn_server_restart_failed: {exc}",
+                        error_class="mn_server_restart_failed",
                         note=variant.note,
                     )
                 )
-                await _report_finished_variant(i)
-                if not keep_going_on_failure:
-                    break
-                continue
 
-            warmup_workspaces_before = snapshot_workspaces(warmup_slot)
-            warmup_started_unix = time.time()
-            # Held in a local because the abort line below has to name the cap the round was actually granted: the
-            # declared one is a hang backstop, and a round killed at the reserved cap logged as a two-hour timeout
-            # reads as a variant that hangs rather than a budget that ran out.
-            warmup_cap_sec = benchmark_timeout_sec
-            try:
-                warmup_rc, warmup_stdout, warmup_stderr = await _reported_magpie(
+            # The restart above is a launch of its own and is under no cap, so the budget admitted at the top of the loop
+            # may no longer be there.
+            if _skip_rest_for_budget(
+                i,
+                spent_on="this variant's server restart",
+                rounds_left=1 + _mn_warmup_rounds,
+            ):
+                if auto_warmup:
+                    _teardown_variant_server(slot, lifecycle)
+                break
+
+            # Multi-node client warmup: one discarded benchmark pass against the just-restarted, persistent remote server
+            # to warm JIT / steady-state before the measured pass.
+            from ._multi_node_env import (
+                is_multi_node as _mn_imn,
+                mn_bench_warmup_enabled as _mn_warm,
+            )
+
+            if _mn_imn() and _mn_warm():
+                _mn_warm_slot = slot / "mn_warmup"
+                _mn_warm_started_unix = time.time()
+                # The measurement is discarded, but the returncode is not: a warmup the run stopped is the same stop as
+                # one in the measured round, and discarding it launches the measured round after the cancel.
+                _mn_warm_rc: int | None = None
+                _mn_warm_rc, _, _ = await _reported_magpie(
                     i,
-                    "warmup",
+                    "mn_warmup",
                     magpie_python=magpie_python,
-                    config_path=warmup_cfg_path,
-                    output_dir=warmup_slot,
-                    timeout_sec=warmup_cap_sec,
+                    config_path=cfg_path,
+                    output_dir=_mn_warm_slot,
+                    timeout_sec=benchmark_timeout_sec,
                     silence_timeout_sec=silence_timeout_sec,
+                    server_already_ready=True,
+                    cwd=cwd,
+                    result_dir=None,
+                    serving_lease=serving_lease,
+                    session_deadline_sec=session_deadline_sec,
+                )
+                log.info(
+                    "grid_runner: MN warmup pass done (discarded) %d/%d name=%s rc=%s",
+                    i + 1,
+                    len(grid),
+                    variant.name,
+                    _mn_warm_rc,
+                )
+                _mn_warm_stopped = stopped_by_the_run(_mn_warm_rc)
+                if _mn_warm_stopped is not None:
+                    _mn_warm_survivors = _teardown_variant_server(slot, lifecycle if auto_warmup else None)
+                    _abort_on_round_stop(
+                        _mn_warm_stopped,
+                        _RoundAttempt(
+                            returncode=_mn_warm_rc,
+                            started_unix=_mn_warm_started_unix,
+                            server_log=_mn_warm_slot / "server.log",
+                            server_survivors=_mn_warm_survivors,
+                        ),
+                        round_label="mn_warmup",
+                    )
+
+            # Snapshot wall-clock before launch so the salvage path can mtime-gate leak destinations per-variant.
+            slot_workspaces_before = snapshot_workspaces(slot)
+            variant_started_unix = time.time()
+            measure_cap_sec = benchmark_timeout_sec
+            try:
+                rc, stdout, stderr = await _reported_magpie(
+                    i,
+                    "benchmark",
+                    magpie_python=magpie_python,
+                    config_path=cfg_path,
+                    output_dir=slot,
+                    timeout_sec=measure_cap_sec,
                     cwd=cwd,
                     result_dir=result_dir,
+                    silence_timeout_sec=silence_timeout_sec,
+                    server_already_ready=(server_already_ready or auto_warmup or _mn_imn()),
                     serving_lease=serving_lease,
                     session_deadline_sec=session_deadline_sec,
                 )
             except subprocess.TimeoutExpired as exc:
-                _teardown_variant_server(slot, lifecycle)
+                # Harvest pre-timeout leaks.
+                to_destination = select_run_workspace(slot, known_before=slot_workspaces_before) or slot
+                to_harvested = harvest_leaked_artifacts(
+                    to_destination,
+                    subprocess_started_unix=variant_started_unix,
+                )
                 log.warning(
-                    "grid_runner: variant %d/%d name=%s aborted: warmup timeout (timeout_sec=%d): %s",
+                    "grid_runner: variant %d/%d name=%s aborted: magpie timeout (timeout_sec=%d): %s",
                     i + 1,
                     len(grid),
                     variant.name,
-                    warmup_cap_sec,
+                    measure_cap_sec,
                     exc,
                 )
                 _write_variant_abort_marker(
                     slot,
                     variant_name=variant.name,
-                    error_class="warmup_magpie_timeout",
+                    error_class="magpie_timeout",
                     error_summary=str(exc),
                     extra_args=variant.extra_server_args,
                 )
-                results.append(
+                raise _VariantAborted(
                     VariantResult(
                         name=variant.name,
                         extra_server_args=variant.extra_server_args,
                         extra_envs=dict(variant.extra_envs),
                         status="failed",
-                        error=f"warmup_timeout: {exc}",
-                        error_class="warmup_magpie_timeout",
-                        server_log_path=_existing_log_path(warmup_server_log),
+                        error=f"timeout: {exc}",
+                        error_class="magpie_timeout",
+                        server_log_path=_existing_log_path(server_log),
                         note=variant.note,
-                        runtime_sec=round(max(0.0, time.time() - warmup_started_unix), 2),
-                        nonfatal_warnings=["run_grid_warmup_round_failed"],
-                    )
-                )
-                await _report_finished_variant(i)
-                if not keep_going_on_failure:
-                    break
-                continue
-
-            warmup_stopped = stopped_by_the_run(warmup_rc)
-            if warmup_stopped is not None:
-                _teardown_variant_server(slot, lifecycle)
-                grid_is_over = _record_round_stop(
-                    warmup_stopped,
-                    idx=i,
-                    variant=variant,
-                    slot=slot,
-                    round_label="warmup",
-                    returncode=warmup_rc,
-                    started_unix=warmup_started_unix,
-                    server_log=warmup_server_log,
-                )
-                await _report_finished_variant(i)
-                if grid_is_over:
-                    break
-                continue
-
-            warmup_run_ws = select_run_workspace(warmup_slot, known_before=warmup_workspaces_before)
-            warmup_workspace = warmup_run_ws if warmup_run_ws is not None else warmup_slot
-            warmup_harvested = harvest_leaked_artifacts(
-                warmup_workspace,
-                subprocess_started_unix=warmup_started_unix,
-            )
-            if warmup_run_ws is not None:
-                _, warmup_measurement = await _settled_measurement(
-                    warmup_workspace,
-                    subprocess_started_unix=warmup_started_unix,
-                    settle_seconds=REPORT_SETTLE_SECONDS if warmup_rc == 0 else 0.0,
-                )
-            else:
-                warmup_measurement = extract_benchmark_measurement(
-                    None,
-                    workspace=warmup_workspace,
-                    subprocess_started_unix=warmup_started_unix,
-                )
-            if warmup_rc != 0 or not warmup_measurement.get("valid_measurement"):
-                _teardown_variant_server(slot, lifecycle)
-                warmup_error = (
-                    server_log_death_excerpt(str(warmup_server_log))
-                    or redact_secret_values((warmup_stderr or warmup_stdout)[-2000:])
-                    if warmup_rc != 0
-                    else "warmup benchmark_report missing valid throughput/completed requests"
-                )
-                log.warning(
-                    "grid_runner: variant %d/%d name=%s aborted: warmup_round_failed (rc=%s): %s",
-                    i + 1,
-                    len(grid),
-                    variant.name,
-                    warmup_rc,
-                    warmup_error[:200],
-                )
-                _write_variant_abort_marker(
-                    slot,
-                    variant_name=variant.name,
-                    error_class="warmup_round_failed",
-                    error_summary=warmup_error,
-                    extra_args=variant.extra_server_args,
-                )
-                results.append(
-                    VariantResult(
-                        name=variant.name,
-                        extra_server_args=variant.extra_server_args,
-                        extra_envs=dict(variant.extra_envs),
-                        status="failed",
-                        workspace=str(warmup_workspace) if warmup_run_ws is not None else None,
-                        report_path=(
-                            str(warmup_workspace / "benchmark_report.json")
-                            if (warmup_workspace / "benchmark_report.json").exists()
-                            else None
+                        runtime_sec=round(
+                            max(0.0, time.time() - variant_started_unix),
+                            2,
                         ),
-                        raw_result_path=warmup_measurement.get("raw_result_path"),
-                        reported_success=warmup_measurement.get("reported_success"),
-                        returncode=warmup_rc,
-                        error=warmup_error,
-                        error_class="warmup_round_failed",
-                        server_log_path=_existing_log_path(warmup_server_log),
-                        note=variant.note,
-                        runtime_sec=round(max(0.0, time.time() - warmup_started_unix), 2),
-                        nonfatal_warnings=[
-                            "run_grid_warmup_round_failed",
-                            *[f"harvested_leaked_artifact:{src}" for src, _ in warmup_harvested],
-                        ],
+                        nonfatal_warnings=[f"harvested_leaked_artifact:{src}" for src, _ in to_harvested],
                     )
                 )
-                await _report_finished_variant(i)
-                if not keep_going_on_failure:
-                    break
-                continue
-            warmup_tput = warmup_measurement.get("output_throughput")
-            log.info(
-                "grid_runner: variant %s warmup tput=%.1f tok/s discarded; measuring hot round next",
-                variant.name,
-                warmup_tput or 0.0,
-            )
+            finally:
+                round_survivors = _teardown_variant_server(slot, lifecycle if auto_warmup else None)
 
-        from ._multi_node_env import log_mn_banner
-
-        log_mn_banner(
-            "grid_runner",
-            log,
-            variant=f"{i + 1}/{len(grid)}:{variant.name}",
-        )
-        log.info(
-            "grid_runner: variant %d/%d name=%s args=%s",
-            i + 1,
-            len(grid),
-            variant.name,
-            variant.extra_server_args,
-        )
-
-        # Multi-node only: restart sglang/vllm with this variant's flags so each row runs against a fresh server.
-        from ._multi_node_server_lifecycle import (
-            ServerRestartFailed,
-            restart_server_for_round,
-        )
-
-        try:
-            # PD knobs auto-resolved from $PD_* env; PD config stays constant across variants within one run.
-            _variant_unset = [str(k) for k in getattr(variant, "unset_envs", []) or [] if str(k).strip()]
-            _restart_env = _mn_restart_env(_mn_ref_envs, variant, _variant_unset)
-            await restart_server_for_round(
-                extra_server_args=_mn_effective_args,
-                # Reference recipe envs under this variant's own overrides (e.g. MORI_* MoE-dispatch tuning) so
-                # server-side env knobs proposed by specialists take effect on the restarted sglang without dropping
-                # the envs the baseline was measured with.
-                extra_env=_restart_env,
-                unset_env=_variant_unset,
-                model_path=model_path,
-                ep=int(os.environ.get("EP") or 0) or None,
-            )
-        except ServerRestartFailed as exc:
-            log.warning(
-                "grid_runner: variant %d/%d name=%s aborted: mn_server_restart_failed: %s",
-                i + 1,
-                len(grid),
-                variant.name,
-                exc,
-            )
-            _write_variant_abort_marker(
-                slot,
-                variant_name=variant.name,
-                error_class="mn_server_restart_failed",
-                error_summary=str(exc),
-                extra_args=variant.extra_server_args,
-            )
-            results.append(
-                VariantResult(
-                    name=variant.name,
-                    extra_server_args=variant.extra_server_args,
-                    extra_envs=dict(variant.extra_envs),
-                    status="failed",
-                    error=f"mn_server_restart_failed: {exc}",
-                    error_class="mn_server_restart_failed",
-                    note=variant.note,
-                )
-            )
-            await _report_finished_variant(i)
-            if not keep_going_on_failure:
-                break
-            continue
-
-        # The restart above is a launch of its own and is under no cap, so the budget admitted at the top of the loop
-        # may no longer be there.
-        if _skip_rest_for_budget(
-            i,
-            spent_on="this variant's server restart",
-            rounds_left=1 + _mn_warmup_rounds,
-        ):
-            if auto_warmup:
-                _teardown_variant_server(slot, lifecycle)
-            break
-
-        # Multi-node client warmup: one discarded benchmark pass against the just-restarted, persistent remote server
-        # to warm JIT / steady-state before the measured pass.
-        from ._multi_node_env import (
-            is_multi_node as _mn_imn,
-            mn_bench_warmup_enabled as _mn_warm,
-        )
-
-        if _mn_imn() and _mn_warm():
-            _mn_warm_slot = slot / "mn_warmup"
-            _mn_warm_started_unix = time.time()
-            # The measurement is discarded, but the returncode is not: a warmup the run stopped is the same stop as
-            # one in the measured round, and discarding it launches the measured round after the cancel.
-            _mn_warm_rc: int | None = None
-            _mn_warm_rc, _, _ = await _reported_magpie(
-                i,
-                "mn_warmup",
-                magpie_python=magpie_python,
-                config_path=cfg_path,
-                output_dir=_mn_warm_slot,
-                timeout_sec=benchmark_timeout_sec,
-                silence_timeout_sec=silence_timeout_sec,
-                server_already_ready=True,
-                cwd=cwd,
-                result_dir=None,
-                serving_lease=serving_lease,
-                session_deadline_sec=session_deadline_sec,
-            )
-            log.info(
-                "grid_runner: MN warmup pass done (discarded) %d/%d name=%s rc=%s",
-                i + 1,
-                len(grid),
-                variant.name,
-                _mn_warm_rc,
-            )
-            _mn_warm_stopped = stopped_by_the_run(_mn_warm_rc)
-            if _mn_warm_stopped is not None:
-                grid_is_over = _record_round_stop(
-                    _mn_warm_stopped,
-                    idx=i,
-                    variant=variant,
-                    slot=slot,
-                    round_label="mn_warmup",
-                    returncode=_mn_warm_rc,
-                    started_unix=_mn_warm_started_unix,
-                    server_log=_mn_warm_slot / "server.log",
-                )
-                await _report_finished_variant(i)
-                if grid_is_over:
-                    break
-                continue
-
-        # Snapshot wall-clock before launch so the salvage path can mtime-gate leak destinations per-variant.
-        slot_workspaces_before = snapshot_workspaces(slot)
-        variant_started_unix = time.time()
-        measure_cap_sec = benchmark_timeout_sec
-        try:
-            rc, stdout, stderr = await _reported_magpie(
-                i,
-                "benchmark",
-                magpie_python=magpie_python,
-                config_path=cfg_path,
-                output_dir=slot,
-                timeout_sec=measure_cap_sec,
-                cwd=cwd,
-                result_dir=result_dir,
-                silence_timeout_sec=silence_timeout_sec,
-                server_already_ready=(server_already_ready or auto_warmup or _mn_imn()),
-                serving_lease=serving_lease,
-                session_deadline_sec=session_deadline_sec,
-            )
-        except subprocess.TimeoutExpired as exc:
-            # Harvest pre-timeout leaks.
-            to_destination = select_run_workspace(slot, known_before=slot_workspaces_before) or slot
-            to_harvested = harvest_leaked_artifacts(
-                to_destination,
-                subprocess_started_unix=variant_started_unix,
-            )
-            log.warning(
-                "grid_runner: variant %d/%d name=%s aborted: magpie timeout (timeout_sec=%d): %s",
-                i + 1,
-                len(grid),
-                variant.name,
-                measure_cap_sec,
-                exc,
-            )
-            _write_variant_abort_marker(
-                slot,
-                variant_name=variant.name,
-                error_class="magpie_timeout",
-                error_summary=str(exc),
-                extra_args=variant.extra_server_args,
-            )
-            results.append(
-                VariantResult(
-                    name=variant.name,
-                    extra_server_args=variant.extra_server_args,
-                    extra_envs=dict(variant.extra_envs),
-                    status="failed",
-                    error=f"timeout: {exc}",
-                    error_class="magpie_timeout",
-                    server_log_path=_existing_log_path(server_log),
-                    note=variant.note,
-                    runtime_sec=round(
-                        max(0.0, time.time() - variant_started_unix),
-                        2,
-                    ),
-                    nonfatal_warnings=[f"harvested_leaked_artifact:{src}" for src, _ in to_harvested],
-                )
-            )
-            await _report_finished_variant(i)
-            if not keep_going_on_failure:
-                break
-            continue
-        finally:
-            if auto_warmup:
-                _teardown_variant_server(slot, lifecycle)
-
-        # Eval bounds could not be installed for a variant that runs eval, so nothing launched.
-        if rc == EVAL_PROBE_UNPATCHABLE_RETURNCODE:
-            variant_runtime_sec = round(max(0.0, time.time() - variant_started_unix), 2)
-            log.error(
-                "grid_runner: variant %d/%d name=%s aborted: eval_probe_unpatchable: %s",
-                i + 1,
-                len(grid),
-                variant.name,
-                stderr,
-            )
-            _write_variant_abort_marker(
-                slot,
-                variant_name=variant.name,
-                error_class="eval_probe_unpatchable",
-                error_summary=stderr,
-                extra_args=variant.extra_server_args,
-            )
-            results.append(
-                VariantResult(
-                    name=variant.name,
-                    extra_server_args=variant.extra_server_args,
-                    extra_envs=dict(variant.extra_envs),
-                    status="failed",
-                    returncode=rc,
-                    runtime_sec=variant_runtime_sec,
-                    error=stderr,
-                    error_class="eval_probe_unpatchable",
-                    note=variant.note,
-                )
-            )
-            await _report_finished_variant(i)
-            if not keep_going_on_failure:
-                break
-            continue
-
-        # Server-liveness watchdog fired: engine/worker bootstrap died but the parent hung.
-        if rc == SERVER_DEAD_RETURNCODE:
-            variant_runtime_sec = round(
-                max(0.0, time.time() - variant_started_unix),
-                2,
-            )
-            sd_destination = select_run_workspace(slot, known_before=slot_workspaces_before) or slot
-            sd_harvested = harvest_leaked_artifacts(
-                sd_destination,
-                subprocess_started_unix=variant_started_unix,
-            )
-            log.warning(
-                "grid_runner: variant %d/%d name=%s aborted: "
-                "server_init_dead (engine/worker bootstrap failed; parent "
-                "hung) after %.1fs",
-                i + 1,
-                len(grid),
-                variant.name,
-                variant_runtime_sec,
-            )
-            death_excerpt = server_log_death_excerpt(str(server_log)) or (
-                "server engine/worker init failed; parent process hung and was reaped by the liveness watchdog"
-            )
-            _write_variant_abort_marker(
-                slot,
-                variant_name=variant.name,
-                error_class="server_init_dead",
-                error_summary=death_excerpt,
-                extra_args=variant.extra_server_args,
-            )
-            results.append(
-                VariantResult(
-                    name=variant.name,
-                    extra_server_args=variant.extra_server_args,
-                    extra_envs=dict(variant.extra_envs),
-                    status="failed",
-                    returncode=rc,
-                    runtime_sec=variant_runtime_sec,
-                    error=death_excerpt,
-                    error_class="server_init_dead",
-                    server_log_path=_existing_log_path(server_log),
-                    note=variant.note,
-                    nonfatal_warnings=[f"harvested_leaked_artifact:{src}" for src, _ in sd_harvested],
-                )
-            )
-            await _report_finished_variant(i)
-            if not keep_going_on_failure:
-                break
-            continue
-
-        # Detokenizer-stall watchdog fired: the server came up healthy but then went silent (hung engine / wedged
-        # detokenizer).
-        if rc == DETOKENIZER_STALL_RETURNCODE:
-            variant_runtime_sec = round(
-                max(0.0, time.time() - variant_started_unix),
-                2,
-            )
-            ds_destination = select_run_workspace(slot, known_before=slot_workspaces_before) or slot
-            ds_harvested = harvest_leaked_artifacts(
-                ds_destination,
-                subprocess_started_unix=variant_started_unix,
-            )
-            log.warning(
-                "grid_runner: variant %d/%d name=%s aborted: detokenizer_stall "
-                "(server ready but log went silent) after %.1fs",
-                i + 1,
-                len(grid),
-                variant.name,
-                variant_runtime_sec,
-            )
-            _write_variant_abort_marker(
-                slot,
-                variant_name=variant.name,
-                error_class="detokenizer_stall",
-                error_summary=(
-                    "server reported ready but emitted no log output (hung "
-                    "engine / detokenizer stall); reaped by the "
-                    "detokenizer-stall watchdog"
-                ),
-                extra_args=variant.extra_server_args,
-            )
-            results.append(
-                VariantResult(
-                    name=variant.name,
-                    extra_server_args=variant.extra_server_args,
-                    extra_envs=dict(variant.extra_envs),
-                    status="failed",
-                    returncode=rc,
-                    runtime_sec=variant_runtime_sec,
-                    error="detokenizer_stall: server ready but log went silent",
-                    error_class="detokenizer_stall",
-                    server_log_path=_existing_log_path(server_log),
-                    note=variant.note,
-                    nonfatal_warnings=[f"harvested_leaked_artifact:{src}" for src, _ in ds_harvested],
-                )
-            )
-            await _report_finished_variant(i)
-            if not keep_going_on_failure:
-                break
-            continue
-
-        stopped = stopped_by_the_run(rc)
-        if stopped is not None:
-            grid_is_over = _record_round_stop(
-                stopped,
-                idx=i,
-                variant=variant,
-                slot=slot,
-                round_label="measured",
-                returncode=rc,
-                started_unix=variant_started_unix,
-                server_log=server_log,
-            )
-            await _report_finished_variant(i)
-            if grid_is_over:
-                break
-            continue
-
-        workspace = select_run_workspace(slot, known_before=slot_workspaces_before)
-        # Always-on artifact harvest so each slot keeps its server.log / gpu_metrics / profile relay for Robustness
-        # RCA.
-        harvest_destination = workspace if workspace is not None else slot
-        harvested = harvest_leaked_artifacts(
-            harvest_destination,
-            subprocess_started_unix=variant_started_unix,
-        )
-        if harvested:
-            log.info(
-                "_grid_runner: variant=%s harvested %d leaked artifact(s): %s",
-                variant.name,
-                len(harvested),
-                ", ".join(src.name for src, _ in harvested),
-            )
-        if workspace is None:
-            harvest_tags = [f"harvested_leaked_artifact:{src}" for src, _ in harvested]
-            # An AgentX preflight abort never reaches Magpie, so of course no workspace exists -- but calling it
-            # ``no_benchmark_workspace`` erases the one fact that decides what to do next.
-            agentx_preflight_abort = rc == AGENTX_PREFLIGHT_RETURNCODE
-            if agentx_preflight_abort:
-                # Same class the baseline path uses for the same abort, so both routes classify it identically.
-                no_ws_error_class = AGENTX_PREFLIGHT_ERROR_CLASS
-                no_ws_error_summary = (
-                    redact_secret_values((stderr or "").strip()[-2000:]) or "AgentX preflight aborted the round"
-                )
-            else:
-                no_ws_error_class = "no_benchmark_workspace"
-                no_ws_error_summary = server_log_death_excerpt(str(server_log)) or (
-                    redact_secret_values((stderr or stdout)[-2000:]) if rc != 0 else "no benchmark_* workspace produced"
-                )
-            log.warning(
-                "grid_runner: variant %d/%d name=%s aborted: %s (rc=%s)",
-                i + 1,
-                len(grid),
-                variant.name,
-                no_ws_error_class,
-                rc,
-            )
-            _write_variant_abort_marker(
-                slot,
-                variant_name=variant.name,
-                error_class=no_ws_error_class,
-                error_summary=no_ws_error_summary,
-                extra_args=variant.extra_server_args,
-            )
-            results.append(
-                VariantResult(
-                    name=variant.name,
-                    extra_server_args=variant.extra_server_args,
-                    extra_envs=dict(variant.extra_envs),
-                    status="failed",
-                    returncode=rc,
-                    error=no_ws_error_summary,
-                    error_class=no_ws_error_class,
-                    server_log_path=_existing_log_path(server_log),
-                    nonfatal_warnings=harvest_tags,
-                    note=variant.note,
-                )
-            )
-            await _report_finished_variant(i)
-            if agentx_preflight_abort:
-                # Environment, not variant.
+            # Eval bounds could not be installed for a variant that runs eval, so nothing launched.
+            if rc == EVAL_PROBE_UNPATCHABLE_RETURNCODE:
+                variant_runtime_sec = round(max(0.0, time.time() - variant_started_unix), 2)
                 log.error(
-                    "grid_runner: variant %d/%d name=%s aborted on the AgentX preflight; "
-                    "abandoning the remaining %d point(s) -- the client is missing for the "
-                    "whole grid, not for this variant: %s",
+                    "grid_runner: variant %d/%d name=%s aborted: eval_probe_unpatchable: %s",
                     i + 1,
                     len(grid),
                     variant.name,
-                    len(grid) - (i + 1),
-                    no_ws_error_summary,
+                    stderr,
                 )
-                # Recorded rather than dropped: a grid that just returns fewer points than it declared reads as a grid
-                # that was that size.
-                results.extend(
-                    VariantResult(
-                        name=rest.name,
-                        extra_server_args=rest.extra_server_args,
-                        extra_envs=dict(rest.extra_envs),
-                        status="skipped",
-                        error="AgentX preflight aborted the grid before this variant ran",
-                        error_class=AGENTX_PREFLIGHT_ERROR_CLASS,
-                        note=rest.note,
-                    )
-                    for rest in grid[i + 1 :]
+                _write_variant_abort_marker(
+                    slot,
+                    variant_name=variant.name,
+                    error_class="eval_probe_unpatchable",
+                    error_summary=stderr,
+                    extra_args=variant.extra_server_args,
                 )
-                break
-            if rc != 0 and not keep_going_on_failure:
-                break
-            continue
-        report_path = workspace / "benchmark_report.json"
-        # The report is written during shutdown and the reader runs the moment the subprocess is reaped, so the read is
-        # worth waiting on however the process exited: a non-zero exit can still be a round that served its whole
-        # protocol, and that verdict is taken from this one read.
-        report, measurement = await _settled_measurement(
-            workspace,
-            subprocess_started_unix=variant_started_unix,
-            settle_seconds=REPORT_SETTLE_SECONDS,
-        )
-        nonzero_kept_error: str | None = None
-        warnings = list(measurement.pop("nonfatal_warnings", []) or [])
-        for leak_src, _ in harvested:
-            warnings.append(f"harvested_leaked_artifact:{leak_src}")
-        if warmup_tput is not None:
-            warnings.append("run_grid_warmup_discarded_first")
-            warnings.append(f"warmup_round_tput:{float(warmup_tput):.1f}")
-
-        if not measurement.get("valid_measurement"):
-            if lifecycle_boot_only and rc == 0:
-                results.append(
+                raise _VariantAborted(
                     VariantResult(
                         name=variant.name,
                         extra_server_args=variant.extra_server_args,
                         extra_envs=dict(variant.extra_envs),
-                        status="succeeded",
-                        workspace=str(workspace),
-                        report_path=str(report_path) if report_path.exists() else None,
+                        status="failed",
                         returncode=rc,
-                        nonfatal_warnings=warnings,
-                        note="server_lifecycle_boot_only",
+                        runtime_sec=variant_runtime_sec,
+                        error=stderr,
+                        error_class="eval_probe_unpatchable",
+                        note=variant.note,
                     )
                 )
-                await _report_finished_variant(i)
-                continue
-            death_excerpt = server_log_death_excerpt(str(server_log))
-            if rc != 0:
-                error = death_excerpt or redact_secret_values((stderr or stdout)[-2000:])
-                # The bypass/scriptable path runs the customer body in a child whose stderr is redirected to
-                # benchmark_stderr.log, not the parent pipe — so `stderr`/`stdout` here are often empty and the real
-                # diagnostic (e.g. argparse "unrecognized arguments") is only on disk.
-                if not error.strip():
-                    error = redact_secret_values(_on_disk_stderr_tail(workspace, slot))
-                # Last resort: report.errors when the pipe and on-disk logs are all empty.
-                if not error.strip():
-                    error = redact_secret_values(_report_errors_summary(report))
-                invalid_class = "magpie_nonzero_invalid_measurement"
-            elif not report:
-                error = death_excerpt or "benchmark_report missing"
-                invalid_class = "benchmark_report_missing"
-            else:
-                error = death_excerpt or "benchmark_report missing valid throughput/completed requests"
-                invalid_class = "benchmark_report_invalid_metric"
-            log.warning(
-                "grid_runner: variant %d/%d name=%s aborted: %s (rc=%s): %s",
-                i + 1,
-                len(grid),
-                variant.name,
-                invalid_class,
-                rc,
-                error[:200],
-            )
-            _write_variant_abort_marker(
-                slot,
-                variant_name=variant.name,
-                error_class=invalid_class,
-                error_summary=error,
-                extra_args=variant.extra_server_args,
-            )
-            results.append(
-                VariantResult(
-                    name=variant.name,
-                    extra_server_args=variant.extra_server_args,
-                    extra_envs=dict(variant.extra_envs),
-                    status="failed",
-                    workspace=str(workspace),
-                    report_path=str(report_path) if report_path.exists() else None,
-                    raw_result_path=measurement.get("raw_result_path"),
-                    reported_success=measurement.get("reported_success"),
-                    returncode=rc,
-                    nonfatal_warnings=warnings,
-                    error=error,
-                    error_class=invalid_class,
-                    server_log_path=_existing_log_path(server_log),
-                    note=variant.note,
-                )
-            )
-            await _report_finished_variant(i)
-            if rc != 0 and not keep_going_on_failure:
-                break
-            continue
 
-        if rc != 0:
-            nonzero_error = redact_secret_values((stderr or stdout)[-2000:])
-            if served_complete_protocol(measurement):
-                # Every request the client recorded as requested was served, so
-                # the exit code came from something the round had already
-                # finished with. The cause stays on the result: a reader
-                # comparing this point to its neighbours is owed the reason it
-                # is not a clean zero.
-                warnings.append(f"nonzero_rc_after_complete_protocol:{rc}")
-                nonzero_kept_error = nonzero_error
-                log.warning(
-                    "grid_runner: variant %s exited %d after serving its whole protocol "
-                    "(%s of %s requests); keeping the measurement: %s",
-                    variant.name,
-                    rc,
-                    measurement.get("completed_requests"),
-                    measurement.get("requested_requests"),
-                    nonzero_error,
+            # Server-liveness watchdog fired: engine/worker bootstrap died but the parent hung.
+            if rc == SERVER_DEAD_RETURNCODE:
+                variant_runtime_sec = round(
+                    max(0.0, time.time() - variant_started_unix),
+                    2,
                 )
-            else:
+                sd_destination = select_run_workspace(slot, known_before=slot_workspaces_before) or slot
+                sd_harvested = harvest_leaked_artifacts(
+                    sd_destination,
+                    subprocess_started_unix=variant_started_unix,
+                )
+                log.warning(
+                    "grid_runner: variant %d/%d name=%s aborted: "
+                    "server_init_dead (engine/worker bootstrap failed; parent "
+                    "hung) after %.1fs",
+                    i + 1,
+                    len(grid),
+                    variant.name,
+                    variant_runtime_sec,
+                )
+                death_excerpt = server_log_death_excerpt(str(server_log)) or (
+                    "server engine/worker init failed; parent process hung and was reaped by the liveness watchdog"
+                )
                 _write_variant_abort_marker(
                     slot,
                     variant_name=variant.name,
-                    error_class="magpie_nonzero_after_valid_measurement",
-                    error_summary=nonzero_error,
+                    error_class="server_init_dead",
+                    error_summary=death_excerpt,
                     extra_args=variant.extra_server_args,
                 )
-                log.warning(
-                    "grid_runner: variant %s aborted: magpie_nonzero_after_valid_measurement "
-                    "(rc=%d, served %s of %s requests)",
-                    variant.name,
-                    rc,
-                    measurement.get("completed_requests"),
-                    measurement.get("requested_requests"),
+                raise _VariantAborted(
+                    VariantResult(
+                        name=variant.name,
+                        extra_server_args=variant.extra_server_args,
+                        extra_envs=dict(variant.extra_envs),
+                        status="failed",
+                        returncode=rc,
+                        runtime_sec=variant_runtime_sec,
+                        error=death_excerpt,
+                        error_class="server_init_dead",
+                        server_log_path=_existing_log_path(server_log),
+                        note=variant.note,
+                        nonfatal_warnings=[f"harvested_leaked_artifact:{src}" for src, _ in sd_harvested],
+                    )
                 )
-                results.append(
+
+            # Detokenizer-stall watchdog fired: the server came up healthy but then went silent (hung engine / wedged
+            # detokenizer).
+            if rc == DETOKENIZER_STALL_RETURNCODE:
+                variant_runtime_sec = round(
+                    max(0.0, time.time() - variant_started_unix),
+                    2,
+                )
+                ds_destination = select_run_workspace(slot, known_before=slot_workspaces_before) or slot
+                ds_harvested = harvest_leaked_artifacts(
+                    ds_destination,
+                    subprocess_started_unix=variant_started_unix,
+                )
+                log.warning(
+                    "grid_runner: variant %d/%d name=%s aborted: detokenizer_stall "
+                    "(server ready but log went silent) after %.1fs",
+                    i + 1,
+                    len(grid),
+                    variant.name,
+                    variant_runtime_sec,
+                )
+                _write_variant_abort_marker(
+                    slot,
+                    variant_name=variant.name,
+                    error_class="detokenizer_stall",
+                    error_summary=(
+                        "server reported ready but emitted no log output (hung "
+                        "engine / detokenizer stall); reaped by the "
+                        "detokenizer-stall watchdog"
+                    ),
+                    extra_args=variant.extra_server_args,
+                )
+                raise _VariantAborted(
+                    VariantResult(
+                        name=variant.name,
+                        extra_server_args=variant.extra_server_args,
+                        extra_envs=dict(variant.extra_envs),
+                        status="failed",
+                        returncode=rc,
+                        runtime_sec=variant_runtime_sec,
+                        error="detokenizer_stall: server ready but log went silent",
+                        error_class="detokenizer_stall",
+                        server_log_path=_existing_log_path(server_log),
+                        note=variant.note,
+                        nonfatal_warnings=[f"harvested_leaked_artifact:{src}" for src, _ in ds_harvested],
+                    )
+                )
+
+            stopped = stopped_by_the_run(rc)
+            if stopped is not None:
+                _abort_on_round_stop(
+                    stopped,
+                    _RoundAttempt(
+                        returncode=rc,
+                        started_unix=variant_started_unix,
+                        server_log=server_log,
+                        server_survivors=round_survivors,
+                    ),
+                    round_label="measured",
+                )
+
+            workspace = select_run_workspace(slot, known_before=slot_workspaces_before)
+            # Always-on artifact harvest so each slot keeps its server.log / gpu_metrics / profile relay for Robustness
+            # RCA.
+            harvest_destination = workspace if workspace is not None else slot
+            harvested = harvest_leaked_artifacts(
+                harvest_destination,
+                subprocess_started_unix=variant_started_unix,
+            )
+            if harvested:
+                log.info(
+                    "_grid_runner: variant=%s harvested %d leaked artifact(s): %s",
+                    variant.name,
+                    len(harvested),
+                    ", ".join(src.name for src, _ in harvested),
+                )
+            if workspace is None:
+                harvest_tags = [f"harvested_leaked_artifact:{src}" for src, _ in harvested]
+                agentx_preflight_abort = rc == AGENTX_PREFLIGHT_RETURNCODE
+                if agentx_preflight_abort:
+                    no_ws_error_class = AGENTX_PREFLIGHT_ERROR_CLASS
+                    no_ws_error_summary = (
+                        redact_secret_values((stderr or "").strip()[-2000:]) or "AgentX preflight aborted the round"
+                    )
+                else:
+                    no_ws_error_class = "no_benchmark_workspace"
+                    no_ws_error_summary = server_log_death_excerpt(str(server_log)) or (
+                        redact_secret_values((stderr or stdout)[-2000:])
+                        if rc != 0
+                        else "no benchmark_* workspace produced"
+                    )
+                log.warning(
+                    "grid_runner: variant %d/%d name=%s aborted: %s (rc=%s)",
+                    i + 1,
+                    len(grid),
+                    variant.name,
+                    no_ws_error_class,
+                    rc,
+                )
+                _write_variant_abort_marker(
+                    slot,
+                    variant_name=variant.name,
+                    error_class=no_ws_error_class,
+                    error_summary=no_ws_error_summary,
+                    extra_args=variant.extra_server_args,
+                )
+                no_ws_halt = _Halt.ON_FAILURE if rc != 0 else _Halt.CONTINUE
+                no_ws_never_started: str | None = None
+                if agentx_preflight_abort:
+                    # Environment, not variant.
+                    log.error(
+                        "grid_runner: variant %d/%d name=%s aborted on the AgentX preflight; "
+                        "abandoning the remaining %d point(s) -- the client is missing for the "
+                        "whole grid, not for this variant: %s",
+                        i + 1,
+                        len(grid),
+                        variant.name,
+                        len(grid) - (i + 1),
+                        no_ws_error_summary,
+                    )
+                    no_ws_halt = _Halt.STOP
+                    no_ws_never_started = "AgentX preflight aborted the grid before this variant ran"
+                raise _VariantAborted(
+                    VariantResult(
+                        name=variant.name,
+                        extra_server_args=variant.extra_server_args,
+                        extra_envs=dict(variant.extra_envs),
+                        status="failed",
+                        returncode=rc,
+                        error=no_ws_error_summary,
+                        error_class=no_ws_error_class,
+                        server_log_path=_existing_log_path(server_log),
+                        nonfatal_warnings=harvest_tags,
+                        note=variant.note,
+                    ),
+                    halt=no_ws_halt,
+                    never_started=no_ws_never_started,
+                )
+            report_path = workspace / "benchmark_report.json"
+            report, measurement = await _settled_measurement(
+                workspace,
+                config_path=cfg_path,
+                subprocess_started_unix=variant_started_unix,
+                settle_seconds=REPORT_SETTLE_SECONDS,
+            )
+            nonzero_kept_error: str | None = None
+            warnings = list(measurement.pop("nonfatal_warnings", []) or [])
+            for leak_src, _ in harvested:
+                warnings.append(f"harvested_leaked_artifact:{leak_src}")
+            if warmup_tput is not None:
+                warnings.append("run_grid_warmup_discarded_first")
+                warnings.append(f"warmup_round_tput:{float(warmup_tput):.1f}")
+
+            if not measurement.get("valid_measurement"):
+                if lifecycle_boot_only and rc == 0:
+                    results.append(
+                        VariantResult(
+                            name=variant.name,
+                            extra_server_args=variant.extra_server_args,
+                            extra_envs=dict(variant.extra_envs),
+                            status="succeeded",
+                            workspace=str(workspace),
+                            report_path=str(report_path) if report_path.exists() else None,
+                            returncode=rc,
+                            nonfatal_warnings=warnings,
+                            note="server_lifecycle_boot_only",
+                        )
+                    )
+                    await _report_finished_variant(i)
+                    continue
+                death_excerpt = server_log_death_excerpt(str(server_log))
+                if rc != 0:
+                    error = death_excerpt or redact_secret_values((stderr or stdout)[-2000:])
+                    # The bypass/scriptable path runs the customer body in a child whose stderr is redirected to
+                    # benchmark_stderr.log, not the parent pipe — so `stderr`/`stdout` here are often empty and the real
+                    # diagnostic (e.g. argparse "unrecognized arguments") is only on disk.
+                    if not error.strip():
+                        error = redact_secret_values(_on_disk_stderr_tail(workspace, slot))
+                    # Last resort: report.errors when the pipe and on-disk logs are all empty.
+                    if not error.strip():
+                        error = redact_secret_values(_report_errors_summary(report))
+                    invalid_class = "magpie_nonzero_invalid_measurement"
+                elif not report:
+                    error = death_excerpt or "benchmark_report missing"
+                    invalid_class = "benchmark_report_missing"
+                else:
+                    error = death_excerpt or "benchmark_report missing valid throughput/completed requests"
+                    invalid_class = "benchmark_report_invalid_metric"
+                log.warning(
+                    "grid_runner: variant %d/%d name=%s aborted: %s (rc=%s): %s",
+                    i + 1,
+                    len(grid),
+                    variant.name,
+                    invalid_class,
+                    rc,
+                    error[:200],
+                )
+                _write_variant_abort_marker(
+                    slot,
+                    variant_name=variant.name,
+                    error_class=invalid_class,
+                    error_summary=error,
+                    extra_args=variant.extra_server_args,
+                )
+                raise _VariantAborted(
                     VariantResult(
                         name=variant.name,
                         extra_server_args=variant.extra_server_args,
@@ -1965,57 +1748,120 @@ async def run_grid(
                         reported_success=measurement.get("reported_success"),
                         returncode=rc,
                         nonfatal_warnings=warnings,
-                        error=nonzero_error,
-                        error_class="magpie_nonzero_after_valid_measurement",
-                        server_log_path=None,
+                        error=error,
+                        error_class=invalid_class,
+                        server_log_path=_existing_log_path(server_log),
                         note=variant.note,
-                    )
+                    ),
+                    halt=_Halt.ON_FAILURE if rc != 0 else _Halt.CONTINUE,
                 )
-                await _report_finished_variant(i)
-                if not keep_going_on_failure:
-                    break
-                continue
 
-        results.append(
-            VariantResult(
-                name=variant.name,
-                extra_server_args=variant.extra_server_args,
-                extra_envs=dict(variant.extra_envs),
-                status="succeeded",
-                output_throughput=measurement.get("output_throughput"),
-                request_throughput=measurement.get("request_throughput"),
-                total_token_throughput=measurement.get("total_token_throughput"),
-                completed_requests=measurement.get("completed_requests"),
-                duration_seconds=measurement.get("duration_seconds"),
-                ttft_mean_ms=measurement.get("ttft_mean_ms"),
-                e2el_mean_ms=measurement.get("e2el_mean_ms"),
-                tpot_mean_ms=measurement.get("tpot_mean_ms"),
-                input_throughput=measurement.get("input_throughput"),
-                tpot_p90_ms=measurement.get("tpot_p90_ms"),
-                intvty_p90=measurement.get("e2e_norm_intvty_p90"),
-                intvty_p50=measurement.get("e2e_norm_intvty_p50"),
-                request_error_rate=measurement.get("request_error_rate"),
-                workspace=str(workspace),
-                report_path=str(report_path) if report_path.exists() else None,
-                raw_result_path=measurement.get("raw_result_path"),
-                reported_success=measurement.get("reported_success"),
-                returncode=rc,
-                nonfatal_warnings=warnings,
-                error=nonzero_kept_error,
-                server_log_path=None,
-                note=variant.note,
-                runtime_sec=round(
-                    max(0.0, time.time() - variant_started_unix),
-                    2,
-                ),
+            if rc != 0:
+                nonzero_error = redact_secret_values((stderr or stdout)[-2000:])
+                if served_complete_protocol(measurement):
+                    # Every request the client recorded as requested was served, so
+                    # the exit code came from something the round had already
+                    # finished with. The cause stays on the result: a reader
+                    # comparing this point to its neighbours is owed the reason it
+                    # is not a clean zero.
+                    warnings.append(f"nonzero_rc_after_complete_protocol:{rc}")
+                    nonzero_kept_error = nonzero_error
+                    log.warning(
+                        "grid_runner: variant %s exited %d after serving its whole protocol "
+                        "(%s of %s requests); keeping the measurement: %s",
+                        variant.name,
+                        rc,
+                        measurement.get("completed_requests"),
+                        measurement.get("requested_requests"),
+                        nonzero_error,
+                    )
+                else:
+                    _write_variant_abort_marker(
+                        slot,
+                        variant_name=variant.name,
+                        error_class="magpie_nonzero_after_valid_measurement",
+                        error_summary=nonzero_error,
+                        extra_args=variant.extra_server_args,
+                    )
+                    log.warning(
+                        "grid_runner: variant %s aborted: magpie_nonzero_after_valid_measurement "
+                        "(rc=%d, served %s of %s requests)",
+                        variant.name,
+                        rc,
+                        measurement.get("completed_requests"),
+                        measurement.get("requested_requests"),
+                    )
+                    raise _VariantAborted(
+                        VariantResult(
+                            name=variant.name,
+                            extra_server_args=variant.extra_server_args,
+                            extra_envs=dict(variant.extra_envs),
+                            status="failed",
+                            workspace=str(workspace),
+                            report_path=str(report_path) if report_path.exists() else None,
+                            raw_result_path=measurement.get("raw_result_path"),
+                            reported_success=measurement.get("reported_success"),
+                            returncode=rc,
+                            nonfatal_warnings=warnings,
+                            error=nonzero_error,
+                            error_class="magpie_nonzero_after_valid_measurement",
+                            server_log_path=None,
+                            note=variant.note,
+                        )
+                    )
+
+            results.append(
+                VariantResult(
+                    name=variant.name,
+                    extra_server_args=variant.extra_server_args,
+                    extra_envs=dict(variant.extra_envs),
+                    status="succeeded",
+                    output_throughput=measurement.get("output_throughput"),
+                    request_throughput=measurement.get("request_throughput"),
+                    total_token_throughput=measurement.get("total_token_throughput"),
+                    completed_requests=measurement.get("completed_requests"),
+                    duration_seconds=measurement.get("duration_seconds"),
+                    ttft_mean_ms=measurement.get("ttft_mean_ms"),
+                    **constraint_fields(measurement),
+                    tpot_mean_ms=measurement.get("tpot_mean_ms"),
+                    input_throughput=measurement.get("input_throughput"),
+                    tpot_p90_ms=measurement.get("tpot_p90_ms"),
+                    intvty_p90=measurement.get("e2e_norm_intvty_p90"),
+                    intvty_p50=measurement.get("e2e_norm_intvty_p50"),
+                    request_error_rate=measurement.get("request_error_rate"),
+                    workspace=str(workspace),
+                    report_path=str(report_path) if report_path.exists() else None,
+                    raw_result_path=measurement.get("raw_result_path"),
+                    reported_success=measurement.get("reported_success"),
+                    returncode=rc,
+                    nonfatal_warnings=warnings,
+                    error=nonzero_kept_error,
+                    server_log_path=None,
+                    note=variant.note,
+                    runtime_sec=round(
+                        max(0.0, time.time() - variant_started_unix),
+                        2,
+                    ),
+                )
             )
-        )
-        log.info(
-            "grid_runner: variant %s tput=%.1f tok/s",
-            variant.name,
-            results[-1].output_throughput or 0.0,
-        )
-        await _report_finished_variant(i)
+            log.info(
+                "grid_runner: variant %s tput=%.1f tok/s",
+                variant.name,
+                results[-1].output_throughput or 0.0,
+            )
+            await _report_finished_variant(i)
+        except _VariantAborted as abort:
+            results.append(abort.result)
+            await _report_finished_variant(i)
+            if abort.halt is _Halt.STOP:
+                # Recorded rather than dropped: a grid that just returns fewer points than it declared reads as a
+                # grid that was that size.
+                results.extend(
+                    _not_run_skip_result(rest, error=abort.never_started, error_class=abort.result.error_class)
+                    for rest in grid[i + 1 :]
+                )
+            if abort.halt is _Halt.STOP or (abort.halt is _Halt.ON_FAILURE and not keep_going_on_failure):
+                break
     await asyncio.to_thread(
         _attach_grid_launch_evidence,
         results,
@@ -2027,26 +1873,31 @@ async def run_grid(
     return results
 
 
-def _teardown_variant_server(slot: Path, lifecycle: dict[str, Any]) -> None:
-    """Stop the server this variant booted for its own rounds."""
-    from ._server_lifecycle import teardown_lifecycle_server
+def _teardown_variant_server(slot: Path, lifecycle: dict[str, Any] | None) -> list[int]:
+    """Stop every server this variant booted for its own rounds; return the pids still alive after SIGKILL.
 
-    teardown_lifecycle_server(
-        pid_dir=slot,
-        framework=str(lifecycle.get("framework") or ""),
-        port=int(lifecycle.get("port") or 0),
-    )
+    ``lifecycle`` names the persistent server the rounds shared, ``None`` when they shared none.
+    """
+    from ._server_lifecycle import stop_agentx_servers, teardown_lifecycle_server
+
+    if lifecycle is not None:
+        teardown_lifecycle_server(
+            pid_dir=slot,
+            framework=str(lifecycle.get("framework") or ""),
+            port=int(lifecycle.get("port") or 0),
+        )
+    return stop_agentx_servers(slot)
 
 
-def _not_run_skip_result(variant: GridVariant, stopped: StoppedByTheRun) -> VariantResult:
+def _not_run_skip_result(variant: GridVariant, *, error: str | None, error_class: str | None) -> VariantResult:
     """Build the ``skipped`` result for a variant the run never got to."""
     return VariantResult(
         name=variant.name,
         extra_server_args=variant.extra_server_args,
         extra_envs=dict(variant.extra_envs),
         status="skipped",
-        error=stopped.never_started,
-        error_class=stopped.error_class,
+        error=error,
+        error_class=error_class,
         note=variant.note,
     )
 
@@ -2096,11 +1947,12 @@ def _attach_grid_launch_evidence(
     for idx, result in enumerate(results):
         if idx >= len(grid):
             break
-        # A skipped variant never launched a measurement.
-        if result.status == "skipped" or result.error_class in {
+        if result.status == "skipped" or result.error_class in {  # skipped or refused: never launched a measurement
             "capability_unsupported",
             "yaml_build_error",
             "warmup_yaml_build_error",
+            SPECULATIVE_DECODING_PINNED,
+            ServerArgvInvalidError.error_class,
         }:
             continue
         slot = output_root / f"variant_{idx:02d}_{_safe(grid[idx].name)}"
@@ -2111,13 +1963,19 @@ def _attach_grid_launch_evidence(
         if not actual_log and ready_server_log:
             actual_log = _existing_log_path(Path(ready_server_log))
         result.server_log_path = actual_log
-        evidence = build_launch_evidence(
-            config_path=config_path,
-            actual_server_log=actual_log,
-            framework=os.environ.get("FRAMEWORK", ""),
-            slot=slot,
-            caller_reused_ready_server=caller_reused_ready_server,
-        )
+        from hyperloom.inference_optimizer.agentx.report import agentx_measurement, native_launch_evidence
+
+        if result.benchmark_backend == "magpie_agentx" and workspace is not None:
+            measurement = agentx_measurement(_parse_report(workspace) or {})
+            evidence = native_launch_evidence(measurement, config_path, actual_server_log=actual_log)
+        else:
+            evidence = build_launch_evidence(
+                config_path=config_path,
+                actual_server_log=actual_log,
+                framework=os.environ.get("FRAMEWORK", ""),
+                slot=slot,
+                caller_reused_ready_server=caller_reused_ready_server,
+            )
         result.launch_evidence = evidence
         result.launch_evidence_path = persist_launch_evidence(evidence, slot=slot)
         declared_env = evidence["requested_server_env"].keys() - set(VLLM_SOURCE_ROOT_ENVS)
@@ -2193,23 +2051,16 @@ def _on_disk_stderr_tail(*dirs: Path, limit: int = 2000) -> str:
 
 
 __all__ = [
-    "DEFAULT_SGLANG_WATCHDOG_TIMEOUT_SEC",
     "GridVariant",
     "ORCHESTRATOR_CANCELLED_CLASS",
     "SESSION_TIME_EXHAUSTED_CLASS",
     "StoppedByTheRun",
-    "SGLANG_WATCHDOG_TIMEOUT_ENV",
     "VariantResult",
     "apply_multi_node_invalid_variants",
     "apply_aiter_moe_pin_filter",
     "apply_runtime_benchmark_overrides",
     "reorder_grid_for_multi_node",
-    "inject_sglang_attention_backend",
-    "inject_sglang_context_length",
-    "inject_sglang_watchdog_timeout",
     "merge_server_args",
-    "remove_server_args",
-    "resolve_sglang_watchdog_timeout",
     "run_grid",
     "sanitize_result_dir",
     "sanitize_script_name",
@@ -2217,42 +2068,12 @@ __all__ = [
     "session_grid_bounds",
     "stopped_by_the_run",
     # Re-exported from the sibling modules to keep the namespace intact.
-    "_resolve_magpie_python",
     "_resolve_probe_python",
-    "coerce_extra_envs",
-    "compact_json_server_args",
-    "_SPACE_VALUE_FLAGS",
-    "_MULTI_VALUE_FLAGS",
-    "_VLLM_SINGLE_VALUE_FLAGS",
-    "dedup_vllm_server_args",
-    "_SGLANG_WATCHDOG_FLAG",
-    "_SGLANG_WATCHDOG_RE",
-    "DEFAULT_SGLANG_CONTEXT_HEADROOM_TOKENS",
-    "DEFAULT_SGLANG_CONTEXT_FLOOR_TOKENS",
-    "SGLANG_CONTEXT_HEADROOM_ENV",
-    "SGLANG_CONTEXT_FLOOR_ENV",
-    "_SGLANG_CONTEXT_LENGTH_FLAG",
-    "_SGLANG_CONTEXT_LENGTH_RE",
-    "_SGLANG_ATTN_BACKEND_FLAG",
-    "_SGLANG_ATTN_BACKEND_RE",
-    "_SGLANG_DUAL_CHUNK_BACKEND",
-    "_resolve_nonneg_int_env",
-    "resolve_sglang_context_cap",
-    "_resolve_dual_chunk_backend",
-    "_SGLANG_MOE_RUNNER_BACKEND_FLAG",
     "_SGLANG_MOE_RUNNER_BACKEND_RE",
     "moe_runner_requires_aiter",
     "resolve_skip_spec",
-    "_parse_skip_spec",
-    "_RE_CUDA_GRAPH_MAX_BS",
     "_MN_PARAMS_PRIORITY",
     "_MN_BACKENDS_PRIORITY",
-    "_mn_priority_index",
-    "_COMPATIBILITY_FLAG_RULES",
-    "_XDIT_ENV_BLACKLIST",
-    "_XDIT_ENV_COMBO_BLACKLIST",
-    "xdit_blacklist_reason",
-    "_detect_model_class",
     "apply_compatibility_filter",
     "apply_user_skip_list",
 ]

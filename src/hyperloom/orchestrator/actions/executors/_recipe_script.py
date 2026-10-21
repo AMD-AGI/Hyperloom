@@ -25,9 +25,9 @@ def resolve_launch_server_script(bench: Mapping[str, Any]) -> str:
     """Path of the script that boots the server, or ``""`` when unresolvable.
 
     ``benchmark_script`` names a server launcher on every non-AgentX run. The
-    AgentX switch pins the aiperf client there instead, so for that one recipe
+    MLPerf switch pins its client there instead, so for that one recipe
     shape the launcher is the builtin the client delegates to. Resolution
-    mirrors ``aiperf_client.sh``: the same ``AGENTX_SERVER_SCRIPT`` override,
+    mirrors ``mlperf_agentic_client.sh``: the same ``AGENTX_SERVER_SCRIPT`` override,
     the same ``{framework}_{gpu}.sh`` fallback, the same ``<checkout>/benchmarks/``
     directory and no recursive search. Recipe-recorded values beat the ambient
     env because the recipe is the record of what actually ran.

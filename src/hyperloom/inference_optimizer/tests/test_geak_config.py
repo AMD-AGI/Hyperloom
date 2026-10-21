@@ -9,7 +9,6 @@ import pytest
 
 from hyperloom.orchestrator.kernel.geak_config import (
     _accepted_config_as_variant,
-    _geak_result_has_material,
     _geak_sweep_measured_tput,
     _split_env_and_flags,
 )
@@ -64,13 +63,11 @@ def test_accepted_config_uses_published_env_map_for_revalidation() -> None:
     assert variant.extra_server_args == config["flags"]
     assert variant.extra_envs == config["env_map"]
     assert variant.extra_envs["RUN_EVAL"] == "true"
-    assert not _geak_result_has_material({"accepted_config": config}, prev_best_flags=flags, prev_best_envs=envs)
 
 
 def test_empty_accepted_env_map_does_not_restore_raw_assignments() -> None:
     config = {"env": "RUN_EVAL=false SGLANG_USE_AITER=1 --disable-cuda-graph", "env_map": {}}
     assert _accepted_config_as_variant(config) == ("--disable-cuda-graph", {})
-    assert _geak_result_has_material({"accepted_config": config}, prev_best_envs={"RUN_EVAL": "true"})
 
 
 @pytest.mark.parametrize("mapped", [False, True])
@@ -88,29 +85,6 @@ def test_legacy_flags_and_discarded_text_are_reported(caplog, mapped, unparsed):
     assert "retaining them alongside accepted_config.flags" in caplog.text
     assert ("reports discarded source text" in caplog.text) == unparsed
     assert "using only validated env_map" not in caplog.text
-
-
-@pytest.mark.parametrize("artifact", ["accepted_kernels", "accepted_heads", "final_overlay", "final_patch"])
-def test_invalid_config_does_not_hide_artifact_materiality(artifact):
-    assert _geak_result_has_material({artifact: ["product"], "accepted_config": {"env_map": None}})
-
-
-def test_invalid_config_is_not_reported_as_no_material():
-    with pytest.raises(ValueError, match="env_map"):
-        _geak_result_has_material({"accepted_config": {"env_map": None}})
-
-
-@pytest.mark.parametrize("removals", [None, [], ["--disable-radix-cache"]])
-def test_complete_config_materiality_inherits_omitted_removals(removals):
-    config = {"flags": "--mem-fraction-static 0.95", "env_map": {}, "args_mode": "replace"}
-    prior = {"args_mode": "replace", "remove_args": ["--disable-radix-cache"]}
-    if removals is not None:
-        config["remove_args"] = removals
-    assert _geak_result_has_material(
-        {"accepted_config": config},
-        prev_best_flags=config["flags"],
-        prev_best_controls=prior,
-    ) == (removals == [])
 
 
 def test_accepted_env_map_preserves_values_and_filters_loader_keys() -> None:
@@ -155,6 +129,14 @@ def test_geak_sweep_measured_tput_prefers_the_promotion_measurement() -> None:
     assert _geak_sweep_measured_tput(res) == 150.0
 
 
+def test_geak_sweep_measured_tput_reads_the_axis_neutral_field_first() -> None:
+    """Off the output axis the replay leaves ``output_throughput`` unset; the neutral field still reads."""
+    res = {"promotion_measurement": {"measured_value": 151.85, "metric_basis": "e2e_norm_intvty_p50"}}
+    assert _geak_sweep_measured_tput(res) == 151.85
+    both = {"promotion_measurement": {"measured_value": 150.0, "output_throughput": 999.0}}
+    assert _geak_sweep_measured_tput(both) == 150.0
+
+
 def test_geak_sweep_measured_tput_none_when_not_dict() -> None:
     assert _geak_sweep_measured_tput(None) is None
     assert _geak_sweep_measured_tput([]) is None  # type: ignore[arg-type]
@@ -166,3 +148,4 @@ def test_geak_sweep_measured_tput_none_when_no_positive_throughput() -> None:
         "points": [{"status": "succeeded", "output_throughput": -1}],
     }
     assert _geak_sweep_measured_tput(res) is None
+    assert _geak_sweep_measured_tput({"promotion_measurement": {"measured_value": 0.0}}) is None

@@ -21,7 +21,12 @@ from typing import Any
 import pytest
 
 from hyperloom.common.perf_metric import GRADED_AXIS_KEYS, GRADED_INTVTY, GRADED_OUTPUT
-from hyperloom.inference_optimizer.breakdown.collectors.v6 import collect_v6_metadata, collect_v6_outcome
+from hyperloom.inference_optimizer.breakdown.collectors.v6 import (
+    MetadataSources,
+    OutcomeSources,
+    collect_v6_metadata,
+    collect_v6_outcome,
+)
 from hyperloom.inference_optimizer.breakdown.recorder import assemble_parts, recorder_for, snapshot_metadata
 from hyperloom.inference_optimizer.breakdown.recorder import stack_event
 from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import (
@@ -174,14 +179,16 @@ def test_the_grading_block_reaches_the_exported_metadata(tmp_path):
     snapshot_metadata(rec, _state(benchmark_mode="agentx", grading={"objective": GRADED_INTVTY, "noise_pct": 3.5}))
 
     metadata = collect_v6_metadata(
+        MetadataSources(
+            session={"session_id": "s-1"},
+            workload={"framework_name": "sglang"},
+            model_info={},
+            langfuse={"enabled": False},
+            state={},
+            recorded=assemble_parts(tmp_path)[METADATA_SECTION],
+        ),
         exported_at_utc="2026-09-01T02:00:05+00:00",
-        session={"session_id": "s-1"},
-        workload={"framework_name": "sglang"},
-        model_info={},
-        langfuse={"enabled": False},
-        state={},
         warnings=[],
-        recorded=assemble_parts(tmp_path)[METADATA_SECTION],
     )
     assert metadata["grading"] == {
         "benchmark_mode": "agentx",
@@ -230,10 +237,12 @@ def _outcome(session_dir, *, close: dict[str, Any] | None = None) -> dict[str, A
     """The assembled ``outcome`` block over the recorded timeline."""
     stack_event.finish()
     return collect_v6_outcome(
-        session={"stop_reason": "target_reached"},
-        close=close or {},
-        state={},
-        timeline=read_timeline_events(session_dir),
+        OutcomeSources(
+            session={"stop_reason": "target_reached"},
+            close=close or {},
+            state={},
+            timeline=read_timeline_events(session_dir),
+        )
     )
 
 
@@ -311,7 +320,7 @@ def test_an_unmeasured_axis_is_an_explicit_null_rather_than_an_absent_key(tmp_pa
 
 
 def test_a_session_with_no_ledger_publishes_no_axis(tmp_path):
-    outcome = collect_v6_outcome(session={"stop_reason": "signal"}, close={}, state={}, timeline=[])
+    outcome = collect_v6_outcome(OutcomeSources(session={"stop_reason": "signal"}, close={}, state={}, timeline=[]))
 
     assert outcome["validation"]["graded_on"] is None
     assert all(value is None for value in outcome["validation"]["perf"].values())
@@ -363,7 +372,7 @@ def test_the_baseline_publishes_the_axes_the_session_was_anchored_on(tmp_path):
     baseline = _outcome(tmp_path)["baseline"]
     assert baseline["perf"] == AGENTX_AXES
     # The output axis keeps its own meaning beside them: this addition takes nothing away.
-    assert baseline["throughput_tok_s_per_gpu"] == 183.0
+    assert baseline["output_throughput"] == 183.0
 
 
 def test_a_synthetic_baseline_publishes_nulls_throughout(tmp_path):

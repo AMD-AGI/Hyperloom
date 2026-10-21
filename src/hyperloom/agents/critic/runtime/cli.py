@@ -16,7 +16,7 @@ from .dead_letter import DeadLetter
 from .decision_reviewer import DecisionReviewer
 from .errors import RuntimeAdapterError
 from .in_memory_kb_client import InMemoryKBClient
-from .kb_client import HTTPKBClient, KBClient
+from .kb_client import HTTPKBClient, KBClient, KBListQuery
 from .kb_writer import KBWriter
 from .session_memory import SessionMemory
 
@@ -82,7 +82,7 @@ def _replay_dispatch(client: KBClient, endpoint: str, payload: dict[str, Any]) -
     elif endpoint == "edges/add":
         client.add_edges(payload.get("edges") or [])
     elif endpoint == "list":
-        client.list(**payload)
+        client.list(KBListQuery(**payload))
     else:
         raise RuntimeAdapterError(f"replay-dead-letter: unknown endpoint {endpoint!r}")
 

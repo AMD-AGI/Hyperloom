@@ -18,9 +18,10 @@ from hyperloom.orchestrator.actions.cancel_channel import CancelScope, use_cance
 from hyperloom.orchestrator.actions.executors import _setup_replay
 from hyperloom.orchestrator.actions.executors._setup_replay import (
     SETUP_CMD_MAX,
+    refused_setup_commands,
     resolve_setup_commands,
+    SetupLedger,
     run_setup_commands,
-    setup_report_fields,
 )
 from hyperloom.orchestrator.enablement.recipe.setup_ledger import command_digest
 
@@ -29,16 +30,12 @@ def _proposed(*commands: str) -> list[tuple[str, str]]:
     return [(cmd, "proposed") for cmd in commands]
 
 
-def _run(commands: list[tuple[str, str]], tmp_path: Path, **overrides: Any) -> dict[str, Any]:
-    kwargs: dict[str, Any] = {
-        "cwd": tmp_path,
-        "log_dir": tmp_path / "logs",
-        "round_task_id": "r1",
-        "seq_start": 0,
-        "on_execution": lambda _row: None,
-    }
-    kwargs.update(overrides)
-    return run_setup_commands(commands, **kwargs)
+def _run(commands: list[tuple[str, str]], tmp_path: Path, **overrides: Any) -> list[str]:
+    kwargs: dict[str, Any] = {"cwd": tmp_path, "log_dir": tmp_path / "logs"}
+    ledger: dict[str, Any] = {"round_task_id": "r1", "seq_start": 0, "on_execution": lambda _row: None}
+    for key, value in overrides.items():
+        (ledger if key in ledger else kwargs)[key] = value
+    return run_setup_commands(commands, ledger=SetupLedger(**ledger), **kwargs)
 
 
 def _succeed(monkeypatch, ran: list[str] | None = None) -> None:
@@ -48,10 +45,6 @@ def _succeed(monkeypatch, ran: list[str] | None = None) -> None:
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
 
     monkeypatch.setattr(subprocess, "run", _fake_run)
-
-
-def _forbid_execution(monkeypatch) -> None:
-    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: pytest.fail("a rejected command was executed"))
 
 
 def test_resolve_dedups_base_then_done_and_keeps_the_inherited_source():
@@ -79,17 +72,15 @@ def test_resolve_ignores_a_source_that_is_not_a_list():
     assert got == [("pip install b", "proposed")]
 
 
-def test_run_setup_commands_skips_non_allowlisted(tmp_path: Path, monkeypatch):
-    """A non-allowlisted command is skipped (never executed); allowlisted runs."""
-    ran: list[str] = []
-    _succeed(monkeypatch, ran)
+def test_refusal_names_every_non_install_in_replay_order():
+    """The whole list is judged before anything runs, so a caller can refuse the round as a whole."""
+    got = refused_setup_commands(_proposed("pip install -U transformers", "rm -rf /tmp/x", "ln -sf a b"))
 
-    out = _run(_proposed("pip install -U transformers", "rm -rf /tmp/x"), tmp_path)
+    assert got == ["rm -rf /tmp/x", "ln -sf a b"]
 
-    assert out["applied"] == ["pip install -U transformers"]
-    assert out["skipped"] == ["rm -rf /tmp/x"]
-    assert ran == ["pip install -U transformers"]
-    assert (tmp_path / "logs" / "enablement_setup.log").exists()
+
+def test_refusal_is_empty_when_every_command_installs():
+    assert refused_setup_commands(_proposed("pip install a", "/opt/venv/bin/uv pip install b")) == []
 
 
 def test_run_setup_commands_stops_between_commands_on_cancel(tmp_path: Path, monkeypatch):
@@ -106,15 +97,14 @@ def test_run_setup_commands_stops_between_commands_on_cancel(tmp_path: Path, mon
     with use_cancel_scope(scope):
         out = _run(_proposed("pip install -U transformers", "pip install -U torch"), tmp_path)
     assert ran == ["pip install -U transformers"]
-    assert out["applied"] == ["pip install -U transformers"]
-    assert out["failed"] == []
+    assert out == ["pip install -U transformers"]
 
 
 def test_run_setup_commands_records_one_row_per_attempted_command(tmp_path: Path, monkeypatch):
     """Occurrence identity needs every attempt, not just the ones that worked.
 
     ``setup_commands`` dedupes to one string per command, so the ledger is the
-    only place a failed or skipped execution is recorded at all.
+    only place a failed execution is recorded at all.
     """
     outcomes = {"pip install good": 0, "pip install bad": 1}
     monkeypatch.setattr(
@@ -127,52 +117,38 @@ def test_run_setup_commands_records_one_row_per_attempted_command(tmp_path: Path
     persisted: list[dict[str, Any]] = []
 
     out = _run(
-        [("pip install good", "inherited"), ("pip install bad", "proposed"), ("rm -rf /tmp/x", "proposed")],
+        [("pip install good", "inherited"), ("pip install bad", "proposed")],
         tmp_path,
         seq_start=4,
         on_execution=persisted.append,
     )
 
-    rows = out["executions"]
-    assert persisted == rows
-    assert [row["outcome"] for row in rows] == ["applied", "failed", "skipped"]
-    assert [row["seq"] for row in rows] == [5, 6, 7]
-    assert [row["source"] for row in rows] == ["inherited", "proposed", "proposed"]
-    assert {row["round_task_id"] for row in rows} == {"r1"}
+    assert out == ["pip install good"]
+    assert [row["outcome"] for row in persisted] == ["applied", "failed"]
+    assert [row["seq"] for row in persisted] == [5, 6]
+    assert [row["source"] for row in persisted] == ["inherited", "proposed"]
+    assert {row["round_task_id"] for row in persisted} == {"r1"}
 
 
-def test_a_rejected_command_never_carries_its_credentialed_url(tmp_path: Path, monkeypatch, caplog):
-    _forbid_execution(monkeypatch)
+def test_a_refused_command_never_carries_its_credentialed_url():
+    got = refused_setup_commands(_proposed("pip install --index-url https://alice:pass@host/simple foo && x"))
 
-    with caplog.at_level(logging.WARNING, logger=_setup_replay.__name__):
-        out = _run(_proposed("pip install --index-url https://alice:pass@host/simple foo && x"), tmp_path)
-    reason = setup_report_fields("boot failed", out)["reason"]
-
-    assert out["skipped"] == ["pip install --index-url <index_url> foo && x"]
-    for surface in (" ".join(out["skipped"]), reason, caplog.text):
-        assert "alice" not in surface
-        assert "host/simple" not in surface
+    assert got == ["pip install --index-url <index_url> foo && x"]
 
 
-def test_the_skipped_list_is_stored_sanitised_and_bounded(tmp_path, monkeypatch):
-    """The list itself must be safe, not just the sentence built from it.
+def test_the_refusal_list_is_sanitised_and_bounded():
+    """The list travels into the result payload, the journal and the next round's mandate.
 
-    ``setup_commands_skipped`` is copied verbatim into every result payload and
-    from there into the journal, the report and the KB, and is read back into the
-    next round's mandate -- so a credential in one must not survive, and a full
-    list of long ones must not bury the reason it is appended to.
+    A credential in one must not survive, and a full list of long ones must not
+    bury the sentence it is rendered into.
     """
-    _forbid_execution(monkeypatch)
     commands = [f"rm -rf /tmp/{i}/ghp_notarealtoken " + "y" * 900 for i in range(SETUP_CMD_MAX)]
 
-    out = _run(_proposed(*commands), tmp_path)
-    reason = setup_report_fields("boot failed", out)["reason"]
+    got = refused_setup_commands(_proposed(*commands))
 
-    assert "ghp_notarealtoken" not in " ".join(out["skipped"]), "a credential was stored verbatim"
-    assert all(len(c) <= 200 for c in out["skipped"]), "an unbounded command was stored"
-    assert "ghp_notarealtoken" not in reason
-    assert reason.startswith("boot failed")
-    assert len(reason) < 4000, f"one rejection list grew to {len(reason)} chars"
+    assert len(got) == SETUP_CMD_MAX
+    assert "ghp_notarealtoken" not in " ".join(got), "a credential was carried verbatim"
+    assert all(len(c) <= 200 for c in got), "an unbounded command was carried"
 
 
 def test_applied_commands_stay_runnable_but_their_ledger_row_is_redacted(tmp_path, monkeypatch):
@@ -186,11 +162,12 @@ def test_applied_commands_stay_runnable_but_their_ledger_row_is_redacted(tmp_pat
     """
     cmd = "pip install --extra-index-url http://pkgs.internal/simple foo ghp_notarealtoken"
     _succeed(monkeypatch)
+    persisted: list[dict[str, Any]] = []
 
-    out = _run(_proposed(cmd), tmp_path)
+    out = _run(_proposed(cmd), tmp_path, on_execution=persisted.append)
 
-    assert out["applied"] == [cmd]
-    assert "ghp_notarealtoken" not in out["executions"][0]["cmd_sanitized"]
+    assert out == [cmd]
+    assert "ghp_notarealtoken" not in persisted[0]["cmd_sanitized"]
 
 
 def test_a_log_write_failure_is_reported_and_does_not_fail_the_install(tmp_path, monkeypatch, caplog):
@@ -201,32 +178,8 @@ def test_a_log_write_failure_is_reported_and_does_not_fail_the_install(tmp_path,
     with caplog.at_level(logging.WARNING, logger=_setup_replay.__name__):
         out = _run(_proposed("pip install foo"), tmp_path, log_dir=blocked / "logs")
 
-    assert out["applied"] == ["pip install foo"]
+    assert out == ["pip install foo"]
     assert "enablement setup output not written" in caplog.text
-
-
-def test_rejections_are_named_in_the_round_reason():
-    """A rejected command must reach the conclusion, not just a log line.
-
-    It used to be a lone ``log.warning``. Downstream saw the round's outcome
-    with no link to the cause, so the same proposal was re-authored and
-    re-dropped until the budget ran out -- the fix was never the problem, and
-    nothing in the result said so.
-    """
-    fields = setup_report_fields(
-        "authored patch produced no gain",
-        {"applied": ["pip install a"], "skipped": ["/opt/x/uv venv /opt/v", "ln -sf a b"], "failed": []},
-    )
-    assert fields["reason"].startswith("authored patch produced no gain (2 setup command(s) were REJECTED")
-    assert "ln -sf a b" in fields["reason"]
-    assert fields["setup_commands_applied"] == ["pip install a"]
-    assert fields["setup_commands_skipped"] == ["/opt/x/uv venv /opt/v", "ln -sf a b"]
-
-
-def test_reason_is_untouched_when_nothing_was_rejected():
-    base = "authored patch produced no gain"
-    fields = setup_report_fields(base, {"applied": ["pip install x"], "skipped": [], "failed": []})
-    assert fields == {"reason": base, "setup_commands_applied": ["pip install x"], "setup_commands_skipped": []}
 
 
 @pytest.mark.asyncio
@@ -257,9 +210,7 @@ async def test_a_completed_setup_row_is_durable_even_when_the_await_is_cancelled
             _proposed("pip install one", "pip install two"),
             cwd=tmp_path,
             log_dir=tmp_path / "logs",
-            round_task_id="r-cancel",
-            seq_start=0,
-            on_execution=durable.append,
+            ledger=SetupLedger(round_task_id="r-cancel", seq_start=0, on_execution=durable.append),
         )
     )
     # The first command has finished and the second is in flight.

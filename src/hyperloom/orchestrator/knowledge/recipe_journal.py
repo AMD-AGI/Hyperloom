@@ -6,12 +6,12 @@
 from __future__ import annotations
 
 import logging as _logging
-import os
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Collection, Mapping
 
 from hyperloom.common.coerce import to_float, to_int
-from hyperloom.common.io import append_jsonl
+from hyperloom.common.io import JsonLineFormat, append_jsonl
 from hyperloom.inference_optimizer.breakdown.recorder import close_out as _close_out
 from hyperloom.inference_optimizer.recipe_snapshot_constants import detect_framework_version
 from hyperloom.inference_optimizer.session.optimization_journal import (
@@ -24,12 +24,12 @@ from hyperloom.inference_optimizer.session.optimization_journal import (
     derive_journal_outcome,
     summarize_change,
 )
-from hyperloom.orchestrator.knowledge.recipe_kb import recipe_canonical_id
-from hyperloom.orchestrator.lever import lever_kind_for_task
+from hyperloom.orchestrator.knowledge.recipe_kb import LocalRecipeStoreError, recipe_canonical_id
+from hyperloom.orchestrator.knowledge.workload_tags import workload_shape_tags
+from hyperloom.orchestrator.lever import LEVER_CONFIG, lever_kind_for_task
 
 from ..collaborator import CoordinatorCollaborator
-from ..state.attempt_ledger import record_config_attempt
-from ..state.failure_evidence import UNMEASURED_OUTCOMES, classify_failure_attribution
+from ..state.attempt_ledger import AttemptRow, record_attempt_row
 
 if TYPE_CHECKING:
     from ..loop.coordinator import Coordinator
@@ -157,7 +157,7 @@ def _record_config_attempts(
     recorder = coord._coord.phase_framework.timeline()
     if recorder is None:
         return
-    from hyperloom.inference_optimizer.breakdown.recorder.framework_event import ARM_CONFIG
+    from hyperloom.inference_optimizer.breakdown.recorder.framework_event import ARM_CONFIG, GateVerdict
 
     task_id = str(getattr(task, "task_id", "") or "")
     params = getattr(task, "params", None) or {}
@@ -185,14 +185,6 @@ def _record_config_attempts(
         accuracy_gate = next((gate for gate in gates if str(gate.get("gate") or "") == "accuracy"), {})
         error_class = str(row.get("error_class") or "")
         error_excerpt = str(row.get("error_excerpt") or "")
-        failure_attribution = ""
-        if outcome in UNMEASURED_OUTCOMES:
-            failure_attribution = classify_failure_attribution(
-                error_class=error_class,
-                error_excerpt=error_excerpt,
-                reason=row.get("reason"),
-                explicit=row.get("failure_attribution"),
-            )
         recorder.record_attempt(
             attempt_id,
             arm=ARM_CONFIG,
@@ -235,7 +227,7 @@ def _record_config_attempts(
             failure={
                 "error_class": error_class,
                 "error_excerpt": error_excerpt,
-                "attribution": failure_attribution,
+                "attribution": str(row.get("failure_attribution") or ""),
             },
             artifacts={
                 "workspace": str(row.get("workspace") or ""),
@@ -244,6 +236,8 @@ def _record_config_attempts(
             },
             decision=outcome,
             adopted=adopted,
+            # Every variant recorded here ran: the deduped one is skipped above.
+            benched=True,
             # Recorded rather than referenced: every KEEP advances the
             # stack, so the session's current config is not what this
             # variant was measured on top of.
@@ -259,11 +253,13 @@ def _record_config_attempts(
                 continue
             recorder.record_attempt_gate(
                 attempt_id,
-                str(gate.get("gate")),
-                passed=gate.get("passed"),
-                reason=str(gate.get("reason") or ""),
-                observed=gate.get("observed"),
-                threshold=gate.get("threshold"),
+                GateVerdict(
+                    gate=str(gate.get("gate")),
+                    passed=gate.get("passed"),
+                    reason=str(gate.get("reason") or ""),
+                    observed=gate.get("observed"),
+                    threshold=gate.get("threshold"),
+                ),
             )
         recorded += 1
     proposal_ref = str(params.get("proposal_msg_id") or "")
@@ -291,6 +287,53 @@ def _extra_server_args(payload: Mapping[str, Any]) -> str:
     if isinstance(value, (list, tuple)):
         return " ".join(str(v).strip() for v in value if str(v).strip())
     return str(value)
+
+
+@dataclass(frozen=True)
+class FactRecord:
+    """One settled outcome to write to the Recipe KB as a lesson or a pitfall.
+
+    Attributes:
+        task: The completed task (provides task_id).
+        source_session_id: Hyperloom-local session id stamped on provenance.
+        is_keep: True when the outcome is a validated KEEP.
+        change: Summarized change string (used in the statement).
+        gain_pct: Measured gain percentage, or ``None``.
+        throughput_after: Measured throughput after the change, or ``None``.
+        best_config_candidate: Pre-extracted best-config dict (differs between
+            per-task and per-variant callers).
+        evidence_refs: Evidence reference strings stamped on the provenance
+            (task-only or task+variant refs).
+        pitfall_severity_dict: The dict passed to ``_pitfall_severity_for``
+            (per-task passes the result dict; per-variant passes a merged
+            metrics + outcome dict).
+        variant_name: Variant name, present only for per-variant calls; added to
+            ``provenance_details`` when non-None.
+    """
+
+    task: "Task"
+    source_session_id: str
+    is_keep: bool
+    change: str
+    gain_pct: float | None
+    throughput_after: float | None
+    best_config_candidate: dict[str, Any] | None
+    evidence_refs: list[str]
+    pitfall_severity_dict: dict[str, Any]
+    variant_name: str | None = None
+
+
+@dataclass(frozen=True)
+class RemoteRecipeAudit:
+    """The outcome of one remote Recipe KB publish attempt, as an audit row records it."""
+
+    status: str
+    canonical_id: str
+    session_id: str
+    primary_metric: str = ""
+    primary_value: float = 0.0
+    reason: str = ""
+    error: Exception | None = None
 
 
 class RecipeJournalCollaborator(CoordinatorCollaborator):
@@ -336,7 +379,7 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
                     tick=int(self.shared_state.tick or 0),
                 )
             )
-        except Exception:
+        except (OSError, ValueError, TypeError):
             log.exception("integrate journal append failed")
 
     def _source_session_id(self) -> str:
@@ -388,8 +431,8 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
                 outcome = str(vo.get("outcome") or "") if isinstance(vo, dict) else ""
                 if outcome and outcome not in _NON_ATTEMPT_OUTCOMES:
                     metrics = vo.get("metrics") if isinstance(vo.get("metrics"), dict) else {}
-                    record_config_attempt(
-                        self.shared_state,
+                    row = AttemptRow(
+                        lever_kind=LEVER_CONFIG,
                         task_id=str(task.task_id or ""),
                         round_id=round_id,
                         fingerprint=str(vo.get("fingerprint") or ""),
@@ -402,11 +445,9 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
                         error_class=str(vo.get("error_class") or ""),
                         provenance=str(vo.get("provenance") or ""),
                     )
+                    record_attempt_row(self.shared_state, row)
                 self._record_fact_per_variant(
-                    task=task,
-                    source_session_id=source_session_id,
-                    variant_outcome=vo,
-                    adopted=adopted,
+                    task=task, source_session_id=source_session_id, variant_outcome=vo, adopted=adopted
                 )
         else:
             self._record_fact_per_task(
@@ -427,14 +468,14 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         existing = self._journal
         if existing is None:
             ss = self.shared_state
-            self._journal = Journal.load_or_create(
-                self.session_dir,
+            fresh = Journal(
                 session_id=str(ss.recipe_kb_session_id or "") or str(ss.session_id or "") or self.session_dir.name,
                 model=str(ss.model_name or ""),
                 hardware=str(ss.gpu_type or ""),
                 framework=str(ss.framework or ""),
                 baseline_throughput=float(ss.baseline_tput or 0.0),
             )
+            self._journal = Journal.load_or_create(self.session_dir, fresh)
         else:
             # Backfill baseline once the baseline executor finishes.
             existing.update_baseline(float(self.shared_state.baseline_tput or 0.0))
@@ -486,20 +527,7 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         """
         return str(self.shared_state.phase or "").strip().upper() or "UNKNOWN"
 
-    def _record_fact_impl(
-        self,
-        *,
-        task: "Task",
-        source_session_id: str,
-        is_keep: bool,
-        change: str,
-        gain_pct: float | None,
-        throughput_after: float | None,
-        best_config_candidate: dict[str, Any] | None,
-        evidence_refs: list[str],
-        pitfall_severity_dict: dict[str, Any],
-        variant_name: str | None = None,
-    ) -> None:
+    def _record_fact_impl(self, fact: FactRecord) -> None:
         """Shared KB write for _record_fact_per_task and _record_fact_per_variant.
 
         Writes one KB lesson (on KEEP with positive gain) or one KB pitfall
@@ -508,21 +536,8 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         non-None by the caller.
 
         Args:
-            task: The completed task (provides task_id).
-            source_session_id: Hyperloom-local session id stamped on provenance.
-            is_keep: True when the outcome is a validated KEEP.
-            change: Summarized change string (used in the statement).
-            gain_pct: Measured gain percentage, or ``None``.
-            throughput_after: Measured throughput after the change, or ``None``.
-            best_config_candidate: Pre-extracted best-config dict (differs
-                between per-task and per-variant callers).
-            evidence_refs: List of evidence reference strings to stamp on the
-                provenance (caller builds task-only or task+variant refs).
-            pitfall_severity_dict: The dict passed to ``_pitfall_severity_for``
-                (per-task passes ``result_dict``; per-variant passes a merged
-                metrics + outcome dict).
-            variant_name: Variant name, present only for per-variant calls;
-                added to ``provenance_details`` when non-None.
+            fact: The completed task, its outcome and the evidence to stamp on
+                the provenance.
         """
         models = [str(self.shared_state.model_name or "")] if self.shared_state.model_name else []
         hardware = [str(self.shared_state.gpu_type or "")] if self.shared_state.gpu_type else []
@@ -531,57 +546,59 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
         provenance_base: dict[str, Any] = {
-            "source_session_id": source_session_id,
-            "source_task_id": task.task_id,
-            "evidence": list(evidence_refs or []),
+            "source_session_id": fact.source_session_id,
+            "source_task_id": fact.task.task_id,
+            "evidence": list(fact.evidence_refs or []),
             "applicable_models": list(models or []),
             "applicable_hardware": list(hardware or []),
             "extra": dict(extra or {}),
             "now": now_iso,
         }
-        if variant_name is not None:
-            provenance_base["source_variant_name"] = variant_name
+        if fact.variant_name is not None:
+            provenance_base["source_variant_name"] = fact.variant_name
 
-        if is_keep and gain_pct is not None and gain_pct > 0:
-            statement = self._build_statement(
-                change=change,
-                kind="lesson",
-            )
-            impact = self._build_measured_impact(
-                gain_pct=gain_pct,
-                throughput_after=throughput_after,
-                stack_depth=len(self.shared_state.optimization_stack or []),
-                measured_at=now_iso,
-            )
-            live = self.read_local_recipe_row()
-            recipe_overrides = self.kb_best_config_overrides_for_keep(
-                live=live,
-                best_config_candidate=best_config_candidate,
-                throughput_after=throughput_after,
-            )
-            self.kb_amend_recipe(
-                append_lesson={
-                    "statement": statement,
-                    "measured_impact": impact,
-                },
-                recipe_overrides=recipe_overrides or None,
-                provenance_details=provenance_base,
-            )
-            return
-
-        severity = self._pitfall_severity_for(pitfall_severity_dict)
-        if severity is not None:
-            description = self._build_statement(
-                change=change,
-                severity=severity,
-                kind="pitfall",
-            )
-            self.kb_amend_recipe(
-                append_pitfall={
-                    "description": description,
+        lesson = None
+        pitfall = None
+        if fact.is_keep and fact.gain_pct is not None and fact.gain_pct > 0:
+            lesson = {
+                "statement": self._build_statement(change=fact.change, kind="lesson"),
+                "measured_impact": self._build_measured_impact(
+                    gain_pct=fact.gain_pct,
+                    throughput_after=fact.throughput_after,
+                    stack_depth=len(self.shared_state.optimization_stack or []),
+                    measured_at=now_iso,
+                ),
+            }
+        else:
+            severity = self._pitfall_severity_for(fact.pitfall_severity_dict)
+            if severity is not None:
+                pitfall = {
+                    "description": self._build_statement(change=fact.change, severity=severity, kind="pitfall"),
                     "severity": severity,
-                },
-                provenance_details=provenance_base,
+                }
+
+        try:
+            if lesson is not None:
+                live = self.read_local_recipe_row()
+                recipe_overrides = self.kb_best_config_overrides_for_keep(
+                    live=live,
+                    best_config_candidate=fact.best_config_candidate,
+                    throughput_after=fact.throughput_after,
+                )
+                self.kb_amend_recipe(
+                    append_lesson=lesson,
+                    recipe_overrides=recipe_overrides or None,
+                    provenance_details=provenance_base,
+                )
+            elif pitfall is not None:
+                self.kb_amend_recipe(append_pitfall=pitfall, provenance_details=provenance_base)
+        except (LocalRecipeStoreError, OSError, ValueError) as error:
+            log.warning(
+                "recipe KB write for task %s%s failed: %s: %s",
+                fact.task.task_id,
+                f" variant {fact.variant_name}" if fact.variant_name is not None else "",
+                type(error).__name__,
+                error,
             )
 
     def _record_fact_per_task(
@@ -647,19 +664,21 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
             return
 
         self._record_fact_impl(
-            task=task,
-            source_session_id=source_session_id,
-            is_keep=is_keep,
-            change=change,
-            gain_pct=gain_pct,
-            throughput_after=throughput_after,
-            best_config_candidate=self.extract_kept_best_config(
+            FactRecord(
                 task=task,
-                result_dict=result_dict,
-            ),
-            # evidence_refs (log:task-...) gives traceability since source_session_id lands in attrs.
-            evidence_refs=[f"log:task-{task.task_id}"],
-            pitfall_severity_dict=result_dict,
+                source_session_id=source_session_id,
+                is_keep=is_keep,
+                change=change,
+                gain_pct=gain_pct,
+                throughput_after=throughput_after,
+                best_config_candidate=self.extract_kept_best_config(
+                    task=task,
+                    result_dict=result_dict,
+                ),
+                # evidence_refs (log:task-...) gives traceability since source_session_id lands in attrs.
+                evidence_refs=[f"log:task-{task.task_id}"],
+                pitfall_severity_dict=result_dict,
+            )
         )
 
     def _build_statement(
@@ -813,24 +832,26 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
             return
 
         self._record_fact_impl(
-            task=task,
-            source_session_id=source_session_id,
-            is_keep=(outcome == OUTCOME_KEEP),
-            change=change,
-            gain_pct=gain_pct,
-            throughput_after=throughput_after,
-            best_config_candidate=self.extract_kept_best_config(
+            FactRecord(
                 task=task,
-                variant_attrs=change_attrs,
-            ),
-            # Workload-shape tags — see _record_fact_per_task.
-            evidence_refs=[f"log:task-{task.task_id}", f"variant:{variant_name}"],
-            pitfall_severity_dict={
-                **(metrics if isinstance(metrics, dict) else {}),
-                "error_class": variant_outcome.get("error_class"),
-                "status": variant_outcome.get("outcome"),
-            },
-            variant_name=variant_name,
+                source_session_id=source_session_id,
+                is_keep=outcome == OUTCOME_KEEP,
+                change=change,
+                gain_pct=gain_pct,
+                throughput_after=throughput_after,
+                best_config_candidate=self.extract_kept_best_config(
+                    task=task,
+                    variant_attrs=change_attrs,
+                ),
+                # Workload-shape tags — see _record_fact_per_task.
+                evidence_refs=[f"log:task-{task.task_id}", f"variant:{variant_name}"],
+                pitfall_severity_dict={
+                    **(metrics if isinstance(metrics, dict) else {}),
+                    "error_class": variant_outcome.get("error_class"),
+                    "status": variant_outcome.get("outcome"),
+                },
+                variant_name=variant_name,
+            )
         )
 
     def _collect_workload_tags(self) -> dict[str, Any]:
@@ -843,62 +864,32 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         """
         ss = self.shared_state
         out: dict[str, Any] = {}
-        framework = str(ss.framework or "").strip()
-        if framework:
-            out["framework"] = framework
-        model_class = str(ss.model_class or "").strip()
-        if model_class:
-            out["model_class"] = model_class
         # model_family is not part of the seven-dimension Recipe identity.
-        model_name = str(ss.model_name or "").strip()
-        if model_name:
-            out["model_name"] = model_name
-        for src_attr, dst_key in (
-            ("precision", "precision"),
-            ("tp", "tp"),
-            ("ep", "ep"),
-            ("conc", "conc"),
-            ("isl", "isl"),
-            ("osl", "osl"),
-            ("max_model_len", "max_model_len"),
-        ):
-            v = getattr(ss, src_attr, None)
-            if v not in (None, "", 0):
-                out[dst_key] = v
-        # EP env fallback when SharedState.ep is unset (legacy SDK callers).
-        if "ep" not in out:
-            raw_ep = (os.environ.get("EP") or "").strip()
-            try:
-                n = int(raw_ep) if raw_ep else 0
-            except ValueError:
-                n = 0
-            if n > 0:
-                out["ep"] = n
-        # PP — no SharedState field (no CLI surface); env-only.
-        raw_pp = (os.environ.get("PP") or "").strip()
-        try:
-            pp_n = int(raw_pp) if raw_pp else 0
-        except ValueError:
-            pp_n = 0
-        if pp_n > 0:
-            out["pp"] = pp_n
+        for attr in ("framework", "model_class", "model_name"):
+            text = str(getattr(ss, attr, "") or "").strip()
+            if text:
+                out[attr] = text
+        precision = getattr(ss, "precision", None)
+        if precision not in (None, "", 0):
+            out["precision"] = precision
+        out.update(workload_shape_tags(ss))
         # runtime version tags from stack_fingerprint_meta (cli writes at boot, resume reads verbatim).
         fp_meta = ss.stack_fingerprint_meta or {}
         if isinstance(fp_meta, dict):
             # framework_version is whichever of sglang/vllm is active.
-            fw_lc = framework.lower()
+            fw_lc = out.get("framework", "").lower()
             if fw_lc in ("sglang", "vllm"):
-                v = str(fp_meta.get(fw_lc) or "").strip()
-                if v and v != "unknown":
-                    out["framework_version"] = v
+                version = str(fp_meta.get(fw_lc) or "").strip()
+                if version and version != "unknown":
+                    out["framework_version"] = version
             for src_key, dst_key in (
                 ("rocm", "rocm_version"),
                 ("aiter", "aiter_version"),
                 ("image_digest", "image_digest"),
             ):
-                v = str(fp_meta.get(src_key) or "").strip()
-                if v and v != "unknown":
-                    out[dst_key] = v
+                version = str(fp_meta.get(src_key) or "").strip()
+                if version and version != "unknown":
+                    out[dst_key] = version
         # per-baseline workload extras from materialized YAML; keep bool False (don't drop an "explicitly disabled" signal).
         wl_extra = ss.baseline_workload_extra or {}
         if isinstance(wl_extra, dict):
@@ -914,82 +905,6 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
                 v = wl_extra.get(k)
                 if isinstance(v, str) and v.strip():
                     out[k] = v.strip()
-        return out
-
-    def _build_kernel_optimizations_from_state(self) -> list[dict[str, Any]]:
-        """Collect KEEP'd kernel optimizations + their E2E verdict by joining kernel_opt_task_attempts (micro) and kernel_integrate_attempts (E2E) on kernel_id; non-integrated KEEPs surface integrated=False. Returns KernelOptimization-shaped dicts.
-
-        Returns:
-            A list of KernelOptimization-shaped dicts for each KEEP'd kernel,
-            joined with its E2E integrate verdict where available.
-        """
-        ss = self.shared_state
-        opt_attempts = ss.kernel_opt_task_attempts or {}
-        integ_attempts = ss.kernel_integrate_attempts or {}
-        if not isinstance(opt_attempts, dict):
-            return []
-
-        # Index integrate results by kernel_id (last write wins; entry carries rolled-up best_gain_pct).
-        integ_by_kid: dict[str, dict[str, Any]] = {}
-        integ_by_task: dict[str, dict[str, Any]] = {}
-        if isinstance(integ_attempts, dict):
-            for entry in integ_attempts.values():
-                if not isinstance(entry, dict):
-                    continue
-                kid = str(entry.get("kernel_id") or "")
-                if kid:
-                    integ_by_kid[kid] = entry
-                task_group_key = str(entry.get("task_group_key") or "")
-                if task_group_key:
-                    integ_by_task[task_group_key] = entry
-
-        out: list[dict[str, Any]] = []
-        for ledger_id, e in opt_attempts.items():
-            if not isinstance(e, dict):
-                continue
-            if str(e.get("last_decision", "")).upper() != "KEEP":
-                continue
-            try:
-                micro = float(e.get("last_micro_speedup") or 0.0)
-            except (TypeError, ValueError):
-                micro = 0.0
-            kid = str(e.get("current_kernel_id") or e.get("kernel_id") or ledger_id)
-            task_group_key = str(e.get("task_group_key") or "")
-            integ = integ_by_task.get(task_group_key) if task_group_key else integ_by_kid.get(kid)
-            e2e_gain = 0.0
-            e2e_tput = 0.0
-            e2e_decision = ""
-            integrated = False
-            if isinstance(integ, dict):
-                integrated = True
-                # Integrate-layer verdict (E2E); lets warm-start skip a micro-win/E2E-loss kernel.
-                e2e_decision = str(integ.get("last_decision") or "").upper()
-                try:
-                    e2e_gain = float(integ.get("best_gain_pct") or 0.0)
-                except (TypeError, ValueError):
-                    e2e_gain = 0.0
-                # Last attempt's E2E re-bench throughput.
-                for att in reversed(list(integ.get("attempts") or [])):
-                    if isinstance(att, dict) and att.get("new_tput") is not None:
-                        try:
-                            e2e_tput = float(att.get("new_tput") or 0.0)
-                        except (TypeError, ValueError):
-                            e2e_tput = 0.0
-                        break
-            out.append(
-                {
-                    "kernel_id": kid,
-                    "source_file": str(e.get("last_source_file") or ""),
-                    "artifact_path": str(e.get("last_artifact_path") or ""),
-                    "micro_speedup": micro,
-                    "decision": "KEEP",
-                    "e2e_gain_pct": e2e_gain,
-                    "e2e_tput": e2e_tput,
-                    "e2e_decision": e2e_decision,
-                    "integrated": integrated,
-                    "ts": str(e.get("last_ts") or ""),
-                }
-            )
         return out
 
     def _collect_attempt_provenance(
@@ -1040,23 +955,21 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
 
         Returns:
             A recipe-shaped attrs dict (best_config, what_worked, what_failed,
-            kernel_optimizations, workload tags, session row) for KB recipe
-            writes.
+            workload tags, session row) for KB recipe writes.
         """
         ss = self.shared_state
-        current_best = ss.current_best or {}
+        current_best = ss.current_best
         opt_stack = ss.optimization_stack or []
         gain_per_stack = ss.gain_per_stack_entry or []
         last_failures = ss.last_action_failures or []
         # RecipeKB best_config keys on the canonical extra_server_args field.
         best_config: dict[str, Any] = {}
-        if isinstance(current_best, dict):
-            cb_args = current_best.get("extra_server_args")
-            if cb_args:
-                best_config["extra_server_args"] = str(cb_args)
-            for key in ("extra_envs", "name", "tput", "accuracy"):
-                if key in current_best:
-                    best_config[key] = current_best[key]
+        cb_args = current_best.get("extra_server_args")
+        if cb_args:
+            best_config["extra_server_args"] = str(cb_args)
+        for key in ("extra_envs", "name", "tput", "accuracy"):
+            if key in current_best:
+                best_config[key] = current_best[key]
         # Prefer the last validated stack layer for launch args (current_best may carry a corrupted string).
         if opt_stack:
             last_entry = opt_stack[-1]
@@ -1103,7 +1016,6 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
                 )
         for rev in reverted_rows:
             what_failed.append(rev)
-        kernel_optimizations = self._build_kernel_optimizations_from_state()
         cumulative_validated = float(ss.cumulative_gain_validated or 0.0)
         validated_stack_len = int(ss.cumulative_gain_validated_stack_len or 0)
         # Workload-shape tags for shape-filtered warm-start queries (shared via _collect_workload_tags).
@@ -1111,10 +1023,9 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         # framework_version left unset here (manifest-derived); the T0 backfill writes it.
         return {
             "best_config": best_config,
-            "best_throughput": float(current_best.get("tput", 0.0)) if isinstance(current_best, dict) else 0.0,
+            "best_throughput": float(current_best.get("tput", 0.0)),
             "what_worked": what_worked,
             "what_failed": what_failed,
-            "kernel_optimizations": kernel_optimizations,
             "last_profiled": str(ss.cumulative_gain_validated_ts or ""),
             "workload": workload_tags,
             "sessions": [
@@ -1124,9 +1035,7 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
                     "stack_len": validated_stack_len or len(opt_stack),
                     # arbor-shape provenance so the session row is self-describing (before/after tput + knobs).
                     "throughput_before": float(ss.baseline_tput or 0.0),
-                    "throughput_after": (
-                        float(current_best.get("tput", 0.0)) if isinstance(current_best, dict) else 0.0
-                    ),
+                    "throughput_after": float(current_best.get("tput", 0.0)),
                     "date": datetime.now(timezone.utc).isoformat(),
                     "actions_taken": [
                         nm
@@ -1141,20 +1050,10 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
             ],
         }
 
-    def _record_remote_recipe_audit(
-        self,
-        *,
-        source: str,
-        status: str,
-        canonical_id: str,
-        session_id: str,
-        primary_metric: str = "",
-        primary_value: float = 0.0,
-        reason: str = "",
-        error_type: str = "",
-    ) -> None:
+    def _record_remote_recipe_audit(self, source: str, audit: RemoteRecipeAudit) -> None:
         """Append one best-effort, secret-free KB Store publish audit row."""
         try:
+            from .remote_recipe.audit import publish_error_fields
             from hyperloom.inference_optimizer.session.session_paths import (
                 recipe_snapshot_audit_jsonl,
             )
@@ -1166,42 +1065,42 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
                 "mode": "remote",
                 "backend": "kb-store",
                 "remote": "kb-store",
-                "resolution": status,
-                "success": status in {"written", "skipped"},
+                "resolution": audit.status,
+                "success": audit.status in {"written", "skipped"},
                 "generator": source,
                 "phase": "CLOSE",
-                "status": status,
-                "reason": reason,
+                "status": audit.status,
+                "reason": audit.reason,
                 "request": {
-                    "canonical_id": canonical_id or None,
-                    "session_id": session_id or None,
+                    "canonical_id": audit.canonical_id or None,
+                    "session_id": audit.session_id or None,
                 },
                 "result": {
-                    "canonical_id": canonical_id,
-                    "session_id": session_id,
-                    "created": status == "written",
+                    "canonical_id": audit.canonical_id,
+                    "session_id": audit.session_id,
+                    "created": audit.status == "written",
                 },
                 "provenance": {
                     "component": "remote_recipe",
                     "source": source,
                 },
             }
-            if primary_metric:
+            if audit.primary_metric:
                 row["result"].update(
                     {
-                        "primary_metric": primary_metric,
-                        "primary_value": primary_value,
+                        "primary_metric": audit.primary_metric,
+                        "primary_value": audit.primary_value,
                     }
                 )
-            if primary_metric == "optimized_throughput":
-                row["result"]["best_throughput"] = primary_value
-            if error_type:
-                row["error"] = {"type": error_type}
+            if audit.primary_metric == "optimized_throughput":
+                row["result"]["best_throughput"] = audit.primary_value
+            if audit.error is not None:
+                row["error"] = publish_error_fields(audit.error)
             append_jsonl(
                 recipe_snapshot_audit_jsonl(self.session_dir),
                 row,
                 make_parents=True,
-                sort_keys=True,
+                fmt=JsonLineFormat(sort_keys=True),
             )
         except Exception:
             log.debug("Remote Recipe KB audit append failed", exc_info=True)
@@ -1226,7 +1125,7 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         _close_out.record_write_back_opened(self.session_dir, attempt=attempts, source=source)
         try:
             state.save(self.session_dir)
-        except Exception:
+        except OSError:
             log.exception("Recipe finalize pending-state save failed")
 
         try:
@@ -1255,7 +1154,7 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         self._record_write_back_settled(outcome, attempt=attempts, source=source)
         try:
             state.save(self.session_dir)
-        except Exception:
+        except OSError:
             log.exception("Recipe finalize outcome save failed")
         return outcome
 
@@ -1273,8 +1172,7 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         recipe was scoped to. ``source`` is ``close`` or ``t4_fallback``.
         """
         state = self.shared_state
-        current_best = state.current_best or {}
-        tput = current_best.get("tput") if isinstance(current_best, dict) else None
+        tput = state.current_best.get("tput")
         validated_gain = state.cumulative_gain_validated
         result_type = str(outcome.get("result_type") or "")
         if result_type == _close_out.RESULT_UNVALIDATED_RECIPE:
@@ -1282,19 +1180,21 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
             tput = validated_gain = None
         _close_out.record_write_back_settled(
             self.session_dir,
-            attempt=attempt,
-            source=source,
-            status=str(outcome.get("status") or ""),
-            result_type=result_type,
-            raw_reason=str(outcome.get("reason") or ""),
-            error_class=str(outcome.get("error_class") or ""),
-            backend=str(outcome.get("backend") or ""),
-            canonical_id=str(outcome.get("canonical_id") or ""),
-            session_id=str(outcome.get("session_id") or ""),
-            scope=self._write_back_scope(),
-            optimized_throughput=to_float(tput, None),
-            validated_gain_pct=to_float(validated_gain, None),
-            ts=str(outcome.get("updated_at") or ""),
+            _close_out.WriteBackSettlement(
+                attempt=attempt,
+                source=source,
+                status=str(outcome.get("status") or ""),
+                result_type=result_type,
+                raw_reason=str(outcome.get("reason") or ""),
+                error_class=str(outcome.get("error_class") or ""),
+                backend=str(outcome.get("backend") or ""),
+                canonical_id=str(outcome.get("canonical_id") or ""),
+                session_id=str(outcome.get("session_id") or ""),
+                scope=self._write_back_scope(),
+                optimized_throughput=to_float(tput, None),
+                validated_gain_pct=to_float(validated_gain, None),
+                ts=str(outcome.get("updated_at") or ""),
+            ),
         )
 
     def _write_back_scope(self) -> dict[str, Any]:
@@ -1338,8 +1238,7 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
             }
         journal = self.ensure_journal()
         ss = self.shared_state
-        cb = ss.current_best or {}
-        final_tput = float(cb.get("tput", 0.0)) if isinstance(cb, dict) else 0.0
+        final_tput = float(ss.current_best.get("tput", 0.0))
         total_gain = float(ss.cumulative_gain_validated or 0.0)
         journal.finalize(
             final_throughput=final_tput if final_tput > 0 else None,
@@ -1360,7 +1259,7 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
 
         try:
             config = getattr(kp, "config", None) or KnowledgeConfig.from_env()
-        except Exception as exc:
+        except ValueError as exc:
             log.exception("Recipe KB finalize configuration failed (non-fatal)")
             return {
                 "status": "error",
@@ -1388,9 +1287,9 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
             remote_sid = str(
                 self.shared_state.recipe_kb_session_id or self.shared_state.session_id or self.session_dir.name
             )
-            try:
-                from ..knowledge.remote_recipe import HyperloomRemoteKB
+            from ..knowledge.remote_recipe import HyperloomRemoteKB, KBStoreError
 
+            try:
                 remote_cid = self.workload_canonical_id()
                 remote_result = HyperloomRemoteKB.from_env().write(
                     remote_cid,
@@ -1405,13 +1304,15 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
                     remote_result.session_id,
                 )
                 self._record_remote_recipe_audit(
-                    source=source,
-                    status=remote_result.status,
-                    canonical_id=remote_cid,
-                    session_id=remote_result.session_id,
-                    primary_metric=remote_result.primary_metric,
-                    primary_value=remote_result.primary_value,
-                    reason=remote_result.reason,
+                    source,
+                    RemoteRecipeAudit(
+                        status=remote_result.status,
+                        canonical_id=remote_cid,
+                        session_id=remote_result.session_id,
+                        primary_metric=remote_result.primary_metric,
+                        primary_value=remote_result.primary_value,
+                        reason=remote_result.reason,
+                    ),
                 )
                 return {
                     "status": remote_result.status,
@@ -1421,13 +1322,9 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
                     "session_id": str(getattr(remote_result, "session_id", "") or remote_sid),
                     "result_type": _remote_result_type(remote_result.status, remote_result.reason),
                 }
-            except Exception as exc:
+            except (KBStoreError, OSError, ValueError) as exc:
                 self._record_remote_recipe_audit(
-                    source=source,
-                    status="error",
-                    canonical_id=remote_cid,
-                    session_id=remote_sid,
-                    error_type=type(exc).__name__,
+                    source, RemoteRecipeAudit(status="error", canonical_id=remote_cid, session_id=remote_sid, error=exc)
                 )
                 log.exception("Remote Recipe KB finalize failed (non-fatal)")
                 return {
@@ -1436,8 +1333,6 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
                     "backend": "kb-store",
                     "canonical_id": remote_cid,
                     "session_id": remote_sid,
-                    # A validation error means the store rejected the bundle we
-                    # built; anything else failed on the way there.
                     "result_type": (
                         _close_out.RESULT_BUNDLE_BUILD_FAILED
                         if type(exc).__name__ == _REMOTE_VALIDATION_ERROR
@@ -1469,94 +1364,64 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
                 "backend": "local",
                 "result_type": _close_out.RESULT_INVALID_SCOPE,
             }
+        attrs = self._build_recipe_attrs_from_state()
+        # Hoist workload tags flat into top-level recipe attrs (shallow-merged) for warm-start filters.
+        workload_tags = attrs.get("workload") or {}
+
+        # sessions[] read-modify-write: read anchor, drop prior entry with our session_id (resume safety), append ours, write back.
+        my_sessions = list(attrs["sessions"] or [])
+        my_session_ids = {str((s or {}).get("session_id") or "") for s in my_sessions if isinstance(s, dict)}
+        # v2: read-modify-write the recipe row; sessions[] merged in-process under the cid flock so concurrent finalises don't tear.
+        merged_sessions: list[dict[str, Any]] = list(my_sessions)
+        existing_row: dict[str, Any] = {}
+        if self.recipe_kb is not None:
+            cid = self.workload_canonical_id()
+            # Read exactly the local store's authority row.
+            existing_row = self.recipe_kb.get_authoritative_recipe(canonical_id=cid) or {}
+            existing_sessions: list[dict[str, Any]] = []
+            for row in existing_row.get("sessions") or []:
+                if not isinstance(row, dict):
+                    continue
+                if str(row.get("session_id") or "") in my_session_ids:
+                    # Resume/retry of the same session — our new entry supersedes the prior one.
+                    continue
+                existing_sessions.append(dict(row))
+            merged_sessions = existing_sessions + my_sessions
+
+        overrides: dict[str, Any] = {
+            "what_worked": attrs["what_worked"],
+            "what_failed": attrs["what_failed"],
+            "last_profiled": attrs["last_profiled"],
+            "sessions": merged_sessions,
+            "extras": dict(workload_tags or {}),
+        }
+        # Overwrite best_config/best_throughput only on a real improvement: requires has_validated_win AND my_tput > live_tput.
+        my_tput = float(attrs.get("best_throughput") or 0.0)
+        cb_args_now = str(ss.current_best.get("extra_server_args") or "").strip()
+        validated_gain = float(ss.cumulative_gain_validated or 0.0)
+        has_validated_win = bool((ss.optimization_stack or []) or validated_gain > 0.0 or cb_args_now)
         try:
-            attrs = self._build_recipe_attrs_from_state()
-            # Hoist workload tags flat into top-level recipe attrs (shallow-merged) for warm-start filters.
-            workload_tags = attrs.get("workload") or {}
-
-            # sessions[] read-modify-write: read anchor, drop prior entry with our session_id (resume safety), append ours, write back.
-            my_sessions = list(attrs["sessions"] or [])
-            my_session_ids = {str((s or {}).get("session_id") or "") for s in my_sessions if isinstance(s, dict)}
-            # v2: read-modify-write the recipe row; sessions[] merged in-process under the cid flock so concurrent finalises don't tear.
-            merged_sessions: list[dict[str, Any]] = list(my_sessions)
-            existing_row: dict[str, Any] = {}
-            if self.recipe_kb is not None:
-                cid = self.workload_canonical_id()
-                # Read exactly the local store's authority row.
-                try:
-                    existing_row = self.recipe_kb.get_authoritative_recipe(canonical_id=cid) or {}
-                except Exception as exc:  # noqa: BLE001 - the recipe store may be remote
-                    log.info("recipe read failed (%s); finalize appends the current session only", exc)
-                existing_sessions: list[dict[str, Any]] = []
-                for row in existing_row.get("sessions") or []:
-                    if not isinstance(row, dict):
-                        continue
-                    if str(row.get("session_id") or "") in my_session_ids:
-                        # Resume/retry of the same session — our new entry supersedes the prior one.
-                        continue
-                    existing_sessions.append(dict(row))
-                merged_sessions = existing_sessions + my_sessions
-
-            # KEEP'd kernel optimizations ride the extras channel; merge with prior rows, dedup by kernel_id.
-            kopts_new = list(attrs.get("kernel_optimizations") or [])
-            new_kids = {str((k or {}).get("kernel_id") or "") for k in kopts_new if isinstance(k, dict)}
-            merged_kopts: list[dict[str, Any]] = list(kopts_new)
-            for prior in existing_row.get("kernel_optimizations") or []:
-                if not isinstance(prior, dict):
-                    continue
-                if str(prior.get("kernel_id") or "") in new_kids:
-                    continue
-                merged_kopts.append(dict(prior))
-
-            extras_payload = dict(workload_tags or {})
-            if merged_kopts:
-                extras_payload["kernel_optimizations"] = merged_kopts
-
-            overrides: dict[str, Any] = {
-                "what_worked": attrs["what_worked"],
-                "what_failed": attrs["what_failed"],
-                "last_profiled": attrs["last_profiled"],
-                "sessions": merged_sessions,
-                "extras": extras_payload,
-            }
-            # Overwrite best_config/best_throughput only on a real improvement: requires has_validated_win AND my_tput > live_tput.
-            my_tput = float(attrs.get("best_throughput") or 0.0)
-            cb_now = ss.current_best or {}
-            cb_args_now = str(cb_now.get("extra_server_args") or "").strip() if isinstance(cb_now, dict) else ""
-            validated_gain = float(ss.cumulative_gain_validated or 0.0)
-            has_validated_win = bool((ss.optimization_stack or []) or validated_gain > 0.0 or cb_args_now)
-            try:
-                live_tput = float(existing_row.get("best_throughput") or 0.0)
-            except (TypeError, ValueError):
-                live_tput = 0.0
-            if has_validated_win and my_tput > live_tput:
-                overrides["best_config"] = attrs["best_config"]
-                overrides["best_throughput"] = my_tput
-            self.kb_amend_recipe(
-                recipe_overrides=overrides,
-                provenance_details={
-                    "phase": "close_finalize",
-                    "evidence": [
-                        f"log:session-{ss.recipe_kb_session_id or self.session_dir.name}",
-                    ],
-                },
-            )
-            return {
-                "status": "written",
-                "reason": "",
-                "backend": "local",
-                "result_type": _close_out.RESULT_WRITTEN,
-            }
-        # Catch-all keeps CLOSE step 2.5 defensive against programmer bugs.
-        except Exception as exc:
-            log.exception("update_recipe raised unexpectedly")
-            return {
-                "status": "error",
-                "reason": type(exc).__name__,
-                "backend": "local",
-                "result_type": _close_out.RESULT_TRANSPORT_FAILED,
-                "error_class": type(exc).__name__,
-            }
+            live_tput = float(existing_row.get("best_throughput") or 0.0)
+        except (TypeError, ValueError):
+            live_tput = 0.0
+        if has_validated_win and my_tput > live_tput:
+            overrides["best_config"] = attrs["best_config"]
+            overrides["best_throughput"] = my_tput
+        self.kb_amend_recipe(
+            recipe_overrides=overrides,
+            provenance_details={
+                "phase": "close_finalize",
+                "evidence": [
+                    f"log:session-{ss.recipe_kb_session_id or self.session_dir.name}",
+                ],
+            },
+        )
+        return {
+            "status": "written",
+            "reason": "",
+            "backend": "local",
+            "result_type": _close_out.RESULT_WRITTEN,
+        }
 
     def _kb_hardware_slug(self) -> str:
         """Topology-aware hardware dimension for the recipe ``canonical_id``."""
@@ -1599,15 +1464,12 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         cache = self._local_recipe_cache
         if isinstance(cache, tuple) and len(cache) == 2 and cache[0] == tick:
             return cache[1]
-        try:
-            row = (
-                self.recipe_kb.get_authoritative_recipe(
-                    canonical_id=self.workload_canonical_id(),
-                )
-                or {}
+        row = (
+            self.recipe_kb.get_authoritative_recipe(
+                canonical_id=self.workload_canonical_id(),
             )
-        except Exception:  # noqa: BLE001 - the recipe store may be remote
-            row = {}
+            or {}
+        )
         self._local_recipe_cache = (tick, row)
         return row
 
@@ -1685,7 +1547,7 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         recipe_overrides: dict[str, Any] | None = None,
         provenance_details: dict[str, Any] | None = None,
     ) -> None:
-        """Read-modify-write helper for the recipe-snapshot KB: load live row, append lesson/pitfall, merge recipe_overrides (unset fields preserved), write back. Best-effort; lesson/pitfall appended without dedup."""
+        """Read-modify-write helper for the recipe-snapshot KB: load live row, append lesson/pitfall, merge recipe_overrides (unset fields preserved), write back. Read or write failures propagate; lesson/pitfall appended without dedup."""
         config = getattr(self.knowledge_plane, "config", None)
         if getattr(getattr(config, "mode", None), "value", None) == "remote" or self.recipe_kb is None:
             return
@@ -1703,14 +1565,7 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         precision = str(ss.precision or "")
 
         # Local mode reads the exact authority row before amending it.
-        try:
-            live = self.recipe_kb.get_authoritative_recipe(canonical_id=cid) or {}
-        except Exception as exc:  # noqa: BLE001
-            log.info(
-                "kb_amend_recipe: authority get_recipe failed (%s); proceeding with empty live",
-                exc,
-            )
-            live = {}
+        live = self.recipe_kb.get_authoritative_recipe(canonical_id=cid) or {}
 
         lessons = list(live.get("lessons") or [])
         if append_lesson is not None:
@@ -1809,14 +1664,8 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
                 "details": dict(provenance_details or {}),
             },
         }
-        try:
-            self.recipe_kb.put_recipe(**put_kwargs)
-            self._local_recipe_cache = None
-        except Exception:
-            log.exception(
-                "kb_amend_recipe: put_recipe failed for cid=%s",
-                cid,
-            )
+        self.recipe_kb.put_recipe(**put_kwargs)
+        self._local_recipe_cache = None
 
 
 __all__ = ["RecipeJournalCollaborator"]

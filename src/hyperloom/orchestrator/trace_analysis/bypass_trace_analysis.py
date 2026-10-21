@@ -20,6 +20,7 @@ import argparse
 import datetime as _dt
 import hashlib
 import json
+import logging
 import os
 import re
 import sys
@@ -30,7 +31,7 @@ from . import _bypass_report as _report
 from . import _bypass_trace_reader as _reader
 from . import _trace_shape_manifest as _tsm
 
-from hyperloom.common.io import atomic_write_json
+from hyperloom.common.io import JsonFormat, atomic_write_json
 from hyperloom.common.provenance import build_provenance as _shared_build_provenance
 from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer import framework_registry
@@ -42,6 +43,8 @@ from ._idle_gate import (
 from ._denoise_steps import count_profiler_steps, resolve_perstep_divisor
 from ._io_utils import write_text
 
+log = logging.getLogger(__name__)
+
 
 AGGREGATION_SCOPE_FULL = "full_trace"
 AGGREGATION_SCOPE_STEADY = "steady_state"
@@ -50,41 +53,6 @@ AGGREGATION_SCOPE_STEADY = "steady_state"
 def _run_stamp() -> str:
     """Return a compact UTC timestamp used to name the per-run output dir."""
     return _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-
-
-def _maybe_enrich_rocprof(
-    kernel_roofline_path: Path,
-    candidates_path: Path,
-    run_dir: Path,
-) -> dict[str, Any]:
-    """Dead rocprof-compute enrichment hook; kept only for the summary key."""
-    enrich_value = os.environ.get("HYPERLOOM_ROCPROF_ROOFLINE_ENRICH", "0").strip().lower()
-    if enrich_value not in {"1", "true", "yes", "on"}:
-        return {"status": "disabled"}
-    try:
-        from rocprof_roofline import enrich_kernel_roofline_sidecar
-
-        timeout_sec = int(os.environ.get("HYPERLOOM_ROCPROF_ROOFLINE_TIMEOUT_SEC", "1800") or 1800)
-        enrich_summary = enrich_kernel_roofline_sidecar(
-            sidecar_path=str(kernel_roofline_path),
-            candidates_path=str(candidates_path),
-            workdir=str(run_dir),
-            timeout_sec_per_kernel=timeout_sec,
-            log_fn=None,
-        )
-        print(
-            "[rocprof_enrich] "
-            f"matched={enrich_summary.get('matched', 0)} "
-            f"skipped={enrich_summary.get('skipped', 0)} "
-            f"failed={enrich_summary.get('failed', 0)} "
-            f"rows={enrich_summary.get('rows', 0)}",
-            file=sys.stderr,
-        )
-        return enrich_summary
-    except Exception as exc:  # noqa: BLE001 — enrichment must never break bypass
-        msg = f"error: {type(exc).__name__}: {exc}"
-        print(f"[rocprof_enrich] skipped: {msg}", file=sys.stderr)
-        return {"status": msg}
 
 
 def _emit_quality_warnings(analyze: dict[str, Any], warnings: list[dict[str, Any]]) -> None:
@@ -317,37 +285,34 @@ def _maybe_build_shape_manifest(
                 shards = [shards[last]]
             else:
                 shards = [shards[round(i * last / (max_caps - 1))] for i in range(max_caps)]
-        capture_variants: list[tuple[str, dict[str, Any]]] = []
-        capture_hashes: dict[str, str] = {}
-        variant_meta: dict[str, dict[str, Any]] = {}
+        capture_variants: list[_tsm.CaptureShard] = []
         for path, label, mode in shards:
-            shard_an = _reader.analyze_trace(path, top_k=0, steady_state=False, emit_launches=True)
+            shard_an = _reader.analyze_trace(
+                path, _reader.TraceAnalysisOptions(top_k=0, steady_state=False, emit_launches=True)
+            )
             if shard_an.get("status") != "ok" or shard_an.get("truncated"):
                 continue
-            capture_variants.append((label, shard_an))
-            capture_hashes[label] = _sha256_file(path)
             bs_m = re.search(r"bs_(\d+)", label)
-            variant_meta[label] = {
-                "batch_size": bs_m.group(1) if bs_m else None,
-                "mode": mode,
-                "file": path.name,
-            }
+            capture_variants.append(
+                _tsm.CaptureShard(
+                    label=label,
+                    analysis=shard_an,
+                    trace_hash=_sha256_file(path),
+                    meta={"batch_size": bs_m.group(1) if bs_m else None, "mode": mode, "file": path.name},
+                )
+            )
 
         # phase hint from the analysis mode the coordinator forwards.
         phase_hint = (args.analysis_mode or "mixed").lower() or "mixed"
         manifest = _tsm.build_shape_manifest(
-            main_analysis=analyze,
-            capture_variants=capture_variants,
+            analyze,
+            capture_variants,
+            _tsm.ManifestOrigin(main_trace_hash=main_hash, generated_at=generated_at),
             provenance=_build_manifest_provenance(args),
-            main_trace_hash=main_hash,
-            capture_trace_hashes=capture_hashes,
-            variant_meta=variant_meta,
-            analysis_route="bypass",
-            generated_at=generated_at,
             phase_hint=phase_hint,
         )
         out_path = bypass_dir / "trace_shape_manifest.json"
-        atomic_write_json(out_path, manifest, ensure_ascii=False, sort_keys=False, trailing_newline=False)
+        atomic_write_json(out_path, manifest, fmt=JsonFormat(sort_keys=False, ensure_ascii=False))
         print(
             f"[trace_shape_manifest] variants={len(capture_variants) or 'eager'} "
             f"rows={len(manifest.get('rows', []))} path={out_path}",
@@ -366,6 +331,18 @@ def _maybe_build_shape_manifest(
         return {"status": msg}
 
 
+def _main_trace_options(args: argparse.Namespace, *, steady_state: bool) -> _reader.TraceAnalysisOptions:
+    """Reader options for the main trace: every device-kernel aggregate and its launches, on the requested rank."""
+    return _reader.TraceAnalysisOptions(
+        top_k=0,
+        steady_state=steady_state,
+        framework=args.framework,
+        emit_launches=True,
+        require_single_rank=args.require_single_rank,
+        tensor_parallel_size=args.tensor_parallel_size or None,
+    )
+
+
 def _build_arg_parser() -> argparse.ArgumentParser:
     """Build the CLI parser mirroring the flags the handler forwards."""
     p = argparse.ArgumentParser(
@@ -373,7 +350,6 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--trace-input", required=True)
     p.add_argument("--session-id", default="")
-    p.add_argument("--top-k", type=int, default=10)
     p.add_argument("--workspace-path", default=os.environ.get("USER_DATA_PATH", "/workspace/hyperloom"))
     p.add_argument("--model-name", default="")
     p.add_argument("--framework", default="")
@@ -399,15 +375,15 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         type=int,
         default=int(os.environ.get("HYPERLOOM_NUM_DENOISE_STEPS", "0") or 0),
     )
-    # Diffusion analytic-ceiling inputs shared with the TraceLens CLI surface; parsed but unused on this route.
+    # The handler forwards these to both trace tools; this route does not use them.
     p.add_argument("--model-path", default=os.environ.get("MODEL_PATH", ""))
     p.add_argument("--precision", default="")
-    p.add_argument("--height", type=int, default=0)
-    p.add_argument("--width", type=int, default=0)
-    p.add_argument("--cfg-batch", type=int, default=0)
     p.add_argument("--dry-run", action="store_true")
     return p
 
+
+#: Hot-kernel candidates kept in the bypass report.
+_TOP_K = 10
 
 #: ``--steady-state-mode`` values that mean "do NOT window" (analyze the full trace).
 _STEADY_OFF_VALUES = frozenset({"", "0", "false", "off", "no", "none"})
@@ -432,7 +408,7 @@ def main(argv: list[str] | None = None) -> int:
     bypass_dir.mkdir(parents=True, exist_ok=True)
 
     trace_health_warnings: list[dict[str, Any]] = []
-    top_k = args.top_k if args.top_k and args.top_k > 0 else 15
+    top_k = _TOP_K
 
     # Mirrors the ``run_meta`` block tracelens_analysis.py returns so the caller's SBD V6 roofline event carries one
     # shape for both tools.
@@ -487,16 +463,9 @@ def main(argv: list[str] | None = None) -> int:
     else:
         try:
             # top_k=0 -> keep all device-kernel aggregates; candidate slicing uses top_k.
-            analyze = _reader.analyze_trace(
-                args.trace_input,
-                top_k=0,
-                steady_state=enable_steady,
-                framework=args.framework,
-                emit_launches=True,
-                require_single_rank=args.require_single_rank,
-                tensor_parallel_size=args.tensor_parallel_size or None,
-            )
+            analyze = _reader.analyze_trace(args.trace_input, _main_trace_options(args, steady_state=enable_steady))
         except Exception as exc:  # noqa: BLE001 — never abort the pipeline
+            log.warning("bypass trace analysis failed: %s", exc)
             analyze = {"status": "failed", "error": f"{type(exc).__name__}: {exc}"}
     run_meta["preflight"].update(
         {
@@ -684,7 +653,6 @@ def main(argv: list[str] | None = None) -> int:
         framework=args.framework,
         target_platform=args.target_platform,
         top_k=top_k,
-        discover_benchmarks=False,
     )
 
     analysis_md_path = bypass_dir / "analysis.md"
@@ -732,15 +700,17 @@ def main(argv: list[str] | None = None) -> int:
         _report.render_analysis_md(
             candidates,
             analyze,
-            model_name=args.model_name,
-            framework=args.framework,
-            target_platform=args.target_platform,
-            throughput_unit=throughput_unit,
-            metrics_csv_path=str(kernel_metrics_csv_path),
-            summary_csv_path=str(kernel_summary_csv_path),
+            _report.BypassReportContext(
+                model_name=args.model_name,
+                framework=args.framework,
+                target_platform=args.target_platform,
+                throughput_unit=throughput_unit,
+                metrics_csv_path=str(kernel_metrics_csv_path),
+                summary_csv_path=str(kernel_summary_csv_path),
+            ),
         ),
     )
-    atomic_write_json(candidates_path, candidates, ensure_ascii=False, sort_keys=False, trailing_newline=False)
+    atomic_write_json(candidates_path, candidates, fmt=JsonFormat(sort_keys=False, ensure_ascii=False))
     # CSV exports: full per-kernel metrics + category summary.
     write_text(kernel_metrics_csv_path, _report.build_metrics_csv(candidates))
     write_text(kernel_summary_csv_path, _report.build_category_summary_csv(candidates))
@@ -773,9 +743,7 @@ def main(argv: list[str] | None = None) -> int:
             "event_total": analyze.get("event_total", 0),
             "created_at": now_iso(timespec="seconds"),
         },
-        ensure_ascii=False,
-        sort_keys=False,
-        trailing_newline=False,
+        fmt=JsonFormat(sort_keys=False, ensure_ascii=False),
     )
 
     kernel_roofline = _report.build_kernel_roofline(
@@ -783,18 +751,8 @@ def main(argv: list[str] | None = None) -> int:
         analysis_md_path=str(analysis_md_path),
         kernel_candidates_path=str(candidates_path),
     )
-    atomic_write_json(
-        kernel_roofline_path, kernel_roofline, ensure_ascii=False, sort_keys=False, trailing_newline=False
-    )
-
-    # Optional rocprof-compute enrichment (opt-in; enriches the sidecar in place).
-    rocprof_enrich: dict[str, Any] = (
-        {"status": "disabled"}
-        if args.dry_run
-        else _maybe_enrich_rocprof(kernel_roofline_path, candidates_path, run_dir)
-    )
-    summary["rocprof_enrich"] = rocprof_enrich
-    atomic_write_json(summary_path, summary, ensure_ascii=False, sort_keys=False, trailing_newline=False)
+    atomic_write_json(kernel_roofline_path, kernel_roofline, fmt=JsonFormat(sort_keys=False, ensure_ascii=False))
+    atomic_write_json(summary_path, summary, fmt=JsonFormat(sort_keys=False, ensure_ascii=False))
 
     # Kernel-fusion opportunities: launch adjacency -> fusable clusters.
     fusion = _report.build_fusion(analyze)
@@ -804,7 +762,7 @@ def main(argv: list[str] | None = None) -> int:
     diffusion_roofline_path: str | None = None
     if framework_registry.is_scriptable(args.framework):
         try:
-            from .diffusion_roofline import build_report_from_bypass
+            from .diffusion_roofline import WorkloadTotals, build_report_from_bypass
 
             _diff_steps = resolve_perstep_divisor(
                 requested_steps=requested_denoise_steps,
@@ -818,13 +776,13 @@ def main(argv: list[str] | None = None) -> int:
                 analyze.get("timeline") or {},
                 _diff_steps,
                 top_k,
-                totals=_workload_totals,
-                kernels_aggregated=len(_all_kernels),
+                workload=WorkloadTotals(_workload_totals, kernel_count=len(_all_kernels)),
             )
             _diff_path = run_dir / "diffusion_roofline.json"
-            atomic_write_json(_diff_path, _diff_report, ensure_ascii=False, sort_keys=False, trailing_newline=False)
+            atomic_write_json(_diff_path, _diff_report, fmt=JsonFormat(sort_keys=False, ensure_ascii=False))
             diffusion_roofline_path = str(_diff_path)
-        except Exception:  # noqa: BLE001 - best-effort sidecar, never blocks the run
+        except Exception as exc:  # noqa: BLE001 - best-effort sidecar, never blocks the run
+            log.warning("diffusion roofline sidecar failed: %s", exc)
             diffusion_roofline_path = None
 
     # Variant-discriminating TraceShapeManifest (P0-A / WP-1).

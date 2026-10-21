@@ -50,6 +50,23 @@ _TRAJECTORY_STATUS: dict[str, str] = {
 # Progress notes a task's ``history`` retains, oldest dropped first.
 _MAX_PROGRESS_NOTES = 120
 _DISPATCH_CLASSES = frozenset({"llm", "coordinator", "inline"})
+_QUEUED_SQL = "SELECT * FROM tasks WHERE state='queued' ORDER BY created_at ASC"
+_RUNNING_SQL = "SELECT * FROM tasks WHERE state='running' ORDER BY updated_at ASC"
+
+
+@dataclass(frozen=True)
+class TaskSpec:
+    """What a new ``queued`` task row is created from."""
+
+    kind: str
+    params: dict
+    idempotency_key: str
+    requires_lanes: list[str] | None = None
+    side_effects: list[str] | None = None
+    lease_ttl_sec: int = 0
+    task_id: str | None = None
+    dispatch_class: str | None = None
+    dispatch_origin: Mapping[str, Any] | None = None
 
 
 @dataclass
@@ -194,19 +211,7 @@ def _record_task_state(
     )
 
 
-def _insert_queued_task(
-    cur: Any,
-    *,
-    kind: str,
-    params: dict,
-    idempotency_key: str,
-    requires_lanes: list[str] | None,
-    side_effects: list[str] | None,
-    lease_ttl_sec: int,
-    task_id: str | None,
-    dispatch_class: str | None,
-    dispatch_origin: Mapping[str, Any] | None,
-) -> Task:
+def _insert_queued_task(cur: Any, spec: TaskSpec) -> Task:
     """INSERT one ``queued`` row on ``cur`` and return the task it holds.
 
     The row and the returned :class:`Task` are built from the same values, so
@@ -214,6 +219,7 @@ def _insert_queued_task(
     ``cur`` belongs to the caller's write transaction.
     """
     now = now_iso()
+    dispatch_class = spec.dispatch_class
     _validate_dispatch_class(dispatch_class)
     initial_history: list[dict[str, Any]] = []
     if dispatch_class:
@@ -222,19 +228,19 @@ def _insert_queued_task(
                 "dispatch_class": dispatch_class,
                 "allowed": True,
                 "denial_rule": None,
-                **_validated_dispatch_origin(dispatch_origin),
+                **_validated_dispatch_origin(spec.dispatch_origin),
                 "ts": now,
             }
         )
     task = Task(
-        task_id=task_id or uuid.uuid4().hex,
-        kind=kind,
+        task_id=spec.task_id or uuid.uuid4().hex,
+        kind=spec.kind,
         state="queued",
-        params=params,
-        idempotency_key=idempotency_key,
-        requires_lanes=[] if requires_lanes is None else list(requires_lanes),
-        side_effects=[] if side_effects is None else list(side_effects),
-        lease_ttl_sec=lease_ttl_sec,
+        params=spec.params,
+        idempotency_key=spec.idempotency_key,
+        requires_lanes=[] if spec.requires_lanes is None else list(spec.requires_lanes),
+        side_effects=[] if spec.side_effects is None else list(spec.side_effects),
+        lease_ttl_sec=spec.lease_ttl_sec,
         history=initial_history,
         created_at=now,
         updated_at=now,
@@ -269,19 +275,7 @@ def _insert_queued_task(
     return task
 
 
-def create_in_cursor(
-    cur: Any,
-    *,
-    kind: str,
-    params: dict,
-    idempotency_key: str,
-    requires_lanes: list[str] | None = None,
-    side_effects: list[str] | None = None,
-    lease_ttl_sec: int = 0,
-    task_id: str | None = None,
-    dispatch_class: str | None = None,
-    dispatch_origin: Mapping[str, Any] | None = None,
-) -> tuple[Task, bool]:
+def create_in_cursor(cur: Any, spec: TaskSpec) -> tuple[Task, bool]:
     """Create (or adopt) a task row on a cursor the caller already owns.
 
     Unlike :meth:`TaskRegistry.create_or_return_existing`, which opens its own
@@ -289,13 +283,8 @@ def create_in_cursor(
 
     Args:
         cur: Open cursor inside the caller's write transaction.
-        kind: Task kind tag.
-        params: Task parameters serialised into the row.
-        idempotency_key: UNIQUE key used to detect an existing task.
-        requires_lanes: Lanes the task must hold while running.
-        side_effects: Declared side effects of the task.
-        lease_ttl_sec: Lease time-to-live in seconds.
-        task_id: Optional explicit task id; generated when omitted.
+        spec: The task to create; ``idempotency_key`` is the UNIQUE key used to
+            detect an existing task.
 
     Returns:
         tuple[Task, bool]: ``(task, was_existing)``.
@@ -304,31 +293,17 @@ def create_in_cursor(
         TerminalTaskReuse: When the key already names a task in a terminal
             state.
     """
-    _validate_dispatch_class(dispatch_class)
-    cur.execute("SELECT * FROM tasks WHERE idempotency_key=?", (idempotency_key,))
+    _validate_dispatch_class(spec.dispatch_class)
+    cur.execute("SELECT * FROM tasks WHERE idempotency_key=?", (spec.idempotency_key,))
     existing = cur.fetchone()
     if existing is not None:
         task = Task.from_row(existing)
-        _validate_dispatch_reuse(task, dispatch_class)
+        _validate_dispatch_reuse(task, spec.dispatch_class)
         if task.state in TERMINAL_STATES:
-            raise TerminalTaskReuse(f"idempotency key {idempotency_key!r} already names a {task.state} task")
+            raise TerminalTaskReuse(f"idempotency key {spec.idempotency_key!r} already names a {task.state} task")
         return task, True
 
-    return (
-        _insert_queued_task(
-            cur,
-            kind=kind,
-            params=params,
-            idempotency_key=idempotency_key,
-            requires_lanes=requires_lanes,
-            side_effects=side_effects,
-            lease_ttl_sec=lease_ttl_sec,
-            task_id=task_id,
-            dispatch_class=dispatch_class,
-            dispatch_origin=dispatch_origin,
-        ),
-        False,
-    )
+    return _insert_queued_task(cur, spec), False
 
 
 def _is_progress_note(entry: Any) -> bool:
@@ -348,6 +323,16 @@ def _drop_oldest_progress_notes(history: list[Any], keep: int) -> list[Any]:
             continue
         kept.append(entry)
     return kept
+
+
+def _cancel_queued_row(cur: Any, task_id: str, history_json: str, *, now: str, reason: str) -> None:
+    """Move one queued row to ``cancelled`` inside the caller's transaction."""
+    history = json.loads(history_json)
+    history.append({"from": "queued", "to": "cancelled", "ts": now, "evidence": {"reason": reason}})
+    cur.execute(
+        "UPDATE tasks SET state='cancelled', history=?, updated_at=? WHERE task_id=?",
+        (json.dumps(history), now, task_id),
+    )
 
 
 class TaskRegistry:
@@ -398,15 +383,17 @@ class TaskRegistry:
         async with self.db.transaction() as cur:
             task = _insert_queued_task(
                 cur,
-                kind=kind,
-                params=params,
-                idempotency_key=idempotency_key,
-                requires_lanes=requires_lanes,
-                side_effects=side_effects,
-                lease_ttl_sec=lease_ttl_sec,
-                task_id=task_id,
-                dispatch_class=dispatch_class,
-                dispatch_origin=dispatch_origin,
+                TaskSpec(
+                    kind=kind,
+                    params=params,
+                    idempotency_key=idempotency_key,
+                    requires_lanes=requires_lanes,
+                    side_effects=side_effects,
+                    lease_ttl_sec=lease_ttl_sec,
+                    task_id=task_id,
+                    dispatch_class=dispatch_class,
+                    dispatch_origin=dispatch_origin,
+                ),
             )
         return task, False
 
@@ -443,6 +430,11 @@ class TaskRegistry:
         if row is None:
             raise TaskNotFound(task_id)
         return Task.from_row(row)
+
+    async def find(self, task_id: str, *, kind: str) -> Task | None:
+        """Fetch the task of ``kind`` with this id, or ``None`` when there is no such row."""
+        row = await self.db.fetchone("SELECT * FROM tasks WHERE task_id=? AND kind=?", (task_id, kind))
+        return Task.from_row(row) if row is not None else None
 
     async def transition(
         self,
@@ -530,21 +522,19 @@ class TaskRegistry:
 
     async def queued(self) -> list[Task]:
         """Return all queued tasks ordered oldest-first."""
-        rows = await self.db.fetchall("SELECT * FROM tasks WHERE state='queued' ORDER BY created_at ASC")
-        return [Task.from_row(r) for r in rows]
+        return [Task.from_row(r) for r in await self.db.fetchall(_QUEUED_SQL)]
 
     async def running(self) -> list[Task]:
         """Return all running tasks ordered least-recently-updated-first."""
-        rows = await self.db.fetchall("SELECT * FROM tasks WHERE state='running' ORDER BY updated_at ASC")
-        return [Task.from_row(r) for r in rows]
+        return [Task.from_row(r) for r in await self.db.fetchall(_RUNNING_SQL)]
 
     def running_context_sync(self) -> list[Task]:
-        """Read running tasks least-recently-updated-first off the sync path."""
-        rows = self.db.fetchall_sync(
-            "SELECT * FROM tasks WHERE state='running' ORDER BY updated_at ASC",
-            (),
-        )
-        return [Task.from_row(row) for row in rows]
+        """:meth:`running` off the sync path."""
+        return [Task.from_row(row) for row in self.db.fetchall_sync(_RUNNING_SQL)]
+
+    def queued_context_sync(self) -> list[Task]:
+        """:meth:`queued` off the sync path."""
+        return [Task.from_row(row) for row in self.db.fetchall_sync(_QUEUED_SQL)]
 
     def queued_kind_counts_sync(self) -> dict[str, int]:
         """Return {kind: count} for queued tasks, synchronously."""
@@ -643,24 +633,23 @@ class TaskRegistry:
             for task_id, kind, history_json in rows:
                 if str(task_id or "").strip() in spared:
                     continue
-                history = json.loads(history_json)
-                history.append(
-                    {
-                        "from": "queued",
-                        "to": "cancelled",
-                        "ts": now,
-                        "evidence": {"reason": reason},
-                    }
-                )
-                cur.execute(
-                    "UPDATE tasks SET state='cancelled', history=?, updated_at=? WHERE task_id=?",
-                    (json.dumps(history), now, task_id),
-                )
+                _cancel_queued_row(cur, task_id, history_json, now=now, reason=reason)
                 cancelled.append(task_id)
                 kinds[task_id] = kind
         for task_id in cancelled:
             _record_task_state(task_id, kinds[task_id], "cancelled", reason=reason)
         return cancelled
+
+    async def cancel_if_queued(self, task_id: str, *, kind: str, reason: str) -> bool:
+        """Cancel ``task_id`` if it is a ``kind`` row that has not started; returns whether it was cancelled."""
+        async with self.db.transaction() as cur:
+            cur.execute("SELECT history FROM tasks WHERE task_id=? AND kind=? AND state='queued'", (task_id, kind))
+            row = cur.fetchone()
+            if row is None:
+                return False
+            _cancel_queued_row(cur, task_id, row["history"], now=now_iso(), reason=reason)
+        _record_task_state(task_id, kind, "cancelled", reason=reason)
+        return True
 
     async def cancel_queued(
         self,
@@ -679,19 +668,7 @@ class TaskRegistry:
             for task_id, kind, history_json in rows:
                 if str(kind or "").strip() in allowed:
                     continue
-                history = json.loads(history_json)
-                history.append(
-                    {
-                        "from": "queued",
-                        "to": "cancelled",
-                        "ts": now,
-                        "evidence": {"reason": reason},
-                    }
-                )
-                cur.execute(
-                    "UPDATE tasks SET state='cancelled', history=?, updated_at=? WHERE task_id=?",
-                    (json.dumps(history), now, task_id),
-                )
+                _cancel_queued_row(cur, task_id, history_json, now=now, reason=reason)
                 cancelled.append(task_id)
                 kinds[task_id] = kind
         for task_id in cancelled:
@@ -706,6 +683,7 @@ __all__ = [
     "Task",
     "TaskNotFound",
     "TaskRegistry",
+    "TaskSpec",
     "TerminalTaskReuse",
     "create_in_cursor",
 ]

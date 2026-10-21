@@ -157,31 +157,38 @@ class Exemption:
     reason: str
 
 
+@dataclass(frozen=True)
+class PullRequestRef:
+    """Where one pull request lives on the GitHub REST API, and the token that reads it."""
+
+    repo: str
+    number: str
+    token: str
+    api: str = "https://api.github.com"
+
+
 def check_exemption(
     labels: list[str],
-    repo: str,
-    pr_number: str,
-    token: str,
-    api: str = "https://api.github.com",
+    pr: PullRequestRef,
     get: Callable[[str, str], tuple[object, str]] = _api_get,
 ) -> Exemption:
     """Decide whether ``size-exception`` exempts this PR; any doubt is a refusal."""
     if EXEMPT_LABEL not in labels:
         return Exemption(False, f"no '{EXEMPT_LABEL}' label")
-    if not (repo and pr_number and token):
+    if not (pr.repo and pr.number and pr.token):
         return Exemption(False, f"'{EXEMPT_LABEL}' is present but GITHUB_REPOSITORY/PR_NUMBER/GH_TOKEN is unset")
     try:
-        url: str | None = f"{api}/repos/{repo}/issues/{pr_number}/timeline?per_page=100"
+        url: str | None = f"{pr.api}/repos/{pr.repo}/issues/{pr.number}/timeline?per_page=100"
         actor = None
         while url:
-            events, link = get(url, token)
+            events, link = get(url, pr.token)
             for ev in events if isinstance(events, list) else []:
                 if ev.get("event") == "labeled" and (ev.get("label") or {}).get("name") == EXEMPT_LABEL:
                     actor = (ev.get("actor") or {}).get("login")
             url = _next_link(link)
         if not actor:
             return Exemption(False, f"'{EXEMPT_LABEL}' is present but no labeled event names who added it")
-        perm, _ = get(f"{api}/repos/{repo}/collaborators/{actor}/permission", token)
+        perm, _ = get(f"{pr.api}/repos/{pr.repo}/collaborators/{actor}/permission", pr.token)
         perm = perm if isinstance(perm, dict) else {}
         # ``permission`` is the legacy field (maintain reads as write); ``role_name`` names custom roles.
         role = perm.get("role_name") or perm.get("permission")
@@ -220,10 +227,12 @@ def cmd_size(args: argparse.Namespace) -> int:
         labels = json.loads(os.environ.get("PR_LABELS") or "[]")
         ex = check_exemption(
             labels,
-            os.environ.get("GITHUB_REPOSITORY", ""),
-            os.environ.get("PR_NUMBER", ""),
-            os.environ.get("GH_TOKEN", ""),
-            os.environ.get("GITHUB_API_URL", "https://api.github.com"),
+            PullRequestRef(
+                os.environ.get("GITHUB_REPOSITORY", ""),
+                os.environ.get("PR_NUMBER", ""),
+                os.environ.get("GH_TOKEN", ""),
+                os.environ.get("GITHUB_API_URL", "https://api.github.com"),
+            ),
         )
         if ex.granted:
             msg = f"{total} production Python lines changed exceeds the {args.limit}-line budget; exempt: {ex.reason}."

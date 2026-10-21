@@ -170,11 +170,11 @@ def test_vllm_identity_is_read_from_the_record_vllm_actually_writes(tmp_path: Pa
     setting is judged unconfirmed, and the replay verdict is insufficient by
     construction rather than by evidence.
     """
-    from hyperloom.common.launch_log_evidence import observed_vllm_server_identity_from_log
+    from hyperloom.common.launch_log_evidence import observed_server_identity_from_log
 
     log = tmp_path / "server.log"
     log.write_text(_VLLM_NON_DEFAULT, encoding="utf-8")
-    identity = observed_vllm_server_identity_from_log(str(log))
+    identity = observed_server_identity_from_log(str(log), "vllm")
 
     assert identity["model"] == "/models/m"
     assert identity["tensor_parallel_size"] == 4
@@ -188,11 +188,11 @@ def test_a_non_literal_value_skips_its_key_rather_than_the_whole_record(tmp_path
     """vLLM prints object reprs inside that dict -- ``CompilationConfig(...)``.
     A single ``literal_eval`` of the dict raises on the first one and yields
     nothing, which is what makes the whole record look unreadable."""
-    from hyperloom.common.launch_log_evidence import observed_vllm_server_identity_from_log
+    from hyperloom.common.launch_log_evidence import observed_server_identity_from_log
 
     log = tmp_path / "server.log"
     log.write_text(_VLLM_NON_DEFAULT, encoding="utf-8")
-    identity = observed_vllm_server_identity_from_log(str(log))
+    identity = observed_server_identity_from_log(str(log), "vllm")
 
     assert "compilation_config" not in identity
     assert identity["model"] == "/models/m", "the literal keys must survive the non-literal one"
@@ -201,12 +201,12 @@ def test_a_non_literal_value_skips_its_key_rather_than_the_whole_record(tmp_path
 def test_the_vllm_binding_carries_the_width_and_digests_the_model(tmp_path: Path) -> None:
     import hashlib
 
-    from hyperloom.common.launch_log_evidence import observed_vllm_server_identity_from_log
+    from hyperloom.common.launch_log_evidence import observed_server_identity_from_log
     from hyperloom.orchestrator.actions.executors._launch_evidence import _binding_from_vllm_identity
 
     log = tmp_path / "server.log"
     log.write_text(_VLLM_NON_DEFAULT, encoding="utf-8")
-    binding = _binding_from_vllm_identity(observed_vllm_server_identity_from_log(str(log)))
+    binding = _binding_from_vllm_identity(observed_server_identity_from_log(str(log), "vllm"))
 
     assert binding["tp"] == "4"
     assert binding["model_digest"] == "sha256:" + hashlib.sha256(b"/models/m").hexdigest()
@@ -214,11 +214,11 @@ def test_the_vllm_binding_carries_the_width_and_digests_the_model(tmp_path: Path
 
 
 def test_a_log_with_no_such_record_yields_no_vllm_identity(tmp_path: Path) -> None:
-    from hyperloom.common.launch_log_evidence import observed_vllm_server_identity_from_log
+    from hyperloom.common.launch_log_evidence import observed_server_identity_from_log
 
     log = tmp_path / "server.log"
     log.write_text("(APIServer pid=1) INFO starting up\n", encoding="utf-8")
-    assert observed_vllm_server_identity_from_log(str(log)) == {}
+    assert observed_server_identity_from_log(str(log), "vllm") == {}
 
 
 def _vllm_slot(tmp_path, log_text: str):
@@ -319,3 +319,23 @@ def test_a_brace_inside_a_vllm_model_path_does_not_truncate_the_record(tmp_path)
         model_path="/models/m}",
     )
     assert evidence["observed_server_identity"]["tensor_parallel_size"] == 4
+
+
+def test_a_failing_server_log_reader_propagates_from_the_entry_point(tmp_path, monkeypatch):
+    import pytest
+
+    from hyperloom.orchestrator.actions.executors import _launch_evidence as evidence_module
+
+    def _boom(*_args, **_kwargs):
+        raise RuntimeError("log reader bug")
+
+    monkeypatch.setattr(evidence_module, "observed_server_config_from_log", _boom)
+    config, slot, log = _vllm_slot(tmp_path, "INFO 09-14 07:00:00 [config.py:1] anything\n")
+
+    with pytest.raises(RuntimeError, match="log reader bug"):
+        evidence_module.build_launch_evidence(
+            config_path=config,
+            actual_server_log=log,
+            framework="vllm",
+            slot=slot,
+        )

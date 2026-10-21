@@ -1,88 +1,21 @@
-#!/usr/bin/env bash
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-# Kernel-agent installer.
-#
-# Base install is intentionally small and deterministic:
-#   - ray[default]==2.44.1 + click<8.3.0
-#   - TraceLens editable install + CLI verification
-#   - GEAK per-kernel + e2e optimizer backends
-#
-# The installer prepares all kernel-agent backends in one pass.
+# Kernel-tool steps of install.sh: Ray + the Ray head, TraceLens, GEAK, the
+# Claude CLI and the kernel-agent env file. install.sh sources this file in a
+# subshell after its own setup (paths, .env, credentials, install lock) and
+# calls install_kernel_tools; the file has no entry point of its own.
 
-set -euo pipefail
-
-# Ray/K8s subprocesses may inherit a minimal PATH; git/apt/node live under
-# /usr/bin even when callers only prepend /opt/venv/bin. Prepend the
-# standard system bins so multi-node RayJob children resolve them.
-export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
-# Re-assert the active virtualenv ahead of the system bins prepended above.
-# Callers may only put the venv on PATH (e.g. /venv/bin) or activate it via
-# $VIRTUAL_ENV; otherwise the system-bins prepend shadows the venv python3
-# with /usr/bin/python3, whose apt-managed packages (e.g. packaging) have no
-# RECORD file and break `pip install`/uninstall. Probe the activated venv
-# first, then the common ROCm image locations (/opt/venv, /venv, and
-# /opt/python on the ROCm 10 vLLM images). A PYTHON the parent installer
-# selected wins, so the bare python3 calls below install into its environment.
-if [ -n "${PYTHON:-}" ] && [ -x "$PYTHON" ]; then
-  export PATH="$(dirname -- "$PYTHON"):$PATH"
-else
-  for _venv_bin in "${VIRTUAL_ENV:+${VIRTUAL_ENV}/bin}" /opt/venv/bin /venv/bin /opt/python/bin; do
-    if [ -n "${_venv_bin}" ] && [ -x "${_venv_bin}/python" ]; then
-      export PATH="${_venv_bin}:$PATH"
-      break
-    fi
-  done
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+  echo "install_kernel_tools.sh is sourced by install.sh; run src/hyperloom/inference_optimizer/assets/install.sh" >&2
+  exit 2
 fi
 
-# Default every writable artefact location under $USER_DATA_PATH so a single
-# session-dir move relocates Magpie / source mirrors / the
-# kernel-agent env file. Operators can still pin individual paths via env
-# overrides (HYPERLOOM_ROOT, MAGPIE_PATH, etc.) — the defaults below take
-# effect only when the corresponding env var is unset.
-#
-# REPO_ROOT defaults to the on-disk source location (this script lives at
-# src/hyperloom/inference_optimizer/assets/install_kernel_tools.sh, so
-# REPO_ROOT is four levels up).
-# Operator-provided read-only inputs
-# (TRACELENS_ROOT, TRACELENS_INTERNAL_ROOT)
-# may stay outside USER_DATA_PATH.
-# The default public TraceLens checkout is cloned under USER_DATA_PATH/runtime
-# like Magpie/InferenceX so its env path is safe across pods.
-#
-# Removed envs: WORKSPACE_PATH / WORKSPACE_ROOT (collapsed into the
-# USER_DATA_PATH-rooted defaults). If your launcher exported these,
-# either rename to USER_DATA_PATH or simply drop them.
-REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/../../../.." && pwd)}"
-# Capture whether USER_DATA_PATH was provided BEFORE applying the default so we
-# can warn loudly on the silent fallback. ${VAR:+1} is empty when VAR is unset
-# or empty, which is exactly the case the :- default below would absorb.
-_user_data_was_set="${USER_DATA_PATH:+1}"
-# Container images ship a writable /workspace; a bare-metal host off root has
-# neither it nor permission to create it, so the mkdir below would abort.
-_default_workspace_root() {
-  # The nearest existing ancestor decides: -w is false for a path that does not
-  # exist yet, which would divert root off a /workspace it can still create.
-  _ws_probe=/workspace
-  while [ ! -e "$_ws_probe" ] && [ "$_ws_probe" != / ]; do _ws_probe=$(dirname "$_ws_probe"); done
-  if [ -w "$_ws_probe" ]; then printf '%s' /workspace/hyperloom; else printf '%s' "$(pwd -P)/session"; fi
-}
-USER_DATA_PATH="${USER_DATA_PATH:-$(_default_workspace_root)}"
-if [ -z "${_user_data_was_set}" ]; then
-  echo "[install WARN] USER_DATA_PATH not set; defaulting to ${USER_DATA_PATH}. Set USER_DATA_PATH to persist artifacts under your data root." >&2
-fi
-HYPERLOOM_RUNTIME_DIR="${HYPERLOOM_RUNTIME_DIR:-${USER_DATA_PATH}/runtime}"
-KERNEL_AGENT_ENV="${KERNEL_AGENT_ENV:-${HYPERLOOM_RUNTIME_DIR}/kernel-agent.env.sh}"
-# Legacy variable kept for compatibility; open-source checkouts use _open_source_root.
-HYPERLOOM_ROOT="${HYPERLOOM_ROOT:-${HYPERLOOM_RUNTIME_DIR}/source-mirrors}"
-# Writable, repo-local base for auto-cloned deps: $HYPERLOOM_CACHE_DIR else
-# $REPO_ROOT/.cache, cloned per revision (<name>@<sha>). Not /tmp (a reaper can
-# wipe it mid-run, leaving TRACELENS_ROOT dangling — #722).
-_open_source_root="${HYPERLOOM_CACHE_DIR:-${REPO_ROOT}/.cache}"
-# MAGPIE_PATH is the single override shared with the Python runtime; this
-# installer never fetches Magpie itself, it only records the path.
-MAGPIE_PATH="${MAGPIE_PATH:-${_open_source_root}/Magpie}"
+# Ray/K8s subprocesses may inherit a minimal PATH; prepend the standard system
+# bins, then the interpreter install.sh selected, so the bare python3 calls
+# below install into its environment.
+export PATH="$(dirname -- "$PYTHON"):/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
+
 # Resolve MAGPIE_PYTHON dynamically. The previous default
 # ${MAGPIE_PATH}/venv/bin/python assumed a Magpie-private venv, but
 # src/hyperloom/inference_optimizer/assets/install.sh's ensure_magpie() pip
@@ -148,8 +81,7 @@ _magpie_pythonpath_arg() {
 # Keep REPO_ROOT on PYTHONPATH so subprocesses can ``import hyperloom`` under a
 # ``pip install --target $REPO_ROOT`` layout (the target dir is not on the
 # default sys.path). Put REPO_ROOT first, then MAGPIE_PATH, then any pre-existing
-# PYTHONPATH; write_env_file recomposes this the same way just before persisting
-# it, so a stale .env sourced later cannot drop REPO_ROOT.
+# PYTHONPATH, including one install.sh loaded from .env.
 PYTHONPATH="$(_compose_pythonpath "${REPO_ROOT:-}" "$(_magpie_pythonpath_arg)" "${PYTHONPATH:-}")"
 INFERENCEX_PATH="${INFERENCEX_PATH:-}"
 # TraceLens base repo is required; the internal extension is OPTIONAL.
@@ -161,7 +93,7 @@ INFERENCEX_PATH="${INFERENCEX_PATH:-}"
 # (env / .env); leave it unset for the base-only report. No separate toggle.
 TRACELENS_REPO="https://github.com/AMD-AGI/TraceLens.git"
 # TraceLens SHA.
-TRACELENS_REF="6489fbc288d3664857aa3204835a1297d6422c22"
+TRACELENS_REF="614c597bc0c66cabf6a15152037324acc7386090"
 # Operator override iff TRACELENS_ROOT points OUTSIDE the pod-local default.
 # The persistent kernel-agent env re-exports the resolved default path, so a
 # presence-only check (${VAR:+1}) would misclassify it as an override and skip
@@ -196,45 +128,6 @@ _home_dir() {
   while [ -n "$h" ] && [ "${h%/}" != "$h" ]; do h="${h%/}"; done
   printf '%s' "${h:-/}"
 }
-# Resolve a git ref to a commit SHA (7-40 hex passes through; branch/tag via
-# ls-remote, falling back to the raw ref). The SHA keys the per-revision cache.
-_resolve_ref_sha() {
-  local repo="$1" ref="$2" sha=""
-  if [[ "$ref" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
-    printf '%s' "$ref"
-    return 0
-  fi
-  sha="$(git ls-remote "$repo" "$ref" 2>/dev/null | awk 'NR==1{print $1}')"
-  if [ -z "$sha" ]; then
-    # Loud, not silent: a raw-ref cache key drops the per-revision guarantee.
-    echo "[kernel-agent WARN] could not resolve '$ref' at $repo to a commit SHA (network or bad ref); using '$ref' as the per-revision cache key -- stale-checkout guard weakened. Pin *_REF to a 40-hex SHA or restore network access." >&2
-    sha="$ref"
-  fi
-  printf '%s' "$sha"
-}
-
-# Bound cache growth: keep the newest $HYPERLOOM_CACHE_KEEP (default 3, 0 disables)
-# <name>@<sha> checkouts per dep, prune older ones. A moving branch ref (GEAK
-# `main`) resolves to a new SHA each HEAD bump, so the cache would grow unbounded.
-# Lock-held; the just-installed revision is newest, so always retained.
-_prune_dep_cache() {
-  local keep="${HYPERLOOM_CACHE_KEEP:-3}"
-  case "$keep" in ''|*[!0-9]*) keep=3 ;; esac
-  [ "$keep" -eq 0 ] && return 0
-  local name stale listing
-  for name in "$@"; do
-    # `|| true`: no-match glob fails `ls` under `set -euo pipefail`. Collect, then act.
-    listing="$(ls -dt "${_open_source_root}/${name}@"* 2>/dev/null | tail -n +"$((keep + 1))" || true)"
-    [ -n "$listing" ] || continue
-    while IFS= read -r stale; do
-      [ -n "$stale" ] && [ -d "$stale" ] || continue
-      log "pruning stale dep cache (keeping newest ${keep} ${name}@*): ${stale}"
-      rm -rf -- "$stale" 2>/dev/null || true
-    done <<EOF
-$listing
-EOF
-  done
-}
 _TRACELENS_SHA="$(_resolve_ref_sha "$TRACELENS_REPO" "$TRACELENS_REF")"
 _tracelens_default_root="$(_canonicalize_path "${_open_source_root}/TraceLens@${_TRACELENS_SHA}")"
 _tracelens_root_was_set=""
@@ -247,63 +140,8 @@ TRACELENS_INTERNAL_ROOT="${TRACELENS_INTERNAL_ROOT:-}"
 # Writable mirror when the optional internal extension is on a read-only mount.
 TRACELENS_MIRROR_DIR="${TRACELENS_MIRROR_DIR:-${_open_source_root}/TraceLens-internal}"
 
-# Credentials fallback: env always wins. If any supported LLM credential is
-# missing from env, source $REPO_ROOT/.env but protect already-set values.
-REPO_ROOT="${REPO_ROOT:-$(pwd)}"
 DOTENV="${REPO_ROOT}/.env"
 
-# Vars whose already-resolved value must survive the `. $REPO_ROOT/.env` below.
-# The dotenv is a *credentials* fallback, but it is a full env file: sourcing it
-# under `set -a` re-imports every path var it happens to carry. A stale entry —
-# or one written by a DIFFERENT checkout / workspace sharing this .env — then
-# silently overwrites what the caller resolved, and the run installs against one
-# workspace while writing its env file into another (#Hyperloom-2 / atom mixup).
-# Only non-empty pre-source values are restored, so the dotenv still fills gaps.
-_DOTENV_PROTECTED_VARS='REPO_ROOT USER_DATA_PATH HYPERLOOM_RUNTIME_DIR KERNEL_AGENT_ENV HYPERLOOM_ROOT
-MAGPIE_PATH INFERENCEX_PATH TRACELENS_ROOT TRACELENS_INTERNAL_ROOT
-GEAK_ROOT GEAK_E2E_RUNNER PYTHONPATH'
-
-if [ -z "${ANTHROPIC_BASE_URL:-}" ] || [ -z "${ANTHROPIC_API_KEY:-}" ] \
-   || [ -z "${ANTHROPIC_AUTH_TOKEN:-}" ] || [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
-  if [ -f "$REPO_ROOT/.env" ]; then
-    _snap_anthropic_url="${ANTHROPIC_BASE_URL-}"
-    _snap_anthropic_key="${ANTHROPIC_API_KEY-}"
-    _snap_anthropic_token="${ANTHROPIC_AUTH_TOKEN-}"
-    # The subscription token is snapshotted like the other three: without it a
-    # stale token in .env silently replaces the one the caller exported.
-    _snap_claude_oauth="${CLAUDE_CODE_OAUTH_TOKEN-}"
-    # Snapshotted like the credentials above rather than via
-    # _DOTENV_PROTECTED_VARS, whose mismatch warning prints the value -- this one
-    # usually carries the gateway secret.
-    _snap_anthropic_headers="${ANTHROPIC_CUSTOM_HEADERS-}"
-    for _v in $_DOTENV_PROTECTED_VARS; do
-      eval "_snap_prot_${_v}=\"\${${_v}-}\""
-    done
-    set -a
-    # shellcheck disable=SC1091
-    . "$REPO_ROOT/.env"
-    set +a
-    [ -n "$_snap_anthropic_url" ] && export ANTHROPIC_BASE_URL="$_snap_anthropic_url"
-    [ -n "$_snap_anthropic_key" ] && export ANTHROPIC_API_KEY="$_snap_anthropic_key"
-    [ -n "$_snap_anthropic_token" ] && export ANTHROPIC_AUTH_TOKEN="$_snap_anthropic_token"
-    [ -n "$_snap_claude_oauth" ] && export CLAUDE_CODE_OAUTH_TOKEN="$_snap_claude_oauth"
-    [ -n "$_snap_anthropic_headers" ] && export ANTHROPIC_CUSTOM_HEADERS="$_snap_anthropic_headers"
-    for _v in $_DOTENV_PROTECTED_VARS; do
-      eval "_snap_val=\"\${_snap_prot_${_v}-}\""
-      if [ -n "${_snap_val}" ]; then
-        eval "_cur_val=\"\${${_v}-}\""
-        if [ "${_cur_val}" != "${_snap_val}" ]; then
-          echo "[kernel-agent] .env would have overridden ${_v}=${_snap_val} with ${_cur_val}; keeping the caller's value" >&2
-        fi
-        eval "export ${_v}=\"\${_snap_prot_${_v}}\""
-      fi
-      unset "_snap_prot_${_v}"
-    done
-    unset _v _snap_val _cur_val
-    unset _snap_anthropic_url _snap_anthropic_key _snap_anthropic_token _snap_claude_oauth _snap_anthropic_headers
-    echo "[kernel-agent] loaded credentials fallback from $REPO_ROOT/.env (env wins)"
-  fi
-fi
 # kernel-agent consumes ANTHROPIC_* and nothing else. Translating a retired
 # DEEPSEEK_* config into the standard variables belongs to whoever owns the
 # entrypoint -- assets/install.sh for a chained install, llm_config for the
@@ -341,19 +179,14 @@ if [ -z "${GEAK_ROOT:-}" ]; then
   GEAK_ROOT="${_open_source_root}/GEAK@${_GEAK_SHA}"
 fi
 GEAK_E2E_RUNNER="${GEAK_E2E_RUNNER:-${GEAK_ROOT}/interface/run_e2e.py}"
-GEAK_CLAUDE_MODEL_VAL="${GEAK_CLAUDE_MODEL:-${CLAUDE_MODEL:-claude-opus-5}}"
+GEAK_CLAUDE_MODEL_VAL="${GEAK_CLAUDE_MODEL:-${CLAUDE_MODEL:-claude-opus-5-5}}"
 # Run mode for the GEAKv4 Claude Code workflow. ``full`` (default) selects the
 # 2 h / 5-round preset; ``quick`` selects the 1 h / 2-round smoke-test preset.
 # GEAK still honours later CLI ``--mode`` or LLM-parsed task-hint overrides.
 GEAK_RUN_MODE_VAL="${GEAK_RUN_MODE:-full}"
-# Validate inline (the ``die`` helper is defined further down; calling it
-# from this top-level scope would error with "die: command not found").
 case "$GEAK_RUN_MODE_VAL" in
   quick|full) ;;
-  *)
-    echo "[kernel-agent ERROR] GEAK_RUN_MODE must be 'quick' or 'full'; got '$GEAK_RUN_MODE_VAL'" >&2
-    exit 1
-    ;;
+  *) die "GEAK_RUN_MODE must be 'quick' or 'full'; got '$GEAK_RUN_MODE_VAL'" ;;
 esac
 # Split-provider aware per-side credentials: each protocol side keeps its own
 # base URL/key. A dual-protocol gateway simply has both pointed at one host.
@@ -369,12 +202,6 @@ _ANTHROPIC_CUSTOM_HEADERS_VAL="${ANTHROPIC_CUSTOM_HEADERS:-}"
 # on the Anthropic side via GEAK_CLAUDE_MODEL + Claude Code auth, and an operator
 # value reaches it from the environment. write_env_file removes both from the
 # shared .env so a stale entry cannot outlive this install.
-# install.sh always installs everything. A previous lazy
-# "install only the requested backend" scheme caused recurring
-# "missing dependency discovered at request time" issues, so the
-# installer brings up every kernel-agent backend in one pass.
-CHECK_ONLY=0
-DRY_RUN=0
 # Optional build-time escape hatch: skip Ray daemon startup while still
 # installing Ray itself and all downstream dependencies (TraceLens/GEAK).
 # Useful in Docker image builds where launching background daemons is fragile.
@@ -382,39 +209,6 @@ case "${SKIP_RAY_START:-0}" in
   1|true|TRUE|yes|YES|on|ON) SKIP_RAY_START=1 ;;
   *) SKIP_RAY_START=0 ;;
 esac
-usage() {
-  cat <<'EOF'
-Usage: install.sh [options]
-
-Always installs:
-  ray[default]==2.44.1, click<8.3.0, TraceLens CLI,
-  the GEAK e2e whole-pipeline optimizer, and LLM gateway env/auth.
-
-Options:
-  --check-only       Verify current environment, do not install
-  --dry-run          Print actions without running installs
-  -h, --help         Show this help
-
-Environment (optional):
-  SKIP_RAY_START=1                      Skip `ray start --head` during install (default 0).
-                                        Installs ray/click but defers daemon startup to runtime.
-EOF
-}
-
-while [ "$#" -gt 0 ]; do
-  case "$1" in
-    --check-only) CHECK_ONLY=1 ;;
-    --dry-run) DRY_RUN=1 ;;
-    -h|--help) usage; exit 0 ;;
-    *) echo "[kernel-agent] ERROR: unknown option '$1'" >&2; usage >&2; exit 2 ;;
-  esac
-  shift
-done
-
-log() { echo "[kernel-agent] $*"; }
-warn() { echo "[kernel-agent WARN] $*" >&2; }
-die() { echo "[kernel-agent ERROR] $*" >&2; exit 1; }
-
 upsert_dotenv_var() {
   local key="$1" value="$2" tmp found=0 line stripped
   [ -n "$key" ] || return 0
@@ -457,147 +251,6 @@ remove_dotenv_var() {
 # defeats the point of check-only.
 verify_die() {
   if [ "$CHECK_ONLY" -eq 1 ]; then warn "$1"; else die "$1"; fi
-}
-
-# Preflight credential validation. The installer gate accepts Anthropic or
-# DeepSeek and intentionally does not default or require OpenAI.
-#
-# Strict mode by design: no bypass env var. The chained installer
-# steps (the GEAK e2e optimizer) all need real credentials, so an
-# install without them cannot finish anyway. The only downgrade path
-# is --check-only / --dry-run, which is for introspection only and
-# does not actually install.
-# Reject one provider's base URL paired with only the other provider's key.
-# DeepSeek serves its own Anthropic-compatible endpoint, so its key counts as one.
-preflight_reject_cross_provider() {
-  local a_key a_endpoint conflict=""
-  a_key="${ANTHROPIC_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-${CLAUDE_CODE_OAUTH_TOKEN:-}}}"
-  a_endpoint="${ANTHROPIC_BASE_URL:-}"
-  # A subscription token only validates against Anthropic itself, so it implies
-  # the official endpoint and needs no ANTHROPIC_BASE_URL.
-  if [ -z "$a_endpoint" ] && [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
-    a_endpoint="https://api.anthropic.com"
-  fi
-  if [ -n "${OPENAI_BASE_URL:-}" ] && [ -z "${OPENAI_API_KEY:-}" ] && [ -n "$a_key" ]; then
-    conflict="OPENAI_BASE_URL is set without an OPENAI_API_KEY, while an Anthropic-side key is configured"
-  elif [ -n "${ANTHROPIC_BASE_URL:-}" ] && [ -z "$a_key" ] && [ -n "${OPENAI_API_KEY:-}" ]; then
-    conflict="ANTHROPIC_BASE_URL is set without an Anthropic-side key, while an OPENAI_API_KEY is configured"
-  elif [ -n "${OPENAI_BASE_URL:-}" ] && [ -n "$a_key" ] && [ -z "$a_endpoint" ]; then
-    conflict="an Anthropic-side key is configured without ANTHROPIC_BASE_URL, while the OpenAI side points at OPENAI_BASE_URL"
-  # Only an explicit ANTHROPIC_BASE_URL signals a gateway-shaped deploy whose
-  # OPENAI_API_KEY is likely a gateway key missing its own URL.
-  elif [ -n "${ANTHROPIC_BASE_URL:-}" ] && [ -n "${OPENAI_API_KEY:-}" ] && [ -z "${OPENAI_BASE_URL:-}" ]; then
-    conflict="OPENAI_API_KEY is configured without OPENAI_BASE_URL, while the Anthropic side points at ANTHROPIC_BASE_URL"
-  fi
-  [ -z "$conflict" ] && return 0
-  if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
-    warn "conflicting LLM credentials: ${conflict}; continuing because --check-only / --dry-run is active."
-    return 0
-  fi
-  cat >&2 <<EOF
-[kernel-agent ERROR] Conflicting LLM credentials: ${conflict}.
-
-Hyperloom never borrows one provider's key or endpoint for the other. Give each
-side its own base URL and key, or drop the other provider's key.
-EOF
-  return 1
-}
-
-preflight_validate_credentials() {
-  local missing=()
-  local has_anthropic=0 has_openai=0
-  # Each side needs its own base URL and key; an unset side is fine.
-  { [ -n "${ANTHROPIC_BASE_URL:-}" ] &&
-    { [ -n "${ANTHROPIC_API_KEY:-}" ] || [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ]; }; } &&
-    has_anthropic=1
-  # A subscription token carries its own endpoint, so it is self-consistent alone.
-  [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && has_anthropic=1
-  { [ -n "${OPENAI_BASE_URL:-}" ] && [ -n "${OPENAI_API_KEY:-}" ]; } && has_openai=1
-  preflight_reject_cross_provider || return 1
-  if [ "$has_anthropic" -eq 1 ] || [ "$has_openai" -eq 1 ]; then
-    log "credentials preflight: at least one self-consistent provider side present"
-    return 0
-  fi
-  missing+=("a self-consistent provider side: ANTHROPIC_BASE_URL + ANTHROPIC_API_KEY (DeepSeek may omit the URL), or OPENAI_BASE_URL + OPENAI_API_KEY")
-  local env_file_status
-  if [ -f "$REPO_ROOT/.env" ]; then
-    env_file_status="present"
-  else
-    env_file_status="not found"
-  fi
-  if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
-    warn "missing credential(s): ${missing[*]} (.env=${env_file_status}); " \
-         "continuing because --check-only / --dry-run is active. The GEAK " \
-         "e2e optimizer will still fail later unless these are set " \
-         "before a real install."
-    return 0
-  fi
-  cat >&2 <<EOF
-[kernel-agent ERROR] Missing required credential group(s): ${missing[*]}
-
-Tried loading from:
-  - shell environment
-  - \$REPO_ROOT/.env  (${env_file_status}: ${REPO_ROOT}/.env)
-
-Fix one of:
-  1. Anthropic:
-       export ANTHROPIC_BASE_URL=https://api.anthropic.com
-       export ANTHROPIC_API_KEY=sk-ant-...
-  2. DeepSeek:
-       export ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic
-       export OPENAI_BASE_URL=https://api.deepseek.com/v1
-       export ANTHROPIC_API_KEY=sk-...  OPENAI_API_KEY=sk-...
-     A gateway serving only its own models also needs the model ids. Known
-     hosts default themselves; otherwise set CLAUDE_MODEL (Anthropic side)
-     and CODEX_MODEL (OpenAI side).
-  3. Claude Max/Pro subscription (run \`claude setup-token\`):
-       export CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-...
-       # leave ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN unset
-  4. Copy .env from a working worktree into this one:
-       cp /path/to/main-worktree/.env "${REPO_ROOT}/.env"
-EOF
-  exit 2
-}
-preflight_validate_credentials
-
-run() {
-  log "$*"
-  if [ "$DRY_RUN" -eq 0 ] && [ "$CHECK_ONLY" -eq 0 ]; then
-    "$@"
-  fi
-}
-
-# Serialize concurrent installs that share one $USER_DATA_PATH. Installs
-# pointed at the same data root share the auto-cloned dependency checkouts —
-# GEAK / TraceLens trees below. With no lock, two installs race and
-# corrupt each other's half-cloned trees. The lock lives in $_open_source_root
-# (pod-local) so it tracks exactly what it guards: same-root installs serialize,
-# but separate pod-local roots never block each other. We hold an flock on
-# $_open_source_root/.install.lock via fd 9 from the first mirror-mutating step
-# until this process exits (fd closes on exit), so it guards every clone/mirror
-# below and releases automatically at the end.
-# Skipped under --check-only / --dry-run (introspection only, no mutation).
-# When inference_optimizer's installer already holds the lock it exports
-# HYPERLOOM_INSTALL_LOCK_HELD=1; we honour that and do not re-acquire, which
-# would deadlock on a second open file description for the same path.
-acquire_install_lock() {
-  if [ "$CHECK_ONLY" -eq 1 ] || [ "$DRY_RUN" -eq 1 ]; then
-    return 0
-  fi
-  if [ "${HYPERLOOM_INSTALL_LOCK_HELD:-0}" = "1" ]; then
-    log "install lock already held by parent installer; not re-locking"
-    return 0
-  fi
-  mkdir -p "${_open_source_root}"
-  exec 9>"${_open_source_root}/.install.lock"
-  if command -v flock >/dev/null 2>&1; then
-    log "waiting for install lock: ${_open_source_root}/.install.lock"
-    flock 9
-    log "acquired install lock"
-    export HYPERLOOM_INSTALL_LOCK_HELD=1
-  else
-    warn "flock not available; concurrent installs may race on dependency checkouts"
-  fi
 }
 
 ensure_python() {
@@ -1194,15 +847,12 @@ ensure_tracelens() {
   _pip_install_editable "$TRACELENS_INTERNAL_ROOT" "TraceLens-internal"
   export TRACELENS_ROOT TRACELENS_INTERNAL_ROOT
   if [ "$DRY_RUN" -eq 0 ]; then
-    # TraceLens #124: only the inference variant is accepted (the correct
-    # entry for vLLM/SGLang traces). Hyperloom is inference-only since
-    # v0.4; the legacy training-mode CLI was removed to keep install /
-    # runtime in lockstep.
-    if command -v TraceLens_generate_perf_report_pytorch_inference >/dev/null 2>&1; then
-      TraceLens_generate_perf_report_pytorch_inference --help >/dev/null
-      log "TraceLens perf CLI verified: TraceLens_generate_perf_report_pytorch_inference (#124)"
+    # The analysis agent's report step runs through this config-driven CLI.
+    if command -v TraceLens_generate_perf_report_from_config >/dev/null 2>&1; then
+      TraceLens_generate_perf_report_from_config --help >/dev/null
+      log "TraceLens perf CLI verified: TraceLens_generate_perf_report_from_config"
     else
-      verify_die "TraceLens_generate_perf_report_pytorch_inference not found after install (Hyperloom is inference-only since v0.4; reinstall TraceLens, plus the optional extension if TRACELENS_INTERNAL_ROOT is set)"
+      verify_die "TraceLens_generate_perf_report_from_config not found after install (reinstall TraceLens, plus the optional extension if TRACELENS_INTERNAL_ROOT is set)"
     fi
   fi
 }
@@ -1246,15 +896,6 @@ write_env_file() {
   if [ -z "${_anthropic_url:-}" ]; then
     warn "LLM gateway URL empty; kernel-agent env will lack ANTHROPIC_BASE_URL"
   fi
-  # Recompute PYTHONPATH just before persisting it. Sourcing an existing
-  # $REPO_ROOT/.env (credentials fallback above) can re-import a stale
-  # PYTHONPATH that lacks REPO_ROOT, silently overwriting the value composed at
-  # the top of this script. Under a ``pip install --target $REPO_ROOT`` layout
-  # that dir holds the hyperloom package and is not on the default sys.path, so
-  # subprocesses would fail to ``import hyperloom`` on re-install. Rebuild here
-  # (REPO_ROOT first, then MAGPIE_PATH, then any remaining entries) and drop
-  # duplicates so repeated installs stay idempotent.
-  PYTHONPATH="$(_compose_pythonpath "${REPO_ROOT:-}" "$(_magpie_pythonpath_arg)" "${PYTHONPATH:-}")"
   local env_file="${KERNEL_AGENT_ENV}"
   mkdir -p "$(dirname "$env_file")"
   {
@@ -1511,14 +1152,11 @@ except Exception:
     raise SystemExit(1)
 PY
 )"
-  # TraceLens perf-report CLI: only the inference variant is accepted
-  # (#124). Hyperloom is inference-only since v0.4; the legacy
-  # training-mode CLI was removed because its output shape silently
-  # breaks downstream fusion / roofline analysis.
-  if command -v TraceLens_generate_perf_report_pytorch_inference >/dev/null 2>&1; then
-    log "found TraceLens_generate_perf_report_pytorch_inference: $(command -v TraceLens_generate_perf_report_pytorch_inference)"
+  # The analysis agent's report step runs through this config-driven CLI.
+  if command -v TraceLens_generate_perf_report_from_config >/dev/null 2>&1; then
+    log "found TraceLens_generate_perf_report_from_config: $(command -v TraceLens_generate_perf_report_from_config)"
   else
-    warn "TraceLens_generate_perf_report_pytorch_inference not found (Hyperloom is inference-only since v0.4)"
+    warn "TraceLens_generate_perf_report_from_config not found"
   fi
   for tool in git patch; do
     if command -v "$tool" >/dev/null 2>&1; then
@@ -1539,22 +1177,13 @@ PY
   fi
 }
 
-main() {
-  if [ "$DRY_RUN" -eq 0 ] && [ "$CHECK_ONLY" -eq 0 ]; then
-    # Tool outputs land under $USER_DATA_PATH/kernel-agent/runs/<session_id>/
-    # (created lazily by the tools themselves). All we need here is the
-    # writable runtime tree on $USER_DATA_PATH for the env file + source mirrors.
-    mkdir -p "${HYPERLOOM_RUNTIME_DIR}" "${_open_source_root}"
-  fi
+install_kernel_tools() {
   ensure_python
   ensure_patch_tools
   ensure_moreutils
   ensure_ray
   ensure_ray_started
-  # Hold the install lock for the whole source-mutating region (TraceLens /
-  # GEAK clones + mirrors). System-package steps above (apt/pip)
-  # do not touch source-mirrors, so they stay outside the lock.
-  acquire_install_lock
+  # TraceLens / GEAK clones run under the install lock install.sh holds.
   ensure_tracelens
   ensure_claude_cli
 
@@ -1565,7 +1194,5 @@ main() {
   write_env_file
 
   report_status
-  log "install complete"
+  log "kernel-agent tools installed"
 }
-
-main "$@"

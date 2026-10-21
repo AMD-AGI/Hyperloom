@@ -7,17 +7,29 @@ from __future__ import annotations
 
 import gzip
 import json
-import os
 import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 from hyperloom.orchestrator.trace_analysis import tracelens_analysis as tla
 from hyperloom.orchestrator.trace_analysis import _bypass_report as bypass_report
 from hyperloom.orchestrator.trace_analysis import _idle_gate as idle_gate
 from hyperloom.orchestrator.trace_analysis import _task_group_contract as task_group_contract
 from hyperloom.orchestrator.trace_analysis import tracelens_skill_runner as tlr
+
+
+def _skill_request(tmp_path: Path, output_dir: Path, **fields: object) -> tlr.TraceLensSkillRequest:
+    """A skill run on ``tmp_path``'s stand-in skill, with ``fields`` overriding the defaults."""
+    defaults: dict[str, object] = {
+        "skill_path": tmp_path / "skill.md",
+        "output_dir": output_dir,
+        "tracelens_root": tmp_path,
+        "tracelens_internal_root": tmp_path / "TraceLens-internal",
+        "capture_folder": None,
+    }
+    return tlr.TraceLensSkillRequest(**{**defaults, **fields})
 
 
 def test_default_top_k_uses_large_pool_by_default(monkeypatch):
@@ -645,18 +657,15 @@ def test_write_reports_enriches_candidates_with_runtime_metadata(tmp_path):
         model_name="llama",
         framework="sglang",
         target_platform="MI300X",
-        analysis_mode="inference",
-        runtime_env="local",
         dry_run=False,
     )
 
     artifacts = tla.write_reports(
         tmp_path / "run",
-        trace_input_type="file",
-        trace_files=[trace],
+        tla.TraceInputs(input_type="file", files=[trace]),
         candidates=[candidate],
         args=args,
-        existing_report_path=analysis_md,
+        outcome=tla.OrchestratorOutcome(report_path=analysis_md),
     )
     payload = _json.loads(Path(artifacts["kernel_candidates"]).read_text(encoding="utf-8"))
     enriched = payload["hot_kernels"][0]
@@ -671,7 +680,6 @@ def test_write_reports_enriches_candidates_with_runtime_metadata(tmp_path):
     assert enriched["env_vars"] == {}
     assert enriched["kernel_params"] == {}
     assert enriched["runtime_flags"]["analysis_mode"] == "inference"
-    assert enriched["runtime_flags"]["runtime_env"] == "local"
     assert enriched["runtime_flags"]["target_platform"] == "MI300X"
     assert enriched["runtime_flags"]["is_multigpu"] is False
     assert enriched["runtime_flags"]["num_gpus_recommended"] == 1
@@ -782,18 +790,15 @@ def test_write_reports_enriches_head_size_from_model_config(tmp_path):
         model_name=str(model_dir),
         framework="sglang",
         target_platform="MI300X",
-        analysis_mode="inference",
-        runtime_env="local",
         dry_run=False,
     )
 
     artifacts = tla.write_reports(
         tmp_path / "run",
-        trace_input_type="file",
-        trace_files=[trace],
+        tla.TraceInputs(input_type="file", files=[trace]),
         candidates=[candidate],
         args=args,
-        existing_report_path=analysis_md,
+        outcome=tla.OrchestratorOutcome(report_path=analysis_md),
     )
     payload = _json.loads(Path(artifacts["kernel_candidates"]).read_text(encoding="utf-8"))
 
@@ -809,8 +814,6 @@ def _make_write_reports_args(trace_path):
         model_name="qwen3-30b-a3b",
         framework="sglang",
         target_platform="MI300X",
-        analysis_mode="inference",
-        runtime_env="local",
         dry_run=False,
     )
 
@@ -824,13 +827,7 @@ def test_write_reports_raises_when_analysis_md_missing(tmp_path):
     args = _make_write_reports_args(trace)
 
     with pytest.raises(RuntimeError, match="did not produce analysis.md"):
-        tla.write_reports(
-            tmp_path / "run",
-            trace_input_type="file",
-            trace_files=[trace],
-            candidates=[],
-            args=args,
-        )
+        tla.write_reports(tmp_path / "run", tla.TraceInputs(input_type="file", files=[trace]), candidates=[], args=args)
 
 
 def test_write_reports_raises_when_existing_report_does_not_exist(tmp_path):
@@ -844,11 +841,10 @@ def test_write_reports_raises_when_existing_report_does_not_exist(tmp_path):
     with pytest.raises(RuntimeError, match="did not produce analysis.md"):
         tla.write_reports(
             tmp_path / "run",
-            trace_input_type="file",
-            trace_files=[trace],
+            tla.TraceInputs(input_type="file", files=[trace]),
             candidates=[],
             args=args,
-            existing_report_path=tmp_path / "does-not-exist" / "analysis.md",
+            outcome=tla.OrchestratorOutcome(report_path=tmp_path / "does-not-exist" / "analysis.md"),
         )
 
 
@@ -865,11 +861,10 @@ def test_write_reports_does_not_create_filename_aliases(tmp_path):
 
     artifacts = tla.write_reports(
         run_dir,
-        trace_input_type="file",
-        trace_files=[trace],
+        tla.TraceInputs(input_type="file", files=[trace]),
         candidates=[],
         args=args,
-        existing_report_path=analysis_md,
+        outcome=tla.OrchestratorOutcome(report_path=analysis_md),
     )
 
     # The returned trace_report_path must point at the upstream file, not at a Hyperloom-owned copy.
@@ -893,11 +888,10 @@ def test_write_reports_does_not_mutate_upstream_analysis_md(tmp_path):
 
     tla.write_reports(
         run_dir,
-        trace_input_type="file",
-        trace_files=[trace],
+        tla.TraceInputs(input_type="file", files=[trace]),
         candidates=[],
         args=args,
-        existing_report_path=analysis_md,
+        outcome=tla.OrchestratorOutcome(report_path=analysis_md),
     )
 
     assert analysis_md.read_text(encoding="utf-8") == upstream_body
@@ -936,8 +930,8 @@ def _contract_candidates():
     ]
 
 
-def test_write_reports_kernel_candidates_contract_full_hot_with_routable_skipped_subsets(tmp_path):
-    """kernel_candidates.json: hot_kernels is full; routable/skipped are disjoint subsets whose union == hot."""
+def _write_contract_reports(tmp_path: Path) -> dict[str, str]:
+    """Write the reports for the contract candidates over a stub trace and ``analysis.md``."""
     trace = tmp_path / "trace.json"
     trace.write_text("{}", encoding="utf-8")
     analysis_md = tmp_path / "run" / "tracelens" / "analysis.md"
@@ -945,14 +939,18 @@ def test_write_reports_kernel_candidates_contract_full_hot_with_routable_skipped
     analysis_md.write_text("# TraceLens stub\n", encoding="utf-8")
     args = _make_write_reports_args(trace)
 
-    artifacts = tla.write_reports(
+    return tla.write_reports(
         tmp_path / "run",
-        trace_input_type="file",
-        trace_files=[trace],
+        tla.TraceInputs(input_type="file", files=[trace]),
         candidates=_contract_candidates(),
         args=args,
-        existing_report_path=analysis_md,
+        outcome=tla.OrchestratorOutcome(report_path=analysis_md),
     )
+
+
+def test_write_reports_kernel_candidates_contract_full_hot_with_routable_skipped_subsets(tmp_path):
+    """kernel_candidates.json: hot_kernels is full; routable/skipped are disjoint subsets whose union == hot."""
+    artifacts = _write_contract_reports(tmp_path)
     payload = json.loads(Path(artifacts["kernel_candidates"]).read_text(encoding="utf-8"))
 
     hot_ids = [c["kernel_id"] for c in payload["hot_kernels"]]
@@ -976,54 +974,12 @@ def test_write_reports_kernel_candidates_contract_full_hot_with_routable_skipped
 
 def test_write_reports_tracelens_report_hot_kernels_is_full_set(tmp_path):
     """tracelens_report.json mirrors the FULL hot_kernels set (no routable-only truncation)."""
-    trace = tmp_path / "trace.json"
-    trace.write_text("{}", encoding="utf-8")
-    analysis_md = tmp_path / "run" / "tracelens" / "analysis.md"
-    analysis_md.parent.mkdir(parents=True, exist_ok=True)
-    analysis_md.write_text("# TraceLens stub\n", encoding="utf-8")
-    args = _make_write_reports_args(trace)
-
-    artifacts = tla.write_reports(
-        tmp_path / "run",
-        trace_input_type="file",
-        trace_files=[trace],
-        candidates=_contract_candidates(),
-        args=args,
-        existing_report_path=analysis_md,
-    )
+    artifacts = _write_contract_reports(tmp_path)
     report = json.loads(Path(artifacts["tracelens_report_json"]).read_text(encoding="utf-8"))
     assert [c["kernel_id"] for c in report["hot_kernels"]] == ["k001", "k002", "k003", "k004"]
 
 
 # SDK runner for TraceLens analysis-orchestrator skill
-def test_124_build_orchestrator_prompt_supplies_step0_inputs(tmp_path):
-    skill = tmp_path / "SKILL.md"
-    trace = tmp_path / "mixed_steady_state_0_trace.json.gz"
-    out = tmp_path / "tracelens"
-    root = tmp_path / "TraceLens-internal"
-    capture = tmp_path / "capture_traces"
-
-    prompt = tlr.build_orchestrator_prompt(
-        skill_path=skill,
-        trace_path=trace,
-        output_dir=out,
-        tracelens_root=root,
-        tracelens_internal_root=tmp_path / "TraceLens-internal",
-        platform="MI300X",
-        framework="vllm",
-        analysis_mode="default",
-        capture_folder=capture,
-    )
-
-    assert str(skill) in prompt
-    assert str(trace) in prompt
-    assert str(out) in prompt
-    assert "Analysis mode: inference" in prompt
-    assert "Inference execution mode: graph_capture" in prompt
-    assert "Comparison scope: standalone" in prompt
-    assert "Do not ask the user" in prompt
-
-
 def test_count_gpu_kernel_events_distinguishes_cpu_only_and_real_traces(tmp_path):
     import gzip
     import json as _json
@@ -1125,9 +1081,37 @@ def test_124_tracelens_analysis_fails_fast_on_cpu_only_trace(tmp_path):
     assert all("TraceLens.TraceUtils.split_trace.main" not in str(p) for cmd in captured for p in cmd), (
         f"splitter must not run on CPU-only trace; captured={captured}"
     )
-    assert all(
-        "TraceLens_generate_perf_report_pytorch_inference" not in str(c[0]) or "--help" in c for c in captured if c
-    ), f"perf-report CLI must not be invoked for CPU-only trace; captured={captured}"
+    assert all("TraceLens_generate_perf_report_" not in str(c[0]) for c in captured if c), (
+        f"perf-report CLI must not be invoked for CPU-only trace; captured={captured}"
+    )
+
+
+@pytest.mark.parametrize(
+    ("framework", "capture", "expected_mode"),
+    [("vllm", True, "inference"), ("custom", False, "default")],
+)
+def test_write_run_config_names_the_one_standalone_job(tmp_path, framework, capture, expected_mode):
+    trace = tmp_path / "trace.json.gz"
+    trace.touch()
+    capture_dir = tmp_path / "capture_traces"
+    capture_dir.mkdir()
+
+    path = tlr.write_run_config(
+        output_dir=tmp_path,
+        trace_path=trace,
+        platform="MI300X",
+        analysis_mode=tlr.tracelens_analysis_mode(framework),
+        capture_folder=capture_dir if capture else None,
+    )
+
+    config = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert path == tmp_path / tlr.RUN_CONFIG_NAME
+    assert config["analysis_mode"] == expected_mode
+    assert config["output_dir"] == str(tmp_path.resolve())
+    job = config["jobs"][0]
+    assert job["trace_path"] == str(trace.resolve())
+    assert job["platform"] == "MI300X"
+    assert job.get("capture_folder") == (str(capture_dir.resolve()) if capture else None)
 
 
 def test_124_run_tracelens_skill_uses_sdk_and_artifacts(tmp_path):
@@ -1160,24 +1144,19 @@ def test_124_run_tracelens_skill_uses_sdk_and_artifacts(tmp_path):
 
     res = asyncio.run(
         tlr.run_tracelens_skill(
-            skill_path=tmp_path / "skill.md",
-            trace_path=tmp_path / "trace.json.gz",
-            output_dir=output_dir,
-            tracelens_root=tmp_path,
-            tracelens_internal_root=tmp_path / "TraceLens-internal",
-            platform="MI300X",
-            framework="sglang",
-            analysis_mode="default",
-            capture_folder=None,
+            _skill_request(tmp_path, output_dir),
             budget_minutes=1,
-            sdk_query_factory=_fake_query,
-            sdk_options_cls=_FakeOptions,
+            sdk=tlr.SdkEntryPoints(query=_fake_query, options_cls=_FakeOptions),
         )
     )
 
     assert res.report_path.exists()
     assert res.artifact_paths["tracelens_agent_report"] == str(res.report_path)
-    assert "analysis-orchestrator" in captured["prompt"] or "skill.md" in captured["prompt"]
+    assert str(tmp_path / "skill.md") in captured["prompt"]
+    assert str(output_dir / tlr.RUN_CONFIG_NAME) in captured["prompt"]
+    assert "standalone" in captured["prompt"]
+    assert "Do not ask the user any questions" in captured["prompt"]
+    assert "TL_EXTENSION: TraceLens_internal" in captured["prompt"]
     assert "Bash" in captured["options"]["allowed_tools"]
     assert "Task" in captured["options"]["allowed_tools"]
     assert res.runner == "claude_agent_sdk"
@@ -1223,19 +1202,10 @@ def test_run_tracelens_skill_aligns_cli_background_wait_with_tool_idle_bound(
 
     asyncio.run(
         tlr.run_tracelens_skill(
-            skill_path=tmp_path / "skill.md",
-            trace_path=tmp_path / "trace.json.gz",
-            output_dir=output_dir,
-            tracelens_root=tmp_path,
-            tracelens_internal_root=tmp_path / "TraceLens-internal",
-            platform="MI355X",
-            framework="vllm",
-            analysis_mode="inference",
-            capture_folder=None,
+            _skill_request(tmp_path, output_dir),
             budget_minutes=1,
             model="claude-sonnet-4-5-20250929",
-            sdk_query_factory=_fake_query,
-            sdk_options_cls=_FakeOptions,
+            sdk=tlr.SdkEntryPoints(query=_fake_query, options_cls=_FakeOptions),
         )
     )
 
@@ -1308,19 +1278,10 @@ def test_run_tracelens_skill_books_its_requests_on_the_trajectory(tmp_path):
     with tt.trajectory_scope(session_dir=session_dir, component="tracelens", task_id="t-tl", parent_span_id="t-tl"):
         asyncio.run(
             tlr.run_tracelens_skill(
-                skill_path=tmp_path / "skill.md",
-                trace_path=tmp_path / "trace.json.gz",
-                output_dir=output_dir,
-                tracelens_root=tmp_path,
-                tracelens_internal_root=tmp_path / "TraceLens-internal",
-                platform="MI355X",
-                framework="sglang",
-                analysis_mode="default",
-                capture_folder=None,
+                _skill_request(tmp_path, output_dir),
                 budget_minutes=1,
                 model="claude-tl",
-                sdk_query_factory=_fake_query,
-                sdk_options_cls=_FakeOptions,
+                sdk=tlr.SdkEntryPoints(query=_fake_query, options_cls=_FakeOptions),
             )
         )
 
@@ -1408,18 +1369,9 @@ def test_run_tracelens_skill_records_nothing_outside_a_session(tmp_path):
 
     res = asyncio.run(
         tlr.run_tracelens_skill(
-            skill_path=tmp_path / "skill.md",
-            trace_path=tmp_path / "trace.json.gz",
-            output_dir=output_dir,
-            tracelens_root=tmp_path,
-            tracelens_internal_root=tmp_path / "TraceLens-internal",
-            platform="MI355X",
-            framework="sglang",
-            analysis_mode="default",
-            capture_folder=None,
+            _skill_request(tmp_path, output_dir),
             budget_minutes=1,
-            sdk_query_factory=_fake_query,
-            sdk_options_cls=_FakeOptions,
+            sdk=tlr.SdkEntryPoints(query=_fake_query, options_cls=_FakeOptions),
         )
     )
 
@@ -1463,19 +1415,10 @@ def test_run_tracelens_skill_uses_hermetic_claude_env(tmp_path, monkeypatch):
 
     asyncio.run(
         tlr.run_tracelens_skill(
-            skill_path=tmp_path / "skill.md",
-            trace_path=tmp_path / "trace.json.gz",
-            output_dir=output_dir,
-            tracelens_root=tmp_path,
-            tracelens_internal_root=tmp_path / "TraceLens-internal",
-            platform="MI355X",
-            framework="vllm",
-            analysis_mode="inference",
-            capture_folder=None,
+            _skill_request(tmp_path, output_dir),
             budget_minutes=1,
             model="claude-sonnet-4-5-20250929",
-            sdk_query_factory=_fake_query,
-            sdk_options_cls=_FakeOptions,
+            sdk=tlr.SdkEntryPoints(query=_fake_query, options_cls=_FakeOptions),
         )
     )
 
@@ -1524,20 +1467,10 @@ def test_run_tracelens_skill_openai_only_uses_codex_tool_runner(tmp_path, monkey
 
     res = asyncio.run(
         tlr.run_tracelens_skill(
-            skill_path=tmp_path / "skill.md",
-            trace_path=tmp_path / "trace.json.gz",
-            output_dir=output_dir,
-            tracelens_root=tmp_path,
-            tracelens_internal_root=None,
-            platform="MI355X",
-            framework="vllm",
-            analysis_mode="inference",
-            capture_folder=None,
+            _skill_request(tmp_path, output_dir, tracelens_internal_root=None),
             budget_minutes=30,
             model="gpt-5.5",
-            sdk_query_factory=_no_claude_query,
-            sdk_options_cls=object,
-            codex_turn_runner=_fake_codex_turn,
+            sdk=tlr.SdkEntryPoints(query=_no_claude_query, options_cls=object, codex_turn_runner=_fake_codex_turn),
         )
     )
 
@@ -1554,22 +1487,22 @@ def test_run_tracelens_skill_openai_only_uses_codex_tool_runner(tmp_path, monkey
 
     assert len(calls) == 1
     call = calls[0]
-    assert call["model"] == "gpt-5.5"
+    assert call["config"].model == "gpt-5.5"
     # The session works out of the TraceLens root so the skill's command-prefix cache and relative paths resolve as
     # they do on the Claude path.
-    assert call["cwd"] == tmp_path
+    assert call["config"].cwd == tmp_path
     # The output dir is the only extra writable root: nothing else is mutable.
-    assert call["writable_roots"] == (output_dir,)
-    assert call["timeout_sec"] == 30 * 60.0
+    assert call["config"].writable_roots == (output_dir,)
+    assert call["request"].timeout_sec == 30 * 60.0
     assert "TraceLens analysis runner" in call["developer_instructions"]
-    assert str(tmp_path / "skill.md") in call["prompt"]
+    assert str(tmp_path / "skill.md") in call["request"].prompt
 
 
 def test_run_tracelens_skill_codex_grants_the_capture_folder_write_access(tmp_path, monkeypatch):
     """Graph-capture analysis writes into the capture folder, so it must be writable.
 
-    ``TraceLens_generate_perf_report_pytorch_inference`` classifies the capture
-    folder before it can merge it, and that classification writes
+    The TraceLens report step classifies the capture folder before it can
+    merge it, and that classification writes
     ``execution_details.json`` into the folder itself. With only ``output_dir``
     writable the step dies with ``OSError: [Errno 30] Read-only file system``
     and the turn ends without ``analysis.md``.
@@ -1592,21 +1525,13 @@ def test_run_tracelens_skill_codex_grants_the_capture_folder_write_access(tmp_pa
 
     asyncio.run(
         tlr.run_tracelens_skill(
-            skill_path=tmp_path / "skill.md",
-            trace_path=tmp_path / "trace.json.gz",
-            output_dir=output_dir,
-            tracelens_root=tmp_path,
-            tracelens_internal_root=None,
-            platform="MI355X",
-            framework="vllm",
-            analysis_mode="inference",
-            capture_folder=capture_folder,
+            _skill_request(tmp_path, output_dir, tracelens_internal_root=None, capture_folder=capture_folder),
             budget_minutes=30,
-            codex_turn_runner=_fake_codex_turn,
+            sdk=tlr.SdkEntryPoints(codex_turn_runner=_fake_codex_turn),
         )
     )
 
-    assert calls[0]["writable_roots"] == (output_dir, capture_folder)
+    assert calls[0]["config"].writable_roots == (output_dir, capture_folder)
 
 
 def test_run_tracelens_skill_codex_floors_the_turn_timeout(tmp_path, monkeypatch):
@@ -1627,21 +1552,13 @@ def test_run_tracelens_skill_codex_floors_the_turn_timeout(tmp_path, monkeypatch
 
     asyncio.run(
         tlr.run_tracelens_skill(
-            skill_path=tmp_path / "skill.md",
-            trace_path=tmp_path / "trace.json.gz",
-            output_dir=output_dir,
-            tracelens_root=tmp_path,
-            tracelens_internal_root=None,
-            platform="MI355X",
-            framework="vllm",
-            analysis_mode="inference",
-            capture_folder=None,
+            _skill_request(tmp_path, output_dir, tracelens_internal_root=None),
             budget_minutes=0.1,
-            codex_turn_runner=_fake_codex_turn,
+            sdk=tlr.SdkEntryPoints(codex_turn_runner=_fake_codex_turn),
         )
     )
 
-    assert calls[0]["timeout_sec"] == 60.0
+    assert calls[0]["request"].timeout_sec == 60.0
 
 
 def test_run_tracelens_skill_codex_raises_when_report_missing(tmp_path, monkeypatch):
@@ -1660,17 +1577,9 @@ def test_run_tracelens_skill_codex_raises_when_report_missing(tmp_path, monkeypa
     with pytest.raises(RuntimeError) as excinfo:
         asyncio.run(
             tlr.run_tracelens_skill(
-                skill_path=tmp_path / "skill.md",
-                trace_path=tmp_path / "trace.json.gz",
-                output_dir=output_dir,
-                tracelens_root=tmp_path,
-                tracelens_internal_root=None,
-                platform="MI355X",
-                framework="vllm",
-                analysis_mode="inference",
-                capture_folder=None,
+                _skill_request(tmp_path, output_dir, tracelens_internal_root=None),
                 budget_minutes=5,
-                codex_turn_runner=_failing_codex_turn,
+                sdk=tlr.SdkEntryPoints(codex_turn_runner=_failing_codex_turn),
             )
         )
 
@@ -1694,17 +1603,9 @@ def test_run_tracelens_skill_codex_keeps_report_written_before_failure(tmp_path,
 
     res = asyncio.run(
         tlr.run_tracelens_skill(
-            skill_path=tmp_path / "skill.md",
-            trace_path=tmp_path / "trace.json.gz",
-            output_dir=output_dir,
-            tracelens_root=tmp_path,
-            tracelens_internal_root=None,
-            platform="MI355X",
-            framework="vllm",
-            analysis_mode="inference",
-            capture_folder=None,
+            _skill_request(tmp_path, output_dir, tracelens_internal_root=None),
             budget_minutes=5,
-            codex_turn_runner=_late_failure,
+            sdk=tlr.SdkEntryPoints(codex_turn_runner=_late_failure),
         )
     )
 
@@ -1728,17 +1629,9 @@ def test_run_tracelens_skill_codex_reports_in_band_turn_error(tmp_path, monkeypa
 
     res = asyncio.run(
         tlr.run_tracelens_skill(
-            skill_path=tmp_path / "skill.md",
-            trace_path=tmp_path / "trace.json.gz",
-            output_dir=output_dir,
-            tracelens_root=tmp_path,
-            tracelens_internal_root=None,
-            platform="MI355X",
-            framework="vllm",
-            analysis_mode="inference",
-            capture_folder=None,
+            _skill_request(tmp_path, output_dir, tracelens_internal_root=None),
             budget_minutes=5,
-            codex_turn_runner=_in_band_error,
+            sdk=tlr.SdkEntryPoints(codex_turn_runner=_in_band_error),
         )
     )
 
@@ -1792,18 +1685,9 @@ async def _run_and_time(tlr_mod, query, options_cls, tmp_path, output_dir):
 
     t0 = _time.monotonic()
     res = await tlr_mod.run_tracelens_skill(
-        skill_path=tmp_path / "skill.md",
-        trace_path=tmp_path / "trace.json.gz",
-        output_dir=output_dir,
-        tracelens_root=tmp_path,
-        tracelens_internal_root=tmp_path / "TraceLens-internal",
-        platform="MI300X",
-        framework="sglang",
-        analysis_mode="default",
-        capture_folder=None,
+        _skill_request(tmp_path, output_dir),
         budget_minutes=1,
-        sdk_query_factory=query,
-        sdk_options_cls=options_cls,
+        sdk=tlr.SdkEntryPoints(query=query, options_cls=options_cls),
     )
     return res, _time.monotonic() - t0
 
@@ -1846,18 +1730,9 @@ def test_t2_run_tracelens_skill_ignores_intermediate_sidecars(tmp_path):
 
     res = asyncio.run(
         tlr.run_tracelens_skill(
-            skill_path=tmp_path / "skill.md",
-            trace_path=tmp_path / "trace.json.gz",
-            output_dir=output_dir,
-            tracelens_root=tmp_path,
-            tracelens_internal_root=tmp_path / "TraceLens-internal",
-            platform="MI300X",
-            framework="sglang",
-            analysis_mode="default",
-            capture_folder=None,
+            _skill_request(tmp_path, output_dir),
             budget_minutes=1,
-            sdk_query_factory=_fake_query,
-            sdk_options_cls=_FakeOptions,
+            sdk=tlr.SdkEntryPoints(query=_fake_query, options_cls=_FakeOptions),
         )
     )
 
@@ -1896,18 +1771,9 @@ def test_t2_missing_analysis_md_still_raises(tmp_path):
     with pytest.raises(RuntimeError, match="analysis.md"):
         asyncio.run(
             tlr.run_tracelens_skill(
-                skill_path=tmp_path / "skill.md",
-                trace_path=tmp_path / "trace.json.gz",
-                output_dir=output_dir,
-                tracelens_root=tmp_path,
-                tracelens_internal_root=tmp_path / "TraceLens-internal",
-                platform="MI300X",
-                framework="sglang",
-                analysis_mode="default",
-                capture_folder=None,
+                _skill_request(tmp_path, output_dir),
                 budget_minutes=1,
-                sdk_query_factory=_fake_query,
-                sdk_options_cls=_FakeOptions,
+                sdk=tlr.SdkEntryPoints(query=_fake_query, options_cls=_FakeOptions),
             )
         )
 
@@ -2121,6 +1987,7 @@ def test_127_splitter_cli_uses_positional_trace_path_and_find_steady_state(
         "--no-llm-orchestrator",
         "--capture-folder",
         str(capture),
+        "--split-llm-inference",
         "--split-conc",
         "8",
         "--split-osl",
@@ -2155,10 +2022,9 @@ def test_127_splitter_cli_uses_positional_trace_path_and_find_steady_state(
     assert "--CONC" in splitter_cmd and "8" in splitter_cmd, splitter_cmd
     assert "--OSL" in splitter_cmd and "1024" in splitter_cmd, splitter_cmd
 
-    assert all(
-        not (c and "TraceLens_generate_perf_report_pytorch_inference" in str(c[0]) and "--profile_json_path" in c)
-        for c in captured
-    ), f"perf-report CSV fallback must not run; analysis.md is the single source of truth. cmds={captured}"
+    assert all("TraceLens_generate_perf_report_" not in str(c[0]) for c in captured if c), (
+        f"perf-report CSV fallback must not run; analysis.md is the single source of truth. cmds={captured}"
+    )
     out = capsys.readouterr().out
     result = _json.loads(out)
     assert result["status"] == "failed"
@@ -2224,6 +2090,7 @@ def _drive_main_capturing_subprocess(tmp_path, extra_argv, env_overrides=None, t
         "--no-llm-orchestrator",
         "--capture-folder",
         str(capture),
+        "--split-llm-inference",
         *extra_argv,
     ]
 
@@ -2389,6 +2256,36 @@ def test_analysis_input_is_left_alone_when_the_first_candidate_has_kernels(tmp_p
     assert str(first) in [str(p) for p in splitter]
 
 
+def test_scriptable_workload_with_a_capture_folder_fails_before_the_agent_starts(tmp_path, capsys):
+    from unittest.mock import patch
+
+    trace_dir = tmp_path / "torch_trace"
+    trace_dir.mkdir()
+    _rank_trace(trace_dir / "rank_0.trace.json.gz", kernels=12)
+    capture = tmp_path / "capture_traces"
+    capture.mkdir()
+
+    def split_to_input(_args, job, *_rest):
+        return job.analysis_trace_path, {"chunks_extracted": 1, "chunks_by_mode": {}}
+
+    async def skill_must_not_run(*_a, **_kw):
+        raise AssertionError("the agent must not start on a rejected config")
+
+    with (
+        patch.object(tla, "_run_trace_split", split_to_input),
+        patch.object(tla, "run_tracelens_skill", skill_must_not_run),
+    ):
+        _drive_main_over_capture_dir(
+            tmp_path,
+            trace_dir,
+            extra_argv=["--use-llm-orchestrator", "--framework", "custom", "--capture-folder", str(capture)],
+        )
+
+    result = json.loads(capsys.readouterr().out)
+    assert result["status"] == "failed"
+    assert result["error"].startswith("ConfigError")
+
+
 def _capture_sidecar(path: Path, kernels: int = 2) -> Path:
     """Write a CUDA-graph capture sidecar in its production shape."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -2547,39 +2444,6 @@ def test_unpatched_sglang_capture_sorts_behind_the_workload_trace(tmp_path):
 
     _kind, traces = tla.discover_trace_inputs(trace_dir)
     assert traces[0] == real
-
-
-def test_skip_split_route_analyses_the_promoted_candidate(tmp_path):
-    """The promotion must hold on the route xDiT actually takes."""
-    from unittest.mock import patch
-
-    trace_dir = tmp_path / "torch_trace"
-    trace_dir.mkdir()
-    empty = _rank_trace(trace_dir / "rank_0.trace.json.gz", kernels=0, cpu_events=400)
-    populated = _rank_trace(trace_dir / "rank_1.trace.json.gz", kernels=12)
-
-    # The skill runs in-process, so the analysed trace never reaches a subprocess argv the way the splitter's does --
-    # the skill's own arguments are the only place the promotion is observable.
-    class _StopAfterSkillDispatch(Exception):
-        """Ends the run once the skill's input trace has been recorded."""
-
-    seen: list[Path] = []
-
-    async def fake_skill(*, trace_path, **_kw):
-        seen.append(trace_path)
-        raise _StopAfterSkillDispatch(trace_path.name)
-
-    with patch.object(tla, "run_tracelens_skill", fake_skill):
-        captured = _drive_main_over_capture_dir(
-            tmp_path,
-            trace_dir,
-            extra_argv=["--skip-split", "--use-llm-orchestrator"],
-        )
-
-    assert _find_splitter_cmd(captured) is None, "--skip-split must skip the splitter"
-    assert seen, "the TraceLens skill was never reached"
-    assert seen[0] == populated, f"analysed {seen[0].name}, expected {populated.name}"
-    assert empty not in seen
 
 
 def test_capture_under_an_ancestor_named_trace_split_still_orders_correctly(tmp_path):
@@ -2957,9 +2821,7 @@ def test_build_audit_summary_splits_tasks_and_skipped():
     ]
     summary = tla.build_audit_summary(
         finalized,
-        trace_input="/tmp/trace.json.gz",
-        framework="sglang",
-        target_platform="mi300x",
+        subject=tla.AuditSubject(trace_input="/tmp/trace.json.gz", framework="sglang", target_platform="mi300x"),
     )
     assert summary["task_count"] == 1
     assert summary["skipped_count"] == 2
@@ -2981,7 +2843,7 @@ def test_build_audit_summary_splits_tasks_and_skipped():
 
 
 def test_build_audit_summary_handles_empty_input():
-    summary = tla.build_audit_summary([], trace_input="/tmp/x.json.gz")
+    summary = tla.build_audit_summary([], subject=tla.AuditSubject(trace_input="/tmp/x.json.gz"))
     assert summary["task_count"] == 0
     assert summary["skipped_count"] == 0
     assert summary["tasks"] == []
@@ -3025,208 +2887,6 @@ def test_parse_launcher_path_returns_none_for_empty_and_garbage():
 def test_parse_launcher_path_swallows_deep_dict_repr():
     payload = "{'entry_point': " + "(" * 9000 + "'a.py(1): f'" + ")" * 9000 + "}"
     assert tlr._parse_launcher_path(payload) == ("", None, None)
-
-
-# _resolve_launcher_to_abs_source — TraceLens launcher path → absolute file.
-
-
-def _seed_pkg(tmp_path, pkg: str, relpath: str, funcs: tuple[str, ...] = ()) -> Path:
-    """Create ``<tmp_path>/<pkg>/<relpath>`` (with optional top-level ``def`` names) and return the absolute file."""
-    target = tmp_path / pkg / relpath
-    target.parent.mkdir(parents=True, exist_ok=True)
-    body = ["# stub for resolver tests\n"]
-    for fn in funcs:
-        body.append(f"def {fn}(*args, **kwargs):\n    pass\n")
-    target.write_text("".join(body), encoding="utf-8")
-    return target
-
-
-def test_resolve_launcher_via_env_override(tmp_path, monkeypatch):
-    """``$HYPERLOOM_FRAMEWORK_SOURCE_ROOTS`` is the highest-priority resolver source (no import needed)."""
-    target = _seed_pkg(
-        tmp_path,
-        "aiter",
-        "ops/rmsnorm.py",
-        funcs=("rmsnorm2d_fwd",),
-    )
-    monkeypatch.setenv(
-        tlr._FRAMEWORK_SOURCE_ROOTS_ENV,
-        f"aiter={tmp_path}",
-    )
-
-    resolved = tlr._resolve_launcher_to_abs_source(
-        "aiter/ops/rmsnorm.py(62): rmsnorm2d_fwd",
-    )
-    assert resolved is not None
-    abs_path, line, func = resolved
-    assert abs_path == str(target)
-    assert line == 62
-    assert func == "rmsnorm2d_fwd"
-
-
-def test_resolve_launcher_via_importlib_spec(monkeypatch):
-    """With no env override, ``find_spec`` resolves the absolute origin (tested via stdlib ``unittest/case.py``)."""
-    monkeypatch.delenv(tlr._FRAMEWORK_SOURCE_ROOTS_ENV, raising=False)
-    resolved = tlr._resolve_launcher_to_abs_source(
-        "unittest/case.py(1): expectedFailure",
-    )
-    assert resolved is not None
-    abs_path, line, func = resolved
-    assert os.path.isabs(abs_path) and abs_path.endswith("unittest/case.py")
-    assert line == 1
-    assert func == "expectedFailure"
-
-
-def test_resolve_launcher_via_hardcoded_fallback(tmp_path, monkeypatch):
-    """When the package isn't importable but a hardcoded fallback root holds the file, the resolver still succeeds."""
-    monkeypatch.delenv(tlr._FRAMEWORK_SOURCE_ROOTS_ENV, raising=False)
-
-    # Seed a fake aiter checkout and point the fallback table at it (package not importable).
-    _seed_pkg(
-        tmp_path,
-        "aiter_pinned_xfx",
-        "ops/rmsnorm.py",
-        funcs=("rmsnorm2d_fwd_with_add",),
-    )
-    monkeypatch.setattr(
-        tlr,
-        "_FRAMEWORK_PKG_FALLBACK_ROOTS",
-        {"aiter_pinned_xfx": (str(tmp_path),)},
-    )
-    # Force find_spec to miss so the fallback table is exercised.
-    monkeypatch.setattr(tlr, "_package_root_parent", lambda pkg: None)
-
-    resolved = tlr._resolve_launcher_to_abs_source(
-        "aiter_pinned_xfx/ops/rmsnorm.py(76): rmsnorm2d_fwd_with_add",
-    )
-    assert resolved is not None
-    abs_path, line, func = resolved
-    assert abs_path == str(tmp_path / "aiter_pinned_xfx" / "ops" / "rmsnorm.py")
-    assert line == 76
-    assert func == "rmsnorm2d_fwd_with_add"
-
-
-def test_resolve_launcher_splits_an_absolute_annotated_path():
-    """Absolute launchers keep their path while separating line and function."""
-    assert tlr._resolve_launcher_to_abs_source(
-        "/sgl-workspace/aiter/aiter/ops/rmsnorm.py(62): fn",
-    ) == (
-        "/sgl-workspace/aiter/aiter/ops/rmsnorm.py",
-        62,
-        "fn",
-    )
-
-
-def test_resolve_launcher_returns_none_for_placeholders_and_misses():
-    """Placeholders, empty strings, and unresolvable packages collapse to None (no fabricated path)."""
-    assert tlr._resolve_launcher_to_abs_source("") is None
-    assert tlr._resolve_launcher_to_abs_source("—") is None
-    # Unresolvable package → None; caller falls back to the verbatim string.
-    assert (
-        tlr._resolve_launcher_to_abs_source(
-            "definitely_not_a_real_pkg_8x9z/foo.py(1): fn",
-        )
-        is None
-    )
-
-
-def test_resolve_launcher_rejects_when_function_not_in_file(tmp_path, monkeypatch):
-    """AST guard: when the resolved ``.py`` exists but lacks the launcher's function, the resolver refuses it."""
-    # Seed a .py file that does NOT define rmsnorm2d_fwd.
-    target = tmp_path / "aiter_shadowed_xyz" / "ops" / "rmsnorm.py"
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(
-        "def some_other_function():\n    pass\n",
-        encoding="utf-8",
-    )
-    monkeypatch.setenv(
-        tlr._FRAMEWORK_SOURCE_ROOTS_ENV,
-        f"aiter_shadowed_xyz={tmp_path}",
-    )
-    # No fallback paths so the bad-symbol path is rejected outright.
-    monkeypatch.setattr(tlr, "_package_root_parent", lambda pkg: None)
-    monkeypatch.setattr(tlr, "_FRAMEWORK_PKG_FALLBACK_ROOTS", {})
-
-    assert (
-        tlr._resolve_launcher_to_abs_source(
-            "aiter_shadowed_xyz/ops/rmsnorm.py(62): rmsnorm2d_fwd",
-        )
-        is None
-    )
-
-
-def test_resolve_launcher_ast_check_falls_through_to_next_root(tmp_path, monkeypatch):
-    """When the first candidate root holds a stub that fails AST validation, the resolver MUST keep walking the candidate list instead of short-circuiting — otherwise a single bad spec (shadowed pkg / stale wheel) permanently masks the real source on the fallback path."""
-    bad_root = tmp_path / "bad"
-    good_root = tmp_path / "good"
-    bad_target = bad_root / "aiter_pinned_qrs" / "ops" / "rmsnorm.py"
-    bad_target.parent.mkdir(parents=True, exist_ok=True)
-    bad_target.write_text("def not_it():\n    pass\n", encoding="utf-8")
-    good_target = good_root / "aiter_pinned_qrs" / "ops" / "rmsnorm.py"
-    good_target.parent.mkdir(parents=True, exist_ok=True)
-    good_target.write_text(
-        "def rmsnorm2d_fwd(x):\n    return x\n",
-        encoding="utf-8",
-    )
-
-    monkeypatch.delenv(tlr._FRAMEWORK_SOURCE_ROOTS_ENV, raising=False)
-    monkeypatch.setattr(tlr, "_package_root_parent", lambda pkg: None)
-    monkeypatch.setattr(
-        tlr,
-        "_FRAMEWORK_PKG_FALLBACK_ROOTS",
-        {"aiter_pinned_qrs": (str(bad_root), str(good_root))},
-    )
-
-    resolved = tlr._resolve_launcher_to_abs_source(
-        "aiter_pinned_qrs/ops/rmsnorm.py(76): rmsnorm2d_fwd",
-    )
-    assert resolved is not None
-    abs_path, line, func = resolved
-    assert abs_path == str(good_target)
-    assert line == 76
-    assert func == "rmsnorm2d_fwd"
-
-
-def test_resolve_launcher_skips_ast_check_for_non_py_sources(tmp_path, monkeypatch):
-    """AST validation only applies to Python sources; HIP/CUDA refs pass existence-only validation."""
-    target = tmp_path / "aiter_hipxyz" / "csrc" / "rms_hip.cu"
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text("// device code\n", encoding="utf-8")
-    monkeypatch.setenv(
-        tlr._FRAMEWORK_SOURCE_ROOTS_ENV,
-        f"aiter_hipxyz={tmp_path}",
-    )
-
-    resolved = tlr._resolve_launcher_to_abs_source(
-        "aiter_hipxyz/csrc/rms_hip.cu#L42",
-    )
-    assert resolved is not None
-    abs_path, line, func = resolved
-    assert abs_path == str(target)
-    assert line == 42
-    assert func is None
-
-
-def test_resolve_launcher_skips_unparseable_env_entries(tmp_path, monkeypatch):
-    """Malformed env entries are silently skipped; the one valid entry still wins."""
-    target = _seed_pkg(
-        tmp_path,
-        "vllm",
-        "model_executor/models/qwen.py",
-        funcs=("forward",),
-    )
-    monkeypatch.setenv(
-        tlr._FRAMEWORK_SOURCE_ROOTS_ENV,
-        # First two entries are malformed (skipped); the third is the valid one.
-        f"junk_without_equals,=/just/value,vllm={tmp_path}",
-    )
-
-    resolved = tlr._resolve_launcher_to_abs_source(
-        "vllm/model_executor/models/qwen.py(10): forward",
-    )
-    assert resolved is not None
-    abs_path, _, _ = resolved
-    assert abs_path == str(target)
 
 
 def test_function_line_from_ast_finds_def_lineno(tmp_path):
@@ -3951,7 +3611,6 @@ def test_build_task_groups_filters_non_reusable():
 def test_build_audit_summary_includes_task_groups():
     summary = tla.build_audit_summary(
         candidates=[],
-        trace_input="/tmp/x.json.gz",
         task_groups=[
             {
                 "task_group_id": "tg001",
@@ -3966,6 +3625,7 @@ def test_build_audit_summary_includes_task_groups():
                 "aggregate_gpu_pct": 7.5,
             },
         ],
+        subject=tla.AuditSubject(trace_input="/tmp/x.json.gz"),
     )
     assert summary["task_group_count"] == 1
 
@@ -4129,11 +3789,9 @@ def test_build_audit_summary_propagates_trace_health_warnings():
     ]
     summary = tla.build_audit_summary(
         [],
-        trace_input="/tmp/trace.json.gz",
-        framework="sglang",
-        target_platform="MI300X",
         task_groups=[],
         trace_health_warnings=warnings,
+        subject=tla.AuditSubject(trace_input="/tmp/trace.json.gz", framework="sglang", target_platform="MI300X"),
     )
     assert summary["trace_health_warnings"] == warnings
     assert summary["task_count"] == 0
@@ -4144,78 +3802,10 @@ def test_build_audit_summary_defaults_trace_health_warnings_to_empty_list():
     """No findings is the empty list, never ``None`` (consumers iterate without a guard)."""
     summary = tla.build_audit_summary(
         [],
-        trace_input="/tmp/trace.json.gz",
-        framework="sglang",
-        target_platform="MI300X",
         task_groups=[],
+        subject=tla.AuditSubject(trace_input="/tmp/trace.json.gz", framework="sglang", target_platform="MI300X"),
     )
     assert summary["trace_health_warnings"] == []
-
-
-# atom maps to ``inference`` analysis mode
-def test_infer_analysis_mode_atom_returns_inference():
-    """atom shares inference-mode kernel grouping with sglang/vllm (else falls to ``default``)."""
-    assert tlr.infer_analysis_mode("atom", "") == "inference"
-    assert tlr.infer_analysis_mode("ATOM", "default") == "inference"
-    assert tlr.infer_analysis_mode("  atom  ", "default") == "inference"
-
-
-def test_infer_analysis_mode_sglang_vllm_unchanged():
-    """Regression guard: sglang / vllm remain ``inference``."""
-    assert tlr.infer_analysis_mode("sglang", "") == "inference"
-    assert tlr.infer_analysis_mode("vllm", "default") == "inference"
-
-
-def test_infer_analysis_mode_explicit_request_wins():
-    """Caller-supplied non-default mode bypasses the framework default for every framework."""
-    assert tlr.infer_analysis_mode("atom", "training") == "training"
-    assert tlr.infer_analysis_mode("sglang", "training") == "training"
-    assert tlr.infer_analysis_mode("unknown", "training") == "training"
-
-
-def test_infer_analysis_mode_unknown_framework_stays_default():
-    """Frameworks outside the canonical set fall back to ``default``."""
-    assert tlr.infer_analysis_mode("trtllm", "") == "default"
-    assert tlr.infer_analysis_mode("", "") == "default"
-
-
-# atom entries present in _FRAMEWORK_PKG_FALLBACK_ROOTS
-def test_framework_pkg_fallback_roots_has_atom_entry():
-    """The atom fallback roots must include ``/app/ATOM`` plus a site-packages variant."""
-    table = tlr._FRAMEWORK_PKG_FALLBACK_ROOTS
-    assert "atom" in table, "atom missing from _FRAMEWORK_PKG_FALLBACK_ROOTS"
-    roots = table["atom"]
-    assert "/app/ATOM" in roots
-    assert any("site-packages" in r or "dist-packages" in r for r in roots), (
-        f"atom fallback roots lack a site-packages entry: {roots!r}"
-    )
-
-
-def test_resolve_launcher_via_atom_fallback_root(tmp_path, monkeypatch):
-    """End-to-end: a relative atom path resolves against the atom fallback root when import atom doesn't fire."""
-    monkeypatch.delenv(tlr._FRAMEWORK_SOURCE_ROOTS_ENV, raising=False)
-    _seed_pkg(
-        tmp_path,
-        "atom",
-        "model_engine/model_runner.py",
-        funcs=("forward",),
-    )
-    monkeypatch.setattr(
-        tlr,
-        "_FRAMEWORK_PKG_FALLBACK_ROOTS",
-        {"atom": (str(tmp_path),)},
-    )
-    # Force find_spec to miss so the test exercises the fallback path.
-    monkeypatch.setattr(tlr, "_package_root_parent", lambda pkg: None)
-
-    resolved = tlr._resolve_launcher_to_abs_source(
-        "atom/model_engine/model_runner.py(125): forward",
-    )
-    assert resolved is not None
-    abs_path, line, func = resolved
-    assert abs_path == str(tmp_path / "atom" / "model_engine" / "model_runner.py")
-    assert line == 125
-    assert func == "forward"
 
 
 # The wrapper that merely *launches* the kernel — must never be the source.
@@ -4357,417 +3947,3 @@ def test_graph_coverage_from_raw_trace_never_raises():
     # Missing/unreadable trace must degrade to {} (fall back to the plain gate).
     assert tla._graph_coverage_from_raw_trace(None) == {}
     assert tla._graph_coverage_from_raw_trace("/no/such/trace.json") == {}
-
-
-# --- pretrim_startup_transient (#profiler-start transient) -------------------
-
-
-def _write_trace(
-    path: Path,
-    step_durs,
-    *,
-    step_us_gap=0.0,
-    host_lead_us=30_000.0,
-    phases=None,
-    unique_names=True,
-    omit_host_steps=(),
-    omit_device_steps=(),
-    extra_events=None,
-):
-    """Build a minimal torch-profiler trace with GPU step annotations."""
-    # torch stamps metadata with the profiler-open ts, i.e. always before any cut point -- reproduce that, it is what
-    # made a naive ts filter drop it.
-    events = [
-        {"ph": "M", "name": "process_name", "ts": 999_999.0, "pid": 1, "args": {"name": "python"}},
-        {"ph": "M", "name": "thread_name", "ts": 999_999.0, "pid": 1, "tid": 7, "args": {"name": "t"}},
-    ]
-    ts = 1_000_000.0
-    for i, dur in enumerate(step_durs):
-        phase = (phases or ["DECODE"] * len(step_durs))[i]
-        name = f"step[{phase} bs=64 g_sk={i}]" if unique_names else f"step[{phase} bs=64]"
-        # The host runs a step ahead: step N's launches are issued while step N-1 still owns the GPU, so the lead is
-        # bounded by the *previous* step's duration.
-        host_ts = ts - min(host_lead_us, step_durs[i - 1]) if i else ts - 1.0
-        if i not in omit_host_steps:
-            events.append(
-                {"ph": "X", "cat": "user_annotation", "name": name, "pid": 1, "tid": 1, "ts": host_ts, "dur": 3.0}
-            )
-        events.append(
-            {"ph": "X", "cat": "cpu_op", "name": f"launch_{i}", "pid": 1, "tid": 1, "ts": host_ts + 0.1, "dur": 1.0}
-        )
-        if i not in omit_device_steps:
-            events.append(
-                {
-                    "ph": "X",
-                    "cat": "gpu_user_annotation",
-                    "name": name,
-                    "pid": 5,
-                    "tid": 7,
-                    "ts": ts,
-                    "dur": dur,
-                }
-            )
-        events.append(
-            {
-                "ph": "X",
-                "cat": "kernel",
-                "name": f"some_kernel_{i}",
-                "pid": 5,
-                "tid": 7,
-                "ts": ts + 1.0,
-                "dur": max(1.0, dur / 2),
-            }
-        )
-        ts += dur + step_us_gap
-    events.extend(extra_events or [])
-    payload = {"schemaVersion": 1, "baseTimeNanoseconds": 12345, "traceEvents": events}
-    with gzip.open(path, "wt", encoding="utf-8") as fh:
-        json.dump(payload, fh)
-    return path
-
-
-def test_pretrim_drops_leading_barrier_step(tmp_path):
-    """A 479x leading step is cut; the steady tail and metadata survive."""
-    src = _write_trace(tmp_path / "r.trace.json.gz", [15_781_320.0] + [32_944.0] * 127)
-    dst = tmp_path / "r.pretrimmed.trace.json.gz"
-
-    trimmed, report = tla.pretrim_startup_transient(src, dst)
-
-    assert trimmed is True
-    assert report["reason"] == "trimmed"
-    assert report["dropped_steps"] == 1
-    assert report["remaining_steps"] == 127
-    assert report["outlier_ratio"] > 400
-
-    out = tla.open_json(dst)
-    spans = tla._step_annotation_spans(out["traceEvents"])
-    assert len(spans) == 127
-    assert max(dur for _, dur, _ in spans) < 40_000.0  # the barrier step is gone
-    # ph:"M" metadata has no ts and must be preserved, else the chunk loses its process/thread names and TraceLens
-    # can't attribute anything.
-    assert sum(1 for ev in out["traceEvents"] if ev.get("ph") == "M") == 2
-    assert out["baseTimeNanoseconds"] == 12345
-
-
-def test_pretrim_noop_on_clean_trace(tmp_path):
-    """Uniform steps are left alone and no output file is written."""
-    src = _write_trace(tmp_path / "r.trace.json.gz", [32_900.0, 33_100.0] * 32)
-    dst = tmp_path / "r.pretrimmed.trace.json.gz"
-
-    trimmed, report = tla.pretrim_startup_transient(src, dst)
-
-    assert trimmed is False
-    assert report["reason"] == "no_leading_outlier"
-    assert not dst.exists()
-
-
-def test_pretrim_keeps_midstream_outlier(tmp_path):
-    """Only a *leading* run is cut; a slow step in the middle is real behaviour."""
-    durs = [32_944.0] * 10 + [5_000_000.0] + [32_944.0] * 10
-    src = _write_trace(tmp_path / "r.trace.json.gz", durs)
-    dst = tmp_path / "r.pretrimmed.trace.json.gz"
-
-    trimmed, report = tla.pretrim_startup_transient(src, dst)
-
-    assert trimmed is False
-    assert report["reason"] == "no_leading_outlier"
-
-
-def test_pretrim_refuses_when_too_many_leading_outliers(tmp_path):
-    """A run that never reaches steady state is surfaced, not trimmed away."""
-    durs = [5_000_000.0] * 6 + [32_944.0] * 20
-    src = _write_trace(tmp_path / "r.trace.json.gz", durs)
-    dst = tmp_path / "r.pretrimmed.trace.json.gz"
-
-    trimmed, report = tla.pretrim_startup_transient(src, dst)
-
-    assert trimmed is False
-    assert report["reason"] == "too_many_leading_outliers"
-    assert report["leading_outliers"] == 6
-    assert not dst.exists()
-
-
-def test_pretrim_skips_short_traces(tmp_path):
-    """Below the step floor the median is not worth trusting."""
-    src = _write_trace(tmp_path / "r.trace.json.gz", [9_000_000.0] + [32_944.0] * 3)
-    dst = tmp_path / "r.pretrimmed.trace.json.gz"
-
-    trimmed, report = tla.pretrim_startup_transient(src, dst)
-
-    assert trimmed is False
-    assert report["reason"] == "too_few_steps"
-
-
-def test_pretrim_degrades_on_unreadable_trace(tmp_path):
-    """An unreadable trace must fall through to the raw path, not raise."""
-    bad = tmp_path / "bad.trace.json.gz"
-    bad.write_bytes(b"not a gzip")
-
-    trimmed, report = tla.pretrim_startup_transient(bad, tmp_path / "out.trace.json.gz")
-
-    assert trimmed is False
-    assert report["reason"] == "unreadable_trace"
-
-
-def test_pretrim_ignores_traces_without_step_annotations(tmp_path):
-    """No step annotations -> nothing to measure against."""
-    payload = {"traceEvents": [{"ph": "X", "cat": "kernel", "name": "k", "ts": 1.0, "dur": 5.0} for _ in range(50)]}
-    src = tmp_path / "r.trace.json.gz"
-    with gzip.open(src, "wt", encoding="utf-8") as fh:
-        json.dump(payload, fh)
-
-    trimmed, report = tla.pretrim_startup_transient(src, tmp_path / "out.trace.json.gz")
-
-    assert trimmed is False
-    assert report["reason"] == "too_few_steps"
-    assert report["steps"] == 0
-
-
-def test_pretrim_threshold_is_the_module_default(tmp_path):
-    """A step under the default multiple is left alone; over it is cut."""
-    dst = tmp_path / "r.pretrimmed.trace.json.gz"
-    # ~6x the median -- real jitter can reach this, so it must survive.
-    under = _write_trace(tmp_path / "under.trace.json.gz", [200_000.0] + [32_944.0] * 20)
-    assert tla.pretrim_startup_transient(under, dst)[0] is False
-    # ~15x -- past the default, and nowhere near the 479x the real barrier hits.
-    over = _write_trace(tmp_path / "over.trace.json.gz", [500_000.0] + [32_944.0] * 20)
-    trimmed, report = tla.pretrim_startup_transient(over, dst)
-    assert trimmed is True
-    assert report["dropped_steps"] == 1
-    assert report["outlier_factor"] == tla._PRETRIM_OUTLIER_FACTOR
-
-
-def test_pretrim_keeps_host_side_of_first_surviving_step(tmp_path):
-    """The kept step's host ops survive even though they start inside the dropped step's device span."""
-    src = _write_trace(
-        tmp_path / "r.trace.json.gz",
-        [15_781_320.0] + [32_944.0] * 40,
-        host_lead_us=839_000.0,
-    )
-    dst = tmp_path / "r.pretrimmed.trace.json.gz"
-
-    trimmed, report = tla.pretrim_startup_transient(src, dst)
-    assert trimmed is True
-    # Two cuts, host earlier -- and by the full lead, not a value clamped down to the kept step's own duration.
-    assert report["gpu_cut_ts"] - report["cpu_cut_ts"] == pytest.approx(839_000.0)
-
-    ev = tla.open_json(dst)["traceEvents"]
-    kept_host = {e["name"] for e in ev if e.get("cat") == "user_annotation"}
-    kept_dev = {n for _, _, n in tla._step_annotation_spans(ev)}
-    # Same set on both timelines: no step is half-present.
-    assert kept_host == kept_dev
-    assert "step[DECODE bs=64 g_sk=0]" not in kept_host  # dropped step, both sides
-    assert "step[DECODE bs=64 g_sk=1]" in kept_host  # kept step, host side survived
-    assert len(kept_host) == 40
-
-
-def test_pretrim_drops_dropped_step_device_work_after_the_host_cut(tmp_path):
-    """Kernels belonging to the dropped step do not leak past the host cut."""
-    src = _write_trace(
-        tmp_path / "r.trace.json.gz",
-        [15_781_320.0] + [32_944.0] * 40,
-        host_lead_us=839_000.0,
-    )
-    dst = tmp_path / "r.pretrimmed.trace.json.gz"
-    tla.pretrim_startup_transient(src, dst)
-
-    ev = tla.open_json(dst)["traceEvents"]
-    kernels = {e["name"] for e in ev if e.get("cat") == "kernel"}
-    assert "some_kernel_0" not in kernels
-    assert "some_kernel_1" in kernels
-    assert len(kernels) == 40
-
-
-def test_pretrim_leaves_enough_steps_for_the_splitter(tmp_path):
-    """Step count downstream is set by --num-steps, and the trim keeps well clear of it: the splitter still gets its full window, only shifted."""
-    src = _write_trace(tmp_path / "r.trace.json.gz", [15_781_320.0] + [32_944.0] * 127)
-    dst = tmp_path / "r.pretrimmed.trace.json.gz"
-
-    _, report = tla.pretrim_startup_transient(src, dst)
-
-    assert report["remaining_steps"] == 127
-    assert report["remaining_steps"] >= 32  # the default --split-num-steps
-
-
-def test_pretrim_pairs_timelines_by_position_not_by_name(tmp_path):
-    """Repeated step names must still cut both timelines at the right place."""
-    src = _write_trace(
-        tmp_path / "r.trace.json.gz",
-        [15_781_320.0] + [32_944.0] * 40,
-        host_lead_us=839_000.0,
-        unique_names=False,
-    )
-    dst = tmp_path / "r.pretrimmed.trace.json.gz"
-
-    trimmed, report = tla.pretrim_startup_transient(src, dst)
-    assert trimmed is True
-    assert report["gpu_cut_ts"] - report["cpu_cut_ts"] == pytest.approx(839_000.0)
-
-    ev = tla.open_json(dst)["traceEvents"]
-    # One host annotation per surviving device step, and no more: the dropped step's host side went with its device
-    # side.
-    assert len(tla._step_annotation_spans(ev)) == 40
-    assert sum(1 for e in ev if e.get("cat") == "user_annotation") == 40
-    # launch_0 is the dropped step's host op; it must not survive on the strength of a name it shares with every other
-    # step.
-    launches = {e["name"] for e in ev if e.get("cat") == "cpu_op"}
-    assert "launch_0" not in launches
-    assert "launch_1" in launches
-
-
-def test_pretrim_refuses_when_the_timelines_hold_different_step_counts(tmp_path):
-    """Unequal step counts make positional pairing meaningless, either way round."""
-    src = _write_trace(
-        tmp_path / "fewer_host.trace.json.gz",
-        [15_781_320.0] + [32_944.0] * 20,
-        omit_host_steps=(1, 2),
-    )
-    dst = tmp_path / "r.pretrimmed.trace.json.gz"
-
-    trimmed, report = tla.pretrim_startup_transient(src, dst)
-
-    assert trimmed is False
-    assert report["reason"] == "timeline_step_count_mismatch"
-    assert (report["steps"], report["host_steps"]) == (21, 19)
-    assert not dst.exists()
-
-
-def test_pretrim_refuses_when_device_step_annotations_are_missing(tmp_path):
-    """More host steps than device steps is the shape real captures arrive in."""
-    src = _write_trace(
-        tmp_path / "fewer_device.trace.json.gz",
-        [15_781_320.0] + [32_944.0] * 20,
-        omit_device_steps=(5, 9, 13),
-    )
-    dst = tmp_path / "r.pretrimmed.trace.json.gz"
-
-    trimmed, report = tla.pretrim_startup_transient(src, dst)
-
-    assert trimmed is False
-    assert report["reason"] == "timeline_step_count_mismatch"
-    assert (report["steps"], report["host_steps"]) == (18, 21)
-    assert not dst.exists()
-
-
-def test_pretrim_keeps_leading_prefill_steps(tmp_path):
-    """Prefill steps are not transients just because decode dominates the trace."""
-    durs = [1_200_000.0, 880_000.0, 1_530_000.0] + [32_944.0] * 30
-    phases = ["EXTEND"] * 3 + ["DECODE"] * 30
-    src = _write_trace(tmp_path / "r.trace.json.gz", durs, phases=phases)
-    dst = tmp_path / "r.pretrimmed.trace.json.gz"
-
-    trimmed, report = tla.pretrim_startup_transient(src, dst)
-
-    assert trimmed is False
-    assert report["reason"] == "no_leading_outlier"
-    # Each phase gets its own baseline rather than one median for the trace.
-    assert set(report["phase_medians_ms"]) == {"EXTEND", "DECODE"}
-    assert report["first_step_phase"] == "EXTEND"
-    assert report["first_step_ratio"] < tla._PRETRIM_OUTLIER_FACTOR
-    assert not dst.exists()
-
-
-def test_pretrim_drops_a_prefill_transient_against_its_own_phase(tmp_path):
-    """The guard still fires when the transient lands on a prefill step."""
-    durs = [15_781_320.0, 1_200_000.0, 1_150_000.0, 1_180_000.0] + [32_944.0] * 30
-    phases = ["EXTEND"] * 4 + ["DECODE"] * 30
-    src = _write_trace(tmp_path / "r.trace.json.gz", durs, phases=phases)
-    dst = tmp_path / "r.pretrimmed.trace.json.gz"
-
-    trimmed, report = tla.pretrim_startup_transient(src, dst)
-
-    assert trimmed is True
-    assert report["dropped_steps"] == 1
-    assert report["dropped_phase"] == "EXTEND"
-    # Measured against EXTEND's 1.2 s median (13x) rather than decode's 33 ms, which would have made it 479x and swept
-    # the healthy prefill steps with it.
-    assert report["outlier_ratio"] == pytest.approx(15_781_320.0 / 1_200_000.0, rel=1e-3)
-    assert report["phase_medians_ms"]["EXTEND"] == pytest.approx(1_200.0)
-    assert report["remaining_steps"] == 33
-
-
-def test_pretrim_leaves_a_phase_without_a_baseline_alone(tmp_path):
-    """A leading step whose phase is too rare to have a median is not dropped."""
-    durs = [9_000_000.0] + [32_944.0] * 30
-    phases = ["EXTEND"] + ["DECODE"] * 30
-    src = _write_trace(tmp_path / "r.trace.json.gz", durs, phases=phases)
-    dst = tmp_path / "r.pretrimmed.trace.json.gz"
-
-    trimmed, report = tla.pretrim_startup_transient(src, dst)
-
-    assert trimmed is False
-    assert report["reason"] == "no_leading_outlier"
-    assert "EXTEND" not in report["phase_medians_ms"]
-    assert report["first_step_ratio"] is None
-
-
-def test_pretrim_reports_the_worst_ratio_across_dropped_steps(tmp_path):
-    """``outlier_ratio`` covers the whole dropped run, not just its first step."""
-    durs = [500_000.0, 5_000_000.0] + [32_944.0] * 20
-    src = _write_trace(tmp_path / "r.trace.json.gz", durs)
-    dst = tmp_path / "r.pretrimmed.trace.json.gz"
-
-    trimmed, report = tla.pretrim_startup_transient(src, dst)
-
-    assert trimmed is True
-    assert report["dropped_steps"] == 2
-    assert report["outlier_ratio"] == pytest.approx(5_000_000.0 / 32_944.0, rel=1e-3)
-
-
-def test_pretrim_write_failure_is_reported_as_a_failure(tmp_path, monkeypatch):
-    """A failed write must not be reported with the ``trimmed`` reason."""
-    src = _write_trace(tmp_path / "r.trace.json.gz", [15_781_320.0] + [32_944.0] * 40)
-    dst = tmp_path / "out" / "r.pretrimmed.trace.json.gz"
-
-    def _boom(*_args, **_kwargs):
-        raise OSError("No space left on device")
-
-    # Fails after the output file is opened, so a partial one is on disk.
-    monkeypatch.setattr(tla.json, "dump", _boom)
-    trimmed, report = tla.pretrim_startup_transient(src, dst)
-
-    assert trimmed is False
-    assert report["reason"] == "write_failed"
-    assert "No space left on device" in report["error"]
-    # The step accounting is kept for diagnosis, but no partial file is left behind for a later step to mistake for a
-    # usable trace.
-    assert report["dropped_steps"] == 1
-    assert not dst.exists()
-
-
-def test_pretrim_redirects_only_the_splitter_input(tmp_path):
-    """The splitter reads the trimmed copy; nothing else is repointed at it."""
-    captured, trace = _drive_main_capturing_subprocess(
-        tmp_path,
-        [],
-        trace_factory=lambda root: _write_trace(root / "trace.trace.json.gz", [15_781_320.0] + [32_944.0] * 40),
-    )
-
-    splitter_cmd = _find_splitter_cmd(captured)
-    assert splitter_cmd is not None, f"splitter never invoked; cmds={captured}"
-    positional = splitter_cmd[3]
-    assert positional.endswith(".pretrimmed.trace.json.gz"), splitter_cmd
-    assert str(trace) not in splitter_cmd, splitter_cmd
-
-    # The trim ran, and the raw capture is still on disk and unmodified.
-    pretrim_files = list((tmp_path / "ws").rglob("pretrim.json"))
-    assert len(pretrim_files) == 1, pretrim_files
-    pretrim = json.loads(pretrim_files[0].read_text())
-    assert pretrim["applied"] is True
-    assert pretrim["source"] == str(trace)
-    assert len(tla._step_annotation_spans(tla.open_json(trace)["traceEvents"])) == 41
-
-
-def test_capture_folder_is_not_discoverable_from_the_split_directory(tmp_path):
-    """Why the splitter's input has to stay separate from the analysed path."""
-    capture_dir = tmp_path / "torch_trace"
-    (capture_dir / "graph_capture_profile").mkdir(parents=True)
-    raw = capture_dir / "r.trace.json.gz"
-    raw.write_bytes(b"")
-    split_dir = tmp_path / "tracelens" / "trace_split"
-    split_dir.mkdir(parents=True)
-    trimmed = split_dir / "r.pretrimmed.trace.json.gz"
-    trimmed.write_bytes(b"")
-
-    assert tlr.discover_capture_folder(raw, [raw]) == capture_dir / "graph_capture_profile"
-    assert tlr.discover_capture_folder(raw, [trimmed]) is None

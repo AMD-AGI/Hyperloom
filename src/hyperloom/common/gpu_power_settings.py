@@ -3,9 +3,10 @@
 
 """Read-only view of the GPU power settings a session is measured under.
 
-The power cap and the DPM performance level decide how much of a card's throughput is available and at what power,
-so they are part of the measurement contract. Nothing here changes them: setting either is privileged and card-wide,
-and belongs to the operator before launch (``amd-smi set --power-cap`` / ``--perf-level``), the same way
+The power cap and the DPM performance level decide how much of a card's throughput is available and at what power, so
+they are part of the measurement contract. Nothing here changes them: setting either is privileged and card-wide, and
+belongs to the operator before launch (``amd-smi set --power-cap`` / ``--perf-level``) or to
+``--apply-gpu-power-settings``, the same way
 ``--compute-partition-mode`` asserts a mode rather than setting one. This module reads what the cards are at, so a
 session can record it and refuse to start when an operator's declared value did not take effect.
 """
@@ -14,19 +15,60 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess  # nosec B404 - fixed read-only amd-smi invocations.
+from dataclasses import dataclass
 from typing import Any, Callable, Mapping
 
+from hyperloom.common.env import env_flag
+
 __all__ = [
+    "GPU_POWER_SAMPLING_ENV",
     "GpuPowerSettingsError",
+    "DeclaredPowerSettings",
+    "PERF_LEVEL",
+    "PERF_LEVELS",
+    "PERF_LEVEL_MANUAL",
+    "POWER_CAP_W",
     "declared_setting_problems",
+    "gpu_power_sampling_unavailable",
     "normalize_perf_level",
     "read_gpu_power_settings",
     "visible_gpu_indices",
 ]
 
 _PERF_LEVEL_PREFIX = "AMDSMI_DEV_PERF_LEVEL_"
+#: The setting keys a card's power settings, a declaration and a record share.
+POWER_CAP_W = "power_cap_w"
+PERF_LEVEL = "perf_level"
+#: The DPM performance levels ``amd-smi set --perf-level`` accepts, lowercased.
+PERF_LEVELS = (
+    "auto",
+    "low",
+    "high",
+    "manual",
+    "stable_std",
+    "stable_peak",
+    "stable_min_mclk",
+    "stable_min_sclk",
+    "determinism",
+)
+#: The perf level an operator sets to tune a card's clocks by hand.
+PERF_LEVEL_MANUAL = "manual"
+_UNREADABLE = "unreadable"
+
+#: Escape hatch for a host where running ``amd-smi`` every couple of seconds is not acceptable.
+GPU_POWER_SAMPLING_ENV = "HYPERLOOM_GPU_POWER_SAMPLING"
+
+
+def gpu_power_sampling_unavailable() -> str:
+    """Why no round on this host can be sampled, or ``""``."""
+    if not env_flag(GPU_POWER_SAMPLING_ENV, default=True):
+        return f"{GPU_POWER_SAMPLING_ENV}=0 turns the GPU power sampler off"
+    if shutil.which("amd-smi") is None:
+        return "amd-smi is not on PATH, so the GPU power sampler has nothing to read"
+    return ""
 
 
 class GpuPowerSettingsError(RuntimeError):
@@ -41,18 +83,63 @@ def normalize_perf_level(value: Any) -> str:
     return text.lower()
 
 
-def visible_gpu_indices(env: Mapping[str, str] | None = None) -> set[int] | None:
-    """Card indices the session may use, from ``ROCR_VISIBLE_DEVICES`` / ``HIP_VISIBLE_DEVICES``; ``None`` for all."""
-    source = os.environ if env is None else env
-    for name in ("ROCR_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES"):
-        raw = str(source.get(name) or "").strip()
-        if not raw:
+#: The masks the ROCm runtime honours, ROCr level then HIP level. HSA_VISIBLE_DEVICES and GPU_DEVICE_ORDINAL are left
+#: out: ROCm ignores them, so a card they name is not one the session's servers are limited to.
+_ROCR_MASKS = ("ROCR_VISIBLE_DEVICES",)
+_HIP_MASKS = ("HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES")
+
+
+#: The only spelling the HIP runtime reads as written: it stops at a space, an empty or ``;``-joined token or a leading
+#: zero, so a looser parse would name cards the session's servers never see.
+_MASK_SPELLING = re.compile(r"(0|[1-9][0-9]*)(,(0|[1-9][0-9]*))*")
+
+
+def _first_mask(source: Mapping[str, str], names: tuple[str, ...]) -> list[int] | None:
+    """The visible-device ordinals of the first of *names* that is set; ``None`` when none is."""
+    for name in names:
+        if name not in source:
             continue
-        try:
-            return {int(part) for part in raw.split(",") if part.strip()}
-        except ValueError:
-            return None
+        raw = str(source.get(name) or "")
+        if not raw.strip():
+            raise GpuPowerSettingsError(f"{name} is set but empty, so the session sees no cards")
+        if not _MASK_SPELLING.fullmatch(raw):
+            raise GpuPowerSettingsError(
+                f"{name}={raw!r} is not a plain comma-separated list of device numbers, so the cards the runtime "
+                "exposes for it cannot be named"
+            )
+        ordinals = [int(token) for token in raw.split(",")]
+        if len(set(ordinals)) != len(ordinals):
+            raise GpuPowerSettingsError(f"{name}={raw} repeats a card, which the runtime does not expose as written")
+        return ordinals
     return None
+
+
+def visible_gpu_indices(env: Mapping[str, str] | None = None) -> set[int] | None:
+    """The amd-smi indices of the cards the session's visible-device masks expose; ``None`` when no mask is set.
+
+    ROCm numbers GPUs in KFD node order and amd-smi in PCI order, and the two differ on MI300X/MI355X boards, so a mask
+    number is never an amd-smi index. ``ROCR_VISIBLE_DEVICES`` picks from the KFD-ordered cards and
+    ``HIP_VISIBLE_DEVICES`` (or ``CUDA_VISIBLE_DEVICES``) then indexes into what it left; each resulting card is matched
+    to amd-smi through its KFD node id.
+
+    Raises:
+        GpuPowerSettingsError: a mask is set but empty, not numeric, repeats a card or names one that does not exist,
+            or amd-smi cannot say which KFD node each card is.
+    """
+    source = os.environ if env is None else env
+    rocr = _first_mask(source, _ROCR_MASKS)
+    hip = _first_mask(source, _HIP_MASKS)
+    if rocr is None and hip is None:
+        return None
+    by_node = [gpu for gpu, _ in sorted(_read_gpu_kfd_nodes().items(), key=lambda item: item[1])]
+    visible = list(range(len(by_node))) if rocr is None else rocr
+    if hip is not None:
+        if any(index >= len(visible) for index in hip):
+            raise GpuPowerSettingsError(f"HIP_VISIBLE_DEVICES names a card beyond the {len(visible)} visible")
+        visible = [visible[index] for index in hip]
+    if any(ordinal >= len(by_node) for ordinal in visible):
+        raise GpuPowerSettingsError(f"the visible-device mask names a card beyond the {len(by_node)} amd-smi lists")
+    return {by_node[ordinal] for ordinal in visible}
 
 
 def _gpu_rows(payload: Any) -> list[dict[str, Any]]:
@@ -60,7 +147,7 @@ def _gpu_rows(payload: Any) -> list[dict[str, Any]]:
     return [row for row in rows or [] if isinstance(row, dict) and isinstance(row.get("gpu"), int)]
 
 
-def _watts(block: Any) -> float | None:
+def _value(block: Any) -> float | None:
     if isinstance(block, dict):
         block = block.get("value")
     return float(block) if isinstance(block, (int, float)) and not isinstance(block, bool) else None
@@ -72,12 +159,55 @@ def _power_cap_w(limit: Any) -> float | None:
         return None
     for key in ("ppt0", "ppt"):
         section = limit.get(key)
-        if isinstance(section, dict) and (cap := _watts(section.get("socket_power_limit"))) is not None:
+        if isinstance(section, dict) and (cap := _value(section.get("socket_power_limit"))) is not None:
             return cap
     for key in ("socket_power_limit", "power_cap"):
-        if (cap := _watts(limit.get(key))) is not None:
+        if (cap := _value(limit.get(key))) is not None:
             return cap
     return None
+
+
+@dataclass(frozen=True)
+class DeclaredPowerSettings:
+    """The GPU power settings a launch declares; ``None`` (or ``""`` for the level) for one it leaves alone."""
+
+    power_cap_w: float | None = None
+    perf_level: str = ""
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "perf_level", normalize_perf_level(self.perf_level) if self.perf_level else "")
+
+    def as_row(self) -> dict[str, Any]:
+        """The settings keyed as a card's reading is."""
+        return {"power_cap_w": self.power_cap_w, "perf_level": self.perf_level}
+
+
+def _amd_smi_json(run: Callable[..., subprocess.CompletedProcess], timeout: float, *args: str) -> Any:
+    if shutil.which("amd-smi") is None and run is subprocess.run:
+        raise GpuPowerSettingsError("amd-smi is not on PATH")
+    try:
+        done = run(["amd-smi", *args, "--json"], capture_output=True, text=True, timeout=timeout, check=False)  # nosec B603 B607
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise GpuPowerSettingsError(f"amd-smi {' '.join(args)} could not run: {exc}") from exc
+    if done.returncode != 0:
+        raise GpuPowerSettingsError(f"amd-smi {' '.join(args)} exited {done.returncode}: {done.stderr.strip()[:200]}")
+    try:
+        return json.loads(done.stdout)
+    except ValueError as exc:
+        raise GpuPowerSettingsError(f"amd-smi {' '.join(args)} printed no JSON") from exc
+
+
+def _read_gpu_kfd_nodes() -> dict[int, int]:
+    """``{amd-smi index: KFD node id}`` for every card ``amd-smi list`` reports.
+
+    Raises:
+        GpuPowerSettingsError: ``amd-smi`` failed, or reported a card without its KFD node.
+    """
+    rows = _gpu_rows(_amd_smi_json(subprocess.run, 30.0, "list"))
+    nodes = {row["gpu"]: row["node_id"] for row in rows if isinstance(row.get("node_id"), int)}
+    if len(nodes) != len(rows):
+        raise GpuPowerSettingsError("amd-smi list reports a card without its KFD node, so its ROCm number is unknown")
+    return nodes
 
 
 def read_gpu_power_settings(
@@ -90,27 +220,10 @@ def read_gpu_power_settings(
     Raises:
         GpuPowerSettingsError: ``amd-smi`` is absent, failed, or printed something that is not its JSON.
     """
-    if shutil.which("amd-smi") is None and run is subprocess.run:
-        raise GpuPowerSettingsError("amd-smi is not on PATH")
-
-    def _query(*args: str) -> Any:
-        try:
-            done = run(["amd-smi", *args, "--json"], capture_output=True, text=True, timeout=timeout, check=False)  # nosec B603 B607
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            raise GpuPowerSettingsError(f"amd-smi {' '.join(args)} could not run: {exc}") from exc
-        if done.returncode != 0:
-            raise GpuPowerSettingsError(
-                f"amd-smi {' '.join(args)} exited {done.returncode}: {done.stderr.strip()[:200]}"
-            )
-        try:
-            return json.loads(done.stdout)
-        except ValueError as exc:
-            raise GpuPowerSettingsError(f"amd-smi {' '.join(args)} printed no JSON") from exc
-
     settings: dict[int, dict[str, Any]] = {}
-    for row in _gpu_rows(_query("static", "--limit")):
+    for row in _gpu_rows(_amd_smi_json(run, timeout, "static", "--limit")):
         settings.setdefault(row["gpu"], {})["power_cap_w"] = _power_cap_w(row.get("limit"))
-    for row in _gpu_rows(_query("metric", "--perf-level")):
+    for row in _gpu_rows(_amd_smi_json(run, timeout, "metric", "--perf-level")):
         settings.setdefault(row["gpu"], {})["perf_level"] = normalize_perf_level(row.get("perf_level"))
     for entry in settings.values():
         entry.setdefault("power_cap_w", None)
@@ -139,10 +252,10 @@ def declared_setting_problems(
             cap = row.get("power_cap_w")
             if not isinstance(cap, (int, float)) or abs(float(cap) - float(power_cap_w)) > 0.5:
                 problems.append(
-                    f"GPU {gpu} power cap is {cap if cap is not None else 'unreadable'} W, declared {power_cap_w:g} W"
+                    f"GPU {gpu} power cap is {cap if cap is not None else _UNREADABLE} W, declared {power_cap_w:g} W"
                 )
         if wanted_level and row.get("perf_level") != wanted_level:
             problems.append(
-                f"GPU {gpu} perf level is {row.get('perf_level') or 'unreadable'!r}, declared {wanted_level!r}"
+                f"GPU {gpu} perf level is {row.get('perf_level') or _UNREADABLE!r}, declared {wanted_level!r}"
             )
     return problems

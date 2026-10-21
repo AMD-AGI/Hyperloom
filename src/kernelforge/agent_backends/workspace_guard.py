@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from kernelforge.agent_backends.base import AgentProviderError, AgentRunSpec
-from kernelforge.llm.git import git
+from kernelforge.llm.git import git, git_bytes
 from kernelforge.loop.new_path_allowlist import matches_commit_new_paths, normalize_commit_new_paths
 from kernelforge.llm.workspace_policy import (
     is_protected_path,
@@ -48,7 +48,7 @@ class WorkspaceSafetyError(AgentProviderError):
 
 def _git_output(cwd: Path, *args: str) -> str:
     """Run a read-only git query and return decoded stdout."""
-    result = git(*args, cwd=cwd, check=False, text=False)
+    result = git_bytes(*args, cwd=cwd, check=False)
     if result.returncode != 0:
         detail = result.stderr.decode(errors="replace").strip()
         raise WorkspaceSafetyError(f"git {' '.join(args)} failed: {detail}", rejection=False)
@@ -106,6 +106,14 @@ class WorkspaceGuard:
     def _guards_dirty_baseline(self) -> bool:
         """Whether this turn inherits, instead of rejecting, a dirty worktree."""
         return self.spec.read_only_resume or self.allow_dirty_baseline
+
+    def _require_read_only_tools(self) -> None:
+        """Refuse a read-only resume whose spec or tool policy would still let the agent write."""
+        policy = self.spec.tool_policy
+        if self.spec.writable or policy is None or policy.write or policy.shell:
+            raise WorkspaceSafetyError(
+                "a read-only resume requires writable=False and a tool policy with write=False and shell=False"
+            )
 
     def _resolve_path(self, value: str) -> Path:
         """Resolve a spec path against the session working directory."""
@@ -179,12 +187,11 @@ class WorkspaceGuard:
 
         unstaged, staged, untracked = self._current_changes()
         if self.spec.read_only_resume:
-            policy = self.spec.tool_policy
-            if self.spec.writable or policy is None or policy.write or policy.shell:
-                raise WorkspaceSafetyError(
-                    "a read-only resume requires writable=False and a tool policy with write=False and shell=False"
-                )
-        elif self._guards_dirty_baseline():
+            self._require_read_only_tools()
+        # The caller owns whether untracked state is expected: the loop writes its own experiment ledger into the
+        # workspace it hands the implementer, so every iteration would otherwise be refused for the caller's files.
+        refused_untracked = [] if self.spec.allow_untracked else untracked
+        if self._guards_dirty_baseline():
             # Nothing to validate up front: this state was inherited, not produced by the turn, and refusing it here
             # would make the phase unrunnable in the only worktrees it ever runs in. verify() judges the deviations.
             pass
@@ -195,8 +202,8 @@ class WorkspaceGuard:
             violations: list[str] = []
             if staged:
                 violations.append(f"staged changes: {', '.join(staged)}")
-            if untracked and not self.spec.allow_untracked:
-                violations.append(f"untracked files: {', '.join(untracked)}")
+            if refused_untracked:
+                violations.append(f"untracked files: {', '.join(refused_untracked)}")
             if unexpected:
                 violations.append(f"non-target changes: {', '.join(unexpected)}")
             if violations:
@@ -207,12 +214,8 @@ class WorkspaceGuard:
             blocking = [
                 *(f"staged: {relative}" for relative in staged),
                 *(f"modified: {relative}" for relative in unstaged),
+                *(f"untracked: {relative}" for relative in refused_untracked),
             ]
-            # The caller owns whether untracked state is expected here, exactly as it does in the resume branch above:
-            # the loop writes its own experiment ledger into the workspace it hands the implementer, so every
-            # iteration would otherwise be refused for the caller's files.
-            if not self.spec.allow_untracked:
-                blocking.extend(f"untracked: {relative}" for relative in untracked)
             if blocking:
                 raise WorkspaceSafetyError(
                     "the workspace guard requires a clean tracked and non-ignored "
@@ -220,10 +223,9 @@ class WorkspaceGuard:
                 )
 
         for path in self.target_paths:
-            exists = path.is_file()
-            content = path.read_bytes() if exists else b""
-            mode = path.stat().st_mode & 0o777 if exists else 0
-            self.target_snapshots[path] = (exists, content, mode)
+            self.target_snapshots[path] = (
+                (True, path.read_bytes(), path.stat().st_mode & 0o777) if path.is_file() else (False, b"", 0)
+            )
 
         self.head = _git_output(self.root, "rev-parse", "HEAD").strip()
         self.branch = _git_output(self.root, "rev-parse", "--abbrev-ref", "HEAD").strip()
@@ -455,7 +457,7 @@ class WorkspaceGuard:
 
     def _run_git_restore(self, *args: str) -> None:
         """Run one repository mutation used only for exact safety recovery."""
-        result = git(*args, cwd=self.root, check=False, text=False)
+        result = git_bytes(*args, cwd=self.root, check=False)
         if result.returncode != 0:
             detail = result.stderr.decode(errors="replace").strip()
             raise WorkspaceSafetyError(

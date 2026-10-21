@@ -42,6 +42,17 @@ def _restore_recording_session_binding():
         session_binding._CURRENT_SESSION.reset(token)
 
 
+@pytest.fixture(autouse=True)
+def _kfd_nodes_in_pci_order(monkeypatch):
+    """No test reaches a real ``amd-smi list``: card N is the Nth KFD node, so a mask number is its amd-smi index.
+
+    A test of the mapping itself patches ``_read_gpu_kfd_nodes`` again with a board where the two orders differ.
+    """
+    from hyperloom.common import gpu_power_settings
+
+    monkeypatch.setattr(gpu_power_settings, "_read_gpu_kfd_nodes", lambda: {gpu: 8 + gpu for gpu in range(16)})
+
+
 def enable_multi_node(monkeypatch, nodes: int = 2) -> None:
     """Put the executors in multi-node mode with a no-op per-round server restart."""
     from hyperloom.orchestrator.actions.executors import _multi_node_server_lifecycle as mnl
@@ -87,31 +98,54 @@ def seed_kernel_keep(
     artifact: str = "",
     task_group_key: str = "",
 ) -> str:
-    """Put one attempt row and, for a KEEP, its queued patch into ``state``."""
-    from hyperloom.orchestrator.kernel._kernel_decisions import (
-        _queue_kernel_keep,
-        _stable_kernel_task_key,
-    )
+    """Queue one KEEP patch in the shape the integrate lane stores it; a non-KEEP decision queues nothing."""
+    from hyperloom.orchestrator.kernel._kernel_decisions import _kernel_integration_id
 
-    task_key = _stable_kernel_task_key(
-        task_group_key=task_group_key,
-        kernel_id=kernel_id,
+    if decision.upper() != "KEEP":
+        return ""
+    task_key = task_group_key or f"seed:{kernel_id}"
+    integration_id = _kernel_integration_id(
+        task_key=task_key,
         source_file=source_file,
+        artifact_path=artifact,
+        artifact_bundle={},
     )
-    entry = {
-        "current_kernel_id": kernel_id,
+    state.pending_kernel_integrations[integration_id] = {
+        "integration_id": integration_id,
+        "task_key": task_key,
         "task_group_key": task_group_key,
-        "last_decision": decision,
-        "last_status": "ok",
-        "last_micro_speedup": micro,
-        "last_source_file": source_file,
-        "last_artifact_path": artifact,
-        "attempts": 1,
-        "last_ts": f"2026-01-01T00:00:{len(state.kernel_opt_task_attempts):02d}+00:00",
+        "kernel_id": kernel_id,
+        "source_file": source_file,
+        "artifact_path": artifact,
+        "artifact_bundle": {},
+        "deploy_patch_path": artifact,
+        "micro_speedup": micro,
+        "optimization_decision": "KEEP",
+        "trace_gpu_pct": 0.0,
+        "status": "pending",
     }
-    state.kernel_opt_task_attempts[task_key] = entry
-    _queue_kernel_keep(state, task_key=task_key, kernel_id=kernel_id, entry=entry)
-    return task_key
+    return integration_id
+
+
+def seed_integrate_verdict(
+    state,
+    kernel_id: str,
+    *,
+    decision: str = "REVERT",
+    source_file: str = "",
+    task_group_key: str = "",
+) -> dict[str, Any] | None:
+    """Settle one end-to-end integrate verdict on ``kernel_id`` through the real ledger writer."""
+    return state.record_kernel_integrate_result(
+        {
+            "kernel_id": kernel_id,
+            "patch_path": f"/tmp/{kernel_id}.patch",
+            "target_file": source_file,
+            "task_group_key": task_group_key,
+            "decision": decision,
+            "status": "ok",
+        }
+    )
 
 
 def make_coordinator(session_dir: Path, *, shared_state_overrides: dict[str, Any] | None = None, **coord_kwargs: Any):
@@ -422,12 +456,6 @@ def build_coord(tmp_path):
     return make_coordinator(tmp_path)
 
 
-@pytest.fixture
-def build_lifecycle(build_coord):
-    """``BuildLifecycleCollaborator`` from the ``build_coord`` coordinator."""
-    return build_coord.build_lifecycle
-
-
 def patch_integrate_patch_roots(monkeypatch, tmp_path: Path) -> None:
     """Register common tmp_path framework repos as integrate_patch search roots."""
     from hyperloom.orchestrator.actions.executors import integrate_patch as ip
@@ -573,13 +601,16 @@ class RayDouble:
     """A ``ray`` module stand-in that runs actor methods in real threads."""
 
     class exceptions:
-        class RayActorError(Exception):
+        class RayError(Exception):
             pass
 
-        class RayTaskError(Exception):
+        class RayActorError(RayError):
             pass
 
-        class GetTimeoutError(Exception):
+        class RayTaskError(RayError):
+            pass
+
+        class GetTimeoutError(RayError):
             pass
 
     def __init__(self) -> None:
@@ -619,3 +650,44 @@ def serving_lease_on_a_ray_double(monkeypatch):
     monkeypatch.setattr(rb, "get_ray_backend", lambda: SimpleNamespace(ensure=lambda **_kw: None))
     with rs.ServingLease(num_gpus=1) as lease:
         yield lease
+
+
+def cli_call_sequence(entry: str) -> list[str]:
+    """Every call ``entry`` makes, in source order, descending into this module's own functions.
+
+    The optimize driver's phases live in sibling functions rather than in one
+    body, so an ordering contract that once read off a single function now spans
+    several. Flattening the path restores the only thing those contracts were
+    ever about -- what happens before what -- and keeps them readable from the
+    source, which is the point of asserting on it at all.
+
+    Recursion stops at a function already on the path, so a cycle cannot hang
+    the test.
+    """
+    import ast
+    import pathlib
+
+    from hyperloom.inference_optimizer import cli
+
+    tree = ast.parse(pathlib.Path(cli.__file__).read_text(encoding="utf-8"))
+    functions = {node.name: node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+
+    def own_calls(node: ast.AST) -> list[str]:
+        found = [
+            (call.lineno, call.col_offset, call.func.id)
+            for call in ast.walk(node)
+            if isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+        ]
+        return [name for _lineno, _col, name in sorted(found)]
+
+    def walk(name: str, path: tuple[str, ...]) -> list[str]:
+        if name in path or name not in functions:
+            return []
+        sequence: list[str] = []
+        for called in own_calls(functions[name]):
+            sequence.append(called)
+            sequence.extend(walk(called, path + (name,)))
+        return sequence
+
+    assert entry in functions, f"{entry} is not a module-level function of the CLI any more"
+    return walk(entry, ())

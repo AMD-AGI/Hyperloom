@@ -11,10 +11,11 @@ import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Iterator, Mapping
 
 from packaging.version import InvalidVersion, Version
 
+from hyperloom.common.coerce import to_float
 from hyperloom.common.gpu_identity import AMD_GPU_DISPATCH_IDENTITIES
 from hyperloom.common.perf_metric import agentx_active
 from hyperloom.orchestrator.knowledge.recipe_kb import (
@@ -22,6 +23,7 @@ from hyperloom.orchestrator.knowledge.recipe_kb import (
     cid_to_path_components,
     recipe_canonical_id,
 )
+from hyperloom.orchestrator.knowledge.workload_tags import WORKLOAD_SHAPE_FIELDS, workload_shape_tags
 from hyperloom.inference_optimizer.breakdown.recorder import warm_start_event as _warm_start_event
 from hyperloom.inference_optimizer.recipe_snapshot_constants import detect_framework_version, kb_hardware_slug
 from hyperloom.inference_optimizer.session.session_paths import (
@@ -33,26 +35,20 @@ from hyperloom.inference_optimizer.session.session_paths import (
 log = logging.getLogger(__name__)
 
 
+def _text(value: Any) -> str:
+    """A stripped string for a value that may be ``None``."""
+    return str(value or "").strip()
+
+
 def _default_status_emitter(line: str) -> None:
     """Default ``on_status`` callback — log the banner line at INFO."""
     log.info("%s", line)
 
 
-# Numeric workload knobs threaded into the KB ``prefer`` block so a closer-workload recipe is reranked first.
-_PREFER_NUMERIC_ATTRS: tuple[str, ...] = (
-    "tp",
-    "ep",
-    "conc",
-    "isl",
-    "osl",
-    "max_model_len",
-)
-
-
 def _build_warm_prefer(shared_state: Any, framework_version: str) -> dict[str, Any]:
-    """Assemble the ``prefer`` similarity hints from SharedState."""
+    """Assemble the ``prefer`` similarity hints from SharedState so a closer-workload recipe is reranked first."""
     prefer: dict[str, Any] = {}
-    for attr in _PREFER_NUMERIC_ATTRS:
+    for attr in WORKLOAD_SHAPE_FIELDS:
         val = getattr(shared_state, attr, None)
         if val not in (None, "", 0):
             prefer[attr] = val
@@ -197,36 +193,31 @@ def _has_replayable_config(row: Mapping[str, Any]) -> bool:
     return bool(args or envs)
 
 
+def _best_session(row: Mapping[str, Any]) -> tuple[Mapping[str, Any] | None, float]:
+    """The row's highest-gain session and that gain; ``-inf`` when the row records none."""
+    best: Mapping[str, Any] | None = None
+    best_gain = float("-inf")
+    sessions = row.get("sessions")
+    # A truthy non-iterable ``sessions`` would otherwise raise here and abort T0.
+    if isinstance(sessions, list):
+        for session in sessions:
+            if not isinstance(session, Mapping):
+                continue
+            gain = to_float(session.get("gain_pct") or 0.0)
+            if gain is not None and gain > best_gain:
+                best, best_gain = session, gain
+    return best, best_gain
+
+
 def _max_session_gain(row: Mapping[str, Any]) -> float:
     """Return the MAX ``gain_pct`` across a row's sessions (fallback flat gain_pct)."""
-    best = 0.0
-    sessions = row.get("sessions")
-    if isinstance(sessions, list):
-        for s in sessions:
-            if not isinstance(s, Mapping):
-                continue
-            try:
-                g = float(s.get("gain_pct") or 0.0)
-            except (TypeError, ValueError):
-                continue
-            best = max(best, g)
+    best = max(_best_session(row)[1], 0.0)
     if best <= 0:
-        try:
-            best = max(best, float(row.get("validated_gain_pct") or row.get("gain_pct") or 0.0))
-        except (TypeError, ValueError):
-            pass
+        best = max(best, to_float(row.get("validated_gain_pct") or row.get("gain_pct"), 0.0))
     return best
 
 
-def _donor_is_trustworthy(
-    donor: Mapping[str, Any],
-    *,
-    target_arch_slug: str,
-    target_model_type: str,
-    target_conc: Any = None,
-    target_isl: Any = None,
-    target_osl: Any = None,
-) -> bool:
+def _donor_is_trustworthy(donor: Mapping[str, Any], identity: Mapping[str, Any], shape: Mapping[str, Any]) -> bool:
     """Gate a BORROWED (cross-model) warm-replay config donor."""
     if not isinstance(donor, Mapping):
         return False
@@ -248,9 +239,10 @@ def _donor_is_trustworthy(
     _unknown = {"", "unknown", "unknown_arch", "unknown_model_type"}
     if donor_arch in _unknown or donor_mt in _unknown:
         return False
-    if target_arch_slug and donor_arch and donor_arch != target_arch_slug:
+    target_arch = _text(identity.get("architectures"))
+    if target_arch and donor_arch and donor_arch != target_arch:
         return False
-    tgt_mt = str(target_model_type or "").strip().lower()
+    tgt_mt = _text(identity.get("model_type")).lower()
     if tgt_mt and donor_mt and donor_mt != tgt_mt:
         return False
 
@@ -267,15 +259,7 @@ def _donor_is_trustworthy(
             return False
         return dv > 0 and tv == dv
 
-    if not all(
-        (
-            _shape_matches(target_conc, "conc"),
-            _shape_matches(target_isl, "isl"),
-            _shape_matches(target_osl, "osl"),
-        )
-    ):
-        return False
-    return True
+    return all(_shape_matches(shape.get(key), key) for key in ("conc", "isl", "osl"))
 
 
 def _select_remote_candidate(kb: Any, row: Mapping[str, Any]) -> bool:
@@ -308,142 +292,36 @@ def _warm_start_scope(shared_state: Any) -> dict[str, Any]:
 def _settle_warm_start_event(
     recorder: Any,
     *,
-    match_status: str,
-    tier: str,
-    confidence: Any,
-    source: str,
-    canonical_id: str,
+    context: Mapping[str, Any],
     recipe: Mapping[str, Any] | None,
-    context: Any,
-    lessons: list[dict[str, Any]],
-    pitfalls: list[dict[str, Any]],
+    experience: Mapping[str, list[dict[str, Any]]],
 ) -> None:
-    """Close the warm_start event.
-
-    Args:
-        recorder (Any): The open warm-start recorder.
-        match_status (str): T0's own ``hit`` / ``seed_only`` / ``miss`` verdict.
-        tier (str): The tier the match was served at.
-        confidence (Any): The match confidence.
-        source (str): Which store served the match.
-        canonical_id (str): The identity that was queried.
-        recipe (Mapping[str, Any] | None): The matched recipe row, if any.
-        context (Any): The built ``warm_start_context``, read for the gain the
-            matched record claims.
-        lessons (list[dict[str, Any]]): The record's lessons.
-        pitfalls (list[dict[str, Any]]): The record's pitfalls.
-    """
+    """Close the warm_start event on the context the lookup produced."""
+    match = context.get("match") or {}
+    status = str(context.get("status") or "")
     matched = None
-    if match_status in _warm_start_event.MATCHED_STATUSES and recipe:
-        replay = context.get("recommended_replay") if isinstance(context, Mapping) else None
+    if status in _warm_start_event.MATCHED_STATUSES and recipe:
+        replay = context.get("recommended_replay")
         matched = _warm_start_event.matched_block(
-            tier=tier,
-            confidence=confidence,
-            source=source,
-            canonical_id=canonical_id,
+            tier=match.get("tier"),
+            confidence=match.get("confidence"),
+            source=match.get("source"),
+            canonical_id=match.get("canonical_id"),
             recipe=recipe,
-            expected_gain_pct=(replay or {}).get("expected_gain_pct") if isinstance(replay, Mapping) else None,
-            lessons=lessons,
-            pitfalls=pitfalls,
+            expected_gain_pct=replay.get("expected_gain_pct") if isinstance(replay, Mapping) else None,
+            lessons=experience["lessons"],
+            pitfalls=experience["pitfalls"],
         )
-    recorder.finish(match_status=match_status, matched=matched)
-
-
-def _find_config_donor(
-    kb: Any,
-    *,
-    cid: str,
-    hardware: str,
-    framework: str,
-    model_type: str,
-    arch_slug: str,
-    framework_version: str,
-    precision: str,
-    target_conc: Any = None,
-    target_isl: Any = None,
-    target_osl: Any = None,
-) -> tuple[Mapping[str, Any] | None, str, float]:
-    """Borrow a replayable config through the standard degradation tiers."""
-    if not (model_type or arch_slug):
-        return None, "", 0.0
-    common = {
-        "framework_name": framework or "",
-        "model_type": model_type,
-        "architectures": arch_slug,
-    }
-    tiers = _warm_search_tiers(
-        common=common,
-        hardware=hardware,
-        framework_version=framework_version,
-        precision=precision,
-    )
-    seen = {cid}
-    target_precision = str(precision or "").strip().lower()
-    for (
-        tier,
-        confidence,
-        labels,
-        hardware_in,
-        relax_framework_version,
-    ) in tiers:
-        labels = {
-            key: value for key, value in labels.items() if value and value not in ("unknown_model_type", "unknown_arch")
-        }
-        usable: list[Mapping[str, Any]] = []
-        candidates = _search_warm_candidates(
-            kb,
-            labels=labels,
-            hardware_in=hardware_in,
-        )
-        for candidate in candidates:
-            candidate_id = str(candidate.get("canonical_id") or "")
-            if not candidate_id or candidate_id in seen:
-                continue
-            seen.add(candidate_id)
-            if hardware_in is not None and not _hardware_is_compatible(
-                hardware,
-                _candidate_dimension(candidate, "hardware"),
-            ):
-                continue
-            if _candidate_dimension(candidate, "precision") != target_precision:
-                continue
-            if relax_framework_version and not _framework_version_is_compatible(
-                framework_version,
-                _candidate_dimension(candidate, "framework_version"),
-            ):
-                continue
-            if _donor_is_trustworthy(
-                candidate,
-                target_arch_slug=arch_slug,
-                target_model_type=model_type,
-                target_conc=target_conc,
-                target_isl=target_isl,
-                target_osl=target_osl,
-            ):
-                usable.append(candidate)
-        if candidates and not usable:
-            log.info(
-                "warm-start config donor tier %s rejected all %d candidates",
-                tier,
-                len(candidates),
-            )
-        ranked = _rank_warm_candidates(
-            usable,
-            target_framework_version=framework_version,
-        )
-        if ranked:
-            return ranked[0], tier, confidence
-    return None, "", 0.0
+    recorder.finish(match_status=status, matched=matched)
 
 
 def _build_warm_start_context(
     *,
-    status: str,
     tier: str,
     confidence: float,
     canonical_id: str,
     source: str,
-    recipe: Mapping[str, Any] | None,
+    recipe: Mapping[str, Any],
     config_donor: Mapping[str, Any] | None = None,
     config_donor_tier: str = "",
     config_donor_confidence: float | None = None,
@@ -451,92 +329,64 @@ def _build_warm_start_context(
     """Build the model-facing WarmStartContext from a KB recipe row."""
     from .remote_recipe import RECORD_KIND_HYPERLOOM_RECIPE
 
-    current_remote = bool(isinstance(recipe, Mapping) and recipe.get("record_kind") == RECORD_KIND_HYPERLOOM_RECIPE)
+    # Priors ride the identity match independent of replay config, and come from the exact identity when the
+    # cascade carried one across from a borrowed row.
+    priors = recipe.get("exact_history") or recipe
+    if config_donor_confidence is None:
+        config_donor_confidence = confidence
     ctx: dict[str, Any] = {
-        "status": status,
+        # A cascade that matched nothing reports tier ``miss``, so the tier is the status.
+        "status": tier if tier in ("miss", "seed_only") else "hit",
         "match": {
             "tier": tier,
             "confidence": float(confidence),
             "source": source,
             "canonical_id": canonical_id,
         },
-        "proven_prior": [],
-        "do_not_repeat": [],
-        "lessons": [],
-        "pitfalls": [],
-    }
-    # Priors ride the identity match independent of replay config.
-    if isinstance(recipe, Mapping):
-        history = recipe.get("exact_history")
-        prior_source = history if isinstance(history, Mapping) else recipe
-        ctx["proven_prior"] = list(prior_source.get("what_worked") or [])
-        ctx["do_not_repeat"] = list(prior_source.get("what_failed") or [])
-        ctx["lessons"] = list(prior_source.get("lessons") or [])
-        ctx["pitfalls"] = list(prior_source.get("pitfalls") or [])
-    # Replay config comes from the donor, or the identity recipe as self-donor.
-    donor = config_donor if not current_remote and isinstance(config_donor, Mapping) else None
-    if not current_remote and donor is None and isinstance(recipe, Mapping) and _has_replayable_config(recipe):
-        donor = recipe
-        config_donor_tier = config_donor_tier or "self"
-        if config_donor_confidence is None:
-            config_donor_confidence = confidence
-    if donor is not None:
-        args, envs = _config_replay_args_envs(donor)
-        if args or envs:
-            try:
-                best_tput = float(donor.get("best_throughput") or 0.0)
-            except (TypeError, ValueError):
-                best_tput = 0.0
-            try:
-                expected_gain = float(donor.get("validated_gain_pct") or 0.0)
-            except (TypeError, ValueError):
-                expected_gain = 0.0
-            if expected_gain <= 0:
-                expected_gain = _max_session_gain(donor)
-            donor_session: Mapping[str, Any] | None = None
-            donor_session_gain = float("-inf")
-            for session in donor.get("sessions") or []:
-                if not isinstance(session, Mapping):
-                    continue
-                try:
-                    session_gain = float(session.get("gain_pct") or 0.0)
-                except (TypeError, ValueError):
-                    continue
-                if session_gain > donor_session_gain:
-                    donor_session = session
-                    donor_session_gain = session_gain
-            recommended_replay: dict[str, Any] = {
-                "extra_server_args": args,
-                "extra_envs": envs,
-                "expected_gain_pct": expected_gain,
-                "best_throughput": best_tput,
-                "config_source": str(donor.get("canonical_id") or ""),
-                "config_tier": config_donor_tier or "self",
-                "config_confidence": float(confidence if config_donor_confidence is None else config_donor_confidence),
-            }
-            donor_canonical_id = str(donor.get("canonical_id") or "")
-            donor_model = str(donor.get("model") or "")
-            family_tags = donor.get("family_tags") or donor.get("model_architectures")
-            breakdown_link = str(donor.get("breakdown_link") or "")
-            if donor_session is not None:
-                breakdown_link = str(
-                    donor_session.get("breakdown_link") or donor_session.get("session_breakdown_url") or breakdown_link
-                )
-            recommended_replay.update(
-                {
-                    "donor_canonical_id": donor_canonical_id,
-                    "donor_model": donor_model,
-                    "donor_session_id": (
-                        str(donor_session.get("session_id") or "") if donor_session is not None else ""
-                    ),
-                    "donor_family_tags": (
-                        [str(tag) for tag in family_tags] if isinstance(family_tags, (list, tuple, set)) else []
-                    ),
-                    "donor_gain_pct": expected_gain,
-                    "donor_breakdown_link": breakdown_link,
-                }
+        **{
+            field: list(priors.get(key) or [])
+            for field, key in (
+                ("proven_prior", "what_worked"),
+                ("do_not_repeat", "what_failed"),
+                ("lessons", "lessons"),
+                ("pitfalls", "pitfalls"),
             )
-            ctx["recommended_replay"] = recommended_replay
+        },
+    }
+    if recipe.get("record_kind") == RECORD_KIND_HYPERLOOM_RECIPE:
+        return ctx
+    # Replay config comes from the donor, or the identity recipe as self-donor.
+    donor = config_donor
+    if donor is None:
+        if not _has_replayable_config(recipe):
+            return ctx
+        donor, config_donor_tier = recipe, "self"
+    args, envs = _config_replay_args_envs(donor)
+    if not (args or envs):
+        return ctx
+    expected_gain = to_float(donor.get("validated_gain_pct"), 0.0)
+    if expected_gain <= 0:
+        expected_gain = _max_session_gain(donor)
+    session = _best_session(donor)[0] or {}
+    family_tags = donor.get("family_tags") or donor.get("model_architectures")
+    donor_cid = _text(donor.get("canonical_id"))
+    ctx["recommended_replay"] = {
+        "extra_server_args": args,
+        "extra_envs": envs,
+        "expected_gain_pct": expected_gain,
+        "best_throughput": to_float(donor.get("best_throughput"), 0.0),
+        "config_source": donor_cid,
+        "config_tier": config_donor_tier,
+        "config_confidence": float(config_donor_confidence),
+        "donor_canonical_id": donor_cid,
+        "donor_model": _text(donor.get("model")),
+        "donor_session_id": _text(session.get("session_id")),
+        "donor_family_tags": [str(tag) for tag in family_tags] if isinstance(family_tags, (list, tuple, set)) else [],
+        "donor_gain_pct": expected_gain,
+        "donor_breakdown_link": _text(
+            session.get("breakdown_link") or session.get("session_breakdown_url") or donor.get("breakdown_link")
+        ),
+    }
     return ctx
 
 
@@ -546,58 +396,30 @@ def _build_t0_trace_extras(
     extra: "Mapping[str, Any]",
     fp: "Mapping[str, Any]",
     image_digest: str,
-    model_class: str,
 ) -> dict[str, Any]:
     """Assemble operator-traceability + workload-shape tags for the recipe extras (skip empty/zero)."""
     _extras: dict[str, Any] = {}
-    if model_class:
-        _extras["model_class"] = model_class
+    _model_class = str(extra.get("model_class") or "").strip()
+    if _model_class:
+        _extras["model_class"] = _model_class
     _architectures = getattr(shared_state, "model_architectures", None) or []
-    if isinstance(_architectures, list):
-        _arch_list = [str(a).strip() for a in _architectures if str(a or "").strip()]
-        if _arch_list:
-            _extras["architectures"] = _arch_list
+    _arch_list = [str(a).strip() for a in _architectures if str(a or "").strip()]
+    if _arch_list:
+        _extras["architectures"] = _arch_list
     _model_type = str(getattr(shared_state, "model_type", "") or "").strip()
     if _model_type:
         _extras["model_type"] = _model_type
-    rocm_v = str(fp.get("rocm") or "").strip()
-    if rocm_v and rocm_v != "unknown":
-        _extras["rocm_version"] = rocm_v
-    aiter_v = str(fp.get("aiter") or "").strip()
-    if aiter_v and aiter_v != "unknown":
-        _extras["aiter_version"] = aiter_v
+    for tag, probed in (("rocm_version", "rocm"), ("aiter_version", "aiter")):
+        probed_value = str(fp.get(probed) or "").strip()
+        if probed_value and probed_value != "unknown":
+            _extras[tag] = probed_value
     if image_digest and image_digest != "unknown":
         _extras["image_digest"] = str(image_digest).strip()
     for src_key in ("claw_session_id", "sandbox_user_id"):
         v = str(extra.get(src_key) or "").strip()
         if v:
             _extras[src_key] = v
-    for src_attr, dst_key in (
-        ("tp", "tp"),
-        ("ep", "ep"),
-        ("conc", "conc"),
-        ("isl", "isl"),
-        ("osl", "osl"),
-        ("max_model_len", "max_model_len"),
-    ):
-        v = getattr(shared_state, src_attr, None)
-        if v not in (None, "", 0):
-            _extras[dst_key] = v
-    if "ep" not in _extras:
-        raw_ep = (os.environ.get("EP") or "").strip()
-        try:
-            n = int(raw_ep) if raw_ep else 0
-        except ValueError:
-            n = 0
-        if n > 0:
-            _extras["ep"] = n
-    raw_pp = (os.environ.get("PP") or "").strip()
-    try:
-        pp_n = int(raw_pp) if raw_pp else 0
-    except ValueError:
-        pp_n = 0
-    if pp_n > 0:
-        _extras["pp"] = pp_n
+    _extras.update(workload_shape_tags(shared_state))
     return _extras
 
 
@@ -615,6 +437,24 @@ _TOPOLOGY_SUFFIX_RE = re.compile(
     rf"(?:_tp[1-9]\d*)?{_SHAPE_SUFFIX}(?:_[a-z0-9-]+)?"
     rf"|{_SHAPE_SUFFIX})$"
 )
+#: The seven-tuple dimensions a canonical id is built from, in canonical-id order.
+_CID_DIMENSIONS = (
+    "model",
+    "hardware",
+    "framework_name",
+    "model_type",
+    "architectures",
+    "framework_version",
+    "precision",
+)
+
+
+def _cid_dimensions(cid: str) -> dict[str, str]:
+    """The seven-tuple a canonical id spells out, empty when it does not parse."""
+    try:
+        return dict(zip(_CID_DIMENSIONS, cid_to_path_components(cid)))
+    except ValueError:
+        return {}
 
 
 def _parse_hardware_topology(hardware: str) -> tuple[str, str, str] | None:
@@ -684,45 +524,27 @@ def _framework_version_is_compatible(target: str, candidate: str) -> bool:
 
 
 def _warm_search_tiers(
-    *,
-    common: dict[str, str],
-    hardware: str,
-    framework_version: str,
-    precision: str,
+    identity: Mapping[str, Any],
 ) -> tuple[
     tuple[str, float, dict[str, str], list[str] | None, bool],
     ...,
 ]:
     """Build the shared ordered seven-tuple degradation tiers."""
-    hardware_values = _hardware_fallback_values(hardware)
+    labels = {key: _text(identity.get(key)) for key in _CID_DIMENSIONS if key != "model"}
+    hardware_values = _hardware_fallback_values(labels["hardware"])
     return (
-        (
-            "same_arch_class",
-            0.95,
-            {
-                **common,
-                "hardware": hardware,
-                "framework_version": framework_version,
-                "precision": precision,
-            },
-            None,
-            False,
-        ),
+        ("same_arch_class", 0.95, labels, None, False),
         (
             "same_gpu_isa",
             0.85,
-            {
-                **common,
-                "framework_version": framework_version,
-                "precision": precision,
-            },
+            {key: value for key, value in labels.items() if key != "hardware"},
             hardware_values,
             False,
         ),
         (
             "compatible_framework_version",
             0.72,
-            {**common, "precision": precision},
+            {key: value for key, value in labels.items() if key not in ("hardware", "framework_version")},
             hardware_values,
             True,
         ),
@@ -737,20 +559,7 @@ def _candidate_dimension(row: Mapping[str, Any], key: str) -> str:
         value = row.get(alias)
     if value not in (None, ""):
         return str(value).strip().lower()
-    try:
-        dimensions = cid_to_path_components(str(row.get("canonical_id") or ""))
-    except ValueError:
-        return ""
-    names = (
-        "model",
-        "hardware",
-        "framework_name",
-        "model_type",
-        "architectures",
-        "framework_version",
-        "precision",
-    )
-    return str(dict(zip(names, dimensions)).get(alias) or "").strip().lower()
+    return str(_cid_dimensions(str(row.get("canonical_id") or "")).get(alias) or "").strip().lower()
 
 
 def _rank_warm_candidates(
@@ -819,24 +628,56 @@ def _remote_candidate_matches(
     return all(_candidate_dimension(row, key) == str(value).strip().lower() for key, value in labels.items())
 
 
+def _tier_matches(
+    kb: Any,
+    tiers: tuple[tuple[str, float, dict[str, str], list[str] | None, bool], ...],
+    identity: Mapping[str, Any],
+    shape: Mapping[str, Any],
+) -> Iterator[tuple[Mapping[str, Any], str, float]]:
+    """Walk the degradation tiers, yielding each tier's trustworthy candidates best first."""
+    seen = {_text(identity.get("canonical_id"))}
+    hardware = _text(identity.get("hardware"))
+    version = _text(identity.get("framework_version"))
+    precision = _text(identity.get("precision")).lower()
+    for tier, confidence, labels, hardware_in, relax_framework_version in tiers:
+        rows = _search_warm_candidates(kb, labels=labels, hardware_in=hardware_in)
+        usable: list[Mapping[str, Any]] = []
+        for candidate in rows:
+            candidate_id = str(candidate.get("canonical_id") or "")
+            if not candidate_id or candidate_id in seen:
+                continue
+            seen.add(candidate_id)
+            if not _remote_candidate_matches(kb, candidate, labels=labels):
+                continue
+            if hardware_in is not None and not _hardware_is_compatible(
+                hardware,
+                _candidate_dimension(candidate, "hardware"),
+            ):
+                continue
+            if _candidate_dimension(candidate, "precision") != precision:
+                continue
+            if relax_framework_version and not _framework_version_is_compatible(
+                version,
+                _candidate_dimension(candidate, "framework_version"),
+            ):
+                continue
+            if _donor_is_trustworthy(candidate, identity, shape):
+                usable.append(candidate)
+        if rows and not usable:
+            log.info("warm-start tier %s rejected all %d candidates", tier, len(rows))
+        for candidate in _rank_warm_candidates(usable, target_framework_version=version):
+            yield candidate, tier, confidence
+
+
 def _cascade_warm_start_search(
     kb: "RecipeKB",
     *,
     cid: str,
-    hw: str,
-    framework: str,
-    model_type_val: str,
-    architectures_val: Any,
-    arch_slug: str,
-    fw_version: str,
-    precision: str,
+    identity: Mapping[str, Any],
+    shape: Mapping[str, Any],
     warm_prefer: Any,
-    target_conc: Any = None,
-    target_isl: Any = None,
-    target_osl: Any = None,
 ) -> "tuple[dict[str, Any], str, float]":
     """Resolve exact plus cumulative four-tier seven-tuple fallbacks."""
-    del architectures_val
     exact_history: Mapping[str, Any] | None = None
     try:
         exact = kb.get_recipe(
@@ -851,97 +692,246 @@ def _cascade_warm_start_search(
             return dict(exact), "exact", 1.0
         exact_history = exact
 
-    try:
-        (
-            _,
-            target_hardware,
-            target_framework,
-            target_model_type,
-            target_architecture,
-            target_framework_version,
-            target_precision,
-        ) = cid_to_path_components(cid)
-    except ValueError:
-        target_hardware = str(hw or "")
-        target_framework = str(framework or "")
-        target_model_type = str(model_type_val or "")
-        target_architecture = str(arch_slug or "")
-        target_framework_version = str(fw_version or "")
-        target_precision = str(precision or "")
-    common = {
-        "framework_name": target_framework,
-        "model_type": target_model_type,
-        "architectures": target_architecture,
-    }
-    tiers = _warm_search_tiers(
-        common=common,
-        hardware=target_hardware,
-        framework_version=target_framework_version,
-        precision=target_precision,
-    )
-    seen = {cid}
-    target_precision_value = str(target_precision or "").strip().lower()
-    for (
-        tier,
-        confidence,
-        labels,
-        hardware_in,
-        relax_framework_version,
-    ) in tiers:
-        rows = _search_warm_candidates(
-            kb,
-            labels=labels,
-            hardware_in=hardware_in,
-        )
-        usable: list[Mapping[str, Any]] = []
-        for candidate in rows:
-            candidate_id = str(candidate.get("canonical_id") or "")
-            if not candidate_id or candidate_id in seen:
-                continue
-            seen.add(candidate_id)
-            if not _remote_candidate_matches(kb, candidate, labels=labels):
-                continue
-            if hardware_in is not None and not _hardware_is_compatible(
-                target_hardware,
-                _candidate_dimension(candidate, "hardware"),
-            ):
-                continue
-            if _candidate_dimension(candidate, "precision") != target_precision_value:
-                continue
-            if relax_framework_version and not _framework_version_is_compatible(
-                target_framework_version,
-                _candidate_dimension(candidate, "framework_version"),
-            ):
-                continue
-            if not _donor_is_trustworthy(
-                candidate,
-                target_arch_slug=target_architecture,
-                target_model_type=target_model_type,
-                target_conc=target_conc,
-                target_isl=target_isl,
-                target_osl=target_osl,
-            ):
-                continue
-            usable.append(candidate)
-        if rows and not usable:
-            log.info(
-                "warm-start tier %s rejected all %d candidates",
-                tier,
-                len(rows),
-            )
-        for candidate in _rank_warm_candidates(
-            usable,
-            target_framework_version=target_framework_version,
-        ):
-            if _select_remote_candidate(kb, candidate):
-                return (
-                    _with_exact_history(candidate, exact_history),
-                    tier,
-                    confidence,
-                )
+    # An unparseable cid — every agentx id is one — keeps the dimensions resolved from SharedState.
+    stored = {**identity, **_cid_dimensions(cid)}
+    for candidate, tier, confidence in _tier_matches(kb, _warm_search_tiers(stored), stored, shape):
+        if _select_remote_candidate(kb, candidate):
+            return _with_exact_history(candidate, exact_history), tier, confidence
     if exact_history is not None:
         return dict(exact_history), "exact", 1.0
     return {}, "miss", 0.0
+
+
+def _find_config_donor(
+    kb: Any,
+    identity: Mapping[str, Any],
+    shape: Mapping[str, Any],
+) -> tuple[Mapping[str, Any] | None, str, float]:
+    """Borrow a replayable config through the standard degradation tiers."""
+    tiers = tuple(
+        (
+            tier,
+            confidence,
+            {
+                key: value
+                for key, value in labels.items()
+                if value and value not in ("unknown_model_type", "unknown_arch")
+            },
+            hardware_in,
+            relax_framework_version,
+        )
+        for tier, confidence, labels, hardware_in, relax_framework_version in _warm_search_tiers(identity)
+    )
+    return next(_tier_matches(kb, tiers, identity, shape), (None, "", 0.0))
+
+
+def _warm_replay_donor(
+    kb: "RecipeKB",
+    match: tuple[Mapping[str, Any], str, float],
+    identity: Mapping[str, Any],
+    shape: Mapping[str, Any],
+) -> tuple[Mapping[str, Any] | None, str, float]:
+    """Pick the row whose champion config T0 recommends replaying."""
+    from .remote_recipe import RECORD_KIND_HYPERLOOM_RECIPE
+
+    recipe, tier, confidence = match
+    if not recipe or recipe.get("record_kind") == RECORD_KIND_HYPERLOOM_RECIPE:
+        return None, "", 0.0
+    # A true-self (identity ``exact``) champion always replays; a cross-model borrow must clear the trustworthiness
+    # gate before it becomes the donor.
+    if _has_replayable_config(recipe) and (tier == "exact" or _donor_is_trustworthy(recipe, identity, shape)):
+        return recipe, "self", confidence
+    return _find_config_donor(kb, identity, shape)
+
+
+def _resolve_t0_identity(
+    shared_state: Any,
+    *,
+    workload: str,
+    hw: str,
+    extra: Mapping[str, Any],
+    fingerprint: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Resolve the seven-tuple a T0 anchor is written and searched under."""
+    from hyperloom.inference_optimizer.recipe_snapshot_constants import _architectures_slug
+    from hyperloom.orchestrator.actions.executors._multi_node_env import resolve_kb_topology
+
+    model = _text(workload) or "unknown_model"
+    # Topology-aware hardware slug (multi-node appends ``_ws{world_size}``), resolved once so the cid, the stored
+    # ``hardware`` field, and every warm-start tier share an identical, isolated key.
+    hardware = kb_hardware_slug(_text(hw) or "unknown_gpu", **resolve_kb_topology())
+    framework = _text(
+        extra.get("framework_name")
+        or extra.get("framework")
+        or getattr(shared_state, "framework", "")
+        or os.environ.get("FRAMEWORK", "")
+    )
+    # framework_version: SharedState > stack_fingerprint > importlib auto-detect.
+    version = _text(getattr(shared_state, "framework_version", ""))
+    if not version and framework in ("sglang", "vllm"):
+        version = _text(fingerprint.get(framework))
+        if version == "unknown":
+            version = ""
+    if not version and framework:
+        version = detect_framework_version(framework)
+    architectures = getattr(shared_state, "model_architectures", None) or []
+    identity: dict[str, Any] = {
+        "model": model,
+        "hardware": hardware,
+        "framework_name": framework,
+        "model_type": _text(getattr(shared_state, "model_type", "")),
+        "architectures": _architectures_slug(architectures),
+        "framework_version": version,
+        "precision": _text(getattr(shared_state, "precision", "")),
+    }
+    identity["canonical_id"] = recipe_canonical_id(
+        model=model,
+        hardware=hardware,
+        framework_name=framework,
+        framework_version=version,
+        precision=identity["precision"],
+        model_type=identity["model_type"],
+        architectures=architectures,
+        scheme=("agentx" if agentx_active(benchmark_mode=getattr(shared_state, "benchmark_mode", "")) else "inference"),
+    )
+    return identity
+
+
+def _stamp_local_authority_row(
+    kb: RecipeKB,
+    *,
+    session_id: str,
+    fingerprint: Mapping[str, Any],
+    identity: Mapping[str, Any],
+    extras: Mapping[str, Any],
+) -> None:
+    """Stamp the T0 anchor onto the local store's own authority row."""
+    if getattr(kb, "mode", "") == "remote":
+        log.debug("T0 anchor: remote publication is owned by CLOSE")
+        return
+    # Read-modify-write the selected store's exact authority row so the stamp does not clobber fields or trigger a
+    # broad remote warm-start scan.
+    try:
+        live = kb.get_authoritative_recipe(canonical_id=identity["canonical_id"]) or {}
+    except Exception as exc:  # noqa: BLE001 — defensive
+        log.info("T0 anchor authority get_recipe non-fatal failure: %s", exc)
+        live = {}
+    # Stack fingerprint — preserve prior values not stamped this round.
+    sfp_payload: dict[str, str] = dict(live.get("stack_fingerprint") or {})
+    for stored, probed in (("vllm_version", "vllm"), ("aiter_commit", "aiter"), ("rocm_version", "rocm")):
+        value = _text(fingerprint.get(probed))
+        if value and value != "unknown":
+            sfp_payload[stored] = value
+    try:
+        kb.put_recipe(
+            canonical_id=identity["canonical_id"],
+            model=identity["model"],
+            hardware=identity["hardware"],
+            framework_name=identity["framework_name"],
+            framework_version=identity["framework_version"],
+            precision=identity["precision"],
+            best_config=dict(live.get("best_config") or {}),
+            best_throughput=float(live.get("best_throughput") or 0.0),
+            what_worked=list(live.get("what_worked") or []),
+            what_failed=list(live.get("what_failed") or []),
+            remaining_gaps=list(live.get("remaining_gaps") or []),
+            pitfalls=list(live.get("pitfalls") or []),
+            lessons=list(live.get("lessons") or []),
+            last_profiled=str(live.get("last_profiled") or ""),
+            stack_fingerprint=sfp_payload,
+            sessions=list(live.get("sessions") or []),
+            # put_recipe sets every field it owns before splatting extras with setdefault, so the row's own values
+            # win and only what the anchor does not own survives from *live*.
+            extras={**live, **extras},
+            provenance={
+                "source": "hyperloom-inference-optimizer",
+                "generator": "t0_anchor",
+                "generated_at": datetime.now(timezone.utc).isoformat(
+                    timespec="microseconds",
+                ),
+                "details": {"sid": session_id},
+            },
+        )
+    except Exception:
+        log.exception("T0 anchor put_recipe raised unexpectedly")
+
+
+def _publish_warm_start_experience(
+    shared_state: Any,
+    session_dir: Path,
+    *,
+    identity: Mapping[str, Any],
+    context: Mapping[str, Any],
+) -> dict[str, list[dict[str, Any]]]:
+    """Snapshot the matched pitfalls and lessons, and hand the non-empty ones to SharedState."""
+    header = {
+        "workload": identity["model"],
+        "hw": identity["hardware"],
+        "framework": identity["framework_name"],
+    }
+    experience: dict[str, list[dict[str, Any]]] = {}
+    for key, required_key, json_path in (
+        ("pitfalls", "description", recipe_kb_pitfalls_json),
+        ("lessons", "statement", recipe_kb_lessons_json),
+    ):
+        rows = _experience_rows(context.get(key), required_key, key)
+        experience[key] = rows
+        path = json_path(session_dir)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                json.dumps({**header, key: rows}, indent=2),
+                encoding="utf-8",
+            )
+        except OSError as exc:
+            log.warning("warm_start_%s snapshot write failed: %s", key, exc)
+            continue
+        if rows:
+            setattr(shared_state, f"warm_start_{key}", rows)
+    return experience
+
+
+def _warm_start_lookup(
+    kb: RecipeKB,
+    shared_state: Any,
+    identity: Mapping[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Run the warm-start search and project what it found into the model-facing context."""
+    cid = str(identity["canonical_id"])
+    shape: dict[str, Any] = {"conc": getattr(shared_state, "conc", None)}
+    # An agentx identity pins no sequence lengths, so a donor's are not compared against it.
+    if not cid.startswith("agentx:"):
+        shape.update(isl=getattr(shared_state, "isl", None), osl=getattr(shared_state, "osl", None))
+    recipe, tier, confidence = _cascade_warm_start_search(
+        kb,
+        cid=cid,
+        identity=identity,
+        shape=shape,
+        warm_prefer=_build_warm_prefer(shared_state, identity["framework_version"]),
+    )
+    # A bare T0 anchor (no best_config) demotes to seed_only.
+    if recipe and not _recipe_is_actionable(recipe):
+        tier, confidence = "seed_only", 0.0
+    # Config-donor decoupling: the identity match supplies the priors; a champion config is borrowed from the
+    # nearest same-arch sibling when the match carries none.
+    donor, donor_tier, donor_confidence = _warm_replay_donor(kb, (recipe, tier, confidence), identity, shape)
+    match = {
+        "workload": identity["model"],
+        "hw": identity["hardware"],
+        "tier": tier,
+        "confidence": confidence,
+        "recipe": recipe,
+    }
+    return match, _build_warm_start_context(
+        config_donor=donor,
+        config_donor_tier=donor_tier,
+        config_donor_confidence=donor_confidence,
+        tier=tier,
+        confidence=confidence,
+        canonical_id=cid,
+        source=_warm_recipe_source(recipe, kb),
+        recipe=recipe,
+    )
 
 
 def run_t0_anchor(
@@ -954,398 +944,74 @@ def run_t0_anchor(
     stack_fingerprint: Mapping[str, str] | None = None,
     extra_attrs: Mapping[str, Any] | None = None,
     resume: bool = False,
-    on_status: Callable[[str], None] | None = None,
+    on_status: Callable[[str], None] = _default_status_emitter,
     session_dir: Path | None = None,
     save_state: bool = True,
 ) -> None:
     """Run the T0 recipe-snapshot anchor and seven-tuple warm-start search."""
-    emit = on_status or _default_status_emitter
     if session_dir is None:
         raise ValueError("run_t0_anchor requires an explicit session_dir")
-
     # The local JSON store remains inference-only.
-    if (
-        agentx_active(benchmark_mode=getattr(shared_state, "benchmark_mode", ""))
-        and str(getattr(kb, "mode", "") or "") != "remote"
+    if getattr(kb, "mode", "") != "remote" and agentx_active(
+        benchmark_mode=getattr(shared_state, "benchmark_mode", "")
     ):
         log.info("run_t0_anchor: local Recipe KB does not serve agentx identities")
         return
 
     sd = Path(session_dir)
-
-    sid = (getattr(shared_state, "recipe_kb_session_id", "") or "").strip()
-    if not sid and sd is not None:
-        sid = Path(sd).name
-
-    workload = (workload or "").strip() or "unknown_model"
-    hw = (hw or "").strip() or "unknown_gpu"
-    # Topology-aware hardware slug (multi-node appends ``_ws{world_size}``), resolved once so the cid, the stored
-    # ``hardware`` field, and every warm-start tier below share an identical, isolated key.
-    from hyperloom.orchestrator.actions.executors._multi_node_env import resolve_kb_topology
-
-    hw = kb_hardware_slug(hw, **resolve_kb_topology())
-
+    sid = _text(getattr(shared_state, "recipe_kb_session_id", "")) or sd.name
+    shared_state.recipe_kb_session_id = sid
     # Short-circuit when already anchored; resume=True bypasses.
-    if sid and not resume and (getattr(shared_state, "warm_start_ts", "") or "").strip():
-        shared_state.recipe_kb_session_id = sid
-        emit(f"Recipe KB        : already anchored session_id={sid}")
+    if not resume and _text(getattr(shared_state, "warm_start_ts", "")):
+        on_status(f"Recipe KB        : already anchored session_id={sid}")
         return
-
-    if sid:
-        shared_state.recipe_kb_session_id = sid
-        if resume:
-            emit(f"Recipe KB        : resumed session_id={sid}")
+    if resume:
+        on_status(f"Recipe KB        : resumed session_id={sid}")
     began_now = not getattr(shared_state, "warm_start_ts", "")
     if began_now:
-        shared_state.warm_start_ts = datetime.now(timezone.utc).isoformat(
-            timespec="seconds",
-        )
+        shared_state.warm_start_ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
-    # Backfill operator-tracing metadata; T0 only stamps metadata (best_config preserved, rewritten at CLOSE).
-    _extra: Mapping[str, Any] = extra_attrs if isinstance(extra_attrs, Mapping) else {}
-    _model_class = str(_extra.get("model_class") or "").strip()
-    _framework = str(
-        _extra.get("framework_name")
-        or _extra.get("framework")
-        or getattr(shared_state, "framework", "")
-        or os.environ.get("FRAMEWORK", "")
-        or ""
-    ).strip()
-    _precision = str(getattr(shared_state, "precision", "") or "").strip()
-    fp: Mapping[str, Any] = stack_fingerprint if isinstance(stack_fingerprint, Mapping) else {}
-    # framework_version: SharedState > stack_fingerprint > importlib auto-detect.
-    _fw_version = str(getattr(shared_state, "framework_version", "") or "").strip()
-    if not _fw_version and _framework in ("sglang", "vllm"):
-        _fw_version = str(fp.get(_framework) or "").strip()
-        if _fw_version == "unknown":
-            _fw_version = ""
-    if not _fw_version and _framework:
-        _fw_version = detect_framework_version(_framework)
+    extra: Mapping[str, Any] = extra_attrs or {}
+    fingerprint: Mapping[str, Any] = stack_fingerprint or {}
+    identity = _resolve_t0_identity(shared_state, workload=workload, hw=hw, extra=extra, fingerprint=fingerprint)
+    cid = str(identity["canonical_id"])
+    # Each is empty only where SharedState already held nothing, and CLOSE/KEEP derives the same cid from them.
+    shared_state.framework = identity["framework_name"]
+    shared_state.framework_version = identity["framework_version"]
 
-    _extras = _build_t0_trace_extras(
-        shared_state,
-        extra=_extra,
-        fp=fp,
-        image_digest=image_digest,
-        model_class=_model_class,
-    )
-
-    # Build canonical_id from the resolved 7-tuple.
-    _model_type_val = str(getattr(shared_state, "model_type", "") or "").strip()
-    _architectures_val = getattr(shared_state, "model_architectures", None) or []
-    cid = recipe_canonical_id(
-        model=workload,
-        hardware=hw,
-        framework_name=_framework or "",
-        framework_version=_fw_version or "",
-        precision=_precision or "",
-        model_type=_model_type_val,
-        architectures=_architectures_val,
-        scheme=("agentx" if agentx_active(benchmark_mode=getattr(shared_state, "benchmark_mode", "")) else "inference"),
-    )
-
-    # Persist framework + framework_version so CLOSE/KEEP derives the same cid.
-    if _framework:
-        shared_state.framework = _framework
-    if _fw_version:
-        shared_state.framework_version = _fw_version
-
-    # Open the warm_start event before the KB is consulted: the identity is
-    # resolved now, and the event's open interval is what tells the audit hook
-    # which reads were T0's. Only on the anchoring pass -- a resume that
-    # re-runs T0 must not reopen an event the first pass already settled.
-    ws_recorder = (
-        _warm_start_event.make_warm_start_recorder(
+    # Opened before the KB is consulted: the event's open interval is what tells the audit hook which reads were
+    # T0's. Only on the anchoring pass -- a resume that re-runs T0 must not reopen a settled event.
+    ws_recorder = None
+    if began_now:
+        ws_recorder = _warm_start_event.make_warm_start_recorder(
             macro_cycle=getattr(shared_state, "macro_cycle", 0) or 0,
             requested_canonical_id=cid,
             scope=_warm_start_scope(shared_state),
-            start_time=str(getattr(shared_state, "warm_start_ts", "") or ""),
+            start_time=shared_state.warm_start_ts,
         )
-        if began_now
-        else None
-    )
+    # T0 only stamps metadata (best_config preserved, rewritten at CLOSE).
+    extras = _build_t0_trace_extras(shared_state, extra=extra, fp=fingerprint, image_digest=image_digest)
+    _stamp_local_authority_row(kb, session_id=sid, fingerprint=fingerprint, identity=identity, extras=extras)
+    match, context = _warm_start_lookup(kb, shared_state, identity)
+    shared_state.warm_start_recipe = match
+    shared_state.warm_start_context = context
+    experience = _publish_warm_start_experience(shared_state, sd, identity=identity, context=context)
 
-    if getattr(kb, "mode", "") != "remote":
-        # Read-modify-write the selected store's exact authority row so the stamp does not clobber fields or trigger a
-        # broad remote warm-start scan.
-        try:
-            live = kb.get_authoritative_recipe(canonical_id=cid) or {}
-        except Exception as exc:  # noqa: BLE001 — defensive
-            log.info("T0 anchor authority get_recipe non-fatal failure: %s", exc)
-            live = {}
-
-        # Merge prior extras; new values win.
-        merged_extras: dict[str, Any] = {}
-        prior_extras = {
-            k: v
-            for k, v in (live or {}).items()
-            if k
-            not in {
-                "canonical_id",
-                "version",
-                "created_at",
-                "updated_at",
-                "model",
-                "hardware",
-                "framework",
-                "framework_version",
-                "precision",
-                "best_config",
-                "best_throughput",
-                "what_worked",
-                "what_failed",
-                "remaining_gaps",
-                "pitfalls",
-                "lessons",
-                "last_profiled",
-                "stack_fingerprint",
-                "sessions",
-                "authority",
-                "confidence",
-                "evidence_refs",
-                "provenance",
-                "_field_sources",
-                "_sources",
-            }
-        }
-        merged_extras.update(prior_extras)
-        merged_extras.update(_extras)
-
-        # Stack fingerprint — preserve prior values not stamped this round.
-        sfp_payload: dict[str, str] = dict(live.get("stack_fingerprint") or {})
-        if isinstance(fp, Mapping):
-            for fp_key in ("vllm_version", "aiter_commit", "rocm_version"):
-                new = str(fp.get(fp_key.replace("_version", "").replace("_commit", "")) or "").strip()
-                if new and new != "unknown":
-                    sfp_payload[fp_key] = new
-
-        try:
-            kb.put_recipe(
-                canonical_id=cid,
-                model=workload,
-                hardware=hw,
-                framework_name=_framework or "",
-                framework_version=_fw_version or "",
-                precision=_precision or "",
-                best_config=dict(live.get("best_config") or {}),
-                best_throughput=float(live.get("best_throughput") or 0.0),
-                what_worked=list(live.get("what_worked") or []),
-                what_failed=list(live.get("what_failed") or []),
-                remaining_gaps=list(live.get("remaining_gaps") or []),
-                pitfalls=list(live.get("pitfalls") or []),
-                lessons=list(live.get("lessons") or []),
-                last_profiled=str(live.get("last_profiled") or ""),
-                stack_fingerprint=sfp_payload,
-                sessions=list(live.get("sessions") or []),
-                extras=merged_extras,
-                provenance={
-                    "source": "hyperloom-inference-optimizer",
-                    "generator": "t0_anchor",
-                    "generated_at": datetime.now(timezone.utc).isoformat(
-                        timespec="microseconds",
-                    ),
-                    "details": {"sid": sid},
-                },
-            )
-        except Exception:
-            log.exception("T0 anchor put_recipe raised unexpectedly")
-
-    else:
-        log.debug("T0 anchor: remote publication is owned by CLOSE")
-
-    # Exact seven-tuple, then cumulative model/hardware/precision/version relaxations.
-    warm_prefer = _build_warm_prefer(shared_state, _fw_version)
-
-    # Architecture remains exact at every fallback tier.
-    from hyperloom.inference_optimizer.recipe_snapshot_constants import _architectures_slug
-
-    _arch_slug = _architectures_slug(_architectures_val)
-    _tgt_conc = getattr(shared_state, "conc", None)
-    _tgt_isl = None if cid.startswith("agentx:") else getattr(shared_state, "isl", None)
-    _tgt_osl = None if cid.startswith("agentx:") else getattr(shared_state, "osl", None)
-
-    warm_point, warm_tier, warm_conf = _cascade_warm_start_search(
-        kb,
-        cid=cid,
-        hw=hw,
-        framework=_framework,
-        model_type_val=_model_type_val,
-        architectures_val=_architectures_val,
-        arch_slug=_arch_slug,
-        fw_version=_fw_version,
-        precision=_precision,
-        warm_prefer=warm_prefer,
-        target_conc=_tgt_conc,
-        target_isl=_tgt_isl,
-        target_osl=_tgt_osl,
-    )
-
-    # A bare T0 anchor (no best_config) demotes to seed_only.
-    if warm_point and not _recipe_is_actionable(warm_point):
-        warm_tier = "seed_only"
-        warm_conf = 0.0
-
-    # Config-donor decoupling: the identity match supplies priors; borrow a champion config from the nearest same-arch
-    # sibling when it has none.
-    config_donor: Mapping[str, Any] | None = None
-    config_donor_tier = ""
-    config_donor_conf = 0.0
-    from .remote_recipe import RECORD_KIND_HYPERLOOM_RECIPE
-
-    current_remote_point = bool(
-        isinstance(warm_point, Mapping) and warm_point.get("record_kind") == RECORD_KIND_HYPERLOOM_RECIPE
-    )
-    # A true-self (identity ``exact``) champion always replays; a cross-model borrow must clear the trustworthiness
-    # gate before it becomes the donor.
-    if (
-        not current_remote_point
-        and warm_point
-        and _has_replayable_config(warm_point)
-        and (
-            warm_tier == "exact"
-            or _donor_is_trustworthy(
-                warm_point,
-                target_arch_slug=_arch_slug,
-                target_model_type=_model_type_val,
-                target_conc=_tgt_conc,
-                target_isl=_tgt_isl,
-                target_osl=_tgt_osl,
-            )
-        )
-    ):
-        config_donor = warm_point
-        config_donor_tier = "self"
-        config_donor_conf = warm_conf
-    if config_donor is None and warm_point and not current_remote_point:
-        donor, dtier, dconf = _find_config_donor(
-            kb,
-            cid=cid,
-            hardware=hw,
-            framework=_framework or "",
-            model_type=_model_type_val,
-            arch_slug=_arch_slug,
-            framework_version=_fw_version or "",
-            precision=_precision or "",
-            target_conc=_tgt_conc,
-            target_isl=_tgt_isl,
-            target_osl=_tgt_osl,
-        )
-        if donor is not None:
-            config_donor = donor
-            config_donor_tier = dtier
-            config_donor_conf = dconf
-
-    shared_state.warm_start_recipe = {
-        "workload": workload,
-        "hw": hw,
-        "tier": warm_tier,
-        "confidence": warm_conf,
-        "recipe": warm_point,
-    }
-
-    # WarmStartContext: model-facing projection of the KB result, with an explicit hit/seed_only/miss status.
-    if not warm_point:
-        wsc_status = "miss"
-    elif warm_tier == "seed_only":
-        wsc_status = "seed_only"
-    else:
-        wsc_status = "hit"
-    warm_source = _warm_recipe_source(warm_point, kb)
-    shared_state.warm_start_context = _build_warm_start_context(
-        config_donor=config_donor,
-        config_donor_tier=config_donor_tier,
-        config_donor_confidence=config_donor_conf,
-        status=wsc_status,
-        tier=warm_tier,
-        confidence=warm_conf,
-        canonical_id=cid,
-        source=warm_source,
-        recipe=warm_point or None,
-    )
-
-    # warm_start_pitfalls / warm_start_lessons are embedded recipe-row fields.
-    exact_history = warm_point.get("exact_history")
-    history_source = exact_history if isinstance(exact_history, Mapping) else warm_point
-    pitfalls_list = _experience_rows(history_source.get("pitfalls"), "description", "pitfalls")
-    lessons_list = _experience_rows(history_source.get("lessons"), "statement", "lessons")
-    try:
-        pit_path = recipe_kb_pitfalls_json(sd)
-        pit_path.parent.mkdir(parents=True, exist_ok=True)
-        pit_path.write_text(
-            json.dumps(
-                {
-                    "workload": workload,
-                    "hw": hw,
-                    "framework": _framework or "",
-                    "pitfalls": pitfalls_list,
-                },
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
-        if pitfalls_list:
-            shared_state.warm_start_pitfalls = pitfalls_list
-    except OSError as exc:
-        log.warning("warm_start_pitfalls snapshot write failed: %s", exc)
-    try:
-        les_path = recipe_kb_lessons_json(sd)
-        les_path.parent.mkdir(parents=True, exist_ok=True)
-        les_path.write_text(
-            json.dumps(
-                {
-                    "workload": workload,
-                    "hw": hw,
-                    "framework": _framework or "",
-                    "lessons": lessons_list,
-                },
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
-        if lessons_list:
-            shared_state.warm_start_lessons = lessons_list
-    except OSError as exc:
-        log.warning("warm_start_lessons snapshot write failed: %s", exc)
-
-    # Settle the event now that the lookup, the match and the experience rows
-    # are all known. Recorded before the state save so the event stands even if
-    # the save fails: the lookup happened either way.
+    # Settled before the state save so the event stands even if the save fails: the lookup happened either way.
     if ws_recorder is not None:
-        _settle_warm_start_event(
-            ws_recorder,
-            match_status=wsc_status,
-            tier=warm_tier,
-            confidence=warm_conf,
-            source=warm_source,
-            canonical_id=cid,
-            recipe=warm_point,
-            context=getattr(shared_state, "warm_start_context", None),
-            lessons=lessons_list,
-            pitfalls=pitfalls_list,
+        _settle_warm_start_event(ws_recorder, context=context, recipe=match["recipe"], experience=experience)
+    if began_now:
+        hit_label = f"hit:{match['tier']}@{match['confidence']:.2f}"
+        warm_label = {"hit": hit_label, "seed_only": "seed_only"}.get(context["status"], "empty")
+        on_status(
+            f"Recipe KB        : session_id={sid} workload={cid} (warm={warm_label}, "
+            f"pitfalls={len(experience['pitfalls'])}, lessons={len(experience['lessons'])})"
         )
-
     if save_state:
         try:
             shared_state.save(sd)
         except Exception:
-            log.exception(
-                "Recipe KB T0: SharedState.save failed (sid=%s, workload=%s)",
-                sid,
-                workload,
-            )
-
-    # warm_present = usable record (confidence > 0).
-    warm_present = bool(warm_point) and warm_conf > 0.0
-    if began_now:
-        warm_label = f"hit:{warm_tier}@{warm_conf:.2f}" if warm_present else "seed_only" if warm_point else "empty"
-        emit(
-            f"Recipe KB        : session_id={sid} "
-            f"workload={cid} "
-            f"(warm={warm_label}, "
-            f"pitfalls={len(pitfalls_list)}, "
-            f"lessons={len(lessons_list)})"
-        )
-    return
+            log.exception("Recipe KB T0: SharedState.save failed (sid=%s, workload=%s)", sid, identity["model"])
 
 
 __all__ = [

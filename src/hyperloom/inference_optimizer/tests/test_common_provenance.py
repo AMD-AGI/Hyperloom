@@ -48,6 +48,16 @@ def test_env_only_mapping():
     assert p["isl"] == 1024 and p["osl"] == 1024 and p["max_model_len"] == 2048
 
 
+def test_target_product_wins_over_runner_in_provenance():
+    p = build_provenance(
+        args=None,
+        env={"TARGET_GPU_TYPE": "r9700", "GPU_TYPE": "gfx12"},
+        probe=False,
+    )
+    assert p["gpu_type"] == "r9700"
+    assert p["gfx_arch"] == "gfx1201"
+
+
 def test_args_override_env():
     env = {"FRAMEWORK": "sglang", "GPU_TYPE": "MI300X", "TP": "8", "ISL": "512"}
     args = _ns(
@@ -322,6 +332,26 @@ def test_resolved_vllm_venv_versions_vllm_and_aiter(tmp_path):
     )
     assert fp["vllm"] == "0.29.0+rocm723"
     assert fp["aiter"] == "0.1.19"
+
+
+def test_a_develop_checkout_reached_through_a_pth_file_is_versioned(tmp_path):
+    """``setup.py develop`` leaves vLLM's metadata in the checkout, which only the venv's ``.pth`` puts on the path."""
+    import subprocess as _sp
+
+    venv_root = tmp_path / "vllm-venv"
+    _sp.run([sys.executable, "-m", "venv", "--without-pip", str(venv_root)], check=True)
+    checkout = tmp_path / "vllm-src"
+    info = checkout / "vllm.egg-info"
+    info.mkdir(parents=True)
+    (info / "PKG-INFO").write_text("Metadata-Version: 2.1\nName: vllm\nVersion: 0.29.0+rocm100\n")
+    (site,) = (venv_root / "lib").glob("python*/site-packages")
+    (site / "easy-install.pth").write_text(f"{checkout}\n")
+
+    env = {
+        "HYPERLOOM_RESOLVED_FRAMEWORK": "vllm",
+        "HYPERLOOM_RESOLVED_FRAMEWORK_PYTHON": str(venv_root / "bin" / "python"),
+    }
+    assert _prov.detect_stack_fingerprint(env, probe=True)["vllm"] == "0.29.0+rocm100"
 
 
 def test_an_operator_pin_still_wins_over_the_resolved_interpreter(tmp_path):

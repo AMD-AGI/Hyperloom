@@ -4,6 +4,9 @@
 """Periodic Coordinator maintenance: lease reaping, DB retention, disk trim."""
 
 from __future__ import annotations
+import shutil
+import sqlite3
+from pathlib import Path
 from typing import Any
 from ..state.shared_state import SharedState
 from ..collaborator import CoordinatorCollaborator
@@ -51,7 +54,7 @@ async def run_lease_and_db_reclaim(
         if ended:
             summary["cleanup_unconfirmed"] = f"{unconfirmed}/{ended}"
         summary["running_tasks_reclaimed"] = len(report.failed_tasks)
-    except Exception:
+    except sqlite3.Error:
         log.exception("%s: reading the reconciler's cleanup report failed", reason)
     try:
         from ..bus import db_maintenance as _db_maint
@@ -59,17 +62,17 @@ async def run_lease_and_db_reclaim(
         res = await _db_maint.run_db_retention(host.db)
         summary["events_pruned"] = res.events_deleted
         summary["tasks_pruned"] = res.tasks_deleted
-    except Exception:
+    except sqlite3.Error:
         log.exception("%s: DB retention failed", reason)
 
 
 class MaintenanceCollaborator(CoordinatorCollaborator):
     """Handles session maintenance: disk cleanup, task reclaim, and health checks."""
 
-    # Advisory disk guard: when the session partition runs low, LRU-trim per-task runs/ workspaces; durable state is
-    # never touched.
+    # Advisory disk guard: when free space runs low, LRU-trim per-task runs/ workspaces; durable state is never
+    # touched, and neither is a workspace a live task still reads or one the enablement stack still replays. Free
+    # space, not the used fraction: a shared volume's used fraction is mostly other tenants'.
     _DISK_FREE_MIN_GB: float = 20.0
-    _DISK_USED_MAX_FRAC: float = 0.85
     _DISK_RUNS_KEEP_PER_ACTION: int = 50
     _STATE_JSON_WARN_BYTES: int = 50 * 1024 * 1024
 
@@ -81,16 +84,23 @@ class MaintenanceCollaborator(CoordinatorCollaborator):
         """Report ownership cleanup, prune the DB, and trim ``runs/`` when disk is low."""
         summary: dict[str, Any] = {"tick": tick}
         await run_lease_and_db_reclaim(self._coord, summary, reason="maintenance_watchdog")
-        disk = self._maybe_prune_runs_for_disk()
+        disk = self._maybe_prune_runs_for_disk(await self._workspaces_in_use())
         if disk is not None:
             summary["disk"] = disk
         log.info("maintenance tick %d: %s", tick, summary)
         return summary
 
-    def _maybe_prune_runs_for_disk(self) -> dict[str, Any] | None:
-        """LRU-trim per-task ``runs/`` workspaces when disk is low."""
-        import shutil
+    async def _workspaces_in_use(self) -> frozenset[str]:
+        """Task ids whose ``runs/`` workspace a queued or running task still reads: its own, and its specialist's."""
+        names: set[str] = set()
+        for task in (*await self.tasks.queued(), *await self.tasks.running()):
+            names.add(task.task_id)
+            if task.params.get("specialist_task_id"):
+                names.add(task.params["specialist_task_id"])
+        return frozenset(names)
 
+    def _maybe_prune_runs_for_disk(self, in_use: frozenset[str]) -> dict[str, Any] | None:
+        """LRU-trim per-task ``runs/`` workspaces outside ``in_use`` when disk is low."""
         from hyperloom.inference_optimizer.session.session_paths import runs_root as _runs_root
 
         try:
@@ -116,26 +126,13 @@ class MaintenanceCollaborator(CoordinatorCollaborator):
             # filesystem error.
             pass
 
-        if free_gb >= self._DISK_FREE_MIN_GB and used_frac <= self._DISK_USED_MAX_FRAC:
+        if free_gb >= self._DISK_FREE_MIN_GB:
             return summary
 
         runs_root = _runs_root(self.session_dir)
         if not runs_root.is_dir():
             return summary
-        removed = 0
-        for action_dir in runs_root.iterdir():
-            if not action_dir.is_dir():
-                continue
-            task_dirs = [p for p in action_dir.iterdir() if p.is_dir()]
-            if len(task_dirs) <= self._DISK_RUNS_KEEP_PER_ACTION:
-                continue
-            task_dirs.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-            for stale in task_dirs[self._DISK_RUNS_KEEP_PER_ACTION :]:
-                try:
-                    shutil.rmtree(stale, ignore_errors=True)
-                    removed += 1
-                except OSError:
-                    log.warning("maintenance: failed to prune %s", stale)
+        removed = self._prune_stale_runs(runs_root, in_use)
         summary["runs_pruned"] = removed
         if removed:
             log.info(
@@ -145,3 +142,23 @@ class MaintenanceCollaborator(CoordinatorCollaborator):
                 removed,
             )
         return summary
+
+    def _prune_stale_runs(self, runs_root: Path, in_use: frozenset[str]) -> int:
+        """Delete each action's task dirs past the newest ``_DISK_RUNS_KEEP_PER_ACTION``; returns how many went.
+
+        A dir in ``in_use`` or holding an enablement stack file is kept.
+        """
+        stack_files = {Path(f).resolve() for f in self.shared_state.enablement.stack_files()}
+        removed = 0
+        for action_dir in (d for d in runs_root.iterdir() if d.is_dir()):
+            task_dirs = sorted((p for p in action_dir.iterdir() if p.is_dir()), key=lambda p: p.stat().st_mtime)
+            for stale in task_dirs[: -self._DISK_RUNS_KEEP_PER_ACTION]:
+                if stale.name in in_use or any(f.is_relative_to(stale.resolve()) for f in stack_files):
+                    continue
+                try:
+                    shutil.rmtree(stale)
+                except OSError:
+                    log.warning("maintenance: failed to prune %s", stale)
+                    continue
+                removed += 1
+        return removed

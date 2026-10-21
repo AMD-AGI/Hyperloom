@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import re
 import subprocess
 import tempfile
 from pathlib import Path
@@ -14,6 +13,8 @@ from hyperloom.common.env_safety import is_python_package_root
 from hyperloom.orchestrator.actions.executors._grid_runner import (
     _prepend_magpie_pythonpath,
 )
+
+from ._kernel_tools_harness import sourceable_kernel_tools
 
 
 class TestIsPythonPackageRoot:
@@ -55,18 +56,10 @@ class TestGridRunnerPrepend:
 INSTALL_SCRIPT = Path(__file__).resolve().parents[1] / "assets" / "install_kernel_tools.sh"
 
 
-def _sourceable_installer(dest_dir: Path) -> Path:
-    text = INSTALL_SCRIPT.read_text(encoding="utf-8")
-    patched = re.sub(r"(?m)^main \"\$@\"\s*$", "", text)
-    copy = dest_dir / "install_sourceable.sh"
-    copy.write_text(patched, encoding="utf-8")
-    return copy
-
-
 def _compose_pythonpath(magpie_path: str, repo_root: str = "/target-install") -> str:
     """Source install.sh and evaluate the top-level PYTHONPATH composition."""
     with tempfile.TemporaryDirectory() as td:
-        sourceable = _sourceable_installer(Path(td))
+        sourceable = sourceable_kernel_tools(Path(td))
         script = f"""
 set -euo pipefail
 export ANTHROPIC_API_KEY=ak-test-key

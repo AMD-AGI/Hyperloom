@@ -18,7 +18,7 @@ globs:
 
 A single JSON file: **`<session_dir>/session_breakdown.json`**.
 
-- Schema:   `hyperloom.session_breakdown.v6.0` (hardcoded; see `SCHEMA_VERSION` in `breakdown/schema.py`).
+- Schema:   `hyperloom.session_breakdown.v6.1` (hardcoded; see `SCHEMA_VERSION` in `breakdown/schema.py`).
 - Producer: `src/hyperloom/inference_optimizer/breakdown/exporter.py`
 - Filename: `BREAKDOWN_FILENAME` (= `session_breakdown.json`)
 
@@ -33,11 +33,10 @@ authoritative.
 | `exported_at_utc`   | When this export was built.                                                                              |
 | `exporter_version`  | Which exporter built it.                                                                                 |
 | `metadata`          | Session identity, launch configuration, `grading` -- the axis this session was configured to rank on -- component versions, Langfuse receipt, and `warnings`, how the export itself went, reported once and only here. |
-| `outcome`           | Terminal status, stage reached, stop reason, the `baseline` and `final` measured results with the graded axes each reported, and the `validation` that reconciles the stack's parts against its total on one axis, named by `graded_on`. |
+| `outcome`           | Terminal status, stage reached, stop reason, the `baseline` and `final` measured results with the graded axes each reported, the `validation` that reconciles the stack's parts against its total on one axis, named by `graded_on`, and `variants`, the framework phase's bench runs counted by how each ended. |
 | `timeline`          | The run itself: one event per stage, oldest first, each carrying its span, status, and an `ext` block of what that kind of stage records. Startup source events live under `reports/sbd_v6/timeline/`. |
-| `close`             | What the session settled at close: the steps the sequencer ran and the artifacts it published. Historical robustness verdicts and recorded findings remain readable; current close-out does not fetch findings or RCA logs. |
+| `close`             | What the session settled at close: the steps the sequencer ran and the artifacts it published. |
 | `critic`            | The critic agent's own run, iteration by iteration: what it was asked about, how its rulings fell (`verdict_counts`), and the four artifacts each pass left behind. Per-proposal verdicts stay with the proposals, on the timeline. |
-| `robustness`        | Historical agent turns only. New sessions retain the fixed V6 object `{"turns": []}`; the report hides the section when no turns exist. For historical turns, read `outcome` before counting `intents`: a missing envelope is not an empty turn. |
 
 ## Who reads it
 
@@ -125,7 +124,6 @@ this reference is partial — `breakdown/exporter.py` is authoritative.
 | `timeline`  | The event fragments in the spool, closed and assembled per event; orphans left open by a killed phase are closed on first build |
 | `close`     | The CLOSE sequencer's own `close` / `close_step` fragments                                                        |
 | `critic`    | `critic-workdir/<NNN>/{request,judge_bundle,emit,review}.json`, recorded as each pass returns                     |
-| `robustness`| Existing `robustness_turn` or assembled `robustness` fragments only; no current runtime producer or log-based reconstruction |
 
 ## What is NOT in scope
 
@@ -155,8 +153,22 @@ this reference is partial — `breakdown/exporter.py` is authoritative.
 
 - `schema_version` (in `schema.py`) carries the **major** contract
   version; it is bumped ONLY on breaking changes (renamed/removed
-  fields, changed semantics).
-- New exports carry `hyperloom.session_breakdown.v6.0`. V6 is a breaking
+  fields, changed semantics), apart from the declared 6.1 changes below.
+- New exports carry `hyperloom.session_breakdown.v6.1`. 6.1 changes three
+  things inside the 6 major, a declared exception to the major-bump rule: it
+  renames one key, removes keys no producer populated (disposition: removed in
+  6.1, never populated) or that only carried a constant (`roofline_measured`,
+  the baseline action's `convergence`; disposition: removed in 6.1, constant),
+  and reports `attributed_gain_pct`,
+  `unattributed_gain_pct` and run `empty` as null when unmeasured or not
+  provided. `throughput_tok_s_per_gpu` in `outcome.baseline`, `outcome.final`
+  and the `baseline` event measurement is now `output_throughput`, and the old key is
+  no longer written. Archived 6.0 documents and 1.1.x exports keep the old key,
+  so readers must accept both or migrate. Re-exporting a 6.0 session directory
+  yields a null `outcome.baseline.output_throughput`, keeps the session's old
+  `contract_digest`, and overwrites the archived file at the default output
+  path.
+- V6 was a breaking
   cutover for the timeline: the actions record their own events as they run,
   so an event's `start_time` is when the work began rather than when its
   artefacts were written, and the KERNEL and BASELINE projections are gone.

@@ -43,9 +43,9 @@ configured upstream gateway.
 2. Re-run preflight (idempotent — rewrites `~/.claude/config.json`
    `customApiUrl` and `primaryApiKey` and re-derives all alias keys):
    ```bash
-   bash "$REPO_ROOT/hyperloom/inference_optimizer/assets/install_kernel_tools.sh" --check-only
+   bash "$REPO_ROOT/hyperloom/inference_optimizer/assets/install.sh" --check-only
    # If check-only reports issues, re-run without --check-only:
-   bash "$REPO_ROOT/hyperloom/inference_optimizer/assets/install_kernel_tools.sh"
+   bash "$REPO_ROOT/hyperloom/inference_optimizer/assets/install.sh"
    ```
 3. Inspect `~/.claude/config.json` — `customApiUrl` must point at the
    upstream gateway (for example, `https://<your-gateway-host>/api/v1/llm-proxy/v1`).
@@ -159,14 +159,25 @@ ray stop --force || true
 # issue #433: raise the soft open-files limit before `ray start` so the
 # raylet stays up (see "Ray raylet unstable / zombie" below).
 ulimit -Sn "${RAY_MIN_NOFILE:-65536}" 2>/dev/null || true
-ray start --head --disable-usage-stats --num-gpus="$RAY_NUM_GPUS" --include-dashboard=false
+ray start --head --disable-usage-stats --num-gpus="$RAY_NUM_GPUS" --include-dashboard=false \
+  --resources='{"serving_slot":1}'
 ray status
 ```
 
+The `--resources='{"serving_slot":1}'` argument is required: Hyperloom
+serializes serving work on that resource, and a head without it cannot run a
+baseline. Prefer letting Hyperloom start the head (or re-running the installer)
+over starting one by hand.
+
 > **Note**: current Hyperloom startup paths can auto-start or reuse a local Ray
-> head. If `ray_current_cluster` points at a stale or incompatible cluster, stop
-> Ray first so Hyperloom can create a fresh head with the required GPU and
-> custom-resource configuration.
+> head. A local head that lacks `serving_slot` is restarted with it
+> automatically only when it is the only Ray head on the host and has no work on
+> it (no held resources, live actors or other drivers); any other cluster
+> without it (an explicit `RAY_ADDRESS`, a multi-node cluster, a busy head, or a
+> host with a second head) fails with `existing Ray head has no serving_slot
+> resource` and the reason it was not restarted. If `ray_current_cluster`
+> points at a stale or incompatible cluster, stop Ray first so Hyperloom can
+> create a fresh head with the required GPU and custom-resource configuration.
 
 ---
 
@@ -251,9 +262,9 @@ hiccup and the installer continued.
 **Fix**:
 
 ```bash
-bash "$REPO_ROOT/hyperloom/inference_optimizer/assets/install_kernel_tools.sh" --check-only
+bash "$REPO_ROOT/hyperloom/inference_optimizer/assets/install.sh" --check-only
 # If --check-only reports missing packages, re-run without --check-only:
-bash "$REPO_ROOT/hyperloom/inference_optimizer/assets/install_kernel_tools.sh"
+bash "$REPO_ROOT/hyperloom/inference_optimizer/assets/install.sh"
 ```
 
 The installer is idempotent and re-installs only what's missing.
@@ -335,10 +346,10 @@ See [Environment variables](environment-variables.md) for
 
 **Symptom.** `trace_analyze` returns `TraceLens root not found`,
 `incomplete (not a git checkout)`, or
-`TraceLens_generate_perf_report_pytorch_inference: command not found`.
+`TraceLens_generate_perf_report_from_config: command not found`.
 
-**Cause**: `TraceLens-internal` isn't installed, or the legacy
-training-mode CLI is being looked for (no longer accepted as of v0.4).
+**Cause**: `TraceLens-internal` isn't installed, or the pinned TraceLens
+(which provides the config-driven report CLI) isn't the installed one.
 
 **Fix**:
 
@@ -346,7 +357,7 @@ training-mode CLI is being looked for (no longer accepted as of v0.4).
    open-source checkout root, pins it to a fixed SHA, runs `pip install -e`,
    and smokes the CLI):
    ```bash
-   bash "$REPO_ROOT/hyperloom/inference_optimizer/assets/install_kernel_tools.sh"
+   bash "$REPO_ROOT/hyperloom/inference_optimizer/assets/install.sh"
    ```
 2. If `install.sh` succeeds but the CLI still isn't on PATH, install
    manually. By default use the installer-managed clone; only point
@@ -357,7 +368,7 @@ training-mode CLI is being looked for (no longer accepted as of v0.4).
    export TRACELENS_ROOT="${TRACELENS_ROOT:-${HYPERLOOM_CACHE_DIR:-$REPO_ROOT/.cache}/TraceLens}"
    cd "$TRACELENS_ROOT"
    pip install -e .
-   TraceLens_generate_perf_report_pytorch_inference --help
+   TraceLens_generate_perf_report_from_config --help
    ```
 3. The optional internal extension is enabled only when
    `TRACELENS_INTERNAL_ROOT` is set to your own existing checkout
@@ -386,7 +397,7 @@ that path is missing or reaped.
    default is re-resolved to the cache root, then reinstall:
    ```bash
    unset TRACELENS_ROOT   # remove any hard-coded old path from env or .env first
-   bash "$REPO_ROOT/hyperloom/inference_optimizer/assets/install_kernel_tools.sh"
+   bash "$REPO_ROOT/hyperloom/inference_optimizer/assets/install.sh"
    ```
    The installer rewrites `kernel-agent.env.sh` with the
    `${HYPERLOOM_CACHE_DIR:-$REPO_ROOT/.cache}/TraceLens@<sha>` default and
@@ -396,7 +407,7 @@ that path is missing or reaped.
    ```bash
    export HYPERLOOM_CACHE_DIR="$USER_DATA_PATH/.hyperloom-cache"
    unset TRACELENS_ROOT
-   bash "$REPO_ROOT/hyperloom/inference_optimizer/assets/install_kernel_tools.sh"
+   bash "$REPO_ROOT/hyperloom/inference_optimizer/assets/install.sh"
    ```
 3. **Keep an operator checkout** only if you deliberately maintain one —
    set `TRACELENS_ROOT` to that path. It is adopted as-is (no clone, no
@@ -445,7 +456,7 @@ KB Store backend is unreachable.
 
 1. Resolve and test the local KB root:
    ```bash
-   KB_ROOT="${KNOWLEDGE_LOCAL_ROOT:-${HYPERLOOM_LOCAL_KB_ROOT:-${USER_DATA_PATH:-$HOME/.cache/hyperloom}/knowledge}}"
+   KB_ROOT="${KNOWLEDGE_LOCAL_ROOT:-${USER_DATA_PATH:-$HOME/.cache/hyperloom}/knowledge}"
    echo "$KB_ROOT"
    mkdir -p "$KB_ROOT"
    touch "$KB_ROOT/.write-test" && rm "$KB_ROOT/.write-test"
@@ -489,7 +500,7 @@ runs against your local baseline.
 ## `result.json` written outside the session dir
 
 **Symptom**: A benchmark "succeeds" but the breakdown shows
-`baseline.throughput_tok_s_per_gpu = null`; logs reference a
+`baseline.output_throughput = null`; logs reference a
 `result.json` written to `--result-dir /tmp/...` outside
 `$USER_DATA_PATH`.
 

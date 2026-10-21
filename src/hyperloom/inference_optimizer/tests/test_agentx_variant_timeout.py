@@ -21,7 +21,7 @@ def test_launch_replaces_stale_yaml_cap_with_invoking_policy(tmp_path, monkeypat
             {
                 "benchmark": {
                     "timeout_seconds": declared,
-                    "envs": {"PYTHONUNBUFFERED": "0", "AGENTX_PHASE_WAIT_TIMEOUT_S": "50000"},
+                    "envs": {"PYTHONUNBUFFERED": "0"},
                 }
             }
         ),
@@ -31,7 +31,6 @@ def test_launch_replaces_stale_yaml_cap_with_invoking_policy(tmp_path, monkeypat
     sync_benchmark_timeout(path, hard)
     bench = yaml.safe_load(path.read_text(encoding="utf-8"))["benchmark"]
     assert bench["timeout_seconds"] == hard
-    assert bench["envs"]["AGENTX_PHASE_WAIT_TIMEOUT_S"] == str(hard)
     assert bench["envs"]["PYTHONUNBUFFERED"] == "1"
 
 
@@ -57,5 +56,5 @@ def test_an_operator_cap_wins_over_the_mlperf_derivation():
     assert resolve_benchmark_timeouts(env)[1] == 1234.0
 
 
-def test_the_aiperf_backend_keeps_the_stock_cap():
+def test_native_magpie_keeps_the_stock_cap():
     assert resolve_benchmark_timeouts({"MLPERF_AGENTIC_FLOW": "full"})[1] == 7800.0

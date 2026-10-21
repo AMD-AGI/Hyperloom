@@ -13,6 +13,7 @@ import shlex
 import tempfile
 import time
 from collections.abc import Callable
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -115,7 +116,7 @@ def _multinode_server_log_dir() -> str:
         return explicit
     try:
         return str(_state_file().parent / "server_logs")
-    except Exception:  # noqa: BLE001 - state file unresolvable (dev/single box)
+    except RuntimeError:  # state file unresolvable (dev/single box)
         return str(Path(tempfile.gettempdir()) / "multi_node_logs")
 
 
@@ -208,45 +209,29 @@ def _infera_default_ssh_port(state: dict[str, Any]) -> int:
 def _infera_ssh_run_script(
     state: dict[str, Any],
     ip: str,
-    script: str,
-    interpreter: str,
-    script_args: str,
+    script: ssh_client.RemoteScript,
     *,
     timeout: int,
-    env: dict[str, str] | None = None,
-    remote_path: str | None = None,
     port: int | None = None,
 ):
     """Run a script on an Infera pod over SSH with host-key retry."""
-    key_path = state["ssh_key_path"]
-    ssh_port = int(port if port is not None else _infera_default_ssh_port(state))
-    known_hosts = _infera_known_hosts_path(state)
-    remote_path = remote_path or str(Path(tempfile.gettempdir()) / "mn_infera_launch")
+    target = ssh_client.SshTarget(
+        host=ip,
+        key_path=state["ssh_key_path"],
+        port=int(port if port is not None else _infera_default_ssh_port(state)),
+        known_hosts=_infera_known_hosts_path(state),
+    )
 
-    def _run(kh: Path):
-        return ssh_client.ssh_run_script(
-            ip,
-            script,
-            interpreter,
-            script_args,
-            key_path=key_path,
-            known_hosts=kh,
-            port=ssh_port,
-            timeout=timeout,
-            env=env,
-            remote_path=remote_path,
-        )
-
-    cp = _run(known_hosts)
+    cp = ssh_client.ssh_run_script(target, script, timeout=timeout)
     if cp.returncode != 0 and ssh_known_hosts.is_host_key_error(cp.stderr):
-        warn(f"infera ssh {ip}:{ssh_port}: host key mismatch; refreshing known_hosts and retrying once")
+        warn(f"infera ssh {ip}:{target.port}: host key mismatch; refreshing known_hosts and retrying once")
         try:
-            known_hosts = _refresh_infera_known_hosts([(ip, ssh_port)], state=state)
+            known_hosts = _refresh_infera_known_hosts([(ip, target.port)], state=state)
         except RuntimeError as exc:
-            warn(f"infera ssh {ip}:{ssh_port}: known_hosts refresh failed: {exc}")
+            warn(f"infera ssh {ip}:{target.port}: known_hosts refresh failed: {exc}")
             return cp
         _save_state(state)
-        cp = _run(known_hosts)
+        cp = ssh_client.ssh_run_script(replace(target, known_hosts=known_hosts), script, timeout=timeout)
     return cp
 
 
@@ -254,94 +239,57 @@ def _infera_ssh_bash_with_env(
     state: dict[str, Any],
     ip: str,
     script: str,
-    env: dict[str, str] | None,
     *,
     timeout: int,
     port: int | None = None,
 ):
     """Run a bash script on an Infera pod via SSH stdin with host-key retry."""
-    key_path = state["ssh_key_path"]
-    ssh_port = int(port if port is not None else _infera_default_ssh_port(state))
-    known_hosts = _infera_known_hosts_path(state)
+    target = ssh_client.SshTarget(
+        host=ip,
+        key_path=state["ssh_key_path"],
+        port=int(port if port is not None else _infera_default_ssh_port(state)),
+        known_hosts=_infera_known_hosts_path(state),
+    )
 
-    def _run(kh: Path):
-        return ssh_client.ssh_run_bash_with_env(
-            ip,
-            script,
-            env,
-            key_path=key_path,
-            known_hosts=kh,
-            port=ssh_port,
-            timeout=timeout,
-        )
-
-    cp = _run(known_hosts)
+    cp = ssh_client.ssh_run_bash_with_env(target, script, None, timeout=timeout)
     if cp.returncode != 0 and ssh_known_hosts.is_host_key_error(cp.stderr):
-        warn(f"infera ssh {ip}:{ssh_port}: host key mismatch; refreshing known_hosts and retrying once")
+        warn(f"infera ssh {ip}:{target.port}: host key mismatch; refreshing known_hosts and retrying once")
         try:
-            known_hosts = _refresh_infera_known_hosts([(ip, ssh_port)], state=state)
+            known_hosts = _refresh_infera_known_hosts([(ip, target.port)], state=state)
         except RuntimeError as exc:
-            warn(f"infera ssh {ip}:{ssh_port}: known_hosts refresh failed: {exc}")
+            warn(f"infera ssh {ip}:{target.port}: known_hosts refresh failed: {exc}")
             return cp
         _save_state(state)
-        cp = _run(known_hosts)
+        cp = ssh_client.ssh_run_bash_with_env(replace(target, known_hosts=known_hosts), script, None, timeout=timeout)
     return cp
 
 
 def _short_poll(
     *,
     label: str,
-    fetch: callable,
-    is_ok: callable,
-    is_fail: callable,
+    fetch: Callable[[], tuple[Any, str]],
     interval_s: int,
     timeout_s: int,
-    failure_diag: callable | None = None,
-    quiet_fetch_error_grace_s: float = 0.0,
-    is_quiet_fetch_error: Callable[[BaseException], bool] | None = None,
 ) -> Any:
-    """Run many short polls within one CLI invocation budget; returns the state_obj on success."""
+    """Poll a Ray job with many short fetches within one CLI invocation budget; returns the job on a terminal OK."""
     started = time.monotonic()
     attempt = 0
     while True:
         attempt += 1
-        fetch_was_quiet = False
         try:
             obj, summary = fetch()
         except Exception as exc:  # noqa: BLE001
-            elapsed_mid = time.monotonic() - started
-            fetch_was_quiet = (
-                quiet_fetch_error_grace_s > 0.0
-                and elapsed_mid < quiet_fetch_error_grace_s
-                and is_quiet_fetch_error is not None
-                and is_quiet_fetch_error(exc)
-            )
-            if fetch_was_quiet:
-                info(
-                    f"{label} poll #{attempt} t={elapsed_mid:.0f}s -> "
-                    f"GET workload not visible yet (404); retrying "
-                    f"(expected within ~{quiet_fetch_error_grace_s:.0f}s after create)"
-                )
-            else:
-                warn(f"{label} poll #{attempt} fetch error: {exc}")
+            warn(f"{label} poll #{attempt} fetch error: {exc}")
             obj, summary = None, str(exc)
 
         elapsed = time.monotonic() - started
-        if not fetch_was_quiet:
-            info(f"{label} poll #{attempt} t={elapsed:.0f}s -> {summary}")
+        info(f"{label} poll #{attempt} t={elapsed:.0f}s -> {summary}")
 
         if obj is not None:
-            if is_ok(obj):
+            status = str(obj.get("status", "")).upper()
+            if status in _TERMINAL_OK_STATUSES:
                 return obj
-            if is_fail(obj):
-                if failure_diag is not None:
-                    diag, snapshot = failure_diag(obj)
-                    raise WorkloadTerminalFailure(
-                        label=label,
-                        phase=str(obj.get("phase") if isinstance(obj, dict) else "?"),
-                        diag=diag,
-                        snapshot=snapshot,
-                    )
+            if status in _TERMINAL_FAIL_STATUSES:
                 raise RuntimeError(f"{label} terminal failure: {summary}")
 
         if elapsed >= timeout_s:
@@ -356,7 +304,7 @@ def _short_poll(
 
 
 def install_geak_on_pods_best_effort() -> int:
-    """Best-effort GEAK install on the Infera GPU pods (provisioner hook)."""
+    """Install GEAK on the Infera GPU pods (provisioner hook); raised errors propagate, the return code is the caller's."""
     if _load_state().get("backend") != "infera":
         return 0
     ns = argparse.Namespace(
@@ -365,11 +313,7 @@ def install_geak_on_pods_best_effort() -> int:
         poll_interval=_DEFAULT_POLL_INTERVAL_S,
         poll_timeout=_resolve_poll_timeout_s(),
     )
-    try:
-        return cmd_install_geak(ns)
-    except Exception as exc:  # noqa: BLE001
-        warn(f"install-geak skipped: {type(exc).__name__}: {exc}")
-        return 0
+    return cmd_install_geak(ns)
 
 
 # Subcommand `bootstrap`
@@ -407,8 +351,6 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
         result = _short_poll(
             label=f"bootstrap {sub_id}",
             fetch=_fetch,
-            is_ok=lambda j: str(j.get("status", "")).upper() in _TERMINAL_OK_STATUSES,
-            is_fail=lambda j: str(j.get("status", "")).upper() in _TERMINAL_FAIL_STATUSES,
             interval_s=args.poll_interval,
             timeout_s=_poll_timeout_from_args(args),
         )
@@ -453,12 +395,10 @@ def cmd_verify(args: argparse.Namespace) -> int:
         result = _short_poll(
             label=f"verify {sub_id}",
             fetch=_fetch,
-            is_ok=lambda j: str(j.get("status", "")).upper() in _TERMINAL_OK_STATUSES,
-            is_fail=lambda j: str(j.get("status", "")).upper() in _TERMINAL_FAIL_STATUSES,
             interval_s=args.poll_interval,
             timeout_s=_poll_timeout_from_args(args),
         )
-        if args.print_logs or str(result.get("status", "")).upper() in _TERMINAL_FAIL_STATUSES:
+        if args.print_logs:
             logs = ray.get_job_logs(sub_id)
             print(logs)
         info(f"verify done: {result.get('status')}")
@@ -601,8 +541,6 @@ def _exec_kill_submission(
         _short_poll(
             label=f"{label} {kill_sub}",
             fetch=_fetch_kill,
-            is_ok=lambda j: str(j.get("status", "")).upper() in _TERMINAL_OK_STATUSES,
-            is_fail=lambda j: str(j.get("status", "")).upper() in _TERMINAL_FAIL_STATUSES,
             interval_s=args.poll_interval,
             timeout_s=_poll_timeout_from_args(args),
         )
@@ -773,24 +711,28 @@ def _kernel_patch_pod_files() -> str:
     )
 
 
-def _build_multinode_apply_patch_entrypoint(
-    target_path: str,
-    patch_b64: str,
-    backup_dir: str,
-    kernel_id: str,
-    timeout_sec: int,
-    jit_build_dir: str = "",
-) -> str:
+@dataclass(frozen=True)
+class KernelPatchApply:
+    """One kernel patch to apply on every pod: the target file, the base64 patch, and where backups and JIT builds go."""
+
+    target_path: str
+    patch_b64: str
+    backup_dir: str
+    kernel_id: str
+    jit_build_dir: str = ""
+
+
+def _build_multinode_apply_patch_entrypoint(patch: KernelPatchApply, timeout_sec: int) -> str:
     """Compose the head-pod entrypoint that fans out a kernel patch to every pod via heredoc-embedded kernel_patch_multinode.py."""
     return (
         f"{_MN_ENTRYPOINT_PREAMBLE}"
         f"{_kernel_patch_pod_files()}"
         f'python3 "$WORK_DIR/kernel_patch_multinode.py" apply '
-        f"--target-path {shlex.quote(str(target_path))} "
-        f"--patch-b64 {shlex.quote(str(patch_b64))} "
-        f"--backup-dir {shlex.quote(str(backup_dir))} "
-        f"--kernel-id {shlex.quote(str(kernel_id))} "
-        f"--jit-build-dir {shlex.quote(str(jit_build_dir))} "
+        f"--target-path {shlex.quote(str(patch.target_path))} "
+        f"--patch-b64 {shlex.quote(str(patch.patch_b64))} "
+        f"--backup-dir {shlex.quote(str(patch.backup_dir))} "
+        f"--kernel-id {shlex.quote(str(patch.kernel_id))} "
+        f"--jit-build-dir {shlex.quote(str(patch.jit_build_dir))} "
         f"--timeout-sec {int(timeout_sec)}"
     )
 
@@ -847,29 +789,6 @@ def _build_multinode_apply_tracelens_patch_entrypoint(
         f'python3 "$WORK_DIR/apply_tracelens_patch_multinode.py" '
         f"--tracelens-root {shlex.quote(str(tracelens_root))}"
         f"{extra_args}"
-    )
-
-
-def _build_multinode_kernel_bench_entrypoint(
-    workspace: str,
-    bench_command: str,
-    files_b64_json: str,
-    result_glob: str,
-    timeout_sec: int,
-) -> str:
-    """Compose the head-pod entrypoint running a kernel micro-benchmark on a single GPU node via heredoc-embedded kernel_bench_multinode.py."""
-    py = _read_pod_script("kernel_bench_multinode.py")
-    return (
-        f"{_MN_ENTRYPOINT_PREAMBLE}"
-        f'cat > "$WORK_DIR/kernel_bench_multinode.py" '
-        f"<<'__MN_KBENCH_PY_EOF__'\n"
-        f"{py}__MN_KBENCH_PY_EOF__\n"
-        f'python3 "$WORK_DIR/kernel_bench_multinode.py" bench '
-        f"--workspace {shlex.quote(str(workspace))} "
-        f"--bench-command {shlex.quote(str(bench_command))} "
-        f"--files-b64-json {shlex.quote(str(files_b64_json))} "
-        f"--result-glob {shlex.quote(str(result_glob))} "
-        f"--timeout-sec {int(timeout_sec)}"
     )
 
 
@@ -961,12 +880,10 @@ def _submit_and_collect_pod_json(
     label: str,
     poll_interval: int,
     poll_timeout: int,
-    runtime_env: dict | None = None,
-    success_statuses: frozenset[str] | None = None,
 ) -> tuple[int, dict | None, str]:
     """Submit ``entrypoint``, poll to terminal, parse the per-pod JSON, and return ``(returncode, parsed_or_None, logs)``."""
     with _ray_dashboard_client(state) as ray:
-        sub_id = ray.submit_job(entrypoint, runtime_env=runtime_env)
+        sub_id = ray.submit_job(entrypoint)
         info(f"{label} submission_id={sub_id}")
 
         def _fetch():
@@ -974,30 +891,22 @@ def _submit_and_collect_pod_json(
             j = ray.get_job(sub_id)
             return j, f"{label} status={j.get('status', '?')}"
 
-        result = _short_poll(
+        _short_poll(
             label=label,
             fetch=_fetch,
-            is_ok=lambda j: str(j.get("status", "")).upper() in _TERMINAL_OK_STATUSES,
-            is_fail=lambda j: str(j.get("status", "")).upper() in _TERMINAL_FAIL_STATUSES,
             interval_s=poll_interval,
             timeout_s=poll_timeout,
         )
-        status = str(result.get("status", "")).upper()
         logs = ray.get_job_logs(sub_id)
         parsed = _extract_pod_json(logs)
-        if status in _TERMINAL_FAIL_STATUSES:
-            return EXIT_TRANSIENT, parsed, logs
-        if status not in _TERMINAL_OK_STATUSES:
-            return EXIT_TRANSIENT, parsed, logs
         # Dashboard SUCCEEDED; the sub-script's own ``status`` says if the fan-out worked.
         if parsed is None:
             return EXIT_TRANSIENT, None, logs
-        ok_statuses = success_statuses or frozenset({"ok"})
         sub_status = str(parsed.get("status", "")).lower()
-        return (EXIT_OK if sub_status in ok_statuses else EXIT_TRANSIENT), parsed, logs
+        return (EXIT_OK if sub_status == "ok" else EXIT_TRANSIENT), parsed, logs
 
 
-# Subcommand: apply-patch / revert-patch / kernel-bench (multi-node only) Cohesive rayjob/infera clusters live in
+# Subcommand: apply-patch / revert-patch (multi-node only) Cohesive rayjob/infera clusters live in
 # commands/{rayjob,infera}.py.
 from .commands.infera import (
     _infera_restart_server as _infera_restart_server,
@@ -1006,7 +915,6 @@ from .commands.infera import (
     _infera_apply_patch as _infera_apply_patch,
     _infera_finalize_patch as _infera_finalize_patch,
     _infera_revert_patch as _infera_revert_patch,
-    _infera_kernel_bench as _infera_kernel_bench,
     cmd_install_geak as cmd_install_geak,
 )
 
@@ -1037,14 +945,14 @@ def cmd_apply_patch(args: argparse.Namespace) -> int:
         f"backup_dir={args.backup_dir} bytes={len(patch_bytes)}"
     )
 
-    entrypoint = _build_multinode_apply_patch_entrypoint(
-        args.target_path,
-        patch_b64,
-        args.backup_dir,
-        args.kernel_id,
-        args.timeout_sec,
-        str(args.jit_build_dir or ""),
+    patch = KernelPatchApply(
+        target_path=args.target_path,
+        patch_b64=patch_b64,
+        backup_dir=args.backup_dir,
+        kernel_id=args.kernel_id,
+        jit_build_dir=str(args.jit_build_dir or ""),
     )
+    entrypoint = _build_multinode_apply_patch_entrypoint(patch, args.timeout_sec)
     rc, parsed, logs = _submit_and_collect_pod_json(
         state,
         entrypoint,
@@ -1190,49 +1098,6 @@ def cmd_apply_tracelens_patch(args: argparse.Namespace) -> int:
     return EXIT_TRANSIENT
 
 
-def cmd_kernel_bench(args: argparse.Namespace) -> int:
-    """Run a kernel micro-benchmark on a GPU-bearing pod."""
-    if _load_state().get("backend") == "infera":
-        return _infera_kernel_bench(args)
-    state = _load_state()
-    head_ip = (state.get("head_pod_ip") or "").strip()
-    if not head_ip:
-        err("kernel-bench requires head_pod_ip in state file; the platform hands it over via HYPERLOOM_MN_EXT_HEAD_IP")
-        return EXIT_CONFIG_ERROR
-
-    # Validate the optional files-b64 JSON before hitting the dashboard.
-    if args.files_b64_json:
-        try:
-            json.loads(args.files_b64_json)
-        except json.JSONDecodeError as exc:
-            err(f"--files-b64-json is not valid JSON: {exc}")
-            return EXIT_CONFIG_ERROR
-
-    info(f"kernel-bench: workspace={args.workspace} cmd={args.bench_command!r} result_glob={args.result_glob}")
-
-    entrypoint = _build_multinode_kernel_bench_entrypoint(
-        args.workspace,
-        args.bench_command,
-        args.files_b64_json or "{}",
-        args.result_glob,
-        args.timeout_sec,
-    )
-    rc, parsed, logs = _submit_and_collect_pod_json(
-        state,
-        entrypoint,
-        label="kernel-bench",
-        poll_interval=args.poll_interval,
-        poll_timeout=_poll_timeout_from_args(args),
-    )
-    if parsed is None:
-        err("kernel-bench: could not parse pod JSON from dashboard logs")
-        if args.print_logs:
-            print(logs)
-        return EXIT_TRANSIENT
-    print(json.dumps(parsed, indent=2, sort_keys=True))
-    return rc
-
-
 def _resume_probe_timeout_s() -> int:
     """Overall budget for the HTTP serving probe, across all of its requests."""
     try:
@@ -1280,259 +1145,219 @@ def _rayjob_topology_fingerprint(
     return fingerprint
 
 
-def cmd_restart_server(args: argparse.Namespace) -> int:
-    """Kill any prior vllm/sglang server and launch a new one."""
-    if _load_state().get("backend") == "infera":
-        return _infera_restart_server(args)
+def _reject_unsupported_restart_args(args: argparse.Namespace) -> int:
+    """The exit code for a restart whose arguments this backend cannot honour, else 0."""
     try:
-        validate_server_args(
-            getattr(args, "extra_args", "") or "",
-            context="restart-server --extra-args",
-        )
+        validate_server_args(getattr(args, "extra_args", "") or "", context="restart-server --extra-args")
     except ServerArgsRejected as exc:
         err(str(exc))
         return EXIT_CONFIG_ERROR
-    if (getattr(args, "pd_mode", "") or "").lower() == "disaggregated":
-        # launch_multinode.py has no per-role EP or server args; only the infera launcher does.
-        per_role = [
-            flag
-            for flag, value in (
-                ("--pd-prefill-ep", getattr(args, "pd_prefill_ep", 0)),
-                ("--pd-decode-ep", getattr(args, "pd_decode_ep", 0)),
-                ("--pd-prefill-extra-args", getattr(args, "pd_prefill_extra_args", "")),
-                ("--pd-decode-extra-args", getattr(args, "pd_decode_extra_args", "")),
-            )
-            if value
-        ]
-        if per_role:
-            err(f"restart-server: {', '.join(per_role)} are supported on the infera backend only, not rayjob")
-            return EXIT_CONFIG_ERROR
-    state = _require_state("head_pod_ip")
-    nnodes = int(state.get("nodes") or 1)
-
-    if nnodes >= 2:
-        # Multi-node: dir-based PID/log layout (one file per rank).
-        pid_dir = (
-            args.pid_file or state.get("last_server_pid_dir") or str(Path(tempfile.gettempdir()) / "multi_node_pids")
+    if (getattr(args, "pd_mode", "") or "").lower() != "disaggregated":
+        return 0
+    # launch_multinode.py has no per-role EP or server args; only the infera launcher does.
+    per_role = [
+        flag
+        for flag, value in (
+            ("--pd-prefill-ep", getattr(args, "pd_prefill_ep", 0)),
+            ("--pd-decode-ep", getattr(args, "pd_decode_ep", 0)),
+            ("--pd-prefill-extra-args", getattr(args, "pd_prefill_extra_args", "")),
+            ("--pd-decode-extra-args", getattr(args, "pd_decode_extra_args", "")),
         )
-        log_dir = args.log_file or state.get("last_server_log_dir") or _multinode_server_log_dir()
-        info(f"restart-server (multi-node): framework={args.framework} model={args.model} tp={args.tp} nnodes={nnodes}")
+        if value
+    ]
+    if per_role:
+        err(f"restart-server: {', '.join(per_role)} are supported on the infera backend only, not rayjob")
+        return EXIT_CONFIG_ERROR
+    return 0
 
-        kill_ep = _build_multinode_kill_entrypoint(pid_dir)
-        launch_ep = _build_multinode_launch_entrypoint(args, nnodes, pid_dir, log_dir)
 
-        # Resume fast path: if the prior launch had identical framework/model/tp/ep/pd_mode and is still RUNNING, skip
-        # KILL+LAUNCH and resume polling.
-        launch_sub: str = ""
-        # Set only when a resume was granted because the cluster is serving, which in PD means its router is already
-        # up and must not be rebuilt.
-        resumed_serving = False
-        resume_enabled = os.environ.get("MULTI_NODE_RESTART_RESUME_RUNNING", "1").lower() not in (
-            "0",
-            "false",
-            "no",
-            "off",
+def _resume_prior_launch(args: argparse.Namespace, state: dict, *, topology: dict[str, Any]) -> tuple[str, bool]:
+    """Reuse a prior launch when the whole topology record matches and it is still good.
+
+    Returns the submission id to keep polling, and whether the resume was granted
+    because the cluster is already serving -- which in PD means its router is up
+    and must not be rebuilt. ``("", False)`` asks for a full KILL+LAUNCH.
+    """
+    resume_enabled = os.environ.get("MULTI_NODE_RESTART_RESUME_RUNNING", "1").lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+    prev_sub = str(state.get("last_restart_submission_id") or "").strip()
+    if not resume_enabled or not prev_sub or state.get("last_restart_topology") != topology:
+        return "", False
+    prev_status = ""
+    try:
+        with _ray_dashboard_client(state) as probe:
+            prev_status = str(probe.get_job(prev_sub).get("status", "")).upper()
+    except Exception as exc:  # noqa: BLE001
+        info(f"resume probe failed: {exc!r}; falling back to KILL+LAUNCH")
+    if prev_status == "RUNNING":
+        info(
+            f"resume: reusing launch_sub={prev_sub} "
+            f"(framework={args.framework} model={args.model} "
+            f"tp={args.tp} ep={getattr(args, 'ep', 1)}) "
+            f"— skipping KILL+LAUNCH, just polling"
         )
-        prev_sub = str(state.get("last_restart_submission_id") or "").strip()
-        # The whole topology record must match. extra_args is normalized on both sides so whitespace alone does not
-        # miss the fast path, and it is part of the record because it carries every variant flag.
-        # Collected once: the same runtime_env decides both whether the prior launch can be resumed and what the
-        # launch below actually sends.
-        runtime_env = _forward_runtime_env(per_round_forward_overrides())
-        topology = _rayjob_topology_fingerprint(args, nnodes, dict((runtime_env or {}).get("env_vars") or {}))
-        prev_match = bool(prev_sub) and state.get("last_restart_topology") == topology
-        if resume_enabled and prev_match:
-            _prev_status = ""
-            try:
-                with _ray_dashboard_client(state) as _probe:
-                    _job = _probe.get_job(prev_sub)
-                    _prev_status = str(_job.get("status", "")).upper()
-            except Exception as _exc:  # noqa: BLE001
-                info(f"resume probe failed: {_exc!r}; falling back to KILL+LAUNCH")
-            if _prev_status == "RUNNING":
-                info(
-                    f"resume: reusing launch_sub={prev_sub} "
-                    f"(framework={args.framework} model={args.model} "
-                    f"tp={args.tp} ep={getattr(args, 'ep', 1)}) "
-                    f"— skipping KILL+LAUNCH, just polling"
-                )
-                launch_sub = prev_sub
-            elif _prev_status in _TERMINAL_OK_STATUSES and not getattr(args, "no_wait_health", False):
-                # The driver waits for the servers it spawned before exiting, so a terminal-OK status means this
-                # cluster served once.
-                if cluster_is_serving(
-                    state,
-                    pd_mode=(getattr(args, "pd_mode", "") or "aggregated").lower(),
-                    timeout_s=_resume_probe_timeout_s(),
-                ):
-                    resumed_serving = True
-                    launch_sub = prev_sub
-                    info(
-                        f"resume: prior launch_sub={prev_sub} SUCCEEDED and every leg serves generated "
-                        f"tokens; skipping KILL+LAUNCH"
-                    )
-                else:
-                    info(
-                        f"resume: prior launch_sub={prev_sub} SUCCEEDED but the cluster no longer serves; "
-                        f"doing a full KILL+LAUNCH"
-                    )
+        return prev_sub, False
+    if prev_status not in _TERMINAL_OK_STATUSES or getattr(args, "no_wait_health", False):
+        return "", False
+    # The driver waits for the servers it spawned before exiting, so a terminal-OK status means this
+    # cluster served once.
+    if cluster_is_serving(state, pd_mode=topology["pd_mode"], timeout_s=_resume_probe_timeout_s()):
+        info(
+            f"resume: prior launch_sub={prev_sub} SUCCEEDED and every leg serves generated tokens; skipping KILL+LAUNCH"
+        )
+        return prev_sub, True
+    info(f"resume: prior launch_sub={prev_sub} SUCCEEDED but the cluster no longer serves; doing a full KILL+LAUNCH")
+    return "", False
 
-        kill_sub = ""
+
+def _start_pd_router(
+    ray,
+    args: argparse.Namespace,
+    *,
+    launch_sub: str,
+    pid_dir: str,
+    log_dir: str,
+) -> tuple[str, dict, int]:
+    """Submit the router that binds 8888 in front of the two PD legs.
+
+    Returns ``(submission_id, leg_urls, exit_code)``; a non-zero exit code is
+    fatal -- a PD cluster with no router has no public port.
+    """
+    router_state = _extract_launcher_summary(ray.get_job_logs(launch_sub))
+    prefill_url = str(router_state.get("pd_prefill_url") or "").strip()
+    decode_url = str(router_state.get("pd_decode_url") or "").strip()
+    if not prefill_url or not decode_url:
+        info("ERROR PD launcher summary missing prefill/decode URL; cannot start router. Inspect launch logs above.")
+        return "", router_state, 1
+
+    info(f"PD launcher summary: prefill={prefill_url} decode={decode_url}; submitting router entrypoint")
+    router_ep = _build_multinode_router_entrypoint(args, prefill_url, decode_url, pid_dir, log_dir)
+    router_sub = ray.submit_job(router_ep)
+    info(f"router submission_id={router_sub} (detaches launch_router.py; dashboard exits when router is alive)")
+
+    def _fetch_router():
+        """Fetch the router job status for the poll loop."""
+        job = ray.get_job(router_sub)
+        return job, f"router status={job.get('status', '?')}"
+
+    _short_poll(
+        label=f"router {router_sub}",
+        fetch=_fetch_router,
+        interval_s=args.poll_interval,
+        timeout_s=_poll_timeout_from_args(args),
+    )
+    if args.print_logs:
+        print(ray.get_job_logs(router_sub))
+    return router_sub, router_state, 0
+
+
+def _persist_multinode_restart(
+    state: dict, args: argparse.Namespace, *, kill_sub: str, router_sub: str, router_state: dict
+) -> None:
+    """Complete the early checkpoint once the launch is up, so a later invocation can resume or fall back to it."""
+    state["last_kill_submission_id"] = kill_sub
+    # Persist PD state so later invocations can fall back when a flag is omitted.
+    if state["last_restart_pd_mode"] == "disaggregated":
+        state["last_restart_pd_prefill_nodes"] = int(getattr(args, "pd_prefill_nodes", 0) or 0)
+        state["last_restart_pd_decode_nodes"] = int(getattr(args, "pd_decode_nodes", 0) or 0)
+        state["last_restart_pd_prefill_tp"] = int(getattr(args, "pd_prefill_tp", 0) or 0)
+        state["last_restart_pd_decode_tp"] = int(getattr(args, "pd_decode_tp", 0) or 0)
+        state["last_restart_pd_transfer_backend"] = getattr(args, "pd_transfer_backend", "") or ""
+        state["last_restart_pd_ib_device"] = getattr(args, "pd_ib_device", "") or ""
+        state["last_router_submission_id"] = router_sub
+        state["pd_prefill_url"] = router_state.get("pd_prefill_url", "")
+        state["pd_decode_url"] = router_state.get("pd_decode_url", "")
+    _save_state(state)
+
+
+def _restart_multinode(args: argparse.Namespace, state: dict, nnodes: int) -> int:
+    """Restart the server group across every node, with a dir-based PID/log layout (one file per rank)."""
+    pid_dir = args.pid_file or state.get("last_server_pid_dir") or str(Path(tempfile.gettempdir()) / "multi_node_pids")
+    log_dir = args.log_file or state.get("last_server_log_dir") or _multinode_server_log_dir()
+    info(f"restart-server (multi-node): framework={args.framework} model={args.model} tp={args.tp} nnodes={nnodes}")
+
+    kill_ep = _build_multinode_kill_entrypoint(pid_dir)
+    launch_ep = _build_multinode_launch_entrypoint(args, nnodes, pid_dir, log_dir)
+
+    # Collected once: the same runtime_env decides both whether the prior launch can be resumed and what the
+    # launch below actually sends. extra_args is normalized on both sides so whitespace alone does not miss the
+    # fast path, and it is part of the record because it carries every variant flag.
+    runtime_env = _forward_runtime_env(per_round_forward_overrides())
+    topology = _rayjob_topology_fingerprint(args, nnodes, dict((runtime_env or {}).get("env_vars") or {}))
+    launch_sub, resumed_serving = _resume_prior_launch(args, state, topology=topology)
+
+    kill_sub = ""
+    if not launch_sub:
+        kill_sub = _exec_kill_submission(state, kill_ep, label="restart kill", args=args)
+
+    with _ray_dashboard_client(state) as ray:
         if not launch_sub:
-            kill_sub = _exec_kill_submission(
-                state,
-                kill_ep,
-                label="restart kill",
-                args=args,
-            )
+            launch_sub = ray.submit_job(launch_ep, runtime_env=runtime_env)
+            info(f"launch submission_id={launch_sub} (driver waits for actors, then returns; servers detached)")
 
-        with _ray_dashboard_client(state) as ray:
-            # Launch new servers (skipped when resuming a RUNNING launch).
-            if not launch_sub:
-                launch_sub = ray.submit_job(launch_ep, runtime_env=runtime_env)
-                info(f"launch submission_id={launch_sub} (driver waits for actors, then returns; servers detached)")
-
-            # Early checkpoint: persist the launch identity + config before the (potentially long) _short_poll, so a
-            # poll-timeout retry can hit the resume fast path instead of restarting the bootstrap from zero.
-            state["last_server_pid_dir"] = pid_dir
-            state["last_server_log_dir"] = log_dir
-            if kill_sub:
-                state["last_kill_submission_id"] = kill_sub
-            state["last_restart_submission_id"] = launch_sub
-            state["last_restart_framework"] = args.framework
-            state["last_restart_model"] = args.model
-            state["last_restart_tp"] = int(args.tp)
-            state["last_restart_ep"] = int(getattr(args, "ep", 1) or 1)
-            state["last_restart_pd_mode"] = (getattr(args, "pd_mode", "") or "aggregated").lower()
-            state["last_restart_extra_args"] = _normalize_extra_args(getattr(args, "extra_args", ""))
-            # A poll-timeout retry resumes from this checkpoint, so it carries the topology record as well; the
-            # per-field pd_* keys below are written only once the poll returns.
-            state["last_restart_topology"] = topology
-            _save_state(state)
-
-            def _fetch_launch():
-                """Fetch the launch job status for the poll loop."""
-                j = ray.get_job(launch_sub)
-                return j, f"launch status={j.get('status', '?')}"
-
-            result = _short_poll(
-                label=f"launch {launch_sub}",
-                fetch=_fetch_launch,
-                is_ok=lambda j: str(j.get("status", "")).upper() in _TERMINAL_OK_STATUSES,
-                is_fail=lambda j: str(j.get("status", "")).upper() in _TERMINAL_FAIL_STATUSES,
-                interval_s=args.poll_interval,
-                timeout_s=_poll_timeout_from_args(args),
-            )
-            launch_status = str(result.get("status", "")).upper()
-            if args.print_logs or launch_status in _TERMINAL_FAIL_STATUSES:
-                logs = ray.get_job_logs(launch_sub)
-                print(logs)
-
-            # Fail-fast on a terminal launch status instead of burning the health wait.
-            if launch_status in _TERMINAL_FAIL_STATUSES:
-                info(
-                    f"ERROR launch driver terminal status={launch_status}; "
-                    f"multi-node restart failed (sub_id={launch_sub}). "
-                    f"Check stderr above for MULTI_NODE_FAILURE_SNAPSHOT."
-                )
-                return 1
-
-            # PD disaggregated: read prefill/decode URLs and submit a separate router entrypoint binding 8888 (fatal
-            # if it fails).
-            pd_mode = (getattr(args, "pd_mode", "") or "aggregated").lower()
-            router_sub = ""
-            router_state: dict = {}
-            if pd_mode == "disaggregated" and resumed_serving:
-                # The serving probe just drove a completion through this cluster's public port, which in PD is the
-                # router: it is up and routing.
-                router_sub = str(state.get("last_router_submission_id") or "")
-                router_state = {
-                    "pd_prefill_url": str(state.get("pd_prefill_url") or ""),
-                    "pd_decode_url": str(state.get("pd_decode_url") or ""),
-                }
-                info("resume: keeping the router that is already serving")
-            elif pd_mode == "disaggregated":
-                launch_logs = ray.get_job_logs(launch_sub)
-                router_state = _extract_launcher_summary(launch_logs)
-                prefill_url = str(router_state.get("pd_prefill_url") or "").strip()
-                decode_url = str(router_state.get("pd_decode_url") or "").strip()
-                if not prefill_url or not decode_url:
-                    info(
-                        "ERROR PD launcher summary missing prefill/decode URL; "
-                        "cannot start router. Inspect launch logs above."
-                    )
-                    return 1
-
-                info(f"PD launcher summary: prefill={prefill_url} decode={decode_url}; submitting router entrypoint")
-                router_ep = _build_multinode_router_entrypoint(
-                    args,
-                    prefill_url,
-                    decode_url,
-                    pid_dir,
-                    log_dir,
-                )
-                router_sub = ray.submit_job(router_ep)
-                info(
-                    f"router submission_id={router_sub} "
-                    f"(detaches launch_router.py; dashboard exits when router is alive)"
-                )
-
-                def _fetch_router():
-                    """Fetch the router job status for the poll loop."""
-                    j = ray.get_job(router_sub)
-                    return j, f"router status={j.get('status', '?')}"
-
-                router_result = _short_poll(
-                    label=f"router {router_sub}",
-                    fetch=_fetch_router,
-                    is_ok=lambda j: str(j.get("status", "")).upper() in _TERMINAL_OK_STATUSES,
-                    is_fail=lambda j: str(j.get("status", "")).upper() in _TERMINAL_FAIL_STATUSES,
-                    interval_s=args.poll_interval,
-                    timeout_s=_poll_timeout_from_args(args),
-                )
-                router_status = str(router_result.get("status", "")).upper()
-                if args.print_logs or router_status in _TERMINAL_FAIL_STATUSES:
-                    print(ray.get_job_logs(router_sub))
-                if router_status in _TERMINAL_FAIL_STATUSES:
-                    info(f"ERROR router job ended {router_status}; PD restart failed")
-                    return 1
-
+        # Early checkpoint: persist the launch identity + config before the (potentially long) _short_poll, so a
+        # poll-timeout retry can hit the resume fast path instead of restarting the bootstrap from zero.
         state["last_server_pid_dir"] = pid_dir
         state["last_server_log_dir"] = log_dir
-        state["last_kill_submission_id"] = kill_sub
+        if kill_sub:
+            state["last_kill_submission_id"] = kill_sub
         state["last_restart_submission_id"] = launch_sub
         state["last_restart_framework"] = args.framework
         state["last_restart_model"] = args.model
-        state["last_restart_tp"] = args.tp
-        state["last_restart_ep"] = int(getattr(args, "ep", 1) or 1)
+        state["last_restart_tp"] = topology["tp"]
+        state["last_restart_ep"] = topology["ep"]
+        state["last_restart_pd_mode"] = topology["pd_mode"]
+        state["last_restart_extra_args"] = topology["extra_args"]
+        # A poll-timeout retry resumes from this checkpoint, so it carries the topology record as well; the
+        # per-field pd_* keys below are written only once the poll returns.
         state["last_restart_topology"] = topology
-        # Persist PD state so later invocations can fall back when a flag is omitted.
-        pd_mode_persist = (getattr(args, "pd_mode", "") or "aggregated").lower()
-        state["last_restart_pd_mode"] = pd_mode_persist
-        if pd_mode_persist == "disaggregated":
-            state["last_restart_pd_prefill_nodes"] = int(
-                getattr(args, "pd_prefill_nodes", 0) or 0,
-            )
-            state["last_restart_pd_decode_nodes"] = int(
-                getattr(args, "pd_decode_nodes", 0) or 0,
-            )
-            state["last_restart_pd_prefill_tp"] = int(
-                getattr(args, "pd_prefill_tp", 0) or 0,
-            )
-            state["last_restart_pd_decode_tp"] = int(
-                getattr(args, "pd_decode_tp", 0) or 0,
-            )
-            state["last_restart_pd_transfer_backend"] = getattr(args, "pd_transfer_backend", "") or ""
-            state["last_restart_pd_ib_device"] = getattr(args, "pd_ib_device", "") or ""
-            state["last_router_submission_id"] = router_sub
-            state["pd_prefill_url"] = router_state.get("pd_prefill_url", "")
-            state["pd_decode_url"] = router_state.get("pd_decode_url", "")
         _save_state(state)
-        info("multi-node servers launched; benchmarks should target $service_url")
-        return 0
 
-    # Single-node path. PD is meaningless on one pod; fail loudly.
+        def _fetch_launch():
+            """Fetch the launch job status for the poll loop."""
+            job = ray.get_job(launch_sub)
+            return job, f"launch status={job.get('status', '?')}"
+
+        _short_poll(
+            label=f"launch {launch_sub}",
+            fetch=_fetch_launch,
+            interval_s=args.poll_interval,
+            timeout_s=_poll_timeout_from_args(args),
+        )
+        if args.print_logs:
+            print(ray.get_job_logs(launch_sub))
+
+        router_sub = ""
+        router_state: dict = {}
+        if topology["pd_mode"] == "disaggregated" and resumed_serving:
+            # The serving probe just drove a completion through this cluster's public port, which in PD is the
+            # router: it is up and routing.
+            router_sub = str(state.get("last_router_submission_id") or "")
+            router_state = {
+                "pd_prefill_url": str(state.get("pd_prefill_url") or ""),
+                "pd_decode_url": str(state.get("pd_decode_url") or ""),
+            }
+            info("resume: keeping the router that is already serving")
+        elif topology["pd_mode"] == "disaggregated":
+            router_sub, router_state, router_rc = _start_pd_router(
+                ray, args, launch_sub=launch_sub, pid_dir=pid_dir, log_dir=log_dir
+            )
+            if router_rc:
+                return router_rc
+
+    _persist_multinode_restart(state, args, kill_sub=kill_sub, router_sub=router_sub, router_state=router_state)
+    info("multi-node servers launched; benchmarks should target $service_url")
+    return 0
+
+
+def _restart_single_node(args: argparse.Namespace, state: dict) -> int:
+    """Restart the one server this pod runs."""
     if (getattr(args, "pd_mode", "") or "aggregated").lower() == "disaggregated":
+        # PD is meaningless on one pod; fail loudly.
         info(
             "ERROR --pd-mode disaggregated is not supported in single-node "
             "mode (state.json says nodes=1). PD requires >=2 nodes so "
@@ -1553,20 +1378,17 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
 
         def _fetch():
             """Fetch the restart job status for the poll loop."""
-            j = ray.get_job(sub_id)
-            return j, f"status={j.get('status', '?')}"
+            job = ray.get_job(sub_id)
+            return job, f"status={job.get('status', '?')}"
 
-        result = _short_poll(
+        _short_poll(
             label=f"restart {sub_id}",
             fetch=_fetch,
-            is_ok=lambda j: str(j.get("status", "")).upper() in _TERMINAL_OK_STATUSES,
-            is_fail=lambda j: str(j.get("status", "")).upper() in _TERMINAL_FAIL_STATUSES,
             interval_s=args.poll_interval,
             timeout_s=_poll_timeout_from_args(args),
         )
-        if args.print_logs or str(result.get("status", "")).upper() in _TERMINAL_FAIL_STATUSES:
-            logs = ray.get_job_logs(sub_id)
-            print(logs)
+        if args.print_logs:
+            print(ray.get_job_logs(sub_id))
 
     state["last_server_pid_file"] = pid_file
     state["last_server_log_file"] = log_file
@@ -1577,6 +1399,20 @@ def cmd_restart_server(args: argparse.Namespace) -> int:
     _save_state(state)
     info("server launch acknowledged; subsequent benchmark jobs can target $service_url")
     return 0
+
+
+def cmd_restart_server(args: argparse.Namespace) -> int:
+    """Kill any prior vllm/sglang server and launch a new one."""
+    if _load_state().get("backend") == "infera":
+        return _infera_restart_server(args)
+    rejected = _reject_unsupported_restart_args(args)
+    if rejected:
+        return rejected
+    state = _require_state("head_pod_ip")
+    nnodes = int(state.get("nodes") or 1)
+    if nnodes >= 2:
+        return _restart_multinode(args, state, nnodes)
+    return _restart_single_node(args, state)
 
 
 def _record_kill_and_invalidate_launch(state: dict, kill_sub: str) -> None:
@@ -1624,7 +1460,7 @@ def cmd_kill_inference(args: argparse.Namespace) -> int:
 
 
 def kill_inference_for_kernel_agent_best_effort() -> None:
-    """Best-effort inference teardown before kernel-agent Ray GPU tasks (swallows errors)."""
+    """Best-effort inference teardown before kernel-agent Ray GPU tasks; command errors are warned about."""
     ns = argparse.Namespace(
         pid_file=None,
         print_logs=False,
@@ -1633,7 +1469,7 @@ def kill_inference_for_kernel_agent_best_effort() -> None:
     )
     try:
         cmd_kill_inference(ns)
-    except Exception as exc:  # noqa: BLE001
+    except (RuntimeError, OSError) as exc:
         warn(f"kill-inference skipped: {type(exc).__name__}: {exc}")
 
 
@@ -1905,28 +1741,6 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--print-logs", action="store_true", help="dump full dashboard job_logs on parse failure")
     _add_common_poll_flags(sp)
     sp.set_defaults(func=cmd_apply_tracelens_patch)
-
-    # kernel-bench (multi-node only)
-    sp = sub.add_parser(
-        "kernel-bench",
-        help="run a kernel micro-benchmark on a GPU-bearing pod; multi-node only",
-    )
-    sp.add_argument("--workspace", required=True, help="absolute dir on pod that will be CWD for the bench")
-    sp.add_argument("--bench-command", required=True, help="shell command to invoke (passed to 'bash -lc')")
-    sp.add_argument(
-        "--files-b64-json",
-        default="{}",
-        help="JSON {rel_path: base64_content} of helper files to stage into workspace before the bench",
-    )
-    sp.add_argument(
-        "--result-glob",
-        default="*.json",
-        help="glob (relative to workspace) of result artifacts to read back after the bench",
-    )
-    sp.add_argument("--timeout-sec", type=int, default=600, help="hard timeout for the bench command (default 600s)")
-    sp.add_argument("--print-logs", action="store_true")
-    _add_common_poll_flags(sp)
-    sp.set_defaults(func=cmd_kernel_bench)
 
     # install-geak (infera only)
     sp = sub.add_parser(

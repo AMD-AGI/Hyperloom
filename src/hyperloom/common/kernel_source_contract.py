@@ -6,9 +6,7 @@
 from __future__ import annotations
 
 import math
-import os
-import re
-from pathlib import Path
+from dataclasses import dataclass
 from typing import Any
 
 #: Bump the major on any field removal or meaning change; consumers gate on it.
@@ -130,51 +128,55 @@ def classify_skip_reason(*, reusable: Any, skip_reason: Any, source_file: Any = 
 REQUIRED_DOCUMENT_KEYS = ("schema_version", "generated_by", "entries")
 
 
-def make_entry(
-    *,
-    kernel_id: str,
-    name: str,
-    gpu_pct: float,
-    source_file: str = "",
-    source_line: int | None = None,
-    source_function: str = "",
-    method: str = METHOD_UNRESOLVED,
-    confidence: float | None = None,
-    reason: str = "",
-    rejected_value: str = "",
-    previous_source_file: str = "",
-    previous_method: str = "",
-    reason_class: str = "",
-) -> dict[str, Any]:
-    """Build one resolution entry with every required key present."""
-    if isinstance(gpu_pct, bool) or not isinstance(gpu_pct, (int, float)) or not math.isfinite(float(gpu_pct)):
-        safe_gpu_pct = 0.0
-    else:
-        safe_gpu_pct = float(gpu_pct)
-    entry = {
-        "kernel_id": str(kernel_id or ""),
-        "name": str(name or ""),
-        "gpu_pct": safe_gpu_pct,
-        "source_file": str(source_file or ""),
-        "source_line": source_line if isinstance(source_line, int) else None,
-        "source_function": str(source_function or ""),
-        "method": str(method or METHOD_UNRESOLVED),
-        "confidence": confidence,
-        "reason": str(reason or ""),
-        "rejected_value": str(rejected_value or ""),
-        # Derived from the caller's verdict when not supplied, so an entry is never written without a class a consumer
-        # can act on.
-        "reason_class": str(reason_class or "")
-        or classify_skip_reason(
-            reusable=bool(source_file),
-            skip_reason=reason,
-            source_file=source_file,
-        ),
-    }
-    if previous_source_file:
-        entry["previous_source_file"] = str(previous_source_file)
-        entry["previous_method"] = str(previous_method or "")
-    return entry
+@dataclass(frozen=True)
+class SourceResolutionEntry:
+    """How one hot kernel's source was resolved, as written to the audit artifact."""
+
+    kernel_id: str
+    name: str
+    gpu_pct: float
+    source_file: str = ""
+    source_line: int | None = None
+    source_function: str = ""
+    method: str = METHOD_UNRESOLVED
+    confidence: float | None = None
+    reason: str = ""
+    rejected_value: str = ""
+    previous_source_file: str = ""
+    previous_method: str = ""
+    reason_class: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        """Build the on-disk entry with every required key present."""
+        gpu_pct = self.gpu_pct
+        if isinstance(gpu_pct, bool) or not isinstance(gpu_pct, (int, float)) or not math.isfinite(float(gpu_pct)):
+            safe_gpu_pct = 0.0
+        else:
+            safe_gpu_pct = float(gpu_pct)
+        entry = {
+            "kernel_id": str(self.kernel_id or ""),
+            "name": str(self.name or ""),
+            "gpu_pct": safe_gpu_pct,
+            "source_file": str(self.source_file or ""),
+            "source_line": self.source_line if isinstance(self.source_line, int) else None,
+            "source_function": str(self.source_function or ""),
+            "method": str(self.method or METHOD_UNRESOLVED),
+            "confidence": self.confidence,
+            "reason": str(self.reason or ""),
+            "rejected_value": str(self.rejected_value or ""),
+            # Derived from the caller's verdict when not supplied, so an entry is never written without a class a
+            # consumer can act on.
+            "reason_class": str(self.reason_class or "")
+            or classify_skip_reason(
+                reusable=bool(self.source_file),
+                skip_reason=self.reason,
+                source_file=self.source_file,
+            ),
+        }
+        if self.previous_source_file:
+            entry["previous_source_file"] = str(self.previous_source_file)
+            entry["previous_method"] = str(self.previous_method or "")
+        return entry
 
 
 def summarize_resolution(entries: list[dict[str, Any]]) -> dict[str, Any]:
@@ -225,14 +227,62 @@ def make_document(
     }
 
 
+def _entry_problems(index: int, entry: Any, seen_ids: set[str]) -> list[str]:
+    """Contract violations in one entry; ``seen_ids`` collects the kernel ids already claimed."""
+    if not isinstance(entry, dict):
+        return [f"entries[{index}] is {type(entry).__name__}, expected dict"]
+    problems = [f"entries[{index}] missing required key {key!r}" for key in REQUIRED_ENTRY_KEYS if key not in entry]
+    kernel_id = str(entry.get("kernel_id") or "")
+    if not kernel_id:
+        problems.append(f"entries[{index}] has empty kernel_id")
+    elif kernel_id in seen_ids:
+        problems.append(f"entries[{index}] has duplicate kernel_id {kernel_id!r}")
+    else:
+        seen_ids.add(kernel_id)
+    gpu_pct = entry.get("gpu_pct")
+    if gpu_pct is not None and not _is_finite_number(gpu_pct):
+        problems.append(f"entries[{index}] has invalid gpu_pct {gpu_pct!r}; expected a finite number")
+    source_line = entry.get("source_line")
+    if source_line is not None and not isinstance(source_line, int):
+        problems.append(f"entries[{index}] has invalid source_line {source_line!r}; expected int or null")
+    method = str(entry.get("method") or "")
+    if method and method not in KNOWN_METHODS:
+        problems.append(f"entries[{index}] has unknown method {method!r}")
+    reason_class = str(entry.get("reason_class") or "")
+    if reason_class and reason_class not in KNOWN_REASON_CLASSES:
+        problems.append(f"entries[{index}] has unknown reason_class {reason_class!r}")
+    problems.extend(_source_file_problems(index, entry, method))
+    confidence = entry.get("confidence")
+    if confidence is not None and not (_is_finite_number(confidence) and 0.0 <= float(confidence) <= 1.0):
+        problems.append(f"entries[{index}] has invalid confidence {confidence!r}; expected a finite number in [0, 1]")
+    return problems
+
+
+def _is_finite_number(value: Any) -> bool:
+    """Whether a value is a real finite number, which ``True`` and ``False`` are not."""
+    return not isinstance(value, bool) and isinstance(value, (int, float)) and math.isfinite(float(value))
+
+
+def _source_file_problems(index: int, entry: dict, method: str) -> list[str]:
+    """Whether this entry's source_file agrees with the method that produced it.
+
+    ``gate_non_patchable`` may or may not carry a source -- a vendor GEMM
+    resolves its dispatcher, a bare symbol does not -- so it is exempt from
+    both rules.
+    """
+    src = str(entry.get("source_file") or "")
+    if src and method == METHOD_UNRESOLVED:
+        return [f"entries[{index}] has a source_file but method is {method}"]
+    if not src and method not in {METHOD_UNRESOLVED, METHOD_GATE_NON_PATCHABLE}:
+        return [f"entries[{index}] has method {method!r} but no source_file"]
+    return []
+
+
 def validate_document(doc: Any) -> list[str]:
     """Return a list of contract violations; empty means the document is valid."""
-    problems: list[str] = []
     if not isinstance(doc, dict):
         return [f"document is {type(doc).__name__}, expected dict"]
-    for key in REQUIRED_DOCUMENT_KEYS:
-        if key not in doc:
-            problems.append(f"document missing required key {key!r}")
+    problems = [f"document missing required key {key!r}" for key in REQUIRED_DOCUMENT_KEYS if key not in doc]
     version = str(doc.get("schema_version") or "")
     if version and version.split(".")[0] != SOURCE_RESOLUTION_SCHEMA_VERSION.split(".")[0]:
         problems.append(f"schema_version {version!r} has a different major than {SOURCE_RESOLUTION_SCHEMA_VERSION!r}")
@@ -241,92 +291,6 @@ def validate_document(doc: Any) -> list[str]:
         problems.append(f"entries is {type(entries).__name__}, expected list")
         return problems
     seen_ids: set[str] = set()
-    for i, entry in enumerate(entries):
-        if not isinstance(entry, dict):
-            problems.append(f"entries[{i}] is {type(entry).__name__}, expected dict")
-            continue
-        for key in REQUIRED_ENTRY_KEYS:
-            if key not in entry:
-                problems.append(f"entries[{i}] missing required key {key!r}")
-        kernel_id = str(entry.get("kernel_id") or "")
-        if not kernel_id:
-            problems.append(f"entries[{i}] has empty kernel_id")
-        elif kernel_id in seen_ids:
-            problems.append(f"entries[{i}] has duplicate kernel_id {kernel_id!r}")
-        else:
-            seen_ids.add(kernel_id)
-        gpu_pct = entry.get("gpu_pct")
-        if gpu_pct is not None:
-            if isinstance(gpu_pct, bool) or not isinstance(gpu_pct, (int, float)) or not math.isfinite(float(gpu_pct)):
-                problems.append(f"entries[{i}] has invalid gpu_pct {gpu_pct!r}; expected a finite number")
-        source_line = entry.get("source_line")
-        if source_line is not None and not isinstance(source_line, int):
-            problems.append(f"entries[{i}] has invalid source_line {source_line!r}; expected int or null")
-        method = str(entry.get("method") or "")
-        if method and method not in KNOWN_METHODS:
-            problems.append(f"entries[{i}] has unknown method {method!r}")
-        reason_class = str(entry.get("reason_class") or "")
-        if reason_class and reason_class not in KNOWN_REASON_CLASSES:
-            problems.append(f"entries[{i}] has unknown reason_class {reason_class!r}")
-        src = str(entry.get("source_file") or "")
-        if src and method == METHOD_UNRESOLVED:
-            problems.append(f"entries[{i}] has a source_file but method is {method}")
-        # gate_non_patchable may or may not carry a source (a vendor GEMM resolves
-        # its dispatcher; a bare symbol does not), so it is exempt from both rules.
-        if not src and method not in {METHOD_UNRESOLVED, METHOD_GATE_NON_PATCHABLE}:
-            problems.append(f"entries[{i}] has method {method!r} but no source_file")
-        confidence = entry.get("confidence")
-        if confidence is not None:
-            if (
-                isinstance(confidence, bool)
-                or not isinstance(confidence, (int, float))
-                or not math.isfinite(float(confidence))
-                or not 0.0 <= float(confidence) <= 1.0
-            ):
-                problems.append(
-                    f"entries[{i}] has invalid confidence {confidence!r}; expected a finite number in [0, 1]"
-                )
+    for index, entry in enumerate(entries):
+        problems.extend(_entry_problems(index, entry, seen_ids))
     return problems
-
-
-#: TraceLens reports a call site as "path.py(247): fn_name"; the line and
-#: function ride along in the same string.
-_LINE_SUFFIX_RE = re.compile(r"^(?P<path>.+?)\((?P<line>\d+)\)\s*(?::\s*(?P<function>.*))?$")
-
-
-def split_line_suffix(path: str) -> tuple[str, int | None, str]:
-    """Split a TraceLens call-site string into path, line and function."""
-    text = (path or "").strip()
-    if not text:
-        return "", None, ""
-    match = _LINE_SUFFIX_RE.match(text)
-    if match is None:
-        return text, None, ""
-    return (
-        match.group("path").strip(),
-        int(match.group("line")),
-        str(match.group("function") or "").strip(),
-    )
-
-
-def strip_line_suffix(path: str) -> str:
-    """Return the bare file path from a possibly line-annotated one."""
-    return split_line_suffix(path)[0]
-
-
-def canonical_source_path(path: str, roots: tuple[str, ...]) -> str:
-    """Return the validated canonical target for ``path``, or ``\"\"``."""
-    text = strip_line_suffix(path)
-    if not text or not os.path.isfile(text):
-        return ""
-    real = Path(os.path.realpath(text))
-    for root in roots:
-        if not root:
-            continue
-        resolved_root = Path(os.path.realpath(str(root)))
-        try:
-            real.relative_to(resolved_root)
-            return str(real)
-        except ValueError:
-            continue
-    return ""

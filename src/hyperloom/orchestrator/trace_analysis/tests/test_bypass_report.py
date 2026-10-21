@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import csv
 import io
-from pathlib import Path
 
 from hyperloom.orchestrator.trace_analysis import _bypass_report as report
 from hyperloom.orchestrator.trace_analysis._kernel_partition import partition_kernels
@@ -440,7 +439,6 @@ def test_build_kernel_roofline_shape():
     rows = kr["kernels"]
     assert len(rows) == 2
     assert all("kernel_id" in r for r in rows)
-    assert all(r["rocprof_roofline"] is None for r in rows)
     # rows are a superset of the TraceLens kernel_roofline row schema.
     tracelens_row_keys = {
         "kernel_id",
@@ -461,7 +459,6 @@ def test_build_kernel_roofline_shape():
         "roofline_name",
         "recommended_actions",
         "reusable_native_kernel",
-        "rocprof_roofline",
     }
     for r in rows:
         assert tracelens_row_keys.issubset(r.keys())
@@ -491,7 +488,6 @@ def test_build_candidates_fills_analytical_roofline_incl_vendor():
     assert cand["bound_type"] == "compute_bound"
     assert cand["arithmetic_intensity"] > 1000
     assert cand["roofline_source"] == "analytical"
-    assert cand["roofline_measured"] is False  # analytical, not hardware-measured
     assert 0.0 < cand["efficiency_percent"] <= 100.0
 
 
@@ -629,22 +625,22 @@ def test_summary_csv_parseable():
     assert rows and rows[0]["kernel_category"] == "GEMM"
 
 
-def test_roofline_rows_flag_placeholder_not_measured():
-    # The bypass roofline is analytical, not a hardware measurement.
+def test_roofline_rows_flag_placeholder_bound():
     cands = report.build_candidates(_analyze([dict(k) for k in _KERNELS]), framework="vllm", target_platform="MI300X")
     kr = report.build_kernel_roofline(cands, analysis_md_path="/x/a.md", kernel_candidates_path="/x/kc.json")
     assert kr["kernels"]
     for r in kr["kernels"]:
-        assert r.get("roofline_measured") is False
+        assert r["roofline_source"] == "placeholder"
         assert r["bound_type"] == "\u2014"  # em-dash "unknown" marker
-    # candidates carry the same honest marker.
-    assert all(c.get("roofline_measured") is False for c in cands["hot_kernels"])
+    assert all(c["roofline_source"] == "placeholder" for c in cands["hot_kernels"])
 
 
 def test_render_analysis_md_sections_textgen():
     analyze = _analyze([dict(k) for k in _KERNELS])
     cands = report.build_candidates(analyze, framework="vllm", target_platform="MI300X")
-    md = report.render_analysis_md(cands, analyze, model_name="Llama", framework="vllm", target_platform="MI300X")
+    md = report.render_analysis_md(
+        cands, analyze, report.BypassReportContext(model_name="Llama", framework="vllm", target_platform="MI300X")
+    )
     for header in (
         # Shared canonical spine (identical across routes).
         "# Performance Analysis Report \u2014 Llama",
@@ -685,11 +681,13 @@ def test_render_analysis_md_top10_and_csv_and_no_stale_text():
     md = report.render_analysis_md(
         cands,
         analyze,
-        model_name="M",
-        framework="vllm",
-        target_platform="mi300x",
-        metrics_csv_path="/x/kernel_metrics.csv",
-        summary_csv_path="/x/kernel_summary.csv",
+        report.BypassReportContext(
+            model_name="M",
+            framework="vllm",
+            target_platform="mi300x",
+            metrics_csv_path="/x/kernel_metrics.csv",
+            summary_csv_path="/x/kernel_summary.csv",
+        ),
     )
     assert "## Top 10 Kernels by Optimization Priority" in md
     assert "| # | kernel_id | Name | Category | GPU% | Bound | AI | Eff% | Priority | Suggestion |" in md
@@ -704,7 +702,11 @@ def test_render_analysis_md_xdit_unit():
     analyze = _analyze([dict(k) for k in _KERNELS])
     cands = report.build_candidates(analyze, framework="xdit", target_platform="MI300X")
     md = report.render_analysis_md(
-        cands, analyze, model_name="FLUX", framework="xdit", target_platform="MI300X", throughput_unit="img/s"
+        cands,
+        analyze,
+        report.BypassReportContext(
+            model_name="FLUX", framework="xdit", target_platform="MI300X", throughput_unit="img/s"
+        ),
     )
     assert "throughput_unit=img/s" in md
     assert "Throughput unit: img/s" in md
@@ -714,7 +716,9 @@ def test_render_empty_kernels_is_valid():
     analyze = _analyze([])
     cands = report.build_candidates(analyze, framework="vllm", target_platform="MI300X")
     assert cands["hot_kernels"] == []
-    md = report.render_analysis_md(cands, analyze, model_name="Empty", framework="vllm", target_platform="MI300X")
+    md = report.render_analysis_md(
+        cands, analyze, report.BypassReportContext(model_name="Empty", framework="vllm", target_platform="MI300X")
+    )
     assert "_No GPU kernels found in trace._" in md
     assert "_No rewritable compute-kernel candidates identified._" in md
 
@@ -933,7 +937,9 @@ def test_render_surfaces_source_dispatchability_and_task_groups(monkeypatch):
     ]
     analyze = _analyze(kernels)
     cands = report.build_candidates(analyze, framework="vllm", target_platform="MI300X")
-    md = report.render_analysis_md(cands, analyze, model_name="M", framework="vllm", target_platform="MI300X")
+    md = report.render_analysis_md(
+        cands, analyze, report.BypassReportContext(model_name="M", framework="vllm", target_platform="MI300X")
+    )
     # dispatchable split line present
     assert "rewritable candidate(s) are auto-dispatchable" in md
     # resolved source surfaced with method
@@ -1005,29 +1011,13 @@ def test_pseudo_op_flydsl_sets_deterministic_implementation_contract():
     assert cand["kernel_kind"] == "flydsl"
 
 
-def test_build_candidates_discovers_benchmark_files_when_enabled(tmp_path, monkeypatch):
-    # discover_benchmarks populates benchmark_files/kernel_repo on a routable candidate (seeds the rocprof roofline
-    # enrichment); off by default.
-    repo = tmp_path / "aiter"
-    (repo / "op_tests").mkdir(parents=True)
-    (repo / "csrc").mkdir(parents=True)
-    src = repo / "csrc" / "foo_kernel.cu"
-    src.write_text("// foo_op\n", encoding="utf-8")
-    (repo / "op_tests" / "test_foo.py").write_text("def test():\n    foo_op(x)\n", encoding="utf-8")
-    monkeypatch.setattr(report, "resolve_source_verdict", lambda *a, **k: _verdict(str(src)))
+def test_build_candidates_keeps_empty_benchmark_fields(monkeypatch):
+    # The bypass route discovers no benchmark files, yet every candidate still carries both keys.
+    monkeypatch.setattr(report, "resolve_source_verdict", lambda *a, **k: _verdict("/repo/aiter/csrc/foo_kernel.cu"))
     base = [{"name": "triton_foo_kernel", "op_name": "aiter::foo_op", "gpu_time_us": 100.0, "count": 1}]
-
-    on = report.build_candidates(
-        _analyze([dict(k) for k in base]), framework="vllm", target_platform="MI300X", discover_benchmarks=True
-    )["hot_kernels"][0]
-    assert on["reusable_native_kernel"] and on["source_file"] == str(src)
-    assert any(Path(f).name == "test_foo.py" for f in on["benchmark_files"])
-    assert on["kernel_repo"] == str(repo.resolve())
-
-    off = report.build_candidates(_analyze([dict(k) for k in base]), framework="vllm", target_platform="MI300X")[
-        "hot_kernels"
-    ][0]
-    assert off["benchmark_files"] == [] and off["kernel_repo"] == ""
+    cand = report.build_candidates(_analyze(base), framework="vllm", target_platform="MI300X")["hot_kernels"][0]
+    assert cand["reusable_native_kernel"] and cand["source_file"] == "/repo/aiter/csrc/foo_kernel.cu"
+    assert cand["benchmark_files"] == [] and cand["kernel_repo"] == ""
 
 
 def test_build_candidates_attaches_task_group_and_summary_counts(monkeypatch):

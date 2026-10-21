@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import shutil
+import site
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -24,6 +25,9 @@ _DISK_MIN_GB_ENV = "FRAMEWORK_EXPLORER_DISK_MIN_GB"
 _DEFAULT_DISK_MIN_GB = 20.0
 # Per-candidate disk budget (worktree + venv + build headroom).
 PER_CANDIDATE_GB = 1.5
+# Sorts after the .pth files pip writes, so a package installed into the venv, editable or not, shadows the
+# interpreter's copy.
+_INHERITED_SITE_PTH = "zz-inherited-site-packages.pth"
 
 
 class DiskPreflightError(RuntimeError):
@@ -34,7 +38,6 @@ class DiskPreflightError(RuntimeError):
 class WorkspacePaths:
     """Resolved per-candidate workspace layout returned by prepare_candidate_workspace."""
 
-    candidate_dir: Path
     worktree_dir: Path
     venv_dir: Path
 
@@ -105,12 +108,12 @@ def prepare_repo_cache(repo_url: str, work_dir: Path) -> Path:
     return repo_dir
 
 
-def _worktree_ref(candidate: Candidate) -> str:
-    """Choose the ref to materialise in a detached worktree."""
-    if candidate.ref.startswith("PR:"):
-        number = candidate.ref.split(":", 1)[1]
+def checkout_ref(ref: str) -> str:
+    """Return the git ref a candidate ref checks out: ``PR:N`` is the PR's head, anything else is itself."""
+    if ref.startswith("PR:"):
+        number = ref.split(":", 1)[1]
         return f"refs/pull/{number}/head"
-    return candidate.ref
+    return ref
 
 
 def _fetch_candidate_ref(repo_dir: Path, candidate: Candidate) -> None:
@@ -130,11 +133,22 @@ def _fetch_candidate_ref(repo_dir: Path, candidate: Candidate) -> None:
 
 
 def create_venv(venv_dir: Path) -> None:
-    """Create a fresh ``--system-site-packages`` venv at ``venv_dir``, replacing any existing one."""
+    """Create a fresh venv at ``venv_dir`` that also sees this interpreter's packages, replacing any existing one.
+
+    ``--system-site-packages`` reaches only the base installation, so when this
+    interpreter is itself a venv its packages -- the image's ROCm torch among
+    them -- would be missing and pip would fetch replacements. Its site
+    directories are appended through a ``.pth`` instead, as site directories:
+    eggs and editable installs reach ``sys.path`` only through the ``.pth``
+    files inside them.
+    """
     if venv_dir.exists():
         shutil.rmtree(venv_dir)
     log.info("create_venv: %s", venv_dir)
     _run_subprocess([sys.executable, "-m", "venv", "--system-site-packages", str(venv_dir)], timeout_sec=600)
+    purelib = venv_dir / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages"
+    adds = "".join(f"; site.addsitedir({d!r})" for d in site.getsitepackages())
+    (purelib / _INHERITED_SITE_PTH).write_text(f"import site{adds}\n", encoding="utf-8")
 
 
 # Per-candidate workspace lifecycle
@@ -170,17 +184,18 @@ def prepare_candidate_workspace(
             "add",
             "--detach",
             str(worktree_dir),
-            _worktree_ref(candidate),
+            checkout_ref(candidate.ref),
         ]
     )
     create_venv(venv_dir)
-    return WorkspacePaths(candidate_dir, worktree_dir, venv_dir)
+    return WorkspacePaths(worktree_dir, venv_dir)
 
 
 __all__ = [
     "DiskPreflightError",
     "PER_CANDIDATE_GB",
     "WorkspacePaths",
+    "checkout_ref",
     "create_venv",
     "disk_preflight",
     "prepare_candidate_workspace",

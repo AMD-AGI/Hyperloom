@@ -114,7 +114,7 @@ def test_extract_skips_non_dict_warning_entries():
             "not-a-dict",
             123,
             {
-                "code": "steady_state_chunk_empty",
+                "code": "steady_state_chunk_low_quality",
                 "non_empty_modes": ["prefilldecode"],
             },
         ],
@@ -366,11 +366,11 @@ class _DrainingProfiler:
 
 
 @pytest.mark.asyncio
-async def test_instrumentation_is_drained_per_attempt(tmp_path):
-    """Each attempt carries its own report, including the attempt that raised and left no result dict."""
+async def test_instrumentation_is_drained_for_a_profile_that_raised(tmp_path):
+    """A profile that raised and left no result dict still carries its own report."""
     md = tmp_path / "analysis.md"
     md.write_text("# Executive Summary\n", encoding="utf-8")
-    profiler = _DrainingProfiler([RuntimeError("boot"), _profile_success()])
+    profiler = _DrainingProfiler([RuntimeError("boot")])
 
     async def fake_ta(payload, *, session_dir):
         return _ta_ok(md)
@@ -382,10 +382,8 @@ async def test_instrumentation_is_drained_per_attempt(tmp_path):
         await RooflineExecutor(shared_state=_state())(_ctx(tmp_path))
 
     runs = _recorded_action(tmp_path)["profile"]["runs"]
-    assert [run["instrumentation"] for run in runs] == [
-        {"check_id": "instrumentation_preflight", "call": 1},
-        {"check_id": "instrumentation_preflight", "call": 2},
-    ]
+    assert [run["instrumentation"] for run in runs] == [{"check_id": "instrumentation_preflight", "call": 1}]
+    assert profiler.calls == 1
 
 
 @pytest.mark.asyncio
@@ -426,12 +424,6 @@ def test_drain_instrumentation_tolerates_an_executor_without_one():
     from hyperloom.orchestrator.actions.executors.roofline import _drain_instrumentation
 
     assert _drain_instrumentation(object()) is None
-
-    class _Angry:
-        def drain_instrumentation_report(self):
-            raise RuntimeError("nope")
-
-    assert _drain_instrumentation(_Angry())["error"].startswith("RuntimeError")
 
 
 # Exception-path cuda-graph classification
@@ -509,14 +501,16 @@ async def test_close_post_opt_reason_uses_opt_output_name(tmp_path):
 
 # Auto-retry returns non-dict
 @pytest.mark.asyncio
-async def test_retry_returns_non_dict_fails_and_clears_cache(tmp_path):
-    """First trace_analyze fails with a recovery hint; the auto-retry then returns a non-dict -> fail with cleared cache."""
+async def test_retry_returns_non_dict_fails_and_keeps_the_previous_analysis(tmp_path):
+    """First trace_analyze fails with a recovery hint; the auto-retry then returns a non-dict -> fail, and the analysis
+    of the previously recorded trace stays as it was.
+    """
     fail = {
         "status": "failed",
-        "error": "steady_state_chunk_empty",
+        "error": "steady_state_chunk_low_quality",
         "trace_health_warnings": [
             {
-                "code": "steady_state_chunk_empty",
+                "code": "steady_state_chunk_low_quality",
                 "requested_mode": "mixed",
                 "non_empty_modes": ["prefilldecode"],
             },
@@ -534,7 +528,8 @@ async def test_retry_returns_non_dict_fails_and_clears_cache(tmp_path):
         return "definitely-not-a-dict"
 
     state = _state()
-    state.last_trace_analyze = {"analysis_md_text": "stale", "roofline_snapshot_id": 9}
+    state.last_profile_trace = "/prev/trace.gz"
+    state.last_trace_analyze = {"trace_input": "/prev/trace.gz", "analysis_md_text": "prev", "roofline_snapshot_id": 9}
     executor = RooflineExecutor(shared_state=state)
     with (
         patch(
@@ -554,7 +549,12 @@ async def test_retry_returns_non_dict_fails_and_clears_cache(tmp_path):
     assert "N26" in result["error"]
     assert "prefilldecode" in result["error"]
     assert calls["n"] == 2
-    assert state.last_trace_analyze == {}
+    assert state.last_profile_trace == "/prev/trace.gz"
+    assert state.last_trace_analyze == {
+        "trace_input": "/prev/trace.gz",
+        "analysis_md_text": "prev",
+        "roofline_snapshot_id": 9,
+    }
 
 
 # Lifecycle save fast-paths: START and END
@@ -586,10 +586,10 @@ async def test_lifecycle_saves_when_session_dir_has_state_json(tmp_path):
     assert saves.count(str(session_dir)) >= 2
 
 
-# Lifecycle START defensive except
+# Lifecycle START emit
 @pytest.mark.asyncio
-async def test_lifecycle_start_emit_failure_is_swallowed(tmp_path, monkeypatch):
-    """record_lifecycle_event raising on the START emit must not abort the run."""
+async def test_lifecycle_start_emit_bug_propagates(tmp_path, monkeypatch):
+    """record_lifecycle_event is in-memory, so a failure on the START emit is a bug and surfaces."""
     state = _state()
     md = tmp_path / "analysis.md"
     md.write_text("# Executive Summary\n", encoding="utf-8")
@@ -607,16 +607,14 @@ async def test_lifecycle_start_emit_failure_is_swallowed(tmp_path, monkeypatch):
 
     p1, p2 = _patch_subs(_profile_success("/tmp/t.gz"), _ta_ok(md))
     executor = RooflineExecutor(shared_state=state)
-    with p1, p2:
-        result = await executor(_ctx(tmp_path))
-
-    assert result["status"] == "succeeded"
+    with p1, p2, pytest.raises(RuntimeError, match="lifecycle START boom"):
+        await executor(_ctx(tmp_path))
 
 
-# Lifecycle END defensive except
+# Lifecycle END emit
 @pytest.mark.asyncio
-async def test_lifecycle_end_emit_failure_is_swallowed(tmp_path, monkeypatch):
-    """record_lifecycle_event raising on the END emit must not fail the run."""
+async def test_lifecycle_end_emit_bug_propagates(tmp_path, monkeypatch):
+    """record_lifecycle_event is in-memory, so a failure on the END emit is a bug and surfaces."""
     state = _state()
     md = tmp_path / "analysis.md"
     md.write_text("# Executive Summary\n", encoding="utf-8")
@@ -634,10 +632,9 @@ async def test_lifecycle_end_emit_failure_is_swallowed(tmp_path, monkeypatch):
 
     p1, p2 = _patch_subs(_profile_success("/tmp/t.gz"), _ta_ok(md))
     executor = RooflineExecutor(shared_state=state)
-    with p1, p2:
-        result = await executor(_ctx(tmp_path))
+    with p1, p2, pytest.raises(RuntimeError, match="lifecycle END boom"):
+        await executor(_ctx(tmp_path))
 
-    assert result["status"] == "succeeded"
     assert calls["n"] >= 2
 
 
@@ -676,3 +673,13 @@ def test_make_roofline_executor_returns_instance():
     assert isinstance(exe, RooflineExecutor)
     assert exe.shared_state is state
     assert rf.RooflineExecutor is RooflineExecutor
+
+
+async def test_orphan_reap_failure_propagates(monkeypatch, tmp_path):
+    def _boom(_session_dir):
+        raise OSError("pidfile scan failed")
+
+    monkeypatch.setattr("hyperloom.orchestrator.actions.executors._server_lifecycle.reap_orphaned_servers", _boom)
+
+    with pytest.raises(OSError, match="pidfile scan failed"):
+        await rf._reap_session_orphans(tmp_path)

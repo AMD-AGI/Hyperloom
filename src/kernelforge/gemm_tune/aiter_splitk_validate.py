@@ -64,15 +64,8 @@ _TRIAL_OPS = {
 }
 
 
-def supported_ops() -> frozenset[str]:
-    """Op keys :func:`make_support_fn` can build a real trial for."""
-    return frozenset(_TRIAL_OPS)
-
-
 def max_supported_splitk(
-    m: int,
-    n: int,
-    k: int,
+    mnk: tuple[int, int, int],
     ceiling: int = 6,
     device: str = "cuda",
     op: str = "a8w8_blockscale",
@@ -86,16 +79,17 @@ def max_supported_splitk(
     probe = _TRIAL_OPS.get(op)
     if probe is None:
         return None
+    m, n, k = mnk
     try:
         if not probe(m, n, k, 0, device=device):
             return None
-    except Exception:  # noqa: BLE001 — no GPU / import error / tensor issue
+    except (ImportError, OSError, RuntimeError):
         return None
     best = 0
     for sk in range(1, max(0, ceiling) + 1):
         try:
             ok = probe(m, n, k, sk, device=device)
-        except Exception:  # noqa: BLE001 — treat a hard error as "unsupported"
+        except RuntimeError:
             ok = False
         if not ok:
             break
@@ -119,7 +113,7 @@ def make_support_fn(ceiling: int = 6, gpu_ids: str = "", op: str = "a8w8_blocksc
     def _fn(m: int, n: int, k: int):
         key = (m, n, k)
         if key not in cache:
-            cache[key] = max_supported_splitk(m, n, k, ceiling=ceiling, device=device, op=op)
+            cache[key] = max_supported_splitk(key, ceiling=ceiling, device=device, op=op)
         return cache[key]
 
     return _fn

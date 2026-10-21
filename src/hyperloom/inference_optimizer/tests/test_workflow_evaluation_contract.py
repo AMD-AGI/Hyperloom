@@ -16,16 +16,22 @@ from hyperloom.inference_optimizer.breakdown.exporter import build, patch_breakd
 from hyperloom.inference_optimizer.breakdown.session_package import package_session_artifacts
 from hyperloom.inference_optimizer.breakdown.recorder import phase_event, record_stage_reached, stack_event
 from hyperloom.inference_optimizer.breakdown.recorder.close_out import (
+    CloseStep,
     record_close_opened,
     record_close_safety_net,
     record_close_settled,
     record_close_step,
 )
 from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import ROUTE_FORGE, make_kernel_recorder
-from hyperloom.inference_optimizer.breakdown.recorder.session_metadata import record_metadata_identity
+from hyperloom.inference_optimizer.breakdown.recorder.phase_records import (
+    ActionDispatch,
+    ActionSettlement,
+    PhaseCycle,
+    PhaseEntry,
+    PhaseExit,
+)
 from hyperloom.inference_optimizer.breakdown.recorder.warm_start_event import MATCH_MISS, make_warm_start_recorder
 from hyperloom.inference_optimizer.breakdown.workflow_contract import (
-    WORKFLOW_CONTRACT_V1,
     workflow_contract,
     workflow_contract_digest,
     workflow_schema,
@@ -36,6 +42,7 @@ from hyperloom.orchestrator.phases.machine_state import (
     compute_next_phase,
     record_phase_transition,
     workflow_predicate_inputs,
+    PhaseFlags,
 )
 from hyperloom.orchestrator.state.shared_state import ESCALATE_HINT_SKIP_TO_CLOSE, SharedState
 
@@ -53,31 +60,28 @@ def _writer_fixture(tmp_path, *, denied: bool) -> dict:
     state.save(tmp_path)
     predicate_inputs = workflow_predicate_inputs(
         SharedState(phase="PRELUDE", macro_cycle=0, baseline_tput=100.0),
-        kernel_enabled=True,
-        optimize_enabled=True,
-        enablement_enabled=True,
+        flags=PhaseFlags(kernel_enabled=True, optimize_enabled=True, enablement_enabled=True),
     )
     with session_scope(tmp_path):
         phase_event.record_entry(
-            phase="PRELUDE",
-            macro_cycle=0,
-            sequence=1,
-            reason="session_start",
-            entered_unix=1.0,
+            PhaseEntry(at=PhaseCycle("PRELUDE", 0), sequence=1, reason="session_start", entered_unix=1.0)
         )
         phase_event.record_dispatch(
-            action="baseline",
-            task_id="task-1",
-            phase="PRELUDE",
-            macro_cycle=0,
-            dispatch_class="llm",
-            dispatched_unix=2.0,
+            ActionDispatch(
+                at=PhaseCycle("PRELUDE", 0),
+                action="baseline",
+                task_id="task-1",
+                dispatch_class="llm",
+                dispatched_unix=2.0,
+            )
         )
         phase_event.record_settle(
-            task_id="task-1",
-            status="failed" if denied else "succeeded",
-            decision="rejected" if denied else "accepted",
-            settled_unix=3.0,
+            ActionSettlement(
+                task_id="task-1",
+                status="failed" if denied else "succeeded",
+                decision="rejected" if denied else "accepted",
+                settled_unix=3.0,
+            )
         )
         if denied:
             phase_event.record_denial(
@@ -90,20 +94,21 @@ def _writer_fixture(tmp_path, *, denied: bool) -> dict:
                 hint="use an allowed PRELUDE action",
             )
         phase_event.record_exit(
-            phase="PRELUDE",
-            macro_cycle=0,
-            to_phase="CLOSE",
-            reason="baseline_failed" if denied else "target_reached",
-            evidence={"predicate_inputs": predicate_inputs},
-            exited_unix=4.0,
+            PhaseExit(
+                at=PhaseCycle("PRELUDE", 0),
+                to_phase="CLOSE",
+                reason="baseline_failed" if denied else "target_reached",
+                evidence={"predicate_inputs": predicate_inputs},
+                exited_unix=4.0,
+            )
         )
     record_stage_reached(tmp_path, "close" if not denied else "prelude")
     if denied:
         record_close_safety_net(tmp_path)
     else:
         record_close_opened(tmp_path)
-        record_close_step(tmp_path, step="report", status="done", optional=False)
-        record_close_settled(tmp_path, stop_reason="target_reached")
+        record_close_step(tmp_path, CloseStep(step="report", status="done", optional=False))
+        record_close_settled(tmp_path)
     return build(tmp_path)
 
 
@@ -112,8 +117,10 @@ def test_real_writer_fixtures_cover_declared_consumer_paths(tmp_path, denied: bo
     fixture = _writer_fixture(tmp_path, denied=denied)
 
     validate(instance=fixture, schema=workflow_schema())
+    assert fixture["schema_version"] == "hyperloom.session_breakdown.v6.1"
+    assert workflow_contract()["sbd_schema_version"] == "hyperloom.session_breakdown.v6.1"
     workflow = fixture["metadata"]["workflow"]
-    assert workflow["workflow_contract_version"] == "hyperloom.workflow_evaluation.v2"
+    assert workflow["workflow_contract_version"] == "hyperloom.workflow_evaluation.v3"
     assert workflow["contract_digest"] == workflow_contract_digest()
     assert fixture["outcome"]["stop_reason"] == ("baseline_failed" if denied else "target_reached")
 
@@ -195,62 +202,23 @@ def test_declared_consumer_paths_are_mechanically_covered(tmp_path):
     assert all(value is not None for value in values.values())
 
 
-@pytest.mark.parametrize("explicit", [False, True])
-def test_legacy_manifest_keeps_v1_identity_on_export(tmp_path, explicit: bool):
-    manifest = write_manifest(tmp_path, session_id="legacy-workflow")
-    legacy = {
-        key: value
-        for key, value in manifest.items()
-        if key not in {"workflow_contract_version", "workflow_contract_digest"}
-    }
-    if explicit:
-        legacy["workflow_contract_version"] = WORKFLOW_CONTRACT_V1
-        legacy["workflow_contract_digest"] = workflow_contract_digest(WORKFLOW_CONTRACT_V1)
-    record_metadata_identity(tmp_path, legacy)
-    workflow = build(tmp_path)["metadata"]["workflow"]
-    assert workflow["workflow_contract_version"] == WORKFLOW_CONTRACT_V1
-    assert workflow["contract_digest"] == workflow_contract_digest(WORKFLOW_CONTRACT_V1)
-    assert "stage_reached_recorded" not in build(tmp_path)["outcome"]
-    validate(instance=build(tmp_path), schema=workflow_schema(WORKFLOW_CONTRACT_V1))
-
-    state = SharedState(session_id="legacy-workflow")
-    with session_scope(tmp_path):
-        record_phase_transition(state, to_phase="PRELUDE", reason="phase_entered")
-    state.save(tmp_path)
-    refreshed = build(tmp_path)
-    assert refreshed["metadata"]["workflow"]["workflow_contract_version"] == WORKFLOW_CONTRACT_V1
-    assert refreshed["outcome"]["stage_reached_recorded"] == "prelude"
-    validate(instance=refreshed, schema=workflow_schema(WORKFLOW_CONTRACT_V1))
-
-
-@pytest.mark.parametrize("legacy", [True, False], ids=["v1", "v2"])
-def test_skip_to_close_without_baseline_exports_under_session_contract(tmp_path, legacy: bool):
-    """A v1 session resumed on this code still validates, and still closes as baseline_failed."""
-    manifest = write_manifest(tmp_path, session_id="skip-to-close-contract")
-    version = WORKFLOW_CONTRACT_V1 if legacy else manifest["workflow_contract_version"]
-    if legacy:
-        manifest = {
-            key: value
-            for key, value in manifest.items()
-            if key not in {"workflow_contract_version", "workflow_contract_digest"}
-        }
-        (tmp_path / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
-        record_metadata_identity(tmp_path, manifest)
+def test_skip_to_close_without_baseline_exports_under_session_contract(tmp_path):
+    """A skip-to-close with no baseline validates against the contract and still closes as baseline_failed."""
+    write_manifest(tmp_path, session_id="skip-to-close-contract")
     state = SharedState(session_id="skip-to-close-contract", phase="ENABLEMENT", baseline_tput=0.0)
     with session_scope(tmp_path):
         # Open the segment whose exit evidence carries the frozen inputs.
         record_phase_transition(state, to_phase="ENABLEMENT", reason="phase_entered")
         state.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_CLOSE)
-        target, reason, evidence = compute_next_phase(state, enablement_enabled=True)
+        target, reason, evidence = compute_next_phase(state, flags=PhaseFlags(enablement_enabled=True))
         assert (target, reason) == ("CLOSE", "baseline_failed")
         assert evidence["baseline_tput"] == 0.0
         frozen = evidence["predicate_inputs"]["global"]
-        assert ("baseline_tput" in frozen) is not legacy
+        assert "baseline_tput" in frozen
         record_phase_transition(state, to_phase=target, reason=reason, evidence=evidence)
     state.save(tmp_path)
 
     exported = build(tmp_path)
-    assert exported["metadata"]["workflow"]["workflow_contract_version"] == version
     exits = [
         segment["exit_evidence"]
         for event in exported["timeline"]
@@ -259,7 +227,7 @@ def test_skip_to_close_without_baseline_exports_under_session_contract(tmp_path,
         if segment.get("exit_reason") == "baseline_failed"
     ]
     assert [row["predicate_inputs"]["global"] for row in exits] == [frozen]
-    validate(instance=exported, schema=workflow_schema(version))
+    validate(instance=exported, schema=workflow_schema())
 
 
 def test_authored_milestones_survive_sbd_export(tmp_path):
@@ -272,7 +240,9 @@ def test_authored_milestones_survive_sbd_export(tmp_path):
         warm_start.finish(match_status=MATCH_MISS)
         assert build(tmp_path)["outcome"]["stage_reached_recorded"] == "warm_start"
 
-        assert phase_event.record_dispatch(action="profile", task_id="profile-1", phase="PRELUDE", macro_cycle=0)
+        assert phase_event.record_dispatch(
+            ActionDispatch(at=PhaseCycle("PRELUDE", 0), action="profile", task_id="profile-1")
+        )
         assert build(tmp_path)["outcome"]["stage_reached_recorded"] == "profile"
 
         record_phase_transition(state, to_phase="KERNEL_AGENT", reason="phase_entered")
@@ -289,14 +259,15 @@ def test_v2_budget_and_stack_ids_come_from_writers(tmp_path):
     state.save(tmp_path)
     inputs = workflow_predicate_inputs(state, now_unix=1.0)
     with session_scope(tmp_path):
-        phase_event.record_entry(phase="FRAMEWORK_AGENT", macro_cycle=0, sequence=1, entered_unix=1.0)
+        phase_event.record_entry(PhaseEntry(at=PhaseCycle("FRAMEWORK_AGENT", 0), sequence=1, entered_unix=1.0))
         phase_event.record_exit(
-            phase="FRAMEWORK_AGENT",
-            macro_cycle=0,
-            to_phase="CLOSE",
-            reason="target_reached",
-            evidence={"predicate_inputs": inputs},
-            exited_unix=2.0,
+            PhaseExit(
+                at=PhaseCycle("FRAMEWORK_AGENT", 0),
+                to_phase="CLOSE",
+                reason="target_reached",
+                evidence={"predicate_inputs": inputs},
+                exited_unix=2.0,
+            )
         )
         stack_event.record_adoption(
             stack_index=0,
@@ -307,7 +278,7 @@ def test_v2_budget_and_stack_ids_come_from_writers(tmp_path):
         )
     record_stage_reached(tmp_path, "close")
     record_close_opened(tmp_path)
-    record_close_settled(tmp_path, stop_reason="target_reached")
+    record_close_settled(tmp_path)
 
     fixture = build(tmp_path)
     validate(instance=fixture, schema=workflow_schema())
@@ -329,13 +300,15 @@ def test_final_close_refresh_matches_rebuilt_package(tmp_path):
     state.set_stop_reason("target_reached")
     state.save(tmp_path)
     record_close_opened(tmp_path)
-    record_close_step(tmp_path, step="session_breakdown", status="done", optional=False)
+    record_close_step(tmp_path, CloseStep(step="session_breakdown", status="done", optional=False))
     sbd_path = write_breakdown_json(tmp_path)
     package = package_session_artifacts(tmp_path, session_id="v2-close", dest_root=tmp_path / "workspace")
     assert package is not None
-    record_close_step(tmp_path, step="artifact_package", status="done", optional=False, artifact_path=str(package))
-    record_close_step(tmp_path, step="done", status="done", optional=False)
-    record_close_settled(tmp_path, stop_reason="target_reached")
+    record_close_step(
+        tmp_path, CloseStep(step="artifact_package", status="done", optional=False, artifact_path=str(package))
+    )
+    record_close_step(tmp_path, CloseStep(step="done", status="done", optional=False))
+    record_close_settled(tmp_path)
     record_stage_reached(tmp_path, "close")
     assert patch_breakdown_close(tmp_path)
     rebuilt = package_session_artifacts(tmp_path, session_id="v2-close", dest_root=tmp_path / "workspace")
@@ -445,17 +418,15 @@ def test_contract_vocabularies_match_runtime_surfaces():
 
 
 def test_process_status_and_business_outcome_remain_separate():
-    from hyperloom.inference_optimizer.breakdown.recorder.event_timeline import build_envelope
+    from hyperloom.inference_optimizer.breakdown.recorder.event_timeline import EventHeader, build_envelope
 
     rejected = build_envelope(
-        event_type="warm_replay",
-        event="prelude:0:warm_replay_1",
+        EventHeader("warm_replay", "prelude:0:warm_replay_1"),
         status="rejected",
         ext={"verdict": {"outcome_status": "quality_failed"}},
     )
     no_gain = build_envelope(
-        event_type="kernel",
-        event="kernel_agent:0:kernel_1",
+        EventHeader("kernel", "kernel_agent:0:kernel_1"),
         status="succeeded",
         ext={"outcome": {"verdict": "no_improvement"}},
     )
@@ -467,15 +438,10 @@ def test_process_status_and_business_outcome_remain_separate():
 
 
 def test_malformed_failure_is_preserved_for_schema_rejection(tmp_path):
-    from hyperloom.inference_optimizer.breakdown.recorder.event_timeline import build_envelope
+    from hyperloom.inference_optimizer.breakdown.recorder.event_timeline import EventHeader, build_envelope
 
     fixture = _writer_fixture(tmp_path, denied=False)
-    event = build_envelope(
-        event_type="roofline",
-        event="prelude:0:roofline",
-        status="failed",
-        ext={"failure": "boom"},
-    )
+    event = build_envelope(EventHeader("roofline", "prelude:0:roofline"), status="failed", ext={"failure": "boom"})
     fixture["timeline"].append(event)
 
     assert event["failure"] == "boom"
@@ -484,11 +450,10 @@ def test_malformed_failure_is_preserved_for_schema_rejection(tmp_path):
 
 
 def test_unknown_business_outcome_is_preserved_for_schema_rejection():
-    from hyperloom.inference_optimizer.breakdown.recorder.event_timeline import build_envelope
+    from hyperloom.inference_optimizer.breakdown.recorder.event_timeline import EventHeader, build_envelope
 
     event = build_envelope(
-        event_type="kernel",
-        event="kernel_agent:0:kernel_1",
+        EventHeader("kernel", "kernel_agent:0:kernel_1"),
         status="succeeded",
         ext={"outcome": {"verdict": "undeclared_new_state"}},
     )

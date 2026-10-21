@@ -136,6 +136,41 @@ def test_framework_script_match_ok(tmp_path):
     assert bench["benchmark_script"] == "vllm_mi300x.sh"
 
 
+def test_r9700_materializes_vllm_gfx12_runner(tmp_path):
+    src = tmp_path / "cfg.yaml"
+    _write_yaml(src, "vllm")
+    out = materialize_config_with_envs(
+        src,
+        tmp_path / "out",
+        model_path="/m",
+        gpu_type="r9700",
+    )
+    bench = yaml.safe_load(out.read_text())["benchmark"]
+    assert bench["runner_type"] == "gfx12"
+    assert bench["benchmark_script"] == "vllm_gfx12.sh"
+
+
+def test_r9700_materialized_config_is_lifecycle_eligible(tmp_path, monkeypatch):
+    """An R9700 session's materialized config may hold one server across rounds (baseline, explore, conc sweep)."""
+    from hyperloom.orchestrator.actions.executors import _server_lifecycle as sl
+    from hyperloom.orchestrator.actions.executors import benchmark_backend as bb
+
+    monkeypatch.delenv(bb.BENCHMARK_BACKEND_ENV, raising=False)
+    monkeypatch.setattr(sl, "_pick_free_port", lambda: 8888)
+    src = tmp_path / "cfg.yaml"
+    _write_yaml(src, "vllm")
+    out = materialize_config_with_envs(
+        src,
+        tmp_path / "out",
+        model_path="/m",
+        gpu_type="r9700",
+    )
+
+    info = sl.resolve_lifecycle_params(out)
+    assert info["eligible"] is True, info["reason"]
+    assert info["framework"] == "vllm"
+
+
 def test_single_node_explicit_tp_overrides_stale_env(monkeypatch):
     """`optimize --tp N` must reach YAML materialization on single-node."""
     monkeypatch.setenv("TP", "8")
@@ -213,6 +248,46 @@ def test_json_serve_arg_survives_append_merge_as_valid_json(tmp_path):
     assert blobs, f"no JSON blob found in materialized args: {args!r}"
     for blob in blobs:
         json.loads(blob)  # must parse: broken JSON was repaired, not passed through
+
+
+def test_unquoted_json_with_a_path_value_is_repaired_for_warm_replay(tmp_path):
+    """A stripped spec-decode blob whose draft model is an absolute path must still be repaired.
+
+    Warm replay re-launches a recorded config whose ``--speculative-config`` lost its double quotes upstream; the draft
+    model value is an absolute path (``/models/...``), which vLLM's ``json.loads`` rejected at boot when the repair left
+    it untouched. The replayed flag follows the correctly quoted operator flag, so it is the one vLLM uses.
+    """
+    src = tmp_path / "cfg.yaml"
+    _write_yaml_with_envs(
+        src,
+        "vllm",
+        {
+            "EXTRA_VLLM_ARGS": (
+                '--speculative-config {"model":"/models/Draft-DSpark","num_speculative_tokens":5,"method":"dspark"}'
+            )
+        },
+    )
+    out = materialize_config_with_envs(
+        src,
+        tmp_path / "out",
+        extra_server_args=(
+            "--speculative-config {model:/models/Draft-DSpark,num_speculative_tokens:5,method:dspark,"
+            "attention_backend:ROCM_AITER_MLA,kv_cache_dtype:fp8,disable_eagle_block_drop:true}"
+        ),
+        args_mode="append",
+    )
+    args = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
+
+    # vLLM's argparse keeps the last occurrence, so that is the value it hands to ``json.loads``.
+    blob = args.rsplit("--speculative-config ", 1)[1].split(" --", 1)[0].strip()
+    assert json.loads(blob) == {
+        "model": "/models/Draft-DSpark",
+        "num_speculative_tokens": 5,
+        "method": "dspark",
+        "attention_backend": "ROCM_AITER_MLA",
+        "kv_cache_dtype": "fp8",
+        "disable_eagle_block_drop": True,
+    }
 
 
 def test_json_serve_arg_survives_shape_capture_port_removal(tmp_path):

@@ -14,7 +14,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import kernelforge.fusion.command as cli
+import kernelforge.fusion.harness_authoring as harness_authoring
+from kernelforge.fusion.author import AuthorAgent
 from kernelforge.fusion.models import Recipe
 
 _ANCHOR = "void bf16_to_fp32_copy(int)"
@@ -69,29 +70,26 @@ class _Author:
         self.scripts = list(scripts)
         self.prompts: list[str] = []
 
-    def __call__(self, prompt, *, workdir, log_path, gpu, model, max_turns, backend, timeout_s, target_files, **kw):
+    def __call__(self, prompt, workspace, agent):
         self.prompts.append(prompt)
         script = self.scripts[min(len(self.prompts), len(self.scripts)) - 1]
-        Path(target_files[0]).write_text(script, encoding="utf-8")
+        Path(workspace.target_files[0]).write_text(script, encoding="utf-8")
         return 0
 
 
 def _run(tmp_path: Path, monkeypatch, author: _Author) -> tuple[bool, str]:
-    monkeypatch.setattr(cli, "run_author", author)
-    monkeypatch.setattr(cli, "_agent_timeout_sec", lambda: 60)
+    monkeypatch.setattr(harness_authoring, "run_author", author)
+    monkeypatch.setattr(harness_authoring, "_agent_timeout_sec", lambda: 60)
     out = tmp_path / "out"
     out.mkdir()
     repo = tmp_path / "repo"
     repo.mkdir()
-    return cli._author_baseline_harness(
+    return harness_authoring._author_baseline_harness(
         _recipe(),
         harness_path=str(out / "kernel_harness.py"),
         repo_root=str(repo),
         out=out,
-        gpu="0",
-        llm_model=None,
-        max_turns=10,
-        backend=None,
+        agent=AuthorAgent(backend=None, gpu="0", model=None, max_turns=10),
     )
 
 

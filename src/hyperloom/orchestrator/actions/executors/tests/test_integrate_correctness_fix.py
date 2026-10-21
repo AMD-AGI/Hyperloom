@@ -146,6 +146,31 @@ async def test_fix_over_the_latency_budget_reverts(tmp_path):
     )
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("state_fields", "reason"),
+    [
+        pytest.param({"power_budget_w": 700.0}, "power_budget_exceeded", id="total"),
+        pytest.param({"power_budget_per_gpu_w": {"4": 300.0}}, "gpu_power_budget_exceeded", id="per-gpu"),
+    ],
+)
+async def test_fix_over_the_power_budget_reverts(tmp_path, state_fields, reason):
+    """The correctness-fix route runs after a REVERT, so it must apply the power budget itself, as it does latency."""
+    out = await _gate(
+        tmp_path,
+        after_log=CLEAN_LOG,
+        tput=985.0,
+        accuracy_pass=True,
+        state_fields=state_fields,
+        bench_fields={"gpu_power_by_gpu_w": {"4": 400.0, "5": 400.0}},
+    )
+
+    assert out["status"] == "reverted"
+    assert out["reason"] == (
+        f"throughput delta -1.50% < keep_threshold 1.00%; correctness fix {FINDING} refused: {reason}"
+    )
+
+
 def _intvty_axes(p50: float, output: float, error_rate: float = 0.0) -> dict:
     return {
         "e2e_norm_intvty_p90": 100.0,

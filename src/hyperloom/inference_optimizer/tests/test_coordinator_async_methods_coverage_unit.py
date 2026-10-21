@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -287,16 +288,18 @@ async def test_unpromotable_baseline_mixed_classes_stop_after_three_total(
             idempotency_key="bl-mixed",
         )
 
-    subproc = {"status": "failed", "error_class": "subprocess_nonzero", "error": "boom"}
+    # Two different outputs: the identical-failure rule must not be what stops the third call.
+    subproc_a = _nonzero_result("RuntimeError: HIP out of memory")
+    subproc_b = _nonzero_result("ConnectionError: port refused")
     argerr = {"status": "failed", "error_class": "fast_exit_arg_error", "error": "bad arg"}
 
-    await coord.writeback.handle_unpromotable_result(_task(), subproc)
+    await coord.writeback.handle_unpromotable_result(_task(), subproc_a)
     await coord.writeback.handle_unpromotable_result(_task(), argerr)
     assert coord.shared_state.stop_reason not in (
         "baseline_failed",
         "baseline_arg_error",
     )
-    await coord.writeback.handle_unpromotable_result(_task(), subproc)
+    await coord.writeback.handle_unpromotable_result(_task(), subproc_b)
     assert coord.shared_state.baseline_failure_streak == 2
     assert coord.shared_state.baseline_total_failures == 3
     assert coord.shared_state.stop_reason == "baseline_failed"
@@ -414,6 +417,158 @@ async def test_compose_prompt_kernel(coord: Coordinator) -> None:
     assert "SESSION_DIR=" in out_k
 
 
+#: ``(heading, owner, producer)`` for every advisory the orchestration prompt carries, in the order it carries
+#: them. A heading of ``None`` is a block the prompt emits without one. Section order is prompt content: the
+#: model reads these in this sequence, so a reordering is a change to what it was asked.
+_ORCHESTRATION_ADVISORIES = (
+    ("=== Warm start (Recipe KB T0) ===", "shared_state", "to_warm_start_summary"),
+    ("=== Current gaps ===", "shared_state", "to_gaps_summary"),
+    (None, "conversation", "_specialist_findings_block"),
+    ("=== External target gap (advisory) ===", "conversation", "target_gap_advisory_block"),
+    ("=== Specialist proposal scores (advisory) ===", "shared_state", "to_proposal_scores_summary"),
+    ("=== Priors-match (advisory ordering) ===", "conversation", "_priors_match_advisory_block"),
+    ("=== Intervention mix (telemetry) ===", "shared_state", "to_intervention_mix_summary"),
+    ("=== Plateau advisory ===", "conversation", "plateau_advisory_block"),
+    ("=== Bottleneck redirect (advisory) ===", "conversation", "_bottleneck_redirect_advisory_block"),
+    ("=== Acceptance threshold (advisory) ===", "conversation", "_acceptance_threshold_advisory_block"),
+    ("=== Discarded escalation hint (advisory) ===", "conversation", "_discarded_escalate_hint_advisory_block"),
+)
+
+
+def _stub_advisories(coord: Coordinator, monkeypatch) -> list[str]:
+    """Give every advisory a unique non-empty block; return the markers in prompt order."""
+    owners = {"shared_state": coord.shared_state, "conversation": coord.conversation}
+    markers = []
+    for _heading, owner, producer in _ORCHESTRATION_ADVISORIES:
+        marker = f"<{producer}>"
+        monkeypatch.setattr(owners[owner], producer, lambda marker=marker: marker)
+        markers.append(marker)
+    return markers
+
+
+@pytest.mark.asyncio
+async def test_compose_prompt_keeps_the_orchestration_advisory_order(coord: Coordinator, monkeypatch) -> None:
+    markers = _stub_advisories(coord, monkeypatch)
+
+    prompt = await coord.conversation.compose_prompt("orchestration")
+
+    for (heading, _owner, _producer), marker in zip(_ORCHESTRATION_ADVISORIES, markers):
+        assert (marker if heading is None else f"{heading}\n{marker}") in prompt
+    positions = [prompt.index(marker) for marker in markers]
+    assert positions == sorted(positions)
+
+
+@pytest.mark.asyncio
+async def test_compose_prompt_withholds_every_advisory_from_a_reviewer(coord: Coordinator, monkeypatch) -> None:
+    markers = _stub_advisories(coord, monkeypatch)
+
+    prompt = await coord.conversation.compose_prompt("critic")
+
+    assert [marker for marker in markers if marker in prompt] == []
+
+
+@pytest.mark.asyncio
+async def test_compose_prompt_drops_the_heading_of_an_advisory_that_produced_nothing(
+    coord: Coordinator,
+    monkeypatch,
+) -> None:
+    _stub_advisories(coord, monkeypatch)
+    monkeypatch.setattr(coord.conversation, "plateau_advisory_block", lambda: "")
+
+    prompt = await coord.conversation.compose_prompt("orchestration")
+
+    assert "=== Plateau advisory ===" not in prompt
+    # The trajectory digest is shown only on a plateau, so it goes with it.
+    assert "=== Trajectory review (advisory) ===" not in prompt
+    assert "=== Bottleneck redirect (advisory) ===" in prompt
+
+
+@pytest.mark.asyncio
+async def test_compose_prompt_puts_the_trajectory_review_under_the_plateau_advisory(
+    coord: Coordinator,
+    monkeypatch,
+) -> None:
+    from hyperloom.orchestrator.knowledge import trajectory_reviewer
+
+    _stub_advisories(coord, monkeypatch)
+    monkeypatch.setattr(trajectory_reviewer, "build_trajectory_digest", lambda *_a, **_k: "<trajectory>")
+
+    prompt = await coord.conversation.compose_prompt("orchestration")
+
+    assert (
+        "=== Plateau advisory ===\n<plateau_advisory_block>\n=== Trajectory review (advisory) ===\n<trajectory>"
+    ) in prompt
+
+
+def _unreadable(message: str):
+    def _fail(*_a, **_k):
+        raise RuntimeError(message)
+
+    return _fail
+
+
+def _error_messages(caplog) -> list[str]:
+    return [r.getMessage() for r in caplog.records if r.levelname == "ERROR"]
+
+
+@pytest.mark.asyncio
+async def test_trajectory_reviewer_task_is_seeded_without_a_digest_when_the_digest_fails(
+    coord: Coordinator, monkeypatch, caplog
+) -> None:
+    from hyperloom.orchestrator.knowledge import trajectory_reviewer
+
+    created: list[dict] = []
+
+    async def _create_or_return_existing(**kwargs):
+        created.append(kwargs["params"])
+        return SimpleNamespace(task_id="t-1"), False
+
+    async def _warm(_params):
+        return None
+
+    monkeypatch.setattr(trajectory_reviewer, "build_trajectory_digest", _unreadable("journal unreadable"))
+    monkeypatch.setattr(coord.conversation, "plateau_advisory_block", lambda: "plateau")
+    monkeypatch.setattr(coord.specialist_dispatch, "warm_specialist_params", _warm)
+    monkeypatch.setattr(coord.gpu_lanes, "framework_authoring_lanes_ttl", lambda params, *, base_ttl_sec: ([], 60))
+    monkeypatch.setattr(coord.tasks, "create_or_return_existing", _create_or_return_existing)
+
+    with caplog.at_level("ERROR"):
+        await coord.phase_internal.maybe_enqueue_trajectory_reviewer()
+
+    (params,) = created
+    assert params["gap_symptom"].endswith("exhausted ones).\n(no digest)")
+    assert _error_messages(caplog) == ["Coordinator: trajectory review digest failed"]
+
+
+def test_primary_gap_lookup_failure_propagates(coord: Coordinator, monkeypatch) -> None:
+    from hyperloom.inference_optimizer.baseline_comparison import research_hints as rh
+
+    monkeypatch.setattr(rh, "load_competitor_target", _unreadable("target unreadable"))
+    coord.shared_state.target_advisory_enabled = True
+
+    with pytest.raises(RuntimeError, match="target unreadable"):
+        coord.conversation._current_primary_gap()
+
+
+@pytest.mark.parametrize("failing", ["load_hints", "load_competitor_target"])
+def test_priors_match_advisory_logs_one_failure_and_yields_no_block(
+    coord: Coordinator, monkeypatch, caplog, failing: str
+) -> None:
+    from hyperloom.inference_optimizer.baseline_comparison import research_hints as rh
+
+    monkeypatch.setattr(coord.conversation, "_recent_proposed_variants", lambda: [{"name": "v"}])
+    monkeypatch.setattr(rh, "load_hints", lambda _session_dir: {})
+    monkeypatch.setattr(rh, "load_competitor_target", lambda _session_dir: None)
+    monkeypatch.setattr(rh, failing, _unreadable("hints unreadable"))
+    coord.shared_state.target_advisory_enabled = True
+
+    with caplog.at_level("ERROR"):
+        block = coord.conversation._priors_match_advisory_block()
+
+    assert block == ""
+    assert _error_messages(caplog) == ["Coordinator: priors-match advisory failed"]
+
+
 # -- advisory blocks -------------------------------------------------------
 def test_advisory_blocks_disabled_return_empty(coord: Coordinator) -> None:
     coord.shared_state.target_advisory_enabled = False
@@ -471,20 +626,13 @@ async def test_escalate_invalid_hint_broadcasts_only(coord: Coordinator) -> None
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("hint", "phase"),
-    [("extend_explore_budget", "FRAMEWORK_AGENT"), ("extend_kernel_budget", "KERNEL_AGENT")],
-)
-async def test_escalate_extend_budget_raises_the_phase_share(coord: Coordinator, hint: str, phase: str) -> None:
-    from hyperloom.orchestrator.phases.machine_state import ESCALATE_HINT_BUDGET_BUMP_DELTA
-
+async def test_escalate_cannot_lengthen_a_phase_budget(coord: Coordinator) -> None:
+    """Phase budgets are operator configuration; no escalate hint raises one."""
     before = dict(coord.shared_state.phase_budget_pct)
 
-    await coord.router._handle_escalate_strategy_change("orchestration", _escalate(hint))
+    await coord.router._handle_escalate_strategy_change("orchestration", _escalate("extend_explore_budget"))
 
-    after = coord.shared_state.phase_budget_pct
-    assert after[phase] == pytest.approx(before[phase] + ESCALATE_HINT_BUDGET_BUMP_DELTA)
-    assert {k: v for k, v in after.items() if k != phase} == {k: v for k, v in before.items() if k != phase}
+    assert coord.shared_state.phase_budget_pct == before
     assert coord.shared_state.pending_escalate_hint == ""
 
 
@@ -969,17 +1117,82 @@ async def test_fan_out_wave_rejects_invalid_entries(coord: Coordinator, monkeypa
 
 # -- warm_specialist_params -----------------------------------------------
 @pytest.mark.asyncio
-async def test_warm_specialist_params_fills_defaults(coord: Coordinator) -> None:
+async def test_warm_specialist_params_always_writes_the_unconditional_keys(coord: Coordinator) -> None:
+    """Three keys are written whatever the session holds, so a specialist can read them without a presence test."""
     coord.shared_state.gpu_type = "mi300x"
-    coord.shared_state.tp = 1
-    coord.shared_state.conc = 64
-    coord.shared_state.isl = 256
-    coord.shared_state.osl = 256
     params: dict = {"domain": "kernel_agent"}
+
     await coord.specialist_dispatch.warm_specialist_params(params)
+
     assert params["gpu_type"] == "mi300x"
-    assert params["tp"] == 1
-    assert "kb_subgraph" in params
+    assert params["kb_subgraph"] == {}
+    assert "keep_threshold_pct" in params
+
+    empty: dict = {"domain": "kernel_agent"}
+    coord.shared_state.gpu_type = ""
+
+    await coord.specialist_dispatch.warm_specialist_params(empty)
+
+    assert empty["gpu_type"] == ""
+
+
+#: ``(state field, param key, value to set, value expected on the params)`` for every field whose value
+#: SharedState hands a specialist. ``grading`` is the one whose key is not its own name.
+_STATE_EXPORTS = (
+    ("warm_start_recipe", "warm_start_recipe", {"backend": "aiter"}, {"backend": "aiter"}),
+    ("warm_start_pitfalls", "warm_start_pitfalls", ["oom"], ["oom"]),
+    ("warm_start_lessons", "warm_start_lessons", ["raise tp"], ["raise tp"]),
+    ("framework", "framework", "  sglang  ", "sglang"),
+    ("tp", "tp", 8, 8),
+    ("precision", "precision", "fp8", "fp8"),
+    ("conc", "conc", 64, 64),
+    ("isl", "isl", 1024, 1024),
+    ("osl", "osl", 128, 128),
+    ("max_model_len", "max_model_len", 8192, 8192),
+    ("benchmark_mode", "benchmark_mode", "agentx", "agentx"),
+    ("agentx_corpus_shape", "agentx_corpus_shape", {"isl": 1024}, {"isl": 1024}),
+    ("grading", "agentx_grading", {"objective": "intvty_p90"}, {"objective": "intvty_p90"}),
+    ("agentx_backend", "agentx_backend", "vllm", "vllm"),
+    ("baseline_tput", "baseline_tput", 900.0, 900.0),
+    ("cumulative_gain_validated", "cumulative_gain_validated", -3.5, -3.5),
+)
+
+
+@pytest.mark.asyncio
+async def test_warm_specialist_params_exports_every_state_field_it_carries(coord: Coordinator) -> None:
+    for field, _key, value, _expected in _STATE_EXPORTS:
+        setattr(coord.shared_state, field, value)
+    params: dict = {"domain": "kernel_agent"}
+
+    await coord.specialist_dispatch.warm_specialist_params(params)
+
+    assert {key: params.get(key) for _f, key, _v, _e in _STATE_EXPORTS} == {
+        key: expected for _f, key, _v, expected in _STATE_EXPORTS
+    }
+
+
+@pytest.mark.asyncio
+async def test_warm_specialist_params_omits_a_field_state_left_empty(coord: Coordinator) -> None:
+    """An absent key is how a specialist is told the session has no value, so an empty one must not be exported."""
+    params: dict = {"domain": "kernel_agent"}
+
+    await coord.specialist_dispatch.warm_specialist_params(params)
+
+    assert [key for _f, key, _v, _e in _STATE_EXPORTS if key in params] == []
+
+
+@pytest.mark.asyncio
+async def test_warm_specialist_params_never_overwrites_a_key_the_caller_set(coord: Coordinator) -> None:
+    for field, _key, value, _expected in _STATE_EXPORTS:
+        setattr(coord.shared_state, field, value)
+    params: dict = {"domain": "kernel_agent"}
+    params.update({key: "caller" for _f, key, _v, _e in _STATE_EXPORTS})
+
+    await coord.specialist_dispatch.warm_specialist_params(params)
+
+    assert {key: params[key] for _f, key, _v, _e in _STATE_EXPORTS} == {
+        key: "caller" for _f, key, _v, _e in _STATE_EXPORTS
+    }
 
 
 # -- finalize_recipe_and_journal ------------------------------------
@@ -1038,3 +1251,220 @@ def test_record_fact_per_variant_keep_revert_skip(coord: Coordinator) -> None:
     by_name = {entry.variant_name: entry.outcome for entry in coord.recipe_journal.ensure_journal().entries}
     # An executor KEEP whose lift did not land adopted nothing.
     assert by_name == {"v1": "KEEP", "v2": "REVERT", "v3": "no_promote"}
+
+
+def _nonzero_result(output: str) -> dict:
+    """A ``subprocess_nonzero`` baseline result shaped the way the baseline executor builds one."""
+    from hyperloom.orchestrator.actions.executors.baseline import nonzero_output_signature
+
+    return {
+        "status": "failed",
+        "error_class": "subprocess_nonzero",
+        "error": output[-2000:],
+        "output_signature": nonzero_output_signature("subprocess_nonzero", "", output),
+    }
+
+
+def _baseline_task(task_id: str) -> Task:
+    return Task(
+        task_id=task_id,
+        kind="baseline",
+        state="running",
+        params={"config_path": "baseline.yaml"},
+        idempotency_key=task_id,
+    )
+
+
+@pytest.mark.asyncio
+async def test_unpromotable_baseline_same_failure_twice_stops_at_two(coord: Coordinator) -> None:
+    """Two subprocess_nonzero baselines that printed the same thing (modulo numbers) end the run at two."""
+    first = _nonzero_result("RuntimeError: worker 1234 died at t=17")
+    second = _nonzero_result("RuntimeError: worker 98 died at t=4")
+
+    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-same-1"), first)
+    assert coord.shared_state.stop_reason != "baseline_failed"
+    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-same-2"), second)
+    assert coord.shared_state.baseline_failure_streak == 2
+    assert coord.shared_state.stop_reason == "baseline_failed"
+
+
+@pytest.mark.asyncio
+async def test_unpromotable_baseline_different_failures_keep_three_strikes(coord: Coordinator) -> None:
+    """Two different failures are not evidence of a third: the three-strike budget still applies."""
+    a = _nonzero_result("RuntimeError: HIP out of memory")
+    b = _nonzero_result("ConnectionError: port refused")
+
+    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-diff-1"), a)
+    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-diff-2"), b)
+    assert coord.shared_state.baseline_failure_streak == 2
+    assert coord.shared_state.stop_reason != "baseline_failed"
+    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-diff-3"), a)
+    assert coord.shared_state.stop_reason == "baseline_failed"
+
+
+@pytest.mark.asyncio
+async def test_unpromotable_baseline_repeat_of_another_class_keeps_three_strikes(coord: Coordinator) -> None:
+    """Only subprocess_nonzero carries the process's own output; a fixed sentence repeating proves nothing."""
+    result = {"status": "failed", "error_class": "no_report", "error": "benchmark_report.json missing under /x"}
+
+    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-nr-1"), result)
+    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-nr-2"), result)
+    assert coord.shared_state.baseline_failure_streak == 2
+    assert coord.shared_state.stop_reason != "baseline_failed"
+
+
+@pytest.mark.asyncio
+async def test_unpromotable_baseline_infeasible_ray_cluster_stops_on_the_first(coord: Coordinator) -> None:
+    """A Ray cluster that cannot place the round fails the same way every time, and no patch changes that."""
+    from hyperloom.orchestrator.actions.executors._ray_serving import RAY_INFEASIBLE_MARKER
+
+    result = {
+        "status": "failed",
+        "error_class": "subprocess_nonzero",
+        "error": f"ray_ensure_error: {RAY_INFEASIBLE_MARKER}: existing Ray head has no serving_slot resource",
+    }
+
+    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-ray-1"), result)
+
+    assert coord.shared_state.stop_reason == "baseline_failed"
+    # Not handed to the enablement lane as something to author a patch against.
+    assert not (coord.shared_state.enablement.launch_log or "").strip()
+
+
+@pytest.mark.asyncio
+async def test_unpromotable_baseline_infeasible_ray_cluster_stops_in_enablement_too(coord: Coordinator) -> None:
+    from hyperloom.orchestrator.actions.executors._ray_serving import RAY_INFEASIBLE_MARKER
+    from hyperloom.orchestrator.phases.machine_state import PHASE_ENABLEMENT
+
+    coord.shared_state.phase = PHASE_ENABLEMENT
+    result = {
+        "status": "failed",
+        "error_class": "subprocess_nonzero",
+        "error": f"ray_ensure_error: {RAY_INFEASIBLE_MARKER}: cluster has 0.0 GPU(s), 1 requested",
+    }
+
+    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-ray-en"), result)
+
+    assert coord.shared_state.stop_reason == "baseline_failed"
+
+
+@pytest.mark.asyncio
+async def test_unpromotable_baseline_same_failure_in_enablement_does_not_stop_early(coord: Coordinator) -> None:
+    """An ordinary repeated boot failure is enablement's input; the early stop does not pre-empt the lane."""
+    from hyperloom.orchestrator.phases.machine_state import PHASE_ENABLEMENT
+
+    coord.shared_state.phase = PHASE_ENABLEMENT
+    result = _nonzero_result("ImportError: no module named foo")
+
+    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-en-1"), result)
+    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-en-2"), result)
+    assert coord.shared_state.stop_reason != "baseline_failed"
+
+
+_SHARED_TAIL = (
+    "Traceback (most recent call last):\n"
+    + "  File engine.py, in run_engine_core\n    engine.step()\n" * 60
+    + "RuntimeError: engine core died unexpectedly\n"
+)
+
+
+async def _executor_nonzero_result(
+    tmp_path, monkeypatch, name: str, stderr: str, *, workspace: bool, stdout: str = ""
+) -> dict:
+    """Run one baseline round through the executor's real result builder, with only Magpie's process faked."""
+    import types
+
+    from hyperloom.orchestrator.actions.executors import baseline as bl
+    from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
+
+    session = tmp_path / "session"
+    session.mkdir(exist_ok=True)
+    out = tmp_path / name
+    out.mkdir()
+    run_workspace = out / "benchmark_vllm_1" if workspace else None
+    if run_workspace is not None:
+        run_workspace.mkdir()
+    monkeypatch.setattr(bl, "harvest_leaked_artifacts", lambda *a, **k: [])
+    monkeypatch.setattr(bl, "snapshot_workspaces", lambda *a, **k: set())
+    monkeypatch.setattr(bl, "select_run_workspace", lambda *a, **k: run_workspace)
+    monkeypatch.setattr(
+        bl, "run_with_session_kill", lambda cmd, **kw: types.SimpleNamespace(returncode=1, stdout=stdout, stderr=stderr)
+    )
+    cfg = session / "bench.yaml"
+    cfg.write_text("benchmark:\n  framework: vllm\n  model: /tmp/m\n", encoding="utf-8")
+    ex = bl.BaselineExecutor(session_dir=session, magpie_python="/usr/bin/python3")
+    return await ex._run_single_benchmark(
+        config_path=cfg,
+        output_dir=out,
+        timeout_sec=30,
+        override_result_dir=None,
+        resolved_model="/tmp/m",
+        materialized_config_path=cfg,
+        inferencex_path="",
+        effective_extra_server_args="",
+        params={"framework": "vllm"},
+        ctx=RunnerContext(task=_baseline_task(name), lease=None, extra={}),
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("workspace", [False, True], ids=["no_workspace", "workspace_without_report"])
+async def test_baseline_executor_signs_the_whole_output_not_the_error_tail(
+    coord: Coordinator, tmp_path, monkeypatch, workspace: bool
+) -> None:
+    """Two causes that end in the same 2000+ characters share an ``error`` but not a signature, so they keep three strikes."""
+    oom = await _executor_nonzero_result(
+        tmp_path, monkeypatch, "oom", "HIP out of memory on device 3\n" + _SHARED_TAIL, workspace=workspace
+    )
+    nccl = await _executor_nonzero_result(
+        tmp_path, monkeypatch, "nccl", "NCCL watchdog timeout after 600s\n" + _SHARED_TAIL, workspace=workspace
+    )
+
+    assert oom["error_class"] == nccl["error_class"] == "subprocess_nonzero"
+    # The executor's own ``error`` is the 2000-character tail, identical for both causes.
+    assert oom["error"] == nccl["error"]
+    assert oom["output_signature"] and nccl["output_signature"]
+    assert oom["output_signature"] != nccl["output_signature"]
+
+    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-tail-1"), oom)
+    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-tail-2"), nccl)
+    assert coord.shared_state.baseline_failure_streak == 2
+    assert coord.shared_state.stop_reason != "baseline_failed"
+
+
+@pytest.mark.asyncio
+async def test_baseline_executor_same_output_modulo_numbers_stops_at_two(
+    coord: Coordinator, tmp_path, monkeypatch
+) -> None:
+    first = await _executor_nonzero_result(
+        tmp_path, monkeypatch, "r1", "worker pid 4121 died at 0x7f3a2c\n" + _SHARED_TAIL, workspace=False
+    )
+    second = await _executor_nonzero_result(
+        tmp_path, monkeypatch, "r2", "worker pid 977 died at 0x7f99e0\n" + _SHARED_TAIL, workspace=False
+    )
+
+    assert first["output_signature"] == second["output_signature"] != ""
+
+    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-same-1"), first)
+    assert coord.shared_state.stop_reason != "baseline_failed"
+    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-same-2"), second)
+    assert coord.shared_state.stop_reason == "baseline_failed"
+
+
+@pytest.mark.asyncio
+async def test_baseline_executor_signs_stdout_as_well_as_stderr(coord: Coordinator, tmp_path, monkeypatch) -> None:
+    """The same generic stderr over different causes on stdout is two failures, not one."""
+    stderr = "RuntimeError: engine died\n"
+    oom = await _executor_nonzero_result(
+        tmp_path, monkeypatch, "oom", stderr, stdout="HIP out of memory on device 3\n", workspace=False
+    )
+    nccl = await _executor_nonzero_result(
+        tmp_path, monkeypatch, "nccl", stderr, stdout="NCCL watchdog timeout after 600s\n", workspace=False
+    )
+
+    assert oom["error"] == nccl["error"]
+    assert oom["output_signature"] != nccl["output_signature"]
+
+    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-out-1"), oom)
+    await coord.writeback.handle_unpromotable_result(_baseline_task("bl-out-2"), nccl)
+    assert coord.shared_state.stop_reason != "baseline_failed"
