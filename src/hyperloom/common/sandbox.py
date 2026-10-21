@@ -35,6 +35,9 @@ SANDBOX_MODE_ENV = "HYPERLOOM_SANDBOX_MODE"
 SANDBOX_ACTIVE_ENV = "HYPERLOOM_SANDBOX_ACTIVE"
 #: Extra paths to bind read-write, colon-separated. Outputs the operator owns.
 SANDBOX_WRITABLE_ENV = "HYPERLOOM_SANDBOX_WRITABLE"
+#: Extra paths to bind read-only, colon-separated. Inputs the operator doesn't
+#: own and the run must not edit -- model weights, datasets, reference images.
+SANDBOX_READONLY_ENV = "HYPERLOOM_SANDBOX_READONLY"
 
 MODE_OFF = "off"
 MODE_BWRAP = "bwrap"
@@ -170,11 +173,19 @@ def writable_roots_from_env(env: Mapping[str, str] | None = None) -> tuple[Path,
     return tuple(Path(p) for p in raw.split(os.pathsep) if p.strip())
 
 
+def readonly_roots_from_env(env: Mapping[str, str] | None = None) -> tuple[Path, ...]:
+    """Operator-declared read-only paths, from :data:`SANDBOX_READONLY_ENV`."""
+    source = os.environ if env is None else env
+    raw = (source.get(SANDBOX_READONLY_ENV) or "").strip()
+    return tuple(Path(p) for p in raw.split(os.pathsep) if p.strip())
+
+
 def build_bwrap_args(
     *,
     bwrap: str,
     venv: Path,
     writable_roots: Sequence[Path] = (),
+    readonly_roots: Sequence[Path] = (),
     support_dir: Path | None = None,
     package_dir: Path | None = None,
 ) -> list[str]:
@@ -186,6 +197,9 @@ def build_bwrap_args(
         writable_roots: Paths bound read-write. The session directory belongs
             here; everything else stays read-only so a run cannot quietly edit
             installed packages or the operator's checkouts.
+        readonly_roots: Paths bound read-only -- inputs the run must not edit
+            (model weights, datasets) but that live outside the venv/package
+            roots already covered automatically.
         support_dir: External interpreter distribution, from
             :func:`interpreter_support_dir`.
         package_dir: Source tree this Hyperloom was imported from, from
@@ -206,6 +220,8 @@ def build_bwrap_args(
     for path in (venv, support_dir, package_dir):
         if path is not None:
             args += [_RO_BIND, str(path), str(path)]
+    for root in readonly_roots:
+        args += [_RO_BIND_TRY, str(root), str(root)]
     for root in writable_roots:
         args += [_BIND_TRY, str(root), str(root)]
     # A private home, and TMPDIR pointed inside it. An inherited TMPDIR naming an
@@ -240,8 +256,11 @@ def probe_sandbox_capability(bwrap: str, *, runner=subprocess.run) -> bool:
     return completed.returncode == 0
 
 
-def verify_sandbox_bindings(writable_roots: Sequence[Path] | None = None) -> None:
-    """Assert, from inside the sandbox, that the declared writable binds took.
+def verify_sandbox_bindings(
+    writable_roots: Sequence[Path] | None = None,
+    readonly_roots: Sequence[Path] | None = None,
+) -> None:
+    """Assert, from inside the sandbox, that the declared binds took.
 
     bwrap exits 0 for a mount it never performed if something rewrote its
     arguments on the way in -- a shim earlier on ``PATH``, a site wrapper, a
@@ -250,23 +269,33 @@ def verify_sandbox_bindings(writable_roots: Sequence[Path] | None = None) -> Non
     as a mistyped workspace or a skipped install step, not as a sandbox that
     dropped the mount, which is an expensive thing to debug from the wrong end.
 
-    Writable roots are checked because they are the silent ones. A missing venv
+    Declared roots are checked because they are the silent ones. A missing venv
     stops the interpreter; a missing output directory just looks like user
     error.
 
-    Verified by writing rather than with :func:`os.access`, which cannot tell a
-    read-only mount from a permission bit and, for uid 0, reports success on
-    both.
+    Writable roots are verified by writing rather than with :func:`os.access`,
+    which cannot tell a read-only mount from a permission bit and, for uid 0,
+    reports success on both. Read-only roots get only an existence check --
+    a write-test there would fail by design and isn't a bug.
 
     Args:
         writable_roots: Paths to check; defaults to the declared set.
+        readonly_roots: Paths to check; defaults to the declared set.
 
     Raises:
-        SandboxError: A declared root is absent or not writable here.
+        SandboxError: A declared root is absent, or a writable one isn't
+            actually writable here.
     """
-    roots = writable_roots_from_env() if writable_roots is None else writable_roots
+    writable = writable_roots_from_env() if writable_roots is None else writable_roots
+    readonly = readonly_roots_from_env() if readonly_roots is None else readonly_roots
     hint = "check for a bwrap wrapper or shim ahead of it on PATH (`which -a bwrap`)"
-    for root in roots:
+    for root in readonly:
+        if not root.is_dir():
+            raise SandboxError(
+                f"{SANDBOX_READONLY_ENV} declared {root}, but it does not exist inside "
+                f"the sandbox -- the bind was not performed. bwrap reported no error, so {hint}."
+            )
+    for root in writable:
         if not root.is_dir():
             raise SandboxError(
                 f"{SANDBOX_WRITABLE_ENV} declared {root}, but it does not exist inside "
@@ -327,6 +356,7 @@ def reexec_if_required(argv: Sequence[str] | None = None) -> None:
         bwrap=bwrap,
         venv=venv,
         writable_roots=writable_roots_from_env(),
+        readonly_roots=readonly_roots_from_env(),
         support_dir=interpreter_support_dir(),
         package_dir=package_root(),
     )

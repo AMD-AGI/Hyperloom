@@ -14,12 +14,14 @@ from hyperloom.common.sandbox import (
     SANDBOX_ACTIVE_ENV,
     SANDBOX_HOME,
     SANDBOX_MODE_ENV,
+    SANDBOX_READONLY_ENV,
     SANDBOX_WRITABLE_ENV,
     SandboxError,
     build_bwrap_args,
     interpreter_support_dir,
     is_sandboxed,
     probe_sandbox_capability,
+    readonly_roots_from_env,
     reexec_if_required,
     resolve_sandbox_mode,
     verify_sandbox_bindings,
@@ -30,7 +32,7 @@ from hyperloom.common.sandbox import (
 @pytest.fixture(autouse=True)
 def _clear_env(monkeypatch):
     """Keep the ambient environment out of every case."""
-    for key in (SANDBOX_MODE_ENV, SANDBOX_ACTIVE_ENV, SANDBOX_WRITABLE_ENV):
+    for key in (SANDBOX_MODE_ENV, SANDBOX_ACTIVE_ENV, SANDBOX_WRITABLE_ENV, SANDBOX_READONLY_ENV):
         monkeypatch.delenv(key, raising=False)
 
 
@@ -169,6 +171,12 @@ def test_declared_writable_roots_are_bound_read_write(tmp_path):
     assert args[args.index(str(session)) - 1] == "--bind-try"
 
 
+def test_declared_readonly_roots_are_bound_read_only(tmp_path):
+    weights = tmp_path / "weights"
+    args = _args(tmp_path, readonly_roots=[weights])
+    assert args[args.index(str(weights)) - 1] == "--ro-bind-try"
+
+
 def test_the_active_marker_is_set_for_the_child(tmp_path):
     """Without it the child would re-exec itself forever."""
     args = _args(tmp_path)
@@ -183,6 +191,12 @@ def test_writable_roots_parse_from_the_environment():
     roots = writable_roots_from_env({SANDBOX_WRITABLE_ENV: "/a:/b"})
     assert [str(r) for r in roots] == ["/a", "/b"]
     assert writable_roots_from_env({}) == ()
+
+
+def test_readonly_roots_parse_from_the_environment():
+    roots = readonly_roots_from_env({SANDBOX_READONLY_ENV: "/weights:/data"})
+    assert [str(r) for r in roots] == ["/weights", "/data"]
+    assert readonly_roots_from_env({}) == ()
 
 
 # --- capability probe and failing closed -----------------------------------
@@ -225,6 +239,21 @@ def test_verify_rejects_a_root_the_bind_never_created(tmp_path):
     """A dropped bind leaves no trace; bwrap still exits 0."""
     with pytest.raises(SandboxError, match="does not exist inside"):
         verify_sandbox_bindings([tmp_path / "never-bound"])
+
+
+def test_verify_accepts_a_readonly_root_that_is_not_writable(tmp_path, monkeypatch):
+    """A read-only bind is the point; it must not be held to the writable check."""
+
+    def refuse(*args, **kwargs):
+        raise OSError("Read-only file system")
+
+    monkeypatch.setattr("hyperloom.common.sandbox.tempfile.NamedTemporaryFile", refuse)
+    verify_sandbox_bindings([], [tmp_path])
+
+
+def test_verify_rejects_a_readonly_root_the_bind_never_created(tmp_path):
+    with pytest.raises(SandboxError, match=f"{SANDBOX_READONLY_ENV}.*does not exist inside"):
+        verify_sandbox_bindings([], [tmp_path / "never-bound"])
 
 
 def test_verify_rejects_a_root_bound_read_only(tmp_path, monkeypatch):
