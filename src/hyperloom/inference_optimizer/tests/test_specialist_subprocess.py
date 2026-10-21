@@ -26,10 +26,10 @@ from hyperloom.orchestrator.specialists.runner import (
     SpecialistRunner,
 )
 from hyperloom.orchestrator.specialists import subprocess_, wall_budget
+from hyperloom.orchestrator.specialists.agent_cli_config import _build_specialist_env
 from hyperloom.orchestrator.specialists.subprocess_ import (
     SpecialistSubprocessConfig,
     SpecialistSubprocessDispatcher,
-    _build_specialist_env,
     _setup_worktree,
     ReapWatch,
     SpecialistSpawn,
