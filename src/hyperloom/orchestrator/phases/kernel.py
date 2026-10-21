@@ -19,7 +19,7 @@ import uuid
 from concurrent.futures import CancelledError as FuturesCancelledError
 from collections.abc import Mapping
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
@@ -443,6 +443,31 @@ class KernelExitFacts:
     agent_in_flight: bool
 
 
+@dataclass(frozen=True)
+class GeakRunnerFacts:
+    """How the GEAK runner process ran, as the timeline and the phase evidence report it.
+
+    These are properties of the dispatch, not of the product GEAK shipped, so
+    they travel beside ``result.json``'s content and never merge into it: the
+    persisted ``geak_result`` has to stay byte-comparable with the file
+    :func:`geak_candidate_matches` reads back on the next KERNEL entry.
+    """
+
+    started_at: str = ""
+    duration_sec: float | None = None
+    runner_timeout_sec: int | None = None
+    kill_timeout_sec: int | None = None
+
+
+@dataclass(frozen=True)
+class GeakRunnerOutcome:
+    """What one GEAK runner dispatch leaves for the phase to settle."""
+
+    result: dict[str, Any] | None = None
+    facts: GeakRunnerFacts = GeakRunnerFacts()
+    recovered_from: str = ""
+
+
 class KernelPhase(CoordinatorCollaborator):
     """KERNEL_AGENT phase handler: drives kernel-level optimization tasks."""
 
@@ -564,10 +589,16 @@ class KernelPhase(CoordinatorCollaborator):
         stack_len = int(self.shared_state.cumulative_gain_validated_stack_len or 0)
         return f"kernel_entry_g{stack_len}_{hashlib.sha256(identity).hexdigest()[:12]}"
 
-    def _adopt_reprofile_snapshot(self, *, before: float, snapshot_id_before: int) -> bool:
+    def _adopt_reprofile_snapshot(self, *, before: float, snapshot_id_before: int, snapshots_before: int) -> bool:
         state = self.shared_state
         after = self._last_measured_roofline_tput()
-        landed = after != before or int(state.roofline_snapshot_id or 0) != snapshot_id_before
+        # A reprofile that reproduces the same tput under the same snapshot id still landed: the third signal is
+        # that the run appended a snapshot at all, and without it a same-tput reprofile never adopts its workload.
+        landed = (
+            after != before
+            or int(state.roofline_snapshot_id or 0) != snapshot_id_before
+            or len(state.roofline_snapshots or []) != snapshots_before
+        )
         if after <= 0 or not landed:
             log.warning("kernel-entry reprofile produced no new snapshot; the phase targets the existing trace")
             return landed
@@ -607,6 +638,7 @@ class KernelPhase(CoordinatorCollaborator):
             return
         trigger = "config_changed" if config_changed else ("workload_changed" if workload_changed else "gain")
         snapshot_id_before = int(self.shared_state.roofline_snapshot_id or 0)
+        snapshots_before = len(self.shared_state.roofline_snapshots or [])
         idempotency_reason = self._reprofile_idempotency_reason(profile_signature, cur)
         task_kind = self._coord.phase_prelude.internal_analysis_kind()
         params = self._coord.phase_prelude.internal_analysis_params(
@@ -639,7 +671,9 @@ class KernelPhase(CoordinatorCollaborator):
                 snapshot_id_before=snapshot_id_before,
             )
             return
-        snapshot_landed = self._adopt_reprofile_snapshot(before=before, snapshot_id_before=snapshot_id_before)
+        snapshot_landed = self._adopt_reprofile_snapshot(
+            before=before, snapshot_id_before=snapshot_id_before, snapshots_before=snapshots_before
+        )
         _note_reprofile(
             ran=True,
             task_kind=task_kind,
@@ -1567,15 +1601,22 @@ class KernelPhase(CoordinatorCollaborator):
         )
         state.save(self.session_dir)
 
-    def _finish_geak_skip(self, result: dict[str, Any], *, handoff: dict[str, Any]) -> None:
-        self._record_geak_delegation_timeline(result, handoff=handoff)
+    def _finish_geak_skip(
+        self, result: dict[str, Any], *, handoff: dict[str, Any], facts: GeakRunnerFacts = GeakRunnerFacts()
+    ) -> None:
+        self._record_geak_delegation_timeline(result, handoff=handoff, **asdict(facts))
         self._settle_geak_skip(result)
 
     def _promote_recovered_geak_result(
-        self, result: dict[str, Any], *, handoff: dict[str, Any], recovered_from: str
+        self,
+        result: dict[str, Any],
+        *,
+        handoff: dict[str, Any],
+        recovered_from: str,
+        facts: GeakRunnerFacts = GeakRunnerFacts(),
     ) -> bool:
         state = self.shared_state
-        self._record_geak_delegation_timeline(result, handoff=handoff, recovered_from_disk=True)
+        self._record_geak_delegation_timeline(result, handoff=handoff, recovered_from_disk=True, **asdict(facts))
         previous = state.geak_result or {}
         if previous.get("kernel_event_id") and _geak_rebench.geak_candidate_matches(previous, result):
             result["kernel_event_id"] = previous["kernel_event_id"]
@@ -1595,7 +1636,7 @@ class KernelPhase(CoordinatorCollaborator):
                 "eval_dir": result.get("eval_dir"),
                 "report_path": result.get("report_path"),
                 "recovered_from": recovered_from,
-                **({"runner_timeout_s": result["runner_timeout_s"]} if "runner_timeout_s" in result else {}),
+                **({"runner_timeout_s": facts.runner_timeout_sec} if facts.runner_timeout_sec is not None else {}),
             }
         )
         state.save(self.session_dir)
@@ -1655,7 +1696,7 @@ class KernelPhase(CoordinatorCollaborator):
         )
 
     def _settle_geak_runner_exit(
-        self, proc: subprocess.CompletedProcess, *, handoff: dict[str, Any], agentx: bool, facts: dict[str, Any]
+        self, proc: subprocess.CompletedProcess, *, handoff: dict[str, Any], agentx: bool, facts: GeakRunnerFacts
     ) -> dict[str, Any] | None:
         result_path = self._geak_result_path()
         stderr_tail = (proc.stderr or "")[-2000:]
@@ -1670,9 +1711,11 @@ class KernelPhase(CoordinatorCollaborator):
                     "error": f"runner rc={proc.returncode} produced no parseable result.json at {result_path}",
                     "stderr_tail": stderr_tail,
                     "returncode": proc.returncode,
-                    **facts,
+                    "runner_timeout_s": facts.runner_timeout_sec,
+                    "kill_timeout_s": facts.kill_timeout_sec,
                 },
                 handoff=handoff,
+                facts=facts,
             )
             return None
         if agentx and self._geak_settled_replay(result, agentx=agentx):
@@ -1687,22 +1730,24 @@ class KernelPhase(CoordinatorCollaborator):
                     "stderr_tail": stderr_tail,
                 },
                 handoff=handoff,
+                facts=facts,
             )
             return None
-        # Carry the actual exit code so the breakdown can audit a nonzero rc.
+        # Carry the actual exit code so the breakdown can audit a nonzero rc. Nothing else is added: the persisted
+        # record stays the product GEAK wrote, so the next KERNEL entry recognizes its own settled candidate.
         result.setdefault("returncode", proc.returncode)
-        return result | facts
+        return result
 
     async def _dispatch_geak_runner(
         self, handoff: dict[str, Any], *, from_phase: str, agentx: bool
-    ) -> tuple[dict[str, Any] | None, str]:
+    ) -> GeakRunnerOutcome:
         out_dir = self.session_dir / "geak"
         # Budget-aware timeouts: shrink to the remaining run deadline and always reserve the closing-grace window.
         runner_timeout, kill_timeout, budget_known = self._geak_timeouts()
         min_run = env_int("GEAK_MIN_RUN_S", default=600)
         if budget_known and runner_timeout < min_run:
             self._refuse_geak_for_budget(handoff, runner_timeout=runner_timeout, min_run=min_run)
-            return None, ""
+            return GeakRunnerOutcome()
         cmd = [sys.executable, "-m", _GEAK_RUNNER_MODULE, str(out_dir / "handoff.json"), str(out_dir)]
         cmd += ["--timeout-s", str(runner_timeout)]
         log.info(
@@ -1718,7 +1763,15 @@ class KernelPhase(CoordinatorCollaborator):
         term_grace = env_int("GEAK_TERM_GRACE_S", default=180)
         started_at = datetime.now(timezone.utc).isoformat()
         started = time.monotonic()
-        facts = {"runner_timeout_s": runner_timeout, "kill_timeout_s": kill_timeout}
+
+        def _facts() -> GeakRunnerFacts:
+            return GeakRunnerFacts(
+                started_at=started_at,
+                duration_sec=time.monotonic() - started,
+                runner_timeout_sec=runner_timeout,
+                kill_timeout_sec=kill_timeout,
+            )
+
         try:
             proc = await asyncio.to_thread(
                 self._run_geak_runner,
@@ -1734,32 +1787,37 @@ class KernelPhase(CoordinatorCollaborator):
             )
             # The graceful SIGTERM gives run_e2e a window to flush result.json; keep a real win instead of discarding
             # the phase as a timeout.
-            facts |= {"started_at": started_at, "duration_sec": time.monotonic() - started}
+            facts = _facts()
             flushed = read_json(self._geak_result_path(), {}, require_dict=True)
             if flushed.get("status") == "ok" and not (agentx and self._geak_settled_replay(flushed, agentx=agentx)):
                 log.info(
                     "GEAK flushed an OK result.json under SIGTERM grace; promoting the recovered win despite the cap."
                 )
-                return flushed | facts, "sigterm_flushed_result_json"
+                return GeakRunnerOutcome(flushed, facts, "sigterm_flushed_result_json")
             self._finish_geak_skip(
                 {
                     "status": "error",
                     "error_class": "timeout",
                     "error": f"GEAK e2e killed after {kill_timeout}s (budget-capped); closing window preserved",
-                    **facts,
+                    "runner_timeout_s": runner_timeout,
+                    "kill_timeout_s": kill_timeout,
                 },
                 handoff=handoff,
+                facts=facts,
             )
-            return None, ""
+            return GeakRunnerOutcome()
         except Exception as exc:
             log.exception("GEAK runner crashed")
-            facts |= {"started_at": started_at, "duration_sec": time.monotonic() - started}
             self._finish_geak_skip(
-                {"status": "error", "error_class": "runner_crashed", "error": repr(exc), **facts}, handoff=handoff
+                {"status": "error", "error_class": "runner_crashed", "error": repr(exc)},
+                handoff=handoff,
+                facts=_facts(),
             )
-            return None, ""
-        facts |= {"started_at": started_at, "duration_sec": time.monotonic() - started}
-        return self._settle_geak_runner_exit(proc, handoff=handoff, agentx=agentx, facts=facts), ""
+            return GeakRunnerOutcome()
+        facts = _facts()
+        return GeakRunnerOutcome(
+            self._settle_geak_runner_exit(proc, handoff=handoff, agentx=agentx, facts=facts), facts
+        )
 
     def _open_geak_handoff(self, *, agentx: bool) -> dict[str, Any] | None:
         try:
@@ -1819,7 +1877,7 @@ class KernelPhase(CoordinatorCollaborator):
             }
         )
 
-    async def _publish_geak_e2e_done(self, result: dict[str, Any]) -> None:
+    async def _publish_geak_e2e_done(self, result: dict[str, Any], *, facts: GeakRunnerFacts) -> None:
         self._coord.phase_machine.record_phase_entry_evidence(
             geak={
                 "status": result.get("status"),
@@ -1827,7 +1885,7 @@ class KernelPhase(CoordinatorCollaborator):
                 "final_throughput_tok_s": result.get("final_throughput_tok_s"),
                 "eval_dir": result.get("eval_dir"),
                 "report_path": result.get("report_path"),
-                "runner_timeout_s": result.get("runner_timeout_s"),
+                "runner_timeout_s": facts.runner_timeout_sec,
             }
         )
         self.shared_state.save(self.session_dir)
@@ -1867,16 +1925,19 @@ class KernelPhase(CoordinatorCollaborator):
             )
             return
 
-        result, recovered_from = await self._dispatch_geak_runner(handoff, from_phase=from_phase, agentx=agentx)
+        outcome = await self._dispatch_geak_runner(handoff, from_phase=from_phase, agentx=agentx)
+        result, facts = outcome.result, outcome.facts
         if result is None:
             return
-        if recovered_from:
-            if self._promote_recovered_geak_result(result, handoff=handoff, recovered_from=recovered_from):
+        if outcome.recovered_from:
+            if self._promote_recovered_geak_result(
+                result, handoff=handoff, recovered_from=outcome.recovered_from, facts=facts
+            ):
                 await self._wait_for_gpus_before_rebench(cards)
                 await self._revalidate_geak_candidate(reason="geak_e2e_win_sigterm_recovered")
             return
 
-        self._record_geak_delegation_timeline(result, handoff=handoff)
+        self._record_geak_delegation_timeline(result, handoff=handoff, **asdict(facts))
         state.geak_result = result
         self._record_geak_measurement(result)
         status = str(result.get("status") or "")
@@ -1897,7 +1958,7 @@ class KernelPhase(CoordinatorCollaborator):
         elif _geak_has_accepted_kernel(result):
             await self._wait_for_gpus_before_rebench(cards)
             await self._revalidate_geak_candidate(reason="geak_e2e_accepted_kernel")
-        await self._publish_geak_e2e_done(result)
+        await self._publish_geak_e2e_done(result, facts=facts)
 
     async def _revalidate_geak_candidate(self, *, reason: str) -> None:
         """Measure the GEAK candidate on the orchestrator harness and settle its verdict.
@@ -1998,6 +2059,8 @@ class KernelPhase(CoordinatorCollaborator):
 
     def _record_geak_candidate(self, result: dict[str, Any]) -> bool:
         """Validate the return and record any measured claim without a headline gain."""
+        if not isinstance(result, dict):
+            return False
         result.setdefault("kernel_event_id", kernel_event_id(int(self.shared_state.macro_cycle or 0)))
         try:
             accepted_flags, parsed_envs = _accepted_config_as_variant(result.get("accepted_config"))
@@ -2502,6 +2565,10 @@ class KernelPhase(CoordinatorCollaborator):
         *,
         handoff: dict[str, Any],
         recovered_from_disk: bool = False,
+        started_at: str = "",
+        duration_sec: float | None = None,
+        runner_timeout_sec: int | None = None,
+        kill_timeout_sec: int | None = None,
     ) -> None:
         """Record the delegated GEAK runner's terminal state."""
         absent = geak_absent_backends(str(result.get("eval_dir") or handoff.get("eval_dir") or ""))
@@ -2518,14 +2585,16 @@ class KernelPhase(CoordinatorCollaborator):
         versions = versions if isinstance(versions, dict) else {}
         recorder.record_geak_delegation(
             runner_status=str(result.get("status") or "unknown"),
-            started_at=str(result.get("started_at") or ""),
+            started_at=started_at or str(result.get("started_at") or ""),
             ended_at=str(result.get("ended_at") or datetime.now(timezone.utc).isoformat()),
-            duration_sec=result.get("duration_sec"),
+            duration_sec=duration_sec if duration_sec is not None else result.get("duration_sec"),
             error_class=str(result.get("error_class") or ""),
             error=str(result.get("error") or ""),
             returncode=result.get("returncode"),
-            runner_timeout_sec=result.get("runner_timeout_s"),
-            kill_timeout_sec=result.get("kill_timeout_s"),
+            runner_timeout_sec=(
+                runner_timeout_sec if runner_timeout_sec is not None else result.get("runner_timeout_s")
+            ),
+            kill_timeout_sec=kill_timeout_sec if kill_timeout_sec is not None else result.get("kill_timeout_s"),
             exp_root=str(result.get("exp_root") or handoff.get("exp_root") or ""),
             eval_dir=str(result.get("eval_dir") or handoff.get("eval_dir") or ""),
             report_path=str(result.get("report_path") or ""),
