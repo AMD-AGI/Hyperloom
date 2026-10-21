@@ -428,6 +428,49 @@ async def test_each_launch_records_its_tokens_at_the_gateway_s_rates_however_it_
     assert (killed.cost_usd, killed.tokens) == (None, TokenCounts(input=1_000_000))
 
 
+async def test_each_launch_keeps_the_stream_of_the_one_before_while_its_readers_see_only_its_own(rig):
+    session = rig.session(command=AgentCommand("claude", "claude", model="claude-opus-5-5"), nudge_waits_s=NO_WAITS)
+    running = asyncio.create_task(session.run())
+    await _until(lambda: len(rig.runner.specs) == 1, "the first launch")
+
+    def call(n: int, tokens: int) -> dict:
+        usage = {"input_tokens": tokens, "output_tokens": 10}
+        return {"type": "assistant", "message": {"id": f"m{n}", "model": "claude-opus-5-5", "usage": usage}}
+
+    _end_turn(rig, call(1, 1_000))
+    first = (rig.workspace / "process.log").read_text()
+    await _until(lambda: rig.runner.beats > 0, "the first turn to end")
+    rig.runner.end(1, EXITED_WELL, 3600.0)
+    await _until(lambda: len(rig.runner.specs) == 2, "a fresh session")
+    assert not (rig.workspace / "process.log").exists()
+    beats = rig.runner.beats
+    _end_turn(rig, call(2, 500))
+    await _until(lambda: rig.runner.beats > beats, "the second launch's first turn to end")
+    await session.stop()
+    await asyncio.wait_for(running, 1)
+
+    assert (rig.workspace / "process-1.log").read_text() == first
+    current = (rig.workspace / "process.log").read_text()
+    assert '"m2"' in current and '"m1"' not in current
+    assert sorted(path.name for path in rig.workspace.glob("process*.log")) == ["process-1.log", "process.log"]
+    tokens = [record.usage.tokens for record in (await rig.notebook.snapshot()).llm_usage]
+    assert tokens == [TokenCounts(1_000, 10), TokenCounts(500, 10)]
+
+
+async def test_a_restarted_session_numbers_the_kept_streams_on_from_those_in_its_workspace(rig):
+    rig.workspace.mkdir(parents=True)
+    for name in ("process-1.log", "process-3.log", "process.log", "process-x.log"):
+        (rig.workspace / name).write_text(name)
+    session = rig.session()
+    running = asyncio.create_task(session.run())
+    await _until(lambda: len(rig.runner.specs) == 1, "the launch")
+    await session.stop()
+    await asyncio.wait_for(running, 1)
+
+    assert (rig.workspace / "process-4.log").read_text() == "process.log"
+    assert not (rig.workspace / "process.log").exists()
+
+
 async def test_each_launch_shows_the_brief_rebuilt_at_the_head_it_starts_at(rig):
     asked = []
 

@@ -17,7 +17,8 @@ error or otherwise ends within ``min_session_seconds`` raises, and the runtime d
 streams partial messages into its log, so a long reasoning step shows as log growth and is not taken for a lost
 session. The session's process registry adopts every process the socket starts, so the session stop kills it even
 when this stop cannot. The spend of each turn, its logged tokens at the gateway's rates, is written to the branch's
-notebook when the turn ends and when the launch is collected, however it ended.
+notebook when the turn ends and when the launch is collected, however it ended. The CLI streams of earlier launches
+stay in the workspace, numbered in launch order beside ``process.log``, which holds the current launch's only.
 """
 
 from __future__ import annotations
@@ -86,6 +87,17 @@ PROMPT_FILE, ROLE_FILE, DONE_FILE, HEARTBEAT_FILE = (
     "heartbeat.json",
 )
 _RUNNING = "running"
+
+
+def _keep_process_log(workspace: Path) -> None:
+    """Move the previous launch's stream to the next numbered sibling, counting on from those already there."""
+    log = workspace / PROCESS_LOG
+    if not log.exists():
+        return
+    stem, suffix = log.stem, log.suffix
+    numbers = (path.name[len(stem) + 1 : -len(suffix)] for path in workspace.glob(f"{stem}-*{suffix}"))
+    last = max((int(number) for number in numbers if number.isdigit()), default=0)
+    log.rename(workspace / f"{stem}-{last + 1}{suffix}")
 
 
 class Processes(Protocol):
@@ -371,7 +383,7 @@ class AgentSession:
         workspace.mkdir(parents=True, exist_ok=True)
         done = workspace / DONE_FILE
         done.unlink(missing_ok=True)
-        (workspace / PROCESS_LOG).unlink(missing_ok=True)
+        _keep_process_log(workspace)
         role_file = workspace / ROLE_FILE
         role_file.write_bytes(setup.role.encode())
         (workspace / PROMPT_FILE).write_bytes(setup.command.stdin(setup.role, prompt).encode())
