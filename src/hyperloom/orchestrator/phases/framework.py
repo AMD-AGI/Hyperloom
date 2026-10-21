@@ -982,12 +982,10 @@ class FrameworkPhase(ProposalBench):
     async def _pump_framework_agent_phase(self) -> None:
         """Drive the FRAMEWORK_AGENT phase: submit candidates for review in parallel.
 
-        Up to ``research_lane_capacity`` candidates are in flight at once; landing
-        still serialises on ``workspace_mutation``. The discovery → local-explore →
-        phase-done fallback runs only once no candidate is left and none is in
-        flight; the local-explore rung is skipped once the source lever reads
-        dry. Idempotent; a discover failure flips ``framework_agent_phase_done``
-        so the phase advances rather than wedging.
+        Up to ``research_lane_capacity`` candidates are in flight at once; landing still serialises on
+        ``workspace_mutation``. The discovery → local-explore → phase-done fallback runs only once no candidate is
+        left and none is in flight; the local-explore rung is skipped once the source lever reads dry. Idempotent; a
+        discover failure flips ``framework_agent_phase_done`` so the phase advances rather than wedging.
         """
         state = self.shared_state
         if (state.phase or "").strip().upper() != _phase_state.PHASE_FRAMEWORK_AGENT:
@@ -1013,8 +1011,8 @@ class FrameworkPhase(ProposalBench):
         if await self._maybe_enqueue_candidate_discovery(reason="candidate_pool_empty"):
             state.save(self.session_dir)
             return
-        _, dryness = _phase_state.per_lever_dryness(state)
-        if self._framework_local_explore_arm_enabled() and not dryness["source_arm_plateaued"]:
+        source_dry = _phase_state.per_lever_dryness(state)[1]["source_arm_plateaued"]
+        if self._framework_local_explore_arm_enabled() and not source_dry:
             gap, keywords = self._compose_framework_local_explore_gap()
             title = (
                 f"local source exploration ({gap})"
@@ -2521,12 +2519,7 @@ class FrameworkPhase(ProposalBench):
                 return True
         return False
 
-    def _record_framework_agent_dispatch_failure(
-        self,
-        *,
-        task: "Task",
-        run_error: str,
-    ) -> None:
+    def _record_framework_agent_dispatch_failure(self, *, task: "Task", run_error: str) -> None:
         """Stamp a terminal row for a candidate whose specialist never ran."""
         params = getattr(task, "params", None) or {}
         cand_id = str(params.get("framework_agent_candidate_id") or "")
@@ -2638,25 +2631,9 @@ class FrameworkPhase(ProposalBench):
         )
 
     def _record_undelivered_authoring_attempt(self, *, task: "Task", candidate_id: str, status: str) -> None:
-        """Charge an authoring round that delivered nothing to its PR lead's lever, else to the source lever.
-
-        Called only on a newly stamped terminal row, so a replay records nothing twice.
-        """
+        """Charge a newly stamped round that delivered nothing to its PR lead's lever, else to the source lever."""
         lever = LEVER_UPSTREAM_PR if patch_lever_kind(task.params) == LEVER_UPSTREAM_PR else LEVER_SOURCE_PATCH
-        record_attempt_row(
-            self.shared_state,
-            AttemptRow(
-                lever_kind=lever,
-                outcome=status,
-                adopted=False,
-                gain_pct=None,
-                before_tput=None,
-                after_tput=None,
-                task_id=task.task_id,
-                candidate_id=candidate_id,
-                specialist_task_id=task.task_id,
-            ),
-        )
+        record_attempt_row(self.shared_state, AttemptRow.undelivered_round(lever, status, task.task_id, candidate_id))
 
     async def _candidate_discovery_inflight(self) -> bool:
         """True while a discovery round this phase dispatched, the kind ``_ingest_candidate_discovery`` harvests, is queued or running."""
