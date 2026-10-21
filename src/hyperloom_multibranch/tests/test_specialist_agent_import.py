@@ -101,19 +101,13 @@ def test_a_keep_reads_the_agent_s_config_through_its_config_source() -> None:
     source = ConfigSource("agent/config.json", "server_flags", "server_env")
     state = {"server_flags": "--tp 1 --enable-torch-compile", "server_env": {"SGLANG_A": "0"}}
 
-    kept = read_kept_change(3, "diff\n", state, source, "fused rmsnorm", fallback=ROOT.launch)
+    kept = read_kept_change(3, "diff\n", state, source, "fused rmsnorm")
 
     assert kept == KeptChange(3, "diff\n", "--tp 1 --enable-torch-compile", {"SGLANG_A": "0"}, "fused rmsnorm")
-
-
-def test_an_agent_that_keeps_no_config_keeps_the_root_s() -> None:
-    kept = read_kept_change(1, "diff\n", None, None, "", fallback=ROOT.launch)
-
-    assert (kept.server_args, dict(kept.envs)) == (ROOT.launch.server_args, dict(ROOT.launch.envs))
 
 
 def test_a_keep_whose_config_the_source_cannot_read_is_refused_naming_the_file() -> None:
     source = ConfigSource("agent/config.json", "server_flags", "server_env")
 
     with pytest.raises(KeptChangeError, match="agent/config.json"):
-        read_kept_change(1, "diff\n", {"server_flags": "--tp 1"}, source, "", fallback=ROOT.launch)
+        read_kept_change(1, "diff\n", {"server_flags": "--tp 1"}, source, "")

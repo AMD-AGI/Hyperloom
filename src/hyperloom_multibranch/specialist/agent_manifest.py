@@ -51,8 +51,9 @@ def _commands(value: object, name: str) -> tuple[str, ...]:
     return tuple(_text(item, f"{name}[{index}]") for index, item in enumerate(value))
 
 
-def _walk(state: object, dotted: str) -> object:
-    """``state`` at the ``.``-separated path ``dotted``; a step that is an integer indexes a list."""
+def read_field(state: object, dotted: str) -> object:
+    """The value at the ``.``-separated path ``dotted`` of the parsed JSON ``state``, a step that is an integer
+    indexing a list; raise ``KeyError``, ``IndexError`` or ``ValueError`` when it is not there."""
 
     for step in dotted.split("."):
         if isinstance(state, Mapping):
@@ -84,7 +85,7 @@ class KeepSignal:
     def count(self, state: object) -> int:
         """The keeps the parsed keep file ``state`` records."""
 
-        found = _walk(state, self.counter)
+        found = read_field(state, self.counter)
         if isinstance(found, Sequence) and not isinstance(found, str):
             return sum(
                 1
@@ -197,13 +198,6 @@ class AgentManifest:
             "result_dir": self.result_dir,
             "needs": list(self.needs),
         }
-
-
-def read_field(state: object, dotted: str) -> object:
-    """The value at the ``.``-separated path ``dotted`` of the parsed JSON ``state``; raise ``KeyError``, ``IndexError``
-    or ``ValueError`` when it is not there."""
-
-    return _walk(state, dotted)
 
 
 __all__ = ["AgentManifest", "ConfigSource", "KeepSignal", "ManifestError", "read_field"]

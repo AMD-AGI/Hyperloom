@@ -12,18 +12,16 @@ import pytest
 
 from hyperloom.contracts.measurement import Purpose, TestKind
 from hyperloom.contracts.recipe import ComponentPatches, LaunchConfig, Recipe, RecipeDelta
-from hyperloom.measure.compile import LocalBlobStore, PackageBase
 from hyperloom.orchestrator.specialists.agent_runner import AgentEnded, AgentHandle, AgentStatus, LocalAgentRunner
 from hyperloom_multibranch.contracts.branch_log import BranchLogEntry, BranchLogType
 from hyperloom_multibranch.contracts.lifecycle import BranchTask
 from hyperloom_multibranch.contracts.notebook import Role, Writer
 from hyperloom_multibranch.contracts.llm_prices import TokenCounts
-from hyperloom_multibranch.contracts.notebook.records import LineageEvent, LlmUsage
-from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH, LineageKind, UsageSource
+from hyperloom_multibranch.contracts.notebook.records import LlmUsage
+from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH, UsageSource
 from hyperloom_multibranch.contracts.toolbox import SpecialistGrant
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.tests.factories import intent, request, result
-from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
 from hyperloom_multibranch.specialist.agent_session import (
     IDLE_TURNS,
     NUDGE_WAITS_S,
@@ -36,7 +34,7 @@ from hyperloom_multibranch.specialist.agent_session import (
 )
 from hyperloom_multibranch.specialist.judging import NOTICE
 from hyperloom_multibranch.specialist.runtime import SessionCrashed, SessionIdle, SessionStart
-from hyperloom_multibranch.specialist.worktree import SourceBase
+from hyperloom_multibranch.tests.branch_rig import branch_rig
 
 BRANCH, TOKEN_ENV, FIRST_PID = "s1", "HYPERLOOM_SPECIALIST_MCP_TOKEN", 4000
 ROOT = Recipe(
@@ -132,23 +130,8 @@ class _Processes:
 
 @pytest.fixture
 async def rig(tmp_path):
-    package = tmp_path / "site-packages" / "vllm"
-    package.mkdir(parents=True)
-    (package / "config.py").write_bytes(b"max_num_seqs = 128\n")
-    installed = PackageBase("vllm", package, None, None)
-    base = SourceBase(tmp_path / "source", locator=lambda _layout: installed)
-    base.build(["vllm"])
-    repo = GitExperimentRepo(
-        tmp_path / "experiments.git", LocalBlobStore(tmp_path / "blobs"), lambda _layout: installed
-    )
-    root = await repo.init_root(ROOT)
-    await repo.create_branch(BRANCH, root)
-    scheduler = LocalNotebook(tmp_path / "notebook", Writer(Role.SCHEDULER, "scheduler"))
-    await scheduler.record_lineage(
-        LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id=root, recipe_digest=ROOT.digest())
-    )
-    await scheduler.record_lineage(LineageEvent(LineageKind.OPEN, BRANCH, from_commit=root))
-    notebook = LocalNotebook(tmp_path / "notebook", Writer(Role.SPECIALIST_RUNTIME, BRANCH, BRANCH))
+    built = await branch_rig(tmp_path, ROOT, BRANCH)
+    base, repo, root, notebook = built.base, built.repo, built.root, built.notebook
     await notebook.append_branch_log(BranchLogEntry(BRANCH, BranchLogType.PLAN, "try fp8 KV cache next"))
     clock = _Clock()
     rig = SimpleNamespace(

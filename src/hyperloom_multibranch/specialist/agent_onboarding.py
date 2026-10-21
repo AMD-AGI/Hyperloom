@@ -34,6 +34,8 @@ ATTEMPTS = 3
 START_SECONDS = 300.0
 INSTALL_SECONDS = 1800.0
 SOURCE_DIR = "src"
+ENCODING = "utf-8"
+GIT = "git"
 SHIM_DIR = "bin"
 #: The lines of an output a failure keeps, the end of the output, where the cause usually is.
 TAIL_LINES = 20
@@ -177,7 +179,7 @@ async def _attempt(
     except (ManifestError, ValueError) as error:
         raise AttemptFailed(f"the manifest: {error}") from error
     (checkout / manifest.config_file).parent.mkdir(parents=True, exist_ok=True)
-    (checkout / manifest.config_file).write_text(json.dumps(manifest.config, indent=2), encoding="utf-8")
+    (checkout / manifest.config_file).write_text(json.dumps(manifest.config, indent=2), encoding=ENCODING)
     env = _shim_env(agent_dir)
     for command in manifest.install:
         done = await setup.sandbox.run(command, checkout, env, setup.install_seconds)
@@ -203,15 +205,15 @@ async def _started(process: AgentProcess, manifest: AgentManifest, checkout: Pat
 async def _fetch(source: str, checkout: Path) -> str:
     if not (checkout / ".git").exists():
         url, ref = split_source(source)
-        clone = ["git", "clone", "--quiet", url, str(checkout)]
+        clone = [GIT, "clone", "--quiet", url, str(checkout)]
         done = await _git(clone, checkout.parent)
         if done.returncode != 0:
             raise AttemptFailed(f"fetching {url}: {tail(done.output)}")
         if ref:
-            checked = await _git(["git", "checkout", "--quiet", ref], checkout)
+            checked = await _git([GIT, "checkout", "--quiet", ref], checkout)
             if checked.returncode != 0:
                 raise AttemptFailed(f"checking out {ref}: {tail(checked.output)}")
-    head = await _git(["git", "rev-parse", "HEAD"], checkout)
+    head = await _git([GIT, "rev-parse", "HEAD"], checkout)
     return head.output.strip()
 
 
@@ -237,7 +239,7 @@ def split_source(source: str) -> tuple[str, str]:
 def _shim_env(agent_dir: Path) -> dict[str, str]:
     shim = agent_dir / SHIM_DIR / "docker"
     shim.parent.mkdir(parents=True, exist_ok=True)
-    shim.write_text(DOCKER_SHIM, encoding="utf-8")
+    shim.write_text(DOCKER_SHIM, encoding=ENCODING)
     shim.chmod(0o755)
     return {"PATH": f"{shim.parent}{os.pathsep}{os.environ.get('PATH', '')}"}
 
@@ -304,6 +306,8 @@ Earlier attempts that failed, to correct rather than repeat:
 
 __all__ = [
     "ATTEMPTS",
+    "ENCODING",
+    "SOURCE_DIR",
     "DOCKER_SHIM",
     "ONBOARDING_PROMPT",
     "AgentProcess",

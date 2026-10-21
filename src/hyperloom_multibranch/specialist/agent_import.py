@@ -45,14 +45,10 @@ class KeptChange:
     summary: str = ""
 
 
-def read_kept_change(
-    seq: int, source_patch: str, state: object, source: ConfigSource | None, summary: str, *, fallback: LaunchConfig
-) -> KeptChange:
-    """The keep ``seq`` of an agent whose workspace differs from the root by ``source_patch`` and whose config file
-    parsed to ``state``; an agent with no config source runs with ``fallback``, the root's."""
+def read_kept_change(seq: int, source_patch: str, state: object, source: ConfigSource, summary: str) -> KeptChange:
+    """The keep ``seq`` of an agent whose workspace differs from the root by ``source_patch`` and whose config file,
+    which ``source`` describes, parsed to ``state``."""
 
-    if source is None:
-        return KeptChange(seq, source_patch, fallback.server_args, dict(fallback.envs), summary)
     try:
         args, envs = read_field(state, source.server_args), read_field(state, source.envs)
     except (KeyError, IndexError, ValueError, TypeError) as exc:
