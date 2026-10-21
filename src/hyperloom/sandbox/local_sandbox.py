@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import IO
 
-from hyperloom.sandbox.launcher import OverlaySetup, SetupFailed, StatusPipe, launcher_argv, read_setup_answer
+from hyperloom.sandbox.launcher import StatusPipe, launcher_argv
 from hyperloom.sandbox.reaper import kill_launchers, reap_sandbox_processes
 from hyperloom.sandbox.socket import (
     CommandResult,
@@ -248,9 +248,6 @@ class LocalSandbox:
     ) -> tuple[subprocess.Popen[bytes], int]:
         """Start a process under a launcher, as the leader of its own session, and track it.
 
-        With ``framework_roots`` on the template, the launcher first gives the process its private view of them and
-        this returns only after the launcher said it is in place.
-
         Args:
             argv: The command line.
             env: Extra environment on top of the sandbox's.
@@ -263,68 +260,32 @@ class LocalSandbox:
 
         Raises:
             SandboxGone: When the sandbox ended before the process could start.
-            SandboxUnavailable: When the private view of the framework roots could not be made; nothing was started.
         """
         read_fd, write_fd = os.pipe()
-        answer = os.pipe() if self.template.framework_roots else None
         try:
-            proc = self._launch(argv, {**self._base_env, **env}, cwd, (stdout, stderr), (write_fd, answer))
+            with self._lock:
+                self._require_alive()
+                extra: dict[str, object] = {}
+                if self._user is not None:
+                    extra = {"user": self._user[0], "group": self._user[1], "extra_groups": []}
+                proc = subprocess.Popen(
+                    launcher_argv(self._launcher_python, write_fd, argv),
+                    env={**self._base_env, **env},
+                    cwd=cwd,
+                    stdin=subprocess.DEVNULL,
+                    stdout=stdout,
+                    stderr=stderr,
+                    start_new_session=True,
+                    pass_fds=(write_fd,),
+                    **extra,
+                )
+                self._procs.append(proc)
         except BaseException:
             os.close(read_fd)
-            if answer is not None:
-                os.close(answer[0])
             raise
         finally:
             os.close(write_fd)
-            if answer is not None:
-                os.close(answer[1])
-        if answer is not None:
-            try:
-                read_setup_answer(answer[0])
-            except SetupFailed as exc:
-                os.close(read_fd)
-                raise SandboxUnavailable(f"sandbox {self.sandbox_id}: {exc}") from exc
         return proc, read_fd
-
-    def _launch(
-        self,
-        argv: list[str],
-        env: Mapping[str, str],
-        cwd: Path,
-        sinks: tuple[_Sink, _Sink],
-        pipes: tuple[int, tuple[int, int] | None],
-    ) -> subprocess.Popen[bytes]:
-        status_fd, answer = pipes
-        setup = None if answer is None else self._overlay_setup(answer[1])
-        extra: dict[str, object] = {}
-        if self._user is not None and setup is None:
-            extra = {"user": self._user[0], "group": self._user[1], "extra_groups": []}
-        with self._lock:
-            self._require_alive()
-            proc = subprocess.Popen(
-                launcher_argv(self._launcher_python, status_fd, argv, setup=setup),
-                env=dict(env),
-                cwd=cwd,
-                stdin=subprocess.DEVNULL,
-                stdout=sinks[0],
-                stderr=sinks[1],
-                start_new_session=True,
-                pass_fds=(status_fd,) if answer is None else (status_fd, answer[1]),
-                **extra,
-            )
-            self._procs.append(proc)
-        return proc
-
-    def _overlay_setup(self, answer_fd: int) -> OverlaySetup:
-        scratch = self.private / "framework"
-        scratch.mkdir(mode=0o700, exist_ok=True)
-        return OverlaySetup(
-            roots=self.template.framework_roots,
-            scratch=str(scratch),
-            upper_mib=self.template.framework_upper_mib,
-            ack_fd=answer_fd,
-            drop=self._user,
-        )
 
     def spawn(
         self, argv: list[str], *, env: Mapping[str, str], cwd: Path, stdout: _Sink, stderr: _Sink

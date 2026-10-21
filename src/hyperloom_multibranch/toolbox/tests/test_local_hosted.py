@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import os
 import time
@@ -17,12 +16,10 @@ from typing import Any
 import pytest
 
 from hyperloom.contracts.measurement import FailureClass, TestResult, Validity
-from hyperloom.measure.framework_base import FRAMEWORK_WATCH_ENV, SESSION_DIGEST_ENV, tree_digest
 from hyperloom.measure.hosted_log import STATE_FINISHED, STATE_SENT, MeasurementJournal, Record
 from hyperloom.measure.runner.tools import ToolError, ensure_inferencex
 from hyperloom.measure.tests.hosted_fixtures import spec_context
 from hyperloom.measure.tests.test_hosted_real_runner import _git_repo, _point
-from hyperloom.sandbox.tests.framework_overlay import make_framework, overlay_unavailable_reason
 from hyperloom_multibranch.contracts.notebook import Role, Writer
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
@@ -170,35 +167,3 @@ async def test_the_factory_builds_a_toolbox_that_runs_a_test_end_to_end(
         assert toolbox.backend.journal.latest(request_id).extra["verified"] is True  # type: ignore[union-attr]
     finally:
         await toolbox.close()
-
-
-async def test_the_shipped_runner_starts_in_a_private_view_of_the_framework_and_signs_the_base_it_saw(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    reason = overlay_unavailable_reason(tmp_path)
-    if reason is not None:
-        pytest.skip(f"this machine cannot give a process a private mount namespace: {reason}")
-    repo = tmp_path / "inferencex"
-    commit = _git_repo(repo)
-    _require_tool_checkout(repo, commit, tmp_path / "home", monkeypatch)
-    framework = make_framework(tmp_path)
-    tables = str(framework / "aiter" / "configs")
-    envs = {
-        "INFERENCEX_REPO": str(repo),
-        FRAMEWORK_WATCH_ENV: tables,
-        SESSION_DIGEST_ENV: tree_digest([tables]),
-    }
-    notebook = LocalNotebook(tmp_path / "notebook", Writer(Role.TOOLBOX, "toolbox"))
-    toolbox = _toolbox_of(
-        notebook, tmp_path, tmp_path / "session", commit, runner_envs=envs, framework_roots=(str(framework),)
-    )
-    try:
-        await toolbox.start()
-        request_id = await toolbox.submit_test(req())
-        await asyncio.wait_for(toolbox.drain(), 120)
-        archive = Path(str(toolbox.backend.journal.latest(request_id).extra["archive"]))  # type: ignore[union-attr]
-        base = json.loads((archive / "framework_base.json").read_text())
-        assert base["isolated_roots"] == [str(framework)] and base["matches_session"] is True, base
-    finally:
-        await toolbox.close()
-    assert (framework / "aiter/configs/tuned.csv").read_text() == "M,N,K\n64,5120,5120\n"

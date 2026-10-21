@@ -23,18 +23,8 @@ COMMIT = "a" * 40
 HOSTNAME = "node-a"
 
 
-def runner_template(
-    name: str = "runner-1", *, gpus: int = 1, signing: bool = True, framework_roots: tuple[str, ...] = ()
-) -> LocalTemplate:
-    return LocalTemplate(
-        name,
-        "measurement",
-        command=FAKE_RUNNER,
-        gpus=gpus,
-        sealed=True,
-        signing=signing,
-        framework_roots=framework_roots,
-    )
+def runner_template(name: str = "runner-1", *, gpus: int = 1, signing: bool = True) -> LocalTemplate:
+    return LocalTemplate(name, "measurement", command=FAKE_RUNNER, gpus=gpus, sealed=True, signing=signing)
 
 
 def point_yaml(directory: Path, name: str = "point.yaml", *, tp: int = 1, **fake: Any) -> Path:

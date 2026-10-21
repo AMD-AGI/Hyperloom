@@ -343,8 +343,6 @@ class LocalSandboxProvider:
         }
         if tpl.gpus:
             envs["ROCR_VISIBLE_DEVICES"] = ",".join(str(c) for c in cards)
-        if tpl.framework_roots:
-            envs["HYPERLOOM_FRAMEWORK_ROOTS"] = os.pathsep.join(tpl.framework_roots)
         if tpl.signing:
             identity = generate_signing_identity(directory / "private", self._users[True])
             meta[SIGNING_PUBLIC_KEY] = identity.public_key_pem

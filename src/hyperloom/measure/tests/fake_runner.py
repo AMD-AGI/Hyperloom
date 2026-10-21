@@ -18,9 +18,6 @@ test leaves (``profile/torch_trace/...``); ``fake_report: false`` leaves out the
 that printed no readable measurement. ``fake_repro: true`` runs the repro case the sheet carries for real (the shipped
 attachment placement and ``run_case``) against no server, and lists the verdict and log it leaves in the manifest.
 ``fake_decode: true`` lists the decode pass's outputs (``decode/outputs.jsonl``) the runner would leave.
-``fake_framework_file: <path>`` lists what the file held when the runner started as ``framework_seen.txt``, then
-overwrites it, deletes its sibling ``framework_victim`` and leaves a ``framework_leftover`` beside it: a test that
-writes into the framework install.
 ``fake_eval_in_warmup: true`` lays the rounds out as a graded test with a warmup leaves them (one evaluation, in the
 warmup round): a warmup round and the accuracy round on one directory, the measured round on another, and the lm-eval
 results file of ``fake_accuracy`` below the warmup's.
@@ -84,15 +81,6 @@ def _version() -> str:
         return "0"
 
 
-def _damage_framework(target: Path) -> bytes:
-    """What ``target`` holds now; then rewrite it in place, delete its sibling ``framework_victim``, add a leftover."""
-    seen = target.read_bytes()
-    target.write_text("damaged\n", encoding="utf-8")
-    (target.parent / "framework_victim").unlink()
-    (target.parent / "framework_leftover").write_text("left behind\n", encoding="utf-8")
-    return seen
-
-
 def _write_files(out: Path, config: dict[str, Any], mode: str) -> dict[str, bytes]:
     report = {
         "success": mode != "fail_test",
@@ -125,8 +113,6 @@ def _write_files(out: Path, config: dict[str, Any], mode: str) -> dict[str, byte
             {"point": 0, "phase": "warmup", "dir": f"variant_00_warmup/{bench}", "returncode": 0},
             {"point": 0, "phase": "measure", "dir": f"variant_00_test/{bench}", "returncode": 0},
         ]
-    if config.get("fake_framework_file"):
-        files["framework_seen.txt"] = _damage_framework(Path(str(config["fake_framework_file"])))
     if config.get("fake_inventory"):
         files["farm_inventory.json"] = json.dumps(config["fake_inventory"]).encode()
     if "fake_accuracy" in config:

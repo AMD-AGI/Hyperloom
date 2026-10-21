@@ -16,20 +16,12 @@ from collections.abc import Mapping
 from typing import Final
 
 from hyperloom.common.env_safety import is_secret_shaped_env_name
-from hyperloom.measure.framework_base import (
-    DEFAULT_FRAMEWORK_ROOTS,
-    DEFAULT_FRAMEWORK_WATCH,
-    FRAMEWORK_WATCH_ENV,
-    SESSION_DIGEST_ENV,
-    tree_digest,
-)
 from hyperloom.sandbox.local import LocalTemplate
 
 __all__ = [
     "IMAGE_ENV_NAMES",
     "IMAGE_ENV_PREFIXES",
     "RUNNER_SCRIPT",
-    "framework_envs",
     "image_env",
     "local_runner_command",
     "local_runner_template",
@@ -72,17 +64,6 @@ def local_runner_command(
     return ("/bin/sh", "-c", RUNNER_SCRIPT, python, str(int(spec_wait_sec)))
 
 
-def framework_envs() -> dict[str, str]:
-    """The variables that make the runner record the framework base: what to hash, and its hash as the session starts.
-
-    Nothing on a machine that has none of the watched paths.
-    """
-    watched = [path for path in DEFAULT_FRAMEWORK_WATCH if os.path.exists(path)]
-    if not watched:
-        return {}
-    return {FRAMEWORK_WATCH_ENV: os.pathsep.join(watched), SESSION_DIGEST_ENV: tree_digest(watched)}
-
-
 def local_runner_template(
     name: str = "runner-1",
     *,
@@ -95,11 +76,6 @@ def local_runner_template(
 
     ``envs`` are the template's fixed variables; when omitted they are the image's variables of this process
     (:func:`image_env`), the local stand-in for what a hosted image and template set.
-
-    Every test sees the image's framework installs that exist on this machine as they are now and writes only
-    privately (``framework_roots``, see :class:`~hyperloom.sandbox.templates.LocalTemplate`); ``dataclasses.replace``
-    the template with ``framework_roots=()`` to run tests on the shared tree, and their results then say no root was
-    isolated.
     """
     return LocalTemplate(
         name,
@@ -108,6 +84,5 @@ def local_runner_template(
         gpus=gpus,
         sealed=True,
         signing=True,
-        envs={**(image_env() if envs is None else envs), **framework_envs()},
-        framework_roots=tuple(root for root in DEFAULT_FRAMEWORK_ROOTS if os.path.isdir(root)),
+        envs=image_env() if envs is None else dict(envs),
     )
