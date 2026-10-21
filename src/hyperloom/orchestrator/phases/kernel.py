@@ -16,7 +16,7 @@ import sys
 import time
 import uuid
 from concurrent.futures import CancelledError as FuturesCancelledError
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Iterable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -28,7 +28,7 @@ from . import _kernel_timeline
 from . import geak_rebench as _geak_rebench
 from .geak_adoption import AdoptionMeasurement, adoption_entry
 from . import machine_state as _phase_state
-from ._kernel_timeline import RunnerRun
+from ._kernel_timeline import RunnerRun, settled_text as _settled_text
 from .kernel_round_budget import controller_round_stop, integrate_within_phase, measurement_round_sec, rebench_round_sec
 from hyperloom.common.env import env_bool, env_float, env_int
 from hyperloom.common.io import WriteOptions, atomic_write_json
@@ -197,6 +197,46 @@ class _IntegrateOutcome(NamedTuple):
 
     verdict: dict[str, Any] | None
     run_stopped: bool
+
+
+def geak_absent_backends(eval_dir: str) -> dict[str, str]:
+    """``{backend: probe}`` for the backends GEAK's environment report lists as absent.
+
+    GEAK records them in ``<eval_dir>/env_report.json`` and deep in its final
+    report; they are provisioning gaps, and nothing else carries them to the
+    optimizer's log or reports.
+    """
+    if not eval_dir:
+        return {}
+    try:
+        report = json.loads((Path(eval_dir) / "env_report.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    absent = report.get("absent_backends") if isinstance(report, dict) else None
+    if not isinstance(absent, dict):
+        return {}
+    return {
+        str(name): str(entry.get("probe") or "") if isinstance(entry, dict) else str(entry or "")
+        for name, entry in absent.items()
+    }
+
+
+def _integration_decision(status: str) -> str:
+    """The verdict an integration status settles on."""
+    if status == "kept":
+        return "KEEP"
+    if status.startswith("reverted"):
+        return "REVERT"
+    if status.startswith("skipped") or stopped_by_the_run_class(status):
+        return "SKIPPED"
+    return "FAILED"
+
+
+def _micro_speedup(gain_pct: Any) -> float | None:
+    """A percentage gain read back as a speedup ratio, or ``None`` when it is not a number."""
+    if isinstance(gain_pct, bool) or not isinstance(gain_pct, (int, float)):
+        return None
+    return 1.0 + float(gain_pct) / 100.0
 
 
 class _GemmMeasured(NamedTuple):
@@ -599,31 +639,6 @@ async def _announce_fusion_done(bus: Any, result: Any, *, status: str) -> None:
         log.exception("failed to post run_fusion_done bus message")
 
 
-def _write_geak_adoptions(
-    state: Any, ledger: dict[str, Any], specs: list[dict[str, Any]], measurement: AdoptionMeasurement
-) -> None:
-    """Record each accepted kernel's adoption in the per-kernel ledger and on the kernel timeline."""
-    cycle = int(state.macro_cycle or 0)
-    for spec in specs:
-        kid = _adopted_kernel_id(spec)
-        entry = adoption_entry(ledger.get(kid) or {}, kid=kid, spec=spec, measurement=measurement)
-        ledger[kid] = entry
-        # GEAK adopts by writing this ledger directly rather than through
-        # the integrate queue, so without this the kernel timeline holds no
-        # gate row for a GEAK adoption at all -- and the basis the gain was
-        # measured on lives only here.
-        _record_geak_integration(entry, kernel_id=kid, macro_cycle=cycle)
-    state.kernel_integrate_attempts = ledger
-
-
-class _AdoptionOrigin(NamedTuple):
-    """Where an adoption's number came from, and whether it can be pinned on one kernel."""
-
-    provenance: str
-    overlay_loaded: bool | None
-    attributable: bool
-
-
 def _adopted_kernel_id(spec: Mapping[str, Any]) -> str:
     """The id an accepted GEAK kernel is recorded under in the per-kernel ledger."""
     return str(spec.get("short_name") or spec.get("kernel_id") or spec.get("cand_tag") or "").strip()
@@ -636,37 +651,6 @@ def _relative_gain_pct(measured_tput: float, baseline_tput: float) -> float | No
     return (measured_tput - baseline_tput) / baseline_tput * 100.0
 
 
-def _geak_adoption_measurement(
-    result: Mapping[str, Any],
-    *,
-    measured_tput: float,
-    rebench_gain: float | None,
-    cycle: int,
-    origin: _AdoptionOrigin,
-) -> AdoptionMeasurement:
-    """The one rebench outcome every kernel in this adopted stack is recorded against."""
-    alignment = result.get("alignment_metrics") or {}
-    return AdoptionMeasurement(
-        measured_tput=measured_tput,
-        rebench_gain=rebench_gain,
-        attributable=origin.attributable,
-        provenance=origin.provenance,
-        ts=datetime.now(timezone.utc).isoformat(),
-        cycle=cycle,
-        overlay_loaded=origin.overlay_loaded,
-        basis=str(alignment.get("final_basis") or result.get("final_throughput_basis") or ""),
-        alignment_status=str((result.get("baseline_alignment") or {}).get("status") or ""),
-    )
-
-
-def _acceptance_lane_rows(result: Mapping[str, Any]) -> Iterator[tuple[str, Mapping[str, Any]]]:
-    """Every acceptance GEAK recorded, paired with the queue that proposed it."""
-    for lane, key in (("kernelQueue", "accepted_kernels"), ("headQueue", "accepted_heads")):
-        for row in result.get(key) or []:
-            if isinstance(row, dict):
-                yield lane, row
-
-
 def _stated_e2e_delta(raw: Mapping[str, Any]) -> float | None:
     """The e2e delta an acceptance row states, or ``None`` when it states none this reader can use."""
     stated = raw.get("e2e_delta_pct")
@@ -676,20 +660,6 @@ def _stated_e2e_delta(raw: Mapping[str, Any]) -> float | None:
         return float(stated)
     except (TypeError, ValueError):
         return None
-
-
-def _collapse_onto_twin(out: list[dict[str, Any]], position: int, row: dict[str, Any], name: str) -> None:
-    """Fold a second acceptance of the same measurement onto the one already kept."""
-    kept = out[position]
-    kept["alias_collapsed"] = True
-    # The collapsed twin's name is the one a reader may hold, so it is
-    # carried on the survivor rather than dropped with the row.
-    aliases = {*(kept.get("aliases") or []), geak_spec_name(kept), name}
-    if geak_is_cand_tag(geak_spec_name(kept)) and not geak_is_cand_tag(name):
-        row["alias_collapsed"] = True
-        out[position] = row
-        kept = row
-    kept["aliases"] = sorted({alias for alias in aliases if alias and alias != geak_spec_name(kept)})
 
 
 class _RunnerExit(NamedTuple):
@@ -1220,12 +1190,58 @@ class KernelPhase(CoordinatorCollaborator):
 
     def _record_kernel_rewrite_controller_timeline(self, result: dict[str, Any]) -> None:
         """Record settled Controller integrations as Forge kernel rewrites."""
-        _kernel_timeline.record_controller_rewrites(
-            self.timeline(),
-            self.session_dir,
-            result,
-            macro_cycle=int(self.shared_state.macro_cycle or 0),
+        integration = result.get("integration")
+        rows = integration.get("results") if isinstance(integration, dict) else None
+        if not isinstance(rows, list):
+            return
+        from hyperloom.inference_optimizer.breakdown.recorder.instrument import (
+            record_backend_versions_and_timeline,
         )
+
+        cycle = int(result.get("macro_cycle") or self.shared_state.macro_cycle or 0)
+        for index, row in enumerate(rows):
+            if not isinstance(row, dict) or not row.get("operator_id"):
+                continue
+            kernel_id = str(row.get("operator_id"))
+            status = str(row.get("status") or "unknown").lower()
+            decision = _integration_decision(status)
+            attempt_id = f"controller-c{cycle}-{index}"
+            speedup = _micro_speedup(row.get("gain_pct"))
+            qualified = kernel_id.split(":")
+            record_backend_versions_and_timeline(
+                self.session_dir,
+                {
+                    "kernel_id": kernel_id,
+                    "kernel_name": qualified[2] if len(qualified) > 2 else "",
+                    "run_id": str(result.get("run_id") or f"controller-c{cycle}"),
+                    "status": status,
+                    "attempts": [
+                        {
+                            "attempt_id": attempt_id,
+                            "backend": "forge",
+                            "status": status,
+                            "decision": decision,
+                            "micro_speedup": speedup,
+                            # The integration status *is* this route's failure
+                            # taxonomy -- ``reverted_apply_conflict``,
+                            # ``skipped_dirty_worktree`` -- and an integration
+                            # row carries no separate class. Stamping it here
+                            # is what makes ``error_class`` answerable on this
+                            # route: the GEAK and fusion lanes both fill it, so
+                            # a reader asking why a candidate did not land had
+                            # one field that was empty only for forge.
+                            "error_class": "" if status == "kept" else status,
+                            "error": str(row.get("reason") or ""),
+                        }
+                    ],
+                    "verification": {
+                        "best_attempt_id": attempt_id if decision == "KEEP" else "",
+                        "micro_speedup": speedup,
+                    },
+                    "proposal": {"decision": decision},
+                },
+                recorder=self.timeline(),
+            )
 
     def _record_gemm_tuning_timeline(self, result: dict[str, Any]) -> None:
         """Record a settled GEMM campaign in the Forge lane."""
@@ -1244,7 +1260,26 @@ class KernelPhase(CoordinatorCollaborator):
         recorder = self.timeline()
         if recorder is None or not isinstance(result, dict):
             return
-        _kernel_timeline.record_fusion_campaign(recorder, self.session_dir, result)
+        recorder.record_fusion_run(
+            run_id=_settled_text(result, "fusion_run_id"),
+            status=_settled_text(result, "status", default="unknown"),
+            pattern=_settled_text(result, "pattern", "fusion_pattern"),
+            target_module=_settled_text(result, "target_module", "kernel_name"),
+            applied=bool(result.get("kept")),
+            gain_pct=result.get("gain_pct"),
+            patch_path=_settled_text(result, "patch_path", "source_patch"),
+            micro_decision=_settled_text(result, "micro_decision", "decision"),
+            integrate_ref=_settled_text(result, "integration_id"),
+            started_at=_settled_text(result, "started_at"),
+            ended_at=_settled_text(result, "ended_at", "ts"),
+            duration_sec=result.get("duration_sec"),
+            error_class=_settled_text(result, "error_class"),
+            failure_reason=_settled_text(result, "error", "skip_reason", "error_class"),
+        )
+        tool_versions.record_tool_version(self.session_dir, tool="forge")
+        agent_backend = _settled_text(result, "agent_backend").lower()
+        if agent_backend:
+            tool_versions.record_tool_version(self.session_dir, tool=agent_backend)
 
     def close_kernel_timeline(self, tr: "Transition") -> None:
         """Close the kernel timeline event when the phase is left."""
@@ -2069,26 +2104,36 @@ class KernelPhase(CoordinatorCollaborator):
         """Return every GEAK acceptance, tagged with the queue that proposed it."""
         out: list[dict[str, Any]] = []
         index: dict[tuple[str, str], int] = {}
-        for lane, raw in _acceptance_lane_rows(result):
-            name = geak_spec_name(raw)
-            if not name:
-                continue
-            row = {**raw, "lane": lane, "alias_collapsed": False}
-            if geak_spec_is_env(raw):
-                row["kind"] = "env"
-            delta = _stated_e2e_delta(raw)
-            if delta is None:
-                # Collapsing is a claim that two rows measured the same thing, and an absent or unparseable delta is
-                # no evidence for it.
-                out.append(row)
-                continue
-            twin = (str(raw.get("op_kind") or ""), f"{delta:.4f}")
-            position = index.get(twin)
-            if position is None:
-                index[twin] = len(out)
-                out.append(row)
-                continue
-            _collapse_onto_twin(out, position, row, name)
+        for lane, key in (("kernelQueue", "accepted_kernels"), ("headQueue", "accepted_heads")):
+            for raw in result.get(key) or []:
+                name = geak_spec_name(raw) if isinstance(raw, dict) else ""
+                if not name:
+                    continue
+                row = {**raw, "lane": lane, "alias_collapsed": False}
+                if geak_spec_is_env(raw):
+                    row["kind"] = "env"
+                delta = _stated_e2e_delta(raw)
+                if delta is None:
+                    # Collapsing is a claim that two rows measured the same thing, and an absent or unparseable
+                    # delta is no evidence for it.
+                    out.append(row)
+                    continue
+                twin = (str(raw.get("op_kind") or ""), f"{delta:.4f}")
+                position = index.get(twin)
+                if position is None:
+                    index[twin] = len(out)
+                    out.append(row)
+                    continue
+                kept = out[position]
+                kept["alias_collapsed"] = True
+                # The collapsed twin's name is the one a reader may hold, so it is
+                # carried on the survivor rather than dropped with the row.
+                aliases = {*(kept.get("aliases") or []), geak_spec_name(kept), name}
+                if geak_is_cand_tag(geak_spec_name(kept)) and not geak_is_cand_tag(name):
+                    row["alias_collapsed"] = True
+                    out[position] = row
+                    kept = row
+                kept["aliases"] = sorted({alias for alias in aliases if alias and alias != geak_spec_name(kept)})
         return out
 
     @staticmethod
@@ -2321,21 +2366,37 @@ class KernelPhase(CoordinatorCollaborator):
             return
         gain = _relative_gain_pct(measured_tput, baseline_tput)
         # One kernel, overlay proven loaded, one measured number: the gain is attributable.
-        origin = _AdoptionOrigin(
-            provenance=provenance, overlay_loaded=overlay_loaded, attributable=bool(overlay_loaded) and len(specs) == 1
-        )
+        attributable = bool(overlay_loaded) and len(specs) == 1
         state = self.shared_state
         cycle = int(state.macro_cycle or 0)
-        measurement = _geak_adoption_measurement(
-            result, measured_tput=measured_tput, rebench_gain=gain, cycle=cycle, origin=origin
+        alignment = result.get("alignment_metrics") or {}
+        measurement = AdoptionMeasurement(
+            measured_tput=measured_tput,
+            rebench_gain=gain,
+            attributable=attributable,
+            provenance=provenance,
+            ts=datetime.now(timezone.utc).isoformat(),
+            cycle=cycle,
+            overlay_loaded=overlay_loaded,
+            basis=str(alignment.get("final_basis") or result.get("final_throughput_basis") or ""),
+            alignment_status=str((result.get("baseline_alignment") or {}).get("status") or ""),
         )
-        _write_geak_adoptions(state, ledger, specs, measurement)
+        for spec in specs:
+            kid = _adopted_kernel_id(spec)
+            entry = adoption_entry(ledger.get(kid) or {}, kid=kid, spec=spec, measurement=measurement)
+            ledger[kid] = entry
+            # GEAK adopts by writing this ledger directly rather than through
+            # the integrate queue, so without this the kernel timeline holds no
+            # gate row for a GEAK adoption at all -- and the basis the gain was
+            # measured on lives only here.
+            _record_geak_integration(entry, kernel_id=kid, macro_cycle=cycle)
+        state.kernel_integrate_attempts = ledger
         log.info(
             "geak: recorded %d adopted kernel(s) in the per-kernel ledger (overlay_loaded=%r attributable=%r gain=%r)",
             len(specs),
             overlay_loaded,
-            origin.attributable,
-            gain if origin.attributable else None,
+            attributable,
+            gain if attributable else None,
         )
 
     def _record_geak_measurement(self, result: dict[str, Any]) -> None:
@@ -2356,7 +2417,13 @@ class KernelPhase(CoordinatorCollaborator):
         self, result: dict[str, Any], *, handoff: dict[str, Any], run: RunnerRun = RunnerRun()
     ) -> None:
         """Record the delegated GEAK runner's terminal state."""
-        _kernel_timeline.note_absent_backends(result, handoff=handoff)
+        absent = geak_absent_backends(_settled_text(result, "eval_dir") or _settled_text(handoff, "eval_dir"))
+        if absent:
+            result["absent_backends"] = absent
+            log.warning(
+                "GEAK could not use these backends (provisioning gaps, not measured no-wins): %s",
+                "; ".join(f"{name}: {probe}" for name, probe in absent.items()),
+            )
         recorder = self.timeline()
         if recorder is None:
             return

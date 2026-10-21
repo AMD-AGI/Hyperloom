@@ -16,7 +16,7 @@ import json
 import logging as _logging
 import os
 import shlex
-from collections.abc import Iterator, Mapping
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Callable, NamedTuple
 
@@ -37,21 +37,6 @@ log = _logging.getLogger(__name__)
 
 #: The reference launch was observed, not merely declared to have been asked for.
 _VERIFIED_OBSERVED = "verified_observed"
-
-#: Measurement protocol keys the handoff forwards, and the env var each is read from.
-_BENCH_PROTOCOL_KEYS: tuple[tuple[str, str, Callable[[str], Any]], ...] = (
-    ("random_range_ratio", "RANDOM_RANGE_RATIO", float),
-    ("num_prompts", "NUM_PROMPTS", int),
-    ("num_warmups", "NUM_WARMUPS", int),
-    ("seed", "SEED", int),
-)
-
-
-class LaunchSpec(NamedTuple):
-    """The env spec a GEAK run launches under, and the config it resolves to."""
-
-    env_spec: dict[str, Any]
-    config: Mapping[str, Any]
 
 
 class SameConfigReference(NamedTuple):
@@ -101,24 +86,30 @@ def same_config_reference(state: Any, env_spec: dict[str, Any], *, writeback: An
     accepted_flags = str(config.get("extra_server_args", best.get("extra_server_args")) or "")
     extra_envs = config.get("extra_envs", best.get("extra_envs")) or {}
     measurement = _best_measurement(state, best)
-    env_spec, config = _recipe_launch_spec(
-        env_spec, config, writeback=writeback, agentx=agentx, measurement=measurement
-    )
+    if agentx and not str(config.get("server_launch_flags") or "").strip():
+        # Rebuild the launch spec from the recipe's own server log, where it has one.
+        evidence = measurement.get("launch_evidence")
+        server_log = str(evidence.get("actual_server_log_path") or "") if isinstance(evidence, Mapping) else ""
+        recipe_launch = recipe_server_launch(server_log)
+        if recipe_launch.flags or recipe_launch.env:
+            env_spec = writeback.build_env_spec(
+                measurement=measurement,
+                server_launch_flags=recipe_launch.flags,
+                server_launch_envs=recipe_launch.env,
+            )
+            config = env_spec["config"]
     identity = _launch_identity(env_spec, measurement)
+    if agentx:
+        # GEAK's proxy workload is not the canonical AgentX one, so no AgentX
+        # measurement can stand as a same-config reference for it.
+        identity["verification_status"] = "unverified_workload"
     return SameConfigReference(
         env_spec=env_spec,
         config=config,
         measurement=measurement,
         accepted_flags=accepted_flags,
         accepted_env=shlex.join(f"{k}={v}" for k, v in dict(extra_envs).items()),
-        expected_identity=identity.expected_identity,
-        declared_identity=identity.declared_identity,
-        observed_identity=identity.observed_identity,
-        observed_server_identity=identity.observed_server_identity,
-        launch_evidence=identity.launch_evidence,
-        # GEAK's proxy workload is not the canonical AgentX one, so no AgentX
-        # measurement can stand as a same-config reference for it.
-        verification_status="unverified_workload" if agentx else identity.verification_status,
+        **identity,
     )
 
 
@@ -131,37 +122,7 @@ def _best_measurement(state: Any, best: Mapping[str, Any]) -> Mapping[str, Any]:
     return inline if isinstance(inline, Mapping) else {}
 
 
-def _recipe_launch_spec(
-    env_spec: dict[str, Any], config: Mapping[str, Any], *, writeback: Any, agentx: bool, measurement: Mapping[str, Any]
-) -> LaunchSpec:
-    """Rebuild the launch spec from the recipe's own server log, where it has one."""
-    if not agentx or str(config.get("server_launch_flags") or "").strip():
-        return LaunchSpec(env_spec, config)
-    evidence = measurement.get("launch_evidence")
-    server_log = str(evidence.get("actual_server_log_path") or "") if isinstance(evidence, Mapping) else ""
-    recipe_launch = recipe_server_launch(server_log)
-    if recipe_launch.flags or recipe_launch.env:
-        env_spec = writeback.build_env_spec(
-            measurement=measurement,
-            server_launch_flags=recipe_launch.flags,
-            server_launch_envs=recipe_launch.env,
-        )
-        return LaunchSpec(env_spec, env_spec["config"])
-    return LaunchSpec(env_spec, config)
-
-
-class _LaunchIdentity(NamedTuple):
-    """How the measured launch identifies itself against the one that was asked for."""
-
-    expected_identity: str
-    declared_identity: str
-    observed_identity: str
-    observed_server_identity: dict[str, Any]
-    launch_evidence: dict[str, Any]
-    verification_status: str
-
-
-def _launch_identity(env_spec: Mapping[str, Any], measurement: Mapping[str, Any]) -> _LaunchIdentity:
+def _launch_identity(env_spec: Mapping[str, Any], measurement: Mapping[str, Any]) -> dict[str, Any]:
     """Pair what the launch declared about itself with what was observed of it."""
     expected = str(env_spec.get("launch_identity") or "")
     declared = str(measurement.get("declared_launch_identity") or measurement.get("launch_identity") or "")
@@ -180,16 +141,16 @@ def _launch_identity(env_spec: Mapping[str, Any], measurement: Mapping[str, Any]
     observed = str(measurement.get("observed_launch_identity") or "")
     if not observed and matches and (flags or server_identity):
         observed = _observed_identity_digest(declared, flags=flags, server_identity=server_identity)
-    return _LaunchIdentity(
-        expected_identity=expected,
-        declared_identity=declared,
-        observed_identity=observed,
-        observed_server_identity=server_identity,
-        launch_evidence=evidence,
-        verification_status=reference_verification_status(
+    return {
+        "expected_identity": expected,
+        "declared_identity": declared,
+        "observed_identity": observed,
+        "observed_server_identity": server_identity,
+        "launch_evidence": evidence,
+        "verification_status": reference_verification_status(
             evidence, identity_matches=matches, observed_flags=flags, observed_server_identity=server_identity
         ),
-    )
+    }
 
 
 def _observed_identity_digest(declared: str, *, flags: str, server_identity: Mapping[str, Any]) -> str:
@@ -268,9 +229,22 @@ def build_handoff(
     # Parsed once for both resolvers below: they read the same recipe, so a
     # second read could only disagree with the first.
     bench = recipe_benchmark(recipe_path)
-    spec = advertised_workload_spec(bench, session_dir=session_dir, baseline_tput=float(state.baseline_tput or 0.0))
-    if spec:
-        handoff["workload_spec"] = spec
+    # Only AgentX materializations carry ``benchmark.workload_spec``; every other
+    # recipe omits it so GEAK keeps today's synthetic path unchanged.
+    spec = bench.get("workload_spec")
+    if isinstance(spec, dict) and spec:
+        observed = observed_replay_shape(session_dir, float(state.baseline_tput or 0.0))
+        if observed:
+            # Give the kernel agents the shape they must actually optimize for;
+            # absence leaves GEAK on the handoff's synthetic isl/osl.
+            log.info(
+                "workload_spec: observed replay shape isl=%d osl=%d over %d requests (%s)",
+                observed["observed_isl"],
+                observed["observed_osl"],
+                observed["observed_requests"],
+                observed["observed_source"],
+            )
+        handoff["workload_spec"] = {**spec, **observed}
     # Absent => GEAK keeps deriving the launcher from the recipe, which is
     # correct everywhere except AgentX (see launch_server_script).
     script = launch_server_script(bench)
@@ -415,28 +389,43 @@ def read_recipe_bench_envs(recipe_path: str) -> dict[str, Any]:
 
 
 def bench_protocol(recipe_path: str, *, envs: Mapping[str, Any] | None = None) -> dict[str, Any]:
-    """Extract Hyperloom's bench measurement protocol for the GEAK handoff."""
+    """Extract Hyperloom's bench measurement protocol for the GEAK handoff.
+
+    Reads the materialized baseline recipe's ``benchmark.envs`` (falling back
+    to the process env) and returns only the keys that resolve, so absent
+    values leave GEAK on its standalone defaults. Never raises.
+
+    Args:
+        recipe_path: Path to the baseline recipe YAML.
+        envs: An already-parsed ``benchmark.envs`` for that path. Pass it
+            when the caller needs the envs too, so the YAML is read once and
+            both consumers see the same snapshot.
+    """
     envs = read_recipe_bench_envs(recipe_path) if envs is None else envs
+
+    def _pick(key: str, cast: Callable[[str], Any]) -> Any:
+        raw = envs.get(key)
+        if raw is None or str(raw).strip() == "":
+            raw = os.environ.get(key, "")
+        raw = str(raw).strip()
+        if not raw:
+            return None
+        try:
+            return cast(raw)
+        except (TypeError, ValueError):
+            return None
+
     protocol: dict[str, Any] = {}
-    for proto_key, env_key, cast in _BENCH_PROTOCOL_KEYS:
-        value = _cast_env(envs, env_key, cast)
-        if value is not None:
-            protocol[proto_key] = value
+    for proto_key, env_key, cast in (
+        ("random_range_ratio", "RANDOM_RANGE_RATIO", float),
+        ("num_prompts", "NUM_PROMPTS", int),
+        ("num_warmups", "NUM_WARMUPS", int),
+        ("seed", "SEED", int),
+    ):
+        val = _pick(env_key, cast)
+        if val is not None:
+            protocol[proto_key] = val
     return protocol
-
-
-def _cast_env(envs: Mapping[str, Any], key: str, cast: Callable[[str], Any]) -> Any:
-    """Read ``key`` from the recipe's envs, then the process env, cast; ``None`` when neither resolves."""
-    raw = envs.get(key)
-    if raw is None or str(raw).strip() == "":
-        raw = os.environ.get(key, "")
-    raw = str(raw).strip()
-    if not raw:
-        return None
-    try:
-        return cast(raw)
-    except (TypeError, ValueError):
-        return None
 
 
 def recipe_benchmark(recipe_path: str) -> dict[str, Any]:
@@ -456,26 +445,6 @@ def recipe_benchmark(recipe_path: str) -> dict[str, Any]:
         return {}
 
 
-def advertised_workload_spec(bench: Mapping[str, Any], *, session_dir: Path, baseline_tput: float) -> dict[str, Any]:
-    """The self-describing workload the recipe carries, refined by the shape the replay actually had."""
-    spec = bench.get("workload_spec")
-    if not isinstance(spec, dict) or not spec:
-        return {}
-    observed = observed_replay_shape(session_dir, baseline_tput)
-    if not observed:
-        return dict(spec)
-    # Give the kernel agents the shape they must actually optimize for;
-    # absence leaves GEAK on the handoff's synthetic isl/osl.
-    log.info(
-        "workload_spec: observed replay shape isl=%d osl=%d over %d requests (%s)",
-        observed["observed_isl"],
-        observed["observed_osl"],
-        observed["observed_requests"],
-        observed["observed_source"],
-    )
-    return {**spec, **observed}
-
-
 def launch_server_script(bench: Mapping[str, Any]) -> str:
     """Name the server-phase script GEAK should launch through Magpie."""
     try:
@@ -491,85 +460,72 @@ def launch_server_script(bench: Mapping[str, Any]) -> str:
         return ""
 
 
-class _ReplayResult(NamedTuple):
-    """One served replay result, as the observed-shape search reads it."""
-
-    path: str
-    completed: int
-    input_tokens: int
-    output_tokens: int
-    tput: float
-
-
 def observed_replay_shape(session_dir: Path, target_tput: float) -> dict[str, Any]:
-    """Measure the trace replay's real sequence shape from OUR OWN baseline."""
+    """Measure the trace replay's real sequence shape from OUR OWN baseline.
+
+    The AgentX handoff's ``workload.isl/osl`` are the CLI's synthetic
+    defaults (1024/1024) because a trace replay has no single ISL -- the
+    corpus spans roughly 89k at p50 past 500k at p99. GEAK does not measure
+    with them (the aiperf client ignores them outright), but the KERNEL
+    agents still read them as the analytic serving call model when they
+    synthesize GEMM/attention shapes. Left at 1024 they aim two orders of
+    magnitude below the load, so the search tunes a regime nobody serves.
+
+    Rather than hardcode corpus percentiles, derive the average shape from
+    the baseline result THIS run already measured: the canonical result
+    records ``total_input_tokens``/``total_output_tokens`` over ``completed``
+    requests. That keeps the number sourced from a measurement instead of a
+    constant that silently rots when the corpus is re-pinned.
+
+    Returns ``{}`` whenever no usable result is on disk, so an unmeasurable
+    run degrades to today's behavior rather than to a fabricated shape.
+    """
+    from hyperloom.inference_optimizer.session.session_paths import runs_root
+
     try:
-        best = _closest_replay_result(session_dir, target_tput)
+        root = runs_root(session_dir)
+        if not Path(root).is_dir():
+            return {}
+        shapes: list[tuple[float, int, int, int, str]] = []
+        for path in glob.glob(str(Path(root) / "**" / "inferencex_result.json"), recursive=True):
+            # GEAK's own results are not the orchestrator's baseline, and the
+            # overlay probe is not a served measurement. Match path COMPONENTS
+            # below the runs root, never the whole string: a substring test
+            # excludes every result the moment an ancestor directory happens
+            # to contain "geak" (a campaign rooted at .../hlgeak_24h_run/ hits
+            # this), which silently degrades the shape to the 1024 default
+            # this method exists to replace.
+            try:
+                parts = set(Path(path).relative_to(root).parts)
+                raw = json.loads(Path(path).read_text(encoding="utf-8"))
+            except (OSError, TypeError, ValueError):
+                continue
+            if not isinstance(raw, dict) or parts & {"geak", "_baseline_source_overlay"}:
+                continue
+            done, tokens_in, tokens_out = (
+                int(raw.get(key) or 0) for key in ("completed", "total_input_tokens", "total_output_tokens")
+            )
+            tput = float(raw.get("output_throughput") or 0.0)
+            if min(done, tokens_in, tokens_out, tput) <= 0:
+                continue
+            # Prefer the result whose throughput IS the baseline we handed
+            # over, so the shape describes the same measurement.
+            error = abs(tput - target_tput) / target_tput if target_tput > 0 else 1.0
+            shapes.append((error, round(tokens_in / done), round(tokens_out / done), done, path))
     except Exception:
         log.warning("workload_spec: could not derive observed replay shape", exc_info=True)
         return {}
-    if best is None:
+    if not shapes:
         return {}
-    result, error = best
-    isl = int(round(result.input_tokens / result.completed))
-    osl = int(round(result.output_tokens / result.completed))
+    error, isl, osl, done, source = min(shapes, key=lambda shape: shape[0])
     if isl <= 0 or osl <= 0:
         return {}
     return {
         "observed_isl": isl,
         "observed_osl": osl,
-        "observed_requests": result.completed,
-        "observed_source": result.path,
+        "observed_requests": done,
+        "observed_source": source,
         # 1.0 => no baseline throughput to match against, so this is the
         # best available replay result rather than a confirmed same-run one.
         "observed_tput_match_err": round(error, 6),
     }
-
-
-def _closest_replay_result(session_dir: Path, target_tput: float) -> tuple[_ReplayResult, float] | None:
-    """The served replay result whose throughput is nearest ``target_tput``, with that relative error."""
-    best: tuple[_ReplayResult, float] | None = None
-    for result in _served_replay_results(session_dir):
-        # Prefer the result whose throughput IS the baseline we handed
-        # over, so the shape describes the same measurement.
-        error = abs(result.tput - target_tput) / target_tput if target_tput > 0 else 1.0
-        if best is None or error < best[1]:
-            best = (result, error)
-    return best
-
-
-def _served_replay_results(session_dir: Path) -> Iterator[_ReplayResult]:
-    """Every orchestrator-served result under the session's runs root that carries a usable shape."""
-    from hyperloom.inference_optimizer.session.session_paths import runs_root
-
-    root = runs_root(session_dir)
-    if not Path(root).is_dir():
-        return
-    for path in glob.glob(str(Path(root) / "**" / "inferencex_result.json"), recursive=True):
-        if not _is_served_baseline(root, path):
-            continue
-        raw = _read_result(path)
-        completed = int(raw.get("completed") or 0)
-        tokens_in = int(raw.get("total_input_tokens") or 0)
-        tokens_out = int(raw.get("total_output_tokens") or 0)
-        tput = float(raw.get("output_throughput") or 0.0)
-        if completed > 0 and tokens_in > 0 and tokens_out > 0 and tput > 0:
-            yield _ReplayResult(path, completed, tokens_in, tokens_out, tput)
-
-
-def _is_served_baseline(root: Any, path: str) -> bool:
-    """Whether a result under ``root`` is one the orchestrator itself served."""
-    try:
-        parts = Path(path).relative_to(root).parts
-    except ValueError:
-        return False
-    return "geak" not in parts and "_baseline_source_overlay" not in parts
-
-
-def _read_result(path: str) -> Mapping[str, Any]:
-    """A result file's mapping, or ``{}`` when it cannot be read as one."""
-    try:
-        raw = json.loads(Path(path).read_text(encoding="utf-8")) or {}
-    except (OSError, json.JSONDecodeError, TypeError, ValueError):
-        return {}
-    return raw if isinstance(raw, dict) else {}

@@ -49,15 +49,6 @@ def _read_table(path: Path) -> _DispatchTable:
         return _DispatchTable(list(reader.fieldnames or []), [dict(row) for row in reader])
 
 
-def _write_table(path: Path, columns: list[str], rows: list[dict[str, str]]) -> Path:
-    """Write a dispatch table to ``path``, and return where it landed."""
-    with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=columns)
-        writer.writeheader()
-        writer.writerows(rows)
-    return path
-
-
 def untuned_table_stem(tuned_stem: str) -> str:
     """The stem of the untuned table that pairs with a tuned one."""
     if _TUNED_STEM_SUFFIX.search(tuned_stem):
@@ -105,15 +96,15 @@ def _merged_columns(source_columns: list[list[str]], candidate_columns: list[str
     return all_columns
 
 
-def _column_value(row: Mapping[str, str], column: str) -> str:
-    """A row's value for ``column``, defaulted where the table it came from has no such field."""
-    value = row.get(column)
-    return _AITER_COLUMN_DEFAULTS.get(column, "0") if value is None else value
-
-
 def _rows_over_columns(rows: list[dict[str, str]], columns: list[str]) -> list[dict[str, str]]:
     """``rows`` restated over ``columns``, so tables with different fields can be concatenated."""
-    return [{column: _column_value(row, column) for column in columns} for row in rows]
+    return [
+        {
+            column: _AITER_COLUMN_DEFAULTS.get(column, "0") if row.get(column) is None else row[column]
+            for column in columns
+        }
+        for row in rows
+    ]
 
 
 def _dispatch_key_columns(all_columns: list[str], untuned_header: list[str]) -> list[str]:
@@ -201,7 +192,11 @@ def merge_candidate_into_runtime(
     # Drop rows from runtime that the candidate improves, then concat.
     tuned_keys = {_dispatch_key(row, key_cols) for row in tuned}
     merged_rows = [row for row in kept if _dispatch_key(row, key_cols) not in tuned_keys] + tuned
-    merged_path = _write_table(candidate_path.parent / f"merged_{candidate_path.name}", all_columns, merged_rows)
+    merged_path = candidate_path.parent / f"merged_{candidate_path.name}"
+    with merged_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=all_columns)
+        writer.writeheader()
+        writer.writerows(merged_rows)
     log.info(
         "gemm E2E: merged %d candidate rows into %d rows from %d aiter config file(s) -> %d total (%s)",
         len(tuned),
