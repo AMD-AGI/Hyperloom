@@ -18,6 +18,7 @@ from hyperloom.orchestrator.enablement.runtime.build_utils import (
     check_rocm_toolchain_alignment,
     probe_torch_abi,
     run_argv,
+    sglang_rocm_install_target,
     sort_tags_desc,
     write_rocm_constraints,
 )
@@ -239,3 +240,37 @@ def test_sort_tags_desc_newest_first():
 
 def test_sort_tags_desc_empty():
     assert sort_tags_desc([]) == []
+
+
+# sglang_rocm_install_target
+
+_ROCM_EXTRAS = "[project.optional-dependencies]\nsrt_hip = ['torch']\nsrt_hip_rocm724 = ['torch==2.11.0']\n"
+
+
+@pytest.mark.parametrize("torch_version, extra", [("2.11.0+rocm7.2", "srt_hip_rocm724"), ("2.9.1+rocm7.0", "srt_hip")])
+def test_the_rocm_pyproject_installs_with_the_extra_the_torch_satisfies(tmp_path, torch_version, extra):
+    """The checkout's CUDA pyproject would replace the ROCm torch; the ROCm one stands in only for the install."""
+    (tmp_path / "pyproject.toml").write_text("cuda", encoding="utf-8")
+    (tmp_path / "pyproject_other.toml").write_text(_ROCM_EXTRAS, encoding="utf-8")
+    with sglang_rocm_install_target(tmp_path, torch_version) as target:
+        assert target == f"{tmp_path}[{extra}]"
+        assert (tmp_path / "pyproject.toml").read_text(encoding="utf-8") == _ROCM_EXTRAS
+    assert (tmp_path / "pyproject.toml").read_text(encoding="utf-8") == "cuda"
+
+
+def test_no_extra_admitting_the_torch_refuses_the_install(tmp_path):
+    (tmp_path / "pyproject.toml").write_text(
+        "[project.optional-dependencies]\nsrt_hip = ['torch==2.9.1']\n", encoding="utf-8"
+    )
+    with pytest.raises(ValueError, match="admits torch 2.11.0"):
+        with sglang_rocm_install_target(tmp_path, "2.11.0+rocm7.2"):
+            pass
+
+
+def test_the_checkout_is_restored_when_the_install_raises(tmp_path):
+    (tmp_path / "pyproject.toml").write_text("cuda", encoding="utf-8")
+    (tmp_path / "pyproject_other.toml").write_text(_ROCM_EXTRAS, encoding="utf-8")
+    with pytest.raises(RuntimeError, match="pip died"):
+        with sglang_rocm_install_target(tmp_path, "2.11.0+rocm7.2"):
+            raise RuntimeError("pip died")
+    assert (tmp_path / "pyproject.toml").read_text(encoding="utf-8") == "cuda"

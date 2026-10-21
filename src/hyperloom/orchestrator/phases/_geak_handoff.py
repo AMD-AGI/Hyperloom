@@ -23,6 +23,7 @@ from typing import Any, Callable, NamedTuple
 from hyperloom.common.launch_log_evidence import recipe_server_launch
 
 from ..actions.executors._gpu_pin import (
+    _resolve_handoff_gpu_identity,
     _resolve_handoff_gpu_ids,
     _resolve_handoff_gpu_ids_space,
     _resolve_handoff_tp,
@@ -307,7 +308,7 @@ def _handoff_payload(
         "schema_version": 3,
         "model_path": str(state.model_path or os.environ.get("MODEL_PATH", "")),
         "framework": str(state.framework or os.environ.get("FRAMEWORK", "") or "sglang"),
-        "gpu_type": str(state.gpu_type or os.environ.get("GPU_TYPE", "")),
+        **_resolve_handoff_gpu_identity(state.gpu_type or os.environ.get("GPU_TYPE", "")),
         "tp": devices.tp,
         "workload": {"isl": int(state.isl), "osl": int(state.osl), "conc": int(state.conc or 64)},
         "accepted_flags": reference.accepted_flags,
