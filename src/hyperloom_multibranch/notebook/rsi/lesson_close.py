@@ -35,8 +35,8 @@ from hyperloom_multibranch.contracts.notebook.records import (
 )
 from hyperloom_multibranch.contracts.notebook.vocab import LearningKind
 from hyperloom_multibranch.notebook.knowledge.learnings import measures
-from hyperloom_multibranch.notebook.learning_search import current_learnings, names, outcome_of, words
-from hyperloom_multibranch.notebook.rsi.learning_eval import PAST, BranchTest, branch_tests, first_shown
+from hyperloom_multibranch.notebook.learning_search import current_learnings, names, outcome_of
+from hyperloom_multibranch.notebook.rsi.learning_eval import PAST, BranchTest, branch_tests, first_shown, rediscoveries
 from hyperloom_multibranch.notebook.rsi.lessons import (
     Lesson,
     LessonEvidence,
@@ -52,9 +52,6 @@ from hyperloom_multibranch.notebook.rsi.lessons import (
 from hyperloom_multibranch.notebook.rsi.similarity import task_conditions
 
 NEW, REVISED, RETIRED, DUPLICATE, FAILED = "new", "revised", "retired", "duplicate", "failed"
-#: A branch's learning that shares this share of the smaller word set with a live lesson it was never shown learnt
-#: that lesson again.
-REDISCOVERY_OVERLAP = 0.5
 _TAKEN_UP = frozenset({LearningKind.INSIGHT, LearningKind.HYPOTHESIS})
 _HEEDED, _IGNORED, _CONTRADICTED, _PAID, _SHOWN, _REDISCOVERED = (
     "heeded",
@@ -206,29 +203,6 @@ def _outcome(head: LessonRevision, later: Sequence[BranchTest]) -> str:
     return _PAID if paid else ""
 
 
-def _overlap(mine: set[str], theirs: set[str]) -> float:
-    return len(mine & theirs) / max(1, min(len(mine), len(theirs)))
-
-
-def _rediscoveries(
-    snapshot: NotebookSnapshot, live: Mapping[str, LessonRevision], shown: Mapping[tuple[str, str], float]
-) -> set[tuple[str, str]]:
-    """The (branch, lesson) pairs where a learning of this session says a live lesson of another session again, the
-    branch never shown it."""
-
-    session_id = _profile(snapshot).session_id
-    found = set()
-    for record in current_learnings(snapshot):
-        mine = words(record.learning.content)
-        for lesson_id, head in live.items():
-            pair = (record.learning.branch, lesson_id)
-            if head.session_id == session_id or pair in shown or pair in found:
-                continue
-            if _overlap(mine, words(head.content)) >= REDISCOVERY_OVERLAP:
-                found.add(pair)
-    return found
-
-
 def session_standings(
     snapshot: NotebookSnapshot, pool: LessonPool, log: Sequence[Mapping[str, Any]]
 ) -> SessionStandings:
@@ -251,7 +225,8 @@ def session_standings(
         outcome = _outcome(latest[lesson_id], [test for test in tests.get(branch, ()) if test.at > at])
         if outcome:
             counts[lesson_id][outcome] += 1
-    for _branch, lesson_id in _rediscoveries(snapshot, live, shown):
+    texts = {lesson_id: (head.session_id, head.content) for lesson_id, head in live.items()}
+    for _branch, lesson_id in rediscoveries(snapshot, texts, shown):
         counts[lesson_id][_REDISCOVERED] += 1
     standings = {lesson_id: LessonStanding(**found) for lesson_id, found in counts.items()}
     return SessionStandings(profile.session_id, snapshot.taken_at, standings)
@@ -261,7 +236,6 @@ __all__ = [
     "DUPLICATE",
     "FAILED",
     "NEW",
-    "REDISCOVERY_OVERLAP",
     "RETIRED",
     "REVISED",
     "LessonPublication",

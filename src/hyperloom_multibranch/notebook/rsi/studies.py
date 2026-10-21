@@ -16,7 +16,8 @@
   expressions of the archive's pool beside it, each judged on the whole archive: for reference, since a session
   counts only the sessions that started after a scorer was registered;
 * ``branch-cap --archive DIR --like SESSION_ID [--caps 2,3,4]``: the branch cap replay, for sessions like that one;
-* ``learnings --notebook DIR --log learnings.jsonl``: one session's learnings retrieval (:mod:`rsi.learning_eval`);
+* ``learnings --notebook DIR --log learnings.jsonl [--archive DIR]``: one session's learnings retrieval
+  (:mod:`rsi.learning_eval`), and with an archive what it missed of the lesson pool beside it;
 * ``dispersion --shadow consistency.jsonl [--labels FILE] [--archive DIR] --model M --tp N --gpu G [--agentx]``: the
   dispersion prior with the shadow runs' noise (:mod:`rsi.shadow`); ``--labels`` is a JSON object of test id to model,
   TP, GPU, and ``--agentx`` asks for an AgentX trace replay's prior.
@@ -178,7 +179,7 @@ def _branch_cap(args: argparse.Namespace) -> Any:
 
 
 def _learnings(args: argparse.Namespace) -> Any:
-    return asyncio.run(read_session(args.notebook, args.log))
+    return asyncio.run(read_session(args.notebook, args.log, args.archive))
 
 
 def _dispersion(args: argparse.Namespace) -> Any:
@@ -212,6 +213,7 @@ def _parser() -> argparse.ArgumentParser:
     learnt = command("learnings", _learnings, "evaluate one session's learnings retrieval")
     learnt.add_argument("--notebook", type=Path, required=True)
     learnt.add_argument("--log", type=Path, required=True)
+    learnt.add_argument(_ARCHIVE, type=Path, default=None, help="an archive whose lesson pool the session drew on")
     noise = command("dispersion", _dispersion, "the dispersion prior with the shadow runs' noise (Q1)")
     noise.add_argument("--shadow", type=Path, required=True)
     noise.add_argument("--labels", type=Path, default=None)

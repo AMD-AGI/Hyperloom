@@ -12,8 +12,10 @@ or a mechanism):
 
 Then every test a branch requested after its first retrieval counts once: *in a shown direction* when a learning shown
 to the branch before it named the test's direction, *elsewhere* otherwise; how many of each led to a commit sets the
-learnings' directions beside the rest. Past sessions' learnings are logged by Experience id only, so they are counted,
-not matched.
+learnings' directions beside the rest. Past sessions' learnings are logged by id only, an Experience's or a pooled
+lesson's (:mod:`rsi.lessons`), so they are counted, not matched; the lessons apart too. Given the pool's live lessons,
+a learning of this session that says one of another session again, its branch never shown it, is a *rediscovery*:
+what the retrieval missed (:func:`rediscoveries`, which CLOSE's lesson standings use too).
 
 A lead a startup brief showed counts once too, at its first showing to a branch: *taken up* when a later test of the
 branch makes every change the lead names (each word of its change, as the Experience export summarizes a change), and
@@ -24,21 +26,25 @@ counts; what they mean for the retrieval and the briefs, vector search included,
 from __future__ import annotations
 
 from collections import Counter, defaultdict
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from hyperloom.common.jsonio import read_jsonl
 from hyperloom_multibranch.contracts.notebook.peers import Intent, TestKind
-from hyperloom_multibranch.contracts.notebook.records import Learning, NotebookSnapshot, Writer
+from hyperloom_multibranch.contracts.notebook.records import Learning, NotebookSnapshot, Writer, is_lesson_id
 from hyperloom_multibranch.contracts.notebook.vocab import COMMITTING, LearningKind, Role
 from hyperloom_multibranch.notebook.knowledge.experience import change_document
-from hyperloom_multibranch.notebook.learning_search import names
+from hyperloom_multibranch.notebook.learning_search import current_learnings, names, words
 from hyperloom_multibranch.notebook.local.notebook import LocalNotebook
+from hyperloom_multibranch.notebook.rsi.archive import TreeArchive
+from hyperloom_multibranch.notebook.rsi.lessons import LessonPool
 from hyperloom_multibranch.notebook.rsi.report import share, table
 
 STUDY_WRITER = "rsi-study"
+#: A learning that shares this share of the smaller word set with a lesson says that lesson again.
+REDISCOVERY_OVERLAP = 0.5
 _TAKEN_UP = frozenset({LearningKind.INSIGHT, LearningKind.HYPOTHESIS})
 
 
@@ -61,12 +67,17 @@ class LearningEvaluation:
     leads_shown: int = 0
     leads_taken_up: int = 0
     leads_committed: int = 0
+    lessons_shown: int = 0
+    lessons_distinct: int = 0
+    learnings_written: int = 0
+    rediscovered: int = 0
 
     def render(self) -> str:
         """The evaluation as markdown: a table of the measures, each with its counts."""
 
         sources = ", ".join(f"{source} {count}" for source, count in sorted(self.by_source.items())) or "none"
         rows = [
+            ("learnings that say a past lesson again, unshown", share(self.rediscovered, self.learnings_written)),
             ("pitfalls avoided", share(self.pitfalls_avoided, self.pitfalls_shown)),
             ("insights and hypotheses taken up", share(self.insights_taken_up, self.insights_shown)),
             (
@@ -80,7 +91,8 @@ class LearningEvaluation:
         return "\n".join(
             [
                 f"Learnings retrieval: {self.retrievals} retrievals ({sources}); past sessions' learnings shown "
-                f"{self.past_shown} times, {self.past_distinct} distinct.",
+                f"{self.past_shown} times, {self.past_distinct} distinct; of them pooled lessons {self.lessons_shown} "
+                f"times, {self.lessons_distinct} distinct.",
                 "",
                 *table(("measure", "share"), rows),
             ]
@@ -177,8 +189,34 @@ def _leads(log: Sequence[Mapping[str, Any]], tests: Mapping[str, list[BranchTest
     return counts
 
 
-def evaluate_learnings(snapshot: NotebookSnapshot, log: Sequence[Mapping[str, Any]]) -> LearningEvaluation:
-    """The retrieval of ``snapshot``'s session, read off its retrieval ``log`` (decoded lines)."""
+def _overlap(mine: set[str], theirs: set[str]) -> float:
+    return len(mine & theirs) / max(1, min(len(mine), len(theirs)))
+
+
+def rediscoveries(
+    snapshot: NotebookSnapshot, lessons: Mapping[str, tuple[str, str]], shown: Collection[tuple[str, str]]
+) -> set[tuple[str, str]]:
+    """The (branch, lesson) pairs where a current learning of the session says again a lesson of another session,
+    ``lessons`` giving each lesson's session and text, the branch never shown it (``shown`` holds what was)."""
+
+    session_id = snapshot.profile.session_id if snapshot.profile is not None else ""
+    found = set()
+    for record in current_learnings(snapshot):
+        mine = words(record.learning.content)
+        for lesson_id, (origin, text) in lessons.items():
+            pair = (record.learning.branch, lesson_id)
+            if origin == session_id or pair in shown or pair in found:
+                continue
+            if _overlap(mine, words(text)) >= REDISCOVERY_OVERLAP:
+                found.add(pair)
+    return found
+
+
+def evaluate_learnings(
+    snapshot: NotebookSnapshot, log: Sequence[Mapping[str, Any]], lessons: Mapping[str, tuple[str, str]] | None = None
+) -> LearningEvaluation:
+    """The retrieval of ``snapshot``'s session, read off its retrieval ``log`` (decoded lines); given the pool's live
+    ``lessons`` (each one's session and text), what it missed of them too."""
 
     learnings = {record.entry_id: record.learning for record in snapshot.learnings}
     tests = branch_tests(snapshot)
@@ -186,6 +224,8 @@ def evaluate_learnings(snapshot: NotebookSnapshot, log: Sequence[Mapping[str, An
     uptake, outcomes = _uptake(shown, learnings, tests), _outcomes(shown, learnings, tests)
     leads = _leads(log, tests)
     past = [str(item) for line in log for item in line.get(PAST, ())]
+    pooled = [item for item in past if is_lesson_id(item)]
+    missed = rediscoveries(snapshot, lessons, first_shown(log, PAST)) if lessons is not None else set()
     return LearningEvaluation(
         retrievals=len(log),
         by_source=dict(Counter(str(line["source"]) for line in log)),
@@ -202,19 +242,29 @@ def evaluate_learnings(snapshot: NotebookSnapshot, log: Sequence[Mapping[str, An
         leads_shown=leads["shown"],
         leads_taken_up=leads["taken_up"],
         leads_committed=leads["committed"],
+        lessons_shown=len(pooled),
+        lessons_distinct=len(set(pooled)),
+        learnings_written=len(current_learnings(snapshot)),
+        rediscovered=len(missed),
     )
 
 
-async def read_session(notebook_root: Path, log_path: Path) -> LearningEvaluation:
-    """The evaluation of the session whose notebook is ``notebook_root``, read as an observer, and its log."""
+async def read_session(notebook_root: Path, log_path: Path, archive: Path | None = None) -> LearningEvaluation:
+    """The evaluation of the session whose notebook is ``notebook_root``, read as an observer, and its log; with
+    ``archive``, against the live lessons of the pool beside it too."""
 
     snapshot = await LocalNotebook(notebook_root, Writer(Role.OBSERVER, STUDY_WRITER)).snapshot()
-    return evaluate_learnings(snapshot, read_jsonl(log_path, skip_malformed=True, skip_non_dict=True))
+    log = read_jsonl(log_path, skip_malformed=True, skip_non_dict=True)
+    if archive is None:
+        return evaluate_learnings(snapshot, log)
+    live = LessonPool.beside(TreeArchive(archive)).live()
+    return evaluate_learnings(snapshot, log, {head.lesson_id: (head.session_id, head.content) for head in live})
 
 
 __all__ = [
     "HERE",
     "PAST",
+    "REDISCOVERY_OVERLAP",
     "STUDY_WRITER",
     "BranchTest",
     "LearningEvaluation",
@@ -223,4 +273,5 @@ __all__ = [
     "first_shown",
     "names",
     "read_session",
+    "rediscoveries",
 ]

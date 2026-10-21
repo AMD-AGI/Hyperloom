@@ -15,9 +15,15 @@ from hyperloom_multibranch.contracts.notebook.records import Learning, LearningR
 from hyperloom_multibranch.contracts.notebook.vocab import LearningKind
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.learning_search import LEARNINGS_LOG
+from hyperloom_multibranch.notebook.rsi.archive import TreeArchive
 from hyperloom_multibranch.notebook.rsi.learning_eval import evaluate_learnings, names, read_session
-from hyperloom_multibranch.notebook.tests.factories import FakeClock
+from hyperloom_multibranch.notebook.rsi.lessons import LessonPool, LessonRevision, lesson_id_for, revision_id_for
+from hyperloom_multibranch.notebook.rsi.similarity import task_conditions
+from hyperloom_multibranch.notebook.tests.factories import FakeClock, profile
 from hyperloom_multibranch.notebook.tests.sessions import GEMM, SPLIT_KV, scripted_session
+
+CONDITIONS = task_conditions(profile())
+CHUNKED = "chunked prefill makes the server exit during warmup on this image"
 
 PITFALL = Learning("s2", LearningKind.PITFALL, "split kv regresses at this concurrency", "attention", "split kv")
 INSIGHT = Learning("s1", LearningKind.INSIGHT, "the moe gemm wants a tuned kernel", "moe gemm", GEMM.mechanism)
@@ -149,3 +155,31 @@ async def test_a_session_is_read_off_its_notebook_folder_and_its_log(tmp_path: P
     found = await read_session(root, log)
 
     assert (found.retrievals, found.pitfalls_shown, found.pitfalls_avoided, found.tests_elsewhere) == (1, 1, 1, 0)
+
+
+async def test_pooled_lessons_shown_count_apart_and_one_written_again_unshown_is_a_retrieval_miss(
+    tmp_path: Path,
+) -> None:
+    clock, root = FakeClock(), tmp_path / "notebook"
+    await scripted_session(root, clock)
+    s2 = LocalNotebook(root, Writer(Role.SPECIALIST_RUNTIME, "s2", "s2"), clock=clock)
+    await s2.append_learning(
+        Learning("s2", LearningKind.PITFALL, "the server exits during warmup with chunked prefill")
+    )
+    pool = LessonPool.beside(TreeArchive(tmp_path / "archive"))
+    shown, missed = lesson_id_for("shown"), lesson_id_for("missed")
+    for lesson_id, text in ((shown, "fp8 kv cache costs accuracy on this model"), (missed, CHUNKED)):
+        pool.write(
+            LessonRevision(revision_id_for(lesson_id), lesson_id, LearningKind.PITFALL, text, CONDITIONS, "x", 1.0, "p")
+        )
+    log = tmp_path / LEARNINGS_LOG
+    line = {"at": clock.now, "branch": "s2", "source": "brief", "here": [], "past": [shown, shown, "exp-1"]}
+    log.write_text(json.dumps(line) + "\n", encoding="utf-8")
+
+    found = await read_session(root, log, tmp_path / "archive")
+    unpooled = await read_session(root, log)
+
+    assert (found.past_shown, found.lessons_shown, found.lessons_distinct) == (3, 2, 1)
+    assert (found.learnings_written, found.rediscovered) == (1, 1)
+    assert "| learnings that say a past lesson again, unshown | 100% (1/1) |" in found.render()
+    assert unpooled.rediscovered == 0
