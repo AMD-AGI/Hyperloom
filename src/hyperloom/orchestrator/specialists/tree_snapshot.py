@@ -5,21 +5,27 @@
 
 It is what a specialist's worktree branches off when the tree has no git of its
 own, and the baseline every patch specialist's run is held to: the tree as the
-session last accepted it.
+session last accepted it, and the HEAD of every dependency checkout beside it.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import subprocess
 import threading
-from dataclasses import dataclass
+from collections.abc import Iterable
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from hyperloom.common.io import atomic_write_json
 from hyperloom.inference_optimizer.breakdown.stop_reasons import PATCH_RECOVERY_INCOMPLETE_STOP_REASON
+from hyperloom.inference_optimizer.framework_paths import enclosing_checkout
 from hyperloom.inference_optimizer.session.session_paths import fs_safe_id
+
+from ..bringup.trees import head_commit
 
 if TYPE_CHECKING:
     from ..state.shared_state import SharedState
@@ -36,6 +42,11 @@ _IDENTITY: tuple[str, ...] = ("-c", "user.name=hyperloom", "-c", "user.email=hyp
 #: Where a snapshot repository records the tree it holds, so a refresh can find it.
 _TREE_KEY = "hyperloom.tree"
 
+#: Beside the snapshots: the HEAD each dependency checkout was at when the
+#: session last accepted it, and the hold a stop leaves until the trees are back.
+_HEADS = "dependency_heads.json"
+_UNRESTORED = "unrestored.json"
+
 _GIT_TIMEOUT_SEC = 600.0
 
 _locks: dict[str, threading.Lock] = {}
@@ -44,26 +55,34 @@ _locks_guard = threading.Lock()
 
 @dataclass(frozen=True)
 class TreeRestore:
-    """What :func:`restore_tree` found in the tree and whether it put it back.
+    """What the check after a patch specialist's run found, and whether the trees are back.
 
     Attributes:
         changed: Paths, relative to the tree, that differed from the snapshot.
-        error: Why the tree could not be read or put back; empty when it was.
+        error: Why the tree could not be put back; empty when it was.
+        moved: Dependency checkouts whose HEAD moved, with the old and new HEAD.
     """
 
     changed: tuple[str, ...] = ()
     error: str = ""
+    moved: tuple[str, ...] = ()
 
     @property
     def clean(self) -> bool:
-        """Whether the tree matched its snapshot."""
-        return not self.changed and not self.error
+        """Whether the trees were as the session last accepted them."""
+        return not (self.changed or self.error or self.moved)
+
+    @property
+    def stops(self) -> bool:
+        """Whether a tree is still not as the session last accepted it, so the session cannot go on."""
+        return bool(self.error or self.moved)
 
     @property
     def reason(self) -> str:
-        """What a run that left the tree like this did, for the error it is discarded with."""
-        failed = f"; restore failed: {self.error}" if self.error else ""
-        return f"wrote the shared tree at {', '.join(self.changed[:8]) or '?'}{failed}"
+        """What a run that left the trees like this did, for the error it is discarded with."""
+        found = [f"wrote the shared tree at {', '.join(self.changed[:8])}"] if self.changed else []
+        found += [f"moved the HEAD of {moved}" for moved in self.moved]
+        return "; ".join(found + ([f"restore failed: {self.error}"] if self.error else []))
 
 
 def _lock(repo: Path) -> threading.Lock:
@@ -72,9 +91,14 @@ def _lock(repo: Path) -> threading.Lock:
         return _locks.setdefault(str(repo), threading.Lock())
 
 
+def _snapshots(session_dir: Path) -> Path:
+    """Where the session keeps its snapshots, the dependency HEADs and the hold."""
+    return session_dir / "tree_snapshots"
+
+
 def _repo(session_dir: Path, tree: Path) -> Path:
     """The bare repository holding ``tree``'s snapshot for this session."""
-    return session_dir / "tree_snapshots" / f"{fs_safe_id(str(tree))}.git"
+    return _snapshots(session_dir) / f"{fs_safe_id(str(tree))}.git"
 
 
 def _run(*args: str) -> subprocess.CompletedProcess[str]:
@@ -209,11 +233,60 @@ def snapshot_tree(session_dir: Path, tree: Path) -> tuple[Path | None, str]:
     return (None, error) if error else (repo, "")
 
 
+def _held(session_dir: Path) -> bool:
+    """Whether a stop holds the session on shared trees no restore has put back yet."""
+    return (_snapshots(session_dir) / _UNRESTORED).is_file()
+
+
+def _head(checkout: str) -> str:
+    """The commit ``checkout`` sits at, or ``""`` when it cannot be read."""
+    try:
+        return head_commit(checkout)
+    except (OSError, subprocess.SubprocessError) as exc:
+        log.error("cannot read the HEAD of %s: %r", checkout, exc)
+        return ""
+
+
+def _dependency_checkouts(tree: Path, roots: Iterable[str]) -> set[str]:
+    """The git checkouts holding a Section 7 root, other than any that holds ``tree`` itself."""
+    own = tree.resolve()
+    checkouts = {checkout.resolve() for checkout in map(enclosing_checkout, roots) if checkout is not None}
+    return {str(checkout) for checkout in checkouts if not own.is_relative_to(checkout)}
+
+
+def _record_heads(session_dir: Path, checkouts: Iterable[str]) -> None:
+    """Record the HEAD each of ``checkouts`` sits at now; one that cannot be read goes unchecked."""
+    heads = {checkout: head for checkout in sorted(checkouts) if (head := _head(checkout))}
+    try:
+        atomic_write_json(_snapshots(session_dir) / _HEADS, heads)
+    except OSError as exc:
+        log.error("dependency HEADs not recorded for %s: %r", session_dir, exc)
+
+
+def _recorded_heads(session_dir: Path) -> dict[str, str]:
+    """The HEAD recorded for each dependency checkout; none before the first record or when it cannot be read."""
+    path = _snapshots(session_dir) / _HEADS
+    try:
+        return dict(json.loads(path.read_bytes())) if path.is_file() else {}
+    except (OSError, ValueError) as exc:
+        log.error("dependency HEADs recorded at %s cannot be read, so none is checked: %r", path, exc)
+        return {}
+
+
+def _moved_heads(session_dir: Path) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """The dependency checkouts whose HEAD moved off the recorded one, and those whose HEAD cannot be read."""
+    recorded = _recorded_heads(session_dir)
+    heads = {checkout: _head(checkout) for checkout in recorded}
+    moved = tuple(f"{c} from {recorded[c][:12]} to {h[:12]}" for c, h in heads.items() if h and h != recorded[c])
+    return moved, tuple(checkout for checkout, head in heads.items() if not head)
+
+
 def refresh_snapshots(session_dir: Path) -> list[str]:
-    """Commit every tree this session snapshots as it is now, once an integrate has settled it.
+    """Move every snapshot and dependency HEAD this session records to the trees an integrate has settled.
 
     A snapshot that cannot be moved is dropped and the failure logged as an
-    error; the session carries on.
+    error; the session carries on. A session held on trees no restore has put
+    back moves nothing, so what the stop found is not taken as accepted.
 
     Args:
         session_dir: The session whose snapshots to move.
@@ -221,8 +294,11 @@ def refresh_snapshots(session_dir: Path) -> list[str]:
     Returns:
         One error per snapshot that could not be moved; empty when all were.
     """
+    if _held(session_dir):
+        log.error("tree snapshots of %s not moved: the session is held on unrestored shared trees", session_dir)
+        return [f"{_UNRESTORED}: the session is held on unrestored shared trees"]
     errors: list[str] = []
-    for repo in sorted((session_dir / "tree_snapshots").glob("*.git")):
+    for repo in sorted(_snapshots(session_dir).glob("*.git")):
         with _lock(repo):
             try:
                 tree = _git_dir(repo, "config", "--get", _TREE_KEY).stdout.strip()
@@ -234,6 +310,9 @@ def refresh_snapshots(session_dir: Path) -> list[str]:
         if error:
             log.error("tree snapshot %s not moved to the settled tree, dropped: %s", repo.name, error)
             errors.append(f"{repo.name}: {error}")
+    recorded = _recorded_heads(session_dir)
+    if recorded:
+        _record_heads(session_dir, recorded)
     return errors
 
 
@@ -269,18 +348,21 @@ def restore_tree(session_dir: Path, tree: Path) -> TreeRestore:
         tree: The tree to restore.
 
     Returns:
-        What differed, and the error when the tree could not be read or still
-        differs after the restore.
+        What differed, and the error when the tree still differs after the
+        restore or the restore failed.
+
+    Raises:
+        OSError: When the tree or its snapshot cannot be read.
+        subprocess.SubprocessError: When git wedges reading them.
     """
     repo = held_snapshot(session_dir, tree)
     if repo is None:
         return TreeRestore()
-    changed: tuple[str, ...] = ()
     with _lock(repo):
+        changed = _drift(repo, tree)
+        if not changed:
+            return TreeRestore()
         try:
-            changed = _drift(repo, tree)
-            if not changed:
-                return TreeRestore()
             for args in (("reset", "--hard"), ("clean", "-ffd")):
                 cp = _git(repo, tree, *args)
                 if cp.returncode != 0:
@@ -303,87 +385,166 @@ def integrate_in_flight(session_dir: Path) -> bool:
         return True
 
 
-def baseline_snapshot(session_dir: Path | None, tree: Path) -> tuple[Path | None, str]:
+def baseline_snapshot(session_dir: Path | None, tree: Path, roots: Iterable[str]) -> tuple[Path | None, str]:
     """The snapshot a patch specialist's worktree branches off and its run is held to.
 
-    Moved to the tree as it is on every dispatch: the check after the last run
-    put back whatever that run wrote, so anything else the tree has gained
-    since, such as a kernel KEEP or a replayed prelude, was written
-    legitimately. Mid-integrate the held snapshot stands as it is: the tree
-    holds a candidate no decision has kept, neither for the specialist to
-    build on nor for the check after its run to accept.
+    Moved to the tree as it is on every dispatch, and the HEAD of every
+    dependency checkout among ``roots`` recorded beside it: the check after the
+    last run put back whatever that run wrote, so anything else the tree has
+    gained since, such as a kernel KEEP or a replayed prelude, was written
+    legitimately. Both stand as they are mid-integrate, when the tree holds a
+    candidate no decision has kept, and while a stop holds the session on
+    trees no restore has put back, which the run's guard retries first.
 
     Args:
         session_dir: The session the snapshot belongs to; none means no snapshot.
         tree: The shared tree the specialist works beside.
+        roots: The Section 7 source roots the specialist is shown.
 
     Returns:
         ``(repo, "")`` with the snapshot, else ``(None, error)``.
     """
     if session_dir is None:
         snapshot, error = None, f"{tree} has no session dir to snapshot it into"
-    elif not integrate_in_flight(session_dir):
-        snapshot, error = snapshot_tree(session_dir, tree)
-    else:
+    elif _held(session_dir) or integrate_in_flight(session_dir):
         snapshot = held_snapshot(session_dir, tree)
-        error = "" if snapshot is not None else f"{tree} is being integrated into and has no snapshot yet"
+        error = "" if snapshot is not None else f"{tree} is held mid-integrate or unrestored and has no snapshot yet"
+    else:
+        snapshot, error = snapshot_tree(session_dir, tree)
+        _record_heads(session_dir, _dependency_checkouts(tree, roots))
     if snapshot is None:
         log.warning("no snapshot of %s, so no specialist run is checked against it: %s", tree, error)
     return snapshot, error
 
 
-async def restore_shared_tree(
-    session_dir: Path | None, tree: Path | None, state: SharedState | None, task_id: str
-) -> TreeRestore:
-    """Hold the shared tree a patch specialist ran beside to its snapshot.
+def _check(session_dir: Path, tree: Path, task_id: str) -> TreeRestore:
+    """Put ``tree`` back to its snapshot and compare the dependency HEADs with the recorded ones.
 
-    The specialist runs with every permission, so its worktree is a
-    convention it can step outside of. An integrate in flight writes the tree
-    legitimately, so the tree is not judged then. A tree that cannot be put
-    back stops the session: every later measurement would run on code no
-    decision kept. The git work runs off the event loop; the stop is recorded
-    on it, where the live state is written.
-
-    Args:
-        session_dir: The session the snapshot belongs to.
-        tree: The shared tree, or ``None`` when the run had none.
-        state: The live session state the stop is recorded on.
-        task_id: The specialist task the run belongs to.
-
-    Returns:
-        What the restore found; ``clean`` when the run left the tree alone or
-        was not judged.
+    What cannot be read is logged and not held against the run: not being able
+    to check a run is no evidence that it trespassed.
     """
-    if session_dir is None or tree is None:
-        return TreeRestore()
-    if await asyncio.to_thread(integrate_in_flight, session_dir):
-        log.info("specialist %s: %s not checked, an integrate is writing it", task_id, tree)
-        return TreeRestore()
-    restore = await asyncio.to_thread(restore_tree, session_dir, tree)
-    if restore.clean:
+    try:
+        restore = restore_tree(session_dir, tree)
+    except (OSError, subprocess.SubprocessError) as exc:
+        log.error("specialist %s: %s cannot be read against its snapshot, so it is not checked: %r", task_id, tree, exc)
+        restore = TreeRestore()
+    moved, unread = _moved_heads(session_dir)
+    if unread:
+        log.error("specialist %s: the HEAD of %s cannot be read, so it is not checked", task_id, ", ".join(unread))
+    return replace(restore, moved=moved)
+
+
+def _retry(session_dir: Path, tree: Path) -> TreeRestore:
+    """Put back the trees a stop left unrestored, and lift the hold once they are all back."""
+    try:
+        error = restore_tree(session_dir, tree).error
+    except (OSError, subprocess.SubprocessError) as exc:
+        error = f"{tree} cannot be read against its snapshot: {exc!r}"
+    moved, unread = _moved_heads(session_dir)
+    error = error or (f"the HEAD of {', '.join(unread)} cannot be read" if unread else "")
+    if not (error or moved):
+        try:
+            (_snapshots(session_dir) / _UNRESTORED).unlink(missing_ok=True)
+        except OSError as exc:
+            error = f"the hold cannot be lifted: {exc!r}"
+    return TreeRestore(error=error, moved=moved)
+
+
+@dataclass(frozen=True)
+class SharedTreeGuard:
+    """Holds a patch specialist's run to the shared trees as the session last accepted them.
+
+    The specialist runs with every permission, so its worktree is a convention
+    it can step outside of. After the run the tree the session optimises is put
+    back to its snapshot, and every dependency checkout beside it must still
+    sit at the HEAD recorded at dispatch; a dependency is only ever read, never
+    put back. An integrate in flight writes the trees legitimately, so they are
+    not judged then. A tree that is not back stops the session, as every later
+    measurement would run on code no decision kept, and holds it: a resumed
+    session puts the trees back before its next run rather than taking them as
+    that run's baseline. The git work runs off the event loop; the stop is
+    recorded on it, where the live state is written.
+
+    Attributes:
+        session_dir: The session the snapshot belongs to.
+        tree: The tree the session optimises, or ``None`` when the run had none.
+        state: The live session state a stop is recorded on.
+        task_id: The specialist task the run belongs to.
+    """
+
+    session_dir: Path | None
+    tree: Path | None
+    state: SharedState | None
+    task_id: str
+
+    async def resume(self) -> TreeRestore:
+        """Before the run, put back the trees a stop left unrestored, or stop the session again.
+
+        Returns:
+            ``clean`` when nothing was held or the trees are back; otherwise
+            why the session stopped again, and the run must not start.
+        """
+        if self.session_dir is None or self.tree is None or not _held(self.session_dir):
+            return TreeRestore()
+        if await asyncio.to_thread(integrate_in_flight, self.session_dir):
+            restore = TreeRestore(error="an integrate is writing the tree, so its restore cannot be retried")
+        else:
+            restore = await asyncio.to_thread(_retry, self.session_dir, self.tree)
+        if restore.clean:
+            log.warning("specialist %s: the shared trees are back as the session last accepted them", self.task_id)
+        else:
+            self._stop(self.session_dir, restore)
         return restore
-    log.error(
-        "specialist %s wrote the shared tree %s at %d path(s): %s",
-        task_id,
-        tree,
-        len(restore.changed),
-        list(restore.changed[:50]),
-    )
-    if restore.error:
-        log.critical("specialist %s: %s could not be put back, stopping the session: %s", task_id, tree, restore.error)
-        if state is not None:
-            state.set_stop_reason(PATCH_RECOVERY_INCOMPLETE_STOP_REASON)
-            state.save(session_dir)
-    return restore
+
+    async def check(self) -> TreeRestore:
+        """After the run, put the tree back and compare the dependency HEADs; stop when a tree is not back.
+
+        A tree that cannot be read is logged and the run kept, so nothing
+        raised here masks the run's own outcome.
+
+        Returns:
+            What the check found; ``clean`` when the run left the trees alone
+            or was not judged.
+        """
+        if self.session_dir is None or self.tree is None:
+            return TreeRestore()
+        if await asyncio.to_thread(integrate_in_flight, self.session_dir):
+            log.info("specialist %s: %s not checked, an integrate is writing it", self.task_id, self.tree)
+            return TreeRestore()
+        restore = await asyncio.to_thread(_check, self.session_dir, self.tree, self.task_id)
+        if not restore.clean:
+            log.error("specialist %s %s; paths: %s", self.task_id, restore.reason, list(restore.changed[:50]))
+        if restore.stops:
+            self._stop(self.session_dir, restore)
+        return restore
+
+    def _stop(self, session_dir: Path, restore: TreeRestore) -> None:
+        """Stop the session and hold it until the shared trees are back."""
+        hold = _snapshots(session_dir) / _UNRESTORED
+        log.critical(
+            "specialist %s: stopping the session, the shared trees are not back (%s); a resume retries before "
+            "its next run, and %s holds the session until then",
+            self.task_id,
+            restore.reason,
+            hold,
+        )
+        if self.state is not None:
+            self.state.set_stop_reason(PATCH_RECOVERY_INCOMPLETE_STOP_REASON)
+        try:
+            atomic_write_json(hold, {"task_id": self.task_id, "reason": restore.reason})
+            if self.state is not None:
+                self.state.save(session_dir)
+        except OSError as exc:
+            log.critical("specialist %s: the stop could not be recorded on disk: %r", self.task_id, exc)
 
 
 __all__ = [
+    "SharedTreeGuard",
     "TreeRestore",
     "baseline_snapshot",
     "held_snapshot",
     "integrate_in_flight",
     "refresh_snapshots",
-    "restore_shared_tree",
     "restore_tree",
     "snapshot_tree",
 ]

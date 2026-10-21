@@ -2412,7 +2412,10 @@ class IntegratePatchExecutor:
             except (OSError, AttributeError) as exc:
                 log.error("integrate_patch: could not persist cancelled attempt recovery: %s", exc)
             raise
-        return self._finish_attempt(attempt, result)
+        settled = self._finish_attempt(attempt, result)
+        if settled.get(RESULT_BENCHED) and "recovery_errors" not in settled:
+            await asyncio.to_thread(refresh_snapshots, self.session_dir)
+        return settled
 
     def _finish_attempt(self, attempt: IntegrateAttempt, result: dict[str, Any]) -> dict[str, Any]:
         """Discharge the attempt's restore obligations exactly once before returning."""
@@ -2444,8 +2447,6 @@ class IntegratePatchExecutor:
                 "error_class": "integrate_restore_incomplete",
                 "recovery_errors": summary["failed"],
             }
-        if not applied_only:
-            refresh_snapshots(self.session_dir)
         if not accepted and not applied_only:
             result["patches_reverted"] = [str(patch) for patch in attempt.applied]
             if attempt.applied_artifacts:

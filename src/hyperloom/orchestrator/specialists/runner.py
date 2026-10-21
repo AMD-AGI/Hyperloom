@@ -61,7 +61,7 @@ from .subprocess_ import (
 )
 from . import patch_safety as _patch_safety
 from .profile import MODE_PATCH, SpecialistProfile, resolve_specialist_profile
-from .tree_snapshot import baseline_snapshot, restore_shared_tree
+from .tree_snapshot import SharedTreeGuard, baseline_snapshot
 from hyperloom.inference_optimizer.framework_paths import (
     FrameworkTree,
     framework_apply_tree,
@@ -557,11 +557,14 @@ class SpecialistRunner:
         if prep.early_return is not None:
             return prep.early_return
 
-        try:
-            result = await self._run_via_subprocess(ctx, prep)
-        finally:
-            guard = (self.session_dir, prep.worktree_base, ctx.extra.get("shared_state"), ctx.task.task_id)
-            restore = await restore_shared_tree(*guard)
+        guard = SharedTreeGuard(self.session_dir, prep.worktree_base, ctx.extra.get("shared_state"), ctx.task.task_id)
+        restore = await guard.resume()
+        result = SpecialistRunResult(ctx.task.task_id, prep.domain.key if prep.domain else "", prep.gap, "", {})
+        if restore.clean:
+            try:
+                result = await self._run_via_subprocess(ctx, prep)
+            finally:
+                restore = await guard.check()
         if restore.clean:
             return result
         violation = SpecialistFailureType.SHARED_TREE_VIOLATION.value
@@ -1253,12 +1256,11 @@ class SpecialistRunner:
         source = _worktree_source(ctx.task.params or {})
         if source is None:
             return None, None, ""
-        base = source.root
-        snapshot, err = baseline_snapshot(self.session_dir, source.root)
-        if not source.checkout:
-            if snapshot is None:
-                return None, source, err
-            base = snapshot
+        roots = (ctx.task.params or {}).get("framework_source_roots") or ()
+        snapshot, err = baseline_snapshot(self.session_dir, source.root, roots)
+        if not source.checkout and snapshot is None:
+            return None, source, err
+        base = source.root if source.checkout or snapshot is None else snapshot
         worktree_path = workspace / "worktree"
         branch = f"specialist-{ctx.task.task_id}"
         wt, err = _setup_worktree(base, worktree_path, branch)

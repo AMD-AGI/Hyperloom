@@ -342,17 +342,17 @@ def test_snapshot_is_not_invented_while_the_package_is_mid_integrate(tmp_path: P
     state.pending_integrate = {"task_id": "t-integrate", "patches": []}
     state.save(session)
 
-    repo, err = baseline_snapshot(session, package)
+    repo, err = baseline_snapshot(session, package, ())
     assert repo is None
-    assert "being integrated into" in err
+    assert "mid-integrate" in err
 
     state.pending_integrate = {}
     state.save(session)
-    taken, _ = baseline_snapshot(session, package)
+    taken, _ = baseline_snapshot(session, package, ())
     state.pending_integrate = {"task_id": "t-integrate-2", "patches": []}
     state.save(session)
     (package / "envs.py").write_text("VLLM_USE_X = 3\n", encoding="utf-8")
-    held, err = baseline_snapshot(session, package)
+    held, err = baseline_snapshot(session, package, ())
     assert err == "" and held == taken
     wt, _ = _setup_worktree(held, tmp_path / "ws" / "worktree", "specialist-t3")
     assert wt is not None and (wt / "envs.py").read_text(encoding="utf-8") == "VLLM_USE_X = 0\n"
