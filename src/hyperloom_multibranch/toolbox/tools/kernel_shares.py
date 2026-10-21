@@ -28,7 +28,9 @@ excluded, in the windows without a replay in flight. The window is **degraded**,
   wrongly, because every kept share is that much too high and an excluded kernel might outrank a listed one.
 
 A kernel is named by its function, with the template arguments and the parameter list dropped; a hipBLASLt (Tensile)
-kernel by its signature, without the tile (``_MT...``) that makes every shape its own name.
+kernel by its signature, without the tile (``_MT...``) that makes every shape its own name. A name that several modules
+launch (the four FlyDSL GEMMs of a layer are all ``kernel_gemm_0``) is split, ``name [Module.Submodule]``, when the events
+say which module launched each (:mod:`~.kernel_launchers`); an event without a known launcher keeps the plain name.
 """
 
 from __future__ import annotations
@@ -65,6 +67,7 @@ MIN_GPU_BUSY_PERCENT = 10.0
 MAX_EXCLUDED_SHARE = 0.05
 KERNEL_SHARES_FILE = "kernel_shares.csv"
 _LABEL_CHARS = 120
+_LAUNCHER_CHARS = 60
 _US_PER_MS = 1000.0
 _FUNCTION = re.compile(r"(?:\(anonymous namespace\)|[^<(])+")
 _MANGLED = re.compile(r"_Z(?:N[KV]*)?(?=\d)")
@@ -80,12 +83,19 @@ class KernelTraceError(Exception):
 
 @dataclass(frozen=True, slots=True)
 class GpuEvent:
-    """One GPU event of a trace: the ``(device, stream)`` that ran it, microseconds, and the kernel's raw name."""
+    """One GPU event of a trace: the ``(device, stream)`` that ran it, microseconds, and the kernel's raw name.
+
+    ``correlation`` ties it to the host call that launched it (a graph launch's kernels share one); ``launcher`` is the
+    module that launched it, empty while unknown.
+    """
 
     stream: tuple[str, str]
     start: float
     end: float
     name: str
+    correlation: int | None = None
+    category: str = "kernel"
+    launcher: str = ""
 
     @property
     def duration(self) -> float:
@@ -98,7 +108,7 @@ def _number(value: Any) -> float | None:
     return float(value)
 
 
-def _gpu_event(raw: Any) -> GpuEvent | None:
+def gpu_event(raw: Any) -> GpuEvent | None:
     if not isinstance(raw, dict) or raw.get("ph") != "X" or raw.get("cat") not in GPU_CATEGORIES:
         return None
     start, duration, name = _number(raw.get("ts")), _number(raw.get("dur")), raw.get("name")
@@ -106,11 +116,19 @@ def _gpu_event(raw: Any) -> GpuEvent | None:
         return None
     args = raw.get("args")
     stream = str(args.get("stream")) if isinstance(args, dict) else ""
-    return GpuEvent((str(raw.get("pid")), stream), start, start + duration, name)
+    correlation = _number(args.get("correlation")) if isinstance(args, dict) else None
+    return GpuEvent(
+        (str(raw.get("pid")), stream),
+        start,
+        start + duration,
+        name,
+        int(correlation) if correlation is not None else None,
+        raw["cat"],
+    )
 
 
-def read_gpu_events(path: Path) -> list[GpuEvent]:
-    """The GPU events (kernels, copies, memsets) of the Chrome trace at ``path`` (``.json`` or ``.json.gz``)."""
+def trace_events(path: Path) -> list[Any]:
+    """The ``traceEvents`` of the Chrome trace at ``path`` (``.json`` or ``.json.gz``), as the file holds them."""
     opener = gzip.open if path.suffix == ".gz" else open
     try:
         with opener(path, "rt", encoding=_ENCODING, errors="replace") as handle:
@@ -120,7 +138,12 @@ def read_gpu_events(path: Path) -> list[GpuEvent]:
     events = payload.get("traceEvents") if isinstance(payload, dict) else payload
     if not isinstance(events, list):
         raise KernelTraceError(f"{path.name} has no traceEvents list")
-    return [event for event in map(_gpu_event, events) if event is not None]
+    return events
+
+
+def read_gpu_events(path: Path) -> list[GpuEvent]:
+    """The GPU events (kernels, copies, memsets) of the Chrome trace at ``path`` (``.json`` or ``.json.gz``)."""
+    return [event for event in map(gpu_event, trace_events(path)) if event is not None]
 
 
 @dataclass(frozen=True)
@@ -272,13 +295,24 @@ class KernelWindow:
         return {row.name: row.percent for row in self.rows}
 
 
+def _launcher_split(labels: list[tuple[str, str]]) -> set[str]:
+    """The kernel labels that more than one module launched: only those are split by launcher."""
+    launchers: dict[str, set[str]] = defaultdict(set)
+    for label, launcher in labels:
+        if launcher:
+            launchers[label].add(launcher)
+    return {label for label, modules in launchers.items() if len(modules) > 1}
+
+
 def _rows(kept: list[GpuEvent]) -> tuple[KernelRow, ...]:
+    labels = [(kernel_label(event.name), event.launcher) for event in kept]
+    split = _launcher_split(labels)
     time_us: dict[str, float] = defaultdict(float)
     count: dict[str, int] = defaultdict(int)
-    for event in kept:
-        label = kernel_label(event.name)
-        time_us[label] += event.duration
-        count[label] += 1
+    for event, (label, launcher) in zip(kept, labels, strict=True):
+        key = f"{label} [{launcher[:_LAUNCHER_CHARS]}]" if launcher and label in split else label
+        time_us[key] += event.duration
+        count[key] += 1
     total = math.fsum(time_us.values())
     if total <= 0:
         return ()
@@ -345,9 +379,11 @@ __all__ = [
     "KernelRow",
     "KernelTraceError",
     "KernelWindow",
+    "gpu_event",
     "kernel_label",
     "kernel_window",
     "read_gpu_events",
     "split_in_order",
+    "trace_events",
     "write_kernel_table",
 ]

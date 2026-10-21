@@ -45,6 +45,7 @@ from hyperloom.inference_optimizer.session import paths as session_paths
 from hyperloom.orchestrator.actions.executors import run_with_session_kill
 from hyperloom.orchestrator.trace_analysis.tracelens_arch_benchmark import resolve_arch_json_path
 from hyperloom.orchestrator.trace_analysis.tracelens_skill_runner import discover_capture_folder
+from hyperloom_multibranch.toolbox.tools.kernel_launchers import Relabelled, read_launched_window
 from hyperloom_multibranch.toolbox.tools.kernel_shares import (
     KERNEL_SHARES_FILE,
     KernelTraceError,
@@ -236,10 +237,12 @@ def _graph_replay_coverage(run: _Run) -> GraphReplayCoverage:
     return check_graph_replay_coverage(unified)
 
 
-def _kernel_window(chunk: Path, trace: Path) -> KernelWindow:
-    """The kernel shares of the window's GPU events; the whole rank trace is read only to price excluded events."""
+def _kernel_window(chunk: Path, trace: Path, capture: Path | None) -> tuple[KernelWindow, Relabelled]:
+    """The kernel shares of the window's GPU events, the kernels of its graph replays named by the capture's launches; the
+    whole rank trace is read only to price excluded events."""
     try:
-        return kernel_window(read_gpu_events(chunk), lambda: read_gpu_events(trace))
+        launched = read_launched_window(chunk, capture)
+        return kernel_window(launched.events, lambda: read_gpu_events(trace)), launched
     except KernelTraceError as exc:
         raise _Refused("kernel_trace_unreadable", str(exc)) from None
 
@@ -281,7 +284,7 @@ def _analyse(payload: Mapping[str, Any], session_dir: Path) -> dict[str, Any]:
     coverage = _graph_replay_coverage(run)
     if coverage.graph_under_recorded:
         _write_degraded_report(run, coverage)
-    kernels = _kernel_window(chunk, trace)
+    kernels, launched = _kernel_window(chunk, trace, capture)
     degraded = kernels.degraded_reason
     if not degraded:
         write_kernel_table(kernels, run.out_dir / KERNEL_SHARES_FILE)
@@ -308,6 +311,9 @@ def _analyse(payload: Mapping[str, Any], session_dir: Path) -> dict[str, Any]:
         EXCLUDED_EVENTS_KEY: kernels.excluded_events,
         EXCLUDED_CLAIMED_KEY: round(kernels.excluded_claimed_ms, 2),
         "excluded_estimated_ms": round(kernels.excluded_estimated_ms, _TIME_DIGITS),
+        "launcher_labelled_kernels": launched.launched,
+        "graph_kernels_renamed": launched.renamed,
+        "launcher_notes": list(launched.notes),
         OWN_DEGRADED_KEY: degraded,
         "trace_health_warnings": warnings,
         "duration_sec": round(time.monotonic() - started, _TIME_DIGITS),

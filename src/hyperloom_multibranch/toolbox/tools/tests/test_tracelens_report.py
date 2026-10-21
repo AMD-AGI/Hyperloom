@@ -43,9 +43,11 @@ CK_GEMM = "ck::kernel_gemm_xdl_cshuffle_v3_multi_d_blockscale_b_preshuffle"
 class Shell:
     """Stands in for ``run_with_session_kill``: writes what TraceLens' splitter and perf report would, records the argv."""
 
-    def __init__(self, *, chunk: str | None = CHUNK, report_rc: int = 0, window: str = DEFAULT_WINDOW) -> None:
+    def __init__(
+        self, *, chunk: str | None = CHUNK, report_rc: int = 0, window: str = DEFAULT_WINDOW, events: str = "gpu_events"
+    ) -> None:
         self.commands: list[list[str]] = []
-        self._chunk, self._report_rc, self._window = chunk, report_rc, window
+        self._chunk, self._report_rc, self._window, self._events = chunk, report_rc, window, events
 
     def __call__(self, cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess:
         self.commands.append(cmd)
@@ -54,7 +56,7 @@ class Shell:
             out = Path(cmd[cmd.index("-o") + 1])
             out.mkdir(parents=True)
             if self._chunk:
-                shutil.copy(DATA / f"{self._window}_gpu_events.json.gz", out / self._chunk)
+                shutil.copy(DATA / f"{self._window}_{self._events}.json.gz", out / self._chunk)
             return subprocess.CompletedProcess(cmd, 0, "", "")
         csvs = Path(cmd[cmd.index("--output_csvs_dir") + 1])
         csvs.mkdir(parents=True)
@@ -319,6 +321,53 @@ async def test_a_decode_window_with_eager_kernels_stamped_inside_the_graph_repla
     assert (
         Path(result["kernel_shares_path"]).read_text(encoding="utf-8").splitlines()[1].startswith("kernel_gemm_0,44.1")
     )
+
+
+async def _with_capture(
+    tmp_path: Path, rig: Rig, monkeypatch: pytest.MonkeyPatch, *, capture: bool = True
+) -> tuple[JobStatus, ToolResultPointer, dict]:
+    """The b40 decode window with the launch calls and frames of its trace, beside the graph capture it replays."""
+    folder = rig.trace_input / "torch_trace" / "graph_capture_profile"
+    if capture:
+        shutil.copy(DATA / "b40_capture_execution_details.json", folder / "execution_details.json")
+        shutil.copy(DATA / "b40_capture_bs64_launches.json.gz", folder / "DecodeCudaGraphRunner_bs_64_rank0.json.gz")
+    monkeypatch.setattr(report, "run_with_session_kill", Shell(window="b40_window", events="launch_events"))
+    shutil.copy(DATA / "b40_rank_trace_gpu_events.json.gz", rig.trace)
+    return await _run(tmp_path, HINTS, rig)
+
+
+async def test_a_decode_window_beside_its_graph_capture_names_the_four_gemms_by_the_module_that_launched_them(
+    rig: Rig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The pointer's one ``kernel_gemm_0`` (44.1%) is the layer's gate_up, down, qkv and out GEMMs, 28.1, 16.4, 6.7, 5.8%."""
+    status, pointer, record = await _with_capture(tmp_path, rig, monkeypatch)
+    assert status is JobStatus.SUCCEEDED and DEGRADED_NOTICE not in pointer.summary
+    gemms = {name: share for name, share in pointer.op_shares.items() if name.startswith("kernel_gemm_0")}
+    assert {name.removeprefix("kernel_gemm_0 "): round(share, 1) for name, share in gemms.items()} == {
+        "[Qwen2MLP.MergedColumnParallelLinear]": 28.1,
+        "[Qwen2MLP.RowParallelLinear]": 16.4,
+        "[Qwen3Attention.QKVParallelLinear]": 6.7,
+        "[Qwen3Attention.RowParallelLinear]": 5.8,
+    }
+    assert len(pointer.op_shares) <= 50 and sum(pointer.op_shares.values()) == pytest.approx(100.0, abs=0.01)
+    result = record["result"]
+    assert (result["launcher_labelled_kernels"], result["graph_kernels_renamed"], result["launcher_notes"]) == (
+        605,
+        420,
+        [],
+    )
+    table = Path(result["kernel_shares_path"]).read_text(encoding="utf-8").splitlines()
+    assert table[1].startswith("kernel_gemm_0 [Qwen2MLP.MergedColumnParallelLinear],28.1")
+
+
+async def test_a_decode_window_without_its_graph_capture_keeps_one_gemm_entry_and_says_why(
+    rig: Rig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    status, pointer, record = await _with_capture(tmp_path, rig, monkeypatch, capture=False)
+    assert status is JobStatus.SUCCEEDED and pointer.op_shares["kernel_gemm_0"] == pytest.approx(44.1, abs=0.05)
+    result = record["result"]
+    assert (result["launcher_labelled_kernels"], result["graph_kernels_renamed"]) == (1, 0)  # the eager sampler's
+    assert len(result["launcher_notes"]) == 1 and "left as recorded" in result["launcher_notes"][0]
 
 
 async def test_excluded_events_of_a_kernel_the_trace_never_ran_clean_degrade_the_window_it_does_not_rank_a_guess(
