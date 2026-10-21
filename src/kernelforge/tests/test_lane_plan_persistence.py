@@ -12,10 +12,12 @@ from types import SimpleNamespace
 
 import pytest
 
+from kernelforge.tests.conftest import silence_jit_rebuild
 from kernelforge.loop import runner as runner_module
 from kernelforge.loop.fanout import LaneResult
 from kernelforge.loop.run_state import LoopStateStore, RunState, make_event
-from kernelforge.loop.runner import IterationConfig, IterationLoop
+from kernelforge.loop.iteration_types import IterationConfig
+from kernelforge.loop.runner import IterationLoop
 from kernelforge.orchestrator.contracts import PlanCriticOutcome
 from kernelforge.tracker import ExperimentTracker
 
@@ -50,7 +52,7 @@ def _reopen(workspace, tmp_path, monkeypatch):
 
 
 def _open_loop(workspace, experiments_root, monkeypatch):
-    monkeypatch.setattr(runner_module, "force_jit_rebuild", lambda _files: None)
+    silence_jit_rebuild(monkeypatch)
 
     loop = IterationLoop(
         IterationConfig(

@@ -23,7 +23,8 @@ from kernelforge.roofline_ceiling.contract import load_report
 from kernelforge.roofline_ceiling.estimate import estimate_ceiling as real_estimate_ceiling
 from kernelforge.roofline_ceiling.report import REPORT_FILENAME, WORKSPACE_SUBDIR
 from kernelforge.loop.run_state import RunState
-from kernelforge.loop.runner import IterationConfig, IterationLoop
+from kernelforge.loop.iteration_types import IterationConfig
+from kernelforge.loop.runner import IterationLoop
 
 
 def _report(cases=(("decode-t1", 12.8),)):
@@ -127,10 +128,13 @@ def test_the_ceiling_never_reaches_the_keep_decision():
 
 def test_one_reader_loads_the_ceiling_for_the_whole_loop():
     """One loader means one thing to audit if the invariant above ever bends."""
-    from kernelforge.loop import runner as runner_module
+    loop_package = Path(inspect.getsourcefile(IterationLoop)).parent
 
-    source = inspect.getsource(runner_module)
-    assert source.count("from kernelforge.roofline_ceiling.report import read_report") == 1
+    loaders = sum(
+        module.read_text().count("from kernelforge.roofline_ceiling.report import read_report")
+        for module in sorted(loop_package.glob("*.py"))
+    )
+    assert loaders == 1
     assert "read_report" in inspect.getsource(IterationLoop._ceiling)
     # Every other user goes through that loader rather than the filesystem.
     for method in (

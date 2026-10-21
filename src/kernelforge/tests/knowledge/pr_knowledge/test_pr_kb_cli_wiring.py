@@ -163,7 +163,8 @@ def test_position_a_never_writes_events_itself(tmp_path):
 
 def test_loop_appends_the_event_only_after_the_campaign_guard():
     """Append the event only after campaign initialization."""
-    from kernelforge.loop.runner import IterationConfig, IterationLoop
+    from kernelforge.loop.iteration_types import IterationConfig
+    from kernelforge.loop.runner import IterationLoop
 
     assert "pr_kb_event" in set(IterationConfig.__dataclass_fields__)
     assert "already contains a campaign" in inspect.getsource(IterationLoop._restore_or_begin_campaign)

@@ -11,7 +11,7 @@ counted rather than dropped.
 from __future__ import annotations
 
 from kernelforge.agent_backends.base import AgentRunSpec, AgentRuntimeConfig
-from kernelforge.loop.runner import llm_spend_lines
+from kernelforge.loop.campaign_report import llm_spend_lines
 from kernelforge.tracker.usage import UsageAccumulator
 
 

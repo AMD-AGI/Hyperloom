@@ -43,10 +43,7 @@ from kernelforge.loop.run_state import (
     should_resume,
     start_session,
 )
-from kernelforge.loop.runner import (
-    LONG_HORIZON_OUTCOME_WINDOW,
-    _long_horizon_header,
-)
+from kernelforge.loop.campaign_report import LONG_HORIZON_OUTCOME_WINDOW, _long_horizon_header
 
 # The header's own rendering budgets, read from the definition that owns them so the expectations below cannot drift
 # from the defaults the loop relies on.
