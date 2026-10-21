@@ -304,7 +304,6 @@ class _TargetedRecipe:
         self._run_raw = run
         self._git = git
         self._disk_preflight_fn = disk_preflight_fn
-        self.result: BuildResult | None = None
         self.abi: dict[str, Any] = {}
         self.worktree_dir: Path
         self.venv_dir: Path
@@ -328,8 +327,8 @@ class _TargetedRecipe:
             error=summary,
         )
 
-    def preflight(self) -> None:
-        """Disk and toolchain checks; sets ``result`` on failure."""
+    def preflight(self) -> BuildResult | None:
+        """Disk and toolchain checks; returns the failed result, or ``None`` when they pass."""
         import os as _os
         import sys as _sys
 
@@ -342,25 +341,23 @@ class _TargetedRecipe:
                 try:
                     disk_preflight(self.root, 1, per_candidate_gb=self.disk_gb)
                 except DiskPreflightError as exc:
-                    self.result = self._fail("preflight_disk", str(exc))
-                    return
+                    return self._fail("preflight_disk", str(exc))
         except (OSError, ValueError) as exc:
-            self.result = self._fail("preflight_disk", f"disk preflight raised: {exc!r}")
-            return
+            return self._fail("preflight_disk", f"disk preflight raised: {exc!r}")
 
         tc_ok, tc_msg = self._check_rocm(env=dict(_os.environ), run=self._run)
         if not tc_ok:
-            self.result = self._fail("preflight_toolchain", tc_msg)
-            return
+            return self._fail("preflight_toolchain", tc_msg)
         self.abi = self._probe_abi(_sys.executable, run=self._run)
         if not self.abi.get("is_rocm"):
-            self.result = self._fail(
+            return self._fail(
                 "preflight_toolchain",
                 f"host torch is not a ROCm build (torch={self.abi.get('torch_version')})",
             )
+        return None
 
-    def prepare(self) -> None:
-        """Isolation workspace and ROCm constraints; sets ``result`` on failure."""
+    def prepare(self) -> BuildResult | None:
+        """Isolation workspace and ROCm constraints; returns the failed result, or ``None`` when ready."""
         self.repo_url = str(self.action.repo_url or self.default_repo).strip() or self.default_repo
         self.ref = str(self.action.ref or "").strip()
         try:
@@ -374,17 +371,17 @@ class _TargetedRecipe:
             self.venv_dir = ws.venv_dir
             self.attempt_py = str(self.venv_dir / "bin" / "python")
         except (OSError, subprocess.SubprocessError) as exc:
-            self.result = self._fail("compile_error", f"workspace preparation failed: {exc!r}")
-            return
+            return self._fail("compile_error", f"workspace preparation failed: {exc!r}")
 
         try:
             self._write_constraints(
                 self.attempt_py, str(self.root / ROCM_CONSTRAINTS_FILE), replacing=self.replacing, run=self._run
             )
         except self._AbiMismatchError as exc:
-            self.result = self._fail("abi_mismatch", str(exc))
+            return self._fail("abi_mismatch", str(exc))
         except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
-            self.result = self._fail("preflight_toolchain", f"ROCm constraint probe failed: {exc!r}")
+            return self._fail("preflight_toolchain", f"ROCm constraint probe failed: {exc!r}")
+        return None
 
     def installed_versions(self, prefix: str, selected_ref: str, gpu_arch: str) -> dict[str, str]:
         git_run = self._git if self._git is not None else self._run
@@ -419,13 +416,7 @@ class _AiterBuild(_TargetedRecipe):
         self.jit_dir.mkdir(parents=True, exist_ok=True)
         self.aiter_home = self.root / "home"
         self.aiter_home.mkdir(parents=True, exist_ok=True)
-        self.preflight()
-        if self.result is not None:
-            return self.result
-        self.prepare()
-        if self.result is not None:
-            return self.result
-        return self.install()
+        return self.preflight() or self.prepare() or self.install()
 
     def install(self) -> BuildResult:
         import os as _os
@@ -744,9 +735,9 @@ class _VllmBuild(_TargetedRecipe):
     def run(self) -> BuildResult:
         import sys as _sys
 
-        self.preflight()
-        if self.result is not None:
-            return self.result
+        failed = self.preflight()
+        if failed is not None:
+            return failed
         gpu_arch = str(self.action.gpu_arch or "").strip()
         if not gpu_arch:
             return self._fail("preflight_toolchain", "gpu_arch must be set explicitly for vLLM source (L6)")
@@ -761,10 +752,7 @@ class _VllmBuild(_TargetedRecipe):
                 abi_pyver,
                 host_pyver,
             )
-        self.prepare()
-        if self.result is not None:
-            return self.result
-        return self.install(gpu_arch)
+        return self.prepare() or self.install(gpu_arch)
 
     def install(self, gpu_arch: str) -> BuildResult:
         import os as _os
