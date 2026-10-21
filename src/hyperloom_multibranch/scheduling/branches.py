@@ -8,7 +8,9 @@ Opening a branch records its ``OPEN`` lineage, cuts it in the experiment reposit
 specialist there and gives it its K; the session's briefs keep the focus a branch the scheduler opens in a batch was
 opened with. A user branch opens the same way at the root commit, on the direction the user wrote for it, which its
 started decision records. A repair the fork desk admitted is opened the same way at the commit its blocked
-candidate was measured against; a fork is cut by the rule gate, which lands the fix on it first and records its
+candidate was measured against, and only while the branch that asked for it is still at that commit: once that branch
+has committed past it the candidate could no longer land there either, so the repair is not cut and is handed back
+like a fork the gate did not land. A fork is cut by the rule gate, which lands the fix on it first and records its
 ``SPLIT`` lineage, so it gets no ``OPEN``: it is opened at its head once the gate has landed it, and a fork the gate
 does not land is stopped as not started. A repair's specialist starts on the request it was admitted for,
 and a repair branch is stopped :data:`REPAIR_BRANCH_SECONDS` after its entry into the roster. Stopping a branch
@@ -43,7 +45,7 @@ from hyperloom_multibranch.contracts.lifecycle import BranchTask, SpecialistLife
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.notebook.records import LineageEvent
 from hyperloom_multibranch.contracts.notebook.vocab import LineageKind
-from hyperloom_multibranch.contracts.repo import ExperimentRepo
+from hyperloom_multibranch.contracts.repo import BranchMoved, ExperimentRepo
 from hyperloom_multibranch.scheduling.context import SchedulerContext
 from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind
 from hyperloom_multibranch.scheduling.forks import DECISION_KINDS, AdmittedBranch
@@ -186,9 +188,18 @@ class BranchControl:
         await self._fail_start(self._roster.entry(branch), reason)
 
     async def _admitted_start(self, entry: BranchEntry, parent_commit: str) -> str:
-        """The commit an admitted branch starts at: a repair's parent commit, a landed fork's head."""
+        """The commit an admitted branch starts at: a repair's parent commit, a landed fork's head.
 
-        return parent_commit if entry.origin.cut_by_scheduler else await self._repo.head(entry.branch)
+        A repair reproduces a candidate measured against ``parent_commit``; once the branch that asked for it has
+        committed past that commit the candidate could no longer land there either, so the repair is not cut.
+        """
+
+        if not entry.origin.cut_by_scheduler:
+            return await self._repo.head(entry.branch)
+        head = await self._repo.head(entry.from_branch)
+        if head != parent_commit:
+            raise BranchMoved(f"{entry.from_branch} moved from {parent_commit} to {head} while the repair waited")
+        return parent_commit
 
     async def _open(self, entry: BranchEntry, start_commit: str, deadline: float, launch: Launch) -> BranchEntry:
         """Record ``OPEN`` and cut a branch the scheduler cuts, give the toolbox its K and start its specialist on
