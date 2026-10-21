@@ -255,15 +255,11 @@ def _compose_critic(out: dict[str, Any]) -> None:
     if not isinstance(rows, list):
         return
 
-    def _iter_of(row: dict[str, Any]) -> int:
-        try:
-            return int(row.get("iter") or 0)
-        except (TypeError, ValueError):
-            return 0
-
+    # ``iter`` restarts with the process on resume, so only the timestamp orders
+    # the passes; rows without one keep their relative order after the rest.
     iterations = sorted(
         (r for r in rows if isinstance(r, dict)),
-        key=lambda r: (_iter_of(r), str(r.get("ts") or "")),
+        key=lambda r: (not r.get("ts"), str(r.get("ts") or "")),
     )
     out["critic"] = {"iterations": iterations}
 
