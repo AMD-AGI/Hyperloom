@@ -406,8 +406,8 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     latency_budget_ms: float = 0.0
     power_budget_w: float = 0.0  # --max-power-w: total W over the serving cards; 0.0 is off. Archived, like latency.
     power_budget_per_gpu_w: dict[str, float] = field(default_factory=dict)  # --max-per-gpu-power-w {GPU id: W}
-    # The GPU power settings the session is measured under: {"declared": {power_cap_w, perf_level}, "observed":
-    # {gpu: {power_cap_w, perf_level}}}. Read at launch and asserted on resume; never set by the optimizer.
+    # The GPU power settings the session is measured under: {"declared", "observed": {gpu: {power_cap_w, perf_level}},
+    # "applied" only with --apply-gpu-power-settings}. Read at launch, asserted on resume; never changed mid-session.
     gpu_power_settings: dict[str, Any] = field(default_factory=dict)
     # AgentX corpus shape: written at seed from canonical constants, overwritten with measured values after every
     # AgentX measurement. Read by semantic consumers (prompts, manifest, reports) instead of the inert state.isl /
@@ -496,7 +496,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     custom_specialist_only: bool = False
     # ``--extra-env NAME=VALUE`` pins.
     operator_extra_env: dict[str, str] = field(default_factory=dict)
-    # Operator-supplied custom-workload paths.
+    # Operator-supplied custom-workload paths; a promoted enablement runtime replaces framework_repo_path with its checkout.
     bypass_scripts_dir: str = ""
     framework_repo_path: str = ""
     # ``HYPERLOOM_BENCHMARK_BACKEND`` at seed time (``bypass`` for custom).
