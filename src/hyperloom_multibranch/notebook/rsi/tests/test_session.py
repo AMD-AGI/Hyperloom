@@ -22,6 +22,7 @@ from hyperloom_multibranch.notebook.knowledge.breakdown import build_breakdown
 from hyperloom_multibranch.notebook.knowledge.tests.kb_service import experience_service
 from hyperloom_multibranch.notebook.rsi import session
 from hyperloom_multibranch.notebook.rsi.archive import ARCHIVE_ENV, ARCHIVED, SKIPPED, TreeArchive
+from hyperloom_multibranch.notebook.rsi.authoring import session_challenger
 from hyperloom_multibranch.notebook.rsi.bandit import BANDIT_LABEL, BanditScorer
 from hyperloom_multibranch.notebook.rsi.calibration import DEFAULT_POLICY, PolicyChoice
 from hyperloom_multibranch.notebook.rsi.expression import ExpressionScorer
@@ -45,7 +46,6 @@ from hyperloom_multibranch.notebook.rsi.session import (
     close_knowledge,
     judge_history,
     named_frontier_choice,
-    session_challenger,
     session_frontier_policy,
     session_frontier_scorer,
 )

@@ -22,6 +22,10 @@ behind it over the evidence the gate asks for, the high end of its lead below 0.
 cost is the scheduler's to record, as ``UsageSource.SCORER``. A candidate is evidence only on the sessions that start
 after it is written (:mod:`rsi.scorers`), so the LLM may read the whole archive without a candidate fitted to it
 winning on it.
+
+:func:`session_challenger` is PRELUDE's call for a 1-in-4 exploration session, which the scheduler picks: the first
+challenger :func:`parents` offers after the champion, from the same standings, which crowns nothing; promotion stays
+:func:`~hyperloom_multibranch.notebook.rsi.session.session_frontier_scorer`.
 """
 
 from __future__ import annotations
@@ -42,6 +46,7 @@ from hyperloom_multibranch.notebook.rsi.calibration import (
     VARIATIONS,
     CalibrationReport,
     Comparison,
+    PolicyChoice,
     Registered,
     calibrate,
     calibrate_against,
@@ -57,6 +62,7 @@ from hyperloom_multibranch.notebook.rsi.frontier import (
     MIN_EFFECTIVE_SESSIONS,
     OBSERVATION_FLOOR_PCT,
     SCORER_LABEL,
+    FrontierPolicy,
     FrontierScorer,
 )
 from hyperloom_multibranch.notebook.rsi.report import number
@@ -75,7 +81,9 @@ from hyperloom_multibranch.notebook.rsi.session import (
     WRITTEN,
     CloseStep,
     archived_history,
+    named_frontier_choice,
 )
+from hyperloom_multibranch.notebook.rsi.similarity import task_conditions
 
 log = logging.getLogger(__name__)
 
@@ -176,6 +184,31 @@ def parents(found: Survey) -> tuple[str, ...]:
     ]
     best = sorted(led, key=lambda item: item.difference_low or 0.0, reverse=True)[: MAX_PARENTS - 1]
     return (found.champion, *(item.label for item in best))
+
+
+def session_challenger(
+    snapshot: NotebookSnapshot, history: Sequence[SearchTree], defaults: FrontierPolicy, pool: ScorerPool | None = None
+) -> PolicyChoice | None:
+    """The scorer a 1-in-4 exploration session scores with, under ``defaults``: the first challenger :func:`parents`
+    offers after the champion, on the archived sessions like this one, from ``pool``, by default the one beside the
+    environment's archive. ``None`` when the session has no profile, there is no pool, or no challenger qualifies.
+    It crowns nothing."""
+
+    if snapshot.profile is None:
+        return None
+    if pool is None:
+        archive = TreeArchive.from_env()
+        pool = None if archive is None else ScorerPool.beside(archive)
+    if pool is None:
+        return None
+    found = survey(tuple(item.tree for item in similar_trees(history, task_conditions(snapshot.profile))), pool)
+    label = next((item for item in parents(found) if item != found.champion), None)
+    compared = None if label is None else found.standings.comparison(label)
+    if label is None or compared is None:
+        return None
+    lead = f"{number(compared.difference_low)} to {number(compared.difference_high)}"
+    evidence = f"{label}: exploration challenger, its lead over {found.champion} {lead}"
+    return named_frontier_choice(label, defaults, evidence, pool)
 
 
 def _tree_lines(tree: SearchTree) -> list[str]:
@@ -432,5 +465,6 @@ __all__ = [
     "authoring_prompt",
     "parents",
     "read_candidates",
+    "session_challenger",
     "survey",
 ]
