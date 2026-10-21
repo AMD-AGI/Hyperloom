@@ -563,8 +563,10 @@ def test_record_subprocess_run_emits_one_ledger_row_per_turn(tmp_path):
         ctx,
         prep,
         sr.SpecialistSubprocessResult(
-            turn_usages=[{"input_tokens": 1}, {"input_tokens": 2}],
-            usage={"model": "m", "input_tokens": 3},
+            trace=AgentTrace(
+                turn_usages=[{"input_tokens": 1}, {"input_tokens": 2}],
+                usage={"model": "m", "input_tokens": 3},
+            )
         ),
         "call-1",
         12,
