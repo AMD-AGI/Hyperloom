@@ -140,12 +140,10 @@ def _merge_named_current_recipe_configs(owners: list[tuple[str, Mapping[str, Any
 
 
 def _gain_pct(after: float, before: float) -> float:
-    """The percentage uplift one measured throughput carries over another."""
     return (after / before - 1.0) * 100.0
 
 
 def _warm_recipe_history_rows(warm: Any, key: str) -> list[Any]:
-    """Read one history list off a warm-start recipe, preferring its ``exact_history`` restatement."""
     if not isinstance(warm, dict):
         return []
     recipe = warm.get("recipe") or {}
@@ -163,7 +161,6 @@ _LANDED_PATCH_STATUSES = frozenset({"applied", "applied_3way", "applied_nogit", 
 
 
 def _replayed_patch_refs(result: Mapping[str, Any], params: Mapping[str, Any]) -> list[str]:
-    """The overlay refs a replay landed, as a promoted stack entry records them."""
     required = params.get("required_patch_timeline")
     refs: list[str] = []
     for item in result.get("warm_patches_applied") or []:
@@ -178,7 +175,6 @@ def _replayed_patch_refs(result: Mapping[str, Any], params: Mapping[str, Any]) -
 
 
 def _warm_patch_trees(result: Mapping[str, Any], pending: Mapping[str, Any]) -> list[Mapping[str, Any]]:
-    """The Recipe checkouts a warm replay wrote to."""
     trees = [
         tree
         for tree in result.get("warm_patch_trees") or pending.get("recipe_patch_trees") or []
@@ -741,7 +737,6 @@ class PreludePhase(CoordinatorCollaborator):
         return self._apply_warm_kernel_plan(plan)
 
     def _apply_warm_kernel_plan(self, plan: list[dict[str, Any]]) -> dict[str, Any]:
-        """Stage every champion column of a kernel plan onto disk, stopping the set at the first failure."""
         state = self.shared_state
         applied: list[dict[str, Any]] = []
         kernel_snapshots: list[dict[str, Any]] = []
@@ -807,7 +802,6 @@ class PreludePhase(CoordinatorCollaborator):
     def _land_warm_kernel_entry(
         self, entry: dict[str, Any], targets: list[str], snapshots: list[dict[str, Any]], applied: list[dict[str, Any]]
     ) -> bool:
-        """Snapshot one champion's target files, apply its patch and record what landed."""
         state = self.shared_state
         entry["resolved_patch_targets"] = list(targets)
         try:
@@ -850,7 +844,6 @@ class PreludePhase(CoordinatorCollaborator):
     def _unwind_prepared_warm_kernel(
         self, applied: list[dict[str, Any]], snapshots: list[dict[str, Any]], pending: list[dict[str, Any]]
     ) -> dict[str, Any]:
-        """Revert every kernel patch a preparation applied and restate the pending record."""
         rollback = revert_warm_kernel_patches(applied, snapshots)
         for entry in pending:
             entry["decision"] = "ROLLED_BACK"
@@ -872,7 +865,6 @@ class PreludePhase(CoordinatorCollaborator):
         kernel_args: str,
         merged_envs: dict[str, str],
     ) -> dict[str, Any]:
-        """Account for a staged kernel plan and publish its outcome."""
         state = self.shared_state
         decisions = [entry.get("decision") for entry in plan]
         errors = decisions.count("ERROR")
@@ -927,7 +919,6 @@ class PreludePhase(CoordinatorCollaborator):
         snapshots: list[dict[str, Any]],
         pending: list[dict[str, Any]],
     ) -> dict[str, Any]:
-        """Unwind a preparation whose prepared state could not be persisted, and restate its outcome."""
         rollback = self._unwind_prepared_warm_kernel(applied, snapshots, pending)
         restored = bool(rollback.get("ok"))
         failed = {
@@ -1066,7 +1057,6 @@ class PreludePhase(CoordinatorCollaborator):
         return await self._enqueue_warm_replay(warm, sdk_replay, overlay, baseline_tput)
 
     def _read_replayable_current_recipe(self, warm: Mapping[str, Any]) -> dict[str, Any] | None:
-        """Read a current-remote prior's replay view, or refuse the replay and answer ``None``."""
         recipe_metadata = warm.get("recipe") or {}
         if isinstance(recipe_metadata, Mapping) and recipe_metadata.get("replayable") is False:
             view_source = str(recipe_metadata.get("view_source") or "")
@@ -1104,7 +1094,6 @@ class PreludePhase(CoordinatorCollaborator):
         return sdk_replay
 
     def _refuse_framework_roots(self, reason: str, roots: list[str], rollback: dict[str, Any] | None = None) -> None:
-        """Refuse a replay whose recorded framework checkouts are not usable on this machine."""
         self._skip_warm_replay(
             code=SKIP_FRAMEWORK_ROOT_MISSING,
             outcome=self._warm_replay_root_skip_outcome(
@@ -1114,7 +1103,6 @@ class PreludePhase(CoordinatorCollaborator):
         )
 
     def _refused_dirty_warm_kernel(self, kernel: Mapping[str, Any]) -> bool:
-        """Refuse a replay whose kernel preparation failed with the trees still written to."""
         state = self.shared_state
         preparation_pending = dict(state.warm_replay_pending)
         preparation_dirty = bool(
@@ -1143,7 +1131,6 @@ class PreludePhase(CoordinatorCollaborator):
         return True
 
     def _settle_warm_kernel_rollback(self, rollback: Mapping[str, Any]) -> bool:
-        """Record what a kernel-half rollback left behind; ``True`` when every tree came back."""
         state = self.shared_state
         if rollback.get("ok"):
             state.warm_replay_pending = {}
@@ -1157,7 +1144,6 @@ class PreludePhase(CoordinatorCollaborator):
         return False
 
     def _unwind_warm_kernel_half(self, overlay: Mapping[str, Any]) -> dict[str, Any]:
-        """Revert the kernel half a replay staged, if it staged one."""
         applied, snapshots = overlay["applied"], overlay["snapshots"]
         rollback = (
             revert_warm_kernel_patches(applied, snapshots) if applied or snapshots else {"ok": True, "errors": []}
@@ -1168,7 +1154,6 @@ class PreludePhase(CoordinatorCollaborator):
     def _warm_kernel_overlay(
         self, kernel: Mapping[str, Any], sdk_replay: Mapping[str, Any], current_remote: bool
     ) -> dict[str, Any]:
-        """The kernel half a prepared Recipe section contributes to the replay launch."""
         pending = list(kernel.get("pending") or []) if kernel.get("status") == "prepared" else []
         config = (sdk_replay.get("kernel_config") or {}) if current_remote else kernel
         return {
@@ -1182,7 +1167,6 @@ class PreludePhase(CoordinatorCollaborator):
     def _warm_replay_launch_config(
         self, warm: Mapping[str, Any], sdk_replay: Mapping[str, Any], current_remote: bool
     ) -> dict[str, Any]:
-        """The Recipe-half config a replay launches under, with the provenance that chose it."""
         recipe = warm.get("recipe") or {}
         if not isinstance(recipe, dict):
             recipe = {}
@@ -1223,7 +1207,6 @@ class PreludePhase(CoordinatorCollaborator):
         return config
 
     def _warm_expected_gain(self, recipe_attrs: Mapping[str, Any], donor_expected_gain: float) -> float:
-        """The historical gain anchor: the donor's expected gain, else the best session's, else the flat one."""
         gain = donor_expected_gain
         sessions_field = recipe_attrs.get("sessions")
         if gain <= 0 and isinstance(sessions_field, list):
@@ -1240,7 +1223,6 @@ class PreludePhase(CoordinatorCollaborator):
     def _replayable_patch_plan(
         self, config: Mapping[str, Any], sdk_replay: Mapping[str, Any], overlay: Mapping[str, Any], current_remote: bool
     ) -> list[Any] | None:
-        """The overlays a replay will apply, or ``None`` once a recorded checkout proved unusable here."""
         patches = list((sdk_replay if current_remote else config["replay"]).get("patches") or [])
         if not patches:
             return patches
@@ -1266,7 +1248,6 @@ class PreludePhase(CoordinatorCollaborator):
         current_remote: bool,
         recipe_suppressed: bool,
     ) -> tuple[str, dict[str, str]]:
-        """The server args and envs the Recipe and kernel halves launch under together."""
         if current_remote and recipe_suppressed:
             return overlay["extra_server_args"], dict(overlay["extra_envs"])
         if current_remote:
@@ -1284,7 +1265,6 @@ class PreludePhase(CoordinatorCollaborator):
     async def _enqueue_warm_replay(
         self, warm: Mapping[str, Any], sdk_replay: dict[str, Any], overlay: dict[str, Any], baseline_tput: float
     ) -> "Task | None":
-        """Rule on the prior's confidence and patch timeline, then enqueue the replay they allow."""
         state = self.shared_state
         current_remote = self._is_current_remote_recipe(warm)
         config = self._warm_replay_launch_config(warm, sdk_replay, current_remote)
@@ -1358,7 +1338,6 @@ class PreludePhase(CoordinatorCollaborator):
         return await self._open_warm_replay_task(params, overlay, sdk_replay, recipe_suppressed, donor_metadata)
 
     def _workload_compatible_launch(self, combined_args: str, overlay: dict[str, Any]) -> dict[str, Any] | None:
-        """Pre-flight a launch config against the session's context budget, refusing a replay it cannot serve."""
         state = self.shared_state
         try:
             from hyperloom.inference_optimizer.grid_server_args import validate_warm_replay_context_length
@@ -1396,7 +1375,6 @@ class PreludePhase(CoordinatorCollaborator):
         baseline_tput: float,
         required_timeline: bool,
     ) -> dict[str, Any]:
-        """The task params a warm replay runs under, bar the merged launch config its caller stamps on."""
         return {
             "source": "coordinator_internal",
             "reason": "warm_replay_prelude",
@@ -1426,7 +1404,6 @@ class PreludePhase(CoordinatorCollaborator):
         recipe_suppressed: bool,
         donor_metadata: Mapping[str, Any],
     ) -> "Task | None":
-        """Enqueue the replay task and open its timeline, unwinding the kernel half if the enqueue fails."""
         state = self.shared_state
         try:
             lanes, ttl = self._coord.dispatcher.registry_lanes_ttl("replay_warm_recipe")
@@ -2041,7 +2018,6 @@ class PreludePhase(CoordinatorCollaborator):
         return self._grade_warm_replay(result, task, outcome, recorder)
 
     def _grade_warm_replay(self, result: dict, task: "Task | None", outcome: dict, recorder: Any) -> Verdict:
-        """Rule on the throughput and the image quality a replay that ran measured."""
         state = self.shared_state
         # ``tput`` (output_throughput) is the HOT measure round and the comparison value; the warmup round is retained
         # for audit only.
@@ -2115,7 +2091,6 @@ class PreludePhase(CoordinatorCollaborator):
         return self._rule_on_warm_replay_keep(result, task, outcome, recorder, baseline_tput)
 
     def _record_replay_measurement(self, recorder: Any, result: dict, outcome: dict, baseline_tput: float) -> None:
-        """Put one measurement of the replay on its timeline, with whatever the gates have scored so far."""
         recorder.record_measurement(
             before_tput=baseline_tput,
             after_tput=outcome["throughput_after"],
@@ -2130,7 +2105,6 @@ class PreludePhase(CoordinatorCollaborator):
     def _rule_on_warm_replay_keep(
         self, result: dict, task: "Task | None", outcome: dict, recorder: Any, baseline_tput: float
     ) -> Verdict:
-        """Grade a measured replay against the session's keep threshold and constraints."""
         state = self.shared_state
         measured_gain = _gain_pct(outcome["throughput_after"], baseline_tput)
         if recorder is not None:
@@ -2176,7 +2150,6 @@ class PreludePhase(CoordinatorCollaborator):
         )
 
     def _adopt_reproduced_warm_replay(self, result: dict, task: "Task | None", outcome: dict, recorder: Any) -> Verdict:
-        """Promote the checkouts a reproduced replay measured on, then push its config onto the stack."""
         params = task.params if task is not None else {}
         promoted, promotion = self._resolve_promoted_recipe_checkout(result, task)
         if not promoted:
@@ -2230,7 +2203,6 @@ class PreludePhase(CoordinatorCollaborator):
         promoted_checkout: str,
         replayed_patch_refs: list[str],
     ) -> dict[str, Any]:
-        """Stack-entry-only metadata for a reproduced replay; the lift keeps current_best pure config."""
         cold_round_tput = to_float(result.get("warmup_round_tput"), 0.0)
         entry_extra: dict[str, Any] = {
             "gain_pct": outcome["actual_gain_pct"],
@@ -2259,7 +2231,6 @@ class PreludePhase(CoordinatorCollaborator):
         return entry_extra
 
     def _warm_replay_candidate(self, result: dict, task: "Task | None", params: Mapping[str, Any]) -> dict[str, Any]:
-        """The candidate record a reproduced replay lifts onto current_best."""
         warm_args = str(params.get("extra_server_args") or "").strip()
         warm_envs = dict(params.get("extra_envs") or {})
         recipe_args = str(
@@ -2288,7 +2259,6 @@ class PreludePhase(CoordinatorCollaborator):
     def _push_warm_replay_onto_stack(
         self, result: dict, task: "Task | None", outcome: dict, recorder: Any, promotion: dict[str, Any]
     ) -> Verdict:
-        """Lift a reproduced replay onto current_best and record the adoption."""
         state = self.shared_state
         params = task.params if task is not None else {}
         warm_args = str(params.get("extra_server_args") or "").strip()
@@ -2353,7 +2323,6 @@ class PreludePhase(CoordinatorCollaborator):
         return self._conclude_warm_replay(outcome, Verdict.ADOPTED, clear_pending=True)
 
     def _journal_warm_replay(self, result: dict, task: "Task | None", outcome: dict, warm_args: str) -> None:
-        """Journal warm-replay as a synthetic KEEP; no KB lesson."""
         state = self.shared_state
         try:
             journal = self._coord.recipe_journal.ensure_journal()
