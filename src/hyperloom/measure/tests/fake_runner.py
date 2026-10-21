@@ -17,6 +17,8 @@ with that score (``none``: a round that holds no score). ``fake_trace: true`` ad
 test leaves (``profile/torch_trace/...``); ``fake_report: false`` leaves out the benchmark report, as a profiled round
 that printed no readable measurement. ``fake_repro: true`` runs the repro case the sheet carries for real (the shipped
 attachment placement and ``run_case``) against no server, and lists the verdict and log it leaves in the manifest.
+``fake_attached_env: [NAME, ...]`` places the sheet's attachments as the runner does and lists, in
+``attached_env.json``, the path each variable holds in the served YAML and the sha256 of the file there.
 ``fake_decode: true`` lists the decode pass's outputs (``decode/outputs.jsonl``) the runner would leave.
 ``fake_eval_in_warmup: true`` lays the rounds out as a graded test with a warmup leaves them (one evaluation, in the
 warmup round): a warmup round and the accuracy round on one directory, the measured round on another, and the lm-eval
@@ -37,7 +39,7 @@ from typing import Any
 import yaml
 
 from hyperloom.measure import signing
-from hyperloom.measure.attachments import place_attachments
+from hyperloom.measure.attachments import place_attachments, substitute
 from hyperloom.measure.decode import OUTPUTS_PATH, plan_pass, write_outputs
 from hyperloom.measure.repro import REPRO_DIR, find_case, run_case
 from hyperloom.measure.manifest import RESULT_SCHEMA, encode_manifest
@@ -141,17 +143,32 @@ def _write_files(out: Path, config: dict[str, Any], mode: str) -> dict[str, byte
     return files
 
 
-def _repro_files(spec: MeasurementSpec, root: Path, out: Path) -> dict[str, bytes]:
-    """Place the sheet's attachments, run its case and return what it left below ``<out>/files/repro``."""
+def _place(spec: MeasurementSpec, root: Path) -> dict[str, Path]:
+    """The sheet's attachments, written under ``<root>/work/attach`` from the blobs the sheet came with."""
     blobs = root / "in" / "blobs"
-
-    def read_blob(address: str) -> bytes:
-        return (blobs / address.removeprefix("sha256:")).read_bytes()
-
     attach = root / "work" / "attach"
     attach.mkdir(parents=True, exist_ok=True)
-    placed = place_attachments(spec.attachments, attach, read_blob)
-    script = find_case(attach, list(placed))
+    return place_attachments(
+        spec.attachments, attach, lambda address: (blobs / address.removeprefix("sha256:")).read_bytes()
+    )
+
+
+def _attached_env_files(spec: MeasurementSpec, root: Path, out: Path, names: list[str]) -> dict[str, bytes]:
+    """The path ``names`` hold in the YAML once the attachments are placed, and the sha256 of the file at each."""
+    served = yaml.safe_load(substitute(spec.config[0].yaml, _place(spec, root))) or {}
+    held = {}
+    for name in names:
+        path = Path(served["benchmark"]["envs"][name])
+        held[name] = {"path": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+    report = json.dumps(held).encode()
+    _atomic(out / "files" / "attached_env.json", report)
+    return {"attached_env.json": report}
+
+
+def _repro_files(spec: MeasurementSpec, root: Path, out: Path) -> dict[str, bytes]:
+    """Place the sheet's attachments, run its case and return what it left below ``<out>/files/repro``."""
+    placed = _place(spec, root)
+    script = find_case(root / "work" / "attach", list(placed))
     run_case(script, base_url="http://127.0.0.1:1", model="fake-model", timeout_sec=30, output_dir=out / "files")
     directory = out / "files" / REPRO_DIR
     return {f"{REPRO_DIR}/{p.name}": p.read_bytes() for p in sorted(directory.iterdir())}
@@ -200,6 +217,9 @@ def _publish(out: Path, spec: MeasurementSpec, raw: bytes, config: dict[str, Any
     files = _write_files(out, config, mode)
     if config.get("fake_repro"):
         files.update(_repro_files(spec, Path(os.environ["HYPERLOOM_SANDBOX_ROOT"]), out))
+    if config.get("fake_attached_env"):
+        sandbox_root = Path(os.environ["HYPERLOOM_SANDBOX_ROOT"])
+        files.update(_attached_env_files(spec, sandbox_root, out, config["fake_attached_env"]))
     manifest = _manifest(spec, raw, key, files, mode)
     manifest_raw = encode_manifest(manifest)
     signer = signing.generate_private_key() if mode == "wrong_key" else key

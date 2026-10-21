@@ -426,7 +426,7 @@ def kernel_attachments(
     attachments: dict[str, AttachmentRef] = {}
     envs: dict[str, str] = {}
     for artifact in kernels:
-        env_name = _load_env(artifact)
+        env_name = kernel_load_env(artifact)
         if env_name in envs or env_name in launch_envs:
             raise KernelLoadError(f"{artifact.ref}: {env_name} is already set by another artifact or by the launch")
         blobs.get(artifact.sha256)
@@ -436,7 +436,9 @@ def kernel_attachments(
     return tuple(attachments.values()), envs
 
 
-def _load_env(artifact: KernelArtifact) -> str:
+def kernel_load_env(artifact: KernelArtifact) -> str:
+    """The variable that points the service at ``artifact``; :class:`KernelLoadError` when it has no supported way."""
+
     load = artifact.metadata.get(KERNEL_LOAD_KEY)
     if artifact.kind not in LOADABLE_KERNEL_KINDS:
         raise KernelLoadError(f"{artifact.ref}: no loading convention for {artifact.kind.value} kernel artifacts yet")
@@ -530,6 +532,7 @@ __all__ = [
     "check_base_image",
     "compile_environment",
     "kernel_attachments",
+    "kernel_load_env",
     "locate_installed_package",
     "patch_targets",
 ]

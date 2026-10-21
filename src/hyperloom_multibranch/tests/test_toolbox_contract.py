@@ -52,7 +52,15 @@ def test_queue_state_totals() -> None:
 
 def test_the_toolbox_protocol_is_the_three_calls_of_the_design() -> None:
     names = {name for name in vars(toolbox.Toolbox) if not name.startswith("_")}
-    assert names == {"submit_test", "cancel", "queue_state", "progress", "measurement_capacity", "put_attachment"}
+    assert names == {
+        "submit_test",
+        "cancel",
+        "queue_state",
+        "progress",
+        "measurement_capacity",
+        "put_attachment",
+        "put_kernel_artifact",
+    }
     assert {o.value for o in CancelOutcome} == {"withdrawn", "finished"}
 
 

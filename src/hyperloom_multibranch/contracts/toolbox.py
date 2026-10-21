@@ -24,6 +24,7 @@ from enum import Enum
 from typing import Literal, Protocol
 
 from hyperloom.contracts.measurement import PRIORITY_HIGHEST, PRIORITY_LOWEST, AttachmentRef, TestRequest
+from hyperloom.contracts.recipe import KernelArtifact, KernelKind
 from hyperloom_multibranch.contracts.notebook.interfaces import NodeHealth, TestRecordSink
 
 
@@ -88,7 +89,9 @@ REJECTION_CODES = (
     "attachment_too_large",  # ``put_attachment``: the data, or what a directory archive expands to, passes the cap
     "attachment_unreadable",  # ``put_attachment``: a ``dir`` attachment is not a tar archive
     "attachment_unsafe",  # ``put_attachment``: a ``dir`` archive has a path that escapes, a link, or too many entries
-    "attachments_unsupported",  # ``put_attachment``: this toolbox has no blob store to keep attachments in
+    "attachments_unsupported",  # ``put_attachment``, ``put_kernel_artifact``: this toolbox has no blob store
+    "kernel_artifact_invalid",  # ``put_kernel_artifact``: the table, target or variable cannot be loaded as given
+    "kernel_variable_taken",  # ``put_kernel_artifact``: the variable already loads the table of another target
 )
 
 
@@ -235,6 +238,17 @@ class Toolbox(Protocol):
         ``dir`` data is a tar archive of the directory. Content-addressed, so the same bytes twice give the same
         reference. Raises :class:`RequestRejected` (``attachment_too_large``, ``attachment_unreadable``,
         ``attachments_unsupported``) and stores nothing when the data is refused.
+        """
+
+    async def put_kernel_artifact(self, kind: KernelKind, target: str, env: str, data: bytes) -> KernelArtifact:
+        """Store the tuned table ``data`` in the session's blob store and return the artifact a delta carries.
+
+        ``env`` is the variable the service reads the table's path from (``metadata["load"]``, ``via`` ``env_file``);
+        ``target`` is the operator or shape the table serves, the merge slot of the artifact. The reference is minted
+        from the content, ``kernel/<kind>/<target>/<sha256><ext>``, so the same table put twice, by any branch, gives
+        the same artifact. A variable loads one table of one target: the first target put for it binds it. Raises
+        :class:`RequestRejected` (``kernel_artifact_invalid``, ``kernel_variable_taken``, ``attachments_unsupported``)
+        and stores nothing when the table is refused.
         """
 
 

@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from hyperloom.contracts.measurement import AttachmentRef, FailureClass, TestKind, TestRequest, TestResult, Validity
+from hyperloom.contracts.recipe import KernelArtifact, KernelKind
 from hyperloom_multibranch.contracts.notebook.interfaces import (
     ClaimLost,
     ClaimService,
@@ -52,6 +53,7 @@ from hyperloom_multibranch.toolbox.analysis import (
 from hyperloom_multibranch.toolbox.acceptance import Acceptance, AcceptanceSetup, check_kind
 from hyperloom_multibranch.toolbox.attachments import store_attachment
 from hyperloom_multibranch.toolbox.attempts import DEFAULT_MAX_INFRA_RETRIES, AttemptRunner, Executor, TestJob
+from hyperloom_multibranch.toolbox.kernel_artifacts import KernelVariables, mint_kernel_artifact
 from hyperloom_multibranch.toolbox.quarantine import Quarantine
 from hyperloom_multibranch.toolbox.queue import QueuedTest, QueuePolicy, State, WorkQueue, sandbox_priority
 from hyperloom_multibranch.toolbox.submission_log import LogEntry, SubmissionLog
@@ -123,6 +125,7 @@ class RealToolbox:
         self._tools, self._repo, self._kinds = tools, acceptance.repo, acceptance.supported_kinds
         self._closed = False
         self._tool_jobs: dict[str, list[str]] = {}
+        self._kernel_variables = KernelVariables()
         self._lock = asyncio.Lock()
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._outcome_events: dict[str, asyncio.Event] = {}
@@ -217,6 +220,16 @@ class RealToolbox:
         if self.blobs is None:
             raise RequestRejected("this toolbox has no blob store for attachments", "attachments_unsupported")
         return store_attachment(self.blobs, attachment_id, kind, data)
+
+    async def put_kernel_artifact(self, kind: KernelKind, target: str, env: str, data: bytes) -> KernelArtifact:
+        """Keep a tuned table in the session's blob store, the one the experiment repository reads; see the interface."""
+
+        if self.blobs is None:
+            raise RequestRejected("this toolbox has no blob store for kernel artifacts", "attachments_unsupported")
+        artifact = mint_kernel_artifact(kind, target, env, data)
+        self._kernel_variables.bind(artifact)
+        self.blobs.put(data)
+        return artifact
 
     # --- beyond the interface ------------------------------------------------------------------------------------
 

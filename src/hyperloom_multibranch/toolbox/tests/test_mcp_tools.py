@@ -179,6 +179,7 @@ def test_a_specialist_sees_exactly_the_specialist_tools(rig: Rig) -> None:
     names = sorted(tool["name"] for tool in reply["result"]["tools"])
     assert names == sorted(
         ["submit_test", "test_result", "wait_test", "cancel_test", "queue_state", "poll_inbox", "start_analysis"]
+        + ["put_kernel_artifact"]
         + [f"notebook_{name}" for name in ("lookup", "claim", "release", "search", "record", "branch_log")]
         + ["notebook_append_branch_log", "notebook_learn", "notebook_learnings", "notebook_brief", "notebook_replay"]
     )

@@ -40,6 +40,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from hyperloom.contracts.measurement import PRIORITY_HIGHEST, PRIORITY_LOWEST, Purpose, TestKind
 from hyperloom.contracts.measurement import TestRequest as MeasuredRequest
+from hyperloom.contracts.recipe import KernelKind
 from hyperloom.hosted.mcp_server import (
     CallContext,
     InvalidParamsError,
@@ -50,6 +51,7 @@ from hyperloom.hosted.mcp_server import (
     ToolError,
     ToolForbidden,
 )
+from hyperloom.measure.compile import LOADABLE_KERNEL_KINDS
 from hyperloom_multibranch.contracts.notebook.interfaces import Notebook, NotebookError, StartupBriefProvider
 from hyperloom_multibranch.contracts.notebook.records import InboxItem
 from hyperloom_multibranch.contracts.toolbox import (
@@ -150,6 +152,28 @@ _START_ANALYSIS: dict[str, Any] = {
         },
     },
     "required": ["tool"],
+    "additionalProperties": False,
+}
+_PUT_KERNEL_ARTIFACT: dict[str, Any] = {
+    "type": _OBJECT,
+    "properties": {
+        "kind": {"enum": sorted(kind.value for kind in LOADABLE_KERNEL_KINDS)},
+        "target": {
+            "type": _STRING,
+            "minLength": 1,
+            "description": (
+                "The operator or shape the table serves, one path segment (letters, digits and ._=,+-); the merge "
+                "slot of the artifact: two branches that put a table of one target compete for it."
+            ),
+        },
+        "env": {
+            "type": _STRING,
+            "minLength": 1,
+            "description": "The environment variable the service reads the table's path from, e.g. AITER_CONFIG_GEMM_A8W8.",
+        },
+        "content": {"type": _STRING, "minLength": 1, "description": "The whole table as UTF-8 text, a CSV."},
+    },
+    "required": ["kind", "target", "env", "content"],
     "additionalProperties": False,
 }
 _POLL_INBOX: dict[str, Any] = {
@@ -261,6 +285,39 @@ def _submit_test(
             raise ToolError(f"backpressure: {exc}; submit again later") from exc
 
     return handle
+
+
+def _put_kernel_artifact(
+    toolbox: Toolbox, home: asyncio.AbstractEventLoop | None
+) -> Callable[[dict[str, Any], CallContext], Any]:
+    async def handle(arguments: dict[str, Any], _ctx: CallContext) -> dict[str, object]:
+        try:
+            data = arguments["content"].encode()
+        except UnicodeEncodeError as exc:
+            raise InvalidParamsError("content is not UTF-8 text") from exc
+        call = toolbox.put_kernel_artifact(KernelKind(arguments["kind"]), arguments["target"], arguments["env"], data)
+        try:
+            artifact = await _on(home, call)
+        except RequestRejected as exc:
+            raise ToolError(f"rejected ({exc.code}): {exc.reason}") from exc
+        return artifact.to_document()
+
+    return handle
+
+
+def _register_put_kernel_artifact(server: McpServer, toolbox: Toolbox, home: asyncio.AbstractEventLoop | None) -> None:
+    server.register(
+        "put_kernel_artifact",
+        description=(
+            "Store a tuned table, a CSV the service loads from a file named by an environment variable, and get the "
+            "kernel artifact to put in the add_kernels of the delta of submit_test. Put every shape of an operator "
+            "in one table: a variable loads one file, so a table of another target for the same env is refused as "
+            "kernel_variable_taken. The same table put twice, by any branch, is the same artifact."
+        ),
+        schema=_PUT_KERNEL_ARTIFACT,
+        handler=_put_kernel_artifact(toolbox, home),
+        scopes=_SPECIALIST_SCOPES,
+    )
 
 
 def _start_analysis(
@@ -566,6 +623,7 @@ def register_specialist_tools(
         handler=_submit_test(toolbox, toolbox_loop),
         **own,
     )
+    _register_put_kernel_artifact(server, toolbox, toolbox_loop)
     server.register(
         "test_result",
         description="The state and result of one test this branch submitted, or of any branch's profile test.",
