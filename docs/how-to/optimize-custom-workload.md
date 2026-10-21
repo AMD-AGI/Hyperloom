@@ -296,9 +296,24 @@ denominator. For the full artifact schema, see
 ## Optimize a single Python module
 
 A script-owned workload can keep model loading, inputs, validation and timing in
-its original Python script and expose only this optimization point:
+its original Python script and expose only this optimization point. Import the
+hook **twice**. Once as the very first thing in the script, before any other
+import -- side effect only, so any accepted settings land as environment
+variables before anything else can read and cache them. And once again at the
+documented call site, after the model is loaded, for the actual patches, which
+need the model object and so can't move earlier. Python only runs a module's
+top-level code on its first import, so the second import is a cached no-op for
+the side-effecting part -- this costs nothing beyond the one extra line:
 
 ```python
+try:
+    import hyperloom_optimize  # noqa: F401  -- side effect only; must be first
+except ModuleNotFoundError as exc:
+    if exc.name != "hyperloom_optimize":
+        raise
+
+# ... all your other imports, including torch, go after the block above ...
+
 try:
     from hyperloom_optimize import hyperloom_optimize
 except ModuleNotFoundError as exc:
@@ -311,6 +326,11 @@ except ModuleNotFoundError as exc:
 model = hyperloom_optimize(model)
 outputs = model(**inputs)
 ```
+
+Skipping the early import doesn't fail quietly. If the exported module carries
+a setting that needs to be set before torch's compiler stack is touched, it
+checks for that at import time and raises if it's already too late, rather
+than silently measuring (or shipping) a setting that never took effect.
 
 Point `--framework-path` at a Git checkout tracking only
 `hyperloom_optimize.py`, initially an identity function. In the frozen benchmark

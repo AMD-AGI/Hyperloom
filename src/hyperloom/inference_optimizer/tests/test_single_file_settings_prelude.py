@@ -6,6 +6,9 @@
 from __future__ import annotations
 
 import ast
+import os
+import sys
+import types
 
 import pytest
 
@@ -79,6 +82,62 @@ def test_tunableop_record_untuned_has_no_api_translation() -> None:
     plan = plan_settings({"PYTORCH_TUNABLEOP_RECORD_UNTUNED": "1"})
     assert plan.applied_api == []
     assert plan.applied_env == {"PYTORCH_TUNABLEOP_RECORD_UNTUNED": "1"}
+
+
+def test_render_prelude_includes_import_timing_guard_for_unprotected_env() -> None:
+    # TORCHINDUCTOR_MAX_AUTOTUNE (and similar) have no _TORCH_API_TRANSLATIONS entry, so
+    # they rely purely on being set before torch._inductor/_dynamo first get imported.
+    # The rendered prelude must guard against a too-late import instead of silently
+    # measuring/shipping a setting that never took effect.
+    plan = plan_settings({"TORCHINDUCTOR_MAX_AUTOTUNE": "1"})
+    rendered = render_prelude(plan)
+
+    assert "torch._inductor" in rendered
+    assert "torch._dynamo" in rendered
+    assert "raise RuntimeError" in rendered
+    ast.parse(rendered)
+
+
+def test_render_prelude_omits_import_timing_guard_when_fully_api_protected() -> None:
+    # Every env entry here has a matching _TORCH_API_TRANSLATIONS poke, so nothing is at
+    # risk from import timing -- the guard would be a pure false positive.
+    plan = plan_settings({"PYTORCH_TUNABLEOP_ENABLED": "1"})
+    rendered = render_prelude(plan)
+
+    assert "raise RuntimeError" not in rendered
+
+
+def test_render_prelude_omits_import_timing_guard_when_env_is_empty() -> None:
+    plan = plan_settings({}, unset_envs=("HL_STALE",))
+    rendered = render_prelude(plan)
+
+    assert "raise RuntimeError" not in rendered
+
+
+def test_import_timing_guard_raises_only_when_inductor_or_dynamo_already_imported() -> None:
+    plan = plan_settings({"TORCHINDUCTOR_MAX_AUTOTUNE": "1"})
+    module_bytes = apply_settings_prelude(b"def hyperloom_optimize(model):\n    return model\n", plan)
+    namespace: dict[str, object] = {"__name__": "generated_hook_under_test"}
+
+    sys.modules["torch._inductor"] = types.ModuleType("torch._inductor")
+    try:
+        with pytest.raises(RuntimeError, match="imported after torch._inductor/_dynamo"):
+            exec(compile(module_bytes, "<generated>", "exec"), namespace)
+    finally:
+        del sys.modules["torch._inductor"]
+
+
+def test_import_timing_guard_does_not_raise_when_nothing_pre_imported(monkeypatch: pytest.MonkeyPatch) -> None:
+    plan = plan_settings({"TORCHINDUCTOR_MAX_AUTOTUNE": "1"})
+    module_bytes = apply_settings_prelude(b"def hyperloom_optimize(model):\n    return model\n", plan)
+    assert "torch._inductor" not in sys.modules
+    assert "torch._dynamo" not in sys.modules
+    monkeypatch.delenv("TORCHINDUCTOR_MAX_AUTOTUNE", raising=False)
+
+    namespace: dict[str, object] = {"__name__": "generated_hook_under_test"}
+    exec(compile(module_bytes, "<generated>", "exec"), namespace)  # must not raise
+
+    assert os.environ.get("TORCHINDUCTOR_MAX_AUTOTUNE") == "1"
 
 
 def test_render_prelude_is_empty_for_empty_plan() -> None:
