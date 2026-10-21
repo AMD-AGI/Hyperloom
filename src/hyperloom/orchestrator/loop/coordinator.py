@@ -610,8 +610,7 @@ class Coordinator:
                 self.shared_state,
                 links=ReconcileLinks(
                     resources=self.policy.resources,
-                    # A callable, not a captured mapping: the resume replay rebuilds
-                    # its contents, so a snapshot taken here would be pre-replay.
+                    # Callables, not snapshots: the resume replay rebuilds the pending proposals after this runs.
                     proposals=lambda: self.state.pending_proposals,
                     drop_proposal=lambda pending, reason: self.router.settle_dropped_proposal(pending, reason),
                     session_dir=self.session_dir,
