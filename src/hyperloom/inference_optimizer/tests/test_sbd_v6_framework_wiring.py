@@ -78,25 +78,14 @@ def test_open_records_the_resolved_policy(session_dir: Path, legacy_timeout_over
     coord.phase_framework.close_framework_timeline(_tr("optimize_budget_cap"))
 
     policy = _events(session_dir)[0]["ext"]["policy"]
+    assert set(policy) == {"keep_threshold_pct", "config", "source"}
     assert policy["keep_threshold_pct"] is not None
-    # Invocation caps are not phase policy; legacy state must not fabricate one.
-    assert policy["variant_timeout_sec"] is None
-    assert policy["overtime_kill_ratio"] is None
     assert policy["config"]["lookback"] == 7
     assert policy["config"]["keep_gain_threshold_pct"] == 1.25
     # Not overridden, so the library default the phase will actually apply.
     assert policy["config"]["empty_streak_threshold"] is not None
     assert policy["source"]["no_keep_streak_threshold"] is not None
     assert policy["source"]["discovery_retry_limit"] == 3
-
-
-def test_force_exit_budget_pct_is_reported_unresolved(session_dir: Path):
-    coord = _coordinator(session_dir)
-    coord.shared_state.phase = "FRAMEWORK_AGENT"
-    coord.phase_framework._open_framework_timeline()
-    coord.phase_framework.close_framework_timeline(_tr("optimize_budget_cap"))
-
-    assert _events(session_dir)[0]["ext"]["policy"]["force_exit_budget_pct"] is None
 
 
 @pytest.mark.asyncio
@@ -360,6 +349,7 @@ def test_config_attempts_record_the_pair_and_the_verbatim_outcome(session_dir: P
                 "outcome": "KILLED_OVERTIME",
                 "fingerprint": "fp2",
                 "provenance": "default_grid",
+                "failure_attribution": "unknown",
                 "metrics": {"base_tput": 112.0, "estimated_output_throughput": 40.0},
                 "variant": {},
             },
@@ -371,6 +361,7 @@ def test_config_attempts_record_the_pair_and_the_verbatim_outcome(session_dir: P
                 "reason": "warmup_failed",
                 "error_class": "capability_unsupported",
                 "error_excerpt": "the requested attention backend is unsupported",
+                "failure_attribution": "candidate_caused",
                 "metrics": {"base_tput": 112.0},
                 "variant": {
                     "extra_server_args": "--attention-backend unsupported",
@@ -1090,6 +1081,27 @@ def test_a_rejected_grid_is_reviewed_and_dropped(session_dir: Path):
     assert proposal["terminal"]["disposition"] == "dropped"
     # A denial is a review plus a disposition; the drop is not a lifecycle step of its own.
     assert [step["step"] for step in proposal["lifecycle"]] == ["proposed", "reviewed"]
+
+
+def test_a_grid_denied_on_the_review_timeout_is_dropped(session_dir: Path):
+    """The timeout deny bypasses the verdict handler, and must still settle what the event log calls rejected."""
+    import asyncio
+    import time
+
+    from hyperloom.orchestrator.bringup.reconcile import REVIEW_TTL_SEC
+
+    coord = _coordinator(session_dir)
+    coord.shared_state.phase = "FRAMEWORK_AGENT"
+    coord.phase_framework._open_framework_timeline()
+
+    msg_id = _propose_grid(coord, [{"provenance": "llm_direct"}])
+    asyncio.run(coord.reconciler.run(time.time() + REVIEW_TTL_SEC + 60.0))
+    coord.phase_framework.close_framework_timeline(_tr("optimize_no_more_leverage"))
+
+    assert msg_id not in coord.state.pending_proposals
+    proposal = _events(session_dir)[0]["ext"]["proposals"][0]
+    assert proposal["terminal"]["disposition"] == "dropped"
+    assert proposal["terminal"]["reason"] == "review_timeout"
 
 
 def _review(coord: Coordinator, msg_id: str, payload: dict[str, Any]) -> None:

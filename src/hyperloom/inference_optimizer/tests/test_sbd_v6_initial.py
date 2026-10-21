@@ -743,7 +743,7 @@ def _stub_preflight_steps(tmp_path, monkeypatch):
     monkeypatch.setattr(preflight.inferencex_checkout, "checkout_ok", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(preflight.inferencex_checkout, "head_sha", lambda *_args: "abc123")
     monkeypatch.setattr(preflight, "_report_inferencex_patch_anchors", lambda *_args: True)
-    monkeypatch.setattr(preflight, "_check_node_claude_cli", lambda: None)
+    monkeypatch.setattr(preflight, "_check_agent_cli", lambda: None)
     monkeypatch.setattr(preflight.shutil, "which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(
         preflight,

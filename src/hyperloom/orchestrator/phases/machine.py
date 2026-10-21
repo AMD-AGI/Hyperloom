@@ -31,8 +31,8 @@ _LEVERAGE_EXIT_REASON = "optimize_no_more_leverage"
 
 def is_leverage_exit(next_phase: tuple[str, str, dict[str, Any]]) -> bool:
     """Whether a FRAMEWORK_AGENT transition is the plateau or LLM-hint exit, the one operator work may hold."""
-    _target, reason, evidence = next_phase
-    return _LEVERAGE_EXIT_REASON in (reason, str((evidence or {}).get("passed_through_reason") or ""))
+    _target, reason, _evidence = next_phase
+    return reason == _LEVERAGE_EXIT_REASON
 
 
 @dataclass(frozen=True)

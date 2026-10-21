@@ -55,41 +55,6 @@ def _run_stamp() -> str:
     return _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 
-def _maybe_enrich_rocprof(
-    kernel_roofline_path: Path,
-    candidates_path: Path,
-    run_dir: Path,
-) -> dict[str, Any]:
-    """Dead rocprof-compute enrichment hook; kept only for the summary key."""
-    enrich_value = os.environ.get("HYPERLOOM_ROCPROF_ROOFLINE_ENRICH", "0").strip().lower()
-    if enrich_value not in {"1", "true", "yes", "on"}:
-        return {"status": "disabled"}
-    try:
-        from rocprof_roofline import enrich_kernel_roofline_sidecar
-
-        timeout_sec = int(os.environ.get("HYPERLOOM_ROCPROF_ROOFLINE_TIMEOUT_SEC", "1800") or 1800)
-        enrich_summary = enrich_kernel_roofline_sidecar(
-            sidecar_path=str(kernel_roofline_path),
-            candidates_path=str(candidates_path),
-            workdir=str(run_dir),
-            timeout_sec_per_kernel=timeout_sec,
-            log_fn=None,
-        )
-        print(
-            "[rocprof_enrich] "
-            f"matched={enrich_summary.get('matched', 0)} "
-            f"skipped={enrich_summary.get('skipped', 0)} "
-            f"failed={enrich_summary.get('failed', 0)} "
-            f"rows={enrich_summary.get('rows', 0)}",
-            file=sys.stderr,
-        )
-        return enrich_summary
-    except Exception as exc:  # noqa: BLE001 — enrichment must never break bypass
-        msg = f"error: {type(exc).__name__}: {exc}"
-        print(f"[rocprof_enrich] skipped: {msg}", file=sys.stderr)
-        return {"status": msg}
-
-
 def _emit_quality_warnings(analyze: dict[str, Any], warnings: list[dict[str, Any]]) -> None:
     """Append analysis-quality health signals so weak analyses are never silent."""
     try:
@@ -787,14 +752,6 @@ def main(argv: list[str] | None = None) -> int:
         kernel_candidates_path=str(candidates_path),
     )
     atomic_write_json(kernel_roofline_path, kernel_roofline, fmt=JsonFormat(sort_keys=False, ensure_ascii=False))
-
-    # Optional rocprof-compute enrichment (opt-in; enriches the sidecar in place).
-    rocprof_enrich: dict[str, Any] = (
-        {"status": "disabled"}
-        if args.dry_run
-        else _maybe_enrich_rocprof(kernel_roofline_path, candidates_path, run_dir)
-    )
-    summary["rocprof_enrich"] = rocprof_enrich
     atomic_write_json(summary_path, summary, fmt=JsonFormat(sort_keys=False, ensure_ascii=False))
 
     # Kernel-fusion opportunities: launch adjacency -> fusable clusters.

@@ -245,6 +245,23 @@ def test_pump_pivots_to_local_explore_on_discovery_failure(tmp_path: Path):
     assert stub.tasks.created[0]["params"]["framework_agent_candidate_id"] == "local_explore:0"
 
 
+def test_the_arm_stops_once_its_rounds_run_the_source_lever_dry(tmp_path: Path):
+    """Its round id advances on every settled round, so dryness, not a per-key retry cap, is what bounds it."""
+    from hyperloom.orchestrator.lever import LEVER_SOURCE_PATCH
+
+    stub = _stub(tmp_path, local_explore=True)
+    state = stub.shared_state
+    state.framework_agent_empty_discoveries = _phase_framework.DISCOVER_FAILURE_RETRY_LIMIT
+    state.attempts = [
+        {"lever_kind": LEVER_SOURCE_PATCH, "outcome": "author_empty", "adopted": False, "cycle": state.macro_cycle}
+    ] * _phase_state.DEFAULT_FRAMEWORK_PLATEAU_NO_KEEP_STREAK
+
+    asyncio.run(stub.phase_framework._pump_framework_agent_phase())
+
+    assert stub.tasks.created == []
+    assert state.framework_agent_phase_done is True
+
+
 def test_pump_falls_back_to_exit_when_arm_disabled(tmp_path: Path):
     """No candidates, no discovery to be had, arm off -> the source arm is dry."""
     stub = _stub(tmp_path, local_explore=False)
