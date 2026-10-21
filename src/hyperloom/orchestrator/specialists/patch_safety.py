@@ -301,6 +301,15 @@ def _settle_tie(matches: tuple[Path, ...], default_root: Path | None, texts: Seq
     return _collapse_nested_roots(matches)
 
 
+def _resolved_dir(path: Path) -> Path | None:
+    """``path`` resolved, or ``None`` when it cannot be resolved or is not a directory."""
+    try:
+        resolved = Path(path).resolve()
+    except (OSError, RuntimeError):
+        return None
+    return resolved if resolved.is_dir() else None
+
+
 def _git_apply_check(root: Path, patch_text: str, timeout_sec: float = 30.0) -> tuple[bool | None, str]:
     """Whether ``patch_text`` applies cleanly in ``root``, with git's complaint; ``None`` when git cannot run."""
     try:
@@ -362,62 +371,30 @@ def resolve_patch_apply_root(
         A :class:`PatchRootResolution` naming the checkout, or carrying one of
         :data:`PATCH_ROOT_FAIL_REASONS`.
     """
-    texts = tuple(str(text or "") for text in patch_texts if str(text or "").strip())
+    texts = tuple(text for text in patch_texts if text.strip())
     resolved_explicit: Path | None = None
     if explicit_root is not None:
-        try:
-            resolved_explicit = Path(explicit_root).resolve()
-        except (OSError, RuntimeError):
-            return PatchRootResolution(None, "explicit_root_invalid")
-        if not resolved_explicit.is_dir():
+        resolved_explicit = _resolved_dir(explicit_root)
+        if resolved_explicit is None:
             return PatchRootResolution(None, "explicit_root_invalid")
         if not texts:
             return PatchRootResolution(resolved_explicit)
-
-    parsed: list[ParsedPatchTargets] = []
+    if not texts:
+        return PatchRootResolution(None, "patch_content_missing")
     try:
         parsed = [parse_patch_targets(text) for text in texts]
     except ValueError:
         return PatchRootResolution(None, "patch_targets_invalid")
-    if not parsed:
-        return PatchRootResolution(None, "patch_content_missing")
-
-    has_existing = any(targets.existing for targets in parsed)
     if resolved_explicit is not None:
         if any(patch_targets_missing(text, resolved_explicit) for text in texts):
             return PatchRootResolution(None, "explicit_root_target_mismatch")
         return PatchRootResolution(resolved_explicit)
-    roots: list[Path] = []
-    seen: set[Path] = set()
-    for candidate in candidate_roots:
-        try:
-            root = Path(candidate).resolve()
-        except (OSError, RuntimeError):
-            continue
-        if root in seen or not root.is_dir():
-            continue
-        seen.add(root)
-        roots.append(root)
-
-    resolved_default: Path | None = None
-    if default_root is not None:
-        try:
-            candidate_default = Path(default_root).resolve()
-        except (OSError, RuntimeError):
-            candidate_default = None
-        if candidate_default is not None and candidate_default.is_dir():
-            resolved_default = candidate_default
-
-    # Settled before the candidates are considered at all: a create-only set has
-    # no pre-image, so whether any candidate exists says nothing about it.
-    if not has_existing:
+    roots = tuple(dict.fromkeys(root for root in map(_resolved_dir, candidate_roots) if root is not None))
+    resolved_default = _resolved_dir(default_root) if default_root is not None else None
+    if not any(targets.existing for targets in parsed):
         if resolved_default is None:
             return PatchRootResolution(None, "pure_create_requires_explicit_root")
         return PatchRootResolution(resolved_default)
-
-    # Nothing to match the pre-images against is not evidence against the patch.
-    # Say so separately so a vetting caller can decline to judge while an
-    # applying caller still refuses to write into a tree it cannot name.
     if not roots:
         return PatchRootResolution(None, "no_candidate_roots")
 

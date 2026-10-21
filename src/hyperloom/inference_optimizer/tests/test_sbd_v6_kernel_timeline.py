@@ -93,6 +93,16 @@ def test_one_event_per_entry_with_macro_cycle_at_the_top(tmp_path):
     assert "macro_cycle" not in (ext.get("forge") or {})
     assert ext["entry"]["route"] == ROUTE_FORGE
     assert ext["entry"]["roofline_snapshot_id"] == 4
+    assert ext["entry"] == {
+        "route": ROUTE_FORGE,
+        "route_reason": "kernel_opt_backend_order=forge",
+        "resumed": False,
+        "stack_depth_in": 2,
+        "roofline_snapshot_id": 4,
+        "roofline_snapshot_ts": "2026-09-02T00:00:00",
+        "roofline_baseline_gain_at_snapshot": None,
+        "snapshot_staleness": "fresh",
+    }
 
 
 def test_the_event_is_on_the_timeline_before_it_concludes(tmp_path):
@@ -590,9 +600,7 @@ def test_geak_handoff_and_product_do_not_share_the_accepted_flags_name(tmp_path)
     recorder.record_geak_product(
         accepted_flags=["--enable-torch-compile", "--attention-backend=aiter"],
         accepted_envs={"A": "1", "B": "2"},
-        cfg_hash="deadbeef",
         final_overlay="/s/geak/overlay",
-        final_overlay_digest="d1",
     )
     recorder.finish(tput_after=900.0)
 
@@ -604,7 +612,15 @@ def test_geak_handoff_and_product_do_not_share_the_accepted_flags_name(tmp_path)
         "--enable-torch-compile",
         "--attention-backend=aiter",
     ]
-    assert geak["product"]["cfg_hash"] == "deadbeef"
+    assert set(geak["product"]) == {
+        "accepted_flags",
+        "accepted_envs",
+        "accepted_config",
+        "final_overlay",
+        "final_launch_script",
+        "bench_script",
+        "final_patch",
+    }
 
 
 def test_the_handoff_records_which_cards_geak_was_given(tmp_path):
@@ -1107,6 +1123,34 @@ def test_the_trace_analyze_run_records_the_only_legal_kernel_id_source(tmp_path)
     assert run["roofline_snapshot_id"] == 5
     assert run["reusable_native_kernel_ids"] == ["k001", "k002"]
     assert run["artifacts"]["candidates_path"] == "/s/candidates.json"
+    assert sorted(run) == [
+        "analysis_md_path",
+        "artifacts",
+        "cache_hit",
+        "hot_kernels",
+        "preflight",
+        "request_msg_id",
+        "requested_by",
+        "reusable_native_kernel_ids",
+        "roofline_baseline_gain_at_snapshot",
+        "roofline_snapshot_id",
+        "route",
+        "route_ext",
+        "run_id",
+        "selection",
+        "split",
+        "status",
+        "steady_state",
+        "steady_state_trace",
+        "steps",
+        "tool",
+        "tool_run_id",
+        "top_k",
+        "trace_input",
+        "trigger",
+        "ts",
+        "warnings",
+    ]
     assert run["hot_kernels"]["count"] == 1
 
 
@@ -1769,3 +1813,128 @@ def test_a_verdict_with_no_failure_behind_it_carries_no_error(tmp_path):
     # Absent rather than blank: nothing failed, so there is no class to name.
     assert rebench["final_error_class"] is None
     assert rebench["final_error"] is None
+
+
+def test_a_geak_attempt_reports_the_rebench_gain_and_keeps_the_claim_apart(tmp_path):
+    recorder = _geak_recorder()
+    recorder.record_geak_attempts(
+        {
+            "kernels": [
+                {
+                    "kernel_id": "k001",
+                    "dispatch": {"dispatched": True},
+                    "e2e": {"decision": "KEEP", "integrated": True, "validated": True, "e2e_gain_pct": 40.799},
+                }
+            ]
+        }
+    )
+    recorder.record_geak_claim({}, specs=[{"short_name": "k001", "kernel_id": "k001", "e2e_delta_pct": 40.799}])
+    _geak_rebench(recorder, "geak-rb-1", REBENCH_VALIDATED, base_tput=1000.0, measured_tput=1107.132)
+    recorder.finish(tput_after=1107.132)
+
+    row = _kernel_events(tmp_path)[0]["ext"]["attempts"][0]
+    assert row["settled_by"] == "rebench"
+    assert row["gain_pct"] == 10.7132
+    assert row["e2e"] == {
+        "integrated": True,
+        "e2e_gain_pct": 10.7132,
+        "validated": True,
+        "decision": "KEEP",
+        "self_reported_e2e_gain_pct": 40.799,
+        "rejection_reason": None,
+        "revalidation_measured_tput": None,
+        "revalidation_current_best_tput": None,
+        "revalidation_provenance": None,
+        "patch_path": None,
+        "target_file": None,
+    }
+
+
+def test_a_geak_attempt_with_no_measurement_has_no_e2e_gain(tmp_path):
+    recorder = _geak_recorder()
+    recorder.record_geak_attempts(
+        {"kernels": [{"kernel_id": "k001", "e2e": {"decision": "KEEP", "integrated": True, "e2e_gain_pct": 40.799}}]}
+    )
+    recorder.finish(tput_after=900.0)
+
+    e2e = _kernel_events(tmp_path)[0]["ext"]["attempts"][0]["e2e"]
+    assert e2e["e2e_gain_pct"] is None
+    assert e2e["self_reported_e2e_gain_pct"] == 40.799
+
+
+def test_a_revoked_geak_keep_keeps_the_claim_it_made(tmp_path):
+    recorder = _geak_recorder()
+    recorder.record_geak_attempts(
+        {"kernels": [{"kernel_id": "k001", "e2e": {"decision": "KEEP", "integrated": True, "e2e_gain_pct": 40.799}}]}
+    )
+    reject_geak_attempts(
+        event=recorder.event_id,
+        measured_tput=850.0,
+        current_best_tput=900.0,
+        provenance="orchestrator_rebench",
+        rejection_reason="no_promote",
+    )
+    recorder.finish(tput_after=900.0)
+
+    e2e = _kernel_events(tmp_path)[0]["ext"]["attempts"][0]["e2e"]
+    assert e2e["e2e_gain_pct"] is None
+    assert e2e["self_reported_e2e_gain_pct"] == 40.799
+
+
+@pytest.mark.parametrize(
+    ("last_gain", "expected"),
+    [(2.0, 2.0), (None, None)],
+)
+def test_the_standing_e2e_gain_is_the_one_the_standing_decision_measured(last_gain, expected):
+    from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import _integrate_e2e
+
+    e2e = _integrate_e2e(
+        [
+            {"decision": "KEEP", "gain_pct": 6.0, "settled_at": "2026-09-02T00:01:00", "attempt_count": 1},
+            {"decision": "REVERT", "gain_pct": last_gain, "settled_at": "2026-09-02T00:09:00", "attempt_count": 2},
+        ]
+    )
+
+    assert e2e == {
+        "integrated": False,
+        "e2e_gain_pct": expected,
+        "validated": None,
+        "decision": "REVERT",
+        "patch_path": None,
+        "target_file": None,
+    }
+
+
+def test_a_geak_candidate_accepted_without_a_rebench_verdict_carries_no_measured_gain(tmp_path):
+    recorder = _geak_recorder()
+    recorder.record_geak_attempts(
+        {
+            "kernels": [
+                {
+                    "kernel_id": "k001",
+                    "dispatch": {"dispatched": True},
+                    "e2e": {"decision": "KEEP", "integrated": True, "validated": True, "e2e_gain_pct": 40.799},
+                }
+            ]
+        }
+    )
+    recorder.record_geak_claim({}, specs=[{"short_name": "k001", "kernel_id": "k001", "e2e_delta_pct": 40.799}])
+    recorder.finish(tput_after=900.0)
+
+    ext = _kernel_events(tmp_path)[0]["ext"]
+    row = ext["attempts"][0]
+    assert (row["settled_by"], row["outcome"], row["gain_pct"]) == ("integrate", "adopted", None)
+    assert row["e2e"]["e2e_gain_pct"] is None
+    assert row["e2e"]["self_reported_e2e_gain_pct"] == 40.799
+    assert ext["outcome"]["delivered"] == [
+        {
+            "route": ROUTE_GEAK,
+            "source_kind": SOURCE_GEAK_AUTHORED_KERNEL,
+            "ref": "k001",
+            "kernel_id": "k001",
+            "gain_pct": None,
+            "settled_by": "integrate",
+        }
+    ]
+    assert ext["outcome"]["verdict"] == "no_improvement"
+    assert ext["outcome"]["reason"] == "nothing measured a gain on the candidates kept"

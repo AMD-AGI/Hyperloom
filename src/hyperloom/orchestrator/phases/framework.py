@@ -798,12 +798,7 @@ class FrameworkPhase(ProposalBench):
         recorder.record_policy(**self._framework_policy_fields())
 
     def _framework_policy_fields(self) -> dict:
-        """Resolve the ``record_policy`` fields this entry runs under.
-
-        ``force_exit_budget_pct`` is deliberately absent: no runtime path
-        resolves it today, so reporting a default would fabricate a threshold
-        the phase never applied.
-        """
+        """Resolve the ``record_policy`` fields this entry runs under."""
         state = self.shared_state
         overrides = state.plateau_overrides or {}
         if not isinstance(overrides, dict):
