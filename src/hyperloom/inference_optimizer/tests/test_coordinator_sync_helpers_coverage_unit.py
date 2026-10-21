@@ -16,7 +16,6 @@ from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.state.objective import TargetGainObjective
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.knowledge.recipe_journal import (
-    kept_kernel_optimizations,
     workload_kb_tags,
 )
 from hyperloom.orchestrator.loop.dispatcher import HeldLeases
@@ -642,29 +641,6 @@ def test_unknown_and_empty_fingerprint_entries_are_not_tagged(coord: Coordinator
     assert tags == {"framework": "vllm", "image_digest": "sha256:abc"}
 
 
-def test_build_kernel_optimizations_from_state(coord: Coordinator) -> None:
-    ss = coord.shared_state
-    ss.kernel_opt_attempts = {
-        "k1": {
-            "last_decision": "KEEP",
-            "last_micro_speedup": 1.3,
-            "last_source_file": "a.py",
-            "last_artifact_path": "a.so",
-        },
-        "k2": {"last_decision": "REVERT", "last_micro_speedup": 1.1},
-    }
-    ss.kernel_integrate_attempts = {
-        "i1": {"kernel_id": "k1", "last_decision": "KEEP", "best_gain_pct": 5.0, "attempts": [{"new_tput": 210.0}]},
-    }
-    out = kept_kernel_optimizations(coord.shared_state)
-    assert len(out) == 1  # only the KEEP'd k1
-    row = out[0]
-    assert row["kernel_id"] == "k1"
-    assert row["integrated"] is True
-    assert row["e2e_gain_pct"] == 5.0
-    assert row["e2e_tput"] == 210.0
-
-
 # -- phase denial gate -----------------------------------------------------
 def test_the_coordinator_revalidation_baseline_is_not_phase_denied(coord: Coordinator) -> None:
     """The revalidation pump prices its own action and never runs the phase gate."""
@@ -721,10 +697,9 @@ def test_skip_gemm_tuning_env(coord: Coordinator, monkeypatch) -> None:
 
 def test_gemm_tuning_required_before_kernel_opt(coord: Coordinator, monkeypatch) -> None:
     monkeypatch.delenv("INFERENCE_OPTIMIZER_SKIP_GEMM_TUNING", raising=False)
-    monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
     ss = coord.shared_state
     ss.last_gemm_tuning = {}
-    # forge backend: any precision on a supported framework is eligible.
+    # Any precision on a supported framework is eligible.
     ss.framework = "sglang"
     ss.precision = "fp16"
     assert coord.phase_kernel._gemm_tuning_required_before_kernel_opt() is True

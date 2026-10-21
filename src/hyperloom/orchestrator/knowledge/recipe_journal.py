@@ -37,7 +37,6 @@ from hyperloom.orchestrator.lever import LEVER_CONFIG, lever_kind_for_task
 
 from ..collaborator import CoordinatorCollaborator
 from ..state.attempt_ledger import AttemptRow, record_attempt_row
-from ..state.failure_evidence import UNMEASURED_OUTCOMES, classify_failure_attribution
 from .config import KnowledgeStoreMode
 from .workload_tags import workload_shape_tags
 
@@ -274,18 +273,13 @@ def _record_config_run(coord: Any, *, task: Any, result_dict: Mapping[str, Any])
     )
 
 
-def _attempt_failure(row: Mapping[str, Any], outcome: str) -> dict[str, Any]:
-    error_class = str(row.get("error_class") or "")
-    error_excerpt = str(row.get("error_excerpt") or "")
-    attribution = ""
-    if outcome in UNMEASURED_OUTCOMES:
-        attribution = classify_failure_attribution(
-            error_class=error_class,
-            error_excerpt=error_excerpt,
-            reason=row.get("reason"),
-            explicit=row.get("failure_attribution"),
-        )
-    return {"error_class": error_class, "error_excerpt": error_excerpt, "attribution": attribution}
+def _attempt_failure(row: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "error_class": str(row.get("error_class") or ""),
+        "error_excerpt": str(row.get("error_excerpt") or ""),
+        # Explore classified this variant's failure once; the verdict it stored is the one verdict.
+        "attribution": str(row.get("failure_attribution") or ""),
+    }
 
 
 def _attempt_fields(
@@ -337,7 +331,7 @@ def _attempt_fields(
             "reference": ruling.get("threshold"),
             "passed": ruling.get("passed"),
         },
-        "failure": _attempt_failure(row, outcome),
+        "failure": _attempt_failure(row),
         "artifacts": {
             "workspace": row.get("workspace"),
             "server_log_path": row.get("server_log_path"),
@@ -1338,12 +1332,7 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         attrs = recipe_attrs_from_state(state, self.session_dir.name)
         live = self.recipe_kb.get_authoritative_recipe(canonical_id=self.workload_canonical_id()) or {}
         my_sessions = list(attrs["sessions"] or [])
-        my_kernels = list(attrs.get("kernel_optimizations") or [])
-        # KEEP'd kernel optimizations ride the extras channel.
         extras = dict(attrs.get("workload") or {})
-        kernels = my_kernels + rows_not_superseded(live.get("kernel_optimizations"), my_kernels, "kernel_id")
-        if kernels:
-            extras["kernel_optimizations"] = kernels
         overrides: dict[str, Any] = {
             "what_worked": attrs["what_worked"],
             "what_failed": attrs["what_failed"],
@@ -1630,69 +1619,6 @@ def workload_kb_tags(state: Any) -> dict[str, Any]:
     return tags
 
 
-def _index_integrate_attempts(attempts: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
-    by_kernel: dict[str, dict[str, Any]] = {}
-    by_task_group: dict[str, dict[str, Any]] = {}
-    for entry in attempts.values():
-        if not isinstance(entry, dict):
-            continue
-        kernel_id = str(entry.get("kernel_id") or "")
-        if kernel_id:
-            by_kernel[kernel_id] = entry
-        task_group_key = str(entry.get("task_group_key") or "")
-        if task_group_key:
-            by_task_group[task_group_key] = entry
-    return by_kernel, by_task_group
-
-
-def _last_rebenched_throughput(integration: Mapping[str, Any]) -> float:
-    for attempt in reversed(list(integration.get("attempts") or [])):
-        if isinstance(attempt, dict) and attempt.get("new_tput") is not None:
-            return recorded_float(attempt.get("new_tput"))
-    return 0.0
-
-
-def _kernel_optimization_row(
-    entry: Mapping[str, Any],
-    ledger_id: str,
-    by_kernel: Mapping[str, Any],
-    by_task_group: Mapping[str, Any],
-) -> dict[str, Any]:
-    kernel_id = str(entry.get("current_kernel_id") or entry.get("kernel_id") or ledger_id)
-    task_group_key = str(entry.get("task_group_key") or "")
-    integration = by_task_group.get(task_group_key) if task_group_key else by_kernel.get(kernel_id)
-    integrated = isinstance(integration, dict)
-    return {
-        "kernel_id": kernel_id,
-        "source_file": str(entry.get("last_source_file") or ""),
-        "artifact_path": str(entry.get("last_artifact_path") or ""),
-        "micro_speedup": recorded_float(entry.get("last_micro_speedup")),
-        "decision": OUTCOME_KEEP,
-        "e2e_gain_pct": recorded_float(integration.get("best_gain_pct")) if integrated else 0.0,
-        "e2e_tput": _last_rebenched_throughput(integration) if integrated else 0.0,
-        "e2e_decision": str(integration.get("last_decision") or "").upper() if integrated else "",
-        "integrated": integrated,
-        "ts": str(entry.get("last_ts") or ""),
-    }
-
-
-def kept_kernel_optimizations(state: Any) -> list[dict[str, Any]]:
-    """The KEEP'd kernel optimizations, each joined to its end-to-end integrate verdict."""
-    optimizations = state.kernel_opt_task_attempts or {}
-    if not isinstance(optimizations, dict):
-        return []
-    integrations = state.kernel_integrate_attempts or {}
-    by_kernel, by_task_group = _index_integrate_attempts(integrations if isinstance(integrations, dict) else {})
-    rows: list[dict[str, Any]] = []
-    for ledger_id, entry in optimizations.items():
-        if not isinstance(entry, dict):
-            continue
-        if str(entry.get("last_decision", "")).upper() != OUTCOME_KEEP:
-            continue
-        rows.append(_kernel_optimization_row(entry, ledger_id, by_kernel, by_task_group))
-    return rows
-
-
 def _reverted_attempt_row(name: str, attempt: Mapping[str, Any], source: str) -> dict[str, Any]:
     row: dict[str, Any] = {
         "name": name,
@@ -1843,7 +1769,6 @@ def recipe_attrs_from_state(state: Any, session_name: str) -> dict[str, Any]:
         "best_throughput": final_throughput,
         "what_worked": _what_worked(optimization_stack, state.gain_per_stack_entry or [], provenance),
         "what_failed": _what_failed(state.last_action_failures or [], provenance.reverted),
-        "kernel_optimizations": kept_kernel_optimizations(state),
         "last_profiled": str(state.cumulative_gain_validated_ts or ""),
         "workload": workload_kb_tags(state),
         "sessions": [_session_row(state, session_name, optimization_stack, final_throughput)],
