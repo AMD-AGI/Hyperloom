@@ -395,13 +395,25 @@ def test_the_speedup_target_is_off_unless_an_operator_sets_it(tmp_path, monkeypa
     assert captured["loops"][-1].ic.target_mean_case_speedup == 0.0
 
 
-def test_a_speedup_target_the_baseline_already_meets_is_refused(tmp_path, monkeypatch):
+@pytest.mark.parametrize("target", ["1.0", "0.5", "-3.15"])
+def test_a_speedup_target_the_baseline_already_meets_is_refused(tmp_path, monkeypatch, target):
     captured = _install_cli_fakes(monkeypatch, tmp_path)
 
-    result, _workspace = _invoke_forge_loop(tmp_path, ["--target-mean-case-speedup", "1.0"])
+    result, _workspace = _invoke_forge_loop(tmp_path, ["--target-mean-case-speedup", target])
 
     assert result.exit_code != 0
-    assert "already met by the baseline" in result.output
+    assert "which the baseline already meets" in result.output
+    assert captured["loops"] == []
+
+
+@pytest.mark.parametrize("target", ["inf", "nan"])
+def test_a_speedup_target_that_can_never_be_reached_is_refused(tmp_path, monkeypatch, target):
+    captured = _install_cli_fakes(monkeypatch, tmp_path)
+
+    result, _workspace = _invoke_forge_loop(tmp_path, ["--target-mean-case-speedup", target])
+
+    assert result.exit_code != 0
+    assert "can never be reached" in result.output
     assert captured["loops"] == []
 
 

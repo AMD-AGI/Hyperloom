@@ -1366,7 +1366,8 @@ class ForgeLoopRequest:
         help="Stop the campaign once the incumbent's mean per-case speedup over the "
         "baseline (the objective a KEEP is judged by) reaches this value, e.g. 3.15, "
         "however much of the time budget remains. Zero (default) disables the gate; "
-        "a value at or below 1.0 is refused. It never affects KEEP.",
+        "any other value at or below 1.0, a negative one included, or one that is not "
+        "finite is refused. It never affects KEEP.",
     ),
     click.option(
         "--prepare-task/--no-prepare-task",
