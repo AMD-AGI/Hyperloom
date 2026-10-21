@@ -76,7 +76,6 @@ ignore_imports =
     hyperloom.inference_optimizer.cli.executors -> hyperloom.orchestrator.actions.executors.profile
     hyperloom.inference_optimizer.cli.executors -> hyperloom.orchestrator.actions.executors.roofline
     hyperloom.inference_optimizer.cli.executors -> hyperloom.orchestrator.actions.executors.targeted_build_executor
-    hyperloom.inference_optimizer.cli.executors -> hyperloom.orchestrator.roles.claude
     hyperloom.inference_optimizer.cli.executors -> hyperloom.orchestrator.specialists.domains
     hyperloom.inference_optimizer.cli.executors -> hyperloom.orchestrator.specialists.mcp_config
     hyperloom.inference_optimizer.cli.executors -> hyperloom.orchestrator.specialists.runner
@@ -296,7 +295,6 @@ ignore_imports =
     hyperloom.inference_optimizer.cli.executors -> hyperloom.orchestrator.actions.executors.profile
     hyperloom.inference_optimizer.cli.executors -> hyperloom.orchestrator.actions.executors.roofline
     hyperloom.inference_optimizer.cli.executors -> hyperloom.orchestrator.actions.executors.targeted_build_executor
-    hyperloom.inference_optimizer.cli.executors -> hyperloom.orchestrator.roles.claude
     hyperloom.inference_optimizer.cli.executors -> hyperloom.orchestrator.specialists.domains
     hyperloom.inference_optimizer.cli.executors -> hyperloom.orchestrator.specialists.mcp_config
     hyperloom.inference_optimizer.cli.executors -> hyperloom.orchestrator.specialists.runner

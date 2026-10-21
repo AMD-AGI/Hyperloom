@@ -257,26 +257,21 @@ def test_skip_to_kernel_hint_short_circuits_optimize():
 
 
 def test_kernel_does_not_exit_on_plateau():
-    """Plateau alone (all attempts reverted, one still PARTIAL) does not exit KERNEL."""
+    """Plateau alone (one hot kernel reverted, another still untried) does not exit KERNEL."""
     state = SharedState(
         phase="KERNEL_AGENT",
         phase_started_unix=0.0,
         max_minutes=0,
         phase_budget_pct={},
-        kernel_opt_task_attempts={
-            "k0": {
-                "last_decision": "REVERT",
-                "last_status": "ok",
-                "rejected_reason": "revert_decision",
-                "failure_count": 0,
-            },
-            "k1": {"last_decision": "PARTIAL", "last_status": "ok", "rejected_reason": "", "failure_count": 0},
-        },
+        last_trace_analyze={"hot_kernels_top15": [_hot("k0", "/repo/op0.py"), _hot("k1", "/repo/op1.py")]},
         rejected_kernel_ids=[],
         pending_escalate_hint="",
         stop_reason="",
         optimization_stack=[],
         kernel_optimizer="",
+    )
+    state.record_kernel_integrate_result(
+        {"kernel_id": "k0", "patch_path": "/tmp/k0.patch", "target_file": "/repo/op0.py", "decision": "REVERT"}
     )
     assert compute_next_phase(state) is None
 
@@ -303,6 +298,16 @@ def test_compute_next_phase_skip_to_close_routes_to_close():
     assert reason == "global_converged"
     assert evidence.get("terminal") is True
     assert evidence.get("hint") == ESCALATE_HINT_SKIP_TO_CLOSE
+
+
+def _hot(kernel_id: str, source_file: str, gpu_pct: float = 20.0) -> dict:
+    return {
+        "kernel_id": kernel_id,
+        "name": kernel_id,
+        "source_file": source_file,
+        "gpu_pct": gpu_pct,
+        "reusable_native_kernel": True,
+    }
 
 
 def _skip_to_sweep_state(phase: str) -> SharedState:
@@ -362,26 +367,36 @@ def test_kernel_holds_while_work_pending_keep():
     assert compute_next_phase(state, flags=PhaseFlags(kernel_enabled=True)) is None
 
 
-def test_kernel_holds_while_work_pending_partial_attempt():
-    state = _skip_to_sweep_state("KERNEL_AGENT")
-    state.kernel_opt_task_attempts = {
-        "k009": {
-            "last_decision": "PARTIAL",
-            "last_status": "ok",
-            "rejected_reason": "",
-        },
-    }
-
-    assert kernel_work_pending(state) is True
-    assert compute_next_phase(state, flags=PhaseFlags(kernel_enabled=True)) is None
-
-
 def test_kernel_holds_while_work_pending_untried_hot_kernel():
     state = _skip_to_sweep_state("KERNEL_AGENT")
     state.untried_hot_reusable_kernels = lambda: ["k017"]
 
     assert kernel_work_pending(state) is True
     assert compute_next_phase(state, flags=PhaseFlags(kernel_enabled=True)) is None
+
+
+def test_a_hot_kernel_a_backend_patched_stops_holding_kernel():
+    # A reusable kernel over the GPU-share floor holds KERNEL until a patch for it exists.
+    state = _skip_to_sweep_state("KERNEL_AGENT")
+    state.last_trace_analyze = {
+        "hot_kernels_top15": [
+            {
+                "kernel_id": "k003",
+                "name": "moe_align",
+                "source_file": "/repo/moe.py",
+                "gpu_pct": 25.2,
+                "reusable_native_kernel": True,
+            }
+        ],
+        "task_groups": [],
+    }
+    assert kernel_work_pending(state) is True
+
+    state.record_kernel_integrate_result(
+        {"kernel_id": "k003", "patch_path": "/tmp/k003.patch", "target_file": "/repo/moe.py", "decision": "REVERT"}
+    )
+
+    assert kernel_work_pending(state) is False
 
 
 @pytest.mark.parametrize("status", ["no_gain", "timeout"])
@@ -399,38 +414,13 @@ def test_geak_terminal_exits_kernel_ignoring_per_kernel_pending_work(status):
     assert reason == "kernel_no_more_leverage"
 
 
-def test_kernel_holds_while_work_pending_retryable_failed_kernel():
+def test_kernel_exits_when_every_hot_kernel_is_rejected_or_integrated():
     state = _skip_to_sweep_state("KERNEL_AGENT")
-    state.kernel_opt_task_attempts = {
-        "k018": {
-            "attempts": 1,
-            "failure_count": 1,
-            "last_decision": "",
-            "last_status": "failed",
-            "rejected_reason": "",
-        },
-    }
-
-    assert kernel_work_pending(state) is True
-    assert compute_next_phase(state, flags=PhaseFlags(kernel_enabled=True)) is None
-
-
-def test_kernel_exits_when_all_attempts_are_rejected_or_integrated():
-    state = _skip_to_sweep_state("KERNEL_AGENT")
-    state.rejected_kernel_ids = ["k001"]
-    state.optimization_stack = [{"action": "integrate", "kernel_id": "k002"}]
-    state.kernel_opt_task_attempts = {
-        "k001": {
-            "last_decision": "REVERT",
-            "last_status": "ok",
-            "rejected_reason": "revert_decision",
-        },
-        "k002": {
-            "last_decision": "KEEP",
-            "last_status": "ok",
-            "rejected_reason": "",
-        },
-    }
+    state.last_trace_analyze = {"hot_kernels_top15": [_hot("k001", "/repo/a.py"), _hot("k002", "/repo/b.py")]}
+    state.record_kernel_integrate_result(
+        {"kernel_id": "k001", "patch_path": "/tmp/k001.patch", "target_file": "/repo/a.py", "decision": "REVERT"}
+    )
+    state.optimization_stack = [{"action": "integrate", "kernel_id": "k002", "target_file": "/repo/b.py"}]
 
     assert kernel_work_pending(state) is False
     out = compute_next_phase(state, flags=PhaseFlags(kernel_enabled=True))
@@ -440,22 +430,18 @@ def test_kernel_exits_when_all_attempts_are_rejected_or_integrated():
     assert reason == "kernel_no_more_leverage"
 
 
-def test_a_fusion_row_retires_its_attempt_like_an_integrate_row():
+def test_a_fusion_row_retires_its_hot_kernel_like_an_integrate_row():
     state = _skip_to_sweep_state("KERNEL_AGENT")
+    state.last_trace_analyze = {"hot_kernels_top15": [_hot("k002", "/repo/op.py")]}
     state.optimization_stack = [{"action": "fusion", "kernel_id": "k900", "target_file": "/repo/op.py"}]
-    state.kernel_opt_task_attempts = {
-        "k002": {"last_source_file": "/repo/op.py", "last_decision": "KEEP", "last_status": "ok"},
-    }
 
     assert kernel_work_pending(state) is False
 
 
 def test_a_whitespace_padded_target_file_still_matches():
     state = _skip_to_sweep_state("KERNEL_AGENT")
+    state.last_trace_analyze = {"hot_kernels_top15": [_hot("k002", "/repo/op.py")]}
     state.optimization_stack = [{"action": "integrate", "kernel_id": "k900", "target_file": "  /repo/op.py "}]
-    state.kernel_opt_task_attempts = {
-        "k002": {"last_source_file": "/repo/op.py", "last_decision": "KEEP", "last_status": "ok"},
-    }
 
     assert kernel_work_pending(state) is False
 
@@ -548,7 +534,6 @@ def test_saving_a_stopped_session_again_does_not_move_its_stop_time(tmp_path):
 
 def test_stop_reason_vocab_has_v08_additions():
     for new in (
-        "no_kernel_skipped",
         "sweep_done",
         "prelude_baseline_failed",
         "time_exhausted_during_prelude",

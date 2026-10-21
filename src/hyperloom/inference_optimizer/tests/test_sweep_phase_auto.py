@@ -31,6 +31,8 @@ from hyperloom.orchestrator.kernel.patch_lifecycle import lifecycle_complete
 from hyperloom.orchestrator.phases import machine_state
 from hyperloom.orchestrator.state.shared_state import SharedState
 
+from .conftest import seed_kernel_keep
+
 
 # Fixtures
 @dataclass
@@ -116,13 +118,7 @@ async def test_drain_pending_keep_integrates_records_result_once(
         baseline_tput=100.0,
         current_best={"action": "baseline", "tput": 100.0},
     )
-    c.shared_state.kernel_opt_attempts = {
-        "k004": {
-            "last_decision": "KEEP",
-            "last_micro_speedup": 4.21,
-            "last_source_file": "/tmp/kernel.cu",
-        },
-    }
+    seed_kernel_keep(c.shared_state, "k004", micro=4.21, source_file="/tmp/kernel.cu", artifact="/tmp/optimized.cu")
     calls: list[str] = []
 
     async def _fake_integrate_handler(payload, *, session_dir):
@@ -166,18 +162,8 @@ def test_pending_keep_kernel_ids_prioritize_trace_impact_over_micro():
             {"kernel_id": "k004", "gpu_pct": 10.0},
         ],
     }
-    state.kernel_opt_attempts = {
-        "k004": {
-            "last_decision": "KEEP",
-            "last_micro_speedup": 4.21,
-            "last_source_file": "/tmp/rmsnorm.cu",
-        },
-        "k001": {
-            "last_decision": "KEEP",
-            "last_micro_speedup": 1.51,
-            "last_source_file": "/tmp/moe.cu",
-        },
-    }
+    seed_kernel_keep(state, "k004", micro=4.21, source_file="/tmp/rmsnorm.cu", artifact="/tmp/k004_opt.cu")
+    seed_kernel_keep(state, "k001", micro=1.51, source_file="/tmp/moe.cu", artifact="/tmp/k001_opt.cu")
 
     assert state.pending_keep_kernel_ids() == ["k001", "k004"]
     assert state.next_pending_keep_kernel_id() == "k001"
@@ -186,18 +172,8 @@ def test_pending_keep_kernel_ids_prioritize_trace_impact_over_micro():
 def test_pending_keep_kernel_ids_do_not_retry_needs_review():
     """A recorded NEEDS_REVIEW attempt should not auto-rerun the same patch."""
     state = SharedState()
-    state.kernel_opt_attempts = {
-        "k004": {
-            "last_decision": "KEEP",
-            "last_micro_speedup": 4.21,
-            "last_source_file": "/tmp/rmsnorm.cu",
-        },
-        "k001": {
-            "last_decision": "KEEP",
-            "last_micro_speedup": 1.51,
-            "last_source_file": "/tmp/moe.cu",
-        },
-    }
+    seed_kernel_keep(state, "k004", micro=4.21, source_file="/tmp/rmsnorm.cu", artifact="/tmp/k004_opt.cu")
+    seed_kernel_keep(state, "k001", micro=1.51, source_file="/tmp/moe.cu", artifact="/tmp/k001_opt.cu")
     state.record_kernel_integrate_result(
         {
             "status": "ok",
@@ -857,13 +833,7 @@ async def test_drain_uses_current_best_tput_not_baseline(
     c.shared_state.optimization_stack = [
         {"action": "integrate", "kernel_id": "k_prev", "tput": 110.0},
     ]
-    c.shared_state.kernel_opt_attempts = {
-        "k_new": {
-            "last_decision": "KEEP",
-            "last_micro_speedup": 2.0,
-            "last_source_file": "/tmp/new.cu",
-        },
-    }
+    seed_kernel_keep(c.shared_state, "k_new", micro=2.0, source_file="/tmp/new.cu", artifact="/tmp/new_opt.cu")
     captured_payloads = []
 
     async def _fake_integrate_handler(payload, *, session_dir):

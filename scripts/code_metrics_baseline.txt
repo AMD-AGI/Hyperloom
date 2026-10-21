@@ -122,7 +122,7 @@ cognitive-complexity src/hyperloom/orchestrator/specialists/subprocess_.py::_cod
 cognitive-complexity src/hyperloom/orchestrator/state/gaps.py::GapsStateMixin.upsert_gap 31
 cognitive-complexity src/hyperloom/orchestrator/state/shared_state.py::SharedState._append_roofline_snapshot_history 39
 cognitive-complexity src/hyperloom/orchestrator/state/shared_state.py::SharedState._build_explore_search 45
-cognitive-complexity src/hyperloom/orchestrator/state/shared_state.py::SharedState.profile_workload_context 43
+cognitive-complexity src/hyperloom/orchestrator/state/shared_state.py::SharedState.profile_workload_context 41
 cognitive-complexity src/hyperloom/orchestrator/state/shared_state.py::SharedState.record_trace_analyze 45
 cognitive-complexity src/hyperloom/orchestrator/trace_analysis/bypass_trace_analysis.py::_discover_capture_shards 44
 cognitive-complexity src/hyperloom/orchestrator/trace_analysis/bypass_trace_analysis.py::main 71
@@ -459,7 +459,7 @@ function-lines src/hyperloom/orchestrator/actions/executors/baseline.py::Baselin
 function-lines src/hyperloom/orchestrator/actions/executors/baseline.py::BenchmarkRunExecutor._maybe_stop_on_missing_baseline_accuracy 126
 function-lines src/hyperloom/orchestrator/actions/executors/baseline.py::BenchmarkRunExecutor._mn_warmup_pass 92
 function-lines src/hyperloom/orchestrator/actions/executors/baseline.py::BenchmarkRunExecutor._preflight_server_argv 103
-function-lines src/hyperloom/orchestrator/actions/executors/baseline.py::BenchmarkRunExecutor._run_once 650
+function-lines src/hyperloom/orchestrator/actions/executors/baseline.py::BenchmarkRunExecutor._run_once 649
 function-lines src/hyperloom/orchestrator/actions/executors/baseline.py::BenchmarkRunExecutor._run_single_benchmark 566
 function-lines src/hyperloom/orchestrator/actions/executors/baseline.py::_apply_warm_patches 416
 function-lines src/hyperloom/orchestrator/actions/executors/benchmark_result.py::harvest_leaked_artifacts 85
@@ -739,12 +739,12 @@ module-lines src/hyperloom/orchestrator/phases/framework.py 3139
 module-lines src/hyperloom/orchestrator/phases/kernel.py 4227
 module-lines src/hyperloom/orchestrator/phases/machine_state.py 2030
 module-lines src/hyperloom/orchestrator/phases/prelude.py 2640
-module-lines src/hyperloom/orchestrator/policy/gate.py 1580
+module-lines src/hyperloom/orchestrator/policy/gate.py 1577
 module-lines src/hyperloom/orchestrator/prompts/prompt_builder.py 1205
 module-lines src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py 2556
 module-lines src/hyperloom/orchestrator/specialists/runner.py 1455
 module-lines src/hyperloom/orchestrator/specialists/subprocess_.py 1737
-module-lines src/hyperloom/orchestrator/state/shared_state.py 2552
+module-lines src/hyperloom/orchestrator/state/shared_state.py 2549
 module-lines src/hyperloom/orchestrator/trace_analysis/tracelens_analysis.py 5276
 module-lines src/hyperloom/orchestrator/trace_analysis/tracelens_skill_runner.py 1322
 module-lines src/kernelforge/fusion/author.py 1322

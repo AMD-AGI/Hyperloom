@@ -24,7 +24,7 @@ from typing import Any, Callable
 from hyperloom.common.perf_metric import is_agentx_mode
 from hyperloom.common.prompt_safety import defang_prompt_structure
 from hyperloom.inference_optimizer.framework_registry import python_package
-from .agentx_context import corpus_lines, grading_lines
+from .agentx_context import corpus_lines, grading_lines, launch_ownership_lines
 from .proposal_schemas import (
     EXPLORE_VARIANT_CONTRACT,
     EXPLORE_VARIANT_EXAMPLE,
@@ -1427,6 +1427,7 @@ def _section_hardware(inp: SpecialistPromptInputs) -> list[str]:
         # The corpus fixes the request shape, so ISL/OSL carry no information.
         workload_rows += corpus_lines(inp.agentx_corpus_shape)
         workload_rows += grading_lines(inp.agentx_grading, inp.agentx_backend)
+        workload_rows += launch_ownership_lines(inp.agentx_backend)
     else:
         if inp.isl > 0:
             workload_rows.append(f"- ISL (input seq len): {inp.isl}")
