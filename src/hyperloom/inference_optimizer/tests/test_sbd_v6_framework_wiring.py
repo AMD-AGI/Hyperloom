@@ -78,25 +78,14 @@ def test_open_records_the_resolved_policy(session_dir: Path, legacy_timeout_over
     coord.phase_framework.close_framework_timeline(_tr("optimize_budget_cap"))
 
     policy = _events(session_dir)[0]["ext"]["policy"]
+    assert set(policy) == {"keep_threshold_pct", "config", "source"}
     assert policy["keep_threshold_pct"] is not None
-    # Invocation caps are not phase policy; legacy state must not fabricate one.
-    assert policy["variant_timeout_sec"] is None
-    assert policy["overtime_kill_ratio"] is None
     assert policy["config"]["lookback"] == 7
     assert policy["config"]["keep_gain_threshold_pct"] == 1.25
     # Not overridden, so the library default the phase will actually apply.
     assert policy["config"]["empty_streak_threshold"] is not None
     assert policy["source"]["no_keep_streak_threshold"] is not None
     assert policy["source"]["discovery_retry_limit"] == 3
-
-
-def test_force_exit_budget_pct_is_reported_unresolved(session_dir: Path):
-    coord = _coordinator(session_dir)
-    coord.shared_state.phase = "FRAMEWORK_AGENT"
-    coord.phase_framework._open_framework_timeline()
-    coord.phase_framework.close_framework_timeline(_tr("optimize_budget_cap"))
-
-    assert _events(session_dir)[0]["ext"]["policy"]["force_exit_budget_pct"] is None
 
 
 @pytest.mark.asyncio
