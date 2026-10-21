@@ -476,8 +476,6 @@ def _fill_integrate_provenance(
 
 
 class _ArtifactRecord(NamedTuple):
-    """Where a recorded candidate keeps the patch, snapshot and source an integrate needs."""
-
     bundle: Any
     snapshot_dir: str
     deploy_patch_path: str
@@ -2379,7 +2377,6 @@ _VLLM_BLOCK_FP8_TRACE_OPS = (
 
 
 def _is_vllm_block_fp8(precision: str, quant_type: str) -> bool:
-    """Return whether vLLM runs the block-scaled FP8 linear kernel path."""
     return precision == "fp8" and quant_type.strip().lower() in {
         "blockscale",
         "block_scale",
@@ -2688,8 +2685,6 @@ def _merge_tunableop_untuned_files(base_path: Path) -> int:
 
 
 class _ShapeCaptureRun(NamedTuple):
-    """One shape-capture pass: where it records, and the recipe it serves the workload under."""
-
     capture_dir: Path
     session_dir: Path
     task_id: str
@@ -2825,7 +2820,6 @@ async def _capture_vllm_tunableop_shapes(
     payload: dict,
     workspace: Path,
 ) -> HandlerResult:
-    """Record real vLLM GEMMs using TunableOp or a block-FP8 profiler trace."""
     run = _shape_capture_run(state, payload, workspace, session_dir)
     if payload.get("_shape_capture_mode") == "block_fp8_profile":
         return await _capture_block_fp8_profile_shapes(run, state, payload)
@@ -2906,8 +2900,6 @@ def _bridge_forge_decision(
 
 
 class _ForgeGemmRun(NamedTuple):
-    """One forge GEMM tuning run: what it tunes for, where it works, and the log it reads."""
-
     session_dir: Path
     workspace: Path
     framework: str
@@ -2925,8 +2917,6 @@ class _ForgeGemmRun(NamedTuple):
 
 
 class _ForgeShapeSources(NamedTuple):
-    """Every shape input a forge GEMM run hands its tuners."""
-
     tokens: str
     shapes_json: str
     untuned_csv: str
@@ -4112,8 +4102,6 @@ async def _run_integrate_rebaseline_with_lock_retry(
 
 
 class _SourceImport(NamedTuple):
-    """Whether the served process imported the patched source, and what it cost."""
-
     confirmed: bool | None
     evidence: dict[str, bool | None]
     decision: str
@@ -4208,8 +4196,6 @@ def _confirm_source_import(
 
 
 class _IntegrateRebaseline(NamedTuple):
-    """The re-baseline run that measures one patched build end to end."""
-
     workspace: Path
     server_args: str
     executor: Any
@@ -4217,8 +4203,6 @@ class _IntegrateRebaseline(NamedTuple):
 
 
 class _IntegrateVerdict(NamedTuple):
-    """Everything an integrate reports about the candidate it measured."""
-
     payload: dict
     bench_result: dict[str, Any]
     performance: Any
