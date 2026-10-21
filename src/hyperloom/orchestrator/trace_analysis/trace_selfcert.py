@@ -510,6 +510,7 @@ def build_verdict(
         "blocking_reasons": blocking,
         "warnings": warnings,
         "thresholds_effective": thresholds,
+        # The continuous quantities the categorical answers were derived from. Reported, never compared here.
         "measures": {
             "kernel_count": health.kernel_count,
             "attributed_pct": health.attributed_pct,
