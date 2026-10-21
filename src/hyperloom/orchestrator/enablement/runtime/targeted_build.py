@@ -240,7 +240,7 @@ _AITER_DISK_PER_CANDIDATE_GB = 6.0
 _AITER_DEFAULT_MAX_JOBS = 8
 
 _VLLM_DEFAULT_REPO = "https://github.com/ROCm/vllm"
-_VLLM_DISK_PER_CANDIDATE_GB = 20.0
+_VLLM_DISK_PER_CANDIDATE_GB = 20.0  # raised headroom for the full vLLM build cache
 _VLLM_DEFAULT_MAX_JOBS = 8
 
 # Inline verify_vllm_rocm probe.
@@ -741,6 +741,8 @@ class _VllmBuild(_TargetedRecipe):
         gpu_arch = str(self.action.gpu_arch or "").strip()
         if not gpu_arch:
             return self._fail("preflight_toolchain", "gpu_arch must be set explicitly for vLLM source (L6)")
+        # ABI-match guard: log an advisory when the torch ABI reports a different Python version; the build continues and
+        # runtime_python_exe points to the attempt venv python so the server uses the correct interpreter.
         host_pyver = f"{_sys.version_info.major}.{_sys.version_info.minor}"
         abi_pyver = str(self.abi.get("python_version") or "").strip()
         if abi_pyver and not abi_pyver.startswith(host_pyver):
@@ -758,6 +760,7 @@ class _VllmBuild(_TargetedRecipe):
         import os as _os
 
         max_jobs = int(self.action.max_jobs or self.default_max_jobs)
+        # vLLM's ROCm setup.py asserts ``CUDA_HOME is not set`` and reuses it as the toolchain root even on ROCm.
         rocm_root = (
             _os.environ.get("ROCM_HOME")
             or _os.environ.get("CUDA_HOME")
@@ -791,6 +794,7 @@ class _VllmBuild(_TargetedRecipe):
 
             _logmod.getLogger(__name__).debug("vLLM source build: build-requires pre-install skipped", exc_info=True)
 
+        # pip install -e triggers CMake build_ext.
         pip_cmd = [
             self.attempt_py,
             "-m",
@@ -827,6 +831,7 @@ class _VllmBuild(_TargetedRecipe):
         if vllm_verify.returncode != 0:
             return self._fail("boot_failed", f"vLLM ROCm platform check failed: {vllm_verify.stderr_tail[:500]}")
 
+        # Load probe: confirm the attempt venv loads vllm from the worktree.
         load_probe_script = (
             f"import vllm, inspect, sys; f = inspect.getfile(vllm); print(f); "
             f"sys.exit(0 if f.startswith({str(self.worktree_dir)!r}) else 3)"

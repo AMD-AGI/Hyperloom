@@ -189,6 +189,18 @@ def _layers_by_family(names: Iterable[str]) -> dict[str, set[int]]:
     return families
 
 
+def _checkpoint_weight_map(model_path: str) -> Any:
+    """Read the ``weight_map`` of the checkpoint's sharded index, or ``None`` when there is none.
+
+    ``model_path`` may be an HF repo id; resolve to the local
+    weights dir so the sharded-index read works for repo-id launches.
+    """
+    model_dir = resolve_local_model_dir(model_path)
+    idx_files = glob.glob(f"{model_dir}/*.index.json") if model_dir else []
+    data = json.loads(Path(idx_files[0]).read_text(errors="replace")) if idx_files else {}
+    return data.get("weight_map") if isinstance(data, dict) else None
+
+
 class EnablementParams(CoordinatorCollaborator):
     """Builds the enablement authoring specialist's parameters."""
 
@@ -374,13 +386,10 @@ class EnablementParams(CoordinatorCollaborator):
         if not offending or not (phrase_hit or weighty):
             return ""
         try:
-            model_dir = resolve_local_model_dir(self.shared_state.model_path)
-            idx_files = glob.glob(f"{model_dir}/*.index.json") if model_dir else []
-            data = json.loads(Path(idx_files[0]).read_text(errors="replace")) if idx_files else {}
+            weight_map = _checkpoint_weight_map(self.shared_state.model_path)
         except (OSError, ValueError):
             log.debug("enablement: checkpoint weight-facts derivation failed", exc_info=True)
             return ""
-        weight_map = data.get("weight_map") if isinstance(data, dict) else None
         if not weight_map:
             return ""
         missing_by_family = _layers_by_family(offending)
