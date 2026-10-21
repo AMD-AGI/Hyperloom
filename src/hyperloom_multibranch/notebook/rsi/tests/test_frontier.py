@@ -27,6 +27,7 @@ from hyperloom_multibranch.notebook.rsi.archive import SearchTree, longest_root_
 from hyperloom_multibranch.notebook.rsi.frontier import (
     FRONTIER_LOG_FORMAT,
     OBSERVATION_SECONDS,
+    SETTLED_TESTS,
     WINDOW_SECONDS,
     FrontierPolicy,
     FrontierScoring,
@@ -104,7 +105,7 @@ def test_a_prior_needs_sessions_at_least_half_similar_that_add_up_to_one_and_a_h
     assert backed is not None and backed.basis is FrontierBasis.PRIOR and backed.expected_gain_pct == pytest.approx(3.0)
 
 
-async def test_a_new_branch_without_a_commit_keeps_a_floor_until_ten_of_its_tests_are_judged(tmp_path: Path) -> None:
+async def test_a_new_branch_without_a_commit_keeps_a_floor_until_its_tests_settle(tmp_path: Path) -> None:
     clock = FakeClock()
     root = tmp_path / "notebook"
     observer = await scripted_session(root, clock)
@@ -121,18 +122,19 @@ async def test_a_new_branch_without_a_commit_keeps_a_floor_until_ten_of_its_test
     fresh = _scores(await observer.snapshot())["s3"]
     clock.advance(WINDOW_SECONDS)
     waited = _scores(await observer.snapshot())["s3"]
-    for n in range(9):
+    for n in range(SETTLED_TESTS - 1):
         await judge_flat(f"n{n}")
-    nine = _scores(await observer.snapshot())["s3"]
-    await judge_flat("n9")
-    ten = _scores(await observer.snapshot())["s3"]
+    unsettled = _scores(await observer.snapshot())["s3"]
+    await judge_flat("last")
+    settled = _scores(await observer.snapshot())["s3"]
 
     assert fresh is not None and fresh.expected_gain_pct == POLICY.new_branch_floor_pct
     assert fresh.basis is FrontierBasis.NEW and fresh.components["trend_pct"] == 0.0
     assert waited is not None and waited.basis is FrontierBasis.NEW
-    assert nine is not None and nine.expected_gain_pct == POLICY.new_branch_floor_pct
-    assert nine.basis is FrontierBasis.NEW
-    assert ten is not None and ten.expected_gain_pct == 0.0 and ten.basis is FrontierBasis.TREND
+    assert unsettled is not None and unsettled.expected_gain_pct == POLICY.new_branch_floor_pct
+    assert unsettled.basis is FrontierBasis.NEW
+    assert settled is not None and settled.expected_gain_pct == 0.0 and settled.basis is FrontierBasis.TREND
+    assert SETTLED_TESTS == 5
 
 
 def test_an_archived_branch_without_judged_times_keeps_the_floor_for_one_window_only() -> None:

@@ -74,8 +74,9 @@ MIN_EFFECTIVE_SESSIONS = 1.5
 REFERENCE_BUDGET_SECONDS = 4 * HOUR
 #: How many of the longest root tests a window spans at least, so that it holds an explore and its confirm.
 WINDOW_TESTS = 4
-#: How many judged tests end a branch's new-branch floor.
-SETTLED_TESTS = 10
+#: How many judged tests end a branch's new-branch floor; the judge's grace reads it too, so the grace never ends
+#: before the floor does.
+SETTLED_TESTS = 5
 
 
 @dataclass(frozen=True)
