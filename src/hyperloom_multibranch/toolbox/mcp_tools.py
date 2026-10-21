@@ -20,7 +20,7 @@ only; the notebook's search and record reads are shared across branches, as the 
 Every reply to a specialist also carries what reached its branch's inbox since the token's last reply, as one more text
 block after the tool's own content (:func:`reply_inbox`); ``poll_inbox`` keeps a cursor of its own. A cursor is the
 notebook's, or, in the middle of a feed too long for one page, that cursor with the number of its items already
-returned (``page:<n>:<notebook cursor>``); callers treat both as opaque.
+returned and a fingerprint of the last (``page:<n>:<fingerprint>:<notebook cursor>``); callers treat both as opaque.
 """
 
 from __future__ import annotations
@@ -30,6 +30,7 @@ import contextlib
 import dataclasses
 import enum
 import functools
+import hashlib
 import itertools
 import json
 import threading
@@ -101,6 +102,7 @@ POLL_INBOX_MAX_BYTES = 16_000
 #: What a page's document needs besides its items and its cursor: the keys, the counts and the marker.
 _POLL_PAGE_OVERHEAD = 200
 _PAGE_CURSOR = "page:"
+_FINGERPRINT_CHARS = 8
 _WAIT_TEST: dict[str, Any] = {
     "type": _OBJECT,
     "properties": {
@@ -380,10 +382,12 @@ def _queue_state(
 @dataclasses.dataclass(frozen=True)
 class _Feed:
     """The inbox items of a branch not yet returned from one cursor: ``base`` is the notebook's cursor they were read
-    from, ``skipped`` how many of its items an earlier page returned, and ``end`` the notebook's cursor past all."""
+    from, ``skipped`` how many of its items earlier pages returned, ``anchor`` the fingerprint of the last of those,
+    and ``end`` the notebook's cursor past all."""
 
     base: str
     skipped: int
+    anchor: str
     items: tuple[InboxItem, ...]
     end: str
 
@@ -391,18 +395,32 @@ class _Feed:
         """The cursor that resumes after the first ``count`` of the items."""
         if count >= len(self.items):
             return self.end
-        return f"{_PAGE_CURSOR}{self.skipped + count}:{self.base}"
+        anchor = _fingerprint(self.items[count - 1]) if count else self.anchor
+        return f"{_PAGE_CURSOR}{self.skipped + count}:{anchor}:{self.base}"
+
+
+def _fingerprint(item: InboxItem) -> str:
+    """A short fingerprint of ``item``, to find it again in a feed that has moved."""
+    text = f"{item.kind.value}|{item.pointer}|{item.at}|{item.summary}"
+    return hashlib.sha256(text.encode()).hexdigest()[:_FINGERPRINT_CHARS]
 
 
 async def _read_feed(notebook: Notebook, branch: str, cursor: str) -> _Feed:
-    base, skipped = cursor, 0
+    """The feed of ``branch`` from ``cursor``. The notebook computes some items from the claims the branch holds, so
+    a feed can change between two pages: a page cursor resumes after the item its page ended with, found by its
+    fingerprint, and by the count only where that item is gone."""
+    base, skipped, anchor = cursor, 0, ""
     if cursor.startswith(_PAGE_CURSOR):
-        count, _, base = cursor[len(_PAGE_CURSOR) :].partition(":")
-        if not count.isdigit():
+        parts = cursor[len(_PAGE_CURSOR) :].split(":", 2)
+        if len(parts) != 3 or not parts[0].isdigit() or len(parts[1]) != _FINGERPRINT_CHARS:
             raise InvalidParamsError(f"not an inbox cursor: {cursor!r}")
-        skipped = int(count)
+        skipped, anchor, base = int(parts[0]), parts[1], parts[2]
     page = await notebook.poll(branch, base)
-    return _Feed(base, skipped, page.items[skipped:], page.cursor)
+    items = page.items
+    if skipped and not (skipped <= len(items) and _fingerprint(items[skipped - 1]) == anchor):
+        found = [at for at, item in enumerate(items) if _fingerprint(item) == anchor]
+        skipped = min(found, key=lambda at: abs(at + 1 - skipped)) + 1 if found else min(skipped, len(items))
+    return _Feed(base, skipped, anchor, items[skipped:], page.cursor)
 
 
 def _item_size(item: InboxItem) -> int:

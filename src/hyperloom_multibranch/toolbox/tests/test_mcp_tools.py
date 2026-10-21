@@ -20,7 +20,8 @@ import pytest
 from hyperloom.contracts.measurement import TestRequest
 from hyperloom.hosted.mcp_server import HOST_KIND, McpServer, McpServerConfig
 from hyperloom_multibranch.contracts.notebook import Role, Writer
-from hyperloom_multibranch.contracts.notebook.records import StartupBrief
+from hyperloom_multibranch.contracts.notebook.vocab import InboxKind
+from hyperloom_multibranch.contracts.notebook.records import InboxItem, InboxPage, StartupBrief
 from hyperloom_multibranch.contracts.toolbox import (
     SCOPE_SPECIALIST,
     Backpressure,
@@ -766,3 +767,41 @@ async def test_a_poll_inbox_that_returns_every_item_still_marks_all_as_seen(wait
 async def test_a_cursor_in_the_middle_of_a_page_is_refused_when_it_is_not_one(wait_rig: Rig) -> None:
     _, reply = wait_rig.call(wait_rig.token("s1"), "poll_inbox", cursor="page:x:")
     assert reply["error"]["code"] == -32602
+
+
+class ScriptedInbox:
+    """A notebook whose inbox is a list the test edits between calls; every poll answers the whole list."""
+
+    def __init__(self, count: int) -> None:
+        self.items = [
+            InboxItem(InboxKind.RESULT, "s1", f"x{number}", f"result x{number}", 1.0) for number in range(count)
+        ]
+
+    async def poll(self, branch: str, cursor: str = "") -> InboxPage:
+        return InboxPage(tuple(self.items), f"end-{len(self.items)}")
+
+
+def _scripted_rig(inbox: ScriptedInbox) -> Rig:
+    server = McpServer(McpServerConfig(host_token=HOST_TOKEN), campaign="camp")
+    register_specialist_tools(server, toolbox=FakeToolbox(), notebooks=lambda branch: inbox)  # type: ignore[arg-type,return-value]
+    server.start()
+    return Rig(server, FakeToolbox(), Path(), FakeClock())
+
+
+@pytest.mark.parametrize("edit", ["vanishes", "appears"])
+def test_a_page_cursor_resumes_after_the_last_item_it_returned_when_the_feed_moved_under_it(edit: str) -> None:
+    """The notebook derives some items from the claims a branch holds now, so an item before the cursor can vanish."""
+    inbox = ScriptedInbox(2 * POLL_INBOX_MAX_ITEMS + 5)
+    rig = _scripted_rig(inbox)
+    try:
+        token = rig.token("s1")
+        first = json.loads(rig.ok(token, "poll_inbox"))
+        assert [item["pointer"] for item in first["items"]] == [f"x{n}" for n in range(POLL_INBOX_MAX_ITEMS)]
+        if edit == "vanishes":
+            del inbox.items[3]
+        else:
+            inbox.items.insert(3, InboxItem(InboxKind.BRIEF, "s1", "head", "pitfall", 1.0))
+        rest = _pages(rig, token, first["cursor"])
+        assert _pointers(rest) == [f"x{n}" for n in range(POLL_INBOX_MAX_ITEMS, 2 * POLL_INBOX_MAX_ITEMS + 5)]
+    finally:
+        rig.server.stop()
