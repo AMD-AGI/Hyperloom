@@ -24,6 +24,7 @@ from hyperloom.inference_optimizer.breakdown.stop_reasons import (
     BACKEND_UNHEALTHY_STOP_REASON,
     PATCH_RECOVERY_INCOMPLETE_STOP_REASON,
 )
+from hyperloom.inference_optimizer.session.optimization_journal import read_journal_entries
 from hyperloom.inference_optimizer.session.paths import db_path_for
 from ...measurement.baseline_budget import BASELINE_BUDGET_STOP_EXPLANATIONS
 from ...state.shared_state import SharedState
@@ -36,15 +37,7 @@ def _count_server_boot_failures(session_dir: Path | None) -> int:
     """Count ``warmup_failed`` variants (server boot failures) from the journal."""
     if session_dir is None:
         return 0
-    path = Path(session_dir) / "reports" / "optimization_journal.json"
-    try:
-        blob = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return 0
-    entries = blob.get("entries") if isinstance(blob, dict) else None
-    if not isinstance(entries, list):
-        return 0
-    return sum(1 for e in entries if isinstance(e, dict) and str(e.get("reason") or "").strip() == "warmup_failed")
+    return sum(1 for e in read_journal_entries(session_dir) if str(e.reason or "").strip() == "warmup_failed")
 
 
 def _safe_call(state: Any, method: str, default: Any) -> Any:
@@ -224,7 +217,10 @@ def _build_failure_summary(
 _STOP_REASON_EXPLANATIONS: dict[str, str] = {
     # Terminal reasons the coordinator loop sets directly.
     "target_reached": "Target reached: a requested --target-gain / --target-tput / --target-roofline was met.",
-    "time_exhausted": "Wall-clock budget (--max-hours) was exhausted; the best validated result was kept.",
+    "time_exhausted": (
+        "Wall-clock budget (--max-hours) was exhausted, or too little of it remained for another macro-cycle; "
+        "the best validated result was kept."
+    ),
     "max_ticks": "The coordinator hit its max-ticks safety cap; the best validated result was kept.",
     "signal": "Stopped on an OS stop signal (e.g. SIGINT / SIGTERM).",
     "emergency": (
@@ -236,9 +232,9 @@ _STOP_REASON_EXPLANATIONS: dict[str, str] = {
     "unknown": "No specific stop reason was recorded (e.g. a terminal session was resumed); treat as unclassified.",
     "baseline_failed": "Baseline never produced a valid measurement; see the failure summary / server log.",
     "server_argv_invalid": (
-        "The installed framework's own argument parser refused the composed server argv before any "
-        "server was launched. Nothing in the framework source is at fault: correct the offending flag "
-        "in --server-args / the recipe for the installed version, then re-run."
+        "The composed server argv was refused before any server was launched: the installed framework's parser "
+        "rejected a flag, or Hyperloom could not split the args into argv tokens intact. Nothing in the framework "
+        "source is at fault: correct the offending flag or value in --server-args / the recipe, then re-run."
     ),
     "environment_fault": (
         "This host cannot run the combination as installed - the framework is missing from the serving "
@@ -271,7 +267,6 @@ _STOP_REASON_EXPLANATIONS: dict[str, str] = {
         "resume; the run stopped instead of falling back to a different tree."
     ),
     # Search / phase plateaus and completions.
-    "no_kernel_skipped": "No kernel candidates were available, so the kernel phase was skipped and the run closed.",
     "sweep_done": "SWEEP finished the concurrency ladder.",
     "sweep_failed": "The concurrency sweep reached a failed terminal result.",
     "optimize_no_more_leverage": (
@@ -283,7 +278,10 @@ _STOP_REASON_EXPLANATIONS: dict[str, str] = {
     # sit in STOP_REASON_VOCAB at all, so these keys are a superset of the vocabulary rather than a mirror of it.
     "framework_agent_phase_done": "The framework-enablement agent completed its phase.",
     "framework_agent_plateau": "The framework-enablement agent plateaued with no further progress.",
-    "global_converged": "Cyclic phases converged: repeated macro-cycles stopped yielding new validated gain.",
+    "global_converged": (
+        "Cyclic phases converged: repeated macro-cycles stopped yielding new validated gain, or every steering "
+        "direction is saturated."
+    ),
     "enablement_stalled": "The enablement loop stopped without a baseline that boots: a revalidation the round depended on never promoted.",
     "plateau_explore": "The configuration search plateaued: no new leverage was found in the search space.",
     # Pre-flight gates (fail fast before booting a server).
@@ -786,7 +784,7 @@ def _format_completeness_annotations(summary: dict[str, Any]) -> list[str]:
     if pending_keeps:
         lines.append(f"- ⚠ kernel_opt KEEPs awaiting integrate: {', '.join(pending_keeps)}.")
     if untried:
-        lines.append(f"- ⚠ reusable hot kernels with no kernel_opt attempt: {', '.join(untried)}.")
+        lines.append(f"- ⚠ reusable hot kernels no backend produced a patch for: {', '.join(untried)}.")
     lines.append("")
     return lines
 

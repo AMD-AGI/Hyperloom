@@ -245,10 +245,14 @@ def _sdk_item_dict(item: Any) -> dict[str, Any]:
     return dict(root) if isinstance(root, dict) else {}
 
 
+def _present_fields(item: dict[str, Any], *keys: str) -> dict[str, Any]:
+    """The fields among ``keys`` that one SDK item actually reports."""
+    return {key: item[key] for key in keys if key in item}
+
+
 def _normalize_sdk_result(result: Any, session_id: str) -> AgentRunResult:
     """Normalize one completed SDK turn into the shared backend result."""
     text = str(getattr(result, "final_response", "") or "").strip()
-    file_changes: list[str] = []
     tool_calls: list[tuple[str, dict[str, Any]]] = []
     findings: list[str] = []
     edit_count = 0
@@ -256,50 +260,23 @@ def _normalize_sdk_result(result: Any, session_id: str) -> AgentRunResult:
         item = _sdk_item_dict(raw_item)
         item_type = str(item.get("type") or "")
         normalized_type = item_type.replace("_", "").lower()
-        if normalized_type == "agentmessage" and not text:
-            message = item.get("text")
-            if isinstance(message, str):
-                text = message.strip()
+        if normalized_type == "agentmessage" and not text and isinstance(item.get("text"), str):
+            text = item["text"].strip()
         elif normalized_type == "commandexecution":
-            command = item.get("command") or item_type
-            metadata = {key: item[key] for key in ("exitCode", "status") if key in item}
-            tool_calls.append((str(command), metadata))
+            tool_calls.append((str(item.get("command") or item_type), _present_fields(item, "exitCode", "status")))
         elif normalized_type == "mcptoolcall":
             server = str(item.get("server") or "mcp")
             tool = str(item.get("tool") or "tool")
-            metadata = {key: item[key] for key in ("status", "error") if key in item}
-            tool_calls.append((f"{server}.{tool}", metadata))
+            tool_calls.append((f"{server}.{tool}", _present_fields(item, "status", "error")))
         elif normalized_type in {"collabagenttoolcall", "collabtoolcall"}:
-            command = item.get("tool") or "collab_agent"
-            metadata = {
-                key: item[key]
-                for key in (
-                    "status",
-                    "senderThreadId",
-                    "receiverThreadIds",
-                )
-                if key in item
-            }
-            tool_calls.append((str(command), metadata))
+            metadata = _present_fields(item, "status", "senderThreadId", "receiverThreadIds")
+            tool_calls.append((str(item.get("tool") or "collab_agent"), metadata))
         elif normalized_type == "subagentactivity":
-            command = item.get("kind") or "subagent"
-            tool_calls.append(
-                (
-                    str(command),
-                    {
-                        "agentThreadId": item.get("agentThreadId", ""),
-                    },
-                )
-            )
-        elif normalized_type == "filechange":
-            item_paths = [
-                change["path"]
-                for change in item.get("changes", ())
-                if isinstance(change, dict) and isinstance(change.get("path"), str)
-            ]
-            file_changes.extend(item_paths)
-            if item_paths:
-                edit_count += 1
+            tool_calls.append((str(item.get("kind") or "subagent"), {"agentThreadId": item.get("agentThreadId", "")}))
+        elif normalized_type == "filechange" and any(
+            isinstance(change, dict) and isinstance(change.get("path"), str) for change in item.get("changes", ())
+        ):
+            edit_count += 1
 
     # The SDK reports a provider-side failure in-band: the turn "completes" while the model never answered.
     error = getattr(result, "error", None)
@@ -320,7 +297,6 @@ def _normalize_sdk_result(result: Any, session_id: str) -> AgentRunResult:
             end_reason = "sdk_error"
         text = text or f"[session ended with SDK error: {message}]"
 
-    unique_changes = list(dict.fromkeys(file_changes))
     return AgentRunResult(
         text=text,
         subtype=subtype,
@@ -328,7 +304,6 @@ def _normalize_sdk_result(result: Any, session_id: str) -> AgentRunResult:
         end_reason=end_reason,
         session_id=session_id,
         tool_calls=tool_calls,
-        file_changes=unique_changes,
         usage=_normalize_sdk_usage(getattr(result, "usage", None)),
         findings=findings,
         edit_count=edit_count,

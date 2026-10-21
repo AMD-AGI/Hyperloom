@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from hyperloom.orchestrator.phases.kernel import _geak_decline_status
 
 
@@ -34,3 +36,12 @@ def test_neither_status_collides_with_the_dispatch_failure_status() -> None:
     # diagnostic.
     for reason in ("geak_overlay_unloadable", "anything_else", None):
         assert _geak_decline_status(reason) != "rebench_unavailable"
+
+
+@pytest.mark.parametrize("status", ["rebench_cancelled", "rebench_declined", "overlay_unloadable"])
+def test_mission_summary_flags_a_dropped_candidate(status: str) -> None:
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    state = SharedState(baseline_tput=100.0, geak_pending={"status": status})
+
+    assert f"geak candidate dropped unvalidated ({status})" in state.to_mission_summary()

@@ -555,7 +555,7 @@ def _seed_shared_state(
     # KB architecture tags from config.json; fresh-launch only.
     _cfg_tags = _load_model_config_tags(str(args.model))
 
-    # Persisted for the session breakdown; the runtime reads the env directly.
+    # The only read of the backend choice; every later decision reads the persisted record.
     _kernel_optimizer_record = "forge" if forge_explicitly_enabled() else "geak"
 
     # Reference launch recipe (fresh-launch only, fail-soft): lowest-priority base for the baseline server args.
