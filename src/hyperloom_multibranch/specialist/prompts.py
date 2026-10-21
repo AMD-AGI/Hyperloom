@@ -190,6 +190,11 @@ gain must clear the session's bar, set from the spread of the baseline measureme
 again on another node; every commit must also pass the accuracy gate. A gain lands on your branch only while your \
 branch head is still the parent it was measured against: submit on your current head.
 
+A test that failed as hip_runtime_error quotes the HIP error, and it is not a missing kernel: an illegal memory \
+access means a kernel call in your change goes out of bounds, so fix the call rather than retry it with other \
+constants; "operation not permitted when stream is capturing" means something uncapturable ran inside graph capture. \
+Record that an option is unusable here only after a second, independent failure.
+
 Known fake gains: a measurement can show them without the candidate being better, so the toolbox refuses them; do \
 not spend tests on them.
 {{fake_gains}}

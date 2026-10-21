@@ -279,6 +279,15 @@ def test_the_role_gives_the_offline_route_for_a_tunableop_table():
     assert "online_tuning_unsupported" in prompt
 
 
+def test_the_role_says_how_to_read_a_hip_runtime_error_and_when_a_setting_counts_as_unusable():
+    prompt = role_prompt(WORKLOAD)
+
+    assert "hip_runtime_error" in prompt
+    assert "an illegal memory access means a kernel call in your change goes out of bounds" in prompt
+    assert "operation not permitted when stream is capturing" in prompt
+    assert "only after a second, independent failure" in prompt
+
+
 def test_the_role_points_at_the_brief_s_unfinished_leads_by_their_section_title():
     prompt = role_prompt(WORKLOAD)
 
