@@ -18,13 +18,9 @@ from hyperloom.orchestrator.trace_analysis import tracelens_skill_runner as tlr
 def _skill_request(tmp_path: Path) -> tlr.TraceLensSkillRequest:
     return tlr.TraceLensSkillRequest(
         skill_path=tmp_path / "skill.md",
-        trace_path=tmp_path / "trace.json.gz",
         output_dir=tmp_path / "out",
         tracelens_root=tmp_path,
         tracelens_internal_root=tmp_path / "TraceLens-internal",
-        platform="MI300X",
-        framework="sglang",
-        analysis_mode="default",
         capture_folder=None,
     )
 
