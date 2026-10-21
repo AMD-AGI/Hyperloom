@@ -3,8 +3,8 @@
 
 """EXPLORE: open the opening batch, then let the judge steer the branches until the EXPLORE deadline or a soft stop.
 
-The branches the user wrote a direction for open first, from the root commit; the opening judge call then sizes the
-opening batch into the slots they leave.
+The branches the user wrote a direction for, then those of the agents the user named, open first, from the root commit;
+the opening judge call then sizes the opening batch into the slots they leave.
 
 The loop wakes every :data:`EXPLORE_TICK_SECONDS`: it stops the repair branches that used up their time and the branches
 whose specialist gave up, once no candidate of theirs waits for its confirm, moves the forks and repairs queued on the
@@ -99,6 +99,7 @@ class ExploreWindow:
     max_llm_usd: float
     prelude_gpu_seconds_upper_bound: float
     user_directions: tuple[str, ...]
+    agents: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -194,6 +195,7 @@ class Explorer:
     async def _open_users(self, window: ExploreWindow) -> None:
         if self._clock.now() < window.explore_end:
             await self._branches.open_user_branches(window.user_directions, window.root_commit, window.explore_end)
+            await self._branches.open_agent_branches(window.agents, window.root_commit, window.explore_end)
 
     async def _steer(self, window: ExploreWindow, merging: asyncio.Future[None]) -> SessionStopReason:
         next_judge = self._clock.now() + self._interval

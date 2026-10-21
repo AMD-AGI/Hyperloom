@@ -105,7 +105,8 @@ class RunSettings:
     the session's tests may use and ``max_llm_usd`` the dollars the session's recorded LLM calls, the specialists'
     and the judge's and patch resolver's, may cost; 0 means no limit for any of them. ``reuse_prelude`` is the earlier
     PRELUDE the run roots on, ``None`` when it runs a child of its own. ``user_directions`` are the directions the user
-    wrote, each opening one branch at the root ahead of the opening batch, within the branch cap.
+    wrote, each opening one branch at the root ahead of the opening batch, within the branch cap; ``agents`` the
+    third-party agents the user named, each opening one autonomous branch the same way.
     ``frontier_policy`` says how the frontier policy is chosen, and ``frontier_scorer`` names the scorer the session
     scores with instead of choosing one, ``""`` when it chooses."""
 
@@ -117,6 +118,7 @@ class RunSettings:
     judge_interval_seconds: float
     reuse_prelude: ReusedPrelude | None = None
     user_directions: tuple[str, ...] = ()
+    agents: tuple[str, ...] = ()
     frontier_policy: FrontierPolicyMode = FrontierPolicyMode.AUTO
     frontier_scorer: str = ""
 
