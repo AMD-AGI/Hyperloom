@@ -191,13 +191,13 @@ class TestMeasurementContract:
     """What replaces the hand-written blacklists for an operator's workload."""
 
     def _grid(self, payload):
-        from hyperloom.orchestrator.actions.executors._variant_grid import _grid_variants_from_payload
+        from hyperloom.orchestrator.actions.executors.explore import _grid_variants_from_payload
 
         return _grid_variants_from_payload(payload)
 
     def test_overwriting_a_pinned_env_is_dropped(self):
         """Same output, different measurement: the quality gate cannot see it."""
-        from hyperloom.orchestrator.actions.executors._variant_grid import filter_operator_pinned_envs
+        from hyperloom.orchestrator.actions.executors.explore import filter_operator_pinned_envs
 
         grid = self._grid([{"name": "halve_repeats", "extra_envs": {"MYFW_REPEATS": "1"}}])
         kept, dropped = filter_operator_pinned_envs(grid, {"MYFW_REPEATS": 3})
@@ -205,7 +205,7 @@ class TestMeasurementContract:
         assert "MYFW_REPEATS" in dropped[0][1]
 
     def test_adding_an_unpinned_env_is_the_point_of_exploring(self):
-        from hyperloom.orchestrator.actions.executors._variant_grid import filter_operator_pinned_envs
+        from hyperloom.orchestrator.actions.executors.explore import filter_operator_pinned_envs
 
         grid = self._grid([{"name": "new_knob", "extra_envs": {"MYFW_CACHE": "1"}}])
         kept, dropped = filter_operator_pinned_envs(grid, {"MYFW_REPEATS": 3})
@@ -213,14 +213,14 @@ class TestMeasurementContract:
         assert dropped == []
 
     def test_the_key_match_ignores_case(self):
-        from hyperloom.orchestrator.actions.executors._variant_grid import filter_operator_pinned_envs
+        from hyperloom.orchestrator.actions.executors.explore import filter_operator_pinned_envs
 
         grid = self._grid([{"name": "lower", "extra_envs": {"myfw_repeats": "1"}}])
         kept, _ = filter_operator_pinned_envs(grid, {"MYFW_REPEATS": 3})
         assert kept == []
 
     def test_a_baseline_that_pins_nothing_constrains_nothing(self):
-        from hyperloom.orchestrator.actions.executors._variant_grid import filter_operator_pinned_envs
+        from hyperloom.orchestrator.actions.executors.explore import filter_operator_pinned_envs
 
         grid = self._grid([{"name": "anything", "extra_envs": {"MYFW_X": "1"}}])
         kept, dropped = filter_operator_pinned_envs(grid, {})
@@ -228,7 +228,7 @@ class TestMeasurementContract:
 
     def test_a_config_replay_carries_the_pinned_values_by_construction(self):
         """It reproduces a measured config; reading that as an edit strands it."""
-        from hyperloom.orchestrator.actions.executors._variant_grid import filter_operator_pinned_envs
+        from hyperloom.orchestrator.actions.executors.explore import filter_operator_pinned_envs
 
         grid = self._grid(
             [

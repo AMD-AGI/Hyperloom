@@ -15,7 +15,7 @@ from hyperloom.orchestrator.actions.executors import _accuracy_gate as ag
 from hyperloom.orchestrator.actions.executors import benchmark_result as br
 from hyperloom.orchestrator.actions.executors import _grid_runner as gr
 from hyperloom.orchestrator.actions.executors import _grid_variant_filter as vf
-from hyperloom.orchestrator.actions.executors import _variant_grid as vg
+from hyperloom.orchestrator.actions.executors import explore as ex
 
 
 class TestFrameworkRegistry:
@@ -276,7 +276,7 @@ class TestExploreGrid:
             ("xdit_no_compile", {"XDIT_USE_TORCH_COMPILE": "0"}),
             ("xdit_attn_aiter", {"XDIT_ATTENTION_BACKEND": "aiter"}),
         ]
-        grid = vg._default_grid_for_framework(framework, model_class=model_class, **hints)
+        grid = ex._default_grid_for_framework(framework, model_class=model_class, **hints)
         assert [(v.name, v.extra_envs) for v in grid] == expected
         for v in grid:
             assert v.extra_server_args == ""
@@ -287,7 +287,7 @@ class TestExploreGrid:
 
     @pytest.mark.parametrize("framework", ["sglang", "vllm", "custom", "unknown", ""])
     def test_other_frameworks_have_no_default_grid(self, framework):
-        assert vg._default_grid_for_framework(framework, model_class="moe_mla", conc=32, isl=2048, osl=256) == []
+        assert ex._default_grid_for_framework(framework, model_class="moe_mla", conc=32, isl=2048, osl=256) == []
 
     @pytest.mark.parametrize(
         "model_class,conc,model_variants",
@@ -310,7 +310,7 @@ class TestExploreGrid:
         expected = [("atom_level_2", "--level 2"), ("atom_prefix_cache", "--enable_prefix_caching"), *model_variants]
         if conc:
             expected.append(("atom_cudagraph_bracket", "--cudagraph-capture-sizes [1,2,4,8,16,32]"))
-        grid = vg._default_grid_for_framework(" ATOM ", model_class=model_class, conc=conc, isl=2048, osl=256)
+        grid = ex._default_grid_for_framework(" ATOM ", model_class=model_class, conc=conc, isl=2048, osl=256)
         assert [(v.name, v.extra_server_args) for v in grid] == expected
         for v in grid:
             assert v.extra_envs == {}

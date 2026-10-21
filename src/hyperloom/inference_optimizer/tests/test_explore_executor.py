@@ -33,13 +33,10 @@ from hyperloom.orchestrator.actions.stop_attribution import (
     ORCHESTRATOR_CANCELLED_CLASS,
     SESSION_TIME_EXHAUSTED_CLASS,
 )
-from hyperloom.orchestrator.actions.executors._grid_runner import _build_variant_yaml
 from hyperloom.orchestrator.actions.executors._launch_evidence import build_launch_evidence
-from hyperloom.orchestrator.actions.executors._variant_grid import (
-    ObservedLaunch,
+from hyperloom.orchestrator.actions.executors.explore import (
     _atom_default_grid,
     _default_grid_for_framework,
-    _seed_lever_variants,
     filter_baseline_noop_variants,
     observed_launch_from_state,
 )
@@ -192,12 +189,7 @@ def _stack_config(**changes: object) -> dict[str, object]:
     return {"mem_fraction_static": 0.9, "max_running_requests": 512, **changes}
 
 
-def _noop_filter_kwargs(
-    tmp_path: Path,
-    observed_server_config: dict | None = None,
-    observed_server_env: dict | None = None,
-    **overrides: object,
-) -> dict:
+def _noop_filter_kwargs(tmp_path: Path, **overrides: object) -> dict:
     base_yaml = tmp_path / "base.yaml"
     base_yaml.write_text(
         yaml.safe_dump({"benchmark": {"framework": "sglang", "envs": {**_RECIPE_ENV, **_BASE_ARGS_ENV}}}),
@@ -205,7 +197,6 @@ def _noop_filter_kwargs(
     )
     kwargs = {
         "framework": "sglang",
-        "build_variant_yaml": _build_variant_yaml,
         "base_yaml_path": base_yaml,
         "base_extra_args": "",
         "base_extra_envs": {},
@@ -215,10 +206,8 @@ def _noop_filter_kwargs(
         "model_path": None,
         "gpu_type": None,
         "benchmark_script": None,
-        "observed": ObservedLaunch(
-            _stack_config() if observed_server_config is None else observed_server_config,
-            _stack_env() if observed_server_env is None else observed_server_env,
-        ),
+        "observed_server_config": _stack_config(),
+        "observed_server_env": _stack_env(),
     }
     kwargs.update(overrides)
     return kwargs
@@ -3330,7 +3319,7 @@ def test_atom_default_grid_survives_compatibility_filter():
 
 def test_grid_variants_from_payload_coerces_list_extra_args():
     """A JSON-list ``extra_args`` must be space-joined into a shell-arg string, not stringified into a Python repr."""
-    from hyperloom.orchestrator.actions.executors._variant_grid import (
+    from hyperloom.orchestrator.actions.executors.explore import (
         _grid_variants_from_payload,
     )
 
@@ -3348,7 +3337,7 @@ def test_grid_variants_from_payload_coerces_list_extra_args():
 
 
 def test_grid_variants_from_payload_carries_removal_controls():
-    from hyperloom.orchestrator.actions.executors._variant_grid import (
+    from hyperloom.orchestrator.actions.executors.explore import (
         _grid_variants_from_payload,
     )
 
@@ -3370,7 +3359,7 @@ def test_grid_variants_from_payload_carries_removal_controls():
 
 
 def test_grid_variants_preserve_authored_reason_as_experience_reasoning():
-    from hyperloom.orchestrator.actions.executors._variant_grid import (
+    from hyperloom.orchestrator.actions.executors.explore import (
         _grid_variants_from_payload,
     )
 
@@ -3390,7 +3379,7 @@ def test_grid_variants_preserve_authored_reason_as_experience_reasoning():
 
 
 def test_grid_variants_do_not_treat_provenance_as_reasoning():
-    from hyperloom.orchestrator.actions.executors._variant_grid import (
+    from hyperloom.orchestrator.actions.executors.explore import (
         _grid_variants_from_payload,
     )
 
@@ -3784,30 +3773,6 @@ async def test_explore_grades_the_rounds_own_gpu_power_against_the_budget(
     coord.shared_state = state
     await coord.writeback._promote_explore(out, None, wb._PromoteOutcome(verdict=wb.Verdict.RECORDED))
     assert state.current_best["variant_name"] == "v_power"
-
-
-def test_lever_variants_are_measured_before_the_rest_of_the_grid():
-    """A round that runs out of budget should still have measured what the rewrite was for."""
-    seeded = _seed_lever_variants(
-        [{"name": "grid_a"}, {"name": "grid_b"}],
-        [{"name": "lever_x"}],
-    )
-
-    assert [v["name"] for v in seeded] == ["lever_x", "grid_a", "grid_b"]
-
-
-def test_a_lever_the_grid_already_names_is_not_seeded_twice():
-    grid = [{"name": "lever_x"}, {"name": "grid_a"}]
-    seeded = _seed_lever_variants(grid, [{"name": "lever_x"}])
-
-    assert [v["name"] for v in seeded] == ["lever_x", "grid_a"]
-
-
-def test_a_round_with_no_levers_keeps_its_grid_as_it_stands():
-    grid = [{"name": "grid_a"}]
-
-    assert _seed_lever_variants(grid, []) is grid
-    assert _seed_lever_variants(grid, None) is grid
 
 
 async def _run_explore_round(

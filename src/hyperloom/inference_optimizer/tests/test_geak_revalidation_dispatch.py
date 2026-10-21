@@ -273,7 +273,6 @@ async def test_geak_launch_controls_reach_materialized_rebench(
     import yaml
 
     from hyperloom.orchestrator.actions.executors import ExploreExecutor, explore
-    from hyperloom.orchestrator.actions.executors import _variant_grid
     from hyperloom.orchestrator.actions.executors._grid_runner import VariantResult, _build_variant_yaml
     from hyperloom.orchestrator.state.shared_state import SharedState
 
@@ -308,7 +307,7 @@ async def test_geak_launch_controls_reach_materialized_rebench(
     task = await coordinator.tasks.create(kind="explore", params=enqueued, idempotency_key="geak-revalidate-c0")
     calls = []
     fingerprints = []
-    original_fingerprint = _variant_grid.effective_fingerprint
+    original_fingerprint = explore.effective_fingerprint
 
     def observe_fingerprint(*args, **kwargs):
         fingerprint = original_fingerprint(*args, **kwargs)
@@ -342,7 +341,7 @@ async def test_geak_launch_controls_reach_materialized_rebench(
         ]
 
     monkeypatch.setattr(explore, "run_grid", capture_grid)
-    monkeypatch.setattr(_variant_grid, "effective_fingerprint", observe_fingerprint)
+    monkeypatch.setattr(explore, "effective_fingerprint", observe_fingerprint)
     monkeypatch.setattr(explore, "maybe_serving_lease", lambda **_kwargs: None)
     monkeypatch.setattr(explore, "teardown_lifecycle_server", lambda **_kwargs: None)
     result = await ExploreExecutor(session_dir=coordinator.session_dir)(

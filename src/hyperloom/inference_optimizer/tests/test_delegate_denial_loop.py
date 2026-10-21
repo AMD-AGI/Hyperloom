@@ -556,7 +556,7 @@ async def test_delegate_explore_grid_is_admitted_while_rewrite_levers_await_attr
         c.shared_state.baseline_tput = 800.0
         await c.router.handle_delegate("orchestration", _explore("round-a", ("folded", "--folded 2")))
         monkeypatch.setattr(
-            "hyperloom.orchestrator.actions.executors._variant_grid.framework_lever_grid",
+            "hyperloom.orchestrator.actions.executors.explore.framework_lever_grid",
             lambda _state: [{"name": "lever_off", "extra_envs": {"HL_X": "0"}}],
         )
         await c.router.handle_delegate("orchestration", _explore("round-b", ("folded", "--folded 2")))
