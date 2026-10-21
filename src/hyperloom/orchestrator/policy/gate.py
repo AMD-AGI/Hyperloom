@@ -1181,7 +1181,7 @@ class PolicyGate:
                 f"extend_lease extra_sec={extra_sec} outside (0, {EXTEND_LEASE_MAX_SEC}]",
                 rule="extend_lease_bounds",
                 hint=(
-                    f"Extend at most {EXTEND_LEASE_MAX_SEC}s per call; call again before the lease expires to extend "
+                    f"Extend at most {EXTEND_LEASE_MAX_SEC}s per call; call again while the task runs to extend "
                     "further. Re-check get_running_tasks between steps."
                 ),
             )

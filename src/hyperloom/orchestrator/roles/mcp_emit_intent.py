@@ -33,7 +33,7 @@ EMIT_INTENT_TOOL_QUALIFIED = f"mcp__{MCP_SERVER_NAME}__{EMIT_INTENT_TOOL_NAME}"
 _PAYLOAD_FIELD_NOTES: dict[IntentType, tuple[str, ...]] = {
     IntentType.REVIEW_VERDICT: ("verdict ∈ approve|reject|redirect|advise|needs_review",),
     IntentType.EXTEND_LEASE: (
-        f"extra_sec ≤ {EXTEND_LEASE_MAX_SEC} per call, repeatable before the lease expires",
+        f"extra_sec ≤ {EXTEND_LEASE_MAX_SEC} per call, repeatable while the task runs",
         "reason is optional",
     ),
     IntentType.PRUNE_BRANCH: ("scope ∈ family|queued",),

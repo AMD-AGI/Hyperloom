@@ -333,7 +333,7 @@ def test_gate_extend_lease_bounds_hint_states_the_step_cap(gate):
         )
     assert exc.value.rule == "extend_lease_bounds"
     assert f"at most {EXTEND_LEASE_MAX_SEC}s per call" in exc.value.hint
-    assert "before the lease expires" in exc.value.hint
+    assert "while the task runs" in exc.value.hint
 
 
 def test_gate_orchestration_prune_branch_requires_family(gate):

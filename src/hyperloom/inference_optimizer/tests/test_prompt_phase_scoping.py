@@ -627,7 +627,7 @@ def test_the_payload_constraints_state_the_extend_lease_step_cap():
     rendered = payload_constraints(IntentType)
 
     assert f"extend_lease.extra_sec ≤ {EXTEND_LEASE_MAX_SEC} per call" in rendered
-    assert "before the lease expires" in rendered
+    assert "while the task runs" in rendered
 
 
 def test_both_provider_descriptions_carry_the_constraints():

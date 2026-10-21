@@ -627,6 +627,22 @@ async def test_mcp_setup_diagnostic_reports_what_the_cli_offered(offered_tools, 
     assert setup["emit_intent"]["offered"] is offered
 
 
+def test_mcp_setup_diagnostic_hashes_the_role_scoped_schema():
+    """The recorded schema hash identifies the schema this role registers, not the full intent contract."""
+    import hashlib
+
+    backend = ClaudeBackend(enable_mcp_emit_intent=False, allowed_intents=_ORCHESTRATION_INTENTS)
+    expected = json.dumps(
+        build_emit_intent_tool_input_schema(_ORCHESTRATION_INTENTS), sort_keys=True, separators=(",", ":")
+    )
+
+    recorded = backend.get_mcp_setup_diagnostic()["emit_intent"]["schema_sha256"]
+
+    assert recorded == hashlib.sha256(expected.encode("utf-8")).hexdigest()
+    full = json.dumps(build_emit_intent_tool_input_schema(IntentType), sort_keys=True, separators=(",", ":"))
+    assert recorded != hashlib.sha256(full.encode("utf-8")).hexdigest()
+
+
 @pytest.mark.asyncio
 async def test_run_invalid_tool_use_input_drops_block_silently():
     """Bad tool_use input shouldn't crash the run — just drop the bad block."""
