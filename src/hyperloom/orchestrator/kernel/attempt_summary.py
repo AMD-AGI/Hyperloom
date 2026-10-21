@@ -5,6 +5,9 @@
 
 from __future__ import annotations
 
+import json
+import logging
+import re
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -13,18 +16,10 @@ from kernelforge.knowledge.kb_store.identity.implementation import normalize_ope
 
 from hyperloom.common.coerce import to_float
 
-from ._kernel_agent_results import (
-    ERROR_CLASS_AGENT_ERROR,
-    ERROR_CLASS_COMPILE_FAILED,
-    ERROR_CLASS_CORRECTNESS_FAILED,
-    ERROR_CLASS_PREPROCESS_FAILED,
-    ERROR_CLASS_TIMEOUT,
-    ERROR_CLASS_UNKNOWN,
-    _backend_results_dir,
-    _load_backend_ladder,
-    _load_kernel_result,
-)
 from ._kernel_decisions import _forge_loop_entries_by_operator_in_optimization_stack
+
+
+log = logging.getLogger(__name__)
 
 
 # Per-kernel outcome bucket (closed set).
@@ -41,10 +36,6 @@ OUTCOME_FAIL = "fail"
 OUTCOME_TIMEOUT = "timeout"
 OUTCOME_SKIP = "skip"
 
-#: Catch-all bucket of both breakdowns, for a reason or failure mode their
-#: vocabularies do not name.
-_BUCKET_OTHER = "other"
-
 #: ``kernel_opt_task_attempts`` rejection reasons we surface verbatim into
 #: ``rejection_breakdown`` totals (anything else falls into ``other``).
 KNOWN_REJECTION_REASONS = (
@@ -55,6 +46,94 @@ KNOWN_REJECTION_REASONS = (
     # was tried and lost".
     "unresolved_source",
 )
+
+#: ``backend_ladder[].error_class`` vocabulary surfaced into
+#: ``failure_reason_breakdown``. Empty string is reserved for succeeded attempts.
+ERROR_CLASS_TIMEOUT = "timeout"
+ERROR_CLASS_PREPROCESS_FAILED = "preprocess_failed"
+ERROR_CLASS_COMPILE_FAILED = "compile_failed"
+ERROR_CLASS_CORRECTNESS_FAILED = "correctness_failed"
+ERROR_CLASS_AGENT_ERROR = "agent_error"
+ERROR_CLASS_UNKNOWN = "unknown"
+
+#: On early failure kernel-agent points ``optimized_path`` at a stdout/stderr
+#: dump; those must not flip ``produced_artifact=true``.
+_ARTIFACT_LOG_SUFFIXES = (
+    "_stdout.log",
+    "_stderr.log",
+    ".log",
+    ".txt",
+)
+
+
+def _is_real_artifact_path(path: str) -> bool:
+    """True only when ``path`` looks like a real kernel artifact."""
+    if not path:
+        return False
+    p = path.strip()
+    if not p:
+        return False
+    low = p.lower()
+    if any(low.endswith(suf) for suf in _ARTIFACT_LOG_SUFFIXES):
+        return False
+    fname = low.rsplit("/", 1)[-1]
+    if "_stdout" in fname or "_stderr" in fname:
+        return False
+    return True
+
+
+_RE_TIMEOUT = re.compile(r"Timed out after (\d+)s")
+# stdout_tail is column-wrapped, so the signal can straddle newlines.
+_RE_PREPROCESS_FAILED = re.compile(
+    r"preprocess[\s\S]{0,300}?success=False"
+    r"(?:[\s\S]{0,80}?errors=(\d+))?",
+    re.IGNORECASE,
+)
+_RE_COMPILE_FAILED = re.compile(
+    r"(compile|build).{0,30}(failed|error)|undefined reference",
+    re.IGNORECASE,
+)
+_RE_CORRECTNESS_FAILED = re.compile(
+    r"correctness.{0,30}(failed|mismatch)|accuracy mismatch",
+    re.IGNORECASE,
+)
+
+
+def _classify_attempt_failure(
+    attempt: dict[str, Any],
+) -> tuple[str, str]:
+    """Classify a failed/partial attempt into ``(error_class, error_message)``."""
+    status = str(attempt.get("status") or "").strip().lower()
+    if status == "succeeded":
+        return "", ""
+    stdout = str(attempt.get("stdout_tail") or "")
+    explicit_err = str(attempt.get("error_message") or "")
+
+    for blob in (explicit_err, stdout):
+        m = _RE_TIMEOUT.search(blob)
+        if m:
+            secs = m.group(1)
+            return ERROR_CLASS_TIMEOUT, f"Timed out after {secs}s"
+
+    m = _RE_PREPROCESS_FAILED.search(stdout)
+    if m:
+        errs = m.group(1) or "?"
+        return (
+            ERROR_CLASS_PREPROCESS_FAILED,
+            f"preprocess reported {errs} error(s)",
+        )
+
+    if _RE_COMPILE_FAILED.search(stdout):
+        return ERROR_CLASS_COMPILE_FAILED, "compilation failed"
+
+    if _RE_CORRECTNESS_FAILED.search(stdout):
+        return ERROR_CLASS_CORRECTNESS_FAILED, "correctness check failed"
+
+    rc = attempt.get("returncode")
+    if isinstance(rc, int) and rc != 0:
+        return ERROR_CLASS_AGENT_ERROR, f"agent exit code {rc}"
+
+    return ERROR_CLASS_UNKNOWN, ""
 
 
 FIELD_GLOSSARY: dict[str, str] = {
@@ -79,6 +158,83 @@ FIELD_GLOSSARY: dict[str, str] = {
         "signal that the entire ladder failed for this kernel."
     ),
 }
+
+
+def _backend_results_dir(session_dir: Path, session_id: str) -> Path | None:
+    """Return ``<sd>/kernel-agent/runs/<key>/results`` or ``None``."""
+    from hyperloom.inference_optimizer.session.session_paths import kernel_agent_runs_root
+
+    runs_root = kernel_agent_runs_root(Path(session_dir))
+    if not runs_root.is_dir():
+        return None
+    for key in (session_dir.name, str(session_id or "").strip()):
+        if not key:
+            continue
+        candidate = runs_root / key / "results"
+        if candidate.is_dir():
+            return candidate
+    subdirs = [p for p in runs_root.iterdir() if p.is_dir()]
+    if len(subdirs) == 1:
+        candidate = subdirs[0] / "results"
+        if candidate.is_dir():
+            return candidate
+    return None
+
+
+def _load_kernel_result(
+    results_dir: Path | None,
+    kernel_id: str,
+) -> tuple[dict[str, Any] | None, str]:
+    """Read the raw kernel-agent ``results/<kid>.json`` payload."""
+    if results_dir is None:
+        return None, "kernel_agent_results_dir_missing"
+    fpath = results_dir / f"{kernel_id}.json"
+    if not fpath.is_file():
+        return None, "kernel_agent_result_file_missing"
+    try:
+        data = json.loads(fpath.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None, "parse_error"
+    if not isinstance(data, dict):
+        return None, "parse_error"
+    return data, ""
+
+
+def _load_backend_ladder(
+    results_dir: Path | None,
+    kernel_id: str,
+) -> tuple[list[dict[str, Any]], str]:
+    """Parse one kernel's kernel-agent ``results/<kid>.json`` attempts."""
+    data, reason = _load_kernel_result(results_dir, kernel_id)
+    if data is None:
+        return [], reason
+    raw_attempts = data.get("attempts") or []
+    if not isinstance(raw_attempts, list) or not raw_attempts:
+        return [], "no_attempts_recorded"
+    ladder: list[dict[str, Any]] = []
+    for a in raw_attempts:
+        if not isinstance(a, dict):
+            continue
+        produced = _is_real_artifact_path(a.get("optimized_path") or "")
+        row: dict[str, Any] = {
+            "backend": str(a.get("backend") or ""),
+            "status": str(a.get("status") or ""),
+            "attempt_id": str(a.get("attempt_id") or ""),
+            "produced_artifact": produced,
+        }
+        # Backend self-skip marker for the outcome classifier.
+        if a.get("skipped"):
+            row["skipped"] = True
+        elapsed = a.get("elapsed_s")
+        if isinstance(elapsed, (int, float)):
+            row["elapsed_sec"] = float(elapsed)
+        err_class, err_msg = _classify_attempt_failure(a)
+        if err_class:
+            row["error_class"] = err_class
+        if err_msg:
+            row["error_message"] = err_msg
+        ladder.append(row)
+    return ladder, ""
 
 
 def _relative_to_session(p: Path, session_dir: Path) -> str:
@@ -107,7 +263,7 @@ def _rejection_bucket(reason: str) -> str:
         return "max_partial_attempts_without_keep"
     if reason.startswith("max_failures_"):
         return "max_failures_without_keep"
-    return _BUCKET_OTHER
+    return "other"
 
 
 def _synthetic_forge_loop_attempt(stack_entry: dict[str, Any]) -> dict[str, Any]:
@@ -263,71 +419,41 @@ def _geak_lane_totals(state: Any) -> dict[str, Any]:
     return _lane_totals(1, 0, 0, 1)
 
 
-class _LaneCounters(NamedTuple):
-    """One lane's attempted/success/unvalidated/failed tallies."""
-
-    attempted: int = 0
-    success: int = 0
-    unvalidated: int = 0
-    failed: int = 0
-
-    def plus(self, other: _LaneCounters) -> _LaneCounters:
-        """These counters with ``other``'s added to each field."""
-        return _LaneCounters(
-            self.attempted + other.attempted,
-            self.success + other.success,
-            self.unvalidated + other.unvalidated,
-            self.failed + other.failed,
-        )
-
-
-def _gemm_tuning_results(state: Any) -> list[Any]:
-    """Every recorded gemm_tuning result, falling back to the last one on its own."""
-    attempts = list(getattr(state, "gemm_tuning_attempts", []) or [])
-    if attempts:
-        return attempts
-    last = getattr(state, "last_gemm_tuning", {}) or {}
-    return [last] if isinstance(last, dict) and last else []
-
-
-def _is_gemm_tuner_winner(row: dict[str, Any]) -> bool:
-    """True when a tuner row kept its config or measured a micro speedup above 1.0x."""
-    return row.get("kept") is True or (_to_float(row.get("best_micro_speedup")) or 0.0) > 1.0
-
-
-def _gemm_tuner_row_counts(result: dict[str, Any]) -> _LaneCounters | None:
-    """Counters for a gemm_tuning result reported per tuner row, ``None`` when it has no rows."""
-    rows = [row for row in (result.get("tuners_run") or []) if isinstance(row, dict)]
-    if not rows:
-        return None
-    winners = sum(1 for row in rows if _is_gemm_tuner_winner(row))
-    losers = len(rows) - winners
-    if result.get("requires_e2e_validation"):
-        return _LaneCounters(attempted=len(rows), unvalidated=winners, failed=losers)
-    return _LaneCounters(attempted=len(rows), success=winners, failed=losers)
-
-
-def _gemm_campaign_counts(result: dict[str, Any]) -> _LaneCounters:
-    """Counters for a gemm_tuning result that reports one campaign-wide decision."""
-    status = str(result.get("status") or "").strip().lower()
-    if not status or status in (OUTCOME_SKIP, "skipped"):
-        return _LaneCounters()
-    if str(result.get("decision") or "").upper() != "KEEP":
-        return _LaneCounters(attempted=1, failed=1)
-    if result.get("requires_e2e_validation"):
-        return _LaneCounters(attempted=1, unvalidated=1)
-    return _LaneCounters(attempted=1, success=1)
-
-
 def _gemm_tuning_lane_totals(state: Any) -> dict[str, Any]:
     """Summarize GEMM micro-tuning without treating candidates as E2E wins."""
-    totals = _LaneCounters()
-    for result in _gemm_tuning_results(state):
+    attempts = list(getattr(state, "gemm_tuning_attempts", []) or [])
+    if not attempts:
+        last = getattr(state, "last_gemm_tuning", {}) or {}
+        if isinstance(last, dict) and last:
+            attempts = [last]
+    attempted = success = unvalidated = failed = 0
+    for result in attempts:
         if not isinstance(result, dict):
             continue
-        per_row = _gemm_tuner_row_counts(result)
-        totals = totals.plus(per_row if per_row is not None else _gemm_campaign_counts(result))
-    return _lane_totals(totals.attempted, totals.success, totals.unvalidated, totals.failed)
+        rows = [row for row in (result.get("tuners_run") or []) if isinstance(row, dict)]
+        if rows:
+            winners = sum(
+                1 for row in rows if row.get("kept") is True or (_to_float(row.get("best_micro_speedup")) or 0.0) > 1.0
+            )
+            attempted += len(rows)
+            if result.get("requires_e2e_validation"):
+                unvalidated += winners
+            else:
+                success += winners
+            failed += len(rows) - winners
+            continue
+        status = str(result.get("status") or "").strip().lower()
+        if not status or status in (OUTCOME_SKIP, "skipped"):
+            continue
+        attempted += 1
+        kept = str(result.get("decision") or "").upper() == "KEEP"
+        if kept and result.get("requires_e2e_validation"):
+            unvalidated += 1
+        elif kept:
+            success += 1
+        else:
+            failed += 1
+    return _lane_totals(attempted, success, unvalidated, failed)
 
 
 def _overall_lane_outcome(lanes: dict[str, dict[str, Any]]) -> str:
@@ -435,267 +561,193 @@ def _summary_one_line(
     return handling.summary(entry, backend_ladder, artifact_error)
 
 
-class _SummaryInputs(NamedTuple):
-    """Every per-session lookup the by-kernel row builders read, resolved once."""
+def build_kernel_optimization_summary(state: Any, session_dir: Path | str) -> dict[str, Any]:
+    """Build the full summary block for one session."""
+    sd_path = Path(session_dir)
+    session_id = str(getattr(state, "session_id", "") or "")
+    results_dir = _backend_results_dir(sd_path, session_id)
+    where = ResultsLocation(results_dir=results_dir, session_dir=sd_path)
 
-    session_dir: Path
-    results_dir: Path | None
-    attempts_map: dict[str, dict[str, Any]]
-    hot_kernel_ids: set[str]
-    integrated_ids: set[str]
-    rejected_ids: set[str]
-    forge_loop_entries_by_operator: dict[str, dict[str, Any]]
-    last_kernel_opt: dict[str, Any]
-    keep_pending_kernel_id: str
+    top15: list[dict[str, Any]] = list(
+        (getattr(state, "last_trace_analyze", {}) or {}).get("kernel_roofline_top15") or []
+    )
 
-
-class _AttemptMatch(NamedTuple):
-    """The ledger row a hot kernel resolved to, with the category it lands in."""
-
-    attempt: dict[str, Any]
-    category: str
-
-
-class _KernelTally:
-    """The by-kernel summary rows of one session and the counters they roll up into."""
-
-    def __init__(self, top_candidates: int) -> None:
-        self.rows: list[dict[str, Any]] = []
-        self.counts: dict[str, int] = {
-            "top_candidates": top_candidates,
-            "attempted": 0,
-            "integrated": 0,
-            "keep_pending": 0,
-            "rejected": 0,
-            "in_flight": 0,
-        }
-        self.rejection_breakdown: dict[str, int] = dict.fromkeys(KNOWN_REJECTION_REASONS, 0)
-        self.rejection_breakdown[_BUCKET_OTHER] = 0
-
-    def record(self, row: dict[str, Any]) -> None:
-        """Keep one attempted kernel's row and fold it into the counters."""
-        category = str(row.get("category") or "")
-        self.counts["attempted"] += 1
-        self.counts[_category_count_key(category)] += 1
-        if category == CATEGORY_ATTEMPTED_REJECTED:
-            bucket = _rejection_bucket(str(row.get("rejected_reason") or ""))
-            self.rejection_breakdown[bucket] = self.rejection_breakdown.get(bucket, 0) + 1
-        self.rows.append(row)
-
-
-def _roofline_top15(state: Any) -> list[dict[str, Any]]:
-    """The session's hottest kernels, in the order trace analysis ranked them."""
-    analysis = getattr(state, "last_trace_analyze", {}) or {}
-    return list(analysis.get("kernel_roofline_top15") or [])
-
-
-def _hot_kernel_ids(top15: list[dict[str, Any]]) -> set[str]:
-    """The kernel ids the roofline top15 names."""
-    ids = {str(entry.get("kernel_id") or "") for entry in top15 if isinstance(entry, dict)}
-    ids.discard("")
-    return ids
-
-
-def _latest_attempt_per_kernel(state: Any) -> dict[str, dict[str, Any]]:
-    """Attempts-ledger rows keyed by the kernel they now describe, newest ``last_ts`` winning."""
-    latest: dict[str, dict[str, Any]] = {}
-    for ledger_id, attempt in dict(getattr(state, "kernel_opt_task_attempts", {}) or {}).items():
+    raw_attempts: dict[str, dict[str, Any]] = dict(getattr(state, "kernel_opt_task_attempts", {}) or {})
+    attempts_map: dict[str, dict[str, Any]] = {}
+    for ledger_id, attempt in raw_attempts.items():
         if not isinstance(attempt, dict):
             continue
-        kernel_id = str(attempt.get("current_kernel_id") or attempt.get("kernel_id") or ledger_id)
-        previous = latest.get(kernel_id)
+        current_kernel_id = str(attempt.get("current_kernel_id") or attempt.get("kernel_id") or ledger_id)
+        previous = attempts_map.get(current_kernel_id)
         if previous is None or str(attempt.get("last_ts") or "") >= str(previous.get("last_ts") or ""):
-            latest[kernel_id] = attempt
-    return latest
-
-
-def _integrated_kernel_ids(state: Any) -> set[str]:
-    """Kernel ids an ``integrate`` entry landed on the optimization stack."""
-    ids: set[str] = set()
+            attempts_map[current_kernel_id] = attempt
+    rejected_ids: set[str] = {str(x) for x in (getattr(state, "rejected_kernel_ids", []) or [])}
+    integrated_ids: set[str] = set()
     for entry in getattr(state, "optimization_stack", []) or []:
         if not isinstance(entry, dict):
             continue
         kid = str(entry.get("kernel_id") or "")
         if kid and entry.get("action") == "integrate":
-            ids.add(kid)
-    return ids
-
-
-def _pending_keep_kernel_id(
-    last_kernel_opt: dict[str, Any],
-    integrated_ids: set[str],
-    rejected_ids: set[str],
-) -> str:
-    """The kernel whose KEEP has reached neither integrate nor reject (``""`` when there is none)."""
-    if str(last_kernel_opt.get("decision") or "").upper() != "KEEP":
-        return ""
-    kernel_id = str(last_kernel_opt.get("kernel_id") or "")
-    if kernel_id and kernel_id not in integrated_ids and kernel_id not in rejected_ids:
-        return kernel_id
-    return ""
-
-
-def _collect_summary_inputs(state: Any, session_dir: Path, top15: list[dict[str, Any]]) -> _SummaryInputs:
-    """Resolve the session state every by-kernel row is built from."""
+            integrated_ids.add(kid)
+    # A kernel-recipe lane (forge-loop/flydsl/fusion) lands its optimization_stack entry under its own long-form
+    # recipe id, which never equals a top15 row's synthetic kNNN id and never touches kernel_opt_task_attempts —
+    # so without this, an integrated kernel silently reads as "never attempted" (see
+    # _forge_loop_entries_by_operator_in_optimization_stack's docstring for why the operator name is the shared
+    # identity).
+    forge_loop_entries_by_operator = _forge_loop_entries_by_operator_in_optimization_stack(state)
     last_kernel_opt = dict(getattr(state, "last_kernel_opt", {}) or {})
-    integrated_ids = _integrated_kernel_ids(state)
-    rejected_ids = {str(x) for x in (getattr(state, "rejected_kernel_ids", []) or [])}
-    return _SummaryInputs(
-        session_dir=session_dir,
-        results_dir=_backend_results_dir(session_dir, str(getattr(state, "session_id", "") or "")),
-        attempts_map=_latest_attempt_per_kernel(state),
-        hot_kernel_ids=_hot_kernel_ids(top15),
-        integrated_ids=integrated_ids,
-        rejected_ids=rejected_ids,
-        forge_loop_entries_by_operator=_forge_loop_entries_by_operator_in_optimization_stack(state),
-        last_kernel_opt=last_kernel_opt,
-        keep_pending_kernel_id=_pending_keep_kernel_id(last_kernel_opt, integrated_ids, rejected_ids),
-    )
+    keep_pending_kid = ""
+    if str(last_kernel_opt.get("decision") or "").upper() == "KEEP":
+        cand_kid = str(last_kernel_opt.get("kernel_id") or "")
+        if cand_kid and cand_kid not in integrated_ids and cand_kid not in rejected_ids:
+            keep_pending_kid = cand_kid
 
+    by_kernel: list[dict[str, Any]] = []
+    rejection_breakdown: dict[str, int] = dict.fromkeys(KNOWN_REJECTION_REASONS, 0)
+    rejection_breakdown["other"] = 0
+    counts = {
+        "top_candidates": len(top15),
+        "attempted": 0,
+        "integrated": 0,
+        "keep_pending": 0,
+        "rejected": 0,
+        "in_flight": 0,
+    }
 
-def _hot_kernel_attempt(top_entry: dict[str, Any], kernel_id: str, inputs: _SummaryInputs) -> _AttemptMatch | None:
-    """Resolve a roofline top15 row to its attempt, or ``None`` when no recorded lane touched it.
-
-    A kernel-recipe lane (forge-loop/flydsl/fusion) lands its optimization_stack entry under its own
-    long-form recipe id, which never equals a top15 row's synthetic kNNN id and never touches
-    kernel_opt_task_attempts — so without the operator-name match below, an integrated kernel
-    silently reads as "never attempted" (see _forge_loop_entries_by_operator_in_optimization_stack's
-    docstring for why the operator name is the shared identity).
-    """
-    attempt = inputs.attempts_map.get(kernel_id)
-    if attempt is not None:
-        category = _classify_attempted(
-            attempt,
-            integrated_ids=inputs.integrated_ids,
-            rejected_ids=inputs.rejected_ids,
-            kernel_id=kernel_id,
-        )
-        return _AttemptMatch(attempt, category)
-    operator = normalize_operator_name(str(top_entry.get("name") or ""))
-    forge_loop_entry = inputs.forge_loop_entries_by_operator.get(operator)
-    if forge_loop_entry is None:
-        return None
-    return _AttemptMatch(_synthetic_forge_loop_attempt(forge_loop_entry), CATEGORY_INTEGRATED)
-
-
-def _tally_hot_kernels(top15: list[dict[str, Any]], inputs: _SummaryInputs, tally: _KernelTally) -> None:
-    """Record every roofline top15 kernel a recorded lane attempted, hottest first."""
+    # Process top15 kernels first (pre-sorted by gpu_pct desc).
+    processed_kids: set[str] = set()
     for top_entry in top15:
         if not isinstance(top_entry, dict):
             continue
-        kernel_id = str(top_entry.get("kernel_id") or "")
-        if not kernel_id:
+        kid = str(top_entry.get("kernel_id") or "")
+        if not kid:
             continue
-        match = _hot_kernel_attempt(top_entry, kernel_id, inputs)
-        if match is None:
+        processed_kids.add(kid)
+        attempt = attempts_map.get(kid)
+        forge_loop_entry = (
+            forge_loop_entries_by_operator.get(normalize_operator_name(str(top_entry.get("name") or "")))
+            if attempt is None
+            else None
+        )
+        if attempt is None and forge_loop_entry is not None:
+            attempt = _synthetic_forge_loop_attempt(forge_loop_entry)
+        if attempt is None:
+            # A hot kernel none of the recorded lanes touched.
             continue
-        pending = inputs.last_kernel_opt if kernel_id == inputs.keep_pending_kernel_id else None
-        where = ResultsLocation(inputs.results_dir, inputs.session_dir)
-        tally.record(_render_attempted_row(top_entry, match.attempt, match.category, where, pending))
+        counts["attempted"] += 1
+        category = (
+            CATEGORY_INTEGRATED
+            if forge_loop_entry is not None
+            else _classify_attempted(
+                attempt,
+                integrated_ids=integrated_ids,
+                rejected_ids=rejected_ids,
+                kernel_id=kid,
+            )
+        )
+        counts[_category_count_key(category)] += 1
+        if category == CATEGORY_ATTEMPTED_REJECTED:
+            bucket = _rejection_bucket(_rejected_reason_of(attempt))
+            rejection_breakdown[bucket] = rejection_breakdown.get(bucket, 0) + 1
+        by_kernel.append(
+            _render_attempted_row(
+                top_entry,
+                attempt,
+                category,
+                where,
+                last_kernel_opt=last_kernel_opt if kid == keep_pending_kid else None,
+            )
+        )
 
-
-def _tally_ledger_only_kernels(inputs: _SummaryInputs, tally: _KernelTally) -> None:
-    """Record every attempted kernel the roofline top15 does not name."""
-    where = ResultsLocation(inputs.results_dir, inputs.session_dir)
-    for kernel_id, attempt in inputs.attempts_map.items():
-        if kernel_id in inputs.hot_kernel_ids:
+    # Kernels with a ledger row but not in top15.
+    for kid, attempt in attempts_map.items():
+        if kid in processed_kids:
             continue
+        counts["attempted"] += 1
         category = _classify_attempted(
             attempt,
-            integrated_ids=inputs.integrated_ids,
-            rejected_ids=inputs.rejected_ids,
-            kernel_id=kernel_id,
+            integrated_ids=integrated_ids,
+            rejected_ids=rejected_ids,
+            kernel_id=kid,
         )
-        tally.record(_render_attempted_row({"kernel_id": kernel_id}, attempt, category, where, None))
+        counts[_category_count_key(category)] += 1
+        # Same accounting as the top15 loop above: a rejected kernel that only has a ledger row must land in the
+        # breakdown too, or the totals and the per-reason split disagree.
+        if category == CATEGORY_ATTEMPTED_REJECTED:
+            bucket = _rejection_bucket(_rejected_reason_of(attempt))
+            rejection_breakdown[bucket] = rejection_breakdown.get(bucket, 0) + 1
+        by_kernel.append(
+            _render_attempted_row(
+                {"kernel_id": kid},
+                attempt,
+                category,
+                where,
+                last_kernel_opt=None,
+            )
+        )
 
-
-def _tally_gemm_tuning_keeps(state: Any, inputs: _SummaryInputs, tally: _KernelTally) -> None:
-    """Record each gemm_tuning KEEP as a standalone entry.
-
-    One campaign retunes many GEMM shapes at once rather than one named kernel, so there is no
-    roofline top15 row to match it against and it would otherwise read as "never attempted".
-    """
-    where = ResultsLocation(inputs.results_dir, inputs.session_dir)
+    # gemm_tuning KEEPs: no roofline top15 row to match against (one campaign retunes many GEMM
+    # shapes at once, not one named kernel), so each lands as its own standalone entry rather than
+    # silently reading as "never attempted".
     for gemm_entry in _gemm_tuning_entries_in_optimization_stack(state):
         gemm_kid = str(gemm_entry.get("variant_name") or "gemm_tuning")
-        top_entry = {"kernel_id": gemm_kid, "name": gemm_kid, "kernel_category": "gemm_tuning"}
-        attempt = _synthetic_gemm_tuning_attempt(gemm_entry)
-        tally.record(_render_attempted_row(top_entry, attempt, CATEGORY_INTEGRATED, where, None))
+        counts["attempted"] += 1
+        counts["integrated"] += 1
+        by_kernel.append(
+            _render_attempted_row(
+                {"kernel_id": gemm_kid, "name": gemm_kid, "kernel_category": "gemm_tuning"},
+                _synthetic_gemm_tuning_attempt(gemm_entry),
+                CATEGORY_INTEGRATED,
+                where,
+                last_kernel_opt=None,
+            )
+        )
 
-
-def _lane_totals_by_lane(
-    state: Any,
-    counts: dict[str, int],
-    by_kernel: list[dict[str, Any]],
-) -> dict[str, dict[str, Any]]:
-    """Counters and terminal outcome for each kernel lane of one session."""
-    unvalidated = counts["keep_pending"] + counts["in_flight"]
-    source_outcome = (
-        OUTCOME_UNVALIDATED
-        if counts["attempted"] and not counts["integrated"] and unvalidated
-        else _session_kernel_opt_outcome(by_kernel)
+    failure_reason_breakdown = _aggregate_failure_reasons(by_kernel)
+    top_takeaways = _build_top_takeaways(
+        counts=counts,
+        by_kernel=by_kernel,
+        rejection_breakdown=rejection_breakdown,
+        failure_reason_breakdown=failure_reason_breakdown,
     )
-    return {
+    source_outcome = _session_kernel_opt_outcome(by_kernel)
+    lane_totals: dict[str, dict[str, Any]] = {
         "source_level": _lane_totals(
             counts["attempted"],
             counts["integrated"],
-            unvalidated,
+            counts["keep_pending"] + counts["in_flight"],
             counts["rejected"],
-            outcome=source_outcome,
+            outcome=(
+                OUTCOME_UNVALIDATED
+                if counts["attempted"] and not counts["integrated"] and (counts["keep_pending"] or counts["in_flight"])
+                else source_outcome
+            ),
         ),
         "geak": _geak_lane_totals(state),
         "gemm_tuning": _gemm_tuning_lane_totals(state),
     }
-
-
-def _absent_geak_backends_takeaway(state: Any) -> str:
-    """Takeaway naming the backends GEAK could not try (``""`` when it had them all)."""
-    geak_result = getattr(state, "geak_result", None)
-    absent = geak_result.get("absent_backends") if isinstance(geak_result, dict) else None
-    if not isinstance(absent, dict) or not absent:
-        return ""
-    return (
-        f"GEAK ran without these backends (unavailable): {', '.join(sorted(absent))}; "
-        "any no-win it reports did not try them."
-    )
-
-
-def build_kernel_optimization_summary(state: Any, session_dir: Path | str) -> dict[str, Any]:
-    """Build the full summary block for one session."""
-    top15 = _roofline_top15(state)
-    inputs = _collect_summary_inputs(state, Path(session_dir), top15)
-    tally = _KernelTally(len(top15))
-    _tally_hot_kernels(top15, inputs, tally)
-    _tally_ledger_only_kernels(inputs, tally)
-    _tally_gemm_tuning_keeps(state, inputs, tally)
-
-    counts = tally.counts
-    failure_reason_breakdown = _aggregate_failure_reasons(tally.rows)
-    top_takeaways = _build_top_takeaways(
-        counts=counts,
-        by_kernel=tally.rows,
-        rejection_breakdown=tally.rejection_breakdown,
-        failure_reason_breakdown=failure_reason_breakdown,
-    )
-    lane_totals = _lane_totals_by_lane(state, counts, tally.rows)
     counts["attempted"] = sum(int(lane["attempted"]) for lane in lane_totals.values())
     if counts["attempted"] and lane_totals["source_level"]["attempted"] == 0:
         top_takeaways[0] = "No source-level kernel rewrites were attempted; other kernel lanes did run."
-    absent_backends_takeaway = _absent_geak_backends_takeaway(state)
-    if absent_backends_takeaway:
-        top_takeaways.append(absent_backends_takeaway)
+    geak_result = getattr(state, "geak_result", None)
+    absent_backends = geak_result.get("absent_backends") if isinstance(geak_result, dict) else None
+    if isinstance(absent_backends, dict) and absent_backends:
+        top_takeaways.append(
+            f"GEAK ran without these backends (unavailable): {', '.join(sorted(absent_backends))}; "
+            "any no-win it reports did not try them."
+        )
 
     return {
         "schema_version": 2,
-        "session_id": str(getattr(state, "session_id", "") or ""),
+        "session_id": session_id,
         "model_name": str(getattr(state, "model_name", "") or ""),
         "cumulative_gain_validated_pct": float(getattr(state, "cumulative_gain_validated", 0.0) or 0.0),
         "kernel_opt_outcome": _overall_lane_outcome(lane_totals),
         "totals": counts,
-        "rejection_breakdown": tally.rejection_breakdown,
+        "rejection_breakdown": rejection_breakdown,
         "failure_reason_breakdown": failure_reason_breakdown,
         "field_glossary": FIELD_GLOSSARY,
-        "by_kernel": tally.rows,
+        "by_kernel": by_kernel,
         "top_takeaways": top_takeaways,
         "lane_totals": lane_totals,
     }
@@ -708,73 +760,68 @@ class ResultsLocation(NamedTuple):
     session_dir: Path
 
 
-#: ``results/<kid>.json`` verification fields that override the ledger's own, for kernels
-#: that never populate the ledger's compile/correctness fields.
-_VERIFICATION_DETAIL_KEYS = (
-    "compile_passed",
-    "correctness_passed",
-    "correctness_source",
-    "micro_speedup",
-    "micro_speedup_source",
-    "verification_status",
-    "best_artifact_path",
-    "best_backend",
-    "best_attempt_id",
-)
-
-#: ``last_kernel_opt`` fields that win over both the ledger and the detail file.
-_VERIFICATION_DECISION_KEYS = (
-    "compile_passed",
-    "correctness_passed",
-    "best_artifact_path",
-    "reasons",
-)
-
-
-def _overlay_present_keys(target: dict[str, Any], source: dict[str, Any], keys: tuple[str, ...]) -> None:
-    """Copy each of ``keys`` that ``source`` records as non-``None`` onto ``target``."""
-    for key in keys:
-        value = source.get(key)
-        if value is not None:
-            target[key] = value
-
-
-def _verification_block(
+def _render_attempted_row(
+    top_entry: dict[str, Any],
     attempt: dict[str, Any],
-    kernel_result: dict[str, Any] | None,
+    category: str,
+    where: ResultsLocation,
+    *,
     last_kernel_opt: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    """Compile/correctness evidence for one kernel, strongest source applied last."""
+    """Build a summary row for a kernel that was attempted."""
+    results_dir, session_dir = where
+    kid = str(top_entry.get("kernel_id") or attempt.get("kernel_id") or "")
+    ladder, ladder_unavailable = _load_backend_ladder(results_dir, kid)
+    kernel_result, _ = _load_kernel_result(results_dir, kid)
+
     verification: dict[str, Any] = {
         "compile_passed": attempt.get("compile_passed"),
         "correctness_passed": attempt.get("correctness_passed"),
     }
-    detail = (kernel_result or {}).get("verification")
-    if isinstance(detail, dict):
-        _overlay_present_keys(verification, detail, _VERIFICATION_DETAIL_KEYS)
-    if last_kernel_opt:
-        _overlay_present_keys(verification, last_kernel_opt, _VERIFICATION_DECISION_KEYS)
-    return verification
+    # Detail-file passthrough for kernels that don't populate ledger compile/correctness fields.
+    if isinstance(kernel_result, dict):
+        ver_block = kernel_result.get("verification")
+        if isinstance(ver_block, dict):
+            for key in (
+                "compile_passed",
+                "correctness_passed",
+                "correctness_source",
+                "micro_speedup",
+                "micro_speedup_source",
+                "verification_status",
+                "best_artifact_path",
+                "best_backend",
+                "best_attempt_id",
+            ):
+                v = ver_block.get(key)
+                if v is not None:
+                    verification[key] = v
+    # last_kernel_opt wins over ledger + detail file.
+    if isinstance(last_kernel_opt, dict) and last_kernel_opt:
+        for key in (
+            "compile_passed",
+            "correctness_passed",
+            "best_artifact_path",
+            "reasons",
+        ):
+            v = last_kernel_opt.get(key)
+            if v is not None:
+                verification[key] = v
+    artifact_error = ""
+    if verification.get("compile_passed") is False and ladder:
+        artifact_error = "no usable backend attempt"
+    elif verification.get("compile_passed") is False:
+        artifact_error = "ladder unavailable; compile_passed=false"
 
+    summary_text = _summary_one_line(
+        category=category,
+        entry=attempt,
+        backend_ladder=ladder,
+        artifact_error=artifact_error,
+    )
 
-def _artifact_error(verification: dict[str, Any], ladder: list[dict[str, Any]]) -> str:
-    """Why this kernel has no usable artifact (``""`` when it compiled)."""
-    if verification.get("compile_passed") is not False:
-        return ""
-    return "no usable backend attempt" if ladder else "ladder unavailable; compile_passed=false"
-
-
-def _kernel_agent_result_path(where: ResultsLocation, kernel_id: str) -> str:
-    """Session-relative path of the kernel-agent result file (``""`` when it was never written)."""
-    if where.results_dir is None:
-        return ""
-    fpath = where.results_dir / f"{kernel_id}.json"
-    return _relative_to_session(fpath, where.session_dir) if fpath.is_file() else ""
-
-
-def _roofline_profile_fields(top_entry: dict[str, Any], attempt: dict[str, Any]) -> dict[str, Any]:
-    """Row fields describing the kernel itself, as trace analysis profiled it."""
-    return {
+    row: dict[str, Any] = {
+        "kernel_id": kid,
         "kernel_name": str(top_entry.get("name") or ""),
         "kernel_category": str(top_entry.get("kernel_category") or ""),
         "source_file": str(top_entry.get("source_file") or attempt.get("last_source_file") or ""),
@@ -782,12 +829,10 @@ def _roofline_profile_fields(top_entry: dict[str, Any], attempt: dict[str, Any])
         "efficiency_pct": _to_float(top_entry.get("efficiency_percent")),
         "bound_type": str(top_entry.get("bound_type") or ""),
         "arithmetic_intensity": _to_float(top_entry.get("arithmetic_intensity")),
-    }
-
-
-def _ledger_progress_fields(attempt: dict[str, Any]) -> dict[str, Any]:
-    """Row fields describing how far the attempts ledger got with the kernel."""
-    return {
+        "category": category,
+        "outcome_class": _kernel_outcome_class(category, ladder),
+        "rejected_reason": _rejected_reason_of(attempt),
+        "summary": summary_text,
         "attempts_total": int(attempt.get("attempts") or 0),
         "partial_count": int(attempt.get("partial_count") or 0),
         "failure_count": int(attempt.get("failure_count") or 0),
@@ -798,41 +843,16 @@ def _ledger_progress_fields(attempt: dict[str, Any]) -> dict[str, Any]:
         # beside a category of INTEGRATED, which reads as "measured and zero".
         "last_micro_speedup": _to_float(attempt.get("last_micro_speedup")),
         "last_ts": str(attempt.get("last_ts") or ""),
-    }
-
-
-def _render_attempted_row(
-    top_entry: dict[str, Any],
-    attempt: dict[str, Any],
-    category: str,
-    where: ResultsLocation,
-    last_kernel_opt: dict[str, Any] | None,
-) -> dict[str, Any]:
-    """Build a summary row for a kernel that was attempted."""
-    kid = str(top_entry.get("kernel_id") or attempt.get("kernel_id") or "")
-    ladder, ladder_unavailable = _load_backend_ladder(where.results_dir, kid)
-    kernel_result, _ = _load_kernel_result(where.results_dir, kid)
-    verification = _verification_block(attempt, kernel_result, last_kernel_opt)
-    artifact_error = _artifact_error(verification, ladder)
-
-    return {
-        "kernel_id": kid,
-        **_roofline_profile_fields(top_entry, attempt),
-        "category": category,
-        "outcome_class": _kernel_outcome_class(category, ladder),
-        "rejected_reason": _rejected_reason_of(attempt),
-        "summary": _summary_one_line(
-            category=category,
-            entry=attempt,
-            backend_ladder=ladder,
-            artifact_error=artifact_error,
-        ),
-        **_ledger_progress_fields(attempt),
         "verification": verification,
         "backend_ladder": ladder,
         "backend_ladder_unavailable_reason": ladder_unavailable,
-        "kernel_agent_result_path": _kernel_agent_result_path(where, kid),
+        "kernel_agent_result_path": (
+            _relative_to_session(results_dir / f"{kid}.json", session_dir)
+            if results_dir is not None and (results_dir / f"{kid}.json").is_file()
+            else ""
+        ),
     }
+    return row
 
 
 #: ``backend_ladder[].error_class`` -> ``failure_reason_breakdown`` bucket.
@@ -843,39 +863,6 @@ _ERROR_CLASS_TO_BUCKET = {
     ERROR_CLASS_CORRECTNESS_FAILED: "correctness_failed",
     ERROR_CLASS_AGENT_ERROR: "agent_error",
 }
-
-
-def _dominant_error_class_bucket(ladder: list[dict[str, Any]]) -> str:
-    """The bucket named by the ladder's most common ``error_class`` (``""`` when it records none)."""
-    seen: dict[str, int] = {}
-    for row in ladder:
-        error_class = str(row.get("error_class") or "")
-        if error_class and error_class != ERROR_CLASS_UNKNOWN:
-            seen[error_class] = seen.get(error_class, 0) + 1
-    if not seen:
-        return ""
-    return _ERROR_CLASS_TO_BUCKET.get(max(seen.items(), key=lambda kv: kv[1])[0], _BUCKET_OTHER)
-
-
-def _structural_failure_bucket(row: dict[str, Any], ladder: list[dict[str, Any]]) -> str:
-    """The bucket implied by the ladder's produced artifacts and the kernel's verification."""
-    if not any(r.get("produced_artifact") for r in ladder):
-        if all(r.get("status") == "failed" for r in ladder):
-            return "ladder_all_failed"
-        return "ladder_partial_no_artifact"
-    if (row.get("verification") or {}).get("correctness_passed") is False:
-        return "correctness_failed"
-    if (row.get("last_micro_speedup") or 0.0) > 0.0:
-        return "speedup_below_threshold"
-    return _BUCKET_OTHER
-
-
-def _rejected_kernel_failure_bucket(row: dict[str, Any]) -> str:
-    """The ``failure_reason_breakdown`` bucket one rejected kernel belongs in."""
-    ladder = row.get("backend_ladder") or []
-    if not ladder:
-        return "ladder_unavailable" if row.get("backend_ladder_unavailable_reason") else _BUCKET_OTHER
-    return _dominant_error_class_bucket(ladder) or _structural_failure_bucket(row, ladder)
 
 
 def _aggregate_failure_reasons(by_kernel: list[dict[str, Any]]) -> dict[str, int]:
@@ -892,11 +879,43 @@ def _aggregate_failure_reasons(by_kernel: list[dict[str, Any]]) -> dict[str, int
         "compile_failed": 0,
         "correctness_failed": 0,
         "agent_error": 0,
-        _BUCKET_OTHER: 0,
+        "other": 0,
     }
     for row in by_kernel:
-        if row.get("category") == CATEGORY_ATTEMPTED_REJECTED:
-            breakdown[_rejected_kernel_failure_bucket(row)] += 1
+        if row.get("category") != CATEGORY_ATTEMPTED_REJECTED:
+            continue
+        ladder = row.get("backend_ladder") or []
+        ladder_unavail = row.get("backend_ladder_unavailable_reason") or ""
+        if not ladder:
+            breakdown["ladder_unavailable" if ladder_unavail else "other"] += 1
+            continue
+
+        # error_class wins: pick the most common failure mode.
+        ec_counts: dict[str, int] = {}
+        for r in ladder:
+            ec = str(r.get("error_class") or "")
+            if ec and ec != ERROR_CLASS_UNKNOWN:
+                ec_counts[ec] = ec_counts.get(ec, 0) + 1
+        if ec_counts:
+            top_ec = max(ec_counts.items(), key=lambda kv: kv[1])[0]
+            bucket = _ERROR_CLASS_TO_BUCKET.get(top_ec, "other")
+            breakdown[bucket] += 1
+            continue
+
+        # Structural fallback: classify via produced artifacts and verification.
+        any_artifact = any(r.get("produced_artifact") for r in ladder)
+        all_failed = all(r.get("status") == "failed" for r in ladder)
+        verification = row.get("verification") or {}
+        if all_failed and not any_artifact:
+            breakdown["ladder_all_failed"] += 1
+        elif not any_artifact:
+            breakdown["ladder_partial_no_artifact"] += 1
+        elif verification.get("correctness_passed") is False:
+            breakdown["correctness_failed"] += 1
+        elif (row.get("last_micro_speedup") or 0.0) > 0.0:
+            breakdown["speedup_below_threshold"] += 1
+        else:
+            breakdown["other"] += 1
     return breakdown
 
 

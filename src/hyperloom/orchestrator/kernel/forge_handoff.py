@@ -84,85 +84,6 @@ def _environment_overrides(
     return dict(sorted(merged.items()))
 
 
-def _fenced_section(heading: str, body: list[str]) -> list[str]:
-    """A Markdown section, opened by a blank line, whose content is one fenced text block."""
-    return ["", heading, "", "```text", *body, "```"]
-
-
-def _serving_identity_lines(state: Any, context: Mapping[str, Any], spec: Mapping[str, Any]) -> list[str]:
-    """The framework and the launch files the run served from."""
-    launch_recipe = _absolute_path(spec.get("launch_recipe") or getattr(state, "baseline_config_path", ""))
-    return [
-        "# Serving Context",
-        "",
-        f"- **Framework:** `{_display(context.get('framework') or getattr(state, 'framework', ''))}`",
-        f"- **Framework version:** `{_display(getattr(state, 'framework_version', ''))}`",
-        f"- **Launch recipe:** `{_display(launch_recipe)}`",
-        f"- **Overlay Python path:** `{_display(_absolute_path(spec.get('overlay_pythonpath')))}`",
-    ]
-
-
-def _source_repository_lines(state: Any, baselines: Mapping[str, Any] | None) -> list[str]:
-    """The repositories a rewrite may diff against, each at the commit the seal pinned.
-
-    Taken from the seal that just ran rather than read back from Git: the commit it returned is the
-    base every rewrite of that repository diffs from, and re-reading HEAD would both cost a
-    subprocess per repository and leave a window in which the two could disagree. A task naming a
-    path Git does not carry at that object id is answerable from this document alone.
-    """
-    sealed = {str(repo): getattr(baseline, "commit", "") for repo, baseline in (baselines or {}).items()}
-    source_roots = tuple(sorted(sealed)) or tuple(str(root) for root in campaign_repositories(state))
-    lines = ["", "## Source Repositories", ""]
-    if not source_roots:
-        lines.append("- not available")
-        return lines
-    lines.extend(f"- `{root}` @ `{sealed.get(root) or 'unknown'}`" for root in source_roots)
-    return lines
-
-
-def _server_argument_lines(
-    config: Mapping[str, Any],
-    context: Mapping[str, Any],
-    current_best: Mapping[str, Any],
-) -> list[str]:
-    """The resolved launch flags and the additional arguments layered on top of them."""
-    serving_config = context.get("serving_config")
-    resolved_args = str(config.get("server_launch_flags") or context.get("server_args") or "").strip()
-    extra_args = str(
-        config.get("extra_server_args")
-        or current_best.get("extra_server_args")
-        or (serving_config if isinstance(serving_config, Mapping) else {}).get("extra_server_args")
-        or ""
-    ).strip()
-    return [
-        *_fenced_section(
-            "## Resolved Server Arguments",
-            [redact_secret_values(resolved_args) if resolved_args else "not available"],
-        ),
-        *_fenced_section(
-            "## Additional Server Arguments",
-            [redact_secret_values(extra_args) if extra_args else "not available"],
-        ),
-    ]
-
-
-def _environment_lines(context: Mapping[str, Any], spec: Mapping[str, Any]) -> list[str]:
-    """The environment variables the run overrode, and the ones it unset."""
-    envs = _environment_overrides(context, spec)
-    override_lines = [f"{key}={value}" for key, value in envs.items()] or ["not available"]
-    unset_envs = context.get("unset_envs")
-    unset_lines = ["- not available"]
-    if isinstance(unset_envs, list) and unset_envs:
-        unset_lines = [f"- `{_display(value)}`" for value in unset_envs]
-    return [
-        *_fenced_section("## Environment Variable Overrides", override_lines),
-        "",
-        "## Unset Environment Variables",
-        "",
-        *unset_lines,
-    ]
-
-
 def build_serving_context_md(
     state: Any,
     env_spec: Mapping[str, Any] | None = None,
@@ -173,12 +94,79 @@ def build_serving_context_md(
     spec = dict(env_spec) if isinstance(env_spec, Mapping) else {}
     config = spec.get("config") if isinstance(spec.get("config"), Mapping) else {}
     current_best = getattr(state, "current_best", None) or {}
+    serving_config = context.get("serving_config")
+    serving_config = serving_config if isinstance(serving_config, Mapping) else {}
+
+    resolved_args = str(config.get("server_launch_flags") or context.get("server_args") or "").strip()
+    extra_args = str(
+        config.get("extra_server_args")
+        or current_best.get("extra_server_args")
+        or serving_config.get("extra_server_args")
+        or ""
+    ).strip()
+    envs = _environment_overrides(context, spec)
+    unset_envs = context.get("unset_envs") if isinstance(context.get("unset_envs"), list) else []
+
     lines = [
-        *_serving_identity_lines(state, context, spec),
-        *_source_repository_lines(state, baselines),
-        *_server_argument_lines(config, context, current_best),
-        *_environment_lines(context, spec),
+        "# Serving Context",
+        "",
+        f"- **Framework:** `{_display(context.get('framework') or getattr(state, 'framework', ''))}`",
+        f"- **Framework version:** `{_display(getattr(state, 'framework_version', ''))}`",
+        f"- **Launch recipe:** `{_display(_absolute_path(spec.get('launch_recipe') or getattr(state, 'baseline_config_path', '')))}`",
+        f"- **Overlay Python path:** `{_display(_absolute_path(spec.get('overlay_pythonpath')))}`",
+        "",
+        "## Source Repositories",
+        "",
     ]
+    # Taken from the seal that just ran rather than read back from Git: the
+    # commit it returned is the base every rewrite of that repository diffs
+    # from, and re-reading HEAD would both cost a subprocess per repository
+    # and leave a window in which the two could disagree.
+    sealed = {str(repo): getattr(baseline, "commit", "") for repo, baseline in (baselines or {}).items()}
+    source_roots = tuple(sorted(sealed)) or tuple(str(root) for root in campaign_repositories(state))
+    if source_roots:
+        # Reported with the commit each one currently sits at, which the caller
+        # sealed just before this was written. That object id is the base every
+        # rewrite of this repository diffs from, so a task naming a path Git does
+        # not carry there is answerable from this document alone.
+        lines.extend(f"- `{root}` @ `{sealed.get(root) or 'unknown'}`" for root in source_roots)
+    else:
+        lines.append("- not available")
+    lines.extend(
+        [
+            "",
+            "## Resolved Server Arguments",
+            "",
+            "```text",
+            redact_secret_values(resolved_args) if resolved_args else "not available",
+            "```",
+            "",
+            "## Additional Server Arguments",
+            "",
+            "```text",
+            redact_secret_values(extra_args) if extra_args else "not available",
+            "```",
+            "",
+            "## Environment Variable Overrides",
+            "",
+            "```text",
+        ]
+    )
+    lines.extend(f"{key}={value}" for key, value in envs.items())
+    if not envs:
+        lines.append("not available")
+    lines.extend(
+        [
+            "```",
+            "",
+            "## Unset Environment Variables",
+            "",
+        ]
+    )
+    if unset_envs:
+        lines.extend(f"- `{_display(value)}`" for value in unset_envs)
+    else:
+        lines.append("- not available")
     return "\n".join(lines) + "\n"
 
 

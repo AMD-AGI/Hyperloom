@@ -114,27 +114,6 @@ def _pow2_ladder(max_m: int) -> list[int]:
     return rungs
 
 
-def _ladder_rows_within_budget(
-    ladder_rows: set[Shape],
-    ladder: list[int],
-    nk_pairs: list[tuple[int, int]],
-    budget: int,
-) -> set[Shape]:
-    """The ladder rows that fit in ``budget``, dropping the smallest rungs but never an (N, K) entirely."""
-    kept = set(ladder_rows)
-    if len(kept) <= budget:
-        return kept
-    for m in ladder:
-        if len(kept) <= budget:
-            break
-        for n, k in nk_pairs:
-            if len(kept) <= budget:
-                break
-            if len([1 for _m, _n, _k in kept if (_n, _k) == (n, k)]) > 1:
-                kept.discard((m, n, k))
-    return kept
-
-
 def align_shapes_to_aiter_keys(
     shapes: Iterable[Shape],
     *,
@@ -153,7 +132,17 @@ def align_shapes_to_aiter_keys(
     fine_rows = {(aiter_padded_m_fine(m), n, k) for m, n, k in observed} - ladder_rows
 
     budget = max(len(nk_pairs), int(max_shapes))
-    kept = _ladder_rows_within_budget(ladder_rows, ladder, nk_pairs, budget)
+    kept = set(ladder_rows)
+    if len(kept) > budget:
+        # Drop the smallest rungs first, but never leave an (N, K) with no row.
+        for m in ladder:
+            if len(kept) <= budget:
+                break
+            for n, k in nk_pairs:
+                if len(kept) <= budget:
+                    break
+                if len([1 for _m, _n, _k in kept if (_n, _k) == (n, k)]) > 1:
+                    kept.discard((m, n, k))
     for shape in sorted(fine_rows, key=lambda s: s[0], reverse=True):
         if len(kept) >= budget:
             break

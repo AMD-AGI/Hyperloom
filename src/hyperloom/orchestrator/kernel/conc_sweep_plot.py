@@ -9,19 +9,11 @@ import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Mapping, NamedTuple
+from typing import Any, Callable, Mapping
 
 from hyperloom.common.perf_metric import GRADED_OUTPUT, is_agentx_mode
 
 log = logging.getLogger(__name__)
-
-# Dark theme palette.
-_BG = "#000000"
-_FG = "#E6E6E6"
-_GRID_C = "#3A3A3A"
-_BASELINE_C = "#FF4C4C"
-_OPTIMIZED_C = "#FF8C00"
-_CEILING_C = "#888888"
 
 
 def _positive(value: Any) -> float | None:
@@ -162,7 +154,7 @@ class _Arm:
     label_dy: int
 
 
-def _draw_arm(ax: Any, arm: _Arm, other_concs: list[float | None]) -> bool:
+def _draw_arm(ax: Any, arm: _Arm, other_concs: list[float | None], bg: str) -> bool:
     """Draw one arm, labelled by concurrency; True when some rung is hollow because the other arm lacks it."""
     xs, ys, concs, color, marker = arm.xs, arm.ys, arm.concs, arm.color, arm.marker
     if not xs:
@@ -176,7 +168,7 @@ def _draw_arm(ax: Any, arm: _Arm, other_concs: list[float | None]) -> bool:
             [y for y, s in zip(ys, single) if s],
             marker,
             markersize=6,
-            markerfacecolor=_BG,
+            markerfacecolor=bg,
             markeredgecolor=color,
             markeredgewidth=1.5,
             linestyle="none",
@@ -222,98 +214,6 @@ def _ceiling_series(
     return [p[0] for p in pairs], [p[1] for p in pairs]
 
 
-class _SweepSeries(NamedTuple):
-    """Both arms of one sweep, projected onto the axes it was graded on."""
-
-    baseline: _Arm
-    optimized: _Arm
-    axes: _Axes
-    metric: str
-    agentic: bool
-
-    def shows_roofline(self) -> bool:
-        """Whether a roofline ceiling describes what this sweep measured."""
-        return not self.agentic and self.metric == GRADED_OUTPUT
-
-
-def _sweep_series(data: Mapping[str, Any], tp_eff: float) -> _SweepSeries | None:
-    """Both arms on the graded axes, ``None`` when neither arm has a point worth drawing."""
-    # Two independent facts the payload records separately: the axis the sweep was graded on, which an operator can
-    # pin against the workload's default, and whether the workload was an agentic replay at all.
-    metric = _graded_metric_of(data)
-    axes = _axes_for_metric(metric, tp_eff)
-    bx, by, bc = _arm_series((data.get("baseline") or {}).get("points") or [], tp_eff, axes)
-    ox, oy, oc = _arm_series((data.get("optimized") or {}).get("points") or [], tp_eff, axes)
-    # Need at least the baseline to draw something useful.
-    if not bx and not ox:
-        return None
-    return _SweepSeries(
-        baseline=_Arm("baseline", bx, by, bc, _BASELINE_C, "o", 8),
-        optimized=_Arm("optimized", ox, oy, oc, _OPTIMIZED_C, "s", -14),
-        axes=axes,
-        metric=metric,
-        agentic=is_agentx_mode(data.get("benchmark_mode")),
-    )
-
-
-def _draw_roofline_ceiling(ax: Any, data: Mapping[str, Any], tp_eff: float) -> None:
-    """Draw the decode-only output_throughput bound, in the graded axis pair's units."""
-    cx, cy = _ceiling_series(data.get("roofline_ceiling") or {}, tp_eff)
-    if cx:
-        ax.plot(cx, cy, "--", color=_CEILING_C, linewidth=1.2, label="Theoretical peak (roofline)")
-
-
-def _draw_arms(ax: Any, series: _SweepSeries) -> None:
-    """Draw both arms, and the legend entry for rungs only one of them measured."""
-    hollow = False
-    for arm, other_concs in (
-        (series.baseline, series.optimized.concs),
-        (series.optimized, series.baseline.concs),
-    ):
-        hollow = _draw_arm(ax, arm, other_concs) or hollow
-    if not hollow:
-        return
-    ax.plot(
-        [],
-        [],
-        "o",
-        markerfacecolor=_BG,
-        markeredgecolor=_FG,
-        markeredgewidth=1.5,
-        linestyle="none",
-        label="hollow: concurrency measured by one arm only",
-    )
-
-
-def _chart_title(options: ConcCurveOptions, agentic: bool) -> str:
-    """The chart's title, naming the request shape only when the sweep fixed one."""
-    parts = [options.model_label or "Model"]
-    if options.gpu_label:
-        parts.append(options.gpu_label)
-    # An agentic replay takes its request shapes from the trace corpus, so the session's ISL/OSL are inert
-    # placeholders and naming them would misreport what was measured.
-    if agentic:
-        parts.append("Agentic")
-    elif options.isl or options.osl:
-        parts.append(f"ISL={options.isl} OSL={options.osl}")
-    return "Concurrency Sweep — Throughput vs Interactivity\n" + " | ".join(parts)
-
-
-def _apply_dark_theme(fig: Any, ax: Any, axes: _Axes, title: str) -> None:
-    """Label the figure and put its axes, grid and legend in the dark palette."""
-    ax.set_xlabel(axes.x_label, fontsize=10, color=_FG)
-    ax.set_ylabel(axes.y_label, fontsize=10, color=_FG)
-    ax.set_title(title, fontsize=11, color=_FG)
-    ax.grid(True, alpha=0.3, color=_GRID_C)
-    ax.tick_params(colors=_FG)
-    for spine in ax.spines.values():
-        spine.set_color(_GRID_C)
-    legend = ax.legend(loc="upper right", fontsize=9, facecolor=_BG, edgecolor=_GRID_C)
-    for text in legend.get_texts():
-        text.set_color(_FG)
-    fig.tight_layout()
-
-
 def _render(payload: dict[str, Any] | str | Path, out_path: Path, options: ConcCurveOptions) -> Path | None:
     import matplotlib
 
@@ -322,21 +222,90 @@ def _render(payload: dict[str, Any] | str | Path, out_path: Path, options: ConcC
 
     data = _load_payload(payload)
     tp_eff = float(max(options.tp, 1))
-    series = _sweep_series(data, tp_eff)
-    if series is None:
+    # Two independent facts the payload records separately: the axis the sweep was graded on, which an operator can
+    # pin against the workload's default, and whether the workload was an agentic replay at all.
+    metric = _graded_metric_of(data)
+    agentic = is_agentx_mode(data.get("benchmark_mode"))
+    axes = _axes_for_metric(metric, tp_eff)
+
+    baseline_pts = (data.get("baseline") or {}).get("points") or []
+    optimized_pts = (data.get("optimized") or {}).get("points") or []
+
+    bx, by, bc = _arm_series(baseline_pts, tp_eff, axes)
+    ox, oy, oc = _arm_series(optimized_pts, tp_eff, axes)
+
+    # Need at least the baseline to draw something useful.
+    if not bx and not ox:
         log.debug("conc_sweep_plot: no valid data points in either arm — skipping plot")
         return None
 
+    # Dark theme palette.
+    bg = "#000000"
+    fg = "#E6E6E6"
+    grid_c = "#3A3A3A"
+    baseline_c = "#FF4C4C"
+    optimized_c = "#FF8C00"
+    ceiling_c = "#888888"
+
     fig, ax = plt.subplots(figsize=(10, 6))
-    fig.patch.set_facecolor(_BG)
-    ax.set_facecolor(_BG)
-    if options.draw_ceiling and series.shows_roofline():
-        _draw_roofline_ceiling(ax, data, tp_eff)
-    _draw_arms(ax, series)
-    _apply_dark_theme(fig, ax, series.axes, _chart_title(options, series.agentic))
+    fig.patch.set_facecolor(bg)
+    ax.set_facecolor(bg)
+
+    # The roofline is a decode-only output_throughput bound computed from the session's ISL/OSL, and
+    # ``_ceiling_series`` returns it in that axis pair's units.
+    if options.draw_ceiling and not agentic and metric == GRADED_OUTPUT:
+        ceiling_data = data.get("roofline_ceiling") or {}
+        cx, cy = _ceiling_series(ceiling_data, tp_eff)
+        if cx:
+            ax.plot(cx, cy, "--", color=ceiling_c, linewidth=1.2, label="Theoretical peak (roofline)")
+
+    single_arm_note = False
+    for arm, other_concs in (
+        (_Arm("baseline", bx, by, bc, baseline_c, "o", 8), oc),
+        (_Arm("optimized", ox, oy, oc, optimized_c, "s", -14), bc),
+    ):
+        single_arm_note = _draw_arm(ax, arm, other_concs, bg) or single_arm_note
+    if single_arm_note:
+        ax.plot(
+            [],
+            [],
+            "o",
+            markerfacecolor=bg,
+            markeredgecolor=fg,
+            markeredgewidth=1.5,
+            linestyle="none",
+            label="hollow: concurrency measured by one arm only",
+        )
+
+    ax.set_xlabel(axes.x_label, fontsize=10, color=fg)
+    ax.set_ylabel(axes.y_label, fontsize=10, color=fg)
+
+    title_parts = [options.model_label or "Model"]
+    if options.gpu_label:
+        title_parts.append(options.gpu_label)
+    # An agentic replay takes its request shapes from the trace corpus, so the session's ISL/OSL are inert
+    # placeholders and naming them would misreport what was measured.
+    if agentic:
+        title_parts.append("Agentic")
+    elif options.isl or options.osl:
+        title_parts.append(f"ISL={options.isl} OSL={options.osl}")
+    ax.set_title(
+        "Concurrency Sweep — Throughput vs Interactivity\n" + " | ".join(title_parts),
+        fontsize=11,
+        color=fg,
+    )
+
+    ax.grid(True, alpha=0.3, color=grid_c)
+    ax.tick_params(colors=fg)
+    for spine in ax.spines.values():
+        spine.set_color(grid_c)
+    legend = ax.legend(loc="upper right", fontsize=9, facecolor=bg, edgecolor=grid_c)
+    for text in legend.get_texts():
+        text.set_color(fg)
+    fig.tight_layout()
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(str(out_path), dpi=150, format="png", facecolor=_BG)
+    fig.savefig(str(out_path), dpi=150, format="png", facecolor=bg)
     plt.close(fig)
     log.info("conc_sweep_plot: wrote %s", out_path)
     return out_path
