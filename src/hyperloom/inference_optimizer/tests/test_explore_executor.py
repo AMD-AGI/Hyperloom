@@ -3147,79 +3147,50 @@ def _lever_state() -> SharedState:
     return state
 
 
-def _capture_grid_names(monkeypatch) -> list[str]:
-    """Record the variant names the round actually hands to ``run_grid``."""
-    from hyperloom.orchestrator.actions.executors import explore as explore_mod
-
-    seen: list[str] = []
-
-    async def _capture(**kwargs):
-        seen.extend(v.name for v in (kwargs.get("grid") or []))
-        return []
-
-    monkeypatch.setattr(explore_mod, "run_grid", _capture)
-    return seen
-
-
 @pytest.mark.asyncio
-async def test_explore_executor_seeds_lever_variants_when_the_llm_proposed_a_grid(
+@pytest.mark.parametrize("with_llm_proposal", [False, True])
+async def test_explore_executor_measures_and_attributes_authored_levers(
     sub_agent_runner,
     tmp_path,
     monkeypatch,
+    with_llm_proposal,
 ):
-    """Authored rewrite levers are benched alongside the LLM's own variants.
-
-    Driven through the executor on purpose: ``framework_lever_grid`` can be entirely
-    correct while the round hands it the wrong argument, so only the grid that reaches
-    ``run_grid`` says whether the levers were seeded.
-    """
+    """Seeded levers reach the runner and return measured attribution, with or without LLM proposals."""
     sub, tr, _ = sub_agent_runner
     base = tmp_path / "base_lever_grid.yaml"
     _write_baseline_yaml(base)
     sub.shared_state = _lever_state()
-    seen = _capture_grid_names(monkeypatch)
+    _force_cold_decision(monkeypatch)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "0")
+    measurements = iter((900.0, 1000.0, 1100.0))
+
+    def _fake_run(cmd, *args, **kwargs):
+        slot = Path(cmd[cmd.index("--output-dir") + 1])
+        _fake_workspace(slot, tput=next(measurements))
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr("hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill", _fake_run)
+    grid = [{"name": "llm_proposal", "extra_server_args": "--max-num-seqs 256"}] if with_llm_proposal else []
 
     task = await tr.create(
         kind="explore",
         params={
             "config_path": str(base),
             "base_tput": 800.0,
-            "grid": [{"name": "llm_proposal", "extra_server_args": "--max-num-seqs 256"}],
+            "grid": grid,
         },
         idempotency_key="ex-fwlever-seeded-with-llm-grid",
     )
     sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
-    await sub.run_task(task)
-
-    assert seen, "run_grid was not invoked"
-    # Levers lead, so the attribution legs are measured against the stack the round opened on.
-    assert [n for n in seen if n.startswith("fwlever_")] == ["fwlever_hl_hoist", "fwlever_hl_cache"]
-    assert seen.index("llm_proposal") > seen.index("fwlever_hl_cache")
-
-
-@pytest.mark.asyncio
-async def test_explore_executor_lever_variants_are_a_grid_of_their_own(
-    sub_agent_runner,
-    tmp_path,
-    monkeypatch,
-):
-    """A round with no LLM proposals still benches the levers instead of refusing as ``empty_grid``."""
-    sub, tr, _ = sub_agent_runner
-    base = tmp_path / "base_lever_only.yaml"
-    _write_baseline_yaml(base)
-    sub.shared_state = _lever_state()
-    seen = _capture_grid_names(monkeypatch)
-
-    task = await tr.create(
-        kind="explore",
-        params={"config_path": str(base), "base_tput": 800.0, "grid": []},
-        idempotency_key="ex-fwlever-only-grid",
-    )
-    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
     res = await sub.run_task(task)
 
-    assert res.result.get("error_class") != "empty_grid"
-    assert [n for n in seen if n.startswith("fwlever_")] == ["fwlever_hl_hoist", "fwlever_hl_cache"]
+    assert res.result["status"] == "succeeded"
+    names = [row["variant_name"] for row in res.result["per_variant_outcomes"]]
+    assert names == ["fwlever_hl_hoist", "fwlever_hl_cache"] + (["llm_proposal"] if with_llm_proposal else [])
+    attributions = res.result["framework_lever_attributions"]
+    assert [row["switch"] for row in attributions] == ["HL_HOIST", "HL_CACHE"]
+    assert [row["gain_pct"] for row in attributions] == pytest.approx([12.5, 11.1111])
+    assert all(row["outcome"] == "KEEP" and row["source"] == "additive" for row in attributions)
 
 
 @pytest.mark.asyncio
