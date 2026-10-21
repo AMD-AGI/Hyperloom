@@ -548,7 +548,9 @@ class RecordingToolbox(FakeToolbox):
 
     ``withdrawals`` holds the reason of every session-wide withdrawal. ``effect`` sets what a test measures (see :func:`recipe_effect`); without one every test measures the baseline.
     ``accuracy`` is the accuracy score of a change by its fingerprint, and ``conc`` the workload's conc, which a test
-    whose request names none is measured at. ``root_profiles`` holds every :meth:`analyze_root_profile` call, which
+    whose request names none is measured at. ``log`` places the submit log, which the hosted toolbox keeps in the
+    session directory, so a second toolbox over that directory hands out request ids where the first one left off;
+    without one it goes with the toolbox. ``root_profiles`` holds every :meth:`analyze_root_profile` call, which
     raises ``refusal`` when one is set. Not a placeholder: the fake is the toolbox owner's own, which has no
     ``analyze_root_profile`` of its own yet.
     """
@@ -559,12 +561,13 @@ class RecordingToolbox(FakeToolbox):
         effect: Callable[[TestRequest], float] | None = None,
         accuracy: Mapping[str, float] | None = None,
         conc: int = FakeToolboxConfig.main_concurrency[0],
+        log: Path | None = None,
     ):
         quiet = NoiseModel(node_bias_median=0.0, node_bias_p90=0.0, test_noise_sigma=0.0)
         config = FakeToolboxConfig(
             noise=quiet, effect_fn=effect, accuracy_scores=dict(accuracy or {}), main_concurrency=(conc,)
         )
-        super().__init__(config, notebook=notebook, wiring=FakeWiring(records=notebook))
+        super().__init__(config, notebook=notebook, wiring=FakeWiring(records=notebook, log_path=log))
         self.serving = False
         self.policies: list[QueuePolicy] = []
         self.cancelled: list[str] = []

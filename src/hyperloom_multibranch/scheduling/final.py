@@ -36,7 +36,6 @@ from hyperloom_multibranch.scheduling.requests import (
     integration_test_request,
     together,
 )
-from hyperloom_multibranch.scheduling.roster import BranchEntry, BranchKind
 from hyperloom_multibranch.scheduling.settings import Workload
 
 #: How far below the other candidate a non-primary sweep point may fall before the candidate is passed over.
@@ -84,31 +83,28 @@ class FinalCandidates:
         return (self.integration,) if self.best_branch is None else (self.integration, self.best_branch)
 
 
-def _branch_candidate(
-    entry: BranchEntry, row: BranchProgress | None, integration_head: str, metric: str
-) -> FinalCandidate | None:
-    if entry.kind is not BranchKind.SPECIALIST or row is None or not row.commits:
+def _branch_candidate(row: BranchProgress, integration_head: str, metric: str) -> FinalCandidate | None:
+    if row.branch == INTEGRATION_BRANCH or not row.commits:
         return None
     value = row.head_value.get(metric)
     if value is None or row.head_commit == integration_head:
         return None
-    return FinalCandidate(BEST_BRANCH_LABEL, entry.branch, row.head_commit, value)
+    return FinalCandidate(BEST_BRANCH_LABEL, row.branch, row.head_commit, value)
 
 
 def choose_candidates(
-    roster_entries: Sequence[BranchEntry],
     progress: Sequence[BranchProgress],
     integration_head: str,
     integration_value: Mapping[str, float],
     metric: str,
 ) -> FinalCandidates:
-    """The integration head and the specialist head with the highest recorded ``metric`` over every roster branch.
+    """The integration head and the specialist head with the highest recorded ``metric`` over every branch the
+    notebook knows.
 
     A branch with no commit, or whose head is the integration head, offers no single-branch candidate.
     """
 
-    rows = {row.branch: row for row in progress}
-    offered = [_branch_candidate(entry, rows.get(entry.branch), integration_head, metric) for entry in roster_entries]
+    offered = [_branch_candidate(row, integration_head, metric) for row in progress]
     ranked = [candidate for candidate in offered if candidate is not None]
     best = max(ranked, key=lambda candidate: candidate.recorded_value, default=None)
     integration = FinalCandidate(INTEGRATION_LABEL, INTEGRATION_BRANCH, integration_head, integration_value.get(metric))

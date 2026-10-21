@@ -38,6 +38,11 @@ directory; the measurement pins must be readable, the image the session runs on 
 installed in the image; and the agent CLI the specialists run must be installed.
 A session uses no Experience KB, whatever ``HYPERLOOM_KB_URL`` names (see
 :data:`~hyperloom_multibranch.scheduling.mb_fakes.MB_FAKE_EXPERIENCE_KB`).
+``final-only SESSION_DIR`` is the emergency recovery of a session that closed before FINAL ran, and takes nothing but
+that directory: it runs FINAL and CLOSE over what the session persisted, on the settings its manifest holds and
+carrying the stop reason it ended with, and rewrites its report, dashboard, breakdown and roster. It creates no
+session directory, so it cannot start one, and it is refused with exit code 2 when the directory is no session that
+ran, committed no root, has not closed, or already ran FINAL.
 """
 
 from __future__ import annotations
@@ -66,7 +71,13 @@ from hyperloom_multibranch.rulegate.critic import LlmCritic, anthropic_critic
 from hyperloom_multibranch.scheduling.budget import MB_DEFAULT_MAX_HOURS, MB_MIN_PRELUDE_HOURS
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.layout import create_session
-from hyperloom_multibranch.scheduling.lifecycle import Session, SessionHost, SessionServices
+from hyperloom_multibranch.scheduling.lifecycle import (
+    PersistedRun,
+    Session,
+    SessionHost,
+    SessionServices,
+    persisted_run,
+)
 from hyperloom_multibranch.scheduling.llm import anthropic_completion, default_model
 from hyperloom_multibranch.scheduling.local_peers import (
     AGENTX_ENV,
@@ -109,7 +120,21 @@ class EnvironmentIncomplete(RuntimeError):
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog=PROG, description="Run a multi-branch optimization session.")
     commands = parser.add_subparsers(dest="command", required=True)
-    run = commands.add_parser("run", help="Run one session: PRELUDE, EXPLORE, FINAL and CLOSE.")
+    _add_run_options(commands.add_parser("run", help="Run one session: PRELUDE, EXPLORE, FINAL and CLOSE."))
+    final_only = commands.add_parser(
+        "final-only",
+        help=(
+            "Emergency recovery: run FINAL and CLOSE over a session directory that closed before FINAL. It rewrites"
+            " that session's report, dashboard, breakdown and roster. Refused if the session has not closed or"
+            " already ran FINAL."
+        ),
+    )
+    final_only.add_argument("session_dir", type=Path, help="The session directory of the run to finish.")
+    final_only.add_argument("-v", "--verbose", action="store_true", help="Log at debug level.")
+    return parser
+
+
+def _add_run_options(run: argparse.ArgumentParser) -> None:
     run.add_argument("--model", required=True, help="Model path or id.")
     run.add_argument("--framework", required=True, help="Inference framework, e.g. vllm or sglang.")
     run.add_argument("--gpu-type", required=True, choices=MAGPIE_RUNNER_GPU_TYPES, help="GPU type.")
@@ -182,7 +207,6 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     run.add_argument("-v", "--verbose", action="store_true", help="Log at debug level.")
-    return parser
 
 
 def _positive(args: argparse.Namespace, names: tuple[str, ...]) -> list[str]:
@@ -348,6 +372,24 @@ async def _run_session(settings: RunSettings, peer_factory: PeerFactory, service
     return (await session.run()).exit_code
 
 
+def final_only(persisted: PersistedRun, peer_factory: PeerFactory, services: SessionServices) -> int:
+    """Run FINAL and CLOSE over the session directory ``persisted`` was read from, print it on one stdout line and
+    return the session's exit code. No session directory is created, which is why this cannot start one."""
+
+    with adopting_orphans():
+        return asyncio.run(_final_only(persisted, peer_factory, services))
+
+
+async def _final_only(persisted: PersistedRun, peer_factory: PeerFactory, services: SessionServices) -> int:
+    clock = Clock()
+    layout = persisted.layout
+    print(layout.root, flush=True)
+    logging.getLogger().addHandler(_file_handler(layout.scheduler_log))
+    host = SessionHost(layout, ProcessRegistry(layout.pids, clock), clock)
+    session = Session(persisted.settings, peer_factory, host, services)
+    return (await session.finish(persisted.ended)).exit_code
+
+
 def _file_handler(path: Path) -> logging.Handler:
     handler = logging.FileHandler(path, encoding="utf-8")
     handler.setFormatter(logging.Formatter(LOG_FORMAT))
@@ -368,13 +410,18 @@ def _reused_image_digest(env: Mapping[str, str]) -> str:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    persisted = None
     try:
-        settings = settings_from(args)
+        if args.command == "final-only":
+            persisted = persisted_run(args.session_dir)
+            settings = persisted.settings
+        else:
+            settings = settings_from(args)
+            if args.reuse_prelude is not None:
+                reused = reused_prelude(args.reuse_prelude, settings.workload, _reused_image_digest(os.environ))
+                settings = replace(settings, reuse_prelude=reused)
         require_workload_switch(settings.workload, os.environ)
         require_priced_models(settings.max_llm_usd, os.environ)
-        if args.reuse_prelude is not None:
-            reused = reused_prelude(args.reuse_prelude, settings.workload, _reused_image_digest(os.environ))
-            settings = replace(settings, reuse_prelude=reused)
     except ValueError as exc:
         parser.print_usage(sys.stderr)
         print(f"{parser.prog}: error: {exc}", file=sys.stderr)
@@ -388,6 +435,8 @@ def main(argv: list[str] | None = None) -> int:
     except (EnvironmentIncomplete, PeersUnavailable) as exc:
         print(f"{PROG}: cannot run a session, {exc}", file=sys.stderr)
         return EXIT_FAILED
+    if persisted is not None:
+        return final_only(persisted, peer_factory, services)
     return run_session(settings, peer_factory, services)
 
 
@@ -398,6 +447,7 @@ __all__ = [
     "SEQUENCE_LENGTHS",
     "EnvironmentIncomplete",
     "build_parser",
+    "final_only",
     "main",
     "recipe_kb_from_env",
     "require_priced_models",

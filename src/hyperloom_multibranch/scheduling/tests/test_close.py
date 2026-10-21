@@ -3,7 +3,8 @@
 
 """CLOSE: everything is stopped first, then the exports land in the MB- directories and the KB gets the final recipe.
 
-Both are bounded by the hard stop, and the report is written whatever became of the exports.
+Both are bounded by the hard stop, and the report is written whatever became of the exports. The report is also read
+back: it says how a session ended and whether FINAL may still be run over its directory.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.common.io import atomic_write_json
 from hyperloom.contracts.recipe import Recipe
 from hyperloom.measure.compile import LocalBlobStore
 from hyperloom.orchestrator.knowledge.remote_recipe import KBStoreError
@@ -30,7 +32,7 @@ from hyperloom_multibranch.notebook.rsi.frontier import FrontierPolicy, Frontier
 from hyperloom_multibranch.notebook.rsi.session import DISABLED
 from hyperloom_multibranch.notebook.tests.factories import FakeClock
 from hyperloom_multibranch.notebook.tests.sessions import METRIC, scripted_session
-from hyperloom_multibranch.scheduling.close import Closer
+from hyperloom_multibranch.scheduling.close import CloseReport, Closer, closed_before_final, report_document
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.dashboard import SessionDashboard
 from hyperloom_multibranch.scheduling.exports import ExportSources, SessionExports
@@ -282,3 +284,36 @@ async def test_processes_and_tests_that_outlive_the_stop_are_reported(
     assert [row["pid"] for row in written["stop"]["leftovers"]] == [4242]
     assert written["stop"]["queue"]["running_by_branch"] == {"b01": 1}
     assert "processes left: [4242]" in layout.report_markdown.read_text()
+
+
+def _written(layout: SessionLayout, stop_reason: SessionStopReason, final: FinalChoice | None) -> Path:
+    """``MB-report.json`` as CLOSE writes it for a session that ended for ``stop_reason`` with ``final``."""
+
+    report = CloseReport(stop_reason, final, None, StopReport((), QueueState()), "")
+    atomic_write_json(layout.report, report_document(report, layout.session_id, NOW))
+    return layout.report
+
+
+def test_a_report_of_a_session_that_closed_before_final_carries_its_stop_reason(layout: SessionLayout) -> None:
+    report = _written(layout, SessionStopReason.TIME_EXHAUSTED, None)
+
+    assert closed_before_final(report) is SessionStopReason.TIME_EXHAUSTED
+
+
+def test_a_session_that_wrote_no_report_has_not_closed(layout: SessionLayout) -> None:
+    with pytest.raises(ValueError, match="has not closed"):
+        closed_before_final(layout.report)
+
+
+def test_a_report_that_records_a_final_choice_refuses_a_second_final(layout: SessionLayout) -> None:
+    report = _written(layout, SessionStopReason.TIME_EXHAUSTED, CHOICE)
+
+    with pytest.raises(ValueError, match="already ran FINAL"):
+        closed_before_final(report)
+
+
+def test_a_failed_prelude_leaves_no_root_to_validate(layout: SessionLayout) -> None:
+    report = _written(layout, SessionStopReason.PRELUDE_FAILED, None)
+
+    with pytest.raises(ValueError, match="PRELUDE failed"):
+        closed_before_final(report)

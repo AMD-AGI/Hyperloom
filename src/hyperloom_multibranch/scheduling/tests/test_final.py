@@ -44,7 +44,6 @@ from hyperloom_multibranch.scheduling.final import (
     pick_final,
     sweep_curve,
 )
-from hyperloom_multibranch.scheduling.roster import BranchEntry, BranchKind, BranchOrigin, BranchStop, StopCause
 from hyperloom_multibranch.scheduling.settings import InferenceXShape, KernelOptimizer, Workload, sweep_concs
 from hyperloom_multibranch.scheduling.requests import SessionChecks, SessionTests, integration_test_request
 from hyperloom_multibranch.scheduling.tests.peer_fakes import (
@@ -74,38 +73,30 @@ INTEGRATION = FinalCandidate("integration", INTEGRATION_BRANCH, "i1", 1040.0)
 BRANCH = FinalCandidate("best_branch", "b02", "c7", 1060.0)
 
 
-def _entry(branch: str, stop: BranchStop | None = None) -> BranchEntry:
-    return BranchEntry(branch, BranchKind.SPECIALIST, BranchOrigin.FIRST_BATCH, "c0", 1, 0.0, stop=stop)
-
-
-def _row(branch: str, head: str, value: float | None, commits: int = 1) -> BranchProgress:
+def _row(branch: str, head: str, value: float | None, commits: int = 1, running: bool = True) -> BranchProgress:
     values = {} if value is None else {METRIC: value}
-    return BranchProgress(branch, True, "c0", head, 3, commits, 0.0, values)
+    return BranchProgress(branch, running, "c0", head, 3, commits, 0.0, values)
 
 
 def test_the_best_single_branch_is_chosen_over_every_branch_whatever_stopped_it() -> None:
-    judged = BranchStop(StopCause.JUDGE, "no progress", 5.0)
-    ended = BranchStop(StopCause.SESSION_END, "time_exhausted", 9.0)
-    entries = (_entry("b01", judged), _entry("b02", ended), _entry("b03"), _entry("b04"), _entry("b05"))
     progress = (
-        _row("b01", "c5", 1100.0),
-        _row("b02", "c7", 1060.0),
+        _row("b01", "c5", 1100.0, running=False),
+        _row("b02", "c7", 1060.0, running=False),
         _row("b03", "i1", 1200.0),
         _row("b04", "c0", 1300.0, commits=0),
         _row("b05", "c9", None),
     )
 
-    candidates = choose_candidates(entries, progress, "i1", {METRIC: 1040.0}, METRIC)
+    candidates = choose_candidates(progress, "i1", {METRIC: 1040.0}, METRIC)
 
     assert candidates.integration == INTEGRATION
     assert candidates.best_branch == FinalCandidate("best_branch", "b01", "c5", 1100.0)
 
 
 def test_without_a_committed_branch_only_the_integration_head_is_a_candidate() -> None:
-    integration = BranchEntry(INTEGRATION_BRANCH, BranchKind.INTEGRATION, BranchOrigin.ROOT, "c0", 1, 0.0)
     rows = (_row(INTEGRATION_BRANCH, "i1", 1040.0), _row("b01", "c0", None, commits=0))
 
-    candidates = choose_candidates((integration, _entry("b01")), rows, "i1", {}, METRIC)
+    candidates = choose_candidates(rows, "i1", {}, METRIC)
 
     assert candidates.best_branch is None
     assert candidates.each == (FinalCandidate("integration", INTEGRATION_BRANCH, "i1", None),)

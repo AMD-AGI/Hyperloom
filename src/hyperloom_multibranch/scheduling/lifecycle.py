@@ -17,6 +17,8 @@ phases and CLOSE share it. An unhandled error brings it forward the same way whe
 signal that arrives during CLOSE; CLOSE is cut short if it still runs then. A second signal, whenever it arrives, cuts the
 unwinding and CLOSE short at once. A CLOSE cut short releases what the session holds, closing the toolbox within
 its own short bound and killing every registered process, and writes the report.
+A session that closed before FINAL is read back by :func:`persisted_run` and taken up again by :meth:`Session.finish`,
+which runs FINAL and CLOSE alone on a budget that is already spent, carrying the stop reason that session ended with.
 """
 
 from __future__ import annotations
@@ -27,8 +29,9 @@ import importlib.metadata
 import logging
 import math
 import os
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Any
 
 from hyperloom.common.io import atomic_write_json
@@ -37,12 +40,12 @@ from hyperloom.common.provenance import detect_code_revision
 from hyperloom.measure.compile import LocalBlobStore
 from hyperloom.measure.versions import socket_versions
 from hyperloom.orchestrator.knowledge.remote_recipe.client import RemoteRecipeClient
-from hyperloom_multibranch.contracts.notebook import Role, Writer
+from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
 from hyperloom_multibranch.contracts.notebook.interfaces import UsageSink
 from hyperloom_multibranch.contracts.notebook.records import ManifestFingerprint
 from hyperloom_multibranch.contracts.notebook.vocab import UsageSource
 from hyperloom_multibranch.notebook import LocalNotebook
-from hyperloom_multibranch.notebook.codec import encode
+from hyperloom_multibranch.notebook.codec import decode, encode
 from hyperloom_multibranch.notebook.rsi.calibration import DEFAULT_POLICY, PolicyChoice
 from hyperloom_multibranch.notebook.rsi.frontier import FrontierPolicy, FrontierScoring
 from hyperloom_multibranch.notebook.rsi.session import (
@@ -55,7 +58,7 @@ from hyperloom_multibranch.rulegate.critic import FixReviewer
 from hyperloom_multibranch.scheduling.branches import BranchControl
 from hyperloom_multibranch.scheduling.budget import HardStop, SessionBudget, budget_seconds, explore_gpu_seconds
 from hyperloom_multibranch.scheduling.clock import Clock
-from hyperloom_multibranch.scheduling.close import CloseReport, Closer
+from hyperloom_multibranch.scheduling.close import CloseReport, Closer, closed_before_final
 from hyperloom_multibranch.scheduling.context import SchedulerContext
 from hyperloom_multibranch.scheduling.dashboard import SessionDashboard
 from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind, DecisionLog
@@ -79,7 +82,7 @@ from hyperloom_multibranch.scheduling.prelude import (
 )
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry
 from hyperloom_multibranch.scheduling.requests import SessionChecks, SessionTests
-from hyperloom_multibranch.scheduling.roster import QUOTA_POLICY_VERSION, Roster
+from hyperloom_multibranch.scheduling.roster import QUOTA_POLICY_VERSION, BranchStop, Roster, StopCause
 from hyperloom_multibranch.scheduling.settings import FrontierPolicyMode, RunSettings
 from hyperloom_multibranch.scheduling.stops import (
     TOOLBOX_CLOSE_SECONDS,
@@ -233,25 +236,42 @@ class Session:
 
         budget = SessionBudget.from_hours(self._settings.max_hours, self._clock.now())
         self._write_manifest(budget, await asyncio.to_thread(code_version))
+        hard_stop = HardStop(budget, self._clock)
+        return await self._run_and_close(self._phases(budget, hard_stop), budget, hard_stop)
+
+    async def finish(self, ended: SessionStopReason) -> SessionOutcome:
+        """Run FINAL and CLOSE over the directory a session that ended for ``ended`` before FINAL left behind, and
+        report as that session would have; the manifest that session wrote is this one's input, so this opens no
+        session of its own and the report, dashboard, breakdown and roster of that one are written again.
+
+        The budget is already spent, which is the state the normal path is in when FINAL overruns the deadline:
+        FINAL is unbounded and CLOSE gets one CLOSE grace from its end.
+        """
+
+        total = budget_seconds(self._settings.max_hours)
+        budget = SessionBudget(self._clock.now() - total, total)
+        self._in_final = True
+        return await self._run_and_close(self._final_phases(ended), budget, HardStop(budget, self._clock))
+
+    async def _run_and_close(
+        self, work: Awaitable[SessionOutcome], budget: SessionBudget, hard_stop: HardStop
+    ) -> SessionOutcome:
+        ending = SessionOutcome(SessionStopReason.ABORTED, None, None, "")
         self._signals.install()
         try:
-            return await self._run_and_close(budget, HardStop(budget, self._clock))
-        finally:
-            self._signals.uninstall()
-
-    async def _run_and_close(self, budget: SessionBudget, hard_stop: HardStop) -> SessionOutcome:
-        ending = SessionOutcome(SessionStopReason.ABORTED, None, None, "")
-        try:
-            ending = await self._until_stopped(budget, hard_stop)
+            ending = await self._until_stopped(work, budget, hard_stop)
         except BaseException as exc:
             ending = replace(ending, error=f"{type(exc).__name__}: {exc}")
             raise
         finally:
             ending = await self._close(ending, hard_stop)
+            self._signals.uninstall()
         return ending
 
-    async def _until_stopped(self, budget: SessionBudget, hard_stop: HardStop) -> SessionOutcome:
-        phases = asyncio.ensure_future(self._phases(budget, hard_stop))
+    async def _until_stopped(
+        self, work: Awaitable[SessionOutcome], budget: SessionBudget, hard_stop: HardStop
+    ) -> SessionOutcome:
+        phases = asyncio.ensure_future(work)
         signal = asyncio.ensure_future(self._signals.wait())
         deadline = asyncio.ensure_future(self._clock.sleep(budget.remaining(self._clock.now())))
         try:
@@ -336,6 +356,24 @@ class Session:
             return SessionOutcome(reason, None, None, NO_CARDS_LEFT)
         candidates = await self._final_candidates()
         await self._stopper.end_exploration(reason)
+        return await self._final(candidates, reason)
+
+    async def _final_phases(self, ended: SessionStopReason) -> SessionOutcome:
+        """FINAL alone, over the branches the notebook of a session that ended for ``ended`` holds; inside the phases
+        coroutine, so a failure still goes through CLOSE and leaves a report."""
+
+        await self._toolbox.start()
+        candidates = await self._final_candidates()
+        self._roster.add_integration(candidates.integration.commit, k=1)
+        await self._branches.push_quota()
+        await self._adopt_frontier_policy()
+        outcome = await self._final(candidates, ended)
+        # The notebook's STOP for the integration branch belongs to the session that opened it, and a second one is a
+        # conflicting write; closing the entry here keeps the session stop from recording it.
+        self._roster.stop(INTEGRATION_BRANCH, BranchStop(StopCause.SESSION_END, ended.value, self._clock.now()))
+        return outcome
+
+    async def _final(self, candidates: FinalCandidates, reason: SessionStopReason) -> SessionOutcome:
         self._in_final = True
         self._phase("final", candidates=encode(candidates.each))
         final = await self._selector.select(candidates)
@@ -413,11 +451,7 @@ class Session:
         if integration is None:
             raise RuntimeError("the notebook has no integration branch after PRELUDE recorded its root")
         return choose_candidates(
-            self._roster.entries(),
-            progress,
-            integration.head_commit,
-            integration.head_value,
-            self._settings.workload.metric,
+            progress, integration.head_commit, integration.head_value, self._settings.workload.metric
         )
 
     async def _close(self, ending: SessionOutcome, hard_stop: HardStop) -> SessionOutcome:
@@ -488,6 +522,31 @@ class Session:
 
 
 @dataclass(frozen=True)
+class PersistedRun:
+    """A session directory that closed without FINAL, as :meth:`Session.finish` takes it again."""
+
+    layout: SessionLayout
+    settings: RunSettings
+    ended: SessionStopReason
+
+
+def persisted_run(root: Path) -> PersistedRun:
+    """The session in ``root``, read back from what :meth:`Session._write_manifest` and CLOSE left there; raises
+    ValueError naming what keeps FINAL from running over it. Creates nothing. Blocks."""
+
+    if not root.is_dir():
+        raise ValueError(f"{root} is not a directory")
+    layout = SessionLayout(root)
+    try:
+        settings = decode(RunSettings, read_json_strict(layout.manifest)["settings"])
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise ValueError(f"{root} is no multi-branch session that ran: {exc}") from exc
+    if not layout.root_recipe.is_file():
+        raise ValueError(f"the session in {root} committed no root, so FINAL has nothing to validate")
+    return PersistedRun(layout, settings, closed_before_final(layout.report))
+
+
+@dataclass(frozen=True)
 class CodeVersion:
     """The installed package version and the source revision :func:`detect_code_revision` reports: the source
     tree's commit, else the revision baked into the image; empty where there is none."""
@@ -512,9 +571,11 @@ __all__ = [
     "FRONTIER_POLICY_KEY",
     "NO_CARDS_LEFT",
     "CodeVersion",
+    "PersistedRun",
     "Session",
     "SessionHost",
     "SessionOutcome",
     "SessionServices",
     "code_version",
+    "persisted_run",
 ]

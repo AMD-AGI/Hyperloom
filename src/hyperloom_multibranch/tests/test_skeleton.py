@@ -108,6 +108,7 @@ from hyperloom_multibranch.scheduling.lifecycle import (
     SessionHost,
     SessionOutcome,
     SessionServices,
+    persisted_run,
 )
 from hyperloom_multibranch.scheduling.local_peers import workload_rule
 from hyperloom_multibranch.scheduling.llm import CompletionFailed, CompletionReply
@@ -170,6 +171,8 @@ SETTINGS = RunSettings(
     caps=RosterCaps(3, 2, 8),
     judge_interval_seconds=600.0,
 )
+#: Where the hosted toolbox keeps its submit log inside the session's toolbox directory.
+SUBMISSIONS = "submissions.jsonl"
 STEP_SECONDS = 30.0
 CLAIM_TTL_SECONDS = 1e6
 STOP_REASON = "no gain left"
@@ -315,7 +318,9 @@ class Stage:
         return LocalNotebook(self.layout.notebook, Writer(role, branch or role.value, branch), clock=self.time.now)
 
     def factory(self, setup: PeerSetup) -> Peers:
-        toolbox = self.toolbox_type(self.handle(Role.TOOLBOX), _measured(setup.layout.repo), conc=CONC)
+        toolbox = self.toolbox_type(
+            self.handle(Role.TOOLBOX), _measured(setup.layout.repo), conc=CONC, log=setup.layout.toolbox / SUBMISSIONS
+        )
         if isinstance(toolbox, StuckToolbox) and self.stuck:
             toolbox.stuck = self.stuck
         repo = self.repo_type(setup.layout.repo, setup.blobs, self.time)
@@ -405,15 +410,22 @@ class Stage:
         await then(branch, head)
 
     async def run(self) -> SessionOutcome:
+        return await self._session().run()
+
+    async def finish(self, ended: SessionStopReason) -> SessionOutcome:
+        """FINAL and CLOSE alone over the session directory this stage was built on, as ``final-only`` runs them."""
+
+        return await self._session().finish(ended)
+
+    def _session(self) -> Session:
         self.time.hold_threads()
         host = SessionHost(self.layout, self.processes, self.time.clock)
-        session = Session(
+        return Session(
             self.settings,
             self.factory,
             host,
             SessionServices(self.judge, ScriptedCompletion(), self.recipe_kb, self.critic),
         )
-        return await session.run()
 
 
 def _stage(tmp_path: Path, *, child: Path | None, exit_code: int = 0) -> Stage:
@@ -423,6 +435,15 @@ def _stage(tmp_path: Path, *, child: Path | None, exit_code: int = 0) -> Stage:
     processes = MbFakeHeldRegistry(layout.pids, time, session=session, exit_code=exit_code)
     judge = ScriptedCompletion([OPENING, STEER])
     return Stage(layout, time, processes, judge, [])
+
+
+def _recovery(stage: Stage, settings: RunSettings) -> Stage:
+    """A second stage over the directory ``stage`` left, as ``final-only`` builds one: the same session directory and
+    the settings read back from its manifest, every peer fresh and no specialist script."""
+
+    time = VirtualClock(stage.time.now())
+    processes = MbFakeHeldRegistry(stage.layout.pids, time, session="", exit_code=0)
+    return Stage(stage.layout, time, processes, ScriptedCompletion(), [], settings=settings)
 
 
 def _script(stage: Stage, forks: int = len(FIX_REASONS)) -> None:
@@ -1084,8 +1105,8 @@ def _slow_final(stage: Stage, *, interrupt: bool = False) -> type[RecordingToolb
     tests are never all withdrawn. A test double for validation that outlasts the budget, not a placeholder."""
 
     class SlowFinalToolbox(RecordingToolbox):
-        def __init__(self, notebook: LocalNotebook, effect: Callable[[TestRequest], float], conc: int) -> None:
-            super().__init__(notebook, effect, conc=conc)
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
             measure = self.executor.run
 
             async def run(job: TestJob) -> TestResult:
@@ -1141,6 +1162,80 @@ async def test_a_stop_signal_cuts_a_final_past_the_hard_stop_short_and_close_get
     assert stage.signalled_at + grace - TOOLBOX_CLOSE_SECONDS <= stage.time.now() <= stage.signalled_at + grace
     final_tests = {rid for rid, test in stage.toolbox.requests.items() if test.purpose is Purpose.FINAL}
     assert final_tests and final_tests <= stage.toolbox.withdrawn.keys()
+
+
+class StuckStopToolbox(RecordingToolbox):
+    """A toolbox whose cancel of ``b01`` never returns, so the end of EXPLORE hangs and the session deadline passes
+    before FINAL: the state an operator is left in with a session worth validating and no final selection."""
+
+    async def cancel_branch(self, branch_id: str, reason: str = "branch stopped") -> int:
+        if branch_id == "b01":
+            await asyncio.Event().wait()
+        return await super().cancel_branch(branch_id, reason)
+
+
+async def test_final_only_validates_the_branches_a_session_that_never_reached_final_left(tmp_path: Path) -> None:
+    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage.scripts = SCRIPTS
+    stage.toolbox_type = StuckStopToolbox
+
+    cut_short = await stage.run()
+
+    assert (cut_short.stop_reason, cut_short.final) == (SessionStopReason.TIME_EXHAUSTED, None)
+    assert json.loads(stage.layout.report.read_text())["final"] is None
+
+    persisted = persisted_run(stage.layout.root)
+    assert (persisted.ended, persisted.settings, persisted.layout) == (
+        SessionStopReason.TIME_EXHAUSTED,
+        SETTINGS,
+        stage.layout,
+    )
+    recovery = _recovery(stage, persisted.settings)
+    outcome = await recovery.finish(persisted.ended)
+
+    head, c2 = await stage.repo.head(INTEGRATION_BRANCH), await stage.repo.head("b02")
+    assert outcome.final is not None and outcome.final.chosen is not None
+    # The branch set FINAL weighs comes from the notebook, not from a roster this session never held.
+    assert {check.candidate.commit for check in outcome.final.checks} == {head, c2}
+    assert (outcome.final.chosen.label, outcome.final.chosen.commit) == (INTEGRATION_LABEL, head)
+    assert (outcome.stop_reason, outcome.error, outcome.exit_code) == (SessionStopReason.TIME_EXHAUSTED, "", 0)
+    assert outcome.close is not None and outcome.close.stop.clean
+
+    report = json.loads(stage.layout.report.read_text())
+    assert report["final"]["chosen"]["commit"] == head
+    assert report["stop_reason"] == SessionStopReason.TIME_EXHAUSTED.value
+    [final] = [row for row in _decisions(stage) if row["kind"] == "final"]
+    assert float(str(final["at"])) > SessionBudget.from_hours(SETTINGS.max_hours, START).deadline
+    # The session that opened the integration branch recorded its STOP; a second one is a conflicting write.
+    assert [row["branch"] for row in _decisions(stage) if row["kind"] == "stop"].count(INTEGRATION_BRANCH) == 1
+    branches_by_name = {branch.branch: branch for branch in (await recovery.handle(Role.OBSERVER).lineage()).branches}
+    assert branches_by_name[INTEGRATION_BRANCH].stop_reason == f"session_end: {SessionStopReason.TIME_EXHAUSTED.value}"
+
+    with pytest.raises(ValueError, match="already ran FINAL"):
+        persisted_run(stage.layout.root)
+
+
+async def test_a_stop_signal_during_a_final_only_still_leaves_a_report_within_one_close_grace(
+    tmp_path: Path,
+) -> None:
+    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage.scripts = SCRIPTS
+    stage.toolbox_type = StuckStopToolbox
+    await stage.run()
+
+    persisted = persisted_run(stage.layout.root)
+    recovery = _recovery(stage, persisted.settings)
+    recovery.toolbox_type = _slow_final(recovery, interrupt=True)
+
+    outcome = await recovery.finish(persisted.ended)
+
+    assert outcome.stop_reason is SessionStopReason.SIGNAL and outcome.exit_code == 1
+    assert outcome.final is None and outcome.close is not None
+    assert STOP_OVERRAN in outcome.close.stop.failures
+    grace = SessionBudget.from_hours(SETTINGS.max_hours, START).close_grace_seconds
+    assert recovery.signalled_at + grace - TOOLBOX_CLOSE_SECONDS <= recovery.time.now()
+    assert recovery.time.now() <= recovery.signalled_at + grace
+    assert json.loads(stage.layout.report.read_text())["final"] is None
 
 
 async def test_an_unreadable_steering_reply_keeps_every_branch_and_k_as_they_were(tmp_path: Path) -> None:

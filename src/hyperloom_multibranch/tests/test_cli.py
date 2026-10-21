@@ -1,13 +1,19 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Contract of the ``hyperloom-multibranch`` command line: options, defaults, validation and exit codes."""
+"""Contract of the ``hyperloom-multibranch`` command line: options, defaults, validation and exit codes.
+
+``final-only`` is the emergency recovery of a session that closed before FINAL: it takes that session's directory and
+nothing else, and refuses before building anything when the directory cannot support FINAL.
+"""
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -26,8 +32,11 @@ from hyperloom.measure import compile as compile_module
 from hyperloom.measure.compile import PackageBase
 from hyperloom_multibranch import cli
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
+from hyperloom_multibranch.notebook.codec import encode
 from hyperloom_multibranch.notebook.rsi.archive import ARCHIVE_ENV
 from hyperloom_multibranch.scheduling.budget import MB_DEFAULT_MAX_HOURS
+from hyperloom_multibranch.scheduling.layout import SessionLayout
+from hyperloom_multibranch.scheduling.lifecycle import PersistedRun
 from hyperloom_multibranch.scheduling import local_peers
 from hyperloom_multibranch.scheduling.local_peers import AGENTX_ENV
 from hyperloom_multibranch.scheduling.peers import PeerFactory
@@ -343,7 +352,12 @@ def agent_cli(monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPath
         runs.append(settings)
         return 0
 
+    def final_only(persisted: PersistedRun, peer_factory: PeerFactory, services: object) -> int:
+        runs.append(persisted.settings)
+        return 0
+
     monkeypatch.setattr(cli, "run_session", run_session)
+    monkeypatch.setattr(cli, "final_only", final_only)
     return runs
 
 
@@ -605,3 +619,89 @@ def test_an_rsi_archive_that_is_not_a_writable_directory_fails_loudly_before_cre
 def test_importing_the_command_and_the_session_loads_no_main_flow_runtime() -> None:
     probe = subprocess.run([sys.executable, "-c", IMPORT_PROBE], capture_output=True, text=True, check=True)
     assert probe.stdout.strip() == "[]"
+
+
+def _closed_before_final(root: Path) -> SessionLayout:
+    """A session directory as a run that ended before FINAL leaves it: the manifest of :func:`_settings`, the root
+    recipe PRELUDE committed, and the report CLOSE wrote with no final choice in it."""
+
+    layout = SessionLayout(root)
+    layout.reports.mkdir(parents=True)
+    layout.prelude.mkdir(parents=True)
+    _write(layout.manifest, {"session_id": root.name, "settings": encode(_settings())})
+    _write(layout.root_recipe, {"components": []})
+    _report(layout)
+    return layout
+
+
+def _write(path: Path, document: dict[str, object]) -> None:
+    path.write_text(json.dumps(document), encoding="utf-8")
+
+
+def _report(layout: SessionLayout, **fields: object) -> None:
+    _write(layout.report, {"stop_reason": "time_exhausted", "final": None, **fields})
+
+
+def _tree(root: Path) -> list[Path]:
+    return sorted(root.rglob("*"))
+
+
+@pytest.mark.parametrize(
+    ("damage", "error"),
+    [
+        (lambda layout: layout.manifest.unlink(), "is no multi-branch session that ran"),
+        (lambda layout: layout.root_recipe.unlink(), "committed no root"),
+        (lambda layout: layout.report.unlink(), "has not closed"),
+        (lambda layout: _report(layout, final={"chosen": None}), "already ran FINAL"),
+        (lambda layout: _report(layout, stop_reason="prelude_baseline_failed"), "PRELUDE failed"),
+    ],
+    ids=["no manifest", "no root", "still running", "final ran", "prelude failed"],
+)
+@pytest.mark.usefixtures("ready_environment")
+def test_a_session_final_cannot_run_over_exits_two_and_changes_nothing(
+    damage: Callable[[SessionLayout], None],
+    error: str,
+    agent_cli: list[RunSettings],
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    layout = _closed_before_final(tmp_path / "MB-20261020T141241Z-64f775fe")
+    damage(layout)
+    before = _tree(layout.root)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["final-only", str(layout.root)])
+
+    assert exc.value.code == cli.EXIT_USAGE
+    captured = capsys.readouterr()
+    assert error in captured.err and captured.out == ""
+    assert agent_cli == [] and _tree(layout.root) == before
+
+
+@pytest.mark.usefixtures("ready_environment")
+def test_final_only_over_a_path_that_is_no_directory_exits_two(
+    agent_cli: list[RunSettings], tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    missing = tmp_path / "no-such-session"
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["final-only", str(missing)])
+
+    assert exc.value.code == cli.EXIT_USAGE
+    assert f"{missing} is not a directory" in capsys.readouterr().err
+    assert agent_cli == [] and not missing.exists()
+
+
+@pytest.mark.usefixtures("ready_environment")
+def test_final_only_finishes_the_session_on_the_settings_its_manifest_holds(
+    agent_cli: list[RunSettings], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setenv("USER_DATA_PATH", str(workspace))
+    layout = _closed_before_final(tmp_path / "MB-20261020T141241Z-64f775fe")
+
+    assert cli.main(["final-only", str(layout.root)]) == 0
+
+    assert agent_cli == [_settings()]
+    assert not any(workspace.iterdir())

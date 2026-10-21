@@ -5,8 +5,10 @@
 
 A session lives at ``<workspace>/<model_basename>/MB-<UTC>-<rand8>/``. Every entry the
 scheduler creates carries the ``MB-`` prefix so it never collides with a single-lineage
-session in the same workspace. Each run creates a fresh directory and nothing resumes, so
-there is no session lock.
+session in the same workspace. Each run creates a fresh directory; only the emergency
+``final-only`` command attaches to one again, and only to a session whose closed report
+says FINAL never ran. That report is what stands in for a session lock, and nothing
+enforces it.
 """
 
 from __future__ import annotations

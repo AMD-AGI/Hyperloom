@@ -8,6 +8,8 @@ and the exports (:mod:`~hyperloom_multibranch.scheduling.exports`) read a notebo
 and exporting are each bounded by the hard stop. ``MB-report.json`` and ``MB-report.md`` record the outcome whatever
 became of the exports, including what outlived the stop; a CLOSE cut short by a second stop signal is reported by the
 session through :meth:`Closer.write_report`.
+``MB-report.json`` is read back by one caller, :func:`closed_before_final`, which says how a session ended and
+whether FINAL may still be run over its directory; it lives here so the format has one reader beside its writer.
 """
 
 from __future__ import annotations
@@ -15,8 +17,10 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
+from pathlib import Path
 
 from hyperloom.common.io import WriteOptions, atomic_write_json, atomic_write_text
+from hyperloom.common.jsonio import read_json_strict
 from hyperloom.contracts.recipe import RecipeError
 from hyperloom_multibranch.contracts.notebook.interfaces import NotebookError
 from hyperloom_multibranch.notebook.codec import encode
@@ -72,6 +76,22 @@ def report_document(report: CloseReport, session_id: str, closed_at: float) -> d
             "failures": list(report.stop.failures),
         },
     }
+
+
+def closed_before_final(report_file: Path) -> SessionStopReason:
+    """How the session :func:`report_document` wrote ``report_file`` for ended, for FINAL and CLOSE to carry forward;
+    raises ValueError naming what keeps FINAL from running over it."""
+
+    try:
+        document = read_json_strict(report_file, require_dict=True)
+        final, ended = document["final"], SessionStopReason(document["stop_reason"])
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise ValueError(f"the session has not closed; {report_file} does not say how it ended: {exc}") from exc
+    if final is not None:
+        raise ValueError(f"the session {report_file} reports already ran FINAL")
+    if ended is SessionStopReason.PRELUDE_FAILED:
+        raise ValueError(f"PRELUDE failed in the session {report_file} reports, so there is no root to validate")
+    return ended
 
 
 def _final_lines(final: FinalChoice | None) -> list[str]:
@@ -170,4 +190,4 @@ class Closer:
         atomic_write_text(self._layout.report_markdown, markdown, options=WriteOptions(make_parents=True))
 
 
-__all__ = ["EXPORT_FAILURES", "CloseReport", "Closer", "report_document", "report_markdown"]
+__all__ = ["EXPORT_FAILURES", "CloseReport", "Closer", "closed_before_final", "report_document", "report_markdown"]
