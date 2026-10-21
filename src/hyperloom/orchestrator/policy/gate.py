@@ -47,7 +47,7 @@ from ..specialists.domains import (
     get_domain,
     normalize_dispatch_tags,
 )
-from .custom_specialist import deny_custom_specialist_delegate, deny_search_under_custom_only
+from .custom_specialist import deny_coordinator_dispatched_delegate, deny_search_under_custom_only
 from .denial import PolicyDenied
 from .send_message import deny_malformed_send_message
 from ..specialists.profile import (
@@ -452,9 +452,9 @@ class PolicyGate:
         # ``specialist`` bypasses the catalogue; ``_validate_specialist_dispatch`` owns its contract.
         if action_name == SPECIALIST_ACTION_NAME:
             params = payload.get("params")
-            # Ingress only: the Coordinator's own custom task row is replayed here at dispatch.
+            # Ingress only: the Coordinator's own rows for these specialists are replayed here at dispatch.
             if check_source and isinstance(params, dict):
-                deny_custom_specialist_delegate(params)
+                deny_coordinator_dispatched_delegate(params)
             self._validate_specialist_dispatch(role, payload)
             return
         # ``integrate_patch`` requires a non-reject Critic verdict.

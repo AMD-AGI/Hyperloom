@@ -56,6 +56,7 @@ from hyperloom.inference_optimizer.session.paths import asset_root, make_session
 from hyperloom.orchestrator.bus.storage import SqliteConnection
 
 _PROFILE_SGLANG_CONFIG = asset_root() / "assets" / "configs" / "profile_sglang.yaml"
+_PROFILE_VLLM_CONFIG = asset_root() / "assets" / "configs" / "profile_vllm.yaml"
 
 
 # fixtures
@@ -86,7 +87,7 @@ def test_mi325x_keeps_real_gpu_type_but_uses_mi300x_runner(tmp_path, monkeypatch
         ["optimize", "--model", "/models/Qwen3", "--max-hours", "1", "--gpu-type", "mi325x"]
     )
 
-    assert gpu_types._gpu_runner_type("mi325x") == "mi300x"
+    assert gpu_types.gpu_runner_type("mi325x") == "mi300x"
     assert gpu_types._GFX_TO_RUNNER.get("gfx1100") is None
     manifest = build_manifest(tmp_path, args=args, session_id="mi325x-session")
     state = cli_bootstrap._seed_shared_state(
@@ -109,7 +110,7 @@ def test_mi308x_keeps_real_gpu_type_but_uses_mi300x_runner(tmp_path, monkeypatch
         ["optimize", "--model", "/models/Qwen3", "--max-hours", "1", "--gpu-type", "mi308x"]
     )
 
-    assert gpu_types._gpu_runner_type("mi308x") == "mi300x"
+    assert gpu_types.gpu_runner_type("mi308x") == "mi300x"
     manifest = build_manifest(tmp_path, args=args, session_id="mi308x-session")
     state = cli_bootstrap._seed_shared_state(
         tmp_path,
@@ -209,6 +210,21 @@ def test_materialize_config_injects_runner_type(tmp_path):
     with out.open() as f:
         rendered = yaml.safe_load(f)
     assert rendered["benchmark"]["runner_type"] == "mi355x"
+
+
+def test_r9700_baseline_and_profile_use_vllm_gfx12_runner(tmp_path, monkeypatch):
+    import yaml
+
+    monkeypatch.setenv("FRAMEWORK", "vllm")
+    for config_path in (default_baseline_config(), _PROFILE_VLLM_CONFIG):
+        out = materialize_benchmark_config(
+            config_path,
+            tmp_path / config_path.stem,
+            gpu_type="r9700",
+        )
+        rendered = yaml.safe_load(out.read_text())["benchmark"]
+        assert rendered["runner_type"] == "gfx12"
+        assert rendered["benchmark_script"] == "vllm_gfx12.sh"
 
 
 def test_materialize_config_forces_generic_benchmark_script(tmp_path):
