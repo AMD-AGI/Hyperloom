@@ -25,7 +25,6 @@ from hyperloom.orchestrator.actions.executors import _kernel_agent_tool as tool
 from hyperloom.orchestrator.actions.executors import trace_analyze as ta
 from hyperloom.inference_optimizer.framework_paths import resolve_known_source_prefixes
 from hyperloom.orchestrator.kernel import request_handlers as krh
-from hyperloom.orchestrator.kernel import _vllm_shape_capture as shape_capture
 from hyperloom.orchestrator.kernel import lane_budget
 from hyperloom.common.llm_config import (
     DEFAULT_CLAUDE_MODEL,
@@ -2419,7 +2418,7 @@ class TestRunGemmTuningHandler:
                 return {"status": "succeeded"}
 
         monkeypatch.setattr(baseline_module, "BaselineExecutor", FakeBaselineExecutor)
-        monkeypatch.setattr(shape_capture, "_pick_shape_capture_port", lambda: 19001)
+        monkeypatch.setattr(krh, "_pick_shape_capture_port", lambda: 19001)
 
         result = asyncio.run(
             krh._capture_vllm_tunableop_shapes(
@@ -2685,11 +2684,11 @@ class TestRunGemmTuningHandler:
         write_trace(main_trace, m=4149, n=34816, k=5120)
         write_trace(capture_trace, m=256, n=34816, k=5120)
 
-        shapes_json, shape_count = shape_capture._extract_vllm_block_fp8_profile_shapes(trace_root)
+        shapes_json, shape_count = krh._extract_vllm_block_fp8_profile_shapes(trace_root)
 
         assert shape_count == 1
         assert json.loads(Path(shapes_json).read_text()) == [{"K": 5120, "M": 4149, "N": 34816}]
-        assert shape_capture._extract_vllm_block_fp8_profile_shapes(capture_trace) == ("", 0)
+        assert krh._extract_vllm_block_fp8_profile_shapes(capture_trace) == ("", 0)
 
     def test_vllm_block_fp8_profile_capture_without_trace_is_explicit_failure(
         self,
@@ -2749,8 +2748,8 @@ class TestRunGemmTuningHandler:
         )
         monkeypatch.chdir(tmp_path)
 
-        assert shape_capture._extract_vllm_block_fp8_profile_shapes(Path("")) == ("", 0)
-        assert shape_capture._extract_vllm_block_fp8_profile_shapes(Path(".")) == ("", 0)
+        assert krh._extract_vllm_block_fp8_profile_shapes(Path("")) == ("", 0)
+        assert krh._extract_vllm_block_fp8_profile_shapes(Path(".")) == ("", 0)
 
     def test_vllm_block_fp8_profile_capture_without_trace_ignores_cwd_traces(
         self,
@@ -2855,7 +2854,7 @@ class TestRunGemmTuningHandler:
     @pytest.mark.parametrize("port", [0, -1, 8888, 65536, "bad"])
     def test_shape_capture_rejects_unsafe_explicit_port(self, port):
         with pytest.raises(ValueError):
-            shape_capture._resolve_shape_capture_port(port)
+            krh._resolve_shape_capture_port(port)
 
     def test_vllm_shape_capture_empty_output_is_explicit_failure(self, tmp_path, monkeypatch):
         from hyperloom.orchestrator.actions.executors import baseline as baseline_module
@@ -3544,7 +3543,7 @@ class TestRunGemmTuningHandler:
             },
         )
         state.last_profile_workload = state.profile_workload_context()
-        caplog.set_level(20, logger=shape_capture.__name__)
+        caplog.set_level(20, logger=krh.__name__)
 
         assert (
             krh._reuse_vllm_block_fp8_roofline_shapes(
