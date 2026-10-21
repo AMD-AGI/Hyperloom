@@ -141,13 +141,13 @@ def _bench_envs(bench: Mapping[str, Any]) -> dict[str, Any]:
     return dict(envs) if isinstance(envs, dict) else {}
 
 
-def _first_text(mapping: Mapping[str, Any], *keys: str) -> str:
+def _first_text(mapping: Mapping[str, Any], *keys: str, default: str = "") -> str:
     # The first of ``keys`` whose value renders as non-empty text.
     for key in keys:
         text = str(mapping.get(key) or "")
         if text:
             return text
-    return ""
+    return default
 
 
 def _read_dispatch_csv(path: Path) -> tuple[list[str], list[dict[str, str]]]:
@@ -797,13 +797,14 @@ class KernelPhase(CoordinatorCollaborator):
                 # The campaign's e2e-validated gain names the axis the KEEP was graded on; it
                 # belongs on the tuner whose artifact was actually applied, not on every row
                 # this cycle produced.
-                applied = not tuner_rows or _first_text(row, "artifact", "env_value") == tuned_file != ""
+                artifact = _first_text(row, "artifact", "env_value")
+                applied = not tuner_rows or artifact == tuned_file != ""
                 recorder.record_gemm_tuning_run(
                     run_id=f"{base_run_id}-{tuner_name}" if tuner_name else base_run_id,
-                    status=_first_text(row, "status") or _first_text(result, "status") or "unknown",
+                    status=_first_text(row, "status", default=_first_text(result, "status", default="unknown")),
                     shapes_total=row.get("total_shapes", result.get("shapes_total", shape_capture.get("shape_count"))),
                     shapes_tuned=row.get("improved_shapes", row.get("shapes_tuned")),
-                    config_path=_first_text(row, "artifact", "env_value", "tuned_file", "config_path"),
+                    config_path=artifact or ("" if tuner_rows else tuned_file),
                     # _validate_gemm_tuning_e2e writes the validated gain to e2e_gain_pct, not
                     # gain_pct -- no producer on this path sets a bare "gain_pct" key.
                     gain_pct=result.get("e2e_gain_pct") if applied else None,
@@ -1339,11 +1340,7 @@ class KernelPhase(CoordinatorCollaborator):
         return env_spec, measurement
 
     @staticmethod
-    def _reference_verification_status(
-        evidence: Mapping[str, Any], *, identity_matches: bool, observed: bool, agentx: bool
-    ) -> str:
-        if agentx:
-            return "unverified_workload"
+    def _reference_verification_status(evidence: Mapping[str, Any], *, identity_matches: bool, observed: bool) -> str:
         if identity_matches and observed:
             return "verified_observed"
         declared = (
@@ -1356,7 +1353,7 @@ class KernelPhase(CoordinatorCollaborator):
     def _same_config_reference(
         self, measurement: Mapping[str, Any], *, expected_identity: str, agentx: bool
     ) -> dict[str, Any]:
-        measured_identity = str(measurement.get("declared_launch_identity") or measurement.get("launch_identity") or "")
+        measured_identity = _first_text(measurement, "declared_launch_identity", "launch_identity")
         identity_matches = bool(expected_identity and expected_identity == measured_identity)
         evidence = measurement.get("launch_evidence")
         evidence = dict(evidence) if isinstance(evidence, Mapping) else {}
@@ -1370,10 +1367,12 @@ class KernelPhase(CoordinatorCollaborator):
             else {}
         )
         observed = bool(observed_flags or server_identity)
-        status = self._reference_verification_status(
-            evidence, identity_matches=identity_matches, observed=observed, agentx=agentx
+        status = (
+            "unverified_workload"
+            if agentx
+            else self._reference_verification_status(evidence, identity_matches=identity_matches, observed=observed)
         )
-        observed_identity = str(measurement.get("observed_launch_identity") or "")
+        observed_identity = _first_text(measurement, "observed_launch_identity")
         if not observed_identity and identity_matches and observed:
             observed_identity = _observed_identity_digest(measured_identity, observed_flags, server_identity)
         verified = status == "verified_observed"
@@ -1383,7 +1382,7 @@ class KernelPhase(CoordinatorCollaborator):
             "same_config_reference_status": "verified" if verified else "unverified",
             "same_config_reference_identity": measured_identity,
             "same_config_expected_identity": expected_identity,
-            "same_config_reference_workspace": str(measurement.get("benchmark_workspace") or ""),
+            "same_config_reference_workspace": _first_text(measurement, "benchmark_workspace"),
             # Additive identity semantics.
             "same_config_reference_verification_status": status,
             "same_config_reference_declared_identity": measured_identity,
@@ -1544,6 +1543,9 @@ class KernelPhase(CoordinatorCollaborator):
         seed_native_geak_proxy(handoff, benchmark=recipe_bench, measurement=measurement)
         return handoff
 
+    def _geak_result_path(self) -> Path:
+        return self.session_dir / "geak" / "result.json"
+
     def _geak_settled_replay(self, candidate: dict[str, Any], *, agentx: bool) -> bool:
         """Whether ``candidate`` is a result this session already settled."""
         return _geak_rebench.geak_candidate_is_adjudicated(
@@ -1655,7 +1657,7 @@ class KernelPhase(CoordinatorCollaborator):
     def _settle_geak_runner_exit(
         self, proc: subprocess.CompletedProcess, *, handoff: dict[str, Any], agentx: bool, facts: dict[str, Any]
     ) -> dict[str, Any] | None:
-        result_path = self.session_dir / "geak" / "result.json"
+        result_path = self._geak_result_path()
         stderr_tail = (proc.stderr or "")[-2000:]
         if proc.returncode != 0:
             log.warning("GEAK runner rc=%s: %s", proc.returncode, stderr_tail)
@@ -1733,7 +1735,7 @@ class KernelPhase(CoordinatorCollaborator):
             # The graceful SIGTERM gives run_e2e a window to flush result.json; keep a real win instead of discarding
             # the phase as a timeout.
             facts |= {"started_at": started_at, "duration_sec": time.monotonic() - started}
-            flushed = read_json(out_dir / "result.json", {}, require_dict=True)
+            flushed = read_json(self._geak_result_path(), {}, require_dict=True)
             if flushed.get("status") == "ok" and not (agentx and self._geak_settled_replay(flushed, agentx=agentx)):
                 log.info(
                     "GEAK flushed an OK result.json under SIGTERM grace; promoting the recovered win despite the cap."
@@ -1782,7 +1784,7 @@ class KernelPhase(CoordinatorCollaborator):
         # A validated result.json written before a coordinator crash is promoted on resume, guarded by
         # ``_geak_win_already_recorded`` so a prior cycle's result.json does not short-circuit a fresh entry. A
         # result this session already settled is not recovered; new candidate evidence remains eligible.
-        recovered = read_json(self.session_dir / "geak" / "result.json", {}, require_dict=True)
+        recovered = read_json(self._geak_result_path(), {}, require_dict=True)
         if (
             recovered.get("status") != "ok"
             or self._geak_win_already_recorded()
@@ -1839,7 +1841,7 @@ class KernelPhase(CoordinatorCollaborator):
                     "kind": "geak_e2e_done",
                     "status": str(result.get("status") or "unknown"),
                     "speedup": result.get("throughput_speedup"),
-                    "result_path": str(self.session_dir / "geak" / "result.json"),
+                    "result_path": str(self._geak_result_path()),
                 },
             )
         )
@@ -2919,20 +2921,20 @@ class KernelPhase(CoordinatorCollaborator):
                 hits=covered,
                 misses=requested - covered,
             )
-        for flag, name, detail in (
-            (
-                "runtime_default",
+        if coverage.get("runtime_default"):
+            return _verdict(
                 "runtime_default_config",
                 "runtime served default heuristics; tuned candidate kernels were not selected",
-            ),
-            (
-                "kernel_name_mismatch",
+                misses=requested,
+                blocks=True,
+            )
+        if coverage.get("kernel_name_mismatch"):
+            return _verdict(
                 "kernel_name_mismatch",
                 "lookup key matched bundled rows but runtime kernelName1/kernelName2 differ from candidate_fmoe.csv",
-            ),
-        ):
-            if coverage.get(flag):
-                return _verdict(name, detail, misses=requested, blocks=True)
+                misses=requested,
+                blocks=True,
+            )
         return _verdict(
             "no_shape_key_matched",
             f"0 of {requested} fused-MoE dispatch(es) resolve to a candidate row",
