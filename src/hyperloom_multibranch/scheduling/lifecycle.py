@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import importlib.metadata
 import logging
 import math
@@ -49,6 +50,7 @@ from hyperloom_multibranch.contracts.notebook.records import ManifestFingerprint
 from hyperloom_multibranch.contracts.notebook.vocab import UsageSource
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.codec import decode, encode
+from hyperloom_multibranch.notebook.rsi.authoring import session_challenger
 from hyperloom_multibranch.notebook.rsi.calibration import DEFAULT_POLICY, PolicyChoice
 from hyperloom_multibranch.notebook.rsi.frontier import SETTLED_TESTS, FrontierPolicy, FrontierScoring, ScorerGuard
 from hyperloom_multibranch.notebook.rsi.session import (
@@ -111,6 +113,11 @@ POLICY_VERSIONS = {
 FRONTIER_POLICY_KEY = "frontier"
 #: The ``policy_versions`` key of the scorer the session scores with, which a variation's label does not name.
 FRONTIER_SCORER_KEY = "frontier_scorer"
+#: The ``policy_versions`` key that says whether the session scored with a challenger, ``"1"``, or not, ``"0"``.
+CHALLENGER_KEY = "frontier_challenger"
+#: One session in this many scores with a challenger instead of the champion: replaying the archive credits only the
+#: scorer a session ran with, since a branch it stopped gains nothing afterwards, so challengers must run sometimes.
+CHALLENGER_EVERY = 4
 #: The ``policy_versions`` key of the grace, :data:`SETTLED_TESTS`: a scorer's record compares only within one grace.
 GRACE_KEY = "grace"
 SCORER_FALLBACK_REASON = "frontier scorer fell back"
@@ -213,6 +220,7 @@ class Session:
         checks = SessionChecks(tests, peers.gate, peers.regression)
         self._metric = settings.workload.metric
         self._budget_seconds = budget_seconds(settings.max_hours)
+        self._challenger = False
         # The defaults until PRELUDE's choice replaces it; EXPLORE and CLOSE build their scoring from it.
         self._choose(
             PolicyChoice(
@@ -278,6 +286,7 @@ class Session:
 
         candidates = await self._final_candidates()
         self._choose(self._recorded_frontier_policy())
+        self._challenger = read_json_strict(self._layout.manifest)["policy_versions"].get(CHALLENGER_KEY) == "1"
         total = budget_seconds(self._settings.max_hours)
         budget = SessionBudget(self._clock.now() - total, total)
         self._in_final = True
@@ -424,9 +433,18 @@ class Session:
             choice = PolicyChoice(defaults, DEFAULT_POLICY, FORCED_DEFAULT_EVIDENCE)
         else:
             snapshot = await self._notebook.snapshot()
-            choice = await asyncio.to_thread(session_frontier_scorer, snapshot, self._history, defaults)
+            challenger = None
+            if challenger_session(self._layout.session_id):
+                challenger = await asyncio.to_thread(session_challenger, snapshot, self._history, defaults)
+            self._challenger = challenger is not None
+            choice = challenger or await asyncio.to_thread(session_frontier_scorer, snapshot, self._history, defaults)
         self._choose(choice)
-        detail = {"label": choice.label, "evidence": choice.evidence, "scorer": choice.scorer.label}
+        detail = {
+            "label": choice.label,
+            "evidence": choice.evidence,
+            "scorer": choice.scorer.label,
+            "challenger": self._challenger,
+        }
         self._decisions.record(Decision(DecisionKind.PRELUDE, "frontier policy", detail=detail))
         manifest = read_json_strict(self._layout.manifest)
         atomic_write_json(self._layout.manifest, {**manifest, "policy_versions": self._policy_versions()})
@@ -446,6 +464,7 @@ class Session:
             **POLICY_VERSIONS,
             FRONTIER_POLICY_KEY: self._frontier.label,
             FRONTIER_SCORER_KEY: self._frontier.scorer.label,
+            CHALLENGER_KEY: "1" if self._challenger else "0",
             GRACE_KEY: str(SETTLED_TESTS),
         }
 
@@ -577,6 +596,13 @@ class Session:
         atomic_write_json(self._layout.manifest, document)
 
 
+def challenger_session(session_id: str) -> bool:
+    """Whether the session ``session_id`` is one of the :data:`CHALLENGER_EVERY` that scores with a challenger; the
+    same answer for the same session every time it is asked."""
+
+    return int(hashlib.sha256(session_id.encode()).hexdigest(), 16) % CHALLENGER_EVERY == 0
+
+
 def pinned_frontier_choice(label: str, defaults: FrontierPolicy) -> PolicyChoice:
     """The choice ``--frontier-scorer`` pins with ``label`` under ``defaults``; raise ValueError when no scorer in code
     or in the scorer pool beside the archive has that label."""
@@ -644,6 +670,8 @@ def code_version() -> CodeVersion:
 
 __all__ = [
     "COMPLETED_REASONS",
+    "CHALLENGER_EVERY",
+    "CHALLENGER_KEY",
     "FORCED_DEFAULT_EVIDENCE",
     "FRONTIER_SCORER_KEY",
     "GRACE_KEY",
@@ -659,5 +687,6 @@ __all__ = [
     "SessionServices",
     "code_version",
     "persisted_run",
+    "challenger_session",
     "pinned_frontier_choice",
 ]

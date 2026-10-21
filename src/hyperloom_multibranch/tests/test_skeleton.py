@@ -105,6 +105,7 @@ from hyperloom_multibranch.scheduling import lifecycle
 from hyperloom_multibranch.notebook.rsi.bandit import BANDIT_LABEL
 from hyperloom_multibranch.scheduling.lifecycle import (
     CUT_SHORT,
+    CHALLENGER_KEY,
     FORCED_DEFAULT_EVIDENCE,
     FRONTIER_SCORER_KEY,
     GRACE_KEY,
@@ -699,7 +700,12 @@ async def test_a_session_scores_its_frontier_with_the_policy_the_calibration_cho
     manifest = json.loads(stage.layout.manifest.read_text())
     assert manifest["policy_versions"][FRONTIER_POLICY_KEY] == CHOSEN_LABEL
     [decided] = [row for row in _decisions(stage) if row["reason"] == "frontier policy"]
-    assert decided["detail"] == {"label": CHOSEN_LABEL, "evidence": CHOSEN_EVIDENCE, "scorer": FRONTIER_V1_LABEL}
+    assert decided["detail"] == {
+        "label": CHOSEN_LABEL,
+        "evidence": CHOSEN_EVIDENCE,
+        "scorer": FRONTIER_V1_LABEL,
+        "challenger": False,
+    }
     states = [_judge_state(prompt) for prompt in _judge_prompts(stage)]
     assert states and all(
         state["frontier_policy"] == {"label": CHOSEN_LABEL, "evidence": CHOSEN_EVIDENCE, "scorer": FRONTIER_V1_LABEL}
@@ -729,6 +735,7 @@ async def test_a_pinned_frontier_scorer_scores_the_session_without_asking_the_ca
         "label": BANDIT_LABEL,
         "evidence": f"{BANDIT_LABEL}: {PINNED_EVIDENCE}",
         "scorer": BANDIT_LABEL,
+        "challenger": False,
     }
     lines = _frontier_lines(stage)
     assert lines and all(line["scorer"] == BANDIT_LABEL for line in lines)
@@ -750,6 +757,55 @@ async def test_close_asks_no_llm_for_frontier_scorers_without_an_archive_and_rec
         SKIPPED,
         NO_ARCHIVE,
     )
+
+
+def test_one_session_in_four_is_a_challenger_session_and_the_rest_are_not() -> None:
+    sessions = [f"MB-20261021T000000Z-{index:08x}" for index in range(400)]
+
+    flags = [lifecycle.challenger_session(session_id) for session_id in sessions]
+
+    assert flags == [lifecycle.challenger_session(session_id) for session_id in sessions]
+    assert 70 <= sum(flags) <= 130
+
+
+@pytest.mark.parametrize("offered", [True, False])
+async def test_a_challenger_session_scores_with_the_challenger_the_notebook_offers_else_the_champion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, offered: bool
+) -> None:
+    champion = _choosing(monkeypatch, lambda defaults: PolicyChoice(defaults, CHOSEN_LABEL, CHOSEN_EVIDENCE))
+    challenger = PolicyChoice(FrontierPolicy("output_throughput"), BANDIT_LABEL, "bandit-rv: the best challenger")
+    monkeypatch.setattr(lifecycle, "challenger_session", lambda session_id: True)
+    monkeypatch.setattr(
+        lifecycle,
+        "session_challenger",
+        lambda snapshot, history, defaults: replace(challenger, policy=defaults) if offered else None,
+    )
+    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    _script(stage)
+
+    outcome = await stage.run()
+
+    assert outcome.exit_code == 0
+    manifest = json.loads(stage.layout.manifest.read_text())["policy_versions"]
+    [decided] = [row for row in _decisions(stage) if row["reason"] == "frontier policy"]
+    if offered:
+        assert champion == [] and manifest[FRONTIER_POLICY_KEY] == BANDIT_LABEL
+        assert (manifest[CHALLENGER_KEY], decided["detail"]["challenger"]) == ("1", True)
+    else:
+        assert len(champion) == 1 and manifest[FRONTIER_POLICY_KEY] == CHOSEN_LABEL
+        assert (manifest[CHALLENGER_KEY], decided["detail"]["challenger"]) == ("0", False)
+
+
+async def test_a_pinned_scorer_is_never_a_challenger_session(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(lifecycle, "challenger_session", lambda session_id: True)
+    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage.settings = replace(SETTINGS, frontier_scorer=BANDIT_LABEL)
+    _script(stage)
+
+    outcome = await stage.run()
+
+    assert outcome.exit_code == 0
+    assert json.loads(stage.layout.manifest.read_text())["policy_versions"][CHALLENGER_KEY] == "0"
 
 
 class _Failing:
@@ -794,6 +850,7 @@ async def test_frontier_policy_default_keeps_the_defaults_without_asking_the_cal
         "label": DEFAULT_POLICY,
         "evidence": FORCED_DEFAULT_EVIDENCE,
         "scorer": FRONTIER_V1_LABEL,
+        "challenger": False,
     }
     assert _judge_state(_judge_prompts(stage)[0])["frontier_policy"] == {
         "label": DEFAULT_POLICY,
