@@ -258,6 +258,21 @@ class WarmReplayEventRecorder:
             ext={"request": dict(self._request)},
         )
 
+    def rebind(self) -> None:
+        """Take over the event an earlier tick opened.
+
+        The stored sequence and start time are restored from the event-level
+        fragment, so the close updates the same timeline entry and keeps its
+        original start.
+        """
+        from .assembler import warm_replay_event_parts
+        from .construct import event_header
+        from ...session.sbd_v6 import timeline_sequence
+
+        stored = event_header(warm_replay_event_parts(self.event_id), SECTION_EVENT, self.event_id)
+        self._sequence = timeline_sequence(stored)
+        self._start_time = str(stored.get("start_time") or self._start_time)
+
     def record_measurement(
         self,
         *,
@@ -611,4 +626,6 @@ def make_warm_replay_recorder(
     )
     if open_event_on_timeline:
         recorder.begin()
+    else:
+        recorder.rebind()
     return recorder

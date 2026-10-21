@@ -280,3 +280,24 @@ def test_an_unreadable_spool_on_finish_does_not_raise(_bound_session, monkeypatc
         lambda *_a, **_k: (_ for _ in ()).throw(OSError("spool down")),
     )
     recorder.finish({"status": "reproduced"})
+
+
+def test_a_rebound_recorder_closes_the_event_the_enqueue_opened(_bound_session, monkeypatch):
+    from hyperloom.inference_optimizer.breakdown.recorder import warm_replay_event
+    from hyperloom.inference_optimizer.session.sbd_v6 import timeline_sequence
+
+    monkeypatch.setattr(warm_replay_event, "_now", lambda: "2026-01-01T00:00:00Z")
+    _recorder()
+    opened = _events(_bound_session)
+    assert len(opened) == 1
+
+    monkeypatch.setattr(warm_replay_event, "_now", lambda: "2026-01-01T01:30:00Z")
+    rebound = _recorder(open_event_on_timeline=False)
+    rebound.finish({"status": "reproduced"})
+
+    events = _events(_bound_session)
+    assert len(events) == 1
+    assert events[0]["id"] == opened[0]["id"]
+    assert events[0]["start_time"] == "2026-01-01T00:00:00Z"
+    assert events[0]["end_time"] == "2026-01-01T01:30:00Z"
+    assert timeline_sequence(events[0]) == timeline_sequence(opened[0])
