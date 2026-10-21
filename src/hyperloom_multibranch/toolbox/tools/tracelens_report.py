@@ -16,24 +16,13 @@ The splitter's workload hints (``--CONC``, ``--OSL``, ``--R``) and the steady-st
 specialist's request gets the hints from the profile test's own point (``toolbox/analysis.py``), not from anything the
 caller or the toolbox process says; the splitter picks its window without a hint the request lacks.
 
-A window whose graph-replayed kernels are missing from the trace is not reported as a table. TraceLens' capture merge needs
-the replay's own kernel events (the capture-time trace holds no kernel durations), so a ``hipGraphLaunch`` the profiler
-recorded without them is skipped with a warning and its whole step is absent from the ops table, which then lists only the
-eager ops around it (a Qwen3-14B-FP8 decode window: 0.05 ms of kernels in an 8.2 ms span, no GEMM). TraceLens' own check
-does not see it (no replay wrapper op is left to count), so the route reads how much of the window's GPU span the report's
-kernels fill (``gpu_timeline.csv``) and marks a window below :data:`MIN_GPU_BUSY_PERCENT` degraded, like a graph-collapsed
-one: no op shares, and the reason in the tool summary.
-
-A window whose kernel durations are not real is not reported either. The eager kernels after a graph replay can carry
-start timestamps inside the replay, on the same in-order stream, and end at the window's end: in a Qwen3-14B-FP8 branch
-window ``greedy_sample``, ``add``, two ``index_put`` and two ``copy_`` kernels (50 to 82 us in all in the branch's other
-windows) last 9 ms each, all ending within 30 us of one another. The raw rank trace already holds them, so TraceLens'
-capture merge is not the cause; it attributes them to the right ops, and the window's one recorded replay (604 kernels,
-7.9 ms) is 13% of the table beside 54.8 ms of those six. The window's kernels fill 96% of its span
-(the overlapping intervals cover it), so the check above passes it. The ops table's kernels add up to the window's busy
-time when they run one after another and to a little more when streams overlap; here to 6.2 times. The route reads the
-table's ``total_direct_kernel_time_ms`` against the timeline's ``busy_time`` and marks a window above
-:data:`MAX_KERNEL_OVERLAP` degraded the same way.
+The op shares do not come from TraceLens' ops table. Its durations are wrong on a decode window after a graph replay (the
+ROCm profiler stamps the eager kernels queued behind the replay as lasting ~9 ms each), so the shares come from the window's
+own GPU events, per kernel, summing to 100% of the window's kernel time (:mod:`~.kernel_shares`): events that overlap the
+previous event of their in-order stream are left out and counted (``excluded_events``, ``excluded_claimed_ms``), and a window
+is reported degraded, with the reason and no shares, when its kernels are missing from the trace (they fill under
+:data:`~.kernel_shares.MIN_GPU_BUSY_PERCENT` of its GPU span) or the excluded events could change the ranking. TraceLens'
+report is still run on the window, and its own check on the result still marks a graph-collapsed one degraded.
 
 It is for LLM serving traces (SGLang, vLLM, ATOM): the splitter reads their step annotations. Anything else asks for
 ``analysis_route: agent``.
@@ -42,7 +31,6 @@ It is for LLM serving traces (SGLang, vLLM, ATOM): the splitter reads their step
 from __future__ import annotations
 
 import asyncio
-import csv
 import math
 import shlex
 import subprocess
@@ -57,7 +45,20 @@ from hyperloom.inference_optimizer.session import paths as session_paths
 from hyperloom.orchestrator.actions.executors import run_with_session_kill
 from hyperloom.orchestrator.trace_analysis.tracelens_arch_benchmark import resolve_arch_json_path
 from hyperloom.orchestrator.trace_analysis.tracelens_skill_runner import discover_capture_folder
-from hyperloom_multibranch.toolbox.tools.op_shares import OWN_DEGRADED_KEY
+from hyperloom_multibranch.toolbox.tools.kernel_shares import (
+    KERNEL_SHARES_FILE,
+    KernelTraceError,
+    KernelWindow,
+    kernel_window,
+    read_gpu_events,
+    write_kernel_table,
+)
+from hyperloom_multibranch.toolbox.tools.op_shares import (
+    EXCLUDED_CLAIMED_KEY,
+    EXCLUDED_EVENTS_KEY,
+    KERNEL_SHARES_KEY,
+    OWN_DEGRADED_KEY,
+)
 
 if TYPE_CHECKING:
     from TraceLens.Agent.Analysis.utils import GraphReplayCoverage
@@ -92,21 +93,10 @@ _ENCODING = "utf-8"
 #: The error class of a perf report that lacks a table the route reads.
 _INCOMPLETE = "perf_report_incomplete"
 _CAPTURE_KEYS = ("capture_folder", "graph_capture_path", "capture_folder_path")
-#: What real windows fill of their GPU span: a fully recorded prefill window 99%; the 32-step mixes of a Qwen3-14B-FP8 root
-#: profile and of a Qwen3-8B one, which lose the kernels of 29 and 30 of their decode replays but keep a prefill step, 54% and
-#: 16%; the single decode step of a Qwen3-14B-FP8 branch profile, whose one replay lost its kernels, 0.6%. Under a tenth of
-#: the span the table is not the window's work.
-MIN_GPU_BUSY_PERCENT = 10.0
-#: How many times the GPU's busy time the ops table's kernels may add up to. Kernels on one stream run one after another, so
-#: a window's kernels add up to about its busy time and overlapping streams (compute, collective, copy) only add a little:
-#: 1.00 for the Qwen3-14B-FP8 root profile window and for the branch one with its replay lost; 0.42 for the Qwen3-8B 32-step
-#: mix and 0.78 for the TP2 one with collectives, whose tables list less than the GPU ran. The Qwen3-14B-FP8 branch window
-#: whose six eager kernels each last 9 ms adds up to 6.17.
-MAX_KERNEL_OVERLAP = 3.0
-_GPU_TIMELINE = "gpu_timeline.csv"
 _OPS_SUMMARY = "ops_summary.csv"
-_OPS_KERNEL_MS = "total_direct_kernel_time_ms"
 _TAIL_CHARS = 1500
+#: Decimal places of the times in the result.
+_TIME_DIGITS = 3
 
 
 class _Refused(Exception):
@@ -246,74 +236,12 @@ def _graph_replay_coverage(run: _Run) -> GraphReplayCoverage:
     return check_graph_replay_coverage(unified)
 
 
-@dataclass(frozen=True)
-class _Window:
-    """What the report's kernels and copies make of the window's GPU span (first to last GPU event)."""
-
-    percent: float
-    span_ms: float
-    busy_ms: float
-    ops_ms: float
-
-    @property
-    def overlap(self) -> float:
-        """How many times the GPU's busy time the ops table's kernels add up to (0 with no busy time: starved, not overlapped)."""
-        return self.ops_ms / self.busy_ms if self.busy_ms > 0 else 0.0
-
-    @property
-    def degraded_reason(self) -> str:
-        """Why the window is not the work it was cut for, empty when its table can be read as that work."""
-        return self.starved_reason or self.overlapping_reason
-
-    @property
-    def starved_reason(self) -> str:
-        """Empty when the window's kernels fill enough of its span."""
-        if self.percent >= MIN_GPU_BUSY_PERCENT:
-            return ""
-        return (
-            f"the window's recorded GPU kernels fill {self.percent:.1f}% of its {self.span_ms:.2f} ms GPU span (under "
-            f"{MIN_GPU_BUSY_PERCENT:g}%): the kernels of its CUDA-graph replays are missing from the trace, so the table "
-            "lists only the eager ops around them"
-        )
-
-    @property
-    def overlapping_reason(self) -> str:
-        """Empty when the ops table's kernels add up to no more than overlapping streams explain."""
-        if self.overlap <= MAX_KERNEL_OVERLAP:
-            return ""
-        return (
-            f"the ops table's kernels add up to {self.ops_ms:.2f} ms over {self.busy_ms:.2f} ms of GPU busy time "
-            f"({self.overlap:.1f} times, over {MAX_KERNEL_OVERLAP:g}): kernels of one stream overlap one another, so the "
-            "profiler's timestamps are wrong for some and the table's durations and shares are not the window's work"
-        )
-
-
-def _ops_kernel_ms(run: _Run) -> float:
-    """The kernel time the ops table lists in all (``total_direct_kernel_time_ms`` summed); an unreadable table fails the report."""
-    path = run.csv_dir / _OPS_SUMMARY
+def _kernel_window(chunk: Path, trace: Path) -> KernelWindow:
+    """The kernel shares of the window's GPU events; the whole rank trace is read only to price excluded events."""
     try:
-        with path.open(encoding=_ENCODING, newline="") as handle:
-            total = math.fsum(float(row[_OPS_KERNEL_MS]) for row in csv.DictReader(handle))
-    except (OSError, KeyError, TypeError, ValueError, csv.Error) as exc:
-        raise _Refused(_INCOMPLETE, f"{path} has no readable {_OPS_KERNEL_MS} column: {exc!r}") from None
-    if not math.isfinite(total):
-        raise _Refused(_INCOMPLETE, f"{path} lists {total} ms of kernels")
-    return total
-
-
-def _window(run: _Run) -> _Window:
-    """The report's GPU timeline (``busy_time`` and ``total_time``) and ops table kernels; unreadable ones fail the report, not pass it."""
-    path = run.csv_dir / _GPU_TIMELINE
-    try:
-        with path.open(encoding=_ENCODING, newline="") as handle:
-            rows = {row["type"]: row for row in csv.DictReader(handle)}
-        busy, total = rows["busy_time"], rows["total_time"]
-        percent, busy_ms, span_ms = float(busy["percent"]), float(busy["time ms"]), float(total["time ms"])
-    except (OSError, KeyError, TypeError, ValueError, csv.Error) as exc:
-        raise _Refused(_INCOMPLETE, f"{path} has no readable busy_time and total_time: {exc!r}") from None
-    if not all(math.isfinite(value) for value in (percent, busy_ms, span_ms)):
-        raise _Refused(_INCOMPLETE, f"{path} gives busy_time {percent}% {busy_ms} ms and total_time {span_ms} ms")
-    return _Window(percent, span_ms, busy_ms, _ops_kernel_ms(run))
+        return kernel_window(read_gpu_events(chunk), lambda: read_gpu_events(trace))
+    except KernelTraceError as exc:
+        raise _Refused("kernel_trace_unreadable", str(exc)) from None
 
 
 def _write_degraded_report(run: _Run, coverage: GraphReplayCoverage) -> None:
@@ -353,7 +281,10 @@ def _analyse(payload: Mapping[str, Any], session_dir: Path) -> dict[str, Any]:
     coverage = _graph_replay_coverage(run)
     if coverage.graph_under_recorded:
         _write_degraded_report(run, coverage)
-    window = _window(run)
+    kernels = _kernel_window(chunk, trace)
+    degraded = kernels.degraded_reason
+    if not degraded:
+        write_kernel_table(kernels, run.out_dir / KERNEL_SHARES_FILE)
 
     warnings = [] if arch is not None else [{"code": "gpu_arch_json_unresolved", "severity": "warning"}]
     return {
@@ -363,6 +294,7 @@ def _analyse(payload: Mapping[str, Any], session_dir: Path) -> dict[str, Any]:
         "trace_report_path": str(run.out_dir / "perf_report.xlsx"),
         "analysis_md_path": str(run.out_dir / "analysis.md") if coverage.graph_under_recorded else "",
         "ops_summary_path": str(run.csv_dir / _OPS_SUMMARY),
+        KERNEL_SHARES_KEY: "" if degraded else str(run.out_dir / KERNEL_SHARES_FILE),
         "trace_input": str(trace_input),
         "analysed_trace": trace.name,
         "steady_state_mode": mode,
@@ -371,11 +303,14 @@ def _analyse(payload: Mapping[str, Any], session_dir: Path) -> dict[str, Any]:
         "capture_folder": str(capture or ""),
         "graph_replay_fraction": round(coverage.graph_replay_fraction, 4),
         "graph_under_recorded": coverage.graph_under_recorded,
-        "window_gpu_busy_percent": round(window.percent, 2),
-        "window_kernel_overlap": round(window.overlap, 2),
-        OWN_DEGRADED_KEY: window.degraded_reason,
+        "window_gpu_busy_percent": round(kernels.busy_percent, 2),
+        "window_kernel_ms": round(kernels.kernel_ms, _TIME_DIGITS),
+        EXCLUDED_EVENTS_KEY: kernels.excluded_events,
+        EXCLUDED_CLAIMED_KEY: round(kernels.excluded_claimed_ms, 2),
+        "excluded_estimated_ms": round(kernels.excluded_estimated_ms, _TIME_DIGITS),
+        OWN_DEGRADED_KEY: degraded,
         "trace_health_warnings": warnings,
-        "duration_sec": round(time.monotonic() - started, 3),
+        "duration_sec": round(time.monotonic() - started, _TIME_DIGITS),
     }
 
 
@@ -399,8 +334,6 @@ async def report_handler(payload: dict, *, session_dir: Path) -> dict[str, Any]:
 
 __all__ = [
     "DEFAULT_PLATFORM",
-    "MAX_KERNEL_OVERLAP",
-    "MIN_GPU_BUSY_PERCENT",
     "REPORT_ROUTE",
     "SPLIT_HINTS",
     "report_handler",

@@ -1,10 +1,10 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The op shares are TraceLens' complete per-op GPU time table, not the few optimisation tasks of its report.
+"""The op shares are a complete per-op (or per-kernel) GPU time table, not the few optimisation tasks of TraceLens' report.
 
 ``data/tracelens_ops_summary.csv`` is a real ``ops_summary.csv`` of a TraceLens perf report (Qwen3-8B on SGLang, TP2,
-one steady-state window).
+one steady-state window). The report route names a kernel table of its own, which is read instead of it.
 """
 
 from __future__ import annotations
@@ -18,8 +18,15 @@ from typing import Any
 import pytest
 
 from hyperloom_multibranch.contracts.notebook.records import MAX_OP_SHARES
+from hyperloom_multibranch.toolbox.tools import ToolOutput, ToolRequest
 from hyperloom_multibranch.toolbox.tools.executor_tool import _copy_back
-from hyperloom_multibranch.toolbox.tools.op_shares import ANALYSIS_JSON, OPS_SUMMARY, read_op_shares
+from hyperloom_multibranch.toolbox.tools.op_shares import (
+    ANALYSIS_JSON,
+    KERNEL_SHARES_KEY,
+    OPS_SUMMARY,
+    read_op_shares,
+    with_op_shares,
+)
 
 FIXTURE = Path(__file__).parent / "data" / "tracelens_ops_summary.csv"
 
@@ -79,3 +86,46 @@ def test_the_table_is_copied_back_from_the_scratch_directory_with_the_report(tmp
     assert landed.is_relative_to(workdir)
     assert (landed.parent / OPS_SUMMARY).is_file() and (landed.parent / ANALYSIS_JSON).is_file()
     assert sum(read_op_shares(out).values()) == pytest.approx(100.0, abs=0.01)
+
+
+def _kernel_table(directory: Path) -> Path:
+    table = directory / "kernel_shares.csv"
+    table.write_text(
+        "name,Percentage (%),total_time_ms,count\nkernel_gemm_0,60.5,3.0,160\nreshape_and_cache_flash,39.5,2.0,40\n"
+    )
+    return table
+
+
+def test_a_result_naming_a_kernel_table_has_its_shares_read_from_it_not_from_the_ops_summary_beside_the_report(
+    tmp_path: Path,
+) -> None:
+    result = {**_report(tmp_path), KERNEL_SHARES_KEY: str(_kernel_table(tmp_path))}
+    assert read_op_shares(result) == {"kernel_gemm_0": 60.5, "reshape_and_cache_flash": 39.5}
+
+
+@pytest.mark.parametrize("named", ["", None, "nowhere/kernel_shares.csv"])
+def test_a_result_whose_kernel_table_is_empty_or_missing_gives_no_shares_even_beside_an_ops_summary(
+    tmp_path: Path, named: str | None
+) -> None:
+    result = {**_report(tmp_path), KERNEL_SHARES_KEY: named}
+    assert (tmp_path / OPS_SUMMARY).is_file() and read_op_shares(result) == {}
+
+
+def test_the_kernel_table_is_copied_back_from_the_scratch_directory_and_read_there(tmp_path: Path) -> None:
+    scratch, workdir = tmp_path / "scratch", tmp_path / "work"
+    scratch.mkdir()
+    out = _copy_back({**_report(scratch), KERNEL_SHARES_KEY: str(_kernel_table(scratch))}, scratch, workdir)
+    assert Path(out[KERNEL_SHARES_KEY]).is_relative_to(workdir)
+    assert read_op_shares(out) == {"kernel_gemm_0": 60.5, "reshape_and_cache_flash": 39.5}
+
+
+def test_the_summary_says_how_many_misreported_events_the_shares_leave_out(tmp_path: Path) -> None:
+    result = {KERNEL_SHARES_KEY: str(_kernel_table(tmp_path)), "excluded_events": 6, "excluded_claimed_ms": 54.84}
+    request = ToolRequest("tracelens", "b1", {"commit_id": "c1"})
+    noted = with_op_shares(ToolOutput(result, "trace analysed"), request)
+    assert (
+        noted.summary
+        == "trace analysed | 6 GPU events the profiler misreported (claiming 54.84 ms) are left out of the shares"
+    )
+    quiet = with_op_shares(ToolOutput({**result, "excluded_events": 0}, "trace analysed"), request)
+    assert quiet.summary == "trace analysed" and quiet.op_shares

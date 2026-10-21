@@ -3,15 +3,15 @@
 
 """The per-op shares of a TraceLens analysis, for the tools that run one (``tracelens``, ``roofline``).
 
-The shares come from TraceLens' ``ops_summary.csv`` (the ``perf_report_csvs`` folder beside the analysis report): the
-complete per-op GPU time table its perf report writes deterministically from the trace, every op's share of the
-total. It is not the ``analysis.json`` task list, which holds only the few optimisation tasks the report recommends
-(a few percent of the time) and would hide GEMM and attention from the Amdahl ceiling. A tool that produced no table,
-or whose request does not name the commit the profile ran on, reports no shares: they are never guessed. A report
-TraceLens marked degraded (its deterministic fallback, or a poor trace) carries no shares either: the decomposition
-behind them failed, so the one row it keeps is a kernel name, not an op. So does one the report route itself found hollow
-(``window_degraded_reason``: the kernels of the window's graph replays are missing from the trace, which TraceLens only
-warns about, or the table's kernels add up to several times the GPU's busy time, so their durations are wrong).
+The shares come from a table of every op's share of the total GPU time. The ``report`` route of ``tracelens`` names its own
+(``kernel_shares_path``: the window's kernels, ``kernel_shares``): TraceLens' per-op durations are wrong on a decode window
+after a graph replay. Any other analysis has TraceLens' ``ops_summary.csv`` (the ``perf_report_csvs`` folder beside the
+report), the complete per-op table its perf report writes deterministically from the trace. Neither is the
+``analysis.json`` task list, which holds only the few optimisation tasks the report recommends (a few percent of the time)
+and would hide GEMM and attention from the Amdahl ceiling. A tool that produced no table, or whose request does not name the
+commit the profile ran on, reports no shares: they are never guessed. A report TraceLens marked degraded (its deterministic
+fallback, or a poor trace) carries no shares either: the decomposition behind them failed, so the one row it keeps is a
+kernel name, not an op. So does one the report route itself found hollow (``window_degraded_reason``).
 """
 
 from __future__ import annotations
@@ -32,12 +32,16 @@ log = logging.getLogger(__name__)
 
 ANALYSIS_JSON = "analysis.json"
 OPS_SUMMARY = "perf_report_csvs/ops_summary.csv"
-_NAME_COLUMN, _SHARE_COLUMN = "name", "Percentage (%)"
+NAME_COLUMN, SHARE_COLUMN = "name", "Percentage (%)"
 COMMIT_PARAM = "commit_id"
 PROFILE_REQUEST_PARAM = "profile_request_id"
 _REPORT_KEYS = ("trace_report_path", "analysis_md_path")
 #: The reason the report route gives when its own check, not TraceLens', found the report hollow.
 OWN_DEGRADED_KEY = "window_degraded_reason"
+#: The report route's table of the window's kernels and their shares; empty when the window gives none.
+KERNEL_SHARES_KEY = "kernel_shares_path"
+#: How many GPU events of the window the report route left out of its kernel shares, and the time they claim.
+EXCLUDED_EVENTS_KEY, EXCLUDED_CLAIMED_KEY = "excluded_events", "excluded_claimed_ms"
 DEGRADED_MODE = "deterministic-fallback"
 POOR_QUALITY = "poor"
 DEGRADED_NOTICE = "TraceLens report is degraded, so no op shares were taken from it"
@@ -87,20 +91,29 @@ def _table_rows(path: Path) -> list[dict[str, str]]:
         return []
 
 
-def read_op_shares(result: Mapping[str, Any], limit: int = MAX_OP_SHARES) -> dict[str, float]:
-    """``Percentage (%)`` per op name of the ops summary the analysis ``result`` points at, the ``limit`` largest only.
+def _share_table(result: Mapping[str, Any]) -> Path | None:
+    """The table the shares are read from: the one the report route names (even when it names none), else the ops summary."""
+    if KERNEL_SHARES_KEY in result:
+        text = str(result[KERNEL_SHARES_KEY] or "").strip()
+        return Path(text) if text else None
+    directory = _report_dir(result)
+    return directory / OPS_SUMMARY if directory is not None else None
 
-    An op the table lists in several rows has the rows' shares summed. Empty when the analysis wrote no table, or a
+
+def read_op_shares(result: Mapping[str, Any], limit: int = MAX_OP_SHARES) -> dict[str, float]:
+    """``Percentage (%)`` per name of the table the analysis ``result`` points at, the ``limit`` largest only.
+
+    A name the table lists in several rows has the rows' shares summed. Empty when the analysis wrote no table, or a
     degraded one.
     """
-    directory = _report_dir(result)
-    if directory is None or degraded_reason(result):
+    table = _share_table(result)
+    if table is None or degraded_reason(result):
         return {}
     shares: dict[str, float] = {}
-    for row in _table_rows(directory / OPS_SUMMARY):
-        name = str(row.get(_NAME_COLUMN) or "").strip()
+    for row in _table_rows(table):
+        name = str(row.get(NAME_COLUMN) or "").strip()
         try:
-            share = float(row.get(_SHARE_COLUMN) or "")
+            share = float(row.get(SHARE_COLUMN) or "")
         except ValueError:
             continue
         if name and math.isfinite(share):
@@ -117,4 +130,15 @@ def with_op_shares(output: ToolOutput, request: ToolRequest) -> ToolOutput:
         reason = degraded_reason(output.result) if commit and output.ok else ""
         return replace(output, summary=f"{output.summary} | {DEGRADED_NOTICE} ({reason})") if reason else output
     profile = str(request.params.get(PROFILE_REQUEST_PARAM) or "").strip()
-    return replace(output, commit_id=commit, profile_request_id=profile, op_shares=shares)
+    return replace(
+        output, summary=_with_excluded_note(output), commit_id=commit, profile_request_id=profile, op_shares=shares
+    )
+
+
+def _with_excluded_note(output: ToolOutput) -> str:
+    """The summary, saying how many GPU events the shares leave out as misreported, when the analysis left any out."""
+    excluded = output.result.get(EXCLUDED_EVENTS_KEY)
+    if not excluded:
+        return output.summary
+    claimed = output.result.get(EXCLUDED_CLAIMED_KEY)
+    return f"{output.summary} | {excluded} GPU events the profiler misreported (claiming {claimed} ms) are left out of the shares"
