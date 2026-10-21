@@ -292,6 +292,20 @@ def test_a_champion_on_this_image_replays_its_whole_recipe_on_any_head_its_files
     assert found.on(CHAMPION, "c9") is None
 
 
+def test_a_replay_keeps_the_heads_upstream_for_a_component_the_head_has_and_brings_the_rest(
+    snapshot: NotebookSnapshot, tmp_path: Path
+) -> None:
+    found = replay(_downloads(snapshot, tmp_path), LEAD, SCOPE, _target(tmp_path))
+    assert found is not None and found.recipe is not None
+    aiter = ComponentPatches("aiter", "https://github.com/ROCm/aiter", "3" * 40)
+    labelled = (ComponentPatches("vllm", "file:///workspace/vllm", "2" * 40, (PATCH,)), aiter)
+
+    on_root = replace(found, recipe=replace(CHAMPION, components=labelled)).on(ROOT, "c0")
+
+    assert on_root is not None
+    assert apply(ROOT, on_root.delta).components == (ComponentPatches("vllm", VLLM, VLLM_AT, (PATCH,)), aiter)
+
+
 @pytest.mark.parametrize(
     ("spoil", "reason"),
     [

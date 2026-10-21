@@ -139,10 +139,11 @@ class PreparedReplay:
 
     def on(self, head: Recipe, parent_commit: str) -> WarmReplay | None:
         """The change that makes ``head``, the recipe of ``parent_commit``, into the champion's; ``None`` when they
-        are alike. Raises ``RecipeError`` for a component the head takes from another upstream repository."""
+        are alike. A component the head has keeps the head's upstream repository and commit, as a merge keeps it: the
+        session builds it from its image, so the champion's upstream label names nothing to rebuild."""
 
         wanted = self.recipe if self.recipe is not None else replace(head, launch=self.launch)
-        delta = delta_between(head, wanted)
+        delta = delta_between(head, _on_head_upstreams(wanted, head))
         if delta == RecipeDelta():
             return None
         return WarmReplay(self.canonical_id, parent_commit, delta, delta_layer(delta), self.reason)
@@ -150,6 +151,16 @@ class PreparedReplay:
     def describe(self) -> str:
         what = "the whole recipe" if self.recipe is not None else f"its launch config only, {self.reason}"
         return f"replay on your head with {REPLAY_TOOL}: {what}"
+
+
+def _on_head_upstreams(wanted: Recipe, head: Recipe) -> Recipe:
+    components = tuple(
+        component
+        if (current := head.component(component.component)) is None
+        else replace(component, upstream_repo=current.upstream_repo, upstream_ref=current.upstream_ref)
+        for component in wanted.components
+    )
+    return replace(wanted, components=components)
 
 
 @dataclass(frozen=True)
