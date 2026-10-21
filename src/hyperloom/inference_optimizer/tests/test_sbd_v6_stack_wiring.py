@@ -426,6 +426,18 @@ def test_a_real_session_validation_records_the_whole_stack_figure(session_dir):
         assert ext["reconciliation_gap_pct"] == pytest.approx(0.0)
 
 
+def test_a_validation_row_carries_the_per_gpu_output_of_the_figure_it_settled_on(session_dir):
+    with session_scope(session_dir):
+        coord = _coord(session_dir, baseline=1000.0, anchor=1000.0)
+        coord.shared_state.tp = 8
+        coord.writeback.lift_to_current_best("explore", 1100.0, {"name": "first"})
+
+        assert coord.writeback.validate(1120.0, {"ttft_mean_ms": 100.0})
+
+        ext, _status = stack_event.assemble_stack_ext(stack_event_parts(), event=stack_event.stack_event_id())
+        assert ext["validations"]["settled"]["perf"]["output_tput_per_gpu"] == pytest.approx(140.0)
+
+
 def test_a_spool_that_cannot_be_written_does_not_refuse_the_adoption(session_dir, monkeypatch):
     """The sink drops the row it could not write; the adoption still stands.
 
