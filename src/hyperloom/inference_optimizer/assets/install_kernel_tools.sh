@@ -42,6 +42,29 @@ _resolve_magpie_python() {
   fi
   printf '%s' "${candidate:-/opt/venv/bin/python}"
 }
+
+# Resolve ROCM_PATH for a rocm-sdk wheel venv (`uv pip install rocm[...]`),
+# which never populates /opt/rocm -- everything lives under site-packages.
+# Ray's native AMD-GPU detector (ray._private.thirdparty.pyamdsmi, a ctypes
+# binding to the legacy rocm_smi_lib ABI) looks for
+# $ROCM_PATH/lib/librocm_smi64.so and defaults ROCM_PATH=/opt/rocm when unset,
+# so on a wheel install it silently finds nothing and the Ray cluster comes up
+# reporting 0 GPUs -- not a clean failure, since `ctypes.CDLL("")` on a miss
+# succeeds (hands back the process's own symbol table) rather than raising.
+# No-op (leaves ROCM_PATH as the caller set it, or unset) on a standard
+# /opt/rocm image or any host without the `rocm_sdk` package, where the
+# default is already correct. Mirrors export_rocm_sdk_toolchain_root() in
+# install_baremetal.sh, which this file does not source.
+_resolve_rocm_path() {
+  if [ -n "${ROCM_PATH:-}" ]; then
+    printf '%s' "$ROCM_PATH"
+    return 0
+  fi
+  local root
+  root="$("$PYTHON" -m rocm_sdk path --root 2>/dev/null)" || return 0
+  [ -n "$root" ] && [ -d "$root" ] && printf '%s' "$root"
+}
+ROCM_PATH="$(_resolve_rocm_path)"
 MAGPIE_PYTHON="$(_resolve_magpie_python)"
 # Join PYTHONPATH-style entries in order, dropping empties and duplicates so
 # repeated composition stays idempotent. Earlier arguments win their position.
@@ -979,6 +1002,7 @@ write_env_file() {
     [ -n "${MAGPIE_PYTHON:-}" ] && echo "export MAGPIE_PYTHON='${MAGPIE_PYTHON}'"
     [ -n "${PYTHONPATH:-}" ] && echo "export PYTHONPATH='${PYTHONPATH}'"
     [ -n "${INFERENCEX_PATH:-}" ] && echo "export INFERENCEX_PATH='${INFERENCEX_PATH}'"
+    [ -n "${ROCM_PATH:-}" ] && echo "export ROCM_PATH='${ROCM_PATH}'"
     # The kernel-agent drives Claude Code, so only the Anthropic side is
     # exported here; gateway/OpenAI credentials are never persisted.
     [ -n "${_anthropic_url}" ] && _emit_credential_fallback ANTHROPIC_BASE_URL "${_anthropic_url}"
@@ -1041,6 +1065,7 @@ write_env_file() {
   [ -n "${MAGPIE_PYTHON:-}" ] && upsert_dotenv_var MAGPIE_PYTHON "$MAGPIE_PYTHON"
   [ -n "${PYTHONPATH:-}" ] && upsert_dotenv_var PYTHONPATH "$PYTHONPATH"
   [ -n "${INFERENCEX_PATH:-}" ] && upsert_dotenv_var INFERENCEX_PATH "$INFERENCEX_PATH"
+  [ -n "${ROCM_PATH:-}" ] && upsert_dotenv_var ROCM_PATH "$ROCM_PATH"
   # Persist each provider's own canonical vars (write when present, clear when
   # absent) so an operator's .env creds survive a re-install. Never cross-write
   # and never persist gateway aliases, so the two providers stay separated.
