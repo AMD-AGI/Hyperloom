@@ -13,11 +13,9 @@ from __future__ import annotations
 
 from typing import Any, Collection, Iterable, Mapping, NamedTuple, Sequence
 
-from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.breakdown.recorder.framework_event import (
     ARM_CONFIG,
     DISPOSITION_ATTEMPTED,
-    ROLE_CONFIG,
     STEP_ATTEMPTED,
     GateVerdict,
 )
@@ -31,9 +29,6 @@ NON_ATTEMPT_OUTCOMES = frozenset({"SKIPPED_DEDUP"})
 #: The gate whose verdict the shared accuracy block is projected from.
 _ACCURACY_GATE = "accuracy"
 
-#: How much of a run's error text a reason field carries.
-_REASON_EXCERPT_CHARS = 200
-
 
 class _ConfigAttemptContext(NamedTuple):
     """What every attempt row produced by one grid dispatch shares."""
@@ -42,31 +37,6 @@ class _ConfigAttemptContext(NamedTuple):
     round_id: str
     proposal_ref: str
     adopted_variants: Collection[str]
-
-
-def record_config_run(coord: Any, *, task: Any, result_dict: Mapping[str, Any]) -> None:
-    """Record the configuration arm's grid dispatch on the framework event."""
-    recorder = coord._coord.phase_framework.timeline()
-    if recorder is None:
-        return
-    task_id = str(getattr(task, "task_id", "") or "")
-    if not task_id:
-        return
-    variants = result_dict.get("per_variant_outcomes")
-    measured = [row for row in variants if isinstance(row, dict)] if isinstance(variants, list) else []
-    recorder.record_run(
-        task_id,
-        role=ROLE_CONFIG,
-        arm=ARM_CONFIG,
-        status=str(result_dict.get("status") or "") or "succeeded",
-        dispatched_at=str(getattr(task, "created_at", "") or ""),
-        completed_at=now_iso("seconds"),
-        reason=str(result_dict.get("error") or "")[:_REASON_EXCERPT_CHARS],
-        # A grid the run stopped before it measured anything is not a grid
-        # whose variants were measured and lost.
-        empty=not measured,
-        workspace=str(result_dict.get("workspace") or ""),
-    )
 
 
 def _attempt_accuracy(gates: Iterable[Mapping[str, Any]]) -> dict[str, Any]:

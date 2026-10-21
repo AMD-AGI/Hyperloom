@@ -29,7 +29,7 @@ from hyperloom.orchestrator.lever import LEVER_CONFIG, lever_kind_for_task
 
 from ..collaborator import CoordinatorCollaborator
 from ..state.attempt_ledger import AttemptRow, record_attempt_row
-from ._config_timeline import NON_ATTEMPT_OUTCOMES, record_config_attempts, record_config_run
+from ._config_timeline import NON_ATTEMPT_OUTCOMES, record_config_attempts
 from ._recipe_amend import (
     amend_provenance,
     amended_recipe_extras,
@@ -200,6 +200,44 @@ def _extra_server_args(payload: Mapping[str, Any]) -> str:
     return str(value)
 
 
+def _record_config_run(coord: Any, *, task: Any, result_dict: Mapping[str, Any]) -> None:
+    """Record the configuration arm's grid dispatch on the framework event.
+
+    The arm's dispatch is one ``explore`` task, and it earns a run row for the
+    same reason a specialist dispatch does: the event reduces its status over
+    what it dispatched, so an arm whose grid came back with nothing must not
+    read as an arm that was never tried. Recorded at completion, where the
+    outcome is known, with the dispatch time taken off the task row; a grid
+    that measured nothing still lands, which is the case
+    :func:`record_config_attempts` never sees.
+    """
+    recorder = coord._coord.phase_framework.timeline()
+    if recorder is None:
+        return
+    from hyperloom.common.timeutil import now_iso
+    from hyperloom.inference_optimizer.breakdown.recorder.framework_event import ARM_CONFIG, ROLE_CONFIG
+
+    task_id = str(getattr(task, "task_id", "") or "")
+    if not task_id:
+        return
+    variants = result_dict.get("per_variant_outcomes")
+    measured = [row for row in variants if isinstance(row, dict)] if isinstance(variants, list) else []
+    status = str(result_dict.get("status") or "") or "succeeded"
+    recorder.record_run(
+        task_id,
+        role=ROLE_CONFIG,
+        arm=ARM_CONFIG,
+        status=status,
+        dispatched_at=str(getattr(task, "created_at", "") or ""),
+        completed_at=now_iso("seconds"),
+        reason=str(result_dict.get("error") or "")[:200],
+        # A grid the run stopped before it measured anything is not a grid
+        # whose variants were measured and lost.
+        empty=not measured,
+        workspace=str(result_dict.get("workspace") or ""),
+    )
+
+
 def _framework_identity(state: Any) -> _FrameworkIdentity:
     """The session's framework, the version it is running and its precision.
 
@@ -277,15 +315,6 @@ def _variant_failure(variant_outcome: Mapping[str, Any], outcome: str) -> _Varia
     )
 
 
-def _variant_pitfall_signals(variant_outcome: Mapping[str, Any], metrics: Any) -> dict[str, Any]:
-    """A variant's measurement plus the fields a pitfall severity is ruled from."""
-    return {
-        **(metrics if isinstance(metrics, dict) else {}),
-        "error_class": variant_outcome.get("error_class"),
-        "status": variant_outcome.get("outcome"),
-    }
-
-
 def _variant_change_attrs(variant_attrs: Any, variant_name: str) -> dict[str, Any]:
     """One variant's attributes as the change summary needs them."""
     attrs = dict(variant_attrs) if isinstance(variant_attrs, dict) else {}
@@ -314,13 +343,6 @@ def _finalize_error(exc: BaseException, *, reason: str, backend: str, result_typ
         "result_type": result_type,
         "error_class": type(exc).__name__,
     }
-
-
-def _remote_publish_failure_type(exc: BaseException) -> str:
-    """Whether the KB Store rejected the bundle or was never reached at all."""
-    if type(exc).__name__ == _REMOTE_VALIDATION_ERROR:
-        return _close_out.RESULT_BUNDLE_BUILD_FAILED
-    return _close_out.RESULT_TRANSPORT_FAILED
 
 
 class RecipeJournalCollaborator(CoordinatorCollaborator):
@@ -401,7 +423,7 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         source_session_id = self._source_session_id()
         per_variant = result_dict.get("per_variant_outcomes")
         if task.kind == "explore":
-            record_config_run(self, task=task, result_dict=result_dict)
+            _record_config_run(self, task=task, result_dict=result_dict)
         if task.kind == "explore" and isinstance(per_variant, list) and per_variant:
             record_config_attempts(
                 self,
@@ -410,13 +432,16 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
                 result_dict=result_dict,
                 adopted_variants=adopted_variants,
             )
-            self._record_grid_facts(
-                task=task,
-                source_session_id=source_session_id,
-                per_variant=per_variant,
-                round_id=str(result_dict.get("round_id") or ""),
-                adopted_variants=adopted_variants,
-            )
+            round_id = str(result_dict.get("round_id") or "")
+            task_id = str(task.task_id or "")
+            for vo in per_variant:
+                adopted = str(vo.get("fingerprint") or "") in adopted_variants
+                row = _grid_attempt_row(vo, task_id=task_id, round_id=round_id, adopted=adopted)
+                if row is not None:
+                    record_attempt_row(self.shared_state, row)
+                self._record_fact_per_variant(
+                    task=task, source_session_id=source_session_id, variant_outcome=vo, adopted=adopted
+                )
         else:
             self._record_fact_per_task(
                 task=task,
@@ -425,29 +450,6 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
                 verdict=verdict,
             )
         self.shared_state.save(self.session_dir)
-
-    def _record_grid_facts(
-        self,
-        *,
-        task: "Task",
-        source_session_id: str,
-        per_variant: list[dict[str, Any]],
-        round_id: str,
-        adopted_variants: Collection[str],
-    ) -> None:
-        """Record every variant of one explore grid: an adoption-ledger row and a journal fact each."""
-        task_id = str(task.task_id or "")
-        for variant_outcome in per_variant:
-            adopted = str(variant_outcome.get("fingerprint") or "") in adopted_variants
-            row = _grid_attempt_row(variant_outcome, task_id=task_id, round_id=round_id, adopted=adopted)
-            if row is not None:
-                record_attempt_row(self.shared_state, row)
-            self._record_fact_per_variant(
-                task=task,
-                source_session_id=source_session_id,
-                variant_outcome=variant_outcome,
-                adopted=adopted,
-            )
 
     def ensure_journal(self) -> Journal:
         """Lazy-instantiate the per-session :class:`Journal` (load_or_create reads an existing file on resume).
@@ -518,23 +520,6 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         """
         return str(self.shared_state.phase or "").strip().upper() or "UNKNOWN"
 
-    def _fact_provenance(self, fact: FactRecord, now_iso: str) -> dict[str, Any]:
-        """The provenance details stamped on the lesson or pitfall this fact writes."""
-        state = self.shared_state
-        workload_tags = workload_kb_tags(state)
-        provenance: dict[str, Any] = {
-            "source_session_id": fact.source_session_id,
-            "source_task_id": fact.task.task_id,
-            "evidence": list(fact.evidence_refs or []),
-            "applicable_models": [str(state.model_name)] if state.model_name else [],
-            "applicable_hardware": [str(state.gpu_type)] if state.gpu_type else [],
-            "extra": dict(workload_tags),
-            "now": now_iso,
-        }
-        if fact.variant_name is not None:
-            provenance["source_variant_name"] = fact.variant_name
-        return provenance
-
     def _record_fact_impl(self, fact: FactRecord) -> None:
         """Shared KB write for _record_fact_per_task and _record_fact_per_variant.
 
@@ -547,8 +532,19 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
             fact: The completed task, its outcome and the evidence to stamp on
                 the provenance.
         """
+        state = self.shared_state
         now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        provenance_base = self._fact_provenance(fact, now_iso)
+        provenance_base: dict[str, Any] = {
+            "source_session_id": fact.source_session_id,
+            "source_task_id": fact.task.task_id,
+            "evidence": list(fact.evidence_refs or []),
+            "applicable_models": [str(state.model_name)] if state.model_name else [],
+            "applicable_hardware": [str(state.gpu_type)] if state.gpu_type else [],
+            "extra": dict(workload_kb_tags(state)),
+            "now": now_iso,
+        }
+        if fact.variant_name is not None:
+            provenance_base["source_variant_name"] = fact.variant_name
 
         lesson = None
         pitfall = None
@@ -807,7 +803,11 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
                 ),
                 # Workload-shape tags — see _record_fact_per_task.
                 evidence_refs=[f"log:task-{task.task_id}", f"variant:{variant_name}"],
-                pitfall_severity_dict=_variant_pitfall_signals(variant_outcome, metrics),
+                pitfall_severity_dict={
+                    **(metrics if isinstance(metrics, dict) else {}),
+                    "error_class": variant_outcome.get("error_class"),
+                    "status": variant_outcome.get("outcome"),
+                },
                 variant_name=variant_name,
             )
         )
@@ -997,15 +997,6 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
             result_type=_close_out.RESULT_UNVALIDATED_RECIPE,
         )
 
-    def _finalize_journal(self) -> None:
-        """Stamp the journal header with the session's settled throughput and total gain."""
-        state = self.shared_state
-        final_tput = float(state.current_best.get("tput", 0.0))
-        self.ensure_journal().finalize(
-            final_throughput=final_tput if final_tput > 0 else None,
-            total_gain_pct=float(state.cumulative_gain_validated or 0.0),
-        )
-
     def finalize_recipe_and_journal(
         self,
         *,
@@ -1015,7 +1006,12 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         unvalidated = self._unvalidated_stack_outcome()
         if unvalidated is not None:
             return unvalidated
-        self._finalize_journal()
+        state = self.shared_state
+        final_tput = float(state.current_best.get("tput", 0.0))
+        self.ensure_journal().finalize(
+            final_throughput=final_tput if final_tput > 0 else None,
+            total_gain_pct=float(state.cumulative_gain_validated or 0.0),
+        )
 
         knowledge_plane = self.knowledge_plane
         if bool(getattr(knowledge_plane, "kb_disabled", False)):
@@ -1083,7 +1079,11 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
                     exc,
                     reason=type(exc).__name__,
                     backend="kb-store",
-                    result_type=_remote_publish_failure_type(exc),
+                    result_type=(
+                        _close_out.RESULT_BUNDLE_BUILD_FAILED
+                        if type(exc).__name__ == _REMOTE_VALIDATION_ERROR
+                        else _close_out.RESULT_TRANSPORT_FAILED
+                    ),
                 ),
                 "canonical_id": canonical_id,
                 "session_id": session_id,
@@ -1212,7 +1212,7 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         )
 
     def read_local_recipe_row(self) -> dict[str, Any]:
-        """Load the selected store's exact authority row for writes, cached for the current tick."""
+        """Load the selected store's exact authority row for writes."""
         if self.recipe_kb is None:
             return {}
         tick = int(self.shared_state.tick or 0)
@@ -1289,16 +1289,6 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
             return overrides
         return {}
 
-    def _amends_local_recipe(self) -> bool:
-        """Whether this session's Recipe row is a local one an amend may rewrite."""
-        config = getattr(self.knowledge_plane, "config", None)
-        mode = getattr(getattr(config, "mode", None), "value", None)
-        if mode == KnowledgeStoreMode.REMOTE.value or self.recipe_kb is None:
-            return False
-        from hyperloom.common.perf_metric import agentx_active
-
-        return not agentx_active(benchmark_mode=self.shared_state.benchmark_mode)
-
     def kb_amend_recipe(
         self,
         *,
@@ -1313,9 +1303,15 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         without dedup, and a field the caller did not override keeps the value
         the live row carries.
         """
-        if not self._amends_local_recipe():
+        config = getattr(self.knowledge_plane, "config", None)
+        mode = getattr(getattr(config, "mode", None), "value", None)
+        if mode == KnowledgeStoreMode.REMOTE.value or self.recipe_kb is None:
             return
+        from hyperloom.common.perf_metric import agentx_active
+
         state = self.shared_state
+        if agentx_active(benchmark_mode=state.benchmark_mode):
+            return
         canonical_id = self.workload_canonical_id()
         identity = _framework_identity(state)
         live = self.recipe_kb.get_authoritative_recipe(canonical_id=canonical_id) or {}
