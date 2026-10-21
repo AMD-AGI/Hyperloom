@@ -528,11 +528,48 @@ def test_json_server_args_survive_every_native_composition(vllm_source, tmp_path
 
 @pytest.mark.parametrize(
     "args",
+    ["--foo a'b", '--default-chat-template-kwargs {"system":"it\'s"}'],
+    ids=["plain", "json"],
+)
+def test_a_value_with_a_single_quote_survives_repeated_native_composition(vllm_source, tmp_path, args):
+    from hyperloom.orchestrator.actions.executors.magpie_agentx import apply_native_runtime
+
+    argv = args.split(" ")
+    base = materialize_benchmark_config(vllm_source, tmp_path / "base", extra_server_args=args)
+    for _ in range(2):
+        bind_source_evidence(base, [])
+        apply_native_runtime(base, {})
+        assert load_benchmark(base)["agentx"]["launch_overrides"]["append_args"] == argv
+    candidate = _build_variant_yaml(
+        base, "", GridVariant("candidate", "--max-num-seqs 32", {}), output_subdir=tmp_path / "candidate"
+    )
+    assert load_benchmark(candidate)["agentx"]["launch_overrides"]["append_args"] == [*argv, "--max-num-seqs", "32"]
+
+
+@pytest.mark.parametrize("token", ["my model", "", "'quoted'"], ids=["space", "empty", "quoted"])
+def test_an_accepted_token_that_is_not_one_argv_token_is_refused_by_name(vllm_source, tmp_path, token):
+    from hyperloom.inference_optimizer.breakdown.stop_reasons import ARGV_INVALID
+
+    config = yaml.safe_load(vllm_source.read_text())
+    config["benchmark"]["agentx"]["launch_overrides"] = {"version": 1, "append_args": ["--served-model-name", token]}
+    vllm_source.write_text(yaml.safe_dump(config))
+    with pytest.raises(ValueError) as refused:
+        materialize_benchmark_config(vllm_source, tmp_path / "base")
+    assert refused.value.error_class == ARGV_INVALID
+    assert f"launch_overrides.append_args token {token!r}" in str(refused.value)
+
+
+@pytest.mark.parametrize(
+    "args",
     [
         "--speculative-config {1:2}",
         '--speculative-config {"method":"mtp"',
         '--compilation-config {"cudagraph_mode": "FULL AND PIECEWISE"}',
         "--hf-overrides=[1,",
+        '--served-model-name "my model"',
+        "--foo ''",
+        "--host [::1]",
+        "--chat-template '{% for m in messages %}{{ m.content }}{% endfor %}'",
     ],
 )
 def test_server_args_that_cannot_become_argv_are_refused_as_argv_invalid(vllm_source, tmp_path, args):
@@ -545,6 +582,30 @@ def test_server_args_that_cannot_become_argv_are_refused_as_argv_invalid(vllm_so
     with pytest.raises(ValueError) as refused:
         _build_variant_yaml(base, "", GridVariant("candidate", args, {}), output_subdir=tmp_path / "candidate")
     assert refused.value.error_class == ARGV_INVALID
+    offending = args.split(" ", 1)[1] if " " in args else args.partition("=")[2]
+    assert offending in str(refused.value)
+
+
+@pytest.mark.asyncio
+async def test_run_grid_writes_no_launch_evidence_for_a_refused_argv(vllm_source, tmp_path, monkeypatch):
+    from hyperloom.inference_optimizer.breakdown.stop_reasons import ARGV_INVALID
+    from hyperloom.orchestrator.actions.executors import _grid_runner
+
+    def never_launched(**kwargs):
+        raise AssertionError("a refused variant must not reach Magpie")
+
+    monkeypatch.setattr(_grid_runner, "_run_magpie", never_launched)
+    base = materialize_benchmark_config(vllm_source, tmp_path / "base")
+    output_root = tmp_path / "grid"
+    results = await _grid_runner.run_grid(
+        base_yaml_path=base,
+        base_extra_args="",
+        grid=[GridVariant("refused", "--speculative-config {1:2}", {})],
+        output_root=output_root,
+    )
+    assert [(result.status, result.error_class) for result in results] == [("failed", ARGV_INVALID)]
+    assert not results[0].launch_evidence
+    assert not [*output_root.rglob("launch_evidence.json"), *output_root.rglob("runtime_findings.json")]
 
 
 def test_native_baseline_refuses_an_unsplittable_argv_without_launching(vllm_source, tmp_path, monkeypatch):
