@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import math
 import os
 import subprocess
@@ -18,7 +19,7 @@ from typing import TYPE_CHECKING, Sequence
 
 import click
 
-from kernelforge.cli.lanes import LaneBinding, _make_lane_agent_factory, _require_lane_provider_capabilities
+from kernelforge.cli.lanes import LaneBinding
 from kernelforge.cli.options import (
     AgentRuntimeOptions,
     CeilingSwitch,
@@ -46,6 +47,7 @@ from kernelforge.cli.publication import (
     _remote_publication_view,
     _warm_start_publication_covers,
 )
+from kernelforge.cli.relay import agent_relay_summary
 from kernelforge.cli.session_budget import _forge_session_timeout_sec, _is_long_horizon
 from kernelforge.config import Config
 from kernelforge.knowledge.kb_store.config import KnowledgeConfig
@@ -69,7 +71,7 @@ from kernelforge.loop.recovery import (
     publish_warm_start_recovery,
     rollback_unpublished_warm_start,
 )
-from kernelforge.loop.scoring import DEFAULT_SNR_THRESHOLD_DB, aggregate_regression_detail
+from kernelforge.evaluation.scoring import DEFAULT_SNR_THRESHOLD_DB, aggregate_regression_detail
 from kernelforge.tracker.schema import ExperimentSubject
 
 if TYPE_CHECKING:
@@ -78,6 +80,7 @@ if TYPE_CHECKING:
     from kernelforge.roofline_ceiling.command import AnalystAgent
     from kernelforge.tracker import ExperimentTracker, UsageAccumulator
 
+log = logging.getLogger(__name__)
 
 # A high runaway backstop, not a time bound.
 FORGE_IMPLEMENTER_TURN_BACKSTOP = 2000
@@ -124,7 +127,7 @@ def _make_ceiling_estimator(
     """
 
     async def estimate(*, case_ids: Sequence[str], case_ms: dict[str, float]):
-        from kernelforge.mcp_server.tools.bench import BenchRun, bench_command
+        from kernelforge.evaluation.benchmark.runner import BenchRun, bench_command
         from kernelforge.roofline_ceiling.analyst import AnalystSession, CeilingTask
         from kernelforge.roofline_ceiling.command import resolve_analyst_backend
         from kernelforge.roofline_ceiling.estimate import estimate_ceiling
@@ -315,6 +318,7 @@ class _RunReporter:
             "kb_experience": kb_experience,
             "agent_backend": self.implementer.backend,
             "agent_model": self.implementer.model,
+            "agent_relay": agent_relay_summary(loop_runner.run_state),
             "llm_usage": getattr(loop_runner, "llm_usage", {}) or {},
         }
         if self.assembly_preparation is not None:
@@ -332,12 +336,12 @@ class _RunReporter:
         return result
 
     def write_result_json(self, result: dict) -> None:
-        """Persist the result dict to --result-json (best-effort; never raises)."""
+        """Persist the result dict to --result-json; a failed write is reported, not raised."""
         if not self.run.request.artifacts.result_json:
             return
         try:
             atomic_write_json(self.run.request.artifacts.result_json, result)
-        except Exception as e:  # noqa: BLE001 - a snapshot write must never break the loop
+        except (OSError, TypeError, ValueError) as e:
             print(f"  [forge-loop] result-json snapshot skipped ({e})", flush=True)
 
     def attempt_remote_publication(
@@ -396,6 +400,7 @@ class _RunReporter:
                 usage=self.run.usage,
             )
         except Exception as e:  # noqa: BLE001 - checkpoint publish must never break the loop
+            log.warning("experience KB publication failed for %s: %s", commit, e)
             status = {"written": False, "reason": f"error:{e!r}"}
         _record_remote_publication_result(
             self.remote_publication,
@@ -481,7 +486,7 @@ class _RunReporter:
                 # on every resumed segment.
                 if self.run.caller_experiment_id:
                     self.run.tracker.set_checkpoint(self.run.caller_experiment_id, checkpoint)
-            except Exception as e:  # noqa: BLE001 - never break the loop
+            except (OSError, ValueError, TypeError) as e:
                 print(f"  [checkpoint] skipped ({e})", flush=True)
         self.write_result_json(self.build_result(kb_experience=None))
 
@@ -980,6 +985,16 @@ def _reject_incompatible_loop_options(*, producer: str) -> None:
             raise click.UsageError(f"--producer must be one of: {', '.join(sorted(KERNEL_RECIPE_PRODUCERS))}")
 
 
+def _resumed_profile_id(state_path: Path) -> str:
+    """The Agent profile a resumed campaign was running, or ``""`` for a fresh one."""
+    from kernelforge.loop.run_state import read_run_state
+
+    try:
+        return read_run_state(state_path).agent_relay.active_profile_id
+    except ValueError as error:
+        raise click.ClickException(str(error)) from error
+
+
 def _check_workspace_matches_resume(
     *,
     resume: bool,
@@ -1012,14 +1027,14 @@ def _record_experiment_accounting(tracker, *, experiment_id, llm_usage: dict, kb
     try:
         if llm_usage.get("calls"):
             tracker.set_llm_usage(experiment_id, llm_usage)
-    except Exception as exc:  # noqa: BLE001 - usage accounting must not fail the run
+    except (OSError, ValueError, TypeError) as exc:
         click.echo(
             f"Warning: failed to record LLM usage for experiment {experiment_id}: {exc}",
             err=True,
         )
     try:
         tracker.set_kb_experience(experiment_id, kb_experience)
-    except Exception as exc:  # noqa: BLE001 - KB accounting must not fail the run
+    except (OSError, ValueError, TypeError) as exc:
         click.echo(
             f"Warning: failed to record KB experience for experiment {experiment_id}: {exc}",
             err=True,
@@ -1298,7 +1313,7 @@ class ForgeLoopRequest:
             default="",
             callback=_validate_optional_agent_provider,
             help="Registered provider for the AVO supervisor. Omit to follow "
-            "the effectively resolved Implementer provider, so one "
+            "the provider of the Agent profile running the search, so one "
             "--agent-backend value controls every local agent.",
         ),
         click.option(
@@ -1594,6 +1609,12 @@ def forge_loop(request: ForgeLoopRequest):
         campaign_store=campaign_store,
         has_run_artifacts=has_run_artifacts,
     )
+    from kernelforge.cli.relay import resolve_relay_policy
+
+    agent_runtime_overrides = _agent_runtime_overrides(request.agent)
+    requested_relay_policy = resolve_relay_policy(
+        Config.from_env(workspace=str(workspace), knowledge_config=knowledge_config, **agent_runtime_overrides)
+    )
 
     try:
         resolution = resolve_campaign(
@@ -1616,6 +1637,7 @@ def forge_loop(request: ForgeLoopRequest):
                 nproc_per_node=request.loop_shape.nproc_per_node,
                 bench_repeat=request.loop_shape.bench_repeat,
                 commit_new_paths=tuple(request.loop_shape.commit_new_paths),
+                agent_relay=requested_relay_policy,
             ),
             resume=resume,
             prepare_task=request.prepare_task,
@@ -1666,7 +1688,7 @@ def forge_loop(request: ForgeLoopRequest):
     ):
         if _value is not None:
             overrides[_name] = _value
-    overrides.update(_agent_runtime_overrides(request.agent))
+    overrides.update(agent_runtime_overrides)
     if gpu_target:
         os.environ["GPU_TARGET"] = gpu_target
     config = Config.from_env(
@@ -1674,6 +1696,13 @@ def forge_loop(request: ForgeLoopRequest):
         knowledge_config=knowledge_config,
         **overrides,
     )
+    from kernelforge.cli.relay import probe_agent_profiles, resolve_session_relay
+
+    try:
+        session_relay = resolve_session_relay(campaign.agent_relay, config)
+    except ValueError as error:
+        raise click.ClickException(str(error)) from error
+    startup_availability = probe_agent_profiles(session_relay, config=config, workspace=str(workspace))
     # Two roots by design: resume artifacts (run_state/candidates/best) always live under
     # <workspace>/forge_experiments (campaign_root); diagnostics and the external-recovery checkpoint go to
     # --experiments-dir when the caller supplies a distinct one (e.g. Hyperloom's output dir), else campaign_root.
@@ -1683,7 +1712,7 @@ def forge_loop(request: ForgeLoopRequest):
 
     # AITER cache isolation: give this attempt its own runtime-build cache so parallel forge processes never
     # share/evict each other's kernels.
-    from kernelforge.loop.aiter_cache import (
+    from kernelforge.tools.aiter_cache import (
         activate_aiter_cache_for_sources,
         configure_aiter_cache_isolation,
         seed_prebuilt_modules,
@@ -1711,7 +1740,7 @@ def forge_loop(request: ForgeLoopRequest):
     from kernelforge.loop.runner import IterationConfig
     from kernelforge.tracker import ExperimentTracker, UsageAccumulator, UsageLedgerFile
     from kernelforge.loop.gate_settings import GateMeasurement
-    from kernelforge.orchestrator.agent import ImplementerSetup, ImplementerTask, SessionOptions, make_agent_fn
+    from kernelforge.orchestrator.agent import ImplementerSetup, ImplementerTask, SessionOptions
     from kernelforge.roofline_ceiling.command import AnalystAgent
 
     iter_config = IterationConfig(
@@ -1911,81 +1940,49 @@ def forge_loop(request: ForgeLoopRequest):
             insession_gate=gate_on,
         ),
     )
-    agent_fn = make_agent_fn(config, implementer_setup, usage=usage)
-    effective_implementer = getattr(
-        agent_fn,
-        "backend_name",
-        selected_runtime.provider,
-    )
-    effective_implementer_model = getattr(
-        agent_fn,
-        "backend_model",
-        selected_runtime.model,
-    )
-    print(f"  Implementer: {effective_implementer} / {effective_implementer_model}")
-
-    # Checked against the backend a lane actually resolves to, not the one that was asked for: a lane repeats the
-    # canonical session's resolution from the same runtime, so a fallback that moved the canonical session moved the
-    # lanes with it.
-    _require_lane_provider_capabilities(effective_implementer, request.loop_shape.lanes)
-
-    _lane_agent_factory = _make_lane_agent_factory(
-        make_agent=make_agent_fn,
-        config=config,
-        binding=LaneBinding(iter_config.workspace_dir, driver, source_files_list),
-        setup=implementer_setup,
-        usage=usage,
-    )
-
+    from kernelforge.cli.relay import SearchActorBuildContext, start_search_actors
     from kernelforge.orchestrator.analysis import make_analysis_agent_service
+    from kernelforge.orchestrator.orchestration import default_specialist_definitions
+
+    specialist_definitions = default_specialist_definitions()
+    actor_builder = SearchActorBuildContext(
+        config=config,
+        setup=implementer_setup,
+        lane_binding=LaneBinding(iter_config.workspace_dir, driver, source_files_list),
+        lanes=request.loop_shape.lanes,
+        program_md=program_md,
+        specialist_definitions=specialist_definitions,
+        critic_enabled=critic_enabled,
+        usage=usage,
+        supervisor_backend=request.roles.supervisor_backend,
+    )
+    try:
+        actors = start_search_actors(
+            session_relay,
+            actor_builder,
+            availability=startup_availability,
+            workspace=str(workspace),
+            resume_profile_id=_resumed_profile_id(state_path),
+        )
+    except (OSError, RuntimeError, ValueError) as error:
+        raise click.ClickException(f"Agent startup availability check failed: {error}") from error
+    start_bundle = actors.start_bundle
+    effective_implementer = start_bundle.profile.provider
+    effective_implementer_model = start_bundle.profile.model
 
     analysis_service = make_analysis_agent_service(
-        config=config,
+        config=actors.analysis_config(config),
         usage=usage,
         timeout_sec=profile_timeout_sec,
         profiling_enabled=profiling_enabled,
     )
     analysis_mode = "profiled" if profiling_enabled else "static-only"
     print("  Analysis Agent: " + analysis_mode)
-
-    from kernelforge.orchestrator.orchestration import (
-        default_specialist_definitions,
-        make_orchestration_service,
-    )
-
-    specialist_definitions = default_specialist_definitions()
-    orchestration_service = make_orchestration_service(
-        config=config,
-        usage=usage,
-        definitions=specialist_definitions,
-        enable_plan_critic=critic_enabled,
-    )
     print(f"  Orchestration: enabled with parallel specialists ({', '.join(sorted(specialist_definitions))})")
     print(
         "  Plan Critic: "
         + ("enabled (long-horizon, same backend/model)" if critic_enabled else "disabled (requires --max-hours > 2)")
     )
-
-    # AVO supervisor (always on): reviews the trajectory on a stall and injects fresh directions.
-    from kernelforge.orchestrator.supervisor import make_supervisor_fn
-
-    sup_backend = request.roles.supervisor_backend or effective_implementer
-    supervisor_fn = make_supervisor_fn(
-        program_md=program_md,
-        gpu_target=config.gpu_target,
-        backend=sup_backend,
-        usage=usage,
-        config=config,
-    )
-    # Report the backend/model resolved by the shared backend preflight.
-    eff_backend = getattr(supervisor_fn, "backend_name", sup_backend)
-    eff_model = getattr(
-        supervisor_fn,
-        "backend_model",
-        config.agent_runtime().model,
-    )
-    fell_back = f" (requested {sup_backend}, fell back)" if eff_backend != sup_backend else ""
-    print(f"  Supervisor: {eff_backend} / {eff_model}{fell_back}")
 
     reporter = _RunReporter(
         run=run,
@@ -2003,11 +2000,12 @@ def forge_loop(request: ForgeLoopRequest):
     asyncio.run(
         loop_runner.run(
             LoopAgents(
-                agent_fn=agent_fn,
-                agent_factory=_lane_agent_factory if request.loop_shape.lanes > 1 else None,
+                agent_fn=start_bundle.agent_fn,
+                agent_factory=start_bundle.agent_factory if request.loop_shape.lanes > 1 else None,
                 analysis_service=analysis_service,
-                orchestration_service=orchestration_service,
-                supervisor_fn=supervisor_fn,
+                orchestration_service=start_bundle.orchestration_service,
+                supervisor_fn=start_bundle.supervisor_fn,
+                search_actors=actors.loop_search_actors,
             ),
             callbacks=LoopCallbacks(
                 on_best_committed=_checkpoint_on_best_committed,

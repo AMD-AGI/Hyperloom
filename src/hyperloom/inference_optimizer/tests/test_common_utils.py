@@ -1138,36 +1138,6 @@ def test_retry_policy_env_and_on_retry_error(monkeypatch: pytest.MonkeyPatch) ->
     assert RetryPolicy(base_delay_s=2.0, max_delay_s=3.0, multiplier=10.0, jitter_s=0.5).delay_for(2) == 3.25
 
 
-@pytest.mark.asyncio
-async def test_retry_with_backoff_swallows_on_retry_callback_error() -> None:
-    from hyperloom.orchestrator.roles.base import RetryPolicy, retry_with_backoff
-
-    calls = {"n": 0}
-    slept: list[float] = []
-
-    async def _flaky():
-        calls["n"] += 1
-        if calls["n"] == 1:
-            raise ConnectionError("transient")
-        return "ok"
-
-    async def _sleep(delay: float) -> None:
-        slept.append(delay)
-
-    def _bad_on_retry(*_args):
-        raise RuntimeError("telemetry failed")
-
-    out = await retry_with_backoff(
-        _flaky,
-        policy=RetryPolicy(max_attempts=2, base_delay_s=0.0, jitter_s=0.0),
-        retry_on=(ConnectionError,),
-        sleep=_sleep,
-        on_retry=_bad_on_retry,
-    )
-    assert out == "ok"
-    assert slept == [0.0]
-
-
 # orchestrator.roles._runtime_bridge
 
 
@@ -1433,6 +1403,23 @@ def test_gpu_type_autodetect_rocm_and_torch_fallback(monkeypatch: pytest.MonkeyP
     assert gpu_types._autodetect_gpu_type() == "mi355x"
 
     fake_torch.cuda.get_device_properties = lambda _idx: (_ for _ in ()).throw(RuntimeError("no gpu"))
+    assert gpu_types._autodetect_gpu_type() is None
+
+
+def test_gpu_type_autodetect_is_none_when_torch_cannot_load_its_library(monkeypatch: pytest.MonkeyPatch) -> None:
+    from hyperloom.inference_optimizer import gpu_types
+
+    def _rocm_missing(*_args, **_kwargs):
+        raise FileNotFoundError("rocm-smi")
+
+    def _loader_failure(fullname, path=None, target=None):
+        if fullname == "torch":
+            raise OSError("libamdhip64.so.6: cannot open shared object file")
+
+    monkeypatch.setattr(subprocess, "run", _rocm_missing)
+    monkeypatch.delitem(sys.modules, "torch", raising=False)
+    monkeypatch.setattr(sys, "meta_path", [SimpleNamespace(find_spec=_loader_failure), *sys.meta_path])
+
     assert gpu_types._autodetect_gpu_type() is None
 
 

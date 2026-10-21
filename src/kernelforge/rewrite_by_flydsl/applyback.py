@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import math
 import os
 import re
@@ -33,8 +34,10 @@ from kernelforge.rewrite_by_flydsl.budget import DEFAULT_REWRITE_BUDGET
 from kernelforge.rewrite_by_flydsl.measurement import FlydslMeasurement
 from kernelforge.rewrite_by_flydsl.protocol import validate_applyback_manifest
 from kernelforge.rewrite_by_flydsl.spec import RewriteSpec
-from kernelforge.durable_io import atomic_write_text
+from kernelforge.tools.durable_io import atomic_write_text
 from kernelforge.tracker import UsageAccumulator
+
+log = logging.getLogger(__name__)
 
 # Framework apply-back artifacts live beside, never inside, the artifact paths the nested standalone FlyDSL forge-loop
 # owns (``forge_experiments/best*``).
@@ -893,6 +896,7 @@ def generate_applyback_patch(
             except (asyncio.TimeoutError, TimeoutError):
                 error_text = f"apply-back agent timed out after {timeout_sec}s"
             except Exception as error:  # noqa: BLE001
+                log.warning("apply-back attempt %d failed: %s", attempt, error)
                 error_text = f"{type(error).__name__}: {error}"
                 retryable = not any(
                     marker in error_text

@@ -26,14 +26,14 @@ from kernelforge.llm.workspace_policy import (
 from kernelforge.llm.git import git
 from kernelforge.loop.gate_settings import GateMeasurement, GateScope
 from kernelforge.loop.jit_rebuild import JitRebuildUnavailable, force_jit_rebuild_for_changes
-from kernelforge.loop.scoring import (
+from kernelforge.evaluation.scoring import (
     KEEP_MEASUREMENT_COUNT,
     keep_score,
     passes_keep_threshold,
     required_keep_speedup,
 )
-from kernelforge.mcp_server.tools.test import test_correctness
-from kernelforge.mcp_server.tools.bench import (
+from kernelforge.evaluation.correctness.driver import test_correctness
+from kernelforge.evaluation.benchmark.runner import (
     CaseCoverageError,
     calculate_measurement_case_speedups,
     BenchRun,
@@ -722,7 +722,7 @@ class InSessionGate:
         errors: list[str] = []
         try:
             paths = set(self._iter_snapshot_paths())
-        except Exception as error:  # noqa: BLE001 - an incomplete scan is a verdict
+        except (OSError, RuntimeError, ValueError) as error:  # an incomplete scan is a verdict
             paths = set()
             errors.append(f"protected inventory scan failed: {type(error).__name__}: {error}")
         if include_baseline:

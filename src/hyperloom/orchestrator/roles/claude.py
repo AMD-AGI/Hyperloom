@@ -202,6 +202,79 @@ def _intent_fingerprint(intent: Intent) -> str:
     )
 
 
+def _is_sdk_boundary_error(exc: Exception) -> bool:
+    """Whether the SDK raised this to end a turn whose collected output is still usable.
+
+    It raises on a terminal ``ResultMessage`` with ``is_error=True``, which is also how it reports a turn that merely
+    ran out of turns or carried an error-shaped success envelope.
+    """
+    err_str = str(exc)
+    return "error result: success" in err_str or "maximum number of turns" in err_str
+
+
+@dataclass
+class _StreamedTurn:
+    """What one SDK stream produced: the turn's intents and text, and the telemetry the call reported alongside them.
+
+    ``usages`` holds every usage dict the stream reported, in order: the last is cumulative over the call, the ones
+    before it describe single requests.
+    """
+
+    intents: list[Intent] = field(default_factory=list)
+    text_chunks: list[str] = field(default_factory=list)
+    result_chunks: list[str] = field(default_factory=list)
+    tool_block_count: int = 0
+    num_turns: int = 0
+    session_id: str | None = None
+    stop_reason: str | None = None
+    usages: list[dict[str, Any]] = field(default_factory=list)
+    # Defense in depth: identical wrapper envelopes in one query are the parser retry storm.
+    seen_fallback_intents: set[str] = field(default_factory=set)
+
+    @property
+    def result_text(self) -> str:
+        """The call's consolidated ``ResultMessage`` text."""
+        return "".join(self.result_chunks)
+
+    @property
+    def raw_text(self) -> str:
+        """The turn's text: the consolidated ``ResultMessage`` text, falling back to the streamed text blocks."""
+        return self.result_text or "".join(self.text_chunks)
+
+    @property
+    def usage(self) -> dict[str, Any]:
+        """The call-cumulative usage, carrying the largest single request's input-side total as the context peak."""
+        if not self.usages:
+            return {}
+        cumulative = dict(self.usages[-1])
+        peak = max((_input_side_total(u) for u in self.usages[:-1]), default=0)
+        cumulative["context_tokens_peak"] = peak or _context_tokens_estimate(cumulative, num_turns=self.num_turns)
+        return cumulative
+
+    def absorb(self, message: Any) -> None:
+        """Take the fields one streamed message reports about the call as a whole; the last non-empty value wins.
+
+        ``ResultMessage.result`` duplicates the streamed text blocks, so it is kept apart from them to avoid
+        double-counting. Both ``AssistantMessage`` and the terminal ``ResultMessage`` carry ``stop_reason``, so the
+        call's own reason is the one that ends up reported.
+        """
+        session_id = getattr(message, "session_id", None)
+        if isinstance(session_id, str) and session_id:
+            self.session_id = session_id
+        result_text = getattr(message, "result", None)
+        if isinstance(result_text, str) and result_text:
+            self.result_chunks.append(result_text)
+        num_turns = getattr(message, "num_turns", None)
+        if isinstance(num_turns, int) and num_turns > 0:
+            self.num_turns = num_turns
+        stop_reason = getattr(message, "stop_reason", None)
+        if isinstance(stop_reason, str) and stop_reason:
+            self.stop_reason = stop_reason
+        usage = getattr(message, "usage", None)
+        if isinstance(usage, dict) and usage:
+            self.usages.append(dict(usage))
+
+
 # Built-in tools disallowed in raw_completion mode so the model produces exactly one text turn (no agentic tool loop).
 _RAW_COMPLETION_DISALLOWED_TOOLS: tuple[str, ...] = (
     "Bash",
@@ -351,6 +424,7 @@ class ClaudeBackend:
                     server_factory=self.mcp_server_factory,
                 )
             except Exception as exc:  # noqa: BLE001
+                log.warning("emit_intent MCP setup failed: %s", exc)
                 self.calls.append({"warn": f"emit_intent MCP setup failed: {exc!r}"})
                 self._mcp_setup_error = f"{type(exc).__name__}: {exc}"
                 cfg = None
@@ -402,7 +476,7 @@ class ClaudeBackend:
         # amplifies the idle budget.
         attempt_state = {"n": 0}
 
-        async def _one_attempt() -> tuple[Any, ...]:
+        async def _one_attempt() -> _StreamedTurn:
             """Run one SDK invocation under an amplified per-attempt idle timeout."""
             # The turn is being stopped: never start another CLI for it.
             turn_stop.raise_if_requested()
@@ -425,14 +499,7 @@ class ClaudeBackend:
             )
 
         try:
-            (
-                intents,
-                raw_text,
-                tool_block_count,
-                usage,
-                session_id,
-                stop_reason,
-            ) = await self._within_turn_bound(
+            collected = await self._within_turn_bound(
                 retry_with_backoff(
                     _one_attempt,
                     policy=self.retry_policy,
@@ -476,7 +543,9 @@ class ClaudeBackend:
                 raise LLMCallFailed(f"Claude backend call failed: {exc!r}") from exc
             raise
         if self._active_turn_diagnostic is not None:
-            self._active_turn_diagnostic["session_id_hash"] = self._session_hash(session_id)
+            self._active_turn_diagnostic["session_id_hash"] = self._session_hash(collected.session_id)
+        raw_text = collected.raw_text
+        usage = collected.usage
         cache_creation = safe_int(usage.get("cache_creation_input_tokens") if usage else None)
         cache_read = safe_int(usage.get("cache_read_input_tokens") if usage else None)
         input_tokens = safe_int(usage.get("input_tokens") if usage else None)
@@ -491,8 +560,8 @@ class ClaudeBackend:
         self.calls.append(
             {
                 "prompt_chars": len(full_prompt),
-                "tool_blocks": tool_block_count,
-                "intents": len(intents),
+                "tool_blocks": collected.tool_block_count,
+                "intents": len(collected.intents),
                 "max_turns": max_turns_use,
                 "cache_creation_input_tokens": cache_creation,
                 "cache_read_input_tokens": cache_read,
@@ -500,18 +569,18 @@ class ClaudeBackend:
                 "output_tokens": output_tokens,
             }
         )
-        self._finish_turn_diagnostic(outcome="succeeded" if intents or self.raw_completion else "no_intent")
+        self._finish_turn_diagnostic(outcome="succeeded" if collected.intents or self.raw_completion else "no_intent")
         return BackendTurnResult(
-            intents=intents,
+            intents=collected.intents,
             raw_text=raw_text,
             metadata={
-                "tool_blocks": tool_block_count,
+                "tool_blocks": collected.tool_block_count,
                 "model": self.model,
                 # Pairs this turn's token row with its conversation row; both halves are written from this one
                 # metadata dict. A caller that opened an ``llm.call`` trajectory span owns the id.
                 "call_id": current_context().call_id or new_call_id(),
                 # Why the model stopped ("end_turn" / "max_tokens" / ...).
-                "stop_reason": stop_reason,
+                "stop_reason": collected.stop_reason,
                 "cache_creation_input_tokens": cache_creation,
                 "cache_read_input_tokens": cache_read,
                 "input_tokens": input_tokens,
@@ -546,6 +615,7 @@ class ClaudeBackend:
                 server_factory=self.mcp_server_factory,
             )
         except Exception as exc:  # noqa: BLE001
+            log.warning("context tools MCP setup failed: %s", exc)
             self.calls.append({"warn": f"context tools MCP setup failed: {exc!r}"})
             self._context_server_config = None
 
@@ -684,6 +754,27 @@ class ClaudeBackend:
         turn_marker: str | None = None,
     ) -> Any:
         """Build the SDK options object for one turn; ``turn_marker`` tags the CLI's processes for cleanup."""
+        kwargs = self._turn_option_kwargs(
+            max_turns=max_turns,
+            system_prompt=system_prompt,
+            turn_marker=turn_marker,
+        )
+        if self.raw_completion:
+            kwargs.update(self._raw_completion_option_kwargs(disallowed_tools))
+        else:
+            kwargs.update(self._tool_palette_option_kwargs(tools, disallowed_tools))
+        # Capture CLI stderr so failures are diagnosable.
+        kwargs["stderr"] = self._stderr_sink
+        return self._instantiate_options(kwargs)
+
+    def _turn_option_kwargs(
+        self,
+        *,
+        max_turns: int,
+        system_prompt: str | None,
+        turn_marker: str | None,
+    ) -> dict[str, Any]:
+        """The SDK options every turn carries, whatever it is allowed to do: model, CLI, prompt, environment, effort."""
         # Stream events are what time each model request inside the call (see ``claude_requests``).
         kwargs: dict[str, Any] = {"max_turns": max_turns, "include_partial_messages": True}
         if self.model:
@@ -698,15 +789,18 @@ class ClaudeBackend:
             # options.env is merged over the inherited environment, so a marker-only dict changes nothing else.
             kwargs["env"] = {**dict(kwargs.get("env") or {}), _TURN_MARKER_ENV: turn_marker}
         self._apply_effort_options(kwargs)
-        if self.raw_completion:
-            # Single text turn: no MCP tools, all built-ins disallowed.
-            kwargs["allowed_tools"] = []
-            deny = list(_RAW_COMPLETION_DISALLOWED_TOOLS)
-            if disallowed_tools:
-                deny = list(dict.fromkeys(deny + disallowed_tools))
-            kwargs["disallowed_tools"] = deny
-            kwargs["stderr"] = self._stderr_sink
-            return self._instantiate_options(kwargs)
+        return kwargs
+
+    @staticmethod
+    def _raw_completion_option_kwargs(disallowed_tools: list[str] | None) -> dict[str, Any]:
+        """The options for a single text turn: no MCP tools, all built-ins disallowed."""
+        deny = list(_RAW_COMPLETION_DISALLOWED_TOOLS)
+        if disallowed_tools:
+            deny = list(dict.fromkeys(deny + disallowed_tools))
+        return {"allowed_tools": [], "disallowed_tools": deny}
+
+    def _tool_palette_option_kwargs(self, tools: list[str], disallowed_tools: list[str] | None) -> dict[str, Any]:
+        """The options naming this turn's tool palette and the MCP servers that serve it."""
         # Drop the bare "emit_intent" name; the MCP-qualified form wires into the SDK tool registry.
         allowed = [t for t in tools if t != EMIT_INTENT_TOOL_NAME]
         if self.mcp_tool_name and self.mcp_tool_name not in allowed:
@@ -716,6 +810,7 @@ class ClaudeBackend:
             for qname in CONTEXT_TOOL_QUALIFIED_NAMES:
                 if qname not in allowed:
                     allowed.append(qname)
+        kwargs: dict[str, Any] = {}
         if allowed:
             kwargs["allowed_tools"] = allowed
         kwargs["tools"] = [t for t in allowed if t not in CONTEXT_TOOL_NAMES and not t.startswith("mcp__")]
@@ -728,9 +823,7 @@ class ClaudeBackend:
             mcp_servers[CONTEXT_MCP_SERVER_NAME] = self._context_server_config
         if mcp_servers:
             kwargs["mcp_servers"] = mcp_servers
-        # Capture CLI stderr so failures are diagnosable.
-        kwargs["stderr"] = self._stderr_sink
-        return self._instantiate_options(kwargs)
+        return kwargs
 
     def _apply_sdk_env_options(self, kwargs: dict[str, Any]) -> None:
         """Pin Claude Code subprocess auth to the current Hyperloom env."""
@@ -857,24 +950,14 @@ class ClaudeBackend:
         idle_timeout_s: float | None = None,
         attempt: int = 1,
         turn_stop: _TurnStop | None = None,
-    ) -> tuple[list[Intent], str, int, dict[str, Any], str | None, str | None]:
-        """Stream SDK messages, collecting intents, raw text, tool counts, the latest `ResultMessage.usage` dict, the
-        SDK ``session_id`` and the model's ``stop_reason``. Each model request of the attempt, finished or cut off,
-        lands on the trajectory ledger as an ``llm.request`` row.
+    ) -> _StreamedTurn:
+        """Stream the SDK's messages for one attempt and collect what they carry.
+
+        Each model request of the attempt, finished or cut off, lands on the trajectory ledger as an ``llm.request``
+        row.
         """
         requests = ClaudeRequestTracker()
-        intents: list[Intent] = []
-        text_chunks: list[str] = []
-        result_chunks: list[str] = []
-        tool_block_count = 0
-        # Defense in depth: identical wrapper envelopes in one query are the parser retry storm.
-        seen_fallback_intents: set[str] = set()
-        # Every usage dict the stream reports, in order: the last is cumulative over the call, the ones before it
-        # describe single requests.
-        usages: list[dict[str, Any]] = []
-        num_turns = 0
-        session_id: str | None = None
-        stop_reason: str | None = None
+        collected = _StreamedTurn()
         turn_stop = turn_stop or _TurnStop()
         stream = self.sdk_query_factory(prompt=prompt, options=options)
         try:
@@ -892,104 +975,91 @@ class ClaudeBackend:
                 # A stop whose cancellation was lost in the wait above (see ``_TurnStop``) is raised here.
                 turn_stop.raise_if_requested()
                 requests.observe(message)
-                if getattr(message, "subtype", None) == "init":
-                    self._record_cli_init(getattr(message, "data", None) or {})
-                if getattr(message, "subtype", None) == "api_retry":
-                    # Each of these resets the idle timer above; only the turn's wall-clock bound ends a retry loop.
-                    retry = getattr(message, "data", None) or {}
-                    log.warning(
-                        "claude CLI retrying its API request (attempt %s/%s, status=%s, error=%s)",
-                        retry.get("attempt"),
-                        retry.get("max_retries"),
-                        retry.get("error_status"),
-                        retry.get("error"),
-                    )
-                # Capture the session token from any message; last seen wins.
-                msg_session = getattr(message, "session_id", None)
-                if isinstance(msg_session, str) and msg_session:
-                    session_id = msg_session
+                self._record_cli_status(message)
                 self._record_message_diagnostic(message)
-                for block in self._iter_blocks(message):
-                    self._record_tool_block_diagnostic(block)
-                    if self._is_tool_use_for_emit_intent(block):
-                        tool_block_count += 1
-                        intent = self._parse_tool_use_block(block)
-                        if intent is not None:
-                            if is_unparsed_tool_wrapper(getattr(block, "input", None)):
-                                fingerprint = _intent_fingerprint(intent)
-                                if fingerprint in seen_fallback_intents:
-                                    if self._active_turn_diagnostic is not None:
-                                        self._active_turn_diagnostic["deduped_fallback_intents"] += 1
-                                    log.info(
-                                        "claude fallback intent deduped (fingerprint=%s)",
-                                        hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()[:12],
-                                    )
-                                    continue
-                                seen_fallback_intents.add(fingerprint)
-                            intents.append(intent)
-                    else:
-                        txt = self._extract_text(block)
-                        if txt:
-                            text_chunks.append(txt)
-                # ResultMessage.result duplicates the streamed TextBlocks; keep it separate to avoid double-counting.
-                result_text = getattr(message, "result", None)
-                if isinstance(result_text, str) and result_text:
-                    result_chunks.append(result_text)
-                msg_turns = getattr(message, "num_turns", None)
-                if isinstance(msg_turns, int) and msg_turns > 0:
-                    num_turns = msg_turns
-                # Both AssistantMessage and the terminal ResultMessage carry it; last seen wins, so the call's own
-                # reason ends up reported.
-                msg_stop = getattr(message, "stop_reason", None)
-                if isinstance(msg_stop, str) and msg_stop:
-                    stop_reason = msg_stop
-                msg_usage = getattr(message, "usage", None)
-                if isinstance(msg_usage, dict) and msg_usage:
-                    usages.append(dict(msg_usage))
+                self._collect_message_blocks(message, collected)
+                collected.absorb(message)
         except Exception as exc:
-            # The SDK raises on a terminal ResultMessage with is_error=True.
-            err_str = str(exc)
-            _non_fatal = "error result: success" in err_str or "maximum number of turns" in err_str
-            if _non_fatal:
-                if self._active_turn_diagnostic is not None:
-                    self._active_turn_diagnostic["sdk_boundary_error"] = err_str
-                if intents:
-                    log.warning(
-                        "claude SDK raised '%s' but %d intents already collected; returning partial results",
-                        err_str,
-                        len(intents),
-                    )
-                else:
-                    log.warning(
-                        "claude SDK raised '%s' with no intents collected; "
-                        "treating as no-intent turn (will retry next tick)",
-                        err_str,
-                    )
-            else:
+            if not _is_sdk_boundary_error(exc):
                 raise
+            self._record_sdk_boundary_error(exc, collected)
         finally:
             requests.record_trajectory(attempt=attempt, fallback_model=self.model)
-            # Best-effort: close the (async-gen) stream so an idle-timeout abort doesn't leak a half-consumed
-            # generator.
-            aclose = getattr(stream, "aclose", None)
-            if aclose is not None:
-                try:
-                    await aclose()
-                except Exception:  # noqa: BLE001 — cleanup must not mask the turn result
-                    pass
-        # Prefer the consolidated ResultMessage text; fall back to TextBlocks.
-        raw_text = "".join(result_chunks) or "".join(text_chunks)
+            await self._close_stream(stream)
         if self._active_turn_diagnostic is not None:
-            self._active_turn_diagnostic["result"] = "".join(result_chunks)
-            self._active_turn_diagnostic["raw_text"] = raw_text
-        last_usage: dict[str, Any] = dict(usages[-1]) if usages else {}
-        if last_usage:
-            peak = max((_input_side_total(u) for u in usages[:-1]), default=0)
-            last_usage["context_tokens_peak"] = peak or _context_tokens_estimate(
-                last_usage,
-                num_turns=num_turns,
+            self._active_turn_diagnostic["result"] = collected.result_text
+            self._active_turn_diagnostic["raw_text"] = collected.raw_text
+        return collected
+
+    def _record_cli_status(self, message: Any) -> None:
+        """Record what a streamed message says about the CLI itself: its session banner and the API retries it makes."""
+        subtype = getattr(message, "subtype", None)
+        if subtype == "init":
+            self._record_cli_init(getattr(message, "data", None) or {})
+        if subtype == "api_retry":
+            # Each of these resets the stream's idle timer; only the turn's wall-clock bound ends a retry loop.
+            retry = getattr(message, "data", None) or {}
+            log.warning(
+                "claude CLI retrying its API request (attempt %s/%s, status=%s, error=%s)",
+                retry.get("attempt"),
+                retry.get("max_retries"),
+                retry.get("error_status"),
+                retry.get("error"),
             )
-        return intents, raw_text, tool_block_count, last_usage, session_id, stop_reason
+
+    def _collect_message_blocks(self, message: Any, collected: _StreamedTurn) -> None:
+        """Add one message's content blocks to the turn: emit_intent calls as intents, everything else as text."""
+        for block in self._iter_blocks(message):
+            self._record_tool_block_diagnostic(block)
+            if not self._is_tool_use_for_emit_intent(block):
+                txt = self._extract_text(block)
+                if txt:
+                    collected.text_chunks.append(txt)
+                continue
+            collected.tool_block_count += 1
+            intent = self._parse_tool_use_block(block)
+            if intent is None:
+                continue
+            if is_unparsed_tool_wrapper(getattr(block, "input", None)):
+                fingerprint = _intent_fingerprint(intent)
+                if fingerprint in collected.seen_fallback_intents:
+                    if self._active_turn_diagnostic is not None:
+                        self._active_turn_diagnostic["deduped_fallback_intents"] += 1
+                    log.info(
+                        "claude fallback intent deduped (fingerprint=%s)",
+                        hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()[:12],
+                    )
+                    continue
+                collected.seen_fallback_intents.add(fingerprint)
+            collected.intents.append(intent)
+
+    def _record_sdk_boundary_error(self, exc: Exception, collected: _StreamedTurn) -> None:
+        """Note on the turn's diagnostic that the SDK ended the stream by raising, and what survived it."""
+        err_str = str(exc)
+        if self._active_turn_diagnostic is not None:
+            self._active_turn_diagnostic["sdk_boundary_error"] = err_str
+        if collected.intents:
+            log.warning(
+                "claude SDK raised '%s' but %d intents already collected; returning partial results",
+                err_str,
+                len(collected.intents),
+            )
+        else:
+            log.warning(
+                "claude SDK raised '%s' with no intents collected; treating as no-intent turn (will retry next tick)",
+                err_str,
+            )
+
+    @staticmethod
+    async def _close_stream(stream: Any) -> None:
+        """Close the SDK's stream so an aborted turn does not leak a half-consumed async generator."""
+        aclose = getattr(stream, "aclose", None)
+        if aclose is None:
+            return
+        try:
+            await aclose()
+        except Exception:  # cleanup must not mask the turn result
+            log.debug("claude SDK stream aclose failed", exc_info=True)
 
     @staticmethod
     def _iter_blocks(message: Any):

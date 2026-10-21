@@ -982,7 +982,7 @@ def test_conc_sweep_executor_missing_session_dir_yields_failure():
     assert result["error_class"] == "missing_session_dir"
 
 
-def test_conc_sweep_executor_state_load_failure_yields_failure(monkeypatch):
+def test_conc_sweep_executor_state_load_failure_propagates(monkeypatch):
     from hyperloom.orchestrator.actions.executors.conc_sweep import (
         ConcSweepExecutor,
     )
@@ -1002,10 +1002,8 @@ def test_conc_sweep_executor_state_load_failure_yields_failure(monkeypatch):
         _boom,
     )
 
-    result = asyncio.run(ConcSweepExecutor()(_Ctx()))
-    assert result["status"] == "failed"
-    assert result["error_class"] == "shared_state_load_failed"
-    assert "state is unreadable" in result["error"]
+    with pytest.raises(RuntimeError, match="state is unreadable"):
+        asyncio.run(ConcSweepExecutor()(_Ctx()))
 
 
 def test_conc_sweep_executor_task_params_override_state(
@@ -2316,12 +2314,24 @@ def test_single_server_option_a_boot_and_reuse(
     assert last["server_lifecycle"]["cleanup"] is True
 
 
+@pytest.mark.parametrize(
+    ("backend", "boot_envs"),
+    [
+        # Magpie keeps the boot round's envs as the persistent server's reuse identity, so a boot round that sent the
+        # phase would make every round that measures on that server fail its reuse check.
+        ("magpie", {}),
+        ("bypass", {"MAGPIE_RUN_PHASE": "server"}),
+    ],
+)
 def test_single_server_boot_only_is_measured_by_reuse_round(
     session_dir: Path,
     baseline_yaml: Path,
     monkeypatch: pytest.MonkeyPatch,
+    backend: str,
+    boot_envs: dict[str, str],
 ):
     """Booting the persistent server is not a data point; the same CONC must still run as a client round."""
+    monkeypatch.setenv("HYPERLOOM_BENCHMARK_BACKEND", backend)
     state = _make_state(baseline_config_path=str(baseline_yaml))
     teardown_log: list[tuple] = []
     _patch_lifecycle_eligible(monkeypatch, teardown_log)
@@ -2363,8 +2373,9 @@ def test_single_server_boot_only_is_measured_by_reuse_round(
     ]
     boot, measured_boot = calls[0], calls[1]
     assert boot["server_already_ready"] is False
-    assert boot["base_extra_envs"] == {"MAGPIE_RUN_PHASE": "server"}
+    assert boot["base_extra_envs"] == boot_envs
     assert measured_boot["server_already_ready"] is True
+    assert measured_boot["base_extra_envs"] == {}
     assert payload["summary"]["successful_pairs"] == 2
 
 
@@ -2710,3 +2721,29 @@ def test_the_sweep_phase_budget_waits_for_the_sweep_it_granted():
 
     landed = _next(_state(granted_until=granted, last_conc_sweep={"status": "succeeded"}))
     assert landed is not None and landed[1] == "sweep_done"
+
+
+@pytest.mark.parametrize("failure", [ImportError("matplotlib is not installed"), OSError("read-only file system")])
+def test_render_conc_sweep_curve_is_none_when_the_plot_cannot_be_produced(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: Exception
+):
+    from hyperloom.orchestrator.kernel import conc_sweep_plot
+    from hyperloom.orchestrator.kernel.conc_sweep_plot import ConcCurveOptions, render_conc_sweep_curve
+
+    def _fail(*_args: Any, **_kwargs: Any) -> Path:
+        raise failure
+
+    monkeypatch.setattr(conc_sweep_plot, "_render", _fail)
+    assert render_conc_sweep_curve({}, tmp_path / "out.png", ConcCurveOptions(tp=1)) is None
+
+
+def test_render_conc_sweep_curve_propagates_an_unexpected_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from hyperloom.orchestrator.kernel import conc_sweep_plot
+    from hyperloom.orchestrator.kernel.conc_sweep_plot import ConcCurveOptions, render_conc_sweep_curve
+
+    def _fail(*_args: Any, **_kwargs: Any) -> Path:
+        raise TypeError("malformed point")
+
+    monkeypatch.setattr(conc_sweep_plot, "_render", _fail)
+    with pytest.raises(TypeError, match="malformed point"):
+        render_conc_sweep_curve({}, tmp_path / "out.png", ConcCurveOptions(tp=1))

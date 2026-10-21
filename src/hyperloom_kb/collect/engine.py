@@ -345,16 +345,21 @@ def _screen(mapping: CollectMapping, projected: _Projected) -> None:
 
 def _prepare(mapping: CollectMapping, unit: dict[str, Any], base: Path) -> _Projected:
     scope = dict(unit)
-    for name, lookup in mapping.lookups:
-        matches = lookup.evaluate(scope)
-        scope[name] = matches[0] if matches else None
-    for name, expression in mapping.lets:
-        scope[name] = expression.evaluate(scope)
-    for rule in mapping.require:
-        if not truth(rule.condition.evaluate(scope)):
-            raise _Skip(rule.reason)
-    projected = _project(mapping, scope, base)
-    _screen(mapping, projected)
+    try:
+        for name, lookup in mapping.lookups:
+            matches = lookup.evaluate(scope)
+            scope[name] = matches[0] if matches else None
+        for name, expression in mapping.lets:
+            scope[name] = expression.evaluate(scope)
+        for rule in mapping.require:
+            if not truth(rule.condition.evaluate(scope)):
+                raise _Skip(rule.reason)
+        projected = _project(mapping, scope, base)
+        _screen(mapping, projected)
+    except EvaluationError as exc:
+        raise _Skip(f"mapping evaluation failed: {exc}") from exc
+    except SchemaValidationError as exc:
+        raise _Skip(f"schema validation failed: {exc}") from exc
     return projected
 
 
@@ -491,22 +496,12 @@ def collect(
         except _Skip as skip:
             skipped.append(SkippedUnit(unit_id, skip.reason))
             continue
-        except EvaluationError as exc:
-            skipped.append(SkippedUnit(unit_id, f"mapping evaluation failed: {exc}"))
-            continue
-        except SchemaValidationError as exc:
-            skipped.append(SkippedUnit(unit_id, f"schema validation failed: {exc}"))
-            continue
-        experience = projected.experience
-        if target is None:
-            collected.append(CollectedExperience(unit_id, experience.id, "dry_run", experience))
-            continue
         try:
-            status = _publish(target, projected)
+            status = "dry_run" if target is None else _publish(target, projected)
         except (LookupError, OSError, RuntimeError, ValueError) as exc:
             errors.append(FailedUnit(unit_id, f"{type(exc).__name__}: {exc}"))
             continue
-        collected.append(CollectedExperience(unit_id, experience.id, status, experience))
+        collected.append(CollectedExperience(unit_id, projected.experience.id, status, projected.experience))
 
     report = CollectReport(
         mapping=compiled.reference,

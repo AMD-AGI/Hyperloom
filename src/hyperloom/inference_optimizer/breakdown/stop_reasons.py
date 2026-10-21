@@ -109,7 +109,7 @@ STOP_REASON_VOCAB: frozenset[str] = frozenset(
         # Pre-run model-config compatibility preflight: config.json is corrupt or declares RoPE scaling without a
         # max-position field (both crash at load).
         "model_config_incompatible",
-        # Baseline arg-validation fast-exit: >=2 consecutive baseline attempts exited <30s on a bad CLI arg.
+        # Two baseline attempts failed argument or configuration validation.
         "baseline_arg_error",
         # Enablement attempt cap: too many consecutive rounds bought no ground.
         # A bring-up that is still advancing is bounded by the run's wall clock.
