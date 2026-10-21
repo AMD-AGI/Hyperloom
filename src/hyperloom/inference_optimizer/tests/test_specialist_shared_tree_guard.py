@@ -498,6 +498,38 @@ async def test_a_specialist_that_moves_a_dependency_checkout_stops_the_session(t
     assert not ctx.extra["shared_state"].stop_reason
 
 
+async def test_a_commit_in_the_optimised_checkout_stops_the_session(tmp_path):
+    """Restoring files cannot undo a commit: the optimised checkout's HEAD would carry into the next integrate."""
+    tree = _dependency_checkout(tmp_path / "sglang")
+    session = tmp_path / "s"
+    session.mkdir()
+    head = _git(tree, "rev-parse", "HEAD")
+    snapshot, err = ts.baseline_snapshot(session, tree, ())
+    assert snapshot is not None, err
+
+    (tree / "csrc" / "op.py").write_text("V = 9  # specialist\n", encoding="utf-8")
+    _git(tree, "commit", "-q", "-am", "specialist")
+    state = SharedState.load_or_init(session)
+    restore = await ts.SharedTreeGuard(session, tree, state, "t-commit").check()
+
+    assert restore.stops and str(tree.resolve()) in restore.reason and head[:12] in restore.reason
+    assert state.stop_reason == PATCH_RECOVERY_INCOMPLETE_STOP_REASON
+
+
+def test_kernel_entry_accepts_the_heads_it_seals(tmp_path):
+    """Sealing commits in a held checkout; the refresh that follows makes the sealed HEAD the accepted one."""
+    dep = _dependency_checkout(tmp_path / "aiter")
+    tree = _installed_package(tmp_path / "t")
+    session = tmp_path / "s"
+    session.mkdir()
+    ts.baseline_snapshot(session, tree, (str(dep),))
+    _git(dep, "commit", "-q", "--allow-empty", "-m", "sealed")
+
+    assert ts.refresh_snapshots(session) == []
+
+    assert ts._moved_heads(session) == ((), ())
+
+
 async def test_a_dependency_checkout_is_not_judged_while_an_integrate_is_in_flight(tmp_path, monkeypatch):
     dep = _dependency_checkout(tmp_path / "aiter")
 

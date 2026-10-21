@@ -3822,6 +3822,10 @@ class KernelPhase(CoordinatorCollaborator):
                     "KERNEL entry: sealed campaign baselines %s",
                     {repo: baseline.commit for repo, baseline in baselines.items()},
                 )
+                from ..specialists.tree_snapshot import refresh_snapshots
+
+                # Sealing commits in the checkouts a specialist's run is held to; accept the sealed HEADs.
+                await asyncio.to_thread(refresh_snapshots, self.session_dir)
         except Exception:
             log.exception("KERNEL entry: sealing the campaign baseline failed")
         try:

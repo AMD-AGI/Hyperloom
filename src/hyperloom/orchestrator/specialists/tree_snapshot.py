@@ -5,7 +5,7 @@
 
 It is what a specialist's worktree branches off when the tree has no git of its
 own, and the baseline every patch specialist's run is held to: the tree as the
-session last accepted it, and the HEAD of every dependency checkout beside it.
+session last accepted it, and the HEAD of every git checkout it and its dependencies sit in.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING
 
 from hyperloom.common.io import atomic_write_json
 from hyperloom.inference_optimizer.breakdown.stop_reasons import PATCH_RECOVERY_INCOMPLETE_STOP_REASON
-from hyperloom.inference_optimizer.framework_paths import enclosing_checkout
+from hyperloom.inference_optimizer.framework_paths import framework_apply_tree
 from hyperloom.inference_optimizer.session.session_paths import fs_safe_id
 
 from ..bringup.trees import head_commit
@@ -42,7 +42,7 @@ _IDENTITY: tuple[str, ...] = ("-c", "user.name=hyperloom", "-c", "user.email=hyp
 #: Where a snapshot repository records the tree it holds, so a refresh can find it.
 _TREE_KEY = "hyperloom.tree"
 
-#: Beside the snapshots: the HEAD each dependency checkout was at when the
+#: Beside the snapshots: the HEAD each held checkout was at when the
 #: session last accepted it, and the hold a stop leaves until the trees are back.
 _HEADS = "dependency_heads.json"
 _UNRESTORED = "unrestored.json"
@@ -60,7 +60,7 @@ class TreeRestore:
     Attributes:
         changed: Paths, relative to the tree, that differed from the snapshot.
         error: Why the tree could not be put back; empty when it was.
-        moved: Dependency checkouts whose HEAD moved, with the old and new HEAD.
+        moved: Checkouts whose HEAD moved, with the old and new HEAD.
     """
 
     changed: tuple[str, ...] = ()
@@ -81,7 +81,10 @@ class TreeRestore:
     def reason(self) -> str:
         """What a run that left the trees like this did, for the error it is discarded with."""
         found = [f"wrote the shared tree at {', '.join(self.changed[:8])}"] if self.changed else []
-        found += [f"moved the HEAD of {moved}" for moved in self.moved]
+        found += [
+            f"moved the HEAD of {moved}; check that checkout out at the old HEAD, or delete the hold to accept the new one"
+            for moved in self.moved
+        ]
         return "; ".join(found + ([f"restore failed: {self.error}"] if self.error else []))
 
 
@@ -247,11 +250,14 @@ def _head(checkout: str) -> str:
         return ""
 
 
-def _dependency_checkouts(tree: Path, roots: Iterable[str]) -> set[str]:
-    """The git checkouts holding a Section 7 root, other than any that holds ``tree`` itself."""
-    own = tree.resolve()
-    checkouts = {checkout.resolve() for checkout in map(enclosing_checkout, roots) if checkout is not None}
-    return {str(checkout) for checkout in checkouts if not own.is_relative_to(checkout)}
+def _held_checkouts(tree: Path, roots: Iterable[str]) -> set[str]:
+    """The git checkouts tracking the optimised ``tree`` or a Section 7 root; a specialist moves none of their HEADs.
+
+    The optimised checkout is one of them: its files are put back from the snapshot, but a commit there would leave
+    its HEAD on the specialist's code, which the next integrate's stash would then build on.
+    """
+    found = (framework_apply_tree(str(path)) for path in (tree, *roots))
+    return {str(found_tree.root.resolve()) for found_tree in found if found_tree is not None and found_tree.checkout}
 
 
 def _record_heads(session_dir: Path, checkouts: Iterable[str]) -> None:
@@ -264,7 +270,7 @@ def _record_heads(session_dir: Path, checkouts: Iterable[str]) -> None:
 
 
 def _recorded_heads(session_dir: Path) -> dict[str, str]:
-    """The HEAD recorded for each dependency checkout; none before the first record or when it cannot be read."""
+    """The HEAD recorded for each held checkout; none before the first record or when it cannot be read."""
     path = _snapshots(session_dir) / _HEADS
     try:
         return dict(json.loads(path.read_bytes())) if path.is_file() else {}
@@ -274,7 +280,7 @@ def _recorded_heads(session_dir: Path) -> dict[str, str]:
 
 
 def _moved_heads(session_dir: Path) -> tuple[tuple[str, ...], tuple[str, ...]]:
-    """The dependency checkouts whose HEAD moved off the recorded one, and those whose HEAD cannot be read."""
+    """The held checkouts whose HEAD moved off the recorded one, and those whose HEAD cannot be read."""
     recorded = _recorded_heads(session_dir)
     heads = {checkout: _head(checkout) for checkout in recorded}
     moved = tuple(f"{c} from {recorded[c][:12]} to {h[:12]}" for c, h in heads.items() if h and h != recorded[c])
@@ -389,7 +395,7 @@ def baseline_snapshot(session_dir: Path | None, tree: Path, roots: Iterable[str]
     """The snapshot a patch specialist's worktree branches off and its run is held to.
 
     Moved to the tree as it is on every dispatch, and the HEAD of every
-    dependency checkout among ``roots`` recorded beside it: the check after the
+    checkout holding it or one of ``roots`` recorded beside it: the check after the
     last run put back whatever that run wrote, so anything else the tree has
     gained since, such as a kernel KEEP or a replayed prelude, was written
     legitimately. Both stand as they are mid-integrate, when the tree holds a
@@ -411,7 +417,7 @@ def baseline_snapshot(session_dir: Path | None, tree: Path, roots: Iterable[str]
         error = "" if snapshot is not None else f"{tree} is held mid-integrate or unrestored and has no snapshot yet"
     else:
         snapshot, error = snapshot_tree(session_dir, tree)
-        _record_heads(session_dir, _dependency_checkouts(tree, roots))
+        _record_heads(session_dir, _held_checkouts(tree, roots))
     if snapshot is None:
         log.warning("no snapshot of %s, so no specialist run is checked against it: %s", tree, error)
     return snapshot, error
@@ -456,9 +462,9 @@ class SharedTreeGuard:
 
     The specialist runs with every permission, so its worktree is a convention
     it can step outside of. After the run the tree the session optimises is put
-    back to its snapshot, and every dependency checkout beside it must still
-    sit at the HEAD recorded at dispatch; a dependency is only ever read, never
-    put back. An integrate in flight writes the trees legitimately, so they are
+    back to its snapshot, and every checkout holding it or a dependency must
+    still sit at the HEAD recorded at dispatch; a HEAD is only ever read, never
+    moved back. An integrate in flight writes the trees legitimately, so they are
     not judged then. A tree that is not back stops the session, as every later
     measurement would run on code no decision kept, and holds it: a resumed
     session puts the trees back before its next run rather than taking them as
