@@ -741,7 +741,7 @@ def _framework_of(config_path: Path) -> tuple[str, dict[str, Any]]:
     except (OSError, yaml.YAMLError) as exc:
         log.warning("explore: could not resolve framework from %s: %s", config_path, exc)
         return "", {}
-    return str(bench.get("framework") or "").lower(), bench.get("envs") or {}
+    return str(bench.get("framework") or "").lower(), bench
 
 
 def _anchor_the_params(params: dict[str, Any], ss: Any) -> None:
