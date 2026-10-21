@@ -318,30 +318,11 @@ async def test_idle_turns_in_a_row_with_nothing_running_end_the_session_idle_wit
         await _until(lambda n=nudged: len(rig.runner.sent) == n, f"nudge {nudged}")
     _end_turn(rig)
 
-    with pytest.raises(SessionIdle, match=f"{IDLE_TURNS} turns in a row") as raised:
+    with pytest.raises(SessionIdle, match=f"{IDLE_TURNS} turns in a row"):
         await asyncio.wait_for(running, 1)
-    assert not raised.value.tested
     assert IDLE_TURNS == len(NUDGE_WAITS_S) and len(rig.runner.sent) == IDLE_TURNS - 1
     assert all("nothing new for your branch" in text for text in rig.runner.sent)
     assert (rig.runner.cancelled, rig.runner.collected) == ([1], [1])
-
-
-async def test_an_idle_session_that_requested_a_test_says_it_tested(rig):
-    rig.clock.now = time.time()
-    session = rig.session(nudge_waits_s=NO_WAITS)
-    running = asyncio.create_task(session.run())
-    await _until(lambda: len(rig.runner.specs) == 1, "the launch")
-    await rig.toolbox_notebook.write_request(request("r1", intent(BRANCH, rig.root)))
-    await rig.toolbox_notebook.write_result(result("r1"))
-
-    _end_turn(rig)
-    await _until(lambda: len(rig.runner.sent) == 1, "the result to wake the CLI")
-    for _ in range(IDLE_TURNS):
-        _end_turn(rig)
-
-    with pytest.raises(SessionIdle) as raised:
-        await asyncio.wait_for(running, 1)
-    assert raised.value.tested
 
 
 async def test_what_arrives_within_the_patience_wakes_the_model_instead_of_a_nudge(rig):

@@ -257,6 +257,7 @@ def test_the_role_says_settings_running_out_never_ends_a_direction_and_no_brief_
     assert "That every setting near your direction was tried never means your direction is done" in prompt
     assert "a patch, a fused or tuned kernel, or a port of an aiter or framework PR" in prompt
     assert "Never end a turn to wait for a brief" in prompt
+    assert "a branch that keeps finding nothing to test is stopped" in prompt
 
 
 def test_the_nudge_sends_a_model_that_ran_out_of_settings_to_source_work():

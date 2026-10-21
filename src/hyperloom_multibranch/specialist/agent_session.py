@@ -221,10 +221,8 @@ class AgentSession:
         self._handle: AgentHandle | None = None
         self._beat: Beat | None = None
         self._recorded: Mapping[str, TokenCounts] = {}
-        self._began = 0.0
 
     async def run(self) -> None:
-        self._began = self._setup.clock()
         grant = self._setup.tokens.issue(self._start.branch, frozenset({SCOPE_SPECIALIST}))
         last_end = ""
         while not self._stopped.is_set():
@@ -293,8 +291,7 @@ class AgentSession:
             if idle == len(waits):
                 self._handle = None
                 await self._finish(handle, cancel=True)
-                tested = await self._tested_since(self._began)
-                raise SessionIdle(f"its model ended {idle} turns in a row with nothing to test", tested=tested)
+                raise SessionIdle(f"its model ended {idle} turns in a row with nothing to test")
             try:
                 await self._setup.runner.send(handle, self._setup.command.message(message or nudge_message()).encode())
             except AgentEnded:
@@ -335,11 +332,6 @@ class AgentSession:
         branch = self._start.branch
         records = (await self._place.notebook.snapshot()).records
         return any(record.request.branch == branch and record.in_flight for record in records)
-
-    async def _tested_since(self, since: float) -> bool:
-        branch = self._start.branch
-        records = (await self._place.notebook.snapshot()).records
-        return any(record.request.branch == branch and record.requested_at >= since for record in records)
 
     async def _shared_profiles(self) -> list[TestRecord]:
         """Other branches' profiles of this branch's head: a specialist whose own profile was refused as

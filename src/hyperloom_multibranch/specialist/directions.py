@@ -5,8 +5,7 @@
 
 A branch started with no direction of its own and no repair takes the first one no branch of the session has held
 yet, so the first four are the ones a four-branch session works on; once each was held, the one the fewest branches
-held, then the one the fewest running branches hold, the earlier one in this order on a tie. A branch whose session
-ended idle moves to the least-held other one.
+held, then the one the fewest running branches hold, the earlier one in this order on a tie.
 """
 
 from __future__ import annotations
