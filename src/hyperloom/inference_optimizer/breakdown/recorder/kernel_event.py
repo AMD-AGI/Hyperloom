@@ -569,7 +569,6 @@ def _write_trace_analyze_run(
             "steady_state_trace": _text(produced.get("steady_state_trace")),
             "analysis_md_path": _text(produced.get("analysis_md_path")),
             "reusable_native_kernel_ids": [str(item) for item in _as_list(produced.get("reusable_native_kernel_ids"))],
-            "trace_validate_ref": None,
             **_analysis_detail(result),
         },
         row_type=ROW_TRACE_ANALYZE,
@@ -1115,7 +1114,6 @@ class KernelEventRecorder:
         self,
         *,
         stack_depth_in: Any = None,
-        budget_remaining_sec: Any = None,
         tput_before: Any = None,
         session_baseline_tput: Any = None,
         snapshot: dict[str, Any] | None = None,
@@ -1128,7 +1126,6 @@ class KernelEventRecorder:
             {
                 "entry": {
                     "stack_depth_in": _int_or_none(stack_depth_in),
-                    "budget_remaining_sec": _float_or_none(budget_remaining_sec),
                     "roofline_snapshot_id": _int_or_none(inherited.get("roofline_snapshot_id")),
                     "roofline_snapshot_ts": _text(inherited.get("ts")),
                     "roofline_baseline_gain_at_snapshot": _float_or_none(
@@ -1479,9 +1476,7 @@ class KernelEventRecorder:
         accepted_flags: Any = None,
         accepted_envs: dict[str, Any] | None = None,
         accepted_config: dict[str, Any] | None = None,
-        cfg_hash: str = "",
         final_overlay: str = "",
-        final_overlay_digest: str = "",
         final_launch_script: str = "",
         bench_script: str = "",
         final_patch: str = "",
@@ -1497,9 +1492,7 @@ class KernelEventRecorder:
                     else _text(flags),
                     "accepted_envs": _as_dict(accepted_envs),
                     "accepted_config": _as_dict(accepted_config),
-                    "cfg_hash": _text(cfg_hash),
                     "final_overlay": _text(final_overlay),
-                    "final_overlay_digest": _text(final_overlay_digest),
                     "final_launch_script": _text(final_launch_script),
                     "bench_script": _text(bench_script),
                     "final_patch": _text(final_patch),

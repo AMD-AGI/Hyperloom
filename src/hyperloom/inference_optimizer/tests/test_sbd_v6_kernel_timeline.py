@@ -93,6 +93,16 @@ def test_one_event_per_entry_with_macro_cycle_at_the_top(tmp_path):
     assert "macro_cycle" not in (ext.get("forge") or {})
     assert ext["entry"]["route"] == ROUTE_FORGE
     assert ext["entry"]["roofline_snapshot_id"] == 4
+    assert ext["entry"] == {
+        "route": ROUTE_FORGE,
+        "route_reason": "kernel_opt_backend_order=forge",
+        "resumed": False,
+        "stack_depth_in": 2,
+        "roofline_snapshot_id": 4,
+        "roofline_snapshot_ts": "2026-09-02T00:00:00",
+        "roofline_baseline_gain_at_snapshot": None,
+        "snapshot_staleness": "fresh",
+    }
 
 
 def test_the_event_is_on_the_timeline_before_it_concludes(tmp_path):
@@ -590,9 +600,7 @@ def test_geak_handoff_and_product_do_not_share_the_accepted_flags_name(tmp_path)
     recorder.record_geak_product(
         accepted_flags=["--enable-torch-compile", "--attention-backend=aiter"],
         accepted_envs={"A": "1", "B": "2"},
-        cfg_hash="deadbeef",
         final_overlay="/s/geak/overlay",
-        final_overlay_digest="d1",
     )
     recorder.finish(tput_after=900.0)
 
@@ -604,7 +612,15 @@ def test_geak_handoff_and_product_do_not_share_the_accepted_flags_name(tmp_path)
         "--enable-torch-compile",
         "--attention-backend=aiter",
     ]
-    assert geak["product"]["cfg_hash"] == "deadbeef"
+    assert set(geak["product"]) == {
+        "accepted_flags",
+        "accepted_envs",
+        "accepted_config",
+        "final_overlay",
+        "final_launch_script",
+        "bench_script",
+        "final_patch",
+    }
 
 
 def test_the_handoff_records_which_cards_geak_was_given(tmp_path):
@@ -1107,6 +1123,34 @@ def test_the_trace_analyze_run_records_the_only_legal_kernel_id_source(tmp_path)
     assert run["roofline_snapshot_id"] == 5
     assert run["reusable_native_kernel_ids"] == ["k001", "k002"]
     assert run["artifacts"]["candidates_path"] == "/s/candidates.json"
+    assert sorted(run) == [
+        "analysis_md_path",
+        "artifacts",
+        "cache_hit",
+        "hot_kernels",
+        "preflight",
+        "request_msg_id",
+        "requested_by",
+        "reusable_native_kernel_ids",
+        "roofline_baseline_gain_at_snapshot",
+        "roofline_snapshot_id",
+        "route",
+        "route_ext",
+        "run_id",
+        "selection",
+        "split",
+        "status",
+        "steady_state",
+        "steady_state_trace",
+        "steps",
+        "tool",
+        "tool_run_id",
+        "top_k",
+        "trace_input",
+        "trigger",
+        "ts",
+        "warnings",
+    ]
     assert run["hot_kernels"]["count"] == 1
 
 
