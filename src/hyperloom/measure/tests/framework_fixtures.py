@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-__all__ = ["CORE", "DAMAGED", "MODELS", "PRISTINE", "SHARED_GEMM", "make_framework"]
+__all__ = ["CORE", "DAMAGED", "MODELS", "PRISTINE", "SHARED_GEMM", "make_framework", "make_installed_aiter"]
 
 CORE = """
 import os
@@ -66,6 +66,13 @@ class AITER_CONFIG:
 
 AITER_CONFIGS = AITER_CONFIG()
 """
+INSTALLED_CORE = """
+class AITER_CONFIG:
+    AITER_CONFIG_FHMOE_FILE = "/installed/fhmoe.csv"
+
+
+AITER_CONFIGS = AITER_CONFIG()
+"""
 PRISTINE = "M,N,K,us\n64,5120,5120,10\n"
 DAMAGED = "M,N,K,us\n"
 MODELS = ("a_gemm_tuned.csv", "b_gemm_tuned.csv", "c_gemm_tuned_untuned_v2.csv", "d_moe_tuned.csv")
@@ -76,6 +83,8 @@ def make_framework(parent: Path) -> Path:
     """The tuned-table directory of a stand-in aiter install below ``parent``; the install is never the machine's."""
     root = parent / "sgl-workspace" / "aiter" / "aiter"
     (root / "jit").mkdir(parents=True)
+    (root / "__init__.py").write_text("", encoding="utf-8")
+    (root / "jit" / "__init__.py").write_text("", encoding="utf-8")
     (root / "jit" / "core.py").write_text(CORE, encoding="utf-8")
     (root / "configs" / "model_configs").mkdir(parents=True)
     for name in (SHARED_GEMM, "moe_tuned.csv", "split_name_tuned.csv"):
@@ -83,3 +92,16 @@ def make_framework(parent: Path) -> Path:
     for name in MODELS:
         (root / "configs" / "model_configs" / name).write_text(PRISTINE + f"1,1,1,{len(name)}\n", encoding="utf-8")
     return root / "configs"
+
+
+def make_installed_aiter(parent: Path) -> Path:
+    """The import root of an aiter installed on the machine, below ``parent``: its variables are not the stand-in's.
+
+    A process that has both on its import path must still import the stand-in, which the test puts first.
+    """
+    root = parent / "installed"
+    (root / "aiter" / "jit").mkdir(parents=True, exist_ok=True)
+    (root / "aiter" / "__init__.py").write_text("", encoding="utf-8")
+    (root / "aiter" / "jit" / "__init__.py").write_text("", encoding="utf-8")
+    (root / "aiter" / "jit" / "core.py").write_text(INSTALLED_CORE, encoding="utf-8")
+    return root

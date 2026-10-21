@@ -57,9 +57,18 @@ WITHDRAWN = 5
 OWN_TABLE = (0, 1, 2, 3)
 WITHDRAW_AFTER_SEC = 90
 NEXT_TEST_WITHIN_SEC = 20
+AITER_CORE = Path(DEFAULT_CONFIGS).parent / "jit" / "core.py"
+
+
+def _installed_aiter_names_the_variable() -> bool:
+    """Whether the installed aiter has the ``AITER_CONFIG_GEMM_BF16_FILE`` property this module reads the table by."""
+    return AITER_CORE.is_file() and f"def {VARIABLE}_FILE" in AITER_CORE.read_text(encoding="utf-8")
+
+
 pytestmark = [
     pytestmark,
     pytest.mark.skipif(not SHARED.is_file(), reason=f"needs the image's aiter table {SHARED}"),
+    pytest.mark.skipif(not _installed_aiter_names_the_variable(), reason=f"the installed aiter has no {VARIABLE}_FILE"),
 ]
 
 
@@ -93,7 +102,7 @@ def test_the_hook_gives_the_real_aiter_a_merge_directory_of_its_own(tmp_path: Pa
         VARIABLE: f"{copy}{os.pathsep}{own}",
         **view.environment(os.environ.get("PYTHONPATH", "")),
     }
-    code = "from aiter.jit.core import AITER_CONFIGS; print(AITER_CONFIGS.AITER_CONFIG_GEMM_BF16_FILE)"
+    code = f"from aiter.jit.core import AITER_CONFIGS; print(AITER_CONFIGS.{VARIABLE}_FILE)"
 
     done = subprocess.run([sys.executable, "-c", code], env=environment, capture_output=True, text=True, timeout=600)
 

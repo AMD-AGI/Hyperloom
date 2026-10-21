@@ -24,7 +24,7 @@ import pytest
 
 from hyperloom.measure import aiter_merge_hook
 from hyperloom.measure.framework_merge import PRIVATE, SHARED, UNCONFIRMED, MergeView
-from hyperloom.measure.tests.framework_fixtures import CORE, make_framework
+from hyperloom.measure.tests.framework_fixtures import CORE, make_framework, make_installed_aiter
 
 SHARED_DIRECTORY = Path("/tmp/aiter_configs")
 MERGED = "gemm_tuned.csv"
@@ -70,8 +70,13 @@ def _core(install: Path, source: str | None = None) -> ModuleType:
 
 
 def _server(install: Path, view: MergeView | None, *, extra: str = "") -> list[str]:
-    """What a Python process prints that imports the stand-in aiter and merges ``AITER_CONFIG_GEMM``, as the test's server."""
-    path = os.pathsep.join(part for part in (extra, str(install)) if part)
+    """What a Python process prints that imports the stand-in aiter and merges ``AITER_CONFIG_GEMM``, as the test's server.
+
+    An aiter installed on the machine is on its path too, behind the stand-in.
+    """
+    path = os.pathsep.join(
+        part for part in (extra, str(install), str(make_installed_aiter(install.parents[1]))) if part
+    )
     environment = {**os.environ, "PYTHONPATH": path, **(view.environment(path) if view else {})}
     done = subprocess.run(
         [sys.executable, "-c", IMPORT_AND_MERGE],

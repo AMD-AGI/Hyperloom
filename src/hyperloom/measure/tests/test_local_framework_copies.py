@@ -37,7 +37,13 @@ from hyperloom.measure.framework_base import (
 )
 from hyperloom.measure.local import LocalMeasurementBackend
 from hyperloom.measure.socket import SessionFacts, TestCall
-from hyperloom.measure.tests.framework_fixtures import DAMAGED, PRISTINE, SHARED_GEMM, make_framework
+from hyperloom.measure.tests.framework_fixtures import (
+    DAMAGED,
+    PRISTINE,
+    SHARED_GEMM,
+    make_framework,
+    make_installed_aiter,
+)
 from hyperloom.orchestrator.actions.executors import VariantResult
 
 
@@ -475,7 +481,7 @@ def test_two_concurrent_tests_that_give_one_variable_different_tables_each_read_
             table.write_text(f"M,N,K,us\n{row}\n", encoding="utf-8")
             tables[name].append(str(table))
     (tmp_path / "rendezvous").mkdir()
-    monkeypatch.setenv("PYTHONPATH", str(configs.parent.parent))
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join([str(configs.parent.parent), str(make_installed_aiter(tmp_path))]))
     context = multiprocessing.get_context("spawn")
     processes = [
         context.Process(target=_one_of_two_concurrent_tests, args=(tmp_path, name, tables[name])) for name in rows
