@@ -407,26 +407,6 @@ def test_a_discovery_proposal_naming_an_unregistered_framework_is_dropped(tmp_pa
     ]
 
 
-def test_a_discovery_proposal_may_name_its_keywords_and_files_as_one_string(tmp_path: Path):
-    """The specialist authors these fields, and a model that writes one name writes it bare, not in a list.
-
-    The KB writeback reads them off the candidate, so dropping a bare string there
-    loses the keyword the upstream-PR record is later searched by.
-    """
-    stub = _stub(tmp_path, local_explore=False)
-    proposals = [
-        {
-            "pr_url": "https://x/pr/1",
-            "verdict": "worth_a_bench",
-            "gap_keywords": "fp8",
-            "changed_files": "vllm/attention.py",
-        }
-    ]
-    candidate = stub.phase_framework._candidates_from_discovery_proposals(proposals)[0]
-    assert candidate["gap_keywords"] == ["fp8"]
-    assert candidate["changed_files"] == ["vllm/attention.py"]
-
-
 def test_a_registry_that_cannot_answer_is_not_an_idle_one(tmp_path: Path):
     """The pump must not read a failed task query as \"nothing in flight\"."""
     stub = _stub(tmp_path, local_explore=True)

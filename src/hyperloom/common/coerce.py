@@ -96,7 +96,6 @@ def to_str_list(value: Any) -> list[str]:
 
 
 def first_str(*values: Any) -> str:
-    """Return the first value carrying anything, as text, else ``""`` -- the ``str`` of :func:`first_float`."""
     for value in values:
         if value:
             return str(value)
@@ -104,12 +103,10 @@ def first_str(*values: Any) -> str:
 
 
 def to_mapping(value: Any) -> dict[str, Any]:
-    """Coerce *value* into a mapping of its own; empty when it is absent or carries another type."""
     return dict(value) if isinstance(value, Mapping) else {}
 
 
 def to_list(value: Any) -> list[Any]:
-    """Coerce *value* into a list of its own, preserving entry types; empty when it is neither list nor tuple."""
     return list(value) if isinstance(value, (list, tuple)) else []
 
 

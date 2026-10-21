@@ -27,7 +27,7 @@ from hyperloom.inference_optimizer.session.optimization_journal import Verdict
 from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
 from hyperloom.inference_optimizer.session.session_binding import session_scope
 from hyperloom.orchestrator.loop.coordinator import AdvisoryServices, Coordinator
-from hyperloom.orchestrator.phases._framework_timeline import _patch_material
+from hyperloom.orchestrator.phases.framework import _patch_material
 from hyperloom.orchestrator.phases.machine import Transition
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.orchestrator.roles.mock_backend import MockBackend, MockTurn, ScriptedPlan
