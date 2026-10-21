@@ -105,7 +105,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
         state = self.shared_state
         plane = self.knowledge_plane
 
-        from .domains import normalize_dispatch_tags
+        from .domains import gap_backfilled_domain, normalize_dispatch_tags
         from .profile import resolve_specialist_profile
 
         # Bench-capable specialists run a real serving + benchmark loop, so
@@ -113,6 +113,8 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
         if resolve_specialist_profile(params).reserves_benchmark_lane:
             params.setdefault("needs_gpu", True)
 
+        if backfilled := gap_backfilled_domain(params, state.find_gap):
+            params["domain"] = backfilled
         domain = str(params.get("domain") or "").strip()
         normalize_dispatch_tags(params)
 
@@ -204,11 +206,6 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                     params["gap_symptom"] = str(gap.get("symptom") or "")
                 if not params.get("gap_layer"):
                     params["gap_layer"] = str(gap.get("layer") or "")
-                if not params.get("domain"):
-                    # LLM omitted domain → gap's domain_hint wins.
-                    hint = str(gap.get("domain_hint") or "")
-                    if hint:
-                        params["domain"] = hint
                 evidence = params.get("gap_evidence")
                 if not isinstance(evidence, dict) or not evidence:
                     attempts = list(gap.get("attempts") or [])[-5:]
@@ -565,12 +562,9 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             return
 
         from .domains import domain_for_tag
+        from .in_flight import in_flight_domains
 
-        busy_domains = {
-            str((t.params or {}).get("domain") or "")
-            for t in (*await self.tasks.queued(), *await self.tasks.running())
-            if t.kind == "specialist"
-        }
+        busy_domains = in_flight_domains([*await self.tasks.queued(), *await self.tasks.running()])
         round_id = int((state.explore_search or {}).get("cursor") or 0)
         for anchor in stalled:
             gap_cid = state.best_gap_for_anchor(anchor)
@@ -593,11 +587,8 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             if is_source_patch and state.is_pruned(_SOURCE_PATCH_FAMILY):
                 continue
             idempotency_key = f"forced-stalled-{anchor}-round{round_id}{self._coord.dispatcher.cycle_idem_suffix()}"
-            lookup = getattr(self.tasks, "find_by_idempotency_key", None)
-            if callable(lookup):
-                existing = await lookup(idempotency_key)
-                if existing is not None:
-                    continue
+            if await self.tasks.find_by_idempotency_key(idempotency_key) is not None:
+                continue
             await self.warm_specialist_params(params)
             if is_source_patch:
                 preflight_error = specialist_patch_preflight_error(
