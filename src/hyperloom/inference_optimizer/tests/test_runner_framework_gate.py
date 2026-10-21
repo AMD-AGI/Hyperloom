@@ -47,6 +47,7 @@ def _seed(tmp_path, monkeypatch, framework: str) -> None:
     for name in ("_enforce_expected_framework", "_apply_operator_supplied_paths", "_check_gfx_arch_resolvable"):
         monkeypatch.setattr(cli, name, lambda *a, **kw: None)
     monkeypatch.setattr(cli, "_should_remote_probe_gpu", lambda args: False)
+    monkeypatch.setattr(cli, "_autodetect_gpu_type", lambda: None)
     monkeypatch.setattr(cli, "resolve_framework_version", lambda args: "test-version")
     monkeypatch.setattr(cli, "make_session_dir", lambda **kw: tmp_path)
     monkeypatch.setattr(cli, "_acquire_session_lock_or_exit", lambda path: None)
