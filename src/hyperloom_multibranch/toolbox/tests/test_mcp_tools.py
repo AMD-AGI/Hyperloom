@@ -32,9 +32,12 @@ from hyperloom_multibranch.contracts.toolbox import (
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.tests.factories import TTL, FakeClock, delta, intent, request, result
 from hyperloom_multibranch.notebook.tests.sessions import Writers, scripted_session
+from hyperloom_multibranch.toolbox import mcp_tools
 from hyperloom_multibranch.toolbox.mcp_tools import (
     REPLY_INBOX_HEADER,
     REPLY_INBOX_LINES,
+    POLL_INBOX_MAX_BYTES,
+    POLL_INBOX_MAX_ITEMS,
     SPECIALIST_TOKEN_ENV,
     WAIT_TEST_MAX_SECONDS,
     McpSpecialistTokens,
@@ -337,7 +340,7 @@ def test_queue_state(rig: Rig) -> None:
 
 def test_poll_inbox_reads_the_callers_branch(rig: Rig) -> None:
     body = json.loads(rig.ok(rig.token("s1"), "poll_inbox"))
-    assert set(body) == {"items", "cursor"}
+    assert set(body) == {"items", "cursor", "remaining"} and body["remaining"] == 0
 
 
 def test_claims_are_made_for_the_branch_of_the_token(rig: Rig) -> None:
@@ -666,3 +669,100 @@ async def test_the_host_token_gets_no_block_and_leaves_the_specialists_unread(wa
     _, reply = wait_rig.call(HOST_TOKEN, "host_ping")
     assert len(_texts(reply)) == 1
     assert _news(wait_rig, token)[1].startswith("result x1: ")
+
+
+def _pages(rig: Rig, token: str, cursor: str = "") -> list[dict[str, Any]]:
+    """Every page ``poll_inbox`` gives from ``cursor`` until it says nothing remains, each page as the reply read."""
+    pages: list[dict[str, Any]] = []
+    while True:
+        page = json.loads(rig.ok(token, "poll_inbox", cursor=cursor))
+        pages.append(page)
+        if not page["remaining"]:
+            return pages
+        assert page["more"] == f"{page['remaining']} more; call poll_inbox with this cursor"
+        cursor = page["cursor"]
+
+
+def _pointers(pages: list[dict[str, Any]]) -> list[str]:
+    return [item["pointer"] for page in pages for item in page["items"]]
+
+
+async def test_a_large_inbox_is_paged_with_no_item_lost_or_repeated(wait_rig: Rig, waiting: Writers) -> None:
+    await _land(waiting, 3 * POLL_INBOX_MAX_ITEMS + 7)
+    observer = await wait_rig.observer().poll("s1")
+    assert len(observer.items) > 3 * POLL_INBOX_MAX_ITEMS
+    pages = _pages(wait_rig, wait_rig.token("s1"))
+    assert all(len(page["items"]) <= POLL_INBOX_MAX_ITEMS for page in pages)
+    assert [len(page["items"]) for page in pages[:-1]] == [POLL_INBOX_MAX_ITEMS] * (len(pages) - 1)
+    assert _pointers(pages) == [item.pointer for item in observer.items]
+    assert pages[0]["remaining"] == len(observer.items) - POLL_INBOX_MAX_ITEMS
+    assert pages[-1]["cursor"] == observer.cursor and "more" not in pages[-1]
+    assert json.loads(wait_rig.ok(wait_rig.token("s1"), "poll_inbox", cursor=observer.cursor))["items"] == []
+
+
+async def test_a_page_holds_at_most_the_byte_budget_cursor_included(
+    wait_rig: Rig, waiting: Writers, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await _land(waiting, 12)
+    token = wait_rig.token("s1")
+    whole = _pages(wait_rig, token)
+    largest = max(len(json.dumps(item)) for page in whole for item in page["items"])
+    budget = len(json.dumps(whole[-1]["cursor"])) + 2 * largest + 300
+    monkeypatch.setattr(mcp_tools, "POLL_INBOX_MAX_BYTES", budget)
+    texts: list[str] = []
+    cursor = ""
+    while True:
+        texts.append(wait_rig.ok(token, "poll_inbox", cursor=cursor))
+        page = json.loads(texts[-1])
+        if not page["remaining"]:
+            break
+        cursor = page["cursor"]
+    assert len(texts) >= 3 and all(len(text) <= budget for text in texts)
+    assert _pointers([json.loads(text) for text in texts]) == _pointers(whole)
+
+
+async def test_a_full_page_stays_under_the_byte_budget_that_keeps_it_clear_of_the_cli_limit(
+    wait_rig: Rig, waiting: Writers
+) -> None:
+    await _land(waiting, 2 * POLL_INBOX_MAX_ITEMS)
+    first = wait_rig.ok(wait_rig.token("s1"), "poll_inbox")
+    assert len(json.loads(first)["items"]) == POLL_INBOX_MAX_ITEMS and len(first) < POLL_INBOX_MAX_BYTES
+
+
+async def test_items_that_arrive_between_pages_come_after_the_rest_and_nothing_is_repeated(
+    wait_rig: Rig, waiting: Writers
+) -> None:
+    await _land(waiting, 2 * POLL_INBOX_MAX_ITEMS)
+    token = wait_rig.token("s1")
+    first = json.loads(wait_rig.ok(token, "poll_inbox"))
+    await _land(waiting, 5, first=2 * POLL_INBOX_MAX_ITEMS + 1)
+    rest = _pages(wait_rig, token, first["cursor"])
+    every = [item.pointer for item in (await wait_rig.observer().poll("s1")).items]
+    assert [item["pointer"] for item in first["items"]] + _pointers(rest) == every
+
+
+async def test_a_poll_inbox_page_marks_as_seen_only_the_items_it_returned(wait_rig: Rig, waiting: Writers) -> None:
+    token = wait_rig.token("s1")
+    _news(wait_rig, token)
+    await _land(waiting, 25)
+    every = (await wait_rig.observer().poll("s1")).items
+    page = json.loads(wait_rig.ok(token, "poll_inbox"))
+    returned = {item["pointer"] for item in page["items"]}
+    unseen = [item for item in every[-25:] if item.pointer not in returned]
+    assert 0 < len(unseen) <= REPLY_INBOX_LINES
+    block = _news(wait_rig, token)
+    assert block == [REPLY_INBOX_HEADER, *(f"{item.kind.value} {item.pointer}: {item.summary}" for item in unseen)]
+    assert _news(wait_rig, token) == []
+
+
+async def test_a_poll_inbox_that_returns_every_item_still_marks_all_as_seen(wait_rig: Rig, waiting: Writers) -> None:
+    token = wait_rig.token("s1")
+    _news(wait_rig, token)
+    await _land(waiting, 3)
+    assert json.loads(wait_rig.ok(token, "poll_inbox"))["remaining"] == 0
+    assert _news(wait_rig, token) == []
+
+
+async def test_a_cursor_in_the_middle_of_a_page_is_refused_when_it_is_not_one(wait_rig: Rig) -> None:
+    _, reply = wait_rig.call(wait_rig.token("s1"), "poll_inbox", cursor="page:x:")
+    assert reply["error"]["code"] == -32602

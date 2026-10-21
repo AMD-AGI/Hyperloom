@@ -13,12 +13,14 @@ only; the notebook's search and record reads are shared across branches, as the 
   reports how far it has got (the toolbox's ``progress``);
 * ``start_analysis`` starts ``tracelens`` or ``roofline`` on the branch's head commit (an
   :class:`~.analysis.AnalysisStarter`, the real toolbox);
-* ``poll_inbox`` reads the branch's inbox;
+* ``poll_inbox`` reads the branch's inbox, one page at a time (:data:`POLL_INBOX_MAX_ITEMS` items at most);
 * the ``notebook_*`` tools are the notebook's own specialist tools (lookup, claim, release, search, record, branch log,
   brief), bound per call to the notebook handle of the caller's branch.
 
 Every reply to a specialist also carries what reached its branch's inbox since the token's last reply, as one more text
-block after the tool's own content (:func:`reply_inbox`); ``poll_inbox`` keeps a cursor of its own.
+block after the tool's own content (:func:`reply_inbox`); ``poll_inbox`` keeps a cursor of its own. A cursor is the
+notebook's, or, in the middle of a feed too long for one page, that cursor with the number of its items already
+returned (``page:<n>:<notebook cursor>``); callers treat both as opaque.
 """
 
 from __future__ import annotations
@@ -28,6 +30,8 @@ import contextlib
 import dataclasses
 import enum
 import functools
+import itertools
+import json
 import threading
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -87,8 +91,16 @@ REPLY_INBOX_LINES = 20
 REPLY_INBOX_HEADER = "New for your branch since your last call:"
 # These replies carry the test they were asked about, so an inbox item naming it would say it twice.
 _CARRIES_REQUEST = frozenset({"wait_test", "test_result"})
-#: ``poll_inbox`` lists the inbox itself; its reply carries no block, and the items it read count as seen.
+#: ``poll_inbox`` lists the inbox itself; its reply carries no block, and the items it returned count as seen.
 _POLL_INBOX_TOOL = "poll_inbox"
+#: One ``poll_inbox`` reply holds at most this many items and this many characters of JSON; the rest is paged. Claude
+#: Code warns at 10,000 tokens of MCP output and saves a text result over 50,000 characters to a file instead of
+#: showing it; 16,000 characters stay near 5,000 tokens.
+POLL_INBOX_MAX_ITEMS = 20
+POLL_INBOX_MAX_BYTES = 16_000
+#: What a page's document needs besides its items and its cursor: the keys, the counts and the marker.
+_POLL_PAGE_OVERHEAD = 200
+_PAGE_CURSOR = "page:"
 _WAIT_TEST: dict[str, Any] = {
     "type": _OBJECT,
     "properties": {
@@ -365,10 +377,66 @@ def _queue_state(
     return handle
 
 
+@dataclasses.dataclass(frozen=True)
+class _Feed:
+    """The inbox items of a branch not yet returned from one cursor: ``base`` is the notebook's cursor they were read
+    from, ``skipped`` how many of its items an earlier page returned, and ``end`` the notebook's cursor past all."""
+
+    base: str
+    skipped: int
+    items: tuple[InboxItem, ...]
+    end: str
+
+    def after(self, count: int) -> str:
+        """The cursor that resumes after the first ``count`` of the items."""
+        if count >= len(self.items):
+            return self.end
+        return f"{_PAGE_CURSOR}{self.skipped + count}:{self.base}"
+
+
+async def _read_feed(notebook: Notebook, branch: str, cursor: str) -> _Feed:
+    base, skipped = cursor, 0
+    if cursor.startswith(_PAGE_CURSOR):
+        count, _, base = cursor[len(_PAGE_CURSOR) :].partition(":")
+        if not count.isdigit():
+            raise InvalidParamsError(f"not an inbox cursor: {cursor!r}")
+        skipped = int(count)
+    page = await notebook.poll(branch, base)
+    return _Feed(base, skipped, page.items[skipped:], page.cursor)
+
+
+def _item_size(item: InboxItem) -> int:
+    return len(json.dumps(jsonable(item), default=str)) + 2
+
+
+def _page_of(feed: _Feed) -> tuple[InboxItem, ...]:
+    """The first items of ``feed`` one ``poll_inbox`` reply holds: at most :data:`POLL_INBOX_MAX_ITEMS` and
+    :data:`POLL_INBOX_MAX_BYTES` with the cursor counted in, but always one so that every page moves on (the notebook
+    bounds one item well under the budget)."""
+    page: list[InboxItem] = []
+    used = _POLL_PAGE_OVERHEAD + len(json.dumps(feed.end))
+    for item in feed.items[:POLL_INBOX_MAX_ITEMS]:
+        used += _item_size(item)
+        if page and used > POLL_INBOX_MAX_BYTES:
+            break
+        page.append(item)
+    return tuple(page)
+
+
 def _poll_inbox(notebooks: NotebookFor) -> Callable[[dict[str, Any], CallContext], Any]:
-    async def handle(arguments: dict[str, Any], ctx: CallContext) -> Any:
-        page = await notebooks(ctx.principal.branch).poll(ctx.principal.branch, str(arguments.get("cursor") or ""))
-        return jsonable(page)
+    async def handle(arguments: dict[str, Any], ctx: CallContext) -> dict[str, Any]:
+        branch = ctx.principal.branch
+        feed = await _read_feed(notebooks(branch), branch, str(arguments.get("cursor") or ""))
+        page = _page_of(feed)
+        remaining = len(feed.items) - len(page)
+        document: dict[str, Any] = {
+            "items": jsonable(page),
+            "cursor": feed.after(len(page)),
+            "remaining": remaining,
+        }
+        if remaining:
+            document["more"] = f"{remaining} more; call poll_inbox with this cursor"
+        return document
 
     return handle
 
@@ -388,18 +456,28 @@ def reply_inbox(notebooks: NotebookFor) -> ReplyAnnotator:
 
     A token's first call is asked with no cursor, so the whole feed is read and the service drops that text: a late
     first call or a restarted service starts from the end. The cursor is the notebook's own, kept by the service per
-    token, apart from ``poll_inbox``'s.
+    token, apart from ``poll_inbox``'s. A ``poll_inbox`` reply carries no block, and only the items it returned count
+    as seen: the cursor moves past the leading ones of the unread items that it returned, and no further.
     """
 
     async def annotate(call: ReplyCall, cursor: str | None) -> ReplyNote:
         branch = call.principal.branch
-        page = await notebooks(branch).poll(branch, cursor or "")
-        if call.tool == _POLL_INBOX_TOOL:
-            return ReplyNote("", page.cursor)
+        notebook = notebooks(branch)
+        unread = await _read_feed(notebook, branch, cursor or "")
+        if call.tool == _POLL_INBOX_TOOL and cursor is not None:
+            returned = set() if call.is_error else await _returned_by_poll(notebook, call)
+            seen = sum(1 for _ in itertools.takewhile(returned.__contains__, unread.items))
+            return ReplyNote("", unread.after(seen))
         asked = call.arguments.get("request_id") if call.tool in _CARRIES_REQUEST and not call.is_error else None
-        return ReplyNote(_inbox_block([item for item in page.items if item.pointer != asked]), page.cursor)
+        return ReplyNote(_inbox_block([item for item in unread.items if item.pointer != asked]), unread.end)
 
     return annotate
+
+
+async def _returned_by_poll(notebook: Notebook, call: ReplyCall) -> set[InboxItem]:
+    """The items the ``poll_inbox`` call returned, read again from the cursor it was given."""
+    feed = await _read_feed(notebook, call.principal.branch, str(call.arguments.get("cursor") or ""))
+    return set(_page_of(feed))
 
 
 def _notebook_handler(
@@ -514,7 +592,11 @@ def register_specialist_tools(
     )
     server.register(
         _POLL_INBOX_TOOL,
-        description="Pointers pushed to this branch since the cursor, such as results of asynchronous tools.",
+        description=(
+            "Pointers pushed to this branch since the cursor, such as results of asynchronous tools. A reply holds "
+            f"at most {POLL_INBOX_MAX_ITEMS} items; when remaining is above 0, call again with the cursor it returned "
+            "to read the next page."
+        ),
         schema=_POLL_INBOX,
         handler=_poll_inbox(notebooks),
         **own,
@@ -538,6 +620,8 @@ def _register_notebook_tools(server: McpServer, notebooks: NotebookFor, options:
 
 
 __all__ = [
+    "POLL_INBOX_MAX_BYTES",
+    "POLL_INBOX_MAX_ITEMS",
     "REPLY_INBOX_HEADER",
     "REPLY_INBOX_LINES",
     "SPECIALIST_TOKEN_ENV",
