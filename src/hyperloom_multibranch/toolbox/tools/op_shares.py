@@ -11,7 +11,7 @@ or whose request does not name the commit the profile ran on, reports no shares:
 TraceLens marked degraded (its deterministic fallback, or a poor trace) carries no shares either: the decomposition
 behind them failed, so the one row it keeps is a kernel name, not an op. So does one the report route itself found hollow
 (``window_degraded_reason``: the kernels of the window's graph replays are missing from the trace, which TraceLens only
-warns about).
+warns about, or the table's kernels add up to several times the GPU's busy time, so their durations are wrong).
 """
 
 from __future__ import annotations

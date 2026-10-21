@@ -24,6 +24,17 @@ does not see it (no replay wrapper op is left to count), so the route reads how 
 kernels fill (``gpu_timeline.csv``) and marks a window below :data:`MIN_GPU_BUSY_PERCENT` degraded, like a graph-collapsed
 one: no op shares, and the reason in the tool summary.
 
+A window whose kernel durations are not real is not reported either. The eager kernels after a graph replay can carry
+start timestamps inside the replay, on the same in-order stream, and end at the window's end: in a Qwen3-14B-FP8 branch
+window ``greedy_sample``, ``add``, two ``index_put`` and two ``copy_`` kernels (50 to 82 us in all in the branch's other
+windows) last 9 ms each, all ending within 30 us of one another. The raw rank trace already holds them, so TraceLens'
+capture merge is not the cause; it attributes them to the right ops, and the window's one recorded replay (604 kernels,
+7.9 ms) is 13% of the table beside 54.8 ms of those six. The window's kernels fill 96% of its span
+(the overlapping intervals cover it), so the check above passes it. The ops table's kernels add up to the window's busy
+time when they run one after another and to a little more when streams overlap; here to 6.2 times. The route reads the
+table's ``total_direct_kernel_time_ms`` against the timeline's ``busy_time`` and marks a window above
+:data:`MAX_KERNEL_OVERLAP` degraded the same way.
+
 It is for LLM serving traces (SGLang, vLLM, ATOM): the splitter reads their step annotations. Anything else asks for
 ``analysis_route: agent``.
 """
@@ -86,7 +97,15 @@ _CAPTURE_KEYS = ("capture_folder", "graph_capture_path", "capture_folder_path")
 #: 16%; the single decode step of a Qwen3-14B-FP8 branch profile, whose one replay lost its kernels, 0.6%. Under a tenth of
 #: the span the table is not the window's work.
 MIN_GPU_BUSY_PERCENT = 10.0
+#: How many times the GPU's busy time the ops table's kernels may add up to. Kernels on one stream run one after another, so
+#: a window's kernels add up to about its busy time and overlapping streams (compute, collective, copy) only add a little:
+#: 1.00 for the Qwen3-14B-FP8 root profile window and for the branch one with its replay lost; 0.42 for the Qwen3-8B 32-step
+#: mix and 0.78 for the TP2 one with collectives, whose tables list less than the GPU ran. The Qwen3-14B-FP8 branch window
+#: whose six eager kernels each last 9 ms adds up to 6.17.
+MAX_KERNEL_OVERLAP = 3.0
 _GPU_TIMELINE = "gpu_timeline.csv"
+_OPS_SUMMARY = "ops_summary.csv"
+_OPS_KERNEL_MS = "total_direct_kernel_time_ms"
 _TAIL_CHARS = 1500
 
 
@@ -219,7 +238,7 @@ def _graph_replay_coverage(run: _Run) -> GraphReplayCoverage:
     from TraceLens.Agent.Analysis.utils import check_graph_replay_coverage
 
     unified = run.csv_dir / "unified_perf_summary.csv"
-    if not unified.is_file() or not (run.csv_dir / "ops_summary.csv").is_file():
+    if not unified.is_file() or not (run.csv_dir / _OPS_SUMMARY).is_file():
         raise _Refused(
             _INCOMPLETE,
             f"the perf report wrote no unified_perf_summary.csv and ops_summary.csv in {run.csv_dir}",
@@ -228,15 +247,27 @@ def _graph_replay_coverage(run: _Run) -> GraphReplayCoverage:
 
 
 @dataclass(frozen=True)
-class _Busy:
-    """How much of the window's GPU span (first to last GPU event) the report's kernels and copies fill."""
+class _Window:
+    """What the report's kernels and copies make of the window's GPU span (first to last GPU event)."""
 
     percent: float
     span_ms: float
+    busy_ms: float
+    ops_ms: float
+
+    @property
+    def overlap(self) -> float:
+        """How many times the GPU's busy time the ops table's kernels add up to (0 with no busy time: starved, not overlapped)."""
+        return self.ops_ms / self.busy_ms if self.busy_ms > 0 else 0.0
+
+    @property
+    def degraded_reason(self) -> str:
+        """Why the window is not the work it was cut for, empty when its table can be read as that work."""
+        return self.starved_reason or self.overlapping_reason
 
     @property
     def starved_reason(self) -> str:
-        """Why the window is not the work it was cut for, empty when its kernels fill enough of it."""
+        """Empty when the window's kernels fill enough of its span."""
         if self.percent >= MIN_GPU_BUSY_PERCENT:
             return ""
         return (
@@ -245,19 +276,44 @@ class _Busy:
             "lists only the eager ops around them"
         )
 
+    @property
+    def overlapping_reason(self) -> str:
+        """Empty when the ops table's kernels add up to no more than overlapping streams explain."""
+        if self.overlap <= MAX_KERNEL_OVERLAP:
+            return ""
+        return (
+            f"the ops table's kernels add up to {self.ops_ms:.2f} ms over {self.busy_ms:.2f} ms of GPU busy time "
+            f"({self.overlap:.1f} times, over {MAX_KERNEL_OVERLAP:g}): kernels of one stream overlap one another, so the "
+            "profiler's timestamps are wrong for some and the table's durations and shares are not the window's work"
+        )
 
-def _gpu_busy(run: _Run) -> _Busy:
-    """The ``busy_time`` share of the report's GPU timeline; a timeline it cannot read fails the report, not passes it."""
+
+def _ops_kernel_ms(run: _Run) -> float:
+    """The kernel time the ops table lists in all (``total_direct_kernel_time_ms`` summed); an unreadable table fails the report."""
+    path = run.csv_dir / _OPS_SUMMARY
+    try:
+        with path.open(encoding=_ENCODING, newline="") as handle:
+            total = math.fsum(float(row[_OPS_KERNEL_MS]) for row in csv.DictReader(handle))
+    except (OSError, KeyError, TypeError, ValueError, csv.Error) as exc:
+        raise _Refused(_INCOMPLETE, f"{path} has no readable {_OPS_KERNEL_MS} column: {exc!r}") from None
+    if not math.isfinite(total):
+        raise _Refused(_INCOMPLETE, f"{path} lists {total} ms of kernels")
+    return total
+
+
+def _window(run: _Run) -> _Window:
+    """The report's GPU timeline (``busy_time`` and ``total_time``) and ops table kernels; unreadable ones fail the report, not pass it."""
     path = run.csv_dir / _GPU_TIMELINE
     try:
         with path.open(encoding=_ENCODING, newline="") as handle:
             rows = {row["type"]: row for row in csv.DictReader(handle)}
-        percent, span_ms = float(rows["busy_time"]["percent"]), float(rows["total_time"]["time ms"])
-    except (OSError, KeyError, ValueError, csv.Error) as exc:
+        busy, total = rows["busy_time"], rows["total_time"]
+        percent, busy_ms, span_ms = float(busy["percent"]), float(busy["time ms"]), float(total["time ms"])
+    except (OSError, KeyError, TypeError, ValueError, csv.Error) as exc:
         raise _Refused(_INCOMPLETE, f"{path} has no readable busy_time and total_time: {exc!r}") from None
-    if not (math.isfinite(percent) and math.isfinite(span_ms)):
-        raise _Refused(_INCOMPLETE, f"{path} gives busy_time {percent} and total_time {span_ms}")
-    return _Busy(percent, span_ms)
+    if not all(math.isfinite(value) for value in (percent, busy_ms, span_ms)):
+        raise _Refused(_INCOMPLETE, f"{path} gives busy_time {percent}% {busy_ms} ms and total_time {span_ms} ms")
+    return _Window(percent, span_ms, busy_ms, _ops_kernel_ms(run))
 
 
 def _write_degraded_report(run: _Run, coverage: GraphReplayCoverage) -> None:
@@ -297,7 +353,7 @@ def _analyse(payload: Mapping[str, Any], session_dir: Path) -> dict[str, Any]:
     coverage = _graph_replay_coverage(run)
     if coverage.graph_under_recorded:
         _write_degraded_report(run, coverage)
-    busy = _gpu_busy(run)
+    window = _window(run)
 
     warnings = [] if arch is not None else [{"code": "gpu_arch_json_unresolved", "severity": "warning"}]
     return {
@@ -306,7 +362,7 @@ def _analyse(payload: Mapping[str, Any], session_dir: Path) -> dict[str, Any]:
         "route": REPORT_ROUTE,
         "trace_report_path": str(run.out_dir / "perf_report.xlsx"),
         "analysis_md_path": str(run.out_dir / "analysis.md") if coverage.graph_under_recorded else "",
-        "ops_summary_path": str(run.csv_dir / "ops_summary.csv"),
+        "ops_summary_path": str(run.csv_dir / _OPS_SUMMARY),
         "trace_input": str(trace_input),
         "analysed_trace": trace.name,
         "steady_state_mode": mode,
@@ -315,8 +371,9 @@ def _analyse(payload: Mapping[str, Any], session_dir: Path) -> dict[str, Any]:
         "capture_folder": str(capture or ""),
         "graph_replay_fraction": round(coverage.graph_replay_fraction, 4),
         "graph_under_recorded": coverage.graph_under_recorded,
-        "window_gpu_busy_percent": round(busy.percent, 2),
-        OWN_DEGRADED_KEY: busy.starved_reason,
+        "window_gpu_busy_percent": round(window.percent, 2),
+        "window_kernel_overlap": round(window.overlap, 2),
+        OWN_DEGRADED_KEY: window.degraded_reason,
         "trace_health_warnings": warnings,
         "duration_sec": round(time.monotonic() - started, 3),
     }
@@ -340,4 +397,12 @@ async def report_handler(payload: dict, *, session_dir: Path) -> dict[str, Any]:
         }
 
 
-__all__ = ["DEFAULT_PLATFORM", "MIN_GPU_BUSY_PERCENT", "REPORT_ROUTE", "SPLIT_HINTS", "report_handler", "split_hint"]
+__all__ = [
+    "DEFAULT_PLATFORM",
+    "MAX_KERNEL_OVERLAP",
+    "MIN_GPU_BUSY_PERCENT",
+    "REPORT_ROUTE",
+    "SPLIT_HINTS",
+    "report_handler",
+    "split_hint",
+]

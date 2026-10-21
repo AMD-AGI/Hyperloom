@@ -25,7 +25,8 @@ DATA = Path(__file__).parent / "data"
 SPLITTER = "TraceLens.TraceUtils.split_trace.main"
 CHUNK = "mixed_steady_state_prefill_1_prefilldecode_0_decode_31_bs11_conc3_t-TP-0.trace.json.gz"
 OPS_SUMMARY = (
-    "name,parent_module,Percentage (%)\naten::mm,A,20.0\naten::mm,B,4.5\naten::copy_,C,19.0\naten::mul,D,10.0\n"
+    "name,parent_module,total_direct_kernel_time_ms,Percentage (%)\n"
+    "aten::mm,A,0.2,20.0\naten::mm,B,0.045,4.5\naten::copy_,C,0.19,19.0\naten::mul,D,0.1,10.0\n"
 )
 SHARES = {"aten::mm": 24.5, "aten::copy_": 19.0, "aten::mul": 10.0}
 HINTS = {"split_conc": "4", "split_osl": "64", "split_r": "1"}
@@ -262,20 +263,87 @@ async def test_a_window_whose_graph_replay_kernels_are_missing_from_the_trace_gi
 
 
 @pytest.mark.parametrize(
-    ("timeline", "busy"),
+    ("report_name", "busy", "overlap", "top_op", "top_share"),
     [
-        ("qwen3_8b_gpu_timeline.csv", 16.04),  # the 32-step mix with 30 of 31 replays missing but a prefill step kept
-        ("fp8_root_gpu_timeline.csv", 53.92),
+        # The 32-step mix with 30 of 31 replays missing but a prefill step kept; the same on two GPUs (collectives).
+        ("qwen3_8b", 16.04, 0.42, "aten::mm", 24.65),
+        ("qwen3_8b_tp2", 13.0, 0.78, "aten::mm", 33.44),
+        ("fp8_root", 53.92, 1.0, "aiter::gemm_a8w8_blockscale_bpreshuffle_ck", 84.11),
     ],
 )
-async def test_a_window_that_keeps_its_prefill_work_keeps_its_shares(
-    rig: Rig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, timeline: str, busy: float
+async def test_a_real_report_whose_kernels_run_one_after_another_keeps_its_shares(
+    rig: Rig,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    report_name: str,
+    busy: float,
+    overlap: float,
+    top_op: str,
+    top_share: float,
 ) -> None:
-    monkeypatch.setattr(report, "run_with_session_kill", Shell(timeline=_real(timeline)))
+    shell = Shell(
+        ops_summary=_real(f"{report_name}_ops_summary.csv"), timeline=_real(f"{report_name}_gpu_timeline.csv")
+    )
+    monkeypatch.setattr(report, "run_with_session_kill", shell)
     status, pointer, record = await _run(tmp_path, HINTS, rig)
-    assert status is JobStatus.SUCCEEDED and dict(pointer.op_shares) == SHARES
-    assert record["result"]["window_gpu_busy_percent"] == busy and record["result"]["window_degraded_reason"] == ""
-    assert DEGRADED_NOTICE not in pointer.summary
+    assert status is JobStatus.SUCCEEDED and DEGRADED_NOTICE not in pointer.summary
+    result = record["result"]
+    assert (result["window_gpu_busy_percent"], result["window_kernel_overlap"]) == (busy, overlap)
+    assert result["window_degraded_reason"] == "" and max(pointer.op_shares, key=pointer.op_shares.get) == top_op
+    assert pointer.op_shares[top_op] == pytest.approx(top_share, abs=0.005)
+
+
+async def test_a_window_whose_eager_kernels_overlap_the_graph_replay_gives_no_shares_and_says_why(
+    rig: Rig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The Qwen3-14B-FP8 branch b40: one recorded decode replay, and six eager kernels after it that last 9 ms each.
+
+    The profiler stamps each of them as starting while the replay still runs on their one stream and ending at the
+    window's end, so index_put and copy_ list ~29% each (62.77 ms of kernels in 10.18 ms of GPU busy time) beside a
+    replay that is 13% of the table. The timeline says the kernels fill 96% of the span, so only their sum gives it away.
+    """
+    shell = Shell(ops_summary=_real("b40_ops_summary.csv"), timeline=_real("b40_gpu_timeline.csv"))
+    monkeypatch.setattr(report, "run_with_session_kill", shell)
+    status, pointer, record = await _run(tmp_path, HINTS, rig)
+    assert status is JobStatus.SUCCEEDED and not pointer.op_shares and not pointer.commit_id
+    result = record["result"]
+    assert (result["window_gpu_busy_percent"], result["window_kernel_overlap"]) == (96.04, 6.17)
+    assert result["window_degraded_reason"].startswith(
+        "the ops table's kernels add up to 62.77 ms over 10.18 ms of GPU"
+    )
+    assert "6.2 times, over 3" in result["window_degraded_reason"]
+    assert DEGRADED_NOTICE in pointer.summary and result["window_degraded_reason"] in pointer.summary
+
+
+@pytest.mark.parametrize(("ops_ms", "degraded"), [(30.0, False), (30.01, True)])
+async def test_the_kernel_overlap_threshold_is_inclusive_of_three_times_the_busy_time(
+    rig: Rig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ops_ms: float, degraded: bool
+) -> None:
+    timeline = "type,time ms,percent\nbusy_time,10.0,10.0\ntotal_time,100.0,100.0\n"
+    ops = f"name,parent_module,total_direct_kernel_time_ms,Percentage (%)\naten::mm,A,{ops_ms},100.0\n"
+    monkeypatch.setattr(report, "run_with_session_kill", Shell(ops_summary=ops, timeline=timeline))
+    status, pointer, record = await _run(tmp_path, HINTS, rig)
+    assert status is JobStatus.SUCCEEDED and bool(pointer.op_shares) is not degraded
+    assert bool(record["result"]["window_degraded_reason"]) is degraded and report.MAX_KERNEL_OVERLAP == 3.0
+
+
+@pytest.mark.parametrize(
+    "ops_summary",
+    [
+        "name,parent_module,Percentage (%)\naten::mm,A,100.0\n",
+        "name,total_direct_kernel_time_ms,Percentage (%)\naten::mm,fast,100.0\n",
+        "name,total_direct_kernel_time_ms,Percentage (%)\naten::mm,nan,100.0\n",
+        "name,total_direct_kernel_time_ms,Percentage (%)\naten::mm,inf,100.0\n",
+        "name,total_direct_kernel_time_ms,Percentage (%)\naten::mm\n",
+    ],
+)
+async def test_an_ops_table_without_readable_kernel_times_fails_the_report_it_does_not_pass_it(
+    rig: Rig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ops_summary: str
+) -> None:
+    monkeypatch.setattr(report, "run_with_session_kill", Shell(ops_summary=ops_summary))
+    status, pointer, record = await _run(tmp_path, HINTS, rig)
+    assert status is JobStatus.FAILED and not pointer.op_shares
+    assert record["result"]["error_class"] == "perf_report_incomplete"
 
 
 @pytest.mark.parametrize(("busy", "degraded"), [(9.99, True), (10.0, False)])
@@ -296,6 +364,9 @@ async def test_the_busy_share_threshold_is_inclusive_of_ten_percent(
         "type,time ms,percent\ntotal_time,8.2,100.0\n",
         "type,time ms,percent\nbusy_time,0.05,nan\ntotal_time,8.2,100.0\n",
         "type,time ms,percent\nbusy_time,0.05,x\ntotal_time,8.2,100.0\n",
+        "type,time ms,percent\nbusy_time,nan,50.0\ntotal_time,8.2,100.0\n",
+        "type,percent\nbusy_time,50.0\ntotal_time,100.0\n",
+        "type,time ms,percent\nbusy_time,0.05\ntotal_time,8.2,100.0\n",
     ],
 )
 async def test_a_gpu_timeline_that_cannot_be_read_fails_the_report_it_does_not_pass_it(
