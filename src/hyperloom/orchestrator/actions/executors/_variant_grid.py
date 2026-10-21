@@ -22,7 +22,7 @@ import yaml
 
 from hyperloom.common.coerce import to_str_list
 from hyperloom.common.launch_log_evidence import settings_the_engine_rewrote
-from hyperloom.inference_optimizer.grid_server_args import _MULTI_VALUE_FLAGS
+from hyperloom.inference_optimizer.grid_server_args import MULTI_VALUE_FLAGS
 from ._framework_switch_manifest import additive_variants, leave_one_out_variants
 from ._grid_base import GridVariant
 from ._launch_restatement import config_envs, named_settings, restates_the_baseline
@@ -384,7 +384,7 @@ def _subtracts_from_the_launch(variant: GridVariant) -> bool:
 
 def _touches_a_multi_value_flag(argv_text: str) -> bool:
     """Whether ``argv_text`` names a list-valued flag, whose ordering the merged config does not preserve."""
-    return any(flag in argv_text for flag in _MULTI_VALUE_FLAGS)
+    return any(flag in argv_text for flag in MULTI_VALUE_FLAGS)
 
 
 # Separate from _CONFIG_REPLAY_PROVENANCE (shared with filter_operator_pinned_envs):

@@ -40,7 +40,7 @@ def validate_server_args_shell_safe(server_args: str | None) -> str:
         if token.startswith("-"):
             if "=" in token:
                 state = "positional"
-            elif token in _MULTI_VALUE_FLAGS:
+            elif token in MULTI_VALUE_FLAGS:
                 state = "many"
             else:
                 state = "any"
@@ -357,7 +357,8 @@ SPACE_VALUE_FLAGS = (
 # Compatibility export used by ``_grid_runner`` and out-of-tree tests.
 _SPACE_VALUE_FLAGS = SPACE_VALUE_FLAGS
 
-_MULTI_VALUE_FLAGS = (
+#: Flags whose value is a list: a merged config does not preserve their ordering.
+MULTI_VALUE_FLAGS = (
     "--cuda-graph-bs",
     "--cuda-graph-max-bs",
 )
@@ -433,7 +434,7 @@ def dedup_vllm_server_args(
         return args
     if server_args_env_name(framework) == "EXTRA_SGLANG_ARGS":
         return args
-    if any(f in args for f in _MULTI_VALUE_FLAGS):
+    if any(f in args for f in MULTI_VALUE_FLAGS):
         return args
     parsed = tokenize_server_args_preserving_json(args)
     if parsed is None:
@@ -476,7 +477,7 @@ def _shell_safe_dedupe(args: str) -> str:
     """Last-wins dedupe for single-token-valued flags only."""
     if not args.strip():
         return ""
-    if any(f in args for f in _MULTI_VALUE_FLAGS):
+    if any(f in args for f in MULTI_VALUE_FLAGS):
         return args
     parsed = tokenize_server_args_preserving_json(args)
     if parsed is None:
@@ -834,7 +835,7 @@ def dedupe_extra_server_args(args_str: str) -> str:
                 flag = t
                 i += 1
                 values = []
-                if flag in _MULTI_VALUE_FLAGS:
+                if flag in MULTI_VALUE_FLAGS:
                     while i < len(tokens) and not tokens[i].startswith("--"):
                         values.append(tokens[i])
                         i += 1
