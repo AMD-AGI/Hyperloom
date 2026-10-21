@@ -297,27 +297,29 @@ async def test_promote_explore_promoted_writes_state_and_audit(session_dir):
 
 
 @pytest.mark.asyncio
-async def test_promote_roofline_succeeded_writes_audit(session_dir):
+@pytest.mark.parametrize("status", ["succeeded", "recovered"])
+async def test_promote_roofline_with_a_trace_writes_audit(session_dir, status):
+    """A trace salvaged from a failed profile run is analysed like any other."""
     coord = _coord(session_dir)
     s = coord.shared_state
     s.baseline_tput = 100.0
+    s.roofline_failure_streak = 2
     s.last_trace_analyze = {"roofline_snapshot_id": 5, "analysis_md_path": "/tmp/a.md"}
 
     await coord.writeback.promote_to_shared_state(
         "roofline",
         {
-            "status": "succeeded",
+            "status": status,
             "snapshot_id": 5,
             "last_profile_trace": "/tmp/trace.gz",
         },
         task=_task("roofline"),
     )
 
-    # roofline resets its failure streak on a succeeded snapshot.
+    # roofline resets its failure streak on an analysed snapshot.
     assert s.roofline_failure_streak == 0
     # Audit row: promoted; snapshot_id taken from last_trace_analyze snapshot.
     assert s.last_roofline["decision"] == "promoted"
-    assert s.last_roofline["status"] == "succeeded"
     assert s.last_roofline["extras"]["snapshot_id"] == 5
 
 

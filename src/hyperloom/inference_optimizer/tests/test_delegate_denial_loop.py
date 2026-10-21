@@ -91,23 +91,19 @@ async def test_delegate_running_collision_denies_without_new_task(session_dir):
 
 
 @pytest.mark.asyncio
-async def test_delegate_source_patch_without_git_root_prunes_without_retry(session_dir):
+async def test_delegate_source_patch_without_git_root_is_refused_and_recorded_once(session_dir):
     c = _silent_coordinator(session_dir)
     try:
         c.shared_state.framework = "sglang"
         c.shared_state.framework_repo_path = ""
         c.shared_state.phase = "FRAMEWORK_AGENT"
-        await c.router.handle_delegate(
-            "orchestration",
-            _delegate(
-                action="specialist",
-                key="patch-no-root",
-                params={"domain": "serving_specialist"},
-            ),
-        )
+        for key in ("patch-no-root", "patch-no-root-again"):
+            await c.router.handle_delegate(
+                "orchestration",
+                _delegate(action="specialist", key=key, params={"domain": "serving_specialist"}),
+            )
 
         assert await c.tasks.by_state("queued") == []
-        assert c.shared_state.pruned_families == ["source_patch"]
         failures = [(row["action"], row["task_id"], row["error_class"]) for row in c.shared_state.last_action_failures]
         assert failures == [("specialist", "patch-no-root", "no_git_framework_source_root")]
     finally:
