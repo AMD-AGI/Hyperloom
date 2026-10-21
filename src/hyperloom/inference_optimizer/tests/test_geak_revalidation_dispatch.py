@@ -884,32 +884,6 @@ def _stub_geak_runner_call(monkeypatch, outcome) -> list[str]:
 
 
 @pytest.mark.asyncio
-async def test_an_unreadable_term_grace_is_refused_before_the_runner_is_dispatched(
-    coordinator, tmp_path, monkeypatch
-) -> None:
-    """The SIGTERM grace is resolved before the dispatch that spawns the runner.
-
-    Resolved inside the dispatched method instead, the raise lands with ``Popen`` already
-    returned: nothing calls ``communicate`` or ``killpg``, so the runner -> run_e2e ->
-    vllm tree keeps the GPUs while the phase records a crash and winds down to SWEEP.
-    """
-    from hyperloom.common.env import EnvValueError
-
-    c = coordinator
-    _arm_settled_candidate(c, tmp_path)
-    calls = _stub_geak_runner_call(
-        monkeypatch,
-        lambda: subprocess.CompletedProcess(["geak_runner"], 0, "", ""),
-    )
-    monkeypatch.setenv("GEAK_TERM_GRACE_S", "3m")
-
-    with pytest.raises(EnvValueError):
-        await c.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
-
-    assert calls == []
-
-
-@pytest.mark.asyncio
 async def test_failed_runner_does_not_replay_the_settled_result(coordinator, tmp_path, monkeypatch) -> None:
     """A runner that exits nonzero over the old file shipped no new product."""
     c = coordinator

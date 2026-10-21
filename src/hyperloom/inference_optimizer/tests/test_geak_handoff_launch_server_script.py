@@ -22,7 +22,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from hyperloom.orchestrator.phases import _geak_handoff
+from hyperloom.orchestrator.phases.kernel import KernelPhase
 
 
 def _RESOLVE(recipe_path: str) -> str:
@@ -32,7 +32,7 @@ def _RESOLVE(recipe_path: str) -> str:
     the recipe once for both of its resolvers; these cases still start from a
     file, so they go through the same parse step.
     """
-    return _geak_handoff.launch_server_script(_geak_handoff.recipe_benchmark(recipe_path))
+    return KernelPhase._resolve_launch_server_script(KernelPhase._recipe_benchmark(recipe_path))
 
 
 def _checkout(tmp_path: Path, *scripts: str, lib: bool = True) -> Path:

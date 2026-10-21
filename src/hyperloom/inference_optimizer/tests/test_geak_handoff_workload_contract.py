@@ -277,7 +277,7 @@ async def test_agentx_geak_metric_aligned_result_is_only_a_proposal_proxy(
     monkeypatch.setenv("E2E_METRIC", "total")
     launches = _launch_mock_runner(coord, monkeypatch, tmp_path)
     _gpus_at_handoff(monkeypatch, _GPUS_FREE)
-    with caplog.at_level("INFO", logger="hyperloom.orchestrator.phases"):
+    with caplog.at_level("INFO", logger="hyperloom.orchestrator.phases.kernel"):
         await coord.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
 
     handoff = json.loads((tmp_path / "geak" / "handoff.json").read_text(encoding="utf-8"))
@@ -327,7 +327,7 @@ async def test_gpus_that_cannot_be_checked_are_still_handed_to_geak(
         monkeypatch, GpuHandoff(reaped=[], busy=[], holders=[], unverified="rocm-smi could not report VRAM")
     )
 
-    with caplog.at_level("WARNING", logger="hyperloom.orchestrator.phases"):
+    with caplog.at_level("WARNING", logger="hyperloom.orchestrator.phases.kernel"):
         await coord.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
 
     assert len(launches) == 1
