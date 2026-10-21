@@ -451,6 +451,20 @@ async def test_resume_halts_when_a_kept_snapshot_cannot_be_installed(coord: Coor
 
 
 @pytest.mark.asyncio
+async def test_resume_halts_instead_of_building_a_tree_where_the_framework_root_is_gone(
+    coord: Coordinator, tmp_path: Path
+) -> None:
+    tree = tmp_path / "vllm"
+    _resume_with_stack(coord, [_source_layer_entry(tmp_path, "kv_window", tree, {"envs.py": "patched envs\n"})])
+
+    with pytest.raises(IntegrateRecoveryIncomplete):
+        await coord.writeback._resume_consistency_pass()
+
+    assert coord.shared_state.stop_reason == PATCH_RECOVERY_INCOMPLETE_STOP_REASON
+    assert not tree.exists()
+
+
+@pytest.mark.asyncio
 async def test_resume_warns_about_a_kept_patch_with_no_snapshot_to_install(coord: Coordinator, tmp_path: Path) -> None:
     tree = tmp_path / "vllm"
     tree.mkdir()

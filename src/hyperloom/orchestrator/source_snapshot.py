@@ -10,6 +10,9 @@ from typing import Any, Iterable, NamedTuple
 
 MANIFEST_NAME = "manifest.json"
 SCHEMA_VERSION = 2
+_OP_UPSERT = "upsert"
+_FILES = "files"
+_ENCODING = "utf-8"
 
 
 def _safe_rel(rel: str) -> str | None:
@@ -29,14 +32,14 @@ def snapshot_is_complete(snapshot_dir: str | Path) -> bool:
     """Return whether the snapshot at ``snapshot_dir`` accounts for every path."""
     manifest_path = Path(snapshot_dir) / MANIFEST_NAME
     try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest = json.loads(manifest_path.read_text(encoding=_ENCODING))
     except (OSError, ValueError):
         return False
     if "complete" in manifest:
         return bool(manifest["complete"])
     # Schema 1 only ever recorded these two ops, so this is always True.
-    files = manifest.get("files") or []
-    return all(f.get("op") in ("upsert", "delete") for f in files if isinstance(f, dict))
+    files = manifest.get(_FILES) or []
+    return all(f.get("op") in (_OP_UPSERT, "delete") for f in files if isinstance(f, dict))
 
 
 def source_layer_reproducible(entry: dict[str, Any]) -> bool:
@@ -55,7 +58,7 @@ def source_layer_overlay_dir(entry: dict[str, Any]) -> str:
     snapshot_dir = str(entry.get("source_snapshot") or "").strip()
     if not snapshot_dir:
         return ""
-    overlay = Path(snapshot_dir) / "files"
+    overlay = Path(snapshot_dir) / _FILES
     import_root = _safe_rel(str(entry.get("source_import_root") or ""))
     return str(overlay / import_root) if import_root else str(overlay)
 
@@ -74,7 +77,7 @@ def snapshot_source_layer(
     """Capture the realized contents of ``rel_paths`` under ``framework_root``."""
     framework_root = Path(framework_root)
     dest_dir = Path(dest_dir)
-    files_root = dest_dir / "files"
+    files_root = dest_dir / _FILES
     ops = dict(declared_ops or {})
 
     captured: list[dict[str, str]] = []
@@ -88,7 +91,7 @@ def snapshot_source_layer(
             dst = files_root / rel
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, dst)
-            captured.append({"rel": rel, "op": "upsert"})
+            captured.append({"rel": rel, "op": _OP_UPSERT})
         elif ops.get(rel) == "delete":
             captured.append({"rel": rel, "op": "delete"})
         else:
@@ -105,13 +108,13 @@ def snapshot_source_layer(
         "provenance": provenance,
         "import_root": import_root,
         "complete": all_complete,
-        "files": captured,
+        _FILES: captured,
     }
     if extra:
         manifest["extra"] = extra
 
     dest_dir.mkdir(parents=True, exist_ok=True)
-    (dest_dir / MANIFEST_NAME).write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    (dest_dir / MANIFEST_NAME).write_text(json.dumps(manifest, indent=2), encoding=_ENCODING)
     return {"snapshot_dir": str(dest_dir), **manifest}
 
 
@@ -139,19 +142,19 @@ def _kept_final_states(stack: Iterable[dict[str, Any]], result: SourceLayerInsta
         snapshot_dir = Path(str(entry["source_snapshot"]))
         root = str(entry.get("framework_root") or "").strip()
         try:
-            manifest = json.loads((snapshot_dir / MANIFEST_NAME).read_text(encoding="utf-8"))
+            manifest = json.loads((snapshot_dir / MANIFEST_NAME).read_text(encoding=_ENCODING))
         except (OSError, ValueError) as exc:
             result.failed.append(f"{variant}: snapshot manifest unreadable: {exc}")
             continue
-        if not root:
-            result.failed.append(f"{variant}: no framework_root recorded")
+        if not root or not Path(root).is_dir():
+            result.failed.append(f"{variant}: framework root {root or '(none recorded)'} is not a directory")
             continue
-        for row in manifest.get("files") or []:
+        for row in manifest.get(_FILES) or []:
             rel = _safe_rel(str(row.get("rel") or "")) if isinstance(row, dict) else None
             if rel is None:
                 result.failed.append(f"{variant}: manifest names an unusable path {row!r}")
                 continue
-            final[Path(root) / rel] = (str(row.get("op") or ""), snapshot_dir / "files" / rel)
+            final[Path(root) / rel] = (str(row.get("op") or ""), snapshot_dir / _FILES / rel)
     return final
 
 
@@ -169,7 +172,7 @@ def install_source_layers(stack: Iterable[dict[str, Any]]) -> SourceLayerInstall
                     dest.unlink()
                     result.installed.append(str(dest))
                 continue
-            if op != "upsert" or not source.is_file():
+            if op != _OP_UPSERT or not source.is_file():
                 result.failed.append(f"{dest}: the snapshot holds no {op or 'unrecorded'} state for it")
                 continue
             if dest.is_file() and filecmp.cmp(source, dest, shallow=False):
