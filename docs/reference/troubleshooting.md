@@ -500,7 +500,7 @@ runs against your local baseline.
 ## `result.json` written outside the session dir
 
 **Symptom**: A benchmark "succeeds" but the breakdown shows
-`baseline.throughput_tok_s_per_gpu = null`; logs reference a
+`baseline.output_throughput = null`; logs reference a
 `result.json` written to `--result-dir /tmp/...` outside
 `$USER_DATA_PATH`.
 

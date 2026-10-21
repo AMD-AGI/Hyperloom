@@ -504,7 +504,7 @@ def test_normalize_codex_sdk_result() -> None:
 
     assert result.session_id == "thread-1"
     assert result.text == "PLAN: vectorize loads"
-    assert result.file_changes == ["kernel.py"]
+    assert result.edit_count == 1
     assert result.usage["input_tokens"] == 120
     assert result.usage["output_tokens"] == 30
     assert result.usage["cache_read_input_tokens"] == 20

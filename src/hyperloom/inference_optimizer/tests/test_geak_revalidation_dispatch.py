@@ -721,8 +721,8 @@ def _render_final(
     section = render(
         {
             "outcome": {
-                "final": {"throughput_tok_s_per_gpu": 140.0, "gain_pct": 0.0},
-                "baseline": {"throughput_tok_s_per_gpu": 100.0},
+                "final": {"output_throughput": 140.0, "gain_pct": 0.0},
+                "baseline": {"output_throughput": 100.0},
                 "validation": {},
             },
             "close": {"geak_candidate": geak_candidate},
@@ -772,8 +772,8 @@ def test_final_report_reads_the_last_geak_visit_not_an_earlier_failure() -> None
     section = render(
         {
             "outcome": {
-                "final": {"throughput_tok_s_per_gpu": 140.0, "gain_pct": 0.0},
-                "baseline": {"throughput_tok_s_per_gpu": 100.0},
+                "final": {"output_throughput": 140.0, "gain_pct": 0.0},
+                "baseline": {"output_throughput": 100.0},
                 "validation": {},
             },
             "close": {"geak_candidate": {}},
@@ -787,11 +787,70 @@ def test_final_report_reads_the_last_geak_visit_not_an_earlier_failure() -> None
     assert not any("DROPPED" in fact for fact in section.key_facts)
 
 
+_AWAITING_FACT = (
+    "GEAK candidate (self-reported +12.50%) is AWAITING a main-flow rebench — excluded from the headline gain "
+    "and final stack until a measured rebench validates it."
+)
+_AWAITING_WARNING = (
+    "A GEAK(GEAK) e2e candidate self-reported a win but has NOT been confirmed by a same-harness main-flow "
+    "rebench, so it is intentionally kept out of current_best / action_path / the validated gain. Its "
+    "self-reported number is audit-only and must not be presented as the headline result."
+)
+_NO_VALIDATION_WARNING = (
+    "No validated gain is recorded while baseline/final throughput are set — no validation run completed."
+)
+
+
+@pytest.mark.parametrize(
+    ("gain", "gain_fact", "decision", "extra_warnings"),
+    [
+        (-1.5, "Validated cumulative gain: -1.50%.", ("attempted", -1.5), []),
+        (0.0, "Validated cumulative gain: 0.00%.", ("attempted", 0.0), []),
+        (None, None, None, [_NO_VALIDATION_WARNING]),
+        (3.0, "Validated cumulative gain: +3.00%.", ("kept", 3.0), []),
+    ],
+)
+def test_an_awaiting_geak_candidate_adds_only_its_own_lines(gain, gain_fact, decision, extra_warnings) -> None:
+    from hyperloom.inference_optimizer.breakdown.reporters._renderers.final import render
+
+    section = render(
+        {
+            "outcome": {
+                "final": {"output_throughput": 140.0, "gain_pct": gain},
+                "baseline": {"output_throughput": 100.0},
+                "validation": {},
+            },
+            "close": {
+                "geak_candidate": {
+                    "status": "awaiting_rebench",
+                    "revalidation_pending": True,
+                    "self_reported_gain_pct": 12.5,
+                }
+            },
+            "timeline": [],
+        }
+    )
+
+    expected = ["Final: 140.00 tok/s.", "Delta vs baseline: +40.00 tok/s."]
+    if gain_fact:
+        expected.append(gain_fact)
+    assert list(section.key_facts) == [*expected, _AWAITING_FACT]
+    assert [(d.kind, d.subject, d.metric_pct) for d in section.decisions] == (
+        [(decision[0], "final", decision[1])] if decision else []
+    )
+    assert list(section.warnings) == [_AWAITING_WARNING, *extra_warnings]
+
+
 def test_final_report_still_flags_awaiting_geak_revalidation() -> None:
     facts, warnings = _render_final({"status": "awaiting_rebench", "self_reported_gain_pct": 12.5})
 
-    assert any("AWAITING" in f for f in facts)
-    assert warnings
+    assert facts == [
+        "Final: 140.00 tok/s.",
+        "Delta vs baseline: +40.00 tok/s.",
+        "Validated cumulative gain: 0.00%.",
+        _AWAITING_FACT,
+    ]
+    assert warnings == [_AWAITING_WARNING]
 
 
 @pytest.mark.asyncio
