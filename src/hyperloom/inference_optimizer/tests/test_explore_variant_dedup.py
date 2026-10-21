@@ -11,11 +11,14 @@ from types import SimpleNamespace
 from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
 
 
-def _dispatcher(*, queued_grids: tuple[tuple[dict, ...], ...] = ()) -> DispatcherCollaborator:
-    """A dispatcher whose only live part is the explore queue."""
+def _dispatcher(
+    *, queued_grids: tuple[tuple[dict, ...], ...] = (), stack: dict | None = None
+) -> DispatcherCollaborator:
+    """A dispatcher whose only live part is the explore queue, all of it on one stack."""
+    base = dict(stack or {})
 
     async def queued():
-        return [SimpleNamespace(kind="explore", params={"grid": list(g)}) for g in queued_grids]
+        return [SimpleNamespace(kind="explore", params={**base, "grid": list(g)}) for g in queued_grids]
 
     async def running():
         return []
@@ -39,7 +42,7 @@ def test_a_configuration_already_queued_is_dropped_from_a_later_grid():
 
     kept = asyncio.run(
         d.variants_not_already_queued(
-            [_variant("--enable-aiter-allreduce-fusion"), _variant("--scheduler-recv-interval 10")]
+            [_variant("--enable-aiter-allreduce-fusion"), _variant("--scheduler-recv-interval 10")], {}
         )
     )
 
@@ -50,7 +53,9 @@ def test_a_grid_that_repeats_itself_is_narrowed_too():
     """The same lever three times in one grid is the same lane cost three times."""
     d = _dispatcher()
 
-    kept = asyncio.run(d.variants_not_already_queued([_variant("--x"), _variant("--x", name="again"), _variant("--y")]))
+    kept = asyncio.run(
+        d.variants_not_already_queued([_variant("--x"), _variant("--x", name="again"), _variant("--y")], {})
+    )
 
     assert [v["extra_args"] for v in kept] == ["--x", "--y"]
 
@@ -59,22 +64,41 @@ def test_a_grid_of_entirely_new_configurations_is_untouched():
     d = _dispatcher(queued_grids=((_variant("--already"),),))
     grid = [_variant("--a"), _variant("--b")]
 
-    assert asyncio.run(d.variants_not_already_queued(grid)) == grid
+    assert asyncio.run(d.variants_not_already_queued(grid, {})) == grid
 
 
 def test_a_grid_whose_every_variant_is_queued_comes_back_empty():
     """The caller refuses the proposal on this, rather than queueing a round that measures nothing."""
     d = _dispatcher(queued_grids=((_variant("--a"), _variant("--b")),))
 
-    assert asyncio.run(d.variants_not_already_queued([_variant("--b"), _variant("--a")])) == []
+    assert asyncio.run(d.variants_not_already_queued([_variant("--b"), _variant("--a")], {})) == []
+
+
+def test_a_configuration_queued_on_another_stack_is_kept():
+    """The anchor moved, so the queued measurement does not speak for the stack this grid would launch on."""
+    d = _dispatcher(queued_grids=((_variant("--a"),),), stack={"base_tput": 800.0})
+
+    kept = asyncio.run(d.variants_not_already_queued([_variant("--a")], {"base_tput": 820.0}))
+
+    assert kept == [_variant("--a")]
+
+
+def test_an_overlay_variant_is_kept_because_its_args_do_not_name_its_kernel():
+    """Two overlay variants share args and envs but not the kernel they load, so one cannot cover the other."""
+    overlay = {"name": "patched", "extra_args": "--k 0", "overlay_pythonpath": "/overlays/a"}
+    d = _dispatcher(queued_grids=((overlay,),))
+
+    kept = asyncio.run(d.variants_not_already_queued([{**overlay, "overlay_pythonpath": "/overlays/b"}], {}))
+
+    assert len(kept) == 1
 
 
 def test_a_missing_or_malformed_grid_is_empty_rather_than_an_error():
     d = _dispatcher()
 
-    assert asyncio.run(d.variants_not_already_queued(None)) == []
-    assert asyncio.run(d.variants_not_already_queued("--not-a-grid")) == []
-    assert asyncio.run(d.variants_not_already_queued([_variant("--a"), "junk"])) == [_variant("--a")]
+    assert asyncio.run(d.variants_not_already_queued(None, {})) == []
+    assert asyncio.run(d.variants_not_already_queued("--not-a-grid", {})) == []
+    assert asyncio.run(d.variants_not_already_queued([_variant("--a"), "junk"], {})) == [_variant("--a")]
 
 
 def test_the_prompt_and_the_gate_read_one_set():

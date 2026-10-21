@@ -144,9 +144,7 @@ def test_preparing_an_agentx_run_keeps_its_prefix_cache(tmp_path, monkeypatch):
         lambda **_kwargs: None,
     )
 
-    we.prepare_agentx_runtime(
-        env=_mlperf_env(tmp_path), inferencex_path=str(tmp_path), active=True
-    )
+    we.prepare_agentx_runtime(env=_mlperf_env(tmp_path), inferencex_path=str(tmp_path), active=True)
 
     for name in mp._AGENTIC_RADIX_SCRIPTS:
         assert mp._AGENTIC_RADIX_SENTINEL in (tmp_path / "benchmarks" / name).read_text(encoding="utf-8")
@@ -159,9 +157,7 @@ def test_a_non_agentx_run_keeps_the_harness_defaults(tmp_path, monkeypatch):
     _runners(tmp_path)
     monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
 
-    we.prepare_agentx_runtime(
-        env=_mlperf_env(tmp_path), inferencex_path=str(tmp_path), active=False
-    )
+    we.prepare_agentx_runtime(env=_mlperf_env(tmp_path), inferencex_path=str(tmp_path), active=False)
 
     body = (tmp_path / "benchmarks" / "sglang_mi355x.sh").read_text(encoding="utf-8")
     assert mp._AGENTIC_RADIX_SENTINEL not in body

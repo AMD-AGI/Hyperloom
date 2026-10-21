@@ -9,7 +9,7 @@ import collections
 import math
 import sqlite3
 import time
-from collections.abc import Awaitable, Callable, Collection
+from collections.abc import Awaitable, Callable, Collection, Mapping
 from functools import partial
 from typing import Any, NamedTuple
 from hyperloom.common.deadline import Deadline
@@ -1454,20 +1454,30 @@ class DispatcherCollaborator(CoordinatorCollaborator):
             total += self.expected_cost_minutes_for(kind, getattr(task, "params", None))
         return total
 
-    async def queued_grid_variants(self) -> set[str]:
-        """Content fingerprints of the variants every queued or running explore grid already holds."""
-        from ..actions.executors._proposal_identity import content_fingerprint
+    async def queued_grid_variants(self, params: Mapping[str, Any] | None = None) -> set[str]:
+        """Content fingerprints of the variants a queued or running explore grid already holds on this stack.
 
-        return {
-            content_fingerprint(variant)
-            for task in (*await self.tasks.queued(), *await self.tasks.running())
-            if task.kind == "explore"
-            for variant in (task.params or {}).get("grid") or ()
-            if isinstance(variant, dict)
-        }
+        Without ``params`` every queued variant counts, which is what the prompt
+        wants; with them the stack rule is ``measured_variants``', the owner of
+        variant identity, and a variant queued on another stack does not count.
+        """
+        from ..actions.executors.measured_variants import variants_queued_on_stack
 
-    async def variants_not_already_queued(self, grid: Any) -> list[dict[str, Any]]:
-        """``grid`` without the variants the queue is already going to measure.
+        active = [*await self.tasks.queued(), *await self.tasks.running()]
+        if params is None:
+            from ..actions.executors._proposal_identity import content_fingerprint
+
+            return {
+                content_fingerprint(variant)
+                for task in active
+                if task.kind == "explore"
+                for variant in (task.params or {}).get("grid") or ()
+                if isinstance(variant, dict)
+            }
+        return variants_queued_on_stack(params, active)
+
+    async def variants_not_already_queued(self, grid: Any, params: Mapping[str, Any]) -> list[dict[str, Any]]:
+        """``grid`` without the variants the queue is already going to measure on this stack.
 
         The explore idempotency key names a whole grid, so ``{A, B}`` and
         ``{A, C}`` are two keys and A is measured twice. One observed
@@ -1475,15 +1485,23 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         configurations: five copies of one lever, and every copy a full server
         launch and benchmark on the one serving lane the reviewed patches were
         waiting for.
+
+        A variant carrying a kernel overlay is always kept: the overlay changes
+        the launch without appearing in the args or envs the fingerprint reads,
+        so two such variants are indistinguishable here and dropping the second
+        would lose a measurement the first never made.
         """
         from ..actions.executors._proposal_identity import content_fingerprint
 
         if not isinstance(grid, list):
             return []
-        already = await self.queued_grid_variants()
+        already = await self.queued_grid_variants(params)
         kept: list[dict[str, Any]] = []
         for variant in grid:
             if not isinstance(variant, dict):
+                continue
+            if variant.get("overlay_pythonpath"):
+                kept.append(variant)
                 continue
             fingerprint = content_fingerprint(variant)
             if fingerprint in already:
