@@ -219,7 +219,6 @@ def _integrate_stack_fields(result: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _patch_member_list(raw: Any) -> list[Any]:
-    """The members of one patch field, whether it names a single path or several."""
     if isinstance(raw, (str, Path)):
         return [raw]
     if isinstance(raw, (list, tuple)):
@@ -228,7 +227,6 @@ def _patch_member_list(raw: Any) -> list[Any]:
 
 
 def _declared_patch_members(result: Mapping[str, Any], params: Mapping[str, Any]) -> list[Any] | None:
-    """The patch members a settled KEEP names, or ``None`` when it names no field at all."""
     if "patches_applied" in result:
         return _patch_member_list(result.get("patches_applied"))
     declared: list[Any] = []
@@ -242,7 +240,6 @@ def _declared_patch_members(result: Mapping[str, Any], params: Mapping[str, Any]
 
 
 def _workspace_patch_files(workspace: str) -> list[Path]:
-    """The patch files a run workspace holds."""
     root = Path(workspace) if workspace else None
     if root is None or not root.is_dir():
         return []
@@ -255,7 +252,6 @@ def _workspace_patch_files(workspace: str) -> list[Path]:
 
 
 def _existing_patch_paths(candidates: list[Any]) -> tuple[list[Path], list[str]]:
-    """Split declared patch members into the files that are on disk and the ones that are not."""
     resolved: list[Path] = []
     missing: list[str] = []
     seen: set[Path] = set()
@@ -281,7 +277,6 @@ def _existing_patch_paths(candidates: list[Any]) -> tuple[list[Path], list[str]]
 
 
 def _keep_origin_provenance(result: Mapping[str, Any], sources: list[Path], *, realized: bool) -> dict[str, Any]:
-    """How a staged KEEP's overlay was captured, and which checkout it came from."""
     return {
         "base_sha": str(result.get("base_sha") or ""),
         "complete": bool(result.get("source_snapshot_complete", True)),
@@ -297,14 +292,12 @@ def _keep_origin_provenance(result: Mapping[str, Any], sources: list[Path], *, r
 
 
 def _profile_trace_path(result: Mapping[str, Any]) -> Any:
-    """The trace a profile round produced, surfaced so Orch hands trace_analyze a real path."""
     if result.get("trace_input_ready") is False:
         return None
     return result.get("main_trace_path") or (result.get("trace_files") or [None])[0]
 
 
 def _unstageable_patch_sources(row: Mapping[str, Any]) -> list[str]:
-    """The patch members a staged outbox row names that are not on disk at drain time."""
     missing = [str(path) for path in (row.get("missing_patch_sources") or []) if str(path).strip()]
     if row.get("include_patches"):
         missing.extend(
@@ -316,7 +309,6 @@ def _unstageable_patch_sources(row: Mapping[str, Any]) -> list[str]:
 
 
 def _integrate_keep_tput(result: Mapping[str, Any], measurement: Mapping[str, Any]) -> float | None:
-    """The throughput an integrate KEEP is promoted on, or ``None`` when it measured none."""
     if measurement is not result and "output_throughput" in measurement:
         measured = measurement["output_throughput"]
     else:
@@ -366,7 +358,6 @@ def _is_patch_column_keep(task_params: Mapping[str, Any], result: Mapping[str, A
 
 
 def _source_snapshot_layers(stack: Any) -> list[dict[str, Any]]:
-    """The ordered source-layer snapshots a stack reconstructs its framework tree from."""
     from ..source_snapshot import source_layer_overlay_dir, source_layer_reproducible
 
     return [
@@ -383,19 +374,6 @@ def _source_snapshot_layers(stack: Any) -> list[dict[str, Any]]:
         if isinstance(entry, dict) and entry.get("scope") == "source_patch"
         for snapshot in (str(entry.get("source_snapshot") or "").strip(),)
     ]
-
-
-def _measurement_identity(measurement: Mapping[str, Any]) -> dict[str, Any]:
-    """Which launch a measurement was taken on, and how well that launch is evidenced."""
-    return {
-        "declared_launch_identity": str(
-            measurement.get("declared_launch_identity") or measurement.get("launch_identity") or ""
-        ),
-        "observed_launch_identity": str(measurement.get("observed_launch_identity") or ""),
-        "verification_status": str(measurement.get("identity_verification_status") or "unverified"),
-        "observed_server_identity": dict(measurement.get("observed_server_identity") or {}),
-        "resolved_server_config": dict(measurement.get("resolved_server_config") or {}),
-    }
 
 
 class IntegrateRecoveryIncomplete(RuntimeError):
@@ -449,7 +427,6 @@ def _source_layer_handles(result: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _baseline_perf_axes(snapshot: Mapping[str, Any] | None) -> dict[str, Any]:
-    """The axes the baseline's own perf snapshot overrides on ``current_best``."""
     if not snapshot:
         return {}
     axes: dict[str, Any] = {
@@ -463,7 +440,6 @@ def _baseline_perf_axes(snapshot: Mapping[str, Any] | None) -> dict[str, Any]:
 
 
 def _integrate_verdict(status: str, *, lifted: bool, kept: bool) -> Verdict:
-    """The settlement verdict a finished integrate_patch attempt earns."""
     if status == "kept_inert":
         return Verdict.RECORDED
     if kept:
@@ -474,12 +450,6 @@ def _integrate_verdict(status: str, *, lifted: bool, kept: bool) -> Verdict:
 
 
 def _patch_recipe_delta(result: Mapping[str, Any], declared: Mapping[str, Any]) -> dict[str, Any]:
-    """The recipe delta a settled patch KEEP re-applies.
-
-    ``declared`` carries what the attempt asked for, which is what a control the
-    run did not report back falls through to; a replayed KEEP declares it in the
-    result itself.
-    """
     return {
         "extra_server_args": str(result.get("extra_server_args_applied") or ""),
         "extra_envs": dict(result.get("extra_envs_applied") or {}),
@@ -490,7 +460,6 @@ def _patch_recipe_delta(result: Mapping[str, Any], declared: Mapping[str, Any]) 
 
 
 def _integrate_keep_origin(result: Mapping[str, Any], task_params: Mapping[str, Any]) -> dict[str, Any]:
-    """Who a settled integrate_patch KEEP is attributed to."""
     domain = str(task_params.get("domain") or task_params.get("source_domain") or result.get("domain") or "").strip()
     provenance = str(task_params.get("provenance") or result.get("provenance") or "").strip()
     if domain and not provenance.startswith("specialist:"):
@@ -522,7 +491,6 @@ def _integrate_keep_variant(
     measurement: Mapping[str, Any],
     tput: float,
 ) -> dict[str, Any]:
-    """The winning variant a settled integrate_patch KEEP lifts."""
     task_params = (getattr(task, "params", None) or {}) if task is not None else {}
     specialist_task_id = str(result.get("specialist_task_id") or task_params.get("specialist_task_id") or "")
     return {
@@ -540,14 +508,11 @@ def _integrate_keep_variant(
 
 
 class _ExploreLift(NamedTuple):
-    """What accepting one explore round's winners changed."""
-
     promoted: bool
     last_lifted: dict[str, Any] | None
 
 
 def _explore_audit_extras(result: Mapping[str, Any]) -> dict[str, Any]:
-    """What an explore round's audit row records about it."""
     winners = result.get("winners") or []
     best_winner = result.get("best_variant")
     return {
@@ -563,8 +528,6 @@ def _explore_audit_extras(result: Mapping[str, Any]) -> dict[str, Any]:
 
 
 class _LiftRequest(NamedTuple):
-    """A measured winner a caller asks the lift to accept."""
-
     task_kind: str
     tput: float
     variant: dict[str, Any]
@@ -573,26 +536,13 @@ class _LiftRequest(NamedTuple):
 
 
 class _ResolvedLaunch(NamedTuple):
-    """The cumulative launch a winner lifts ``current_best`` to."""
-
     variant_name: Any
     candidate_args: str
     full_args: str
     overlay: str
 
 
-def _is_prebaseline_enablement(task_kind: str, bv: Mapping[str, Any], baseline_tput: Any) -> bool:
-    """Whether this lift is an enablement patch landing before any runnable baseline."""
-    return (
-        task_kind == "integrate_patch"
-        and float(baseline_tput or 0.0) <= 0.0
-        and bv.get("baseline_enablement") is True
-        and bv.get("attribution_eligible") is False
-    )
-
-
 def _resolved_launch(previous: Mapping[str, Any], bv: Mapping[str, Any]) -> _ResolvedLaunch:
-    """The cumulative launch a winner lifts ``current_best`` to."""
     candidate_args = strip_benchmark_harness_flags(bv.get("candidate_extra_server_args") or bv.get("extra_server_args"))
     full_args = strip_benchmark_harness_flags(bv.get("extra_server_args"))
     controls_effective = bool(
@@ -615,7 +565,6 @@ def _resolved_launch(previous: Mapping[str, Any], bv: Mapping[str, Any]) -> _Res
 
 
 def _already_stacked(stack: list[Any], request: _LiftRequest, variant_name: Any) -> bool:
-    """Whether the winner's configuration is already applied on the stack."""
     rows = [row for row in stack if isinstance(row, dict)]
     applied = {(str(row.get("action")), str(row.get("variant_name"))) for row in rows}
     if (request.task_kind, str(variant_name or "")) in applied:
@@ -625,7 +574,6 @@ def _already_stacked(stack: list[Any], request: _LiftRequest, variant_name: Any)
 
 
 def _variant_fingerprint(bv: Mapping[str, Any], candidate_args: str, full_args: str) -> str:
-    """The winner's stable join key, computed from its config when it carries none."""
     recorded = str(bv.get("fingerprint") or "").strip()
     if recorded:
         return recorded
@@ -641,7 +589,6 @@ def _variant_fingerprint(bv: Mapping[str, Any], candidate_args: str, full_args: 
 
 
 def _variant_attribution(bv: Mapping[str, Any]) -> dict[str, Any]:
-    """What a winner's stack row is attributed to, and whether it may be republished."""
     fields: dict[str, Any] = {}
     # Authored-kernel names separate a config gain from a gain measured with a
     # kernel loaded. Absent on every flags-only variant.
@@ -663,7 +610,6 @@ def _variant_attribution(bv: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _variant_launch_controls(bv: Mapping[str, Any]) -> dict[str, Any]:
-    """The removal and replace controls a winner's stack row re-applies."""
     fields: dict[str, Any] = {}
     for key in ("remove_args", "unset_envs", "args_mode"):
         if bv.get(key):
@@ -685,7 +631,6 @@ def _variant_launch_controls(bv: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _variant_source_layer(bv: Mapping[str, Any]) -> dict[str, Any]:
-    """The durable source-layer handles a winner's stack row carries."""
     fields: dict[str, Any] = {}
     for key in ("source_snapshot", "source_manifest", "source_import_root", "framework_root", "base_sha"):
         value = bv.get(key)
@@ -705,7 +650,6 @@ def _variant_source_layer(bv: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _preserves_measured_eval_trigger(state: Any, result_payload: Mapping[str, Any]) -> bool:
-    """Whether the stored enablement trigger outranks this eval failure's own."""
     if result_payload.get(BASELINE_EVAL_FAILURE_KIND_KEY) != EVAL_KIND_ACCURACY_UNAVAILABLE:
         return False
     if to_float(result_payload.get(BASELINE_EVAL_OBSERVED_ACCURACY_KEY)) is not None:
@@ -715,7 +659,6 @@ def _preserves_measured_eval_trigger(state: Any, result_payload: Mapping[str, An
 
 
 def _adopt_eval_trigger(state: Any, result_payload: Mapping[str, Any]) -> None:
-    """Make this eval failure the evidence the enablement lane authors against."""
     enablement = state.enablement
     cfg = result_payload.get("materialized_config")
     if isinstance(cfg, str) and cfg:
@@ -740,14 +683,11 @@ def _adopt_eval_trigger(state: Any, result_payload: Mapping[str, Any]) -> None:
 
 
 class _StackKey(NamedTuple):
-    """Where a KEEP sits on the optimization stack."""
-
     action: str
     variant: str
 
 
 def _stacked_keep_keys(stack: Any) -> set[_StackKey]:
-    """Every place the optimization stack already carries a KEEP."""
     return {
         _StackKey(str(entry.get("action") or ""), str(entry.get("variant_name") or ""))
         for entry in (stack or [])
@@ -756,7 +696,6 @@ def _stacked_keep_keys(stack: Any) -> set[_StackKey]:
 
 
 def _orphan_stack_key(kind: str, result: Mapping[str, Any]) -> _StackKey | None:
-    """Where a recorded KEEP would sit on the stack, or ``None`` for a kind that never stacks."""
     if kind == "integrate_patch":
         return _StackKey(kind, str(result.get("specialist_task_id") or ""))
     if kind == "framework_agent":
@@ -769,26 +708,17 @@ def _orphan_stack_key(kind: str, result: Mapping[str, Any]) -> _StackKey | None:
 
 
 class _IntegrateMarker(NamedTuple):
-    """What a crashed integrate window's own durable records say it reached."""
-
     phase: str
     outcome: dict[str, Any] | None
     verdict: str
 
 
 class _KeptResultScan(NamedTuple):
-    """What a search of the event log found for one integrate window.
-
-    ``scanned`` is false when the log could not be read, which establishes
-    nothing -- a different answer from having found no KEEP.
-    """
-
     scanned: bool
     kept: dict[str, Any] | None
 
 
 def _integrate_marker_of(pending: Mapping[str, Any], task: Task | None) -> _IntegrateMarker:
-    """Read a crashed integrate window's marker: the phase it reached, its outcome, their verdict."""
     recovery = pending.get("recovery")
     phase = str(recovery.get("phase") or "") if isinstance(recovery, dict) else ""
     outcome = _confirmed_task_outcome(task) if task is not None else None
@@ -797,7 +727,6 @@ def _integrate_marker_of(pending: Mapping[str, Any], task: Task | None) -> _Inte
 
 
 def _task_recorded_a_result(task: Task) -> bool:
-    """Whether a task row's history shows the runner already wrote a result for it."""
     return any(
         any(key in (row.get("evidence") or {}) for key in ("result_keys", "result", "outcome"))
         for row in task.history
@@ -806,7 +735,6 @@ def _task_recorded_a_result(task: Task) -> bool:
 
 
 def _replayed_explore_variant(result: Mapping[str, Any]) -> dict[str, Any] | None:
-    """The winning variant a recorded explore KEEP replays, or ``None`` when it names none."""
     best = result.get("best_variant")
     if not isinstance(best, dict) or not best.get("name"):
         return None
@@ -814,7 +742,6 @@ def _replayed_explore_variant(result: Mapping[str, Any]) -> dict[str, Any] | Non
 
 
 def _replay_origin_fields(result: Mapping[str, Any]) -> dict[str, Any]:
-    """Who a recorded patch KEEP is attributed to: provenance, authoring phase, domain, gap layer."""
     domain = str(result.get("domain") or result.get("source_domain") or "").strip()
     provenance = str(result.get("provenance") or "").strip()
     if domain and not provenance.startswith("specialist:"):
@@ -841,7 +768,6 @@ def _replay_origin_fields(result: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _replayed_integrate_variant(result: Mapping[str, Any], tput: float) -> dict[str, Any] | None:
-    """The winning variant a recorded integrate_patch KEEP replays, or ``None`` when it names none."""
     from hyperloom.common.perf_metric import constraint_fields, graded_axes_of
 
     specialist_task_id = str(result.get("specialist_task_id") or "")
@@ -1113,7 +1039,6 @@ class WritebackCollaborator(GeakRevalidation):
         self.shared_state.kb_stage_outbox = outbox
 
     def _claim_patch_section(self, stack_index: int) -> None:
-        """Record that a stack row cannot publish until its patch section is staged."""
         stack = list(self.shared_state.optimization_stack or [])
         if 0 <= stack_index < len(stack) and isinstance(stack[stack_index], dict):
             stack[stack_index]["kb_required_owner"] = _PATCH_KEEP_OWNER
@@ -1125,7 +1050,6 @@ class WritebackCollaborator(GeakRevalidation):
         row: Mapping[str, Any],
         missing: list[str],
     ) -> list[dict[str, Any]]:
-        """Drop a staged KEEP section whose patch sources are gone; release the row that claimed it."""
         owner = str(row.get("owner") or "").upper()
         index = int(row.get("stack_index") or 0)
         stack = self.shared_state.optimization_stack or []
@@ -1681,7 +1605,6 @@ class WritebackCollaborator(GeakRevalidation):
             )
 
     def _tracks_open_revalidation(self, task: Task) -> bool:
-        """Whether this baseline is the enablement revalidation the lane is still waiting on."""
         enablement = self.shared_state.enablement
         if not bool(getattr(enablement, "validation_pending", False)):
             return False
@@ -1696,7 +1619,6 @@ class WritebackCollaborator(GeakRevalidation):
         result_payload: dict[str, Any],
         err_class: str,
     ) -> dict[str, Any]:
-        """Charge a failed baseline to the streaks and the stop gates; the event it reports."""
         from ..actions.executors._accuracy_gate import eval_enablement_allowed
         from ..actions.executors._multi_node_env import is_multi_node
 
@@ -1753,7 +1675,6 @@ class WritebackCollaborator(GeakRevalidation):
         *,
         retries_suppressed: bool,
     ) -> None:
-        """Set the stop reason a failed baseline of this class earns, if it earns one."""
         if stopped_by_the_run_class(err_class) is not None:
             log.warning(
                 "baseline %s was stopped by the run (%s); the failure streak stays at %d "
@@ -1787,7 +1708,6 @@ class WritebackCollaborator(GeakRevalidation):
             self.shared_state.set_stop_reason(_BASELINE_FAILED_STOP_REASON)
 
     def _arm_eager_baseline_fallback(self, task: Task, err_class: str) -> None:
-        """Arm the one-shot disable-cuda-graph retry a capture failure is often recoverable by."""
         if err_class != "cuda_graph_capture_failed" or self.shared_state.baseline_eager_fallback:
             return
         self.shared_state.baseline_eager_fallback = True
@@ -1798,7 +1718,6 @@ class WritebackCollaborator(GeakRevalidation):
         )
 
     def _stash_enablement_launch_log(self, result_payload: dict[str, Any], err_class: str) -> None:
-        """Stash a failed boot's launch text for the FRAMEWORK pump to author against."""
         launch_log = _authorable_launch_log(result_payload, err_class=err_class)
         if not launch_log:
             return
@@ -1848,7 +1767,12 @@ class WritebackCollaborator(GeakRevalidation):
         cand_source = _graded_source(bv, best_tput)
         graded = (
             None
-            if _is_prebaseline_enablement(task_kind, bv, self.shared_state.baseline_tput)
+            if (
+                task_kind == "integrate_patch"
+                and float(self.shared_state.baseline_tput or 0.0) <= 0.0
+                and bv.get("baseline_enablement") is True
+                and bv.get("attribution_eligible") is False
+            )
             else resolve_graded_comparison(self.shared_state, cand_source)
         )
         if graded is not None and self._refuses_graded_winner(task_kind, bv, graded):
@@ -1868,7 +1792,6 @@ class WritebackCollaborator(GeakRevalidation):
         return True
 
     def _refuses_graded_winner(self, task_kind: str, bv: Mapping[str, Any], graded: "GradedComparison") -> bool:
-        """Whether grading turns this winner down, logging the reason it was refused."""
         from hyperloom.common.perf_metric import VERDICT_KEEP
 
         if not graded.comparable:
@@ -1908,7 +1831,6 @@ class WritebackCollaborator(GeakRevalidation):
         launch: _ResolvedLaunch,
         graded: "GradedComparison | None",
     ) -> None:
-        """Record the winner on the optimization stack, unless it is already applied."""
         if _already_stacked(self.shared_state.optimization_stack, request, launch.variant_name):
             return
         stack_entry = self._stack_entry(request, launch)
@@ -1939,7 +1861,6 @@ class WritebackCollaborator(GeakRevalidation):
         )
 
     def _stack_entry(self, request: _LiftRequest, launch: _ResolvedLaunch) -> dict[str, Any]:
-        """The stack row a lifted winner is recorded as."""
         bv = request.variant
         entry: dict[str, Any] = {
             "stack_entry_id": uuid.uuid4().hex,
@@ -1983,7 +1904,6 @@ class WritebackCollaborator(GeakRevalidation):
         return entry
 
     def _variant_authorship(self, task_kind: str, bv: Mapping[str, Any], variant_name: Any) -> dict[str, Any]:
-        """Which phase and which lever a winner is credited to."""
         fields: dict[str, Any] = {}
         source_phase = str(
             bv.get("source_phase") or (self.shared_state.phase if task_kind != "integrate_patch" else "") or ""
@@ -2008,7 +1928,6 @@ class WritebackCollaborator(GeakRevalidation):
         cand_source: Mapping[str, Any],
         previous: Mapping[str, Any],
     ) -> None:
-        """Make the lifted winner the session's ``current_best``."""
         from hyperloom.common.perf_metric import constraint_fields, graded_axes_of
 
         bv = request.variant
@@ -2249,7 +2168,6 @@ class WritebackCollaborator(GeakRevalidation):
         prior_anchor: float,
         promoting_tid: str,
     ) -> None:
-        """Make this measured baseline the session's anchor, unless the anchor is held."""
         measured = float(result.get("output_throughput"))
         if held_reason:
             log.info(
@@ -2269,7 +2187,6 @@ class WritebackCollaborator(GeakRevalidation):
         is_revalidation: bool,
         promoting_tid: str,
     ) -> None:
-        """Close an open enablement revalidation window on this promoted baseline."""
         enablement = self.shared_state.enablement
         tracked_tid = str(getattr(enablement, "revalidation_task_id", "") or "").strip()
         if not bool(getattr(enablement, "validation_pending", False)):
@@ -2301,7 +2218,6 @@ class WritebackCollaborator(GeakRevalidation):
         floor: float,
         promoting_tid: str,
     ) -> None:
-        """Close the enablement lane on a revalidation that met its accuracy floor."""
         enablement = self.shared_state.enablement
         enablement.succeeded = True
         enablement.validation_pending = False
@@ -2328,7 +2244,6 @@ class WritebackCollaborator(GeakRevalidation):
         floor: float,
         promoting_tid: str,
     ) -> None:
-        """Rearm the specialist loop after a revalidation measured below its floor."""
         log.warning(
             "enablement revalidation: accuracy %.4f below floor %.4f; rearming",
             accuracy if isinstance(accuracy, (int, float)) else float("nan"),
@@ -2348,7 +2263,6 @@ class WritebackCollaborator(GeakRevalidation):
         )
 
     def _promote_anchor_run_facts(self, result: dict, task_params: Mapping[str, Any]) -> bool:
-        """Promote the accuracy, config and wall-clock the anchor run measured; whether any moved."""
         from hyperloom.common.perf_metric import perf_snapshot_from_mapping
 
         state = self.shared_state
@@ -2387,7 +2301,6 @@ class WritebackCollaborator(GeakRevalidation):
         return changed
 
     def _promote_anchor_round_split(self, result: dict) -> bool:
-        """Promote the anchor's warm and boot wall-clock splits; whether either moved."""
         state = self.shared_state
         changed = False
         # Present only on the double-run baseline path; else explore uses the cold anchor.
@@ -2408,7 +2321,6 @@ class WritebackCollaborator(GeakRevalidation):
         return changed
 
     def _anchor_current_best(self, result: dict) -> None:
-        """Make the anchor run the session's ``current_best``."""
         tput = result.get("output_throughput")
         warmup_anchor = result.get("warmup_round_tput")
         measured = float(tput) if isinstance(tput, (int, float)) else None
@@ -2456,7 +2368,6 @@ class WritebackCollaborator(GeakRevalidation):
         held_reason: str,
         prior_anchor: float,
     ) -> dict[str, Any]:
-        """What a settled baseline's audit row records about it."""
         tput = result.get("output_throughput")
         measured = float(tput) if isinstance(tput, (int, float)) else None
         extras: dict[str, Any] = {
@@ -2478,7 +2389,6 @@ class WritebackCollaborator(GeakRevalidation):
         return extras
 
     async def _bootstrap_prelude_after_baseline(self, tput: Any) -> None:
-        """Fire the post-baseline PRELUDE chain, in the order it has to run in."""
         # History injection fires regardless of --no-warm-replay.
         self._coord.phase_prelude.inject_warm_recipe_history_into_ledger()
         # Warm-recipe replay, anchored on the hot baseline_tput contract.
@@ -2558,7 +2468,6 @@ class WritebackCollaborator(GeakRevalidation):
         await self._coord.phase_prelude.maybe_enqueue_prelude_initial_analysis_after_baseline()
 
     def _record_failed_profile(self, trace_path: Any) -> None:
-        """Mark the session's last profile as failed, keeping a trace the round did produce."""
         self.shared_state.last_profile_status = "failed"
         self.shared_state.last_profile_workload = {}
         if not trace_path:
@@ -2568,7 +2477,6 @@ class WritebackCollaborator(GeakRevalidation):
         self.shared_state.last_profile_workload_action = ""
 
     def _adopt_profile_trace(self, result: dict, task: "Task | None", trace_path: Any) -> str:
-        """Make this trace the session's last profile, and invalidate the stale analysis."""
         self.shared_state.last_profile_trace = str(trace_path)
         self.shared_state.last_profile_launch_evidence_path = str(result.get("launch_evidence_path") or "")
         self.shared_state.last_profile_status = "succeeded"
@@ -2655,7 +2563,6 @@ class WritebackCollaborator(GeakRevalidation):
         outcome.audit_extras = audit_extras
 
     def _anchor_watermark_on_roofline(self, result: dict, task: "Task | None") -> dict[str, Any]:
-        """Re-anchor the watermark step on a succeeded roofline; describe its snapshot."""
         # Prefer the executor's last_trace_analyze snapshot over the result dict.
         last_ta = self.shared_state.last_trace_analyze or {}
         self.shared_state.roofline_failure_streak = 0
@@ -2679,7 +2586,6 @@ class WritebackCollaborator(GeakRevalidation):
         }
 
     def _charge_roofline_failure(self, result: dict, task: "Task | None") -> dict[str, Any]:
-        """Charge a failed roofline to the streak; describe what it failed on."""
         self.shared_state.roofline_failure_streak += 1
         log.warning(
             "Auto-roofline %s failed (reason=%s phase=%s "
@@ -2798,7 +2704,6 @@ class WritebackCollaborator(GeakRevalidation):
         outcome.audit_extras = _explore_audit_extras(result)
 
     def _record_framework_lever_attributions(self, result: Mapping[str, Any]) -> bool:
-        """Record what each framework lever this round measured was worth; whether any landed."""
         recorded = False
         for attribution in result.get("framework_lever_attributions") or []:
             if not isinstance(attribution, dict):
@@ -2812,7 +2717,6 @@ class WritebackCollaborator(GeakRevalidation):
         return recorded
 
     async def _warn_on_stale_revalidation(self, task: "Task") -> bool:
-        """Whether a revalidation measured an older recipe than the one now live."""
         measured_generation = (task.params or {}).get("recipe_generation")
         working_generation = int(self.shared_state.working_recipe_generation or 0)
         if measured_generation is None or int(measured_generation) == working_generation:
@@ -2837,7 +2741,6 @@ class WritebackCollaborator(GeakRevalidation):
         return True
 
     async def _reconcile_revalidated_watermark(self, result: dict, *, stale: bool) -> None:
-        """Move the validation watermark onto what a stack revalidation measured."""
         measured = result.get("output_throughput")
         if stale or not isinstance(measured, (int, float)) or measured <= 0:
             return
@@ -2863,7 +2766,6 @@ class WritebackCollaborator(GeakRevalidation):
         )
 
     def _record_accepted_winners(self, result: Mapping[str, Any], winners: list[dict[str, Any]]) -> None:
-        """Enter this round's winners on the explore ledger."""
         round_id = str(result.get("round_id") or "")
         for winner in winners:
             accepted = dict(winner)
@@ -2881,7 +2783,6 @@ class WritebackCollaborator(GeakRevalidation):
         task: "Task | None",
         outcome: _PromoteOutcome,
     ) -> _ExploreLift:
-        """Enter this round's explore winners and lift the ones that still beat the anchor."""
         winners = [winner for winner in result.get("winners") or [] if isinstance(winner, dict)]
         self._record_accepted_winners(result, winners)
         gap_canonical_id = str((task.params or {}).get("gap_canonical_id") or "").strip() if task is not None else ""
@@ -2979,7 +2880,6 @@ class WritebackCollaborator(GeakRevalidation):
         outcome.changed = changed
 
     def _record_authored_levers(self, result: Mapping[str, Any]) -> bool:
-        """Register this patch's framework-rewrite switches as search levers; whether any landed."""
         levers = result.get("framework_levers")
         if not (isinstance(levers, list) and levers):
             return False
@@ -3001,7 +2901,6 @@ class WritebackCollaborator(GeakRevalidation):
         *,
         enablement_landing: bool,
     ) -> bool:
-        """Lift a settled integrate_patch KEEP onto current_best; whether it landed."""
         task_params = (getattr(task, "params", None) or {}) if task is not None else {}
         new_tput = float(measurement.get("output_throughput", result.get("output_throughput")))
         variant = _integrate_keep_variant(result, task, measurement, new_tput)
@@ -3127,7 +3026,6 @@ class WritebackCollaborator(GeakRevalidation):
         }
 
     def _publish_recovered_keeps(self, report: dict[str, Any]) -> None:
-        """Materialise the KB sections the recovered KEEPs owe, once the state is durable."""
         state = self.shared_state
         resume_state_durable = True
         try:
@@ -3147,7 +3045,6 @@ class WritebackCollaborator(GeakRevalidation):
             report["fixes"].append({"kind": "reconciled_kb_stage_outbox", "count": pending_before})
 
     async def _compensate_validation_watermark(self, report: dict[str, Any]) -> None:
-        """Enqueue the one full-stack rebench that re-measures unvalidated KEEPs."""
         state = self.shared_state
         if not state.optimization_stack_has_unvalidated_keeps():
             return
@@ -3495,7 +3392,15 @@ class WritebackCollaborator(GeakRevalidation):
             # Additive evidence record. Consumers can distinguish a captured
             # launch from a declaration resolved without a new CLI line.
             "measurement_evidence": dict(measurement.get("launch_evidence") or {}),
-            "measurement_identity": _measurement_identity(measurement),
+            "measurement_identity": {
+                "declared_launch_identity": str(
+                    measurement.get("declared_launch_identity") or measurement.get("launch_identity") or ""
+                ),
+                "observed_launch_identity": str(measurement.get("observed_launch_identity") or ""),
+                "verification_status": str(measurement.get("identity_verification_status") or "unverified"),
+                "observed_server_identity": dict(measurement.get("observed_server_identity") or {}),
+                "resolved_server_config": dict(measurement.get("resolved_server_config") or {}),
+            },
         }
         env_spec["launch_identity"] = self._handoff_launch_identity(env_spec)
         return env_spec
@@ -3678,7 +3583,6 @@ class WritebackCollaborator(GeakRevalidation):
         report: dict[str, Any],
         marker: _IntegrateMarker,
     ) -> bool:
-        """Clear a sentinel whose records show the tree was put back; whether it was cleared."""
         task_id = str(pending.get("task_id") or "")
         if marker.verdict == "settled":
             fix = {
@@ -3695,7 +3599,6 @@ class WritebackCollaborator(GeakRevalidation):
         return True
 
     async def _scan_for_published_integrate_keep(self, task_id: str) -> _KeptResultScan:
-        """Search the event log for the KEEP an integrate window published before it crashed."""
         try:
             for msg in await self.bus.tail(topic="delegated_result", n=-1):
                 payload = msg.payload or {}
@@ -4032,7 +3935,6 @@ class WritebackCollaborator(GeakRevalidation):
             log.debug("resume: revalidation pending recovery check failed", exc_info=True)
 
     async def _surface_orphaned_keep(self, report: dict[str, Any], kind: str, variant: str, task_id: Any) -> None:
-        """Alert on an explore or framework KEEP the stack lost, without resurrecting it."""
         report["warnings"].append(
             {"kind": "orphaned_keep", "orphan_kind": kind, "variant": variant, "task_id": task_id}
         )
@@ -4049,7 +3951,6 @@ class WritebackCollaborator(GeakRevalidation):
         variant: str,
         task_id: Any,
     ) -> bool:
-        """Replay an integrate_patch KEEP the stack lost; whether the stack now carries it."""
         kind = "integrate_patch"
         workspace = str(result.get("workspace") or "").strip()
         if workspace and not Path(workspace).exists():

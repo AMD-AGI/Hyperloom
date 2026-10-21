@@ -1,15 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Ruling on a GEAK end-to-end win: the 2b rebench, and the 2a harness replay behind it.
-
-A GEAK win is accepted on GEAK's own measurement, so the orchestrator re-measures
-it on its own harness before any of it reaches ``current_best``. This module owns
-that round end to end: the params the rebench is dispatched with, how its result
-is read, what each reading is allowed to publish, and -- when the rebench cannot
-rule -- the replay through GEAK's own ``bench_e2e.sh``, whose reproduction of the
-accepted configuration is what makes a succeeded replay engagement proof.
-"""
+"""Ruling on a GEAK end-to-end win: the 2b rebench, and the 2a harness replay behind it."""
 
 from __future__ import annotations
 
@@ -48,13 +40,6 @@ _MIN_KERNEL_ENGAGED_GAIN_PCT: float = 2.0
 
 
 class _GeakRebench(NamedTuple):
-    """A GEAK 2b rebench: what it measured, and what it measured against.
-
-    ``current_best`` and ``candidate`` are read once, before the ruling can
-    promote and move them, so every arm of the ruling judges the same state the
-    rebench was measured against.
-    """
-
     variant: Mapping[str, Any]
     measurement: dict[str, Any]
     measured: float
@@ -66,8 +51,6 @@ class _GeakRebench(NamedTuple):
 
 
 class _OverlayReading(NamedTuple):
-    """Whether the overlay a 2b rebench expected was in the measurement."""
-
     expected: str
     loaded: bool
     digest: str
@@ -75,22 +58,16 @@ class _OverlayReading(NamedTuple):
 
 
 class _RebenchDecision(NamedTuple):
-    """What a 2b rebench decided, and the native refusal behind it if any."""
-
     decision: str
     native_rejection: str
 
 
 class _ReplayRuling(NamedTuple):
-    """How a GEAK-harness replay ruled a revalidation it was handed."""
-
     decision: str
     promoted: bool
 
 
 class _MaterialVerdict(NamedTuple):
-    """Whether a validated GEAK rebench has material product behind it."""
-
     decision: str
     rejection: str | None = None
 
@@ -102,12 +79,6 @@ FALLBACK = "fallback"
 
 
 class _RebenchEngagement(NamedTuple):
-    """What a settled 2b rebench reported about the config and overlay it was dispatched with.
-
-    ``config_matched`` and ``overlay_loaded`` are ``None`` when nothing was
-    expected on that axis, which is a different answer from a miss.
-    """
-
     config_matched: bool | None
     overlay_loaded: bool | None
     observed_cfg_hash: str
@@ -115,8 +86,6 @@ class _RebenchEngagement(NamedTuple):
 
 
 class _GeakProduct(NamedTuple):
-    """The deployable parts of an accepted GEAK result."""
-
     flags: str
     envs: Mapping[str, Any]
     controls: dict[str, Any]
@@ -125,7 +94,6 @@ class _GeakProduct(NamedTuple):
 
 
 def _geak_rebench_grid_row(accepted: Mapping[str, Any], product: _GeakProduct, overlay: str) -> dict[str, Any]:
-    """The single grid variant a 2b rebench measures."""
     kernels = [geak_spec_name(spec) for spec in _geak_accepted_kernel_specs(accepted)]
     return {
         "name": "geak_revalidate",
@@ -145,7 +113,6 @@ def _grades_can_rule(
     baseline_grade: GradedComparison,
     current_grade: GradedComparison,
 ) -> bool:
-    """Whether a 2b rebench produced a reading both grades can rule on."""
     if measured <= 0 or str(result.get("status") or "succeeded") not in {"succeeded", "ok"}:
         return False
     return (
@@ -154,7 +121,6 @@ def _grades_can_rule(
 
 
 def _gate_refused(entry: Mapping[str, Any]) -> bool:
-    """Whether a per-variant outcome records a graded-axes or accuracy gate turning it down."""
     if "gates" not in entry:
         return entry.get("reason") in {"accuracy_drop", EVAL_KIND_ACCURACY_UNAVAILABLE, "intvty_regression"}
     return any(
@@ -164,7 +130,6 @@ def _gate_refused(entry: Mapping[str, Any]) -> bool:
 
 
 def _native_rejection_reason(result: Mapping[str, Any], expected_hash: str) -> str:
-    """Why the native gate turned this rebench's own variant down, or ``""`` when it did not."""
     return next(
         (
             str(entry.get("reason") or "native_gate_rejected")
@@ -179,28 +144,22 @@ def _native_rejection_reason(result: Mapping[str, Any], expected_hash: str) -> s
 
 
 class _ReplayRegime(NamedTuple):
-    """The single operating point a 2a replay re-measures at."""
-
     conc: int
     isl: int
     osl: int
 
 
 class _ReplayOverlay(NamedTuple):
-    """The kernel overlay a 2a replay expected, as it stood before the replay ran."""
-
     path: str
     digest_before: str
 
 
 def _promotion_measurement(res: Mapping[str, Any]) -> Mapping[str, Any]:
-    """The measurement a GEAK sweep promotes on, or an empty mapping when it carries none."""
     measurement = res.get("promotion_measurement")
     return measurement if isinstance(measurement, Mapping) else {}
 
 
 def _geak_own_speedup(accepted: Mapping[str, Any]) -> float:
-    """GEAK's own within-harness speedup, read on the basis it promoted on."""
     try:
         speedup = float(accepted.get("throughput_speedup") or 0.0)
     except (TypeError, ValueError):
@@ -217,7 +176,6 @@ def _geak_own_speedup(accepted: Mapping[str, Any]) -> float:
 
 
 def _replay_regime(accepted: Mapping[str, Any]) -> _ReplayRegime:
-    """The operating point a 2a replay re-measures, falling back to the canonical one."""
     regimes = accepted.get("validated_regimes") or []
     first = regimes[0] if regimes and isinstance(regimes[0], dict) else {}
     try:
@@ -231,17 +189,13 @@ def _replay_regime(accepted: Mapping[str, Any]) -> _ReplayRegime:
 
 
 def _overlay_survived_replay(overlay: _ReplayOverlay) -> bool:
-    """Whether the kernel overlay was still installable, and still the same one, at replay time."""
     if not overlay.path or not geak_overlay_is_loadable(overlay.path):
         return False
     return not overlay.digest_before or _geak_overlay_digest(overlay.path) == overlay.digest_before
 
 
 class GeakRevalidation(CoordinatorCollaborator):
-    """Rules on a GEAK win: rebenches it on our harness, and replays it through GEAK's when that cannot rule."""
-
     def geak_rebench_params(self, *, reason: str) -> dict[str, Any]:
-        """Build canonical revalidation params, or explain why a product cannot be deployed."""
         from ..phases.geak_native_revalidation import source_rebench_params
 
         accepted = self.shared_state.geak_result if isinstance(self.shared_state.geak_result, dict) else {}
@@ -267,7 +221,6 @@ class GeakRevalidation(CoordinatorCollaborator):
         return self._geak_explore_rebench_params(accepted, product, reason=reason)
 
     def _accepted_geak_product(self, accepted: Mapping[str, Any]) -> _GeakProduct | None:
-        """What an accepted GEAK result offers to deploy, or ``None`` when it offers nothing."""
         config = accepted.get("accepted_config") or {}
         admissible = str(accepted.get("status") or "") == "ok" or _geak_has_accepted_kernel(accepted)
         controls = _accepted_config_controls(
@@ -290,7 +243,6 @@ class GeakRevalidation(CoordinatorCollaborator):
         *,
         reason: str,
     ) -> dict[str, Any]:
-        """The explore-executor params that re-measure a GEAK config or overlay product."""
         from ..actions.executors._proposal_identity import effective_fingerprint
 
         overlay = product.overlay
@@ -338,7 +290,6 @@ class GeakRevalidation(CoordinatorCollaborator):
         return params
 
     def _geak_rebench_base_params(self, controls: Mapping[str, Any]) -> dict[str, Any]:
-        """The launch the 2b rebench measures the GEAK product on top of."""
         base = stack_base_params({**self.shared_state.current_best, **self.current_best_launch_config()})
         base = {
             key: value
@@ -352,7 +303,6 @@ class GeakRevalidation(CoordinatorCollaborator):
         return base
 
     async def _rule_on_geak_rebench(self, result: dict, *, task: "Task") -> Verdict:
-        """Rule on a GEAK (2b) revalidation rebench and publish what it decided."""
         # Set by the validated promotion and by the harness replay; a ruling that
         # reaches neither leaves the round unpromoted.
         promoted = False
@@ -418,12 +368,10 @@ class GeakRevalidation(CoordinatorCollaborator):
         return Verdict.ADOPTED if promoted else Verdict.REFUSED
 
     def _geak_candidate_slot_status(self) -> str:
-        """The status of the candidate slot this revalidation was dispatched for."""
         pending = self.shared_state.geak_pending or {}
         return str(pending.get("status") or "") if isinstance(pending, dict) else ""
 
     def _read_geak_rebench(self, result: dict) -> _GeakRebench:
-        """Read a 2b rebench round: the variant measured, and what it measured against."""
         from hyperloom.common.perf_metric import output_tput_of
 
         best_winner = result.get("best_variant")
@@ -460,7 +408,6 @@ class GeakRevalidation(CoordinatorCollaborator):
         *,
         decision: str,
     ) -> _OverlayReading:
-        """Read whether the kernel overlay a 2b rebench expected survived the run."""
         expected_overlay = str((task.params or {}).get("expected_overlay") or "")
         overlay_loaded = True
         got_digest = ""
@@ -487,7 +434,6 @@ class GeakRevalidation(CoordinatorCollaborator):
         task: "Task",
         rebench: _GeakRebench,
     ) -> _RebenchDecision:
-        """Read what a GEAK 2b rebench decided about the stack it re-measured."""
         measured, got_hash = rebench.measured, rebench.got_hash
         expected_hash = str((task.params or {}).get("expected_cfg_hash") or "")
         baseline_grade = resolve_graded_comparison(self.shared_state, rebench.measurement, against_baseline=True)
@@ -516,7 +462,6 @@ class GeakRevalidation(CoordinatorCollaborator):
         return _RebenchDecision(decision=decision, native_rejection=native_rejection)
 
     async def _drop_immaterial_rebench(self, rebench: _GeakRebench) -> None:
-        """Record a rebench that beat current_best with no GEAK product behind it."""
         candidate, measured = rebench.candidate, rebench.measured
         current_best_tput = rebench.current_best_tput
         log.info(
@@ -567,7 +512,6 @@ class GeakRevalidation(CoordinatorCollaborator):
         decision: str,
         native_rejection: str,
     ) -> None:
-        """Record a revalidation the rebench refused, and why it was refused."""
         measured, measured_ok = rebench.measured, rebench.measured_ok
         candidate, current_best_tput = rebench.candidate, rebench.current_best_tput
         log.info(
@@ -601,7 +545,6 @@ class GeakRevalidation(CoordinatorCollaborator):
         result["status"] = "no_promote"
 
     def _promote_validated_rebench(self, rebench: _GeakRebench, *, overlay_loaded: bool) -> bool:
-        """Write the headline a validated orchestrator-harness rebench earns."""
         measurement, variant = rebench.measurement, rebench.variant
         promotion_result = dict(rebench.candidate)
         for key in (
@@ -626,7 +569,6 @@ class GeakRevalidation(CoordinatorCollaborator):
         )
 
     def _material_verdict(self, rebench: _GeakRebench) -> _MaterialVerdict:
-        """Rule on whether a validated GEAK rebench has material product behind it."""
         pending_summary, current_best = rebench.candidate, rebench.current_best
         stack_now = self.shared_state.optimization_stack or []
         has_prior_geak_e2e = any(isinstance(e, dict) and e.get("action") == "geak_e2e" for e in stack_now)
@@ -669,7 +611,6 @@ class GeakRevalidation(CoordinatorCollaborator):
         measured: Any,
         engagement: _RebenchEngagement,
     ) -> None:
-        """Record one GEAK rebench attempt on the kernel timeline event."""
         recorder = self._coord.phase_kernel.timeline()
         if recorder is None:
             return
@@ -697,7 +638,6 @@ class GeakRevalidation(CoordinatorCollaborator):
         )
 
     def _close_failed_geak_revalidation(self, result_payload: Mapping[str, Any]) -> None:
-        """Settle a GEAK revalidation whose rebench task came back unpromotable."""
         geak_result = {
             **(self.shared_state.geak_result or {}),
             "revalidation_status": "failed",
@@ -720,11 +660,6 @@ class GeakRevalidation(CoordinatorCollaborator):
         final_error_class: str = "",
         final_error: str = "",
     ) -> None:
-        """Record the terminal revalidation verdict on the kernel timeline event.
-
-        The points that stamp a closed verdict onto ``geak_result`` also release the candidate slot, so the
-        verdict has nowhere else to be read from afterwards.
-        """
         recorder = self._coord.phase_kernel.timeline()
         if recorder is None:
             return
@@ -735,11 +670,6 @@ class GeakRevalidation(CoordinatorCollaborator):
         )
 
     async def validate_geak_via_geak_harness(self, *, reason: str) -> dict[str, Any]:
-        """2a fallback - validate the geak win by replaying it through GEAK's own ``bench_e2e.sh``.
-
-        That is the harness which produced the headline result, so the optimized config engages by
-        construction whatever the winner kind, and a ``succeeded`` status is itself the engagement proof.
-        """
         from hyperloom.common.perf_metric import is_agentx_mode
         from ..actions.executors._workload_envs import agentx_enabled
 
@@ -780,7 +710,6 @@ class GeakRevalidation(CoordinatorCollaborator):
         return {"validated": False, "status": res.get("status"), "reason": reason}
 
     async def _replay_through_geak(self, accepted: Mapping[str, Any], mode: str) -> dict[str, Any]:
-        """Re-run an accepted GEAK win through GEAK's own end-to-end harness."""
         from hyperloom.common.jsonio import read_json
         from hyperloom.inference_optimizer.session.session_paths import unique_runs_dir
         from ..actions.executors._geak_sweep import sweep_via_geak
@@ -807,7 +736,6 @@ class GeakRevalidation(CoordinatorCollaborator):
         )
 
     def _replay_accuracy_failure(self, measurement: Mapping[str, Any]) -> str:
-        """Why the replay's accuracy disqualifies the win, or ``""`` when it does not."""
         baseline_accuracy = float(self.shared_state.baseline_accuracy or 0.0)
         if baseline_accuracy <= 0:
             return ""
@@ -828,7 +756,6 @@ class GeakRevalidation(CoordinatorCollaborator):
         res: Mapping[str, Any],
         failure: str,
     ) -> None:
-        """Close the candidate out on the accuracy its 2a replay measured."""
         self._coord.phase_kernel.reject_geak_promotion(
             {
                 **accepted,
@@ -850,7 +777,6 @@ class GeakRevalidation(CoordinatorCollaborator):
         *,
         reason: str,
     ) -> dict[str, Any]:
-        """Write the headline a succeeded 2a replay earns; report what it settled."""
         measured = _geak_sweep_measured_tput(res)
         if measured is None:
             log.warning("geak 2a: succeeded sweep but no measurable throughput; candidate stays pending")
@@ -892,7 +818,6 @@ class GeakRevalidation(CoordinatorCollaborator):
         task: Task,
         rebench: _GeakRebench,
     ) -> _ReplayRuling:
-        """Replay an inconclusive 2b revalidation through the GEAK harness (2a)."""
         measured, got_hash = rebench.measured, rebench.got_hash
         promoted = False
         decision = FALLBACK
