@@ -13,6 +13,7 @@ import pytest
 import yaml
 
 from hyperloom.measure import signing
+from hyperloom.measure.framework_base import FRAMEWORK_ROOTS_ENV, FRAMEWORK_WATCH_ENV, SESSION_DIGEST_ENV, tree_digest
 from hyperloom.measure.bundle import BundleExpectation, verify_bundle
 from hyperloom.measure.manifest import ResultManifest
 from hyperloom.measure.runner import run as runner
@@ -142,13 +143,67 @@ def test_a_successful_test_leaves_a_signed_manifest_and_status_last(tmp_path, en
     assert signing.verify(raw, (out / "manifest.sig").read_text(), signing.public_key_pem(key))
     manifest = ResultManifest.from_bytes(raw)
     assert manifest.request_id == REQUEST_ID and manifest.outcome.returncode == 0
-    assert sorted(f.path for f in manifest.files) == ["farm_inventory.json", "rounds.json", "server.log"]
+    assert sorted(f.path for f in manifest.files) == [
+        "farm_inventory.json",
+        "framework_base.json",
+        "rounds.json",
+        "server.log",
+    ]
     assert json.loads((out / "files" / "rounds.json").read_text()) == [
         {"point": 0, "phase": "measure", "dir": ".", "returncode": 0}
     ]
     assert manifest.runner.sandbox_id == "sbx-1" and manifest.runner.node_name == "node-1"
     assert manifest.platform_env_changed == ("NCCL_IB_SL",)
     assert _status(tmp_path) == {"state": "succeeded", "error_class": None, "message": ""}
+
+
+def _framework_environment(tmp_path, env, table: bytes) -> str:
+    tables = tmp_path / "configs"
+    tables.mkdir()
+    (tables / "tuned.csv").write_bytes(table)
+    env.update({FRAMEWORK_ROOTS_ENV: str(tmp_path), FRAMEWORK_WATCH_ENV: str(tables)})
+    return tree_digest([str(tables)])
+
+
+def test_the_signed_result_says_what_framework_base_the_test_began_on(tmp_path, env, monkeypatch):
+    session = _framework_environment(tmp_path, env, b"M,N,K\n")
+    env[SESSION_DIGEST_ENV] = session
+    monkeypatch.setattr(runner, "LocalMeasurementBackend", _Backend(_ok))
+
+    assert _go(tmp_path, env, _sheet()) == 0
+
+    base = json.loads((tmp_path / "out" / "files" / "framework_base.json").read_text())
+    assert base["isolated_roots"] == [str(tmp_path)] and base["watched"] == [str(tmp_path / "configs")]
+    assert base["tree_sha256"] == session == base["session_sha256"] and base["matches_session"] is True
+    listed = ResultManifest.from_bytes((tmp_path / "out" / "manifest.json").read_bytes()).files
+    assert "framework_base.json" in [f.path for f in listed], "the signature covers it"
+
+
+def test_a_test_that_began_on_another_base_than_the_sessions_is_marked_in_its_result(tmp_path, env, monkeypatch):
+    _framework_environment(tmp_path, env, b"M,N,K\n64,5120,5120\n")
+    env[SESSION_DIGEST_ENV] = tree_digest([str(tmp_path / "missing")])
+    monkeypatch.setattr(runner, "LocalMeasurementBackend", _Backend(_ok))
+
+    assert _go(tmp_path, env, _sheet()) == 0
+
+    base = json.loads((tmp_path / "out" / "files" / "framework_base.json").read_text())
+    assert base["matches_session"] is False
+
+
+def test_the_base_is_hashed_before_the_test_runs_not_after_it(tmp_path, env, monkeypatch):
+    session = _framework_environment(tmp_path, env, b"M,N,K\n")
+    env[SESSION_DIGEST_ENV] = session
+
+    def damaging(call: TestCall) -> TestOutcome:
+        (tmp_path / "configs" / "tuned.csv").write_bytes(b"damaged\n")
+        return _ok(call)
+
+    monkeypatch.setattr(runner, "LocalMeasurementBackend", _Backend(damaging))
+
+    assert _go(tmp_path, env, _sheet()) == 0
+
+    base = json.loads((tmp_path / "out" / "files" / "framework_base.json").read_text())
+    assert base["matches_session"] is True
 
 
 def test_the_call_is_built_from_the_sheet_and_the_environment_is_the_sandboxes(tmp_path, env, monkeypatch):

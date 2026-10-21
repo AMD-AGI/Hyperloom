@@ -221,7 +221,9 @@ class LocalOptions:
     infrastructure retries per test before it ends as ``measurement_failed`` and ``poll_interval_sec`` how often the
     backend polls a runner for its result. ``tools`` are the asynchronous tools ``start_analysis`` may reach; ``None``
     is the local set, TraceLens only: roofline profiles in the host process on host cards outside the card leases, so
-    it is not offered here.
+    it is not offered here. ``framework_roots`` are the framework installs every test sees as they were when the session
+    started and writes only privately (needs root and mount namespaces; creating a runner fails where they cannot be
+    made); ``None`` is ``/sgl-workspace`` when the machine has it, ``()`` runs the tests on the shared tree.
     """
 
     policy: QueuePolicy | None = None
@@ -232,12 +234,15 @@ class LocalOptions:
     max_infra_retries: int = DEFAULT_MAX_INFRA_RETRIES
     poll_interval_sec: float = _POLL_INTERVAL_SEC
     tools: Sequence[AsyncTool] | None = None
+    framework_roots: Sequence[str] | None = None
 
 
 def _provider(session: LocalSession, cards: tuple[int, ...], options: LocalOptions) -> LocalSandboxProvider:
     template = local_runner_template(
         f"runner-{session.tp}", gpus=session.tp, python=options.python, envs=options.runner_envs
     )
+    if options.framework_roots is not None:
+        template = replace(template, framework_roots=tuple(options.framework_roots))
     return LocalSandboxProvider(
         [template], gpus=cards, base_dir=Path(session.session_dir) / _SANDBOXES, hostname=session.hostname
     )

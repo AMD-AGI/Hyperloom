@@ -10,7 +10,16 @@ import sys
 
 import pytest
 
+from hyperloom.measure import local_templates
+from hyperloom.measure.framework_base import FRAMEWORK_WATCH_ENV, SESSION_DIGEST_ENV, tree_digest
 from hyperloom.measure.local_templates import image_env, local_runner_command, local_runner_template
+
+
+@pytest.fixture(autouse=True)
+def _no_framework_here(monkeypatch):
+    """What these tests assert must not depend on whether this machine has the image's framework installed."""
+    monkeypatch.setattr(local_templates, "DEFAULT_FRAMEWORK_ROOTS", ())
+    monkeypatch.setattr(local_templates, "DEFAULT_FRAMEWORK_WATCH", ())
 
 
 def _expanded(command: tuple[str, ...], root: str) -> str:
@@ -109,3 +118,34 @@ def test_explicit_envs_replace_the_image_variables(monkeypatch) -> None:
     monkeypatch.setenv("SGLANG_USE_AITER", "1")
     assert local_runner_template(envs={"A": "b"}).envs == {"A": "b"}
     assert local_runner_template(envs={}).envs == {}
+
+
+def test_the_image_framework_installs_that_exist_here_are_the_roots(tmp_path, monkeypatch) -> None:
+    present = tmp_path / "sgl-workspace"
+    present.mkdir()
+    monkeypatch.setattr(local_templates, "DEFAULT_FRAMEWORK_ROOTS", (str(present), str(tmp_path / "absent")))
+    assert local_runner_template().framework_roots == (str(present),)
+
+
+def test_the_tuned_tables_are_hashed_as_the_session_starts_and_named_for_the_runner(tmp_path, monkeypatch) -> None:
+    tables = tmp_path / "configs"
+    tables.mkdir()
+    (tables / "tuned.csv").write_text("M,N,K\n")
+    monkeypatch.setattr(local_templates, "DEFAULT_FRAMEWORK_WATCH", (str(tables),))
+    envs = local_runner_template(envs={}).envs
+    assert envs == {FRAMEWORK_WATCH_ENV: str(tables), SESSION_DIGEST_ENV: tree_digest([str(tables)])}
+    (tables / "tuned.csv").write_text("M,N,K\n64,5120,5120\n")
+    assert local_runner_template(envs={}).envs[SESSION_DIGEST_ENV] != envs[SESSION_DIGEST_ENV]
+
+
+def test_the_digest_follows_names_and_contents_and_counts_a_missing_path_as_absent(tmp_path) -> None:
+    (tmp_path / "a").mkdir()
+    (tmp_path / "a" / "x.csv").write_text("1")
+    paths = [str(tmp_path / "a"), str(tmp_path / "missing")]
+    first = tree_digest(paths)
+    assert tree_digest(paths) == first
+    (tmp_path / "a" / "x.csv").write_text("2")
+    assert tree_digest(paths) != first
+    (tmp_path / "a" / "x.csv").write_text("1")
+    (tmp_path / "a" / "x.csv").rename(tmp_path / "a" / "y.csv")
+    assert tree_digest(paths) != first

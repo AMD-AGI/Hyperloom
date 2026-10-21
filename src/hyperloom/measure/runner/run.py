@@ -26,6 +26,7 @@ from hyperloom.measure.manifest import encode_manifest, RESULT_SCHEMA
 from hyperloom.measure.runner import hardware
 from hyperloom.measure.attachments import AttachmentError, place_attachments
 from hyperloom.measure.farm import Farm, FarmError, build_farm, server_environment, server_python, verify_farm
+from hyperloom.measure.framework_base import framework_base, write_framework_base
 from hyperloom.measure.runner.inventory import OutputRejected, drop_agentx_runtime, inventory, write_farm_inventory
 from hyperloom.measure.runner.platform_env import align_platform_env, take_topology
 from hyperloom.measure.runner.rewrite import Placement, rewrite_config
@@ -303,6 +304,7 @@ def _run_sheet(ctx: _Context, spec_path: Path, key, progress: Progress) -> None:
     visible = _visible(ctx.environ)
     _check_model(spec.config[0].yaml, dict(spec.model_hashes))
     facts = _preflight(spec, visible)
+    base = framework_base(ctx.environ)
     before = hardware.ecc_counts(visible)
     changed = align_platform_env(ctx.environ, spec.platform_env)
     progress.phase("preparing")
@@ -316,6 +318,7 @@ def _run_sheet(ctx: _Context, spec_path: Path, key, progress: Progress) -> None:
     drop_agentx_runtime(ctx.files)
     _check_node(before, hardware.ecc_counts(visible), visible, facts)
     write_farm_inventory(ctx.files, farm)
+    write_framework_base(ctx.files, base)
     write_rounds(ctx.files, outcome)
     try:
         files = inventory(ctx.files, max_total_bytes=spec.outputs.max_total_bytes)
