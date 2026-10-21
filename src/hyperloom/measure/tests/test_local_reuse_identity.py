@@ -11,6 +11,7 @@ run a real sweep arm through ``LocalMeasurementBackend`` with the points the too
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -18,13 +19,15 @@ from typing import Any
 import pytest
 import yaml
 
-from hyperloom.contracts.recipe import RecipeDelta
+from hyperloom.contracts.recipe import KernelArtifact, KernelKind, RecipeDelta
 from hyperloom.measure import local
-from hyperloom.measure.compile import LocalBlobStore, PackageBase, compile_environment
+from hyperloom.measure.compile import CompiledEnvironment, LocalBlobStore, PackageBase, compile_environment
+from hyperloom.measure.framework_base import framework_envs
 from hyperloom.measure.local import LocalMeasurementBackend
 from hyperloom.measure.points import default_canonical, generate_points
-from hyperloom.measure.socket import RoundPlan, TestCall
-from hyperloom.measure.tests._recipes import IMAGE, recipe_with
+from hyperloom.measure.socket import EnvironmentRef, RoundPlan, TestCall
+from hyperloom.measure.tests._recipes import IMAGE, recipe_with, sha
+from hyperloom.measure.tests.framework_fixtures import make_framework
 from hyperloom.orchestrator.actions.executors import VariantResult
 from hyperloom.orchestrator.actions.executors._grid_runner import _build_variant_yaml
 from hyperloom.orchestrator.actions.executors._workload_envs import default_baseline_config
@@ -98,12 +101,16 @@ class _Rounds:
             base_extra_envs=kwargs.get("base_extra_envs"),
         )
         envs = yaml.safe_load(candidate.read_text())["benchmark"]["envs"]
+        tables = [
+            part for key, value in envs.items() if key.startswith("AITER_CONFIG_") for part in value.split(os.pathsep)
+        ]
         self.rounds.append(
             {
                 "name": variant.name,
                 "boot": bool(kwargs.get("lifecycle_boot_only")),
                 "ready": bool(kwargs.get("server_already_ready")),
                 "envs": envs,
+                "tables_present": [Path(part).read_text() for part in tables if Path(part).is_file()],
             }
         )
         workspace = self.tmp_path / "ws" / str(len(self.rounds))
@@ -133,7 +140,17 @@ def rounds(monkeypatch, tmp_path) -> _Rounds:
     return fake
 
 
-def _points(tmp_path: Path, *, accuracy: bool) -> tuple[Path, ...]:
+def _environment(tmp_path: Path, delta: RecipeDelta | None = None) -> CompiledEnvironment:
+    return compile_environment(
+        recipe_with(),
+        delta or RecipeDelta(),
+        blobs=LocalBlobStore(tmp_path / "blobs"),
+        active_image_digest=IMAGE,
+        locator=lambda _layout: PackageBase("sglang", tmp_path, None, None),
+    )
+
+
+def _points(tmp_path: Path, *, accuracy: bool, environment: CompiledEnvironment | None = None) -> tuple[Path, ...]:
     """The points the toolbox renders for a sweep over ``LEVELS``: the real planner, the shipped baseline recipe."""
     model = tmp_path / "model"
     model.mkdir()
@@ -144,19 +161,14 @@ def _points(tmp_path: Path, *, accuracy: bool) -> tuple[Path, ...]:
         config_path=default_baseline_config(),
         model_path=str(model),
     )
-    environment = compile_environment(
-        recipe_with(),
-        RecipeDelta(),
-        blobs=LocalBlobStore(tmp_path / "blobs"),
-        active_image_digest=IMAGE,
-        locator=lambda _layout: PackageBase("sglang", tmp_path, None, None),
-    )
+    environment = environment or _environment(tmp_path)
     return generate_points(environment, canonical, tmp_path / "points", concurrency=LEVELS, accuracy=accuracy)
 
 
-def _sweep(tmp_path: Path, *, accuracy: bool = False) -> TestCall:
+def _sweep(tmp_path: Path, *, accuracy: bool = False, environment: CompiledEnvironment | None = None) -> TestCall:
     return TestCall(
-        points=_points(tmp_path, accuracy=accuracy),
+        points=_points(tmp_path, accuracy=accuracy, environment=environment),
+        environment=environment or EnvironmentRef.current_stack(),
         output_dir=tmp_path / "out",
         timeout_sec=900,
         cwd=str(tmp_path),
@@ -210,6 +222,47 @@ def test_on_magpie_the_warmup_and_the_measured_round_of_a_graded_test_have_one_s
     assert (warmup["envs"]["RUN_EVAL"], measured["envs"]["RUN_EVAL"]) == ("true", "false"), "one evaluation, first"
     assert magpie_server_env(measured["envs"]) == magpie_server_env(warmup["envs"]), "Magpie's reuse check passes"
     assert warmup["envs"]["NUM_PROMPTS"] == measured["envs"]["NUM_PROMPTS"], "both are full rounds"
+
+
+TABLE_ENV = "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE"
+TABLE = b"cu_num,M,N,K,libtype,solidx\n304,64,5120,5120,hipblaslt,7\n"
+
+
+@pytest.fixture
+def framework_session(tmp_path, monkeypatch):
+    """The toolbox's start on a machine with aiter's tables: the snapshot is taken and the runner's variables are set."""
+    for name in list(os.environ):
+        if name.startswith(("AITER_CONFIG_", "HYPERLOOM_FRAMEWORK_")):
+            monkeypatch.delenv(name)
+    for name, value in framework_envs(tmp_path / "framework", str(make_framework(tmp_path))).items():
+        monkeypatch.setenv(name, value)
+
+
+def test_a_put_kernel_table_has_one_path_in_every_round_of_a_sweep_arm(
+    rounds, tmp_path, monkeypatch, framework_session
+):
+    """The private copy of a table is named by what the table is, not by the point that names it first.
+
+    The boot round runs on the highest level and the rounds that measure on the levels below it, each from a point of
+    its own that names the same table; a path that counted the points ("2-k-..." at the boot, "1-k-..." next) made
+    Magpie's reuse check refuse every level after the boot.
+    """
+    monkeypatch.setenv("HYPERLOOM_BENCHMARK_BACKEND", "magpie")
+    LocalBlobStore(tmp_path / "blobs").put(TABLE)
+    table = KernelArtifact(
+        KernelKind.GEMM, "fp8", "kernel/t.csv", sha(TABLE), {"load": {"via": "env_file", "env": TABLE_ENV}}
+    )
+    environment = _environment(tmp_path, RecipeDelta(add_kernels=(table,)))
+
+    LocalMeasurementBackend().run_test(_sweep(tmp_path, environment=environment))
+
+    boot, *measured = rounds.rounds
+    assert boot["boot"] and [r["name"] for r in measured] == ["c64", "c16", "c4"]
+    for round_ in measured:
+        assert magpie_server_env(round_["envs"]) == magpie_server_env(boot["envs"]), f"the round at {round_['name']}"
+    for round_ in rounds.rounds:
+        assert round_["tables_present"] == [TABLE.decode()], f"the table {round_['name']} names is a private copy"
+        assert round_["envs"][TABLE_ENV] == boot["envs"][TABLE_ENV]
 
 
 def test_on_bypass_the_boot_round_carries_the_server_phase(rounds, tmp_path, monkeypatch):

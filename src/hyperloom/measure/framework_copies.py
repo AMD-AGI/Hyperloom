@@ -59,6 +59,7 @@ _SCHEMA = "hyperloom.framework-base/v1"
 _CONFIGS = "configs"
 _SANDBOX_ROOT_ENV = "HYPERLOOM_SANDBOX_ROOT"
 _UTF8 = "utf-8"
+_TABLE_DIGEST_CHARS = 16
 
 
 @dataclass(frozen=True)
@@ -85,14 +86,25 @@ class _Redirect:
         return os.pathsep.join(self._copy(name, part) for part in value.split(os.pathsep))
 
     def _copy(self, name: str, part: str) -> str:
+        """The private copy of the table ``part`` names; every point that names the same table gets the same path.
+
+        The copy lives at ``tables/<variable>/<digest>/<file name>``, named by what the table holds: Magpie's reuse
+        check compares the server's environment word for word, so a path that counted the tables copied so far (one
+        per point of a sweep arm) would make every round after the one that booted the server look like another server.
+        Tables with the same file name and other content stay apart, and the server's write-back lands in the one copy.
+        """
         source = Path(part)
         if not part or not source.is_file():
             return part
+        digest = file_sha256(source)
+        target = self._tables / name / digest[:_TABLE_DIGEST_CHARS] / source.name
+        if not target.exists():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, target)
+        table = {"source": part, "sha256": digest, "copy": str(target)}
         listed = self.copied.setdefault(name, [])
-        target = self._tables / name / f"{len(listed)}-{source.name}"
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(source, target)
-        listed.append({"source": part, "sha256": file_sha256(target), "copy": str(target)})
+        if table not in listed:
+            listed.append(table)
         return str(target)
 
     def default(self, name: str) -> str | None:
@@ -161,12 +173,12 @@ class _Redirect:
         names = {
             name for name in (*configs, *self._snapshot.files) if configs.get(name) != self._snapshot.files.get(name)
         }
-        changed = [f"{_CONFIGS}/{name}" for name in names]
+        changed = {f"{_CONFIGS}/{name}" for name in names}
         for listed in self.copied.values():
             for table in listed:
                 copy = Path(table["copy"])
                 if not copy.is_file() or file_sha256(copy) != table["sha256"]:
-                    changed.append(str(copy.relative_to(private)))
+                    changed.add(str(copy.relative_to(private)))
         return sorted(changed)
 
 

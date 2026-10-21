@@ -35,6 +35,7 @@ from hyperloom.measure.framework_base import (
     load_snapshot,
     tree_files,
 )
+from hyperloom.measure.framework_copies import private_framework
 from hyperloom.measure.local import LocalMeasurementBackend
 from hyperloom.measure.socket import SessionFacts, TestCall
 from hyperloom.measure.tests.framework_fixtures import (
@@ -220,6 +221,35 @@ def test_the_tables_a_test_names_itself_are_copied_and_the_variable_names_the_co
     listed = first["point_tables"]["AITER_CONFIG_GEMM"]
     assert [t["source"] for t in listed] == [str(configs / SHARED_GEMM), str(own)]
     assert second["point_tables"] == first["point_tables"], "the second test copied the same pristine tables"
+
+
+def test_the_copy_of_a_table_is_named_by_its_content_so_every_point_naming_it_gets_the_same_path(
+    tmp_path: Path, configs: Path, session: Path
+) -> None:
+    first, other = tmp_path / "one" / "t.csv", tmp_path / "two" / "t.csv"
+    for table, rows in ((first, PRISTINE), (other, PRISTINE + "7,7,7,1\n")):
+        table.parent.mkdir()
+        table.write_text(rows, encoding="utf-8")
+    listing = f"{first}{os.pathsep}{other}"
+    names = (str(first), str(first), str(other), listing)
+    points = tuple(_point(tmp_path / f"p{index}", AITER_CONFIG_GEMM=value) for index, value in enumerate(names))
+    call = TestCall(
+        points=points, output_dir=tmp_path / "out", timeout_sec=900, cwd=str(tmp_path), magpie_python="", task_id="t"
+    )
+
+    with private_framework(call) as private:
+        values = [
+            server_environment(yaml.safe_load(point.read_text()))["AITER_CONFIG_GEMM"] for point in private.call.points
+        ]
+        rows = [[path.read_text(encoding="utf-8") for path in _paths(value)] for value in values]
+        copies = {path for value in values for path in _paths(value)}
+
+    assert values[0] == values[1], "two points naming one table name one copy, not one copy each"
+    assert values[0] != values[2] and rows[0] == [PRISTINE] and rows[2] == [PRISTINE + "7,7,7,1\n"], (
+        "same name, other rows"
+    )
+    assert values[3] == f"{values[0]}{os.pathsep}{values[2]}", "a listing keeps its order and names the same copies"
+    assert len(copies) == 2 and all(configs not in path.parents and path not in {first, other} for path in copies)
 
 
 def test_a_table_the_test_lists_that_is_not_there_stays_listed_as_it_was(
