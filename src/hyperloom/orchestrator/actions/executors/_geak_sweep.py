@@ -195,10 +195,6 @@ class _ReplayPlan:
     def replay_mode(self) -> str:
         return "final_launch_script" if self.use_final_launch else "bench_e2e_fallback"
 
-    @property
-    def env_str(self) -> str:
-        return shlex.join(f"{name}={value}" for name, value in self.accepted_env.items())
-
 
 def _requires_deployment(result: Mapping[str, Any]) -> bool:
     tuning = result.get("tuning_skillset")
@@ -245,7 +241,7 @@ def _sweep_point_env(plan: _ReplayPlan, out_dir: Path, *, conc: int, isl: int, o
             "PROFILE": "0",
             "OVERLAY_PYTHONPATH": plan.overlay,
             "EXTRA_SERVER_ARGS": plan.flags,
-            "EXTRA_ENV": plan.env_str,
+            "EXTRA_ENV": shlex.join(f"{name}={value}" for name, value in plan.accepted_env.items()),
             "BENCH_CLIENT": plan.bench_client,
             "E2E_METRIC": plan.e2e_metric,
         }

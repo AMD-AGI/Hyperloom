@@ -674,9 +674,10 @@ def port_from_server_log(workspace: Any) -> int | None:
                     if not _SERVER_BIND_HINT.search(line):
                         continue
                     match = _SERVER_BIND_URL.search(line)
-                    port = _port_value(match.group(1)) if match else None
-                    if port is not None:
-                        return port
+                    if match:
+                        port = _port_value(match.group(1))
+                        if port is not None:
+                            return port
     except OSError:
         return None
     return None
