@@ -456,7 +456,6 @@ function-args src/kernelforge/gemm_tune/router.py::select_tuners 10
 function-lines scripts/platform_audit_bmc.py::main 131
 function-lines src/hyperloom/agents/critic/runtime/kb_writer.py::KBWriter.write_kb_drafts 110
 function-lines src/hyperloom/agents/quantization/driver/retry.py::quantize_via_prompt 102
-function-lines src/hyperloom/agents/quantization/driver/runner.py::run_one_attempt 83
 function-lines src/hyperloom/inference_optimizer/breakdown/exporter.py::build 132
 function-lines src/hyperloom/inference_optimizer/breakdown/recorder/kernel_event.py::assemble_kernel_ext 206
 function-lines src/hyperloom/inference_optimizer/breakdown/recorder/kernel_event.py::record_geak_attempts 102
@@ -698,7 +697,7 @@ function-lines src/hyperloom/orchestrator/trace_analysis/tracelens_analysis.py::
 function-lines src/hyperloom/orchestrator/trace_analysis/tracelens_analysis.py::write_reports 202
 function-lines src/hyperloom/orchestrator/trace_analysis/tracelens_arch_benchmark.py::populate_gpu_arch_json 81
 function-lines src/hyperloom/orchestrator/trace_analysis/tracelens_skill_runner.py::aggregate_by_source_function 158
-function-lines src/hyperloom/orchestrator/trace_analysis/tracelens_skill_runner.py::run_tracelens_skill 144
+function-lines src/hyperloom/orchestrator/trace_analysis/tracelens_skill_runner.py::run_tracelens_skill 113
 function-lines src/hyperloom_kb/http_service.py::ExperienceHTTPService.read 101
 function-lines src/hyperloom_kb/knowledge_read.py::QueryExecutor.execute 111
 function-lines src/kernelforge/agent_backends/claude.py::ClaudeBackend._query_once 121
