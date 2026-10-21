@@ -26,7 +26,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, NotRecorded
-from hyperloom_multibranch.contracts.notebook.peers import Intent, IntentLayer, SandboxFacts
+from hyperloom_multibranch.contracts.notebook.peers import Intent, IntentLayer, Purpose, SandboxFacts, TestKind
 from hyperloom_multibranch.contracts.notebook.records import BranchNode, LineageView, NotebookSnapshot, TestRecord
 from hyperloom_multibranch.contracts.notebook.vocab import COMMITTING, CommitOrigin, Conclusion, LineageKind
 from hyperloom_multibranch.notebook.codec import decode, encode
@@ -69,7 +69,8 @@ class TreeBranch:
     ``stop_reason`` is the reason the scheduler gave when it stopped the branch; ``directions`` are the intents its tests
     tried, in the order it first tried them; ``kernel_test_times`` when its kernel-layer tests were requested, which the
     frontier calibration reads the observation period off. ``measured_times`` and ``judged_times`` are when its tests
-    were measured and judged; ``None`` in a tree archived before they were kept.
+    were measured and judged, and ``ended_times`` when its explore tests got a result of any validity, as the judge's
+    grace counts them; each ``None`` in a tree archived before it was kept.
     """
 
     name: str
@@ -86,6 +87,7 @@ class TreeBranch:
     kernel_test_times: tuple[float, ...] = ()
     measured_times: tuple[float, ...] | None = None
     judged_times: tuple[float, ...] | None = None
+    ended_times: tuple[float, ...] | None = None
 
     @property
     def spent_times(self) -> tuple[float, ...]:
@@ -97,6 +99,12 @@ class TreeBranch:
         """How many of the branch's tests were judged by ``t_s``; ``None`` in a tree archived before that was kept."""
 
         return None if self.judged_times is None else sum(1 for when in self.judged_times if when <= t_s)
+
+    def ended_by(self, t_s: float) -> int | None:
+        """How many of the branch's explore tests had a result by ``t_s``; ``None`` in a tree archived before that was
+        kept."""
+
+        return None if self.ended_times is None else sum(1 for when in self.ended_times if when <= t_s)
 
     def gain_at(self, t_s: float) -> float:
         """The cumulative gain of the branch's latest commit at ``t_s``, or the gain it forked at."""
@@ -129,6 +137,7 @@ class TreeBranch:
             kernel_test_times=tuple(when for when in self.kernel_test_times if when <= t_s),
             measured_times=_by(self.measured_times, t_s),
             judged_times=_by(self.judged_times, t_s),
+            ended_times=_by(self.ended_times, t_s),
         )
 
 
@@ -218,6 +227,21 @@ def _measured_times(records: Sequence[TestRecord], start: float) -> tuple[float,
 
 def _judged_times(records: Sequence[TestRecord], start: float) -> tuple[float, ...]:
     return tuple(sorted(item.judged_at - start for item in records if item.judged and item.judged_at is not None))
+
+
+def _ended_times(records: Sequence[TestRecord], start: float) -> tuple[float, ...]:
+    """When the explore tests got a result, whatever its validity: what the judge's grace counts."""
+
+    return tuple(
+        sorted(
+            item.measured_at - start
+            for item in records
+            if item.request.kind is TestKind.TEST
+            and item.request.purpose is Purpose.EXPLORE
+            and item.result is not None
+            and item.measured_at is not None
+        )
+    )
 
 
 def _parent_branch(node: BranchNode, view: LineageView) -> str:
@@ -330,6 +354,7 @@ def tree_from_snapshot(
             ),
             measured_times=_measured_times(tests[node.branch], start),
             judged_times=_judged_times(tests[node.branch], start),
+            ended_times=_ended_times(tests[node.branch], start),
         )
         for node in view.branches
     )

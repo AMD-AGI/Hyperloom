@@ -19,7 +19,8 @@
 
 The expected gain is the prior where there is one, else the trend; a branch under observation keeps at least
 ``observation_floor_pct``, and a branch scored by its trend keeps ``new_branch_floor_pct`` until :data:`SETTLED_TESTS` of
-its tests are judged, so a flat trend does not stop it before it has tried a few directions; a candidate waiting for its
+its explore tests have ended, as the judge's grace counts them, so a flat trend does not stop it before it has tried a
+few directions; a candidate waiting for its
 confirm raises it to its own gain; the headroom and the Amdahl ceiling cap it, and it is never negative.
 ``basis`` names which of them the score rests on. The formula is a prototype: what the score means is the scheduler's
 call (gongzheng's), and it stays here until then. :func:`score_at` is the formula alone, on a branch as an archived
@@ -194,13 +195,17 @@ class Readings:
 
 
 def _young(branch: TreeBranch, t_s: float, policy: FrontierPolicy) -> bool:
-    """Too new to have a trend: fewer than :data:`SETTLED_TESTS` tests judged, or, in a tree archived before judgements
-    were kept, open less than a window and without a commit."""
+    """Too new to have a trend: fewer than :data:`SETTLED_TESTS` explore tests ended, counted as the judge's grace
+    counts them, so the floor and the grace end at the same test. A tree archived before ended tests were kept counts
+    its judged tests; one archived before judgements were kept, too, is young while open less than a window and
+    without a commit."""
 
-    judged = branch.judged_by(t_s)
-    if judged is None:
+    settled = branch.ended_by(t_s)
+    if settled is None:
+        settled = branch.judged_by(t_s)
+    if settled is None:
         return t_s - branch.opened_s < policy.window_seconds and not branch.commits
-    return judged < SETTLED_TESTS
+    return settled < SETTLED_TESTS
 
 
 def score_at(branch: TreeBranch, t_s: float, context: ScoringContext, readings: Readings = Readings()) -> FrontierScore:

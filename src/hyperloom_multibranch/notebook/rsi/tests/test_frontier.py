@@ -13,13 +13,14 @@ import pytest
 
 from hyperloom.contracts.recipe import RecipeDelta
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
-from hyperloom_multibranch.contracts.notebook.peers import Purpose, Verdict
+from hyperloom_multibranch.contracts.notebook.peers import Purpose, TestKind, Validity, Verdict
 from hyperloom_multibranch.contracts.notebook.records import (
     LineageEvent,
     NotebookSnapshot,
     PendingCandidate,
     TestRecord,
     ToolResultPointer,
+    Withdrawal,
 )
 from hyperloom_multibranch.contracts.notebook.vocab import Conclusion, FrontierBasis, LineageKind
 from hyperloom_multibranch.notebook import LocalNotebook
@@ -135,6 +136,34 @@ async def test_a_new_branch_without_a_commit_keeps_a_floor_until_its_tests_settl
     assert unsettled.basis is FrontierBasis.NEW
     assert settled is not None and settled.expected_gain_pct == 0.0 and settled.basis is FrontierBasis.TREND
     assert SETTLED_TESTS == 10
+
+
+async def test_the_floor_ends_with_the_judges_grace_at_the_settled_explore_tests_failed_ones_included(
+    tmp_path: Path,
+) -> None:
+    clock = FakeClock()
+    root = tmp_path / "notebook"
+    observer = await scripted_session(root, clock)
+    scheduler = LocalNotebook(root, Writer(Role.SCHEDULER, "scheduler"), clock=clock)
+    toolbox = LocalNotebook(root, Writer(Role.TOOLBOX, "toolbox"), clock=clock)
+    await scheduler.record_lineage(LineageEvent(LineageKind.OPEN, "s3", from_commit="c1", reason="fill"))
+    clock.advance(WINDOW_SECONDS)
+
+    async def ended(request_id: str, validity: Validity, **kinds: object) -> None:
+        await toolbox.write_request(request(request_id, intent("s3", "c1", target=request_id), **kinds))
+        await toolbox.write_result(result(request_id, validity=validity))
+
+    for n in range(SETTLED_TESTS - 1):
+        await ended(f"f{n}", Validity.CANDIDATE_FAILED)
+    await ended("p1", Validity.SUCCEEDED, kind=TestKind.PROFILE, purpose=Purpose.PROFILE)
+    await toolbox.write_request(request("w1", intent("s3", "c1", target="w1")))
+    await toolbox.write_withdrawal(Withdrawal("w1", "branch stopped"))
+    unsettled = _scores(await observer.snapshot())["s3"]
+    await ended("last", Validity.MEASUREMENT_FAILED)
+    settled = _scores(await observer.snapshot())["s3"]
+
+    assert unsettled is not None and unsettled.basis is FrontierBasis.NEW
+    assert settled is not None and settled.basis is FrontierBasis.TREND
 
 
 def test_an_archived_branch_without_judged_times_keeps_the_floor_for_one_window_only() -> None:
