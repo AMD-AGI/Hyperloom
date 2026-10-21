@@ -1,14 +1,12 @@
 # KernelForge forge-loop runs: one Experience per candidate kernel a run archived (candidates/iter_NNN), the kernel
 # one iteration measured and KernelForge's decision to keep or revert it. A run yields one or more: each lane of a
 # fan-out round is measured as its own candidate, built from its own plan, so each lane is its own Experience.
-# Hyperloom gives every declaration the rationale fields reasoning, alternatives, and preconditions, so they are not
-# listed here. rationale.reasoning holds the whole reasoning log the implementer kept beside the plan it executed,
-# orchestration/iter_NNN/<plan>.reasoning.md: its Summary line, then its record of what it examined, what it changed,
-# what each change measured, and which directions it kept or dropped. When the session kept no log, as in every run
-# made before KernelForge asked for one, a single session's reasoning is the first three sentences of the rationale
-# its meta.json records, and a lane has none. A log longer than the 32 KB a text field holds makes collect skip the
-# candidate. Reasoning is required: a candidate whose logs hold none, such as a merge of two earlier candidates, which
-# no agent made, becomes no Experience.
+# rationale.reasoning is the whole lesson KernelForge writes for the iteration, lessons/iter_NNN.md: the implementer's
+# record of what it explored, including HELD-FIXED, NEGATIVES, and DISPROOF, with the loop's scope and outcome lines
+# after the verdict. When that file is absent, a single session's reasoning is the first three sentences of the
+# rationale its meta.json records. A lane or a merge with neither has none. A lesson longer than the 32 KB a text
+# field holds makes collect skip the candidate. Reasoning is required: a candidate whose logs hold none, such as a
+# merge of two earlier candidates, which no agent made, becomes no Experience.
 # provenance.extra holds the candidate's metadata, which never reaches a prompt: meta, the whole meta.json
 # KernelForge archived for the candidate, verbatim, among it the commit it kept the candidate as, the mean case
 # speedup it decided on, the per-case times, every benchmark measurement, and the session's turns and end reason;
@@ -17,7 +15,10 @@
 # generation reflection.analysis_report comes from, as analysis/<commit>/generation-NNN under forge_experiments; and
 # analysis_report_omitted, why a report too long for a text field is not held.
 # An Experience carries no raw logs and none of the profiler's output: the only files it links are the plan, the
-# measured kernel, and the lesson, and the only Analysis output it holds is the report its plan was built on, as text.
+# measured kernel, and the archived diff of every file the commit touched (candidates/iter_NNN/change.diff). The diff
+# and the kernel file are different records: the diff has every file the commit touched and not the kernel's unchanged
+# lines, and the kernel file has none of the other files. The only Analysis output an Experience holds is the report
+# its plan was built on, as text. The lesson is rationale.reasoning, not a second copy under reflection.
 # The objective and every identity field always form the repeat group, with the schema: Hyperloom groups Experiences
 # that way by itself (hyperloom_kb/query_view.py repeat_group_key) and accepts group: true only on baseline and change
 # fields, so none is declared here.
@@ -26,17 +27,16 @@ schema_version: 2
 objectives:
   - id: kernel_time_ms@v1
     description: >-
-      Minimize the time the kernel takes on the task's benchmark, in milliseconds: the representative time
-      KernelForge records for it and logs as its raw mean (wall_ms). KernelForge runs the task's benchmark driver
-      three independent times and records the median of those three run times. Each run's time is the aggregate the
-      driver prints: the median of the wall_ms samples it reports, or the single median_ms or mean_ms summary it
-      prints, kept as printed. The grouped-GEMM driver prints mean_ms, the arithmetic mean of its per-case timings,
-      so each of its runs contributes that mean and the recorded time is the median of those three means.
-      KernelForge does not decide on this time: it keeps a candidate only when the candidate's mean case speedup,
-      the equal-weight mean over the benchmark cases of the original kernel's time on a case divided by the
-      candidate's, clears a bar KernelForge sets from the best result so far and the spread of those runs.
-      KernelForge itself labels this time diagnostic and not monotonic, so a kept candidate can occasionally be
-      slower in milliseconds than the best kernel before it.
+      Minimize the wall time the kernel takes on the task's benchmark, in milliseconds: the time KernelForge
+      records for it (wall_ms). That time is the median of three run aggregates. KernelForge runs the task's
+      benchmark driver three independent times. One run's time is the median of the wall_ms samples that run
+      printed. If the driver prints one median_ms or mean_ms line instead, that printed number is the run's time.
+      Grouped GEMM's mean_ms is the arithmetic mean of that run's per-case times, so each of its runs contributes
+      a mean, and the recorded time is the median of those three means. KernelForge does not decide on this time:
+      it keeps a candidate only when the candidate's mean case speedup, the equal-weight mean over the benchmark
+      cases of the original kernel's time on a case divided by the candidate's, clears a bar KernelForge sets from
+      the best result so far and the spread of those runs. A KEEP can still be slower on this time, because
+      KernelForge keeps on mean case speedup rather than on it.
     unit: ms
     direction: lower_is_better
 
@@ -48,13 +48,20 @@ identity:
   - {name: backend_version, description: "Release of the candidate's kernel language in the run's runtime, e.g. 0.3.2. forge-loop does not record it yet, so Experiences from its runs leave it absent.", kind: version}
   - {name: gpu, description: "GPU model the candidate was measured on, which also fixes its architecture target, e.g. mi355x (gfx950), mi300x (gfx942)."}
   - {name: dtype, description: "Data type of the operator's first input in the benchmark cases, e.g. bfloat16, float8_e4m3fn. forge-loop does not record it yet, so Experiences from its runs leave it absent."}
+  - name: driver_sha256
+    description: >-
+      SHA-256 of the benchmark driver file's bytes, as the run's campaign_config.json records it after preparation.
+      The hash is here so two runs of one operator on different benchmark drivers do not share a repeat group and
+      have their times pooled. The same driver bytes group together. A preparation rewrite that changes the driver
+      bytes splits them, because that rewrite is not deterministic; an unchanged driver does not get a new hash.
+      Absent when the run recorded none.
 
 baseline:
-  - name: current_best_mean_ms
+  - name: best_wall_ms_before
     description: >-
-      The raw mean of the best kernel KernelForge had kept when the iteration began, in milliseconds, as the
-      candidate's meta.json records it (best_wall_ms_before): the same representative benchmark time as
-      candidate_mean_ms, for the kernel the candidate was measured against. Until the first KEEP, it is
+      The recorded wall time of the best kernel KernelForge had kept when the iteration began, in milliseconds, as
+      the candidate's meta.json records it (best_wall_ms_before): the same median of three run aggregates as
+      candidate_wall_ms, for the kernel the candidate was measured against. Until the first KEEP, it is
       KernelForge's own measurement of the kernel the forge-loop started from. KernelForge replaces it only when it
       keeps a candidate, with that candidate's time; since it decides the KEEP on mean case speedup rather than on
       this time, the value can occasionally rise.
@@ -62,12 +69,14 @@ baseline:
     role: measurement
   - name: source_ms
     description: >-
-      How long the original kernel took before any change, in milliseconds, measured the same way: the pristine
-      baseline the run's run_state.json records, which for a run given --baseline-json is that file's time rather
+      How long the original kernel took before any change, in milliseconds, the same median of three run aggregates:
+      the pristine baseline the run's run_state.json records, which for a run given --baseline-json is that file's time rather
       than the time of the kernel the search started from. A run state that records none leaves the baseline time
       the candidate's meta.json archives (baseline_wall_ms).
     kind: number
 
+# Hyperloom adds reasoning, alternatives, and preconditions to every declaration. Writing them here fails with
+# `declaration.rationale redeclares a default field`. For this declaration rationale.reasoning is the whole lesson.
 rationale:
   - name: plan
     description: >-
@@ -90,8 +99,18 @@ change:
   - name: source_code
     description: >-
       The kernel file that was measured, as KernelForge archived it in candidates/iter_NNN/. The Experience links to
-      the file by its name, size, and SHA-256, and the knowledge base stores the file once.
+      the file by its name, size, and SHA-256, and the knowledge base stores the file once. This is the anchor kernel
+      only. A wrapper or config edit is in change_diff_file, and the unchanged lines of this file are not in that diff.
     kind: file
+  - name: change_diff_file
+    description: >-
+      The unified diff of every file the commit touched, as KernelForge archived it beside the kernel in
+      candidates/iter_NNN/change.diff. The Experience links to the file by its name, size, and SHA-256. The name says
+      it is the diff file, not another copy of the kernel: the diff does not contain the kernel's unchanged lines,
+      and the kernel file does not contain the other files the commit touched. Optional: absent when the candidate
+      archived no diff.
+    kind: file
+    required: false
 
 outcome:
   - name: decision
@@ -111,33 +130,19 @@ outcome:
       - API_ERROR
       - AGENT_ERROR
       - ORCHESTRATION_ERROR
-  - name: candidate_mean_ms
+  - name: candidate_wall_ms
     description: >-
-      The candidate's raw mean in milliseconds, as its meta.json records it (wall_ms): the median of three
-      independent runs of the task's benchmark driver. Each run's time is the aggregate the driver printed, the
-      median of its wall_ms samples or its own median_ms or mean_ms summary kept as printed. When the driver prints
-      mean_ms, as the grouped-GEMM driver does for the arithmetic mean of its per-case timings, this is the median
-      of those three means. It is reported, not decided on: KernelForge kept or reverted the candidate on its mean
-      case speedup (provenance.extra.meta.mean_case_speedup), so a kept candidate can be slower than
-      current_best_mean_ms.
+      The candidate's recorded wall time in milliseconds, as its meta.json records it (wall_ms): the median of three
+      run aggregates. KernelForge runs the task's benchmark driver three independent times. One run's time is the
+      median of the wall_ms samples that run printed, or the single median_ms or mean_ms summary it prints, kept as
+      printed. When the driver prints mean_ms, as the grouped-GEMM driver does for the arithmetic mean of its
+      per-case timings, this is the median of those three means. It is reported, not decided on: KernelForge kept or
+      reverted the candidate on its mean case speedup (provenance.extra.meta.mean_case_speedup), so a kept candidate
+      can be slower than best_wall_ms_before.
     kind: number
     role: measurement
 
 reflection:
-  - name: lesson
-    description: >-
-      The first three sentences of KernelForge's lesson for the iteration, which it writes after every iteration that
-      ran an implementer session (kernelforge/loop/runner.py:3796 at 1c14e79e1): the agent's own record of the
-      iteration when KernelForge could get one, otherwise a record KernelForge writes from what the loop observed,
-      opening "(no agent summary)". Optional: lanes get no lesson.
-    kind: text
-    required: false
-  - name: lesson_file
-    description: >-
-      KernelForge's whole lesson for the iteration, lessons/iter_NNN.md. The Experience links to the file by its
-      name, size, and SHA-256. Optional, as lesson is.
-    kind: file
-    required: false
   - name: analysis_report
     description: >-
       The whole report.md of the Analysis generation the candidate's plan was built on: KernelForge's cross-case

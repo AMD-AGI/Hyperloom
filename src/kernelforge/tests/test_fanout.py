@@ -669,7 +669,7 @@ class _RecordingImplementer:
             }
         )
 
-        async def agent(kernel_path: str, plan: str, reasoning_log: str | None = None) -> str:
+        async def agent(kernel_path: str, plan: str) -> str:
             return f"{kernel_path}:{plan}"
 
         return agent

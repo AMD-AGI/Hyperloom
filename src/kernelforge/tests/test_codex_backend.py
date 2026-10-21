@@ -48,7 +48,6 @@ from kernelforge.agent_backends.codex import (
 from kernelforge.config import Config
 from kernelforge.cli.options import AgentRuntimeOptions, _agent_runtime_overrides
 from kernelforge.orchestrator import agent as agent_module
-from kernelforge.orchestrator.summary_line import REASONING_LOG_RULE, reasoning_log_section
 from kernelforge.tracker.usage import UsageAccumulator
 
 
@@ -1043,12 +1042,12 @@ def test_implementer_turn_inherits_the_worktree_the_loop_dirtied(
 
 
 @pytest.mark.parametrize("insession_gate", [False, True])
-def test_implementer_is_handed_its_reasoning_log_only_when_one_is_named(
+def test_implementer_leaves_the_takeaway_to_the_lesson_turn(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     insession_gate: bool,
 ) -> None:
-    """A named log adds one prompt section and its directory; without one the session is as it was."""
+    """The session does not keep a reasoning log. A later turn writes the lesson."""
     specs: list[AgentRunSpec] = []
 
     class FakeBackend:
@@ -1077,22 +1076,17 @@ def test_implementer_is_handed_its_reasoning_log_only_when_one_is_named(
             session=agent_module.SessionOptions(agent_backend="codex", insession_gate=insession_gate),
         ),
     )
-    log = tmp_path / "forge_experiments" / "orchestration" / "iter_001" / "optimization_plan.reasoning.md"
 
     asyncio.run(agent_fn(str(kernel), "history"))
-    asyncio.run(agent_fn(str(kernel), "history", reasoning_log=str(log)))
 
-    without, named = specs
-    assert without.additional_directories == []
-    assert "## Reasoning log" not in without.user_prompt
-    assert "land in time.\n\n## Prior experience" in without.user_prompt
-    assert named.additional_directories == [str(log.parent)]
-    assert log.parent.is_dir()
-    assert f"`{log}`" in named.user_prompt
-    assert named.user_prompt.replace(reasoning_log_section(str(log)), "", 1) == without.user_prompt
-    assert named.system_prompt == without.system_prompt
-    assert REASONING_LOG_RULE in named.system_prompt
-    assert named.system_prompt.index(REASONING_LOG_RULE) < named.system_prompt.index("starting with `PLAN:`")
+    spec = specs[0]
+    assert spec.additional_directories == []
+    assert "## Reasoning log" not in spec.user_prompt
+    assert "reasoning log" not in spec.system_prompt.lower()
+    assert "land in time.\n\n## Prior experience" in spec.user_prompt
+    assert "You do NOT write a takeaway" in spec.system_prompt
+    assert "separate turn" in spec.system_prompt
+    assert spec.system_prompt.index("starting with `PLAN:`") < spec.system_prompt.index("You do NOT write a takeaway")
 
 
 def test_outer_gate_counts_only_incremental_resume_target_edits(

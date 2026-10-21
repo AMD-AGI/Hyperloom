@@ -13,7 +13,7 @@ experience KB each kept candidate was written as.
 A log belongs to the run whose workspace path shares the most trailing components with the kernel path the log
 announces. That is the path the run had where it was made, so a run made in a container is still found, and a path two
 runs fit equally stops the export rather than giving both runs the log. A log is read for what it records, and a unit
-does not name it: the only files a unit names are its plan, its kernel, and its lesson.
+does not name it: the only files a unit names are its plan, its kernel, and the diff of every file the commit touched.
 
 Kernel Forge writes naive local times, and the units carry them as it wrote them; collection reads a naive time as
 UTC. That is right for a run made in a container, which normally runs in UTC, and shifts the times of a run made on a
@@ -34,7 +34,7 @@ from kernelforge.run_export.archive import (
     analysis_report,
     campaign_identity,
     first_sentences,
-    implementer_fields,
+    lesson_reasoning,
 )
 from kernelforge.run_export.files import FileRecord, inventory, read_json, read_text
 from kernelforge.run_export.units import CandidateOrigin, Run, read_error
@@ -244,13 +244,14 @@ class _PlainRun:
         unit.update(
             started_at=self.times.get((_STARTED, seq), stamp),
             completed_at=self.times.get((_RESULT, seq), stamp),
-            current_best_mean_ms=meta.get("best_wall_ms_before"),
+            best_wall_ms_before=meta.get("best_wall_ms_before"),
             decision=meta.get("decision"),
-            candidate_mean_ms=meta.get("wall_ms"),
+            candidate_wall_ms=meta.get("wall_ms"),
         )
         unit.update(archive.fields(meta, plan_file))
         unit.update(_origin_fields(origin, meta, plan))
-        unit.update(implementer_fields(plan_file))
+        # The lesson is the reasoning. A session that wrote none keeps the rationale excerpt _origin_fields set.
+        unit.update(lesson_reasoning(archive.lesson))
         if report is not None and report.fits:
             unit["analysis_report"] = report.text
         return unit

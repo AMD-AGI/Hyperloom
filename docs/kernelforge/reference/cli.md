@@ -520,25 +520,27 @@ entry of its own; a run whose `campaign_config.json` or `run_state.json` is not
 the JSON KernelForge writes, or a candidate whose `meta.json` is missing or
 malformed, is one entry saying why, which collection skips with that reason.
 
-An entry names three files: the candidate's plan, the kernel KernelForge
-measured, and the iteration's lesson. Its reasoning is the whole reasoning log
-the Implementer kept beside that plan or, for a single session that kept none,
-the rationale its `meta.json` records. It holds the text of the `report.md` of
-the Analysis generation the candidate's planning round read, which its
+An entry names the candidate's plan, the kernel KernelForge measured, and, when
+the candidate archived one, the diff of every file the commit touched
+(`candidates/iter_NNN/change.diff`). Its reasoning is the whole lesson
+`lessons/iter_NNN.md` or, for a single session that wrote none, the first three
+sentences of the rationale its `meta.json` records. A lane or a merge with
+neither has no reasoning. It holds the text of the `report.md` of the Analysis
+generation the candidate's planning round read, which its
 `orchestration/iter_NNN/context.json` names, and names that generation in its
 metadata. It carries the candidate's whole
 `meta.json` as its metadata, and the run's operator, the kernel name
-KernelForge files its KB records under, its framework, backend and GPU from
-`campaign_config.json`. The run's `forge-loop.log` gives the Implementer's
-backend and model and the record KernelForge's own experience KB filed a kept
-candidate under; the log is only read, and no entry names it or records its
-path.
+KernelForge files its KB records under, its framework, backend, GPU, and the
+benchmark driver's SHA-256 from `campaign_config.json`. The run's
+`forge-loop.log` gives the Implementer's backend and model and the record
+KernelForge's own experience KB filed a kept candidate under; the log is only
+read, and no entry names it or records its path.
 
 A log belongs to the run whose workspace path ends most like the kernel path
 it announces, which may differ in its leading directories, as for a run made in
 a container. The export stops with an error and writes nothing when it cannot
 list a directory under the log roots or read a file it needs, such as a JSON
-record, a plan, a reasoning log or a log, naming that path, or when a log fits
+record, a plan, a lesson, or a log, naming that path, or when a log fits
 two runs equally well.
 
 | Argument / option | Default | Meaning |

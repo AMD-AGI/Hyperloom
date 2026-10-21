@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Iterable
 import click
 
 from kernelforge.config import Config
+from kernelforge.loop.agent_extras import declared_extras
 
 if TYPE_CHECKING:
     from kernelforge.orchestrator.agent import ImplementerSetup
@@ -185,14 +186,16 @@ def _make_lane_agent_factory(
         # and each one measures a kernel it did not write.
         lane_env = child_cache_environment(lane_root.with_name(lane_root.name + _LANE_AITER_CACHE_SUFFIX))
 
-        async def session(kernel_path: str, plan: str, *, reasoning_log: str | None = None) -> str:
+        async def session(kernel_path: str, plan: str, *, session_sink: dict | None = None) -> str:
             _assert_lane_session_cwd(
                 kernel_path=kernel_path,
                 workspace=lane_config.workspace,
                 lane_dir=lane_dir,
             )
+            # The lesson turn resumes this session. An agent written before the sink existed is still called as it was.
+            extras = declared_extras(lane_agent, {"session_sink": session_sink})
             with session_environment(lane_env):
-                return await lane_agent(kernel_path, plan, reasoning_log=reasoning_log)
+                return await lane_agent(kernel_path, plan, **extras)
 
         return session
 

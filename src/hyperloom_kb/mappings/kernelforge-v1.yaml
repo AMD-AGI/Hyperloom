@@ -7,6 +7,9 @@ description: >-
 declaration: kernelforge-run-v1
 producer:
   name: kernelforge
+  # Hand-written label with no upstream source. Collect copies it to provenance.producer_version. The schema
+  # requires some non-empty value, and a later change can rename it. It does not name a KernelForge version, a log
+  # format, or the archive layout.
   version: "10"
 
 units:
@@ -22,10 +25,9 @@ require:
       what it found.
     check: {absent: $run.read_error}
   - reason: >-
-      No reasoning, which every Experience requires: the logs hold no reasoning log for this candidate and no
-      rationale in its meta.json. A merge never has one, since no agent made it, and neither does a lane of a run made
-      before KernelForge asked for the reasoning log. For any other candidate, provide logs that record the agent's
-      reasoning.
+      No reasoning, which every Experience requires: the logs hold no lesson for this candidate and no rationale in
+      its meta.json. A merge never has one, since no agent made it, and neither does a lane whose iteration recorded
+      no lesson. For any other candidate, provide the lesson the iteration wrote.
     check: {present: $run.reasoning}
 
 experience:
@@ -36,7 +38,7 @@ experience:
   identity: $run.identity
   objective: kernel_time_ms@v1
   baseline:
-    current_best_mean_ms: {number: $run.current_best_mean_ms}
+    best_wall_ms_before: {number: $run.best_wall_ms_before}
     source_ms: {number: $run.source_ms}
   rationale:
     reasoning: {text: $run.reasoning}
@@ -44,12 +46,11 @@ experience:
     plan_file: $run.plan_file
   change:
     source_code: $run.source_code
+    change_diff_file: $run.change_diff_file
   outcome:
     decision: {text: $run.decision}
-    candidate_mean_ms: {number: $run.candidate_mean_ms}
+    candidate_wall_ms: {number: $run.candidate_wall_ms}
   reflection:
-    lesson: {text: $run.lesson}
-    lesson_file: $run.lesson_file
     analysis_report: {text: $run.analysis_report}
   provenance:
     source_ref: {text: $run.unit_id}

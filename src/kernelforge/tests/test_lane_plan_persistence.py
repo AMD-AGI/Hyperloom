@@ -17,7 +17,6 @@ from kernelforge.loop.fanout import LaneResult
 from kernelforge.loop.run_state import LoopStateStore, RunState, make_event
 from kernelforge.loop.runner import IterationConfig, IterationLoop
 from kernelforge.orchestrator.contracts import PlanCriticOutcome
-from kernelforge.orchestrator.summary_line import reasoning_log_path
 from kernelforge.tracker import ExperimentTracker
 
 
@@ -138,19 +137,6 @@ def test_replanning_one_iteration_narrower_removes_the_wider_leftovers(tmp_path,
     root = workspace / "forge_experiments" / "orchestration" / "iter_004"
     assert sorted(path.name for path in root.glob("*.md")) == ["optimization_plan.md"]
     assert loop._load_lane_plans(4) == ("commit-b", ["rewrite the whole thing"])
-
-
-def test_replanning_keeps_the_reasoning_logs_the_lanes_wrote(tmp_path, monkeypatch):
-    """The leftovers are plans the new round no longer has; a lane's log records a session that already ran."""
-    loop, _workspace = _loop(tmp_path, monkeypatch)
-    _round(loop, 4, ["widen the loads", "stage through LDS"])
-    log = reasoning_log_path(loop._lane_plan_path(4, 2))
-    log.write_text("Summary: Staged the scales through LDS.\n")
-
-    _round(loop, 4, ["rewrite the whole thing"], analysis_commit="commit-b")
-
-    assert not loop._lane_plan_path(4, 2).exists()
-    assert log.read_text() == "Summary: Staged the scales through LDS.\n"
 
 
 def test_an_empty_plan_is_refused_rather_than_published(tmp_path, monkeypatch):

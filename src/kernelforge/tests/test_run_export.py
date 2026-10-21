@@ -54,8 +54,14 @@ Summary: Small rows are bound by launch latency. This plan fuses the passes.
 # Fuse the row reduction
 Step one.
 """
-SESSION_LOG = "Summary: Each row was read twice. I fused the two passes into one sweep.\n\n## Evidence\nThe profile.\n"
-LANE_LOG = "Summary: The loads were 32-bit. I widened them to 128-bit.\n\n## Measurements\nSmall rows gained.\n"
+SESSION_LESSON = (
+    "One sweep saved a global read. Small rows gained most. More.\n"
+    "HELD-FIXED: the output layout.\n"
+    "NEGATIVES: a second pass over the row.\n"
+)
+LANE_LESSON = (
+    "The loads were 32-bit. I widened them to 128-bit.\n\nHELD-FIXED: the reduction.\nNEGATIVES: scalar loads.\n"
+)
 KB_RECORD = "kernel:forge-loop:softmax:unknown:unknown:triton:mi300x/rewrite-softmax-92fe883d6dc2-e45ae0d5646e"
 BASELINE_COMMIT = "ce146831869e122424b2a67038ae466565882a3d"
 KEPT_COMMIT = "761247d9b335287cd89902de285dbee4c0e0d96b"
@@ -129,7 +135,7 @@ def _plain_run(
     _write(experiments / "orchestration" / "iter_001" / "lane_002.md", lane_plan)
     plan_path = "forge_experiments/orchestration/iter_001/optimization_plan.md"
     _write_json(experiments / "handoffs" / "iter_001.json", {"optimization_plan_path": plan_path})
-    _write(experiments / "lessons" / "iter_001.md", "One sweep saved a global read. Small rows gained most. More.\n")
+    _write(experiments / "lessons" / "iter_001.md", SESSION_LESSON)
     _write(experiments / "best" / "iter_001" / "softmax_kernel.py", "# best\n")
     _candidate(
         experiments,
@@ -264,9 +270,9 @@ def test_a_single_session_candidate_becomes_a_complete_unit(tmp_path: Path) -> N
         },
         "started_at": "2026-10-15T10:00:00",
         "completed_at": "2026-10-15T10:04:30",
-        "current_best_mean_ms": 0.052,
+        "best_wall_ms_before": 0.052,
         "decision": "KEEP",
-        "candidate_mean_ms": 0.044,
+        "candidate_wall_ms": 0.044,
         "plan_file": str((orchestration / "optimization_plan.md").resolve()),
         "plan": (
             "Small rows are bound by launch latency. This plan fuses the max and sum passes into one sweep. "
@@ -274,9 +280,8 @@ def test_a_single_session_candidate_becomes_a_complete_unit(tmp_path: Path) -> N
         ),
         "source_ms": 0.052,
         "source_code": str((candidate / "softmax_kernel.py").resolve()),
-        "lesson_file": str((experiments / "lessons" / "iter_001.md").resolve()),
-        "lesson": "One sweep saved a global read. Small rows gained most. More.",
-        "reasoning": SESSION_RATIONALE,
+        "change_diff_file": str((candidate / "change.diff").resolve()),
+        "reasoning": SESSION_LESSON.strip(),
     }
 
 
@@ -289,7 +294,7 @@ def test_a_lane_candidate_takes_its_lane_plan_from_the_round_that_planned_it(tmp
     assert unit["plan_file"] == str(lane_plan.resolve())
     assert unit["plan"] == "Use 128-bit loads for the input rows. Keep the reduction as it is."
     assert (unit["started_at"], unit["completed_at"]) == ("2026-10-15T10:05:00", "2026-10-15T10:09:00")
-    assert (unit["current_best_mean_ms"], unit["candidate_mean_ms"], unit["source_ms"]) == (0.044, 0.051, 0.052)
+    assert (unit["best_wall_ms_before"], unit["candidate_wall_ms"], unit["source_ms"]) == (0.044, 0.051, 0.052)
     assert "reasoning" not in unit
 
 
@@ -299,7 +304,7 @@ def test_a_merge_is_named_by_its_stacked_plans_and_dated_by_its_archive(tmp_path
 
     assert unit["provenance"] == {"candidate_origin": "merge", "meta": _meta(experiments, 3)}
     assert unit["plan"] == MERGE_PLAN
-    assert (unit["current_best_mean_ms"], unit["candidate_mean_ms"]) == (0.044, 0.047)
+    assert (unit["best_wall_ms_before"], unit["candidate_wall_ms"]) == (0.044, 0.047)
     assert (unit["started_at"], unit["completed_at"]) == ("2026-10-15T10:12:00", "2026-10-15T10:12:00")
     assert "reasoning" not in unit and "plan_file" not in unit
 
@@ -354,6 +359,29 @@ def test_identity_names_the_operator_and_the_kernel_kernelforge_files_its_record
     identities = [unit["identity"] for unit in _units(tmp_path).values()]
 
     assert identities == [{**expected, "backend": "triton", "gpu": "mi300x"}] * 3
+
+
+def test_the_driver_hash_joins_identity_only_when_the_campaign_recorded_one(tmp_path: Path) -> None:
+    experiments = _plain_run(tmp_path)
+    assert "driver_sha256" not in _units(tmp_path)[f"{WORKSPACE}/iteration-1"]["identity"]
+
+    digest = "ab" * 32
+    config = json.loads((experiments / "campaign_config.json").read_text(encoding="utf-8"))
+    _write_json(experiments / "campaign_config.json", {**config, "driver_sha256": digest})
+
+    identities = [unit["identity"]["driver_sha256"] for unit in _units(tmp_path).values()]
+
+    assert identities == [digest, digest, digest]
+
+
+def test_a_candidate_without_an_archived_diff_links_no_diff_file(tmp_path: Path) -> None:
+    experiments = _plain_run(tmp_path)
+    (experiments / "candidates" / "iter_003" / "change.diff").unlink()
+
+    units = _units(tmp_path)
+
+    assert units[f"{WORKSPACE}/iteration-1"]["change_diff_file"].endswith("change.diff")
+    assert "change_diff_file" not in units[f"{WORKSPACE}/iteration-3"]
 
 
 def test_each_log_attaches_to_the_run_whose_kernel_it_announces(tmp_path: Path) -> None:
@@ -429,11 +457,13 @@ def test_lane_copies_are_not_runs_and_unreadable_archives_say_why(tmp_path: Path
     }
 
 
-def test_summary_lines_give_the_plan_and_each_reasoning_log_is_the_whole_reasoning(tmp_path: Path) -> None:
+def test_summary_lines_give_the_plan_and_the_whole_lesson_is_the_reasoning(tmp_path: Path) -> None:
     experiments = _plain_run(tmp_path, round_plan=SUMMARY_PLAN, lane_plan=SUMMARY_LANE_PLAN)
     orchestration = experiments / "orchestration" / "iter_001"
-    _write(orchestration / "optimization_plan.reasoning.md", SESSION_LOG)
-    _write(orchestration / "lane_002.reasoning.md", LANE_LOG)
+    _write(experiments / "lessons" / "iter_001.md", SESSION_LESSON)
+    _write(experiments / "lessons" / "iter_002.md", LANE_LESSON)
+    _write(orchestration / "optimization_plan.reasoning.md", "Summary: This log is not the reasoning.\n")
+    _write(orchestration / "lane_002.reasoning.md", "Summary: Neither is this one.\n")
 
     units = _units(tmp_path)
 
@@ -442,32 +472,30 @@ def test_summary_lines_give_the_plan_and_each_reasoning_log_is_the_whole_reasoni
         "Small rows are bound by launch latency. Each row is read twice. "
         "This plan fuses the max and sum passes into one sweep. The small cases should gain most."
     )
-    assert session["reasoning"] == SESSION_LOG.strip()
+    assert session["reasoning"] == SESSION_LESSON.strip()
+    assert "lesson" not in session and "lesson_file" not in session
     assert session["plan_file"] == str((orchestration / "optimization_plan.md").resolve())
-    assert (lane["plan"], lane["reasoning"]) == ("Loads are 32-bit. This lane widens them.", LANE_LOG.strip())
+    assert (lane["plan"], lane["reasoning"]) == ("Loads are 32-bit. This lane widens them.", LANE_LESSON.strip())
     assert lane["plan_file"] == str((orchestration / "lane_002.md").resolve())
     assert "reasoning" not in merge
 
 
-@pytest.mark.parametrize(
-    ("log", "reasoning"),
-    [
-        pytest.param(None, SESSION_RATIONALE, id="no-log"),
-        pytest.param("\n", SESSION_RATIONALE, id="empty-log"),
-        pytest.param("## Evidence\nThe profile.\n", "## Evidence\nThe profile.", id="no-summary"),
-    ],
-)
-def test_a_plan_is_summarized_from_its_draft_and_a_session_without_a_reasoning_log_falls_back(
-    tmp_path: Path, log: str | None, reasoning: str
+@pytest.mark.parametrize("lesson", [None, "\n"])
+def test_a_plan_is_summarized_from_its_draft_and_a_session_without_a_lesson_falls_back(
+    tmp_path: Path, lesson: str | None
 ) -> None:
     experiments = _plain_run(tmp_path, round_plan=CRITIC_FALLBACK_PLAN)
-    if log is not None:
-        _write(experiments / "orchestration" / "iter_001" / "optimization_plan.reasoning.md", log)
+    lesson_path = experiments / "lessons" / "iter_001.md"
+    if lesson is None:
+        lesson_path.unlink()
+    else:
+        _write(lesson_path, lesson)
+    _write(experiments / "orchestration" / "iter_001" / "optimization_plan.reasoning.md", "Summary: Ignored.\n")
 
     session = _units(tmp_path)[f"{WORKSPACE}/iteration-1"]
 
     assert session["plan"] == "Small rows are bound by launch latency. This plan fuses the passes."
-    assert session["reasoning"] == reasoning
+    assert session["reasoning"] == SESSION_RATIONALE
 
 
 def test_each_candidate_carries_the_report_of_the_analysis_its_round_planned_on(tmp_path: Path) -> None:
@@ -557,7 +585,7 @@ def test_the_report_collects_as_text_and_no_analysis_file_is_linked(tmp_path: Pa
         for value in experience[category].values()
         if isinstance(value, dict)
     ]
-    assert linked == ["optimization_plan.md", "softmax_kernel.py", "iter_001.md"]
+    assert linked == ["optimization_plan.md", "softmax_kernel.py", "change.diff"]
     assert "raw_logs" not in experience
 
 
@@ -589,8 +617,10 @@ def test_the_exported_document_collects_through_the_packaged_mapping(tmp_path: P
         "backend": "triton",
         "gpu": "mi300x",
     }
-    assert row.experience.baseline == {"current_best_mean_ms": 0.052, "source_ms": 0.052}
-    assert row.experience.outcome == {"decision": "KEEP", "candidate_mean_ms": 0.044}
+    assert row.experience.baseline == {"best_wall_ms_before": 0.052, "source_ms": 0.052}
+    assert row.experience.outcome == {"decision": "KEEP", "candidate_wall_ms": 0.044}
+    assert row.experience.rationale["reasoning"] == SESSION_LESSON.strip()
+    assert "lesson" not in row.experience.reflection
     assert row.experience.provenance.extra["llm_model"] == "Claude-Opus-5"
     assert row.experience.provenance.extra["meta"] == _meta(tmp_path / "logs" / WORKSPACE / "forge_experiments", 1)
     assert row.experience.raw_logs == ()
@@ -600,12 +630,11 @@ def test_the_exported_document_collects_through_the_packaged_mapping(tmp_path: P
     }
 
 
-def test_a_run_that_kept_reasoning_logs_collects_its_lanes_with_each_log_as_their_reasoning(tmp_path: Path) -> None:
+def test_a_run_collects_its_lanes_with_each_lesson_as_their_reasoning(tmp_path: Path) -> None:
     logs = tmp_path / "logs"
     experiments = _plain_run(logs, round_plan=SUMMARY_PLAN, lane_plan=SUMMARY_LANE_PLAN)
     orchestration = experiments / "orchestration" / "iter_001"
-    _write(orchestration / "optimization_plan.reasoning.md", SESSION_LOG)
-    _write(orchestration / "lane_002.reasoning.md", LANE_LOG)
+    _write(experiments / "lessons" / "iter_002.md", LANE_LESSON)
     output = tmp_path / "runs.json"
     assert CliRunner().invoke(main, ["export-runs", str(logs), "-o", str(output)]).exit_code == 0
 
@@ -614,15 +643,17 @@ def test_a_run_that_kept_reasoning_logs_collects_its_lanes_with_each_log_as_thei
     experiences = {row["unit_id"]: row["experience"] for row in report["collected"]}
     assert sorted(experiences) == [f"{WORKSPACE}/iteration-1", f"{WORKSPACE}/iteration-2"]
     session, lane = experiences[f"{WORKSPACE}/iteration-1"], experiences[f"{WORKSPACE}/iteration-2"]
-    assert session["rationale"]["reasoning"] == SESSION_LOG.strip()
+    assert session["rationale"]["reasoning"] == SESSION_LESSON.strip()
+    assert "lesson" not in session["reflection"]
     assert lane["rationale"] == {
-        "reasoning": LANE_LOG.strip(),
+        "reasoning": LANE_LESSON.strip(),
         "plan": "Loads are 32-bit. This lane widens them.",
         "plan_file": _ref(orchestration / "lane_002.md"),
     }
+    assert lane["change"]["change_diff_file"]["name"] == "change.diff"
     assert (lane["baseline"], lane["outcome"]) == (
-        {"current_best_mean_ms": 0.044, "source_ms": 0.052},
-        {"decision": "REVERT_PERF", "candidate_mean_ms": 0.051},
+        {"best_wall_ms_before": 0.044, "source_ms": 0.052},
+        {"decision": "REVERT_PERF", "candidate_wall_ms": 0.051},
     )
     origins = [experience["provenance"]["extra"]["candidate_origin"] for experience in (session, lane)]
     assert origins == ["session", "lane"]

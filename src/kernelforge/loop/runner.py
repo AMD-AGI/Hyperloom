@@ -112,7 +112,6 @@ from kernelforge.loop.run_state import (
 from kernelforge.orchestrator.orchestration import (
     OrchestrationInfrastructureError,
 )
-from kernelforge.orchestrator.summary_line import reasoning_log_path
 from kernelforge.orchestrator.supervisor import (
     clear_latest_supervisor_ruling,
     latest_supervisor_ruling_path,
@@ -843,6 +842,9 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         self._last_critic_verdict = ""
         self._last_critic_review = ""
         self.monitor = None
+        # The lesson turn's resume callback, keyed by the queued candidate. lane_queue.json cannot hold it: a process
+        # that restores the queue has no session to resume, and its lesson is the machine fallback.
+        self._lane_sessions: dict[LaneResult, dict] = {}
 
     def _expire_supervisor_ruling(self) -> None:
         """Stop injecting a ruling after its stall episode ends."""
@@ -1938,6 +1940,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             )
         except (OSError, RuntimeError) as error:
             self._lane_queue = []
+            self._lane_sessions.clear()
             print(f"  [lanes] fan-out unavailable ({error}); falling back")
         # A recovered round that could not even republish holds nothing, and nothing was spent on it: that iteration
         # plans for itself as usual.
@@ -1946,6 +1949,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
     async def _fill_lane_queue(self, *, iteration: int = 0, agent_factory, lane_plans) -> None:
         """Run this round's lane sessions concurrently and queue what they wrote."""
         kernel_relative = self._workspace_path(self.ic.kernel_file)
+        sinks: dict[str, dict] = {}
 
         async def _session(
             lane: LanePlan,
@@ -1953,10 +1957,14 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             serialized_driver: Path,
         ) -> None:
             # The session edits the lane's own copy, so it is handed that copy's kernel rather than the canonical one.
-            await agent_factory(str(lane_dir), str(serialized_driver))(
+            # The sink is how the lesson turn resumes this session once the iteration measures the lane.
+            sink: dict = {}
+            sinks[lane.lane_id] = sink
+            call = agent_factory(str(lane_dir), str(serialized_driver))
+            await call(
                 str(lane_dir / kernel_relative),
                 _lane_prompt(lane.plan, serialized_driver=serialized_driver),
-                reasoning_log=str(reasoning_log_path(self._lane_plan_path(iteration, int(lane.lane_id)))),
+                **declared_extras(call, {"session_sink": sink}),
             )
 
         results = await run_lanes(
@@ -1971,10 +1979,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         for result in results:
             if result.error:
                 print(f"  [lane {result.lane_id}] session lost: {result.error}")
-        active_profile_id = self.run_state.agent_relay.active_profile_id
-        self._lane_queue = [
-            replace(item, agent_profile_id=active_profile_id) for item in results if item.produced_candidate
-        ]
+        self._queue_produced_lanes(results, sinks)
         print(f"  [lanes] {len(self._lane_queue)} of {len(results)} lanes produced a candidate")
         self._persist_lane_queue()
         # The device is not per-lane.
@@ -2037,6 +2042,42 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             return "it changes the measurement surface: " + ", ".join(protected)
         return ""
 
+    def _queue_produced_lanes(self, results: list[LaneResult], sinks: dict[str, dict]) -> None:
+        """Queue the candidates a round produced, remembering each session until its iteration measures it."""
+        active_profile_id = self.run_state.agent_relay.active_profile_id
+        queued: list[LaneResult] = []
+        sessions: dict[LaneResult, dict] = {}
+        for item in results:
+            if not item.produced_candidate:
+                continue
+            queued_item = replace(item, agent_profile_id=active_profile_id)
+            sink = sinks.get(item.lane_id)
+            if sink is not None:
+                sessions[queued_item] = sink
+            queued.append(queued_item)
+        self._lane_queue = queued
+        self._lane_sessions = sessions
+
+    def _drop_lane_session(self, lane: LaneResult) -> None:
+        """Forget a queued session that will not be measured."""
+        self._lane_sessions.pop(lane, None)
+
+    def _adopt_lane_session(self, session_sink: dict, lane: LaneResult) -> None:
+        """Copy the lane session's lesson inputs onto the iteration that measures it.
+
+        The resume callback stays in this dict. ``lane_queue.json`` is what a later process reads, and that process
+        has no session to resume: its lesson is the machine fallback ``_record_lesson`` already writes.
+        """
+        remembered = self._lane_sessions.pop(lane, None)
+        if remembered:
+            for name in ("session_started", "summarize", "end_reason", "turns", "findings", "progress_log"):
+                if name in remembered:
+                    session_sink[name] = remembered[name]
+            return
+        # The queue was restored, or the session left no sink. There is no session to resume, so the lesson turn
+        # writes the machine fallback and that file is still the reasoning.
+        session_sink["session_started"] = True
+
     def _take_lane_candidate(self) -> LaneResult | None:
         """Apply the next queued lane candidate to the canonical tree."""
         try:
@@ -2049,9 +2090,11 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             lane = self._lane_queue.pop(0)
             rejection = self._lane_rejection(lane.diff)
             if rejection:
+                self._drop_lane_session(lane)
                 print(f"  [lane {lane.lane_id}] candidate rejected: {rejection}")
                 continue
             if not self._git_apply_patch(lane.diff):
+                self._drop_lane_session(lane)
                 self._git_discard_worktree()
                 print(f"  [lane {lane.lane_id}] candidate no longer applies; dropped")
                 continue
@@ -2061,6 +2104,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             except ValueError as error:
                 # Take the candidate back off the tree before anything else, so the next candidate does not inherit
                 # it.
+                self._drop_lane_session(lane)
                 self._git_discard_worktree()
                 self._validate_driver_integrity(self.run_state)
                 print(f"  [lane {lane.lane_id}] candidate rejected: {error}")
@@ -4556,6 +4600,8 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         if not queued:
             return
         self._lane_queue = queued
+        # The resumed objects are new. The process that ran the sessions is gone, so none of them has a callback.
+        self._lane_sessions.clear()
         print(f"  [lanes] resuming {len(queued)} candidate(s) an earlier round bought and never measured")
 
     def _lane_plan_manifest_path(self, iteration: int) -> Path:
@@ -5662,6 +5708,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             reusable_benchmark = None
             session_sink["plan"] = queued_lane.plan
             self._bind_session_producer(session_sink, queued_lane.agent_profile_id)
+            self._adopt_lane_session(session_sink, queued_lane)
             print(f"  [lane {queued_lane.lane_id}] measuring queued candidate")
         elif merge_diff and merge_pair is not None:
             unmeasured_result = None
@@ -5731,13 +5778,11 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             )
             # Pass extras only to agent_fns that declare them: the in-session gate uses the current best mean case
             # speedup and immutable pristine per-case timings; session_sink hands back findings and the
-            # resumed-session factual-record callback; the reasoning log is kept beside the plan being executed.
+            # resumed-session factual-record callback. The lesson turn, not this session, writes the record.
             extras = {
                 "gate_scoring": GateScoring(dict(self._baseline_case_times), self.best_mean_case_speedup),
                 "session_sink": session_sink,
             }
-            if optimization_plan_path:
-                extras["reasoning_log"] = str(reasoning_log_path(optimization_plan_path))
             extra_kwargs = declared_extras(agent_fn, extras)
             agent_error = None
             try:
@@ -6151,6 +6196,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         # Candidates from one concurrent fan-out, spent one per iteration so each is measured and judged on its own by
         # the ordinary decision path.
         self._lane_queue: list[LaneResult] = []
+        self._lane_sessions = {}
         self._last_lane_plans: list[str] = []
         # Stacked iterations run back to back so far.
         self._merge_precedence_streak = 0
