@@ -37,14 +37,43 @@ recorded-timeline wire shape:
 "schema_version": "hyperloom.session_breakdown.v6.1"
 ```
 
-6.1 renames one key inside the 6 major, an exception to the compatibility rules
-below: `throughput_tok_s_per_gpu` in `outcome.baseline`, `outcome.final` and the
-`baseline` event's `measurement` is now `output_throughput`, and the old key is
-no longer written. The value is unchanged: the whole-server output throughput,
-not a per-GPU figure. Archived 6.0 documents and documents exported by 1.1.x
-carry the old key, so readers must accept both keys or migrate. Within 6.1,
-`perf.output_tput_per_gpu` also carries its value on the `baseline` event and
-on stack validation rows.
+6.1 changes three things inside the 6 major, an exception to the compatibility
+rules below: it renames one key, removes keys no producer populated or that
+only carried a constant, and reports two unmeasured figures as null. `throughput_tok_s_per_gpu` in
+`outcome.baseline`, `outcome.final` and the `baseline` event's `measurement` is
+now `output_throughput`, and the old key is no longer written. The value is
+unchanged: the whole-server output throughput, not a per-GPU figure. Archived
+6.0 documents and documents exported by 1.1.x carry the old key, so readers must
+accept both keys or migrate. Within 6.1, `perf.output_tput_per_gpu` also carries
+its value on the `baseline` event and on stack validation rows.
+
+6.1 also removes keys that no producer ever populated. Each carries the
+disposition `removed in 6.1, never populated`:
+
+- `framework_agent` `policy.force_exit_budget_pct`, `policy.variant_timeout_sec`
+  and `policy.overtime_kill_ratio`
+- `kernel_agent` `trace_analyze_runs[].trace_validate_ref`
+- `critic_review.iteration` on framework proposals
+- `kernel_agent` `geak.product.cfg_hash` and `geak.product.final_overlay_digest`
+- `kernel_agent` `entry.budget_remaining_sec`
+- `roofline` event `ext.actions[].kernel_roofline.kernels[].rocprof_roofline`
+
+The `event_id` and `ordinal` row-scope declarations are removed from the schema
+types: they were already stripped before export and never appeared on the wire.
+`conc_sweep` `points[].budget_remaining_sec` is unchanged.
+
+Two keys that only ever carried a constant are removed with the disposition
+`removed in 6.1, constant`: `roofline` event
+`ext.actions[].kernel_roofline.kernels[].roofline_measured` (always `false`;
+`roofline_source` states whether a row's bound is analytical or a placeholder)
+and `baseline` event `ext.actions[].convergence` (always `insufficient_rounds`).
+
+Two figures are null instead of a fabricated default when they were not
+measured or not provided. `outcome.validation.attributed_gain_pct` and
+`unattributed_gain_pct` are null when no adoption could be measured, rather than
+`0.0`, and `empty` on `framework_agent` runs is null when the producer did not
+report it, rather than `false`. `kernel_agent` `entry.snapshot_staleness` is the
+string `"absent"` or `"fresh"`.
 
 Re-exporting a 6.0 session directory reads its old `baseline`
 event, so `outcome.baseline.output_throughput` is null while `outcome.final` and
@@ -85,9 +114,12 @@ Compatibility rules:
   the major version. Consumers must tolerate unknown keys.
 * **Renamed, removed, or semantically changed** fields of a result section
   require a major bump; `enablement` is outside that rule, as the stability
-  guarantee below records, and so is the 6.1 rename of
-  `throughput_tok_s_per_gpu` to `output_throughput`, declared above. Only one version is written per session; there is
-  no parallel write of the previous version's file.
+  guarantee below records, and so are the 6.1 changes declared above: the
+  rename of `throughput_tok_s_per_gpu` to `output_throughput`, the removal of
+  keys no producer populated, and the null reporting of unmeasured
+  `attributed_gain_pct`, `unattributed_gain_pct` and run `empty`. Only one
+  version is written per session; there is no parallel write of the previous
+  version's file.
 * **Missing data** is always represented as `null`, `[]`, or `{}` —
   never as a default / fabricated value. Consumers MUST treat
   missing data as "not available".
@@ -625,9 +657,11 @@ The Hyperloom team commits to the following compatibility guarantees.
 1. Never removing or renaming a documented field of a result section within
    a major `schema_version`. Such changes require a major bump, as the `v5.0`
    optimization cutover did, and every removed or renamed field is given a
-   disposition in the section it left. The 6.1 rename of
-   `throughput_tok_s_per_gpu` to `output_throughput` is a declared exception to
-   this rule, recorded under Versioning. `enablement` is outside this guarantee:
+   disposition in the section it left. The 6.1 changes (the
+   rename of `throughput_tok_s_per_gpu` to `output_throughput`, the removal of
+   keys no producer populated, and null reporting of unmeasured
+   `attributed_gain_pct`, `unattributed_gain_pct` and run `empty`) are a
+   declared exception to this rule, recorded under Versioning. `enablement` is outside this guarantee:
    it reports on the runtime a session built rather than on its results, is
    emitted as `{}` whenever no enablement ran, and its fields move with the
    runtime they describe — every field the round ledger replaced is still given

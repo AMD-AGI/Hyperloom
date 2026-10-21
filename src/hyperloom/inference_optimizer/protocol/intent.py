@@ -14,6 +14,12 @@ from hyperloom.common.coerce import to_int
 
 _ALERT_SEVERITIES: frozenset[str] = frozenset({"low", "medium", "high"})
 ALLOWED_VERDICTS: frozenset[str] = frozenset({"approve", "reject", "redirect", "advise", "needs_review"})
+# Body of the observation a critic turn emits when it has nothing to say.
+DEFAULT_IDLE_BODY = "ok (critic)"
+
+# Ceiling on a single extend_lease step; repeated extensions are allowed. The PolicyGate enforces it; it is declared
+# here so the payload contract each backend renders for the agents states the same number.
+EXTEND_LEASE_MAX_SEC: int = 3600
 
 
 # ---------------------------------------------------------------------------
@@ -210,6 +216,8 @@ def _validate_review_verdict_payload(
 
 __all__ = [
     "ALLOWED_VERDICTS",
+    "DEFAULT_IDLE_BODY",
+    "EXTEND_LEASE_MAX_SEC",
     "Intent",
     "IntentType",
     "IntentValidationError",

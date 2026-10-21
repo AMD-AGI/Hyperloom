@@ -25,7 +25,7 @@ from contextlib import ExitStack, suppress
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, BinaryIO, Iterable, Iterator, Mapping, NamedTuple
+from typing import Any, Iterable, Iterator, Mapping, NamedTuple
 
 import yaml
 
@@ -124,6 +124,7 @@ from .benchmark_result import (
     snapshot_workspaces,
 )
 from .benchmark_backend import build_benchmark_command
+from .magpie_agentx import ServerArgvInvalidError
 
 
 log = logging.getLogger(__name__)
@@ -252,13 +253,6 @@ _NON_RECOVERABLE_MARKERS = (
 _STRONG_OOM_CONTEXT_RADIUS = 1
 
 
-#: Bytes read from each end of a ``server.log`` when observing a bring-up.
-_BRINGUP_LOG_EDGE_BYTES = 65_536
-
-#: Cap on milestone lines carried out of the unread middle; the ladder needs
-#: one witness per milestone.
-_BRINGUP_MIDDLE_MARKER_LINES = 200
-
 #: Subdirectory of a round slot holding earlier attempts' server logs.
 _ATTEMPTS_DIRNAME = "attempts"
 
@@ -281,8 +275,8 @@ class BringupLog:
     """One bring-up log as far as it could be read.
 
     Attributes:
-        text: The decoded head-and-tail text; empty when no log was written and
-            empty when the log could not be read.
+        text: The decoded log; empty when no log was written and empty when
+            the log could not be read.
         degraded: Empty when the read answered for the log's contents;
             :data:`~hyperloom.orchestrator.bringup.DEGRADED_UNREADABLE` when a
             log that exists could not be read back.
@@ -292,39 +286,14 @@ class BringupLog:
     degraded: str = ""
 
 
-def _middle_marker_lines(handle: BinaryIO, *, start: int, stop: int) -> list[str]:
-    """Return the milestone-bearing lines in ``[start, stop)`` of an open log."""
-    from ...bringup.ladder import PROGRESS_MARKER_SUBSTRINGS
+def read_bringup_log(path: Path) -> BringupLog:
+    """Read a server log whole for bring-up classification.
 
-    handle.seek(start)
-    remaining = max(0, stop - start)
-    kept: list[str] = []
-    carry = b""
-    while remaining > 0 and len(kept) < _BRINGUP_MIDDLE_MARKER_LINES:
-        chunk = handle.read(min(1 << 20, remaining))
-        if not chunk:
-            break
-        remaining -= len(chunk)
-        lines = (carry + chunk).split(b"\n")
-        carry = lines.pop()
-        for raw in lines:
-            text = raw.decode("utf-8", "replace")
-            lowered = text.lower()
-            if any(marker in lowered for marker in PROGRESS_MARKER_SUBSTRINGS):
-                kept.append(text)
-                if len(kept) >= _BRINGUP_MIDDLE_MARKER_LINES:
-                    break
-    return kept
-
-
-def read_bringup_log(path: Path, *, edge_bytes: int = _BRINGUP_LOG_EDGE_BYTES) -> BringupLog:
-    """Read a server log for bring-up classification: both edges, plus milestones.
-
-    The edges carry the failure excerpt. The ladder needs a witness for every
-    milestone the boot passed, and those are not all near one: a build that logs
-    per kernel shape pushes the later rungs megabytes in, which would understate
-    ``stage_reached`` and make two unequal boots compare as equal. So the middle
-    is streamed for milestone lines and they are carried between the edges.
+    Neither what the ladder looks for nor where it lies is bounded: a build that
+    logs per kernel shape pushes the later milestones megabytes in, and a worker's
+    root traceback can sit megabytes above the engine-dead consequence that ends
+    the log. The read is linear in the log's size, so callers run it off the
+    event loop.
 
     A log that was never written and a log the mount refuses to serve are
     different answers, and both are answers: an ESTALE or EIO on the session
@@ -332,34 +301,21 @@ def read_bringup_log(path: Path, *, edge_bytes: int = _BRINGUP_LOG_EDGE_BYTES) -
 
     Args:
         path: The log file to read.
-        edge_bytes: Bytes taken from each end; a log no larger than twice this
-            is read whole.
 
     Returns:
-        BringupLog: The decoded text, head first, and the degraded outcome when
-        a log that exists could not be read.
+        BringupLog: The decoded text and the degraded outcome when a log that
+        exists could not be read.
     """
     from ...bringup import DEGRADED_UNREADABLE
 
     try:
-        with open(path, "rb") as handle:
-            handle.seek(0, 2)
-            size = handle.tell()
-            if size <= edge_bytes * 2:
-                handle.seek(0)
-                return BringupLog(handle.read().decode("utf-8", "replace"))
-            handle.seek(0)
-            head = handle.read(edge_bytes)
-            middle = _middle_marker_lines(handle, start=edge_bytes, stop=size - edge_bytes)
-            handle.seek(size - edge_bytes)
-            tail = handle.read(edge_bytes)
+        data = path.read_bytes()
     except FileNotFoundError:
         return BringupLog("")
     except OSError as exc:
         log.warning("bringup: server log %s could not be read (%s)", path, exc)
         return BringupLog("", DEGRADED_UNREADABLE)
-    segments = [head.decode("utf-8", "replace"), *middle, tail.decode("utf-8", "replace")]
-    return BringupLog("\n".join(segments))
+    return BringupLog(data.decode("utf-8", "replace"))
 
 
 def server_child_elapsed_sec(server_log_text: str) -> float:
@@ -1787,34 +1743,28 @@ class BenchmarkRunExecutor:
         return any(_hit(tail) for _, tail in _iter_log_tails(root, max_bytes=_LOG_SCAN_MAX_BYTES))
 
     @staticmethod
-    def _record_baseline_convergence(
+    def _warn_on_cold_start_delta(
         result: dict[str, Any],
         warmup_tput: Any,
     ) -> None:
-        """Record how steady the baseline anchor actually is."""
-        try:
-            from hyperloom.orchestrator.measurement.convergence import assess_convergence
-
-            warm = float(warmup_tput or 0.0)
-            measured = float(result.get("output_throughput") or 0.0)
-            verdict = assess_convergence([warm, measured])
-            record: dict[str, Any] = verdict.to_dict()
-            if warm > 0 and measured > 0:
-                delta_pct = (measured - warm) / warm * 100.0
-                record["cold_start_delta_pct"] = round(delta_pct, 2)
-                if delta_pct > _COLD_START_DELTA_WARN_PCT:
-                    result.setdefault("nonfatal_warnings", []).append("baseline_cold_start_delta_high")
-                    log.warning(
-                        "baseline_executor: measured round is %.1f%% above the warm-up round "
-                        "(%.1f -> %.1f tok/s); the server may still have been ramping, so the "
-                        "anchor every later gain is graded against may be low",
-                        delta_pct,
-                        warm,
-                        measured,
-                    )
-            result["baseline_convergence"] = record
-        except Exception:
-            log.debug("baseline convergence record failed", exc_info=True)
+        """Warn when the measured round climbed far enough above the warm-up to suggest a server still ramping."""
+        warm = float(warmup_tput or 0.0)
+        measured = float(result.get("output_throughput") or 0.0)
+        if warm <= 0 or measured <= 0:
+            return
+        delta_pct = (measured - warm) / warm * 100.0
+        if delta_pct <= _COLD_START_DELTA_WARN_PCT:
+            return
+        result.setdefault("nonfatal_warnings", [])
+        result["nonfatal_warnings"].append("baseline_cold_start_delta_high")
+        log.warning(
+            "baseline_executor: measured round is %.1f%% above the warm-up round "
+            "(%.1f -> %.1f tok/s); the server may still have been ramping, so the "
+            "anchor every later gain is graded against may be low",
+            delta_pct,
+            warm,
+            measured,
+        )
 
     @staticmethod
     def _eval_failure_evidence(result: dict[str, Any]) -> tuple[bool, str]:
@@ -2345,11 +2295,10 @@ class BenchmarkRunExecutor:
                 agentx_mode=agentx_active(shared_state),
                 grading=getattr(shared_state, "grading", None),
             )
-        except FrameworkScriptMismatchError as exc:
-            # Cross-framework script override: return a structured failure.
+        except (FrameworkScriptMismatchError, ServerArgvInvalidError) as exc:
             return {
                 "status": "failed",
-                "error_class": "framework_script_mismatch",
+                "error_class": getattr(exc, "error_class", "framework_script_mismatch"),
                 "error": str(exc),
                 "output_dir": str(output_dir),
             }
@@ -2808,7 +2757,7 @@ class BenchmarkRunExecutor:
         warmup_tput = warmup_result.get("output_throughput")
         warmup_runtime = warmup_result.get("subprocess_runtime_sec")
         result["warmup_round_tput"] = warmup_tput
-        self._record_baseline_convergence(result, warmup_tput)
+        self._warn_on_cold_start_delta(result, warmup_tput)
         # The Coordinator promotes ``subprocess_runtime_sec`` into the explore soft-kill anchor.
         if isinstance(warmup_runtime, (int, float)) and warmup_runtime > 0:
             result["measure_round_runtime_sec"] = result.get("subprocess_runtime_sec")
@@ -3422,13 +3371,13 @@ class BenchmarkRunExecutor:
             finished = await self._launch_benchmark(round_, started_unix, server_ready=ready)
         except subprocess.TimeoutExpired as exc:
             # A reaped timeout carries no wrapper streams; the server log is the whole of the evidence.
-            self._record_bringup(round_, attempt_index, workspaces_before)
+            await asyncio.to_thread(self._record_bringup, round_, attempt_index, workspaces_before)
             reaped = {"error_class": "timeout", "error": f"baseline benchmark exceeded {round_.timeout_sec}s: {exc}"}
             return self._reaped_round_failure(
                 round_.output_dir, workspaces_before, started_unix, {**reaped, **round_.capture_meta}
             )
-        server_log_text = self._record_bringup(
-            round_, attempt_index, workspaces_before, wrapper_stderr=finished.stderr, wrapper_stdout=finished.stdout
+        server_log_text = await asyncio.to_thread(
+            self._record_bringup, round_, attempt_index, workspaces_before, finished.stderr, finished.stdout
         )
         boot_ref = round_.capture_meta["boot_observation_path"]
         finished = finished._replace(server_log_text=server_log_text, boot_observation_ref=boot_ref)
@@ -3471,7 +3420,6 @@ class BenchmarkRunExecutor:
         round_: _BenchmarkRound,
         attempt_index: int,
         workspaces_before: Any,
-        *,
         wrapper_stderr: str = "",
         wrapper_stdout: str = "",
     ) -> str:

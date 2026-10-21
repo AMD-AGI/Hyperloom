@@ -19,7 +19,10 @@ already ordered and routed (`direct_framework` -> apply the diff,
 `author_via_specialist` -> rewrite it against live source). The pump takes that
 order as given. When discovery comes back empty its full retry budget, the
 local-exploration arm authors against profile evidence instead; when that is
-off too, the source arm reports itself dry.
+off too, the source arm reports itself dry. An authoring round that comes back
+empty, or whose specialist never runs, counts against the source arm's no-KEEP
+streak like a reverted patch; once that streak marks the arm dry, the
+local-exploration arm stops dispatching for the cycle.
 
 `integrate_patch` lands every diff, config-only or source, with
 `patch_source` naming where it came from. KEEP commits to the live tree (the

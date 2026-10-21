@@ -48,6 +48,38 @@ def contract_digest(contract: dict) -> str:
     return hashlib.sha256(json.dumps(contract, sort_keys=True, allow_nan=False).encode()).hexdigest()
 
 
+def _source_bound(row: dict, metric: str, limits: dict) -> float:
+    """The largest ``metric`` error a leg may show before it regresses against the case's two source legs."""
+    source_error = max(max(row[role][metric]) for role in ("source_before", "source_after"))
+    return max(source_error * limits["max_error_ratio"], limits["error_floor"])
+
+
+def _case_failures(row: dict, contract: dict) -> list[str]:
+    """Validate one case's measured legs and list every tolerance they break."""
+    name = row["id"]
+    limits = contract["cases"][name]
+    failures = []
+    for role in ("source_before", "candidate", "source_after"):
+        item = row.get(role)
+        if not isinstance(item, dict) or type(item.get("finite")) is not bool:
+            raise ValueError(f"{name}/{role}: missing finite-output evidence")
+        if not item["finite"]:
+            failures.append(f"{name}/{role}: nonfinite output")
+        for metric in ("oracle_errors", "repeat_errors"):
+            errors = item.get(metric)
+            count = contract["repetitions"] - (metric == "repeat_errors")
+            if not isinstance(errors, list) or len(errors) != count or any(not _number(x) for x in errors):
+                raise ValueError(f"{name}/{role}: invalid {metric} or repetition count")
+        if max(item["oracle_errors"]) > limits["max_oracle_error"]:
+            failures.append(f"{name}/{role}: mathematical error exceeds task tolerance")
+    for metric in ("oracle_errors", "repeat_errors"):
+        bound = _source_bound(row, metric, limits)
+        error = max(row["candidate"][metric])
+        if error > bound:
+            failures.append(f"{name}: candidate {metric} {error:.6g} exceeds source-relative limit {bound:.6g}")
+    return failures
+
+
 def judge_evidence(output: str, contract: dict, request_id: str) -> tuple[bool, str, dict]:
     """Reject absent, stale, incomplete or numerically regressed evidence."""
     records = [line[len(EVIDENCE_PREFIX) :] for line in output.splitlines() if line.startswith(EVIDENCE_PREFIX)]
@@ -66,31 +98,7 @@ def judge_evidence(output: str, contract: dict, request_id: str) -> tuple[bool, 
         raise ValueError("numerical evidence contains invalid or duplicate case IDs")
     if set(ids) != set(contract["cases"]):
         raise ValueError("numerical evidence coverage differs from the declared cases")
-    failures = []
-    for row in rows:
-        name = row["id"]
-        limits = contract["cases"][name]
-        measurements = {}
-        for role in ("source_before", "candidate", "source_after"):
-            item = row.get(role)
-            if not isinstance(item, dict) or type(item.get("finite")) is not bool:
-                raise ValueError(f"{name}/{role}: missing finite-output evidence")
-            if not item["finite"]:
-                failures.append(f"{name}/{role}: nonfinite output")
-            for metric in ("oracle_errors", "repeat_errors"):
-                errors = item.get(metric)
-                count = contract["repetitions"] - (metric == "repeat_errors")
-                if not isinstance(errors, list) or len(errors) != count or any(not _number(x) for x in errors):
-                    raise ValueError(f"{name}/{role}: invalid {metric} or repetition count")
-            measurements[role] = item
-            if max(item["oracle_errors"]) > limits["max_oracle_error"]:
-                failures.append(f"{name}/{role}: mathematical error exceeds task tolerance")
-        for metric in ("oracle_errors", "repeat_errors"):
-            source_error = max(max(measurements[role][metric]) for role in ("source_before", "source_after"))
-            bound = max(source_error * limits["max_error_ratio"], limits["error_floor"])
-            error = max(measurements["candidate"][metric])
-            if error > bound:
-                failures.append(f"{name}: candidate {metric} {error:.6g} exceeds source-relative limit {bound:.6g}")
+    failures = [failure for row in rows for failure in _case_failures(row, contract)]
     evidence["contract_sha256"] = contract_digest(contract)
     detail = "; ".join(failures) if failures else f"numerical stability: {len(rows)} cases passed"
     return not failures, detail, evidence
@@ -116,9 +124,7 @@ def validate_source_independence(probe: dict, baseline: dict, contract: dict) ->
             if not source["finite"] or max(source["oracle_errors"]) > limits["max_oracle_error"]:
                 raise ValueError(f"numerical execution probe {name}/{role}: source failed with candidate disabled")
             for metric in ("oracle_errors", "repeat_errors"):
-                initial = max(max(original[name][leg][metric]) for leg in ("source_before", "source_after"))
-                bound = max(initial * limits["max_error_ratio"], limits["error_floor"])
-                if max(source[metric]) > bound:
+                if max(source[metric]) > _source_bound(original[name], metric, limits):
                     raise ValueError(
                         f"numerical execution probe {name}/{role}: {metric} exceeded the original source envelope"
                     )

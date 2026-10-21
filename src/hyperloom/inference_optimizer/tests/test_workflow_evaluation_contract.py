@@ -120,7 +120,7 @@ def test_real_writer_fixtures_cover_declared_consumer_paths(tmp_path, denied: bo
     assert fixture["schema_version"] == "hyperloom.session_breakdown.v6.1"
     assert workflow_contract()["sbd_schema_version"] == "hyperloom.session_breakdown.v6.1"
     workflow = fixture["metadata"]["workflow"]
-    assert workflow["workflow_contract_version"] == "hyperloom.workflow_evaluation.v2"
+    assert workflow["workflow_contract_version"] == "hyperloom.workflow_evaluation.v3"
     assert workflow["contract_digest"] == workflow_contract_digest()
     assert fixture["outcome"]["stop_reason"] == ("baseline_failed" if denied else "target_reached")
 

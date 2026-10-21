@@ -259,16 +259,26 @@ controlled by the CLI flag `--enable-roofline`, which defaults **on**. Pass
 
 ### Schema compatibility
 
-`session_breakdown.json` emits `hyperloom.session_breakdown.v6.1`. 6.1 renames
-one key inside the 6 major, a declared exception to the major-bump rule:
-`throughput_tok_s_per_gpu` in `outcome.baseline`, `outcome.final` and the
-`baseline` event's `measurement` is now `output_throughput`, and the old key is
-no longer written. Archived 6.0 documents and documents exported by 1.1.x keep
+`session_breakdown.json` emits `hyperloom.session_breakdown.v6.1`. 6.1 changes
+three things inside the 6 major, a declared exception to the major-bump rule: it
+renames `throughput_tok_s_per_gpu` in `outcome.baseline`, `outcome.final` and
+the `baseline` event's `measurement` to `output_throughput` (the old key is no
+longer written), removes keys no producer populated or that only carried a
+constant, and reports two unmeasured figures as null. Archived 6.0 documents and documents exported by 1.1.x keep
 the old key, so readers must accept both keys or migrate.
 Re-exporting a 6.0 session directory emits a null
 `outcome.baseline.output_throughput` and the `contract_digest` recorded at
 session creation, and the default output overwrites the archived
-`<session_dir>/session_breakdown.json`.
+`<session_dir>/session_breakdown.json`. The removed keys (disposition: removed
+in 6.1, never populated) are `policy.force_exit_budget_pct`,
+`policy.variant_timeout_sec`, `policy.overtime_kill_ratio`,
+`trace_validate_ref`, `critic_review.iteration`, `geak.product.cfg_hash`,
+`geak.product.final_overlay_digest`, `entry.budget_remaining_sec` and the
+roofline rows' `rocprof_roofline`; the roofline rows' `roofline_measured` and the
+baseline action's `convergence` (disposition: removed in 6.1, constant) are
+removed as well.
+`attributed_gain_pct`, `unattributed_gain_pct` and run `empty` are null when
+unmeasured or not provided.
 
 V6 was the preceding cutover, for the timeline: each action records its own event as it
 runs, so an event's `start_time` is when the work started rather than when its

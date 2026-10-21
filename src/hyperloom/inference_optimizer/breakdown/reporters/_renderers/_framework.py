@@ -130,13 +130,24 @@ def specialist_tally(breakdown: dict[str, Any]) -> tuple[FrameworkTally, int]:
         if str(proposal.get("producer") or "") == _PRODUCER_SPECIALIST:
             tally.add(attempt)
 
-    rounds = 0
+    # A dispatch appears as a phase row and as a run sharing its id; count it once.
+    dispatched: set[str] = set()
+    unkeyed = 0
     for event in events_of(breakdown, "phase"):
         for row in dict_rows(as_dict(as_dict(event.get("ext")).get("actions")).get("rows")):
             if str(row.get("action") or "") == "specialist":
-                rounds += 1
+                task_id = str(row.get("task_id") or "")
+                if task_id:
+                    dispatched.add(task_id)
+                else:
+                    unkeyed += 1
     for event in events_of(breakdown, "framework_agent"):
         for row in dict_rows(as_dict(event.get("ext")).get("runs")):
             if str(row.get("role") or "") in {"discovery", "authoring"}:
-                rounds += 1
+                run_id = str(row.get("run_id") or "")
+                if run_id:
+                    dispatched.add(run_id)
+                else:
+                    unkeyed += 1
+    rounds = len(dispatched) + unkeyed
     return tally, rounds
