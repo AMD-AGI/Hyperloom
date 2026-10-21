@@ -259,8 +259,18 @@ controlled by the CLI flag `--enable-roofline`, which defaults **on**. Pass
 
 ### Schema compatibility
 
-`session_breakdown.json` emits `hyperloom.session_breakdown.v6.0`. V6 is a
-breaking cutover for the timeline: each action records its own event as it
+`session_breakdown.json` emits `hyperloom.session_breakdown.v6.1`. 6.1 renames
+one key inside the 6 major, a declared exception to the major-bump rule:
+`throughput_tok_s_per_gpu` in `outcome.baseline`, `outcome.final` and the
+`baseline` event's `measurement` is now `output_throughput`, and the old key is
+no longer written. Archived 6.0 documents and documents exported by 1.1.x keep
+the old key, so readers must accept both keys or migrate.
+Re-exporting a 6.0 session directory emits a null
+`outcome.baseline.output_throughput` and the `contract_digest` recorded at
+session creation, and the default output overwrites the archived
+`<session_dir>/session_breakdown.json`.
+
+V6 was the preceding cutover, for the timeline: each action records its own event as it
 runs, so an event's `start_time` is when the work started rather than when its
 artefacts were written, and the KERNEL and BASELINE projections are no longer
 emitted. Ordering that relied on the old collapsed windows changes as a result.
