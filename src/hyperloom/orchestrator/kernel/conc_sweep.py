@@ -309,13 +309,13 @@ def _sweep_workspace(session_dir: Path) -> Path:
 
 def _materialize_sweep_config(state: SharedState, workspace: Path, base_config_path: str) -> _SweepLaunch:
     """Materialize the benchmark config into the sweep's workspace and resolve what it launches with."""
-    from hyperloom.inference_optimizer.gpu_types import _gpu_runner_type
+    from hyperloom.inference_optimizer.gpu_types import gpu_runner_type
 
     resolved_model = resolve_session_model_path(
         state_model_path=str(getattr(state, "model_path", "") or ""),
         for_serving=True,
     )
-    resolved_gpu = _gpu_runner_type(
+    resolved_gpu = gpu_runner_type(
         os.environ.get("GPU_TYPE", "").strip().lower() or str(getattr(state, "gpu_type", "") or "").strip().lower()
     )
     benchmark_script = state.accepted_baseline_script()

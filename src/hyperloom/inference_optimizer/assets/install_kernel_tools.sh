@@ -93,7 +93,7 @@ INFERENCEX_PATH="${INFERENCEX_PATH:-}"
 # (env / .env); leave it unset for the base-only report. No separate toggle.
 TRACELENS_REPO="https://github.com/AMD-AGI/TraceLens.git"
 # TraceLens SHA.
-TRACELENS_REF="647cbf2702687a656f2480e07517824369898aa9"
+TRACELENS_REF="614c597bc0c66cabf6a15152037324acc7386090"
 # Operator override iff TRACELENS_ROOT points OUTSIDE the pod-local default.
 # The persistent kernel-agent env re-exports the resolved default path, so a
 # presence-only check (${VAR:+1}) would misclassify it as an override and skip
@@ -847,15 +847,12 @@ ensure_tracelens() {
   _pip_install_editable "$TRACELENS_INTERNAL_ROOT" "TraceLens-internal"
   export TRACELENS_ROOT TRACELENS_INTERNAL_ROOT
   if [ "$DRY_RUN" -eq 0 ]; then
-    # TraceLens #124: only the inference variant is accepted (the correct
-    # entry for vLLM/SGLang traces). Hyperloom is inference-only since
-    # v0.4; the legacy training-mode CLI was removed to keep install /
-    # runtime in lockstep.
-    if command -v TraceLens_generate_perf_report_pytorch_inference >/dev/null 2>&1; then
-      TraceLens_generate_perf_report_pytorch_inference --help >/dev/null
-      log "TraceLens perf CLI verified: TraceLens_generate_perf_report_pytorch_inference (#124)"
+    # The analysis agent's report step runs through this config-driven CLI.
+    if command -v TraceLens_generate_perf_report_from_config >/dev/null 2>&1; then
+      TraceLens_generate_perf_report_from_config --help >/dev/null
+      log "TraceLens perf CLI verified: TraceLens_generate_perf_report_from_config"
     else
-      verify_die "TraceLens_generate_perf_report_pytorch_inference not found after install (Hyperloom is inference-only since v0.4; reinstall TraceLens, plus the optional extension if TRACELENS_INTERNAL_ROOT is set)"
+      verify_die "TraceLens_generate_perf_report_from_config not found after install (reinstall TraceLens, plus the optional extension if TRACELENS_INTERNAL_ROOT is set)"
     fi
   fi
 }
@@ -1155,14 +1152,11 @@ except Exception:
     raise SystemExit(1)
 PY
 )"
-  # TraceLens perf-report CLI: only the inference variant is accepted
-  # (#124). Hyperloom is inference-only since v0.4; the legacy
-  # training-mode CLI was removed because its output shape silently
-  # breaks downstream fusion / roofline analysis.
-  if command -v TraceLens_generate_perf_report_pytorch_inference >/dev/null 2>&1; then
-    log "found TraceLens_generate_perf_report_pytorch_inference: $(command -v TraceLens_generate_perf_report_pytorch_inference)"
+  # The analysis agent's report step runs through this config-driven CLI.
+  if command -v TraceLens_generate_perf_report_from_config >/dev/null 2>&1; then
+    log "found TraceLens_generate_perf_report_from_config: $(command -v TraceLens_generate_perf_report_from_config)"
   else
-    warn "TraceLens_generate_perf_report_pytorch_inference not found (Hyperloom is inference-only since v0.4)"
+    warn "TraceLens_generate_perf_report_from_config not found"
   fi
   for tool in git patch; do
     if command -v "$tool" >/dev/null 2>&1; then
