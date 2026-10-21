@@ -407,11 +407,11 @@ function-args src/hyperloom/orchestrator/actions/executors/baseline.py::Benchmar
 function-args src/hyperloom/orchestrator/actions/executors/baseline.py::_stopped_round_result 7
 function-args src/hyperloom/orchestrator/actions/executors/explore.py::filter_baseline_noop_variants 13
 function-args src/hyperloom/orchestrator/bringup/argv_preflight.py::check_server_argv 7
-function-args src/hyperloom/orchestrator/kernel/_vllm_shape_capture.py::_vllm_block_fp8_profile_capture_required 6
 function-args src/hyperloom/orchestrator/kernel/controller_patch_integration.py::integrate_controller_patches 6
 function-args src/hyperloom/orchestrator/kernel/geak_config.py::_geak_revalidation_decision 6
 function-args src/hyperloom/orchestrator/kernel/request_handlers.py::_forge_framework_for_vllm 6
 function-args src/hyperloom/orchestrator/kernel/request_handlers.py::_gemm_router_targets 9
+function-args src/hyperloom/orchestrator/kernel/request_handlers.py::_vllm_block_fp8_profile_capture_required 6
 function-args src/hyperloom/orchestrator/knowledge/agent_kb.py::PatchKB.stage_provenance 6
 function-args src/hyperloom/orchestrator/knowledge/recipe_kb/local_store.py::LocalRecipeStore.put_recipe 21
 function-args src/hyperloom/orchestrator/knowledge/recipe_kb_t0.py::_build_warm_start_context 9
@@ -544,7 +544,6 @@ function-lines src/hyperloom/orchestrator/enablement/recipe/sufficiency.py::_pat
 function-lines src/hyperloom/orchestrator/enablement/runtime/targeted_build.py::run_aiter_build 218
 function-lines src/hyperloom/orchestrator/enablement/runtime/targeted_build.py::run_sgl_kernel_build 159
 function-lines src/hyperloom/orchestrator/enablement/runtime/targeted_build.py::run_vllm_source_build 220
-function-lines src/hyperloom/orchestrator/kernel/_integrate_accuracy.py::_grade_integrate_accuracy 103
 function-lines src/hyperloom/orchestrator/kernel/_kernel_decisions.py::_queue_kernel_keep 99
 function-lines src/hyperloom/orchestrator/kernel/_kernel_decisions.py::enqueue_nominated_patch 105
 function-lines src/hyperloom/orchestrator/kernel/_kernel_decisions.py::record_kernel_integrate_result 171
@@ -569,9 +568,9 @@ function-lines src/hyperloom/orchestrator/kernel/forge_fusion.py::salvage_forge_
 function-lines src/hyperloom/orchestrator/kernel/forge_handoff.py::build_serving_context_md 84
 function-lines src/hyperloom/orchestrator/kernel/request_handlers.py::_persist_forge_gemm_csv_durably 95
 function-lines src/hyperloom/orchestrator/kernel/request_handlers.py::_run_forge_fusion 144
-function-lines src/hyperloom/orchestrator/kernel/request_handlers.py::_run_forge_gemm_tuning 103
+function-lines src/hyperloom/orchestrator/kernel/request_handlers.py::_run_forge_gemm_tuning 115
 function-lines src/hyperloom/orchestrator/kernel/request_handlers.py::_run_integrate_rebaseline_with_lock_retry 106
-function-lines src/hyperloom/orchestrator/kernel/request_handlers.py::integrate_handler 128
+function-lines src/hyperloom/orchestrator/kernel/request_handlers.py::integrate_handler 157
 function-lines src/hyperloom/orchestrator/knowledge/recipe_journal.py::RecipeJournalCollaborator._build_recipe_attrs_from_state 102
 function-lines src/hyperloom/orchestrator/knowledge/recipe_journal.py::RecipeJournalCollaborator._record_fact_per_variant 114
 function-lines src/hyperloom/orchestrator/knowledge/recipe_journal.py::RecipeJournalCollaborator.finalize_recipe_and_journal 226
@@ -804,7 +803,7 @@ module-lines src/hyperloom/orchestrator/actions/executors/report.py 1366
 module-lines src/hyperloom/orchestrator/actions/executors/roofline.py 1303
 module-lines src/hyperloom/orchestrator/kernel/apply_kernel_patch.py 2657
 module-lines src/hyperloom/orchestrator/kernel/conc_sweep.py 1429
-module-lines src/hyperloom/orchestrator/kernel/request_handlers.py 4673
+module-lines src/hyperloom/orchestrator/kernel/request_handlers.py 4884
 module-lines src/hyperloom/orchestrator/knowledge/recipe_journal.py 1774
 module-lines src/hyperloom/orchestrator/knowledge/recipe_kb_t0.py 1318
 module-lines src/hyperloom/orchestrator/knowledge/remote_recipe/values.py 1224
