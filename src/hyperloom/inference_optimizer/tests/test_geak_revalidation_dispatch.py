@@ -722,8 +722,8 @@ def _render_final(
     section = render(
         {
             "outcome": {
-                "final": {"throughput_tok_s_per_gpu": 140.0, "gain_pct": 0.0},
-                "baseline": {"throughput_tok_s_per_gpu": 100.0},
+                "final": {"output_throughput": 140.0, "gain_pct": 0.0},
+                "baseline": {"output_throughput": 100.0},
                 "validation": {},
             },
             "close": {"geak_candidate": geak_candidate},
@@ -773,8 +773,8 @@ def test_final_report_reads_the_last_geak_visit_not_an_earlier_failure() -> None
     section = render(
         {
             "outcome": {
-                "final": {"throughput_tok_s_per_gpu": 140.0, "gain_pct": 0.0},
-                "baseline": {"throughput_tok_s_per_gpu": 100.0},
+                "final": {"output_throughput": 140.0, "gain_pct": 0.0},
+                "baseline": {"output_throughput": 100.0},
                 "validation": {},
             },
             "close": {"geak_candidate": {}},

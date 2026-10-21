@@ -104,8 +104,8 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     b = as_dict(outcome.get("baseline"))
     validation = validation_of(breakdown)
     session = session_of(breakdown)
-    final_tput = f.get("throughput_tok_s_per_gpu")
-    base_tput = b.get("throughput_tok_s_per_gpu")
+    final_tput = f.get("output_throughput")
+    base_tput = b.get("output_throughput")
     gain_v = f.get("gain_pct")
     val_stack_len = validation.get("validated_at_stack_len")
     val_ts = validation.get("validated_ts")
@@ -223,7 +223,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
 
     md_kv = md_kv_list(
         [
-            ("final_throughput_tok_s_per_gpu", final_tput),
+            ("final_output_throughput", final_tput),
             ("throughput_unit", _unit or None),
             ("validated_gain_pct", gain_v),
             ("revalidation_pending", revalidation_pending or None),
@@ -243,7 +243,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
 
     md_parts = [md_kv]
     # The axes the validation round was graded on, beside the throughput figure above. On an AgentX session the two
-    # answer different questions: the verdict was decided on these, not on ``final_throughput_tok_s_per_gpu``.
+    # answer different questions: the verdict was decided on these, not on ``final_output_throughput``.
     graded_md = render_graded_axes(validation.get("perf"))
     if graded_md:
         md_parts.append("")
