@@ -4471,8 +4471,6 @@ class TestBuildTraceAnalyzeCmd:
             "sglang",
             "--target-platform",
             "MI300X",
-            "--analysis-mode",
-            "inference",
             # LLM inference flag + splitter hints: payload override wins over workload metadata.
             "--split-llm-inference",
             "--split-conc",
@@ -4595,6 +4593,7 @@ class TestBuildTraceAnalyzeCmd:
         )
         assert "--require-single-rank" in cmd
         assert cmd[cmd.index("--tensor-parallel-size") + 1] == "8"
+        assert cmd[cmd.index("--analysis-mode") + 1] == "inference"
 
     def test_tracelens_cmd_carries_the_ambient_trajectory_scope(self, monkeypatch, tmp_path):
         from hyperloom.inference_optimizer.trace.trajectory_trace import trajectory_scope
