@@ -155,7 +155,7 @@ from hyperloom_multibranch.toolbox.attempts import TestJob
 from hyperloom_multibranch.toolbox.tools.base import JobStatus
 from hyperloom_multibranch.specialist.directions import DIRECTIONS
 from hyperloom_multibranch.specialist.prompts import prompt_versions
-from hyperloom_multibranch.specialist.runtime import MAX_LOSS_RESTARTS, SessionCrashed
+from hyperloom_multibranch.specialist.runtime import SessionCrashed
 
 START = 1_700_000_000.0
 CONC = 16
@@ -1405,14 +1405,7 @@ async def test_the_judge_sees_each_live_specialist_as_the_runtime_reports_it(tmp
     [_, steering, *later] = [
         _judged_rows(json.loads(line)["prompt"]) for line in stage.layout.judge.read_text().splitlines()
     ]
-    losses = MAX_LOSS_RESTARTS + 1
-    assert steering["b02"]["specialist"] == {
-        "running": False,
-        "crashes": losses,
-        "lost": losses,
-        "gave_up": True,
-        "judge_failed": False,
-    }
+    assert "specialist" not in steering["b02"]
     assert steering["b01"]["specialist"] == {
         "running": True,
         "crashes": 0,
@@ -1422,6 +1415,25 @@ async def test_the_judge_sees_each_live_specialist_as_the_runtime_reports_it(tmp
     }
     assert "specialist" not in steering[INTEGRATION_BRANCH]
     assert later and all("specialist" not in rows.get("b02", {}) for rows in later)
+
+
+async def test_a_branch_whose_specialist_gave_up_is_stopped_before_the_next_judge_call(tmp_path: Path) -> None:
+    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    _script(stage, forks=1)
+    stage.steps = {**stage.steps, "b02": _loses_its_heartbeat}
+    stage.judge = ScriptedCompletion([OPENING, _refill_steer(1)])
+
+    outcome = await stage.run()
+
+    assert (outcome.stop_reason, outcome.error) == (SessionStopReason.TIME_EXHAUSTED, "")
+    rows = _decisions(stage)
+    [stop] = [index for index, row in enumerate(rows) if row["kind"] == "stop" and row["branch"] == "b02"]
+    assert str(rows[stop]["reason"]).startswith(StopCause.GAVE_UP.value)
+    judged = [index for index, row in enumerate(rows) if row["kind"] == "judge"]
+    assert judged[0] < stop < judged[1]
+    roster = json.loads(stage.layout.roster.read_text())
+    [b02] = [entry for entry in roster["entries"] if entry["branch"] == "b02"]
+    assert b02["stop"]["cause"] == StopCause.GAVE_UP.value
 
 
 async def _loses_its_heartbeat(branch: str) -> None:

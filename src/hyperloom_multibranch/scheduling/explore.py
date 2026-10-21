@@ -6,12 +6,13 @@
 The branches the user wrote a direction for open first, from the root commit; the opening judge call then sizes the
 opening batch into the slots they leave.
 
-The loop wakes every :data:`EXPLORE_TICK_SECONDS`: it stops the repair branches that used up their time, moves the forks
+The loop wakes every :data:`EXPLORE_TICK_SECONDS`: it stops the repair branches that used up their time and the
+branches whose specialist gave up, once no candidate of theirs waits for its confirm, moves the forks
 and repairs queued on the fork desk onto the free slots, has the rule gate land each admitted fork and starts
 the admitted forks and repairs, and every judge interval asks the judge, applies what it decided and rebuilds the
 dashboard. A slot the judge's stops free goes to the queued requests first and only then to the branches the judge
 opens. The judge is asked at once, not at its next interval, when the scheduler itself frees a slot: a repair branch
-stopped at its time limit, a fork the gate did not land, or an admitted fork or repair that failed to start; and when an
+stopped at its time limit, a branch whose specialist gave up, a fork the gate did not land, or an admitted fork or repair that failed to start; and when an
 event changes what the branches are worth: a merge that moved the integration head by a large gain, the bottleneck of
 the profile taken of the integration head after such a merge moving, or a quarantined measurement node. A branch the
 judge opens after the opening batch starts from the integration head, briefed on a focus. The judge reads the
@@ -79,6 +80,7 @@ logger = logging.getLogger(__name__)
 EXPLORE_TICK_SECONDS = 5.0
 OPEN_CUT_REASON = "branch slots taken"
 FORK_NOT_LANDED = "the rule gate did not land the fork"
+GAVE_UP_REASON = "its specialist gave up; the branch log says why"
 
 
 @dataclass(frozen=True)
@@ -203,8 +205,9 @@ class Explorer:
             if await self._events.record_card_shortage():
                 return SessionStopReason.NO_MEASUREMENT_CARDS
             overrun = await self._branches.stop_overrun_repairs()
+            given_up = await self._stop_given_up()
             self._desk.fill_free_slots()
-            freed = await self._start_admitted(window.explore_end) or overrun
+            freed = await self._start_admitted(window.explore_end) or overrun or given_up
             if await self._events.detect() or freed:
                 next_judge = now
             if now >= next_judge:
@@ -332,11 +335,27 @@ class Explorer:
                     states[entry.branch] = state
         return states
 
-    async def _held(self) -> dict[str, HoldReason]:
+    async def _held(self, specialists: Mapping[str, SpecialistStatus] | None = None) -> dict[str, HoldReason]:
         snapshot = await self._notebook.snapshot()
-        return held_branches(
-            self._roster.entries(), snapshot.progress, snapshot.records, await self._specialist_states()
-        )
+        states = await self._specialist_states() if specialists is None else specialists
+        return held_branches(self._roster.entries(), snapshot.progress, snapshot.records, states)
+
+    async def _stop_given_up(self) -> bool:
+        """Stop every live branch whose specialist gave up and has no candidate waiting for its confirm: nothing of
+        it is left to measure but that confirm, which the rule gate judges without the specialist. True when one
+        stopped."""
+
+        states = await self._specialist_states()
+        given_up = [branch for branch, state in states.items() if state.gave_up]
+        if not given_up:
+            return False
+        held = await self._held(states)
+        stopped = False
+        for branch in given_up:
+            if held.get(branch) is not HoldReason.PENDING_CONFIRM:
+                await self._stop(branch, GAVE_UP_REASON, StopCause.GAVE_UP)
+                stopped = True
+        return stopped
 
     async def _apply(self, decision: JudgeDecision, start: BatchStart) -> bool:
         """Apply the stop and K orders, move the queued forks and repairs onto the slots the stops freed, then open the
@@ -388,12 +407,13 @@ class Explorer:
             self._decisions.record(Decision(DecisionKind.OPEN, OPEN_CUT_REASON, detail=detail))
         return opened
 
-    async def _stop(self, branch: str, reason: str) -> None:
-        """A judge stop; a step that fails is logged and exploring goes on, as CLOSE kills what the stop left."""
+    async def _stop(self, branch: str, reason: str, cause: StopCause = StopCause.JUDGE) -> None:
+        """A stop the judge ordered or the scheduler made; a step that fails is logged and exploring goes on, as CLOSE
+        kills what the stop left."""
 
-        stop = BranchStop(StopCause.JUDGE, reason, self._clock.now())
+        stop = BranchStop(cause, reason, self._clock.now())
         for failure in await self._branches.stop_branch(branch, stop):
-            logger.error("the judge's stop of %s did not finish cleanly", branch, exc_info=failure)
+            logger.error("the %s stop of %s did not finish cleanly", cause.value, branch, exc_info=failure)
 
 
 def _hours_or_none(seconds: float) -> float | None:
@@ -403,6 +423,7 @@ def _hours_or_none(seconds: float) -> float | None:
 __all__ = [
     "EXPLORE_TICK_SECONDS",
     "FORK_NOT_LANDED",
+    "GAVE_UP_REASON",
     "OPEN_CUT_REASON",
     "ExploreWindow",
     "Explorer",
