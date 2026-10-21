@@ -67,6 +67,8 @@ def test_a_native_run_is_pointed_at_the_installed_launch_protocol(magpie_install
     assert f"`{magpie_install}`" in body
     assert "before it is benchmarked" in body
     assert "every other change bundled into it" in body
+    for symbol in ("PROTECTED_ARGS", "PROTECTED_ENV", "PROTECTED_ENV_PREFIXES", "_validate_golden_launch"):
+        assert f"`{symbol}`" in body
 
 
 def test_the_lines_point_at_the_lists_without_copying_them(magpie_install):
@@ -84,9 +86,10 @@ def test_an_unresolvable_install_still_states_the_rule_with_a_generic_pointer(tm
     assert "missing" not in body
 
 
-def test_an_mlperf_run_gets_no_magpie_launch_block(magpie_install):
-    """The MLPerf harness launch is Hyperloom-managed, so Magpie's rules do not apply to it."""
-    assert launch_ownership_lines("mlperf") == []
+@pytest.mark.parametrize("backend", ["mlperf", "aiperf"])
+def test_a_backend_other_than_magpie_gets_no_magpie_launch_block(magpie_install, backend):
+    """Only a native Magpie launch is Magpie-validated; any other recorded backend gets no block."""
+    assert launch_ownership_lines(backend) == []
 
 
 def test_a_session_without_a_recorded_backend_falls_back_to_the_environment(magpie_install, monkeypatch):
@@ -107,6 +110,14 @@ def test_every_specialist_prompt_carries_the_block_only_on_native_agentx(magpie_
     assert str(magpie_install) in _specialist_prompt(domain, "agentx", "magpie")
     assert _OWNERSHIP not in _specialist_prompt(domain, "agentx", "mlperf")
     assert _OWNERSHIP not in _specialist_prompt(domain, "", "")
+
+
+def test_the_specialist_block_is_its_own_paragraph(magpie_install):
+    """Without a blank line Markdown folds the block into the grading paragraph above it."""
+    lines = _specialist_prompt("serving_specialist", "agentx", "magpie").splitlines()
+    start = next(i for i, line in enumerate(lines) if _OWNERSHIP in line)
+    assert lines[start - 1] == ""
+    assert lines[start - 2].strip()
 
 
 def test_the_speculative_decoding_reference_defers_to_magpie_on_native_runs():

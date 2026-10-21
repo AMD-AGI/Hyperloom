@@ -217,10 +217,8 @@ def _section_session_context(session: SessionContext) -> list[str]:
             *corpus_lines(session.agentx_corpus_shape),
             "",
             *grading_lines(session.agentx_grading, session.agentx_backend),
+            *launch_ownership_lines(session.agentx_backend),
         ]
-        ownership = launch_ownership_lines(session.agentx_backend)
-        if ownership:
-            lines += ["", *ownership]
     lines += [
         "",
         "Per-tick dynamic context (Phase, Mission progress, Time budget,",

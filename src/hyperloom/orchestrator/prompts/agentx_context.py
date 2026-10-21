@@ -9,7 +9,7 @@ import os
 from types import SimpleNamespace
 from typing import Any, Mapping
 
-from hyperloom.common.agentx_workload import BACKEND_ENV, is_mlperf_backend
+from hyperloom.common.agentx_workload import BACKEND_ENV, agentic_backend, is_mlperf_backend
 from hyperloom.common.perf_metric import AGENTX_KEEP_P50_THRESHOLD_PCT
 from hyperloom.inference_optimizer.grading import resolved_grading
 from hyperloom.inference_optimizer.session.paths import magpie_dir
@@ -56,17 +56,12 @@ def corpus_lines(shape: Mapping[str, Any] | None) -> list[str]:
     return lines
 
 
-def _is_mlperf(backend: str) -> bool:
-    """Whether the session's recorded ``agentx_backend`` is MLPerf; an unrecorded one falls back to the environment."""
-    return is_mlperf_backend({BACKEND_ENV: backend} if backend else None)
-
-
 def grading_lines(grading: Mapping[str, Any] | None = None, backend: str = "") -> list[str]:
     """Describe what an AgentX KEEP is decided on, from the session's recorded ``grading`` and ``agentx_backend``.
 
     A session recorded before the backend field existed falls back to the process environment for it.
     """
-    if _is_mlperf(backend):
+    if is_mlperf_backend({BACKEND_ENV: backend} if backend else None):
         return [
             "**Graded on output token throughput** — the MLPerf agentic harness replays a",
             "fixed trajectory set and publishes no per-request interactivity, so a KEEP is",
@@ -100,17 +95,21 @@ def _magpie_launch_protocol_path() -> str:
 
 
 def launch_ownership_lines(backend: str = "") -> list[str]:
-    """Point a native Magpie AgentX session at the launch rules Magpie enforces; ``[]`` on the MLPerf backend.
+    """Point a native Magpie AgentX session at the launch rules Magpie enforces; ``[]`` on any other backend.
 
-    The rules are Magpie's to change, so the lines name where they live and never restate them.
+    ``backend`` is the session's recorded ``agentx_backend``; an unrecorded one falls back to the environment. The
+    lines open with a blank line so they render as their own paragraph, and the rules are Magpie's to change, so the
+    lines name the symbols that hold them and never restate them.
     """
-    if _is_mlperf(backend):
+    if (backend or agentic_backend()) != "magpie":
         return []
     path = _magpie_launch_protocol_path()
     source = f"`{path}`" if path else f"the module `{_MAGPIE_LAUNCH_MODULE}` of the Magpie install"
     return [
+        "",
         "**The recipe and Magpie own the launch protocol.** Before proposing any server-arg or",
-        f"environment change, read Magpie's protected lists and golden-acceptance lock in {source}.",
+        "environment change, read only `PROTECTED_ARGS`, `PROTECTED_ENV`, `PROTECTED_ENV_PREFIXES`",
+        f"and `_validate_golden_launch` in {source}.",
         "Magpie rejects a candidate that violates them before it is benchmarked, which wastes the",
         "variant and every other change bundled into it; spend variants on other knobs.",
     ]

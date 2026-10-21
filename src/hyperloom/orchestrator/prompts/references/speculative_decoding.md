@@ -45,14 +45,17 @@ Concretely:
 
 On a native Magpie AgentX run the recipe and Magpie own the launch protocol,
 including acceptance and the recipe-pinned speculative-decoding inputs. Do not
-add, change or unset any `SGLANG_SIMULATE_ACC_*` env or synthetic-acceptance
-value, and do not change a pinned speculative-decoding input. Magpie rejects such
-a candidate before it is benchmarked, and every other change bundled into it goes
-unmeasured. The exact rules are Magpie's: read `PROTECTED_*` and
-`_validate_golden_launch` in its `Magpie/modes/benchmark/agentx_launch.py` (the
-session prompt gives the installed path) rather than relying on a copy here. The
-golden-AL lookup below then only confirms the recipe's own cell; spend variants on
-other knobs.
+add, change or unset synthetic acceptance (a `SGLANG_SIMULATE_ACC_*` env or a
+synthetic-acceptance value), and do not change a speculative-decoding input the
+recipe pins. Magpie rejects, before it is benchmarked, a candidate that violates
+its protected lists or the recipe's golden-acceptance lock, and every other change
+bundled into it goes unmeasured; a change Magpie lets through is still not
+allowed by this policy.
+The exact rules are Magpie's: read `PROTECTED_ARGS`, `PROTECTED_ENV`,
+`PROTECTED_ENV_PREFIXES` and `_validate_golden_launch` in its
+`Magpie/modes/benchmark/agentx_launch.py` (the session prompt gives the installed
+path) rather than relying on a copy here. The golden-AL lookup below then only
+confirms the recipe's own cell; spend variants on other knobs.
 
 ## Do NOT guess the golden-AL filename from the model name
 
