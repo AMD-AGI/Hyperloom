@@ -151,6 +151,13 @@ def test_the_role_sends_a_tuned_table_through_put_kernel_artifact_whole_and_one_
     assert any("put_kernel_artifact" in direction for direction in DIRECTIONS)
 
 
+def test_the_role_says_a_patch_delta_never_relabels_a_component_the_head_has():
+    prompt = role_prompt(WORKLOAD)
+
+    assert "Submit the delta worktree_patch returns as it is" in prompt
+    assert "never set upstream_ref or upstream_repo on a component your head already has" in prompt
+
+
 def test_the_role_says_a_change_never_selects_its_file_or_setting_with_setdefault():
     prompt = role_prompt(WORKLOAD)
 

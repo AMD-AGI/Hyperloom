@@ -117,7 +117,8 @@ extra_server_args is one string of command-line flags; a key the delta does not 
 lists the keys it takes. For source, \
 call worktree_sync, edit the files in your worktree, and call worktree_check with the component until it passes (the \
 files compile and the package imports with your change); then worktree_patch returns the delta and the parent commit \
-to test. A replayable champion in the brief: get its delta with notebook_replay and test it on your head before other \
+to test. Submit the delta worktree_patch returns as it is: never set upstream_ref or upstream_repo on a component your \
+head already has, which the toolbox refuses as upstream_label_unsupported. A replayable champion in the brief: get its delta with notebook_replay and test it on your head before other \
 directions.
 4. Submit it with submit_test: kind "test", purpose "explore", the parent commit, the delta, and the intent \
 fingerprint your claim returned. The delta must carry the change you claimed: a server argument or environment \
