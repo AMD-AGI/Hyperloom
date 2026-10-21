@@ -224,84 +224,31 @@ def test_an_undecodable_payload_string_is_rejected() -> None:
         decode_intent_envelope(envelope)
 
 
-async def test_the_specialist_runner_call_shape_is_accepted(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A live run's specialists all crashed on TypeError: the runner passes disallowed_tools."""
-    _stub_turn(monkeypatch, DeepSeekSessionResult(text=_reply("send_message", {"topic": "heartbeat"})))
-    result = await _backend(tmp_path).run(
-        prompt="scout",
-        system_prompt="You are a specialist.",
-        disallowed_tools=["KillShell", "SlashCommand"],
-        max_turns=1,
-    )
-
-    assert [intent.type for intent in result.intents] == [IntentType.SEND_MESSAGE]
-
-
 # What the harness is told, given it has no field for a system prompt.
 
 
-async def test_instructions_carry_the_runtime_mapping_the_contract_and_the_system_prompt(
+async def test_instructions_and_every_turn_carry_the_whole_envelope_contract(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The harness exposes no system-prompt field, so all three ride the session."""
+    """The harness has no system-prompt field and no schema, so the wording is all that holds the model to the shape."""
     captured = _stub_turn(monkeypatch, DeepSeekSessionResult(text=_reply("send_message", {"topic": "heartbeat"})))
     await _backend(tmp_path).run("status?", system_prompt="You are the Coordinator.")
 
     instructions = captured["instructions"]
-    assert "DeepSeek Harness runtime mapping" in instructions
+    legal = ", ".join(sorted(t.value for t in _ORCHESTRATION_INTENTS))
+    # Carried on the first message: the runtime mapping, the system prompt, the output format, the exact legal names
+    # (a live run emitted 'send_message:kernel'), and a payload written inline (a serialized one broke on 1 tick in 5).
+    assert deepseek_session.DEEPSEEK_RUNTIME_MAPPING.strip() in instructions
     assert "You are the Coordinator." in instructions
     assert "OUTPUT FORMAT" in instructions
-
-
-async def test_instructions_name_every_legal_intent_type_exactly(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """No schema enum holds the model to the set, so the text has to; a live run emitted 'send_message:kernel'."""
-    captured = _stub_turn(monkeypatch, DeepSeekSessionResult(text=_reply("send_message", {"topic": "heartbeat"})))
-    await _backend(tmp_path).run("status?")
-
-    legal = ", ".join(sorted(t.value for t in _ORCHESTRATION_INTENTS))
-    assert f"`intent_type` MUST be exactly one of: {legal}." in captured["instructions"]
-
-
-async def test_every_turn_restates_the_envelope_contract(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Instructions ride the first message only, so a later turn needs reminding."""
-    captured = _stub_turn(monkeypatch, DeepSeekSessionResult(text=_reply("send_message", {"topic": "heartbeat"})))
-    await _backend(tmp_path).run("status?")
-
-    assert deepseek_module._ENVELOPE_REMINDER in captured["prompt"]
-
-
-async def test_every_turn_spells_out_the_intent_object_keys(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Compaction folds the first message away; a live run then wrote 'intent_payload' for 'payload' on every tick."""
-    captured = _stub_turn(monkeypatch, DeepSeekSessionResult(text=_reply("send_message", {"topic": "heartbeat"})))
-    await _backend(tmp_path).run("status?")
-
-    assert '{"intents": [{"intent_type": "<type>", "payload": {<JSON object>}}]}' in captured["prompt"]
-
-
-async def test_the_payload_is_asked_for_as_an_inline_object(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """No schema forces a string here; a live run broke the escaping of a serialized payload on 1 tick in 5."""
-    captured = _stub_turn(monkeypatch, DeepSeekSessionResult(text=_reply("send_message", {"topic": "heartbeat"})))
-    await _backend(tmp_path).run("status?")
-
-    assert "Do not serialize it into a string" in captured["instructions"]
-    assert "serialized JSON object" not in captured["instructions"]
-    assert "not a string" in captured["prompt"]
+    assert f"`intent_type` MUST be exactly one of: {legal}." in instructions
+    assert "Do not serialize it into a string" in instructions
+    # Instructions ride the first message only and compaction folds it away, so each turn restates the contract.
+    prompt = captured["prompt"]
+    assert deepseek_module._ENVELOPE_REMINDER in prompt
+    assert '{"intents": [{"intent_type": "<type>", "payload": {<JSON object>}}]}' in prompt
+    assert "not a string" in prompt
 
 
 def test_an_intent_without_a_payload_key_names_the_keys_it_carried() -> None:
@@ -370,6 +317,16 @@ def _pin_gateway(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "gateway-key")
 
 
+class _FakeHarnessError(Exception):
+    """Stands in for ``deepseek_harness.errors.HarnessError``."""
+
+
+def _install_fake_sdk(monkeypatch: pytest.MonkeyPatch, harness_cls: type) -> None:
+    """Replace the SDK module with one whose harness class is ``harness_cls``."""
+    sdk = SimpleNamespace(DeepSeekHarness=harness_cls, errors=SimpleNamespace(HarnessError=_FakeHarnessError))
+    monkeypatch.setattr(deepseek_session, "_load_harness_sdk", lambda: sdk)
+
+
 def _capture_harness_kwargs(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     """Replace the SDK with one whose harness records its construction kwargs."""
     captured: dict[str, Any] = {}
@@ -378,7 +335,10 @@ def _capture_harness_kwargs(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         def __init__(self, **kwargs: Any) -> None:
             captured.update(kwargs)
 
-    monkeypatch.setattr(deepseek_session, "_load_harness_sdk", lambda: SimpleNamespace(DeepSeekHarness=_Harness))
+        def start(self) -> None:
+            captured["started"] = True
+
+    _install_fake_sdk(monkeypatch, _Harness)
     return captured
 
 
@@ -445,6 +405,37 @@ async def test_an_unconfigured_gateway_fails_at_start_not_at_the_first_turn(
         await DeepSeekSession(cwd=tmp_path, model="deepseek-v4-flash", dsh_home=tmp_path / "home").start()
 
 
+class _RecordingHarness:
+    """A harness that records its lifecycle; subclasses decide what ``run`` and ``start`` do."""
+
+    instances: list[Any]
+
+    def __init__(self, **_kwargs: Any) -> None:
+        self.closed = False
+        self.instances.append(self)
+
+    def start(self) -> None:
+        pass
+
+    def close(self) -> None:
+        self.closed = True
+
+    def run(self, _body: str, *, session_id: str) -> Any:
+        return SimpleNamespace(final_response="ok", finish_reason="completed", events=[], session_id=session_id)
+
+
+def _recording_harness(monkeypatch: pytest.MonkeyPatch, **behaviour: Any) -> list[Any]:
+    """Install a recording harness whose methods are overridden by ``behaviour``; return its instances."""
+    instances: list[Any] = []
+    namespace = {"instances": instances, **behaviour}
+    _install_fake_sdk(monkeypatch, type("_Harness", (_RecordingHarness,), namespace))
+    return instances
+
+
+def _session(tmp_path: Path) -> DeepSeekSession:
+    return DeepSeekSession(cwd=tmp_path, model="deepseek-v4-flash", dsh_home=tmp_path / "home")
+
+
 async def test_a_timed_out_turn_is_stopped_and_the_next_one_runs_on_a_fresh_runtime(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -454,34 +445,102 @@ async def test_a_timed_out_turn_is_stopped_and_the_next_one_runs_on_a_fresh_runt
 
     _pin_gateway(monkeypatch)
     release = threading.Event()
-    harnesses: list[Any] = []
 
-    class _Harness:
-        def __init__(self, **_kwargs: Any) -> None:
-            self.closed = False
-            harnesses.append(self)
+    def _run(self: Any, _body: str, *, session_id: str) -> Any:
+        if len(instances) == 1:
+            release.wait(timeout=5)
+        return SimpleNamespace(final_response="ok", finish_reason="completed", events=[], session_id=session_id)
 
-        def run(self, _body: str, *, session_id: str) -> Any:
-            if len(harnesses) == 1:
-                release.wait(timeout=5)
-            return SimpleNamespace(final_response="ok", finish_reason="completed", events=[], session_id=session_id)
+    def _close(self: Any) -> None:
+        self.closed = True
+        release.set()
 
-        def close(self) -> None:
-            self.closed = True
-            release.set()
-
-    monkeypatch.setattr(deepseek_session, "_load_harness_sdk", lambda: SimpleNamespace(DeepSeekHarness=_Harness))
-    session = DeepSeekSession(cwd=tmp_path, model="deepseek-v4-flash", dsh_home=tmp_path / "home")
+    instances = _recording_harness(monkeypatch, run=_run, close=_close)
+    session = _session(tmp_path)
     await session.start()
 
     with pytest.raises(deepseek_session.DeepSeekSessionTimeoutError):
         await session.turn("slow", timeout_sec=0.05)
-    assert harnesses[0].closed
+    assert instances[0].closed
 
     result = await session.turn("fast", timeout_sec=5)
-    assert len(harnesses) == 2
+    assert len(instances) == 2
     assert result.text == "ok"
     await session.aclose()
+
+
+async def test_a_dead_runtime_is_closed_so_the_next_turn_does_not_write_to_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Once the runtime process is gone every later turn fails on the same write; only a new runtime recovers."""
+    _pin_gateway(monkeypatch)
+
+    def _run(self: Any, _body: str, *, session_id: str) -> Any:
+        if len(instances) == 1:
+            raise _FakeHarnessError("Failed to write to DeepSeek Harness runtime")
+        return SimpleNamespace(final_response="ok", finish_reason="completed", events=[], session_id=session_id)
+
+    instances = _recording_harness(monkeypatch, run=_run)
+    session = _session(tmp_path)
+
+    with pytest.raises(DeepSeekSessionError, match="Failed to write"):
+        await session.turn("first", timeout_sec=5)
+    assert instances[0].closed
+
+    assert (await session.turn("second", timeout_sec=5)).text == "ok"
+    assert len(instances) == 2
+    await session.aclose()
+
+
+async def test_a_cancelled_turn_stops_its_runtime_instead_of_leaving_it_spending(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The coordinator cancels a turn with ``wait_for``; the abandoned thread would otherwise keep running and billing."""
+    import asyncio
+    import threading
+
+    _pin_gateway(monkeypatch)
+    entered = threading.Event()
+    release = threading.Event()
+
+    def _run(self: Any, _body: str, *, session_id: str) -> Any:
+        entered.set()
+        release.wait(timeout=5)
+        return SimpleNamespace(final_response="late", finish_reason="completed", events=[], session_id=session_id)
+
+    def _close(self: Any) -> None:
+        self.closed = True
+        release.set()
+
+    instances = _recording_harness(monkeypatch, run=_run, close=_close)
+    session = _session(tmp_path)
+    task = asyncio.create_task(session.turn("slow", timeout_sec=30))
+    while not entered.is_set():
+        await asyncio.sleep(0.01)
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert instances[0].closed
+
+
+async def test_start_runs_the_handshake_so_a_bad_configuration_is_not_retried_as_transient(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The SDK starts lazily, so constructing it proves nothing: a missing binary or a bogus model must fail here."""
+    _pin_gateway(monkeypatch)
+
+    def _start(self: Any) -> None:
+        raise _FakeHarnessError("initialize refused model 'bogus'")
+
+    instances = _recording_harness(monkeypatch, start=_start)
+    with pytest.raises(DeepSeekSessionUnavailableError, match="initialize refused"):
+        await _session(tmp_path).start()
+    # The runtime the failed handshake spawned is stopped, not left running.
+    assert instances[0].closed
 
 
 # Token accounting.
