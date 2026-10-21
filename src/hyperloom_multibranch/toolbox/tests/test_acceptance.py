@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom.contracts.measurement import AttachmentRef, Purpose, TestKind
-from hyperloom.contracts.recipe import ComponentChange, Recipe, RecipeDelta
+from hyperloom.contracts.recipe import ComponentChange, ComponentPatches, PatchRef, Recipe, RecipeDelta
 from hyperloom_multibranch.contracts.toolbox import RequestRejected, WorkloadKind
 from hyperloom_multibranch.toolbox.tests.helpers import BAD_DELTA, IMAGE, OTHER_IMAGE, FakeRepo, build, req
 
@@ -175,3 +175,60 @@ async def test_a_baseline_or_a_confirm_may_carry_an_empty_delta(tmp_path: Path, 
     first = await rig.toolbox.submit_test(req())
     request = req(purpose=purpose, change=RecipeDelta(), **({"retest_of": first} if purpose is Purpose.CONFIRM else {}))
     assert await rig.toolbox.submit_test(request)
+
+
+SGLANG_REPO = "https://github.com/sgl-project/sglang"
+SGLANG_REF = "9f5d8712" + "0" * 32
+OTHER_REF = "e8b97b24" + "0" * 32
+PATCH = PatchRef("patch/sglang/0001-fuse.patch", "d" * 64)
+
+
+def _with_sglang() -> FakeRepo:
+    return FakeRepo(Recipe(base_image_digest=IMAGE, components=(ComponentPatches("sglang", SGLANG_REPO, SGLANG_REF),)))
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        ComponentChange("sglang", upstream_ref=OTHER_REF),
+        ComponentChange("sglang", upstream_ref=OTHER_REF, upstream_repo=SGLANG_REPO, add_patches=(PATCH,)),
+        ComponentChange("sglang", upstream_repo="https://github.com/someone/sglang"),
+        ComponentChange("sglang", SGLANG_REF, "https://github.com/someone/sglang"),
+    ],
+    ids=["ref", "ref_and_patch", "repo", "repo_with_equal_ref"],
+)
+async def test_a_delta_that_moves_the_upstream_of_a_component_the_parent_has_is_refused(
+    tmp_path: Path, change: ComponentChange
+) -> None:
+    rig = build(tmp_path, repo=_with_sglang())
+    with pytest.raises(RequestRejected, match="installed package") as refused:
+        await rig.toolbox.submit_test(req(change=RecipeDelta(components=(change,))))
+    assert refused.value.code == "upstream_label_unsupported" and "sglang" in refused.value.reason
+    state = await rig.toolbox.queue_state()
+    assert state.queued == 0 and state.running == 0
+    assert rig.notebook._state().requests == {} and rig.toolbox._log.entries() == []
+    assert rig.planner.calls == []
+
+
+@pytest.mark.parametrize("purpose", [Purpose.EXPLORE, Purpose.INTEGRATION])
+async def test_a_delta_that_restates_the_parents_upstream_is_accepted_unchanged(
+    tmp_path: Path, purpose: Purpose
+) -> None:
+    rig = build(tmp_path, repo=_with_sglang())
+    change = RecipeDelta(components=(ComponentChange("sglang", SGLANG_REF, SGLANG_REPO, add_patches=(PATCH,)),))
+    request_id = await rig.toolbox.submit_test(req(purpose=purpose, change=change))
+    assert rig.notebook._state().requests[request_id].purpose == purpose.value
+    assert rig.planner.calls == [change], "the delta runs as submitted, so its fingerprint matches the claim's"
+
+
+async def test_a_component_the_parent_lacks_is_still_accepted_with_its_repository_and_commit(tmp_path: Path) -> None:
+    rig = build(tmp_path, repo=_with_sglang())
+    triton = RecipeDelta(components=(ComponentChange("triton", OTHER_REF, "https://github.com/triton-lang/triton"),))
+    assert await rig.toolbox.submit_test(req(change=triton))
+    assert rig.planner.calls == [triton]
+
+
+async def test_a_component_the_parent_lacks_still_needs_its_repository_and_commit(tmp_path: Path) -> None:
+    rig = build(tmp_path, repo=_with_sglang())
+    bare = RecipeDelta(components=(ComponentChange("triton", add_patches=(PATCH,)),))
+    await _rejected(rig, req(change=bare), "delta_not_applicable")

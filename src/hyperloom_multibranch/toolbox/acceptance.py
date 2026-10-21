@@ -60,6 +60,26 @@ def _check_explore_changes_something(request: TestRequest) -> None:
         raise RequestRejected("an explore test must change something, and its delta is empty", "empty_delta")
 
 
+def _check_upstream_label(parent: Recipe, request: TestRequest) -> None:
+    """Refuse a delta that moves the upstream label of a component the parent already has.
+
+    Every component is built from the installed package of the session's base image, so a different ``upstream_ref``
+    or ``upstream_repo`` would label a measurement with source it never ran. A value equal to the parent's moves
+    nothing and passes; a component the parent lacks is a new one, which ``apply`` requires both fields for.
+    """
+    for change in request.delta.components:
+        pinned = parent.component(change.component)
+        if pinned is not None and (
+            change.upstream_ref not in (None, pinned.upstream_ref)
+            or change.upstream_repo not in (None, pinned.upstream_repo)
+        ):
+            raise RequestRejected(
+                f"{change.component} is built from the session's installed package; only patches, launch config and "
+                "kernels may change, so drop upstream_ref and upstream_repo from its change",
+                "upstream_label_unsupported",
+            )
+
+
 def _no_live_profile(request: TestRequest) -> str | None:
     return None
 
@@ -142,6 +162,8 @@ class Acceptance:
             self._check_profile_exists(request)
         recipe = await self._read_parent(request)
         self._check_image(recipe)
+        if not replay:  # a request an earlier toolbox accepted is not withdrawn by a later rule
+            _check_upstream_label(recipe, request)
         candidate = self._check_delta(recipe, request)
         self._check_fake_gain(recipe, candidate)
         return Prepared(self._plan(recipe, request))

@@ -124,7 +124,13 @@ _SUBMIT_TEST: dict[str, Any] = {
         "kind": {"enum": [kind.value for kind in TestKind]},
         "purpose": {"enum": [purpose.value for purpose in Purpose]},
         "parent_commit": {"type": _STRING, "minLength": 1},
-        "delta": {"type": _OBJECT, "description": "The recipe delta document: config, components, kernels."},
+        "delta": {
+            "type": _OBJECT,
+            "description": (
+                "The recipe delta document: config, components, kernels. A component the recipe has takes patches "
+                "only: its upstream_ref and upstream_repo are refused as upstream_label_unsupported."
+            ),
+        },
         "intent_fingerprint": {"type": [_STRING, _NULL]},
         "priority": {"type": [_INTEGER, _NULL], "minimum": PRIORITY_HIGHEST, "maximum": PRIORITY_LOWEST},
         "retest_of": {"type": [_STRING, _NULL]},
