@@ -19,7 +19,7 @@ from ave.claude import query_result
 
 SYSTEM_PROMPT = """You prepare one AveLang kernel optimization for Hyperloom.
 Use the supplied inference workload, serving configuration, trace evidence and
-source repositories to choose ONE existing single-GPU AveLang kernel that the
+source repositories to choose ONE existing AveLang kernel on a single node that the
 serving workload actually calls and to which ALL supplied optimization prompts apply.
 Read available trace analysis and source/call sites before selecting it. TraceLens
 conclusions and candidate lists are hints: missing analysis or source resolution
@@ -53,6 +53,9 @@ overhead. Print 'case_ms: <stable_case_id> <positive_milliseconds>' for every ca
 Keep cases identical between validation and timing. Use runtime APIs and test
 conventions verified from source. Do not run or benchmark the driver yourself;
 the host validates it against the unchanged kernel before allowing optimization.
+For a multi-GPU kernel, preserve its rank count and collective reference. The
+driver must launch and join every rank itself, fail if any rank fails, and emit
+one set of correctness/timing results from rank 0. Do not reduce it to one GPU.
 """
 
 

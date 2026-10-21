@@ -30,7 +30,7 @@ Hyperloom kernel phase with backend=ave → inspect workload, trace and source c
   └─ No applicable AveLang kernel → record the reason and skip kernel optimization
 ```
 
-This version checks for one existing single-GPU AveLang kernel per session.
+This version checks for one existing AveLang kernel on a single node per session.
 It does not mix Ave and Forge jobs within the same phase. All supplied prompts
 must apply to that one selected kernel. If the evidence cannot establish a
 suitable kernel, its serving call path, or a valid workload/reference, Hyperloom
@@ -101,7 +101,7 @@ alone constitutes an E2E KEEP.
 
 ## Generate prompts from shared knowledge
 
-`ave.prompts.build_prompts(recipe, context=...)` renders an ordered recipe into the same `PromptStep` objects accepted by the loop. It reads packaged Markdown knowledge and makes no LLM calls.
+`ave.prompts.build_prompts(recipe, context=...)` renders an ordered recipe into the same `PromptStep` objects accepted by the loop. It reads packaged Markdown knowledge and makes no LLM calls. The [MoE examples](../../examples/ave-moe/README.md) use this path instead of storing expanded prompts in the repository.
 
 The [knowledge directory](../../src/ave/knowledge/) separates shared language/hardware rules from individual optimization mechanisms. Each mechanism document describes its applicability, transformation, invariants and tradeoffs.
 
@@ -119,7 +119,7 @@ A recipe supplies `objective`, shared `knowledge` topic names and an ordered `st
 
 The step's readable `name`, such as `register_tiling`, becomes its execution `id`. Array order still defines the sequence. Existing prompt-file input and the default prompt use the same loop as generated prompts.
 
-Changing shared knowledge changes subsequently generated prompts; an existing Hyperloom session continues to use its saved prompts on resume.
+The examples' `prepare.py` writes the complete generated prompts to `<workspace>/<suite>/prompts.json` before optimization so they can be inspected. Changing shared knowledge changes subsequently generated prompts; an existing Hyperloom session continues to use its saved prompts on resume.
 
 ## Runtime and driver
 
@@ -140,6 +140,10 @@ The driver contract is:
 - Emit finite positive milliseconds per case, for example
   `case_ms: tokens128_hidden4096_bf16 0.012`. Keep case IDs and workloads fixed.
 
+For a multi-GPU kernel, the driver launches and joins every required rank on the
+allocated node, validates against the collective reference, and fails if any rank
+fails. Only rank zero emits the aggregate correctness and timing results.
+
 Ave uses Claude Code subscription authentication through the shared Claude
 Agent SDK configuration and `CLAUDE_MODEL`. For Hyperloom CLI runs, obtain a token
 with `claude setup-token` and set `CLAUDE_CODE_OAUTH_TOKEN`, with
@@ -157,7 +161,7 @@ Claude uses Read/Glob/Grep to inspect source, language APIs and tests, and
 Edit/Write/Bash to modify the scoped sources and run the supplied driver.
 The agent receives correctness and benchmark commands using the worker's Python
 environment, current per-case timings and its remaining session budget.
-Each editing session is limited to ten minutes or the remaining optimizer budget,
+Each editing session is limited to sixty minutes or the remaining optimizer budget,
 with time reserved for host validation.
 Its final text report is informational; the host validates the actual worktree
 changes and measures them independently before committing.

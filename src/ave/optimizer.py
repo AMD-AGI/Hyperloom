@@ -25,7 +25,7 @@ from hyperloom.common.io import atomic_write_json
 from ave.claude import query_result
 from hyperloom.common.llm_config import DEFAULT_CLAUDE_MODEL, claude_sdk_env_options
 
-MAX_SESSION_SEC = 600
+MAX_SESSION_SEC = 3600
 MIN_SESSION_SEC = 30
 STEP_ATTEMPTS = 3
 FAILED = "failed"
