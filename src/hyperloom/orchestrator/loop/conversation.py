@@ -125,14 +125,14 @@ def _format_delegated_result(head: str, payload: dict[str, Any], max_variant_row
     # Only a specialist result carries this key, so its presence is the test.
     done: dict[str, Any] = result.get("specialist_done") or {}
     parts = [head, f"kind={payload.get('kind')!r}", f"state={payload.get('state')!r}"]
-    for label, value in (
-        ("status", _first_present(result, _OUTCOME_STATUS_KEYS)),
-        ("kept", result.get("kept")),
-        ("gain", _first_present(result, _OUTCOME_GAIN_KEYS)),
-        ("tput", _first_present(result, _OUTCOME_TPUT_KEYS)),
+    for label, value, quoted in (
+        ("status", _first_present(result, _OUTCOME_STATUS_KEYS), True),
+        ("kept", result.get("kept"), True),
+        ("gain", _first_present(result, _OUTCOME_GAIN_KEYS), False),
+        ("tput", _first_present(result, _OUTCOME_TPUT_KEYS), False),
     ):
         if value is not None:
-            parts.append(f"{label}={value!r}" if label in ("status", "kept") else f"{label}={value}")
+            parts.append(f"{label}={value!r}" if quoted else f"{label}={value}")
     summary = str(done.get("summary") or "").strip()
     if summary:
         parts.append(f"summary={summary[:400]!r}")

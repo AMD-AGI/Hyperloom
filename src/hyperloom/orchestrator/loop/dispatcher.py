@@ -128,6 +128,8 @@ _CANCEL_NOTICE_SEC: float = STOP_GATE_POLL_SECONDS
 #: Kinds whose execution manages its own completion: the pump does not book
 #: their result. Admission is unchanged — same budget, lane and lease gates.
 _SELF_SETTLING_KINDS: frozenset[str] = frozenset({"targeted_build", "kernel_agent"})
+#: Warm replay settles through its own promote handler even when dispatch failed.
+_REPLAY_WARM_RECIPE = "replay_warm_recipe"
 
 
 class HeldLeases(NamedTuple):
@@ -1105,7 +1107,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
             await self._record_specialist_settlement(task, result)
         payload = dict(result.result)
         # A warm replay that failed in dispatch still owes its promote handler a cleanup pass.
-        if task.kind == "replay_warm_recipe" and result.state == "failed":
+        if task.kind == _REPLAY_WARM_RECIPE and result.state == "failed":
             payload.setdefault("status", "failed")
             payload.setdefault("error_class", "dispatch_failed")
             if result.error:
@@ -1130,7 +1132,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         if task.kind == "integrate_patch":
             await self._coord.phase_framework.on_integrate_patch_settled(task, result, verdict)
         # replay_warm_recipe is excluded from the fact-write: it is verification, not a fact.
-        if task.kind != "replay_warm_recipe":
+        if task.kind != _REPLAY_WARM_RECIPE:
             try:
                 await self._coord.recipe_journal.fact_write_hook(
                     task=task, result=result, verdict=verdict, adopted_variants=adopted
@@ -1175,7 +1177,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
             return None
         writeback = self._coord.writeback
         try:
-            promotable = result.state == "succeeded" or (task.kind == "replay_warm_recipe" and result.state == "failed")
+            promotable = result.state == "succeeded" or (task.kind == _REPLAY_WARM_RECIPE and result.state == "failed")
             if promotable and writeback.is_promotable_result(task.kind, payload):
                 promoted = await writeback.promote_to_shared_state(task.kind, payload, task=task)
                 return promoted.verdict, promoted.adopted_variants
