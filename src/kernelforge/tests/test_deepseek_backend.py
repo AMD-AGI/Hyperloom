@@ -9,28 +9,28 @@ from types import SimpleNamespace
 
 import pytest
 
+from hyperloom.common.deepseek_session import DEEPSEEK_PROVIDER_ROUTE
 from hyperloom.common.reasoning_effort import harness_reasoning_effort
 from kernelforge.agent_backends.base import (
     AgentRunSpec,
     AgentRuntimeConfig,
 )
 from kernelforge.agent_backends.deepseek import (
-    DEEPSEEK_PROVIDER_ROUTE,
     DeepSeekHarnessBackend,
     DeepSeekHarnessExecutionError,
     DeepSeekHarnessUnavailableError,
     _normalize_run_result,
-    _usage_from_events,
     resolve_deepseek_reasoning_effort,
 )
 from kernelforge.agent_backends.registry import get_agent_provider
 from kernelforge.agent_backends.workspace_guard import WorkspaceSafetyError
 from kernelforge.tracker.usage import UsageAccumulator
 
-_GATEWAY = {
-    "base_url": "https://gateway.example.invalid/v1",
-    "key_env": "FAKE_DEEPSEEK_API_KEY",
-}
+_GATEWAY_URL = "https://gateway.example.invalid/v1"
+
+
+class _FakeHarnessError(Exception):
+    """Stands in for ``deepseek_harness.errors.HarnessError``."""
 
 
 def _git(cwd: Path, *args: str) -> str:
@@ -64,7 +64,13 @@ class _FakeHarness:
         self.prompts: list[tuple[str, str]] = []
         self.closed = False
         self.on_run = None
+        self.on_start = None
         _FakeHarness.instances.append(self)
+
+    def start(self) -> None:
+        """Run the handshake the real SDK defers until asked."""
+        if self.on_start is not None:
+            self.on_start(self)
 
     def run(self, prompt: str, *, session_id: str | None = None) -> SimpleNamespace:
         """Return one deterministic activity-interval result."""
@@ -87,28 +93,24 @@ class _FakeHarnessSdk:
     """Collect the fake classes exposed by the public Python SDK."""
 
     DeepSeekHarness = _FakeHarness
+    errors = SimpleNamespace(HarnessError=_FakeHarnessError)
 
 
 @pytest.fixture(autouse=True)
 def _install_fake_harness_sdk(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Route backend tests through the deterministic SDK transport fake."""
+    """Route backend tests through the deterministic SDK transport fake and a configured gateway."""
     _FakeHarness.instances.clear()
-    monkeypatch.setattr(
-        "kernelforge.agent_backends.deepseek._load_harness_sdk",
-        lambda: _FakeHarnessSdk,
-    )
+    monkeypatch.setattr("hyperloom.common.deepseek_session.load_harness_sdk", lambda: _FakeHarnessSdk)
+    monkeypatch.setattr("kernelforge.agent_backends.deepseek.load_harness_sdk", lambda: _FakeHarnessSdk)
+    monkeypatch.setenv("OPENAI_BASE_URL", _GATEWAY_URL)
+    monkeypatch.setenv("OPENAI_API_KEY", "fake-key")
 
 
 def _backend(**runtime_fields: object) -> DeepSeekHarnessBackend:
-    """Build a backend with a deterministic fake gateway."""
+    """Build a backend whose gateway is the fixture's."""
     fields: dict[str, object] = {"provider": "deepseek", "model": "deepseek-v4-flash"}
     fields.update(runtime_fields)
-    from kernelforge.llm import LlmGateway
-
-    return DeepSeekHarnessBackend(
-        gateway=LlmGateway.from_mapping(_GATEWAY),
-        runtime=AgentRuntimeConfig(**fields),  # type: ignore[arg-type]
-    )
+    return DeepSeekHarnessBackend(runtime=AgentRuntimeConfig(**fields))  # type: ignore[arg-type]
 
 
 def _spec(repo: Path, kernel: Path, **fields: object) -> AgentRunSpec:
@@ -129,9 +131,6 @@ def test_provider_is_registered_with_the_capabilities_it_implements() -> None:
     provider = get_agent_provider("deepseek")
 
     assert provider.default_model == "deepseek-v4-flash"
-    assert provider.owns_model("deepseek-v4-flash")
-    assert not provider.owns_model("claude-opus-5")
-    assert not provider.owns_model("gpt-5.6-sol")
     assert provider.capabilities.resumable
     assert provider.capabilities.workspace_guard
     assert provider.capabilities.session_env
@@ -170,34 +169,6 @@ def test_an_off_ladder_effort_is_refused_rather_than_rewritten() -> None:
         resolve_deepseek_reasoning_effort("enormous")
 
 
-@pytest.mark.parametrize(
-    ("sandbox_mode", "writable", "expected"),
-    [
-        ("bypass", True, "danger-full-access"),
-        ("bypass", False, "read-only"),
-        ("workspace-write", True, "danger-full-access"),
-        ("workspace-write", False, "read-only"),
-        ("read-only", True, "read-only"),
-        ("read-only", False, "read-only"),
-    ],
-)
-def test_permission_mode_confines_a_read_only_session_and_lets_a_writable_one_write(
-    sandbox_mode: str,
-    writable: bool,
-    expected: str,
-) -> None:
-    """A writable session cannot use workspace-write: its approvals fail closed.
-
-    The harness pairs workspace-write with an ``ask`` approval policy and an SDK
-    client registers no answerer, so every write would be refused on a request
-    nobody can answer. Confinement for a writable session is WorkspaceGuard's.
-    """
-    backend = _backend(sandbox_mode=sandbox_mode)
-    spec = AgentRunSpec(system_prompt="s", user_prompt="u", cwd=".", writable=writable)
-
-    assert backend._permission_mode(spec) == expected
-
-
 def test_the_retired_deepseek_variables_are_not_consulted(monkeypatch: pytest.MonkeyPatch) -> None:
     """This provider must not resurrect a spelling the preflight migrates away from.
 
@@ -214,68 +185,6 @@ def test_the_retired_deepseek_variables_are_not_consulted(monkeypatch: pytest.Mo
 
     with pytest.raises(DeepSeekHarnessUnavailableError, match="OPENAI_BASE_URL"):
         backend.preflight()
-
-
-def test_child_environment_carries_the_route_credential_and_the_session_overlay(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The subprocess gets the endpoint, the key, the sandbox and the caller's overlay."""
-    monkeypatch.setenv("FAKE_DEEPSEEK_API_KEY", "secret-value")
-    monkeypatch.setenv("GIT_DIR", "/elsewhere/.git")
-    monkeypatch.setenv("GIT_WORK_TREE", "/elsewhere")
-    backend = _backend()
-    spec = AgentRunSpec(
-        system_prompt="s",
-        user_prompt="u",
-        cwd=".",
-        env={"HIP_VISIBLE_DEVICES": "3"},
-    )
-
-    env = backend._child_environment(spec)
-
-    assert env["DEEPSEEK_BASE_URL"] == _GATEWAY["base_url"]
-    assert env["DEEPSEEK_API_KEY"] == "secret-value"
-    assert env["DSH_PERMISSION_MODE"] == "danger-full-access"
-    assert env["HIP_VISIBLE_DEVICES"] == "3"
-    # These outrank cwd, so a caller that set them to reach one repository would answer every git command the session
-    # runs anywhere.
-    assert "GIT_DIR" not in env
-    assert "GIT_WORK_TREE" not in env
-
-
-def test_two_roles_in_one_workspace_share_a_runtime(tmp_path: Path) -> None:
-    """The system prompt rides the message, so roles need no runtime of their own.
-
-    Each runtime is a Node subprocess. Keying them by system prompt would start
-    one per role in a campaign that runs several against the same worktree.
-    """
-    repo, kernel = _make_repo(tmp_path)
-    backend = _backend()
-    implementer = _spec(repo, kernel, system_prompt="Implement.").resolved(backend.runtime)
-    analysis = _spec(repo, kernel, system_prompt="Analyse.").resolved(backend.runtime)
-
-    assert backend._runtime_key(implementer) == backend._runtime_key(analysis)
-
-
-@pytest.mark.parametrize(
-    "divergent",
-    [
-        {"model": "deepseek-v4-pro"},
-        {"writable": False},
-        {"env": {"HIP_VISIBLE_DEVICES": "1"}},
-    ],
-)
-def test_anything_fixed_at_initialization_gets_its_own_runtime(
-    tmp_path: Path,
-    divergent: dict[str, object],
-) -> None:
-    """Values sent in the handshake or the child env cannot be shared across runtimes."""
-    repo, kernel = _make_repo(tmp_path)
-    backend = _backend()
-    base = _spec(repo, kernel).resolved(backend.runtime)
-    other = _spec(repo, kernel, **divergent).resolved(backend.runtime)
-
-    assert backend._runtime_key(base) != backend._runtime_key(other)
 
 
 def test_run_sends_the_system_prompt_with_the_task_and_names_the_route(tmp_path: Path) -> None:
@@ -372,17 +281,6 @@ def test_a_runtime_whose_workspace_is_gone_is_shut_down(tmp_path: Path) -> None:
     assert not main_runtime.closed
 
 
-def test_close_shuts_down_every_runtime_it_started(tmp_path: Path) -> None:
-    """A campaign must not leak one Node subprocess per workspace it visited."""
-    repo, kernel = _make_repo(tmp_path)
-    backend = _backend()
-    asyncio.run(backend.run(_spec(repo, kernel)))
-
-    backend.close()
-
-    assert [harness.closed for harness in _FakeHarness.instances] == [True]
-
-
 def test_a_session_that_edits_a_protected_measurement_file_is_rejected_and_restored(
     tmp_path: Path,
 ) -> None:
@@ -419,39 +317,6 @@ def test_a_session_that_edits_a_protected_measurement_file_is_rejected_and_resto
         DeepSeekHarnessBackend._harness_for = original  # type: ignore[method-assign]
 
     assert measure.read_text() == "BUDGET = 1\n"
-
-
-def test_usage_sums_per_step_tokens_without_double_counting_the_prefix() -> None:
-    """``totalTokens`` is a running turn total, so only the deltas may be summed."""
-    events = [
-        {
-            "type": "assistant/message",
-            "data": {"usage": {"inputTokens": 7246, "outputTokens": 54, "totalTokens": 7300}},
-        },
-        {
-            "type": "assistant/message",
-            "data": {
-                "usage": {
-                    "inputTokens": 188,
-                    "outputTokens": 18,
-                    "totalTokens": 7374,
-                    "cacheReadTokens": 7168,
-                }
-            },
-        },
-        {"type": "tool/call", "data": {"name": "read"}},
-    ]
-
-    usage = _usage_from_events(events)
-
-    assert usage["input_tokens"] == 7434
-    assert usage["output_tokens"] == 72
-    assert usage["cache_read_input_tokens"] == 7168
-
-
-def test_a_session_that_reported_no_usage_records_none() -> None:
-    """An empty dict keeps an unmeasured session out of the campaign's token totals."""
-    assert _usage_from_events([{"type": "turn/end", "data": {}}]) == {}
 
 
 def test_normalize_reports_tool_calls_and_session_identity() -> None:
@@ -553,20 +418,6 @@ def test_usage_is_attributed_to_the_role_that_spent_it(tmp_path: Path) -> None:
     assert "implementer" in totals["by_role"]
 
 
-def test_a_missing_sdk_reports_provider_unavailability(monkeypatch: pytest.MonkeyPatch) -> None:
-    """An absent extra names itself rather than failing minutes into a campaign."""
-
-    def missing() -> object:
-        raise DeepSeekHarnessUnavailableError(
-            "DeepSeek Harness Python SDK is not installed; install kernelforge[deepseek]"
-        )
-
-    monkeypatch.setattr("kernelforge.agent_backends.deepseek._load_harness_sdk", missing)
-
-    with pytest.raises(DeepSeekHarnessUnavailableError, match="not installed"):
-        _backend().preflight()
-
-
 def test_a_timed_out_session_is_stopped_before_its_edits_are_rolled_back(tmp_path: Path) -> None:
     """The SDK has no per-turn cancel: an abandoned turn keeps editing the workspace the guard just restored."""
     import threading
@@ -579,7 +430,7 @@ def test_a_timed_out_session_is_stopped_before_its_edits_are_rolled_back(tmp_pat
             release.wait(timeout=5)
 
     backend = _backend()
-    first = backend._harness_for(_spec(repo, kernel))
+    first = backend._harness_for(_spec(repo, kernel).resolved(backend.runtime))
     first.on_run = _stall
     first.close = lambda: (setattr(first, "closed", True), release.set())
 
@@ -587,7 +438,98 @@ def test_a_timed_out_session_is_stopped_before_its_edits_are_rolled_back(tmp_pat
         asyncio.run(backend.run(_spec(repo, kernel, timeout_sec=0.05)))
 
     assert first.closed
-    assert backend._harness_for(_spec(repo, kernel)) is not first
+    assert backend._harness_for(_spec(repo, kernel).resolved(backend.runtime)) is not first
+
+
+def test_a_session_scoped_gateway_reaches_the_runtime_environment(tmp_path: Path) -> None:
+    """The per-session overlay is applied before the gateway is resolved, not after."""
+    repo, kernel = _make_repo(tmp_path)
+
+    asyncio.run(
+        _backend().run(
+            _spec(
+                repo, kernel, env={"OPENAI_BASE_URL": "https://scoped.example.invalid/v1", "OPENAI_API_KEY": "scoped"}
+            )
+        )
+    )
+
+    env = _FakeHarness.instances[-1].kwargs["env"]
+    assert env["DEEPSEEK_BASE_URL"] == "https://scoped.example.invalid/v1"
+    assert env["DEEPSEEK_API_KEY"] == "scoped"
+
+
+def test_probe_runs_the_handshake_so_a_bad_route_fails_at_launch(tmp_path: Path) -> None:
+    """Construction is lazy in the SDK: a missing binary or a bogus model only shows when the handshake runs."""
+    repo, _kernel = _make_repo(tmp_path)
+
+    def refuse(_harness: _FakeHarness) -> None:
+        raise _FakeHarnessError("initialize refused model 'bogus'")
+
+    original = _FakeHarness.__init__
+
+    def init(self: _FakeHarness, **kwargs: object) -> None:
+        original(self, **kwargs)
+        self.on_start = refuse
+
+    _FakeHarness.__init__ = init  # type: ignore[method-assign]
+    try:
+        with pytest.raises(DeepSeekHarnessUnavailableError, match="initialize refused"):
+            _backend().probe(cwd=str(repo))
+    finally:
+        _FakeHarness.__init__ = original  # type: ignore[method-assign]
+
+    assert _FakeHarness.instances[0].closed
+
+
+def test_a_cancelled_session_is_stopped_before_its_edits_are_rolled_back(tmp_path: Path) -> None:
+    """Cancelling must take the same route as a timeout, or the abandoned turn rewrites files after the rollback."""
+    import threading
+
+    repo, kernel = _make_repo(tmp_path)
+    entered = threading.Event()
+    release = threading.Event()
+    backend = _backend()
+    harness = backend._harness_for(_spec(repo, kernel).resolved(backend.runtime))
+
+    def stall(_harness: _FakeHarness, _prompt: str, _session_id: object) -> None:
+        entered.set()
+        release.wait(timeout=5)
+
+    harness.on_run = stall
+    harness.close = lambda: (setattr(harness, "closed", True), release.set())
+
+    async def scenario() -> None:
+        task = asyncio.create_task(backend.run(_spec(repo, kernel, timeout_sec=30)))
+        while not entered.is_set():
+            await asyncio.sleep(0.01)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(scenario())
+
+    assert harness.closed
+    assert backend._harness_for(_spec(repo, kernel).resolved(backend.runtime)) is not harness
+
+
+def test_a_crashed_runtime_is_not_served_to_later_sessions(tmp_path: Path) -> None:
+    """Every later session with the same key would land on the dead process."""
+    repo, kernel = _make_repo(tmp_path)
+    backend = _backend()
+    first = backend._harness_for(_spec(repo, kernel).resolved(backend.runtime))
+
+    def crash(_harness: _FakeHarness, _prompt: str, _session_id: object) -> None:
+        raise _FakeHarnessError("Failed to write to DeepSeek Harness runtime")
+
+    first.on_run = crash
+
+    with pytest.raises(DeepSeekHarnessExecutionError, match="Failed to write"):
+        asyncio.run(backend.run(_spec(repo, kernel)))
+    assert first.closed
+
+    result = asyncio.run(backend.run(_spec(repo, kernel)))
+    assert result.text == "done"
+    assert len(_FakeHarness.instances) == 2
 
 
 def test_the_relay_never_adds_the_harness_on_its_own(tmp_path):

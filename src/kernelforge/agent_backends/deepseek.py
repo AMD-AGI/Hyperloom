@@ -1,20 +1,35 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""DeepSeek Harness Python SDK backend for Forge implementer sessions."""
+"""DeepSeek Harness Python SDK backend for Forge implementer sessions.
+
+The runtime layer (SDK loading, gateway environment, handshake, result
+normalization) is :mod:`hyperloom.common.deepseek_session`; this module adds
+what Forge needs on top of it: the workspace guard, resumable sessions and a
+cache of live runtimes.
+"""
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
-import logging
-import os
 import threading
 import uuid
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.deepseek_session import turn_end_failure
+from hyperloom.common.deepseek_session import (
+    DEEPSEEK_RUNTIME_MAPPING,
+    DeepSeekSessionUnavailableError,
+    HarnessLaunch,
+    child_environment,
+    load_harness_sdk,
+    normalize_run_result,
+    sdk_failures,
+    start_harness,
+)
+from hyperloom.common.llm_config import DEFAULT_DEEPSEEK_HARNESS_MODEL
 from hyperloom.common.reasoning_effort import (
     DEFAULT_REASONING_EFFORT,
     REASONING_EFFORT_LEVELS,
@@ -29,16 +44,6 @@ from kernelforge.agent_backends.base import (
     AgentRuntimeConfig,
 )
 from kernelforge.agent_backends.workspace_guard import WorkspaceGuard
-from kernelforge.llm import LlmGateway, resolve_openai_gateway
-
-log = logging.getLogger(__name__)
-
-#: The route the harness mounts for DeepSeek models in its own default plugin
-#: composition. Naming any other provider needs a composition that mounts an
-#: adapter owning it, which initialization refuses to guess at.
-DEEPSEEK_PROVIDER_ROUTE = "deepseek-official"
-
-DEFAULT_DEEPSEEK_MODEL = "deepseek-v4-flash"
 
 
 class DeepSeekHarnessBackendError(AgentProviderError):
@@ -60,20 +65,16 @@ class DeepSeekHarnessExecutionError(DeepSeekHarnessBackendError):
         self.session_id = str(session_id or "")
 
 
-def _load_harness_sdk() -> Any:
-    """Load the optional DeepSeek Harness SDK only when this provider is selected."""
+_READ_ONLY = "read-only"
+
+
+@contextlib.contextmanager
+def _as_forge_unavailable() -> Iterator[None]:
+    """Re-raise the shared layer's unavailability as this provider's own error."""
     try:
-        import deepseek_harness
-    except ImportError as exc:
-        raise DeepSeekHarnessUnavailableError(
-            "DeepSeek Harness Python SDK is not installed; install kernelforge[deepseek]"
-        ) from exc
-    return deepseek_harness
-
-
-def resolve_deepseek_model(explicit: str = "") -> str:
-    """Resolve a DeepSeek model from generic runtime input or built-in default."""
-    return explicit.strip() or DEFAULT_DEEPSEEK_MODEL
+        yield
+    except DeepSeekSessionUnavailableError as exc:
+        raise DeepSeekHarnessUnavailableError(str(exc)) from exc
 
 
 def resolve_deepseek_reasoning_effort(explicit: str = "") -> str:
@@ -102,68 +103,22 @@ def _harness_instructions(spec: AgentRunSpec) -> str:
         if spec.writable
         else "This is a read-only session. Do not edit, create, delete, or rename any file."
     )
-    runtime = f"""\
-## DeepSeek Harness runtime mapping
-Use the read, glob and grep tools to inspect and search files, and bash to run
-commands. References below to Read, Edit, Write, Grep, Glob, or Bash describe
-equivalent capabilities, not literal tool names. {write_guidance}
-
-Do not run git commands that change repository state. Do not commit, reset,
-checkout, stash, clean, or alter branches. The Forge loop owns all git state.
-Follow the task-specific write scope and output format below exactly. Stop when
-that task is complete; do not continue open-ended exploration.
-"""
+    runtime = (
+        f"{DEEPSEEK_RUNTIME_MAPPING}\n{write_guidance} The Forge loop owns all git state.\n"
+        "Follow the task-specific write scope and output format below exactly. Stop when\n"
+        "that task is complete; do not continue open-ended exploration.\n"
+    )
     return f"{runtime}\n## System instructions\n{spec.system_prompt}"
 
 
-def _usage_from_events(events: list[dict[str, Any]]) -> dict[str, Any]:
-    """Sum the per-step token counts the harness reports into Forge fields.
-
-    Only ``inputTokens`` and ``outputTokens`` are added up. The harness reports
-    ``totalTokens`` as a running total for the whole turn, so summing that field
-    across steps would count the same prefix once per step.
-    """
-    totals = {
-        "input_tokens": 0,
-        "output_tokens": 0,
-        "cache_creation_input_tokens": 0,
-        "cache_read_input_tokens": 0,
-    }
-    wire_names = {
-        "inputTokens": "input_tokens",
-        "outputTokens": "output_tokens",
-        "cacheReadTokens": "cache_read_input_tokens",
-    }
-    seen = False
-    for event in events:
-        if not isinstance(event, dict) or event.get("type") != "assistant/message":
-            continue
-        data = event.get("data")
-        usage = data.get("usage") if isinstance(data, dict) else None
-        if not isinstance(usage, dict):
-            continue
-        seen = True
-        for wire, field in wire_names.items():
-            value = usage.get(wire)
-            if isinstance(value, bool):
-                continue
-            with contextlib.suppress(TypeError, ValueError):
-                parsed = int(value)
-                if parsed >= 0:
-                    totals[field] += parsed
-    return totals if seen else {}
-
-
 def _normalize_run_result(result: Any, session_id: str) -> AgentRunResult:
-    """Normalize one completed harness activity interval into the shared result."""
-    text = str(getattr(result, "final_response", "") or "").strip()
+    """Fold one completed harness activity interval into the shared Forge result."""
+    shared = normalize_run_result(result, session_id)
     events = [event for event in (getattr(result, "events", ()) or ()) if isinstance(event, dict)]
     tool_calls: list[tuple[str, dict[str, Any]]] = []
     for event in events:
-        if event.get("type") != "tool/call":
-            continue
         data = event.get("data")
-        if not isinstance(data, dict):
+        if event.get("type") != "tool/call" or not isinstance(data, dict):
             continue
         tool_calls.append(
             (
@@ -172,33 +127,29 @@ def _normalize_run_result(result: Any, session_id: str) -> AgentRunResult:
             )
         )
 
+    text = shared.text
     findings: list[str] = []
     stderr_tail = ""
     subtype = "success"
     end_reason = "agent_stopped"
-    # ``finish_reason`` is the kind of the last turn/end in the interval: the harness reports a provider failure or a
-    # spent output cap there while the run itself completes, so an unexamined result reads as a session that simply
-    # had nothing to say.
-    finish_reason = str(getattr(result, "finish_reason", "") or "")
-    if finish_reason == "max-tokens":
+    if shared.finish_reason == "max-tokens":
         subtype = "error_max_turns"
         end_reason = "turn_cap"
-    elif finish_reason and finish_reason != "completed":
-        message = turn_end_failure(events) or f"session ended with turn/end {finish_reason!r}"
-        findings.append(message)
-        stderr_tail = message[:2000]
+    elif shared.error:
+        findings.append(shared.error)
+        stderr_tail = shared.error[:2000]
         subtype = "error"
         end_reason = "sdk_error"
-        text = text or f"[session ended with harness error: {message}]"
+        text = text or f"[session ended with harness error: {shared.error}]"
 
     return AgentRunResult(
         text=text,
         subtype=subtype,
         num_turns=1,
         end_reason=end_reason,
-        session_id=str(getattr(result, "session_id", "") or session_id),
+        session_id=shared.session_id,
         tool_calls=tool_calls,
-        usage=_usage_from_events(events),
+        usage=shared.usage,
         findings=findings,
         stderr_tail=stderr_tail,
     )
@@ -218,48 +169,17 @@ class DeepSeekHarnessBackend:
         workspace_guard=True,
     )
 
-    def __init__(
-        self,
-        gateway: LlmGateway | None = None,
-        runtime: AgentRuntimeConfig | None = None,
-    ) -> None:
-        """Capture transport overrides while deferring checks until execution."""
+    def __init__(self, runtime: AgentRuntimeConfig | None = None) -> None:
+        """Capture runtime overrides while deferring checks until execution."""
         self.runtime = runtime or AgentRuntimeConfig(
             provider=self.name,
-            model=DEFAULT_DEEPSEEK_MODEL,
+            model=DEFAULT_DEEPSEEK_HARNESS_MODEL,
         )
-        self.gateway = gateway
         self._preflight_done = False
         self._runtimes: dict[str, Any] = {}
         # Which runtime ran each session: only that process can resume it, whatever spec the resume carries.
         self._session_runtimes: dict[str, Any] = {}
         self._runtimes_lock = threading.Lock()
-
-    def _effective_gateway(self) -> LlmGateway:
-        """Return the explicit override, else what the environment configures.
-
-        The OpenAI-compatible line, not a ``DEEPSEEK_*`` one: that spelling is
-        retired in this repository and the preflight rewrites it into the two
-        standard lines, so reading it here would resurrect a variable an
-        operator is being migrated off. DeepSeek's own wire format is
-        OpenAI-compatible chat completions, so the line that already carries a
-        base URL and key for that protocol is the one this route speaks.
-        """
-        if self.gateway is not None and self.gateway.is_complete():
-            return self.gateway
-        return resolve_openai_gateway()
-
-    def _require_gateway(self) -> LlmGateway:
-        """Return a complete gateway or explain which half is missing."""
-        gateway = self._effective_gateway()
-        if not gateway.is_complete():
-            raise DeepSeekHarnessUnavailableError(
-                "DeepSeek Harness gateway is not configured; it speaks the "
-                "OpenAI-compatible protocol and needs both OPENAI_BASE_URL and "
-                "OPENAI_API_KEY. The ANTHROPIC_* line belongs to Claude and is "
-                "not a substitute."
-            )
-        return gateway
 
     def _harness_home(self) -> Path:
         """Resolve the harness home holding profiles, plugins and session logs.
@@ -288,28 +208,9 @@ class DeepSeekHarnessBackend:
         enforce, which judges the edits against the spec's declared targets and
         restores the baseline when they deviate.
         """
-        if not spec.writable or self.runtime.sandbox_mode.strip().lower() == "read-only":
-            return "read-only"
+        if not spec.writable or self.runtime.sandbox_mode.strip().lower() == _READ_ONLY:
+            return _READ_ONLY
         return "danger-full-access"
-
-    def _child_environment(self, spec: AgentRunSpec) -> dict[str, str]:
-        """Build the environment the harness runtime subprocess is spawned with.
-
-        ``DEEPSEEK_*`` is what the harness's own DeepSeek adapter reads, so it
-        is written here for the subprocess only. It is never read back from the
-        parent environment: see :meth:`_effective_gateway`.
-        """
-        gateway = self._require_gateway()
-        env = os.environ.copy()
-        env.update(spec.env)
-        env["DEEPSEEK_BASE_URL"] = gateway.base_url
-        env["DEEPSEEK_API_KEY"] = os.environ.get(gateway.key_env, "")
-        env["DSH_PERMISSION_MODE"] = self._permission_mode(spec)
-        # These outrank -C and cwd, so a caller that set them to reach one repository would answer every git command
-        # the session runs anywhere.
-        env.pop("GIT_DIR", None)
-        env.pop("GIT_WORK_TREE", None)
-        return env
 
     def _runtime_key(self, spec: AgentRunSpec) -> str:
         """Key one harness process by everything fixed at its initialization.
@@ -325,7 +226,7 @@ class DeepSeekHarnessBackend:
         return "\x00".join(
             (
                 str(Path(spec.cwd).resolve()),
-                resolve_deepseek_model(spec.model),
+                spec.model,
                 resolve_deepseek_reasoning_effort(spec.reasoning_effort),
                 self._permission_mode(spec),
                 env,
@@ -342,7 +243,6 @@ class DeepSeekHarnessBackend:
         makes :meth:`resume` continue the durable conversation instead of
         starting a fresh one that has never seen the work it is judging.
         """
-        sdk = _load_harness_sdk()
         key = self._runtime_key(spec)
         with self._runtimes_lock:
             harness = self._runtimes.get(key)
@@ -352,38 +252,49 @@ class DeepSeekHarnessBackend:
             orphaned = [k for k in self._runtimes if not Path(k.split("\x00", 1)[0]).is_dir()]
             stale = [self._runtimes.pop(k) for k in orphaned]
             self._forget_sessions_of(stale)
-            workspace = str(Path(spec.cwd).resolve())
-            harness = sdk.DeepSeekHarness(
-                dsh_home=str(self._harness_home()),
-                cwd=workspace,
-                # The harness reads its sandbox root from the subprocess working directory, so a runtime rooted
-                # anywhere else would confine a read-only session to the wrong tree.
-                runtime_cwd=workspace,
-                provider=DEEPSEEK_PROVIDER_ROUTE,
-                model=resolve_deepseek_model(spec.model),
-                reasoning_effort=resolve_deepseek_reasoning_effort(spec.reasoning_effort),
-                env=self._child_environment(spec),
-                initialize_timeout_seconds=float(self.runtime.options.get("initialize_timeout_sec", 120)),
-                request_timeout_seconds=float(spec.timeout_sec or self.runtime.timeout_sec),
-            )
-            self._runtimes[key] = harness
         for runtime in stale:
-            with contextlib.suppress(OSError):
+            with contextlib.suppress(*sdk_failures()):
                 runtime.close()
-        return harness
+        started = self._start_harness(spec)
+        with self._runtimes_lock:
+            winner = self._runtimes.setdefault(key, started)
+        if winner is not started:
+            with contextlib.suppress(*sdk_failures()):
+                started.close()
+        return winner
+
+    def _start_harness(self, spec: AgentRunSpec) -> Any:
+        """Spawn one runtime for ``spec`` and run its handshake."""
+        with _as_forge_unavailable():
+            sdk = load_harness_sdk()
+            env = child_environment(spec.env, self._permission_mode(spec))
+        try:
+            launch = HarnessLaunch(
+                dsh_home=self._harness_home(),
+                cwd=Path(spec.cwd).resolve(),
+                model=spec.model,
+                reasoning_effort=resolve_deepseek_reasoning_effort(spec.reasoning_effort),
+                env=env,
+                request_timeout_sec=float(spec.timeout_sec or self.runtime.timeout_sec),
+                initialize_timeout_sec=float(self.runtime.options.get("initialize_timeout_sec", 120)),
+            )
+            return start_harness(sdk, launch)
+        except sdk_failures() as exc:
+            raise DeepSeekHarnessUnavailableError(f"DeepSeek Harness initialization failed: {exc}") from exc
 
     def preflight(self) -> None:
         """Validate SDK and gateway prerequisites without spending tokens."""
         if self._preflight_done:
             return
-        _load_harness_sdk()
-        self._require_gateway()
+        with _as_forge_unavailable():
+            load_harness_sdk()
+            child_environment(None, _READ_ONLY)
         self._preflight_done = True
 
     def probe(self, *, cwd: str, usage: Any = None) -> None:
-        """Start one harness runtime so a misconfigured route fails before a campaign.
+        """Start one harness runtime and run its handshake, so a misconfigured route fails before a campaign.
 
-        Initialization is where the harness rejects a missing adapter, an
+        The handshake is where the harness rejects a missing binary, an
         unavailable model, or an effort the selected route does not support, so
         this turns those into a launch-time error instead of one raised hours in
         by the first session that happened to need them.
@@ -391,21 +302,15 @@ class DeepSeekHarnessBackend:
         del usage
         self.preflight()
         spec = AgentRunSpec(system_prompt="", user_prompt="", cwd=cwd)
-        try:
-            self._harness_for(spec.resolved(self.runtime))
-        except DeepSeekHarnessBackendError:
-            raise
-        except Exception as exc:
-            raise DeepSeekHarnessUnavailableError(f"DeepSeek Harness initialization failed: {exc}") from exc
+        self._harness_for(spec.resolved(self.runtime))
 
-    def _discard_harness(self, spec: AgentRunSpec, harness: Any) -> None:
+    def _discard_harness(self, harness: Any) -> None:
         """Close one runtime and stop serving anything from it."""
-        del spec
         with self._runtimes_lock:
             for key in [k for k, runtime in self._runtimes.items() if runtime is harness]:
                 del self._runtimes[key]
             self._forget_sessions_of([harness])
-        with contextlib.suppress(OSError):
+        with contextlib.suppress(*sdk_failures()):
             harness.close()
 
     def _forget_sessions_of(self, runtimes: list[Any]) -> None:
@@ -418,15 +323,32 @@ class DeepSeekHarnessBackend:
         with self._runtimes_lock:
             return self._session_runtimes.get(session_id)
 
-    def close(self) -> None:
-        """Shut down every harness runtime this backend started."""
-        with self._runtimes_lock:
-            runtimes = list(self._runtimes.values())
-            self._runtimes.clear()
-            self._session_runtimes.clear()
-        for harness in runtimes:
-            with contextlib.suppress(OSError):
-                harness.close()
+    async def _run_turn(self, harness: Any, prompt: str, session_id: str, spec: AgentRunSpec) -> Any:
+        """Run one turn, closing the runtime when it ends in anything but a result.
+
+        The SDK has no per-turn cancel, so a turn that is abandoned keeps
+        editing the workspace the guard is about to restore. Closing its runtime
+        is the only way to stop it, and a runtime that failed once is never
+        served to a later session.
+        """
+        run = asyncio.to_thread(harness.run, prompt, session_id=session_id)
+        try:
+            return await asyncio.wait_for(run, timeout=spec.timeout_sec)
+        except asyncio.TimeoutError as exc:
+            await asyncio.to_thread(self._discard_harness, harness)
+            raise DeepSeekHarnessExecutionError(
+                f"DeepSeek Harness timed out after {spec.timeout_sec}s",
+                session_id=session_id,
+            ) from exc
+        except asyncio.CancelledError:
+            await asyncio.to_thread(self._discard_harness, harness)
+            raise
+        except Exception as exc:
+            await asyncio.to_thread(self._discard_harness, harness)
+            raise DeepSeekHarnessExecutionError(
+                f"DeepSeek Harness SDK execution failed: {exc}",
+                session_id=session_id,
+            ) from exc
 
     async def _execute(
         self,
@@ -441,35 +363,13 @@ class DeepSeekHarnessBackend:
         guard = WorkspaceGuard(spec)
         guard.prepare()
         try:
-            harness = self._owning_harness(session_id) or self._harness_for(spec)
+            harness = self._owning_harness(session_id) or await asyncio.to_thread(self._harness_for, spec)
             with self._runtimes_lock:
                 self._session_runtimes[session_id] = harness
-            run = asyncio.to_thread(harness.run, prompt, session_id=session_id)
-            try:
-                sdk_result = await asyncio.wait_for(run, timeout=spec.timeout_sec)
-            except asyncio.TimeoutError as exc:
-                # The SDK has no per-turn cancel, so the turn is still editing the workspace the guard is about to
-                # restore. Closing its runtime is the only way to stop it first.
-                await asyncio.to_thread(self._discard_harness, spec, harness)
-                raise DeepSeekHarnessExecutionError(
-                    f"DeepSeek Harness timed out after {spec.timeout_sec}s",
-                    session_id=session_id,
-                ) from exc
-        except asyncio.CancelledError:
+            sdk_result = await self._run_turn(harness, prompt, session_id, spec)
+        except BaseException:
             guard.rollback()
             raise
-        except DeepSeekHarnessBackendError as exc:
-            guard.rollback()
-            if not getattr(exc, "session_id", ""):
-                with contextlib.suppress(AttributeError):
-                    exc.session_id = session_id
-            raise
-        except Exception as exc:
-            guard.rollback()
-            raise DeepSeekHarnessExecutionError(
-                f"DeepSeek Harness SDK execution failed: {exc}",
-                session_id=session_id,
-            ) from exc
 
         result = _normalize_run_result(sdk_result, session_id)
         if usage is not None:
@@ -509,25 +409,18 @@ class DeepSeekHarnessBackend:
         """Resume an exact harness session with canonical Forge gate feedback."""
         if not session_id.strip():
             raise DeepSeekHarnessExecutionError("DeepSeek Harness resume requires a session ID")
-        spec = spec.resolved(self.runtime)
-        result = await self._execute(
-            spec=spec,
+        return await self._execute(
+            spec=spec.resolved(self.runtime),
             prompt=feedback,
             session_id=session_id,
             usage=usage,
         )
-        if not result.session_id:
-            result.session_id = session_id
-        return result
 
 
 __all__ = [
-    "DEEPSEEK_PROVIDER_ROUTE",
-    "DEFAULT_DEEPSEEK_MODEL",
     "DeepSeekHarnessBackend",
     "DeepSeekHarnessBackendError",
     "DeepSeekHarnessExecutionError",
     "DeepSeekHarnessUnavailableError",
-    "resolve_deepseek_model",
     "resolve_deepseek_reasoning_effort",
 ]

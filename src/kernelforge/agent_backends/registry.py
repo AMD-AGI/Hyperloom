@@ -372,13 +372,6 @@ def _codex_credentialed(env: Mapping[str, str]) -> bool:
     return llm_config.openai_agent_credentialed(env)
 
 
-def _deepseek_credentialed(env: Mapping[str, str]) -> bool:
-    """Return whether the harness route can authenticate."""
-    from hyperloom.common import llm_config
-
-    return llm_config.openai_agent_credentialed(env)
-
-
 def _claude_owns_model(model: str) -> bool:
     """Recognize Anthropic Claude model identifiers."""
     return model.strip().lower().startswith("claude")
@@ -394,11 +387,6 @@ def _codex_owns_model(model: str) -> bool:
     if normalized.startswith("gpt"):
         return True
     return re.match(r"^o\d(?:$|[-._:/])", normalized) is not None
-
-
-def _deepseek_owns_model(model: str) -> bool:
-    """Recognize DeepSeek model identifiers."""
-    return model.strip().lower().startswith("deepseek")
 
 
 register_agent_provider(
@@ -461,8 +449,6 @@ register_agent_provider(
             workspace_guard=True,
         ),
         availability=_deepseek_available,
-        credentialed=_deepseek_credentialed,
-        owns_model=_deepseek_owns_model,
         # It authenticates on the same OpenAI-compatible line as Codex, so ranking it would let an installed SDK
         # select it on a box that never asked for the harness.
         auto_selectable=False,
