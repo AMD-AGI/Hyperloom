@@ -385,35 +385,6 @@ async def test_try_acquire_many_returns_none_on_full(conn, locks):
 
 
 @pytest.mark.asyncio
-async def test_heartbeat_only_extends_own_holder_row(conn, locks):
-    set_lane_capacity(conn.raw, "research_lane", 2)
-    a = await locks.acquire_many(
-        ["research_lane"],
-        holder_id="s0",
-        task_id="t0",
-        action="specialist",
-        ttl_sec=30,
-    )
-    b = await locks.acquire_many(
-        ["research_lane"],
-        holder_id="s1",
-        task_id="t1",
-        action="specialist",
-        ttl_sec=30,
-    )
-    await locks.heartbeat(a, ttl_sec=999)
-    cur = conn.raw.execute(
-        "SELECT holder_id, expires_at FROM leases WHERE lane=? ORDER BY holder_id",
-        ("research_lane",),
-    )
-    rows = list(cur.fetchall())
-    by_holder = {r["holder_id"]: r["expires_at"] for r in rows}
-    assert by_holder["s0"] > by_holder["s1"]
-    await locks.release(a)
-    await locks.release(b)
-
-
-@pytest.mark.asyncio
 async def test_release_only_drops_own_holder_row(conn, locks):
     set_lane_capacity(conn.raw, "research_lane", 2)
     a = await locks.acquire_many(

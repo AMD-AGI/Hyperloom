@@ -221,7 +221,7 @@ def test_kernel_opt_body_references_v08_decision_signals():
     for signal in (
         "state.gaps[]",
         "last_action_failures",
-        "last_kernel_opt",
+        "pending_keep_kernels",
         "rejected_kernel_ids",
     ):
         assert signal in body, (

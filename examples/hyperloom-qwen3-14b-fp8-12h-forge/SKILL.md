@@ -285,7 +285,7 @@ and the stop reason. Never print API keys, tokens, or custom header values.
    `--no-kernel` would skip the very phase this demo exists to exercise.
 7. Report the session ID, log path, PID, and initial health check result.
 8. Inspect persisted state on requested status checks; report when work stops.
-9. After diagnosing an unexpected crash and obtaining explicit resume approval, only run `optimize --resume-from "$SESSION_DIR"` against the same session dir, with `KERNEL_OPT_BACKEND_ORDER=forge` still set. After the first launch, never start a new `optimize`; that creates a new `<UTC_ts>` session and is forbidden.
+9. After diagnosing an unexpected crash and obtaining explicit resume approval, only run `optimize --resume-from "$SESSION_DIR"` against the same session dir; the resumed session keeps the backend it was created with. After the first launch, never start a new `optimize`; that creates a new `<UTC_ts>` session and is forbidden.
 10. If `stop_reason` in the current session `state.json` is final, stop and exit.
 
 ## ATOM
