@@ -87,6 +87,8 @@ REPLY_INBOX_LINES = 20
 REPLY_INBOX_HEADER = "New for your branch since your last call:"
 # These replies carry the test they were asked about, so an inbox item naming it would say it twice.
 _CARRIES_REQUEST = frozenset({"wait_test", "test_result"})
+#: ``poll_inbox`` lists the inbox itself; its reply carries no block, and the items it read count as seen.
+_POLL_INBOX_TOOL = "poll_inbox"
 _WAIT_TEST: dict[str, Any] = {
     "type": _OBJECT,
     "properties": {
@@ -392,6 +394,8 @@ def reply_inbox(notebooks: NotebookFor) -> ReplyAnnotator:
     async def annotate(call: ReplyCall, cursor: str | None) -> ReplyNote:
         branch = call.principal.branch
         page = await notebooks(branch).poll(branch, cursor or "")
+        if call.tool == _POLL_INBOX_TOOL:
+            return ReplyNote("", page.cursor)
         asked = call.arguments.get("request_id") if call.tool in _CARRIES_REQUEST and not call.is_error else None
         return ReplyNote(_inbox_block([item for item in page.items if item.pointer != asked]), page.cursor)
 
@@ -509,7 +513,7 @@ def register_specialist_tools(
         **own,
     )
     server.register(
-        "poll_inbox",
+        _POLL_INBOX_TOOL,
         description="Pointers pushed to this branch since the cursor, such as results of asynchronous tools.",
         schema=_POLL_INBOX,
         handler=_poll_inbox(notebooks),

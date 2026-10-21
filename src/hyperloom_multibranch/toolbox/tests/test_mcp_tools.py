@@ -647,6 +647,15 @@ async def test_poll_inbox_keeps_its_own_cursor_apart_from_the_reply_block(wait_r
     assert [item["pointer"] for item in again["items"]] == ["x2"]
 
 
+async def test_a_poll_inbox_reply_carries_no_block_and_its_items_count_as_seen(wait_rig: Rig, waiting: Writers) -> None:
+    token = wait_rig.token("s1")
+    _news(wait_rig, token)
+    await _land(waiting, 1)
+    status, reply = wait_rig.call(token, "poll_inbox")
+    assert status == 200 and len(_texts(reply)) == 1
+    assert _news(wait_rig, token) == []
+
+
 async def test_the_host_token_gets_no_block_and_leaves_the_specialists_unread(wait_rig: Rig, waiting: Writers) -> None:
     wait_rig.server.register(
         "host_ping", schema={"type": "object"}, handler=lambda arguments, ctx: {"ok": True}, scopes={HOST_KIND}
