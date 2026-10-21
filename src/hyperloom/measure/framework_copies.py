@@ -11,9 +11,9 @@ tables writes the de-duplicated rows back into its sources, which are now the te
 
 What no variable redirects is checked instead: the shared tables are hashed against the snapshot before and after the
 test, anything that differs is put back, and the result says so (``framework_base.json``, covered by the signature).
-One path stays shared by aiter's own choice: it writes the merged view of a variable to ``/tmp/aiter_configs`` whatever
-the environment says. That file is derived output each aiter process writes from its own tables right before it reads
-it, so it carries nothing from one test to the next.
+aiter writes the merged view of a variable to ``/tmp/aiter_configs`` whatever the environment says, and local sandboxes
+share ``/tmp``; ``framework_merge`` gives the test's server a directory of its own for it instead, through a start-up hook
+on its ``PYTHONPATH``, and the result says whether the hook did its work.
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ from typing import Any
 
 import yaml
 
-from hyperloom.measure.farm import server_environment
+from hyperloom.measure.farm import prepend_pythonpath, server_environment
 from hyperloom.measure.framework_base import (
     FRAMEWORK_BASE_FILE,
     SESSION_SHA_ENV,
@@ -47,6 +47,7 @@ from hyperloom.measure.framework_base import (
     shared_view,
     tree_files,
 )
+from hyperloom.measure.framework_merge import MergeView
 from hyperloom.measure.framework_tables import AITER_VARIABLE_PREFIX
 from hyperloom.measure.socket import TestCall
 
@@ -77,6 +78,7 @@ class _Redirect:
         self._tables = private / "tables"
         self._points = private / "points"
         self.copied: dict[str, list[dict[str, str]]] = {}
+        self.hook: Path | None = None
 
     def value(self, name: str, value: str) -> str:
         """``value`` with each table it lists replaced by a private copy; a path that is no file stays as it was."""
@@ -130,7 +132,8 @@ class _Redirect:
         config = yaml.safe_load(Path(path).read_text(encoding=_UTF8)) or {}
         envs = server_environment(config)
         named = [name for name in envs if str(name).startswith(AITER_VARIABLE_PREFIX)]
-        if not named:
+        hook = self.hook if "PYTHONPATH" in envs else None
+        if not named and hook is None:
             return path
         for name in named:
             given = "" if name in unset else str(envs[name]).strip()
@@ -138,6 +141,8 @@ class _Redirect:
                 envs[name] = self.value(str(name), given)
             else:
                 del envs[name]
+        if hook is not None:
+            prepend_pythonpath(envs, hook)
         self._points.mkdir(parents=True, exist_ok=True)
         target = self._points / f"point_{index}.yaml"
         target.write_text(yaml.safe_dump(config, sort_keys=False), encoding=_UTF8)
@@ -181,6 +186,7 @@ class _TestBase:
         self._snapshot: Snapshot | None = None
         self._private: Path | None = None
         self._redirect: _Redirect | None = None
+        self._merge: MergeView | None = None
         self.document: dict[str, Any] = {
             "schema": _SCHEMA,
             "isolation": "none",
@@ -197,6 +203,12 @@ class _TestBase:
             "redirected": [],
             "point_tables": {},
             "private_rewritten": [],
+            "merge_isolation": "shared",
+            "merge_reason": "no private directory",
+            "merge_chain_failure": None,
+            "merge_dir": None,
+            "merge_patched_processes": 0,
+            "merge_files": {},
         }
 
     def begin(self, call: TestCall) -> PrivateFramework:
@@ -221,14 +233,15 @@ class _TestBase:
         return PrivateFramework(call)
 
     def _isolate(self, snapshot: Snapshot, call: TestCall) -> PrivateFramework:
-        self._private = Path(tempfile.mkdtemp(prefix="hl-framework-", dir=_private_base()))
-        shutil.copytree(snapshot.copies, self._private / _CONFIGS)
-        private_sha = files_digest(tree_files(self._private / _CONFIGS))
-        redirect = self._redirect = _Redirect(snapshot, self._private)
+        private = self._private = Path(tempfile.mkdtemp(prefix="hl-framework-", dir=_private_base()))
+        shutil.copytree(snapshot.copies, private / _CONFIGS)
+        private_sha = files_digest(tree_files(private / _CONFIGS))
+        redirect = self._redirect = _Redirect(snapshot, private)
         unset = frozenset(call.unset_envs) | frozenset(
             call.session_facts.reference_unset_envs if call.session_facts else ()
         )
         values = redirect.process_env(call, unset)
+        hook_env = self._install_merge_hook(redirect, private)
         points = tuple(redirect.point(point, index, unset) for index, point in enumerate(call.points))
         self.document.update(
             isolation="private_copies",
@@ -237,8 +250,18 @@ class _TestBase:
             redirected=sorted(values),
             point_tables=redirect.provenance(),
         )
-        isolated = dataclasses.replace(call, points=points, env_overrides={**call.env_overrides, **values})
+        isolated = dataclasses.replace(call, points=points, env_overrides={**call.env_overrides, **values, **hook_env})
         return PrivateFramework(isolated, frozenset(values))
+
+    def _install_merge_hook(self, redirect: _Redirect, private: Path) -> dict[str, str]:
+        """The variables that give the test's server its own merge directory; none, and the reason, when it cannot."""
+        try:
+            self._merge = MergeView.make(private)
+        except OSError as exc:
+            self.document["merge_reason"] = f"the hook cannot be installed: {type(exc).__name__}: {exc}"
+            return {}
+        redirect.hook = self._merge.hook
+        return self._merge.environment(os.environ.get("PYTHONPATH", ""))
 
     def _watch_shared(self, snapshot: Snapshot, when: str) -> str | None:
         """Hash the shared tables against the snapshot and put back what differs; the digest, ``None`` if unreadable."""
@@ -259,7 +282,7 @@ class _TestBase:
     def _drop_private(self) -> None:
         if self._private is not None:
             shutil.rmtree(self._private, ignore_errors=True)
-        self._private = self._redirect = None
+        self._private = self._redirect = self._merge = None
 
     def finish(self, output_dir: Path) -> None:
         """Hash what the test left, put the shared tables back if it changed them, and write the document."""
@@ -268,6 +291,8 @@ class _TestBase:
                 self._watch_shared(self._snapshot, "end")
             if self._redirect is not None and self._private is not None:
                 self.document["private_rewritten"] = self._redirect.rewritten(self._private)
+            if self._merge is not None:
+                self.document.update(self._merge.report())
         except OSError as exc:
             log.warning("the framework base cannot be measured after the test: %s", exc)
         finally:

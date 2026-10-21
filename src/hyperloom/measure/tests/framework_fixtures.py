@@ -29,6 +29,24 @@ AITER_CONFIG_SPLIT = os.getenv(
 
 
 class AITER_CONFIG:
+    def get_config_file(self, env_name, default_file, tuned_file_name):
+        return self.update_config_files((os.getenv(env_name) or "").strip() or default_file, tuned_file_name)
+
+    def update_config_files(self, file_path, merge_name):
+        paths = file_path.split(os.pathsep)
+        if len(paths) <= 1:
+            return file_path
+        from pathlib import Path
+
+        rows = [Path(path).read_text().splitlines() for path in paths if os.path.exists(path)]
+        merged = [rows[0][0], *dict.fromkeys(row for table in rows for row in table[1:])]
+        config_path = Path("/tmp/aiter_configs/")
+        config_path.mkdir(parents=True, exist_ok=True)
+        new_file_path = f"{config_path}/{os.environ.get('FAKE_AITER_MERGE_PREFIX', '')}{merge_name}.csv"
+        Path(new_file_path + ".tmp").write_text("\\n".join(merged) + "\\n")
+        os.replace(new_file_path + ".tmp", new_file_path)
+        return new_file_path
+
     @property
     def AITER_CONFIG_GEMM_FILE(self):
         return self.get_config_file("AITER_CONFIG_GEMM", AITER_CONFIG_GEMM, "gemm_tuned")
@@ -44,6 +62,9 @@ class AITER_CONFIG:
             AITER_CONFIG_SPLIT,
             "split_tuned",
         )
+
+
+AITER_CONFIGS = AITER_CONFIG()
 """
 PRISTINE = "M,N,K,us\n64,5120,5120,10\n"
 DAMAGED = "M,N,K,us\n"

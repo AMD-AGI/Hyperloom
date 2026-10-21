@@ -11,17 +11,23 @@ rewrites them the way aiter's duplicate-shape cleanup does, through the path the
 from __future__ import annotations
 
 import fnmatch
+import hashlib
 import json
+import multiprocessing
 import os
 import shutil
-from collections.abc import Callable
+import subprocess
+import sys
+import uuid
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
 import pytest
 import yaml
 
-from hyperloom.measure import local
+from hyperloom.measure import aiter_merge_hook, local
+from hyperloom.measure.farm import server_environment
 from hyperloom.measure.framework_base import (
     FRAMEWORK_BASE_FILE,
     SNAPSHOT_ENV,
@@ -70,7 +76,7 @@ class _Server:
     async def __call__(self, **kwargs: Any) -> list[VariantResult]:
         config = yaml.safe_load(Path(kwargs["base_yaml_path"]).read_text())
         unset = list(kwargs["grid"][0].unset_envs)
-        env = {**os.environ, **{str(k): str(v) for k, v in config["benchmark"]["envs"].items()}}
+        env = {**os.environ, **{str(k): str(v) for k, v in server_environment(config).items()}}
         env = {k: v for k, v in env.items() if k not in unset}
         self.envs.append(env)
         self.unset.append(unset)
@@ -348,3 +354,149 @@ def test_a_variable_the_call_sets_empty_means_its_defaults_whatever_the_process_
 
     names = [path.name for path in _paths(server.envs[0]["AITER_CONFIG_GEMM"])]
     assert names[0] == SHARED_GEMM and "image.csv" not in names
+
+
+def test_the_server_gets_a_merge_directory_of_the_tests_own_and_the_hook_first_on_its_python_path(
+    tmp_path: Path, configs: Path, session: Path, server: _Server, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PYTHONPATH", "/image/site")
+    seen: list[dict[str, Any]] = []
+
+    def act(env: dict[str, str]) -> None:
+        hook = Path(env["PYTHONPATH"].split(os.pathsep)[0])
+        seen.append(
+            {
+                "path": env["PYTHONPATH"],
+                "directory": env[aiter_merge_hook.MERGE_DIR_ENV],
+                "made": Path(env[aiter_merge_hook.MERGE_DIR_ENV]).is_dir(),
+                "hook": (hook / "sitecustomize.py").read_bytes(),
+            }
+        )
+
+    server.act = act
+    first = _run(tmp_path, "first")
+    second = _run(tmp_path, "second")
+
+    assert first is not None and second is not None
+    assert seen[0]["path"].split(os.pathsep)[1:] == ["/image/site"], "what the process carried stays behind the hook"
+    assert seen[0]["hook"] == Path(aiter_merge_hook.__file__).read_bytes() and seen[0]["made"] is True
+    assert seen[0]["directory"] == first["merge_dir"] != second["merge_dir"] == seen[1]["directory"]
+    assert not Path(first["merge_dir"]).exists(), "the directory goes with the test"
+    assert first["merge_isolation"] == "unconfirmed" and "ran the hook" in first["merge_reason"]
+    assert os.environ["PYTHONPATH"] == "/image/site" and aiter_merge_hook.MERGE_DIR_ENV not in os.environ
+
+
+def test_a_python_path_the_point_names_keeps_its_place_behind_the_hook(
+    tmp_path: Path, configs: Path, session: Path, server: _Server, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("PYTHONPATH", raising=False)
+    agentx = tmp_path / "agentx.yaml"
+    launch = {"env": {"PYTHONPATH": "/farm/site", "OTHER": "x"}}
+    benchmark = {"envs": {"CONC": 4, "RUN_EVAL": "false"}, "agentx": {"enabled": True, "launch_overrides": launch}}
+    agentx.write_text(yaml.safe_dump({"benchmark": benchmark}))
+
+    _run(tmp_path, "none")
+    _run(tmp_path, "point", _point(tmp_path, PYTHONPATH="/farm/site"))
+    _run(tmp_path, "agentx", agentx)
+
+    rest = [env["PYTHONPATH"].split(os.pathsep)[1:] for env in server.envs]
+    assert rest == [[], ["/farm/site"], ["/farm/site"]]
+    assert all(env["PYTHONPATH"].split(os.pathsep)[0].endswith("hook") for env in server.envs)
+
+
+def test_a_hook_that_cannot_be_installed_does_not_stop_the_test_which_then_says_its_merged_view_was_shared(
+    tmp_path: Path, configs: Path, session: Path, server: _Server, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def full_disk(*args: Any, **kwargs: Any) -> None:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr("hyperloom.measure.framework_merge.MergeView.make", full_disk)
+    monkeypatch.setenv("PYTHONPATH", "/image/site")
+
+    evidence = _run(tmp_path, "t", _point(tmp_path, PYTHONPATH="/farm/site"))
+
+    env = server.envs[0]
+    assert env["PYTHONPATH"] == "/farm/site" and aiter_merge_hook.MERGE_DIR_ENV not in env
+    assert evidence is not None and evidence["isolation"] == "private_copies", "the tables are still private"
+    assert evidence["merge_isolation"] == "shared" and "hook cannot be installed" in evidence["merge_reason"]
+    assert evidence["merge_dir"] is None and evidence["merge_files"] == {}
+
+
+@pytest.fixture
+def merged_name(monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
+    """The name aiter's stand-in gives its merged view in ``/tmp/aiter_configs``; what lands there is removed."""
+    name = f"hl-test-{uuid.uuid4().hex[:10]}-"
+    monkeypatch.setenv("FAKE_AITER_MERGE_PREFIX", name)
+    yield f"{name}gemm_tuned.csv"
+    for left in Path("/tmp/aiter_configs").glob(f"{name}*"):
+        left.unlink(missing_ok=True)
+
+
+_AITER_SERVER = """
+import json, sys, time
+from pathlib import Path
+from aiter.jit.core import AITER_CONFIGS
+
+merged = AITER_CONFIGS.AITER_CONFIG_GEMM_FILE
+rendezvous = Path(sys.argv[1])
+(rendezvous / sys.argv[2]).touch()
+deadline = time.monotonic() + 60
+while len(list(rendezvous.iterdir())) < 2 and time.monotonic() < deadline:
+    time.sleep(0.02)
+print(json.dumps({"merged": merged, "read": Path(merged).read_text()}))
+"""
+
+
+def _one_of_two_concurrent_tests(tmp_path: Path, name: str, tables: list[str]) -> None:
+    """A test of its own process: its server merges ``tables``, waits until the other server has too, then reads."""
+    fake = _Server(tmp_path)
+    rendezvous = tmp_path / "rendezvous"
+
+    def aiter_server(env: dict[str, str]) -> None:
+        done = subprocess.run(
+            [sys.executable, "-c", _AITER_SERVER, str(rendezvous), name], env=env, capture_output=True, text=True
+        )
+        (tmp_path / f"{name}.server").write_text(done.stdout or done.stderr, encoding="utf-8")
+
+    fake.act = aiter_server
+    local.run_grid = fake
+    _run(tmp_path, name, env_overrides={"AITER_CONFIG_GEMM": os.pathsep.join(tables)})
+
+
+def test_two_concurrent_tests_that_give_one_variable_different_tables_each_read_their_own_merged_view(
+    tmp_path: Path, configs: Path, session: Path, merged_name: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rows = {"a": ("1,1,1,1", "2,2,2,2"), "b": ("3,3,3,3", "4,4,4,4")}
+    tables = {}
+    for name, pair in rows.items():
+        tables[name] = []
+        for index, row in enumerate(pair):
+            table = tmp_path / f"{name}{index}.csv"
+            table.write_text(f"M,N,K,us\n{row}\n", encoding="utf-8")
+            tables[name].append(str(table))
+    (tmp_path / "rendezvous").mkdir()
+    monkeypatch.setenv("PYTHONPATH", str(configs.parent.parent))
+    context = multiprocessing.get_context("spawn")
+    processes = [
+        context.Process(target=_one_of_two_concurrent_tests, args=(tmp_path, name, tables[name])) for name in rows
+    ]
+
+    for process in processes:
+        process.start()
+    for process in processes:
+        process.join(timeout=300)
+    assert [process.exitcode for process in processes] == [0, 0]
+
+    shared = Path("/tmp/aiter_configs") / merged_name
+    saw = {name: json.loads((tmp_path / f"{name}.server").read_text()) for name in rows}
+    expected = {name: "M,N,K,us\n" + "".join(f"{row}\n" for row in pair) for name, pair in rows.items()}
+    assert {name: saw[name]["read"] for name in rows} == expected, "a test read a merged view not made of its tables"
+    merged_dirs = set()
+    for name in rows:
+        evidence = json.loads((tmp_path / "out" / name / FRAMEWORK_BASE_FILE).read_text())
+        assert Path(saw[name]["merged"]).parent == Path(evidence["merge_dir"]) and saw[name]["merged"] != str(shared)
+        assert evidence["merge_isolation"] == "private" and evidence["merge_reason"] is None
+        assert evidence["merge_files"] == {merged_name: hashlib.sha256(expected[name].encode()).hexdigest()}
+        assert evidence["merge_patched_processes"] == 1
+        merged_dirs.add(evidence["merge_dir"])
+    assert len(merged_dirs) == 2 and not shared.exists(), "the shared directory was not written"
