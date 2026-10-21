@@ -365,6 +365,20 @@ def test_each_discovery_retry_takes_a_fresh_idempotency_key(tmp_path: Path):
     assert asyncio.run(stub.phase_framework._maybe_enqueue_candidate_discovery(reason="candidate_pool_empty")) is False
 
 
+def test_a_discovery_specialist_orchestration_dispatched_does_not_hold_back_the_phase_round(tmp_path: Path):
+    """Only rounds this phase dispatched are harvested into the pool, so only they make the next round wait."""
+    stub = _stub(tmp_path, local_explore=False)
+    stub.tasks._queued.append(
+        SimpleNamespace(
+            kind="specialist", task_id="o-1", params={"domain": "candidate_discovery_specialist"}, state="queued"
+        )
+    )
+
+    assert asyncio.run(stub.phase_framework._maybe_enqueue_candidate_discovery(reason="candidate_pool_empty")) is True
+    assert len(stub.tasks.created) == 1
+    assert stub.tasks.created[0]["params"]["candidate_discovery"] is True
+
+
 def test_a_failed_discovery_round_is_not_an_empty_one(tmp_path: Path):
     """A crashed specialist reports nothing about what is out there."""
     stub = _stub(tmp_path, local_explore=False)

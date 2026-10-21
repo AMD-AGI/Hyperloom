@@ -522,9 +522,9 @@ def _final_breakdown(*, pending: bool, gain_v: float) -> dict:
     return {
         "session": {"image": ""},
         "outcome": {
-            "baseline": {"throughput_tok_s_per_gpu": 2844.2},
+            "baseline": {"output_throughput": 2844.2},
             "final": {
-                "throughput_tok_s_per_gpu": 3236.5,
+                "output_throughput": 3236.5,
                 "gain_pct": gain_v,
                 "action_path": ["geak_e2e"],
             },
@@ -981,8 +981,8 @@ def test_report_shows_pending_candidate_excluded_from_headline() -> None:
     bd = {
         "session": {"image": ""},
         "outcome": {
-            "baseline": {"throughput_tok_s_per_gpu": 2844.2},
-            "final": {"throughput_tok_s_per_gpu": 2844.2, "gain_pct": 0.0, "action_path": []},
+            "baseline": {"output_throughput": 2844.2},
+            "final": {"output_throughput": 2844.2, "gain_pct": 0.0, "action_path": []},
             "validation": {},
         },
         "close": {

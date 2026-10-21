@@ -51,6 +51,8 @@ _TRAJECTORY_STATUS: dict[str, str] = {
 # Progress notes a task's ``history`` retains, oldest dropped first.
 _MAX_PROGRESS_NOTES = 120
 _DISPATCH_CLASSES = frozenset({"llm", "coordinator", "inline"})
+_QUEUED_SQL = "SELECT * FROM tasks WHERE state='queued' ORDER BY created_at ASC"
+_RUNNING_SQL = "SELECT * FROM tasks WHERE state='running' ORDER BY updated_at ASC"
 
 
 @dataclass(frozen=True)
@@ -521,21 +523,19 @@ class TaskRegistry:
 
     async def queued(self) -> list[Task]:
         """Return all queued tasks ordered oldest-first."""
-        rows = await self.db.fetchall("SELECT * FROM tasks WHERE state='queued' ORDER BY created_at ASC")
-        return [Task.from_row(r) for r in rows]
+        return [Task.from_row(r) for r in await self.db.fetchall(_QUEUED_SQL)]
 
     async def running(self) -> list[Task]:
         """Return all running tasks ordered least-recently-updated-first."""
-        rows = await self.db.fetchall("SELECT * FROM tasks WHERE state='running' ORDER BY updated_at ASC")
-        return [Task.from_row(r) for r in rows]
+        return [Task.from_row(r) for r in await self.db.fetchall(_RUNNING_SQL)]
 
     def running_context_sync(self) -> list[Task]:
-        """Read running tasks least-recently-updated-first off the sync path."""
-        rows = self.db.fetchall_sync(
-            "SELECT * FROM tasks WHERE state='running' ORDER BY updated_at ASC",
-            (),
-        )
-        return [Task.from_row(row) for row in rows]
+        """:meth:`running` off the sync path."""
+        return [Task.from_row(row) for row in self.db.fetchall_sync(_RUNNING_SQL)]
+
+    def queued_context_sync(self) -> list[Task]:
+        """:meth:`queued` off the sync path."""
+        return [Task.from_row(row) for row in self.db.fetchall_sync(_QUEUED_SQL)]
 
     def queued_kind_counts_sync(self) -> dict[str, int]:
         """Return {kind: count} for queued tasks, synchronously."""
