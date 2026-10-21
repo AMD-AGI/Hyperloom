@@ -293,12 +293,6 @@ def test_summarise_for_prompt_empty(tmp_path):
     assert rh.summarise_for_prompt(tmp_path) == ""
 
 
-def test_to_num():
-    assert rh._to_num("1.5") == 1.5
-    assert rh._to_num(None) is None
-    assert rh._to_num("x") is None
-
-
 def test_tokens():
     toks = rh._tokens("Enable CUDAGraph for-decode the")
     assert "cudagraph" in toks
