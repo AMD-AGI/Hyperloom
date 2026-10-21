@@ -3,9 +3,9 @@
 
 """The specialist lifecycle: on each branch, the specialist's session and the branch's judge.
 
-A branch started with neither a direction nor a repair takes the next of the session's
-:data:`~hyperloom_multibranch.specialist.directions.DIRECTIONS`, so the first branches split the work instead of all
-sweeping the same settings.
+A branch started with neither a direction nor a repair takes the one of the session's
+:data:`~hyperloom_multibranch.specialist.directions.DIRECTIONS` the fewest running branches hold, so the branches split
+the work instead of all sweeping the same settings.
 
 A session that crashes is restarted on its branch, at most ``MAX_RESTARTS`` times within ``RESTART_WINDOW_S``, and a
 lost one at most ``MAX_LOSS_RESTARTS`` times in a row with no session working in between: a loss takes the heartbeat
@@ -22,7 +22,6 @@ once a test carries a claim, the toolbox renews it.
 from __future__ import annotations
 
 import asyncio
-import itertools
 import logging
 import time
 from collections import deque
@@ -140,13 +139,13 @@ class SpecialistRuntime:
         self._sessions = sessions
         self._pacing = pacing
         self._branches: dict[str, _Branch] = {}
-        self._handed = itertools.cycle(DIRECTIONS)
 
     async def start(self, branch: str, start_commit: str, task: BranchTask = BranchTask()) -> None:
         if branch in self._branches:
             raise ValueError(f"branch {branch!r} already has a specialist")
         if not task.direction.strip() and task.repair is None:
-            task = replace(task, direction=next(self._handed))
+            held = [state.task.direction for state in self._branches.values()]
+            task = replace(task, direction=min(DIRECTIONS, key=held.count))
         state = _Branch(branch, start_commit, task, self._notebook_for(branch))
         self._branches[branch] = state
         judge = BranchJudge(branch, state.notebook, self._judging)

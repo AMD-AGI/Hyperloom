@@ -3,8 +3,8 @@
 
 """The directions a session hands its specialist branches, so its first branches do not all sweep the same settings.
 
-A branch started with no direction of its own and no repair takes the next one, in this order, from the first again
-once all are handed out: the first four are the ones a four-branch session works on.
+A branch started with no direction of its own and no repair takes the one the fewest running branches hold, the
+earlier one in this order on a tie: the first four are the ones a four-branch session works on.
 """
 
 from __future__ import annotations

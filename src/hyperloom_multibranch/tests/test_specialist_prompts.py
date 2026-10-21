@@ -133,6 +133,21 @@ def test_the_role_carries_what_found_gains_on_rocm_with_examples():
     assert prompt.index("What has found gains") < prompt.index("Examples:") < prompt.index("How a candidate is judged")
 
 
+def test_the_role_defines_the_layers_an_intent_names():
+    prompt = role_prompt(WORKLOAD)
+
+    assert "config for server arguments, environment variables and other settings" in prompt
+    assert "kernel when the change adds or replaces a GPU kernel (a Triton, HIP or CK kernel, a fused kernel)" in prompt
+    assert "or a kernel's tuned table, and source for any other code change" in prompt
+
+
+def test_the_role_says_a_change_never_selects_its_file_or_setting_with_setdefault():
+    prompt = role_prompt(WORKLOAD)
+
+    assert "must not use os.environ.setdefault" in prompt
+    assert "a variable the recipe already sets silently wins" in prompt
+
+
 def test_the_role_lets_small_changes_too_small_alone_go_together_as_one_intent():
     prompt = role_prompt(WORKLOAD)
 

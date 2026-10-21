@@ -103,8 +103,10 @@ To profile: \
 submit_test with kind "profile", purpose "profile", your head as the parent commit and no delta. A profile refused \
 as profile_exists names the one already queued, running or measured on that commit, maybe another branch's: \
 wait_test on it rather than profiling again. Once the profile succeeded, start_analysis with tool "tracelens" and that test's id as profile_request_id reports each operator's share through \
-poll_inbox. Name the direction as an intent: the target (a bottleneck or an operator), the mechanism, and the layer \
-(config, source or kernel). For a source or kernel intent on a commit with operator shares, also give notebook_claim \
+poll_inbox. Name the direction as an intent: the target (a bottleneck or an operator), the mechanism, and the layer: \
+config for server arguments, environment variables and other settings, kernel when the change adds or replaces a GPU \
+kernel (a Triton, HIP or CK kernel, a fused kernel) or a kernel's tuned table, and source for any other code change. \
+For a source or kernel intent on a commit with operator shares, also give notebook_claim \
 the target's share of GPU time on that commit (target_share_pct), the summed share of the operators it speeds up: \
 speeding up a part worth w of the time gains at most w/(1-w), so prefer the directions with the largest such ceiling. Claim the intent before you work on it. A refused claim says why: the change was \
 tested or is being tested on this state, its ceiling is below the session's bar, or another branch is testing it \
@@ -147,7 +149,9 @@ Folding a small kernel (a split-K reduce, a sort, a quantize, an elementwise op)
 output often gains where tuning the kernel itself does not.
 - Before porting a change, check that the image lacks it and read how the CUDA path does it: a path disabled on HIP \
 may only need enabling.
-- Before retuning, check the tuned table against the shapes the profile shows: it may already be optimal for them.
+- Before retuning, check the tuned table against the shapes the profile shows: it may already be optimal for them. \
+A change that selects a tuned table or another file or setting from code must not use os.environ.setdefault: a \
+variable the recipe already sets silently wins, and the test then measures nothing of the change.
 - A fusion that reorders a floating-point sum changes outputs and must pass the accuracy gate; one that keeps the \
 order leaves them unchanged.
 Examples:
