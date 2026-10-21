@@ -232,9 +232,9 @@ _STOP_REASON_EXPLANATIONS: dict[str, str] = {
     "unknown": "No specific stop reason was recorded (e.g. a terminal session was resumed); treat as unclassified.",
     "baseline_failed": "Baseline never produced a valid measurement; see the failure summary / server log.",
     "server_argv_invalid": (
-        "The installed framework's own argument parser refused the composed server argv before any "
-        "server was launched. Nothing in the framework source is at fault: correct the offending flag "
-        "in --server-args / the recipe for the installed version, then re-run."
+        "The composed server argv was refused before any server was launched: the installed framework's parser "
+        "rejected a flag, or Hyperloom could not split the args into argv tokens intact. Nothing in the framework "
+        "source is at fault: correct the offending flag or value in --server-args / the recipe, then re-run."
     ),
     "environment_fault": (
         "This host cannot run the combination as installed - the framework is missing from the serving "

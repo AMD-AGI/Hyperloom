@@ -619,17 +619,28 @@ def test_the_payload_constraints_are_rendered_separately():
     assert "extend_lease.reason is optional" in rendered
 
 
+def test_the_payload_constraints_state_the_extend_lease_step_cap():
+    """An agent asking for more than one step at a time is told the cap before the gate denies it."""
+    from hyperloom.inference_optimizer.protocol.intent import EXTEND_LEASE_MAX_SEC, IntentType
+    from hyperloom.orchestrator.roles.mcp_emit_intent import payload_constraints
+
+    rendered = payload_constraints(IntentType)
+
+    assert f"extend_lease.extra_sec ≤ {EXTEND_LEASE_MAX_SEC} per call" in rendered
+    assert "while the task runs" in rendered
+
+
 def test_both_provider_descriptions_carry_the_constraints():
     """Claude's tool description and Codex's output block say the same thing."""
     from hyperloom.inference_optimizer.protocol.intent import IntentType
     from hyperloom.orchestrator.roles.codex import build_output_instructions
     from hyperloom.orchestrator.roles.mcp_emit_intent import (
-        EMIT_INTENT_TOOL_INPUT_SCHEMA,
+        build_emit_intent_tool_input_schema,
         payload_constraints,
     )
 
     constraints = payload_constraints(IntentType)
-    claude_description = EMIT_INTENT_TOOL_INPUT_SCHEMA["properties"]["payload"]["description"]
+    claude_description = build_emit_intent_tool_input_schema(IntentType)["properties"]["payload"]["description"]
     codex_block = build_output_instructions(frozenset(IntentType))
 
     assert constraints in claude_description
