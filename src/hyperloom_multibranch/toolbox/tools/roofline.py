@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 from collections.abc import Mapping
 from pathlib import Path
@@ -17,7 +18,7 @@ from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom_multibranch.toolbox.tools.base import ToolOutput, ToolRequest
 from hyperloom_multibranch.toolbox.tools.executor_tool import ExecutorFn, ExecutorTool, ScratchHandlerTool
 from hyperloom_multibranch.toolbox.tools.op_shares import with_op_shares
-from hyperloom_multibranch.toolbox.tools.tracelens_report import REPORT_ROUTE, report_handler
+from hyperloom_multibranch.toolbox.tools.tracelens_report import REPORT_ROUTE, report_handler, with_window_shares
 
 ROOFLINE_TOOL = "roofline"
 TRACELENS_TOOL = "tracelens"
@@ -31,7 +32,9 @@ class _SharesOps:
 
 
 class _RooflineTool(_SharesOps, ExecutorTool):
-    pass
+    async def settled(self, result: dict, workdir: Path) -> dict:
+        """The roofline's op shares are the kernel shares of the window its analysis ran on, not its aten ops table's."""
+        return await asyncio.to_thread(with_window_shares, result, str(result.get("last_profile_trace") or ""), workdir)
 
 
 class _TracelensTool(_SharesOps, ScratchHandlerTool):
@@ -58,7 +61,8 @@ async def tracelens_handler(payload: dict, *, session_dir: Path) -> dict:
         route = REPORT_ROUTE
     if route.lower() == REPORT_ROUTE:
         return await report_handler(payload, session_dir=session_dir)
-    return await trace_analyze_handler(payload, session_dir=session_dir)
+    result = await trace_analyze_handler(payload, session_dir=session_dir)
+    return await asyncio.to_thread(with_window_shares, result, str(payload.get("trace_input") or ""), session_dir)
 
 
 def tracelens_tool() -> ScratchHandlerTool:

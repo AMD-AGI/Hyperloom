@@ -5,8 +5,10 @@
 
 The shares come from a table of every op's share of the total GPU time. The ``report`` route of ``tracelens`` names its own
 (``kernel_shares_path``: the window's kernels, ``kernel_shares``): TraceLens' per-op durations are wrong on a decode window
-after a graph replay. Any other analysis has TraceLens' ``ops_summary.csv`` (the ``perf_report_csvs`` folder beside the
-report), the complete per-op table its perf report writes deterministically from the trace. Neither is the
+after a graph replay. So do the agent route and the roofline when their analysis names the window it ran on
+(:func:`~.tracelens_report.with_window_shares`). An analysis that names none has TraceLens' ``ops_summary.csv`` (the
+``perf_report_csvs`` folder beside the report), the complete per-op table its perf report writes deterministically from the
+trace. Neither is the
 ``analysis.json`` task list, which holds only the few optimisation tasks the report recommends (a few percent of the time)
 and would hide GEMM and attention from the Amdahl ceiling. A tool that produced no table, or whose request does not name the
 commit the profile ran on, reports no shares: they are never guessed. A report TraceLens marked degraded (its deterministic

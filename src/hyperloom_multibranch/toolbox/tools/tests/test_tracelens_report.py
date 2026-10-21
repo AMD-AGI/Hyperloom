@@ -370,6 +370,98 @@ async def test_a_decode_window_without_its_graph_capture_keeps_one_gemm_entry_an
     assert len(result["launcher_notes"]) == 1 and "left as recorded" in result["launcher_notes"][0]
 
 
+def _analysed_window(rig: Rig, tmp_path: Path, *, capture: bool = True) -> tuple[Path, Path]:
+    """What an orchestrator analysis leaves: the b40 window it ran on, and its report with the misreporting ops table."""
+    folder = rig.trace_input / "torch_trace" / "graph_capture_profile"
+    if capture:
+        shutil.copy(DATA / "b40_capture_execution_details.json", folder / "execution_details.json")
+        shutil.copy(DATA / "b40_capture_bs64_launches.json.gz", folder / "DecodeCudaGraphRunner_bs_64_rank0.json.gz")
+    shutil.copy(DATA / "b40_rank_trace_gpu_events.json.gz", rig.trace)
+    window = tmp_path / "analysis" / "window.json.gz"
+    window.parent.mkdir()
+    shutil.copy(DATA / "b40_window_launch_events.json.gz", window)
+    table = window.parent / "perf_report_csvs" / "ops_summary.csv"
+    table.parent.mkdir()
+    table.write_text(OPS_SUMMARY, encoding="utf-8")
+    report = window.parent / "analysis.md"
+    report.write_text("# report\n", encoding="utf-8")
+    return window, report
+
+
+async def test_the_agent_routes_op_shares_are_the_kernel_shares_of_the_window_it_analysed_not_its_ops_table(
+    rig: Rig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    window, report = _analysed_window(rig, tmp_path)
+
+    async def agent(payload: dict, *, session_dir: Path) -> dict:
+        artifacts = {"tracelens_steady_state_trace": str(window)}
+        return {"status": "ok", "trace_report_path": str(report), "artifact_paths": artifacts}
+
+    monkeypatch.setattr(roofline, "trace_analyze_handler", agent)
+    status, pointer, record = await _run(tmp_path, {"analysis_route": "agent"}, rig)
+    assert status is JobStatus.SUCCEEDED and "aten::mm" not in pointer.op_shares
+    assert pointer.op_shares["kernel_gemm_0 [Qwen2MLP.MergedColumnParallelLinear]"] == pytest.approx(28.1, abs=0.05)
+    assert sum(pointer.op_shares.values()) == pytest.approx(100.0, abs=0.01)
+    result = record["result"]
+    assert result["graph_kernels_renamed"] == 420 and Path(result["kernel_shares_path"]).is_file()  # copied back
+
+
+async def test_an_agent_analysis_that_names_no_window_keeps_its_ops_table_as_before(
+    rig: Rig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, report = _analysed_window(rig, tmp_path)
+
+    async def agent(payload: dict, *, session_dir: Path) -> dict:
+        return {"status": "ok", "trace_report_path": str(report)}
+
+    monkeypatch.setattr(roofline, "trace_analyze_handler", agent)
+    _, pointer, _ = await _run(tmp_path, {"analysis_route": "agent"}, rig)
+    assert pointer.op_shares["aten::mm"] == 24.5 and "kernel_shares_path" not in str(pointer.summary)
+
+
+async def test_an_agent_analysis_whose_window_cannot_be_read_carries_no_shares_not_its_ops_table(
+    rig: Rig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    window, report = _analysed_window(rig, tmp_path)
+    window.unlink()
+
+    async def agent(payload: dict, *, session_dir: Path) -> dict:
+        return {"status": "ok", "trace_report_path": str(report), "steady_state_trace": str(window)}
+
+    monkeypatch.setattr(roofline, "trace_analyze_handler", agent)
+    status, pointer, _ = await _run(tmp_path, {"analysis_route": "agent"}, rig)
+    assert status is JobStatus.SUCCEEDED and not pointer.op_shares
+    assert DEGRADED_NOTICE in pointer.summary and "window.json.gz cannot be read" in pointer.summary
+
+
+async def test_the_roofline_pointer_carries_the_kernel_shares_of_the_window_its_analysis_ran_on(
+    rig: Rig, tmp_path: Path
+) -> None:
+    window, report = _analysed_window(rig, tmp_path)
+    result = {
+        "status": "succeeded",
+        "analysis_md_path": str(report),
+        "steady_state_trace": str(window),
+        "last_profile_trace": str(rig.trace_input),
+    }
+
+    class Executor:
+        async def __call__(self, ctx: Any) -> dict:
+            return dict(result)
+
+    tool = roofline.roofline_tool()
+    tool._factory = lambda workdir: Executor()
+    sink = RecordingSink()
+    jobs = ToolJobs([tool], sink, tmp_path / "jobs", push_delay_seconds=0)
+    assert (
+        await jobs.wait(jobs.submit(ToolRequest("roofline", "b1", {"commit_id": "c9"}), job_id="r1"))
+        is JobStatus.SUCCEEDED
+    )
+    shares = sink.pointers[0].op_shares
+    gemms = [name for name in shares if name.startswith("kernel_gemm_0 [")]
+    assert len(gemms) == 4 and "aten::mm" not in shares and (tmp_path / "jobs" / "r1" / "kernel_shares.csv").is_file()
+
+
 async def test_excluded_events_of_a_kernel_the_trace_never_ran_clean_degrade_the_window_it_does_not_rank_a_guess(
     rig: Rig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

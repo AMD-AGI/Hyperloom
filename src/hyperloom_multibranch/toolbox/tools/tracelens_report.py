@@ -24,6 +24,11 @@ is reported degraded, with the reason and no shares, when its kernels are missin
 :data:`~.kernel_shares.MIN_GPU_BUSY_PERCENT` of its GPU span) or the excluded events could change the ranking. TraceLens'
 report is still run on the window, and its own check on the result still marks a graph-collapsed one degraded.
 
+A kernel name that several modules launch (the four FlyDSL GEMMs of a layer are all ``kernel_gemm_0``) is split by the module,
+``kernel_gemm_0 [Qwen2MLP.RowParallelLinear]`` (:mod:`~.kernel_launchers`): an eager kernel's launch call and the module frames
+around it are in the window; a graph replay's are in the graph-capture folder beside the trace, which TraceLens also takes.
+A replay that cannot be paired with its capture keeps its plain names, and ``launcher_notes`` says why.
+
 It is for LLM serving traces (SGLang, vLLM, ATOM): the splitter reads their step annotations. Anything else asks for
 ``analysis_route: agent``.
 """
@@ -258,6 +263,57 @@ def _write_degraded_report(run: _Run, coverage: GraphReplayCoverage) -> None:
     render_analysis_json(report)
 
 
+def _kernel_fields(kernels: KernelWindow, launched: Relabelled, table: Path) -> dict[str, Any]:
+    """What a result says of its window's kernel shares: where the table is (empty when degraded), the window's numbers."""
+    degraded = kernels.degraded_reason
+    return {
+        KERNEL_SHARES_KEY: "" if degraded else str(table),
+        "window_gpu_busy_percent": round(kernels.busy_percent, 2),
+        "window_kernel_ms": round(kernels.kernel_ms, _TIME_DIGITS),
+        EXCLUDED_EVENTS_KEY: kernels.excluded_events,
+        EXCLUDED_CLAIMED_KEY: round(kernels.excluded_claimed_ms, 2),
+        "excluded_estimated_ms": round(kernels.excluded_estimated_ms, _TIME_DIGITS),
+        "launcher_labelled_kernels": launched.launched,
+        "graph_kernels_renamed": launched.renamed,
+        "launcher_notes": list(launched.notes),
+        OWN_DEGRADED_KEY: degraded,
+    }
+
+
+def _analysed_window(result: Mapping[str, Any]) -> str:
+    """The steady-state window the orchestrator's analysis says it ran TraceLens on; empty when it names none."""
+    artifacts = result.get("artifact_paths")
+    fallback = artifacts.get("tracelens_steady_state_trace") if isinstance(artifacts, dict) else None
+    return str(result.get("steady_state_trace") or fallback or "").strip()
+
+
+def with_window_shares(result: Mapping[str, Any], trace_input: str, out_dir: Path) -> dict[str, Any]:
+    """``result`` of an analysis the orchestrator ran (the agent route, a roofline) with the kernel shares of the window it
+    analysed, which the op shares are then read from instead of the aten ops table of its perf report (the table whose
+    durations the ROCm profiler's misreport breaks).
+
+    The table is written to ``out_dir``. A result that names no window is returned as it is. One that names a window the
+    kernel shares cannot be read from carries no shares and says why: the ops table is not read in its place.
+    """
+    named = _analysed_window(result)
+    if not named or not trace_input:
+        return dict(result)
+    try:
+        origin = Path(trace_input).expanduser()
+        trace = _analysed_trace(origin)
+        kernels, launched = _kernel_window(Path(named), trace, discover_capture_folder(origin, [trace]))
+    except _Refused as exc:
+        return {
+            **result,
+            KERNEL_SHARES_KEY: "",
+            OWN_DEGRADED_KEY: f"the window {Path(named).name} cannot be read: {exc}",
+        }
+    table = out_dir / KERNEL_SHARES_FILE
+    if not kernels.degraded_reason:
+        write_kernel_table(kernels, table)
+    return {**result, **_kernel_fields(kernels, launched, table)}
+
+
 def _analyse(payload: Mapping[str, Any], session_dir: Path) -> dict[str, Any]:
     started = time.monotonic()
     trace_input = Path(str(payload["trace_input"])).expanduser().resolve()
@@ -285,9 +341,9 @@ def _analyse(payload: Mapping[str, Any], session_dir: Path) -> dict[str, Any]:
     if coverage.graph_under_recorded:
         _write_degraded_report(run, coverage)
     kernels, launched = _kernel_window(chunk, trace, capture)
-    degraded = kernels.degraded_reason
-    if not degraded:
-        write_kernel_table(kernels, run.out_dir / KERNEL_SHARES_FILE)
+    table = run.out_dir / KERNEL_SHARES_FILE
+    if not kernels.degraded_reason:
+        write_kernel_table(kernels, table)
 
     warnings = [] if arch is not None else [{"code": "gpu_arch_json_unresolved", "severity": "warning"}]
     return {
@@ -297,7 +353,6 @@ def _analyse(payload: Mapping[str, Any], session_dir: Path) -> dict[str, Any]:
         "trace_report_path": str(run.out_dir / "perf_report.xlsx"),
         "analysis_md_path": str(run.out_dir / "analysis.md") if coverage.graph_under_recorded else "",
         "ops_summary_path": str(run.csv_dir / _OPS_SUMMARY),
-        KERNEL_SHARES_KEY: "" if degraded else str(run.out_dir / KERNEL_SHARES_FILE),
         "trace_input": str(trace_input),
         "analysed_trace": trace.name,
         "steady_state_mode": mode,
@@ -306,15 +361,7 @@ def _analyse(payload: Mapping[str, Any], session_dir: Path) -> dict[str, Any]:
         "capture_folder": str(capture or ""),
         "graph_replay_fraction": round(coverage.graph_replay_fraction, 4),
         "graph_under_recorded": coverage.graph_under_recorded,
-        "window_gpu_busy_percent": round(kernels.busy_percent, 2),
-        "window_kernel_ms": round(kernels.kernel_ms, _TIME_DIGITS),
-        EXCLUDED_EVENTS_KEY: kernels.excluded_events,
-        EXCLUDED_CLAIMED_KEY: round(kernels.excluded_claimed_ms, 2),
-        "excluded_estimated_ms": round(kernels.excluded_estimated_ms, _TIME_DIGITS),
-        "launcher_labelled_kernels": launched.launched,
-        "graph_kernels_renamed": launched.renamed,
-        "launcher_notes": list(launched.notes),
-        OWN_DEGRADED_KEY: degraded,
+        **_kernel_fields(kernels, launched, table),
         "trace_health_warnings": warnings,
         "duration_sec": round(time.monotonic() - started, _TIME_DIGITS),
     }
@@ -344,4 +391,5 @@ __all__ = [
     "SPLIT_HINTS",
     "report_handler",
     "split_hint",
+    "with_window_shares",
 ]
