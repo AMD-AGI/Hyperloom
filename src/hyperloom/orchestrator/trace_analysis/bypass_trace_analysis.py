@@ -688,7 +688,6 @@ def main(argv: list[str] | None = None) -> int:
         framework=args.framework,
         target_platform=args.target_platform,
         top_k=top_k,
-        discover_benchmarks=False,
     )
 
     analysis_md_path = bypass_dir / "analysis.md"

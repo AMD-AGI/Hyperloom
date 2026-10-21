@@ -32,6 +32,21 @@ def test_a_venv_sees_the_packages_of_the_interpreter_that_created_it(tmp_path: P
     assert _venv_python(venv, "import yaml; print(yaml.__file__)") == __import__("yaml").__file__
 
 
+def test_a_venv_sees_the_eggs_and_editable_installs_of_the_interpreter_that_created_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The image's sglang-kernel is an egg and its aiter an editable install: both reach sys.path through a .pth."""
+    inherited = tmp_path / "inherited-site"
+    (inherited / "sgl_kernel-0.4.7.egg" / "sgl_kernel").mkdir(parents=True)
+    (inherited / "sgl_kernel-0.4.7.egg" / "sgl_kernel" / "__init__.py").write_text("", encoding="utf-8")
+    (inherited / "easy-install.pth").write_text("./sgl_kernel-0.4.7.egg\n", encoding="utf-8")
+    monkeypatch.setattr("site.getsitepackages", lambda: [str(inherited)])
+    venv = tmp_path / "venv"
+    create_venv(venv)
+    expected = str(inherited / "sgl_kernel-0.4.7.egg" / "sgl_kernel" / "__init__.py")
+    assert _venv_python(venv, "import sgl_kernel; print(sgl_kernel.__file__)") == expected
+
+
 def test_a_package_installed_into_the_venv_shadows_the_interpreters_copy(tmp_path: Path) -> None:
     """An editable install lands as a ``.pth`` too; it must still win over the inherited site directories."""
     venv = tmp_path / "venv"

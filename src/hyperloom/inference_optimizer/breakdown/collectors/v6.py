@@ -366,7 +366,7 @@ def _prelude_stage_from_state(state: dict[str, Any], timeline: list[dict[str, An
 #: The figures ``outcome.baseline`` publishes, named as the ``baseline`` event's
 #: own measurement block names them so the read is a straight lift.
 _BASELINE_OUTCOME_FIELDS = (
-    "throughput_tok_s_per_gpu",
+    "output_throughput",
     "accuracy",
     "ttft_mean_ms",
     "e2el_mean_ms",
@@ -666,7 +666,7 @@ def collect_v6_outcome(sources: OutcomeSources, warnings: list[str] | None = Non
     stop_reason = str(session.get("stop_reason") or "").strip()
     baseline_ids: list[str] = []
     baseline = _baseline_from_timeline(timeline, baseline_ids)
-    measured_tput = _optional_float(baseline.get("throughput_tok_s_per_gpu"))
+    measured_tput = _optional_float(baseline.get("output_throughput"))
     if measured_tput is None:
         measured_tput = _optional_float(state.get("baseline_tput")) or 0.0
     outcome_status = _outcome_status(stop_reason, measured_tput)
@@ -688,7 +688,7 @@ def collect_v6_outcome(sources: OutcomeSources, warnings: list[str] | None = Non
         "baseline": baseline,
         "anchoring_eval": anchoring_eval_from_timeline(timeline),
         "final": {
-            "throughput_tok_s_per_gpu": _optional_float(recipe.get("throughput")),
+            "output_throughput": _optional_float(recipe.get("throughput")),
             # The ledger's own settled figure rather than a second tally of it.
             # Absent a validation this is ``None``, not ``0.0``: nothing
             # measured is not the same as a measured zero.

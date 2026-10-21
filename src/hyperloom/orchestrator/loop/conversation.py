@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, Callable
 from ..bus.gpu_pool import gpus_by_task_sync
 from ..phases import machine_state as _phase_state
 from ..policy.projection import resource_pools_summary
+from ..specialists.in_flight import in_flight_domains
 from ..roles.base import BackendTurnResult
 from ..bus.message_bus import Message
 from hyperloom.inference_optimizer.trace.conversation_trace import ConversationRecord, append_conversation
@@ -365,7 +366,7 @@ class ConversationCollaborator(CoordinatorCollaborator):
     def _context_running_tasks_reader(self) -> str:
         """Project in-flight tasks and their held resources from three reads, not one snapshot."""
         tasks = self.tasks.running_context_sync()
-        backlog = self._queued_backlog_line()
+        backlog = "\n".join(line for line in (self._queued_backlog_line(), self._queued_specialists_line()) if line)
         if not tasks:
             return "\n".join(line for line in ("(no tasks in flight)", backlog) if line)
 
@@ -419,6 +420,15 @@ class ConversationCollaborator(CoordinatorCollaborator):
             if counts.get(kind)
         ]
         return "queued backlog: " + ", ".join(parts) if parts else ""
+
+    def _queued_specialists_line(self) -> str:
+        """Domains a queued specialist holds: a specialist delegate for one of them is refused until it finishes."""
+        held = in_flight_domains(self.tasks.queued_context_sync())
+        if not held:
+            return ""
+        return "queued specialists (each holds its domain): " + ", ".join(
+            f"{domain} task_id={task.task_id}" for domain, task in held.items()
+        )
 
     def _task_heartbeat_age_sec(self, task: "Task", *, now_unix: float) -> float | None:
         """Age of a specialist's freshest liveness file, mirroring the reaper."""

@@ -11,9 +11,6 @@ from typing import Any
 from .server_args_safety import prepare_shell_safe_extra_args
 from .ssh_client import DEFAULT_SSH_PORT
 
-# Frontend HTTP port (SaFE common.InferaFrontendPort).
-INFERA_FRONTEND_PORT = 8000
-
 # SSH control plane: hostNetwork pods on the same node share one IP, so each GPU role binds a distinct MN_SSH_PORT
 # (decode offset by ROLE_STRIDE).
 INFERA_SSH_PORT_ROLE_STRIDE = 10
@@ -135,10 +132,6 @@ def build_node_launch_args(launch: NodeLaunch) -> str:
         _INFERA_PID_FILE,
         "--log-file",
         _INFERA_LOG_FILE,
-        "--health-port",
-        str(INFERA_FRONTEND_PORT),
-        "--health-wait-sec",
-        "0",
     ]
     ep = launch.ep
     if ep and int(ep) > 1:

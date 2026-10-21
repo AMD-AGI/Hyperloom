@@ -247,18 +247,26 @@ def _match_target_row(
     if not rows or (target.get("benchmark_mode") == "agentx" and conc is None):
         return None
     if conc is not None:
-        exact = [r for r in rows if _to_num(r.get("conc")) == conc]
+        exact = [r for r in rows if to_float(r.get("conc")) == conc]
         if exact:
-            return max(exact, key=lambda r: _to_num(r.get("tput_per_gpu")) or 0.0)
+            return max(exact, key=lambda r: to_float(r.get("tput_per_gpu")) or 0.0)
         if target.get("benchmark_mode") == "agentx":
             return None
-        rows_with_conc = [r for r in rows if _to_num(r.get("conc")) is not None]
+        rows_with_conc = [r for r in rows if to_float(r.get("conc")) is not None]
         if rows_with_conc:
             return min(
                 rows_with_conc,
-                key=lambda r: abs((_to_num(r.get("conc")) or 0) - conc),
+                key=lambda r: abs((to_float(r.get("conc")) or 0) - conc),
             )
-    return max(rows, key=lambda r: _to_num(r.get("tput_per_gpu")) or 0.0)
+    return max(rows, key=lambda r: to_float(r.get("tput_per_gpu")) or 0.0)
+
+
+def _gap_pct(target_value: Any, our_value: Any) -> float | None:
+    """Percent by which ``our_value`` trails ``target_value``; ``None`` unless both parse as positive numbers."""
+    tgt, our = to_float(target_value), to_float(our_value)
+    if tgt is None or our is None or tgt <= 0 or our <= 0:
+        return None
+    return (tgt - our) / tgt * 100.0
 
 
 @dataclass(frozen=True)
@@ -291,71 +299,47 @@ def gap_analysis(
     """
     if not target or target.get("benchmark_mode", "synthetic") != benchmark_mode:
         return None
-    our_tput_per_gpu, our_tpot_ms = ours.tput_per_gpu, ours.tpot_ms
     agentx = benchmark_mode == "agentx"
     row = _match_target_row(target, conc)
     if row is None and not agentx:
         return None
     row = row or {}
-    tgt_tput = _to_num(row.get("tput_per_gpu"))
-    tgt_tpot = _to_num(row.get("tpot_ms"))
-    tgt_inter = _to_num(row.get("e2e_norm_intvty_p90" if agentx else "interactivity"))
-    our_inter = 1000.0 / our_tpot_ms if our_tpot_ms and our_tpot_ms > 0 else None
+    throughput_gap_pct = _gap_pct(row.get("tput_per_gpu"), ours.tput_per_gpu)
     if agentx:
-        tgt_tput, tgt_inter, our_tput_per_gpu, our_inter = [
-            value if value is not None and value > 0 else None
-            for value in (tgt_tput, tgt_inter, to_float(our_tput_per_gpu), to_float(ours.e2e_norm_intvty_p90))
-        ]
-        our_tpot_ms = None
-
-    throughput_gap_pct: float | None = None
-    if tgt_tput and our_tput_per_gpu and tgt_tput > 0:
-        throughput_gap_pct = (tgt_tput - our_tput_per_gpu) / tgt_tput * 100.0
-
-    tpot_ratio: float | None = None
-    if tgt_tpot and our_tpot_ms and tgt_tpot > 0:
-        tpot_ratio = our_tpot_ms / tgt_tpot
-
-    interactivity_gap_pct: float | None = None
-    if tgt_inter and our_inter:
-        interactivity_gap_pct = (tgt_inter - our_inter) / tgt_inter * 100.0
-
-    primary_gap: str | None = "throughput"
-    if tpot_ratio is not None and throughput_gap_pct is not None:
-        if (tpot_ratio - 1.0) * 100.0 > throughput_gap_pct:
-            primary_gap = "latency"
-    elif tpot_ratio is not None and tpot_ratio > 1.0:
-        primary_gap = "latency"
-
-    if agentx:
-        primary_gap = None
-        if max(throughput_gap_pct or 0, interactivity_gap_pct or 0) > 0:
-            primary_gap = "latency" if (interactivity_gap_pct or 0) >= (throughput_gap_pct or 0) else "throughput"
-
+        tpot_ratio = None
+        interactivity_gap_pct = _gap_pct(row.get("e2e_norm_intvty_p90"), ours.e2e_norm_intvty_p90)
+        tput_gap, inter_gap = throughput_gap_pct or 0, interactivity_gap_pct or 0
+        primary_gap = None if max(tput_gap, inter_gap) <= 0 else "latency" if inter_gap >= tput_gap else "throughput"
+    else:
+        tgt_tpot, our_tpot_ms = to_float(row.get("tpot_ms")), ours.tpot_ms
+        tpot_ratio = our_tpot_ms / tgt_tpot if tgt_tpot and our_tpot_ms and tgt_tpot > 0 else None
+        interactivity_gap_pct = _gap_pct(row.get("interactivity"), 1000.0 / our_tpot_ms if our_tpot_ms else None)
+        latency_wins = tpot_ratio is not None and (tpot_ratio - 1.0) * 100.0 > (throughput_gap_pct or 0)
+        primary_gap = "latency" if latency_wins else "throughput"
     gap: dict[str, Any] = {
         "throughput_gap_pct": throughput_gap_pct,
         "tpot_ratio": tpot_ratio,
         "interactivity_gap_pct": interactivity_gap_pct,
         "primary_gap": primary_gap,
-        "target_conc": _to_num(row.get("conc")),
+        "target_conc": to_float(row.get("conc")),
         "source": row.get("source"),
     }
-
-    if agentx:
-        available = throughput_gap_pct is not None or interactivity_gap_pct is not None
-        reason: ComparisonReason | None = (
-            None if available else "measurement_unavailable" if row else "concurrency_mismatch"
+    if not agentx:
+        return gap
+    available = throughput_gap_pct is not None or interactivity_gap_pct is not None
+    reason: ComparisonReason | None = (
+        None if available else "measurement_unavailable" if row else "concurrency_mismatch"
+    )
+    if None in (throughput_gap_pct, interactivity_gap_pct):
+        log.warning(
+            "AgentX comparison: reason=%s requested_conc=%s target_concs=%s throughput_gap=%s interactivity_gap=%s",
+            reason,
+            conc,
+            [r.get("conc") for r in target.get("per_conc", [])],
+            throughput_gap_pct,
+            interactivity_gap_pct,
         )
-        if throughput_gap_pct is None or interactivity_gap_pct is None:
-            log.warning(
-                "AgentX comparison: reason=%s requested_conc=%s target_concs=%s throughput_gap=%s interactivity_gap=%s",
-                reason,
-                conc,
-                [r.get("conc") for r in target.get("per_conc", [])],
-                throughput_gap_pct,
-                interactivity_gap_pct,
-            )
-        gap.update(benchmark_mode="agentx", status="ok" if available else "unavailable", reason=reason)
+    gap.update(benchmark_mode="agentx", status="ok" if available else "unavailable", reason=reason)
     return gap
 
 
@@ -420,11 +404,6 @@ def full_gap_summary(
             "per-output-token latency."
         )
     return "\n".join(lines)
-
-
-def _to_num(value: Any) -> float | None:
-    """Coerce a value to ``float``, returning ``None`` on failure."""
-    return to_float(value)
 
 
 # Direction keywords for cutting per-output-token latency (advisory).
