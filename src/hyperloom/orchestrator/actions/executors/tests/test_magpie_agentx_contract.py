@@ -570,6 +570,7 @@ def test_an_accepted_token_that_is_not_one_argv_token_is_refused_by_name(vllm_so
         "--foo ''",
         "--host [::1]",
         "--chat-template '{% for m in messages %}{{ m.content }}{% endfor %}'",
+        "--served-model-name my\\ model",
     ],
 )
 def test_server_args_that_cannot_become_argv_are_refused_as_argv_invalid(vllm_source, tmp_path, args):

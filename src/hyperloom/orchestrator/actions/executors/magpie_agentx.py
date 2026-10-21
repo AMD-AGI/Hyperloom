@@ -104,6 +104,13 @@ def _server_argv(server_args: str, requested: str) -> list[str]:
             f"or has an unbalanced quote or bracket): {requested}"
         )
     for token in split[1]:
+        if token.endswith("\\"):
+            # A shell would join ``my\ model`` into one value; argv splitting keeps two, so refuse it here
+            # rather than let the framework reject a stray positional at launch.
+            raise ServerArgvInvalidError(
+                f"{ARGV_INVALID}: a server arg value ends with a backslash escape, which is not shell-parsed: "
+                f"{requested}"
+            )
         value = token.partition("=")[2] if token.startswith("-") else token
         if value.startswith(("{", "[")):
             try:
