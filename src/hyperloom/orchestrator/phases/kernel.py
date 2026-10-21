@@ -1810,51 +1810,83 @@ class KernelPhase(CoordinatorCollaborator):
             for item in (self.shared_state.optimization_stack or [])
         )
 
-    @staticmethod
-    def _parse_geak_accepted_config(
-        result: dict[str, Any],
-    ) -> tuple[str, dict[str, str]]:
-        """Parse ``result.accepted_config`` into (flags, env dict)."""
-        return _accepted_config_as_variant(result.get("accepted_config"))
+    def _record_geak_claim_and_product(
+        self, result: dict[str, Any], accepted_flags: str, parsed_envs: dict[str, str]
+    ) -> None:
+        recorder = self.timeline()
+        if recorder is None:
+            return
+        recorder.record_geak_claim(self.shared_state.geak_pending, specs=self._geak_acceptance_specs(result))
+        recorder.record_geak_product(
+            accepted_flags=accepted_flags,
+            accepted_envs=dict(parsed_envs),
+            accepted_config=result.get("accepted_config"),
+            final_overlay=result.get("final_overlay") or "",
+            final_launch_script=result.get("final_launch_script") or "",
+            bench_script=result.get("bench_script") or "",
+            final_patch=result.get("final_patch") or "",
+        )
 
     def _record_geak_candidate(self, result: dict[str, Any]) -> bool:
         """Validate the return and record any measured claim without a headline gain."""
-        if not isinstance(result, dict):
-            return False
         result.setdefault("kernel_event_id", kernel_event_id(int(self.shared_state.macro_cycle or 0)))
-        from .geak_native_revalidation import matching_review
-
-        reviewed_product = matching_review(self.shared_state, result)
         try:
-            accepted_flags, parsed_envs = self._parse_geak_accepted_config(result)
+            accepted_flags, parsed_envs = _accepted_config_as_variant(result.get("accepted_config"))
         except ValueError as exc:
             self.reject_geak_promotion(result, measured_tput=0.0, current_best_tput=0.0, reason=str(exc))
             return False
-        if result.get("status") not in ("ok",) and not _geak_has_accepted_kernel(result):
+        if result.get("status") != "ok" and not _geak_has_accepted_kernel(result):
             return True
         new_tput = float(result.get("final_throughput_tok_s") or 0.0)
         if new_tput <= 0:
             return True
+        basis_facts = result.get("baseline_basis") or {}
+        self.shared_state.geak_pending = self._geak_pending_record(
+            result, basis_facts, accepted_flags=accepted_flags, parsed_envs=parsed_envs, new_tput=new_tput
+        )
+        self._record_geak_claim_and_product(result, accepted_flags, parsed_envs)
+        # Surface a large cross-harness measurement divergence as a warning only.
+        divergence = _as_float(basis_facts.get("measurement_divergence_pct"), 0.0)
+        if abs(divergence) > _GEAK_MEASUREMENT_DIVERGENCE_WARN_PCT:
+            log.warning(
+                "geak candidate: large cross-harness measurement divergence %.2f%% (|.|>%.1f%%) - candidate held "
+                "out of headline until a main-flow rebench validates it",
+                divergence,
+                _GEAK_MEASUREMENT_DIVERGENCE_WARN_PCT,
+            )
+        return True
+
+    def _geak_pending_record(
+        self,
+        result: dict[str, Any],
+        basis_facts: Mapping[str, Any],
+        *,
+        accepted_flags: str,
+        parsed_envs: dict[str, str],
+        new_tput: float,
+    ) -> dict[str, Any]:
+        from .geak_native_revalidation import matching_review
+
         basis = str(result.get("metric_basis") or GEAK_METRIC_OUTPUT[1])
-        if basis == GEAK_METRIC_OUTPUT[1]:
-            base = float(self.shared_state.baseline_tput or 0.0)
-        else:
-            base = axis_of(self.shared_state.baseline_perf, basis)
+        base = (
+            float(self.shared_state.baseline_tput or 0.0)
+            if basis == GEAK_METRIC_OUTPUT[1]
+            else axis_of(self.shared_state.baseline_perf, basis)
+        )
         # synthetic isl/osl at face value reads as roughly +175% with nothing
         # optimized. The downstream rebench would eventually reject it, but the
         # number would already be recorded, so refuse to compute it here.
         # An ABSENT verdict means an older GEAK that only ever ran the synthetic
         # path, which stays comparable and keeps today's value exactly.
-        comparability = (result.get("baseline_basis") or {}).get("workload_comparability") or {}
-        workloads_comparable = comparability.get("comparable") is not False
-        self_gain = ((new_tput - base) / base * 100.0) if (base > 0 and workloads_comparable) else None
+        comparability = basis_facts.get("workload_comparability") or {}
+        comparable = comparability.get("comparable") is not False
         am = result.get("alignment_metrics") or {}
-        self.shared_state.geak_pending = {
+        return {
             "status": "awaiting_rebench",
             # Audit-only self-reported numbers (not the headline until rebench).
             "self_reported_tput": new_tput,
             "self_reported_speedup": result.get("throughput_speedup"),
-            "self_reported_gain_pct": self_gain,
+            "self_reported_gain_pct": ((new_tput - base) / base * 100.0) if (base > 0 and comparable) else None,
             # Why the gain above is a number or None, so a reader never has to
             # guess whether an absent gain means "no gain" or "not comparable".
             "workload_comparability": comparability or None,
@@ -1883,39 +1915,8 @@ class KernelPhase(CoordinatorCollaborator):
                 "geak_throughput_speedup": result.get("throughput_speedup"),
             },
             "ts": datetime.now(timezone.utc).isoformat(),
+            **matching_review(self.shared_state, result),
         }
-        self.shared_state.geak_pending.update(reviewed_product)
-        recorder = self.timeline()
-        if recorder is not None:
-            recorder.record_geak_claim(
-                self.shared_state.geak_pending,
-                specs=self._geak_acceptance_specs(result),
-            )
-            recorder.record_geak_product(
-                accepted_flags=accepted_flags,
-                accepted_envs=dict(parsed_envs),
-                accepted_config=result.get("accepted_config"),
-                final_overlay=result.get("final_overlay") or "",
-                final_launch_script=result.get("final_launch_script") or "",
-                bench_script=result.get("bench_script") or "",
-                final_patch=result.get("final_patch") or "",
-            )
-        # Surface a large cross-harness measurement divergence as a warning only.
-        bb = result.get("baseline_basis") or {}
-        mdiv = bb.get("measurement_divergence_pct")
-        try:
-            mdiv_f = abs(float(mdiv)) if mdiv is not None else None
-        except (TypeError, ValueError):
-            mdiv_f = None
-        if mdiv_f is not None and mdiv_f > _GEAK_MEASUREMENT_DIVERGENCE_WARN_PCT:
-            log.warning(
-                "geak candidate: large cross-harness measurement divergence "
-                "%.2f%% (|.|>%.1f%%) - candidate held out of headline until a "
-                "main-flow rebench validates it",
-                float(mdiv),
-                _GEAK_MEASUREMENT_DIVERGENCE_WARN_PCT,
-            )
-        return True
 
     @staticmethod
     def _geak_acceptance_specs(result: dict[str, Any]) -> list[dict[str, Any]]:
@@ -2017,39 +2018,16 @@ class KernelPhase(CoordinatorCollaborator):
             )
             recorder.record_geak_rebench_conclusion(final_status="no_promote", final_error=reason)
 
-    def promote_geak_from_candidate(
+    def _geak_promotion_measurement(
         self,
         result: dict[str, Any],
+        graded_measurement: Mapping[str, Any],
         *,
-        measured_tput: float,
-        provenance: str = "geak_e2e_promote",
-        overlay_loaded: bool | None = None,
-        measurement_provenance: Mapping[str, Any] | None = None,
-    ) -> bool:
-        """Promote a measured GEAK candidate and return whether the lift succeeded."""
-        if not isinstance(result, dict):
-            return False
-        try:
-            measured = float(measured_tput)
-        except (TypeError, ValueError):
-            return False
-        if measured <= 0:
-            return False
-        cb_now = self.shared_state.current_best
-        cb_tput = cb_now.get("tput")
-        try:
-            accepted_flags, parsed_envs = self._parse_geak_accepted_config(result)
-        except ValueError as exc:
-            self.reject_geak_promotion(result, measured_tput=0.0, current_best_tput=0.0, reason=str(exc))
-            return False
-
-        # The lever is stamped here, not guessed from the task kind: GEAK promotes on a proven kernel overlay OR on a
-        # config/env-only win, and only this site holds the overlay proof.
-        entry_extra = self._geak_stack_entry_extra(result, overlay_loaded=overlay_loaded)
-        kernel_proven = bool(entry_extra.get("accepted_kernels") or entry_extra.get("accepted_heads"))
-        graded_measurement = measurement_provenance if isinstance(measurement_provenance, Mapping) else result
-
-        promotion_measurement = {
+        accepted_flags: str,
+        parsed_envs: dict[str, str],
+        kernel_proven: bool,
+    ) -> dict[str, Any]:
+        measurement = {
             "name": "geak_e2e",
             "candidate_extra_server_args": accepted_flags,
             "extra_server_args": accepted_flags,
@@ -2063,103 +2041,104 @@ class KernelPhase(CoordinatorCollaborator):
             **graded_axes_of(graded_measurement),
             "workspace": result.get("eval_dir"),
         }
-        if isinstance(measurement_provenance, Mapping):
-            for key in (
-                "extra_server_args",
-                "effective_extra_server_args",
-                "extra_envs",
-                "candidate_extra_server_args",
-                "candidate_extra_envs",
-                "recipe_delta",
-                "remove_args",
-                "unset_envs",
-                "args_mode",
-                "fingerprint",
-            ):
-                if key in measurement_provenance:
-                    promotion_measurement[key] = measurement_provenance[key]
-            for key in (
-                "accuracy",
-                "gpu_power_avg_w",
-                "gpu_power_by_gpu_w",
-                "launch_evidence",
-                "launch_evidence_path",
-                "server_log_path",
-                "workspace",
-                "single_workspace",
-            ):
-                value = measurement_provenance.get(key)
-                if value not in (None, "", {}):
-                    promotion_measurement[key] = value
-        if not isinstance(measurement_provenance, Mapping) or "extra_server_args" not in measurement_provenance:
-            from hyperloom.common.coerce import to_str_list
-            from hyperloom.inference_optimizer.framework_registry import server_args_env_name
+        if graded_measurement is result:
+            return measurement
+        for key in (
+            "extra_server_args",
+            "effective_extra_server_args",
+            "extra_envs",
+            "candidate_extra_server_args",
+            "candidate_extra_envs",
+            "recipe_delta",
+            "remove_args",
+            "unset_envs",
+            "args_mode",
+            "fingerprint",
+        ):
+            if key in graded_measurement:
+                measurement[key] = graded_measurement[key]
+        for key in (
+            "accuracy",
+            "gpu_power_avg_w",
+            "gpu_power_by_gpu_w",
+            "launch_evidence",
+            "launch_evidence_path",
+            "server_log_path",
+            "workspace",
+            "single_workspace",
+        ):
+            value = graded_measurement.get(key)
+            if value not in (None, "", {}):
+                measurement[key] = value
+        return measurement
 
-            from hyperloom.inference_optimizer.canonical_fingerprint import canonical_fingerprint
-            from hyperloom.inference_optimizer.grid_server_args import compose_server_args, remove_server_args
+    def _compose_geak_launch_recipe(
+        self,
+        measurement: dict[str, Any],
+        accepted_config: Mapping[str, Any],
+        *,
+        accepted_flags: str,
+        parsed_envs: dict[str, str],
+    ) -> None:
+        from hyperloom.common.coerce import to_str_list
+        from hyperloom.inference_optimizer.canonical_fingerprint import canonical_fingerprint
+        from hyperloom.inference_optimizer.framework_registry import server_args_env_name
+        from hyperloom.inference_optimizer.grid_server_args import compose_server_args, remove_server_args
 
-            accepted_controls = _accepted_config_controls(result.get("accepted_config"))
-            prior_controls = _accepted_config_controls(cb_now)
-            launch_controls = {**prior_controls, **accepted_controls}
-            for key in ("remove_args", "unset_envs"):
-                values = list(
-                    dict.fromkeys(to_str_list(prior_controls.get(key)) + to_str_list(accepted_controls.get(key)))
-                )
-                if values:
-                    launch_controls[key] = values
-            accepted_config = result.get("accepted_config") or {}
-            if accepted_controls.get("args_mode") == "replace" and "remove_args" in accepted_config:
-                launch_controls["remove_args"] = to_str_list(accepted_config["remove_args"])
-            if launch_controls:
-                complete = accepted_controls.get("args_mode") == "replace"
-                prior_complete = prior_controls.get("args_mode") == "replace"
-                inherited_args = ""
-                if not complete and not prior_complete:
-                    recipe_envs = self._read_recipe_bench_envs(str(self.shared_state.baseline_config_path or ""))
-                    inherited_args = str(recipe_envs.get(server_args_env_name(self.shared_state.framework)) or "")
-                promotion_measurement["extra_server_args"] = compose_server_args(
-                    inherited_args=inherited_args,
-                    base_extra_args="" if complete else cb_now.get("extra_server_args"),
-                    variant_extra_args=accepted_flags,
-                    remove_args=launch_controls.get("remove_args"),
-                    args_mode="replace" if complete else "append",
-                )
-                if not complete and launch_controls.get("remove_args"):
-                    # A legacy delta can re-enable a removed flag. The retained
-                    # snapshot is complete, so stale removals would prune it again.
-                    accepted_identity = canonical_fingerprint(accepted_flags, {})
-                    launch_controls["remove_args"] = [
-                        spec
-                        for spec in launch_controls["remove_args"]
-                        if canonical_fingerprint(remove_server_args(accepted_flags, [spec]), {}) == accepted_identity
-                    ]
-                launch_envs = dict(cb_now.get("extra_envs") or {})
-                for key in accepted_controls.get("unset_envs", []):
-                    launch_envs.pop(key, None)
-                launch_envs.update(parsed_envs)
-                promotion_measurement["extra_envs"] = launch_envs
-                promotion_measurement.update(launch_controls)
-                promotion_measurement["args_mode"] = "replace"
-        lifted = self._coord.writeback.lift_to_current_best(
-            "geak_e2e",
-            measured,
-            promotion_measurement,
-            entry_extra=entry_extra,
+        cb_now = self.shared_state.current_best
+        accepted_controls = _accepted_config_controls(accepted_config)
+        prior_controls = _accepted_config_controls(cb_now)
+        launch_controls = {**prior_controls, **accepted_controls}
+        for key in ("remove_args", "unset_envs"):
+            values = list(dict.fromkeys(to_str_list(prior_controls.get(key)) + to_str_list(accepted_controls.get(key))))
+            if values:
+                launch_controls[key] = values
+        complete = accepted_controls.get("args_mode") == "replace"
+        if complete and "remove_args" in accepted_config:
+            launch_controls["remove_args"] = to_str_list(accepted_config["remove_args"])
+        if not launch_controls:
+            return
+        inherited_args = ""
+        if not complete and prior_controls.get("args_mode") != "replace":
+            recipe_envs = self._recipe_benchmark(str(self.shared_state.baseline_config_path or "")).get("envs") or {}
+            inherited_args = str(recipe_envs.get(server_args_env_name(self.shared_state.framework)) or "")
+        measurement["extra_server_args"] = compose_server_args(
+            inherited_args=inherited_args,
+            base_extra_args="" if complete else cb_now.get("extra_server_args"),
+            variant_extra_args=accepted_flags,
+            remove_args=launch_controls.get("remove_args"),
+            args_mode="replace" if complete else "append",
         )
-        if not lifted:
-            KernelPhase.reject_geak_promotion(
-                self,
-                result,
-                measured_tput=measured,
-                current_best_tput=float(cb_tput) if isinstance(cb_tput, (int, float)) else 0.0,
-                reason="graded_comparison_rejected",
-            )
-            return False
+        if not complete and launch_controls.get("remove_args"):
+            # A legacy delta can re-enable a removed flag. The retained
+            # snapshot is complete, so stale removals would prune it again.
+            accepted_identity = canonical_fingerprint(accepted_flags, {})
+            launch_controls["remove_args"] = [
+                spec
+                for spec in launch_controls["remove_args"]
+                if canonical_fingerprint(remove_server_args(accepted_flags, [spec]), {}) == accepted_identity
+            ]
+        launch_envs = dict(cb_now.get("extra_envs") or {})
+        for key in accepted_controls.get("unset_envs", []):
+            launch_envs.pop(key, None)
+        launch_envs.update(parsed_envs)
+        measurement["extra_envs"] = launch_envs
+        measurement.update(launch_controls)
+        measurement["args_mode"] = "replace"
 
+    def _settle_geak_lift(
+        self,
+        result: dict[str, Any],
+        graded_measurement: Mapping[str, Any],
+        *,
+        measured: float,
+        provenance: str,
+        overlay_loaded: bool | None,
+    ) -> None:
         base = float(self.shared_state.baseline_tput or 0.0)
         # Where the session stood before GEAK ran: the anchor both the journey rejection and the route-level residual
         # measure from.
-        pre_geak = float(cb_tput) if isinstance(cb_tput, (int, float)) and cb_tput > 0 else base
+        cb_tput = _as_float(self.shared_state.current_best.get("tput"), 0.0)
         self.record_geak_adopted_kernels(
             result,
             measured_tput=measured,
@@ -2173,16 +2152,63 @@ class KernelPhase(CoordinatorCollaborator):
             self.reject_geak_kernel_journey(
                 result,
                 measured_tput=measured,
-                current_best_tput=pre_geak,
+                current_best_tput=cb_tput if cb_tput > 0 else base,
                 provenance=provenance,
                 rejection_reason="overlay_not_proven_loaded",
             )
-        self._coord.writeback.validate(
-            measured,
-            graded_measurement,
-            source="geak_e2e_promote",
-        )
+        self._coord.writeback.validate(measured, graded_measurement, source="geak_e2e_promote")
         self.shared_state.geak_pending = {}
+
+    def promote_geak_from_candidate(
+        self,
+        result: dict[str, Any],
+        *,
+        measured_tput: float,
+        provenance: str = "geak_e2e_promote",
+        overlay_loaded: bool | None = None,
+        measurement_provenance: Mapping[str, Any] | None = None,
+    ) -> bool:
+        """Promote a measured GEAK candidate and return whether the lift succeeded."""
+        measured = _as_float(measured_tput, 0.0)
+        if measured <= 0:
+            return False
+        try:
+            accepted_flags, parsed_envs = _accepted_config_as_variant(result.get("accepted_config"))
+        except ValueError as exc:
+            self.reject_geak_promotion(result, measured_tput=0.0, current_best_tput=0.0, reason=str(exc))
+            return False
+
+        # The lever is stamped here, not guessed from the task kind: GEAK promotes on a proven kernel overlay OR on a
+        # config/env-only win, and only this site holds the overlay proof.
+        entry_extra = self._geak_stack_entry_extra(result, overlay_loaded=overlay_loaded)
+        graded_measurement = measurement_provenance if isinstance(measurement_provenance, Mapping) else result
+        promotion_measurement = self._geak_promotion_measurement(
+            result,
+            graded_measurement,
+            accepted_flags=accepted_flags,
+            parsed_envs=parsed_envs,
+            kernel_proven=bool(entry_extra.get("accepted_kernels") or entry_extra.get("accepted_heads")),
+        )
+        if graded_measurement is result or "extra_server_args" not in graded_measurement:
+            self._compose_geak_launch_recipe(
+                promotion_measurement,
+                result.get("accepted_config") or {},
+                accepted_flags=accepted_flags,
+                parsed_envs=parsed_envs,
+            )
+        if not self._coord.writeback.lift_to_current_best(
+            "geak_e2e", measured, promotion_measurement, entry_extra=entry_extra
+        ):
+            self.reject_geak_promotion(
+                result,
+                measured_tput=measured,
+                current_best_tput=_as_float(self.shared_state.current_best.get("tput"), 0.0),
+                reason="graded_comparison_rejected",
+            )
+            return False
+        self._settle_geak_lift(
+            result, graded_measurement, measured=measured, provenance=provenance, overlay_loaded=overlay_loaded
+        )
         return True
 
     @staticmethod
@@ -2622,14 +2648,14 @@ class KernelPhase(CoordinatorCollaborator):
         envs: dict[str, str],
     ) -> dict[str, Any] | None:
         """Did the tuned table reach the server's merge list and get read?"""
-        if tuner_name == "fmoe_ck":
-            return self._fmoe_apply_verdict(envs)
-        from ..kernel.gemm_shape_coverage import aiter_log_tuned_config_enabled
-        from ..measurement.apply_verification import verify_applied
-
         csv_paths = [value for key, value in envs.items() if key.startswith("AITER_CONFIG")]
         if not csv_paths:
             return None
+        if tuner_name == "fmoe_ck":
+            return self._fmoe_apply_verdict(envs, csv_paths)
+        from ..kernel.gemm_shape_coverage import aiter_log_tuned_config_enabled
+        from ..measurement.apply_verification import verify_applied
+
         logs = _integrate_server_logs(self.session_dir, tuner_name)
         if not logs:
             # Say so.
@@ -2655,10 +2681,7 @@ class KernelPhase(CoordinatorCollaborator):
             runtime_table_names=table_names,
         ).to_dict()
 
-    def _fmoe_apply_verdict(
-        self,
-        envs: dict[str, str],
-    ) -> dict[str, Any] | None:
+    def _fmoe_apply_verdict(self, envs: dict[str, str], csv_paths: list[str]) -> dict[str, Any] | None:
         """Apply verdict for ``fmoe_ck`` based on fused-MoE dispatch, not dense GEMM."""
         from ..kernel.gemm_shape_coverage import (
             aiter_log_tuned_config_enabled,
@@ -2670,122 +2693,85 @@ class KernelPhase(CoordinatorCollaborator):
             tuned_fmoe_csv_rows,
         )
 
-        csv_paths = [value for key, value in envs.items() if key.startswith("AITER_CONFIG")]
-        if not csv_paths:
-            return None
         loaded = read_latest_integrate_server_log(self.session_dir)
         if loaded is None:
-            run_dir = self.session_dir / "runs" / "integrate" / "integrate-gemm_tune_fmoe_ck"
             log.warning(
                 "forge gemm E2E: no server.log under %s; apply verification cannot run for fmoe_ck",
-                run_dir,
+                self.session_dir / "runs" / "integrate" / "integrate-gemm_tune_fmoe_ck",
             )
             return None
-        log_path, log_text = loaded
-        hit_logging = aiter_log_tuned_config_enabled(envs)
+        log_text = loaded[1]
         candidate_path = resolve_fmoe_candidate_csv(csv_paths[0])
         dispatches = parse_aiter_fused_moe_dispatches(log_text)
+
+        def _verdict(name: str, detail: str, *, hits: int = 0, misses: int = 0, blocks: bool = False) -> dict[str, Any]:
+            attributable = bool(dispatches) and candidate_path is not None
+            return {
+                "verdict": name,
+                "hits": hits,
+                "misses": misses,
+                "blocks_keep": blocks,
+                "conclusive": blocks or hits > 0,
+                "merged_tables": [],
+                "unmerged_artifacts": [] if attributable else list(csv_paths),
+                "detail": detail,
+            }
+
         if not dispatches:
             if log_has_fused_moe_activity(log_text):
-                return {
-                    "verdict": "fused_moe_parse_inconclusive",
-                    "hits": 0,
-                    "misses": 0,
-                    "blocks_keep": False,
-                    "conclusive": False,
-                    "merged_tables": [],
-                    "unmerged_artifacts": list(csv_paths),
-                    "detail": ("server.log contains fused-MoE activity but no dispatch lines could be parsed"),
-                }
-            if not hit_logging:
-                return {
-                    "verdict": "fused_moe_logging_disabled",
-                    "hits": 0,
-                    "misses": 0,
-                    "blocks_keep": False,
-                    "conclusive": False,
-                    "merged_tables": [],
-                    "unmerged_artifacts": list(csv_paths),
-                    "detail": ("AITER_LOG_TUNED_CONFIG is off; fused-MoE dispatch attribution cannot run"),
-                }
-            return {
-                "verdict": "no_fused_moe_dispatch",
-                "hits": 0,
-                "misses": 0,
-                "blocks_keep": True,
-                "conclusive": True,
-                "merged_tables": [],
-                "unmerged_artifacts": list(csv_paths),
-                "detail": ("server.log exists but contains no [aiter] [fused_moe] dispatch lines"),
-            }
-
+                return _verdict(
+                    "fused_moe_parse_inconclusive",
+                    "server.log contains fused-MoE activity but no dispatch lines could be parsed",
+                )
+            # aiter prints a hit line only under this flag, so a zero-hit result means nothing without it.
+            if not aiter_log_tuned_config_enabled(envs):
+                return _verdict(
+                    "fused_moe_logging_disabled",
+                    "AITER_LOG_TUNED_CONFIG is off; fused-MoE dispatch attribution cannot run",
+                )
+            return _verdict(
+                "no_fused_moe_dispatch",
+                "server.log exists but contains no [aiter] [fused_moe] dispatch lines",
+                blocks=True,
+            )
         if candidate_path is None:
-            return {
-                "verdict": "candidate_csv_missing",
-                "hits": 0,
-                "misses": len(dispatches),
-                "blocks_keep": False,
-                "conclusive": False,
-                "merged_tables": [],
-                "unmerged_artifacts": list(csv_paths),
-                "detail": (
-                    "env points at a merged fmoe CSV but the sibling bare "
-                    "candidate file is absent; cannot attribute runtime "
-                    "kernel names to the tuner candidate"
-                ),
-            }
+            return _verdict(
+                "candidate_csv_missing",
+                "env points at a merged fmoe CSV but the sibling bare candidate file is absent; cannot attribute "
+                "runtime kernel names to the tuner candidate",
+                misses=len(dispatches),
+            )
 
-        candidate_rows = tuned_fmoe_csv_rows(candidate_path)
-        coverage = fmoe_tuned_config_coverage(candidate_rows, dispatches)
-        covered = int(coverage.get("covered") or 0)
+        coverage = fmoe_tuned_config_coverage(tuned_fmoe_csv_rows(candidate_path), dispatches)
         requested = int(coverage.get("requested") or 0)
+        covered = int(coverage.get("covered") or 0)
         if covered > 0:
-            return {
-                "verdict": "served",
-                "hits": covered,
-                "misses": requested - covered,
-                "blocks_keep": False,
-                "conclusive": True,
-                "merged_tables": [],
-                "unmerged_artifacts": [],
-                "detail": (
-                    f"{covered} fused-MoE dispatch(es) match candidate kernelName1/kernelName2 in {candidate_path.name}"
-                ),
-            }
-        if coverage.get("runtime_default"):
-            return {
-                "verdict": "runtime_default_config",
-                "hits": 0,
-                "misses": requested,
-                "blocks_keep": True,
-                "conclusive": True,
-                "merged_tables": [],
-                "unmerged_artifacts": [],
-                "detail": ("runtime served default heuristics; tuned candidate kernels were not selected"),
-            }
-        if coverage.get("kernel_name_mismatch"):
-            return {
-                "verdict": "kernel_name_mismatch",
-                "hits": 0,
-                "misses": requested,
-                "blocks_keep": True,
-                "conclusive": True,
-                "merged_tables": [],
-                "unmerged_artifacts": [],
-                "detail": (
-                    "lookup key matched bundled rows but runtime kernelName1/kernelName2 differ from candidate_fmoe.csv"
-                ),
-            }
-        return {
-            "verdict": "no_shape_key_matched",
-            "hits": 0,
-            "misses": requested,
-            "blocks_keep": True,
-            "conclusive": True,
-            "merged_tables": [],
-            "unmerged_artifacts": [],
-            "detail": (f"0 of {requested} fused-MoE dispatch(es) resolve to a candidate row"),
-        }
+            return _verdict(
+                "served",
+                f"{covered} fused-MoE dispatch(es) match candidate kernelName1/kernelName2 in {candidate_path.name}",
+                hits=covered,
+                misses=requested - covered,
+            )
+        for flag, name, detail in (
+            (
+                "runtime_default",
+                "runtime_default_config",
+                "runtime served default heuristics; tuned candidate kernels were not selected",
+            ),
+            (
+                "kernel_name_mismatch",
+                "kernel_name_mismatch",
+                "lookup key matched bundled rows but runtime kernelName1/kernelName2 differ from candidate_fmoe.csv",
+            ),
+        ):
+            if coverage.get(flag):
+                return _verdict(name, detail, misses=requested, blocks=True)
+        return _verdict(
+            "no_shape_key_matched",
+            f"0 of {requested} fused-MoE dispatch(es) resolve to a candidate row",
+            misses=requested,
+            blocks=True,
+        )
 
     def _merge_gemm_candidate_with_runtime(self, env_var: str, candidate_csv_path: str) -> str | None:
         """Merge a GEMM candidate CSV with the runtime config."""
