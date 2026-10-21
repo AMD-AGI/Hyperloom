@@ -2096,9 +2096,7 @@ def _apply_whole_file_patch(request: KernelPatchRequest) -> dict[str, Any]:
         if target.suffix.lower() in PYTHON_SOURCE_SUFFIXES
         else {"status": "skipped", "reason": "not a python source target"}
     )
-    multinode = (
-        _fan_whole_file_out_to_pods(request, deployment, patch, strategy) if _is_multi_node() else {}
-    )
+    multinode = _fan_whole_file_out_to_pods(request, deployment, patch, strategy) if _is_multi_node() else {}
 
     compiled = bool(strategy["compiled"])
     records = _rebuild_not_run()
