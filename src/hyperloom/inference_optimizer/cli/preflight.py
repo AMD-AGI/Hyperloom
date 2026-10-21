@@ -1659,15 +1659,10 @@ def _check_kernel_tuning_clis() -> dict[str, Any]:
 
 def _check_agent_cli() -> None:
     """WARN when the CLI this deployment's specialists run cannot be resolved; launching them will fail."""
-    if preferred_agent_backend() == AGENT_BACKEND_CODEX:
-        missing = "" if resolve_codex_executable() else "no codex runtime on PATH or bundled with the Codex SDK"
-        remedy = "install `codex` on PATH or pip install 'hyperloom-inference_optimizer[llm]'"
-    else:
-        found = resolve_claude_executable()
-        missing = "" if found else "no claude CLI in $HYPERLOOM_CLAUDE_CLI_PATH, $GEAK_CLAUDE_BIN or on PATH"
-        remedy = "src/hyperloom/inference_optimizer/assets/install.sh installs it"
-    if missing:
-        print(f"Preflight: WARNING — {missing}; specialists cannot start without it ({remedy}).")
+    backend = preferred_agent_backend()
+    resolve = resolve_codex_executable if backend == AGENT_BACKEND_CODEX else resolve_claude_executable
+    if not resolve():
+        print(f"Preflight: WARNING — no {backend} CLI; specialists cannot start without it (assets/install.sh).")
 
 
 def _emit_preflight_diagnostics(

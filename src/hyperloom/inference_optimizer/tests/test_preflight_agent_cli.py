@@ -13,7 +13,7 @@ from hyperloom.inference_optimizer.cli import preflight
 
 @pytest.mark.parametrize(
     ("backend", "named"),
-    [(AGENT_BACKEND_CLAUDE, "no claude CLI"), (AGENT_BACKEND_CODEX, "no codex runtime")],
+    [(AGENT_BACKEND_CLAUDE, "no claude CLI"), (AGENT_BACKEND_CODEX, "no codex CLI")],
 )
 def test_a_missing_agent_cli_warns(monkeypatch, capsys, backend, named):
     monkeypatch.setattr(preflight, "preferred_agent_backend", lambda: backend)
