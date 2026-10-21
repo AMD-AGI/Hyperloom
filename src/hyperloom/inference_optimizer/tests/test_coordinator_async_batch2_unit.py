@@ -343,6 +343,131 @@ async def test_resume_does_not_export_a_framework_tree_as_the_inferencex_path(
     assert coord.shared_state.stop_reason != "active_inferencex_checkout_missing"
 
 
+def _source_layer_entry(
+    tmp_path: Path, name: str, framework_root: Path, files: dict[str, str | None], *, complete: bool = True
+) -> dict:
+    """A kept ``source_patch`` stack entry whose durable snapshot holds ``files``; ``None`` marks a deletion."""
+    snapshot = tmp_path / "optimization_stack" / "src" / name
+    rows = []
+    for rel, text in files.items():
+        if text is None:
+            rows.append({"rel": rel, "op": "delete"})
+            continue
+        target = snapshot / "files" / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+        rows.append({"rel": rel, "op": "upsert"})
+    (snapshot / "manifest.json").write_text(
+        json.dumps({"schema_version": 2, "complete": complete, "files": rows}), encoding="utf-8"
+    )
+    return {
+        "action": "integrate_patch",
+        "scope": "source_patch",
+        "variant_name": name,
+        "framework_root": str(framework_root),
+        "source_snapshot": str(snapshot),
+        "source_snapshot_complete": complete,
+        "tput": 120.0,
+    }
+
+
+def _resume_with_stack(coord: Coordinator, stack: list[dict]) -> None:
+    coord.writeback._resumed_from["is_resume"] = True
+    coord.shared_state.optimization_stack = stack
+    coord.shared_state.cumulative_gain_validated_stack_len = len(stack)
+
+
+@pytest.mark.asyncio
+async def test_resume_reinstalls_the_kept_source_layer_on_a_fresh_tree(coord: Coordinator, tmp_path: Path) -> None:
+    """A resumed session on a pristine framework tree gets its kept patches back before any bench measures it."""
+    tree = tmp_path / "vllm"
+    (tree / "v1").mkdir(parents=True)
+    (tree / "envs.py").write_text("stock envs\n", encoding="utf-8")
+    entry = _source_layer_entry(
+        tmp_path, "kv_window", tree, {"envs.py": "patched envs\n", "v1/rocm_aiter_mla.py": "patched mla\n"}
+    )
+    _resume_with_stack(coord, [entry])
+
+    report = await coord.writeback._resume_consistency_pass()
+
+    assert (tree / "envs.py").read_text(encoding="utf-8") == "patched envs\n"
+    assert (tree / "v1" / "rocm_aiter_mla.py").read_text(encoding="utf-8") == "patched mla\n"
+    restored = [
+        fix for fix in report["fixes"] if isinstance(fix, dict) and fix.get("kind") == "reinstalled_source_layer"
+    ]
+    assert [sorted(fix["files"]) for fix in restored] == [
+        [str(tree / "envs.py"), str(tree / "v1" / "rocm_aiter_mla.py")]
+    ]
+
+
+@pytest.mark.asyncio
+async def test_resume_leaves_a_tree_that_already_carries_the_source_layer_alone(
+    coord: Coordinator, tmp_path: Path
+) -> None:
+    tree = tmp_path / "vllm"
+    tree.mkdir()
+    (tree / "envs.py").write_text("patched envs\n", encoding="utf-8")
+    _resume_with_stack(coord, [_source_layer_entry(tmp_path, "kv_window", tree, {"envs.py": "patched envs\n"})])
+
+    report = await coord.writeback._resume_consistency_pass()
+
+    assert not any(isinstance(fix, dict) and fix.get("kind") == "reinstalled_source_layer" for fix in report["fixes"])
+
+
+@pytest.mark.asyncio
+async def test_resume_installs_the_last_kept_state_of_a_file_two_patches_touch(
+    coord: Coordinator, tmp_path: Path
+) -> None:
+    tree = tmp_path / "vllm"
+    tree.mkdir()
+    (tree / "envs.py").write_text("stock envs\n", encoding="utf-8")
+    _resume_with_stack(
+        coord,
+        [
+            _source_layer_entry(tmp_path, "first", tree, {"envs.py": "first\n", "gone.py": None}),
+            _source_layer_entry(tmp_path, "second", tree, {"envs.py": "second\n"}),
+        ],
+    )
+    (tree / "gone.py").write_text("stock\n", encoding="utf-8")
+
+    await coord.writeback._resume_consistency_pass()
+
+    assert (tree / "envs.py").read_text(encoding="utf-8") == "second\n"
+    assert not (tree / "gone.py").exists()
+
+
+@pytest.mark.asyncio
+async def test_resume_halts_when_a_kept_snapshot_cannot_be_installed(coord: Coordinator, tmp_path: Path) -> None:
+    tree = tmp_path / "vllm"
+    tree.mkdir()
+    entry = _source_layer_entry(tmp_path, "kv_window", tree, {"envs.py": "patched envs\n"})
+    (Path(entry["source_snapshot"]) / "files" / "envs.py").unlink()
+    _resume_with_stack(coord, [entry])
+
+    with pytest.raises(IntegrateRecoveryIncomplete):
+        await coord.writeback._resume_consistency_pass()
+
+    assert coord.shared_state.stop_reason == PATCH_RECOVERY_INCOMPLETE_STOP_REASON
+
+
+@pytest.mark.asyncio
+async def test_resume_warns_about_a_kept_patch_with_no_snapshot_to_install(coord: Coordinator, tmp_path: Path) -> None:
+    tree = tmp_path / "vllm"
+    tree.mkdir()
+    legacy = {
+        "action": "integrate_patch",
+        "scope": "source_patch",
+        "variant_name": "legacy",
+        "framework_root": str(tree),
+    }
+    _resume_with_stack(coord, [legacy])
+
+    report = await coord.writeback._resume_consistency_pass()
+
+    assert {"kind": "source_layer_not_reproducible", "variant": "legacy"} in report["warnings"]
+    assert coord.shared_state.stop_reason != PATCH_RECOVERY_INCOMPLETE_STOP_REASON
+
+
 @pytest.fixture
 def pending_candidate(coord: Coordinator, tmp_path: Path, monkeypatch):
     """Apply real local files, then discard the live state before resume."""

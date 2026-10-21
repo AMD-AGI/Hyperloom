@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import filecmp
 import json
 import shutil
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, NamedTuple
 
 MANIFEST_NAME = "manifest.json"
 SCHEMA_VERSION = 2
@@ -112,3 +113,73 @@ def snapshot_source_layer(
     dest_dir.mkdir(parents=True, exist_ok=True)
     (dest_dir / MANIFEST_NAME).write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     return {"snapshot_dir": str(dest_dir), **manifest}
+
+
+class SourceLayerInstall(NamedTuple):
+    """What installing the kept source layers on their framework trees did."""
+
+    #: Paths written or removed because the tree did not hold the kept state.
+    installed: list[str]
+    #: Why a kept state could not be put on its tree, one line each.
+    failed: list[str]
+    #: Variants whose source patch has no complete snapshot, so there is nothing to install or check.
+    unreproducible: list[str]
+
+
+def _kept_final_states(stack: Iterable[dict[str, Any]], result: SourceLayerInstall) -> dict[Path, tuple[str, Path]]:
+    """Map each file a kept source patch touches to its last kept ``(op, snapshot file)``, in stack order."""
+    final: dict[Path, tuple[str, Path]] = {}
+    for entry in stack:
+        if not isinstance(entry, dict) or entry.get("scope") != "source_patch":
+            continue
+        variant = str(entry.get("variant_name") or entry.get("name") or "")
+        if not source_layer_reproducible(entry):
+            result.unreproducible.append(variant)
+            continue
+        snapshot_dir = Path(str(entry["source_snapshot"]))
+        root = str(entry.get("framework_root") or "").strip()
+        try:
+            manifest = json.loads((snapshot_dir / MANIFEST_NAME).read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            result.failed.append(f"{variant}: snapshot manifest unreadable: {exc}")
+            continue
+        if not root:
+            result.failed.append(f"{variant}: no framework_root recorded")
+            continue
+        for row in manifest.get("files") or []:
+            rel = _safe_rel(str(row.get("rel") or "")) if isinstance(row, dict) else None
+            if rel is None:
+                result.failed.append(f"{variant}: manifest names an unusable path {row!r}")
+                continue
+            final[Path(root) / rel] = (str(row.get("op") or ""), snapshot_dir / "files" / rel)
+    return final
+
+
+def install_source_layers(stack: Iterable[dict[str, Any]]) -> SourceLayerInstall:
+    """Put every kept source patch's final file state on its framework tree, and confirm each file is in place.
+
+    A tree that already holds the kept state is left untouched. The checks and writes run in stack order, so a
+    file two patches touch ends in the last one's state.
+    """
+    result = SourceLayerInstall([], [], [])
+    for dest, (op, source) in _kept_final_states(stack, result).items():
+        try:
+            if op == "delete":
+                if dest.exists():
+                    dest.unlink()
+                    result.installed.append(str(dest))
+                continue
+            if op != "upsert" or not source.is_file():
+                result.failed.append(f"{dest}: the snapshot holds no {op or 'unrecorded'} state for it")
+                continue
+            if dest.is_file() and filecmp.cmp(source, dest, shallow=False):
+                continue
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, dest)
+            if not filecmp.cmp(source, dest, shallow=False):
+                result.failed.append(f"{dest}: differs from the snapshot after it was written")
+                continue
+            result.installed.append(str(dest))
+        except OSError as exc:
+            result.failed.append(f"{dest}: {exc}")
+    return result
