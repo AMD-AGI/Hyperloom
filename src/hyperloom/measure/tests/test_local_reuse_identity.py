@@ -12,6 +12,7 @@ run a real sweep arm through ``LocalMeasurementBackend`` with the points the too
 from __future__ import annotations
 
 import os
+import shutil
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -19,7 +20,7 @@ from typing import Any
 import pytest
 import yaml
 
-from hyperloom.contracts.recipe import KernelArtifact, KernelKind, RecipeDelta
+from hyperloom.contracts.recipe import ConfigDelta, KernelArtifact, KernelKind, RecipeDelta
 from hyperloom.measure import local
 from hyperloom.measure.compile import CompiledEnvironment, LocalBlobStore, PackageBase, compile_environment
 from hyperloom.measure.framework_base import framework_envs
@@ -89,6 +90,8 @@ class _Rounds:
     def __init__(self, tmp_path: Path) -> None:
         self.tmp_path = tmp_path
         self.rounds: list[dict[str, Any]] = []
+        #: (Magpie's launcher directory, the InferenceX ``benchmarks`` directory it copies them into when a round starts)
+        self.copies_launchers: tuple[Path, Path] | None = None
 
     async def __call__(self, **kwargs: Any) -> list[VariantResult]:
         variant = kwargs["grid"][0]
@@ -101,6 +104,9 @@ class _Rounds:
             base_extra_envs=kwargs.get("base_extra_envs"),
         )
         envs = yaml.safe_load(candidate.read_text())["benchmark"]["envs"]
+        if self.copies_launchers is not None:
+            for script in self.copies_launchers[0].glob("*.sh"):
+                shutil.copyfile(script, self.copies_launchers[1] / script.name)
         tables = [
             part for key, value in envs.items() if key.startswith("AITER_CONFIG_") for part in value.split(os.pathsep)
         ]
@@ -150,7 +156,9 @@ def _environment(tmp_path: Path, delta: RecipeDelta | None = None) -> CompiledEn
     )
 
 
-def _points(tmp_path: Path, *, accuracy: bool, environment: CompiledEnvironment | None = None) -> tuple[Path, ...]:
+def _points(
+    tmp_path: Path, *, accuracy: bool, environment: CompiledEnvironment | None = None, **options: Any
+) -> tuple[Path, ...]:
     """The points the toolbox renders for a sweep over ``LEVELS``: the real planner, the shipped baseline recipe."""
     model = tmp_path / "model"
     model.mkdir()
@@ -160,14 +168,17 @@ def _points(tmp_path: Path, *, accuracy: bool, environment: CompiledEnvironment 
         primary_concurrency=LEVELS[0],
         config_path=default_baseline_config(),
         model_path=str(model),
+        **options,
     )
     environment = environment or _environment(tmp_path)
     return generate_points(environment, canonical, tmp_path / "points", concurrency=LEVELS, accuracy=accuracy)
 
 
-def _sweep(tmp_path: Path, *, accuracy: bool = False, environment: CompiledEnvironment | None = None) -> TestCall:
+def _sweep(
+    tmp_path: Path, *, accuracy: bool = False, environment: CompiledEnvironment | None = None, **options: Any
+) -> TestCall:
     return TestCall(
-        points=_points(tmp_path, accuracy=accuracy, environment=environment),
+        points=_points(tmp_path, accuracy=accuracy, environment=environment, **options),
         environment=environment or EnvironmentRef.current_stack(),
         output_dir=tmp_path / "out",
         timeout_sec=900,
@@ -263,6 +274,35 @@ def test_a_put_kernel_table_has_one_path_in_every_round_of_a_sweep_arm(
     for round_ in rounds.rounds:
         assert round_["tables_present"] == [TABLE.decode()], f"the table {round_['name']} names is a private copy"
         assert round_["envs"][TABLE_ENV] == boot["envs"][TABLE_ENV]
+
+
+def test_a_variable_the_launcher_exports_is_kept_or_dropped_alike_in_every_round_of_a_sweep_arm(
+    rounds, tmp_path, monkeypatch
+):
+    """Magpie puts its launcher in the InferenceX checkout when the first round starts, and ``run_grid`` drops from a
+    round's environment what that launcher exports unconditionally: a checkout the runner has just made clean had no
+    launcher while the boot round's configuration was built, so the boot kept ``SGLANG_USE_AITER`` and every round after
+    it dropped it, and Magpie's reuse check refused them.
+    """
+    monkeypatch.setenv("HYPERLOOM_BENCHMARK_BACKEND", "magpie")
+    checkout, launchers = tmp_path / "inferencex", tmp_path / "magpie" / "Magpie" / "scripts" / "benchmark"
+    for path in (checkout / "benchmarks", launchers):
+        path.mkdir(parents=True)
+    (checkout / "benchmarks" / "benchmark_lib.sh").write_text("")
+    (launchers / "sglang_mi355x.sh").write_text("export SGLANG_USE_AITER=1\n")
+    delta = RecipeDelta(config=ConfigDelta(envs={"SGLANG_USE_AITER": "1", "AITER_LOG_TUNED_CONFIG": "1"}))
+    call = _sweep(tmp_path, environment=_environment(tmp_path, delta), gpu_type="mi355x")
+    monkeypatch.setenv("INFERENCEX_PATH", str(checkout))
+    monkeypatch.setenv("MAGPIE_PATH", str(tmp_path / "magpie"))
+    rounds.copies_launchers = (launchers, checkout / "benchmarks")
+
+    LocalMeasurementBackend().run_test(call)
+
+    boot, *measured = rounds.rounds
+    assert boot["boot"] and [r["name"] for r in measured] == ["c64", "c16", "c4"]
+    assert "AITER_LOG_TUNED_CONFIG" in boot["envs"], "a variable the launcher does not export stays"
+    for round_ in measured:
+        assert magpie_server_env(round_["envs"]) == magpie_server_env(boot["envs"]), f"the round at {round_['name']}"
 
 
 def test_on_bypass_the_boot_round_carries_the_server_phase(rounds, tmp_path, monkeypatch):

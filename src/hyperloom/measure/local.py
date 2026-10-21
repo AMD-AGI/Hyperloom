@@ -48,6 +48,7 @@ from hyperloom.measure.boot_watch import BOOT_CANCEL_REASON, BootGuard, boot_lim
 from hyperloom.measure.compile import CompiledEnvironment, LocalBlobStore
 from hyperloom.measure.farm import FarmError, build_farm, place_farm, server_python, verify_farm
 from hyperloom.measure.framework_copies import private_framework
+from hyperloom.measure.magpie_launchers import install_launchers
 from hyperloom.measure.profile_client import ProfileClientError, patch_profile_client
 from hyperloom.measure.profile_traces import PROFILE_DIR, collect_traces
 from hyperloom.measure.repro import ReproError, find_case, run_case
@@ -175,6 +176,8 @@ class LocalMeasurementBackend:
             if call.kind == _PROFILE:
                 _patch_profile_client(call)
             with _test_environment(call) as unset_envs:
+                if resolve_backend().name == "magpie":
+                    install_launchers(call.points)
                 run = _Run(call, [name for name in unset_envs if name not in private.redirected])
                 with _watch_output(call), _guard_boot(run):
                     asyncio.run(_runner_of(call)(run))
