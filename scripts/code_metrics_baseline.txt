@@ -109,11 +109,6 @@ cognitive-complexity src/hyperloom/orchestrator/loop/writeback.py::WritebackColl
 cognitive-complexity src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator.validate_geak_via_geak_harness 50
 cognitive-complexity src/hyperloom/orchestrator/measurement/apply_verification.py::verify_applied 32
 cognitive-complexity src/hyperloom/orchestrator/measurement/runtime_findings.py::_scan_lines 38
-cognitive-complexity src/hyperloom/orchestrator/phases/framework.py::FrameworkPhase._enqueue_author_specialist 36
-cognitive-complexity src/hyperloom/orchestrator/phases/framework.py::FrameworkPhase._record_framework_agent_authored_outcome 33
-cognitive-complexity src/hyperloom/orchestrator/phases/framework.py::FrameworkPhase._recover_framework_agent_authoring_outcome 37
-cognitive-complexity src/hyperloom/orchestrator/phases/framework.py::FrameworkPhase.maybe_reauthor_from_critic_feedback 47
-cognitive-complexity src/hyperloom/orchestrator/phases/framework.py::_framework_config_levers_from_done 81
 cognitive-complexity src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._gemm_e2e_candidates 34
 cognitive-complexity src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._merge_gemm_candidate_with_runtime 83
 cognitive-complexity src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._run_geak_kernel_phase 122
@@ -626,16 +621,6 @@ function-lines src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborat
 function-lines src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator.validate_geak_via_geak_harness 185
 function-lines src/hyperloom/orchestrator/measurement/apply_verification.py::verify_applied 81
 function-lines src/hyperloom/orchestrator/phases/close.py::ClosePhase.on_enter_close 112
-function-lines src/hyperloom/orchestrator/phases/framework.py::FrameworkPhase._enqueue_author_specialist 123
-function-lines src/hyperloom/orchestrator/phases/framework.py::FrameworkPhase._enqueue_framework_agent_authoring_specialist 97
-function-lines src/hyperloom/orchestrator/phases/framework.py::FrameworkPhase._enqueue_framework_agent_local_explore_specialist 132
-function-lines src/hyperloom/orchestrator/phases/framework.py::FrameworkPhase._maybe_rearm_authored_lane 103
-function-lines src/hyperloom/orchestrator/phases/framework.py::FrameworkPhase._record_framework_agent_authored_outcome 109
-function-lines src/hyperloom/orchestrator/phases/framework.py::FrameworkPhase._submit_framework_agent_candidate_for_review 97
-function-lines src/hyperloom/orchestrator/phases/framework.py::FrameworkPhase.maybe_autosubmit_specialist_patches 102
-function-lines src/hyperloom/orchestrator/phases/framework.py::FrameworkPhase.maybe_reauthor_from_critic_feedback 131
-function-lines src/hyperloom/orchestrator/phases/framework.py::_framework_config_levers_from_done 84
-function-lines src/hyperloom/orchestrator/phases/framework.py::_record_source_attempt 150
 function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._fmoe_apply_verdict 131
 function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._maybe_reprofile_for_kernel 98
 function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._merge_gemm_candidate_with_runtime 151
@@ -825,7 +810,7 @@ module-lines src/hyperloom/orchestrator/loop/coordinator.py 1423
 module-lines src/hyperloom/orchestrator/loop/dispatcher.py 1503
 module-lines src/hyperloom/orchestrator/loop/intent_router.py 1423
 module-lines src/hyperloom/orchestrator/loop/writeback.py 4748
-module-lines src/hyperloom/orchestrator/phases/framework.py 3139
+module-lines src/hyperloom/orchestrator/phases/framework.py 3067
 module-lines src/hyperloom/orchestrator/phases/kernel.py 4227
 module-lines src/hyperloom/orchestrator/phases/machine_state.py 2128
 module-lines src/hyperloom/orchestrator/phases/prelude.py 2640

@@ -133,6 +133,11 @@ def _critic_feedback_lines(critic_feedback: Mapping[str, Any] | None) -> list[st
     return lines
 
 
+def _patches_on_disk(patch: Path, resolve_bases: list[Path]) -> bool:
+    """True when a specialist's claimed patch path resolves to a real file under one of its worktree roots."""
+    return (patch.is_absolute() and patch.is_file()) or any((base / patch).is_file() for base in resolve_bases)
+
+
 def _resolvable_artifacts_from_done(
     done_payload: dict[str, Any] | None,
     resolve_bases: list[Path],
@@ -542,6 +547,90 @@ class AuthoredAttempt(NamedTuple):
     specialist_task_id: str = ""
 
 
+def _attempt_outcome_fields(
+    attempt: AuthoredAttempt, *, result: Mapping[str, Any], params: Mapping[str, Any]
+) -> dict[str, Any]:
+    """The measurement, accuracy, failure and artifact blocks an attempt's record carries, and what its adoption rests on."""
+    base = result.get("base_tput") if result.get("base_tput") is not None else params.get("base_tput")
+    accuracy_pass = result.get("accuracy_pass")
+    attribution = ""
+    if attempt.status.upper() in UNMEASURED_OUTCOMES:
+        attribution = classify_failure_attribution(
+            error_class=first_str(result.get("error_class")),
+            error_excerpt=first_str(result.get("error"))[:600],
+            reason=result.get("reason"),
+            explicit=result.get("failure_attribution"),
+        )
+    return {
+        "measurement": {
+            "before_tput": base,
+            "after_tput": result.get("output_throughput"),
+            "gain_pct": result.get("delta_pct"),
+            "runtime_sec": result.get("runtime_sec"),
+        },
+        # A ``required`` of ``None`` is an accuracy gate that did not run, not one that ran and failed.
+        "accuracy": {
+            "required": None if accuracy_pass is None else True,
+            "value": result.get("accuracy_value"),
+            "reference": result.get("accuracy_reference"),
+            "passed": accuracy_pass,
+        },
+        "failure": {
+            "error_class": first_str(result.get("error_class")),
+            "error_excerpt": first_str(result.get("error"))[:600],
+            "attribution": attribution,
+        },
+        "artifacts": {
+            "workspace": first_str(result.get("workspace")),
+            "server_log_path": first_str(result.get("server_log_path")),
+        },
+        # On the same rule the config arm writes it under: a KEEP no accuracy gate ruled on rests on throughput
+        # alone, a weaker claim that must not read alike. Only an adoption carries it -- on a reverted row
+        # "accuracy_pass" would name the gate that refused it.
+        "validation_basis": (
+            ("accuracy_pass" if accuracy_pass is not None else "keep_verdict_unscored") if attempt.adopted else ""
+        ),
+        "attribution_eligible": (attempt.adopted and base is not None and result.get("output_throughput") is not None),
+    }
+
+
+def _record_attempt_gates(recorder: Any, task_id: str, *, result: Mapping[str, Any], params: Mapping[str, Any]) -> None:
+    """Record the gate verdicts an attempt's measurement settled: keep threshold, accuracy, switch-off parity."""
+    from hyperloom.inference_optimizer.breakdown.recorder.framework_event import GateVerdict
+
+    delta_pct = result.get("delta_pct")
+    keep_threshold = result.get("keep_threshold_pct")
+    if keep_threshold is None:
+        keep_threshold = params.get("keep_threshold_pct")
+    accuracy_pass = result.get("accuracy_pass")
+    parity = to_mapping(result.get("switch_off_parity"))
+    verdicts: list[Any] = []
+    if isinstance(delta_pct, (int, float)) and isinstance(keep_threshold, (int, float)):
+        verdicts.append(
+            GateVerdict(
+                gate="keep_threshold",
+                passed=float(delta_pct) >= float(keep_threshold),
+                observed=delta_pct,
+                threshold=keep_threshold,
+            )
+        )
+    if accuracy_pass is not None:
+        verdicts.append(
+            GateVerdict(
+                gate="accuracy",
+                passed=bool(accuracy_pass),
+                observed=result.get("accuracy_value"),
+                threshold=result.get("accuracy_reference"),
+            )
+        )
+    if parity.get("ran"):
+        verdicts.append(
+            GateVerdict(gate="switch_off_parity", passed=bool(parity.get("ok")), reason=first_str(parity.get("reason")))
+        )
+    for verdict in verdicts:
+        recorder.record_attempt_gate(task_id, verdict)
+
+
 def _record_source_attempt(
     coord: Any,
     attempt: AuthoredAttempt,
@@ -558,136 +647,58 @@ def _record_source_attempt(
     recorder = _recorder(coord)
     if recorder is None:
         return
-    from hyperloom.inference_optimizer.breakdown.recorder.framework_event import ARM_SOURCE, GateVerdict
+    from hyperloom.inference_optimizer.breakdown.recorder.framework_event import ARM_SOURCE
 
-    task_id = str(getattr(attempt.task, "task_id", "") or "")
+    task_id = first_str(getattr(attempt.task, "task_id", ""))
     if not task_id:
         return
-    base = result.get("base_tput") if result.get("base_tput") is not None else params.get("base_tput")
-    accuracy_pass = result.get("accuracy_pass")
-    # Only the executor knows the stack the patch was measured on, since it
-    # rebinds onto the live stack top before running; the task's params are the
-    # stack as of dispatch. Absent on a row that never reached a measurement.
+    # Only the executor knows the stack the patch was measured on, since it rebinds onto the live stack top before
+    # running; the task's params are the stack as of dispatch. Absent on a row that never reached a measurement.
     stack = result.get("measured_against")
     measured_against = {"measured_against": stack} if isinstance(stack, Mapping) and stack else {}
     # The levers the deliverable layered onto that stack: the whole change when the specialist returned no patch.
     levers = {"extra_server_args": params.get("extra_server_args"), "extra_envs": params.get("extra_envs")}
     config_delta = {"config_delta": levers} if any(levers.values()) else {}
-    candidate = params.get("candidate")
-    candidate_row = candidate if isinstance(candidate, Mapping) else {}
-    reasoning, reasoning_origin = _source_action_reasoning(params, candidate_row, result)
-    patches_applied = [str(path) for path in (result.get("patches_applied") or []) if str(path)]
-    patches_reverted = [str(path) for path in (result.get("patches_reverted") or []) if str(path)]
-    patch_path = str(result.get("source_realized_patch") or result.get("patch_path") or "")
-    if not patch_path:
-        patch_path = next(iter(patches_applied or patches_reverted), "")
-    error_class = str(result.get("error_class") or "")
-    error_excerpt = str(result.get("error") or "")[:600]
-    failure_attribution = ""
-    if attempt.status.upper() in UNMEASURED_OUTCOMES:
-        failure_attribution = classify_failure_attribution(
-            error_class=error_class,
-            error_excerpt=error_excerpt,
-            reason=result.get("reason"),
-            explicit=result.get("failure_attribution"),
-        )
+    reasoning, reasoning_origin = _source_action_reasoning(params, to_mapping(params.get("candidate")), result)
+    patches_applied = [str(path) for path in to_list(result.get("patches_applied")) if str(path)]
+    patches_reverted = [str(path) for path in to_list(result.get("patches_reverted")) if str(path)]
+    patch_path = first_str(result.get("source_realized_patch"), result.get("patch_path")) or next(
+        iter(patches_applied or patches_reverted), ""
+    )
     recorder.record_attempt(
         task_id,
         arm=ARM_SOURCE,
         task_id=task_id,
         proposal_ref=attempt.candidate_id,
         candidate_id=attempt.candidate_id,
-        provenance=str(params.get("lever_kind") or ""),
+        provenance=first_str(params.get("lever_kind")),
         outcome=attempt.status,
-        reason=str(result.get("reason") or ""),
+        reason=first_str(result.get("reason")),
         reasoning=reasoning,
         reasoning_origin=reasoning_origin,
         experience_citations=params.get("experience_citations") or [],
-        stage=str(result.get("stage") or ""),
-        route=str(params.get("audit_step") or ""),
+        stage=first_str(result.get("stage")),
+        route=first_str(params.get("audit_step")),
         patch_source=attempt.specialist_task_id,
         patch_path=patch_path,
-        fingerprint=str(result.get("patch_sha256") or result.get("fingerprint") or ""),
-        # An attempt can apply several patches, and which ones landed is
-        # not recoverable from the single primary path.
+        fingerprint=first_str(result.get("patch_sha256"), result.get("fingerprint")),
+        # Which patches landed is not recoverable from the single primary path.
         patches_applied=patches_applied,
         patches_reverted=patches_reverted,
         patch_material=_patch_material(
             Path(coord._coord.session_dir), [patch_path, *patches_applied, *patches_reverted]
         ),
         target_files=result.get("target_files") or [],
-        source_ref=str(params.get("framework_agent_candidate_id") or attempt.candidate_id),
-        measurement={
-            "before_tput": base,
-            "after_tput": result.get("output_throughput"),
-            "gain_pct": result.get("delta_pct"),
-            "runtime_sec": result.get("runtime_sec"),
-        },
-        accuracy={
-            # ``None`` is an accuracy gate that did not run, which is not
-            # the same as one that ran and failed.
-            "required": None if accuracy_pass is None else True,
-            "value": result.get("accuracy_value"),
-            "reference": result.get("accuracy_reference"),
-            "passed": accuracy_pass,
-        },
-        failure={
-            "error_class": error_class,
-            "error_excerpt": error_excerpt,
-            "attribution": failure_attribution,
-        },
-        artifacts={
-            "workspace": str(result.get("workspace") or ""),
-            "server_log_path": str(result.get("server_log_path") or ""),
-        },
+        source_ref=first_str(params.get("framework_agent_candidate_id"), attempt.candidate_id),
         decision=attempt.status,
         adopted=attempt.adopted,
         benched=bool(result.get(RESULT_BENCHED)),
-        # What stood behind the adoption, on the same rule the config arm
-        # writes it under: a KEEP no accuracy gate ruled on rests on
-        # throughput alone, a weaker claim that must not read alike. Only
-        # an adoption carries it -- on a reverted row "accuracy_pass"
-        # would name the gate that refused it.
-        validation_basis=(
-            ("accuracy_pass" if accuracy_pass is not None else "keep_verdict_unscored") if attempt.adopted else ""
-        ),
-        attribution_eligible=(attempt.adopted and base is not None and result.get("output_throughput") is not None),
+        **_attempt_outcome_fields(attempt, result=result, params=params),
         **measured_against,
         **config_delta,
     )
     _record_kb_exposure(recorder, attempt.candidate_id, params)
-    delta_pct = result.get("delta_pct")
-    keep_threshold = result.get("keep_threshold_pct")
-    if keep_threshold is None:
-        keep_threshold = params.get("keep_threshold_pct")
-    if isinstance(delta_pct, (int, float)) and isinstance(keep_threshold, (int, float)):
-        recorder.record_attempt_gate(
-            task_id,
-            GateVerdict(
-                gate="keep_threshold",
-                passed=float(delta_pct) >= float(keep_threshold),
-                observed=delta_pct,
-                threshold=keep_threshold,
-            ),
-        )
-    if accuracy_pass is not None:
-        recorder.record_attempt_gate(
-            task_id,
-            GateVerdict(
-                gate="accuracy",
-                passed=bool(accuracy_pass),
-                observed=result.get("accuracy_value"),
-                threshold=result.get("accuracy_reference"),
-            ),
-        )
-    parity = result.get("switch_off_parity")
-    if isinstance(parity, Mapping) and parity.get("ran"):
-        recorder.record_attempt_gate(
-            task_id,
-            GateVerdict(
-                gate="switch_off_parity", passed=bool(parity.get("ok")), reason=str(parity.get("reason") or "")
-            ),
-        )
+    _record_attempt_gates(recorder, task_id, result=result, params=params)
     _record_step(
         coord,
         attempt.candidate_id,
@@ -2314,19 +2325,14 @@ class FrameworkPhase(ProposalBench):
             params.get("framework_agent_candidate_id"), cand_map.get(spec_tid), spec_tid, getattr(task, "task_id", "")
         )
         batches = to_list(self.shared_state.framework_agent_batches)
-        batch_id = first_str(params.get("framework_batch_id"))
-        if not batch_id and batches:
-            batch_id = first_str(to_mapping(batches[-1]).get("batch_id"))
+        batch_id = first_str(
+            params.get("framework_batch_id"), to_mapping(batches[-1] if batches else None).get("batch_id")
+        )
         delta_pct = res.get("delta_pct")
         new_tput = res.get("output_throughput")
         gain = float(delta_pct) if isinstance(delta_pct, (int, float)) else 0.0
-        progress = to_list(self.shared_state.framework_agent_phase_progress)
-        matching = [row for row in progress if isinstance(row, dict) and self._framework_candidate_key(row) == cand_id]
-        # An adopted patch is the last word on a candidate; any other row is an outcome a later attempt may better.
-        if any(row.get("kept") for row in matching):
+        if not self._clear_superseded_progress(cand_id):
             return
-        if matching:
-            self.shared_state.framework_agent_phase_progress = [row for row in progress if row not in matching]
         recorded = self._stamp_framework_progress(
             ProgressStamp(
                 candidate_id=cand_id,
@@ -2361,6 +2367,19 @@ class FrameworkPhase(ProposalBench):
             status,
             gain,
         )
+
+    def _clear_superseded_progress(self, cand_id: str) -> bool:
+        """Drop the progress rows earlier attempts on ``cand_id`` left; False when one of them was adopted.
+
+        An adopted patch is the last word on a candidate; any other row is an outcome a later attempt may better.
+        """
+        progress = to_list(self.shared_state.framework_agent_phase_progress)
+        matching = [row for row in progress if isinstance(row, dict) and self._framework_candidate_key(row) == cand_id]
+        if any(row.get("kept") for row in matching):
+            return False
+        if matching:
+            self.shared_state.framework_agent_phase_progress = [row for row in progress if row not in matching]
+        return True
 
     def _record_authored_attempt(
         self, attempt: AuthoredAttempt, *, result: Mapping[str, Any], params: Mapping[str, Any]
@@ -2818,18 +2837,10 @@ class FrameworkPhase(ProposalBench):
         task: "Task",
         done_payload: dict[str, Any],
     ) -> None:
-        """Auto-surface a specialist's source patches to the Critic via a synthetic integrate_patch proposal; idempotent per specialist.
-
-        Args:
-            task: The completed specialist task whose worktree patches are
-                surfaced.
-            done_payload: The specialist done payload carrying
-                ``patches_written`` and proposal metadata.
-        """
-        patches = done_payload.get("patches_written") or []
-        if not isinstance(patches, list):
-            patches = []
-        sid = str(task.task_id or "").strip()
+        """Auto-surface a specialist's source patches to the Critic via a synthetic integrate_patch proposal; idempotent per specialist."""
+        patches = to_list(done_payload.get("patches_written"))
+        claimed = [str(x) for x in patches][:8]
+        sid = first_str(task.task_id).strip()
         if not sid:
             return
         # Resolve patches_written; submit only when >=1 real file exists.
@@ -2839,16 +2850,8 @@ class FrameworkPhase(ProposalBench):
         if self.session_dir is not None:
             spec_root = _runs_dir(Path(self.session_dir), "specialist", sid)
             resolve_bases = [spec_root / "worktree", spec_root]
-        existing_patches: list[str] = []
-        for p in patches:
-            raw = Path(str(p))
-            cands = [raw] if raw.is_absolute() else []
-            for base in resolve_bases:
-                cands.append(base / raw)
-            if any(c.is_file() for c in cands):
-                existing_patches.append(str(p))
-        # A non-diff tuned artifact is also a routable deliverable; route it like
-        # a patch.
+        existing_patches = [str(p) for p in patches if _patches_on_disk(Path(str(p)), resolve_bases)]
+        # A non-diff tuned artifact is also a routable deliverable; route it like a patch.
         routable_artifacts = _resolvable_artifacts_from_done(done_payload, resolve_bases)
         if not existing_patches and not routable_artifacts:
             if patches:
@@ -2858,39 +2861,28 @@ class FrameworkPhase(ProposalBench):
                     {
                         "kind": "specialist_patch_autosubmit_skipped_no_files",
                         "specialist_task_id": sid,
-                        "claimed": [str(x) for x in patches][:8],
+                        "claimed": claimed,
                     },
                 )
             return
-        spec_params = getattr(task, "params", None) or {}
-        # In an ENABLEMENT round a companion lever is inseparable from the patch it
-        # ships with: the patch clears a framework guard the server then asserts on
-        # through a launch flag, so a round that applies one without the other cannot
-        # boot and can never be kept -- and with no KEEP the recipe is never emitted.
-        # The lane decides this, not the deliverable: ``atomic`` is authored by the
-        # specialist and is not reliably set even when its own reason says the flag is
-        # required to boot. While optimizing, a patch stays its own outcome and only an
-        # explicitly atomic lever rides with it.
+        spec_params = to_mapping(getattr(task, "params", None))
+        # The lane, not the deliverable's own ``atomic`` flag, decides whether a companion lever rides with the patch.
         is_enablement_round = bool(spec_params.get("enablement"))
         companion_levers = _framework_config_levers_from_done(
-            done_payload,
-            levers_ride_with_patches=is_enablement_round,
+            done_payload, levers_ride_with_patches=is_enablement_round
         )
-        round_args = str(companion_levers.get("extra_server_args") or "")
-        round_envs = dict(companion_levers.get("extra_envs") or {})
+        round_args = first_str(companion_levers.get("extra_server_args"))
+        round_envs = to_mapping(companion_levers.get("extra_envs"))
         if is_enablement_round:
-            # Inherit what earlier rounds already established. ``_rearm_on_advanced``
-            # accumulates these "so a later kept round replays every advance", but the
-            # accumulation only reached the emitted recipe -- each new round still
-            # launched from whatever the latest deliverable happened to restate. A flag
-            # the architecture requires does not stop being required because the next
-            # specialist is working on a different blocker, and one that omits it sends
-            # the round back to the wall an earlier round already cleared.
-            established = dict(getattr(self.shared_state.enablement, "accepted_config", None) or {})
-            round_envs = {**{str(k): str(v) for k, v in (established.get("extra_envs") or {}).items()}, **round_envs}
-            # This round last, so it overrides an inherited value for the same flag.
+            # A flag the architecture requires stays required once a later round moves on to a different blocker, so
+            # the round launches from everything enablement has established, with its own values winning a collision.
+            established = to_mapping(getattr(self.shared_state.enablement, "accepted_config", None))
+            round_envs = {
+                **{str(k): str(v) for k, v in to_mapping(established.get("extra_envs")).items()},
+                **round_envs,
+            }
             round_args = dedupe_extra_server_args(
-                merge_server_args(str(established.get("extra_server_args") or ""), round_args)
+                merge_server_args(first_str(established.get("extra_server_args")), round_args)
             )
         deliverable: dict[str, Any] = {}
         if round_args or round_envs:
@@ -2905,7 +2897,7 @@ class FrameworkPhase(ProposalBench):
             deliverable,
             observation={
                 "kind": "specialist_patch_autosubmitted_for_review",
-                "patches": [str(x) for x in patches][:8],
+                "patches": claimed,
                 # Artifact-only deliverables: record their install targets.
                 "artifacts_written": [
                     str((a or {}).get("target") or "")
