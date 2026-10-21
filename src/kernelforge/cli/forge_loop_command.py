@@ -15,7 +15,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Sequence
+from typing import TYPE_CHECKING, NoReturn, Sequence
 
 import click
 
@@ -77,6 +77,7 @@ from kernelforge.tracker.schema import ExperimentSubject
 if TYPE_CHECKING:
     from kernelforge.loop.campaign_config import CampaignConfig, CampaignConfigStore
     from kernelforge.loop.runner import IterationConfig
+    from kernelforge.loop.task_preparer import PrepareResult
     from kernelforge.roofline_ceiling.command import AnalystAgent
     from kernelforge.tracker import ExperimentTracker, UsageAccumulator
 
@@ -484,6 +485,55 @@ class _ForgeRun:
         return (self.request.artifacts.experiment_id or "").strip()
 
 
+def _print_prepared_driver(prep: PrepareResult) -> None:
+    """Tell the operator what a successful preparation wrote, and what its final preflight cost."""
+    # Cap the file list: an external driver bundle can legitimately publish dozens of files, and one run
+    # scrolled ~700 cache paths through the operator's log for a 3-file change.
+    shown = prep.wrote_files[:12]
+    extra = len(prep.wrote_files) - len(shown)
+    print(
+        f"  [prepare] prepared measurement driver in {prep.attempts} attempt(s); "
+        f"wrote {', '.join(shown) or '(none)'}" + (f" (+{extra} more)" if extra > 0 else "")
+    )
+    # Telemetry only: never let a missing field break a good prep.
+    preflight_sec = getattr(prep.final_preflight, "duration_sec", 0.0) or 0.0
+    if preflight_sec:
+        stages = ", ".join(
+            f"{name}={detail['seconds']:.0f}s"
+            for name, detail in (getattr(prep.final_preflight, "details", {}) or {}).items()
+            if isinstance(detail, dict) and "seconds" in detail
+        )
+        print(f"  [prepare] preflight: {preflight_sec:.0f}s" + (f" ({stages})" if stages else ""))
+    if prep.audit_dir:
+        print(f"  [prepare] audit: {prep.audit_dir}")
+
+
+def _exit_failed_preparation(prep: PrepareResult, result_json: str | None) -> NoReturn:
+    """End the run with the reason preparation failed: on the console, in --result-json and in the stdout result."""
+    # prep.message carries the real failure reason (e.g. "driver conformed but commit didn't land"); the
+    # preflight summary can read "ok" even when prep failed downstream, so lead with prep.message and
+    # append the preflight summary as extra context.
+    detail = prep.message or (prep.final_preflight.summary() if prep.final_preflight else "")
+    if prep.message and prep.final_preflight:
+        detail = f"{prep.message} | preflight: {prep.final_preflight.summary()}"
+    disposition = "rolled back" if prep.rolled_back else "workspace preserved"
+    print(f"  [prepare] FAILED after {prep.attempts} attempt(s); {disposition}. {detail}")
+    err_result = {
+        "error": "task_preparation_failed",
+        "detail": detail,
+        "attempts": prep.attempts,
+        "rolled_back": prep.rolled_back,
+        "experiment_id": None,
+    }
+    if prep.audit_dir:
+        err_result["task_preparation_audit_dir"] = prep.audit_dir
+    err_payload = json.dumps(err_result)
+    if result_json:
+        atomic_write_json(result_json, err_result)
+    click.echo(f"__FORGE_RESULT__{err_payload}__FORGE_RESULT__")
+    sys.exit(2)
+
+
 def _prepare_measurement_driver(run: _ForgeRun, program_md: str) -> None:
     """Make the driver conform to the measurement contract, or leave with the reason it cannot.
 
@@ -491,27 +541,15 @@ def _prepare_measurement_driver(run: _ForgeRun, program_md: str) -> None:
     to the prep agent, and a preparation that fails ends the run rather than
     measuring against a driver nobody vouched for.
     """
-    driver = run.iter_config.driver_script
-    snr_threshold = run.iter_config.snr_threshold
-    nproc_per_node = run.iter_config.nproc_per_node
-    program_md_file = run.request.task_context.program_md_file
-    invocation_spec_file = run.request.task_context.invocation_spec_file
-    result_json = run.request.artifacts.result_json
-    deadline_unix = run.deadline.deadline_unix
-    finalize_reserve_sec = run.deadline.finalize_reserve_sec
-    usage = run.usage
+    from kernelforge.loop import task_preparer
     from kernelforge.loop.task_preflight import DriverContract
-    from kernelforge.loop.task_preparer import (
-        PreparationBudget,
-        PreparationTask,
-        declared_case_ids,
-        preflight_task,
-        prepare_task_sync,
-    )
 
+    iter_config = run.iter_config
+    invocation_spec_file = run.request.task_context.invocation_spec_file or ""
+    prep_deadline = run.deadline.deadline_unix - run.deadline.finalize_reserve_sec
     # Preparation runs the driver, so it needs the rank count before the loop that normally exports it exists.
-    if nproc_per_node > 1:
-        os.environ["FORGE_NPROC_PER_NODE"] = str(nproc_per_node)
+    if iter_config.nproc_per_node > 1:
+        os.environ["FORGE_NPROC_PER_NODE"] = str(iter_config.nproc_per_node)
     else:
         os.environ.pop("FORGE_NPROC_PER_NODE", None)
 
@@ -520,106 +558,61 @@ def _prepare_measurement_driver(run: _ForgeRun, program_md: str) -> None:
     # conforming", it just measures less than the task asks for, and accepting it here skips the only step that
     # would have repaired it.
     try:
-        expected_case_ids = declared_case_ids(invocation_spec_file)
+        expected_case_ids = task_preparer.declared_case_ids(invocation_spec_file)
     except ValueError as exc:
         # Continuing would switch the driver's case check off and spend the whole run measuring a suite the
         # operator never got to state.
         raise click.ClickException(str(exc)) from exc
-    pf = preflight_task(
-        driver=driver,
+    pf = task_preparer.preflight_task(
+        driver=iter_config.driver_script,
         contract=DriverContract(
-            snr_threshold=snr_threshold,
+            snr_threshold=iter_config.snr_threshold,
             require_graph=True,
             require_profile=True,
-            require_ranks=max(1, int(nproc_per_node or 1)),
+            require_ranks=iter_config.nproc_per_node,
             expected_case_ids=expected_case_ids,
         ),
-        deadline_unix=deadline_unix - finalize_reserve_sec,
+        deadline_unix=prep_deadline,
     )
     if pf.ok:
         print("  [prepare] task already conforms to the driver contract; skipping")
-        _persist_declared_spec(invocation_spec_file or "", driver)
-    else:
-        print(f"  [prepare] task does not conform ({pf.summary()}); invoking prep agent...")
-        # The budget that actually applies is min(wall, what the per-kernel deadline leaves), and it decides how
-        # many attempts ever start.
-        from kernelforge.loop import task_preparer as _tp
-
-        _prep_wall = min(
-            float(_tp.PREPARE_MAX_WALL_SEC),
-            max(0.0, deadline_unix - finalize_reserve_sec - time.time()),
-        )
-        print(
-            f"  [prepare] budget: wall={_prep_wall:.0f}s "
-            f"attempt_cap={_tp.PER_ATTEMPT_CAP_SEC}s "
-            f"max_attempts={_tp.PREPARE_MAX_ATTEMPTS}"
-        )
-        prep = prepare_task_sync(
-            config=run.config,
-            task=PreparationTask(
-                workspace_dir=run.iter_config.workspace_dir,
-                kernel=run.iter_config.kernel_file,
-                driver=driver,
-                program_md=program_md,
-                target_functions=run.iter_config.target_functions,
-                source_files=run.iter_config.source_files,
-                snr_threshold=snr_threshold,
-                invocation_spec_file=invocation_spec_file or "",
-                expected_case_ids=expected_case_ids,
-                read_only_files=[path for path in (program_md_file, invocation_spec_file) if path],
-                # A collective task needs a driver that launches its own ranks; the preparer cannot infer that from
-                # the kernel source.
-                nproc_per_node=nproc_per_node,
-            ),
-            # Let the default PREPARE_MAX_WALL_SEC (3000s, sized for a cold-JIT preflight) apply; prepare_task
-            # clamps it to the per-kernel deadline_unix below.
-            budget=PreparationBudget(deadline_unix=deadline_unix - finalize_reserve_sec),
-            preflight=pf,
-            usage=usage,
-        )
-        if prep.ok:
-            # Cap the file list: an external driver bundle can legitimately publish dozens of files, and one run
-            # scrolled ~700 cache paths through the operator's log for a 3-file change.
-            _shown = prep.wrote_files[:12]
-            _extra = len(prep.wrote_files) - len(_shown)
-            print(
-                f"  [prepare] prepared measurement driver in {prep.attempts} attempt(s); "
-                f"wrote {', '.join(_shown) or '(none)'}" + (f" (+{_extra} more)" if _extra > 0 else "")
-            )
-            # Telemetry only: never let a missing field break a good prep.
-            _pf_sec = getattr(prep.final_preflight, "duration_sec", 0.0) or 0.0
-            if _pf_sec:
-                _stages = ", ".join(
-                    f"{name}={detail['seconds']:.0f}s"
-                    for name, detail in (getattr(prep.final_preflight, "details", {}) or {}).items()
-                    if isinstance(detail, dict) and "seconds" in detail
-                )
-                print(f"  [prepare] preflight: {_pf_sec:.0f}s" + (f" ({_stages})" if _stages else ""))
-            if prep.audit_dir:
-                print(f"  [prepare] audit: {prep.audit_dir}")
-        else:
-            # prep.message carries the real failure reason (e.g. "driver conformed but commit didn't land"); the
-            # preflight summary can read "ok" even when prep failed downstream, so lead with prep.message and
-            # append the preflight summary as extra context.
-            detail = prep.message or (prep.final_preflight.summary() if prep.final_preflight else "")
-            if prep.message and prep.final_preflight:
-                detail = f"{prep.message} | preflight: {prep.final_preflight.summary()}"
-            disposition = "rolled back" if prep.rolled_back else "workspace preserved"
-            print(f"  [prepare] FAILED after {prep.attempts} attempt(s); {disposition}. {detail}")
-            err_result = {
-                "error": "task_preparation_failed",
-                "detail": detail,
-                "attempts": prep.attempts,
-                "rolled_back": prep.rolled_back,
-                "experiment_id": None,
-            }
-            if prep.audit_dir:
-                err_result["task_preparation_audit_dir"] = prep.audit_dir
-            err_payload = json.dumps(err_result)
-            if result_json:
-                atomic_write_json(result_json, err_result)
-            click.echo(f"__FORGE_RESULT__{err_payload}__FORGE_RESULT__")
-            sys.exit(2)
+        _persist_declared_spec(invocation_spec_file, iter_config.driver_script)
+        return
+    print(f"  [prepare] task does not conform ({pf.summary()}); invoking prep agent...")
+    # The budget that actually applies is min(wall, what the per-kernel deadline leaves), and it decides how
+    # many attempts ever start.
+    prep_wall = min(float(task_preparer.PREPARE_MAX_WALL_SEC), max(0.0, prep_deadline - time.time()))
+    print(
+        f"  [prepare] budget: wall={prep_wall:.0f}s "
+        f"attempt_cap={task_preparer.PER_ATTEMPT_CAP_SEC}s "
+        f"max_attempts={task_preparer.PREPARE_MAX_ATTEMPTS}"
+    )
+    prep = task_preparer.prepare_task_sync(
+        config=run.config,
+        task=task_preparer.PreparationTask(
+            workspace_dir=iter_config.workspace_dir,
+            kernel=iter_config.kernel_file,
+            driver=iter_config.driver_script,
+            program_md=program_md,
+            target_functions=iter_config.target_functions,
+            source_files=iter_config.source_files,
+            snr_threshold=iter_config.snr_threshold,
+            invocation_spec_file=invocation_spec_file,
+            expected_case_ids=expected_case_ids,
+            read_only_files=[path for path in (run.request.task_context.program_md_file, invocation_spec_file) if path],
+            # A collective task needs a driver that launches its own ranks; the preparer cannot infer that from
+            # the kernel source.
+            nproc_per_node=iter_config.nproc_per_node,
+        ),
+        # Let the default PREPARE_MAX_WALL_SEC (3000s, sized for a cold-JIT preflight) apply; prepare_task
+        # clamps it to the per-kernel deadline_unix below.
+        budget=task_preparer.PreparationBudget(deadline_unix=prep_deadline),
+        preflight=pf,
+        usage=run.usage,
+    )
+    if not prep.ok:
+        _exit_failed_preparation(prep, run.request.artifacts.result_json)
+    _print_prepared_driver(prep)
 
 
 def _collect_pr_kb_context(run: _ForgeRun) -> tuple[str, str]:
