@@ -8,6 +8,7 @@ import asyncio
 import hashlib
 import json
 import logging as _logging
+import math
 import os
 import shlex
 import signal
@@ -125,6 +126,140 @@ def _first_text(mapping: Mapping[str, Any], *keys: str) -> str:
         if text:
             return text
     return ""
+
+
+def _read_dispatch_csv(path: Path) -> tuple[list[str], list[dict[str, str]]]:
+    import csv
+
+    with path.open(newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        fieldnames = list(reader.fieldnames or [])
+        return fieldnames, [dict(row) for row in reader]
+
+
+def _dispatch_key(row: Mapping[str, str], key_cols: list[str]) -> tuple[str, ...]:
+    return tuple(row.get(column, "") for column in key_cols)
+
+
+def _merged_dispatch_columns(column_sets: list[list[str]]) -> list[str]:
+    all_columns = list(column_sets[0])
+    for columns in column_sets[1:]:
+        for column in columns:
+            if column not in all_columns:
+                insert_at = all_columns.index("tflops") if "tflops" in all_columns else len(all_columns)
+                all_columns.insert(insert_at, column)
+    return all_columns
+
+
+def _normalized_dispatch_rows(rows: list[dict[str, str]], all_columns: list[str]) -> list[dict[str, str]]:
+    fill = {"xbf16": "0", "run_1stage": "0", "ksplit": "0"}
+    return [
+        {column: fill.get(column, "0") if row.get(column) is None else row[column] for column in all_columns}
+        for row in rows
+    ]
+
+
+def _dispatch_key_columns(all_columns: list[str], keys_from: Path | None, untuned_stem: str) -> list[str]:
+    key_cols: list[str] = []
+    untuned_path = keys_from / f"{untuned_stem}.csv" if keys_from is not None else None
+    if untuned_path is not None and untuned_path.is_file():
+        key_cols = [column for column in _read_dispatch_csv(untuned_path)[0] if column in all_columns]
+    if not key_cols:
+        key_cols = [column for column in ("M", "N", "K") if column in all_columns]
+    for column in ("gfx", "cu_num", "_tag"):
+        if column in all_columns and column not in key_cols:
+            key_cols.append(column)
+    return key_cols
+
+
+def _fastest_dispatch_row(row: Mapping[str, str]) -> float:
+    try:
+        return float(row.get("us", ""))
+    except (TypeError, ValueError):
+        return math.inf
+
+
+def _deduplicate_dispatch_rows(
+    rows: list[dict[str, str]], key_cols: list[str], all_columns: list[str], label: str, env_var: str
+) -> list[dict[str, str]] | None:
+    keys = [_dispatch_key(row, key_cols) for row in rows]
+    if len(set(keys)) == len(keys):
+        return rows
+    if "us" not in all_columns:
+        log.warning(
+            "gemm E2E: %s has duplicate dispatch keys for %s but no 'us' column to select the fastest row",
+            label,
+            env_var,
+        )
+        return None
+    # Keep the fastest (smallest us) row per dispatch key; ties keep the first row seen (stable), NaN-like
+    # values sort last.
+    best: dict[tuple[str, ...], dict[str, str]] = {}
+    for key, row in zip(keys, rows):
+        if key not in best or _fastest_dispatch_row(row) < _fastest_dispatch_row(best[key]):
+            best[key] = row
+    log.info("gemm E2E: removed %d duplicate %s row(s) for %s", len(rows) - len(best), label, env_var)
+    return list(best.values())
+
+
+def _candidate_envs(raw: object) -> dict[str, str]:
+    if not isinstance(raw, dict):
+        return {}
+    return {str(key): str(value) for key, value in raw.items() if str(key).strip() and str(value).strip()}
+
+
+def _legacy_tuner_candidates(result: Mapping[str, Any]) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    for row in result.get("tuners_run") or []:
+        if not isinstance(row, dict):
+            continue
+        # partial_output is a real artifact: the tuner wrote fewer rows than shapes it was given (the grouped
+        # batch budget ran out), but the rows it did write are deployable.
+        if row.get("status") not in ("ok", "partial_output"):
+            continue
+        # improved_shapes can never exceed 0 for tuners with no comparable baseline -- TunableOp never times the
+        # untuned dispatch, the candidate-CSV fallback has no per-shape Pre/Post table, and a hipblaslt-only bf16
+        # run has no torch candidate to measure against.
+        if (
+            not row.get("candidate")
+            and int(row.get("improved_shapes") or 0) <= 0
+            and int(row.get("unverified_shapes") or 0) <= 0
+        ):
+            continue
+        env_var = _first_text(row, "env_var").strip()
+        env_value = _first_text(row, "env_value").strip()
+        envs = _candidate_envs(row.get("env_vars"))
+        if env_var and env_value:
+            envs.setdefault(env_var, env_value)
+        if envs:
+            candidates.append(
+                {
+                    "tuner": row.get("tuner") or "unknown",
+                    "env_var": env_var,
+                    "env_value": env_value,
+                    "envs": envs,
+                    "micro_speedup": _as_float(row.get("best_micro_speedup"), 1.0),
+                }
+            )
+    return candidates
+
+
+def _a8w8_blockscale_candidate(result: Mapping[str, Any]) -> dict[str, Any]:
+    tuned_file = _first_text(result, "tuned_file").strip()
+    micro_speedup = _as_float(result.get("best_speedup"), 0.0)
+    keeps = _first_text(result, "decision").strip().upper() == "KEEP" and _first_text(
+        result, "status"
+    ).strip().lower() in {"ok", "complete", "completed", "succeeded", "success"}
+    if not (tuned_file and micro_speedup > 1.0 and keeps):
+        return {}
+    env_var = "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE"
+    return {
+        "tuner": "a8w8_blockscale_tuned_gemm",
+        "env_var": env_var,
+        "env_value": tuned_file,
+        "envs": {env_var: tuned_file},
+        "micro_speedup": micro_speedup,
+    }
 
 
 def _observed_identity_digest(declared: str, flags: str, server_identity: Mapping[str, Any]) -> str:
@@ -2773,43 +2908,13 @@ class KernelPhase(CoordinatorCollaborator):
             blocks=True,
         )
 
-    def _merge_gemm_candidate_with_runtime(self, env_var: str, candidate_csv_path: str) -> str | None:
-        """Merge a GEMM candidate CSV with the runtime config."""
-        import csv
+    def _aiter_config_dirs(self) -> list[Path]:
         import importlib.util
-        import math
-        import re
-
-        def _read_csv(path: Path) -> tuple[list[str], list[dict[str, str]]]:
-            with path.open(newline="", encoding="utf-8") as handle:
-                reader = csv.DictReader(handle)
-                fieldnames = list(reader.fieldnames or [])
-                rows = [dict(row) for row in reader]
-            return fieldnames, rows
-
-        def _read_header(path: Path) -> list[str]:
-            with path.open(newline="", encoding="utf-8") as handle:
-                return list(csv.DictReader(handle).fieldnames or [])
-
-        candidate_path = Path(candidate_csv_path)
-        if not candidate_path.is_file():
-            return None
-
-        runtime_filename = _AITER_ENV_TO_TABLE.get(env_var)
-        if not runtime_filename:
-            return None
-        tuned_stem = Path(runtime_filename).stem
-        untuned_stem = (
-            re.sub(r"(?:_)?tuned$", "_untuned", tuned_stem)
-            if re.search(r"(?:_)?tuned$", tuned_stem)
-            else tuned_stem.replace("tuned", "untuned")
-        )
 
         config_dirs: list[Path] = []
         explicit_root = os.environ.get("AITER_ROOT_DIR", "").strip()
         if explicit_root:
-            root = Path(explicit_root)
-            config_dirs.extend((root / "aiter" / "configs", root / "configs"))
+            config_dirs.extend((Path(explicit_root) / "aiter" / "configs", Path(explicit_root) / "configs"))
         try:
             spec = importlib.util.find_spec("aiter")
         except (ImportError, ValueError):
@@ -2818,157 +2923,78 @@ class KernelPhase(CoordinatorCollaborator):
             config_dirs.append(Path(spec.origin).resolve().parent / "configs")
         config_dirs.append(_CONTAINER_AITER_CONFIG_DIR)
         config_dirs.extend(sorted(self.session_dir.glob("runs/specialist/*/worktree/aiter/configs")))
-
-        seen_dirs: set[str] = set()
-        unique_config_dirs: list[Path] = []
+        unique: dict[str, Path] = {}
         for config_dir in config_dirs:
-            key = str(config_dir)
-            if key not in seen_dirs and config_dir.is_dir():
-                seen_dirs.add(key)
-                unique_config_dirs.append(config_dir)
+            if config_dir.is_dir():
+                unique.setdefault(str(config_dir), config_dir)
+        return list(unique.values())
 
-        try:
-            candidate_columns, candidate_rows = _read_csv(candidate_path)
-            runtime_cache_dir = Path(
-                os.environ.get(
-                    "INFERENCE_OPTIMIZER_AITER_CONFIG_CACHE_DIR",
-                    "/tmp/aiter_configs",
-                )
+    @staticmethod
+    def _aiter_source_tables(
+        config_dirs: list[Path], *, runtime_filename: str, tuned_stem: str, untuned_stem: str
+    ) -> tuple[list[Path], Path | None]:
+        """The complete runtime tables to merge the candidate into, and the dir that defines their keys."""
+        cache_dir = os.environ.get("INFERENCE_OPTIMIZER_AITER_CONFIG_CACHE_DIR", "/tmp/aiter_configs")
+        runtime_path = Path(cache_dir) / runtime_filename
+        if runtime_path.is_file():
+            keys_from = next((d for d in config_dirs if (d / f"{untuned_stem}.csv").is_file()), None)
+            return [runtime_path], keys_from
+        for config_dir in config_dirs:
+            base_path = config_dir / runtime_filename
+            model_paths = sorted(
+                path
+                for path in (config_dir / "model_configs").glob(f"*{tuned_stem}*.csv")
+                if path.is_file() and "untuned" not in path.name
             )
-            runtime_path = runtime_cache_dir / runtime_filename
-            source_paths: list[Path] = []
-            source_config_dir: Path | None = None
-            if runtime_path.is_file():
-                source_paths = [runtime_path]
-            else:
-                for config_dir in unique_config_dirs:
-                    base_path = config_dir / runtime_filename
-                    model_paths = sorted(
-                        path
-                        for path in (config_dir / "model_configs").glob(f"*{tuned_stem}*.csv")
-                        if path.is_file() and "untuned" not in path.name
-                    )
-                    paths = ([base_path] if base_path.is_file() else []) + model_paths
-                    if paths:
-                        source_paths = paths
-                        source_config_dir = config_dir
-                        break
+            paths = ([base_path] if base_path.is_file() else []) + model_paths
+            if paths:
+                return paths, config_dir
+        return [], None
+
+    def _merge_gemm_candidate_with_runtime(self, env_var: str, candidate_csv_path: str) -> str | None:
+        """Merge a GEMM candidate CSV with the runtime config."""
+        import csv
+        import re
+
+        candidate_path = Path(candidate_csv_path)
+        runtime_filename = _AITER_ENV_TO_TABLE.get(env_var)
+        if not runtime_filename or not candidate_path.is_file():
+            return None
+        tuned_stem = Path(runtime_filename).stem
+        untuned_stem = (
+            re.sub(r"(?:_)?tuned$", "_untuned", tuned_stem)
+            if re.search(r"(?:_)?tuned$", tuned_stem)
+            else tuned_stem.replace("tuned", "untuned")
+        )
+        config_dirs = self._aiter_config_dirs()
+        try:
+            candidate_columns, candidate_rows = _read_dispatch_csv(candidate_path)
+            source_paths, keys_from = self._aiter_source_tables(
+                config_dirs, runtime_filename=runtime_filename, tuned_stem=tuned_stem, untuned_stem=untuned_stem
+            )
             if not source_paths:
                 log.warning(
                     "gemm E2E: no complete aiter config found for %s; candidate-only validation would be unsafe",
                     env_var,
                 )
                 return None
-            if source_config_dir is None:
-                source_config_dir = next(
-                    (config_dir for config_dir in unique_config_dirs if (config_dir / f"{untuned_stem}.csv").is_file()),
-                    None,
-                )
-
-            source_columns: list[list[str]] = []
-            source_row_sets: list[list[dict[str, str]]] = []
-            for path in source_paths:
-                columns, rows = _read_csv(path)
-                source_columns.append(columns)
-                source_row_sets.append(rows)
-
-            all_columns = list(source_columns[0])
-            for columns in [*source_columns[1:], candidate_columns]:
-                for column in columns:
-                    if column not in all_columns:
-                        insert_at = all_columns.index("tflops") if "tflops" in all_columns else len(all_columns)
-                        all_columns.insert(insert_at, column)
-            fill_defaults = {"xbf16": "0", "run_1stage": "0", "ksplit": "0"}
-
-            def _normalize(rows: list[dict[str, str]]) -> list[dict[str, str]]:
-                normalized = []
-                for row in rows:
-                    new_row = {}
-                    for column in all_columns:
-                        value = row.get(column)
-                        if value is None:
-                            value = fill_defaults.get(column, "0")
-                        new_row[column] = value
-                    normalized.append(new_row)
-                return normalized
-
+            sources = [_read_dispatch_csv(path) for path in source_paths]
+            all_columns = _merged_dispatch_columns([columns for columns, _ in sources] + [candidate_columns])
             runtime_rows: list[dict[str, str]] = []
-            for rows in source_row_sets:
-                runtime_rows.extend(_normalize(rows))
-            candidate_rows = _normalize(candidate_rows)
-
-            key_cols: list[str] = []
-            if source_config_dir is not None:
-                untuned_path = source_config_dir / f"{untuned_stem}.csv"
-                if untuned_path.is_file():
-                    untuned_columns = _read_header(untuned_path)
-                    key_cols.extend(column for column in untuned_columns if column in all_columns)
+            for _, rows in sources:
+                runtime_rows.extend(_normalized_dispatch_rows(rows, all_columns))
+            candidate_rows = _normalized_dispatch_rows(candidate_rows, all_columns)
+            key_cols = _dispatch_key_columns(all_columns, keys_from, untuned_stem)
             if not key_cols:
-                key_cols.extend(column for column in ("M", "N", "K") if column in all_columns)
-            for column in ("gfx", "cu_num", "_tag"):
-                if column in all_columns and column not in key_cols:
-                    key_cols.append(column)
-            if not key_cols:
-                log.warning(
-                    "gemm E2E: cannot derive dispatch keys for %s",
-                    env_var,
-                )
+                log.warning("gemm E2E: cannot derive dispatch keys for %s", env_var)
                 return None
-
-            def _dispatch_key(row: dict[str, str]) -> tuple[str, ...]:
-                return tuple(row.get(column, "") for column in key_cols)
-
-            def _deduplicate_dispatch_rows(rows: list[dict[str, str]], label: str) -> list[dict[str, str]] | None:
-                counts: dict[tuple[str, ...], int] = {}
-                for row in rows:
-                    key = _dispatch_key(row)
-                    counts[key] = counts.get(key, 0) + 1
-                if not any(count > 1 for count in counts.values()):
-                    return rows
-                if "us" not in all_columns:
-                    log.warning(
-                        "gemm E2E: %s has duplicate dispatch keys for %s but no 'us' column to select the fastest row",
-                        label,
-                        env_var,
-                    )
-                    return None
-
-                def _us(row: dict[str, str]) -> float:
-                    try:
-                        return float(row.get("us", ""))
-                    except (TypeError, ValueError):
-                        return math.inf
-
-                # Keep the fastest (smallest us) row per dispatch key; ties keep the first row seen (stable), NaN-like
-                # values sort last.
-                best: dict[tuple[str, ...], dict[str, str]] = {}
-                order: list[tuple[str, ...]] = []
-                for row in rows:
-                    key = _dispatch_key(row)
-                    if key not in best:
-                        best[key] = row
-                        order.append(key)
-                    elif _us(row) < _us(best[key]):
-                        best[key] = row
-                deduplicated = [best[key] for key in order]
-                log.info(
-                    "gemm E2E: removed %d duplicate %s row(s) for %s",
-                    len(rows) - len(deduplicated),
-                    label,
-                    env_var,
-                )
-                return deduplicated
-
-            runtime_rows = _deduplicate_dispatch_rows(runtime_rows, "runtime config")
-            candidate_rows = _deduplicate_dispatch_rows(candidate_rows, "candidate")
-            if runtime_rows is None or candidate_rows is None:
+            kept = _deduplicate_dispatch_rows(runtime_rows, key_cols, all_columns, "runtime config", env_var)
+            tuned = _deduplicate_dispatch_rows(candidate_rows, key_cols, all_columns, "candidate", env_var)
+            if kept is None or tuned is None:
                 return None
-
             # Drop rows from runtime that the candidate improves, then concat.
-            candidate_keys = {_dispatch_key(row) for row in candidate_rows}
-            kept_from_runtime = [row for row in runtime_rows if _dispatch_key(row) not in candidate_keys]
-            merged_rows = kept_from_runtime + candidate_rows
-
+            candidate_keys = {_dispatch_key(row, key_cols) for row in tuned}
+            merged_rows = [row for row in kept if _dispatch_key(row, key_cols) not in candidate_keys] + tuned
             merged_path = candidate_path.parent / f"merged_{candidate_path.name}"
             with merged_path.open("w", newline="", encoding="utf-8") as handle:
                 writer = csv.DictWriter(handle, fieldnames=all_columns)
@@ -2976,8 +3002,8 @@ class KernelPhase(CoordinatorCollaborator):
                 writer.writerows(merged_rows)
             log.info(
                 "gemm E2E: merged %d candidate rows into %d rows from %d aiter config file(s) -> %d total (%s)",
-                len(candidate_rows),
-                len(runtime_rows),
+                len(tuned),
+                len(kept),
                 len(source_paths),
                 len(merged_rows),
                 merged_path,
@@ -3149,12 +3175,7 @@ class KernelPhase(CoordinatorCollaborator):
         for row in rows:
             if not isinstance(row, dict):
                 continue
-            raw_env = row.get("env")
-            envs = (
-                {str(key): str(value) for key, value in raw_env.items() if str(key).strip() and str(value).strip()}
-                if isinstance(raw_env, dict)
-                else {}
-            )
+            envs = _candidate_envs(row.get("env"))
             if not envs:
                 # Nothing to apply, so nothing an e2e run could validate.
                 continue
@@ -3177,64 +3198,12 @@ class KernelPhase(CoordinatorCollaborator):
         candidates = self._gemm_canonical_candidates(result)
         # The rebuild's status gate cannot see a forced candidate, so it runs only when the producer named none: the
         # pre-``candidates[]`` envelope and GEAK.
-        for t in [] if candidates else (result.get("tuners_run") or []):
-            if not isinstance(t, dict):
-                continue
-            # partial_output is a real artifact: the tuner wrote fewer rows than shapes it was given (the grouped
-            # batch budget ran out), but the rows it did write are deployable.
-            if t.get("status") not in ("ok", "partial_output"):
-                continue
-            # improved_shapes can never exceed 0 for tuners with no comparable baseline -- TunableOp never times the
-            # untuned dispatch, the candidate-CSV fallback has no per-shape Pre/Post table, and a hipblaslt-only bf16
-            # run has no torch candidate to measure against.
-            if (
-                not bool(t.get("candidate"))
-                and int(t.get("improved_shapes") or 0) <= 0
-                and int(t.get("unverified_shapes") or 0) <= 0
-            ):
-                continue
-            env_var = str(t.get("env_var") or "").strip()
-            env_value = str(t.get("env_value") or "").strip()
-            raw_envs = t.get("env_vars") or {}
-            envs = (
-                {str(key): str(value) for key, value in raw_envs.items() if str(key).strip() and str(value).strip()}
-                if isinstance(raw_envs, dict)
-                else {}
-            )
-            if env_var and env_value:
-                envs.setdefault(env_var, env_value)
-            if envs:
-                candidates.append(
-                    {
-                        "tuner": t.get("tuner") or "unknown",
-                        "env_var": env_var,
-                        "env_value": env_value,
-                        "envs": envs,
-                        "micro_speedup": float(t.get("best_micro_speedup") or 1.0),
-                    }
-                )
-
+        if not candidates:
+            candidates = _legacy_tuner_candidates(result)
         if not candidates and str(result.get("backend") or "").strip().lower() != "forge":
-            tuned_file = str(result.get("tuned_file") or "").strip()
-            try:
-                micro_speedup = float(result.get("best_speedup") or 0.0)
-            except (TypeError, ValueError):
-                micro_speedup = 0.0
-            keeps = str(result.get("decision") or "").strip().upper() == "KEEP" and str(
-                result.get("status") or ""
-            ).strip().lower() in {"ok", "complete", "completed", "succeeded", "success"}
-            if tuned_file and micro_speedup > 1.0 and keeps:
-                env_var = "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE"
-                candidates.append(
-                    {
-                        "tuner": "a8w8_blockscale_tuned_gemm",
-                        "env_var": env_var,
-                        "env_value": tuned_file,
-                        "envs": {env_var: tuned_file},
-                        "micro_speedup": micro_speedup,
-                    }
-                )
-
+            fallback = _a8w8_blockscale_candidate(result)
+            if fallback:
+                candidates.append(fallback)
         return candidates
 
     async def _validate_gemm_tuning_e2e(self, result: dict[str, Any]) -> None:
