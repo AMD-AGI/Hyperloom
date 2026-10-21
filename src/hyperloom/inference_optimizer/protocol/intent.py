@@ -17,6 +17,10 @@ ALLOWED_VERDICTS: frozenset[str] = frozenset({"approve", "reject", "redirect", "
 # Body of the observation a critic turn emits when it has nothing to say.
 DEFAULT_IDLE_BODY = "ok (critic)"
 
+# Ceiling on a single extend_lease step; repeated extensions are allowed. The PolicyGate enforces it; it is declared
+# here so the payload contract each backend renders for the agents states the same number.
+EXTEND_LEASE_MAX_SEC: int = 3600
+
 
 # ---------------------------------------------------------------------------
 class IntentType(str, Enum):
@@ -213,6 +217,7 @@ def _validate_review_verdict_payload(
 __all__ = [
     "ALLOWED_VERDICTS",
     "DEFAULT_IDLE_BODY",
+    "EXTEND_LEASE_MAX_SEC",
     "Intent",
     "IntentType",
     "IntentValidationError",

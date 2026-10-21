@@ -260,7 +260,6 @@ def _record_critic_review(
     if recorder is None:
         return
     from hyperloom.inference_optimizer.breakdown.recorder.framework_event import (
-        DISPOSITION_DROPPED,
         REVIEWER_CRITIC,
         REVIEWER_CRITIC_UNAVAILABLE,
         STEP_REVIEWED,
@@ -287,11 +286,7 @@ def _record_critic_review(
         reason=reason,
     )
     if effective == "reject":
-        recorder.settle_proposal(
-            proposal_id,
-            disposition=DISPOSITION_DROPPED,
-            reason=reason or "critic_rejected",
-        )
+        router.settle_dropped_proposal(pending, reason or "critic_rejected")
 
 
 def _record_phase_proposal_outcome(pending: Any, **outcome: Any) -> None:
@@ -332,6 +327,16 @@ def _record_review_outcome(router: Any, pending: Any, **outcome: Any) -> None:
 
 class IntentRouter(CoordinatorCollaborator):
     """Validates and dispatches agent-emitted intents on behalf of a Coordinator."""
+
+    def settle_dropped_proposal(self, pending: Any, reason: str) -> None:
+        """Settle a denied proposal as dropped on the framework timeline: it never reaches a bench."""
+        proposal_id = review_row_id(pending.payload or {}, fallback_msg_id=pending.proposal_msg_id)
+        recorder = self._coord.phase_framework.timeline()
+        if not proposal_id or recorder is None:
+            return
+        from hyperloom.inference_optimizer.breakdown.recorder.framework_event import DISPOSITION_DROPPED
+
+        recorder.settle_proposal(proposal_id, disposition=DISPOSITION_DROPPED, reason=reason)
 
     def _resolve_primatune_mandate(self, params: dict[str, Any]) -> PolicyDenied | None:
         """Swap a queued predictor mandate in for the ``primatune_mandate_id`` that cites it.
@@ -521,11 +526,18 @@ class IntentRouter(CoordinatorCollaborator):
                 log.exception("failed to record handle_intent_exception observation")
             return
 
+    def _is_pruned_action(self, action_name: str) -> bool:
+        """Whether ``prune_branch`` retired ``action_name`` itself or its catalogue family."""
+        meta = self.action_registry.get(action_name)
+        return self.shared_state.is_pruned(action_name) or (
+            meta is not None and self.shared_state.is_pruned(meta.family)
+        )
+
     async def _handle_propose_action(self, source: str, intent: Intent) -> None:
         """Gate a proposed action and enqueue it for Critic Review."""
         action_name = intent.payload["action_name"]
         # Pruned families are advisory: proposal still queues with an advisory note.
-        if self.shared_state.is_pruned(action_name):
+        if self._is_pruned_action(action_name):
             await self.bus.record_observation(
                 "coordinator",
                 "observation",
@@ -851,30 +863,14 @@ class IntentRouter(CoordinatorCollaborator):
     async def _prepare_specialist_dispatch(self, request: DelegateRequest, nested_idempotency_key: Any) -> bool:
         """Warm a specialist delegate's params through the KnowledgePlane.
 
-        False once a patch preflight error pruned the source-patch family instead.
+        False when it is a patch specialist with no git source tree to write into.
         """
         if request.action_name != "specialist":
             return True
-        await self._coord.specialist_dispatch.warm_specialist_params(request.params)
-        from ..specialists.runner import specialist_patch_preflight_error
-
-        preflight_error = specialist_patch_preflight_error(
-            request.params,
-            framework_repo_path=str(self.shared_state.framework_repo_path or ""),
-        )
-        if not preflight_error:
-            return True
-        if self.shared_state.add_pruned_family("source_patch"):
-            self.shared_state.record_action_failure(
-                action="specialist",
-                task_id=str(request.intent.payload.get("idempotency_key") or nested_idempotency_key or ""),
-                result={"error_class": preflight_error, "error": preflight_error},
-            )
-            try:
-                self.shared_state.save(self.session_dir)
-            except Exception:
-                log.exception("delegate specialist: source-patch prune save failed")
-        return False
+        dispatch = self._coord.specialist_dispatch
+        await dispatch.warm_specialist_params(request.params)
+        task_id = str(request.intent.payload.get("idempotency_key") or nested_idempotency_key or "")
+        return not dispatch.refuse_patch_without_source(request.params, task_id=task_id)
 
     async def _create_delegated_task(self, request: DelegateRequest, raw_key: Any) -> Any | None:
         """Register the delegate as a task, stepping its idempotency key past terminated twins.
@@ -972,7 +968,7 @@ class IntentRouter(CoordinatorCollaborator):
     async def handle_delegate(self, source: str, intent: Intent) -> None:
         """Validate and enqueue a delegated action as a TaskRegistry task."""
         action_name = intent.payload["action_name"]
-        if self.shared_state.is_pruned(action_name):
+        if self._is_pruned_action(action_name):
             await self.bus.record_observation(
                 "coordinator",
                 "observation",
@@ -990,12 +986,7 @@ class IntentRouter(CoordinatorCollaborator):
             )
         denied = self._coord.dispatcher.admission_denial_for_action(action_name, params=intent.payload.get("params"))
         if denied is not None:
-            await self.record_policy_denied(
-                source,
-                intent,
-                denied,
-                action_name=action_name,
-            )
+            await self.record_policy_denied(source, intent, denied, action_name=action_name)
             return
         # delegate explore runs variants directly (no Critic pre-review).
         payload = dict(intent.payload)
@@ -1016,6 +1007,7 @@ class IntentRouter(CoordinatorCollaborator):
                     },
                 )
                 return
+            self._coord.proposals.floor_keep_threshold(params)
         if action_name == "specialist" and not await self._admit_specialist(source, intent, params):
             return
         # idempotency_key is top-level per schema; strip a nested compat alias.
@@ -1248,13 +1240,6 @@ class IntentRouter(CoordinatorCollaborator):
         # A late extension can arrive after the cumulative task TTL expired but before the worker/reaper acted on it.
         remaining_sec = max(1, int(extra_sec), int(new_ttl - running_sec))
         lanes = await self.locks.heartbeat_by_task(task_id, ttl_sec=remaining_sec)
-        gpu_error = ""
-        try:
-            gpus = await self.gpu_specialist_pool.extend(task_id, remaining_sec)
-        except Exception as exc:
-            log.exception("extend_lease: GPU lease refresh failed for task=%s", task_id)
-            gpus = 0
-            gpu_error = repr(exc)[:200]
         # Move the live subprocess's kill instant too, within the room its dispatch left before the phase end.
         wall_budget_error = ""
         granted_sec = 0.0
@@ -1263,39 +1248,40 @@ class IntentRouter(CoordinatorCollaborator):
         except Exception as exc:
             log.exception("extend_lease: wall-budget extension failed for task=%s", task_id)
             wall_budget_error = repr(exc)[:200]
-        # A swallowed GPU or wall-budget failure would leave the lane extended while the GPU reaper or subprocess
-        # wall-clock cap can still interrupt the work — report the partial extension as degraded.
+        # A swallowed wall-budget failure leaves the lane extended while the subprocess wall-clock cap can still
+        # interrupt the work — report the partial extension as degraded.
         await self.bus.record_observation(
             "coordinator",
             "observation",
             {
-                "kind": "extend_lease_degraded" if gpu_error or wall_budget_error else "extend_lease",
+                "kind": "extend_lease_degraded" if wall_budget_error else "extend_lease",
                 "task_id": task_id,
                 "source": source,
                 "extra_sec": extra_sec,
                 "lease_ttl_sec": new_ttl,
                 "lease_expires_in_sec": remaining_sec,
                 "lanes": lanes,
-                "gpu_rows": gpus,
                 "wall_budget_extension_sec": granted_sec,
-                **({"gpu_refresh_error": gpu_error} if gpu_error else {}),
                 **({"wall_budget_extension_error": wall_budget_error} if wall_budget_error else {}),
                 "reason": str(intent.payload.get("reason") or "")[:200],
             },
         )
 
     async def _handle_prune_branch(self, source: str, intent: Intent) -> None:
-        """Prune an action family and cancel its in-flight tasks."""
+        """Cancel a family's queued tasks and, unless ``scope`` is ``queued``, retire the family; running tasks continue."""
         family = intent.payload["family"]
         reason = str(intent.payload.get("reason") or "prune_branch")
         scope = str(intent.payload.get("scope") or PRUNE_BRANCH_SCOPE_FAMILY).strip()
         drain_only = scope == PRUNE_BRANCH_SCOPE_QUEUED
         if not drain_only and self.shared_state.add_pruned_family(family):
             self.shared_state.save(self.session_dir)
-        if drain_only and family == "baseline":
+        # A catalogue family names its member actions; any other value names a single action kind.
+        kinds = [name for name, meta in self.action_registry.items() if meta.family == family] or [family]
+        cancelled: list[str] = []
+        if drain_only and "baseline" in kinds:
+            kinds.remove("baseline")
             cancelled = await self._coord.writeback.drain_queued_baselines(reason=reason)
-        else:
-            cancelled = await self.tasks.cancel_family([family], reason=reason)
+        cancelled += await self.tasks.cancel_family(kinds, reason=reason)
         await self.bus.append_and_seq(
             Message.new(
                 source,
