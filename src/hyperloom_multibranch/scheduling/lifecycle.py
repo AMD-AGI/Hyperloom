@@ -18,7 +18,9 @@ signal that arrives during CLOSE; CLOSE is cut short if it still runs then. A se
 unwinding and CLOSE short at once. A CLOSE cut short releases what the session holds, closing the toolbox within
 its own short bound and killing every registered process, and writes the report.
 A session that closed before FINAL is read back by :func:`persisted_run` and taken up again by :meth:`Session.finish`,
-which runs FINAL and CLOSE alone on a budget that is already spent, carrying the stop reason that session ended with.
+which runs FINAL and CLOSE alone on a budget that is already spent, carrying the stop reason that session ended with:
+the roster, the frontier policy and the branches are the ones that session persisted, and only its report, dashboard
+and breakdown are written again.
 """
 
 from __future__ import annotations
@@ -40,13 +42,13 @@ from hyperloom.common.provenance import detect_code_revision
 from hyperloom.measure.compile import LocalBlobStore
 from hyperloom.measure.versions import socket_versions
 from hyperloom.orchestrator.knowledge.remote_recipe.client import RemoteRecipeClient
-from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
+from hyperloom_multibranch.contracts.notebook import Role, Writer
 from hyperloom_multibranch.contracts.notebook.interfaces import UsageSink
 from hyperloom_multibranch.contracts.notebook.records import ManifestFingerprint
 from hyperloom_multibranch.contracts.notebook.vocab import UsageSource
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.codec import decode, encode
-from hyperloom_multibranch.notebook.rsi.calibration import DEFAULT_POLICY, PolicyChoice
+from hyperloom_multibranch.notebook.rsi.calibration import DEFAULT_POLICY, VARIATIONS, PolicyChoice
 from hyperloom_multibranch.notebook.rsi.frontier import FrontierPolicy, FrontierScoring
 from hyperloom_multibranch.notebook.rsi.session import (
     FRONTIER_LOG,
@@ -82,7 +84,7 @@ from hyperloom_multibranch.scheduling.prelude import (
 )
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry
 from hyperloom_multibranch.scheduling.requests import SessionChecks, SessionTests
-from hyperloom_multibranch.scheduling.roster import QUOTA_POLICY_VERSION, BranchStop, Roster, StopCause
+from hyperloom_multibranch.scheduling.roster import QUOTA_POLICY_VERSION, Roster, final_quota
 from hyperloom_multibranch.scheduling.settings import FrontierPolicyMode, RunSettings
 from hyperloom_multibranch.scheduling.stops import (
     TOOLBOX_CLOSE_SECONDS,
@@ -205,7 +207,9 @@ class Session:
         self._frontier = PolicyChoice(
             FrontierPolicy.for_budget(self._metric, self._budget_seconds), DEFAULT_POLICY, UNCHOSEN_EVIDENCE
         )
-        self._history = archived_history()
+        # A session is not evidence about itself: a run over a directory whose CLOSE already archived its tree would
+        # otherwise calibrate and score against that tree.
+        self._history = tuple(tree for tree in archived_history() if tree.session_id != layout.session_id)
         self._context = context
         self._repo = peers.repo
         self._blobs = blobs
@@ -237,26 +241,37 @@ class Session:
         budget = SessionBudget.from_hours(self._settings.max_hours, self._clock.now())
         self._write_manifest(budget, await asyncio.to_thread(code_version))
         hard_stop = HardStop(budget, self._clock)
-        return await self._run_and_close(self._phases(budget, hard_stop), budget, hard_stop)
+        aborted = SessionOutcome(SessionStopReason.ABORTED, None, None, "")
+        return await self._run_and_close(self._phases(budget, hard_stop), aborted, budget, hard_stop)
 
     async def finish(self, ended: SessionStopReason) -> SessionOutcome:
         """Run FINAL and CLOSE over the directory a session that ended for ``ended`` before FINAL left behind, and
-        report as that session would have; the manifest that session wrote is this one's input, so this opens no
-        session of its own and the report, dashboard, breakdown and roster of that one are written again.
+        report as that session would have; the manifest and the notebook that session wrote are this one's input, so
+        this opens no session of its own and only its report, dashboard and breakdown are written again. It ends for
+        ``ended`` however FINAL goes: the session did not run its course, and a FINAL run after the fact does not
+        make it so.
 
-        The budget is already spent, which is the state the normal path is in when FINAL overruns the deadline:
-        FINAL is unbounded and CLOSE gets one CLOSE grace from its end.
+        The candidates and the frontier policy are read before anything else happens, so a session FINAL cannot run
+        over is refused without a stop or a report being written. The budget is already spent, which is the state the
+        normal path is in when FINAL overruns the deadline: FINAL is unbounded and CLOSE gets one CLOSE grace from
+        its end.
         """
 
+        candidates = await self._final_candidates()
+        self._frontier = self._recorded_frontier_policy()
         total = budget_seconds(self._settings.max_hours)
         budget = SessionBudget(self._clock.now() - total, total)
         self._in_final = True
-        return await self._run_and_close(self._final_phases(ended), budget, HardStop(budget, self._clock))
+        hard_stop = HardStop(budget, self._clock)
+        ending = SessionOutcome(ended, None, None, "")
+        return await self._run_and_close(self._final_phases(candidates, ended), ending, budget, hard_stop)
 
     async def _run_and_close(
-        self, work: Awaitable[SessionOutcome], budget: SessionBudget, hard_stop: HardStop
+        self, work: Awaitable[SessionOutcome], ending: SessionOutcome, budget: SessionBudget, hard_stop: HardStop
     ) -> SessionOutcome:
-        ending = SessionOutcome(SessionStopReason.ABORTED, None, None, "")
+        """Run ``work``, then CLOSE whatever became of it; ``ending`` is how the session ends when ``work`` raises
+        instead of reporting an outcome of its own."""
+
         self._signals.install()
         try:
             ending = await self._until_stopped(work, budget, hard_stop)
@@ -358,20 +373,18 @@ class Session:
         await self._stopper.end_exploration(reason)
         return await self._final(candidates, reason)
 
-    async def _final_phases(self, ended: SessionStopReason) -> SessionOutcome:
-        """FINAL alone, over the branches the notebook of a session that ended for ``ended`` holds; inside the phases
-        coroutine, so a failure still goes through CLOSE and leaves a report."""
+    async def _final_phases(self, candidates: FinalCandidates, ended: SessionStopReason) -> SessionOutcome:
+        """FINAL alone over ``candidates``, inside the phases coroutine, so a failure still goes through CLOSE and
+        leaves a report.
+
+        The toolbox takes the dead session's unfinished tests up again from its submit log when it starts, and they
+        belong to branches that are over: they are withdrawn, and the quota then admits FINAL's validation alone.
+        """
 
         await self._toolbox.start()
-        candidates = await self._final_candidates()
-        self._roster.add_integration(candidates.integration.commit, k=1)
-        await self._branches.push_quota()
-        await self._adopt_frontier_policy()
-        outcome = await self._final(candidates, ended)
-        # The notebook's STOP for the integration branch belongs to the session that opened it, and a second one is a
-        # conflicting write; closing the entry here keeps the session stop from recording it.
-        self._roster.stop(INTEGRATION_BRANCH, BranchStop(StopCause.SESSION_END, ended.value, self._clock.now()))
-        return outcome
+        await self._toolbox.withdraw_all(ended.value)
+        await self._toolbox.set_policy(final_quota(self._settings.caps))
+        return await self._final(candidates, ended)
 
     async def _final(self, candidates: FinalCandidates, reason: SessionStopReason) -> SessionOutcome:
         self._in_final = True
@@ -395,6 +408,15 @@ class Session:
         self._decisions.record(Decision(DecisionKind.PRELUDE, "frontier policy", detail=detail))
         manifest = read_json_strict(self._layout.manifest)
         atomic_write_json(self._layout.manifest, {**manifest, "policy_versions": self._policy_versions()})
+
+    def _recorded_frontier_policy(self) -> PolicyChoice:
+        """The frontier policy the manifest records, rebuilt from its label: a run over a session that already chose
+        one scores with that choice instead of calibrating again, so the label the manifest holds stays true."""
+
+        label = read_json_strict(self._layout.manifest)["policy_versions"][FRONTIER_POLICY_KEY]
+        defaults = self._frontier.policy
+        policies = {DEFAULT_POLICY: defaults, **{item.label: item.apply(defaults) for item in VARIATIONS}}
+        return PolicyChoice(policies[label], label, f"{label}: the policy the session recorded in its manifest")
 
     def _policy_versions(self) -> dict[str, str]:
         return {**POLICY_VERSIONS, FRONTIER_POLICY_KEY: self._frontier.label}
@@ -523,7 +545,8 @@ class Session:
 
 @dataclass(frozen=True)
 class PersistedRun:
-    """A session directory that closed without FINAL, as :meth:`Session.finish` takes it again."""
+    """A session directory that closed without FINAL, as :meth:`Session.finish` takes it again; ``ended`` is the stop
+    reason that session reported, which the second report carries."""
 
     layout: SessionLayout
     settings: RunSettings
@@ -538,9 +561,17 @@ def persisted_run(root: Path) -> PersistedRun:
         raise ValueError(f"{root} is not a directory")
     layout = SessionLayout(root)
     try:
-        settings = decode(RunSettings, read_json_strict(layout.manifest)["settings"])
+        manifest = read_json_strict(layout.manifest, require_dict=True)
+        settings = decode(RunSettings, manifest["settings"])
+        ran_on = decode(CodeVersion, manifest["code_version"])
     except (OSError, ValueError, KeyError, TypeError) as exc:
         raise ValueError(f"{root} is no multi-branch session that ran: {exc}") from exc
+    here = code_version()
+    if ran_on != here:
+        raise ValueError(
+            f"the session in {root} ran on {ran_on} and this build is {here}; FINAL and CLOSE read back what that "
+            "build persisted, so run them from it"
+        )
     if not layout.root_recipe.is_file():
         raise ValueError(f"the session in {root} committed no root, so FINAL has nothing to validate")
     return PersistedRun(layout, settings, closed_before_final(layout.report))

@@ -80,15 +80,20 @@ def report_document(report: CloseReport, session_id: str, closed_at: float) -> d
 
 def closed_before_final(report_file: Path) -> SessionStopReason:
     """How the session :func:`report_document` wrote ``report_file`` for ended, for FINAL and CLOSE to carry forward;
-    raises ValueError naming what keeps FINAL from running over it."""
+    raises ValueError naming what keeps FINAL from running over it.
+
+    A FINAL that ran and chose nothing keeps nothing from running it again: the session still has no winner, which is
+    what running FINAL over it a second time is for.
+    """
 
     try:
         document = read_json_strict(report_file, require_dict=True)
         final, ended = document["final"], SessionStopReason(document["stop_reason"])
+        chosen = None if final is None else final["chosen"]
     except (OSError, ValueError, KeyError, TypeError) as exc:
         raise ValueError(f"the session has not closed; {report_file} does not say how it ended: {exc}") from exc
-    if final is not None:
-        raise ValueError(f"the session {report_file} reports already ran FINAL")
+    if chosen is not None:
+        raise ValueError(f"the session {report_file} reports already chose {chosen['commit']} in FINAL")
     if ended is SessionStopReason.PRELUDE_FAILED:
         raise ValueError(f"PRELUDE failed in the session {report_file} reports, so there is no root to validate")
     return ended

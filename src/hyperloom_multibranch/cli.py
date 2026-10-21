@@ -39,10 +39,13 @@ installed in the image; and the agent CLI the specialists run must be installed.
 A session uses no Experience KB, whatever ``HYPERLOOM_KB_URL`` names (see
 :data:`~hyperloom_multibranch.scheduling.mb_fakes.MB_FAKE_EXPERIENCE_KB`).
 ``final-only SESSION_DIR`` is the emergency recovery of a session that closed before FINAL ran, and takes nothing but
-that directory: it runs FINAL and CLOSE over what the session persisted, on the settings its manifest holds and
-carrying the stop reason it ended with, and rewrites its report, dashboard, breakdown and roster. It creates no
-session directory, so it cannot start one, and it is refused with exit code 2 when the directory is no session that
-ran, committed no root, has not closed, or already ran FINAL.
+that directory: it runs FINAL and CLOSE over what the session persisted -- the settings and the frontier policy its
+manifest holds, the branches its roster and notebook hold -- and rewrites its report, dashboard and breakdown. It
+creates no session directory, so it cannot start one. It carries the stop reason that session ended with, which is
+also what its exit code says: a session that did not run its course stays a failed session however FINAL goes. The
+search tree the session's own CLOSE archived is left as it was. It is refused with exit code 2, having written
+nothing, when the directory is no session that ran, ran on another build than this one, committed no root, has not
+closed, already chose in FINAL, or has another ``final-only`` running over it.
 """
 
 from __future__ import annotations
@@ -125,8 +128,9 @@ def build_parser() -> argparse.ArgumentParser:
         "final-only",
         help=(
             "Emergency recovery: run FINAL and CLOSE over a session directory that closed before FINAL. It rewrites"
-            " that session's report, dashboard, breakdown and roster. Refused if the session has not closed or"
-            " already ran FINAL."
+            " that session's report, dashboard and breakdown, and exits as that session did, so a session that did"
+            " not run its course still fails. Refused if it has not closed, already chose in FINAL, or ran on"
+            " another build than this one."
         ),
     )
     final_only.add_argument("session_dir", type=Path, help="The session directory of the run to finish.")
@@ -374,10 +378,25 @@ async def _run_session(settings: RunSettings, peer_factory: PeerFactory, service
 
 def final_only(persisted: PersistedRun, peer_factory: PeerFactory, services: SessionServices) -> int:
     """Run FINAL and CLOSE over the session directory ``persisted`` was read from, print it on one stdout line and
-    return the session's exit code. No session directory is created, which is why this cannot start one."""
+    return the session's exit code. No session directory is created, which is why this cannot start one.
 
-    with adopting_orphans():
-        return asyncio.run(_final_only(persisted, peer_factory, services))
+    The run holds the session's lock file while it works; a second one over the same directory is refused rather
+    than left to write over the first one's report.
+    """
+
+    lock = persisted.layout.final_only_lock
+    try:
+        holder = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        print(f"{PROG}: {lock} is held, by the pid it names; delete it if that run is gone", file=sys.stderr)
+        return EXIT_USAGE
+    os.write(holder, f"{os.getpid()}\n".encode())
+    os.close(holder)
+    try:
+        with adopting_orphans():
+            return asyncio.run(_final_only(persisted, peer_factory, services))
+    finally:
+        lock.unlink()
 
 
 async def _final_only(persisted: PersistedRun, peer_factory: PeerFactory, services: SessionServices) -> int:

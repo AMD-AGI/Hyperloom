@@ -1,7 +1,11 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The session's exit code: 0 only for a session that ran its course, chose a commit and left nothing behind."""
+"""The session's exit code: 0 only for a session that ran its course, chose a commit and left nothing behind.
+
+A ``final-only`` carries the stop reason of the session it finishes, so a session that was stopped stays a failed
+session even when FINAL then chose for it.
+"""
 
 from __future__ import annotations
 
@@ -44,6 +48,7 @@ def test_a_session_that_ran_its_course_and_stopped_clean_exits_zero(reason: Sess
         _outcome(SessionStopReason.TIME_EXHAUSTED, None, CLEAN),
         _outcome(SessionStopReason.TIME_EXHAUSTED, replace(CHOSEN, chosen=None), CLEAN),
         _outcome(SessionStopReason.SIGNAL, None, CLEAN),
+        _outcome(SessionStopReason.SIGNAL, CHOSEN, CLEAN),
         _outcome(SessionStopReason.PRELUDE_FAILED, None, CLEAN, "no baseline"),
         SessionOutcome(SessionStopReason.TIME_EXHAUSTED, CHOSEN, None, ""),
     ],
@@ -55,6 +60,7 @@ def test_a_session_that_ran_its_course_and_stopped_clean_exits_zero(reason: Sess
         "final-never-ran",
         "nothing-chosen",
         "signal",
+        "chosen-after-a-signal",
         "prelude-failed",
         "close-never-ran",
     ],

@@ -5,6 +5,8 @@
 
 The roster says what is running now; the history of the branch tree is the notebook's lineage, which the roster does
 not copy. The branch cap counts specialist branches that are admitted or running, never the integration branch.
+``MB-roster.json`` is written after every change and read back when a roster is built over a session directory that
+already has one, so the emergency ``final-only`` run carries the dead session's branches instead of writing them away.
 """
 
 from __future__ import annotations
@@ -13,8 +15,10 @@ from collections.abc import Iterable
 from dataclasses import asdict, dataclass, replace
 from enum import Enum
 from pathlib import Path
+from typing import Any
 
 from hyperloom.common.io import atomic_write_json
+from hyperloom.common.jsonio import read_json_strict
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
@@ -144,16 +148,19 @@ class BranchStopped(RuntimeError):
 class Roster:
     """The live roster, written to ``snapshot_file`` after every change so the dashboard and a post-mortem see it.
 
+    A roster built over a ``snapshot_file`` an earlier run of the same session directory left takes up its branches,
+    the ids it handed out and whether it closed, so that run's record is carried rather than written over.
     Branch ids are ``b01``, ``b02``, ... in the order they are handed out, and an id is never handed out twice.
     """
 
     def __init__(self, caps: RosterCaps, snapshot_file: Path, clock: Clock) -> None:
+        snapshot = _read_snapshot(snapshot_file)
         self.caps = caps
         self._snapshot_file = snapshot_file
         self._clock = clock
-        self._entries: dict[str, BranchEntry] = {}
-        self._issued = 0
-        self._closed = False
+        self._entries: dict[str, BranchEntry] = {entry.branch: entry for entry in snapshot.entries}
+        self._issued = snapshot.issued_branch_ids
+        self._closed = snapshot.closed
         self._persist()
 
     @property
@@ -279,6 +286,46 @@ class Roster:
         )
 
 
+def final_quota(caps: RosterCaps) -> QueuePolicy:
+    """The quota of a run that validates FINAL's candidates and nothing else: the integration branch alone may submit,
+    under the same cap on tests in flight, and FINAL's own measurements take no slot of its K."""
+
+    return QueuePolicy(
+        global_concurrency=caps.max_parallel_tests, branch_k={INTEGRATION_BRANCH: 1}, listed_branches_only=True
+    )
+
+
+@dataclass(frozen=True)
+class _Snapshot:
+    """``MB-roster.json`` as a roster takes it up again; the empty roster when no run has written one."""
+
+    entries: tuple[BranchEntry, ...] = ()
+    issued_branch_ids: int = 0
+    closed: bool = False
+
+
+def _read_snapshot(snapshot_file: Path) -> _Snapshot:
+    if not snapshot_file.is_file():
+        return _Snapshot()
+    document = read_json_strict(snapshot_file, require_dict=True)
+    entries = tuple(_entry_from_record(record) for record in document["entries"])
+    return _Snapshot(entries, int(document["issued_branch_ids"]), bool(document["closed"]))
+
+
+def _entry_from_record(record: dict[str, Any]) -> BranchEntry:
+    stop = record["stop"]
+    return BranchEntry(
+        record["branch"],
+        BranchKind(record["kind"]),
+        BranchOrigin(record["origin"]),
+        record["start_commit"],
+        int(record["k"]),
+        float(record["opened_at"]),
+        from_branch=record["from_branch"],
+        stop=None if stop is None else BranchStop(StopCause(stop["cause"]), stop["reason"], float(stop["at"])),
+    )
+
+
 def _entry_record(entry: BranchEntry) -> dict[str, object]:
     stop = entry.stop
     return {
@@ -306,4 +353,5 @@ __all__ = [
     "RosterCaps",
     "RosterFull",
     "StopCause",
+    "final_quota",
 ]

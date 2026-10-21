@@ -4,7 +4,8 @@
 """Contract of the ``hyperloom-multibranch`` command line: options, defaults, validation and exit codes.
 
 ``final-only`` is the emergency recovery of a session that closed before FINAL: it takes that session's directory and
-nothing else, and refuses before building anything when the directory cannot support FINAL.
+nothing else, refuses before building anything when the directory cannot support FINAL -- a session another build
+ran included -- and holds the directory against a second recovery while it works.
 """
 
 from __future__ import annotations
@@ -36,7 +37,7 @@ from hyperloom_multibranch.notebook.codec import encode
 from hyperloom_multibranch.notebook.rsi.archive import ARCHIVE_ENV
 from hyperloom_multibranch.scheduling.budget import MB_DEFAULT_MAX_HOURS
 from hyperloom_multibranch.scheduling.layout import SessionLayout
-from hyperloom_multibranch.scheduling.lifecycle import PersistedRun
+from hyperloom_multibranch.scheduling.lifecycle import PersistedRun, code_version, persisted_run
 from hyperloom_multibranch.scheduling import local_peers
 from hyperloom_multibranch.scheduling.local_peers import AGENTX_ENV
 from hyperloom_multibranch.scheduling.peers import PeerFactory
@@ -628,10 +629,23 @@ def _closed_before_final(root: Path) -> SessionLayout:
     layout = SessionLayout(root)
     layout.reports.mkdir(parents=True)
     layout.prelude.mkdir(parents=True)
-    _write(layout.manifest, {"session_id": root.name, "settings": encode(_settings())})
+    _manifest(layout)
     _write(layout.root_recipe, {"components": []})
     _report(layout)
     return layout
+
+
+def _manifest(layout: SessionLayout, **fields: object) -> None:
+    _write(
+        layout.manifest,
+        {
+            "code_version": encode(code_version()),
+            "session_id": layout.session_id,
+            "settings": encode(_settings()),
+            "policy_versions": {"frontier": "default"},
+            **fields,
+        },
+    )
 
 
 def _write(path: Path, document: dict[str, object]) -> None:
@@ -650,12 +664,13 @@ def _tree(root: Path) -> list[Path]:
     ("damage", "error"),
     [
         (lambda layout: layout.manifest.unlink(), "is no multi-branch session that ran"),
+        (lambda layout: _manifest(layout, code_version={"package": "0.0", "git_sha": "beef"}), "ran on CodeVersion"),
         (lambda layout: layout.root_recipe.unlink(), "committed no root"),
         (lambda layout: layout.report.unlink(), "has not closed"),
-        (lambda layout: _report(layout, final={"chosen": None}), "already ran FINAL"),
+        (lambda layout: _report(layout, final={"chosen": {"commit": "c9"}}), "already chose c9"),
         (lambda layout: _report(layout, stop_reason="prelude_baseline_failed"), "PRELUDE failed"),
     ],
-    ids=["no manifest", "no root", "still running", "final ran", "prelude failed"],
+    ids=["no manifest", "another build", "no root", "still running", "final ran", "prelude failed"],
 )
 @pytest.mark.usefixtures("ready_environment")
 def test_a_session_final_cannot_run_over_exits_two_and_changes_nothing(
@@ -690,6 +705,25 @@ def test_final_only_over_a_path_that_is_no_directory_exits_two(
     assert exc.value.code == cli.EXIT_USAGE
     assert f"{missing} is not a directory" in capsys.readouterr().err
     assert agent_cli == [] and not missing.exists()
+
+
+def test_a_final_only_holds_the_session_against_a_second_one_and_releases_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    layout = _closed_before_final(tmp_path / "MB-20261020T141241Z-64f775fe")
+    persisted = persisted_run(layout.root)
+
+    async def while_it_runs(run: PersistedRun, peer_factory: object, services: object) -> int:
+        assert layout.final_only_lock.read_text(encoding="utf-8") == f"{os.getpid()}\n"
+        assert cli.final_only(run, peer_factory, services) == cli.EXIT_USAGE
+        return 0
+
+    monkeypatch.setattr(cli, "_final_only", while_it_runs)
+
+    assert cli.final_only(persisted, None, None) == 0
+
+    assert str(layout.final_only_lock) in capsys.readouterr().err
+    assert not layout.final_only_lock.exists()
 
 
 @pytest.mark.usefixtures("ready_environment")

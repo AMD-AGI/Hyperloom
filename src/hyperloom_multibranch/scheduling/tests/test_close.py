@@ -308,8 +308,15 @@ def test_a_session_that_wrote_no_report_has_not_closed(layout: SessionLayout) ->
 def test_a_report_that_records_a_final_choice_refuses_a_second_final(layout: SessionLayout) -> None:
     report = _written(layout, SessionStopReason.TIME_EXHAUSTED, CHOICE)
 
-    with pytest.raises(ValueError, match="already ran FINAL"):
+    with pytest.raises(ValueError, match=f"already chose {CHOSEN}"):
         closed_before_final(report)
+
+
+def test_a_final_that_chose_nothing_may_be_run_again(layout: SessionLayout) -> None:
+    nothing = FinalChoice(None, (), "no candidate passed the final validation", METRIC, 64)
+    report = _written(layout, SessionStopReason.TIME_EXHAUSTED, nothing)
+
+    assert closed_before_final(report) is SessionStopReason.TIME_EXHAUSTED
 
 
 def test_a_failed_prelude_leaves_no_root_to_validate(layout: SessionLayout) -> None:

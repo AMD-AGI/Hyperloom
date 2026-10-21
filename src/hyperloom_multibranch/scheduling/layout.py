@@ -7,8 +7,8 @@ A session lives at ``<workspace>/<model_basename>/MB-<UTC>-<rand8>/``. Every ent
 scheduler creates carries the ``MB-`` prefix so it never collides with a single-lineage
 session in the same workspace. Each run creates a fresh directory; only the emergency
 ``final-only`` command attaches to one again, and only to a session whose closed report
-says FINAL never ran. That report is what stands in for a session lock, and nothing
-enforces it.
+says FINAL never ran. Two of those would write over each other, so one holds
+:data:`FINAL_ONLY_LOCK` in the session directory for as long as it runs.
 """
 
 from __future__ import annotations
@@ -40,6 +40,8 @@ DASHBOARD_DIR = "MB-dashboard"
 REPORTS_DIR = "MB-reports"
 LOGS_DIR = "MB-logs"
 PIDS_FILE = "MB-pids.jsonl"
+#: Created exclusively by a ``final-only`` run and removed when it ends; holds the pid that took it.
+FINAL_ONLY_LOCK = "MB-final-only.lock"
 
 ROSTER_FILE = "MB-roster.json"
 DECISIONS_FILE = "MB-decisions.jsonl"
@@ -146,6 +148,10 @@ class SessionLayout:
         return self.root / PIDS_FILE
 
     @property
+    def final_only_lock(self) -> Path:
+        return self.root / FINAL_ONLY_LOCK
+
+    @property
     def roster(self) -> Path:
         return self.scheduling / ROSTER_FILE
 
@@ -227,6 +233,7 @@ def create_session(workspace: Path, model_basename: str, clock: Clock) -> Sessio
 
 
 __all__ = [
+    "FINAL_ONLY_LOCK",
     "SESSION_PREFIX",
     "SessionLayout",
     "create_session",

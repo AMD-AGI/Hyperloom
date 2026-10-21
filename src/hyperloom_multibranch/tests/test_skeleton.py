@@ -24,7 +24,7 @@ import signal
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 import pytest
 
@@ -114,7 +114,7 @@ from hyperloom_multibranch.scheduling.local_peers import workload_rule
 from hyperloom_multibranch.scheduling.llm import CompletionFailed, CompletionReply
 from hyperloom_multibranch.scheduling.peers import Peers, PeerSetup
 from hyperloom_multibranch.scheduling.policy import SCHEDULING_POLICY, policy_version
-from hyperloom_multibranch.scheduling.roster import BranchOrigin, BranchStatus, RosterCaps, StopCause
+from hyperloom_multibranch.scheduling.roster import BranchOrigin, BranchStatus, RosterCaps, StopCause, final_quota
 from hyperloom_multibranch.scheduling.settings import (
     FrontierPolicyMode,
     InferenceXShape,
@@ -208,6 +208,8 @@ AGENT_ARGV = ("sleep", "600")
 CHOSEN_WINDOW_SECONDS = 4321.0
 CHOSEN_LABEL = "no new-branch floor"
 CHOSEN_EVIDENCE = "no new-branch floor: rank correlation 0.6 against 0.4 for the defaults"
+#: What a FINAL that cannot read the regression set fails with.
+REGRESSION_SET_GONE = "the regression set is gone"
 #: How long each FINAL test of a slow toolbox runs: longer than the whole budget.
 FINAL_TEST_SECONDS = 2 * SETTINGS.max_hours * 3600
 
@@ -1190,12 +1192,14 @@ async def test_final_only_validates_the_branches_a_session_that_never_reached_fi
         SETTINGS,
         stage.layout,
     )
+    before = json.loads(stage.layout.roster.read_text())
+    frontier = json.loads(stage.layout.manifest.read_text())["policy_versions"][FRONTIER_POLICY_KEY]
     recovery = _recovery(stage, persisted.settings)
     outcome = await recovery.finish(persisted.ended)
 
     head, c2 = await stage.repo.head(INTEGRATION_BRANCH), await stage.repo.head("b02")
     assert outcome.final is not None and outcome.final.chosen is not None
-    # The branch set FINAL weighs comes from the notebook, not from a roster this session never held.
+    # The branch set FINAL weighs comes from the notebook, which holds every branch the session explored.
     assert {check.candidate.commit for check in outcome.final.checks} == {head, c2}
     assert (outcome.final.chosen.label, outcome.final.chosen.commit) == (INTEGRATION_LABEL, head)
     assert (outcome.stop_reason, outcome.error, outcome.exit_code) == (SessionStopReason.TIME_EXHAUSTED, "", 0)
@@ -1210,8 +1214,13 @@ async def test_final_only_validates_the_branches_a_session_that_never_reached_fi
     assert [row["branch"] for row in _decisions(stage) if row["kind"] == "stop"].count(INTEGRATION_BRANCH) == 1
     branches_by_name = {branch.branch: branch for branch in (await recovery.handle(Role.OBSERVER).lineage()).branches}
     assert branches_by_name[INTEGRATION_BRANCH].stop_reason == f"session_end: {SessionStopReason.TIME_EXHAUSTED.value}"
+    assert json.loads(stage.layout.roster.read_text()) == before
+    assert json.loads(stage.layout.manifest.read_text())["policy_versions"][FRONTIER_POLICY_KEY] == frontier
+    # The tests the dead session left are withdrawn before FINAL's quota, which admits the integration branch alone.
+    assert recovery.toolbox.policies == [final_quota(SETTINGS.caps)]
+    assert recovery.toolbox.withdrawals == [SessionStopReason.TIME_EXHAUSTED.value] * 2
 
-    with pytest.raises(ValueError, match="already ran FINAL"):
+    with pytest.raises(ValueError, match="already chose"):
         persisted_run(stage.layout.root)
 
 
@@ -1231,11 +1240,40 @@ async def test_a_stop_signal_during_a_final_only_still_leaves_a_report_within_on
 
     assert outcome.stop_reason is SessionStopReason.SIGNAL and outcome.exit_code == 1
     assert outcome.final is None and outcome.close is not None
-    assert STOP_OVERRAN in outcome.close.stop.failures
     grace = SessionBudget.from_hours(SETTINGS.max_hours, START).close_grace_seconds
-    assert recovery.signalled_at + grace - TOOLBOX_CLOSE_SECONDS <= recovery.time.now()
-    assert recovery.time.now() <= recovery.signalled_at + grace
+    assert recovery.signalled_at <= recovery.time.now() <= recovery.signalled_at + grace
     assert json.loads(stage.layout.report.read_text())["final"] is None
+    # The signal is how this one ended, so the session it reports ends there too and is still open to a later FINAL.
+    assert json.loads(stage.layout.report.read_text())["stop_reason"] == SessionStopReason.SIGNAL.value
+    assert persisted_run(stage.layout.root).ended is SessionStopReason.SIGNAL
+
+
+class NoRegressionSet(FakeRegressionCheck):
+    """A regression set FINAL cannot read, as a source tree that has gone leaves it; a failure double, not a
+    placeholder."""
+
+    async def check(self, base_commit: str, candidate_delta: RecipeDelta, *, sources: tuple[str, ...]) -> NoReturn:
+        raise LookupError(REGRESSION_SET_GONE)
+
+
+async def test_a_final_only_that_fails_reports_the_session_as_it_ended_and_leaves_it_open_to_another(
+    tmp_path: Path,
+) -> None:
+    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage.scripts = SCRIPTS
+    stage.toolbox_type = StuckStopToolbox
+    await stage.run()
+    persisted = persisted_run(stage.layout.root)
+    recovery = _recovery(stage, persisted.settings)
+    recovery.regression = NoRegressionSet()
+
+    with pytest.raises(LookupError, match=REGRESSION_SET_GONE):
+        await recovery.finish(persisted.ended)
+
+    report = json.loads(stage.layout.report.read_text())
+    assert (report["stop_reason"], report["final"]) == (SessionStopReason.TIME_EXHAUSTED.value, None)
+    assert REGRESSION_SET_GONE in str(report["error"])
+    assert persisted_run(stage.layout.root).ended is SessionStopReason.TIME_EXHAUSTED
 
 
 async def test_an_unreadable_steering_reply_keeps_every_branch_and_k_as_they_were(tmp_path: Path) -> None:
