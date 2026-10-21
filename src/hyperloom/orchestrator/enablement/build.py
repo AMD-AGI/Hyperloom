@@ -5,9 +5,11 @@
 
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING, Any
 
 from hyperloom.common.gpu_identity import gfx_arch_for_gpu_type
+from hyperloom.inference_optimizer.gpu_types import targeted_build_validated
 from hyperloom.orchestrator.lever import LEVER_ENABLEMENT
 
 from ..collaborator import CoordinatorCollaborator
@@ -17,6 +19,7 @@ from .generation_scan import GenerationScan
 
 if TYPE_CHECKING:
     from ..state.task_registry import Task
+    from .runtime.build_actions import TargetedBuildAction
 
 import logging as _logging
 
@@ -44,8 +47,35 @@ def _repo_matches_targeted_build_component(repo_url: str, component: str) -> boo
 _ROUTING_FIELDS: tuple[str, ...] = ("routed", "probe_task_id")
 
 
+def _targeted_build_switched_off() -> bool:
+    """The operator switched targeted builds off."""
+    return os.environ.get("HYPERLOOM_ENABLEMENT_DISABLE_TARGETED_BUILD", "").strip() == "1"
+
+
 class EnablementBuild(CoordinatorCollaborator):
     """Escalates to a compiled build and routes the result back into the lane."""
+
+    def _refuse_build_on_unvalidated_board(self, capability: str | None) -> bool:
+        """Refuse a targeted build on a board whose build path is unvalidated, logging it and telling the lane why."""
+        gpu_type = (getattr(self.shared_state, "gpu_type", "") or "").strip().lower()
+        if targeted_build_validated(gpu_type):
+            return False
+        log.warning(
+            "ENABLEMENT: targeted_build skipped capability=%s gpu_type=%s (build path not validated on this board)",
+            capability or "(none)",
+            gpu_type,
+        )
+        self.shared_state.enablement.last_build_failure = {
+            "failure_class": "preflight_toolchain",
+            "failure_summary": f"targeted builds are not validated on {gpu_type}; no build was attempted",
+        }
+        return True
+
+    async def _enqueue_on_validated_board(self, action: TargetedBuildAction) -> str:
+        """Enqueue ``action`` unless this board's build path is unvalidated; the task id, or ``""``."""
+        if self._refuse_build_on_unvalidated_board(action.capability):
+            return ""
+        return await self._coord.build_lifecycle.enqueue_targeted_build(action)
 
     async def maybe_escalate_to_targeted_build(
         self,
@@ -54,9 +84,7 @@ class EnablementBuild(CoordinatorCollaborator):
         attempt: int = 0,
     ) -> None:
         """Enqueue a targeted build row when the residual gap is a compiled miss."""
-        import os as _os
-
-        if _os.environ.get("HYPERLOOM_ENABLEMENT_DISABLE_TARGETED_BUILD", "").strip() == "1":
+        if _targeted_build_switched_off():
             return
         from ..actions.executors._multi_node_env import is_multi_node
 
@@ -165,7 +193,7 @@ class EnablementBuild(CoordinatorCollaborator):
             build_budget_sec=0,
             source_pr_url=source_pr_url,
         )
-        task_id = await self._coord.build_lifecycle.enqueue_targeted_build(action)
+        task_id = await self._enqueue_on_validated_board(action)
         if task_id:
             from hyperloom.common.bringup import failure_digest
 
@@ -188,8 +216,6 @@ class EnablementBuild(CoordinatorCollaborator):
         payload: dict[str, Any] | None = None,
     ) -> None:
         """Enqueue a targeted build the enablement specialist explicitly requested."""
-        import os as _os
-
         state = self.shared_state
         marker_task_id = str(state.enablement.last_specialist_task_id or "").strip()
         task_id = str(task_id or marker_task_id).strip()
@@ -201,7 +227,7 @@ class EnablementBuild(CoordinatorCollaborator):
                 state.enablement.last_specialist_task_id = ""
 
         try:
-            if _os.environ.get("HYPERLOOM_ENABLEMENT_DISABLE_TARGETED_BUILD", "").strip() == "1":
+            if _targeted_build_switched_off():
                 _consume_marker()
                 return
             from ..actions.executors._multi_node_env import is_multi_node
@@ -220,7 +246,7 @@ class EnablementBuild(CoordinatorCollaborator):
                 except (OSError, ValueError):  # unreadable or partial done file: retry next tick
                     return
             req = payload.get("needs_targeted_build") if isinstance(payload, dict) else None
-            if not isinstance(req, dict) or not req:
+            if not isinstance(req, dict) or not req or self._refuse_build_on_unvalidated_board(req.get("capability")):
                 _consume_marker()
                 return
 
