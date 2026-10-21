@@ -5,7 +5,8 @@
 
 A branch started with no direction of its own and no repair takes the first one no branch of the session has held
 yet, so the first four are the ones a four-branch session works on; once each was held, the one the fewest branches
-held, then the one the fewest running branches hold, the earlier one in this order on a tie.
+held, then the one the fewest running branches hold, the earlier one in this order on a tie. A branch whose session
+ended idle moves to the least-held other one.
 """
 
 from __future__ import annotations
@@ -30,4 +31,10 @@ DIRECTIONS = (
     "the version installed in the image, which can predate a merged PR, and port the ones it lacks as a patch to test.",
 )
 
-__all__ = ["DIRECTIONS"]
+
+def direction_name(direction: str) -> str:
+    """The short name a direction opens with, as prompts and notices cite it."""
+    return direction.split(":", 1)[0]
+
+
+__all__ = ["DIRECTIONS", "direction_name"]

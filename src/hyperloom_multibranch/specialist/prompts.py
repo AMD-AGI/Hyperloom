@@ -25,7 +25,7 @@ from hyperloom.orchestrator.prompts.specialist_prompt_builder import BASH_KILL_S
 from hyperloom_multibranch.contracts.fork import RepairRequest
 from hyperloom_multibranch.contracts.notebook.records import BranchLogRecord, InboxItem
 from hyperloom_multibranch.rulegate.fix_case import CASE_SCRIPT
-from hyperloom_multibranch.specialist.directions import DIRECTIONS
+from hyperloom_multibranch.specialist.directions import DIRECTIONS, direction_name
 from hyperloom_multibranch.specialist.judging import NOTICE
 from hyperloom_multibranch.specialist.runtime import SessionStart
 
@@ -63,7 +63,8 @@ Read what bears on your work (test_result, notebook_brief) and carry on from whe
 _WAKE_ITEM = "- {kind} {pointer}: {summary}"
 _NUDGE = """\
 Your turn ended with no test of yours running and nothing new for your branch. The session decides when your branch \
-stops: choose your next direction from the profile, the learnings and what was tried, and test it."""
+stops. Settings run out; source work does not: take the operator the profile ranks highest in your direction and \
+write a patch, a fused or tuned kernel, or a port of a PR the image lacks, and test it."""
 _LAUNCH = (
     _REPAIR,
     _DIRECTION,
@@ -139,7 +140,11 @@ held back, or a test that could not be judged. What another specialist should kn
 to notebook_learn. Then go back to step 2: the session decides when your branch stops, not you.
 
 Your launch prompt names your branch's direction: work on it first. When its first idea fails, profile and dig \
-deeper in it rather than switching to settings. Once it is done, with nothing promising left in it (a tuning pass \
+deeper in it rather than switching to settings. Settings are a small space the settings branch sweeps; the larger \
+ceilings are in source: a patch, a fused or tuned kernel, or a port of an aiter or framework PR, on the operators the \
+profile ranks highest. That every setting near your direction was tried never means your direction is done. Never \
+end a turn to wait for a brief: one comes only when the session moves, and a branch that keeps finding nothing to \
+test is moved to another direction or stopped. Once it is done, with nothing promising left in it (a tuning pass \
 can be done within the hour), take another of the session's directions, preferring one no running branch covers: \
 {{directions}}.
 
@@ -272,7 +277,7 @@ def prompt_versions() -> dict[str, str]:
 
 
 def _direction_names() -> str:
-    return "; ".join(direction.split(":", 1)[0] for direction in DIRECTIONS)
+    return "; ".join(direction_name(direction) for direction in DIRECTIONS)
 
 
 def _fake_gains() -> str:

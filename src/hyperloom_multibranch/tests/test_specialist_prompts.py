@@ -251,6 +251,18 @@ def test_the_role_tests_a_replayable_champion_on_the_head_before_other_direction
     assert "get its delta with notebook_replay and test it on your head before other directions" in prompt
 
 
+def test_the_role_says_settings_running_out_never_ends_a_direction_and_no_brief_comes_by_waiting():
+    prompt = role_prompt(WORKLOAD)
+
+    assert "That every setting near your direction was tried never means your direction is done" in prompt
+    assert "a patch, a fused or tuned kernel, or a port of an aiter or framework PR" in prompt
+    assert "Never end a turn to wait for a brief" in prompt
+
+
+def test_the_nudge_sends_a_model_that_ran_out_of_settings_to_source_work():
+    assert "Settings run out; source work does not" in prompts.nudge_message()
+
+
 def test_the_role_points_at_the_brief_s_unfinished_leads_by_their_section_title():
     prompt = role_prompt(WORKLOAD)
 

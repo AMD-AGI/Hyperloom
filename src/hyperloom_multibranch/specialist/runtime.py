@@ -13,7 +13,10 @@ A session that crashes is restarted on its branch, at most ``MAX_RESTARTS`` time
 lost one at most ``MAX_LOSS_RESTARTS`` times in a row with no session working in between: a loss takes the heartbeat
 timeout, so losses alone never fill the window. A session that ends idle, its model finding nothing to test, is no
 crash: it is restarted, and it ends a run of losses as a session that worked does, but ``MAX_IDLE_SESSIONS`` of them
-in a row with no test requested in any are not restarted. Past any of these the branch keeps its judge, which settles
+in a row with no test requested in any are not restarted. A branch on one of the session's directions is restarted
+on the least-held other one, picked as for a new branch: its model had concluded its direction was exhausted, and a
+restart on the same one reads that conclusion back from the branch log and ends idle again. A direction the user
+wrote and a repair stay. Past any of these the branch keeps its judge, which settles
 what was already measured, and the scheduler stops it as it stops any branch that makes no progress; ``status`` tells
 it. A judge that fails is a defect of this code, not of the specialist: it is not restarted, and the branch's session
 is stopped so no candidate is measured that nothing would judge. Both leave a notice in the branch log. While the
@@ -27,7 +30,7 @@ import asyncio
 import logging
 import time
 from collections import Counter, deque
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Protocol
 
@@ -35,7 +38,7 @@ from hyperloom_multibranch.contracts.branch_log import BranchLogEntry, BranchLog
 from hyperloom_multibranch.contracts.lifecycle import BranchTask, SpecialistStatus
 from hyperloom_multibranch.contracts.notebook.interfaces import ClaimService, NotebookError
 from hyperloom_multibranch.contracts.notebook.vocab import ClaimStatus
-from hyperloom_multibranch.specialist.directions import DIRECTIONS
+from hyperloom_multibranch.specialist.directions import DIRECTIONS, direction_name
 from hyperloom_multibranch.specialist.judging import NOTICE, BranchJudge, JudgeNotebook, Judging
 
 logger = logging.getLogger(__name__)
@@ -147,8 +150,7 @@ class SpecialistRuntime:
         if branch in self._branches:
             raise ValueError(f"branch {branch!r} already has a specialist")
         if not task.direction.strip() and task.repair is None:
-            running = [state.task.direction for state in self._branches.values()]
-            task = replace(task, direction=min(DIRECTIONS, key=lambda d: (self._held[d], running.count(d))))
+            task = replace(task, direction=self._least_held(DIRECTIONS))
         if task.direction in DIRECTIONS:
             self._held[task.direction] += 1
         state = _Branch(branch, start_commit, task, self._notebook_for(branch))
@@ -211,6 +213,8 @@ class SpecialistRuntime:
                     return
                 logger.info("the specialist of %s ended idle: %s", state.name, error)
                 await _notice(state, f"the specialist ended idle ({error}) and is restarted on this branch")
+                if state.task.repair is None and state.task.direction in DIRECTIONS:
+                    await self._turn(state)
             except Exception as error:
                 logger.exception("the specialist of %s crashed", state.name)
                 await state.session.stop()
@@ -234,6 +238,21 @@ class SpecialistRuntime:
                 state.session, state.gave_up = None, True
                 await _notice(state, f"the specialist {why} ({error!r}); it is not restarted")
                 return
+
+    def _least_held(self, directions: Sequence[str]) -> str:
+        running = [state.task.direction for state in self._branches.values()]
+        return min(directions, key=lambda d: (self._held[d], running.count(d)))
+
+    async def _turn(self, state: _Branch) -> None:
+        """Move a branch whose session ended idle to the least-held other direction."""
+        previous = state.task.direction
+        direction = self._least_held([d for d in DIRECTIONS if d != previous])
+        state.task = replace(state.task, direction=direction)
+        self._held[direction] += 1
+        await _notice(
+            state,
+            f"found nothing to test in {direction_name(previous)}; this branch now works on {direction_name(direction)}",
+        )
 
     async def _judge(self, state: _Branch, judge: BranchJudge) -> None:
         try:

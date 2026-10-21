@@ -335,6 +335,42 @@ async def test_idle_sessions_in_a_row_that_tested_nothing_stop_the_restarts(sess
     await runtime.stop(BRANCH)
 
 
+async def test_an_idle_session_restarts_its_branch_on_the_least_held_other_direction(session):
+    runs = _Runs(errors=(_idle(), _idle(tested=True)))
+    runtime = session.runtime(runs)
+    head = await session.repo.head(BRANCH)
+
+    await runtime.start(BRANCH, head)
+    await _until(lambda: _true(len(runs.started) == 3), "both idle sessions to be restarted")
+    await runtime.start("next", head)
+    await _until(lambda: _true(len(runs.started) == 4), "the next branch to start")
+    await runtime.stop("next")
+
+    directions = [run.start.task.direction for run in runs.started]
+    assert directions == list(DIRECTIONS[:4])
+    first, second = (DIRECTIONS[index].split(":", 1)[0] for index in (0, 1))
+    assert any(
+        f"found nothing to test in {first}; this branch now works on {second}" in notice
+        for notice in await session.notices()
+    )
+    await runtime.stop(BRANCH)
+
+
+@pytest.mark.parametrize("kind", ["direction", "repair"])
+async def test_an_idle_session_keeps_a_direction_the_user_wrote_and_a_repair(session, kind):
+    blocked = Judgement(Verdict.BLOCKED, 3.0, 2.0, ("s0-4", "s0-5"), {"output_throughput": 1030.0}, False)
+    repair = RepairRequest(intent("s0", "c0"), delta(), blocked, "per-tensor KV scales; scale per head")
+    task = BranchTask(direction="the user's own") if kind == "direction" else BranchTask(repair=repair)
+    runs = _Runs(errors=(_idle(), _idle()))
+    runtime = session.runtime(runs)
+
+    await runtime.start(BRANCH, await session.repo.head(BRANCH), task)
+    await _until(lambda: _true(len(runs.started) == 3), "both idle sessions to be restarted")
+    await runtime.stop(BRANCH)
+
+    assert [run.start.task for run in runs.started] == [task] * 3
+
+
 async def test_an_idle_session_that_tested_counts_idle_sessions_again_and_any_idle_one_ends_a_loss_streak(session):
     idle_then_tested = (*(_idle() for _ in range(MAX_IDLE_SESSIONS - 1)), _idle(tested=True))
     losses = tuple(_lost() for _ in range(MAX_LOSS_RESTARTS))
