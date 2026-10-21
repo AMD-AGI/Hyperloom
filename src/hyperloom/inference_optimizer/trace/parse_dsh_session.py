@@ -5,33 +5,27 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.deepseek_session import turn_end_failure
+from hyperloom.common.deepseek_session import step_usage, turn_end_failure
 from hyperloom.common.env_safety import redact_secret_values
 
 from ._row_utils import coerce_optional_int
 from .agent_trace import AgentTrace
-from .parse_usage import _summarize_tool_input, normalize_usage
+from .parse_usage import _iter_json_events, _summarize_tool_input, normalize_usage
 
 log = logging.getLogger(__name__)
 
-# Every session the run opened, the root and each subagent's, under the run's ``DSH_HOME``.
-_SESSION_LOG_GLOB = "sessions/*/*/session.v3.jsonl.zstd"
+# Every session the run opened, the root and each subagent's, under the run's ``DSH_HOME``. The launch's patch turns
+# off the log's compression, which is the harness's default and is not a format external readers may rely on.
+_SESSION_LOG_GLOB = "sessions/*/*/session.v3.jsonl"
 
 _REASONING_KEY = "reasoning_output_tokens"
 _ASSISTANT_MESSAGE = "assistant/message"
-
-# ``inputTokens`` already excludes the cached prefix, so it maps straight onto the uncached counter.
-_TOKEN_NAMES: dict[str, str] = {
-    "inputTokens": "input_tokens",
-    "outputTokens": "output_tokens",
-    "cacheReadTokens": "cache_read_input_tokens",
-    "reasoningTokens": _REASONING_KEY,
-}
 
 # dsh tool name -> the Claude tool name the intel ledger and the web-tool policy already use.
 _TOOL_NAMES: dict[str, str] = {
@@ -48,46 +42,9 @@ _TOOL_NAMES: dict[str, str] = {
 }
 
 
-def _decode_frames(blob: bytes) -> bytes:
-    """Concatenate every complete zstd frame of ``blob``.
-
-    The harness appends one frame per flush, so a run reaped mid-write leaves
-    only its last frame incomplete.
-    """
-    import zstandard
-
-    decoded = bytearray()
-    while blob:
-        decompressor = zstandard.ZstdDecompressor().decompressobj()
-        try:
-            decoded += decompressor.decompress(blob)
-        except zstandard.ZstdError:
-            break
-        if not decompressor.eof:
-            break
-        blob = decompressor.unused_data
-    return bytes(decoded)
-
-
 def _session_records(path: Path) -> list[dict[str, Any]]:
-    """The JSON records of one session log, up to a cut-off final frame."""
-    try:
-        decoded = _decode_frames(path.read_bytes())
-    except ImportError:
-        log.warning("parse_dsh_session: zstandard is not installed; dsh session log %s is unreadable", path)
-        return []
-    except OSError as exc:
-        log.warning("parse_dsh_session: cannot read dsh session log %s: %s", path, exc)
-        return []
-    records: list[dict[str, Any]] = []
-    for line in decoded.decode("utf-8", errors="replace").splitlines():
-        try:
-            record = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(record, dict):
-            records.append(record)
-    return records
+    """The JSON records of one session log, up to a cut-off final line."""
+    return list(_iter_json_events(path, "dsh session"))
 
 
 def _is_root(records: list[dict[str, Any]]) -> bool:
@@ -99,14 +56,6 @@ def _is_root(records: list[dict[str, Any]]) -> bool:
 def _data(record: dict[str, Any], kind: str) -> dict[str, Any]:
     data = record.get("data") if record.get("type") == kind else None
     return data if isinstance(data, dict) else {}
-
-
-def _step_usage(record: dict[str, Any]) -> dict[str, int]:
-    usage = _data(record, _ASSISTANT_MESSAGE).get("usage")
-    if not isinstance(usage, dict):
-        return {}
-    counts = {name: coerce_optional_int(usage.get(wire)) for wire, name in _TOKEN_NAMES.items()}
-    return {name: count for name, count in counts.items() if count is not None}
 
 
 def _canonical(usage: dict[str, int]) -> dict[str, int | None] | None:
@@ -132,10 +81,9 @@ def _tool_call(record: dict[str, Any]) -> dict[str, Any] | None:
         return None
     arguments: Any = data.get("arguments")
     if isinstance(arguments, str):
-        try:
+        # Arguments that are not JSON are summarized as the text they are.
+        with contextlib.suppress(json.JSONDecodeError):
             arguments = json.loads(arguments)
-        except json.JSONDecodeError:
-            pass
     return {"tool": _TOOL_NAMES.get(name, name), "query": _summarize_tool_input(arguments)}
 
 
@@ -149,9 +97,10 @@ def parse_dsh_session_trace(dsh_home: str | Path) -> AgentTrace:
     tool_calls: list[dict[str, Any]] = []
     replies: list[str] = []
     error = ""
-    for path in sorted(Path(dsh_home).glob(_SESSION_LOG_GLOB)):
+    paths = sorted(Path(dsh_home).glob(_SESSION_LOG_GLOB))
+    for path in paths:
         records = _session_records(path)
-        steps += [usage for usage in map(_step_usage, records) if usage]
+        steps += [usage for usage in map(step_usage, records) if usage]
         tool_calls += [call for call in map(_tool_call, records) if call is not None]
         if _is_root(records):
             replies += [text for record in records for text in _reply_texts(record)]
@@ -160,6 +109,9 @@ def parse_dsh_session_trace(dsh_home: str | Path) -> AgentTrace:
     for step in steps:
         for key, count in step.items():
             totals[key] = totals.get(key, 0) + count
+    if not paths:
+        log.warning("parse_dsh_session: dsh left no session log under %s; its token spend is unknown", dsh_home)
+        return AgentTrace(error=f"dsh: no session log was written under {dsh_home}")
     return AgentTrace(
         usage=_canonical(totals),
         response=replies[-1] if replies else None,

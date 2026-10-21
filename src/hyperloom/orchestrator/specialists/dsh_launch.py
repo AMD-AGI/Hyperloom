@@ -18,26 +18,24 @@ import shutil
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
-from urllib.parse import urlsplit
 
-from hyperloom.common.env_safety import BLOCKED_CHILD_ENV_NAMES, valid_env_key
-from hyperloom.common.llm_config import DEFAULT_DEEPSEEK_HARNESS_MODEL, LLMConfigError, resolve_openai_client_config
+from hyperloom.common.deepseek_session import DEEPSEEK_PROVIDER_ROUTE, DeepSeekSessionUnavailableError, gateway_env
 from hyperloom.inference_optimizer.trace.agent_trace import AgentTrace
 from hyperloom.inference_optimizer.trace.parse_dsh_session import parse_dsh_session_trace
 
 from .agent_cli_config import (
-    MCP_HTTP,
-    MCP_STDIO,
+    McpServer,
     SpecialistAgentUnavailableError,
     _codex_provider_resolver_overlay,
     _private_mcp_env_name,
     _resolve_env_references,
+    load_mcp_servers,
 )
 
 # ``dsh --profile headless`` reads its task from argv alone, and Linux caps one argument at MAX_ARG_STRLEN (32 pages).
 _TASK_ARG_LIMIT_BYTES = 32 * 4096
 # dsh-mcp-client's ``serverName`` rule.
+_PATCH_CONFIG = "  config:"
 _MCP_SERVER_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,32}$")
 _MCP_ENV_PREFIX = "HYPERLOOM_DSH_MCP_ENV_"
 # The shipped headless profile's default instruction budget; raised when the system prompt needs more.
@@ -53,7 +51,7 @@ class DshLaunchRequest:
 
     Attributes:
         executable: The resolved ``dsh`` CLI, ``""`` when none exists.
-        model: Harness model id; empty takes the harness default model.
+        model: Harness model id.
         mcp_config_path: Claude-style MCP config to translate, if any.
         workspace: The task workspace; its ``.dsh`` is the run's ``DSH_HOME``.
         system_prompt: Sent as the run's baseline instructions.
@@ -115,7 +113,7 @@ def _yaml_string(value: str) -> str:
 
 
 class _McpRows:
-    """Translate Claude-style MCP servers into ``dsh-mcp-client`` patch rows.
+    """Render validated MCP servers as ``dsh-mcp-client`` patch rows.
 
     Header and env values are resolved into child-only variables that the rows
     reference, so the patch file carries no secret.
@@ -127,28 +125,11 @@ class _McpRows:
         self.rows: list[str] = []
         self.env_additions: dict[str, str] = {}
 
-    def add(self, name: str, server: Any) -> None:
+    def add(self, server: McpServer) -> None:
+        name = server.name
         if not _MCP_SERVER_NAME_RE.fullmatch(name):
             raise SpecialistAgentUnavailableError(
                 f"dsh MCP server name {name!r} is not translatable; use 1-32 letters, digits, '_' or '-'"
-            )
-        if not isinstance(server, dict):
-            raise SpecialistAgentUnavailableError(f"dsh MCP server {name!r} must be an object")
-        transport = str(server.get("type") or "").strip().lower()
-        if not transport:
-            transport = MCP_HTTP if server.get("url") else MCP_STDIO if server.get("command") else ""
-        if transport not in (MCP_HTTP, MCP_STDIO):
-            raise SpecialistAgentUnavailableError(
-                f"dsh MCP server {name!r} uses unsupported transport {transport or '<missing>'!r}; "
-                "expected 'http' or 'stdio'"
-            )
-        unsupported = set(server) - {
-            "type",
-            *(("url", "headers") if transport == MCP_HTTP else ("command", "args", "env")),
-        }
-        if unsupported:
-            raise SpecialistAgentUnavailableError(
-                f"dsh MCP server {name!r} has unsupported {transport} fields: {sorted(unsupported)!r}"
             )
         self.rows.extend(
             [
@@ -158,10 +139,10 @@ class _McpRows:
                 f"        serverName: {_yaml_string(name)}",
             ]
         )
-        if transport == MCP_HTTP:
-            self._http(name, server)
+        if server.is_http:
+            self._http(server)
         else:
-            self._stdio(name, server)
+            self._stdio(server)
 
     def _private_reference(self, raw_value: str, *, context: str) -> str:
         """Hold one value in a child-only variable; return the patch expression that reads it."""
@@ -175,89 +156,59 @@ class _McpRows:
         self.env_additions[env_name] = _resolve_env_references(raw_value, source=self.source, context=context)
         return f"!!js process.env.{env_name}"
 
-    def _http(self, name: str, server: dict[str, Any]) -> None:
-        url = server.get("url")
-        parsed = urlsplit(url.strip()) if isinstance(url, str) else None
-        if parsed is None or parsed.scheme not in {"http", "https"} or not parsed.netloc:
-            raise SpecialistAgentUnavailableError(f"dsh MCP server {name!r} has invalid HTTP URL")
-        if parsed.username is not None or parsed.password is not None:
-            raise SpecialistAgentUnavailableError(
-                f"dsh MCP server {name!r} URL embeds credentials; use environment-backed headers instead"
-            )
-        headers = server.get("headers") or {}
-        if not isinstance(headers, dict):
-            raise SpecialistAgentUnavailableError(f"dsh MCP server {name!r} headers must be an object")
-        self.rows.extend(["        transport: streamable-http", f"        url: {_yaml_string(url.strip())}"])
-        if headers:
+    def _http(self, server: McpServer) -> None:
+        self.rows.extend(["        transport: streamable-http", f"        url: {_yaml_string(server.url)}"])
+        if server.headers:
             self.rows.append("        headers:")
-        for raw_header, raw_value in headers.items():
-            header = str(raw_header or "").strip()
-            if not header or not isinstance(raw_value, str):
-                raise SpecialistAgentUnavailableError(f"dsh MCP server {name!r} has an invalid HTTP header")
-            reference = self._private_reference(raw_value, context=f"dsh MCP server {name!r} header {header!r}")
+        for header, raw_value in server.headers:
+            reference = self._private_reference(raw_value, context=f"dsh MCP server {server.name!r} header {header!r}")
             self.rows.append(f"          {_yaml_string(header)}: {reference}")
 
-    def _stdio(self, name: str, server: dict[str, Any]) -> None:
-        command = server.get("command")
-        if not isinstance(command, str) or not command.strip():
-            raise SpecialistAgentUnavailableError(f"dsh MCP server {name!r} requires a non-empty command")
-        args = server.get("args") or []
-        if not isinstance(args, list) or not all(isinstance(value, str) for value in args):
-            raise SpecialistAgentUnavailableError(f"dsh MCP server {name!r} args must be a list of strings")
-        raw_env = server.get("env") or {}
-        if not isinstance(raw_env, dict):
-            raise SpecialistAgentUnavailableError(f"dsh MCP server {name!r} env must be an object")
+    def _stdio(self, server: McpServer) -> None:
         self.rows.extend(
             [
                 "        transport: stdio",
-                f"        command: {_yaml_string(command.strip())}",
-                f"        args: {json.dumps(args, ensure_ascii=False)}",
+                f"        command: {_yaml_string(server.command)}",
+                f"        args: {json.dumps(list(server.args), ensure_ascii=False)}",
             ]
         )
-        if raw_env:
+        if server.env:
             self.rows.append("        env:")
-        for raw_key, raw_value in raw_env.items():
-            key = str(raw_key or "").strip()
-            if not valid_env_key(key) or key in BLOCKED_CHILD_ENV_NAMES or not isinstance(raw_value, str):
-                raise SpecialistAgentUnavailableError(
-                    f"dsh MCP server {name!r} has an unsafe or invalid env entry {key!r}"
-                )
-            reference = self._private_reference(raw_value, context=f"dsh MCP server {name!r} env {key!r}")
+        for key, raw_value in server.env:
+            reference = self._private_reference(raw_value, context=f"dsh MCP server {server.name!r} env {key!r}")
             self.rows.append(f"          {_yaml_string(key)}: {reference}")
 
 
 def _mcp_rows(config_path: str | None, *, source: Mapping[str, str], protected_env_names: frozenset[str]) -> _McpRows:
     """The ``dsh-mcp-client`` rows for the servers of a Claude-style MCP config file."""
     rows = _McpRows(source, protected_env_names)
-    if not config_path:
-        return rows
-    path = Path(config_path)
-    try:
-        payload = json.loads(path.read_text(encoding=_ENCODING))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise SpecialistAgentUnavailableError(f"cannot read specialist MCP config {path}: {exc}") from exc
-    servers = payload.get("mcpServers") if isinstance(payload, dict) else None
-    if not isinstance(servers, dict):
-        raise SpecialistAgentUnavailableError(f"specialist MCP config {path} must contain an object at 'mcpServers'")
-    for name, server in servers.items():
-        rows.add(str(name or ""), server)
+    for server in load_mcp_servers(config_path):
+        rows.add(server)
     return rows
 
 
 def _render_patch(*, model: str, instruction_bytes: int, mcp_rows: list[str]) -> str:
     """The patch overlay a specialist's headless ``dsh`` run boots with."""
     lines = [
-        # The shipped headless profile lists a session-title plugin whose
-        # package the runtime does not ship, and boot fails while it is enabled.
+        # The shipped headless profile enables a session-title plugin whose
+        # implementation package (@deepseek-ai/dsh-session-title-llm) the
+        # runtime does not ship, and boot fails while it is enabled.
         "- id: session-title-llm",
         "  disabled: true",
+        # The harness compresses its session log by default, a format its own
+        # documentation says is to be read through the backend; the harvest
+        # reads the plain JSONL instead.
+        "- id: session-persistence-jsonl",
+        _PATCH_CONFIG,
+        "    root: !!js dshHomePath('sessions')",
+        "    compression: none",
         "- id: agent-default-model",
-        "  config:",
-        "    provider: deepseek-official",
+        _PATCH_CONFIG,
+        f"    provider: {DEEPSEEK_PROVIDER_ROUTE}",
         f"    model: {_yaml_string(model)}",
         # ``$DSH_HOME/AGENTS.md`` carries the system prompt; never clip it.
         "- id: agent-instructions",
-        "  config:",
+        _PATCH_CONFIG,
         f"    maxBytes: {instruction_bytes + _DEFAULT_INSTRUCTION_BYTES}",
     ]
     if mcp_rows:
@@ -272,19 +223,6 @@ def _write_private_text(path: Path, text: str) -> None:
     with os.fdopen(fd, "w", encoding=_ENCODING) as handle:
         handle.write(text)
     path.chmod(_PRIVATE_FILE_MODE)
-
-
-def _gateway_env(base_env: Mapping[str, str]) -> dict[str, str]:
-    """The harness's ``DEEPSEEK_*`` gateway names, set from the OpenAI-compatible line it speaks."""
-    try:
-        gateway = resolve_openai_client_config(env=_codex_provider_resolver_overlay(base_env))
-    except LLMConfigError as exc:
-        raise SpecialistAgentUnavailableError(
-            f"the DeepSeek Harness needs OPENAI_BASE_URL and OPENAI_API_KEY: {exc}"
-        ) from exc
-    if not gateway.base_url or not gateway.api_key:
-        raise SpecialistAgentUnavailableError("the DeepSeek Harness needs both OPENAI_BASE_URL and OPENAI_API_KEY")
-    return {"DEEPSEEK_BASE_URL": gateway.base_url, "DEEPSEEK_API_KEY": gateway.api_key}
 
 
 def _prepare_home(home: Path, *, instructions: str, patch: str) -> Path:
@@ -322,8 +260,12 @@ def build_dsh_launch(request: DshLaunchRequest, base_env: Mapping[str, str]) -> 
             f"the specialist user prompt is {task_bytes} bytes; dsh headless takes its "
             f"task as one argument, which the kernel caps below {_TASK_ARG_LIMIT_BYTES} bytes"
         )
+    try:
+        gateway = gateway_env(_codex_provider_resolver_overlay(base_env))
+    except DeepSeekSessionUnavailableError as exc:
+        raise SpecialistAgentUnavailableError(str(exc)) from exc
     env_additions = {
-        **_gateway_env(base_env),
+        **gateway,
         "DSH_PERMISSION_MODE": "danger-full-access",
         "DSH_TELEMETRY_MODE": "DISABLED",
     }
@@ -336,7 +278,7 @@ def build_dsh_launch(request: DshLaunchRequest, base_env: Mapping[str, str]) -> 
         home,
         instructions=instructions,
         patch=_render_patch(
-            model=request.model or DEFAULT_DEEPSEEK_HARNESS_MODEL,
+            model=request.model,
             instruction_bytes=len(instructions.encode(_ENCODING)),
             mcp_rows=mcp.rows,
         ),
@@ -349,12 +291,13 @@ def build_dsh_launch(request: DshLaunchRequest, base_env: Mapping[str, str]) -> 
 
 
 def harvest_dsh_trace(workspace: Path) -> AgentTrace:
-    """What a finished ``dsh`` run left under its ``DSH_HOME``; its profile tree is removed after.
+    """What a finished ``dsh`` run left under its ``DSH_HOME``.
 
     dsh prints only its final message and reasoning, so the session logs are the record.
     """
-    home = dsh_home(workspace)
-    trace = parse_dsh_session_trace(home)
-    # dsh materializes megabytes of profile modules per DSH_HOME; a finished task never boots it again.
-    shutil.rmtree(home / "profiles", ignore_errors=True)
-    return trace
+    return parse_dsh_session_trace(dsh_home(workspace))
+
+
+def remove_dsh_profiles(workspace: Path) -> None:
+    """Remove the megabytes of profile modules dsh materializes per ``DSH_HOME``; a finished task never boots it again."""
+    shutil.rmtree(dsh_home(workspace) / "profiles", ignore_errors=True)

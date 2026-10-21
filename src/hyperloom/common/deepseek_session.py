@@ -52,6 +52,7 @@ _USAGE_WIRE_NAMES: dict[str, str] = {
     "inputTokens": "input_tokens",
     "outputTokens": "output_tokens",
     "cacheReadTokens": "cache_read_input_tokens",
+    "reasoningTokens": "reasoning_output_tokens",
 }
 
 
@@ -95,15 +96,14 @@ def sdk_failures() -> tuple[type[BaseException], ...]:
     return (errors.HarnessError, asyncio.TimeoutError, TimeoutError, OSError)
 
 
-def with_deepseek_gateway(env: Mapping[str, str]) -> dict[str, str]:
-    """Return ``env`` with the configured gateway written onto the names the harness adapter reads.
+def gateway_env(env: Mapping[str, str]) -> dict[str, str]:
+    """The ``DEEPSEEK_*`` names the harness adapter reads, set from the gateway ``env`` configures.
 
     The harness's DeepSeek adapter authenticates from ``DEEPSEEK_*`` only, while
     this repository configures the gateway on the OpenAI-compatible line.
     """
-    merged = dict(env)
     try:
-        gateway = resolve_openai_client_config(env=merged)
+        gateway = resolve_openai_client_config(env=dict(env))
     except LLMConfigError as exc:
         raise DeepSeekSessionUnavailableError(
             f"the DeepSeek Harness speaks the OpenAI-compatible protocol and needs "
@@ -114,9 +114,12 @@ def with_deepseek_gateway(env: Mapping[str, str]) -> dict[str, str]:
             "the DeepSeek Harness speaks the OpenAI-compatible protocol and needs "
             "both OPENAI_BASE_URL and OPENAI_API_KEY"
         )
-    merged["DEEPSEEK_BASE_URL"] = gateway.base_url
-    merged["DEEPSEEK_API_KEY"] = gateway.api_key
-    return merged
+    return {"DEEPSEEK_BASE_URL": gateway.base_url, "DEEPSEEK_API_KEY": gateway.api_key}
+
+
+def with_deepseek_gateway(env: Mapping[str, str]) -> dict[str, str]:
+    """Return ``env`` with the configured gateway written onto the names the harness adapter reads."""
+    return {**env, **gateway_env(env)}
 
 
 def child_environment(overrides: Mapping[str, str] | None, permission_mode: str) -> dict[str, str]:
@@ -180,6 +183,30 @@ def start_harness(sdk: Any, launch: HarnessLaunch) -> Any:
     return harness
 
 
+def step_usage(event: Mapping[str, Any]) -> dict[str, int] | None:
+    """The token counts one ``assistant/message`` event reports, or ``None`` for any other event.
+
+    One implementation for every reader of the harness's records: the live
+    events of a turn and the records of a session log share this shape.
+    """
+    if event.get("type") != "assistant/message":
+        return None
+    data = event.get("data")
+    usage = data.get("usage") if isinstance(data, dict) else None
+    if not isinstance(usage, dict):
+        return None
+    step: dict[str, int] = {}
+    for wire, name in _USAGE_WIRE_NAMES.items():
+        value = usage.get(wire)
+        if isinstance(value, bool):
+            continue
+        with contextlib.suppress(TypeError, ValueError):
+            parsed = int(value)
+            if parsed >= 0:
+                step[name] = parsed
+    return step
+
+
 def usage_from_events(events: list[dict[str, Any]]) -> dict[str, int]:
     """Sum the per-step token counts the harness reports for one turn."""
     totals = {
@@ -191,23 +218,12 @@ def usage_from_events(events: list[dict[str, Any]]) -> dict[str, int]:
     seen = False
     peak = 0
     for event in events:
-        if not isinstance(event, dict) or event.get("type") != "assistant/message":
-            continue
-        data = event.get("data")
-        usage = data.get("usage") if isinstance(data, dict) else None
-        if not isinstance(usage, dict):
+        step = step_usage(event) if isinstance(event, dict) else None
+        if step is None:
             continue
         seen = True
-        step: dict[str, int] = {}
-        for wire, name in _USAGE_WIRE_NAMES.items():
-            value = usage.get(wire)
-            if isinstance(value, bool):
-                continue
-            with contextlib.suppress(TypeError, ValueError):
-                parsed = int(value)
-                if parsed >= 0:
-                    totals[name] += parsed
-                    step[name] = parsed
+        for name, count in step.items():
+            totals[name] = totals.get(name, 0) + count
         # ``inputTokens`` excludes the cached prefix, and every step resends the whole context, so one step's
         # uncached plus cached input is that request's context size; the largest of them is the turn's peak.
         peak = max(peak, step.get("input_tokens", 0) + step.get("cache_read_input_tokens", 0))
@@ -391,10 +407,12 @@ __all__ = [
     "DeepSeekSessionUnavailableError",
     "HarnessLaunch",
     "child_environment",
+    "gateway_env",
     "load_harness_sdk",
     "normalize_run_result",
     "sdk_failures",
     "start_harness",
+    "step_usage",
     "turn_end_failure",
     "usage_from_events",
     "with_deepseek_gateway",

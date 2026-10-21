@@ -23,10 +23,6 @@ _DEFAULT_RUNTIMES: tuple[tuple[str, str], ...] = (
 #: admits a pre-release only when the specifier itself does.
 DEEPSEEK_HARNESS_SDK_SPEC = "deepseek-harness-sdk>=0.1.5rc1"
 
-#: Decodes the zstd session logs a ``dsh`` specialist run leaves under its
-#: ``DSH_HOME``, where its token usage and tool calls are read from.
-DEEPSEEK_SESSION_LOG_DECODER_SPEC = "zstandard>=0.22"
-
 
 def harness_runtime_requirements(env: Mapping[str, str] | None = None) -> tuple[tuple[str, str], ...]:
     """``(module, pip spec)`` pairs this launch needs installed for the DeepSeek Harness.
@@ -36,7 +32,7 @@ def harness_runtime_requirements(env: Mapping[str, str] | None = None) -> tuple[
     source = env if env is not None else os.environ
     if (source.get(AGENT_BACKEND_ENV) or "").strip().lower() != AGENT_BACKEND_DEEPSEEK:
         return ()
-    return (("deepseek_harness", DEEPSEEK_HARNESS_SDK_SPEC), ("zstandard", DEEPSEEK_SESSION_LOG_DECODER_SPEC))
+    return (("deepseek_harness", DEEPSEEK_HARNESS_SDK_SPEC),)
 
 
 def agent_runtime_requirements(env: Mapping[str, str] | None = None) -> tuple[tuple[str, str], ...]:

@@ -41,7 +41,6 @@ llm = [
 # only by naming it, so a deployment that does not is not made to carry it.
 deepseek = [
     "deepseek-harness-sdk>=0.1.5rc1",
-    "zstandard>=0.22",
 ]
 # Critic-agent web tools (web_search / web_fetch).
 web = [
@@ -119,8 +118,6 @@ test = [
     # framework-agent patch-authoring / isolation paths.
     "libcst>=1.0",
     "patch-ng>=1.18",
-    # The dsh specialist tests write and read the harness's zstd session logs.
-    "zstandard>=0.22",
 ]
 # Coverage job deps: ``pip install -e ".[test,ci]"``.
 ci = [

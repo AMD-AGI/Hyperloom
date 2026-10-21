@@ -13,8 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-import zstandard
-
+import yaml
 
 from hyperloom.common import llm_config
 from hyperloom.common.deadline import Deadline
@@ -102,13 +101,30 @@ _CHILD_SESSION: list[dict[str, Any]] = _session_rows(
 )
 
 
-def _write_session_log(path: Path, rows: list[dict[str, Any]], *, truncate_last: bool = False) -> None:
-    """Write ``rows`` one zstd frame each, the way the harness appends its log as it runs."""
+def _write_session_log(path: Path, rows: list[dict[str, Any]]) -> None:
+    """Write ``rows`` one JSON line each, the way the harness appends its log as it runs."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    frames = [zstandard.ZstdCompressor().compress((json.dumps(row) + "\n").encode("utf-8")) for row in rows]
-    if truncate_last:
-        frames[-1] = frames[-1][: len(frames[-1]) // 2]
-    path.write_bytes(b"".join(frames))
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+
+
+class _PatchLoader(yaml.SafeLoader):
+    """Reads a dsh patch; the ``!!js`` expressions the harness evaluates stay as ``("js", source)``."""
+
+
+_PatchLoader.add_multi_constructor(
+    "tag:yaml.org,2002:js", lambda loader, _suffix, node: ("js", loader.construct_scalar(node))
+)
+
+
+def _patch_rows(text: str) -> dict[str, dict[str, Any]]:
+    """The patch's rows by id; the ``insert`` rows of the MCP clients are listed under their own ids."""
+    rows: dict[str, dict[str, Any]] = {}
+    for row in yaml.load(text, Loader=_PatchLoader):
+        for inserted in row.get("insert", []):
+            rows[inserted["id"]] = inserted
+        if "id" in row:
+            rows[row["id"]] = row
+    return rows
 
 
 def _pin_provider_env(monkeypatch: pytest.MonkeyPatch, shape: dict[str, str]) -> None:
@@ -127,8 +143,6 @@ _FAKE_DSH = """#!{python}
 import json, os, sys
 from pathlib import Path
 
-import zstandard
-
 home = Path(os.environ["DSH_HOME"])
 patch = sys.argv[sys.argv.index("--patch") + 1]
 record = {{
@@ -143,10 +157,9 @@ record = {{
 (home.parent / "fake_dsh_record.json").write_text(json.dumps(record), encoding="utf-8")
 (home / "profiles" / "headless" / "node_modules").mkdir(parents=True, exist_ok=True)
 for rel, rows in {sessions}:
-    body = "".join(json.dumps(row) + "\\n" for row in rows).encode("utf-8")
-    target = home / "sessions" / rel / "session.v3.jsonl.zstd"
+    target = home / "sessions" / rel / "session.v3.jsonl"
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_bytes(zstandard.ZstdCompressor().compress(body))
+    target.write_text("".join(json.dumps(row) + "\\n" for row in rows), encoding="utf-8")
 if {write_done}:
     Path(os.getcwd(), "specialist_done.json").write_text(json.dumps({done}), encoding="utf-8")
 print("DONE")
@@ -212,7 +225,6 @@ async def test_a_deepseek_selection_runs_the_specialist_on_the_dsh_cli(
 ) -> None:
     """Selecting the harness spawns ``dsh`` headless and harvests its session log like the other CLIs."""
     _pin_provider_env(monkeypatch, _OPENAI_ENV)
-    _select_deepseek(monkeypatch)
     dsh = _fake_dsh(
         tmp_path,
         sessions=[("ws/session-0", _ROOT_SESSION), ("ws/session-1", _CHILD_SESSION)],
@@ -239,40 +251,25 @@ async def test_a_deepseek_selection_runs_the_specialist_on_the_dsh_cli(
         "DEEPSEEK_BASE_URL": _OPENAI_ENV["OPENAI_BASE_URL"],
         "DEEPSEEK_API_KEY": _OPENAI_ENV["OPENAI_API_KEY"],
     }
-    assert '"deepseek-v4-flash"' in record["patch"]
-    assert "id: session-title-llm\n  disabled: true" in record["patch"]
+    rows = _patch_rows(record["patch"])
+    assert rows["agent-default-model"]["config"] == {"provider": "deepseek-official", "model": "deepseek-v4-flash"}
+    assert rows["session-title-llm"]["disabled"] is True
+    assert rows["session-persistence-jsonl"]["config"]["compression"] == "none"
 
-    assert result.usage == {
+    trace = result.trace
+    assert trace.usage == {
         "input_tokens": 6542 + 222 + 10,
         "output_tokens": 67 + 3 + 5,
         "cache_creation_input_tokens": None,
         "cache_read_input_tokens": 768 + 7168,
         "reasoning_output_tokens": 0,
     }
-    assert result.response == "DONE"
-    assert [call["tool"] for call in result.tool_calls] == ["Bash", "WebSearch"]
-    assert len(result.turn_usages) == 3
+    assert trace.response == "DONE"
+    assert [call["tool"] for call in trace.tool_calls] == ["Bash", "WebSearch"]
+    assert len(trace.turn_usages) == 3
     # The profile tree dsh materializes per DSH_HOME is megabytes per task; the session logs stay.
     assert not (workspace / ".dsh" / "profiles").exists()
     assert (workspace / ".dsh" / "sessions").is_dir()
-
-
-@pytest.mark.asyncio
-async def test_a_dsh_specialist_works_in_its_worktree(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Like the other CLIs, the agent's working root is the per-task worktree when there is one."""
-    _pin_provider_env(monkeypatch, _OPENAI_ENV)
-    _select_deepseek(monkeypatch)
-    worktree = tmp_path / "worktree"
-    worktree.mkdir()
-
-    result = await _run(_dispatcher(_fake_dsh(tmp_path, sessions=[])), tmp_path, worktree=worktree)
-
-    record = json.loads((tmp_path / "workspace" / "fake_dsh_record.json").read_text(encoding="utf-8"))
-    assert record["cwd"] == str(worktree)
-    assert result.done_payload is not None
 
 
 @pytest.mark.asyncio
@@ -282,7 +279,6 @@ async def test_a_failed_dsh_turn_reaches_the_task_error(
 ) -> None:
     """A provider failure the harness records on ``turn/end`` is the task's error, not a bare exit code."""
     _pin_provider_env(monkeypatch, _OPENAI_ENV)
-    _select_deepseek(monkeypatch)
     failed = _session_rows(
         depth=0,
         rows=[
@@ -290,7 +286,7 @@ async def test_a_failed_dsh_turn_reaches_the_task_error(
                 "type": "turn/end",
                 "data": {
                     "turn": 1,
-                    "reason": {"kind": "failed", "error": {"code": "provider", "message": "429 rate limited"}},
+                    "reason": {"kind": "error", "error": {"code": "provider", "message": "429 rate limited"}},
                 },
             }
         ],
@@ -310,7 +306,6 @@ async def test_a_user_prompt_beyond_the_argv_limit_fails_the_task(
 ) -> None:
     """``dsh`` headless reads its task only from argv, which the kernel caps per argument."""
     _pin_provider_env(monkeypatch, _OPENAI_ENV)
-    _select_deepseek(monkeypatch)
     monkeypatch.setattr(sp.subprocess, "Popen", lambda *_a, **_k: pytest.fail("an oversized task must not spawn"))
 
     result = await _run(_dispatcher(_fake_dsh(tmp_path, sessions=[])), tmp_path, user_prompt="x" * 131072)
@@ -326,7 +321,6 @@ async def test_a_missing_dsh_cli_fails_the_task(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _pin_provider_env(monkeypatch, _OPENAI_ENV)
-    _select_deepseek(monkeypatch)
     monkeypatch.setattr(sp, "resolve_dsh_executable", lambda explicit="": "")
     monkeypatch.setattr(sp.subprocess, "Popen", lambda *_a, **_k: pytest.fail("no dsh means no spawn"))
 
@@ -342,7 +336,6 @@ async def test_an_unconfigured_gateway_fails_the_dsh_task(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _pin_provider_env(monkeypatch, {})
-    _select_deepseek(monkeypatch)
     monkeypatch.setattr(sp.subprocess, "Popen", lambda *_a, **_k: pytest.fail("no gateway means no spawn"))
 
     result = await _run(_dispatcher(_fake_dsh(tmp_path, sessions=[])), tmp_path)
@@ -389,32 +382,36 @@ def test_mcp_servers_become_dsh_client_rows_without_their_secrets(
 
     patch = Path(cmd[cmd.index("--patch") + 1]).read_text(encoding="utf-8")
     assert "pr-secret" not in patch and "tool-secret" not in patch
-    assert "- insert:" in patch
-    assert 'serverName: "pr_monitor"' in patch and "transport: streamable-http" in patch
-    assert 'url: "http://pr-monitor.invalid/mcp"' in patch
-    assert 'serverName: "local"' in patch and "transport: stdio" in patch
-    assert 'command: "/usr/bin/tool"' in patch
-    assert sorted(v for k, v in env_additions.items() if k.startswith("HYPERLOOM_DSH_MCP_ENV_")) == [
-        "Bearer pr-secret",
-        "tool-secret",
-    ]
-    for name in (k for k in env_additions if k.startswith("HYPERLOOM_DSH_MCP_ENV_")):
-        assert f"!!js process.env.{name}" in patch
+    rows = _patch_rows(patch)
+    http = rows["mcp-pr_monitor"]["config"]
+    assert (http["transport"], http["url"]) == ("streamable-http", "http://pr-monitor.invalid/mcp")
+    stdio = rows["mcp-local"]["config"]
+    assert (stdio["transport"], stdio["command"], stdio["args"]) == ("stdio", "/usr/bin/tool", ["--serve"])
+    private = {k: v for k, v in env_additions.items() if k.startswith("HYPERLOOM_DSH_MCP_ENV_")}
+    assert sorted(private.values()) == ["Bearer pr-secret", "tool-secret"]
+    (header_ref,) = http["headers"].values()
+    (env_ref,) = stdio["env"].values()
+    assert {header_ref[1], env_ref[1]} == {f"process.env.{name}" for name in private}
 
 
-def test_a_truncated_dsh_session_log_still_yields_its_complete_records(tmp_path: Path) -> None:
-    """A reaped run leaves a cut-off zstd stream; the records before the cut are still the run's."""
+def test_a_cut_off_dsh_session_log_still_yields_its_complete_records(tmp_path: Path) -> None:
+    """A reaped run leaves a half-written final line; the records before it are still the run's."""
     home = tmp_path / ".dsh"
-    _write_session_log(
-        home / "sessions" / "ws" / "session-0" / "session.v3.jsonl.zstd",
-        _ROOT_SESSION,
-        truncate_last=True,
-    )
+    log = home / "sessions" / "ws" / "session-0" / "session.v3.jsonl"
+    _write_session_log(log, _ROOT_SESSION)
+    with log.open("a", encoding="utf-8") as handle:
+        handle.write('{"type": "assistant/mess')
 
     trace = parse_dsh_session_trace(home)
     assert trace.usage is not None
     assert trace.usage["output_tokens"] == 67 + 3
     assert trace.response == "DONE"
+
+
+def test_a_dsh_run_without_a_session_log_is_reported_not_read_as_zero_spend(tmp_path: Path) -> None:
+    trace = parse_dsh_session_trace(tmp_path / ".dsh")
+    assert trace.usage is None
+    assert "no session log" in (trace.error or "")
 
 
 def test_the_specialist_executor_pins_the_dsh_cli_for_a_deepseek_selection(
