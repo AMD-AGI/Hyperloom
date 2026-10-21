@@ -120,7 +120,9 @@ class TestResolve:
         monkeypatch.delenv("HIP_VISIBLE_DEVICES", raising=False)
         kw.setdefault("nodes", 1)
         kw.setdefault("read", lambda: read_gpu_power_settings(run=_fake_run))
-        kw.setdefault("read_node", _node_reader())
+        from hyperloom.common import gpu_power_settings
+
+        monkeypatch.setattr(gpu_power_settings, "read_node_power_settings", kw.pop("read_node", None) or _node_reader())
         fields = ("power_cap_w", "perf_level", "npm", "node_power_limit_w")
         declared = DeclaredPowerSettings(**{key: value for key in fields if (value := kw.pop(key, None)) is not None})
         return resolve_gpu_power_settings(declared, **kw)
@@ -154,7 +156,10 @@ class TestResolve:
 
     def test_a_declared_npm_state_that_cannot_be_read_refuses(self, monkeypatch):
         _, error = self._resolve(monkeypatch, npm="disabled", read_node=_no_node_command)
-        assert "the node power management settings cannot be read" in error
+        assert error == (
+            "the declared node power management settings cannot be checked: amd-smi node --power-management exited 2: "
+            "invalid choice: 'node'"
+        )
 
     def test_card_and_node_mismatches_are_reported_together(self, monkeypatch):
         _, error = self._resolve(monkeypatch, power_cap_w=1000.0, npm="disabled")
@@ -170,6 +175,10 @@ class TestResolve:
 
         record, error = self._resolve(monkeypatch, npm="enabled", read=_unreadable)
         assert (error, record["node"]["npm"]) == ("", "enabled")
+        assert self._resolve(monkeypatch, read=_unreadable) == (
+            {"node": {"npm": "enabled", "node_power_limit_w": 8000.0}},
+            "",
+        )
         monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "GPU-745a0e162570d044")
         _, error = self._resolve(monkeypatch, npm="disabled")
         assert "node power management is 'enabled', declared 'disabled'" in error
@@ -225,7 +234,7 @@ class TestResolve:
         def _unreadable():
             raise GpuPowerSettingsError("amd-smi is not on PATH")
 
-        assert self._resolve(monkeypatch, read=_unreadable) == ({}, "")
+        assert self._resolve(monkeypatch, read=_unreadable, read_node=_no_node_command) == ({}, "")
 
     def test_a_multi_node_declaration_refuses(self, monkeypatch):
         _, error = self._resolve(monkeypatch, power_cap_w=1000.0, nodes=2)

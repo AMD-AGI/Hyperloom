@@ -411,8 +411,8 @@ def resume_gpu_power_settings(args: Any, state: Any) -> tuple[dict[str, Any], st
     return record, error
 
 
-def _node_power_settings(read_node: Any, declared: Any) -> tuple[dict[str, Any] | None, list[str]]:
-    """The node's NPM reading and why it is not at the declared values; ``(None, [])`` when it cannot be read and
+def _node_power_settings(declared: DeclaredPowerSettings) -> tuple[dict[str, Any] | None, str]:
+    """The node's NPM reading and why the declared values do not hold; ``(None, "")`` when it cannot be read and
     nothing about it was declared (an amd-smi before ROCm 7.2, or a GPU without NPM)."""
     from hyperloom.common.gpu_power_settings import (
         GpuPowerSettingsError,
@@ -422,12 +422,17 @@ def _node_power_settings(read_node: Any, declared: Any) -> tuple[dict[str, Any] 
 
     npm, node_power_limit_w = declared.npm or None, declared.node_power_limit_w
     try:
-        node = (read_node or read_node_power_settings)()
+        node = read_node_power_settings()
     except GpuPowerSettingsError as exc:
         if npm or node_power_limit_w is not None:
-            return None, [f"the node power management settings cannot be read: {exc}"]
-        return None, []
-    return node, declared_node_problems(node, npm=npm, node_power_limit_w=node_power_limit_w)
+            return None, f"the declared node power management settings cannot be checked: {exc}"
+        return None, ""
+    problems = declared_node_problems(node, npm=npm, node_power_limit_w=node_power_limit_w)
+    if problems:
+        return node, "the node is not at the declared power management settings (NPM is set on the BMC): " + "; ".join(
+            problems
+        )
+    return node, ""
 
 
 def resolve_gpu_power_settings(
@@ -435,7 +440,6 @@ def resolve_gpu_power_settings(
     *,
     nodes: int,
     read: Any = None,
-    read_node: Any = None,
     just_applied: bool = False,
 ) -> tuple[dict[str, Any], str]:
     """Read the cards' and the node's power settings and check the declared ones; ``(record, error)``.
@@ -470,7 +474,8 @@ def resolve_gpu_power_settings(
         if cards_declared:
             return {_DECLARED: declared}, f"the declared GPU power settings cannot be checked: {exc}"
         if not declared:
-            return {}, ""
+            node, _ = _node_power_settings(declared_settings)
+            return ({"node": node} if node is not None else {}), ""
         observed = {}
     try:
         gpus = visible_gpu_indices()
@@ -488,7 +493,7 @@ def resolve_gpu_power_settings(
         perf_level=declared.get("perf_level"),
         gpus=gpus,
     )
-    node, node_problems = _node_power_settings(read_node, declared_settings)
+    node, node_error = _node_power_settings(declared_settings)
     if node is not None:
         record["node"] = node
     why = (
@@ -497,12 +502,7 @@ def resolve_gpu_power_settings(
         else "the GPUs are not at the declared power settings (set them with amd-smi before launch)"
     )
     errors = [f"{why}: " + "; ".join(problems)] if problems else []
-    if node_problems:
-        errors.append(
-            "the node is not at the declared power management settings (NPM is set on the BMC): "
-            + "; ".join(node_problems)
-        )
-    return record, "; ".join(errors)
+    return record, "; ".join(errors + [node_error] if node_error else errors)
 
 
 def _build_agentx_corpus_shape_seed() -> dict[str, Any]:
