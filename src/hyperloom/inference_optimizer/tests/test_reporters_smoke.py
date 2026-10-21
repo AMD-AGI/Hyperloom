@@ -373,7 +373,48 @@ def test_kernel_lifecycle_funnel_propagates_to_global_facts() -> None:
     r = render_session_report(_fixture_breakdown())
     f = r.global_facts.kernel_pipeline_funnel
     assert f["detected"] == 50 and f["recommended"] == 10
-    assert f["optimized"] == 0 and f["adopted"] == 0
+    assert f["attempted"] == 0 and f["adopted"] == 0
+
+
+def test_the_funnel_counts_a_kernel_every_lane_rejected_as_attempted() -> None:
+    bd = _fixture_breakdown()
+    bd["timeline"] = [
+        _baseline_event(),
+        {
+            "type": "kernel",
+            "ext": {
+                "attempts": [
+                    {"kernel_id": "k_a", "route": "geak", "outcome": "rejected", "source_kind": "geak_authored_kernel"}
+                ]
+            },
+        },
+    ]
+    r = render_session_report(bd)
+
+    assert (r.global_facts.kernel_pipeline_funnel["attempted"], r.global_facts.kernel_pipeline_funnel["rejected"]) == (
+        1,
+        1,
+    )
+    assert "recommended=1 → attempted=1 → adopted=0 (reverted=0, rejected=1, partial=0)." in r.markdown
+
+
+def test_a_revoked_keep_is_a_revert_in_the_capability_row_and_the_funnel() -> None:
+    bd = _fixture_breakdown()
+    attempt = {
+        "kernel_id": "k_rms",
+        "route": "geak",
+        "source_kind": "geak_authored_kernel",
+        "outcome": "adopted",
+        "speedup": 1.5,
+        "e2e": {"decision": "REVERT", "e2e_gain_pct": 2.0},
+    }
+    bd["timeline"] = [_baseline_event(), {"type": "kernel", "ext": {"attempts": [attempt]}}]
+    r = render_session_report(bd)
+    funnel = r.global_facts.kernel_pipeline_funnel
+
+    assert "| geak | tried | 1 | 0 | reverts=1 |" in r.markdown.splitlines()
+    assert r.global_facts.capabilities_kept == []
+    assert (funnel["adopted"], funnel["reverted"], funnel["partial"]) == (0, 1, 0)
 
 
 def test_variant_funnel_reaches_the_key_facts_and_the_summary() -> None:

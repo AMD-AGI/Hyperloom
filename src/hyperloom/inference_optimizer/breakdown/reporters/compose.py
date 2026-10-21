@@ -226,7 +226,7 @@ def _deterministic_exec_summary(g: GlobalFacts) -> str:
     funnel = g.kernel_pipeline_funnel
     out.append(
         f"- Kernel pipeline: detected={funnel['detected']} → "
-        f"recommended={funnel['recommended']} → optimized={funnel['optimized']} → "
+        f"recommended={funnel['recommended']} → attempted={funnel['attempted']} → "
         f"adopted={funnel['adopted']} (reverted={funnel['reverted']}, "
         f"rejected={funnel['rejected']}, partial={funnel['partial']})."
     )
@@ -289,7 +289,7 @@ def _render_global_facts_block(g: GlobalFacts) -> str:
     out.append(f"- **Variants**: {_variant_funnel_text(g)}")
     out.append(
         f"- **Kernel pipeline**: detected={funnel['detected']} → "
-        f"recommended={funnel['recommended']} → optimized={funnel['optimized']} → "
+        f"recommended={funnel['recommended']} → attempted={funnel['attempted']} → "
         f"adopted={funnel['adopted']} (partial={funnel['partial']}, "
         f"reverted={funnel['reverted']}, rejected={funnel['rejected']})"
     )

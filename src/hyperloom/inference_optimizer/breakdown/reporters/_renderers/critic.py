@@ -19,6 +19,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from hyperloom.inference_optimizer.protocol.intent import DEFAULT_IDLE_BODY
+
 from ..base import (
     RenderedSection,
     as_dict,
@@ -37,15 +39,16 @@ _SUMMARY_CELL = 120
 def _iteration_rows(iterations: list[dict[str, Any]]) -> list[list[Any]]:
     """One table row per pass: when it ran, where, and how it ruled."""
     rows: list[list[Any]] = []
-    for it in iterations:
+    for seq, it in enumerate(iterations, start=1):
+        said = str(it.get("summary") or "")
         rows.append(
             [
-                it.get("iter"),
+                seq,
                 it.get("phase") or "—",
                 it.get("macro_cycle"),
                 it.get("topic") or "—",
                 it.get("verdict") or "—",
-                str(it.get("summary") or "")[:_SUMMARY_CELL] or "—",
+                "—" if said == DEFAULT_IDLE_BODY else said[:_SUMMARY_CELL] or "—",
             ]
         )
     return rows
@@ -58,13 +61,13 @@ def _review_rows(iterations: list[dict[str, Any]]) -> list[list[Any]]:
     still ran, and reporting either alone misreads what happened.
     """
     rows: list[list[Any]] = []
-    for it in iterations:
+    for seq, it in enumerate(iterations, start=1):
         for review in dict_rows(it.get("framework_reviews")):
             verdict = str(review.get("verdict") or "")
             effective = str(review.get("effective_verdict") or "")
             rows.append(
                 [
-                    it.get("iter"),
+                    seq,
                     review.get("proposal_msg_id") or "—",
                     review.get("variant_name") or review.get("candidate_id") or "—",
                     review.get("arm") or "—",
@@ -137,7 +140,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
 
     parts: list[str] = []
     passes = md_table(
-        ["iter", "phase", "macro_cycle", "topic", "rulings", "said"],
+        ["#", "phase", "macro_cycle", "topic", "rulings", "said"],
         _iteration_rows(iterations),
     )
     if passes:
@@ -145,7 +148,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
         parts.append("")
 
     reviews = md_table(
-        ["iter", "proposal", "candidate", "arm", "verdict", "effective", "conf", "failure_code", "reasoning"],
+        ["#", "proposal", "candidate", "arm", "verdict", "effective", "conf", "failure_code", "reasoning"],
         _review_rows(iterations),
     )
     if reviews:
@@ -162,7 +165,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
         ]
     )
     if artifacts:
-        parts.append(f"**Artifacts of the last pass** (iter {last.get('iter')})\n\n" + artifacts)
+        parts.append(f"**Artifacts of the last pass** (pass {len(iterations)})\n\n" + artifacts)
         parts.append("")
 
     return RenderedSection(

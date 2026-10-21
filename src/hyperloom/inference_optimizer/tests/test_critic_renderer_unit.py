@@ -10,6 +10,7 @@ the critic was asked.
 
 from __future__ import annotations
 
+from hyperloom.inference_optimizer.protocol.intent import DEFAULT_IDLE_BODY
 from hyperloom.inference_optimizer.breakdown.reporters._renderers import critic as cr
 
 
@@ -66,3 +67,28 @@ def test_knowledge_base_use_is_reported_only_when_it_was_wired_up():
 def test_a_malformed_verdict_count_does_not_lose_the_section():
     out = cr.render(_critic({"iter": 1, "verdict_counts": {"approve": "many"}}))
     assert out.skipped is False
+
+
+def test_pass_rows_are_numbered_in_order_even_when_the_recorded_counter_repeats():
+    out = cr.render(_critic({"iter": 1, "topic": "a"}, {"iter": 2, "topic": "b"}, {"iter": 1, "topic": "c"}))
+    rows = [line for line in out.markdown_block.splitlines() if line.startswith("| ") and "macro_cycle" not in line]
+
+    assert [row.split(" | ")[0] for row in rows[:3]] == ["| 1", "| 2", "| 3"]
+
+
+def test_the_idle_placeholder_is_not_shown_as_something_the_critic_said():
+    out = cr.render(_critic({"iter": 1, "summary": DEFAULT_IDLE_BODY}, {"iter": 2, "summary": "slow gemm"}))
+    rows = [line for line in out.markdown_block.splitlines() if line.startswith("| ") and "macro_cycle" not in line]
+
+    assert [row.split(" | ")[-1] for row in rows[:2]] == ["— |", "slow gemm |"]
+
+
+def test_both_tables_label_the_sequence_column_as_a_pass_number():
+    out = cr.render(_critic({"iter": 7, "request_path": "r.json", "framework_reviews": [{"verdict": "approve"}]}))
+    headers = [line for line in out.markdown_block.splitlines() if line.startswith("| #")]
+
+    assert headers == [
+        "| # | phase | macro_cycle | topic | rulings | said |",
+        "| # | proposal | candidate | arm | verdict | effective | conf | failure_code | reasoning |",
+    ]
+    assert "**Artifacts of the last pass** (pass 1)" in out.markdown_block
