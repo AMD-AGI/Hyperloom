@@ -9,6 +9,7 @@ import logging
 import os
 import signal
 import subprocess
+import sys
 import time
 
 from hyperloom.common.git_safety import safe_directory_args
@@ -273,6 +274,7 @@ class _TargetedRecipe:
     default_repo: str
     default_max_jobs: int
     replacing: str
+    gpu_arch_error: str | None
     run_timeout: int = 3600
 
     def __init__(
@@ -288,14 +290,14 @@ class _TargetedRecipe:
             AbiMismatchError,
             check_rocm_toolchain_alignment,
             probe_torch_abi,
-            run_argv,
+            run_argv as run_argv_impl,
             write_rocm_constraints,
         )
 
         self._AbiMismatchError = AbiMismatchError
         self._check_rocm = check_rocm_toolchain_alignment
         self._probe_abi = probe_torch_abi
-        self._run_argv = run_argv
+        self._run_argv_impl = run_argv_impl
         self._write_constraints = write_rocm_constraints
         self.action = action
         self.root = Path(attempt_root)
@@ -317,6 +319,13 @@ class _TargetedRecipe:
         kw.setdefault("timeout", self.run_timeout)
         return self._run_raw(argv, **kw)
 
+    def _run_argv(self, argv: Any, **kw: Any) -> Any:
+        return self._run_argv_impl(argv, run=self._run, **kw)
+
+    @property
+    def gpu_arch(self) -> str:
+        return str(self.action.gpu_arch or "").strip()
+
     def _fail(self, failure_class: str, summary: str) -> BuildResult:
         return BuildResult(
             ok=False,
@@ -329,9 +338,6 @@ class _TargetedRecipe:
 
     def preflight(self) -> BuildResult | None:
         """Disk and toolchain checks; returns the failed result, or ``None`` when they pass."""
-        import os as _os
-        import sys as _sys
-
         try:
             if self._disk_preflight_fn is not None:
                 self._disk_preflight_fn(self.root, 1, per_candidate_gb=self.disk_gb)
@@ -345,15 +351,17 @@ class _TargetedRecipe:
         except (OSError, ValueError) as exc:
             return self._fail("preflight_disk", f"disk preflight raised: {exc!r}")
 
-        tc_ok, tc_msg = self._check_rocm(env=dict(_os.environ), run=self._run)
+        tc_ok, tc_msg = self._check_rocm(env=dict(os.environ), run=self._run)
         if not tc_ok:
             return self._fail("preflight_toolchain", tc_msg)
-        self.abi = self._probe_abi(_sys.executable, run=self._run)
+        self.abi = self._probe_abi(sys.executable, run=self._run)
         if not self.abi.get("is_rocm"):
             return self._fail(
                 "preflight_toolchain",
                 f"host torch is not a ROCm build (torch={self.abi.get('torch_version')})",
             )
+        if self.gpu_arch_error is not None and not self.gpu_arch:
+            return self._fail("preflight_toolchain", self.gpu_arch_error)
         return None
 
     def prepare(self) -> BuildResult | None:
@@ -383,7 +391,7 @@ class _TargetedRecipe:
             return self._fail("preflight_toolchain", f"ROCm constraint probe failed: {exc!r}")
         return None
 
-    def installed_versions(self, prefix: str, selected_ref: str, gpu_arch: str) -> dict[str, str]:
+    def installed_versions(self, prefix: str, selected_ref: str) -> dict[str, str]:
         git_run = self._git if self._git is not None else self._run
         sha_res = git_run(
             ["git", *safe_directory_args(["-C", str(self.worktree_dir), "rev-parse", "--short", "HEAD"])],
@@ -395,7 +403,7 @@ class _TargetedRecipe:
             "torch": self.abi.get("torch_version", ""),
             f"{prefix}_ref": selected_ref,
             f"{prefix}_sha": (getattr(sha_res, "stdout", "") or "").strip(),
-            "arch": gpu_arch,
+            "arch": self.gpu_arch,
             "hip_version": self.abi.get("hip_version", ""),
         }
         if self.action.source_pr_url:
@@ -410,6 +418,7 @@ class _AiterBuild(_TargetedRecipe):
     default_repo = _AITER_DEFAULT_REPO
     default_max_jobs = _AITER_DEFAULT_MAX_JOBS
     replacing = "amd-aiter"
+    gpu_arch_error = None
 
     def run(self) -> BuildResult:
         self.jit_dir = self.root / "aiter_jit"
@@ -419,24 +428,20 @@ class _AiterBuild(_TargetedRecipe):
         return self.preflight() or self.prepare() or self.install()
 
     def install(self) -> BuildResult:
-        import os as _os
-
         from .build_utils import sort_tags_desc
 
-        gpu_arch = str(self.action.gpu_arch or "").strip()
-        max_jobs = int(self.action.max_jobs or self.default_max_jobs)
+        gpu_arch = self.gpu_arch
         env = {
-            **_os.environ,
+            **os.environ,
             "AITER_ROOT_DIR": str(self.aiter_home),
             "HOME": str(self.aiter_home),
             "INFERENCE_OPTIMIZER_AITER_JIT_DIR": str(self.jit_dir),
             "AITER_REBUILD": "1",
+            "MAX_JOBS": str(self.action.max_jobs or self.default_max_jobs),
         }
         if gpu_arch:
             env["PYTORCH_ROCM_ARCH"] = gpu_arch
             env["AITER_ROCM_ARCH"] = gpu_arch
-        if max_jobs:
-            env["MAX_JOBS"] = str(max_jobs)
         pip = [
             self.attempt_py,
             "-m",
@@ -450,10 +455,10 @@ class _AiterBuild(_TargetedRecipe):
             str(self.worktree_dir),
         ]
         if self.ref:
-            return self._pinned(pip, env, gpu_arch)
-        return self._autoselect(pip, env, gpu_arch, sort_tags_desc)
+            return self._pinned(pip, env)
+        return self._autoselect(pip, env, sort_tags_desc)
 
-    def _ok(self, selected_ref: str, gpu_arch: str) -> BuildResult:
+    def _ok(self, selected_ref: str) -> BuildResult:
         return BuildResult(
             ok=True,
             attempt_root=str(self.root),
@@ -463,13 +468,13 @@ class _AiterBuild(_TargetedRecipe):
                 source_root=str(self.worktree_dir),
                 attempt_root=str(self.root),
             ),
-            installed_versions=self.installed_versions("aiter", selected_ref, gpu_arch),
+            installed_versions=self.installed_versions("aiter", selected_ref),
             build_log_path=str(self.build_log),
             failure_class="ok",
         )
 
-    def _pinned(self, pip: list[str], env: dict[str, str], gpu_arch: str) -> BuildResult:
-        res = self._run_argv(pip, cwd=str(self.worktree_dir), env=env, timeout_sec=3600, run=self._run)
+    def _pinned(self, pip: list[str], env: dict[str, str]) -> BuildResult:
+        res = self._run_argv(pip, cwd=str(self.worktree_dir), env=env, timeout_sec=3600)
         if res.returncode != 0:
             self.build_log.write_text(res.stderr_tail or res.stdout_tail, encoding="utf-8")
             return self._fail("compile_error", f"pip install failed for ref={self.ref!r}: rc={res.returncode}")
@@ -478,18 +483,15 @@ class _AiterBuild(_TargetedRecipe):
             cwd=str(self.root),
             env=env,
             timeout_sec=60,
-            run=self._run,
         )
         if probe.returncode != 0:
             return self._fail(
                 "boot_failed",
                 f"aiter not importable after pip install (ref={self.ref!r}): {probe.stderr_tail or probe.stdout_tail}",
             )
-        return self._ok(self.ref, gpu_arch)
+        return self._ok(self.ref)
 
-    def _autoselect(
-        self, pip: list[str], env: dict[str, str], gpu_arch: str, sort_tags_desc: Callable[..., list[str]]
-    ) -> BuildResult:
+    def _autoselect(self, pip: list[str], env: dict[str, str], sort_tags_desc: Callable[..., list[str]]) -> BuildResult:
         git_run = self._git if self._git is not None else self._run
         tags_res = git_run(
             ["git", *safe_directory_args(["-C", str(self.worktree_dir), "tag", "-l", "v*"])],
@@ -510,7 +512,7 @@ class _AiterBuild(_TargetedRecipe):
             )
             if getattr(checkout_res, "returncode", 1) != 0:
                 continue
-            res = self._run_argv(pip, cwd=str(self.worktree_dir), env=env, timeout_sec=3600, run=self._run)
+            res = self._run_argv(pip, cwd=str(self.worktree_dir), env=env, timeout_sec=3600)
             if res.returncode != 0:
                 continue
             probe = self._run_argv(
@@ -518,10 +520,9 @@ class _AiterBuild(_TargetedRecipe):
                 cwd=str(self.root),
                 env=env,
                 timeout_sec=60,
-                run=self._run,
             )
             if probe.returncode == 0:
-                return self._ok(tag, gpu_arch)
+                return self._ok(tag)
         return self._fail("compile_error", "no AITER tag installed and imported successfully")
 
 
@@ -545,6 +546,79 @@ _SGLANG_DISK_PER_CANDIDATE_GB = 8.0
 _SGLANG_DEFAULT_MAX_JOBS = 8
 
 
+class _SglKernelBuild(_TargetedRecipe):
+    """Isolated sgl-kernel compile and SGLang ROCm install."""
+
+    disk_gb = _SGLANG_DISK_PER_CANDIDATE_GB
+    default_repo = _SGLANG_DEFAULT_REPO
+    default_max_jobs = _SGLANG_DEFAULT_MAX_JOBS
+    replacing = "sglang-kernel"
+    gpu_arch_error = "gpu_arch must be set explicitly for sgl-kernel (L6)"
+
+    def run(self) -> BuildResult:
+        return self.preflight() or self.prepare() or self.install()
+
+    def install(self) -> BuildResult:
+        install_env = {
+            **os.environ,
+            "AMDGPU_TARGET": self.gpu_arch,
+            "MAX_JOBS": str(self.action.max_jobs or self.default_max_jobs),
+        }
+        kernel_build = self._run_argv(
+            [self.attempt_py, "setup_rocm.py", "install"],
+            cwd=str(self.worktree_dir / "sgl-kernel"),
+            env=install_env,
+            timeout_sec=3600,
+        )
+        if kernel_build.returncode != 0:
+            self.build_log.write_text(kernel_build.stderr_tail or kernel_build.stdout_tail, encoding="utf-8")
+            return self._fail("compile_error", f"sgl-kernel compile failed (rc={kernel_build.returncode})")
+
+        try:
+            with sglang_rocm_install_target(self.worktree_dir / "python", self.abi["torch_version"]) as target:
+                constraint_path = str(self.root / ROCM_CONSTRAINTS_FILE)
+                pip_cmd = [self.attempt_py, "-m", "pip", "install", "--constraint", constraint_path, "-e", target]
+                pip_res = self._run_argv(
+                    pip_cmd,
+                    cwd=str(self.root),
+                    env=dict(os.environ),
+                    timeout_sec=3600,
+                )
+        except (OSError, ValueError) as exc:
+            return self._fail("compile_error", f"no ROCm install of the SGLang checkout: {exc}")
+        if pip_res.returncode != 0:
+            self.build_log.write_text(pip_res.stderr_tail or pip_res.stdout_tail, encoding="utf-8")
+            return self._fail("compile_error", f"sgl-kernel pip install failed (rc={pip_res.returncode})")
+
+        probe = self._run_argv(
+            [self.attempt_py, "-c", "import sgl_kernel"],
+            cwd=str(self.root),
+            env=dict(os.environ),
+            timeout_sec=60,
+        )
+        if probe.returncode != 0:
+            return self._fail(
+                "boot_failed",
+                f"sgl_kernel not importable after pip install: {probe.stderr_tail or probe.stdout_tail}",
+            )
+
+        return BuildResult(
+            ok=True,
+            attempt_root=str(self.root),
+            runtime=FrameworkRuntime(
+                pythonpath_prefixes=(str(self.worktree_dir / "python"),),
+                entrypoint_bin_dir=str(self.venv_dir / "bin"),
+                runtime_python_exe=self.attempt_py,
+                runtime_env={"SGLANG_USE_AITER": "1"},
+                source_root=str(self.worktree_dir),
+                attempt_root=str(self.root),
+            ),
+            installed_versions=self.installed_versions("sgl_kernel", self.ref),
+            build_log_path=str(self.build_log),
+            failure_class="ok",
+        )
+
+
 def run_sgl_kernel_build(
     action: TargetedBuildAction,
     attempt_root: str,
@@ -554,170 +628,8 @@ def run_sgl_kernel_build(
     disk_preflight_fn: Callable[..., Any] | None = None,
 ) -> BuildResult:
     """Run an isolated sgl-kernel targeted build."""
-    import os as _os
-    import sys as _sys
-
-    from .build_utils import (
-        AbiMismatchError,
-        check_rocm_toolchain_alignment,
-        probe_torch_abi,
-        run_argv,
-        write_rocm_constraints,
-    )
-
-    root = Path(attempt_root)
-    root.mkdir(parents=True, exist_ok=True)
-    build_log = root / "build.log"
-
-    def _run(argv, **kw):
-        kw.setdefault("capture_output", True)
-        kw.setdefault("text", True)
-        kw.setdefault("timeout", 3600)
-        return run(argv, **kw)
-
-    def _fail(failure_class: str, summary: str) -> BuildResult:
-        return BuildResult(
-            ok=False,
-            attempt_root=str(root),
-            build_log_path=str(build_log),
-            failure_class=failure_class,
-            failure_summary=summary,
-            error=summary,
-        )
-
-    # Disk preflight
-    try:
-        if disk_preflight_fn is not None:
-            disk_preflight_fn(root, 1, per_candidate_gb=_SGLANG_DISK_PER_CANDIDATE_GB)
-        else:
-            from hyperloom.agents.framework.isolation import DiskPreflightError, disk_preflight
-
-            try:
-                disk_preflight(root, 1, per_candidate_gb=_SGLANG_DISK_PER_CANDIDATE_GB)
-            except DiskPreflightError as exc:
-                return _fail("preflight_disk", str(exc))
-    except (OSError, ValueError) as exc:
-        return _fail("preflight_disk", f"disk preflight raised: {exc!r}")
-
-    tc_ok, tc_msg = check_rocm_toolchain_alignment(env=dict(_os.environ), run=_run)
-    if not tc_ok:
-        return _fail("preflight_toolchain", tc_msg)
-
-    host_py = _sys.executable
-    abi = probe_torch_abi(host_py, run=_run)
-    if not abi.get("is_rocm"):
-        return _fail("preflight_toolchain", f"host torch is not a ROCm build (torch={abi.get('torch_version')})")
-
-    gpu_arch = str(action.gpu_arch or "").strip()
-    if not gpu_arch:
-        return _fail("preflight_toolchain", "gpu_arch must be set explicitly for sgl-kernel (L6)")
-
-    repo_url = str(action.repo_url or _SGLANG_DEFAULT_REPO).strip() or _SGLANG_DEFAULT_REPO
-    ref = str(action.ref or "").strip()
-    max_jobs = int(action.max_jobs or _SGLANG_DEFAULT_MAX_JOBS)
-
-    # Isolation worktree + venv
-    worktree_dir: Path | None = None
-    venv_dir: Path | None = None
-
-    try:
-        from hyperloom.agents.framework.isolation import prepare_candidate_workspace, prepare_repo_cache
-        from hyperloom.agents.framework.models import Candidate
-
-        prepare_repo_cache(repo_url, root)
-        candidate = Candidate(ref=ref or "HEAD", repo=repo_url)
-        ws = prepare_candidate_workspace(candidate, repo_url=repo_url, work_dir=root, index=0)
-        worktree_dir = ws.worktree_dir
-        venv_dir = ws.venv_dir
-        attempt_py = str(venv_dir / "bin" / "python")
-    except (OSError, subprocess.SubprocessError) as exc:
-        return _fail("compile_error", f"workspace preparation failed: {exc!r}")
-
-    constraint_path = root / ROCM_CONSTRAINTS_FILE
-    try:
-        write_rocm_constraints(attempt_py, str(constraint_path), replacing="sglang-kernel", run=_run)
-    except AbiMismatchError as exc:
-        return _fail("abi_mismatch", str(exc))
-    except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
-        return _fail("preflight_toolchain", f"ROCm constraint probe failed: {exc!r}")
-
-    sgl_kernel_dir = worktree_dir / "sgl-kernel"
-
-    # Build sgl-kernel with explicit AMDGPU_TARGET
-    install_env = {
-        **_os.environ,
-        "AMDGPU_TARGET": gpu_arch,
-        "MAX_JOBS": str(max_jobs),
-    }
-    kernel_build = run_argv(
-        [attempt_py, "setup_rocm.py", "install"],
-        cwd=str(sgl_kernel_dir),
-        env=install_env,
-        timeout_sec=3600,
-        run=_run,
-    )
-    if kernel_build.returncode != 0:
-        build_log.write_text(kernel_build.stderr_tail or kernel_build.stdout_tail, encoding="utf-8")
-        return _fail("compile_error", f"sgl-kernel compile failed (rc={kernel_build.returncode})")
-
-    try:
-        with sglang_rocm_install_target(worktree_dir / "python", abi["torch_version"]) as target:
-            pip_cmd = [attempt_py, "-m", "pip", "install", "--constraint", str(constraint_path), "-e", target]
-            pip_res = run_argv(pip_cmd, cwd=str(root), env=dict(_os.environ), timeout_sec=3600, run=_run)
-    except (OSError, ValueError) as exc:
-        return _fail("compile_error", f"no ROCm install of the SGLang checkout: {exc}")
-    if pip_res.returncode != 0:
-        build_log.write_text(pip_res.stderr_tail or pip_res.stdout_tail, encoding="utf-8")
-        return _fail("compile_error", f"sgl-kernel pip install failed (rc={pip_res.returncode})")
-
-    probe = run_argv(
-        [attempt_py, "-c", "import sgl_kernel"],
-        cwd=str(root),
-        env=dict(_os.environ),
-        timeout_sec=60,
-        run=_run,
-    )
-    if probe.returncode != 0:
-        return _fail(
-            "boot_failed",
-            f"sgl_kernel not importable after pip install: {probe.stderr_tail or probe.stdout_tail}",
-        )
-
-    git_run = git if git is not None else _run
-    sha_res = git_run(
-        ["git", *safe_directory_args(["-C", str(worktree_dir), "rev-parse", "--short", "HEAD"])],
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
-    commit_sha = (getattr(sha_res, "stdout", "") or "").strip()
-
-    installed_versions = {
-        "torch": abi.get("torch_version", ""),
-        "sgl_kernel_ref": ref,
-        "sgl_kernel_sha": commit_sha,
-        "arch": gpu_arch,
-        "hip_version": abi.get("hip_version", ""),
-    }
-    if action.source_pr_url:
-        installed_versions["source_pr_url"] = action.source_pr_url
-
-    runtime = FrameworkRuntime(
-        pythonpath_prefixes=(str(worktree_dir / "python"),),
-        entrypoint_bin_dir=str(venv_dir / "bin") if venv_dir else "",
-        runtime_python_exe=attempt_py,
-        runtime_env={"SGLANG_USE_AITER": "1"},
-        source_root=str(worktree_dir),
-        attempt_root=str(root),
-    )
-    return BuildResult(
-        ok=True,
-        attempt_root=str(root),
-        runtime=runtime,
-        installed_versions=installed_versions,
-        build_log_path=str(build_log),
-        failure_class="ok",
-    )
+    build = _SglKernelBuild(action, attempt_root, run=run, git=git, disk_preflight_fn=disk_preflight_fn)
+    return build.run()
 
 
 # vLLM from source recipe
@@ -730,20 +642,16 @@ class _VllmBuild(_TargetedRecipe):
     default_repo = _VLLM_DEFAULT_REPO
     default_max_jobs = _VLLM_DEFAULT_MAX_JOBS
     replacing = "vllm"
+    gpu_arch_error = "gpu_arch must be set explicitly for vLLM source (L6)"
     run_timeout = 5400
 
     def run(self) -> BuildResult:
-        import sys as _sys
-
         failed = self.preflight()
         if failed is not None:
             return failed
-        gpu_arch = str(self.action.gpu_arch or "").strip()
-        if not gpu_arch:
-            return self._fail("preflight_toolchain", "gpu_arch must be set explicitly for vLLM source (L6)")
         # ABI-match guard: log an advisory when the torch ABI reports a different Python version; the build continues and
         # runtime_python_exe points to the attempt venv python so the server uses the correct interpreter.
-        host_pyver = f"{_sys.version_info.major}.{_sys.version_info.minor}"
+        host_pyver = f"{sys.version_info.major}.{sys.version_info.minor}"
         abi_pyver = str(self.abi.get("python_version") or "").strip()
         if abi_pyver and not abi_pyver.startswith(host_pyver):
             import logging as _log
@@ -754,24 +662,22 @@ class _VllmBuild(_TargetedRecipe):
                 abi_pyver,
                 host_pyver,
             )
-        return self.prepare() or self.install(gpu_arch)
+        return self.prepare() or self.install()
 
-    def install(self, gpu_arch: str) -> BuildResult:
-        import os as _os
-
-        max_jobs = int(self.action.max_jobs or self.default_max_jobs)
+    def install(self) -> BuildResult:
+        gpu_arch = self.gpu_arch
         # vLLM's ROCm setup.py asserts ``CUDA_HOME is not set`` and reuses it as the toolchain root even on ROCm.
         rocm_root = (
-            _os.environ.get("ROCM_HOME")
-            or _os.environ.get("CUDA_HOME")
-            or _os.environ.get("ROCM_PATH")
-            or _os.environ.get("HIP_PATH")
+            os.environ.get("ROCM_HOME")
+            or os.environ.get("CUDA_HOME")
+            or os.environ.get("ROCM_PATH")
+            or os.environ.get("HIP_PATH")
             or "/opt/rocm"
         ).strip() or "/opt/rocm"
         env = {
-            **_os.environ,
+            **os.environ,
             "PYTORCH_ROCM_ARCH": gpu_arch,
-            "MAX_JOBS": str(max_jobs),
+            "MAX_JOBS": str(self.action.max_jobs or self.default_max_jobs),
             "CUDA_HOME": rocm_root,
             "ROCM_HOME": rocm_root,
             "ROCM_PATH": rocm_root,
@@ -787,7 +693,6 @@ class _VllmBuild(_TargetedRecipe):
                     cwd=str(self.worktree_dir),
                     env=env,
                     timeout_sec=1800,
-                    run=self._run,
                 )
         except OSError:
             import logging as _logmod
@@ -806,27 +711,25 @@ class _VllmBuild(_TargetedRecipe):
             "-e",
             str(self.worktree_dir),
         ]
-        pip_res = self._run_argv(pip_cmd, cwd=str(self.worktree_dir), env=env, timeout_sec=5400, run=self._run)
+        pip_res = self._run_argv(pip_cmd, cwd=str(self.worktree_dir), env=env, timeout_sec=5400)
         if pip_res.returncode != 0:
             self.build_log.write_text(pip_res.stderr_tail or pip_res.stdout_tail, encoding="utf-8")
             return self._fail("compile_error", f"vLLM source pip install failed (rc={pip_res.returncode})")
-        return self._probed_success(gpu_arch)
+        return self._probed_success()
 
-    def _probed_success(self, gpu_arch: str) -> BuildResult:
-        import os as _os
-
+    def _probed_success(self) -> BuildResult:
+        gpu_arch = self.gpu_arch
         # The probes import vllm the way the runtime will: the editable finder runs
         # after sys.path, where the base image's system-site vllm would otherwise win.
         pythonpath_prefixes = (str(self.worktree_dir),)
-        pythonpath = _os.pathsep.join(p for p in (*pythonpath_prefixes, _os.environ.get("PYTHONPATH", "")) if p)
-        probe_env = {**_os.environ, "PYTHONPATH": pythonpath}
+        pythonpath = os.pathsep.join(p for p in (*pythonpath_prefixes, os.environ.get("PYTHONPATH", "")) if p)
+        probe_env = {**os.environ, "PYTHONPATH": pythonpath}
 
         vllm_verify = self._run_argv(
             [self.attempt_py, "-c", _VERIFY_VLLM_ROCM_SCRIPT],
             cwd=str(self.root),
             env=probe_env,
             timeout_sec=120,
-            run=self._run,
         )
         if vllm_verify.returncode != 0:
             return self._fail("boot_failed", f"vLLM ROCm platform check failed: {vllm_verify.stderr_tail[:500]}")
@@ -841,7 +744,6 @@ class _VllmBuild(_TargetedRecipe):
             cwd=str(self.root),
             env=probe_env,
             timeout_sec=60,
-            run=self._run,
         )
         if load_probe.returncode != 0:
             return self._fail(
@@ -861,7 +763,7 @@ class _VllmBuild(_TargetedRecipe):
                 source_root=str(self.worktree_dir),
                 attempt_root=str(self.root),
             ),
-            installed_versions=self.installed_versions("vllm", self.ref, gpu_arch),
+            installed_versions=self.installed_versions("vllm", self.ref),
             build_log_path=str(self.build_log),
             failure_class="ok",
         )
@@ -953,8 +855,6 @@ def _driver_main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    import sys
-
     sys.exit(_driver_main())
 
 
