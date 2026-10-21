@@ -289,17 +289,18 @@ def _apply_patch_set(patches: tuple[Path, ...], apply_root: Path, strip: int) ->
     return [path.name for path in applied], ""
 
 
+def _sentinel_path(apply_root: Path, strip: int, relpath: str) -> Path:
+    """``relpath`` (repo-relative) under ``apply_root``; strip=1: apply_root is the repo root; strip=3: the wheel sglang/ dir."""
+    return apply_root / Path(*Path(relpath).parts[strip - 1 :])
+
+
 def _markers_already_applied(apply_root: Path, strip: int, *, graph_capture: bool) -> bool:
     """True when the patch-set sentinel markers are already present under ``apply_root``."""
     rel = _GC_SENTINEL_RELPATH if graph_capture else _SENTINEL_RELPATH
     markers = _GC_SENTINEL_MARKERS if graph_capture else _SENTINEL_MARKERS
-    if strip == 1:
-        sentinel_path, extra_path = apply_root / rel, apply_root / _EXTRA_SENTINEL_RELPATH
-    else:
-        sentinel_path = apply_root / Path(*Path(rel).parts[2:])
-        extra_path = apply_root / Path(*Path(_EXTRA_SENTINEL_RELPATH).parts[2:])
-    return _all_markers_present(sentinel_path, markers) and (
-        graph_capture or _all_markers_present(extra_path, _EXTRA_SENTINEL_MARKERS)
+    return _all_markers_present(_sentinel_path(apply_root, strip, rel), markers) and (
+        graph_capture
+        or _all_markers_present(_sentinel_path(apply_root, strip, _EXTRA_SENTINEL_RELPATH), _EXTRA_SENTINEL_MARKERS)
     )
 
 
