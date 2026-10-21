@@ -174,6 +174,11 @@ def _carry_variant_metadata(src: Any, dst: Any) -> Any:
     return dst
 
 
+def _variant_fingerprint(variant: Any) -> str:
+    """The canonical fingerprint stamped on a variant before the round launched it."""
+    return str(getattr(variant, "canonical_fp", "") or "")
+
+
 def _variant_control_fields(variant: Any) -> dict[str, Any]:
     """Return non-default remove/unset/replace controls for identity and ledger rows."""
     remove_args = to_str_list(getattr(variant, "remove_args", []))
@@ -819,8 +824,8 @@ _VARIANT_METRIC_KEYS: tuple[str, ...] = (
     "wall_clock_ratio_vs_baseline",
 )
 
-# The rejected ledger's and the round summary's views of a variant row.
-_REJECTED_FIELDS: tuple[str, ...] = (
+# The ledgers' views of the row the round records for a variant.
+_VARIANT_FIELDS: tuple[str, ...] = (
     "fingerprint",
     "name",
     "extra_server_args",
@@ -828,34 +833,16 @@ _REJECTED_FIELDS: tuple[str, ...] = (
     "remove_args",
     "unset_envs",
     "args_mode",
-    "note",
-    "reasoning_origin",
-    "experience_citations",
-    "reason",
-    "gain_pct",
-    "tput",
+)
+_LOSER_FIELDS: tuple[str, ...] = (*_VARIANT_FIELDS, "provenance", "gain_pct", "tput", "reason", "workspace")
+_REJECTED_FIELDS: tuple[str, ...] = (
+    *_LOSER_FIELDS,
     "round_id",
     "ts",
-    "provenance",
     "stage",
     "error_class",
     "error_excerpt",
     "server_log_path",
-    "workspace",
-)
-_LOSER_FIELDS: tuple[str, ...] = (
-    "fingerprint",
-    "name",
-    "extra_server_args",
-    "extra_envs",
-    "remove_args",
-    "unset_envs",
-    "args_mode",
-    "provenance",
-    "gain_pct",
-    "tput",
-    "reason",
-    "workspace",
 )
 
 
@@ -918,20 +905,6 @@ def _sanitized_overrides(params: dict[str, Any]) -> tuple[str | None, str | None
         return sanitize_script_name(params.get("benchmark_script")), sanitize_result_dir(params.get("result_dir"))
     except ValueError as exc:
         raise _RoundRefused("bad_param", str(exc)) from exc
-
-
-_WINNER_HISTORY_FIELDS: tuple[str, ...] = (
-    "round_id",
-    "fingerprint",
-    "gain_pct",
-    "extra_envs",
-    "remove_args",
-    "unset_envs",
-    "args_mode",
-    "provenance",
-    "scope",
-    "ts",
-)
 
 
 class _ExploreRound:
@@ -1237,7 +1210,7 @@ class _ExploreRound:
     # ----- one variant -----------------------------------------------------
 
     def _refused(self, gv: GridVariant, idx: int) -> bool:
-        fingerprint = str(getattr(gv, "canonical_fp", "") or "")
+        fingerprint = _variant_fingerprint(gv)
         if fingerprint in self.launched_fps:
             self.skipped.append({"name": gv.name, "fingerprint": fingerprint, "reason": "round_dup"})
             return True
@@ -1274,7 +1247,7 @@ class _ExploreRound:
         """
         if self.ss is None or is_stack_revalidation(self.params) or getattr(gv, "overlay_pythonpath", ""):
             return False
-        fingerprint = str(getattr(gv, "canonical_fp", "") or "")
+        fingerprint = _variant_fingerprint(gv)
         prior = measured_verdict(
             getattr(self.ss, "explore_search", None),
             fingerprint,
@@ -1366,7 +1339,7 @@ class _ExploreRound:
         return True
 
     async def _measure(self, gv: GridVariant, run_gv: GridVariant, idx: int, slot: Path) -> Any:
-        self.launched_fps.add(str(getattr(gv, "canonical_fp", "") or ""))
+        self.launched_fps.add(_variant_fingerprint(gv))
         # The warmup and decision rounds share this slot as the lifecycle pid_dir so the decision round
         # re-attaches to the server the warmup left hot. Ray-managed GPU execution (12 T1): both reuse the
         # round-level lease, and one persistent server, so no GPU process outlives it.
@@ -1374,7 +1347,7 @@ class _ExploreRound:
             {"cleanup": False, "pid_dir": str(slot), "port": self.lifecycle_port} if self.lifecycle_eligible else None
         )
         warmup = await self._warmup(gv, run_gv, idx, slot, lifecycle) if self.use_warm_decision else None
-        if self.use_warm_decision and getattr(warmup, "status", "") != "succeeded":
+        if self.use_warm_decision and warmup is None:
             return None
         # The decision round is warm (it re-attaches to the warmup's hot server, client-only) when a warmup
         # preceded it, and skips eval then: it is timed against a throughput-only anchor, and
@@ -1418,6 +1391,7 @@ class _ExploreRound:
             return None
         if getattr(warmup, "status", "") != "succeeded":
             self._warmup_failed(gv, warmup)
+            return None
         return warmup
 
     def _warmup_failed(self, gv: GridVariant, warmup: Any) -> None:
@@ -1505,7 +1479,7 @@ class _ExploreRound:
 
     def _variant_facts(self, gv: GridVariant) -> dict[str, Any]:
         return {
-            "fingerprint": str(getattr(gv, "canonical_fp", "") or ""),
+            "fingerprint": _variant_fingerprint(gv),
             "name": gv.name,
             "extra_server_args": gv.extra_server_args,
             "extra_envs": dict(gv.extra_envs),
@@ -1622,14 +1596,21 @@ class _ExploreRound:
         if gv.name:
             self.name_index[gv.name] = row["fingerprint"]
         if row["outcome"] != "KEEP":
-            self.rejected.append(_ledger_view(row, _REJECTED_FIELDS))
+            self.rejected.append({**_ledger_view(row, _REJECTED_FIELDS), **_decision_fields(gv)})
             self.losers.append(_ledger_view(row, _LOSER_FIELDS))
             return
         self.winners_history.append(
             {
-                **_ledger_view(row, _WINNER_HISTORY_FIELDS),
+                "round_id": row["round_id"],
                 "variant_name": row["name"],
+                "fingerprint": row["fingerprint"],
+                "gain_pct": row["gain_pct"],
                 "extra_args": row["extra_server_args"],
+                "extra_envs": row["extra_envs"],
+                **_variant_control_fields(gv),
+                "provenance": row["provenance"],
+                "scope": row["scope"],
+                "ts": row["ts"],
             }
         )
 
