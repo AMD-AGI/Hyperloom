@@ -583,7 +583,6 @@ class _PrepareDrive:
         self.starved_retry_sec = 0.0
         self.scaffold_error = ""
         self.external_rollback_error = ""
-        self.stop = False
         self._loop_start = 0.0
         self._attempt_dir = ""
         self._digest_before = None
@@ -716,7 +715,7 @@ class _PrepareDrive:
         self._loop_start = time.monotonic()
         layout = self.layout
         try:
-            while self.attempts < PREPARE_MAX_ATTEMPTS and not self.stop:
+            while self.attempts < PREPARE_MAX_ATTEMPTS:
                 budget = _attempt_budget(self.attempts, deadline_sec=self.deadline_sec, start=self._loop_start)
                 if not budget.may_start:
                     self.starved_retry_sec = budget.starved_retry_sec
@@ -795,90 +794,69 @@ class _PrepareDrive:
             return None
 
         self.audit.text(f"{self._attempt_dir}/agent_output.txt", str(agent_output or ""))
-        self.audit.text(f"{self._attempt_dir}/agent_progress.txt", "\n".join(self._progress_log))
-        self.audit.driver(f"{self._attempt_dir}/driver_after.py")
+        driver_edited = self._record_agent_end("driver_after.py", {"status": "completed"})
+        finished = await self._preflight_attempt("driver_at_preflight.py", driver_edited)
+        if finished is None:
+            self.prior_failure = _preflight_retry_prompt(
+                self.last_pf, driver_rel=self.driver_rel, driver_edited=driver_edited
+            )
+        return finished
+
+    def _record_agent_end(self, driver_snapshot: str, event: dict[str, object]) -> bool:
+        """Snapshot the driver, write the attempt's agent event and progress log; return whether the driver changed."""
+        self.audit.driver(f"{self._attempt_dir}/{driver_snapshot}")
         driver_edited = self.audit.driver_edited(self._digest_before)
         self.edited_any_attempt = self.edited_any_attempt or driver_edited
         self.audit.json(
             f"{self._attempt_dir}/agent_event.json",
             {
-                "status": "completed",
+                **event,
                 "elapsed_s": round(time.monotonic() - self._agent_started, 3),
-                "budget_s": round(attempt_timeout, 3),
+                "budget_s": round(self._attempt_timeout, 3),
                 "driver_edited": driver_edited,
             },
         )
+        self.audit.text(f"{self._attempt_dir}/agent_progress.txt", "\n".join(self._progress_log))
+        return driver_edited
+
+    async def _preflight_attempt(self, driver_snapshot: str, driver_edited: bool) -> PrepareResult | None:
+        """Retire the scaffold and preflight the driver; return the prepared result when it conforms, else None."""
         self.scaffold.reset()
         self.last_pf = await _preflight_async(
-            layout.driver_path.as_posix(),
+            self.layout.driver_path.as_posix(),
             self.contract,
             PREFLIGHT_WARMUP,
             PREFLIGHT_ITERS,
             deadline_unix=self.preflight_deadline_unix,
         )
-        self.audit.driver(f"{self._attempt_dir}/driver_at_preflight.py")
+        self.audit.driver(f"{self._attempt_dir}/{driver_snapshot}")
         self.audit.json(f"{self._attempt_dir}/preflight.json", asdict(self.last_pf))
         if self.last_pf.ok:
-            return _finish_prepared_task(self.last_pf, self.attempts, layout, provided_harness=self.provided_harness)
+            return _finish_prepared_task(
+                self.last_pf, self.attempts, self.layout, provided_harness=self.provided_harness
+            )
         self.prior_failure_heading = RETRY_HEADING_DEFAULT if driver_edited else RETRY_HEADING_NO_EDIT
-        self.prior_failure = _preflight_retry_prompt(
-            self.last_pf, driver_rel=self.driver_rel, driver_edited=driver_edited
-        )
         return None
 
     def _after_agent_error(self, exc: BaseException) -> None:
         """Record an agent exception and retire the scaffold for the next attempt."""
         log.warning("task preparation agent attempt %d failed: %s", self.attempts, exc)
-        self.audit.driver(f"{self._attempt_dir}/driver_at_exception.py")
-        driver_edited = self.audit.driver_edited(self._digest_before)
-        self.edited_any_attempt = self.edited_any_attempt or driver_edited
-        self.audit.json(
-            f"{self._attempt_dir}/agent_event.json",
-            {
-                "status": "error",
-                "exception_type": type(exc).__name__,
-                "exception": str(exc),
-                "elapsed_s": round(time.monotonic() - self._agent_started, 3),
-                "budget_s": round(self._attempt_timeout, 3),
-                "driver_edited": driver_edited,
-            },
+        self._record_agent_end(
+            "driver_at_exception.py",
+            {"status": "error", "exception_type": type(exc).__name__, "exception": str(exc)},
         )
-        self.audit.text(f"{self._attempt_dir}/agent_progress.txt", "\n".join(self._progress_log))
         self.prior_failure = f"Agent invocation error: {type(exc).__name__}: {exc}"
         self.prior_failure_heading = RETRY_HEADING_DEFAULT
         self.scaffold.reset()
 
     async def _after_timeout(self) -> PrepareResult | None:
-        """Salvage-preflight after an authoring timeout and decide whether to retry."""
-        audit, layout, attempt_dir = self.audit, self.layout, self._attempt_dir
-        audit.driver(f"{attempt_dir}/driver_at_timeout.py")
+        """Salvage-preflight after an authoring timeout; the next attempt's budget decides whether it may retry."""
         elapsed_s = round(time.monotonic() - self._agent_started, 3)
-        driver_edited = audit.driver_edited(self._digest_before)
-        self.edited_any_attempt = self.edited_any_attempt or driver_edited
-        audit.json(
-            f"{attempt_dir}/agent_event.json",
-            {
-                "status": "timeout",
-                "elapsed_s": elapsed_s,
-                "budget_s": round(self._attempt_timeout, 3),
-                "driver_edited": driver_edited,
-            },
-        )
-        audit.text(f"{attempt_dir}/agent_progress.txt", "\n".join(self._progress_log))
-        self.scaffold.reset()
+        driver_edited = self._record_agent_end("driver_at_timeout.py", {"status": "timeout"})
         # The Agent may have completed a valid driver before getting stuck on self-verification.
-        self.last_pf = await _preflight_async(
-            layout.driver_path.as_posix(),
-            self.contract,
-            PREFLIGHT_WARMUP,
-            PREFLIGHT_ITERS,
-            deadline_unix=self.preflight_deadline_unix,
-        )
-        audit.driver(f"{attempt_dir}/driver_after_timeout_preflight.py")
-        audit.json(f"{attempt_dir}/preflight.json", asdict(self.last_pf))
-        if self.last_pf.ok:
-            return _finish_prepared_task(self.last_pf, self.attempts, layout, provided_harness=self.provided_harness)
-        self.prior_failure_heading = RETRY_HEADING_DEFAULT if driver_edited else RETRY_HEADING_NO_EDIT
+        finished = await self._preflight_attempt("driver_after_timeout_preflight.py", driver_edited)
+        if finished is not None:
+            return finished
         self.prior_failure = _timeout_retry_prompt(
             self.last_pf,
             driver_rel=self.driver_rel,
@@ -886,10 +864,6 @@ class _PrepareDrive:
             elapsed_s=elapsed_s,
             progress_log=self._progress_log,
         )
-        retry, starved = _retry_after_timeout(self.attempts, deadline_sec=self.deadline_sec, start=self._loop_start)
-        if not retry:
-            self.starved_retry_sec = starved
-            self.stop = True
         return None
 
 
@@ -1396,16 +1370,6 @@ def _timeout_retry_prompt(
         f"What you spent that time on — {summarize_agent_progress(progress_log)}\n"
         "The deterministic check on that unchanged driver reported:\n" + pf.detail_report()
     )
-
-
-def _retry_after_timeout(attempts: int, *, deadline_sec: float, start: float) -> tuple[bool, float]:
-    """Whether another attempt may start after a timeout, and the starved-retry time when it may not."""
-    if attempts >= PREPARE_MAX_ATTEMPTS:
-        return False, 0.0
-    remaining = deadline_sec - (time.monotonic() - start)
-    if remaining >= PREPARE_MIN_RETRY_SEC:
-        return True, 0.0
-    return False, remaining if remaining > 10 else 0.0
 
 
 def _preflight_retry_prompt(pf: PreflightResult, *, driver_rel: str, driver_edited: bool) -> str:
