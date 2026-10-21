@@ -5,7 +5,8 @@
 
 The specialist proposes and the toolbox measures; this code compares each measurement through the rule gate, retests a
 gain on another node, checks a declared correctness fix (``fix_check``) and lands it or asks for its fork, and tells the
-specialist in its branch log what landed and what the gate could not land. Every step is read back from the notebook,
+specialist in its branch log what landed and what the gate could not land. A retest that fails as a candidate settles
+the candidate as regressed; one whose measurement failed leaves it unjudged. Every step is read back from the notebook,
 so a restarted runtime takes each step once; a fix check interrupted by a restart runs its repro tests again.
 """
 
@@ -13,7 +14,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Protocol
 
 from hyperloom.contracts.measurement import Purpose, Validity
@@ -99,10 +100,16 @@ class BranchJudge:
             if judgement.verdict is Verdict.NEEDS_CONFIRM and retests:
                 measured = [retest for retest in retests if _succeeded(retest)]
                 if not measured:
-                    if not any(retest.in_flight for retest in retests):
-                        last = max(retests, key=lambda retest: retest.requested_at)
+                    if any(retest.in_flight for retest in retests):
+                        return
+                    last = max(retests, key=lambda retest: retest.requested_at)
+                    if not _failed_as_candidate(last):
                         content = f"the retest of {first.request_id} {_ended(last)}; nothing was judged"
                         await self._notice(logged, content, first.request_id, last.request_id)
+                        return
+                    content = f"the retest of {first.request_id} {_ended(last)}; recorded as regressed"
+                    await self._notice(logged, content, first.request_id, last.request_id)
+                    await self._gate.settle(first.request, _failed_retest(judgement, last))
                     return
                 latest = max(measured, key=lambda retest: retest.requested_at)
                 judgement = await self._rule.retest(judgement, latest, parent)
@@ -170,6 +177,23 @@ def _awaits_judgement(record: TestRecord) -> bool:
 
 def _succeeded(record: TestRecord) -> bool:
     return record.result is not None and record.result.validity is Validity.SUCCEEDED
+
+
+def _failed_as_candidate(record: TestRecord) -> bool:
+    return record.result is not None and record.result.validity is Validity.CANDIDATE_FAILED
+
+
+def _failed_retest(first: Judgement, retest: TestRecord) -> Judgement:
+    """The candidate's judgement once its retest failed as a candidate: the change itself failed, so its gain stands
+    refused and no fix is checked on it, and the record says so where an unjudged candidate would leave no trace."""
+    return replace(
+        first,
+        verdict=Verdict.REGRESSED,
+        request_ids=(*first.request_ids, retest.request_id),
+        refused_by=(*first.refused_by, Validity.CANDIDATE_FAILED.value),
+        fixes_correctness=False,
+        foundation_fix=False,
+    )
 
 
 def _forked(first: TestRecord, admission: ForkAdmission) -> str:

@@ -203,6 +203,34 @@ async def test_a_flat_candidate_is_recorded_without_a_retest(session):
     assert await session.repo.head(BRANCH) == ROOT
 
 
+async def test_a_gain_whose_retest_fails_as_a_candidate_is_recorded_regressed(session):
+    session.toolbox.script(lambda request: request.purpose is Purpose.CONFIRM, [Fate.CANDIDATE] * 4)
+    first = await session.explore(FAST)
+    await session.step()
+    (retest,) = session.retests()
+    await session.step()
+
+    record = await session.runtime.record(first)
+    assert record.conclusion is Conclusion.RECORDED_ONLY
+    assert (record.judgement.verdict, record.judgement.refused_by[-1]) == (Verdict.REGRESSED, "candidate_failed")
+    assert record.judgement.request_ids == (first, retest.request_id)
+    assert await session.repo.head(BRANCH) == ROOT
+    (notice,) = await session.notices()
+    assert notice.startswith(f"{NOTICE} the retest of {first} ended candidate_failed")
+    assert notice.endswith("recorded as regressed")
+
+
+async def test_a_gain_whose_retest_failed_to_measure_is_left_unjudged(session):
+    session.toolbox.script(lambda request: request.purpose is Purpose.CONFIRM, [Fate.MEASUREMENT])
+    first = await session.explore(FAST)
+    await session.step()
+    await session.step()
+
+    assert (await session.runtime.record(first)).judgement is None
+    (notice,) = await session.notices()
+    assert notice.endswith("nothing was judged")
+
+
 async def test_a_gain_the_retest_does_not_repeat_is_recorded_only(tmp_path):
     session = _Session(tmp_path / "notebook", effect_fn=lambda r: 0.05 if r.purpose is Purpose.EXPLORE else 0.0)
     await session.prelude()
