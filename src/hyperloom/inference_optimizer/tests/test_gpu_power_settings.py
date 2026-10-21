@@ -13,6 +13,7 @@ import pytest
 
 from hyperloom.common import gpu_power_settings
 from hyperloom.common.gpu_power_settings import (
+    DeclaredPowerSettings,
     GpuPowerSettingsError,
     _read_gpu_kfd_nodes as _real_read_gpu_kfd_nodes,
     declared_node_problems,
@@ -118,11 +119,11 @@ class TestResolve:
         monkeypatch.delenv("ROCR_VISIBLE_DEVICES", raising=False)
         monkeypatch.delenv("HIP_VISIBLE_DEVICES", raising=False)
         kw.setdefault("nodes", 1)
-        kw.setdefault("power_cap_w", None)
-        kw.setdefault("perf_level", None)
         kw.setdefault("read", lambda: read_gpu_power_settings(run=_fake_run))
         kw.setdefault("read_node", _node_reader())
-        return resolve_gpu_power_settings(**kw)
+        fields = ("power_cap_w", "perf_level", "npm", "node_power_limit_w")
+        declared = DeclaredPowerSettings(**{key: value for key in fields if (value := kw.pop(key, None)) is not None})
+        return resolve_gpu_power_settings(declared, **kw)
 
     def test_the_node_npm_state_is_recorded_without_a_declaration(self, monkeypatch):
         record, error = self._resolve(monkeypatch)
@@ -180,7 +181,9 @@ class TestResolve:
 
         monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "1")
         record, error = resolve_gpu_power_settings(
-            power_cap_w=1000.0, perf_level="determinism", nodes=1, read=lambda: read_gpu_power_settings(run=_fake_run)
+            DeclaredPowerSettings(power_cap_w=1000.0, perf_level="determinism"),
+            nodes=1,
+            read=lambda: read_gpu_power_settings(run=_fake_run),
         )
         assert error == ""
         assert list(record["observed"]) == ["1"]
@@ -193,10 +196,10 @@ class TestResolve:
         monkeypatch.delenv("HIP_VISIBLE_DEVICES", raising=False)
         read = lambda: read_gpu_power_settings(run=_fake_run)  # noqa: E731
         _, error = resolve_gpu_power_settings(
-            power_cap_w=1000.0, perf_level=None, nodes=1, read=read, just_applied=True
+            DeclaredPowerSettings(power_cap_w=1000.0), nodes=1, read=read, just_applied=True
         )
         assert error.startswith("the GPUs did not take the power settings just applied: GPU 0 power cap is 1400.0 W")
-        _, error = resolve_gpu_power_settings(power_cap_w=1000.0, perf_level=None, nodes=1, read=read)
+        _, error = resolve_gpu_power_settings(DeclaredPowerSettings(power_cap_w=1000.0), nodes=1, read=read)
         assert "(set them with amd-smi before launch)" in error
 
     def test_a_declaration_that_cannot_be_read_refuses(self, monkeypatch):
@@ -319,7 +322,9 @@ class TestVisibleCards:
 
         monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "0")
         cards = {gpu: {"power_cap_w": 1000.0 if gpu == 3 else 1400.0, "perf_level": "auto"} for gpu in range(8)}
-        record, error = resolve_gpu_power_settings(power_cap_w=1000.0, perf_level=None, nodes=1, read=lambda: cards)
+        record, error = resolve_gpu_power_settings(
+            DeclaredPowerSettings(power_cap_w=1000.0), nodes=1, read=lambda: cards
+        )
         assert (error, list(record["observed"])) == ("", ["3"])
 
     def test_a_declaration_whose_cards_cannot_be_named_refuses(self, monkeypatch):
@@ -327,7 +332,7 @@ class TestVisibleCards:
 
         monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "GPU-745a0e162570d044")
         cards = {0: {"power_cap_w": 1000.0, "perf_level": "auto"}}
-        _, error = resolve_gpu_power_settings(power_cap_w=1000.0, perf_level=None, nodes=1, read=lambda: cards)
+        _, error = resolve_gpu_power_settings(DeclaredPowerSettings(power_cap_w=1000.0), nodes=1, read=lambda: cards)
         assert "cannot be checked" in error and "device numbers" in error
 
     def test_the_sampler_samples_the_cards_the_mask_names(self, tmp_path, monkeypatch):

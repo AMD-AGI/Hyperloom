@@ -71,6 +71,8 @@ NODE_POWER_LIMIT_W = "node_power_limit_w"
 #: The NPM states ``amd-smi node -p`` reports, lowercased.
 NPM_STATES = ("enabled", "disabled")
 _UNREADABLE = "unreadable"
+_WATTS = ("power_cap_w", NODE_POWER_LIMIT_W)
+_READ_TIMEOUT_SEC = 30.0
 
 #: Escape hatch for a host where running ``amd-smi`` every couple of seconds is not acceptable.
 GPU_POWER_SAMPLING_ENV = "HYPERLOOM_GPU_POWER_SAMPLING"
@@ -202,6 +204,11 @@ class DeclaredPowerSettings:
         """The node-wide settings keyed as the node's reading is."""
         return {NPM: self.npm, NODE_POWER_LIMIT_W: self.node_power_limit_w}
 
+    def as_record(self) -> dict[str, Any]:
+        """Only the settings declared, watts as floats: what the session stores and resumes from."""
+        row = {**self.as_row(), **self.node_row()}
+        return {key: float(value) if key in _WATTS else value for key, value in row.items() if value}
+
 
 def _amd_smi_json(run: Callable[..., subprocess.CompletedProcess], timeout: float, *args: str) -> Any:
     if shutil.which("amd-smi") is None and run is subprocess.run:
@@ -224,7 +231,7 @@ def _read_gpu_kfd_nodes() -> dict[int, int]:
     Raises:
         GpuPowerSettingsError: ``amd-smi`` failed, or reported a card without its KFD node.
     """
-    rows = _gpu_rows(_amd_smi_json(subprocess.run, 30.0, "list"))
+    rows = _gpu_rows(_amd_smi_json(subprocess.run, _READ_TIMEOUT_SEC, "list"))
     nodes = {row["gpu"]: row["node_id"] for row in rows if isinstance(row.get("node_id"), int)}
     if len(nodes) != len(rows):
         raise GpuPowerSettingsError("amd-smi list reports a card without its KFD node, so its ROCm number is unknown")
@@ -234,7 +241,7 @@ def _read_gpu_kfd_nodes() -> dict[int, int]:
 def read_gpu_power_settings(
     *,
     run: Callable[..., subprocess.CompletedProcess] = subprocess.run,
-    timeout: float = 30.0,
+    timeout: float = _READ_TIMEOUT_SEC,
 ) -> dict[int, dict[str, Any]]:
     """``{gpu: {"power_cap_w": float | None, "perf_level": str}}`` for every card ``amd-smi`` lists.
 
@@ -255,7 +262,7 @@ def read_gpu_power_settings(
 def read_node_power_settings(
     *,
     run: Callable[..., subprocess.CompletedProcess] = subprocess.run,
-    timeout: float = 30.0,
+    timeout: float = _READ_TIMEOUT_SEC,
 ) -> dict[str, Any]:
     """``{"npm": "enabled" | "disabled" | "", "node_power_limit_w": float | None}`` from ``amd-smi node -p``.
 

@@ -19,6 +19,7 @@ from typing import Any
 from hyperloom.common.coerce import to_unix
 from hyperloom.common.env import forge_explicitly_enabled
 from hyperloom.common.gpu_partition import published_shape
+from hyperloom.common.gpu_power_settings import DeclaredPowerSettings
 from hyperloom.common.perf_metric import is_agentx_mode
 from hyperloom.common.timeutil import now_iso
 from hyperloom.orchestrator.actions.executors._workload_envs import (
@@ -326,14 +327,7 @@ def _established_gpu_power_settings(
             gpu_power_apply.warn_about_orphaned_cards()
     except GpuPowerSettingsError as exc:
         return {}, f"cannot apply the declared GPU power settings: {exc}"
-    record, error = resolve_gpu_power_settings(
-        power_cap_w=declared.power_cap_w,
-        perf_level=declared.perf_level or None,
-        npm=declared.npm or None,
-        node_power_limit_w=declared.node_power_limit_w,
-        nodes=nodes,
-        just_applied=bool(applied),
-    )
+    record, error = resolve_gpu_power_settings(declared, nodes=nodes, just_applied=bool(applied))
     if applied:
         record["applied"] = applied
     return record, error
@@ -417,9 +411,7 @@ def resume_gpu_power_settings(args: Any, state: Any) -> tuple[dict[str, Any], st
     return record, error
 
 
-def _node_power_settings(
-    read_node: Any, *, npm: str | None, node_power_limit_w: float | None
-) -> tuple[dict[str, Any] | None, list[str]]:
+def _node_power_settings(read_node: Any, declared: Any) -> tuple[dict[str, Any] | None, list[str]]:
     """The node's NPM reading and why it is not at the declared values; ``(None, [])`` when it cannot be read and
     nothing about it was declared (an amd-smi before ROCm 7.2, or a GPU without NPM)."""
     from hyperloom.common.gpu_power_settings import (
@@ -428,6 +420,7 @@ def _node_power_settings(
         read_node_power_settings,
     )
 
+    npm, node_power_limit_w = declared.npm or None, declared.node_power_limit_w
     try:
         node = (read_node or read_node_power_settings)()
     except GpuPowerSettingsError as exc:
@@ -438,12 +431,9 @@ def _node_power_settings(
 
 
 def resolve_gpu_power_settings(
+    declared_settings: DeclaredPowerSettings,
     *,
-    power_cap_w: float | None,
-    perf_level: str | None,
     nodes: int,
-    npm: str | None = None,
-    node_power_limit_w: float | None = None,
     read: Any = None,
     read_node: Any = None,
     just_applied: bool = False,
@@ -457,24 +447,13 @@ def resolve_gpu_power_settings(
     NPM is set on the BMC.
     """
     from hyperloom.common.gpu_power_settings import (
-        NODE_POWER_LIMIT_W,
-        NPM,
         GpuPowerSettingsError,
         declared_setting_problems,
-        normalize_perf_level,
         read_gpu_power_settings,
         visible_gpu_indices,
     )
 
-    declared: dict[str, Any] = {}
-    if power_cap_w is not None:
-        declared["power_cap_w"] = float(power_cap_w)
-    if perf_level:
-        declared["perf_level"] = normalize_perf_level(perf_level)
-    if npm:
-        declared[NPM] = npm
-    if node_power_limit_w is not None:
-        declared[NODE_POWER_LIMIT_W] = float(node_power_limit_w)
+    declared = declared_settings.as_record()
     if nodes >= 2:
         if declared:
             return {}, (
@@ -505,7 +484,7 @@ def resolve_gpu_power_settings(
         perf_level=declared.get("perf_level"),
         gpus=gpus,
     )
-    node, node_problems = _node_power_settings(read_node, npm=npm, node_power_limit_w=node_power_limit_w)
+    node, node_problems = _node_power_settings(read_node, declared_settings)
     if node is not None:
         record["node"] = node
     if problems:
