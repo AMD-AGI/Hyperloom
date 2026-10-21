@@ -25,7 +25,12 @@ SOURCE_GEAK_AUTHORED_KERNEL = "geak_authored_kernel"
 #: step at all -- its candidates are settled by the integrate gate.
 LEDGER_GEAK = "geak"
 
+#: ``geak_pending.status`` values left by a candidate whose revalidation ended
+#: without a verdict, so the win was abandoned rather than judged.
+GEAK_DROPPED_STATUSES: frozenset[str] = frozenset({"rebench_cancelled", "rebench_declined", "overlay_unloadable"})
+
 __all__ = [
+    "GEAK_DROPPED_STATUSES",
     "LEDGER_GEAK",
     "SOURCE_FUSION",
     "SOURCE_GEAK_AUTHORED_KERNEL",

@@ -611,3 +611,11 @@ def test_the_escape_check_reads_the_paths_the_applier_resolves():
     assert ps.patch_escapes_tree("--- a/ok.py\n+++ b//etc/passwd\n") == "/etc/passwd"
     assert ps.patch_escapes_tree("--- a/../../escape.py\n+++ b/ok.py\n") == "../../escape.py"
     assert ps.patch_escapes_tree("--- /dev/null\n+++ b/new.py\n@@ -0,0 +1 @@\n+x\n") is None
+
+
+def test_explicit_root_without_patch_texts_is_accepted(tmp_path):
+    root = _make_git_repo(tmp_path / "fw", {"a.py": "x\n"})
+    res = ps.resolve_patch_apply_root([], explicit_root=root, candidate_roots=[])
+    assert res.root is not None
+    assert res.root.resolve() == root.resolve()
+    assert res.reason == ""

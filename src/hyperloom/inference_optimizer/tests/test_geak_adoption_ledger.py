@@ -55,16 +55,33 @@ def test_env_selections_are_excluded() -> None:
     assert [geak_spec_name(s) for s in _geak_accepted_kernel_specs(result)] == ["_mxfp8_linear_kernel"]
 
 
-def test_non_positive_and_unparseable_deltas_are_dropped() -> None:
+def test_geaks_own_delta_never_decides_whether_a_kernel_counts() -> None:
     result = {
         "accepted_kernels": [
             _spec("regression", -1.2),
             _spec("flat", 0.0),
             _spec("unparseable", "not-a-number"),
+            {"short_name": "unstated"},
             _spec("real", 2.5),
         ]
     }
-    assert [geak_spec_name(s) for s in _geak_accepted_kernel_specs(result)] == ["real"]
+    assert [geak_spec_name(s) for s in _geak_accepted_kernel_specs(result)] == [
+        "regression",
+        "flat",
+        "unparseable",
+        "unstated",
+        "real",
+    ]
+
+
+def test_two_rows_without_a_stated_delta_are_not_twins() -> None:
+    result = {
+        "accepted_kernels": [
+            {"short_name": "cand_c0_triton", "op_kind": "gemm"},
+            {"short_name": "gemm_kernel", "op_kind": "gemm"},
+        ]
+    }
+    assert [geak_spec_name(s) for s in _geak_accepted_kernel_specs(result)] == ["cand_c0_triton", "gemm_kernel"]
 
 
 def test_unnamed_and_non_dict_rows_are_skipped() -> None:
@@ -228,8 +245,7 @@ def test_a_second_promotion_appends_rather_than_replaces() -> None:
 
 
 def test_best_gain_is_the_max_over_attempts_not_the_last_one() -> None:
-    # ``by_kernel`` and ``kernel_lifecycle`` read ``best_gain_pct`` from this writer and from ``_kernel_decisions.py``
-    # alike, and that one is a max.
+    # ``_kernel_decisions.py`` writes ``best_gain_pct`` as a max; this writer must agree.
     phase = _phase()
     result = {"accepted_kernels": [_spec("k", 5.0)]}
     _record(phase, result, measured_tput=150.0)  # +50%
