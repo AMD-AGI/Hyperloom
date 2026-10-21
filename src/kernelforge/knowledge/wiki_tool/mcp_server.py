@@ -23,23 +23,25 @@ import sys
 import time
 from typing import Any
 
+from kernelforge.knowledge.wiki_tool.contract import (
+    CALL_TIMEOUT_SEC,
+    GREP,
+    GUIDE,
+    LOG_ENV,
+    PAGE,
+    ROLE_ENV,
+    ROOT_ENV,
+    SCRIPTS,
+    SEARCH,
+    TOOL_NAMES,
+)
 from kernelforge.tools import mcp_stdio
 
 InvalidParamsError = mcp_stdio.InvalidParamsError
 
 SERVER_NAME = "kernelforge-knowledge-wiki"
-SEARCH, PAGE, GREP, GUIDE = "search", "page", "grep", "guide"
-# Agents see these as mcp__knowledge_wiki__<name>.
-TOOL_NAMES = (SEARCH, PAGE, GREP, GUIDE)
-
-ROOT_ENV = "FORGE_KNOWLEDGE_WIKI_ROOT"
-LOG_ENV = "FORGE_KNOWLEDGE_WIKI_LOG"
-ROLE_ENV = "FORGE_KNOWLEDGE_WIKI_ROLE"
-
-SCRIPTS = {SEARCH: "query.py", PAGE: "get_page.py", GREP: "grep_wiki.py"}
 GUIDE_FILE = "SKILL.md"
 
-CALL_TIMEOUT_SEC = 60
 MAX_OUTPUT_CHARS = 30_000
 MAX_TEXT_CHARS = 500
 MAX_SEARCH_LIMIT = 50

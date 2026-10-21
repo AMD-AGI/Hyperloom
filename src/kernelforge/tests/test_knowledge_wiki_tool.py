@@ -13,7 +13,7 @@ import pytest
 from kernelforge.agent_backends.base import AgentCapabilities, AgentRunResult
 from kernelforge.config import Config
 from kernelforge.knowledge.wiki_tool import LOG_NAME, SERVER_KEY, KnowledgeWikiTool, require_mcp_backend
-from kernelforge.knowledge import wiki_tool_server as server
+from kernelforge.knowledge.wiki_tool import mcp_server as server
 from kernelforge.orchestrator import agent as agent_module
 from kernelforge.orchestrator import orchestration as orchestration_module
 from kernelforge.orchestrator.contracts import (
@@ -295,7 +295,7 @@ def test_each_session_entry_names_its_role_and_forwards_the_launch_environment(w
     entry = tool.mcp_servers("supervisor")[SERVER_KEY]
 
     assert tool.tool_names == TOOL_NAMES == entry.tools
-    assert entry.args == ("-m", "kernelforge.knowledge.wiki_tool_server")
+    assert entry.args == ("-m", "kernelforge.knowledge.wiki_tool.mcp_server")
     assert entry.env[server.ROOT_ENV] == str(wiki)
     assert entry.env[server.LOG_ENV] == str(log)
     assert entry.env[server.ROLE_ENV] == "supervisor"

@@ -17,7 +17,7 @@ import sys
 from typing import TYPE_CHECKING
 
 from kernelforge.agent_backends.base import StdioMcpServer
-from kernelforge.knowledge.wiki_tool_server import (
+from kernelforge.knowledge.wiki_tool.contract import (
     CALL_TIMEOUT_SEC,
     LOG_ENV,
     ROLE_ENV,
@@ -61,7 +61,7 @@ class KnowledgeWikiTool:
         return {
             SERVER_KEY: StdioMcpServer(
                 command=sys.executable,
-                args=("-m", "kernelforge.knowledge.wiki_tool_server"),
+                args=("-m", "kernelforge.knowledge.wiki_tool.mcp_server"),
                 env=env,
                 startup_timeout_sec=15,
                 tool_timeout_sec=CALL_TIMEOUT_SEC + 10,
