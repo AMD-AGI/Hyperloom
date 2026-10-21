@@ -58,6 +58,8 @@ from .tracelens_skill_runner import (
     extract_idle_pct_from_analysis_md,
     normalize_upstream_category,
     run_tracelens_skill,
+    tracelens_analysis_mode,
+    write_run_config,
 )
 from TraceLens.Agent.Analysis.post_processing import render_analysis_json
 
@@ -3189,7 +3191,7 @@ def run_command(
 
 # Kept in sync with install.sh (TRACELENS_REPO / TRACELENS_REF). Overridable via env.
 _TRACELENS_REPO_DEFAULT = "https://github.com/AMD-AGI/TraceLens.git"
-_TRACELENS_REF_DEFAULT = "647cbf2702687a656f2480e07517824369898aa9"
+_TRACELENS_REF_DEFAULT = "614c597bc0c66cabf6a15152037324acc7386090"
 
 
 def _default_tracelens_root() -> Path:
@@ -3637,7 +3639,7 @@ def enrich_candidates_with_runtime_metadata(
     model_params = load_model_kernel_params(str(getattr(args, "model_name", "") or ""))
     target_platform = str(getattr(args, "target_platform", "") or "")
     runtime_flags = {
-        "analysis_mode": getattr(args, "analysis_mode", ""),
+        "analysis_mode": tracelens_analysis_mode(framework),
         "target_platform": target_platform,
     }
     for item in candidates:
@@ -3963,7 +3965,7 @@ def write_reports(
         "model_name": args.model_name,
         "framework": args.framework,
         "target_platform": args.target_platform,
-        "analysis_mode": args.analysis_mode,
+        "analysis_mode": tracelens_analysis_mode(args.framework),
         "trace_input_type": trace_inputs.input_type,
         "hot_kernels": candidates,
         "task_groups": task_groups,
@@ -4435,7 +4437,6 @@ def main() -> int:
     parser.add_argument("--model-name", default="")
     parser.add_argument("--framework", default="")
     parser.add_argument("--target-platform", default="MI355X")
-    parser.add_argument("--analysis-mode", default="default")
     parser.add_argument(
         "--workspace-path",
         default=_default_workspace_path(),
@@ -5028,19 +5029,22 @@ def main() -> int:
                     state="running",
                     current_step="run_tracelens_sdk_orchestrator",
                 )
+                write_run_config(
+                    output_dir=tracelens_dir,
+                    trace_path=cli_trace_path,
+                    platform=args.target_platform,
+                    analysis_mode=tracelens_analysis_mode(args.framework),
+                    capture_folder=capture_folder,
+                )
                 try:
                     with _trajectory_scope(args):
                         skill_result = asyncio.run(
                             run_tracelens_skill(
                                 TraceLensSkillRequest(
                                     skill_path=skill,
-                                    trace_path=cli_trace_path,
                                     output_dir=tracelens_dir,
                                     tracelens_root=tl_root,
                                     tracelens_internal_root=tl_internal_root,
-                                    platform=args.target_platform,
-                                    framework=args.framework,
-                                    analysis_mode=args.analysis_mode,
                                     capture_folder=capture_folder,
                                 ),
                                 budget_minutes=args.budget_minutes,
