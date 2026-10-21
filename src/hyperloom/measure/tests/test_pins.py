@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from hyperloom.inference_optimizer.inferencex_checkout import DEFAULT_REF
 from hyperloom.measure import pins
 from hyperloom.measure.pins import (
     ImagePinError,
@@ -26,16 +27,7 @@ def test_pins_come_from_the_shipped_install_script() -> None:
 
 
 def test_the_preflight_default_stays_in_lockstep() -> None:
-    # Main moved the default to the public ``inferencex_checkout.DEFAULT_REF``; the old private name is read only
-    # until that move is merged here.
-    try:
-        from hyperloom.inference_optimizer.inferencex_checkout import DEFAULT_REF as default_ref
-    except ImportError:
-        from hyperloom.inference_optimizer.cli import preflight
-
-        default_ref = preflight._INFERENCEX_REF_DEFAULT
-
-    assert pinned_tool_commits({}).inferencex == default_ref
+    assert pinned_tool_commits({}).inferencex == DEFAULT_REF
 
 
 def test_environment_overrides_win_and_empty_does_not() -> None:
