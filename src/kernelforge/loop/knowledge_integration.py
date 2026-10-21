@@ -1140,6 +1140,9 @@ class _WarmStartAttempt:
         except Exception:
             _clear_kb_references(self.kernel.workspace)
             raise
+        # A trial's cost scales with how slow the candidate is -- the correctness suite and the benchmark both run the
+        # kernel -- so a port claiming to be orders of magnitude off the pace can spend the whole search budget on
+        # itself. The claim only has to be right about the magnitude for that to be the wrong trade.
         admissible = [sol for sol in sols if not warmstart_policy.below_floor(_ranked_speedup(sol))]
         if len(admissible) != len(sols):
             print(
@@ -1181,6 +1184,7 @@ class _WarmStartAttempt:
         )
         self.measured_writebacks = field.writebacks
         self.reference_reason = field.reject_reason
+        # One entry per candidate that reached a measurement, in rank order.
         for measurement in sorted(
             field.measurements,
             key=lambda item: (-item["mean_case_speedup"], item["index"]),

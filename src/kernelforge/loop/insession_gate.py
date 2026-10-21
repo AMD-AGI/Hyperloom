@@ -1152,11 +1152,8 @@ class InSessionGate:
             self.passed = True
             self.end_reason = "converged"
             self._log(
-                "ALLOW (correct + faster: mean case speedup "
-                f"mean score={mean_case_speedup:.6f}x >= {required:.6f}x "
-                f"from scores="
-                f"{[round(score, 6) for score in measurement_scores]}; "
-                f"raw mean {wall} ms) "
+                f"ALLOW (correct + faster: mean case speedup mean score={mean_case_speedup:.6f}x >= {required:.6f}x "
+                f"from scores={[round(score, 6) for score in measurement_scores]}; raw mean {wall} ms) "
                 f"edit={self.edit_count}"
             )
             return self._allow()
@@ -1164,30 +1161,30 @@ class InSessionGate:
         speedup_txt = f"{mean_case_speedup:.6f}x"
         wall_txt = f"{wall:.6f}" if wall is not None else "unmeasured"
         self._log(
-            "BLOCK (correct but not faster: mean case speedup "
-            f"{speedup_txt}; required="
-            f"{required:.6f}x; "
-            f"raw mean {wall_txt} ms) "
-            f"edit={self.edit_count}"
+            f"BLOCK (correct but not faster: mean case speedup {speedup_txt}; required={required:.6f}x; "
+            f"raw mean {wall_txt} ms) edit={self.edit_count}"
         )
         return self._block(
-            "The kernel is CORRECT but NOT faster than the current best, so it "
-            "is not good enough to finish.\n"
-            f"Measured mean case speedup={speedup_txt}; required="
-            f"{required:.6f}x; "
-            f"raw mean={wall_txt} ms.\n"
-            "Keep the kernel correct and try a DIFFERENT optimization to reduce "
-            "wall time, then continue."
+            "The kernel is CORRECT but NOT faster than the current best, so it is not good enough to finish.\n"
+            f"Measured mean case speedup={speedup_txt}; required={required:.6f}x; raw mean={wall_txt} ms.\n"
+            "Keep the kernel correct and try a DIFFERENT optimization to reduce wall time, then continue."
         )
 
     async def _stop_candidate_verdict(self) -> dict:
         """Run in-session correctness (and performance) and allow or block the stop."""
+        # Ensure the canonical check compiles the kernel the agent has on disk RIGHT NOW: the SDK hook may run in a
+        # subprocess that did not inherit the loop's AITER_REBUILD, so (re)assert it here. Its measurement is the one
+        # the outer loop reuses, so a shard chosen from a stale source list would decide keep/revert on the previous
+        # iteration's binary.
         try:
             force_jit_rebuild_for_changes(
                 self.workspace_root or Path.cwd(),
                 [self.kernel_abs, *self.target_abs],
             )
         except JitRebuildUnavailable as error:
+            # The workspace, not the agent: the candidate on disk is intact, and outer canonical validation
+            # asserts the rebuild itself before measuring. Blocking here would only spend turns on a failure no
+            # edit can clear.
             self.end_reason = "jit_rebuild_unavailable"
             self.findings.append(f"In-session validation skipped; workspace unavailable: {error}")
             self._log(
@@ -1195,6 +1192,7 @@ class InSessionGate:
             )
             return self._allow()
 
+        # Correctness — canonical driver, same call the pipeline uses.
         corr = await test_correctness(
             driver_script=self.driver_script,
             driver_args=[],
@@ -1221,6 +1219,7 @@ class InSessionGate:
                 f"{corr.get('message', '')}\n{str(tail)[-1400:]}"
             )
 
+        # Correctness-only phase (e.g. PORT): there is no performance requirement, so a CORRECT kernel is done.
         if self.correctness_only:
             self.passed = True
             self.end_reason = "converged"
@@ -1230,6 +1229,7 @@ class InSessionGate:
 
     async def _on_stop(self, input_data: dict, tool_use_id: str | None, context: Any) -> dict:
         try:
+            # Harness protection (security, first).
             protected_delta = self._protected_changes()
             self.integrity_reason = protected_delta
             self.integrity_violation = bool(protected_delta)
@@ -1237,6 +1237,8 @@ class InSessionGate:
             if protected_delta:
                 return self._stop_for_protected_harness(protected_delta)
 
+            # Budget (bounded so the gate never hangs the session). Checked before the (GPU-costly) canonical
+            # validation so an exhausted session hands off immediately instead of paying for one more bench.
             if self.block_count >= self.max_blocks:
                 self.end_reason = "block_budget_exhausted"
                 self._log(

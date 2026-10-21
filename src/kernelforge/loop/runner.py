@@ -2477,6 +2477,9 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         best = self.run_state.best
         if not best.commit_hash or best.wall_ms is None or best.mean_case_speedup is None:
             return
+        # A resumed session recomputes session_index and experiment_id, which legitimately differ from what the stored
+        # manifest was written with, so republishing an already-current best tripped the same-iteration conflict guard
+        # and reported persistence_degraded over a bundle that was already correct.
         if self.best_publisher.describes_current_best(
             iteration=best.iteration,
             commit_hash=best.commit_hash,
@@ -2699,6 +2702,16 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             )
         )
         return decision.lanes if decision.admitted else None
+
+    def _price_round(self, iteration: int) -> int | None:
+        """Price the round before anything is spent on it: the lanes it may plan, or ``None`` if none fit."""
+        self._close_round()
+        round_lanes: int | None = self.ic.lanes
+        if not self._lane_queue:
+            round_lanes = self._admit_next_round(iteration)
+            if round_lanes is not None:
+                self._open_round(iteration, lanes=round_lanes)
+        return round_lanes
 
     def _admit_dispatch(self, iteration: int) -> bool:
         """Whether the round now holding plans may start its session."""
@@ -3043,6 +3056,8 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         if current is base:
             return replace(found, rounds=rounds, detail=stopped)
         share = current.variance_shares.get(dominant)
+        # A case's *share* of the variance is structural -- q61's speedup term is 8x the others', so it holds most of
+        # the variance at any sample size -- and re-measuring cannot be expected to move it.
         settled = current.case_sigmas[dominant] < base.case_sigmas[dominant]
         return replace(
             found,
@@ -4114,6 +4129,9 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             sigma=sigma,
             sigma_sample_size=sigma_resolution.sample_size,
         )
+        # The bar is a t multiple of the standard error of the mean, so a REVERT is only readable next to the spread
+        # that set it and, when one case supplied that spread, next to the case: a weak candidate and a noisy 10 us
+        # dispatch print the same mean score.
         sigma_text = f"{sigma:.6f}" if sigma is not None else "n/a"
         print(
             f"  [bench] pristine-relative scores="
@@ -4125,7 +4143,32 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             f"({bench_result.get('message', '')})"
         )
         if bench_error_output:
+            # The scoring verdict has already overwritten ``message`` with "candidate emitted no per-case timings",
+            # which describes the symptom of a crash as if it were a formatting choice.
             print(f"  [bench] {bench_error_output}")
+
+    def _clears_keep_bar(
+        self,
+        bench_result: dict,
+        measurement_scores: list[float],
+        sigma_resolution: SigmaResolution,
+    ) -> bool:
+        """Whether a measured candidate is a KEEP.
+
+        The mean of the independent pristine-relative scores must clear the current best by the candidate's own
+        measurement noise. A second-stage ASM result must also beat the original caller's aggregate time.
+        """
+        improved = bool(bench_result.get("success")) and passes_keep_threshold(
+            measurement_scores,
+            best_mean_case_speedup=(self.best_mean_case_speedup or 1.0),
+            sigma=sigma_resolution.sigma,
+            sigma_sample_size=sigma_resolution.sample_size,
+        )
+        if improved and self.ic.kernel_backend == "assembly":
+            source_ms = self.ic.pristine_baseline_wall_ms
+            raw_mean_ms = bench_result.get("median_ms")
+            improved = source_ms is not None and raw_mean_ms is not None and raw_mean_ms < source_ms
+        return improved
 
     async def _decide_iteration_keep(
         self,
@@ -4135,9 +4178,13 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         bench_result: dict,
     ) -> IterationResult:
         """Score the bench, check registers, apply the KEEP bar, and build the IterationResult."""
+        # A candidate whose bench crashed is reverted for "no speedup" unless the crash itself reaches the agent; the
+        # tool's output tail is the only place the traceback exists.
         bench_error_output = (
             "" if bench_result.get("success") else "BENCH FAILED: " + _bench_failure_detail(bench_result)
         )
+        # Collapse per-case times into an equal-weight mean of per-case speedups, rather than allowing expensive cases
+        # to dominate an aggregate ratio.
         self._apply_mean_case_speedup_metric(bench_result)
         measurement_scores = list(bench_result.get("measurement_mean_case_speedups") or [])
         sigma_resolution = await self._resolve_keep_sigma(bench_result, measurement_scores)
@@ -4145,23 +4192,17 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         selected_raw_mean_ms = bench_result.get("median_ms")
         mean_case_speedup = bench_result.get("mean_case_speedup")
         snr_db = report.results[-1].snr_db if report.results else None
-        sigma = sigma_resolution.sigma
 
         reg_result = await check_registers(build_dir=self.ic.build_dir)
         vgpr = reg_result.get("vgpr") if reg_result.get("success") else None
         if vgpr:
             print(f"  [registers] VGPR={vgpr}")
 
-        improved = bool(bench_result.get("success")) and passes_keep_threshold(
-            measurement_scores,
-            best_mean_case_speedup=(self.best_mean_case_speedup or 1.0),
-            sigma=sigma,
-            sigma_sample_size=sigma_resolution.sample_size,
-        )
-        if improved and self.ic.kernel_backend == "assembly":
-            source_ms = self.ic.pristine_baseline_wall_ms
-            improved = source_ms is not None and selected_raw_mean_ms is not None and selected_raw_mean_ms < source_ms
+        improved = self._clears_keep_bar(bench_result, measurement_scores, sigma_resolution)
 
+        # The numerical contract, which only assembly declares and only it needs. Every other backend was judged by
+        # the driver and measured through it since; re-running that verdict here would answer the same question with
+        # the same command, while reading a task configuration whose shape the engine has no business knowing.
         canonical_summary = ""
         if improved and runs_task_suite_acceptance(self.ic.kernel_backend):
             canonical_started = time.time()
@@ -4171,6 +4212,8 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
                 candidate_label=f"iteration {iteration}",
                 kernel_backend=self.ic.kernel_backend,
             )
+            # The suite only runs for a candidate the round produced, so it is part of that round's measurement and
+            # has to be priced into the next round's admission alongside the validate-and-bench cycle.
             self._observe_measurement(canonical_started)
             canonical_summary = f"\n  Canonical correctness suite: {canonical.detail}"
             if canonical.numerical_evidence is not None:
@@ -6203,6 +6246,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         self.run_state = self.state_store.load()
         actors = _with_search_actor(agents, self._session_start_bundle())
         self._supervisor_ruling = load_latest_supervisor_ruling(self.ic.workspace_dir) if self.resume else ""
+        # Ownership boundary for anything a candidate creates, taken before this loop touches the workspace.
         self._pre_untracked = self._untracked_snapshot()
         self._restore_or_begin_campaign(
             state_exists=state_exists,
@@ -6211,6 +6255,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             orchestration_service=actors.orchestration_service,
             on_best_committed=callbacks.on_best_committed,
         )
+        # Anchor the campaign clock now that the state carrying what earlier sessions spent is loaded.
         self._campaign_started_at = self.start_time - max(0.0, float(self.run_state.round_costs.campaign_sec))
         if reconcile_stale_running_session(self.run_state):
             self.state_store.append_event(
@@ -6248,10 +6293,16 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         self._seed_and_hydrate_run_state()
         self._adopt_validated_warm_start()
         self._verify_baseline_anchor()
+        # Once the anchor is settled and verified, so the estimate is handed the case set the objective scores and
+        # latencies from the campaign's own clock.
         await self._establish_ceiling()
+        # A crash immediately after a verified commit can leave the KEEP's archive unfinished.
         await self._finish_recovered_pending_keep()
         self._restore_lane_queue()
+        # The previous round's verdict: a REPLACE is spent on the round after the one it judged, and the budget often
+        # ends between the two.
         self._restore_critic_ruling()
+        # Analyze the baseline canonical commit once before any specialist or Implementer session.
         if actors.analysis_service is not None:
             await self._resolve_analysis_context(actors.analysis_service)
         return actors
@@ -6261,7 +6312,6 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         attempt,
         frame: _IterationFrame,
         *,
-        session_sink: dict,
         callbacks: LoopCallbacks,
     ) -> None:
         """Measure one sourced attempt, stamp it, rule on it, and close the iteration."""
@@ -6275,6 +6325,8 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             _optimization_plan_path,
             optimization_plan_executable,
         ) = attempt
+        # Snapshot the best-so-far BEFORE this iteration is measured, so the archive can record the true delta vs
+        # the standard it had to beat (run_one_iteration mutates self.best_wall_ms on an improvement).
         frame = replace(
             frame,
             best_before=self.best_wall_ms,
@@ -6286,10 +6338,12 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             try:
                 result = await self.run_one_iteration(
                     frame.iteration,
-                    plan=session_sink.get("plan", ""),
+                    plan=frame.session_sink.get("plan", ""),
                     **({"benchmark_measurement": reusable_benchmark} if reusable_benchmark is not None else {}),
                 )
             except Exception as e:  # noqa: BLE001
+                # Turn the crash into a FAILED result (crashed=True) and let it flow through the same
+                # verdict/ledger/archive path.
                 print(f"  [CRASH] iteration {frame.iteration} crashed during run: {e}")
                 result = IterationResult(
                     iteration=frame.iteration,
@@ -6302,9 +6356,11 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
                 )
         result.commit_hash = commit_hash
         result.agent_rationale = rationale
-        self._stamp_result_profile(result, session_sink)
-        result.session_end_reason = session_sink.get("end_reason", "")
-        result.turns = session_sink.get("turns")
+        self._stamp_result_profile(result, frame.session_sink)
+        # Session end reason + turns spent (from the in-session gate / SDK via session_sink) — persisted so a
+        # run's end-reason distribution (edit cap / turn cap / converged / …) is analyzable.
+        result.session_end_reason = frame.session_sink.get("end_reason", "")
+        result.turns = frame.session_sink.get("turns")
         self._apply_iteration_planning_state(
             optimization_plan_created=optimization_plan_executable,
         )
@@ -6324,6 +6380,8 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         iteration = self.run_state.next_iteration - 1
         while True:
             iteration += 1
+            # Build the lineage digest once per iteration — reused by BOTH the supervisor (trajectory to review) and
+            # the implementer (prompt history).
             digest = self.archive.render_digest()
             stop, hazard = self._stop_condition_met(iteration)
             if stop:
@@ -6331,14 +6389,9 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             actors = _with_search_actor(actors, self._iteration_bundle(iteration))
             agent_fn, agent_factory, supervisor_fn = actors.agent_fn, actors.agent_factory, actors.supervisor_fn
             orchestration_service = actors.orchestration_service
-            self._close_round()
-            round_lanes = self.ic.lanes
-            if not self._lane_queue:
-                admitted_lanes = self._admit_next_round(iteration)
-                if admitted_lanes is None:
-                    break
-                round_lanes = admitted_lanes
-                self._open_round(iteration, lanes=round_lanes)
+            round_lanes = self._price_round(iteration)
+            if round_lanes is None:
+                break
             await self._open_iteration(
                 iteration=iteration,
                 digest=digest,
@@ -6346,6 +6399,8 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
                 analysis_service=analysis_service,
             )
             session_sink: dict = {}
+            # What a fan-out round leaves this iteration holding, so the single-session path below spends it instead
+            # of buying it again.
             fan_out_plan: HeldRound | None = None
             if hazard is None and (
                 not self._lane_queue
@@ -6360,14 +6415,18 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
                     agent_factory=agent_factory,
                     lanes=round_lanes,
                 )
+                # The round's own lanes share one device with the canonical measurement, so a lane whose teardown
+                # could not clear it has just refused this iteration -- whatever its siblings produced.
                 hazard = self.device_hazard.live
                 if self._refused_round:
+                    # Planning cost more than the round had left.
                     break
             merge = self._stage_merge(
                 iteration=iteration,
                 hazard=hazard,
                 fan_out_plan=fan_out_plan,
             )
+            # A fan-out round already paid for these candidates, so they are measured before anything new is planned.
             queued_lane = None if hazard or merge.diff else self._take_lane_candidate()
             frame = _IterationFrame(iteration, session_sink, merge)
             attempt = await self._source_attempt(
@@ -6381,12 +6440,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
                 if self._refused_round:
                     break
                 continue
-            await self._settle_locked_attempt(
-                attempt,
-                frame,
-                session_sink=session_sink,
-                callbacks=callbacks,
-            )
+            await self._settle_locked_attempt(attempt, frame, callbacks=callbacks)
         self._persist_terminal_state()
         self._print_final_report()
         return self.results
