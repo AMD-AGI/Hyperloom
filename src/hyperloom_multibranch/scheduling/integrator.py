@@ -5,7 +5,8 @@
 
 Candidates are the notebook's committed specialist commits, in the order it gives them (foundation fixes first, then
 by their own gain), whatever became of the branch that made them. Each is tried once per integration head, until it
-is merged or found already on the head. A round
+is merged or found already on the head, except that one a merge test measured as not stackable waits until a later
+merge changes something its own change names: see :mod:`hyperloom_multibranch.scheduling.candidates`. A round
 tests up to the integration branch's K candidates at once on the same head; the first of them, in that order, that
 may be merged is merged, and every other one that may is superseded: it gets no judgement and is tried again on the
 new head. A merge the experiment repository cannot combine, or whose test the toolbox refuses, is skipped and recorded
@@ -43,6 +44,7 @@ from hyperloom_multibranch.contracts.repo import ExperimentRepo, PatchConflict, 
 from hyperloom_multibranch.contracts.toolbox import RequestRejected
 from hyperloom_multibranch.rulegate.agentx import P50_BELOW_THRESHOLD
 from hyperloom_multibranch.rulegate.inferencex import GAIN_BELOW_THRESHOLD, GAIN_NOT_CONFIRMED
+from hyperloom_multibranch.scheduling.candidates import offered_on
 from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind, DecisionLog
 from hyperloom_multibranch.scheduling.llm import Completion, CompletionFailed
 from hyperloom_multibranch.scheduling.requests import SessionChecks, integration_test_request
@@ -145,13 +147,6 @@ class LlmPatchResolver:
             return await self._repo.patch_text(onto, path)
 
 
-def _untried(commit: CommittedCommit, head: str) -> bool:
-    last = commit.last_merge
-    if commit.merged_into is not None or (last is not None and last.outcome is MergeOutcome.ALREADY_ON_HEAD):
-        return False
-    return last is None or last.integration_head != head
-
-
 #: The verdicts a foundation fix that passed the accuracy gate merges on: a settled measurement, whatever its gain.
 FOUNDATION_FIX_VERDICTS = frozenset({Verdict.IMPROVED, Verdict.FLAT, Verdict.REGRESSED})
 # A settled verdict refused only for want of a gain; any other refusal (a broken guard, extra failed requests, a pair
@@ -233,14 +228,14 @@ class Integrator:
         self._recording: asyncio.Future[str] | None = None
 
     async def integrate_next(self, width: int) -> tuple[MergeReport, ...]:
-        """Test up to ``width`` commits not merged and not yet tried on the current head, at once; ``()`` when none is.
+        """Test up to ``width`` of the commits offered on the current head at once; ``()`` when none is offered.
 
         At most one of them is merged, so the head moves once per round.
         """
 
         head = await self._repo.head(INTEGRATION_BRANCH)
-        untried = [commit for commit in await self._notebook.committed() if _untried(commit, head)]
-        tested = await asyncio.gather(*(self._test(candidate, head) for candidate in untried[:width]))
+        offered = await offered_on(self._notebook, self._repo, head)
+        tested = await asyncio.gather(*(self._test(candidate, head) for candidate in offered[:width]))
         reports = []
         merged = False
         for item in tested:

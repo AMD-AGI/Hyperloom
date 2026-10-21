@@ -443,7 +443,28 @@ async def test_a_merge_measuring_no_throughput_is_not_stackable_and_merging_goes
     assert await bench.repo.head(INTEGRATION_BRANCH) == bench.root
 
 
-async def test_each_commit_is_tried_once_per_integration_head(tmp_path: Path) -> None:
+async def test_a_merge_that_could_not_be_measured_is_tried_again_on_the_next_head(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bench = await _bench(tmp_path)
+    measure_no_throughput(monkeypatch)
+    unmeasured = await _one(bench)
+    monkeypatch.undo()
+
+    merged = await _one(bench)
+    retried = await _one(bench)
+
+    c1, c2 = bench.commits["c1"], bench.commits["c2"]
+    assert unmeasured is not None and (unmeasured.candidate, unmeasured.onto) == (c1, bench.root)
+    assert (await bench.handle(Role.OBSERVER).record(str(unmeasured.request_id))).conclusion is None
+    assert merged is not None and (merged.candidate, merged.outcome) == (c2, MergeOutcome.MERGED)
+    assert retried is not None and (retried.candidate, retried.onto) == (c1, merged.merged_commit)
+    assert retried.outcome is MergeOutcome.MERGED
+
+
+async def test_a_not_stackable_commit_is_tried_again_once_a_merge_changed_what_its_change_names(
+    tmp_path: Path,
+) -> None:
     curves = {frozenset({"c1"}): {MAIN_POINT: 1005.0}, frozenset({"c2"}): {MAIN_POINT: 1020.0}}
     bench = await _bench(tmp_path, {**curves, frozenset({"c1", "c2"}): {MAIN_POINT: 1025.0}})
 
@@ -461,6 +482,26 @@ async def test_each_commit_is_tried_once_per_integration_head(tmp_path: Path) ->
     assert [row["detail"]["config_conflicts"] for row in merged_c2] == [
         [{"name": "--max-num-seqs", "before": "64", "after": "128"}]
     ]
+
+
+#: A change that names nothing ``c1`` or ``c2`` name: an environment variable and a tag flag of its own.
+APART = RecipeDelta(config=ConfigDelta(server_args=f"{TAG_FLAG}apart", envs={"HL_APART": "1"}))
+
+
+async def test_a_not_stackable_commit_whose_change_the_head_did_not_touch_is_not_tried_again(bench: Bench) -> None:
+    apart = await _committed_elsewhere(bench, APART, 9.0)
+
+    rounds = [await _one(bench) for _ in range(4)]
+
+    c1, c2 = bench.commits["c1"], bench.commits["c2"]
+    assert [(report.candidate, report.outcome) for report in rounds if report is not None] == [
+        (apart, MergeOutcome.NOT_STACKABLE),
+        (c1, MergeOutcome.MERGED),
+        (c2, MergeOutcome.MERGED),
+    ]
+    assert rounds[3] is None
+    tried = [test for test in bench.merge_tests().values() if f"{TAG_FLAG}apart" in test.delta.config.server_args]
+    assert len(tried) == 1
 
 
 async def test_a_round_tests_k_candidates_at_once_and_merges_the_first_improvement(bench: Bench) -> None:
@@ -482,19 +523,24 @@ async def test_a_round_tests_k_candidates_at_once_and_merges_the_first_improveme
     assert await bench.integrator.integrate_next(2) == ()
 
 
-async def _committed_again(bench: Bench) -> str:
-    """A commit of a new branch ``s2`` that makes ``c1``'s change again, committed on the root."""
+async def _committed_elsewhere(bench: Bench, delta: RecipeDelta, gain: float) -> str:
+    """A commit of a new branch ``s2`` on the root, that the gate judged ``gain`` and committed."""
 
     scheduler, toolbox, gate = (bench.handle(role) for role in (Role.SCHEDULER, Role.TOOLBOX, Role.GATE))
     await scheduler.record_lineage(LineageEvent(LineageKind.OPEN, "s2", from_commit=bench.root, reason="refill"))
     await bench.repo.create_branch("s2", bench.root)
-    same = RecipeDelta(config=bench.deltas["c1"].config)
-    again = await bench.repo.commit("s2", bench.root, apply(await bench.repo.read_recipe(bench.root), same), "d1")
-    test = request("rd1", intent("s2", bench.root, mechanism="d1"), same)
+    commit = await bench.repo.commit("s2", bench.root, apply(await bench.repo.read_recipe(bench.root), delta), "d1")
+    test = request("rd1", intent("s2", bench.root, mechanism="d1"), delta)
     await toolbox.write_request(test)
     await toolbox.write_result(result(test.request_id))
-    await gate.write_judgement(test.request_id, judgement(5.0, (test.request_id,)), Conclusion.COMMITTED, again)
-    return again
+    await gate.write_judgement(test.request_id, judgement(gain, (test.request_id,)), Conclusion.COMMITTED, commit)
+    return commit
+
+
+async def _committed_again(bench: Bench) -> str:
+    """A commit of a new branch ``s2`` that makes ``c1``'s change again, committed on the root."""
+
+    return await _committed_elsewhere(bench, RecipeDelta(config=bench.deltas["c1"].config), 5.0)
 
 
 async def test_a_merge_that_leaves_the_head_s_recipe_unchanged_is_skipped_untested(bench: Bench) -> None:
