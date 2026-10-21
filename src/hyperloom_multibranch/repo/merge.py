@@ -4,9 +4,11 @@
 """A candidate commit's own change carried onto another commit's recipe, for the integrator's merge.
 
 The change is what the candidate's recipe changed from its parent's. A server argument or environment variable both
-sides changed takes the candidate's value and is listed; a component pin or a kernel slot both sides moved has no
-value to prefer, so the merge is refused. The merged patch stacks are applied to the installed package as the toolbox
-applies them when it builds a test's environment, so a conflict shows before the merge test is paid for.
+sides changed takes the candidate's value and is listed; a kernel slot both sides filled has no value to prefer, so
+the merge is refused. A component the head already has keeps the head's upstream commit: every component is built
+from the installed package of the session's fixed base image, so a recipe's upstream pin is provenance no merge can
+act on. The merged patch stacks are applied to the installed package as the toolbox applies them when it builds a
+test's environment, so a conflict shows before the merge test is paid for.
 """
 
 from __future__ import annotations
@@ -81,31 +83,17 @@ def _components(base: Recipe, candidate: Recipe, ours: Recipe) -> tuple[Componen
 
 
 def _component_change(name: str, base: Recipe, candidate: Recipe, ours: Recipe) -> ComponentChange | None:
+    """What the candidate did to ``name``; its upstream pin travels only to create a component ``ours`` lacks."""
     before, after, current = base.component(name), candidate.component(name), ours.component(name)
     old, new = (before.patches if before else ()), (after.patches if after else ())
     have = current.patches if current else ()
     added = tuple(patch for patch in new if patch not in old and patch not in have)
     removed = tuple(patch.path for patch in old if patch not in new and patch in have)
-    pin = _pin(name, before, after, current)
-    if not (added or removed or pin):
-        return None
-    if current is None and after is not None:
+    if current is None and after is not None and (before is None or added):
         return ComponentChange(name, after.upstream_ref, after.upstream_repo, added)
-    return ComponentChange(name, pin, add_patches=added, remove_patches=removed)
-
-
-def _pin(
-    name: str, before: ComponentPatches | None, after: ComponentPatches | None, current: ComponentPatches | None
-) -> str | None:
-    """The upstream commit the candidate moved ``name`` to, if it moved it."""
-    was = before.upstream_ref if before else None
-    if after is None or after.upstream_ref == was:
+    if not (added or removed):
         return None
-    if current is not None and current.upstream_ref not in (was, after.upstream_ref):
-        raise RecipeError(
-            f"both sides moved {name}: onto to {current.upstream_ref}, the candidate to {after.upstream_ref}"
-        )
-    return after.upstream_ref
+    return ComponentChange(name, add_patches=added, remove_patches=removed)
 
 
 def _added_kernels(base: Recipe, candidate: Recipe, ours: Recipe) -> tuple[KernelArtifact, ...]:

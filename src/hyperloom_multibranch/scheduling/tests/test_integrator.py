@@ -600,13 +600,14 @@ async def test_a_merge_the_recipe_contract_refuses_is_skipped_and_the_round_goes
 
 
 async def _commit_moving_the_component(bench: Bench, ref: str) -> str:
-    """Branch ``s2`` starts from the root and commits ``c3`` (+1%), which pins ``vllm`` at ``ref``."""
+    """Branch ``s2`` starts from the root and commits ``c3``, a server argument whose recipe labels ``vllm`` with the
+    upstream commit ``ref`` instead of the one the root recorded."""
 
     scheduler, toolbox, gate = (bench.handle(role) for role in (Role.SCHEDULER, Role.TOOLBOX, Role.GATE))
     await scheduler.record_lineage(LineageEvent(LineageKind.OPEN, "s2", from_commit=bench.root, reason="second batch"))
     await bench.repo.create_branch("s2", bench.root)
-    patch = await bench.repo.store_patch(COMPONENT, _patch_text("x.py", "old", "moved"))
-    change = RecipeDelta(components=(ComponentChange(COMPONENT, ref, UPSTREAM_REPO, add_patches=(patch,)),))
+    config = ConfigDelta(server_args=f"--max-num-batched-tokens 2048 {TAG_FLAG}c3")
+    change = RecipeDelta(config, components=(ComponentChange(COMPONENT, ref, UPSTREAM_REPO),))
     commit = await bench.repo.commit("s2", bench.root, apply(await bench.repo.read_recipe(bench.root), change), "c3")
     test = request("rc3", intent("s2", bench.root, mechanism="c3"), change)
     await toolbox.write_request(test)
@@ -615,29 +616,28 @@ async def _commit_moving_the_component(bench: Bench, ref: str) -> str:
     return commit
 
 
-async def test_a_merge_that_moves_a_component_the_head_moved_too_is_skipped_and_recorded(bench: Bench) -> None:
-    await _one(bench)
+async def test_a_candidate_naming_another_upstream_commit_is_merged_and_the_head_keeps_its_pin(tmp_path: Path) -> None:
+    bench = await _bench(tmp_path, {**CURVES, frozenset({"c1", "c2", "c3"}): {MAIN_POINT: 1080.0}})
+    for _ in range(2):
+        await _one(bench)
     head = await bench.repo.head(INTEGRATION_BRANCH)
     ref = "b" * 40
     moved = await _commit_moving_the_component(bench, ref)
 
-    reports = await bench.integrator.integrate_next(2)
+    report = await _one(bench)
 
-    prefix = f"the merge does not combine: both sides moved {COMPONENT}"
-    [skipped] = [report for report in reports if report.candidate == moved]
-    assert (skipped.onto, skipped.outcome, skipped.request_id) == (head, MergeOutcome.CONFLICT_SKIPPED, None)
-    assert skipped.reason.startswith(prefix)
+    assert report is not None and (report.candidate, report.onto, report.outcome) == (
+        moved,
+        head,
+        MergeOutcome.MERGED,
+    )
+    assert report.request_id is not None and "does not combine" not in report.reason
     tested_refs = {change.upstream_ref for test in bench.merge_tests().values() for change in test.delta.components}
     assert ref not in tested_refs
-    by_commit = {commit.commit_id: commit for commit in await bench.handle(Role.OBSERVER).committed()}
-    assert by_commit[moved].last_merge is not None
-    assert by_commit[moved].last_merge.outcome is MergeOutcome.CONFLICT_SKIPPED
-    [attempt] = await bench.handle(Role.OBSERVER).search(f"both sides moved {COMPONENT}")
-    assert attempt.summary.startswith(f"merge {moved} onto {head}, skipped: {prefix}")
+    assert await bench.handle(Role.OBSERVER).search(f"both sides moved {COMPONENT}") == ()
     [logged] = [row for row in bench.logged() if row["detail"]["candidate"] == moved]
     assert (logged["kind"], logged["branch"]) == (DecisionKind.MERGE.value, INTEGRATION_BRANCH)
-    assert str(logged["reason"]).startswith(prefix)
-    assert logged["detail"]["outcome"] == MergeOutcome.CONFLICT_SKIPPED.value
+    assert logged["detail"]["outcome"] == MergeOutcome.MERGED.value
     pinned = (await bench.repo.read_recipe(await bench.repo.head(INTEGRATION_BRANCH))).component(COMPONENT)
     assert pinned is not None and pinned.upstream_ref == UPSTREAM_REF
 

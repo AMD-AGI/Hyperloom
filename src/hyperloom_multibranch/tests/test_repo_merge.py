@@ -28,6 +28,7 @@ from hyperloom_multibranch.repo.merge import carry
 
 IMAGE = "rocm/vllm@sha256:" + "c" * 64
 VLLM = "https://github.com/vllm-project/vllm"
+TRITON = "https://github.com/triton-lang/triton"
 PIN, MOVED, ELSEWHERE = "1" * 40, "2" * 40, "3" * 40
 BASE = Recipe(
     IMAGE,
@@ -128,9 +129,28 @@ def test_a_head_patch_the_candidate_breaks_is_dropped_and_reported():
     assert apply(ours, merge.delta).component("vllm").patches == ()
 
 
-def test_a_component_pin_both_sides_moved_does_not_merge():
-    with pytest.raises(RecipeError, match="both sides moved vllm"):
-        carry("i1", BASE, _changed(BASE, upstream_ref=MOVED), _changed(BASE, upstream_ref=ELSEWHERE), _applies)
+def test_a_candidate_labelling_a_component_with_another_upstream_commit_still_merges_its_patches():
+    candidate = _changed(BASE, upstream_ref=MOVED, add_patches=(_patch("theirs"),))
+    ours = _changed(BASE, upstream_ref=ELSEWHERE, add_patches=(_patch("ours"),))
+
+    merge = carry("i1", BASE, candidate, ours, _applies)
+
+    merged = apply(ours, merge.delta).component("vllm")
+    assert merge.clean and merged is not None
+    assert merged.patches == (_patch("ours"), _patch("theirs"))
+    assert merged.upstream_ref == ELSEWHERE
+
+
+@pytest.mark.parametrize("patches", [(), (_patch("theirs"),)], ids=["without-patches", "with-patches"])
+def test_a_component_the_candidate_adds_carries_its_upstream_repo_and_commit(patches):
+    added = ComponentChange("triton", MOVED, TRITON, add_patches=patches)
+    candidate = apply(BASE, RecipeDelta(components=(added,)))
+
+    merge = carry("i1", BASE, candidate, BASE, _applies)
+
+    merged = apply(BASE, merge.delta).component("triton")
+    assert merged is not None
+    assert (merged.upstream_repo, merged.upstream_ref, merged.patches) == (TRITON, MOVED, patches)
 
 
 def test_a_kernel_slot_both_sides_filled_does_not_merge_and_a_new_one_lands():
