@@ -36,7 +36,7 @@ from hyperloom_multibranch.contracts.notebook.peers import Intent, TestKind
 from hyperloom_multibranch.contracts.notebook.records import Learning, NotebookSnapshot, Writer, is_lesson_id
 from hyperloom_multibranch.contracts.notebook.vocab import COMMITTING, LearningKind, Role
 from hyperloom_multibranch.notebook.knowledge.experience import change_document
-from hyperloom_multibranch.notebook.learning_search import current_learnings, names, words
+from hyperloom_multibranch.notebook.learning_search import current_learnings, names, word_overlap, words
 from hyperloom_multibranch.notebook.local.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.rsi.archive import TreeArchive
 from hyperloom_multibranch.notebook.rsi.lessons import LessonPool
@@ -189,10 +189,6 @@ def _leads(log: Sequence[Mapping[str, Any]], tests: Mapping[str, list[BranchTest
     return counts
 
 
-def _overlap(mine: set[str], theirs: set[str]) -> float:
-    return len(mine & theirs) / max(1, min(len(mine), len(theirs)))
-
-
 def rediscoveries(
     snapshot: NotebookSnapshot, lessons: Mapping[str, tuple[str, str]], shown: Collection[tuple[str, str]]
 ) -> set[tuple[str, str]]:
@@ -207,7 +203,7 @@ def rediscoveries(
             pair = (record.learning.branch, lesson_id)
             if origin == session_id or pair in shown or pair in found:
                 continue
-            if _overlap(mine, words(text)) >= REDISCOVERY_OVERLAP:
+            if word_overlap(mine, words(text)) >= REDISCOVERY_OVERLAP:
                 found.add(pair)
     return found
 

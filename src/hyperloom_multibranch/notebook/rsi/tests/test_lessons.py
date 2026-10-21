@@ -26,6 +26,7 @@ from hyperloom_multibranch.notebook.rsi.lessons import (
     SessionStandings,
     human_author,
     lesson_id_for,
+    main,
     retirement_proposals,
     revision_id_for,
     specialist_author,
@@ -188,3 +189,32 @@ def test_standings_are_written_once_a_session_and_weigh_a_lesson_by_what_bore_it
     assert retirement_proposals(pool.lessons(), pool.standings()) == (contradicted,)
     with pytest.raises(ValueError):
         pool.record_standings(SessionStandings("../escape", START))
+
+
+def test_a_person_lists_shows_revises_retires_and_purges_lessons_from_the_command_line(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv(ARCHIVE_ENV, raising=False)
+    pool = LessonPool.beside(TreeArchive(tmp_path))
+    first = revision("first", START)
+    other = lesson_id_for("other")
+    pool.write(first)
+    pool.write(LessonRevision(revision_id_for("other"), other, LearningKind.TOOLING, FIXED, CONDITIONS, "x", START))
+    archive = ["--archive", str(tmp_path)]
+
+    listed = main([*archive, "list", "--query", "argparse"])
+    printed = capsys.readouterr().out
+    revised = main([*archive, "revise", LESSON, "--author", "siliang", "--content", f"  {FIXED}  "])
+    shown = main([*archive, "show", LESSON])
+    history = capsys.readouterr().out
+    retired = main([*archive, "retire", other, "--author", "siliang", "--reason", "fixed upstream in 0.12"])
+    unconfirmed = main([*archive, "purge", LESSON, "--author", "siliang", "--reason", "it quoted a token"])
+    purged = main([*archive, "purge", LESSON, "--author", "siliang", "--reason", "it quoted a token", "--yes"])
+    missing = main([*archive, "retire", LESSON, "--author", "siliang", "--reason", "gone already"])
+
+    assert (listed, revised, shown, retired, unconfirmed, purged, missing) == (0, 0, 0, 0, 2, 0, 1)
+    assert printed.splitlines() == [f"{LESSON} live [pitfall] sess-1: {TEXT}"]
+    assert f"replaces {first.revision_id}" in history and f"  {FIXED}" in history and "standing: {" in history
+    assert [head.author for head in pool.lessons()[other].heads] == ["x"] and pool.lessons()[other].retired is not None
+    assert LESSON not in pool.lessons() and [item.author for item in pool.purges()] == [human_author("siliang")]
+    assert main(["list"]) == 2

@@ -124,13 +124,14 @@ class InboxKind(str, Enum):
 
 class UsageSource(str, Enum):
     """Whose LLM spent the money: a branch's specialist, or the scheduler's judge, resolver, the rule gate's fix
-    critic, or the LLM that writes frontier scorers at CLOSE."""
+    critic, the LLM that writes frontier scorers at CLOSE, or the one that curates the RSI lesson pool there."""
 
     SPECIALIST = "specialist"
     JUDGE = "judge"
     RESOLVER = "resolver"
     CRITIC = "critic"
     SCORER = "scorer"
+    CURATOR = "curator"
 
 
 class QuarantineAction(str, Enum):

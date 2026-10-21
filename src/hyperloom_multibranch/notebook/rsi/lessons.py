@@ -25,13 +25,17 @@ scheduler's LLM, curating at CLOSE (:mod:`rsi.lesson_curation`); and a person, t
 
 from __future__ import annotations
 
+import argparse
 import json
 import logging
 import re
+import sys
+import time
 import uuid
 from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, fields
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TypeVar
 
@@ -39,9 +43,10 @@ from hyperloom_multibranch.contracts.notebook.peers import IntentLayer
 from hyperloom_multibranch.contracts.notebook.records import LESSON_ID, is_lesson_id
 from hyperloom_multibranch.contracts.notebook.vocab import LearningKind
 from hyperloom_multibranch.notebook.codec import decode, encode
+from hyperloom_multibranch.notebook.learning_search import words
 from hyperloom_multibranch.notebook.local.files import encode_json, publish_once
 from hyperloom_multibranch.notebook.local.notebook import LEARNING_MAX_CHARS, LEARNING_MIN_CHARS
-from hyperloom_multibranch.notebook.rsi.archive import TreeArchive
+from hyperloom_multibranch.notebook.rsi.archive import ARCHIVE_ENV, TreeArchive
 from hyperloom_multibranch.notebook.rsi.similarity import TaskConditions
 
 log = logging.getLogger(__name__)
@@ -369,6 +374,137 @@ def retirement_proposals(lessons: Mapping[str, Lesson], standings: Sequence[Sess
     return tuple(sorted(proposed))
 
 
+def _when(at: float) -> str:
+    return datetime.fromtimestamp(at, timezone.utc).isoformat(timespec="seconds")
+
+
+def _clean(text: str) -> str:
+    return " ".join(text.split())
+
+
+def _live(pool: LessonPool, lesson_id: str) -> Lesson | None:
+    lesson = pool.lessons().get(lesson_id)
+    if lesson is None or lesson.retired is not None:
+        print(f"error: no live lesson {lesson_id}", file=sys.stderr)
+        return None
+    return lesson
+
+
+def _list(pool: LessonPool, args: argparse.Namespace) -> int:
+    wanted = words(args.query)
+    for lesson in pool.lessons().values():
+        if lesson.retired is not None and not args.all:
+            continue
+        state = "retired" if lesson.retired is not None else "live"
+        for head in lesson.heads:
+            if not wanted or wanted & words(head.content):
+                print(
+                    f"{lesson.lesson_id} {state} [{head.kind.value}] {head.session_id or head.author}: {head.content}"
+                )
+    return 0
+
+
+def _show(pool: LessonPool, args: argparse.Namespace) -> int:
+    lesson = pool.lessons().get(args.lesson)
+    if lesson is None:
+        print(f"error: no lesson {args.lesson}", file=sys.stderr)
+        return 1
+    for revision in lesson.revisions:
+        replaced = ", ".join(revision.supersedes) or "nothing"
+        print(f"{revision.revision_id} {_when(revision.written_at)} {revision.author}, replaces {replaced}")
+        print(f"  {revision.content}")
+    if lesson.retired is not None:
+        retired = lesson.retired
+        print(f"retired {_when(retired.retired_at)} by {retired.author}: {retired.reason}")
+    print(f"standing: {encode(standing_of(pool.standings(), lesson.lesson_id))}")
+    return 0
+
+
+def _revise(pool: LessonPool, args: argparse.Namespace) -> int:
+    lesson = _live(pool, args.lesson)
+    if lesson is None:
+        return 1
+    head, now = max(lesson.heads, key=lambda item: item.written_at), time.time()
+    revision = LessonRevision(
+        revision_id_for("human", args.author, lesson.lesson_id, f"{now:.6f}"),
+        lesson.lesson_id,
+        head.kind,
+        _clean(args.content),
+        head.conditions,
+        human_author(args.author),
+        now,
+        target=head.target,
+        mechanism=head.mechanism,
+        layer=head.layer,
+        supersedes=tuple(item.revision_id for item in lesson.heads),
+        evidence=head.evidence,
+    )
+    pool.write(revision)
+    print(f"revised {lesson.lesson_id} as {revision.revision_id}")
+    return 0
+
+
+def _retire(pool: LessonPool, args: argparse.Namespace) -> int:
+    if _live(pool, args.lesson) is None:
+        return 1
+    pool.retire(LessonRetirement(args.lesson, human_author(args.author), time.time(), _clean(args.reason)))
+    print(f"retired {args.lesson}")
+    return 0
+
+
+def _purge(pool: LessonPool, args: argparse.Namespace) -> int:
+    if not args.yes:
+        print("error: a purge deletes the lesson's revisions for good; give --yes", file=sys.stderr)
+        return 2
+    if args.lesson not in pool.lessons():
+        print(f"error: no lesson {args.lesson}", file=sys.stderr)
+        return 1
+    deleted = pool.purge(LessonPurge(args.lesson, human_author(args.author), time.time(), _clean(args.reason)))
+    print(f"purged {args.lesson}: {deleted} revisions deleted, its id and why kept")
+    return 0
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="python -m hyperloom_multibranch.notebook.rsi.lessons", description=__doc__)
+    parser.add_argument("--archive", type=Path, default=None, help=f"the archive beside the pool; else {ARCHIVE_ENV}'s")
+    commands = parser.add_subparsers(dest="command", required=True)
+    listed = commands.add_parser("list", help="the live lessons, or every lesson with --all")
+    listed.add_argument("--all", action="store_true")
+    listed.add_argument("--query", default="", help="only those sharing a word with it")
+    listed.set_defaults(run=_list)
+    shown = commands.add_parser("show", help="one lesson's revisions, retirement and standing")
+    shown.add_argument("lesson")
+    shown.set_defaults(run=_show)
+    for name, run, text, says in (
+        ("revise", _revise, "a new text for a live lesson, replacing its heads", "--content"),
+        ("retire", _retire, "show a live lesson to no session again", "--reason"),
+        ("purge", _purge, "delete a lesson's revisions, for a text that must not exist", "--reason"),
+    ):
+        command = commands.add_parser(name, help=text)
+        command.add_argument("lesson")
+        command.add_argument("--author", required=True, help="who you are, named in what is written")
+        command.add_argument(says, required=True)
+        command.set_defaults(run=run)
+    purge = commands.choices["purge"]
+    purge.add_argument("--yes", action="store_true", help="confirm the deletion")
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """A person's look at the pool and change to it; 2 when no pool is named, 1 when the lesson is not there."""
+
+    args = _parser().parse_args(argv)
+    pool = LessonPool.beside(TreeArchive(args.archive)) if args.archive is not None else LessonPool.from_env()
+    if pool is None:
+        print(f"error: no lesson pool: give --archive or set {ARCHIVE_ENV}", file=sys.stderr)
+        return 2
+    try:
+        return int(args.run(pool, args))
+    except (OSError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+
 __all__ = [
     "CONTRADICTING_SESSIONS",
     "LESSONS",
@@ -388,9 +524,13 @@ __all__ = [
     "curator_author",
     "human_author",
     "lesson_id_for",
+    "main",
     "retirement_proposals",
     "revision_id_for",
     "specialist_author",
     "standing_factor",
     "standing_of",
 ]
+
+if __name__ == "__main__":
+    raise SystemExit(main())

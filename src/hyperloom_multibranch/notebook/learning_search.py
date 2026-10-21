@@ -183,6 +183,12 @@ def words(text: str) -> set[str]:
     }
 
 
+def word_overlap(mine: set[str], theirs: set[str]) -> float:
+    """The share of the smaller of two word sets the other holds too: 1 when one text's words are all the other's."""
+
+    return len(mine & theirs) / max(1, min(len(mine), len(theirs)))
+
+
 def session_matches(snapshot: NotebookSnapshot, query: str, *, limit: int) -> tuple[LearningRecord, ...]:
     """This session's current learnings that share a word with ``query``, best first."""
 
@@ -283,5 +289,6 @@ __all__ = [
     "outcome_of",
     "render_session_learning",
     "session_matches",
+    "word_overlap",
     "words",
 ]
