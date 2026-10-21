@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import signal
@@ -191,10 +192,8 @@ def test_sigkill_drain_is_bounded_when_an_escaped_descendant_holds_the_pipes(tmp
         out = psr.call_geak(_handoff(), tmp_path / "out", timeout_s=2)
     finally:
         if pid_file.is_file():
-            try:
+            with contextlib.suppress(ProcessLookupError):
                 os.kill(int(pid_file.read_text()), signal.SIGKILL)
-            except ProcessLookupError:
-                pass
 
     assert time.monotonic() - started < 30
     assert out["status"] == "error"
