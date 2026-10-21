@@ -46,6 +46,7 @@ from .domains import (
     FREEFORM_DOMAIN,
     SPECIALIST_DOMAIN_KEYS,
     SpecialistDomain,
+    dispatch_domain_key,
     domain_for_tag,
     get_domain,
     normalize_dispatch_tags,
@@ -578,15 +579,9 @@ class SpecialistRunner:
                 execute phase should be skipped (e.g. unknown domain).
         """
         params = ctx.task.params or {}
-        domain_key = str(params.get("domain") or "").strip()
-        # Back-fill domain_key from the first resolved tag for tag-only dispatch.
-        if not domain_key:
-            resolved_tags = normalize_dispatch_tags(params)
-            if resolved_tags:
-                domain_key = resolved_tags[0]
+        domain_key = dispatch_domain_key(params)
         gap = str(params.get("gap_canonical_id") or params.get("gap") or "").strip()
         max_turns = resolve_specialist_max_turns(params.get("max_turns"), default=self.default_max_turns)
-        # Resolve by anchor first then key so a domain carrying the KB anchor matches its entry.
         domain = domain_for_tag(domain_key)
         profile = resolve_specialist_profile(params, domain=domain)
         task_description = str(params.get("task_description") or "").strip()
