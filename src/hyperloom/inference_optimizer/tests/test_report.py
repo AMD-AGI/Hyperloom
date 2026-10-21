@@ -18,7 +18,6 @@ from hyperloom.common.perf_metric import (
     VERDICT_KEEP,
     VERDICT_REVERT,
 )
-from hyperloom.orchestrator.actions.executors import _report_md as rp_md
 from hyperloom.orchestrator.actions.executors import report as rp
 from hyperloom.inference_optimizer.session.session_paths import (
     reports_dir,
@@ -71,7 +70,7 @@ def test_report_agentx_comparison_reads_persisted_target(report_performance_stat
     assert comparison["interactivity_gap_pct"] == 75.0
     assert comparison["primary_gap"] == "latency"
     assert reference == before
-    md = "\n".join(rp_md._format_external_baseline_section(summary["external_baseline"]))
+    md = "\n".join(rp._format_external_baseline_section(summary["external_baseline"]))
     assert "+75.0%" in md
     assert "9999" not in md
 
@@ -83,7 +82,7 @@ def test_report_does_not_rebuild_missing_competitor_target(report_performance_st
     comparison = summary["external_baseline"]["comparison"]
     assert comparison["status"] == "unavailable"
     assert comparison["reason"] == "target_unavailable"
-    assert "gap vs target" not in "\n".join(rp_md._format_external_baseline_section(summary["external_baseline"]))
+    assert "gap vs target" not in "\n".join(rp._format_external_baseline_section(summary["external_baseline"]))
     assert "target_unavailable" in caplog.text
     assert str(tmp_path) in caplog.text
 
@@ -97,18 +96,18 @@ def test_agentx_report_keeps_no_data_reason_without_computing_gap(report_perform
         "all_concurrencies": [],
     }
     summary = rp._build_summary_dict(report_performance_state, {}, [], external_baseline=reference)
-    md = "\n".join(rp_md._format_external_baseline_section(summary["external_baseline"]))
+    md = "\n".join(rp._format_external_baseline_section(summary["external_baseline"]))
     assert "fetch_error" in md
     assert "gap vs target" not in md
 
 
 # ---- _format_completeness_annotations ----
 def test_completeness_annotations_empty():
-    assert rp_md._format_completeness_annotations({}) == []
+    assert rp._format_completeness_annotations({}) == []
 
 
 def test_completeness_annotations_full():
-    out = rp_md._format_completeness_annotations(
+    out = rp._format_completeness_annotations(
         {
             "has_unvalidated_keeps": True,
             "untried_hot_reusable_kernels": ["k1"],
@@ -122,7 +121,7 @@ def test_completeness_annotations_full():
 
 
 def test_degraded_mode_section():
-    out = rp_md._format_degraded_mode_section(
+    out = rp._format_degraded_mode_section(
         {
             "degraded_mode": True,
             "model_warnings": [
@@ -137,11 +136,11 @@ def test_degraded_mode_section():
 
 
 def test_degraded_mode_section_empty():
-    assert rp_md._format_degraded_mode_section({}) == []
+    assert rp._format_degraded_mode_section({}) == []
 
 
 def test_format_md_shows_validated_gain_when_timestamp_missing():
-    md = rp_md._format_md(
+    md = rp._format_md(
         {
             "session_id": "s1",
             "model_name": "m",
@@ -257,13 +256,13 @@ def test_report_performance_render_survives_json_reload_and_environment_change(
 ):
     monkeypatch.setenv("HYPERLOOM_PERF_METRIC", mode)
     summary = json.loads(json.dumps(rp._build_summary_dict(report_performance_state, {}, [])))
-    rendered = rp_md._format_md(summary)
+    rendered = rp._format_md(summary)
 
     monkeypatch.setenv("HYPERLOOM_PERF_METRIC", GRADED_OUTPUT if mode == INTVTY_V1 else INTVTY_V1)
     monkeypatch.setenv("HYPERLOOM_PERF_NOISE_PCT", "99")
     monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
 
-    assert rp_md._format_md(summary) == rendered
+    assert rp._format_md(summary) == rendered
 
 
 @pytest.mark.parametrize("missing_axis", ["total_throughput", GRADED_INTVTY])
@@ -271,7 +270,7 @@ def test_report_performance_missing_candidate_axes_does_not_claim_intvty_grading
     report_performance_state, missing_axis
 ):
     report_performance_state.current_best.pop(missing_axis)
-    rendered = rp_md._format_md(rp._build_summary_dict(report_performance_state, {}, []))
+    rendered = rp._format_md(rp._build_summary_dict(report_performance_state, {}, []))
 
     assert f"grading mode        : `{INTVTY_V1}`" not in rendered
     assert GRADED_OUTPUT in rendered
@@ -293,7 +292,7 @@ def test_report_performance_diagnostic_gain_does_not_overwrite_validation_stamp(
     state.optimization_stack = [{"action": "integrate"}] * stack_len
     state.cumulative_gain_validated = stored_gain
     summary = rp._build_summary_dict(state, {}, [])
-    rendered = rp_md._format_md(summary)
+    rendered = rp._format_md(summary)
 
     assert summary["performance_comparison"]["gain_pct"] == pytest.approx(20.0)
     assert summary["cumulative_gain_validated"] == stored_gain
@@ -316,7 +315,7 @@ def test_report_performance_without_validation_stamp_is_diagnostic_only(report_p
     assert summary["performance_comparison"]["gain_pct"] == pytest.approx(20.0)
     assert summary["cumulative_validation_status"] == "unavailable"
     assert summary["cumulative_gain_validated"] == 0.0
-    assert "never validated" in rp_md._format_md(summary)
+    assert "never validated" in rp._format_md(summary)
 
 
 @pytest.mark.parametrize(
@@ -356,18 +355,18 @@ def test_report_performance_summary_does_not_alias_live_measurements(report_perf
 
 # ---- _extract_executive_summary ----
 def test_extract_exec_summary_no_path():
-    assert "no analysis.md" in rp_md._extract_executive_summary("")
+    assert "no analysis.md" in rp._extract_executive_summary("")
 
 
 def test_extract_exec_summary_missing_file(tmp_path):
-    out = rp_md._extract_executive_summary(str(tmp_path / "nope.md"))
+    out = rp._extract_executive_summary(str(tmp_path / "nope.md"))
     assert "could not read" in out
 
 
 def test_extract_exec_summary_no_block(tmp_path):
     md = tmp_path / "a.md"
     md.write_text("# Title\nno exec block here\n", encoding="utf-8")
-    assert "does not contain" in rp_md._extract_executive_summary(str(md))
+    assert "does not contain" in rp._extract_executive_summary(str(md))
 
 
 def test_extract_exec_summary_present_and_image_stripped(tmp_path):
@@ -376,7 +375,7 @@ def test_extract_exec_summary_present_and_image_stripped(tmp_path):
         "## Executive Summary\n![chart](data:image/png;base64,AAAA)\ncompute 70%\n## Next Section\nignored\n",
         encoding="utf-8",
     )
-    out = rp_md._extract_executive_summary(str(md))
+    out = rp._extract_executive_summary(str(md))
     assert "Executive Summary" in out
     assert "[image stripped]" in out
     assert "Next Section" not in out
@@ -385,7 +384,7 @@ def test_extract_exec_summary_present_and_image_stripped(tmp_path):
 def test_extract_exec_summary_truncates(tmp_path):
     md = tmp_path / "a.md"
     md.write_text("## Executive Summary\n" + ("x" * 5000), encoding="utf-8")
-    out = rp_md._extract_executive_summary(str(md))
+    out = rp._extract_executive_summary(str(md))
     assert out.endswith("...")
     assert len(out) <= 2048
 
@@ -576,7 +575,7 @@ def test_a_sweep_that_spent_its_budget_is_not_reported_as_one_that_never_ran(tmp
 
 
 def test_format_md_renders_stop_explanation():
-    md = rp_md._format_md(
+    md = rp._format_md(
         {
             "session_id": "s",
             "model_name": "m",
@@ -622,7 +621,7 @@ def test_classify_root_cause_prefers_kv_cache_oom_over_generic_oom():
 @pytest.mark.parametrize("objective", [GRADED_INTVTY_P50, GRADED_INTVTY])
 def test_composite_section_names_the_interactivity_mode_for_either_percentile(objective):
     """The renderer reads the family: the graded axis is the median, the session marker still names the tail."""
-    lines = rp_md._format_composite_perf_section(
+    lines = rp._format_composite_perf_section(
         {
             "performance_comparison": {
                 "objective": objective,

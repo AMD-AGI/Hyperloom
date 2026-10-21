@@ -525,6 +525,7 @@ function-lines src/hyperloom/orchestrator/actions/executors/profile.py::ProfileE
 function-lines src/hyperloom/orchestrator/actions/executors/profile.py::_validate_trace_structure 337
 function-lines src/hyperloom/orchestrator/actions/executors/report.py::ReportExecutor.__call__ 97
 function-lines src/hyperloom/orchestrator/actions/executors/report.py::_build_summary_dict 86
+function-lines src/hyperloom/orchestrator/actions/executors/trace_analyze.py::trace_analyze_handler 146
 function-lines src/hyperloom/orchestrator/bringup/argv_preflight.py::check_server_argv 107
 function-lines src/hyperloom/orchestrator/bus/resource_lock.py::SqliteLeaseBackend.acquire_many 95
 function-lines src/hyperloom/orchestrator/bus/resource_lock.py::_unverifiable_holders 89
@@ -793,12 +794,13 @@ module-lines src/hyperloom/inference_optimizer/cli/preflight.py 2647
 module-lines src/hyperloom/inference_optimizer/multi_node/cli.py 1867
 module-lines src/hyperloom/inference_optimizer/roofline_ceiling.py 1444
 module-lines src/hyperloom/orchestrator/actions/executors/_grid_runner.py 2089
-module-lines src/hyperloom/orchestrator/actions/executors/_kv_metrics.py 1511
+module-lines src/hyperloom/orchestrator/actions/executors/_kv_metrics.py 1578
 module-lines src/hyperloom/orchestrator/actions/executors/_workload_envs.py 2158
 module-lines src/hyperloom/orchestrator/actions/executors/baseline.py 4197
 module-lines src/hyperloom/orchestrator/actions/executors/explore.py 1880
 module-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py 4735
 module-lines src/hyperloom/orchestrator/actions/executors/profile.py 1395
+module-lines src/hyperloom/orchestrator/actions/executors/report.py 1353
 module-lines src/hyperloom/orchestrator/actions/executors/roofline.py 1303
 module-lines src/hyperloom/orchestrator/kernel/apply_kernel_patch.py 2657
 module-lines src/hyperloom/orchestrator/kernel/conc_sweep.py 1429

@@ -716,7 +716,10 @@ def test_a_round_that_nobody_reached_is_still_unavailable(tmp_path):
 
 
 def test_aiperf_aggregate_json_timeslices_are_adopted(tmp_path):
-    from hyperloom.orchestrator.actions.executors._kv_metrics import aggregate_series, read_aiperf_server_metrics
+    from hyperloom.orchestrator.actions.executors._kv_metrics import (
+        aggregate_series,
+        read_aiperf_server_metrics,
+    )
 
     artifact_dir = tmp_path / "aiperf_artifacts"
     artifact_dir.mkdir()
@@ -833,7 +836,7 @@ def test_the_port_is_read_from_the_server_the_config_did_not_pin(tmp_path):
     can only ever be right for one of the two. The server's own banner is right
     for both.
     """
-    from hyperloom.orchestrator.actions.executors._kv_ports import port_from_server_log, resolve_metrics_port
+    from hyperloom.orchestrator.actions.executors._kv_metrics import port_from_server_log, resolve_metrics_port
 
     nested = tmp_path / "benchmark_vllm_1"
     nested.mkdir()
@@ -863,7 +866,10 @@ def test_agentx_rust_frontend_port_is_read_from_vllm_command(tmp_path):
         encoding="utf-8",
     )
 
-    from hyperloom.orchestrator.actions.executors._kv_ports import port_from_server_command, resolve_metrics_port
+    from hyperloom.orchestrator.actions.executors._kv_metrics import (
+        port_from_server_command,
+        resolve_metrics_port,
+    )
 
     assert port_from_server_command(tmp_path) == 8000
     assert resolve_metrics_port({}, tmp_path) == 8000
@@ -888,7 +894,7 @@ def test_bind_line_recognition(tmp_path, line, expected):
     Enumerating phrasings is how this collector got its original bug, so the test
     is the combination: a line announcing the server, carrying a URL with a port.
     """
-    from hyperloom.orchestrator.actions.executors._kv_ports import port_from_server_log
+    from hyperloom.orchestrator.actions.executors._kv_metrics import port_from_server_log
 
     (tmp_path / "server.log").write_text(line + "\n", encoding="utf-8")
 
@@ -897,7 +903,7 @@ def test_bind_line_recognition(tmp_path, line, expected):
 
 def test_the_pinned_config_still_outranks_the_server_banner(tmp_path):
     """Both exist on a synthetic round and the config is the earlier authority."""
-    from hyperloom.orchestrator.actions.executors._kv_ports import resolve_metrics_port
+    from hyperloom.orchestrator.actions.executors._kv_metrics import resolve_metrics_port
 
     (tmp_path / "baseline_lifecycle.yaml").write_text(_ROUND_YAML, encoding="utf-8")
     (tmp_path / "server.log").write_text("INFO:     Uvicorn running on http://0.0.0.0:8000\n", encoding="utf-8")
@@ -998,7 +1004,7 @@ def test_port_comes_from_the_round_config_not_the_default(tmp_path):
     exported into the subprocess environment, so resolving from the environment
     alone lands on 8888 and scrapes a port nothing is listening on.
     """
-    from hyperloom.orchestrator.actions.executors._kv_ports import port_from_workspace, resolve_metrics_port
+    from hyperloom.orchestrator.actions.executors._kv_metrics import port_from_workspace, resolve_metrics_port
 
     (tmp_path / "baseline_lifecycle.yaml").write_text(_ROUND_YAML, encoding="utf-8")
 
@@ -1008,7 +1014,7 @@ def test_port_comes_from_the_round_config_not_the_default(tmp_path):
 
 def test_port_is_read_from_the_benchmark_config_too(tmp_path):
     """A warm-reuse round carries it here rather than in a lifecycle YAML."""
-    from hyperloom.orchestrator.actions.executors._kv_ports import port_from_workspace
+    from hyperloom.orchestrator.actions.executors._kv_metrics import port_from_workspace
 
     nested = tmp_path / "benchmark_vllm_1"
     nested.mkdir()
@@ -1019,7 +1025,7 @@ def test_port_is_read_from_the_benchmark_config_too(tmp_path):
 
 def test_explicit_env_still_outranks_the_config(tmp_path):
     """An operator pin has to win over a file we merely found."""
-    from hyperloom.orchestrator.actions.executors._kv_ports import resolve_metrics_port
+    from hyperloom.orchestrator.actions.executors._kv_metrics import resolve_metrics_port
 
     (tmp_path / "baseline_lifecycle.yaml").write_text(_ROUND_YAML, encoding="utf-8")
 
@@ -1028,7 +1034,7 @@ def test_explicit_env_still_outranks_the_config(tmp_path):
 
 def test_a_round_without_a_pinned_port_falls_back_to_the_default(tmp_path):
     """Which is what the one round that worked was relying on."""
-    from hyperloom.orchestrator.actions.executors._kv_ports import DEFAULT_METRICS_PORT, resolve_metrics_port
+    from hyperloom.orchestrator.actions.executors._kv_metrics import DEFAULT_METRICS_PORT, resolve_metrics_port
 
     (tmp_path / "baseline_config.with_envs.yaml").write_text(
         "benchmark:\n  framework: vllm\n  envs:\n    TP: 1\n", encoding="utf-8"
@@ -1039,7 +1045,7 @@ def test_a_round_without_a_pinned_port_falls_back_to_the_default(tmp_path):
 
 def test_unreadable_config_does_not_raise(tmp_path):
     """Malformed YAML in a round directory is not a reason to fail a round."""
-    from hyperloom.orchestrator.actions.executors._kv_ports import port_from_workspace
+    from hyperloom.orchestrator.actions.executors._kv_metrics import port_from_workspace
 
     (tmp_path / "broken.yaml").write_text("benchmark: [unclosed\n", encoding="utf-8")
 

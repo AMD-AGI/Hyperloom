@@ -49,20 +49,23 @@ import json
 import logging
 import math
 import os
+import re
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ._kv_ports import resolve_metrics_port, resolve_metrics_url
+import yaml
 
 
 log = logging.getLogger(__name__)
 
 
 __all__ = [
+    "DEFAULT_METRICS_PORT",
     "KV_ARTIFACT_NAME",
     "PHASES",
     "AiperfProgressPoller",
@@ -74,9 +77,16 @@ __all__ = [
     "families_from_aiperf_record",
     "parse_prometheus_text",
     "read_aiperf_server_metrics",
+    "resolve_metrics_url",
+    "resolve_metrics_port",
     "sample_from_families",
 ]
 
+
+#: Port the persistent server binds when ``benchmark.envs.PORT`` is unset. Mirrors
+#: ``_server_lifecycle.REUSE_PORT_DEFAULT``; duplicated rather than imported because that module imports
+#: ``_subprocess_kill``, which is where this one gets wired in.
+DEFAULT_METRICS_PORT = 8888
 
 #: Scrape timeout. Deliberately well under the 0.5s poll interval of the loop this runs inside: a slow endpoint must not
 #: stretch the interval that the stall and soft-deadline gates are measured on. The engine is on loopback, so anything
@@ -87,6 +97,16 @@ _SCRAPE_TIMEOUT_SEC = 0.4
 #: corporate host routes a loopback scrape through an external proxy: wrong by construction, and slow enough that the
 #: blocking call visibly delays the watchdog loop it runs inside.
 _OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+#: How much of a server log to read when hunting for the bound-port banner. It is logged during startup and these logs
+#: grow to megabytes on shared storage, so reading the head is both sufficient and the difference between a cheap check
+#: and a slow one.
+_SERVER_LOG_HEAD_BYTES = 262144
+
+#: A log line is a bind announcement when it is about the server coming up and carries a URL with a port. Split in two
+#: so neither half has to be exact: the hint tolerates a reworded banner, and the URL is what actually carries the port.
+_SERVER_BIND_HINT = re.compile(r"\b(?:server|uvicorn|listening|running)\b", re.IGNORECASE)
+_SERVER_BIND_URL = re.compile(r"https?://[^\s/:]+:(\d+)")
 
 #: Consecutive failures after which the poller stops trying. A server that never exposes ``/metrics`` (SGLang without
 #: ``--enable-metrics``) would otherwise pay a connection refusal every couple of seconds for the whole round.
@@ -247,135 +267,84 @@ def _server_metrics_exports(workspace: Any) -> list[Path]:
     return found
 
 
-@dataclass(frozen=True)
-class _PhaseBlock:
-    """One phase of an AIPerf run: the metrics it recorded and the time range it covers."""
-
-    phase: str
-    metrics: dict[str, Any]
-    start_ns: int
-    end_ns: int
+def _ns(raw: Any) -> int:
+    return int(_number(raw) or 0)
 
 
-@dataclass(frozen=True)
-class _SeriesContext:
-    """What one metric series is being read as, and in which phase."""
-
-    name: str
-    metric_type: str
-    block: _PhaseBlock
-
-    @property
-    def is_counter(self) -> bool:
-        """Whether AIPerf stores this series as per-timeslice increments rather than averages."""
-        return self.metric_type == "counter"
-
-
-@dataclass(frozen=True)
-class _MetricReading:
-    """One metric value, bracketed by the timeslice and phase it was read in."""
-
-    start_ns: int
-    end_ns: int
-    phase: str
-    name: str
-    labels: dict[str, str]
-    value: float
-
-
-def _phase_block(phase: str, metrics: dict[str, Any], time_range: Any) -> _PhaseBlock:
-    """One phase's metrics with its bounds; the bounds are zero when the aggregate records no range for it."""
-    if not isinstance(time_range, dict):
-        return _PhaseBlock(phase, metrics, 0, 0)
-    start = int(_number(time_range.get("start_ns")) or 0)
-    return _PhaseBlock(phase, metrics, start, int(_number(time_range.get("end_ns")) or 0))
-
-
-def _aiperf_phase_blocks(payload: dict[str, Any]) -> list[_PhaseBlock]:
-    """The warmup and measured metric blocks of an AIPerf aggregate, each under its own phase range."""
+def _phase_blocks(payload: dict[str, Any]) -> list[tuple[str, dict[str, Any], tuple[int, int]]]:
     summary = payload.get("summary")
-    phase_ranges = (summary.get("phase_time_ranges") or {}) if isinstance(summary, dict) else {}
-    blocks: list[_PhaseBlock] = []
+    ranges = (summary if isinstance(summary, dict) else {}).get("phase_time_ranges") or {}
+
+    def window(name: str) -> tuple[int, int]:
+        value = ranges.get(name)
+        if not isinstance(value, dict):
+            return 0, 0
+        return _ns(value.get("start_ns")), _ns(value.get("end_ns"))
+
+    blocks: list[tuple[str, dict[str, Any], tuple[int, int]]] = []
     warmup = payload.get("warmup_metrics")
     if isinstance(warmup, dict):
-        blocks.append(_phase_block("warmup", warmup, phase_ranges.get("warmup")))
+        blocks.append(("warmup", warmup, window("warmup")))
     measured = payload.get("metrics")
     if isinstance(measured, dict):
         metrics_phase = str(payload.get("metrics_phase") or "").lower()
-        credited = _CREDIT_PHASE_NAMES.get(metrics_phase, "measured")
-        blocks.append(_phase_block(credited, measured, phase_ranges.get(metrics_phase)))
+        blocks.append((_CREDIT_PHASE_NAMES.get(metrics_phase, "measured"), measured, window(metrics_phase)))
     return blocks
 
 
-def _overlapping_timeslices(series: dict[str, Any], block: _PhaseBlock) -> list[dict[str, Any]]:
-    """The timeslices of one series that fall inside this phase's time range."""
+def _timeslices_in_window(series: dict[str, Any], window: tuple[int, int]) -> list[dict[str, Any]]:
+    start, end = window
     return [
         item
         for item in (series.get("timeslices") or [])
         if isinstance(item, dict)
-        and (not block.start_ns or int(_number(item.get("end_ns")) or 0) > block.start_ns)
-        and (not block.end_ns or int(_number(item.get("start_ns")) or 0) < block.end_ns)
+        and (not start or _ns(item.get("end_ns")) > start)
+        and (not end or _ns(item.get("start_ns")) < end)
     ]
 
 
 def _series_readings(
-    series: dict[str, Any], ctx: _SeriesContext, totals: dict[tuple[str, str], float]
-) -> list[_MetricReading]:
-    """Rebuild one series' readings, carrying its cumulative total forward through *totals*.
-
-    AIPerf stores per-timeslice increments for a counter, so the opening cumulative snapshot is emitted too:
-    without it a phase delta starts after its first interval instead of including it.
-    """
-    labels = series.get("labels")
-    label_map = {str(k): str(v) for k, v in labels.items()} if isinstance(labels, dict) else {}
-    series_key = (ctx.name, canonical_label_key(label_map))
-    running = totals.get(series_key, 0.0)
-    timeslices = _overlapping_timeslices(series, ctx.block)
-    readings: list[_MetricReading] = []
-    if ctx.is_counter and timeslices:
-        opening = int(_number(timeslices[0].get("start_ns")) or 0)
+    series: dict[str, Any], metric_type: str, window: tuple[int, int], running: float
+) -> tuple[list[tuple[int, int, float]], float]:
+    counter = metric_type == "counter"
+    slices = _timeslices_in_window(series, window)
+    rows: list[tuple[int, int, float]] = []
+    if counter and slices:
+        opening = _ns(slices[0].get("start_ns"))
         if opening > 0:
-            readings.append(_MetricReading(opening, opening, ctx.block.phase, ctx.name, label_map, running))
-    for timeslice in timeslices:
-        start = int(_number(timeslice.get("start_ns")) or 0)
-        end = int(_number(timeslice.get("end_ns")) or 0)
-        value = _number(timeslice.get("total") if ctx.is_counter else timeslice.get("avg"))
+            # AIPerf stores per-timeslice increments. Emit the opening cumulative snapshot so
+            # phase deltas include the first interval instead of starting after it.
+            rows.append((opening, opening, running))
+    for item in slices:
+        end = _ns(item.get("end_ns"))
+        value = _number(item.get("total" if counter else "avg"))
         if end <= 0 or value is None:
             continue
-        if ctx.is_counter:
+        if counter:
             running += value
             value = running
-        readings.append(_MetricReading(start, end, ctx.block.phase, ctx.name, label_map, value))
-    totals[series_key] = running
-    return readings
+        rows.append((_ns(item.get("start_ns")), end, value))
+    return rows, running
 
 
-def _aiperf_metric_readings(blocks: list[_PhaseBlock]) -> list[_MetricReading]:
-    """Every reading the aggregate's phase blocks carry, with counters accumulated across the phases."""
-    totals: dict[tuple[str, str], float] = {}
-    readings: list[_MetricReading] = []
-    for block in blocks:
-        for name, metric in block.metrics.items():
-            if not isinstance(metric, dict):
-                continue
-            ctx = _SeriesContext(str(name), str(metric.get("type") or "").lower(), block)
-            for series in metric.get("series") or []:
-                if isinstance(series, dict):
-                    readings.extend(_series_readings(series, ctx, totals))
-    return readings
+def _metric_readings(
+    metric: dict[str, Any], window: tuple[int, int], name: str, cumulative: dict[tuple[str, str], float]
+) -> list[tuple[int, int, dict[str, str], float]]:
+    rows: list[tuple[int, int, dict[str, str], float]] = []
+    metric_type = str(metric.get("type") or "").lower()
+    for series in metric.get("series") or []:
+        if not isinstance(series, dict):
+            continue
+        labels = series.get("labels")
+        label_map = {str(k): str(v) for k, v in labels.items()} if isinstance(labels, dict) else {}
+        key = (name, canonical_label_key(label_map))
+        readings, cumulative[key] = _series_readings(series, metric_type, window, cumulative.get(key, 0.0))
+        rows += [(start, end, label_map, value) for start, end, value in readings]
+    return rows
 
 
-def _scrape_windows(readings: list[_MetricReading]) -> dict[tuple[int, int, str], ParsedFamilies]:
-    """Group readings into the scrape windows they belong to, oldest first."""
-    windows: dict[tuple[int, int, str], ParsedFamilies] = {}
-    for reading in readings:
-        window = (reading.start_ns, reading.end_ns, reading.phase)
-        windows.setdefault(window, {}).setdefault(reading.name, []).append((reading.labels, reading.value))
-    return dict(sorted(windows.items()))
-
-
-def _read_aiperf_aggregate_json(path: Path) -> list[tuple[KvSample, dict[str, Any], str | None]]:
-    """Rebuild scrape-like samples from AIPerf 0.12 aggregate JSON timeslices."""
+def read_aiperf_server_metrics(path: Path) -> list[tuple[KvSample, dict[str, Any], str | None]]:
+    """Read AIPerf aggregate JSON as ``(sample, timing, phase)`` rows."""
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
@@ -383,31 +352,34 @@ def _read_aiperf_aggregate_json(path: Path) -> list[tuple[KvSample, dict[str, An
         return []
     if not isinstance(payload, dict):
         return []
+    cumulative: dict[tuple[str, str], float] = {}
+    grouped: dict[tuple[int, int, str], dict[str, list[dict[str, Any]]]] = {}
+    for phase, metrics, window in _phase_blocks(payload):
+        for name, metric in metrics.items():
+            if not isinstance(metric, dict):
+                continue
+            for start, end, label_map, value in _metric_readings(metric, window, str(name), cumulative):
+                group = grouped.setdefault((start, end, phase), {})
+                group.setdefault(str(name), []).append({"labels": label_map, "value": value})
 
     out: list[tuple[KvSample, dict[str, Any], str | None]] = []
-    for (start, end, phase), window in _scrape_windows(_aiperf_metric_readings(_aiperf_phase_blocks(payload))).items():
-        families = families_from_aiperf_record(
-            {
-                name: [{"labels": labels, "value": value} for labels, value in samples]
-                for name, samples in window.items()
-            }
-        )
+    for (start, end, phase), record in sorted(grouped.items()):
         ts = end / 1e9
-        sample = sample_from_families(families, ts=ts, mono=ts)
+        sample = sample_from_families(families_from_aiperf_record(record), ts=ts, mono=ts)
         if not sample.has_readings():
             continue
-        timing = {
-            "scrape_start_unix": start / 1e9,
-            "scrape_end_unix": end / 1e9,
-            "scrape_sec": round(max(0, end - start) / 1e9, 4),
-        }
-        out.append((sample, timing, phase))
+        out.append(
+            (
+                sample,
+                {
+                    "scrape_start_unix": start / 1e9,
+                    "scrape_end_unix": end / 1e9,
+                    "scrape_sec": round(max(0, end - start) / 1e9, 4),
+                },
+                phase,
+            )
+        )
     return out
-
-
-def read_aiperf_server_metrics(path: Path) -> list[tuple[KvSample, dict[str, Any], str | None]]:
-    """Read AIPerf aggregate JSON as ``(sample, timing, phase)`` rows."""
-    return _read_aiperf_aggregate_json(path)
 
 
 def parse_prometheus_text(text: str) -> ParsedFamilies:
@@ -570,6 +542,15 @@ class KvSample:
         )
 
 
+def _outranks(candidate: dict[str, Any], best: dict[str, Any]) -> bool:
+    for metric in ("active", "physical", "used"):
+        mine, theirs = candidate.get(metric), best.get(metric)
+        if mine is None and theirs is None:
+            continue
+        return theirs is None or (mine is not None and mine > theirs)
+    return False
+
+
 def _detect_engine(families: ParsedFamilies) -> str:
     """Identify the engine from its metric-name prefix."""
     for name in families:
@@ -580,97 +561,6 @@ def _detect_engine(families: ParsedFamilies) -> str:
     return ""
 
 
-@dataclass(frozen=True)
-class _RankReading:
-    """One rank's view of the KV pool, assembled in full before any rank is chosen.
-
-    Taking a per-field max across ranks silently welds numbers from different sides of the engine together:
-    rank A's capacity against rank B's used tokens produced a physical occupancy of 1.7 on two individually
-    valid readings.
-    """
-
-    active: float | None = None
-    physical: float | None = None
-    used: float | None = None
-    available: float | None = None
-    evictable: float | None = None
-    capacity: float | None = None
-    capacity_derived: bool = False
-    capacity_gb: float | None = None
-
-
-def _rank_occupancy(families: ParsedFamilies, key: str) -> float | None:
-    """How full this rank reports its active pool to be.
-
-    ``token_usage`` is already the maximum across the full, SWA and Mamba subpools on current SGLang, so it is
-    read directly. The per-subpool gauges are only consulted when it is missing, which is what an older build
-    looks like.
-    """
-    active = _read(families, _SGL_USAGE_PRIMARY, key)
-    if active is not None:
-        return active
-    for names in (_SGL_USAGE_FALLBACK, _VLLM_USAGE):
-        active = max((v for n in names if (v := _read(families, n, key)) is not None), default=None)
-        if active is not None:
-            return active
-    return None
-
-
-def _rank_reading(families: ParsedFamilies, key: str) -> _RankReading:
-    """Assemble one rank's KV pool view from that rank's own readings alone."""
-    used = _read(families, _SGL_USED, key)
-    available = _read(families, _SGL_AVAILABLE, key)
-    evictable = _read(families, _SGL_EVICTABLE, key)
-
-    # Engine-reported capacity wins; the sum is a fallback for builds that do not expose it, flagged so a consumer
-    # knows it may run short of the true pool size.
-    capacity = _read(families, _SGL_CAPACITY_TOKENS, key)
-    capacity_derived = capacity is None and used is not None and available is not None
-    if capacity_derived:
-        capacity = used + available + (evictable or 0.0)
-
-    physical: float | None = None
-    if capacity and capacity > 0 and used is not None:
-        physical = (used + (evictable or 0.0)) / capacity
-
-    return _RankReading(
-        active=_rank_occupancy(families, key),
-        physical=physical,
-        used=used,
-        available=available,
-        evictable=evictable,
-        capacity=capacity,
-        capacity_derived=capacity_derived,
-        capacity_gb=_read(families, _SGL_CAPACITY_GB, key),
-    )
-
-
-def _is_more_pressured(candidate: _RankReading, incumbent: _RankReading) -> bool:
-    """Whether *candidate* reports more KV pressure than *incumbent*.
-
-    The most pressured rank is the one that will retract, so it is the one worth reporting. Falls back to
-    physical occupancy, then to having read anything at all.
-    """
-    for metric in ("active", "physical", "used"):
-        mine, theirs = getattr(candidate, metric), getattr(incumbent, metric)
-        if mine is None and theirs is None:
-            continue
-        return theirs is None or (mine is not None and mine > theirs)
-    return False
-
-
-def _most_pressured_rank(families: ParsedFamilies, keys: list[str]) -> _RankReading:
-    """The rank of this exposition whose KV pool is under the most pressure."""
-    best = _RankReading()
-    assembled = False
-    for key in keys:
-        candidate = _rank_reading(families, key)
-        if not assembled or _is_more_pressured(candidate, best):
-            best = candidate
-            assembled = True
-    return best
-
-
 def sample_from_families(
     families: ParsedFamilies,
     *,
@@ -678,30 +568,207 @@ def sample_from_families(
     mono: float | None = None,
 ) -> KvSample:
     """Build a normalised sample from a parsed exposition."""
+    engine = _detect_engine(families)
     occupancy_names = (_SGL_USAGE_PRIMARY,) + _SGL_USAGE_FALLBACK + _VLLM_USAGE + (_SGL_USED,)
     keys = _rank_keys(families, occupancy_names)
-    rank = _most_pressured_rank(families, keys)
+
+    # Assemble each rank in full before choosing one. Taking a per-field max across ranks silently welds numbers from
+    # different sides of the engine together: rank A's capacity against rank B's used tokens produced a physical
+    # occupancy of 1.7 on two individually valid readings.
+    best: dict[str, Any] = {}
+    for key in keys:
+        used = _read(families, _SGL_USED, key)
+        available = _read(families, _SGL_AVAILABLE, key)
+        evictable = _read(families, _SGL_EVICTABLE, key)
+
+        # Engine-reported capacity wins; the sum is a fallback for builds that do not expose it, flagged so a consumer
+        # knows it may run short of the true pool size.
+        capacity = _read(families, _SGL_CAPACITY_TOKENS, key)
+        evicted = evictable or 0.0
+        capacity_derived = False
+        if capacity is None and used is not None and available is not None:
+            capacity = used + available + evicted
+            capacity_derived = True
+
+        physical: float | None = None
+        if capacity and capacity > 0 and used is not None:
+            physical = (used + evicted) / capacity
+
+        # ``token_usage`` is already the maximum across the full, SWA and Mamba subpools on current SGLang, so it is
+        # read directly. The per-subpool gauges are only consulted when it is missing, which is what an older build
+        # looks like.
+        active = _read(families, _SGL_USAGE_PRIMARY, key)
+        for names in (_SGL_USAGE_FALLBACK, _VLLM_USAGE):
+            if active is None:
+                active = max((v for n in names if (v := _read(families, n, key)) is not None), default=None)
+
+        candidate = {
+            "active": active,
+            "physical": physical,
+            "used": used,
+            "available": available,
+            "evictable": evictable,
+            "capacity": capacity,
+            "capacity_derived": capacity_derived,
+            "capacity_gb": _read(families, _SGL_CAPACITY_GB, key),
+        }
+        # The most pressured rank is the one that will retract, so it is the one worth reporting. Fall back to physical,
+        # then to having read anything.
+        if not best or _outranks(candidate, best):
+            best = candidate
+
     return KvSample(
         ts=time.time() if ts is None else ts,
         mono=time.monotonic() if mono is None else mono,
-        engine=_detect_engine(families),
-        active_pool_usage=rank.active,
-        physical_pool_usage=rank.physical,
-        used_tokens=rank.used,
-        evictable_tokens=rank.evictable,
-        available_tokens=rank.available,
-        capacity_tokens=rank.capacity,
-        capacity_derived=rank.capacity_derived,
+        engine=engine,
+        active_pool_usage=best.get("active"),
+        physical_pool_usage=best.get("physical"),
+        used_tokens=best.get("used"),
+        evictable_tokens=best.get("evictable"),
+        available_tokens=best.get("available"),
+        capacity_tokens=best.get("capacity"),
+        capacity_derived=bool(best.get("capacity_derived")),
         series_count=len(keys) if keys != [""] else 0,
         # From the rank that was assembled, not re-read: a fresh lookup would be free to land on a different rank than
         # every field above it.
-        capacity_gb=rank.capacity_gb,
+        capacity_gb=best.get("capacity_gb"),
         retract_total=_series(families, _SGL_RETRACT_TOTAL),
         preempt_total=_series(families, _VLLM_PREEMPT_TOTAL),
         prefix_cache_queries=_series(families, _VLLM_PREFIX_QUERIES),
         prefix_cache_hits=_series(families, _VLLM_PREFIX_HITS),
         cached_tokens_total=_series(families, _SGL_CACHED_TOKENS),
     )
+
+
+def _port_value(raw: Any) -> int | None:
+    """One PORT reading as a usable port number, or ``None``."""
+    if raw in (None, ""):
+        return None
+    try:
+        port = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return None
+    return port if port > 0 else None
+
+
+def port_from_server_log(workspace: Any) -> int | None:
+    """Read the port the server actually bound out of its own log.
+
+    The last resort before the default, and the only source that is right by construction: it is what the server said
+    it was listening on. Needed because the port is not always pinned anywhere else -- on an AgentX round the config
+    carries no ``PORT`` at all and vLLM falls back to its own 8000, while the synthetic path pins 8888. A default can
+    only ever match one of those.
+    """
+    try:
+        root = Path(workspace)
+        for pattern in ("server.log", "*/server.log"):
+            for candidate in sorted(root.glob(pattern)):
+                # The banner is near the top; a served round's log grows to megabytes and is on shared storage.
+                with candidate.open(encoding="utf-8", errors="ignore") as handle:
+                    head = handle.read(_SERVER_LOG_HEAD_BYTES)
+                for line in head.splitlines():
+                    # Matched on what the line is about rather than on its exact wording. The observed builds say
+                    # "Starting vLLM server on http://0.0.0.0:8000"; older ones and SGLang say "Uvicorn running on".
+                    # A list of phrasings misses the next build's wording, so the test is the combination -- a
+                    # line announcing the server, carrying a URL with a port.
+                    if not _SERVER_BIND_HINT.search(line):
+                        continue
+                    match = _SERVER_BIND_URL.search(line)
+                    port = _port_value(match.group(1)) if match else None
+                    if port is not None:
+                        return port
+    except OSError:
+        return None
+    return None
+
+
+def port_from_workspace(workspace: Any) -> int | None:
+    """Read ``benchmark.envs.PORT`` out of the round's materialized config.
+
+    This is the only place the port is reliably written. The subprocess environment does not carry it -- the port is
+    pinned in the YAML that Magpie reads, not exported to the parent -- so resolving from the environment alone lands
+    on the default and scrapes a port nothing is listening on. Observed on a real session: two of three rounds bound an
+    ephemeral 34407 while collection sat on 8888 and recorded the engine as unavailable, and the one round that worked
+    did so only because it happened to bind the default.
+    """
+    try:
+        root = Path(workspace)
+        # The round's own config first, then the benchmark's copy, which only exists once the client has started.
+        for pattern in ("*.yaml", "*/config.yaml"):
+            for candidate in sorted(root.glob(pattern)):
+                try:
+                    payload = yaml.safe_load(candidate.read_text(encoding="utf-8"))
+                except (OSError, ValueError, yaml.YAMLError):
+                    continue
+                if not isinstance(payload, dict):
+                    continue
+                envs = (
+                    (payload.get("benchmark") or {}).get("envs") if isinstance(payload.get("benchmark"), dict) else None
+                )
+                port = _port_value(envs.get("PORT")) if isinstance(envs, dict) else None
+                if port is not None:
+                    return port
+    except OSError:
+        return None
+    return None
+
+
+def port_from_server_command(workspace: Any) -> int | None:
+    """Read ``--port`` from the command that launched the serving process.
+
+    AgentX vLLM rounds do not pin ``benchmark.envs.PORT`` and the Rust frontend
+    does not emit the Python API server's bind banner.  The materialized command
+    is therefore the only durable authority for those rounds.
+    """
+    try:
+        root = Path(workspace)
+        for pattern in ("vllm_command.txt", "*/vllm_command.txt"):
+            for candidate in sorted(root.glob(pattern)):
+                text = candidate.read_text(encoding="utf-8", errors="ignore")
+                match = re.search(r"(?:^|\s)--port(?:=|\s+)(\d+)(?:\s|$)", text)
+                if match:
+                    port = _port_value(match.group(1))
+                    if port is not None:
+                        return port
+    except OSError:
+        return None
+    return None
+
+
+def resolve_metrics_port(config_envs: dict[str, Any] | None = None, workspace: Any = None) -> int:
+    """Resolve the port the engine serves ``/metrics`` on.
+
+    A ``PORT`` in the caller's env is an operator pin and wins. Then the round's own evidence: its materialized
+    ``benchmark.envs.PORT`` (an ephemeral port assigned per session, never exported into the subprocess env), the port
+    the server logged at bind, and the ``--port`` of the command that launched it. Only then a ``PORT`` in the ambient
+    env, and the default last, which is only ever right by coincidence.
+    """
+    port = _port_value((config_envs or {}).get("PORT"))
+    if port is not None:
+        return port
+    if workspace is not None:
+        for probe in (port_from_workspace, port_from_server_log, port_from_server_command):
+            port = probe(workspace)
+            if port is not None:
+                return port
+    port = _port_value(os.environ.get("PORT"))
+    if port is not None:
+        return port
+    return DEFAULT_METRICS_PORT
+
+
+def resolve_metrics_url(config_envs: dict[str, Any] | None = None) -> str | None:
+    """Resolve a remote serving endpoint to its Prometheus metrics URL."""
+    raw = str((config_envs or {}).get("BENCHMARK_BASE_URL") or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = urllib.parse.urlsplit(raw)
+    except ValueError:
+        return None
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return None
+    return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, "/metrics", "", ""))
 
 
 class KvMetricsPoller:

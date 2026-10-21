@@ -12,15 +12,13 @@ from __future__ import annotations
 import pytest
 
 from hyperloom.orchestrator.actions.executors._kv_metrics import (
+    DEFAULT_METRICS_PORT,
     KvMetricsPoller,
     aggregate_series,
     canonical_label_key,
     parse_prometheus_text,
-    sample_from_families,
-)
-from hyperloom.orchestrator.actions.executors._kv_ports import (
-    DEFAULT_METRICS_PORT,
     resolve_metrics_port,
+    sample_from_families,
 )
 
 

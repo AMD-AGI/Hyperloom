@@ -2438,14 +2438,6 @@ async def test_trace_analyze_handler_dry_run_returns_structured_result(session_d
 
 
 @pytest.mark.asyncio
-async def test_trace_analyze_handler_refuses_a_payload_without_a_trace_before_touching_session_state(session_dir):
-    """A request naming no trace is refused on its own terms, whatever shape the session state is in."""
-    (session_dir / "state.json").write_text("{ not json", encoding="utf-8")
-    res = await ta.trace_analyze_handler({"session_id": session_dir.name}, session_dir=session_dir)
-    assert res == {"status": "failed", "error": "missing 'trace_input' in payload"}
-
-
-@pytest.mark.asyncio
 async def test_trace_analyze_handler_rejects_non_string_analysis_route(session_dir):
     """A non-string route is coerced into a structured validation error."""
     fake_trace = session_dir / "fake_trace_dir"

@@ -445,67 +445,6 @@ async def test_sweep_rejects_malformed_structured_environment_before_launch(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "result_fields,expected_error_class",
-    [
-        (
-            {"tuning_skillset": {"gate": "accepted", "live_tree_files": ["required-data"]}},
-            "missing_deployment_launcher",
-        ),
-        ({}, "invalid_accepted_config"),
-    ],
-)
-async def test_the_first_failing_precheck_names_the_sweep_failure(
-    tmp_path: Path, result_fields: dict[str, Any], expected_error_class: str
-) -> None:
-    """Every precheck fails at once, so only their order decides which ``error_class`` the sweep publishes."""
-    result = await sweep_via_geak(
-        result={
-            "bench_script": str(tmp_path / "never_written.sh"),
-            "accepted_config": {"env_map": [], "env": "VALID=1"},
-            **result_fields,
-        },
-        conc_values=[1],
-        isl_osl_configs=["16:16"],
-        output_root=tmp_path / "sweep",
-        variant_timeout_sec=30,
-    )
-    assert result["status"] == "failed"
-    assert result["error_class"] == expected_error_class
-
-
-@pytest.mark.asyncio
-async def test_an_unreadable_accuracy_result_fails_its_own_point_only(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """An eval export the accuracy reader cannot parse costs that point, not the rest of the grid."""
-    bench = _bench_script(tmp_path)
-
-    def _unreadable(*_a: Any, **_k: Any) -> dict[str, Any]:
-        raise ValueError("eval results are not a mapping")
-
-    monkeypatch.setattr(_geak_sweep, "parse_eval_results", _unreadable)
-
-    result = await sweep_via_geak(
-        result={"bench_script": str(bench), "accepted_config": {}},
-        conc_values=[1, 2],
-        isl_osl_configs=["16:16"],
-        output_root=tmp_path / "sweep",
-        variant_timeout_sec=30,
-    )
-
-    assert result["status"] == "failed"
-    assert result["grid_size"] == 2
-    for entry in result["points"]:
-        assert entry["status"] == "failed"
-        assert "eval results are not a mapping" in entry["error"]
-        assert "accuracy" not in entry
-        report = json.loads((Path(entry["workspace"]) / "benchmark_report.json").read_text(encoding="utf-8"))
-        assert report["output_throughput_tok_s"] == 200.0
-        assert "eval results are not a mapping" in report["error"]
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize("native_accuracy", [0.8, 0.2, None])
 async def test_sweep_reads_only_fresh_native_quality(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, native_accuracy
