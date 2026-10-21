@@ -141,16 +141,25 @@ def test_a_candidate_labelling_a_component_with_another_upstream_commit_still_me
     assert merged.upstream_ref == ELSEWHERE
 
 
-@pytest.mark.parametrize("patches", [(), (_patch("theirs"),)], ids=["without-patches", "with-patches"])
-def test_a_component_the_candidate_adds_carries_its_upstream_repo_and_commit(patches):
-    added = ComponentChange("triton", MOVED, TRITON, add_patches=patches)
+def test_a_component_the_candidate_adds_carries_its_upstream_repo_and_commit():
+    added = ComponentChange("triton", MOVED, TRITON, add_patches=(_patch("theirs"),))
     candidate = apply(BASE, RecipeDelta(components=(added,)))
 
     merge = carry("i1", BASE, candidate, BASE, _applies)
 
     merged = apply(BASE, merge.delta).component("triton")
     assert merged is not None
-    assert (merged.upstream_repo, merged.upstream_ref, merged.patches) == (TRITON, MOVED, patches)
+    assert (merged.upstream_repo, merged.upstream_ref, merged.patches) == (TRITON, MOVED, (_patch("theirs"),))
+
+
+def test_a_component_the_candidate_records_without_patching_it_leaves_the_merge_empty():
+    recorded = ComponentChange("triton", MOVED, TRITON)
+    candidate = apply(BASE, RecipeDelta(components=(recorded,)))
+
+    merge = carry("i1", BASE, candidate, BASE, _applies)
+
+    assert merge.delta.components == ()
+    assert apply(BASE, merge.delta).digest() == BASE.digest()
 
 
 def test_a_kernel_slot_both_sides_filled_does_not_merge_and_a_new_one_lands():
