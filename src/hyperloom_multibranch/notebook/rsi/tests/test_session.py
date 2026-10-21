@@ -25,7 +25,7 @@ from hyperloom_multibranch.notebook.rsi.archive import ARCHIVE_ENV, ARCHIVED, SK
 from hyperloom_multibranch.notebook.rsi.bandit import BANDIT_LABEL, BanditScorer
 from hyperloom_multibranch.notebook.rsi.calibration import DEFAULT_POLICY, PolicyChoice
 from hyperloom_multibranch.notebook.rsi.expression import ExpressionScorer
-from hyperloom_multibranch.notebook.rsi.frontier import FRONTIER_V1, FRONTIER_V1_LABEL, FrontierPolicy
+from hyperloom_multibranch.notebook.rsi.frontier import FRONTIER_V1, FRONTIER_V1_LABEL, FrontierPolicy, FrontierScoring
 from hyperloom_multibranch.notebook.rsi.history import MAX_CHARS, session_history
 from hyperloom_multibranch.notebook.rsi.session import (
     CALIBRATION_REPORT,
@@ -45,7 +45,7 @@ from hyperloom_multibranch.notebook.rsi.session import (
     close_knowledge,
     judge_history,
     named_frontier_choice,
-    session_frontier,
+    session_challenger,
     session_frontier_policy,
     session_frontier_scorer,
 )
@@ -222,18 +222,20 @@ def test_the_breakdown_records_the_knowledge_steps_only_when_given(snapshot: Not
     assert "knowledge" not in build_breakdown(snapshot)["close"]
 
 
-async def test_the_session_frontier_sizes_its_windows_to_the_budget_reads_the_archive_and_logs(
+async def test_frontier_scoring_sizes_its_windows_to_the_budget_reads_the_archive_and_logs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     notebook = await scripted_session(tmp_path / "notebook", FakeClock())
     TreeArchive(tmp_path / "archive").put(PAST)
     monkeypatch.setenv(ARCHIVE_ENV, str(tmp_path / "archive"))
     path = tmp_path / "reports" / FRONTIER_LOG
+    history = session.archived_history()
+    policy = FrontierPolicy.for_budget(METRIC, BUDGET)
 
-    scoring = session_frontier(notebook, METRIC, budget_seconds=BUDGET, log_path=path)
+    scoring = FrontierScoring(notebook, policy, history, log=path)
     await scoring.progress()
 
-    assert scoring.policy == FrontierPolicy.for_budget(METRIC, BUDGET)
+    assert scoring.policy == policy
     assert [item.session_id for item in scoring.history] == ["past"]
     assert len(path.read_text(encoding="utf-8").splitlines()) == 1
 
@@ -241,14 +243,14 @@ async def test_the_session_frontier_sizes_its_windows_to_the_budget_reads_the_ar
 @pytest.mark.usefixtures("unconfigured")
 async def test_without_a_budget_or_an_archive_the_defaults_stand(tmp_path: Path) -> None:
     notebook = await scripted_session(tmp_path / "notebook", FakeClock())
-
-    plain = session_frontier(notebook, METRIC)
-    given = session_frontier(notebook, METRIC, history=[PAST])
     chosen = dataclasses.replace(FrontierPolicy(METRIC), window_seconds=3600.0)
+
+    plain = FrontierScoring(notebook, FrontierPolicy(METRIC))
+    given = FrontierScoring(notebook, FrontierPolicy(METRIC), (PAST,))
 
     assert (plain.policy, plain.history, plain.log) == (FrontierPolicy(METRIC), (), None)
     assert given.history == (PAST,)
-    assert session_frontier(notebook, METRIC, budget_seconds=BUDGET, policy=chosen).policy == chosen
+    assert FrontierScoring(notebook, chosen).policy == chosen
 
 
 def test_a_session_scores_with_the_defaults_before_its_profile_and_while_the_evidence_is_thin(
@@ -318,6 +320,30 @@ def test_a_challenger_that_beats_the_champion_is_crowned_and_the_sessions_after_
     assert (back.label, back.scorer) == (DEFAULT_POLICY, FRONTIER_V1)
     assert worse.champion() == ChampionRecord(FRONTIER_V1_LABEL, snapshot.taken_at, "younger-v1", back.evidence)
     assert current_champion(worse) is None
+
+
+def test_a_challenger_session_picks_the_best_pooled_scorer_without_crowning(
+    snapshot: NotebookSnapshot, tmp_path: Path
+) -> None:
+    defaults = FrontierPolicy.for_budget(METRIC, BUDGET)
+    races = [race(f"race-{n}", task=task_conditions(profile()), started_at=START - HOUR + 600.0 * n) for n in range(4)]
+    pool = ScorerPool(tmp_path / "pool")
+    empty = ScorerPool(tmp_path / "empty")
+    _pooled(pool, "older-v1", "age_s")
+
+    picked = session_challenger(snapshot, races, defaults, pool)
+    none_yet = session_challenger(dataclasses.replace(snapshot, profile=None), races, defaults, pool)
+    none_empty = session_challenger(snapshot, races, defaults, empty)
+
+    assert picked is not None
+    assert (picked.label, picked.scorer, picked.policy) == (
+        "older-v1",
+        ExpressionScorer.read("older-v1", "age_s"),
+        defaults,
+    )
+    assert picked.evidence.startswith("older-v1: exploration challenger")
+    assert pool.champion() is None
+    assert none_yet is None and none_empty is None
 
 
 def test_the_judge_reads_the_digest_of_the_archived_sessions_and_nothing_without_any(

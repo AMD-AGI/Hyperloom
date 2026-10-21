@@ -9,12 +9,13 @@
   writes the frontier calibration over the archived sessions like this one beside the receipts. A step that cannot
   be done says why and never stops CLOSE; :meth:`KnowledgeClose.document` is what the breakdown records of the steps
   (``build_breakdown(..., knowledge=...)``).
-* :func:`session_frontier` is one session's frontier scoring: windows sized to its budget, the archived sessions as
-  the prior, and the scores log. :func:`session_frontier_policy` chooses its policy once the session has a profile:
-  the calibration's recommendation for sessions like it, or the defaults; :func:`session_frontier_scorer` chooses the
-  same way among the scorers of :mod:`rsi.scorers` too, and :func:`named_frontier_choice` is the choice a label names,
-  as a manifest records it or ``--frontier-policy`` asks for it. The scheduler holds the chosen scorer in one
-  ``ScorerGuard`` a session, which stands ``frontier-v1`` in where it fails.
+* :func:`session_frontier_policy` chooses its policy once the session has a profile: the calibration's recommendation
+  for sessions like it, or the defaults; :func:`session_frontier_scorer` chooses the same way among the scorers of
+  :mod:`rsi.scorers` too, crowning a challenger that passes the promotion gate; :func:`session_challenger` is the
+  exploration pick for a 1-in-4 session, the best pooled challenger that is not clearly worse, without crowning;
+  :func:`named_frontier_choice` is the choice a label names, as a manifest records it or ``--frontier-scorer`` asks
+  for it. The scheduler holds the chosen scorer in one ``ScorerGuard`` a session, which stands ``frontier-v1`` in
+  where it fails.
 * :func:`judge_history` is the history digest the judge reads every round, as text; empty while nothing is archived.
 
 Passed no KB or archive, each step uses the environment's: the Experience KB ``HYPERLOOM_KB_URL`` names, and the
@@ -34,7 +35,6 @@ from hyperloom_kb import NoOpExperienceKB
 from hyperloom_kb.collect import CollectionTarget, CollectReport
 from hyperloom.common.io import WriteOptions, atomic_write_text
 from hyperloom_multibranch.contracts.notebook import NotRecorded
-from hyperloom_multibranch.contracts.notebook.interfaces import SnapshotQuery
 from hyperloom_multibranch.contracts.notebook.records import NotebookSnapshot
 from hyperloom_multibranch.notebook.codec import encode
 from hyperloom_multibranch.notebook.knowledge.experience import publish_experiences, publish_multibranch_experiences
@@ -49,7 +49,7 @@ from hyperloom_multibranch.notebook.rsi.calibration import (
     frontier_scorer_for,
 )
 from hyperloom_multibranch.notebook.rsi.expression import ExpressionError
-from hyperloom_multibranch.notebook.rsi.frontier import FRONTIER_V1_LABEL, FrontierPolicy, FrontierScoring
+from hyperloom_multibranch.notebook.rsi.frontier import FRONTIER_V1_LABEL, FrontierPolicy
 from hyperloom_multibranch.notebook.rsi.history import MAX_CHARS, session_history
 from hyperloom_multibranch.notebook.rsi.scorers import (
     ChampionRecord,
@@ -257,28 +257,6 @@ def archived_history(archive: TreeArchive | None = None) -> tuple[SearchTree, ..
         return ()
 
 
-def session_frontier(
-    notebook: SnapshotQuery,
-    metric: str,
-    *,
-    budget_seconds: float | None = None,
-    log_path: Path | None = None,
-    history: Sequence[SearchTree] | None = None,
-    policy: FrontierPolicy | None = None,
-) -> FrontierScoring:
-    """One session's frontier scoring: windows sized to ``budget_seconds``, ``history`` as the prior, the scores log.
-
-    ``history`` defaults to the environment's archive, read once here. ``log_path`` (:data:`FRONTIER_LOG` in the
-    session's reports folder, say) gets one line per round that scored a branch. ``policy`` replaces the budget's,
-    such as the one ``calibration.frontier_policy_for`` chose.
-    """
-
-    if policy is None:
-        policy = FrontierPolicy(metric) if budget_seconds is None else FrontierPolicy.for_budget(metric, budget_seconds)
-    trees = archived_history() if history is None else tuple(history)
-    return FrontierScoring(notebook, policy, trees, log=log_path)
-
-
 def session_frontier_policy(
     snapshot: NotebookSnapshot, history: Sequence[SearchTree], defaults: FrontierPolicy
 ) -> PolicyChoice:
@@ -323,6 +301,34 @@ def _crown(pool: ScorerPool, record: ChampionRecord) -> None:
         log.warning("could not crown %s in %s: %s", record.label, pool.root, exc)
 
 
+def session_challenger(
+    snapshot: NotebookSnapshot, history: Sequence[SearchTree], defaults: FrontierPolicy, pool: ScorerPool | None = None
+) -> PolicyChoice | None:
+    """The scorer a 1-in-4 exploration session runs with: the pooled challenger :func:`authoring.parents` would offer
+    first after the champion, under ``defaults``, or ``None`` when the session has no profile, there is no pool, or no
+    challenger qualifies. Does not crown; promotion stays :func:`session_frontier_scorer`."""
+
+    if snapshot.profile is None:
+        return None
+    target = pool if pool is not None else _environment_pool()
+    if target is None:
+        return None
+    # authoring imports CloseStep from this module; load the survey helpers only here.
+    from hyperloom_multibranch.notebook.rsi.authoring import parents, survey
+
+    found = survey(tuple(item.tree for item in similar_trees(history, task_conditions(snapshot.profile))), target)
+    label = next((item for item in parents(found) if item != found.champion), None)
+    if label is None:
+        return None
+    compared = found.standings.comparison(label)
+    lead = (
+        f"lead {compared.difference_low} to {compared.difference_high} over {found.champion}"
+        if compared is not None and compared.difference_low is not None
+        else f"not clearly worse than {found.champion}"
+    )
+    return named_frontier_choice(label, defaults, f"{label}: exploration challenger, {lead}", target)
+
+
 def named_frontier_choice(
     label: str, defaults: FrontierPolicy, evidence: str, pool: ScorerPool | None = None
 ) -> PolicyChoice | None:
@@ -353,7 +359,7 @@ def judge_history(
 ) -> str:
     """How similar archived sessions went, for the judge this round, in at most ``max_chars``; empty without any.
 
-    Pass the scoring's own history (``session_frontier(...).history``), so the archive is read once a session.
+    Pass the scoring's own history, so the archive is read once a session.
     """
 
     if not history:
@@ -380,7 +386,7 @@ __all__ = [
     "close_knowledge",
     "judge_history",
     "named_frontier_choice",
-    "session_frontier",
+    "session_challenger",
     "session_frontier_policy",
     "session_frontier_scorer",
 ]
