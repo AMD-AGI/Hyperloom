@@ -3347,7 +3347,9 @@ async def _run_forge_gemm_tuning(
 
     requested_tuners = _positive_int(payload.get("max_tuners"))
     tuner_ceiling = 0 if str(payload.get("tuner") or "").strip() else (requested_tuners or gemm_lane.max_targets)
-    result = await _invoke_forge_gemm_tune(_forge_gemm_tune_input(payload, run, sources, timeout, tuner_ceiling), timeout)
+    result = await _invoke_forge_gemm_tune(
+        _forge_gemm_tune_input(payload, run, sources, timeout, tuner_ceiling), timeout
+    )
     _stamp_forge_gemm_provenance(result, run, tuning_framework=run.tuning_framework)
     _report_forge_shape_provenance(result, sources, shape_alignment)
     _fill_forge_tuner_outcomes(result, run.workspace)
@@ -4196,9 +4198,7 @@ def _confirm_source_import(
     if not written:
         written = [str(payload.get("target_file") or payload.get("source_file") or "")]
     confirmed, evidence = _confirm_sources_imported(written, workspace)
-    downgraded = (
-        decision == "KEEP" and confirmed is False and _honest_flag("HL_CONFIRM_SOURCE_IMPORTED_STRICT")
-    )
+    downgraded = decision == "KEEP" and confirmed is False and _honest_flag("HL_CONFIRM_SOURCE_IMPORTED_STRICT")
     return _SourceImport(
         confirmed=confirmed,
         evidence=evidence,
