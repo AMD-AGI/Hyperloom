@@ -175,9 +175,9 @@ def _profile_capture_window(
         return delay_iters, cap
     max_iters = int(override)
     try:
-        delay_iters = max(0, int(policy_env.get("HYPERLOOM_PROFILE_DELAY_ITERS") or 8))
+        delay_iters = max(0, int(policy_env.get("HYPERLOOM_PROFILE_DELAY_ITERS") or _DEFAULT_PROFILE_DELAY_ITERS))
     except ValueError:
-        delay_iters = 8
+        delay_iters = _DEFAULT_PROFILE_DELAY_ITERS
     if steady_floor is not None and max_iters < steady_floor:
         log.warning("HYPERLOOM_PROFILE_MAX_ITERS=%d is below the steady-state floor of %d", max_iters, steady_floor)
     elif max_iters > cap:
