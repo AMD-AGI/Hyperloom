@@ -614,7 +614,6 @@ def _invalid_measurement_error(
     workspace: Any,
     slot: Any,
 ) -> _RoundError:
-    """Say why a round that finished produced no valid measurement."""
     if proc.returncode != 0:
         error = death_excerpt or redact_secret_values((proc.stderr or proc.stdout)[-2000:])
         if not error.strip():
@@ -758,12 +757,10 @@ class _VariantOutcome(NamedTuple):
 
 
 def _variant_tag(run: _GridRun, at: _VariantSlot) -> str:
-    """How the grid's log lines name one variant: its position and its name."""
     return f"{at.idx + 1}/{len(run.grid)} name={at.variant.name}"
 
 
 def _abort_variant(at: _VariantSlot, failure: _VariantFailure, **fields: Any) -> NoReturn:
-    """Record why this variant ended against its slot and end it."""
     _write_variant_abort_marker(
         at.path,
         variant_name=at.variant.name,
@@ -794,7 +791,6 @@ def _abort_on_round_stop(
     *,
     round_label: str,
 ) -> NoReturn:
-    """End the variant on a round the run stopped."""
     if attempt.returncode == SESSION_TIME_EXHAUSTED_RETURNCODE:
         stopped = run.deadline_stop
     at = attempt.at
@@ -837,7 +833,6 @@ def _abort_on_round_stop(
 
 
 def _abandon_rest_of_grid(run: _GridRun, at: _VariantSlot) -> NoReturn:
-    """End this variant and every one after it as never started."""
     stop = run.deadline_stop
     raise _VariantAborted(
         _not_run_skip_result(at.variant, stop),
@@ -898,7 +893,6 @@ async def _report_finished_variant(grid: list[GridVariant], results: list[Varian
 
 
 def _sweep_stale_aiter_locks() -> None:
-    """Reap orphaned aiter JIT build locks before any server boots."""
     try:
         from ._aiter_jit import sweep_stale_aiter_locks_if_dead
 
@@ -927,7 +921,6 @@ def _multi_node_reference_envs() -> dict[str, str]:
 
 
 def _refuse_unsupported_capability(run: _GridRun, at: _VariantSlot) -> None:
-    """End a variant whose env flag the build cannot honour before a doomed server boots."""
     reason = unsupported_capability_reason(at.variant)
     if not reason:
         return
@@ -940,7 +933,6 @@ def _refuse_unsupported_capability(run: _GridRun, at: _VariantSlot) -> None:
 
 
 async def _variant_yaml(run: _GridRun, at: _VariantSlot, *, into: Path, lifecycle: dict[str, Any] | None) -> Path:
-    """Materialize this variant's Magpie YAML under ``into``, against the server ``lifecycle`` names."""
     return await asyncio.to_thread(
         _build_variant_yaml,
         run.base_yaml_path,
@@ -981,7 +973,6 @@ async def _variant_yaml_or_abort(
 
 
 async def _prepare_variant_rounds(run: _GridRun, at: _VariantSlot) -> _VariantRounds:
-    """Materialize this variant's Magpie config and resolve the server its rounds share."""
     cfg_path = await _variant_yaml_or_abort(run, at, into=at.path, lifecycle=run.server_lifecycle)
     mn_effective_args = _resolve_mn_effective_server_args(
         cfg_path,
@@ -1141,7 +1132,6 @@ async def _warmup_throughput(
 
 
 def _log_variant_banner(run: _GridRun, at: _VariantSlot) -> None:
-    """Announce the variant about to be measured, with its multi-node banner."""
     from ._multi_node_env import log_mn_banner
 
     log_mn_banner("grid_runner", log, variant=f"{at.idx + 1}/{len(run.grid)}:{at.variant.name}")
@@ -1217,8 +1207,8 @@ async def _run_multi_node_warmup(run: _GridRun, at: _VariantSlot, rounds: _Varia
 
 
 async def _run_measured_round(run: _GridRun, at: _VariantSlot, rounds: _VariantRounds) -> _BenchmarkPass:
-    """Run the pass this variant is measured on and reap the servers it booted."""
     from ._multi_node_env import is_multi_node
+
     # Snapshot wall-clock before launch so the salvage path can mtime-gate leak destinations per-variant.
     workspaces_before = snapshot_workspaces(at.path)
     started_unix = time.time()
@@ -1262,7 +1252,6 @@ async def _run_measured_round(run: _GridRun, at: _VariantSlot, rounds: _VariantR
 
 
 def _abort_on_watchdog(run: _GridRun, at: _VariantSlot, round_: _BenchmarkPass) -> NoReturn:
-    """End the variant on a measured round a liveness watchdog reaped."""
     runtime_sec = round(max(0.0, time.time() - round_.started_unix), 2)
     destination = select_run_workspace(at.path, known_before=round_.workspaces_before) or at.path
     # server.log is itself one of the salvaged artifacts, so the cause of death only reaches the slot here.
@@ -1300,7 +1289,6 @@ def _abort_on_watchdog(run: _GridRun, at: _VariantSlot, round_: _BenchmarkPass) 
 
 
 def _refuse_reaped_round(run: _GridRun, at: _VariantSlot, round_: _BenchmarkPass) -> None:
-    """End the variant when a watchdog, the eval probe or the run itself stopped its measured round."""
     returncode = round_.proc.returncode
     if returncode == EVAL_PROBE_UNPATCHABLE_RETURNCODE:
         # Eval bounds could not be installed for a variant that runs eval, so nothing launched.
@@ -1324,7 +1312,6 @@ def _refuse_reaped_round(run: _GridRun, at: _VariantSlot, round_: _BenchmarkPass
 
 
 def _harvest_round_workspace(run: _GridRun, at: _VariantSlot, round_: _BenchmarkPass) -> tuple[Path, list[Any]]:
-    """Salvage the round's leaked artifacts into the workspace it produced."""
     workspace = select_run_workspace(at.path, known_before=round_.workspaces_before)
     artifacts = harvest_leaked_artifacts(
         workspace if workspace is not None else at.path,
@@ -1348,7 +1335,6 @@ def _abort_without_workspace(
     round_: _BenchmarkPass,
     artifacts: list[Any],
 ) -> NoReturn:
-    """End the variant on a round that ran to the end and produced no benchmark workspace."""
     proc = round_.proc
     returncode = proc.returncode
     preflight_abort = returncode == AGENTX_PREFLIGHT_RETURNCODE
@@ -1397,7 +1383,6 @@ def _abort_without_workspace(
 
 
 def _round_warnings(measurement: dict[str, Any], measured: _MeasuredVariant) -> list[str]:
-    """The nonfatal warnings this variant's row carries out of its rounds."""
     warnings = list(measurement.pop("nonfatal_warnings", []) or [])
     warnings += [f"harvested_leaked_artifact:{src}" for src, _ in measured.artifacts]
     if measured.warmup_tput is not None:
@@ -1407,7 +1392,6 @@ def _round_warnings(measurement: dict[str, Any], measured: _MeasuredVariant) -> 
 
 
 def _abort_on_invalid_measurement(run: _GridRun, at: _VariantSlot, outcome: _VariantOutcome) -> NoReturn:
-    """End the variant on a round that finished and produced no valid measurement."""
     returncode = outcome.measured.round.proc.returncode
     workspace = outcome.measured.workspace
     report_path = workspace / "benchmark_report.json"
@@ -1444,7 +1428,6 @@ def _abort_on_invalid_measurement(run: _GridRun, at: _VariantSlot, outcome: _Var
 
 
 async def _variant_row(run: _GridRun, at: _VariantSlot, measured: _MeasuredVariant) -> VariantResult:
-    """Read the measured round's benchmark report and turn it into this variant's row."""
     report, measurement = await _settled_measurement(
         measured.workspace,
         config_path=measured.rounds.cfg_path,
@@ -1460,7 +1443,6 @@ async def _variant_row(run: _GridRun, at: _VariantSlot, measured: _MeasuredVaria
 
 
 def _booted_server_row(at: _VariantSlot, outcome: _VariantOutcome) -> VariantResult:
-    """The row for a lifecycle-only round: the server came up and nothing was measured."""
     workspace = outcome.measured.workspace
     report_path = workspace / "benchmark_report.json"
     return VariantResult(
@@ -1522,7 +1504,6 @@ def _kept_nonzero_exit(at: _VariantSlot, outcome: _VariantOutcome) -> str | None
 
 
 def _measured_row(at: _VariantSlot, outcome: _VariantOutcome) -> VariantResult:
-    """The row for a variant whose measured round produced a valid measurement."""
     nonzero_kept_error = _kept_nonzero_exit(at, outcome)
     measurement = outcome.measurement
     workspace = outcome.measured.workspace
@@ -1945,7 +1926,6 @@ def _importable_overlay_dir(variant: GridVariant) -> str:
 
 
 def _pin_xdit_tool_path(envs: dict[str, Any], framework: Any) -> None:
-    """Force the xdit wrapper's own tool directories onto ``PATH``."""
     if str(framework or "").strip().lower() != "xdit":
         return
     parts = [p for p in str(envs.get("PATH", "") or "").split(":") if p]

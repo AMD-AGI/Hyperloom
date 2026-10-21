@@ -801,7 +801,7 @@ module-lines src/hyperloom/inference_optimizer/cli/model_gate.py 1815
 module-lines src/hyperloom/inference_optimizer/cli/preflight.py 2647
 module-lines src/hyperloom/inference_optimizer/multi_node/cli.py 1867
 module-lines src/hyperloom/inference_optimizer/roofline_ceiling.py 1444
-module-lines src/hyperloom/orchestrator/actions/executors/_grid_runner.py 2065
+module-lines src/hyperloom/orchestrator/actions/executors/_grid_runner.py 2045
 module-lines src/hyperloom/orchestrator/actions/executors/_kv_metrics.py 1590
 module-lines src/hyperloom/orchestrator/actions/executors/_workload_envs.py 2137
 module-lines src/hyperloom/orchestrator/actions/executors/baseline.py 4197
