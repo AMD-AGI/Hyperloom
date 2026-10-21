@@ -374,7 +374,7 @@ class RecordedSessions:
 
     ``started`` keeps the start commit of every branch a run started on, ``briefs`` the brief its first run started
     on, ``repairs`` the repair a repair branch's first run started on, ``directions`` the direction of each of a
-    branch's runs in order, ``k`` its last K and ``quota_at_start`` the K the toolbox's policy gave it as its first
+    branch's runs in order, ``agents`` the agent an agent's branch runs, ``k`` its last K and ``quota_at_start`` the K the toolbox's policy gave it as its first
     run started; ``running`` holds the branches whose last run was not stopped, and ``stopped`` every stop a run was
     asked for. A run of a branch in ``hanging`` never returns from its stop, a failure double. Every scripted session
     waits ``poll_seconds`` with ``sleep`` between two reads. Not a placeholder: the scripted session is the specialist
@@ -405,6 +405,7 @@ class RecordedSessions:
         self.briefs: dict[str, str] = {}
         self.repairs: dict[str, RepairRequest] = {}
         self.directions: dict[str, list[str]] = {}
+        self.agents: dict[str, str] = {}
         self.k: dict[str, int] = {}
         self.quota_at_start: dict[str, int | None] = {}
         self.running: set[str] = set()
@@ -420,6 +421,8 @@ class RecordedSessions:
         if start.task.repair is not None:
             self.repairs.setdefault(branch, start.task.repair)
         self.directions.setdefault(branch, []).append(start.task.direction)
+        if start.task.agent:
+            self.agents.setdefault(branch, start.task.agent)
         self.k[branch] = start.k
         self.running.add(branch)
         script = tuple(self._scripts.get(branch, ()))

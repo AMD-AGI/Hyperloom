@@ -242,6 +242,22 @@ async def test_user_branches_open_at_the_root_at_k_one_on_their_directions_up_to
     assert json.loads((tmp_path / "MB-roster.json").read_text())["issued_branch_ids"] == 3
 
 
+async def test_agent_branches_open_at_the_root_at_k_one_after_the_user_branches_each_on_its_agent(
+    tmp_path: Path,
+) -> None:
+    bench = await Bench(tmp_path).rooted()
+
+    await bench.control.open_user_branches(("Fuse the MoE gate.",), bench.root, OPEN_BY)
+    opened = await bench.control.open_agent_branches(("https://github.com/acme/agent@v1",), bench.root, OPEN_BY)
+    await _runs_started()
+
+    assert [(entry.branch, entry.origin, entry.k) for entry in opened] == [("b02", BranchOrigin.AGENT, 1)]
+    assert bench.sessions.agents == {"b02": "https://github.com/acme/agent@v1"}
+    assert bench.sessions.started["b02"] == bench.root
+    rows = [json.loads(line) for line in (tmp_path / "MB-decisions.jsonl").read_text().splitlines()]
+    assert ("b02", "agent branch started") in [(row["branch"], row["reason"]) for row in rows if row["kind"] == "open"]
+
+
 async def test_each_user_branchs_specialist_runs_on_its_own_direction_in_every_launch_and_a_judge_opened_one_on_a_built_in_one(
     tmp_path: Path,
 ) -> None:

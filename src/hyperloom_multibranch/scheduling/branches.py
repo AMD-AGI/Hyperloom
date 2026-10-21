@@ -89,11 +89,13 @@ class BatchStart:
 @dataclass(frozen=True)
 class Launch:
     """What a branch's specialist starts on: the repair the branch was opened for, the focus the session's briefs keep
-    for it unless ``None``, and the direction the user wrote for a user branch."""
+    for it unless ``None``, the direction the user wrote for a user branch, and the agent the user named for an agent's
+    branch."""
 
     repair: RepairRequest | None = None
     focus: str | None = None
     direction: str = ""
+    agent: str = ""
 
 
 class BranchControl:
@@ -149,13 +151,28 @@ class BranchControl:
         :meth:`open_branches` opens a batch, unfocused at K :data:`STARTED_K`; the roster entries issued before the
         roster first refuses one, a branch whose specialist did not start among them, already stopped."""
 
-        start = BatchStart(BranchOrigin.USER, root_commit, deadline)
+        launches = tuple(Launch(focus="", direction=direction) for direction in directions)
+        return await self._open_at_root(BranchOrigin.USER, launches, root_commit, deadline)
+
+    async def open_agent_branches(
+        self, agents: tuple[str, ...], root_commit: str, deadline: float
+    ) -> tuple[BranchEntry, ...]:
+        """Open one :attr:`BranchOrigin.AGENT` branch at ``root_commit`` for each agent source the user named, as
+        :meth:`open_user_branches` opens the user's directions; no judge changes its K of :data:`STARTED_K`."""
+
+        launches = tuple(Launch(focus="", agent=agent) for agent in agents)
+        return await self._open_at_root(BranchOrigin.AGENT, launches, root_commit, deadline)
+
+    async def _open_at_root(
+        self, origin: BranchOrigin, launches: tuple[Launch, ...], root_commit: str, deadline: float
+    ) -> tuple[BranchEntry, ...]:
+        start = BatchStart(origin, root_commit, deadline)
         opened = []
-        for direction in directions:
+        for launch in launches:
             entry = self._issue(start, STARTED_K)
             if entry is None:
                 break
-            opened.append(await self._open(entry, root_commit, deadline, Launch(focus="", direction=direction)))
+            opened.append(await self._open(entry, root_commit, deadline, launch))
         return tuple(opened)
 
     def _issue(self, start: BatchStart, k: int) -> BranchEntry | None:
@@ -335,7 +352,7 @@ class BranchControl:
             await self._repo.create_branch(entry.branch, start_commit)
         await self.push_quota()
         self._specialists.add(entry.branch)
-        task = BranchTask(repair=launch.repair, direction=launch.direction)
+        task = BranchTask(repair=launch.repair, direction=launch.direction, agent=launch.agent)
         started = await settled(self._lifecycle.start(entry.branch, start_commit, task))
         if isinstance(started, BaseException):
             self._specialists.discard(entry.branch)
