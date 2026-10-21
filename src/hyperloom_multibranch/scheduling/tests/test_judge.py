@@ -211,7 +211,7 @@ def test_the_prompt_shows_and_explains_the_gpu_hours_and_llm_dollars_used() -> N
     )
 
 
-def test_a_branch_row_shows_what_is_known_of_its_specialist_and_the_prompt_says_who_stops_one_out_of_service() -> None:
+def test_a_branch_row_shows_what_is_known_of_its_specialist_and_the_prompt_says_to_stop_one_that_gave_up() -> None:
     gave_up = SpecialistStatus(running=False, crashes=4, lost=1, gave_up=True, judge_failed=False)
     judging_failed = SpecialistStatus(running=False, crashes=0, lost=6, gave_up=False, judge_failed=True)
 
@@ -231,8 +231,7 @@ def test_a_branch_row_shows_what_is_known_of_its_specialist_and_the_prompt_says_
     prompt = " ".join(JUDGE_SYSTEM_PROMPT.split())
     for field in ("crashes", "lost", "gave_up", "judge_failed"):
         assert f"({field})" in prompt
-    assert "The scheduler stops a branch whose specialist gave up once no confirm of it waits" in prompt
-    assert "a branch whose judging failed makes no more progress but holds its slot until you stop it" in prompt
+    assert "A branch whose specialist gave up or whose judging failed makes no more progress" in prompt
     assert "weigh a specialist's lost count against its progress" in prompt
 
 
