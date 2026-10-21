@@ -228,12 +228,17 @@ hyperloom-kb-collect --mapping kernelforge-v1 --document runs.json --dry-run
 ```
 
 Every Experience records the `kernel_time_ms@v1` objective, lower is better:
-the kernel's time on the task's benchmark in milliseconds, the median over
-three independent runs of the task's benchmark driver, each run's time being the
-driver's median over all the timing samples it reports, every benchmark case
-pooled. KernelForge keeps a candidate on its mean case speedup, not on this
-time, and labels the time diagnostic and not monotonic, so a kept candidate can
-occasionally be slower in milliseconds than the best kernel before it.
+the kernel's benchmark time in milliseconds, the representative time
+KernelForge records and logs as its raw mean (`wall_ms`). KernelForge runs the
+task's benchmark driver three independent times and records the median of those
+three run times. Each run's time is the aggregate the driver prints: the median
+of the `wall_ms` samples it reports, or the single `median_ms` or `mean_ms`
+summary it prints, kept as printed. The grouped-GEMM driver prints `mean_ms`,
+the arithmetic mean of its per-case timings, so each of its runs contributes
+that mean and the recorded time is the median of those three means. KernelForge
+keeps a candidate on its mean case speedup, not on this time, and labels the
+time diagnostic and not monotonic, so a kept candidate can occasionally be
+slower in milliseconds than the best kernel before it.
 
 It reads:
 
@@ -243,11 +248,11 @@ It reads:
   `softmax`); `framework`, unless recorded as `unknown`; `backend`; and `gpu`.
   The declaration also has `backend_version` and `dtype`, which `forge-loop`
   does not record yet, so its Experiences leave them absent;
-- `baseline.current_best_median_ms` from the candidate's `meta.json`
-  `best_wall_ms_before`, the time of the best kernel KernelForge had kept when
-  the iteration began, and `outcome.candidate_median_ms` from its `wall_ms`,
-  the candidate's own time, both the median the objective describes, beside
-  KernelForge's decision label in `outcome.decision`;
+- `baseline.current_best_mean_ms` from the candidate's `meta.json`
+  `best_wall_ms_before`, the raw mean of the best kernel KernelForge had kept
+  when the iteration began, and `outcome.candidate_mean_ms` from its `wall_ms`,
+  the candidate's own raw mean, both the representative time the objective
+  describes, beside KernelForge's decision label in `outcome.decision`;
 - `baseline.source_ms` from the pristine baseline the run's `run_state.json`
   records, which for a run given `--baseline-json` is that file's time rather
   than that of the kernel its search started from;

@@ -65,9 +65,9 @@ def _session_unit(files: dict[str, Path], **fields: Any) -> dict[str, Any]:
         },
         "started_at": "2026-10-15T10:00:00",
         "completed_at": "2026-10-15T10:04:30",
-        "current_best_median_ms": 0.052,
+        "current_best_mean_ms": 0.052,
         "decision": "KEEP",
-        "candidate_median_ms": 0.044,
+        "candidate_mean_ms": 0.044,
         "plan_file": str(files["plan"]),
         "plan": "Small rows are bound by launch latency. This plan fuses the max and sum passes.",
         "source_ms": 0.052,
@@ -93,7 +93,7 @@ def test_the_mapping_produces_the_packaged_kernelforge_declaration() -> None:
         "direction": "lower_is_better",
     }
     measured = [declaration.role_field(category, FieldRole.MEASUREMENT) for category in ("baseline", "outcome")]
-    assert [field.name for field in measured if field is not None] == ["current_best_median_ms", "candidate_median_ms"]
+    assert [field.name for field in measured if field is not None] == ["current_best_mean_ms", "candidate_mean_ms"]
     assert [(field.name, field.kind.value, field.required) for field in declaration.identity] == [
         ("operator", "string", False),
         ("kernel", "string", False),
@@ -137,14 +137,14 @@ def test_a_session_unit_projects_a_complete_experience(files: dict[str, Path]) -
         "backend": "triton",
         "gpu": "mi300x",
     }
-    assert experience["baseline"] == {"current_best_median_ms": 0.052, "source_ms": 0.052}
+    assert experience["baseline"] == {"current_best_mean_ms": 0.052, "source_ms": 0.052}
     assert experience["rationale"] == {
         "reasoning": REASONING,
         "plan": "Small rows are bound by launch latency. This plan fuses the max and sum passes.",
         "plan_file": _ref(files["plan"]),
     }
     assert experience["change"] == {"source_code": _ref(files["kernel"])}
-    assert experience["outcome"] == {"decision": "KEEP", "candidate_median_ms": 0.044}
+    assert experience["outcome"] == {"decision": "KEEP", "candidate_mean_ms": 0.044}
     assert experience["reflection"] == {
         "lesson": "One sweep saved a global read.",
         "lesson_file": _ref(files["lesson"]),

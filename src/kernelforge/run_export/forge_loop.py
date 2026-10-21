@@ -244,9 +244,9 @@ class _PlainRun:
         unit.update(
             started_at=self.times.get((_STARTED, seq), stamp),
             completed_at=self.times.get((_RESULT, seq), stamp),
-            current_best_median_ms=meta.get("best_wall_ms_before"),
+            current_best_mean_ms=meta.get("best_wall_ms_before"),
             decision=meta.get("decision"),
-            candidate_median_ms=meta.get("wall_ms"),
+            candidate_mean_ms=meta.get("wall_ms"),
         )
         unit.update(archive.fields(meta, plan_file))
         unit.update(_origin_fields(origin, meta, plan))
