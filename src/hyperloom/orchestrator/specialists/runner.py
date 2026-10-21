@@ -1010,8 +1010,6 @@ class SpecialistRunner:
         tick, phase = self._ctx_tick_phase(ctx)
         # Fold the production specialist's token spend into the unified ledger: one row per turn
         # when per-turn usage is available, else one cumulative row; the session latency lands on the last.
-        # Prefer per-turn token rows when available; whole-session latency lands on the final turn.
-        # Fall back to a single cumulative turn=1 row (None metadata when the subprocess reported no usage).
         if len(sub_result.turn_usages) > 1:
             model = (sub_result.usage or {}).get("model")
             last_idx = len(sub_result.turn_usages)
