@@ -12,7 +12,7 @@ import subprocess
 import time
 from collections.abc import MutableMapping
 from typing import Any
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
@@ -22,7 +22,9 @@ from hyperloom.measure import signing
 from hyperloom.measure.docs import DocumentError
 from hyperloom.measure.failures import Disposition, FailureClassification, classify_test_failure
 from hyperloom.measure.local import LocalMeasurementBackend, TestCallRefused
+from hyperloom.measure.magpie_launchers import install_launchers
 from hyperloom.measure.manifest import encode_manifest, RESULT_SCHEMA
+from hyperloom.measure.pins import IMAGE_DIGEST_VAR
 from hyperloom.measure.runner import hardware
 from hyperloom.measure.attachments import AttachmentError, place_attachments
 from hyperloom.measure.farm import Farm, FarmError, build_farm, server_environment, server_python, verify_farm
@@ -31,15 +33,18 @@ from hyperloom.measure.runner.platform_env import align_platform_env, take_topol
 from hyperloom.measure.runner.rewrite import Placement, rewrite_config
 from hyperloom.measure.runner.rounds import write_rounds
 from hyperloom.measure.runner.service import Progress, RunnerFailure, wait_for_file, write_status
+from hyperloom.measure.runner.snapshot import SnapshotError, check_snapshot
 from hyperloom.measure.runner.tools import ToolError, ensure_inferencex, ensure_magpie
 from hyperloom.measure.socket import RoundPlan, SessionFacts, TestCall
 from hyperloom.measure.spec import MeasurementSpec, fingerprint, spec_sha256
+from hyperloom.measure.surface import extract_surface
 from hyperloom.orchestrator.actions.executors import harvest_leaked_artifacts
 
 __all__ = ["run"]
 
 _START_FAILED = "runner_start_failed"
 _SPEC_REJECTED = "spec_rejected"
+_NODE_FAULT = "node_fault"
 _FAILED = "failed"
 _FILES_DIR = "files"
 _KEY_ENV = "HYPERLOOM_SIGNING_KEY_FILE"
@@ -54,6 +59,8 @@ class _Context:
     cache: Path
     environ: MutableMapping[str, str]
     started: float
+    #: Checks that could not be made on this machine; a successful run says so in ``status.json``.
+    notes: list[str] = field(default_factory=list)
 
     @property
     def files(self) -> Path:
@@ -116,20 +123,65 @@ def _check_model(yaml_text: str, hashes: dict[str, str]) -> None:
             raise RunnerFailure(_SPEC_REJECTED, f"model file {relative} differs from the recorded hash")
 
 
-def _preflight(spec: MeasurementSpec, visible: list[int]):
+def _check_runtime(spec: MeasurementSpec) -> None:
+    runtime = spec.environment.runtime
+    if runtime is None:
+        return
+    try:
+        check_snapshot(Path(runtime.snapshot), runtime.manifest_sha256)
+    except SnapshotError as exc:
+        raise RunnerFailure(_SPEC_REJECTED, str(exc)) from exc
+
+
+def _check_vram_free(ctx: _Context, visible: list[int]) -> None:
+    """A visible GPU that already holds memory is not free for the test (design 4.8.1 step 3)."""
+    busy = hardware.busy_gpus(visible)
+    if busy is None:
+        ctx.notes.append("GPU memory use could not be read; the visible GPUs were not checked for free memory")
+    elif busy:
+        raise RunnerFailure(
+            _START_FAILED, f"GPU {', '.join(map(str, busy))} already holds memory: the card is not free"
+        )
+
+
+def _image_problems(ctx: _Context, wanted: str) -> list[str]:
+    """The image the sheet is for against the digest the machine is told it runs; no container can state its own."""
+    actual = ctx.environ.get(IMAGE_DIGEST_VAR, "").strip()
+    if not actual:
+        ctx.notes.append(f"{IMAGE_DIGEST_VAR} is not set; the image digest was not compared with the sheet's")
+        return []
+    return [] if actual == wanted else [f"the machine runs image {actual}, the sheet is for {wanted}"]
+
+
+def _preflight(ctx: _Context, spec: MeasurementSpec, visible: list[int]):
     facts = hardware.read_gpu_facts(visible)
-    if facts is not None:
+    problems = _image_problems(ctx, spec.image.digest)
+    if facts is None:
+        ctx.notes.append("GPU model, power cap and partition mode could not be read; they were not compared")
+    else:
         h = spec.hardware
-        problems = hardware.check_hardware(
+        problems += hardware.check_hardware(
             facts,
             gpu_type=h.gpu_type,
             gpu_count=h.gpu_count,
             power_cap_w=h.power_cap_w,
             partition_mode=h.partition_mode,
         )
-        if problems:
-            raise RunnerFailure("preflight_mismatch", "; ".join(problems))
+    if problems:
+        raise RunnerFailure("preflight_mismatch", "; ".join(problems))
     return facts
+
+
+def _surface_sha256(spec: MeasurementSpec, points: list[Path]) -> str:
+    """The hash of the measurement surface of the YAML the test will execute (design 4.20 step 3).
+
+    The points of a sheet differ only in what the concurrency level decides, so the first speaks for all of them. Under
+    Magpie the benchmark script a test executes is Magpie's own copy of its launcher, which the backend puts in the
+    InferenceX checkout before the first round; it is put there first so that the hash is of the file that runs.
+    """
+    if spec.procedure.benchmark_backend == "magpie":
+        install_launchers(points)
+    return extract_surface(yaml.safe_load(points[0].read_text()) or {}).sha256
 
 
 def _prepare(ctx: _Context, spec: MeasurementSpec, visible: list[int]) -> tuple[list[Path], Path, Farm | None]:
@@ -242,13 +294,20 @@ def _outcome_document(outcome, timed_out: bool) -> dict:
     }
 
 
-def _check_node(before, after, visible: list[int], facts) -> None:
-    if facts is not None and len(hardware.read_gpu_facts(visible) or facts) < len(facts):
-        raise RunnerFailure("node_fault", "fewer GPUs are visible after the test")
-    if before and after:
-        for gpu, was in before.items():
-            if after.get(gpu) and after[gpu].uncorrectable > was.uncorrectable:
-                raise RunnerFailure("node_fault", f"GPU {gpu} reported new uncorrectable ECC errors")
+def _check_node(ctx: _Context, before, after, visible: list[int], facts) -> None:
+    if facts is not None:
+        now = hardware.read_gpu_facts(visible)
+        if now is None:
+            raise RunnerFailure(_NODE_FAULT, "the GPUs cannot be read after the test, as they could before it")
+        if len(now) < len(facts):
+            raise RunnerFailure(_NODE_FAULT, "fewer GPUs are visible after the test")
+    if before is None or after is None:
+        unread = " and ".join(when for when, counts in (("before", before), ("after", after)) if counts is None)
+        ctx.notes.append(f"ECC counts could not be read {unread} the test; there is no ECC verdict")
+        return
+    for gpu, was in before.items():
+        if after.get(gpu) and after[gpu].uncorrectable > was.uncorrectable:
+            raise RunnerFailure(_NODE_FAULT, f"GPU {gpu} reported new uncorrectable ECC errors")
 
 
 @dataclass(frozen=True)
@@ -269,6 +328,7 @@ class _Findings:
     changed: Any
     timing: dict
     visible: list[int]
+    surface_sha256: str
 
 
 def _write_bundle(ctx: _Context, signed: _Signed, outcome: dict, found: _Findings) -> None:
@@ -283,7 +343,7 @@ def _write_bundle(ctx: _Context, signed: _Signed, outcome: dict, found: _Finding
             "request_id": spec.request_id,
             "spec_fingerprint": fingerprint(spec, hyperloom_version=_version()),
             "spec_sha256": spec_sha256(raw),
-            "surface_sha256": None,
+            "surface_sha256": found.surface_sha256,
             "runner": {
                 "sandbox_id": ctx.environ.get("E2B_SANDBOX_ID", ""),
                 "signing_key_fingerprint": signing.public_key_fingerprint(pem),
@@ -313,11 +373,13 @@ def _run_sheet(ctx: _Context, spec_path: Path, key, progress: Progress) -> None:
     spec = _parse(raw)
     visible = _visible(ctx.environ)
     _check_model(spec.config[0].yaml, dict(spec.model_hashes))
-    facts = _preflight(spec, visible)
+    _check_runtime(spec)
+    facts = _preflight(ctx, spec, visible)
     before = hardware.ecc_counts(visible)
     changed = align_platform_env(ctx.environ, spec.platform_env)
     progress.phase("preparing")
     points, inferencex, farm = _prepare(ctx, spec, visible)
+    surface = _surface_sha256(spec, points)
     call = _call(ctx, spec, points, inferencex, progress)
     progress.phase("running")
     started = time.time()
@@ -325,7 +387,7 @@ def _run_sheet(ctx: _Context, spec_path: Path, key, progress: Progress) -> None:
     progress.phase("collecting")
     harvest_leaked_artifacts(ctx.files, subprocess_started_unix=started, leak_root=ctx.work)
     drop_agentx_runtime(ctx.files)
-    _check_node(before, hardware.ecc_counts(visible), visible, facts)
+    _check_node(ctx, before, hardware.ecc_counts(visible), visible, facts)
     write_farm_inventory(ctx.files, farm)
     write_rounds(ctx.files, outcome)
     try:
@@ -342,7 +404,7 @@ def _run_sheet(ctx: _Context, spec_path: Path, key, progress: Progress) -> None:
         ctx,
         _Signed(spec, raw, key),
         _outcome_document(outcome, timed_out),
-        _Findings(files, facts, changed, timing, visible),
+        _Findings(files, facts, changed, timing, visible, surface),
     )
 
 
@@ -365,6 +427,7 @@ def run(
         try:
             key = _load_key(environ)
             take_topology(environ)
+            _check_vram_free(ctx, _visible(environ))
             progress.phase("waiting_spec")
             if not wait_for_file(in_dir / "READY", spec_wait_sec):
                 write_status(out_dir, state=_FAILED, error_class="no_spec", message="no instruction sheet arrived")
@@ -376,5 +439,5 @@ def run(
         except Exception as exc:  # noqa: BLE001 - the application reads status.json, not a traceback
             write_status(out_dir, state=_FAILED, error_class="runner_error", message=f"{type(exc).__name__}: {exc}")
             return 1
-        write_status(out_dir, state="succeeded")
+        write_status(out_dir, state="succeeded", message="; ".join(ctx.notes))
     return 0
