@@ -876,10 +876,8 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
                 ),
             )
         )
-
         if self.recipe_kb is None:
             return
-
         self._record_fact_impl(
             FactRecord(
                 task=task,
@@ -964,14 +962,7 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
     ) -> None:
         """Per-variant fact write — mirror of _record_fact_per_task for explore per-variant decisions.
 
-        Args:
-            task: The completed explore task.
-            source_session_id: The hyperloom-local session id stamped on the
-                fact provenance.
-            variant_outcome: One per-variant outcome row (name, outcome,
-                metrics).
-            adopted: Whether this variant's lift landed; an executor KEEP that
-                was not adopted journals as ``no_promote``.
+        An executor KEEP that was not adopted journals as ``no_promote``.
         """
         journal = self.ensure_journal()
         outcome_raw = str(variant_outcome.get("outcome") or "")
