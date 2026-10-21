@@ -18,7 +18,7 @@ from typing import Any
 import pytest
 
 from hyperloom.contracts.measurement import TestRequest
-from hyperloom.hosted.mcp_server import McpServer, McpServerConfig
+from hyperloom.hosted.mcp_server import HOST_KIND, McpServer, McpServerConfig
 from hyperloom_multibranch.contracts.notebook import Role, Writer
 from hyperloom_multibranch.contracts.notebook.records import StartupBrief
 from hyperloom_multibranch.contracts.toolbox import (
@@ -33,6 +33,8 @@ from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.tests.factories import TTL, FakeClock, delta, intent, request, result
 from hyperloom_multibranch.notebook.tests.sessions import Writers, scripted_session
 from hyperloom_multibranch.toolbox.mcp_tools import (
+    REPLY_INBOX_HEADER,
+    REPLY_INBOX_LINES,
     SPECIALIST_TOKEN_ENV,
     WAIT_TEST_MAX_SECONDS,
     McpSpecialistTokens,
@@ -506,3 +508,152 @@ async def test_toolbox_calls_run_on_the_loop_the_toolbox_was_registered_from() -
     finally:
         server.stop()
     assert seen == [home, home, home]
+
+
+async def _land(w: Writers, count: int, first: int = 1) -> None:
+    """``count`` tests of ``s1`` measured one after another: one result in its inbox each, ``x<first>`` onwards."""
+    for number in range(first, first + count):
+        of = intent("s1", "c1", "attention", f"mechanism {number}")
+        await w.measure("s1", f"x{number}", of, delta(f"--max-num-seqs {1000 + number}"))
+
+
+def _texts(reply: Any) -> list[str]:
+    return [block["text"] for block in reply["result"]["content"]]
+
+
+def _news(rig: Rig, token: str, tool: str = "queue_state", **arguments: Any) -> list[str]:
+    """The lines of the block a reply carries after the tool's own content; none when it has no block."""
+    status, reply = rig.call(token, tool, **arguments)
+    assert status == 200 and "result" in reply, reply
+    texts = _texts(reply)
+    assert len(texts) <= 2, texts
+    return texts[1].splitlines() if len(texts) == 2 else []
+
+
+def _item_lines(rig: Rig, token: str) -> list[str]:
+    """What ``poll_inbox`` lists, as the lines a block carries them."""
+    items = json.loads(rig.ok(token, "poll_inbox"))["items"]
+    return [f"{item['kind']} {item['pointer']}: {item['summary']}" for item in items]
+
+
+async def test_a_reply_carries_what_arrived_in_the_branch_inbox_since_the_last_reply(
+    wait_rig: Rig, waiting: Writers
+) -> None:
+    token = wait_rig.token("s1")
+    assert _news(wait_rig, token) == []
+    await waiting.as_role(Role.TOOLBOX).write_result(result("r9"))
+    status, reply = wait_rig.call(token, "queue_state")
+    own, block = _texts(reply)
+    assert status == 200 and json.loads(own)["queued"] == 3
+    assert block.splitlines() == [REPLY_INBOX_HEADER, *_item_lines(wait_rig, token)[-1:]]
+    assert block.splitlines()[1].startswith("result r9: ")
+    assert _news(wait_rig, token) == []
+
+
+async def test_a_branch_sees_its_own_inbox_only(wait_rig: Rig, waiting: Writers) -> None:
+    other = wait_rig.token("s2")
+    assert _news(wait_rig, other) == []
+    await _land(waiting, 1)
+    assert _news(wait_rig, other) == []
+
+
+async def test_the_first_call_of_a_token_starts_at_the_end_of_the_feed(wait_rig: Rig, waiting: Writers) -> None:
+    await _land(waiting, 1)
+    assert (await wait_rig.observer().poll("s1")).items
+    early = wait_rig.token("s1")
+    assert _news(wait_rig, early) == []
+    await _land(waiting, 1, first=2)
+    assert _news(wait_rig, early)[1].startswith("result x2: ")
+    await _land(waiting, 1, first=3)
+    assert _news(wait_rig, wait_rig.token("s1")) == []
+    assert _news(wait_rig, early)[1].startswith("result x3: ")
+
+
+async def test_what_arrives_while_the_first_call_of_a_token_runs_is_news_for_its_reply(
+    wait_rig: Rig, waiting: Writers
+) -> None:
+    call = asyncio.create_task(
+        asyncio.to_thread(wait_rig.call, wait_rig.token("s1"), "wait_test", request_id="r9", wait_seconds=60)
+    )
+    await asyncio.sleep(0.3)
+    await _land(waiting, 1)
+    await waiting.as_role(Role.TOOLBOX).write_result(result("r9"))
+    status, reply = await asyncio.wait_for(call, 10)
+    own, block = _texts(reply)
+    assert status == 200 and json.loads(own)["state"] == "measured"
+    assert [line.split(":")[0] for line in block.splitlines()] == [REPLY_INBOX_HEADER[:-1], "result x1"]
+
+
+async def test_a_block_lists_at_most_twenty_items_and_counts_the_rest(wait_rig: Rig, waiting: Writers) -> None:
+    token = wait_rig.token("s1")
+    _news(wait_rig, token)
+    await _land(waiting, REPLY_INBOX_LINES + 5)
+    lines = _news(wait_rig, token)
+    assert len(lines) == 1 + REPLY_INBOX_LINES + 1
+    assert lines[-1] == "... 5 more, poll_inbox lists them"
+    assert [line.split(":")[0] for line in lines[1:-1]][-1] == f"result x{REPLY_INBOX_LINES}"
+    assert _news(wait_rig, token) == []
+
+
+async def test_a_block_of_exactly_twenty_items_has_no_more_line(wait_rig: Rig, waiting: Writers) -> None:
+    token = wait_rig.token("s1")
+    _news(wait_rig, token)
+    await _land(waiting, REPLY_INBOX_LINES)
+    lines = _news(wait_rig, token)
+    assert len(lines) == 1 + REPLY_INBOX_LINES and not lines[-1].startswith("...")
+
+
+async def test_an_error_reply_still_gets_the_block_and_moves_the_cursor(wait_rig: Rig, waiting: Writers) -> None:
+    token = wait_rig.token("s1")
+    _news(wait_rig, token)
+    await _land(waiting, 1)
+    status, reply = wait_rig.call(token, "test_result", request_id="nope")
+    assert status == 200 and reply["result"]["isError"] is True
+    assert "UnknownRequest" in _texts(reply)[0] and _texts(reply)[1].splitlines()[1].startswith("result x1: ")
+    assert _news(wait_rig, token) == []
+
+
+async def test_a_result_reply_leaves_out_the_item_that_names_the_request_it_carries(
+    wait_rig: Rig, waiting: Writers
+) -> None:
+    token = wait_rig.token("s1")
+    _news(wait_rig, token)
+    await waiting.as_role(Role.TOOLBOX).write_result(result("r9"))
+    await _land(waiting, 1)
+    carried = _news(wait_rig, token, "wait_test", request_id="r9")
+    assert [line.split(":")[0] for line in carried] == [REPLY_INBOX_HEADER[:-1], "result x1"]
+    await _land(waiting, 1, first=2)
+    assert [line.split(":")[0] for line in _news(wait_rig, token, "test_result", request_id="r9")][1:] == ["result x2"]
+
+
+async def test_other_replies_list_the_item_of_a_request_a_result_reply_would_leave_out(
+    wait_rig: Rig, waiting: Writers
+) -> None:
+    token = wait_rig.token("s1")
+    _news(wait_rig, token)
+    await waiting.as_role(Role.TOOLBOX).write_result(result("r9"))
+    assert _news(wait_rig, token, "cancel_test", request_id="r9")[1].startswith("result r9: ")
+
+
+async def test_poll_inbox_keeps_its_own_cursor_apart_from_the_reply_block(wait_rig: Rig, waiting: Writers) -> None:
+    token = wait_rig.token("s1")
+    _news(wait_rig, token)
+    await _land(waiting, 1)
+    assert [line.split(":")[0] for line in _news(wait_rig, token)][1:] == ["result x1"]
+    first = json.loads(wait_rig.ok(token, "poll_inbox"))
+    assert any(item["pointer"] == "x1" for item in first["items"])
+    await _land(waiting, 1, first=2)
+    again = json.loads(wait_rig.ok(token, "poll_inbox", cursor=first["cursor"]))
+    assert [item["pointer"] for item in again["items"]] == ["x2"]
+
+
+async def test_the_host_token_gets_no_block_and_leaves_the_specialists_unread(wait_rig: Rig, waiting: Writers) -> None:
+    wait_rig.server.register(
+        "host_ping", schema={"type": "object"}, handler=lambda arguments, ctx: {"ok": True}, scopes={HOST_KIND}
+    )
+    token = wait_rig.token("s1")
+    _news(wait_rig, token)
+    await _land(waiting, 1)
+    _, reply = wait_rig.call(HOST_TOKEN, "host_ping")
+    assert len(_texts(reply)) == 1
+    assert _news(wait_rig, token)[1].startswith("result x1: ")

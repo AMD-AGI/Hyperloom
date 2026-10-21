@@ -16,6 +16,9 @@ only; the notebook's search and record reads are shared across branches, as the 
 * ``poll_inbox`` reads the branch's inbox;
 * the ``notebook_*`` tools are the notebook's own specialist tools (lookup, claim, release, search, record, branch log,
   brief), bound per call to the notebook handle of the caller's branch.
+
+Every reply to a specialist also carries what reached its branch's inbox since the token's last reply, as one more text
+block after the tool's own content (:func:`reply_inbox`); ``poll_inbox`` keeps a cursor of its own.
 """
 
 from __future__ import annotations
@@ -27,7 +30,7 @@ import enum
 import functools
 import threading
 import time
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, cast
 
 from hyperloom.contracts.measurement import PRIORITY_HIGHEST, PRIORITY_LOWEST, Purpose, TestKind
@@ -36,10 +39,14 @@ from hyperloom.hosted.mcp_server import (
     CallContext,
     InvalidParamsError,
     McpServer,
+    ReplyAnnotator,
+    ReplyCall,
+    ReplyNote,
     ToolError,
     ToolForbidden,
 )
 from hyperloom_multibranch.contracts.notebook.interfaces import Notebook, NotebookError, StartupBriefProvider
+from hyperloom_multibranch.contracts.notebook.records import InboxItem
 from hyperloom_multibranch.contracts.toolbox import (
     SCOPE_SPECIALIST,
     SpecialistGrant,
@@ -75,6 +82,11 @@ _REQUEST_ID: dict[str, Any] = {
 WAIT_TEST_MAX_SECONDS = 45
 #: How often ``wait_test`` reads the test's record while it waits.
 WAIT_POLL_SECONDS = 5.0
+#: How many inbox items one reply's block lists; the rest are counted.
+REPLY_INBOX_LINES = 20
+REPLY_INBOX_HEADER = "New for your branch since your last call:"
+# These replies carry the test they were asked about, so an inbox item naming it would say it twice.
+_CARRIES_REQUEST = frozenset({"wait_test", "test_result"})
 _WAIT_TEST: dict[str, Any] = {
     "type": _OBJECT,
     "properties": {
@@ -359,6 +371,33 @@ def _poll_inbox(notebooks: NotebookFor) -> Callable[[dict[str, Any], CallContext
     return handle
 
 
+def _inbox_block(items: Sequence[InboxItem]) -> str:
+    """The text of a reply's block for ``items``, empty for none; past :data:`REPLY_INBOX_LINES` the rest are counted."""
+    if not items:
+        return ""
+    lines = [f"{item.kind.value} {item.pointer}: {item.summary}" for item in items[:REPLY_INBOX_LINES]]
+    if len(items) > REPLY_INBOX_LINES:
+        lines.append(f"... {len(items) - REPLY_INBOX_LINES} more, poll_inbox lists them")
+    return "\n".join([REPLY_INBOX_HEADER, *lines])
+
+
+def reply_inbox(notebooks: NotebookFor) -> ReplyAnnotator:
+    """The reply annotator that adds what arrived in the caller's branch inbox since its token's last reply.
+
+    A token's first call is asked with no cursor, so the whole feed is read and the service drops that text: a late
+    first call or a restarted service starts from the end. The cursor is the notebook's own, kept by the service per
+    token, apart from ``poll_inbox``'s.
+    """
+
+    async def annotate(call: ReplyCall, cursor: str | None) -> ReplyNote:
+        branch = call.principal.branch
+        page = await notebooks(branch).poll(branch, cursor or "")
+        asked = call.arguments.get("request_id") if call.tool in _CARRIES_REQUEST and not call.is_error else None
+        return ReplyNote(_inbox_block([item for item in page.items if item.pointer != asked]), page.cursor)
+
+    return annotate
+
+
 def _notebook_handler(
     name: str,
     notebooks: NotebookFor,
@@ -415,6 +454,7 @@ def register_specialist_tools(
         with contextlib.suppress(RuntimeError):
             toolbox_loop = asyncio.get_running_loop()
     own = {"scopes": _SPECIALIST_SCOPES}
+    server.attach_reply_annotator(reply_inbox(notebooks))
     server.register(
         "submit_test",
         description=(
@@ -494,6 +534,8 @@ def _register_notebook_tools(server: McpServer, notebooks: NotebookFor, options:
 
 
 __all__ = [
+    "REPLY_INBOX_HEADER",
+    "REPLY_INBOX_LINES",
     "SPECIALIST_TOKEN_ENV",
     "BriefingFor",
     "NotebookFor",
@@ -503,5 +545,6 @@ __all__ = [
     "WAIT_TEST_MAX_SECONDS",
     "jsonable",
     "register_specialist_tools",
+    "reply_inbox",
     "wait_budget",
 ]

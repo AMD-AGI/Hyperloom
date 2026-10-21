@@ -15,6 +15,10 @@ client may send back and the server never requires. JSON-RPC dispatch is the tra
 A handler returns a string (sent as is) or a JSON value, raises :class:`ToolError` to report a failed call and
 :class:`ToolForbidden` to refuse the caller.
 
+A reply annotator (:meth:`McpServer.attach_reply_annotator`) adds one text block to the tool replies of specialist
+tokens. The service keeps one opaque cursor per token for it, starts it empty, and moves it only when the reply
+that carries the block has been written to the client.
+
 Authentication: ``X-Hyperloom-Token`` or ``Authorization: Bearer``. The host token is the campaign's
 ``HYPERLOOM_MCP_TOKEN``; every other token was issued by this server to one specialist and dies with
 :meth:`McpServer.revoke`. Issued tokens are kept as digests only, compared in constant time, and a token is never
@@ -25,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import hashlib
 import hmac
 import inspect
@@ -96,6 +101,30 @@ ToolHandler = Callable[[dict[str, Any], CallContext], Any]
 
 
 @dataclass(frozen=True)
+class ReplyCall:
+    """What a reply annotator learns about the call it annotates: the caller, the tool, its arguments, and whether
+    the tool failed."""
+
+    principal: McpPrincipal
+    tool: str
+    arguments: Mapping[str, Any]
+    is_error: bool
+
+
+@dataclass(frozen=True)
+class ReplyNote:
+    """What an annotator adds to one reply: ``text`` (empty to add nothing) and the ``cursor`` it resumes from next."""
+
+    text: str
+    cursor: str
+
+
+#: Called with the call and the token's cursor (``None`` on the token's first call); a function or a coroutine
+#: function returning a :class:`ReplyNote`.
+ReplyAnnotator = Callable[[ReplyCall, str | None], Any]
+
+
+@dataclass(frozen=True)
 class RegisteredTool:
     name: str
     description: str
@@ -130,6 +159,7 @@ class _TokenRegistry:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._by_digest: dict[bytes, McpPrincipal] = {}
+        self._cursors: dict[bytes, str] = {}
 
     def issue(self, principal: McpPrincipal) -> str:
         token = secrets.token_urlsafe(32)
@@ -152,7 +182,71 @@ class _TokenRegistry:
             doomed = [key for key, principal in self._by_digest.items() if predicate(principal)]
             for key in doomed:
                 del self._by_digest[key]
+                self._cursors.pop(key, None)
         return len(doomed)
+
+    def cursor(self, token: str) -> str | None:
+        with self._lock:
+            return self._cursors.get(_digest(token))
+
+    def move_cursor(self, token: str, was: str | None, now: str) -> None:
+        """Keep ``now`` for a live token whose cursor is still ``was``; a reply that raced a newer one loses."""
+        key = _digest(token)
+        with self._lock:
+            if key in self._by_digest and self._cursors.get(key) == was:
+                self._cursors[key] = now
+
+
+class _ReplyNotes:
+    """One request's view of its token's annotation cursor: each reply moves it, and it is kept once they are sent."""
+
+    def __init__(self, annotator: ReplyAnnotator, tokens: _TokenRegistry, presented: str) -> None:
+        self._annotator, self._tokens, self._presented = annotator, tokens, presented
+        self._was = tokens.cursor(presented)
+        self._now = self._was
+
+    async def _ask(self, call: ReplyCall) -> ReplyNote | None:
+        try:
+            note = self._annotator(call, self._now)
+            if inspect.isawaitable(note):
+                note = await note
+        except Exception as exc:  # noqa: BLE001 - a failing annotator must not take the tool's reply with it
+            logger.warning("reply annotator failed: %s", type(exc).__name__)
+            return None
+        self._now = note.cursor
+        return note
+
+    async def start(self, call: ReplyCall) -> None:
+        """Before the tool runs: a token without a cursor asks the annotator where the feed ends, and the text is
+        dropped, so what arrives while its first call runs is still news for that call's reply."""
+        if self._now is None:
+            await self._ask(call)
+
+    async def annotate(self, call: ReplyCall, result: dict[str, Any]) -> dict[str, Any]:
+        """``result`` with the annotator's block after its own content; unchanged when the annotator fails."""
+        note = await self._ask(call)
+        if note is None or not note.text:
+            return result
+        return {**result, "content": [*result["content"], {"type": "text", "text": note.text}]}
+
+    def delivered(self) -> None:
+        """The replies of this request were written to the client: keep the cursor they moved to."""
+        if self._now is not None and self._now != self._was:
+            self._tokens.move_cursor(self._presented, self._was, self._now)
+
+
+def _nothing_to_keep() -> None:
+    return None
+
+
+@dataclass(frozen=True)
+class PostReply:
+    """The answer to one POST; call ``delivered`` once ``body`` has been written to the client."""
+
+    status: HTTPStatus
+    body: Any
+    initialized: bool = False
+    delivered: Callable[[], None] = _nothing_to_keep
 
 
 class McpServer:
@@ -179,6 +273,7 @@ class McpServer:
         self._beats_lock = threading.Lock()
         self._heartbeat_seconds = heartbeat_seconds
         self._tools: dict[str, RegisteredTool] = {}
+        self._annotator: ReplyAnnotator | None = None
         self._httpd: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
 
@@ -220,6 +315,17 @@ class McpServer:
         """
         with self._beats_lock:
             self._beats[specialist] = beat
+
+    def attach_reply_annotator(self, annotator: ReplyAnnotator | None) -> None:
+        """Add the block ``annotator`` returns to every tool reply a specialist token gets; the host gets none.
+
+        The service holds one cursor per token and hands it to the annotator, which returns the text to add (empty
+        for none) and the cursor to resume from. The cursor moves when the reply is written to the client, so a reply
+        that was never sent leaves it where it was. A token's first call asks the annotator once with the cursor
+        ``None``, before the tool runs: the annotator answers where the feed ends and the text is dropped. Attaching
+        again replaces the annotator; ``None`` removes it.
+        """
+        self._annotator = annotator
 
     def revoke_specialist(self, specialist: str) -> int:
         """Revoke every token of ``specialist`` and drop its heartbeat; returns how many tokens were live."""
@@ -280,7 +386,9 @@ class McpServer:
         text = outcome if isinstance(outcome, str) else json.dumps(outcome, default=str)
         return _tool_result(text, is_error=False)
 
-    async def _answer(self, principal: McpPrincipal, presented: str, message: Any) -> dict[str, Any] | None:
+    async def _answer(
+        self, principal: McpPrincipal, presented: str, message: Any, notes: _ReplyNotes | None = None
+    ) -> dict[str, Any] | None:
         """One JSON-RPC response, or ``None`` for a notification."""
         if not isinstance(message, dict) or message.get("jsonrpc") != JSONRPC_VERSION or "method" not in message:
             return _rpc_error(
@@ -295,7 +403,13 @@ class McpServer:
             return _rpc_error(request_id, _ERR_PARAMS, "params must be an object")
 
         async def handle(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-            return await self._call_tool(principal, presented, name, arguments)
+            call = ReplyCall(principal, name, arguments, is_error=False)
+            if notes is not None:
+                await notes.start(call)
+            result = await self._call_tool(principal, presented, name, arguments)
+            if notes is None:
+                return result
+            return await notes.annotate(dataclasses.replace(call, is_error=bool(result["isError"])), result)
 
         try:
             result = await dispatch_envelope(
@@ -316,13 +430,15 @@ class McpServer:
             return _rpc_error(request_id, _ERR_INTERNAL, self.scrub(f"{type(exc).__name__}: {exc}", presented))
         return {"jsonrpc": JSONRPC_VERSION, "id": request_id, "result": result}
 
-    async def _answer_all(self, principal: McpPrincipal, presented: str, payload: Any) -> Any:
+    async def _answer_all(
+        self, principal: McpPrincipal, presented: str, payload: Any, notes: _ReplyNotes | None = None
+    ) -> Any:
         if isinstance(payload, list):
             if not payload:
                 return _rpc_error(None, _ERR_INVALID_REQUEST, "Invalid Request")
-            replies = [await self._answer(principal, presented, item) for item in payload]
+            replies = [await self._answer(principal, presented, item, notes) for item in payload]
             return [reply for reply in replies if reply is not None] or None
-        return await self._answer(principal, presented, payload)
+        return await self._answer(principal, presented, payload, notes)
 
     @contextlib.contextmanager
     def _call_heartbeat(self, principal: McpPrincipal) -> Iterator[None]:
@@ -349,18 +465,21 @@ class McpServer:
             done.set()
             thread.join()
 
-    def handle_post(self, principal: McpPrincipal, presented: str, body: bytes) -> tuple[HTTPStatus, Any, bool]:
-        """Run one POST body: the HTTP status, the JSON reply (``None`` for no content) and whether it initialized."""
+    def handle_post(self, principal: McpPrincipal, presented: str, body: bytes) -> PostReply:
+        """Run one POST body: what to send (status, the JSON reply, ``None`` for no content, whether it initialized)."""
         try:
             payload = json.loads(body.decode())
         except (UnicodeDecodeError, json.JSONDecodeError):
-            return HTTPStatus.BAD_REQUEST, _rpc_error(None, _ERR_PARSE, "Parse error"), False
+            return PostReply(HTTPStatus.BAD_REQUEST, _rpc_error(None, _ERR_PARSE, "Parse error"))
+        notes = None
+        if self._annotator is not None and principal.kind == SPECIALIST_KIND:
+            notes = _ReplyNotes(self._annotator, self._tokens, presented)
         with self._call_heartbeat(principal):
-            reply = asyncio.run(self._answer_all(principal, presented, payload))
+            reply = asyncio.run(self._answer_all(principal, presented, payload, notes))
+        delivered = notes.delivered if notes is not None else _nothing_to_keep
         if reply is None:
-            return HTTPStatus.ACCEPTED, None, False
-        initialized = _mentions_initialize(payload)
-        return HTTPStatus.OK, reply, initialized
+            return PostReply(HTTPStatus.ACCEPTED, None, delivered=delivered)
+        return PostReply(HTTPStatus.OK, reply, _mentions_initialize(payload), delivered)
 
     # -- lifecycle ---------------------------------------------------------------------------------------------
 
@@ -456,9 +575,10 @@ def _make_handler(server: McpServer) -> type[BaseHTTPRequestHandler]:
             if length < 0 or length > MAX_BODY_BYTES:
                 self._send(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, {"error": "body too large"})
                 return
-            status, reply, initialized = server.handle_post(principal, presented, self.rfile.read(length))
-            headers = {SESSION_HEADER: uuid.uuid4().hex} if initialized else None
-            self._send(status, reply, headers)
+            reply = server.handle_post(principal, presented, self.rfile.read(length))
+            headers = {SESSION_HEADER: uuid.uuid4().hex} if reply.initialized else None
+            self._send(reply.status, reply.body, headers)
+            reply.delivered()
 
     return Handler
 
@@ -471,6 +591,10 @@ __all__ = [
     "McpPrincipal",
     "McpServer",
     "McpServerConfig",
+    "PostReply",
+    "ReplyAnnotator",
+    "ReplyCall",
+    "ReplyNote",
     "ToolError",
     "ToolForbidden",
     "ToolHandler",
