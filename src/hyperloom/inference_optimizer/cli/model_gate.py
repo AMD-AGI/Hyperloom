@@ -170,12 +170,12 @@ _VERDICT_VISION_ONLY = "vision_only"
 _UNKNOWN_MODEL_FIELD = "<unknown>"
 _UNSUPPORTED_ARCH_DEGRADED = (
     "DEGRADED MODE: model '{name}' carries a multimodal signal "
-    "({signal}; architecture '{arch}', model_type '{mt}') but exposes a text-generation path. "
+    "({signal}; architecture '{architecture}', model_type '{model_type}') but exposes a text-generation path. "
     "Hyperloom is running it on the TEXT path only — any image/audio inputs are ignored, so "
     "benchmark numbers reflect the text decoder alone. Pass --no-allow-mm-text-fallback to fail-fast instead."
 )
 _UNSUPPORTED_ARCH_REJECTED = (
-    "Unsupported model '{name}': architecture '{arch}' (model_type '{mt}') is not a supported "
+    "Unsupported model '{name}': architecture '{architecture}' (model_type '{model_type}') is not a supported "
     "text-generation model. Hyperloom only supports decoder-only causal LM models (architectures "
     "containing ForCausalLM or LMHeadModel). Rejected because: {signal}. Submit a text-generation "
     "checkpoint instead."
@@ -392,7 +392,12 @@ def _config_declares_text_decoder(config: dict, architectures: list[str], model_
 
 def _unsupported_hit(architecture: str, model_type: str, signal: str, verdict: str = _VERDICT_VISION_ONLY) -> dict:
     """One ``_detect_unsupported_model`` hit: what matched, and whether the text path can still serve the model."""
-    return {"architecture": architecture, "model_type": model_type, "signal": signal, "verdict": verdict}
+    return {
+        "architecture": architecture or _UNKNOWN_MODEL_FIELD,
+        "model_type": model_type or _UNKNOWN_MODEL_FIELD,
+        "signal": signal,
+        "verdict": verdict,
+    }
 
 
 def _detect_unsupported_model(model_path: str) -> dict | None:
@@ -1654,43 +1659,30 @@ def _warn_text_coercible_arch(
     args: argparse.Namespace,
     session_dir: Path,
     hit: Mapping[str, Any],
-    model: str,
+    name: str,
     allow: bool,
 ) -> None:
     """Persist degraded mode and record a warned unsupported_model_arch check."""
-    name = Path(model).name or model
-    arch = hit.get("architecture") or _UNKNOWN_MODEL_FIELD
-    mt = hit.get("model_type") or _UNKNOWN_MODEL_FIELD
-    signal = str(hit.get("signal") or "")
-    warning = _UNSUPPORTED_ARCH_DEGRADED.format(
-        name=name, signal=hit.get("signal", "multimodal config"), arch=arch, mt=mt
-    )
+    warning = _UNSUPPORTED_ARCH_DEGRADED.format(name=name, **hit)
     print(f"WARNING: {warning}", file=sys.stderr)
     log.warning(warning)
     from hyperloom.orchestrator.state.shared_state import SharedState
 
+    detail = {"architecture": hit["architecture"], "model_type": hit["model_type"], "signal": hit["signal"]}
     try:
         state = SharedState.load_or_init(session_dir)
         state.degraded_mode = True
         state.model_warnings = [
             *state.model_warnings,
-            {
-                "kind": "multimodal_text_fallback",
-                "model_name": name,
-                "architecture": arch,
-                "model_type": mt,
-                "signal": signal,
-                "detail": warning,
-            },
+            {"kind": "multimodal_text_fallback", "model_name": name, **detail, "detail": warning},
         ]
         state.save(session_dir)
     except (OSError, ValueError) as exc:  # the marker is advisory; the run proceeds without it
         print(f"WARNING: failed to persist degraded-mode marker: {exc!r}", file=sys.stderr)
-    detail = {"architecture": arch, "model_type": mt, "signal": signal}
     _record_model_gate_check(
         args,
         session_dir,
-        _unsupported_arch_check_row("warned", allow, detail, verdict=str(hit.get("verdict") or _VERDICT_VISION_ONLY)),
+        _unsupported_arch_check_row("warned", allow, detail, verdict=hit["verdict"]),
         degraded_warning={"kind": "multimodal_text_fallback", **detail},
     )
 
@@ -1699,17 +1691,11 @@ def _reject_unsupported_arch(
     args: argparse.Namespace,
     session_dir: Path,
     hit: Mapping[str, Any],
-    model: str,
+    name: str,
     allow: bool,
 ) -> None:
     """Fail-fast: stop report, failed gate check, breakdown, Langfuse."""
-    name = Path(model).name or model
-    arch = hit.get("architecture") or _UNKNOWN_MODEL_FIELD
-    mt = hit.get("model_type") or _UNKNOWN_MODEL_FIELD
-    signal = str(hit.get("signal") or "")
-    reason = _UNSUPPORTED_ARCH_REJECTED.format(
-        name=name, arch=arch, mt=mt, signal=hit.get("signal", "unknown architecture")
-    )
+    reason = _UNSUPPORTED_ARCH_REJECTED.format(name=name, **hit)
     _persist_gate_stop_report(
         session_dir, stop_reason="unsupported_model_arch", reason=reason, warning_label="unsupported-model"
     )
@@ -1717,12 +1703,7 @@ def _reject_unsupported_arch(
     _record_model_gate_check(
         args,
         session_dir,
-        _unsupported_arch_check_row(
-            "failed",
-            allow,
-            {"architecture": arch, "model_type": mt, "signal": signal, "action": "fail_fast"},
-            verdict=str(hit.get("verdict") or _VERDICT_VISION_ONLY),
-        ),
+        _unsupported_arch_check_row("failed", allow, {**hit, "action": "fail_fast"}, verdict=hit["verdict"]),
         failure={
             "gate_id": "unsupported_model_arch",
             "stop_reason": "unsupported_model_arch",
@@ -1770,8 +1751,9 @@ def _preflight_unsupported_model_arch(
             ),
         )
         return False
-    if str(hit.get("verdict") or _VERDICT_VISION_ONLY) == _VERDICT_TEXT_COERCIBLE and allow:
-        _warn_text_coercible_arch(args, session_dir, hit, model, allow)
+    name = Path(model).name or model
+    if hit["verdict"] == _VERDICT_TEXT_COERCIBLE and allow:
+        _warn_text_coercible_arch(args, session_dir, hit, name, allow)
         return False
-    _reject_unsupported_arch(args, session_dir, hit, model, allow)
+    _reject_unsupported_arch(args, session_dir, hit, name, allow)
     return True
