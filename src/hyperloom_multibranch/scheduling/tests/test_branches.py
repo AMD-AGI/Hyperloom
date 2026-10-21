@@ -301,27 +301,21 @@ async def test_an_admitted_repair_is_cut_and_opens_at_its_commit_with_its_k_its_
     assert (logged["kind"], logged["branch"]) == ("repair", "b02")
 
 
-async def test_a_repair_whose_branch_committed_past_its_candidates_parent_is_not_cut_and_is_handed_back(
+async def test_an_admitted_repair_is_cut_at_its_candidates_parent_though_its_branch_committed_past_it(
     tmp_path: Path,
 ) -> None:
     bench = await Bench(tmp_path).rooted()
     await bench.control.open_branches(1, 1, BatchStart(BranchOrigin.FIRST_BATCH, bench.root, OPEN_BY))
-    fix = await bench.repo.commit("b01", bench.root, BASELINE, "a fix")
-    free_before = bench.roster.free_slots()
+    measured = await bench.repo.commit("b01", bench.root, BASELINE, "a fix")
     bench.roster.open("b02", origin=BranchOrigin.REPAIR, start_commit="", k=2, from_branch="b01")
-    moved = await bench.repo.commit("b01", fix, BASELINE, "a later fix")
+    await bench.repo.commit("b01", measured, BASELINE, "a later fix")
 
-    await bench.control.start_admitted(AdmittedBranch("b02", fix, _repair_of(fix)), OPEN_BY)
+    await bench.control.start_admitted(AdmittedBranch("b02", measured, _repair_of(measured)), OPEN_BY)
     await _runs_started()
 
-    with pytest.raises(KeyError):
-        await bench.repo.head("b02")
-    assert "b02" not in bench.sessions.started
-    stop = bench.roster.entry("b02").stop
-    assert stop is not None and stop.cause is StopCause.START_FAILED
-    assert fix in stop.reason and moved in stop.reason
-    assert bench.roster.free_slots() == free_before
-    assert bench.reserved.voided == [("b02", stop.reason)]
+    assert await bench.repo.head("b02") == measured
+    assert bench.sessions.started["b02"] == measured
+    assert bench.roster.entry("b02").stop is None
 
 
 async def test_a_repair_branch_is_stopped_for_its_time_limit_two_hours_after_its_admission(tmp_path: Path) -> None:
