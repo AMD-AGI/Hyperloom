@@ -341,7 +341,6 @@ class TestFlyDSLKernelParams(unittest.TestCase):
         args = argparse.Namespace(
             framework="sglang",
             model_name="",
-            analysis_mode="inference",
             target_platform="mi355x",
         )
         flydsl_cand = {

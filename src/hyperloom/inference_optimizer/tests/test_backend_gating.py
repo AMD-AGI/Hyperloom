@@ -149,6 +149,31 @@ def test_lifecycle_magpie_default_unchanged(tmp_path, monkeypatch):
     assert info["eligible"] is True  # magpie built-in script -> eligible
 
 
+def test_lifecycle_magpie_gfx12_eligible(tmp_path, monkeypatch):
+    """magpie backend: the R9700 script vllm_gfx12.sh is lifecycle-eligible like the MI scripts."""
+    import yaml
+    from hyperloom.orchestrator.actions.executors import _server_lifecycle as sl
+
+    monkeypatch.delenv(bb.BENCHMARK_BACKEND_ENV, raising=False)
+    monkeypatch.setattr(sl, "_pick_free_port", lambda: 8888)
+    cfg = {
+        "benchmark": {
+            "framework": "vllm",
+            "benchmark_script": "vllm_gfx12.sh",
+            "envs": {"PORT": 8888},
+            "profiler": {"torch_profiler": {"enabled": False}},
+        }
+    }
+    cfg_path = tmp_path / "cfg.yaml"
+    cfg_path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+
+    info = sl.resolve_lifecycle_params(cfg_path)
+    assert info["eligible"] is True
+    assert info["framework"] == "vllm"
+    assert info["port"] == 8888
+    assert info["reason"] == ""
+
+
 def test_lifecycle_magpie_non_builtin_ineligible(tmp_path, monkeypatch):
     """magpie backend: a non-built-in script stays ineligible (unchanged)."""
     import yaml

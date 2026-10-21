@@ -69,7 +69,8 @@ configuration.
 
 See [`src/hyperloom/inference_optimizer/SKILL.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/inference_optimizer/SKILL.md)
 for the full prompt field reference (every field maps to a CLI flag defined in
-`cli/parser.py`, or in `cli/constraint_args.py` for the latency and power budgets).
+`cli/parser.py`, in `cli/constraint_args.py` for the latency and power budgets,
+or in `cli/gpu_power_args.py` for the GPU power settings).
 
 ## Monitor the run
 
@@ -109,7 +110,7 @@ fields to read first are:
 
 | Field | What it tells you |
 |-------|-------------------|
-| `final.throughput_tok_s_per_gpu` | Validated end-of-session serving throughput — the headline number for SGLang / vLLM |
+| `final.output_throughput` | Validated end-of-session serving throughput — the headline number for SGLang / vLLM |
 | `final.cumulative_gain_pct_validated` | Validated gain over baseline |
 | `final.action_path` | Ordered list of changes that make up the final optimized stack |
 
