@@ -21,7 +21,7 @@ from functools import cache
 from enum import Enum
 from typing import Any, Mapping, NamedTuple, Sequence
 
-from hyperloom.common.coerce import optional_positive_int, to_float, to_int
+from hyperloom.common.coerce import optional_positive_int, to_float
 from hyperloom.common.env import is_truthy
 from hyperloom.inference_optimizer.runtime_environment import prepend_launch_path
 from ._benchmark_interpreter import _resolve_probe_python
@@ -76,7 +76,11 @@ _ATOM_CAPS_NONE = _AtomTracelensCaps(False, False, False)
 
 @cache
 def _atom_tracelens_caps() -> _AtomTracelensCaps:
-    """Probe the installed atom for ``--mark-trace`` and annotation envs."""
+    """Probe the installed atom for ``--mark-trace`` and annotation envs.
+
+    Fail-soft: import / help / parse errors return all-false so an older ATOM
+    argparse never sees ``--mark-trace``. Cached after the first call.
+    """
     try:
         proc = subprocess.run(
             [_resolve_probe_python("atom"), "-c", _ATOM_CAPS_PROBE],
@@ -108,7 +112,14 @@ _PROFILER_FLAG_RE = re.compile(r"--profiler-config\.(\w+)[=\s]+(\S+)")
 
 
 def _profiler_flag_value(server_args: str, name: str) -> str | None:
-    """The value vLLM would resolve for ``--profiler-config.<name>``, or None."""
+    """The value vLLM would resolve for ``--profiler-config.<name>``, or None.
+
+    Returns the LAST occurrence, because repeated flags are how this layer overrides
+    earlier ones and vLLM's argparse resolves them last-wins. Accepts both
+    ``--flag value`` and ``--flag=value``. Regex rather than tokenization: this runs
+    after JSON-valued flags have been compacted, and one unbalanced quote must not
+    take the whole guard down with it.
+    """
     value: str | None = None
     for match in _PROFILER_FLAG_RE.finditer(server_args or ""):
         if match.group(1) == name:
@@ -117,12 +128,28 @@ def _profiler_flag_value(server_args: str, name: str) -> str | None:
 
 
 def _profiler_bound_holds(name: str, value: str | None, *, cap: int) -> bool:
-    """Whether the value already present keeps this flag's guarantee."""
+    """Whether the value already present keeps this flag's guarantee.
+
+    Name-only matching is not enough for the two flags that decide whether the
+    capture is bounded at all: vLLM reads ``max_iterations`` of 0 (or absent) as "no
+    limit", and a frontend profiler left on tracks no iterations and captures the
+    entire ``start_profile``..``stop_profile`` range. A guard that accepted those
+    would report success while the run stayed unbounded, which is worse than not
+    guarding -- the warning would send the next investigation the wrong way. The
+    summary table is the same kind of flag: only an explicit false keeps vLLM from
+    building it after the trace is written.
+
+    Every other flag only decides what the trace contains or where it lands, so its
+    presence is the whole contract.
+    """
     if value is None:
         return False
     if name == "max_iterations":
-        iterations = optional_positive_int(value)
-        return iterations is not None and iterations <= cap
+        try:
+            iterations = int(value)
+        except ValueError:
+            return False
+        return 0 < iterations <= cap
     if name == "ignore_frontend":
         return is_truthy(value)
     if name == "torch_profiler_dump_cuda_time_total":
@@ -131,20 +158,26 @@ def _profiler_bound_holds(name: str, value: str | None, *, cap: int) -> bool:
 
 
 def _profile_steps_cap(policy_env: Mapping[str, Any]) -> int:
-    """The serialization-safe cap on captured decode steps this run may raise to."""
-    return optional_positive_int(policy_env.get("HYPERLOOM_PROFILE_MAX_STEPS_CAP")) or _DEFAULT_PROFILE_MAX_STEPS
+    raw = str(policy_env.get("HYPERLOOM_PROFILE_MAX_STEPS_CAP") or "").strip()
+    try:
+        cap = int(raw or _DEFAULT_PROFILE_MAX_STEPS)
+    except ValueError:
+        cap = _DEFAULT_PROFILE_MAX_STEPS
+    return cap if cap > 0 else _DEFAULT_PROFILE_MAX_STEPS
 
 
 def _profile_capture_window(
     policy_env: Mapping[str, Any], *, cap: int, delay_iters: int = 0, steady_floor: int | None = None
 ) -> tuple[int, int]:
     """Resolve the synthetic workload's capture steps and delay."""
-    max_iters = optional_positive_int(policy_env.get("HYPERLOOM_PROFILE_MAX_ITERS"))
-    if max_iters is None:
+    override = str(policy_env.get("HYPERLOOM_PROFILE_MAX_ITERS") or "").strip()
+    if not override.isdigit() or int(override) <= 0:
         return delay_iters, cap
-    # A pinned 0 means "no delay" and must survive, so this is not an ``or`` default.
-    delay = to_int(policy_env.get("HYPERLOOM_PROFILE_DELAY_ITERS"))
-    delay_iters = max(0, _DEFAULT_PROFILE_DELAY_ITERS if delay is None else delay)
+    max_iters = int(override)
+    try:
+        delay_iters = max(0, int(policy_env.get("HYPERLOOM_PROFILE_DELAY_ITERS") or 8))
+    except ValueError:
+        delay_iters = 8
     if steady_floor is not None and max_iters < steady_floor:
         log.warning("HYPERLOOM_PROFILE_MAX_ITERS=%d is below the steady-state floor of %d", max_iters, steady_floor)
     elif max_iters > cap:
@@ -209,11 +242,6 @@ class _ProfileWindow(NamedTuple):
     num_prompts: int
 
 
-def _profile_range_ratio(envs: Mapping[str, Any]) -> float:
-    """The request-length spread the steady-state floor is computed against."""
-    return to_float(envs.get("RANDOM_RANGE_RATIO"), 1.0)
-
-
 def _steady_state_floor(*, osl_val: int, conc_val: int, range_ratio: float) -> int:
     """Captured decode steps the splitter needs to isolate a steady-state window."""
     return math.ceil(max(osl_val, 1) * (1.0 + range_ratio) / (2.0 * max(conc_val, 1)))
@@ -261,7 +289,7 @@ def _profile_prompt_count(*, osl_val: int, conc_val: int, captured_iters: int) -
 def _fit_profile_capture_window(envs: dict[str, Any], *, osl_val: int, conc_val: int) -> _ProfileWindow:
     """Bound what a profile captures to a window the engine can serialize."""
     cap = _profile_steps_cap(os.environ)
-    range_ratio = _profile_range_ratio(envs)
+    range_ratio = to_float(envs.get("RANDOM_RANGE_RATIO"), 1.0)
     fitted = _fit_profile_osl(osl_val=osl_val, conc_val=conc_val, range_ratio=range_ratio, cap=cap)
     delay_iters, max_iters = _profile_capture_window(
         os.environ,
