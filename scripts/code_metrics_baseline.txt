@@ -529,7 +529,6 @@ function-lines src/hyperloom/orchestrator/enablement/recipe/sufficiency.py::_pat
 function-lines src/hyperloom/orchestrator/enablement/runtime/targeted_build.py::run_aiter_build 218
 function-lines src/hyperloom/orchestrator/enablement/runtime/targeted_build.py::run_sgl_kernel_build 159
 function-lines src/hyperloom/orchestrator/enablement/runtime/targeted_build.py::run_vllm_source_build 220
-function-lines src/hyperloom/orchestrator/kernel/_kernel_decisions.py::enqueue_nominated_patch 92
 function-lines src/hyperloom/orchestrator/kernel/_kernel_decisions.py::record_kernel_integrate_result 99
 function-lines src/hyperloom/orchestrator/kernel/apply_kernel_patch.py::_apply_kernel_patch_snapshot 349
 function-lines src/hyperloom/orchestrator/kernel/apply_kernel_patch.py::_detect_strategy 126
