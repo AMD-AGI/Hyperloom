@@ -40,6 +40,7 @@ from hyperloom.common.benchmark_config import is_magpie_agentx
 from hyperloom.common.env import is_truthy
 from hyperloom.common.env_safety import filter_untrusted_env_mapping, is_allowed_variant_env_key
 from hyperloom.contracts.measurement import SandboxFacts
+from hyperloom.inference_optimizer import framework_registry
 from hyperloom.measure.attachments import AttachmentError, place_attachments, substitute
 from hyperloom.measure.accuracy import read_accuracy
 from hyperloom.measure import log_causes
@@ -47,6 +48,7 @@ from hyperloom.measure.boot_watch import BOOT_CANCEL_REASON, BootGuard, boot_lim
 from hyperloom.measure.compile import CompiledEnvironment, LocalBlobStore
 from hyperloom.measure.farm import FarmError, build_farm, place_farm, server_python, verify_farm
 from hyperloom.measure.framework_copies import private_framework
+from hyperloom.measure.profile_client import ProfileClientError, patch_profile_client
 from hyperloom.measure.profile_traces import PROFILE_DIR, collect_traces
 from hyperloom.measure.repro import ReproError, find_case, run_case
 from hyperloom.measure.returncodes import HOSTED_INFRA_FAILURE_RC, SERVER_BOOT_TIMEOUT_RC
@@ -170,6 +172,8 @@ class LocalMeasurementBackend:
         _validate(call)
         with _PROCESS_LOCK, _rebuilt_environment(call) as call, private_framework(call) as private:
             call = private.call
+            if call.kind == _PROFILE:
+                _patch_profile_client(call)
             with _test_environment(call) as unset_envs:
                 run = _Run(call, [name for name in unset_envs if name not in private.redirected])
                 with _watch_output(call), _guard_boot(run):
@@ -260,6 +264,23 @@ def _check_sweep_levels(points: Sequence[Path]) -> None:
     levels = _levels(points)
     if any(level <= 0 for level in levels) or len(set(levels)) != len(levels):
         raise TestCallRefused(f"every sweep point names its own CONC, got {levels}")
+
+
+def _patch_profile_client(call: TestCall) -> None:
+    """Make the InferenceX checkout a profile point runs honour the point's capture window, or refuse the test.
+
+    The checkout is the one the point names, else the session's; a test with neither (an AgentX point, whose client is
+    Magpie's, or a framework with no InferenceX script) has none to patch.
+    """
+    benchmark = _point_config(call.points[0]).get("benchmark") or {}
+    facts = call.session_facts
+    root = benchmark.get("inferencex_path") or (facts.inferencex_path if facts is not None else None)
+    if not root or is_magpie_agentx(benchmark) or framework_registry.is_scriptable(benchmark.get("framework")):
+        return
+    try:
+        patch_profile_client(root)
+    except ProfileClientError as exc:
+        raise TestCallRefused(str(exc)) from exc
 
 
 # --- the rebuilt environment --------------------------------------------------------------------------------------

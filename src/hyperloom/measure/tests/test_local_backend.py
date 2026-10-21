@@ -22,6 +22,7 @@ from hyperloom.measure import local
 from hyperloom.measure.local import SUPPORTED_KINDS, LocalMeasurementBackend, TestCallRefused
 from hyperloom.measure.repro import read_verdict
 from hyperloom.measure.socket import RoundPlan, SessionFacts, TestCall
+from hyperloom.measure.tests._inferencex import CLIENT, CLIENT_PATH, LIBRARY, LIBRARY_PATH, stock_checkout
 from hyperloom.orchestrator.actions.executors import (
     ORCHESTRATOR_CANCELLED_RETURNCODE,
     SESSION_TIME_EXHAUSTED_RETURNCODE,
@@ -997,6 +998,75 @@ def test_a_profile_test_puts_the_points_start_profile_body_in_the_process_enviro
 
     assert [seen["PROFILE_EXTRA_BODY"] for seen in grid.env_seen] == [body]
     assert "PROFILE_EXTRA_BODY" not in os.environ, "the test's environment is put back afterwards"
+
+
+def _checkout_when_a_round_starts(monkeypatch, root: Path) -> list[dict[str, str]]:
+    """Each round's start, with the two InferenceX files as ``run_grid`` finds them when it is called."""
+    seen: list[dict[str, str]] = []
+    original = local.run_grid
+
+    async def looking(**kwargs: Any):
+        seen.append({str(path): (root / path).read_text() for path in (LIBRARY_PATH, CLIENT_PATH)})
+        return await original(**kwargs)
+
+    monkeypatch.setattr(local, "run_grid", looking)
+    return seen
+
+
+def _point_on(path: Path, checkout: Path | None, **point: Any) -> Path:
+    """A profile point whose ``benchmark.inferencex_path`` names ``checkout``."""
+    config = yaml.safe_load(_profile_point(path, **point).read_text())
+    if checkout is not None:
+        config["benchmark"]["inferencex_path"] = str(checkout)
+    pinned = path / "named.yaml"
+    pinned.write_text(yaml.safe_dump(config), encoding="utf-8")
+    return pinned
+
+
+def test_a_profile_test_runs_on_a_checkout_patched_to_honour_the_points_window(grid, tmp_path, monkeypatch):
+    """The stock client sends one step per stage whatever PROFILE_EXTRA_BODY says; that trace has no graph kernels."""
+    _with_trace(grid)
+    root = stock_checkout(tmp_path / "ix")
+    seen = _checkout_when_a_round_starts(monkeypatch, root)
+
+    _run(_call(tmp_path, _point_on(tmp_path, root, body='{"start_step": 320, "num_steps": 128}'), kind="profile"))
+
+    (files,) = seen
+    assert "PROFILE_EXTRA_BODY" in files[str(CLIENT_PATH)], "the client reads the window"
+    assert "${NUM_PROMPTS:-$max_concurrency}" in files[str(LIBRARY_PATH)], "the run lasts until the window"
+
+
+def test_a_profile_test_takes_the_checkout_of_the_session_when_its_point_names_none(grid, tmp_path, monkeypatch):
+    _with_trace(grid)
+    root = stock_checkout(tmp_path / "ix")
+    seen = _checkout_when_a_round_starts(monkeypatch, root)
+    facts = SessionFacts(reference_unset_envs=(), inferencex_path=str(root))
+
+    _run(_call(tmp_path, _point_on(tmp_path, None), kind="profile", session_facts=facts))
+
+    assert "PROFILE_EXTRA_BODY" in seen[0][str(CLIENT_PATH)]
+
+
+def test_a_profile_test_on_a_checkout_that_cannot_be_patched_is_refused_before_any_round(grid, tmp_path):
+    root = stock_checkout(
+        tmp_path / "ix", client=CLIENT.replace('"profile_by_stage": True', '"profile_by_stage": False')
+    )
+
+    with pytest.raises(TestCallRefused, match=r"cannot honour .*: .*benchmark_serving\.py lack the patch"):
+        _run(_call(tmp_path, _point_on(tmp_path, root), kind="profile"))
+    assert grid.calls == []
+
+
+def test_a_test_that_does_not_profile_leaves_the_checkout_as_upstream_ships_it(grid, tmp_path):
+    root = stock_checkout(tmp_path / "ix")
+    config = yaml.safe_load(_point(tmp_path, "p").read_text())
+    config["benchmark"]["inferencex_path"] = str(root)
+    point = tmp_path / "plain.yaml"
+    point.write_text(yaml.safe_dump(config), encoding="utf-8")
+
+    _run(_call(tmp_path, point))
+
+    assert (root / LIBRARY_PATH).read_text() == LIBRARY and (root / CLIENT_PATH).read_text() == CLIENT
 
 
 def test_the_traces_of_a_profile_test_move_into_the_output_profile_directory(grid, tmp_path):
