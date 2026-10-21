@@ -27,7 +27,7 @@ def _baseline_event(**action: Any) -> dict[str, Any]:
                     "start_time": "2026-05-12T10:00:00Z",
                     "end_time": "2026-05-12T10:04:00Z",
                     "request": {"establishes_quality_ref": True, "failure_streak_before": 0},
-                    "measurement": {"throughput_tok_s_per_gpu": 2205.0, "throughput_unit": "tok/s"},
+                    "measurement": {"output_throughput": 2205.0, "throughput_unit": "tok/s"},
                     **action,
                 }
             ]
@@ -103,13 +103,13 @@ def _fixture_breakdown(**overrides: Any) -> dict[str, Any]:
         "outcome": {
             "stop_reason": "time_exhausted",
             "baseline": {
-                "throughput_tok_s_per_gpu": 2205.0,
+                "output_throughput": 2205.0,
                 "accuracy": None,
                 "ttft_mean_ms": None,
                 "e2el_mean_ms": None,
             },
             "final": {
-                "throughput_tok_s_per_gpu": 2447.5,
+                "output_throughput": 2447.5,
                 "gain_pct": 10.99,
                 "extra_server_args": "",
                 "action_path": ["explore:vllm_kv_fp8"],
@@ -312,7 +312,7 @@ def test_every_source_the_ledger_credits_gets_its_own_attribution_line() -> None
 
 def test_attribution_missing_when_no_gain() -> None:
     bd = _fixture_breakdown()
-    bd["outcome"]["final"] = {"throughput_tok_s_per_gpu": None, "gain_pct": None, "action_path": []}
+    bd["outcome"]["final"] = {"output_throughput": None, "gain_pct": None, "action_path": []}
     r = render_session_report(bd)
     assert r.global_facts.attribution_method == "missing"
     assert r.global_facts.gain_attribution_lines == []
@@ -648,8 +648,8 @@ def test_numeric_metrics_recorded_as_strings_still_produce_a_headline() -> None:
         {
             "metadata": {"session": {"session_id": "s"}},
             "outcome": {
-                "baseline": {"throughput_tok_s_per_gpu": "2205"},
-                "final": {"throughput_tok_s_per_gpu": "2447", "gain_pct": "10.99"},
+                "baseline": {"output_throughput": "2205"},
+                "final": {"output_throughput": "2447", "gain_pct": "10.99"},
             },
         }
     )
@@ -688,7 +688,7 @@ def test_the_report_shows_the_axes_the_session_was_graded_on() -> None:
     """The ``perf`` block reached the artifact from the first V6 recorder and no renderer read it.
 
     An AgentX session is ranked on median interactivity with the tail and per-GPU output as guards, so a report
-    that shows only ``throughput_tok_s_per_gpu`` states a figure the verdict was not taken on.
+    that shows only ``output_throughput`` states a figure the verdict was not taken on.
     """
     md = render_session_report(_agentx_breakdown()).markdown
 
@@ -730,7 +730,7 @@ def test_a_round_with_no_graded_axes_renders_no_axis_block() -> None:
 
     # Anchored on a positive assertion first: both checks below would also pass on an empty report, and
     # reporters/base.py substitutes a warning section for a renderer that raises.
-    assert "throughput_tok_s_per_gpu" in md
+    assert "- **output_throughput**:" in md
     assert "AgentX graded axes" not in md
     assert "e2e_norm_intvty_p50" not in md
 
@@ -780,7 +780,7 @@ def test_a_synthetic_round_that_reports_a_duration_heads_no_agentx_section() -> 
 
     md = render_session_report(b).markdown
 
-    assert "throughput_tok_s_per_gpu" in md
+    assert "- **output_throughput**:" in md
     assert "AgentX graded axes" not in md
 
 

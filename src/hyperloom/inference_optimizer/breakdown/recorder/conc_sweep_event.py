@@ -35,6 +35,7 @@ from .event_fields import (
     float_or_none as _float_or_none,
     int_or_none as _int_or_none,
     now_iso_seconds as _now_iso,
+    text as _text,
     text_or_none as _text_or_none,
 )
 from .event_ids import event_id
@@ -145,11 +146,6 @@ def conc_sweep_event_id(*, phase: str, macro_cycle: Any) -> str:
     """Build ``{phase}:{macro_cycle}:conc_sweep``. Raises ``ValueError`` if
     either segment is malformed."""
     return event_id(phase, macro_cycle, EVENT_COMPONENT)
-
-
-def _text(value: Any) -> str:
-    """Coerce to a plain string, treating ``None`` as empty."""
-    return str(value or "")
 
 
 def _int_list(values: Any) -> list[int]:

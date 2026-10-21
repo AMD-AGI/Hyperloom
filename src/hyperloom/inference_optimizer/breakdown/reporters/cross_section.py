@@ -260,8 +260,8 @@ def _headline(breakdown: dict[str, Any]) -> str:
 
     fw = task_config_of(breakdown).get("framework_name")
     outcome = outcome_of(breakdown)
-    b = to_float(as_dict(outcome.get("baseline")).get("throughput_tok_s_per_gpu"))
-    f = to_float(as_dict(outcome.get("final")).get("throughput_tok_s_per_gpu"))
+    b = to_float(as_dict(outcome.get("baseline")).get("output_throughput"))
+    f = to_float(as_dict(outcome.get("final")).get("output_throughput"))
     g = to_float(as_dict(outcome.get("final")).get("gain_pct"))
     if b and f and g is not None:
         sign = "+" if g > 0 else ""
