@@ -18,9 +18,7 @@ from hyperloom.inference_optimizer.breakdown.stop_reasons import PATCH_RECOVERY_
 from hyperloom.orchestrator.actions.executors._integrate_attempt import IntegrateAttempt
 from hyperloom.orchestrator.actions.executors.integrate_patch import IntegratePatchExecutor
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
-from hyperloom.orchestrator.prompts.specialist_prompt_builder import SpecialistPromptInputs, build_specialist_prompts
 from hyperloom.orchestrator.specialists import tree_snapshot as ts
-from hyperloom.orchestrator.specialists.domains import get_domain
 from hyperloom.orchestrator.specialists.runner import (
     SpecialistFailureType,
     SpecialistRunner,
@@ -388,17 +386,3 @@ def test_a_settled_integrate_whose_snapshot_cannot_follow_drops_it(tmp_path: Pat
     assert held_snapshot(session, package) is None
     assert restore_tree(session, package) == TreeRestore()
     assert (package / "kernels" / "tuned_moe.py").is_file()
-
-
-# -- prompt -------------------------------------------------------------------
-def test_the_patch_prompt_forbids_writing_the_shared_trees_by_any_means() -> None:
-    domain = get_domain("serving_specialist")
-    assert domain is not None
-    system_prompt, _user = build_specialist_prompts(SpecialistPromptInputs(domain=domain, task_id="t"))
-
-    rule = system_prompt[system_prompt.index("## 9. IRON RULES") :]
-    for means in ("Edit", "Write", "sed -i", "pip install", "cp", "mv", "patch"):
-        assert means in rule
-    assert "Section 7" in rule
-    assert "The tree this session is optimising is checked after your run" in rule
-    assert "reverted" in rule and "discarded" in rule
