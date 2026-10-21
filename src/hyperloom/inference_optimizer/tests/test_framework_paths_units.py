@@ -733,6 +733,22 @@ def test_invalidate_aiter_jit_build_ignores_orphaned_prior_backup(
     assert Path(second["backup_path"]).is_dir()
 
 
+class TestPointSessionFrameworkRoot:
+    def test_every_resolver_names_the_pointed_root_over_a_prior_pin(self, monkeypatch, tmp_path):
+        prior = tmp_path / "image"
+        prior.mkdir()
+        checkout = tmp_path / "attempt-src"
+        checkout.mkdir()
+        monkeypatch.setenv("FRAMEWORK", "sglang")
+        monkeypatch.setenv("SGLANG_DIR", str(prior))
+        monkeypatch.setenv("SGLANG_REPO_PATH", "")
+        monkeypatch.setenv("FRAMEWORK_REPO_PATH", "")
+
+        fp.point_session_framework_root(str(checkout), "sglang")
+        assert fp.resolve_session_framework_root() == f"{checkout}/"
+        assert fp.resolve_framework_tree("sglang") == f"{checkout}/"
+
+
 class TestResolveFrameworkTree:
     def test_prefixed_env_wins(self, monkeypatch, tmp_path):
         tree = tmp_path / "sglang"
