@@ -1886,6 +1886,42 @@ class FrameworkPhase(ProposalBench):
             "recent_outcomes": outcomes,
         }
 
+    def _review_already_pending(self, cand_id: str) -> bool:
+        """True while ``cand_id`` is still awaiting the Critic's pre-screen verdict."""
+        return bool(cand_id) and any(
+            first_str(to_mapping(getattr(p, "payload", None)).get("framework_agent_candidate_id")) == cand_id
+            for p in self.state.pending_proposals.values()
+            if getattr(p, "action_name", "") == "integrate_patch"
+        )
+
+    def _charge_review_submission(self, cand_id: str, batch_id: str) -> bool:
+        """Count one review submission against ``cand_id``; False once the phase budget's cap is passed."""
+        if not cand_id:
+            return True
+        counts = to_mapping(self.shared_state.framework_agent_review_counts)
+        count = int(counts.get(cand_id, 0) or 0) + 1
+        counts[cand_id] = count
+        self.shared_state.framework_agent_review_counts = counts
+        if count <= self._MAX_REPEATED_REVIEW_SUBMISSIONS:
+            return True
+        log.warning(
+            "FRAMEWORK: candidate=%s submitted for review %d times (> cap %d); aborting to protect the phase budget",
+            cand_id,
+            count,
+            self._MAX_REPEATED_REVIEW_SUBMISSIONS,
+        )
+        self._stamp_framework_progress(
+            ProgressStamp(
+                candidate_id=cand_id,
+                batch_id=batch_id,
+                status="repeated_review_abort",
+                rationale=f"submitted for review {count} times (> cap {self._MAX_REPEATED_REVIEW_SUBMISSIONS})",
+                provenance="pump",
+                extra={"review_submissions": count},
+            )
+        )
+        return False
+
     async def _submit_framework_agent_candidate_for_review(
         self,
         candidate: dict[str, Any],
@@ -1895,43 +1931,9 @@ class FrameworkPhase(ProposalBench):
     ) -> None:
         """Submit a FRAMEWORK candidate as a normal ``proposal`` for async Critic review."""
         cand_id = self._framework_candidate_key(candidate)
-        batch_id = str(candidate.get("batch_id") or "")
-        # Dedup: a candidate is already awaiting its pre-screen verdict.
-        for p in self.state.pending_proposals.values():
-            if getattr(p, "action_name", "") != "integrate_patch":
-                continue
-            if not (getattr(p, "payload", None) or {}).get("framework_agent_candidate_id"):
-                continue
-            pl = getattr(p, "payload", {}) or {}
-            if str(pl.get("framework_agent_candidate_id") or "") == cand_id and cand_id:
-                return
-        # Repeated-review backstop: count how many times this candidate has been sent for review.
-        if cand_id:
-            counts = self.shared_state.framework_agent_review_counts
-            if not isinstance(counts, dict):
-                counts = {}
-                self.shared_state.framework_agent_review_counts = counts
-            count = int(counts.get(cand_id, 0) or 0) + 1
-            counts[cand_id] = count
-            if count > self._MAX_REPEATED_REVIEW_SUBMISSIONS:
-                log.warning(
-                    "FRAMEWORK: candidate=%s submitted for review %d times "
-                    "(> cap %d); aborting to protect the phase budget",
-                    cand_id,
-                    count,
-                    self._MAX_REPEATED_REVIEW_SUBMISSIONS,
-                )
-                self._stamp_framework_progress(
-                    ProgressStamp(
-                        candidate_id=cand_id,
-                        batch_id=batch_id,
-                        status="repeated_review_abort",
-                        rationale=f"submitted for review {count} times (> cap {self._MAX_REPEATED_REVIEW_SUBMISSIONS})",
-                        provenance="pump",
-                        extra={"review_submissions": count},
-                    )
-                )
-                return
+        batch_id = first_str(candidate.get("batch_id"))
+        if self._review_already_pending(cand_id) or not self._charge_review_submission(cand_id, batch_id):
+            return
         propose_payload: dict[str, Any] = {
             "action_name": "integrate_patch",
             "provenance": LEVER_UPSTREAM_PR,
@@ -1939,8 +1941,8 @@ class FrameworkPhase(ProposalBench):
             "candidate": dict(candidate),
             "batch_id": batch_id,
             "framework_agent_candidate_id": cand_id,
-            "audit": dict(audit) if isinstance(audit, dict) else {},
-            "audit_step": str(audit_step or ""),
+            "audit": to_mapping(audit),
+            "audit_step": first_str(audit_step),
             "priors": self._collect_framework_agent_candidate_priors(),
         }
         pending = await record_proposal(
@@ -2136,51 +2138,21 @@ class FrameworkPhase(ProposalBench):
         advisory: dict[str, Any] | None,
     ) -> None:
         """Re-author a framework_agent deliverable once, seeding the next authoring round with the Critic's ``required_evidence``."""
-        advisory = advisory or {}
+        advisory = to_mapping(advisory)
+        if first_str(getattr(pending, "action_name", "")) != "integrate_patch":
+            return
         # Resolve the candidate identity FIRST so the two dead-end returns below (no required_evidence / reauthor cap)
         # can stamp a terminal progress row — a needs_review verdict that neither re-authors nor materializes would
         # otherwise leave the candidate row-less and re-selected forever.
-        action_name = str(getattr(pending, "action_name", "") or "")
-        payload = getattr(pending, "payload", {}) or {}
-        candidate: dict[str, Any] = {}
-        audit: dict[str, Any] = {}
-        old_sid = ""
-        if action_name == "integrate_patch" and payload.get("framework_agent_candidate_id"):
-            candidate = dict(payload.get("candidate") or {})
-            raw_audit = payload.get("audit")
-            audit = raw_audit if isinstance(raw_audit, dict) else {}
-        elif action_name == "integrate_patch":
-            # Rebuild the candidate from the originating authoring specialist.
-            params = payload.get("params") or {}
-            if not bool(params.get("framework_agent_authoring")):
-                return
-            sid = str(params.get("specialist_task_id") or "").strip()
-            old_sid = sid
-            spec_params: dict[str, Any] = {}
-            if sid:
-                try:
-                    spec_task = await self.tasks.get(sid)
-                except TaskNotFound:
-                    spec_task = None
-                spec_params = dict(getattr(spec_task, "params", None) or {})
-            candidate = {
-                "candidate_id": str(
-                    params.get("framework_agent_candidate_id") or spec_params.get("framework_agent_candidate_id") or ""
-                ),
-                "batch_id": str(params.get("framework_batch_id") or spec_params.get("framework_batch_id") or ""),
-                "title": str(spec_params.get("gap_symptom") or ""),
-                "framework": str(spec_params.get("framework") or ""),
-                "gap_canonical_id": str(spec_params.get("gap_canonical_id") or ""),
-            }
-            raw_audit = spec_params.get("framework_audit")
-            audit = raw_audit if isinstance(raw_audit, dict) else {}
-        else:
-            return
+        payload = to_mapping(getattr(pending, "payload", None))
+        authored = to_mapping(payload.get("params")) if not payload.get("framework_agent_candidate_id") else {}
+        old_sid = first_str(authored.get("specialist_task_id")).strip()
+        candidate, audit = await self._reauthor_target(payload)
         cand_id = self._framework_candidate_key(candidate)
         if not cand_id:
             return
-        batch_id = str(candidate.get("batch_id") or payload.get("batch_id") or "")
-        required_evidence = [str(x).strip() for x in (advisory.get("required_evidence") or []) if str(x).strip()]
+        batch_id = first_str(candidate.get("batch_id"), payload.get("batch_id"))
+        required_evidence = [str(x).strip() for x in to_list(advisory.get("required_evidence")) if str(x).strip()]
         if not required_evidence:
             # needs_review with nothing to act on: no re-author is possible, so this is terminal for the candidate.
             self._stamp_framework_progress(
@@ -2188,67 +2160,33 @@ class FrameworkPhase(ProposalBench):
                     candidate_id=cand_id,
                     batch_id=batch_id,
                     status="needs_review_no_evidence",
-                    rationale=str(advisory.get("advice_text") or "")[:500],
+                    rationale=first_str(advisory.get("advice_text"))[:500],
                     provenance="critic",
                 )
             )
             return
-        # Skip if the candidate is already materializing as a live integrate_patch task.
-        live_tasks = [*await self.tasks.queued(), *await self.tasks.running()]
-        for t in live_tasks:
-            if getattr(t, "kind", "") != "integrate_patch":
-                continue
-            tp = getattr(t, "params", None) or {}
-            if str(tp.get("framework_agent_candidate_id") or "") == cand_id:
-                return
-        attempts = self.shared_state.specialist_reauthor_attempts
-        if not isinstance(attempts, dict):
-            attempts = {}
-            self.shared_state.specialist_reauthor_attempts = attempts
+        if await self._candidate_is_materializing(cand_id):
+            return
+        attempts = to_mapping(self.shared_state.specialist_reauthor_attempts)
         prior = int(attempts.get(cand_id, 0) or 0)
         if prior >= _AUTHORED_LANE_MAX_ATTEMPTS:
-            await self.bus.record_observation(
-                "coordinator",
-                "observation",
-                {
-                    "kind": "reauthor_cap_reached",
-                    "candidate_id": cand_id,
-                    "attempts": prior,
-                    "proposal_msg_id": str(getattr(pending, "proposal_msg_id", "") or ""),
-                    "verdict": "needs_review",
-                },
-            )
-            # Re-author budget exhausted: terminal for the candidate.
-            self._stamp_framework_progress(
-                ProgressStamp(
-                    candidate_id=cand_id,
-                    batch_id=batch_id,
-                    status="reauthor_cap",
-                    rationale=f"reauthor attempts >= cap ({_AUTHORED_LANE_MAX_ATTEMPTS})",
-                    provenance="pump",
-                )
-            )
+            await self._close_out_spent_reauthor_budget(pending, cand_id=cand_id, batch_id=batch_id, attempts=prior)
             return
         attempt = prior + 1
         attempts[cand_id] = attempt
+        self.shared_state.specialist_reauthor_attempts = attempts
         critic_feedback = {
             "required_evidence": required_evidence,
-            "advice_text": str(advisory.get("advice_text") or ""),
-            "risks": [str(r).strip() for r in (advisory.get("risks") or []) if str(r).strip()],
+            "advice_text": first_str(advisory.get("advice_text")),
+            "risks": [str(r).strip() for r in to_list(advisory.get("risks")) if str(r).strip()],
         }
         new_task_id = await self._enqueue_framework_agent_authoring_specialist(
-            candidate,
-            audit=audit,
-            reauthor_attempt=attempt,
-            critic_feedback=critic_feedback,
+            candidate, audit=audit, reauthor_attempt=attempt, critic_feedback=critic_feedback
         )
         try:
             self.shared_state.save(self.session_dir)
         except OSError:
-            log.exception(
-                "save after re-author dispatch failed candidate=%s",
-                cand_id,
-            )
+            log.exception("save after re-author dispatch failed candidate=%s", cand_id)
         await self.bus.record_observation(
             "coordinator",
             "observation",
@@ -2256,12 +2194,64 @@ class FrameworkPhase(ProposalBench):
                 "kind": "specialist_reauthor_dispatched",
                 "candidate_id": cand_id,
                 "attempt": attempt,
-                "proposal_msg_id": str(getattr(pending, "proposal_msg_id", "") or ""),
+                "proposal_msg_id": first_str(getattr(pending, "proposal_msg_id", "")),
                 "old_specialist_task_id": old_sid,
                 "new_specialist_task_id": new_task_id,
                 "verdict": "needs_review",
                 "required_evidence": required_evidence[:6],
             },
+        )
+
+    async def _reauthor_target(self, payload: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+        """The candidate row and the audit a needs_review integrate_patch proposal re-authors from."""
+        if payload.get("framework_agent_candidate_id"):
+            return to_mapping(payload.get("candidate")), to_mapping(payload.get("audit"))
+        params = to_mapping(payload.get("params"))
+        if not params.get("framework_agent_authoring"):
+            return {}, {}
+        spec_params = await self._authoring_specialist_params(first_str(params.get("specialist_task_id")).strip())
+        candidate = {
+            "candidate_id": first_str(
+                params.get("framework_agent_candidate_id"), spec_params.get("framework_agent_candidate_id")
+            ),
+            "batch_id": first_str(params.get("framework_batch_id"), spec_params.get("framework_batch_id")),
+            "title": first_str(spec_params.get("gap_symptom")),
+            "framework": first_str(spec_params.get("framework")),
+            "gap_canonical_id": first_str(spec_params.get("gap_canonical_id")),
+        }
+        return candidate, to_mapping(spec_params.get("framework_audit"))
+
+    async def _candidate_is_materializing(self, cand_id: str) -> bool:
+        """True while an integrate_patch task for ``cand_id`` is already queued or running."""
+        return any(
+            first_str(to_mapping(t.params).get("framework_agent_candidate_id")) == cand_id
+            for t in (*await self.tasks.queued(), *await self.tasks.running())
+            if t.kind == "integrate_patch"
+        )
+
+    async def _close_out_spent_reauthor_budget(
+        self, pending: "PendingProposal", *, cand_id: str, batch_id: str, attempts: int
+    ) -> None:
+        """Settle a candidate whose re-author budget is spent: the cap is terminal for it."""
+        await self.bus.record_observation(
+            "coordinator",
+            "observation",
+            {
+                "kind": "reauthor_cap_reached",
+                "candidate_id": cand_id,
+                "attempts": attempts,
+                "proposal_msg_id": first_str(getattr(pending, "proposal_msg_id", "")),
+                "verdict": "needs_review",
+            },
+        )
+        self._stamp_framework_progress(
+            ProgressStamp(
+                candidate_id=cand_id,
+                batch_id=batch_id,
+                status="reauthor_cap",
+                rationale=f"reauthor attempts >= cap ({_AUTHORED_LANE_MAX_ATTEMPTS})",
+                provenance="pump",
+            )
         )
 
     async def pump(self) -> None:
@@ -2306,57 +2296,44 @@ class FrameworkPhase(ProposalBench):
         statuses and lane-owned ``apply_failed`` retries are skipped). The row is ``kept``
         only when the patch was adopted.
         """
-        params = getattr(task, "params", None) or {}
-        if not bool(params.get("framework_agent_authoring")):
+        params = to_mapping(getattr(task, "params", None))
+        if not params.get("framework_agent_authoring"):
             return
         res = result if isinstance(result, dict) else getattr(result, "result", None)
         if not isinstance(res, dict):
             return
-        status = str(res.get("status") or "")
-        # Record EVERY terminal integrate_patch outcome — not just keep/revert.
-        if not status:
+        # Every terminal integrate_patch outcome is recorded, not just keep/revert; an apply_failed carrying a lane
+        # is the unified retry loop's to settle (re-dispatch, or a terminal row at the cap).
+        status = first_str(res.get("status"))
+        if not status or (status == "apply_failed" and res.get("lane") in ("perf_framework", "perf_explore")):
             return
-        # apply_failed with a lane field means the unified retry loop will handle this result (either re-dispatch or
-        # stamp a terminal row at the cap).
-        if status == "apply_failed" and res.get("lane") in ("perf_framework", "perf_explore"):
-            return
-        # Resolve the FRAMEWORK candidate id (a PR URL) that this authored patch belongs to.
-        spec_tid = str(params.get("specialist_task_id") or "")
-        cand_map = self.shared_state.framework_agent_specialist_candidate_map
-        mapped_cand = ""
-        if isinstance(cand_map, dict) and spec_tid:
-            mapped_cand = str(cand_map.get(spec_tid) or "")
-        cand_id = str(
-            params.get("framework_agent_candidate_id") or mapped_cand or spec_tid or getattr(task, "task_id", "") or ""
+        # The FRAMEWORK candidate id an authored patch belongs to is a PR URL.
+        spec_tid = first_str(params.get("specialist_task_id"))
+        cand_map = to_mapping(self.shared_state.framework_agent_specialist_candidate_map)
+        cand_id = first_str(
+            params.get("framework_agent_candidate_id"), cand_map.get(spec_tid), spec_tid, getattr(task, "task_id", "")
         )
-        batch_id = str(params.get("framework_batch_id") or "")
-        if not batch_id:
-            batches = self.shared_state.framework_agent_batches or []
-            if isinstance(batches, list) and batches and isinstance(batches[-1], dict):
-                batch_id = str(batches[-1].get("batch_id") or "")
+        batches = to_list(self.shared_state.framework_agent_batches)
+        batch_id = first_str(params.get("framework_batch_id"))
+        if not batch_id and batches:
+            batch_id = first_str(to_mapping(batches[-1]).get("batch_id"))
         delta_pct = res.get("delta_pct")
         new_tput = res.get("output_throughput")
         gain = float(delta_pct) if isinstance(delta_pct, (int, float)) else 0.0
-        progress = self.shared_state.framework_agent_phase_progress
-        if not isinstance(progress, list):
-            progress = []
-            self.shared_state.framework_agent_phase_progress = progress
+        progress = to_list(self.shared_state.framework_agent_phase_progress)
         matching = [row for row in progress if isinstance(row, dict) and self._framework_candidate_key(row) == cand_id]
-        # An adopted patch is the last word on a candidate; any other row is an outcome a later attempt may better,
-        # and is replaced below.
+        # An adopted patch is the last word on a candidate; any other row is an outcome a later attempt may better.
         if any(row.get("kept") for row in matching):
             return
         if matching:
-            progress[:] = [
-                row for row in progress if not (isinstance(row, dict) and self._framework_candidate_key(row) == cand_id)
-            ]
+            self.shared_state.framework_agent_phase_progress = [row for row in progress if row not in matching]
         recorded = self._stamp_framework_progress(
             ProgressStamp(
                 candidate_id=cand_id,
                 batch_id=batch_id,
                 status=status,
                 kept=adopted,
-                rationale=str(res.get("reason") or ""),
+                rationale=first_str(res.get("reason")),
                 provenance="authored",
                 gain_pct=gain,
                 extra={
@@ -2366,35 +2343,17 @@ class FrameworkPhase(ProposalBench):
                     "post_tput": float(new_tput) if isinstance(new_tput, (int, float)) else 0.0,
                     "accuracy_pass": res.get("accuracy_pass"),
                     "specialist_task_id": spec_tid,
-                    "integrate_task_id": str(getattr(task, "task_id", "") or ""),
+                    "integrate_task_id": first_str(getattr(task, "task_id", "")),
                     "reauthor_attempt": res.get("reauthor_attempt", params.get("reauthor_attempt")),
                 },
             )
         )
         if not recorded:
             return
-        evidence = {**res, **params}  # A lever the dispatch named outranks the one the deliverable names.
-        row = AttemptRow(
-            lever_kind=patch_lever_kind(evidence),
-            task_id=str(getattr(task, "task_id", "") or ""),
-            candidate_id=str(evidence.get("framework_agent_candidate_id") or ""),
-            specialist_task_id=spec_tid,
-            outcome=status,
-            adopted=adopted,
-            gain_pct=delta_pct,
-            before_tput=res.get("base_tput") if res.get("base_tput") is not None else params.get("base_tput"),
-            after_tput=new_tput,
-            error_class=str(res.get("error_class") or ""),
+        attempt = AuthoredAttempt(
+            task=task, candidate_id=cand_id, status=status, adopted=adopted, specialist_task_id=spec_tid
         )
-        record_attempt_row(self.shared_state, row)
-        _record_source_attempt(
-            self,
-            AuthoredAttempt(
-                task=task, candidate_id=cand_id, status=status, adopted=adopted, specialist_task_id=spec_tid
-            ),
-            result=res,
-            params=params,
-        )
+        self._record_authored_attempt(attempt, result=res, params=params)
         log.info(
             "FRAMEWORK: authored patch outcome candidate=%s batch=%s status=%s gain=%.2f%%",
             cand_id,
@@ -2403,64 +2362,89 @@ class FrameworkPhase(ProposalBench):
             gain,
         )
 
+    def _record_authored_attempt(
+        self, attempt: AuthoredAttempt, *, result: Mapping[str, Any], params: Mapping[str, Any]
+    ) -> None:
+        """Record one authored deliverable's measured attempt in the attempt ledger and on the framework timeline."""
+        evidence = {**result, **params}  # A lever the dispatch named outranks the one the deliverable names.
+        record_attempt_row(
+            self.shared_state,
+            AttemptRow(
+                lever_kind=patch_lever_kind(evidence),
+                task_id=first_str(getattr(attempt.task, "task_id", "")),
+                candidate_id=first_str(evidence.get("framework_agent_candidate_id")),
+                specialist_task_id=attempt.specialist_task_id,
+                outcome=attempt.status,
+                adopted=attempt.adopted,
+                gain_pct=result.get("delta_pct"),
+                before_tput=result.get("base_tput") if result.get("base_tput") is not None else params.get("base_tput"),
+                after_tput=result.get("output_throughput"),
+                error_class=first_str(result.get("error_class")),
+            ),
+        )
+        _record_source_attempt(self, attempt, result=result, params=params)
+
     async def _recover_framework_agent_authoring_outcome(
         self,
         *,
         specialist_task: "Task",
     ) -> bool:
         """Recover a missed authoring outcome from persisted delegated results."""
-        params = getattr(specialist_task, "params", None) or {}
-        specialist_task_id = str(getattr(specialist_task, "task_id", "") or "")
-        cand_id = str(params.get("framework_agent_candidate_id") or "")
+        specialist_task_id = first_str(getattr(specialist_task, "task_id", ""))
+        cand_id = first_str(to_mapping(getattr(specialist_task, "params", None)).get("framework_agent_candidate_id"))
         if not specialist_task_id or not cand_id:
             return False
         messages = await self.bus.tail(n=10000, topic="delegated_result")
+        if self._replay_specialist_deliverable(specialist_task, specialist_task_id, messages):
+            if cand_id in self._framework_processed_candidate_keys():
+                return True
+        return await self._replay_authored_integrates(specialist_task_id, cand_id, messages)
+
+    def _replay_specialist_deliverable(self, specialist_task: "Task", specialist_task_id: str, messages: Any) -> bool:
+        """Re-record the deliverable the specialist's own bus entry carries; False when the bus holds none."""
         for message in messages:
-            payload = getattr(message, "payload", None) or {}
+            payload = to_mapping(getattr(message, "payload", None))
             if (
-                str(payload.get("task_id") or "") != specialist_task_id
-                or str(payload.get("kind") or "") != "specialist"
+                first_str(payload.get("task_id")) != specialist_task_id
+                or first_str(payload.get("kind")) != "specialist"
             ):
                 continue
-            result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
-            done_payload = result.get("specialist_done")
+            done_payload = to_mapping(payload.get("result")).get("specialist_done")
             # A run that failed before delivering carries its error on the bus entry rather than in the result, and
             # must reach the recorder for the same reason it does on the live path.
-            run_error = str(payload.get("error") or "")
-            if isinstance(done_payload, dict) or run_error:
-                self._record_framework_agent_authoring_empty_outcome(
-                    task=specialist_task,
-                    done_payload=done_payload if isinstance(done_payload, dict) else {},
-                    run_error=run_error,
-                )
-                if cand_id in self._framework_processed_candidate_keys():
-                    return True
-            break
+            run_error = first_str(payload.get("error"))
+            if not isinstance(done_payload, dict) and not run_error:
+                return False
+            self._record_framework_agent_authoring_empty_outcome(
+                task=specialist_task, done_payload=to_mapping(done_payload), run_error=run_error
+            )
+            return True
+        return False
+
+    async def _replay_authored_integrates(self, specialist_task_id: str, cand_id: str, messages: Any) -> bool:
+        """Re-record every integrate_patch outcome the specialist's patches reached; True once ``cand_id`` is settled."""
         for message in messages:
-            payload = getattr(message, "payload", None) or {}
-            if str(payload.get("kind") or "") != "integrate_patch":
-                continue
-            task_id = str(payload.get("task_id") or "")
-            if not task_id:
+            payload = to_mapping(getattr(message, "payload", None))
+            task_id = first_str(payload.get("task_id"))
+            if first_str(payload.get("kind")) != "integrate_patch" or not task_id:
                 continue
             try:
                 integrate_task = await self.tasks.get(task_id)
             except TaskNotFound:
                 continue
-            integrate_params = getattr(integrate_task, "params", None) or {}
-            if str(integrate_params.get("specialist_task_id") or "") != specialist_task_id or not bool(
-                integrate_params.get("framework_agent_authoring")
+            integrate_params = to_mapping(integrate_task.params)
+            if first_str(integrate_params.get("specialist_task_id")) != specialist_task_id or not integrate_params.get(
+                "framework_agent_authoring"
             ):
                 continue
-            result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
             # The bus carries the executor's result, not the settlement verdict; the stack entry the
             # lift wrote for this task is the durable record of the adoption.
             self._record_framework_agent_authored_outcome(
                 task=integrate_task,
-                result=result,
+                result=to_mapping(payload.get("result")),
                 adopted=any(
-                    isinstance(entry, dict) and str(entry.get("task_id") or "") == task_id
-                    for entry in (self.shared_state.optimization_stack or [])
+                    first_str(to_mapping(entry).get("task_id")) == task_id
+                    for entry in to_list(self.shared_state.optimization_stack)
                 ),
             )
             if cand_id in self._framework_processed_candidate_keys():
