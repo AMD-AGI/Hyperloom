@@ -1,0 +1,320 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+"""Making an autonomous branch's agent ready to run: its preflight.
+
+The agent's source is fetched once into the branch's directory. Each attempt then asks the onboarding model, which
+reads that checkout, for the manifest (:mod:`agent_manifest`), writes the agent's config from it, runs its install
+commands in the branch's sandbox and starts it. An attempt fails with one line that says which step failed and what
+the step printed last, and the next attempt's prompt carries every earlier line, so the model corrects the manifest
+instead of repeating it. After :data:`ATTEMPTS` failures the preflight raises
+:class:`~hyperloom_multibranch.specialist.runtime.PreflightFailed` with every line.
+
+The agent runs commands, not containers: a ``docker`` on its ``PATH`` (:data:`DOCKER_SHIM`) runs ``docker exec`` and
+``docker cp`` in place, for an agent written to drive a container, and refuses everything else.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import re
+import time
+from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Protocol
+
+from hyperloom_multibranch.specialist.agent_manifest import AgentManifest, ManifestError
+from hyperloom_multibranch.specialist.runtime import PreflightFailed
+
+ATTEMPTS = 3
+#: How long a started agent has to write its keep file or stay up before its start counts as made.
+START_SECONDS = 300.0
+INSTALL_SECONDS = 1800.0
+SOURCE_DIR = "src"
+SHIM_DIR = "bin"
+#: The lines of an output a failure keeps, the end of the output, where the cause usually is.
+TAIL_LINES = 20
+
+DOCKER_SHIM = """#!/usr/bin/env python3
+# Runs `docker exec` and `docker cp` in place, for an agent written to drive a container; the sandbox has no daemon.
+import os, shutil, subprocess, sys
+
+args = sys.argv[1:]
+if args[:1] == ["exec"]:
+    rest, env, cwd = args[1:], dict(os.environ), None
+    while rest and rest[0].startswith("-"):
+        flag = rest.pop(0)
+        if flag in ("-e", "--env"):
+            name, _, value = rest.pop(0).partition("=")
+            env[name] = value
+        elif flag in ("-w", "--workdir"):
+            cwd = rest.pop(0)
+    sys.exit(subprocess.call(rest[1:], cwd=cwd, env=env))
+if args[:1] == ["cp"]:
+    source, target = (path.split(":", 1)[-1] for path in args[1:3])
+    copy = shutil.copytree if os.path.isdir(source) else shutil.copy2
+    copy(source, target)
+    sys.exit(0)
+sys.exit(f"docker {' '.join(args[:1])}: this sandbox runs commands in place and has no docker daemon")
+"""
+
+
+@dataclass(frozen=True)
+class AgentSpec:
+    """What MB asks of the agent, which its config must be derived from: the workload, the metric it is judged on,
+    the server arguments and environment it starts from (the root's), ``workspace``, the framework checkout it edits,
+    ``cards``, the GPUs it may use, and ``seconds``, how long it may run."""
+
+    model: str
+    framework: str
+    tp: int
+    precision: str
+    gpu_type: str
+    workload: Mapping[str, object]
+    metric: str
+    server_args: str
+    envs: Mapping[str, str]
+    workspace: str
+    cards: tuple[int, ...]
+    seconds: float
+
+    def to_document(self) -> dict[str, object]:
+        return {
+            "model": self.model,
+            "framework": self.framework,
+            "tp": self.tp,
+            "precision": self.precision,
+            "gpu_type": self.gpu_type,
+            "workload": dict(self.workload),
+            "metric": self.metric,
+            "server_args": self.server_args,
+            "envs": dict(self.envs),
+            "workspace": self.workspace,
+            "cards": list(self.cards),
+            "seconds": self.seconds,
+        }
+
+
+@dataclass(frozen=True)
+class CommandResult:
+    returncode: int
+    output: str
+
+
+class AgentProcess(Protocol):
+    """A command started in the sandbox."""
+
+    @property
+    def returncode(self) -> int | None: ...
+
+    async def output(self) -> str: ...
+
+    async def kill(self) -> None:
+        """Kill it and everything it started."""
+
+
+class AgentSandbox(Protocol):
+    """The branch's sandbox: its own cards, the session's image, a shell; commands run with ``env`` added."""
+
+    async def run(self, command: str, cwd: Path, env: Mapping[str, str], timeout: float) -> CommandResult: ...
+
+    async def start(self, command: str, cwd: Path, env: Mapping[str, str]) -> AgentProcess: ...
+
+
+#: Asks the onboarding model ``prompt`` with the agent's checkout as its working directory; its answer.
+Onboard = Callable[[Path, str], Awaitable[str]]
+
+
+@dataclass(frozen=True)
+class OnboardingSetup:
+    sandbox: AgentSandbox
+    onboard: Onboard
+    attempts: int = ATTEMPTS
+    start_seconds: float = START_SECONDS
+    install_seconds: float = INSTALL_SECONDS
+    poll_seconds: float = 5.0
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
+    clock: Callable[[], float] = time.monotonic
+
+
+@dataclass(frozen=True)
+class ReadyAgent:
+    """An agent preflight made ready: its manifest, its checkout and the process it runs in."""
+
+    manifest: AgentManifest
+    source_dir: Path
+    process: AgentProcess
+
+
+class AttemptFailed(RuntimeError):
+    """One onboarding attempt failed; the message says at which step and what the step printed last."""
+
+
+async def make_ready(source: str, spec: AgentSpec, agent_dir: Path, setup: OnboardingSetup) -> ReadyAgent:
+    """Fetch ``source`` into ``agent_dir``, onboard it for ``spec`` and start it; raise
+    :class:`~hyperloom_multibranch.specialist.runtime.PreflightFailed` with one line per failed attempt."""
+
+    failures: list[str] = []
+    for attempt in range(1, setup.attempts + 1):
+        try:
+            return await _attempt(source, spec, agent_dir, setup, tuple(failures))
+        except AttemptFailed as error:
+            failures.append(f"attempt {attempt}: {error}")
+    raise PreflightFailed(failures)
+
+
+async def _attempt(
+    source: str, spec: AgentSpec, agent_dir: Path, setup: OnboardingSetup, failures: tuple[str, ...]
+) -> ReadyAgent:
+    checkout = agent_dir / SOURCE_DIR
+    commit = await _fetch(source, checkout)
+    answer = await setup.onboard(checkout, onboarding_prompt(spec, source, commit, failures))
+    try:
+        manifest = AgentManifest.read(_json_object(answer))
+    except (ManifestError, ValueError) as error:
+        raise AttemptFailed(f"the manifest: {error}") from error
+    (checkout / manifest.config_file).parent.mkdir(parents=True, exist_ok=True)
+    (checkout / manifest.config_file).write_text(json.dumps(manifest.config, indent=2), encoding="utf-8")
+    env = _shim_env(agent_dir)
+    for command in manifest.install:
+        done = await setup.sandbox.run(command, checkout, env, setup.install_seconds)
+        if done.returncode != 0:
+            raise AttemptFailed(f"install `{command}` exited {done.returncode}: {tail(done.output)}")
+    process = await setup.sandbox.start(manifest.launch, checkout, env)
+    await _started(process, manifest, checkout, setup)
+    return ReadyAgent(manifest, checkout, process)
+
+
+async def _started(process: AgentProcess, manifest: AgentManifest, checkout: Path, setup: OnboardingSetup) -> None:
+    """Return once the agent wrote its keep file or stayed up :attr:`OnboardingSetup.start_seconds`; raise
+    :class:`AttemptFailed` when it exited first."""
+
+    until = setup.clock() + setup.start_seconds
+    keep = None if manifest.keep is None else checkout / manifest.keep.path
+    while setup.clock() < until and not (keep is not None and keep.exists()):
+        if process.returncode is not None:
+            raise AttemptFailed(f"`{manifest.launch}` exited {process.returncode}: {tail(await process.output())}")
+        await setup.sleep(setup.poll_seconds)
+
+
+async def _fetch(source: str, checkout: Path) -> str:
+    if not (checkout / ".git").exists():
+        url, ref = split_source(source)
+        clone = ["git", "clone", "--quiet", url, str(checkout)]
+        done = await _git(clone, checkout.parent)
+        if done.returncode != 0:
+            raise AttemptFailed(f"fetching {url}: {tail(done.output)}")
+        if ref:
+            checked = await _git(["git", "checkout", "--quiet", ref], checkout)
+            if checked.returncode != 0:
+                raise AttemptFailed(f"checking out {ref}: {tail(checked.output)}")
+    head = await _git(["git", "rev-parse", "HEAD"], checkout)
+    return head.output.strip()
+
+
+async def _git(argv: list[str], cwd: Path) -> CommandResult:
+    cwd.mkdir(parents=True, exist_ok=True)
+    process = await asyncio.create_subprocess_exec(
+        *argv, cwd=cwd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT
+    )
+    output, _ = await process.communicate()
+    return CommandResult(process.returncode or 0, output.decode(errors="replace"))
+
+
+def split_source(source: str) -> tuple[str, str]:
+    """``source`` as the repository and the ref after its last ``@``; the ref is ``""`` when what follows the ``@`` is
+    a host or a path, as in ``git@host:org/repo``."""
+
+    url, at, ref = source.rpartition("@")
+    if not at or not url or "/" in ref or ":" in ref:
+        return source, ""
+    return url, ref
+
+
+def _shim_env(agent_dir: Path) -> dict[str, str]:
+    shim = agent_dir / SHIM_DIR / "docker"
+    shim.parent.mkdir(parents=True, exist_ok=True)
+    shim.write_text(DOCKER_SHIM, encoding="utf-8")
+    shim.chmod(0o755)
+    return {"PATH": f"{shim.parent}{os.pathsep}{os.environ.get('PATH', '')}"}
+
+
+def _json_object(answer: str) -> object:
+    """The JSON object the onboarding answer holds, inside a code fence or not."""
+
+    match = re.search(r"\{.*\}", answer, re.DOTALL)
+    if match is None:
+        raise ValueError("the answer holds no JSON object")
+    return json.loads(match.group(0))
+
+
+def tail(output: str) -> str:
+    """The last :data:`TAIL_LINES` lines of ``output``, on one line."""
+
+    return " | ".join(line.strip() for line in output.strip().splitlines()[-TAIL_LINES:])
+
+
+def onboarding_prompt(spec: AgentSpec, source: str, commit: str, failures: tuple[str, ...]) -> str:
+    """What the onboarding model is asked: read the agent's checkout and answer with its manifest for ``spec``."""
+
+    earlier = "\n".join(f"- {line}" for line in failures) or "- none"
+    return ONBOARDING_PROMPT.format(
+        source=source, commit=commit, spec=json.dumps(spec.to_document(), indent=2), failures=earlier
+    )
+
+
+ONBOARDING_PROMPT = """\
+You are onboarding a third-party LLM-serving optimization agent so it can run unattended in a sandbox. Your working
+directory is its checkout: {source} at {commit}. Read its README, its docs and its entry points before you answer.
+
+It will optimize this workload, and every value its config needs must come from here, not be invented:
+{spec}
+
+The sandbox:
+- has the session's image and framework, the GPUs in "cards" (HIP_VISIBLE_DEVICES is set), and no docker daemon. A
+  `docker` on PATH runs `docker exec [-w DIR] [-e K=V] CONTAINER CMD...` as CMD in DIR and `docker cp C:SRC DST` as a
+  copy, so an agent written to drive a container works when its config names any container;
+- must not have processes killed beyond the agent's own: turn off any sweep that kills what holds GPU memory, or
+  point it at the agent's own processes only;
+- the agent edits the framework source in "workspace", in place, and launches its servers from it.
+
+Answer with one JSON object and nothing else, with exactly these fields:
+- "source": "{source}", "commit": "{commit}";
+- "install": shell commands run once in the checkout, [] when none;
+- "config_file": where the agent's config goes, relative to the checkout; "config": that config, as an object;
+- "launch": the shell command that runs the agent end to end from the checkout; "resume": the one that continues a
+  run after a crash, "" when launching again does;
+- "keep": how a kept change shows, {{"path": file relative to the checkout, "field": dotted path of the counter (a
+  number or a list), "where": {{field: value}} that a list item must match}}, or null when the agent keeps nothing and
+  only its final state counts;
+- "config_source": {{"path": file relative to "workspace" holding the server arguments and environment the agent runs
+  with, "server_args": the field of the arguments string, "envs": the field of the environment object}}, or null;
+- "summary_field": dotted path in the keep file to the agent's own words for its latest keep, "" when none;
+- "result_dir": for an agent with no keep, the directory relative to the checkout that holds its final state, "" to
+  read the workspace;
+- "needs": what it requires, from "anthropic", "openai", "network", "docker".
+
+Earlier attempts that failed, to correct rather than repeat:
+{failures}
+"""
+
+
+__all__ = [
+    "ATTEMPTS",
+    "DOCKER_SHIM",
+    "ONBOARDING_PROMPT",
+    "AgentProcess",
+    "AgentSandbox",
+    "AgentSpec",
+    "AttemptFailed",
+    "CommandResult",
+    "OnboardingSetup",
+    "ReadyAgent",
+    "make_ready",
+    "onboarding_prompt",
+    "split_source",
+    "tail",
+]
