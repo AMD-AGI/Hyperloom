@@ -181,6 +181,15 @@ def test_specialist_dispatch_prose_only_in_explore(registry):
                 assert marker not in text, f"{marker} leaked into {phase}"
 
 
+def test_dispatch_prose_leaves_environment_changes_to_the_operator(registry):
+    """A dependency change or an in-place edit of a shared tree is raised as an ``alert``, never delegated."""
+    dials = _build(registry, _ps.PHASE_FRAMEWORK_AGENT).split(SPECIALIST_DIALS, 1)[1].split("\n### ", 1)[0]
+    rule = next(" ".join(p.split()) for p in dials.split("\n\n") if "environment change" in p)
+    for term in ("upgrade", "reinstall", "rebuild", "check out", "in place", "`integrate_patch`", "`alert`"):
+        assert term in rule, term
+    assert "do not delegate it" in rule
+
+
 def test_specialist_watching_prose_spans_both_dispatching_phases(registry):
     """A live specialist can exist in EXPLORE and FRAMEWORK_AGENT; the LLM steers both."""
     with_specialists = {_ps.PHASE_FRAMEWORK_AGENT, _ps.PHASE_FRAMEWORK_AGENT}

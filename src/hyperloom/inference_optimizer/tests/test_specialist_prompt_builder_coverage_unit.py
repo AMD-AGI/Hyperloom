@@ -16,6 +16,8 @@ from hyperloom.orchestrator.prompts.specialist_prompt_builder import (
 )
 from hyperloom.orchestrator.specialists.domains import SPECIALIST_DOMAINS, get_domain
 
+from .conftest import init_git_repo
+
 
 # Derived, not copied: a hand-maintained list goes stale silently when a domain is added, and fails en masse when one
 # is removed.
@@ -215,6 +217,26 @@ def test_no_gpu_iron_rule_retains_serving_port_boundary():
     inp = _rich_inputs(allocated_gpu_ids=())
     sys_p, _ = build_specialist_prompts(inp)
     assert "port 8888" in sys_p
+
+
+def test_source_roots_are_labelled_by_the_checkout_that_tracks_them(tmp_path):
+    """A package dir inside a checkout is part of it, so it must not read as an installed tree with no git history."""
+    checkout = tmp_path / "aiter"
+    package = checkout / "aiter"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    init_git_repo(checkout)
+    installed = tmp_path / "site-packages" / "vllm"
+    installed.mkdir(parents=True)
+    (installed / "__init__.py").write_text("", encoding="utf-8")
+
+    _, user_p = build_specialist_prompts(
+        _rich_inputs(framework_source_roots=(f"{package}/", str(checkout), str(installed)), source_hint_directories=())
+    )
+
+    assert f"- {package}/ — inside the git checkout {checkout}\n" in user_p
+    assert f"- {checkout} — git checkout\n" in user_p
+    assert f"- {installed} — installed package, no git tree" in user_p
 
 
 def test_render_measured_impact_variants():

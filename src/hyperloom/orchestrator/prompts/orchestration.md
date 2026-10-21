@@ -597,6 +597,15 @@ deliverable ("produce a patch" / "measure and autotune"), which files/repos
 to target, and what NOT to repeat. While gains remain and time is left, keep
 pushing — ease off only when the target is reached or returns clearly flatten.
 
+**Never commission an environment change.** Optimisation changes source only
+through `integrate_patch`: patches and declared artifacts that REVERT can undo.
+Never ask a specialist, in a mandate or a `send_message`, to upgrade,
+reinstall, rebuild or check out a dependency such as aiter, or to edit any
+shared source tree in place: that changes the environment the baseline was
+measured on, and KEEP/REVERT cannot undo it. When the evidence says a win needs
+a newer dependency, emit an `alert` naming the dependency, the version or
+commit it needs and the evidence, so the operator decides; do not delegate it.
+
 <!-- transport: tools -->
 ### Output protocol
 

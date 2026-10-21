@@ -1074,6 +1074,38 @@ def test_readonly_dispatch_states_the_read_only_boundary():
     assert "MUST NOT author" in system
 
 
+def _integration_rule(mode: str) -> str:
+    system, _ = build_specialist_prompts(
+        SpecialistPromptInputs(
+            task_id=f"task-{mode}",
+            domain=get_domain("serving_specialist"),
+            max_turns=4,
+            scope="freeform",
+            mode=mode,
+            task_description="In /sgl-workspace/aiter/: git checkout 57e2c6b42e, then run `pip install -e .`",
+            workspace_path=f"/ws/{mode}",
+        )
+    )
+    return " ".join(system.split("## 9. IRON RULES", 1)[1].split("\n2. ", 1)[1].split("\n3. ", 1)[0].split())
+
+
+def test_patch_iron_rule_guards_every_section7_tree_by_any_means():
+    """A specialist that kept its framework edit in the worktree still checked out and reinstalled aiter in place."""
+    rule = _integration_rule("patch")
+    assert "change a tree listed in Section 7 — the one this session optimises and every other one" in rule
+    for means in ("Edit/Write", "``sed -i``", "``git apply``", "``checkout``", "``stash``", "``pip install``", "build"):
+        assert means in rule, means
+    assert "discards your whole result" in rule
+
+
+@pytest.mark.parametrize("mode", ["patch", MODE_RESEARCH])
+def test_iron_rule_outranks_the_mandate_and_reports_the_conflict(mode: str):
+    """A mandate that asks for a forbidden change is answered with a ``specialist_done``, not carried out."""
+    rule = _integration_rule(mode)
+    assert "This rule outranks your mandate" in rule
+    assert "do not do it — finish with ``specialist_done``, state the conflict in ``residual_questions``" in rule
+
+
 def test_cross_domain_research_dispatch_drops_patch_deliverable():
     """Mode outranks scope: a read-only `domains` dispatch must not be promised the coupled cross-domain patch."""
     _, user = build_specialist_prompts(

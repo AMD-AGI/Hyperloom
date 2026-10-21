@@ -23,6 +23,7 @@ from typing import Any, Callable
 
 from hyperloom.common.perf_metric import is_agentx_mode
 from hyperloom.common.prompt_safety import defang_prompt_structure
+from hyperloom.inference_optimizer.framework_paths import framework_apply_tree
 from hyperloom.inference_optimizer.framework_registry import python_package
 from .agentx_context import corpus_lines, grading_lines
 from .proposal_schemas import (
@@ -2054,9 +2055,12 @@ def _source_root_row(root: str, *, worktree_base: str) -> str:
         if (Path(base) / ".git").exists():
             return f"- {root} — git checkout; your worktree was cut from it"
         return f"- {root} — installed package; your worktree holds a git snapshot of it, so edit its files there"
-    if (Path(root) / ".git").is_dir():
+    tree = framework_apply_tree(root)
+    if tree is None or not tree.checkout:
+        return f"- {root} — installed package, no git tree: re-author upstream diffs against it, never apply them"
+    if tree.root == tree.tree:
         return f"- {root} — git checkout"
-    return f"- {root} — installed package, no git tree: re-author upstream diffs against it, never apply them"
+    return f"- {root} — inside the git checkout {tree.root}"
 
 
 def _resolve_focus_dir(hint: str, session_tree: str) -> str:
@@ -2286,7 +2290,7 @@ def _section_iron_rules(inp: SpecialistPromptInputs) -> list[str]:
         cards = ", ".join(str(g) for g in inp.allocated_gpu_ids)
         gpu_rule = [
             f"1. You EXCLUSIVELY own GPU card(s) [{cards}] for this task. On",
-            "   those cards do whatever you want: edit code, build, start/stop",
+            "   those cards do whatever you want within rule 2: edit code, build, start/stop",
             "   your own servers, profile, autotune, install tuned artifacts,",
             "   and run real benchmark loops. The ONE thing you must NOT do:",
             "   touch the production serving process or its cards — co-residing",
@@ -2311,9 +2315,15 @@ def _section_iron_rules(inp: SpecialistPromptInputs) -> list[str]:
             "   - Tuned non-diff artifacts (e.g. an autotuned config JSON): write",
             "     under the worktree and list in ``artifacts_written`` as",
             "     ``{source, target, kind, description}``.",
-            "   **NEVER** ``git apply`` / ``git commit`` against the shared source",
-            "   trees in Section 7 directly — ``integrate_patch`` is the single",
-            "   integration point, whichever tree the patch names.",
+            "   **NEVER** change a tree listed in Section 7 — the one this session",
+            "   optimises and every other one (e.g. aiter) — by any means: Edit/Write,",
+            "   ``cp`` / ``mv`` / ``rm``, ``sed -i``, ``patch``, ``git apply`` /",
+            "   ``commit`` / ``checkout`` / ``stash`` / ``reset``, ``pip install`` or",
+            "   a build. ``integrate_patch`` is the single integration point, whichever",
+            "   tree the patch names; upgrading or rebuilding one of these trees is",
+            "   never yours to do. After your run a write to the tree this session",
+            "   optimises discards your whole result, and moving a dependency",
+            "   checkout's HEAD (e.g. ``git checkout`` in aiter) stops the session.",
         ]
     else:
         integration_rule = [
@@ -2327,6 +2337,9 @@ def _section_iron_rules(inp: SpecialistPromptInputs) -> list[str]:
         "",
         *gpu_rule,
         *integration_rule,
+        "   This rule outranks your mandate: if the task asks for something it",
+        "   forbids, do not do it — finish with ``specialist_done``, state the",
+        "   conflict in ``residual_questions``, and let the Orchestrator decide.",
         "3. Only ``specialist_done``, ``send_message``, and ``alert`` are",
         "   accepted intents; all others are dropped.",
         "4. You **MUST** finish within ``max_turns`` LLM turns and end with",
