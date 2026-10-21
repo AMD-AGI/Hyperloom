@@ -134,7 +134,7 @@ async def test_a_new_branch_without_a_commit_keeps_a_floor_until_its_tests_settl
     assert unsettled is not None and unsettled.expected_gain_pct == POLICY.new_branch_floor_pct
     assert unsettled.basis is FrontierBasis.NEW
     assert settled is not None and settled.expected_gain_pct == 0.0 and settled.basis is FrontierBasis.TREND
-    assert SETTLED_TESTS == 5
+    assert SETTLED_TESTS == 10
 
 
 def test_an_archived_branch_without_judged_times_keeps_the_floor_for_one_window_only() -> None:

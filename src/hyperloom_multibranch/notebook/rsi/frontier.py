@@ -76,7 +76,7 @@ REFERENCE_BUDGET_SECONDS = 4 * HOUR
 WINDOW_TESTS = 4
 #: How many judged tests end a branch's new-branch floor; the judge's grace reads it too, so the grace never ends
 #: before the floor does.
-SETTLED_TESTS = 5
+SETTLED_TESTS = 10
 
 
 @dataclass(frozen=True)
