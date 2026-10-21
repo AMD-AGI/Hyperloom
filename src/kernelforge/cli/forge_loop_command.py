@@ -71,7 +71,7 @@ from kernelforge.loop.recovery import (
     publish_warm_start_recovery,
     rollback_unpublished_warm_start,
 )
-from kernelforge.evaluation.scoring import DEFAULT_SNR_THRESHOLD_DB, aggregate_regression_detail
+from kernelforge.evaluation.scoring import DEFAULT_SNR_THRESHOLD_DB, warm_start_improvement_flags
 from kernelforge.tracker.schema import ExperimentSubject
 
 if TYPE_CHECKING:
@@ -196,6 +196,25 @@ class _SearchAnchors:
     search_start_mean_case_speedup: float
     pristine_ms: float | None
 
+    def claims(self, *, best_ms, mean_case_speedup) -> dict:
+        """What a best measured at ``best_ms`` may report against these anchors, in the order a report carries it."""
+        improved_during_search = bool(mean_case_speedup and mean_case_speedup > self.search_start_mean_case_speedup)
+        return {
+            "baseline_ms": self.pristine_ms,
+            "pristine_baseline_ms": self.pristine_ms,
+            "search_start_ms": self.search_start_ms,
+            "best_ms": best_ms,
+            "mean_case_speedup": mean_case_speedup,
+            "search_start_mean_case_speedup": self.search_start_mean_case_speedup,
+            # KEEP is decided on the mean of per-case speedups while these are aggregate wall times, so the two can
+            # legitimately disagree by a hair.
+            **warm_start_improvement_flags(
+                pristine_ms=self.pristine_ms, best_ms=best_ms, mean_case_speedup=mean_case_speedup
+            ),
+            "incremental_improved": improved_during_search,
+            "improved_during_search": improved_during_search,
+        }
+
 
 def _search_anchors(loop_runner, *, pristine_fallback=None) -> _SearchAnchors:
     """Read the run's search-start and pristine anchors off the live runner."""
@@ -246,53 +265,32 @@ class _RunReporter:
         """Assemble the loop result dict from live runner state."""
         loop_runner = self.loop_runner
         anchors = _search_anchors(loop_runner, pristine_fallback=self.warm_start.kb_pristine_baseline_ms)
-        search_start_ms = anchors.search_start_ms
-        search_start_mean_case_speedup = anchors.search_start_mean_case_speedup
-        pristine_ms = anchors.pristine_ms
         best = getattr(loop_runner, "best_wall_ms", None)
         total_speedup = getattr(loop_runner, "best_mean_case_speedup", None)
         incremental_speedup = (
-            float(total_speedup) / float(search_start_mean_case_speedup)
-            if total_speedup and search_start_mean_case_speedup
-            else None
+            float(total_speedup) / float(anchors.search_start_mean_case_speedup) if total_speedup else None
         )
         exp_id = getattr(loop_runner.experiment, "experiment_id", None)
-        state_best = loop_runner.run_state.best
-        best_iteration = getattr(state_best, "iteration", 0)
-        best_commit = getattr(state_best, "commit_hash", "")
+        best_iteration = loop_runner.run_state.best.iteration
+        best_commit = loop_runner.run_state.best.commit_hash
         # A validated warm-start is published before IterationLoop creates a run-state best.
         if not best_commit:
             published = load_published_best(self.run.iter_config.workspace_dir) or {}
             if int(published.get("iteration", -1)) == 0:
-                pristine_ms = published.get("pristine_baseline_ms") or published.get("baseline_wall_ms") or pristine_ms
-                search_start_ms = published.get("search_start_ms") or published.get("best_wall_ms") or search_start_ms
                 best = published.get("best_wall_ms")
                 total_speedup = published.get("mean_case_speedup")
-                search_start_mean_case_speedup = (
-                    published.get("search_start_mean_case_speedup") or total_speedup or search_start_mean_case_speedup
+                anchors = _SearchAnchors(
+                    published.get("search_start_ms") or best or anchors.search_start_ms,
+                    published.get("search_start_mean_case_speedup")
+                    or total_speedup
+                    or anchors.search_start_mean_case_speedup,
+                    published.get("pristine_baseline_ms") or published.get("baseline_wall_ms") or anchors.pristine_ms,
                 )
                 incremental_speedup = 1.0
                 best_iteration = 0
                 best_commit = str(published.get("commit_hash") or "")
-        # KEEP is decided on the mean of per-case speedups while these are aggregate wall times, so the two can
-        # legitimately disagree by a hair.
-        aggregate_regression = aggregate_regression_detail(
-            baseline_ms=pristine_ms,
-            best_ms=best,
-            mean_case_speedup=total_speedup,
-        )
         result = {
-            "baseline_ms": pristine_ms,
-            "pristine_baseline_ms": pristine_ms,
-            "search_start_ms": search_start_ms,
-            "best_ms": best,
-            "mean_case_speedup": total_speedup,
-            "search_start_mean_case_speedup": (search_start_mean_case_speedup),
-            "aggregate_regression": aggregate_regression,
-            "improved": bool(total_speedup and total_speedup > 1.0) and not aggregate_regression,
-            "total_improved": bool(total_speedup and total_speedup > 1.0) and not aggregate_regression,
-            "incremental_improved": bool(total_speedup and total_speedup > search_start_mean_case_speedup),
-            "improved_during_search": bool(total_speedup and total_speedup > search_start_mean_case_speedup),
+            **anchors.claims(best_ms=best, mean_case_speedup=total_speedup),
             # Reported so a consumer can tell a faster transfer from a cheaper barrier; wall time alone cannot say
             # which one a kept kernel bought.
             "case_bandwidth": dict(getattr(loop_runner, "last_case_bandwidth", {}) or {}),
@@ -305,10 +303,7 @@ class _RunReporter:
             "next_iteration": getattr(loop_runner.run_state, "next_iteration", 1),
             "best_iteration": best_iteration,
             "best_commit": best_commit,
-            "remote_publication": _remote_publication_view(
-                self.remote_publication,
-                best_commit,
-            ),
+            "remote_publication": _remote_publication_view(self.remote_publication, best_commit),
             "best_manifest": str(self.run.campaign_store.root / "best" / "manifest.json"),
             "optimization_report": str(self.run.campaign_store.root / "optimization_report.md"),
             "optimization_history": str(self.run.campaign_store.root / "optimization_history.md"),
@@ -438,16 +433,7 @@ class _RunReporter:
         experiment = self.loop_runner.experiment
         best_commit = str(getattr(result, "commit_hash", "") or git_head(self.run.iter_config.workspace_dir))
         anchors = _search_anchors(self.loop_runner)
-        search_start_ms = anchors.search_start_ms
-        search_start_mean_case_speedup = anchors.search_start_mean_case_speedup
-        baseline_ms = anchors.pristine_ms
-        best_ms = getattr(result, "wall_ms", None)
         mean_case_speedup = getattr(result, "mean_case_speedup", None)
-        aggregate_regression = aggregate_regression_detail(
-            baseline_ms=baseline_ms,
-            best_ms=best_ms,
-            mean_case_speedup=mean_case_speedup,
-        )
         checkpoint = {
             "state": "best_committed",
             "decision": "KEEP",
@@ -457,22 +443,10 @@ class _RunReporter:
             "base_commit": self.run.campaign.base_commit,
             "best_commit": best_commit,
             "best_iteration": int(getattr(result, "iteration", 0) or 0),
-            "baseline_ms": baseline_ms,
-            "pristine_baseline_ms": baseline_ms,
-            "search_start_ms": search_start_ms,
-            "best_ms": best_ms,
-            "mean_case_speedup": mean_case_speedup,
-            "search_start_mean_case_speedup": (search_start_mean_case_speedup),
-            "aggregate_regression": aggregate_regression,
-            "improved": bool(mean_case_speedup and mean_case_speedup > 1.0) and not aggregate_regression,
-            "total_improved": bool(mean_case_speedup and mean_case_speedup > 1.0) and not aggregate_regression,
-            "incremental_improved": bool(mean_case_speedup and mean_case_speedup > search_start_mean_case_speedup),
-            "improved_during_search": bool(mean_case_speedup and mean_case_speedup > search_start_mean_case_speedup),
+            **anchors.claims(best_ms=getattr(result, "wall_ms", None), mean_case_speedup=mean_case_speedup),
             "total_speedup": mean_case_speedup,
             "incremental_speedup": (
-                float(mean_case_speedup) / float(search_start_mean_case_speedup)
-                if mean_case_speedup and search_start_mean_case_speedup
-                else None
+                float(mean_case_speedup) / float(anchors.search_start_mean_case_speedup) if mean_case_speedup else None
             ),
             "validation_passed": bool(getattr(result, "validation_passed", False)),
             "validation_summary": str(getattr(result, "validation_summary", "") or ""),
