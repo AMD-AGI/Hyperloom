@@ -25,7 +25,7 @@ cognitive-complexity src/hyperloom/orchestrator/actions/executors/_grid_base.py:
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/_grid_runner.py::run_grid 177
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/_kv_metrics.py::_read_aiperf_aggregate_json 91
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/_kv_metrics.py::sample_from_families 33
-cognitive-complexity src/hyperloom/orchestrator/actions/executors/_multi_node_server_lifecycle.py::_wait_for_server_health_async 46
+cognitive-complexity src/hyperloom/orchestrator/actions/executors/_multi_node_server_lifecycle.py::_wait_for_server_health_async 45
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/_patch_snapshot.py::_patch_touched_paths_split 32
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/_ray_serving.py::ServingLease._await_or_cancel 32
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/_workload_envs.py::materialize_config_with_envs 285
@@ -470,8 +470,8 @@ function-lines src/hyperloom/orchestrator/actions/executors/_grid_runner.py::run
 function-lines src/hyperloom/orchestrator/actions/executors/_kernel_agent_tool.py::materialize_unified_patch_snapshot 94
 function-lines src/hyperloom/orchestrator/actions/executors/_kv_metrics.py::_read_aiperf_aggregate_json 101
 function-lines src/hyperloom/orchestrator/actions/executors/_kv_metrics.py::sample_from_families 100
-function-lines src/hyperloom/orchestrator/actions/executors/_multi_node_server_lifecycle.py::_wait_for_published_service_ready_async 90
-function-lines src/hyperloom/orchestrator/actions/executors/_multi_node_server_lifecycle.py::_wait_for_server_health_async 141
+function-lines src/hyperloom/orchestrator/actions/executors/_multi_node_server_lifecycle.py::_wait_for_published_service_ready_async 87
+function-lines src/hyperloom/orchestrator/actions/executors/_multi_node_server_lifecycle.py::_wait_for_server_health_async 137
 function-lines src/hyperloom/orchestrator/actions/executors/_multi_node_server_lifecycle.py::restart_server_for_round 135
 function-lines src/hyperloom/orchestrator/actions/executors/_nogit_patch.py::_apply_patch_no_git 141
 function-lines src/hyperloom/orchestrator/actions/executors/_partition_shape.py::validate_session_shape 127
@@ -776,7 +776,7 @@ module-lines src/hyperloom/orchestrator/actions/executors/_workload_envs.py 2158
 module-lines src/hyperloom/orchestrator/actions/executors/baseline.py 4197
 module-lines src/hyperloom/orchestrator/actions/executors/explore.py 1880
 module-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py 4692
-module-lines src/hyperloom/orchestrator/actions/executors/profile.py 1395
+module-lines src/hyperloom/orchestrator/actions/executors/profile.py 1393
 module-lines src/hyperloom/orchestrator/actions/executors/report.py 1366
 module-lines src/hyperloom/orchestrator/actions/executors/roofline.py 1303
 module-lines src/hyperloom/orchestrator/kernel/apply_kernel_patch.py 2657
