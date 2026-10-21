@@ -777,7 +777,7 @@ function-lines src/kernelforge/loop/runner.py::IterationLoop._reconcile_best_pub
 function-lines src/kernelforge/loop/runner.py::IterationLoop._record_iteration_outcome 107
 function-lines src/kernelforge/loop/runner.py::IterationLoop._record_lesson 124
 function-lines src/kernelforge/loop/runner.py::IterationLoop._resolve_keep_sigma 96
-function-lines src/kernelforge/loop/runner.py::IterationLoop._run_locked 256
+function-lines src/kernelforge/loop/runner.py::IterationLoop._run_locked 253
 function-lines src/kernelforge/loop/runner.py::IterationLoop.run_one_iteration 206
 function-lines src/kernelforge/loop/task_preflight.py::_count_graph_replays 85
 function-lines src/kernelforge/loop/task_preflight.py::_preflight_async 195
@@ -844,7 +844,7 @@ module-lines src/kernelforge/fusion/validate.py 1517
 module-lines src/kernelforge/gemm_tune/tuners/_aiter_dense_common.py 1399
 module-lines src/kernelforge/loop/insession_gate.py 1218
 module-lines src/kernelforge/loop/knowledge_integration.py 1457
-module-lines src/kernelforge/loop/runner.py 6051
+module-lines src/kernelforge/loop/runner.py 2520
 module-lines src/kernelforge/loop/task_preparer.py 1299
 module-lines src/kernelforge/orchestrator/analysis.py 2080
 module-lines src/kernelforge/orchestrator/orchestration.py 1831

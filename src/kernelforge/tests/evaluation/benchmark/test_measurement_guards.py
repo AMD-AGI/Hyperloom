@@ -27,6 +27,7 @@ from kernelforge.evaluation.benchmark.baseline import (
 from kernelforge.knowledge.kb_store.identity.run import LoopKernel
 from kernelforge.loop.recovery import CallerRecovery, publish_warm_start_recovery
 from kernelforge.loop.run_state import IterationVerdict, LoopStanding, LoopStateStore, RunState, apply_iteration
+from kernelforge.loop import budget_runtime
 from kernelforge.loop import runner as runner_module
 from kernelforge.loop.runner import IterationResult, _decision_label
 from kernelforge.evaluation.scoring import (
@@ -1135,7 +1136,9 @@ def test_a_re_measure_bench_that_failed_is_reported_as_bought_not_as_measured(mo
 def test_the_extra_benches_are_charged_to_the_round_that_bought_them(monkeypatch):
     """Round admission prices the next round from what this one spent measuring."""
     clock = [1000.0]
-    monkeypatch.setattr(runner_module, "time", SimpleNamespace(time=lambda: clock[0]))
+    fake_time = SimpleNamespace(time=lambda: clock[0])
+    monkeypatch.setattr(runner_module, "time", fake_time)
+    monkeypatch.setattr(budget_runtime, "time", fake_time)
 
     def charged(baseline, runs, extra_rounds=(), *, incumbent=None):
         loop, calls = _attributed_loop(monkeypatch, baseline, runs, extra_rounds)

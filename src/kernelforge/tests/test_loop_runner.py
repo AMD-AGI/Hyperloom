@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import io
 import json
 import os
 import re
@@ -23,8 +24,11 @@ from kernelforge.llm.process_reaping import ReapReport
 from kernelforge.agent_backends import AgentRunResult
 from kernelforge.llm.git import GitError
 from kernelforge.loop import analysis_evidence
+from kernelforge.loop import budget_runtime
 from kernelforge.loop import fanout
+from kernelforge.loop import lane_runtime
 from kernelforge.loop import runner as runner_module
+from kernelforge.loop import workspace_runtime
 from kernelforge.loop.analysis_refresh_policy import AnalysisRefreshDecision
 from kernelforge.loop.archive import CandidateRecord
 from kernelforge.loop.device_hazard import MAX_BLOCKED_ITERATIONS
@@ -53,6 +57,7 @@ from kernelforge.loop.run_state import (
     apply_round_cost,
     apply_supervisor_intervention,
     make_event,
+    pin_iteration,
 )
 from kernelforge.loop.merge_candidates import (
     MERGE_ATTEMPT_STALL_THRESHOLD,
@@ -188,13 +193,31 @@ def test_staged_candidate_is_detected_and_discarded(tmp_path, monkeypatch):
     assert "return 1" in kernel.read_text()
 
 
+def test_the_loop_flushes_stdout_at_every_line(monkeypatch):
+    piped = io.TextIOWrapper(io.BytesIO(), encoding="utf-8")
+    monkeypatch.setattr(sys, "stdout", piped)
+
+    runner_module._line_buffer_stdout()
+
+    assert piped.line_buffering is True
+
+
+def test_a_stdout_that_cannot_be_reconfigured_is_left_as_it_is(monkeypatch):
+    captured = io.StringIO()
+    monkeypatch.setattr(sys, "stdout", captured)
+
+    runner_module._line_buffer_stdout()
+
+    assert sys.stdout is captured
+
+
 def test_working_tree_diff_failure_is_not_treated_as_empty(tmp_path, monkeypatch):
     loop, _workspace = _make_loop(tmp_path, monkeypatch)
 
     def _unreadable_index(*_args, **_kwargs):
         raise GitError(128, ["git", "diff"], "", "fatal: unable to read index")
 
-    monkeypatch.setattr(runner_module, "git", _unreadable_index)
+    monkeypatch.setattr(workspace_runtime, "git", _unreadable_index)
 
     with pytest.raises(GitError, match="unable to read index"):
         loop._working_tree_diff()
@@ -477,7 +500,7 @@ def test_a_run_of_near_misses_cannot_evict_the_best_lineage_pin(
         commit_hash="kept",
         source="iteration",
     )
-    runner_module.pin_iteration(loop.run_state, 3)
+    pin_iteration(loop.run_state, 3)
 
     for iteration in range(4, 14):
         loop._record_iteration_outcome(
@@ -493,7 +516,7 @@ def test_a_run_of_near_misses_cannot_evict_the_best_lineage_pin(
         commit_hash="newer",
         source="iteration",
     )
-    runner_module.pin_iteration(loop.run_state, 14)
+    pin_iteration(loop.run_state, 14)
 
     assert while_best == [3, 7, 8, 9, 10, 11, 12, 13]
     assert loop.run_state.pinned_iterations == [7, 8, 9, 10, 11, 12, 13, 14]
@@ -855,7 +878,7 @@ def test_lanes_that_produced_nothing_do_not_buy_the_round_again(tmp_path, monkey
     async def _no_candidates(**_kwargs):
         return []
 
-    monkeypatch.setattr(runner_module, "run_lanes", _no_candidates)
+    monkeypatch.setattr(lane_runtime, "run_lanes", _no_candidates)
 
     decisions = _fan_out_iteration(tmp_path, monkeypatch, rounds)
 
@@ -880,7 +903,7 @@ def test_candidates_refused_at_intake_do_not_buy_the_round_again(tmp_path, monke
             runner_module.LaneResult(lane_id="2", plan="b", diff=tampered),
         ]
 
-    monkeypatch.setattr(runner_module, "run_lanes", _rejected_candidates)
+    monkeypatch.setattr(lane_runtime, "run_lanes", _rejected_candidates)
 
     decisions = _fan_out_iteration(tmp_path, monkeypatch, rounds)
 
@@ -900,7 +923,7 @@ def test_a_lane_infrastructure_failure_does_not_buy_the_round_again(tmp_path, mo
     async def _no_room(**_kwargs):
         raise OSError(28, "No space left on device")
 
-    monkeypatch.setattr(runner_module, "run_lanes", _no_room)
+    monkeypatch.setattr(lane_runtime, "run_lanes", _no_room)
 
     decisions = _fan_out_iteration(tmp_path, monkeypatch, rounds)
 
@@ -1204,7 +1227,7 @@ async def test_a_lane_infrastructure_failure_falls_back_to_one_session(
         raise OSError(28, "No space left on device")
 
     monkeypatch.setattr(loop, "_run_orchestration", _lane_plans_available(loop, ["a", "b"]))
-    monkeypatch.setattr(runner_module, "run_lanes", _no_room)
+    monkeypatch.setattr(lane_runtime, "run_lanes", _no_room)
 
     await loop._fan_out_round(
         iteration=3,
@@ -1227,7 +1250,7 @@ async def test_a_programming_error_in_a_fan_out_round_is_not_swallowed(
         raise TypeError("session() got an unexpected keyword argument")
 
     monkeypatch.setattr(loop, "_run_orchestration", _lane_plans_available(loop, ["a", "b"]))
-    monkeypatch.setattr(runner_module, "run_lanes", _wrong_call)
+    monkeypatch.setattr(lane_runtime, "run_lanes", _wrong_call)
 
     with pytest.raises(TypeError):
         await loop._fan_out_round(
@@ -1248,7 +1271,7 @@ async def test_lane_copies_are_made_beside_the_workspace(tmp_path, monkeypatch):
         seen["driver"] = driver
         return []
 
-    monkeypatch.setattr(runner_module, "run_lanes", _capture)
+    monkeypatch.setattr(lane_runtime, "run_lanes", _capture)
 
     await loop._fill_lane_queue(agent_factory=None, lane_plans=["a", "b"])
 
@@ -1360,7 +1383,7 @@ def test_a_lane_candidate_is_rejected_when_the_driver_stops_being_canonical(
     )
     diff = _diff_of(workspace, lambda: driver.write_text("print('bypass')\n"))
     loop._lane_queue = [runner_module.LaneResult(lane_id="1", plan="tamper", diff=diff)]
-    monkeypatch.setattr(runner_module, "is_protected_path", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(lane_runtime, "is_protected_path", lambda *_args, **_kwargs: False)
 
     assert loop._take_lane_candidate() is None
     assert loop._validate_driver_integrity(loop.run_state)
@@ -1546,7 +1569,7 @@ def test_a_stack_does_not_take_an_iteration_that_is_holding_a_plan(tmp_path, mon
     async def _no_candidates(**_kwargs):
         return []
 
-    monkeypatch.setattr(runner_module, "run_lanes", _no_candidates)
+    monkeypatch.setattr(lane_runtime, "run_lanes", _no_candidates)
 
     asyncio.run(
         loop.run(
@@ -2333,8 +2356,8 @@ def test_the_finalize_reserve_is_its_own_bound_not_a_term_inside_admission(
 
         return _wrapped
 
-    monkeypatch.setattr(runner_module, "admit_round", _spy(admit_round))
-    monkeypatch.setattr(runner_module, "admit_dispatch", _spy(admit_dispatch))
+    monkeypatch.setattr(budget_runtime, "admit_round", _spy(admit_round))
+    monkeypatch.setattr(budget_runtime, "admit_dispatch", _spy(admit_dispatch))
 
     # Halfway between "clears each bound on its own" and "covers their sum".
     between = 0.5 * (clears_both + stacked)
@@ -8136,7 +8159,7 @@ def _bare_loop(tmp_path, monkeypatch, *, running: bool = False):
 
 def _site_full_diff(tmp_path, monkeypatch, failure):
     loop, _workspace = _make_loop(tmp_path, monkeypatch)
-    monkeypatch.setattr(runner_module, "git", _raiser(failure))
+    monkeypatch.setattr(workspace_runtime, "git", _raiser(failure))
     return loop._full_diff("c0ffee")
 
 
