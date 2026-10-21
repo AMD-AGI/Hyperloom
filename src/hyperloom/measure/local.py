@@ -42,12 +42,14 @@ from hyperloom.common.env_safety import filter_untrusted_env_mapping, is_allowed
 from hyperloom.contracts.measurement import SandboxFacts
 from hyperloom.measure.attachments import AttachmentError, place_attachments, substitute
 from hyperloom.measure.accuracy import read_accuracy
+from hyperloom.measure import log_causes
+from hyperloom.measure.boot_watch import BOOT_CANCEL_REASON, BootGuard, boot_limit_sec
 from hyperloom.measure.compile import CompiledEnvironment, LocalBlobStore
 from hyperloom.measure.decode import DecodePassError, plan_pass, run_pass, vocab_size_of, write_outputs
 from hyperloom.measure.farm import FarmError, build_farm, place_farm, server_python, verify_farm
 from hyperloom.measure.profile_traces import PROFILE_DIR, collect_traces
 from hyperloom.measure.repro import ReproError, find_case, run_case
-from hyperloom.measure.returncodes import HOSTED_INFRA_FAILURE_RC
+from hyperloom.measure.returncodes import HOSTED_INFRA_FAILURE_RC, SERVER_BOOT_TIMEOUT_RC
 from hyperloom.sandbox.node import node_name
 from hyperloom.measure.socket import RoundOutcome, TestCall, TestOutcome
 from hyperloom.measure.spec import Attachment
@@ -64,6 +66,7 @@ from hyperloom.orchestrator.actions.executors import (
     run_grid_warmup_enabled,
     teardown_lifecycle_server,
 )
+from hyperloom.orchestrator.actions.cancel_channel import CancelScope, current_cancel_scope, use_cancel_scope
 from hyperloom.orchestrator.actions.executors.benchmark_backend import resolve_backend
 from hyperloom.orchestrator.actions.stop_attribution import (
     ORCHESTRATOR_CANCELLED_CLASS,
@@ -84,6 +87,7 @@ _STOP_RETURNCODES = {
 _BOOT_ONLY_NOTE = "server_lifecycle_boot_only"
 _OUTPUT_POLL_SEC = 5.0
 _LOG_TAIL_CHARS = 64 * 1024
+_BENCHMARK_STDERR = "benchmark_stderr.log"
 _ACCURACY = "accuracy"
 _UTF8 = "utf-8"
 _PROFILE = "profile"
@@ -149,6 +153,8 @@ class _Run:
     case_failed: bool = False
     started: float = field(default_factory=time.monotonic)
     notes: list[str] = field(default_factory=list)
+    #: Ends a round whose server is not ready in time; ``None`` when the caller owns the cancellation.
+    boot: BootGuard | None = None
 
     def add(self, point: int, result: VariantResult) -> bool:
         """Record one result; say whether the test must go on."""
@@ -169,7 +175,7 @@ class LocalMeasurementBackend:
         _validate(call)
         with _PROCESS_LOCK, _rebuilt_environment(call) as call, _test_environment(call) as unset_envs:
             run = _Run(call, unset_envs)
-            with _watch_output(call):
+            with _watch_output(call), _guard_boot(run):
                 asyncio.run(_runner_of(call)(run))
         _raise_on_timeout(run)
         if call.kind == _PROFILE:
@@ -379,6 +385,27 @@ def _watch_output(call: TestCall) -> Iterator[None]:
         thread.join(timeout=_OUTPUT_POLL_SEC + 1)
 
 
+@contextlib.contextmanager
+def _guard_boot(run: _Run) -> Iterator[None]:
+    """Publish the cancel scope a round's boot limit cancels, unless the caller already published its own."""
+    if current_cancel_scope() is not None:
+        yield
+        return
+    scope = CancelScope()
+    run.boot = BootGuard(Path(run.call.output_dir), scope)
+    with use_cancel_scope(scope):
+        yield
+
+
+def _booting(run: _Run, point: int, round_args: dict[str, Any]) -> contextlib.AbstractContextManager[None]:
+    """Watch the boot of the round about to run, unless it reuses a ready server or no ready stamp can be expected."""
+    call = run.call
+    if run.boot is None or round_args.get("server_already_ready") or call.serving_lease is not None:
+        return contextlib.nullcontext()
+    limit = boot_limit_sec(_point_config(call.points[point]).get("benchmark") or {}, call.timeout_sec)
+    return contextlib.nullcontext() if limit is None else run.boot.watching(limit)
+
+
 # --- running ------------------------------------------------------------------------------------------------------
 
 
@@ -408,7 +435,7 @@ def _free_port_for(point: Path, server_lifecycle: dict[str, Any] | None) -> Iter
 async def _grid(run: _Run, point: int, name: str, **kwargs: Any) -> VariantResult:
     """One ``run_grid`` call for the point at index ``point``."""
     call = run.call
-    with _free_port_for(call.points[point], kwargs.get("server_lifecycle")) as base_yaml:
+    with _free_port_for(call.points[point], kwargs.get("server_lifecycle")) as base_yaml, _booting(run, point, kwargs):
         results = await run_grid(
             base_yaml_path=base_yaml,
             base_extra_args="",
@@ -797,16 +824,50 @@ def _clean_returncode(run: _Run) -> int:
     return HOSTED_INFRA_FAILURE_RC if run.case_failed else int(run.traceless)
 
 
+def _failure_logs(run: _Run) -> list[str]:
+    """The tails of the server log and of the benchmark's own stderr of every failed round.
+
+    The launcher's pipe seldom holds the cause: the server prints a refused flag or a crash into ``server.log``, and the
+    evaluation client prints a refused request into ``benchmark_stderr.log``.
+    """
+    logs: list[str] = []
+    for _, result in run.results:
+        if not _is_failure(result) or not result.server_log_path:
+            continue
+        beside = Path(result.server_log_path).parent
+        stderr_logs = [beside / _BENCHMARK_STDERR, *sorted(beside.glob(f"benchmark_*/{_BENCHMARK_STDERR}"))]
+        logs.extend(_read_tail(str(path)) for path in [Path(result.server_log_path), *stderr_logs])
+    return logs
+
+
+def _boot_timeout_detail(run: _Run) -> str:
+    """What the boot guard saw when it ended the test, or ``""`` when it did not: the limit, and where the log stopped."""
+    if run.boot is None or run.boot.expired_after is None or run.stopped_rc != ORCHESTRATOR_CANCELLED_RETURNCODE:
+        return ""
+    logs = [_read_tail(result.server_log_path) for _, result in run.results if _is_failure(result)]
+    ends = log_causes.last_line(next((text for text in logs if text), ""))
+    detail = f"the server was not ready within {run.boot.expired_after:.0f}s of the {run.call.timeout_sec:.0f}s a round may take"
+    return f"{detail}; its log ends: {ends}" if ends else detail
+
+
 def _outcome(run: _Run) -> TestOutcome:
     from hyperloom.measure.failures import Disposition, classify_test_failure
 
     call = run.call
     rounds = [r for point, result in run.results for r in _rounds(run, point, result)]
+    detail = _boot_timeout_detail(run)
+    if detail:
+        # The guard ended the round by cancelling it; the cancellation is the symptom, the slow boot the failure.
+        rounds = [
+            dataclasses.replace(r, returncode=SERVER_BOOT_TIMEOUT_RC) if r.returncode == run.stopped_rc else r
+            for r in rounds
+        ]
+        run.notes.append(f"{BOOT_CANCEL_REASON}: {detail}")
     failed = [r for r in rounds if r.returncode != 0]
     returncode = failed[0].returncode if failed else _clean_returncode(run)
     stderr = "\n".join([*(result.error for _, result in run.results if result.error), *run.notes])
-    logs = [stderr, *(_read_tail(result.server_log_path) for _, result in run.results if _is_failure(result))]
-    verdict = classify_test_failure(returncode=returncode, logs=logs)
+    logs = [stderr, *_failure_logs(run)]
+    verdict = classify_test_failure(returncode=returncode, logs=logs, detail=detail)
     summary = [
         {"point": p, "name": r.name, "status": r.status, "returncode": r.returncode, "error_class": r.error_class}
         for p, r in run.results

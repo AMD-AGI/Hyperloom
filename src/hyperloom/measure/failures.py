@@ -7,8 +7,10 @@ One function decides for the local backend, the hosted backend and the runner, s
 wherever it is read. The classes drive different follow-ups in the tool layer:
 
 * ``infra``: nothing about the candidate was learned; retry in a fresh sandbox, write no negative result;
-* ``candidate``: the log carries a known failure signature; record a negative result;
-* ``unclear``: non-zero with no known signature, or a timeout; rerun once in a fresh sandbox.
+* ``candidate``: the log carries a known failure signature, the server refused its own command line, or it did not
+  become ready within its boot limit; record a negative result;
+* ``unclear``: non-zero with no known signature, or a timeout; rerun once in a fresh sandbox. The reason still names
+  what the log says (a refused evaluation request, a Python exception) when it says anything.
 
 A refused instruction sheet or a rejected result bundle is none of these. It is a program error (or a tampered result),
 so it gets no failure class at all: calling it ``candidate`` would write a false negative, and calling it ``unclear`` or
@@ -22,13 +24,15 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import Enum
 
-from hyperloom.common.failure_signature import classify_failure
+from hyperloom.common.failure_signature import SERVE_FLAG, classify_failure
 from hyperloom.contracts.measurement import FailureClass
+from hyperloom.measure import log_causes
 from hyperloom.measure.returncodes import (
     HOSTED_INFRA_FAILURE_RC,
     HOSTED_RESULT_REJECTED_RC,
     HOSTED_RUNNER_UNAVAILABLE_RC,
     HOSTED_SPEC_REJECTED_RC,
+    SERVER_BOOT_TIMEOUT_RC,
 )
 
 #: Only the tail of a log is read, so a runner and a local backend holding the same log in different amounts decide
@@ -61,6 +65,12 @@ PROGRAM_ERROR_CLASSES: frozenset[str] = frozenset({"spec_rejected", "result_reje
 #: The server could not bind its port. The launcher picks a free port and releases it before the server binds, so
 #: another process can take it in between; the candidate has no say in that, and a fresh sandbox does not repeat it.
 PORT_IN_USE_REASON = "port_in_use"
+#: The server did not report ready within the boot limit (``hyperloom.measure.boot_watch``).
+SERVER_BOOT_TIMEOUT_REASON = "server_boot_timeout"
+#: The two causes an unclear failure names when its log carries them; the reason is ``<prefix>: <the log's line>``.
+LM_EVAL_BAD_REQUEST_REASON = "lm_eval_http_400"
+PYTHON_EXCEPTION_REASON = "python_exception"
+NO_KNOWN_SIGNATURE_REASON = "no_known_signature"
 _PORT_IN_USE = re.compile(r"address already in use|\[Errno 98\]", re.IGNORECASE)
 
 # Sentinel return codes of the local flow (``orchestrator/actions/executors/_subprocess_kill.py``). The names stay
@@ -122,11 +132,13 @@ def classify_test_failure(
     timed_out: bool = False,
     error_class: str | None = None,
     logs: Iterable[str] = (),
+    detail: str = "",
 ) -> FailureClassification:
     """Classify how one test ended.
 
     ``error_class`` is what the runner's ``status.json`` or the hosted backend reports; ``logs`` are the texts a known
-    failure signature may be found in (stdout and stderr tails, ``server.log`` tail).
+    failure signature may be found in (stdout and stderr tails, the tails of ``server.log`` and of the benchmark's
+    stderr); ``detail`` is what the caller observed of a boot timeout, which the return code alone does not say.
     """
     if error_class is not None:
         return _from_error_class(error_class)
@@ -140,8 +152,16 @@ def classify_test_failure(
         return _unclear("timeout")
     if returncode == 0:
         return FailureClassification(Disposition.SUCCEEDED)
-    # The silence watchdog reaped a ready server that stopped writing; a crash it logged before going quiet names it.
-    return _from_logs(logs, unmatched="server_stalled" if returncode == _SERVER_STALLED_RC else "no_known_signature")
+    text = "\n".join(_bounded(part) for part in logs if part)
+    named = _named_by_logs(text)
+    if named is not None:
+        return named
+    if returncode == _SERVER_STALLED_RC:
+        # The silence watchdog reaped a ready server that stopped writing; a crash it logged before going quiet names it.
+        return _unclear("server_stalled")
+    if returncode == SERVER_BOOT_TIMEOUT_RC:
+        return _candidate(f"{SERVER_BOOT_TIMEOUT_REASON}: {detail}" if detail else SERVER_BOOT_TIMEOUT_REASON)
+    return _from_unnamed_logs(text)
 
 
 def _from_error_class(error_class: str) -> FailureClassification:
@@ -154,14 +174,31 @@ def _from_error_class(error_class: str) -> FailureClassification:
     return FailureClassification(Disposition.PROGRAM_ERROR, failure_reason=f"unknown_error_class:{error_class}")
 
 
-def _from_logs(logs: Iterable[str], *, unmatched: str) -> FailureClassification:
-    text = "\n".join(_bounded(part) for part in logs if part)
+def _named_by_logs(text: str) -> FailureClassification | None:
+    """The verdict a log gives by itself: a port taken, a known signature, a refused command line; else ``None``."""
     if _PORT_IN_USE.search(text):
         return _infra(PORT_IN_USE_REASON)
+    flag_error = log_causes.argparse_error(text)
     signature = classify_failure(text)
     if signature.is_actionable:
-        return FailureClassification(Disposition.FAILED, FailureClass.CANDIDATE, signature.kind)
-    return _unclear(unmatched)
+        # The signature names the kind; for a refused flag the line that refused it names the flag.
+        return _candidate(
+            f"{SERVE_FLAG}: {flag_error}" if signature.kind == SERVE_FLAG and flag_error else signature.kind
+        )
+    if flag_error:
+        return _candidate(f"{SERVE_FLAG}: {flag_error}")
+    return None
+
+
+def _from_unnamed_logs(text: str) -> FailureClassification:
+    """An unclear failure, with the line of the log that says what happened when there is one."""
+    for reason, cause in (
+        (LM_EVAL_BAD_REQUEST_REASON, log_causes.bad_request(text)),
+        (PYTHON_EXCEPTION_REASON, log_causes.python_exception(text)),
+    ):
+        if cause:
+            return _unclear(f"{reason}: {cause}")
+    return _unclear(NO_KNOWN_SIGNATURE_REASON)
 
 
 def _bounded(log: str) -> str:
@@ -176,6 +213,10 @@ def _bounded(log: str) -> str:
 
 def _infra(reason: str) -> FailureClassification:
     return FailureClassification(Disposition.FAILED, FailureClass.INFRA, reason)
+
+
+def _candidate(reason: str) -> FailureClassification:
+    return FailureClassification(Disposition.FAILED, FailureClass.CANDIDATE, reason)
 
 
 def _unclear(reason: str) -> FailureClassification:

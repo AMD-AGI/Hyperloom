@@ -17,10 +17,10 @@ from pathlib import Path
 
 import yaml
 
-from hyperloom.contracts.measurement import AttachmentRef
+from hyperloom.contracts.measurement import AttachmentRef, FailureClass
 from hyperloom.measure import signing
 from hyperloom.measure.docs import DocumentError
-from hyperloom.measure.failures import Disposition, classify_test_failure
+from hyperloom.measure.failures import Disposition, FailureClassification, classify_test_failure
 from hyperloom.measure.local import LocalMeasurementBackend, TestCallRefused
 from hyperloom.measure.manifest import encode_manifest, RESULT_SCHEMA
 from hyperloom.measure.runner import hardware
@@ -211,13 +211,25 @@ def _execute(call: TestCall):
         raise RunnerFailure(_SPEC_REJECTED, str(exc)) from exc
 
 
+def _verdict_of(outcome) -> FailureClassification:
+    """The backend's verdict when it gave a failure class, else a classification of the outcome's stderr.
+
+    The backend read the server log and the benchmark's stderr of every failed round, which hold the causes the outcome's
+    own stderr lacks and which this process does not know the paths of.
+    """
+    if outcome.failure_class is not None and outcome.failure_reason:
+        failure_class = FailureClass(getattr(outcome.failure_class, "value", outcome.failure_class))
+        return FailureClassification(Disposition.FAILED, failure_class, outcome.failure_reason)
+    return classify_test_failure(returncode=outcome.returncode, logs=[outcome.stderr])
+
+
 def _outcome_document(outcome, timed_out: bool) -> dict:
     if timed_out:
         verdict = classify_test_failure(returncode=_TIMED_OUT_RC, timed_out=True)
         rc, out, err = _TIMED_OUT_RC, "", "the test exceeded its time limit"
     else:
         rc, out, err = outcome.returncode, outcome.stdout, outcome.stderr
-        verdict = classify_test_failure(returncode=rc, logs=[err])
+        verdict = _verdict_of(outcome)
     failed = verdict.disposition is not Disposition.SUCCEEDED
     failure_class = verdict.failure_class.value if verdict.failure_class else None
     return {

@@ -29,7 +29,7 @@ def _classify(**kwargs):
 
 def test_the_hosted_return_codes_are_distinct_negative_and_clear_of_the_local_sentinels() -> None:
     codes = sorted(returncodes.HOSTED_RETURNCODES)
-    assert len(codes) == 4 and all(code < 0 for code in codes)
+    assert len(codes) == 5 and all(code < 0 for code in codes)
     local = set()
     for module in ("_subprocess_kill", "_ray_serving"):
         mod = importlib.import_module(f"hyperloom.orchestrator.actions.executors.{module}")
@@ -55,6 +55,24 @@ def test_a_server_that_went_silent_is_an_unclear_stall_unless_its_log_names_the_
 
     assert (stalled.failure_class, stalled.failure_reason) == (FailureClass.UNCLEAR, "server_stalled")
     assert (crashed.failure_class, crashed.failure_reason) == (FailureClass.CANDIDATE, failure_signature.IMPORT_ERROR)
+
+
+def test_a_server_that_was_not_ready_in_time_is_the_candidates_failure_unless_its_log_names_another_cause() -> None:
+    boot = returncodes.SERVER_BOOT_TIMEOUT_RC
+    slow = _classify(
+        returncode=boot, logs=["[aiter] TunableOp: tuning gemm 17/4096\n"], detail="not ready within 1800s"
+    )
+    bare = _classify(returncode=boot)
+    crashed = _classify(returncode=boot, logs=[IMPORT_ERROR_LOG], detail="not ready within 1800s")
+    bound = _classify(returncode=boot, logs=["[Errno 98] address already in use"], detail="not ready within 1800s")
+
+    assert (slow.failure_class, slow.failure_reason) == (
+        FailureClass.CANDIDATE,
+        "server_boot_timeout: not ready within 1800s",
+    )
+    assert (bare.failure_class, bare.failure_reason) == (FailureClass.CANDIDATE, "server_boot_timeout")
+    assert (crashed.failure_class, crashed.failure_reason) == (FailureClass.CANDIDATE, failure_signature.IMPORT_ERROR)
+    assert (bound.failure_class, bound.failure_reason) == (FailureClass.INFRA, "port_in_use")
 
 
 def test_a_clean_exit_is_a_success() -> None:

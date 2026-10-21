@@ -19,6 +19,9 @@ HOSTED_INFRA_FAILURE_RC: int = -921
 HOSTED_SPEC_REJECTED_RC: int = -922
 #: The result bundle failed verification: a program error or a tampered result, never a measurement.
 HOSTED_RESULT_REJECTED_RC: int = -923
+#: The inference server did not report ready within the boot limit (``hyperloom.measure.boot_watch``) and the round was
+#: ended; what the candidate does at boot is the cause.
+SERVER_BOOT_TIMEOUT_RC: int = -924
 
 HOSTED_RETURNCODES: frozenset[int] = frozenset(
     {
@@ -26,5 +29,6 @@ HOSTED_RETURNCODES: frozenset[int] = frozenset(
         HOSTED_INFRA_FAILURE_RC,
         HOSTED_SPEC_REJECTED_RC,
         HOSTED_RESULT_REJECTED_RC,
+        SERVER_BOOT_TIMEOUT_RC,
     }
 )

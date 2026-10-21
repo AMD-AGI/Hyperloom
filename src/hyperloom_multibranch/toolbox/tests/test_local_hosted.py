@@ -156,12 +156,14 @@ async def test_the_factory_builds_a_toolbox_that_runs_a_test_end_to_end(
         assert entry is not None and entry.outcome is not None and "result" in entry.outcome, entry.outcome
         result = TestResult.from_document(entry.outcome["result"])
         # No GPU here, so the shipped runner cannot serve a model: what this proves is the wiring. The real runner
-        # started from the local template, signed a bundle, the backend verified it, and the toolbox applied its
-        # unclear-failure rule (one rerun in a new sandbox) and wrote the final failure to the notebook.
-        assert result.validity is Validity.CANDIDATE_FAILED and result.failure_class is FailureClass.UNCLEAR
-        assert len(result.attempts) == 2 and result.manifest_sha256, result
+        # started from the local template, signed a bundle, the backend verified it, and the toolbox took the cause
+        # the server log names (no sglang module) as the candidate's failure, did not rerun it and wrote it to the
+        # notebook.
+        assert result.validity is Validity.CANDIDATE_FAILED and result.failure_class is FailureClass.CANDIDATE
+        assert result.failure_reason == "import_error"
+        assert len(result.attempts) == 1 and result.manifest_sha256, result
         sandboxes = {rec.sandbox_id for rec in toolbox.backend.journal.records() if rec.request_id == request_id}
-        assert len(sandboxes) == 2
+        assert len(sandboxes) == 1
         record = await notebook.record(request_id)
         assert record.result is not None and record.result.manifest_sha256 == result.manifest_sha256
         assert toolbox.backend.journal.latest(request_id).extra["verified"] is True  # type: ignore[union-attr]

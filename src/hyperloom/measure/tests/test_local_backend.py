@@ -1308,3 +1308,35 @@ def test_a_repro_call_that_is_not_one_case_against_one_server_is_refused(grid, s
     with pytest.raises(TestCallRefused, match=match):
         _run(_repro_call(tmp_path, **kwargs))
     assert grid.calls == []
+
+
+def _failed_round_with_logs(grid, tmp_path, *, server_log: str, benchmark_stderr: str = "") -> VariantResult:
+    workspace = tmp_path / "ws" / "test"
+    workspace.mkdir(parents=True)
+    (workspace / "server.log").write_text(server_log, encoding="utf-8")
+    if benchmark_stderr:
+        (workspace / "benchmark_stderr.log").write_text(benchmark_stderr, encoding="utf-8")
+    return grid.result("test", status="failed", returncode=1, error="", server_log_path=str(workspace / "server.log"))
+
+
+def test_a_failed_round_is_classified_from_the_flag_error_in_its_server_log(grid, tmp_path):
+    flag_error = "launch_server.py: error: ambiguous option: --chunked-prefill could match --chunked-prefill-size"
+    grid.answers["test"] = _failed_round_with_logs(
+        grid, tmp_path, server_log=f"usage: launch_server.py [-h]\n{flag_error}\n"
+    )
+
+    outcome = _run(_call(tmp_path))
+
+    assert (outcome.returncode, outcome.failure_class) == (1, "candidate")
+    assert outcome.failure_reason == f"serve_flag: {flag_error}"
+
+
+def test_a_failed_round_is_classified_from_the_refused_request_in_its_benchmark_stderr(grid, tmp_path):
+    refusal = 'API request failed with error message: {"message":"maximum context length is 5120 tokens","code":400}'
+    grid.answers["test"] = _failed_round_with_logs(
+        grid, tmp_path, server_log="INFO server booted\n", benchmark_stderr=f"WARNING {refusal}\n"
+    )
+
+    outcome = _run(_call(tmp_path))
+
+    assert (outcome.failure_class, outcome.failure_reason) == ("unclear", f"lm_eval_http_400: WARNING {refusal}")

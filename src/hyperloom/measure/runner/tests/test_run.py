@@ -16,6 +16,7 @@ from hyperloom.measure import signing
 from hyperloom.measure.bundle import BundleExpectation, verify_bundle
 from hyperloom.measure.manifest import ResultManifest
 from hyperloom.measure.runner import run as runner
+from hyperloom.measure.returncodes import SERVER_BOOT_TIMEOUT_RC
 from hyperloom.measure.runner.hardware import EccCounts, GpuFacts
 from hyperloom.measure.socket import RoundOutcome, TestCall, TestOutcome
 from hyperloom.measure.spec import MeasurementSpec
@@ -180,6 +181,50 @@ def test_a_failed_test_is_a_signed_result_with_its_failure_class(tmp_path, env, 
     outcome = ResultManifest.from_bytes((tmp_path / "out" / "manifest.json").read_bytes()).outcome
     assert outcome.returncode == 1 and (outcome.failure_class or outcome.error_class)
     assert _status(tmp_path)["state"] == "succeeded"
+
+
+def test_the_cause_the_backend_read_in_the_logs_is_what_the_signed_result_records(tmp_path, env, monkeypatch):
+    reason = (
+        "serve_flag: launch_server.py: error: ambiguous option: --chunked-prefill could match --chunked-prefill-size"
+    )
+
+    def refused_flag(call):
+        return TestOutcome(
+            1, "[]", "", (), SandboxFacts(sandbox_id="x"), failure_class="candidate", failure_reason=reason
+        )
+
+    monkeypatch.setattr(runner, "LocalMeasurementBackend", _Backend(refused_flag))
+
+    assert _go(tmp_path, env, _sheet()) == 0
+
+    outcome = ResultManifest.from_bytes((tmp_path / "out" / "manifest.json").read_bytes()).outcome
+    assert (outcome.failure_class, outcome.failure_reason, outcome.error_class) == ("candidate", reason, None)
+
+
+def test_a_boot_timeout_is_recorded_as_the_candidates_failure_with_its_return_code(tmp_path, env, monkeypatch):
+    reason = "server_boot_timeout: the server was not ready within 1800s of the 3600s a round may take"
+
+    def slow_boot(call):
+        return TestOutcome(
+            SERVER_BOOT_TIMEOUT_RC,
+            "[]",
+            "",
+            (),
+            SandboxFacts(sandbox_id="x"),
+            failure_class="candidate",
+            failure_reason=reason,
+        )
+
+    monkeypatch.setattr(runner, "LocalMeasurementBackend", _Backend(slow_boot))
+
+    assert _go(tmp_path, env, _sheet()) == 0
+
+    outcome = ResultManifest.from_bytes((tmp_path / "out" / "manifest.json").read_bytes()).outcome
+    assert (outcome.returncode, outcome.failure_class, outcome.failure_reason) == (
+        SERVER_BOOT_TIMEOUT_RC,
+        "candidate",
+        reason,
+    )
 
 
 def test_a_timeout_is_recorded_as_timed_out(tmp_path, env, monkeypatch):
