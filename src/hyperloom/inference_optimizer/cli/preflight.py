@@ -1579,7 +1579,7 @@ def _check_platform_tuning() -> dict[str, Any]:
     }
 
 
-_TRACELENS_REQUIRED_CLIS: tuple[str, ...] = ("TraceLens_generate_perf_report_pytorch_inference",)
+_TRACELENS_REQUIRED_CLIS: tuple[str, ...] = ("TraceLens_generate_perf_report_from_config",)
 
 
 def _tracelens_required_at_preflight(no_kernel: bool, enable_roofline: bool) -> bool:
