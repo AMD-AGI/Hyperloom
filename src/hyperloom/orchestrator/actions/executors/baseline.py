@@ -108,7 +108,7 @@ from ._inferencex_patcher import (
 )
 from ._git import _git_head_sha
 from ._agentx_prefix_cache import refuse_cacheless_agentx_baseline
-from ._magpie_patcher import ensure_client_tokenizer_hook, ensure_eval_concurrency_compat
+from ._magpie_patcher import client_tokenizer_hook_installed, ensure_eval_concurrency_compat
 from ._patch_snapshot import (
     _create_patch_snapshot,
     _patch_touched_paths_from_text,
@@ -175,10 +175,11 @@ _MOE_SCHEME_CONTEXT_MARKERS = (
 )
 
 
-# Fast-exit arg errors (vLLM/sglang exits in <30s on bad CLI args) should not consume the slow-baseline retry budget.
+# Time limit for heuristic CLI-error matching; explicit configuration validation is independent of runtime.
 FAST_EXIT_THRESHOLD_SEC = 30.0
 # The error class of a subprocess that exited nonzero for no recognised cause.
 _SUBPROCESS_NONZERO = "subprocess_nonzero"
+_ARG_ERROR_CLASS = "fast_exit_arg_error"
 _ARG_ERROR_PATTERNS = (
     "unrecognized arguments",
     "invalid choice",
@@ -693,30 +694,20 @@ def _classify_subprocess_error(
     stderr_tail: str,
     returncode: int | None = None,
 ) -> str:
-    """Return 'fast_exit_arg_error' when the subprocess died fast on an arg
-    validation error, else 'subprocess_nonzero'.
-
-    Args:
-        elapsed_sec: Subprocess wall-clock runtime in seconds.
-        stderr_tail: Tail of the subprocess stderr used for marker matching.
-        returncode: The subprocess returncode, read for the sentinels that
-            name their own cause.
-
-    Returns:
-        The named class for a recognised sentinel, ``"fast_exit_arg_error"``
-        for a fast exit caused by argument validation, else
-        ``"subprocess_nonzero"``.
-    """
+    """Recognize KV-cache OOM, configuration validation, and fast argument failures."""
     tail = (stderr_tail or "").lower()
     # KV-cache OOM can surface long after weight load; match before the fast-exit elapsed gate below.
     if any(m in tail for m in _KV_CACHE_OOM_MARKERS):
         return "kv_cache_oom"
+    # Config validation can follow slow framework imports; elapsed time does not change its cause.
+    if re.search(r"\bvalidation errors? for cacheconfig\b", tail):
+        return _ARG_ERROR_CLASS
     if elapsed_sec >= FAST_EXIT_THRESHOLD_SEC:
         return _SUBPROCESS_NONZERO
     if any(p.lower() in tail for p in _ARG_ERROR_PATTERNS):
-        return "fast_exit_arg_error"
+        return _ARG_ERROR_CLASS
     if "valueerror:" in tail and any(p in tail for p in _ARG_ERROR_CONTEXT_PATTERNS):
-        return "fast_exit_arg_error"
+        return _ARG_ERROR_CLASS
     return _SUBPROCESS_NONZERO
 
 
@@ -3975,19 +3966,13 @@ class BaselineExecutor(BenchmarkRunExecutor):
         # Required custom tokenizers must reach the throughput client as well as eval.
         tok_mode = _client_tokenizer_mode(self._model_from_config(config_path))
         if tok_mode:
-            try:
-                hook_ok = ensure_client_tokenizer_hook(
-                    inferencex_dir=ix_root or None,
-                    script_name=self._client_script_from_config(config_path),
-                )
-            except OSError as exc:
-                log.error("baseline_executor: client tokenizer hook raised for %s: %s", ix_root, exc)
-                hook_ok = False
-            if not hook_ok:
+            script_name = self._client_script_from_config(config_path)
+            if not script_name or not client_tokenizer_hook_installed(script_name, inferencex_dir=ix_root or None):
                 msg = (
-                    f"the benchmark client cannot be told to load the {tok_mode!r} tokenizer: "
-                    f"the hook could not be installed in InferenceX's benchmark scripts "
-                    f"(inferencex={ix_root or '<unset>'}). This model's client resolves the "
+                    f"the benchmark client script {script_name or '<unresolved>'!r} cannot be told to load the "
+                    f"{tok_mode!r} tokenizer: it has no --tokenizer-mode hook "
+                    f"(inferencex={ix_root or '<unset>'}). Use a Magpie revision at or above "
+                    "1eb3df69de9cb26cb5c8109e43371dd1abb9bbed. This model's client resolves the "
                     "checkpoint through HF AutoConfig, which cannot map its model_type, so it "
                     "would die before issuing a request and the round would be graded a boot "
                     "failure with the server up."

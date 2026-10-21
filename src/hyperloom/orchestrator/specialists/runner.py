@@ -46,6 +46,7 @@ from .domains import (
     FREEFORM_DOMAIN,
     SPECIALIST_DOMAIN_KEYS,
     SpecialistDomain,
+    dispatch_domain_key,
     domain_for_tag,
     get_domain,
     normalize_dispatch_tags,
@@ -578,15 +579,9 @@ class SpecialistRunner:
                 execute phase should be skipped (e.g. unknown domain).
         """
         params = ctx.task.params or {}
-        domain_key = str(params.get("domain") or "").strip()
-        # Back-fill domain_key from the first resolved tag for tag-only dispatch.
-        if not domain_key:
-            resolved_tags = normalize_dispatch_tags(params)
-            if resolved_tags:
-                domain_key = resolved_tags[0]
+        domain_key = dispatch_domain_key(params)
         gap = str(params.get("gap_canonical_id") or params.get("gap") or "").strip()
         max_turns = resolve_specialist_max_turns(params.get("max_turns"), default=self.default_max_turns)
-        # Resolve by anchor first then key so a domain carrying the KB anchor matches its entry.
         domain = domain_for_tag(domain_key)
         profile = resolve_specialist_profile(params, domain=domain)
         task_description = str(params.get("task_description") or "").strip()
@@ -860,7 +855,7 @@ class SpecialistRunner:
                         "query": _redact_transcript_value(call.get("query")),
                     }
                     f.write(json.dumps(row, sort_keys=True) + "\n")
-        except Exception:
+        except OSError:
             log.debug(
                 "full-trace: specialist intel append failed for task_id=%s turn=%s",
                 task_id,
@@ -1211,33 +1206,13 @@ class SpecialistRunner:
             patches=deduped,
             patch_roots=collected_roots,
         )
-        kept, ungrounded, grounding, spans_roots = _patch_safety.vet_patches(
+        vetted = _patch_safety.vet_patches(
             deduped,
             base_checkout=base_checkout,
             candidate_roots=candidate_roots,
             explicit_root=explicit_root,
         )
-        numeric_warnings = _patch_safety.scan_numeric_claims(done_payload)
-        # Strip, do not forward: the Critic is instructed to reject the whole
-        # proposal_set over these fields, which costs the round every idea the
-        # specialist produced. The audit note below records what the strip took.
-        forbidden_fields = _patch_safety.strip_forbidden_proposal_fields(done_payload)
-        safety = _patch_safety.PatchSafetyReport(
-            kept_patches=kept,
-            ungrounded=ungrounded,
-            grounding=grounding,
-            numeric_warnings=numeric_warnings,
-            forbidden_fields=forbidden_fields,
-        )
-        done_payload["patches_written"] = kept
-        done_payload["patch_grounding"] = grounding
-        if collected_roots:
-            done_payload["patch_roots"] = {p: r for p, r in collected_roots.items() if p in kept}
-        if ungrounded:
-            done_payload["patches_ungrounded"] = [d["detail"] for d in ungrounded[:8]]
-        if spans_roots:
-            done_payload["patches_span_multiple_roots"] = True
-        notes.extend(safety.notes())
+        notes.extend(_patch_safety.admit_payload(done_payload, vetted, collected_roots).notes())
         recovered = bool(done_payload.get("_recovered_from_partial"))
         # ``partial`` keeps an infra failure visible without making the attempt
         # retry-eligible, which would discard whatever was salvaged.
@@ -1332,7 +1307,7 @@ class SpecialistRunner:
             return False
         try:
             return bool(SharedState.load_or_init(self.session_dir).pending_integrate)
-        except Exception:
+        except (OSError, ValueError):
             # An unreadable state cannot vouch for the tree.
             log.warning(
                 "specialist worktree: cannot read pending_integrate; not refreshing the snapshot", exc_info=True

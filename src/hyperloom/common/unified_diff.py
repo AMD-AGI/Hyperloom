@@ -42,11 +42,10 @@ def parse_unified_diff(patch_text: str) -> list[FileChange]:
             continue
         if current is None:
             # Tolerate a diff with no leading "diff --git".
-            if raw.startswith((_OLD_FILE, _NEW_FILE)):
-                current = FileChange(path="")
-                changes.append(current)
-            else:
+            if not raw.startswith((_OLD_FILE, _NEW_FILE)):
                 continue
+            current = FileChange(path="")
+            changes.append(current)
         if raw.startswith("new file mode"):
             current.is_new = True
             continue
@@ -65,14 +64,9 @@ def parse_unified_diff(patch_text: str) -> list[FileChange]:
             if old_path and old_path != _DEV_NULL and not current.path:
                 current.path = old_path
             continue
-        if raw.startswith("@@"):
-            continue
-        if raw.startswith("+") and not raw.startswith("+++"):
-            current.added.append(raw[1:])
-        elif raw.startswith("-") and not raw.startswith("---"):
-            current.removed.append(raw[1:])
-        elif raw.startswith(" "):
-            current.context.append(raw[1:])
+        lines = {"+": current.added, "-": current.removed, " ": current.context}.get(raw[:1])
+        if lines is not None and not raw.startswith(("+++", "---")):
+            lines.append(raw[1:])
     # Drop empty/placeholder sections.
     return [c for c in changes if c.path and c.path != _DEV_NULL]
 

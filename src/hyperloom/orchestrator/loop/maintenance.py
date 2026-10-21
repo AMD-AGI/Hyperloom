@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 import shutil
+import sqlite3
 from pathlib import Path
 from typing import Any
 from ..state.shared_state import SharedState
@@ -53,7 +54,7 @@ async def run_lease_and_db_reclaim(
         if ended:
             summary["cleanup_unconfirmed"] = f"{unconfirmed}/{ended}"
         summary["running_tasks_reclaimed"] = len(report.failed_tasks)
-    except Exception:
+    except sqlite3.Error:
         log.exception("%s: reading the reconciler's cleanup report failed", reason)
     try:
         from ..bus import db_maintenance as _db_maint
@@ -61,7 +62,7 @@ async def run_lease_and_db_reclaim(
         res = await _db_maint.run_db_retention(host.db)
         summary["events_pruned"] = res.events_deleted
         summary["tasks_pruned"] = res.tasks_deleted
-    except Exception:
+    except sqlite3.Error:
         log.exception("%s: DB retention failed", reason)
 
 

@@ -63,7 +63,7 @@ def _load_session_json(path: Path, label: str, warnings: list[str]) -> dict[str,
         return {}
     try:
         return read_json_strict(path, require_dict=True)
-    except Exception as exc:  # noqa: BLE001
+    except (OSError, ValueError) as exc:
         warnings.append(f"failed to parse {label}: {exc!r}")
         return {}
 

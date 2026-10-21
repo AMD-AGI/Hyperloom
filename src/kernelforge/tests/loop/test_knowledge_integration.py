@@ -18,7 +18,7 @@ from kernelforge.rewrite_by_flydsl.flydsl_rewrite_driver_preparation import (
 from kernelforge.rewrite_by_flydsl.port_loop import PortResult
 from kernelforge.rewrite_by_flydsl.ingest import RewriteSubject
 from kernelforge.rewrite_by_flydsl.request import DriverSetup, RewriteRun, RewriteWorkspace
-from kernelforge.conftest import kb_store_run_config as _kb_store_config
+from kernelforge.tests.conftest import kb_store_run_config as _kb_store_config
 from kernelforge.knowledge.kb_store.identity.run import LoopKernel
 from kernelforge.loop.knowledge_integration import ExperiencePublication, WarmStartHarness
 
@@ -1271,32 +1271,38 @@ def test_write_experience_to_kb_extracts_run_context(monkeypatch, tmp_path):
     assert captured["usage"] is usage
 
 
-def test_write_experience_to_kb_names_the_failure_that_stopped_the_publish(
+@pytest.mark.parametrize(
+    ("stage", "failure", "message"),
+    [
+        ("write_run_experience", RuntimeError("boom"), "boom"),
+        ("_git_cumulative_diff", ValueError("bad diff"), "bad diff"),
+    ],
+)
+def test_write_experience_to_kb_lets_a_pipeline_failure_reach_the_publication_boundary(
     monkeypatch,
     tmp_path,
+    stage,
+    failure,
+    message,
 ):
-    """The refusal is persisted, so it has to say which failure happened."""
     kernel = tmp_path / "kernel.py"
     kernel.write_text("def kernel(x):\n    return x\n")
 
-    def fail_write_run_experience(**_kwargs):
-        raise RuntimeError("boom")
+    def fail(*_args, **_kwargs):
+        raise failure
 
-    monkeypatch.setattr(
-        "kernelforge.knowledge.kb_store.writer.write_run_experience",
-        fail_write_run_experience,
-    )
+    if stage == "write_run_experience":
+        monkeypatch.setattr("kernelforge.knowledge.kb_store.writer.write_run_experience", fail)
+    else:
+        monkeypatch.setattr(integ, stage, fail)
 
-    status = integ.write_experience_to_kb(
-        config=object(),
-        loop_runner=_FakeLoopRunner(),
-        kernel=LoopKernel(kernel_path=str(kernel), kernel_backend="triton", workspace=str(tmp_path)),
-        publication=ExperiencePublication(base_sha="base", gpu_target="gfx942"),
-    )
-
-    assert status["written"] is False
-    assert "RuntimeError" in status["reason"]
-    assert "boom" in status["reason"]
+    with pytest.raises(type(failure), match=message):
+        integ.write_experience_to_kb(
+            config=object(),
+            loop_runner=_FakeLoopRunner(),
+            kernel=LoopKernel(kernel_path=str(kernel), kernel_backend="triton", workspace=str(tmp_path)),
+            publication=ExperiencePublication(base_sha="base", gpu_target="gfx942"),
+        )
 
 
 def test_write_uses_pristine_campaign_signature_after_helper_is_added(

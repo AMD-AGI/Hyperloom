@@ -388,7 +388,7 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
                     tick=int(self.shared_state.tick or 0),
                 )
             )
-        except Exception:
+        except (OSError, ValueError, TypeError):
             log.exception("integrate journal append failed")
 
     def _source_session_id(self) -> str:
@@ -566,18 +566,28 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         if fact.variant_name is not None:
             provenance_base["source_variant_name"] = fact.variant_name
 
-        try:
-            if fact.is_keep and fact.gain_pct is not None and fact.gain_pct > 0:
-                statement = self._build_statement(
-                    change=fact.change,
-                    kind="lesson",
-                )
-                impact = self._build_measured_impact(
+        lesson = None
+        pitfall = None
+        if fact.is_keep and fact.gain_pct is not None and fact.gain_pct > 0:
+            lesson = {
+                "statement": self._build_statement(change=fact.change, kind="lesson"),
+                "measured_impact": self._build_measured_impact(
                     gain_pct=fact.gain_pct,
                     throughput_after=fact.throughput_after,
                     stack_depth=len(self.shared_state.optimization_stack or []),
                     measured_at=now_iso,
-                )
+                ),
+            }
+        else:
+            severity = self._pitfall_severity_for(fact.pitfall_severity_dict)
+            if severity is not None:
+                pitfall = {
+                    "description": self._build_statement(change=fact.change, severity=severity, kind="pitfall"),
+                    "severity": severity,
+                }
+
+        try:
+            if lesson is not None:
                 live = self.read_local_recipe_row()
                 recipe_overrides = self.kb_best_config_overrides_for_keep(
                     live=live,
@@ -585,31 +595,20 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
                     throughput_after=fact.throughput_after,
                 )
                 self.kb_amend_recipe(
-                    append_lesson={
-                        "statement": statement,
-                        "measured_impact": impact,
-                    },
+                    append_lesson=lesson,
                     recipe_overrides=recipe_overrides or None,
                     provenance_details=provenance_base,
                 )
-                return
-
-            severity = self._pitfall_severity_for(fact.pitfall_severity_dict)
-            if severity is not None:
-                description = self._build_statement(
-                    change=fact.change,
-                    severity=severity,
-                    kind="pitfall",
-                )
-                self.kb_amend_recipe(
-                    append_pitfall={
-                        "description": description,
-                        "severity": severity,
-                    },
-                    provenance_details=provenance_base,
-                )
+            elif pitfall is not None:
+                self.kb_amend_recipe(append_pitfall=pitfall, provenance_details=provenance_base)
         except (LocalRecipeStoreError, OSError, ValueError) as error:
-            log.warning("recipe KB write for task %s failed: %s", fact.task.task_id, error)
+            log.warning(
+                "recipe KB write for task %s%s failed: %s: %s",
+                fact.task.task_id,
+                f" variant {fact.variant_name}" if fact.variant_name is not None else "",
+                type(error).__name__,
+                error,
+            )
 
     def _record_fact_per_task(
         self,
@@ -1214,7 +1213,7 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         _close_out.record_write_back_opened(self.session_dir, attempt=attempts, source=source)
         try:
             state.save(self.session_dir)
-        except Exception:
+        except OSError:
             log.exception("Recipe finalize pending-state save failed")
 
         try:
@@ -1243,7 +1242,7 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         self._record_write_back_settled(outcome, attempt=attempts, source=source)
         try:
             state.save(self.session_dir)
-        except Exception:
+        except OSError:
             log.exception("Recipe finalize outcome save failed")
         return outcome
 
@@ -1348,7 +1347,7 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
 
         try:
             config = getattr(kp, "config", None) or KnowledgeConfig.from_env()
-        except Exception as exc:
+        except ValueError as exc:
             log.exception("Recipe KB finalize configuration failed (non-fatal)")
             return {
                 "status": "error",
@@ -1376,9 +1375,9 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
             remote_sid = str(
                 self.shared_state.recipe_kb_session_id or self.shared_state.session_id or self.session_dir.name
             )
-            try:
-                from ..knowledge.remote_recipe import HyperloomRemoteKB
+            from ..knowledge.remote_recipe import HyperloomRemoteKB, KBStoreError
 
+            try:
                 remote_cid = self.workload_canonical_id()
                 remote_result = HyperloomRemoteKB.from_env().write(
                     remote_cid,
@@ -1411,7 +1410,7 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
                     "session_id": str(getattr(remote_result, "session_id", "") or remote_sid),
                     "result_type": _remote_result_type(remote_result.status, remote_result.reason),
                 }
-            except Exception as exc:
+            except (KBStoreError, OSError, ValueError) as exc:
                 self._record_remote_recipe_audit(
                     source, RemoteRecipeAudit(status="error", canonical_id=remote_cid, session_id=remote_sid, error=exc)
                 )
@@ -1453,90 +1452,79 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
                 "backend": "local",
                 "result_type": _close_out.RESULT_INVALID_SCOPE,
             }
+        attrs = self._build_recipe_attrs_from_state()
+        # Hoist workload tags flat into top-level recipe attrs (shallow-merged) for warm-start filters.
+        workload_tags = attrs.get("workload") or {}
+
+        # sessions[] read-modify-write: read anchor, drop prior entry with our session_id (resume safety), append ours, write back.
+        my_sessions = list(attrs["sessions"] or [])
+        my_session_ids = {str((s or {}).get("session_id") or "") for s in my_sessions if isinstance(s, dict)}
+        # v2: read-modify-write the recipe row; sessions[] merged in-process under the cid flock so concurrent finalises don't tear.
+        merged_sessions: list[dict[str, Any]] = list(my_sessions)
+        existing_row: dict[str, Any] = {}
+        if self.recipe_kb is not None:
+            cid = self.workload_canonical_id()
+            # Read exactly the local store's authority row.
+            existing_row = self.recipe_kb.get_authoritative_recipe(canonical_id=cid) or {}
+            existing_sessions: list[dict[str, Any]] = []
+            for row in existing_row.get("sessions") or []:
+                if not isinstance(row, dict):
+                    continue
+                if str(row.get("session_id") or "") in my_session_ids:
+                    # Resume/retry of the same session — our new entry supersedes the prior one.
+                    continue
+                existing_sessions.append(dict(row))
+            merged_sessions = existing_sessions + my_sessions
+
+        # KEEP'd kernel optimizations ride the extras channel; merge with prior rows, dedup by kernel_id.
+        kopts_new = list(attrs.get("kernel_optimizations") or [])
+        new_kids = {str((k or {}).get("kernel_id") or "") for k in kopts_new if isinstance(k, dict)}
+        merged_kopts: list[dict[str, Any]] = list(kopts_new)
+        for prior in existing_row.get("kernel_optimizations") or []:
+            if not isinstance(prior, dict):
+                continue
+            if str(prior.get("kernel_id") or "") in new_kids:
+                continue
+            merged_kopts.append(dict(prior))
+
+        extras_payload = dict(workload_tags or {})
+        if merged_kopts:
+            extras_payload["kernel_optimizations"] = merged_kopts
+
+        overrides: dict[str, Any] = {
+            "what_worked": attrs["what_worked"],
+            "what_failed": attrs["what_failed"],
+            "last_profiled": attrs["last_profiled"],
+            "sessions": merged_sessions,
+            "extras": extras_payload,
+        }
+        # Overwrite best_config/best_throughput only on a real improvement: requires has_validated_win AND my_tput > live_tput.
+        my_tput = float(attrs.get("best_throughput") or 0.0)
+        cb_args_now = str(ss.current_best.get("extra_server_args") or "").strip()
+        validated_gain = float(ss.cumulative_gain_validated or 0.0)
+        has_validated_win = bool((ss.optimization_stack or []) or validated_gain > 0.0 or cb_args_now)
         try:
-            attrs = self._build_recipe_attrs_from_state()
-            # Hoist workload tags flat into top-level recipe attrs (shallow-merged) for warm-start filters.
-            workload_tags = attrs.get("workload") or {}
-
-            # sessions[] read-modify-write: read anchor, drop prior entry with our session_id (resume safety), append ours, write back.
-            my_sessions = list(attrs["sessions"] or [])
-            my_session_ids = {str((s or {}).get("session_id") or "") for s in my_sessions if isinstance(s, dict)}
-            # v2: read-modify-write the recipe row; sessions[] merged in-process under the cid flock so concurrent finalises don't tear.
-            merged_sessions: list[dict[str, Any]] = list(my_sessions)
-            existing_row: dict[str, Any] = {}
-            if self.recipe_kb is not None:
-                cid = self.workload_canonical_id()
-                # Read exactly the local store's authority row.
-                existing_row = self.recipe_kb.get_authoritative_recipe(canonical_id=cid) or {}
-                existing_sessions: list[dict[str, Any]] = []
-                for row in existing_row.get("sessions") or []:
-                    if not isinstance(row, dict):
-                        continue
-                    if str(row.get("session_id") or "") in my_session_ids:
-                        # Resume/retry of the same session — our new entry supersedes the prior one.
-                        continue
-                    existing_sessions.append(dict(row))
-                merged_sessions = existing_sessions + my_sessions
-
-            # KEEP'd kernel optimizations ride the extras channel; merge with prior rows, dedup by kernel_id.
-            kopts_new = list(attrs.get("kernel_optimizations") or [])
-            new_kids = {str((k or {}).get("kernel_id") or "") for k in kopts_new if isinstance(k, dict)}
-            merged_kopts: list[dict[str, Any]] = list(kopts_new)
-            for prior in existing_row.get("kernel_optimizations") or []:
-                if not isinstance(prior, dict):
-                    continue
-                if str(prior.get("kernel_id") or "") in new_kids:
-                    continue
-                merged_kopts.append(dict(prior))
-
-            extras_payload = dict(workload_tags or {})
-            if merged_kopts:
-                extras_payload["kernel_optimizations"] = merged_kopts
-
-            overrides: dict[str, Any] = {
-                "what_worked": attrs["what_worked"],
-                "what_failed": attrs["what_failed"],
-                "last_profiled": attrs["last_profiled"],
-                "sessions": merged_sessions,
-                "extras": extras_payload,
-            }
-            # Overwrite best_config/best_throughput only on a real improvement: requires has_validated_win AND my_tput > live_tput.
-            my_tput = float(attrs.get("best_throughput") or 0.0)
-            cb_args_now = str(ss.current_best.get("extra_server_args") or "").strip()
-            validated_gain = float(ss.cumulative_gain_validated or 0.0)
-            has_validated_win = bool((ss.optimization_stack or []) or validated_gain > 0.0 or cb_args_now)
-            try:
-                live_tput = float(existing_row.get("best_throughput") or 0.0)
-            except (TypeError, ValueError):
-                live_tput = 0.0
-            if has_validated_win and my_tput > live_tput:
-                overrides["best_config"] = attrs["best_config"]
-                overrides["best_throughput"] = my_tput
-            self.kb_amend_recipe(
-                recipe_overrides=overrides,
-                provenance_details={
-                    "phase": "close_finalize",
-                    "evidence": [
-                        f"log:session-{ss.recipe_kb_session_id or self.session_dir.name}",
-                    ],
-                },
-            )
-            return {
-                "status": "written",
-                "reason": "",
-                "backend": "local",
-                "result_type": _close_out.RESULT_WRITTEN,
-            }
-        # Catch-all keeps CLOSE step 2.5 defensive against programmer bugs.
-        except Exception as exc:
-            log.exception("update_recipe raised unexpectedly")
-            return {
-                "status": "error",
-                "reason": type(exc).__name__,
-                "backend": "local",
-                "result_type": _close_out.RESULT_TRANSPORT_FAILED,
-                "error_class": type(exc).__name__,
-            }
+            live_tput = float(existing_row.get("best_throughput") or 0.0)
+        except (TypeError, ValueError):
+            live_tput = 0.0
+        if has_validated_win and my_tput > live_tput:
+            overrides["best_config"] = attrs["best_config"]
+            overrides["best_throughput"] = my_tput
+        self.kb_amend_recipe(
+            recipe_overrides=overrides,
+            provenance_details={
+                "phase": "close_finalize",
+                "evidence": [
+                    f"log:session-{ss.recipe_kb_session_id or self.session_dir.name}",
+                ],
+            },
+        )
+        return {
+            "status": "written",
+            "reason": "",
+            "backend": "local",
+            "result_type": _close_out.RESULT_WRITTEN,
+        }
 
     def _kb_hardware_slug(self) -> str:
         """Topology-aware hardware dimension for the recipe ``canonical_id``."""

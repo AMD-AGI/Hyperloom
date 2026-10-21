@@ -23,9 +23,11 @@ queued behind the lane or GPUs it holds.
 
 ## Moves for a single task
 
-- `send_message{to='specialist:<task_id>', body_md}` — lands in its inbox
-  and it acts without restarting. Prefer this when the agent works well but
-  on the wrong question, or to answer its `residual_questions`.
+- `send_message{to='specialist:<task_id>', topic='observation', body_md}` —
+  lands in its inbox and it acts without restarting. Prefer this when the
+  agent works well but on the wrong question, or to answer its
+  `residual_questions`. `to` also takes a list
+  (`to=['specialist:<a>', 'specialist:<b>']`) to redirect several at once.
 - `extend_lease{task_id, extra_sec, reason}` — grows the lease TTL and the
   expiry of the lanes and GPUs the task holds, in bounded steps, and moves a
   running specialist's wall-clock kill deadline out by `extra_sec`, never

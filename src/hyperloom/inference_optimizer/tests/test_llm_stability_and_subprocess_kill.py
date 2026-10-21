@@ -125,7 +125,7 @@ def test_stream_capture_tees_partial_output_before_child_exit(monkeypatch, strea
             return written
 
     sink = Sink()
-    monkeypatch.setattr(sys, stream_name, sink if text else SimpleNamespace(buffer=sink))
+    monkeypatch.setattr(sys, stream_name, sink if text else SimpleNamespace(buffer=sink, flush=sink.flush))
     descriptor = 1 if stream_name == "stdout" else 2
     script = (
         f"import os,sys; os.write({descriptor}, b'A\\xe2'); "
