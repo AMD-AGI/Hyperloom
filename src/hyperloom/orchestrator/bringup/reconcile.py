@@ -24,6 +24,7 @@ from ..state.round_store import (
 )
 from ..state.task_registry import TERMINAL_STATES, Task, TaskNotFound, TaskRegistry
 from hyperloom.inference_optimizer.trace.trajectory_trace import EVENT_PROPOSAL, STATUS_CANCELLED, record_event
+from hyperloom.inference_optimizer.breakdown.recorder import enablement_event
 
 log = logging.getLogger(__name__)
 
@@ -332,6 +333,9 @@ class Reconciler:
             return
         if self._result_pending is not None and self._result_pending(tracked):
             return
+        enablement_event.record_revalidation_cleared(
+            generation=int(state.enablement.revalidation_generation or 0), task_id=tracked
+        )
         state.enablement.validation_pending = False
         state.enablement.revalidation_task_id = ""
         self._save_state()
