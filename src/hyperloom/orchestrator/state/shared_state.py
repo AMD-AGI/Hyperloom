@@ -2198,6 +2198,8 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
                 # TraceLens kernel_category bucket ("" when absent).
                 "kernel_category": entry.get("kernel_category") or "",
                 "gpu_pct": entry.get("gpu_pct"),
+                "call_count": entry.get("call_count"),
+                "duration_us": entry.get("duration_us"),
                 "tracelens_pitem_rank": entry.get("tracelens_pitem_rank"),
                 "impact_score": entry.get("impact_score"),
                 "bottleneck": entry.get("bottleneck"),
@@ -2214,13 +2216,11 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
                 "reusable_native_kernel": reusable,
                 "kernel_contract": entry.get("kernel_contract"),
                 "is_multigpu": entry.get("is_multigpu") is True,
-                # Names the deterministic extractor a row came from, so a reader need not re-derive provenance from
-                # the kernel name alone.
+                # Names the deterministic extractor the row came from.
                 "candidate_source": entry.get("candidate_source") or "",
                 "recommended_backends": entry.get("recommended_backends") or [],
                 "recommended_actions": entry.get("recommended_actions") or [],
-                # Vendor-playbook fields (mori's dispatch+combine is the first case -- see
-                # _vendor_operator_playbooks.py).
+                # Vendor-playbook fields; see _vendor_operator_playbooks.py.
                 "patch_strategy": entry.get("patch_strategy") or "",
                 "vendor_playbook_group_id": entry.get("vendor_playbook_group_id") or "",
                 "vendor_playbook_aggregate_gpu_pct": entry.get("vendor_playbook_aggregate_gpu_pct"),
