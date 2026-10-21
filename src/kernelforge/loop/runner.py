@@ -35,7 +35,7 @@ from kernelforge.llm.workspace_policy import is_protected_path
 from kernelforge.llm.git import git, git_bytes
 from kernelforge.config import Config
 from kernelforge.evaluation.correctness.canonical import accept_candidate
-from kernelforge.evaluation.correctness.pipeline import run_validation_pipeline
+from kernelforge.evaluation.correctness.pipeline import run_validation_pipeline, status_label
 from kernelforge.loop.experience import ExperienceLedger
 from kernelforge.loop.lessons import (
     SUMMARY_MIN_SECONDS,
@@ -311,13 +311,6 @@ def _bench_failure_detail(bench_result: dict) -> str:
     if not output:
         return message
     return f"{message}\n{textwrap.indent(output[-2000:], '    ')}"
-
-
-_VALIDATE_FAIL_STATUS = {
-    "timeout": "TIMEOUT",
-    "driver_error": "ERROR",
-    "invalid_result": "ERROR",
-}
 
 
 def _build_failure_tail(stdout: bytes, stderr: bytes, limit: int) -> str:
@@ -4290,7 +4283,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             timeout_per_stage=self.ic.validate_stage_timeout_sec,
         )
         for result in report.results:
-            status = "PASS" if result.passed else _VALIDATE_FAIL_STATUS.get(str(result.outcome or ""), "FAIL")
+            status = status_label(result.outcome, result.passed)
             snr_str = f" SNR={result.snr_db:.1f}dB" if result.snr_db is not None else ""
             print(f"  [validate] Stage {result.stage} {result.stage_name}: {status}{snr_str}")
         if not report.all_passed:

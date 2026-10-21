@@ -2,13 +2,30 @@ from __future__ import annotations
 
 import asyncio
 
-from kernelforge.evaluation.correctness.pipeline import run_validation_pipeline
-from kernelforge.loop.runner import IterationConfig
+import pytest
+
+from kernelforge.evaluation.correctness.pipeline import run_validation_pipeline, status_label
 
 
 def test_full_suite_timeout_default_matches_cold_jit_budget():
+    from kernelforge.loop.runner import IterationConfig
+
     config = IterationConfig(kernel_file="kernel.py", driver_script="driver.py")
     assert config.validate_stage_timeout_sec == 1800
+
+
+@pytest.mark.parametrize(
+    ("outcome", "passed", "expected"),
+    [
+        ("", True, "PASS"),
+        ("timeout", False, "TIMEOUT"),
+        ("driver_error", False, "ERROR"),
+        ("invalid_result", False, "ERROR"),
+        ("correctness_failure", False, "FAIL"),
+    ],
+)
+def test_status_label_contract(outcome, passed, expected):
+    assert status_label(outcome, passed) == expected
 
 
 def test_validation_runs_driver_full_suite_once(monkeypatch):

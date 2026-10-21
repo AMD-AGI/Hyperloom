@@ -1102,6 +1102,9 @@ class InSessionGate:
 
     async def _stop_performance_verdict(self) -> dict:
         """Bench the correct candidate and allow only when it clears the KEEP bar."""
+        self.last_wall_ms = None
+        self.last_mean_case_speedup = None
+        self.last_bench_result = None
         bench = await measure_wallclock(
             BenchRun(self.driver_script, driver_args=[], repeat=self.bench_repeat),
             measurements=KEEP_MEASUREMENT_COUNT,
@@ -1109,9 +1112,6 @@ class InSessionGate:
         )
         wall = bench.get("median_ms")
         if not bench.get("success"):
-            self.last_wall_ms = None
-            self.last_mean_case_speedup = None
-            self.last_bench_result = None
             detail = bench.get("message") or "benchmark failed"
             self._log(f"BLOCK (benchmark failed: {detail})")
             return self._block(
@@ -1125,7 +1125,6 @@ class InSessionGate:
                 expected_measurements=KEEP_MEASUREMENT_COUNT,
             )
         except CaseCoverageError as error:
-            self.last_wall_ms = None
             self._log(f"BLOCK (case coverage failed: {error})")
             return self._block(
                 "The kernel benchmark did not report every baseline case, so "
@@ -1135,8 +1134,6 @@ class InSessionGate:
         mean_case_speedup = keep_score(measurement_scores)
         if mean_case_speedup is None or self.best_mean_case_speedup is None:
             self.last_wall_ms = wall
-            self.last_mean_case_speedup = None
-            self.last_bench_result = None
             self._log("BLOCK (pristine scoring state unavailable)")
             return self._block(
                 "Mean case scoring requires the fixed pristine baseline and "
