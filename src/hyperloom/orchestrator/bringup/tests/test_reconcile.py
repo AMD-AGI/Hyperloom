@@ -59,6 +59,7 @@ class _Enablement:
     def __init__(self) -> None:
         self.validation_pending = False
         self.revalidation_task_id = ""
+        self.revalidation_generation = 0
 
 
 class _State:
