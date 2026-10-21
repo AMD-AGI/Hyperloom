@@ -144,6 +144,53 @@ def _identity(payload: Any, *, operator_name: str) -> tuple[KernelRecipeIdentity
     return identity, operator_id
 
 
+def _driver_path(payload: dict[str, Any], root: Path) -> str:
+    """The task's driver: exactly ``driver.py``, a file inside the task directory."""
+    driver_path = safe_relative_path(_required_string(payload, "driver_path"), field_name="driver_path")
+    if driver_path != "driver.py":
+        raise TaskContractError("driver_path must be exactly 'driver.py'")
+    driver_file = (root / driver_path).resolve()
+    try:
+        driver_file.relative_to(root)
+    except ValueError as error:
+        raise TaskContractError(f"driver_path escapes task directory: {driver_path!r}") from error
+    if not driver_file.is_file():
+        raise TaskContractError(f"driver_path is not a file: {driver_path!r}")
+    return driver_path
+
+
+def _world_size(payload: dict[str, Any], operator_name: str, kernel_name: str) -> int:
+    """The declared rank count; a multi-rank task must say so in its names, by suffix and by collective."""
+    world_size = payload.get("world_size", 1)
+    if isinstance(world_size, bool) or not isinstance(world_size, int) or world_size < 1:
+        raise TaskContractError("world_size must be an integer >= 1")
+    if world_size > 1 and not carries_parallelism_suffix(operator_name, kernel_name):
+        # world_size is deliberately outside the identity six-tuple, which is
+        # the experience KB's primary key, so the suffix is the only thing
+        # telling one rank count's recipe from another's. Left as prose, two
+        # rank counts of the same collective land on one operator_id: the
+        # scheduler keeps one task per id and silently drops the other, and
+        # both write the same KB entry.
+        raise TaskContractError(
+            f"world_size {world_size} needs the rank count in the operator name, because world_size is "
+            f"not part of the identity that keys the experience store. Neither operator_name "
+            f"{operator_name!r} nor identity.kernel_name {kernel_name!r} carries a parallelism "
+            f"suffix; name it something like '{kernel_name}_tp{world_size}'."
+        )
+    if world_size > 1 and not looks_like_multi_rank_operator(operator_name, kernel_name):
+        # A rank count on an operator that reads as ordinary single-GPU work is
+        # almost always a mistake, and an expensive one: the campaign runs to
+        # its budget before the measurement is found to describe nothing.
+        raise TaskContractError(
+            f"world_size {world_size} declares a multi-rank operator, but neither "
+            f"operator_name {operator_name!r} nor identity.kernel_name {kernel_name!r} "
+            "names one. Name the collective it performs (all_reduce, all_gather, "
+            "reduce_scatter, all_to_all, broadcast, send/recv, an EP dispatch/combine, or a "
+            "vendor comms symbol), or carry the parallelism as a suffix such as '_tp8'."
+        )
+    return world_size
+
+
 def parse_task_payload(
     payload: Any,
     *,
@@ -184,16 +231,7 @@ def parse_task_payload(
         raise TaskContractError(f"repo_root is not a directory: {repo_root}")
 
     kernel_path = safe_relative_path(_required_string(payload, "kernel_path"), field_name="kernel_path")
-    driver_path = safe_relative_path(_required_string(payload, "driver_path"), field_name="driver_path")
-    if driver_path != "driver.py":
-        raise TaskContractError("driver_path must be exactly 'driver.py'")
-    driver_file = (root / driver_path).resolve()
-    try:
-        driver_file.relative_to(root)
-    except ValueError as error:
-        raise TaskContractError(f"driver_path escapes task directory: {driver_path!r}") from error
-    if not driver_file.is_file():
-        raise TaskContractError(f"driver_path is not a file: {driver_path!r}")
+    driver_path = _driver_path(payload, root)
 
     priority = payload.get("priority")
     if isinstance(priority, bool) or not isinstance(priority, int) or priority < 0:
@@ -209,34 +247,7 @@ def parse_task_payload(
     reason = payload.get("reason", "")
     if not isinstance(reason, str):
         raise TaskContractError("reason must be a string")
-
-    world_size_raw = payload.get("world_size", 1)
-    if isinstance(world_size_raw, bool) or not isinstance(world_size_raw, int) or world_size_raw < 1:
-        raise TaskContractError("world_size must be an integer >= 1")
-    if world_size_raw > 1 and not carries_parallelism_suffix(operator_name, identity.kernel_name):
-        # world_size is deliberately outside the identity six-tuple, which is
-        # the experience KB's primary key, so the suffix is the only thing
-        # telling one rank count's recipe from another's. Left as prose, two
-        # rank counts of the same collective land on one operator_id: the
-        # scheduler keeps one task per id and silently drops the other, and
-        # both write the same KB entry.
-        raise TaskContractError(
-            f"world_size {world_size_raw} needs the rank count in the operator name, because world_size is "
-            f"not part of the identity that keys the experience store. Neither operator_name "
-            f"{operator_name!r} nor identity.kernel_name {identity.kernel_name!r} carries a parallelism "
-            f"suffix; name it something like '{identity.kernel_name}_tp{world_size_raw}'."
-        )
-    if world_size_raw > 1 and not looks_like_multi_rank_operator(operator_name, identity.kernel_name):
-        # A rank count on an operator that reads as ordinary single-GPU work is
-        # almost always a mistake, and an expensive one: the campaign runs to
-        # its budget before the measurement is found to describe nothing.
-        raise TaskContractError(
-            f"world_size {world_size_raw} declares a multi-rank operator, but neither "
-            f"operator_name {operator_name!r} nor identity.kernel_name {identity.kernel_name!r} "
-            "names one. Name the collective it performs (all_reduce, all_gather, "
-            "reduce_scatter, all_to_all, broadcast, send/recv, an EP dispatch/combine, or a "
-            "vendor comms symbol), or carry the parallelism as a suffix such as '_tp8'."
-        )
+    world_size = _world_size(payload, operator_name, identity.kernel_name)
 
     return KernelRewriteTask(
         identity=identity,
@@ -252,7 +263,7 @@ def parse_task_payload(
         shape_cases=copy.deepcopy(shape_cases),
         reason=reason,
         evidence=tuple(copy.deepcopy(evidence)),
-        world_size=world_size_raw,
+        world_size=world_size,
         # Unchecked by contract: it is read by people, not by the run, and a
         # refusal here would trade an operator for a number's formatting.
         gpu_pct=copy.deepcopy(payload.get("gpu_pct")),
