@@ -12,7 +12,7 @@ import pytest
 import yaml
 
 from hyperloom.inference_optimizer.framework_registry import names, server_args_env_name
-from hyperloom.orchestrator.actions.executors import _grid_runner, _grid_variant_yaml, _workload_envs
+from hyperloom.orchestrator.actions.executors import _grid_runner, _workload_envs
 from hyperloom.orchestrator.actions.executors._grid_base import GridVariant
 from hyperloom.orchestrator.actions.executors._server_argv import (
     ServerArgv,
@@ -37,7 +37,7 @@ ARGUMENT_ENVS = frozenset(server_args_env_name(framework) for framework in names
 #: The composers, each of which ends on the seal.
 _COMPOSERS = (
     (_workload_envs, "materialize_config_with_envs"),
-    (_grid_variant_yaml, "_build_variant_yaml"),
+    (_grid_runner, "_build_variant_yaml"),
 )
 
 #: The functions allowed to write the argument env: the two composers, the two

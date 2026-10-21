@@ -70,7 +70,7 @@ from ._grid_base import (
     TS_SKIPPED_DEDUP,
 )
 from .benchmark_result import double_run_requested
-from ._grid_variant_yaml import _build_variant_yaml
+from ._grid_runner import _build_variant_yaml
 from ._grid_runner import (
     DEFAULT_KEEP_THRESHOLD_PCT,
     _MN_BACKENDS_PRIORITY,
