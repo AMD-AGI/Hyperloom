@@ -221,7 +221,7 @@ class Config:
         self.knowledge_wiki_root = str(self.knowledge_wiki_root or "").strip()
         self.knowledge_wiki_log = str(self.knowledge_wiki_log or "").strip()
         if self.knowledge_wiki_root:
-            from kernelforge.knowledge.wiki_tool_server import SCRIPTS
+            from kernelforge.knowledge.wiki_tool.contract import SCRIPTS
 
             root = Path(self.knowledge_wiki_root)
             if not root.is_absolute():
