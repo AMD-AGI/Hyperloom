@@ -528,7 +528,7 @@ function-lines src/hyperloom/orchestrator/actions/executors/benchmark_result.py:
 function-lines src/hyperloom/orchestrator/actions/executors/bypass_engine.py::build_server_command 96
 function-lines src/hyperloom/orchestrator/actions/executors/explore.py::ExploreExecutor.__call__ 1124
 function-lines src/hyperloom/orchestrator/actions/executors/explore.py::filter_baseline_noop_variants 99
-function-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._gate_enablement 166
+function-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._gate_enablement 164
 function-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._gate_perf 166
 function-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._keep_inert_switches 92
 function-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._stage_apply 139
@@ -818,7 +818,7 @@ module-lines src/hyperloom/orchestrator/actions/executors/_kv_metrics.py 1590
 module-lines src/hyperloom/orchestrator/actions/executors/_workload_envs.py 2158
 module-lines src/hyperloom/orchestrator/actions/executors/baseline.py 4197
 module-lines src/hyperloom/orchestrator/actions/executors/explore.py 1880
-module-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py 4639
+module-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py 4617
 module-lines src/hyperloom/orchestrator/actions/executors/profile.py 1395
 module-lines src/hyperloom/orchestrator/actions/executors/report.py 1366
 module-lines src/hyperloom/orchestrator/actions/executors/roofline.py 1303
