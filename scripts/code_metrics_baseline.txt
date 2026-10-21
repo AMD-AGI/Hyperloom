@@ -626,7 +626,7 @@ function-lines src/hyperloom/orchestrator/loop/dispatcher.py::DispatcherCollabor
 function-lines src/hyperloom/orchestrator/loop/intent_router.py::IntentRouter._handle_single_verdict 111
 function-lines src/hyperloom/orchestrator/loop/intent_router.py::IntentRouter.handle_delegate 92
 function-lines src/hyperloom/orchestrator/loop/sub_agent_runner.py::SubAgentRunner.run_task 167
-function-lines src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._promote_baseline 278
+function-lines src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._promote_baseline 276
 function-lines src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._promote_explore 492
 function-lines src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._promote_integrate_patch 152
 function-lines src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._promote_profile 98
