@@ -122,13 +122,14 @@ class InboxKind(str, Enum):
 
 
 class UsageSource(str, Enum):
-    """Whose LLM spent the money: a branch's specialist, or the scheduler's judge, resolver or the rule gate's fix
-    critic."""
+    """Whose LLM spent the money: a branch's specialist, or the scheduler's judge, resolver, the rule gate's fix
+    critic, or the LLM that writes frontier scorers at CLOSE."""
 
     SPECIALIST = "specialist"
     JUDGE = "judge"
     RESOLVER = "resolver"
     CRITIC = "critic"
+    SCORER = "scorer"
 
 
 class QuarantineAction(str, Enum):
@@ -153,7 +154,8 @@ class FrontierBasis(str, Enum):
     ``trend`` is the branch's own recent gain; ``prior`` what similar archived branches still gained; ``observing`` the
     floor of a branch whose kernel-layer direction may still pay off; ``new`` the floor of a branch too young to have a
     trend; ``pending`` the gain of a measured candidate waiting for its confirm; ``headroom`` the roofline bound that
-    capped any of them; ``amdahl`` the most that speeding up the head's largest op could gain, which capped any of them.
+    capped any of them; ``amdahl`` the most that speeding up the head's largest op could gain, which capped any of them;
+    ``custom`` the estimate of a scorer other than the built-in formula, whose components say what it read.
     """
 
     TREND = "trend"
@@ -163,6 +165,7 @@ class FrontierBasis(str, Enum):
     PENDING = "pending"
     HEADROOM = "headroom"
     AMDAHL = "amdahl"
+    CUSTOM = "custom"
 
 
 __all__ = [

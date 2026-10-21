@@ -364,11 +364,16 @@ class LlmUsageRecord:
 
 @dataclass(frozen=True)
 class FrontierScore:
-    """Expected gain over the PRELUDE baseline from one more unit of budget, its parts, and what it rests on."""
+    """Expected gain over the PRELUDE baseline from one more unit of budget, its parts, and what it rests on.
+
+    ``scorer`` names the scorer whose estimate it took, by the label that carries its version; empty in a score from
+    before scorers were named.
+    """
 
     expected_gain_pct: float
     components: Mapping[str, float] = field(default_factory=dict)
     basis: FrontierBasis | None = None
+    scorer: str = ""
 
 
 @dataclass(frozen=True)

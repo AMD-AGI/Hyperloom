@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import math
 from pathlib import Path
 
 import pytest
@@ -24,19 +25,28 @@ from hyperloom_multibranch.contracts.notebook.records import (
 )
 from hyperloom_multibranch.contracts.notebook.vocab import Conclusion, FrontierBasis, LineageKind
 from hyperloom_multibranch.notebook import LocalNotebook
-from hyperloom_multibranch.notebook.rsi.archive import SearchTree, longest_root_test_seconds
+from hyperloom_multibranch.notebook.rsi.archive import SearchTree, TreeBranch, longest_root_test_seconds
 from hyperloom_multibranch.notebook.rsi.frontier import (
+    FALLBACK_COMPONENT,
+    FALLBACK_LIMIT,
     FRONTIER_LOG_FORMAT,
+    FRONTIER_V1_LABEL,
     OBSERVATION_SECONDS,
     SETTLED_TESTS,
     WINDOW_SECONDS,
+    Estimate,
     FrontierPolicy,
     FrontierScoring,
+    Readings,
+    ScorerError,
+    ScorerGuard,
     ScoringContext,
+    checked_estimate,
     paced,
     remaining_prior,
     score_at,
     score_progress,
+    score_with,
 )
 from hyperloom_multibranch.notebook.rsi.similarity import TaskConditions, task_conditions, task_similarity
 from hyperloom_multibranch.notebook.rsi.tests.trees import branch, tree
@@ -309,6 +319,94 @@ async def test_with_a_log_every_round_that_scored_a_branch_is_appended(tmp_path:
     s1 = first["branches"][0]
     assert (s1["tests"], s1["commits"], s1["head_value"]) == (2, 1, {METRIC: 1040.0})
     assert s1["frontier"]["expected_gain_pct"] == pytest.approx(4.0) and s1["frontier"]["basis"] == "trend"
+    assert first["scorer"] == s1["frontier"]["scorer"] == FRONTIER_V1_LABEL
+
+
+@dataclasses.dataclass(frozen=True)
+class _Fixed:
+    """A scorer that expects ``gain`` of every branch, resting on ``basis``."""
+
+    gain: float
+    basis: FrontierBasis = FrontierBasis.CUSTOM
+    components: tuple[tuple[str, float], ...] = ()
+    label: str = "fixed-v1"
+
+    def estimate(self, branch: TreeBranch, t_s: float, context: ScoringContext, readings: Readings) -> Estimate:
+        return Estimate(self.gain, dict(self.components), self.basis)
+
+
+class _Failing:
+    label = "failing-v1"
+
+    def estimate(self, branch: TreeBranch, t_s: float, context: ScoringContext, readings: Readings) -> Estimate:
+        raise RuntimeError("no estimate today")
+
+
+def test_any_scorer_is_held_to_the_envelope_and_named_in_its_score() -> None:
+    context = ScoringContext(TASK, (), POLICY)
+    young, settled = branch("s9", []), branch("s9", [], ended_times=(0.0,) * SETTLED_TESTS)
+
+    floored = score_with(_Fixed(-1.0), young, 60.0, context)
+    resting = score_with(_Fixed(-1.0, FrontierBasis.PRIOR), young, 60.0, context)
+    capped = score_with(_Fixed(9.0), settled, 60.0, context, Readings(headroom_pct=2.0, pending_pct=1.0))
+    lifted = score_with(_Fixed(0.2), settled, 60.0, context, Readings(pending_pct=1.0))
+
+    assert (floored.expected_gain_pct, floored.basis) == (POLICY.new_branch_floor_pct, FrontierBasis.NEW)
+    assert floored.scorer == "fixed-v1" and score_at(settled, 60.0, context).scorer == FRONTIER_V1_LABEL
+    assert (resting.expected_gain_pct, resting.basis) == (0.0, FrontierBasis.PRIOR)
+    assert (capped.expected_gain_pct, capped.basis) == (2.0, FrontierBasis.HEADROOM)
+    assert capped.components == {"pending_pct": 1.0, "headroom_pct": 2.0}
+    assert (lifted.expected_gain_pct, lifted.basis) == (1.0, FrontierBasis.PENDING)
+
+
+@pytest.mark.parametrize(
+    ("scorer", "why"),
+    [
+        (_Fixed(math.nan), "not a finite number"),
+        (_Fixed(1.0, components=(("gpu_hours", math.inf),)), "not finite numbers: gpu_hours"),
+        (_Fixed(1.0, components=(("headroom_pct", 1.0),)), "components the envelope writes: headroom_pct"),
+        (_Fixed(1.0, FrontierBasis.NEW), "the envelope's to give"),
+    ],
+)
+def test_an_estimate_that_breaks_the_scorer_contract_is_refused(scorer: _Fixed, why: str) -> None:
+    with pytest.raises(ScorerError, match=why):
+        score_with(scorer, branch("s9", []), 60.0, ScoringContext(TASK, (), POLICY))
+    with pytest.raises(ScorerError, match="not an Estimate"):
+        checked_estimate("fixed-v1", 1.0)
+
+
+def test_the_guard_stands_frontier_v1_in_for_a_failing_scorer_then_scores_the_rest_of_the_session_with_it() -> None:
+    told: list[str] = []
+    guard = ScorerGuard(_Failing(), on_fallback=told.append)
+    context = ScoringContext(TASK, (), POLICY)
+    settled = branch("s9", [(30.0, 1.0)], ended_times=(0.0,) * SETTLED_TESTS)
+
+    first = guard.score(settled, 60.0, context, Readings())
+    for _ in range(FALLBACK_LIMIT - 1):
+        guard.score(settled, 60.0, context, Readings())
+    after = guard.score(settled, 60.0, context, Readings())
+
+    assert first.scorer == FRONTIER_V1_LABEL and first.components[FALLBACK_COMPONENT] == 1.0
+    assert first.expected_gain_pct == score_at(settled, 60.0, context).expected_gain_pct
+    assert (guard.failures, guard.label, guard.chosen.label) == (FALLBACK_LIMIT, FRONTIER_V1_LABEL, "failing-v1")
+    assert FALLBACK_COMPONENT not in after.components
+    assert told == [
+        f"the frontier scorer failing-v1 failed {FALLBACK_LIMIT} times; {FRONTIER_V1_LABEL} scores the rest of the "
+        "session"
+    ]
+
+
+async def test_the_scoring_scores_with_its_guards_scorer_and_logs_its_label(tmp_path: Path) -> None:
+    notebook = await scripted_session(tmp_path / "notebook", FakeClock())
+    path = tmp_path / "frontier.jsonl"
+    scoring = FrontierScoring(notebook, POLICY, log=path, guard=ScorerGuard(_Fixed(3.0)))
+
+    rows = {row.branch: row for row in await scoring.progress()}
+    line = json.loads(path.read_text(encoding="utf-8"))
+
+    assert rows["s1"].frontier is not None and rows["s1"].frontier.scorer == "fixed-v1"
+    assert rows["s1"].frontier.expected_gain_pct == 3.0
+    assert line["scorer"] == "fixed-v1" and line["branches"][0]["frontier"]["basis"] == "custom"
 
 
 async def test_a_round_that_scored_nothing_writes_no_line(tmp_path: Path) -> None:

@@ -12,6 +12,8 @@ import pytest
 
 from hyperloom_multibranch.notebook.rsi.archive import SearchTree
 from hyperloom_multibranch.notebook.rsi.bandit import (
+    BANDIT_LABEL,
+    BanditScorer,
     bandit_baselines,
     decayed_mean,
     reward_scale,
@@ -19,10 +21,9 @@ from hyperloom_multibranch.notebook.rsi.bandit import (
     visit_rewards,
 )
 from hyperloom_multibranch.notebook.rsi.calibration import CURRENT, Variation, calibrate
+from hyperloom_multibranch.notebook.rsi.frontier import SETTLED_TESTS, FrontierPolicy, Readings, ScoringContext
 from hyperloom_multibranch.notebook.rsi.similarity import TaskConditions
-from hyperloom_multibranch.notebook.rsi.tests.trees import HOUR, branch, tree
-
-STEADY = [(600.0 * step, 0.2 * step) for step in range(1, 13)]
+from hyperloom_multibranch.notebook.rsi.tests.trees import HOUR, TASK, branch, tree
 
 
 def test_a_tests_reward_is_the_step_its_commit_took_and_a_forked_gain_is_none() -> None:
@@ -58,22 +59,44 @@ def test_the_scale_puts_the_archives_large_steps_near_one() -> None:
     assert reward_scale([searched]) == pytest.approx(1.0 / 101.0)
 
 
-def _session(n: int) -> SearchTree:
-    tested = tuple(600.0 * step - 60.0 for step in range(1, 13))
-    steady = branch("steady", STEADY, test_times=tested)
-    fresh = branch("fresh", [], opened_s=5400.0, test_times=(5400.0, 6000.0, 6600.0))
+def _mature(n: int) -> SearchTree:
+    """Two settled branches, one that committed early and late and one that never did: after the early commit leaves
+    the window, the trend ties them while the bandit still tells them apart."""
+
+    tested = tuple(600.0 * step for step in range(12))
+    settled = (0.0,) * SETTLED_TESTS + tested
+    early = branch("early", [(600.0, 2.0), (6600.0, 5.0)], test_times=tested, ended_times=settled)
+    never = branch("never", [], test_times=tested, ended_times=settled)
     unlike = TaskConditions(labels={"model": f"model-{n}"})
-    return dataclasses.replace(tree(f"sess-{n}", steady, fresh, task=unlike), budget_seconds=2 * HOUR)
+    return dataclasses.replace(tree(f"sess-{n}", early, never, task=unlike), budget_seconds=2 * HOUR)
 
 
-def test_the_decayed_mean_may_be_advice_and_the_ucb_rows_never_are() -> None:
-    sessions = tuple(_session(n) for n in range(7))
+def test_bandit_rv_may_be_advice_and_the_ucb_rows_never_are() -> None:
+    sessions = tuple(_mature(n) for n in range(3))
     baselines = bandit_baselines(sessions, explorations=(0.0,))
 
     report = calibrate(sessions, variations=(Variation(CURRENT),), baselines=baselines)
     current, decayed, upper = report.rows
+    (compared,) = report.comparisons
 
-    assert (decayed.label, upper.label) == ("bandit R/V, decay 0.95", "bandit UCB, C=0")
-    assert current.rank_correlation == pytest.approx(-1 / 3)
-    assert decayed.rank_correlation == pytest.approx(1.0) and upper.rank_correlation == pytest.approx(1.0)
-    assert report.recommended == decayed and report.note.startswith("Consider 'bandit R/V, decay 0.95'")
+    assert (decayed.label, upper.label) == (BANDIT_LABEL, "bandit UCB, C=0")
+    # The trend tells the branches apart in the two rounds after the early commit, and ties them in the other eight.
+    assert (current.rank_correlation, current.compared_rounds) == (pytest.approx(1.0), 6)
+    assert (compared.label, compared.rounds, compared.sessions) == (BANDIT_LABEL, 30, 3)
+    assert compared.rank_correlation == pytest.approx(1.0) and compared.current_correlation == pytest.approx(0.2)
+    assert report.recommended == decayed and report.note.startswith(f"Consider '{BANDIT_LABEL}'")
+
+
+def test_bandit_rv_is_the_recent_gain_per_test_in_points_and_needs_the_sessions_tree() -> None:
+    tested = (0.0, 600.0, 1200.0)
+    worked = branch("s1", [(650.0, 2.0)], test_times=tested)
+    searched = tree("a", worked)
+    context = ScoringContext(TASK, (), FrontierPolicy("m"), searched)
+
+    estimate = BanditScorer().estimate(worked, 1200.0, context, Readings())
+
+    mean = decayed_mean(visit_rewards(searched, worked))
+    assert estimate.expected_gain_pct == pytest.approx(mean * 102.0)
+    assert estimate.components == {"bandit_rv": pytest.approx(mean), "reward_scale": 1.0}
+    with pytest.raises(ValueError, match="session's tree"):
+        BanditScorer().estimate(worked, 1200.0, dataclasses.replace(context, tree=None), Readings())

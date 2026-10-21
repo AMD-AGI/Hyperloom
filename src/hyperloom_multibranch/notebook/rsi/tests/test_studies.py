@@ -75,7 +75,7 @@ def test_the_command_runs_the_calibration_and_the_branch_cap_study_on_an_archive
     study = json.loads(capsys.readouterr().out)
 
     assert calibrated.startswith("Frontier calibration") and "Too little evidence" in calibrated
-    assert "| bandit R/V, decay 0.95 |" in calibrated and "| bandit UCB, C=1.4 |" in calibrated
+    assert "| bandit-rv |" in calibrated and "| bandit UCB, C=1.4 |" in calibrated
     assert study["recommended"] == 2 and [row["policy"]["branch_cap"] for row in study["rows"]] == [2, 4]
     assert study["rows"][0]["policy"]["stop_pct"] is None
 

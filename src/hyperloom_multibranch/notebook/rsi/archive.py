@@ -166,7 +166,9 @@ class SearchTree:
 
     ``roofline_ceiling_pct`` is the roofline bound PRELUDE recorded for the gain metric, as a gain over the baseline;
     ``None`` when it recorded none, or the tree is older. ``longest_root_test_seconds`` is the longest of the root tests
-    the baseline anchored on, start to finish, which paces the frontier's window; ``None`` likewise.
+    the baseline anchored on, start to finish, which paces the frontier's window; ``None`` likewise. ``started_at`` is
+    when the session started, in seconds since the epoch, which tells the frontier scorers registered before it, for
+    which it is evidence, from the ones it could have been fitted to; ``None`` likewise.
     """
 
     session_id: str
@@ -179,6 +181,15 @@ class SearchTree:
     policy_versions: Mapping[str, str] = field(default_factory=dict)
     roofline_ceiling_pct: float | None = None
     longest_root_test_seconds: float | None = None
+    started_at: float | None = None
+
+    def as_of(self, t_s: float) -> SearchTree:
+        """The tree as it stood at ``t_s`` on its clock: the branches opened by then, each as of then, and the best
+        gain reached by then."""
+
+        branches = tuple(branch.as_of(t_s) for branch in self.branches if branch.opened_s <= t_s)
+        reached = (commit.gain_pct for branch in branches for commit in branch.commits)
+        return replace(self, branches=branches, final_gain_pct=max(reached, default=0.0))
 
 
 def tree_document(tree: SearchTree) -> dict[str, object]:
@@ -373,6 +384,7 @@ def tree_from_snapshot(
         policy_versions=dict(snapshot.fingerprints[-1].policy_versions) if snapshot.fingerprints else {},
         roofline_ceiling_pct=(ceiling / anchor - 1.0) * 100.0 if ceiling else None,
         longest_root_test_seconds=longest_root_test_seconds(snapshot),
+        started_at=start,
     )
 
 
@@ -410,14 +422,18 @@ class TreeArchive:
         return cls(Path(root)) if root else None
 
     def put(self, tree: SearchTree) -> None:
-        """Archive ``tree`` once; archiving it again is a no-op, another tree under its session id is an error."""
+        """Archive ``tree`` once; archiving it again is a no-op, another tree under its session id is an error.
+
+        The start time does not tell two trees apart: a tree archived before it was kept is the same session's tree.
+        """
 
         if not _FILE_NAME.fullmatch(tree.session_id):
             raise ValueError(f"session id {tree.session_id!r} cannot name an archived tree")
         path = self.root / f"{tree.session_id}.json"
         if publish_once(path, encode_json(tree_document(tree))):
             return
-        if tree_from_document(json.loads(path.read_text(encoding="utf-8"))) != tree:
+        held = tree_from_document(json.loads(path.read_text(encoding="utf-8")))
+        if replace(held, started_at=tree.started_at) != tree:
             raise TreeConflict(f"{path} already holds another tree for session {tree.session_id}")
 
     def load(self) -> list[SearchTree]:

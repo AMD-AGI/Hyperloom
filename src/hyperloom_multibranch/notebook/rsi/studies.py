@@ -12,7 +12,9 @@
 ``--json``, as JSON:
 
 * ``frontier --archive DIR [--log SESSION_ID=frontier.jsonl ...]``: the frontier calibration (:mod:`rsi.calibration`),
-  with the island bandit's rows beside it (:mod:`rsi.bandit`);
+  with the island bandit's rows (:mod:`rsi.bandit`), the scorers of :func:`rsi.scorers.custom_scorers` and the
+  expressions of the archive's pool beside it, each judged on the whole archive: for reference, since a session
+  counts only the sessions that started after a scorer was registered;
 * ``branch-cap --archive DIR --like SESSION_ID [--caps 2,3,4]``: the branch cap replay, for sessions like that one;
 * ``learnings --notebook DIR --log learnings.jsonl``: one session's learnings retrieval (:mod:`rsi.learning_eval`);
 * ``dispersion --shadow consistency.jsonl [--labels FILE] [--archive DIR] --model M --tp N --gpu G [--agentx]``: the
@@ -25,6 +27,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
 import math
 import sys
 from collections.abc import Callable, Sequence
@@ -36,14 +39,24 @@ from hyperloom.common.jsonio import read_jsonl
 from hyperloom_multibranch.notebook.codec import encode
 from hyperloom_multibranch.notebook.rsi.archive import SearchTree, TreeArchive
 from hyperloom_multibranch.notebook.rsi.bandit import bandit_baselines
-from hyperloom_multibranch.notebook.rsi.calibration import ROUND_SECONDS, CalibrationSettings, calibrate
+from hyperloom_multibranch.notebook.rsi.calibration import (
+    ROUND_SECONDS,
+    Baseline,
+    CalibrationSettings,
+    calibrate,
+    scorer_baseline,
+)
+from hyperloom_multibranch.notebook.rsi.expression import ExpressionError, ExpressionScorer
 from hyperloom_multibranch.notebook.rsi.frontier import MIN_EFFECTIVE_SESSIONS
 from hyperloom_multibranch.notebook.rsi.learning_eval import read_session
 from hyperloom_multibranch.notebook.rsi.priors import HOSTED, DispersionPrior, DispersionTask, dispersion_prior
 from hyperloom_multibranch.notebook.rsi.replay import TICK_SECONDS, PolicyEvaluation, ReplayPolicy, evaluate
 from hyperloom_multibranch.notebook.rsi.report import number, table
+from hyperloom_multibranch.notebook.rsi.scorers import ScorerPool, custom_scorers
 from hyperloom_multibranch.notebook.rsi.shadow import ShadowNoise, read_shadow, shadow_noise
 from hyperloom_multibranch.notebook.rsi.similarity import TaskConditions
+
+log = logging.getLogger(__name__)
 
 CAPS = (2, 3, 4, 6, 8)
 #: A stop threshold no stall falls under: the replay leaves stopping to the cap alone.
@@ -135,11 +148,25 @@ def _caps(text: str) -> tuple[int, ...]:
     return caps
 
 
+def _scorer_rows(archive: Path) -> list[Baseline]:
+    """The scorers of :func:`custom_scorers` and the expressions of ``archive``'s pool, as rows judged on the whole
+    archive."""
+
+    rows = [scorer_baseline(scorer) for scorer in custom_scorers()]
+    for record in ScorerPool(archive).expressions():
+        try:
+            rows.append(scorer_baseline(ExpressionScorer.read(record.label, record.expression)))
+        except ExpressionError as exc:
+            log.warning("left out the pooled frontier scorer %s: %s", record.label, exc)
+    return rows
+
+
 def _frontier(args: argparse.Namespace) -> Any:
     logs = {session_id: read_jsonl(path, skip_malformed=True, skip_non_dict=True) for session_id, path in args.log}
     trees = TreeArchive(args.archive).load()
     settings = CalibrationSettings(round_seconds=args.round_seconds, horizon_seconds=args.horizon_seconds)
-    return calibrate(trees, logs=logs, settings=settings, baselines=bandit_baselines(trees))
+    baselines = [*bandit_baselines(trees), *_scorer_rows(args.archive)]
+    return calibrate(trees, logs=logs, settings=settings, baselines=baselines)
 
 
 def _branch_cap(args: argparse.Namespace) -> Any:

@@ -11,7 +11,10 @@
   (``build_breakdown(..., knowledge=...)``).
 * :func:`session_frontier` is one session's frontier scoring: windows sized to its budget, the archived sessions as
   the prior, and the scores log. :func:`session_frontier_policy` chooses its policy once the session has a profile:
-  the calibration's recommendation for sessions like it, or the defaults.
+  the calibration's recommendation for sessions like it, or the defaults; :func:`session_frontier_scorer` chooses the
+  same way among the scorers of :mod:`rsi.scorers` too, and :func:`named_frontier_choice` is the choice a label names,
+  as a manifest records it or ``--frontier-policy`` asks for it. The scheduler holds the chosen scorer in one
+  ``ScorerGuard`` a session, which stands ``frontier-v1`` in where it fails.
 * :func:`judge_history` is the history digest the judge reads every round, as text; empty while nothing is archived.
 
 Passed no KB or archive, each step uses the environment's: the Experience KB ``HYPERLOOM_KB_URL`` names, and the
@@ -37,9 +40,18 @@ from hyperloom_multibranch.notebook.codec import encode
 from hyperloom_multibranch.notebook.knowledge.experience import publish_experiences, publish_multibranch_experiences
 from hyperloom_multibranch.notebook.knowledge.learnings import publish_learnings
 from hyperloom_multibranch.notebook.rsi.archive import SKIPPED, SearchTree, TreeArchive, archive_session, similar_trees
-from hyperloom_multibranch.notebook.rsi.calibration import DEFAULT_POLICY, PolicyChoice, calibrate, frontier_policy_for
+from hyperloom_multibranch.notebook.rsi.calibration import (
+    DEFAULT_POLICY,
+    VARIATIONS,
+    PolicyChoice,
+    calibrate,
+    frontier_policy_for,
+    frontier_scorer_for,
+)
+from hyperloom_multibranch.notebook.rsi.expression import ExpressionError
 from hyperloom_multibranch.notebook.rsi.frontier import FrontierPolicy, FrontierScoring
 from hyperloom_multibranch.notebook.rsi.history import MAX_CHARS, session_history
+from hyperloom_multibranch.notebook.rsi.scorers import ScorerPool, registered_scorers, scorer_named
 from hyperloom_multibranch.notebook.rsi.similarity import task_conditions
 
 log = logging.getLogger(__name__)
@@ -57,6 +69,7 @@ CALIBRATION_REPORT = "frontier-calibration.md"
 NO_REPORTS = "no_reports_folder"
 #: The scores log's usual name in the session's reports folder.
 FRONTIER_LOG = "frontier.jsonl"
+NO_PROFILE_EVIDENCE = f"{DEFAULT_POLICY}: the session has no profile yet"
 #: What a step raises when its target or its input lets it down; CLOSE records it and goes on.
 STEP_ERRORS = (LookupError, OSError, RuntimeError, ValueError)
 
@@ -267,8 +280,46 @@ def session_frontier_policy(
     the scoring reads it, once PRELUDE recorded the session's profile; ``defaults`` before."""
 
     if snapshot.profile is None:
-        return PolicyChoice(defaults, DEFAULT_POLICY, f"{DEFAULT_POLICY}: the session has no profile yet")
+        return PolicyChoice(defaults, DEFAULT_POLICY, NO_PROFILE_EVIDENCE)
     return frontier_policy_for(history, task_conditions(snapshot.profile), defaults)
+
+
+def _environment_pool() -> ScorerPool | None:
+    archive = TreeArchive.from_env()
+    return None if archive is None else ScorerPool.beside(archive)
+
+
+def session_frontier_scorer(
+    snapshot: NotebookSnapshot, history: Sequence[SearchTree], defaults: FrontierPolicy, pool: ScorerPool | None = None
+) -> PolicyChoice:
+    """How the session ``snapshot`` records scores, once PRELUDE recorded its profile:
+    :func:`calibration.frontier_scorer_for` on its task over every scorer :mod:`rsi.scorers` registers, in ``pool``,
+    by default the one beside the environment's archive; ``defaults`` before."""
+
+    if snapshot.profile is None:
+        return PolicyChoice(defaults, DEFAULT_POLICY, NO_PROFILE_EVIDENCE)
+    scorers = registered_scorers(pool if pool is not None else _environment_pool(), snapshot.taken_at)
+    return frontier_scorer_for(history, task_conditions(snapshot.profile), defaults, scorers)
+
+
+def named_frontier_choice(
+    label: str, defaults: FrontierPolicy, evidence: str, pool: ScorerPool | None = None
+) -> PolicyChoice | None:
+    """The choice ``label`` names, as ``--frontier-policy`` or a manifest's ``policy_versions`` gives it, with
+    ``evidence``: the defaults, a variation of them, or a scorer of :mod:`rsi.scorers` (looked up in ``pool``, by
+    default the one beside the environment's archive) under them; ``None`` when nothing goes by that label."""
+
+    if label == DEFAULT_POLICY:
+        return PolicyChoice(defaults, label, evidence)
+    variation = next((item for item in VARIATIONS[1:] if item.label == label), None)
+    if variation is not None:
+        return PolicyChoice(variation.apply(defaults), label, evidence)
+    try:
+        scorer = scorer_named(label, pool if pool is not None else _environment_pool())
+    except ExpressionError as exc:
+        log.warning("the frontier scorer %s no longer reads: %s", label, exc)
+        return None
+    return None if scorer is None else PolicyChoice(defaults, label, evidence, scorer)
 
 
 def judge_history(
@@ -307,6 +358,8 @@ __all__ = [
     "archived_history",
     "close_knowledge",
     "judge_history",
+    "named_frontier_choice",
     "session_frontier",
     "session_frontier_policy",
+    "session_frontier_scorer",
 ]

@@ -4,39 +4,49 @@
 """Frontier scoring, a prototype: how much one more unit of budget is expected to gain on each specialist branch.
 
 :class:`FrontierScoring` is a ``ProgressQuery`` over the notebook's: the same rows, each running specialist branch's
-``frontier`` filled with ``FrontierScore(expected_gain_pct, components, basis)``. The components:
+``frontier`` filled with ``FrontierScore(expected_gain_pct, components, basis, scorer)``. A score has two layers. A
+:class:`FrontierScorer` gives the core :class:`Estimate`: :data:`FRONTIER_V1`, the formula below, by default, and the
+fallback of every other (:mod:`rsi.scorers` says where the others come from and how to write one). The envelope,
+:func:`enveloped`, then holds every scorer to the same guarantees: a branch scored on its own short record keeps
+``new_branch_floor_pct`` until :data:`SETTLED_TESTS` of its explore tests have ended, as the judge's grace counts them,
+so a flat start does not stop it before it has tried a few directions; a candidate waiting for its confirm raises the
+score to its own gain; the headroom and the Amdahl ceiling cap it; and it is never negative. :class:`ScorerGuard` keeps a
+session scored when its scorer fails: ``frontier-v1`` scores the branch it failed on, and after :data:`FALLBACK_LIMIT`
+failures the whole session.
+
+``frontier-v1``'s components, and the envelope's:
 
 * ``trend_pct``: the cumulative gain the branch reached over the last window, in points over the baseline; the window
   spans at least :data:`WINDOW_TESTS` of the session's longest root tests (:func:`paced`);
 * ``tests`` and ``gpu_hours``: what the branch has spent, its tests counted once measured;
-* ``headroom_pct``: how far the head's recorded value is from the roofline bound PRELUDE recorded for the metric;
 * ``prior_remaining_pct``: what similar archived branches still gained after spending as many tests, weighted by task
   similarity, with ``prior_effective_sessions``, the sessions behind it each counted by its similarity; a session less
   than half similar does not count, and the prior is left out while they add up to less than 1.5;
 * ``observing``: 1 while a kernel-layer direction the branch tested lately may still be paying off;
+* ``headroom_pct``: how far the head's recorded value is from the roofline bound PRELUDE recorded for the metric;
 * ``amdahl_ceiling_pct``: the most that speeding up the head's largest op could gain, when the head was profiled;
 * ``pending_pct``: the gain of the branch's best candidate waiting for its confirm, in points over the baseline.
 
-The expected gain is the prior where there is one, else the trend; a branch under observation keeps at least
-``observation_floor_pct``, and a branch scored by its trend keeps ``new_branch_floor_pct`` until :data:`SETTLED_TESTS` of
-its explore tests have ended, as the judge's grace counts them, so a flat trend does not stop it before it has tried a
-few directions; a candidate waiting for its
-confirm raises it to its own gain; the headroom and the Amdahl ceiling cap it, and it is never negative.
-``basis`` names which of them the score rests on. The formula is a prototype: what the score means is the scheduler's
-call (gongzheng's), and it stays here until then. :func:`score_at` is the formula alone, on a branch as an archived
-tree has it, so the live scoring and the calibration score with the same one.
+``frontier-v1`` expects the prior where there is one, else the trend, and a branch under observation keeps at least
+``observation_floor_pct``. ``basis`` names which part of either layer the score rests on, and ``scorer`` the scorer.
+The formula is a prototype: what the score means is the scheduler's call (gongzheng's), and it stays here until then.
+:func:`score_with` scores with any scorer and :func:`score_at` with ``frontier-v1``, on a branch as an archived tree
+has it, so the live scoring and the calibration score alike.
 
 Given a ``log`` path, the scoring appends one :data:`FRONTIER_LOG_FORMAT` line per round it scored anything: when, on
-the session clock too, the parameters the calibration varies, and each scored branch's spend, head value and score.
-Checking the scores against the gains that followed is how they get calibrated.
+the session clock too, the parameters the calibration varies, the scorer, and each scored branch's spend, head value
+and score. Checking the scores against the gains that followed is how they get calibrated.
 """
 
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
-from dataclasses import dataclass, replace
+import math
+import re
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from pathlib import Path
+from typing import Protocol
 
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, NotRecorded
 from hyperloom_multibranch.contracts.notebook.interfaces import ProgressQuery, SnapshotQuery
@@ -78,6 +88,22 @@ WINDOW_TESTS = 4
 #: How many judged tests end a branch's new-branch floor; the judge's grace reads it too, so the grace never ends
 #: before the floor does.
 SETTLED_TESTS = 10
+FRONTIER_V1_LABEL = "frontier-v1"
+#: A scorer's label: lower-case letters, digits and ``.``, ``_``, ``-``, its version in it, such as ``frontier-v1``.
+SCORER_LABEL = re.compile(r"[a-z][a-z0-9._-]{1,63}")
+#: The bases a scorer's estimate may rest on; the envelope's own are not a scorer's to give.
+CORE_BASES = frozenset({FrontierBasis.TREND, FrontierBasis.PRIOR, FrontierBasis.OBSERVING, FrontierBasis.CUSTOM})
+#: The bases of an estimate read off the branch's own short record, which the new-branch floor holds up.
+_FLOORED = frozenset({FrontierBasis.TREND, FrontierBasis.CUSTOM})
+PENDING_COMPONENT = "pending_pct"
+HEADROOM_COMPONENT = "headroom_pct"
+AMDAHL_COMPONENT = "amdahl_ceiling_pct"
+#: Set to 1 in the components of a branch ``frontier-v1`` scored because the session's scorer failed on it.
+FALLBACK_COMPONENT = "scorer_fallback"
+#: The components the envelope and the guard write, which a scorer's estimate may not hold.
+RESERVED_COMPONENTS = frozenset({PENDING_COMPONENT, HEADROOM_COMPONENT, AMDAHL_COMPONENT, FALLBACK_COMPONENT})
+#: How many failures of its scorer a session takes before ``frontier-v1`` scores the rest of it.
+FALLBACK_LIMIT = 3
 
 
 @dataclass(frozen=True)
@@ -171,11 +197,14 @@ def largest_ceiling_pct(shares: OpShares | None) -> float | None:
 
 @dataclass(frozen=True)
 class ScoringContext:
-    """What a branch is scored against: its session's ``task``, the archived ``history`` and the ``policy``."""
+    """What a branch is scored against: its session's ``task``, the archived ``history``, the ``policy``, and ``tree``,
+    the session's own search tree as it stood then, for a scorer that sets a branch beside its siblings; ``None`` where
+    the caller built none."""
 
     task: TaskConditions
     history: tuple[SearchTree, ...]
     policy: FrontierPolicy
+    tree: SearchTree | None = None
 
 
 @dataclass(frozen=True)
@@ -194,7 +223,66 @@ class Readings:
     pending_pct: float | None = None
 
 
-def _young(branch: TreeBranch, t_s: float, policy: FrontierPolicy) -> bool:
+@dataclass(frozen=True)
+class Estimate:
+    """A scorer's estimate of a branch, before the envelope: the gain expected of one more unit of budget, in points
+    over the baseline, the ``components`` it read, and the ``basis`` it rests on, one of :data:`CORE_BASES`."""
+
+    expected_gain_pct: float
+    components: Mapping[str, float] = field(default_factory=dict)
+    basis: FrontierBasis = FrontierBasis.CUSTOM
+
+
+class FrontierScorer(Protocol):
+    """Estimates how much one more unit of budget gains on a branch; the envelope then applies to what it says.
+
+    ``label`` matches :data:`SCORER_LABEL` and carries the scorer's version: one that scores differently takes a new
+    label. ``estimate`` reads ``branch`` as it stood ``t_s`` seconds into its session, with ``context`` and
+    ``readings``. It is deterministic, writes nothing, and returns an :class:`Estimate` whose gain and components are
+    finite numbers, none of them in :data:`RESERVED_COMPONENTS`, with a basis in :data:`CORE_BASES`.
+    """
+
+    @property
+    def label(self) -> str: ...
+
+    def estimate(self, branch: TreeBranch, t_s: float, context: ScoringContext, readings: Readings) -> Estimate: ...
+
+
+class ScorerError(ValueError):
+    """A scorer's estimate breaks the scorer contract."""
+
+
+def _finite(value: object) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def checked_estimate(label: str, estimate: object) -> Estimate:
+    """``estimate`` as the envelope reads it, numbers as floats; raises :class:`ScorerError` when it breaks the
+    contract."""
+
+    if not isinstance(estimate, Estimate) or not isinstance(estimate.components, Mapping):
+        raise ScorerError(f"{label} returned a {type(estimate).__name__}, not an Estimate with a mapping of components")
+    if not _finite(estimate.expected_gain_pct):
+        raise ScorerError(f"{label} expects a gain of {estimate.expected_gain_pct!r}, not a finite number")
+    broken = sorted(
+        str(key) for key, value in estimate.components.items() if not (isinstance(key, str) and _finite(value))
+    )
+    if broken:
+        raise ScorerError(f"{label} gives components that are not finite numbers: {', '.join(broken)}")
+    reserved = sorted(RESERVED_COMPONENTS.intersection(estimate.components))
+    if reserved:
+        raise ScorerError(f"{label} gives components the envelope writes: {', '.join(reserved)}")
+    try:
+        basis = FrontierBasis(estimate.basis)
+    except ValueError:
+        raise ScorerError(f"{label} rests on {estimate.basis!r}, which is no frontier basis") from None
+    if basis not in CORE_BASES:
+        raise ScorerError(f"{label} rests on {basis.value}, which is the envelope's to give")
+    components = {key: float(value) for key, value in estimate.components.items()}
+    return Estimate(float(estimate.expected_gain_pct), components, basis)
+
+
+def is_young(branch: TreeBranch, t_s: float, policy: FrontierPolicy) -> bool:
     """Too new to have a trend: fewer than :data:`SETTLED_TESTS` explore tests ended, counted as the judge's grace
     counts them, so the floor and the grace end at the same test. A tree archived before ended tests were kept counts
     its judged tests; one archived before judgements were kept, too, is young while open less than a window and
@@ -208,39 +296,61 @@ def _young(branch: TreeBranch, t_s: float, policy: FrontierPolicy) -> bool:
     return settled < SETTLED_TESTS
 
 
-def score_at(branch: TreeBranch, t_s: float, context: ScoringContext, readings: Readings = Readings()) -> FrontierScore:
-    """The frontier score of ``branch`` as it stood at ``t_s`` on its session's clock: the one formula.
+@dataclass(frozen=True)
+class FrontierV1:
+    """Today's formula, the default scorer and the fallback of every other: the prior where similar archived sessions
+    back one, else the branch's trend, and at least ``observation_floor_pct`` while a kernel-layer direction it tested
+    lately may still pay off."""
 
-    The scoring reads the ``readings`` off the notebook; the calibration reads them, and the branch as of ``t_s``, off
-    an archived tree.
-    """
+    @property
+    def label(self) -> str:
+        return FRONTIER_V1_LABEL
+
+    def estimate(self, branch: TreeBranch, t_s: float, context: ScoringContext, readings: Readings) -> Estimate:
+        policy = context.policy
+        trend = branch.gain_at(t_s) - branch.gain_at(t_s - policy.window_seconds)
+        tests = len(branch.spent_times)
+        components = {
+            "trend_pct": trend,
+            "tests": float(tests),
+            "gpu_hours": branch.gpu_seconds / HOUR,
+            "observing": float(readings.observing),
+        }
+        expected, basis = trend, FrontierBasis.TREND
+        prior = remaining_prior(context.history, context.task, tests, min_similarity=policy.min_similarity)
+        if prior is not None and prior.effective_sessions >= policy.min_effective_sessions:
+            components.update(
+                prior_remaining_pct=prior.remaining_pct, prior_effective_sessions=prior.effective_sessions
+            )
+            expected, basis = prior.remaining_pct, FrontierBasis.PRIOR
+        if readings.observing and expected < policy.observation_floor_pct:
+            expected, basis = policy.observation_floor_pct, FrontierBasis.OBSERVING
+        return Estimate(expected, components, basis)
+
+
+#: The built-in formula, :class:`FrontierV1`.
+FRONTIER_V1 = FrontierV1()
+
+
+def enveloped(
+    estimate: Estimate, branch: TreeBranch, t_s: float, context: ScoringContext, readings: Readings
+) -> FrontierScore:
+    """``estimate`` held to the envelope every scorer gets. ``basis`` names the envelope's part where it changed the
+    score: the new-branch floor of a young branch scored on its own record, the gain of a candidate waiting for its
+    confirm, or the headroom or the Amdahl ceiling that capped it."""
 
     policy = context.policy
-    observing = readings.observing
-    trend = branch.gain_at(t_s) - branch.gain_at(t_s - policy.window_seconds)
-    tests = len(branch.spent_times)
-    components = {
-        "trend_pct": trend,
-        "tests": float(tests),
-        "gpu_hours": branch.gpu_seconds / HOUR,
-        "observing": float(observing),
-    }
-    expected, basis = trend, FrontierBasis.TREND
-    prior = remaining_prior(context.history, context.task, tests, min_similarity=policy.min_similarity)
-    if prior is not None and prior.effective_sessions >= policy.min_effective_sessions:
-        components.update(prior_remaining_pct=prior.remaining_pct, prior_effective_sessions=prior.effective_sessions)
-        expected, basis = prior.remaining_pct, FrontierBasis.PRIOR
-    if observing and expected < policy.observation_floor_pct:
-        expected, basis = policy.observation_floor_pct, FrontierBasis.OBSERVING
-    if basis is FrontierBasis.TREND and _young(branch, t_s, policy) and expected < policy.new_branch_floor_pct:
+    expected, basis = estimate.expected_gain_pct, estimate.basis
+    components = dict(estimate.components)
+    if basis in _FLOORED and is_young(branch, t_s, policy) and expected < policy.new_branch_floor_pct:
         expected, basis = policy.new_branch_floor_pct, FrontierBasis.NEW
     if readings.pending_pct is not None:
-        components["pending_pct"] = readings.pending_pct
+        components[PENDING_COMPONENT] = readings.pending_pct
         if readings.pending_pct > expected:
             expected, basis = readings.pending_pct, FrontierBasis.PENDING
     for key, bound, capped in (
-        ("headroom_pct", readings.headroom_pct, FrontierBasis.HEADROOM),
-        ("amdahl_ceiling_pct", readings.amdahl_pct, FrontierBasis.AMDAHL),
+        (HEADROOM_COMPONENT, readings.headroom_pct, FrontierBasis.HEADROOM),
+        (AMDAHL_COMPONENT, readings.amdahl_pct, FrontierBasis.AMDAHL),
     ):
         if bound is not None:
             components[key] = bound
@@ -249,28 +359,100 @@ def score_at(branch: TreeBranch, t_s: float, context: ScoringContext, readings: 
     return FrontierScore(expected_gain_pct=max(0.0, expected), components=components, basis=basis)
 
 
-def score_branch(
-    snapshot: NotebookSnapshot,
-    row: BranchProgress,
-    tree: SearchTree,
-    history: tuple[SearchTree, ...],
-    policy: FrontierPolicy,
+def score_with(
+    scorer: FrontierScorer, branch: TreeBranch, t_s: float, context: ScoringContext, readings: Readings = Readings()
 ) -> FrontierScore:
-    """The frontier score of one running specialist branch of ``tree``, the session's own search tree."""
+    """The frontier score of ``branch`` as it stood at ``t_s``: ``scorer``'s estimate held to the envelope. Raises
+    :class:`ScorerError` when the estimate breaks the scorer contract, and whatever the scorer raises."""
 
-    branch = next(item for item in tree.branches if item.name == row.branch)
+    estimate = checked_estimate(scorer.label, scorer.estimate(branch, t_s, context, readings))
+    return replace(enveloped(estimate, branch, t_s, context, readings), scorer=scorer.label)
+
+
+def score_at(branch: TreeBranch, t_s: float, context: ScoringContext, readings: Readings = Readings()) -> FrontierScore:
+    """The frontier score of ``branch`` as it stood at ``t_s`` on its session's clock, by ``frontier-v1``.
+
+    The scoring reads the ``readings`` off the notebook; the calibration reads them, and the branch as of ``t_s``, off
+    an archived tree.
+    """
+
+    return score_with(FRONTIER_V1, branch, t_s, context, readings)
+
+
+class ScorerGuard:
+    """A session's scorer, ``frontier-v1`` standing in where it fails.
+
+    A failure is anything the scorer raises, or an estimate that breaks the contract. The branch it failed on is scored
+    by ``frontier-v1`` that round, with :data:`FALLBACK_COMPONENT` set; once it has failed ``limit`` times,
+    ``frontier-v1`` scores the rest of the session, and ``on_fallback`` is told why, once.
+    """
+
+    def __init__(
+        self,
+        scorer: FrontierScorer = FRONTIER_V1,
+        *,
+        limit: int = FALLBACK_LIMIT,
+        on_fallback: Callable[[str], None] | None = None,
+    ) -> None:
+        self.chosen = scorer
+        self.failures = 0
+        self._active = scorer
+        self._limit = limit
+        self._on_fallback = on_fallback
+
+    @property
+    def label(self) -> str:
+        """The label of the scorer the session scores with now."""
+
+        return self._active.label
+
+    def score(self, branch: TreeBranch, t_s: float, context: ScoringContext, readings: Readings) -> FrontierScore:
+        """``branch`` scored by the session's scorer, or by ``frontier-v1`` where that fails."""
+
+        if self._active is FRONTIER_V1:
+            return score_with(FRONTIER_V1, branch, t_s, context, readings)
+        try:
+            return score_with(self._active, branch, t_s, context, readings)
+        except Exception:
+            log.exception(
+                "the frontier scorer %s failed on %s; %s scores it", self.label, branch.name, FRONTIER_V1_LABEL
+            )
+        self._failed()
+        stood_in = score_with(FRONTIER_V1, branch, t_s, context, readings)
+        return replace(stood_in, components={**stood_in.components, FALLBACK_COMPONENT: 1.0})
+
+    def _failed(self) -> None:
+        self.failures += 1
+        if self.failures < self._limit:
+            return
+        why = (
+            f"the frontier scorer {self.label} failed {self.failures} times; "
+            f"{FRONTIER_V1_LABEL} scores the rest of the session"
+        )
+        log.warning("%s", why)
+        self._active = FRONTIER_V1
+        if self._on_fallback is not None:
+            self._on_fallback(why)
+
+
+def score_branch(
+    snapshot: NotebookSnapshot, row: BranchProgress, context: ScoringContext, guard: ScorerGuard | None = None
+) -> FrontierScore:
+    """The frontier score of one running specialist branch of ``context.tree``, the session's own search tree, by
+    ``guard``'s scorer, ``frontier-v1`` without one."""
+
+    if context.tree is None:
+        raise ValueError("a running branch is scored on its session's search tree")
+    policy = context.policy
+    branch = next(item for item in context.tree.branches if item.name == row.branch)
     ceiling = snapshot.profile.roofline_ceiling.get(policy.metric) if snapshot.profile is not None else None
-    return score_at(
-        branch,
-        snapshot.taken_at - session_start(snapshot),
-        ScoringContext(tree.task, history, policy),
-        Readings(
-            observing=_observing(snapshot, row.branch, snapshot.taken_at - policy.observation_seconds),
-            headroom_pct=headroom_pct(ceiling, row.head_value.get(policy.metric)),
-            amdahl_pct=largest_ceiling_pct(snapshot.op_shares.get(row.head_commit)),
-            pending_pct=_pending_pct(snapshot, row, policy.metric),
-        ),
+    readings = Readings(
+        observing=_observing(snapshot, row.branch, snapshot.taken_at - policy.observation_seconds),
+        headroom_pct=headroom_pct(ceiling, row.head_value.get(policy.metric)),
+        amdahl_pct=largest_ceiling_pct(snapshot.op_shares.get(row.head_commit)),
+        pending_pct=_pending_pct(snapshot, row, policy.metric),
     )
+    return (guard or ScorerGuard()).score(branch, snapshot.taken_at - session_start(snapshot), context, readings)
 
 
 def _pending_pct(snapshot: NotebookSnapshot, row: BranchProgress, metric: str) -> float | None:
@@ -285,17 +467,22 @@ def _pending_pct(snapshot: NotebookSnapshot, row: BranchProgress, metric: str) -
 
 
 def score_progress(
-    snapshot: NotebookSnapshot, history: tuple[SearchTree, ...], policy: FrontierPolicy
+    snapshot: NotebookSnapshot,
+    history: tuple[SearchTree, ...],
+    policy: FrontierPolicy,
+    guard: ScorerGuard | None = None,
 ) -> tuple[BranchProgress, ...]:
-    """The notebook's progress, each running specialist branch scored; unscored without a profile or a baseline."""
+    """The notebook's progress, each running specialist branch scored by ``guard``'s scorer (``frontier-v1`` without
+    one); unscored without a profile or a baseline."""
 
     try:
         tree = tree_from_snapshot(snapshot, policy.metric)
     except (NotRecorded, ValueError):
         return snapshot.progress
-    policy = paced(policy, tree.longest_root_test_seconds)
+    context = ScoringContext(tree.task, history, paced(policy, tree.longest_root_test_seconds), tree)
+    scoring = guard or ScorerGuard()
     return tuple(
-        replace(row, frontier=score_branch(snapshot, row, tree, history, policy))
+        replace(row, frontier=score_branch(snapshot, row, context, scoring))
         if row.running and row.branch != INTEGRATION_BRANCH
         else row
         for row in snapshot.progress
@@ -303,9 +490,10 @@ def score_progress(
 
 
 def frontier_log_line(
-    snapshot: NotebookSnapshot, rows: Sequence[BranchProgress], policy: FrontierPolicy
+    snapshot: NotebookSnapshot, rows: Sequence[BranchProgress], policy: FrontierPolicy, scorer: str = FRONTIER_V1_LABEL
 ) -> dict[str, object] | None:
-    """One round of scores as a log line; ``None`` when the round scored no branch."""
+    """One round of scores as a log line, ``scorer`` the label the session scored with; ``None`` when the round scored
+    no branch."""
 
     scored = [row for row in rows if row.frontier is not None]
     if not scored:
@@ -315,6 +503,7 @@ def frontier_log_line(
         "at": snapshot.taken_at,
         "t_s": snapshot.taken_at - session_start(snapshot),
         "metric": policy.metric,
+        "scorer": scorer,
         "window_seconds": policy.window_seconds,
         "observation_seconds": policy.observation_seconds,
         "new_branch_floor_pct": policy.new_branch_floor_pct,
@@ -335,18 +524,21 @@ def frontier_log_line(
 
 @dataclass(frozen=True)
 class FrontierScoring(ProgressQuery):
-    """The notebook's progress with frontier scores, against the archived ``history``; ``log`` keeps every round."""
+    """The notebook's progress with frontier scores, against the archived ``history``; ``log`` keeps every round, and
+    ``guard`` holds the session's scorer and counts its failures, so one guard serves a session."""
 
     notebook: SnapshotQuery
     policy: FrontierPolicy
     history: tuple[SearchTree, ...] = ()
     log: Path | None = None
+    guard: ScorerGuard = field(default_factory=ScorerGuard)
 
     async def progress(self) -> tuple[BranchProgress, ...]:
         snapshot = await self.notebook.snapshot()
-        rows = score_progress(snapshot, self.history, self.policy)
+        rows = score_progress(snapshot, self.history, self.policy, self.guard)
         if self.log is not None:
-            line = frontier_log_line(snapshot, rows, paced(self.policy, longest_root_test_seconds(snapshot)))
+            policy = paced(self.policy, longest_root_test_seconds(snapshot))
+            line = frontier_log_line(snapshot, rows, policy, self.guard.label)
             if line is not None:
                 self._append(self.log, encode_json(line))
         return rows
@@ -366,26 +558,45 @@ class FrontierScoring(ProgressQuery):
 
 
 __all__ = [
+    "AMDAHL_COMPONENT",
+    "CORE_BASES",
+    "FALLBACK_COMPONENT",
+    "FALLBACK_LIMIT",
     "FRONTIER_LOG_FORMAT",
+    "FRONTIER_V1",
+    "FRONTIER_V1_LABEL",
+    "HEADROOM_COMPONENT",
     "MIN_EFFECTIVE_SESSIONS",
     "NEW_BRANCH_FLOOR_PCT",
     "OBSERVATION_FLOOR_PCT",
     "OBSERVATION_SECONDS",
+    "PENDING_COMPONENT",
     "REFERENCE_BUDGET_SECONDS",
+    "RESERVED_COMPONENTS",
+    "SCORER_LABEL",
     "SETTLED_TESTS",
     "WINDOW_SECONDS",
     "WINDOW_TESTS",
+    "Estimate",
     "FrontierPolicy",
+    "FrontierScorer",
     "FrontierScoring",
+    "FrontierV1",
     "Readings",
     "RemainingPrior",
+    "ScorerError",
+    "ScorerGuard",
     "ScoringContext",
+    "checked_estimate",
+    "enveloped",
     "frontier_log_line",
     "headroom_pct",
+    "is_young",
     "largest_ceiling_pct",
     "paced",
     "remaining_prior",
     "score_at",
     "score_branch",
     "score_progress",
+    "score_with",
 ]

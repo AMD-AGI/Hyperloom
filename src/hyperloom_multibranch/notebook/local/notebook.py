@@ -824,7 +824,7 @@ class LocalNotebook(
                 raise WriterNotAllowed(f"a specialist runtime records its specialist's spend, not the {usage.source}'s")
         elif usage.branch or usage.source is UsageSource.SPECIALIST:
             raise WriterNotAllowed(
-                "the scheduler records its own judge's, resolver's and fix critic's spend, with no branch"
+                "the scheduler records its own LLMs' spend (judge, resolver, fix critic, scorer author), with no branch"
             )
         tokens = usage.tokens
         cost = "unpriced" if usage.cost_usd is None else f"${usage.cost_usd:.4f}"

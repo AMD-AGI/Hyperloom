@@ -24,6 +24,7 @@ from hyperloom_multibranch.notebook.rsi.archive import (
     TreeArchive,
     TreeDirection,
     archive_session,
+    session_start,
     similar_trees,
     tree_document,
     tree_from_document,
@@ -96,6 +97,29 @@ def test_a_branch_as_of_a_time_has_only_what_it_had_by_then() -> None:
     assert (then.test_times, then.kernel_test_times) == ((0.0, 1800.0, 3600.0), (1800.0,))
     assert then.closed_s is None and then.gpu_seconds == pytest.approx(3 * HOUR)
     assert grown.as_of(7200.0).closed_s == 7200.0
+
+
+def test_a_tree_as_of_a_time_holds_the_branches_opened_by_then_and_the_best_gain_reached_by_then() -> None:
+    grown = tree("a", branch("s1", LATE_BLOOMER, test_times=(0.0, 3600.0)), branch("s2", [], opened_s=5400.0))
+
+    then = grown.as_of(3600.0)
+
+    assert [item.name for item in then.branches] == [INTEGRATION_BRANCH, "s1"]
+    assert then.final_gain_pct == pytest.approx(2.3) and grown.final_gain_pct == pytest.approx(12.0)
+    assert then.branches[1] == grown.branches[1].as_of(3600.0)
+
+
+def test_the_tree_keeps_when_its_session_started_and_a_tree_archived_without_it_is_the_same_tree(
+    snapshot: NotebookSnapshot, tmp_path: Path
+) -> None:
+    searched = tree_from_snapshot(snapshot, METRIC)
+    archive = TreeArchive(tmp_path / "archive")
+    archive.put(dataclasses.replace(searched, started_at=None))
+
+    archive.put(searched)
+
+    assert searched.started_at == session_start(snapshot)
+    assert archive.load()[0].started_at is None
 
 
 def test_each_branch_keeps_why_it_stopped_and_the_directions_it_tried(snapshot: NotebookSnapshot) -> None:

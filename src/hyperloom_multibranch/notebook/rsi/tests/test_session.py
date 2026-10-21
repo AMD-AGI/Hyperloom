@@ -22,8 +22,9 @@ from hyperloom_multibranch.notebook.knowledge.breakdown import build_breakdown
 from hyperloom_multibranch.notebook.knowledge.tests.kb_service import experience_service
 from hyperloom_multibranch.notebook.rsi import session
 from hyperloom_multibranch.notebook.rsi.archive import ARCHIVE_ENV, ARCHIVED, SKIPPED, TreeArchive
-from hyperloom_multibranch.notebook.rsi.calibration import DEFAULT_POLICY
-from hyperloom_multibranch.notebook.rsi.frontier import FrontierPolicy
+from hyperloom_multibranch.notebook.rsi.bandit import BANDIT_LABEL, BanditScorer
+from hyperloom_multibranch.notebook.rsi.calibration import DEFAULT_POLICY, PolicyChoice
+from hyperloom_multibranch.notebook.rsi.frontier import FRONTIER_V1, FrontierPolicy
 from hyperloom_multibranch.notebook.rsi.history import MAX_CHARS, session_history
 from hyperloom_multibranch.notebook.rsi.session import (
     CALIBRATION_REPORT,
@@ -42,9 +43,12 @@ from hyperloom_multibranch.notebook.rsi.session import (
     KnowledgeClose,
     close_knowledge,
     judge_history,
+    named_frontier_choice,
     session_frontier,
     session_frontier_policy,
+    session_frontier_scorer,
 )
+from hyperloom_multibranch.notebook.rsi.scorers import ScorerPool
 from hyperloom_multibranch.notebook.rsi.similarity import task_conditions
 from hyperloom_multibranch.notebook.rsi.tests.trees import branch, tree
 from hyperloom_multibranch.notebook.tests.factories import START, FakeClock, profile
@@ -252,6 +256,31 @@ def test_a_session_scores_with_the_defaults_before_its_profile_and_while_the_evi
     assert early.evidence == f"{DEFAULT_POLICY}: the session has no profile yet"
     assert (started.policy, started.label) == (defaults, DEFAULT_POLICY)
     assert started.evidence.startswith(f"{DEFAULT_POLICY}: Too little evidence")
+
+
+def test_a_session_chooses_among_the_registered_scorers_too_and_a_label_names_a_choice(
+    snapshot: NotebookSnapshot, tmp_path: Path
+) -> None:
+    defaults = FrontierPolicy.for_budget(METRIC, BUDGET)
+    pool = ScorerPool(tmp_path)
+
+    early = session_frontier_scorer(dataclasses.replace(snapshot, profile=None), [PAST], defaults, pool)
+    started = session_frontier_scorer(snapshot, [PAST], defaults, pool)
+    named = {
+        label: named_frontier_choice(label, defaults, "recorded", pool)
+        for label in (DEFAULT_POLICY, "window x2", BANDIT_LABEL, "nowhere")
+    }
+
+    assert (early.label, early.evidence) == (DEFAULT_POLICY, f"{DEFAULT_POLICY}: the session has no profile yet")
+    assert (started.label, started.policy, started.scorer) == (DEFAULT_POLICY, defaults, FRONTIER_V1)
+    assert started.evidence.startswith(f"{DEFAULT_POLICY}: Too little evidence")
+    assert [record.label for record in pool.records()] == [BANDIT_LABEL]
+    assert named[DEFAULT_POLICY] == PolicyChoice(defaults, DEFAULT_POLICY, "recorded")
+    window = named["window x2"]
+    assert window is not None and window.policy.window_seconds == 2 * defaults.window_seconds
+    bandit = named[BANDIT_LABEL]
+    assert bandit is not None and (bandit.policy, bandit.scorer) == (defaults, BanditScorer())
+    assert named["nowhere"] is None
 
 
 def test_the_judge_reads_the_digest_of_the_archived_sessions_and_nothing_without_any(

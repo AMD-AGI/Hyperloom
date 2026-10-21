@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""AdaEvolve's island bandit (SkyDiscover; arXiv 2602.20133, section 3.3) on archived branches: a baseline the
-frontier calibration sets beside the frontier score, never a policy.
+"""AdaEvolve's island bandit (SkyDiscover; arXiv 2602.20133, section 3.3) on archived branches: a frontier scorer
+beside ``frontier-v1``, and baselines the frontier calibration sets beside both.
 
 A specialist branch is an island and each of its tests a visit. A visit's reward is the step its commit took, the
 gain the rule gate confirmed: the commit's cumulative gain over the branch's previous one, divided by one plus the
@@ -14,21 +14,25 @@ forked with is its start, not a reward. Rewards and visits decay by ``decay`` at
 UCB adds ``exploration * sqrt(ln N / n)``, ``N`` the tests of every specialist branch by then and ``n`` the branch's
 own. A branch not tested yet counts as tested once: a visit here is an end-to-end test, too dear to force. The
 calibration measures how well a score foretells the gains that followed, while the bonus is a choice of where to
-spend, so only the decayed mean can be advice for the frontier score; the UCB rows show what the bonus costs it.
+spend, so only the decayed mean, :class:`BanditScorer` (``bandit-rv``), is a frontier scorer that may be advice; the
+UCB rows show what the bonus costs it.
 """
 
 from __future__ import annotations
 
 import math
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
+from hyperloom_multibranch.contracts.notebook.vocab import FrontierBasis
 from hyperloom_multibranch.notebook.rsi.archive import SearchTree, TreeBranch
-from hyperloom_multibranch.notebook.rsi.calibration import Baseline
+from hyperloom_multibranch.notebook.rsi.calibration import Baseline, scorer_baseline
+from hyperloom_multibranch.notebook.rsi.frontier import Estimate, Readings, ScoringContext
 
 #: SkyDiscover's ``gamma_decay``.
 DECAY = 0.95
+BANDIT_LABEL = "bandit-rv"
 EXPLORATIONS = (0.1, 0.5, math.sqrt(2))
 #: The quantile of the archive's steps that the scale puts at 1.
 SCALE_QUANTILE = 0.9
@@ -95,14 +99,39 @@ def _visits(tree: SearchTree, t_s: float) -> int:
 
 
 @dataclass(frozen=True)
-class DecayedMean:
-    """The bandit's exploitation term, ``R / V``, as a score of ``branch`` at ``t_s``."""
+class BanditScorer:
+    """The bandit's exploitation term, ``R / V``, as a frontier scorer: the branch's recent gain per test, back in
+    points over the baseline, its reward scale read off the archived sessions it is scored against. It sets the branch
+    beside the session's best gain by then, so it scores only where the scoring passes the session's tree."""
 
-    scale: float
     decay: float = DECAY
+    _scales: dict[int, tuple[tuple[SearchTree, ...], float]] = field(
+        default_factory=dict, init=False, repr=False, compare=False
+    )
 
-    def __call__(self, tree: SearchTree, branch: TreeBranch, t_s: float, history: tuple[SearchTree, ...]) -> float:
-        return decayed_mean(visit_rewards(tree, branch.as_of(t_s), self.scale), self.decay)
+    @property
+    def label(self) -> str:
+        return BANDIT_LABEL
+
+    def estimate(self, branch: TreeBranch, t_s: float, context: ScoringContext, readings: Readings) -> Estimate:
+        tree = context.tree
+        if tree is None:
+            raise ValueError(f"{BANDIT_LABEL} scores a branch beside its session's tree, and none was passed")
+        scale = self._scale(context.history)
+        mean = decayed_mean(visit_rewards(tree, branch, scale), self.decay)
+        points = mean * scale * (_PERCENT + _best_gain(tree, t_s))
+        return Estimate(points, {"bandit_rv": mean, "reward_scale": scale}, FrontierBasis.CUSTOM)
+
+    def _scale(self, history: tuple[SearchTree, ...]) -> float:
+        """:func:`reward_scale` of ``history``, read once per history: the calibration scores every round against one."""
+
+        held = self._scales.get(id(history))
+        if held is not None and held[0] is history:
+            return held[1]
+        scale = reward_scale(history)
+        self._scales.clear()
+        self._scales[id(history)] = (history, scale)
+        return scale
 
 
 @dataclass(frozen=True)
@@ -121,20 +150,21 @@ class UpperConfidence:
 def bandit_baselines(
     trees: Sequence[SearchTree], *, decay: float = DECAY, explorations: Sequence[float] = EXPLORATIONS
 ) -> tuple[Baseline, ...]:
-    """The decayed mean, which may be advice, and the whole rule at each of ``explorations``, scaled on ``trees``."""
+    """``bandit-rv``, which may be advice, then the whole rule at each of ``explorations``, scaled on ``trees``."""
 
     scale = reward_scale(trees)
     return (
-        Baseline(f"bandit R/V, decay {decay:g}", DecayedMean(scale, decay), advisable=True),
+        scorer_baseline(BanditScorer(decay)),
         *(Baseline(f"bandit UCB, C={c:.2g}", UpperConfidence(scale, c, decay)) for c in explorations),
     )
 
 
 __all__ = [
+    "BANDIT_LABEL",
     "DECAY",
     "EXPLORATIONS",
     "SCALE_QUANTILE",
-    "DecayedMean",
+    "BanditScorer",
     "UpperConfidence",
     "bandit_baselines",
     "decayed_mean",

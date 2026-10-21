@@ -6,26 +6,37 @@
 from __future__ import annotations
 
 import dataclasses
+import math
 
 import pytest
 
 from hyperloom_multibranch.contracts.notebook.records import NotebookSnapshot
 from hyperloom_multibranch.notebook.rsi import calibration
-from hyperloom_multibranch.notebook.rsi.archive import SearchTree, session_start, tree_from_snapshot
+from hyperloom_multibranch.notebook.rsi.archive import SearchTree, TreeBranch, session_start, tree_from_snapshot
 from hyperloom_multibranch.notebook.rsi.calibration import (
     CURRENT,
     DEFAULT_POLICY,
     LOGGED,
     VARIATIONS,
+    Baseline,
+    Registered,
     Variation,
     calibrate,
     frontier_policy_for,
+    frontier_scorer_for,
     gain_after,
     rank_correlation,
     score_archived,
     session_policy,
 )
-from hyperloom_multibranch.notebook.rsi.frontier import FrontierPolicy, score_progress
+from hyperloom_multibranch.notebook.rsi.frontier import (
+    FRONTIER_V1,
+    Estimate,
+    FrontierPolicy,
+    Readings,
+    ScoringContext,
+    score_progress,
+)
 from hyperloom_multibranch.notebook.rsi.similarity import TaskConditions
 from hyperloom_multibranch.notebook.rsi.tests.trees import HOUR, branch, tree
 from hyperloom_multibranch.notebook.tests.sessions import METRIC
@@ -162,6 +173,92 @@ def test_an_archive_the_calibration_cannot_read_leaves_the_defaults(monkeypatch:
     assert choice.evidence == f"{DEFAULT_POLICY}: the calibration failed: a tree without a baseline"
 
 
+def test_a_round_whose_scores_all_tie_gives_no_top_hit() -> None:
+    current = calibrate(tuple(_tied(n) for n in range(3)), variations=(Variation(CURRENT),)).rows[0]
+
+    assert (current.compared_rounds, current.top_hit_rate, current.rank_correlation) == (0, None, None)
+
+
+@dataclasses.dataclass(frozen=True)
+class _Names:
+    """A baseline that scores the branch named ``best`` above the others."""
+
+    best: str
+
+    def __call__(self, tree: SearchTree, branch: TreeBranch, t_s: float, history: tuple[SearchTree, ...]) -> float:
+        return 1.0 if branch.name == self.best else 0.0
+
+
+def test_a_candidate_beside_the_current_policy_counts_the_rounds_where_only_it_told_the_branches_apart() -> None:
+    picks = Baseline("a first", _Names("a"), advisable=True)
+
+    report = calibrate(tuple(_tied(n) for n in range(3)), variations=(Variation(CURRENT),), baselines=(picks,))
+    (compared,) = report.comparisons
+
+    # Before a's commit at 90 minutes the current policy ties the two branches, while a went on to gain.
+    assert (compared.label, compared.rounds, compared.sessions) == ("a first", 24, 3)
+    assert compared.rank_correlation == pytest.approx(1.0) and compared.current_correlation == 0.0
+    assert report.recommended is not None and report.recommended.label == "a first"
+    assert "| a first | 1.00 | 0.00 | 24 | 3 |" in report.render()
+
+
+def test_a_baseline_registered_later_is_judged_only_on_the_sessions_that_started_after_it() -> None:
+    sessions = (
+        *(dataclasses.replace(_tied(n), started_at=1000.0 * n) for n in range(4)),
+        dataclasses.replace(_tied(4), started_at=None),
+    )
+    later = Baseline("a first", _Names("a"), advisable=True, since=1500.0)
+
+    report = calibrate(sessions, variations=(Variation(CURRENT),), baselines=(later,))
+    row = next(item for item in report.rows if item.label == "a first")
+    (compared,) = report.comparisons
+
+    assert (row.sessions, compared.sessions, compared.rounds) == (2, 2, 16)
+    assert report.recommended is None and report.note.startswith("Too little evidence for advice: at most 2 sessions")
+
+
+def test_a_baseline_that_fails_is_left_out_with_why_and_the_others_stand() -> None:
+    def broken(*_: object) -> float:
+        raise RuntimeError("no estimate")
+
+    report = calibrate(
+        SESSIONS[:2], variations=(Variation(CURRENT), NO_FLOOR), baselines=(Baseline("broken", broken, True),)
+    )
+    failed = report.rows[-1]
+
+    assert (failed.label, failed.failure, failed.rounds) == ("broken", "RuntimeError: no estimate", 0)
+    assert [item.label for item in report.comparisons] == [NO_FLOOR.label]
+    assert "'broken' failed: RuntimeError: no estimate" in report.render()
+
+
+@dataclasses.dataclass(frozen=True)
+class _Prefers:
+    """A frontier scorer that expects 2 points of the branch named ``best`` and nothing of the others."""
+
+    best: str
+    label: str = "prefers-a"
+
+    def estimate(self, branch: TreeBranch, t_s: float, context: ScoringContext, readings: Readings) -> Estimate:
+        return Estimate(2.0 if branch.name == self.best else 0.0)
+
+
+def test_a_session_scores_with_the_scorer_its_similar_sessions_recommend_once_they_are_evidence_for_it() -> None:
+    archived = tuple(_on_the_gpu(n, _tied(n)) for n in range(3))
+    task, defaults, scorer = (
+        TaskConditions(labels={"gpu": "mi355x"}),
+        FrontierPolicy.for_budget(METRIC, BUDGET),
+        _Prefers("a"),
+    )
+
+    chosen = frontier_scorer_for(archived, task, defaults, (Registered(scorer),))
+    unproven = frontier_scorer_for(archived, task, defaults, (Registered(scorer, since=math.inf),))
+
+    assert (chosen.label, chosen.policy, chosen.scorer) == ("prefers-a", defaults, scorer)
+    assert chosen.evidence.startswith("prefers-a: rank correlation 1.00 against 0.00 for the defaults")
+    assert "3 similar sessions" in chosen.evidence
+    assert (unproven.label, unproven.policy, unproven.scorer) == (DEFAULT_POLICY, defaults, FRONTIER_V1)
+
+
 def test_rank_correlation_ranks_ties_alike_and_needs_a_spread() -> None:
     assert rank_correlation([1.0, 2.0, 3.0], [3.0, 2.0, 1.0]) == pytest.approx(-1.0)
     assert rank_correlation([1.0, 1.0, 2.0], [1.0, 2.0, 3.0]) == pytest.approx(0.8660254)
@@ -173,7 +270,5 @@ def test_the_report_renders_a_table_and_the_advice() -> None:
 
     assert text.splitlines()[0] == "Frontier calibration, against the gains that followed until each branch stopped:"
     assert "| policy | rank correlation | top hit rate | rounds | compared | sessions |" in text
-    assert "| current | -0.33 | 0.33 | 6 | 6 | 2 |" in text and text.endswith(
-        "2 sessions and 6 rounds whose scores and later gains both differ, of 6 with two or more branches open; "
-        "3 and 20 needed."
-    )
+    assert "| current | -0.33 | 0.33 | 6 | 6 | 2 |" in text
+    assert text.endswith("No candidate to set beside the current policy.")
