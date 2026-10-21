@@ -583,8 +583,8 @@ def _resolve_framework_root(
 ) -> Path | None:
     """Pick one unambiguous framework root under the shared Patch rules.
 
-    A ``recorded_root`` â€” carried from the authoring stage through
-    ``done_payload["patch_roots"]`` â€” is authoritative and skips probing
+    A ``recorded_root`` — carried from the authoring stage through
+    ``done_payload["patch_roots"]`` — is authoritative and skips probing
     entirely.
 
     Without a recorded root, the decision falls through to
@@ -956,8 +956,8 @@ def _git_quarantine_unmerged(framework_root: Path, paths: list[str]) -> tuple[bo
     """Bank unresolved-merge paths in a stash entry that is never popped back.
 
     ``git stash`` refuses to run at all while the index carries unmerged
-    entries, so they are staged first â€” staging is what marks a conflict
-    resolved â€” and the working-tree content, conflict markers and all, is what
+    entries, so they are staged first — staging is what marks a conflict
+    resolved — and the working-tree content, conflict markers and all, is what
     gets banked. Recover it with ``git stash list | grep hyperloom-quarantine``.
 
     Emptying the index is not the same as ending the merge: ``MERGE_HEAD``
@@ -1058,10 +1058,10 @@ def _git_stash_if_dirty(framework_root: Path) -> tuple[str, str]:
     Returns:
         ``(state, note)`` where ``state`` is one of:
 
-        - ``"clean"`` â€” working tree was already clean, safe to proceed.
-        - ``"stashed"`` â€” dirty tree was successfully stashed; ``note`` is the
+        - ``"clean"`` — working tree was already clean, safe to proceed.
+        - ``"stashed"`` — dirty tree was successfully stashed; ``note`` is the
           stash ref to restore when the candidate finishes.
-        - ``"failed"`` â€” tree is dirty but stash command failed; callers
+        - ``"failed"`` — tree is dirty but stash command failed; callers
           MUST NOT proceed with destructive operations.
     """
     cp = _run_git_cp(["-C", str(framework_root), "status", "--porcelain"], timeout=30.0)
@@ -1078,7 +1078,7 @@ def _git_stash_if_dirty(framework_root: Path) -> tuple[str, str]:
     if not cp.stdout.strip():
         return "clean", ""
     # git refuses to stash while an unresolved merge stands, so every later
-    # candidate would abort here forever. Clear it â€” but bank the content
+    # candidate would abort here forever. Clear it — but bank the content
     # instead of overwriting it. Usually this is wreckage from an earlier cycle;
     # nothing here can prove that, and a merge the operator started themselves
     # is not ours to throw away. Quarantine keeps both cases recoverable at the
@@ -1184,44 +1184,6 @@ def _git_reset_clean(framework_root: Path, base: str, *, exclude: list[str] | No
         return False, "git clean spawn failed"
     return cp2.returncode == 0, cp2.stderr.strip()
 
-class _RecoveryEntry(NamedTuple):
-    """A pending integration's recovery record, or why there is nothing to act on."""
-
-    record: dict[str, Any] | None
-    refusal: str
-
-
-class _PatchUndo(NamedTuple):
-    """How an attempt's patches come back out: a git base to reset to, or the preimages taken instead."""
-
-    base: str
-    records: list[dict[str, Any]]
-
-
-def _recovery_to_discharge(pending: dict[str, Any]) -> _RecoveryEntry:
-    """The complete recovery record of a pending integration, or why it carries no obligation to discharge."""
-    recovery = pending.get("recovery")
-    if not isinstance(recovery, dict) or recovery.get("version") != 1:
-        mutated = pending.get("patches") or pending.get("artifacts") or pending.get("attempt_venv_root")
-        return _RecoveryEntry(None, "pending integration has no complete recovery evidence" if mutated else "")
-    phase = recovery.get("phase")
-    if phase in ("restored", "accepted"):
-        return _RecoveryEntry(None, "")
-    if phase not in ("ready", "applied", "files_restored"):
-        return _RecoveryEntry(
-            None,
-            "the operator's uncommitted work was merged back on top of the ungraded candidate and "
-            "the stash was dropped, so nothing on disk separates the two; taking the candidate back "
-            "out would destroy that work, and this refuses rather than guess"
-            if phase == "applied_with_restored_stash"
-            else f"integration interrupted before stash identity was durable: {phase!r}",
-        )
-    root = recovery.get("root")
-    if not isinstance(root, str) or not Path(root).is_absolute():
-        return _RecoveryEntry(None, "attempt-owned recovery root missing")
-    return _RecoveryEntry(recovery, "")
-
-
 def _recorded_stash_ref(framework_root: Path | None, stash_oid: str) -> str:
     """The stash entry holding the operator's pre-candidate work, found by the oid recorded for it."""
     if not stash_oid:
@@ -1237,53 +1199,6 @@ def _recorded_stash_ref(framework_root: Path | None, stash_oid: str) -> str:
     return refs[0]
 
 
-def _prepared_artifact_records(
-    pending: dict[str, Any],
-    recovery: dict[str, Any],
-    workspace: Path,
-) -> list[dict[str, Any]]:
-    """The artifact preimages this attempt committed, proven to cover its whole mutation plan.
-
-    The artifact phase commits its whole plan's preimages before it installs
-    anything, so the witness tells "never started" apart from "started, evidence
-    now gone".
-    """
-    if not recovery.get("artifacts_prepared"):
-        return []
-    records = load_prepared_records(workspace / "artifact_backups")
-    expected = {str(Path(row["target"]).resolve()) for row in pending.get("artifacts", [])}
-    recorded = {str(Path(row["target"]).resolve()) for row in records}
-    if not expected <= recorded:
-        raise ValueError("artifact recovery ledger does not cover the complete mutation plan")
-    return records
-
-
-def _patch_undo_plan(
-    pending: dict[str, Any],
-    recovery: dict[str, Any],
-    *,
-    framework_root: Path | None,
-    workspace: Path,
-) -> _PatchUndo:
-    """How this attempt's patches come back out of the tree they were applied to.
-
-    A git attempt takes no backups, so a HEAD that has moved since means the tree
-    is no longer the one it mutated. A non-git attempt writes a preimage record
-    before every mutation, so an absent ledger there is proof that no patch
-    reached the tree.
-    """
-    if not pending.get("patches"):
-        return _PatchUndo("", [])
-    base = str(recovery.get("git_head") or "")
-    if not base and not (framework_root is not None and _is_git_tree(framework_root)):
-        return _PatchUndo("", load_prepared_records(workspace / "patch_backups"))
-    if not base:
-        raise ValueError("git attempt recorded no base to restore to")
-    if framework_root is None or _git_head_sha(framework_root) != base:
-        raise ValueError("framework HEAD differs from the recorded attempt base")
-    return _PatchUndo(base, [])
-
-
 def _take_candidate_out(
     pending: dict[str, Any],
     recovery: dict[str, Any],
@@ -1294,8 +1209,31 @@ def _take_candidate_out(
     """Undo this attempt's artifact installs and patch applies, reporting what came back out."""
     summary: dict[str, Any] = {"reversed": [], "artifacts_reverted": [], "failed": []}
     try:
-        artifact_records = _prepared_artifact_records(pending, recovery, workspace)
-        undo = _patch_undo_plan(pending, recovery, framework_root=framework_root, workspace=workspace)
+        artifact_records: list[dict[str, Any]] = []
+        if recovery.get("artifacts_prepared"):
+            # The artifact phase commits its whole plan's preimages before it
+            # installs anything, so the witness tells "never started" apart from
+            # "started, evidence now gone".
+            artifact_records = load_prepared_records(workspace / "artifact_backups")
+            expected = {str(Path(row["target"]).resolve()) for row in pending.get("artifacts", [])}
+            if not expected <= {str(Path(row["target"]).resolve()) for row in artifact_records}:
+                raise ValueError("artifact recovery ledger does not cover the complete mutation plan")
+        # A git attempt takes no backups, so a HEAD that has moved since means the
+        # tree is no longer the one it mutated. A non-git attempt writes a preimage
+        # record before every mutation, so an absent ledger there is proof that no
+        # patch reached the tree.
+        patches = pending.get("patches")
+        base = ""
+        undo_records: list[dict[str, Any]] = []
+        if patches:
+            base = str(recovery.get("git_head", ""))
+            if base:
+                if framework_root is None or _git_head_sha(framework_root) != base:
+                    raise ValueError("framework HEAD differs from the recorded attempt base")
+            elif framework_root is not None and _is_git_tree(framework_root):
+                raise ValueError("git attempt recorded no base to restore to")
+            else:
+                undo_records = load_prepared_records(workspace / "patch_backups")
         # Both ledgers are read and the artifacts are undone before the git sweep,
         # which is irreversible: it has to run against a tree that already holds
         # every preimage, and an artifact target git will not touch -- ignored, or
@@ -1304,10 +1242,10 @@ def _take_candidate_out(
         if errors:
             summary["failed"].extend(errors)
             return summary
-        summary["artifacts_reverted"] = [row.get("rel_target") or row["target"] for row in artifact_records]
-        if not pending.get("patches"):
+        summary["artifacts_reverted"] = [row["rel_target"] for row in artifact_records]
+        if not patches:
             return summary
-        if undo.base:
+        if base:
             # Everything still untracked here was created by this attempt: the
             # pre-candidate auto-stash took the operator's untracked files with
             # ``push -u``, and ``clean`` without ``-x`` leaves ignored paths (an
@@ -1315,18 +1253,18 @@ def _take_candidate_out(
             # attempt's own recovery data has to survive the sweep.
             exclusions = (
                 ["/" + workspace.relative_to(framework_root).as_posix()]
-                if framework_root is not None and workspace.is_relative_to(framework_root)
+                if workspace.is_relative_to(framework_root)
                 else []
             )
-            ok, error = _git_reset_clean(framework_root, undo.base, exclude=exclusions)
+            ok, error = _git_reset_clean(framework_root, base, exclude=exclusions)
             if not ok:
                 raise OSError(error)
         else:
-            _, errors = restore_records(undo.records)
+            _, errors = restore_records(undo_records)
             if errors:
                 summary["failed"].extend(errors)
                 return summary
-        summary["reversed"] = list(reversed(pending["patches"]))
+        summary["reversed"] = list(reversed(patches))
     except (OSError, ValueError, TypeError, KeyError) as exc:
         summary["failed"].append(str(exc))
     return summary
@@ -1335,20 +1273,33 @@ def _take_candidate_out(
 def restore_pending_integrate(pending: dict[str, Any], *, keep: bool = False) -> dict[str, Any]:
     """Discharge one recorded integration's file and stash obligations, or retain them."""
     summary: dict[str, Any] = {"reversed": [], "artifacts_reverted": [], "failed": []}
-    entry = _recovery_to_discharge(pending)
-    if entry.record is None:
-        if entry.refusal:
-            summary["failed"].append(entry.refusal)
+    recovery = pending.get("recovery")
+    if not isinstance(recovery, dict) or recovery.get("version") != 1:
+        if pending.get("patches") or pending.get("artifacts") or pending.get("attempt_venv_root"):
+            summary["failed"].append("pending integration has no complete recovery evidence")
         return summary
-    recovery = entry.record
-    root_text = str(pending.get("framework_source_root") or "")
+    phase = recovery.get("phase")
+    if phase in ("restored", "accepted"):
+        return summary
+    if phase not in ("ready", "applied", "files_restored"):
+        summary["failed"].append(
+            "the operator's uncommitted work was merged back on top of the ungraded candidate and "
+            "the stash was dropped, so nothing on disk separates the two; taking the candidate back "
+            "out would destroy that work, and this refuses rather than guess"
+            if phase == "applied_with_restored_stash"
+            else f"integration interrupted before stash identity was durable: {phase!r}"
+        )
+        return summary
+    root = recovery.get("root")
+    if not isinstance(root, str) or not Path(root).is_absolute():
+        summary["failed"].append("attempt-owned recovery root missing")
+        return summary
+    root_text = str(pending.get("framework_source_root", ""))
     framework_root = Path(root_text) if root_text else None
     try:
-        stash_ref = _recorded_stash_ref(framework_root, str(recovery.get("stash_oid") or ""))
-        if not keep and recovery.get("phase") != "files_restored":
-            summary = _take_candidate_out(
-                pending, recovery, framework_root=framework_root, workspace=Path(recovery["root"])
-            )
+        stash_ref = _recorded_stash_ref(framework_root, str(recovery.get("stash_oid", "")))
+        if not keep and phase != "files_restored":
+            summary = _take_candidate_out(pending, recovery, framework_root=framework_root, workspace=Path(root))
             if summary["failed"]:
                 return summary
             recovery["phase"] = "files_restored"
@@ -1542,7 +1493,7 @@ def _resolve_artifact_specs(
 ) -> tuple[list[_ArtifactSpec], list[dict[str, str]]]:
     """Resolve non-diff tuned artifacts to install.
 
-    Order: ``params.artifacts`` â†’ ``specialist_done.artifacts_written``. Each
+    Order: ``params.artifacts`` → ``specialist_done.artifacts_written``. Each
     entry is ``{source, target, kind, description}``: ``source`` is resolved
     inside the specialist workspace/worktree (sandbox) and ``target`` is
     resolved inside a framework root. Malformed / out-of-sandbox entries are
