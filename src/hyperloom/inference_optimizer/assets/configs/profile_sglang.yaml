@@ -55,6 +55,14 @@ benchmark:
     # --- Profiler: graph capture (#126; shape-discovery flag dropped
     # because the deployed SGLang argparse rejects it) ---
     EXTRA_SGLANG_ARGS: "--enable-profile-cuda-graph"
+    # --- Profiler: graph replays ---
+    # The HIP runtime replays a captured graph from its recorded packets by default, and the ROCm profiler then
+    # records a replay's kernels only for the replay that a host sync follows (the profiler's stop, or a prefill step):
+    # of the 764-kernel decode replays of a Qwen3-14B-FP8 profile, a 128-step window had them for 1 of 127, a 32-step
+    # window for 1 of 32, and 6 of 8 single-step by-stage windows had none, so the window's shares were those of the
+    # eager ops around the replays and of its prefill steps. Replayed node by node (0) every replay is recorded, its
+    # kernels named in capture order and the eager ops after it with their own times.
+    DEBUG_CLR_GRAPH_PACKET_CAPTURE: "0"
     # --- Profiler: steady-state window via extra_body (#194) ---
     # PROFILE_EXTRA_BODY is consumed by InferenceX benchmark_lib.sh to inject
     # into the benchmark request body. start_step skips warmup, num_steps

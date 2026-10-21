@@ -226,6 +226,16 @@ def test_a_profile_point_carries_the_profiler_settings_and_the_recipes_launch(ca
     assert (envs["CONC"], envs["RUN_EVAL"]) == ("32", "false")
 
 
+def test_a_profile_point_replays_graphs_node_by_node_so_the_profiler_records_every_replay(canonical, blobs, tmp_path):
+    (profile,) = generate_profile_point(environment(blobs, tmp_path), canonical, tmp_path / "profile")
+    (normal,) = generate_points(environment(blobs, tmp_path), canonical, tmp_path / "normal")
+
+    assert load(profile)["benchmark"]["envs"]["DEBUG_CLR_GRAPH_PACKET_CAPTURE"] == "0"
+    assert "DEBUG_CLR_GRAPH_PACKET_CAPTURE" not in load(normal)["benchmark"]["envs"], (
+        "a measured point replays as shipped"
+    )
+
+
 def test_a_normal_point_does_not_turn_the_profiler_on(canonical, blobs, tmp_path):
     (point,) = generate_points(environment(blobs, tmp_path), canonical, tmp_path / "points")
 
