@@ -44,11 +44,8 @@ def test_agentx_donor_ignores_fixed_length_placeholders() -> None:
     }
     assert _donor_is_trustworthy(
         donor,
-        target_arch_slug="arch",
-        target_model_type="mt",
-        target_conc=64,
-        target_isl=None,
-        target_osl=None,
+        {"architectures": "arch", "model_type": "mt"},
+        {"conc": 64, "isl": None, "osl": None},
     )
 
 
@@ -537,13 +534,16 @@ def _cascade(kb, cid="CID:target"):
     return _cascade_warm_start_search(
         kb,
         cid=cid,
-        hw="mi300x",
-        framework="sglang",
-        model_type_val="qwen",
-        architectures_val=["Qwen3ForCausalLM"],
-        arch_slug="qwen3forcausallm",
-        fw_version="0.4.5",
-        precision="fp8",
+        identity={
+            "canonical_id": cid,
+            "hardware": "mi300x",
+            "framework_name": "sglang",
+            "model_type": "qwen",
+            "architectures": "qwen3forcausallm",
+            "framework_version": "0.4.5",
+            "precision": "fp8",
+        },
+        shape={},
         warm_prefer=None,
     )
 
