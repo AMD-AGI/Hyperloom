@@ -210,7 +210,8 @@ interactivity session always carries `e2e_norm_intvty_p90`, which is not the
 axis promotions are decided on. The deciding axis is
 `outcome.validation.graded_on` (and `outcome.final.graded_on`), read off the
 promotion itself (`e2e_norm_intvty_p50` on an AgentX replay). A session that
-ran no validation has no `graded_on`.
+adopted nothing has no `graded_on`; one that adopted but never validated
+reports the adoption axis.
 
 `tput_guard.noise_pct` is null on a session that predates the band being
 recorded.

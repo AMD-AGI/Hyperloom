@@ -187,8 +187,9 @@ class V6Grading(TypedDict, total=False):
     ``objective`` is a mode marker written at session start: an interactivity
     session always carries ``e2e_norm_intvty_p90``, which is not the axis a
     promotion is decided on. That axis is ``outcome.validation.graded_on`` /
-    ``outcome.final.graded_on``, read off the promotion itself; a session that
-    ran no validation has none.
+    ``outcome.final.graded_on``, read off the promotion itself. A session that
+    adopted nothing has none; one that adopted but never validated reports the
+    adoption axis.
     """
 
     benchmark_mode: str
