@@ -226,8 +226,7 @@ async def test_a_recovered_profile_and_an_n26_retry_are_the_effective_runs(tmp_p
         "to_mode": "decode_only",
         "source_warning_code": "steady_state_chunk_low_quality",
     }
-    assert result["status"] == "succeeded"
-    assert result["profile_recovered"] is True
+    assert result["status"] == "recovered"
     assert result["profile_warning"] == {"status": "failed", "error_class": "stop_profile", "error": "dup stop"}
 
 
@@ -286,7 +285,7 @@ async def test_a_cancelled_profile_is_not_recovered_from_the_trace_it_flushed(tm
     assert action["profile"]["recovered"] is False
     assert action["analysis"]["runs"] == []
     assert result["status"] == "failed"
-    assert "profile_recovered" not in result
+    assert "profile_warning" not in result
 
 
 @pytest.mark.asyncio

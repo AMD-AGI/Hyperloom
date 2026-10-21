@@ -601,72 +601,45 @@ def build_kernel_fusion_value(state: Any, files: _Files) -> dict[str, Any]:
     return {"items": [record]}
 
 
-def match_rewrite_attempt(
+def _match_queued_integration(
     integrate: Mapping[str, Any],
-    attempts: Mapping[str, Any],
+    queue: Mapping[str, Any],
 ) -> Mapping[str, Any]:
-    """Find micro evidence for an E2E-integrated stack row, strongest key first."""
-    candidates = [(str(key), raw) for key, raw in attempts.items() if isinstance(raw, Mapping)]
+    """Find the queued KEEP an E2E-integrated stack row landed, strongest key first."""
     criteria = (
-        (
-            str(integrate.get("integration_id") or ""),
-            lambda key, raw: str(raw.get("integration_id") or "") == str(integrate.get("integration_id") or ""),
-        ),
-        (
-            str(integrate.get("task_group_key") or ""),
-            lambda key, raw: str(raw.get("task_group_key") or "") == str(integrate.get("task_group_key") or ""),
-        ),
-        (
-            str(integrate.get("kernel_id") or ""),
-            lambda key, raw: (
-                str(raw.get("kernel_id") or raw.get("current_kernel_id") or key)
-                == str(integrate.get("kernel_id") or "")
-            ),
-        ),
-        (
-            str(integrate.get("patch_path") or ""),
-            lambda key, raw: (
-                str(raw.get("last_artifact_path") or raw.get("artifact_path") or "")
-                == str(integrate.get("patch_path") or "")
-            ),
-        ),
+        ("integration_id", "integration_id"),
+        ("task_group_key", "task_group_key"),
+        ("kernel_id", "kernel_id"),
+        ("patch_path", "artifact_path"),
     )
-    for expected, predicate in criteria:
+    for stack_field, queue_field in criteria:
+        expected = str(integrate.get(stack_field) or "")
         if not expected:
             continue
-        for key, raw in candidates:
-            if predicate(key, raw):
+        for raw in queue.values():
+            if str(raw.get(queue_field) or "") == expected:
                 return raw
     return {}
 
 
 def build_kernel_rewrite_value(state: Any, files: _Files) -> dict[str, Any]:
     """Build rewrite rows exclusively from E2E-integrated stack entries."""
-    attempts = getattr(state, "kernel_opt_task_attempts", {}) or {}
     rows: list[dict[str, Any]] = []
-    if not isinstance(attempts, Mapping):
-        attempts = {}
     integrated = [
         dict(entry)
         for entry in (getattr(state, "optimization_stack", []) or [])
         if isinstance(entry, Mapping) and str(entry.get("action") or "").lower() == "integrate"
     ]
     for entry in integrated:
-        raw = match_rewrite_attempt(entry, attempts)
-        kernel_name = str(
-            raw.get("kernel_name")
-            or raw.get("current_kernel_id")
-            or raw.get("kernel_id")
-            or entry.get("kernel_id")
-            or "unknown"
-        )
-        speedup = _number(raw.get("last_micro_speedup") or raw.get("speedup"))
+        raw = _match_queued_integration(entry, state.pending_kernel_integrations)
+        kernel_name = str(raw.get("kernel_id") or entry.get("kernel_id") or "unknown")
+        speedup = _number(raw.get("micro_speedup"))
         integration_id = str(entry.get("integration_id") or "")
         slug = hashlib.sha256(
             f"{integration_id}|{entry.get('kernel_id')}|{entry.get('patch_path')}".encode()
         ).hexdigest()[:10]
         # The integrated stack row is authoritative.
-        patch_source = entry.get("patch_path") or raw.get("last_artifact_path") or raw.get("artifact_path")
+        patch_source = entry.get("patch_path") or raw.get("artifact_path")
         patch = files.add(
             patch_source,
             category="kernel/rewrite",
@@ -680,7 +653,7 @@ def build_kernel_rewrite_value(state: Any, files: _Files) -> dict[str, Any]:
         declared = _patch_declared_targets(patch_source)
         # Recorded now or never: replay has no way back to the checkout this was measured on, and a record that cannot
         # name it cannot be replayed.
-        apply_root = str(raw.get("last_deploy_repo_root") or "").strip() or _kernel_apply_root(
+        apply_root = str(raw.get("deploy_repo_root") or "").strip() or _kernel_apply_root(
             patch_source,
             entry.get("target_file"),
             declared,
@@ -1218,7 +1191,6 @@ __all__ = [
     "has_replay_material",
     "knowledge_to_warm_recipe",
     "has_new_keep",
-    "match_rewrite_attempt",
     "merge_staged_sections",
     "workload_shape",
 ]

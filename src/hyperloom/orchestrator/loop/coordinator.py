@@ -183,7 +183,7 @@ class RunOptions:
         max_ticks: Stop after this many ticks, when set.
         stop_when: Custom stop predicate, asked after every tick.
         install_signal_handlers: Whether to arm the stop-signal drain.
-        crash_emergency_threshold: Consecutive tick crashes that end the run.
+        crash_emergency_threshold: Coordinator exceptions within the trailing 24 hours that end the run as ``emergency``.
         closing_grace_sec: Bound on the closing phase; the default when ``None``.
     """
 
@@ -513,9 +513,9 @@ class Coordinator:
                 self.shared_state,
                 links=ReconcileLinks(
                     resources=self.policy.resources,
-                    # A callable, not a captured mapping: the resume replay rebuilds
-                    # its contents, so a snapshot taken here would be pre-replay.
+                    # Callables, not snapshots: the resume replay rebuilds the pending proposals after this runs.
                     proposals=lambda: self.state.pending_proposals,
+                    drop_proposal=lambda pending, reason: self.router.settle_dropped_proposal(pending, reason),
                     session_dir=self.session_dir,
                     # The window a revalidation holds is closed by the writeback when
                     # its result is booked; this pass only closes one nobody will.

@@ -9,6 +9,7 @@ import pytest
 
 from hyperloom.orchestrator.state.shared_state import SharedState
 
+from .conftest import seed_integrate_verdict
 from .conftest import seed_kernel_keep as _seed_keep
 
 
@@ -116,34 +117,6 @@ def test_next_pending_keep_excludes_rejected_and_integrated(state: SharedState):
     )
     assert state.next_pending_keep_kernel_id() == ""
     assert state.has_keep_pending_integrate is False
-
-
-def test_kernel_opt_attempts_count_property(state: SharedState):
-    assert state.kernel_opt_attempts_count == 0
-    _seed_keep(state, "k001", decision="KEEP", micro=1.5)
-    _seed_keep(state, "k001", decision="REVERT", micro=0.9)  # same kid
-    _seed_keep(state, "k002", decision="PARTIAL", micro=1.0)
-    assert state.kernel_opt_attempts_count == 2
-
-
-# failure_count + max_failures = 1 retirement.
-def test_resolve_kernel_opt_max_failures_defaults_and_env(monkeypatch):
-    from hyperloom.orchestrator.state.kernel_decision_settings import (
-        _DEFAULT_KERNEL_OPT_MAX_FAILURES,
-    )
-    from hyperloom.orchestrator.state.shared_state import resolve_kernel_opt_max_failures
-
-    monkeypatch.delenv("INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_FAILURES", raising=False)
-    assert resolve_kernel_opt_max_failures() == _DEFAULT_KERNEL_OPT_MAX_FAILURES
-
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_FAILURES", "4")
-    assert resolve_kernel_opt_max_failures() == 4
-
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_FAILURES", "0")
-    assert resolve_kernel_opt_max_failures() == 1
-
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_FAILURES", "bad")
-    assert resolve_kernel_opt_max_failures() == _DEFAULT_KERNEL_OPT_MAX_FAILURES
 
 
 # untried_hot_reusable_kernels report gate.
@@ -411,14 +384,7 @@ def test_untried_hot_kernels_skips_when_any_group_member_attempted(state: Shared
             {"primary_kernel_id": "k002", "kernel_ids": ["k001", "k002"]},
         ],
     )
-    _seed_keep(
-        state,
-        "k002",
-        decision="REVERT",
-        micro=0.0,
-        source_file="/p/moe_op.py",
-        task_group_key="k002",
-    )
+    seed_integrate_verdict(state, "k002", source_file="/p/moe_op.py", task_group_key="k002")
     untried = state.untried_hot_reusable_kernels()
     assert untried == []
 
