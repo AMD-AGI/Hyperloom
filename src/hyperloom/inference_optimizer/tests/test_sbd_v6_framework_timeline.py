@@ -134,7 +134,7 @@ def test_authoring_run_is_both_a_step_and_a_run(_bound_session):
         source_ref="vllm#4821",
     )
     recorder.record_proposal_step("cand-7", step=STEP_PROPOSED)
-    recorder.record_proposal_review("cand-7", verdict="approved", iteration=1)
+    recorder.record_proposal_review("cand-7", verdict="approved")
     recorder.record_proposal_step("cand-7", step=STEP_REVIEWED, outcome="approved")
     recorder.record_run("r-auth-1", role=ROLE_AUTHORING, arm=ARM_SOURCE, status="succeeded")
     recorder.record_proposal_step("cand-7", step=STEP_AUTHORED, run_ref="r-auth-1", outcome="patch_ready")
@@ -170,14 +170,13 @@ def test_policy_is_recorded_not_scavenged(_bound_session):
     recorder = make_framework_recorder(macro_cycle=0)
     recorder.record_policy(
         keep_threshold_pct=3.0,
-        variant_timeout_sec=1800,
-        overtime_kill_ratio=1.5,
         config={"keep_gain_threshold_pct": 1.0, "empty_streak_threshold": 2, "lookback": 5},
         source={"no_keep_streak_threshold": 3, "authoring_enabled": True},
     )
     recorder.finish(exit_reason="budget")
 
     policy = _ext(_bound_session)["policy"]
+    assert set(policy) == {"keep_threshold_pct", ARM_CONFIG, ARM_SOURCE}
     assert policy["keep_threshold_pct"] == 3.0
     assert policy[ARM_CONFIG]["empty_streak_threshold"] == 2
     assert policy[ARM_SOURCE]["authoring_enabled"] is True
@@ -545,3 +544,37 @@ def test_pending_disposition_is_representable(_bound_session):
 )
 def test_provenance_labels_map_onto_producers(label, producer, ref):
     assert producer_for_provenance(label) == (producer, ref)
+
+
+def test_a_proposal_review_carries_exactly_the_recorded_keys(_bound_session):
+    recorder = make_framework_recorder(macro_cycle=0)
+    recorder.record_proposal("cand-5", arm=ARM_SOURCE, producer=PRODUCER_SPECIALIST)
+    recorder.record_proposal_review("cand-5", verdict="approved")
+    recorder.finish(exit_reason="budget")
+
+    review = _ext(_bound_session)["proposals"][0]["critic_review"]
+    assert set(review) == {
+        "verdict",
+        "effective_verdict",
+        "held_to_rule",
+        "reviewer",
+        "reason",
+        "confidence",
+        "failure_reason_code",
+        "concerns",
+        "reviewed_at",
+    }
+
+
+def test_run_empty_is_null_unless_provided(_bound_session):
+    recorder = make_framework_recorder(macro_cycle=0)
+    recorder.record_run("r-unset", role=ROLE_DISCOVERY, arm=ARM_SOURCE, status="succeeded", empty=None)
+    recorder.record_run("r-true", role=ROLE_DISCOVERY, arm=ARM_SOURCE, status="succeeded", empty=True)
+    recorder.record_run("r-false", role=ROLE_DISCOVERY, arm=ARM_SOURCE, status="succeeded", empty=False)
+    recorder.finish(exit_reason="budget")
+
+    assert {row["run_id"]: row["empty"] for row in _ext(_bound_session)["runs"]} == {
+        "r-unset": None,
+        "r-true": True,
+        "r-false": False,
+    }
