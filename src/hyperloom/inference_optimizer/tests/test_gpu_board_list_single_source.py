@@ -52,6 +52,10 @@ def test_every_listed_board_actually_resolves():
         assert amd_gpu_dispatch_identity(board) is not None, board
 
 
+def test_r9700_has_explicit_gfx1201_dispatch_identity():
+    assert AMD_GPU_DISPATCH_IDENTITIES["r9700"] == ("gfx1201", 64)
+
+
 def test_product_tags_cover_the_same_boards():
     assert set(_PRODUCT_TAGS) == {b.upper() for b in AMD_GPU_DISPATCH_IDENTITIES}
 
