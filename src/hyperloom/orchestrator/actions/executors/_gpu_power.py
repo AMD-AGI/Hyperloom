@@ -188,24 +188,6 @@ def _mhz(value: float | None) -> str:
     return "unread" if value is None else f"{value} MHz"
 
 
-def _serving_gpus(peak_vram: dict[int, float], watts: dict[int, list[float]]) -> list[int]:
-    """The cards whose peak VRAM share says they served the round and whose power was read."""
-    return sorted(gpu for gpu, frac in peak_vram.items() if frac >= _SERVING_VRAM_FRACTION and gpu in watts)
-
-
-def _unread_gpus(in_scope: set[int], peak_vram: dict[int, float], watts: dict[int, list[float]]) -> list[int]:
-    """The cards in scope that cannot be ruled out as serving because a reading is missing.
-
-    Such a card would drop out of the total and escape its own limit, so it leaves the whole round
-    unmeasured rather than under-counted.
-    """
-    return sorted(
-        gpu
-        for gpu in in_scope
-        if gpu not in peak_vram or (peak_vram[gpu] >= _SERVING_VRAM_FRACTION and gpu not in watts)
-    )
-
-
 def _power_throttled(per_gpu: dict[str, dict[str, Any]], serving: list[int]) -> list[int]:
     """The serving cards held back by their power limit for at least the reporting share of the measured phase."""
     return sorted(
@@ -358,9 +340,20 @@ class GpuPowerRecorder:
                     peak_vram[gpu] = max(peak_vram.get(gpu, 0.0), fraction)
                 if power is not None:
                     watts.setdefault(gpu, []).append(power)
-        serving = _serving_gpus(peak_vram, watts)
+        serving = sorted(gpu for gpu, frac in peak_vram.items() if frac >= _SERVING_VRAM_FRACTION and gpu in watts)
+        # A card that may be serving but cannot be read would drop out of the total and escape its own limit, so it
+        # leaves the whole round unmeasured: a card holding a model with no power reading, or a card in scope whose
+        # VRAM was never read (absent from amd-smi, or reported N/A), so it cannot be ruled out as serving.
         in_scope = self._gpus if self._gpus is not None else {gpu for reading in samples for gpu in reading}
-        unread = _unread_gpus(in_scope, peak_vram, watts) if samples else []
+        unread = (
+            sorted(
+                gpu
+                for gpu in in_scope
+                if gpu not in peak_vram or (peak_vram[gpu] >= _SERVING_VRAM_FRACTION and gpu not in watts)
+            )
+            if samples
+            else []
+        )
         per_gpu = {
             str(gpu): {
                 **_power_fields(watts[gpu], peak_vram.get(gpu, 0.0)),

@@ -267,22 +267,6 @@ def _fingerprint_component_matches(actual: str, expected: str) -> bool:
     return found is not None and expected.startswith(found.group(1))
 
 
-def _is_qwen3_14b_fp8_config(config: dict) -> bool:
-    """Match the exact Qwen3-14B-FP8 geometry the unsafe unified-attn path mishandles."""
-    quant = config.get("quantization_config") or {}
-    if not isinstance(quant, dict):
-        return False
-    return (
-        config.get("architectures") == ["Qwen3ForCausalLM"]
-        and str(config.get("model_type") or "").lower() == "qwen3"
-        and str(config.get("torch_dtype") or "").lower() in {"bf16", "bfloat16"}
-        and config.get("head_dim") == 128
-        and config.get("num_attention_heads") == 40
-        and config.get("num_key_value_heads") == 8
-        and str(quant.get("quant_method") or "").lower() == "fp8"
-    )
-
-
 def _matches_unsafe_unified_attn_stack(
     *,
     framework: str,
@@ -307,7 +291,18 @@ def _matches_unsafe_unified_attn_stack(
         return False
     if not isinstance(config, dict):
         return False
-    return _is_qwen3_14b_fp8_config(config)
+    quant = config.get("quantization_config") or {}
+    if not isinstance(quant, dict):
+        return False
+    return (
+        config.get("architectures") == ["Qwen3ForCausalLM"]
+        and str(config.get("model_type")).lower() == "qwen3"
+        and str(config.get("torch_dtype")).lower() in {"bf16", "bfloat16"}
+        and config.get("head_dim") == 128
+        and config.get("num_attention_heads") == 40
+        and config.get("num_key_value_heads") == 8
+        and str(quant.get("quant_method")).lower() == "fp8"
+    )
 
 
 def _last_server_arg(args: str, flags: tuple[str, ...], default: str) -> str:

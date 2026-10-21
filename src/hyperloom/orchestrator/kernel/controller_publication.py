@@ -69,43 +69,6 @@ def _relative_path(value: Any, field_name: str) -> str:
     return path.as_posix()
 
 
-def _publication_payload(publication_path: Path) -> dict[str, Any]:
-    """Read one ``publication.json`` and accept it only if it is micro-validated at the supported schema."""
-    try:
-        payload = json.loads(publication_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
-        raise ControllerPublicationError(f"could not read publication metadata: {error}") from error
-    if not isinstance(payload, dict):
-        raise ControllerPublicationError("publication metadata must be a JSON object")
-    if payload.get("schema_version") != PUBLICATION_SCHEMA_VERSION:
-        raise ControllerPublicationError(f"unsupported publication schema {payload.get('schema_version')!r}")
-    if payload.get("micro_validated") is not True:
-        raise ControllerPublicationError("publication is not micro-validated")
-    return payload
-
-
-def _publication_identity(payload: dict[str, Any]) -> dict[str, str]:
-    """The six canonical identity dimensions, each a non-empty string."""
-    identity_raw = payload.get("identity")
-    if not isinstance(identity_raw, dict) or set(identity_raw) != set(_IDENTITY_FIELDS):
-        raise ControllerPublicationError("publication identity must contain the six canonical dimensions")
-    identity: dict[str, str] = {}
-    for field in _IDENTITY_FIELDS:
-        value = identity_raw.get(field)
-        if not isinstance(value, str) or not value:
-            raise ControllerPublicationError(f"identity.{field} must be a non-empty string")
-        identity[field] = value
-    return identity
-
-
-def _publication_commit(payload: dict[str, Any], field_name: str) -> str:
-    """One full hexadecimal object id the publication pins, lower-cased."""
-    value = str(payload.get(field_name) or "").lower()
-    if not _COMMIT_RE.fullmatch(value):
-        raise ControllerPublicationError("publication commits must be full hexadecimal object ids")
-    return value
-
-
 def load_controller_publication(patch_dir: str | Path) -> ControllerPatchPublication:
     """Validate one publication directory and return its integration contract."""
     root = Path(patch_dir).expanduser()
@@ -117,15 +80,35 @@ def load_controller_publication(patch_dir: str | Path) -> ControllerPatchPublica
     for path in (patch_path, report_path, publication_path):
         if not path.is_file() or path.is_symlink():
             raise ControllerPublicationError(f"publication artifact must be a regular file: {path}")
-    payload = _publication_payload(publication_path)
-    identity = _publication_identity(payload)
+    try:
+        payload = json.loads(publication_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ControllerPublicationError(f"could not read publication metadata: {error}") from error
+    if not isinstance(payload, dict):
+        raise ControllerPublicationError("publication metadata must be a JSON object")
+    if payload.get("schema_version") != PUBLICATION_SCHEMA_VERSION:
+        raise ControllerPublicationError(f"unsupported publication schema {payload.get('schema_version')!r}")
+    if payload.get("micro_validated") is not True:
+        raise ControllerPublicationError("publication is not micro-validated")
+
+    identity_raw = payload.get("identity")
+    if not isinstance(identity_raw, dict) or set(identity_raw) != set(_IDENTITY_FIELDS):
+        raise ControllerPublicationError("publication identity must contain the six canonical dimensions")
+    identity: dict[str, str] = {}
+    for field in _IDENTITY_FIELDS:
+        value = identity_raw.get(field)
+        if not isinstance(value, str) or not value:
+            raise ControllerPublicationError(f"identity.{field} must be a non-empty string")
+        identity[field] = value
     operator_id = str(payload.get("operator_id") or "")
     expected_id = ":".join(["kernel", *(identity[field] for field in _IDENTITY_FIELDS)])
     if operator_id != expected_id or root.name != operator_directory_name(operator_id):
         raise ControllerPublicationError("operator_id does not match identity or directory name")
 
-    base_commit = _publication_commit(payload, "base_commit")
-    best_commit = _publication_commit(payload, "best_commit")
+    base_commit = str(payload.get("base_commit") or "").lower()
+    best_commit = str(payload.get("best_commit") or "").lower()
+    if not _COMMIT_RE.fullmatch(base_commit) or not _COMMIT_RE.fullmatch(best_commit):
+        raise ControllerPublicationError("publication commits must be full hexadecimal object ids")
     repo_root_raw = payload.get("repo_root")
     if not isinstance(repo_root_raw, str) or not Path(repo_root_raw).expanduser().is_absolute():
         raise ControllerPublicationError("repo_root must be an absolute path")
