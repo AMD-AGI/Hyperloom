@@ -24,7 +24,10 @@ its guardrails, and ``default`` keeps the defaults; the manifest fingerprint and
 the label under ``frontier`` in ``policy_versions``. ``--frontier-scorer LABEL`` pins the scorer the session scores
 with instead: ``frontier-v1``, a variation's label, a scorer in code or an expression in the archive's scorer pool; a
 label none of these has, or one given beside ``--frontier-policy default``, is a usage error.
-Each ``--specialist-prompt`` file holds a direction the user wrote for one specialist: its branch opens at PRELUDE's
+Each ``--autonomous-agent SOURCE`` opens one branch at PRELUDE's root, after the user's directions and within
+``--max-branches``, whose specialist runs that third-party agent end to end in a sandbox of its own; a source that
+carries credentials in its URL is a usage error. Each ``--specialist-prompt`` file holds a direction the user wrote
+for one specialist: its branch opens at PRELUDE's
 root ahead of the opening batch, counted within ``--max-branches``, its specialist sees the text in every launch
 prompt, and the judge neither stops it nor lowers its K for its first judged tests; an empty or unreadable file, or
 more files than ``--max-branches``, is a usage error. A session whose toolbox has fewer
@@ -144,6 +147,31 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _add_branch_options(run: argparse.ArgumentParser) -> None:
+    """The branches the user opens at the root, ahead of the opening batch."""
+
+    run.add_argument(
+        "--specialist-prompt",
+        dest="specialist_prompts",
+        action="append",
+        type=Path,
+        default=None,
+        metavar="FILE",
+        help="A direction for one specialist; repeatable, each opens one branch at the root within --max-branches.",
+    )
+    run.add_argument(
+        "--autonomous-agent",
+        dest="agents",
+        action="append",
+        default=None,
+        metavar="SOURCE",
+        help=(
+            "A third-party agent to run end to end on one branch, a git URL (URL@ref for a ref) or a local path;"
+            " repeatable, each opens one branch at the root within --max-branches."
+        ),
+    )
+
+
 def _add_run_options(run: argparse.ArgumentParser) -> None:
     run.add_argument("--model", required=True, help="Model path or id.")
     run.add_argument("--framework", required=True, help="Inference framework, e.g. vllm or sglang.")
@@ -181,15 +209,7 @@ def _add_run_options(run: argparse.ArgumentParser) -> None:
     run.add_argument(
         "--max-branches", type=int, default=DEFAULT_MAX_BRANCHES, help="Specialist branches not stopped, at most."
     )
-    run.add_argument(
-        "--specialist-prompt",
-        dest="specialist_prompts",
-        action="append",
-        type=Path,
-        default=None,
-        metavar="FILE",
-        help="A direction for one specialist; repeatable, each opens one branch at the root within --max-branches.",
-    )
+    _add_branch_options(run)
     run.add_argument(
         "--max-parallel-tests",
         type=int,
@@ -241,6 +261,19 @@ def _workload_shape(args: argparse.Namespace) -> InferenceXShape | None:
     if WorkloadKind(args.workload) is WorkloadKind.AGENTX:
         return None
     return InferenceXShape(args.isl, args.osl)
+
+
+def _agents(sources: list[str], free: int) -> tuple[str, ...]:
+    """The agent sources, refused when one carries credentials, which come from the sandbox's environment only, or
+    when there are more than the ``free`` branches the user's directions leave."""
+
+    if len(sources) > free:
+        raise ValueError(f"--autonomous-agent is given {len(sources)} times, more than the {free} branches left")
+    for source in sources:
+        scheme, found, rest = source.partition("://")
+        if found and "@" in rest.split("/", 1)[0]:
+            raise ValueError(f"--autonomous-agent {scheme}://... carries credentials; give them in the environment")
+    return tuple(sources)
 
 
 def _user_directions(files: list[Path], max_branches: int) -> tuple[str, ...]:
@@ -298,6 +331,7 @@ def settings_from(args: argparse.Namespace) -> RunSettings:
         caps,
         args.judge_interval_sec,
         user_directions=_user_directions(args.specialist_prompts or [], caps.max_branches),
+        agents=_agents(args.agents or [], caps.max_branches - len(args.specialist_prompts or [])),
         frontier_policy=FrontierPolicyMode(args.frontier_policy),
         frontier_scorer=args.frontier_scorer,
     )

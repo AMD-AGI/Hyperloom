@@ -218,6 +218,28 @@ def test_each_specialist_prompt_file_is_one_user_direction_in_order(tmp_path: Pa
     assert _settings().user_directions == ()
 
 
+def test_each_autonomous_agent_is_one_agent_branch_in_order() -> None:
+    settings = _settings(
+        "--autonomous-agent", "https://github.com/acme/agent@v1", "--autonomous-agent", "git@github.com:acme/b.git"
+    )
+
+    assert settings.agents == ("https://github.com/acme/agent@v1", "git@github.com:acme/b.git")
+    assert _settings().agents == ()
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        ["--autonomous-agent", "https://user:ghp_secret@github.com/acme/agent"],
+        ["--autonomous-agent", "https://ghp_secret@github.com/acme/agent"],
+        ["--max-branches", "1", "--autonomous-agent", "/a", "--autonomous-agent", "/b"],
+    ],
+)
+def test_an_agent_source_with_credentials_or_one_too_many_is_a_usage_error(extra: list[str]) -> None:
+    with pytest.raises(ValueError, match="--autonomous-agent"):
+        _settings(*extra)
+
+
 def _prompt_file(tmp_path: Path, name: str, text: str | bytes | None) -> str:
     """A prompt file holding ``text``; none is written for ``None``."""
 
