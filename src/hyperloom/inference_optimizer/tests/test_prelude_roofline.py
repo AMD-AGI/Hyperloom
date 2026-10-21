@@ -73,7 +73,6 @@ class _StubTaskRegistry:
 
 @pytest.fixture
 def coord(tmp_path: Path, monkeypatch) -> Coordinator:
-    monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
     c = Coordinator.__new__(Coordinator)
     c.session_dir = tmp_path
     c.shared_state = SharedState(

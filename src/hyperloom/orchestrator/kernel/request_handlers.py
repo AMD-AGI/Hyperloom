@@ -31,7 +31,7 @@ from typing import Any, Awaitable, Callable, Iterator, Mapping, NamedTuple
 from hyperloom.common import codex_session, llm_config
 from hyperloom.common.checkpoint_quant import checkpoint_format
 from hyperloom.common.coerce import to_str_list
-from hyperloom.common.env import env_bool, forge_explicitly_enabled, is_truthy
+from hyperloom.common.env import env_bool, is_truthy
 from hyperloom.common.gpu_identity import is_gfx_arch
 from hyperloom.common.io import JsonLineFormat, append_jsonl
 from hyperloom.common.unified_diff import PatchOp, repo_relative_manifest
@@ -61,7 +61,7 @@ from .lane_budget import (
 from .patch_landing import bundle_belongs_to
 from .patch_lifecycle import cleanup_verdict as _cleanup_verdict
 
-from ._kernel_decisions import _entry_by_kernel_id, _honest_flag
+from ._kernel_decisions import _honest_flag
 
 
 log = logging.getLogger(__name__)
@@ -186,10 +186,6 @@ _COMPILE_GENERATED_NAME_MARKERS = (
 )
 
 
-# forge is the only per-kernel backend. The default phase-level backend is the
-# whole-pipeline GEAK delegate (``geak``); per-kernel selection is opt-in via
-# KERNEL_OPT_BACKEND_ORDER=forge.
-_DEFAULT_KERNEL_PHASE_BACKEND_ORDER = ("geak",)
 # Outer subprocess cap for the whole GEMM-tuning run (all shapes/tuners) when there is
 # no lane share to take, as in an unbounded session; sized for large models with many
 # GEMM shapes. Override via HYPERLOOM_GEMM_TUNING_TIMEOUT_SEC (or payload timeout_sec).
@@ -312,7 +308,6 @@ def _fill_integrate_defaults_from_state(
     current_best = getattr(state, "current_best", None) or {}
     _fill_integrate_recipe_from_current_best(resolved, state, current_best)
     _merge_integrate_extra_envs(resolved, payload, current_best)
-    _fill_integrate_kernel_attempt_defaults(resolved, state)
     return resolved
 
 
@@ -398,41 +393,17 @@ def _merge_integrate_extra_envs(
     if current_envs or requested_envs or "extra_envs" in resolved:
         resolved["extra_envs"] = {**current_envs, **requested_envs}
 
-
-def _fill_integrate_kernel_attempt_defaults(resolved: dict, state: Any) -> None:
-    kernel_id = str(resolved.get("kernel_id") or "")
-    if not kernel_id:
-        return
-    attempt = _entry_by_kernel_id(state, kernel_id) or {}
-    if not resolved.get("task_group_key"):
-        task_group_key = str(attempt.get("task_group_key") or "")
-        if task_group_key:
-            resolved["task_group_key"] = task_group_key
-    last_kernel_opt = state.last_kernel_opt
-    blocked_by_last_opt = (
-        isinstance(last_kernel_opt, dict)
-        and str(last_kernel_opt.get("kernel_id") or "") == kernel_id
-        and bool(last_kernel_opt.get("vendor_playbook_deploy_blocked"))
-    )
-    if attempt.get("vendor_playbook_deploy_blocked") or blocked_by_last_opt:
-        resolved["_vendor_playbook_deploy_blocked"] = True
+    return resolved
 
 
 def _fill_integrate_snapshot_from_bundle(resolved: dict, bundle: Any) -> None:
     """Backfill integrate inputs from a recorded multi-file artifact bundle.
 
-    A bundle is bound to the sibling that produced it by ``integration_id``. When
-    the caller already resolved this integrate from a specific pending record
-    (i.e. ``resolved`` carries an ``integration_id``), a bundle stamped with a
-    *different* id belongs to another sibling of the same nomination round and
-    must not be merged in: doing so would land one sibling's multi-file write
-    set under a second sibling's integrate. Under the one-patch era every
-    kernel_id had exactly one bundle so this never arose; the fallbacks keyed on
-    ``kernel_id`` (``last_kernel_opt`` / per-kernel ledger) now route several
-    bundles through the same kernel_id, so the guard is load-bearing.
-
-    A bundle with no ``integration_id`` of its own predates the contract and is
-    accepted as before -- there is no id to disagree with.
+    A bundle is bound to the sibling that produced it by ``integration_id``: a
+    bundle stamped with a different id than the integrate being resolved belongs
+    to another sibling of the same nomination round, and merging it would land
+    that sibling's write set under this one's integrate. A bundle with no
+    ``integration_id`` of its own carries no id to disagree with.
     """
     if not isinstance(bundle, dict) or bundle.get("type") != "patch_snapshot":
         return
@@ -451,76 +422,6 @@ def _fill_integrate_snapshot_from_bundle(resolved: dict, bundle: Any) -> None:
         write_paths = [str(path) for path in (bundle.get("write_paths") or []) if str(path or "").strip()]
         if write_paths:
             resolved["patch_write_paths"] = write_paths
-
-
-def _fill_integrate_provenance(
-    resolved: dict,
-    *,
-    framework_applyback: Any,
-    integration_validation_status: Any,
-) -> None:
-    """Backfill artifact provenance for an integrate resolved from a ledger entry.
-
-    These two fields arm the strict accuracy gate. A KEEP the ``source_file`` dedup
-    drops from the pending queue resolves through a fallback instead, and without
-    them a reference-only apply-back reads as an ordinary kernel patch.
-    """
-    if not resolved.get("artifact_kind") and isinstance(framework_applyback, dict):
-        kind = str(framework_applyback.get("artifact_kind") or "")
-        if kind:
-            resolved["artifact_kind"] = kind
-    if not resolved.get("integration_validation_status"):
-        status = str(integration_validation_status or "")
-        if status:
-            resolved["integration_validation_status"] = status
-
-
-class _ArtifactRecord(NamedTuple):
-    bundle: Any
-    snapshot_dir: str
-    deploy_patch_path: str
-    deploy_repo_root: str
-    artifact_path: str
-    source_file: str
-    framework_applyback: Any
-    integration_validation_status: Any
-
-
-def _best_kernel_artifact(last_kernel: Mapping[str, Any]) -> _ArtifactRecord:
-    return _ArtifactRecord(
-        bundle=last_kernel.get("best_artifact_bundle"),
-        snapshot_dir=str(last_kernel.get("deploy_snapshot_dir") or ""),
-        deploy_patch_path=str(last_kernel.get("deploy_patch_path") or ""),
-        deploy_repo_root=str(last_kernel.get("deploy_repo_root") or ""),
-        artifact_path=str(
-            last_kernel.get("best_artifact_path")
-            or last_kernel.get("patch_path")
-            or last_kernel.get("optimized_path")
-            or ""
-        ),
-        source_file=str(last_kernel.get("source_file") or ""),
-        framework_applyback=last_kernel.get("framework_applyback"),
-        integration_validation_status=last_kernel.get("integration_validation_status"),
-    )
-
-
-def _fill_integrate_from_artifact(resolved: dict, record: _ArtifactRecord) -> None:
-    _fill_integrate_snapshot_from_bundle(resolved, record.bundle)
-    if not resolved.get("snapshot_dir") and record.snapshot_dir:
-        resolved["snapshot_dir"] = record.snapshot_dir
-        if record.deploy_patch_path and not resolved.get("patch_path"):
-            resolved["patch_path"] = record.deploy_patch_path
-        if record.deploy_repo_root and not resolved.get("kernel_repo"):
-            resolved["kernel_repo"] = record.deploy_repo_root
-    if not resolved.get("patch_path") and record.artifact_path:
-        resolved["patch_path"] = record.artifact_path
-    if not resolved.get("source_file") and record.source_file:
-        resolved["source_file"] = record.source_file
-    _fill_integrate_provenance(
-        resolved,
-        framework_applyback=record.framework_applyback,
-        integration_validation_status=record.integration_validation_status,
-    )
 
 
 def _pending_integration_record(records: list[dict], integration_id: str) -> dict | None:
@@ -552,7 +453,7 @@ def _bind_integrate_to_pending_record(resolved: dict, pending_record: Mapping[st
         resolved["source_file"] = str(pending_record["source_file"])
 
 
-def _missing_integration_inputs(resolved: dict, last_kernel: Mapping[str, Any]) -> HandlerResult | None:
+def _missing_integration_inputs(resolved: dict) -> HandlerResult | None:
     patch_path = str(resolved.get("patch_path") or "").strip()
     target_file = str(resolved.get("target_file") or resolved.get("source_file") or "").strip()
     if patch_path and target_file:
@@ -571,16 +472,11 @@ def _missing_integration_inputs(resolved: dict, last_kernel: Mapping[str, Any]) 
         "patch_path": patch_path or None,
         "target_file": target_file or None,
         "missing": missing,
-        "last_kernel_opt": {
-            k: last_kernel.get(k)
-            for k in ("kernel_id", "best_artifact_path", "patch_path", "source_file")
-            if k in last_kernel
-        },
     }
 
 
 def _resolve_integrate_payload(payload: dict, *, session_dir: Path) -> tuple[dict, HandlerResult | None]:
-    """Fill integrate inputs from SharedState when Orchestration sends only kernel_id (artifact in ``last_kernel_opt``, source in ``last_trace_analyze``).
+    """Fill integrate inputs from SharedState when Orchestration sends only kernel_id (artifact from the queued integration, source from ``last_trace_analyze``).
 
     Args:
         payload: The integrate request payload.
@@ -595,7 +491,6 @@ def _resolve_integrate_payload(payload: dict, *, session_dir: Path) -> tuple[dic
 
     resolved = dict(payload)
     state = SharedState.load_or_init(session_dir)
-    last_kernel = state.last_kernel_opt or {}
     pending_record = _pending_integration_record(
         state.pending_kernel_integration_records(),
         str(resolved.get("integration_id") or ""),
@@ -604,35 +499,12 @@ def _resolve_integrate_payload(payload: dict, *, session_dir: Path) -> tuple[dic
         _bind_integrate_to_pending_record(resolved, pending_record)
     kernel_id = str(resolved.get("kernel_id") or "")
 
-    if kernel_id and str(last_kernel.get("kernel_id") or "") == kernel_id:
-        # Snapshot deploy: prefer the original patch + snapshot dir so the whole
-        # multi-file patch lands atomically.
-        _fill_integrate_from_artifact(resolved, _best_kernel_artifact(last_kernel))
-
-    # Multi-KEEP queue fallback: pull patch_path/source_file from the per-kernel
-    # ledger for KEEPs other than the strongest pending one.
-    if kernel_id:
-        attempt = _entry_by_kernel_id(state, kernel_id) or {}
-        _fill_integrate_from_artifact(
-            resolved,
-            _ArtifactRecord(
-                bundle=attempt.get("last_artifact_bundle"),
-                snapshot_dir=str(attempt.get("last_snapshot_dir") or ""),
-                deploy_patch_path=str(attempt.get("last_deploy_patch_path") or ""),
-                deploy_repo_root=str(attempt.get("last_deploy_repo_root") or ""),
-                artifact_path=str(attempt.get("last_artifact_path") or ""),
-                source_file=str(attempt.get("last_source_file") or ""),
-                framework_applyback=attempt.get("last_framework_applyback"),
-                integration_validation_status=attempt.get("last_integration_validation_status"),
-            ),
-        )
-
     if kernel_id and not (resolved.get("target_file") or resolved.get("source_file")):
         source = _find_selected_kernel_source(state, kernel_id)
         if source:
             resolved["source_file"] = source
 
-    return resolved, _missing_integration_inputs(resolved, last_kernel)
+    return resolved, _missing_integration_inputs(resolved)
 
 
 def _normalize_precision(value: Any) -> str:
@@ -2270,7 +2142,7 @@ async def _capture_block_fp8_profile_shapes(run: _ShapeCaptureRun, state: Any, p
             Path(steady_state_trace),
             output_dir=run.capture_dir,
         )
-    if benchmark_result.get("status") == "succeeded" and shape_count > 0:
+    if benchmark_result.get("status") in {"succeeded", "recovered"} and shape_count > 0:
         return {
             "status": "ok",
             "shapes_json": shapes_json,
@@ -2528,9 +2400,9 @@ def _reuse_vllm_block_fp8_roofline_shapes(
             "not match the latest profile; running a standard Roofline fallback"
         )
         return None
-    if str(getattr(state, "last_profile_status", "") or "").strip().lower() != "succeeded":
+    if not state.profile_trace_usable():
         log.info(
-            "vLLM block-FP8 shape capture: latest Roofline profile is not successful; "
+            "vLLM block-FP8 shape capture: latest Roofline profile left no usable trace; "
             "running a standard Roofline fallback"
         )
         return None
@@ -3865,33 +3737,6 @@ def _summarize_dropped_patches(dropped: Any) -> dict[str, int]:
     return counts
 
 
-def _raw_kernel_backend_order() -> list[str]:
-    """Return the effective kernel backend order.
-
-    Forge is deliberately not request-selectable.  The only supported forge
-    opt-in is exactly ``KERNEL_OPT_BACKEND_ORDER=forge``; every other value,
-    missing value or legacy alias stays on the GEAK whole-phase backend.
-    """
-    if forge_explicitly_enabled():
-        return ["forge"]
-    return list(_DEFAULT_KERNEL_PHASE_BACKEND_ORDER)
-
-
-def geak_selected() -> bool:
-    """Whether ``geak`` (the whole-pipeline e2e delegate) is in the kernel backend order.
-
-    ``geak`` is not a per-kernel backend: when it appears in the order it
-    means "delegate the whole KERNEL_AGENT phase to the GEAK e2e optimizer".
-    It therefore *owns* the phase whenever present (any other backends in the
-    order are ignored for the kernel phase), so an order of just ``geak``
-    runs only the GEAK e2e optimizer. ``forge`` is the per-kernel backend.
-
-    Returns:
-        bool: ``True`` when ``geak`` is in the resolved order.
-    """
-    return "geak" in _raw_kernel_backend_order()
-
-
 def _sweep_integrate_aiter_locks(*, reason: str) -> dict[str, Any]:
     """Best-effort orphaned-lock sweep immediately before an integrate boot."""
     from ..actions.executors._aiter_jit import sweep_stale_aiter_locks_if_dead
@@ -4222,27 +4067,6 @@ def _request_overrides_serving_controls(payload: Mapping[str, Any]) -> bool:
 
 
 def _integrate_request_refusal(payload: dict, *, requested_controls: bool) -> HandlerResult | None:
-    if payload.get("_vendor_playbook_deploy_blocked"):
-        # A vendor-playbook KEEP (e.g. mori dispatch/combine launch-config
-        # tuning) has no deployable artifact: best_artifact_path is a copy of
-        # a KernelForge task-bundle config file, not a rewrite of the real
-        # installed operator, and apply_kernel_patch's legacy full-file
-        # replace would happily overwrite the real site-packages module with
-        # it (PR #1191 review finding #1). Refuse before touching the
-        # filesystem rather than letting a config-file copy silently
-        # corrupt a live install.
-        return {
-            "status": "failed",
-            "error_class": "vendor_playbook_not_deployable",
-            "error": (
-                "integrate refused: kernel_id="
-                f"{payload.get('kernel_id')!r} is a vendor-playbook result "
-                "(closed-source operator launch-config tuning); it has no "
-                "deployable artifact and must not be applied as a source patch"
-            ),
-            "decision": "NEEDS_REVIEW",
-            "kernel_id": payload.get("kernel_id"),
-        }
     if float(payload.get("base_tput", 0.0)) <= 0:
         return {
             "status": "failed",

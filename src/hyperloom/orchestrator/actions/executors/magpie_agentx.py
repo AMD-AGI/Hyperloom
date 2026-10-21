@@ -9,7 +9,6 @@ import copy
 import hashlib
 import json
 import os
-import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import AbstractSet, Any, Mapping
@@ -18,9 +17,16 @@ import yaml
 
 from hyperloom.common.benchmark_config import is_magpie_agentx
 from hyperloom.common.unified_diff import touched_paths
+from hyperloom.inference_optimizer.breakdown.stop_reasons import ARGV_INVALID
 
 
 _ENCODING = "utf-8"
+
+
+class ServerArgvInvalidError(ValueError):
+    """Composed server args that cannot become an argv without corrupting a value."""
+
+    error_class = ARGV_INVALID
 
 
 @dataclass
@@ -61,10 +67,67 @@ def recipe_option_names(config_path: Path) -> set[str]:
     }
 
 
+def _inherited_server_args(argv: list[str]) -> str:
+    """Join the accepted argv with single spaces, which :func:`_server_argv` splits back into the same tokens.
+
+    Every token :func:`_server_argv` returns is one argv token on its own (non-empty, no whitespace, not
+    quote-wrapped), which is what makes repeated composition of the same launch idempotent.
+
+    Raises:
+        ServerArgvInvalidError: When a token, such as one written by hand in the workload YAML, is not one argv token.
+    """
+    from hyperloom.inference_optimizer.grid_server_args import tokenize_server_args_preserving_json
+
+    for token in argv:
+        split = tokenize_server_args_preserving_json(token)
+        if split is None or len(split[1]) != 1:
+            raise ServerArgvInvalidError(
+                f"{ARGV_INVALID}: launch_overrides.append_args token {token!r} is not one argv token: it is empty, "
+                "contains whitespace, is quote-wrapped, or has an unbalanced quote or bracket"
+            )
+    return " ".join(argv)
+
+
+def _server_argv(server_args: str, requested: str) -> list[str]:
+    """Split server args the way Hyperloom writes them: a JSON value is one token that keeps its quotes.
+
+    Raises:
+        ServerArgvInvalidError: When a token boundary is ambiguous or a JSON-looking value does not parse; the
+            message quotes ``requested``, the caller's own args, since ``server_args`` is already normalized.
+    """
+    from hyperloom.inference_optimizer.grid_server_args import tokenize_server_args_preserving_json
+
+    split = tokenize_server_args_preserving_json(server_args)
+    if split is None:
+        raise ServerArgvInvalidError(
+            f"{ARGV_INVALID}: server args do not split into argv tokens (a value is empty, contains whitespace, "
+            f"or has an unbalanced quote or bracket): {requested}"
+        )
+    for token in split[1]:
+        if token.endswith("\\"):
+            # A shell would join ``my\ model`` into one value; argv splitting keeps two, so refuse it here
+            # rather than let the framework reject a stray positional at launch.
+            raise ServerArgvInvalidError(
+                f"{ARGV_INVALID}: a server arg value ends with a backslash escape, which is not shell-parsed: "
+                f"{requested}"
+            )
+        value = token.partition("=")[2] if token.startswith("-") else token
+        if value.startswith(("{", "[")):
+            try:
+                json.loads(value)
+            except ValueError as exc:
+                raise ServerArgvInvalidError(f"{ARGV_INVALID}: server arg value is not valid JSON: {value}") from exc
+    return split[1]
+
+
 def apply_launch_changes(
     benchmark: dict[str, Any], changes: LaunchChanges, *, recipe_options: AbstractSet[str] = frozenset()
 ) -> None:
-    """Compose a candidate; Magpie validates protected args and environment."""
+    """Compose a candidate; Magpie validates protected args and environment.
+
+    Raises:
+        ServerArgvInvalidError: When the composed args cannot become an argv intact.
+    """
     from hyperloom.inference_optimizer.grid_server_args import compose_server_args, dedupe_extra_server_args
 
     agentx = benchmark["agentx"]
@@ -73,16 +136,16 @@ def apply_launch_changes(
         benchmark["agentx"] = agentx
     launch = agentx.setdefault("launch_overrides", {"version": 1})
     appended_options = {token.partition("=")[0] for token in launch.get("append_args", []) if token.startswith("--")}
-    inherited = shlex.join(launch.get("append_args", []))
-    launch["append_args"] = shlex.split(
+    launch["append_args"] = _server_argv(
         dedupe_extra_server_args(
             compose_server_args(
-                inherited_args=inherited,
+                inherited_args=_inherited_server_args(launch.get("append_args", [])),
                 variant_extra_args=changes.args,
                 remove_args=changes.remove_args,
                 args_mode=REPLACE if changes.replace_args else "append",
             )
-        )
+        ),
+        changes.args,
     )
     launch["replace_args"] = changes.replace_args or launch.get("replace_args", False)
     # Magpie matches removals against the recipe, before appending our options. A local-only ablation must not

@@ -20,7 +20,6 @@ from typing import Any
 from hyperloom.common.timeutil import iso_z
 from hyperloom.inference_optimizer.breakdown.collectors._common import (
     _load_jsonl_safe,
-    _load_optimization_journal,
     _parse_iso_unix,
     _to_float,
     phase_at,
@@ -28,8 +27,10 @@ from hyperloom.inference_optimizer.breakdown.collectors._common import (
 from hyperloom.inference_optimizer.breakdown.recorder.phase_event import is_phase_transition_row
 from hyperloom.inference_optimizer.session.optimization_journal import (
     JournalEntry,
+    journal_path,
     operation_kind_for,
     proposer_for,
+    read_journal_entries,
 )
 from hyperloom.inference_optimizer.session.session_paths import decision_trace_path
 
@@ -255,39 +256,38 @@ def _proposal_scores_by_variant(state: dict[str, Any]) -> dict[str, list[dict[st
 
 
 def _keep_revert_decision(
-    entry: dict[str, Any],
+    entry: JournalEntry,
     phase_windows: list[tuple[float, str]],
     scores_by_variant: dict[str, list[dict[str, Any]]],
 ) -> dict[str, Any]:
     """The trace row for one KEEP/REVERT journal entry, still carrying its call-join ``key``."""
-    ts = iso_z(entry.get("ts"))
+    ts = iso_z(entry.ts)
     decision: dict[str, Any] = {
-        "change": str(entry.get("change") or ""),
-        "outcome": str(entry.get("outcome") or ""),
-        "gain_pct": _to_float(entry.get("gain_pct")),
-        "task_id": str(entry.get("task_id") or ""),
+        "change": entry.change,
+        "outcome": entry.outcome,
+        "gain_pct": _to_float(entry.gain_pct),
+        "task_id": entry.task_id,
     }
     for field in ("kind", "provenance", "scope", "fingerprint", "variant_name"):
-        text = str(entry.get(field) or "")
+        text = getattr(entry, field)
         if text:
             decision[field] = text
     decision["component"] = proposer_for(decision.get("provenance", ""))
     decision["operation_kind"] = operation_kind_for("", decision.get("kind", ""))
     # Predicted (pre-measurement) gain, when the proposer supplied one.
-    predicted_gain = _to_float(entry.get("predicted_gain_pct"))
+    predicted_gain = _to_float(entry.predicted_gain_pct)
     if predicted_gain is not None:
         decision["predicted_gain_pct"] = predicted_gain
-    detail_metrics = entry.get("metrics")
-    if isinstance(detail_metrics, dict) and detail_metrics:
-        decision["metrics"] = detail_metrics
-    scored = scores_by_variant.get(decision.get("variant_name"))
+    if entry.metrics:
+        decision["metrics"] = entry.metrics
+    scored = scores_by_variant.get(entry.variant_name)
     if scored:
         decision["proposal_scores"] = scored
     return {
-        "decision_id": _decision_id("keep_revert", *JournalEntry.from_dict(entry).dedupe_key()),
-        "key": _decision_key(decision["task_id"], ""),
-        "phase": str(entry.get("phase") or "").strip() or _phase_at(ts, phase_windows),
-        "tick": entry.get("tick"),
+        "decision_id": _decision_id("keep_revert", *entry.dedupe_key()),
+        "key": _decision_key(entry.task_id, ""),
+        "phase": entry.phase.strip() or _phase_at(ts, phase_windows),
+        "tick": entry.tick,
         "ts": ts,
         "decision": decision,
     }
@@ -350,11 +350,11 @@ def write_decision_trace(
         if key is not None:
             calls_by_key.setdefault(key, []).append(call)
 
-    decisions = [
-        _keep_revert_decision(e, phase_windows, scores_by_variant)
-        for e in _load_optimization_journal(session_dir, warnings)
-        if isinstance(e, dict)
-    ]
+    journal_file = journal_path(session_dir)
+    entries = read_journal_entries(
+        session_dir, on_error=lambda exc: warnings.append(f"failed to parse {journal_file}: {exc!r}")
+    )
+    decisions = [_keep_revert_decision(e, phase_windows, scores_by_variant) for e in entries]
     decisions += [
         _dynamic_action_decision(row, phase_windows) for row in _load_dispatch_history_all(session_dir, warnings)
     ]
