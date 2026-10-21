@@ -13,6 +13,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from hyperloom.common.perf_metric import INTVTY_OBJECTIVES
+
 from ..base import (
     Decision,
     RenderedSection,
@@ -21,6 +23,7 @@ from ..base import (
     events_of,
     fmt_pct,
     md_kv_list,
+    measured_ms,
     outcome_of,
     register_renderer,
     session_of,
@@ -35,6 +38,28 @@ from ._invocation import render_invocation_block
 # rebench ran and could not produce a verdict. ``no_material`` / ``no_promote``
 # are deliberately absent — those ARE verdicts, so the candidate was judged.
 _GEAK_DROPPED_RESULT_STATUSES: frozenset[str] = frozenset({"failed", "fallback_failed"})
+
+
+def _gain_axis_note(final: dict[str, Any]) -> str:
+    """`` (<axis>)`` when the gain was measured on an interactivity axis, else nothing."""
+    axis = final.get("graded_on")
+    return f" ({axis})" if axis in INTVTY_OBJECTIVES else ""
+
+
+def _validation_gap_warnings(*, validated: bool, stack_changed: bool, gain_missing: bool) -> list[str]:
+    """Warnings for a validation that fell behind the shipped stack, or that never ran."""
+    warnings: list[str] = []
+    if validated and stack_changed:
+        warnings.append(
+            "The last whole-stack validation predates the final adoptions, so "
+            "the validated cumulative gain describes a shorter stack than the "
+            "one that shipped."
+        )
+    if gain_missing:
+        warnings.append(
+            "No validated gain is recorded while baseline/final throughput are set — no validation run completed."
+        )
+    return warnings
 
 
 def _last_geak_rebench(breakdown: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -135,7 +160,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
             note = " (negative = faster)" if framework_registry.is_scriptable(fw) else ""
             facts.append(f"Delta vs baseline: {final_v - base_v:+.2f} {_unit}{note}.")
     if gain_v is not None:
-        facts.append(f"Validated cumulative gain: {fmt_pct(gain_v, plus=True)}.")
+        facts.append(f"Validated cumulative gain: {fmt_pct(gain_v, plus=True)}{_gain_axis_note(f)}.")
         decisions.append(
             Decision(
                 kind="kept" if (gain_v or 0) > 0 else "attempted",
@@ -195,21 +220,18 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
         facts.append("Final stack: " + " → ".join(f"`{p}`" for p in action_path))
     if extra_args:
         facts.append(f"Final extra_server_args: `{extra_args}`.")
-    if stack_changed:
-        warnings.append(
-            "The last whole-stack validation predates the final adoptions, so "
-            "the validated cumulative gain describes a shorter stack than the "
-            "one that shipped."
+    warnings.extend(
+        _validation_gap_warnings(
+            validated=val_stack_len is not None,
+            stack_changed=stack_changed,
+            gain_missing=gain_v is None and bool(final_tput or base_tput),
         )
-    if gain_v is None and (final_tput or base_tput):
-        warnings.append(
-            "No validated gain is recorded while baseline/final throughput are set — no validation run completed."
-        )
+    )
 
     md_kv = md_kv_list(
         [
             ("final_output_throughput", final_tput),
-            ("throughput_unit", _unit or None),
+            ("throughput_unit", framework_registry.throughput_unit(fw) or None),
             ("validated_gain_pct", gain_v),
             ("revalidation_pending", revalidation_pending or None),
             ("geak_candidate", candidate or None),
@@ -219,7 +241,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
             ("stack_changed_after_validation", stack_changed),
             ("extra_server_args", extra_args or None),
             ("action_path", action_path or None),
-            ("ttft_mean_ms", f.get("ttft_mean_ms")),
+            ("ttft_mean_ms", measured_ms(f.get("ttft_mean_ms"))),
             ("e2el_mean_ms", f.get("e2el_mean_ms")),
             ("ttft_e2el_source", validation.get("ttft_e2el_source")),
             ("extra_envs", f.get("extra_envs") or None),

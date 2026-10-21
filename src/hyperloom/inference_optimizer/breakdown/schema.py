@@ -1915,7 +1915,6 @@ class V6FrameworkAttempt(TypedDict, total=False):
     reasoning_origin: str
     experience_citations: list[V6ExperienceCitation]
     target_files: list[str]
-    accepted_kernels: list[str]
     measured_against: V6FrameworkStack
     config_delta: V6FrameworkConfigDelta
     measurement: V6FrameworkMeasurement
