@@ -3832,8 +3832,9 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             "iteration_result",
             result.iteration,
             decision=resolved_decision,
-            # The agent's own reason for this candidate and decision, for trajectory comparison; absent when no
-            # agent ran (baseline) or it returned nothing.
+            # Why this candidate was tried and decided, for trajectory comparison. Every path that produces an
+            # iteration names one, a placeholder when no agent ran or it gave none; only a pending KEEP recorded before
+            # the field existed has none, and then the key is omitted.
             rationale=(result.agent_rationale or "").replace("\n", " ").strip()[:500] or None,
             plan=(plan or "").strip()[:120] or None,
             # The mode this iteration actually ran under, which is the direction identity the empty-diff streak is
