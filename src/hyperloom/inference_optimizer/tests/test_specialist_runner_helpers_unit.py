@@ -13,6 +13,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from hyperloom.inference_optimizer.trace.agent_trace import AgentTrace
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
 from hyperloom.orchestrator.specialists import runner as sr
 from hyperloom.orchestrator.specialists.runner import (
