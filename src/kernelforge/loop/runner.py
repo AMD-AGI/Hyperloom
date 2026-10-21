@@ -35,7 +35,7 @@ from kernelforge.llm.workspace_policy import is_protected_path
 from kernelforge.llm.git import git, git_bytes
 from kernelforge.config import Config
 from kernelforge.evaluation.correctness.canonical import accept_candidate
-from kernelforge.evaluation.correctness.pipeline import run_validation_pipeline, status_label
+from kernelforge.evaluation.correctness.pipeline import run_validation_pipeline
 from kernelforge.loop.experience import ExperienceLedger
 from kernelforge.loop.lessons import (
     SUMMARY_MIN_SECONDS,
@@ -4283,9 +4283,8 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             timeout_per_stage=self.ic.validate_stage_timeout_sec,
         )
         for result in report.results:
-            status = status_label(result.outcome, result.passed)
             snr_str = f" SNR={result.snr_db:.1f}dB" if result.snr_db is not None else ""
-            print(f"  [validate] Stage {result.stage} {result.stage_name}: {status}{snr_str}")
+            print(f"  [validate] Stage {result.stage} {result.stage_name}: {result.status_label}{snr_str}")
         if not report.all_passed:
             print(f"  [validate] FAILED at stage {report.failed_stage} — skipping bench")
             self._observe_measurement(measurement_started)

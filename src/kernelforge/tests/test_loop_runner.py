@@ -2375,7 +2375,7 @@ def _measurement_loop(monkeypatch, benchmark_result, workspace_dir="."):
     report = SimpleNamespace(
         all_passed=True,
         results=[
-            SimpleNamespace(stage=5, stage_name="full", passed=True, outcome="", snr_db=40.0),
+            SimpleNamespace(stage=5, stage_name="full", passed=True, status_label="PASS", snr_db=40.0),
         ],
         summary=lambda: "PASS",
     )
@@ -7859,7 +7859,7 @@ class _StubStage:
     def __init__(self, stage, name, snr_db):
         self.stage, self.stage_name, self.snr_db = stage, name, snr_db
         self.passed = True
-        self.outcome = ""
+        self.status_label = "PASS"
 
 
 class _StubReport:
