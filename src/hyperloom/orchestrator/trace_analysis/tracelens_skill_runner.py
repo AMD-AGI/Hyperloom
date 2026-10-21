@@ -34,7 +34,7 @@ from hyperloom.common.codex_session import (
     run_codex_turn,
 )
 from hyperloom.common import llm_config
-from hyperloom.common.agent_sdk_runner import AgentSessionRequest
+from hyperloom.common.deepseek_task import DeepSeekTaskRequest
 from hyperloom.common.llm_config import claude_sdk_env_options
 from hyperloom.common.llm_config import DEFAULT_CLAUDE_MODEL, DEFAULT_CODEX_MODEL
 from hyperloom.inference_optimizer import framework_registry
@@ -61,19 +61,22 @@ RUN_CONFIG_NAME = "run.yaml"
 # The Codex SDK has no literal Read/Write/Bash/Task tools, and this thread runs
 # without sub-agents, so the skill's tool names have to be mapped to Codex's
 # native shell and patch capabilities before the agent follows them.
-_CODEX_DEVELOPER_INSTRUCTIONS = """\
+_CODEX_RUNTIME_MAPPING = """\
 ## Codex runtime mapping
 Use shell commands to inspect, search and run files, and your native patch/edit
 capability to write them. Where the skill names Read, Write, Edit, Grep, Glob,
 Bash or Task, it describes an equivalent capability rather than a literal tool;
 carry out any sub-agent step yourself, in sequence.
-
-## System instructions
-You are a TraceLens analysis runner inside Hyperloom. Execute only the
-requested standalone analysis workflow. Use absolute paths, write artifacts
-under the requested output directory, and do not modify application source
-code.
 """
+
+# The one system prompt every runtime runs the skill under; each runtime adds only its own tool mapping.
+_TRACELENS_SYSTEM_PROMPT = (
+    "You are a TraceLens analysis runner inside Hyperloom. Execute only the requested standalone analysis workflow. "
+    "Use absolute paths, write artifacts under the requested output directory, and do not modify application "
+    "source code."
+)
+
+_CODEX_DEVELOPER_INSTRUCTIONS = f"{_CODEX_RUNTIME_MAPPING}\n## System instructions\n{_TRACELENS_SYSTEM_PROMPT}\n"
 
 
 # Per-message stream-idle timeout (seconds). The in-process Claude SDK query has
@@ -745,12 +748,7 @@ def _claude_skill_options(run: _SkillRun, model: str, bounds: _StreamIdleBounds)
     log = run.log
     kwargs: dict[str, Any] = {
         "max_turns": _MAX_AGENT_TURNS,
-        "system_prompt": (
-            "You are a TraceLens analysis runner inside Hyperloom. Execute only "
-            "the requested standalone analysis workflow. Use absolute paths, "
-            "write artifacts under the requested output directory, and do not "
-            "modify application source code."
-        ),
+        "system_prompt": _TRACELENS_SYSTEM_PROMPT,
         "allowed_tools": DEFAULT_ALLOWED_TOOLS,
         "stderr": lambda line: log(f"[claude-sdk] {line.rstrip()}") if log else None,
         "model": model,
@@ -786,14 +784,15 @@ async def run_tracelens_skill(
 
     Args:
         request (TraceLensSkillRequest): The run's inputs.
-        budget_minutes (float): Time budget for the run. The Codex path spends
-            it as the turn's wall-clock timeout (floored at 60s, matching the
-            other TraceLens subprocess timeouts); the Claude path bounds each
-            SDK message by a stream-idle timeout instead.
+        budget_minutes (float): Time budget for the run. The Codex and DeepSeek
+            Harness paths spend it as the wall-clock timeout of the whole
+            session (floored at 60s, matching the other TraceLens subprocess
+            timeouts); the Claude path bounds each SDK message by a
+            stream-idle timeout instead.
         model (str | None): Optional model override. Defaults to
             :data:`DEFAULT_CLAUDE_MODEL` on the Claude SDK path, or ``$CODEX_MODEL`` /
             :data:`DEFAULT_CODEX_MODEL` on the Codex SDK path. The DeepSeek
-            Harness path ignores it and runs the harness model.
+            Harness path ignores it: the harness session owns its model.
         sdk (SdkEntryPoints): Optional injected query factory, options class
             and Codex turn entry point (used by tests); the query factory and
             options class are imported from the SDK when ``None``, and the
@@ -824,13 +823,11 @@ async def run_tracelens_skill(
     if runner == llm_config.AGENT_BACKEND_DEEPSEEK and no_injected_sdk:
         from .tracelens_deepseek import drive_tracelens_skill
 
-        session = AgentSessionRequest(
+        session = DeepSeekTaskRequest(
             prompt=prompt,
-            system_prompt=_CODEX_DEVELOPER_INSTRUCTIONS.replace("Codex", "DeepSeek Harness"),
+            system_prompt=_TRACELENS_SYSTEM_PROMPT,
             cwd=tracelens_root,
-            model=llm_config.resolve_forge_llm_model(llm_config.AGENT_BACKEND_DEEPSEEK),
-            max_turns=_MAX_AGENT_TURNS,
-            allowed_tools=DEFAULT_ALLOWED_TOOLS,
+            writable=True,
             log=log,
             timeout_sec=timeout_sec,
         )

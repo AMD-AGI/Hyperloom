@@ -674,7 +674,7 @@ function-lines src/hyperloom/orchestrator/trace_analysis/tracelens_analysis.py::
 function-lines src/hyperloom/orchestrator/trace_analysis/tracelens_analysis.py::write_reports 202
 function-lines src/hyperloom/orchestrator/trace_analysis/tracelens_arch_benchmark.py::populate_gpu_arch_json 81
 function-lines src/hyperloom/orchestrator/trace_analysis/tracelens_skill_runner.py::aggregate_by_source_function 158
-function-lines src/hyperloom/orchestrator/trace_analysis/tracelens_skill_runner.py::run_tracelens_skill 113
+function-lines src/hyperloom/orchestrator/trace_analysis/tracelens_skill_runner.py::run_tracelens_skill 112
 function-lines src/hyperloom_kb/http_service.py::ExperienceHTTPService.read 101
 function-lines src/hyperloom_kb/knowledge_read.py::QueryExecutor.execute 111
 function-lines src/kernelforge/agent_backends/claude.py::ClaudeBackend._query_once 121

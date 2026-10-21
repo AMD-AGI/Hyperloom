@@ -12,7 +12,8 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Iterable
 
 from hyperloom.common import llm_config
-from hyperloom.common.agent_sdk_runner import AgentSessionRequest, drive_agent_session
+from hyperloom.agents.quantization.driver.result_collector import collect_artifacts
+from hyperloom.common.deepseek_task import DeepSeekTaskRequest, OwedArtifact, run_deepseek_task
 from hyperloom.common.llm_attribution import sdk_env_overlay
 from hyperloom.common.llm_config import DEFAULT_CLAUDE_MODEL
 
@@ -188,11 +189,37 @@ def _attempt_child_env() -> dict[str, str]:
     return env
 
 
+#: The phase an attempt reaches when it starts evaluating its quantized model; nothing later is owed.
+_TERMINAL_PHASE = "eval"
+
+
+def _attempt_finished(workspace: Path) -> bool:
+    """Whether the attempt has reached an end the classifier can judge: blocked, or through to evaluation."""
+    artifacts = collect_artifacts(workspace)
+    return (
+        artifacts.blocked_reason is not None
+        or artifacts.last_phase == _TERMINAL_PHASE
+        or artifacts.eval_report_present
+        or artifacts.eval_skipped_reason is not None
+    )
+
+
+def _owed_attempt_end(workspace: Path) -> OwedArtifact:
+    """What an attempt owes: a ``blocked.md``, or the workflow carried through to its evaluation phase."""
+    return OwedArtifact(
+        done=lambda: _attempt_finished(workspace),
+        continuation_prompt=(
+            "The quantization workflow is not finished: there is no blocked.md and last_phase.txt has not reached "
+            f"{_TERMINAL_PHASE}. A tool call written out as text in a reply is not executed. Continue from the phase "
+            "last_phase.txt names, calling tools directly, and write blocked.md if you cannot go on."
+        ),
+    )
+
+
 async def _run_attempt_on_deepseek(
     attempt: AttemptContext,
     prompt: str,
     *,
-    model: str | None,
     log: Callable[[str], None] | None,
 ) -> AttemptResult:
     """Run one attempt's session on the DeepSeek Harness."""
@@ -202,18 +229,17 @@ async def _run_attempt_on_deepseek(
             f"quantization-agent DeepSeek runner: workspace={workspace} "
             f"quark_root={attempt.quark_root} attempt={attempt.attempt_number}"
         )
-    request = AgentSessionRequest(
+    request = DeepSeekTaskRequest(
         prompt=prompt,
         system_prompt=_ATTEMPT_SYSTEM_PROMPT,
         cwd=workspace,
-        model=model,
-        max_turns=DEFAULT_MAX_TURNS,
-        allowed_tools=DEFAULT_ALLOWED_TOOLS,
+        writable=True,
         child_env=_attempt_child_env(),
         log=log,
-        backend=llm_config.AGENT_BACKEND_DEEPSEEK,
     )
-    result = await drive_agent_session(request)
+    # An interactive attempt stops at its checkpoints for an answer nobody gives a headless session.
+    owed = None if attempt.interactive else _owed_attempt_end(workspace)
+    result = await run_deepseek_task(request, owed)
     return AttemptResult(workspace=workspace, sdk_error=result.error, raw_text=result.text)
 
 
@@ -243,7 +269,7 @@ async def run_one_attempt(
     prompt = build_attempt_prompt(attempt, skill_path=skill_path, fix_hypothesis_path=fix_hypothesis_path)
 
     if sdk is None and llm_config.resolve_agent_backend() == llm_config.AGENT_BACKEND_DEEPSEEK:
-        return await _run_attempt_on_deepseek(attempt, prompt, model=model, log=log)
+        return await _run_attempt_on_deepseek(attempt, prompt, log=log)
 
     sdk = sdk or _import_sdk()
 
