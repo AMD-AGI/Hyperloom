@@ -25,7 +25,8 @@ def _dispatcher(phase: str, *, baseline_tput: float = 800.0) -> DispatcherCollab
     state = SharedState(session_id="s")
     state.phase = phase
     state.baseline_tput = baseline_tput
-    return DispatcherCollaborator(SimpleNamespace(shared_state=state, action_registry=ACTION_CATALOGUE))
+    no_tasks = SimpleNamespace(queued_context_sync=list, running_context_sync=list)
+    return DispatcherCollaborator(SimpleNamespace(shared_state=state, action_registry=ACTION_CATALOGUE, tasks=no_tasks))
 
 
 def test_a_baseline_proposed_in_the_optimisation_phase_is_refused():

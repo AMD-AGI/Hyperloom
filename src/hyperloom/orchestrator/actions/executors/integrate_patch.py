@@ -113,7 +113,6 @@ from ._nogit_patch import (
     _is_within,
 )
 from ...enablement.lane import bind_integrate_to_lane
-from ...enablement.recipe.credentials import detect_credential_channels
 from ._patch_snapshot import _git_commit_kept, _patch_touched_paths
 from hyperloom.inference_optimizer.canonical_fingerprint import canonical_fingerprint
 from ._grid_runner import (
@@ -1704,28 +1703,6 @@ def _bringup_evidence(before: Any, after: Any) -> dict[str, Any]:
     }
 
 
-def _kept_runtime_identity(stack_action: Any, provision_result: Any) -> dict[str, Any]:
-    """What a KEEP'd attempt runtime must carry so every later bench re-activates the stack it graded."""
-    if stack_action is None or provision_result is None or not getattr(provision_result, "ok", False):
-        return {}
-    return {
-        "enablement_kept_stack_action": {
-            **stack_action.to_state(),
-            "resolved_ref": str(getattr(provision_result, "resolved_ref", "") or ""),
-            "resolved_packages": {
-                str(name): dict(spec)
-                for name, spec in (getattr(provision_result, "resolved_packages", {}) or {}).items()
-            },
-            # The clone and the install inherit the whole process environment, so
-            # a runtime acquired over an authenticated remote replays no better
-            # than an install that was.
-            "credential_channels": detect_credential_channels(os.environ),
-        },
-        "enablement_active_runtime": provision_result.runtime.to_state(),
-        "installed_versions": dict(getattr(provision_result, "installed_versions", {}) or {}),
-    }
-
-
 def _advanced_round(
     attempt: IntegrateAttempt,
     bench_result: dict[str, Any],
@@ -1776,6 +1753,7 @@ def _advanced_round(
         "bench_result": bench_result,
         "workspace": str(attempt.output_root),
         **evidence,
+        **attempt.accepted_runtime_records(),
     }
 
 
@@ -3128,10 +3106,12 @@ class IntegratePatchExecutor:
 
     @staticmethod
     def _gc_attempt_dir(attempt_dir: Path) -> None:
-        """Remove a half/failed attempt-runtime dir (best-effort)."""
+        """Remove a half/failed attempt runtime's venv and checkout, keeping its provision log (best-effort)."""
         try:
             if attempt_dir.exists():
-                shutil.rmtree(attempt_dir, ignore_errors=True)
+                for child in attempt_dir.iterdir():
+                    if child.is_dir():
+                        shutil.rmtree(child, ignore_errors=True)
         except OSError:
             log.debug("integrate_patch: attempt-dir GC failed for %s", attempt_dir, exc_info=True)
 
@@ -3651,9 +3631,9 @@ class IntegratePatchExecutor:
         ``enablement_effective_config``, captured from the variant that ran: the
         materialized YAML holds only the base layer, so the revalidation baseline
         needs them to re-run the graded config.
-        When an attempt runtime was provisioned, the stack action is recorded in
-        the result (``enablement_kept_stack_action``) so it survives rearm. On
-        REVERT / non-KEEP, the attempt runtime dir is GC'd.
+        When an attempt runtime was provisioned, an accepted round (kept or
+        advanced) records it in the result (``enablement_kept_stack_action``) so
+        it survives rearm. On REVERT, the attempt runtime dir is GC'd.
 
         Every verdict carries ``framework_root`` (the source tree patches were applied
         against, needed to replay them on a fresh machine).
@@ -3667,8 +3647,6 @@ class IntegratePatchExecutor:
         applied_artifacts = attempt.applied_artifacts
         extra_envs_applied = attempt.extra_envs_applied
         extra_server_args_applied = attempt.extra_server_args_applied
-        stack_action = attempt.stack_action
-        provision_result = attempt.provision_result
 
         from hyperloom.common.failure_signature import runnable_decision
 
@@ -3763,7 +3741,7 @@ class IntegratePatchExecutor:
             "enablement_effective_config": dict(bench_result.get("effective_config") or {}),
             **evidence,
         }
-        kept_result.update(_kept_runtime_identity(stack_action, provision_result))
+        kept_result.update(attempt.accepted_runtime_records())
         # Snapshot a manifest of the localized closure that survives rearm, so
         # the closure is recorded and not re-fetched.
         manifest = await asyncio.to_thread(
