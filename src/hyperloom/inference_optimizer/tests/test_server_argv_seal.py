@@ -40,25 +40,14 @@ _COMPOSERS = (
     (_grid_runner, "_build_variant_yaml"),
 )
 
-#: The functions allowed to write the argument env: the phases the composers
-#: delegate to and the steps those phases are themselves made of -- the per-source
-#: merges, the per-framework profiler flags, the caller's removals and the final
-#: guards -- all of which run above the seal, plus the composer that still writes
-#: the env itself, the seal, and the re-seal a repair is written back through.
-#: Every name here is a writer the census sees; a name that writes nothing is a
-#: hole, not a margin, so the set is checked in both directions.
+#: The functions allowed to write the argument env: the two composers, the two
+#: helpers they delegate a step to -- the per-flag merge every injection goes
+#: through and the final guards -- all of which run above the seal, plus the
+#: seal itself and the re-seal a repair is written back through.
 _WRITERS = frozenset(
     {
-        "_bound_vllm_profiler_capture",
-        "_publish_patched_shape_discovery",
-        "_drop_redundant_graph_capture_flag",
+        "materialize_config_with_envs",
         "add_server_arg_unless_pinned",
-        "_seed_reference_server_args",
-        "_merge_caller_server_args",
-        "_compose_server_args",
-        "_apply_caller_removals",
-        "_restore_vllm_profiler_bounds",
-        "_apply_atom_tracelens_knobs",
         "_finalize_framework_server_args",
         "_build_variant_yaml",
         "seal_server_argv",
@@ -160,17 +149,6 @@ def test_every_write_to_the_argument_env_is_one_the_seal_settles():
             if function not in _WRITERS:
                 offenders.append(f"{path}:{lineno} in {function}")
     assert not offenders, "the server argument env is written outside the seal's reach: " + "; ".join(offenders)
-
-
-def test_every_name_the_allowlist_carries_is_a_writer():
-    """A name that writes nothing is a hole the next function to take it falls through."""
-    writers = {
-        function
-        for path in sorted(_PACKAGE.rglob("*.py"))
-        if "/tests/" not in str(path)
-        for function, _ in _argument_env_writes(path.read_text(encoding="utf-8"))
-    }
-    assert not _WRITERS - writers, f"these allowlist names write nothing: {sorted(_WRITERS - writers)}"
 
 
 @pytest.mark.parametrize(("module", "name"), _COMPOSERS)

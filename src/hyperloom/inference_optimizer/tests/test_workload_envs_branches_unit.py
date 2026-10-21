@@ -14,7 +14,6 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
-from hyperloom.orchestrator.actions.executors import _profile_capture as pc
 from hyperloom.orchestrator.actions.executors import _workload_envs as we
 from hyperloom.inference_optimizer.grid_server_args import validate_server_args_shell_safe
 
@@ -421,7 +420,7 @@ def test_profile_atom_num_prompts_equals_conc(monkeypatch, tmp_path):
     _clear_env(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setenv("CONC", "16")
-    monkeypatch.setattr(pc, "_atom_tracelens_caps", lambda: pc._ATOM_CAPS_NONE)
+    monkeypatch.setattr(we, "_atom_tracelens_caps", lambda: we._ATOM_CAPS_NONE)
     src = tmp_path / "cfg.yaml"
     src.write_text(
         yaml.safe_dump({"benchmark": {"framework": "atom", "model": "/m", "envs": {"PROFILE": "1"}}}), encoding="utf-8"
@@ -544,20 +543,6 @@ def test_profile_manual_max_iters_above_cap_warns(monkeypatch, tmp_path, caplog)
         bench = _materialize(src, tmp_path / "out")
     assert _profile_num_steps(bench) == 2000  # honored verbatim
     assert any("exceeds the serialization-safe cap" in r.message for r in caplog.records)
-
-
-def test_profile_refuses_an_unreadable_shape_discovery_force(monkeypatch, tmp_path):
-    from hyperloom.common.env import EnvValueError
-
-    _clear_env(monkeypatch)
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
-    # The global switch already settles the answer; the escape hatch is still read
-    # strictly, so a typo in it cannot pass for "unset".
-    monkeypatch.setenv("HYPERLOOM_PROFILE_SHAPE_DISCOVERY", "0")
-    monkeypatch.setenv("HYPERLOOM_PROFILE_SHAPE_DISCOVERY_FORCE", "ture")
-    src = _write(tmp_path / "cfg.yaml", envs={"PROFILE": "1"})
-    with pytest.raises(EnvValueError, match="HYPERLOOM_PROFILE_SHAPE_DISCOVERY_FORCE"):
-        _materialize(src, tmp_path / "out")
 
 
 def _arm_sglang_shape_tool(monkeypatch, tmp_path) -> Path:
