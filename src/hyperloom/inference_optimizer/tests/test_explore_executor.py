@@ -206,10 +206,12 @@ def _noop_filter_kwargs(tmp_path: Path, **overrides: object) -> dict:
         "model_path": None,
         "gpu_type": None,
         "benchmark_script": None,
-        "observed_server_config": _stack_config(),
-        "observed_server_env": _stack_env(),
     }
     kwargs.update(overrides)
+    kwargs["observed"] = (
+        kwargs.pop("observed_server_config", _stack_config()),
+        kwargs.pop("observed_server_env", _stack_env()),
+    )
     return kwargs
 
 
