@@ -505,8 +505,8 @@ async def restart_server_for_round(
                 # cmd_restart_server returns when actors are spawned, but a cold MoE weight-load can need 20-30 min
                 # before /health flips; poll it here so the downstream baseline doesn't fire against a not-yet-ready
                 # server.
-                poll_s = env_int("HYPERLOOM_MN_HEALTH_POLL_S", 10)
                 try:
+                    poll_s = env_int("HYPERLOOM_MN_HEALTH_POLL_S", 10)
                     # PD restart: ensure BOTH prefill+decode legs are /health-ready (mooncake init done) before the
                     # frontend completions probe, so its grace does not expire against a half-ready pair.
                     await _wait_for_workers_ready_async(timeout_s=health_wait_s, poll_every_s=poll_s)
