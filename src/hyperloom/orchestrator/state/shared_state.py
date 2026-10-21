@@ -8,7 +8,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import shlex
 import time
 import traceback
 from collections.abc import Callable, Iterator, Mapping
@@ -61,7 +60,6 @@ _DEFAULT_ATTEMPTS_HISTORY = _kernel_decision_settings._DEFAULT_ATTEMPTS_HISTORY
 _DEFAULT_HOT_KERNEL_MIN_GPU_PCT = _kernel_decision_settings._DEFAULT_HOT_KERNEL_MIN_GPU_PCT
 _MAX_INTEGRATE_FAULT_ATTEMPTS = _kernel_decision_settings._MAX_INTEGRATE_FAULT_ATTEMPTS
 resolve_hot_kernel_min_gpu_pct = _kernel_decision_settings.resolve_hot_kernel_min_gpu_pct
-resolve_kernel_opt_max_failures = _kernel_decision_settings.resolve_kernel_opt_max_failures
 
 # escalate_strategy_change hint vocabulary (closed enum; unknown hints ignored). ``skip_to_kernel`` is the
 # "exhausted the current lever" signal from FRAMEWORK_AGENT; it advances to KERNEL.
@@ -280,7 +278,6 @@ _ROOFLINE_SIGNAL_KEYS: tuple[str, ...] = (
     "bandwidth_utilization_pct",
     "suggestion",
     "roofline_name",
-    "rocprof_roofline",
 )
 
 
@@ -291,7 +288,7 @@ def _saturation_delta(sat: dict[str, Any], prev_sat: dict[str, Any], key: str) -
     return round(float(current) - float(previous), 2)
 
 
-def _hot_kernel_row(entry: dict[str, Any], rocprof_by_kernel_id: dict[str, Any]) -> dict[str, Any]:
+def _hot_kernel_row(entry: dict[str, Any]) -> dict[str, Any]:
     kid = entry.get("kernel_id")
     arithmetic_intensity = entry.get("arithmetic_intensity")
     if arithmetic_intensity is None:
@@ -299,9 +296,6 @@ def _hot_kernel_row(entry: dict[str, Any], rocprof_by_kernel_id: dict[str, Any])
     efficiency_percent = entry.get("efficiency_percent")
     if efficiency_percent is None:
         efficiency_percent = entry.get("efficiency_pct")
-    rocprof_roofline = entry.get("rocprof_roofline")
-    if rocprof_roofline is None and kid is not None:
-        rocprof_roofline = rocprof_by_kernel_id.get(str(kid))
     return {
         "kernel_id": kid,
         "name": entry.get("name"),
@@ -319,7 +313,6 @@ def _hot_kernel_row(entry: dict[str, Any], rocprof_by_kernel_id: dict[str, Any])
         "bandwidth_utilization_pct": entry.get("bandwidth_utilization_pct"),
         "suggestion": entry.get("suggestion") or "",
         "roofline_name": entry.get("roofline_name"),
-        "rocprof_roofline": rocprof_roofline,
         "source_file": entry.get("source_file"),
         "reusable_native_kernel": bool(entry.get("reusable_native_kernel")),
         "kernel_contract": entry.get("kernel_contract"),
@@ -441,8 +434,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     profile_osl: int = 0
     max_model_len: int = 0
     kernel_enabled: bool = True
-    # KERNEL-phase optimizer: "geak" (default, one-shot whole-pipeline e2e) or "native" (per-kernel loop when
-    # explicitly requested).
+    # KERNEL-phase backend, recorded once when the session is created: "geak" (default) or "forge".
     kernel_optimizer: str = "geak"
     # Snapshot of the last GEAK e2e run (result.json + final_launch.sh / bench_e2e.sh handles the SWEEP phase reuses).
     geak_result: dict[str, Any] = field(default_factory=dict)
@@ -641,7 +633,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     last_profile_trace: str = ""
     # Launch evidence of the run that produced ``last_profile_trace``; its runtime findings share the trace's shapes.
     last_profile_launch_evidence_path: str = ""
-    # ``succeeded``/``failed`` for most recent profile; failed allows re-run even when last_profile_trace is non-empty.
+    # ``succeeded``/``recovered``/``failed`` for most recent profile; failed allows re-run with a last_profile_trace.
     last_profile_status: str = ""
     # Workload context captured with ``last_profile_trace``; strict matching prevents consumers from reusing runtime
     # shapes after workload changes.
@@ -735,8 +727,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     # Wall-clock instant (unix seconds) until which the ``conc_sweep`` SWEEP enqueued is entitled to run: its granted
     # budget plus the lease grace. SWEEP's own budget exits defer to it while no result has landed; 0 means no grant.
     conc_sweep_granted_until_unix: float = 0.0
-    # Most recent per-kernel optimization record.
-    last_kernel_opt: dict[str, Any] = field(default_factory=dict)
     # Most recent forge-fusion run result and its e2e integrate result; persisted so resume does not rerun a completed
     # fusion loop or lose the adoption audit.
     last_fusion: dict[str, Any] = field(default_factory=dict)
@@ -766,8 +756,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     last_action_failures: list[dict[str, Any]] = field(default_factory=list)
     # Structured per-variant failure evidence, capped and keyed by failure_id (last-wins).
     failures: list[dict[str, Any]] = field(default_factory=list)
-    # Authoritative per-kernel optimization history keyed by stable task identity.
-    kernel_opt_task_attempts: dict[str, Any] = field(default_factory=dict)
     # Immutable KEEP snapshots awaiting E2E integration, keyed by integration_id.
     pending_kernel_integrations: dict[str, Any] = field(default_factory=dict)
     # Consecutive grid-runner tasks with no new current_best; Robustness nudges Orch off the plateau. Reset on advance.
@@ -824,8 +812,8 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     rejected_kernel_ids: list[str] = field(default_factory=list)
     # Consecutive KERNEL_AGENT ticks that observed no forward motion AND no kernel-lane task in flight.
     kernel_idle_ticks: int = 0
-    # Digest of the KERNEL progress signals (attempt ledger, rejected ids, last kernel_opt, stack depth, in-flight
-    # kernel task ids) seen on the tick that opened the current idle streak.
+    # Digest of the KERNEL progress signals (integrate verdicts, queued integrations, rejected ids, stack depth,
+    # rewrite-controller result, in-flight kernel task ids) seen on the tick that opened the current idle streak.
     kernel_progress_fingerprint: str = ""
     # Unix time the current idle streak opened.
     kernel_idle_since_unix: float = 0.0
@@ -921,6 +909,8 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         overrides: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Return the normalized workload and runtime identity for a profile trace."""
+        from hyperloom.inference_optimizer.grid_server_args import normalize_server_args
+
         params = overrides if isinstance(overrides, dict) else {}
         workload = {
             name: params[name] if params.get(name) not in (None, "") else getattr(self, name, "")
@@ -941,10 +931,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
                     )
         runtime = {name: params[name] if name in params else params.get(base) for base, name, _ in _STACK_BASE_FIELDS}
         server_args = sanitize_profile_server_args(str(runtime["extra_server_args"] or "").strip())
-        try:
-            joined_args = shlex.join(shlex.split(server_args))
-        except ValueError:
-            joined_args = " ".join(server_args.split())
+        joined_args = normalize_server_args(server_args)
         serving_args = str(self.current_best.get("extra_server_args") or "").strip()
         serving_envs = {
             key: value
@@ -969,15 +956,14 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
             context["serving_config"] = {"extra_server_args": serving_args, "extra_envs": serving_envs}
         return context
 
-    def profile_trace_matches_workload(
-        self,
-        expected: dict[str, Any] | None = None,
-    ) -> bool:
+    def profile_trace_usable(self) -> bool:
+        """Whether the latest profile left a trace; ``recovered`` was salvaged from a run that reported failure."""
+        return self.last_profile_status in {"succeeded", "recovered"}
+
+    def profile_trace_matches_workload(self, expected: dict[str, Any] | None = None) -> bool:
         """Whether the recorded profile trace is fresh for a target workload."""
-        if str(getattr(self, "last_profile_status", "") or "").strip().lower() != "succeeded":
-            return False
-        recorded = getattr(self, "last_profile_workload", None)
-        if not isinstance(recorded, dict) or not recorded:
+        recorded = self.last_profile_workload
+        if not self.profile_trace_usable() or not isinstance(recorded, dict) or not recorded:
             return False
         # Default to the *current-best* runtime identity, not the bare context: last_profile_workload is recorded with
         # the real profile params (actual server_args / extra_envs), while profile_workload_context() with no
@@ -1119,8 +1105,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         filtered["leg_anchor_unix"] = 0.0
         if not isinstance(filtered.get("specialist_patch_verdicts"), dict):
             filtered["specialist_patch_verdicts"] = {}
-        if not isinstance(filtered.get("kernel_opt_task_attempts"), dict):
-            filtered["kernel_opt_task_attempts"] = {}
         if not isinstance(filtered.get("pending_kernel_integrations"), dict):
             filtered["pending_kernel_integrations"] = {}
         if not isinstance(filtered.get("current_best"), dict):
@@ -1610,15 +1594,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         self.last_tick_exception = entry
         return entry
 
-    def _resolve_kernel_patch_identity(
-        self,
-        payload: dict[str, Any] | None,
-    ) -> tuple[str, str, str, str]:
-        """Forwarding shim — implementation in :mod:`._kernel_decisions`."""
-        from ..kernel import _kernel_decisions as _m
-
-        return _m._resolve_kernel_patch_identity(self, payload)
-
     def find_rejected_kernel_patch(
         self,
         payload: dict[str, Any] | None,
@@ -1728,33 +1703,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         return _m.pending_kernel_integration_records(self)
 
     @property
-    def kernel_opt_attempts(self) -> dict[str, Any]:
-        """``kernel_opt_task_attempts`` re-indexed by the trace-local kernel id."""
-        from ..kernel import _kernel_decisions as _m
-
-        return _m.index_attempts_by_kernel_id(self.kernel_opt_task_attempts)
-
-    @kernel_opt_attempts.setter
-    def kernel_opt_attempts(self, value: dict[str, Any]) -> None:
-        """Seed ``kernel_opt_task_attempts`` from an ordinal-keyed dict."""
-        from ..kernel._kernel_decisions import _stable_kernel_task_key
-
-        if not isinstance(self.kernel_opt_task_attempts, dict):
-            object.__setattr__(self, "kernel_opt_task_attempts", {})
-        for kernel_id, entry in value.items():
-            if not isinstance(entry, dict):
-                continue
-            stamped = dict(entry)
-            stamped.setdefault("current_kernel_id", str(kernel_id))
-            task_key = stamped.get("stable_task_key") or _stable_kernel_task_key(
-                task_group_key=str(stamped.get("task_group_key") or ""),
-                kernel_id=str(kernel_id),
-                source_file=str(stamped.get("last_source_file") or ""),
-            )
-            stamped.setdefault("stable_task_key", task_key)
-            self.kernel_opt_task_attempts.setdefault(task_key, stamped)
-
-    @property
     def roofline_snapshot_id(self) -> int:
         """Counter of the newest roofline snapshot, or 0 before the first one."""
         raw = (self.last_trace_analyze or {}).get("roofline_snapshot_id")
@@ -1767,14 +1715,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
 
         return _m.has_keep_pending_integrate(self)
 
-    @property
-    def kernel_opt_attempts_count(self) -> int:
-        """Forwarding shim — implementation in :mod:`._kernel_decisions`."""
-        from ..kernel import _kernel_decisions as _m
-
-        return _m.kernel_opt_attempts_count(self)
-
-    # Reusable hot kernels still owing a kernel_opt attempt.
+    # Reusable hot kernels no backend has produced a patch for yet.
     def untried_hot_reusable_kernels(
         self,
         *,
@@ -2057,7 +1998,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
                     disk["path"],
                 )
         steady_state_trace = result.get("steady_state_trace") or artifacts.get("tracelens_steady_state_trace") or ""
-        summary, kernel_roofline, reusable_ids = self._build_hot_kernel_summaries(result, report)
+        summary, kernel_roofline, reusable_ids = self._build_hot_kernel_summaries(result)
 
         # Project skipped (non-routable) candidates so the LLM sees unoptimizable operators.
         skipped = result.get("skipped_kernels")
@@ -2131,14 +2072,8 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     def _build_hot_kernel_summaries(
         self,
         result: dict[str, Any],
-        report: dict[str, Any],
     ) -> "tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]":
-        """Build ``(summary, kernel_roofline, reusable_ids)`` from the top-N hot kernels, merging the optional per-kernel rocprof roofline sidecar."""
-        rocprof_by_kernel_id = {
-            str(row["kernel_id"]): row.get("rocprof_roofline")
-            for row in report.get("kernels") or []
-            if isinstance(row, dict) and row.get("kernel_id")
-        }
+        """Build ``(summary, kernel_roofline, reusable_ids)`` from the top-N hot kernels."""
         hot = result.get("hot_kernels")
         summary: list[dict[str, Any]] = []
         kernel_roofline: list[dict[str, Any]] = []
@@ -2146,7 +2081,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         for entry in hot[:_TRACE_HOT_KERNEL_TOP_N] if isinstance(hot, list) else []:
             if not isinstance(entry, dict):
                 continue
-            row = _hot_kernel_row(entry, rocprof_by_kernel_id)
+            row = _hot_kernel_row(entry)
             summary.append(row)
             if any(row.get(key) not in (None, "", []) for key in _ROOFLINE_SIGNAL_KEYS):
                 kernel_roofline.append(dict(row))

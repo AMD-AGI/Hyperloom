@@ -86,7 +86,7 @@ async def test_geak_kernel_phase_recovers_existing_ok_result_on_resume(
 
     revalidations: list[str] = []
 
-    async def _record_revalidation(*, reason: str) -> None:
+    async def _record_revalidation(*, reason: str, handoff_cards: list[int] | None) -> None:
         revalidations.append(reason)
 
     phase._revalidate_geak_candidate = _record_revalidation  # type: ignore[method-assign]

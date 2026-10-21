@@ -27,7 +27,6 @@ from .conftest import make_coordinator
     "status,error,expected_type,expected_retry",
     [
         ("succeeded", "", SpecialistFailureType.NONE, False),
-        ("tool_violation", "emitted explore", SpecialistFailureType.TOOL_VIOLATION, False),
         # Transient infra failures (status == 'stale' with a backend_error).
         ("stale", "subprocess_timeout", SpecialistFailureType.TIMEOUT, True),
         ("stale", "subprocess_stale_heartbeat", SpecialistFailureType.STALE_HEARTBEAT, True),

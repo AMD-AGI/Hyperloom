@@ -68,7 +68,7 @@ from .benchmark_result import (
 from ._gpu_metrics import write_gpu_metrics_from_report
 from .benchmark_backend import build_benchmark_command
 from .benchmark_config import prepare_benchmark_runtime
-from .magpie_agentx import LaunchChanges, materialize_variant
+from .magpie_agentx import LaunchChanges, ServerArgvInvalidError, materialize_variant
 from hyperloom.inference_optimizer.runtime_environment import apply_runtime_override
 
 from ._launch_evidence import build_launch_evidence, persist_launch_evidence
@@ -1947,12 +1947,12 @@ def _attach_grid_launch_evidence(
     for idx, result in enumerate(results):
         if idx >= len(grid):
             break
-        # A skipped variant never launched a measurement.
-        if result.status == "skipped" or result.error_class in {
+        if result.status == "skipped" or result.error_class in {  # skipped or refused: never launched a measurement
             "capability_unsupported",
             "yaml_build_error",
             "warmup_yaml_build_error",
             SPECULATIVE_DECODING_PINNED,
+            ServerArgvInvalidError.error_class,
         }:
             continue
         slot = output_root / f"variant_{idx:02d}_{_safe(grid[idx].name)}"
