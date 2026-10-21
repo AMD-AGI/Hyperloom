@@ -1768,6 +1768,7 @@ def _restore_source_backups(manifest: dict[str, Any], backup_root: Path) -> _Res
         entries = [manifest["source_backup"]]
     restored: list[str] = []
     untrusted: list[dict[str, str]] = []
+    cache_cleared = False
     for entry in reversed(entries):
         dst = Path(entry["path"])
         backup_path = entry.get("backup_path")
@@ -1783,8 +1784,9 @@ def _restore_source_backups(manifest: dict[str, Any], backup_root: Path) -> _Res
         else:
             continue
         restored.append(str(dst))
-        if dst.suffix.lower() in PYTHON_SOURCE_SUFFIXES and "revert_cache_clear" not in manifest:
+        if dst.suffix.lower() in PYTHON_SOURCE_SUFFIXES and not cache_cleared:
             manifest["revert_cache_clear"] = _clear_python_kernel_caches(dst)
+            cache_cleared = True
     return _RestoreTally(restored, untrusted, [], {})
 
 
