@@ -22,8 +22,8 @@ import yaml
 
 from hyperloom.common.coerce import to_str_list
 from hyperloom.common.launch_log_evidence import settings_the_engine_rewrote
-from hyperloom.inference_optimizer.grid_server_args import MULTI_VALUE_FLAGS
-from ._framework_switch_manifest import additive_variants, leave_one_out_variants
+from hyperloom.inference_optimizer.grid_server_args import _MULTI_VALUE_FLAGS
+from . import _framework_switch_manifest as _switch_manifest
 from ._grid_base import GridVariant
 from ._launch_restatement import config_envs, named_settings, restates_the_baseline
 from ._proposal_identity import effective_fingerprint, normalize_proposal
@@ -35,10 +35,10 @@ log = logging.getLogger(__name__)
 
 def _action_reasoning(raw: dict[str, Any]) -> tuple[str, str]:
     """Return the action-authored rationale and the payload field that supplied it."""
-    for key in ("reasoning", "rationale", "reason", "note"):
-        value = str(raw.get(key) or "").strip()
+    for field in ("reasoning", "rationale", "reason", "note"):
+        value = str(raw.get(field) or "").strip()
         if value:
-            return value, f"action_payload.{key}"
+            return value, f"action_payload.{field}"
     return "", ""
 
 
@@ -91,10 +91,10 @@ def framework_lever_grid(shared_state: Any) -> list[dict[str, Any]]:
     active = [row for row in pending if row.get("default_on")]
     payload: list[dict[str, Any]] = []
     if dormant:
-        for variant in additive_variants(dormant):
+        for variant in _switch_manifest.additive_variants(dormant):
             payload.append({**variant, "framework_lever_source": "additive"})
     if active:
-        for variant in leave_one_out_variants(active):
+        for variant in _switch_manifest.leave_one_out_variants(active):
             payload.append({**variant, "framework_lever_source": "leave_one_out"})
     return payload
 
@@ -248,7 +248,12 @@ class ObservedLaunch(NamedTuple):
 
 
 def observed_launch_from_state(state: Any) -> tuple[dict[str, Any], dict[str, str]]:
-    """The running server's resolved config and env, empty unless ``current_best`` observed them."""
+    """The running server's resolved config and env, empty unless ``current_best`` observed them.
+
+    A setting the engine rewrote after parsing it is left out of the config: its
+    resolved value is not the value a flag would pass, so it reads as unknown
+    and a variant touching it runs.
+    """
     measurement = getattr(state, "current_best_measurement", None)
     if not isinstance(measurement, dict) or not measurement:
         return {}, {}
@@ -337,7 +342,14 @@ def _launch_delta(
     base_envs: Mapping[str, str],
     framework: str,
 ) -> tuple[dict[str, list[str]], dict[str, str]]:
-    """What a variant changes about the baseline launch, in argv settings and envs alike."""
+    """What a variant changes about the baseline launch, in argv settings and envs alike.
+
+    Only the delta is comparable to the running server. The rest is the
+    baseline's own request, which materialization, the recipe and the engine all
+    rewrite on the way to a launch -- a requested ``--watchdog-timeout 1800``
+    resolves to ``3600.0`` -- so weighing it would reject every variant. Those
+    rewrites hit base and variant alike, so the delta cancels them.
+    """
     base_settings = named_settings(base_argv, framework)
     settings = {
         name: values
@@ -349,7 +361,11 @@ def _launch_delta(
 
 
 def _settings_already_hold(settings: Mapping[str, list[str]], observed_config: Mapping[str, Any]) -> bool:
-    """Whether every named setting already holds that value in the running server."""
+    """Whether every named setting already holds that value in the running server.
+
+    Checked setting by setting rather than as one argv string: the observed side
+    is the engine's whole resolved config, which no config's argv can equal.
+    """
     return all(
         name in observed_config and _setting_already_holds(values, observed_config[name])
         for name, values in settings.items()
@@ -368,7 +384,7 @@ def _subtracts_from_the_launch(variant: GridVariant) -> bool:
 
 def _touches_a_multi_value_flag(argv_text: str) -> bool:
     """Whether ``argv_text`` names a list-valued flag, whose ordering the merged config does not preserve."""
-    return any(flag in argv_text for flag in MULTI_VALUE_FLAGS)
+    return any(flag in argv_text for flag in _MULTI_VALUE_FLAGS)
 
 
 # Separate from _CONFIG_REPLAY_PROVENANCE (shared with filter_operator_pinned_envs):
@@ -412,7 +428,14 @@ def filter_context_copy_drafts(
     base_extra_args: str,
     **build: Any,
 ) -> tuple[list[GridVariant], list[tuple[str, str]]]:
-    """Drop variants that introduce or change a context-copying speculative-decoding draft (synthetic sessions only)."""
+    """Drop variants that introduce or change a context-copying speculative-decoding draft (synthetic sessions only).
+
+    Each variant and its base are materialized through ``build_variant_yaml``, the way ``run_grid`` builds the round,
+    so a draft reached through args, replace mode, envs or a server-args env counts. A launch that cannot be
+    materialized is judged on the variant's own args and envs against an empty base.
+
+    Returns the variants still to run, plus ``(name, reason)`` for each drop.
+    """
     if not grid:
         return [], []
     kept: list[GridVariant] = []
