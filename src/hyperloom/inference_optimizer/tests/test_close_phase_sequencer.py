@@ -939,6 +939,7 @@ _RECORDER = "hyperloom.inference_optimizer.breakdown.recorder"
 _CLOSE_RECORD_STEPS = [
     ("roofline_progress", "close_out.record_roofline_progress"),
     ("baseline_progress", "close_out.record_baseline_progress"),
+    ("geak_candidate", "close_out.record_geak_candidate"),
     ("stack_ledger", "stack_event.finish"),
     ("final_recipe", "close_out.record_final_recipe"),
 ]
@@ -963,6 +964,25 @@ async def test_close_sequencer_records_a_failed_record_step_and_carries_on(coord
     assert failed == [(step, repr(boom))]
     assert rows[-1]["step"] == "done"
     assert coord.shared_state.close_sequence_done is True
+
+
+@pytest.mark.asyncio
+async def test_a_failed_baseline_record_does_not_skip_the_geak_candidate(coord, tmp_path, monkeypatch):
+    monkeypatch.setenv("HYPERLOOM_SESSION_PACKAGE_DEST", str(tmp_path / "session-packages"))
+    coord.shared_state.phase_history = [_close_phase_history_row()]
+    coord.shared_state.geak_pending = {"status": "rebench_cancelled", "self_reported_gain_pct": 12.5}
+
+    def _fail(*_args, **_kwargs):
+        raise RuntimeError("baseline boom")
+
+    monkeypatch.setattr(f"{_RECORDER}.close_out.record_baseline_progress", _fail)
+
+    await _enter_close(coord)
+
+    rows = coord.shared_state.phase_history[-1]["evidence"]["close_steps"]
+    assert [row["step"] for row in rows if row["status"] == "failed"] == ["baseline_progress"]
+    close = collect_v6_close([], recorded=assemble_parts(tmp_path, warnings=[])["close"])
+    assert close["geak_candidate"]["status"] == "rebench_cancelled"
 
 
 @pytest.mark.asyncio

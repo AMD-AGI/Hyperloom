@@ -277,10 +277,15 @@ class ClosePhase(CoordinatorCollaborator):
             ),
         )
 
-    async def _record_close_tallies(self) -> None:
-        """Snapshot the baseline failure tally and the unsettled GEAK candidate into the close section."""
-        await self._record_close_baseline_progress()
+    async def _record_close_geak_candidate(self) -> None:
+        """Snapshot the unsettled GEAK candidate into the close section."""
         _close_out.record_geak_candidate(self.session_dir, self.shared_state.geak_pending)
+
+    async def _record_close_progress(self) -> None:
+        """Record the roofline, baseline and GEAK candidate sections, each as its own close step."""
+        await self._run_close_step("roofline_progress", self._record_close_roofline_progress())
+        await self._run_close_step("baseline_progress", self._record_close_baseline_progress())
+        await self._run_close_step("geak_candidate", self._record_close_geak_candidate())
 
     async def _close_stack_ledger(self) -> None:
         """Settle the stack ledger's timeline event.
@@ -487,8 +492,7 @@ class ClosePhase(CoordinatorCollaborator):
         # Recorded here rather than derived by the exporter: this is the first
         # moment each of these is final, and the snapshot history the exporter
         # would re-walk is capped and may have evicted what it needs.
-        await self._run_close_step("roofline_progress", self._record_close_roofline_progress())
-        await self._run_close_step("baseline_progress", self._record_close_tallies())
+        await self._record_close_progress()
         await self._run_close_step("stack_ledger", self._close_stack_ledger())
         # A revert leaves its adoption row standing, so what the stack ended as
         # is stated here or nowhere.

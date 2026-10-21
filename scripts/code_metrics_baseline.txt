@@ -642,7 +642,7 @@ function-lines src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborat
 function-lines src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator.lift_to_current_best 320
 function-lines src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator.validate_geak_via_geak_harness 185
 function-lines src/hyperloom/orchestrator/measurement/apply_verification.py::verify_applied 81
-function-lines src/hyperloom/orchestrator/phases/close.py::ClosePhase.on_enter_close 112
+function-lines src/hyperloom/orchestrator/phases/close.py::ClosePhase.on_enter_close 111
 function-lines src/hyperloom/orchestrator/phases/framework.py::FrameworkPhase._enqueue_author_specialist 123
 function-lines src/hyperloom/orchestrator/phases/framework.py::FrameworkPhase._enqueue_framework_agent_authoring_specialist 97
 function-lines src/hyperloom/orchestrator/phases/framework.py::FrameworkPhase._enqueue_framework_agent_local_explore_specialist 132
