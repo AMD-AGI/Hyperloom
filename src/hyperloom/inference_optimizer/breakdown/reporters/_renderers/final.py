@@ -30,12 +30,9 @@ from ..base import (
     task_config_of,
     validation_of,
 )
+from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import GEAK_DROPPED_STATUSES
 from ._agentx_metrics import graded_axes_facts, render_graded_axes
 from ._invocation import render_invocation_block
-
-# ``geak_candidate.status`` values meaning the candidate was measured but its
-# revalidation never landed, so the win was abandoned rather than judged.
-_GEAK_DROPPED_STATUSES: frozenset[str] = frozenset({"rebench_cancelled", "rebench_unavailable"})
 
 # ``geak.rebench.final_status`` values with the same meaning, but settled: the
 # rebench ran and could not produce a verdict. ``no_material`` / ``no_promote``
@@ -144,10 +141,6 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     revalidation_pending = bool(candidate.get("revalidation_pending"))
     candidate_status = str(candidate.get("status") or "")
     pending_awaiting = candidate_status == "awaiting_rebench"
-    # Gain is provisional when a cross-harness revalidation is pending with no confirmed validated number.
-    is_provisional = revalidation_pending and not (isinstance(gain_v, (int, float)) and gain_v > 0)
-    # Headline is unvalidated when a GEAK candidate is pending with no positive validated gain.
-    headline_unvalidated = pending_awaiting and not (isinstance(gain_v, (int, float)) and gain_v > 0)
 
     facts: list[str] = []
     warnings: list[str] = []
@@ -166,15 +159,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
             # For latency-based metrics, an improvement shows as a negative delta.
             note = " (negative = faster)" if framework_registry.is_scriptable(fw) else ""
             facts.append(f"Delta vs baseline: {final_v - base_v:+.2f} {_unit}{note}.")
-    if is_provisional:
-        facts.append("Cumulative gain is PENDING same-harness revalidation; no validated number exists yet.")
-        warnings.append(
-            "The recorded gain basis is PROVISIONAL and cross-harness: measured by the "
-            "delegated optimizer's harness against the orchestrator baseline, so "
-            "no gain is reported here. A same-harness full-stack rebench is "
-            "pending and will supply the validated number."
-        )
-    elif gain_v is not None and not headline_unvalidated:
+    if gain_v is not None:
         facts.append(f"Validated cumulative gain: {fmt_pct(gain_v, plus=True)}{_gain_axis_note(f)}.")
         decisions.append(
             Decision(
@@ -187,7 +172,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     facts.extend(graded_axes_facts(validation.get("perf"), label="Final"))
     self_gain = candidate.get("self_reported_gain_pct")
     self_gain_str = fmt_pct(self_gain, plus=True) if isinstance(self_gain, (int, float)) else "unknown"
-    if candidate_status in _GEAK_DROPPED_STATUSES:
+    if candidate_status in GEAK_DROPPED_STATUSES:
         drop_reason = str(candidate.get("revalidation_error") or "").strip() or "reason not recorded"
         facts.append(
             f"GEAK candidate (self-reported {self_gain_str}) was DROPPED without "
@@ -239,7 +224,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
         _validation_gap_warnings(
             validated=val_stack_len is not None,
             stack_changed=stack_changed,
-            gain_missing=gain_v is None and not is_provisional and bool(final_tput or base_tput),
+            gain_missing=gain_v is None and bool(final_tput or base_tput),
         )
     )
 
