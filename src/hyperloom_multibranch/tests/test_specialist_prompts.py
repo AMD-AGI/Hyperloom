@@ -141,6 +141,16 @@ def test_the_role_defines_the_layers_an_intent_names():
     assert "or a kernel's tuned table, and source for any other code change" in prompt
 
 
+def test_the_role_sends_a_tuned_table_through_put_kernel_artifact_whole_and_one_per_variable():
+    prompt = role_prompt(WORKLOAD)
+
+    assert "A tuned table goes into the recipe through put_kernel_artifact" in prompt
+    assert "put the whole table for its variable, one table per variable" in prompt
+    assert "add the artifact it returns to the delta's add_kernels" in prompt
+    assert "never point a variable at a file of yours or set it from code" in prompt
+    assert any("put_kernel_artifact" in direction for direction in DIRECTIONS)
+
+
 def test_the_role_says_a_change_never_selects_its_file_or_setting_with_setdefault():
     prompt = role_prompt(WORKLOAD)
 

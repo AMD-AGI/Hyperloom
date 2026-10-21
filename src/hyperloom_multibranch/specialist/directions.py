@@ -14,7 +14,8 @@ DIRECTIONS = (
     "every setting the recipe asks for is really applied, with no fallback to an eager or plain torch path; a fix is a "
     "source patch or the setting that removes the cause.",
     "GEMM tuning: from the GEMM shapes the profile shows for this workload (decode and prefill), tune the aiter and "
-    "hipBLASLt GEMM configurations for those shapes, and test the tuned configuration as a kernel artifact or a patch.",
+    "hipBLASLt GEMM configurations for those shapes, and test each tuned table as the kernel artifact put_kernel_artifact "
+    "returns.",
     "Fusion: fuse the elementwise work around the GEMMs and the attention (rmsnorm with the residual add, silu with "
     "mul, rope) with a source patch or a kernel, starting from the operators the profile ranks highest.",
     "Server arguments and environment variables: yours is the one branch that tests settings alone; test the settings "

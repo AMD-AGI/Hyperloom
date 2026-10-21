@@ -150,8 +150,10 @@ output often gains where tuning the kernel itself does not.
 - Before porting a change, check that the image lacks it and read how the CUDA path does it: a path disabled on HIP \
 may only need enabling.
 - Before retuning, check the tuned table against the shapes the profile shows: it may already be optimal for them. \
-A change that selects a tuned table or another file or setting from code must not use os.environ.setdefault: a \
-variable the recipe already sets silently wins, and the test then measures nothing of the change.
+A tuned table goes into the recipe through put_kernel_artifact: put the whole table for its variable, one table per \
+variable, and add the artifact it returns to the delta's add_kernels; never point a variable at a file of yours or \
+set it from code. Another file or setting a change selects from code must not use os.environ.setdefault: a variable \
+the recipe already sets silently wins, and the test then measures nothing of the change.
 - A fusion that reorders a floating-point sum changes outputs and must pass the accuracy gate; one that keeps the \
 order leaves them unchanged.
 Examples:
