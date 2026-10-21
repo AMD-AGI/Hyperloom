@@ -1162,7 +1162,7 @@ def test_instrumentation_preflight_names_the_checks_it_dooms(tmp_path, monkeypat
     """A degraded patch makes checks 3 and 5 certain to fail, and the run says so before it starts."""
     import yaml
 
-    from hyperloom.orchestrator.actions.executors._profile_trace_checks import (
+    from hyperloom.orchestrator.actions.executors.profile import (
         CHECK_INSTRUMENTATION_PREFLIGHT,
         CHECK_SGLANG_SHAPE_PROFILER,
         CHECK_STEP_ANNOTATIONS,
@@ -1230,7 +1230,7 @@ def test_trace_certificate_stays_out_of_the_resolver_namespace(tmp_path):
     that tuple. A certificate written among the traces used to add a second unranked candidate, which makes
     ``require_single_rank`` resolve to nothing and lets the certificate win the size fallback over a small trace.
     """
-    from hyperloom.orchestrator.actions.executors._profile_trace_checks import _write_trace_certificate
+    from hyperloom.orchestrator.actions.executors.profile import _write_trace_certificate
     from hyperloom.orchestrator.trace_analysis._bypass_trace_reader import _trace_candidates, resolve_trace_file
 
     # A lone unranked trace: the certificate must not become the second candidate that makes this unresolvable.
@@ -2362,12 +2362,12 @@ def _check_row(health: dict, check_id: str) -> dict:
 
 def test_zero_cpu_op_is_not_a_failed_input_dims_check(tmp_path):
     """The structured check must not contradict the advisory beside it."""
-    from hyperloom.orchestrator.actions.executors import _profile_trace_checks as checks
+    from hyperloom.orchestrator.actions.executors import profile as pf
 
     _capture_trace_dir(tmp_path, cpu_ops=0, with_input_dims=0)
-    health = checks._validate_trace_structure(tmp_path, "sglang")
+    health = pf._validate_trace_structure(tmp_path, "sglang")
 
-    row = _check_row(health, checks.CHECK_CAPTURE_INPUT_DIMS)
+    row = _check_row(health, pf.CHECK_CAPTURE_INPUT_DIMS)
     assert row["status"] == "skipped"
     assert row["skip_reason"]
     assert row["detail"]["input_dims_fraction"] is None
@@ -2377,25 +2377,25 @@ def test_zero_cpu_op_is_not_a_failed_input_dims_check(tmp_path):
 
 
 def test_a_thin_input_dims_fraction_still_fails_the_check(tmp_path):
-    from hyperloom.orchestrator.actions.executors import _profile_trace_checks as checks
+    from hyperloom.orchestrator.actions.executors import profile as pf
 
     _capture_trace_dir(tmp_path, cpu_ops=10, with_input_dims=1)
-    health = checks._validate_trace_structure(tmp_path, "sglang")
+    health = pf._validate_trace_structure(tmp_path, "sglang")
 
-    assert _check_row(health, checks.CHECK_CAPTURE_INPUT_DIMS)["status"] == "failed"
+    assert _check_row(health, pf.CHECK_CAPTURE_INPUT_DIMS)["status"] == "failed"
 
 
 def test_a_healthy_input_dims_fraction_passes_the_check(tmp_path):
-    from hyperloom.orchestrator.actions.executors import _profile_trace_checks as checks
+    from hyperloom.orchestrator.actions.executors import profile as pf
 
     _capture_trace_dir(tmp_path, cpu_ops=10, with_input_dims=10)
-    health = checks._validate_trace_structure(tmp_path, "sglang")
+    health = pf._validate_trace_structure(tmp_path, "sglang")
 
-    assert _check_row(health, checks.CHECK_CAPTURE_INPUT_DIMS)["status"] == "passed"
+    assert _check_row(health, pf.CHECK_CAPTURE_INPUT_DIMS)["status"] == "passed"
 
 
 def test_upstream_sglang_capture_directory_passes_health_check(tmp_path):
-    from hyperloom.orchestrator.actions.executors import _profile_trace_checks as checks
+    from hyperloom.orchestrator.actions.executors import profile as pf
 
     capture = _capture_trace_dir(
         tmp_path,
@@ -2403,9 +2403,9 @@ def test_upstream_sglang_capture_directory_passes_health_check(tmp_path):
         with_input_dims=10,
         dirname="graph_capture_profile",
     )
-    health = checks._validate_trace_structure(tmp_path, "sglang")
+    health = pf._validate_trace_structure(tmp_path, "sglang")
 
-    row = _check_row(health, checks.CHECK_CAPTURE_TRACES_PRESENT)
+    row = _check_row(health, pf.CHECK_CAPTURE_TRACES_PRESENT)
     assert row["status"] == "passed"
     assert row["detail"]["capture_dir"] == str(capture)
     assert health["capture_traces_present"] is True

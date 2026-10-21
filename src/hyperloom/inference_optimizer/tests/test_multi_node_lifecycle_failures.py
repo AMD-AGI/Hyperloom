@@ -13,8 +13,6 @@ import pytest
 
 from hyperloom.inference_optimizer import multi_node
 from hyperloom.orchestrator.actions.executors import _multi_node_server_lifecycle as life
-from hyperloom.orchestrator.actions.executors import _multi_node_server_readiness as readiness
-from hyperloom.orchestrator.actions.executors import _multi_node_worker_logs as worker_logs
 
 
 @pytest.fixture
@@ -24,7 +22,7 @@ def serve(monkeypatch: pytest.MonkeyPatch):
     async def _no_sleep(_seconds: float) -> None:
         return None
 
-    monkeypatch.setattr(readiness.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr(life.asyncio, "sleep", _no_sleep)
     real_client = httpx.AsyncClient
 
     def _install(routes: dict[str, list[object]], state: dict[str, object]) -> list[str]:
@@ -40,7 +38,6 @@ def serve(monkeypatch: pytest.MonkeyPatch):
             return outcome
 
         monkeypatch.setattr(life, "_read_state", lambda: state)
-        monkeypatch.setattr(readiness, "_read_state", lambda: state)
         monkeypatch.setattr(life, "is_multi_node", lambda: True)
         monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **k: real_client(transport=httpx.MockTransport(handler)))
         return calls
@@ -63,11 +60,11 @@ def _profile() -> None:
 
 
 def _workers() -> None:
-    asyncio.run(readiness._wait_for_workers_ready_async(timeout_s=600, poll_every_s=1))
+    asyncio.run(life._wait_for_workers_ready_async(timeout_s=600, poll_every_s=1))
 
 
 def _health() -> None:
-    asyncio.run(readiness._wait_for_server_health_async(timeout_s=600, poll_every_s=1))
+    asyncio.run(life._wait_for_server_health_async(timeout_s=600, poll_every_s=1))
 
 
 # site -> (state, routes, call, endpoints requested when its first request fails once)
@@ -115,11 +112,11 @@ _SSH_STATE = {
 def collect(monkeypatch: pytest.MonkeyPatch, tmp_path):
     """Run the log sweep with ssh_run replaced and return the tags of the logs it wrote."""
     monkeypatch.setenv("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", str(tmp_path))
-    monkeypatch.setattr(worker_logs, "_shared_worker_log_tail", lambda _ip: None)
+    monkeypatch.setattr(life, "_shared_worker_log_tail", lambda _ip: None)
 
     def _run(state: dict, fake_ssh) -> list[str]:
         monkeypatch.setattr(multi_node, "ssh_run", fake_ssh)
-        worker_logs.collect_worker_server_logs(state, "probe failed")
+        life._collect_worker_server_logs(state, "probe failed")
         return sorted(path.name.split("_", 1)[1] for path in (tmp_path / "server_logs").iterdir())
 
     return _run
