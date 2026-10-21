@@ -193,7 +193,7 @@ keep their values, with any recognizable credential inside a value masked.
 Replaying a session takes credentials from its own environment, never from the
 breakdown.
 
-`metadata.grading` — which axis this session was configured to grade on:
+`metadata.grading` — the grading mode this session was started in:
 `benchmark_mode` (`agentx` or `synthetic`), `objective`, and the `tput_guard`
 that rides along with the interactivity objective (`enabled`, `noise_pct`).
 
@@ -205,12 +205,13 @@ document is the output axis by construction, so without this block a consumer
 cannot tell the two kinds of session apart — and on the canonical corpus the
 two axes differ by roughly two orders of magnitude.
 
-This is the session-level *setting*. What a promotion was actually decided on
-is `outcome.validation.graded_on`, read off the promotion itself. On a session
-that promoted anything the two agree, because a comparison that cannot supply
-the configured axis pair fails rather than settling for another axis — nothing
-is ever promoted off-objective. Neither field resolves the other even so: a
-session can be configured for an axis and promote nothing on it.
+`grading.objective` is a mode marker written when the session starts: an
+interactivity session always carries `e2e_norm_intvty_p90`, which is not the
+axis promotions are decided on. The deciding axis is
+`outcome.validation.graded_on` (and `outcome.final.graded_on`), read off the
+promotion itself (`e2e_norm_intvty_p50` on an AgentX replay). A session that
+ran no validation has no `graded_on`.
+
 `tput_guard.noise_pct` is null on a session that predates the band being
 recorded.
 
