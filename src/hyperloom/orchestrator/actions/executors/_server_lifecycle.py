@@ -60,6 +60,7 @@ MAGPIE_BUILTIN_SCRIPTS = frozenset(
     {
         "vllm_mi300x.sh",
         "vllm_mi355x.sh",
+        "vllm_gfx12.sh",
         "sglang_mi300x.sh",
         "sglang_mi355x.sh",
         "atom_mi300x.sh",
