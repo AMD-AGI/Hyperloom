@@ -368,13 +368,15 @@ def require_rsi_archive(env: MutableMapping[str, str]) -> None:
 
 
 def session_services(recipe_kb: RemoteRecipeClient | None) -> SessionServices:
-    """The judge, the patch resolver and the fix critic on the default model, and ``recipe_kb``."""
+    """The judge, the patch resolver, the fix critic and CLOSE's scorer author on the default model, and
+    ``recipe_kb``."""
 
     model = default_model()
     judge = anthropic_completion(model, component=PROG, operation="judge")
     resolver = anthropic_completion(model, component=PROG, operation="patch_resolve")
     critic = partial(LlmCritic, anthropic_critic(model, component=PROG))
-    return SessionServices(judge, resolver, recipe_kb, critic)
+    scorer = anthropic_completion(model, component=PROG, operation="author_scorers")
+    return SessionServices(judge, resolver, recipe_kb, critic, scorer, model)
 
 
 def run_session(settings: RunSettings, peer_factory: PeerFactory, services: SessionServices) -> int:

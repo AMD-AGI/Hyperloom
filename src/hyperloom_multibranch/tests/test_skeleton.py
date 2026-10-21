@@ -68,10 +68,11 @@ from hyperloom_multibranch.contracts.notebook.vocab import (
 )
 from hyperloom_multibranch.contracts.toolbox import CancelOutcome, MeasurementCapacity
 from hyperloom_multibranch.notebook import LocalNotebook
-from hyperloom_multibranch.notebook.rsi.archive import ARCHIVE_ENV
+from hyperloom_multibranch.notebook.rsi.archive import ARCHIVE_ENV, SKIPPED
 from hyperloom_multibranch.notebook.rsi.briefing import SessionBriefs
 from hyperloom_multibranch.notebook.rsi.calibration import DEFAULT_POLICY, PolicyChoice
 from hyperloom_multibranch.notebook.rsi import scorers
+from hyperloom_multibranch.notebook.rsi.authoring import NO_ARCHIVE
 from hyperloom_multibranch.notebook.rsi.frontier import FRONTIER_V1_LABEL, SETTLED_TESTS, Estimate, FrontierPolicy
 from hyperloom_multibranch.notebook.rsi.session import FRONTIER_LOG
 from hyperloom_multibranch.notebook.tests.factories import delta, intent, request
@@ -227,6 +228,7 @@ def _reply(document: dict[str, object]) -> str:
     return json.dumps(document)
 
 
+SCORER_MODEL = "scorer-model"
 OPENING = _reply({"open": 2, "open_k": 9, "branches": [{"branch": INTEGRATION_BRANCH, "k": 2}], "stop": []})
 STEER = _reply({"open": 0, "branches": [{"branch": "b01", "k": 7}], "stop": [{"branch": "b02", "reason": STOP_REASON}]})
 
@@ -314,6 +316,7 @@ class Stage:
     settings: RunSettings = SETTINGS
     repo_type: type[HeldGitRepo] = HeldGitRepo
     critic: Callable[[UsageSink], FixReviewer] = lambda _usage: NoCritic()
+    scorer_author: ScriptedCompletion = field(default_factory=ScriptedCompletion)
     toolbox: RecordingToolbox = field(init=False)
     sessions: RecordedSessions = field(init=False)
     repo: HeldGitRepo = field(init=False)
@@ -435,7 +438,9 @@ class Stage:
             self.settings,
             self.factory,
             host,
-            SessionServices(self.judge, ScriptedCompletion(), self.recipe_kb, self.critic),
+            SessionServices(
+                self.judge, ScriptedCompletion(), self.recipe_kb, self.critic, self.scorer_author, SCORER_MODEL
+            ),
         )
 
 
@@ -724,6 +729,23 @@ async def test_a_pinned_frontier_scorer_scores_the_session_without_asking_the_ca
     lines = _frontier_lines(stage)
     assert lines and all(line["scorer"] == BANDIT_LABEL for line in lines)
     assert all(_judge_state(prompt)["frontier_policy"]["scorer"] == BANDIT_LABEL for prompt in _judge_prompts(stage))
+
+
+async def test_close_asks_no_llm_for_frontier_scorers_without_an_archive_and_records_why(tmp_path: Path) -> None:
+    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    _script(stage)
+
+    outcome = await stage.run()
+
+    assert outcome.exit_code == 0 and stage.scorer_author.calls == []
+    breakdown = json.loads((stage.layout.reports / "session_breakdown.json").read_text())
+    assert (
+        breakdown["close"]["knowledge"]["scorers"]["status"],
+        breakdown["close"]["knowledge"]["scorers"]["reason"],
+    ) == (
+        SKIPPED,
+        NO_ARCHIVE,
+    )
 
 
 class _Failing:

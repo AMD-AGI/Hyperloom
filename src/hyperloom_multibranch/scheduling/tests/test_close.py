@@ -33,15 +33,17 @@ from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.knowledge.recipe_writeback import FinalRecipe
 from hyperloom_multibranch.notebook.knowledge.tests.fakes import FakeRecipeStore
 from hyperloom_multibranch.notebook.knowledge.tests.test_recipe_writeback import final
-from hyperloom_multibranch.notebook.rsi.archive import ARCHIVE_ENV, ARCHIVED
+from hyperloom_multibranch.notebook.rsi.archive import ARCHIVE_ENV, ARCHIVED, SKIPPED
+from hyperloom_multibranch.notebook.rsi.authoring import AUTHORING_SYSTEM_PROMPT
 from hyperloom_multibranch.notebook.rsi.frontier import FrontierPolicy, FrontierScoring
-from hyperloom_multibranch.notebook.rsi.session import DISABLED
+from hyperloom_multibranch.notebook.rsi.session import DISABLED, WRITTEN
 from hyperloom_multibranch.notebook.tests.factories import FakeClock
 from hyperloom_multibranch.notebook.tests.sessions import METRIC, scripted_session
 from hyperloom_multibranch.scheduling.close import CloseReport, Closer, ended_before_final, report_document
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.dashboard import SessionDashboard
-from hyperloom_multibranch.scheduling.exports import ExportSources, SessionExports
+from hyperloom_multibranch.scheduling.exports import ExportServices, ExportSources, ScorerAuthoring, SessionExports
+from hyperloom_multibranch.scheduling.tests.peer_fakes import ScriptedCompletion
 from hyperloom_multibranch.scheduling.final import FinalCandidate, FinalChoice
 from hyperloom_multibranch.scheduling.layout import SessionLayout, create_session
 from hyperloom_multibranch.scheduling.mb_fakes import MB_FAKE_EXPERIENCE_KB
@@ -149,16 +151,21 @@ def layout(tmp_path: Path) -> SessionLayout:
     return create_session(tmp_path / "workspace", "model", CLOCK)
 
 
+AUTHOR_MODEL = "author-model"
+
+
 def _closer(
     layout: SessionLayout,
     notebook: object,
     stopper: RecordingStopper,
     recipe: FinalRecipe,
     kb_client: RemoteRecipeClient | None,
+    author: ScriptedCompletion | None = None,
 ) -> Closer:
     """CLOSE with ``recipe`` committed as :data:`CHOSEN`, its files in the session's blob store and not in the
     repository."""
 
+    author = author or ScriptedCompletion()
     progress = FrontierScoring(notebook, FrontierPolicy(metric=METRIC))  # type: ignore[arg-type]
     blobs = LocalBlobStore(layout.blobs)
     for path in (
@@ -168,7 +175,8 @@ def _closer(
         blobs.put((recipe.files_root / path).read_bytes())
     dashboard = SessionDashboard(notebook, progress, AfterStopToolbox(), METRIC, layout.dashboard)  # type: ignore[arg-type]
     sources = ExportSources(notebook, ChosenRepo(recipe), blobs, dashboard)
-    exports = SessionExports(layout, sources, METRIC, BUDGET_SECONDS, kb_client=kb_client)  # type: ignore[arg-type]
+    services = ExportServices(kb_client, ScorerAuthoring(author, AUTHOR_MODEL))
+    exports = SessionExports(layout, sources, METRIC, BUDGET_SECONDS, services)  # type: ignore[arg-type]
     return Closer(layout, stopper, exports, CLOCK)  # type: ignore[arg-type]
 
 
@@ -187,8 +195,9 @@ async def test_close_publishes_the_final_recipe_exports_and_stops_everything(
     monkeypatch.setenv(KB_URL, "http://127.0.0.1:9/kb")
     store = FakeRecipeStore(champion={"metric": "optimized_throughput", "session_id": "older", "value": 1000.0})
     stopper = _clean()
+    author = ScriptedCompletion()
 
-    report = await _closer(layout, notebook, stopper, final, RemoteRecipeClient(store)).close(
+    report = await _closer(layout, notebook, stopper, final, RemoteRecipeClient(store), author).close(
         SessionStopReason.TIME_EXHAUSTED, CHOICE, "", HARD_STOP
     )
 
@@ -204,6 +213,8 @@ async def test_close_publishes_the_final_recipe_exports_and_stops_everything(
     for step in ("experiences", "learnings"):
         assert (knowledge[step]["status"], knowledge[step]["reason"]) == (DISABLED, MB_FAKE_EXPERIENCE_KB)
     assert knowledge["archive"]["status"] == ARCHIVED and any((tmp_path / "archive").iterdir())
+    assert [system for system, _user in author.calls] == [AUTHORING_SYSTEM_PROMPT]
+    assert knowledge["scorers"]["status"] in (WRITTEN, SKIPPED)
     assert breakdown["close"]["final"]["commit_id"] == CHOSEN
     assert breakdown["close"]["selection"]["chosen"]["commit"] == CHOSEN
     assert (breakdown["close"]["selection"]["metric"], breakdown["close"]["selection"]["primary_conc"]) == (METRIC, 64)
@@ -217,6 +228,7 @@ async def test_close_publishes_the_final_recipe_exports_and_stops_everything(
     assert written["final"]["chosen"]["commit"] == CHOSEN and written["exports"]["knowledge"] == knowledge
     assert "Chosen: integration `i1`" in layout.report_markdown.read_text()
     assert f"Experiences: {DISABLED} {MB_FAKE_EXPERIENCE_KB}" in layout.report_markdown.read_text()
+    assert f"Scorers: {knowledge['scorers']['status']}" in layout.report_markdown.read_text()
 
 
 async def test_without_a_kb_client_or_a_final_choice_the_write_back_is_recorded_as_not_made(

@@ -67,7 +67,7 @@ from hyperloom_multibranch.scheduling.dashboard import SessionDashboard
 from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind, DecisionLog
 from hyperloom_multibranch.scheduling.events import IntegrationProfiler, SessionEvents
 from hyperloom_multibranch.scheduling.explore import Explorer, ExploreWindow, Steering, integration_row
-from hyperloom_multibranch.scheduling.exports import ExportSources, SessionExports
+from hyperloom_multibranch.scheduling.exports import ExportServices, ExportSources, ScorerAuthoring, SessionExports
 from hyperloom_multibranch.scheduling.final import FinalCandidates, FinalChoice, FinalSelector, choose_candidates
 from hyperloom_multibranch.scheduling.forks import ForkDesk
 from hyperloom_multibranch.scheduling.integrator import Integrator, LlmPatchResolver, MergeRecords
@@ -171,13 +171,16 @@ class SessionHost:
 class SessionServices:
     """What the session calls out to besides its peers: the completions the judge and the patch resolver ask, the
     Recipe KB PRELUDE reads the warm-start leads from and CLOSE writes the final recipe back to (``None`` when none is
-    configured), and what builds the critic the rule gate asks whether a proven correctness fix matters under the
-    workload, on the scheduler's notebook handle its spend is recorded through."""
+    configured), what builds the critic the rule gate asks whether a proven correctness fix matters under the
+    workload, on the scheduler's notebook handle its spend is recorded through, and the completion CLOSE asks for a
+    generation of frontier scorers, with ``scorer_model`` the model it runs on."""
 
     judge_completion: Completion
     resolver_completion: Completion
     recipe_kb: RemoteRecipeClient | None
     critic: Callable[[UsageSink], FixReviewer]
+    scorer_completion: Completion
+    scorer_model: str
 
 
 class Session:
@@ -237,6 +240,8 @@ class Session:
             MergeRecords(merger, DecisionLog(layout.merges, clock)), peers.repo, checks, resolver
         )
         self._judge = Judge(recorded(services.judge_completion, self._notebook, UsageSource.JUDGE), layout.judge, clock)
+        scorer = recorded(services.scorer_completion, self._notebook, UsageSource.SCORER)
+        self._scorers = ScorerAuthoring(scorer, services.scorer_model)
         self._similarity = BranchSimilarity(peers.repo, self._roster)
         profiler = IntegrationProfiler(peers.toolbox, tests, self._notebook, clock)
         self._events = SessionEvents(self._notebook, self._decisions, profiler, peers.toolbox, settings.workload.tp)
@@ -476,7 +481,8 @@ class Session:
 
     def _closer(self) -> Closer:
         sources = ExportSources(self._notebook, self._repo, self._blobs, self._dashboard(self._scoring()))
-        closing = SessionExports(self._layout, sources, self._metric, self._budget_seconds, kb_client=self._recipe_kb)
+        services = ExportServices(self._recipe_kb, self._scorers)
+        closing = SessionExports(self._layout, sources, self._metric, self._budget_seconds, services)
         return Closer(self._layout, self._stopper, closing, self._clock)
 
     async def _root_session(self, budget: SessionBudget, hard_stop: HardStop) -> PreludeResult:
