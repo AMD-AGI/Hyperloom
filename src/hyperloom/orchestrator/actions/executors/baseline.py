@@ -812,7 +812,6 @@ _COLD_START_DELTA_WARN_PCT = 25.0
 
 
 def _requested_framework(params: dict[str, Any]) -> str | None:
-    """The serving framework the task asked for, falling back to the process default."""
     return str(params.get("framework") or "").strip() or os.environ.get("FRAMEWORK", "").strip() or None
 
 
@@ -1105,14 +1104,11 @@ def _revert_warm_patch_trees(trees: Iterable[Mapping[str, Any]]) -> dict[str, An
 
 
 class _OverlayText(NamedTuple):
-    """An overlay's diff text, or why it could not be read."""
-
     content: str
     reason: str
 
 
 def _refused_warm_replay(patches: list[Any], failure: str) -> dict[str, Any]:
-    """The report a required timeline gets when its replay was refused before anything landed."""
     return {
         "required": True,
         "status": "failed",
@@ -1125,7 +1121,6 @@ def _refused_warm_replay(patches: list[Any], failure: str) -> dict[str, Any]:
 
 
 def _warm_patch_trees(roots: list[str]) -> dict[str, dict[str, Any]]:
-    """Resolve each recorded root to its work tree and record what a rollback of that tree will need."""
     from ._nogit_patch import _is_git_tree
 
     # Two recorded roots inside one checkout are one tree: a git diff's paths are work-tree-root relative, so both
@@ -1153,7 +1148,6 @@ def _warm_patch_trees(roots: list[str]) -> dict[str, dict[str, Any]]:
 
 
 def _warm_patch_text(patch: Mapping[str, Any]) -> _OverlayText:
-    """The overlay's diff text, read back from its artifact when it was not carried inline."""
     content = str(patch.get("patch_content") or "")
     patch_ref = str(patch.get("patch_ref") or "")
     patch_file = str(patch.get("patch_file") or "")
@@ -1173,11 +1167,6 @@ def _warm_patch_text(patch: Mapping[str, Any]) -> _OverlayText:
 
 
 def _unusable_patch_reason(content: str, patch_file: str) -> str:
-    """Why this overlay may not touch the live checkout, or ``""`` when it may.
-
-    A structural safety gate on untrusted KB-sourced content before it is git-applied to the
-    live checkout: non-diff blobs and any patch whose header path escapes the tree are refused.
-    """
     from ...specialists.patch_safety import is_unified_diff, patch_escapes_tree
 
     if not is_unified_diff(content) or "GIT binary patch" in content:
@@ -1193,7 +1182,6 @@ def _unusable_patch_reason(content: str, patch_file: str) -> str:
 
 
 def _screened_overlays(patches: list[Any]) -> list[_OverlayText]:
-    """Read every overlay once and judge whether it may be written into a live checkout."""
     overlays: list[_OverlayText] = []
     for patch in patches:
         read = _warm_patch_text(patch)
@@ -1208,7 +1196,6 @@ def _refuse_warm_replay_before_apply(
     trees: dict[str, dict[str, Any]],
     overlays: list[_OverlayText],
 ) -> dict[str, Any] | None:
-    """Why a required timeline may not be replayed at all, judged before any tree is written to."""
     if not any(roots):
         return _refused_warm_replay(patches, "missing_target_repo")
     if absent := next((root for root in roots if root and root not in trees), ""):
@@ -1234,7 +1221,6 @@ def _snapshot_warm_patch_trees(
     overlays: list[_OverlayText],
     output_dir: Path,
 ) -> None:
-    """Capture every tree's pristine content before any of them is written to."""
     by_tree: dict[str, list[str]] = {root: [] for root in trees}
     for idx, overlay in enumerate(overlays):
         if not overlay.reason and roots[idx] in trees:
@@ -1259,7 +1245,6 @@ def _git_apply_overlay(
     *,
     required_timeline: bool,
 ) -> str:
-    """Overlay a git checkout, naming the method that landed it."""
     checked = subprocess.run(
         ["git", "apply", "--check", str(patch_path)],
         cwd=target_repo,
@@ -1320,7 +1305,6 @@ def _apply_warm_patch_sequence(
     *,
     required_timeline: bool,
 ) -> tuple[list[dict[str, str]], list[dict[str, Any]]]:
-    """Apply every overlay in timeline order, stopping a required timeline at the first that will not land."""
     applied: list[dict[str, str]] = []
     statuses: list[dict[str, Any]] = []
     for idx, patch in enumerate(patches):
@@ -1385,7 +1369,6 @@ def _warm_replay_report(
     statuses: list[dict[str, Any]],
     records: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    """The report a required timeline gets once its overlays have been through the trees."""
     primary = trees[next(iter(trees))]
     last = statuses[-1] if statuses else {}
     report = {
@@ -1492,7 +1475,6 @@ def _apply_warm_patches(
 def _warm_patches_applied(
     patch_application: list[dict[str, str]] | Mapping[str, Any],
 ) -> list[dict[str, str]]:
-    """The overlays that landed, read off either shape of apply report."""
     if isinstance(patch_application, Mapping):
         return list(patch_application.get("applied") or [])
     return list(patch_application)
@@ -1641,8 +1623,6 @@ def _iter_log_tails(root: Path, *, max_bytes: int, limit: int = 64) -> Iterator[
 
 
 class _BenchmarkRound(NamedTuple):
-    """One benchmark subprocess: where it runs, what it runs, and the facts its result is read against."""
-
     config_path: Path
     materialized_config_path: Path
     output_dir: Path
@@ -1663,8 +1643,6 @@ class _BenchmarkRound(NamedTuple):
 
 
 class _BenchProcess(NamedTuple):
-    """What one benchmark subprocess left behind, and where it left it."""
-
     returncode: Any
     stdout: str
     stderr: str
@@ -1676,14 +1654,6 @@ class _BenchProcess(NamedTuple):
 
 
 def _boot_failure(finished: _BenchProcess, server_log: Path) -> tuple[str, str] | None:
-    """The error class and text a bring-up that died earns, or ``None`` when the server came up.
-
-    The root cause of an engine/worker death is in ``server.log``, not Magpie's stdout/stderr
-    tail, and the liveness watchdog may have reaped the hung parent with
-    ``SERVER_DEAD_RETURNCODE``. Registry mismatch is wrapped in "Capture cuda graph failed" and
-    must win so the disable-cuda-graph retry is not armed; a cuda-graph capture failure in turn
-    outranks the death, because only that class arms the one-shot retry.
-    """
     death = server_log_death_excerpt(str(server_log))
     dead = death is not None or finished.returncode == SERVER_DEAD_RETURNCODE
     death_error = death or "server engine/worker init failed (reaped by liveness watchdog); see server.log"
@@ -2424,7 +2394,6 @@ class BenchmarkRunExecutor:
         *,
         drop_moe_runner_backend: bool,
     ) -> tuple[str, str]:
-        """Decide the framework and server args this attempt runs with, aligning the task envelope with them."""
         # One-shot cuda-graph eager fallback: a prior baseline armed state.baseline_eager_fallback.
         server_args = str(params.get("extra_server_args") or "")
         fw = _requested_framework(params) or ""
@@ -2450,7 +2419,6 @@ class BenchmarkRunExecutor:
         return fw, server_args
 
     async def _run_attempt_rounds(self, common: dict[str, Any], output_dir: Path) -> dict[str, Any]:
-        """Run the rounds this attempt takes: preflight, budget, overlays and lease, then the rounds themselves."""
         params = common["params"]
         config_path = common["materialized_config_path"]
         extra = getattr(common["ctx"], "extra", None) or {}
@@ -2529,7 +2497,6 @@ class BenchmarkRunExecutor:
                 lease.close()
 
     def _save_warm_replay_pending(self, state: Any, **fields: Any) -> bool:
-        """Merge ``fields`` into the session's pending warm-replay record and persist it."""
         state.warm_replay_pending = {**(state.warm_replay_pending or {}), **fields}
         try:
             state.save(self.session_dir)
@@ -2544,7 +2511,6 @@ class BenchmarkRunExecutor:
         output_dir: Path,
         shared_state: Any,
     ) -> list[dict[str, str]] | dict[str, Any]:
-        """Apply this attempt's warm-replay overlays, recording what a resume would have to restore."""
 
         def _persist_recipe_snapshot(tree_records: list[dict[str, Any]]) -> bool:
             if shared_state is None:
@@ -2598,7 +2564,6 @@ class BenchmarkRunExecutor:
         output_dir: Path,
         live_shared_state: Any,
     ) -> dict[str, Any]:
-        """Unwind an apply that failed, and report it as the attempt's failure."""
         kernel_rollback = _rollback_warm_kernel_apply_results(
             params.get("warm_kernel_apply_results"),
             params.get("warm_kernel_snapshots"),
@@ -2649,7 +2614,6 @@ class BenchmarkRunExecutor:
         double_run: bool,
         ctx_extra: dict[str, Any],
     ) -> dict[str, Any] | None:
-        """Refuse a round the run can no longer afford."""
         ignitable, evidence = self._round_affordable_before_ignition(double_run=double_run, ctx_extra=ctx_extra)
         if ignitable:
             return None
@@ -2699,7 +2663,6 @@ class BenchmarkRunExecutor:
         port: Any,
         **config: Any,
     ) -> dict[str, Any]:
-        """Run one round of the cold-start guard against the server its slot shares."""
         round_cfg = self._write_lifecycle_config(
             common["materialized_config_path"],
             round_dir,
@@ -2725,7 +2688,6 @@ class BenchmarkRunExecutor:
         *,
         defer_accuracy: bool,
     ) -> dict[str, Any]:
-        """Boot on a discarded warmup round, then measure on the hot server it leaves running."""
         params = common["params"]
         warmup_dir = output_dir / _WARMUP_ROUND_DIR
         log.info(
@@ -2797,7 +2759,6 @@ class BenchmarkRunExecutor:
         warmup_result: dict[str, Any],
         common: Mapping[str, Any],
     ) -> dict[str, Any] | None:
-        """Keep the warmup as the baseline when the run can no longer afford the hot pass."""
         affordable, evidence = self._measure_round_affordable(
             warmup_runtime_sec=warmup_result.get("subprocess_runtime_sec"),
             warmup_post_ready_sec=warmup_result.get("post_ready_runtime_sec"),
@@ -2829,7 +2790,6 @@ class BenchmarkRunExecutor:
         return _cold_anchor_from_warmup(warmup_result, dropped=evidence)
 
     def _record_measured_against_warmup(self, result: dict[str, Any], warmup_result: dict[str, Any]) -> None:
-        """Credit the measured pass with the boot it re-attached to, and say what the cold figure would have claimed."""
         result.setdefault("nonfatal_warnings", []).append("baseline_double_run_discarded_first")
         # The measured pass re-attaches to the server launched by the warmup pass.
         for evidence_field in ("launch_evidence", "launch_evidence_path", "server_log_path"):
@@ -2874,7 +2834,6 @@ class BenchmarkRunExecutor:
         hot_round: Mapping[str, Any],
         result: dict[str, Any],
     ) -> None:
-        """Stage the accuracy round after the measurement, or record why it was not worth its GPU time."""
         params = common["params"]
         hot = float(result.get("output_throughput") or 0.0)
         keep_policy = params.get("post_measure_accuracy_keep_policy")
@@ -3393,7 +3352,6 @@ class BenchmarkRunExecutor:
         server_args: str,
         resolved_model: str,
     ) -> dict[str, Any] | None:
-        """Give a multi-node round a fresh sglang/vllm server, reporting a restart that failed."""
         from ._multi_node_server_lifecycle import ServerRestartFailed, restart_server_for_round
 
         if round_.ctx_extra.get("mn_round_restarted"):
@@ -3432,7 +3390,6 @@ class BenchmarkRunExecutor:
         return None
 
     async def _measured_round_result(self, round_: _BenchmarkRound, round_warnings: list[str]) -> dict[str, Any]:
-        """Run the benchmark subprocess and turn what it left behind into this round's result."""
         from ._multi_node_env import is_multi_node
 
         workspaces_before = snapshot_workspaces(round_.output_dir)
@@ -3518,7 +3475,6 @@ class BenchmarkRunExecutor:
         wrapper_stderr: str = "",
         wrapper_stdout: str = "",
     ) -> str:
-        """Observe this attempt's boot once and name it on every later result."""
         from ...bringup import observe_bringup, write_boot_observation
 
         # Magpie writes the server log into the workspace it creates, not to $SERVER_LOG.
@@ -3548,7 +3504,6 @@ class BenchmarkRunExecutor:
         *,
         server_ready: bool,
     ) -> _BenchProcess:
-        """Run Magpie to completion."""
         if round_.serving_lease is not None:
             # Ray-managed GPU execution (§12 T1): run inside the lease's actor (holds num_gpus across this run's
             # rounds).
@@ -3602,7 +3557,6 @@ class BenchmarkRunExecutor:
         started_unix: float,
         fields: dict[str, Any],
     ) -> dict[str, Any]:
-        """Report a round a watchdog reaped, harvesting whatever it leaked on the way out."""
         destination = select_run_workspace(output_dir, known_before=workspaces_before) or output_dir
         harvested = harvest_leaked_artifacts(destination, subprocess_started_unix=started_unix)
         return {
@@ -3620,7 +3574,6 @@ class BenchmarkRunExecutor:
         boot: tuple[str, str] | None,
         round_warnings: list[str],
     ) -> dict[str, Any]:
-        """Turn the workspace the benchmark left behind into this round's result."""
         workspace = finished.workspace
         # Always-on artifact harvest: copy wrapper-side leaks into the task workspace so failure-path diagnostics
         # survive; mtime gating rejects stale prior-run leaks.
@@ -3691,7 +3644,6 @@ class BenchmarkRunExecutor:
         boot: tuple[str, str] | None,
         harvested: Any,
     ) -> dict[str, Any]:
-        """Report a run that finished without ever creating a benchmark workspace."""
         failure_extras = {
             "output_dir": str(round_.output_dir),
             "harvested_artifacts": [str(dst) for _, dst in harvested],
@@ -3742,7 +3694,6 @@ class BenchmarkRunExecutor:
         measurement: dict[str, Any],
         warnings: list[str],
     ) -> dict[str, Any] | None:
-        """Why this round's measurement cannot be reported, or ``None`` when it stands."""
         workspace = round_.output_dir if finished.workspace is None else finished.workspace
         report_path = workspace / _BENCHMARK_REPORT_NAME
         tail = (finished.stderr or finished.stdout)[-2000:]
@@ -3803,7 +3754,6 @@ class BenchmarkRunExecutor:
         report: dict[str, Any] | None,
         warnings: list[str],
     ) -> None:
-        """Read this round's accuracy eval back onto its result, and report what the round measured."""
         from hyperloom.inference_optimizer import framework_registry
 
         from ._accuracy_gate import eval_probe_summary, parse_eval_results, read_eval_probe
@@ -3942,7 +3892,6 @@ class BaselineExecutor(BenchmarkRunExecutor):
         return self._eval_patch_failure(ix_root)
 
     def _eval_patch_failure(self, ix_root: str) -> dict[str, Any] | None:
-        """Refuse a round whose accuracy eval cannot be made to run, or report nothing when it can."""
         # Target present but unpatchable is a hard stop; target absent is an unrecognized layout, which warns
         # rather than failing every eval run.
         probe_root = Path(ix_root) if ix_root else None
