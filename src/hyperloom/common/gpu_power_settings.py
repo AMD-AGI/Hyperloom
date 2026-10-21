@@ -274,8 +274,11 @@ def read_node_power_settings(
     """
     payload = _amd_smi_json(run, timeout, "node", "--power-management")
     rows = payload if isinstance(payload, list) else [payload]
-    block = next((row["node"] for row in rows if isinstance(row, dict) and isinstance(row.get("node"), dict)), {})
-    management = block.get("power_management") if isinstance(block.get("power_management"), dict) else {}
+    block: dict[str, Any] = next(
+        (row["node"] for row in rows if isinstance(row, dict) and isinstance(row.get("node"), dict)), {}
+    )
+    found = block.get("power_management")
+    management: dict[str, Any] = found if isinstance(found, dict) else {}
     status = str(management.get("status") or "").lower()
     return {
         NPM: status if status in NPM_STATES else "",
