@@ -3,8 +3,9 @@
 
 """The directions a session hands its specialist branches, so its first branches do not all sweep the same settings.
 
-A branch started with no direction of its own and no repair takes the one the fewest running branches hold, the
-earlier one in this order on a tie: the first four are the ones a four-branch session works on.
+A branch started with no direction of its own and no repair takes the first one no branch of the session has held
+yet, so the first four are the ones a four-branch session works on; once each was held, the one the fewest branches
+held, then the one the fewest running branches hold, the earlier one in this order on a tie.
 """
 
 from __future__ import annotations
@@ -24,8 +25,9 @@ DIRECTIONS = (
     "(a fallback, a missing fused or tuned path), and port or align the CUDA implementation.",
     "Attention and decode kernels: speed up the hottest attention and decode kernels the profile shows, with a kernel "
     "artifact or a source patch.",
-    "Existing PRs and patches: find upstream sglang and aiter PRs or patches that this image lacks and that target this "
-    "workload's hot paths, port them as a patch and test them.",
+    "Existing PRs and patches: scan the GitHub PRs of aiter and of this session's framework (sglang, vllm or atom), "
+    "merged or open, for ones on this model's architecture, its hot operators or ROCm and gfx950; check each against "
+    "the version installed in the image, which can predate a merged PR, and port the ones it lacks as a patch to test.",
 )
 
 __all__ = ["DIRECTIONS"]

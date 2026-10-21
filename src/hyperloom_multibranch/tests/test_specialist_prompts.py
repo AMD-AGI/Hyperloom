@@ -133,6 +133,24 @@ def test_the_role_carries_what_found_gains_on_rocm_with_examples():
     assert prompt.index("What has found gains") < prompt.index("Examples:") < prompt.index("How a candidate is judged")
 
 
+def test_the_role_points_at_a_bf16_gemm_left_among_fp8_ones_and_the_table_a_shape_really_reads():
+    prompt = role_prompt(WORKLOAD)
+
+    assert "a large GEMM still in bf16, such as lm_head (the vocabulary projection), is a candidate" in prompt
+    assert "a source change on top of an FP8 GEMM kernel" in prompt
+    assert "the server.log's tuned-config lookups name the table each shape reads" in prompt
+    assert "a table for a path the model no longer reaches changes nothing" in prompt
+
+
+def test_the_prs_direction_scans_aiter_and_the_framework_and_checks_the_installed_version():
+    (direction,) = [text for text in DIRECTIONS if text.startswith("Existing PRs and patches:")]
+
+    assert "aiter" in direction
+    assert "this session's framework (sglang, vllm or atom)" in direction
+    assert "merged or open" in direction
+    assert "check each against the version installed in the image" in direction
+
+
 def test_the_role_defines_the_layers_an_intent_names():
     prompt = role_prompt(WORKLOAD)
 
@@ -148,6 +166,8 @@ def test_the_role_sends_a_tuned_table_through_put_kernel_artifact_whole_and_one_
     assert "put the whole table for its variable, one table per variable" in prompt
     assert "add the artifact it returns to the delta's add_kernels" in prompt
     assert "never point a variable at a file of yours or set it from code" in prompt
+    assert "replaces the image's default table for that variable" in prompt
+    assert "carry the default's rows for the other shapes as well as the tuned ones" in prompt
     assert any("put_kernel_artifact" in direction for direction in DIRECTIONS)
 
 

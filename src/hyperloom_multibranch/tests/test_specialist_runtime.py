@@ -202,23 +202,60 @@ async def test_branches_started_with_no_direction_take_the_session_s_directions_
     assert (directions["user"], directions["repair"]) == ("the user's own", "")
 
 
-async def test_a_new_branch_takes_the_direction_the_fewest_running_branches_hold(session):
+async def test_a_direction_no_branch_held_goes_first_even_after_earlier_branches_stopped(session):
     runs = _Runs()
     runtime = session.runtime(runs)
     head = await session.repo.head(BRANCH)
 
-    await runtime.start("b0", head, BranchTask(direction=DIRECTIONS[0]))
-    await runtime.start("b1", head, BranchTask(direction=DIRECTIONS[1]))
-    await runtime.start("b2", head)
-    await _until(lambda: _true(len(runs.started) == 3), "the first specialists to start")
+    await runtime.start("b0", head)
+    await runtime.start("b1", head)
+    await _until(lambda: _true(len(runs.started) == 2), "the first specialists to start")
     await runtime.stop("b0")
-    await runtime.start("b3", head)
-    await _until(lambda: _true(len(runs.started) == 4), "the last specialist to start")
-    for name in ("b1", "b2", "b3"):
+    await runtime.start("b2", head)
+    await _until(lambda: _true(len(runs.started) == 3), "the last specialist to start")
+    for name in ("b1", "b2"):
         await runtime.stop(name)
 
     directions = {run.start.branch: run.start.task.direction for run in runs.started}
-    assert (directions["b2"], directions["b3"]) == (DIRECTIONS[2], DIRECTIONS[0])
+    assert [directions[name] for name in ("b0", "b1", "b2")] == list(DIRECTIONS[:3])
+
+
+async def test_once_every_direction_was_held_the_least_held_over_the_session_wins_then_the_least_running(session):
+    runs = _Runs()
+    runtime = session.runtime(runs)
+    head = await session.repo.head(BRANCH)
+    first = [f"b{index}" for index in range(len(DIRECTIONS) + 1)]
+
+    for name in first:
+        await runtime.start(name, head)
+    await _until(lambda: _true(len(runs.started) == len(first)), "the first specialists to start")
+    stopped = ("b0", first[-1], "b5")
+    for name in stopped:
+        await runtime.stop(name)
+    await runtime.start("late", head)
+    await _until(lambda: _true(len(runs.started) == len(first) + 1), "the last specialist to start")
+    for name in [*first, "late"]:
+        if name not in stopped:
+            await runtime.stop(name)
+
+    directions = {run.start.branch: run.start.task.direction for run in runs.started}
+    assert directions[first[-1]] == DIRECTIONS[0]
+    assert directions["late"] == DIRECTIONS[5]
+
+
+async def test_a_direction_given_to_a_branch_counts_as_held(session):
+    runs = _Runs()
+    runtime = session.runtime(runs)
+    head = await session.repo.head(BRANCH)
+
+    await runtime.start("user", head, BranchTask(direction=DIRECTIONS[0]))
+    await _until(lambda: _true(len(runs.started) == 1), "the user's specialist to start")
+    await runtime.stop("user")
+    await runtime.start("b0", head)
+    await _until(lambda: _true(len(runs.started) == 2), "the next specialist to start")
+    await runtime.stop("b0")
+
+    assert runs.started[1].start.task.direction == DIRECTIONS[1]
 
 
 async def test_past_the_restarts_a_window_allows_the_specialist_stays_down(session):

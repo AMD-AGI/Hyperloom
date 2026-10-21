@@ -3,9 +3,11 @@
 
 """The specialist lifecycle: on each branch, the specialist's session and the branch's judge.
 
-A branch started with neither a direction nor a repair takes the one of the session's
-:data:`~hyperloom_multibranch.specialist.directions.DIRECTIONS` the fewest running branches hold, so the branches split
-the work instead of all sweeping the same settings.
+A branch started with neither a direction nor a repair takes one of the session's
+:data:`~hyperloom_multibranch.specialist.directions.DIRECTIONS` that no branch has held yet, so the branches split the
+work instead of all sweeping the same settings, and a stopped branch's direction is not handed out again while another
+was never tried. Once each was held, it takes the one the fewest branches held over the session, then the one the
+fewest running branches hold. A direction given to a branch counts when it is one of these.
 
 A session that crashes is restarted on its branch, at most ``MAX_RESTARTS`` times within ``RESTART_WINDOW_S``, and a
 lost one at most ``MAX_LOSS_RESTARTS`` times in a row with no session working in between: a loss takes the heartbeat
@@ -24,7 +26,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections import deque
+from collections import Counter, deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from typing import Protocol
@@ -139,13 +141,16 @@ class SpecialistRuntime:
         self._sessions = sessions
         self._pacing = pacing
         self._branches: dict[str, _Branch] = {}
+        self._held: Counter[str] = Counter()
 
     async def start(self, branch: str, start_commit: str, task: BranchTask = BranchTask()) -> None:
         if branch in self._branches:
             raise ValueError(f"branch {branch!r} already has a specialist")
         if not task.direction.strip() and task.repair is None:
-            held = [state.task.direction for state in self._branches.values()]
-            task = replace(task, direction=min(DIRECTIONS, key=held.count))
+            running = [state.task.direction for state in self._branches.values()]
+            task = replace(task, direction=min(DIRECTIONS, key=lambda d: (self._held[d], running.count(d))))
+        if task.direction in DIRECTIONS:
+            self._held[task.direction] += 1
         state = _Branch(branch, start_commit, task, self._notebook_for(branch))
         self._branches[branch] = state
         judge = BranchJudge(branch, state.notebook, self._judging)
