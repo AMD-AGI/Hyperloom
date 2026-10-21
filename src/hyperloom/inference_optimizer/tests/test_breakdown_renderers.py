@@ -6,6 +6,8 @@
 from __future__ import annotations
 
 from hyperloom.inference_optimizer.breakdown.reporters._renderers import (
+    _kernels,
+    capability_summary,
     kernel_lifecycle as kl,
     optimizations as opt,
 )
@@ -201,3 +203,69 @@ def test_kernel_lifecycle_merges_a_kernel_across_two_visits():
 
     assert "1 kernel(s) detected" in out.key_facts[0]
     assert "adopted=1" in out.key_facts[0]
+
+
+# ---- capability counting --------------------------------------------------
+
+
+def test_a_specialist_dispatch_seen_as_row_and_run_is_one_round():
+    breakdown = {
+        "timeline": [
+            {
+                "type": "phase",
+                "ext": {
+                    "actions": {
+                        "rows": [{"action": "specialist", "task_id": "t1"}, {"action": "specialist", "task_id": "t2"}]
+                    }
+                },
+            },
+            {
+                "type": "framework_agent",
+                "ext": {
+                    "runs": [
+                        {"role": "discovery", "run_id": "t1"},
+                        {"role": None, "run_id": "t2"},
+                        {"role": "authoring", "run_id": "t3"},
+                        {"role": "config", "run_id": "t4"},
+                    ]
+                },
+            },
+        ]
+    }
+
+    assert capability_summary.capability_rows(breakdown)["specialist"]["extras"]["rounds"] == 3
+
+
+def _attempt(outcome: str, decision: str | None = None, gain: float | None = None) -> dict:
+    e2e = {"decision": decision, "e2e_gain_pct": gain} if decision else {}
+    return {"source_kind": "geak_authored_kernel", "route": "geak", "kernel_id": "k", "outcome": outcome, "e2e": e2e}
+
+
+def _counters(*attempts: dict) -> dict:
+    breakdown = {"timeline": [_kernel_event(attempts=list(attempts))]}
+    return _kernels.source_counters(breakdown, _kernels.GEAK_SOURCES)
+
+
+def test_each_attempt_lands_in_exactly_one_outcome_bucket():
+    got = _counters(
+        _attempt("rejected", "REJECTED"),
+        _attempt("rejected"),
+        _attempt("rejected"),
+        _attempt("rejected", "KEEP"),
+        _attempt("rejected", "REVERT"),
+        _attempt("adopted", "KEEP"),
+        _attempt("adopted"),
+        _attempt("adopted", "REVERT", 4.0),
+    )
+
+    buckets = {k: got[k] for k in ("keeps", "micro_only_keeps", "reverts", "rejected", "failed")}
+    assert buckets == {"keeps": 1, "micro_only_keeps": 1, "reverts": 2, "rejected": 4, "failed": 0}
+    assert got["attempted"] == 8
+    assert got["adopted"] == 2
+
+
+def test_capability_e2e_gain_is_the_best_kept_gain_only():
+    got = _counters(_attempt("adopted", "KEEP", 3.0), _attempt("rejected", "REVERT", 9.0))
+    assert got["e2e_gain_pct"] == 3.0
+
+    assert _counters(_attempt("rejected", "REVERT", 9.0))["e2e_gain_pct"] is None
