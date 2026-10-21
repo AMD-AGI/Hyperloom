@@ -110,14 +110,15 @@ def build_report(
         # Some tuners crashed while others merely found nothing.
         micro_decision = "partial_failure"
     elif all(r.status == "empty_output" for r in results):
-        # Strict status (A2b): "tuner ran but produced nothing parseable" is never silently reported as a genuine
-        # "compared, no shape improved" result.
+        # Strict status: distinguish a genuine "compared, no shape improved" (no_improvement) from "tuner ran but
+        # produced nothing parseable" (empty_output) so an empty/unparsed run is never silently reported as a real
+        # no-improvement result.
         micro_decision = "empty_output"
     elif any(r.status == "partial_output" for r in results):
         # Some shapes were lost.
         micro_decision = "partial_output"
     else:
-        # At least one tuner genuinely compared shapes without a win.
+        # At least one tuner genuinely compared shapes without a win (possibly alongside empties).
         micro_decision = "no_improvement"
 
     return TuneReport(

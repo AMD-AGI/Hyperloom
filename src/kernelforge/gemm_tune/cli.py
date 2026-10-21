@@ -99,7 +99,11 @@ def _demand_from_serving_log(server_log: str, output_dir: Path) -> str:
 
 
 def _load_demand_report(demand_json: str) -> dict | None:
-    """Parse the demand file once, for both selection and the coverage report."""
+    """Parse the demand file once, for both selection and the coverage report.
+
+    Selection needs the tables the runtime consulted, and the coverage report needs the same document to say what
+    stayed uncovered.
+    """
     if not demand_json:
         return None
     from .evidence import load_demand

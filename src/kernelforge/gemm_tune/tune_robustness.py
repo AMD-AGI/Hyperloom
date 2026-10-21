@@ -314,6 +314,7 @@ def run_isolated(invocation: TunerInvocation, guard: IsolationGuard) -> tuple[in
         n_ok += 1
         if soft := count_soft_faults(out, err):
             log.info("shape %d/%d tuned with %d recovered candidate fault(s)", idx + 1, len(rows), soft)
+        # aiter writes this shape's compare candidate under compare_dir.
         cand = _latest_candidate(compare_dir, shape_out.stem, start)
         if cand is not None:
             candidates.absorb(_read_csv_lines(cand))

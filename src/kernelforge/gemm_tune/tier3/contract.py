@@ -47,6 +47,8 @@ def _row_violations(where: str, row: dict[str, str]) -> list[ContractViolation]:
             bad.append(ContractViolation(where, f"{col}={value} is not a positive time"))
 
     improved = str(row.get("improved", "")).strip().lower()
+    # Missing or unparseable timings are already recorded by the column checks above; there is nothing to cross-check
+    # for them.
     d, t = times.get("default_us", 0.0), times.get("tuned_us", 0.0)
     if improved not in ("true", "false"):
         bad.append(ContractViolation(where, f"improved={improved!r} is not a boolean"))
