@@ -21,7 +21,7 @@ from hyperloom.orchestrator.roles import (
 )
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.orchestrator.roles.base import BackendError, LLMCallFailed, RetryPolicy
-from hyperloom.orchestrator.roles.mcp_emit_intent import EMIT_INTENT_TOOL_INPUT_SCHEMA
+from hyperloom.orchestrator.roles.mcp_emit_intent import build_emit_intent_tool_input_schema
 from hyperloom.inference_optimizer.protocol.intent import (
     IntentType,
     IntentValidationError,
@@ -285,14 +285,18 @@ def test_emit_intent_schema_offers_only_the_roles_intents():
 def test_emit_intent_schema_without_a_role_offers_every_intent():
     schema = _registered_emit_intent()["schema"]
 
-    assert schema == EMIT_INTENT_TOOL_INPUT_SCHEMA
+    assert schema == build_emit_intent_tool_input_schema(IntentType)
     assert _offered_intent_types(schema) == {t.value for t in IntentType}
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("wrapped", [False, True], ids=["native", "unparsed-wrapper"])
-async def test_the_emit_intent_tool_refuses_an_intent_outside_the_role(wrapped):
-    """The agent hears in the same turn that its role cannot emit the type, and which types it can."""
+@pytest.mark.parametrize("wrapped", [False, True], ids=["native-if-schema-bypassed", "unparsed-wrapper"])
+async def test_the_emit_intent_handler_refuses_an_intent_outside_the_role(wrapped):
+    """The handler refuses by the decoded type and names the types the role may emit.
+
+    Under the real SDK only the wrapped form reaches the handler: the schema's enum refuses a native out-of-role
+    call first (pinned in test_claude_unparsed_tool_input_unit). The native case pins the handler's own check.
+    """
     handler = _registered_emit_intent(allowed_intents=_ORCHESTRATION_INTENTS)["handler"]
     arguments: dict[str, Any] = _REVIEW_VERDICT_EMIT
     if wrapped:

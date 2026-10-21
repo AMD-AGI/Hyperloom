@@ -635,12 +635,12 @@ def test_both_provider_descriptions_carry_the_constraints():
     from hyperloom.inference_optimizer.protocol.intent import IntentType
     from hyperloom.orchestrator.roles.codex import build_output_instructions
     from hyperloom.orchestrator.roles.mcp_emit_intent import (
-        EMIT_INTENT_TOOL_INPUT_SCHEMA,
+        build_emit_intent_tool_input_schema,
         payload_constraints,
     )
 
     constraints = payload_constraints(IntentType)
-    claude_description = EMIT_INTENT_TOOL_INPUT_SCHEMA["properties"]["payload"]["description"]
+    claude_description = build_emit_intent_tool_input_schema(IntentType)["properties"]["payload"]["description"]
     codex_block = build_output_instructions(frozenset(IntentType))
 
     assert constraints in claude_description

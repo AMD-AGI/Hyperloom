@@ -28,8 +28,8 @@ EMIT_INTENT_TOOL_NAME = "emit_intent"
 EMIT_INTENT_TOOL_QUALIFIED = f"mcp__{MCP_SERVER_NAME}__{EMIT_INTENT_TOOL_NAME}"
 
 
-# Vocabulary a required-field name cannot carry on its own: closed value sets and the one optional dial each type
-# honours.
+# Vocabulary a required-field name cannot carry on its own: closed value sets, numeric bounds, and the optional dials
+# each type honours.
 _PAYLOAD_FIELD_NOTES: dict[IntentType, tuple[str, ...]] = {
     IntentType.REVIEW_VERDICT: ("verdict ∈ approve|reject|redirect|advise|needs_review",),
     IntentType.EXTEND_LEASE: (
@@ -141,8 +141,6 @@ def build_emit_intent_tool_input_schema(allowed_intents: Iterable[IntentType]) -
         "additionalProperties": False,
     }
 
-
-EMIT_INTENT_TOOL_INPUT_SCHEMA: dict[str, Any] = build_emit_intent_tool_input_schema(IntentType)
 
 EMIT_INTENT_TOOL_DESCRIPTION = (
     "Emit ONE structured intent into the inference_optimizer system. This "
@@ -337,7 +335,6 @@ def build_emit_intent_server(
 
 __all__ = [
     "EMIT_INTENT_TOOL_DESCRIPTION",
-    "EMIT_INTENT_TOOL_INPUT_SCHEMA",
     "EMIT_INTENT_TOOL_NAME",
     "EMIT_INTENT_TOOL_QUALIFIED",
     "MCP_SERVER_NAME",
