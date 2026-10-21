@@ -22,6 +22,7 @@ from ..base import (
     events_of,
     md_kv_list,
     md_table,
+    measured_ms,
     register_renderer,
     session_of,
     task_config_of,
@@ -104,7 +105,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     session = session_of(breakdown)
     tput = measurement.get("output_throughput")
     acc = measurement.get("accuracy")
-    ttft = measurement.get("ttft_mean_ms")
+    ttft = measured_ms(measurement.get("ttft_mean_ms"))
     e2el = measurement.get("e2el_mean_ms")
     ttft_source = str(measurement.get("ttft_e2el_source") or "")
     # The streak this measurement was dispatched under, which is the count of
@@ -142,8 +143,8 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     if acc:
         facts.append(f"Baseline accuracy: {float(acc):.4g}.")
     if ttft is not None:
-        facts.append(f"Baseline TTFT mean: {float(ttft):.1f} ms.")
-    else:
+        facts.append(f"Baseline TTFT mean: {ttft:.1f} ms.")
+    elif measurement.get("ttft_mean_ms") is None:
         warnings.append(
             "ttft_mean_ms is null — the measured round reported no latency, so "
             "the baseline's throughput cannot be read against a per-request cost."
