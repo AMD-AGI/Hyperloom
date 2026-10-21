@@ -46,6 +46,13 @@ KB_DISABLED = "disabled"
 KB_FAILED = "failed"
 
 
+def knowledge_document(knowledge: KnowledgeClose, scorers: CloseStep) -> dict[str, object]:
+    """The knowledge steps and the scorers' step as JSON-ready data: ``close.knowledge`` of the breakdown and of the
+    CLOSE report alike."""
+
+    return {**knowledge.document(), "scorers": encode(scorers)}
+
+
 @dataclass(frozen=True)
 class CloseExports:
     """What CLOSE handed on: the Recipe KB write-back, the knowledge steps, the generation of frontier scorers, the
@@ -60,7 +67,7 @@ class CloseExports:
     def knowledge_document(self) -> dict[str, object]:
         """The knowledge steps and the scorers' step as JSON-ready data: the breakdown's ``close.knowledge``."""
 
-        return {**self.knowledge.document(), "scorers": encode(self.scorers)}
+        return knowledge_document(self.knowledge, self.scorers)
 
 
 @dataclass(frozen=True)
@@ -132,7 +139,7 @@ class SessionExports:
         )
         scorers = await author_scorers(snapshot, self._ask_scorers, model=self._scorers.model)
         selection = encode(final) if final is not None else None
-        stepped = {**knowledge.document(), "scorers": encode(scorers)}
+        stepped = knowledge_document(knowledge, scorers)
         document = build_breakdown(
             snapshot, final=chosen, selection=selection, kb_write_back=kb_write_back, knowledge=stepped
         )
@@ -171,4 +178,5 @@ __all__ = [
     "ExportSources",
     "ScorerAuthoring",
     "SessionExports",
+    "knowledge_document",
 ]
