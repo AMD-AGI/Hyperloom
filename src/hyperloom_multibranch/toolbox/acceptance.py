@@ -33,12 +33,15 @@ from hyperloom_multibranch.contracts.toolbox import RequestRejected, WorkloadKin
 #: enables it) and tuning is not switched off (the value ``0``, nothing else disables it).
 _TUNABLEOP_ENABLED = "PYTORCH_TUNABLEOP_ENABLED"
 _TUNABLEOP_TUNING = "PYTORCH_TUNABLEOP_TUNING"
+_TUNABLEOP_TABLE = "PYTORCH_TUNABLEOP_FILENAME"
 ONLINE_TUNING_CODE = "online_tuning_unsupported"
 ONLINE_TUNING_REASON = (
     f"{_TUNABLEOP_ENABLED}=1 without {_TUNABLEOP_TUNING}=0 tunes every GEMM shape the first time the server runs it: at "
     "boot, in the warmup, and for each new prompt length of the evaluation. The test then takes a time no candidate "
     "controls and ends at the attempt timeout, and the tuned results file is lost with the server. For tuned GEMMs "
-    "put an offline-tuned table with put_kernel_artifact (kind gemm, an aiter table such as AITER_CONFIG_GEMM_BF16)"
+    "put an offline-tuned table with put_kernel_artifact (kind gemm): an aiter table (env such as "
+    f"AITER_CONFIG_GEMM_BF16), or a TunableOp table (env {_TUNABLEOP_TABLE}, with {_TUNABLEOP_ENABLED}=1 and "
+    f"{_TUNABLEOP_TUNING}=0 in the launch envs; the file is placed for every device ordinal TunableOp reads)"
 )
 
 # Every purpose whose result the InferenceX rule gate reads an eval score from: explore and confirm are compared,

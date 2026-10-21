@@ -55,6 +55,13 @@ KERNEL_LOAD_KEY = "load"
 LOAD_VIA_ENV_FILE = "env_file"
 #: Kernel kinds whose artifacts are loaded as files through a variable; others have no loading convention yet.
 LOADABLE_KERNEL_KINDS = frozenset({KernelKind.GEMM})
+#: Variables whose value PyTorch turns into one file per device: TunableOp reads ``<stem><ordinal><extension>`` (``x.csv``
+#: is read as ``x0.csv`` on device 0, ``x1.csv`` on device 1; the ordinal counts the devices the process sees, so a test
+#: on N cards reads 0..N-1). A table loaded through one of them is placed under the name the variable holds and under the
+#: name of each of the ``DEVICE_ORDINALS`` of a node, so a test on any number of its cards finds its file.
+PER_DEVICE_TABLE_ENVS = frozenset({"PYTORCH_TUNABLEOP_FILENAME"})
+DEVICE_ORDINALS = range(8)
+TABLE_EXTENSION = ".csv"
 #: Directories an editable-installed source tree may live in and still count as part of the image.
 IMAGE_SOURCE_ROOTS = ("/sgl-workspace", "/opt", "/app", "/usr")
 
@@ -430,10 +437,21 @@ def kernel_attachments(
         if env_name in envs or env_name in launch_envs:
             raise KernelLoadError(f"{artifact.ref}: {env_name} is already set by another artifact or by the launch")
         blobs.get(artifact.sha256)
-        attachment = AttachmentRef(f"k-{artifact.sha256[:16]}", "file", artifact.sha256)
-        attachments.setdefault(attachment.id, attachment)
-        envs[env_name] = attachment_placeholder(attachment)
+        placed = _table_attachments(artifact, env_name)
+        for attachment in placed:
+            attachments.setdefault(attachment.id, attachment)
+        envs[env_name] = attachment_placeholder(placed[0])
     return tuple(attachments.values()), envs
+
+
+def _table_attachments(artifact: KernelArtifact, env_name: str) -> tuple[AttachmentRef, ...]:
+    """The files that carry the table of ``artifact``; the first is the one ``env_name`` points at."""
+
+    stem = f"k-{artifact.sha256[:16]}"
+    if env_name not in PER_DEVICE_TABLE_ENVS:
+        return (AttachmentRef(stem, "file", artifact.sha256),)
+    names = [stem + TABLE_EXTENSION, *(f"{stem}{ordinal}{TABLE_EXTENSION}" for ordinal in DEVICE_ORDINALS)]
+    return tuple(AttachmentRef(name, "file", artifact.sha256) for name in names)
 
 
 def kernel_load_env(artifact: KernelArtifact) -> str:

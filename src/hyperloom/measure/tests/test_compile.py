@@ -33,7 +33,10 @@ from hyperloom.measure.compile import (
     compile_environment,
     locate_installed_package,
 )
+from hyperloom.measure.attachments import place_attachments, substitute
+from hyperloom.measure.spec import Attachment
 from hyperloom.measure.tests._recipes import IMAGE, PREFIX, git_patch, put_patch, recipe_with, sha, write_tree
+from hyperloom.measure.tests.tunableop_table import NODE_CARDS, TUNABLEOP_ENV, TUNABLEOP_TABLE, tunableop_reads
 
 OLD_A = "def f():\n    return 1\n\n\ndef g():\n    return 2\n"
 NEW_A = "def f():\n    return 10\n\n\ndef g():\n    return 2\n"
@@ -215,6 +218,34 @@ def test_gemm_table_is_attached_and_loaded_through_its_variable(blobs, base):
     assert attachment == AttachmentRef(attachment.id, "file", sha(b"table"))
     assert env.envs == {"AITER_CONFIG_GEMM_BF16": "${HL_ATTACH:" + attachment.id + "}"}
     assert env.recipe.kernels == (kernel(**LOAD),)
+
+
+@pytest.mark.parametrize("home", ["run", "run.1"], ids=["plain_directory", "directory_with_a_dot"])
+def test_a_tunableop_table_is_placed_under_the_file_name_each_device_reads(tmp_path, blobs, base, home):
+    blobs.put(TUNABLEOP_TABLE)
+    load = {"load": {"via": "env_file", "env": TUNABLEOP_ENV}}
+    artifact = KernelArtifact(KernelKind.GEMM, "qwen3-8b", "kernel/g.csv", sha(TUNABLEOP_TABLE), load)
+
+    env = compile_with(recipe_with(), RecipeDelta(add_kernels=(artifact,)), blobs, base)
+    placed = place_attachments(
+        [Attachment(a.id, a.kind, f"sha256:{a.sha256}", "0" * 64) for a in env.attachments],
+        tmp_path / home / "attach",
+        lambda address: blobs.get(address.removeprefix("sha256:")),
+    )
+    value = substitute(env.envs[TUNABLEOP_ENV], placed)
+
+    assert {a.sha256 for a in env.attachments} == {sha(TUNABLEOP_TABLE)}, "one blob, however many files carry it"
+    assert Path(value).read_bytes() == TUNABLEOP_TABLE, "the variable names a file that exists"
+    for ordinal in range(NODE_CARDS):
+        assert tunableop_reads(value, ordinal).read_bytes() == TUNABLEOP_TABLE, f"device {ordinal} finds no table"
+
+
+def test_an_aiter_table_is_still_one_file_named_without_an_extension(blobs, base):
+    blobs.put(b"table")
+
+    env = compile_with(recipe_with(), RecipeDelta(add_kernels=(kernel(**LOAD),)), blobs, base)
+
+    assert [a.id for a in env.attachments] == [f"k-{sha(b'table')[:16]}"]
 
 
 @pytest.mark.parametrize(

@@ -17,6 +17,7 @@ import pytest
 
 from hyperloom.contracts.measurement import Purpose
 from hyperloom.contracts.recipe import ConfigDelta, KernelArtifact, KernelKind, Recipe, RecipeDelta
+from hyperloom.measure.tests.tunableop_table import TUNABLEOP_ENV, TUNABLEOP_TABLE
 from hyperloom_multibranch.contracts.toolbox import REJECTION_CODES, RequestRejected, WorkloadKind
 from hyperloom_multibranch.toolbox.acceptance import ONLINE_TUNING_CODE, Acceptance
 from hyperloom_multibranch.toolbox.kernel_artifacts import mint_kernel_artifact
@@ -67,6 +68,8 @@ async def test_the_test_that_was_measured_is_refused_and_the_reason_names_the_wa
     assert refused.value.code == ONLINE_TUNING_CODE
     for named in ("PYTORCH_TUNABLEOP_TUNING=0", "put_kernel_artifact", AITER_TABLE_ENV):
         assert named in refused.value.reason, named
+    for tunableop_route in ("a TunableOp table", f"env {TUNABLEOP_ENV}", "PYTORCH_TUNABLEOP_ENABLED=1 and"):
+        assert tunableop_route in refused.value.reason, tunableop_route
 
 
 @pytest.mark.parametrize(
@@ -102,6 +105,13 @@ async def test_a_candidate_that_does_not_tune_online_is_accepted(tmp_path: Path,
 async def test_a_candidate_that_puts_an_offline_tuned_table_is_accepted(tmp_path: Path) -> None:
     table = mint_kernel_artifact(KernelKind.GEMM, "qwen3-8b-bf16", AITER_TABLE_ENV, TABLE)
     change = dataclasses.replace(_delta(), add_kernels=(KernelArtifact.from_document(table.to_document()),))
+    assert await _code_of(tmp_path, FakeRepo(), change) is None
+
+
+async def test_a_candidate_that_puts_a_tunableop_table_and_turns_tuning_off_is_accepted(tmp_path: Path) -> None:
+    table = mint_kernel_artifact(KernelKind.GEMM, "qwen3-8b-bf16", TUNABLEOP_ENV, TUNABLEOP_TABLE)
+    offline = _delta(PYTORCH_TUNABLEOP_ENABLED="1", PYTORCH_TUNABLEOP_TUNING="0")
+    change = dataclasses.replace(offline, add_kernels=(KernelArtifact.from_document(table.to_document()),))
     assert await _code_of(tmp_path, FakeRepo(), change) is None
 
 

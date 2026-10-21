@@ -13,6 +13,9 @@ table of one target. The binding belongs to the session, not to a branch: the fi
 whichever branch, binds it to that table's target, and from then on any branch may put its own table under that
 target (a new content reference under the same target; no other branch's artifact changes), while a table of another
 target name for the same variable is refused. Every shape of an operator goes in one file under that target.
+
+A TunableOp results file (``PYTORCH_TUNABLEOP_FILENAME``) is such a table too: PyTorch reads it from a file named after
+the variable's value with the device ordinal put in, so the compiler places it under the name of every ordinal.
 """
 
 from __future__ import annotations
@@ -21,14 +24,12 @@ import hashlib
 import re
 
 from hyperloom.contracts.recipe import KERNEL_ROOT, KernelArtifact, KernelKind, RecipeError
-from hyperloom.measure.compile import KERNEL_LOAD_KEY, LOAD_VIA_ENV_FILE, kernel_load_env
+from hyperloom.measure.compile import KERNEL_LOAD_KEY, LOAD_VIA_ENV_FILE, TABLE_EXTENSION, kernel_load_env
 from hyperloom.measure.hosted_spec import MAX_ATTACHMENT_BYTES
 from hyperloom_multibranch.contracts.toolbox import RequestRejected
 
 #: What a target may be: one path segment, since the target is a directory of the reference.
 TARGET_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._=,+-]{0,127}")
-#: Tuned tables are CSV files.
-TABLE_EXTENSION = ".csv"
 CODE_INVALID = "kernel_artifact_invalid"
 CODE_VARIABLE_TAKEN = "kernel_variable_taken"
 

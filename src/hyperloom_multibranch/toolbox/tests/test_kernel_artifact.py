@@ -21,10 +21,11 @@ from typing import Any
 import pytest
 
 from hyperloom.contracts.measurement import TestRequest, Validity
-from hyperloom.contracts.recipe import KernelArtifact, KernelKind, RecipeDelta, RecipeError, apply
-from hyperloom.measure.compile import LocalBlobStore
+from hyperloom.contracts.recipe import ConfigDelta, KernelArtifact, KernelKind, RecipeDelta, RecipeError, apply
+from hyperloom.measure.compile import LocalBlobStore, kernel_load_env
 from hyperloom.measure.points import AcceptedMeasurement, default_canonical
 from hyperloom.measure.tests.hosted_fixtures import spec_context
+from hyperloom.measure.tests.tunableop_table import NODE_CARDS, TUNABLEOP_ENV, TUNABLEOP_TABLE, tunableop_reads
 from hyperloom.orchestrator.actions.executors._workload_envs import default_baseline_config
 from hyperloom_multibranch.contracts.toolbox import REJECTION_CODES, RequestRejected
 from hyperloom_multibranch.toolbox import kernel_artifacts
@@ -52,7 +53,8 @@ class ReportingPlanner:
 
     def plan(self, request: TestRequest, parent: object) -> AcceptedMeasurement:
         accepted = self._inner.plan(request, parent)  # type: ignore[arg-type]
-        lines = ["fake_throughput: 1000.0", f"fake_attached_env: [{ENV}]"]
+        names = [kernel_load_env(kernel) for kernel in request.delta.add_kernels] or [ENV]
+        lines = ["fake_throughput: 1000.0", f"fake_attached_env: [{', '.join(names)}]"]
         if request.accuracy:
             lines.append("fake_accuracy: 0.8")
         for point in accepted.points:
@@ -143,6 +145,26 @@ async def test_a_put_table_is_loaded_by_the_test_from_a_file_in_its_sandbox(stac
     assert held["sha256"] == sha(TABLE), "the file the variable points at is the table that was put"
     assert (stack.root / "session" / "sandboxes") in placed.parents and placed.parent.name == "attach", placed
     assert stack.blobs.root not in placed.parents, "a copy in the sandbox, not the session's store"
+
+
+async def test_a_tunableop_table_is_placed_where_each_device_of_the_test_reads_it(stack: Stack) -> None:
+    s1 = Specialist(stack, "s1")
+    artifact = await put(s1, target="qwen3-8b", env=TUNABLEOP_ENV, content=TUNABLEOP_TABLE.decode())
+    offline = ConfigDelta(envs={"PYTORCH_TUNABLEOP_ENABLED": "1", "PYTORCH_TUNABLEOP_TUNING": "0"})
+    delta = RecipeDelta(config=offline, add_kernels=(KernelArtifact.from_document(artifact),))
+
+    submitted = await s1.call(
+        "submit_test", kind="test", purpose="explore", parent_commit=stack.baseline_commit, delta=delta.to_document()
+    )
+    result = await asyncio.wait_for(stack.toolbox.outcome(json.loads(submitted)["request_id"]), 120)
+
+    assert result.validity is Validity.SUCCEEDED, result.failure_reason
+    held = json.loads((stack.root / "session" / result.output_dir / "attached_env.json").read_text())[TUNABLEOP_ENV]
+    table = hashlib.sha256(TUNABLEOP_TABLE).hexdigest()
+    assert held["sha256"] == table, "the variable names the table that was put"
+    for ordinal in range(NODE_CARDS):
+        read = tunableop_reads(held["path"], ordinal).name
+        assert held["directory"].get(read) == table, f"device {ordinal} reads {read}, which the sandbox lacks"
 
 
 async def test_branches_that_put_the_same_table_get_one_artifact_and_merge_without_a_conflict(

@@ -175,7 +175,11 @@ _PUT_KERNEL_ARTIFACT: dict[str, Any] = {
         "env": {
             "type": _STRING,
             "minLength": 1,
-            "description": "The environment variable the service reads the table's path from, e.g. AITER_CONFIG_GEMM_A8W8.",
+            "description": (
+                "The environment variable the service reads the table's path from: an aiter table, e.g. "
+                "AITER_CONFIG_GEMM_A8W8, or a TunableOp results file, PYTORCH_TUNABLEOP_FILENAME (the delta must also "
+                "set PYTORCH_TUNABLEOP_ENABLED=1 and PYTORCH_TUNABLEOP_TUNING=0)."
+            ),
         },
         "content": {"type": _STRING, "minLength": 1, "description": "The whole table as UTF-8 text, a CSV."},
     },

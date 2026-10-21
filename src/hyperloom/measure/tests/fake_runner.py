@@ -18,7 +18,8 @@ test leaves (``profile/torch_trace/...``); ``fake_report: false`` leaves out the
 that printed no readable measurement. ``fake_repro: true`` runs the repro case the sheet carries for real (the shipped
 attachment placement and ``run_case``) against no server, and lists the verdict and log it leaves in the manifest.
 ``fake_attached_env: [NAME, ...]`` places the sheet's attachments as the runner does and lists, in
-``attached_env.json``, the path each variable holds in the served YAML and the sha256 of the file there.
+``attached_env.json``, the path each variable holds in the served YAML, the sha256 of the file there, and the sha256 of
+every file in the directory it is in (``directory``; a directory attachment beside it is left out).
 ``fake_legacy_decode: true`` lists the ``decode/outputs.jsonl`` that a runner of the removed decode pass left, so a
 bundle written then can be verified again.
 ``fake_eval_in_warmup: true`` lays the rounds out as a graded test with a warmup leaves them (one evaluation, in the
@@ -163,7 +164,13 @@ def _attached_env_files(spec: MeasurementSpec, root: Path, out: Path, names: lis
     held = {}
     for name in names:
         path = Path(served["benchmark"]["envs"][name])
-        held[name] = {"path": str(path), "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+        held[name] = {
+            "path": str(path),
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            "directory": {
+                p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in path.parent.iterdir() if p.is_file()
+            },
+        }
     report = json.dumps(held).encode()
     _atomic(out / "files" / "attached_env.json", report)
     return {"attached_env.json": report}
