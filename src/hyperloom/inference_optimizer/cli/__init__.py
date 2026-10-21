@@ -49,9 +49,11 @@ from .model_gate import (
 )
 from ..gpu_types import (
     _autodetect_gpu_type,
-    _gpu_runner_type,
+    gpu_runner_type,
     _resolve_amd_gpu_type,
     _resolve_gpu_type,
+    require_runner_framework,
+    warn_family_runner,
 )
 from ..model_config_utils import (
     summarize_model_config,
@@ -69,7 +71,7 @@ from .bootstrap import (
     _seed_shared_state,
     _snapshot_system_prompts,
     agentx_state_is_stale,
-    resolve_gpu_power_settings,
+    resume_gpu_power_settings,
     latency_budget_scope_error,
     parse_operator_extra_env,
     resolve_framework_version,
@@ -137,6 +139,7 @@ from hyperloom.common.workload_defaults import (
     DEFAULT_EP,
     DEFAULT_PRECISION,
 )
+from .gpu_power_apply import gpu_power_restore_guard
 from .custom_specialist import (
     CUSTOM_SPECIALIST_ONLY_ENV,
     _apply_custom_specialist_resume as _apply_custom_specialist_resume,
@@ -214,17 +217,16 @@ def _apply_operator_supplied_paths(args: Any, framework: str) -> None:
 
 
 def _restore_operator_supplied_paths_from_state(args: Any, state: SharedState) -> None:
-    """Fill custom-workload env from persisted state when this resume omitted it."""
-    from hyperloom.orchestrator.actions.executors.benchmark_backend import (
-        BENCHMARK_BACKEND_ENV,
-    )
+    """Re-export the session paths persisted on ``state`` when this resume omitted them."""
+    from hyperloom.inference_optimizer.framework_paths import point_session_framework_root
+    from hyperloom.orchestrator.actions.executors.benchmark_backend import BENCHMARK_BACKEND_ENV
 
     cli_repo = str(getattr(args, "framework_path", None) or "").strip()
     cli_scripts = str(getattr(args, "benchmark_scripts_dir", None) or "").strip()
     if not cli_repo and not os.environ.get("FRAMEWORK_REPO_PATH", "").strip():
         archived = str(getattr(state, "framework_repo_path", "") or "").strip()
         if archived:
-            os.environ["FRAMEWORK_REPO_PATH"] = archived
+            point_session_framework_root(archived, state.framework)
     if not cli_scripts and not os.environ.get("HYPERLOOM_BYPASS_SCRIPTS_DIR", "").strip():
         archived = str(getattr(state, "bypass_scripts_dir", "") or "").strip()
         if archived:
@@ -236,7 +238,8 @@ def _restore_operator_supplied_paths_from_state(args: Any, state: SharedState) -
 
 
 def _require_custom_entrypoint(framework: str, gpu_type: str | None = None) -> None:
-    """Fail at launch when ``--framework custom`` cannot resolve its script."""
+    """Fail at launch when the selected runner cannot serve the framework."""
+    require_runner_framework(gpu_type or "", framework)
     if str(framework or "").strip().lower() != "custom":
         return
     from hyperloom.orchestrator.actions.executors._workload_envs import (
@@ -1691,13 +1694,11 @@ def _restore_platform_state(args: argparse.Namespace, state: SharedState, sessio
     # The partition shape is part of the measurement contract, so it resumes on the same restore / apply / persist
     # path as the paths above.
     _restore_partition_shape_from_state(args, state)
+    from hyperloom.orchestrator.loop.coordinator import reap_orphaned_servers_best_effort
+
+    reap_orphaned_servers_best_effort(session_lock.session_dir, phase="resume")  # before an apply reads the cards
     # The power settings resume on the same assert / record path: an omitted flag re-asserts the archived value.
-    _declared_power = dict((getattr(state, "gpu_power_settings", None) or {}).get("declared") or {})
-    gpu_power, _gpu_power_error = resolve_gpu_power_settings(
-        power_cap_w=getattr(args, "gpu_power_cap_w", None) or _declared_power.get("power_cap_w"),
-        perf_level=getattr(args, "gpu_perf_level", None) or _declared_power.get("perf_level"),
-        nodes=max(int(getattr(args, "nodes", 1) or 1), int(getattr(state, "nodes", 1) or 1)),
-    )
+    gpu_power, _gpu_power_error = resume_gpu_power_settings(args, state)
     if _gpu_power_error:
         session_lock.release()
         print(f"ERROR: cannot resume this session -- {_gpu_power_error}.", file=sys.stderr)
@@ -1819,7 +1820,7 @@ def _reexport_session_environment(
     if state.framework == "atom":
         _apply_atom_auto_tighten(args)
     if state.gpu_type:
-        runner_gpu_type = _gpu_runner_type(state.gpu_type)
+        runner_gpu_type = gpu_runner_type(state.gpu_type)
         os.environ["TARGET_GPU_TYPE"] = state.gpu_type
         os.environ["GPU_TYPE"] = runner_gpu_type
         print(f"  re-exported GPU_TYPE  : {state.gpu_type}")
@@ -2117,14 +2118,8 @@ async def _seed_fresh_session(args: argparse.Namespace, *, nodes_resolved: int) 
         print(line, file=sys.stderr)
     if probed and not user_specified:
         print(f"GPU type        : {gpu_type} (auto-detected)")
-    runner_gpu_type = _gpu_runner_type(gpu_type)
-    if gpu_type and runner_gpu_type != gpu_type:
-        print(
-            f"WARN: {gpu_type} uses {runner_gpu_type} as Magpie "
-            f"runner_type (same gfx942/CDNA3 arch; Magpie has no "
-            f"sglang_{gpu_type}.sh / vllm_{gpu_type}.sh yet)",
-            file=sys.stderr,
-        )
+    runner_gpu_type = gpu_runner_type(gpu_type)
+    warn_family_runner(gpu_type, framework)
     args.gpu_type = gpu_type or None
     if runner_gpu_type:
         os.environ["TARGET_GPU_TYPE"] = gpu_type
@@ -2212,7 +2207,7 @@ async def _seed_fresh_session(args: argparse.Namespace, *, nodes_resolved: int) 
         nodes=nodes_resolved,
         model=PartitionModel(str(args.model or os.environ.get("MODEL_PATH") or ""), getattr(args, "precision", None)),
     )
-    gpu_power = resolve_launch_gpu_power(args, nodes=nodes_resolved)
+    gpu_power = resolve_launch_gpu_power(args, nodes=nodes_resolved, owner=str(manifest["session_id"]))
     _publish_gpu_power_settings(gpu_power)
     _seed_shared_state(
         session_dir,
@@ -2775,7 +2770,8 @@ def main(argv: list[str] | None = None) -> int:
             _load_custom_specialist_args(args)
         except (ValueError, OSError) as exc:
             parser.error(str(exc))
-        return asyncio.run(_run_optimize(args))
+        with gpu_power_restore_guard():
+            return asyncio.run(_run_optimize(args))
     if args.command == "recover":
         return _run_recover_session(args)
     parser.print_help()

@@ -46,27 +46,26 @@ _MI355X_PEAK_TFLOPS: dict[str, float] = {
     "fp32": 157.3,
     "float32": 157.3,
 }
+#: https://www.amd.com/en/products/graphics/workstations/radeon-ai-pro/ai-9000-series/amd-radeon-ai-pro-r9700.html
+_R9700_FP16_MATRIX_TFLOPS = 191.0
+_R9700_FP8_MATRIX_TFLOPS = 383.0
+_R9700_PEAK_TFLOPS: dict[str, float] = {
+    "bf16": _R9700_FP16_MATRIX_TFLOPS,
+    "bfloat16": _R9700_FP16_MATRIX_TFLOPS,
+    "fp16": _R9700_FP16_MATRIX_TFLOPS,
+    "float16": _R9700_FP16_MATRIX_TFLOPS,
+    "fp8": _R9700_FP8_MATRIX_TFLOPS,
+    "float8_e4m3fn": _R9700_FP8_MATRIX_TFLOPS,
+    "float8_e5m2": _R9700_FP8_MATRIX_TFLOPS,
+    "fp32": 47.8,
+    "float32": 47.8,
+}
 HW_SPECS: dict[str, dict[str, Any]] = {
-    "mi300x": {
-        "hbm_gb": 192.0,
-        "hbm_bw_gbps": 5300.0,
-        "peak_tflops": _MI300X_PEAK_TFLOPS,
-    },
-    "mi308x": {
-        "hbm_gb": 192.0,
-        "hbm_bw_gbps": 5300.0,
-        "peak_tflops": _MI300X_PEAK_TFLOPS,
-    },
-    "mi325x": {
-        "hbm_gb": 256.0,
-        "hbm_bw_gbps": 6000.0,
-        "peak_tflops": _MI300X_PEAK_TFLOPS,
-    },
-    "mi355x": {
-        "hbm_gb": 288.0,
-        "hbm_bw_gbps": 8000.0,
-        "peak_tflops": _MI355X_PEAK_TFLOPS,
-    },
+    "mi300x": {"hbm_gb": 192.0, "hbm_bw_gbps": 5300.0, "peak_tflops": _MI300X_PEAK_TFLOPS},
+    "mi308x": {"hbm_gb": 192.0, "hbm_bw_gbps": 5300.0, "peak_tflops": _MI300X_PEAK_TFLOPS},
+    "mi325x": {"hbm_gb": 256.0, "hbm_bw_gbps": 6000.0, "peak_tflops": _MI300X_PEAK_TFLOPS},
+    "mi355x": {"hbm_gb": 288.0, "hbm_bw_gbps": 8000.0, "peak_tflops": _MI355X_PEAK_TFLOPS},
+    "r9700": {"hbm_gb": 32.0, "hbm_bw_gbps": 640.0, "peak_tflops": _R9700_PEAK_TFLOPS},
 }
 
 

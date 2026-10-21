@@ -218,7 +218,7 @@ def _sanitize_value(value: Any, *, key: str = "", allow_absolute: bool = False) 
     if _is_secret_key(key):
         return _DROP
     if key == "extra_server_args":
-        return sanitize_publish_server_args(str(value or ""))
+        return sanitize_publish_server_args(value)
     if key == "extra_envs":
         return sanitize_publish_env_mapping(value if isinstance(value, Mapping) else None)
     if isinstance(value, Mapping):

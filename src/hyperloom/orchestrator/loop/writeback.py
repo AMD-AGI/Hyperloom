@@ -13,6 +13,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Mapping, NamedTuple
 import yaml
 from hyperloom.common.coerce import to_float, to_str_list
+from hyperloom.common.perf_metric import constraint_fields, stamp_output_per_gpu, with_output_per_gpu
 from hyperloom.common.env import is_truthy
 from hyperloom.inference_optimizer.breakdown.recorder import enablement_event
 from hyperloom.orchestrator.lever import (
@@ -1192,7 +1193,7 @@ class WritebackCollaborator(GeakRevalidation, LaunchIdentity):
         """
         if self.shared_state.baseline_tput <= 0:
             return False
-        graded_source = _graded_source(measurement, new_tput)
+        graded_source = with_output_per_gpu(_graded_source(measurement, new_tput), self.shared_state.tp)
         graded = resolve_graded_comparison(self.shared_state, graded_source, against_baseline=True)
         if not graded.comparable:
             log.info("cumulative gain held: measurement not comparable (%s)", graded.degrade_reason)
@@ -2181,8 +2182,6 @@ class WritebackCollaborator(GeakRevalidation, LaunchIdentity):
         outcome: _PromoteOutcome,
     ) -> None:
         """Promote a baseline result: anchor tput / accuracy / config and bootstrap PRELUDE."""
-        from hyperloom.common.perf_metric import stamp_output_per_gpu
-
         stamp_output_per_gpu(result, self.shared_state.tp)
         changed = False
         tput = result.get("output_throughput")
@@ -2427,8 +2426,6 @@ class WritebackCollaborator(GeakRevalidation, LaunchIdentity):
 
     def _anchor_current_best(self, result: dict) -> None:
         """Make the anchor run the session's ``current_best``."""
-        from hyperloom.common.perf_metric import constraint_fields
-
         tput = result.get("output_throughput")
         warmup_anchor = result.get("warmup_round_tput")
         measured = float(tput) if isinstance(tput, (int, float)) else None
