@@ -61,6 +61,8 @@ def resolve_campaign(
 
     state_path = campaign_store.root / "run_state.json"
     pending_retry = not resume and campaign_store.exists() and not state_path.is_file()
+    # ``normalize_kernel_backend_name`` already returns the bare backend key, so this is the name the operator
+    # asked for, spelled canonically.
     requested_backend = (inputs.kernel_backend or "").strip() or env_backend_override()
     resolved_kernel_backend = resolve_kernel_backend_override(requested_backend) if requested_backend else ""
     if resolved_kernel_backend != requested_backend:
