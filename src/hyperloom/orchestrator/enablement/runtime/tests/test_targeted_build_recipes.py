@@ -190,6 +190,16 @@ def _vllm_action(**kw):
     return TargetedBuildAction(**base)
 
 
+def _sglang_python_dir(worktree):
+    """An SGLang checkout's ``python/``, whose pyproject declares a ROCm extra."""
+    python_dir = worktree / "python"
+    python_dir.mkdir(parents=True, exist_ok=True)
+    (python_dir / "pyproject.toml").write_text(
+        "[project.optional-dependencies]\nsrt_hip = ['torch']\n", encoding="utf-8"
+    )
+    return python_dir
+
+
 def _patch_isolation(monkeypatch, worktree, venv):
     import hyperloom.agents.framework.isolation as iso_mod
 
@@ -515,7 +525,7 @@ def test_driver_main_missing_plan_writes_error(tmp_path):
 def test_sgl_kernel_build_success(monkeypatch, tmp_path):
     wt = tmp_path / "worktree"
     (wt / "sgl-kernel").mkdir(parents=True)
-    (wt / "python").mkdir()
+    _sglang_python_dir(wt)
     (wt / "sgl-kernel" / "sgl_kernel_ext.so").write_bytes(b"\x7fELF")
     venv = tmp_path / "venv"
     (venv / "bin").mkdir(parents=True)
@@ -537,7 +547,7 @@ def test_sgl_kernel_build_success(monkeypatch, tmp_path):
 def test_sgl_kernel_build_missing_gpu_arch_fails(monkeypatch, tmp_path):
     wt = tmp_path / "wt"
     (wt / "sgl-kernel").mkdir(parents=True)
-    (wt / "python").mkdir()
+    _sglang_python_dir(wt)
     venv = tmp_path / "venv"
     (venv / "bin").mkdir(parents=True)
     _patch_isolation(monkeypatch, wt, venv)
@@ -556,7 +566,7 @@ def test_sgl_kernel_build_missing_gpu_arch_fails(monkeypatch, tmp_path):
 def test_sgl_kernel_build_compile_error(monkeypatch, tmp_path):
     wt = tmp_path / "wt"
     (wt / "sgl-kernel").mkdir(parents=True)
-    (wt / "python").mkdir()
+    _sglang_python_dir(wt)
     venv = tmp_path / "venv"
     (venv / "bin").mkdir(parents=True)
     _patch_isolation(monkeypatch, wt, venv)
@@ -574,7 +584,7 @@ def test_sgl_kernel_build_compile_error(monkeypatch, tmp_path):
 def test_sgl_kernel_build_abi_mismatch(monkeypatch, tmp_path):
     wt = tmp_path / "wt"
     (wt / "sgl-kernel").mkdir(parents=True)
-    (wt / "python").mkdir()
+    _sglang_python_dir(wt)
     venv = tmp_path / "venv"
     (venv / "bin").mkdir(parents=True)
     _patch_isolation(monkeypatch, wt, venv)
@@ -589,32 +599,32 @@ def test_sgl_kernel_build_abi_mismatch(monkeypatch, tmp_path):
     assert result.failure_class in ("abi_mismatch", "preflight_toolchain")
 
 
-def test_sgl_kernel_build_pyproject_toml_copied(monkeypatch, tmp_path):
-    """setup_rocm.py install must not fail when pyproject_other.toml is present."""
+def test_sgl_kernel_build_installs_sglang_with_its_rocm_extra(monkeypatch, tmp_path):
     wt = tmp_path / "wt"
     (wt / "sgl-kernel").mkdir(parents=True)
-    (wt / "python").mkdir()
-    (wt / "python" / "pyproject_other.toml").write_text("[project]\nname='sglang'\n")
+    python_dir = _sglang_python_dir(wt)
     (wt / "sgl-kernel" / "sgl_kernel_ext.so").write_bytes(b"ELF")
     venv = tmp_path / "venv"
     (venv / "bin").mkdir(parents=True)
     _patch_isolation(monkeypatch, wt, venv)
+    installed: list[str] = []
+    rocm_run = _make_rocm_run()
 
-    result = run_sgl_kernel_build(
-        _sgl_action(),
-        str(tmp_path / "attempt"),
-        run=_make_rocm_run(),
-        disk_preflight_fn=_noop_disk,
-    )
+    def _run(argv, **kw):
+        if argv[1:4] == ["-m", "pip", "install"]:
+            installed.append(argv[-1])
+        return rocm_run(argv, **kw)
+
+    result = run_sgl_kernel_build(_sgl_action(), str(tmp_path / "attempt"), run=_run, disk_preflight_fn=_noop_disk)
     assert result.ok
-    assert (wt / "python" / "pyproject.toml").exists()
+    assert installed == [f"{python_dir}[srt_hip]"]
 
 
 def test_sgl_kernel_import_probe_gate(monkeypatch, tmp_path):
     """An sgl-kernel install that does not import is not a successful build."""
     wt = tmp_path / "wt"
     (wt / "sgl-kernel").mkdir(parents=True)
-    (wt / "python").mkdir()
+    _sglang_python_dir(wt)
     venv = tmp_path / "venv"
     (venv / "bin").mkdir(parents=True)
     _patch_isolation(monkeypatch, wt, venv)
@@ -639,7 +649,7 @@ def test_sgl_kernel_runtime_python_exe_set(monkeypatch, tmp_path):
     """sgl-kernel build must set runtime_python_exe and entrypoint_bin_dir."""
     wt = tmp_path / "worktree"
     (wt / "sgl-kernel").mkdir(parents=True)
-    (wt / "python").mkdir()
+    _sglang_python_dir(wt)
     (wt / "sgl-kernel" / "sgl_kernel_ext.so").write_bytes(b"\x7fELF")
     venv = tmp_path / "venv"
     (venv / "bin").mkdir(parents=True)
@@ -660,7 +670,7 @@ def test_sgl_kernel_runtime_python_exe_set(monkeypatch, tmp_path):
 def test_sgl_kernel_source_pr_url_in_installed_versions(monkeypatch, tmp_path):
     wt = tmp_path / "wt"
     (wt / "sgl-kernel").mkdir(parents=True)
-    (wt / "python").mkdir()
+    _sglang_python_dir(wt)
     (wt / "sgl-kernel" / "sgl_ext.so").write_bytes(b"\x7fELF")
     venv = tmp_path / "venv"
     (venv / "bin").mkdir(parents=True)
