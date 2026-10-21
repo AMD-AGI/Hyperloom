@@ -31,7 +31,7 @@ from hyperloom_multibranch.contracts.toolbox import RequestRejected, WorkloadKin
 
 # Every purpose whose result the InferenceX rule gate reads an eval score from: explore and confirm are compared,
 # integration and final are checked (accuracy_passes), baseline sets the accuracy bar (write_inferencex_baseline).
-ACCURACY_PURPOSES = (Purpose.BASELINE, Purpose.EXPLORE, Purpose.CONFIRM, Purpose.INTEGRATION, Purpose.FINAL)
+_ACCURACY_PURPOSES = (Purpose.BASELINE, Purpose.EXPLORE, Purpose.CONFIRM, Purpose.INTEGRATION, Purpose.FINAL)
 
 
 def backend_kind(kind: TestKind) -> str:
@@ -145,7 +145,7 @@ class Acceptance:
         accepted request records it) rather than refusing. AgentX campaigns and every other purpose are unchanged.
         """
 
-        if self._workload is WorkloadKind.INFERENCEX and request.purpose in ACCURACY_PURPOSES and not request.accuracy:
+        if self._workload is WorkloadKind.INFERENCEX and request.purpose in _ACCURACY_PURPOSES and not request.accuracy:
             return replace(request, accuracy=True)
         return request
 

@@ -502,7 +502,8 @@
           "minimum": 0
         },
         "decode_pass": {
-          "type": "boolean"
+          "type": "boolean",
+          "description": "Removed: read and ignored, so a sheet written while the greedy decode pass existed still parses."
         }
       }
     },

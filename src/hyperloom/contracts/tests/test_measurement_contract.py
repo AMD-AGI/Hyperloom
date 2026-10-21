@@ -395,6 +395,19 @@ def test_a_document_written_before_the_warnings_loads_with_none() -> None:
     assert TestResult.from_document(document).nonfatal_warnings == ()
 
 
+def test_a_document_written_while_the_decode_pass_existed_loads_and_drops_its_two_keys() -> None:
+    plain = _result(nonfatal_warnings=("decode_pass_failed:http_500",)).to_document()
+    old = {**plain, "decode_outputs": "decode/outputs.jsonl", "decode_identity": "sha256:ab|temperature=0|top_k=1"}
+
+    loaded = TestResult.from_document(old)
+
+    assert loaded == TestResult.from_document(plain)
+    assert "decode_outputs" not in loaded.to_document() and "decode_identity" not in loaded.to_document()
+    # the old validation ("both set or both empty") judged a half-set pair; nothing reads the pair now
+    assert TestResult.from_document({**plain, "decode_outputs": "decode/outputs.jsonl"}) == loaded
+    assert TestResult.from_document({**plain, "decode_outputs": "", "decode_identity": ""}) == loaded
+
+
 @pytest.mark.parametrize("bad", [("ok", 3), "a string", ["list"], (None,)])
 def test_warnings_must_be_a_tuple_of_strings(bad: object) -> None:
     with pytest.raises(MeasurementError, match="nonfatal_warnings must be a tuple of strings"):

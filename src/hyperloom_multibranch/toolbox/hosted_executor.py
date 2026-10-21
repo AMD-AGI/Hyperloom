@@ -44,7 +44,6 @@ from hyperloom.contracts.measurement import (
     Validity,
 )
 from hyperloom.measure.fake_gain import PREFIX_CACHE_OFF_ERROR_CLASS, baseline_prefix_cache_refusal
-from hyperloom.measure.decode import OUTPUTS_PATH, DecodePass, DecodePassError, parse_outputs
 from hyperloom.measure.failures import Disposition, classify_test_failure
 from hyperloom.measure.archive import ArchiveError
 from hyperloom.measure.bundle import RecordedBundle, ResultRejected
@@ -58,10 +57,9 @@ from hyperloom.measure.socket import RoundOutcome, RoundPlan, TestCall, TestMeta
 from hyperloom.orchestrator.actions.executors.benchmark_result import extract_benchmark_measurement
 from hyperloom_multibranch.contracts.gate import ResultUnverified
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
-from hyperloom_multibranch.toolbox.acceptance import ACCURACY_PURPOSES, backend_kind
+from hyperloom_multibranch.toolbox.acceptance import backend_kind
 from hyperloom_multibranch.toolbox.attempts import MeasurementRefused, TestJob
 from hyperloom_multibranch.toolbox.reverify import (
-    first_decode_difference,
     first_hash_difference,
     first_value_difference,
     first_warning_difference,
@@ -207,17 +205,6 @@ class HostedExecutor:
             ),
             avoid_nodes=tuple(job.avoid_nodes),
             attachments=request.attachments if request.kind is TestKind.REPRO else (),
-            decode_pass=self._decodes(request, accepted),
-        )
-
-    def _decodes(self, request: TestRequest, accepted: AcceptedMeasurement) -> bool:
-        """Whether the test carries the greedy decode pass: an InferenceX test of one point that evaluates accuracy."""
-        return (
-            self._workload is WorkloadKind.INFERENCEX
-            and request.accuracy
-            and request.purpose in ACCURACY_PURPOSES
-            and request.kind in (TestKind.TEST, TestKind.ACCURACY)
-            and len(accepted.points) == 1
         )
 
     # -- the outcome -----------------------------------------------------------------------------------------------
@@ -241,7 +228,6 @@ class HostedExecutor:
         rounds, accuracy = _measured_values(request, accepted, outcome) if failure is None else ((), ())
         location = self._profile_location(call) if failure is None and request.kind is TestKind.PROFILE else ""
         verdict = _landed_verdict(call) if failure is None and request.kind is TestKind.REPRO else ""
-        decode = _landed_decode(call) if failure is None and call.decode_pass else None
         gpu_seconds = max(0.0, finished - started) * facts.gpu_count
         return TestResult(
             request_id=request_id,
@@ -258,8 +244,6 @@ class HostedExecutor:
             profile_location=location,
             repro_verdict=verdict,
             nonfatal_warnings=_warnings_of(outcome.rounds) if failure is None else (),
-            decode_outputs=OUTPUTS_PATH if decode else "",
-            decode_identity=decode.identity if decode else "",
             **audit,
         )
 
@@ -353,9 +337,7 @@ def _unlike_values(result: TestResult, derived: Reverified, landed: Path) -> str
     if result.repro_verdict or _lists_verdict(derived.manifest):
         return _repro_difference(result, derived.manifest, landed)
     values = _round_values_at(derived.rounds, tuple(_concurrency_in(text) for text in derived.point_yaml))
-    return first_value_difference(result, values, _scores_of(derived.rounds)) or first_decode_difference(
-        result, derived.manifest, landed
-    )
+    return first_value_difference(result, values, _scores_of(derived.rounds))
 
 
 def _profile_difference(result: TestResult, manifest: ResultManifest) -> str | None:
@@ -429,18 +411,6 @@ def _landed_verdict(call: TestCall) -> str:
         return read_verdict(Path(call.output_dir))
     except ReproError as exc:
         raise MeasurementRefused(f"the verified repro result holds no verdict: {exc}") from None
-
-
-def _landed_decode(call: TestCall) -> DecodePass | None:
-    """The decode pass the verified bundle landed, or ``None`` when the sandbox left none (a pass that failed leaves a
-    warning on the measurement instead); a file that cannot be read is no result."""
-    path = Path(call.output_dir) / OUTPUTS_PATH
-    if not path.is_file():
-        return None
-    try:
-        return parse_outputs(path.read_text(encoding=_UTF8))
-    except (DecodePassError, OSError, ValueError) as exc:
-        raise MeasurementRefused(f"the verified result holds an unreadable decode pass: {exc}") from None
 
 
 def _refuse_unless_measured(outcome: TestOutcome) -> None:

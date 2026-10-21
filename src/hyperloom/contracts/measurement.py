@@ -546,8 +546,8 @@ class TestResult:
     The timing, cost and profile fields are what the notebook asks of the toolbox beyond the measurement itself.
     ``repro_verdict`` is the one outcome of a ``repro`` test: ``""`` for any other test, ``"reproduced"`` or
     ``"not_reproduced"`` for a repro test that ran its case to the end (``SUCCEEDED`` only).
-    ``decode_outputs`` is the bundle-relative path of the greedy decode pass's outputs (``""`` when no pass ran) and
-    ``decode_identity`` the identity of that pass (prompt-set digest and sampling settings), set together.
+    A document written while the greedy decode pass existed may carry ``decode_outputs`` and ``decode_identity``; they
+    mean nothing now and ``from_document`` leaves them out, so such a document still loads.
     """
 
     __test__ = False
@@ -572,8 +572,6 @@ class TestResult:
     profile_location: str = ""
     repro_verdict: str = ""
     nonfatal_warnings: tuple[str, ...] = ()
-    decode_outputs: str = ""
-    decode_identity: str = ""
 
     def __post_init__(self) -> None:
         _text(self.request_id, "request_id")
@@ -594,14 +592,6 @@ class TestResult:
         _optional_number(self.finished_at, "finished_at")
         self._check_repro_verdict()
         _strings(self.nonfatal_warnings, "nonfatal_warnings")
-        self._check_decode()
-
-    def _check_decode(self) -> None:
-        _relative_dir(self.decode_outputs, "decode_outputs")
-        if not isinstance(self.decode_identity, str) or bool(self.decode_outputs) != bool(self.decode_identity):
-            raise MeasurementError("decode_outputs and decode_identity are both set or both empty")
-        if self.decode_outputs and self.validity is not Validity.SUCCEEDED:
-            raise MeasurementError("only a succeeded test has decode outputs")
 
     def _check_repro_verdict(self) -> None:
         if self.repro_verdict not in ("", *REPRO_VERDICTS):
@@ -649,8 +639,6 @@ class TestResult:
             "profile_location": self.profile_location,
             "repro_verdict": self.repro_verdict,
             "nonfatal_warnings": list(self.nonfatal_warnings),
-            "decode_outputs": self.decode_outputs,
-            "decode_identity": self.decode_identity,
         }
 
     @classmethod
@@ -678,8 +666,6 @@ class TestResult:
             profile_location=f.get("profile_location", ""),
             repro_verdict=f.get("repro_verdict", ""),
             nonfatal_warnings=tuple(_items(f.get("nonfatal_warnings", ()), "nonfatal_warnings")),
-            decode_outputs=f.get("decode_outputs", ""),
-            decode_identity=f.get("decode_identity", ""),
         )
 
 

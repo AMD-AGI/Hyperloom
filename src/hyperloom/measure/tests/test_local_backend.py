@@ -377,19 +377,6 @@ def test_a_graded_test_the_run_stops_during_its_warmup_reports_the_stop_and_meas
     assert outcome.returncode == SESSION_TIME_EXHAUSTED_RETURNCODE
 
 
-def test_a_graded_test_decodes_after_its_measured_round(grid, server, tmp_path, monkeypatch):
-    _graded_answers(grid)
-    point = _point(tmp_path, "graded", run_eval="true", ISL=8, OSL=4)
-    monkeypatch.setattr(local, "run_pass", lambda *a, **k: ())
-    monkeypatch.setattr(local, "write_outputs", lambda *a, **k: None)
-    monkeypatch.setattr(local, "vocab_size_of", lambda model: 1000)
-    grid.answers["decode_server"] = grid.result("decode_server", note="server_lifecycle_boot_only")
-
-    _run(_call(tmp_path, point, accuracy=True, kind="accuracy", decode_pass=True, rounds=RoundPlan(warmup_rounds=1)))
-
-    assert [c["grid"][0].name for c in grid.calls] == ["warmup", "test", "decode_server"]
-
-
 @pytest.mark.parametrize(
     ("kwargs", "why"),
     [

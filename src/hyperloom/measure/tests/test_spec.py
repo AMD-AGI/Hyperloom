@@ -260,15 +260,13 @@ def test_the_request_id_in_the_sheet_is_the_one_given() -> None:
     assert MeasurementSpec.from_document(spec_document()).request_id == REQUEST_ID
 
 
-def test_the_decode_pass_flag_is_in_the_sheet_only_when_it_is_on_and_the_schema_knows_it() -> None:
-    plain = spec_document()
-    assert "decode_pass" not in MeasurementSpec.from_document(plain).to_document()["procedure"]
+def test_a_sheet_written_while_the_decode_pass_existed_still_parses_and_the_flag_is_dropped() -> None:
+    old = copy.deepcopy(spec_document())
+    old["procedure"]["decode_pass"] = True
+    assert list(VALIDATOR.iter_errors(old)) == []
 
-    asked = copy.deepcopy(plain)
-    asked["procedure"]["decode_pass"] = True
-    assert list(VALIDATOR.iter_errors(asked)) == []
-    spec = MeasurementSpec.from_document(asked)
-    assert spec.procedure.decode_pass is True and spec.to_document()["procedure"]["decode_pass"] is True
-    asked["procedure"]["decode_pass"] = "yes"
-    with pytest.raises(DocumentError, match="decode_pass"):
-        MeasurementSpec.from_document(asked)
+    spec = MeasurementSpec.from_document(old)
+
+    assert "decode_pass" not in spec.to_document()["procedure"]
+    assert spec.to_document() == MeasurementSpec.from_document(spec_document()).to_document()
+    assert not hasattr(spec.procedure, "decode_pass")

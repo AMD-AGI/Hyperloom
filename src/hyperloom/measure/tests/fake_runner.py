@@ -19,7 +19,8 @@ that printed no readable measurement. ``fake_repro: true`` runs the repro case t
 attachment placement and ``run_case``) against no server, and lists the verdict and log it leaves in the manifest.
 ``fake_attached_env: [NAME, ...]`` places the sheet's attachments as the runner does and lists, in
 ``attached_env.json``, the path each variable holds in the served YAML and the sha256 of the file there.
-``fake_decode: true`` lists the decode pass's outputs (``decode/outputs.jsonl``) the runner would leave.
+``fake_legacy_decode: true`` lists the ``decode/outputs.jsonl`` that a runner of the removed decode pass left, so a
+bundle written then can be verified again.
 ``fake_eval_in_warmup: true`` lays the rounds out as a graded test with a warmup leaves them (one evaluation, in the
 warmup round): a warmup round and the accuracy round on one directory, the measured round on another, and the lm-eval
 results file of ``fake_accuracy`` below the warmup's.
@@ -32,7 +33,6 @@ import json
 import os
 import sys
 import time
-from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -40,13 +40,19 @@ import yaml
 
 from hyperloom.measure import signing
 from hyperloom.measure.attachments import place_attachments, substitute
-from hyperloom.measure.decode import OUTPUTS_PATH, plan_pass, write_outputs
 from hyperloom.measure.repro import REPRO_DIR, find_case, run_case
 from hyperloom.measure.manifest import RESULT_SCHEMA, encode_manifest
 from hyperloom.measure.spec import MeasurementSpec, fingerprint, spec_sha256
 
 REPORT_PATH = "benchmark_fake_20261014_000000/benchmark_report.json"
 TRACE_PATH = "profile/torch_trace/rank0.pt.trace.json.gz"
+#: What a runner of the removed greedy decode pass left in a bundle: a header line, then one line per prompt.
+LEGACY_DECODE_PATH = "decode/outputs.jsonl"
+LEGACY_DECODE_IDENTITY = "sha256:0123456789abcdef|temperature=0|top_k=1"
+LEGACY_DECODE_OUTPUTS = (
+    json.dumps({"decode_pass": {"identity": LEGACY_DECODE_IDENTITY, "prompts": 2, "isl": 8, "max_tokens": 4}})
+    + '\n{"prompt": 0, "tokens": [1, 2]}\n{"prompt": 1, "tokens": [3]}\n'
+).encode()
 
 
 def _atomic(path: Path, data: bytes) -> None:
@@ -134,10 +140,8 @@ def _write_files(out: Path, config: dict[str, Any], mode: str) -> dict[str, byte
         rounds[0]["nonfatal_warnings"] = list(config["fake_warnings"])
     if config.get("fake_rounds") or "fake_accuracy" in config or "fake_warnings" in config:
         files["rounds.json"] = json.dumps(rounds).encode()
-    if config.get("fake_decode"):
-        files[OUTPUTS_PATH] = write_outputs(
-            out / "files", replace(plan_pass(8, 4, 1000), prompts=2), ((1, 2), (3,))
-        ).read_bytes()
+    if config.get("fake_legacy_decode"):
+        files[LEGACY_DECODE_PATH] = LEGACY_DECODE_OUTPUTS
     for relative, data in files.items():
         _atomic(out / "files" / relative, data)
     return files
