@@ -55,8 +55,8 @@ _DECIDING_AXES = ("e2e_norm_intvty_p50", "e2e_norm_intvty_p90")
 def has_graded_axes(perf: Any) -> bool:
     """Whether *perf* carries an axis that exists only when the AgentX verdict ran.
 
-    A synthetic round carries the graded axes as nulls, and rendering the block for it would claim the session was
-    graded on axes it never had; emptiness is how a non-AgentX round says so. Deliberately narrower than the table
+    A synthetic round carries the AgentX-only axes as nulls and at most ``output_tput_per_gpu``, so the block stays
+    hidden: rendering it would claim the session was graded on axes it never had. Deliberately narrower than the table
     it gates: a row being *displayed* beside the objective does not make it evidence the objective was measured.
     """
     axes = as_dict(perf)
