@@ -75,7 +75,6 @@ from hyperloom_multibranch.contracts.llm_prices import price_of
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
 from hyperloom_multibranch.notebook.rsi.archive import ARCHIVE_ENV
 from hyperloom_multibranch.notebook.rsi.frontier import FrontierPolicy
-from hyperloom_multibranch.notebook.rsi.session import named_frontier_choice
 from hyperloom_multibranch.rulegate.critic import LlmCritic, anthropic_critic
 from hyperloom_multibranch.scheduling.budget import MB_DEFAULT_MAX_HOURS, MB_MIN_PRELUDE_HOURS
 from hyperloom_multibranch.scheduling.clock import Clock
@@ -86,6 +85,7 @@ from hyperloom_multibranch.scheduling.lifecycle import (
     SessionHost,
     SessionServices,
     persisted_run,
+    pinned_frontier_choice,
 )
 from hyperloom_multibranch.scheduling.llm import anthropic_completion, default_model
 from hyperloom_multibranch.scheduling.local_peers import (
@@ -307,8 +307,7 @@ def require_frontier_scorer(label: str, metric: str) -> None:
     """Raise ValueError unless ``label`` names a scorer a session of ``metric`` can score with; the scorer pool is
     read beside the archive ``HYPERLOOM_RSI_ARCHIVE`` names."""
 
-    if named_frontier_choice(label, FrontierPolicy(metric), "") is None:
-        raise ValueError(f"--frontier-scorer {label} names no frontier scorer in code or in the scorer pool")
+    pinned_frontier_choice(label, FrontierPolicy(metric))
 
 
 def require_workload_switch(workload: Workload, env: Mapping[str, str]) -> None:

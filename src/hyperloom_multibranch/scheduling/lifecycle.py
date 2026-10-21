@@ -214,11 +214,11 @@ class Session:
         self._metric = settings.workload.metric
         self._budget_seconds = budget_seconds(settings.max_hours)
         # The defaults until PRELUDE's choice replaces it; EXPLORE and CLOSE build their scoring from it.
-        self._frontier = PolicyChoice(
-            FrontierPolicy.for_budget(self._metric, self._budget_seconds), DEFAULT_POLICY, UNCHOSEN_EVIDENCE
+        self._choose(
+            PolicyChoice(
+                FrontierPolicy.for_budget(self._metric, self._budget_seconds), DEFAULT_POLICY, UNCHOSEN_EVIDENCE
+            )
         )
-        # One guard a session, so the scorer's failures count across EXPLORE and CLOSE.
-        self._guard = ScorerGuard()
         # A session is not evidence about itself: a run over a directory whose CLOSE already archived its tree would
         # otherwise calibrate and score against that tree.
         self._history = tuple(tree for tree in archived_history() if tree.session_id != layout.session_id)
@@ -277,7 +277,7 @@ class Session:
         """
 
         candidates = await self._final_candidates()
-        self._frontier = self._recorded_frontier_policy()
+        self._choose(self._recorded_frontier_policy())
         total = budget_seconds(self._settings.max_hours)
         budget = SessionBudget(self._clock.now() - total, total)
         self._in_final = True
@@ -418,18 +418,15 @@ class Session:
         ``--frontier-scorer`` pins, or the defaults under ``--frontier-policy default``."""
 
         defaults = self._frontier.policy
-        pinned = self._settings.frontier_scorer
-        if pinned:
-            choice = named_frontier_choice(pinned, defaults, f"{pinned}: {PINNED_EVIDENCE}")
-            if choice is None:
-                raise ValueError(f"--frontier-scorer {pinned} names no frontier scorer in code or in the scorer pool")
-            self._frontier = choice
+        if self._settings.frontier_scorer:
+            choice = pinned_frontier_choice(self._settings.frontier_scorer, defaults)
         elif self._settings.frontier_policy is FrontierPolicyMode.DEFAULT:
-            self._frontier = PolicyChoice(defaults, DEFAULT_POLICY, FORCED_DEFAULT_EVIDENCE)
+            choice = PolicyChoice(defaults, DEFAULT_POLICY, FORCED_DEFAULT_EVIDENCE)
         else:
             snapshot = await self._notebook.snapshot()
-            self._frontier = await asyncio.to_thread(session_frontier_scorer, snapshot, self._history, defaults)
-        detail = {"label": self._frontier.label, "evidence": self._frontier.evidence}
+            choice = await asyncio.to_thread(session_frontier_scorer, snapshot, self._history, defaults)
+        self._choose(choice)
+        detail = {"label": choice.label, "evidence": choice.evidence, "scorer": choice.scorer.label}
         self._decisions.record(Decision(DecisionKind.PRELUDE, "frontier policy", detail=detail))
         manifest = read_json_strict(self._layout.manifest)
         atomic_write_json(self._layout.manifest, {**manifest, "policy_versions": self._policy_versions()})
@@ -452,9 +449,14 @@ class Session:
             GRACE_KEY: str(SETTLED_TESTS),
         }
 
+    def _choose(self, choice: PolicyChoice) -> None:
+        """Score with ``choice`` from here on, through one guard that counts its scorer's failures across EXPLORE and
+        CLOSE."""
+
+        self._frontier = choice
+        self._guard = ScorerGuard(choice.scorer, on_fallback=self._fell_back)
+
     def _scoring(self) -> FrontierScoring:
-        if self._guard.chosen is not self._frontier.scorer:
-            self._guard = ScorerGuard(self._frontier.scorer, on_fallback=self._fell_back)
         log = self._layout.reports / FRONTIER_LOG
         return FrontierScoring(self._notebook, self._frontier.policy, self._history, log, self._guard)
 
@@ -575,6 +577,16 @@ class Session:
         atomic_write_json(self._layout.manifest, document)
 
 
+def pinned_frontier_choice(label: str, defaults: FrontierPolicy) -> PolicyChoice:
+    """The choice ``--frontier-scorer`` pins with ``label`` under ``defaults``; raise ValueError when no scorer in code
+    or in the scorer pool beside the archive has that label."""
+
+    choice = named_frontier_choice(label, defaults, f"{label}: {PINNED_EVIDENCE}")
+    if choice is None:
+        raise ValueError(f"--frontier-scorer {label} names no frontier scorer in code or in the scorer pool")
+    return choice
+
+
 @dataclass(frozen=True)
 class PersistedRun:
     """A session directory that ended without FINAL, as :meth:`Session.finish` takes it again; ``ended`` is the stop
@@ -647,4 +659,5 @@ __all__ = [
     "SessionServices",
     "code_version",
     "persisted_run",
+    "pinned_frontier_choice",
 ]

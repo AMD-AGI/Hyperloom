@@ -699,7 +699,7 @@ async def test_a_session_scores_its_frontier_with_the_policy_the_calibration_cho
     manifest = json.loads(stage.layout.manifest.read_text())
     assert manifest["policy_versions"][FRONTIER_POLICY_KEY] == CHOSEN_LABEL
     [decided] = [row for row in _decisions(stage) if row["reason"] == "frontier policy"]
-    assert decided["detail"] == {"label": CHOSEN_LABEL, "evidence": CHOSEN_EVIDENCE}
+    assert decided["detail"] == {"label": CHOSEN_LABEL, "evidence": CHOSEN_EVIDENCE, "scorer": FRONTIER_V1_LABEL}
     states = [_judge_state(prompt) for prompt in _judge_prompts(stage)]
     assert states and all(
         state["frontier_policy"] == {"label": CHOSEN_LABEL, "evidence": CHOSEN_EVIDENCE, "scorer": FRONTIER_V1_LABEL}
@@ -725,7 +725,11 @@ async def test_a_pinned_frontier_scorer_scores_the_session_without_asking_the_ca
     assert outcome.exit_code == 0 and calls == []
     assert await _frontier_fingerprint(stage) == BANDIT_LABEL
     [decided] = [row for row in _decisions(stage) if row["reason"] == "frontier policy"]
-    assert decided["detail"] == {"label": BANDIT_LABEL, "evidence": f"{BANDIT_LABEL}: {PINNED_EVIDENCE}"}
+    assert decided["detail"] == {
+        "label": BANDIT_LABEL,
+        "evidence": f"{BANDIT_LABEL}: {PINNED_EVIDENCE}",
+        "scorer": BANDIT_LABEL,
+    }
     lines = _frontier_lines(stage)
     assert lines and all(line["scorer"] == BANDIT_LABEL for line in lines)
     assert all(_judge_state(prompt)["frontier_policy"]["scorer"] == BANDIT_LABEL for prompt in _judge_prompts(stage))
@@ -786,7 +790,11 @@ async def test_frontier_policy_default_keeps_the_defaults_without_asking_the_cal
     assert outcome.exit_code == 0 and calls == []
     assert await _frontier_fingerprint(stage) == DEFAULT_POLICY
     [decided] = [row for row in _decisions(stage) if row["reason"] == "frontier policy"]
-    assert decided["detail"] == {"label": DEFAULT_POLICY, "evidence": FORCED_DEFAULT_EVIDENCE}
+    assert decided["detail"] == {
+        "label": DEFAULT_POLICY,
+        "evidence": FORCED_DEFAULT_EVIDENCE,
+        "scorer": FRONTIER_V1_LABEL,
+    }
     assert _judge_state(_judge_prompts(stage)[0])["frontier_policy"] == {
         "label": DEFAULT_POLICY,
         "evidence": FORCED_DEFAULT_EVIDENCE,
