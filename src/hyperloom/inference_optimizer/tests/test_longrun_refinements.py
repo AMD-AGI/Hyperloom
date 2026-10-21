@@ -85,6 +85,12 @@ def test_all_saturated_directions_stop_reloop():
     assert reloop is False
     assert ev["reloop_blocked"] == "all_directions_saturated"
 
+    st.last_conc_sweep = {"status": "succeeded", "summary": {"successful_pairs": 1}}
+    target, reason, evidence = ps.compute_next_phase(st)
+    assert (target, reason) == (ps.PHASE_CLOSE, "global_converged")
+    assert evidence["terminal"] is True
+    assert evidence["saturated_directions"] == ["comm_specialist", "kernel_switch_specialist"]
+
 
 def test_saturation_convergence_is_always_enabled():
     st = _sweep_state(macro_cycle=2, cycle_delta=1.0, no_gain_streak=0)

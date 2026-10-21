@@ -157,7 +157,9 @@ this reference is partial — `breakdown/exporter.py` is authoritative.
 - New exports carry `hyperloom.session_breakdown.v6.1`. 6.1 changes three
   things inside the 6 major, a declared exception to the major-bump rule: it
   renames one key, removes keys no producer populated (disposition: removed in
-  6.1, never populated), and reports `attributed_gain_pct`,
+  6.1, never populated) or that only carried a constant (`roofline_measured`,
+  the baseline action's `convergence`; disposition: removed in 6.1, constant),
+  and reports `attributed_gain_pct`,
   `unattributed_gain_pct` and run `empty` as null when unmeasured or not
   provided. `throughput_tok_s_per_gpu` in `outcome.baseline`, `outcome.final`
   and the `baseline` event measurement is now `output_throughput`, and the old key is

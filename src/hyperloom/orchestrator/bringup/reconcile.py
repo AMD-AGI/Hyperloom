@@ -106,6 +106,8 @@ class ReconcileLinks:
         resources: The gate's resource facts; ``None`` skips the update.
         proposals: Returns the in-memory pending proposals, so a durable
             timeout deny also reaches the copy the loop consults.
+        drop_proposal: Settles a timed-out pending proposal as dropped on the
+            framework timeline, as a Critic reject would.
         session_dir: Where SharedState is saved after a terminal is set.
         result_pending: Whether a terminal task's result is still to be
             booked by the dispatcher; ``None`` treats every terminal row
@@ -114,6 +116,7 @@ class ReconcileLinks:
 
     resources: Any = None
     proposals: Callable[[], Mapping[str, Any]] | None = None
+    drop_proposal: Callable[[Any, str], None] | None = None
     session_dir: Any = None
     result_pending: Callable[[str], bool] | None = None
 
@@ -146,7 +149,6 @@ class ReconcileReport:
         settled: ``(round_id, outcome)`` for every round this pass ended.
         handed_off: Rounds moved onto the successor that owes their result.
         failed_tasks: Task ids marked failed on proof their process is gone.
-        denied_reviews: Proposal ids denied on the review TTL.
         closed_windows: Revalidation task ids whose window the pass closed.
         failures: Rules that raised, by name.
     """
@@ -156,14 +158,13 @@ class ReconcileReport:
     settled: list[tuple[str, str]] = field(default_factory=list)
     handed_off: list[str] = field(default_factory=list)
     failed_tasks: list[str] = field(default_factory=list)
-    denied_reviews: list[str] = field(default_factory=list)
     closed_windows: list[str] = field(default_factory=list)
     failures: list[str] = field(default_factory=list)
 
     @property
     def acted(self) -> bool:
-        """bool: Whether the pass changed anything worth logging."""
-        return bool(self.settled or self.handed_off or self.failed_tasks or self.denied_reviews or self.closed_windows)
+        """bool: Whether the pass changed a round, task or window; a review deny logs itself."""
+        return bool(self.settled or self.handed_off or self.failed_tasks or self.closed_windows)
 
 
 class Reconciler:
@@ -203,6 +204,7 @@ class Reconciler:
         self._shared_state = shared_state
         self._resources = links.resources
         self._proposals = links.proposals
+        self._drop_proposal = links.drop_proposal
         self._session_dir = links.session_dir
         self._result_pending = links.result_pending
         self.terminal_holder_cap_sec = max(0.0, float(limits.terminal_holder_cap_sec))
@@ -235,11 +237,10 @@ class Reconciler:
         self.last_report = report
         if report.acted:
             log.info(
-                "RECONCILE: settled=%s handed_off=%s failed_tasks=%d denied_reviews=%d leases_reaped=%d",
+                "RECONCILE: settled=%s handed_off=%s failed_tasks=%d leases_reaped=%d",
                 report.settled,
                 report.handed_off,
                 len(report.failed_tasks),
-                len(report.denied_reviews),
                 report.leases_reaped,
             )
         return report
@@ -255,16 +256,10 @@ class Reconciler:
             age = float(now_unix) - _unix_of(row["ts"])
             if age < self.review_ttl_sec:
                 continue
-            msg_id = str(row["msg_id"])
-            if await self._author_timeout_deny(msg_id, str(row["from_agent"]), age=age, now_unix=now_unix):
-                report.denied_reviews.append(msg_id)
+            await self._author_timeout_deny(str(row["msg_id"]), str(row["from_agent"]), age=age, now_unix=now_unix)
 
-    async def _author_timeout_deny(self, msg_id: str, to_agent: str, *, age: float, now_unix: float) -> bool:
-        """Write the coordinator's timeout deny, unless a verdict beat it there.
-
-        Returns:
-            bool: Whether this call wrote the verdict.
-        """
+    async def _author_timeout_deny(self, msg_id: str, to_agent: str, *, age: float, now_unix: float) -> None:
+        """Write the coordinator's timeout deny, unless a verdict beat it there."""
         payload = json.dumps(
             {
                 "target_proposal_msg_id": msg_id,
@@ -284,16 +279,16 @@ class Reconciler:
                 (uuid.uuid4().hex, "coordinator", to_agent, payload, now_iso(), msg_id),
             )
             applied = cur.rowcount == 1
-        if applied:
-            log.warning("RECONCILE: review timeout denied proposal %s after %.0fs", msg_id, age)
-            self._record_timeout_terminal(msg_id, age=age)
-            if self._proposals is not None:
-                self._proposals().pop(msg_id, None)
-        return applied
+        if not applied:
+            return
+        log.warning("RECONCILE: review timeout denied proposal %s after %.0fs", msg_id, age)
+        pending = self._proposals().pop(msg_id, None) if self._proposals is not None else None
+        self._record_timeout_terminal(msg_id, pending, age=age)
+        if pending is not None and self._drop_proposal is not None:
+            self._drop_proposal(pending, "review_timeout")
 
-    def _record_timeout_terminal(self, msg_id: str, *, age: float) -> None:
+    def _record_timeout_terminal(self, msg_id: str, pending: Any, *, age: float) -> None:
         """Close the proposal's trajectory span: a timeout deny never passes through the verdict handler."""
-        pending = self._proposals().get(msg_id) if self._proposals is not None else None
         action_name = str(getattr(pending, "action_name", "") or "") or None
         record_event(
             EVENT_PROPOSAL,

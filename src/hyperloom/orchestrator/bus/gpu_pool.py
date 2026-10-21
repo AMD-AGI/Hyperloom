@@ -261,17 +261,6 @@ class SpecialistGpuPool:
                 params,
             )
 
-    async def extend(self, task_id: str, ttl_sec: int) -> int:
-        """Push a task's GPU rows out to ``ttl_sec`` from now."""
-        expires_iso = datetime.fromtimestamp(time.time() + max(0, int(ttl_sec)), tz=timezone.utc).isoformat()
-        stamp = now_iso()
-        async with self.db.transaction() as cur:
-            cur.execute(
-                "UPDATE gpu_leases SET expires_at=?, heartbeat_at=? WHERE task_id=?",
-                (expires_iso, stamp, task_id),
-            )
-            return int(cur.rowcount or 0)
-
 
 __all__ = [
     "DEFAULT_GPU_LEASE_TTL_SEC",

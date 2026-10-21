@@ -378,11 +378,10 @@ async def test_an_unanswered_review_is_denied_and_a_verdict_that_arrived_is_not_
             (json.dumps({"target_proposal_msg_id": "m-answered", "verdict": "approve"}),),
         )
 
-    report = await rec.run(_NOW)
+    await rec.run(_NOW)
 
     verdicts = await db.fetchall("SELECT payload FROM events WHERE topic = 'review_verdict' ORDER BY seq")
     decoded = [json.loads(row["payload"]) for row in verdicts]
-    assert report.denied_reviews == ["m-late"]
     assert [(d["target_proposal_msg_id"], d["verdict"]) for d in decoded] == [
         ("m-answered", "approve"),
         ("m-late", TIMEOUT_VERDICT),

@@ -502,11 +502,10 @@ class V6RooflineKernel(TypedDict, total=False):
     the kernel worth optimizing is often a cheap one running at low efficiency,
     which is exactly what a top-N-by-cost cut removes.
 
-    The two analysis routes agree on identity and cost and diverge on
-    provenance: the bypass route measures attainment against a real rocprof
-    ceiling and sets ``roofline_measured`` / ``roofline_attainment_pct``, where
-    TraceLens has only its analytical model. The absent field is itself the
-    answer to "was this number measured"."""
+    The two analysis routes agree on identity and cost and diverge in the
+    tail: the bypass route reports ``roofline_attainment_pct`` from its
+    analytical model, which TraceLens rows do not carry. ``roofline_source``
+    says whether a row's bound came from a model or is a placeholder."""
 
     kernel_id: str
     name: str
@@ -525,11 +524,9 @@ class V6RooflineKernel(TypedDict, total=False):
     roofline_attainment_pct: float | None
     roofline_name: str | None
     roofline_source: str
-    roofline_measured: bool
     suggestion: str
     recommended_actions: list[str]
     reusable_native_kernel: bool
-    rocprof_roofline: dict[str, Any] | None
 
 
 class V6RooflineKernelTable(TypedDict, total=False):

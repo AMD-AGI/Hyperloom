@@ -23,6 +23,7 @@ from typing import Iterable
 from hyperloom.common.env import env_flag
 from hyperloom.common.env_safety import redact_secret_env_values
 
+from ..session.optimization_journal import JOURNAL_FILENAME
 from ..session.paths import is_path_within
 from ..session.session_paths import BRINGUP_SEGMENT, ENABLEMENT_SEGMENT
 
@@ -78,7 +79,7 @@ PACKAGE_GLOBS: tuple[str, ...] = (
     # silently adopt whatever lands there next.
     f"optimization_stack/{ENABLEMENT_SEGMENT}/**",
     "reports/final.md",
-    "reports/optimization_journal.json",
+    f"reports/{JOURNAL_FILENAME}",
     "reports/kernel_optimization_summary.json",
     "reports/kernel_roofline.json",
     "reports/conc_sweep_summary.json",
