@@ -660,6 +660,13 @@ class GeakRevalidation(CoordinatorCollaborator):
         final_error_class: str = "",
         final_error: str = "",
     ) -> None:
+        """Record the terminal revalidation verdict on the kernel timeline event.
+
+        The points that stamp a closed verdict onto ``geak_result`` also release
+        the candidate slot, so the verdict has nowhere else to be read from
+        afterwards. The recorder declines silently when the kernel event has
+        already closed, and the close-out's ``geak_candidate`` carries it then.
+        """
         recorder = self._coord.phase_kernel.timeline()
         if recorder is None:
             return
