@@ -38,7 +38,6 @@ from ..kernel.geak_config import (
 )
 from ..state.shared_state import resolve_graded_comparison, stack_base_params
 from ..state.task_registry import Task
-from ._promote_outcome import _PromoteOutcome
 
 log = _logging.getLogger(__name__)
 
@@ -146,11 +145,7 @@ def _grades_can_rule(
     baseline_grade: GradedComparison,
     current_grade: GradedComparison,
 ) -> bool:
-    """Whether a 2b rebench produced a reading both grades can rule on.
-
-    A round that measured nothing, did not succeed, or whose two grades read different axes says nothing
-    about the stack and goes to the harness replay.
-    """
+    """Whether a 2b rebench produced a reading both grades can rule on."""
     if measured <= 0 or str(result.get("status") or "succeeded") not in {"succeeded", "ok"}:
         return False
     return (
@@ -169,11 +164,7 @@ def _gate_refused(entry: Mapping[str, Any]) -> bool:
 
 
 def _native_rejection_reason(result: Mapping[str, Any], expected_hash: str) -> str:
-    """Why the native gate turned this rebench's own variant down, or ``""`` when it did not.
-
-    A refusal whose fingerprint does not match the one dispatched belongs to another variant of the round
-    and says nothing about this one.
-    """
+    """Why the native gate turned this rebench's own variant down, or ``""`` when it did not."""
     return next(
         (
             str(entry.get("reason") or "native_gate_rejected")
@@ -209,11 +200,7 @@ def _promotion_measurement(res: Mapping[str, Any]) -> Mapping[str, Any]:
 
 
 def _geak_own_speedup(accepted: Mapping[str, Any]) -> float:
-    """GEAK's own within-harness speedup, read on the basis it promoted on.
-
-    It serves only to sanity-check that GEAK claimed a win before the replay measurement becomes the
-    headline.
-    """
+    """GEAK's own within-harness speedup, read on the basis it promoted on."""
     try:
         speedup = float(accepted.get("throughput_speedup") or 0.0)
     except (TypeError, ValueError):
@@ -244,11 +231,7 @@ def _replay_regime(accepted: Mapping[str, Any]) -> _ReplayRegime:
 
 
 def _overlay_survived_replay(overlay: _ReplayOverlay) -> bool:
-    """Whether the kernel overlay was still installable, and still the same one, at replay time.
-
-    A succeeded replay proves the configuration engaged; it proves nothing about the overlay, which is a
-    separate artifact on a path in ``result.json`` and can be gone or inert by then.
-    """
+    """Whether the kernel overlay was still installable, and still the same one, at replay time."""
     if not overlay.path or not geak_overlay_is_loadable(overlay.path):
         return False
     return not overlay.digest_before or _geak_overlay_digest(overlay.path) == overlay.digest_before
@@ -307,11 +290,7 @@ class GeakRevalidation(CoordinatorCollaborator):
         *,
         reason: str,
     ) -> dict[str, Any]:
-        """The explore-executor params that re-measure a GEAK config or overlay product.
-
-        An overlay that cannot install a kernel is dropped and the configuration revalidated without it; a
-        product with nothing left to apply has to go back through GEAK's own harness instead.
-        """
+        """The explore-executor params that re-measure a GEAK config or overlay product."""
         from ..actions.executors._proposal_identity import effective_fingerprint
 
         overlay = product.overlay
@@ -359,11 +338,7 @@ class GeakRevalidation(CoordinatorCollaborator):
         return params
 
     def _geak_rebench_base_params(self, controls: Mapping[str, Any]) -> dict[str, Any]:
-        """The launch the 2b rebench measures the GEAK product on top of.
-
-        A product that replaces the launch args starts from nothing, so the inherited removals have no base
-        left to apply to.
-        """
+        """The launch the 2b rebench measures the GEAK product on top of."""
         base = stack_base_params({**self.shared_state.current_best, **self.current_best_launch_config()})
         base = {
             key: value
@@ -376,18 +351,8 @@ class GeakRevalidation(CoordinatorCollaborator):
             base.pop("base_remove_args", None)
         return base
 
-    async def _rule_on_geak_rebench(
-        self,
-        result: dict,
-        *,
-        task: "Task",
-        outcome: _PromoteOutcome,
-    ) -> None:
-        """Rule on a GEAK (2b) revalidation rebench and publish what it decided.
-
-        A GEAK revalidation must assert config identity and that the optimization engaged before it may
-        stamp ``validated``, else the round replays through the GEAK harness (2a).
-        """
+    async def _rule_on_geak_rebench(self, result: dict, *, task: "Task") -> Verdict:
+        """Rule on a GEAK (2b) revalidation rebench and publish what it decided."""
         # Set by the validated promotion and by the harness replay; a ruling that
         # reaches neither leaves the round unpromoted.
         promoted = False
@@ -450,8 +415,7 @@ class GeakRevalidation(CoordinatorCollaborator):
             result=result,
             extras={"revalidation_decision": decision, "output_throughput": rebench.measured},
         )
-        outcome.verdict = Verdict.ADOPTED if promoted else Verdict.REFUSED
-        outcome.changed = True
+        return Verdict.ADOPTED if promoted else Verdict.REFUSED
 
     def _geak_candidate_slot_status(self) -> str:
         """The status of the candidate slot this revalidation was dispatched for."""
@@ -459,12 +423,7 @@ class GeakRevalidation(CoordinatorCollaborator):
         return str(pending.get("status") or "") if isinstance(pending, dict) else ""
 
     def _read_geak_rebench(self, result: dict) -> _GeakRebench:
-        """Read a 2b rebench round: the variant measured, and what it measured against.
-
-        A variant carries its measurement under one of three keys depending on how it was produced, and a
-        measurement with no throughput of its own falls back to the round's -- so a rebench is never graded
-        against a missing number.
-        """
+        """Read a 2b rebench round: the variant measured, and what it measured against."""
         from hyperloom.common.perf_metric import output_tput_of
 
         best_winner = result.get("best_variant")
@@ -501,12 +460,7 @@ class GeakRevalidation(CoordinatorCollaborator):
         *,
         decision: str,
     ) -> _OverlayReading:
-        """Read whether the kernel overlay a 2b rebench expected survived the run.
-
-        An overlay that no longer loads, or whose digest moved, means the kernel was not in the measurement
-        -- which sends an otherwise validated round to the harness replay rather than letting it stamp a
-        kernel gain.
-        """
+        """Read whether the kernel overlay a 2b rebench expected survived the run."""
         expected_overlay = str((task.params or {}).get("expected_overlay") or "")
         overlay_loaded = True
         got_digest = ""
@@ -672,10 +626,7 @@ class GeakRevalidation(CoordinatorCollaborator):
         )
 
     def _material_verdict(self, rebench: _GeakRebench) -> _MaterialVerdict:
-        """Rule on whether a validated GEAK rebench has material product behind it.
-
-        A rebench that beats current_best is only a KERNEL gain when GEAK actually produced something.
-        """
+        """Rule on whether a validated GEAK rebench has material product behind it."""
         pending_summary, current_best = rebench.candidate, rebench.current_best
         stack_now = self.shared_state.optimization_stack or []
         has_prior_geak_e2e = any(isinstance(e, dict) and e.get("action") == "geak_e2e" for e in stack_now)
@@ -899,11 +850,7 @@ class GeakRevalidation(CoordinatorCollaborator):
         *,
         reason: str,
     ) -> dict[str, Any]:
-        """Write the headline a succeeded 2a replay earns; report what it settled.
-
-        The leaderboard number is the measured same-harness total rather than GEAK's self-reported speedup,
-        because the launch-script replay engages the optimized config by construction.
-        """
+        """Write the headline a succeeded 2a replay earns; report what it settled."""
         measured = _geak_sweep_measured_tput(res)
         if measured is None:
             log.warning("geak 2a: succeeded sweep but no measurable throughput; candidate stays pending")

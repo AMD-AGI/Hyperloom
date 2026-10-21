@@ -4,9 +4,14 @@
 """Coordinator result writeback: settle finished tasks into SharedState and rebuild that state on resume."""
 
 from __future__ import annotations
+import argparse
+import hashlib
+import json
 import os
+import shlex
 import time
 import uuid
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,6 +20,10 @@ import yaml
 from hyperloom.common.coerce import to_float, to_str_list
 from hyperloom.common.perf_metric import constraint_fields, stamp_output_per_gpu, with_output_per_gpu
 from hyperloom.common.env import is_truthy
+from hyperloom.common.launch_log_evidence import (
+    launch_argv_from_log,
+    observed_sglang_server_identity_from_log,
+)
 from hyperloom.inference_optimizer.breakdown.recorder import enablement_event
 from hyperloom.orchestrator.lever import (
     FRAMEWORK_STACK_ACTION,
@@ -57,6 +66,7 @@ from hyperloom.inference_optimizer.grid_server_args import (
     dedupe_extra_server_args,
     merge_cumulative_extra_server_args,
 )
+from ..kernel.geak_config import _geak_overlay_digest
 from ..state.round_store import ABANDONED, BOOTED, FAILED
 from ..state.task_registry import Task
 from ..actions.executors.benchmark_result import is_valid_measurement
@@ -76,8 +86,6 @@ from .proposals import PendingProposal
 from ..measurement.integrate_performance import integrate_measurement_fields
 from ..measurement.runtime_findings import KEEP_REASON_CORRECTNESS_FIX
 from ._geak_revalidation import GeakRevalidation
-from ._launch_identity import LaunchIdentity
-from ._promote_outcome import _PromoteOutcome
 
 if TYPE_CHECKING:
     from hyperloom.common.perf_metric import GradedComparison
@@ -220,12 +228,7 @@ def _patch_member_list(raw: Any) -> list[Any]:
 
 
 def _declared_patch_members(result: Mapping[str, Any], params: Mapping[str, Any]) -> list[Any] | None:
-    """The patch members a settled KEEP names, or ``None`` when it names no field at all.
-
-    An executor verdict's ``patches_applied`` is authoritative, including an explicit empty list left after
-    every candidate was rejected: a field that names nothing is still an answer, and the workspace must not
-    be searched behind it.
-    """
+    """The patch members a settled KEEP names, or ``None`` when it names no field at all."""
     if "patches_applied" in result:
         return _patch_member_list(result.get("patches_applied"))
     declared: list[Any] = []
@@ -294,10 +297,7 @@ def _keep_origin_provenance(result: Mapping[str, Any], sources: list[Path], *, r
 
 
 def _profile_trace_path(result: Mapping[str, Any]) -> Any:
-    """The trace a profile round produced, surfaced so Orch hands trace_analyze a real path.
-
-    A round whose trace input was never ready has none, whatever files it left behind.
-    """
+    """The trace a profile round produced, surfaced so Orch hands trace_analyze a real path."""
     if result.get("trace_input_ready") is False:
         return None
     return result.get("main_trace_path") or (result.get("trace_files") or [None])[0]
@@ -316,11 +316,7 @@ def _unstageable_patch_sources(row: Mapping[str, Any]) -> list[str]:
 
 
 def _integrate_keep_tput(result: Mapping[str, Any], measurement: Mapping[str, Any]) -> float | None:
-    """The throughput an integrate KEEP is promoted on, or ``None`` when it measured none.
-
-    A bench_result of its own outranks the envelope, which keeps the figure the attempt started from under
-    the same name.
-    """
+    """The throughput an integrate KEEP is promoted on, or ``None`` when it measured none."""
     if measurement is not result and "output_throughput" in measurement:
         measured = measurement["output_throughput"]
     else:
@@ -369,8 +365,58 @@ def _is_patch_column_keep(task_params: Mapping[str, Any], result: Mapping[str, A
     return phase in {"EXPLORE", "FRAMEWORK_AGENT"}
 
 
+def _source_snapshot_layers(stack: Any) -> list[dict[str, Any]]:
+    """The ordered source-layer snapshots a stack reconstructs its framework tree from."""
+    from ..source_snapshot import source_layer_overlay_dir, source_layer_reproducible
+
+    return [
+        {
+            "id": str(entry.get("variant_name") or entry.get("name") or ""),
+            # GEAK PYTHONPATHs this value; it is the import root inside the
+            # snapshot, not the snapshot's own top level.
+            "snapshot_dir": source_layer_overlay_dir(entry) if snapshot else "",
+            "framework_root": str(entry.get("framework_root") or ""),
+            "base_sha": str(entry.get("base_sha") or ""),
+            "reproducible": source_layer_reproducible(entry) if snapshot else False,
+        }
+        for entry in (stack or [])
+        if isinstance(entry, dict) and entry.get("scope") == "source_patch"
+        for snapshot in (str(entry.get("source_snapshot") or "").strip(),)
+    ]
+
+
+def _measurement_identity(measurement: Mapping[str, Any]) -> dict[str, Any]:
+    """Which launch a measurement was taken on, and how well that launch is evidenced."""
+    return {
+        "declared_launch_identity": str(
+            measurement.get("declared_launch_identity") or measurement.get("launch_identity") or ""
+        ),
+        "observed_launch_identity": str(measurement.get("observed_launch_identity") or ""),
+        "verification_status": str(measurement.get("identity_verification_status") or "unverified"),
+        "observed_server_identity": dict(measurement.get("observed_server_identity") or {}),
+        "resolved_server_config": dict(measurement.get("resolved_server_config") or {}),
+    }
+
+
 class IntegrateRecoveryIncomplete(RuntimeError):
     """An integration cannot publish a result while its recovery is unconfirmed."""
+
+
+@dataclass
+class _PromoteOutcome:
+    """Mutable carrier threaded through the per-kind promote handlers;
+    ``early_return`` skips the shared audit/save tail (conc_sweep).
+
+    ``verdict`` is the settlement's single answer to "was this adopted";
+    ``adopted_variants`` names, by fingerprint, the explore winners whose lift
+    landed."""
+
+    verdict: Verdict
+    adopted_variants: set[str] = field(default_factory=set)
+    changed: bool = False
+    audit_decision: str | None = None
+    audit_extras: dict[str, Any] = field(default_factory=dict)
+    early_return: bool = False
 
 
 def _source_layer_handles(result: Mapping[str, Any]) -> dict[str, Any]:
@@ -417,11 +463,7 @@ def _baseline_perf_axes(snapshot: Mapping[str, Any] | None) -> dict[str, Any]:
 
 
 def _integrate_verdict(status: str, *, lifted: bool, kept: bool) -> Verdict:
-    """The settlement verdict a finished integrate_patch attempt earns.
-
-    ``kept_inert`` means applied with every switch off: nothing was adopted, yet the patch stays on disk as
-    registered levers, so it is not a failure either.
-    """
+    """The settlement verdict a finished integrate_patch attempt earns."""
     if status == "kept_inert":
         return Verdict.RECORDED
     if kept:
@@ -431,14 +473,19 @@ def _integrate_verdict(status: str, *, lifted: bool, kept: bool) -> Verdict:
     return Verdict.FAILED
 
 
-def _integrate_keep_recipe_delta(result: Mapping[str, Any], task_params: Mapping[str, Any]) -> dict[str, Any]:
-    """The recipe delta a settled integrate_patch KEEP re-applies."""
+def _patch_recipe_delta(result: Mapping[str, Any], declared: Mapping[str, Any]) -> dict[str, Any]:
+    """The recipe delta a settled patch KEEP re-applies.
+
+    ``declared`` carries what the attempt asked for, which is what a control the
+    run did not report back falls through to; a replayed KEEP declares it in the
+    result itself.
+    """
     return {
         "extra_server_args": str(result.get("extra_server_args_applied") or ""),
         "extra_envs": dict(result.get("extra_envs_applied") or {}),
-        "remove_args": to_str_list(result.get("remove_args_applied") or task_params.get("remove_args")),
-        "unset_envs": to_str_list(result.get("unset_envs_applied") or task_params.get("unset_envs")),
-        "args_mode": str(result.get("args_mode") or task_params.get("args_mode") or "append").strip().lower(),
+        "remove_args": to_str_list(result.get("remove_args_applied") or declared.get("remove_args")),
+        "unset_envs": to_str_list(result.get("unset_envs_applied") or declared.get("unset_envs")),
+        "args_mode": str(result.get("args_mode") or declared.get("args_mode") or "append").strip().lower(),
     }
 
 
@@ -483,7 +530,7 @@ def _integrate_keep_variant(
         "task_id": getattr(task, "task_id", "") if task is not None else "",
         "candidate_extra_server_args": str(result.get("extra_server_args_applied") or ""),
         "candidate_extra_envs": dict(result.get("extra_envs_applied") or {}),
-        "recipe_delta": _integrate_keep_recipe_delta(result, task_params),
+        "recipe_delta": _patch_recipe_delta(result, task_params),
         "extra_envs": dict(result.get("extra_envs_applied") or {}),
         "tput": tput,
         **integrate_measurement_fields(measurement),
@@ -535,11 +582,7 @@ class _ResolvedLaunch(NamedTuple):
 
 
 def _is_prebaseline_enablement(task_kind: str, bv: Mapping[str, Any], baseline_tput: Any) -> bool:
-    """Whether this lift is an enablement patch landing before any runnable baseline.
-
-    Such a patch has no runnable reference to grade against, so its configuration is retained without gain
-    attribution.
-    """
+    """Whether this lift is an enablement patch landing before any runnable baseline."""
     return (
         task_kind == "integrate_patch"
         and float(baseline_tput or 0.0) <= 0.0
@@ -549,11 +592,7 @@ def _is_prebaseline_enablement(task_kind: str, bv: Mapping[str, Any], baseline_t
 
 
 def _resolved_launch(previous: Mapping[str, Any], bv: Mapping[str, Any]) -> _ResolvedLaunch:
-    """The cumulative launch a winner lifts ``current_best`` to.
-
-    Every args string passes through :func:`strip_benchmark_harness_flags`, the previous ``current_best``
-    included since it is re-merged onto the winner.
-    """
+    """The cumulative launch a winner lifts ``current_best`` to."""
     candidate_args = strip_benchmark_harness_flags(bv.get("candidate_extra_server_args") or bv.get("extra_server_args"))
     full_args = strip_benchmark_harness_flags(bv.get("extra_server_args"))
     controls_effective = bool(
@@ -576,11 +615,7 @@ def _resolved_launch(previous: Mapping[str, Any], bv: Mapping[str, Any]) -> _Res
 
 
 def _already_stacked(stack: list[Any], request: _LiftRequest, variant_name: Any) -> bool:
-    """Whether the winner's configuration is already applied on the stack.
-
-    Keyed by ``(action, variant_name)`` and by fingerprint, so a rerun under a new name cannot re-apply a
-    config the stack already carries.
-    """
+    """Whether the winner's configuration is already applied on the stack."""
     rows = [row for row in stack if isinstance(row, dict)]
     applied = {(str(row.get("action")), str(row.get("variant_name"))) for row in rows}
     if (request.task_kind, str(variant_name or "")) in applied:
@@ -590,10 +625,7 @@ def _already_stacked(stack: list[Any], request: _LiftRequest, variant_name: Any)
 
 
 def _variant_fingerprint(bv: Mapping[str, Any], candidate_args: str, full_args: str) -> str:
-    """The winner's stable join key, computed from its config when it carries none.
-
-    Breakdown attribution maps an explore gain to its specialist provenance through this key.
-    """
+    """The winner's stable join key, computed from its config when it carries none."""
     recorded = str(bv.get("fingerprint") or "").strip()
     if recorded:
         return recorded
@@ -673,11 +705,7 @@ def _variant_source_layer(bv: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _preserves_measured_eval_trigger(state: Any, result_payload: Mapping[str, Any]) -> bool:
-    """Whether the stored enablement trigger outranks this eval failure's own.
-
-    A run that never executed the eval characterizes nothing: it reports ``accuracy_unavailable`` with no
-    task, metric or source.
-    """
+    """Whether the stored enablement trigger outranks this eval failure's own."""
     if result_payload.get(BASELINE_EVAL_FAILURE_KIND_KEY) != EVAL_KIND_ACCURACY_UNAVAILABLE:
         return False
     if to_float(result_payload.get(BASELINE_EVAL_OBSERVED_ACCURACY_KEY)) is not None:
@@ -785,24 +813,8 @@ def _replayed_explore_variant(result: Mapping[str, Any]) -> dict[str, Any] | Non
     return dict(best)
 
 
-def _replayed_recipe_delta(result: Mapping[str, Any]) -> dict[str, Any]:
-    """The recipe delta a recorded patch KEEP re-applies."""
-    return {
-        "extra_server_args": str(result.get("extra_server_args_applied") or ""),
-        "extra_envs": dict(result.get("extra_envs_applied") or {}),
-        "remove_args": to_str_list(result.get("remove_args_applied") or result.get("remove_args")),
-        "unset_envs": to_str_list(result.get("unset_envs_applied") or result.get("unset_envs")),
-        "args_mode": str(result.get("args_mode") or "append").strip().lower(),
-    }
-
-
 def _replay_origin_fields(result: Mapping[str, Any]) -> dict[str, Any]:
-    """Who a recorded patch KEEP is attributed to: provenance, authoring phase, domain, gap layer.
-
-    A KEEP whose authoring phase was never recorded cannot be republished as a recipe, and neither can an
-    enablement landing: the first because nothing can say which column it belongs to, the second because it
-    describes this host.
-    """
+    """Who a recorded patch KEEP is attributed to: provenance, authoring phase, domain, gap layer."""
     domain = str(result.get("domain") or result.get("source_domain") or "").strip()
     provenance = str(result.get("provenance") or "").strip()
     if domain and not provenance.startswith("specialist:"):
@@ -840,7 +852,7 @@ def _replayed_integrate_variant(result: Mapping[str, Any], tput: float) -> dict[
         "name": specialist_task_id,
         "candidate_extra_server_args": str(result.get("extra_server_args_applied") or ""),
         "candidate_extra_envs": dict(result.get("extra_envs_applied") or {}),
-        "recipe_delta": _replayed_recipe_delta(result),
+        "recipe_delta": _patch_recipe_delta(result, result),
         "extra_envs": dict(result.get("extra_envs_applied") or {}),
         "tput": float(tput),
         **graded_axes_of(bench),
@@ -878,22 +890,6 @@ _WORKLOAD_ARG_COUNTS: dict[str, str] = {
 }
 
 
-def _server_arg_workload_fields(extra_server_args: str) -> dict[str, Any]:
-    """The workload-shape fields a Magpie extra-server-args line declares."""
-    out: dict[str, Any] = {}
-    tokens = extra_server_args.split()
-    for index, token in enumerate(tokens):
-        out.update(_WORKLOAD_ARG_FLAGS.get(token, {}))
-        count_field = _WORKLOAD_ARG_COUNTS.get(token)
-        if count_field is None or index + 1 >= len(tokens):
-            continue
-        try:
-            out[count_field] = int(tokens[index + 1])
-        except ValueError:
-            continue
-    return out
-
-
 def _parse_baseline_workload_extra(yaml_path: str) -> dict[str, Any]:
     """Extract KB workload-tag fields from a baseline-materialized Magpie YAML."""
     try:
@@ -911,7 +907,16 @@ def _parse_baseline_workload_extra(yaml_path: str) -> dict[str, Any]:
             out[key] = value
     envs = bm.get("envs") if isinstance(bm.get("envs"), dict) else {}
     declared = envs.get(server_args_env_name(bm.get("framework")))
-    out.update(_server_arg_workload_fields(declared.strip() if isinstance(declared, str) else ""))
+    tokens = declared.split() if isinstance(declared, str) else []
+    for index, token in enumerate(tokens):
+        out.update(_WORKLOAD_ARG_FLAGS.get(token, {}))
+        count_field = _WORKLOAD_ARG_COUNTS.get(token)
+        if count_field is None or index + 1 >= len(tokens):
+            continue
+        try:
+            out[count_field] = int(tokens[index + 1])
+        except ValueError:
+            continue
     # Torch compile may also be a separate env var.
     if "enable_torch_compile" not in out:
         tc_env = envs.get("ENABLE_TORCH_COMPILE")
@@ -920,7 +925,7 @@ def _parse_baseline_workload_extra(yaml_path: str) -> dict[str, Any]:
     return out
 
 
-class WritebackCollaborator(GeakRevalidation, LaunchIdentity):
+class WritebackCollaborator(GeakRevalidation):
     """Handles result writeback: promotion of measured results, KEEP/REVERT settlement, and resume replay."""
 
     @staticmethod
@@ -1691,11 +1696,7 @@ class WritebackCollaborator(GeakRevalidation, LaunchIdentity):
         result_payload: dict[str, Any],
         err_class: str,
     ) -> dict[str, Any]:
-        """Charge a failed baseline to the streaks and the stop gates; the event it reports.
-
-        A round the run itself stopped -- the session budget reaped it, or the orchestrator cancelled the
-        action -- measured nothing, so it says nothing about whether this baseline boots.
-        """
+        """Charge a failed baseline to the streaks and the stop gates; the event it reports."""
         from ..actions.executors._accuracy_gate import eval_enablement_allowed
         from ..actions.executors._multi_node_env import is_multi_node
 
@@ -1867,12 +1868,7 @@ class WritebackCollaborator(GeakRevalidation, LaunchIdentity):
         return True
 
     def _refuses_graded_winner(self, task_kind: str, bv: Mapping[str, Any], graded: "GradedComparison") -> bool:
-        """Whether grading turns this winner down, logging the reason it was refused.
-
-        AgentX sessions fail closed when the interactivity axis could not apply: the output figure on a
-        degraded pair is diagnostic only, and promoting on it would record a throughput KEEP the session
-        never asked for.
-        """
+        """Whether grading turns this winner down, logging the reason it was refused."""
         from hyperloom.common.perf_metric import VERDICT_KEEP
 
         if not graded.comparable:
@@ -2253,11 +2249,7 @@ class WritebackCollaborator(GeakRevalidation, LaunchIdentity):
         prior_anchor: float,
         promoting_tid: str,
     ) -> None:
-        """Make this measured baseline the session's anchor, unless the anchor is held.
-
-        The anchor is the hot measure round; the cold warmup round is discarded so gain math never mixes a
-        cold "before" with a hot "after".
-        """
+        """Make this measured baseline the session's anchor, unless the anchor is held."""
         measured = float(result.get("output_throughput"))
         if held_reason:
             log.info(
@@ -2277,11 +2269,7 @@ class WritebackCollaborator(GeakRevalidation, LaunchIdentity):
         is_revalidation: bool,
         promoting_tid: str,
     ) -> None:
-        """Close an open enablement revalidation window on this promoted baseline.
-
-        An unrelated baseline promoting while the window is open only anchors the throughput: it must not
-        consume or clear the pending state.
-        """
+        """Close an open enablement revalidation window on this promoted baseline."""
         enablement = self.shared_state.enablement
         tracked_tid = str(getattr(enablement, "revalidation_task_id", "") or "").strip()
         if not bool(getattr(enablement, "validation_pending", False)):
@@ -2399,12 +2387,7 @@ class WritebackCollaborator(GeakRevalidation, LaunchIdentity):
         return changed
 
     def _promote_anchor_round_split(self, result: dict) -> bool:
-        """Promote the anchor's warm and boot wall-clock splits; whether either moved.
-
-        Both are cleared by a later baseline that carries neither, so a stale split can never be subtracted
-        from a fresh total and reported as this workload's boot, and a resumed session with a fresh clock is
-        not held to an earlier leg's shortfall.
-        """
+        """Promote the anchor's warm and boot wall-clock splits; whether either moved."""
         state = self.shared_state
         changed = False
         # Present only on the double-run baseline path; else explore uses the cold anchor.
@@ -2672,12 +2655,7 @@ class WritebackCollaborator(GeakRevalidation, LaunchIdentity):
         outcome.audit_extras = audit_extras
 
     def _anchor_watermark_on_roofline(self, result: dict, task: "Task | None") -> dict[str, Any]:
-        """Re-anchor the watermark step on a succeeded roofline; describe its snapshot.
-
-        The anchor is what stops the watermark firing again until throughput climbs another 10%, so a
-        roofline that produced no analysis leaves it where it is: anchoring on an empty snapshot would buy a
-        whole cycle of silence for one that says nothing.
-        """
+        """Re-anchor the watermark step on a succeeded roofline; describe its snapshot."""
         # Prefer the executor's last_trace_analyze snapshot over the result dict.
         last_ta = self.shared_state.last_trace_analyze or {}
         self.shared_state.roofline_failure_streak = 0
@@ -2783,7 +2761,8 @@ class WritebackCollaborator(GeakRevalidation, LaunchIdentity):
             # A GEAK revalidation (2b) rules on its own rebench and publishes the
             # verdict itself; a native one reconciles the watermark here.
             if bool((task.params or {}).get("geak_fallback")):
-                await self._rule_on_geak_rebench(result, task=task, outcome=outcome)
+                outcome.verdict = await self._rule_on_geak_rebench(result, task=task)
+                outcome.changed = True
                 return
             await self._reconcile_revalidated_watermark(result, stale=stale)
             changed = True
@@ -2833,11 +2812,7 @@ class WritebackCollaborator(GeakRevalidation, LaunchIdentity):
         return recorded
 
     async def _warn_on_stale_revalidation(self, task: "Task") -> bool:
-        """Whether a revalidation measured an older recipe than the one now live.
-
-        A lift since the row was enqueued means the grid ran an older ``current_best``, and crediting it to
-        the newer one is the mismatch CLOSE refuses to publish.
-        """
+        """Whether a revalidation measured an older recipe than the one now live."""
         measured_generation = (task.params or {}).get("recipe_generation")
         working_generation = int(self.shared_state.working_recipe_generation or 0)
         if measured_generation is None or int(measured_generation) == working_generation:
@@ -2906,11 +2881,7 @@ class WritebackCollaborator(GeakRevalidation, LaunchIdentity):
         task: "Task | None",
         outcome: _PromoteOutcome,
     ) -> _ExploreLift:
-        """Enter this round's explore winners and lift the ones that still beat the anchor.
-
-        Winners arrive already graded by the executor, on the decision round that judged them; the lift
-        still refuses one that no longer beats the live anchor.
-        """
+        """Enter this round's explore winners and lift the ones that still beat the anchor."""
         winners = [winner for winner in result.get("winners") or [] if isinstance(winner, dict)]
         self._record_accepted_winners(result, winners)
         gap_canonical_id = str((task.params or {}).get("gap_canonical_id") or "").strip() if task is not None else ""
@@ -3030,10 +3001,7 @@ class WritebackCollaborator(GeakRevalidation, LaunchIdentity):
         *,
         enablement_landing: bool,
     ) -> bool:
-        """Lift a settled integrate_patch KEEP onto current_best; whether it landed.
-
-        A patch landing before any runnable baseline establishes the baseline environment.
-        """
+        """Lift a settled integrate_patch KEEP onto current_best; whether it landed."""
         task_params = (getattr(task, "params", None) or {}) if task is not None else {}
         new_tput = float(measurement.get("output_throughput", result.get("output_throughput")))
         variant = _integrate_keep_variant(result, task, measurement, new_tput)
@@ -3159,11 +3127,7 @@ class WritebackCollaborator(GeakRevalidation, LaunchIdentity):
         }
 
     def _publish_recovered_keeps(self, report: dict[str, Any]) -> None:
-        """Materialise the KB sections the recovered KEEPs owe, once the state is durable.
-
-        The outbox must never publish a config the state file has not made authoritative yet, so a save that
-        failed leaves the sections pending.
-        """
+        """Materialise the KB sections the recovered KEEPs owe, once the state is durable."""
         state = self.shared_state
         resume_state_durable = True
         try:
@@ -3203,6 +3167,338 @@ class WritebackCollaborator(GeakRevalidation, LaunchIdentity):
             idempotency_key=f"resume-stack-revalidate-g{generation}",
         )
         report["fixes"].append({"kind": "queued_resume_stack_rebench", **fix})
+
+    @staticmethod
+    def _handoff_launch_identity(env_spec: Mapping[str, Any]) -> str:
+        """Return a stable identity for the complete GEAK baseline launch."""
+        config = env_spec.get("config") if isinstance(env_spec.get("config"), Mapping) else {}
+        # The recipe PATH is deliberately excluded: a baseline re-run repoints
+        # ``baseline_config_path`` at a new timestamped YAML without re-stamping
+        # current_best, so hashing the path drops the same-config reference for a
+        # byte-identical recipe. The digest already carries the recipe content.
+        payload = {
+            "base_launch_recipe_digest": str(env_spec.get("base_launch_recipe_digest") or ""),
+            "extra_server_args": str(config.get("extra_server_args") or ""),
+            "extra_envs": dict(config.get("extra_envs") or {}),
+            "server_launch_flags": str(config.get("server_launch_flags") or ""),
+            "source_snapshots": list(env_spec.get("source_snapshots") or []),
+            "overlay_pythonpath": str(env_spec.get("overlay_pythonpath") or ""),
+            "overlay_digest": str(env_spec.get("overlay_digest") or ""),
+        }
+        # Keep legacy identities unchanged for launches with default controls.
+        for key in ("remove_args", "unset_envs"):
+            values = sorted(set(to_str_list(config.get(key))))
+            if values:
+                payload[key] = values
+        if str(config.get("args_mode") or "").strip().lower() == "replace":
+            payload["args_mode"] = "replace"
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
+
+    @staticmethod
+    def _launch_recipe_digest(path: str) -> str:
+        """Hash the recipe content so an in-place recipe edit invalidates tput."""
+        try:
+            return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+        except OSError:
+            return ""
+
+    def _measurement_launch_flags(self, measurement: Mapping[str, Any]) -> str:
+        """Read resolved launch flags only from the promoted measurement's evidence."""
+        existing = str(measurement.get("resolved_server_launch_flags") or "").strip()
+        if existing:
+            return existing
+        evidence = measurement.get("launch_evidence")
+        if isinstance(evidence, Mapping):
+            observed = str(evidence.get("observed_server_launch_flags") or "").strip()
+            if observed:
+                return observed
+        framework = (
+            str(
+                (evidence.get("framework") if isinstance(evidence, Mapping) else "")
+                or os.environ.get("FRAMEWORK", "")
+                or "sglang"
+            )
+            .strip()
+            .lower()
+        )
+        paths = [str(measurement.get("server_log_path") or "").strip()]
+        if isinstance(evidence, Mapping):
+            paths.append(str(evidence.get("actual_server_log_path") or "").strip())
+        for key in ("benchmark_workspace", "workspace"):
+            workspace = str(measurement.get(key) or "").strip()
+            if workspace:
+                root = Path(workspace)
+                paths.append(str(root / "server.log"))
+        for path in dict.fromkeys(path for path in paths if path):
+            flags = launch_argv_from_log(path, framework)
+            if flags:
+                return flags
+        return ""
+
+    @staticmethod
+    def _resolved_sglang_server_config(launch_evidence: Mapping[str, Any]) -> dict[str, Any]:
+        """Resolve selected SGLang ``ServerArgs`` fields from declared args.
+
+        A captured command line is preferred evidence. This fallback makes the
+        declaration inspectable when a reused ready server did not emit a fresh
+        CLI line; it is intentionally not treated as observed launch evidence.
+        """
+        if str(launch_evidence.get("framework") or "").strip().lower() != "sglang":
+            return {}
+        raw_args = str(
+            launch_evidence.get("requested_server_args") or launch_evidence.get("requested_server_flags") or ""
+        ).strip()
+        model_path = str(launch_evidence.get("model_path") or "").strip()
+        try:
+            from sglang.srt.server_args import ServerArgs
+
+            parser = argparse.ArgumentParser(add_help=False)
+            ServerArgs.add_cli_args(parser)
+            tokens = shlex.split(raw_args)
+            if model_path and not any(token == "--model-path" or token.startswith("--model-path=") for token in tokens):
+                tokens = ["--model-path", model_path, *tokens]
+            namespace, _unknown = parser.parse_known_args(tokens)
+        except (Exception, SystemExit):  # noqa: BLE001 - optional declared-only evidence
+            return {}
+        fields = (
+            "model_path",
+            "tokenizer_path",
+            "host",
+            "port",
+            "tp_size",
+            "dp_size",
+            "pp_size",
+            "mem_fraction_static",
+            "context_length",
+            "max_total_tokens",
+            "max_running_requests",
+            "attention_backend",
+            "quantization",
+            "dtype",
+            "disable_cuda_graph",
+            "enable_dp_attention",
+            "enable_ep_moe",
+            "chunked_prefill_size",
+            "schedule_policy",
+        )
+        out: dict[str, Any] = {}
+        for field_name in fields:
+            value = getattr(namespace, field_name, None)
+            if isinstance(value, (str, int, float, bool)) or value is None:
+                out[field_name] = value
+        return out
+
+    @staticmethod
+    def _measurement_observed_server_identity(measurement: Mapping[str, Any]) -> dict[str, Any]:
+        """Return archived SGLang ``ServerArgs`` evidence from this measurement only."""
+        evidence = measurement.get("launch_evidence")
+        if isinstance(evidence, Mapping):
+            identity = evidence.get("observed_server_identity")
+            if isinstance(identity, Mapping) and identity:
+                return {str(key): value for key, value in sorted(identity.items())}
+        if str((evidence or {}).get("framework") if isinstance(evidence, Mapping) else "").lower() != "sglang":
+            return {}
+        for path in (
+            str(measurement.get("server_log_path") or ""),
+            str((evidence or {}).get("actual_server_log_path") if isinstance(evidence, Mapping) else ""),
+        ):
+            if path:
+                identity = observed_sglang_server_identity_from_log(path)
+                if identity:
+                    return identity
+        return {}
+
+    @staticmethod
+    def _observed_launch_identity(
+        declared_identity: str,
+        observed_flags: str,
+        observed_server_identity: Mapping[str, Any] | None = None,
+    ) -> str:
+        """Hash actual captured launch data under the declared identity."""
+        if not declared_identity or (not observed_flags and not observed_server_identity):
+            return ""
+        payload = json.dumps(
+            {
+                "declared_launch_identity": declared_identity,
+                "observed_server_launch_flags": observed_flags,
+                "observed_server_identity": dict(observed_server_identity or {}),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return f"sha256:{hashlib.sha256(payload).hexdigest()}"
+
+    @staticmethod
+    def _identity_verification_status(
+        *,
+        expected_identity: str,
+        measurement: Mapping[str, Any],
+    ) -> str:
+        """Classify whether identity rests on observed or declared evidence."""
+        declared_identity = str(measurement.get("declared_launch_identity") or measurement.get("launch_identity") or "")
+        if not expected_identity or declared_identity != expected_identity:
+            return "unverified"
+        evidence = measurement.get("launch_evidence")
+        observed = str(measurement.get("resolved_server_launch_flags") or "").strip()
+        if not observed and isinstance(evidence, Mapping):
+            observed = str(evidence.get("observed_server_launch_flags") or "").strip()
+        observed_server_identity = WritebackCollaborator._measurement_observed_server_identity(measurement)
+        if observed or observed_server_identity:
+            return "verified_observed"
+        if isinstance(evidence, Mapping) and (
+            str(evidence.get("requested_server_args") or "").strip()
+            or bool(evidence.get("requested_server_env"))
+            or str(evidence.get("recipe_digest") or "").strip()
+        ):
+            return "verified_declared_only"
+        return "unverified"
+
+    def _stamp_current_best_measurement(self, evidence: Mapping[str, Any] | None = None) -> None:
+        """Attach the exact promoted config identity to ``current_best``."""
+        cb = self.shared_state.current_best
+        evidence = evidence if isinstance(evidence, Mapping) else {}
+        launch_evidence = evidence.get("launch_evidence") or {}
+        launch_evidence = dict(launch_evidence) if isinstance(launch_evidence, Mapping) else {}
+        measurement = {
+            "schema_version": 2,
+            "tput": float(cb.get("tput") or 0.0),
+            "benchmark_workspace": str(
+                evidence.get("workspace") or evidence.get("single_workspace") or cb.get("workspace") or ""
+            ),
+            "server_log_path": str(
+                evidence.get("server_log_path") or launch_evidence.get("actual_server_log_path") or ""
+            ),
+            "launch_evidence": launch_evidence,
+            "launch_evidence_path": str(evidence.get("launch_evidence_path") or ""),
+        }
+        measurement["resolved_server_launch_flags"] = self._measurement_launch_flags(measurement)
+        observed_server_identity = self._measurement_observed_server_identity(measurement)
+        if observed_server_identity:
+            launch_evidence["observed_server_identity"] = observed_server_identity
+        measurement["observed_server_identity"] = observed_server_identity
+        measurement["resolved_server_config"] = observed_server_identity or self._resolved_sglang_server_config(
+            launch_evidence
+        )
+        declared_identity = str(
+            self.build_env_spec(
+                measurement=measurement,
+                server_launch_flags=measurement["resolved_server_launch_flags"],
+            )["launch_identity"]
+        )
+        measurement["launch_identity"] = declared_identity  # Legacy alias.
+        measurement["declared_launch_identity"] = declared_identity
+        measurement["observed_launch_identity"] = self._observed_launch_identity(
+            declared_identity,
+            measurement["resolved_server_launch_flags"],
+            observed_server_identity,
+        )
+        measurement["identity_verification_status"] = self._identity_verification_status(
+            expected_identity=declared_identity,
+            measurement=measurement,
+        )
+        # Do not publish a partial measurement. All parsing and identity
+        # preparation above is local; these paired assignments are the commit.
+        cb["measurement"] = measurement
+        self.shared_state.current_best_measurement = measurement
+
+    def current_best_launch_config(self) -> dict[str, Any]:
+        """The launch config ``current_best`` was measured on.
+
+        Returns:
+            Server args, envs, removal/replacement controls, and ``final_overlay``.
+        """
+        cb = self.shared_state.current_best
+        args = str(cb.get("extra_server_args") or "").strip()
+        envs: dict[str, str] = {}
+        raw_envs = cb.get("extra_envs")
+        if isinstance(raw_envs, Mapping):
+            for key, value in raw_envs.items():
+                name = str(key)
+                # A ``-``-prefixed key is a server arg; exported as an env the
+                # backend ignores it and the flag is silently lost.
+                if name.startswith("-"):
+                    token = name if value in ("", None) else f"{name}={value}"
+                    args = merge_cumulative_extra_server_args(args, token, "")
+                else:
+                    envs[name] = str(value)
+        return {
+            "extra_server_args": args,
+            "extra_envs": envs,
+            "remove_args": to_str_list(cb.get("remove_args")),
+            "unset_envs": to_str_list(cb.get("unset_envs")),
+            "args_mode": "replace" if str(cb.get("args_mode") or "").strip().lower() == "replace" else "append",
+            "final_overlay": str(cb.get("final_overlay") or "").strip(),
+        }
+
+    def build_env_spec(
+        self,
+        *,
+        measurement: Mapping[str, Any] | None = None,
+        server_launch_flags: str | None = None,
+        server_launch_envs: Mapping[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """Fully-reproducible descriptor of ``current_best``'s launch environment.
+
+        Layers, in the order a consumer must apply them to reconstruct the exact
+        stack ``current_best`` was measured on:
+
+          * ``config``  — cumulative server args + env vars (the reversible layer).
+          * ``source_snapshots`` — ordered durable source-layer snapshots
+            (``scope=source_patch`` entries), each a self-contained directory
+            (see :mod:`source_snapshot`) that reconstructs the patched framework
+            tree independent of the mutable live checkout.
+          * ``overlay_pythonpath`` — the authored-kernel overlay prefix.
+          * ``base_launch_recipe`` — the baseline Magpie recipe to launch from.
+
+        This is the single source of truth the GEAK handoff forwards so the
+        baseline ref is materialized from the SAME layers as ``current_best``
+        (not just its flags/env), closing the cross-harness baseline gap.
+        """
+        cb = self.shared_state.current_best
+        materialized = self.current_best_launch_config()
+        # ``extra_server_args`` remains the current_best delta; ``extra_envs`` is the
+        # current_best delta layered over any recipe launch environment (see below).
+        # Full engine flags must come from the same promoted measurement, not a
+        # search over historical benchmarks with a similar throughput.
+        if not isinstance(measurement, Mapping):
+            stored = self.shared_state.current_best_measurement
+            promoted = stored if isinstance(stored, Mapping) and stored else cb.get("measurement")
+            measurement = promoted if isinstance(promoted, Mapping) else {}
+        if server_launch_flags is None:
+            server_launch_flags = self._measurement_launch_flags(measurement)
+        recipe_path = str(self.shared_state.baseline_config_path or "")
+        env_spec = {
+            "schema_version": 1,
+            "config": {
+                "extra_server_args": materialized.get("extra_server_args") or "",
+                # A launch-time environment the recipe applied itself sits under
+                # the current_best delta, which wins on a shared name.
+                "extra_envs": {**dict(server_launch_envs or {}), **dict(materialized.get("extra_envs") or {})},
+                "remove_args": list(materialized["remove_args"]),
+                "unset_envs": list(materialized["unset_envs"]),
+                "args_mode": materialized["args_mode"],
+                # Authoritative, COMPLETE engine flags (run-specific stripped);
+                # when unavailable, args_mode governs recipe inheritance.
+                "server_launch_flags": server_launch_flags,
+            },
+            # current_best's embedded stack was promoted with its tput. Reading the
+            # mutable global stack here could attach an unrelated source patch after
+            # a resume or partial state write.
+            "source_snapshots": _source_snapshot_layers(cb.get("optimization_stack")),
+            "overlay_pythonpath": materialized.get("final_overlay") or "",
+            "overlay_digest": _geak_overlay_digest(str(materialized.get("final_overlay") or "")),
+            "base_launch_recipe": recipe_path,
+            "base_launch_recipe_digest": self._launch_recipe_digest(recipe_path),
+            # Backward-compatible alias for existing GEAK v2 consumers.
+            "launch_recipe": recipe_path,
+            # Additive evidence record. Consumers can distinguish a captured
+            # launch from a declaration resolved without a new CLI line.
+            "measurement_evidence": dict(measurement.get("launch_evidence") or {}),
+            "measurement_identity": _measurement_identity(measurement),
+        }
+        env_spec["launch_identity"] = self._handoff_launch_identity(env_spec)
+        return env_spec
 
     async def _resume_consistency_pass(self) -> dict[str, Any]:
         """One-shot resume audit + recovery for stack/current_best consistency.
@@ -3736,11 +4032,7 @@ class WritebackCollaborator(GeakRevalidation, LaunchIdentity):
             log.debug("resume: revalidation pending recovery check failed", exc_info=True)
 
     async def _surface_orphaned_keep(self, report: dict[str, Any], kind: str, variant: str, task_id: Any) -> None:
-        """Alert on an explore or framework KEEP the stack lost, without resurrecting it.
-
-        Which stack such a KEEP landed on is known only to the round that ran it, so a replay here cannot
-        tell recovery from re-applying an eviction.
-        """
+        """Alert on an explore or framework KEEP the stack lost, without resurrecting it."""
         report["warnings"].append(
             {"kind": "orphaned_keep", "orphan_kind": kind, "variant": variant, "task_id": task_id}
         )
