@@ -681,7 +681,7 @@ def test_stamp_framework_kb_provenance_noop_when_done_payload_none():
 async def test_kb_writeback_skips_when_no_pr_keys(tmp_path):
     ex = IntegratePatchExecutor(session_dir=tmp_path)
     payload = {"proposal_set": [{"provenance": "specialist:serving:framework"}]}
-    await ex._maybe_write_framework_kb_record(ip.KbLesson("integrated", 1.0), done_payload=payload, extra={})
+    await ex._maybe_write_framework_kb_record(ip._KbLesson("integrated", 1.0), done_payload=payload, extra={})
 
 
 @pytest.mark.asyncio
@@ -708,7 +708,7 @@ async def test_kb_writeback_ignores_payload_level_pr_identity(tmp_path, monkeypa
         "fa_pr_sha": "cafebabe",
         "proposal_set": [{"provenance": "specialist:serving:framework"}],
     }
-    await ex._maybe_write_framework_kb_record(ip.KbLesson("integrated", 1.0), done_payload=payload, extra={})
+    await ex._maybe_write_framework_kb_record(ip._KbLesson("integrated", 1.0), done_payload=payload, extra={})
     assert writes == []
 
 

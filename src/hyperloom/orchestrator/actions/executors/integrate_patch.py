@@ -34,6 +34,7 @@ from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.breakdown.stop_reasons import PATCH_RECOVERY_INCOMPLETE_STOP_REASON
 from hyperloom.inference_optimizer.gpu_types import amd_gpu_dispatch_identity
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
+from hyperloom.inference_optimizer import framework_paths
 from hyperloom.inference_optimizer.framework_paths import (
     framework_apply_tree,
     resolve_framework_tree,
@@ -89,16 +90,10 @@ from ._accuracy_gate import (
     read_eval_probe,
 )
 from ._apply_feedback import ApplyFeedback, build_apply_feedback
-from ._enablement_keep_capture import capture_keep_records
-from ._framework_kb_record import KbLesson, write_framework_lesson
+from ...enablement.recipe import keep_probe, keep_records
+from ...enablement.recipe.projections import project_launch_evidence
 from ._git import _git_head_sha, _run_git_cp
 from ._integrate_attempt import IntegrateAttempt
-from ._integrate_stash import (
-    _git_reset_clean,
-    _git_restore_stash_if_needed,
-    _git_restore_to_head,
-    _git_stash_if_dirty,
-)
 from ._setup_replay import replay_setup_commands
 from .source_tree_identity import new_recovery_record
 from ._patch_source_pr import (
@@ -113,6 +108,7 @@ from ._nogit_patch import (
     _is_within,
 )
 from ...enablement.lane import bind_integrate_to_lane
+from . import _patch_snapshot
 from ._patch_snapshot import _git_commit_kept, _patch_touched_paths
 from hyperloom.inference_optimizer.canonical_fingerprint import canonical_fingerprint
 from ._grid_runner import (
@@ -147,6 +143,12 @@ from ._workload_envs import (
 
 
 log = logging.getLogger(__name__)
+
+
+_HYPERLOOM_AUTO_STASH_MSG = "hyperloom-auto-stash: preserving user changes before candidate run"
+# Deliberately shares no substring with the auto-stash tag: _find_hyperloom_auto_stash
+# matches by message, and a quarantined merge must never be picked up and popped back.
+_HYPERLOOM_QUARANTINE_STASH_MSG = "hyperloom-quarantine: unresolved merge cleared before candidate run"
 
 
 # Two-sided band, in percent of the pre-patch base, that a switch-off parity leg
@@ -573,18 +575,6 @@ def _sole_patch_root(
     return roots.pop() if covered == selected and len(roots) == 1 else None
 
 
-def _edited_framework_tree() -> Path | None:
-    """The tree the session's framework is edited at: the session's root, else its checkout or pip install root."""
-    session_root = resolve_session_framework_root()
-    if session_root and Path(session_root).is_dir():
-        return Path(session_root)
-    framework = os.environ.get("FRAMEWORK", "")
-    if not framework:
-        return None
-    tree = framework_apply_tree(resolve_framework_tree(framework))
-    return tree.root if tree is not None else None
-
-
 def _resolve_framework_root(
     explicit: str | None,
     patch_paths: list[Path] | None = None,
@@ -593,8 +583,8 @@ def _resolve_framework_root(
 ) -> Path | None:
     """Pick one unambiguous framework root under the shared Patch rules.
 
-    A ``recorded_root`` — carried from the authoring stage through
-    ``done_payload["patch_roots"]`` — is authoritative and skips probing
+    A ``recorded_root`` â€” carried from the authoring stage through
+    ``done_payload["patch_roots"]`` â€” is authoritative and skips probing
     entirely.
 
     Without a recorded root, the decision falls through to
@@ -649,7 +639,16 @@ def _resolve_framework_root(
             )
         return resolution.root
 
-    return explicit_path if explicit_path is not None else _edited_framework_tree()
+    if explicit_path is not None:
+        return explicit_path
+    session_root = resolve_session_framework_root()
+    if session_root and Path(session_root).is_dir():
+        return Path(session_root)
+    framework = os.environ.get("FRAMEWORK", "")
+    if not framework:
+        return None
+    tree = framework_apply_tree(resolve_framework_tree(framework))
+    return tree.root if tree is not None else None
 
 
 def _run_git_apply(
@@ -935,6 +934,255 @@ def _git_apply_reverse(
         return False, cp2.stderr.strip()
     return False, f"git apply -R: no matching -p level for {patch_path}"
 
+
+def _find_hyperloom_auto_stash(framework_root: Path) -> str:
+    """Return the newest Hyperloom auto-stash ref, or ``""`` if absent."""
+    cp = _run_git_cp(
+        ["-C", str(framework_root), "stash", "list", "--format=%gd:%gs"],
+        timeout=30.0,
+    )
+    if cp is None:
+        return ""
+    if cp.returncode != 0:
+        return ""
+    for line in cp.stdout.splitlines():
+        ref, _sep, msg = line.partition(":")
+        if ref and _HYPERLOOM_AUTO_STASH_MSG in msg:
+            return ref
+    return ""
+
+
+def _git_quarantine_unmerged(framework_root: Path, paths: list[str]) -> tuple[bool, str]:
+    """Bank unresolved-merge paths in a stash entry that is never popped back.
+
+    ``git stash`` refuses to run at all while the index carries unmerged
+    entries, so they are staged first â€” staging is what marks a conflict
+    resolved â€” and the working-tree content, conflict markers and all, is what
+    gets banked. Recover it with ``git stash list | grep hyperloom-quarantine``.
+
+    Emptying the index is not the same as ending the merge: ``MERGE_HEAD``
+    outlives both the staging and the stash, and while it stands the next
+    ``git commit`` is a *merge* commit. A KEEP would then carry a second parent
+    and silently claim the whole of the other side as accepted work, which is
+    the one thing "every KEEP is a commit, so HEAD is the accepted stack"
+    cannot survive. ``git merge --quit`` forgets the merge without touching the
+    index or the working tree.
+
+    Args:
+        framework_root (Path): The framework repo.
+        paths (list[str]): Repo-relative paths in an unresolved merge state.
+
+    Returns:
+        tuple[bool, str]: ``(ok, error)``; ``error`` is empty on success.
+    """
+    add = _run_git_cp(["-C", str(framework_root), "add", "--", *paths], timeout=60.0)
+    if add is None:
+        return False, "git add failed"
+    if add.returncode != 0:
+        return False, f"git add rc={add.returncode}: {add.stderr.strip()}"
+    cp = _run_git_cp(
+        [
+            "-C",
+            str(framework_root),
+            "stash",
+            "push",
+            "-m",
+            _HYPERLOOM_QUARANTINE_STASH_MSG,
+            "--",
+            *paths,
+        ],
+        timeout=60.0,
+    )
+    if cp is None:
+        return False, "git stash push failed"
+    if cp.returncode != 0:
+        return False, f"git stash push rc={cp.returncode}: {cp.stderr.strip()}"
+    quit_cp = _run_git_cp(["-C", str(framework_root), "merge", "--quit"], timeout=30.0)
+    if quit_cp is None or quit_cp.returncode != 0:
+        # Nothing was banked that a later revert cannot reach, but leaving
+        # MERGE_HEAD standing would mislabel the next KEEP, so refuse rather
+        # than proceed on a repo that is still mid-merge.
+        detail = "git merge --quit failed" if quit_cp is None else quit_cp.stderr.strip()
+        return False, f"merge state could not be cleared: {detail}"
+    return True, ""
+
+
+def _git_unmerged_paths(framework_root: Path) -> list[str]:
+    """Return repo-relative paths left in an unresolved merge state, if any."""
+    cp = _run_git_cp(["-C", str(framework_root), "ls-files", "-u", "--full-name"], timeout=30.0)
+    if cp is None or cp.returncode != 0:
+        return []
+    seen: list[str] = []
+    for line in (cp.stdout or "").splitlines():
+        _meta, _sep, path = line.partition("\t")
+        path = path.strip()
+        if path and path not in seen:
+            seen.append(path)
+    return seen
+
+
+def _git_restore_to_head(framework_root: Path, paths: list[str] | None = None) -> tuple[bool, str]:
+    """Force ``paths`` (or the whole tree) back to HEAD, clearing any merge state.
+
+    Every KEEP is committed, so HEAD is the accepted stack: restoring to it drops
+    candidate work and keeps everything the loop has accepted.
+
+    Args:
+        framework_root (Path): The git checkout to restore.
+        paths (list[str] | None): Repo-relative paths, or ``None`` for the tree.
+
+    Returns:
+        tuple[bool, str]: ``(ok, stderr)``.
+    """
+    target = paths if paths else ["."]
+    # `checkout --force HEAD --` resolves an unmerged index, which plain
+    # `checkout -- .` refuses to touch.
+    cp = _run_git_cp(
+        ["-C", str(framework_root), "checkout", "--force", "HEAD", "--", *target],
+        timeout=60.0,
+    )
+    if cp is None:
+        return False, "git checkout spawn failed"
+    if cp.returncode != 0:
+        return False, (cp.stderr or "").strip()
+    return True, ""
+
+
+def _git_stash_if_dirty(framework_root: Path) -> tuple[str, str]:
+    """Stash uncommitted user changes so destructive resets don't lose them.
+
+    Only stashes when the working tree is dirty (``git status --porcelain``
+    is non-empty). The stash message is tagged for easy retrieval via
+    ``git stash list | grep hyperloom-auto-stash``.
+
+    Returns:
+        ``(state, note)`` where ``state`` is one of:
+
+        - ``"clean"`` â€” working tree was already clean, safe to proceed.
+        - ``"stashed"`` â€” dirty tree was successfully stashed; ``note`` is the
+          stash ref to restore when the candidate finishes.
+        - ``"failed"`` â€” tree is dirty but stash command failed; callers
+          MUST NOT proceed with destructive operations.
+    """
+    cp = _run_git_cp(["-C", str(framework_root), "status", "--porcelain"], timeout=30.0)
+    if cp is None:
+        return "failed", "git status check failed"
+    if cp.returncode != 0:
+        # Non-git directory or other git status errors: treat as clean.
+        log.debug(
+            "integrate_patch: git status rc=%d in %s (not a git repo?), treating as clean",
+            cp.returncode,
+            framework_root,
+        )
+        return "clean", ""
+    if not cp.stdout.strip():
+        return "clean", ""
+    # git refuses to stash while an unresolved merge stands, so every later
+    # candidate would abort here forever. Clear it â€” but bank the content
+    # instead of overwriting it. Usually this is wreckage from an earlier cycle;
+    # nothing here can prove that, and a merge the operator started themselves
+    # is not ours to throw away. Quarantine keeps both cases recoverable at the
+    # cost of one stash entry. It is deliberately not the auto-stash tag, so it
+    # is never popped back: restoring conflict markers into the source is what
+    # made every benchmark fail to parse the model.
+    unmerged = _git_unmerged_paths(framework_root)
+    if unmerged:
+        ok, err = _git_quarantine_unmerged(framework_root, unmerged)
+        log.warning(
+            "integrate_patch: %s had %d path(s) in an unresolved merge (%s); moved to a '%s' stash entry%s",
+            framework_root,
+            len(unmerged),
+            ", ".join(unmerged[:5]),
+            _HYPERLOOM_QUARANTINE_STASH_MSG,
+            "" if ok else f" FAILED: {err}",
+        )
+        if not ok:
+            return "failed", f"unresolved merge could not be quarantined: {err}"
+        cp = _run_git_cp(["-C", str(framework_root), "status", "--porcelain"], timeout=30.0)
+        if cp is None:
+            return "failed", "git status check failed"
+        if not cp.stdout.strip():
+            return "clean", ""
+    cp2 = _run_git_cp(
+        ["-C", str(framework_root), "stash", "push", "-u", "-m", _HYPERLOOM_AUTO_STASH_MSG],
+        timeout=60.0,
+    )
+    if cp2 is None:
+        return "failed", "git stash push failed"
+    if cp2.returncode == 0:
+        stash_ref = _find_hyperloom_auto_stash(framework_root) or "stash@{0}"
+        log.info(
+            "integrate_patch: stashed user changes in %s as %s",
+            framework_root,
+            stash_ref,
+        )
+        return "stashed", stash_ref
+    return "failed", f"git stash push rc={cp2.returncode}: {cp2.stderr.strip()}"
+
+
+def _git_restore_stash_if_needed(
+    framework_root: Path,
+    stash_state: str,
+    stash_ref: str,
+) -> str:
+    """Restore the user-change stash created before candidate mutation."""
+    if stash_state != "stashed":
+        return ""
+    ref = stash_ref or _find_hyperloom_auto_stash(framework_root)
+    if not ref:
+        return "auto-stash ref not found; user changes remain in git stash"
+    cp = _run_git_cp(["-C", str(framework_root), "stash", "pop", "--index", ref], timeout=120.0)
+    if cp is None:
+        return f"git stash pop failed; user changes remain in {ref}"
+    if cp.returncode == 0:
+        log.info("integrate_patch: restored user changes from %s", ref)
+        return ""
+    # A pop that cannot merge leaves conflict markers in source. Left there they
+    # break every later measurement silently -- the benchmark fails to parse the
+    # file, and git will not stash again while the merge is unresolved. Put the
+    # tree back at HEAD instead; the stash is deliberately NOT dropped, so the
+    # work is still there under `git stash list`.
+    detail = (cp.stderr or "").strip()
+    unmerged = _git_unmerged_paths(framework_root)
+    if unmerged:
+        ok, err = _git_restore_to_head(framework_root, unmerged)
+        log.warning(
+            "integrate_patch: %s did not merge back into %s; restored %d path(s) to HEAD and kept the stash%s",
+            ref,
+            framework_root,
+            len(unmerged),
+            "" if ok else f" (restore FAILED: {err})",
+        )
+        if not ok:
+            detail = f"{detail}; tree left conflicted: {err}"
+    return f"git stash pop {ref} rc={cp.returncode}: {detail}; user changes remain in git stash"
+
+
+def _git_reset_clean(framework_root: Path, base: str, *, exclude: list[str] | None = None) -> tuple[bool, str]:
+    """Return the tree to ``base`` exactly: tracked, staged and untracked candidate files all go.
+
+    This is the REVERT: ``base`` is the HEAD recorded before the candidate,
+    which is the accepted stack because every KEEP is committed. User changes
+    must already have been stashed before the candidate was applied.
+
+    Args:
+        framework_root: Directory to run ``git reset`` in.
+        base: The commit to restore.
+        exclude: Paths ``git clean`` must keep.
+
+    Returns:
+        ``(ok, stderr)`` where ``ok`` is ``True`` when both steps succeed.
+    """
+    cp = _run_git_cp(["-C", str(framework_root), "reset", "--hard", base], timeout=60.0)
+    if cp is None:
+        return False, "git reset spawn failed"
+    if cp.returncode != 0:
+        return False, (cp.stderr or "").strip()
+    exclusions = [arg for path in exclude or [] for arg in ("-e", path)]
+    cp2 = _run_git_cp(["-C", str(framework_root), "clean", "-fd", *exclusions], timeout=60.0)
+    if cp2 is None:
+        return False, "git clean spawn failed"
+    return cp2.returncode == 0, cp2.stderr.strip()
 
 class _RecoveryEntry(NamedTuple):
     """A pending integration's recovery record, or why there is nothing to act on."""
@@ -1286,17 +1534,6 @@ def _resolve_artifact_target(rel_target: str) -> tuple[Path, str, Path] | None:
     return None
 
 
-def _declared_artifacts(
-    explicit_artifacts: list[dict[str, Any]] | None,
-    done_payload: dict[str, Any] | None,
-) -> list[Any]:
-    """The artifact entries this attempt installs: the params override, else what the specialist wrote."""
-    if explicit_artifacts:
-        return list(explicit_artifacts)
-    written = (done_payload or {}).get("artifacts_written")
-    return list(written) if isinstance(written, list) else []
-
-
 def _resolve_artifact_specs(
     *,
     specialist_workspace: Path,
@@ -1305,7 +1542,7 @@ def _resolve_artifact_specs(
 ) -> tuple[list[_ArtifactSpec], list[dict[str, str]]]:
     """Resolve non-diff tuned artifacts to install.
 
-    Order: ``params.artifacts`` → ``specialist_done.artifacts_written``. Each
+    Order: ``params.artifacts`` â†’ ``specialist_done.artifacts_written``. Each
     entry is ``{source, target, kind, description}``: ``source`` is resolved
     inside the specialist workspace/worktree (sandbox) and ``target`` is
     resolved inside a framework root. Malformed / out-of-sandbox entries are
@@ -1320,7 +1557,12 @@ def _resolve_artifact_specs(
         A ``(specs, errors)`` tuple: resolved specs, plus per-entry error
         records (``{artifact, error}``) for entries that could not be resolved.
     """
-    raw = _declared_artifacts(explicit_artifacts, done_payload)
+    raw: list[Any] = []
+    if explicit_artifacts:
+        raw = list(explicit_artifacts)
+    elif done_payload and isinstance(done_payload.get("artifacts_written"), list):
+        raw = list(done_payload["artifacts_written"])
+
     allowed_roots = [
         (specialist_workspace / "worktree").resolve(),
         specialist_workspace.resolve(),
@@ -1378,20 +1620,6 @@ def _is_aiter_gemm_model_config(spec: _ArtifactSpec) -> bool:
     filename = spec.target.name.lower()
     is_aiter_model_config = "/aiter/configs/model_configs/" in target
     return is_aiter_model_config and (kind == "model_config" or "_tuned_gemm" in filename)
-
-
-def _rows_not_runtime_ready(rows: list[dict[str, Any]]) -> int:
-    """How many tuned rows name no kernel the runtime can dispatch."""
-    unusable = 0
-    for row in rows:
-        kernel_name = str(row.get("kernelName") or "").strip().lower()
-        try:
-            runtime_us = float(str(row.get("us") or "0").strip())
-        except ValueError:
-            runtime_us = 0.0
-        if not math.isfinite(runtime_us) or runtime_us <= 0.0 or "placeholder" in kernel_name:
-            unusable += 1
-    return unusable
 
 
 def _validate_aiter_gemm_artifacts(
@@ -1454,7 +1682,15 @@ def _validate_aiter_gemm_artifacts(
             errors.append({**base_error, "error": "no_target_gpu_rows"})
             continue
 
-        invalid_target_rows = _rows_not_runtime_ready(target_rows)
+        invalid_target_rows = 0
+        for row in target_rows:
+            kernel_name = str(row.get("kernelName") or "").strip().lower()
+            try:
+                runtime_us = float(str(row.get("us") or "0").strip())
+            except ValueError:
+                runtime_us = 0.0
+            if not math.isfinite(runtime_us) or runtime_us <= 0.0 or "placeholder" in kernel_name:
+                invalid_target_rows += 1
         if invalid_target_rows:
             errors.append(
                 {
@@ -1465,6 +1701,71 @@ def _validate_aiter_gemm_artifacts(
                 }
             )
     return errors
+
+
+def _patch_stack_by_root(enablement: Any, patch_roots: dict[str, str], applied: list[Path]) -> dict[str, list[Path]]:
+    """Group the accepted patch stack by the tree each patch applies to, in apply order.
+
+    Apply order, not the mapping's: the operation a later patch declares must
+    override an earlier one's for the same file.
+    """
+    accepted = enablement.accepted_stack(applied)
+    ordered = [patch for patch in patch_roots if patch not in set(accepted)] + accepted
+    by_root: dict[str, list[Path]] = {}
+    for patch_path in dict.fromkeys(ordered):
+        patch_root = str(patch_roots.get(patch_path) or "")
+        if patch_root:
+            by_root.setdefault(patch_root, []).append(Path(patch_path))
+    return by_root
+
+
+def _declared_stack_ops(patch_root: str, patches: list[Path], *, base_sha: str) -> dict[str, dict[str, str]]:
+    """The file operations each patch declares against ``patch_root``, per patch.
+
+    Proven, not believed: the whole stack is replayed from its base in an isolated
+    tree, over the ORDERED stack, because a patch's preimage is the tree its
+    predecessors left behind rather than this root's base or the final tree.
+    """
+    replayed = _patch_snapshot.replayed_stack_ops(Path(patch_root), patches, base_sha=base_sha)
+    if replayed is not None:
+        return replayed
+    if base_sha:
+        log.warning(
+            "integrate_patch: enablement KEEP cannot replay the stack on %s from %s; "
+            "its targets are left undeclared and the recipe is refused",
+            patch_root,
+            base_sha,
+        )
+        return {}
+    # No base commit: a framework installed from a wheel, which is the ordinary
+    # production shape. There is no "check out the base and apply" to prove, but
+    # that is not how such a root is replayed -- it is replayed by OVERLAYING the
+    # captured files, which is exactly what building an image from this recipe
+    # does. Declaring nothing here removes those files from the capture and with
+    # them the only replay path that applies, leaving the recipe unusable in the
+    # case it is most needed for.
+    #
+    # What is NOT claimed is that the patch was proven applied: there is no
+    # preimage to prove it against. Do not read an empty base_sha as the thing
+    # that withholds that claim -- the judge's base_sha refusal is gated on
+    # ``is_git``, so it never fires for a wheel root and this path can and does
+    # reach ``sufficient``. The protection that does apply is the op map itself:
+    # ``overlay_inventory_without_base`` returns None for anything it cannot
+    # PROVE, and undeclared targets are what the judge blocks on. The targets are
+    # what the overlay must contain, not evidence that the patch applied cleanly.
+    overlaid: dict[str, dict[str, str]] = {}
+    for patch in patches:
+        ops = _patch_snapshot.overlay_inventory_without_base(Path(patch_root), patch)
+        if ops is None:
+            log.warning(
+                "integrate_patch: enablement KEEP cannot resolve %s against the "
+                "base-less root %s; its targets are left undeclared",
+                patch,
+                patch_root,
+            )
+            continue
+        overlaid[str(patch)] = ops
+    return overlaid
 
 
 def _read_done_payload(workspace: Path) -> dict[str, Any] | None:
@@ -2641,6 +2942,16 @@ def _kept_patch(
 
 
 @dataclass(frozen=True)
+class _KbLesson:
+    """The outcome and measured deltas one framework KB record stores."""
+
+    outcome: str
+    tps_delta_pct: float
+    accuracy_delta_pct: float | None = None
+    config_fingerprint: str = ""
+
+
+@dataclass(frozen=True)
 class _PatchBench:
     """What every bench leg of one integration shares: its params, workspace, specialist and session bounds."""
 
@@ -2682,9 +2993,9 @@ class _PatchMeasurement:
     cfg_fingerprint: str
     measured_against: dict[str, Any]
 
-    def lesson(self, outcome: str) -> KbLesson:
+    def lesson(self, outcome: str) -> _KbLesson:
         """The KB record of this measurement under ``outcome``."""
-        return KbLesson(outcome, float(self.delta_pct or 0.0), self.acc_delta_pct, self.cfg_fingerprint)
+        return _KbLesson(outcome, float(self.delta_pct or 0.0), self.acc_delta_pct, self.cfg_fingerprint)
 
     def envelope(self) -> dict[str, Any]:
         """How every perf verdict reports the measurement behind it."""
@@ -3313,7 +3624,7 @@ class IntegratePatchExecutor:
         )
         if outcome.errors:
             await self._maybe_write_framework_kb_record(
-                KbLesson("rejected_apply_fail", 0.0), done_payload=attempt.done_payload, params=params, extra=extra
+                _KbLesson("rejected_apply_fail", 0.0), done_payload=attempt.done_payload, params=params, extra=extra
             )
             rejected = _reauthorable_apply_failure(
                 attempt,
@@ -3424,7 +3735,7 @@ class IntegratePatchExecutor:
         if not missing_records:
             return _ApplyRoot(framework_root, None)
         await self._maybe_write_framework_kb_record(
-            KbLesson("rejected_apply_fail", 0.0), done_payload=attempt.done_payload, params=params, extra=extra
+            _KbLesson("rejected_apply_fail", 0.0), done_payload=attempt.done_payload, params=params, extra=extra
         )
         return _ApplyRoot(
             None,
@@ -3517,7 +3828,7 @@ class IntegratePatchExecutor:
     ) -> dict[str, Any]:
         """Refuse the round because its tuned artifacts are not installable as delivered."""
         await self._maybe_write_framework_kb_record(
-            KbLesson("rejected_apply_fail", 0.0), done_payload=attempt.done_payload, params=params, extra=extra
+            _KbLesson("rejected_apply_fail", 0.0), done_payload=attempt.done_payload, params=params, extra=extra
         )
         result = _apply_failed(attempt, rejection.error_class, rejection.error)
         result["artifacts_applied"] = []
@@ -3669,7 +3980,7 @@ class IntegratePatchExecutor:
         advanced = not runs and not served and round_advanced(before_loaded.observation, after_loaded.observation)
         if not runs and not advanced:
             await self._maybe_write_framework_kb_record(
-                KbLesson("reverted_smoke_fail", 0.0), done_payload=done_payload, params=params, extra=extra
+                _KbLesson("reverted_smoke_fail", 0.0), done_payload=done_payload, params=params, extra=extra
             )
             return {
                 "status": "reverted",
@@ -3705,7 +4016,7 @@ class IntegratePatchExecutor:
 
         if advanced:
             await self._maybe_write_framework_kb_record(
-                KbLesson("integrated", 0.0), done_payload=done_payload, params=params, extra=extra
+                _KbLesson("integrated", 0.0), done_payload=done_payload, params=params, extra=extra
             )
             return _advanced_round(attempt, bench_result, after=after_loaded, run_reason=run_reason, evidence=evidence)
 
@@ -3714,7 +4025,7 @@ class IntegratePatchExecutor:
         if provisional:
             reason += " (provisional: served but eval produced no accuracy; correctness not verified)"
         await self._maybe_write_framework_kb_record(
-            KbLesson("integrated", 0.0), done_payload=done_payload, params=params, extra=extra
+            _KbLesson("integrated", 0.0), done_payload=done_payload, params=params, extra=extra
         )
         kept_result: dict[str, Any] = {
             "status": "kept",
@@ -3770,12 +4081,108 @@ class IntegratePatchExecutor:
         bench_result: dict[str, Any],
     ) -> dict[str, Any]:
         """Capture the per-root identity, payload and assertions of this KEEP."""
-        return capture_keep_records(
-            attempt,
-            params=params,
-            bench_result=bench_result,
+        root = str(attempt.framework_root or "")
+        enablement = attempt.shared_state.enablement
+        patch_roots = enablement.accepted_patch_roots(
+            done_payload=attempt.done_payload,
+            applied=attempt.applied,
+            framework_root=root,
+        )
+        # Read from the durable stack: the round lifecycle does not dispatch the
+        # base set with the round.
+        stack_artifacts = keep_records.accepted_stack_artifacts(
+            inherited=enablement.kept_artifacts,
+            applied=attempt.applied_artifacts,
+        )
+        contributions = keep_records.collect_contributions(
+            framework_root=root,
+            patch_roots=patch_roots,
+            artifacts=stack_artifacts,
+        )
+        git_roots = [tree for tree in contributions if tree and _is_git_tree(Path(tree))]
+        # Only what was captured before this round touched each tree, and only
+        # where no earlier round already named the tree the stack applies to. A
+        # root left with no sha either way keeps none, which the decision refuses
+        # rather than answering with a HEAD that has moved since.
+        inherited_sha = enablement.inherited_base_shas()
+        captured = attempt.base_sha_by_root
+        base_sha_by_root = {tree: inherited_sha.get(tree, "") or captured.get(tree, "") for tree in git_roots}
+        records = keep_records.build_root_records(
+            contributions=contributions,
+            base_sha_by_root=base_sha_by_root,
+            git_roots=git_roots,
+            session_framework_root=framework_paths.resolve_session_framework_root(),
+        )
+        # One classification per root: a rel path is only meaningful against the
+        # tree its patch was bound to, and reading them all against this round's
+        # root would name files that root does not have. Per patch as well as per
+        # root: the decision cross-checks each patch step against the snapshot of
+        # the files that step declares, and it cannot read the diffs itself.
+        targets: dict[str, dict[str, str]] = {}
+        patch_targets: dict[str, dict[str, str]] = {}
+        for patch_root, patches in _patch_stack_by_root(enablement, patch_roots, attempt.applied).items():
+            base_sha = str(base_sha_by_root.get(patch_root) or "")
+            for patch_path, ops in _declared_stack_ops(patch_root, patches, base_sha=base_sha).items():
+                if not ops:
+                    continue
+                patch_targets[patch_path] = ops
+                targets.setdefault(patch_root, {}).update(ops)
+        for declared_root, ops in keep_records.declared_targets(
+            framework_root=root,
+            upserted=(),
+            deleted=(),
+            artifacts=stack_artifacts,
+        ).items():
+            targets.setdefault(declared_root, {}).update(ops)
+        snapshots = keep_records.capture_root_snapshots(
+            records=records,
+            targets=targets,
+            dest_root=self.session_dir / "optimization_stack" / "enablement",
             session_dir=self.session_dir,
         )
+        materialized_config = str(bench_result.get("materialized_config") or "")
+        framework = keep_probe.graded_framework(params, materialized_config)
+        closure, assertions = keep_probe.probe_keep_environment(
+            params,
+            keep_probe.KeepEvidence(
+                build_manifest=enablement.build_manifest,
+                specialist_task_id=attempt.specialist_task_id,
+                provision_result=attempt.provision_result,
+            ),
+            framework=framework,
+            materialized_config=materialized_config,
+        )
+        launch_evidence, argv_refused = project_launch_evidence(bench_result.get("launch_evidence"))
+        return {
+            "enablement_roots": records,
+            "enablement_patch_roots": patch_roots,
+            # Per root, and through the same inherited-then-captured resolution
+            # every other root gets. Preferring the persisted scalar outright
+            # hands this round's root the sha an earlier round read off a
+            # *different* tree, and the snapshot is then captured against a base
+            # commit that tree never had.
+            "enablement_base_sha": str(base_sha_by_root.get(root) or ""),
+            "enablement_source_snapshots": snapshots,
+            "enablement_patch_targets": patch_targets,
+            "enablement_accepted_stack_targets": {
+                str(record["id"]): dict(targets.get(str(record["path"])) or {}) for record in records
+            },
+            "enablement_launch_evidence": launch_evidence or {},
+            "enablement_launch_argv_refused": argv_refused,
+            "enablement_environment_closure": closure,
+            "enablement_installed_versions_at_keep": assertions,
+            "enablement_build_extensions_not_carried": keep_records.build_extensions_not_carried(
+                enablement,
+                attempt.framework_root,
+                specialist_task_id=attempt.specialist_task_id,
+            ),
+            "enablement_levers_without_readers": keep_records.levers_without_readers(
+                enablement,
+                attempt.framework_root,
+                framework=framework,
+                effective_config=bench_result.get("effective_config"),
+            ),
+        }
 
     @staticmethod
     def _commit_accepted_work(attempt: IntegrateAttempt, message: str) -> tuple[str, bool]:
@@ -4380,7 +4787,7 @@ class IntegratePatchExecutor:
 
     async def _maybe_write_framework_kb_record(
         self,
-        lesson: KbLesson,
+        lesson: _KbLesson,
         *,
         done_payload: dict[str, Any] | None,
         params: Mapping[str, Any] | None = None,
@@ -4398,11 +4805,59 @@ class IntegratePatchExecutor:
             proposal = self._upstream_pr_kb_proposal(params or {})
             if proposal is None:
                 return
-        await write_framework_lesson(
-            lesson,
-            proposal,
-            done_payload=done_payload,
-            shared_state=extra.get("shared_state") or extra.get("state"),
+        # Never the payload's: a payload-level ``fa_pr_*`` belongs to whichever
+        # proposal put it there, so standing it in for one this proposal omits
+        # would file the lesson under another patch's PR.
+        pr_url = str(proposal.get("fa_pr_url") or "").strip()
+        pr_sha = str(proposal.get("fa_pr_sha") or "").strip()
+        if not pr_url and not pr_sha:
+            log.warning("integrate_patch: framework proposal lacks both fa_pr_url and fa_pr_sha; KB writeback skipped")
+            return
+        # The ``if v`` filter is what makes the merge mean "the proposal's value,
+        # or the payload's where the proposal left it empty".
+        fields = {**(done_payload or {}), **{k: v for k, v in proposal.items() if v}}
+        shared_state = extra.get("shared_state") or extra.get("state")
+        patches_written = to_str_list(proposal.get("patches_written"))
+        accuracy_delta_pct = lesson.accuracy_delta_pct
+        if accuracy_delta_pct is None:
+            try:
+                accuracy_delta_pct = float(fields.get("accuracy_delta_pct") or 0.0)
+            except (TypeError, ValueError):
+                accuracy_delta_pct = 0.0
+        try:
+            from ...knowledge.kb_writeback import FrameworkOutcome, write_framework_record
+
+            written = await write_framework_record(
+                FrameworkOutcome(
+                    pr_url=pr_url,
+                    pr_sha=pr_sha,
+                    patch_path=patches_written[0] if patches_written else "",
+                    outcome=lesson.outcome,
+                    tps_delta_pct=float(lesson.tps_delta_pct),
+                    session_id=str(getattr(shared_state, "recipe_kb_session_id", "") or ""),
+                    framework=str(fields.get("framework") or "").strip().lower(),
+                    gap_canonical_id=str(fields.get("gap_canonical_id") or "").strip(),
+                    gap_keywords=[keyword.lower() for keyword in to_str_list(fields.get("gap_keywords"))],
+                    model_class=str(getattr(shared_state, "model_class", "") or "").strip(),
+                    gpu_type=str(getattr(shared_state, "gpu_type", "") or "").strip(),
+                    precision=str(getattr(shared_state, "precision", "") or "").strip(),
+                    applicability=lesson.config_fingerprint or str(fields.get("applicability") or "").strip(),
+                    provenance=str(fields.get("provenance") or "").strip(),
+                    accuracy_delta_pct=accuracy_delta_pct,
+                    changed_files=to_str_list(fields.get("changed_files")),
+                    source_framework=str(fields.get("source_framework") or "").strip().lower(),
+                    target_framework=str(fields.get("target_framework") or "").strip().lower(),
+                )
+            )
+        except (OSError, ValueError, TypeError) as exc:
+            log.warning("integrate_patch: framework KB writeback failed: %r", exc)
+            return
+        log.info(
+            "integrate_patch: wrote framework KB record to %s (outcome=%s pr_url=%s tps_delta=%+.2f%%)",
+            written,
+            lesson.outcome,
+            pr_url,
+            float(lesson.tps_delta_pct),
         )
 
     def _backup_artifacts(
@@ -4609,7 +5064,6 @@ __all__ = [
     "_git_apply",
     "_git_apply_reverse",
     "_git_reset_clean",
-    "_git_restore_to_head",
     "_run_git_apply",
     "_resolve_framework_root",
     "_resolve_patch_paths",
