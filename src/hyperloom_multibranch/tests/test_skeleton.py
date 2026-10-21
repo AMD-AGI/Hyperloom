@@ -71,7 +71,8 @@ from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.rsi.archive import ARCHIVE_ENV
 from hyperloom_multibranch.notebook.rsi.briefing import SessionBriefs
 from hyperloom_multibranch.notebook.rsi.calibration import DEFAULT_POLICY, PolicyChoice
-from hyperloom_multibranch.notebook.rsi.frontier import SETTLED_TESTS, FrontierPolicy
+from hyperloom_multibranch.notebook.rsi import scorers
+from hyperloom_multibranch.notebook.rsi.frontier import FRONTIER_V1_LABEL, SETTLED_TESTS, Estimate, FrontierPolicy
 from hyperloom_multibranch.notebook.rsi.session import FRONTIER_LOG
 from hyperloom_multibranch.notebook.tests.factories import delta, intent, request
 from hyperloom_multibranch.rulegate.critic import (
@@ -104,6 +105,9 @@ from hyperloom_multibranch.notebook.rsi.bandit import BANDIT_LABEL
 from hyperloom_multibranch.scheduling.lifecycle import (
     CUT_SHORT,
     FORCED_DEFAULT_EVIDENCE,
+    FRONTIER_SCORER_KEY,
+    GRACE_KEY,
+    SCORER_FALLBACK_REASON,
     PINNED_EVIDENCE,
     FRONTIER_POLICY_KEY,
     NO_CARDS_LEFT,
@@ -489,6 +493,8 @@ async def test_a_session_runs_every_phase_and_leaves_nothing_behind(tmp_path: Pa
     assert fingerprint.policy_versions["judge_prompt"] == JUDGE_PROMPT_VERSION
     assert fingerprint.policy_versions["scheduling"] == policy_version(SCHEDULING_POLICY)
     assert fingerprint.policy_versions[FRONTIER_POLICY_KEY] == DEFAULT_POLICY
+    assert fingerprint.policy_versions[FRONTIER_SCORER_KEY] == FRONTIER_V1_LABEL
+    assert fingerprint.policy_versions[GRACE_KEY] == str(SETTLED_TESTS)
     [policy] = [row for row in _decisions(stage) if row["kind"] == "prelude" and row["reason"] == "scheduling policy"]
     assert policy["detail"] == {"values": dict(SCHEDULING_POLICY)}
     assert dict(fingerprint.sockets) == socket_versions()
@@ -648,11 +654,13 @@ def _choosing(monkeypatch: pytest.MonkeyPatch, choice: Callable[[FrontierPolicy]
 
     calls: list[object] = []
 
-    def choose(snapshot: NotebookSnapshot, history: Sequence[object], defaults: FrontierPolicy) -> PolicyChoice:
+    def choose(
+        snapshot: NotebookSnapshot, history: Sequence[object], defaults: FrontierPolicy, pool: object = None
+    ) -> PolicyChoice:
         calls.append((snapshot, defaults))
         return choice(defaults)
 
-    monkeypatch.setattr(lifecycle, "session_frontier_policy", choose)
+    monkeypatch.setattr(lifecycle, "session_frontier_scorer", choose)
     return calls
 
 
@@ -714,6 +722,31 @@ async def test_a_pinned_frontier_scorer_scores_the_session_without_asking_the_ca
     assert decided["detail"] == {"label": BANDIT_LABEL, "evidence": f"{BANDIT_LABEL}: {PINNED_EVIDENCE}"}
     lines = _frontier_lines(stage)
     assert lines and all(line["scorer"] == BANDIT_LABEL for line in lines)
+
+
+class _Failing:
+    """A scorer that raises on every branch."""
+
+    label = "failing-v1"
+
+    def estimate(self, branch: object, t_s: float, context: object, readings: object) -> Estimate:
+        raise RuntimeError("the scorer broke")
+
+
+async def test_a_scorer_that_keeps_failing_falls_back_to_frontier_v1_as_a_recorded_decision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(scorers, "custom_scorers", lambda: (_Failing(),))
+    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage.settings = replace(SETTINGS, frontier_scorer=_Failing.label)
+    _script(stage)
+
+    outcome = await stage.run()
+
+    assert outcome.exit_code == 0
+    [fell_back] = [row for row in _decisions(stage) if row["reason"] == SCORER_FALLBACK_REASON]
+    assert fell_back["kind"] == "event" and _Failing.label in str(fell_back["detail"]["why"])
+    assert _frontier_lines(stage)[-1]["scorer"] == FRONTIER_V1_LABEL
 
 
 async def test_frontier_policy_default_keeps_the_defaults_without_asking_the_calibration(

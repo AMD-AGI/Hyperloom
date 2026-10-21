@@ -4,23 +4,24 @@
 """One multi-branch session, PRELUDE -> EXPLORE -> FINAL -> CLOSE, on the peers a factory builds for it.
 
 PRELUDE gets the whole remaining budget, and spends none of it on a child when it reuses an earlier session's PRELUDE;
-whatever it leaves is split into the EXPLORE, FINAL and CLOSE windows, FINAL's no shorter than the
-longest baseline test. Once the baseline is established, the session chooses the frontier policy EXPLORE and CLOSE
-score with: the calibration's choice for sessions like it, or the defaults under ``--frontier-policy default``. The
-FINAL candidates are fixed while every branch still stands, then exploration ends and FINAL validates them. A
-failed PRELUDE, an EXPLORE that ran out of cards to measure on, a stop signal, the session deadline before FINAL
-starts or an unhandled error skip straight to CLOSE, which always runs and kills every process the session started.
-FINAL waits for the validation tests it started, past the deadline and the hard stop if need be, and moves the hard
-stop to no sooner than one CLOSE grace from its end. The deadline plus the CLOSE grace bounds CLOSE itself; a stop
-signal brings that hard stop forward to the CLOSE grace from the signal, once, and the unwinding of the cancelled
-phases and CLOSE share it. An unhandled error brings it forward the same way when CLOSE starts, and so does a first
-signal that arrives during CLOSE; CLOSE is cut short if it still runs then. A second signal, whenever it arrives, cuts the
-unwinding and CLOSE short at once. A CLOSE cut short releases what the session holds, closing the toolbox within
-its own short bound and killing every registered process, and writes the report.
-A session that ended before FINAL, killed with its machine before CLOSE included, is read back by
-:func:`persisted_run` and taken up again by :meth:`Session.finish`, which runs FINAL and CLOSE alone on a budget that
-is already spent, carrying the stop reason that session ended with: the roster, the frontier policy and the branches
-are the ones that session persisted, and only its report, dashboard and breakdown are written again.
+whatever it leaves is split into the EXPLORE, FINAL and CLOSE windows, FINAL's no shorter than the longest baseline
+test. Once the baseline is established, the session chooses the frontier policy EXPLORE and CLOSE score with: the scorer
+or variation the calibration over sessions like it chooses against the scorer pool's champion, the scorer
+``--frontier-scorer`` pins, or the defaults under ``--frontier-policy default``; a scorer that keeps failing falls back
+to ``frontier-v1``, recorded as a decision. The FINAL candidates are fixed while every branch still stands, then
+exploration ends and FINAL validates them. A failed PRELUDE, an EXPLORE that ran out of cards to measure on, a stop
+signal, the session deadline before FINAL starts or an unhandled error skip straight to CLOSE, which always runs and
+kills every process the session started. FINAL waits for the validation tests it started, past the deadline and the hard
+stop if need be, and moves the hard stop to no sooner than one CLOSE grace from its end. The deadline plus the CLOSE
+grace bounds CLOSE itself; a stop signal brings that hard stop forward to the CLOSE grace from the signal, once, and the
+unwinding of the cancelled phases and CLOSE share it. An unhandled error brings it forward the same way when CLOSE
+starts, and so does a first signal that arrives during CLOSE; CLOSE is cut short if it still runs then. A second signal,
+whenever it arrives, cuts the unwinding and CLOSE short at once. A CLOSE cut short releases what the session holds,
+closing the toolbox within its own short bound and killing every registered process, and writes the report.
+A session that ended before FINAL, killed with its machine before CLOSE included, is read back by :func:`persisted_run`
+and taken up again by :meth:`Session.finish`, which runs FINAL and CLOSE alone on a budget that is already spent,
+carrying the stop reason that session ended with: the roster, the frontier policy and the branches are the ones that
+session persisted, and only its report, dashboard and breakdown are written again.
 """
 
 from __future__ import annotations
@@ -48,13 +49,13 @@ from hyperloom_multibranch.contracts.notebook.records import ManifestFingerprint
 from hyperloom_multibranch.contracts.notebook.vocab import UsageSource
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.codec import decode, encode
-from hyperloom_multibranch.notebook.rsi.calibration import DEFAULT_POLICY, VARIATIONS, PolicyChoice
-from hyperloom_multibranch.notebook.rsi.frontier import FrontierPolicy, FrontierScoring, ScorerGuard
+from hyperloom_multibranch.notebook.rsi.calibration import DEFAULT_POLICY, PolicyChoice
+from hyperloom_multibranch.notebook.rsi.frontier import SETTLED_TESTS, FrontierPolicy, FrontierScoring, ScorerGuard
 from hyperloom_multibranch.notebook.rsi.session import (
     FRONTIER_LOG,
     archived_history,
     named_frontier_choice,
-    session_frontier_policy,
+    session_frontier_scorer,
 )
 from hyperloom_multibranch.rulegate.critic import FixReviewer
 from hyperloom_multibranch.scheduling.branches import BranchControl
@@ -108,6 +109,11 @@ POLICY_VERSIONS = {
 }
 #: The ``policy_versions`` key the frontier policy's label is recorded under: the defaults' until PRELUDE chose it.
 FRONTIER_POLICY_KEY = "frontier"
+#: The ``policy_versions`` key of the scorer the session scores with, which a variation's label does not name.
+FRONTIER_SCORER_KEY = "frontier_scorer"
+#: The ``policy_versions`` key of the grace, :data:`SETTLED_TESTS`: a scorer's record compares only within one grace.
+GRACE_KEY = "grace"
+SCORER_FALLBACK_REASON = "frontier scorer fell back"
 FORCED_DEFAULT_EVIDENCE = f"{DEFAULT_POLICY}: --frontier-policy default"
 PINNED_EVIDENCE = "pinned by --frontier-scorer"
 UNCHOSEN_EVIDENCE = f"{DEFAULT_POLICY}: not chosen yet, PRELUDE has not established the baseline"
@@ -403,8 +409,8 @@ class Session:
 
     async def _adopt_frontier_policy(self) -> None:
         """Replace the defaults with the frontier policy the session scores with from here on, and record it as a
-        scheduler decision and in the manifest: the calibration's choice for the profile PRELUDE recorded, or the
-        defaults under ``--frontier-policy default``."""
+        scheduler decision and in the manifest: the calibration's choice for the profile PRELUDE recorded, the scorer
+        ``--frontier-scorer`` pins, or the defaults under ``--frontier-policy default``."""
 
         defaults = self._frontier.policy
         pinned = self._settings.frontier_scorer
@@ -417,7 +423,7 @@ class Session:
             self._frontier = PolicyChoice(defaults, DEFAULT_POLICY, FORCED_DEFAULT_EVIDENCE)
         else:
             snapshot = await self._notebook.snapshot()
-            self._frontier = await asyncio.to_thread(session_frontier_policy, snapshot, self._history, defaults)
+            self._frontier = await asyncio.to_thread(session_frontier_scorer, snapshot, self._history, defaults)
         detail = {"label": self._frontier.label, "evidence": self._frontier.evidence}
         self._decisions.record(Decision(DecisionKind.PRELUDE, "frontier policy", detail=detail))
         manifest = read_json_strict(self._layout.manifest)
@@ -428,18 +434,27 @@ class Session:
         one scores with that choice instead of calibrating again, so the label the manifest holds stays true."""
 
         label = read_json_strict(self._layout.manifest)["policy_versions"][FRONTIER_POLICY_KEY]
-        defaults = self._frontier.policy
-        policies = {DEFAULT_POLICY: defaults, **{item.label: item.apply(defaults) for item in VARIATIONS}}
-        return PolicyChoice(policies[label], label, f"{label}: the policy the session recorded in its manifest")
+        choice = named_frontier_choice(label, self._frontier.policy, f"{label}: the policy the session recorded")
+        if choice is None:
+            raise ValueError(f"the frontier policy {label} the manifest records names no scorer any more")
+        return choice
 
     def _policy_versions(self) -> dict[str, str]:
-        return {**POLICY_VERSIONS, FRONTIER_POLICY_KEY: self._frontier.label}
+        return {
+            **POLICY_VERSIONS,
+            FRONTIER_POLICY_KEY: self._frontier.label,
+            FRONTIER_SCORER_KEY: self._frontier.scorer.label,
+            GRACE_KEY: str(SETTLED_TESTS),
+        }
 
     def _scoring(self) -> FrontierScoring:
         if self._guard.chosen is not self._frontier.scorer:
-            self._guard = ScorerGuard(self._frontier.scorer)
+            self._guard = ScorerGuard(self._frontier.scorer, on_fallback=self._fell_back)
         log = self._layout.reports / FRONTIER_LOG
         return FrontierScoring(self._notebook, self._frontier.policy, self._history, log, self._guard)
+
+    def _fell_back(self, why: str) -> None:
+        self._decisions.record(Decision(DecisionKind.EVENT, SCORER_FALLBACK_REASON, detail={"why": why}))
 
     def _dashboard(self, scoring: FrontierScoring) -> SessionDashboard:
         return SessionDashboard(self._notebook, scoring, self._toolbox, self._metric, self._layout.dashboard)
@@ -612,6 +627,9 @@ def code_version() -> CodeVersion:
 __all__ = [
     "COMPLETED_REASONS",
     "FORCED_DEFAULT_EVIDENCE",
+    "FRONTIER_SCORER_KEY",
+    "GRACE_KEY",
+    "SCORER_FALLBACK_REASON",
     "PINNED_EVIDENCE",
     "FRONTIER_POLICY_KEY",
     "NO_CARDS_LEFT",
