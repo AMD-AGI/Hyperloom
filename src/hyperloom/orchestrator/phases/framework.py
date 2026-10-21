@@ -2644,13 +2644,10 @@ class FrameworkPhase(ProposalBench):
         )
 
     async def _candidate_discovery_inflight(self) -> bool:
-        """True while a candidate-discovery specialist is queued or running."""
-        queued = await self.tasks.queued()
-        running = await self.tasks.running()
+        """True while a discovery round this phase dispatched, the kind ``_ingest_candidate_discovery`` harvests, is queued or running."""
         return any(
-            getattr(t, "kind", "") == "specialist"
-            and bool((getattr(t, "params", None) or {}).get("candidate_discovery"))
-            for t in (*queued, *running)
+            t.kind == "specialist" and bool((t.params or {}).get("candidate_discovery"))
+            for t in (*await self.tasks.queued(), *await self.tasks.running())
         )
 
     async def _maybe_enqueue_candidate_discovery(self, *, reason: str) -> bool:

@@ -108,10 +108,13 @@ when `--gpu-type` is omitted.
   back to the benchmark report's reading, and either power budget is refused at
   launch, since it could not be measured) and `HYPERLOOM_GPU_POWER_INTERVAL_S`
   sets its cadence (default 2 s, minimum 0.5 s).
-- **GPU power settings (asserted, never set):** `--gpu-power-cap-w`,
-  `--gpu-perf-level`. Set them with `amd-smi set` before launch; the session
-  refuses to start or resume if a card it uses differs, and records what the
-  cards report either way.
+- **GPU power settings:** `--gpu-power-cap-w`, `--gpu-perf-level`. By default
+  asserted: set them with `amd-smi set` before launch; the session refuses to
+  start or resume if a card it uses differs, and records what the cards report
+  either way. `--apply-gpu-power-settings` lets the session set them itself on
+  the cards of its integer visible-device mask for the whole session, and
+  restore the originals when it ends; it needs root (records under
+  `/var/tmp/hyperloom/gpu_power_settings/`).
 - **Cluster topology & multi-node backend:** `--nodes`, `--gpus-per-node`,
   `--gpu-type`, `--mn-backend` (`rayjob` / `infera`), `--server-args` (rayjob).
   Per-pod sizing, the pod image and pod-side env are the provisioning
