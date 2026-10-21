@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import math
 import os
@@ -62,7 +63,7 @@ from ..bus.resource_lock import (
 from ..state.shared_state import SharedState, effective_closing_grace_sec, timed_teardown_step
 from .signals import SignalDrain
 from .intent_router import IntentRouter
-from .model_class import infer_model_class_from_config
+from hyperloom.inference_optimizer.model_config_utils import infer_model_class
 from .sub_agent_runner import SubAgentRunner
 from ..state.task_registry import TaskRegistry, task_dispatch_origin
 from ..collaborator import OrchestrationPrompt
@@ -195,21 +196,6 @@ class RunOptions:
     closing_grace_sec: float | None = None
 
 
-@dataclass
-class _RunProgress:
-    """What the tick loop leaves behind for the shutdown sequence to classify and report.
-
-    Attributes:
-        ticks: Ticks started so far.
-        stop_reason: The reason the loop stopped, refined by the shutdown sequence.
-        last_tick_exc: The last exception a tick body raised, if any.
-    """
-
-    ticks: int = 0
-    stop_reason: str = ""
-    last_tick_exc: BaseException | None = None
-
-
 class Coordinator:
     """The single Coordinator instance per session."""
 
@@ -316,7 +302,7 @@ class Coordinator:
         self._pin_source_trees()
         # Derive model_class once at boot if not supplied; never overwrite a resume.
         if not (self.shared_state.model_class or "").strip():
-            self.shared_state.model_class = self._model_class_override or infer_model_class_from_config(
+            self.shared_state.model_class = self._model_class_override or infer_model_class(
                 self.shared_state.model_path or os.environ.get("MODEL_PATH", "")
             )
         self.state = CoordinatorState()
@@ -931,38 +917,23 @@ class Coordinator:
         """Live ``(phase, tick)`` for trajectory events recorded inside :meth:`run`."""
         return (self.shared_state.phase or None), int(self.shared_state.tick or 0)
 
-    async def _run_tick_body(self, progress: _RunProgress) -> bool:
-        """Run one tick, keeping a tick-body failure; returns whether the session is in its closing phase."""
-        in_closing = bool(self.shared_state.closing_phase)
-        try:
-            return await self._tick_once()
-        except (asyncio.CancelledError, KeyboardInterrupt):
-            raise
-        except Exception as exc:
-            progress.last_tick_exc = exc
-            log.exception("Coordinator.run: tick %d body raised", self.shared_state.tick)
-            self.record_exception(stage="tick_body", exc=exc)
-        return in_closing
-
-    def _requested_stop_reason(self, *, in_closing: bool) -> str:
-        """The reason a signal or the shared state asks the loop to stop for, or ``""`` to keep ticking."""
-        if self.stop_requested():
-            return self._signal_stop_reason()
-        if self.shared_state.stop_reason and not in_closing:
-            return self.shared_state.stop_reason
-        return ""
-
-    def _budget_stop_reason(self, options: RunOptions, *, ticks: int) -> str:
-        """The reason the crash-rate and tick-count budgets ask the loop to stop for, or ``""``."""
+    async def _budget_stop_reason(self, options: RunOptions, *, ticks: int) -> str:
+        """The reason the crash-rate, tick-count and caller-supplied budgets ask the loop to stop for, or ``""``."""
         crashes = self.shared_state.recent_crash_count(window_sec=_CRASH_EMERGENCY_WINDOW_SEC)
         if crashes >= options.crash_emergency_threshold:
             return "emergency"
         if options.max_ticks is not None and ticks >= options.max_ticks:
             return "max_ticks"
-        return ""
+        if options.stop_when is None:
+            return ""
+        triggered = options.stop_when(self)
+        if asyncio.iscoroutine(triggered):
+            triggered = await triggered
+        return "custom" if triggered else ""
 
-    async def _closing_phase_spent(self, closing_deadline: Deadline | None, *, grace_sec: float) -> bool:
+    async def _closing_phase_spent(self, *, grace_sec: float) -> bool:
         """True once the closing report has reached a terminal state or its grace window is gone."""
+        closing_deadline = self._closing_deadline
         report_terminal = await self.phase_close.closing_report_terminal()
         grace_blown = closing_deadline is not None and closing_deadline.expired()
         if grace_blown and not report_terminal:
@@ -971,93 +942,27 @@ class Coordinator:
                 grace_sec,
                 self.shared_state.closing_report_task_id,
             )
-        return report_terminal or grace_blown
-
-    async def _pace_closing_tick(self, closing_deadline: Deadline | None) -> None:
-        """Wait on the running work: no reactor turn paces the closing ticks."""
+        if report_terminal or grace_blown:
+            return True
+        # Wait on the running work: no reactor turn paces the closing ticks.
         poll_sec = self.dispatcher.poll_sec
         await self.dispatcher.wait_for_running_work(
             timeout=min(poll_sec, seconds_until(closing_deadline, unbounded_cap=poll_sec))
         )
+        return False
 
-    async def _stop_when_triggered(self, stop_when: Callable[["Coordinator"], Any]) -> bool:
-        """Evaluate a caller-supplied stop predicate, awaiting it when it is a coroutine."""
-        triggered = stop_when(self)
-        if asyncio.iscoroutine(triggered):
-            triggered = await triggered
-        return bool(triggered)
-
-    async def _wait_between_ticks(self, options: RunOptions, *, in_closing: bool) -> bool:
-        """Idle between ticks without spinning; True when a stop signal arrived before the interval elapsed."""
-        wait_sec = (
-            options.tick_interval_sec if in_closing else max(options.tick_interval_sec, self._backend_retry_wait_sec())
-        )
-        if wait_sec <= 0:
-            return False
-        try:
-            await asyncio.wait_for(self._stop.wait(), timeout=wait_sec)
-        except asyncio.TimeoutError:
-            # Normal path: no stop signal within the tick interval.
-            return False
-        return True
-
-    async def _drive_ticks(
-        self,
-        progress: _RunProgress,
-        *,
-        objective: Objective,
-        options: RunOptions,
-        deadline: Deadline,
-        grace_sec: float,
-    ) -> None:
-        """Tick until a stop condition fires, recording the reason on ``progress``."""
-        closing_deadline: Deadline | None = None
-        while not progress.stop_reason:
-            progress.ticks += 1
-            in_closing = await self._run_tick_body(progress)
-            progress.stop_reason = self._requested_stop_reason(in_closing=in_closing)
-            if progress.stop_reason:
-                break
-            if objective.reached(self.shared_state) and not self.shared_state.target_reached_at:
-                # The phase machine reads the marker; the transition it makes next persists it.
-                self.shared_state.target_reached_at = now_iso()
-            if deadline.expired() and not in_closing:
-                if grace_sec <= 0:
-                    progress.stop_reason = "time_exhausted"
-                    break
-                closing_deadline = await self.phase_close.enter_closing_phase(grace_sec=grace_sec)
-                self._closing_deadline = closing_deadline
-                continue
-            if in_closing:
-                if await self._closing_phase_spent(closing_deadline, grace_sec=grace_sec):
-                    progress.stop_reason = "time_exhausted"
-                    break
-                await self._pace_closing_tick(closing_deadline)
-            progress.stop_reason = self._budget_stop_reason(options, ticks=progress.ticks)
-            if progress.stop_reason:
-                break
-            if options.stop_when is not None and await self._stop_when_triggered(options.stop_when):
-                progress.stop_reason = "custom"
-                break
-            if await self._wait_between_ticks(options, in_closing=in_closing):
-                progress.stop_reason = self._signal_stop_reason()
-                break
-
-    async def _close_run(self, progress: _RunProgress, *, max_minutes: float) -> None:
+    async def _close_run(self, stop_reason: str, *, ticks: int, tick_failed: bool, max_minutes: float) -> str:
         """Classify the stop, persist it, and release everything the run still holds."""
         final_signals: AbstractSet[int] = frozenset()
         if self._signals is not None:
             final_signals = self._signals.close()
             self._signals = None
-        progress.stop_reason = self._classify_stop(final_signals, pending=progress.stop_reason)
-        self._stop_classification = progress.stop_reason
-        if self.shared_state.closing_phase:
-            self.shared_state.closing_phase = False
+        stop_reason = self._classify_stop(final_signals, pending=stop_reason)
+        self._stop_classification = stop_reason
+        self.shared_state.closing_phase = False
         # Resuming a terminal session can break out before stop_reason is set.
         self.shared_state.set_stop_reason(
-            progress.stop_reason
-            or self.shared_state.stop_reason
-            or ("coordinator_exception" if progress.last_tick_exc is not None else "unknown")
+            stop_reason or self.shared_state.stop_reason or ("coordinator_exception" if tick_failed else "unknown")
         )
         self.shared_state.save(self.session_dir)
         try:
@@ -1068,8 +973,8 @@ class Coordinator:
         log.info(
             "Coordinator.run: stopped tick=%d reason=%s baseline_tput=%.1f "
             "cumulative_gain_validated=%.2f%% max_minutes=%.0f",
-            progress.ticks,
-            progress.stop_reason or "unknown",
+            ticks,
+            stop_reason or "unknown",
             self.shared_state.baseline_tput,
             self.shared_state.cumulative_gain_validated,
             max_minutes,
@@ -1081,6 +986,7 @@ class Coordinator:
         with timed_teardown_step(self.shared_state, "reap_orphaned_servers"):
             await asyncio.to_thread(reap_orphaned_servers_best_effort, self.session_dir, phase="shutdown")
         self.shared_state.save(self.session_dir)
+        return stop_reason
 
     async def _run_ticks(self, *, objective: Objective | None, options: RunOptions) -> str:
         """Tick loop and shutdown sequence behind :meth:`run`."""
@@ -1101,18 +1007,54 @@ class Coordinator:
             closing_grace_sec=options.closing_grace_sec,
         )
 
-        progress = _RunProgress()
+        ticks = 0
+        stop_reason = ""
+        tick_failed = False
         try:
-            await self._drive_ticks(
-                progress,
-                objective=objective,
-                options=options,
-                deadline=deadline,
-                grace_sec=grace_sec,
-            )
+            while not stop_reason:
+                ticks += 1
+                in_closing = bool(self.shared_state.closing_phase)
+                try:
+                    in_closing = await self._tick_once()
+                except Exception as exc:
+                    tick_failed = True
+                    log.exception("Coordinator.run: tick %d body raised", self.shared_state.tick)
+                    self.record_exception(stage="tick_body", exc=exc)
+                if self.stop_requested():
+                    stop_reason = self._signal_stop_reason()
+                    break
+                if self.shared_state.stop_reason and not in_closing:
+                    stop_reason = self.shared_state.stop_reason
+                    break
+                if objective.reached(self.shared_state) and not self.shared_state.target_reached_at:
+                    # The phase machine reads the marker; the transition it makes next persists it.
+                    self.shared_state.target_reached_at = now_iso()
+                if deadline.expired() and not in_closing:
+                    if grace_sec <= 0:
+                        stop_reason = "time_exhausted"
+                        break
+                    self._closing_deadline = await self.phase_close.enter_closing_phase(grace_sec=grace_sec)
+                    continue
+                if in_closing and await self._closing_phase_spent(grace_sec=grace_sec):
+                    stop_reason = "time_exhausted"
+                    break
+                stop_reason = await self._budget_stop_reason(options, ticks=ticks)
+                if stop_reason:
+                    break
+                wait_sec = (
+                    options.tick_interval_sec
+                    if in_closing
+                    else max(options.tick_interval_sec, self._backend_retry_wait_sec())
+                )
+                if wait_sec > 0:
+                    with contextlib.suppress(asyncio.TimeoutError):
+                        await asyncio.wait_for(self._stop.wait(), timeout=wait_sec)
+                        stop_reason = self._signal_stop_reason()
         finally:
-            await self._close_run(progress, max_minutes=max_minutes_value)
-        return progress.stop_reason or self.shared_state.stop_reason
+            stop_reason = await self._close_run(
+                stop_reason, ticks=ticks, tick_failed=tick_failed, max_minutes=max_minutes_value
+            )
+        return stop_reason or self.shared_state.stop_reason
 
     async def _close_backends(self) -> None:
         """Release every backend holding a live agent session."""

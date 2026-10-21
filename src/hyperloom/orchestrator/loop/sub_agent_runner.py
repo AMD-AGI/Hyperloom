@@ -16,7 +16,7 @@ import sys
 from concurrent.futures import CancelledError as FuturesCancelledError
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, NamedTuple
+from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 import logging
 
@@ -142,46 +142,11 @@ class ExecutionCleanupUnconfirmed(RuntimeError):
         self.tree_pgid = tree_pgid
 
 
-@dataclass
-class _Execution:
-    """What one execution leaves for its terminal row: its outcome, evidence and call-site label."""
-
-    outcome: SubAgentResult | None = None
-    evidence: dict[str, Any] = field(default_factory=dict)
-    context: str = "executor_success"
-
-
-class _Cleanup(NamedTuple):
-    """Whether an execution's physical resources were released, and what stopped the release."""
-
-    released: bool
-    error: BaseException | None
-
-    @property
-    def confirmed(self) -> bool:
-        """True when the release was both acknowledged and uninterrupted."""
-        return self.released and self.error is None
-
-
 def _cancel_ambient_scope(reason: str) -> None:
     """Tell the ambient cancel scope the execution stopped without proving its worker did."""
     scope = current_cancel_scope()
     if scope is not None:
         scope.cancel(reason=reason)
-
-
-def _surface_unconfirmed_cleanup(task_id: str, outcome: SubAgentResult | None, cleanup: _Cleanup) -> None:
-    """Hand an unconfirmed physical cleanup to the caller that can act on it."""
-    error = cleanup.error
-    if isinstance(error, asyncio.CancelledError):
-        _cancel_ambient_scope("execution_cleanup_cancelled")
-        log.warning("sub_agent_runner: task=%s cleanup cancelled; retaining unconfirmed capacity", task_id)
-        return
-    if isinstance(error, ExecutionCleanupUnconfirmed):
-        error.result = outcome
-        return
-    if not cleanup.confirmed:
-        raise ExecutionCleanupUnconfirmed(f"task={task_id}: physical cleanup unconfirmed", result=outcome) from error
 
 
 @dataclass(frozen=True)
@@ -301,42 +266,27 @@ class SubAgentRunner:
                 context,
             )
 
-    def _dispatch_denial(self, task: Task) -> PolicyDenied | None:
-        """Replay the gate at dispatch time, defending against a forged queued task row."""
-        if self.policy is None:
-            return None
-        try:
-            self.policy.validate_dispatched_task(
-                task.kind,
-                dict(task.params or {}),
-                task_id=task.task_id,
-            )
-        except PolicyDenied as denied:
-            return denied
-        return None
-
-    async def _run_executor(
+    async def _execute(
         self,
         task: Task,
-        execution: _Execution,
         *,
         lease: Lease | None,
         extra_context: dict | None,
-    ) -> SubAgentResult:
-        """Claim the row and run its executor, recording what the terminal row will say."""
-        denied = self._dispatch_denial(task)
-        if denied is not None:
-            execution.context = "dispatch_policy_denied"
-            execution.evidence = {"reason": "policy_denied", "rule": denied.rule, "error": str(denied)}
-            rule = denied.rule or "denied"
-            execution.outcome = SubAgentResult(
-                task_id=task.task_id,
-                state="cancelled",
-                result={},
-                error=str(denied),
-                error_class=f"policy_{rule}",
-            )
-            return execution.outcome
+    ) -> tuple[SubAgentResult, dict[str, Any]]:
+        """Claim the row and run its executor, returning its outcome and the terminal row's evidence."""
+        if self.policy is not None:
+            # Replay the gate at dispatch time, defending against a forged queued task row.
+            try:
+                self.policy.validate_dispatched_task(task.kind, task.params, task_id=task.task_id)
+            except PolicyDenied as denied:
+                outcome = SubAgentResult(
+                    task_id=task.task_id,
+                    state="cancelled",
+                    result={},
+                    error=str(denied),
+                    error_class=f"policy_{denied.rule or 'denied'}",
+                )
+                return outcome, {"reason": "policy_denied", "rule": denied.rule, "error": str(denied)}
 
         # Running an action whose lanes nobody holds would run it
         # unserialised, so a missing lease is a caller bug, not a fallback.
@@ -351,29 +301,15 @@ class SubAgentRunner:
 
         runner = self.executor_registry.get(task.kind)
         if runner is None:
-            execution.context = "no_executor"
-            execution.evidence = {"reason": "no_executor", "kind": task.kind}
-            execution.outcome = SubAgentResult(
+            outcome = SubAgentResult(
                 task_id=task.task_id,
                 state="failed",
                 result={},
                 error=f"no runner registered for kind={task.kind!r}",
                 error_class="no_executor",
             )
-            return execution.outcome
+            return outcome, {"reason": "no_executor", "kind": task.kind}
 
-        return await self._invoke_executor(task, execution, runner, lease=lease, extra_context=extra_context)
-
-    async def _invoke_executor(
-        self,
-        task: Task,
-        execution: _Execution,
-        runner: ExecutorFn,
-        *,
-        lease: Lease | None,
-        extra_context: dict | None,
-    ) -> SubAgentResult:
-        """Run a claimed task's executor and classify how it ended."""
         # Workspace prep is inside the terminal-writing block: an ENOSPC
         # there is a task that failed, not a task still running.
         try:
@@ -383,74 +319,35 @@ class SubAgentRunner:
         except asyncio.CancelledError:
             log.warning("sub_agent_runner: task=%s cleanup unconfirmed; retaining ownership", task.task_id)
             raise
-        except ExecutionCleanupUnconfirmed as exc:
-            execution.outcome = exc.result
+        except ExecutionCleanupUnconfirmed:
+            # A RuntimeError, so the broad clause below would otherwise swallow it.
             raise
         except FuturesCancelledError as exc:
-            execution.context = "executor_cancelled"
-            execution.evidence = {"reason": str(exc)}
-            execution.outcome = SubAgentResult(
+            outcome = SubAgentResult(
                 task_id=task.task_id,
                 state="cancelled",
                 result={"status": "cancelled", "reason": str(exc)},
                 error=str(exc),
                 error_class="cancelled",
             )
-            return execution.outcome
+            return outcome, {"reason": str(exc)}
         except Exception as exc:  # noqa: BLE001 — surface to task.history
-            execution.context = "executor_exception"
-            execution.evidence = {"error": repr(exc)}
-            execution.outcome = SubAgentResult(
+            outcome = SubAgentResult(
                 task_id=task.task_id,
                 state="failed",
                 result={},
                 error=repr(exc),
                 error_class=exc.__class__.__name__,
             )
-            return execution.outcome
-        execution.evidence = {"result_keys": sorted(result_payload.keys())}
-        execution.outcome = SubAgentResult(task_id=task.task_id, state="succeeded", result=result_payload)
-        return execution.outcome
-
-    async def _release_held_resources(
-        self,
-        lease: Lease | None,
-        release_resources: Callable[[], Awaitable[bool]] | None,
-    ) -> bool:
-        """Confirm the worker's cleanup, then hand back the lane lease it held."""
-        released = release_resources is None or await release_resources() is True
-        if released and lease is not None:
-            await self.locks.release(lease)
-        return released
-
-    async def _record_terminal_row(self, task_id: str, execution: _Execution, cleanup: _Cleanup) -> None:
-        """Write the executor's outcome and the cleanup evidence onto the task's terminal row."""
-        outcome = execution.outcome
-        if outcome is None:
-            return
-        evidence = execution.evidence
-        evidence.update({"outcome": asdict(outcome), CLEANUP_CONFIRMED_KEY: cleanup.confirmed})
-        if not cleanup.confirmed:
-            evidence["cleanup_error"] = repr(cleanup.error) if cleanup.error else "physical cleanup unconfirmed"
-            # The lane this path deliberately retains is not taken back by
-            # anything: no reaper inspects this number, because a served process
-            # setsid's out of the group it names. It is recorded so the operator
-            # who has to clear that lane by hand has somewhere to start -- as a
-            # number, rather than left to be dug back out of the repr above.
-            pgid = getattr(cleanup.error, "tree_pgid", None)
-            if isinstance(pgid, int) and not isinstance(pgid, bool) and pgid > 0:
-                evidence[CLEANUP_TREE_PGID_KEY] = pgid
-        await self._write_terminal(
-            task_id,
-            outcome.state,
-            evidence=evidence,
-            context=execution.context,
-        )
+            return outcome, {"error": repr(exc)}
+        outcome = SubAgentResult(task_id=task.task_id, state="succeeded", result=result_payload)
+        return outcome, {"result_keys": sorted(result_payload.keys())}
 
     async def _settle_execution(
         self,
         task: Task,
-        execution: _Execution,
+        outcome: SubAgentResult | None,
+        evidence: dict[str, Any],
         *,
         lease: Lease | None,
         release_resources: Callable[[], Awaitable[bool]] | None,
@@ -466,14 +363,41 @@ class SubAgentRunner:
         try:
             if cleanup_error is None:
                 try:
-                    released = await self._release_held_resources(lease, release_resources)
-                finally:
-                    if sys.exc_info()[1] is not execution_error:
-                        cleanup_error = sys.exc_info()[1]
+                    released = release_resources is None or await release_resources() is True
+                    if released and lease is not None:
+                        await self.locks.release(lease)
+                except BaseException as exc:
+                    cleanup_error = exc
+                    raise
         finally:
-            cleanup = _Cleanup(released, cleanup_error)
-            await self._record_terminal_row(task.task_id, execution, cleanup)
-            _surface_unconfirmed_cleanup(task.task_id, execution.outcome, cleanup)
+            confirmed = released and cleanup_error is None
+            if outcome is not None:
+                evidence.update({"outcome": asdict(outcome), CLEANUP_CONFIRMED_KEY: confirmed})
+                if not confirmed:
+                    evidence["cleanup_error"] = repr(cleanup_error) if cleanup_error else "physical cleanup unconfirmed"
+                    # The lane this path deliberately retains is not taken back by
+                    # anything: no reaper inspects this number, because a served process
+                    # setsid's out of the group it names. It is recorded so the operator
+                    # who has to clear that lane by hand has somewhere to start -- as a
+                    # number, rather than left to be dug back out of the repr above.
+                    if pgid := getattr(cleanup_error, "tree_pgid", None):
+                        evidence[CLEANUP_TREE_PGID_KEY] = pgid
+                await self._write_terminal(
+                    task.task_id,
+                    outcome.state,
+                    evidence=evidence,
+                    context=outcome.error_class or "executor_success",
+                )
+            # Hand an unconfirmed physical cleanup to the caller that can act on it.
+            if isinstance(cleanup_error, asyncio.CancelledError):
+                _cancel_ambient_scope("execution_cleanup_cancelled")
+                log.warning("sub_agent_runner: task=%s cleanup cancelled; retaining unconfirmed capacity", task.task_id)
+            elif isinstance(cleanup_error, ExecutionCleanupUnconfirmed):
+                cleanup_error.result = outcome
+            elif not confirmed:
+                raise ExecutionCleanupUnconfirmed(
+                    f"task={task.task_id}: physical cleanup unconfirmed", result=outcome
+                ) from cleanup_error
 
     async def run_task(
         self,
@@ -500,18 +424,19 @@ class SubAgentRunner:
         Returns:
             The :class:`SubAgentResult` capturing terminal state and payload.
         """
-        execution = _Execution()
+        outcome: SubAgentResult | None = None
+        evidence: dict[str, Any] = {}
         try:
-            return await self._run_executor(
-                task,
-                execution,
-                lease=prebound_lease,
-                extra_context=extra_context,
-            )
+            outcome, evidence = await self._execute(task, lease=prebound_lease, extra_context=extra_context)
+            return outcome
+        except ExecutionCleanupUnconfirmed as exc:
+            outcome = exc.result
+            raise
         finally:
             await self._settle_execution(
                 task,
-                execution,
+                outcome,
+                evidence,
                 lease=prebound_lease,
                 release_resources=release_resources,
             )
