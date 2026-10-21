@@ -299,59 +299,29 @@ class DecisionReviewer:
             bundle.review_constraints["kb_breaker"] = self.kb_writer.kb_breaker_state()
             return bundle
 
-        scope = build_scope(req.context, session_context=merge.merged, require_critical=False)
+        self._fetch_kb_priors(bundle, req, merge.merged)
+        return bundle
+
+    def _fetch_kb_priors(self, bundle: JudgeBundle, req: CriticRequest, merged: dict[str, Any]) -> None:
+        """Read the KB priors for each proposal, or for the decision, into ``bundle`` with their audit trail."""
+        scope = build_scope(req.context, session_context=merged, require_critical=False)
         # Hide "unknown" so the service doesn't filter to literal "unknown" rows.
         scope_filter = {k: v for k, v in scope.items() if v != "unknown"}
-
-        topic_hits: dict[str, list[dict[str, Any]]] = {}
         ctx = WriteContext(session_id=req.session_id, review_id=req.decision_id)
-        any_kb_unreachable = False
         prior_limit = int(os.environ.get("CRITIC_KB_PRIOR_LIMIT", "5"))
+        lookups = [(p.msg_id, self._topic_for_proposal(p)) for p in req.proposals] or [
+            (None, self._topic_for_decision(req))
+        ]
         priors_requests: list[dict[str, Any]] = []
-        if req.proposals:
-            for p in req.proposals:
-                topic = self._topic_for_proposal(p)
-                priors = self.kb_writer.list_priors(
-                    scope=scope_filter,
-                    kind=None,
-                    topic=topic,
-                    limit=prior_limit,
-                    ctx=ctx,
-                )
-                topic_hits[p.msg_id] = priors.get("priors") or []
-                if priors.get("cache") == "kb_unreachable":
-                    any_kb_unreachable = True
-                priors_requests.append(
-                    {
-                        "msg_id": p.msg_id,
-                        "topic": topic,
-                        "cache": priors.get("cache"),
-                        "count": len(topic_hits[p.msg_id]),
-                    }
-                )
-            bundle.kb_priors_by_proposal = topic_hits
-        else:
-            topic = self._topic_for_decision(req)
-            priors = self.kb_writer.list_priors(
-                scope=scope_filter,
-                kind=None,
-                topic=topic,
-                limit=prior_limit,
-                ctx=ctx,
-            )
-            bundle.kb_priors_for_decision = priors.get("priors") or []
-            if priors.get("cache") == "kb_unreachable":
-                any_kb_unreachable = True
-            priors_requests.append(
-                {
-                    "msg_id": None,
-                    "topic": topic,
-                    "cache": priors.get("cache"),
-                    "count": len(bundle.kb_priors_for_decision),
-                }
-            )
+        for msg_id, topic in lookups:
+            priors = self.kb_writer.list_priors(scope=scope_filter, kind=None, topic=topic, limit=prior_limit, ctx=ctx)
+            hits = priors.get("priors") or []
+            if msg_id is None:
+                bundle.kb_priors_for_decision = hits
+            else:
+                bundle.kb_priors_by_proposal[msg_id] = hits
+            priors_requests.append({"msg_id": msg_id, "topic": topic, "cache": priors.get("cache"), "count": len(hits)})
 
-        # Audit trail for the historical KB prior reads (always injected).
         bundle.kb_priors_trace = {
             "configured": True,
             "mode": "per_proposal" if req.proposals else "per_decision",
@@ -360,17 +330,13 @@ class DecisionReviewer:
             "limit": prior_limit,
             "requests": priors_requests,
         }
-
-        if any_kb_unreachable:
+        if any(r["cache"] == "kb_unreachable" for r in priors_requests):
             bundle.kb_read_skipped_reason = "kb_unreachable"
             bundle.notes.append("KB service unreachable for at least one lookup — priors may be incomplete")
             bundle.review_constraints["kb_breaker"] = self.kb_writer.kb_breaker_state()
-
         if scope.get("model") == "unknown" or scope.get("framework") == "unknown":
             bundle.notes.append("scope partially unknown — proceed with caution")
         bundle.notes.append(f"scope_cache_key={scope_cache_key(scope_filter)}")
-
-        return bundle
 
     # Phase 2: commit-review
     def commit_review(
@@ -481,18 +447,16 @@ class DecisionReviewer:
         if not isinstance(verdicts_raw, list):
             raise ReviewValidationError("coordinator_inbox commit expects review.review_verdicts to be a list")
 
+        advice = [a for a in review.get("advice") or [] if isinstance(a, dict) and a.get("body_md")]
         advice_by_target: dict[str, list[str]] = {}
-        for advisory in review.get("advice") or []:
-            if not isinstance(advisory, dict):
-                continue
-            body = advisory.get("body_md")
+        for advisory in advice:
             advice_target = advisory.get("target_proposal_msg_id")
-            if not body or not isinstance(advice_target, str) or not advice_target:
-                continue
-            advice_by_target.setdefault(advice_target, []).append(body)
+            if isinstance(advice_target, str) and advice_target:
+                advice_by_target.setdefault(advice_target, []).append(advisory["body_md"])
 
+        # Every verdict is validated before any of them is committed.
         seen_targets: set[str] = set()
-        validated: list[tuple[dict[str, Any], str, str, Intent]] = []
+        intents: list[Intent] = []
         for i, item in enumerate(verdicts_raw):
             if not isinstance(item, dict):
                 raise ReviewValidationError(f"review.review_verdicts[{i}] must be an object")
@@ -514,14 +478,12 @@ class DecisionReviewer:
             ]
             advice_text = "\n\n".join(advice_parts)
             try:
-                intent = build_review_verdict_intent(_review_verdict(item, target, verdict, advice_text))
+                intents.append(build_review_verdict_intent(_review_verdict(item, target, verdict, advice_text)))
             except IntentEnvelopeValidationError as exc:
                 raise ReviewValidationError(str(exc)) from exc
-            validated.append((item, target, verdict, intent))
 
-        intents: list[Intent] = []
-        for item, target, verdict, intent in validated:
-            intents.append(intent)
+        for item in verdicts_raw:
+            target, verdict = item["target_proposal_msg_id"], item["verdict"]
             self.session_memory.mark_reviewed(req.session_id, target, verdict, decision_id=req.decision_id)
             self.session_memory.append_decision(
                 req.session_id,
@@ -539,13 +501,10 @@ class DecisionReviewer:
 
         # Every advisory also goes out as a standalone advice message, whatever the target's verdict (or if
         # untargeted); targeted bodies are already inlined into the verdict's ``advice_text`` above.
-        for advisory in review.get("advice") or []:
-            if not isinstance(advisory, dict):
-                continue
-            body = advisory.get("body_md")
-            if not body:
-                continue
-            intents.append(build_advice_intent(body, target_proposal_msg_id=advisory.get("target_proposal_msg_id")))
+        for advisory in advice:
+            intents.append(
+                build_advice_intent(advisory["body_md"], target_proposal_msg_id=advisory.get("target_proposal_msg_id"))
+            )
 
         # Nothing to review — still report in.
         if not intents:

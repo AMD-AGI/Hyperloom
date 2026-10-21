@@ -49,9 +49,11 @@ from .model_gate import (
 )
 from ..gpu_types import (
     _autodetect_gpu_type,
-    _gpu_runner_type,
+    gpu_runner_type,
     _resolve_amd_gpu_type,
     _resolve_gpu_type,
+    require_runner_framework,
+    warn_family_runner,
 )
 from ..model_config_utils import (
     summarize_model_config,
@@ -215,17 +217,16 @@ def _apply_operator_supplied_paths(args: Any, framework: str) -> None:
 
 
 def _restore_operator_supplied_paths_from_state(args: Any, state: SharedState) -> None:
-    """Fill custom-workload env from persisted state when this resume omitted it."""
-    from hyperloom.orchestrator.actions.executors.benchmark_backend import (
-        BENCHMARK_BACKEND_ENV,
-    )
+    """Re-export the session paths persisted on ``state`` when this resume omitted them."""
+    from hyperloom.inference_optimizer.framework_paths import point_session_framework_root
+    from hyperloom.orchestrator.actions.executors.benchmark_backend import BENCHMARK_BACKEND_ENV
 
     cli_repo = str(getattr(args, "framework_path", None) or "").strip()
     cli_scripts = str(getattr(args, "benchmark_scripts_dir", None) or "").strip()
     if not cli_repo and not os.environ.get("FRAMEWORK_REPO_PATH", "").strip():
         archived = str(getattr(state, "framework_repo_path", "") or "").strip()
         if archived:
-            os.environ["FRAMEWORK_REPO_PATH"] = archived
+            point_session_framework_root(archived, state.framework)
     if not cli_scripts and not os.environ.get("HYPERLOOM_BYPASS_SCRIPTS_DIR", "").strip():
         archived = str(getattr(state, "bypass_scripts_dir", "") or "").strip()
         if archived:
@@ -237,7 +238,8 @@ def _restore_operator_supplied_paths_from_state(args: Any, state: SharedState) -
 
 
 def _require_custom_entrypoint(framework: str, gpu_type: str | None = None) -> None:
-    """Fail at launch when ``--framework custom`` cannot resolve its script."""
+    """Fail at launch when the selected runner cannot serve the framework."""
+    require_runner_framework(gpu_type or "", framework)
     if str(framework or "").strip().lower() != "custom":
         return
     from hyperloom.orchestrator.actions.executors._workload_envs import (
@@ -1818,7 +1820,7 @@ def _reexport_session_environment(
     if state.framework == "atom":
         _apply_atom_auto_tighten(args)
     if state.gpu_type:
-        runner_gpu_type = _gpu_runner_type(state.gpu_type)
+        runner_gpu_type = gpu_runner_type(state.gpu_type)
         os.environ["TARGET_GPU_TYPE"] = state.gpu_type
         os.environ["GPU_TYPE"] = runner_gpu_type
         print(f"  re-exported GPU_TYPE  : {state.gpu_type}")
@@ -2116,14 +2118,8 @@ async def _seed_fresh_session(args: argparse.Namespace, *, nodes_resolved: int) 
         print(line, file=sys.stderr)
     if probed and not user_specified:
         print(f"GPU type        : {gpu_type} (auto-detected)")
-    runner_gpu_type = _gpu_runner_type(gpu_type)
-    if gpu_type and runner_gpu_type != gpu_type:
-        print(
-            f"WARN: {gpu_type} uses {runner_gpu_type} as Magpie "
-            f"runner_type (same gfx942/CDNA3 arch; Magpie has no "
-            f"sglang_{gpu_type}.sh / vllm_{gpu_type}.sh yet)",
-            file=sys.stderr,
-        )
+    runner_gpu_type = gpu_runner_type(gpu_type)
+    warn_family_runner(gpu_type, framework)
     args.gpu_type = gpu_type or None
     if runner_gpu_type:
         os.environ["TARGET_GPU_TYPE"] = gpu_type
