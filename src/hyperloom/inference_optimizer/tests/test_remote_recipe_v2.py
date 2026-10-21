@@ -2762,7 +2762,6 @@ def test_current_warm_adapter_keeps_replay_payload_out_of_t0(tmp_path: Path) -> 
 def test_remote_adapter_pages_history_then_materializes_l2_donor(
     tmp_path: Path,
 ) -> None:
-    from hyperloom.orchestrator.knowledge._warm_start_match import _DonorTarget, _SearchIdentity
     from hyperloom.orchestrator.knowledge.recipe_kb_t0 import (
         _cascade_warm_start_search,
     )
@@ -2874,16 +2873,17 @@ def test_remote_adapter_pages_history_then_materializes_l2_donor(
     row, tier, confidence = _cascade_warm_start_search(
         adapter,  # type: ignore[arg-type]
         cid=exact,
-        identity=_SearchIdentity(
-            hardware="mi300x",
-            framework="sglang",
-            model_type="qwen",
-            arch_slug="qwenarch",
-            framework_version="1.0",
-            precision="fp8",
-        ),
+        identity={
+            "canonical_id": exact,
+            "hardware": "mi300x",
+            "framework_name": "sglang",
+            "model_type": "qwen",
+            "architectures": "qwenarch",
+            "framework_version": "1.0",
+            "precision": "fp8",
+        },
+        shape={},
         warm_prefer=None,
-        target=_DonorTarget(),
     )
 
     assert row["canonical_id"] == donor
