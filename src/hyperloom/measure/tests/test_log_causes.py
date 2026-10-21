@@ -4,7 +4,9 @@
 """A failed test's reason names the cause its server log or its benchmark's stderr states.
 
 The logs are sanitised copies of the three kinds that ended a 12 h session as ``no_known_signature``: the server
-refusing its own command line, the evaluation client answered ``400``, and a worker dying on a Python exception.
+refusing its own command line, the evaluation client answered ``400``, and a worker dying on a Python exception. The
+fourth, an import that failed, is the server.log lines of a real SGLang server (one MI355X card) asked for
+``--load-format fastsafetensors``.
 """
 
 from __future__ import annotations
@@ -53,6 +55,21 @@ VLLM_PREFIXED_EXCEPTION_LOG = (
     "(EngineCore_0 pid=4417) ERROR 10-20 23:44:09 [core.py:700] Traceback (most recent call last):\n"
     '(EngineCore_0 pid=4417) ERROR 10-20 23:44:09 [core.py:700]   File "vllm/v1/engine/core.py", line 691, in run\n'
     "(EngineCore_0 pid=4417) ERROR 10-20 23:44:09 [core.py:700] ValueError: 8 attention heads cannot be split into 3 shards\n"
+)
+FASTSAFETENSORS_LOG = (
+    "[2026-10-21 06:23:02] Ignore import error when loading sglang.srt.models.falcon_mamba: cannot import name "
+    "'causal_conv1d_fn' from 'sglang.srt.layers.attention.mamba.mamba' "
+    "(/sgl-workspace/sglang/python/sglang/srt/layers/attention/mamba/mamba.py)\n"
+    "[2026-10-21 06:23:03] Ignore import error when loading sglang.srt.models.inkling: No module named 'cutlass'\n"
+    "[2026-10-21 06:23:03] Ignore import error when loading sglang.srt.models.mamba: cannot import name "
+    "'causal_conv1d_fn' from 'sglang.srt.layers.attention.mamba.mamba' "
+    "(/sgl-workspace/sglang/python/sglang/srt/layers/attention/mamba/mamba.py)\n"
+    "[2026-10-21 06:23:03] Scheduler hit an exception: Traceback (most recent call last):\n"
+    "    raise ImportError(\n"
+    "ImportError: Please install fastsafetensors via `pip install fastsafetensors`\n"
+    "\n"
+    "[2026-10-21 06:23:03] Received sigquit from a child process. It usually means the child failed.\n"
+    "[2026-10-21 06:23:03] kill_process_tree called: parent_pid=16242, include_parent=True, pid=16242\n"
 )
 PLAIN_LOG = "INFO server booted\nINFO request finished in 3.1s\nsegfault somewhere\n"
 
@@ -129,7 +146,30 @@ def test_a_log_that_names_nothing_stays_no_known_signature() -> None:
 def test_a_signature_the_shared_table_knows_wins_over_the_exception_line() -> None:
     log = PYTHON_EXCEPTION_LOG + "ModuleNotFoundError: No module named 'sglang_patch'\n"
 
-    assert _classify(log) == (FailureClass.CANDIDATE, "import_error")
+    assert _classify(log) == (
+        FailureClass.CANDIDATE,
+        "import_error: ModuleNotFoundError: No module named 'sglang_patch'",
+    )
+
+
+def test_a_failed_import_is_a_candidate_failure_that_names_the_import_line() -> None:
+    assert _classify("stderr of the launcher", FASTSAFETENSORS_LOG) == (
+        FailureClass.CANDIDATE,
+        "import_error: ImportError: Please install fastsafetensors via `pip install fastsafetensors`",
+    )
+
+
+def test_an_import_the_server_skipped_on_purpose_is_not_the_cause() -> None:
+    skipped = "\n".join(FASTSAFETENSORS_LOG.splitlines()[:3]) + "\n"
+
+    assert _classify(skipped) == (FailureClass.UNCLEAR, "no_known_signature")
+
+
+def test_a_failed_import_with_no_message_still_ends_as_the_bare_kind() -> None:
+    assert _classify("Traceback (most recent call last):\n  raise ImportError(\nImportError:\n") == (
+        FailureClass.CANDIDATE,
+        "import_error",
+    )
 
 
 def test_a_port_taken_still_wins_over_a_refused_flag() -> None:
@@ -157,6 +197,7 @@ def test_a_stalled_server_keeps_its_reason_when_its_log_holds_an_exception() -> 
         (log_causes.argparse_error, ARGPARSE_LOG, "launch_server.py: error: ambiguous option:"),
         (log_causes.bad_request, LM_EVAL_STDERR, "API request failed with error message:"),
         (log_causes.python_exception, PYTHON_EXCEPTION_LOG, "AssertionError: M must be"),
+        (log_causes.import_error, FASTSAFETENSORS_LOG, "ImportError: Please install fastsafetensors"),
     ],
 )
 def test_each_reader_returns_the_line_that_names_the_cause_and_none_for_a_plain_log(reader, log, expected) -> None:

@@ -165,10 +165,13 @@ async def test_the_factory_builds_a_toolbox_that_runs_a_test_end_to_end(
         result = TestResult.from_document(entry.outcome["result"])
         # No GPU here, so the shipped runner cannot serve a model: what this proves is the wiring. The real runner
         # started from the local template, signed a bundle, the backend verified it, and the toolbox took the cause
-        # the server log names (no sglang module) as the candidate's failure, did not rerun it and wrote it to the
+        # the server log names, quoted (no sglang module) as the candidate's failure, did not rerun it and wrote it to the
         # notebook.
         assert result.validity is Validity.CANDIDATE_FAILED and result.failure_class is FailureClass.CANDIDATE
-        assert result.failure_reason == "import_error"
+        assert result.failure_reason is not None and result.failure_reason.startswith("import_error: ")
+        assert "No module named 'sglang'" in result.failure_reason, (
+            "the reason quotes the line the server log ends with"
+        )
         assert len(result.attempts) == 1 and result.manifest_sha256, result
         sandboxes = {rec.sandbox_id for rec in toolbox.backend.journal.records() if rec.request_id == request_id}
         assert len(sandboxes) == 1

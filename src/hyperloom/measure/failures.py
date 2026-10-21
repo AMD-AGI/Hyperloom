@@ -24,7 +24,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import Enum
 
-from hyperloom.common.failure_signature import SERVE_FLAG, classify_failure
+from hyperloom.common.failure_signature import IMPORT_ERROR, SERVE_FLAG, classify_failure
 from hyperloom.contracts.measurement import FailureClass
 from hyperloom.measure import log_causes
 from hyperloom.measure.returncodes import (
@@ -71,6 +71,8 @@ SERVER_BOOT_TIMEOUT_REASON = "server_boot_timeout"
 LM_EVAL_BAD_REQUEST_REASON = "lm_eval_http_400"
 PYTHON_EXCEPTION_REASON = "python_exception"
 NO_KNOWN_SIGNATURE_REASON = "no_known_signature"
+#: The kinds of the shared signature table whose reason also quotes the log line that states them, with the reader of it.
+_QUOTED_KINDS = {SERVE_FLAG: log_causes.argparse_error, IMPORT_ERROR: log_causes.import_error}
 _PORT_IN_USE = re.compile(r"address already in use|\[Errno 98\]", re.IGNORECASE)
 
 # Sentinel return codes of the local flow (``orchestrator/actions/executors/_subprocess_kill.py``). The names stay
@@ -178,13 +180,13 @@ def _named_by_logs(text: str) -> FailureClassification | None:
     """The verdict a log gives by itself: a port taken, a known signature, a refused command line; else ``None``."""
     if _PORT_IN_USE.search(text):
         return _infra(PORT_IN_USE_REASON)
-    flag_error = log_causes.argparse_error(text)
     signature = classify_failure(text)
     if signature.is_actionable:
-        # The signature names the kind; for a refused flag the line that refused it names the flag.
-        return _candidate(
-            f"{SERVE_FLAG}: {flag_error}" if signature.kind == SERVE_FLAG and flag_error else signature.kind
-        )
+        # The signature names the kind; the line of the log that states it names the flag or the module.
+        reader = _QUOTED_KINDS.get(signature.kind)
+        cause = reader(text) if reader else None
+        return _candidate(f"{signature.kind}: {cause}" if cause else signature.kind)
+    flag_error = log_causes.argparse_error(text)
     if flag_error:
         return _candidate(f"{SERVE_FLAG}: {flag_error}")
     return None

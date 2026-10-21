@@ -23,6 +23,10 @@ IMPORT_ERROR_LOG = (
 )
 
 
+#: The kind of the signature table, then the line of the log that states it.
+IMPORT_ERROR_REASON = f"{failure_signature.IMPORT_ERROR}: ModuleNotFoundError: No module named 'sglang_patch'"
+
+
 def _classify(**kwargs):
     return classify_test_failure(**kwargs)
 
@@ -54,7 +58,7 @@ def test_a_server_that_went_silent_is_an_unclear_stall_unless_its_log_names_the_
     crashed = _classify(returncode=-911, logs=[IMPORT_ERROR_LOG])
 
     assert (stalled.failure_class, stalled.failure_reason) == (FailureClass.UNCLEAR, "server_stalled")
-    assert (crashed.failure_class, crashed.failure_reason) == (FailureClass.CANDIDATE, failure_signature.IMPORT_ERROR)
+    assert (crashed.failure_class, crashed.failure_reason) == (FailureClass.CANDIDATE, IMPORT_ERROR_REASON)
 
 
 def test_a_server_that_was_not_ready_in_time_is_the_candidates_failure_unless_its_log_names_another_cause() -> None:
@@ -71,7 +75,7 @@ def test_a_server_that_was_not_ready_in_time_is_the_candidates_failure_unless_it
         "server_boot_timeout: not ready within 1800s",
     )
     assert (bare.failure_class, bare.failure_reason) == (FailureClass.CANDIDATE, "server_boot_timeout")
-    assert (crashed.failure_class, crashed.failure_reason) == (FailureClass.CANDIDATE, failure_signature.IMPORT_ERROR)
+    assert (crashed.failure_class, crashed.failure_reason) == (FailureClass.CANDIDATE, IMPORT_ERROR_REASON)
     assert (bound.failure_class, bound.failure_reason) == (FailureClass.INFRA, "port_in_use")
 
 
@@ -82,7 +86,7 @@ def test_a_clean_exit_is_a_success() -> None:
 
 def test_a_known_failure_signature_is_a_candidate_failure_named_by_the_signature() -> None:
     verdict = _classify(returncode=1, logs=["", IMPORT_ERROR_LOG])
-    assert (verdict.failure_class, verdict.failure_reason) == (FailureClass.CANDIDATE, failure_signature.IMPORT_ERROR)
+    assert (verdict.failure_class, verdict.failure_reason) == (FailureClass.CANDIDATE, IMPORT_ERROR_REASON)
 
 
 def test_a_non_zero_exit_without_a_known_signature_is_unclear() -> None:

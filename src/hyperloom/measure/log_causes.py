@@ -6,7 +6,8 @@
 The signature table of :mod:`hyperloom.common.failure_signature` knows the failures an enablement run acts on. A
 measurement also meets failures it does not know: the server refuses its own command line, the evaluation client is
 answered ``400``, a worker dies on a Python exception. Each of them names its cause in one line of the server log or of
-the benchmark's stderr, and that line is what the specialist needs, so each reader here returns it.
+the benchmark's stderr, and that line is what the specialist needs, so each reader here returns it. A failure the
+signature table does know (an import that failed, a refused flag) quotes its line the same way.
 
 Every reader takes the joined log text and returns the last line that names the cause, shortened to one bounded line, or
 ``None``.
@@ -39,6 +40,11 @@ _BAD_REQUEST = re.compile(
 )
 #: The lm_eval client's own report of a refused request carries the server's message, which names the cause.
 _REFUSAL_MESSAGE = re.compile(r"API request failed|[\"']message[\"']\s*:")
+
+#: The exception a failed import raised, ``ImportError: message`` or ``ModuleNotFoundError: message`` after an optional
+#: log prefix. A server that skips a model whose imports fail logs ``Ignore import error when loading <module>: ...``
+#: and carries on; that line is not an exception and does not match.
+_IMPORT_FAILURE = re.compile(r"(?<![\w.])(?:[A-Za-z_]\w*\.)*(?:ImportError|ModuleNotFoundError):\s*\S")
 
 #: ``SomeError: message`` after an optional log prefix, or a bare ``SomeError`` on a line of its own.
 _EXCEPTION_WITH_MESSAGE = re.compile(r"(?<![\w.])((?:[A-Za-z_]\w*\.)*(?:[A-Z]\w*)?(?:Error|Exception)):\s*\S")
@@ -77,6 +83,11 @@ def bad_request(text: str) -> str | None:
     with_message = [line for line in lines if _REFUSAL_MESSAGE.search(line)]
     chosen = (with_message or lines or [None])[-1]
     return None if chosen is None else one_line(chosen)
+
+
+def import_error(text: str) -> str | None:
+    """The ``ImportError``/``ModuleNotFoundError`` line a failed import ended the server with."""
+    return _last_matching(text, lambda line: bool(_IMPORT_FAILURE.search(line)))
 
 
 def python_exception(text: str) -> str | None:
