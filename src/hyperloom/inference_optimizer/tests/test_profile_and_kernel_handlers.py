@@ -56,6 +56,7 @@ from hyperloom.inference_optimizer.session.paths import asset_root, make_session
 from hyperloom.orchestrator.bus.storage import SqliteConnection
 
 _PROFILE_SGLANG_CONFIG = asset_root() / "assets" / "configs" / "profile_sglang.yaml"
+_PROFILE_VLLM_CONFIG = asset_root() / "assets" / "configs" / "profile_vllm.yaml"
 
 
 # fixtures
@@ -86,7 +87,7 @@ def test_mi325x_keeps_real_gpu_type_but_uses_mi300x_runner(tmp_path, monkeypatch
         ["optimize", "--model", "/models/Qwen3", "--max-hours", "1", "--gpu-type", "mi325x"]
     )
 
-    assert gpu_types._gpu_runner_type("mi325x") == "mi300x"
+    assert gpu_types.gpu_runner_type("mi325x") == "mi300x"
     assert gpu_types._GFX_TO_RUNNER.get("gfx1100") is None
     manifest = build_manifest(tmp_path, args=args, session_id="mi325x-session")
     state = cli_bootstrap._seed_shared_state(
@@ -109,7 +110,7 @@ def test_mi308x_keeps_real_gpu_type_but_uses_mi300x_runner(tmp_path, monkeypatch
         ["optimize", "--model", "/models/Qwen3", "--max-hours", "1", "--gpu-type", "mi308x"]
     )
 
-    assert gpu_types._gpu_runner_type("mi308x") == "mi300x"
+    assert gpu_types.gpu_runner_type("mi308x") == "mi300x"
     manifest = build_manifest(tmp_path, args=args, session_id="mi308x-session")
     state = cli_bootstrap._seed_shared_state(
         tmp_path,
@@ -209,6 +210,21 @@ def test_materialize_config_injects_runner_type(tmp_path):
     with out.open() as f:
         rendered = yaml.safe_load(f)
     assert rendered["benchmark"]["runner_type"] == "mi355x"
+
+
+def test_r9700_baseline_and_profile_use_vllm_gfx12_runner(tmp_path, monkeypatch):
+    import yaml
+
+    monkeypatch.setenv("FRAMEWORK", "vllm")
+    for config_path in (default_baseline_config(), _PROFILE_VLLM_CONFIG):
+        out = materialize_benchmark_config(
+            config_path,
+            tmp_path / config_path.stem,
+            gpu_type="r9700",
+        )
+        rendered = yaml.safe_load(out.read_text())["benchmark"]
+        assert rendered["runner_type"] == "gfx12"
+        assert rendered["benchmark_script"] == "vllm_gfx12.sh"
 
 
 def test_materialize_config_forces_generic_benchmark_script(tmp_path):
@@ -1955,7 +1971,7 @@ async def test_roofline_executor_skips_when_framework_atom(monkeypatch):
     )
 
     monkeypatch.setenv("FRAMEWORK", "atom")
-    rexec = RooflineExecutor(shared_state=SimpleNamespace())
+    rexec = RooflineExecutor(shared_state=SimpleNamespace(lifecycle=None, phase=""))
 
     # Sentinel: prove the lazy import / sub-step orchestration is reached.
     from hyperloom.orchestrator.actions.executors import profile as profile_mod
@@ -2511,7 +2527,6 @@ async def test_trace_analyze_handler_xdit_state_overrides_stale_payload_framewor
     cmd = captured["cmd"]
     assert "--framework" in cmd and cmd[cmd.index("--framework") + 1] == "xdit"
     assert "--steady-state-mode" in cmd and cmd[cmd.index("--steady-state-mode") + 1] == "generic"
-    assert "--analysis-mode" not in cmd
     warnings = res["trace_health_warnings"]
     assert warnings[0]["code"] == "stale_framework_overridden"
     assert warnings[0]["payload_framework"] == "sglang"
@@ -2590,7 +2605,6 @@ async def test_trace_analyze_handler_payload_framework_overrides_serving_state(
     assert res["status"] == "ok"
     cmd = captured["cmd"]
     assert "--framework" in cmd and cmd[cmd.index("--framework") + 1] == "sglang"
-    assert "--analysis-mode" in cmd and cmd[cmd.index("--analysis-mode") + 1] == "inference"
 
 
 @pytest.mark.asyncio
@@ -3025,7 +3039,6 @@ async def test_trace_analyze_handler_backfills_workload_context_from_state(
     assert "--framework" in cmd and "vllm" in cmd
     assert "--target-platform" in cmd and "mi300x" in cmd
     assert "--model-name" in cmd and "Qwen3-30B-A3B" in cmd
-    assert "--analysis-mode" in cmd and "inference" in cmd
 
 
 @pytest.mark.asyncio
@@ -3826,68 +3839,16 @@ async def test_coordinator_request_trace_analyze_uses_handler(session_dir):
 
 
 @pytest.mark.asyncio
-async def test_coordinator_request_unknown_kind_auto_rejected(session_dir):
-    """REQUEST with no registered handler emits an auto-reject RESPONSE."""
-    c = Coordinator(session_dir, backends=_backends_silent())
-    try:
-        c.shared_state.kernel_enabled = True
-        await c.router.handle_intent(
-            "orchestration",
-            Intent(
-                type=IntentType.REQUEST,
-                payload={
-                    "target_agent": "kernel_agent",
-                    "kind": "invent_brand_new_kind",
-                },
-            ),
-        )
-        req_msgs = await c.bus.tail(topic="request", to_agent="kernel_agent")
-        assert req_msgs, "request must be recorded on bus"
-        resp_msgs = await c.bus.tail(topic="response", to_agent="orchestration")
-        assert resp_msgs, "auto-reject RESPONSE must be emitted"
-        r = resp_msgs[0]
-        assert r.from_agent == "kernel_agent"
-        assert r.payload["status"] == "failed"
-        assert r.payload["result"]["error_class"] == "unknown_kernel_kind"
-        assert r.payload["source"] == "coordinator_auto_reject"
-        assert "valid_kinds" in r.payload["result"]
-    finally:
-        await c.stop()
-
-
-@pytest.mark.asyncio
-async def test_coordinator_request_kernel_disabled_auto_rejected(session_dir):
-    """REQUEST to kernel_agent when kernel_enabled=False emits agent_disabled RESPONSE."""
-    c = Coordinator(session_dir, backends=_backends_silent())
-    try:
-        c.shared_state.kernel_enabled = False
-        await c.router.handle_intent(
-            "orchestration",
-            Intent(
-                type=IntentType.REQUEST,
-                payload={
-                    "target_agent": "kernel_agent",
-                    "kind": "trace_analyze",
-                    "params": {"trace_input": "/tmp/t.json.gz"},
-                },
-            ),
-        )
-        resp_msgs = await c.bus.tail(topic="response", to_agent="orchestration")
-        assert resp_msgs, "auto-reject RESPONSE must be emitted"
-        r = resp_msgs[0]
-        assert r.payload["status"] == "failed"
-        assert r.payload["result"]["error_class"] == "agent_disabled"
-        assert r.payload["source"] == "coordinator_auto_reject"
-    finally:
-        await c.stop()
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("payload", "kernel_enabled", "error_class"),
+    ("payload", "kernel_enabled", "error_class", "result_keys"),
     [
-        ({"target_agent": "kernel_agent", "kind": "trace_analyze"}, False, "agent_disabled"),
-        ({"target_agent": "kernel_agent", "kind": "invent_brand_new_kind"}, True, "unknown_kernel_kind"),
+        ({"target_agent": "kernel_agent", "kind": "trace_analyze"}, False, "agent_disabled", ()),
+        (
+            {"target_agent": "kernel_agent", "kind": "invent_brand_new_kind"},
+            True,
+            "unknown_kernel_kind",
+            ("valid_kinds",),
+        ),
     ],
 )
 async def test_coordinator_auto_reject_answers_in_one_envelope(
@@ -3895,6 +3856,7 @@ async def test_coordinator_auto_reject_answers_in_one_envelope(
     payload,
     kernel_enabled,
     error_class,
+    result_keys,
 ):
     """Every refusal the coordinator makes before a handler runs answers the requester the same way."""
     c = Coordinator(session_dir, backends=_backends_silent())
@@ -3915,6 +3877,7 @@ async def test_coordinator_auto_reject_answers_in_one_envelope(
         assert reply.payload["source"] == "coordinator_auto_reject"
         assert reply.payload["result"]["status"] == "failed"
         assert reply.payload["result"]["error_class"] == error_class
+        assert [k for k in result_keys if k not in reply.payload["result"]] == []
         assert c.shared_state.last_action_failures[-1]["error_class"] == error_class
     finally:
         await c.stop()

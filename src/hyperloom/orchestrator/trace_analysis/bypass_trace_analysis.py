@@ -20,6 +20,7 @@ import argparse
 import datetime as _dt
 import hashlib
 import json
+import logging
 import os
 import re
 import sys
@@ -41,6 +42,8 @@ from ._idle_gate import (
 )
 from ._denoise_steps import count_profiler_steps, resolve_perstep_divisor
 from ._io_utils import write_text
+
+log = logging.getLogger(__name__)
 
 
 AGGREGATION_SCOPE_FULL = "full_trace"
@@ -497,6 +500,7 @@ def main(argv: list[str] | None = None) -> int:
             # top_k=0 -> keep all device-kernel aggregates; candidate slicing uses top_k.
             analyze = _reader.analyze_trace(args.trace_input, _main_trace_options(args, steady_state=enable_steady))
         except Exception as exc:  # noqa: BLE001 — never abort the pipeline
+            log.warning("bypass trace analysis failed: %s", exc)
             analyze = {"status": "failed", "error": f"{type(exc).__name__}: {exc}"}
     run_meta["preflight"].update(
         {
@@ -684,7 +688,6 @@ def main(argv: list[str] | None = None) -> int:
         framework=args.framework,
         target_platform=args.target_platform,
         top_k=top_k,
-        discover_benchmarks=False,
     )
 
     analysis_md_path = bypass_dir / "analysis.md"
@@ -821,7 +824,8 @@ def main(argv: list[str] | None = None) -> int:
             _diff_path = run_dir / "diffusion_roofline.json"
             atomic_write_json(_diff_path, _diff_report, fmt=JsonFormat(sort_keys=False, ensure_ascii=False))
             diffusion_roofline_path = str(_diff_path)
-        except Exception:  # noqa: BLE001 - best-effort sidecar, never blocks the run
+        except Exception as exc:  # noqa: BLE001 - best-effort sidecar, never blocks the run
+            log.warning("diffusion roofline sidecar failed: %s", exc)
             diffusion_roofline_path = None
 
     # Variant-discriminating TraceShapeManifest (P0-A / WP-1).

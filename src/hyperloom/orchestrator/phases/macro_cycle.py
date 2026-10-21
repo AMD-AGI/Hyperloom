@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import logging as _logging
+from collections.abc import Iterable
 from typing import Any
 
 from hyperloom.common.env import env_bool
@@ -17,6 +18,31 @@ from ..loop.maintenance import run_lease_and_db_reclaim
 log = _logging.getLogger(__name__)
 
 __all__ = ["MacroCycleCollaborator"]
+
+
+class _FocusScoreboard:
+    """Per-domain cycle-focus scores and the evidence each one rests on."""
+
+    def __init__(self, domains: Iterable[str]) -> None:
+        self.scores: dict[str, float] = dict.fromkeys(domains, 0.0)
+        self.reasons: dict[str, list[str]] = {domain: [] for domain in self.scores}
+
+    def admit(self, domain: str) -> None:
+        """Make ``domain`` selectable at its current score."""
+        self.scores.setdefault(domain, 0.0)
+        self.reasons.setdefault(domain, [])
+
+    def credit(self, domain: str, delta: float, reason: str) -> None:
+        """Move ``domain``'s score by ``delta`` and record why."""
+        self.admit(domain)
+        self.scores[domain] += delta
+        self.reasons[domain].append(reason)
+
+    def leader(self) -> str:
+        """The highest-scoring domain, ties broken by name; empty when nothing is scored."""
+        if not self.scores:
+            return ""
+        return max(self.scores.items(), key=lambda kv: (kv[1], kv[0]))[0]
 
 
 class MacroCycleCollaborator(CoordinatorCollaborator):
@@ -62,69 +88,78 @@ class MacroCycleCollaborator(CoordinatorCollaborator):
             counts[domain] = counts.get(domain, 0) + 1
         return counts
 
-    def plan_cycle_focus(self) -> dict[str, Any]:
-        """Pick an advisory specialist-domain focus for the current macro-cycle."""
-        from hyperloom.inference_optimizer.roofline_snapshot import BOTTLENECK_DOMAIN_HINTS
-
-        state = self.shared_state
-        cycle = int(state.macro_cycle or 0)
-        domains = sorted({v[0] for v in BOTTLENECK_DOMAIN_HINTS.values()} | {"freeform_specialist"})
-        scores: dict[str, float] = dict.fromkeys(domains, 0.0)
-        reasons: dict[str, list[str]] = {d: [] for d in domains}
-        shift = state.bottleneck_shift or {}
+    def _score_bottleneck_shift(self, board: _FocusScoreboard, shift: dict[str, Any]) -> None:
+        """Credit the domain the latest bottleneck shift points at."""
         to_domain = str(shift.get("to_domain") or "").strip()
         if to_domain:
-            scores.setdefault(to_domain, 0.0)
-            reasons.setdefault(to_domain, [])
-            scores[to_domain] += 5.0
-            reasons[to_domain].append(f"matches current bottleneck shift to {shift.get('to') or to_domain}")
-        sat = state.saturated_directions or {}
-        if isinstance(sat, dict):
-            for domain, row in sat.items():
-                if not isinstance(row, dict):
-                    continue
-                d = str(domain or row.get("domain") or "").strip()
-                if not d:
-                    continue
-                scores.setdefault(d, 0.0)
-                reasons.setdefault(d, [])
-                if bool(row.get("saturated")):
-                    scores[d] -= 100.0
-                    reasons[d].append(f"saturated at {row.get('within_pct')}% within roofline; deprioritized")
-                else:
-                    scores[d] += 1.0
-                    reasons[d].append("not saturated in latest roofline snapshot")
-        log_rows = list(state.cycle_strategy_log or [])
-        tried = {str(r.get("focus") or "") for r in log_rows if isinstance(r, dict)}
+            board.credit(to_domain, 5.0, f"matches current bottleneck shift to {shift.get('to') or to_domain}")
+
+    def _score_roofline_saturation(self, board: _FocusScoreboard, saturated: Any) -> None:
+        """Deprioritise the directions the latest roofline snapshot reports as saturated."""
+        if not isinstance(saturated, dict):
+            return
+        for domain, row in saturated.items():
+            if not isinstance(row, dict):
+                continue
+            name = str(domain or row.get("domain") or "").strip()
+            if not name:
+                continue
+            if bool(row.get("saturated")):
+                board.credit(name, -100.0, f"saturated at {row.get('within_pct')}% within roofline; deprioritized")
+            else:
+                board.credit(name, 1.0, "not saturated in latest roofline snapshot")
+
+    def _score_cycle_history(self, board: _FocusScoreboard, log_rows: list[Any]) -> None:
+        """Credit each earlier focus with the cycle gain it produced."""
         for row in log_rows:
             if not isinstance(row, dict):
                 continue
             domain = str(row.get("focus") or "").strip()
             if not domain:
                 continue
-            scores.setdefault(domain, 0.0)
-            reasons.setdefault(domain, [])
-            gd = row.get("gain_delta")
-            if isinstance(gd, (int, float)):
-                scores[domain] += max(-2.0, min(3.0, float(gd)))
-                reasons[domain].append(f"historical cycle gain_delta={float(gd):+.2f}%")
+            board.admit(domain)
+            gain_delta = row.get("gain_delta")
+            if isinstance(gain_delta, (int, float)):
+                board.credit(
+                    domain,
+                    max(-2.0, min(3.0, float(gain_delta))),
+                    f"historical cycle gain_delta={float(gain_delta):+.2f}%",
+                )
+
+    def _score_unexplored(self, board: _FocusScoreboard, domains: list[str], log_rows: list[Any]) -> None:
+        """Favour a domain no earlier cycle has focused on."""
+        tried = {str(row.get("focus") or "") for row in log_rows if isinstance(row, dict)}
         for domain in domains:
             if domain not in tried:
-                scores[domain] += 1.5
-                reasons[domain].append("exploration bonus: not yet used as cycle focus")
-        negative_counts = self._negative_ledger_domain_counts()
-        for domain, count in negative_counts.items():
-            scores.setdefault(domain, 0.0)
-            reasons.setdefault(domain, [])
+                board.credit(domain, 1.5, "exploration bonus: not yet used as cycle focus")
+
+    def _score_negative_ledger(self, board: _FocusScoreboard) -> None:
+        """Penalise the domains the recent explore ledger keeps rejecting."""
+        for domain, count in self._negative_ledger_domain_counts().items():
             penalty = min(4.0, 0.5 * float(count))
-            scores[domain] -= penalty
-            reasons[domain].append(f"recent negative ledger count={count} penalty={penalty:.1f}")
-        focus = max(scores.items(), key=lambda kv: (kv[1], kv[0]))[0] if scores else "freeform_specialist"
-        rationale_bits = reasons.get(focus) or ["fallback focus; no stronger cycle-level evidence"]
+            board.credit(domain, -penalty, f"recent negative ledger count={count} penalty={penalty:.1f}")
+
+    def plan_cycle_focus(self) -> dict[str, Any]:
+        """Pick an advisory specialist-domain focus for the current macro-cycle."""
+        from hyperloom.inference_optimizer.roofline_snapshot import BOTTLENECK_DOMAIN_HINTS
+
+        state = self.shared_state
+        domains = sorted({v[0] for v in BOTTLENECK_DOMAIN_HINTS.values()} | {"freeform_specialist"})
+        board = _FocusScoreboard(domains)
+        shift = state.bottleneck_shift or {}
+        sat = state.saturated_directions or {}
+        log_rows = list(state.cycle_strategy_log or [])
+        self._score_bottleneck_shift(board, shift)
+        self._score_roofline_saturation(board, sat)
+        self._score_cycle_history(board, log_rows)
+        self._score_unexplored(board, domains, log_rows)
+        self._score_negative_ledger(board)
+        focus = board.leader() or "freeform_specialist"
+        rationale_bits = board.reasons.get(focus) or ["fallback focus; no stronger cycle-level evidence"]
         return {
-            "cycle": cycle,
+            "cycle": int(state.macro_cycle or 0),
             "focus": focus,
-            "score": round(float(scores.get(focus, 0.0)), 3),
+            "score": round(float(board.scores.get(focus, 0.0)), 3),
             "rationale": "; ".join(rationale_bits[:4]),
             "bottleneck_at_start": str(shift.get("to") or self.shared_state.current_top_bottleneck() or ""),
             "saturated_at_start": sorted(

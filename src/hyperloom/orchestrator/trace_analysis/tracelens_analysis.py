@@ -58,6 +58,8 @@ from .tracelens_skill_runner import (
     extract_idle_pct_from_analysis_md,
     normalize_upstream_category,
     run_tracelens_skill,
+    tracelens_analysis_mode,
+    write_run_config,
 )
 from TraceLens.Agent.Analysis.post_processing import render_analysis_json
 
@@ -239,9 +241,8 @@ def _graph_coverage_from_raw_trace(trace_path: str | Path | None) -> dict[str, A
     Reuses the tested ``_bypass_trace_reader.analyze_trace`` graph-launch
     detection so the TraceLens route can tell a cuda/HIP-graph under-recorded
     capture (profiler activity-buffer overflow → only ~1 of N replays recorded →
-    inflated idle%) apart from a genuinely idle/launch-bound workload. Best
-    effort: any failure returns ``{}`` so the caller falls back to the plain
-    idle gate (never worse than today).
+    inflated idle%) apart from a genuinely idle/launch-bound workload. An
+    unreadable trace returns ``{}`` so the caller falls back to the plain idle gate.
 
     ``graph_coverage`` is derived from the launch/kernel correlation scan and is
     independent of the returned aggregation lists, so we pass ``emit_launches=
@@ -258,7 +259,7 @@ def _graph_coverage_from_raw_trace(trace_path: str | Path | None) -> dict[str, A
             return {}
         cov = analyze.get("graph_coverage") if isinstance(analyze, dict) else None
         return cov if isinstance(cov, dict) else {}
-    except Exception:  # noqa: BLE001 - guard is advisory; never block on it
+    except (OSError, zlib.error):
         return {}
 
 
@@ -3190,7 +3191,7 @@ def run_command(
 
 # Kept in sync with install.sh (TRACELENS_REPO / TRACELENS_REF). Overridable via env.
 _TRACELENS_REPO_DEFAULT = "https://github.com/AMD-AGI/TraceLens.git"
-_TRACELENS_REF_DEFAULT = "647cbf2702687a656f2480e07517824369898aa9"
+_TRACELENS_REF_DEFAULT = "614c597bc0c66cabf6a15152037324acc7386090"
 
 
 def _default_tracelens_root() -> Path:
@@ -3489,7 +3490,7 @@ def _candidate_model_config_paths(model_name: str) -> list[Path]:
         _hit = try_to_load_from_cache(repo_id=text, filename="config.json")
         if isinstance(_hit, str):
             candidates.append(Path(_hit))
-    except Exception:  # noqa: BLE001 - hub cache probe is optional
+    except (ImportError, OSError, ValueError):
         pass
     out: list[Path] = []
     seen: set[str] = set()
@@ -3638,7 +3639,7 @@ def enrich_candidates_with_runtime_metadata(
     model_params = load_model_kernel_params(str(getattr(args, "model_name", "") or ""))
     target_platform = str(getattr(args, "target_platform", "") or "")
     runtime_flags = {
-        "analysis_mode": getattr(args, "analysis_mode", ""),
+        "analysis_mode": tracelens_analysis_mode(framework),
         "target_platform": target_platform,
     }
     for item in candidates:
@@ -3964,7 +3965,7 @@ def write_reports(
         "model_name": args.model_name,
         "framework": args.framework,
         "target_platform": args.target_platform,
-        "analysis_mode": args.analysis_mode,
+        "analysis_mode": tracelens_analysis_mode(args.framework),
         "trace_input_type": trace_inputs.input_type,
         "hot_kernels": candidates,
         "task_groups": task_groups,
@@ -4094,6 +4095,7 @@ def write_reports(
                                     _est["ideal_ms"] / (_actual_us / 1e3) * 100.0, 2
                                 )
                 except Exception as _exc:  # noqa: BLE001 — analytic ceiling is best-effort
+                    log.warning("diffusion analytic ceiling failed: %s", _exc)
                     _diff_report["analytic_ceiling_error"] = f"{type(_exc).__name__}: {_exc}"
             out = run_dir / "diffusion_roofline.json"
             atomic_write_json(out, _diff_report, fmt=JsonFormat(trailing_newline=True))
@@ -4107,6 +4109,7 @@ def write_reports(
         except FileNotFoundError as exc:
             print(f"[diffusion_roofline] skipped: {exc}")
         except Exception as exc:  # noqa: BLE001 - best-effort sidecar
+            log.warning("diffusion roofline sidecar failed: %s", exc)
             print(f"[diffusion_roofline] skipped: {type(exc).__name__}: {exc}")
 
     artifact_paths = {
@@ -4434,7 +4437,6 @@ def main() -> int:
     parser.add_argument("--model-name", default="")
     parser.add_argument("--framework", default="")
     parser.add_argument("--target-platform", default="MI355X")
-    parser.add_argument("--analysis-mode", default="default")
     parser.add_argument(
         "--workspace-path",
         default=_default_workspace_path(),
@@ -5027,19 +5029,22 @@ def main() -> int:
                     state="running",
                     current_step="run_tracelens_sdk_orchestrator",
                 )
+                write_run_config(
+                    output_dir=tracelens_dir,
+                    trace_path=cli_trace_path,
+                    platform=args.target_platform,
+                    analysis_mode=tracelens_analysis_mode(args.framework),
+                    capture_folder=capture_folder,
+                )
                 try:
                     with _trajectory_scope(args):
                         skill_result = asyncio.run(
                             run_tracelens_skill(
                                 TraceLensSkillRequest(
                                     skill_path=skill,
-                                    trace_path=cli_trace_path,
                                     output_dir=tracelens_dir,
                                     tracelens_root=tl_root,
                                     tracelens_internal_root=tl_internal_root,
-                                    platform=args.target_platform,
-                                    framework=args.framework,
-                                    analysis_mode=args.analysis_mode,
                                     capture_folder=capture_folder,
                                 ),
                                 budget_minutes=args.budget_minutes,

@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from kernelforge.knowledge.kb_store.identity.implementation import canonical_owner_framework
+from kernelforge.knowledge.kb_store.identity.kernel_names import derive_kernel_names
 
 log = logging.getLogger(__name__)
 
@@ -37,8 +38,6 @@ def resolve_operation(kernel_source: str, kernel_path: str, target_functions: li
         if preferred:
             return preferred[0]
         return names[0] if names else None
-
-    from kernelforge.mcp_server.tools.pmc import derive_kernel_names
 
     # Anchor source order is stable for the same file, so keep it (the first compute kernel is usually the primary
     # one, helpers come later).
@@ -86,7 +85,7 @@ def _read_text_safe(
                 return source_contents[candidate]
     try:
         return Path(path).read_text(errors="replace")
-    except Exception:  # noqa: BLE001 - best-effort
+    except OSError:
         return ""
 
 

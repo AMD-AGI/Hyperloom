@@ -13,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from kernelforge.durable_io import atomic_write_text
+from kernelforge.tools.durable_io import atomic_write_text
 from kernelforge.tracker.usage import combine_usage_totals
 
 log = logging.getLogger(__name__)

@@ -215,6 +215,7 @@ class AnalysisRuntimeMixin(AnalysisEvidenceMixin):
             analysis_state.last_attempt_status = "fatal"
             raise
         except Exception as error:  # noqa: BLE001 - partial checkpoint may remain
+            log.warning("analysis refresh failed: %s", error)
             analysis_state.last_attempt_status = "failed"
             print(
                 f"  [analysis] unavailable ({error}); "

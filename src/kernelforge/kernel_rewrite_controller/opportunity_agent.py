@@ -33,7 +33,7 @@ from kernelforge.agent_backends.session_resume import (
     run_session_with_api_resume,
 )
 from kernelforge.config import Config
-from kernelforge.durable_io import atomic_write_text
+from kernelforge.tools.durable_io import atomic_write_text
 from kernelforge.kernel_backends.constants import KERNEL_BACKENDS
 from kernelforge.kernel_rewrite_controller.contracts import HandoffBundle
 from kernelforge.kernel_rewrite_controller.paths import ControllerLayout
@@ -718,6 +718,7 @@ def run_opportunity_analysis(
         )
         return asyncio.run(agent.run(handoff=handoff, layout=layout))
     except Exception as error:  # noqa: BLE001 - agent backend failure is not enumerable
+        log.warning("opportunity analysis setup failed: %s", error)
         result = OpportunityAnalysisResult(
             status=ANALYSIS_STATUS_FAILED,
             reason=f"opportunity analysis setup failed: {error}",

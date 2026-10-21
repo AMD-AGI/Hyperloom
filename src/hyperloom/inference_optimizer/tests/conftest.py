@@ -42,6 +42,17 @@ def _restore_recording_session_binding():
         session_binding._CURRENT_SESSION.reset(token)
 
 
+@pytest.fixture(autouse=True)
+def _kfd_nodes_in_pci_order(monkeypatch):
+    """No test reaches a real ``amd-smi list``: card N is the Nth KFD node, so a mask number is its amd-smi index.
+
+    A test of the mapping itself patches ``_read_gpu_kfd_nodes`` again with a board where the two orders differ.
+    """
+    from hyperloom.common import gpu_power_settings
+
+    monkeypatch.setattr(gpu_power_settings, "_read_gpu_kfd_nodes", lambda: {gpu: 8 + gpu for gpu in range(16)})
+
+
 def enable_multi_node(monkeypatch, nodes: int = 2) -> None:
     """Put the executors in multi-node mode with a no-op per-round server restart."""
     from hyperloom.orchestrator.actions.executors import _multi_node_server_lifecycle as mnl
@@ -567,13 +578,16 @@ class RayDouble:
     """A ``ray`` module stand-in that runs actor methods in real threads."""
 
     class exceptions:
-        class RayActorError(Exception):
+        class RayError(Exception):
             pass
 
-        class RayTaskError(Exception):
+        class RayActorError(RayError):
             pass
 
-        class GetTimeoutError(Exception):
+        class RayTaskError(RayError):
+            pass
+
+        class GetTimeoutError(RayError):
             pass
 
     def __init__(self) -> None:
