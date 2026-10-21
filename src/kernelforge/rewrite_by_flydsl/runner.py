@@ -406,6 +406,7 @@ class _Rewrite:
             candidate_kernel = self.attempt.candidate_path(request.flydsl_kernel_name)
         except ValueError as error:
             raise _SetupFailed(str(error), CANDIDATE_NAME_INVALID)
+        # Ingest auto-discovers the source_entry hint if omitted.
         try:
             spec = ingest.build_spec(subject, flydsl_kernel=str(candidate_kernel), workspace=self.workspace)
         except Exception as e:  # noqa: BLE001 - any ingest error must still be scorable
