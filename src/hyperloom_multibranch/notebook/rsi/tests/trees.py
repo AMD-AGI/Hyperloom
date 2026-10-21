@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.notebook.vocab import CommitOrigin, LineageKind
 from hyperloom_multibranch.notebook.rsi.archive import MeasurementNoise, SearchTree, TreeBranch, TreeCommit
@@ -43,3 +45,11 @@ def tree(
     integration = branch(INTEGRATION_BRANCH, [], origin=LineageKind.ROOT, parent_branch="", gpu_seconds=0.0)
     final = max((commit.gain_pct for item in branches for commit in item.commits), default=0.0)
     return SearchTree(session_id, "test", task, 4 * HOUR, final, (integration, *branches), noise or MeasurementNoise())
+
+
+def race(session_id: str, *, task: TaskConditions = TASK, started_at: float | None = None) -> SearchTree:
+    """A two-hour session of two branches only their age tells apart until ``a``, opened first, gains 2% at 90
+    minutes; ``b``, opened 10 minutes later, never does. ``frontier-v1`` ties them until then."""
+
+    raced = tree(session_id, branch("a", [(5400.0, 2.0)]), branch("b", [], opened_s=600.0), task=task)
+    return replace(raced, budget_seconds=2 * HOUR, started_at=started_at)

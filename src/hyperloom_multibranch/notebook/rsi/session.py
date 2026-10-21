@@ -49,9 +49,15 @@ from hyperloom_multibranch.notebook.rsi.calibration import (
     frontier_scorer_for,
 )
 from hyperloom_multibranch.notebook.rsi.expression import ExpressionError
-from hyperloom_multibranch.notebook.rsi.frontier import FrontierPolicy, FrontierScoring
+from hyperloom_multibranch.notebook.rsi.frontier import FRONTIER_V1_LABEL, FrontierPolicy, FrontierScoring
 from hyperloom_multibranch.notebook.rsi.history import MAX_CHARS, session_history
-from hyperloom_multibranch.notebook.rsi.scorers import ScorerPool, registered_scorers, scorer_named
+from hyperloom_multibranch.notebook.rsi.scorers import (
+    ChampionRecord,
+    ScorerPool,
+    current_champion,
+    registered_scorers,
+    scorer_named,
+)
 from hyperloom_multibranch.notebook.rsi.similarity import task_conditions
 
 log = logging.getLogger(__name__)
@@ -293,13 +299,28 @@ def session_frontier_scorer(
     snapshot: NotebookSnapshot, history: Sequence[SearchTree], defaults: FrontierPolicy, pool: ScorerPool | None = None
 ) -> PolicyChoice:
     """How the session ``snapshot`` records scores, once PRELUDE recorded its profile:
-    :func:`calibration.frontier_scorer_for` on its task over every scorer :mod:`rsi.scorers` registers, in ``pool``,
-    by default the one beside the environment's archive; ``defaults`` before."""
+    :func:`calibration.frontier_scorer_for` on its task over every scorer :mod:`rsi.scorers` registers in ``pool``, by
+    default the one beside the environment's archive, against the pool's champion; ``defaults`` before. A scorer that
+    takes the champion's place is crowned in the pool, so the sessions after this one start from it."""
 
     if snapshot.profile is None:
         return PolicyChoice(defaults, DEFAULT_POLICY, NO_PROFILE_EVIDENCE)
-    scorers = registered_scorers(pool if pool is not None else _environment_pool(), snapshot.taken_at)
-    return frontier_scorer_for(history, task_conditions(snapshot.profile), defaults, scorers)
+    target = pool if pool is not None else _environment_pool()
+    scorers = registered_scorers(target, snapshot.taken_at)
+    held = current_champion(target)
+    choice = frontier_scorer_for(history, task_conditions(snapshot.profile), defaults, scorers, held)
+    holder = held.scorer.label if held is not None else FRONTIER_V1_LABEL
+    if target is not None and choice.scorer.label != holder:
+        _crown(target, ChampionRecord(choice.scorer.label, snapshot.taken_at, holder, choice.evidence))
+    return choice
+
+
+def _crown(pool: ScorerPool, record: ChampionRecord) -> None:
+    # A champion the pool cannot record costs the next sessions the ratchet, not this one its start.
+    try:
+        pool.crown(record)
+    except (OSError, ValueError) as exc:
+        log.warning("could not crown %s in %s: %s", record.label, pool.root, exc)
 
 
 def named_frontier_choice(

@@ -22,11 +22,14 @@ one parameter each, beside other scores given as :class:`Baseline` rows (another
 :func:`scorer_baseline`, or the island bandit's rows of :mod:`rsi.bandit`), and beside the scores the sessions logged
 when their logs are given. A baseline with ``since`` is judged only on the sessions that started after it: one written
 after the archive could have been fitted to it. Each candidate, a variation or a baseline that may be advice, is
-compared with the current policy on the same rounds (:class:`Comparison`), and recommended only when it beats the
-current policy there by :data:`MIN_IMPROVEMENT` over at least :data:`MIN_SESSIONS` sessions and :data:`MIN_ROUNDS`
-rounds; otherwise the report says why not. :func:`frontier_scorer_for` is the one place a recommendation changes how a
-session scores: a session starting on a task scores with the variation, one step from the defaults, or the scorer that
-the calibration over its similar sessions recommends.
+compared with the reference, the current policy unless the settings name another row, on the same rounds
+(:class:`Comparison`), with an interval over sessions for the difference. It is recommended only when it beats the
+reference there by :data:`MIN_IMPROVEMENT`, the interval's low end above 0, over at least :data:`MIN_SESSIONS` sessions
+and :data:`MIN_ROUNDS` rounds; otherwise the report says why not. :func:`frontier_scorer_for` is the one place a
+recommendation changes how a session scores: a session starting on a task scores with the champion, the scorer that
+last earned the place (``frontier-v1`` until one does), or with what the calibration over its similar sessions
+recommends over it: a variation one step from the defaults while the champion is ``frontier-v1``, or another scorer.
+:func:`rankings` is how a scorer ranks the branches round by round, to tell a candidate that ranks like another.
 """
 
 from __future__ import annotations
@@ -34,7 +37,7 @@ from __future__ import annotations
 import logging
 import math
 import statistics
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -43,6 +46,7 @@ from hyperloom_multibranch.contracts.notebook.records import FrontierScore
 from hyperloom_multibranch.notebook.rsi.archive import SearchTree, TreeBranch, similar_trees
 from hyperloom_multibranch.notebook.rsi.frontier import (
     FRONTIER_V1,
+    FRONTIER_V1_LABEL,
     NEW_BRANCH_FLOOR_PCT,
     FrontierPolicy,
     FrontierScorer,
@@ -62,9 +66,10 @@ log = logging.getLogger(__name__)
 ROUND_SECONDS = 600.0
 MIN_SESSIONS = 3
 MIN_ROUNDS = 20
-#: How much higher a candidate's rank correlation must be than the current policy's, on the same rounds, to be
-#: recommended.
+#: How much higher a candidate's rank correlation must be than the reference's, on the same rounds, to be recommended.
 MIN_IMPROVEMENT = 0.05
+#: The normal quantile of the interval over sessions: 1.645 leaves 5% below its low end.
+INTERVAL_Z = 1.645
 CURRENT = "current"
 LOGGED = "as logged"
 #: The label of a session that scores with the defaults.
@@ -112,6 +117,8 @@ VARIATIONS = (
 #: A score of ``branch`` of ``tree`` at ``t_s`` on the session clock, against the other archived sessions; the replay
 #: passes the tree as it stood at ``t_s``.
 Scorer = Callable[[SearchTree, TreeBranch, float, tuple[SearchTree, ...]], float]
+#: The ranks a scorer gave the branches open at each replayed round, keyed by session id and time.
+Ranked = dict[tuple[str, float], tuple[float, ...]]
 
 
 @dataclass(frozen=True)
@@ -128,13 +135,15 @@ class Baseline:
 @dataclass(frozen=True)
 class CalibrationSettings:
     """How the sessions are replayed (every ``round_seconds``, gains over ``horizon_seconds`` or until each branch
-    stopped) and the evidence advice needs (``min_sessions`` sessions and ``min_rounds`` rounds that compare a
-    candidate with the current policy)."""
+    stopped), the evidence advice needs (``min_sessions`` sessions and ``min_rounds`` rounds that compare a candidate
+    with the reference), and ``reference``, the label of the row candidates are compared with: the current policy's
+    when empty."""
 
     round_seconds: float = ROUND_SECONDS
     horizon_seconds: float | None = None
     min_sessions: int = MIN_SESSIONS
     min_rounds: int = MIN_ROUNDS
+    reference: str = ""
 
 
 @dataclass(frozen=True)
@@ -156,32 +165,40 @@ class PolicyCalibration:
 
 @dataclass(frozen=True)
 class Comparison:
-    """A candidate beside the current policy on the same rounds: those whose later gains differ and where the scores of
-    either differ, a round where one's scores all tie counting 0 for it; ``sessions`` they came from."""
+    """A candidate beside the reference on the same rounds: those whose later gains differ and where the scores of
+    either differ, a round where one's scores all tie counting 0 for it; ``sessions`` they came from.
+
+    ``current_correlation`` is the reference's on those rounds. ``difference_low`` and ``difference_high`` bound the
+    candidate's mean lead over it, by the jackknife over sessions, :data:`INTERVAL_Z` standard errors either side;
+    ``None`` from a single session.
+    """
 
     label: str
     rounds: int
     sessions: int
     rank_correlation: float | None
     current_correlation: float | None
+    difference_low: float | None = None
+    difference_high: float | None = None
 
 
 @dataclass(frozen=True)
 class CalibrationReport:
-    """Every policy's calibration, the current one first, and every candidate's comparison with it; ``recommended``
-    only when the evidence carries it."""
+    """Every policy's calibration, the current one first, and every candidate's comparison with the ``reference`` row;
+    ``recommended`` only when the evidence carries it."""
 
     rows: tuple[PolicyCalibration, ...]
     horizon_seconds: float | None
     recommended: PolicyCalibration | None
     note: str
     comparisons: tuple[Comparison, ...] = ()
+    reference: str = CURRENT
 
     def comparison(self, label: str) -> Comparison | None:
         return next((item for item in self.comparisons if item.label == label), None)
 
     def render(self) -> str:
-        """The report as markdown: a table of the policies, one of the candidates beside the current policy, then the
+        """The report as markdown: a table of the policies, one of the candidates beside the reference, then the
         advice."""
 
         horizon = "until each branch stopped" if self.horizon_seconds is None else f"{self.horizon_seconds:.0f} s"
@@ -207,13 +224,15 @@ class CalibrationReport:
                     item.label,
                     number(item.rank_correlation),
                     number(item.current_correlation),
+                    f"{number(item.difference_low)} to {number(item.difference_high)}",
                     item.rounds,
                     item.sessions,
                 )
                 for item in self.comparisons
             ]
-            heading = ("candidate", "rank correlation", "current policy", "rounds", "sessions")
-            lines += ["", "Each candidate beside the current policy, on the same rounds:", "", *table(heading, paired)]
+            heading = ("candidate", "rank correlation", self.reference, "lead interval", "rounds", "sessions")
+            title = f"Each candidate beside {self.reference}, on the same rounds:"
+            lines += ["", title, "", *table(heading, paired)]
         failed = [f"'{row.label}' failed: {row.failure}" for row in self.rows if row.failure]
         return "\n".join([*lines, *([""] + failed if failed else []), "", self.note])
 
@@ -350,6 +369,29 @@ def scorer_baseline(scorer: FrontierScorer, since: float | None = None) -> Basel
     return Baseline(scorer.label, _ScorerScore(scorer), advisable=True, since=since)
 
 
+@dataclass(frozen=True)
+class _Moment:
+    """A replayed round: the branches open at ``t_s`` in the whole tree, and the tree as it stood then."""
+
+    t_s: float
+    branches: list[TreeBranch]
+    then: SearchTree
+
+    def scores(self, scorer: Scorer, history: tuple[SearchTree, ...]) -> list[float]:
+        standing = {branch.name: branch for branch in self.then.branches}
+        return [scorer(self.then, standing[branch.name], self.t_s, history) for branch in self.branches]
+
+
+def _moments(tree: SearchTree, round_seconds: float) -> Iterator[_Moment]:
+    """Every ``round_seconds`` of ``tree``'s clock that two or more specialist branches were open at."""
+
+    for step in range(1, math.ceil(tree.budget_seconds / round_seconds)):
+        t_s = step * round_seconds
+        branches = _open_at(tree, t_s)
+        if len(branches) >= 2:
+            yield _Moment(t_s, branches, tree.as_of(t_s))
+
+
 def _session_rounds(
     tree: SearchTree,
     history: tuple[SearchTree, ...],
@@ -357,17 +399,30 @@ def _session_rounds(
     settings: CalibrationSettings,
 ) -> list[_Round]:
     rounds = []
-    for step in range(1, math.ceil(tree.budget_seconds / settings.round_seconds)):
-        t_s = step * settings.round_seconds
-        branches = _open_at(tree, t_s)
-        if len(branches) < 2:
-            continue
-        then = tree.as_of(t_s)
-        standing = {branch.name: branch for branch in then.branches}
-        scores = [scorer(then, standing[branch.name], t_s, history) for branch in branches]
-        gains = [gain_after(tree, branch, t_s, settings.horizon_seconds) for branch in branches]
-        rounds.append(_judged(tree.session_id, t_s, scores, gains))
+    for moment in _moments(tree, settings.round_seconds):
+        gains = [gain_after(tree, branch, moment.t_s, settings.horizon_seconds) for branch in moment.branches]
+        rounds.append(_judged(tree.session_id, moment.t_s, moment.scores(scorer, history), gains))
     return rounds
+
+
+def rankings(trees: Sequence[SearchTree], scorer: FrontierScorer, round_seconds: float = ROUND_SECONDS) -> Ranked:
+    """How ``scorer`` ranks the specialist branches open at each replayed round of ``trees``, ties alike, keyed by the
+    session and the time on its clock; each tree scored against the others as its history."""
+
+    score = _ScorerScore(scorer)
+    ranked: Ranked = {}
+    for tree in trees:
+        history = tuple(other for other in trees if other.session_id != tree.session_id)
+        for moment in _moments(tree, round_seconds):
+            ranked[(tree.session_id, moment.t_s)] = tuple(_ranks(moment.scores(score, history)))
+    return ranked
+
+
+def ranked_alike(first: Ranked, second: Ranked) -> float:
+    """The share of the rounds both rank in which they rank the branches alike; 0 when they share none."""
+
+    shared = [key for key in first if key in second]
+    return sum(1 for key in shared if first[key] == second[key]) / len(shared) if shared else 0.0
 
 
 def _logged_round(tree: SearchTree, line: Mapping[str, Any], horizon_seconds: float | None) -> _Round | None:
@@ -404,8 +459,26 @@ def _credit(item: _Round) -> float:
     return item.correlation if item.correlation is not None else 0.0
 
 
-def _compared(label: str, candidate: Sequence[_Round], current: Sequence[_Round]) -> Comparison:
-    by_round = {(item.session_id, item.t_s): item for item in current}
+def _interval(leads: Mapping[str, Sequence[float]]) -> tuple[float | None, float | None]:
+    """The mean of ``leads``, each session's rounds, :data:`INTERVAL_Z` jackknife standard errors either side, leaving
+    one session out at a time; ``None`` from a single session."""
+
+    if len(leads) < 2:
+        return None, None
+    every = [lead for found in leads.values() for lead in found]
+    left_out = [
+        statistics.fmean([lead for other, found in leads.items() if other != session for lead in found])
+        for session in leads
+    ]
+    centre = statistics.fmean(left_out)
+    count = len(left_out)
+    error = math.sqrt((count - 1) / count * sum((value - centre) ** 2 for value in left_out))
+    mean = statistics.fmean(every)
+    return mean - INTERVAL_Z * error, mean + INTERVAL_Z * error
+
+
+def _compared(label: str, candidate: Sequence[_Round], reference: Sequence[_Round]) -> Comparison:
+    by_round = {(item.session_id, item.t_s): item for item in reference}
     paired = [
         (item, by_round[(item.session_id, item.t_s)]) for item in candidate if (item.session_id, item.t_s) in by_round
     ]
@@ -414,12 +487,18 @@ def _compared(label: str, candidate: Sequence[_Round], current: Sequence[_Round]
     ]
     if not kept:
         return Comparison(label, 0, 0, None, None)
+    leads: dict[str, list[float]] = {}
+    for mine, theirs in kept:
+        leads.setdefault(mine.session_id, []).append(_credit(mine) - _credit(theirs))
+    low, high = _interval(leads)
     return Comparison(
         label,
         len(kept),
-        len({mine.session_id for mine, _ in kept}),
+        len(leads),
         statistics.fmean(_credit(mine) for mine, _ in kept),
         statistics.fmean(_credit(theirs) for _, theirs in kept),
+        low,
+        high,
     )
 
 
@@ -429,13 +508,24 @@ def _gain_over_current(item: Comparison) -> float:
     return item.rank_correlation - item.current_correlation
 
 
+def _carried(item: Comparison) -> bool:
+    """Whether ``item`` leads by :data:`MIN_IMPROVEMENT` with an interval above 0."""
+
+    return _gain_over_current(item) >= MIN_IMPROVEMENT and item.difference_low is not None and item.difference_low > 0
+
+
+def _named(label: str) -> str:
+    return "the current policy" if label == CURRENT else label
+
+
 def _advice(
-    current: PolicyCalibration, comparisons: Sequence[Comparison], settings: CalibrationSettings
+    reference: PolicyCalibration, comparisons: Sequence[Comparison], settings: CalibrationSettings
 ) -> tuple[str | None, str]:
     """The label of the candidate to recommend, if any, and the note that says why or why not."""
 
+    name = _named(reference.label)
     if not comparisons:
-        return None, "No candidate to set beside the current policy."
+        return None, f"No candidate to set beside {name}."
     enough = [
         item for item in comparisons if item.sessions >= settings.min_sessions and item.rounds >= settings.min_rounds
     ]
@@ -443,19 +533,21 @@ def _advice(
         most = max(comparisons, key=lambda item: (item.rounds, item.sessions))
         return None, (
             f"Too little evidence for advice: at most {most.sessions} sessions and {most.rounds} rounds compare a "
-            f"candidate with the current policy, of {current.rounds} with two or more branches open; "
+            f"candidate with {name}, of {reference.rounds} with two or more branches open; "
             f"{settings.min_sessions} and {settings.min_rounds} needed."
         )
-    best = max(enough, key=_gain_over_current)
-    if _gain_over_current(best) < MIN_IMPROVEMENT:
+    carried = [item for item in enough if _carried(item)]
+    if not carried:
         return None, (
-            f"Keep the current policy: no candidate ranks the branches better by {MIN_IMPROVEMENT} or more on the same "
-            "rounds."
+            f"Keep {name}: no candidate ranks the branches better by {MIN_IMPROVEMENT} or more on the same rounds, "
+            "with its interval above 0."
         )
+    best = max(carried, key=_gain_over_current)
     return best.label, (
         f"Consider '{best.label}': rank correlation {number(best.rank_correlation)} against "
-        f"{number(best.current_correlation)} for the current policy on the same {best.rounds} rounds of "
-        f"{best.sessions} sessions. Advice only; the scheduler's owner decides."
+        f"{number(best.current_correlation)} for {name} on the same {best.rounds} rounds of {best.sessions} "
+        f"sessions, a lead of {number(best.difference_low)} to {number(best.difference_high)}. Advice only; the "
+        "scheduler's owner decides."
     )
 
 
@@ -527,18 +619,19 @@ def calibrate(
             if session_id in by_id
         }
         rows.append(_summary(LOGGED, logged))
-    eligible = [variation.label for variation in variations[1:]] + [
+    reference = next((row for row in rows if row.label == settings.reference and not row.failure), rows[0])
+    eligible = [variation.label for variation in variations] + [
         baseline.label for baseline in baselines if baseline.advisable
     ]
-    current = rows[0]
+    failed = {row.label for row in rows if row.failure}
     comparisons = tuple(
-        _compared(label, rounds[label], rounds[current.label])
+        _compared(label, rounds[label], rounds[reference.label])
         for label in eligible
-        if not next(row for row in rows if row.label == label).failure
+        if label not in failed and label != reference.label
     )
-    chosen, note = _advice(current, comparisons, settings)
+    chosen, note = _advice(reference, comparisons, settings)
     recommended = next((row for row in rows if row.label == chosen), None)
-    return CalibrationReport(tuple(rows), settings.horizon_seconds, recommended, note, comparisons)
+    return CalibrationReport(tuple(rows), settings.horizon_seconds, recommended, note, comparisons, reference.label)
 
 
 @dataclass(frozen=True)
@@ -562,38 +655,71 @@ class Registered:
     since: float | None = None
 
 
+def calibrate_against(
+    similar: Sequence[SearchTree], scorers: Sequence[Registered], champion: Registered | None
+) -> CalibrationReport:
+    """The calibration that sets ``scorers`` beside the champion on ``similar``: beside ``frontier-v1``, its
+    variations among the challengers, while there is none, else beside the champion's row, ``frontier-v1`` among the
+    challengers."""
+
+    challengers = tuple(
+        scorer_baseline(item.scorer, item.since)
+        for item in scorers
+        if champion is None or item.scorer.label != champion.scorer.label
+    )
+    if champion is None or champion.scorer.label == FRONTIER_V1_LABEL:
+        return calibrate(similar, baselines=challengers)
+    held = Baseline(champion.scorer.label, _ScorerScore(champion.scorer))
+    settings = CalibrationSettings(reference=champion.scorer.label)
+    return calibrate(similar, variations=VARIATIONS[:1], baselines=(held, *challengers), settings=settings)
+
+
 def frontier_scorer_for(
     history: Sequence[SearchTree],
     task: TaskConditions,
     defaults: FrontierPolicy,
     scorers: Sequence[Registered] = (),
+    champion: Registered | None = None,
 ) -> PolicyChoice:
-    """How a session on ``task`` scores: the variation, one step from ``defaults``, or the one of ``scorers`` that the
-    calibration over the archived sessions similar to it recommends, or ``frontier-v1`` under ``defaults``, with the
-    reason, when the evidence carries none.
+    """How a session on ``task`` scores: with ``champion`` (``frontier-v1`` without one) under ``defaults``, unless the
+    calibration over the archived sessions similar to it recommends over the champion a variation one step from
+    ``defaults`` (while the champion is ``frontier-v1``), another of ``scorers``, or ``frontier-v1`` again. The
+    evidence says why either way.
 
-    An archive the calibration cannot read gives the defaults too, so a session never fails to start over it.
+    An archive the calibration cannot read keeps the champion too, so a session never fails to start over it.
     """
 
+    kept = _kept(defaults, champion)
     try:
-        similar = tuple(item.tree for item in similar_trees(history, task))
-        report = calibrate(similar, baselines=tuple(scorer_baseline(item.scorer, item.since) for item in scorers))
+        report = calibrate_against(tuple(item.tree for item in similar_trees(history, task)), scorers, champion)
     except (ArithmeticError, ValueError) as exc:
-        return PolicyChoice(defaults, DEFAULT_POLICY, f"{DEFAULT_POLICY}: the calibration failed: {exc}")
+        return replace(kept, evidence=f"{kept.label}: the calibration failed: {exc}")
     best = report.recommended
     compared = report.comparison(best.label) if best is not None else None
     if compared is None:
-        return PolicyChoice(defaults, DEFAULT_POLICY, f"{DEFAULT_POLICY}: {report.note}")
+        return replace(kept, evidence=f"{kept.label}: {report.note}")
+    winner = FRONTIER_V1_LABEL if compared.label == CURRENT else compared.label
+    over = "the defaults" if report.reference == CURRENT else report.reference
     evidence = (
-        f"{compared.label}: rank correlation {number(compared.rank_correlation)} against "
-        f"{number(compared.current_correlation)} for the defaults, over {compared.rounds} compared rounds in "
+        f"{winner}: rank correlation {number(compared.rank_correlation)} against "
+        f"{number(compared.current_correlation)} for {over}, over {compared.rounds} compared rounds in "
         f"{compared.sessions} similar sessions"
     )
+    if compared.label == CURRENT:
+        return PolicyChoice(defaults, DEFAULT_POLICY, evidence)
     variation = next((item for item in VARIATIONS[1:] if item.label == compared.label), None)
     if variation is not None:
         return PolicyChoice(variation.apply(defaults), variation.label, evidence)
     chosen = next(item.scorer for item in scorers if item.scorer.label == compared.label)
     return PolicyChoice(defaults, chosen.label, evidence, chosen)
+
+
+def _kept(defaults: FrontierPolicy, champion: Registered | None) -> PolicyChoice:
+    """The choice that keeps the champion, its evidence to be told."""
+
+    if champion is None or champion.scorer.label == FRONTIER_V1_LABEL:
+        return PolicyChoice(defaults, DEFAULT_POLICY, "")
+    return PolicyChoice(defaults, champion.scorer.label, "", champion.scorer)
 
 
 def frontier_policy_for(history: Sequence[SearchTree], task: TaskConditions, defaults: FrontierPolicy) -> PolicyChoice:
@@ -606,6 +732,7 @@ def frontier_policy_for(history: Sequence[SearchTree], task: TaskConditions, def
 __all__ = [
     "CURRENT",
     "DEFAULT_POLICY",
+    "INTERVAL_Z",
     "LOGGED",
     "MIN_IMPROVEMENT",
     "MIN_ROUNDS",
@@ -618,14 +745,18 @@ __all__ = [
     "Comparison",
     "PolicyCalibration",
     "PolicyChoice",
+    "Ranked",
     "Registered",
     "Scorer",
     "Variation",
     "calibrate",
+    "calibrate_against",
     "frontier_policy_for",
     "frontier_scorer_for",
     "gain_after",
     "rank_correlation",
+    "ranked_alike",
+    "rankings",
     "score_archived",
     "scorer_baseline",
     "session_policy",

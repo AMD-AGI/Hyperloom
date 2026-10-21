@@ -12,14 +12,18 @@ import pytest
 
 from hyperloom_multibranch.notebook.rsi import scorers
 from hyperloom_multibranch.notebook.rsi.bandit import BANDIT_LABEL, BanditScorer
+from hyperloom_multibranch.notebook.rsi.calibration import Registered
 from hyperloom_multibranch.notebook.rsi.expression import ExpressionScorer
 from hyperloom_multibranch.notebook.rsi.frontier import FRONTIER_V1, FRONTIER_V1_LABEL
 from hyperloom_multibranch.notebook.rsi.scorers import (
     MAX_EXPRESSIONS,
+    ChampionRecord,
     PoolConflict,
     PoolRecord,
+    RetiredRecord,
     ScorerPool,
     ScorerSource,
+    current_champion,
     custom_scorers,
     registered_scorers,
     scorer_named,
@@ -89,6 +93,51 @@ def test_a_session_chooses_among_the_pools_expressions_but_one_that_no_longer_re
 
     assert [(item.scorer.label, item.since) for item in found] == [(BANDIT_LABEL, 10.0), ("trend-v2", 5.0)]
     assert "broken-v1" in caplog.text
+
+
+def test_the_champion_is_the_latest_crowned_and_frontier_v1_holds_the_place_until_one_is(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    pool = ScorerPool(tmp_path)
+    pool.register(_expression("trend-v2", 5.0, TREND_TWICE))
+    unpooled = current_champion(pool)
+
+    crowned = pool.crown(ChampionRecord("trend-v2", 10.0, FRONTIER_V1_LABEL, "led by 0.20"))
+    pool.crown(crowned)
+    held = current_champion(pool)
+    pool.crown(ChampionRecord(FRONTIER_V1_LABEL, 20.0, "trend-v2", "led by 0.10"))
+    back = current_champion(pool)
+    pool.crown(ChampionRecord(BANDIT_LABEL, 30.0, FRONTIER_V1_LABEL, "led by 0.30"))
+    bandit = current_champion(pool)
+    pool.crown(ChampionRecord("gone-v1", 40.0, BANDIT_LABEL, "led by 0.40"))
+    with caplog.at_level(logging.WARNING, logger="hyperloom_multibranch.notebook.rsi.scorers"):
+        gone = current_champion(pool)
+
+    assert unpooled is None and current_champion(None) is None
+    assert held == Registered(ExpressionScorer.read("trend-v2", TREND_TWICE))
+    assert back is None and bandit == Registered(BanditScorer())
+    assert gone is None and "gone-v1 is no longer to be found" in caplog.text
+    assert pool.champion() == ChampionRecord("gone-v1", 40.0, BANDIT_LABEL, "led by 0.40")
+    with pytest.raises(ValueError, match="no scorer label"):
+        pool.crown(ChampionRecord("Not A Label", 50.0, FRONTIER_V1_LABEL, ""))
+
+
+def test_a_retired_expression_is_offered_no_more_and_the_champion_is_whatever_its_age(tmp_path: Path) -> None:
+    pool = ScorerPool(tmp_path)
+    for n in range(MAX_EXPRESSIONS + 2):
+        pool.register(_expression(f"expr-{n}", float(n)))
+    newest = f"expr-{MAX_EXPRESSIONS + 1}"
+
+    pool.crown(ChampionRecord("expr-0", 100.0, FRONTIER_V1_LABEL, "led"))
+    retired = RetiredRecord(newest, 200.0, "behind expr-0", "trend_pct")
+    pool.retire(retired)
+    pool.retire(retired)
+
+    assert pool.retired() == (retired,)
+    assert [item.label for item in pool.expressions()] == [f"expr-{n}" for n in range(MAX_EXPRESSIONS + 1)]
+    assert newest not in {item.scorer.label for item in registered_scorers(pool, 300.0)}
+    with pytest.raises(ValueError, match="no scorer label"):
+        pool.retire(RetiredRecord("Not A Label", 1.0, ""))
 
 
 def test_a_label_names_frontier_v1_a_scorer_in_code_or_a_pooled_expression(tmp_path: Path) -> None:

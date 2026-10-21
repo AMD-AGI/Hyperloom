@@ -26,6 +26,8 @@ from hyperloom_multibranch.notebook.rsi.calibration import (
     frontier_scorer_for,
     gain_after,
     rank_correlation,
+    ranked_alike,
+    rankings,
     score_archived,
     session_policy,
 )
@@ -199,7 +201,7 @@ def test_a_candidate_beside_the_current_policy_counts_the_rounds_where_only_it_t
     assert (compared.label, compared.rounds, compared.sessions) == ("a first", 24, 3)
     assert compared.rank_correlation == pytest.approx(1.0) and compared.current_correlation == 0.0
     assert report.recommended is not None and report.recommended.label == "a first"
-    assert "| a first | 1.00 | 0.00 | 24 | 3 |" in report.render()
+    assert "| a first | 1.00 | 0.00 | 1.00 to 1.00 | 24 | 3 |" in report.render()
 
 
 def test_a_baseline_registered_later_is_judged_only_on_the_sessions_that_started_after_it() -> None:
@@ -257,6 +259,50 @@ def test_a_session_scores_with_the_scorer_its_similar_sessions_recommend_once_th
     assert chosen.evidence.startswith("prefers-a: rank correlation 1.00 against 0.00 for the defaults")
     assert "3 similar sessions" in chosen.evidence
     assert (unproven.label, unproven.policy, unproven.scorer) == (DEFAULT_POLICY, defaults, FRONTIER_V1)
+
+
+def test_a_lead_that_varies_from_session_to_session_needs_its_interval_above_0() -> None:
+    sessions = tuple(_tied(n) for n in range(4))
+    # The baseline picks the branch that went on to gain in two sessions, and the wrong one in the other two.
+    picks = Baseline(
+        "flip", lambda tree, branch, t_s, _: float((branch.name == "a") == (tree.session_id < "tied-2")), True
+    )
+
+    report = calibrate(sessions, variations=(Variation(CURRENT),), baselines=(picks,))
+    (compared,) = report.comparisons
+
+    assert (compared.rounds, compared.sessions) == (32, 4)
+    assert compared.rank_correlation == pytest.approx(0.0)
+    assert compared.difference_low is not None and compared.difference_low < 0 < (compared.difference_high or 0)
+    assert report.recommended is None and report.note.startswith("Keep the current policy")
+
+
+def test_a_champion_is_kept_until_a_challenger_ranks_better_and_frontier_v1_can_take_its_place_back() -> None:
+    archived = tuple(_on_the_gpu(n, _tied(n)) for n in range(3))
+    task, defaults = TaskConditions(labels={"gpu": "mi355x"}), FrontierPolicy.for_budget(METRIC, BUDGET)
+    wrong, right = _Prefers("b", "prefers-b"), _Prefers("a")
+
+    kept = frontier_scorer_for(archived, task, defaults, (), Registered(right))
+    displaced = frontier_scorer_for(archived, task, defaults, (Registered(right),), Registered(wrong))
+    back = frontier_scorer_for(archived, task, defaults, (), Registered(wrong))
+
+    assert (kept.label, kept.scorer) == ("prefers-a", right)
+    assert kept.evidence.startswith("prefers-a: Keep prefers-a: no candidate ranks the branches better")
+    assert (displaced.label, displaced.scorer) == ("prefers-a", right)
+    assert displaced.evidence.startswith("prefers-a: rank correlation 1.00 against -1.00 for prefers-b")
+    assert (back.label, back.scorer) == (DEFAULT_POLICY, FRONTIER_V1)
+    assert back.evidence.startswith("frontier-v1: rank correlation 0.00 against -1.00 for prefers-b")
+
+
+def test_rankings_tell_two_scorers_that_rank_the_branches_alike() -> None:
+    sessions = tuple(_tied(n) for n in range(2))
+
+    double = rankings(sessions, _Prefers("a"))
+    same, other = rankings(sessions, _Prefers("a", "prefers-a-again")), rankings(sessions, _Prefers("b", "prefers-b"))
+
+    assert len(double) == 2 * 11 and all(len(ranks) == 2 for ranks in double.values())
+    assert ranked_alike(double, same) == 1.0 and ranked_alike(double, other) < 0.5
+    assert ranked_alike(double, {}) == 0.0
 
 
 def test_rank_correlation_ranks_ties_alike_and_needs_a_spread() -> None:

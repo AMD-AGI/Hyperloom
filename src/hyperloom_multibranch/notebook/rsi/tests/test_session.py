@@ -24,7 +24,8 @@ from hyperloom_multibranch.notebook.rsi import session
 from hyperloom_multibranch.notebook.rsi.archive import ARCHIVE_ENV, ARCHIVED, SKIPPED, TreeArchive
 from hyperloom_multibranch.notebook.rsi.bandit import BANDIT_LABEL, BanditScorer
 from hyperloom_multibranch.notebook.rsi.calibration import DEFAULT_POLICY, PolicyChoice
-from hyperloom_multibranch.notebook.rsi.frontier import FRONTIER_V1, FrontierPolicy
+from hyperloom_multibranch.notebook.rsi.expression import ExpressionScorer
+from hyperloom_multibranch.notebook.rsi.frontier import FRONTIER_V1, FRONTIER_V1_LABEL, FrontierPolicy
 from hyperloom_multibranch.notebook.rsi.history import MAX_CHARS, session_history
 from hyperloom_multibranch.notebook.rsi.session import (
     CALIBRATION_REPORT,
@@ -48,9 +49,15 @@ from hyperloom_multibranch.notebook.rsi.session import (
     session_frontier_policy,
     session_frontier_scorer,
 )
-from hyperloom_multibranch.notebook.rsi.scorers import ScorerPool
+from hyperloom_multibranch.notebook.rsi.scorers import (
+    ChampionRecord,
+    PoolRecord,
+    ScorerPool,
+    ScorerSource,
+    current_champion,
+)
 from hyperloom_multibranch.notebook.rsi.similarity import task_conditions
-from hyperloom_multibranch.notebook.rsi.tests.trees import branch, tree
+from hyperloom_multibranch.notebook.rsi.tests.trees import HOUR, branch, race, tree
 from hyperloom_multibranch.notebook.tests.factories import START, FakeClock, profile
 from hyperloom_multibranch.notebook.tests.sessions import METRIC, scripted_session
 
@@ -281,6 +288,36 @@ def test_a_session_chooses_among_the_registered_scorers_too_and_a_label_names_a_
     bandit = named[BANDIT_LABEL]
     assert bandit is not None and (bandit.policy, bandit.scorer) == (defaults, BanditScorer())
     assert named["nowhere"] is None
+
+
+def _pooled(pool: ScorerPool, label: str, text: str) -> None:
+    pool.register(PoolRecord(label, ScorerSource.EXPRESSION, START - 2 * HOUR, text, "why"))
+
+
+def test_a_challenger_that_beats_the_champion_is_crowned_and_the_sessions_after_start_from_it(
+    snapshot: NotebookSnapshot, tmp_path: Path
+) -> None:
+    defaults = FrontierPolicy.for_budget(METRIC, BUDGET)
+    # Sessions after the expressions were written: what ranks the older branch first leads frontier-v1 there.
+    races = [race(f"race-{n}", task=task_conditions(profile()), started_at=START - HOUR + 600.0 * n) for n in range(4)]
+    pool, worse = ScorerPool(tmp_path / "pool"), ScorerPool(tmp_path / "worse")
+    _pooled(pool, "older-v1", "age_s")
+    _pooled(worse, "younger-v1", "1000000 - age_s")
+    worse.crown(ChampionRecord("younger-v1", START - HOUR, FRONTIER_V1_LABEL, "led"))
+
+    crowned = session_frontier_scorer(snapshot, races, defaults, pool)
+    champion = pool.champion()
+    later = dataclasses.replace(snapshot, taken_at=snapshot.taken_at + 60.0)
+    kept = session_frontier_scorer(later, races, defaults, pool)
+    back = session_frontier_scorer(snapshot, races, defaults, worse)
+
+    assert (crowned.label, crowned.scorer) == ("older-v1", ExpressionScorer.read("older-v1", "age_s"))
+    assert champion == ChampionRecord("older-v1", snapshot.taken_at, FRONTIER_V1_LABEL, crowned.evidence)
+    assert kept.label == "older-v1" and kept.evidence.startswith("older-v1: Keep older-v1")
+    assert pool.champion() == champion
+    assert (back.label, back.scorer) == (DEFAULT_POLICY, FRONTIER_V1)
+    assert worse.champion() == ChampionRecord(FRONTIER_V1_LABEL, snapshot.taken_at, "younger-v1", back.evidence)
+    assert current_champion(worse) is None
 
 
 def test_the_judge_reads_the_digest_of_the_archived_sessions_and_nothing_without_any(
