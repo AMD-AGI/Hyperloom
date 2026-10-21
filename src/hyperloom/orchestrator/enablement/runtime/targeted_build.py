@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .build_actions import BuildResult, FrameworkRuntime, TargetedBuildAction
-from .build_utils import ROCM_CONSTRAINTS_FILE
+from .build_utils import ROCM_CONSTRAINTS_FILE, sglang_rocm_install_target
 
 log = logging.getLogger(__name__)
 
@@ -597,25 +597,12 @@ def run_sgl_kernel_build(
         build_log.write_text(kernel_build.stderr_tail or kernel_build.stdout_tail, encoding="utf-8")
         return _fail("compile_error", f"sgl-kernel compile failed (rc={kernel_build.returncode})")
 
-    # Copy pyproject_other.toml if present (mirrors the installer).
-    py_other = worktree_dir / "python" / "pyproject_other.toml"
-    if py_other.is_file():
-        import shutil
-
-        shutil.copy2(str(py_other), str(worktree_dir / "python" / "pyproject.toml"))
-
-    # Install SGLang python package
-    pip_cmd = [
-        attempt_py,
-        "-m",
-        "pip",
-        "install",
-        "--constraint",
-        str(constraint_path),
-        "-e",
-        str(worktree_dir / "python[srt_hip]"),
-    ]
-    pip_res = run_argv(pip_cmd, cwd=str(root), env=dict(_os.environ), timeout_sec=3600, run=_run)
+    try:
+        with sglang_rocm_install_target(worktree_dir / "python", abi["torch_version"]) as target:
+            pip_cmd = [attempt_py, "-m", "pip", "install", "--constraint", str(constraint_path), "-e", target]
+            pip_res = run_argv(pip_cmd, cwd=str(root), env=dict(_os.environ), timeout_sec=3600, run=_run)
+    except (OSError, ValueError) as exc:
+        return _fail("compile_error", f"no ROCm install of the SGLang checkout: {exc}")
     if pip_res.returncode != 0:
         build_log.write_text(pip_res.stderr_tail or pip_res.stdout_tail, encoding="utf-8")
         return _fail("compile_error", f"sgl-kernel pip install failed (rc={pip_res.returncode})")
