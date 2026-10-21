@@ -24,7 +24,13 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import Enum
 
-from hyperloom.common.failure_signature import IMPORT_ERROR, SERVE_FLAG, classify_failure
+from hyperloom.common.failure_signature import (
+    HIP_KERNEL_MISSING,
+    HIP_RUNTIME_ERROR,
+    IMPORT_ERROR,
+    SERVE_FLAG,
+    classify_failure,
+)
 from hyperloom.contracts.measurement import FailureClass
 from hyperloom.measure import log_causes
 from hyperloom.measure.returncodes import (
@@ -72,7 +78,12 @@ LM_EVAL_BAD_REQUEST_REASON = "lm_eval_http_400"
 PYTHON_EXCEPTION_REASON = "python_exception"
 NO_KNOWN_SIGNATURE_REASON = "no_known_signature"
 #: The kinds of the shared signature table whose reason also quotes the log line that states them, with the reader of it.
-_QUOTED_KINDS = {SERVE_FLAG: log_causes.argparse_error, IMPORT_ERROR: log_causes.import_error}
+_QUOTED_KINDS = {
+    SERVE_FLAG: log_causes.argparse_error,
+    IMPORT_ERROR: log_causes.import_error,
+    HIP_KERNEL_MISSING: log_causes.missing_hip_kernel,
+    HIP_RUNTIME_ERROR: log_causes.hip_error,
+}
 _PORT_IN_USE = re.compile(r"address already in use|\[Errno 98\]", re.IGNORECASE)
 
 # Sentinel return codes of the local flow (``orchestrator/actions/executors/_subprocess_kill.py``). The names stay

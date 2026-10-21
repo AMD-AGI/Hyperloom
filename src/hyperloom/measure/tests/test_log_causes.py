@@ -6,7 +6,9 @@
 The logs are sanitised copies of the three kinds that ended a 12 h session as ``no_known_signature``: the server
 refusing its own command line, the evaluation client answered ``400``, and a worker dying on a Python exception. The
 fourth, an import that failed, is the server.log lines of a real SGLang server (one MI355X card) asked for
-``--load-format fastsafetensors``.
+``--load-format fastsafetensors``. The two HIP logs are lines of the next 12 h session's server.logs, where twelve
+candidates ended as ``hip_kernel_missing`` although no kernel was missing: a patched kernel that read out of bounds and
+a CUDA graph capture that was invalidated.
 """
 
 from __future__ import annotations
@@ -70,6 +72,40 @@ FASTSAFETENSORS_LOG = (
     "\n"
     "[2026-10-21 06:23:03] Received sigquit from a child process. It usually means the child failed.\n"
     "[2026-10-21 06:23:03] kill_process_tree called: parent_pid=16242, include_parent=True, pid=16242\n"
+)
+ILLEGAL_ADDRESS_LOG = (
+    "[aiter] -mllvm -amdgpu-coerce-illegal-types=1 is not supported by hipcc.\n"
+    "[2026-10-21 14:46:55] Scheduler hit an exception: Traceback (most recent call last):\n"
+    '  File "/sgl-workspace/sglang/python/sglang/srt/model_executor/runner_backend/full_cuda_graph_backend.py", line 182, '
+    "in capture_one\n"
+    "torch.AcceleratorError: HIP error: an illegal memory access was encountered\n"
+    "Search for `hipErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__HIPRT__TYPES.html for more "
+    "information.\n"
+    "\n"
+    "Exception: Capture cuda graph failed: HIP error: an illegal memory access was encountered\n"
+    "Search for `hipErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__HIPRT__TYPES.html for more "
+    "information.\n"
+    "[2026-10-21 14:46:56] Received sigquit from a child process. It usually means the child failed.\n"
+)
+CAPTURE_INVALIDATED_LOG = (
+    "Exception ignored in: <function CompiledKernel.__del__ at 0x77be94b6acb0>\n"
+    "RuntimeError: Triton Error [HIP]:  Code: 900, Messsage: operation not permitted when stream is capturing\n"
+    "[2026-10-21 15:29:10] Scheduler hit an exception: Traceback (most recent call last):\n"
+    "RuntimeError: HIP runtime error: operation failed due to a previous error during capture. hip_check_error.hpp: 18in "
+    "function: hip_check_error\n"
+    "torch.AcceleratorError: HIP error: operation failed due to a previous error during capture\n"
+    "Search for `hipErrorStreamCaptureInvalidated' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__HIPRT__TYPES.html "
+    "for more information.\n"
+)
+HIP_WARNING_THEN_EXCEPTION_LOG = (
+    "UserWarning: HIP warning: an illegal memory access was encountered (Triggered internally at /pytorch/aten/src)\n"
+    "torch.AcceleratorError: HIP error: an illegal memory access was encountered\n"
+    "Search for `hipErrorIllegalAddress' in https://docs.nvidia.com/cuda/cuda-runtime-api/group__HIPRT__TYPES.html\n"
+    "HIP kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.\n"
+)
+UNDEFINED_SYMBOL_LOG = (
+    "Traceback (most recent call last):\n"
+    "ImportError: /opt/sgl-kernel/common_ops.so: undefined symbol: _ZN4aiter8fmha_fwdEv\n"
 )
 PLAIN_LOG = "INFO server booted\nINFO request finished in 3.1s\nsegfault somewhere\n"
 
@@ -172,6 +208,39 @@ def test_a_failed_import_with_no_message_still_ends_as_the_bare_kind() -> None:
     )
 
 
+def test_a_kernel_that_faulted_is_a_runtime_error_that_names_the_fault_not_a_missing_kernel() -> None:
+    assert _classify(ILLEGAL_ADDRESS_LOG) == (
+        FailureClass.CANDIDATE,
+        "hip_runtime_error: Exception: Capture cuda graph failed: HIP error: an illegal memory access was encountered",
+    )
+
+
+def test_a_graph_capture_that_was_invalidated_says_so_in_the_reason() -> None:
+    assert _classify("stderr of the launcher", CAPTURE_INVALIDATED_LOG) == (
+        FailureClass.CANDIDATE,
+        "hip_runtime_error: torch.AcceleratorError: HIP error: operation failed due to a previous error during capture",
+    )
+
+
+def test_a_hip_runtime_error_prefers_the_exception_to_the_warning_before_it() -> None:
+    assert _classify(HIP_WARNING_THEN_EXCEPTION_LOG)[1] == (
+        "hip_runtime_error: torch.AcceleratorError: HIP error: an illegal memory access was encountered"
+    )
+
+
+def test_a_hip_runtime_error_with_only_the_token_quotes_the_line_that_names_it() -> None:
+    reason = _classify("Search for `hipErrorLaunchFailure' in https://docs.nvidia.com/cuda/\n")[1]
+
+    assert reason == "hip_runtime_error: Search for `hipErrorLaunchFailure' in https://docs.nvidia.com/cuda/"
+
+
+def test_an_absent_symbol_is_a_missing_kernel_that_names_the_symbol() -> None:
+    assert _classify(UNDEFINED_SYMBOL_LOG) == (
+        FailureClass.CANDIDATE,
+        "hip_kernel_missing: ImportError: /opt/sgl-kernel/common_ops.so: undefined symbol: _ZN4aiter8fmha_fwdEv",
+    )
+
+
 def test_a_port_taken_still_wins_over_a_refused_flag() -> None:
     log = ARGPARSE_LOG + "OSError: [Errno 98] error while attempting to bind on address: address already in use\n"
 
@@ -198,6 +267,8 @@ def test_a_stalled_server_keeps_its_reason_when_its_log_holds_an_exception() -> 
         (log_causes.bad_request, LM_EVAL_STDERR, "API request failed with error message:"),
         (log_causes.python_exception, PYTHON_EXCEPTION_LOG, "AssertionError: M must be"),
         (log_causes.import_error, FASTSAFETENSORS_LOG, "ImportError: Please install fastsafetensors"),
+        (log_causes.hip_error, ILLEGAL_ADDRESS_LOG, "HIP error: an illegal memory access"),
+        (log_causes.missing_hip_kernel, UNDEFINED_SYMBOL_LOG, "undefined symbol: _ZN4aiter8fmha_fwdEv"),
     ],
 )
 def test_each_reader_returns_the_line_that_names_the_cause_and_none_for_a_plain_log(reader, log, expected) -> None:

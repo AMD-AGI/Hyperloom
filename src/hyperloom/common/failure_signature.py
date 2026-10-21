@@ -16,6 +16,10 @@ from typing import Any, Callable, Pattern
 MISSING_MODEL_ARCH = "missing_model_arch"
 UNSUPPORTED_DTYPE = "unsupported_dtype"
 HIP_KERNEL_MISSING = "hip_kernel_missing"
+# A HIP call that failed while the program ran: a kernel faulted on an out-of-bounds address, a graph capture was
+# invalidated, a launch failed. The kernel was there and ran, so there is nothing to build; the line the log prints names
+# the fault. Distinct from HIP_KERNEL_MISSING, whose evidence is a binary or a symbol that is absent.
+HIP_RUNTIME_ERROR = "hip_runtime_error"
 IMPORT_ERROR = "import_error"
 SHAPE_MISMATCH = "shape_mismatch"
 MISSING_WEIGHT = "missing_weight"
@@ -168,7 +172,7 @@ _RULES: tuple[_Rule, ...] = (
     ),
     _Rule(
         # A kernel over the device's per-launch budget. Ordered ahead of both
-        # neighbours it would otherwise be swallowed by: the HIP rule matches
+        # neighbours it would otherwise be swallowed by: the HIP rules match
         # any ``hipError`` token, and ``hipErrorLaunchOutOfResources`` carries
         # exactly this text; the resource-constraint rule means the host is too
         # small and marks the gap as needing no code, while this is a launch
@@ -197,12 +201,22 @@ _RULES: tuple[_Rule, ...] = (
         kind=HIP_KERNEL_MISSING,
         bridge_layer="rocm_hip",
         patterns=(
-            re.compile(r"hipError[A-Za-z]*"),
             re.compile(r"no kernel image is available"),
             re.compile(r"hipErrorNoBinaryForGpu"),
             re.compile(r"undefined symbol:\s*([A-Za-z0-9_:]+)"),
             re.compile(r"HSA_STATUS_ERROR[A-Za-z_]*"),
         ),
+        confidence=0.85,
+        symbol_from=_grp,
+    ),
+    _Rule(
+        # Every other ``hipError`` token (hipErrorIllegalAddress, hipErrorStreamCaptureInvalidated, ...) reports a call
+        # that failed, not a kernel that is absent. It used to share the rule above, so a candidate whose own kernel
+        # read out of bounds came back as "hip_kernel_missing" and was read as a gap in the image. Same position and
+        # bridge layer as before, so the enablement ladder places and routes it as it always did.
+        kind=HIP_RUNTIME_ERROR,
+        bridge_layer="rocm_hip",
+        patterns=(re.compile(r"hipError[A-Za-z]*"),),
         confidence=0.85,
         symbol_from=_grp,
     ),
@@ -517,6 +531,7 @@ __all__ = [
     "EVAL_GENERATION_PATHOLOGY",
     "EVAL_RUNTIME_FAILURE",
     "HIP_KERNEL_MISSING",
+    "HIP_RUNTIME_ERROR",
     "IMPORT_ERROR",
     "MISSING_MODEL_ARCH",
     "MISSING_WEIGHT",

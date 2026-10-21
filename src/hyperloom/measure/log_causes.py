@@ -46,6 +46,16 @@ _REFUSAL_MESSAGE = re.compile(r"API request failed|[\"']message[\"']\s*:")
 #: and carries on; that line is not an exception and does not match.
 _IMPORT_FAILURE = re.compile(r"(?<![\w.])(?:[A-Za-z_]\w*\.)*(?:ImportError|ModuleNotFoundError):\s*\S")
 
+#: What a missing compiled kernel prints: an extension that references a symbol nothing defines, or a GPU binary built for
+#: another device. Nothing else a HIP call reports belongs here.
+_MISSING_KERNEL = re.compile(r"undefined symbol|no kernel image is available|hipErrorNoBinaryForGpu|HSA_STATUS_ERROR")
+#: The exception a failed HIP call raised (``torch.AcceleratorError: HIP error: an illegal memory access was
+#: encountered``, ``RuntimeError: HIP runtime error: operation failed ...``), which states the fault in words. The
+#: ``HIP warning:`` a stream prints for the same fault is not it.
+_HIP_EXCEPTION = re.compile(r"\bHIP (?:runtime )?error: ")
+#: The name of the failed call, on its own line when the exception text was cut (``Search for `hipErrorIllegalAddress'``).
+_HIP_ERROR_TOKEN = re.compile(r"hipError[A-Za-z]+")
+
 #: ``SomeError: message`` after an optional log prefix, or a bare ``SomeError`` on a line of its own.
 _EXCEPTION_WITH_MESSAGE = re.compile(r"(?<![\w.])((?:[A-Za-z_]\w*\.)*(?:[A-Z]\w*)?(?:Error|Exception)):\s*\S")
 _EXCEPTION_ALONE = re.compile(r"^\s*(?:[A-Za-z_]\w*\.)*(?:[A-Z]\w*)?(?:Error|Exception)\s*$")
@@ -93,3 +103,15 @@ def import_error(text: str) -> str | None:
 def python_exception(text: str) -> str | None:
     """The last ``SomeError: message`` line of a traceback or of a logged exception."""
     return _last_matching(text, lambda line: bool(_EXCEPTION_WITH_MESSAGE.search(line) or _EXCEPTION_ALONE.match(line)))
+
+
+def missing_hip_kernel(text: str) -> str | None:
+    """The line that says a compiled kernel or a symbol of it is absent (an undefined symbol, no image for this GPU)."""
+    return _last_matching(text, lambda line: bool(_MISSING_KERNEL.search(line)))
+
+
+def hip_error(text: str) -> str | None:
+    """The line that states a HIP call failed at run time: the exception that carries the fault's words, else the line that names the failed call."""
+    return _last_matching(text, lambda line: bool(_HIP_EXCEPTION.search(line))) or _last_matching(
+        text, lambda line: bool(_HIP_ERROR_TOKEN.search(line))
+    )
