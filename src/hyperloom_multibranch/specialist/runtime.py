@@ -11,14 +11,14 @@ fewest running branches hold. A direction given to a branch counts when it is on
 
 A session that crashes is restarted on its branch, at most ``MAX_RESTARTS`` times within ``RESTART_WINDOW_S``, and a
 lost one at most ``MAX_LOSS_RESTARTS`` times in a row with no session working in between: a loss takes the heartbeat
-timeout, so losses alone never fill the window. A session that ends idle, its model finding nothing to test, is no
-crash and is not restarted: a restart reads the model's own conclusion back from the branch log and ends idle again,
-so the specialist gives up and the scheduler opens a fresh branch, with its own direction, in the freed slot. Past
+timeout, so losses alone never fill the window. A session that ends idle, its model finding nothing to test, is no crash
+and is not restarted: a restart reads the model's own conclusion back from the branch log and ends idle again, so the
+specialist gives up and the scheduler stops the branch, freeing its slot for a fresh branch with its own direction. Past
 any of these the branch keeps its judge, which settles what was already measured, and the scheduler stops it once
-nothing of it waits for a confirm; ``status`` tells it. A judge that fails is a defect of this code, not of the specialist: it is not restarted, and the branch's session
-is stopped so no candidate is measured that nothing would judge. Both leave a notice in the branch log. While the
-specialist writes a change, the runtime renews the claims it holds, so a claim does not lapse while a model thinks;
-once a test carries a claim, the toolbox renews it.
+nothing of it waits for a confirm; ``status`` tells it. A judge that fails is a defect of this code, not of the
+specialist: it is not restarted, and the branch's session is stopped so no candidate is measured that nothing would
+judge. Both leave a notice in the branch log. While the specialist writes a change, the runtime renews the claims it
+holds, so a claim does not lapse while a model thinks; once a test carries a claim, the toolbox renews it.
 """
 
 from __future__ import annotations

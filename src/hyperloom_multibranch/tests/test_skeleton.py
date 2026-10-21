@@ -1539,6 +1539,22 @@ async def test_a_candidate_that_starts_waiting_while_the_judge_answers_holds_its
     assert str(stopped["reason"]).startswith(StopCause.SESSION_END.value)
 
 
+async def test_a_branch_whose_specialist_gave_up_is_not_stopped_while_its_candidate_waits_for_its_confirm(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _candidate_waits_on_b02(monkeypatch, lambda: True)
+    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage.steps = {**stage.steps, "b02": _loses_its_heartbeat}
+
+    outcome = await stage.run()
+
+    assert (outcome.stop_reason, outcome.error) == (SessionStopReason.TIME_EXHAUSTED, "")
+    [_, steering] = [row for row in _decisions(stage) if row["kind"] == "judge"]
+    assert steering["detail"]["held"] == {"b02": HoldReason.PENDING_CONFIRM.value}
+    [stopped] = [row for row in _decisions(stage) if row["kind"] == "stop" and row["branch"] == "b02"]
+    assert str(stopped["reason"]).startswith(StopCause.SESSION_END.value)
+
+
 async def test_a_failed_opening_judge_call_opens_no_branch_beside_the_user_branches(tmp_path: Path) -> None:
     stage = _stage(tmp_path, child=child_with_patch(tmp_path))
     stage.settings = replace(SETTINGS, user_directions=(USER_DIRECTION, "Tune the attention block size."))

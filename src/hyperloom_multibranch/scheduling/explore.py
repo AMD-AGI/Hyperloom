@@ -6,15 +6,15 @@
 The branches the user wrote a direction for open first, from the root commit; the opening judge call then sizes the
 opening batch into the slots they leave.
 
-The loop wakes every :data:`EXPLORE_TICK_SECONDS`: it stops the repair branches that used up their time and the
-branches whose specialist gave up, once no candidate of theirs waits for its confirm, moves the forks
-and repairs queued on the fork desk onto the free slots, has the rule gate land each admitted fork and starts
-the admitted forks and repairs, and every judge interval asks the judge, applies what it decided and rebuilds the
-dashboard. A slot the judge's stops free goes to the queued requests first and only then to the branches the judge
-opens. The judge is asked at once, not at its next interval, when the scheduler itself frees a slot: a repair branch
-stopped at its time limit, a branch whose specialist gave up, a fork the gate did not land, or an admitted fork or repair that failed to start; and when an
-event changes what the branches are worth: a merge that moved the integration head by a large gain, the bottleneck of
-the profile taken of the integration head after such a merge moving, or a quarantined measurement node. A branch the
+The loop wakes every :data:`EXPLORE_TICK_SECONDS`: it stops the repair branches that used up their time and the branches
+whose specialist gave up, once no candidate of theirs waits for its confirm, moves the forks and repairs queued on the
+fork desk onto the free slots, has the rule gate land each admitted fork and starts the admitted forks and repairs, and
+every judge interval asks the judge, applies what it decided and rebuilds the dashboard. A slot the judge's stops free
+goes to the queued requests first and only then to the branches the judge opens. The judge is asked at once, not at its
+next interval, when the scheduler itself frees a slot: a repair branch stopped at its time limit, a branch whose
+specialist gave up, a fork the gate did not land, or an admitted fork or repair that failed to start; and when an event
+changes what the branches are worth: a merge that moved the integration head by a large gain, the bottleneck of the
+profile taken of the integration head after such a merge moving, or a quarantined measurement node. A branch the
 judge opens after the opening batch starts from the integration head, briefed on a focus. The judge reads the
 frontier-scored progress, how similar archived sessions went, which running branches made much the same change, the
 events since its last call, how far each branch lies behind the integration head, whether a profile of the integration
