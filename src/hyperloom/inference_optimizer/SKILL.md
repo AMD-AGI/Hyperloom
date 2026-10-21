@@ -440,7 +440,10 @@ ledger, and judges each entry — already present, not applicable, or worth a
 bench and by which route. The pump takes that batch in the order given; it
 does not re-rank or re-audit. When discovery comes back empty its full retry
 budget, the local-exploration arm authors against profile evidence instead;
-with that off too, the source arm reports itself dry.
+with that off too, the source arm reports itself dry. An authoring round that
+comes back empty, or whose specialist never runs, counts against the source
+arm's no-KEEP streak like a reverted patch; once that streak marks the arm
+dry, the local-exploration arm stops dispatching for the cycle.
 
 Every diff lands through `integrate_patch`, with `patch_source` naming where
 it came from. KEEP commits to the live tree so the next candidate stacks on
@@ -1513,7 +1516,7 @@ python3 -m hyperloom session state "$SESSION"
 ```
 
 It prints `stop_reason`, `baseline_tput`, `cumulative_gain_validated`, `current_best`,
-`last_kernel_opt`, `last_trace_analyze`, `last_conc_sweep`, `explore_last_round`,
+`last_trace_analyze`, `last_conc_sweep`, `explore_last_round`,
 `phase`, the latest orchestration and specialist Experience KB injections when
 they exist, plus the recent lifecycle events.
 

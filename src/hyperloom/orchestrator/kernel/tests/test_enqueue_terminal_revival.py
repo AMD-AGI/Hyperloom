@@ -34,7 +34,6 @@ def _patch(kernel: str = "attn", *, micro: float = 1.0) -> SimpleNamespace:
 def _state() -> SimpleNamespace:
     return SimpleNamespace(
         pending_kernel_integrations={},
-        kernel_opt_task_attempts={},
         kernel_integrate_attempts={},
         optimization_stack=[],
         rejected_kernel_ids=[],
@@ -95,7 +94,7 @@ def test_a_re_offered_verdict_survives_ten_cycles_as_a_verdict(verdict: str, mon
     monkeypatch.setenv("HL_KERNEL_PATCH_BUDGET", "1")
     state, integration_id = _settled(verdict, micro=1.0)
     for _ in range(10):
-        kd._ensure_kernel_task_state(state)
+        kd._evict_settled_integrations(state)
         kd.enqueue_nominated_patch(state, patch=_patch(micro=9.0))
     assert sorted(state.pending_kernel_integrations) == [integration_id]
     assert state.pending_kernel_integrations[integration_id]["status"] == verdict
@@ -107,7 +106,7 @@ def test_a_re_offered_verdict_is_still_reaped_once_over_the_cap(verdict: str, mo
     monkeypatch.setenv("HL_KERNEL_PATCH_BUDGET", "1")
     state, integration_id = _settled(verdict, micro=1.0)
     for _ in range(10):
-        kd._ensure_kernel_task_state(state)
+        kd._evict_settled_integrations(state)
         kd.enqueue_nominated_patch(state, patch=_patch(micro=9.0))
     # budget=1 * TERMINAL_RETENTION_MULTIPLE=2 => two stronger terminals push the re-offered record past the
     # post-mortem cap, and it is the weakest.
@@ -116,7 +115,7 @@ def test_a_re_offered_verdict_is_still_reaped_once_over_the_cap(verdict: str, mo
         strong = kd.enqueue_nominated_patch(state, patch=_patch(filler, micro=8.0))
         strong["status"] = "integrated"
         survivors.append(str(strong["integration_id"]))
-    kd._ensure_kernel_task_state(state)
+    kd._evict_settled_integrations(state)
     assert sorted(state.pending_kernel_integrations) == sorted(survivors)
     assert integration_id not in survivors
 

@@ -66,15 +66,14 @@ class TestEnqueueNominatedPatch:
 
     def test_the_record_survives_the_queue_rebuild(self):
         from hyperloom.orchestrator.kernel._kernel_decisions import (
-            _ensure_kernel_task_state,
+            _evict_settled_integrations,
             enqueue_nominated_patch,
         )
 
         state = SharedState()
         enqueue_nominated_patch(state, patch=self._patch("fuse_a", "/repo/a.py", env_flag="ZAYA_FUSED_A"))
-        # A fusion record has no kernel_opt_task_attempts ledger entry; the rebuild must keep it anyway (non-terminal
-        # is never evicted).
-        _ensure_kernel_task_state(state)
+        # Eviction only reaps settled records; a pending one is never evicted.
+        _evict_settled_integrations(state)
 
         records = state.pending_kernel_integration_records()
         assert len(records) == 1

@@ -6,9 +6,8 @@
 atom used to be filled in with ``forge`` when the operator named no backend, on
 the grounds that GEAK could not resolve a rewrite seam there. GEAK reaches atom
 now, so the framework carries no backend rule of its own: an unset
-``KERNEL_OPT_BACKEND_ORDER`` resolves through
-``_DEFAULT_KERNEL_PHASE_BACKEND_ORDER`` like sglang and vllm, and forge is the
-exact-match opt-in it is everywhere else.
+``KERNEL_OPT_BACKEND_ORDER`` resolves to GEAK like sglang and vllm, and forge
+is the exact-match opt-in it is everywhere else.
 
 What survives from the retired default is the atom-only shape around it: the
 ``--nodes>=2`` fail-fast guard (IR-8), and the requirement that every call site
@@ -64,17 +63,6 @@ def test_a_named_backend_survives_verbatim(monkeypatch, value):
     _apply_atom_auto_tighten(_args())
 
     assert os.environ[_KEY] == value
-
-
-def test_the_shared_default_puts_atom_on_geak(monkeypatch):
-    """The observable end of removing the special case, read off the shared resolver."""
-    from hyperloom.orchestrator.kernel.request_handlers import _raw_kernel_backend_order
-
-    monkeypatch.delenv(_KEY, raising=False)
-
-    _apply_atom_auto_tighten(_args())
-
-    assert _raw_kernel_backend_order() == ["geak"]
 
 
 def test_multi_node_still_fails_fast(monkeypatch):
