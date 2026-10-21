@@ -1833,8 +1833,7 @@ class BenchmarkRunExecutor:
                 delta_pct = (measured - warm) / warm * 100.0
                 record["cold_start_delta_pct"] = round(delta_pct, 2)
                 if delta_pct > _COLD_START_DELTA_WARN_PCT:
-                    result.setdefault("nonfatal_warnings", [])
-                    result["nonfatal_warnings"].append("baseline_cold_start_delta_high")
+                    result.setdefault("nonfatal_warnings", []).append("baseline_cold_start_delta_high")
                     log.warning(
                         "baseline_executor: measured round is %.1f%% above the warm-up round "
                         "(%.1f -> %.1f tok/s); the server may still have been ramping, so the "
@@ -1981,8 +1980,7 @@ class BenchmarkRunExecutor:
                     "the eval reached a verdict; recording an ordinary baseline failure rather than an enablement "
                     "gap."
                 )
-                result.setdefault("nonfatal_warnings", [])
-                result["nonfatal_warnings"].append("eval_failed_server_unreachable")
+                result.setdefault("nonfatal_warnings", []).append("eval_failed_server_unreachable")
             else:
                 _, evidence = self._eval_failure_evidence(result)
                 if self._eval_enablement_active(ctx):
@@ -2025,8 +2023,7 @@ class BenchmarkRunExecutor:
                 attempt_reason=RUN_AFTER_MOE_RUNNER_FAILURE,
                 force_drop_moe_runner_backend=True,
             )
-            retry.setdefault("nonfatal_warnings", [])
-            retry["nonfatal_warnings"].append("moe_runner_backend_fallback_dropped_flag")
+            retry.setdefault("nonfatal_warnings", []).append("moe_runner_backend_fallback_dropped_flag")
             result = retry
         self._maybe_stop_on_missing_baseline_accuracy(ctx, result)
         return result
@@ -2284,8 +2281,7 @@ class BenchmarkRunExecutor:
                 acc_val,
                 salvaged.get("source_file", ""),
             )
-            result.setdefault("nonfatal_warnings", [])
-            result["nonfatal_warnings"].append("baseline_accuracy_salvaged_from_sibling_attempt")
+            result.setdefault("nonfatal_warnings", []).append("baseline_accuracy_salvaged_from_sibling_attempt")
         if shared_state is not None and accuracy_meets_floor(acc_val, 0.0):
             shared_state.baseline_accuracy = acc_val
         return acc_val
@@ -2431,7 +2427,7 @@ class BenchmarkRunExecutor:
         """Decide the framework and server args this attempt runs with, aligning the task envelope with them."""
         # One-shot cuda-graph eager fallback: a prior baseline armed state.baseline_eager_fallback.
         server_args = str(params.get("extra_server_args") or "")
-        fw = str(params.get("framework") or "").strip() or os.environ.get("FRAMEWORK", "").strip()
+        fw = _requested_framework(params) or ""
         if not fw and self._eager_fallback_armed(shared_state):
             log.warning(
                 "baseline_executor: eager fallback is armed but framework is "
@@ -2834,8 +2830,7 @@ class BenchmarkRunExecutor:
 
     def _record_measured_against_warmup(self, result: dict[str, Any], warmup_result: dict[str, Any]) -> None:
         """Credit the measured pass with the boot it re-attached to, and say what the cold figure would have claimed."""
-        result.setdefault("nonfatal_warnings", [])
-        result["nonfatal_warnings"].append("baseline_double_run_discarded_first")
+        result.setdefault("nonfatal_warnings", []).append("baseline_double_run_discarded_first")
         # The measured pass re-attaches to the server launched by the warmup pass.
         for evidence_field in ("launch_evidence", "launch_evidence_path", "server_log_path"):
             if warmup_result.get(evidence_field):
@@ -2937,8 +2932,7 @@ class BenchmarkRunExecutor:
             "workspace": accuracy_result.get("workspace"),
         }
         if accuracy_result.get("status") != "succeeded":
-            result.setdefault("nonfatal_warnings", [])
-            result["nonfatal_warnings"].append("post_measure_accuracy_failed")
+            result.setdefault("nonfatal_warnings", []).append("post_measure_accuracy_failed")
             return
         for key in ("accuracy", "accuracy_task", "accuracy_metric", "accuracy_source"):
             if accuracy_result.get(key) is not None:
@@ -3340,11 +3334,7 @@ class BenchmarkRunExecutor:
             sync_benchmark_timeout(config_path, timeout_sec)
         # The materialized YAML is authoritative for the framework: params and $FRAMEWORK are both optional on a
         # baseline task.
-        framework = (
-            _config_framework(materialized_config_path)
-            or str(params.get("framework") or "").strip().lower()
-            or os.environ.get("FRAMEWORK", "").strip().lower()
-        )
+        framework = _config_framework(materialized_config_path) or (_requested_framework(params) or "").lower()
         round_ = _BenchmarkRound(
             config_path=config_path,
             materialized_config_path=materialized_config_path,
