@@ -15,7 +15,7 @@ from hyperloom.contracts.recipe import (
     PatchRef,
     Recipe,
 )
-from hyperloom_multibranch.scheduling.candidates import IMAGE, touched
+from hyperloom_multibranch.scheduling.candidates import touched
 
 IMAGE_DIGEST = "sha256:" + "b" * 64
 UPSTREAM_REF = "a" * 40
@@ -65,12 +65,6 @@ def test_a_kernel_artifact_is_named_by_its_kind_and_target() -> None:
 
     assert touched(BEFORE, swapped) == frozenset({"kernel gemm qkv_proj"})
     assert touched(BEFORE, added) == frozenset({"kernel fusion rmsnorm"})
-
-
-def test_a_moved_base_image_is_named() -> None:
-    moved = replace(BEFORE, base_image_digest="sha256:" + "e" * 64)
-
-    assert touched(BEFORE, moved) == frozenset({IMAGE})
 
 
 def test_two_recipes_that_differ_in_nothing_name_nothing() -> None:

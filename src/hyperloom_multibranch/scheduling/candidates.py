@@ -4,12 +4,14 @@
 """Which committed specialist commits the integrator offers on an integration head.
 
 A commit is offered once per head, until it is merged or found already on the head, except where the answer it
-already has still holds. ``NOT_STACKABLE`` on a commit's latest merge is a measured answer about that commit's own
-change against what the head held: a settled merge test the rule gate judged no improvement, or a regression set
-that failed on the merge. The integration head only grows, so that answer stands until a later merge changes one of
-the things the candidate's own change names -- a server argument, an environment variable, a component, a kernel
-artifact or the base image -- and then the candidate is offered again. A merge test that did not measure writes no
-judgement, so its candidate is ``PENDING`` and comes back on the next head whatever it named.
+already has still holds. ``NOT_STACKABLE`` on a commit's latest merge is the rule gate's measured answer about that
+commit's own change against what the head held. The integration head only grows, so that answer stands until a later
+merge changes one of the things the candidate's own change names -- a server argument, an environment variable, a
+component or a kernel artifact -- and then the candidate is offered again. A merge attempt that reached no judgement,
+because its test did not measure or its regression set did not run clean, leaves its candidate ``PENDING``, and it
+comes back on the next head whatever it named. The session's base image is fixed, and
+:func:`~hyperloom_multibranch.repo.merge.carry` refuses a candidate that moves it, so an image is never one of the
+things a change names here.
 
 The asymmetry with a merged or already-on-head commit is deliberate: its change is on the head, and a later merge
 that overrode a value it set was itself judged an improvement over a head that held the old value, so the old value
@@ -30,9 +32,6 @@ from hyperloom_multibranch.contracts.notebook.records import CommittedCommit
 from hyperloom_multibranch.contracts.notebook.vocab import MergeOutcome
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 
-#: What :func:`touched` calls a moved base image or runtime snapshot.
-IMAGE = "image"
-
 
 def _components(recipe: Recipe) -> dict[str, tuple[str, tuple[str, ...]]]:
     return {
@@ -50,42 +49,58 @@ def _differing(before: Mapping[str, object], after: Mapping[str, object]) -> set
 
 
 def touched(before: Recipe, after: Recipe) -> frozenset[str]:
-    """What a change from ``before`` to ``after`` names: each argument, variable, component, kernel slot and image
-    it sets, drops or moves, whatever the value it gives them."""
+    """What a change from ``before`` to ``after`` names: each argument, variable, component and kernel slot it sets,
+    drops or moves, whatever the value it gives them."""
 
     change = diff(before, after)
     names = {f"arg {item.name}" for item in change.args}
     names |= {f"env {item.name}" for item in change.envs}
     names |= {f"component {name}" for name in _differing(_components(before), _components(after))}
     names |= {f"kernel {slot}" for slot in _differing(_kernels(before), _kernels(after))}
-    if change.base_image_changed:
-        names.add(IMAGE)
     return frozenset(names)
 
 
-async def _touched_between(repo: ExperimentRepo, before: str, after: str) -> frozenset[str]:
-    return touched(await repo.read_recipe(before), await repo.read_recipe(after))
+class Candidates:
+    """The committed commits the integrator offers, and the recipes it has read to decide.
+
+    A commit's recipe never changes, so each one is read from ``repo`` once: the idle merge loop asks on every tick,
+    and both sides of the overlap are changes between commits already read.
+    """
+
+    def __init__(self, notebook: CommitQuery, repo: ExperimentRepo) -> None:
+        self._notebook = notebook
+        self._repo = repo
+        self._recipes: dict[str, Recipe] = {}
+
+    async def offered_on(self, head: str) -> tuple[CommittedCommit, ...]:
+        """The committed commits to test on ``head``, in the order the notebook gives them."""
+
+        offered = []
+        for commit in await self._notebook.committed():
+            if await self._offered(commit, head):
+                offered.append(commit)
+        return tuple(offered)
+
+    async def _offered(self, commit: CommittedCommit, head: str) -> bool:
+        last = commit.last_merge
+        if commit.merged_into is not None:
+            return False
+        if last is None:
+            return True
+        if last.integration_head == head or last.outcome is MergeOutcome.ALREADY_ON_HEAD:
+            return False
+        if last.outcome is not MergeOutcome.NOT_STACKABLE:
+            return True
+        own = await self._touched_between(commit.parent_commit, commit.commit_id)
+        return bool(own & await self._touched_between(last.integration_head, head))
+
+    async def _touched_between(self, before: str, after: str) -> frozenset[str]:
+        return touched(await self._recipe(before), await self._recipe(after))
+
+    async def _recipe(self, commit: str) -> Recipe:
+        if commit not in self._recipes:
+            self._recipes[commit] = await self._repo.read_recipe(commit)
+        return self._recipes[commit]
 
 
-async def _offered(commit: CommittedCommit, repo: ExperimentRepo, head: str) -> bool:
-    last = commit.last_merge
-    if commit.merged_into is not None:
-        return False
-    if last is None:
-        return True
-    if last.integration_head == head or last.outcome is MergeOutcome.ALREADY_ON_HEAD:
-        return False
-    if last.outcome is not MergeOutcome.NOT_STACKABLE:
-        return True
-    own = await _touched_between(repo, commit.parent_commit, commit.commit_id)
-    return bool(own & await _touched_between(repo, last.integration_head, head))
-
-
-async def offered_on(notebook: CommitQuery, repo: ExperimentRepo, head: str) -> tuple[CommittedCommit, ...]:
-    """The committed commits to test on ``head``, in the order the notebook gives them."""
-
-    offered = [commit for commit in await notebook.committed() if await _offered(commit, repo, head)]
-    return tuple(offered)
-
-
-__all__ = ["IMAGE", "offered_on", "touched"]
+__all__ = ["Candidates", "touched"]

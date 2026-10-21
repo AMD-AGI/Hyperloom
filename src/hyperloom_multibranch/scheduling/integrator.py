@@ -5,11 +5,13 @@
 
 Candidates are the notebook's committed specialist commits, in the order it gives them (foundation fixes first, then
 by their own gain), whatever became of the branch that made them. Each is tried once per integration head, until it
-is merged or found already on the head, except that one a merge test measured as not stackable waits until a later
+is merged or found already on the head, except that one the rule gate measured as not stackable waits until a later
 merge changes something its own change names: see :mod:`hyperloom_multibranch.scheduling.candidates`. A round
 tests up to the integration branch's K candidates at once on the same head; the first of them, in that order, that
 may be merged is merged, and every other one that may is superseded: it gets no judgement and is tried again on the
-new head. A merge the experiment repository cannot combine, or whose test the toolbox refuses, is skipped and recorded
+new head. So is a merge whose test did not measure, and one whose regression set did not run clean: the set says a
+case did not come back clean, not whether it reproduced or never ran, so it settles nothing about the candidate. A
+merge the experiment repository cannot combine, or whose test the toolbox refuses, is skipped and recorded
 like an unresolved conflict. One that leaves the head's recipe as it is is skipped untested as already on the head:
 another branch's commit already brought the same change, and the head keeps it, so it is not tried again, as a merged
 commit is not.
@@ -44,7 +46,7 @@ from hyperloom_multibranch.contracts.repo import ExperimentRepo, PatchConflict, 
 from hyperloom_multibranch.contracts.toolbox import RequestRejected
 from hyperloom_multibranch.rulegate.agentx import P50_BELOW_THRESHOLD
 from hyperloom_multibranch.rulegate.inferencex import GAIN_BELOW_THRESHOLD, GAIN_NOT_CONFIRMED
-from hyperloom_multibranch.scheduling.candidates import offered_on
+from hyperloom_multibranch.scheduling.candidates import Candidates
 from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind, DecisionLog
 from hyperloom_multibranch.scheduling.llm import Completion, CompletionFailed
 from hyperloom_multibranch.scheduling.requests import SessionChecks, integration_test_request
@@ -220,6 +222,7 @@ class Integrator:
     ) -> None:
         self._notebook = records.notebook
         self._repo = repo
+        self._candidates = Candidates(records.notebook, repo)
         self._tests = checks.tests
         self._gate = checks.gate
         self._regression = checks.regression
@@ -234,7 +237,7 @@ class Integrator:
         """
 
         head = await self._repo.head(INTEGRATION_BRANCH)
-        offered = await offered_on(self._notebook, self._repo, head)
+        offered = await self._candidates.offered_on(head)
         tested = await asyncio.gather(*(self._test(candidate, head) for candidate in offered[:width]))
         reports = []
         merged = False
@@ -282,7 +285,7 @@ class Integrator:
         try:
             judgement = await self._gate.compare(request_id)
         except NotMeasured as exc:
-            return replace(tested, outcome=MergeOutcome.NOT_STACKABLE, reason=f"the merge test failed: {exc}")
+            return replace(tested, reason=f"the merge test failed: {exc}")
         return _TestedMerge(tested, delta, judgement)
 
     async def _resolved(self, merge: RepoMerge, candidate: str) -> RecipeDelta:
@@ -306,18 +309,19 @@ class Integrator:
 
     async def _conclude(self, tested: _TestedMerge, superseded: bool) -> MergeReport:
         """A superseded candidate gets no integration judgement and runs no regression set: it stays pending and is
-        tried on the new head. Any other candidate that may be merged is merged once the regression set passes on the
-        merge."""
+        tried on the new head, as does one whose regression set did not run clean. Any other candidate that may be
+        merged is merged once the regression set passes on the merge."""
 
         report, judgement = tested.report, tested.judgement
         reason = not_stackable_reason(judgement, foundation_fix=report.foundation_fix)
-        if not reason and not superseded:
-            reason = await self._regression_failure(report, tested.delta)
         if reason:
             await self._notebook.write_judgement(str(report.request_id), judgement, Conclusion.NOT_STACKABLE)
             return replace(report, outcome=MergeOutcome.NOT_STACKABLE, reason=reason)
         if superseded:
             return replace(report, reason=SUPERSEDED)
+        failed = await self._regression_failure(report, tested.delta)
+        if failed:
+            return replace(report, reason=failed)
         self._recording = asyncio.ensure_future(self._record_merge(report, tested.delta, judgement))
         merged = await asyncio.shield(self._recording)
         reason = f"{judgement.verdict.value} {judgement.gain_pct:+.2f}% on the integration head"

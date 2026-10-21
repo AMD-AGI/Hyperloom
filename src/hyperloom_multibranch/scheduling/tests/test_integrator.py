@@ -326,19 +326,29 @@ async def test_a_merge_that_does_not_improve_is_not_stackable(
     assert await bench.outcome("c1") is MergeOutcome.NOT_STACKABLE
 
 
-async def test_an_improving_merge_the_regression_set_fails_is_not_stackable(bench: Bench) -> None:
+async def test_an_improving_merge_the_regression_set_fails_stays_pending_and_is_tried_on_the_next_head(
+    bench: Bench,
+) -> None:
     bench.regression.failures = {bench.root: "case kv-overflow reproduced"}
 
     report = await _one(bench)
 
-    assert report is not None and report.outcome is MergeOutcome.NOT_STACKABLE
+    assert report is not None and report.outcome is MergeOutcome.PENDING
     assert report.reason == "the regression set failed: case kv-overflow reproduced"
     [test] = bench.merge_tests().values()
     assert bench.regression.calls == [(bench.root, test.delta, (bench.commits["c1"],))]
     assert await bench.repo.head(INTEGRATION_BRANCH) == bench.root
     record = await bench.handle(Role.OBSERVER).record(str(report.request_id))
-    assert (record.conclusion, record.commit_id) == (Conclusion.NOT_STACKABLE, None)
+    assert (record.conclusion, record.commit_id) == (None, None)
+    assert await bench.outcome("c1") is MergeOutcome.PENDING
     assert [row["reason"] for row in bench.logged()] == [report.reason]
+
+    bench.regression.failures = {}
+    merged, retried = await _one(bench), await _one(bench)
+
+    assert merged is not None and (merged.candidate, merged.outcome) == (bench.commits["c2"], MergeOutcome.MERGED)
+    assert retried is not None and (retried.candidate, retried.onto) == (bench.commits["c1"], merged.merged_commit)
+    assert retried.outcome is MergeOutcome.MERGED
 
 
 @pytest.mark.parametrize(("value", "verdict"), [(1005.0, "flat"), (950.0, "regressed")], ids=["flat", "regressed"])
@@ -363,13 +373,13 @@ async def test_a_foundation_fix_that_passes_the_accuracy_gate_and_the_regression
     assert (logged["detail"]["gain_pct"], logged["detail"]["threshold_pct"]) == (report.gain_pct, report.threshold_pct)
 
 
-async def test_a_foundation_fix_the_regression_set_fails_is_not_stackable(tmp_path: Path) -> None:
+async def test_a_foundation_fix_the_regression_set_fails_stays_pending(tmp_path: Path) -> None:
     bench = await _bench(tmp_path, {**CURVES, frozenset({"c1"}): {MAIN_POINT: 950.0}}, foundation=True)
     bench.regression.failures = {bench.root: "case kv-overflow reproduced"}
 
     report = await _one(bench)
 
-    assert report is not None and report.outcome is MergeOutcome.NOT_STACKABLE and report.foundation_fix
+    assert report is not None and report.outcome is MergeOutcome.PENDING and report.foundation_fix
     assert report.reason == "the regression set failed: case kv-overflow reproduced"
     assert await bench.repo.head(INTEGRATION_BRANCH) == bench.root
 
@@ -430,7 +440,7 @@ def test_an_agentx_foundation_fix_that_breaks_a_guard_is_not_stackable() -> None
     assert reason == "a foundation fix, regressed on the integration head, refused by output_regressed"
 
 
-async def test_a_merge_measuring_no_throughput_is_not_stackable_and_merging_goes_on(
+async def test_a_merge_measuring_no_throughput_stays_pending_and_merging_goes_on(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     bench = await _bench(tmp_path)
@@ -438,7 +448,7 @@ async def test_a_merge_measuring_no_throughput_is_not_stackable_and_merging_goes
 
     report = await _one(bench)
 
-    assert report is not None and report.outcome is MergeOutcome.NOT_STACKABLE
+    assert report is not None and report.outcome is MergeOutcome.PENDING
     assert report.reason.startswith("the merge test failed: ") and "positive" in report.reason
     assert await bench.repo.head(INTEGRATION_BRANCH) == bench.root
 
@@ -456,6 +466,7 @@ async def test_a_merge_that_could_not_be_measured_is_tried_again_on_the_next_hea
 
     c1, c2 = bench.commits["c1"], bench.commits["c2"]
     assert unmeasured is not None and (unmeasured.candidate, unmeasured.onto) == (c1, bench.root)
+    assert unmeasured.outcome is MergeOutcome.PENDING and unmeasured.reason.startswith("the merge test failed")
     assert (await bench.handle(Role.OBSERVER).record(str(unmeasured.request_id))).conclusion is None
     assert merged is not None and (merged.candidate, merged.outcome) == (c2, MergeOutcome.MERGED)
     assert retried is not None and (retried.candidate, retried.onto) == (c1, merged.merged_commit)
@@ -707,7 +718,7 @@ async def test_a_merge_test_that_measures_nothing_writes_nothing_to_the_integrat
 
     report = await _one(bench)
 
-    assert report is not None and report.outcome is MergeOutcome.NOT_STACKABLE and report.request_id
+    assert report is not None and report.outcome is MergeOutcome.PENDING and report.request_id
     assert "measurement_failed" in report.reason
     assert await bench.repo.head(INTEGRATION_BRANCH) == bench.root
     assert await bench.outcome("c1") is MergeOutcome.PENDING
