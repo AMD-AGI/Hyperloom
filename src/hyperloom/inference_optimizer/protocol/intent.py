@@ -14,6 +14,8 @@ from hyperloom.common.coerce import to_int
 
 _ALERT_SEVERITIES: frozenset[str] = frozenset({"low", "medium", "high"})
 ALLOWED_VERDICTS: frozenset[str] = frozenset({"approve", "reject", "redirect", "advise", "needs_review"})
+# Body of the observation a critic turn emits when it has nothing to say.
+DEFAULT_IDLE_BODY = "ok (critic)"
 
 
 # ---------------------------------------------------------------------------
@@ -210,6 +212,7 @@ def _validate_review_verdict_payload(
 
 __all__ = [
     "ALLOWED_VERDICTS",
+    "DEFAULT_IDLE_BODY",
     "Intent",
     "IntentType",
     "IntentValidationError",

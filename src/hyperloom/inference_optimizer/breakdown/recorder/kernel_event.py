@@ -69,6 +69,7 @@ from .event_ids import event_id
 from .event_rows import group_rows, rows_for_event, sort_rows, wire_rows
 from .event_sink import make_sink
 from .event_timeline import EventHeader, finish_event, open_event
+from .kernel_gain import claimed_gain, stamp_rebench_gain
 from .kernel_records import (
     LEDGER_GEAK,
     SOURCE_FUSION,
@@ -335,10 +336,10 @@ def record_geak_attempts(*, event: str, journey: dict[str, Any] | None) -> None:
                 else None,
                 "e2e": {
                     "integrated": bool(e2e.get("integrated")),
-                    "e2e_gain_pct": _float_or_none(e2e.get("e2e_gain_pct")),
+                    "e2e_gain_pct": None,
                     "validated": e2e.get("validated") if isinstance(e2e.get("validated"), bool) else None,
                     "decision": _text(e2e.get("decision")),
-                    "self_reported_e2e_gain_pct": _float_or_none(e2e.get("self_reported_e2e_gain_pct")),
+                    "self_reported_e2e_gain_pct": claimed_gain(e2e),
                     "rejection_reason": _text(e2e.get("rejection_reason")),
                     "revalidation_measured_tput": _float_or_none(e2e.get("revalidation_measured_tput")),
                     "revalidation_current_best_tput": _float_or_none(e2e.get("revalidation_current_best_tput")),
@@ -383,7 +384,6 @@ def reject_geak_attempts(
                 **row,
                 "e2e": {
                     **e2e,
-                    "self_reported_e2e_gain_pct": e2e.get("e2e_gain_pct"),
                     "revalidation_measured_tput": measured_tput,
                     "revalidation_current_best_tput": current_best_tput,
                     "revalidation_provenance": provenance,
@@ -648,9 +648,8 @@ def _integrate_e2e(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
     """Project one kernel's integrate rows into the standing e2e sub-result.
 
     A patch can be gated more than once, so the sub-result reports the verdict
-    that stands: the last one to settle. The best gain is taken across all of
-    them, because a fault that measured nothing does not un-measure what an
-    earlier attempt did.
+    that stands: the last one to settle, with that row's own gain (``None``
+    when it measured none). Earlier measurements stay on the integrate rows.
 
     Returns:
         dict[str, Any] | None: The sub-result, or ``None`` when the kernel was
@@ -660,10 +659,10 @@ def _integrate_e2e(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
         return None
     ordered = sort_rows(rows, keys=("settled_at", "attempt_count"))
     last = ordered[-1]
-    gains = [row.get("gain_pct") for row in ordered if isinstance(row.get("gain_pct"), (int, float))]
+    gain = last.get("gain_pct")
     return {
         "integrated": str(last.get("decision") or "").upper() == "KEEP",
-        "e2e_gain_pct": max(gains) if gains else None,
+        "e2e_gain_pct": gain if isinstance(gain, (int, float)) else None,
         "validated": last.get("accuracy_pass") if isinstance(last.get("accuracy_pass"), bool) else None,
         "decision": _text(last.get("decision")),
         "patch_path": _text(last.get("patch_path")),
@@ -1781,7 +1780,7 @@ def _settle(
             row["settled_by"] = SETTLED_BY_REBENCH
             # The rebench is the instrument that measured this candidate, so
             # its delta is the gain, not whatever GEAK claimed for itself.
-            _record_gain(row, rebench.get("delta_pct"))
+            stamp_rebench_gain(row, rebench.get("delta_pct"))
             if decision == REBENCH_VALIDATED:
                 row["outcome"] = OUTCOME_ADOPTED
             elif decision in {REBENCH_NO_MATERIAL, REBENCH_NO_PROMOTE}:
