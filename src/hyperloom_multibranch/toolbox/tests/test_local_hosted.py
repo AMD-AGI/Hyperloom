@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import json
 import logging
 import os
@@ -141,6 +142,10 @@ async def test_a_runner_that_cannot_start_says_why_and_leaves_no_log_traceback(
         await toolbox.close()
 
 
+@pytest.mark.skipif(
+    importlib.util.find_spec("sglang") is not None,
+    reason="proves the wiring through the runner's import failure; with sglang installed the server fails otherwise",
+)
 async def test_the_factory_builds_a_toolbox_that_runs_a_test_end_to_end(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
