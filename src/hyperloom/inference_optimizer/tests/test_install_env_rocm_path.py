@@ -106,9 +106,7 @@ write_env_file
             wheel_root.mkdir(parents=True)
             python_stub = self._rocm_sdk_wheel_python_stub(work, wheel_root)
 
-            env_text, dotenv_text = self._run_write_env_file(
-                work, repo_root=repo_root, python_stub=python_stub
-            )
+            env_text, dotenv_text = self._run_write_env_file(work, repo_root=repo_root, python_stub=python_stub)
 
         rocm_path_line = next(
             (ln for ln in env_text.splitlines() if "export ROCM_PATH=" in ln),
@@ -149,9 +147,7 @@ write_env_file
             repo_root.mkdir()
             python_stub = self._system_rocm_python_stub(work)
 
-            env_text, dotenv_text = self._run_write_env_file(
-                work, repo_root=repo_root, python_stub=python_stub
-            )
+            env_text, dotenv_text = self._run_write_env_file(work, repo_root=repo_root, python_stub=python_stub)
 
         self.assertNotIn("ROCM_PATH", env_text)
         self.assertNotIn("ROCM_PATH", dotenv_text)
