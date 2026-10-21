@@ -56,8 +56,8 @@ from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
 from hyperloom.common.proctree import collect_tree, kill_tree
 
 from .agent_cli_config import (
-    _build_specialist_env,
     SpecialistAgentUnavailableError,
+    _build_specialist_env,
     _codex_mcp_config,
     _codex_provider_resolver_overlay,
     _write_private_codex_config,
@@ -243,29 +243,11 @@ class SpecialistSubprocessResult:
     Empty for patches merely found on disk, whose target tree is not knowable at
     collection time and must therefore still be resolved from their contents."""
 
-    usage: dict[str, Any] | None = None
-    """Token usage recovered from the agent CLI's ``process.log``. Carries the
-    four canonical counters (``input_tokens`` / ``output_tokens`` /
-    ``cache_creation_input_tokens`` / ``cache_read_input_tokens``); the two
-    ``cache_*`` may be ``None``, and the codex backend adds
-    ``reasoning_output_tokens``. ``None`` when no row carried a ``usage`` block.
-    Re-enters the unified ledger the production specialist's token spend."""
-
-    response: str | None = None
-    """Assistant reply text recovered from the same log. The prompt is held by
-    the parent; pairing it with this response lands the production specialist
-    turn in ``conversations.jsonl``. ``None`` when no response text could be
-    recovered."""
-
-    tool_calls: list[dict[str, Any]] = field(default_factory=list)
-    """Intel/tool calls (``{"tool", "query"}``) recovered from the same log
-    (WebSearch / WebFetch / pr_monitor / Bash / ...). Empty when none were made
-    or the log was missing/truncated."""
-
-    turn_usages: list[dict[str, int | None]] = field(default_factory=list)
-    """Per-turn token usage recovered from the same log so the parent can trace
-    the multi-turn subprocess as one ledger row per model turn. Empty when no
-    per-turn usage was present (parent falls back to ``usage``)."""
+    trace: AgentTrace = field(default_factory=AgentTrace)
+    """What the agent CLI's own log recorded: token usage (re-entering the
+    unified ledger the production specialist's spend), the reply text, the
+    intel/tool calls and the per-turn usage. Empty when the log was missing or
+    truncated."""
 
     error: str = ""
 
@@ -550,6 +532,8 @@ class SpecialistSubprocessDispatcher:
         )
         request.workspace.mkdir(parents=True, exist_ok=True)
         prompt_file = request.workspace / "prompt.md"
+        prompt_file.write_text(request.user_prompt, encoding="utf-8")
+        prompt_file.chmod(0o600)
         process_log = request.workspace / _PROCESS_LOG_NAME
         # Poll worktree first (prompt-advertised path), then workspace as fallback.
         done_candidates: list[Path] = []
@@ -816,22 +800,16 @@ class SpecialistSubprocessDispatcher:
             process_log_path=str(process_log),
             patches=patches,
             patch_roots=collected_patch_roots,
-            usage=trace.usage,
-            response=trace.response,
-            tool_calls=trace.tool_calls,
-            turn_usages=trace.turn_usages,
+            trace=trace,
             error=outcome["error"],
         )
 
     # Internals
     def _build_launch(self, backend: str, request: SpecialistSpawn, env: dict[str, str]) -> list[str]:
-        """Write ``prompt.md``, then build the CLI argv for ``backend``; child-only values go into ``env``.
+        """Build the CLI argv for ``backend``; child-only values go into ``env``.
 
         Codex and Claude read the user turn from ``prompt.md`` on stdin; dsh takes it as argv.
         """
-        prompt_file = request.workspace / "prompt.md"
-        prompt_file.write_text(request.user_prompt, encoding="utf-8")
-        prompt_file.chmod(0o600)
         if backend == AGENT_BACKEND_DEEPSEEK:
             dsh_request = DshLaunchRequest(
                 executable=resolve_dsh_executable(self.config.dsh_executable),
@@ -861,7 +839,7 @@ class SpecialistSubprocessDispatcher:
             env["CODEX_HOME"] = str(request.workspace / ".codex")
             return cmd
         return self._build_claude_cmd(
-            system_prompt_file=prompt_file.parent / "system_prompt.md",
+            system_prompt_file=request.workspace / "system_prompt.md",
             system_prompt=request.system_prompt,
             workspace=request.workspace,
             worktree=request.worktree,
@@ -1474,7 +1452,6 @@ class SpecialistSubprocessDispatcher:
 
 __all__ = [
     "UNBOUNDED_REAP_CAP_SEC",
-    "SpecialistAgentUnavailableError",
     "SpecialistSubprocessConfig",
     "SpecialistSubprocessDispatcher",
     "SpecialistSubprocessResult",

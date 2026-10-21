@@ -26,7 +26,6 @@ from hyperloom.orchestrator.scoring.proposal_scorer import DEFAULT_SCORER_MODELS
 
 CRITIC_PROTOCOL_CHOICES: tuple[str, ...] = ("auto", "openai", "anthropic")
 
-ORCHESTRATION_BACKEND_ENV = llm_config.ORCHESTRATION_BACKEND_ENV
 _ORCHESTRATION_ROLE = "orchestration"
 
 
@@ -45,16 +44,30 @@ def orchestration_runs_on_codex(*, codex_follows_claude: bool, claude_follows_co
 
 
 def _resolve_orchestration_backend(*, codex_follows_claude: bool, claude_follows_codex: bool = False) -> str:
-    """Pick the agent CLI that runs the orchestration role."""
-    for env_name in (ORCHESTRATION_BACKEND_ENV, llm_config.AGENT_BACKEND_ENV):
-        requested = llm_config.explicit_agent_backend(env_name=env_name)
-        if requested:
-            return requested
+    """Pick the agent CLI that runs the orchestration role, and whose side the critic reviews on."""
+    requested = llm_config.explicit_agent_backend()
+    if requested:
+        return requested
     if orchestration_runs_on_codex(
         codex_follows_claude=codex_follows_claude, claude_follows_codex=claude_follows_codex
     ):
         return llm_config.AGENT_BACKEND_CODEX
     return llm_config.AGENT_BACKEND_CLAUDE
+
+
+def critic_on_codex_side(*, codex_follows_claude: bool, claude_follows_codex: bool = False) -> bool:
+    """Whether the critic reviews on the OpenAI side, given the backend the orchestration role runs on.
+
+    The DeepSeek Harness has no side of its own, so a launch that names it keeps the side the credentials rank first.
+    """
+    backend = _resolve_orchestration_backend(
+        codex_follows_claude=codex_follows_claude, claude_follows_codex=claude_follows_codex
+    )
+    if backend == llm_config.AGENT_BACKEND_DEEPSEEK:
+        return orchestration_runs_on_codex(
+            codex_follows_claude=codex_follows_claude, claude_follows_codex=claude_follows_codex
+        )
+    return backend == llm_config.AGENT_BACKEND_CODEX
 
 
 def _resolve_critic_protocol(requested: str, *, orchestration_on_codex: bool) -> str:
@@ -169,9 +182,8 @@ def _build_backends(models: ModelRouting, critic: CriticSetup, *, session_dir: P
     if critic_choice not in ("mock", "agent"):
         raise ValueError(f"_build_backends: critic_choice={critic_choice!r} not in {{'mock','agent'}}")
 
-    # Orchestration is an agentic role like any other, so which CLI runs it is the shared rule's answer rather than a
-    # second reading of the endpoint shape.
-    orchestration_on_codex = orchestration_runs_on_codex(
+    # The critic reviews on the side the orchestration backend runs on.
+    orchestration_on_codex = critic_on_codex_side(
         codex_follows_claude=models.codex_follows_claude, claude_follows_codex=models.claude_follows_codex
     )
 

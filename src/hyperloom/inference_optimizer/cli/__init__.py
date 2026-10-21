@@ -36,7 +36,7 @@ from .backends import (
     _build_proposal_scorer,
     _orchestration_banner,
     critic_review_target,
-    orchestration_runs_on_codex,
+    critic_on_codex_side,
 )
 from .model_gate import (
     _load_model_max_position_embeddings,
@@ -824,7 +824,7 @@ def _probe_critic_review_model(
     try:
         protocol, model = critic_review_target(
             args.critic_protocol,
-            orchestration_on_codex=orchestration_runs_on_codex(
+            orchestration_on_codex=critic_on_codex_side(
                 codex_follows_claude=codex_follows_claude, claude_follows_codex=claude_follows_codex
             ),
             claude_model=args.claude_model,
@@ -2559,6 +2559,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             codex_model=args.codex_model,
             codex_follows_claude=codex_follows_claude,
             claude_follows_codex=claude_follows_codex,
+            deepseek_model=llm_config.resolve_forge_llm_model(llm_config.AGENT_BACKEND_DEEPSEEK),
         ),
         CriticSetup(
             choice=critic_choice,

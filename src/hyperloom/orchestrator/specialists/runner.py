@@ -101,7 +101,7 @@ def _worktree_source(params: dict[str, Any], *, framework_repo_path: str = "") -
 def _subprocess_call_outcome(result: SpecialistSubprocessResult) -> tuple[str, dict[str, Any]]:
     """The terminal status and attributes of a specialist subprocess's ``llm.call`` span."""
     attributes: dict[str, Any] = {
-        **llm_call_summary(result.usage),
+        **llm_call_summary(result.trace.usage),
         "exit_code": result.exit_code,
         "timed_out": result.timed_out,
     }
@@ -993,7 +993,7 @@ class SpecialistRunner:
                 "stale_heartbeat": sub_result.stale_heartbeat,
                 "process_log_path": sub_result.process_log_path,
                 "patch_count": len(sub_result.patches),
-                "usage": sub_result.usage,
+                "usage": sub_result.trace.usage,
                 "error": sub_result.error,
             },
         )
@@ -1007,13 +1007,13 @@ class SpecialistRunner:
         _tick, _phase = self._ctx_tick_phase(ctx)
         # Prefer per-turn token rows when available; whole-session latency lands
         # on the final turn. Fall back to a single cumulative turn=1 row.
-        turn_usages = list(sub_result.turn_usages or [])
+        turn_usages = list(sub_result.trace.turn_usages or [])
         if len(turn_usages) > 1:
             last_idx = len(turn_usages) - 1
             for i, tu in enumerate(turn_usages):
                 md: dict[str, Any] = {**tu, "call_id": call_id}
-                if sub_result.usage and sub_result.usage.get("model"):
-                    md.setdefault("model", sub_result.usage.get("model"))
+                if sub_result.trace.usage and sub_result.trace.usage.get("model"):
+                    md.setdefault("model", sub_result.trace.usage.get("model"))
                 self._trace_specialist_llm_call(
                     ctx, turn=i + 1, metadata=md, latency_ms=_sub_latency_ms if i == last_idx else None
                 )
@@ -1021,25 +1021,25 @@ class SpecialistRunner:
             self._trace_specialist_llm_call(
                 ctx,
                 turn=1,
-                metadata={**sub_result.usage, "call_id": call_id} if sub_result.usage else None,
+                metadata={**sub_result.trace.usage, "call_id": call_id} if sub_result.trace.usage else None,
                 latency_ms=_sub_latency_ms,
             )
         # Persist the tool/intel calls the specialist made, backfilled as spans.
         self._record_specialist_intel(
             task_id=ctx.task.task_id,
             turn=1,
-            tool_calls=sub_result.tool_calls,
+            tool_calls=sub_result.trace.tool_calls,
         )
         # Pair the parent-held prompt with the recovered assistant reply so the
         # production specialist turn lands in conversations.jsonl. No-op when no
         # reply text was recovered.
-        if sub_result.response:
+        if sub_result.trace.response:
             self._record_specialist_conversation(
                 task_id=ctx.task.task_id,
                 turn=1,
                 metadata={
                     "prompt": (prep.system_prompt + "\n---\n" + prep.user_prompt),
-                    "response": sub_result.response,
+                    "response": sub_result.trace.response,
                 },
                 tick=_tick,
                 phase=_phase,

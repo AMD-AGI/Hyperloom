@@ -18,6 +18,7 @@ from typing import Any, Optional
 
 import click
 
+from hyperloom.common.llm_config import AGENT_BACKEND_CHOICES
 from kernelforge.llm.git import git
 from kernelforge.option_groups import option_group
 
@@ -78,8 +79,7 @@ log = logging.getLogger("forge_fusion")
 
 # Exit code for "the run never reached the model".
 EXIT_LLM_UNAVAILABLE = 3
-# Exit code for "infrastructure failure before fusion was attempted": no git workspace, harness could not be authored,
-# etc.
+# Exit code for "infrastructure failure before fusion was attempted" (no git workspace, harness not authored, etc.).
 EXIT_INFRASTRUCTURE_FAILURE = 4
 
 
@@ -746,7 +746,7 @@ class FuseRequest:
         FuseAgentOptions,
         click.option(
             "--agent-backend",
-            type=click.Choice(["auto", "claude", "codex", "deepseek"]),
+            type=click.Choice(["auto", *AGENT_BACKEND_CHOICES]),
             default="auto",
             show_default=True,
             help="Registered Agent provider for discovery and authoring.",
