@@ -89,6 +89,9 @@ _GEAK_MEASUREMENT_DIVERGENCE_WARN_PCT: float = 3.0
 
 _GEAK_RUNNER_MODULE = "hyperloom.orchestrator.kernel.geak_runner"
 
+# What the phase, not the Controller subprocess, decides about a rewrite-controller attempt.
+_CONTROLLER_ATTEMPT_FACTS = ("macro_cycle", "handoff_dir", "budget_minutes", "hard_timeout_sec")
+
 # How long the GEAK handoff waits for the servers it stopped to release their VRAM.
 _GEAK_GPU_FREE_WAIT_SEC: float = 120.0
 
@@ -813,6 +816,13 @@ class KernelPhase(CoordinatorCollaborator):
         recorder = self.timeline()
         if recorder is None:
             return
+        try:
+            self._record_gemm_tuner_rows(recorder, result)
+        except Exception:
+            log.debug("kernel timeline: GEMM tuning record failed", exc_info=True)
+
+    def _record_gemm_tuner_rows(self, recorder: Any, result: dict[str, Any]) -> None:
+        """Write one timeline row per tuner the campaign ran, and the campaign's own tool version."""
         tuner_rows = [row for row in result.get("tuners_run") or [] if isinstance(row, dict)]
         shape_capture = result.get("shape_capture") or {}
         base_run_id = (
@@ -821,39 +831,47 @@ class KernelPhase(CoordinatorCollaborator):
             or f"gemm-c{int(self.shared_state.macro_cycle or 0)}"
         )
         tuned_file = _first_text(result, "tuned_file", "config_path")
-        try:
-            # Without per-tuner rows the campaign itself is the one row.
-            for row in tuner_rows or [result]:
-                tuner_name = _first_text(row, "tuner")
-                # The campaign's e2e-validated gain names the axis the KEEP was graded on; it
-                # belongs on the tuner whose artifact was actually applied, not on every row
-                # this cycle produced.
-                artifact = _first_text(row, "artifact", "env_value")
-                applied = not tuner_rows or artifact == tuned_file != ""
-                recorder.record_gemm_tuning_run(
-                    run_id=f"{base_run_id}-{tuner_name}" if tuner_name else base_run_id,
-                    status=_first_text(row, "status", default=_first_text(result, "status", default="unknown")),
-                    shapes_total=row.get("total_shapes", result.get("shapes_total", shape_capture.get("shape_count"))),
-                    shapes_tuned=row.get("improved_shapes", row.get("shapes_tuned")),
-                    config_path=artifact or ("" if tuner_rows else tuned_file),
-                    # _validate_gemm_tuning_e2e writes the validated gain to e2e_gain_pct, not
-                    # gain_pct -- no producer on this path sets a bare "gain_pct" key.
-                    gain_pct=result.get("e2e_gain_pct") if applied else None,
-                    graded_objective=_first_text(result, "graded_objective") if applied else "",
-                    tuner=tuner_name,
-                    micro_decision=_first_text(result, "micro_decision", "decision"),
-                    integrate_ref=_first_text(result, "integration_id"),
-                    started_at=_first_text(result, "started_at"),
-                    ended_at=_first_text(result, "ended_at", "ts"),
-                    duration_sec=row.get("elapsed_s", result.get("duration_sec")),
-                    error_class=_first_text(row, "error_class"),
-                    failure_reason=_first_text(row, "error", "skip_reason", "error_class"),
-                )
-            backend = _first_text(result, "backend", "engine").lower()
-            if backend:
-                tool_versions.record_tool_version(self.session_dir, tool=backend)
-        except Exception:
-            log.debug("kernel timeline: GEMM tuning record failed", exc_info=True)
+        # Without per-tuner rows the campaign itself is the one row. It names these facts the way the campaign
+        # envelope does, so it enters the loop under the per-tuner names and every field keeps its own source.
+        campaign_row = {
+            "tuner": _first_text(result, "tuner"),
+            "status": _first_text(result, "status", default="unknown"),
+            "total_shapes": result.get("shapes_total", shape_capture.get("shape_count")),
+            "improved_shapes": result.get("shapes_tuned"),
+            "artifact": tuned_file,
+            "elapsed_s": result.get("duration_sec"),
+            "error_class": _first_text(result, "error_class"),
+            "error": _first_text(result, "error", "skip_reason", "error_class"),
+        }
+        for row in tuner_rows or [campaign_row]:
+            tuner_name = _first_text(row, "tuner")
+            # The campaign's e2e-validated gain names the axis the KEEP was graded on; it
+            # belongs on the tuner whose artifact was actually applied, not on every row
+            # this cycle produced.
+            artifact = _first_text(row, "artifact", "env_value")
+            applied = not tuner_rows or artifact == tuned_file != ""
+            recorder.record_gemm_tuning_run(
+                run_id=f"{base_run_id}-{tuner_name}" if tuner_rows and tuner_name else base_run_id,
+                status=_first_text(row, "status", default=_first_text(result, "status", default="unknown")),
+                shapes_total=row.get("total_shapes", result.get("shapes_total", shape_capture.get("shape_count"))),
+                shapes_tuned=row.get("improved_shapes"),
+                config_path=artifact,
+                # _validate_gemm_tuning_e2e writes the validated gain to e2e_gain_pct, not
+                # gain_pct -- no producer on this path sets a bare "gain_pct" key.
+                gain_pct=result.get("e2e_gain_pct") if applied else None,
+                graded_objective=_first_text(result, "graded_objective") if applied else "",
+                tuner=tuner_name,
+                micro_decision=_first_text(result, "micro_decision", "decision"),
+                integrate_ref=_first_text(result, "integration_id"),
+                started_at=_first_text(result, "started_at"),
+                ended_at=_first_text(result, "ended_at", "ts"),
+                duration_sec=row.get("elapsed_s", result.get("duration_sec")),
+                error_class=_first_text(row, "error_class"),
+                failure_reason=_first_text(row, "error", "skip_reason", "error_class"),
+            )
+        backend = _first_text(result, "backend", "engine").lower()
+        if backend:
+            tool_versions.record_tool_version(self.session_dir, tool=backend)
 
     def _record_fusion_timeline(self, result: dict[str, Any]) -> None:
         """Record a settled fusion campaign in the Forge lane."""
@@ -1708,8 +1726,6 @@ class KernelPhase(CoordinatorCollaborator):
                     "error": f"runner rc={proc.returncode} produced no parseable result.json at {result_path}",
                     "stderr_tail": stderr_tail,
                     "returncode": proc.returncode,
-                    "runner_timeout_s": facts.runner_timeout_sec,
-                    "kill_timeout_s": facts.kill_timeout_sec,
                 },
                 handoff=handoff,
                 facts=facts,
@@ -1727,7 +1743,6 @@ class KernelPhase(CoordinatorCollaborator):
                     "stderr_tail": stderr_tail,
                 },
                 handoff=handoff,
-                facts=facts,
             )
             return None
         # Carry the actual exit code so the breakdown can audit a nonzero rc. Nothing else is added: the persisted
@@ -2363,11 +2378,11 @@ class KernelPhase(CoordinatorCollaborator):
         measured: float,
         provenance: str,
         overlay_loaded: bool | None,
+        pre_geak_tput: float,
     ) -> None:
         base = float(self.shared_state.baseline_tput or 0.0)
-        # Where the session stood before GEAK ran: the anchor both the journey rejection and the route-level residual
-        # measure from.
-        cb_tput = _as_float(self.shared_state.current_best.get("tput"), 0.0)
+        # ``pre_geak_tput`` is read before the lift, which overwrites ``current_best`` with ``measured``: the journey
+        # rejection and the route-level residual both measure from where the session stood before GEAK ran.
         self.record_geak_adopted_kernels(
             result,
             measured_tput=measured,
@@ -2381,7 +2396,7 @@ class KernelPhase(CoordinatorCollaborator):
             self.reject_geak_kernel_journey(
                 result,
                 measured_tput=measured,
-                current_best_tput=cb_tput if cb_tput > 0 else base,
+                current_best_tput=pre_geak_tput if pre_geak_tput > 0 else base,
                 provenance=provenance,
                 rejection_reason="overlay_not_proven_loaded",
             )
@@ -2398,9 +2413,13 @@ class KernelPhase(CoordinatorCollaborator):
         measurement_provenance: Mapping[str, Any] | None = None,
     ) -> bool:
         """Promote a measured GEAK candidate and return whether the lift succeeded."""
+        if not isinstance(result, dict):
+            return False
         measured = _as_float(measured_tput, 0.0)
         if measured <= 0:
             return False
+        # Read before the lift overwrites ``current_best``; see :meth:`_settle_geak_lift`.
+        pre_geak_tput = _as_float(self.shared_state.current_best.get("tput"), 0.0)
         try:
             accepted_flags, parsed_envs = _accepted_config_as_variant(result.get("accepted_config"))
         except ValueError as exc:
@@ -2431,12 +2450,17 @@ class KernelPhase(CoordinatorCollaborator):
             self.reject_geak_promotion(
                 result,
                 measured_tput=measured,
-                current_best_tput=_as_float(self.shared_state.current_best.get("tput"), 0.0),
+                current_best_tput=pre_geak_tput,
                 reason="graded_comparison_rejected",
             )
             return False
         self._settle_geak_lift(
-            result, graded_measurement, measured=measured, provenance=provenance, overlay_loaded=overlay_loaded
+            result,
+            graded_measurement,
+            measured=measured,
+            provenance=provenance,
+            overlay_loaded=overlay_loaded,
+            pre_geak_tput=pre_geak_tput,
         )
         return True
 
@@ -3777,7 +3801,9 @@ class KernelPhase(CoordinatorCollaborator):
         except Exception as error:
             log.exception("KERNEL entry: kernel rewrite controller failed")
             return {**attempt, "status": "failed", "reason": f"controller invocation failed: {error}"}
-        return {**attempt, **result, "macro_cycle": attempt["macro_cycle"], "handoff_dir": attempt["handoff_dir"]}
+        # The four facts the phase owns are re-pinned over the child's own output: the Controller writes
+        # ``state.json`` itself and must not be able to report a budget other than the one it was given.
+        return {**attempt, **result, **{key: attempt[key] for key in _CONTROLLER_ATTEMPT_FACTS}}
 
     async def _integrate_controller_output(self, result: dict[str, Any], output_dir: Path) -> None:
         if int(result.get("patch_count") or 0) <= 0:
