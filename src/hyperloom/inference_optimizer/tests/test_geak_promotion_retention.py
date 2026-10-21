@@ -334,7 +334,8 @@ async def test_terminal_rejection_cannot_attribute_geak_claims(
     assert before["decision"] == "KEEP"
     assert before["validated"] is True
     assert before["integrated"] is True
-    assert before["e2e_gain_pct"] == 50.0
+    assert before["e2e_gain_pct"] is None
+    assert before["self_reported_e2e_gain_pct"] == 50.0
     if journey_missing:
         Path(result["kernel_journey_path"]).unlink()
     if closed:

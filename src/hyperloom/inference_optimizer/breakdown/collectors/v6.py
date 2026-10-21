@@ -92,9 +92,7 @@ def collect_v6_metadata(sources: MetadataSources, *, exported_at_utc: str, warni
     Returns:
         The ``metadata`` section.
     """
-    session, workload, state = sources.session, sources.workload, sources.state
-    recovery = session.get("recovery") if isinstance(session.get("recovery"), dict) else {}
-    image = str(session.get("image") or "").strip()
+    workload, state = sources.workload, sources.state
     task_config = {
         "model_name": str(workload.get("model_name") or ""),
         "model_path": str(workload.get("model_path") or ""),
@@ -119,40 +117,14 @@ def collect_v6_metadata(sources: MetadataSources, *, exported_at_utc: str, warni
         task_config["workload_signature"] = signature
     projected = {
         "versions": {
-            "framework": str(workload.get("framework_name") or "") or None,
-            "framework_version": str(workload.get("framework_version") or "") or None,
+            "framework": task_config["framework_name"] or None,
+            "framework_version": task_config["framework_version"] or None,
             # Probed per tool the moment it is first used and written straight
             # into the recorded ``metadata`` singleton, so there is nothing to
             # re-derive here: the overlay supplies the whole map.
             "tools": {},
         },
-        "session": {
-            "session_id": str(session.get("session_id") or ""),
-            "claw_session_id": session.get("claw_session_id"),
-            "sandbox_user_id": session.get("sandbox_user_id"),
-            "created_at_utc": str(session.get("created_at_utc") or ""),
-            "start_ts": str(session.get("start_ts") or ""),
-            "ended_at_utc": str(session.get("ended_at_utc") or ""),
-            "host": str(session.get("host") or ""),
-            "session_dir": str(session.get("session_dir") or ""),
-            "user_data_path": str(session.get("user_data_path") or ""),
-            "code_revision": str(session.get("code_revision") or ""),
-            "pid": int(session.get("pid") or 0),
-            "image": image or None,
-            "image_id": (image.split("/")[-1] or None) if image else None,
-            "max_minutes": int(session.get("max_minutes") or 0),
-            "elapsed_minutes": float(session.get("elapsed_minutes") or 0.0),
-            "total_elapsed_minutes": _projected_total_elapsed_minutes(session, state),
-            "tick_count": int(session.get("tick_count") or 0),
-            "recovery": {
-                "recovered": bool(recovery.get("recovered")),
-                "crash_count": int(recovery.get("crash_count") or 0),
-                "crash_timestamps": list(recovery.get("crash_timestamps") or []),
-                "degraded_mode": bool(recovery.get("degraded_mode")),
-                "resume_pending_revalidation": bool(recovery.get("resume_pending_revalidation")),
-                "last_tick_exception": recovery.get("last_tick_exception"),
-            },
-        },
+        "session": _session_block(sources.session, state),
         "task_config": task_config,
         "langfuse": langfuse_block(sources.langfuse),
     }
@@ -162,6 +134,39 @@ def collect_v6_metadata(sources: MetadataSources, *, exported_at_utc: str, warni
     metadata = _overlay_recorded(projected, sources.recorded)
     _mask_launch_env(metadata)
     return {"exported_at_utc": exported_at_utc, **metadata, "warnings": list(warnings)}
+
+
+def _session_block(session: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+    """The ``metadata.session`` block, with ``state`` read for the minutes charged across every leg."""
+    recovery = _mapping(session.get("recovery"))
+    image = str(session.get("image") or "").strip()
+    return {
+        "session_id": str(session.get("session_id") or ""),
+        "claw_session_id": session.get("claw_session_id"),
+        "sandbox_user_id": session.get("sandbox_user_id"),
+        "created_at_utc": str(session.get("created_at_utc") or ""),
+        "start_ts": str(session.get("start_ts") or ""),
+        "ended_at_utc": str(session.get("ended_at_utc") or ""),
+        "host": str(session.get("host") or ""),
+        "session_dir": str(session.get("session_dir") or ""),
+        "user_data_path": str(session.get("user_data_path") or ""),
+        "code_revision": str(session.get("code_revision") or ""),
+        "pid": int(session.get("pid") or 0),
+        "image": image or None,
+        "image_id": image.split("/")[-1] or None,
+        "max_minutes": int(session.get("max_minutes") or 0),
+        "elapsed_minutes": float(session.get("elapsed_minutes") or 0.0),
+        "total_elapsed_minutes": _projected_total_elapsed_minutes(session, state),
+        "tick_count": int(session.get("tick_count") or 0),
+        "recovery": {
+            "recovered": bool(recovery.get("recovered")),
+            "crash_count": int(recovery.get("crash_count") or 0),
+            "crash_timestamps": list(recovery.get("crash_timestamps") or []),
+            "degraded_mode": bool(recovery.get("degraded_mode")),
+            "resume_pending_revalidation": bool(recovery.get("resume_pending_revalidation")),
+            "last_tick_exception": recovery.get("last_tick_exception"),
+        },
+    }
 
 
 def _mask_launch_env(metadata: dict[str, Any]) -> None:
@@ -398,7 +403,7 @@ def _graded_axes(recorded: Any) -> dict[str, Any]:
     return {key: _optional_float(source.get(key)) for key in GRADED_AXIS_KEYS}
 
 
-def _baseline_from_timeline(timeline: list[dict[str, Any]], source_ids: list[str] | None = None) -> dict[str, Any]:
+def _baseline_from_timeline(timeline: list[dict[str, Any]], source_ids: list[str]) -> dict[str, Any]:
     """Read the session's anchoring baseline off the ``baseline`` events.
 
     Two dispatches reach the baseline executor and land an action on a
@@ -442,7 +447,7 @@ def _baseline_from_timeline(timeline: list[dict[str, Any]], source_ids: list[str
             "submission_invalid_reasons": [],
         }
     anchors.sort(key=lambda row: row[0])
-    if source_ids is not None and anchors[-1][2]:
+    if anchors[-1][2]:
         source_ids.append(anchors[-1][2])
     measurement = _mapping(anchors[-1][1].get("measurement"))
     submission_valid = measurement.get("submission_valid")
@@ -459,7 +464,7 @@ def _baseline_from_timeline(timeline: list[dict[str, Any]], source_ids: list[str
     }
 
 
-def _validation_from_timeline(timeline: list[dict[str, Any]], source_ids: list[str] | None = None) -> dict[str, Any]:
+def _validation_from_timeline(timeline: list[dict[str, Any]], source_ids: list[str]) -> dict[str, Any]:
     """Read the session's gain attribution off the ``stack`` ledger event.
 
     Every figure here is read, not computed: the ledger event's ``ext`` was
@@ -483,25 +488,9 @@ def _validation_from_timeline(timeline: list[dict[str, Any]], source_ids: list[s
     for event in timeline:
         if isinstance(event, dict) and str(event.get("type") or "") == "stack":
             ledger = _mapping(event.get("ext"))
-            if source_ids is not None:
-                source_ids[:] = [str(event["id"])] if event.get("id") else []
+            source_ids[:] = [str(event["id"])] if event.get("id") else []
     available = bool(ledger)
-    buckets = _mapping(_mapping(ledger.get("adoptions")).get("by_source"))
-
-    def _bucket(*names: str) -> dict[str, Any]:
-        rows = [_mapping(buckets.get(name)) for name in names]
-        return {
-            "total_gain_pct": (
-                round(sum(_optional_float(row.get("total_gain_pct")) or 0.0 for row in rows), 6) if available else None
-            ),
-            "keep_count": sum(_optional_int(row.get("count")) or 0 for row in rows),
-            # Adoptions in this bucket whose contribution could not be measured
-            # at all. Zero of these is what makes ``total_gain_pct`` a complete
-            # account of the bucket rather than a lower bound.
-            "unmeasured_keep_count": sum(_optional_int(row.get("unmeasured")) or 0 for row in rows),
-        }
-
-    kernel_backends = _mapping(_mapping(buckets.get("kernel")).get("by_backend"))
+    adoptions = _mapping(ledger.get("adoptions"))
     validations = _mapping(ledger.get("validations"))
     settled = _mapping(validations.get("settled"))
     return {
@@ -514,14 +503,14 @@ def _validation_from_timeline(timeline: list[dict[str, Any]], source_ids: list[s
         # The settled measurement's own axes, carried beside the gain they produced rather than read off
         # ``current_best``: a revalidation moves the cumulative figure without re-promoting the recipe.
         "perf": _graded_axes(settled.get("perf")),
-        "attributed_gain_pct": _optional_float(ledger.get("attributed_gain_pct")) or 0.0,
+        "attributed_gain_pct": _optional_float(ledger.get("attributed_gain_pct")),
         "attributed_gain_pct_excluding_fixes": _optional_float(ledger.get("attributed_gain_pct_excluding_fixes")),
-        "by_keep_reason": dict(_mapping(_mapping(ledger.get("adoptions")).get("by_keep_reason"))),
-        "unattributed_gain_pct": _optional_float(ledger.get("unattributed_gain_pct")) or 0.0,
+        "by_keep_reason": dict(_mapping(adoptions.get("by_keep_reason"))),
+        "unattributed_gain_pct": _optional_float(ledger.get("unattributed_gain_pct")),
         "reconciliation_gap_pct": _optional_float(ledger.get("reconciliation_gap_pct")),
         "validated_total_gain_pct": _optional_float(ledger.get("validated_total_gain_pct")),
         "chain_total_gain_pct": _optional_float(ledger.get("chain_total_gain_pct")),
-        "adoption_count": _optional_int(_mapping(ledger.get("adoptions")).get("count")) or 0,
+        "adoption_count": _optional_int(adoptions.get("count")) or 0,
         # Which stack the settled figure was measured on, and when. Both are
         # read off the validation row that produced the figure rather than
         # inferred from the stack's length at export.
@@ -540,24 +529,44 @@ def _validation_from_timeline(timeline: list[dict[str, Any]], source_ids: list[s
         # no ledger, which is not the same as a stack that outran its
         # validation, so the negation is only taken when the ledger exists.
         "stack_changed_after_validation": (not bool(validations.get("at_head")) if available else False),
-        "attribution": {
-            "available": available,
-            "by_source": {
-                "warm_replay": _bucket("warm_replay"),
-                # V6 folds the old Explore phase into Framework Agent, so the
-                # two ledger buckets are combined at this boundary.
-                "framework_agent": _bucket("framework_agent", "explore"),
-                "kernel": {
-                    **_bucket("kernel"),
-                    "by_backend": {
-                        "geak": _bucket_of(kernel_backends, "geak", available),
-                        "forge": _bucket_of(kernel_backends, "forge", available),
-                    },
+        "attribution": _attribution(_mapping(adoptions.get("by_source")), available),
+        "guards": dict(_mapping(ledger.get("guards"))),
+        "notes": _validation_notes(ledger),
+    }
+
+
+def _attribution(buckets: dict[str, Any], available: bool) -> dict[str, Any]:
+    """The ledger's adoptions by source, the kernel source by backend; ``available`` says the ledger exists."""
+
+    def _bucket(*names: str) -> dict[str, Any]:
+        rows = [_mapping(buckets.get(name)) for name in names]
+        return {
+            "total_gain_pct": (
+                round(sum(_optional_float(row.get("total_gain_pct")) or 0.0 for row in rows), 6) if available else None
+            ),
+            "keep_count": sum(_optional_int(row.get("count")) or 0 for row in rows),
+            # Adoptions in this bucket whose contribution could not be measured
+            # at all. Zero of these is what makes ``total_gain_pct`` a complete
+            # account of the bucket rather than a lower bound.
+            "unmeasured_keep_count": sum(_optional_int(row.get("unmeasured")) or 0 for row in rows),
+        }
+
+    kernel_backends = _mapping(_mapping(buckets.get("kernel")).get("by_backend"))
+    return {
+        "available": available,
+        "by_source": {
+            "warm_replay": _bucket("warm_replay"),
+            # V6 folds the old Explore phase into Framework Agent, so the
+            # two ledger buckets are combined at this boundary.
+            "framework_agent": _bucket("framework_agent", "explore"),
+            "kernel": {
+                **_bucket("kernel"),
+                "by_backend": {
+                    "geak": _bucket_of(kernel_backends, "geak", available),
+                    "forge": _bucket_of(kernel_backends, "forge", available),
                 },
             },
         },
-        "guards": dict(_mapping(ledger.get("guards"))),
-        "notes": _validation_notes(ledger),
     }
 
 
