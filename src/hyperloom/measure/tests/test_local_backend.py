@@ -1340,3 +1340,52 @@ def test_a_failed_round_is_classified_from_the_refused_request_in_its_benchmark_
     outcome = _run(_call(tmp_path))
 
     assert (outcome.failure_class, outcome.failure_reason) == ("unclear", f"lm_eval_http_400: WARNING {refusal}")
+
+
+# What a graded test whose evaluation was refused left on a real SGLang 0.5 server (``--context-length 400``, Qwen3-8B):
+# the benchmark served its whole protocol, so run_grid kept the round ``succeeded`` with the evaluation's exit code.
+_REFUSED_REQUEST = (
+    "2026-10-21:06:27:25 WARNING  [models.api_models:521] API request failed! Status code: 400, Response text: "
+    '{"object":"error","message":"The input (1392 tokens) is longer than the model\'s context length (400 tokens).",'
+    '"type":"BadRequestError","param":null,"code":400}. Retrying...'
+)
+_SESSION_CLOSED = """\
+Task exception was never retrieved
+future: <Task finished name='Task-121' coro=<tqdm_asyncio.gather.<locals>.wrap_awaitable() done, defined at /opt/venv/lib/python3.10/site-packages/tqdm/asyncio.py:75> exception=RuntimeError('Session is closed')>
+Traceback (most recent call last):
+  File "/opt/venv/lib/python3.10/site-packages/lm_eval/models/api_models.py", line 514, in amodel_call
+    async with session.post(
+  File "/opt/venv/lib/python3.10/site-packages/aiohttp/client.py", line 1756, in __aenter__
+    self._resp: _RetType_co = await self._coro
+  File "/opt/venv/lib/python3.10/site-packages/aiohttp/client.py", line 615, in _request
+    raise RuntimeError("Session is closed")
+RuntimeError: Session is closed
+"""
+_ACCESS_400 = '[2026-10-21 06:27:25] INFO:     127.0.0.1:58342 - "POST /v1/completions HTTP/1.1" 400 Bad Request\n'
+
+
+def test_an_evaluation_that_fails_after_a_whole_protocol_is_classified_from_the_logs_it_wrote(grid, server, tmp_path):
+    workspace = tmp_path / "ws" / "warmup"
+    workspace.mkdir(parents=True)
+    (workspace / "server.log").write_text(_ACCESS_400 * 4, encoding="utf-8")
+    (workspace / "benchmark_stderr.log").write_text(_REFUSED_REQUEST + "\n" + _SESSION_CLOSED * 38, encoding="utf-8")
+    (workspace / "eval_returncode").write_text("1", encoding="utf-8")
+    grid.answers.update(
+        warmup=grid.result(
+            "warmup",
+            returncode=1,
+            output_throughput=1111.0,
+            error=_SESSION_CLOSED * 2,
+            server_log_path=str(workspace / "server.log"),
+            nonfatal_warnings=["nonzero_rc_after_complete_protocol:1"],
+        ),
+        test=grid.result("test"),
+    )
+
+    outcome = _run(_graded_call(tmp_path))
+
+    assert [(r.phase, r.returncode) for r in outcome.rounds] == [("warmup", 1), ("accuracy", 1), ("measure", 0)]
+    assert (outcome.returncode, outcome.failure_class) == (1, "unclear")
+    reason = outcome.failure_reason or ""
+    assert reason.startswith("lm_eval_http_400: "), "the refusal, not the session the client closed after it"
+    assert "longer than the model's context length (400 tokens)" in reason

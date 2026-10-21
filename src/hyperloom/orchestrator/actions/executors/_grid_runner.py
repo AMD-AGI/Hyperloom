@@ -1932,7 +1932,7 @@ def _measurement_server_log_path(
         return direct
     warmup_dir = owning_slot / "warmup_round"
     try:
-        candidates = [path for path in warmup_dir.glob("*/server.log") if path.is_file()]
+        candidates = [p for d in (owning_slot, warmup_dir) for p in d.glob("*/server.log") if p.is_file()]
     except OSError:
         candidates = []
     if not candidates:

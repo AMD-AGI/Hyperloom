@@ -827,15 +827,15 @@ def _clean_returncode(run: _Run) -> int:
     return HOSTED_INFRA_FAILURE_RC if run.case_failed else int(run.traceless)
 
 
-def _failure_logs(run: _Run) -> list[str]:
-    """The tails of the server log and of the benchmark's own stderr of every failed round.
+def _failure_logs(failing: list[VariantResult]) -> list[str]:
+    """The tails of the server log and of the benchmark's own stderr of every result with a failed round.
 
     The launcher's pipe seldom holds the cause: the server prints a refused flag or a crash into ``server.log``, and the
     evaluation client prints a refused request into ``benchmark_stderr.log``.
     """
     logs: list[str] = []
-    for _, result in run.results:
-        if not _is_failure(result) or not result.server_log_path:
+    for result in failing:
+        if not result.server_log_path:
             continue
         beside = Path(result.server_log_path).parent
         stderr_logs = [beside / _BENCHMARK_STDERR, *sorted(beside.glob(f"benchmark_*/{_BENCHMARK_STDERR}"))]
@@ -843,11 +843,11 @@ def _failure_logs(run: _Run) -> list[str]:
     return logs
 
 
-def _boot_timeout_detail(run: _Run) -> str:
+def _boot_timeout_detail(run: _Run, failing: list[VariantResult]) -> str:
     """What the boot guard saw when it ended the test, or ``""`` when it did not: the limit, and where the log stopped."""
     if run.boot is None or run.boot.expired_after is None or run.stopped_rc != ORCHESTRATOR_CANCELLED_RETURNCODE:
         return ""
-    logs = [_read_tail(result.server_log_path) for _, result in run.results if _is_failure(result)]
+    logs = [_read_tail(result.server_log_path) for result in failing]
     ends = log_causes.last_line(next((text for text in logs if text), ""))
     detail = f"the server was not ready within {run.boot.expired_after:.0f}s of the {run.call.timeout_sec:.0f}s a round may take"
     return f"{detail}; its log ends: {ends}" if ends else detail
@@ -857,8 +857,12 @@ def _outcome(run: _Run) -> TestOutcome:
     from hyperloom.measure.failures import Disposition, classify_test_failure
 
     call = run.call
-    rounds = [r for point, result in run.results for r in _rounds(run, point, result)]
-    detail = _boot_timeout_detail(run)
+    by_result = [(result, _rounds(run, point, result)) for point, result in run.results]
+    rounds = [r for _, of_result in by_result for r in of_result]
+    # A benchmark that served its whole protocol keeps its status when its evaluation fails, so a round's own return
+    # code, not its status, says whose logs hold the cause.
+    failing = [result for result, of_result in by_result if any(r.returncode != 0 for r in of_result)]
+    detail = _boot_timeout_detail(run, failing)
     if detail:
         # The guard ended the round by cancelling it; the cancellation is the symptom, the slow boot the failure.
         rounds = [
@@ -869,7 +873,7 @@ def _outcome(run: _Run) -> TestOutcome:
     failed = [r for r in rounds if r.returncode != 0]
     returncode = failed[0].returncode if failed else _clean_returncode(run)
     stderr = "\n".join([*(result.error for _, result in run.results if result.error), *run.notes])
-    logs = [stderr, *_failure_logs(run)]
+    logs = [stderr, *_failure_logs(failing)]
     verdict = classify_test_failure(returncode=returncode, logs=logs, detail=detail)
     summary = [
         {"point": p, "name": r.name, "status": r.status, "returncode": r.returncode, "error_class": r.error_class}
