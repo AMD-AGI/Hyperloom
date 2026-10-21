@@ -462,16 +462,20 @@ def resolve_gpu_power_settings(
                 "read, and an unverifiable assertion is not a satisfied one"
             )
         return {}, ""
+    # The node's settings need neither the cards' reading nor the mask, so only a card declaration refuses without them.
+    cards_declared = any(declared_settings.as_row().values())
     try:
         observed = (read or read_gpu_power_settings)()
     except GpuPowerSettingsError as exc:
-        if declared:
+        if cards_declared:
             return {_DECLARED: declared}, f"the declared GPU power settings cannot be checked: {exc}"
-        return {}, ""
+        if not declared:
+            return {}, ""
+        observed = {}
     try:
         gpus = visible_gpu_indices()
     except GpuPowerSettingsError as exc:
-        if declared:
+        if cards_declared:
             return {_DECLARED: declared}, f"the declared GPU power settings cannot be checked: {exc}"
         gpus = None
     record = {
@@ -487,19 +491,18 @@ def resolve_gpu_power_settings(
     node, node_problems = _node_power_settings(read_node, declared_settings)
     if node is not None:
         record["node"] = node
-    if problems:
-        why = (
-            "the GPUs did not take the power settings just applied"
-            if just_applied
-            else "the GPUs are not at the declared power settings (set them with amd-smi before launch)"
-        )
-        return record, f"{why}: " + "; ".join(problems + node_problems)
+    why = (
+        "the GPUs did not take the power settings just applied"
+        if just_applied
+        else "the GPUs are not at the declared power settings (set them with amd-smi before launch)"
+    )
+    errors = [f"{why}: " + "; ".join(problems)] if problems else []
     if node_problems:
-        return record, (
+        errors.append(
             "the node is not at the declared power management settings (NPM is set on the BMC): "
             + "; ".join(node_problems)
         )
-    return record, ""
+    return record, "; ".join(errors)
 
 
 def _build_agentx_corpus_shape_seed() -> dict[str, Any]:

@@ -158,8 +158,20 @@ class TestResolve:
 
     def test_card_and_node_mismatches_are_reported_together(self, monkeypatch):
         _, error = self._resolve(monkeypatch, power_cap_w=1000.0, npm="disabled")
-        assert error.startswith("the GPUs are not at the declared power settings")
-        assert "GPU 0 power cap is 1400.0 W" in error
+        assert error == (
+            "the GPUs are not at the declared power settings (set them with amd-smi before launch): GPU 0 power cap is "
+            "1400.0 W, declared 1000 W; the node is not at the declared power management settings (NPM is set on the "
+            "BMC): node power management is 'enabled', declared 'disabled'"
+        )
+
+    def test_a_node_declaration_needs_neither_the_card_reading_nor_the_mask(self, monkeypatch):
+        def _unreadable():
+            raise GpuPowerSettingsError("amd-smi static --limit exited 1")
+
+        record, error = self._resolve(monkeypatch, npm="enabled", read=_unreadable)
+        assert (error, record["node"]["npm"]) == ("", "enabled")
+        monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "GPU-745a0e162570d044")
+        _, error = self._resolve(monkeypatch, npm="disabled")
         assert "node power management is 'enabled', declared 'disabled'" in error
 
     def test_a_multi_node_npm_declaration_refuses(self, monkeypatch):
