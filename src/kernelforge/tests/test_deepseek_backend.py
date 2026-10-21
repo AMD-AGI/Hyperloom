@@ -503,8 +503,8 @@ def test_a_cancelled_session_is_stopped_before_its_edits_are_rolled_back(tmp_pat
         while not entered.is_set():
             await asyncio.sleep(0.01)
         task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
+        await asyncio.wait([task])
+        assert task.cancelled()
 
     asyncio.run(scenario())
 
