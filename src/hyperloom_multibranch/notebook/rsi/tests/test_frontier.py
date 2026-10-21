@@ -104,7 +104,7 @@ def test_a_prior_needs_sessions_at_least_half_similar_that_add_up_to_one_and_a_h
     assert backed is not None and backed.basis is FrontierBasis.PRIOR and backed.expected_gain_pct == pytest.approx(3.0)
 
 
-async def test_a_new_branch_keeps_a_floor_until_two_of_its_tests_are_judged(tmp_path: Path) -> None:
+async def test_a_new_branch_without_a_commit_keeps_a_floor_until_ten_of_its_tests_are_judged(tmp_path: Path) -> None:
     clock = FakeClock()
     root = tmp_path / "notebook"
     observer = await scripted_session(root, clock)
@@ -112,20 +112,27 @@ async def test_a_new_branch_keeps_a_floor_until_two_of_its_tests_are_judged(tmp_
     toolbox, gate = (LocalNotebook(root, Writer(role, role.value), clock=clock) for role in (Role.TOOLBOX, Role.GATE))
     await scheduler.record_lineage(LineageEvent(LineageKind.OPEN, "s3", from_commit="c1", reason="fill"))
 
-    fresh = _scores(await observer.snapshot())["s3"]
-    clock.advance(WINDOW_SECONDS)
-    waited = _scores(await observer.snapshot())["s3"]
-    for request_id in ("r7", "r8"):
+    async def judge_flat(request_id: str) -> None:
         await toolbox.write_request(request(request_id, intent("s3", "c1", target=request_id)))
         await toolbox.write_result(result(request_id))
         flat = judgement(0.2, (request_id,), verdict=Verdict.FLAT)
         await gate.write_judgement(request_id, flat, Conclusion.RECORDED_ONLY)
-    judged = _scores(await observer.snapshot())["s3"]
+
+    fresh = _scores(await observer.snapshot())["s3"]
+    clock.advance(WINDOW_SECONDS)
+    waited = _scores(await observer.snapshot())["s3"]
+    for n in range(9):
+        await judge_flat(f"n{n}")
+    nine = _scores(await observer.snapshot())["s3"]
+    await judge_flat("n9")
+    ten = _scores(await observer.snapshot())["s3"]
 
     assert fresh is not None and fresh.expected_gain_pct == POLICY.new_branch_floor_pct
     assert fresh.basis is FrontierBasis.NEW and fresh.components["trend_pct"] == 0.0
     assert waited is not None and waited.basis is FrontierBasis.NEW
-    assert judged is not None and judged.expected_gain_pct == 0.0 and judged.basis is FrontierBasis.TREND
+    assert nine is not None and nine.expected_gain_pct == POLICY.new_branch_floor_pct
+    assert nine.basis is FrontierBasis.NEW
+    assert ten is not None and ten.expected_gain_pct == 0.0 and ten.basis is FrontierBasis.TREND
 
 
 def test_an_archived_branch_without_judged_times_keeps_the_floor_for_one_window_only() -> None:
@@ -186,7 +193,10 @@ def test_the_headroom_caps_the_score_and_observation_keeps_a_floor(snapshot: Not
     tight = dataclasses.replace(snapshot, profile=profile(roofline_ceiling={METRIC: 1050.0}))
     capped = _scores(tight)["s1"]
     stalled = _scores(snapshot, policy=dataclasses.replace(POLICY, window_seconds=0.0))["s1"]
-    unwatched = _scores(snapshot, policy=dataclasses.replace(POLICY, window_seconds=0.0, observation_seconds=0.0))["s1"]
+    unwatched_policy = dataclasses.replace(
+        POLICY, window_seconds=0.0, observation_seconds=0.0, new_branch_floor_pct=0.0
+    )
+    unwatched = _scores(snapshot, policy=unwatched_policy)["s1"]
 
     assert capped is not None and capped.expected_gain_pct == pytest.approx((1050.0 / 1040.0 - 1.0) * 100.0)
     assert capped.basis is FrontierBasis.HEADROOM

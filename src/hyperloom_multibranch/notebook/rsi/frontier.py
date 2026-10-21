@@ -19,8 +19,8 @@
 
 The expected gain is the prior where there is one, else the trend; a branch under observation keeps at least
 ``observation_floor_pct``, and a branch scored by its trend keeps ``new_branch_floor_pct`` until :data:`SETTLED_TESTS` of
-its tests are judged, since its trend cannot be anything but zero before; a candidate waiting for its confirm raises it
-to its own gain; the headroom and the Amdahl ceiling cap it, and it is never negative.
+its tests are judged, so a flat trend does not stop it before it has tried a few directions; a candidate waiting for its
+confirm raises it to its own gain; the headroom and the Amdahl ceiling cap it, and it is never negative.
 ``basis`` names which of them the score rests on. The formula is a prototype: what the score means is the scheduler's
 call (gongzheng's), and it stays here until then. :func:`score_at` is the formula alone, on a branch as an archived
 tree has it, so the live scoring and the calibration score with the same one.
@@ -75,7 +75,7 @@ REFERENCE_BUDGET_SECONDS = 4 * HOUR
 #: How many of the longest root tests a window spans at least, so that it holds an explore and its confirm.
 WINDOW_TESTS = 4
 #: How many judged tests end a branch's new-branch floor.
-SETTLED_TESTS = 2
+SETTLED_TESTS = 10
 
 
 @dataclass(frozen=True)
