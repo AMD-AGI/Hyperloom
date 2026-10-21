@@ -125,6 +125,17 @@ def test_frontier_policy_can_keep_the_defaults() -> None:
     assert _settings("--frontier-policy", "default").frontier_policy is FrontierPolicyMode.DEFAULT
 
 
+def test_frontier_scorer_pins_the_scorer_the_session_scores_with() -> None:
+    assert _settings().frontier_scorer == ""
+    assert _settings("--frontier-scorer", "bandit-rv").frontier_scorer == "bandit-rv"
+
+
+def test_a_pinned_frontier_scorer_must_be_one_the_session_can_find() -> None:
+    cli.require_frontier_scorer("bandit-rv", "output_throughput")
+    with pytest.raises(ValueError, match="no-such-scorer"):
+        cli.require_frontier_scorer("no-such-scorer", "output_throughput")
+
+
 def test_run_options_override_the_defaults() -> None:
     settings = _settings(
         "--gpu-type", "mi355x", "--max-hours", "12", "--max-gpu-hours", "40", "--max-llm-usd", "25.5",
@@ -178,6 +189,7 @@ def test_parallel_tests_default_fills_the_machine() -> None:
         ["run", *WORKLOAD_ARGS, "--gpu-type", "mi308x"],
         ["run", *WORKLOAD_ARGS, "--kernel-optimizer", "triton"],
         ["run", *WORKLOAD_ARGS, "--frontier-policy", "bandit"],
+        ["run", *WORKLOAD_ARGS, "--frontier-policy", "default", "--frontier-scorer", "bandit-rv"],
         ["run", *_without(WORKLOAD_ARGS, "--workload")],
         ["run", *WORKLOAD_ARGS, "--workload", "sharegpt"],
         ["run", *_without(WORKLOAD_ARGS, "--isl")],

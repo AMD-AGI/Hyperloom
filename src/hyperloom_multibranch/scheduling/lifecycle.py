@@ -49,11 +49,11 @@ from hyperloom_multibranch.contracts.notebook.vocab import UsageSource
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.codec import decode, encode
 from hyperloom_multibranch.notebook.rsi.calibration import DEFAULT_POLICY, VARIATIONS, PolicyChoice
-from hyperloom_multibranch.notebook.rsi.frontier import FrontierPolicy, FrontierScoring
+from hyperloom_multibranch.notebook.rsi.frontier import FrontierPolicy, FrontierScoring, ScorerGuard
 from hyperloom_multibranch.notebook.rsi.session import (
     FRONTIER_LOG,
     archived_history,
-    session_frontier,
+    named_frontier_choice,
     session_frontier_policy,
 )
 from hyperloom_multibranch.rulegate.critic import FixReviewer
@@ -109,6 +109,7 @@ POLICY_VERSIONS = {
 #: The ``policy_versions`` key the frontier policy's label is recorded under: the defaults' until PRELUDE chose it.
 FRONTIER_POLICY_KEY = "frontier"
 FORCED_DEFAULT_EVIDENCE = f"{DEFAULT_POLICY}: --frontier-policy default"
+PINNED_EVIDENCE = "pinned by --frontier-scorer"
 UNCHOSEN_EVIDENCE = f"{DEFAULT_POLICY}: not chosen yet, PRELUDE has not established the baseline"
 #: Stop reasons a session ends with when it ran its course, a budget spent as set included; any other one, or an
 #: error, is a failed session.
@@ -207,6 +208,8 @@ class Session:
         self._frontier = PolicyChoice(
             FrontierPolicy.for_budget(self._metric, self._budget_seconds), DEFAULT_POLICY, UNCHOSEN_EVIDENCE
         )
+        # One guard a session, so the scorer's failures count across EXPLORE and CLOSE.
+        self._guard = ScorerGuard()
         # A session is not evidence about itself: a run over a directory whose CLOSE already archived its tree would
         # otherwise calibrate and score against that tree.
         self._history = tuple(tree for tree in archived_history() if tree.session_id != layout.session_id)
@@ -404,7 +407,13 @@ class Session:
         defaults under ``--frontier-policy default``."""
 
         defaults = self._frontier.policy
-        if self._settings.frontier_policy is FrontierPolicyMode.DEFAULT:
+        pinned = self._settings.frontier_scorer
+        if pinned:
+            choice = named_frontier_choice(pinned, defaults, f"{pinned}: {PINNED_EVIDENCE}")
+            if choice is None:
+                raise ValueError(f"--frontier-scorer {pinned} names no frontier scorer in code or in the scorer pool")
+            self._frontier = choice
+        elif self._settings.frontier_policy is FrontierPolicyMode.DEFAULT:
             self._frontier = PolicyChoice(defaults, DEFAULT_POLICY, FORCED_DEFAULT_EVIDENCE)
         else:
             snapshot = await self._notebook.snapshot()
@@ -427,13 +436,10 @@ class Session:
         return {**POLICY_VERSIONS, FRONTIER_POLICY_KEY: self._frontier.label}
 
     def _scoring(self) -> FrontierScoring:
-        return session_frontier(
-            self._notebook,
-            self._metric,
-            log_path=self._layout.reports / FRONTIER_LOG,
-            history=self._history,
-            policy=self._frontier.policy,
-        )
+        if self._guard.chosen is not self._frontier.scorer:
+            self._guard = ScorerGuard(self._frontier.scorer)
+        log = self._layout.reports / FRONTIER_LOG
+        return FrontierScoring(self._notebook, self._frontier.policy, self._history, log, self._guard)
 
     def _dashboard(self, scoring: FrontierScoring) -> SessionDashboard:
         return SessionDashboard(self._notebook, scoring, self._toolbox, self._metric, self._layout.dashboard)
@@ -606,6 +612,7 @@ def code_version() -> CodeVersion:
 __all__ = [
     "COMPLETED_REASONS",
     "FORCED_DEFAULT_EVIDENCE",
+    "PINNED_EVIDENCE",
     "FRONTIER_POLICY_KEY",
     "NO_CARDS_LEFT",
     "CodeVersion",

@@ -21,7 +21,9 @@ unless that session committed its root on the same workload and on the image ``H
 ``--frontier-policy`` says which frontier policy the session scores its branches with once PRELUDE established the
 baseline: ``auto`` (the default) takes the variation the calibration over similar archived sessions chooses, within
 its guardrails, and ``default`` keeps the defaults; the manifest fingerprint and the session's manifest record
-the label under ``frontier`` in ``policy_versions``.
+the label under ``frontier`` in ``policy_versions``. ``--frontier-scorer LABEL`` pins the scorer the session scores
+with instead: ``frontier-v1``, a variation's label, a scorer in code or an expression in the archive's scorer pool; a
+label none of these has, or one given beside ``--frontier-policy default``, is a usage error.
 Each ``--specialist-prompt`` file holds a direction the user wrote for one specialist: its branch opens at PRELUDE's
 root ahead of the opening batch, counted within ``--max-branches``, its specialist sees the text in every launch
 prompt, and the judge neither stops it nor lowers its K for its first judged tests; an empty or unreadable file, or
@@ -72,6 +74,8 @@ from hyperloom.orchestrator.knowledge.remote_recipe.client import RemoteRecipeCl
 from hyperloom_multibranch.contracts.llm_prices import price_of
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
 from hyperloom_multibranch.notebook.rsi.archive import ARCHIVE_ENV
+from hyperloom_multibranch.notebook.rsi.frontier import FrontierPolicy
+from hyperloom_multibranch.notebook.rsi.session import named_frontier_choice
 from hyperloom_multibranch.rulegate.critic import LlmCritic, anthropic_critic
 from hyperloom_multibranch.scheduling.budget import MB_DEFAULT_MAX_HOURS, MB_MIN_PRELUDE_HOURS
 from hyperloom_multibranch.scheduling.clock import Clock
@@ -212,6 +216,12 @@ def _add_run_options(run: argparse.ArgumentParser) -> None:
             " archived sessions, default keeps the defaults."
         ),
     )
+    run.add_argument(
+        "--frontier-scorer",
+        default="",
+        metavar="LABEL",
+        help="The frontier scorer the session scores with, instead of the one the calibration chooses.",
+    )
     run.add_argument("-v", "--verbose", action="store_true", help="Log at debug level.")
 
 
@@ -258,6 +268,8 @@ def settings_from(args: argparse.Namespace) -> RunSettings:
         errors.append("--max-gpu-hours must be 0 (no limit) or a positive number of hours")
     if not math.isfinite(args.max_llm_usd) or args.max_llm_usd < 0:
         errors.append("--max-llm-usd must be 0 (no limit) or a positive number of dollars")
+    if args.frontier_scorer and FrontierPolicyMode(args.frontier_policy) is FrontierPolicyMode.DEFAULT:
+        errors.append("--frontier-scorer pins a scorer, which --frontier-policy default rules out")
     if errors:
         raise ValueError("; ".join(errors))
     try:
@@ -287,7 +299,16 @@ def settings_from(args: argparse.Namespace) -> RunSettings:
         args.judge_interval_sec,
         user_directions=_user_directions(args.specialist_prompts or [], caps.max_branches),
         frontier_policy=FrontierPolicyMode(args.frontier_policy),
+        frontier_scorer=args.frontier_scorer,
     )
+
+
+def require_frontier_scorer(label: str, metric: str) -> None:
+    """Raise ValueError unless ``label`` names a scorer a session of ``metric`` can score with; the scorer pool is
+    read beside the archive ``HYPERLOOM_RSI_ARCHIVE`` names."""
+
+    if named_frontier_choice(label, FrontierPolicy(metric), "") is None:
+        raise ValueError(f"--frontier-scorer {label} names no frontier scorer in code or in the scorer pool")
 
 
 def require_workload_switch(workload: Workload, env: Mapping[str, str]) -> None:
@@ -456,6 +477,13 @@ def main(argv: list[str] | None = None) -> int:
     except (EnvironmentIncomplete, PeersUnavailable) as exc:
         print(f"{PROG}: cannot run a session, {exc}", file=sys.stderr)
         return EXIT_FAILED
+    if settings.frontier_scorer:
+        try:
+            require_frontier_scorer(settings.frontier_scorer, settings.workload.metric)
+        except ValueError as exc:
+            parser.print_usage(sys.stderr)
+            print(f"{parser.prog}: error: {exc}", file=sys.stderr)
+            raise SystemExit(EXIT_USAGE) from exc
     if persisted is not None:
         return final_only(persisted, peer_factory, services)
     return run_session(settings, peer_factory, services)
@@ -471,6 +499,7 @@ __all__ = [
     "final_only",
     "main",
     "recipe_kb_from_env",
+    "require_frontier_scorer",
     "require_priced_models",
     "require_rsi_archive",
     "require_workload_switch",

@@ -100,9 +100,11 @@ from hyperloom_multibranch.scheduling import judge
 from hyperloom_multibranch.scheduling.judge import JUDGE_PROMPT_VERSION, HoldReason
 from hyperloom_multibranch.scheduling.layout import SessionLayout, create_session
 from hyperloom_multibranch.scheduling import lifecycle
+from hyperloom_multibranch.notebook.rsi.bandit import BANDIT_LABEL
 from hyperloom_multibranch.scheduling.lifecycle import (
     CUT_SHORT,
     FORCED_DEFAULT_EVIDENCE,
+    PINNED_EVIDENCE,
     FRONTIER_POLICY_KEY,
     NO_CARDS_LEFT,
     Session,
@@ -694,6 +696,24 @@ async def test_a_session_scores_its_frontier_with_the_policy_the_calibration_cho
     assert lines and all(
         (line["new_branch_floor_pct"], line["window_seconds"]) == (0.0, CHOSEN_WINDOW_SECONDS) for line in lines
     )
+
+
+async def test_a_pinned_frontier_scorer_scores_the_session_without_asking_the_calibration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = _choosing(monkeypatch, lambda defaults: PolicyChoice(defaults, CHOSEN_LABEL, CHOSEN_EVIDENCE))
+    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage.settings = replace(SETTINGS, frontier_scorer=BANDIT_LABEL)
+    _script(stage)
+
+    outcome = await stage.run()
+
+    assert outcome.exit_code == 0 and calls == []
+    assert await _frontier_fingerprint(stage) == BANDIT_LABEL
+    [decided] = [row for row in _decisions(stage) if row["reason"] == "frontier policy"]
+    assert decided["detail"] == {"label": BANDIT_LABEL, "evidence": f"{BANDIT_LABEL}: {PINNED_EVIDENCE}"}
+    lines = _frontier_lines(stage)
+    assert lines and all(line["scorer"] == BANDIT_LABEL for line in lines)
 
 
 async def test_frontier_policy_default_keeps_the_defaults_without_asking_the_calibration(
