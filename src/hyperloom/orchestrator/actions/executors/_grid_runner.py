@@ -74,7 +74,7 @@ from hyperloom.common.coerce import to_str_list
 from hyperloom.inference_optimizer.runtime_environment import apply_runtime_override
 from ._recipe_script import launcher_overwritten_envs
 from ._server_argv import seal_server_argv
-from .magpie_agentx import LaunchChanges, materialize_variant
+from .magpie_agentx import LaunchChanges, ServerArgvInvalidError, materialize_variant
 
 # Re-exported from sibling modules to keep the module namespace intact.
 from ._grid_base import (
@@ -1743,12 +1743,12 @@ def _attach_grid_launch_evidence(
     for idx, result in enumerate(results):
         if idx >= len(grid):
             break
-        # A skipped variant never launched a measurement.
-        if result.status == "skipped" or result.error_class in {
+        if result.status == "skipped" or result.error_class in {  # skipped or refused: never launched a measurement
             "capability_unsupported",
             "yaml_build_error",
             "warmup_yaml_build_error",
             SPECULATIVE_DECODING_PINNED,
+            ServerArgvInvalidError.error_class,
         }:
             continue
         slot = output_root / f"variant_{idx:02d}_{_safe(grid[idx].name)}"

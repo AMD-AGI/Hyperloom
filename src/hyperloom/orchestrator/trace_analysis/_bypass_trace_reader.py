@@ -687,7 +687,10 @@ class _TraceBuffers:
         return self.extid_to_opname.get(extid) or "", self.extid_to_opmeta.get(extid) or {}
 
     def graph_coverage(self, graph_kernels: int, busy_fraction: float) -> dict[str, Any]:
-        """Report graph-replay recording health, flagging a trace that likely under-recorded replays."""
+        """Report graph-replay recording health, flagging a trace that likely under-recorded replays.
+
+        Under continuous graph replay roctracer's activity buffer overflows, so only ~1 replay's kernels are recorded.
+        """
         launch_count = len(self.graph_launch_corrs)
         # Graph capture health is a WHOLE-TRACE property (activity-buffer overflow drops replays across the run), so the
         # recorded-launch coverage is computed over every buffered kernel -- never the steady window -- to stay
@@ -760,6 +763,9 @@ def _finalize(
         if op_name:
             attributed.add(dur)
         elif corr in buffers.graph_launch_corrs:
+            # Graph-internal kernels launched via a captured CUDA/HIP graph: they carry a correlation matching a
+            # graph-launch runtime event (which has no External id), so they resolve to no cpu_op but are not a genuine
+            # attribution failure.
             op_name = "(graph)"
             graph.add(dur)
         else:

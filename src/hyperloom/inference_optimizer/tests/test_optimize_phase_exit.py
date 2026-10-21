@@ -94,8 +94,8 @@ def test_with_kernel_disabled_it_winds_down_to_sweep_carrying_its_reason():
     state = optimize_state(**_DRY_SOURCE, **_DRY_CONFIG)
     target, reason, evidence = ps.compute_next_phase(state, flags=ps.PhaseFlags(kernel_enabled=False))
     assert target == ps.PHASE_SWEEP
-    assert reason == "no_kernel_skipped"
-    assert evidence["passed_through_reason"] == "optimize_no_more_leverage"
+    assert reason == "optimize_no_more_leverage"
+    assert evidence["kernel_skipped"] is True
 
 
 def test_the_config_arm_needs_a_trailing_no_keep_streak_to_report_dry():
