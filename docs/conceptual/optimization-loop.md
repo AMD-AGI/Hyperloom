@@ -578,7 +578,8 @@ default. See the [AgentX workflow](../how-to/optimize.md#optimize-an-agentx-work
 for supported workload controls.
 
 Results update `last_conc_sweep` and feed the final report and breakdown.
-The phase exits on `sweep_done` (or `sweep_failed`). While the sweep it
+A ladder that fails closes the phase as `sweep_failed`; one that finishes
+(`sweep_done`) loops back or closes on the reason below. While the sweep it
 enqueued is still running, SWEEP's own budget and cap wait for the budget the
 sweep was granted (plus its lease grace); the session deadline does not. A
 sweep the orchestrator cancels stops its ladder at once and records
