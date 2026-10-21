@@ -119,8 +119,30 @@ def _as_int(value: object) -> int:
         return 0
 
 
+def _record_gemm_e2e_envelope(
+    result: dict[str, Any],
+    stacked_envs: dict[str, str],
+    *,
+    kept: list[dict[str, Any]],
+    reverted: list[dict[str, Any]],
+    faults: list[dict[str, Any]],
+) -> None:
+    # Orchestration must never see the raw combined recommended_env and issue a bundled integrate, so the
+    # E2E-validated envs replace it and the tuners' own record moves to the ``_raw`` keys.
+    result["e2e_results"] = {"kept": kept, "reverted": reverted, "faults": faults}
+    result["recommended_env_raw"] = dict(result.get("recommended_env") or {})
+    result["extra_envs_raw"] = dict(result.get("extra_envs") or {})
+    result["recommended_env"] = dict(stacked_envs)
+    result["extra_envs"] = dict(stacked_envs)
+
+
+def _bench_envs(bench: Mapping[str, Any]) -> dict[str, Any]:
+    envs = bench.get("envs")
+    return dict(envs) if isinstance(envs, dict) else {}
+
+
 def _first_text(mapping: Mapping[str, Any], *keys: str) -> str:
-    """The first of ``keys`` whose value renders as non-empty text."""
+    # The first of ``keys`` whose value renders as non-empty text.
     for key in keys:
         text = str(mapping.get(key) or "")
         if text:
@@ -200,6 +222,18 @@ def _deduplicate_dispatch_rows(
             best[key] = row
     log.info("gemm E2E: removed %d duplicate %s row(s) for %s", len(rows) - len(best), label, env_var)
     return list(best.values())
+
+
+def _per_tuner_budget_minutes() -> int:
+    from hyperloom.orchestrator.actions.executors._subprocess_kill import resolve_benchmark_timeouts
+
+    return max(1, int((resolve_benchmark_timeouts()[1] + 59) // 60))
+
+
+def _integrate_tput_and_gain(verdict: Mapping[str, Any]) -> tuple[float, float]:
+    measurement = verdict.get("bench_result") or verdict
+    tput = float(measurement.get("output_throughput", verdict.get("new_tput")) or 0.0)
+    return tput, float(verdict.get("gain_pct") or 0.0)
 
 
 def _candidate_envs(raw: object) -> dict[str, str]:
@@ -531,7 +565,6 @@ class KernelPhase(CoordinatorCollaborator):
         return f"kernel_entry_g{stack_len}_{hashlib.sha256(identity).hexdigest()[:12]}"
 
     def _adopt_reprofile_snapshot(self, *, before: float, snapshot_id_before: int) -> bool:
-        """Advance the roofline anchor when the reprofile landed a new snapshot; whether it did."""
         state = self.shared_state
         after = self._last_measured_roofline_tput()
         landed = after != before or int(state.roofline_snapshot_id or 0) != snapshot_id_before
@@ -1470,7 +1503,7 @@ class KernelPhase(CoordinatorCollaborator):
         accepted_flags = str(spec_config.get("extra_server_args", cb.get("extra_server_args")) or "")
         extra_envs = spec_config.get("extra_envs", cb.get("extra_envs")) or {}
         recipe_bench = self._recipe_benchmark(str(self.shared_state.baseline_config_path or ""))
-        recipe_envs = recipe_bench.get("envs") or {}
+        recipe_envs = _bench_envs(recipe_bench)
         # Absent => GEAK keeps deriving the launcher from the recipe, which is
         # correct everywhere except AgentX (see _resolve_launch_server_script).
         launch_server_script = self._resolve_launch_server_script(recipe_bench)
@@ -1757,8 +1790,7 @@ class KernelPhase(CoordinatorCollaborator):
         ):
             return False
         log.info(
-            "GEAK result.json exists but state has no recorded win (crash before handback); promoting recovered "
-            "result."
+            "GEAK result.json exists but state has no recorded win (crash before handback); promoting recovered result."
         )
         if self._promote_recovered_geak_result(recovered, handoff=handoff, recovered_from="existing_result_json"):
             await self._revalidate_geak_candidate(reason="geak_e2e_win_recovered")
@@ -2235,7 +2267,7 @@ class KernelPhase(CoordinatorCollaborator):
             return
         inherited_args = ""
         if not complete and prior_controls.get("args_mode") != "replace":
-            recipe_envs = self._recipe_benchmark(str(self.shared_state.baseline_config_path or "")).get("envs") or {}
+            recipe_envs = _bench_envs(self._recipe_benchmark(str(self.shared_state.baseline_config_path or "")))
             inherited_args = str(recipe_envs.get(server_args_env_name(self.shared_state.framework)) or "")
         measurement["extra_server_args"] = compose_server_args(
             inherited_args=inherited_args,
@@ -2933,7 +2965,7 @@ class KernelPhase(CoordinatorCollaborator):
     def _aiter_source_tables(
         config_dirs: list[Path], *, runtime_filename: str, tuned_stem: str, untuned_stem: str
     ) -> tuple[list[Path], Path | None]:
-        """The complete runtime tables to merge the candidate into, and the dir that defines their keys."""
+        # The complete runtime tables to merge the candidate into, plus the dir that defines their keys.
         cache_dir = os.environ.get("INFERENCE_OPTIMIZER_AITER_CONFIG_CACHE_DIR", "/tmp/aiter_configs")
         runtime_path = Path(cache_dir) / runtime_filename
         if runtime_path.is_file():
@@ -3206,365 +3238,272 @@ class KernelPhase(CoordinatorCollaborator):
                 candidates.append(fallback)
         return candidates
 
-    async def _validate_gemm_tuning_e2e(self, result: dict[str, Any]) -> None:
-        """Sequentially E2E-validate each tuning candidate's env independently."""
-        from ..measurement.integrate_performance import integrate_measurement_fields
-        from hyperloom.common.model_paths import resolve_session_model_path
+    def _close_gemm_e2e_without_candidates(self, result: dict[str, Any]) -> None:
+        log.info("gemm tuning: no candidates to E2E validate")
+        result["decision"] = "REVERT"
+        result["requires_e2e_validation"] = False
+        result["e2e_validated"] = False
+        # Only when the tuners left no verdict of their own: ``micro_decision`` is a routing key downstream, not a
+        # label, so an existing one stands.
+        if not _first_text(result, "micro_decision").strip():
+            result["micro_decision"] = "no_e2e_candidates"
+        # ``recommended_env``/``extra_envs`` stay as the tuners left them: they are the raw record of what was
+        # produced, and the eligibility checks downstream already read them as "must be empty".
+        self._replace_latest_gemm_tuning_attempt(result)
 
-        backend = str(result.get("backend") or "geak").strip().lower()
-        candidates = self._gemm_e2e_candidates(result)
-        if not candidates:
-            log.info("gemm tuning: no candidates to E2E validate")
-            # Close the books here too.
-            result["decision"] = "REVERT"
-            result["requires_e2e_validation"] = False
-            result["e2e_validated"] = False
-            # Only when the tuners left no verdict of their own: ``micro_decision`` is a routing key downstream, not a
-            # label, so an existing one stands.
-            if not str(result.get("micro_decision") or "").strip():
-                result["micro_decision"] = "no_e2e_candidates"
-            # ``recommended_env``/``extra_envs`` stay as the tuners left them: they are the raw record of what was
-            # produced, and the eligibility checks downstream already read them as "must be empty".
-            self._replace_latest_gemm_tuning_attempt(result)
-            return
+    def _gemm_candidate_skip_reason(self, tuner_name: str, *, triton_moe_inert: bool) -> str:
+        from hyperloom.inference_optimizer.model_config_utils import model_supports_aiter_ck_fused_moe
 
-        baseline_tput = float(self.shared_state.baseline_tput or 0.0)
-        running_tput = float((self.shared_state.current_best or {}).get("tput") or baseline_tput)
-        paired_reference = deepcopy(self.shared_state.current_best or {})
-        paired_reference.setdefault("tput", running_tput)
-        paired_config_path = str(self.shared_state.baseline_config_path or "")
-        stacked_envs: dict[str, str] = {}
-        kept: list[dict[str, Any]] = []
-        reverted: list[dict[str, Any]] = []
-        faults: list[dict[str, Any]] = []
-        accepted_measurement: dict[str, Any] = {}
-        # Set by the last KEEP; the attempt row claims this exact string.
-        adopted_tuned_file = ""
-        from ..actions.executors._subprocess_kill import resolve_benchmark_timeouts
-
-        per_tuner_timeout_sec = resolve_benchmark_timeouts()[1]
-        per_tuner_budget_minutes = max(1, int((per_tuner_timeout_sec + 59) // 60))
-
+        if tuner_name == "vllm_moe_triton" and triton_moe_inert:
+            log.warning(
+                "gemm E2E: skipping %s -- the server dispatches MoE through "
+                "aiter, which never reads VLLM_TUNED_CONFIG_FOLDER, so the tuned "
+                "Triton config cannot take effect",
+                tuner_name,
+            )
+            return "aiter_moe_runtime_triton_config_inert"
         # fmoe_ck is only meaningful with --moe-runner-backend aiter, and aiter's CK fused-MoE rejects a
         # non-128-aligned intermediate_size_per_partition.
-        from hyperloom.inference_optimizer.model_config_utils import (
-            model_supports_aiter_ck_fused_moe,
-        )
+        if tuner_name == "fmoe_ck" and not model_supports_aiter_ck_fused_moe(
+            str(self.shared_state.model_path or ""), int(self.shared_state.tp or 0)
+        ):
+            log.info(
+                "gemm E2E: skipping %s -- aiter CK fused-MoE cannot serve "
+                "this model at tp=%s (intermediate size is not 128-aligned)",
+                tuner_name,
+                self.shared_state.tp or 0,
+            )
+            return "aiter_ck_moe_shape_unsupported"
+        return ""
 
-        # ``_runtime_uses_aiter_fused_moe`` resolves the serving log -- which now byte-scans the whole runs/ tree for
-        # aiter evidence -- and then reads it whole, ~17MB on the fleet.
-        triton_moe_inert = any(c.get("tuner") == "vllm_moe_triton" for c in candidates) and await asyncio.to_thread(
-            self._runtime_uses_aiter_fused_moe
-        )
-
-        for cand in candidates:
-            tuner_name = cand["tuner"]
-            if tuner_name == "vllm_moe_triton" and triton_moe_inert:
-                log.warning(
-                    "gemm E2E: skipping %s — the server dispatches MoE through "
-                    "aiter, which never reads VLLM_TUNED_CONFIG_FOLDER, so the tuned "
-                    "Triton config cannot take effect",
-                    tuner_name,
-                )
-                reverted.append({**cand, "reason": "aiter_moe_runtime_triton_config_inert"})
+    def _merged_candidate_envs(self, cand: dict[str, Any]) -> tuple[dict[str, str], dict[str, Any] | None]:
+        # Each aiter table merged into the runtime one, plus the refusal row if one of them is unusable.
+        env = dict(cand["envs"])
+        for env_var, env_value in list(env.items()):
+            if not env_var.startswith("AITER_CONFIG"):
                 continue
-            if tuner_name == "fmoe_ck" and not model_supports_aiter_ck_fused_moe(
-                str(self.shared_state.model_path or ""),
-                int(self.shared_state.tp or 0),
-            ):
-                log.info(
-                    "gemm E2E: skipping %s — aiter CK fused-MoE cannot serve "
-                    "this model at tp=%s (intermediate size is not 128-aligned)",
-                    tuner_name,
-                    self.shared_state.tp or 0,
-                )
-                reverted.append({**cand, "reason": "aiter_ck_moe_shape_unsupported"})
-                continue
-            # Merge candidate CSV with the runtime config so that shapes NOT in the candidate keep their existing
-            # tuned entries.
-            env = dict(cand["envs"])
-            merge_failure_reason = ""
-            merge_failure_env = ""
-            for env_var, env_value in list(env.items()):
-                if not env_var.startswith("AITER_CONFIG"):
-                    continue
-                if not Path(env_value).is_file():
-                    merge_failure_reason = "candidate_artifact_missing"
-                    merge_failure_env = env_var
-                    break
-                merged_path = self._merge_gemm_candidate_with_runtime(
-                    env_var,
-                    env_value,
-                )
+            if Path(env_value).is_file():
+                merged_path = self._merge_gemm_candidate_with_runtime(env_var, env_value)
                 if merged_path:
                     env[env_var] = merged_path
-                else:
-                    merge_failure_reason = "complete_aiter_config_unavailable"
-                    merge_failure_env = env_var
-                    break
-            if merge_failure_reason:
-                log.error(
-                    "gemm E2E: refusing aiter candidate for %s (%s: %s)",
-                    tuner_name,
-                    merge_failure_env,
-                    merge_failure_reason,
-                )
-                reverted.append(
-                    {
-                        **cand,
-                        "reason": merge_failure_reason,
-                        "failed_env_var": merge_failure_env,
-                    }
-                )
-                continue
-            extra_server_args = (
-                "--moe-runner-backend aiter"
-                if tuner_name == "fmoe_ck" and str(self.shared_state.framework or "").lower() == "sglang"
-                else ""
-            )
-            # Merge with previously KEEP'd envs.
-            test_envs = dict(stacked_envs)
-            test_envs.update(env)
-
-            log.info(
-                "gemm E2E: validating tuner=%s env=%s (base_tput=%.1f)",
-                tuner_name,
-                cand["env_var"],
-                running_tput,
-            )
-
-            from ..actions.executors._aiter_jit import (
-                drop_serving_so_for_envs,
-                prepare_serving_so_for_csvs,
-            )
-
-            jit_backup_dir = self.session_dir / "runs" / "aiter_jit_backup"
-
-            from ..state.kernel_decision_settings import _MAX_INTEGRATE_FAULT_ATTEMPTS
-
-            integrate_verdict: dict[str, Any] | None = None
-            run_stopped = False
-            integrate_payload = {
-                "task_id": f"gemm_tune_e2e_{tuner_name}",
-                "kernel_id": f"gemm_tune_{tuner_name}",
-                "source": "forge_gemm_tuning",
-                "base_tput": running_tput,
-                "model_path": resolve_session_model_path(
-                    state_model_path=str(self.shared_state.model_path or ""),
-                    for_serving=True,
-                ),
-                "extra_server_args": extra_server_args,
-                "extra_envs": test_envs,
-                "keep_threshold_pct": 1.0,
-                "budget_minutes": per_tuner_budget_minutes,
-                "mode": "env_only",
-            }
-            # The native handler reloads both the recipe and grading anchor from disk.
-            self.shared_state.save(self.session_dir)
-            for fault_attempt in range(1, _MAX_INTEGRATE_FAULT_ATTEMPTS + 1):
-                await asyncio.to_thread(prepare_serving_so_for_csvs, test_envs, backup_dir=jit_backup_dir)
-                try:
-                    integrate_result = await integrate_within_phase(
-                        integrate_payload, state=self.shared_state, session_dir=self.session_dir
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    if fault_attempt < _MAX_INTEGRATE_FAULT_ATTEMPTS:
-                        log.warning(
-                            "gemm E2E: integrate raised for %s (fault attempt %d/%d): %s",
-                            tuner_name,
-                            fault_attempt,
-                            _MAX_INTEGRATE_FAULT_ATTEMPTS,
-                            exc,
-                        )
-                        continue
-                    log.warning(
-                        "gemm E2E: integrate raised for %s: %s",
-                        tuner_name,
-                        exc,
-                    )
-                    faults.append(
-                        {
-                            **cand,
-                            "reason": "integrate_fault:handler_exception",
-                            "fault": True,
-                            "error_class": "handler_exception",
-                            "error": repr(exc),
-                            "fault_attempts": fault_attempt,
-                        }
-                    )
-                    await asyncio.to_thread(drop_serving_so_for_envs, test_envs, backup_dir=jit_backup_dir)
-                    break
-
-                stopped = stopped_by_the_run_class(integrate_result.get("error_class"))
-                if stopped is not None:
-                    log.info(
-                        "gemm E2E: %s left unmeasured — %s",
-                        tuner_name,
-                        stopped.interrupted,
-                    )
-                    run_stopped = True
-                    break
-
-                if self.shared_state._is_integrate_fault(integrate_result):
-                    error_class = str(integrate_result.get("error_class") or "integrate_fault").strip()
-                    if fault_attempt < _MAX_INTEGRATE_FAULT_ATTEMPTS:
-                        log.warning(
-                            "gemm E2E: retrying tuner=%s after integrate fault %s (attempt %d/%d)",
-                            tuner_name,
-                            error_class,
-                            fault_attempt,
-                            _MAX_INTEGRATE_FAULT_ATTEMPTS,
-                        )
-                        continue
-                    log.warning(
-                        "gemm E2E: tuner=%s integrate fault (%s) — unmeasured, not a REVERT verdict",
-                        tuner_name,
-                        error_class,
-                    )
-                    faults.append(
-                        {
-                            **cand,
-                            "reason": f"integrate_fault:{error_class}",
-                            "fault": True,
-                            "error_class": error_class,
-                            "integrate_status": integrate_result.get("status"),
-                            "error": integrate_result.get("error"),
-                            "fault_attempts": fault_attempt,
-                        }
-                    )
-                    await asyncio.to_thread(drop_serving_so_for_envs, test_envs, backup_dir=jit_backup_dir)
-                    break
-
-                integrate_verdict = integrate_result
-                break
-
-            if run_stopped:
-                break
-            if integrate_verdict is None:
-                continue
-
-            decision = str(integrate_verdict.get("decision") or "").upper()
-            measurement = integrate_verdict.get("bench_result") or integrate_verdict
-            new_tput = float(measurement.get("output_throughput", integrate_verdict.get("new_tput")) or 0.0)
-            gain_pct = float(integrate_verdict.get("gain_pct") or 0.0)
-
-            log.info(
-                "gemm E2E: tuner=%s decision=%s new_tput=%.1f gain=%.2f%%",
-                tuner_name,
-                decision,
-                new_tput,
-                gain_pct,
-            )
-
-            # Two independent ways the artifact can fail to take effect, neither of which the throughput delta can
-            # see: the keys are unreachable (coverage), and the table never reached the server (apply verdict).
-            apply_blockers: list[str] = []
-
-            # Off the event loop for the same reason: this reads the integrate run's server.log in full and parses
-            # every tuned CSV named in the candidate env.
-            coverage = await asyncio.to_thread(self._gemm_tuned_config_coverage, tuner_name, env)
-            if coverage is not None:
-                cand = {**cand, "tuned_config_coverage": coverage}
-                if not coverage.get("artifact_applied") and coverage.get("conclusive", True):
-                    apply_blockers.append(str(coverage.get("not_applied_reason") or "no_shape_key_matched"))
-                    log.error(
-                        "gemm E2E: tuner=%s produced an artifact the runtime never "
-                        "applied — 0 of %d requested shape(s) resolve to a tuned row; "
-                        "the %.2f%% e2e delta measures nothing about the tuning",
-                        tuner_name,
-                        coverage.get("requested") or 0,
-                        gain_pct,
-                    )
-                elif not coverage.get("artifact_applied"):
-                    log.info(
-                        "gemm E2E: tuner=%s tuned-config coverage inconclusive — %s",
-                        tuner_name,
-                        coverage.get("not_applied_reason"),
-                    )
-                else:
-                    log.info(
-                        "gemm E2E: tuner=%s tuned-config coverage %.2f%% (%d/%d shapes)",
-                        tuner_name,
-                        coverage.get("coverage_pct") or 0.0,
-                        coverage.get("covered") or 0,
-                        coverage.get("requested") or 0,
-                    )
-
-            applied = self._gemm_apply_verdict(tuner_name, env)
-            if applied is not None:
-                cand = {**cand, "apply_verdict": applied}
-                if applied.get("blocks_keep"):
-                    apply_blockers.append(str(applied.get("verdict") or "not_applied"))
-                    log.error(
-                        "forge gemm E2E: tuner=%s apply verdict=%s — %s",
-                        tuner_name,
-                        applied.get("verdict"),
-                        applied.get("detail"),
-                    )
-                elif not applied.get("conclusive"):
-                    # "Cannot tell" is not "did not apply": hit lines need AITER_LOG_TUNED_CONFIG=1, and treating
-                    # their absence as a failure would revert every arm that ran without it.
-                    log.info(
-                        "forge gemm E2E: tuner=%s apply verdict=%s (not conclusive) — %s",
-                        tuner_name,
-                        applied.get("verdict"),
-                        applied.get("detail"),
-                    )
-
-            if decision == "KEEP" and new_tput > 0 and not apply_blockers:
-                tuned_file = _candidate_tuned_file(env, cand.get("env_var", ""))
-                lifted = self._coord.writeback.lift_to_current_best(
-                    "gemm_tuning",
-                    new_tput,
-                    {
-                        "name": f"{backend}_{tuner_name}",
-                        "candidate_extra_server_args": extra_server_args,
-                        "extra_envs": dict(env),
-                        "source_phase": "KERNEL_AGENT",
-                        **integrate_measurement_fields(measurement),
-                    },
-                    entry_extra={
-                        "tuned_file": tuned_file,
-                        "gain_pct": gain_pct,
-                        "backend": backend,
-                        "source": "kernel_entry_auto",
-                    },
-                )
-                if lifted:
-                    stacked_envs.update(env)
-                    running_tput = new_tput
-                    accepted_measurement = measurement
-                    adopted_tuned_file = tuned_file
-                    kept.append(
-                        {
-                            **cand,
-                            "envs": dict(env),
-                            "tput": new_tput,
-                            "gain_pct": gain_pct,
-                        }
-                    )
-                    self._journal_gemm_tuning_keep(
-                        self.shared_state.optimization_stack[-1],
-                        task_id=f"gemm_tune_e2e_{tuner_name}",
-                    )
                     continue
-            reason = f"decision={decision}, gain={gain_pct:.2f}%"
-            if apply_blockers:
-                # Distinguish no gain from a tuned artifact the runtime never reached.
-                reason = f"tuned_config_never_applied[{'+'.join(apply_blockers)}] ({reason})"
-            reverted.append({**cand, "reason": reason})
-            await asyncio.to_thread(drop_serving_so_for_envs, test_envs, backup_dir=jit_backup_dir)
+                reason = "complete_aiter_config_unavailable"
+            else:
+                reason = "candidate_artifact_missing"
+            log.error("gemm E2E: refusing aiter candidate for %s (%s: %s)", cand["tuner"], env_var, reason)
+            return env, {**cand, "reason": reason, "failed_env_var": env_var}
+        return env, None
 
+    def _gemm_candidate_server_args(self, tuner_name: str) -> str:
+        if tuner_name == "fmoe_ck" and str(self.shared_state.framework or "").lower() == "sglang":
+            return "--moe-runner-backend aiter"
+        return ""
+
+    def _gemm_integrate_payload(
+        self, tuner_name: str, test_envs: dict[str, str], *, base_tput: float, budget_minutes: int
+    ) -> dict[str, Any]:
+        from hyperloom.common.model_paths import resolve_session_model_path
+
+        return {
+            "task_id": f"gemm_tune_e2e_{tuner_name}",
+            "kernel_id": f"gemm_tune_{tuner_name}",
+            "source": "forge_gemm_tuning",
+            "base_tput": base_tput,
+            "model_path": resolve_session_model_path(
+                state_model_path=str(self.shared_state.model_path or ""), for_serving=True
+            ),
+            "extra_server_args": self._gemm_candidate_server_args(tuner_name),
+            "extra_envs": test_envs,
+            "keep_threshold_pct": 1.0,
+            "budget_minutes": budget_minutes,
+            "mode": "env_only",
+        }
+
+    async def _integrate_gemm_candidate(
+        self,
+        cand: dict[str, Any],
+        test_envs: dict[str, str],
+        jit_backup_dir: Path,
+        *,
+        base_tput: float,
+        budget_minutes: int,
+    ) -> dict[str, Any] | None:
+        # The integrate verdict, a row carrying ``fault``, or ``None`` when the run itself was stopped.
+        from ..actions.executors._aiter_jit import drop_serving_so_for_envs, prepare_serving_so_for_csvs
+        from ..state.kernel_decision_settings import _MAX_INTEGRATE_FAULT_ATTEMPTS
+
+        tuner_name = cand["tuner"]
+        payload = self._gemm_integrate_payload(
+            tuner_name, test_envs, base_tput=base_tput, budget_minutes=budget_minutes
+        )
+        # The native handler reloads both the recipe and grading anchor from disk.
+        self.shared_state.save(self.session_dir)
+
+        async def _fault(attempt: int, error_class: str, **fields: Any) -> dict[str, Any]:
+            await asyncio.to_thread(drop_serving_so_for_envs, test_envs, backup_dir=jit_backup_dir)
+            return {
+                **cand,
+                "reason": f"integrate_fault:{error_class}",
+                "fault": True,
+                "error_class": error_class,
+                "fault_attempts": attempt,
+                **fields,
+            }
+
+        for attempt in range(1, _MAX_INTEGRATE_FAULT_ATTEMPTS + 1):
+            last = attempt >= _MAX_INTEGRATE_FAULT_ATTEMPTS
+            await asyncio.to_thread(prepare_serving_so_for_csvs, test_envs, backup_dir=jit_backup_dir)
+            try:
+                integrate_result = await integrate_within_phase(
+                    payload, state=self.shared_state, session_dir=self.session_dir
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "gemm E2E: integrate raised for %s (fault attempt %d/%d): %s",
+                    tuner_name,
+                    attempt,
+                    _MAX_INTEGRATE_FAULT_ATTEMPTS,
+                    exc,
+                )
+                if last:
+                    return await _fault(attempt, "handler_exception", error=repr(exc))
+                continue
+            stopped = stopped_by_the_run_class(integrate_result.get("error_class"))
+            if stopped is not None:
+                log.info("gemm E2E: %s left unmeasured -- %s", tuner_name, stopped.interrupted)
+                return None
+            if not self.shared_state._is_integrate_fault(integrate_result):
+                return integrate_result
+            error_class = str(integrate_result.get("error_class") or "integrate_fault").strip()
+            log.warning(
+                "gemm E2E: tuner=%s integrate fault %s (attempt %d/%d)",
+                tuner_name,
+                error_class,
+                attempt,
+                _MAX_INTEGRATE_FAULT_ATTEMPTS,
+            )
+            if last:
+                return await _fault(
+                    attempt,
+                    error_class,
+                    integrate_status=integrate_result.get("status"),
+                    error=integrate_result.get("error"),
+                )
+        return None
+
+    async def _gemm_apply_blockers(
+        self, cand: dict[str, Any], env: dict[str, str], *, gain_pct: float
+    ) -> tuple[list[str], dict[str, Any]]:
+        # Two independent ways the artifact can fail to take effect, neither of which the throughput delta can
+        # see: the keys are unreachable (coverage), and the table never reached the server (apply verdict).
+        tuner_name = cand["tuner"]
+        blockers: list[str] = []
+        # Off the event loop for the same reason: this reads the integrate run's server.log in full and parses
+        # every tuned CSV named in the candidate env.
+        coverage = await asyncio.to_thread(self._gemm_tuned_config_coverage, tuner_name, env)
+        if coverage is not None:
+            cand = {**cand, "tuned_config_coverage": coverage}
+            if coverage.get("artifact_applied"):
+                log.info(
+                    "gemm E2E: tuner=%s tuned-config coverage %.2f%% (%d/%d shapes)",
+                    tuner_name,
+                    coverage.get("coverage_pct") or 0.0,
+                    coverage.get("covered") or 0,
+                    coverage.get("requested") or 0,
+                )
+            elif coverage.get("conclusive", True):
+                blockers.append(str(coverage.get("not_applied_reason") or "no_shape_key_matched"))
+                log.error(
+                    "gemm E2E: tuner=%s produced an artifact the runtime never "
+                    "applied -- 0 of %d requested shape(s) resolve to a tuned row; "
+                    "the %.2f%% e2e delta measures nothing about the tuning",
+                    tuner_name,
+                    coverage.get("requested") or 0,
+                    gain_pct,
+                )
+            else:
+                log.info(
+                    "gemm E2E: tuner=%s tuned-config coverage inconclusive -- %s",
+                    tuner_name,
+                    coverage.get("not_applied_reason"),
+                )
+        applied = self._gemm_apply_verdict(tuner_name, env)
+        if applied is None:
+            return blockers, cand
+        cand = {**cand, "apply_verdict": applied}
+        if applied.get("blocks_keep"):
+            blockers.append(str(applied.get("verdict") or "not_applied"))
+            log.error(
+                "forge gemm E2E: tuner=%s apply verdict=%s -- %s",
+                tuner_name,
+                applied.get("verdict"),
+                applied.get("detail"),
+            )
+        elif not applied.get("conclusive"):
+            # "Cannot tell" is not "did not apply": hit lines need AITER_LOG_TUNED_CONFIG=1, and treating
+            # their absence as a failure would revert every arm that ran without it.
+            log.info(
+                "forge gemm E2E: tuner=%s apply verdict=%s (not conclusive) -- %s",
+                tuner_name,
+                applied.get("verdict"),
+                applied.get("detail"),
+            )
+        return blockers, cand
+
+    def _keep_gemm_candidate(
+        self, cand: dict[str, Any], env: dict[str, str], verdict: Mapping[str, Any], result: Mapping[str, Any]
+    ) -> dict[str, Any] | None:
+        from ..measurement.integrate_performance import integrate_measurement_fields
+
+        backend = _first_text(result, "backend").strip().lower() or "geak"
+        tuner_name = cand["tuner"]
+        tput, gain_pct = _integrate_tput_and_gain(verdict)
+        tuned_file = _candidate_tuned_file(env, cand["env_var"])
+        lifted = self._coord.writeback.lift_to_current_best(
+            "gemm_tuning",
+            tput,
+            {
+                "name": f"{backend}_{tuner_name}",
+                "candidate_extra_server_args": self._gemm_candidate_server_args(tuner_name),
+                "extra_envs": dict(env),
+                "source_phase": "KERNEL_AGENT",
+                **integrate_measurement_fields(verdict.get("bench_result") or verdict),
+            },
+            entry_extra={
+                "tuned_file": tuned_file,
+                "gain_pct": gain_pct,
+                "backend": backend,
+                "source": "kernel_entry_auto",
+            },
+        )
+        if not lifted:
+            return None
+        self._journal_gemm_tuning_keep(self.shared_state.optimization_stack[-1], task_id=f"gemm_tune_e2e_{tuner_name}")
+        return {**cand, "envs": dict(env), "tput": tput, "gain_pct": gain_pct, "tuned_file": tuned_file}
+
+    async def _settle_gemm_e2e_verdict(
+        self,
+        result: dict[str, Any],
+        accepted_measurement: Mapping[str, Any],
+        paired_reference: dict[str, Any],
+        *,
+        running_tput: float,
+        paired_config_path: str,
+    ) -> None:
+        kept = result["e2e_results"]["kept"]
+        reverted = result["e2e_results"]["reverted"]
+        faults = result["e2e_results"]["faults"]
         # The watermark covers the whole run, so it waits for the last KEEP.
         result["graded_objective"] = None
+        total_gain: float | None = 0.0
         if kept:
-            total_gain: float | None = None
+            total_gain = None
             # Paired checks isolate the GEMM increment, not cumulative session gain.
             paired = await self._confirm_gemm_gain_paired(
                 paired_reference,
                 deepcopy(self.shared_state.current_best),
                 config_path=paired_config_path,
-                budget_minutes=per_tuner_budget_minutes,
+                budget_minutes=_per_tuner_budget_minutes(),
             )
             if self._coord.writeback.validate(
                 running_tput,
@@ -3579,8 +3518,8 @@ class KernelPhase(CoordinatorCollaborator):
                     against_baseline=True,
                 ).objective
             # Name the artifact this run adopted, so the breakdown can tell it was.
-            if adopted_tuned_file:
-                result["tuned_file"] = adopted_tuned_file
+            if kept[-1]["tuned_file"]:
+                result["tuned_file"] = kept[-1]["tuned_file"]
             log.info(
                 "gemm E2E: %d tuners KEEP (total gain=%s), %d REVERT",
                 len(kept),
@@ -3588,49 +3527,103 @@ class KernelPhase(CoordinatorCollaborator):
                 len(reverted),
             )
         elif faults:
-            stacked_envs = {}
-            total_gain = 0.0
-            log.info(
-                "gemm E2E: %d tuner(s) hit integrate fault(s), no E2E verdict",
-                len(faults),
-            )
+            log.info("gemm E2E: %d tuner(s) hit integrate fault(s), no E2E verdict", len(faults))
         else:
-            stacked_envs = {}
-            total_gain = 0.0
-            log.info(
-                "gemm E2E: all %d tuners REVERT, no E2E gain",
-                len(reverted),
-            )
-
-        # Rewrite the stored result to the E2E-validated outcome so Orchestration never sees the raw combined
-        # recommended_env and issues a bundled integrate.
-        result["e2e_results"] = {"kept": kept, "reverted": reverted, "faults": faults}
-        result["recommended_env_raw"] = dict(result.get("recommended_env") or {})
-        result["extra_envs_raw"] = dict(result.get("extra_envs") or {})
-        result["recommended_env"] = dict(stacked_envs)
-        result["extra_envs"] = dict(stacked_envs)
+            log.info("gemm E2E: all %d tuners REVERT, no E2E gain", len(reverted))
         if total_gain is None or (faults and not kept and not reverted):
             result["e2e_gain_pct"] = None
         else:
             result["e2e_gain_pct"] = round(float(total_gain), 4)
         result["e2e_validated"] = True
         result["requires_e2e_validation"] = False
+        result["decision"] = "KEEP" if kept else "REVERT"
         if kept:
             result["status"] = "complete"
-            result["decision"] = "KEEP"
-        elif reverted:
-            result["status"] = "complete"
-            result["decision"] = "REVERT"
-            result["micro_decision"] = "candidate_no_e2e_gain"
-        elif faults:
+        elif faults and not reverted:
             result["status"] = "failed"
-            result["decision"] = "REVERT"
             result["micro_decision"] = "integrate_fault"
         else:
             result["status"] = "complete"
-            result["decision"] = "REVERT"
             result["micro_decision"] = "candidate_no_e2e_gain"
         self._replace_latest_gemm_tuning_attempt(result)
+
+    async def _validate_gemm_tuning_e2e(self, result: dict[str, Any]) -> None:
+        """Sequentially E2E-validate each tuning candidate's env independently."""
+        from ..actions.executors._aiter_jit import drop_serving_so_for_envs
+
+        candidates = self._gemm_e2e_candidates(result)
+        if not candidates:
+            self._close_gemm_e2e_without_candidates(result)
+            return
+        running_tput = float(self.shared_state.current_best.get("tput") or self.shared_state.baseline_tput or 0.0)
+        budget_minutes = _per_tuner_budget_minutes()
+        paired_reference = deepcopy(self.shared_state.current_best)
+        paired_reference.setdefault("tput", running_tput)
+        paired_config_path = str(self.shared_state.baseline_config_path or "")
+        jit_backup_dir = self.session_dir / "runs" / "aiter_jit_backup"
+        stacked_envs: dict[str, str] = {}
+        kept: list[dict[str, Any]] = []
+        reverted: list[dict[str, Any]] = []
+        faults: list[dict[str, Any]] = []
+        accepted_measurement: dict[str, Any] = {}
+        # ``_runtime_uses_aiter_fused_moe`` resolves the serving log -- which now byte-scans the whole runs/ tree for
+        # aiter evidence -- and then reads it whole, ~17MB on the fleet.
+        triton_moe_inert = any(c.get("tuner") == "vllm_moe_triton" for c in candidates) and await asyncio.to_thread(
+            self._runtime_uses_aiter_fused_moe
+        )
+        for cand in candidates:
+            tuner_name = cand["tuner"]
+            skip_reason = self._gemm_candidate_skip_reason(tuner_name, triton_moe_inert=triton_moe_inert)
+            if skip_reason:
+                reverted.append({**cand, "reason": skip_reason})
+                continue
+            # Merge candidate CSV with the runtime config so that shapes NOT in the candidate keep their existing
+            # tuned entries.
+            env, refusal = self._merged_candidate_envs(cand)
+            if refusal is not None:
+                reverted.append(refusal)
+                continue
+            # Merge with previously KEEP'd envs.
+            test_envs = {**stacked_envs, **env}
+            log.info("gemm E2E: validating tuner=%s env=%s (base_tput=%.1f)", tuner_name, cand["env_var"], running_tput)
+            verdict = await self._integrate_gemm_candidate(
+                cand, test_envs, jit_backup_dir, base_tput=running_tput, budget_minutes=budget_minutes
+            )
+            if verdict is None:
+                break
+            if verdict.get("fault"):
+                faults.append(verdict)
+                continue
+            measurement = verdict.get("bench_result") or verdict
+            new_tput, gain_pct = _integrate_tput_and_gain(verdict)
+            decision = str(verdict.get("decision") or "").upper()
+            log.info(
+                "gemm E2E: tuner=%s decision=%s new_tput=%.1f gain=%.2f%%", tuner_name, decision, new_tput, gain_pct
+            )
+            blockers, cand = await self._gemm_apply_blockers(cand, env, gain_pct=gain_pct)
+            if decision == "KEEP" and new_tput > 0 and not blockers:
+                keep_row = self._keep_gemm_candidate(cand, env, verdict, result)
+                if keep_row is not None:
+                    stacked_envs.update(env)
+                    running_tput = new_tput
+                    accepted_measurement = measurement
+                    kept.append(keep_row)
+                    continue
+            reason = f"decision={decision}, gain={gain_pct:.2f}%"
+            if blockers:
+                # Distinguish no gain from a tuned artifact the runtime never reached.
+                reason = f"tuned_config_never_applied[{'+'.join(blockers)}] ({reason})"
+            reverted.append({**cand, "reason": reason})
+            await asyncio.to_thread(drop_serving_so_for_envs, test_envs, backup_dir=jit_backup_dir)
+
+        _record_gemm_e2e_envelope(result, stacked_envs, kept=kept, reverted=reverted, faults=faults)
+        await self._settle_gemm_e2e_verdict(
+            result,
+            accepted_measurement,
+            paired_reference,
+            running_tput=running_tput,
+            paired_config_path=paired_config_path,
+        )
 
     async def _finish_kernel_entry(self) -> None:
         """Run the gated kernel lanes, write the handoff, and delegate rewrite control."""
