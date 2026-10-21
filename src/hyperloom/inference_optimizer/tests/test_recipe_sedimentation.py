@@ -17,7 +17,7 @@ from hyperloom.orchestrator.roles.mock_backend import (
 )
 from hyperloom.orchestrator.loop.coordinator import AdvisoryServices, Coordinator
 from hyperloom.orchestrator.knowledge.recipe_kb import LocalRecipeStore, RecipeKB
-from hyperloom.orchestrator.knowledge._recipe_attrs import (
+from hyperloom.orchestrator.knowledge.recipe_journal import (
     attempt_provenance,
     recipe_attrs_from_state,
 )
@@ -223,7 +223,7 @@ def test_experience_rows_survive_the_kb_round_trip(tmp_path):
         model="m",
         hardware="h",
         framework_name="f",
-        # Exactly what _recipe_attrs.recipe_attrs_from_state emits.
+        # Exactly what recipe_journal.recipe_attrs_from_state emits.
         what_worked=[
             {
                 "name": "mtp_on",

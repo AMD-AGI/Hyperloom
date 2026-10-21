@@ -15,7 +15,7 @@ from hyperloom.orchestrator.roles import (
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.state.objective import TargetGainObjective
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
-from hyperloom.orchestrator.knowledge._recipe_attrs import (
+from hyperloom.orchestrator.knowledge.recipe_journal import (
     kept_kernel_optimizations,
     workload_kb_tags,
 )

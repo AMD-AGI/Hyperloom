@@ -6,13 +6,21 @@
 from __future__ import annotations
 
 import logging as _logging
+from copy import copy
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Collection, Mapping, NamedTuple
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Any, Collection, Mapping, NamedTuple, Sequence
 
-from hyperloom.common.coerce import to_float, to_int
+from hyperloom.common.coerce import recorded_float, to_float, to_int
 from hyperloom.common.io import JsonLineFormat, append_jsonl
 from hyperloom.inference_optimizer.breakdown.recorder import close_out as _close_out
+from hyperloom.inference_optimizer.breakdown.recorder.framework_event import (
+    ARM_CONFIG,
+    DISPOSITION_ATTEMPTED,
+    STEP_ATTEMPTED,
+    GateVerdict,
+)
 from hyperloom.inference_optimizer.recipe_snapshot_constants import detect_framework_version
 from hyperloom.inference_optimizer.session.optimization_journal import (
     OUTCOME_KEEP,
@@ -29,17 +37,9 @@ from hyperloom.orchestrator.lever import LEVER_CONFIG, lever_kind_for_task
 
 from ..collaborator import CoordinatorCollaborator
 from ..state.attempt_ledger import AttemptRow, record_attempt_row
-from ._config_timeline import NON_ATTEMPT_OUTCOMES, record_config_attempts
-from ._recipe_amend import (
-    amend_provenance,
-    amended_recipe_extras,
-    amended_recipe_fields,
-    appended,
-    improved_best_config,
-    rows_not_superseded,
-)
-from ._recipe_attrs import recipe_attrs_from_state, workload_kb_tags
+from ..state.failure_evidence import UNMEASURED_OUTCOMES, classify_failure_attribution
 from .config import KnowledgeStoreMode
+from .workload_tags import workload_shape_tags
 
 if TYPE_CHECKING:
     from ..loop.coordinator import Coordinator
@@ -75,6 +75,48 @@ _REMOTE_VALIDATION_ERROR = "RemoteRecipeValidationError"
 
 #: Explore outcomes the journal collapses into a plain revert.
 _MEASURED_LOSS_OUTCOMES: frozenset[str] = frozenset({OUTCOME_REVERT, "FAILED"})
+
+#: Explore outcomes that are not an attempt at anything: a variant skipped as a
+#: duplicate was never measured, so no measurement would back its funnel row.
+_NON_ATTEMPT_OUTCOMES: frozenset[str] = frozenset({"SKIPPED_DEDUP"})
+
+#: Recipe fields an amend carries forward when the caller does not override
+#: them, each with the empty value ``put_recipe`` falls back to.
+PRESERVED_RECIPE_FIELDS: Mapping[str, Any] = MappingProxyType(
+    {
+        "best_config": {},
+        "best_throughput": 0.0,
+        "what_worked": [],
+        "what_failed": [],
+        "remaining_gaps": [],
+        "last_profiled": "",
+        "stack_fingerprint": {},
+        "sessions": [],
+        "authority": "EXPERIENTIAL",
+        "confidence": 0.85,
+        "evidence_refs": [],
+    }
+)
+
+#: Row keys ``put_recipe`` owns; everything else on a live row is a session
+#: extra and survives the amend untouched.
+_RECIPE_OWNED_KEYS: frozenset[str] = frozenset(PRESERVED_RECIPE_FIELDS) | frozenset(
+    {
+        "canonical_id",
+        "version",
+        "created_at",
+        "updated_at",
+        "model",
+        "hardware",
+        "framework",
+        "framework_name",
+        "framework_version",
+        "precision",
+        "pitfalls",
+        "lessons",
+        "provenance",
+    }
+)
 
 #: Per-variant measurement detail the journal row carries beyond the headline
 #: gain and throughput.
@@ -133,24 +175,18 @@ class RemoteRecipeAudit:
 
 
 class _FrameworkIdentity(NamedTuple):
-    """The framework dimensions of a Recipe identity, with the version resolved."""
-
     name: str
     version: str
     precision: str
 
 
 class _VariantMeasurement(NamedTuple):
-    """What one explore variant's benchmark reported."""
-
     gain_pct: float | None
     throughput_after: float | None
     detail: dict[str, Any]
 
 
 class _VariantFailure(NamedTuple):
-    """Why a variant was reverted; both fields absent for every other outcome."""
-
     error_class: str | None
     reason: str | None
 
@@ -215,7 +251,7 @@ def _record_config_run(coord: Any, *, task: Any, result_dict: Mapping[str, Any])
     if recorder is None:
         return
     from hyperloom.common.timeutil import now_iso
-    from hyperloom.inference_optimizer.breakdown.recorder.framework_event import ARM_CONFIG, ROLE_CONFIG
+    from hyperloom.inference_optimizer.breakdown.recorder.framework_event import ROLE_CONFIG
 
     task_id = str(getattr(task, "task_id", "") or "")
     if not task_id:
@@ -238,12 +274,212 @@ def _record_config_run(coord: Any, *, task: Any, result_dict: Mapping[str, Any])
     )
 
 
-def _framework_identity(state: Any) -> _FrameworkIdentity:
-    """The session's framework, the version it is running and its precision.
+def _attempt_failure(row: Mapping[str, Any], outcome: str) -> dict[str, Any]:
+    error_class = str(row.get("error_class") or "")
+    error_excerpt = str(row.get("error_excerpt") or "")
+    attribution = ""
+    if outcome in UNMEASURED_OUTCOMES:
+        attribution = classify_failure_attribution(
+            error_class=error_class,
+            error_excerpt=error_excerpt,
+            reason=row.get("reason"),
+            explicit=row.get("failure_attribution"),
+        )
+    return {"error_class": error_class, "error_excerpt": error_excerpt, "attribution": attribution}
 
-    The version is probed from the installed framework when the session never
-    recorded one, so a recipe is never filed under a blank version.
+
+def _attempt_fields(
+    row: Mapping[str, Any],
+    gates: Sequence[Mapping[str, Any]],
+    shared: Mapping[str, str],
+    adopted: bool,
+) -> dict[str, Any]:
+    variant = row.get("variant") if isinstance(row.get("variant"), dict) else {}
+    metrics = row.get("metrics") if isinstance(row.get("metrics"), dict) else {}
+    outcome = str(row.get("outcome") or "")
+    # This arm gates accuracy rather than reporting it, so the block both arms
+    # carry is projected from the gate that ruled. No gate row means nothing
+    # gated the variant, which is not a gate that refused it.
+    ruling = next((gate for gate in gates if str(gate.get("gate") or "") == "accuracy"), {})
+    return {
+        "arm": ARM_CONFIG,
+        **shared,
+        "provenance": row.get("provenance"),
+        "outcome": outcome,
+        "reason": row.get("reason"),
+        "reasoning": variant.get("note"),
+        "reasoning_origin": variant.get("reasoning_origin"),
+        "experience_citations": variant.get("experience_citations"),
+        "stage": row.get("stage"),
+        "fingerprint": row.get("fingerprint"),
+        # The fingerprint is the join key; the name is what a reader
+        # recognises the variant by.
+        "variant_name": row.get("variant_name"),
+        "measurement": {
+            # Both ends of the pair: the anchor advances on every KEEP, so a
+            # percentage without its denominator adds to nothing.
+            "before_tput": metrics.get("base_tput"),
+            "after_tput": metrics.get("tput"),
+            "gain_pct": metrics.get("gain_pct"),
+            "runtime_sec": metrics.get("runtime_sec"),
+            "estimated_output_throughput": metrics.get("estimated_output_throughput"),
+        },
+        "config_delta": {
+            "extra_server_args": variant.get("extra_server_args"),
+            "extra_envs": variant.get("extra_envs"),
+            "remove_args": variant.get("remove_args"),
+            "unset_envs": variant.get("unset_envs"),
+            "args_mode": variant.get("args_mode"),
+        },
+        "accuracy": {
+            "required": True if ruling else None,
+            "value": ruling.get("observed"),
+            "reference": ruling.get("threshold"),
+            "passed": ruling.get("passed"),
+        },
+        "failure": _attempt_failure(row, outcome),
+        "artifacts": {
+            "workspace": row.get("workspace"),
+            "server_log_path": row.get("server_log_path"),
+            "raw_result_path": row.get("raw_result_path"),
+        },
+        "decision": outcome,
+        "adopted": adopted,
+        # Every variant recorded here ran: the deduped one is skipped above.
+        "benched": True,
+        # Recorded rather than referenced: every KEEP advances the stack, so
+        # the session's current config is not what this variant was measured
+        # on top of.
+        "measured_against": row.get("measured_against"),
+        # What stood behind the verdict. Absent when nothing ruled.
+        "validation_basis": row.get("validation_basis"),
+        # A pair is what makes a gain addable, so eligibility follows the pair
+        # being present rather than the outcome being a KEEP.
+        "attribution_eligible": (adopted and metrics.get("base_tput") is not None and metrics.get("tput") is not None),
+    }
+
+
+def _record_variant_attempt(
+    recorder: Any,
+    row: Any,
+    shared: Mapping[str, str],
+    adopted_variants: Collection[str],
+) -> bool:
+    if not isinstance(row, dict):
+        return False
+    if str(row.get("outcome") or "") in _NON_ATTEMPT_OUTCOMES:
+        return False
+    # The fingerprint identifies the variant within the round and the round
+    # within the task, so the three together identify the attempt.
+    fingerprint = str(row.get("fingerprint") or "")
+    parts = (shared["task_id"], shared["round_id"], fingerprint)
+    attempt_id = ":".join(part for part in parts if part) or shared["task_id"]
+    if not attempt_id:
+        return False
+    gates = [gate for gate in (row.get("gates") or []) if isinstance(gate, dict)]
+    recorder.record_attempt(attempt_id, **_attempt_fields(row, gates, shared, fingerprint in adopted_variants))
+    for gate in gates:
+        recorder.record_attempt_gate(
+            attempt_id,
+            GateVerdict(
+                gate=str(gate.get("gate") or ""),
+                passed=gate.get("passed"),
+                reason=str(gate.get("reason") or ""),
+                observed=gate.get("observed"),
+                threshold=gate.get("threshold"),
+            ),
+        )
+    return True
+
+
+def _record_config_attempts(
+    coord: Any,
+    *,
+    task: Any,
+    per_variant: list[dict[str, Any]],
+    result_dict: Mapping[str, Any],
+    adopted_variants: Collection[str],
+) -> None:
+    """Record the configuration arm's measured attempts on the framework event.
+
+    Timeline only: the ledger row is written by ``fact_write_hook``, which does
+    not depend on a recorder being open. The outcome is recorded verbatim here,
+    unlike the journal beside it, which collapses ``KEEP_UNSTABLE`` and
+    ``KILLED_OVERTIME`` into a plain revert.
     """
+    recorder = coord._coord.phase_framework.timeline()
+    if recorder is None:
+        return
+    params = getattr(task, "params", None) or {}
+    shared = {
+        "task_id": str(getattr(task, "task_id", "") or ""),
+        "round_id": str(result_dict.get("round_id") or ""),
+        "proposal_ref": str(params.get("proposal_msg_id") or ""),
+    }
+    recorded = 0
+    for row in per_variant:
+        if _record_variant_attempt(recorder, row, shared, adopted_variants):
+            recorded += 1
+    if not (recorded and shared["proposal_ref"]):
+        return
+    # Settled here rather than at materialization: a grid whose task dies before
+    # any variant runs has no attempt to stand behind an ``attempted`` reading,
+    # and is more honestly left unsettled.
+    recorder.record_proposal_step(shared["proposal_ref"], step=STEP_ATTEMPTED, outcome=str(recorded))
+    recorder.settle_proposal(shared["proposal_ref"], disposition=DISPOSITION_ATTEMPTED)
+
+
+def rows_not_superseded(live_rows: Any, superseding: Any, key: str) -> list[dict[str, Any]]:
+    claimed = {str(row.get(key) or "") for row in superseding or [] if isinstance(row, dict)}
+    kept: list[dict[str, Any]] = []
+    for row in live_rows or []:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get(key) or "") in claimed:
+            continue
+        kept.append(dict(row))
+    return kept
+
+
+def appended(live_facts: Any, addition: Mapping[str, Any] | None) -> list[Any]:
+    facts = list(live_facts or [])
+    if addition is not None:
+        facts.append(addition)
+    return facts
+
+
+def amended_recipe_fields(live: Mapping[str, Any], overrides: Mapping[str, Any]) -> dict[str, Any]:
+    # An absent or empty live value falls back to the field's own default, so
+    # ``put_recipe`` never sees ``None`` where it declares a container.
+    merged: dict[str, Any] = {}
+    for field, default in PRESERVED_RECIPE_FIELDS.items():
+        if field in overrides:
+            merged[field] = overrides[field]
+            continue
+        live_value = live.get(field)
+        merged[field] = type(default)(live_value) if live_value else copy(default)
+    return merged
+
+
+def amended_recipe_extras(live: Mapping[str, Any], overrides: Mapping[str, Any], state: Any) -> dict[str, Any]:
+    # The architecture tags are re-stamped from config.json each time because a
+    # row written before the architecture was read carries none.
+    extras = {key: value for key, value in live.items() if key not in _RECIPE_OWNED_KEYS}
+    extras.update(overrides.get("extras") or {})
+    architectures = state.model_architectures or []
+    if isinstance(architectures, list):
+        named = [str(name).strip() for name in architectures if str(name or "").strip()]
+        if named:
+            extras["architectures"] = named
+    model_type = str(state.model_type or "").strip()
+    if model_type:
+        extras["model_type"] = model_type
+    return extras
+
+
+def _framework_identity(state: Any) -> _FrameworkIdentity:
+    # Probed from the installed framework when the session never recorded a
+    # version, so a recipe is never filed under a blank one.
     name = str(state.framework or "")
     version = str(state.framework_version or "")
     if not version and name:
@@ -252,7 +488,6 @@ def _framework_identity(state: Any) -> _FrameworkIdentity:
 
 
 def _result_payload(result: Any) -> dict[str, Any]:
-    """A completed task's result dict, whatever shape the executor returned it in."""
     payload = result.result if hasattr(result, "result") else (result or {})
     return payload if isinstance(payload, dict) else {}
 
@@ -264,9 +499,8 @@ def _grid_attempt_row(
     round_id: str,
     adopted: bool,
 ) -> AttemptRow | None:
-    """The adoption-ledger row for one measured grid variant, or ``None`` when it measured nothing."""
     outcome = str(variant_outcome.get("outcome") or "") if isinstance(variant_outcome, dict) else ""
-    if not outcome or outcome in NON_ATTEMPT_OUTCOMES:
+    if not outcome or outcome in _NON_ATTEMPT_OUTCOMES:
         return None
     metrics = variant_outcome.get("metrics") if isinstance(variant_outcome.get("metrics"), dict) else {}
     return AttemptRow(
@@ -286,7 +520,6 @@ def _grid_attempt_row(
 
 
 def _variant_verdict(outcome: str, adopted: bool) -> Verdict:
-    """How one explore variant's own outcome settles against the adoption rule."""
     if outcome == OUTCOME_KEEP:
         return Verdict.ADOPTED if adopted else Verdict.REFUSED
     if outcome in _MEASURED_LOSS_OUTCOMES:
@@ -295,7 +528,6 @@ def _variant_verdict(outcome: str, adopted: bool) -> Verdict:
 
 
 def _variant_measurement(metrics: Any) -> _VariantMeasurement:
-    """One variant's measured figures, blank throughout when it never measured."""
     if not isinstance(metrics, dict):
         return _VariantMeasurement(gain_pct=None, throughput_after=None, detail={})
     return _VariantMeasurement(
@@ -306,7 +538,6 @@ def _variant_measurement(metrics: Any) -> _VariantMeasurement:
 
 
 def _variant_failure(variant_outcome: Mapping[str, Any], outcome: str) -> _VariantFailure:
-    """What the journal records about a reverted variant, blank for every other outcome."""
     if outcome != OUTCOME_REVERT:
         return _VariantFailure(error_class=None, reason=None)
     return _VariantFailure(
@@ -316,7 +547,6 @@ def _variant_failure(variant_outcome: Mapping[str, Any], outcome: str) -> _Varia
 
 
 def _variant_change_attrs(variant_attrs: Any, variant_name: str) -> dict[str, Any]:
-    """One variant's attributes as the change summary needs them."""
     attrs = dict(variant_attrs) if isinstance(variant_attrs, dict) else {}
     named_knob = attrs.get("extra_server_args") or attrs.get("extra_envs") or attrs.get("name")
     if not named_knob and variant_name:
@@ -325,7 +555,6 @@ def _variant_change_attrs(variant_attrs: Any, variant_name: str) -> dict[str, An
 
 
 def _finalize_outcome(*, status: str, reason: str, backend: str, result_type: str) -> dict[str, Any]:
-    """One terminal Recipe-finalize outcome, in the shape the close-out step records."""
     return {
         "status": status,
         "reason": reason,
@@ -335,7 +564,6 @@ def _finalize_outcome(*, status: str, reason: str, backend: str, result_type: st
 
 
 def _finalize_error(exc: BaseException, *, reason: str, backend: str, result_type: str) -> dict[str, Any]:
-    """The outcome for a finalize attempt an exception ended."""
     return {
         "status": "error",
         "reason": reason,
@@ -425,7 +653,7 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         if task.kind == "explore":
             _record_config_run(self, task=task, result_dict=result_dict)
         if task.kind == "explore" and isinstance(per_variant, list) and per_variant:
-            record_config_attempts(
+            _record_config_attempts(
                 self,
                 task=task,
                 per_variant=per_variant,
@@ -747,7 +975,7 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         """
         journal = self.ensure_journal()
         outcome_raw = str(variant_outcome.get("outcome") or "")
-        if outcome_raw in NON_ATTEMPT_OUTCOMES:
+        if outcome_raw in _NON_ATTEMPT_OUTCOMES:
             return
         outcome = derive_journal_outcome(_variant_verdict(outcome_raw, adopted), variant_outcome)
         variant_name = str(variant_outcome.get("variant_name") or "")
@@ -974,12 +1202,10 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         }
 
     def _unvalidated_stack_outcome(self) -> dict[str, Any] | None:
-        """The skip outcome when the working recipe outran its last validation, else ``None``.
-
-        ``current_best`` and ``cumulative_gain_validated`` are only one Recipe's
-        figures when nothing was lifted since the last validation; otherwise every
-        sink below would pair the newer config with the older gain.
-        """
+        # ``current_best`` and ``cumulative_gain_validated`` are only one
+        # Recipe's figures when nothing was lifted since the last validation;
+        # otherwise every sink below would pair the newer config with the
+        # older gain.
         state = self.shared_state
         if not state.optimization_stack_has_unvalidated_keeps():
             return None
@@ -1050,11 +1276,8 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         return self._write_local_recipe()
 
     def _publish_remote_recipe(self, source: str) -> dict[str, Any]:
-        """Publish the terminal Recipe to the KB Store and audit the attempt.
-
-        Remote mode has one Recipe sink: the KB Store final session writer. T0 and
-        runtime amendment are intentionally absent.
-        """
+        # Remote mode has one Recipe sink: the KB Store final session writer.
+        # T0 and runtime amendment are intentionally absent.
         state = self.shared_state
         session_id = str(state.recipe_kb_session_id or state.session_id or self.session_dir.name)
         canonical_id = ""
@@ -1118,11 +1341,8 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         }
 
     def _final_recipe_overrides(self) -> dict[str, Any]:
-        """What this session's close writes over the live Recipe row.
-
-        Read-modify-write under the cid flock, so two finalises of the same session
-        leave one row rather than tearing the lists they both append to.
-        """
+        # Read-modify-write under the cid flock, so two finalises of the same
+        # session leave one row rather than tearing the lists they both append to.
         state = self.shared_state
         attrs = recipe_attrs_from_state(state, self.session_dir.name)
         live = self.recipe_kb.get_authoritative_recipe(canonical_id=self.workload_canonical_id()) or {}
@@ -1140,14 +1360,18 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
             "sessions": rows_not_superseded(live.get("sessions"), my_sessions, "session_id") + my_sessions,
             "extras": extras,
         }
-        overrides.update(improved_best_config(state, attrs, live))
+        # The row's own figures survive a session that never validated a win,
+        # or whose win does not beat what the row already advertises.
+        my_throughput = float(attrs.get("best_throughput") or 0.0)
+        won = bool(state.optimization_stack or float(state.cumulative_gain_validated or 0.0) > 0.0)
+        won = won or bool(str(state.current_best.get("extra_server_args") or "").strip())
+        if won and my_throughput > recorded_float(live.get("best_throughput")):
+            overrides["best_config"] = attrs["best_config"]
+            overrides["best_throughput"] = my_throughput
         return overrides
 
     def _write_local_recipe(self) -> dict[str, Any]:
-        """Amend the local Recipe row with this session's settled result.
-
-        Local mode never consults ambient KB_STORE_* credentials.
-        """
+        # Local mode never consults ambient KB_STORE_* credentials.
         if self.recipe_kb is None:
             return _finalize_outcome(
                 status="skipped",
@@ -1326,7 +1550,12 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
             "pitfalls": appended(live.get("pitfalls"), append_pitfall),
             "lessons": appended(live.get("lessons"), append_lesson),
             "extras": amended_recipe_extras(live, overrides, state),
-            "provenance": amend_provenance(provenance_details),
+            "provenance": {
+                "source": "hyperloom-inference-optimizer",
+                "generator": "coordinator",
+                "generated_at": datetime.now(timezone.utc).isoformat(timespec="microseconds"),
+                "details": dict(provenance_details or {}),
+            },
             **amended_recipe_fields(live, overrides),
         }
         self.recipe_kb.put_recipe(**put_kwargs)
@@ -1334,3 +1563,297 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
 
 
 __all__ = ["RecipeJournalCollaborator"]
+
+
+#: The probe's own word for a version it could not read.
+_UNIDENTIFIED_VERSION: str = "unknown"
+
+
+class AttemptProvenance(NamedTuple):
+    """Where a session's proven optimizations came from, and what it reverted.
+
+    Keepers are indexed twice because a stack layer may identify itself either
+    by name or by the research gap it closed.
+    """
+
+    kept_by_name: dict[str, str]
+    kept_by_gap: dict[str, str]
+    reverted: list[dict[str, Any]]
+
+
+def _known_version(raw: Any) -> str:
+    version = str(raw or "").strip()
+    return "" if version == _UNIDENTIFIED_VERSION else version
+
+
+def _runtime_version_tags(fingerprint_meta: Mapping[str, Any], framework: str) -> dict[str, str]:
+    tags: dict[str, str] = {}
+    framework_key = framework.lower()
+    if framework_key in {"sglang", "vllm"}:
+        active = _known_version(fingerprint_meta.get(framework_key))
+        if active:
+            tags["framework_version"] = active
+    for source_key, tag in (("rocm", "rocm_version"), ("aiter", "aiter_version"), ("image_digest", "image_digest")):
+        version = _known_version(fingerprint_meta.get(source_key))
+        if version:
+            tags[tag] = version
+    return tags
+
+
+def _baseline_workload_tags(workload_extra: Mapping[str, Any]) -> dict[str, Any]:
+    tags: dict[str, Any] = {}
+    for key in ("max_running_requests", "max_num_seqs"):
+        value = workload_extra.get(key)
+        if isinstance(value, int) and value > 0:
+            tags[key] = value
+    for key in ("chunked_prefill_enabled", "enable_torch_compile"):
+        value = workload_extra.get(key)
+        if isinstance(value, bool):
+            tags[key] = value
+    for key in ("quant_scheme", "workload_mode"):
+        value = workload_extra.get(key)
+        if isinstance(value, str) and value.strip():
+            tags[key] = value.strip()
+    return tags
+
+
+def workload_kb_tags(state: Any) -> dict[str, Any]:
+    """The workload-shape tags describing the session this recipe came from."""
+    tags: dict[str, Any] = {}
+    # ``model_family`` is deliberately absent, being no part of the
+    # seven-dimension Recipe identity.
+    for attr in ("framework", "model_class", "model_name"):
+        text = str(getattr(state, attr, "") or "").strip()
+        if text:
+            tags[attr] = text
+    precision = getattr(state, "precision", None)
+    if precision not in (None, "", 0):
+        tags["precision"] = precision
+    tags.update(workload_shape_tags(state))
+    fingerprint_meta = state.stack_fingerprint_meta or {}
+    if isinstance(fingerprint_meta, dict):
+        tags.update(_runtime_version_tags(fingerprint_meta, str(tags.get("framework") or "")))
+    workload_extra = state.baseline_workload_extra or {}
+    if isinstance(workload_extra, dict):
+        tags.update(_baseline_workload_tags(workload_extra))
+    return tags
+
+
+def _index_integrate_attempts(attempts: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    by_kernel: dict[str, dict[str, Any]] = {}
+    by_task_group: dict[str, dict[str, Any]] = {}
+    for entry in attempts.values():
+        if not isinstance(entry, dict):
+            continue
+        kernel_id = str(entry.get("kernel_id") or "")
+        if kernel_id:
+            by_kernel[kernel_id] = entry
+        task_group_key = str(entry.get("task_group_key") or "")
+        if task_group_key:
+            by_task_group[task_group_key] = entry
+    return by_kernel, by_task_group
+
+
+def _last_rebenched_throughput(integration: Mapping[str, Any]) -> float:
+    for attempt in reversed(list(integration.get("attempts") or [])):
+        if isinstance(attempt, dict) and attempt.get("new_tput") is not None:
+            return recorded_float(attempt.get("new_tput"))
+    return 0.0
+
+
+def _kernel_optimization_row(
+    entry: Mapping[str, Any],
+    ledger_id: str,
+    by_kernel: Mapping[str, Any],
+    by_task_group: Mapping[str, Any],
+) -> dict[str, Any]:
+    kernel_id = str(entry.get("current_kernel_id") or entry.get("kernel_id") or ledger_id)
+    task_group_key = str(entry.get("task_group_key") or "")
+    integration = by_task_group.get(task_group_key) if task_group_key else by_kernel.get(kernel_id)
+    integrated = isinstance(integration, dict)
+    return {
+        "kernel_id": kernel_id,
+        "source_file": str(entry.get("last_source_file") or ""),
+        "artifact_path": str(entry.get("last_artifact_path") or ""),
+        "micro_speedup": recorded_float(entry.get("last_micro_speedup")),
+        "decision": OUTCOME_KEEP,
+        "e2e_gain_pct": recorded_float(integration.get("best_gain_pct")) if integrated else 0.0,
+        "e2e_tput": _last_rebenched_throughput(integration) if integrated else 0.0,
+        "e2e_decision": str(integration.get("last_decision") or "").upper() if integrated else "",
+        "integrated": integrated,
+        "ts": str(entry.get("last_ts") or ""),
+    }
+
+
+def kept_kernel_optimizations(state: Any) -> list[dict[str, Any]]:
+    """The KEEP'd kernel optimizations, each joined to its end-to-end integrate verdict."""
+    optimizations = state.kernel_opt_task_attempts or {}
+    if not isinstance(optimizations, dict):
+        return []
+    integrations = state.kernel_integrate_attempts or {}
+    by_kernel, by_task_group = _index_integrate_attempts(integrations if isinstance(integrations, dict) else {})
+    rows: list[dict[str, Any]] = []
+    for ledger_id, entry in optimizations.items():
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get("last_decision", "")).upper() != OUTCOME_KEEP:
+            continue
+        rows.append(_kernel_optimization_row(entry, ledger_id, by_kernel, by_task_group))
+    return rows
+
+
+def _reverted_attempt_row(name: str, attempt: Mapping[str, Any], source: str) -> dict[str, Any]:
+    row: dict[str, Any] = {
+        "name": name,
+        "reason": "reverted",
+        "gain_pct": attempt.get("gain_pct"),
+    }
+    if source:
+        row["source"] = source
+    return row
+
+
+def _gap_attempt_provenance(gap: Mapping[str, Any]) -> AttemptProvenance:
+    source = str(gap.get("provenance") or "").strip()
+    canonical_id = str(gap.get("canonical_id") or "").strip()
+    kept_by_name: dict[str, str] = {}
+    kept_by_gap: dict[str, str] = {}
+    reverted: list[dict[str, Any]] = []
+    for attempt in gap.get("attempts") or []:
+        if not isinstance(attempt, dict):
+            continue
+        variant = str(attempt.get("variant_name") or "").strip()
+        kernel = str(attempt.get("kernel_id") or "").strip()
+        outcome = str(attempt.get("outcome") or "").strip().upper()
+        if outcome == OUTCOME_KEEP and source:
+            for name in (variant, kernel):
+                if name:
+                    kept_by_name.setdefault(name, source)
+            if canonical_id:
+                kept_by_gap.setdefault(canonical_id, source)
+        elif outcome == OUTCOME_REVERT and (variant or kernel):
+            reverted.append(_reverted_attempt_row(variant or kernel, attempt, source))
+    return AttemptProvenance(kept_by_name=kept_by_name, kept_by_gap=kept_by_gap, reverted=reverted)
+
+
+def attempt_provenance(state: Any) -> AttemptProvenance:
+    """Trace each proven optimization back to the research hint it came from."""
+    kept_by_name: dict[str, str] = {}
+    kept_by_gap: dict[str, str] = {}
+    reverted: list[dict[str, Any]] = []
+    for gap in state.gaps or []:
+        if not isinstance(gap, dict):
+            continue
+        from_gap = _gap_attempt_provenance(gap)
+        for name, source in from_gap.kept_by_name.items():
+            kept_by_name.setdefault(name, source)
+        for canonical_id, source in from_gap.kept_by_gap.items():
+            kept_by_gap.setdefault(canonical_id, source)
+        reverted.extend(from_gap.reverted)
+    return AttemptProvenance(kept_by_name=kept_by_name, kept_by_gap=kept_by_gap, reverted=reverted)
+
+
+def _best_config(current_best: Mapping[str, Any], optimization_stack: Sequence[Any]) -> dict[str, Any]:
+    config: dict[str, Any] = {}
+    current_args = current_best.get("extra_server_args")
+    if current_args:
+        config["extra_server_args"] = str(current_args)
+    for key in ("extra_envs", "name", "tput", "accuracy"):
+        if key in current_best:
+            config[key] = current_best[key]
+    last = optimization_stack[-1] if optimization_stack else None
+    stack_args = (
+        str(last.get("candidate_extra_server_args") or last.get("extra_server_args") or "").strip()
+        if isinstance(last, dict)
+        else ""
+    )
+    if stack_args:
+        config["extra_server_args"] = stack_args
+    return config
+
+
+def _what_worked(
+    optimization_stack: Sequence[Any],
+    gain_per_entry: Sequence[Any],
+    provenance: AttemptProvenance,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for index, entry in enumerate(optimization_stack):
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("variant_name") or entry.get("name") or entry.get("kernel_id") or "")
+        row: dict[str, Any] = {
+            "name": name,
+            "extra_server_args": str(entry.get("extra_server_args") or ""),
+            "extra_envs": dict(entry.get("extra_envs") or {}),
+            "gain_pct": gain_per_entry[index] if index < len(gain_per_entry) else None,
+        }
+        # The layer's gap id wins; the variant or kernel name answers for
+        # layers recorded before gap ids were stamped.
+        gap_id = str(entry.get("gap_canonical_id") or "").strip()
+        by_name = provenance.kept_by_name
+        source = (provenance.kept_by_gap.get(gap_id) if gap_id else "") or by_name.get(name)
+        source = source or by_name.get(str(entry.get("kernel_id") or "")) or ""
+        if source:
+            row["source"] = source
+        rows.append(row)
+    return rows
+
+
+def _what_failed(recent_failures: Sequence[Any], reverted: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for failure in recent_failures[-10:]:
+        if isinstance(failure, dict):
+            rows.append(
+                {
+                    "name": str(failure.get("name") or failure.get("action") or ""),
+                    "reason": str(failure.get("reason") or failure.get("error_class") or ""),
+                }
+            )
+    rows.extend(reverted)
+    return rows
+
+
+def _session_row(
+    state: Any,
+    session_name: str,
+    optimization_stack: Collection[Any],
+    final_throughput: float,
+) -> dict[str, Any]:
+    validated_stack_len = int(state.cumulative_gain_validated_stack_len or 0)
+    actions = [
+        str(entry.get("variant_name") or entry.get("name") or entry.get("action") or "").strip()
+        for entry in optimization_stack
+        if isinstance(entry, dict)
+    ]
+    return {
+        "session_id": str(state.recipe_kb_session_id or session_name),
+        "gain_pct": float(state.cumulative_gain_validated or 0.0),
+        "stack_len": validated_stack_len or len(optimization_stack),
+        "throughput_before": float(state.baseline_tput or 0.0),
+        "throughput_after": final_throughput,
+        "date": datetime.now(timezone.utc).isoformat(),
+        "actions_taken": [name for name in actions if name],
+    }
+
+
+def recipe_attrs_from_state(state: Any, session_name: str) -> dict[str, Any]:
+    """Materialise the recipe-shaped view of one session's settled state.
+
+    ``framework_version`` is left unset here because it is manifest-derived; the
+    T0 backfill writes it.
+    """
+    optimization_stack = state.optimization_stack or []
+    # A session that does not sediment its attempts reports no provenance.
+    provenance = attempt_provenance(state) if state.recipe_sediment_enabled else AttemptProvenance({}, {}, [])
+    final_throughput = float(state.current_best.get("tput", 0.0))
+    return {
+        "best_config": _best_config(state.current_best, optimization_stack),
+        "best_throughput": final_throughput,
+        "what_worked": _what_worked(optimization_stack, state.gain_per_stack_entry or [], provenance),
+        "what_failed": _what_failed(state.last_action_failures or [], provenance.reverted),
+        "kernel_optimizations": kept_kernel_optimizations(state),
+        "last_profiled": str(state.cumulative_gain_validated_ts or ""),
+        "workload": workload_kb_tags(state),
+        "sessions": [_session_row(state, session_name, optimization_stack, final_throughput)],
+    }

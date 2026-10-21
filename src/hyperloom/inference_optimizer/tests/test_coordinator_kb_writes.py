@@ -25,7 +25,7 @@ from hyperloom.orchestrator.knowledge.recipe_kb import (
     recipe_canonical_id,
 )
 from hyperloom.orchestrator.knowledge.config import KnowledgeConfig
-from hyperloom.orchestrator.knowledge._recipe_attrs import (
+from hyperloom.orchestrator.knowledge.recipe_journal import (
     recipe_attrs_from_state,
 )
 from hyperloom.inference_optimizer.breakdown.recorder import close_out as _close_out
