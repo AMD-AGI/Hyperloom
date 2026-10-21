@@ -502,9 +502,11 @@ function-lines src/hyperloom/orchestrator/actions/executors/_ray_serving.py::Ser
 function-lines src/hyperloom/orchestrator/actions/executors/_server_patcher.py::_apply_atomic 149
 function-lines src/hyperloom/orchestrator/actions/executors/_server_patcher.py::_discover_sglang_plan 92
 function-lines src/hyperloom/orchestrator/actions/executors/_workload_envs.py::materialize_config_with_envs 915
+function-lines src/hyperloom/orchestrator/actions/executors/baseline.py::BenchmarkRunExecutor._maybe_stop_on_missing_baseline_accuracy 108
 function-lines src/hyperloom/orchestrator/actions/executors/baseline.py::BenchmarkRunExecutor._mn_warmup_pass 92
 function-lines src/hyperloom/orchestrator/actions/executors/baseline.py::BenchmarkRunExecutor._preflight_server_argv 103
-function-lines src/hyperloom/orchestrator/actions/executors/baseline.py::BenchmarkRunExecutor._run_single_benchmark 84
+function-lines src/hyperloom/orchestrator/actions/executors/baseline.py::BenchmarkRunExecutor._run_once 107
+function-lines src/hyperloom/orchestrator/actions/executors/baseline.py::BenchmarkRunExecutor._run_single_benchmark 98
 function-lines src/hyperloom/orchestrator/actions/executors/benchmark_result.py::harvest_leaked_artifacts 85
 function-lines src/hyperloom/orchestrator/actions/executors/bypass_engine.py::build_server_command 96
 function-lines src/hyperloom/orchestrator/actions/executors/explore.py::ExploreExecutor.__call__ 1124
@@ -799,7 +801,7 @@ module-lines src/hyperloom/inference_optimizer/roofline_ceiling.py 1444
 module-lines src/hyperloom/orchestrator/actions/executors/_grid_runner.py 2089
 module-lines src/hyperloom/orchestrator/actions/executors/_kv_metrics.py 1590
 module-lines src/hyperloom/orchestrator/actions/executors/_workload_envs.py 2158
-module-lines src/hyperloom/orchestrator/actions/executors/baseline.py 3938
+module-lines src/hyperloom/orchestrator/actions/executors/baseline.py 4163
 module-lines src/hyperloom/orchestrator/actions/executors/explore.py 1880
 module-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py 4735
 module-lines src/hyperloom/orchestrator/actions/executors/profile.py 1395
