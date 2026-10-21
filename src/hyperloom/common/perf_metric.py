@@ -313,6 +313,13 @@ def stamp_output_per_gpu(measurement: Any, tp: Any) -> None:
     measurement[GRADED_OUTPUT_PER_GPU] = out / chips
 
 
+def with_output_per_gpu(measurement: Mapping[str, Any], tp: Any) -> dict[str, Any]:
+    """A copy of *measurement* carrying the per-GPU output, for a record written before its owner stamps it."""
+    stamped = dict(measurement)
+    stamp_output_per_gpu(stamped, tp)
+    return stamped
+
+
 def incomparability_reason(candidate: Mapping[str, float], anchor: Mapping[str, float]) -> str:
     """Why the pair did not measure the same work, or "" when it did: equal-length windows, failures within the slack.
 
@@ -537,5 +544,6 @@ __all__ = [
     "perf_snapshot_from_mapping",
     "resolve_grading_anchor_perf",
     "stamp_output_per_gpu",
+    "with_output_per_gpu",
     "total_tput_of",
 ]

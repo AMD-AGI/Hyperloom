@@ -33,7 +33,7 @@ from hyperloom.common.env import is_truthy
 from hyperloom.common.env_safety import redact_secret_values, scrub_benchmark_process_env
 from hyperloom.common.git_safety import safe_directory_args
 from hyperloom.common.model_paths import resolve_session_model_path
-from hyperloom.common.perf_metric import is_agentx_mode
+from hyperloom.common.perf_metric import is_agentx_mode, with_output_per_gpu
 from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import (
     ROUND_ACCURACY,
@@ -4126,7 +4126,7 @@ class BaselineExecutor(BenchmarkRunExecutor):
                 recorder.finish_crashed(exc)
             raise
         if recorder is not None:
-            recorder.finish(result)
+            recorder.finish(with_output_per_gpu(result, getattr(shared_state, "tp", None)))
         return result
 
     def _resolve_sink(self, ctx: RunnerContext) -> Any:
