@@ -514,7 +514,7 @@ async def restart_server_for_round(
                     # The reachable /health above can be a pod-pinned head address; the benchmark dials the published
                     # ClusterIP Service, whose endpoints lag readiness after a restart.
                     await _wait_for_published_service_ready_async(
-                        timeout_s=env_int("HYPERLOOM_MN_PUBLISHED_READY_S", 300), poll_every_s=poll_s
+                        timeout_s=_published_ready_timeout_s(), poll_every_s=poll_s
                     )
                 except ServerRestartFailed as exc:
                     _collect_worker_server_logs(_read_state(), str(exc))
@@ -1087,6 +1087,16 @@ def _is_name_resolution_error(exc: BaseException) -> bool:
     return False
 
 
+def _published_ready_timeout_s() -> int:
+    """Resolve the published-service gate budget from the environment."""
+    return env_int("HYPERLOOM_MN_PUBLISHED_READY_S", 300)
+
+
+def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
+    """Read a poll-count knob whose smallest meaningful value is *minimum*, not zero."""
+    return max(minimum, env_int(name, default))
+
+
 async def _wait_for_published_service_ready_async(
     timeout_s: int = 300,
     poll_every_s: int = 10,
@@ -1114,11 +1124,11 @@ async def _wait_for_published_service_ready_async(
     health_url = published + "/health"
     # Consecutive 200s required so a single endpoint-list flap does not pass us (override:
     # HYPERLOOM_MN_PUBLISHED_READY_OK_STREAK).
-    required_ok = max(1, env_int("HYPERLOOM_MN_PUBLISHED_READY_OK_STREAK", 2))
+    required_ok = _env_int("HYPERLOOM_MN_PUBLISHED_READY_OK_STREAK", 2)
     ok_streak = 0
     # Skip only after this many CONSECUTIVE name-resolution failures, so a CoreDNS blip inside the readiness window
     # (which resolves on a later poll) does not disable the gate exactly when it is needed.
-    dns_skip_after = max(1, env_int("HYPERLOOM_MN_PUBLISHED_DNS_SKIP_AFTER", 6))
+    dns_skip_after = _env_int("HYPERLOOM_MN_PUBLISHED_DNS_SKIP_AFTER", 6)
     dns_failures = 0
     started = _time.monotonic()
     last_err = ""
