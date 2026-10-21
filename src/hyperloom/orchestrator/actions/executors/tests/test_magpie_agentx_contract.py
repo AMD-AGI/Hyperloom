@@ -465,6 +465,182 @@ async def test_profile_executor_keeps_capture_windows_separate(source, report, t
     assert set(result["profile_captures"][0]["trace_files"]).isdisjoint(result["profile_captures"][1]["trace_files"])
 
 
+# vLLM server args of CI workloads (capture-size lists shortened): Hyperloom writes a JSON value as one unquoted token.
+_CI_JSON_ARGS = {
+    "DeepSeek-V4.1-Flash": (
+        "--language-model-only --tokenizer-mode deepseek_v41 --tool-call-parser deepseek_v41 --enable-auto-tool-choice "
+        "--moe-backend aiter --max-num-seqs 128 --max-num-batched-tokens 16384 "
+        '--speculative-config {"method":"dspark","num_speculative_tokens":5,"draft_sample_method":"probabilistic",'
+        '"rejection_sample_method":"synthetic","synthetic_acceptance_length":3.51,"enable_adaptive_verification":false}'
+    ),
+    "Kimi-K3": (
+        "--moe-backend auto --load-format fastsafetensors --tool-call-parser kimi_k3 --kv-cache-dtype fp8 "
+        '--attention-config {"mla_prefill_backend":"ROCM_AITER_FA"} --max-num-seqs 8 '
+        '--compilation-config {"mode":3,"cudagraph_mode":"FULL_AND_PIECEWISE","max_cudagraph_capture_size":48,'
+        '"custom_ops":["+fused_rms_norm_gated"],"cudagraph_capture_sizes":[2,3,4,5,6,7,8,16,32,48]} '
+        '--speculative-config {"model":"/shared_nfs/chenluo/models/Kimi-K3-DSpark","num_speculative_tokens":5,'
+        '"method":"dspark","attention_backend":"ROCM_AITER_MLA","kv_cache_dtype":"fp8",'
+        '"draft_sample_method":"probabilistic","rejection_sample_method":"block"}'
+    ),
+    "MiniMax-M3-MXFP4": (
+        "--block-size 128 --enable-chunked-prefill "
+        '--compilation-config {"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[1,2,4,8,16,32,64,128]} '
+        '--attention-backend ROCM_AITER_UNIFIED_ATTN --attention-config {"indexer_kv_dtype":"fp8"} '
+        '--default-chat-template-kwargs {"thinking_mode":"enabled"} --max-num-seqs 64 '
+        '--speculative-config {"method":"eagle3","model":"/shared_nfs/hyperloom/models/MiniMax-M3-EAGLE3-GQA",'
+        '"num_speculative_tokens":3,"attention_backend":"ROCM_AITER_UNIFIED_ATTN","rejection_sample_method":"synthetic",'
+        '"synthetic_acceptance_length":2.78}'
+    ),
+}
+
+
+def _json_values(argv):
+    return {argv[i - 1]: json.loads(token) for i, token in enumerate(argv) if token.startswith(("{", "["))}
+
+
+@pytest.fixture
+def vllm_source(source):
+    config = yaml.safe_load(source.read_text())
+    config["benchmark"]["framework"] = "vllm"
+    source.write_text(yaml.safe_dump(config))
+    return source
+
+
+@pytest.mark.parametrize("args", list(_CI_JSON_ARGS.values()), ids=list(_CI_JSON_ARGS))
+def test_json_server_args_survive_every_native_composition(vllm_source, tmp_path, args):
+    from hyperloom.orchestrator.actions.executors.magpie_agentx import apply_native_runtime
+
+    base = materialize_benchmark_config(vllm_source, tmp_path / "base", extra_server_args=args)
+    assert load_benchmark(base)["agentx"]["launch_overrides"]["append_args"] == args.split(" ")
+    bind_source_evidence(base, [])
+    apply_native_runtime(base, {})
+    assert load_benchmark(base)["agentx"]["launch_overrides"]["append_args"] == args.split(" ")
+
+    candidate = _build_variant_yaml(
+        base, "", GridVariant("candidate", "--max-num-seqs 32", {}), output_subdir=tmp_path / "candidate"
+    )
+    argv = load_benchmark(candidate)["agentx"]["launch_overrides"]["append_args"]
+    assert _json_values(argv) == _json_values(args.split(" "))
+    assert argv[argv.index("--max-num-seqs") + 1] == "32"
+    again = _build_variant_yaml(candidate, "", GridVariant("again", "", {}), output_subdir=tmp_path / "again")
+    assert load_benchmark(again)["agentx"]["launch_overrides"]["append_args"] == argv
+
+
+@pytest.mark.parametrize(
+    "args",
+    ["--foo a'b", '--default-chat-template-kwargs {"system":"it\'s"}'],
+    ids=["plain", "json"],
+)
+def test_a_value_with_a_single_quote_survives_repeated_native_composition(vllm_source, tmp_path, args):
+    from hyperloom.orchestrator.actions.executors.magpie_agentx import apply_native_runtime
+
+    argv = args.split(" ")
+    base = materialize_benchmark_config(vllm_source, tmp_path / "base", extra_server_args=args)
+    for _ in range(2):
+        bind_source_evidence(base, [])
+        apply_native_runtime(base, {})
+        assert load_benchmark(base)["agentx"]["launch_overrides"]["append_args"] == argv
+    candidate = _build_variant_yaml(
+        base, "", GridVariant("candidate", "--max-num-seqs 32", {}), output_subdir=tmp_path / "candidate"
+    )
+    assert load_benchmark(candidate)["agentx"]["launch_overrides"]["append_args"] == [*argv, "--max-num-seqs", "32"]
+
+
+@pytest.mark.parametrize("token", ["my model", "", "'quoted'"], ids=["space", "empty", "quoted"])
+def test_an_accepted_token_that_is_not_one_argv_token_is_refused_by_name(vllm_source, tmp_path, token):
+    from hyperloom.inference_optimizer.breakdown.stop_reasons import ARGV_INVALID
+
+    config = yaml.safe_load(vllm_source.read_text())
+    config["benchmark"]["agentx"]["launch_overrides"] = {"version": 1, "append_args": ["--served-model-name", token]}
+    vllm_source.write_text(yaml.safe_dump(config))
+    with pytest.raises(ValueError) as refused:
+        materialize_benchmark_config(vllm_source, tmp_path / "base")
+    assert refused.value.error_class == ARGV_INVALID
+    assert f"launch_overrides.append_args token {token!r}" in str(refused.value)
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        "--speculative-config {1:2}",
+        '--speculative-config {"method":"mtp"',
+        '--compilation-config {"cudagraph_mode": "FULL AND PIECEWISE"}',
+        "--hf-overrides=[1,",
+        '--served-model-name "my model"',
+        "--foo ''",
+        "--host [::1]",
+        "--chat-template '{% for m in messages %}{{ m.content }}{% endfor %}'",
+        "--served-model-name my\\ model",
+    ],
+)
+def test_server_args_that_cannot_become_argv_are_refused_as_argv_invalid(vllm_source, tmp_path, args):
+    from hyperloom.inference_optimizer.breakdown.stop_reasons import ARGV_INVALID
+
+    with pytest.raises(ValueError) as refused:
+        materialize_benchmark_config(vllm_source, tmp_path / "base", extra_server_args=args)
+    assert refused.value.error_class == ARGV_INVALID
+    base = materialize_benchmark_config(vllm_source, tmp_path / "accepted")
+    with pytest.raises(ValueError) as refused:
+        _build_variant_yaml(base, "", GridVariant("candidate", args, {}), output_subdir=tmp_path / "candidate")
+    assert refused.value.error_class == ARGV_INVALID
+    offending = args.split(" ", 1)[1] if " " in args else args.partition("=")[2]
+    assert offending in str(refused.value)
+
+
+@pytest.mark.asyncio
+async def test_run_grid_writes_no_launch_evidence_for_a_refused_argv(vllm_source, tmp_path, monkeypatch):
+    from hyperloom.inference_optimizer.breakdown.stop_reasons import ARGV_INVALID
+    from hyperloom.orchestrator.actions.executors import _grid_runner
+
+    def never_launched(**kwargs):
+        raise AssertionError("a refused variant must not reach Magpie")
+
+    monkeypatch.setattr(_grid_runner, "_run_magpie", never_launched)
+    base = materialize_benchmark_config(vllm_source, tmp_path / "base")
+    output_root = tmp_path / "grid"
+    results = await _grid_runner.run_grid(
+        base_yaml_path=base,
+        base_extra_args="",
+        grid=[GridVariant("refused", "--speculative-config {1:2}", {})],
+        output_root=output_root,
+    )
+    assert [(result.status, result.error_class) for result in results] == [("failed", ARGV_INVALID)]
+    assert not results[0].launch_evidence
+    assert not [*output_root.rglob("launch_evidence.json"), *output_root.rglob("runtime_findings.json")]
+
+
+def test_native_baseline_refuses_an_unsplittable_argv_without_launching(vllm_source, tmp_path, monkeypatch):
+    import asyncio
+
+    from hyperloom.inference_optimizer.breakdown.stop_reasons import ARGV_INVALID
+    from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    monkeypatch.setenv(BENCHMARK_CONFIG_ENV, str(vllm_source))
+
+    def run(cmd, **kwargs):
+        raise AssertionError("an argv that cannot be split must not reach Magpie")
+
+    monkeypatch.setattr("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", run)
+    ctx = SimpleNamespace(
+        task=SimpleNamespace(
+            task_id="native",
+            params={
+                "output_dir": str(tmp_path / "round"),
+                "timeout_sec": 10,
+                "model_path": "Qwen/Qwen3-0.6B",
+                "extra_server_args": "--speculative-config {1:2}",
+            },
+        ),
+        extra={"shared_state": SharedState(benchmark_mode="agentx", agentx_backend="magpie", enablement_mode="off")},
+    )
+    executor = BaselineExecutor(magpie_python="python3", default_config_path=vllm_source, session_dir=tmp_path)
+    result = asyncio.run(executor(ctx))
+    assert result["status"] == "failed", result
+    assert result["error_class"] == ARGV_INVALID
+    assert "{1:2}" in result["error"]
+
+
 def test_vllm_attempt_uses_python_for_magpies_module_entrypoint(source, tmp_path):
     from hyperloom.orchestrator.actions.executors.magpie_agentx import apply_native_runtime
 

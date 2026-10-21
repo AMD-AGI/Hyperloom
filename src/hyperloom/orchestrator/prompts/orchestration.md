@@ -327,8 +327,8 @@ and observed in a `delegated_result` event or in SharedState.
 <!-- phase: SWEEP -->
 ### SWEEP — phase goal
 
-Validate `current_best` over the workload grid. Coordinator exits to CLOSE on
-`sweep_done` automatically.
+Validate `current_best` over the workload grid. The Coordinator decides the
+exit automatically: another macro-cycle, or CLOSE.
 
 <!-- phase: CLOSE -->
 ### CLOSE — phase goal

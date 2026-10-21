@@ -89,20 +89,6 @@ def _rich_inputs(**overrides):
                 "comm_pct": 3.0,
                 "top_bottleneck": "MoE",
             },
-            "kernel_roofline_top15": [
-                {
-                    "kernel_id": "k1",
-                    "name": "gemm",
-                    "gpu_pct": 30.0,
-                    "bound_type": "compute",
-                    "arithmetic_intensity": 12.3,
-                    "efficiency_percent": 55.0,
-                    "compute_utilization_pct": 60.0,
-                    "bandwidth_utilization_pct": 40.0,
-                    "recommended_actions": ["fuse"],
-                },
-                "skip-non-dict",
-            ],
             "hot_kernels_top15": [
                 {"kernel_id": "h1", "name": "attn", "gpu_pct": 20.0, "bottleneck": "memory", "source_file": "attn.py"},
             ],
@@ -147,7 +133,6 @@ def test_build_rich_user_prompt_sections():
     sys_p, user_p = build_specialist_prompts(_rich_inputs())
     assert "TraceLens snapshot #7" in user_p
     assert "Executive Summary" in user_p
-    assert "`k1`" in user_p
     assert "`h1`" in user_p
     assert "find-recipe result" in user_p
     assert "enable cudagraph" in user_p

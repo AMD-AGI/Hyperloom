@@ -130,6 +130,25 @@ def test_scrub_benchmark_process_env_removes_control_plane_credentials():
     }
 
 
+_HOSTED_CREDENTIALS = (
+    "HYPERLOOM_MCP_TOKEN",
+    "HYPERLOOM_SANDBOX_KEY_DEV",
+    "HYPERLOOM_SANDBOX_KEY_MEASUREMENT",
+    "HYPERLOOM_SANDBOX_KEY_SUBRUN",
+    "HYPERLOOM_SIGNING_KEY_FILE",
+)
+
+
+@pytest.mark.parametrize("name", _HOSTED_CREDENTIALS)
+def test_a_hosted_measurement_credential_never_reaches_a_child_a_variant_or_a_record(name):
+    env = {name: "credential", "PATH": "/bin", "HYPERLOOM_RUN_MODE": "hosted"}
+
+    assert common_env_safety.scrub_benchmark_process_env(env) == {"PATH": "/bin", "HYPERLOOM_RUN_MODE": "hosted"}
+    assert not common_env_safety.is_allowed_variant_env_key(name)
+    assert not common_env_safety.is_allowed_external_env_key(name)
+    assert common_env_safety.redact_secret_env_values({name: "credential"}) == {name: "[REDACTED]"}
+
+
 def test_redact_secret_env_values_masks_credentials_and_keeps_knobs():
     env = {
         "OPENAI_API_KEY": "plaintext",

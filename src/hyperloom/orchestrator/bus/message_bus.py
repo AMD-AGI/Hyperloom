@@ -24,7 +24,6 @@ TOPIC_ALLOWLIST = frozenset(
         "decision",
         "alert",
         "delegated_result",
-        "lease_expired",
         "request",
         "response",
         "review_verdict",
@@ -46,7 +45,6 @@ ROLE_SUBSCRIPTIONS: dict[str, frozenset[str]] = {
             "advice",
             "strategy_change",
             "response",
-            "lease_expired",
             "proposal",
         }
     ),

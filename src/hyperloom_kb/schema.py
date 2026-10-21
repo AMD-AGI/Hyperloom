@@ -384,10 +384,6 @@ class FieldDeclaration:
         name = _require_name(self.name, "field.name")
         object.__setattr__(self, "name", name)
         object.__setattr__(self, "description", _require_string(self.description, f"field {name!r} description"))
-        if not isinstance(self.kind, FieldKind):
-            raise SchemaValidationError(f"field {name!r} has an invalid kind")
-        for flag in ("required", "sensitive", "many", "group"):
-            _boolean(getattr(self, flag), f"field {name!r} {flag}")
         if self.many and self.kind not in {FieldKind.STRING, FieldKind.TEXT, FieldKind.FILE}:
             raise SchemaValidationError(f"field {name!r}: only string, text, and file fields may hold many values")
         values = tuple(_require_string(item, f"field {name!r} values[]") for item in self.values)
@@ -406,8 +402,6 @@ class FieldDeclaration:
                 raise SchemaValidationError(f"field {name!r}: a file's content is not searched")
             object.__setattr__(self, "search", weight)
         if self.role is not None:
-            if not isinstance(self.role, FieldRole):
-                raise SchemaValidationError(f"field {name!r} has an invalid role")
             if self.many:
                 raise SchemaValidationError(f"field {name!r}: a field with a role holds one value")
             if self.role is FieldRole.DECISION and (self.kind is not FieldKind.STRING or not values):
