@@ -311,7 +311,7 @@ class Explorer:
             max_llm_usd=None if window.max_llm_usd == math.inf else window.max_llm_usd,
             scheduler_llm_usd=priced_usd(record.usage for record in snapshot.llm_usage if not record.usage.branch),
             specialists=specialists,
-            held=await self._held(),
+            held=await self._held(specialists),
             frontier_policy=self._frontier_policy,
         )
         try:
@@ -335,10 +335,9 @@ class Explorer:
                     states[entry.branch] = state
         return states
 
-    async def _held(self, specialists: Mapping[str, SpecialistStatus] | None = None) -> dict[str, HoldReason]:
+    async def _held(self, specialists: Mapping[str, SpecialistStatus]) -> dict[str, HoldReason]:
         snapshot = await self._notebook.snapshot()
-        states = await self._specialist_states() if specialists is None else specialists
-        return held_branches(self._roster.entries(), snapshot.progress, snapshot.records, states)
+        return held_branches(self._roster.entries(), snapshot.progress, snapshot.records, specialists)
 
     async def _stop_given_up(self) -> bool:
         """Stop every live branch whose specialist gave up and has no candidate waiting for its confirm: nothing of
@@ -363,7 +362,8 @@ class Explorer:
         judge asked to stop the session. The held branches are found again here, not taken from the judge's view: a
         candidate that started waiting for its confirm while the judge answered holds its branch as well."""
 
-        decision = hold_decision(decision, await self._held(), self._roster.entries())
+        held = await self._held(await self._specialist_states())
+        decision = hold_decision(decision, held, self._roster.entries())
         self._decisions.record(
             Decision(
                 DecisionKind.JUDGE,
