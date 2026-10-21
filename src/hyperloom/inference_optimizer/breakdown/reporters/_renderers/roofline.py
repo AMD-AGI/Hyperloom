@@ -9,12 +9,13 @@ the session's history is the snapshots in event order and the comparison is
 its first against its last. The flat projection this replaces read the same
 history out of a capped session-state list that later runs evict entries from.
 
-Silently skipped when no roofline run recorded a snapshot, i.e. a session that
-never ran the roofline pipeline.
+Skipped when no roofline run recorded a snapshot; the skipped section still states
+how the failed runs ended so a failure does not read as a pipeline that never ran.
 """
 
 from __future__ import annotations
 
+from collections import Counter
 from typing import Any
 
 from ..base import (
@@ -47,6 +48,30 @@ def _snapshots(breakdown: dict[str, Any]) -> list[dict[str, Any]]:
             if isinstance(snapshot, dict) and snapshot:
                 out.append(snapshot)
     return out
+
+
+def _failed_runs_note(breakdown: dict[str, Any]) -> str:
+    """How the session's roofline runs ended when none recorded a snapshot.
+
+    Args:
+        breakdown (dict[str, Any]): The full ``session_breakdown.json`` dict.
+
+    Returns:
+        str: The run count and the error classes of the failed ones, or ``""`` when no run reported a failure.
+    """
+    actions = [
+        action
+        for event in events_of(breakdown, "roofline")
+        for action in dict_rows(as_dict(event.get("ext")).get("actions"))
+    ]
+    failures = Counter(
+        str(as_dict(action["failure"]).get("error_class") or "unknown") for action in actions if action.get("failure")
+    )
+    if not failures:
+        return ""
+    classes = ", ".join(f"{name}×{count}" for name, count in failures.items())
+    outcome = "all failed" if sum(failures.values()) == len(actions) else f"{sum(failures.values())} failed"
+    return f"{len(actions)} run(s), {outcome}: {classes}"
 
 
 def _snapshot_kv(label: str, snap: dict[str, Any] | None) -> str:
@@ -87,7 +112,8 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     """Render the roofline-comparison section.
 
     Shows the session's first and last roofline snapshots and the delta
-    between them. Skipped when no roofline run recorded a snapshot.
+    between them. Skipped when no run recorded a snapshot, carrying the failed
+    runs' error classes as its key fact.
 
     Args:
         breakdown (dict[str, Any]): The full ``session_breakdown.json`` dict.
@@ -98,9 +124,11 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     """
     snapshots = _snapshots(breakdown)
     if not snapshots:
+        note = _failed_runs_note(breakdown)
         return RenderedSection(
             section_id="roofline",
             title="Roofline",
+            key_facts=[note] if note else [],
             skipped=True,
         )
 

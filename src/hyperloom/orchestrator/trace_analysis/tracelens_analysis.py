@@ -30,6 +30,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, NamedTuple
 
+from hyperloom.common.env import env_flag
 from hyperloom.common.io import JsonFormat, atomic_write_json
 from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer import framework_registry
@@ -1181,11 +1182,8 @@ def classify_patchability(candidate: dict[str, Any]) -> tuple[bool, str]:
     source_file = str(candidate.get("source_file") or "")
     name = str(candidate.get("name") or "")
     lower_name = name.lower()
-    # Verdict-first: honor TraceLens' resolve_kernel_source verdict (carried on
-    # the op_to_source_* fields) when it decided this symbol. A patchable entry is
-    # ground truth and bypasses the heuristics; a non-patchable one -- Tensile,
-    # MIOpen, inductor-Triton, or a Composable Kernel template -- reports the kind
-    # as its reason. Only genuinely unresolved symbols fall through below.
+    # TraceLens' resolver verdict is ground truth: a patchable entry skips the heuristics below, and a non-patchable
+    # one (Tensile, MIOpen, inductor-Triton, a Composable Kernel template) reports its kind as the reason.
     if candidate.get("source_resolution_method") in _RESOLVER_VERDICT_METHODS:
         patchable = candidate.get("op_to_source_patchable")
         if patchable is True and source_file:
@@ -1197,22 +1195,15 @@ def classify_patchability(candidate: dict[str, Any]) -> tuple[bool, str]:
                 or "non-rewritable"
             )
             return False, f"source: {reason}"
-    # Vendor-operator-playbook check: some closed-source vendor operators (a
-    # pip-installed compiled library with no rewritable device source) still
-    # have a small, named set of launch-config knobs that a KernelForge
-    # forge-loop task bundle has already been validated to tune (mori's EP
-    # dispatch/combine is the first case -- see KernelForge PR #88). This is
-    # checked before the vendor_binary/no-source-file rejections below and
-    # before the ``source_file`` requirement, since a vendor-playbook
-    # candidate's "source" is a pip-installed file, not something forge would
-    # ever rewrite.
+    # A vendor operator with a validated KernelForge task bundle is tuned through launch knobs, never rewritten,
+    # so it passes before the source-file and vendor-binary rejections below.
     if match_vendor_operator_playbook(candidate) is not None:
         return True, ""
     if not source_file:
         # A bare launch API has no kernel body to rewrite, which is a different
         # situation from a kernel whose source we merely failed to locate. Say
         # so rather than sending a reader looking for a file that cannot exist.
-        if is_runtime_api_name(str(candidate.get("name") or "")):
+        if is_runtime_api_name(name):
             return False, "launch API, not a kernel (no rewritable body)"
         return False, "source file not resolved"
     if candidate.get("source_type") == "vendor_binary":
@@ -1229,35 +1220,27 @@ def classify_patchability(candidate: dict[str, Any]) -> tuple[bool, str]:
         return False, (
             f"vendor backend library {candidate.get('library')!r} (precompiled binary, no rewritable source)"
         )
-    if name.startswith("aten::"):
-        if not library or library in {"tensile", "pytorch native"}:
-            return False, (
-                f"PyTorch native op {name!r} backed by "
-                f"{candidate.get('library') or 'unknown'} library "
-                "(typically Tensile / vendor backend)"
-            )
+    if name.startswith("aten::") and library in {"", "pytorch native"}:
+        return False, (
+            f"PyTorch native op {name!r} backed by "
+            f"{candidate.get('library') or 'unknown'} library "
+            "(typically Tensile / vendor backend)"
+        )
     if is_runtime_generated_kernel(name, source_file):
         return False, (f"runtime-generated (torch.compile / Inductor cache): {source_file}")
     lower_file = source_file.lower()
     if not any(root in lower_file for root in _reusable_roots()):
         return False, (f"source not under a reusable framework root: {source_file}")
-    # cpp_itfs host-launcher guard: a .py under csrc/cpp_itfs/ is a host driver
-    # whose real GPU code lives in sibling .cuh/.cpp.jinja; skip it so the
-    # candidate doesn't burn a forge/geak attempt.
     if "/csrc/cpp_itfs/" in lower_file and lower_file.endswith(".py"):
         return False, (
             f"cpp_itfs host launcher (device code is in sibling .cuh/.cpp.jinja, not this .py): {source_file}"
         )
-    source_type = candidate.get("source_type")
     # aiter device-source promotion: a real .cu/.cuh/.hip kernel under /aiter/ is
     # patchable even when the classifier left source_type unknown, since aiter
     # JIT-compiles each op and forge edits it in place.
-    if (
-        source_type not in {"hip_cpp", "triton", "python", "flydsl"}
-        and "/aiter/" in lower_file
-        and lower_file.endswith((".cu", ".cuh", ".hip"))
-    ):
+    if "/aiter/" in lower_file and lower_file.endswith((".cu", ".cuh", ".hip")):
         return True, ""
+    source_type = candidate.get("source_type")
     if source_type not in {"hip_cpp", "triton", "python", "flydsl"}:
         return False, (f"source_type={source_type!r} not in {{hip_cpp, triton, python, flydsl}}")
     return True, ""
@@ -1578,11 +1561,163 @@ def is_runtime_api_name(name: str) -> bool:
     return _normalize_profiler_op_name(name).strip().lower() in _RUNTIME_API_NAMES
 
 
+def _trace_name(item: dict[str, Any]) -> str:
+    """Return the normalized trace name for one candidate."""
+    return str(item.get("name") or "").strip().lower()
+
+
+def _workload_dtypes(item: dict[str, Any]) -> list[str]:
+    """Return explicit or shape-derived input dtypes for one workload."""
+    values = item.get("input_dtypes") or _dtypes_from_shapes(item.get("shapes") or [])
+    return [str(value).strip() for value in values if isinstance(value, str) and value.strip()]
+
+
+def _has_workload(item: dict[str, Any]) -> bool:
+    """Return whether the trace row carries driver inputs."""
+    return bool(item.get("input_shapes") or item.get("shapes")) and bool(_workload_dtypes(item))
+
+
+def _is_all_reduce_name(item: dict[str, Any]) -> bool:
+    """Return whether a trace name carries all-reduce semantics."""
+    return any(tag in _trace_name(item) for tag in ("all_reduce", "allreduce", "cross_device_reduce"))
+
+
+def _workload_family(item: dict[str, Any]) -> str:
+    """Collapse prefill and decode rows from one profiled wrapper."""
+    name = _trace_name(item)
+    if name.startswith(("sglang_profiler::", "vllm_profiler::")):
+        name = name.split("->", 1)[0]
+    return re.sub(r"\s+\((?:prefill|decode)\)\s*$", "", name)
+
+
+def _first_shape_record(item: dict[str, Any]) -> dict[str, Any] | None:
+    """Return the first tensor shape record from one invocation."""
+    records = item.get("input_shapes")
+    if isinstance(records, list):
+        for record in records:
+            if isinstance(record, dict) and str(record.get("shape") or "").strip():
+                return dict(record)
+    shapes = item.get("shapes")
+    if isinstance(shapes, list):
+        for shape in shapes:
+            text = str(shape or "").strip()
+            if text:
+                return {"call_num": int(item.get("call_count") or 1), "shape": text}
+    return None
+
+
+def _attach_workload(target: dict[str, Any], donors: list[dict[str, Any]]) -> None:
+    """Attach the donors' traced workload: one donor lends all of it, several their distinct first inputs."""
+    if len(donors) == 1:
+        donor = donors[0]
+        for key in ("input_shapes", "shapes", "input_dtypes", "shape_provenance"):
+            if donor.get(key):
+                target[key] = donor[key]
+        if not target.get("input_dtypes"):
+            target["input_dtypes"] = _workload_dtypes(donor)
+        target["workload_source_kernel"] = str(donor.get("name") or "")
+        return
+    records: list[dict[str, Any]] = []
+    shapes: list[str] = []
+    dtypes: list[str] = []
+    seen_shapes: set[str] = set()
+    for donor in donors:
+        record = _first_shape_record(donor)
+        if record is None:
+            continue
+        shape = str(record["shape"]).strip()
+        if shape in seen_shapes:
+            continue
+        seen_shapes.add(shape)
+        records.append(record)
+        shapes.append(shape)
+        donor_dtypes = _workload_dtypes(donor)
+        if donor_dtypes:
+            dtypes.append(donor_dtypes[0])
+    if records:
+        target["input_shapes"] = records
+        target["shapes"] = shapes
+    if dtypes:
+        target["input_dtypes"] = dtypes
+    provenance = next(
+        (str(donor.get("shape_provenance") or "") for donor in donors if donor.get("shape_provenance")), ""
+    )
+    if provenance:
+        target["shape_provenance"] = provenance
+    target["workload_source_kernels"] = [str(donor.get("name") or "") for donor in donors]
+    hottest = max(donors, key=lambda donor: float(donor.get("duration_us") or 0.0))
+    target["workload_source_kernel"] = str(hottest.get("name") or "")
+
+
+def _attach_collective_workloads(
+    existing: list[dict[str, Any]],
+    extracted: list[dict[str, Any]],
+    note: Callable[[str], None],
+) -> list[dict[str, Any]]:
+    """Give each source-resolved collective its traced workload; return the rows to append.
+
+    A collective that matches a trace row by name updates that row in place. Otherwise it is appended only when it
+    can borrow the trace's sole all-reduce workload family, which ``HYPERLOOM_COLLECTIVE_ALLOW_INFERRED_SHAPES``
+    must opt into.
+    """
+    by_name = {_trace_name(item): item for item in existing if _trace_name(item)}
+    families: dict[str, list[dict[str, Any]]] = {}
+    for row in existing:
+        if _has_workload(row) and _is_all_reduce_name(row):
+            families.setdefault(_workload_family(row), []).append(row)
+    sole_family: list[dict[str, Any]] = []
+    if len(families) == 1 and env_flag("HYPERLOOM_COLLECTIVE_ALLOW_INFERRED_SHAPES"):
+        sole_family = next(iter(families.values()))
+    appended: list[dict[str, Any]] = []
+    for item in extracted:
+        exact = by_name.get(_trace_name(item))
+        target = exact or dict(item)
+        for key in (
+            "source_file",
+            "source_line",
+            "source_function",
+            "source_resolution_method",
+            "candidate_source",
+            "collective_stream",
+            "nccl_summary_total_ms",
+            "duration_provenance",
+        ):
+            target[key] = item[key]
+        if exact is not None and _has_workload(exact):
+            donors, borrowed = [exact], False
+        elif sole_family and _is_all_reduce_name(item):
+            # Shapes are inferred from the sole all-reduce family, valid only
+            # because the symbol is itself an all-reduce. Handing the driver
+            # shapes the traced kernel never ran would yield confident SNR and
+            # latency for a workload that never existed, so ``shape_provenance``
+            # travels with them to mark the values attributed, not observed.
+            donors, borrowed = sole_family, True
+        else:
+            donors, borrowed = [], False
+        if donors:
+            _attach_workload(target, donors)
+        if borrowed:
+            target["shape_provenance"] = "borrowed_sole_all_reduce_family"
+            note(
+                "nccl_summary: attributing the trace's only all-reduce workload "
+                f"to {item.get('source_function')!r}; shapes are inferred"
+            )
+        if exact is None:
+            if not donors:
+                note(
+                    "nccl_summary: no unique traced all-reduce workload for "
+                    f"{item.get('source_function')!r}; dropping candidate"
+                )
+                continue
+            appended.append(target)
+            by_name[_trace_name(target)] = target
+    return appended
+
+
 def _inject_collective_candidates(
     tracelens_dir: Path,
     candidates: list[dict[str, Any]],
     *,
-    source_roots: list[str] | None = None,
     log_path: Path | None = None,
     health_warnings: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
@@ -1594,23 +1729,19 @@ def _inject_collective_candidates(
     the report surfaces it -- a log line alone leaves the lane looking as if the
     workload simply had no collective.
     """
-    if not isinstance(candidates, list) or any(not isinstance(item, dict) for item in candidates):
-        raise ValueError("Collective candidates must be a list of mappings")
     existing = [dict(item) for item in candidates]
-    roots = list(source_roots or [])
-    if not roots:
-        aiter_csrc = _aiter_csrc_root().rstrip("/")
-        if aiter_csrc and Path(aiter_csrc).is_dir():
-            roots.append(aiter_csrc)
+    aiter_csrc = _aiter_csrc_root().rstrip("/")
+    roots = [aiter_csrc] if aiter_csrc and Path(aiter_csrc).is_dir() else []
+    messages: list[str] = []
 
-    def _skip(code: str, detail: str, notes: list[str] | None = None) -> list[dict[str, Any]]:
+    def _skip(code: str, detail: str) -> list[dict[str, Any]]:
         """Record a visible reason the collective lane got no candidate."""
         message = f"nccl_summary: {detail}; skipping injection"
         log.warning(message)
         if log_path is not None:
             # The per-symbol notes are the only record of WHICH symbol failed and
             # they are normally flushed at the end, which a skip never reaches.
-            for note in notes or []:
+            for note in messages:
                 append_log(log_path, note)
             append_log(log_path, message)
         if health_warnings is not None:
@@ -1632,7 +1763,6 @@ def _inject_collective_candidates(
             "no bounded collective source root",
         )
 
-    messages: list[str] = []
     scan_diagnostics: list[dict[str, Any]] = []
     try:
         extracted = extract_collective_candidates(
@@ -1663,164 +1793,8 @@ def _inject_collective_candidates(
         return _skip(
             "collective_symbols_unresolved",
             "no summary row resolved to a device source under " + ", ".join(roots),
-            notes=messages,
         )
-
-    def _name(item: dict[str, Any]) -> str:
-        """Return the normalized trace name for one candidate."""
-        return str(item.get("name") or "").strip().lower()
-
-    def _workload_dtypes(item: dict[str, Any]) -> list[str]:
-        """Return explicit or shape-derived input dtypes for one workload."""
-        values = item.get("input_dtypes") or item.get("dtypes") or []
-        if not values:
-            values = _dtypes_from_shapes(item.get("shapes") or [])
-        return [str(value).strip() for value in values if isinstance(value, str) and value.strip()]
-
-    def _has_workload(item: dict[str, Any]) -> bool:
-        """Return whether the trace row carries driver inputs."""
-        return bool(item.get("input_shapes") or item.get("shapes")) and bool(_workload_dtypes(item))
-
-    def _is_all_reduce_workload(item: dict[str, Any]) -> bool:
-        """Return whether a traced workload has all-reduce semantics."""
-        contract = item.get("kernel_contract")
-        if isinstance(contract, dict) and str(contract.get("kind") or "") == "collective":
-            return str(contract.get("collective_op") or "") == "all_reduce"
-        name = _name(item)
-        return any(tag in name for tag in ("all_reduce", "allreduce", "cross_device_reduce"))
-
-    def _workload_family(item: dict[str, Any]) -> str:
-        """Collapse prefill and decode rows from one profiled wrapper."""
-        name = _name(item)
-        if name.startswith(("sglang_profiler::", "vllm_profiler::")):
-            name = name.split("->", 1)[0]
-        return re.sub(r"\s+\((?:prefill|decode)\)\s*$", "", name)
-
-    def _first_shape_record(item: dict[str, Any]) -> dict[str, Any] | None:
-        """Return the first tensor shape record from one invocation."""
-        records = item.get("input_shapes")
-        if isinstance(records, list):
-            for record in records:
-                if isinstance(record, dict) and str(record.get("shape") or "").strip():
-                    return dict(record)
-        shapes = item.get("shapes")
-        if isinstance(shapes, list):
-            for shape in shapes:
-                text = str(shape or "").strip()
-                if text:
-                    return {
-                        "call_num": int(item.get("call_count") or 1),
-                        "shape": text,
-                    }
-        return None
-
-    def _merge_workloads(
-        target: dict[str, Any],
-        donors: list[dict[str, Any]],
-    ) -> None:
-        """Attach distinct first-input cases from one workload family."""
-        records: list[dict[str, Any]] = []
-        shapes: list[str] = []
-        dtypes: list[str] = []
-        seen_shapes: set[str] = set()
-        for donor in donors:
-            record = _first_shape_record(donor)
-            if record is None:
-                continue
-            shape = str(record["shape"]).strip()
-            if shape in seen_shapes:
-                continue
-            seen_shapes.add(shape)
-            records.append(record)
-            shapes.append(shape)
-            donor_dtypes = _workload_dtypes(donor)
-            if donor_dtypes:
-                dtypes.append(donor_dtypes[0])
-        if records:
-            target["input_shapes"] = records
-            target["shapes"] = shapes
-        if dtypes:
-            target["input_dtypes"] = dtypes
-        provenance = next(
-            (str(donor.get("shape_provenance") or "") for donor in donors if donor.get("shape_provenance")),
-            "",
-        )
-        if provenance:
-            target["shape_provenance"] = provenance
-        target["workload_source_kernels"] = [str(donor.get("name") or "") for donor in donors]
-        hottest = max(
-            donors,
-            key=lambda donor: float(donor.get("duration_us") or 0.0),
-        )
-        target["workload_source_kernel"] = str(hottest.get("name") or "")
-
-    by_name = {_name(item): item for item in existing if _name(item)}
-    workload_rows = [item for item in existing if _has_workload(item) and _is_all_reduce_workload(item)]
-    workload_families: dict[str, list[dict[str, Any]]] = {}
-    for row in workload_rows:
-        family = _workload_family(row)
-        if family:
-            workload_families.setdefault(family, []).append(row)
-    allow_inferred_shapes = os.environ.get("HYPERLOOM_COLLECTIVE_ALLOW_INFERRED_SHAPES", "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
-    appended: list[dict[str, Any]] = []
-    for item in extracted:
-        exact = by_name.get(_name(item))
-        target = exact or dict(item)
-        for key in (
-            "source_file",
-            "source_line",
-            "source_function",
-            "source_resolution_method",
-            "candidate_source",
-            "collective_stream",
-            "nccl_summary_total_ms",
-            "duration_provenance",
-        ):
-            target[key] = item[key]
-        if exact is not None and _has_workload(exact):
-            donors = [exact]
-            borrowed = False
-        elif allow_inferred_shapes and len(workload_families) == 1 and _is_all_reduce_workload(item):
-            # Shapes are inferred from the sole all-reduce family, valid only
-            # because the symbol is itself an all-reduce. Handing the driver
-            # shapes the traced kernel never ran would yield confident SNR and
-            # latency for a workload that never existed, so ``shape_provenance``
-            # travels with them to mark the values attributed, not observed.
-            donors = next(iter(workload_families.values()))
-            borrowed = True
-        else:
-            donors = []
-            borrowed = False
-        if len(donors) == 1:
-            donor = donors[0]
-            for key in ("input_shapes", "shapes", "input_dtypes", "dtypes", "shape_provenance"):
-                if donor.get(key):
-                    target[key] = donor[key]
-            if not target.get("input_dtypes"):
-                target["input_dtypes"] = _workload_dtypes(donor)
-            target["workload_source_kernel"] = str(donor.get("name") or "")
-        elif donors:
-            _merge_workloads(target, donors)
-        if borrowed:
-            target["shape_provenance"] = "borrowed_sole_all_reduce_family"
-            messages.append(
-                "nccl_summary: attributing the trace's only all-reduce workload "
-                f"to {item.get('source_function')!r}; shapes are inferred"
-            )
-        if exact is None:
-            if not donors:
-                messages.append(
-                    "nccl_summary: no unique traced all-reduce workload for "
-                    f"{item.get('source_function')!r}; dropping candidate"
-                )
-                continue
-            appended.append(target)
-            by_name[_name(target)] = target
+    appended = _attach_collective_workloads(existing, extracted, messages.append)
     if log_path is not None:
         for message in messages:
             append_log(log_path, message)
@@ -2049,6 +2023,30 @@ def _library_token(path: str) -> str:
     return ""
 
 
+_BENCHMARK_GREP_INCLUDES = tuple(f"--include=*.{ext}" for ext in ("py", "cpp", "cu", "cuh", "hip", "sh"))
+_MULTIGPU_PATH_TAGS = ("multigpu", "multi_gpu", "multinode", "/dist/", "_dist_")
+
+
+def _files_mentioning(keyword: str, root: Path) -> list[Path]:
+    """List the existing source and script files under ``root`` that contain ``keyword``.
+
+    A grep that cannot start, times out, or exits with an error finds nothing.
+    """
+    try:
+        proc = subprocess.run(
+            ["grep", "-rln", *_BENCHMARK_GREP_INCLUDES, "--", keyword, str(root)],
+            text=True,
+            capture_output=True,
+            timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if proc.returncode not in (0, 1):
+        return []
+    paths = [Path(line) for line in map(str.strip, proc.stdout.splitlines()) if line]
+    return [path for path in paths if path.exists()]
+
+
 def find_benchmark_files(name: str, repo_root: str, source_file: str = "") -> list[str]:
     """Find test/benchmark files matching a kernel under a repo's subdirs.
 
@@ -2068,13 +2066,12 @@ def find_benchmark_files(name: str, repo_root: str, source_file: str = "") -> li
         return [str(p) for p in known[:10]]
     keywords = _candidate_keywords(name)
     # Add the source stem (and no-underscore variant) for repos that name tests differently.
-    if source_file:
-        stem = Path(source_file).stem
-        if stem and stem not in keywords:
-            keywords.append(stem)
-        no_us = stem.replace("_", "")
-        if len(no_us) >= 6 and no_us not in keywords:
-            keywords.append(no_us)
+    stem = Path(source_file).stem
+    if stem and stem not in keywords:
+        keywords.append(stem)
+    no_us = stem.replace("_", "")
+    if len(no_us) >= 6 and no_us not in keywords:
+        keywords.append(no_us)
     if not keywords:
         return []
     root = Path(repo_root)
@@ -2084,71 +2081,18 @@ def find_benchmark_files(name: str, repo_root: str, source_file: str = "") -> li
         if not sub_root.exists():
             continue
         for keyword in keywords:
-            try:
-                proc = subprocess.run(
-                    [
-                        "grep",
-                        "-rln",
-                        "--include=*.py",
-                        "--include=*.cpp",
-                        "--include=*.cu",
-                        "--include=*.cuh",
-                        "--include=*.hip",
-                        "--include=*.sh",
-                        "--",
-                        keyword,
-                        str(sub_root),
-                    ],
-                    text=True,
-                    capture_output=True,
-                    timeout=15,
-                )
-            except (OSError, subprocess.SubprocessError):
-                continue
-            if proc.returncode not in (0, 1):
-                continue
-            for line in (proc.stdout or "").splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                p = Path(line)
-                if not p.exists():
-                    continue
-                found.append(p)
-    seen: set[str] = set()
-    unique: list[str] = []
-    for p in found:
-        s = str(p)
-        if s in seen:
-            continue
-        seen.add(s)
-        unique.append(s)
-
-    # Demote multi-GPU / distributed tests to the end: backends running on a
-    # single Ray worker can't satisfy them, and they tend to make agents bail.
-    def _is_multigpu(path_str: str) -> bool:
-        """Return whether a harness path looks multi-GPU / distributed.
-
-        Args:
-            path_str (str): Candidate harness file path.
-
-        Returns:
-            bool: ``True`` when the path contains a multi-GPU/distributed tag.
-        """
-        low = path_str.lower()
-        return any(tag in low for tag in ("multigpu", "multi_gpu", "multinode", "/dist/", "_dist_"))
-
-    # Same-library guard (RCA root cause 2): never pair a kernel from one library
-    # with a benchmark from another (e.g. a sglang sgl-kernel .cuh with an aiter
-    # op_test). Editing the kernel then "validating" against an unrelated lib's
-    # op always fails the smoke test -> REVERT. Drop cross-library candidates
-    # when the kernel's library is recognizable.
+            found.extend(_files_mentioning(keyword, sub_root))
+    unique = list(dict.fromkeys(str(p) for p in found))
+    # Never pair a kernel from one library with a benchmark from another (a sglang sgl-kernel .cuh with an aiter
+    # op_test): validating an edit against an unrelated library's op always fails the smoke test.
     src_lib = _library_token(source_file)
     if src_lib:
         same_lib = [s for s in unique if _library_token(s) in (src_lib, "")]
         if same_lib:
             unique = same_lib
-    unique.sort(key=_is_multigpu)
+    # Demote multi-GPU / distributed tests to the end: backends running on a
+    # single Ray worker can't satisfy them, and they tend to make agents bail.
+    unique.sort(key=lambda path: any(tag in path.lower() for tag in _MULTIGPU_PATH_TAGS))
     return unique[:10]
 
 
@@ -2839,6 +2783,54 @@ def _stamp_candidate_metadata(item: dict[str, Any], op_cat_map: dict[str, str] |
     item.setdefault("source_path", item.get("source_file", ""))
 
 
+def _recover_csv_invocations(item: dict[str, Any], perf_report_csv_dir: Path | str | None) -> None:
+    """Fill a candidate's missing shapes, invocation cases and raw arg spec from ``ops_unique_args.csv``.
+
+    The fused-MoE expert kernel's trace event carries no Input Dims, so it takes the sidecar's fused-MoE rows
+    instead of an exact-name match.
+    """
+    had_observed_shapes = bool(item.get("shapes"))
+    operation = str(item.get("name") or "")
+    if _is_fused_moe_candidate(item):
+        fused_moe_shapes = resolve_fused_moe_shapes_from_csv(perf_report_csv_dir)
+        invocation_cases = resolve_fused_moe_invocation_cases_from_csv(perf_report_csv_dir)
+        if not item.get("shapes") and fused_moe_shapes:
+            item["shapes"] = fused_moe_shapes
+            item["shape_provenance"] = "torch_trace"
+    else:
+        invocation_cases = resolve_invocation_cases_from_csv(perf_report_csv_dir, operation)
+    if not item.get("shapes"):
+        csv_shapes = resolve_shapes_from_csv_for_op(perf_report_csv_dir, operation)
+        if csv_shapes:
+            item["shapes"] = csv_shapes
+            item["shape_provenance"] = "torch_trace"
+    if invocation_cases:
+        if had_observed_shapes:
+            invocation_cases = [
+                {
+                    "operation": operation,
+                    "input_shapes": (item.get("input_shapes") or item.get("shapes") or []),
+                    "input_dtypes": item.get("input_dtypes") or [],
+                    "raw_arg_spec": item.get("raw_arg_spec") or {},
+                },
+                *invocation_cases,
+            ]
+        item["invocation_cases"] = invocation_cases
+    # Mark trace-extracted shapes so the dispatch-time validator knows their provenance.
+    if item.get("shapes"):
+        item.setdefault("shape_provenance", "torch_trace")
+    # Forward the full ordered arg metadata so GEAK's harness builder can
+    # reconstruct the exact call signature.
+    if not item.get("raw_arg_spec"):
+        raw_spec = (
+            invocation_cases[0].get("raw_arg_spec")
+            if invocation_cases
+            else resolve_raw_arg_spec_from_csv(perf_report_csv_dir, operation)
+        )
+        if raw_spec:
+            item["raw_arg_spec"] = raw_spec
+
+
 def _finalize_candidates(
     top: list[dict[str, Any]],
     *,
@@ -2859,10 +2851,6 @@ def _finalize_candidates(
         The finalized candidate list (the same ``top`` object).
     """
     op_cat_map = load_op_category_map(perf_report_csv_dir) if perf_report_csv_dir is not None else {}
-    # Recover the fused-MoE expert kernel's operand shapes (its trace event carries
-    # no Input Dims) once from the sidecar and graft onto candidates lacking shapes.
-    _fused_moe_shapes: list[str] | None = None
-    _fused_moe_invocation_cases: list[dict[str, Any]] | None = None
     # Denominator for the duration-derived gpu_pct fallback below.
     sum_dur = sum(float(it.get("duration_us") or 0.0) for it in top) or 1.0
     for idx, item in enumerate(top, 1):
@@ -2870,58 +2858,7 @@ def _finalize_candidates(
         item.setdefault("source_file", "")
         item.setdefault("source_type", "unknown")
         item.setdefault("shapes", [])
-        had_observed_shapes = bool(item.get("shapes"))
-        operation = str(item.get("name") or "")
-        if _is_fused_moe_candidate(item):
-            if _fused_moe_shapes is None:
-                _fused_moe_shapes = resolve_fused_moe_shapes_from_csv(perf_report_csv_dir)
-            if _fused_moe_invocation_cases is None:
-                _fused_moe_invocation_cases = resolve_fused_moe_invocation_cases_from_csv(perf_report_csv_dir)
-            invocation_cases = list(_fused_moe_invocation_cases or [])
-            if not item.get("shapes") and _fused_moe_shapes:
-                item["shapes"] = list(_fused_moe_shapes)
-                item["shape_provenance"] = "torch_trace"
-        else:
-            invocation_cases = resolve_invocation_cases_from_csv(
-                perf_report_csv_dir,
-                operation,
-            )
-        if not item.get("shapes"):
-            csv_shapes = resolve_shapes_from_csv_for_op(
-                perf_report_csv_dir,
-                operation,
-            )
-            if csv_shapes:
-                item["shapes"] = csv_shapes
-                item["shape_provenance"] = "torch_trace"
-        if invocation_cases:
-            if had_observed_shapes:
-                invocation_cases = [
-                    {
-                        "operation": operation,
-                        "input_shapes": (item.get("input_shapes") or item.get("shapes") or []),
-                        "input_dtypes": item.get("input_dtypes") or [],
-                        "raw_arg_spec": item.get("raw_arg_spec") or {},
-                    },
-                    *invocation_cases,
-                ]
-            item["invocation_cases"] = invocation_cases
-        # Mark trace-extracted shapes so the dispatch-time validator knows their provenance.
-        if item.get("shapes"):
-            item.setdefault("shape_provenance", "torch_trace")
-        # Forward the full ordered arg metadata so GEAK's harness builder can
-        # reconstruct the exact call signature.
-        if not item.get("raw_arg_spec"):
-            raw_spec = (
-                invocation_cases[0].get("raw_arg_spec")
-                if invocation_cases
-                else resolve_raw_arg_spec_from_csv(
-                    perf_report_csv_dir,
-                    str(item.get("name") or ""),
-                )
-            )
-            if raw_spec:
-                item["raw_arg_spec"] = raw_spec
+        _recover_csv_invocations(item, perf_report_csv_dir)
         item["kernel_id"] = f"k{idx:03d}"
         item["duration_us"] = round(item["duration_us"], 3)
         # Keep TraceLens' authoritative pct_e2e when present, including a real
@@ -2938,11 +2875,11 @@ def _finalize_candidates(
         # MoE kernel source before the patchability gate.
         if item["source_type"] == "flydsl":
             _sf = str(item.get("source_file") or "").strip()
-            if (not _sf) or (not os.path.isfile(_sf)):
+            if not os.path.isfile(_sf):
                 _fb = _resolve_flydsl_source_fallback()
                 if _fb:
                     item["source_file"] = _fb
-                    item["kernel_repo"] = find_repo_root(_fb) or item.get("kernel_repo", "")
+                    item["kernel_repo"] = find_repo_root(_fb) or item["kernel_repo"]
                     item["flydsl_source_from_fallback"] = True
         # Downgrade thin dispatch wrappers to vendor_binary so recommend_backends drops them.
         if item["source_type"] != "vendor_binary" and is_vendor_dispatch_wrapper(
@@ -3704,7 +3641,24 @@ def enrich_candidates_with_runtime_metadata(
         _enrich_kernel_contract(item, model_params)
 
 
-def _enrich_kernel_contract(item: dict[str, Any], model_params: dict[str, Any] | None) -> None:
+# Kernel-name tag -> torch.distributed op; the first match wins, so the bare "reduce" stays last.
+_COLLECTIVE_OPS = {
+    "all_reduce": "all_reduce",
+    "allreduce": "all_reduce",
+    "all_gather": "all_gather",
+    "allgather": "all_gather",
+    "reduce_scatter": "reduce_scatter",
+    "reducescatter": "reduce_scatter",
+    "all_to_all": "all_to_all",
+    "alltoall": "all_to_all",
+    "broadcast": "broadcast",
+    # aiter cross_device_reduce_* kernels use all-reduce semantics.
+    "cross_device_reduce": "all_reduce",
+    "reduce": "reduce",
+}
+
+
+def _enrich_kernel_contract(item: dict[str, Any], model_params: dict[str, Any]) -> None:
     """Populate per-kernel-class contract fields used to build a faithful harness.
 
     - Collectives (all_reduce / all_gather / reduce_scatter / ...): record
@@ -3717,48 +3671,19 @@ def _enrich_kernel_contract(item: dict[str, Any], model_params: dict[str, Any] |
     These are advisory metadata; absent fields are simply not set.
     """
     name = str(item.get("name") or "").lower()
-    mp = model_params or {}
-    contract = item.get("kernel_contract")
-    if not isinstance(contract, dict):
-        contract = {}
+    contract = item.get("kernel_contract") or {}
     # --- collectives ---
-    _COLL = (
-        ("all_reduce", "allreduce"),
-        ("all_gather", "allgather"),
-        ("reduce_scatter", "reducescatter"),
-        ("all_to_all", "alltoall"),
-        ("broadcast",),
-        # aiter cross_device_reduce_* kernels use all-reduce semantics.
-        ("cross_device_reduce",),
-        ("reduce",),
-    )
-    _OPMAP = {
-        "all_reduce": "all_reduce",
-        "allreduce": "all_reduce",
-        "all_gather": "all_gather",
-        "allgather": "all_gather",
-        "reduce_scatter": "reduce_scatter",
-        "reducescatter": "reduce_scatter",
-        "all_to_all": "all_to_all",
-        "alltoall": "all_to_all",
-        "broadcast": "broadcast",
-        "cross_device_reduce": "all_reduce",
-        "reduce": "reduce",
-    }
-    if bool(item.get("is_multigpu")) or any(tag in name for grp in _COLL for tag in grp):
-        op = next((_OPMAP[t] for grp in _COLL for t in grp if t in name), "all_reduce")
+    collective_op = next((op for tag, op in _COLLECTIVE_OPS.items() if tag in name), None)
+    if item.get("is_multigpu") or collective_op:
+        op = collective_op or "all_reduce"
         contract["kind"] = "collective"
         contract["collective_op"] = op
-        ws = (
-            mp.get("WORLD_SIZE")
-            or mp.get("TP_SIZE")
-            or mp.get("TENSOR_PARALLEL_SIZE")
-            or item.get("num_gpus_recommended")
-        )
+        tp = model_params.get("TP_SIZE") or model_params.get("TENSOR_PARALLEL_SIZE")
+        ws = model_params.get("WORLD_SIZE") or tp or item.get("num_gpus_recommended")
         if ws:
             contract["world_size"] = int(ws)
-        if mp.get("TP_SIZE") or mp.get("TENSOR_PARALLEL_SIZE"):
-            contract["tp_size"] = int(mp.get("TP_SIZE") or mp.get("TENSOR_PARALLEL_SIZE"))
+        if tp:
+            contract["tp_size"] = int(tp)
         contract.setdefault("reduce_op", "sum")
         contract["reference"] = f"torch.distributed.{op}"
         contract["e2e_note"] = "comm-bound collective: a 1-GPU GEAK slot cannot reproduce inter-GPU traffic"
@@ -3771,10 +3696,10 @@ def _enrich_kernel_contract(item: dict[str, Any], model_params: dict[str, Any] |
             ("NUM_ATTENTION_HEADS", "num_heads"),
             ("NUM_KEY_VALUE_HEADS", "num_kv_heads"),
         ):
-            if mp.get(src) is not None:
-                contract[dst] = mp.get(src)
+            if model_params.get(src) is not None:
+                contract[dst] = model_params[src]
         contract.setdefault("kv_layout", "unknown")  # to be confirmed from trace; flag for reviewer
-        contract["seqlen_regime"] = "prefill" if "prefill" in name else ("decode" if "decode" in name else "mixed")
+        contract["seqlen_regime"] = next((regime for regime in ("prefill", "decode") if regime in name), "mixed")
         contract["reference"] = "torch.nn.functional.scaled_dot_product_attention"
     # E2E-TRANSFER honesty flag: warn when a kernel-level win is unlikely to move
     # serving E2E so neither the pipeline nor a reviewer over-trusts a micro-speedup.
