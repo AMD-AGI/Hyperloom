@@ -328,9 +328,7 @@ def _certify_trace_dir(trace_dir: Path, framework: str) -> dict[str, Any]:
     )
 
 
-def _capture_trace_files(trace_dir: Path, scriptable: bool) -> tuple[Path | None, list[Path]]:
-    if scriptable:
-        return None, []
+def _capture_trace_files(trace_dir: Path) -> tuple[Path | None, list[Path]]:
     capture_dirs = (
         trace_dir / "capture_traces",
         trace_dir / "graph_capture_profile",
@@ -353,13 +351,7 @@ def _main_trace_and_text(trace_dir: Path) -> tuple[Path | None, str | None]:
     return main_traces[0], _sample_trace_text(main_traces[0])
 
 
-def _check_capture_traces(capture: Path | None, capture_files: list[Path], scriptable: bool) -> tuple[dict, str]:
-    if scriptable:
-        return _check_row(
-            CHECK_CAPTURE_TRACES_PRESENT,
-            status="skipped",
-            skip_reason="scriptable framework writes a plain torch-profiler trace",
-        ), ""
+def _check_capture_traces(capture: Path | None, capture_files: list[Path]) -> tuple[dict, str]:
     if capture is None:
         return _check_row(CHECK_CAPTURE_TRACES_PRESENT, status="failed", capture_dir_present=False, file_count=0), (
             "[1] graph-capture subdirectory missing — graph capture "
@@ -618,11 +610,17 @@ def _validate_trace_structure(
     from hyperloom.inference_optimizer import framework_registry as _fw_reg
 
     scriptable = _fw_reg.is_scriptable(framework)
-    capture, capture_files = _capture_trace_files(trace_dir, scriptable)
+    capture_files: list[Path] = []
+    if scriptable:
+        skip = "scriptable framework writes a plain torch-profiler trace"
+        capture_result = (_check_row(CHECK_CAPTURE_TRACES_PRESENT, status="skipped", skip_reason=skip), "")
+    else:
+        capture, capture_files = _capture_trace_files(trace_dir)
+        capture_result = _check_capture_traces(capture, capture_files)
     main_trace, main_text = _main_trace_and_text(trace_dir)
 
     results = [
-        _check_capture_traces(capture, capture_files, scriptable),
+        capture_result,
         _check_capture_input_dims(capture_files),
         _check_step_annotations(main_trace, main_text, scriptable),
         *_check_split_chunks(trace_dir / "trace_split", scriptable),

@@ -320,11 +320,7 @@ async def _apply_tracelens_patch_fanout(patch_set: str, torch_profiler_dir: str,
 def _health_wait_budget(
     poll_timeout_s: int, extra_server_args: str, pd: dict, extra_env: dict[str, str] | None
 ) -> tuple[int, int]:
-    from hyperloom.inference_optimizer.multi_node.cli import _resolve_poll_timeout_s
-
     health_wait_s = env_int("HYPERLOOM_MN_HEALTH_WAIT_S", DEFAULT_HEALTH_TIMEOUT_S)
-    # Align launch-driver poll with /health wait for JIT-heavy MoE runs.
-    poll_timeout_s = max(poll_timeout_s, _resolve_poll_timeout_s())
     # aiter kernels JIT-compile + autotune on first use (server log: "not found tuned config in
     # /tmp/aiter_configs"); a cold compile can exceed the default 900s gate and false-fail an
     # otherwise-healthy variant (the doomed attempt then burns a reclaim+retry cycle before the now-warm
@@ -453,11 +449,14 @@ async def restart_server_for_round(
 
             poll_timeout_s = env_int("HYPERLOOM_MN_POLL_TIMEOUT_S", DEFAULT_HEALTH_TIMEOUT_S)
             await _apply_tracelens_patch_fanout(resolve_sglang_patch_set(), torch_profiler_dir, poll_timeout_s)
-            poll_timeout_s, health_wait_s = _health_wait_budget(poll_timeout_s, extra_server_args, pd, extra_env)
 
             # Local import to keep httpx out of the single-node import path.
-            from hyperloom.inference_optimizer.multi_node.cli import cmd_restart_server
+            from hyperloom.inference_optimizer.multi_node.cli import cmd_restart_server, _resolve_poll_timeout_s
 
+            # Align launch-driver poll with /health wait for JIT-heavy MoE runs.
+            poll_timeout_s, health_wait_s = _health_wait_budget(
+                max(poll_timeout_s, _resolve_poll_timeout_s()), extra_server_args, pd, extra_env
+            )
             ns = _restart_namespace(round_args, extra_server_args, poll_timeout_s, pd)
             from ._multi_node_env import log_mn_banner
 
@@ -515,7 +514,7 @@ async def restart_server_for_round(
                     # The reachable /health above can be a pod-pinned head address; the benchmark dials the published
                     # ClusterIP Service, whose endpoints lag readiness after a restart.
                     await _wait_for_published_service_ready_async(
-                        timeout_s=_published_ready_timeout_s(), poll_every_s=poll_s
+                        timeout_s=env_int("HYPERLOOM_MN_PUBLISHED_READY_S", 300), poll_every_s=poll_s
                     )
                 except ServerRestartFailed as exc:
                     _collect_worker_server_logs(_read_state(), str(exc))
@@ -595,13 +594,6 @@ async def trigger_infera_engine_profile(
             log.warning("infera profile %s -> %s failed (%s); continuing", route, url, exc)
 
 
-def _probe_generated_tokens(data: object) -> int:
-    """Best-effort count of tokens a /v1/completions probe actually generated."""
-    from hyperloom.inference_optimizer.multi_node._internal.serving_probe import generated_tokens
-
-    return generated_tokens(data)
-
-
 async def _probe_health(client: Any, health_url: str) -> tuple[bool, str]:
     import httpx as _httpx
 
@@ -636,6 +628,8 @@ async def _probe_completion_tokens(
 ) -> tuple[int, str]:
     import httpx as _httpx
 
+    from hyperloom.inference_optimizer.multi_node._internal.serving_probe import generated_tokens
+
     model_id = str(models[0].get("id") or "") if isinstance(models[0], dict) else ""
     if not model_id:
         return -1, "completion_probe: no model id"
@@ -656,7 +650,7 @@ async def _probe_completion_tokens(
     if resp.status_code != 200:
         return -1, f"completion_probe_http={resp.status_code}"
     try:
-        return _probe_generated_tokens(resp.json()), ""
+        return generated_tokens(resp.json()), ""
     except ValueError:
         return 0, ""
 
@@ -680,22 +674,26 @@ def _models_empty_too_long(
     return (elapsed - health_ok_at) > grace_s
 
 
-def _worker_detokenizer_wedged(shared_dir: str, ip: str) -> bool:
-    """Best-effort: True when worker ``ip``'s server log shows a persistent detokenizer wedge -- weights are loaded but the detokenizer never heartbeats, so the engine's /health never flips and the HTTP port never binds."""
-    import re as _re
-
+def _worker_log_tail(shared_dir: str, ip: str) -> str:
     if not shared_dir:
-        return False
+        return ""
     log_path = Path(shared_dir) / ("mn_infera_server_" + str(ip) + "_r0.log")
     try:
         with log_path.open("rb") as f:
             f.seek(0, 2)
             size = f.tell()
             f.seek(max(0, size - 65536))
-            tail = f.read().decode("utf-8", "replace")
+            return f.read().decode("utf-8", "replace")
     except OSError:
-        return False
+        return ""
+
+
+def _worker_detokenizer_wedged(shared_dir: str, ip: str) -> bool:
+    """Best-effort: True when worker ``ip``'s server log shows a persistent detokenizer wedge -- weights are loaded but the detokenizer never heartbeats, so the engine's /health never flips and the HTTP port never binds."""
+    import re as _re
+
     # >=15 recent markers ~= 30s+ of continuous stall (marker ~every 2s).
+    tail = _worker_log_tail(shared_dir, ip)
     return len(_re.findall(r"Health check failed.*detokenizer", tail, _re.IGNORECASE)) >= 15
 
 
@@ -703,17 +701,7 @@ def _worker_startup_crashed(shared_dir: str, ip: str) -> str | None:
     """Best-effort: return a short reason when worker ``ip``'s server log shows a NON-RECOVERABLE startup failure (so /health will never flip), else None."""
     import re as _re
 
-    if not shared_dir:
-        return None
-    log_path = Path(shared_dir) / ("mn_infera_server_" + str(ip) + "_r0.log")
-    try:
-        with log_path.open("rb") as f:
-            f.seek(0, 2)
-            size = f.tell()
-            f.seek(max(0, size - 65536))
-            tail = f.read().decode("utf-8", "replace")
-    except OSError:
-        return None
+    tail = _worker_log_tail(shared_dir, ip)
     patterns = (
         r"error: unrecognized arguments:.*",
         r"[A-Za-z0-9_./-]*: error: .*",  # argparse "<prog>: error: ..."
@@ -789,10 +777,8 @@ async def _wait_for_workers_ready_async(timeout_s: int, poll_every_s: int = 10) 
     """Wait for every prefill/decode worker's own /health to return 200 before the frontend serving probe runs."""
     import time as _t
 
-    try:
-        import httpx as _httpx
-    except ImportError:  # pragma: no cover
-        return
+    import httpx as _httpx
+
     port = env_int("HYPERLOOM_MN_WORKER_PORT", 30000)
     targets = _worker_health_targets(_read_state())
     if not targets:
@@ -946,11 +932,7 @@ async def _wait_for_server_health_async(
     """Poll the multi_node service_url /health until 200 or timeout."""
     import time as _time
 
-    try:
-        import httpx as _httpx
-    except ImportError:  # pragma: no cover
-        log.warning("httpx not available; skipping post-restart /health wait")
-        return
+    import httpx as _httpx
 
     from hyperloom.inference_optimizer.multi_node._internal.external_state import reachable_service_url
 
@@ -1105,16 +1087,6 @@ def _is_name_resolution_error(exc: BaseException) -> bool:
     return False
 
 
-def _published_ready_timeout_s() -> int:
-    """Resolve the published-service gate budget from the environment."""
-    return env_int("HYPERLOOM_MN_PUBLISHED_READY_S", 300)
-
-
-def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
-    """Read a poll-count knob whose smallest meaningful value is *minimum*, not zero."""
-    return max(minimum, env_int(name, default))
-
-
 async def _wait_for_published_service_ready_async(
     timeout_s: int = 300,
     poll_every_s: int = 10,
@@ -1126,10 +1098,7 @@ async def _wait_for_published_service_ready_async(
         log.info("post-restart published-service gate disabled (HYPERLOOM_MN_PUBLISHED_READY_S<=0)")
         return
 
-    try:
-        import httpx as _httpx
-    except ImportError:  # pragma: no cover - httpx is backfilled by preflight
-        return
+    import httpx as _httpx
 
     from hyperloom.inference_optimizer.multi_node._internal.external_state import reachable_service_url
 
@@ -1145,11 +1114,11 @@ async def _wait_for_published_service_ready_async(
     health_url = published + "/health"
     # Consecutive 200s required so a single endpoint-list flap does not pass us (override:
     # HYPERLOOM_MN_PUBLISHED_READY_OK_STREAK).
-    required_ok = _env_int("HYPERLOOM_MN_PUBLISHED_READY_OK_STREAK", 2)
+    required_ok = max(1, env_int("HYPERLOOM_MN_PUBLISHED_READY_OK_STREAK", 2))
     ok_streak = 0
     # Skip only after this many CONSECUTIVE name-resolution failures, so a CoreDNS blip inside the readiness window
     # (which resolves on a later poll) does not disable the gate exactly when it is needed.
-    dns_skip_after = _env_int("HYPERLOOM_MN_PUBLISHED_DNS_SKIP_AFTER", 6)
+    dns_skip_after = max(1, env_int("HYPERLOOM_MN_PUBLISHED_DNS_SKIP_AFTER", 6))
     dns_failures = 0
     started = _time.monotonic()
     last_err = ""
