@@ -262,16 +262,27 @@ async def test_build_specialist_round_entry_carries_full_payload(coord):
 
 @pytest.mark.asyncio
 async def test_build_specialist_round_entry_round_id_falls_back_to_task_id(coord):
-    from hyperloom.orchestrator.loop.coordinator import Coordinator
-
-    coord_obj = Coordinator.__new__(Coordinator)
     task = _StubTask(task_id="task-no-round", params={})
-    entry = coord_obj.specialist_dispatch.build_specialist_round_entry(
+    entry = coord.specialist_dispatch.build_specialist_round_entry(
         task=task,
         done_payload=_done_payload(),
         source=f"{SPECIALIST_FROM_AGENT_PREFIX}task-no-round",
     )
     assert entry["round_id"] == "task-no-round"
+
+
+@pytest.mark.asyncio
+async def test_build_specialist_round_entry_records_run_error_and_notes(coord):
+    task = _StubTask(task_id="t-err", params={})
+    entry = coord.specialist_dispatch.build_specialist_round_entry(
+        task=task,
+        done_payload={**_done_payload(), "_specialist_notes": ["n1", 2]},
+        source=f"{SPECIALIST_FROM_AGENT_PREFIX}t-err",
+        run_error="dispatch failed",
+    )
+    assert entry["status"] == "failed"
+    assert entry["error"] == entry["run_error"] == "dispatch failed"
+    assert entry["notes"] == ["n1", "2"]
 
 
 # 5. End-to-end: dispatcher exit hook bookkeeping
@@ -466,7 +477,7 @@ async def test_force_stalled_domain_does_not_resubmit_existing_round(force_coord
 
 
 @pytest.mark.asyncio
-async def test_force_stalled_source_patch_without_git_root_is_pruned_once(force_coord):
+async def test_force_stalled_source_patch_without_git_root_is_refused_and_recorded_once(force_coord):
     state = force_coord.shared_state
     state.framework_repo_path = ""
     for _ in range(10):
@@ -483,7 +494,6 @@ async def test_force_stalled_source_patch_without_git_root_is_pruned_once(force_
     await force_coord.specialist_dispatch.maybe_force_stalled_domain_specialist()
 
     force_coord.router.handle_intent.assert_not_awaited()
-    assert state.pruned_families == ["source_patch"]
     failures = [
         (row["action"], row["task_id"], row["error_class"], row["error_excerpt"]) for row in state.last_action_failures
     ]
@@ -514,10 +524,9 @@ async def test_force_stalled_skips_a_domain_with_a_specialist_in_flight(force_co
 
 
 @pytest.mark.asyncio
-async def test_force_stalled_research_specialist_ignores_source_patch_prune(force_coord):
+async def test_force_stalled_research_specialist_needs_no_source_root(force_coord):
     state = force_coord.shared_state
     state.framework_repo_path = ""
-    state.add_pruned_family("source_patch")
     state.stalled_domains = lambda **_kwargs: ["pr_intelligence"]
     state.best_gap_for_anchor = lambda _anchor: "gap.framework.discovery.s1"
 
@@ -582,22 +591,9 @@ def _force_dispatch_site(_coord, force_coord):
     return force_coord.shared_state, run, lambda: force_coord.router.handle_intent.await_count == 1
 
 
-def _force_prune_site(_coord, force_coord):
-    state = force_coord.shared_state
-    state.framework_repo_path = ""
-    _stall_serving_domain(state)
-    run = force_coord.specialist_dispatch.maybe_force_stalled_domain_specialist
-    return (
-        state,
-        run,
-        lambda: force_coord.router.handle_intent.await_count == 0 and state.pruned_families == ["source_patch"],
-    )
-
-
 _SAVE_SITES = {
     "record_result": _record_result_site,
     "force_dispatch": _force_dispatch_site,
-    "force_prune": _force_prune_site,
 }
 
 

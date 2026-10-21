@@ -2623,7 +2623,7 @@ class WritebackCollaborator(GeakRevalidation):
                 "error_class": result.get("error_class"),
                 "error": result.get("error"),
             }
-        elif status == "succeeded":
+        elif status in {"succeeded", "recovered"}:
             audit_decision = "promoted"
             audit_extras = self._anchor_watermark_on_roofline(result, task)
             changed = True

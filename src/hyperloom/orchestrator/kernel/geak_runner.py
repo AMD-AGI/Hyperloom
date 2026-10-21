@@ -15,6 +15,18 @@ import time
 from pathlib import Path
 
 
+#: How long a SIGKILLed tree's pipes are read; a descendant that left the process group can hold them open forever.
+KILLED_DRAIN_TIMEOUT_S: float = 10.0
+
+
+def drain_killed(proc: subprocess.Popen) -> tuple[str, str]:
+    """Return what a SIGKILLed text-mode ``proc`` wrote, stopping after :data:`KILLED_DRAIN_TIMEOUT_S`."""
+    try:
+        return proc.communicate(timeout=KILLED_DRAIN_TIMEOUT_S)
+    except subprocess.TimeoutExpired as exc:
+        return (exc.output or b"").decode(errors="replace"), (exc.stderr or b"").decode(errors="replace")
+
+
 def _resolve_runner() -> str:
     """Resolve run_e2e.py from $GEAK_E2E_RUNNER / $GEAK_ROOT (GEAK@GEAK)."""
     runner = os.environ.get("GEAK_E2E_RUNNER", "").strip()
@@ -95,7 +107,7 @@ def call_geak(handoff: dict, output_dir: Path, *, timeout_s: int = 43200) -> dic
             returncode = proc.returncode
         except subprocess.TimeoutExpired:
             _killpg(signal.SIGKILL)
-            stdout, stderr = proc.communicate()
+            stdout, stderr = drain_killed(proc)
             returncode = -1
     stdout_tail = (stdout or "")[-4000:]
     stderr_tail = (stderr or "")[-4000:]
