@@ -914,7 +914,7 @@ class PolicyGate:
                 sorted(SPECIALIST_SCOPE_VALUES),
             )
         elif scope_raw == SPECIALIST_SCOPE_DOMAINS and len(tags) < 2:
-            log.info("specialist dispatch scope='domains' with %d tag(s)=%r", len(tags), tags)
+            log.info("specialist dispatch scope='domains' with %d tag(s)=%r; profile will re-infer", len(tags), tags)
         elif scope_raw == SPECIALIST_SCOPE_DOMAIN and len(tags) > 1:
             log.info("specialist dispatch scope='domain' with %d tags=%r", len(tags), tags)
 
