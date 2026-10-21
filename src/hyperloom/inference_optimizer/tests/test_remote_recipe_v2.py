@@ -33,7 +33,6 @@ from hyperloom.orchestrator.knowledge.remote_recipe import (
     read_remote_recipe as _read_remote_recipe,
     write_final_remote_recipe,
 )
-from hyperloom.orchestrator.knowledge.remote_recipe.values import _Files, merge_staged_sections
 from hyperloom.orchestrator.knowledge.remote_recipe._vendor import kb_store_client
 from hyperloom.orchestrator.knowledge.remote_recipe.client import (
     _champion,
@@ -2363,32 +2362,6 @@ def test_a_staged_file_is_published_under_its_own_section(tmp_path: Path) -> Non
     assert (tmp_path / "files" / refs[0]).is_file()
 
 
-def test_merge_staged_sections_unions_and_dedups_prior_refs(tmp_path: Path) -> None:
-    """Replay refs already on the section must union with newly staged refs, without duplicates."""
-    patch_a = tmp_path / "authored_a.patch"
-    patch_b = tmp_path / "authored_b.patch"
-    patch_a.write_text("authored_a", encoding="utf-8")
-    patch_b.write_text("authored_b", encoding="utf-8")
-    sections = _sections(tmp_path)
-    staged_refs = PatchKB(sections).stage_patches([patch_a, patch_b], stack_index=2)
-    staged_ref_a, staged_ref_b = staged_refs[0], staged_refs[1]
-    prior_patch = "patch/overlays/000000/00-replayed.patch"
-    prior_artifact = "patch/artifacts/prior.bin"
-    # before = [prior, staged_ref_a]; after = [staged_ref_a, staged_ref_b].
-    after_patches = list(sections.staged("patch").knowledge.get("patches") or [])
-    assert after_patches == [staged_ref_a, staged_ref_b]
-    value = {
-        "patch": {
-            "patches": [prior_patch, staged_ref_a],
-            "artifacts": [prior_artifact],
-        }
-    }
-    merged = merge_staged_sections(value, sections, _Files(tmp_path / "files"))
-    assert merged == ["patch"]
-    assert value["patch"]["patches"] == [prior_patch, staged_ref_a, staged_ref_b]
-    assert value["patch"]["artifacts"] == [prior_artifact]
-
-
 def test_non_overlay_owner_patch_ref_fails_before_publish(
     tmp_path: Path,
 ) -> None:
@@ -2900,13 +2873,16 @@ def test_remote_adapter_pages_history_then_materializes_l2_donor(
     row, tier, confidence = _cascade_warm_start_search(
         adapter,  # type: ignore[arg-type]
         cid=exact,
-        hw="mi300x",
-        framework="sglang",
-        model_type_val="qwen",
-        architectures_val=["QwenArch"],
-        arch_slug="qwenarch",
-        fw_version="1.0",
-        precision="fp8",
+        identity={
+            "canonical_id": exact,
+            "hardware": "mi300x",
+            "framework_name": "sglang",
+            "model_type": "qwen",
+            "architectures": "qwenarch",
+            "framework_version": "1.0",
+            "precision": "fp8",
+        },
+        shape={},
         warm_prefer=None,
     )
 

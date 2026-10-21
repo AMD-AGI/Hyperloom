@@ -66,6 +66,19 @@ _STATE_PARAMS: tuple[tuple[str, str, Callable[[Any], Any]], ...] = (
     ("cumulative_gain_validated", "cumulative_gain_validated", float),
 )
 
+#: Optional round-row fields, taken from the done payload or else the dispatch params; an empty value is not carried.
+_ROUND_CARRIED_KEYS: tuple[str, ...] = (
+    "task_kind",
+    "scope",
+    "proposal_msg_id",
+    "framework_agent_candidate_id",
+    "framework_batch_id",
+    "reauthor_attempt",
+    "apply_retry_attempt",
+    "kb_read_id",
+    "kb_rendered_refs",
+)
+
 # Bounded transient-failure auto-retry for specialist dispatches (infra-only).
 SPECIALIST_AUTO_RETRY_MAX: int = 2
 
@@ -105,7 +118,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
         state = self.shared_state
         plane = self.knowledge_plane
 
-        from .domains import normalize_dispatch_tags
+        from .domains import gap_backfilled_domain, normalize_dispatch_tags
         from .profile import resolve_specialist_profile
 
         # Bench-capable specialists run a real serving + benchmark loop, so
@@ -113,6 +126,8 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
         if resolve_specialist_profile(params).reserves_benchmark_lane:
             params.setdefault("needs_gpu", True)
 
+        if backfilled := gap_backfilled_domain(params, state.find_gap):
+            params["domain"] = backfilled
         domain = str(params.get("domain") or "").strip()
         normalize_dispatch_tags(params)
 
@@ -204,11 +219,6 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                     params["gap_symptom"] = str(gap.get("symptom") or "")
                 if not params.get("gap_layer"):
                     params["gap_layer"] = str(gap.get("layer") or "")
-                if not params.get("domain"):
-                    # LLM omitted domain → gap's domain_hint wins.
-                    hint = str(gap.get("domain_hint") or "")
-                    if hint:
-                        params["domain"] = hint
                 evidence = params.get("gap_evidence")
                 if not isinstance(evidence, dict) or not evidence:
                     attempts = list(gap.get("attempts") or [])[-5:]
@@ -565,12 +575,9 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             return
 
         from .domains import domain_for_tag
+        from .in_flight import in_flight_domains
 
-        busy_domains = {
-            str((t.params or {}).get("domain") or "")
-            for t in (*await self.tasks.queued(), *await self.tasks.running())
-            if t.kind == "specialist"
-        }
+        busy_domains = in_flight_domains([*await self.tasks.queued(), *await self.tasks.running()])
         round_id = int((state.explore_search or {}).get("cursor") or 0)
         for anchor in stalled:
             gap_cid = state.best_gap_for_anchor(anchor)
@@ -593,11 +600,8 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             if is_source_patch and state.is_pruned(_SOURCE_PATCH_FAMILY):
                 continue
             idempotency_key = f"forced-stalled-{anchor}-round{round_id}{self._coord.dispatcher.cycle_idem_suffix()}"
-            lookup = getattr(self.tasks, "find_by_idempotency_key", None)
-            if callable(lookup):
-                existing = await lookup(idempotency_key)
-                if existing is not None:
-                    continue
+            if await self.tasks.find_by_idempotency_key(idempotency_key) is not None:
+                continue
             await self.warm_specialist_params(params)
             if is_source_patch:
                 preflight_error = specialist_patch_preflight_error(
@@ -736,34 +740,25 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             A specialist-round row dict suitable for
             ``SharedState.record_specialist_round``.
         """
-        proposals = done_payload.get("proposal_set") or []
+        proposals = done_payload.get("proposal_set")
         if not isinstance(proposals, list):
             proposals = []
         task_params = task.params or {}
-        round_id = str(task_params.get("round_id") or task.task_id)
         source_phase = (
-            str(
-                task_params.get("source_phase")
-                or done_payload.get("source_phase")
-                or getattr(getattr(self, "shared_state", None), "phase", "")
-                or ""
-            )
+            str(task_params.get("source_phase") or done_payload.get("source_phase") or self.shared_state.phase or "")
             .strip()
             .upper()
         )
         from .domains import normalize_dispatch_tags
 
-        # Knowledge-domain tags; reported tags win over dispatch params.
-        tags = normalize_dispatch_tags(done_payload)
-        if not tags:
-            tags = normalize_dispatch_tags(task.params or {})
         entry: dict[str, Any] = {
-            "round_id": round_id,
+            "round_id": str(task_params.get("round_id") or task.task_id),
             "task_id": task.task_id,
             "source": source or "coordinator",
             "completed_at": datetime.now(timezone.utc).isoformat(),
             "domain": str(done_payload.get("domain") or task_params.get("domain") or ""),
-            "tags": list(tags),
+            # Knowledge-domain tags; reported tags win over dispatch params.
+            "tags": normalize_dispatch_tags(done_payload) or normalize_dispatch_tags(task_params),
             "gap_canonical_id": str(done_payload.get("gap_canonical_id") or task_params.get("gap_canonical_id") or ""),
             "proposals_total": len(proposals),
             "proposal_set": list(proposals),
@@ -773,41 +768,30 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             "new_findings": list(done_payload.get("new_findings") or []),
             "residual_questions": list(done_payload.get("residual_questions") or []),
         }
-        for key in (
-            "task_kind",
-            "scope",
-            "proposal_msg_id",
-            "framework_agent_candidate_id",
-            "framework_batch_id",
-            "reauthor_attempt",
-            "apply_retry_attempt",
-            "kb_read_id",
-            "kb_rendered_refs",
-        ):
+        for key in _ROUND_CARRIED_KEYS:
             value = done_payload.get(key)
             if value in (None, "", [], {}):
                 value = task_params.get(key)
             if value not in (None, "", [], {}):
                 entry[key] = value
         for key in ("candidate_discovery", "framework_agent_authoring"):
-            if bool(done_payload.get(key) or task_params.get(key)):
+            if done_payload.get(key) or task_params.get(key):
                 entry[key] = True
         if run_error:
             entry["status"] = "failed"
-            entry["error"] = str(run_error)[:1000]
-            entry["run_error"] = str(run_error)[:1000]
+            entry["error"] = entry["run_error"] = str(run_error)[:1000]
         elif done_payload.get("status") not in (None, ""):
             entry["status"] = str(done_payload.get("status"))
         if source_phase:
             entry["source_phase"] = source_phase
-        gpu_ids = done_payload.get("allocated_gpu_ids") or []
+        gpu_ids = done_payload.get("allocated_gpu_ids")
         if isinstance(gpu_ids, list) and gpu_ids:
             entry["allocated_gpu_ids"] = [
                 int(g) for g in gpu_ids if isinstance(g, (int, str)) and str(g).strip().lstrip("-").isdigit()
             ]
-        specialist_notes = done_payload.get("_specialist_notes") or []
+        specialist_notes = done_payload.get("_specialist_notes")
         if isinstance(specialist_notes, list) and specialist_notes:
-            entry["notes"] = [str(n) for n in specialist_notes]
+            entry["notes"] = list(map(str, specialist_notes))
         return entry
 
     def _record_specialist_round_product(self, *, task: Task, round_entry: dict[str, Any]) -> None:
@@ -867,12 +851,6 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                 usable payload.
         """
         task_params = task.params or {}
-        domain = str(done_payload.get("domain") or task_params.get("domain") or "").strip()
-        proposals = done_payload.get("proposal_set") or []
-        if not isinstance(proposals, list):
-            proposals = []
-        is_empty = len(proposals) == 0
-
         round_entry = self.build_specialist_round_entry(
             task=task,
             done_payload=done_payload,
@@ -890,21 +868,21 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                     result={"error_class": error_class, "error": "; ".join(str(d) for d in dropped[:4])},
                 )
         # Advisory multi-model scoring of the proposal_set; informational only, gates nothing.
-        if self._proposal_scorer is not None and proposals:
+        if self._proposal_scorer is not None and round_entry["proposal_set"]:
             scores = await self._proposal_scorer.score(
                 gap={
-                    "domain": domain,
+                    "domain": round_entry["domain"].strip(),
                     "gap_canonical_id": done_payload.get("gap_canonical_id", ""),
                     "gap_symptom": task_params.get("gap_symptom"),
                     "gap_evidence": task_params.get("gap_evidence"),
                     "summary": done_payload.get("summary", ""),
                 },
-                proposals=proposals,
+                proposals=round_entry["proposal_set"],
                 task_id=task.task_id,
                 tick=int(self.shared_state.tick or 0),
-                phase=(self.shared_state.phase or "") or None,
+                phase=self.shared_state.phase or None,
             )
-            if scores and (scores.get("models") or scores.get("errors")):
+            if scores.get("models") or scores.get("errors"):
                 round_entry["ensemble_scores"] = scores
                 input_err = (scores.get("errors") or {}).get("input")
                 if input_err and not scores.get("models"):
@@ -928,7 +906,13 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                 "specialist bookkeeping: SharedState.save failed for task=%s",
                 task.task_id,
             )
+        await self._follow_up_specialist_round(task, done_payload, round_entry)
 
+    async def _follow_up_specialist_round(
+        self, task: Task, done_payload: dict[str, Any], round_entry: dict[str, Any]
+    ) -> None:
+        """Hand a recorded specialist round to the gap ledger and the phases that consume what it produced."""
+        domain = round_entry["domain"].strip()
         # Harvest specialist findings (hints, gap seeds, PR dedup) from any domain.
         if done_payload.get("new_findings"):
             await self._harvest_specialist_findings(done_payload)
@@ -952,8 +936,8 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
                 {
                     "action": "specialist",
                     "variant_name": domain,
-                    "outcome": "EMPTY" if is_empty else "PROPOSALS",
-                    "proposals_total": len(proposals),
+                    "outcome": "EMPTY" if not round_entry["proposals_total"] else "PROPOSALS",
+                    "proposals_total": round_entry["proposals_total"],
                 },
             )
         await self._coord.gap_refresh.refresh_gaps(
