@@ -10,6 +10,18 @@ from typing import Any
 from ..base import Decision, RenderedSection, md_kv_list, register_renderer, session_of, stop_reason_of
 
 
+def _elapsed_facts(session: dict[str, Any]) -> list[str]:
+    """The run leg's and the whole session's wall-clock time, each under its own name."""
+    leg = session.get("elapsed_minutes")
+    total = session.get("total_elapsed_minutes")
+    facts: list[str] = []
+    if leg is not None:
+        facts.append(f"Wall-clock elapsed{' (this leg)' if total is not None else ''}: {float(leg):.1f} minutes.")
+    if total is not None:
+        facts.append(f"Total elapsed across all legs: {float(total):.1f} minutes.")
+    return facts
+
+
 @register_renderer("session")
 def render(breakdown: dict[str, Any]) -> RenderedSection:
     """Render the session-identification + lifecycle section.
@@ -32,7 +44,6 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     claw = s.get("claw_session_id")
     sandbox = s.get("sandbox_user_id")
     stop_reason = stop_reason_of(breakdown)
-    elapsed = s.get("elapsed_minutes")
     host = str(s.get("host") or "")
     image = s.get("image")
     code = str(s.get("code_revision") or "")
@@ -48,8 +59,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
         facts.append(f"Sandbox user `{sandbox}`")
     if stop_reason:
         facts.append(f"Run ended with stop_reason=`{stop_reason}`.")
-    if elapsed is not None:
-        facts.append(f"Wall-clock elapsed: {float(elapsed):.1f} minutes.")
+    facts.extend(_elapsed_facts(s))
     if tick and int(tick) > 0:
         facts.append(f"Coordinator advanced through {int(tick)} ticks.")
     elif tick == 0:
@@ -70,7 +80,8 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
             ("claw_session_id", claw),
             ("sandbox_user_id", sandbox),
             ("stop_reason", stop_reason or None),
-            ("elapsed_minutes", elapsed),
+            ("elapsed_minutes", s.get("elapsed_minutes")),
+            ("total_elapsed_minutes", s.get("total_elapsed_minutes")),
             ("tick_count", tick),
             ("host", host or None),
             # Always emit the image row so a missing image is visible.
