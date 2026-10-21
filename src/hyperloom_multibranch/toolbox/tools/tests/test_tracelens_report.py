@@ -21,6 +21,7 @@ from hyperloom_multibranch.toolbox.tools import tracelens_report as report
 from hyperloom_multibranch.toolbox.tools.op_shares import DEGRADED_NOTICE
 from hyperloom_multibranch.toolbox.tools.tests.sinks import RecordingSink
 
+DATA = Path(__file__).parent / "data"
 SPLITTER = "TraceLens.TraceUtils.split_trace.main"
 CHUNK = "mixed_steady_state_prefill_1_prefilldecode_0_decode_31_bs11_conc3_t-TP-0.trace.json.gz"
 OPS_SUMMARY = (
@@ -28,15 +29,23 @@ OPS_SUMMARY = (
 )
 SHARES = {"aten::mm": 24.5, "aten::copy_": 19.0, "aten::mul": 10.0}
 HINTS = {"split_conc": "4", "split_osl": "64", "split_r": "1"}
+HEALTHY_TIMELINE = "type,time ms,percent\nbusy_time,90.0,90.0\nidle_time,10.0,10.0\ntotal_time,100.0,100.0\n"
 ANALYSIS_JSON = {"report_info": {"mode": "deterministic-fallback", "trace_quality": "poor", "warnings": ["collapsed"]}}
 
 
 class Shell:
     """Stands in for ``run_with_session_kill``: writes what TraceLens' splitter and perf report would, records the argv."""
 
-    def __init__(self, *, chunk: str | None = CHUNK, report_rc: int = 0) -> None:
+    def __init__(
+        self,
+        *,
+        chunk: str | None = CHUNK,
+        report_rc: int = 0,
+        ops_summary: str = OPS_SUMMARY,
+        timeline: str | None = HEALTHY_TIMELINE,
+    ) -> None:
         self.commands: list[list[str]] = []
-        self._chunk, self._report_rc = chunk, report_rc
+        self._chunk, self._report_rc, self._ops_summary, self._timeline = chunk, report_rc, ops_summary, timeline
 
     def __call__(self, cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess:
         self.commands.append(cmd)
@@ -49,8 +58,10 @@ class Shell:
             return subprocess.CompletedProcess(cmd, 0, "", "")
         csvs = Path(cmd[cmd.index("--output_csvs_dir") + 1])
         csvs.mkdir(parents=True)
-        (csvs / "ops_summary.csv").write_text(OPS_SUMMARY, encoding="utf-8")
+        (csvs / "ops_summary.csv").write_text(self._ops_summary, encoding="utf-8")
         (csvs / "unified_perf_summary.csv").write_text("name\n", encoding="utf-8")
+        if self._timeline is not None:
+            (csvs / "gpu_timeline.csv").write_text(self._timeline, encoding="utf-8")
         Path(cmd[cmd.index("--output_xlsx_path") + 1]).write_bytes(b"xlsx")
         return subprocess.CompletedProcess(cmd, self._report_rc, "", "perf report blew up" if self._report_rc else "")
 
@@ -226,6 +237,74 @@ async def test_a_graph_collapsed_report_gets_the_degraded_fallback_and_no_shares
     assert status is JobStatus.SUCCEEDED and not pointer.op_shares and DEGRADED_NOTICE in pointer.summary
     assert record["result"]["graph_under_recorded"] is True
     assert Path(record["result"]["analysis_md_path"]).read_text(encoding="utf-8").startswith("# Deterministic Fallback")
+
+
+def _real(name: str) -> str:
+    return (DATA / name).read_text(encoding="utf-8")
+
+
+async def test_a_window_whose_graph_replay_kernels_are_missing_from_the_trace_gives_no_shares_and_says_why(
+    rig: Rig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Qwen3-14B-FP8 branch profile: its one decode step is a replay with no kernels, TraceLens skips it with a warning.
+
+    The ops table (a real one) lists the four eager ops around it, no GEMM, and TraceLens' own check passes it (0% of the
+    time is in replay wrapper ops); only the GPU timeline shows 0.6% of the window's 8.2 ms span covered.
+    """
+    shell = Shell(ops_summary=_real("fp8_branch_ops_summary.csv"), timeline=_real("fp8_branch_gpu_timeline.csv"))
+    monkeypatch.setattr(report, "run_with_session_kill", shell)
+    status, pointer, record = await _run(tmp_path, HINTS, rig)
+    assert status is JobStatus.SUCCEEDED and not pointer.op_shares and not pointer.commit_id
+    result = record["result"]
+    assert result["graph_under_recorded"] is False and result["window_gpu_busy_percent"] == 0.61
+    assert "0.6% of its 8.22 ms GPU span" in result["window_degraded_reason"]
+    assert DEGRADED_NOTICE in pointer.summary and result["window_degraded_reason"] in pointer.summary
+
+
+@pytest.mark.parametrize(
+    ("timeline", "busy"),
+    [
+        ("qwen3_8b_gpu_timeline.csv", 16.04),  # the 32-step mix with 30 of 31 replays missing but a prefill step kept
+        ("fp8_root_gpu_timeline.csv", 53.92),
+    ],
+)
+async def test_a_window_that_keeps_its_prefill_work_keeps_its_shares(
+    rig: Rig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, timeline: str, busy: float
+) -> None:
+    monkeypatch.setattr(report, "run_with_session_kill", Shell(timeline=_real(timeline)))
+    status, pointer, record = await _run(tmp_path, HINTS, rig)
+    assert status is JobStatus.SUCCEEDED and dict(pointer.op_shares) == SHARES
+    assert record["result"]["window_gpu_busy_percent"] == busy and record["result"]["window_degraded_reason"] == ""
+    assert DEGRADED_NOTICE not in pointer.summary
+
+
+@pytest.mark.parametrize(("busy", "degraded"), [(9.99, True), (10.0, False)])
+async def test_the_busy_share_threshold_is_inclusive_of_ten_percent(
+    rig: Rig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, busy: float, degraded: bool
+) -> None:
+    timeline = f"type,time ms,percent\nbusy_time,{busy},{busy}\ntotal_time,100.0,100.0\n"
+    monkeypatch.setattr(report, "run_with_session_kill", Shell(timeline=timeline))
+    status, pointer, record = await _run(tmp_path, HINTS, rig)
+    assert status is JobStatus.SUCCEEDED and bool(pointer.op_shares) is not degraded
+    assert bool(record["result"]["window_degraded_reason"]) is degraded and report.MIN_GPU_BUSY_PERCENT == 10.0
+
+
+@pytest.mark.parametrize(
+    "timeline",
+    [
+        None,
+        "type,time ms,percent\ntotal_time,8.2,100.0\n",
+        "type,time ms,percent\nbusy_time,0.05,nan\ntotal_time,8.2,100.0\n",
+        "type,time ms,percent\nbusy_time,0.05,x\ntotal_time,8.2,100.0\n",
+    ],
+)
+async def test_a_gpu_timeline_that_cannot_be_read_fails_the_report_it_does_not_pass_it(
+    rig: Rig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, timeline: str | None
+) -> None:
+    monkeypatch.setattr(report, "run_with_session_kill", Shell(timeline=timeline))
+    status, pointer, record = await _run(tmp_path, HINTS, rig)
+    assert status is JobStatus.FAILED and not pointer.op_shares
+    assert record["result"]["error_class"] == "perf_report_incomplete"
 
 
 @pytest.mark.parametrize(

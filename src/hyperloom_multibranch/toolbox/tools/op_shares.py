@@ -9,7 +9,9 @@ total. It is not the ``analysis.json`` task list, which holds only the few optim
 (a few percent of the time) and would hide GEMM and attention from the Amdahl ceiling. A tool that produced no table,
 or whose request does not name the commit the profile ran on, reports no shares: they are never guessed. A report
 TraceLens marked degraded (its deterministic fallback, or a poor trace) carries no shares either: the decomposition
-behind them failed, so the one row it keeps is a kernel name, not an op.
+behind them failed, so the one row it keeps is a kernel name, not an op. So does one the report route itself found hollow
+(``window_degraded_reason``: the kernels of the window's graph replays are missing from the trace, which TraceLens only
+warns about).
 """
 
 from __future__ import annotations
@@ -34,6 +36,8 @@ _NAME_COLUMN, _SHARE_COLUMN = "name", "Percentage (%)"
 COMMIT_PARAM = "commit_id"
 PROFILE_REQUEST_PARAM = "profile_request_id"
 _REPORT_KEYS = ("trace_report_path", "analysis_md_path")
+#: The reason the report route gives when its own check, not TraceLens', found the report hollow.
+OWN_DEGRADED_KEY = "window_degraded_reason"
 DEGRADED_MODE = "deterministic-fallback"
 POOR_QUALITY = "poor"
 DEGRADED_NOTICE = "TraceLens report is degraded, so no op shares were taken from it"
@@ -48,7 +52,12 @@ def _report_dir(result: Mapping[str, Any]) -> Path | None:
 
 
 def degraded_reason(result: Mapping[str, Any]) -> str:
-    """Why the analysis ``result`` points at is degraded, from its ``report_info``; empty when it is not (or unreadable)."""
+    """Why the analysis ``result`` is degraded: TraceLens' ``report_info``, else the report route's own finding; empty if not."""
+    return _tracelens_reason(result) or str(result.get(OWN_DEGRADED_KEY) or "").strip()
+
+
+def _tracelens_reason(result: Mapping[str, Any]) -> str:
+    """The degraded reason of the ``report_info`` in the ``analysis.json`` beside the report; empty when it is not (or unreadable)."""
     directory = _report_dir(result)
     if directory is None:
         return ""

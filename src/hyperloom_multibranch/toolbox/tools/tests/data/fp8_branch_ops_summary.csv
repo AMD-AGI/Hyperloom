@@ -1,0 +1,5 @@
+name,parent_module,total_direct_kernel_time_sum,total_subtree_kernel_time_sum,total_subtree_kernel_time_count,total_direct_kernel_time_ms,Count,Categories,call_stack_first,Percentage (%),Cumulative Percentage (%)
+aten::copy_,NA,15.716064453125,15.716064453125,4,0.015716064453125,4,['elementwise'],['aten::copy_'],31.16400886900785,31.16400886900785
+aten::_index_put_impl_,NA,12.55712890625,12.55712890625,3,0.01255712890625,3,['elementwise'],['aten::_index_put_impl_'],24.900030015201242,56.0640388842091
+aiter::greedy_sample,nn.Module: Sampler,12.52001953125,12.52001953125,1,0.01252001953125,1,['other'],"['aiter::greedy_sample', 'nn.Module: Sampler_0']",24.826444360530974,80.89048324474007
+aten::add,NA,9.636962890625,9.636962890625,3,0.009636962890625,3,['elementwise'],['aten::add'],19.10951675525992,99.99999999999999

@@ -16,6 +16,14 @@ The splitter's workload hints (``--CONC``, ``--OSL``, ``--R``) and the steady-st
 specialist's request gets the hints from the profile test's own point (``toolbox/analysis.py``), not from anything the
 caller or the toolbox process says; the splitter picks its window without a hint the request lacks.
 
+A window whose graph-replayed kernels are missing from the trace is not reported as a table. TraceLens' capture merge needs
+the replay's own kernel events (the capture-time trace holds no kernel durations), so a ``hipGraphLaunch`` the profiler
+recorded without them is skipped with a warning and its whole step is absent from the ops table, which then lists only the
+eager ops around it (a Qwen3-14B-FP8 decode window: 0.05 ms of kernels in an 8.2 ms span, no GEMM). TraceLens' own check
+does not see it (no replay wrapper op is left to count), so the route reads how much of the window's GPU span the report's
+kernels fill (``gpu_timeline.csv``) and marks a window below :data:`MIN_GPU_BUSY_PERCENT` degraded, like a graph-collapsed
+one: no op shares, and the reason in the tool summary.
+
 It is for LLM serving traces (SGLang, vLLM, ATOM): the splitter reads their step annotations. Anything else asks for
 ``analysis_route: agent``.
 """
@@ -23,6 +31,7 @@ It is for LLM serving traces (SGLang, vLLM, ATOM): the splitter reads their step
 from __future__ import annotations
 
 import asyncio
+import csv
 import math
 import shlex
 import subprocess
@@ -37,6 +46,7 @@ from hyperloom.inference_optimizer.session import paths as session_paths
 from hyperloom.orchestrator.actions.executors import run_with_session_kill
 from hyperloom.orchestrator.trace_analysis.tracelens_arch_benchmark import resolve_arch_json_path
 from hyperloom.orchestrator.trace_analysis.tracelens_skill_runner import discover_capture_folder
+from hyperloom_multibranch.toolbox.tools.op_shares import OWN_DEGRADED_KEY
 
 if TYPE_CHECKING:
     from TraceLens.Agent.Analysis.utils import GraphReplayCoverage
@@ -67,7 +77,16 @@ SPLIT_HINTS = (
     ("--OSL", "split_osl", "OSL"),
     ("--R", "split_r", "RANDOM_RANGE_RATIO"),
 )
+_ENCODING = "utf-8"
+#: The error class of a perf report that lacks a table the route reads.
+_INCOMPLETE = "perf_report_incomplete"
 _CAPTURE_KEYS = ("capture_folder", "graph_capture_path", "capture_folder_path")
+#: What real windows fill of their GPU span: a fully recorded prefill window 99%; the 32-step mixes of a Qwen3-14B-FP8 root
+#: profile and of a Qwen3-8B one, which lose the kernels of 29 and 30 of their decode replays but keep a prefill step, 54% and
+#: 16%; the single decode step of a Qwen3-14B-FP8 branch profile, whose one replay lost its kernels, 0.6%. Under a tenth of
+#: the span the table is not the window's work.
+MIN_GPU_BUSY_PERCENT = 10.0
+_GPU_TIMELINE = "gpu_timeline.csv"
 _TAIL_CHARS = 1500
 
 
@@ -111,7 +130,7 @@ def _sh(run: _Run, step: str, cmd: list[str]) -> None:
         done = run_with_session_kill(cmd, cwd=str(run.tracelens_root), timeout=run.timeout_sec, text=True)
     except subprocess.TimeoutExpired:
         raise _Refused("subprocess_timeout", f"{step} timed out after {run.timeout_sec}s") from None
-    with run.log.open("a", encoding="utf-8") as handle:
+    with run.log.open("a", encoding=_ENCODING) as handle:
         handle.write(f"$ {shlex.join(cmd)}\n{done.stdout}{done.stderr}\n[exit_code] {done.returncode}\n")
     if done.returncode != 0:
         tail = (done.stderr or done.stdout or "")[-_TAIL_CHARS:].strip()
@@ -202,10 +221,43 @@ def _graph_replay_coverage(run: _Run) -> GraphReplayCoverage:
     unified = run.csv_dir / "unified_perf_summary.csv"
     if not unified.is_file() or not (run.csv_dir / "ops_summary.csv").is_file():
         raise _Refused(
-            "perf_report_incomplete",
+            _INCOMPLETE,
             f"the perf report wrote no unified_perf_summary.csv and ops_summary.csv in {run.csv_dir}",
         )
     return check_graph_replay_coverage(unified)
+
+
+@dataclass(frozen=True)
+class _Busy:
+    """How much of the window's GPU span (first to last GPU event) the report's kernels and copies fill."""
+
+    percent: float
+    span_ms: float
+
+    @property
+    def starved_reason(self) -> str:
+        """Why the window is not the work it was cut for, empty when its kernels fill enough of it."""
+        if self.percent >= MIN_GPU_BUSY_PERCENT:
+            return ""
+        return (
+            f"the window's recorded GPU kernels fill {self.percent:.1f}% of its {self.span_ms:.2f} ms GPU span (under "
+            f"{MIN_GPU_BUSY_PERCENT:g}%): the kernels of its CUDA-graph replays are missing from the trace, so the table "
+            "lists only the eager ops around them"
+        )
+
+
+def _gpu_busy(run: _Run) -> _Busy:
+    """The ``busy_time`` share of the report's GPU timeline; a timeline it cannot read fails the report, not passes it."""
+    path = run.csv_dir / _GPU_TIMELINE
+    try:
+        with path.open(encoding=_ENCODING, newline="") as handle:
+            rows = {row["type"]: row for row in csv.DictReader(handle)}
+        percent, span_ms = float(rows["busy_time"]["percent"]), float(rows["total_time"]["time ms"])
+    except (OSError, KeyError, ValueError, csv.Error) as exc:
+        raise _Refused(_INCOMPLETE, f"{path} has no readable busy_time and total_time: {exc!r}") from None
+    if not (math.isfinite(percent) and math.isfinite(span_ms)):
+        raise _Refused(_INCOMPLETE, f"{path} gives busy_time {percent} and total_time {span_ms}")
+    return _Busy(percent, span_ms)
 
 
 def _write_degraded_report(run: _Run, coverage: GraphReplayCoverage) -> None:
@@ -215,7 +267,7 @@ def _write_degraded_report(run: _Run, coverage: GraphReplayCoverage) -> None:
 
     report = run.out_dir / "analysis.md"
     unified = run.csv_dir / "unified_perf_summary.csv"
-    report.write_text(render_fallback_report(unified, coverage.graph_replay_fraction), encoding="utf-8")
+    report.write_text(render_fallback_report(unified, coverage.graph_replay_fraction), encoding=_ENCODING)
     render_analysis_json(report)
 
 
@@ -245,6 +297,7 @@ def _analyse(payload: Mapping[str, Any], session_dir: Path) -> dict[str, Any]:
     coverage = _graph_replay_coverage(run)
     if coverage.graph_under_recorded:
         _write_degraded_report(run, coverage)
+    busy = _gpu_busy(run)
 
     warnings = [] if arch is not None else [{"code": "gpu_arch_json_unresolved", "severity": "warning"}]
     return {
@@ -262,6 +315,8 @@ def _analyse(payload: Mapping[str, Any], session_dir: Path) -> dict[str, Any]:
         "capture_folder": str(capture or ""),
         "graph_replay_fraction": round(coverage.graph_replay_fraction, 4),
         "graph_under_recorded": coverage.graph_under_recorded,
+        "window_gpu_busy_percent": round(busy.percent, 2),
+        OWN_DEGRADED_KEY: busy.starved_reason,
         "trace_health_warnings": warnings,
         "duration_sec": round(time.monotonic() - started, 3),
     }
@@ -285,4 +340,4 @@ async def report_handler(payload: dict, *, session_dir: Path) -> dict[str, Any]:
         }
 
 
-__all__ = ["DEFAULT_PLATFORM", "REPORT_ROUTE", "SPLIT_HINTS", "report_handler", "split_hint"]
+__all__ = ["DEFAULT_PLATFORM", "MIN_GPU_BUSY_PERCENT", "REPORT_ROUTE", "SPLIT_HINTS", "report_handler", "split_hint"]

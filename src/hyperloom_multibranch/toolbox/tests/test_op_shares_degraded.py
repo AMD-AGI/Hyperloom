@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import shutil
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -59,3 +60,14 @@ def test_a_degraded_report_gives_no_shares_and_a_warning_in_the_summary(tmp_path
 def test_a_report_without_report_info_is_not_degraded(tmp_path: Path) -> None:
     written = _write(tmp_path, {})
     assert "aten::mm" in with_op_shares(written, REQUEST).op_shares
+
+
+def test_a_report_the_route_found_hollow_gives_no_shares_though_tracelens_marked_nothing(tmp_path: Path) -> None:
+    written = _write(tmp_path, {"mode": "agentic", "trace_quality": "good"})
+    hollow = ToolOutput(
+        result={**written.result, "window_degraded_reason": "kernels fill 0.6% of the span"}, summary="a"
+    )
+    assert read_op_shares(hollow.result) == {}
+    output = with_op_shares(hollow, REQUEST)
+    assert not output.op_shares and "kernels fill 0.6% of the span" in output.summary
+    assert with_op_shares(replace(hollow, result={**hollow.result, "window_degraded_reason": ""}), REQUEST).op_shares
