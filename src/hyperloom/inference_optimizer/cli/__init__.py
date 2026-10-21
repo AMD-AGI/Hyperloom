@@ -2040,42 +2040,8 @@ async def _resume_session(args: argparse.Namespace) -> _SessionStart:
     return session
 
 
-async def _seed_fresh_session(args: argparse.Namespace, *, nodes_resolved: int) -> _SessionStart:
-    """Open a new session: resolve the target, seed its state, and gate the model before bring-up."""
-    # Resolve model path: --model > $MODEL_PATH; fail fast rather than silently use the YAML hardcoded model.
-    if not args.model:
-        args.model = os.environ.get("MODEL_PATH") or ""
-    if not args.model:
-        print(
-            "ERROR: model is required. Pass --model <path> or set "
-            "MODEL_PATH env (or use --resume-from <session_dir> to "
-            "continue an existing session).",
-            file=sys.stderr,
-        )
-        sys.exit(2)
-    # Re-export so subprocess executors inject the resolved model into the Magpie YAML, not its hardcoded model.
-    from hyperloom.common.model_paths import resolve_serving_model_path
-
-    os.environ["MODEL_PATH"] = resolve_serving_model_path(str(args.model)) or str(args.model)
-
-    # Quantization prelude (one-shot, before any session/baseline work): if --quantize was passed, quantize the
-    # source model now and rewrite args.model to the exported quantized model.
-    await _run_quantization_prelude(args)
-
-    # Resolve framework: --framework > $FRAMEWORK > "sglang" (session-wide; no framework mixing).
-    framework = _registered_framework_or_exit(
-        args.framework or os.environ.get("FRAMEWORK", ""),
-        hint="set $FRAMEWORK accordingly or pass --framework",
-    )
-    _enforce_expected_framework(framework)
-    os.environ["FRAMEWORK"] = framework
-    print(f"Framework       : {framework}")
-    _apply_operator_supplied_paths(args, framework)
-
-    # B3: --framework atom auto-tightens incompatible phases (see _apply_atom_auto_tighten).
-    if framework == "atom":
-        _apply_atom_auto_tighten(args)
-
+def _resolve_target_gpu(args: argparse.Namespace, framework: str) -> None:
+    """Settle ``args.gpu_type`` and the Magpie runner, then refuse a board this session cannot serve."""
     # Resolve real target GPU: probe > --gpu-type hint; probe wins to catch wrong-host typos that corrupt KB.
     user_specified = _resolve_amd_gpu_type(args.gpu_type) or ""
     if _should_remote_probe_gpu(args):
@@ -2086,10 +2052,7 @@ async def _seed_fresh_session(args: argparse.Namespace, *, nodes_resolved: int) 
             print(f"GPU probe       : {probed} (remote {(args.mn_backend or 'rayjob').lower()})")
     else:
         probed = _autodetect_gpu_type() or ""
-    gpu_type, gpu_warnings = _resolve_gpu_type(
-        user_specified=user_specified,
-        probed=probed,
-    )
+    gpu_type, gpu_warnings = _resolve_gpu_type(user_specified=user_specified, probed=probed)
     for line in gpu_warnings:
         print(line, file=sys.stderr)
     if probed and not user_specified:
@@ -2105,41 +2068,16 @@ async def _seed_fresh_session(args: argparse.Namespace, *, nodes_resolved: int) 
     else:
         os.environ.pop("TARGET_GPU_TYPE", None)
         os.environ.pop("GPU_TYPE", None)
-        args.gpu_type = None
         print("GPU type        : <unset> (Magpie will auto-detect)")
-    _require_custom_entrypoint(framework, gpu_type=runner_gpu_type or gpu_type)
+    _require_custom_entrypoint(framework, gpu_type=runner_gpu_type)
 
     # Runs here, not in _preflight, because the question it asks -- will provenance be able to name the ISA? -- is
     # unanswerable until args.gpu_type is final.
     _check_gfx_arch_resolvable(args.gpu_type)
 
-    # ISL/OSL/CONC/TP/EP were settled and projected before _preflight; precision could not be, because it reads
-    # the checkpoint and the model is only resolved above (issue #903).
-    _resolve_precision(args)
-    # MAX_MODEL_LEN is operator-overridable.
-    max_model_len, max_model_len_source = _resolve_run_max_model_len(args)
-    args.max_model_len = max_model_len
-    os.environ["MAX_MODEL_LEN"] = str(max_model_len)
-    os.environ["ISL"] = str(args.isl)
-    os.environ["OSL"] = str(args.osl)
-    # Profile-scoped OSL (issue #571): exported only when explicitly set, so the profile/roofline materializer can
-    # decouple its OSL from the served workload.
-    if getattr(args, "profile_osl", None) is not None:
-        os.environ["PROFILE_OSL"] = str(args.profile_osl)
-    os.environ["PRECISION"] = args.precision
-    _fw_version_for_env = resolve_framework_version(args)
-    if _fw_version_for_env:
-        os.environ["FRAMEWORK_VERSION"] = _fw_version_for_env
-    if _agentx_enabled():
-        print(f"Workload        : AgentX replay, CONC={args.conc}; corpus and model context resolved by Magpie")
-    else:
-        print(
-            f"Workload        : ISL={args.isl} OSL={args.osl} "
-            f"MAX_MODEL_LEN={max_model_len} ({max_model_len_source}) "
-            f"PRECISION={args.precision} "
-            f"FRAMEWORK_VERSION={_fw_version_for_env or '<unset>'}"
-        )
 
+def _create_fresh_session(args: argparse.Namespace, *, framework: str, nodes_resolved: int) -> _SessionStart:
+    """Create and lock the session directory, then write its manifest, launch info and seeded state."""
     # session_dir defaults to <workspace_root>/<model>/<UTC ts>-<rand8>/.
     session_dir = make_session_dir(model_name=resolve_model_display_name(args))
     # Single-optimizer guard: take the lock so the contract holds uniformly and the owner pid is published for the
@@ -2167,9 +2105,9 @@ async def _seed_fresh_session(args: argparse.Namespace, *, nodes_resolved: int) 
         session_dir=session_dir,
         session_id=str(manifest["session_id"]),
         run_log=os.environ.get("INFERENCE_OPTIMIZER_RUN_LOG", ""),
-        gpu_type=gpu_type or "",
+        gpu_type=args.gpu_type or "",
         framework=args.framework or "",
-        model=str(args.model) if args.model else "",
+        model=str(args.model),
     )
     _emit_launch_info(info, launch_info_file=getattr(args, "launch_info_file", None))
     # Placed here, not at the top of _run_optimize, because everything it weighs is resolved by now and none of it
@@ -2181,7 +2119,7 @@ async def _seed_fresh_session(args: argparse.Namespace, *, nodes_resolved: int) 
         framework=framework,
         gpu_type=args.gpu_type,
         nodes=nodes_resolved,
-        model=PartitionModel(str(args.model or os.environ.get("MODEL_PATH") or ""), getattr(args, "precision", None)),
+        model=PartitionModel(str(args.model), getattr(args, "precision", None)),
     )
     gpu_power = resolve_launch_gpu_power(args, nodes=nodes_resolved, owner=str(manifest["session_id"]))
     _publish_gpu_power_settings(gpu_power)
@@ -2192,18 +2130,78 @@ async def _seed_fresh_session(args: argparse.Namespace, *, nodes_resolved: int) 
         compute_partition=compute_partition,
         gpu_power_settings=gpu_power,
     )
-    _start_model_gate(args, session_dir)
-    # Unsupported-model preflight: reject multimodal/vision configs (runs after seed, before heavy bring-up).
-    if _preflight_unsupported_model_arch(args, session_dir):
-        sys.exit(2)
-    # Model-config compatibility preflight: reject statically-broken configs before the heavy server bring-up.
-    if _preflight_model_config_compat(args, session_dir):
-        sys.exit(2)
-    # Context-window preflight: reject when ISL+OSL+headroom exceeds max_position_embeddings (no stretch by policy).
-    if _preflight_context_window(args, session_dir):
-        sys.exit(2)
-    _finish_model_gate(args, session_dir)
     return _SessionStart(session_dir=session_dir, session_lock=session_lock, manifest=manifest)
+
+
+async def _seed_fresh_session(args: argparse.Namespace, *, nodes_resolved: int) -> _SessionStart:
+    """Open a new session: resolve the target, seed its state, and gate the model before bring-up."""
+    # Resolve model path: --model > $MODEL_PATH; fail fast rather than silently use the YAML hardcoded model.
+    args.model = args.model or os.environ.get("MODEL_PATH") or ""
+    if not args.model:
+        print(
+            "ERROR: model is required. Pass --model <path> or set MODEL_PATH env (or use --resume-from <session_dir> "
+            "to continue an existing session).",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    # Re-export so subprocess executors inject the resolved model into the Magpie YAML, not its hardcoded model.
+    from hyperloom.common.model_paths import resolve_serving_model_path
+
+    os.environ["MODEL_PATH"] = resolve_serving_model_path(str(args.model)) or str(args.model)
+
+    # Quantization prelude (one-shot, before any session/baseline work): if --quantize was passed, quantize the
+    # source model now and rewrite args.model to the exported quantized model.
+    await _run_quantization_prelude(args)
+
+    # Resolve framework: --framework > $FRAMEWORK > "sglang" (session-wide; no framework mixing).
+    framework = _registered_framework_or_exit(
+        args.framework or os.environ.get("FRAMEWORK", ""),
+        hint="set $FRAMEWORK accordingly or pass --framework",
+    )
+    _enforce_expected_framework(framework)
+    os.environ["FRAMEWORK"] = framework
+    print(f"Framework       : {framework}")
+    _apply_operator_supplied_paths(args, framework)
+    if framework == "atom":
+        _apply_atom_auto_tighten(args)
+    _resolve_target_gpu(args, framework)
+
+    # ISL/OSL/CONC/TP/EP were settled and projected before _preflight; precision could not be, because it reads
+    # the checkpoint and the model is only resolved above (issue #903).
+    _resolve_precision(args)
+    # MAX_MODEL_LEN is operator-overridable.
+    max_model_len, max_model_len_source = _resolve_run_max_model_len(args)
+    args.max_model_len = max_model_len
+    os.environ["MAX_MODEL_LEN"] = str(max_model_len)
+    os.environ["ISL"] = str(args.isl)
+    os.environ["OSL"] = str(args.osl)
+    # Profile-scoped OSL (issue #571): exported only when explicitly set, so the profile/roofline materializer can
+    # decouple its OSL from the served workload.
+    if getattr(args, "profile_osl", None) is not None:
+        os.environ["PROFILE_OSL"] = str(args.profile_osl)
+    os.environ["PRECISION"] = args.precision
+    _fw_version_for_env = resolve_framework_version(args)
+    if _fw_version_for_env:
+        os.environ["FRAMEWORK_VERSION"] = _fw_version_for_env
+    if _agentx_enabled():
+        print(f"Workload        : AgentX replay, CONC={args.conc}; corpus and model context resolved by Magpie")
+    else:
+        print(
+            f"Workload        : ISL={args.isl} OSL={args.osl} MAX_MODEL_LEN={max_model_len} ({max_model_len_source}) "
+            f"PRECISION={args.precision} FRAMEWORK_VERSION={_fw_version_for_env or '<unset>'}"
+        )
+
+    session = _create_fresh_session(args, framework=framework, nodes_resolved=nodes_resolved)
+    _start_model_gate(args, session.session_dir)
+    # After the seed, before the heavy server bring-up: each check rejects a model that bring-up would fail on.
+    if (
+        _preflight_unsupported_model_arch(args, session.session_dir)
+        or _preflight_model_config_compat(args, session.session_dir)
+        or _preflight_context_window(args, session.session_dir)
+    ):
+        sys.exit(2)
+    _finish_model_gate(args, session.session_dir)
+    return session
 
 
 def _resolve_run_topology(args: argparse.Namespace) -> int:
