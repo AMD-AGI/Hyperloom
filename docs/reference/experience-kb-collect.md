@@ -260,6 +260,15 @@ It reads:
   `meta.json` records, and a lane that kept none gives no reasoning. A
   reasoning log longer than the 32 KB a text field holds makes collection skip
   the candidate;
+- `reflection.analysis_report` from the whole `report.md` of the Analysis
+  generation the candidate's plan was built on: the
+  `forge_experiments/analysis/<commit>/generation-NNN/` its planning round's
+  `orchestration/iter_NNN/context.json` names as its `analysis_bundle`. That is
+  the baseline's report until Analysis refreshes after a KEEP; on campaigns
+  longer than two hours Analysis profiles the kernel with rocprof-compute. A
+  merge has no report, and a report longer than the 32 KB a text field holds
+  is left out, with `provenance.extra.analysis_report_omitted` saying so. None
+  of the profiler's raw output is collected;
 - the plan, the measured kernel, and the lesson as files
   (`rationale.plan_file`, `change.source_code`, `reflection.lesson_file`);
 - `provenance.extra` from the logs, which never reaches a prompt: `meta`, the
@@ -267,14 +276,16 @@ It reads:
   the candidate as, the mean case speedup it decided on, the per-case times,
   and every benchmark measurement; `llm_backend` and `llm_model`, the
   Implementer the run's `forge-loop.log` names; `kb_record`, the record
-  KernelForge's own experience KB filed a kept candidate under; and
-  `candidate_origin`, `session` or `lane`.
+  KernelForge's own experience KB filed a kept candidate under;
+  `candidate_origin`, `session` or `lane`; and `analysis_generation`, the
+  `analysis/<commit>/generation-NNN` the Analysis report comes from.
 
 An Experience carries metadata instead of raw logs: it has no `raw_logs`, and
 the three files above are the only ones it links, so they are the only ones that
 go with it if it is ever pushed to a global KB. No `forge-loop.log`,
 `events.jsonl`, or other archive file does; `meta.json` goes only as the
-metadata in `provenance.extra.meta`. A `forge-loop.log` is only read, by the
+metadata in `provenance.extra.meta`, and of the Analysis directory only the
+report's text goes. A `forge-loop.log` is only read, by the
 run whose workspace path ends most like the kernel path it announces; one that
 fits two runs equally well stops the export.
 

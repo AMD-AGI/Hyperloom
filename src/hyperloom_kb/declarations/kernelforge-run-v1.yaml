@@ -13,8 +13,11 @@
 # KernelForge archived for the candidate, verbatim, among it the commit it kept the candidate as, the mean case
 # speedup it decided on, the per-case times, every benchmark measurement, and the session's turns and end reason;
 # llm_backend and llm_model, the Implementer the run's forge-loop.log names; kb_record, the record KernelForge's own
-# experience KB filed a kept candidate under; and candidate_origin, session or lane.
-# An Experience carries no raw logs: the only files it links are the plan, the measured kernel, and the lesson.
+# experience KB filed a kept candidate under; candidate_origin, session or lane; analysis_generation, the Analysis
+# generation reflection.analysis_report comes from, as analysis/<commit>/generation-NNN under forge_experiments; and
+# analysis_report_omitted, why a report too long for a text field is not held.
+# An Experience carries no raw logs and none of the profiler's output: the only files it links are the plan, the
+# measured kernel, and the lesson, and the only Analysis output it holds is the report its plan was built on, as text.
 # The objective and every identity field always form the repeat group, with the schema: Hyperloom groups Experiences
 # that way by itself (hyperloom_kb/query_view.py repeat_group_key) and accepts group: true only on baseline and change
 # fields, so none is declared here.
@@ -128,4 +131,20 @@ reflection:
       KernelForge's whole lesson for the iteration, lessons/iter_NNN.md. The Experience links to the file by its
       name, size, and SHA-256. Optional, as lesson is.
     kind: file
+    required: false
+  - name: analysis_report
+    description: >-
+      The whole report.md of the Analysis generation the candidate's plan was built on: KernelForge's cross-case
+      summary of one kernel, which its Analysis agent publishes for the commit it analyzed as one immutable
+      generation, forge_experiments/analysis/<commit>/generation-NNN/. Analysis runs on the baseline, and again after
+      a KEEP once the canonical mean case speedup has improved 5% on the analyzed kernel's, or just before a
+      Supervisor intervention; on a campaign longer than two hours it profiles the kernel with rocprof-compute,
+      through rocpc_profile.py, and a shorter campaign's report is written from the source alone. The generation is
+      the one the planning round's orchestration/iter_NNN/context.json names as its analysis_bundle evidence: until a
+      refresh is published, rounds plan on the last report that was, so candidates on both sides of a KEEP can carry
+      the same report. Optional: absent when the round named no published generation, as for a merge, which no round
+      planned, and when report.md is over the 32 KB a text field holds, which provenance.extra.analysis_report_omitted
+      then says. The profiler's raw output, such as pmc_perf.csv, the rocprofv3 counter CSVs, and the profile/ and
+      .rocprofv3/ directories, is never stored: it is large and tied to one binary.
+    kind: text
     required: false
