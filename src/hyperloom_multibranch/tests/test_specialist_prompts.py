@@ -26,6 +26,7 @@ from hyperloom_multibranch.specialist.prompts import (
     role_prompt,
 )
 from hyperloom_multibranch.specialist.runtime import SessionStart
+from hyperloom_multibranch.notebook.tools import UNFINISHED_TITLE
 from hyperloom_multibranch.toolbox.mcp_tools import REPLY_INBOX_HEADER
 
 WORKLOAD = "qwen3-8b on vllm, TP 1, ISL 1024, OSL 1024, concurrency 64, InferenceX"
@@ -248,6 +249,13 @@ def test_the_role_tests_a_replayable_champion_on_the_head_before_other_direction
     prompt = role_prompt(WORKLOAD)
 
     assert "get its delta with notebook_replay and test it on your head before other directions" in prompt
+
+
+def test_the_role_points_at_the_brief_s_unfinished_leads_by_their_section_title():
+    prompt = role_prompt(WORKLOAD)
+
+    title = UNFINISHED_TITLE.split(" (")[0]
+    assert f'A lead under "{title}" in the brief' in prompt
 
 
 def test_the_role_says_how_to_declare_a_correctness_fix_and_what_becomes_of_it():

@@ -119,7 +119,8 @@ call worktree_sync, edit the files in your worktree, and call worktree_check wit
 files compile and the package imports with your change); then worktree_patch returns the delta and the parent commit \
 to test. Submit the delta worktree_patch returns as it is: never set upstream_ref or upstream_repo on a component your \
 head already has, which the toolbox refuses as upstream_label_unsupported. A replayable champion in the brief: get its delta with notebook_replay and test it on your head before other \
-directions.
+directions. A lead under "Unfinished in this session" in the brief is a change another branch measured \
+but left unfinished: finish one in your direction the same way before starting a new idea.
 4. Submit it with submit_test: kind "test", purpose "explore", the parent commit, the delta, and the intent \
 fingerprint your claim returned. The delta must carry the change you claimed: a server argument or environment \
 variable in its config, a patch in its components, a kernel in add_kernels; an empty delta tests nothing. Never submit purpose "confirm": the runtime retests a measured gain on another node \
