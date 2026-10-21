@@ -9,6 +9,7 @@ from enum import Enum
 
 #: The branch the integrator owns; every other branch is a specialist's.
 INTEGRATION_BRANCH = "integration"
+_NOT_STACKABLE = "not_stackable"
 
 
 class Role(str, Enum):
@@ -62,7 +63,7 @@ class Conclusion(str, Enum):
     ACCURACY_FAILED = "accuracy_failed"
     UNVERIFIED = "unverified"
     MERGED = "merged"
-    NOT_STACKABLE = "not_stackable"
+    NOT_STACKABLE = _NOT_STACKABLE
 
 
 #: Conclusions that put a commit on a specialist branch.
@@ -103,7 +104,7 @@ class MergeOutcome(str, Enum):
     already on the integration head, or still testing."""
 
     MERGED = "merged"
-    NOT_STACKABLE = "not_stackable"
+    NOT_STACKABLE = _NOT_STACKABLE
     CONFLICT_SKIPPED = "conflict_skipped"
     ALREADY_ON_HEAD = "already_on_head"
     PENDING = "pending"
@@ -169,11 +170,11 @@ class FrontierBasis(str, Enum):
 
 
 class UnfinishedReason(str, Enum):
-    """Why a result of the session is worth finishing: a commit of a stopped branch that never reached the integration
-    head, an explore that kept accuracy and fell just short of its bar, a blocked candidate whose repair never
-    finished, or an explore withdrawn before its result."""
+    """Why a result of the session is worth finishing: a commit of a stopped branch whose merge onto the integration
+    head was not stackable, an explore that kept accuracy and fell just short of its bar, a blocked candidate whose
+    repair never finished, or an explore withdrawn before its result."""
 
-    UNMERGED = "unmerged"
+    NOT_STACKABLE = _NOT_STACKABLE
     NEAR_BAR = "near_bar"
     REPAIR_UNFINISHED = "repair_unfinished"
     WITHDRAWN = "withdrawn"

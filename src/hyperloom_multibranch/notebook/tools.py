@@ -85,7 +85,7 @@ UNFINISHED_TITLE = (
     f"Unfinished in this session (finish one: {REPLAY_TOOL} with its request_id makes its change for your head):"
 )
 _UNFINISHED = {
-    UnfinishedReason.UNMERGED: "committed, never on the integration head",
+    UnfinishedReason.NOT_STACKABLE: "committed, merge not stackable",
     UnfinishedReason.NEAR_BAR: "kept accuracy, just short of its bar",
     UnfinishedReason.REPAIR_UNFINISHED: "blocked, its repair never finished",
     UnfinishedReason.WITHDRAWN: "withdrawn before its result",
@@ -236,8 +236,8 @@ def _unfinished(item: UnfinishedLead) -> str:
     shown = UNCHANGED if item.change == NO_CHANGE else item.change
     change = f" ({shown})" if shown else ""
     gain = f" {item.gain_pct:+.2f}%" if item.gain_pct is not None else ""
-    detail = f", {item.detail}" if item.detail else ""
-    return f"{where}{change} on {item.measured_on}: {_UNFINISHED[item.reason]}{gain}{detail}"
+    detail = f" ({item.detail})" if item.detail else ""
+    return f"{where}{change} on {item.measured_on}{gain}: {_UNFINISHED[item.reason]}{detail}"
 
 
 def render_brief(brief: StartupBrief) -> str:

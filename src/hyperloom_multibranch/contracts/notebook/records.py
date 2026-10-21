@@ -560,8 +560,8 @@ class UnfinishedLead:
     """A result of this session worth finishing, by replaying test ``request_id`` of ``branch`` on another head.
 
     ``target`` and ``mechanism`` are its intent's, ``change`` its recipe delta in one line, ``measured_on`` the commit it
-    was tested on, ``gain_pct`` its judged gain where it had one, and ``detail`` more on ``reason``: the commit it made,
-    the bar it fell short of, or why it was withdrawn.
+    was tested on, ``gain_pct`` its judged gain where it had one, and ``detail`` more on ``reason``: the commit it made
+    and what its merge test found, the bar it fell short of, or why it was withdrawn.
     """
 
     request_id: str

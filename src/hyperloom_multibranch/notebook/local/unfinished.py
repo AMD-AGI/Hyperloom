@@ -5,14 +5,17 @@
 
 :func:`unfinished_leads` reads the session's notebook for results worth finishing:
 
-* a commit of a stopped branch that never reached the integration head: never merge-tested, or skipped on a conflict;
+* a commit of a stopped branch whose last merge onto the integration head was not stackable: that answer stands until
+  the head moves in a way that offers the commit again, while a commit not merge-tested yet, or skipped on a conflict,
+  is the integrator's to offer again, not a lead;
 * a measured explore that kept accuracy, gained, and fell short of its bar by less than :data:`NEAR_BAR_PCT`;
 * a blocked candidate whose repair never finished;
 * an explore withdrawn before its result, a branch stop's withdrawal included.
 
 A lead drops out once its direction is tested again on any branch, its own confirm aside, or a branch holds a claim on
-it, so two later branches do not chase the same one. The leads come in that order, unmerged commits and near misses by
-gain, unfinished repairs and withdrawn explores newest first, at most :data:`MAX_UNFINISHED` of them.
+it, so two later branches do not chase the same one; a commit drops out once the integrator offers it again. The leads
+come in that order, unstackable commits and near misses by gain, unfinished repairs and withdrawn explores newest
+first, at most :data:`MAX_UNFINISHED` of them.
 """
 
 from __future__ import annotations
@@ -69,8 +72,18 @@ def _near_bar(record: TestRecord) -> bool:
     )
 
 
-def _unmerged(state: NotebookState, view: LineageView) -> list[UnfinishedLead]:
-    """The commits of stopped branches that never reached the integration head, each led by the test it came from."""
+def _merge_found(state: NotebookState, request_id: str | None) -> str:
+    """What the merge test ``request_id`` found, as its judgement records it."""
+
+    write = state.latest_judgement(request_id) if request_id is not None else None
+    if write is None:
+        return ""
+    found = write.judgement
+    return f" {found.gain_pct:+.2f}%, bar {found.threshold_pct:.2f}%"
+
+
+def _not_stackable(state: NotebookState, view: LineageView) -> list[UnfinishedLead]:
+    """The commits of stopped branches whose last merge was not stackable, each led by the test it came from."""
 
     stopped = {node.branch for node in view.branches if node.stop_reason is not None}
     integration = next((node for node in view.branches if node.branch == INTEGRATION_BRANCH), None)
@@ -79,12 +92,14 @@ def _unmerged(state: NotebookState, view: LineageView) -> list[UnfinishedLead]:
     leads = []
     for commit in committed(state, view):
         last = commit.last_merge
-        tried = last is not None and last.outcome is not MergeOutcome.CONFLICT_SKIPPED
         record = records.get(commit.request_id)
-        if commit.branch not in stopped or commit.commit_id in on_head or tried or record is None:
+        if last is None or last.outcome is not MergeOutcome.NOT_STACKABLE or record is None:
             continue
-        detail = "never merge-tested" if last is None else "skipped on a conflict"
-        leads.append(_lead(state, record, UnfinishedReason.UNMERGED, f"committed as {commit.commit_id}, {detail}"))
+        if commit.branch not in stopped or commit.commit_id in on_head:
+            continue
+        found = _merge_found(state, last.request_id)
+        detail = f"commit {commit.commit_id}; merge {last.request_id} on {last.integration_head}{found}"
+        leads.append(_lead(state, record, UnfinishedReason.NOT_STACKABLE, detail))
     return leads
 
 
@@ -133,11 +148,11 @@ def unfinished_leads(state: NotebookState, view: LineageView, held: Collection[s
         for record in explores
         if record.withdrawn_at is not None and record.result is None
     ]
-    unmerged = [lead for lead in _unmerged(state, view) if lead.request_id in untaken]
+    unstackable = [lead for lead in _not_stackable(state, view) if lead.request_id in untaken]
     fingerprints = {record.request_id: record.request.intent_fingerprint or record.request_id for record in records}
     leads: list[UnfinishedLead] = []
     directions: set[str] = set()
-    for lead in (*_by_gain(unmerged), *_by_gain(near), *repairs, *withdrawn):
+    for lead in (*_by_gain(unstackable), *_by_gain(near), *repairs, *withdrawn):
         direction = fingerprints[lead.request_id]
         if direction not in directions:
             directions.add(direction)
