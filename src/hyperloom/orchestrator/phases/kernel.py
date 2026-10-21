@@ -834,14 +834,14 @@ class KernelPhase(CoordinatorCollaborator):
         # Without per-tuner rows the campaign itself is the one row. It names these facts the way the campaign
         # envelope does, so it enters the loop under the per-tuner names and every field keeps its own source.
         campaign_row = {
-            "tuner": _first_text(result, "tuner"),
-            "status": _first_text(result, "status", default="unknown"),
+            "tuner": result.get("tuner"),
             "total_shapes": result.get("shapes_total", shape_capture.get("shape_count")),
             "improved_shapes": result.get("shapes_tuned"),
             "artifact": tuned_file,
             "elapsed_s": result.get("duration_sec"),
-            "error_class": _first_text(result, "error_class"),
-            "error": _first_text(result, "error", "skip_reason", "error_class"),
+            "error": result.get("error"),
+            "skip_reason": result.get("skip_reason"),
+            "error_class": result.get("error_class"),
         }
         for row in tuner_rows or [campaign_row]:
             tuner_name = _first_text(row, "tuner")
@@ -2370,16 +2370,16 @@ class KernelPhase(CoordinatorCollaborator):
         measurement.update(launch_controls)
         measurement["args_mode"] = "replace"
 
-    def _settle_geak_lift(
+    def _record_geak_lift_attribution(
         self,
         result: dict[str, Any],
-        graded_measurement: Mapping[str, Any],
         *,
         measured: float,
         provenance: str,
         overlay_loaded: bool | None,
         pre_geak_tput: float,
     ) -> None:
+        """Attribute the lifted GEAK result to the kernels that can carry it."""
         base = float(self.shared_state.baseline_tput or 0.0)
         # ``pre_geak_tput`` is read before the lift, which overwrites ``current_best`` with ``measured``: the journey
         # rejection and the route-level residual both measure from where the session stood before GEAK ran.
@@ -2400,8 +2400,6 @@ class KernelPhase(CoordinatorCollaborator):
                 provenance=provenance,
                 rejection_reason="overlay_not_proven_loaded",
             )
-        self._coord.writeback.validate(measured, graded_measurement, source="geak_e2e_promote")
-        self.shared_state.geak_pending = {}
 
     def promote_geak_from_candidate(
         self,
@@ -2418,7 +2416,7 @@ class KernelPhase(CoordinatorCollaborator):
         measured = _as_float(measured_tput, 0.0)
         if measured <= 0:
             return False
-        # Read before the lift overwrites ``current_best``; see :meth:`_settle_geak_lift`.
+        # Read before the lift overwrites ``current_best``; see :meth:`_record_geak_lift_attribution`.
         pre_geak_tput = _as_float(self.shared_state.current_best.get("tput"), 0.0)
         try:
             accepted_flags, parsed_envs = _accepted_config_as_variant(result.get("accepted_config"))
@@ -2454,14 +2452,15 @@ class KernelPhase(CoordinatorCollaborator):
                 reason="graded_comparison_rejected",
             )
             return False
-        self._settle_geak_lift(
+        self._record_geak_lift_attribution(
             result,
-            graded_measurement,
             measured=measured,
             provenance=provenance,
             overlay_loaded=overlay_loaded,
             pre_geak_tput=pre_geak_tput,
         )
+        self._coord.writeback.validate(measured, graded_measurement, source="geak_e2e_promote")
+        self.shared_state.geak_pending = {}
         return True
 
     @staticmethod
