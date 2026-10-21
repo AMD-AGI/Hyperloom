@@ -118,6 +118,24 @@ def task_similarity(first: TaskConditions, second: TaskConditions) -> float:
     return matched / total if total else 0.0
 
 
+def differing_conditions(first: TaskConditions, second: TaskConditions) -> tuple[str, ...]:
+    """The labels and the sizes both hold and do not share, labels first, as the similarity weighs them."""
+
+    labels = [
+        key
+        for key in LABEL_WEIGHTS
+        if key in first.labels
+        and key in second.labels
+        and _label(key, first.labels[key]) != _label(key, second.labels[key])
+    ]
+    sizes = [
+        key
+        for key in SIZE_WEIGHTS
+        if key in first.sizes and key in second.sizes and first.sizes[key] != second.sizes[key]
+    ]
+    return (*labels, *sizes)
+
+
 def effective_sessions(weights: Iterable[float]) -> float:
     """How many equally similar sessions ``weights`` are worth: the square of their sum over their sum of squares."""
 
@@ -136,6 +154,7 @@ __all__ = [
     "SIZE_WEIGHTS",
     "WORKLOAD",
     "TaskConditions",
+    "differing_conditions",
     "effective_sessions",
     "model_name",
     "task_conditions",

@@ -254,8 +254,8 @@ class CrossSessionBriefing(StartupBriefProvider):
 
         here = session_matches(snapshot, self.focus, limit=LEARNINGS)
         past = None
-        if self.learnings is not None and snapshot.profile is not None:
-            past = await asyncio.to_thread(self.learnings.past, snapshot.profile, self.focus, limit=LEARNINGS)
+        if self.learnings is not None:
+            past = await asyncio.to_thread(self.learnings.past_for, snapshot, self.focus, limit=LEARNINGS)
         return tuple(here), past
 
     async def startup_brief(self, start_commit: str) -> StartupBrief:

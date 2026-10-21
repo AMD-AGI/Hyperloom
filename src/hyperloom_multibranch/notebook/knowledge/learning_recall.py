@@ -193,6 +193,14 @@ class LearningRecall(SessionLearnings):
             past_status=past.status if past is not None else "",
         )
 
+    def past_for(self, snapshot: NotebookSnapshot, query: str, *, limit: int) -> PastLearnings | None:
+        """Past sessions' learnings for ``query`` as the session of ``snapshot`` reads them; ``None`` before its
+        profile, or without a knowledge base to read."""
+
+        if snapshot.profile is None or self._reader is None:
+            return None
+        return self.past(snapshot.profile, query, limit=limit)
+
     def past(self, profile: SessionProfile, query: str, *, limit: int) -> PastLearnings:
         key = (" ".join(sorted(words(query))), limit)
         with self._lock:
@@ -211,9 +219,7 @@ class LearningRecall(SessionLearnings):
         """This session's matches, then past sessions', each under its heading; empty when nothing matched."""
 
         here = session_matches(snapshot, query, limit=limit)
-        past = None
-        if snapshot.profile is not None and self._reader is not None:
-            past = await asyncio.to_thread(self.past, snapshot.profile, query, limit=limit)
+        past = await asyncio.to_thread(self.past_for, snapshot, query, limit=limit)
         self.record(snapshot, Retrieval(branch, RetrievalSource.TOOL, query), here, past)
         rendered = [render_session_learning(record, snapshot) for record in here]
         before = _rendered_past(past)
