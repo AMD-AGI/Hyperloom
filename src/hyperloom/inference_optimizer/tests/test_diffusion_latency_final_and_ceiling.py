@@ -63,7 +63,7 @@ class TestFinalRecipeCarriesLatency:
 
     def test_serving_final_has_no_derived_e2el(self):
         final = self._final({"action": "grid", "tput": 123.4})
-        assert final["throughput_tok_s_per_gpu"] == 123.4
+        assert final["output_throughput"] == 123.4
         assert final["e2el_mean_ms"] is None
 
 

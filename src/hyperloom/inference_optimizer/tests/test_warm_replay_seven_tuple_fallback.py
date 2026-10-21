@@ -33,6 +33,7 @@ TARGET = {
     "precision": "bf16",
 }
 TARGET_CID = "inference:" + ":".join(TARGET.values())
+TARGET_SHAPE = {"conc": 64, "isl": 128, "osl": 128}
 
 
 def _candidate(
@@ -101,17 +102,9 @@ def _cascade(kb: _RemoteKB) -> tuple[dict[str, Any], str, float]:
     return _cascade_warm_start_search(
         kb,  # type: ignore[arg-type]
         cid=TARGET_CID,
-        hw=TARGET["hardware"],
-        framework=TARGET["framework_name"],
-        model_type_val=TARGET["model_type"],
-        architectures_val=["Qwen3ForCausalLM"],
-        arch_slug=TARGET["architectures"],
-        fw_version=TARGET["framework_version"],
-        precision=TARGET["precision"],
+        identity={**TARGET, "canonical_id": TARGET_CID},
+        shape=TARGET_SHAPE,
         warm_prefer=None,
-        target_conc=64,
-        target_isl=128,
-        target_osl=128,
     )
 
 
@@ -189,23 +182,9 @@ def test_local_framework_name_filter_matches_canonical_rows() -> None:
 
 def test_borrowed_donor_requires_matching_workload_shape() -> None:
     donor = _candidate("shape-donor")
-    assert _donor_is_trustworthy(
-        donor,
-        target_arch_slug=TARGET["architectures"],
-        target_model_type=TARGET["model_type"],
-        target_conc=64,
-        target_isl=128,
-        target_osl=128,
-    )
+    assert _donor_is_trustworthy(donor, TARGET, TARGET_SHAPE)
     donor.pop("conc")
-    assert not _donor_is_trustworthy(
-        donor,
-        target_arch_slug=TARGET["architectures"],
-        target_model_type=TARGET["model_type"],
-        target_conc=64,
-        target_isl=128,
-        target_osl=128,
-    )
+    assert not _donor_is_trustworthy(donor, TARGET, TARGET_SHAPE)
 
 
 def test_exact_and_each_fallback_confidence_order() -> None:

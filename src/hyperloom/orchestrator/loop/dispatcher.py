@@ -40,6 +40,7 @@ from ..policy.gate import (
     PolicyDenied,
     SPECIALIST_FROM_AGENT_PREFIX,
 )
+from ..policy.specialist_in_flight import specialist_in_flight_denial
 from ..bus.gpu_pool import (
     GPU_LEASE_TTL_GRACE,
 )
@@ -94,14 +95,7 @@ log = _logging.getLogger(__name__)
 # closing its lease, it is what it does first.
 #
 # The enumeration above has to stay exhaustive, so a serial step the unwind takes
-# and this sum does not name has to be removed from the unwind instead. One is:
-# ``run_grid`` fires a robustness tick at each variant boundary, and a cooperative
-# stop reaches that boundary the ordinary way, so the tick would sit between
-# recording the round's row and releasing what the round held -- eight more
-# seconds, spent observing the reap this cancel just ordered. It is skipped
-# whenever the scope is already cancelled rather than budgeted for, because the
-# rows the grid has already built are what a window short by those eight seconds
-# throws away, and they are worth more than one tick.
+# and this sum does not name has to be removed from the unwind instead.
 #
 # Past this window the coroutine is cancelled anyway, and the window is only ever
 # spent when work is still unwinding: the wait ends the moment the last victim is
@@ -688,8 +682,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
                             serving_tp,
                         )
                         gpu_count = serving_tp
-                    # Iron law: kill <= gpu_lease TTL <= gpu_research_lane TTL,
-                    # measured from the same deadline carried down to the reaper.
+                    # Timed from the same deadline carried down to the reaper.
                     gpu_ttl_sec = self.gpu_lease_ttl_sec(
                         int(task.lease_ttl_sec or 0),
                         deadline=specialist_deadline,
@@ -1065,11 +1058,13 @@ class DispatcherCollaborator(CoordinatorCollaborator):
     ) -> int:
         """Single source for the GPU-specialist lease / ``gpu_research_lane`` TTL.
 
-        The iron law is ``kill ≤ gpu_lease TTL ≤ gpu_research_lane TTL`` — both the
-        GPU-pool lease (dispatch) and the lane lease (intent_router) must outlive
-        the kill the reaper performs at the specialist's deadline. A caller that
-        has already anchored that deadline passes it in, so the kill and the
-        lease are not timed from two different readings of the clock.
+        Nothing releases a lease when this TTL passes; the reaper stops the
+        specialist at its deadline. The lane expiry feeds the in-flight
+        ``lease_expires_in_sec`` countdown and ``recover --confirm-scope-gone``'s
+        liveness check, so covering the deadline keeps both from calling a lease
+        lapsed while its specialist can still run. A caller that has already
+        anchored the deadline passes it in, so the kill and the lease are timed
+        from one reading of the clock.
 
         Args:
             floor_ttl_sec: A lower bound (e.g. the registry / existing
@@ -1436,13 +1431,12 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         Returns:
             The first :class:`PolicyDenied` that fires, else ``None``.
         """
-        denied = self._phase_denial_for_action(action_name)
-        if denied is not None:
-            return denied
-        denied = self._sequence_denial_for_action(action_name)
-        if denied is not None:
-            return denied
-        return self.time_budget_denial_for_action(action_name, params=params)
+        return (
+            self._phase_denial_for_action(action_name)
+            or self._sequence_denial_for_action(action_name)
+            or specialist_in_flight_denial(action_name, params, self.tasks, self.shared_state.find_gap)
+            or self.time_budget_denial_for_action(action_name, params=params)
+        )
 
     async def _cancel_queued_task_over_budget(self, task: Task) -> bool:
         """Drop a queued task the budget can no longer fit, before it takes a lane.
@@ -1501,7 +1495,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
             },
         )
         # A cancelled conc_sweep never writes last_conc_sweep on its own, so SWEEP
-        # would idle. Stamp the skip here so the phase machine closes on sweep_done.
+        # would idle. Stamp the skip here so SWEEP can exit.
         if str(task.kind or "") == "conc_sweep":
             self._coord.phase_sweep.record_session_budget_conc_sweep_skip(denied=denied)
         return True

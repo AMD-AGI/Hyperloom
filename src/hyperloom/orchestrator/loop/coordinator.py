@@ -210,6 +210,33 @@ if TYPE_CHECKING:
     from .proposals import PendingProposal
 
 
+def reap_orphaned_servers_best_effort(session_dir: Path, *, phase: str) -> None:
+    """Reap leftover single-node serving processes via this session's pidfiles.
+
+    Runs at boot, at shutdown and on resume. Every other teardown is in-band (a wrapper's signal trap, a ``killpg`` on
+    a handle still held), so none of it runs when the owner dies without getting to; this is the backstop, and with no
+    cgroup or pid namespace the only one: the pidfile outlives its writer. Scoped to this session's own pidfiles and
+    gated on a cmdline match, so a co-located session's server and a recycled pid are never touched.
+    """
+    try:
+        from ..actions.executors._multi_node_env import is_multi_node
+
+        if is_multi_node():
+            return
+        from ..actions.executors._server_lifecycle import reap_orphaned_servers
+
+        reaped = reap_orphaned_servers(session_dir)
+        if reaped:
+            log.warning(
+                "coordinator: reaped %d orphaned serving process(es) at %s: %s",
+                len(reaped),
+                phase,
+                reaped,
+            )
+    except Exception:
+        log.exception("coordinator: orphan server reaper failed at %s (ignored)", phase)
+
+
 @dataclass
 class CoordinatorState:
     """In-memory ephemeral state for the reactor + dispatcher."""
@@ -253,7 +280,7 @@ class RunOptions:
         max_ticks: Stop after this many ticks, when set.
         stop_when: Custom stop predicate, asked after every tick.
         install_signal_handlers: Whether to arm the stop-signal drain.
-        crash_emergency_threshold: Consecutive tick crashes that end the run.
+        crash_emergency_threshold: Coordinator exceptions within the trailing 24 hours that end the run as ``emergency``.
         closing_grace_sec: Bound on the closing phase; the default when ``None``.
     """
 
@@ -366,7 +393,7 @@ class Coordinator:
         self.writeback.detect_resume_state()
         # Reap serving processes orphaned by a prior monitor-process crash (e.g. a raylet death that took the
         # optimizer down mid-benchmark), scoped strictly to this session's own pidfiles.
-        self._reap_orphaned_servers_best_effort(phase="boot")
+        reap_orphaned_servers_best_effort(self.session_dir, phase="boot")
         # Before any bring-up can dispatch: an attempt classified against a
         # different pin is not comparable with its neighbours.
         self._pin_source_trees()
@@ -583,9 +610,9 @@ class Coordinator:
                 self.shared_state,
                 links=ReconcileLinks(
                     resources=self.policy.resources,
-                    # A callable, not a captured mapping: the resume replay rebuilds
-                    # its contents, so a snapshot taken here would be pre-replay.
+                    # Callables, not snapshots: the resume replay rebuilds the pending proposals after this runs.
                     proposals=lambda: self.state.pending_proposals,
+                    drop_proposal=lambda pending, reason: self.router.settle_dropped_proposal(pending, reason),
                     session_dir=self.session_dir,
                     # The window a revalidation holds is closed by the writeback when
                     # its result is booked; this pass only closes one nobody will.
@@ -637,33 +664,6 @@ class Coordinator:
         from .build_lifecycle import BuildLifecycleCollaborator
 
         return self._collaborator("_build_lifecycle", BuildLifecycleCollaborator)
-
-    def _reap_orphaned_servers_best_effort(self, *, phase: str) -> None:
-        """Reap leftover single-node serving processes via this session's pidfiles.
-
-        Runs at boot and again at shutdown. Every other teardown here is in-band -- a benchmark wrapper's own signal
-        trap, or a ``killpg`` on a handle we still hold -- so none of it runs when the owner dies without getting to
-        execute. This is the backstop for that case, and with no cgroup or pid-namespace available it is the only one:
-        the pidfile outlives whatever wrote it. Scoped to this session's own pidfiles and gated on a cmdline match, so
-        a co-located session's server and a recycled pid are never touched.
-        """
-        try:
-            from ..actions.executors._multi_node_env import is_multi_node
-
-            if is_multi_node():
-                return
-            from ..actions.executors._server_lifecycle import reap_orphaned_servers
-
-            reaped = reap_orphaned_servers(self.session_dir)
-            if reaped:
-                log.warning(
-                    "coordinator: reaped %d orphaned serving process(es) at %s: %s",
-                    len(reaped),
-                    phase,
-                    reaped,
-                )
-        except Exception:
-            log.exception("coordinator: orphan server reaper failed at %s (ignored)", phase)
 
     def _pin_source_trees(self) -> None:
         """Pin the source trees this session observes and patches, once at boot.
@@ -1154,7 +1154,7 @@ class Coordinator:
             # A server outliving the run holds every GPU it was given, so the
             # session's last act is to reap its own pidfiles.
             with timed_teardown_step(self.shared_state, "reap_orphaned_servers"):
-                await asyncio.to_thread(self._reap_orphaned_servers_best_effort, phase="shutdown")
+                await asyncio.to_thread(reap_orphaned_servers_best_effort, self.session_dir, phase="shutdown")
             self.shared_state.save(self.session_dir)
         return stop_reason or self.shared_state.stop_reason
 

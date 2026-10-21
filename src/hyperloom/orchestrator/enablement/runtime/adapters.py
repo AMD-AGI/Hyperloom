@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shlex
 import subprocess
 from dataclasses import replace
 from pathlib import Path, PurePosixPath
@@ -18,7 +19,7 @@ from hyperloom.common.failure_signature import CapabilityGap
 from hyperloom.inference_optimizer import framework_registry
 
 from .build_actions import resolve_build_ref
-from .build_utils import ROCM_CONSTRAINTS_FILE, write_rocm_constraints
+from .build_utils import ROCM_CONSTRAINTS_FILE, sglang_rocm_install_target, write_rocm_constraints
 from .stack_actions import EnablementStackAction, FrameworkRuntime, ProvisionResult, RuntimeRequest
 
 
@@ -27,6 +28,11 @@ log = logging.getLogger(__name__)
 
 # Per-provision hard timeout: wheel/editable install must fit inside the integrate lane TTL.
 _PROVISION_TIMEOUT_SEC = 1800
+
+# pip/git put the error last; earlier lines are warnings.
+_FAILURE_TAIL_CHARS = 1500
+
+_PROVISION_LOG = "provision.log"
 
 
 # Injectable subprocess shim: (argv, env, cwd) -> CompletedProcess.
@@ -87,6 +93,11 @@ def _stdout(argv: list[str], *, run: RunFn) -> str:
     if getattr(cp, "returncode", 1) != 0:
         return ""
     return (getattr(cp, "stdout", "") or "").strip()
+
+
+def _failure_tail(cp: subprocess.CompletedProcess) -> str:
+    """The end of ``cp``'s stderr, which carries the error."""
+    return (cp.stderr or "").strip()[-_FAILURE_TAIL_CHARS:]
 
 
 def _resolved_clone_ref(checkout: str, *, run: RunFn = _default_run) -> str:
@@ -287,43 +298,47 @@ class _VenvProvisionMixin(BaseAdapter):
         """
         return purelib if (Path(purelib) / PurePosixPath(self.package_path).name).is_dir() else ""
 
-    def _create_venv(self, attempt_dir: Path) -> tuple[Path, Path]:
-        """Create ``attempt_dir/venv`` over this interpreter's packages; return (bin, python)."""
-        venv_root = attempt_dir / "venv"
-        create_venv(venv_root)
-        bin_dir = venv_root / "bin"
-        return bin_dir, bin_dir / "python"
-
-    def _write_rocm_constraints(self, python_path: Path, attempt_dir: Path) -> Path:
-        """Write the pip constraints that hold the attempt's ROCm stack in place."""
-        constraints = attempt_dir / ROCM_CONSTRAINTS_FILE
+    def _prepare_attempt_venv(self, attempt_dir: Path) -> tuple[Path, Path]:
+        """Reset the provision log, create ``attempt_dir/venv`` and pin its ROCm stack; return (bin, python)."""
+        attempt_dir.mkdir(parents=True, exist_ok=True)
+        (attempt_dir / _PROVISION_LOG).write_bytes(b"")
+        bin_dir = attempt_dir / "venv" / "bin"
+        create_venv(bin_dir.parent)
         write_rocm_constraints(
-            str(python_path),
-            constraints,
+            str(bin_dir / "python"),
+            attempt_dir / ROCM_CONSTRAINTS_FILE,
             replacing=self.framework,
             run=lambda argv, **_kwargs: self._run(argv, dict(os.environ), None),
         )
-        return constraints
+        return bin_dir, bin_dir / "python"
+
+    def _logged_run(self, argv: list[str], attempt_dir: Path) -> subprocess.CompletedProcess:
+        """Run ``argv`` and append its command, exit code and full output to the attempt's provision log."""
+        cp = self._run(argv, dict(os.environ), None)
+        with (attempt_dir / _PROVISION_LOG).open("a", encoding="utf-8") as fh:
+            fh.write(f"$ {shlex.join(argv)}\nrc={cp.returncode}\n")
+            fh.write(f"{cp.stdout or ''}{cp.stderr or ''}\n")
+        return cp
 
     def _pip_install(
         self,
         python_path: Path,
         specs: list[str],
+        attempt_dir: Path,
         *,
-        constraints: Path,
         index_url: str = "",
         editable: str = "",
     ) -> subprocess.CompletedProcess:
-        """Run one ``pip install`` into the attempt venv, held to ``constraints``."""
-        argv = [str(python_path), "-m", "pip", "install", "--constraint", str(constraints)]
+        """Run one ``pip install`` into the attempt venv, held to the attempt's ROCm constraints."""
+        argv = [str(python_path), "-m", "pip", "install", "--constraint", str(attempt_dir / ROCM_CONSTRAINTS_FILE)]
         if index_url:
             argv += ["--extra-index-url", index_url]
         if editable:
             argv += ["-e", editable]
         argv += list(specs)
-        return self._run(argv, dict(os.environ), None)
+        return self._logged_run(argv, attempt_dir)
 
-    def _checkout(self, repo_url: str, ref: str, dest: Path) -> subprocess.CompletedProcess:
+    def _checkout(self, repo_url: str, ref: str, dest: Path, attempt_dir: Path) -> subprocess.CompletedProcess:
         """Shallow-fetch ``ref`` of ``repo_url`` into ``dest`` and detach on it; returns the first failing step."""
         dest.mkdir(parents=True, exist_ok=True)
         git = ["git", "-C", str(dest)]
@@ -333,7 +348,7 @@ class _VenvProvisionMixin(BaseAdapter):
             ["checkout", "-q", "--detach", "FETCH_HEAD"],
         )
         for step in steps:
-            cp = self._run([*git, *step], dict(os.environ), None)
+            cp = self._logged_run([*git, *step], attempt_dir)
             if getattr(cp, "returncode", 1) != 0:
                 break
         return cp
@@ -359,22 +374,18 @@ class VllmRocmAdapter(_VenvProvisionMixin):
 
         Blocking (venv/pip, 1800s cap); call via ``asyncio.to_thread``.
         """
-        log_path = str(attempt_dir / "provision.log")
+        log_path = str(attempt_dir / _PROVISION_LOG)
         try:
-            attempt_dir.mkdir(parents=True, exist_ok=True)
-            bin_dir, python_path = self._create_venv(attempt_dir)
-            constraints = self._write_rocm_constraints(python_path, attempt_dir)
+            bin_dir, python_path = self._prepare_attempt_venv(attempt_dir)
         except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
             return ProvisionResult(ok=False, log_path=log_path, error=f"venv setup failed: {exc!r}")
 
         if action.acquisition_method != "wheel":
             return ProvisionResult(ok=False, log_path=log_path, error=f"unsupported method {action.acquisition_method}")
 
-        cp = self._pip_install(python_path, list(action.packages), constraints=constraints, index_url=action.index_url)
+        cp = self._pip_install(python_path, list(action.packages), attempt_dir, index_url=action.index_url)
         if getattr(cp, "returncode", 1) != 0:
-            return ProvisionResult(
-                ok=False, log_path=log_path, error=f"pip install failed: {(getattr(cp, 'stderr', '') or '')[:400]}"
-            )
+            return ProvisionResult(ok=False, log_path=log_path, error=f"pip install failed: {_failure_tail(cp)}")
 
         # Refuse a CUDA torch / non-ROCm vLLM swap-in.
         if not verify_torch_is_rocm(str(python_path), run=self._run):
@@ -429,11 +440,9 @@ class SglangAdapter(_VenvProvisionMixin):
 
         Blocking (venv/pip, 1800s cap); call via ``asyncio.to_thread``.
         """
-        log_path = str(attempt_dir / "provision.log")
+        log_path = str(attempt_dir / _PROVISION_LOG)
         try:
-            attempt_dir.mkdir(parents=True, exist_ok=True)
-            bin_dir, python_path = self._create_venv(attempt_dir)
-            constraints = self._write_rocm_constraints(python_path, attempt_dir)
+            bin_dir, python_path = self._prepare_attempt_venv(attempt_dir)
         except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
             return ProvisionResult(ok=False, log_path=log_path, error=f"venv setup failed: {exc!r}")
 
@@ -443,25 +452,26 @@ class SglangAdapter(_VenvProvisionMixin):
             if not action.repo_url or not action.ref:
                 return ProvisionResult(ok=False, log_path=log_path, error="editable_ref requires repo_url and ref")
             checkout = attempt_dir / "src"
-            fetched = self._checkout(action.repo_url, action.ref, checkout)
+            fetched = self._checkout(action.repo_url, action.ref, checkout, attempt_dir)
             if getattr(fetched, "returncode", 1) != 0:
                 return ProvisionResult(
                     ok=False,
                     log_path=log_path,
-                    error=f"git checkout of {action.ref} failed: {(getattr(fetched, 'stderr', '') or '')[:400]}",
+                    error=f"git checkout of {action.ref} failed: {_failure_tail(fetched)}",
                 )
-            cp = self._pip_install(
-                python_path, list(action.packages), constraints=constraints, editable=str(checkout / "python")
-            )
+            torch_version = _installed_version(str(python_path), "torch", run=self._run)
+            try:
+                with sglang_rocm_install_target(checkout / "python", torch_version) as target:
+                    cp = self._pip_install(python_path, list(action.packages), attempt_dir, editable=target)
+            except (OSError, ValueError) as exc:
+                return ProvisionResult(ok=False, log_path=log_path, error=f"no ROCm install of {action.ref}: {exc}")
             pythonpath_prefix = str(checkout / "python")
             # The editable install imports straight out of the clone, and its
             # diffs are cut against the repo root that holds ``python/sglang``.
             source_root = str(checkout)
             resolved_ref = _resolved_clone_ref(str(checkout), run=self._run)
         elif action.acquisition_method == "wheel":
-            cp = self._pip_install(
-                python_path, list(action.packages), constraints=constraints, index_url=action.index_url
-            )
+            cp = self._pip_install(python_path, list(action.packages), attempt_dir, index_url=action.index_url)
             purelib = _site_packages(str(python_path), run=self._run)
             if not purelib:
                 return ProvisionResult(
@@ -472,9 +482,7 @@ class SglangAdapter(_VenvProvisionMixin):
             return ProvisionResult(ok=False, log_path=log_path, error=f"unsupported method {action.acquisition_method}")
 
         if getattr(cp, "returncode", 1) != 0:
-            return ProvisionResult(
-                ok=False, log_path=log_path, error=f"install failed: {(getattr(cp, 'stderr', '') or '')[:400]}"
-            )
+            return ProvisionResult(ok=False, log_path=log_path, error=f"install failed: {_failure_tail(cp)}")
         if not verify_torch_is_rocm(str(python_path), run=self._run):
             return ProvisionResult(ok=False, log_path=log_path, error="attempt torch is not a ROCm build")
         resolved_packages = _resolved_packages(str(python_path), list(action.packages), run=self._run)

@@ -398,7 +398,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
             interval_s=args.poll_interval,
             timeout_s=_poll_timeout_from_args(args),
         )
-        if args.print_logs or str(result.get("status", "")).upper() in _TERMINAL_FAIL_STATUSES:
+        if args.print_logs:
             logs = ray.get_job_logs(sub_id)
             print(logs)
         info(f"verify done: {result.get('status')}")
@@ -891,19 +891,14 @@ def _submit_and_collect_pod_json(
             j = ray.get_job(sub_id)
             return j, f"{label} status={j.get('status', '?')}"
 
-        result = _short_poll(
+        _short_poll(
             label=label,
             fetch=_fetch,
             interval_s=poll_interval,
             timeout_s=poll_timeout,
         )
-        status = str(result.get("status", "")).upper()
         logs = ray.get_job_logs(sub_id)
         parsed = _extract_pod_json(logs)
-        if status in _TERMINAL_FAIL_STATUSES:
-            return EXIT_TRANSIENT, parsed, logs
-        if status not in _TERMINAL_OK_STATUSES:
-            return EXIT_TRANSIENT, parsed, logs
         # Dashboard SUCCEEDED; the sub-script's own ``status`` says if the fan-out worked.
         if parsed is None:
             return EXIT_TRANSIENT, None, logs
@@ -1176,7 +1171,7 @@ def _reject_unsupported_restart_args(args: argparse.Namespace) -> int:
     return 0
 
 
-def _resume_prior_launch(args: argparse.Namespace, state: dict, *, topology, prev_sub: str) -> tuple[str, bool]:
+def _resume_prior_launch(args: argparse.Namespace, state: dict, *, topology: dict[str, Any]) -> tuple[str, bool]:
     """Reuse a prior launch when the whole topology record matches and it is still good.
 
     Returns the submission id to keep polling, and whether the resume was granted
@@ -1189,6 +1184,7 @@ def _resume_prior_launch(args: argparse.Namespace, state: dict, *, topology, pre
         "no",
         "off",
     )
+    prev_sub = str(state.get("last_restart_submission_id") or "").strip()
     if not resume_enabled or not prev_sub or state.get("last_restart_topology") != topology:
         return "", False
     prev_status = ""
@@ -1209,11 +1205,7 @@ def _resume_prior_launch(args: argparse.Namespace, state: dict, *, topology, pre
         return "", False
     # The driver waits for the servers it spawned before exiting, so a terminal-OK status means this
     # cluster served once.
-    if cluster_is_serving(
-        state,
-        pd_mode=(getattr(args, "pd_mode", "") or "aggregated").lower(),
-        timeout_s=_resume_probe_timeout_s(),
-    ):
+    if cluster_is_serving(state, pd_mode=topology["pd_mode"], timeout_s=_resume_probe_timeout_s()):
         info(
             f"resume: prior launch_sub={prev_sub} SUCCEEDED and every leg serves generated tokens; skipping KILL+LAUNCH"
         )
@@ -1252,58 +1244,33 @@ def _start_pd_router(
         job = ray.get_job(router_sub)
         return job, f"router status={job.get('status', '?')}"
 
-    router_result = _short_poll(
+    _short_poll(
         label=f"router {router_sub}",
         fetch=_fetch_router,
         interval_s=args.poll_interval,
         timeout_s=_poll_timeout_from_args(args),
     )
-    router_status = str(router_result.get("status", "")).upper()
-    if args.print_logs or router_status in _TERMINAL_FAIL_STATUSES:
+    if args.print_logs:
         print(ray.get_job_logs(router_sub))
-    if router_status in _TERMINAL_FAIL_STATUSES:
-        info(f"ERROR router job ended {router_status}; PD restart failed")
-        return router_sub, router_state, 1
     return router_sub, router_state, 0
 
 
-@dataclass(frozen=True)
-class _MultinodeLaunch:
-    """What one multi-node restart launched: its PID/log dirs, Ray submissions, topology and PD router endpoints."""
-
-    pid_dir: str
-    log_dir: str
-    kill_sub: str
-    launch_sub: str
-    topology: dict[str, Any]
-    router_sub: str
-    router_state: dict
-
-
-def _persist_multinode_restart(state: dict, args: argparse.Namespace, launch: _MultinodeLaunch) -> None:
-    """Record what this restart launched, so a later invocation can resume or fall back to it."""
-    state["last_server_pid_dir"] = launch.pid_dir
-    state["last_server_log_dir"] = launch.log_dir
-    state["last_kill_submission_id"] = launch.kill_sub
-    state["last_restart_submission_id"] = launch.launch_sub
-    state["last_restart_framework"] = args.framework
-    state["last_restart_model"] = args.model
-    state["last_restart_tp"] = args.tp
-    state["last_restart_ep"] = int(getattr(args, "ep", 1) or 1)
-    state["last_restart_topology"] = launch.topology
+def _persist_multinode_restart(
+    state: dict, args: argparse.Namespace, *, kill_sub: str, router_sub: str, router_state: dict
+) -> None:
+    """Complete the early checkpoint once the launch is up, so a later invocation can resume or fall back to it."""
+    state["last_kill_submission_id"] = kill_sub
     # Persist PD state so later invocations can fall back when a flag is omitted.
-    pd_mode = (getattr(args, "pd_mode", "") or "aggregated").lower()
-    state["last_restart_pd_mode"] = pd_mode
-    if pd_mode == "disaggregated":
+    if state["last_restart_pd_mode"] == "disaggregated":
         state["last_restart_pd_prefill_nodes"] = int(getattr(args, "pd_prefill_nodes", 0) or 0)
         state["last_restart_pd_decode_nodes"] = int(getattr(args, "pd_decode_nodes", 0) or 0)
         state["last_restart_pd_prefill_tp"] = int(getattr(args, "pd_prefill_tp", 0) or 0)
         state["last_restart_pd_decode_tp"] = int(getattr(args, "pd_decode_tp", 0) or 0)
         state["last_restart_pd_transfer_backend"] = getattr(args, "pd_transfer_backend", "") or ""
         state["last_restart_pd_ib_device"] = getattr(args, "pd_ib_device", "") or ""
-        state["last_router_submission_id"] = launch.router_sub
-        state["pd_prefill_url"] = launch.router_state.get("pd_prefill_url", "")
-        state["pd_decode_url"] = launch.router_state.get("pd_decode_url", "")
+        state["last_router_submission_id"] = router_sub
+        state["pd_prefill_url"] = router_state.get("pd_prefill_url", "")
+        state["pd_decode_url"] = router_state.get("pd_decode_url", "")
     _save_state(state)
 
 
@@ -1321,19 +1288,13 @@ def _restart_multinode(args: argparse.Namespace, state: dict, nnodes: int) -> in
     # fast path, and it is part of the record because it carries every variant flag.
     runtime_env = _forward_runtime_env(per_round_forward_overrides())
     topology = _rayjob_topology_fingerprint(args, nnodes, dict((runtime_env or {}).get("env_vars") or {}))
-    launch_sub, resumed_serving = _resume_prior_launch(
-        args,
-        state,
-        topology=topology,
-        prev_sub=str(state.get("last_restart_submission_id") or "").strip(),
-    )
+    launch_sub, resumed_serving = _resume_prior_launch(args, state, topology=topology)
 
     kill_sub = ""
     if not launch_sub:
         kill_sub = _exec_kill_submission(state, kill_ep, label="restart kill", args=args)
 
     with _ray_dashboard_client(state) as ray:
-        # Launch new servers (skipped when resuming a RUNNING launch).
         if not launch_sub:
             launch_sub = ray.submit_job(launch_ep, runtime_env=runtime_env)
             info(f"launch submission_id={launch_sub} (driver waits for actors, then returns; servers detached)")
@@ -1347,10 +1308,10 @@ def _restart_multinode(args: argparse.Namespace, state: dict, nnodes: int) -> in
         state["last_restart_submission_id"] = launch_sub
         state["last_restart_framework"] = args.framework
         state["last_restart_model"] = args.model
-        state["last_restart_tp"] = int(args.tp)
-        state["last_restart_ep"] = int(getattr(args, "ep", 1) or 1)
-        state["last_restart_pd_mode"] = (getattr(args, "pd_mode", "") or "aggregated").lower()
-        state["last_restart_extra_args"] = _normalize_extra_args(getattr(args, "extra_args", ""))
+        state["last_restart_tp"] = topology["tp"]
+        state["last_restart_ep"] = topology["ep"]
+        state["last_restart_pd_mode"] = topology["pd_mode"]
+        state["last_restart_extra_args"] = topology["extra_args"]
         # A poll-timeout retry resumes from this checkpoint, so it carries the topology record as well; the
         # per-field pd_* keys below are written only once the poll returns.
         state["last_restart_topology"] = topology
@@ -1361,29 +1322,18 @@ def _restart_multinode(args: argparse.Namespace, state: dict, nnodes: int) -> in
             job = ray.get_job(launch_sub)
             return job, f"launch status={job.get('status', '?')}"
 
-        result = _short_poll(
+        _short_poll(
             label=f"launch {launch_sub}",
             fetch=_fetch_launch,
             interval_s=args.poll_interval,
             timeout_s=_poll_timeout_from_args(args),
         )
-        launch_status = str(result.get("status", "")).upper()
-        if args.print_logs or launch_status in _TERMINAL_FAIL_STATUSES:
+        if args.print_logs:
             print(ray.get_job_logs(launch_sub))
 
-        # Fail-fast on a terminal launch status instead of burning the health wait.
-        if launch_status in _TERMINAL_FAIL_STATUSES:
-            info(
-                f"ERROR launch driver terminal status={launch_status}; "
-                f"multi-node restart failed (sub_id={launch_sub}). "
-                f"Check stderr above for MULTI_NODE_FAILURE_SNAPSHOT."
-            )
-            return 1
-
-        pd_mode = (getattr(args, "pd_mode", "") or "aggregated").lower()
         router_sub = ""
         router_state: dict = {}
-        if pd_mode == "disaggregated" and resumed_serving:
+        if topology["pd_mode"] == "disaggregated" and resumed_serving:
             # The serving probe just drove a completion through this cluster's public port, which in PD is the
             # router: it is up and routing.
             router_sub = str(state.get("last_router_submission_id") or "")
@@ -1392,30 +1342,14 @@ def _restart_multinode(args: argparse.Namespace, state: dict, nnodes: int) -> in
                 "pd_decode_url": str(state.get("pd_decode_url") or ""),
             }
             info("resume: keeping the router that is already serving")
-        elif pd_mode == "disaggregated":
+        elif topology["pd_mode"] == "disaggregated":
             router_sub, router_state, router_rc = _start_pd_router(
-                ray,
-                args,
-                launch_sub=launch_sub,
-                pid_dir=pid_dir,
-                log_dir=log_dir,
+                ray, args, launch_sub=launch_sub, pid_dir=pid_dir, log_dir=log_dir
             )
             if router_rc:
                 return router_rc
 
-    _persist_multinode_restart(
-        state,
-        args,
-        _MultinodeLaunch(
-            pid_dir=pid_dir,
-            log_dir=log_dir,
-            kill_sub=kill_sub,
-            launch_sub=launch_sub,
-            topology=topology,
-            router_sub=router_sub,
-            router_state=router_state,
-        ),
-    )
+    _persist_multinode_restart(state, args, kill_sub=kill_sub, router_sub=router_sub, router_state=router_state)
     info("multi-node servers launched; benchmarks should target $service_url")
     return 0
 
@@ -1447,13 +1381,13 @@ def _restart_single_node(args: argparse.Namespace, state: dict) -> int:
             job = ray.get_job(sub_id)
             return job, f"status={job.get('status', '?')}"
 
-        result = _short_poll(
+        _short_poll(
             label=f"restart {sub_id}",
             fetch=_fetch,
             interval_s=args.poll_interval,
             timeout_s=_poll_timeout_from_args(args),
         )
-        if args.print_logs or str(result.get("status", "")).upper() in _TERMINAL_FAIL_STATUSES:
+        if args.print_logs:
             print(ray.get_job_logs(sub_id))
 
     state["last_server_pid_file"] = pid_file

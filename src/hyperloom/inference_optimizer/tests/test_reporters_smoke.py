@@ -27,7 +27,7 @@ def _baseline_event(**action: Any) -> dict[str, Any]:
                     "start_time": "2026-05-12T10:00:00Z",
                     "end_time": "2026-05-12T10:04:00Z",
                     "request": {"establishes_quality_ref": True, "failure_streak_before": 0},
-                    "measurement": {"throughput_tok_s_per_gpu": 2205.0, "throughput_unit": "tok/s"},
+                    "measurement": {"output_throughput": 2205.0, "throughput_unit": "tok/s"},
                     **action,
                 }
             ]
@@ -103,13 +103,13 @@ def _fixture_breakdown(**overrides: Any) -> dict[str, Any]:
         "outcome": {
             "stop_reason": "time_exhausted",
             "baseline": {
-                "throughput_tok_s_per_gpu": 2205.0,
+                "output_throughput": 2205.0,
                 "accuracy": None,
                 "ttft_mean_ms": None,
                 "e2el_mean_ms": None,
             },
             "final": {
-                "throughput_tok_s_per_gpu": 2447.5,
+                "output_throughput": 2447.5,
                 "gain_pct": 10.99,
                 "extra_server_args": "",
                 "action_path": ["explore:vllm_kv_fp8"],
@@ -312,7 +312,7 @@ def test_every_source_the_ledger_credits_gets_its_own_attribution_line() -> None
 
 def test_attribution_missing_when_no_gain() -> None:
     bd = _fixture_breakdown()
-    bd["outcome"]["final"] = {"throughput_tok_s_per_gpu": None, "gain_pct": None, "action_path": []}
+    bd["outcome"]["final"] = {"output_throughput": None, "gain_pct": None, "action_path": []}
     r = render_session_report(bd)
     assert r.global_facts.attribution_method == "missing"
     assert r.global_facts.gain_attribution_lines == []
@@ -373,7 +373,48 @@ def test_kernel_lifecycle_funnel_propagates_to_global_facts() -> None:
     r = render_session_report(_fixture_breakdown())
     f = r.global_facts.kernel_pipeline_funnel
     assert f["detected"] == 50 and f["recommended"] == 10
-    assert f["optimized"] == 0 and f["adopted"] == 0
+    assert f["attempted"] == 0 and f["adopted"] == 0
+
+
+def test_the_funnel_counts_a_kernel_every_lane_rejected_as_attempted() -> None:
+    bd = _fixture_breakdown()
+    bd["timeline"] = [
+        _baseline_event(),
+        {
+            "type": "kernel",
+            "ext": {
+                "attempts": [
+                    {"kernel_id": "k_a", "route": "geak", "outcome": "rejected", "source_kind": "geak_authored_kernel"}
+                ]
+            },
+        },
+    ]
+    r = render_session_report(bd)
+
+    assert (r.global_facts.kernel_pipeline_funnel["attempted"], r.global_facts.kernel_pipeline_funnel["rejected"]) == (
+        1,
+        1,
+    )
+    assert "recommended=1 → attempted=1 → adopted=0 (reverted=0, rejected=1, partial=0)." in r.markdown
+
+
+def test_a_revoked_keep_is_a_revert_in_the_capability_row_and_the_funnel() -> None:
+    bd = _fixture_breakdown()
+    attempt = {
+        "kernel_id": "k_rms",
+        "route": "geak",
+        "source_kind": "geak_authored_kernel",
+        "outcome": "adopted",
+        "speedup": 1.5,
+        "e2e": {"decision": "REVERT", "e2e_gain_pct": 2.0},
+    }
+    bd["timeline"] = [_baseline_event(), {"type": "kernel", "ext": {"attempts": [attempt]}}]
+    r = render_session_report(bd)
+    funnel = r.global_facts.kernel_pipeline_funnel
+
+    assert "| geak | tried | 1 | 0 | reverts=1 |" in r.markdown.splitlines()
+    assert r.global_facts.capabilities_kept == []
+    assert (funnel["adopted"], funnel["reverted"], funnel["partial"]) == (0, 1, 0)
 
 
 def test_variant_funnel_reaches_the_key_facts_and_the_summary() -> None:
@@ -648,8 +689,8 @@ def test_numeric_metrics_recorded_as_strings_still_produce_a_headline() -> None:
         {
             "metadata": {"session": {"session_id": "s"}},
             "outcome": {
-                "baseline": {"throughput_tok_s_per_gpu": "2205"},
-                "final": {"throughput_tok_s_per_gpu": "2447", "gain_pct": "10.99"},
+                "baseline": {"output_throughput": "2205"},
+                "final": {"output_throughput": "2447", "gain_pct": "10.99"},
             },
         }
     )
@@ -688,7 +729,7 @@ def test_the_report_shows_the_axes_the_session_was_graded_on() -> None:
     """The ``perf`` block reached the artifact from the first V6 recorder and no renderer read it.
 
     An AgentX session is ranked on median interactivity with the tail and per-GPU output as guards, so a report
-    that shows only ``throughput_tok_s_per_gpu`` states a figure the verdict was not taken on.
+    that shows only ``output_throughput`` states a figure the verdict was not taken on.
     """
     md = render_session_report(_agentx_breakdown()).markdown
 
@@ -730,7 +771,7 @@ def test_a_round_with_no_graded_axes_renders_no_axis_block() -> None:
 
     # Anchored on a positive assertion first: both checks below would also pass on an empty report, and
     # reporters/base.py substitutes a warning section for a renderer that raises.
-    assert "throughput_tok_s_per_gpu" in md
+    assert "- **output_throughput**:" in md
     assert "AgentX graded axes" not in md
     assert "e2e_norm_intvty_p50" not in md
 
@@ -780,7 +821,7 @@ def test_a_synthetic_round_that_reports_a_duration_heads_no_agentx_section() -> 
 
     md = render_session_report(b).markdown
 
-    assert "throughput_tok_s_per_gpu" in md
+    assert "- **output_throughput**:" in md
     assert "AgentX graded axes" not in md
 
 
@@ -791,3 +832,360 @@ def test_a_non_finite_axis_reads_the_same_in_the_facts_as_in_the_table() -> None
     assert graded_axes_facts({"e2e_norm_intvty_p50": float("nan")}, label="X") == []
     assert graded_axes_facts({"e2e_norm_intvty_p50": float("inf")}, label="X") == []
     assert graded_axes_facts({"e2e_norm_intvty_p50": 41.8}, label="X") == ["X e2e_norm_intvty_p50: 41.8."]
+
+
+def _section(result: Any, section_id: str) -> Any:
+    """The rendered section ``section_id`` of a ``render_session_report`` result."""
+    return next(s for s in result.sections if s.section_id == section_id)
+
+
+def _stack_event(**settled: Any) -> dict[str, Any]:
+    """A ``stack`` event whose settled validation row produced the session's gain."""
+    return {"type": "stack", "ext": {"validations": {"settled": settled}}}
+
+
+def _graded_breakdown() -> dict[str, Any]:
+    """An AgentX-graded session: p50 interactivity moved while the tok/s figures barely did."""
+    b = _fixture_breakdown()
+    b["outcome"]["final"]["graded_on"] = "e2e_norm_intvty_p50"
+    b["outcome"]["final"]["gain_pct"] = 26.5457
+    b["timeline"].append(
+        _stack_event(
+            baseline_tput=63.02819,
+            validated_tput=79.75949,
+            validated_gain_pct=26.5457,
+            graded_objective="e2e_norm_intvty_p50",
+        )
+    )
+    return b
+
+
+def test_headline_on_an_interactivity_session_quotes_the_graded_axis() -> None:
+    """Throughput in tok/s beside a gain measured on interactivity reads as one derived from the other."""
+    result = render_session_report(_graded_breakdown())
+
+    expected = "e2e_norm_intvty_p50 63.03 → 79.76 = +26.55% validated gain"
+    assert result.global_facts.headline == expected
+    assert f"- **Headline**: {expected}" in result.markdown.splitlines()
+
+
+def test_headline_uses_the_settled_row_when_the_baseline_was_re_anchored() -> None:
+    """``outcome.baseline`` holds the latest anchor; the gain was measured against the ledger's baseline."""
+    b = _graded_breakdown()
+    b["outcome"]["baseline"]["perf"] = {"e2e_norm_intvty_p50": 150.51}
+    b["outcome"]["final"]["gain_pct"] = 44.52
+    b["timeline"][-1] = _stack_event(
+        baseline_tput=103.479,
+        validated_tput=149.544,
+        validated_gain_pct=44.5158,
+        graded_objective="e2e_norm_intvty_p50",
+    )
+
+    headline = render_session_report(b).global_facts.headline
+
+    assert headline == "e2e_norm_intvty_p50 103.48 → 149.54 = +44.52% validated gain"
+
+
+def test_headline_names_only_the_gain_and_axis_without_a_settled_row() -> None:
+    b = _graded_breakdown()
+    b["timeline"] = [e for e in b["timeline"] if e["type"] != "stack"]
+
+    headline = render_session_report(b).global_facts.headline
+
+    assert headline == "+26.55% validated gain on e2e_norm_intvty_p50"
+
+
+def test_headline_names_only_the_gain_and_axis_when_the_settled_row_is_on_another_axis() -> None:
+    b = _graded_breakdown()
+    b["timeline"][-1]["ext"]["validations"]["settled"]["graded_objective"] = "e2e_norm_intvty_p90"
+
+    assert render_session_report(b).global_facts.headline == "+26.55% validated gain on e2e_norm_intvty_p50"
+
+
+def test_headline_names_only_the_gain_and_axis_when_the_pair_does_not_reproduce_it() -> None:
+    b = _graded_breakdown()
+    b["timeline"][-1]["ext"]["validations"]["settled"]["validated_tput"] = 70.0
+
+    assert render_session_report(b).global_facts.headline == "+26.55% validated gain on e2e_norm_intvty_p50"
+
+
+def test_headline_reads_the_last_stack_event() -> None:
+    b = _graded_breakdown()
+    first = _stack_event(
+        baseline_tput=1.0, validated_tput=9.0, validated_gain_pct=800.0, graded_objective="e2e_norm_intvty_p50"
+    )
+    b["timeline"].insert(0, first)
+
+    assert (
+        render_session_report(b).global_facts.headline == "e2e_norm_intvty_p50 63.03 → 79.76 = +26.55% validated gain"
+    )
+
+
+def test_headline_keeps_the_throughput_sentence_when_the_graded_axis_is_throughput() -> None:
+    b = _graded_breakdown()
+    b["outcome"]["final"]["graded_on"] = "output_throughput"
+
+    headline = render_session_report(b).global_facts.headline
+
+    assert headline == "baseline 2205.00 tok/s → final 2447.50 tok/s = +26.55% validated gain"
+
+
+def test_final_gain_fact_names_the_axis_it_was_measured_on() -> None:
+    facts = _section(render_session_report(_graded_breakdown()), "final").key_facts
+
+    assert "Validated cumulative gain: +26.55% (e2e_norm_intvty_p50)." in facts
+
+
+def test_final_gain_fact_is_unlabelled_when_graded_on_throughput() -> None:
+    facts = _section(render_session_report(_fixture_breakdown()), "final").key_facts
+
+    assert "Validated cumulative gain: +10.99%." in facts
+
+
+def test_elapsed_reports_the_total_across_legs() -> None:
+    b = _fixture_breakdown()
+    b["metadata"]["session"]["total_elapsed_minutes"] = 2741.93
+    result = render_session_report(b)
+
+    assert result.global_facts.elapsed_minutes == 2741.93
+    stop_line = next(line for line in result.markdown.splitlines() if line.startswith("- **Stop reason**"))
+    assert " · elapsed(total) `2741.9 min` · " in stop_line
+    assert "elapsed(total)=2742min" in result.markdown
+
+
+def test_elapsed_falls_back_to_the_leg_value_with_a_plain_label() -> None:
+    result = render_session_report(_fixture_breakdown())
+
+    stop_line = next(line for line in result.markdown.splitlines() if line.startswith("- **Stop reason**"))
+    assert " · elapsed `720.0 min` · " in stop_line
+    assert "elapsed=720min" in result.markdown
+
+
+def test_session_section_lists_the_leg_and_the_total_separately() -> None:
+    b = _fixture_breakdown()
+    b["metadata"]["session"]["total_elapsed_minutes"] = 2741.93
+    section = _section(render_session_report(b), "session")
+
+    assert "Wall-clock elapsed (this leg): 720.0 minutes." in section.key_facts
+    assert "Total elapsed across all legs: 2741.9 minutes." in section.key_facts
+    assert "- **elapsed_minutes**: 720" in section.markdown_block.splitlines()
+    assert "- **total_elapsed_minutes**: 2741.93" in section.markdown_block.splitlines()
+
+
+def test_summary_names_the_graded_axis_and_labels_the_stop_target() -> None:
+    result = render_session_report(_graded_breakdown())
+
+    stop_line = next(line for line in result.markdown.splitlines() if line.startswith("- **Stop reason**"))
+    assert stop_line == (
+        "- **Stop reason**: `time_exhausted` · elapsed `720.0 min` · "
+        "graded on `e2e_norm_intvty_p50` · stop target `gain_pct>=30`"
+    )
+    assert "graded_on=e2e_norm_intvty_p50, stop target gain_pct>=30)." in result.markdown
+
+
+def test_graded_axis_is_unset_without_a_recorded_verdict_axis() -> None:
+    """The configured axis says what was asked for, not what the verdict was taken on."""
+    b = _fixture_breakdown()
+    b["metadata"]["grading"] = {"objective": "e2e_norm_intvty_p90"}
+    result = render_session_report(b)
+
+    assert result.global_facts.graded_on == ""
+    stop_line = next(line for line in result.markdown.splitlines() if line.startswith("- **Stop reason**"))
+    assert stop_line == (
+        "- **Stop reason**: `time_exhausted` · elapsed `720.0 min` · graded on `unset` · stop target `gain_pct>=30`"
+    )
+
+
+def test_workload_labels_the_objective_as_the_stop_target() -> None:
+    section = _section(render_session_report(_fixture_breakdown()), "workload")
+
+    assert "Stop target: gain_pct>=30." in section.key_facts
+    assert "- **stop_target**: gain_pct>=30" in section.markdown_block.splitlines()
+
+
+def _scriptable_breakdown() -> dict[str, Any]:
+    """A server-less session whose rounds recorded a zero TTFT because they measure none."""
+    b = _fixture_breakdown()
+    b["metadata"]["task_config"]["framework_name"] = "custom"
+    action = b["timeline"][0]["ext"]["actions"][0]
+    action["measurement"] = {"output_throughput": 9.13, "throughput_unit": "unit/s", "ttft_mean_ms": 0}
+    b["outcome"]["baseline"]["output_throughput"] = 9.13
+    b["outcome"]["final"].update({"output_throughput": 10.25, "ttft_mean_ms": 0, "gain_pct": 12.35})
+    return b
+
+
+def test_a_zero_ttft_is_unmeasured_and_not_printed() -> None:
+    result = render_session_report(_scriptable_breakdown())
+    baseline = _section(result, "baseline")
+    final = _section(result, "final")
+
+    assert baseline.markdown_block.splitlines()[:2] == [
+        "- **output_throughput**: 9.13",
+        "- **throughput_unit**: unit/s",
+    ]
+    assert not any(line.startswith("- **ttft_mean_ms**") for line in baseline.markdown_block.splitlines())
+    assert not any(line.startswith("- **ttft_mean_ms**") for line in final.markdown_block.splitlines())
+    assert not any(fact.startswith("Baseline TTFT") for fact in baseline.key_facts)
+    assert baseline.warnings == []
+
+
+def test_a_measured_ttft_still_prints() -> None:
+    b = _scriptable_breakdown()
+    b["timeline"][0]["ext"]["actions"][0]["measurement"]["ttft_mean_ms"] = 12.5
+    baseline = _section(render_session_report(b), "baseline")
+
+    assert "- **ttft_mean_ms**: 12.50" in baseline.markdown_block.splitlines()
+    assert "Baseline TTFT mean: 12.5 ms." in baseline.key_facts
+
+
+def test_final_throughput_unit_matches_the_throughput_value() -> None:
+    final = _section(render_session_report(_scriptable_breakdown()), "final")
+
+    lines = final.markdown_block.splitlines()
+    assert lines[:2] == ["- **final_output_throughput**: 10.25", "- **throughput_unit**: unit/s"]
+    assert "Final: 97.56 ms." in final.key_facts
+
+
+def _unvalidated_breakdown() -> dict[str, Any]:
+    """A session that adopted nothing and never ran a whole-stack validation."""
+    b = _fixture_breakdown()
+    b["outcome"]["final"].pop("gain_pct")
+    b["outcome"]["validation"].update(
+        {
+            "validated_at_stack_len": None,
+            "validated_ts": None,
+            "adoption_count": 0,
+            "stack_changed_after_validation": True,
+        }
+    )
+    return b
+
+
+_NO_VALIDATION = "No validated gain is recorded while baseline/final throughput are set — no validation run completed."
+
+
+def test_no_validation_run_does_not_also_claim_a_stale_validation() -> None:
+    final = _section(render_session_report(_unvalidated_breakdown()), "final")
+
+    assert final.warnings == [_NO_VALIDATION]
+
+
+def test_a_validation_that_predates_the_final_stack_is_still_reported() -> None:
+    b = _fixture_breakdown()
+    b["outcome"]["validation"]["stack_changed_after_validation"] = True
+    final = _section(render_session_report(b), "final")
+
+    assert final.warnings == [
+        "The last whole-stack validation predates the final adoptions, so the validated cumulative gain "
+        "describes a shorter stack than the one that shipped."
+    ]
+
+
+def _kernel_attempt_event(speedup: float) -> dict[str, Any]:
+    """A ``kernel`` event with one GEAK attempt that the end-to-end gate kept."""
+    attempt = {
+        "kernel_id": "k_rms",
+        "name": "k_rms",
+        "route": "geak",
+        "speedup": speedup,
+        "outcome": "adopted",
+        "e2e": {"decision": "KEEP"},
+    }
+    return {"type": "kernel", "ext": {"attempts": [attempt]}}
+
+
+def _kernel_row(speedup: float) -> str:
+    b = _fixture_breakdown()
+    b["timeline"].append(_kernel_attempt_event(speedup))
+    md = _section(render_session_report(b), "kernel_lifecycle").markdown_block
+    return next(line for line in md.splitlines() if line.startswith("| k_rms |"))
+
+
+def test_an_unmeasured_kernel_speedup_renders_as_missing() -> None:
+    assert "| — (1 att) [KEEP] |" in _kernel_row(0.0)
+
+
+def test_a_measured_kernel_speedup_still_renders() -> None:
+    assert "| 1.50x (1 att) [KEEP] |" in _kernel_row(1.5)
+
+
+def _roofline_event(*error_classes: str) -> dict[str, Any]:
+    """A ``roofline`` event whose runs each failed with the matching error class."""
+    actions = [
+        {"failure": {"error_class": cls, "message": "boom", "stage": "x"}, "outcome": {}} for cls in error_classes
+    ]
+    return {"type": "roofline", "failure": None, "ext": {"actions": actions}}
+
+
+def test_roofline_runs_that_all_failed_report_their_error_classes() -> None:
+    b = _fixture_breakdown()
+    b["timeline"] += [
+        _roofline_event("trace_analyze_failed"),
+        _roofline_event("trace_analyze_failed", "profile_failed"),
+    ]
+    result = render_session_report(b)
+
+    roofline = _section(result, "roofline")
+    assert roofline.skipped
+    assert roofline.key_facts == ["3 run(s), all failed: trace_analyze_failed×2, profile_failed×1"]
+    assert (
+        "  - [roofline] skipped: 3 run(s), all failed: trace_analyze_failed×2, profile_failed×1"
+        in result.markdown.splitlines()
+    )
+
+
+def test_a_session_without_roofline_events_keeps_the_no_data_wording() -> None:
+    result = render_session_report(_fixture_breakdown())
+
+    assert _section(result, "roofline").skipped
+    assert "  - [roofline] skipped: no data recorded this session." in result.markdown.splitlines()
+
+
+def test_attribution_prompt_names_the_methods_the_report_really_emits() -> None:
+    from hyperloom.inference_optimizer.breakdown.reporters.llm_prompt import SYSTEM_PROMPT
+
+    start = SYSTEM_PROMPT.index("- Reflect the ``attribution_method``")
+    bullet = SYSTEM_PROMPT[start:].strip()
+
+    assert bullet == (
+        '- Reflect the ``attribution_method`` honestly: ``"stack_ledger"`` is the only method backed by the\n'
+        '  stack ledger; any other value (``"unattributed"``, ``"unattributed (stack listed for reference,\n'
+        '  not verified as KEEP)"`` or ``"missing"``) MUST be described in plain language as not validated.'
+    )
+
+
+def _stop_target_facts(objective: dict[str, Any]) -> tuple[str, str]:
+    """The workload fact and the summary's stop target for ``objective``."""
+    b = _fixture_breakdown()
+    b["metadata"]["task_config"]["objective"] = objective
+    result = render_session_report(b)
+    fact = next(f for f in _section(result, "workload").key_facts if f.startswith("Stop target"))
+    return fact, result.global_facts.stop_target
+
+
+def test_several_stop_targets_are_all_rendered() -> None:
+    gain = {"kind": "gain_pct", "value": 500.0}
+    roofline = {"kind": "roofline_pct", "value": 80.0}
+
+    fact, target = _stop_target_facts({**gain, "objectives": [gain, roofline]})
+
+    assert target == "gain_pct>=500, roofline_pct>=80"
+    assert fact == "Stop target: gain_pct>=500, roofline_pct>=80."
+
+
+def test_a_baseline_directory_target_names_the_directory() -> None:
+    fact, target = _stop_target_facts({"kind": "baseline", "value": "/runs/base"})
+
+    assert target == "baseline=/runs/base"
+    assert fact == "Stop target: baseline=/runs/base."
+
+
+def test_a_time_only_target_has_no_value() -> None:
+    fact, target = _stop_target_facts({"kind": "time_only", "value": None})
+
+    assert target == "time_only"
+    assert fact == "Stop target: time_only."
+
+
+def test_a_numeric_throughput_target_keeps_the_threshold() -> None:
+    assert _stop_target_facts({"kind": "tput", "value": 1500.5})[1] == "tput>=1500.5"

@@ -512,6 +512,8 @@ class TestResumeReappliesOperatorPaths:
         (scripts / "custom_mi355x.sh").write_text("#!/bin/sh\n")
         monkeypatch.setenv("FRAMEWORK_REPO_PATH", "")
         monkeypatch.setenv("HYPERLOOM_BYPASS_SCRIPTS_DIR", "")
+        monkeypatch.setenv("CUSTOM_REPO_PATH", "")
+        monkeypatch.setenv("CUSTOM_DIR", "")
         state = SharedState(
             session_id="s",
             framework="custom",

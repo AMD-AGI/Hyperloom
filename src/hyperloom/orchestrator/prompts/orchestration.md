@@ -327,8 +327,8 @@ and observed in a `delegated_result` event or in SharedState.
 <!-- phase: SWEEP -->
 ### SWEEP — phase goal
 
-Validate `current_best` over the workload grid. Coordinator exits to CLOSE on
-`sweep_done` automatically.
+Validate `current_best` over the workload grid. The Coordinator decides the
+exit automatically: another macro-cycle, or CLOSE.
 
 <!-- phase: CLOSE -->
 ### CLOSE — phase goal
@@ -552,6 +552,12 @@ admitted against. A `bench` / enablement specialist admits against
 `serving_disjoint_gpu_pool`, which is `serving_tp` cards smaller and is `0`
 whenever serving owns every card — in that case dispatch CPU specialists, or
 use `bench` when the work genuinely needs to measure.
+
+A domain holds at most one queued or running `scope=domain` specialist,
+whatever gap each names: a second `scope=domain` delegate for it is refused
+(`specialist_domain_in_flight`) until the first finishes. Fold new evidence into
+that domain's next dispatch; the in-flight block lists the domains queued
+specialists hold. `domains` and `freeform` dispatches hold no domain.
 
 **Domain-anchored example:**
 ```
