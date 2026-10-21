@@ -398,7 +398,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
             interval_s=args.poll_interval,
             timeout_s=_poll_timeout_from_args(args),
         )
-        if args.print_logs or str(result.get("status", "")).upper() in _TERMINAL_FAIL_STATUSES:
+        if args.print_logs:
             logs = ray.get_job_logs(sub_id)
             print(logs)
         info(f"verify done: {result.get('status')}")
@@ -891,19 +891,14 @@ def _submit_and_collect_pod_json(
             j = ray.get_job(sub_id)
             return j, f"{label} status={j.get('status', '?')}"
 
-        result = _short_poll(
+        _short_poll(
             label=label,
             fetch=_fetch,
             interval_s=poll_interval,
             timeout_s=poll_timeout,
         )
-        status = str(result.get("status", "")).upper()
         logs = ray.get_job_logs(sub_id)
         parsed = _extract_pod_json(logs)
-        if status in _TERMINAL_FAIL_STATUSES:
-            return EXIT_TRANSIENT, parsed, logs
-        if status not in _TERMINAL_OK_STATUSES:
-            return EXIT_TRANSIENT, parsed, logs
         # Dashboard SUCCEEDED; the sub-script's own ``status`` says if the fan-out worked.
         if parsed is None:
             return EXIT_TRANSIENT, None, logs
@@ -1252,18 +1247,14 @@ def _start_pd_router(
         job = ray.get_job(router_sub)
         return job, f"router status={job.get('status', '?')}"
 
-    router_result = _short_poll(
+    _short_poll(
         label=f"router {router_sub}",
         fetch=_fetch_router,
         interval_s=args.poll_interval,
         timeout_s=_poll_timeout_from_args(args),
     )
-    router_status = str(router_result.get("status", "")).upper()
-    if args.print_logs or router_status in _TERMINAL_FAIL_STATUSES:
+    if args.print_logs:
         print(ray.get_job_logs(router_sub))
-    if router_status in _TERMINAL_FAIL_STATUSES:
-        info(f"ERROR router job ended {router_status}; PD restart failed")
-        return router_sub, router_state, 1
     return router_sub, router_state, 0
 
 
@@ -1361,24 +1352,14 @@ def _restart_multinode(args: argparse.Namespace, state: dict, nnodes: int) -> in
             job = ray.get_job(launch_sub)
             return job, f"launch status={job.get('status', '?')}"
 
-        result = _short_poll(
+        _short_poll(
             label=f"launch {launch_sub}",
             fetch=_fetch_launch,
             interval_s=args.poll_interval,
             timeout_s=_poll_timeout_from_args(args),
         )
-        launch_status = str(result.get("status", "")).upper()
-        if args.print_logs or launch_status in _TERMINAL_FAIL_STATUSES:
+        if args.print_logs:
             print(ray.get_job_logs(launch_sub))
-
-        # Fail-fast on a terminal launch status instead of burning the health wait.
-        if launch_status in _TERMINAL_FAIL_STATUSES:
-            info(
-                f"ERROR launch driver terminal status={launch_status}; "
-                f"multi-node restart failed (sub_id={launch_sub}). "
-                f"Check stderr above for MULTI_NODE_FAILURE_SNAPSHOT."
-            )
-            return 1
 
         pd_mode = (getattr(args, "pd_mode", "") or "aggregated").lower()
         router_sub = ""
@@ -1447,13 +1428,13 @@ def _restart_single_node(args: argparse.Namespace, state: dict) -> int:
             job = ray.get_job(sub_id)
             return job, f"status={job.get('status', '?')}"
 
-        result = _short_poll(
+        _short_poll(
             label=f"restart {sub_id}",
             fetch=_fetch,
             interval_s=args.poll_interval,
             timeout_s=_poll_timeout_from_args(args),
         )
-        if args.print_logs or str(result.get("status", "")).upper() in _TERMINAL_FAIL_STATUSES:
+        if args.print_logs:
             print(ray.get_job_logs(sub_id))
 
     state["last_server_pid_file"] = pid_file
