@@ -56,7 +56,6 @@ cognitive-complexity src/hyperloom/orchestrator/actions/executors/benchmark_resu
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/explore.py::ExploreExecutor.__call__ 369
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._bench_patch 33
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._enablement_keep_records 38
-cognitive-complexity src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._gate_enablement 31
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._gate_perf 101
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._stage_apply 131
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/integrate_patch.py::_resolve_patch_paths 36
@@ -582,7 +581,7 @@ function-lines src/hyperloom/orchestrator/actions/executors/explore.py::ExploreE
 function-lines src/hyperloom/orchestrator/actions/executors/explore.py::filter_baseline_noop_variants 99
 function-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._bench_patch 259
 function-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._enablement_keep_records 211
-function-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._gate_enablement 243
+function-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._gate_enablement 224
 function-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._gate_perf 414
 function-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._keep_inert_switches 103
 function-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._maybe_write_framework_kb_record 114
@@ -613,7 +612,7 @@ function-lines src/hyperloom/orchestrator/enablement/params.py::EnablementParams
 function-lines src/hyperloom/orchestrator/enablement/params.py::EnablementParams.build_enablement_specialist_params 114
 function-lines src/hyperloom/orchestrator/enablement/recipe/sufficiency.py::_patch_step_reasons 92
 function-lines src/hyperloom/orchestrator/enablement/runtime/targeted_build.py::run_aiter_build 218
-function-lines src/hyperloom/orchestrator/enablement/runtime/targeted_build.py::run_sgl_kernel_build 172
+function-lines src/hyperloom/orchestrator/enablement/runtime/targeted_build.py::run_sgl_kernel_build 159
 function-lines src/hyperloom/orchestrator/enablement/runtime/targeted_build.py::run_vllm_source_build 220
 function-lines src/hyperloom/orchestrator/kernel/_kernel_decisions.py::_queue_kernel_keep 99
 function-lines src/hyperloom/orchestrator/kernel/_kernel_decisions.py::enqueue_nominated_patch 105
@@ -900,7 +899,7 @@ module-lines src/hyperloom/orchestrator/actions/executors/_kv_metrics.py 1590
 module-lines src/hyperloom/orchestrator/actions/executors/_workload_envs.py 2158
 module-lines src/hyperloom/orchestrator/actions/executors/baseline.py 4197
 module-lines src/hyperloom/orchestrator/actions/executors/explore.py 1880
-module-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py 4741
+module-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py 4735
 module-lines src/hyperloom/orchestrator/actions/executors/profile.py 1395
 module-lines src/hyperloom/orchestrator/actions/executors/report.py 1366
 module-lines src/hyperloom/orchestrator/actions/executors/roofline.py 1303

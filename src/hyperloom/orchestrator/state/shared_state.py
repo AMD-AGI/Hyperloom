@@ -496,7 +496,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     custom_specialist_only: bool = False
     # ``--extra-env NAME=VALUE`` pins.
     operator_extra_env: dict[str, str] = field(default_factory=dict)
-    # Operator-supplied custom-workload paths.
+    # Operator-supplied custom-workload paths; a promoted enablement runtime replaces framework_repo_path with its checkout.
     bypass_scripts_dir: str = ""
     framework_repo_path: str = ""
     # ``HYPERLOOM_BENCHMARK_BACKEND`` at seed time (``bypass`` for custom).
