@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..base import RenderedSection, as_dict, md_kv_list, register_renderer, task_config_of
+from ..base import RenderedSection, as_dict, md_kv_list, register_renderer, stop_target_text, task_config_of
 
 
 @register_renderer("workload")
@@ -56,7 +56,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
         )
     facts.append(f"Shape: tp={tp}, conc={conc}, isl={isl}, osl={osl}, max_model_len={mml}, precision={prec or '?'}.")
     if obj:
-        facts.append(f"Objective: {obj.get('kind') or '?'}={obj.get('value')}.")
+        facts.append(f"Stop target: {stop_target_text(obj) or '?'}.")
 
     md = md_kv_list(
         [
@@ -72,7 +72,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
             ("osl", osl),
             ("max_model_len", mml),
             ("precision", prec or None),
-            ("objective", obj or None),
+            ("stop_target", stop_target_text(obj) or None),
         ]
     )
     return RenderedSection(
