@@ -131,6 +131,17 @@ def _warm_start_scores(warm: dict) -> KeepScore:
     )
 
 
+def _warm_start_improvement(score: KeepScore) -> dict[str, str | bool]:
+    """The improvement ``score`` may claim.
+
+    The manifest publish() just wrote withholds the improvement badge when the aggregate wall times contradict the
+    score.
+    """
+    return warm_start_improvement_flags(
+        pristine_ms=score.baseline_wall_ms, best_ms=score.best_wall_ms, mean_case_speedup=score.mean_case_speedup
+    )
+
+
 def _warm_start_identity(workspace_dir: str, base_commit: str, warm: dict, external_id: str) -> KeepIdentity:
     """KeepIdentity for HEAD when it differs from ``base_commit``."""
     head = git("rev-parse", "HEAD", cwd=workspace_dir).stdout.strip()
@@ -225,9 +236,7 @@ def publish_warm_start_recovery(
         if manifest is None:
             raise
         errors.append(f"derived-best-view: {error}")
-    improvement = warm_start_improvement_flags(
-        pristine_ms=score.baseline_wall_ms, best_ms=score.best_wall_ms, mean_case_speedup=score.mean_case_speedup
-    )
+    improvement = _warm_start_improvement(score)
     scores = {
         "baseline_ms": score.baseline_wall_ms,
         "best_ms": score.best_wall_ms,

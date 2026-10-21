@@ -257,7 +257,8 @@ def _find_reference_harness(ref_dir: Path | None) -> str | None:
 
 
 def _materialize_reference(workspace: Path) -> Path | None:
-    """Make the shipped reference examples available for the agent to Read."""
+    """Make the shipped reference examples available for the agent to Read: REAL files, copied into the workspace so
+    they are inside its cwd."""
     ref_dir = workspace / REFERENCE_SUBDIR
     _safe_rmtree(ref_dir)
 
@@ -620,6 +621,7 @@ class _PrepareDrive:
         self.audit = _PrepareAudit(self._audit_dir, driver_path)
         if preflight is not None:
             self.audit.json("initial_preflight.json", asdict(preflight))
+        # Protect ONLY the source under optimization: kernel + declared source files.
         protected = {_abs(workspace, path) for path in (task.kernel, *task.source_files) if path}
         guard = _SourceGuard(workspace, protected)
         self.driver_rel = os.path.relpath(driver_path, agent_workspace)
@@ -628,8 +630,12 @@ class _PrepareDrive:
         reference_prefix = (
             _EXTERNAL_DRIVER_PREFIX.format(driver_access_dir=driver_access_dir) if driver_external else ""
         )
+        # The spec lives beside the driver, NOT in the reference bundle: the driver may read it at runtime, so it has to
+        # outlive preparation and be committed alongside the driver it feeds.
         spec_path, canonical_spec = _materialize_invocation_spec(task.invocation_spec_file, driver_path.parent)
         if task.invocation_spec_file and spec_path is None:
+            # Not a default: an explicitly supplied spec that cannot be used costs the prompt's case table, the driver's
+            # durable runtime input and the committed-alongside check all at once, and the caller asked for it.
             log.warning(
                 "could not materialize the invocation specification %s beside the "
                 "driver; preparation continues without its case table, without a "
@@ -639,6 +645,7 @@ class _PrepareDrive:
             )
         self.invocation_note = _invocation_spec_note(spec_path, agent_workspace)
         self.nproc_per_node = nproc_per_node
+        # A produced driver must actually time under a CUDA/HIP graph, not eagerly (nor silently fall back to eager).
         self.contract = DriverContract(
             snr_threshold=task.snr_threshold,
             require_graph=True,
@@ -650,6 +657,8 @@ class _PrepareDrive:
             *(path.as_posix() for path in protected),
             *(task.read_only_files or []),
             *([spec_path.as_posix()] if spec_path is not None else []),
+            # Protected rather than merely discouraged: the distributed guarantees
+            # are only guarantees while this file is the one KernelForge shipped.
             *([dist_harness_path.as_posix()] if nproc_per_node > 1 else []),
         ]
         canonical_harness, reference_prefix = _place_graph_harness(
@@ -837,6 +846,7 @@ class _PrepareDrive:
         )
         audit.text(f"{attempt_dir}/agent_progress.txt", "\n".join(self._progress_log))
         self.scaffold.reset()
+        # The Agent may have completed a valid driver before getting stuck on self-verification.
         self.last_pf = await _preflight_async(
             layout.driver_path.as_posix(),
             self.contract,
@@ -878,6 +888,8 @@ async def prepare_task(
     self.attempts = 0
     self.prior_failure = ""
     self.prior_failure_heading = RETRY_HEADING_DEFAULT
+    # An attempt that leaves the driver byte-identical is a distinct failure from one that edited it badly, and the
+    # two need different guidance.
     self.edited_any_attempt = False
     self.starved_retry_sec = 0.0
     self.scaffold_error = ""
@@ -1110,6 +1122,12 @@ def _place_graph_harness(
     ``dirty``/``verify``) instead of writing its own -- a self-written harness
     can silently mismatch its driver calls and degrade graph timing to eager.
     A harness the caller already placed is left alone.
+
+    Beside the driver in both cases, which is where the prompt says it is and
+    where the driver imports it from. Identical to the workspace root for a
+    driver that sits there; different only for one kept in a subdirectory,
+    where placing it at the root left the agent to find nothing and write its
+    own -- tripping the guard that protects harness files from being rewritten.
     """
     canonical_harness = None if harness_path.is_file() else _find_reference_harness(ref_dir)
     if canonical_harness is None:
@@ -1132,6 +1150,11 @@ def _place_dist_harness(dist_harness_path: Path, nproc_per_node: int) -> str | N
     A multi-rank task measures inside it or it is not measured. A missing
     packaged source is not fatal here, so the failure is reported by preflight,
     against the driver, in the same shape as every other distributed refusal.
+
+    Unlike graph_harness, this one is not optional and is not retired when the
+    driver appears not to use it: a multi-rank driver that does not import it
+    is rejected by preflight, so its absence could only turn that verdict into
+    an ImportError.
     """
     if nproc_per_node <= 1:
         return None
@@ -1165,7 +1188,11 @@ class _PreparationLayout:
 
 @dataclass(frozen=True)
 class _ReferenceBundle:
-    """The authoring-only reference bundle and the prompt note that points the agent at it."""
+    """The authoring-only reference bundle and the prompt note that points the agent at it.
+
+    ``prefix`` is kept apart from the bundle's own file list so an attempt whose re-materialization failed can drop
+    that list and keep it (see ``_PrepareScaffold.open``).
+    """
 
     ref_dir: Path | None
     prefix: str

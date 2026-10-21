@@ -150,11 +150,13 @@ class AnalysisEvidenceMixin:
                 include_aiter = backend == "aiter" or any(
                     "aiter" in Path(source).parts for source in self._target_source_files()
                 )
-                # Ablation must reach this inlined context or it only measures half the knowledge cost.
                 knowledge_index = build_forge_knowledge(
                     root,
                     language=resolve_language_dirs(backend, root),
                     include_aiter=include_aiter,
+                    # The orchestration context is inlined into every specialist
+                    # and analysis prompt, so the ablation has to reach it too or
+                    # it only measures half the knowledge block's cost.
                     defer_all=bool(getattr(self.config, "defer_knowledge_maps", False)),
                 )
             except OSError:
@@ -171,6 +173,8 @@ class AnalysisEvidenceMixin:
                 ),
                 program_context=(self.ic.program_md or f"Optimize the kernel at {self.ic.kernel_file}."),
                 source_map_path=str(source_map_path),
+                # The declared source set, verbatim and in campaign order, so the planner is told what it may edit
+                # instead of inferring it from the one path in program_context.
                 editable_sources=tuple(self._target_source_files()),
                 cases=cases,
                 knowledge_index=knowledge_index,

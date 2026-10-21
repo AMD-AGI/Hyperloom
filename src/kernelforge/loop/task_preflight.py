@@ -644,6 +644,7 @@ class _PreflightWork:
             self.details["bench"] = {k: bres.get(k) for k in ("success", "median_ms", "message")}
             self.details["bench"]["case_count"] = len(reported_cases)
             self.details["bench"]["seconds"] = _stage_seconds(stage_started)
+            # The declared suite is the contract, in both directions.
             declared = set(expected_case_ids or ())
             missing_cases = sorted(declared - set(reported_cases))
             undeclared_cases = sorted(set(reported_cases) - declared) if declared else []
@@ -705,6 +706,8 @@ class _PreflightWork:
             return True, True
         self.diagnostics["graph"] = tail
         if replays == PROBE_DISTRIBUTED_VIOLATION:
+            # A verdict on the driver, not a failure of the probe, so it is
+            # reported against the rank contract rather than graph timing.
             self.reasons.append(f"distributed measurement contract violated: {tail}")
         elif replays < 0:
             self.reasons.append(f"could not verify graph timing (probe failed): {tail[-160:]}")
@@ -768,6 +771,8 @@ async def _preflight_async(
     if contract.require_graph:
         graph_ok, ranks_ok = await work.check_graph(driver, warmup, iters, contract, deadline_unix)
     elif contract.require_ranks > 1:
+        # The rank observations ride on the graph probe, so there is nothing to
+        # conclude from without it.
         work.reasons.append(
             f"cannot verify the {contract.require_ranks}-rank measurement contract because graph timing was not required"
         )
