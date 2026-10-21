@@ -25,6 +25,7 @@ from hyperloom_multibranch.specialist.runtime import (
     RESTART_WINDOW_S,
     RuntimePacing,
     SessionCrashed,
+    PreflightFailed,
     SessionIdle,
     SessionStart,
     SpecialistRuntime,
@@ -43,9 +44,12 @@ class _Runs:
     """Every run the runtime starts: the first ones raise ``errors`` in turn, the next ``crashes`` crash, the others
     idle until stopped."""
 
-    def __init__(self, crashes: int = 0, errors: tuple[Exception, ...] = ()) -> None:
-        self.crashes, self.errors = crashes, list(errors)
+    def __init__(
+        self, crashes: int = 0, errors: tuple[Exception, ...] = (), preflight: PreflightFailed | None = None
+    ) -> None:
+        self.crashes, self.errors, self.preflight = crashes, list(errors), preflight
         self.started: list[_Run] = []
+        self.preflights = 0
 
     def __call__(self, start: SessionStart) -> "_Run":
         run = _Run(self, start)
@@ -57,6 +61,11 @@ class _Run:
     def __init__(self, runs: _Runs, start: SessionStart) -> None:
         self._runs, self.start, self.stopped = runs, start, asyncio.Event()
         self.k = start.k
+
+    async def preflight(self) -> None:
+        self._runs.preflights += 1
+        if self._runs.preflight is not None:
+            raise self._runs.preflight
 
     async def run(self) -> None:
         if self._runs.errors:
@@ -299,6 +308,32 @@ async def test_a_session_that_worked_between_losses_counts_them_again_from_its_o
 
     assert not any("not restarted" in notice for notice in await session.notices())
     assert await runtime.status(BRANCH) == SpecialistStatus(True, 4, 4, False, False)
+    await runtime.stop(BRANCH)
+
+
+async def test_a_branch_preflights_once_before_its_first_run_and_not_on_a_restart(session):
+    runs = _Runs(crashes=1)
+    runtime = session.runtime(runs)
+
+    await runtime.start(BRANCH, await session.repo.head(BRANCH))
+    await _until(lambda: _true(len(runs.started) == 2), "the crashed run to be restarted")
+
+    assert runs.preflights == 1
+    await runtime.stop(BRANCH)
+
+
+async def test_a_failed_preflight_gives_up_the_specialist_with_every_reason_and_runs_nothing(session):
+    reasons = ("attempt 1: launch exited 127", "attempt 2: no keep file", "attempt 3: no server")
+    runs = _Runs(preflight=PreflightFailed(reasons))
+    runtime = session.runtime(runs)
+
+    await runtime.start(BRANCH, await session.repo.head(BRANCH))
+    await _until(lambda: _any_notice(session, "not started"), "the runtime to give up")
+
+    assert len(runs.started) == 1 and runs.started[0].stopped.is_set()
+    [notice] = [notice for notice in await session.notices() if "preflight failed" in notice]
+    assert all(reason in notice for reason in reasons)
+    assert await runtime.status(BRANCH) == SpecialistStatus(False, 0, 0, True, False)
     await runtime.stop(BRANCH)
 
 

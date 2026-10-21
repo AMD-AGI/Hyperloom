@@ -222,6 +222,9 @@ class AgentSession:
         self._beat: Beat | None = None
         self._recorded: Mapping[str, TokenCounts] = {}
 
+    async def preflight(self) -> None:
+        """Nothing to prepare: the CLI is the image's and the worktree the session's."""
+
     async def run(self) -> None:
         grant = self._setup.tokens.issue(self._start.branch, frozenset({SCOPE_SPECIALIST}))
         last_end = ""

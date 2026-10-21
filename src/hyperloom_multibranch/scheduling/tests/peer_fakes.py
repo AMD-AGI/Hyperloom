@@ -347,6 +347,9 @@ class RecordedSession:
         self._inner = inner
         self._step = step
 
+    async def preflight(self) -> None:
+        await self._inner.preflight()
+
     async def run(self) -> None:
         if self._step is not None:
             await self._step(self._branch)

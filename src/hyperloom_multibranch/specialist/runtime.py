@@ -9,16 +9,18 @@ work instead of all sweeping the same settings, and a stopped branch's direction
 was never tried. Once each was held, it takes the one the fewest branches held over the session, then the one the
 fewest running branches hold. A direction given to a branch counts when it is one of these.
 
-A session that crashes is restarted on its branch, at most ``MAX_RESTARTS`` times within ``RESTART_WINDOW_S``, and a
-lost one at most ``MAX_LOSS_RESTARTS`` times in a row with no session working in between: a loss takes the heartbeat
-timeout, so losses alone never fill the window. A session that ends idle, its model finding nothing to test, is no crash
-and is not restarted: a restart reads the model's own conclusion back from the branch log and ends idle again, so the
-specialist gives up and the scheduler stops the branch, freeing its slot for a fresh branch with its own direction. Past
-any of these the branch keeps its judge, which settles what was already measured, and the scheduler stops it once
-nothing of it waits for a confirm; ``status`` tells it. A judge that fails is a defect of this code, not of the
-specialist: it is not restarted, and the branch's session is stopped so no candidate is measured that nothing would
-judge. Both leave a notice in the branch log. While the specialist writes a change, the runtime renews the claims it
-holds, so a claim does not lapse while a model thinks; once a test carries a claim, the toolbox renews it.
+A branch's first session is made ready once (``preflight``); one that cannot be gives the specialist up with every
+reason in a notice, and a restart does not repeat it. A session that crashes is restarted on its branch, at most
+``MAX_RESTARTS`` times within ``RESTART_WINDOW_S``, and a lost one at most ``MAX_LOSS_RESTARTS`` times in a row with no
+session working in between: a loss takes the heartbeat timeout, so losses alone never fill the window. A session that
+ends idle, its model finding nothing to test, is no crash and is not restarted: a restart reads the model's own
+conclusion back from the branch log and ends idle again, so the specialist gives up and the scheduler stops the branch,
+freeing its slot for a fresh branch with its own direction. Past any of these the branch keeps its judge, which settles
+what was already measured, and the scheduler stops it once nothing of it waits for a confirm; ``status`` tells it. A
+judge that fails is a defect of this code, not of the specialist: it is not restarted, and the branch's session is
+stopped so no candidate is measured that nothing would judge. Both leave a notice in the branch log. While the
+specialist writes a change, the runtime renews the claims it holds, so a claim does not lapse while a model thinks; once
+a test carries a claim, the toolbox renews it.
 """
 
 from __future__ import annotations
@@ -27,7 +29,7 @@ import asyncio
 import logging
 import time
 from collections import Counter, deque
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Protocol
 
@@ -64,9 +66,21 @@ class SessionIdle(RuntimeError):
     """A run of a branch's specialist ended because its model kept finding nothing to test."""
 
 
+class PreflightFailed(RuntimeError):
+    """A branch's specialist could not be made ready to run; ``reasons`` says why, one line per attempt."""
+
+    def __init__(self, reasons: Sequence[str]) -> None:
+        super().__init__("; ".join(reasons))
+        self.reasons = tuple(reasons)
+
+
 class Session(Protocol):
-    """One run of a branch's specialist: ``run`` returns once its work is done, raises :class:`SessionIdle` when its
-    model kept finding nothing to test, and raises when it crashed, a :class:`SessionCrashed` when it can say how."""
+    """One run of a branch's specialist: ``preflight`` makes it ready, once a branch, and raises
+    :class:`PreflightFailed` when it cannot; ``run`` returns once its work is done, raises :class:`SessionIdle` when
+    its model kept finding nothing to test, and raises when it crashed, a :class:`SessionCrashed` when it can say
+    how."""
+
+    async def preflight(self) -> None: ...
 
     async def run(self) -> None: ...
 
@@ -185,9 +199,13 @@ class SpecialistRuntime:
     async def _supervise(self, state: _Branch) -> None:
         crashes: deque[float] = deque()
         losses = 0
+        ready = False
         while True:
             start = SessionStart(state.name, state.start_commit, state.k, state.task)
             state.session = self._sessions(start)
+            if not ready and not await self._preflight(state, state.session):
+                return
+            ready = True
             try:
                 await state.session.run()
                 return
@@ -220,6 +238,19 @@ class SpecialistRuntime:
                 state.session, state.gave_up = None, True
                 await _notice(state, f"the specialist {why} ({error!r}); it is not restarted")
                 return
+
+    async def _preflight(self, state: _Branch, session: Session) -> bool:
+        """Make the branch's first session ready; give the specialist up, with every reason, when it cannot be."""
+
+        try:
+            await session.preflight()
+        except PreflightFailed as error:
+            await session.stop()
+            logger.warning("the specialist of %s could not be made ready: %s", state.name, error)
+            state.session, state.gave_up = None, True
+            await _notice(state, f"the specialist's preflight failed ({error}); it is not started")
+            return False
+        return True
 
     def _least_held(self) -> str:
         running = [state.task.direction for state in self._branches.values()]
@@ -270,6 +301,7 @@ __all__ = [
     "RuntimePacing",
     "Session",
     "SessionCrashed",
+    "PreflightFailed",
     "SessionIdle",
     "SessionFactory",
     "SessionStart",

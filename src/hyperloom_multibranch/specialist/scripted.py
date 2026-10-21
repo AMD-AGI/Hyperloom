@@ -49,6 +49,9 @@ class ScriptedSession:
         self._setup = setup
         self._stopped = asyncio.Event()
 
+    async def preflight(self) -> None:
+        """Nothing to prepare: the script's changes are submitted as they are."""
+
     async def run(self) -> None:
         submitted = {record.request.delta.fingerprint() for record in await self._explored()}
         for change in self._setup.script:
