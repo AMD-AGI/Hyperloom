@@ -281,7 +281,7 @@ def test_untried_hot_kernels_vendor_playbook_floor_still_applies(state: SharedSt
 
 
 def test_untried_hot_kernels_vendor_playbook_gate_survives_real_projection(state: SharedState):
-    """Regression for PR #1191 tech-lead finding: the aggregate/floor gate was a no-op on the production path because ``untried_hot_reusable_kernels()`` reads ``hot_kernels_top15`` (``_trace_analyze._summarize_hot_kernels()``'s projected ``summary_entry``, an explicit key whitelist) in preference to raw ``hot_kernels``, and that whitelist dropped ``vendor_playbook_aggregate_gpu_pct`` / ``vendor_playbook_min_gpu_pct_floor`` / ``vendor_playbook_group_id`` / ``patch_strategy`` entirely."""
+    """Regression for PR #1191 tech-lead finding: the aggregate/floor gate was a no-op on the production path because ``untried_hot_reusable_kernels()`` reads ``hot_kernels_top15`` (SharedState._build_hot_kernel_summaries()'s projected ``summary_entry``, an explicit key whitelist) in preference to raw ``hot_kernels``, and that whitelist dropped ``vendor_playbook_aggregate_gpu_pct`` / ``vendor_playbook_min_gpu_pct_floor`` / ``vendor_playbook_group_id`` / ``patch_strategy`` entirely."""
     state.record_trace_analyze(
         {"trace_input": "/tmp/trace.json"},
         {
@@ -311,7 +311,7 @@ def test_untried_hot_kernels_vendor_playbook_gate_survives_real_projection(state
         },
     )
     # The projection must actually carry the fields through -- this is the exact assertion that fails without the
-    # _trace_analyze._summarize_hot_kernels() fix.
+    # _build_hot_kernel_summaries() fix.
     projected = {row["kernel_id"]: row for row in state.last_trace_analyze["hot_kernels_top15"]}
     assert projected["k010"]["vendor_playbook_aggregate_gpu_pct"] == 12.0
     assert projected["k010"]["patch_strategy"] == "vendor_playbook"
