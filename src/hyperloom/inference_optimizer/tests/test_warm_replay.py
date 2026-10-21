@@ -2861,9 +2861,9 @@ def test_an_overlay_with_no_recorded_root_is_left_for_local_resolution(tmp_path,
 
 def test_overlay_provenance_summary_counts_known_gaps():
     """A capture that missed paths, or landed gain outside the root, is a gap."""
-    from hyperloom.orchestrator.phases._warm_prior import overlay_provenance_summary
+    from hyperloom.orchestrator.phases.prelude import _overlay_provenance_summary
 
-    summary = overlay_provenance_summary(
+    summary = _overlay_provenance_summary(
         {
             "patches": [{"patch_file": "patch/overlays/000000/00-a.patch"}],
             "provenance": [
@@ -2882,15 +2882,15 @@ def test_overlay_provenance_summary_counts_known_gaps():
 
 
 def test_overlay_provenance_summary_is_absent_for_a_config_only_replay():
-    from hyperloom.orchestrator.phases._warm_prior import overlay_provenance_summary
+    from hyperloom.orchestrator.phases.prelude import _overlay_provenance_summary
 
-    assert overlay_provenance_summary({"patches": [], "provenance": []}) == {}
+    assert _overlay_provenance_summary({"patches": [], "provenance": []}) == {}
 
 
 def test_overlay_provenance_summary_tolerates_unusable_counts():
-    from hyperloom.orchestrator.phases._warm_prior import overlay_provenance_summary
+    from hyperloom.orchestrator.phases.prelude import _overlay_provenance_summary
 
-    summary = overlay_provenance_summary(
+    summary = _overlay_provenance_summary(
         {"patches": [], "provenance": [{"stack_index": 0, "artifacts_outside_root": "nope"}]}
     )
 
@@ -3163,70 +3163,52 @@ def test_promote_warm_replay_honours_the_power_budget(tmp_path, power_w, expecte
         assert outcome["reason"] == "power_budget_exceeded"
 
 
+_PREPARED_KERNEL = {
+    "status": "prepared",
+    "pending": [{"column": "attention"}],
+    "extra_envs": {"FROM": "preparation"},
+    "extra_server_args": "--from-preparation",
+}
+
+
 def test_a_current_remote_recipe_takes_its_kernel_overlay_from_the_replay_payload(tmp_path):
     """The replay payload, not the preparation result, carries a remote recipe's launch overlay."""
     coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
 
-    request = coord.phase_prelude._warm_replay_request(
-        {},
+    overlay = coord.phase_prelude._warm_kernel_overlay(
+        _PREPARED_KERNEL,
         {"kernel_config": {"extra_envs": {"FROM": "replay"}, "extra_server_args": "--from-replay"}},
-        {
-            "status": "prepared",
-            "pending": [{"column": "attention"}],
-            "extra_envs": {"FROM": "preparation"},
-            "extra_server_args": "--from-preparation",
-        },
+        True,
     )
 
-    assert request is not None
-    assert request.overlay.envs == {"FROM": "replay"}
-    assert request.overlay.args == "--from-replay"
+    assert overlay["extra_envs"] == {"FROM": "replay"}
+    assert overlay["extra_server_args"] == "--from-replay"
 
 
 def test_a_local_recipe_takes_its_kernel_overlay_from_the_preparation(tmp_path):
     coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
 
-    request = coord.phase_prelude._warm_replay_request(
-        {},
-        {},
-        {
-            "status": "prepared",
-            "pending": [{"column": "attention"}],
-            "extra_envs": {"FROM": "preparation"},
-            "extra_server_args": "--from-preparation",
-        },
-    )
+    overlay = coord.phase_prelude._warm_kernel_overlay(_PREPARED_KERNEL, {}, False)
 
-    assert request is not None
-    assert request.overlay.envs == {"FROM": "preparation"}
-    assert request.overlay.args == "--from-preparation"
+    assert overlay["extra_envs"] == {"FROM": "preparation"}
+    assert overlay["extra_server_args"] == "--from-preparation"
 
 
 def test_a_preparation_that_prepared_nothing_carries_no_overlay(tmp_path):
     """Without pending kernels there is nothing to launch under, whatever the result says."""
     coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
 
-    request = coord.phase_prelude._warm_replay_request(
-        _warm_recipe_t1(),
-        {},
-        {
-            "status": "prepared",
-            "pending": [],
-            "extra_envs": {"FROM": "preparation"},
-            "extra_server_args": "--from-preparation",
-        },
-    )
+    overlay = coord.phase_prelude._warm_kernel_overlay({**_PREPARED_KERNEL, "pending": []}, {}, False)
 
-    assert request is not None
-    assert request.overlay.envs == {}
-    assert request.overlay.args == ""
+    assert overlay["extra_envs"] == {}
+    assert overlay["extra_server_args"] == ""
 
 
 def test_a_clean_kernel_preparation_failure_is_not_refused_as_dirty(tmp_path):
     """Nothing was applied, so there is nothing to unwind and no reason to stop."""
     coord = _make_coord(tmp_path)
 
-    refused = coord.phase_prelude._refuse_dirty_kernel_preparation({"status": "error", "reason": "geak said no"})
+    refused = coord.phase_prelude._refused_dirty_warm_kernel({"status": "error", "reason": "geak said no"})
 
     assert refused is False
     assert coord.shared_state.stop_reason in (None, "")
@@ -3245,7 +3227,7 @@ def test_a_kernel_rollback_that_fails_stops_the_run(tmp_path, monkeypatch):
         lambda *_args, **_kwargs: {"ok": False, "errors": ["could not restore kernel.py"]},
     )
 
-    refused = coord.phase_prelude._refuse_dirty_kernel_preparation(
+    refused = coord.phase_prelude._refused_dirty_warm_kernel(
         {"status": "rollback_failed", "reason": "apply left a patched tree"}
     )
 
@@ -3265,9 +3247,7 @@ def test_a_kernel_rollback_that_succeeds_refuses_without_stopping_the_run(tmp_pa
     }
     monkeypatch.setattr(prelude_mod, "revert_warm_kernel_patches", lambda *_a, **_k: {"ok": True, "errors": []})
 
-    refused = coord.phase_prelude._refuse_dirty_kernel_preparation(
-        {"status": "error", "reason": "apply left a patched tree"}
-    )
+    refused = coord.phase_prelude._refused_dirty_warm_kernel({"status": "error", "reason": "apply left a patched tree"})
 
     assert refused is True
     assert coord.shared_state.stop_reason in (None, "")

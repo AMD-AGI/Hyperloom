@@ -141,6 +141,9 @@ cognitive-complexity src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._m
 cognitive-complexity src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._run_geak_kernel_phase 122
 cognitive-complexity src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._validate_gemm_tuning_e2e 106
 cognitive-complexity src/hyperloom/orchestrator/phases/kernel.py::KernelPhase.promote_geak_from_candidate 56
+cognitive-complexity src/hyperloom/orchestrator/phases/prelude.py::PreludePhase._collect_warm_kernel_plan 33
+cognitive-complexity src/hyperloom/orchestrator/phases/prelude.py::PreludePhase._warm_kernel_extra_envs 34
+cognitive-complexity src/hyperloom/orchestrator/phases/prelude.py::_merge_named_current_recipe_configs 32
 cognitive-complexity src/hyperloom/orchestrator/policy/gate.py::PolicyGate._validate_payload_paths 39
 cognitive-complexity src/hyperloom/orchestrator/policy/gate.py::PolicyGate._validate_warm_replay_targets 39
 cognitive-complexity src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py::_section_mandate 49
@@ -699,6 +702,7 @@ function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._run_gea
 function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._run_kernel_rewrite_controller 128
 function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._validate_gemm_tuning_e2e 425
 function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase.promote_geak_from_candidate 165
+function-lines src/hyperloom/orchestrator/phases/prelude.py::PreludePhase._judge_warm_replay_accuracy 92
 function-lines src/hyperloom/orchestrator/phases/sweep.py::SweepPhase._start_conc_sweep 81
 function-lines src/hyperloom/orchestrator/policy/gate.py::PolicyGate._validate_specialist_dispatch 91
 function-lines src/hyperloom/orchestrator/policy/gate.py::PolicyGate._validate_specialist_gpu_request 82
@@ -902,7 +906,7 @@ module-lines src/hyperloom/orchestrator/loop/writeback.py 4748
 module-lines src/hyperloom/orchestrator/phases/framework.py 3139
 module-lines src/hyperloom/orchestrator/phases/kernel.py 4227
 module-lines src/hyperloom/orchestrator/phases/machine_state.py 2128
-module-lines src/hyperloom/orchestrator/phases/prelude.py 2555
+module-lines src/hyperloom/orchestrator/phases/prelude.py 2551
 module-lines src/hyperloom/orchestrator/policy/gate.py 1588
 module-lines src/hyperloom/orchestrator/prompts/prompt_builder.py 1205
 module-lines src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py 2571

@@ -32,16 +32,11 @@ class _StubPrelude:
     _snapshot_warm_kernel_target = PreludePhase._snapshot_warm_kernel_target
     _set_warm_kernel_outcome = PreludePhase._set_warm_kernel_outcome
     _prepare_warm_kernel_kb = PreludePhase._prepare_warm_kernel_kb
-    _staged_warm_kernel_plan = PreludePhase._staged_warm_kernel_plan
-    _settle_empty_warm_kernel_plan = PreludePhase._settle_empty_warm_kernel_plan
-    _record_warm_kernel_progress = PreludePhase._record_warm_kernel_progress
-    _record_kernel_rollback_failure = PreludePhase._record_kernel_rollback_failure
     _apply_warm_kernel_plan = PreludePhase._apply_warm_kernel_plan
-    _stage_warm_kernel_entry = staticmethod(PreludePhase._stage_warm_kernel_entry)
     _land_warm_kernel_entry = PreludePhase._land_warm_kernel_entry
-    _warm_kernel_preparation_outcome = PreludePhase._warm_kernel_preparation_outcome
-    _persist_prepared_warm_kernel = PreludePhase._persist_prepared_warm_kernel
-    _unwind_unpersisted_warm_kernel = PreludePhase._unwind_unpersisted_warm_kernel
+    _settle_warm_kernel_preparation = PreludePhase._settle_warm_kernel_preparation
+    _unwind_prepared_warm_kernel = PreludePhase._unwind_prepared_warm_kernel
+    _warm_kernel_persist_failure = PreludePhase._warm_kernel_persist_failure
 
     def _warm_kernel_gate_reason(self) -> str:
         """Stubbed gate: these tests exercise the replay itself."""
