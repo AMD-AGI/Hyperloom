@@ -59,6 +59,7 @@ class _Loaded:
     lessons: dict[str, Lesson]
     heads: tuple[LessonRevision, ...]
     factors: dict[str, float]
+    revision: str = ""
 
 
 def edited_lessons(snapshot: NotebookSnapshot) -> frozenset[str]:
@@ -93,8 +94,14 @@ class LessonRecall(LearningRecall):
                 standings = self._pool.standings() if self._pool is not None else ()
                 heads = tuple(head for lesson in lessons.values() if lesson.retired is None for head in lesson.heads)
                 factors = {key: standing_factor(standing_of(standings, key)) for key in lessons}
-                self._loaded = _Loaded(lessons, heads, factors)
+                revision = self._pool.digest() if self._pool is not None else ""
+                self._loaded = _Loaded(lessons, heads, factors, revision)
             return self._loaded
+
+    def past_revision(self) -> str:
+        """The pool's digest as this recall read it, the one read a session works on; empty without a pool."""
+
+        return self._load().revision
 
     def knows(self, lesson_id: str) -> bool:
         """Whether ``lesson_id`` names a live lesson of the pool."""

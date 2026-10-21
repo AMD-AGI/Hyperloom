@@ -26,6 +26,7 @@ scheduler's LLM, curating at CLOSE (:mod:`rsi.lesson_curation`); and a person, t
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import re
@@ -340,6 +341,17 @@ class LessonPool:
 
         found = _documents(self.root / _STANDINGS, SessionStandings, STANDINGS_FORMAT)
         return tuple(sorted(found, key=lambda item: item.written_at))
+
+    def digest(self) -> str:
+        """A digest of every record the pool holds: each is written once under its own name and only a purge deletes,
+        so the names alone say what a reader of the pool read, and any write changes them."""
+
+        names = sorted(
+            path.relative_to(self.root).as_posix()
+            for folder in (_REVISIONS, _RETIRED, _PURGED, _STANDINGS)
+            for path in (self.root / folder).glob(_JSON)
+        )
+        return hashlib.sha256("\n".join(names).encode(_ENCODING)).hexdigest()[:16]
 
 
 def standing_of(standings: Iterable[SessionStandings], lesson_id: str) -> LessonStanding:

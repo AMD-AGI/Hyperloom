@@ -193,6 +193,12 @@ class LearningRecall(SessionLearnings):
             past_status=past.status if past is not None else "",
         )
 
+    def past_revision(self) -> str:
+        """A digest of the past sessions' learnings this recall reads as a whole, for the session to record; empty, as
+        an Experience KB read is planned query by query and holds no snapshot to name."""
+
+        return ""
+
     def past_for(self, snapshot: NotebookSnapshot, query: str, *, limit: int) -> PastLearnings | None:
         """Past sessions' learnings for ``query`` as the session of ``snapshot`` reads them; ``None`` before its
         profile, or without a knowledge base to read."""

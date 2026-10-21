@@ -86,6 +86,10 @@ def test_a_lesson_bears_on_a_query_by_its_words_from_a_session_alike_enough_to_t
         f"- [past-1, tp differ, unmeasured] attention split kv pays only past conc 128 [{split}]"
     ]
     assert (recall.knows(graph), recall.knows(gone), recall.knows(lesson_id_for("nowhere"))) == (True, False, False)
+    read = recall.past_revision()
+    lesson(pool, "later", "written after this session read the pool")
+    assert recall.past_revision() == read != pool.digest() == LessonRecall(pool=pool).past_revision()
+    assert LessonRecall().past_revision() == ""
     assert LessonRecall().past_for(snapshot, "cuda graph", limit=5) is None
     assert recall.past_for(dataclasses.replace(snapshot, profile=None), "cuda graph", limit=5) is None
 

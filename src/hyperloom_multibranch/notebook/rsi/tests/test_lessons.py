@@ -141,6 +141,19 @@ def test_a_purge_deletes_the_lessons_revisions_and_its_retirement_and_keeps_only
         pool.write(revision("again", START + 4))
 
 
+def test_the_pools_digest_changes_with_every_write_and_with_nothing_else(tmp_path: Path) -> None:
+    pool = LessonPool(tmp_path)
+    empty = pool.digest()
+    pool.write(revision("first", START))
+    written = pool.digest()
+    pool.write(revision("first", START))
+    again = pool.digest()
+    pool.record_standings(SessionStandings("s1", START, {LESSON: LessonStanding(shown=1)}))
+
+    assert len({empty, written, pool.digest()}) == 3 and again == written
+    assert LessonPool(tmp_path).digest() == pool.digest()
+
+
 def test_a_session_uses_the_pool_beside_the_archive_the_environment_names_by_default(tmp_path: Path) -> None:
     found = LessonPool.from_env({ARCHIVE_ENV: str(tmp_path / "archive")})
 
