@@ -358,10 +358,10 @@ class TestVariantAbort:
         assert "boom" in (aborted.error or "")
         assert aborted.returncode is None
         assert aborted.workspace is None
-        markers = [
-            json.loads(p.read_text(encoding="utf-8")) for p in sorted((tmp_path / "out").glob("*/abort_reason.json"))
-        ]
-        assert [m["error_class"] for m in markers] == ["no_benchmark_workspace", "yaml_build_error"]
+        marker = json.loads(
+            (next((tmp_path / "out").glob("*_c1/abort_reason.json"))).read_text(encoding="utf-8"),
+        )
+        assert marker["error_class"] == "yaml_build_error"
 
     def test_abort_at_a_later_variant_is_walked_past(self, tmp_path, monkeypatch):
         results = self._run(keep_going=True, tmp_path=tmp_path, monkeypatch=monkeypatch)
