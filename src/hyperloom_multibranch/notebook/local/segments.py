@@ -43,6 +43,7 @@ class EntryKind(str, Enum):
     WITHDRAWAL = "withdrawal"
     JUDGEMENT = "judgement"
     MERGE_ATTEMPT = "merge_attempt"
+    FAST_FORWARD = "fast_forward"
     LINEAGE = "lineage"
     BASELINE = "baseline"
     REGRESSION = "regression"

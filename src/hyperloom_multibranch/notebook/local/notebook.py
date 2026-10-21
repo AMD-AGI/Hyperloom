@@ -6,8 +6,8 @@
 The directory holds ``segments/`` (one append-only file per handle) and ``claims/`` (claim generations), and works the
 same on a local disk and on a shared NFS folder. A handle writes as one :class:`Writer`, and each write checks that the
 writer's role owns the state it writes: test requests, results and withdrawals the toolbox, specialist-branch
-judgements the rule gate, integration-branch judgements and merge attempts the integrator, branch starts and stops the
-scheduler, claims, branch logs and learnings the specialist runtime of that branch.
+judgements the rule gate, integration-branch judgements, merge attempts and fast-forwards the integrator, branch starts
+and stops the scheduler, claims, branch logs and learnings the specialist runtime of that branch.
 """
 
 from __future__ import annotations
@@ -67,6 +67,7 @@ from hyperloom_multibranch.contracts.notebook.records import (
     ClaimKey,
     CommittedCommit,
     DedupAnswer,
+    FastForward,
     InboxPage,
     Learning,
     LearningRecord,
@@ -96,6 +97,7 @@ from hyperloom_multibranch.contracts.notebook.vocab import (
     INTEGRATION_CONCLUSIONS,
     LINEAGE_WRITERS,
     ClaimStatus,
+    CommitOrigin,
     Conclusion,
     DedupStatus,
     LineageKind,
@@ -250,6 +252,11 @@ def _new_lineage(state: NotebookState, event: LineageEvent) -> bool:
     return True
 
 
+def _require_digest_format(digest: str) -> None:
+    if not _RECIPE_DIGEST.fullmatch(digest):
+        raise ValueError(f"a recipe digest is {DIGEST_PREFIX} and 64 hex digits, got {digest!r}")
+
+
 def _check_recipe_digest(state: NotebookState, commit_id: str | None, digest: str | None) -> None:
     """Refuse a malformed digest, one without a commit, or another digest than ``commit_id`` was recorded with."""
 
@@ -257,11 +264,31 @@ def _check_recipe_digest(state: NotebookState, commit_id: str | None, digest: st
         return
     if commit_id is None:
         raise ValueError("a recipe digest names the recipe of the commit a write makes")
-    if not _RECIPE_DIGEST.fullmatch(digest):
-        raise ValueError(f"a recipe digest is {DIGEST_PREFIX} and 64 hex digits, got {digest!r}")
+    _require_digest_format(digest)
     known = views.lineage_view(state).commit(commit_id)
     if known is not None and known.recipe_digest not in (None, digest):
         raise ConflictingWrite(f"commit {commit_id} was recorded with recipe {known.recipe_digest}")
+
+
+def _check_fast_forward(state: NotebookState, forward: FastForward) -> None:
+    """Refuse a fast-forward off the current integration head, onto a commit the notebook knows already, of a source
+    no judgement committed on that head, or under another recipe than the source's."""
+
+    view = views.lineage_view(state)
+    head = next((node.head_commit for node in view.branches if node.branch == INTEGRATION_BRANCH), None)
+    if head != forward.integration_head:
+        raise ConflictingWrite(f"the integration head is {head}, not {forward.integration_head}")
+    if view.commit(forward.commit_id) is not None:
+        raise ConflictingWrite(f"commit {forward.commit_id} is already recorded")
+    source = view.commit(forward.source_commit)
+    if source is None:
+        raise NotRecorded(f"no commit {forward.source_commit}")
+    if source.origin not in (CommitOrigin.COMMIT, CommitOrigin.SPLIT) or source.parent_commit != head:
+        raise ValueError(f"{forward.source_commit} is no specialist commit made on the integration head {head}")
+    if source.recipe_digest != forward.recipe_digest:
+        raise ValueError(f"{forward.source_commit} has recipe {source.recipe_digest}, not {forward.recipe_digest}")
+    for request_id in forward.regression_request_ids:
+        state.record(request_id)
 
 
 class LocalNotebook(
@@ -493,6 +520,21 @@ class LocalNotebook(
             branch=INTEGRATION_BRANCH,
             parent=attempt.integration_head,
             summary=summary,
+        )
+
+    async def record_fast_forward(self, forward: FastForward) -> None:
+        self._require(Role.INTEGRATOR)
+        state = self._state()
+        known = state.fast_forwards.get(forward.commit_id)
+        if known is not None:
+            if known != forward:
+                raise ConflictingWrite(f"commit {forward.commit_id} was recorded as another fast-forward")
+            return
+        _require_digest_format(forward.recipe_digest)
+        _check_fast_forward(state, forward)
+        summary = f"fast-forward {forward.source_commit} onto {forward.integration_head} as {forward.commit_id}"
+        self._append(
+            EntryKind.FAST_FORWARD, forward, branch=INTEGRATION_BRANCH, parent=forward.integration_head, summary=summary
         )
 
     async def write_baseline(self, record: BaselineRecord) -> None:

@@ -20,6 +20,7 @@ from hyperloom_multibranch.contracts.notebook.peers import (
 from hyperloom_multibranch.contracts.notebook.records import (
     BaselineRecord,
     BranchLogRecord,
+    FastForward,
     Learning,
     LearningRecord,
     LineageEvent,
@@ -82,6 +83,7 @@ PAYLOADS: dict[EntryKind, type] = {
     EntryKind.WITHDRAWAL: Withdrawal,
     EntryKind.JUDGEMENT: JudgementWrite,
     EntryKind.MERGE_ATTEMPT: MergeAttempt,
+    EntryKind.FAST_FORWARD: FastForward,
     EntryKind.LINEAGE: LineageEvent,
     EntryKind.BASELINE: BaselineRecord,
     EntryKind.REGRESSION: RegressionCase,
@@ -108,6 +110,7 @@ class NotebookState:
         self.judgements: dict[str, list[JudgementWrite]] = {}
         self.commit_writes: dict[str, JudgementWrite] = {}
         self.merge_attempts: list[MergeAttempt] = []
+        self.fast_forwards: dict[str, FastForward] = {}
         self.lineage: list[LineageEvent] = []
         self.baselines: list[BaselineRecord] = []
         self.regressions: list[RegressionCase] = []
@@ -131,6 +134,7 @@ class NotebookState:
             EntryKind.SESSION_PROFILE: lambda _entry, value: self.profiles.append(value),
             EntryKind.MANIFEST: lambda _entry, value: self.fingerprints.append(value),
             EntryKind.MERGE_ATTEMPT: lambda _entry, value: self.merge_attempts.append(value),
+            EntryKind.FAST_FORWARD: self._fast_forward,
             EntryKind.LINEAGE: lambda _entry, value: self.lineage.append(value),
             EntryKind.BASELINE: lambda _entry, value: self.baselines.append(value),
             EntryKind.REGRESSION: lambda _entry, value: self.regressions.append(value),
@@ -170,6 +174,9 @@ class NotebookState:
         if write.commit_id is not None:
             self.commit_writes.setdefault(write.commit_id, write)
 
+    def _fast_forward(self, _entry: Entry, forward: FastForward) -> None:
+        self.fast_forwards.setdefault(forward.commit_id, forward)
+
     def _branch_log(self, entry: Entry, log_entry: BranchLogEntry) -> None:
         self.branch_logs.setdefault(log_entry.branch, []).append(BranchLogRecord(entry.entry_id, entry.at, log_entry))
 
@@ -183,6 +190,12 @@ class NotebookState:
         if pointer.op_shares:
             shares = OpShares(pointer.commit_id, pointer.job_id, pointer.profile_request_id, pointer.op_shares)
             self.op_shares[pointer.commit_id] = shares
+
+    def commit_judgement(self, commit_id: str) -> Judgement:
+        """The judgement behind ``commit_id``: the one that made it, or for a fast-forward its source commit's."""
+
+        forward = self.fast_forwards.get(commit_id)
+        return self.commit_writes[forward.source_commit if forward is not None else commit_id].judgement
 
     def latest_judgement(self, request_id: str) -> JudgementWrite | None:
         history = self.judgements.get(request_id)
