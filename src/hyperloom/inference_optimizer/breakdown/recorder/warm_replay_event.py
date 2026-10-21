@@ -23,8 +23,9 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Mapping
-from datetime import datetime
 from typing import Any
+
+from hyperloom.common.coerce import to_unix
 
 from .event_fields import (
     as_dict as _as_dict,
@@ -262,12 +263,9 @@ class WarmReplayEventRecorder:
 
     def _duration_sec(self, end_time: str) -> float:
         """Seconds from the opening to ``end_time``; a rebound recorder measures from the restored start."""
-        if self._rebound:
-            try:
-                started = datetime.fromisoformat(self._start_time)
-                return round((datetime.fromisoformat(end_time) - started).total_seconds(), 3)
-            except (TypeError, ValueError):
-                pass
+        started, ended = to_unix(self._start_time), to_unix(end_time)
+        if self._rebound and started is not None and ended is not None:
+            return round(ended - started, 3)
         return round(time.monotonic() - self._t0, 3)
 
     def rebind(self) -> None:
