@@ -31,7 +31,6 @@ from hyperloom_multibranch.contracts.notebook.records import (
     ClaimKey,
     CommittedCommit,
     DedupAnswer,
-    FastForward,
     InboxPage,
     Learning,
     LearningRecord,
@@ -156,14 +155,6 @@ class JudgementSink(Protocol):
         """
 
     async def record_merge_attempt(self, attempt: MergeAttempt) -> None: ...
-
-    async def record_fast_forward(self, forward: FastForward) -> None:
-        """Record the integrator taking a specialist commit made on the integration head as its next merge commit.
-
-        Raises ``ConflictingWrite`` when the integration head is no longer ``forward.integration_head`` or the merge
-        commit was recorded otherwise, ``NotRecorded`` for an unknown source commit or regression test, and
-        ``ValueError`` when the source is no specialist commit made on that head or carries another recipe digest.
-        """
 
 
 class GateRecords(Protocol):

@@ -174,22 +174,6 @@ class MergeAttempt:
 
 
 @dataclass(frozen=True)
-class FastForward:
-    """The integrator making ``source_commit``, a specialist commit made on the integration head, that head's next
-    merge commit ``commit_id`` without testing it again: the source's own judgement is the merge's recorded value.
-
-    ``recipe_digest`` is the merge commit's, which is the source's; ``regression_request_ids`` are the regression-set
-    tests the integrator ran on it first.
-    """
-
-    commit_id: str
-    source_commit: str
-    integration_head: str
-    recipe_digest: str
-    regression_request_ids: tuple[str, ...] = ()
-
-
-@dataclass(frozen=True)
 class LineageEvent:
     """A branch starting (``from_commit``), splitting off ``from_branch`` with fix ``commit_id``, or stopping.
 
@@ -754,7 +738,6 @@ __all__ = [
     "CommittedCommit",
     "DedupAnswer",
     "EnvironmentChange",
-    "FastForward",
     "FrontierScore",
     "InboxItem",
     "InboxPage",

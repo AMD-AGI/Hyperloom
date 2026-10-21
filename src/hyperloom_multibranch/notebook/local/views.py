@@ -4,8 +4,8 @@
 """What the notebook's queries derive from its state: the branch tree, progress, commits, values and briefs.
 
 Each fact is written once and every view is derived from it: a specialist commit comes from the judgement that
-carries its commit id, a merge from the integrator's merge judgement and its merge attempt, or from a fast-forward
-that cites its source commit's judgement, a branch's start, split and stop from lineage events.
+carries its commit id, a merge from the integrator's merge judgement and its merge attempt, a branch's start, split
+and stop from lineage events.
 """
 
 from __future__ import annotations
@@ -23,7 +23,6 @@ from hyperloom_multibranch.contracts.notebook.records import (
     Claim,
     CommitNode,
     CommittedCommit,
-    FastForward,
     LineageEvent,
     LineageView,
     MergeAttempt,
@@ -88,8 +87,6 @@ def lineage_view(state: NotebookState) -> LineageView:
             _apply_event(branches, commits, value, entry.at)
             continue
         node = _commit_node(state, value, splits, entry.at) if isinstance(value, JudgementWrite) else None
-        if isinstance(value, FastForward):
-            node = _fast_forward_node(state, value, entry.at)
         if node is not None and node.commit_id not in commits:
             commits[node.commit_id] = node
             implicit = _BranchDraft(node.branch, LineageKind.OPEN, node.parent_commit, opened_at=entry.at)
@@ -146,22 +143,6 @@ def _commit_node(
     )
 
 
-def _fast_forward_node(state: NotebookState, forward: FastForward, at: float) -> CommitNode:
-    """The merge commit a fast-forward made, citing the judged request of the commit it brought in."""
-
-    source = state.commit_writes.get(forward.source_commit)
-    return CommitNode(
-        forward.commit_id,
-        forward.integration_head,
-        INTEGRATION_BRANCH,
-        CommitOrigin.MERGE,
-        source.request_id if source is not None else None,
-        (forward.source_commit,),
-        at,
-        recipe_digest=forward.recipe_digest,
-    )
-
-
 def merge_state(state: NotebookState, attempt: MergeAttempt) -> MergeState:
     """Where a merge attempt stands, from the judgement of its merge test."""
 
@@ -185,11 +166,6 @@ def committed(state: NotebookState, view: LineageView) -> tuple[CommittedCommit,
             continue
         judgement = state.commit_writes[node.commit_id].judgement
         attempts = [attempt for attempt in state.merge_attempts if node.commit_id in attempt.source_commits]
-        forward = next((item for item in state.fast_forwards.values() if item.source_commit == node.commit_id), None)
-        if forward is not None:
-            last = MergeState(MergeOutcome.MERGED, forward.integration_head, merged_commit=forward.commit_id)
-        else:
-            last = merge_state(state, attempts[-1]) if attempts else None
         found.append(
             CommittedCommit(
                 commit_id=node.commit_id,
@@ -200,7 +176,7 @@ def committed(state: NotebookState, view: LineageView) -> tuple[CommittedCommit,
                 fixes_correctness=judgement.fixes_correctness,
                 foundation_fix=judgement.foundation_fix,
                 merged_into=next((merge.commit_id for merge in merges if node.commit_id in merge.merged_from), None),
-                last_merge=last,
+                last_merge=merge_state(state, attempts[-1]) if attempts else None,
             )
         )
     return tuple(sorted(found, key=lambda commit: (not commit.foundation_fix, -commit.gain_pct)))
@@ -217,7 +193,7 @@ def recorded_value(state: NotebookState, view: LineageView, commit_id: str) -> R
         if baseline is None:
             raise NotRecorded(f"no baseline for the root commit {commit_id}")
         return RecordedValue(commit_id, baseline.values, baseline.request_ids)
-    judgement = state.commit_judgement(commit_id)
+    judgement = state.commit_writes[commit_id].judgement
     return RecordedValue(commit_id, judgement.recorded_value, judgement.request_ids)
 
 

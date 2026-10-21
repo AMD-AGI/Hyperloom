@@ -39,13 +39,10 @@ from hyperloom_multibranch.contracts.notebook.peers import (
 from hyperloom_multibranch.contracts.llm_prices import TokenCounts
 from hyperloom_multibranch.contracts.notebook.records import (
     BaselineRecord,
-    CommitNode,
-    FastForward,
     Learning,
     LineageEvent,
     LlmUsage,
     MergeAttempt,
-    MergeState,
     QuarantineEvent,
     TestRecord,
     ToolResultPointer,
@@ -53,7 +50,6 @@ from hyperloom_multibranch.contracts.notebook.records import (
 )
 from hyperloom_multibranch.contracts.notebook.vocab import (
     ClaimStatus,
-    CommitOrigin,
     Conclusion,
     DedupStatus,
     InboxKind,
@@ -104,7 +100,7 @@ def test_a_record_is_judged_once_the_gate_judged_a_test_it_measured(
 def test_the_local_notebook_implements_every_interface_method() -> None:
     names = [name for name, member in inspect.getmembers(interfaces.Notebook) if inspect.iscoroutinefunction(member)]
 
-    assert len(names) == 41
+    assert len(names) == 40
     assert all(getattr(LocalNotebook, name) is not getattr(interfaces.Notebook, name) for name in names)
 
 
@@ -645,60 +641,6 @@ async def test_a_merge_skipped_because_its_change_is_already_on_the_head_is_no_c
     assert (c1.last_merge.outcome, c1.merged_into) == (MergeOutcome.ALREADY_ON_HEAD, None)
     with pytest.raises(ValueError, match="skipped as"):
         await integrator.record_merge_attempt(replace(skipped, skipped_outcome=MergeOutcome.MERGED))
-
-
-async def test_a_commit_made_on_the_integration_head_fast_forwards_as_a_merge_citing_its_own_judgement(
-    open_as: Open,
-) -> None:
-    await open_as(Role.SCHEDULER).record_lineage(LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id="c0"))
-    await _tested(open_as, "r1")
-    made = judgement(3.0, ("r1",), recorded={"output_tps": 1030.0})
-    await open_as(Role.GATE).write_judgement("r1", made, Conclusion.COMMITTED, "c1", CHILD_RECIPE)
-    await _tested(open_as, "g1", branch=INTEGRATION_BRANCH)
-    integrator = open_as(Role.INTEGRATOR)
-    forward = FastForward("m1", "c1", "c0", CHILD_RECIPE, ("g1",))
-
-    await integrator.record_fast_forward(forward)
-    await integrator.record_fast_forward(forward)
-
-    view = await integrator.lineage()
-    merge = view.commit("m1")
-    assert merge == CommitNode(
-        "m1", "c0", INTEGRATION_BRANCH, CommitOrigin.MERGE, "r1", ("c1",), merge.at, CHILD_RECIPE
-    )
-    assert next(node.head_commit for node in view.branches if node.branch == INTEGRATION_BRANCH) == "m1"
-    (c1,) = await integrator.committed()
-    assert (c1.merged_into, c1.last_merge) == ("m1", MergeState(MergeOutcome.MERGED, "c0", merged_commit="m1"))
-    value = await integrator.recorded_value("m1")
-    assert (value.values, value.request_ids) == ({"output_tps": 1030.0}, ("r1",))
-    assert len([entry for entry in integrator._state().entries if entry.kind.value == "fast_forward"]) == 1
-
-
-async def test_a_fast_forward_needs_the_current_head_a_commit_judged_on_it_and_its_recipe(open_as: Open) -> None:
-    await open_as(Role.SCHEDULER).record_lineage(LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id="c0"))
-    gate, integrator = open_as(Role.GATE), open_as(Role.INTEGRATOR)
-    for request_id, commit_id in (("r1", "c1"), ("r2", "c2")):
-        await _tested(open_as, request_id)
-        await gate.write_judgement(
-            request_id, judgement(3.0, (request_id,)), Conclusion.COMMITTED, commit_id, CHILD_RECIPE
-        )
-    forward = FastForward("m1", "c1", "c0", CHILD_RECIPE)
-
-    with pytest.raises(ValueError, match="has recipe"):
-        await integrator.record_fast_forward(replace(forward, recipe_digest=ROOT_RECIPE))
-    with pytest.raises(NotRecorded, match="no commit c9"):
-        await integrator.record_fast_forward(replace(forward, source_commit="c9"))
-    with pytest.raises(UnknownRequest):
-        await integrator.record_fast_forward(replace(forward, regression_request_ids=("g404",)))
-    with pytest.raises(WriterNotAllowed):
-        await gate.record_fast_forward(forward)
-    await integrator.record_fast_forward(forward)
-    with pytest.raises(ConflictingWrite, match="the integration head is m1, not c0"):
-        await integrator.record_fast_forward(FastForward("m2", "c2", "c0", CHILD_RECIPE))
-    with pytest.raises(ValueError, match="no specialist commit made on the integration head m1"):
-        await integrator.record_fast_forward(FastForward("m2", "c2", "m1", CHILD_RECIPE))
-    with pytest.raises(ConflictingWrite, match="another fast-forward"):
-        await integrator.record_fast_forward(replace(forward, source_commit="c2"))
 
 
 async def test_a_pending_merge_shows_as_pending(open_as: Open) -> None:
