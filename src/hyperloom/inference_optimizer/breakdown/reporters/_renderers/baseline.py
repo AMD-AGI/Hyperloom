@@ -22,6 +22,7 @@ from ..base import (
     events_of,
     md_kv_list,
     md_table,
+    measured_ms,
     register_renderer,
     session_of,
     task_config_of,
@@ -102,9 +103,9 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     anchor = _anchor(attempts)
     measurement = as_dict(anchor.get("measurement"))
     session = session_of(breakdown)
-    tput = measurement.get("throughput_tok_s_per_gpu")
+    tput = measurement.get("output_throughput")
     acc = measurement.get("accuracy")
-    ttft = measurement.get("ttft_mean_ms")
+    ttft = measured_ms(measurement.get("ttft_mean_ms"))
     e2el = measurement.get("e2el_mean_ms")
     ttft_source = str(measurement.get("ttft_e2el_source") or "")
     # The streak this measurement was dispatched under, which is the count of
@@ -142,15 +143,15 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     if acc:
         facts.append(f"Baseline accuracy: {float(acc):.4g}.")
     if ttft is not None:
-        facts.append(f"Baseline TTFT mean: {float(ttft):.1f} ms.")
-    else:
+        facts.append(f"Baseline TTFT mean: {ttft:.1f} ms.")
+    elif measurement.get("ttft_mean_ms") is None:
         warnings.append(
             "ttft_mean_ms is null — the measured round reported no latency, so "
             "the baseline's throughput cannot be read against a per-request cost."
         )
     if e2el is not None:
         facts.append(f"Baseline e2el mean: {float(e2el):.1f} ms.")
-    # The axes an AgentX session is actually ranked on. ``throughput_tok_s_per_gpu`` above is the synthetic-workload
+    # The axes an AgentX session is actually ranked on. ``output_throughput`` above is the synthetic-workload
     # figure, so on an agentic round it is the one number a reader must not read the verdict off.
     perf = measurement.get("perf")
     facts.extend(graded_axes_facts(perf, label="Baseline"))
@@ -163,7 +164,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     md_parts.append(
         md_kv_list(
             [
-                ("throughput_tok_s_per_gpu", tput),
+                ("output_throughput", tput),
                 ("throughput_unit", measurement.get("throughput_unit") or None),
                 ("accuracy", acc),
                 ("submission_valid", measurement.get("submission_valid")),
@@ -190,7 +191,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
                 a.get("end_time") or a.get("start_time"),
                 a.get("status"),
                 a.get("decision"),
-                as_dict(a.get("measurement")).get("throughput_tok_s_per_gpu"),
+                as_dict(a.get("measurement")).get("output_throughput"),
                 as_dict(a.get("failure")).get("error_class"),
             ]
             for a in attempts[:10]
