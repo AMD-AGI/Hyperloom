@@ -12,7 +12,6 @@ import pytest
 
 from hyperloom.inference_optimizer.model_config_utils import (
     _sparse_kv_block_size,
-    describe_model,
     summarize_model_config,
 )
 
@@ -43,19 +42,10 @@ def test_summary_reports_mtp_layers_under_every_family_field(tmp_path: Path, mtp
     assert summarize_model_config(str(m))["mtp_layers"] == 1
 
 
-def test_summary_omits_mtp_layers_for_a_model_without_them(tmp_path: Path) -> None:
-    m = _write_config(tmp_path / "m", {"model_type": "llama", "num_nextn_predict_layers": 0})
-    assert "mtp_layers" not in summarize_model_config(str(m))
-
-
-def test_describe_model_adds_the_identity_to_the_summary(tmp_path: Path) -> None:
-    m = _write_config(tmp_path / "m", {"model_type": "llama", "num_hidden_layers": 32})
-    out = describe_model(str(m), "org/Target")
-    assert out == {**summarize_model_config(str(m)), "model_name": "org/Target", "model_path": str(m)}
-
-
-def test_describe_model_is_empty_when_the_config_is_unreadable(tmp_path: Path) -> None:
-    assert describe_model(str(tmp_path / "nope"), "org/Target") == {}
+@pytest.mark.parametrize("payload", [{}, {"num_nextn_predict_layers": 0}])
+def test_summary_reports_zero_mtp_layers_for_a_model_without_them(tmp_path: Path, payload: dict) -> None:
+    m = _write_config(tmp_path / "m", {"model_type": "llama", **payload})
+    assert summarize_model_config(str(m))["mtp_layers"] == 0
 
 
 def test_summary_mha(tmp_path: Path) -> None:

@@ -579,9 +579,8 @@ def summarize_model_config(model_path: str) -> dict:
             out[key] = value
 
     out.update(_moe_shape(cfg))
-    mtp_layers = _first_int_under(cfg, _MTP_LAYER_KEYS)
-    if mtp_layers:
-        out["mtp_layers"] = mtp_layers
+    # Always written, so an absent key marks a summary that predates the field, not a model without MTP.
+    out["mtp_layers"] = _first_int_under(cfg, _MTP_LAYER_KEYS)
 
     quant = _derive_quantization(cfg)
     if quant:
@@ -591,12 +590,6 @@ def summarize_model_config(model_path: str) -> dict:
         if value:
             out[key] = value
     return out
-
-
-def describe_model(model_path: str, model_name: str) -> dict:
-    """Which model a session optimises plus its :func:`summarize_model_config` summary; {} when that is empty."""
-    summary = summarize_model_config(model_path)
-    return {"model_name": model_name, "model_path": model_path, **summary} if summary else {}
 
 
 def _model_is_gemma2(model_path: str) -> bool:

@@ -832,7 +832,7 @@ def _focus_custom_specialist(inp: SpecialistPromptInputs) -> list[str]:
 
 def _focus_speculative_decoding_specialist(inp: SpecialistPromptInputs) -> list[str]:
     """Render the speculative-decoding focus for this session's target model."""
-    return speculative_decoding_focus(inp.model_info)
+    return speculative_decoding_focus(model_name=inp.model_name, model_path=inp.model_path, model_info=inp.model_info)
 
 
 _DOMAIN_FOCUS_TEMPLATES: dict[str, "Callable[[SpecialistPromptInputs], list[str]]"] = {
@@ -935,6 +935,9 @@ class SpecialistPromptInputs:
     # Framework package directory relative to the worktree; empty without a worktree.
     worktree_package_dir: str = ""
 
+    # Target model identity warmed from SharedState.model_name / model_path; "" => not recorded.
+    model_name: str = ""
+    model_path: str = ""
     # Structured model architecture features mirrored from SharedState.model_info;
     # machine-parseable companion to ``arch_notes``. Empty dict => not warmed.
     model_info: dict[str, Any] = field(default_factory=dict)

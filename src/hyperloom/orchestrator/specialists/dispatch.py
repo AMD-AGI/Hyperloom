@@ -42,13 +42,15 @@ _ADMISSION_DROPS: tuple[tuple[str, str], ...] = (
     ("proposals_env_ungrounded", "proposal_env_file_missing"),
 )
 
+#: Domains whose focus reads the target's ``config.json`` summary from ``model_info``.
+_MODEL_INFO_DOMAINS: frozenset[str] = frozenset({"static_recon_specialist", "speculative_decoding_specialist"})
+
 #: ``(SharedState field, param key, conversion)`` for the values a specialist is warmed with. The converted value
 #: decides: an empty string, an empty container and a zero are not exported, because an absent key is how the
 #: specialist reads "this session has none".
-# Domains whose focus reads the target model from ``model_info``.
-_MODEL_INFO_DOMAINS: frozenset[str] = frozenset({"static_recon_specialist", "speculative_decoding_specialist"})
-
 _STATE_PARAMS: tuple[tuple[str, str, Callable[[Any], Any]], ...] = (
+    ("model_name", "model_name", str),
+    ("model_path", "model_path", str),
     ("warm_start_recipe", "warm_start_recipe", dict),
     ("warm_start_pitfalls", "warm_start_pitfalls", list),
     ("warm_start_lessons", "warm_start_lessons", list),
@@ -138,7 +140,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
         state = self.shared_state
         plane = self.knowledge_plane
 
-        from .domains import gap_backfilled_domain, normalize_dispatch_tags
+        from .domains import dispatch_domain, gap_backfilled_domain, normalize_dispatch_tags
         from .profile import resolve_specialist_profile
 
         # Bench-capable specialists run a real serving + benchmark loop, so
@@ -148,7 +150,9 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
 
         if backfilled := gap_backfilled_domain(params, state.find_gap):
             params["domain"] = backfilled
-        domain = str(params.get("domain") or "").strip()
+        # Resolve as the runner does, so a tags-only or gap-backfilled dispatch is warmed for the domain it runs as.
+        resolved_domain = dispatch_domain(params)
+        domain = resolved_domain.key if resolved_domain is not None else ""
         normalize_dispatch_tags(params)
 
         if "pr_monitor_available" not in params:

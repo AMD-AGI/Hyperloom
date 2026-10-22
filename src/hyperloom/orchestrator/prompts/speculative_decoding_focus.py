@@ -121,12 +121,14 @@ _DRAFTER_STEPS: tuple[str, ...] = (
 )
 
 
-def speculative_decoding_focus(model_info: Mapping[str, Any]) -> list[str]:
+def speculative_decoding_focus(*, model_name: str, model_path: str, model_info: Mapping[str, Any]) -> list[str]:
     """Render the speculative-decoding focus block for one target model.
 
     Args:
-        model_info: The session's model description (``model_config_utils.describe_model``); empty when its
-            ``config.json`` could not be read.
+        model_name: The session's target model name; empty when not recorded.
+        model_path: The path or Hugging Face repo id the target is launched from; empty when not recorded.
+        model_info: The target's ``config.json`` summary (``model_config_utils.summarize_model_config``); empty
+            when the config could not be read.
 
     Returns:
         Markdown lines of the focus block.
@@ -139,7 +141,7 @@ def speculative_decoding_focus(model_info: Mapping[str, Any]) -> list[str]:
         *_METHODS,
         "",
         "**Choosing the method and finding drafter weights**",
-        _target_line(model_info),
+        _target_line(model_name, model_path),
         _mtp_step(model_info),
         *_DRAFTER_STEPS,
         "",
@@ -147,21 +149,24 @@ def speculative_decoding_focus(model_info: Mapping[str, Any]) -> list[str]:
     ]
 
 
-def _target_line(model_info: Mapping[str, Any]) -> str:
+def _target_line(model_name: str, model_path: str) -> str:
     """Name the target model the drafter must be trained for."""
-    if not model_info:
+    if not model_path:
         return "Target model: not recorded for this session; identify it from the serving configuration you tune."
     return (
-        f"Target model: `{model_info.get('model_name')}`, launched from `{model_info.get('model_path')}` "
+        f"Target model: `{model_name or model_path}`, launched from `{model_path}` "
         "(a local path or a Hugging Face repo id)."
     )
 
 
 def _mtp_step(model_info: Mapping[str, Any]) -> str:
     """Step 1: use MTP when ``config.json`` declares MTP layers and the weights carry them."""
-    if not model_info:
-        return "1. **MTP first.** The target's config.json could not be read; check it for an MTP layer count."
-    layers = int(model_info.get("mtp_layers") or 0)
+    if "mtp_layers" not in model_info:
+        return (
+            "1. **MTP first.** This session's summary of the target's config.json does not record an MTP layer "
+            "count; read it from config.json."
+        )
+    layers = int(model_info["mtp_layers"] or 0)
     if not layers:
         return "1. **No MTP.** The target's config.json declares no MTP layers; go to the drafter-based methods."
     return (

@@ -8,6 +8,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+import pytest
+
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
 from hyperloom.orchestrator.policy.gate import PolicyGate
@@ -19,14 +21,16 @@ from hyperloom.orchestrator.specialists.runner import SpecialistRunner, Speciali
 from hyperloom.orchestrator.state.shared_state import SharedState
 
 DOMAIN_KEY = "speculative_decoding_specialist"
-_TARGET = {"model_name": "org/Target-7B", "model_path": "/models/Target-7B", "model_type": "llama"}
+_NAME = "org/Target-7B"
+_PATH = "/models/Target-7B"
+_SUMMARY = {"model_type": "llama", "mtp_layers": 0}
 
 
 def _flat(text: str) -> str:
     return " ".join(text.split())
 
 
-def _system_prompt(model_info: dict[str, Any] | None = None) -> str:
+def _system_prompt(*, model_name: str = _NAME, model_path: str = _PATH, model_info: dict | None = None) -> str:
     domain = get_domain(DOMAIN_KEY)
     assert domain is not None
     system, _ = build_specialist_prompts(
@@ -35,7 +39,9 @@ def _system_prompt(model_info: dict[str, Any] | None = None) -> str:
             domain=domain,
             gap_canonical_id="gap.decode",
             framework="vllm",
-            model_info=_TARGET if model_info is None else model_info,
+            model_name=model_name,
+            model_path=model_path,
+            model_info=_SUMMARY if model_info is None else model_info,
         )
     )
     return _flat(system)
@@ -62,13 +68,23 @@ def test_focus_names_the_target_model():
 
 
 def test_focus_sends_the_specialist_to_the_serving_config_when_the_model_is_not_recorded():
-    text = _system_prompt({})
+    text = _system_prompt(model_name="", model_path="", model_info={})
     assert "Target model: not recorded for this session" in text
-    assert "MTP first.** The target's config.json could not be read" in text
+
+
+@pytest.mark.parametrize(
+    "model_info",
+    [{}, {"model_type": "deepseek_v3"}],
+    ids=["config_unreadable", "summary_predates_mtp_layers"],
+)
+def test_focus_asks_for_the_mtp_count_when_the_summary_does_not_record_it(model_info: dict):
+    text = _system_prompt(model_info=model_info)
+    assert "**MTP first.** This session's summary of the target's config.json does not record an MTP layer" in text
+    assert "**No MTP.**" not in text
 
 
 def test_focus_states_the_mtp_layer_count_and_still_asks_for_the_tensors():
-    text = _system_prompt({**_TARGET, "mtp_layers": 1})
+    text = _system_prompt(model_info={**_SUMMARY, "mtp_layers": 1})
     assert "**MTP first.** The target's config.json declares 1 MTP layer(s)." in text
     assert "Confirm the weight index carries those tensors" in text
 
@@ -94,7 +110,8 @@ def test_focus_downloads_safely_into_the_hub_cache_by_default():
 
 
 def test_focus_names_no_framework_flags_and_sends_the_specialist_to_the_installed_source():
-    text = "\n".join(speculative_decoding_focus({**_TARGET, "mtp_layers": 1}))
+    lines = speculative_decoding_focus(model_name=_NAME, model_path=_PATH, model_info={**_SUMMARY, "mtp_layers": 1})
+    text = "\n".join(lines)
     for version_specific in ("--", "SGLANG_", "VLLM_", "synthetic_acceptance_length", "rejection_sample_method"):
         assert version_specific not in text
     assert "from the installed framework's source" in _flat(text)
@@ -111,11 +128,23 @@ class _StubTask:
     kind: str = "specialist"
 
 
-async def test_dispatch_tells_the_specialist_the_session_model(tmp_path):
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"domain": DOMAIN_KEY, "gap_canonical_id": "gap.decode"},
+        {"tags": [DOMAIN_KEY], "gap_canonical_id": "gap.decode"},
+        {"tags": ["speculative_decoding"], "gap_canonical_id": "gap.decode"},
+        {"gap_canonical_id": "gap.scout"},
+    ],
+    ids=["domain_key", "tag_key", "tag_kb_anchor", "gap_domain_hint"],
+)
+async def test_dispatch_tells_the_specialist_the_session_model(tmp_path, payload: dict[str, Any]):
     from hyperloom.orchestrator.loop.coordinator import AdvisoryServices, Coordinator
     from hyperloom.orchestrator.roles.mock_backend import MockBackend, MockTurn, ScriptedPlan
 
-    SharedState(model_info={**_TARGET, "mtp_layers": 2}).save(tmp_path)
+    state = SharedState(model_name=_NAME, model_path=_PATH, model_info={**_SUMMARY, "mtp_layers": 2})
+    state.upsert_gap({"canonical_id": "gap.scout", "domain_hint": "speculative_decoding"})
+    state.save(tmp_path)
     idle = ScriptedPlan(turns=[MockTurn(intents=[])])
     coord = Coordinator(
         session_dir=tmp_path,
@@ -123,7 +152,7 @@ async def test_dispatch_tells_the_specialist_the_session_model(tmp_path):
         role_registry=default_role_registry(),
         advisory=AdvisoryServices(knowledge_plane=None),
     )
-    params = {"domain": DOMAIN_KEY, "gap_canonical_id": "gap.decode", "mode": "research"}
+    params = {**payload, "mode": "research"}
     await coord.specialist_dispatch.warm_specialist_params(params)
     runner = SpecialistRunner(subprocess_config=SpecialistSubprocessConfig(), session_dir=tmp_path)
 
