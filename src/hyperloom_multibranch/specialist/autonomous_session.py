@@ -113,6 +113,7 @@ class AutonomousSession:
         self._manifest: AgentManifest | None = None
         self._process: AgentProcess | None = None
         self._root = LaunchConfig()
+        self._unread = ""
         self._stopped = asyncio.Event()
 
     async def preflight(self) -> None:
@@ -131,6 +132,7 @@ class AutonomousSession:
 
     async def run(self) -> None:
         manifest, process = await self._running()
+        self._unread = ""
         self._root = (await self._setup.repo.read_recipe(self._start.start_commit)).launch
         watch = KeepWatch.load(self._place.workspace / WATCH_FILE)
         while not self._stopped.is_set():
@@ -180,7 +182,10 @@ class AutonomousSession:
         """Read the agent's state the moment its keep file shows a new keep: by the time an import can go, the agent
         may be measuring its next candidate in the same workspace."""
 
+        unread = self._unread
         mark = self._mark(manifest)
+        if self._unread and self._unread != unread:
+            await self._note(f"{self._unread}; no keep is counted until it does")
         if mark is None or mark == watch.mark:
             return
         if isinstance(mark, int) and isinstance(watch.mark, int) and mark < watch.mark:
@@ -238,16 +243,27 @@ class AutonomousSession:
         await self._note(f"keep {kept.seq} imported as {request_id}: {kept.summary or 'no summary'}")
 
     def _mark(self, manifest: AgentManifest) -> int | str | None:
-        """What the agent's keep file says of its keeps now; ``None`` when it has none or cannot be read mid-write."""
+        """What the agent's keep file says of its keeps now; ``None`` when it has none, cannot be read mid-write, or
+        holds no counter the manifest names, which :attr:`_unread` then says."""
 
         if manifest.keep is None:
             return None
         path = self._agent_dir / SOURCE_DIR / manifest.keep.path
         try:
-            return manifest.keep.mark(path.read_bytes())
-        except (OSError, ValueError, KeyError, IndexError) as error:
-            log.debug("the keep file %s is not readable yet: %s", path, error)
+            mark = manifest.keep.mark(path.read_bytes())
+        except json.JSONDecodeError as error:
+            log.debug("the keep file %s is being written: %s", path, error)
             return None
+        except OSError as error:
+            self._unread = f"the keep file {manifest.keep.path} cannot be read ({error.strerror})"
+            return None
+        except (ValueError, KeyError, IndexError) as error:
+            self._unread = (
+                f"the keep file {manifest.keep.path} holds no keep count at {manifest.keep.counter!r} ({error!r})"
+            )
+            return None
+        self._unread = ""
+        return mark
 
     def _read(self, manifest: AgentManifest, root: str, seq: int) -> KeptChange:
         """The agent's state now; an agent that keeps no config of its own runs with the root's."""

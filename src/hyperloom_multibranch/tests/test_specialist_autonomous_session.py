@@ -405,3 +405,14 @@ async def test_a_keep_after_an_agent_restarted_its_count_is_a_new_keep(tmp_path:
     assert any(note.startswith(f"{NOTICE} keep 2 imported") for note in await rig.notices())
     await resumed.stop()
     await asyncio.wait_for(running, 10)
+
+
+async def test_a_keep_file_whose_counter_never_resolves_is_noted_once(tmp_path: Path) -> None:
+    rig = await _rig(tmp_path, Agent(keep={"path": "run/state.json", "field": "lessons"}, tail=0.6))
+
+    await rig.session.preflight()
+    with pytest.raises(SessionFinished):
+        await asyncio.wait_for(rig.session.run(), 10)
+
+    unread = [note for note in await rig.notices() if "run/state.json" in note and "lessons" in note]
+    assert len(unread) == 1 and not rig.toolbox.requests
