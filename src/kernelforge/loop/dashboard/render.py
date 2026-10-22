@@ -1,7 +1,11 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Render a dashboard snapshot as one self-contained HTML page: no script, no network, every agent text escaped."""
+"""Render a dashboard snapshot as one self-contained HTML page: no network, every agent text escaped.
+
+Its one script reloads the page every minute, except while a message is being typed into its form, and keeps open
+the rounds the reader opened. Without scripts a meta refresh does the reloading.
+"""
 
 from __future__ import annotations
 
@@ -45,7 +49,7 @@ h1{font-size:20px;margin:0 0 4px}h2{font-size:15px;margin:0 0 10px}
 .card{background:var(--surface-1);border:1px solid var(--border);border-radius:8px;padding:14px 16px;margin-bottom:14px}
 .tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:14px;margin-bottom:14px}
 .tile .label{color:var(--text-secondary);font-size:13px}.tile .value{font-size:26px;font-weight:600;margin-top:4px}
-.hero .value{font-size:48px}.tile .note{color:var(--muted);font-size:12px;margin-top:2px}
+.hero .value{font-size:38px;white-space:nowrap}.tile .note{color:var(--muted);font-size:12px;margin-top:2px}
 table{border-collapse:collapse;width:100%;font-variant-numeric:tabular-nums}
 th,td{text-align:left;padding:4px 8px;border-bottom:1px solid var(--grid);vertical-align:top}
 th{color:var(--text-secondary);font-weight:600}td.num,th.num{text-align:right}
@@ -57,7 +61,29 @@ th{color:var(--text-secondary);font-weight:600}td.num,th.num{text-align:right}
 pre{white-space:pre-wrap;word-break:break-word;margin:0;font-size:12px;color:var(--text-secondary)}
 details summary{cursor:pointer;color:var(--text-secondary);font-size:12px;margin-top:8px}
 svg text{fill:var(--muted);font-size:11px}
+details.round{border-top:1px solid var(--grid);padding:6px 0}
+details.round>summary{font-size:14px;color:var(--text-primary);margin:0;list-style-position:inside}
+details.round>summary .meta{color:var(--text-secondary)}
+.round-body{margin:8px 0 4px 18px}.round-body h3{font-size:12px;color:var(--text-secondary);margin:10px 0 4px;
+text-transform:uppercase;letter-spacing:.04em}.round-body pre{color:var(--text-primary);font-size:13px;
+font-family:inherit;line-height:1.45}
+form.say textarea{width:100%;box-sizing:border-box;font:inherit;padding:8px;border:1px solid var(--axis);
+border-radius:6px;background:var(--page);color:var(--text-primary);resize:vertical}
+form.say .buttons{display:flex;gap:8px;margin:8px 0 4px}
+form.say button{font:inherit;padding:6px 14px;border-radius:6px;border:1px solid var(--axis);cursor:pointer;
+background:var(--surface-1);color:var(--text-primary)}form.say button.primary{background:var(--series-1);
+border-color:var(--series-1);color:#fff}
 """
+
+# Reload every REFRESH_SEC unless a message is half typed, and reopen the rounds that were open before the reload.
+_SCRIPT = """
+(function(){var k='forge-open';try{JSON.parse(sessionStorage.getItem(k)||'[]').forEach(function(id){
+var d=document.getElementById(id);if(d)d.open=true;});}catch(e){}
+setInterval(function(){var t=document.querySelector('form.say textarea');
+if(t&&(t.value.trim()||document.activeElement===t))return;
+var open=[].map.call(document.querySelectorAll('details[id][open]'),function(d){return d.id;});
+try{sessionStorage.setItem(k,JSON.stringify(open));}catch(e){}location.reload();},%d);})();
+""" % (REFRESH_SEC * 1000)
 
 
 def _fmt(value, spec: str = ".4f", default: str = "—") -> str:
@@ -122,14 +148,34 @@ def _header(snapshot: dict) -> str:
         parts.append(f"ended: {escape(reason)}")
     if live.get("anchor_label"):
         parts.append(f"scores are speedups over {escape(live['anchor_label'])}")
-    parts.append(f"rendered {rendered}, refreshes every {REFRESH_SEC} s")
+    parts.append(f"rendered {rendered}, refreshes every {REFRESH_SEC} s (not while you type a message)")
     title = escape(campaign.get("campaign_id") or snapshot.get("campaign_root") or "forge-loop")
     return f"<h1>forge-loop · {title}</h1><div class='sub'>{' · '.join(parts)}</div>"
 
 
+def _best_tile(campaign: dict) -> str:
+    best = campaign.get("best") or {}
+    if best.get("mean_case_speedup") is not None:
+        return _tile(
+            "Best speedup",
+            f"{_fmt(best['mean_case_speedup'])}×",
+            f"iteration {escape(str(best.get('iteration') or '—'))}",
+            hero=True,
+        )
+    start = campaign.get("search_start_mean_case_speedup")
+    return _tile("Best speedup", f"{_fmt(start)}×" if start is not None else "—", "the starting kernel", hero=True)
+
+
+def _time_left(snapshot: dict) -> float | None:
+    """From the deadline when there is one, so a page re-rendered later does not show a stale countdown."""
+    live = snapshot.get("live") or {}
+    if live.get("deadline_unix"):
+        return float(live["deadline_unix"]) - float(snapshot.get("rendered_at") or time.time())
+    return live.get("time_remaining_sec")
+
+
 def _tiles(snapshot: dict) -> str:
     live, campaign = snapshot.get("live") or {}, snapshot.get("campaign") or {}
-    best = campaign.get("best") or {}
     counters = campaign.get("cumulative") or {}
     usage = snapshot.get("usage") or {}
     deadline = live.get("deadline_unix")
@@ -141,18 +187,13 @@ def _tiles(snapshot: dict) -> str:
         "<div class='tiles'>"
         + "".join(
             [
-                _tile(
-                    "Best speedup",
-                    f"{_fmt(best.get('mean_case_speedup'))}×",
-                    f"iteration {escape(str(best.get('iteration') or '—'))}",
-                    hero=True,
-                ),
+                _best_tile(campaign),
                 _tile(
                     "Iterations",
                     escape(str(counters.get("iterations") or 0)),
                     f"{counters.get('kept') or 0} kept · {counters.get('reverted') or 0} reverted",
                 ),
-                _tile("Time left", _duration(live.get("time_remaining_sec")), escape(deadline_text)),
+                _tile("Time left", _duration(_time_left(snapshot)), escape(deadline_text)),
                 _tile("LLM spend", cost_text, f"{tokens:,} tokens · {usage.get('calls') or 0} calls"),
                 _noise_tile(snapshot),
             ]
@@ -300,17 +341,21 @@ def _case_table(snapshot: dict) -> str:
             served += ok
             cell = _status_mark(ok)
         rows.append(
-            f"<tr><td>{escape(str(case.get('case_id')))}</td><td class='num'>{_fmt(anchor, '.4f')}</td>"
-            f"<td class='num'>{_fmt(best, '.4f')}</td><td class='num'>{_fmt(speedup, '.3f')}</td><td>{cell}</td></tr>"
+            f"<tr><td>{escape(str(case.get('case_id')))}</td><td class='num'>{_micro(anchor)}</td>"
+            f"<td class='num'>{_micro(best)}</td><td class='num'>{_fmt(speedup, '.3f')}</td><td>{cell}</td></tr>"
         )
     head = "per-case speedup of the best kernel over the anchor (point estimate from the loop's own timing)"
     if threshold is not None:
         head += f"; {served}/{len(cases)} at or above {float(threshold):g}×"
     return (
         f"<div class='card'><h2>Cases</h2><div class='sub'>{escape(head)}</div><table><tr><th>case</th>"
-        "<th class='num'>anchor ms</th><th class='num'>best ms</th><th class='num'>speedup</th>"
+        "<th class='num'>anchor µs</th><th class='num'>best µs</th><th class='num'>speedup</th>"
         f"<th>at threshold</th></tr>{''.join(rows)}</table></div>"
     )
+
+
+def _micro(milliseconds) -> str:
+    return _fmt(None if milliseconds is None else float(milliseconds) * 1000.0, ".2f")
 
 
 def _status_mark(ok: bool) -> str:
@@ -467,13 +512,67 @@ def _ablation_panel(snapshot: dict) -> str:
 def _inbox_panel(snapshot: dict) -> str:
     inbox = snapshot.get("inbox") or {}
     pending, active = inbox.get("pending") or [], inbox.get("active") or []
-    if not pending and not active:
-        return ""
     items = [f"<li>waiting for the next iteration: {escape(text)}</li>" for text in pending]
     items += [f"<li>{escape(text)}</li>" for text in active]
+    standing = f"<ul>{''.join(items)}</ul>" if items else "<div class='sub'>No message stands.</div>"
     return (
-        "<div class='card'><h2>Operator messages</h2><div class='sub'>standing guidance, newest first; "
-        f"withdraw with <code>forge-say --clear</code></div><ul>{''.join(items)}</ul></div>"
+        "<div class='card'><h2>Operator messages</h2><div class='sub'>Every agent reads them from the next iteration "
+        "on, ahead of its own plans, until they are cleared. Sending works when the page is served by "
+        "<code>kernelforge forge-dashboard</code> or a relay; opened as a file, use <code>forge-say</code>.</div>"
+        "<form class='say' method='post' action='say'><textarea name='message' rows='3' "
+        "placeholder='e.g. Focus on the M&lt;=64 cases; leave the large ones alone.'></textarea>"
+        "<div class='buttons'><button class='primary' type='submit'>Send</button>"
+        "<button type='submit' name='clear' value='1'>Clear all messages</button></div></form>"
+        f"{standing}</div>"
+    )
+
+
+def _plan_title(plan: str) -> str:
+    for line in plan.splitlines():
+        line = line.strip().lstrip("#").strip()
+        if line and not line.lower().startswith("direction:"):
+            return line[:140]
+    return ""
+
+
+def _round_entry(entry: dict, *, open_: bool) -> str:
+    iteration, score, before = entry.get("iter"), entry.get("score"), entry.get("best_before")
+    change = ""
+    if score is not None and before:
+        change = f" ({float(score) / float(before) - 1:+.2%} vs best {_fmt(before)}×)"
+    meta = [f"iteration {escape(str(iteration))}"]
+    if score is not None:
+        meta.append(f"{_fmt(score)}×{change}")
+    if entry.get("direction_id"):
+        meta.append(f"direction {escape(str(entry['direction_id']))}")
+    title = _plan_title(entry.get("plan") or "")
+    verdict = [part for part in (_keep_bar(entry.get("keep_bar")),) if part]
+    if entry.get("session_end_reason"):
+        verdict.append(f"session ended: {entry['session_end_reason']}")
+    if entry.get("turns"):
+        verdict.append(f"{entry['turns']} turns")
+    sections = [
+        ("Plan", entry.get("plan")),
+        ("What the implementer reports", entry.get("rationale")),
+        ("Why it failed", entry.get("validation")),
+        ("Verdict", " · ".join(verdict)),
+    ]
+    body = "".join(f"<h3>{name}</h3><pre>{escape(str(text))}</pre>" for name, text in sections if text)
+    return (
+        f"<details class='round' id='round-{escape(str(iteration))}'{' open' if open_ else ''}><summary>"
+        f"{_status_chip(entry.get('decision', ''))} <span class='meta'>· {' · '.join(meta)}</span>"
+        f"{' — ' + escape(title) if title else ''}</summary><div class='round-body'>{body}</div></details>"
+    )
+
+
+def _rounds_panel(snapshot: dict) -> str:
+    rounds = snapshot.get("rounds") or []
+    if not rounds:
+        return ""
+    entries = "".join(_round_entry(entry, open_=index == 0) for index, entry in enumerate(rounds))
+    return (
+        "<div class='card'><h2>Rounds</h2><div class='sub'>newest first: what each round planned, what its "
+        f"implementer reports doing, and the verdict</div>{entries}</div>"
     )
 
 
@@ -486,6 +585,7 @@ def render_dashboard(snapshot: dict) -> str:
         _score_chart(rows),
         _decision_strip(rows),
         _inbox_panel(snapshot),
+        _rounds_panel(snapshot),
         _directions_panel(snapshot),
         _ablation_panel(snapshot),
         _case_table(snapshot),
@@ -495,8 +595,9 @@ def render_dashboard(snapshot: dict) -> str:
     ]
     return (
         "<!doctype html><html lang='en'><head><meta charset='utf-8'>"
-        f"<meta http-equiv='refresh' content='{REFRESH_SEC}'>"
+        f"<noscript><meta http-equiv='refresh' content='{REFRESH_SEC}'></noscript>"
         "<meta name='viewport' content='width=device-width,initial-scale=1'>"
         f"<title>forge-loop dashboard</title><style>{_CSS}</style></head>"
-        f"<body><div class='viz-root'>{''.join(part for part in body if part)}</div></body></html>"
+        f"<body><div class='viz-root'>{''.join(part for part in body if part)}</div>"
+        f"<script>{_SCRIPT}</script></body></html>"
     )

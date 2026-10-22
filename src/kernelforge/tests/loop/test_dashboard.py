@@ -6,12 +6,19 @@
 from __future__ import annotations
 
 import json
+import stat
+import threading
+import urllib.error
+import urllib.parse
+import urllib.request
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from kernelforge.loop.dashboard import DASHBOARD_HTML, LiveStatus, publish_dashboard
+from kernelforge.loop.dashboard.server import make_server
+from kernelforge.loop.operator_inbox import CLEAR, OperatorInbox
 from kernelforge.loop.runner import IterationLoop
 
 
@@ -37,7 +44,8 @@ def campaign(tmp_path: Path) -> Path:
         "iteration": 3,
         "cumulative": {"iterations": 3, "kept": 1, "reverted": 2},
         "best": {"iteration": 2, "mean_case_speedup": 1.05},
-        "baseline_case_times": {"m=7": 0.0103, "m=14": 0.0100},
+        "search_start_mean_case_speedup": 0.99,
+        "baseline_case_times": {"m=14": 0.0100, "m=7": 0.0103},
         "best_case_times": {"m=7": 0.0100, "m=14": 0.0101},
     }
     (root / "run_state.json").write_text(json.dumps(state))
@@ -60,6 +68,15 @@ def campaign(tmp_path: Path) -> Path:
         )
     )
     (root / "supervisor" / "latest.md").write_text("Try a deeper pipeline <b>now</b>.\n")
+    rounds = {
+        2: {"plan": "Direction: d1\nPrefetch B two tiles ahead", "rationale": "Moved B loads up; 5% faster."},
+        3: {"plan": "Direction: d2\nSplit K", "rationale": "Split K by 2 and <i>reduced</i> in the epilogue."},
+    }
+    for iteration, meta in rounds.items():
+        folder = root / "candidates" / f"iter_{iteration:03d}"
+        folder.mkdir(parents=True)
+        (folder / "meta.json").write_text(json.dumps(meta | {"best_mean_case_speedup_before": 1.0}))
+    (root / "candidates" / "iter_003" / "validation.txt").write_text("m=14: max_diff 0.5 > atol")
     return root
 
 
@@ -76,11 +93,79 @@ def test_the_page_carries_every_panel(campaign: Path) -> None:
     assert (campaign / "dashboard.json").is_file()
 
 
-def test_the_page_loads_nothing_and_runs_nothing(campaign: Path) -> None:
+def test_the_page_loads_nothing_and_runs_only_its_own_refresh(campaign: Path) -> None:
     html = publish_dashboard(campaign, _live()).read_text()
-    assert "<script" not in html
+    assert html.count("<script") == 1 and "<script>" in html
     assert "src=" not in html
     assert "http://" not in html and "https://" not in html
+    assert "<noscript><meta http-equiv='refresh'" in html
+
+
+def test_each_round_says_what_was_planned_what_was_done_and_why_it_failed(campaign: Path) -> None:
+    html = publish_dashboard(campaign, _live()).read_text()
+    rounds = html[html.index("<h2>Rounds</h2>") :]
+    # Newest first, and only the newest open.
+    assert rounds.index("id='round-3' open") < rounds.index("id='round-2'>") < rounds.index("id='round-1'>")
+    assert "Split K by 2 and &lt;i&gt;reduced&lt;/i&gt; in the epilogue." in rounds
+    assert "m=14: max_diff 0.5 &gt; atol" in rounds
+    assert "Prefetch B two tiles ahead" in rounds and "(+5.00% vs best 1.0000×)" in rounds
+
+
+def test_the_page_carries_a_message_form_even_with_an_empty_inbox(campaign: Path) -> None:
+    html = publish_dashboard(campaign, _live()).read_text()
+    assert "<form class='say' method='post' action='say'>" in html
+    assert "name='message'" in html and "name='clear'" in html
+    assert "No message stands." in html
+
+
+def test_the_published_page_is_readable_by_whoever_syncs_it(campaign: Path) -> None:
+    for path in (publish_dashboard(campaign, _live()), campaign / "dashboard.json"):
+        assert stat.S_IMODE(path.stat().st_mode) == 0o644
+
+
+def test_cases_run_in_numeric_order(campaign: Path) -> None:
+    html = publish_dashboard(campaign, _live()).read_text()
+    assert html.index("<td>m=7</td>") < html.index("<td>m=14</td>")
+    assert "<th class='num'>anchor µs</th>" in html and "<td class='num'>10.30</td>" in html
+
+
+def _serve(campaign: Path):
+    server = make_server(campaign.parent, port=0)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, f"http://127.0.0.1:{server.server_address[1]}"
+
+
+def _post(url: str, fields: dict) -> int:
+    request = urllib.request.Request(url, data=urllib.parse.urlencode(fields).encode(), method="POST")
+    opener = urllib.request.build_opener(_NoRedirect)
+    try:
+        return opener.open(request).status
+    except urllib.error.HTTPError as error:
+        return error.code
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+def test_the_served_page_takes_a_message_and_a_clear(campaign: Path) -> None:
+    publish_dashboard(campaign, _live())
+    server, base = _serve(campaign)
+    try:
+        page = urllib.request.urlopen(f"{base}/dashboard.html").read().decode()
+        assert "<h2>Rounds</h2>" in page
+        assert _post(f"{base}/say", {"message": "focus on m=7"}) == 303
+        inbox = OperatorInbox(campaign.parent)
+        assert [path.read_text().strip() for path in inbox.pending()] == ["focus on m=7"]
+        assert "waiting for the next iteration: focus on m=7" in urllib.request.urlopen(base + "/").read().decode()
+        assert _post(f"{base}/say", {"message": "ignored", "clear": "1"}) == 303
+        assert inbox.pending()[-1].read_text().strip() == CLEAR
+        assert _post(f"{base}/say", {"message": "  "}) == 400
+        assert _post(f"{base}/elsewhere", {"message": "x"}) == 404
+    finally:
+        server.shutdown()
+        server.server_close()
 
 
 def test_agent_text_is_escaped(campaign: Path) -> None:
@@ -112,6 +197,14 @@ def test_an_empty_campaign_still_renders(tmp_path: Path) -> None:
     root.mkdir()
     html = publish_dashboard(root, _live()).read_text()
     assert "No measured iteration yet." in html
+
+
+def test_before_any_keep_the_best_is_the_starting_kernel(campaign: Path) -> None:
+    state = json.loads((campaign / "run_state.json").read_text())
+    (campaign / "run_state.json").write_text(json.dumps(state | {"best": {}}))
+    html = publish_dashboard(campaign, _live()).read_text()
+    tile = html[html.index("Best speedup") :].split("</div></div>")[0]
+    assert "0.9900×" in tile and "the starting kernel" in tile
 
 
 def test_the_loop_publishes_and_never_raises(campaign: Path, tmp_path: Path) -> None:

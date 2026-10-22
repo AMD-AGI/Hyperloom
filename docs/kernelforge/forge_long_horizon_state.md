@@ -50,10 +50,13 @@ forge_experiments/
   ablation.md
 ```
 
-`dashboard.html` is a static page that reloads itself every minute. The loop re-renders it, with the
-`dashboard.json` snapshot it was built from, at the start of a run, after every iteration and when the run
-ends. It reads only the files above plus the LLM usage ledger and writes nothing else; a failed render is
-recorded as a persistence error and never stops the loop.
+`dashboard.html` is one self-contained page that reloads itself every minute, except while a message is
+being typed into its form. The loop re-renders it, with the `dashboard.json` snapshot it was built from, at the
+start of a run, after every iteration and when the run ends, readable by every user (mode 0644). It reads only
+the files above, the LLM usage ledger and each recent round's `candidates/iter_NNN/meta.json` and
+`validation.txt` (its plan, the implementer's account and why it failed), and writes nothing else; a failed render
+is recorded as a persistence error and never stops the loop. `kernelforge forge-dashboard` serves the same page,
+rendered on every visit, and posts the form's messages into `inbox/`.
 
 The loader accepts exactly the field set the current code writes: a checkpoint
 with a missing or unknown field, top-level or nested, is rejected rather than

@@ -224,6 +224,27 @@ kernelforge forge-say --workspace <ws> "Focus on the M<=64 cases; leave the larg
 kernelforge forge-say --workspace <ws> --clear
 ```
 
+## forge-dashboard
+
+Serves the dashboard of a campaign, running or finished, rendered from its files on
+every visit: score by iteration, every decision, each round's plan, the
+implementer's own account and why a round failed, the cases against the
+anchor, the noise floor, directions, operator messages, spend and the ablation.
+Its form posts operator messages into the campaign's inbox exactly as
+`forge-say` does, and clears them. The page reloads itself every minute, except
+while a message is being typed. It listens on the loopback address by default:
+forward the port to read it from another machine.
+
+| Option | Default | Meaning |
+|:--|:--|:--|
+| `--workspace <dir>` | required | Workspace of the campaign to show. |
+| `--host <addr>` | `127.0.0.1` | Address to listen on. |
+| `--port <n>` | `8765` | Port to listen on; `0` picks a free one. |
+
+```bash
+kernelforge forge-dashboard --workspace <ws> --port 8765
+```
+
 ## forge-ablate
 
 Prices each change a finished forge-loop campaign kept. Every commit from the

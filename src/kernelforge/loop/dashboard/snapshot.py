@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -19,6 +20,12 @@ DASHBOARD_JSON = "dashboard.json"
 DASHBOARD_HTML = "dashboard.html"
 _RECENT_EVENTS = 15
 _TEXT_LIMIT = 6000
+_RECENT_ROUNDS = 30
+# How much of each round's own words the page carries: the plan, the implementer's account, the failure.
+_ROUND_TEXT_LIMITS = {"plan": 2000, "rationale": 4000, "validation": 1500}
+_VALIDATION_FAILURES = frozenset(
+    {"REVERT_VALIDATION", "REVERT_VALIDATION_TIMEOUT", "REVERT_VALIDATION_ERROR", "BUILD_FAILED", "CRASH"}
+)
 # Events worth a line in the recent-events panel; iteration results have their own panels.
 _NOTABLE_EVENTS = frozenset(
     {
@@ -106,13 +113,45 @@ def _event_summary(event: dict) -> dict:
     return {"type": event.get("type", ""), "iter": event.get("iter"), "ts": event.get("ts", ""), "detail": text[:300]}
 
 
+def _clip(text: str, limit: int) -> str:
+    text = text.strip()
+    return text if len(text) <= limit else text[:limit] + "\n…"
+
+
+def _round(campaign_root: Path, event: dict) -> dict:
+    """One iteration as a reviewer reads it: what was planned, what the implementer says it did, and the verdict."""
+    iteration = int(event.get("iter") or 0)
+    folder = campaign_root / "candidates" / f"iter_{iteration:03d}"
+    meta = _read_json(folder / "meta.json") or {}
+    decision = str(event.get("decision") or "")
+    validation = _read_text(folder / "validation.txt") if decision in _VALIDATION_FAILURES else ""
+    return _iteration_row(event) | {
+        "best_before": meta.get("best_mean_case_speedup_before"),
+        "delta_vs_best_pct": meta.get("delta_vs_best_pct"),
+        "turns": event.get("turns"),
+        "plan": _clip(str(meta.get("plan") or event.get("plan") or ""), _ROUND_TEXT_LIMITS["plan"]),
+        "rationale": _clip(str(meta.get("rationale") or ""), _ROUND_TEXT_LIMITS["rationale"]),
+        "validation": _clip(validation, _ROUND_TEXT_LIMITS["validation"]),
+    }
+
+
+def _natural(case_id: str) -> list:
+    """``m=7`` before ``m=14``: digits compare as numbers."""
+    return [int(part) if part.isdigit() else part for part in re.split(r"(\d+)", case_id)]
+
+
 def _cases(state: dict) -> list[dict]:
     anchor = state.get("baseline_case_times") or {}
     best = state.get("best_case_times") or {}
     unscored = set(state.get("unscored_cases") or [])
     return [
-        {"case_id": case_id, "anchor_ms": anchor_ms, "best_ms": best.get(case_id), "unscored": case_id in unscored}
-        for case_id, anchor_ms in anchor.items()
+        {
+            "case_id": case_id,
+            "anchor_ms": anchor[case_id],
+            "best_ms": best.get(case_id),
+            "unscored": case_id in unscored,
+        }
+        for case_id in sorted(anchor, key=_natural)
     ]
 
 
@@ -192,12 +231,14 @@ def collect_snapshot(campaign_root: Path, live: LiveStatus | None = None) -> dic
         live_block = previous.get("live") or {}
     usage_path = Path(live_block.get("usage_path") or campaign_root / "llm_usage.json")
     notable = [event for event in events if event.get("type") in _NOTABLE_EVENTS]
+    results = [event for event in events if event.get("type") == "iteration_result"]
     return {
         "rendered_at": time.time(),
         "campaign_root": str(campaign_root),
         "live": live_block,
         "campaign": _campaign(state),
-        "iterations": [_iteration_row(event) for event in events if event.get("type") == "iteration_result"],
+        "iterations": [_iteration_row(event) for event in results],
+        "rounds": [_round(campaign_root, event) for event in reversed(results[-_RECENT_ROUNDS:])],
         "cases": _cases(state),
         "usage": _read_json(usage_path) or {},
         "supervisor": _read_text(campaign_root / "supervisor" / "latest.md"),

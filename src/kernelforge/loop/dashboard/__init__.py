@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 from kernelforge.loop.dashboard.render import render_dashboard
@@ -19,7 +20,10 @@ def publish_dashboard(campaign_root: str | Path, live: LiveStatus | None = None)
     """Write ``dashboard.json`` and ``dashboard.html`` under ``campaign_root``; return the HTML path."""
     root = Path(campaign_root)
     snapshot = collect_snapshot(root, live)
-    atomic_write_text(root / DASHBOARD_JSON, json.dumps(snapshot, indent=2, default=str))
-    html_path = root / DASHBOARD_HTML
+    json_path, html_path = root / DASHBOARD_JSON, root / DASHBOARD_HTML
+    atomic_write_text(json_path, json.dumps(snapshot, indent=2, default=str))
     atomic_write_text(html_path, render_dashboard(snapshot))
+    # Readable by whoever syncs the page off the node; the atomic write leaves its temporary file's 0600.
+    for path in (json_path, html_path):
+        os.chmod(path, 0o644)
     return html_path
