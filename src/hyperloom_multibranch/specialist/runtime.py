@@ -8,8 +8,9 @@ A branch started with neither a direction nor a repair takes one of the session'
 work instead of all sweeping the same settings, and a stopped branch's direction is not handed out again while another
 was never tried. Once each was held, it takes the one the fewest branches held over the session, then the one the
 fewest running branches hold. A direction given to a branch counts when it is one of these. A direction whose
-specialist gave up finding nothing to test is not dealt again on that start commit while another is left there: a
-later head may open it again, the same one would not.
+specialist gave up finding nothing to test is not dealt again on that start commit while another is left there, nor on
+the head its last :mod:`~hyperloom_multibranch.specialist.exhausted` record names: a later head may open it again, the
+same one would not.
 
 A session that crashes is restarted on its branch, at most ``MAX_RESTARTS`` times within ``RESTART_WINDOW_S``, and a
 lost one at most ``MAX_LOSS_RESTARTS`` times in a row with no session working in between: a loss takes the heartbeat
@@ -39,6 +40,7 @@ from hyperloom_multibranch.contracts.lifecycle import BranchTask, SpecialistStat
 from hyperloom_multibranch.contracts.notebook.interfaces import ClaimService, NotebookError
 from hyperloom_multibranch.contracts.notebook.vocab import ClaimStatus
 from hyperloom_multibranch.specialist.directions import DIRECTIONS
+from hyperloom_multibranch.specialist.exhausted import latest_exhausted
 from hyperloom_multibranch.specialist.judging import NOTICE, BranchJudge, JudgeNotebook, Judging
 
 logger = logging.getLogger(__name__)
@@ -211,8 +213,8 @@ class SpecialistRuntime:
                     )
                     continue
                 state.session, state.gave_up = None, True
-                self._given_up.add((state.start_commit, state.task.direction))
-                await _notice(state, f"the specialist found nothing to test ({error}); it is not restarted")
+                record = await self._close_direction(state)
+                await _notice(state, f"the specialist found nothing to test ({error}); it is not restarted{record}")
                 return
             except Exception as error:
                 logger.exception("the specialist of %s crashed", state.name)
@@ -237,6 +239,16 @@ class SpecialistRuntime:
                 state.session, state.gave_up = None, True
                 await _notice(state, f"the specialist {why} ({error!r}); it is not restarted")
                 return
+
+    async def _close_direction(self, state: _Branch) -> str:
+        """Deal the given-up branch's direction to no new branch on its start commit or on the head its specialist's
+        last exhausted record names; that record as the give-up notice quotes it, ``""`` without one."""
+        self._given_up.add((state.start_commit, state.task.direction))
+        exhausted = latest_exhausted(await state.notebook.branch_log(state.name))
+        if exhausted is None:
+            return ""
+        self._given_up.add((exhausted.head, state.task.direction))
+        return f"; its last exhausted record: {exhausted.summary()}"
 
     def _least_held(self, start_commit: str) -> str:
         running = [state.task.direction for state in self._branches.values()]

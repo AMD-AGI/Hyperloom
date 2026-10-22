@@ -3,10 +3,12 @@
 
 import asyncio
 import itertools
+import json
 
 import pytest
 
 from hyperloom.contracts.recipe import LaunchConfig, Recipe
+from hyperloom_multibranch.contracts.branch_log import BranchLogEntry, BranchLogType
 from hyperloom_multibranch.contracts.fork import AdmissionStatus, RepairRequest
 from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
 from hyperloom_multibranch.contracts.lifecycle import BranchTask, SpecialistStatus
@@ -18,6 +20,7 @@ from hyperloom_multibranch.notebook.tests.factories import delta, intent
 from hyperloom_multibranch.rulegate.gate import RuleGate
 from hyperloom_multibranch.rulegate.rules import InferenceXRule
 from hyperloom_multibranch.specialist.directions import DIRECTIONS
+from hyperloom_multibranch.specialist.exhausted import EXHAUSTED_PREFIX
 from hyperloom_multibranch.specialist.judging import NOTICE, Judging
 from hyperloom_multibranch.specialist.runtime import (
     MAX_LOSS_RESTARTS,
@@ -347,6 +350,27 @@ async def test_two_idle_sessions_in_a_row_end_the_specialist_after_one_fresh_ses
     assert any("found nothing to test" in notice and "not restarted" in notice for notice in notices)
     assert await runtime.status(BRANCH) == SpecialistStatus(False, 0, 0, True, False)
     await runtime.stop(BRANCH)
+
+
+async def test_a_specialist_s_exhausted_record_is_in_its_give_up_notice_and_closes_its_direction_on_that_head(session):
+    runs = _Runs(errors=(_idle(), _idle()))
+    runtime = session.runtime(runs)
+    head, moved = await session.repo.head(BRANCH), "e" * 40
+    record = {"direction": DIRECTIONS[0], "head": moved, "tried": ["r1"], "why": "blocked_by_tool"}
+    record |= {"detail": "start_analysis refused the head's profile", "reopen_if": "the analysis is allowed"}
+    entry = BranchLogEntry(BRANCH, BranchLogType.RESULT, EXHAUSTED_PREFIX + json.dumps(record))
+    await LocalNotebook(session.root, Writer(Role.SPECIALIST_RUNTIME, BRANCH, BRANCH)).append_branch_log(entry)
+
+    await runtime.start(BRANCH, head)
+    await _until(lambda: _any_notice(session, "not restarted"), "the specialist to give up")
+    await runtime.stop(BRANCH)
+    await runtime.start("next", moved)
+    await _until(lambda: _true(len(runs.started) == 3), "the next specialist to start")
+    await runtime.stop("next")
+
+    (given_up,) = [notice for notice in await session.notices() if "not restarted" in notice]
+    assert "blocked_by_tool: start_analysis refused the head's profile" in given_up
+    assert runs.started[-1].start.task.direction == DIRECTIONS[1]
 
 
 async def test_an_idle_session_that_submitted_a_test_starts_the_count_again(session):
