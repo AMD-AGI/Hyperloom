@@ -33,6 +33,7 @@ SPEC = AgentSpec(
     workspace="/ws/sglang",
     cards=(7,),
     seconds=3600.0,
+    port=31100,
 )
 
 

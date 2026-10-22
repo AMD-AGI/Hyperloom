@@ -30,7 +30,7 @@ from hyperloom_multibranch.specialist.autonomous_session import (
     without_file,
 )
 from hyperloom_multibranch.specialist.judging import NOTICE
-from hyperloom_multibranch.specialist.runtime import SessionCrashed, SessionFinished, SessionStart
+from hyperloom_multibranch.specialist.runtime import PreflightFailed, SessionCrashed, SessionFinished, SessionStart
 from hyperloom_multibranch.tests.branch_rig import branch_rig
 
 BRANCH = "a1"
@@ -193,7 +193,9 @@ class Rig:
         return self.blobs.get(change.add_patches[0].sha256).decode()
 
 
-async def _rig(tmp_path: Path, agent: Agent = Agent(), *, poll: float = 0.05, clock=time.time) -> Rig:
+async def _rig(
+    tmp_path: Path, agent: Agent = Agent(), *, poll: float = 0.05, clock=time.time, cards: tuple[int, ...] = (0,)
+) -> Rig:
     rig = await branch_rig(tmp_path, ROOT, BRANCH)
     toolbox_notebook = LocalNotebook(tmp_path / "notebook", Writer(Role.TOOLBOX, "toolbox"))
     worktree = rig.base.worktree(BRANCH, tmp_path / BRANCH / "agent-workspace")
@@ -202,13 +204,8 @@ async def _rig(tmp_path: Path, agent: Agent = Agent(), *, poll: float = 0.05, cl
     async def onboard(checkout: Path, prompt: str) -> str:
         return _manifest(str(worktree.path), agent)
 
-    def spec(workspace: Path) -> AgentSpec:
-        return AgentSpec(
-            "/models/m", "vllm", 1, "fp8", "mi355x", {}, "output_throughput", ROOT.launch.server_args, {},
-            str(workspace), (0,), 60.0,
-        )  # fmt: skip
-
     onboarding = OnboardingSetup(sandbox, onboard, start_seconds=5.0, poll_seconds=0.05)
+    spec = AgentSpec("/models/m", "vllm", 1, "fp8", "mi355x", {}, "output_throughput", "", {}, "", cards, 60.0, 31100)
     setup = AutonomousSetup(
         onboarding, spec, toolbox, rig.repo, "vllm", poll_seconds=poll, settle_seconds=0.3, clock=clock
     )
@@ -352,3 +349,12 @@ def test_only_the_file_the_agent_keeps_its_config_in_leaves_the_source_patch() -
     ]
 
     assert without_file("".join(sections), manifest) == sections[1]
+
+
+async def test_an_agent_with_no_card_left_fails_its_preflight_before_it_is_fetched(tmp_path: Path) -> None:
+    rig = await _rig(tmp_path, cards=())
+
+    with pytest.raises(PreflightFailed, match="no GPU is left"):
+        await rig.session.preflight()
+
+    assert not rig.sandbox.started

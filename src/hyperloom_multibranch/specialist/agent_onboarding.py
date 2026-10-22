@@ -69,7 +69,8 @@ sys.exit(f"docker {' '.join(args[:1])}: this sandbox runs commands in place and 
 class AgentSpec:
     """What MB asks of the agent, which its config must be derived from: the workload, the metric it is judged on,
     the server arguments and environment it starts from (the root's), ``workspace``, the framework checkout it edits,
-    ``cards``, the GPUs it may use, and ``seconds``, how long it may run."""
+    ``cards``, the GPUs it may use, ``seconds``, how long it may run, and ``port``, the first of the ports its servers
+    may listen on."""
 
     model: str
     framework: str
@@ -83,6 +84,7 @@ class AgentSpec:
     workspace: str
     cards: tuple[int, ...]
     seconds: float
+    port: int
 
     def to_document(self) -> dict[str, object]:
         return {
@@ -98,6 +100,7 @@ class AgentSpec:
             "workspace": self.workspace,
             "cards": list(self.cards),
             "seconds": self.seconds,
+            "port": self.port,
         }
 
 

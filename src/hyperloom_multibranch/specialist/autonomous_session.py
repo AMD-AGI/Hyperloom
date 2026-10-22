@@ -22,11 +22,11 @@ import json
 import logging
 import time
 from collections.abc import Awaitable, Callable
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
 from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest
-from hyperloom.contracts.recipe import RecipeDelta, RecipeError
+from hyperloom.contracts.recipe import LaunchConfig, RecipeDelta, RecipeError
 from hyperloom_multibranch.contracts.branch_log import BranchLogEntry, BranchLogType
 from hyperloom_multibranch.contracts.notebook.records import TestRecord
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
@@ -45,7 +45,7 @@ from hyperloom_multibranch.specialist.agent_onboarding import (
 )
 from hyperloom_multibranch.specialist.agent_session import BranchPlace
 from hyperloom_multibranch.specialist.judging import NOTICE
-from hyperloom_multibranch.specialist.runtime import SessionCrashed, SessionFinished, SessionStart
+from hyperloom_multibranch.specialist.runtime import PreflightFailed, SessionCrashed, SessionFinished, SessionStart
 from hyperloom_multibranch.specialist.tools import sync_to_head
 from hyperloom_multibranch.specialist.worktree import WorktreeError
 
@@ -62,12 +62,12 @@ SETTLE_SECONDS = 120.0
 
 @dataclass(frozen=True)
 class AutonomousSetup:
-    """What every autonomous branch of a session shares: how agents are made ready, the spec a branch's agent is given
-    (from the branch's agent workspace), what imports are submitted through and read against, and ``component``, the
-    framework the agent edits."""
+    """What an autonomous branch runs on: how its agent is made ready, the spec it is given (its root's server
+    arguments and environment and its workspace are filled in at the preflight), what imports are submitted through
+    and read against, and ``component``, the framework the agent edits."""
 
     onboarding: OnboardingSetup
-    spec: Callable[[Path], AgentSpec]
+    spec: AgentSpec
     toolbox: Toolbox
     repo: ExperimentRepo
     component: str
@@ -110,12 +110,17 @@ class AutonomousSession:
         self._agent_dir = place.workspace / AGENT_DIR
         self._manifest: AgentManifest | None = None
         self._process: AgentProcess | None = None
+        self._root = LaunchConfig()
         self._stopped = asyncio.Event()
 
     async def preflight(self) -> None:
         await sync_to_head(self._setup.repo, self._start.branch, self._place.worktree)
         root = self._place.worktree.commit()
-        spec = self._setup.spec(self._place.worktree.path)
+        launch = (await self._setup.repo.read_recipe(self._start.start_commit)).launch
+        workspace = str(self._place.worktree.path)
+        spec = replace(self._setup.spec, server_args=launch.server_args, envs=dict(launch.envs), workspace=workspace)
+        if not spec.cards:
+            raise PreflightFailed(["no GPU is left for the agent: every card the agents may lease is taken"])
         ready = await make_ready(self._start.task.agent, spec, self._agent_dir, self._setup.onboarding)
         self._manifest, self._process = ready.manifest, ready.process
         (self._place.workspace / MANIFEST_FILE).write_text(json.dumps(ready.manifest.to_document()), encoding=ENCODING)
@@ -124,6 +129,7 @@ class AutonomousSession:
 
     async def run(self) -> None:
         manifest, process = await self._running()
+        self._root = (await self._setup.repo.read_recipe(self._start.start_commit)).launch
         watch = KeepWatch.load(self._place.workspace / WATCH_FILE)
         while not self._stopped.is_set():
             ended = process.returncode is not None
@@ -239,8 +245,7 @@ class AutonomousSession:
         patch = without_file(self._place.worktree.diff_from(root, self._setup.component), manifest)
         source, summary = manifest.config_source, self._summary(manifest)
         if source is None:
-            spec = self._setup.spec(self._place.worktree.path)
-            return KeptChange(seq, patch, spec.server_args, dict(spec.envs), summary)
+            return KeptChange(seq, patch, self._root.server_args, dict(self._root.envs), summary)
         return read_kept_change(seq, patch, _json(self._place.worktree.path / source.path), source, summary)
 
     def _summary(self, manifest: AgentManifest) -> str:
