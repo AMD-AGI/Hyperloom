@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from kernelforge.llm.git import git
+from kernelforge.tools.git import git
 from kernelforge.config import Config
 from kernelforge.rewrite_by_flydsl.spec import RewriteSpec
 from kernelforge.tracker import ExperimentTracker

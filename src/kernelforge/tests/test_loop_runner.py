@@ -18,10 +18,10 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
-from kernelforge.llm import process_reaping
-from kernelforge.llm.process_reaping import ReapReport
+from kernelforge.tools import process_reaping
+from kernelforge.tools.process_reaping import ReapReport
 from kernelforge.agent_backends import AgentRunResult
-from kernelforge.llm.git import GitError
+from kernelforge.tools.git import GitError
 from kernelforge.loop import analysis_evidence
 from kernelforge.loop import fanout
 from kernelforge.loop import runner as runner_module
@@ -2375,7 +2375,7 @@ def _measurement_loop(monkeypatch, benchmark_result, workspace_dir="."):
     report = SimpleNamespace(
         all_passed=True,
         results=[
-            SimpleNamespace(stage=5, stage_name="full", passed=True, snr_db=40.0),
+            SimpleNamespace(stage=5, stage_name="full", passed=True, status_label="PASS", snr_db=40.0),
         ],
         summary=lambda: "PASS",
     )
@@ -3258,6 +3258,8 @@ def test_runner_uses_analysis_checkpoint_after_session_failure(
     catalog.write_text("{}")
 
     class FailingAnalysisService:
+        profiling_enabled = True
+
         async def ensure_bundle(self, context, **_kwargs):
             raise RuntimeError("analysis interrupted")
 
@@ -4426,6 +4428,8 @@ def test_analysis_service_rechecks_same_commit_for_partial_upgrade(
             return context
 
     class AnalysisService:
+        profiling_enabled = True
+
         async def ensure_bundle(self, context, **_kwargs):
             analysis_calls.append(context.analysis_commit)
             return Bundle(
@@ -4482,8 +4486,11 @@ def test_keep_defers_incremental_analysis_until_next_request(
             self.root.mkdir(parents=True, exist_ok=True)
             (self.root / "manifest.json").write_text("{}")
             (commit_root / "published.json").write_text(json.dumps({"generation_root": self.root.name}))
+            self.manifest = {"status": "READY"}
             self.outcome = SimpleNamespace(
                 checkpoint_level="published",
+                available_tier="profiled",
+                upgrade_exhausted=False,
                 to_dict=dict,
             )
 
@@ -4491,6 +4498,8 @@ def test_keep_defers_incremental_analysis_until_next_request(
             return context
 
     class AnalysisService:
+        profiling_enabled = True
+
         async def ensure_bundle(
             self,
             context,
@@ -5667,6 +5676,45 @@ def test_reconcile_republishes_a_best_a_stale_manifest_does_not_name(
     assert len(republished) == 1
     assert republished[0].commit_hash == head
     assert loop.persistence_degraded is False
+
+
+def test_resume_publication_diff_failure_degrades_persistence_without_propagating(
+    tmp_path,
+    monkeypatch,
+    caplog,
+):
+    loop, workspace = _make_loop(tmp_path, monkeypatch)
+    loop.best_publisher = runner_module.BestResultPublisher(str(workspace))
+    loop.archive = runner_module.CandidateArchive(str(workspace), loop.ic.kernel_file)
+    base_commit = loop._git("rev-parse", "HEAD").strip()
+    (workspace / "kernel.py").write_text("def kernel():\n    return 2\n")
+    best_commit = loop._git_commit("best candidate")
+    loop.ic.campaign_base_commit = base_commit
+    loop.run_state = RunState(campaign_id="campaign", session_index=2, baseline_wall_ms=1.0)
+    loop.run_state.best = BestRecord(
+        iteration=1,
+        wall_ms=0.8,
+        mean_case_speedup=1.25,
+        commit_hash=best_commit,
+        source="iteration",
+    )
+    failure = GitError(128, ["git", "diff"], "", "fatal: bad object")
+    real_git = runner_module.git
+
+    def fail_publication_diff(*args, **kwargs):
+        if args == ("diff", base_commit, best_commit, "--", "."):
+            raise failure
+        return real_git(*args, **kwargs)
+
+    monkeypatch.setattr(runner_module, "git", fail_publication_diff)
+
+    with caplog.at_level("WARNING", logger=runner_module.__name__):
+        loop._reconcile_best_publication()
+
+    assert loop.persistence_degraded is True
+    assert loop.persistence_errors == [f"publish best iteration 1: {failure}"]
+    assert caplog.messages == ["failed to publish best result"]
+    assert caplog.records[0].levelname == "WARNING"
 
 
 def test_intervention_reset_is_persisted_before_agent_runs(tmp_path, monkeypatch):
@@ -7820,6 +7868,7 @@ class _StubStage:
     def __init__(self, stage, name, snr_db):
         self.stage, self.stage_name, self.snr_db = stage, name, snr_db
         self.passed = True
+        self.status_label = "PASS"
 
 
 class _StubReport:

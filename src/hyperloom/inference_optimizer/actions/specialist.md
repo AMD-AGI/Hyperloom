@@ -113,7 +113,7 @@ arrives as a ranked target rather than an advisory you have to notice.
 
 | Key                  | Type     | Required | Description |
 |----------------------|----------|----------|-------------|
-| `tags`               | list     | yes*     | Canonical knowledge-domain tags (`framework`, `kernel`, `communication`, `compiler`, `systems`, `pr_intelligence`, `research_scout`). |
+| `tags`               | list     | yes*     | Canonical knowledge-domain tags (`framework`, `kernel`, `communication`, `compiler`, `systems`, `speculative_decoding`, `pr_intelligence`, `research_scout`). |
 | `domain`             | string   | yes*     | Backward-compatible single-tag alias using a SpecialistDomain key. Required only when `tags` is absent. |
 | `gap_canonical_id`   | string   | yes      | Stable id of the gap (e.g. `gap.framework.cuda_graph_inefficient.session-<sid>`). |
 | `gap_symptom`        | string   | no       | Human summary of the symptom (e.g. `decode kernel at 30% HBM peak`). |

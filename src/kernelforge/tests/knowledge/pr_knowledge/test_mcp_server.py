@@ -35,7 +35,7 @@ def test_tool_names_avoid_colliding_with_the_upstream_mcp_server():
     names = set(server.TOOL_NAMES)
 
     assert names.isdisjoint({"pr_search", "pr_distill", "pr_file_patch"})
-    assert names == {"pr_find_references", "pr_get_reference", "pr_get_file_patch"}
+    assert names == {"pr_find_references", "pr_get_reference", "pr_get_file_patch", "pr_check_inclusion"}
 
 
 def test_declared_names_match_the_schemas():
@@ -52,8 +52,8 @@ def test_initialize_reports_the_server_identity():
     assert result["protocolVersion"] == "2024-11-05"
 
 
-def test_tools_list_returns_exactly_three_tools():
-    assert len(_call("tools/list")["tools"]) == 3
+def test_tools_list_returns_exactly_four_tools():
+    assert len(_call("tools/list")["tools"]) == 4
 
 
 def test_ping_and_lifecycle_methods_are_accepted():
@@ -393,7 +393,7 @@ def test_serve_answers_then_stops_at_end_of_input(monkeypatch, capsys):
 
     replies = [json.loads(l) for l in capsys.readouterr().out.splitlines() if l]
     assert [r["id"] for r in replies] == [1, 2]
-    assert len(replies[1]["result"]["tools"]) == 3
+    assert len(replies[1]["result"]["tools"]) == 4
 
 
 def test_serve_reports_malformed_requests_and_skips_notifications(monkeypatch, capsys):

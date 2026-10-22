@@ -54,6 +54,8 @@ LEGS = {
 # Every turn appends its background-task switch, CLAW_SESSION_ID and Experience KB
 # home to turns.log.
 STUB_CLAUDE = r"""#!/usr/bin/env bash
+# run-leg.sh probes --version before it enters the workspace, so that call must not write .env into the caller's cwd.
+[ "${1:-}" = --version ] && { echo "stub-claude 0.0.0"; exit 0; }
 prompt="$(cat)"
 echo "bg_disabled=${CLAUDE_CODE_DISABLE_BACKGROUND_TASKS:-unset} claw=${CLAW_SESSION_ID:-unset} kb=${HYPERLOOM_KB_HOME:-unset}" >> turns.log
 echo "${HYPERLOOM_CODE_REVISION:-unset}" >> revisions.log

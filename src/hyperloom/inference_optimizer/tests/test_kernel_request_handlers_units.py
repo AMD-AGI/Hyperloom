@@ -2590,7 +2590,7 @@ class TestRunGemmTuningHandler:
                     "PYTORCH_TUNABLEOP_ENABLED": "1",
                 },
             },
-            last_baseline={"benchmark_script": "vllm_custom.sh"},
+            baseline_benchmark_script="vllm_custom.sh",
         )
         captured: dict = {}
 

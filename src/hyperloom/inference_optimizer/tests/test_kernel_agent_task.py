@@ -70,7 +70,7 @@ def _arm_kernel_phase(st):
 
 
 def _spend_the_phase_budget(st):
-    spent = datetime.now(timezone.utc) - timedelta(hours=30)
+    spent = datetime.now(timezone.utc) - timedelta(hours=100)
     st.phase_started_ts = spent.isoformat()
     st.phase_started_unix = spent.timestamp()
 
@@ -311,7 +311,7 @@ def test_kernel_agent_in_flight_never_blocks_a_budget_exit():
     transition = ps.compute_next_phase(st, kernel_work_in_flight=True)
 
     assert transition is not None
-    assert transition[1] in {"kernel_phase_budget_exhausted", "kernel_budget_cap"}
+    assert transition[1] == "kernel_phase_budget_exhausted"
     assert ps.replay_next_phase(transition[2]["predicate_inputs"]) == transition
 
 

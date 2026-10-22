@@ -44,7 +44,7 @@ def _phase(*, phase="FRAMEWORK_AGENT", rounds=(), queued=(), running=(), frozen=
     state.phase = phase
     state.baseline_tput = 100.0
     state.baseline_config_path = "/cfg.yaml"
-    state.last_baseline = {"benchmark_script": "bench.sh"}
+    state.baseline_benchmark_script = "bench.sh"
     state.specialist_rounds = list(rounds)
     dispatcher = SimpleNamespace(
         admission_frozen=frozen,

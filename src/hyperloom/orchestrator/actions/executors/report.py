@@ -273,9 +273,9 @@ _STOP_REASON_EXPLANATIONS: dict[str, str] = {
         "OPTIMIZE exhausted both levers: neither configuration search nor source/upstream landing had leverage left."
     ),
     "optimize_phase_budget_exhausted": "OPTIMIZE spent its phase budget.",
-    "optimize_budget_cap": "OPTIMIZE reached the absolute per-phase wall-clock cap.",
     # Retired reason names, kept so a report over an archived session still explains what it is reading. Some no longer
     # sit in STOP_REASON_VOCAB at all, so these keys are a superset of the vocabulary rather than a mirror of it.
+    "optimize_budget_cap": "OPTIMIZE reached the absolute per-phase wall-clock cap.",
     "framework_agent_phase_done": "The framework-enablement agent completed its phase.",
     "framework_agent_plateau": "The framework-enablement agent plateaued with no further progress.",
     "global_converged": (
@@ -539,10 +539,104 @@ def _build_summary_dict(
     return deepcopy(summary)
 
 
+def _format_throughput_section(summary: dict[str, Any]) -> list[str]:
+    # Per-framework primary metric: serving reports throughput (tok/s), scriptable xDiT reports per-image latency
+    # (e2el_mean_ms).
+    from hyperloom.inference_optimizer import framework_registry
+
+    cb = summary.get("current_best") or {}
+    fw = summary.get("framework")
+    lines = ["## Throughput", ""]
+    lines.append(f"- baseline            : `{framework_registry.format_primary_metric(fw, summary['baseline_tput'])}`")
+    if cb.get("tput") is not None:
+        lines.append(
+            f"- current_best        : `{framework_registry.format_primary_metric(fw, cb.get('tput'))}` "
+            f"(action=`{cb.get('action', '?')}`)"
+        )
+    # Printed even when never validated, so the absence is stated, not implied.
+    val_gain = summary.get("cumulative_gain_validated", 0.0) or 0.0
+    val_ts = summary.get("cumulative_gain_validated_ts") or ""
+    val_len = summary.get("cumulative_gain_validated_stack_len", 0) or 0
+    stack_len = summary.get("optimization_stack_len", 0) or 0
+    if val_ts or val_gain or val_len:
+        stale = (
+            " ⚠ stack changed since validation" if stack_len > val_len or summary.get("has_unvalidated_keeps") else ""
+        )
+        lines.append(
+            f"- cumulative_gain_val : `{val_gain:.2f}%` "
+            f"(validated_at_stack_len={val_len}, ts={val_ts or '<missing>'}){stale}"
+        )
+    else:
+        lines.append("- cumulative_gain_val : `0.00%` ⚠ never validated — nothing has promoted in this session")
+    validation_status = summary.get("cumulative_validation_status")
+    if validation_status:
+        explanations = {
+            "current": "stored gain agrees with the current measured comparison",
+            "stale": "stack changed since validation; stored gain does not validate the current stack",
+            "unavailable": "no current comparable validation evidence; comparison is diagnostic only",
+            "inconsistent": "stored gain disagrees with the current grading evidence; retained as historical only",
+        }
+        lines.append(f"- validation status   : `{validation_status}` ({explanations[validation_status]})")
+    if cb.get("ttft_mean_ms") is not None:
+        lines.append(f"- ttft_mean      : `{cb.get('ttft_mean_ms'):.1f}` ms")
+    if cb.get("e2el_mean_ms") is not None:
+        lines.append(f"- e2el_mean      : `{cb.get('e2el_mean_ms'):.1f}` ms")
+    lines.extend(_format_composite_perf_section(summary))
+    lines.append("")
+    lines.extend(_format_completeness_annotations(summary))
+    return lines
+
+
+def _format_run_summary_section(summary: dict[str, Any]) -> list[str]:
+    lines = ["## Run summary", "", f"- crash_count    : {summary['crash_count']}"]
+    boot_fail = summary.get("server_boot_failures") or 0
+    if boot_fail:
+        lines.append(f"- server_boot_failures : {boot_fail}  *(warmup_failed variants; excluded from crash_count)*")
+    lines.append(f"- pruned_families: {summary['pruned_families'] or '(none)'}")
+    plat = summary.get("platform") or {}
+    if plat.get("status") != "ok":
+        # Always emit the line, with the reason when there is one: a silent absence is indistinguishable from a host
+        # that was never checked, and the no-reason case is the one that needs saying -- it is a summary written
+        # before this field existed, not a probe that failed.
+        why = str(plat.get("reason") or "").strip()
+        lines.append(f"- platform       : not recorded{f' — {why}' if why else ''}")
+        lines.append("")
+        return lines
+
+    if plat.get("multi_node_session"):
+        lines.append(
+            f"- platform scope : ⚠ multi-node session — sampled on `{plat.get('host')}` "
+            f"(the orchestrator), which may not be the benchmark node"
+        )
+    else:
+        lines.append(f"- host           : {plat.get('host', 'unknown')}")
+
+    def _q(value: Any) -> str:
+        """Render an unresolved field as '?' rather than the word None."""
+        return "?" if value in (None, "") else str(value)
+
+    gpu, stack = plat.get("gpu") or {}, plat.get("stack") or {}
+    lines.append(
+        f"- platform       : {_q(plat.get('cpu'))} — SMT {_q(plat.get('smt'))}, "
+        f"{_q(plat.get('nps'))} ({_q(plat.get('numa_nodes'))} NUMA nodes / "
+        f"{_q(plat.get('sockets'))} sockets), governor {_q(plat.get('governor'))}, "
+        f"boost {_q(plat.get('boost'))}"
+    )
+    lines.append(
+        f"- accelerators   : {gpu.get('host_count') or '?'}× {gpu.get('gfx_arch', 'unknown')} "
+        f"on the host, amdgpu {gpu.get('amdgpu_driver', 'unknown')}"
+    )
+    lines.append(
+        "- stack          : "
+        + ", ".join(f"{k} {v}" for k, v in sorted(stack.items()))
+        + f", kernel {plat.get('kernel', 'unknown')}"
+    )
+    lines.append("")
+    return lines
+
+
 def _format_md(summary: dict[str, Any]) -> str:
     """Render the human-readable Markdown report from a summary dict."""
-    cb = summary.get("current_best") or {}
-    cb_tput = cb.get("tput") if isinstance(cb, dict) else None
     lines: list[str] = []
     lines.append(f"# Inference Optimizer Report — {summary['session_id']}")
     lines.append("")
@@ -570,97 +664,8 @@ def _format_md(summary: dict[str, Any]) -> str:
     lines.append(f"- **Budget**: {summary['max_minutes']} minutes")
     lines.append(f"- **Generated**: {summary['report_generated_at']}")
     lines.append("")
-    # Per-framework primary metric: serving reports throughput (tok/s), scriptable xDiT reports per-image latency
-    # (e2el_mean_ms).
-    from hyperloom.inference_optimizer import framework_registry
-
-    _fw = summary.get("framework")
-    lines.append("## Throughput")
-    lines.append("")
-    lines.append(f"- baseline            : `{framework_registry.format_primary_metric(_fw, summary['baseline_tput'])}`")
-    if cb_tput is not None:
-        lines.append(
-            f"- current_best        : `{framework_registry.format_primary_metric(_fw, cb_tput)}` "
-            f"(action=`{cb.get('action', '?')}`)"
-        )
-    # Printed even when never validated, so the absence is stated, not implied.
-    val_gain = summary.get("cumulative_gain_validated", 0.0) or 0.0
-    val_ts = summary.get("cumulative_gain_validated_ts") or ""
-    val_len = summary.get("cumulative_gain_validated_stack_len", 0) or 0
-    stack_len = summary.get("optimization_stack_len", 0) or 0
-    changed_since_validation = stack_len > val_len or bool(summary.get("has_unvalidated_keeps"))
-    if val_ts:
-        stale = " ⚠ stack changed since validation" if changed_since_validation else ""
-        lines.append(
-            f"- cumulative_gain_val : `{val_gain:.2f}%` (validated_at_stack_len={val_len}, ts={val_ts}){stale}"
-        )
-    elif val_gain or val_len:
-        stale = " ⚠ stack changed since validation" if changed_since_validation else ""
-        lines.append(
-            f"- cumulative_gain_val : `{val_gain:.2f}%` (validated_at_stack_len={val_len}, ts=<missing>){stale}"
-        )
-    else:
-        lines.append("- cumulative_gain_val : `0.00%` ⚠ never validated — nothing has promoted in this session")
-    validation_status = summary.get("cumulative_validation_status")
-    if validation_status:
-        explanations = {
-            "current": "stored gain agrees with the current measured comparison",
-            "stale": "stack changed since validation; stored gain does not validate the current stack",
-            "unavailable": "no current comparable validation evidence; comparison is diagnostic only",
-            "inconsistent": "stored gain disagrees with the current grading evidence; retained as historical only",
-        }
-        lines.append(f"- validation status   : `{validation_status}` ({explanations[validation_status]})")
-    if cb.get("ttft_mean_ms") is not None:
-        lines.append(f"- ttft_mean      : `{cb.get('ttft_mean_ms'):.1f}` ms")
-    if cb.get("e2el_mean_ms") is not None:
-        lines.append(f"- e2el_mean      : `{cb.get('e2el_mean_ms'):.1f}` ms")
-    lines.extend(_format_composite_perf_section(summary))
-    lines.append("")
-    lines.extend(_format_completeness_annotations(summary))
-    lines.append("## Run summary")
-    lines.append("")
-    lines.append(f"- crash_count    : {summary['crash_count']}")
-    boot_fail = summary.get("server_boot_failures") or 0
-    if boot_fail:
-        lines.append(f"- server_boot_failures : {boot_fail}  *(warmup_failed variants; excluded from crash_count)*")
-    lines.append(f"- pruned_families: {summary['pruned_families'] or '(none)'}")
-    plat = summary.get("platform") or {}
-    if plat.get("status") != "ok":
-        # Always emit the line, with the reason when there is one: a silent absence is indistinguishable from a host
-        # that was never checked, and the no-reason case is the one that needs saying -- it is a summary written
-        # before this field existed, not a probe that failed.
-        why = str(plat.get("reason") or "").strip()
-        lines.append(f"- platform       : not recorded{f' — {why}' if why else ''}")
-    else:
-        if plat.get("multi_node_session"):
-            lines.append(
-                f"- platform scope : ⚠ multi-node session — sampled on `{plat.get('host')}` "
-                f"(the orchestrator), which may not be the benchmark node"
-            )
-        else:
-            lines.append(f"- host           : {plat.get('host', 'unknown')}")
-
-        def _q(value: Any) -> str:
-            """Render an unresolved field as '?' rather than the word None."""
-            return "?" if value in (None, "") else str(value)
-
-        lines.append(
-            f"- platform       : {_q(plat.get('cpu'))} — SMT {_q(plat.get('smt'))}, "
-            f"{_q(plat.get('nps'))} ({_q(plat.get('numa_nodes'))} NUMA nodes / "
-            f"{_q(plat.get('sockets'))} sockets), governor {_q(plat.get('governor'))}, "
-            f"boost {_q(plat.get('boost'))}"
-        )
-        gpu, stack = plat.get("gpu") or {}, plat.get("stack") or {}
-        lines.append(
-            f"- accelerators   : {gpu.get('host_count') or '?'}× {gpu.get('gfx_arch', 'unknown')} "
-            f"on the host, amdgpu {gpu.get('amdgpu_driver', 'unknown')}"
-        )
-        lines.append(
-            "- stack          : "
-            + ", ".join(f"{k} {v}" for k, v in sorted(stack.items()))
-            + f", kernel {plat.get('kernel', 'unknown')}"
-        )
-    lines.append("")
+    lines.extend(_format_throughput_section(summary))
+    lines.extend(_format_run_summary_section(summary))
     lines.append("## Event counts")
     lines.append("")
     if not summary.get("event_counts_by_topic"):
@@ -825,6 +830,29 @@ def _extract_executive_summary(analysis_md_path: str) -> str:
     return block
 
 
+_ROOFLINE_PEAK_NOTE = (
+    "_The **Theoretical peak** below is the decode "
+    "memory-roofline ceiling derived from the GPU's HBM "
+    "bandwidth and the model's weight + KV-cache traffic per "
+    "token (see `roofline_ceiling.compute_roofline_breakdown_from_state`). "
+    "It is an upper bound: real `output_throughput` always "
+    "stays under it because of comm overhead, kernel "
+    "efficiency < 100%, and KV-cache fragmentation. **Within "
+    "roofline %** = measured / peak; **Gap to roofline %** = "
+    "100 − Within."
+)
+
+
+def _snapshot_summary_lines(heading: str, snapshot: dict[str, Any]) -> list[str]:
+    lines = [heading, "", f"`{snapshot.get('analysis_md_path')}`"]
+    if snapshot.get("ts"):
+        lines.append(f"_captured: {snapshot.get('ts')}_")
+    lines.append("")
+    lines.append(_extract_executive_summary(str(snapshot.get("analysis_md_path") or "")))
+    lines.append("")
+    return lines
+
+
 def _format_roofline_comparison_section(cmp: dict[str, Any]) -> list[str]:
     """Render the ``## Roofline Comparison`` section from ``cmp`` (built by :func:`roofline_snapshot.build_roofline_comparison_from_history`)."""
     from hyperloom.inference_optimizer.roofline_snapshot import format_roofline_metrics_table
@@ -856,28 +884,10 @@ def _format_roofline_comparison_section(cmp: dict[str, Any]) -> list[str]:
             "for the report._"
         )
         lines.append("")
-        lines.append(
-            "_The **Theoretical peak** below is the decode "
-            "memory-roofline ceiling derived from the GPU's HBM "
-            "bandwidth and the model's weight + KV-cache traffic per "
-            "token (see `roofline_ceiling.compute_roofline_breakdown_from_state`). "
-            "It is an upper bound: real `output_throughput` always "
-            "stays under it because of comm overhead, kernel "
-            "efficiency < 100%, and KV-cache fragmentation. **Within "
-            "roofline %** = measured / peak; **Gap to roofline %** = "
-            "100 − Within._"
-        )
+        lines.append(f"{_ROOFLINE_PEAK_NOTE}_")
         lines.append("")
         lines.extend(format_roofline_metrics_table(cmp))
-        lines.append(f"### Snapshot #{base_id} — Executive Summary")
-        lines.append("")
-        lines.append(f"`{baseline.get('analysis_md_path')}`")
-        if baseline.get("ts"):
-            lines.append(f"_captured: {baseline.get('ts')}_")
-        lines.append("")
-        lines.append(_extract_executive_summary(str(baseline.get("analysis_md_path") or "")))
-        lines.append("")
-        return lines
+        return lines + _snapshot_summary_lines(f"### Snapshot #{base_id} — Executive Summary", baseline)
 
     lines.append(
         "Before/after comparison of TraceLens Executive Summaries. "
@@ -897,35 +907,11 @@ def _format_roofline_comparison_section(cmp: dict[str, Any]) -> list[str]:
         "quantization changed), so each Within % is measured against its own "
         "anchor and the Δ column is withheld."
     )
-    lines.append(
-        "_The **Theoretical peak** below is the decode "
-        "memory-roofline ceiling derived from the GPU's HBM "
-        "bandwidth and the model's weight + KV-cache traffic per "
-        "token (see `roofline_ceiling.compute_roofline_breakdown_from_state`). "
-        "It is an upper bound: real `output_throughput` always "
-        "stays under it because of comm overhead, kernel "
-        "efficiency < 100%, and KV-cache fragmentation. **Within "
-        "roofline %** = measured / peak; **Gap to roofline %** = "
-        f"100 − Within. {anchor_note}_"
-    )
+    lines.append(f"{_ROOFLINE_PEAK_NOTE} {anchor_note}_")
     lines.append("")
     lines.extend(format_roofline_metrics_table(cmp))
-    lines.append(f"### Baseline snapshot #{base_id}")
-    lines.append("")
-    lines.append(f"`{baseline.get('analysis_md_path')}`")
-    if baseline.get("ts"):
-        lines.append(f"_captured: {baseline.get('ts')}_")
-    lines.append("")
-    lines.append(_extract_executive_summary(str(baseline.get("analysis_md_path") or "")))
-    lines.append("")
-    lines.append(f"### Post-optimization snapshot #{latest_id}")
-    lines.append("")
-    lines.append(f"`{latest.get('analysis_md_path')}`")
-    if latest.get("ts"):
-        lines.append(f"_captured: {latest.get('ts')}_")
-    lines.append("")
-    lines.append(_extract_executive_summary(str(latest.get("analysis_md_path") or "")))
-    lines.append("")
+    lines += _snapshot_summary_lines(f"### Baseline snapshot #{base_id}", baseline)
+    lines += _snapshot_summary_lines(f"### Post-optimization snapshot #{latest_id}", latest)
     return lines
 
 
@@ -953,34 +939,54 @@ def _external_baseline_with_comparison(
     }
 
 
+_ADVISORY_NOTE = (
+    "> Advisory only. This block does not feed Objective, scoring, or "
+    "any agent prompt; it is shown here purely for post-mortem "
+    "comparison."
+)
+
+
+def _reference_best_lines(best: dict[str, Any]) -> list[str]:
+    lines = [
+        "",
+        f"- Reference best per-GPU throughput: "
+        f"**{float(best.get('tput_per_gpu', 0.0)):.1f}** tok/s/GPU "
+        f"at concurrency {best.get('conc')}, decode TP {best.get('decode_tp')}",
+    ]
+    for label, key, places in (
+        ("TTFT", "mean_ttft_ms", 1),
+        ("TPOT", "mean_tpot_ms", 3),
+        ("E2E latency", "mean_e2el_ms", 1),
+    ):
+        value = float(best.get(key) or 0.0)
+        if value:
+            lines.append(f"- Reference mean {label}: {value:.{places}f} ms")
+    if best.get("date"):
+        lines.append(f"- Reference run date: {best.get('date')}")
+    return lines
+
+
 def _format_external_baseline_section(ext: dict[str, Any]) -> list[str]:
     """Render the advisory external-baseline section (report-only)."""
-    lines: list[str] = []
     status = str(ext.get("status") or "unknown")
     reason = str(ext.get("reason") or "").strip()
+    fetched = f"- Fetched at: {ext.get('fetched_at') or '(unknown)'}"
     if reason == "no_target_gpu_configured":
-        lines.append("## External baseline (not requested)")
-    else:
-        lines.append("## External baseline (competitor target, advisory)")
-    lines.append("")
-    if reason == "no_target_gpu_configured":
-        lines.append(
+        return [
+            "## External baseline (not requested)",
+            "",
             "- No `--compare-against-gpu` was specified; only a marker JSON "
             "was written. Re-run with `--compare-against-gpu <gpu>` (e.g. "
             "`b300` / `mi355x` / `h200`) to fetch the matching InferenceX "
-            "reference data point."
-        )
-        lines.append(f"- Fetched at: {ext.get('fetched_at') or '(unknown)'}")
-        lines.append(f"- Status: `{status}` reason=`{reason}` (rows matched: {ext.get('row_count', 0)})")
-        lines.append("")
-        lines.append(
-            "> Advisory only. This block does not feed Objective, scoring, or "
-            "any agent prompt; it is shown here purely for post-mortem "
-            "comparison."
-        )
-        lines.append("")
-        return lines
+            "reference data point.",
+            fetched,
+            f"- Status: `{status}` reason=`{reason}` (rows matched: {ext.get('row_count', 0)})",
+            "",
+            _ADVISORY_NOTE,
+            "",
+        ]
 
+    lines: list[str] = ["## External baseline (competitor target, advisory)", ""]
     q = ext.get("query") or {}
     lines.append(
         "- Query: "
@@ -990,10 +996,10 @@ def _format_external_baseline_section(ext: dict[str, Any]) -> list[str]:
         f"precision=`{q.get('precision') or '(any)'}`  "
         f"ISL/OSL=`{q.get('isl') or '(any)'}/{q.get('osl') or '(any)'}`"
     )
-    lines.append(f"- Fetched at: {ext.get('fetched_at') or '(unknown)'}")
+    lines.append(fetched)
     reason_suffix = f" reason=`{reason}`" if reason else ""
     lines.append(f"- Status: `{status}`{reason_suffix} (rows matched: {ext.get('row_count', 0)})")
-    warning = ext.get("warning") or ""
+    warning = ext.get("warning")
     if warning:
         lines.append(f"- Warning: {warning}")
 
@@ -1007,32 +1013,13 @@ def _format_external_baseline_section(ext: dict[str, Any]) -> list[str]:
 
     best = ext.get("best")
     if status == "ok" and isinstance(best, dict):
-        lines.append("")
-        lines.append(
-            f"- Reference best per-GPU throughput: "
-            f"**{float(best.get('tput_per_gpu', 0.0)):.1f}** tok/s/GPU "
-            f"at concurrency {best.get('conc')}, decode TP {best.get('decode_tp')}"
-        )
-        ttft = float(best.get("mean_ttft_ms") or 0.0)
-        tpot = float(best.get("mean_tpot_ms") or 0.0)
-        e2el = float(best.get("mean_e2el_ms") or 0.0)
-        if ttft:
-            lines.append(f"- Reference mean TTFT: {ttft:.1f} ms")
-        if tpot:
-            lines.append(f"- Reference mean TPOT: {tpot:.3f} ms")
-        if e2el:
-            lines.append(f"- Reference mean E2E latency: {e2el:.1f} ms")
-        if best.get("date"):
-            lines.append(f"- Reference run date: {best.get('date')}")
+        lines.extend(_reference_best_lines(best))
     else:
         lines.append("")
         lines.append("- No reference best available — orchestrator was not affected by this section.")
 
     lines.append("")
-    lines.append(
-        "> Advisory only. This block does not feed Objective, scoring, or any "
-        "agent prompt; it is shown here purely for post-mortem comparison."
-    )
+    lines.append(_ADVISORY_NOTE)
     lines.append("")
     return lines
 
