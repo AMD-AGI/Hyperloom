@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from pathlib import Path
 from typing import Any
@@ -564,9 +564,12 @@ class TestAMetTargetDoesNotOutrankTheGuards:
 
 def test_a_met_target_renames_a_budget_limited_sweep_exit():
     """``sweep_budget_exhausted`` is outside STOP_REASON_VOCAB, so CLOSE would recover it as ``time_exhausted`` -- a met target reported as a timeout."""
+    now = 1_800_000_000.0
+    started = datetime.fromtimestamp(now, tz=timezone.utc) - timedelta(hours=2)
     state = SharedState(
         phase=phase_state.PHASE_SWEEP,
-        phase_started_unix=1.0,
+        phase_started_unix=started.timestamp(),
+        start_ts=started.isoformat(),
         max_minutes=60,
         phase_budget_pct={phase_state.PHASE_SWEEP: 0.0001},
         stop_reason="",
@@ -583,7 +586,7 @@ def test_a_met_target_renames_a_budget_limited_sweep_exit():
         no_gain_cycle_streak=0,
         resumed_ts="",
     )
-    out = phase_state.compute_next_phase(state, flags=phase_state.PhaseFlags(kernel_enabled=True))
+    out = phase_state.compute_next_phase(state, flags=phase_state.PhaseFlags(kernel_enabled=True), now_unix=now)
     assert out is not None
     assert out[0] == phase_state.PHASE_CLOSE and out[1] == "target_reached"
     assert out[2].get("terminal") is True

@@ -108,7 +108,7 @@ async def test_a_baseline_carries_the_run_into_the_optimisation_phase_with_work(
     # hard cap, which outlasts this KERNEL slice.
     [
         ("geak", "geak_result", "error_class", "insufficient_budget"),
-        ("forge", "kernel_rewrite_controller_result", "status", "no_result"),
+        ("forge", "kernel_rewrite_controller_result", "status", "no_opportunity"),
     ],
     ids=["geak", "forge"],
 )

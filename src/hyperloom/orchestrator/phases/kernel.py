@@ -1160,9 +1160,6 @@ class KernelPhase(CoordinatorCollaborator):
         phase_remaining = _phase_state.phase_budget_remaining_seconds(self.shared_state)
         if phase_remaining is not None:
             candidates.append(max(0.0, float(phase_remaining)))
-        phase_cap = _phase_state.phase_cap_seconds(self.shared_state)
-        if phase_cap is not None:
-            candidates.append(max(0.0, float(phase_cap) - _phase_state.phase_cumulative_seconds(self.shared_state)))
         # The phase still measures the Controller's patches E2E after the Controller exits.
         hard_timeout = int(min(candidates) - measurement_round_sec(self.shared_state)) if candidates else 90 * 60
         return max(0, hard_timeout - 30), max(0, hard_timeout)
