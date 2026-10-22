@@ -40,6 +40,11 @@ SPECIALIST_USER_ENV = "HYPERLOOM_SPECIALIST_USER"
 _CHILD_UMASK = 0o002
 _GROUP_RW = stat.S_IRGRP | stat.S_IWGRP
 _GROUP_RWX_SETGID = _GROUP_RW | stat.S_IXGRP | stat.S_ISGID
+_GROUP_R = stat.S_IRGRP
+_GROUP_RX_SETGID = _GROUP_R | stat.S_IXGRP | stat.S_ISGID
+# The app's own umask once a specialist user is set: what it creates (a sync's
+# reset and apply rebuild worktree files as the app) stays group-writable.
+_APP_UMASK = 0o002
 
 
 class RunAsError(ValueError):
@@ -83,12 +88,13 @@ class RunAs:
             env[f"GIT_CONFIG_KEY_{i}"] = "safe.directory"
             env[f"GIT_CONFIG_VALUE_{i}"] = path
 
-    def share_tree(self, root: Path, *, sticky: bool = False) -> None:
+    def share_tree(self, root: Path, *, sticky: bool = False, write: bool = True) -> None:
         """Give this user's group read-write access to everything under ``root``.
 
         The tree stays owned by the app. Its group becomes this user's group,
         directories get the setgid bit (new entries keep the group) and every
-        entry gets group read and write. ``sticky`` additionally stops the
+        entry gets group read and write (``write=False``: group read only,
+        plus search on directories, for a tree the child only reads). ``sticky`` additionally stops the
         child deleting the app's own files in the top directory. Symlinks are
         not followed, and a ``root`` that is itself a symlink is refused.
         ``.git`` is left alone: the child does no git writes. Needs root or
@@ -103,7 +109,10 @@ class RunAs:
                 os.chown(path, -1, self.gid, follow_symlinks=False)
             if stat.S_ISLNK(st.st_mode):
                 continue
-            add = _GROUP_RWX_SETGID if stat.S_ISDIR(st.st_mode) else _GROUP_RW
+            if stat.S_ISDIR(st.st_mode):
+                add = _GROUP_RWX_SETGID if write else _GROUP_RX_SETGID
+            else:
+                add = _GROUP_RW if write else _GROUP_R
             if sticky and path == root:
                 add |= stat.S_ISVTX
             mode = stat.S_IMODE(st.st_mode) | add
@@ -147,5 +156,13 @@ def resolve_run_as(user: str | None) -> RunAs | None:
 
 
 def specialist_run_as() -> RunAs | None:
-    """Resolve ``HYPERLOOM_SPECIALIST_USER``; ``None`` (today's behaviour) when unset or blank."""
-    return resolve_run_as(env_str(SPECIALIST_USER_ENV))
+    """Resolve ``HYPERLOOM_SPECIALIST_USER``; ``None`` (today's behaviour) when unset or blank.
+
+    When a user is named, this process's own umask becomes 0o002, so files the
+    app itself (re)creates in a specialist's worktree stay writable by the
+    specialist's group. Unset leaves the umask alone.
+    """
+    run_as = resolve_run_as(env_str(SPECIALIST_USER_ENV))
+    if run_as is not None:
+        os.umask(_APP_UMASK)
+    return run_as

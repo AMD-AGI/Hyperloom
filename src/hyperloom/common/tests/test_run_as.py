@@ -224,3 +224,66 @@ def test_demoted_child_files_are_group_writable_and_a_plain_launch_keeps_the_uma
     app_umask = os.umask(0)
     os.umask(app_umask)
     assert plain.stdout.strip() == f"{app_umask:04o}"
+
+
+@pytest.fixture
+def restore_umask() -> Iterator[None]:
+    saved = os.umask(0o022)
+    try:
+        yield
+    finally:
+        os.umask(saved)
+
+
+@pytest.mark.skipif(not _account_exists(UNPRIVILEGED), reason=f"no {UNPRIVILEGED!r} account")
+def test_naming_a_user_sets_the_apps_umask_and_unset_leaves_it(monkeypatch, restore_umask):
+    monkeypatch.delenv(run_as_mod.SPECIALIST_USER_ENV, raising=False)
+    assert specialist_run_as() is None
+    assert os.umask(0o022) == 0o022
+    monkeypatch.setenv(run_as_mod.SPECIALIST_USER_ENV, UNPRIVILEGED)
+    assert specialist_run_as() is not None
+    assert os.umask(0o022) == 0o002
+
+
+@needs_root
+def test_files_the_app_creates_after_naming_a_user_are_group_writable(shared_tmp, monkeypatch, restore_umask):
+    spec = resolve_run_as(UNPRIVILEGED)
+    assert spec is not None
+    spec.share_tree(shared_tmp)
+    monkeypatch.setenv(run_as_mod.SPECIALIST_USER_ENV, UNPRIVILEGED)
+    specialist_run_as()
+    (shared_tmp / "rebuilt.py").write_text("x", encoding="utf-8")
+    (shared_tmp / "newdir").mkdir()
+    assert stat.S_IMODE((shared_tmp / "rebuilt.py").stat().st_mode) == 0o664
+    assert (shared_tmp / "rebuilt.py").stat().st_gid == spec.gid
+    assert (shared_tmp / "newdir").stat().st_mode & stat.S_ISGID
+    assert (shared_tmp / "newdir").stat().st_gid == spec.gid
+
+
+@needs_root
+def test_read_only_share_gives_the_group_read_and_search_but_not_write(shared_tmp):
+    spec = resolve_run_as(UNPRIVILEGED)
+    assert spec is not None
+    (shared_tmp / "d").mkdir()
+    (shared_tmp / "d" / "f").write_text("x", encoding="utf-8")
+    for p in (shared_tmp / "d", shared_tmp / "d" / "f"):
+        p.chmod(0o700 if p.is_dir() else 0o600)
+    spec.share_tree(shared_tmp / "d", write=False)
+    assert stat.S_IMODE((shared_tmp / "d").stat().st_mode) == 0o2750
+    assert stat.S_IMODE((shared_tmp / "d" / "f").stat().st_mode) == 0o640
+    assert _run_as_unprivileged(f"cat {shared_tmp}/d/f").stdout == "x"
+    assert _run_as_unprivileged(f"echo y > {shared_tmp}/d/f").returncode != 0
+    assert _run_as_unprivileged(f"touch {shared_tmp}/d/new").returncode != 0
+
+
+@needs_root
+def test_writable_share_modes(shared_tmp):
+    spec = resolve_run_as(UNPRIVILEGED)
+    assert spec is not None
+    (shared_tmp / "d").mkdir()
+    (shared_tmp / "d" / "f").write_text("x", encoding="utf-8")
+    (shared_tmp / "d").chmod(0o700)
+    (shared_tmp / "d" / "f").chmod(0o600)
+    spec.share_tree(shared_tmp / "d")
+    assert stat.S_IMODE((shared_tmp / "d").stat().st_mode) == 0o2770
+    assert stat.S_IMODE((shared_tmp / "d" / "f").stat().st_mode) == 0o660

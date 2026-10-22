@@ -1381,6 +1381,14 @@ async def test_specialist_user_is_refused_on_the_ray_gpu_actor_path(tmp_path, mo
 _DEMOTE_USER = "nobody"
 
 
+@pytest.fixture
+def restore_umask():
+    """Naming a specialist user sets the app's umask; do not leak that into other tests."""
+    saved = os.umask(0o022)
+    yield
+    os.umask(saved)
+
+
 def _account_exists(name: str) -> bool:
     import pwd
 
@@ -1408,7 +1416,7 @@ echo '{{"gap_canonical_id": "gap.test.example", "domain": "serving_specialist", 
 
 
 @_demote_skip
-async def test_demoted_specialist_writes_its_worktree_and_cannot_read_the_apps_files(monkeypatch):
+async def test_demoted_specialist_writes_its_worktree_and_cannot_read_the_apps_files(monkeypatch, restore_umask):
     import pwd
     import shutil
     import tempfile
@@ -1464,7 +1472,7 @@ async def test_demoted_specialist_writes_its_worktree_and_cannot_read_the_apps_f
 
 
 @_demote_skip
-def test_demote_shares_a_worktree_that_lives_outside_the_workspace(tmp_path, monkeypatch):
+def test_demote_shares_a_worktree_that_lives_outside_the_workspace(tmp_path, monkeypatch, restore_umask):
     monkeypatch.setenv("HYPERLOOM_SPECIALIST_USER", _DEMOTE_USER)
     request = SpecialistSpawn(
         task_id="t-outside",
