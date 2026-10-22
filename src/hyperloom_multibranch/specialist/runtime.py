@@ -3,7 +3,7 @@
 
 """The specialist lifecycle: on each branch, the specialist's session and the branch's judge.
 
-A branch started with neither a direction nor a repair takes one of the session's
+A branch started with no direction, no repair and no third-party agent takes one of the session's
 :data:`~hyperloom_multibranch.specialist.directions.DIRECTIONS` that no branch has held yet, so the branches split the
 work instead of all sweeping the same settings, and a stopped branch's direction is not handed out again while another
 was never tried. Once each was held, it takes the one the fewest branches held over the session, then the one the
@@ -15,9 +15,10 @@ reason in a notice, and a restart does not repeat it. A session that crashes is 
 session working in between: a loss takes the heartbeat timeout, so losses alone never fill the window. A session that
 ends idle, its model finding nothing to test, is no crash and is not restarted: a restart reads the model's own
 conclusion back from the branch log and ends idle again, so the specialist gives up and the scheduler stops the branch,
-freeing its slot for a fresh branch with its own direction. Past any of these the branch keeps its judge, which settles
-what was already measured, and the scheduler stops it once nothing of it waits for a confirm; ``status`` tells it. A
-judge that fails is a defect of this code, not of the specialist: it is not restarted, and the branch's session is
+freeing its slot for a fresh branch with its own direction. A session that finished, a third-party agent that ended its
+run and whose last keep settled, ends its specialist the same way. Past any of these the branch keeps its judge, which
+settles what was already measured, and the scheduler stops it once nothing of it waits for a confirm; ``status`` tells
+it. A judge that fails is a defect of this code, not of the specialist: it is not restarted, and the branch's session is
 stopped so no candidate is measured that nothing would judge. Both leave a notice in the branch log. While the
 specialist writes a change, the runtime renews the claims it holds, so a claim does not lapse while a model thinks; once
 a test carries a claim, the toolbox renews it.
@@ -66,6 +67,11 @@ class SessionIdle(RuntimeError):
     """A run of a branch's specialist ended because its model kept finding nothing to test."""
 
 
+class SessionFinished(RuntimeError):
+    """A run of a branch's specialist that has no work left: a third-party agent that ended its run, once the last
+    change it kept settled."""
+
+
 class PreflightFailed(RuntimeError):
     """A branch's specialist could not be made ready to run; ``reasons`` says why, one line per attempt."""
 
@@ -77,8 +83,8 @@ class PreflightFailed(RuntimeError):
 class Session(Protocol):
     """One run of a branch's specialist: ``preflight`` makes it ready, once a branch, and raises
     :class:`PreflightFailed` when it cannot; ``run`` returns once its work is done, raises :class:`SessionIdle` when
-    its model kept finding nothing to test, and raises when it crashed, a :class:`SessionCrashed` when it can say
-    how."""
+    its model kept finding nothing to test, :class:`SessionFinished` when it has no work left, and raises when it
+    crashed, a :class:`SessionCrashed` when it can say how."""
 
     async def preflight(self) -> None: ...
 
@@ -152,7 +158,7 @@ class SpecialistRuntime:
     async def start(self, branch: str, start_commit: str, task: BranchTask = BranchTask()) -> None:
         if branch in self._branches:
             raise ValueError(f"branch {branch!r} already has a specialist")
-        if not task.direction.strip() and task.repair is None:
+        if not task.direction.strip() and task.repair is None and not task.agent:
             task = replace(task, direction=self._least_held())
         if task.direction in DIRECTIONS:
             self._held[task.direction] += 1
@@ -208,6 +214,11 @@ class SpecialistRuntime:
             ready = True
             try:
                 await state.session.run()
+                return
+            except SessionFinished as error:
+                await state.session.stop()
+                state.session, state.gave_up = None, True
+                await _notice(state, f"{error}; it is not restarted")
                 return
             except SessionIdle as error:
                 await state.session.stop()
@@ -302,6 +313,7 @@ __all__ = [
     "Session",
     "SessionCrashed",
     "PreflightFailed",
+    "SessionFinished",
     "SessionIdle",
     "SessionFactory",
     "SessionStart",

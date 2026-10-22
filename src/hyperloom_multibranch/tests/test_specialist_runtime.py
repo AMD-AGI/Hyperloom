@@ -25,6 +25,7 @@ from hyperloom_multibranch.specialist.runtime import (
     RESTART_WINDOW_S,
     RuntimePacing,
     SessionCrashed,
+    SessionFinished,
     PreflightFailed,
     SessionIdle,
     SessionStart,
@@ -199,15 +200,16 @@ async def test_branches_started_with_no_direction_take_the_session_s_directions_
     await runtime.start(handed[0], head)
     await runtime.start("user", head, BranchTask(direction="the user's own"))
     await runtime.start("repair", head, BranchTask(repair=repair))
+    await runtime.start("agent", head, BranchTask(agent="https://example.com/agent.git"))
     for name in handed[1:]:
         await runtime.start(name, head)
-    await _until(lambda: _true(len(runs.started) == len(handed) + 2), "every specialist to start")
-    for name in [*handed, "user", "repair"]:
+    await _until(lambda: _true(len(runs.started) == len(handed) + 3), "every specialist to start")
+    for name in [*handed, "user", "repair", "agent"]:
         await runtime.stop(name)
 
     directions = {run.start.branch: run.start.task.direction for run in runs.started}
     assert [directions[name] for name in handed] == [*DIRECTIONS, DIRECTIONS[0]]
-    assert (directions["user"], directions["repair"]) == ("the user's own", "")
+    assert (directions["user"], directions["repair"], directions["agent"]) == ("the user's own", "", "")
 
 
 async def test_a_direction_no_branch_held_goes_first_even_after_earlier_branches_stopped(session):
@@ -333,6 +335,19 @@ async def test_a_failed_preflight_gives_up_the_specialist_with_every_reason_and_
     assert len(runs.started) == 1 and runs.started[0].stopped.is_set()
     [notice] = [notice for notice in await session.notices() if "preflight failed" in notice]
     assert all(reason in notice for reason in reasons)
+    assert await runtime.status(BRANCH) == SpecialistStatus(False, 0, 0, True, False)
+    await runtime.stop(BRANCH)
+
+
+async def test_a_finished_session_ends_its_specialist_with_no_restart_and_no_crash(session):
+    runs = _Runs(errors=(SessionFinished("the agent finished its run"),))
+    runtime = session.runtime(runs)
+
+    await runtime.start(BRANCH, await session.repo.head(BRANCH), BranchTask(agent="https://example.com/agent.git"))
+    await _until(lambda: _any_notice(session, "not restarted"), "the runtime to end the specialist")
+
+    assert len(runs.started) == 1 and runs.started[0].stopped.is_set()
+    assert any("the agent finished its run" in notice for notice in await session.notices())
     assert await runtime.status(BRANCH) == SpecialistStatus(False, 0, 0, True, False)
     await runtime.stop(BRANCH)
 
