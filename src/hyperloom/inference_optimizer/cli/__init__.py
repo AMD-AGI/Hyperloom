@@ -69,6 +69,8 @@ from .bootstrap import (
     _print_final_summary,
     _print_session_skeleton,
     _reconcile_crash_count,
+    prepare_plug_host,
+    running_plug_host,
     _seed_shared_state,
     _snapshot_system_prompts,
     agentx_state_is_stale,
@@ -2482,6 +2484,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     session_dir = session.session_dir
     session_lock = session.session_lock
     manifest = session.manifest
+    plug_host = prepare_plug_host(args, session_dir)
 
     # Recipe KB T0 anchor (after seed/restore for recipe_canonical_id, before Coordinator); skipped when --degraded-kb.
     recipe_kb_client = _bootstrap_recipe_kb(
@@ -2661,16 +2664,17 @@ async def _run_optimize(args: argparse.Namespace) -> int:
 
     stop_reason: str | None = None
     try:
-        stop_reason = await coordinator.run(
-            objective=objective,
-            options=RunOptions(
-                max_minutes=args.max_hours * 60.0,
-                tick_interval_sec=args.tick_interval_sec,
-                max_ticks=args.max_ticks,
-                install_signal_handlers=True,
-                closing_grace_sec=args.closing_grace_sec,
-            ),
-        )
+        with running_plug_host(plug_host):
+            stop_reason = await coordinator.run(
+                objective=objective,
+                options=RunOptions(
+                    max_minutes=args.max_hours * 60.0,
+                    tick_interval_sec=args.tick_interval_sec,
+                    max_ticks=args.max_ticks,
+                    install_signal_handlers=True,
+                    closing_grace_sec=args.closing_grace_sec,
+                ),
+            )
     finally:
         state = coordinator.shared_state
         effective_stop_reason = stop_reason or coordinator.stop_classification

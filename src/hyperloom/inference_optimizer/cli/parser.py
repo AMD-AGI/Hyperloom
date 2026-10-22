@@ -176,6 +176,43 @@ def _add_custom_specialist_args(opt: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_plug_arguments(opt: argparse.ArgumentParser) -> None:
+    """Add the flags that select which implementation fills each plug socket; absent, every socket stays local."""
+    opt.add_argument(
+        "--profile",
+        dest="plug_profile",
+        default=None,
+        metavar="NAME",
+        help="Built-in plug profile to load (local, hosted-gpu, hosted-cpu). Without it, and without the other plug "
+        "flags, nothing changes from a plain local run.",
+    )
+    opt.add_argument(
+        "--manifest",
+        dest="plug_manifest",
+        default=None,
+        metavar="PATH",
+        help="Custom plug manifest (JSON) laid over the profile. Falls back to $HYPERLOOM_MANIFEST.",
+    )
+    opt.add_argument(
+        "--plug",
+        dest="plug",
+        action="append",
+        default=[],
+        metavar="SOCKET=IMPL",
+        help="Choose the implementation of one socket; repeatable. The last layer, over profile, manifest and "
+        "$HYPERLOOM_MANIFEST_OVERRIDES.",
+    )
+    opt.add_argument(
+        "--plug-config",
+        dest="plug_config",
+        action="append",
+        default=[],
+        metavar="SOCKET.KEY=VALUE",
+        help="Set one configuration key of a socket's implementation; repeatable. VALUE is read as JSON when it "
+        "parses as JSON, as text otherwise.",
+    )
+
+
 def _build_parser() -> argparse.ArgumentParser:
     """Build the top-level CLI argument parser and subcommands."""
     from hyperloom.orchestrator.specialists.domains import (
@@ -617,6 +654,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "No-op without ``--resume-from``."
         ),
     )
+    _add_plug_arguments(opt)
     opt.add_argument(
         "--model-class",
         type=str,

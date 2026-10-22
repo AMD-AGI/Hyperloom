@@ -8,6 +8,7 @@ from dataclasses import dataclass
 import pytest
 
 import kernelforge.agent_backends.codex as codex_backend
+import hyperloom.common.entry_points as entry_points
 import kernelforge.agent_backends.registry as registry
 from kernelforge.agent_backends import (
     AgentCapabilities,
@@ -233,7 +234,7 @@ def test_broken_entry_point_is_isolated(monkeypatch) -> None:
                 return [_EntryPoint()]
             return []
 
-    monkeypatch.setattr(registry.metadata, "entry_points", _EntryPoints)
+    monkeypatch.setattr(entry_points.metadata, "entry_points", _EntryPoints)
     monkeypatch.setattr(registry, "_plugins_loaded", False)
     monkeypatch.setattr(registry, "_plugin_errors", {})
     registry.discover_agent_providers(force=True)
@@ -316,7 +317,7 @@ def test_entry_point_discovery_failure_is_recorded(monkeypatch) -> None:
         def select(*, group):
             raise OSError("metadata unreadable")
 
-    monkeypatch.setattr(registry.metadata, "entry_points", _EntryPoints)
+    monkeypatch.setattr(entry_points.metadata, "entry_points", _EntryPoints)
     monkeypatch.setattr(registry, "_plugins_loaded", False)
     monkeypatch.setattr(registry, "_plugin_errors", {})
     registry.discover_agent_providers(force=True)
@@ -395,7 +396,7 @@ def test_external_entry_point_provider_is_discovered(monkeypatch) -> None:
             assert group == registry.PROVIDER_ENTRY_POINT_GROUP
             return [_EntryPoint()]
 
-    monkeypatch.setattr(registry.metadata, "entry_points", _EntryPoints)
+    monkeypatch.setattr(entry_points.metadata, "entry_points", _EntryPoints)
     monkeypatch.setattr(registry, "_plugins_loaded", False)
 
     assert get_agent_provider("externalcli") is provider
