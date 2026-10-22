@@ -50,7 +50,7 @@ from hyperloom_multibranch.contracts.llm_prices import price_of
 from hyperloom_multibranch.contracts.notebook import Role, Writer
 from hyperloom_multibranch.contracts.notebook.interfaces import BranchLogStore, CommitQuery
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
-from hyperloom_multibranch.contracts.toolbox import SpecialistTokens
+from hyperloom_multibranch.contracts.toolbox import SpecialistTokens, Toolbox
 from hyperloom_multibranch.notebook import BriefTriggers, LocalNotebook
 from hyperloom_multibranch.notebook.learning_search import LEARNINGS_LOG, RetrievalLog
 from hyperloom_multibranch.notebook.rsi.briefing import SessionBriefs
@@ -69,6 +69,7 @@ from hyperloom_multibranch.specialist.judging import Judging
 from hyperloom_multibranch.specialist.runtime import RuntimePacing, SpecialistRuntime
 
 if TYPE_CHECKING:
+    from hyperloom_multibranch.specialist.agent_onboarding import AgentSpec
     from pathlib import Path
 
     from hyperloom.measure.pins import ActiveImage, ToolCommits
@@ -103,6 +104,7 @@ class SessionWiring:
     tokens: SpecialistTokens
     notebooks: Callable[[str], BranchLogStore]
     briefs: SessionBriefs
+    toolbox: Toolbox
 
 
 #: Builds the specialist runtime's session factory, and the worktree of each branch the worktree tools serve, on a
@@ -279,7 +281,7 @@ def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: Peer
         analysis=toolbox,
     )
     register_specialist_tools(mcp, toolbox=toolbox, notebooks=runtime_notebook, options=tool_options)
-    built = sessions(SessionWiring(setup, repo, McpSpecialistTokens(mcp), runtime_notebook, briefs))
+    built = sessions(SessionWiring(setup, repo, McpSpecialistTokens(mcp), runtime_notebook, briefs, toolbox))
     register_worktree_tools(mcp, repo=repo, worktrees=built.worktrees)
     gate = RuleGate(gate_notebook, repo, setup.desk, toolbox)
     blocked = BlockedCandidates(gate_notebook, gate)
@@ -446,8 +448,13 @@ def _specialist_role(workload: Workload) -> str:
     )
 
 
-def model_backed_sessions(command: AgentCommand) -> SpecialistSessions:
-    """Sessions that run ``command`` for every branch's specialist, in a worktree of the workload's framework.
+AGENT_CARDS_ENV = "HYPERLOOM_MB_AGENT_CARDS"
+AGENT_PORT = 31100
+
+
+def model_backed_sessions(command: AgentCommand, agent_cards: tuple[int, ...] = ()) -> SpecialistSessions:
+    """Sessions that run ``command`` for every branch's specialist, in a worktree of the workload's framework, and
+    each branch's third-party agent on ``agent_cards``.
 
     The CLI runs on the main flow's allowlisted specialist environment, through a local AI work socket whose resource
     log is under ``MB-logs``; its worktrees branch off one source base at ``MB-source``, and each launch rebuilds the
@@ -457,6 +464,7 @@ def model_backed_sessions(command: AgentCommand) -> SpecialistSessions:
     def build(wiring: SessionWiring) -> ModelSessions:
         from hyperloom.orchestrator.specialists.agent_runner import Liveness, LocalAgentRunner, build_specialist_env
         from hyperloom_multibranch.specialist.agent_session import SPECIALIST_LOST_AFTER_S, AgentSetup
+        from hyperloom_multibranch.specialist.agent_sessions import AgentSessions, with_agents
         from hyperloom_multibranch.specialist.model_sessions import model_sessions
         from hyperloom_multibranch.specialist.prompts import role_prompt
         from hyperloom_multibranch.specialist.worktree import SourceBase
@@ -474,15 +482,63 @@ def model_backed_sessions(command: AgentCommand) -> SpecialistSessions:
             repo=wiring.repo,
             briefs=wiring.briefs.text,
         )
-        return model_sessions(
+        sessions = model_sessions(
             agent,
             base=SourceBase(layout.source),
             components=(workload.framework,),
             branch_dir=layout.branch_dir,
             notebook_for=wiring.notebooks,
         )
+        agents = AgentSessions(
+            _agent_spec(workload),
+            agent_cards,
+            command,
+            agent.env,
+            wiring.toolbox,
+            wiring.repo,
+            wiring.setup.processes,
+        )
+        return with_agents(sessions, agents, branch_dir=layout.branch_dir, notebook_for=wiring.notebooks)
 
     return build
+
+
+def _agent_spec(workload: Workload) -> AgentSpec:
+    """What every agent of a session of ``workload`` is asked to optimize; the root's launch, the workspace, the
+    cards and the port are each branch's own."""
+
+    from hyperloom_multibranch.specialist.agent_onboarding import AgentSpec
+
+    shape = workload.inferencex
+    requests = {"kind": workload.kind.value, "conc": workload.conc}
+    if shape is not None:
+        requests.update(isl=shape.isl, osl=shape.osl)
+    return AgentSpec(
+        model=resolve_serving_model_path(workload.model),
+        framework=workload.framework,
+        tp=workload.tp,
+        precision=workload.precision,
+        gpu_type=workload.gpu_type,
+        workload=requests,
+        metric=workload.metric,
+        server_args="",
+        envs={},
+        workspace="",
+        cards=(),
+        seconds=0.0,
+        port=AGENT_PORT,
+    )
+
+
+def agent_cards(env: Mapping[str, str]) -> tuple[int, ...]:
+    """The cards ``HYPERLOOM_MB_AGENT_CARDS`` sets aside for third-party agents, none of the measurement's; a local
+    stand-in for the toolbox's sandbox lease."""
+
+    cards = tuple(int(card) for card in env.get(AGENT_CARDS_ENV, "").split(",") if card.strip())
+    shared = set(cards) & set(machine_cards())
+    if shared:
+        raise PeersUnavailable(f"{AGENT_CARDS_ENV} names cards the measurements use: {sorted(shared)}")
+    return cards
 
 
 def load_peers(workload: Workload) -> PeerFactory:
@@ -494,7 +550,8 @@ def load_peers(workload: Workload) -> PeerFactory:
 
     host = measurement_host(os.environ, workload)
     require_framework_package(workload.framework)
-    return partial(local_peers, host, model_backed_sessions(specialist_command(os.environ)))
+    command = specialist_command(os.environ)
+    return partial(local_peers, host, model_backed_sessions(command, agent_cards(os.environ)))
 
 
 __all__ = [
