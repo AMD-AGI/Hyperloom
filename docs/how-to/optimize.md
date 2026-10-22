@@ -185,8 +185,9 @@ the same canonical Magpie workload and Hyperloom's KEEP gate.
 The profile phase prepares the TraceLens runtime patch and SGLang kernel-shape tool
 using the same helpers as fixed-sequence profiling, on a separate copy of the YAML.
 The copy enables `profiler.torch_profiler` and preserves explicit capture steps, count,
-start delay, interval, and detailed-annotation settings. When annotation settings are
-absent, runtime preparation supplies them; Magpie supplies the capture-window defaults.
+start delay, interval, and detailed-annotation settings. A missing capture setting
+becomes one capture of 256 steps, a 300-second start delay, and a 900-second interval.
+When annotation settings are absent, runtime preparation supplies them.
 The shape tool is prepended to the server's existing Python path, preserving candidate
 runtime paths. Magpie owns server profiling flags and the capture/flush lifecycle.
 Profiled measurements never replace the unprofiled performance baseline.

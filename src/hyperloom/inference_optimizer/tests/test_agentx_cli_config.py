@@ -90,6 +90,7 @@ def test_standard_cli_generates_native_yaml_and_candidate_controls(tmp_path, mon
     assert bench["run_mode"] == "local"
     assert bench["envs"] == {"TP": 4, "EP_SIZE": 4, "CONC": 8}
     assert bench["agentx"]["mode"] == "canonical"
+    assert bench["profiler"]["torch_profiler"] == {"enabled": False}
     assert "benchmark_script" not in bench
     assert args.enable_conc_sweep is False
     assert agentx_enabled()
@@ -99,8 +100,13 @@ def test_standard_cli_generates_native_yaml_and_candidate_controls(tmp_path, mon
     assert launch["append_args"] == ["--disable-custom-all-reduce"]
     assert launch["env"] == {"TEST_SERVER_KNOB": "2"}
     enable_profile(candidate)
-    assert load_benchmark(candidate)["profiler"]["torch_profiler"]["enabled"] is True
-    assert load_benchmark(source)["profiler"]["torch_profiler"]["enabled"] is False
+    profiled = load_benchmark(candidate)["profiler"]["torch_profiler"]
+    assert profiled["enabled"] is True
+    assert profiled["num_steps"] == 256
+    assert profiled["num_profiles"] == 1
+    assert profiled["start_seconds"] == 300
+    assert profiled["interval_seconds"] == 900
+    assert load_benchmark(source)["profiler"]["torch_profiler"] == {"enabled": False}
 
 
 @pytest.mark.parametrize(("board", "runner"), [("mi308x", "mi300x"), ("mi325x", "mi300x"), ("mi355x", "mi355x")])

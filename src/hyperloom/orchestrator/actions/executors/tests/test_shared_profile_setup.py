@@ -74,7 +74,14 @@ def test_native_and_fixed_profiles_share_patches_not_launch_controls(tmp_path, m
     native = load_benchmark(path)
     assert calls == [framework, framework]
     assert fixed["envs"]["HYPERLOOM_TRACELENS_PATCH_STATUS"] == "ok"
-    assert native["profiler"]["torch_profiler"] == {"enabled": True, "detailed_annotations": True}
+    assert native["profiler"]["torch_profiler"] == {
+        "enabled": True,
+        "num_steps": 256,
+        "num_profiles": 1,
+        "start_seconds": 300,
+        "interval_seconds": 900,
+        "detailed_annotations": True,
+    }
     assert native["envs"]["TP"] == original["envs"]["TP"]
     assert native["envs"]["CONC"] == original["envs"]["CONC"]
     assert (
@@ -216,7 +223,13 @@ def test_native_shape_setup_preserves_annotations_without_rewriting_client_body(
     )
     enable_profile(path)
     native = load_benchmark(path)
-    assert native["profiler"]["torch_profiler"] == {**requested, "enabled": True}
+    assert native["profiler"]["torch_profiler"] == {
+        **requested,
+        "enabled": True,
+        "num_profiles": 1,
+        "start_seconds": 300,
+        "interval_seconds": 900,
+    }
     assert native["envs"]["PROFILE_EXTRA_BODY"] == client_body
     server_env = native["agentx"]["launch_overrides"]["env"]
     assert server_env["TRACELENS_SHAPE_DISCOVERY"] == "1"

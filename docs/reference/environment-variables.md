@@ -951,8 +951,9 @@ Native AgentX profiling shares TraceLens patch and kernel-shape-tool preparation
 fixed-sequence profiling. Configure capture steps, count, delay and interval through
 `benchmark.profiler.torch_profiler` (`num_steps`, `num_profiles`, `start_seconds`,
 `interval_seconds`). The diagnostic copy preserves those settings and explicit
-`detailed_annotations`; unset annotation settings follow runtime preparation. Other
-unset profiler settings retain Magpie's defaults, including the 200-second interval.
+`detailed_annotations`. When profiling is enabled, a missing capture setting becomes
+one capture of 256 steps, starting 300 seconds after measurement, with a 900-second
+interval. Unset annotation settings follow runtime preparation.
 Hyperloom adds the shape-tool environment through `agentx.launch_overrides` while
 preserving the server's runtime paths. Magpie owns profiling flags, starts after replay
 reaches measurement, and manages capture/flush. Each window remains a separate TraceLens input.

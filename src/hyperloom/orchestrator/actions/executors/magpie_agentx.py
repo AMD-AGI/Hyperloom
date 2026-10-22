@@ -149,7 +149,11 @@ def bind_source_evidence(config_path: Path, patches: list[dict[str, Any]]) -> No
 
 
 def enable_profile(config_path: Path) -> None:
-    """Prepare TraceLens instrumentation while leaving native capture policy to Magpie."""
+    """Prepare TraceLens instrumentation and fill any missing AgentX capture settings.
+
+    An explicit ``num_steps``, ``num_profiles``, ``start_seconds``, or
+    ``interval_seconds`` already present in the profile copy is left unchanged.
+    """
     from ._profile_setup import apply_sglang_shape_tool, patch_for_profile, shape_discovery_enabled
 
     config = yaml.safe_load(config_path.read_text(encoding=_ENCODING))
@@ -174,6 +178,10 @@ def enable_profile(config_path: Path) -> None:
     apply_launch_changes(bench, LaunchChanges(env=profile_env))
     torch_profiler = bench.setdefault("profiler", {}).setdefault("torch_profiler", {})
     torch_profiler["enabled"] = True
+    torch_profiler.setdefault("num_steps", 256)
+    torch_profiler.setdefault("num_profiles", 1)
+    torch_profiler.setdefault("start_seconds", 300)
+    torch_profiler.setdefault("interval_seconds", 900)
     torch_profiler.setdefault("detailed_annotations", detailed)
     config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding=_ENCODING)
 

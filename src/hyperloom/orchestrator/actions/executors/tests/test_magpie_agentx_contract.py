@@ -250,7 +250,8 @@ def test_profile_uses_same_workload_and_is_never_keep_evidence(source, tmp_path,
     assert torch_profiler["enabled"] is True
     assert torch_profiler["num_profiles"] == 3
     assert torch_profiler["num_steps"] == 5
-    assert "start_seconds" not in torch_profiler
+    assert torch_profiler["start_seconds"] == 300
+    assert torch_profiler["interval_seconds"] == 900
     assert "PROFILE_EXTRA_BODY" not in bench["envs"]
     assert bench["model"] == "Qwen/Qwen3-0.6B"
     assert str(bench["envs"]["CONC"]) == "8"
