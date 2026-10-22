@@ -320,14 +320,13 @@ Answer with one JSON object and nothing else, with exactly these fields:
 - "launch": the shell command that runs the agent end to end from the checkout; "resume": the one that continues a
   run after a crash, "" when launching again does;
 - "keep": how a kept change shows, {{"path": file relative to the checkout, "field": dotted path of the counter (a
-  number or a list), "where": {{field: value}} that a list item must match}}, or null when the agent keeps nothing and
-  only its final state counts;
+  number or a list) as the file has it once the first keep is in, or "" when every change of the file is a keep,
+  "where": {{field: value}} that a list item must match}}, or null when the agent keeps nothing and only the state its
+  workspace ends in counts;
 - "config_source": {{"path": file relative to "workspace" holding the server arguments and environment the agent runs
   with, "server_args": the field of the arguments string, "envs": the field of the environment object}}, or null;
 - "summary_field": dotted path in the keep file to the agent's own words for its latest keep (an integer step indexes
   a list, -1 its last item), "" when none;
-- "result_dir": for an agent with no keep, the directory relative to the checkout that holds its final state, "" to
-  read the workspace;
 - "needs": what it requires, from "anthropic", "openai", "network", "docker".
 
 Earlier attempts that failed, to correct rather than repeat:

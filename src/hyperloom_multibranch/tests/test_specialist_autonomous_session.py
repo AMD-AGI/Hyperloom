@@ -172,7 +172,6 @@ def _manifest(workspace: str, agent: Agent) -> str:
             "keep": agent.keep,
             "config_source": agent.config_source,
             "summary_field": "note",
-            "result_dir": "",
             "needs": [],
         }
     )

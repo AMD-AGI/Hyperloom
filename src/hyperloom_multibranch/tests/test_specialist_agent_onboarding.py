@@ -61,7 +61,6 @@ def _manifest(**overrides: Any) -> str:
         "keep": {"path": "run/session.json", "field": "keeps"},
         "config_source": None,
         "summary_field": "",
-        "result_dir": "",
         "needs": [],
     }
     document.update(overrides)

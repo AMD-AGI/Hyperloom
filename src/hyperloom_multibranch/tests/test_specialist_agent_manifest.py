@@ -26,7 +26,6 @@ def _document(**overrides: Any) -> dict[str, Any]:
         "keep": {"path": "run/session.json", "field": "lessons", "where": {"decision": "KEEP"}},
         "config_source": {"path": "agent/config.json", "server_args": "server_flags", "envs": "server_env"},
         "summary_field": "lessons.-1.done",
-        "result_dir": "",
         "needs": ["anthropic"],
     }
     document.update(overrides)
@@ -42,9 +41,15 @@ def test_a_manifest_reads_back_what_it_writes() -> None:
 
 
 def test_an_agent_with_no_keep_signal_is_read_as_collected_once() -> None:
-    manifest = AgentManifest.read(_document(keep=None, result_dir="results"))
+    assert AgentManifest.read(_document(keep=None)).keep is None
 
-    assert manifest.keep is None and manifest.result_dir == "results"
+
+def test_a_null_optional_field_is_empty_not_the_text_none() -> None:
+    manifest = AgentManifest.read(_document(resume=None, summary_field=None, keep={"path": "s.json", "field": None}))
+
+    assert (manifest.resume, manifest.summary_field, manifest.keep.counter) == ("", "", "")
+    with pytest.raises(ManifestError, match="resume"):
+        AgentManifest.read(_document(resume=3))
 
 
 @pytest.mark.parametrize(
@@ -57,6 +62,7 @@ def test_an_agent_with_no_keep_signal_is_read_as_collected_once() -> None:
         ({"config_source": {"path": "c.json", "server_args": "", "envs": "env"}}, "config_source.server_args"),
         ({"surprise": 1}, "surprise"),
         ({"keep": {"path": "s.json", "fields": "lessons"}}, "fields"),
+        ({"result_dir": "results"}, "result_dir"),
     ],
 )
 def test_a_manifest_that_breaks_the_schema_is_refused_naming_the_field(overrides: dict[str, Any], names: str) -> None:

@@ -8,7 +8,7 @@ validates before anything runs: every command is a non-empty string, every path 
 agent's checkout, and a key the schema does not have is refused, so a misspelt field fails the attempt instead of
 silently meaning nothing. The manifest says how to install and launch the agent, the config it is launched with, how
 a kept change shows (:class:`KeepSignal`), where the agent keeps the server arguments and environment it runs with
-(:class:`ConfigSource`), and, for an agent with no keep signal, where its final state is.
+(:class:`ConfigSource`); an agent with no keep signal is read once, from its workspace.
 """
 
 from __future__ import annotations
@@ -28,6 +28,15 @@ class ManifestError(ValueError):
 def _text(value: object, name: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ManifestError(f"{name} must be a non-empty string, got {value!r}")
+    return value
+
+
+def _optional(value: object, name: str) -> str:
+    """An optional text field: absent and ``null`` are both empty."""
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise ManifestError(f"{name} must be a string or null, got {value!r}")
     return value
 
 
@@ -82,7 +91,9 @@ class KeepSignal:
         where = fields.get("where", {})
         if not isinstance(where, Mapping):
             raise ManifestError(f"keep.where must be an object, got {where!r}")
-        return cls(_relative(fields.get("path"), "keep.path"), str(fields.get("field", "")), dict(where))
+        return cls(
+            _relative(fields.get("path"), "keep.path"), _optional(fields.get("field"), "keep.field"), dict(where)
+        )
 
     def mark(self, raw: bytes) -> int | str:
         """What the keep file's bytes ``raw`` say of the keeps: the count of :meth:`count`, or, with no ``counter``,
@@ -144,7 +155,6 @@ _MANIFEST_FIELDS = {
     "keep",
     "config_source",
     "summary_field",
-    "result_dir",
     "needs",
 }
 
@@ -152,8 +162,8 @@ _MANIFEST_FIELDS = {
 @dataclass(frozen=True)
 class AgentManifest:
     """How to run one agent: ``install`` once, write ``config`` to ``config_file``, run ``launch`` (``resume`` after a
-    crash, ``launch`` again when empty); ``keep`` is ``None`` for an agent collected once, from ``result_dir`` when it
-    names one; ``summary_field`` is where the keep file holds the agent's words for its latest keep; ``needs`` is what
+    crash, ``launch`` again when empty); ``keep`` is ``None`` for an agent collected once, from its workspace;
+    ``summary_field`` is where the keep file holds the agent's words for its latest keep; ``needs`` is what
     the agent requires of its sandbox."""
 
     source: str
@@ -166,7 +176,6 @@ class AgentManifest:
     keep: KeepSignal | None = None
     config_source: ConfigSource | None = None
     summary_field: str = ""
-    result_dir: str = ""
     needs: tuple[str, ...] = ()
 
     @classmethod
@@ -178,7 +187,6 @@ class AgentManifest:
         if not isinstance(config, Mapping):
             raise ManifestError(f"config must be an object, got {config!r}")
         keep, source = fields.get("keep"), fields.get("config_source")
-        result_dir = str(fields.get("result_dir", ""))
         return cls(
             source=_text(fields.get("source"), "source"),
             commit=_text(fields.get("commit"), "commit"),
@@ -186,11 +194,10 @@ class AgentManifest:
             config_file=_relative(fields.get("config_file"), "config_file"),
             config=dict(config),
             launch=_text(fields.get("launch"), "launch"),
-            resume=str(fields.get("resume", "")),
+            resume=_optional(fields.get("resume"), "resume"),
             keep=None if keep is None else KeepSignal.read(keep),
             config_source=None if source is None else ConfigSource.read(source),
-            summary_field=str(fields.get("summary_field", "")),
-            result_dir=_relative(result_dir, "result_dir") if result_dir else "",
+            summary_field=_optional(fields.get("summary_field"), "summary_field"),
             needs=_commands(fields.get("needs", []), "needs"),
         )
 
@@ -206,7 +213,6 @@ class AgentManifest:
             "keep": None if self.keep is None else self.keep.to_document(),
             "config_source": None if self.config_source is None else self.config_source.to_document(),
             "summary_field": self.summary_field,
-            "result_dir": self.result_dir,
             "needs": list(self.needs),
         }
 
