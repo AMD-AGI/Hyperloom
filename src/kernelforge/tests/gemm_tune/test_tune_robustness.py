@@ -152,7 +152,7 @@ class TestRunIsolatedProfileMerge:
                 work_dir=tmp_path,
                 aiter_root=str(tmp_path),
             ),
-            tr.IsolationGuard(outer_timeout_s=60, task_timeout_s=30, gpu_ids="", blocklist=None),
+            tr.IsolationGuard(outer_timeout_s=60, gpu_ids="", blocklist=tr.FaultBlocklist(tmp_path / "bl.json", {})),
         )
         assert rc == 0
         body = shared_profile.read_text(encoding="utf-8")
