@@ -168,7 +168,7 @@ def test_loop_appends_the_event_only_after_the_campaign_guard():
     assert "pr_kb_event" in set(IterationConfig.__dataclass_fields__)
     assert "already contains a campaign" in inspect.getsource(IterationLoop._restore_or_begin_campaign)
     assert "pr_refs_refreshed" in inspect.getsource(IterationLoop._persist_pr_knowledge)
-    source = inspect.getsource(IterationLoop._run_locked)
+    source = inspect.getsource(IterationLoop._begin_locked_run)
     guard = source.index("self._restore_or_begin_campaign(")
     append = source.index("self._persist_pr_knowledge()")
     assert append > guard, "the event append must follow the fresh-campaign guard"
