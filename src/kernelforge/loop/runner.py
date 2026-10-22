@@ -109,6 +109,7 @@ from kernelforge.loop.run_state import (
     should_resume,
     start_session,
 )
+from kernelforge.orchestrator.agent import RATIONALE_MAX_CHARS
 from kernelforge.orchestrator.orchestration import (
     OrchestrationInfrastructureError,
 )
@@ -236,7 +237,7 @@ CONFIG_COVERAGE_DISPERSION_MULTIPLE = 1.0
 _CEILING_UNLOADED = object()
 
 
-def _lane_rationale(lane) -> str:
+def _lane_rationale(lane: LanePlan) -> str:
     """The rationale of the iteration that measures a queued lane, with the lane Implementer's own when it gave one."""
     head = f"lane {lane.lane_id} of a fan-out round"
     return f"{head}: {lane.rationale}" if lane.rationale else head
@@ -3400,7 +3401,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         Like the roofline target, this decides only whether to buy another round; KEEP stays a measurement against
         the incumbent.
         """
-        target = float(self.ic.target_mean_case_speedup or 0.0)
+        target = self.ic.target_mean_case_speedup
         return target > 0 and self.best_mean_case_speedup is not None and self.best_mean_case_speedup >= target
 
     def _render_roofline_progress(self) -> str:
@@ -3848,7 +3849,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             # Why this candidate was tried and decided, for trajectory comparison. Every path that produces an
             # iteration names one, a placeholder when no agent ran or it gave none; only a pending KEEP recorded before
             # the field existed has none, and then the key is omitted.
-            rationale=(result.agent_rationale or "").replace("\n", " ").strip()[:500] or None,
+            rationale=(result.agent_rationale or "").replace("\n", " ").strip()[:RATIONALE_MAX_CHARS] or None,
             plan=(plan or "").strip()[:120] or None,
             # The mode this iteration actually ran under, which is the direction identity the empty-diff streak is
             # counted against.
@@ -5266,7 +5267,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             print(
                 f"\nSPEEDUP TARGET MET at iteration {iteration}: mean case speedup "
                 f"{self.best_mean_case_speedup:.6f}x, at or above the "
-                f"{float(self.ic.target_mean_case_speedup):.6f}x target"
+                f"{self.ic.target_mean_case_speedup:.6f}x target"
             )
             return True, None
         if self.run_state.orchestration_circuit_state == ORCHESTRATION_CIRCUIT_OPEN:
