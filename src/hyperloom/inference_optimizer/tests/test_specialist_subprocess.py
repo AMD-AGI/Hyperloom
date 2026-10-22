@@ -59,6 +59,21 @@ def test_build_specialist_env_inherits_provider_secrets_by_default(monkeypatch):
     assert "LD_PRELOAD" not in env
 
 
+def test_build_specialist_env_forwards_hub_settings_but_not_the_hub_token(monkeypatch):
+    hub = {
+        "HF_ENDPOINT": "https://hf-mirror.example",
+        "HF_HOME": "/shared/hf",
+        "HF_HUB_CACHE": "/shared/hf/hub",
+        "HF_HUB_OFFLINE": "1",
+    }
+    for name, value in hub.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setenv("HF_TOKEN", "hf-token-value")
+    env = _build_specialist_env()
+    assert {name: env.get(name) for name in hub} == hub
+    assert "HF_TOKEN" not in env
+
+
 def test_build_specialist_env_forwards_the_claude_config_dir(monkeypatch):
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", "/tmp/claude-config")
     assert _build_specialist_env()["CLAUDE_CONFIG_DIR"] == "/tmp/claude-config"
