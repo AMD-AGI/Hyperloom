@@ -75,7 +75,7 @@ MFMA tiles **one wave** computes — not the wave count. This trips people up co
 Uniform across every device-op family:
 
 ```cpp
-using DeviceOp = ck::tensor_operation::device::DeviceGemmXdlUniversal<
+using DeviceOp = ck::tensor_operation::device::DeviceGemm_Xdl_CShuffleV3<   // prints as "DeviceGemmXdlUniversal"
     Row, Col, Row, BF16, BF16, BF16, F32, BF16, PassThrough, PassThrough, PassThrough,
     GemmDefault, 256, /*M,N,K PerBlock*/ 256,256,64, /*AK1,BK1*/ 8,8,
     /*MPerXDL,NPerXDL*/ 32,32, /*MXdlPerWave,NXdlPerWave*/ 4,4, /* ...transfer... */
@@ -89,7 +89,8 @@ float ms = inv.Run(arg, StreamConfig{stream, /*time_kernel*/true});
 ```
 
 **`IsSupportedArgument` is a correctness gate, not a hint.** It checks M/N/K divisibility against the
-tile, K against `KPerBlock × KBatch`, pointer alignment against `AK1`/`BK1`, and layout/spec. **An
+tile, K against `KPerBlock × KBatch`, `K` and the contiguous dimension against `AK1`/`BK1` and the load
+vector width (it does not inspect pointer alignment), and layout/spec. **An
 instance forced past a `false` returns silent garbage — not an error.**
 
 ### Layout shorthand
@@ -101,20 +102,20 @@ stored N×K column-major — the most-tuned layout in CK's instance DB. Also RRR
 Two template parameters select it:
 
 **Scheduler**
-- **`Intrawave`** — one wave's loads and MFMAs software-pipelined via `s_setprio` + sched barriers.
+- **`Intrawave`** — one wave's loads and MFMAs software-pipelined via `sched_group_barrier`.
   Compute-bound prefill default.
-- **`Interwave`** — hide latency by switching waves. Memory-bound, skinny-M, low occupancy, or when
-  Intrawave spills.
+- **`Interwave`** — hide latency by switching waves (`s_setprio` around the MFMA clusters). Memory-bound,
+  skinny-M, low occupancy, or when Intrawave spills. Only v1 and v2 have an Interwave variant.
 
 **Version**
 
 | Version | Shape |
 |---|---|
 | v1 | single buffer, lowest VGPR |
-| v2 | — |
-| **v3** | **2-stage prefetch, double-buffered LDS — the workhorse for large compute-bound GEMM** |
+| v2 | memory-optimized: ≥2 global prefetch stages, single LDS buffer |
+| **v3** | **2-stage global prefetch, single LDS buffer — the workhorse for large compute-bound GEMM** |
 | v4 | deeper ping-pong, huge K |
-| v5 | persistent / async-input |
+| v5 | 3-stage prefetch with a double global-prefetch register buffer, double LDS buffer |
 
 On gfx950's **160 KiB LDS** a deeper pipeline is cheaper than it was on a 64 KiB part — v4 is worth
 testing where v3 used to be the ceiling.
@@ -123,7 +124,7 @@ testing where v3 used to be the ceiling.
 
 ```cpp
 std::vector<DeviceOpPtr> ops;
-DeviceOperationInstanceFactory<DeviceGemm<Row,Col,Row,BF16,BF16,BF16,PT,PT,PT>>::GetInstances(ops);
+DeviceOperationInstanceFactory<DeviceGemmV2<Row,Col,Row,BF16,BF16,BF16,PT,PT,PT>>::GetInstances(ops);  // v3 instances
 for (auto& op : ops) {
     auto arg = op->MakeArgumentPointer(...);
     if (!op->IsSupportedArgument(arg.get())) continue;      // skip incompatible
@@ -149,7 +150,7 @@ build-specific** — re-sweep after any CK/ROCm bump (`ck_traps.md` §3).
 
 | Check | How |
 |---|---|
-| Instance ranking | `ckProfiler gemm <args>` — top line is your pin |
+| Instance ranking | `ckProfiler gemm_universal <args>` — top line is your pin |
 | Cross-check | the same shape against a hipBLASLt solidx and the aiter tuned config |
 | Correctness | fp32-accumulate reference parity **before** pinning |
 | No spills | disassemble; `buffer_load_dwordx4` in the K-loop, no `scratch_` / `v_accvgpr` spam |
@@ -158,8 +159,8 @@ build-specific** — re-sweep after any CK/ROCm bump (`ck_traps.md` §3).
 - **Assuming ck_tile is faster for dense square GEMM** — it is ~1.7× slower at 4096³ (Issue #1727).
 - **Skipping `IsSupportedArgument`** — silent garbage.
 - **`ckProfiler` missing in deployment images** — build it on a dev box, or fall back to aiter/Triton.
-- **gfx950 fp4/mxfp4 gated behind `DTYPES` build flags** — they will not appear unless enabled at cmake
-  time.
+- **gfx950 fp4/mxfp4 (MX) instances gated on `GPU_TARGETS`** — they are built only when gfx950 is in the
+  target list at cmake time.
 - **Confusing `MXdlPerWave` with wave count** — it is MFMA tiles per wave.
 
 Full list: `ck_traps.md`.

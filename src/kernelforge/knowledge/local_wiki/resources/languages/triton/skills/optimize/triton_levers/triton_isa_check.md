@@ -25,12 +25,16 @@ dialect — that timing alone will not attribute.
 ## 1. Dump everything
 
 ```bash
-AMDGCN_ENABLE_DUMP=1 \      # final AMDGCN ISA to stderr
-MLIR_ENABLE_DUMP=1 \        # TTGIR / TritonAMDGPU IR after each pass
-TRITON_PRINT_AUTOTUNING=1 \ # winning config + timing
-TRITON_ALWAYS_COMPILE=1 \   # bypass the kernel cache so the dump is for THIS run
-python my_kernel.py 2> dump.txt
+# AMDGCN_ENABLE_DUMP      final AMDGCN ISA (printed to stdout)
+# MLIR_ENABLE_DUMP        TTGIR / TritonAMDGPU IR after each pass (stderr)
+# TRITON_PRINT_AUTOTUNING winning config + timing
+# TRITON_ALWAYS_COMPILE   bypass the kernel cache so the dump is for THIS run
+AMDGCN_ENABLE_DUMP=1 MLIR_ENABLE_DUMP=1 TRITON_PRINT_AUTOTUNING=1 TRITON_ALWAYS_COMPILE=1 \
+  python my_kernel.py > dump.txt 2>&1
 ```
+
+Keep the comments off the continuation lines: a `\` followed by a comment ends the command there, and
+the variables never reach `python`.
 
 `TRITON_ALWAYS_COMPILE=1` matters more than it looks — without it you can spend an afternoon reading a
 cached dump of a previous config.
@@ -38,10 +42,10 @@ cached dump of a previous config.
 ```bash
 grep ".vgpr_count"                 dump.txt   # VGPRs/lane
 grep ".sgpr_count"                 dump.txt
-grep ".group_segment_fixed_size"   dump.txt   # LDS bytes
+grep ".group_segment_fixed_size"   dump.txt   # static LDS only — 0 for Triton, which sizes LDS at launch
 grep ".private_segment_fixed_size" dump.txt   # scratch — MUST be 0
 grep "num-warps"                   dump.txt
-grep "triton_gpu.shared"           dump.txt   # LDS bytes per shared layout (MLIR dump)
+grep "ttg.shared ="                dump.txt   # LDS bytes the kernel requests (MLIR dump; = kernel.metadata.shared)
 ```
 
 `ROCm/triton` ships `occ.sh` to turn `.vgpr_count` / LDS / `num-warps` into wg/CU occupancy.
@@ -54,7 +58,7 @@ grep "triton_gpu.shared"           dump.txt   # LDS bytes per shared layout (MLI
 | Masked tail | `buffer_load_*` (HW bounds check) | `global_load_*` + `v_cmp` predication |
 | LDS access | `ds_read_b128` / `ds_write_b128` | `ds_read_b32` |
 | MFMA | dense `v_mfma_f32_16x16x32` | sparse, with gaps — a starved core |
-| Accumulator | stays in AGPR (`a[0:n]`) | `v_accvgpr_read/write` **inside** the loop |
+| Accumulator | stays put in VGPRs or AGPRs (`.agpr_count` says which) | `v_accvgpr_read/write` **inside** the loop |
 | **Scratch** | **`.private_segment_fixed_size: 0`** | nonzero → spilling to HBM, **3–5× slower** |
 | Waitcnt | minimal, overlapped | `s_waitcnt vmcnt(0)` after every load = no overlap at all |
 
@@ -72,7 +76,7 @@ grep "triton_gpu.shared"           dump.txt   # LDS bytes per shared layout (MLI
 | Expectation | If you see something else |
 |---|---|
 | fp16/bf16 with `nonkdim=16` → `v_mfma_f32_16x16x32` | `32x32x16` means `nonkdim` is 32 (or auto picked it) — compare timings |
-| fp8 on gfx950 → the OCP `f8f6f4` family | a lowering failure means you passed the **FNUZ** types (gfx942 dialect) |
+| fp8 on gfx950 → the OCP `f8f6f4` family | `v_mfma_f32_*_f16` plus a `UserWarning` means you passed the **FNUZ** types (gfx942 dialect) and Triton 3.7.0 upcast them to fp16 |
 | MXFP → `v_mfma_scale_f32_*_f8f6f4` | plain `f8f6f4` means the scales are not wired up |
 
 ## 5. LDS width check

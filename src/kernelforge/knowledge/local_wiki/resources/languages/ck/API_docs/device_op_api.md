@@ -22,7 +22,7 @@ priority see [../skills/optimize/ck_levers/ck_tuning_knobs.md](../skills/optimiz
 ## The device-op families
 | Template | Use |
 |---|---|
-| `DeviceGemm*` / `DeviceGemmXdlUniversal` | plain GEMM (RCR = `Y=X·Wᵀ` is the most-tuned layout) |
+| `DeviceGemm*` / `DeviceGemm_Xdl_CShuffleV3` (prints as `DeviceGemmXdlUniversal`) | plain GEMM (RCR = `Y=X·Wᵀ` is the most-tuned layout) |
 | `DeviceBatchedGemmXdl` | batched GEMM (batch stride) |
 | `DeviceGroupedGemm*` | variable-M MoE (arrays of ptrs/strides) — the CK path behind fused-MoE |
 | `DeviceGemmMultipleD*` | bias/residual/activation fused epilogue |
@@ -30,7 +30,7 @@ priority see [../skills/optimize/ck_levers/ck_tuning_knobs.md](../skills/optimiz
 
 ## The five-call lifecycle (uniform across all device-op families)
 ```cpp
-using DeviceOp = ck::tensor_operation::device::DeviceGemmXdlUniversal</* Row/Col layouts, dtypes,
+using DeviceOp = ck::tensor_operation::device::DeviceGemm_Xdl_CShuffleV3</* Row/Col layouts, dtypes,
     elementwise ops, GemmSpec, tile params, pipeline scheduler+version */>;
 auto op   = DeviceOp{};
 auto arg  = op.MakeArgument(a_ptr, b_ptr, c_ptr, M, N, K,
@@ -40,14 +40,16 @@ auto inv  = op.MakeInvoker();
 float ms  = inv.Run(arg, StreamConfig{stream, /*time_kernel=*/true});
 ```
 **`IsSupportedArgument` is a correctness gate**: it checks M/N/K divisibility vs the tile, `K` vs
-`KPerBlock×KBatch`, pointer alignment vs `AK1/BK1`, and layout/spec. **Forcing an instance past a `false`
+`KPerBlock×KBatch`, `K` and the contiguous dimension vs `AK1/BK1` and the load vector width (it does
+not inspect pointer alignment), and layout/spec. **Forcing an instance past a `false`
 returns garbage, not an error.** For non-divisible shapes use `GemmSpecialization::MNKPadding`.
 
 ## Instance factory + sweep (this IS ckProfiler / the framework fallback)
 ```cpp
 std::vector<DeviceOpPtr> ops;
 ck::tensor_operation::device::instance::DeviceOperationInstanceFactory<
-    ck::tensor_operation::device::DeviceGemm<Row,Col,Row,BF16,BF16,BF16,PT,PT,PT>>::GetInstances(ops);
+    ck::tensor_operation::device::DeviceGemmV2<Row,Col,Row,BF16,BF16,BF16,PT,PT,PT>>::GetInstances(ops);
+    // DeviceGemmV2 = the universal (CShuffleV3) instances; DeviceGemm<...> returns the older family
 for (auto& op : ops) {
     auto a = op->MakeArgumentPointer(...);
     if (!op->IsSupportedArgument(a.get())) continue;         // skip incompatible
@@ -61,7 +63,7 @@ IDs drift across CK/ROCm versions) — re-sweep on any bump; never ship a hand-c
 ## Layout shorthand
 `R`=row, `C`=col. **RCR** (A row, B col, C row) is the standard linear-layer layout and the most-tuned in
 CK's instance DB. Pipeline selection = `BlockGemmPipelineScheduler::{Intrawave,Interwave}` ×
-`BlockGemmPipelineVersion::{v1..v5}` — see ck_classic.md.
+`BlockGemmPipelineVersion::{v1..v5}` (Interwave exists only for v1/v2) — see ck_classic.md.
 
 ## Sources
 - `DeviceGemm` base (MakeArgument / IsSupportedArgument / MakeInvoker / Run): https://rocm.docs.amd.com/projects/composable_kernel/en/docs-6.4.2/doxygen/html/structck_1_1tensor__operation_1_1device_1_1_device_gemm.html

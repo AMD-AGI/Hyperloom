@@ -50,19 +50,20 @@ Swap into `fmha_fwd_kernel`:
 The `qr` family also handles arbitrary head-dim padding.
 
 On gfx950 the async path benefits from the widened **128 b/lane** direct-to-LDS and
-**read-with-transpose `ds`** loads — re-check that the emitted form is the 12/16-DWORD one.
+**read-with-transpose `ds`** loads — re-check that the emitted form is the `dwordx3`/`dwordx4` one (12/16
+bytes per lane).
 
 ## Knobs that matter
 
 | Knob | Values | Note |
 |---|---|---|
 | **`kM0`** (Q rows per block) | 64 / 128 | the main occupancy/reuse lever |
-| Head-dim tile `kK0` / `kK1` | 64 / 128 | forward supports head_dim ≤ 256 |
+| Head-dim tiles `kK0` / `kN1` | usually 32 / hdim_v | Q·Kᵀ K-step along head_dim / V head_dim tile (`kK1` is the P·V K-step along seqlen_k); forward supports head_dim ≤ 256 |
 | `qr_ks_vs_async` vs sync | — | async is the latency-hidden default |
-| Mask specialization | causal / sliding / alibi | a separate codegen trait; the masked variant **skips upper-triangle tiles** |
+| Mask specialization | causal / sliding window / generic | a separate codegen trait; the masked variant **skips upper-triangle tiles** |
 | Page size | — | paged-KV decode |
 | WarpGemm for gemm0/gemm1 | bf16 or fp8 | fp8 KV-cache uses the fp8 WarpGemm + per-tile scale |
-| Bias / rotary | `bias.hpp` / `rotary.hpp` | fused traits |
+| Bias (elementwise / alibi) / rotary | `bias.hpp` / `rotary.hpp` | fused traits; rotary is a trait of `fmha_fwd_appendkv`, not `fmha_fwd` |
 
 gfx950's **160 KiB LDS** (2.5× a 64 KiB part) directly relaxes the head-dim and `kM0` ceiling that used
 to bind here — re-tune rather than inheriting a tile sized for 64 KiB.

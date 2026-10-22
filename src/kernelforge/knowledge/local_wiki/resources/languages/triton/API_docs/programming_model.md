@@ -42,7 +42,7 @@ kernel[grid](x, y, N, BLOCK=1024)        # launch via subscript; tensors pass as
 |---|---|---|
 | `num_warps` | warps/block | **wave64**: `num_warps=N` → N·64 threads. Start GEMM at 4 (8 spills) |
 | `num_stages` | stream-pipeliner depth | single GEMM 2, fused FA 1 (NOT 3–4) |
-| `maxnreg` | hard VGPR cap | rarely needed |
+| `maxnreg` | hard register cap (CUDA `.maxnreg`) | **not a `HIPOptions` field — silently dropped on AMD**; use `waves_per_eu` |
 AMD-only knobs (`matrix_instr_nonkdim`, `kpack`, `waves_per_eu`, `schedule_hint`) go **inside
 `triton.Config({...})` kwargs**, not as bare vars — see knobs.md.
 
@@ -54,8 +54,8 @@ AMD-only knobs (`matrix_instr_nonkdim`, `kpack`, `waves_per_eu`, `schedule_hint`
                            num_warps=4, num_stages=2),
              # ... more configs ...],
     key=["M","N","K"],                       # re-tune when these change
-    prune_configs_by={"early_config_prune": my_prune},   # e.g. drop configs whose LDS > 64 KB
-    warmup=25, rep=100)
+    prune_configs_by={"early_config_prune": my_prune})   # e.g. drop configs whose LDS > 64 KB (gfx942) / 160 KB (gfx950)
+# warmup=/rep= are deprecated (DeprecationWarning); the default bench already uses 25 ms / 100 ms
 @triton.jit
 def gemm(...): ...
 ```

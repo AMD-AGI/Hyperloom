@@ -64,7 +64,7 @@ gl.BlockedLayout(
     size_per_thread=[2, 4],     # contiguous subtile each thread owns, in registers
     threads_per_warp=[16, 4],   # product MUST be the wavefront size: 64 on CDNA
     warps_per_cta=[2, 2],       # product should be num_warps
-    order=[1, 0],               # dimension tiling order, fastest-varying last
+    order=[1, 0],               # dimension tiling order, fastest-varying first
 )
 ```
 
@@ -147,7 +147,8 @@ raw / swizzled / padded comparison the AMD GEMM ladder runs at its LDS rung:
 - **`gl.SwizzledSharedLayout`** — permutes addresses so a wave's lanes spread across banks. The
   standard fix; the upstream tutorial's own issue tracker shows it does not always behave as expected,
   so **verify against the instruction stream, do not assume**.
-- **`gl.PaddedSharedLayout`** — pads the stride so it is coprime with the bank count. Costs LDS
+- **`gl.PaddedSharedLayout`** — pads the row stride so that, counted in units of the per-lane read
+  width (4/8/16 B for `ds_read_b32`/`b64`/`b128`), it is odd (`hardware/mi350_lds.md`). Costs LDS
   capacity (64 KB/CU on CDNA3, 160 KB/CU on CDNA4 — see `hardware/`), so it trades occupancy for
   conflict-freedom, and a padding that fits on CDNA4 may not fit on CDNA3. It carries a
   `with_identity_for(...)` helper for deriving the padded form from an existing layout.

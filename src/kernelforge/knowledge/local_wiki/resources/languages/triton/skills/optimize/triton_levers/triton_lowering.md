@@ -38,13 +38,16 @@ Every MFMA is **wavefront-wide**: all 64 lanes jointly hold A, B and C. You neve
 the layout the compiler picks determines VGPR and AGPR pressure, and therefore occupancy — which is why
 a shape choice this far down the stack shows up in your throughput.
 
-The accumulator lives in **AGPRs**. Getting it back out to a storable arrangement means a
-`convert_layout`, and on AMD that is a round trip through LDS. `OPTIMIZE_EPILOGUE=1` removes it.
+The accumulator lives in **VGPRs or AGPRs** — the register allocator decides; `.agpr_count` in the dump
+says which (a 128×128 bf16 tile on gfx950 used none, a 256×256 tile did). Moving it to a blocked store
+layout would be a `convert_layout`, a round trip through LDS; Triton 3.7.0's epilogue pass stores
+straight from the MFMA layout instead, by default (`OPTIMIZE_EPILOGUE` is not read).
 
 **On preferring nonkdim=16.** Two independent reasons, and most write-ups only give the second:
 
-1. A 32×32 accumulator occupies **16 C registers per lane against 16×16's 4**. That is register
-   pressure you pay in occupancy, or in spills.
+1. A 32×32 accumulator occupies **16 C registers per lane against 16×16's 4** per instruction — the
+   same total for a given block tile (128×128 bf16 on gfx950: 202 vs 198 VGPRs), so the cost is
+   granularity, not 4× the register pressure.
 2. It schedules coarsely — fewer instruction boundaries at which the compiler can hide load latency.
 
 On top of both, it draws more power and so clocks lower. Start at 16; move to 32 only when a
@@ -59,13 +62,13 @@ Two of these show up in a GEMM, and they are not equally fixable:
 
 | Conversion | What it costs | What to do |
 |---|---|---|
-| Epilogue: MFMA accumulator → blocked store layout | one LDS round trip per output tile | `OPTIMIZE_EPILOGUE=1` eliminates it outright |
+| Epilogue: MFMA accumulator → blocked store layout | one LDS round trip per output tile | Triton 3.7.0 removes it by default (stores from the MFMA layout); `OPTIMIZE_EPILOGUE` is not read |
 | dot-operand: loaded blocked tile → MFMA operand layout | unavoidable — GEMM needs it | you cannot remove it; the LDS swizzle it uses is shaped by your tile choice |
 
-To see how much LDS each layout is reserving, dump the IR and look at the shared-memory allocations:
+To see how much LDS the kernel reserves, dump the IR and look at the `ttg.shared` attribute:
 
 ```bash
-MLIR_ENABLE_DUMP=1 python your_kernel.py 2>&1 | grep "triton_gpu.shared"
+MLIR_ENABLE_DUMP=1 python your_kernel.py 2>&1 | grep "ttg.shared ="
 ```
 
 ## 3. The stream pipeliner — what `num_stages` actually drives
@@ -103,8 +106,8 @@ issues memory traffic.
 |---|---|---|
 | `global_load_dwordx4` | a **128-bit** load — the one you want | contiguous, aligned, well-formed kernel |
 | `global_load_dword` | scalar; vectorization failed | grow the tile; check that the mask and strides really are contiguous |
-| `buffer_load` | 128-bit through a descriptor with **hardware bounds checking** — out-of-range lanes return zero, no predication branch needed | `knobs.amd.use_buffer_ops`, **which is not on by default in many builds** |
-| `global_load_lds` / `buffer_load ... lds` | asynchronous, straight into LDS, skipping VGPR staging — frees registers | `knobs.amd.use_async_copy`, **default on gfx950**, experimental on gfx942 |
+| `buffer_load` | 128-bit through a descriptor with **hardware bounds checking** — out-of-range lanes return zero, no predication branch needed | `knobs.amd.use_buffer_ops` — **on by default in Triton 3.7.0**, for tensors under 2 GiB |
+| `global_load_lds` / `buffer_load ... lds` | asynchronous, straight into LDS, skipping VGPR staging — frees registers | `knobs.amd.use_async_copy`, **off by default in Triton 3.7.0** (`TRITON_HIP_USE_ASYNC_COPY=1`), experimental on gfx942 |
 
 The buffer-ops default is worth checking explicitly. **If the disassembly shows `global_load_dword`
 surrounded by `v_cmp` predication on your masked tail loads, you are on the slow path and a single flag
@@ -113,8 +116,9 @@ away from the fast one.** Nothing in the output warns you.
 gfx950 also widens direct-to-LDS to **128 bits per lane** and adds **read-with-transpose** `ds` loads.
 
 ## 5. LDS swizzling
-Triton lays shared memory out with a **swizzle** so that a 64-lane wave touches 64 distinct banks. On
-gfx950 that means **64 banks of 4 B at 256 B/clock** — double gfx942 on both counts.
+Triton lays shared memory out with a **swizzle** so that the lanes of each LDS read phase hit distinct
+banks (phase rules in `hardware/mi350_lds.md`). On gfx950 that means **64 banks of 4 B at 256 B/clock**
+— double gfx942 on both counts.
 
 `kpack=2` used to matter on gfx942: it packed two K-slices into one LDS read so the compiler could emit
 `ds_read_b128` instead of a pair of `ds_read_b64`. It is **deprecated and forced to 1 on gfx950**,
@@ -128,23 +132,24 @@ Before AMDGCN, the LLVM-IR stage attaches:
 - `"amdgpu-flat-work-group-size"` from `num_warps · 64`
 - denormal handling flags
 
-Register allocation then fixes `.vgpr_count`, `.sgpr_count`, `.group_segment_fixed_size` (LDS), and
-`.private_segment_fixed_size`. **That last one must be 0.** Anything else means the kernel is spilling
-to HBM, and no amount of tile tuning will compensate.
+Register allocation then fixes `.vgpr_count`, `.sgpr_count`, `.group_segment_fixed_size` (static LDS —
+0 for Triton, which passes the LDS size at launch), and `.private_segment_fixed_size`. **That last one
+must be 0.** Anything else means the kernel is spilling to HBM, and no amount of tile tuning will
+compensate.
 
 ## 7. A loop whose ISA you can predict
 ```python
-acc = tl.zeros((BLOCK_M, BLOCK_N), tl.float32)     # AGPR accumulator, MFMA layout
+acc = tl.zeros((BLOCK_M, BLOCK_N), tl.float32)     # accumulator in MFMA layout (VGPRs or AGPRs)
 for k in range(0, tl.cdiv(K, BLOCK_K)):
     a = tl.load(a_ptrs, mask=offs_k[None, :] < K - k * BLOCK_K, other=0.0)   # global_load_dwordx4
     b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_K, other=0.0)
     acc = tl.dot(a, b, acc)                        # ds_read_b128 + v_mfma_f32_16x16x32
     a_ptrs += BLOCK_K * stride_ak
     b_ptrs += BLOCK_K * stride_bk
-c = acc.to(c_ptr.dtype.element_ty)                 # with OPTIMIZE_EPILOGUE=1, no convert_layout
+c = acc.to(c_ptr.dtype.element_ty)                 # stored from the MFMA layout, no convert_layout
 ```
 
-Compiled with `matrix_instr_nonkdim=16`, `num_stages=2` and `OPTIMIZE_EPILOGUE=1`, the inner loop
+Compiled with `matrix_instr_nonkdim=16` and `num_stages=2`, the inner loop
 should contain: several `global_load_dwordx4`, `ds_read_b128`, a dense run of `v_mfma_f32_16x16x32`,
 **no `v_accvgpr_*` moves**, and `.private_segment_fixed_size: 0`.
 
@@ -154,7 +159,7 @@ Anything else is a finding. Take it to `triton_isa_check.md`.
 | What you see | What it means | Where to go |
 |---|---|---|
 | `num_stages` sweep is completely flat | the pipeliner never fired on this loop | `lever_loop_form.md` — restructure the loop |
-| `global_load_dword` plus `v_cmp` on masked loads | buffer ops are off in this build | enable `knobs.amd.use_buffer_ops` |
+| `global_load_dword` plus `v_cmp` on masked loads | buffer ops are off, or the tensor is ≥ 2 GiB (Triton 3.7.0 buffer-addresses only smaller tensors) | enable `knobs.amd.use_buffer_ops`; split or re-base a tensor ≥ 2 GiB |
 | `.private_segment_fixed_size` nonzero | spilling to scratch | cut the tile or the stage count before tuning anything else |
 | Runs of `v_accvgpr_*` in the hot loop | accumulator pressure at this tile size | shrink the tile; also check LLVM #131954 |
 | Two `ds_read_b64` where you expected `ds_read_b128` | on gfx942 this was `kpack`; on gfx950 it means something else | look at the tile shape and the swizzle |

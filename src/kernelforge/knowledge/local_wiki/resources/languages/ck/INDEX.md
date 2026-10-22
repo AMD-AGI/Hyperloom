@@ -42,8 +42,8 @@ CK has **two front-ends, and choosing between them is the single load-bearing de
 - **A pinned "winning instance" is build-specific** — tile/pipeline IDs drift across CK/ROCm versions;
   re-sweep after any bump, never ship a hand-copied instance table as portable.
 - **`mfma_16x16` usually beats `32x32`** on MI300X (power/clock); **`AK1/BK1` ≥ 128-bit/load** (bf16=8,
-  fp8=16); aim block count `ceil(M/MPerBlock)·ceil(N/NPerBlock) ≈ k·304`; **split-K (`KBatch≥2`)** fills
-  CUs for skinny-M decode.
+  fp8=16); aim block count `ceil(M/MPerBlock)·ceil(N/NPerBlock) ≈ k·CUs` (304 on MI300X, 256 on
+  gfx950); **split-K (`KBatch≥2`)** fills CUs for skinny-M decode.
 - **fp8 is FNUZ on CDNA3 (gfx942), OCP on CDNA4 (gfx950)** — match the dequant scale to the encoding.
 - **CK is often consumed via aiter/hipBLASLt.** If the library already dispatches a strong CK instance for
   your shape, **tune via the aiter DB first**; author/modify CK templates only for a fusion the library

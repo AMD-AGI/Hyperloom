@@ -27,7 +27,7 @@ picked a front-end yet, go back — the front-end decision dominates every knob 
 | `MPerBlock × NPerBlock` | 256×256, 256×128, 128×128, 128×64, 64×64 | block tile — more reuse vs fewer blocks (occupancy/tail trade-off) | ★★★★★ |
 | `KPerBlock` | 32, 64, 128 | K-loop tile — better MFMA/load overlap, more LDS + VGPR | ★★★★ |
 | `BlockGemmPipelineVersion` | v1 / v2 / **v3** / v4 / v5 | hot-loop schedule depth | ★★★★ |
-| `BlockGemmPipelineScheduler` | **Intrawave** / Interwave | overlap strategy | ★★★★ |
+| `BlockGemmPipelineScheduler` | **Intrawave** / Interwave (v1/v2 only) | overlap strategy | ★★★★ |
 | `MPerXDL × NPerXDL` | **16×16**, 32×32 | MFMA tile — 16×16 usually wins, see below | ★★★ |
 | `MXdlPerWave × NXdlPerWave` | 4×4, 4×2, 2×2 | MFMA tiles **per wave** — drives VGPR and occupancy | ★★★ |
 | `AK1 / BK1` | 8 (bf16), 16 (fp8) | global-load vector width — **must be ≥128 bit** | ★★★ |
@@ -40,8 +40,9 @@ picked a front-end yet, go back — the front-end decision dominates every knob 
 
 Both point the same way:
 
-1. **Register footprint** — 16×16 carries **4 C-registers/lane**; 32×32 carries **16**. That 4× comes
-   out of the 512-register budget and costs occupancy.
+1. **Register granularity** — 16×16 carries **4 C-registers/lane** per instruction; 32×32 carries
+   **16**. For a given per-wave tile the total is the same (`MPerWave·NPerWave/64` per lane), so the cost
+   is granularity: 32×32 cannot shrink a wave tile below 32×32.
 2. **Power and clock** — the 32×32 op draws more power, so the part clocks lower and delivers **lower
    max-achievable FLOPs** (ROCm Max-Achievable-FLOPs Part 2).
 
@@ -56,16 +57,17 @@ Default 16×16; test 32×32 only for a specific large square shape.
 | bf16 / fp16 | **8** | 8 × 16 bit = 128 bit → `buffer_load_dwordx4` |
 | fp8 | **16** | 16 × 8 bit = 128 bit |
 
-**A sub-128-bit load silently halves effective HBM bandwidth.** Pointers must be aligned to the vector
-width or `IsSupportedArgument` rejects the instance.
+**A sub-128-bit load silently halves effective HBM bandwidth.** `K` (or the contiguous dimension) must be
+divisible by the vector width or `IsSupportedArgument` rejects the instance; it does not inspect pointer
+alignment.
 
 ## Shape heuristics (gfx950)
 
 | Regime | Configuration |
 |---|---|
-| **Prefill** (large M) | 256×256×64, `MPerXDL=NPerXDL=16` (test 32×32), WaveMap 4×4, **v3 Intrawave**, `AK1=BK1=8` |
+| **Prefill** (large M) | 256×256×64, `MPerXDL=NPerXDL=16` with WaveMap 8×8 (test 32×32 with 4×4), **v3 Intrawave**, `AK1=BK1=8` |
 | **Decode** (M = batch ≪ N,K) | small M tile (16/32 × 256), **split-K `KBatch≥2`** to occupy CUs, **Interwave** often wins, 16×16 MFMA. A 256×256 tile leaves most CUs idle at tiny M. |
-| **fp8 weight-only linear** | `*_b_scale` fp8 instance, `AK1/BK1=16`, `bpreshuffle` the static weight into MFMA layout at load. `KPerBlock` can double (K-density doubles). |
+| **fp8 weight-only linear** | `*_b_scale` fp8 instance, `AK1/BK1=16`, `bpreshuffle` the static weight into MFMA layout at load. `KPerBlock` can grow (CK's default fp8 MFMA on gfx950 is 16×16×128 against bf16's 16×16×32). |
 | **MoE** | `DeviceGroupedGemm*` (+ `mx` / `b_scale` for low-precision experts) |
 
 **Grid sizing:** aim for `ceil(M/MPerBlock)·ceil(N/NPerBlock) ≈ k·256` — gfx950 has **256 CUs**, not

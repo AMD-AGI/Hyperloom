@@ -29,16 +29,17 @@ MI350 gfx950. Reference: [../optimize/ck_levers/ck_traps.md](../optimize/ck_leve
 | A pinned config regressed after upgrade | build-specific instance drift | §3 |
 
 ## 2. IsSupportedArgument — the #1 correctness gate
-`op.IsSupportedArgument(arg)` checks M/N/K divisibility vs the tile, `K` vs `KPerBlock×KBatch`, pointer
-alignment vs `AK1/BK1`, and layout/spec. **Forcing an instance past a `false` returns garbage, not an
-error.** Always gate; for non-divisible shapes add `GemmSpecialization::MNKPadding` (small perf cost)
+`op.IsSupportedArgument(arg)` checks M/N/K divisibility vs the tile, `K` vs `KPerBlock×KBatch`, `K` and
+the contiguous dimension vs `AK1/BK1` and the load vector width (not pointer alignment), and
+layout/spec. **Forcing an instance past a `false` returns garbage, not an error.** Always gate; for non-divisible shapes add `GemmSpecialization::MNKPadding` (small perf cost)
 rather than bypassing the check.
 
 ## 3. Build / instance / repo traps
 - **Repo deprecation**: standalone `ROCm/composable_kernel` is DEPRECATED → use
   `ROCm/rocm-libraries:projects/composablekernel`. `develop` is a read-only mirror.
 - **Arch/dtype not built**: CK's full build is huge — scope `GPU_TARGETS=gfx942` and build only the
-  needed instance group; gfx950 fp4/mxfp4 are behind `DTYPES` cmake flags (won't appear otherwise).
+  needed instance group; gfx950 fp4/mxfp4 (MX) instances are built only when `GPU_TARGETS` includes
+  gfx950 (won't appear otherwise).
 - **`ckProfiler` missing** in deployment images → no on-box sweep; build it on a dev node.
 - **Build-specific pin drift**: tile/pipeline IDs and the tuned instance DB drift across CK/ROCm
   versions. Re-sweep after any bump; never ship a hand-copied instance table as portable.
@@ -60,7 +61,7 @@ Details: [../optimize/ck_levers/ck_instance_codegen.md](../optimize/ck_levers/ck
 - **Sub-128-bit `AK1/BK1`** halves HBM bandwidth. Size loads to ≥128 bit (bf16 `AK1=8`, fp8 `AK1=16`);
   align pointers.
 - **Scheduler**: Intrawave (compute-bound prefill) vs Interwave (memory-bound / skinny decode). Decode
-  also wants split-K (`KBatch≥2`) + small M tile to fill the 304 CUs.
+  also wants split-K (`KBatch≥2`) + small M tile to fill the CUs (304 on MI300X, 256 on gfx950).
 
 ## 6. fp8 encoding
 CDNA3 is **fnuz** fp8 (different exponent bias from OCP); match the dequant scale to the encoding or get

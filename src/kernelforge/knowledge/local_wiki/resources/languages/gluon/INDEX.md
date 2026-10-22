@@ -49,15 +49,17 @@ for the substrate; read this folder for what Gluon adds on top.
   LDS.
 - **Do not `convert_layout` before a reduction.** The compiler emits efficient reductions and scans
   from any input layout, so converting first usually costs more than it saves.
-- **`gl.warp_specialize` is Hopper-and-newer NVIDIA only.** On CDNA the pipelining mechanism is the
+- **`gl.warp_specialize` has no CDNA path** — it lowers on NVIDIA Hopper+ and, on AMD, only on gfx1250
+  (Triton 3.7.0 rejects gfx942/gfx950). On CDNA the pipelining mechanism is the
   async-copy group (`async_copy.buffer_load_to_shared` + `commit_group` / `wait_group`) plus
   hand-authored wave scheduling. Do not port an NVIDIA warp-specialized kernel shape verbatim.
 - **Wave specialization is the *wrong* pattern on CDNA anyway** — it reaches only ~80% of peak BF16
   GEMM on MI355X because static register allocation starves the producer waves. The two patterns that
   do reach peak are **8-wave ping-pong** and **4-wave interleave** (HipKittens, arXiv 2511.08083).
 - **CDNA4-only:** native scaled MFMA (`v_mfma_scale_f32_16x16x128_f8f6f4`) and therefore the MXFP4
-  route. CDNA3 runs Gluon fine — buffer loads, async copy to LDS, manual pipelining and the wave
-  patterns all apply — but has no native scaled MFMA.
+  route. CDNA3 runs Gluon fine — buffer loads, manual pipelining and the wave patterns all apply, async
+  copy to LDS only at ≤32 bits per lane (`gl.amd.cdna3` does not export `async_copy`) — but has no
+  native scaled MFMA.
 - **Gluon is `triton.experimental`.** The API is not stabilized and it has shipped release-to-release
   breakage. Probe before you build; see `forge_integration.md` § Version traps.
 

@@ -22,9 +22,9 @@ or wrong.
 | 3–5× slower than expected after a port | `num_warps=8` carried from NVIDIA → spill | §1 |
 | Knob set, nothing changed | AMD knobs outside `triton.Config` | §2 |
 | **`num_stages` sweep is flat** | the loop is never pipelined | §3 |
-| `Unsupported conversion 'f8E4M3FN'` | wrong fp8 dialect for the target | §4 |
+| fp8 `tl.dot` emits `v_mfma_*_f16`, not an fp8 MFMA | wrong fp8 dialect for the target (silently upcast) | §4 |
 | Results silently ~2× off | wrong fp8 dialect, other direction | §4 |
-| ISA shows `global_load_dword` + `v_cmp` | buffer ops not enabled | §5 |
+| ISA shows `global_load_dword` + `v_cmp` | buffer ops off, or tensor ≥ 2 GiB | §5 |
 | Occupancy 1, or compile failure on a big tile | LDS budget | §6 |
 | Slow GEMM at specific N/K only | 512 B leading-dimension stride | §7 |
 | `ds_read_b32` in the ISA | LDS layout / `BLOCK_K` too small | §8 |
@@ -60,28 +60,30 @@ blocks**. → `common_methodology/optimization/lever_loop_form.md`
 
 ### §4 fp8 dialect mismatch
 **gfx950 = OCP. gfx942 = FNUZ.** The exponent bias differs by 1, so:
-- OCP `float8_e4m3fn` into `tl.dot` **on gfx942** → `Unsupported conversion 'f8E4M3FN'` (loud).
+- OCP `float8_e4m3fn` into `tl.dot` **on gfx942** → Triton 3.7.0 silently upcasts to fp16
+  (`v_mfma_f32_16x16x16_f16`): right answer, no fp8 MFMA. FNUZ into `tl.dot` on gfx950 does the same,
+  with a `UserWarning`.
 - The reverse — FNUZ values read as OCP — is a **silent ~2× error**, not a crash.
 
 SGLang/vLLM call `normalize_e4m3fn_to_e4m3fnuz` before the matmul **when targeting gfx942**
 (sglang PR #2601). Doing that on gfx950 corrupts your data.
 **Fix:** check which dialect the checkpoint stored, and which the target wants.
 
-Also: **`tf32` is CDNA3-only and removed on CDNA4.** Valid AMD `input_precision` is `"ieee"`;
-NVIDIA's `"tf32x3"` is not an AMD path.
+Also: **`tf32` is CDNA3-only and removed on CDNA4.** Valid AMD `input_precision` is `"ieee"` (default),
+`"bf16x3"` or `"bf16x6"`, plus `"tf32"` on gfx942 only; NVIDIA's `"tf32x3"` is not an AMD path.
 
-### §5 Buffer loads are not the default
+### §5 Buffer loads not emitted
 Masked GEMM/attention tails want `buffer_load_dwordx4` — a 128-bit descriptor with **hardware bounds
-checking**, so OOB lanes return 0 and there is no predication branch. **Many builds do not emit it by
-default.**
-**Fix:** set `knobs.amd.use_buffer_ops`. If the ISA shows `global_load_dword` with a `v_cmp` around
-masked loads, you are on the slow path.
+checking**, so OOB lanes return 0 and there is no predication branch. **Triton 3.7.0 turns
+`knobs.amd.use_buffer_ops` on by default, but only for tensors under 2 GiB.**
+**Fix:** check `knobs.amd.use_buffer_ops` (`AMDGCN_USE_BUFFER_OPS`) and the tensor size. If the ISA
+shows `global_load_dword` with a `v_cmp` around masked loads, you are on the slow path.
 
 ### §6 LDS budget
 gfx950 has **160 KiB/CU** (gfx942 had 64 KiB). Two opposite errors: sizing tiles against 64 KiB and
 leaving performance unused, or porting an H100 kernel (228 KB) and overflowing.
 **Fix:** prune the config space against **160 KiB**; if occupancy drops to 1 wg/CU, shrink the tile or
-`num_stages`, and set `OPTIMIZE_EPILOGUE=1`.
+`num_stages` (`OPTIMIZE_EPILOGUE` is not read by Triton 3.7.0; the epilogue already skips LDS).
 
 ### §7 512 B leading-dimension stride (TN GEMM)
 A leading dimension that is an exact multiple of 512 B can collide in the L2 tag RAM. Symptom: slow at
@@ -130,7 +132,7 @@ Adds first-call latency and is non-deterministic.
 ## The one diagnostic pass
 
 ```bash
-AMDGCN_ENABLE_DUMP=1 TRITON_ALWAYS_COMPILE=1 python k.py 2> dump.txt
+AMDGCN_ENABLE_DUMP=1 TRITON_ALWAYS_COMPILE=1 python k.py > dump.txt   # the AMDGCN dump goes to stdout
 ```
 Want: `global_load_dwordx4` / `buffer_load_dwordx4`, `ds_*_b128`, dense `v_mfma_*`, **no `v_accvgpr_*`
 in the loop**, `.private_segment_fixed_size: 0`. → `triton_isa_check.md`

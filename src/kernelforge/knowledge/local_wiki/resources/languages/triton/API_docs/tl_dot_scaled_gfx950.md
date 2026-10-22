@@ -21,7 +21,7 @@ gfx950 emits **native `v_mfma_scale_f32_32x32x64_f8f6f4`** — verify with
 `AMDGCN_ENABLE_DUMP=1` on any scaled kernel build. No bf16 emulation.
 
 Scale format the instruction expects:
-- `uint8` e8m0 (biased exponent, bias 127; 0x00 = zero, 0xFF = NaN)
+- `uint8` e8m0 (biased exponent, bias 127; 0x00 = 2^-127 — there is no zero encoding; 0xFF = NaN)
 - Groups of 32 K-elements share one scale byte
 - Layout for the B operand: `[N, K // 32]` (N-first, NOT K-first). Do NOT
   transpose B's scale from this layout — the MFMA instruction bakes in the

@@ -67,10 +67,12 @@ tl.atomic_add(ptr + offs, val, mask=...)      # split-K accumulate; also _max/_m
 ```python
 a = a.to(tl.float8e4b8)     # E4M3 FNUZ — the gfx942 MFMA fp8 (NOT tl.float8e4nv = OCP)
 a = a.to(tl.float8e5b16)    # E5M2 FNUZ
-c = acc.to(tl.bfloat16)     # epilogue downcast; OPTIMIZE_EPILOGUE=1 drops the convert_layout
+c = acc.to(tl.bfloat16)     # epilogue downcast; Triton 3.7.0 stores from the MFMA layout, no convert_layout
 ```
 `supported_fp8_dtypes` (AMD) = `fp8e4nv, fp8e5, fp8e5b16, fp8e4b8`; the **fnuz** MFMA types are
-`fp8e4b8` / `fp8e5b16`. OCP `float8_e4m3fn` into `tl.dot` on gfx942 raises `Unsupported conversion`.
+`fp8e4b8` / `fp8e5b16`. Triton 3.7.0 accepts the non-native dialect but upcasts it to fp16: OCP
+`float8_e4m3fn` into `tl.dot` on gfx942 compiles to `v_mfma_f32_16x16x16_f16` with no warning; FNUZ on
+gfx950 warns and runs on fp16 MFMA.
 
 ## Misc
 ```python

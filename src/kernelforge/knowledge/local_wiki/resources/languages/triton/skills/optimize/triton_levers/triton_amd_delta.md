@@ -46,7 +46,7 @@ skinny split-K decode.**
 | Registers | 65536/SM, 256/thread cap | **512/SIMD**, 8-granule |
 | FP8 matrix dtype | OCP `e4m3fn`/`e5m2` | **OCP** on gfx950 (**FNUZ** on gfx942 — the porting trap) |
 | `num_stages` (single GEMM) | 3–4 | **1–2** (stream pipeliner; 1 for fused FA) |
-| `tf32` | available | **removed on CDNA4** — `input_precision` is `"ieee"` |
+| `tf32` | available | **removed on CDNA4** — `input_precision` is `"ieee"` (default) or the `"bf16x3"`/`"bf16x6"` emulations |
 | CU count | — | **256** (8 XCD × 32), not 304 |
 | Backend dir | `third_party/nvidia` | `third_party/amd` |
 
@@ -56,8 +56,9 @@ skinny split-K decode.**
 2. **Carrying `num_warps=8` from NVIDIA** → VGPR spill to scratch (HBM) → **3–5× slowdown**. Cut warps
    first, before anything else.
 3. **`num_stages=3/4` for a single GEMM** — pipelines *worse* than 1–2 on the AMD stream pipeliner.
-4. **Feeding the wrong fp8 dialect.** gfx950 is OCP; gfx942 is FNUZ. Wrong one = silent ~2× error or a
-   lowering failure, depending on direction.
+4. **Feeding the wrong fp8 dialect.** gfx950 is OCP; gfx942 is FNUZ. Reinterpreted bits = silent ~2×
+   error; a non-native dtype into `tl.dot` = Triton 3.7.0 upcasts it to fp16 (no fp8 MFMA; a warning only
+   on gfx950).
 5. **Setting AMD knobs as Python variables.** They only take effect inside `triton.Config({...})`.
 
 ## The two distributions

@@ -65,9 +65,10 @@ hardware, HipKittens reports BF16 at ~1610 TFLOPS — i.e. hand-written still le
 anymore.
 
 ## Cross-gen
-gfx942 runs this design: buffer ops, async copy to LDS, manual pipelining, and both wave patterns all
-apply, and HipKittens reports the same 8-wave schedule reaching >95% of peak on **both** CDNA3 and
-CDNA4 with only shared-memory-size adjustments. What does not transfer is anything scaled-MFMA — see
+gfx942 runs this design: buffer ops, manual pipelining, and both wave patterns all apply; async copy to
+LDS works only at ≤32 bits per lane there (no `dwordx4` direct-to-LDS form), so the 128-bit async-copy
+rung does not carry over. HipKittens reports the same 8-wave schedule reaching >95% of peak on **both**
+CDNA3 and CDNA4 with only shared-memory-size adjustments. What does not transfer is anything scaled-MFMA — see
 [`../quant_fp4_mxfp/gluon.md`](../quant_fp4_mxfp/gluon.md). Note also LDS is 64 KB/CU on CDNA3 vs
 160 KB/CU on CDNA4, so a padded LDS layout tuned on gfx950 may not fit on gfx942.
 

@@ -132,7 +132,8 @@ per cycle per warp.
 The upstream Gluon tutorial series is mostly written against NVIDIA hardware. These parts have no CDNA
 equivalent and must not be copied:
 
-- **`gl.warp_specialize`** — Hopper and newer NVIDIA only. On CDNA, pipelining is the async-copy group
+- **`gl.warp_specialize`** — NVIDIA Hopper+ and AMD gfx1250 only; Triton 3.7.0 rejects it on gfx942/gfx950.
+  On CDNA, pipelining is the async-copy group
   mechanism plus hand-authored wave scheduling. See [amd_targets.md](amd_targets.md).
 - **TMA** (`tcgen05`, `NVMMASharedLayout`, `fence_async_shared`, mbarrier-based descriptor pipelines,
   the `conv-im2col` tutorial) — NVIDIA. The AMD analogue of the direct-to-shared path is

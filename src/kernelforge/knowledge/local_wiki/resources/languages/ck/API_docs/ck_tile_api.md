@@ -43,7 +43,7 @@ load/store happens inside the **pipeline**/**epilogue**. A window is a cursor, n
 auto t   = load_tile(window);          // global/LDS → registers (DistributedTensor)
 store_tile(window, t);                 // registers → global/LDS
 update_tile(window, t);                // accumulate
-async_load_tile(window);               // direct global→LDS (buffer_load), skip VGPR staging
+async_load_tile(lds_window, window);   // direct global→LDS (buffer_load), skip VGPR staging
 auto s   = shuffle_tile(t, ...);       // re-distribute across lanes (e.g. transpose)
 sweep_tile(t, [&](auto idx){ ... });   // iterate per-lane Y elements with a lambda
 auto r   = block_tile_reduce(t, ...);  // block-wide reduce (FMHA row-max / row-sum)
@@ -62,7 +62,7 @@ The `Policy` (e.g. `UniversalGemmPipelineAgBgCrPolicy`) generates the `TileDistr
 ## Build / run an example
 ```bash
 sh ../script/cmake-ck-dev.sh ../ gfx942
-ninja tile_example_universal_gemm && ./bin/tile_example_universal_gemm -m=4096 -n=4096 -k=4096 -v=1
+ninja tile_example_gemm_universal && ./bin/tile_example_gemm_universal -m=4096 -n=4096 -k=4096 -v=1
 ninja tile_example_fmha_fwd       && ./bin/tile_example_fmha_fwd -b=1 -h=8 -s=4096 -d=128 -v=1
 ```
 `generate.py` instantiates per-trait `.cpp` files (prune traits to your shapes — see

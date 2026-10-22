@@ -40,7 +40,7 @@ produced them**, which is why a pinned winner is not portable.
 Two layers, and it helps to keep them separate in your head.
 
 **Registration.** Under `library/src/tensor_operation_instance/gpu/gemm*/`, headers spell out concrete
-`DeviceGemmXdlUniversal<...>` specializations — one per tile-and-pipeline combination — and hand them
+`DeviceGemm_Xdl_CShuffleV3<...>` specializations — one per tile-and-pipeline combination — and hand them
 to `add_device_gemm_xdl_universal_*_instances(...)`. This happens at build time; the list is fixed once
 the library is compiled.
 
@@ -85,12 +85,12 @@ Ordered by how much time each one actually saves:
 | Lever | Why it matters |
 |---|---|
 | `GPU_TARGETS=gfx950` at cmake | Left alone, CK compiles every architecture it knows about. This one flag usually dominates everything else on this list. |
-| Name your instance group | `make device_gemm_xdl_universal_f16_instance`, `ninja tile_example_fmha_fwd` — build the one group you are testing, not the library. |
+| Name your instance group | `make device_gemm_universal_instance`, `ninja tile_example_fmha_fwd` — build the one group you are testing, not the library. |
 | CK-Tile dispatcher | The newer unified codegen front-end (C++ and Python, see CHANGELOG) filters by architecture and emits only the instances your shapes need. |
 | Cut the generator's trait list | Restrict head-dims, dtypes and masks to what you actually serve. Six multiplied dimensions is where the `.cpp` explosion comes from. |
 
-**One flag causes a confusing symptom.** On gfx950, fp4 and mxfp4 instances sit behind `DTYPES` build
-flags. Leave them off and the instances are never generated — so the failure surfaces later, at
+**One flag causes a confusing symptom.** fp4 and mxfp4 (MX) instances are built only when gfx950 is in
+`GPU_TARGETS`. Leave it out and the instances are never generated — so the failure surfaces later, at
 selection time, as "that instance does not exist." It reads like a coverage gap in CK. It is a cmake
 argument you did not pass.
 
@@ -121,7 +121,7 @@ Three habits that keep this from biting:
 | Build runs for an hour or more | compiling every architecture and dtype | scope `GPU_TARGETS`, then build one instance group |
 | Hundreds of FMHA `.cpp` files | the generator's trait product was never bounded | prune head-dims / dtypes / masks to serving shapes |
 | A pinned instance got slow after an upgrade | IDs drifted; the index now names something else | re-sweep — the pin was only ever valid for that build |
-| "That instance doesn't exist" on gfx950 | fp4 / mxfp4 gated behind `DTYPES` at cmake | enable them at configure time and rebuild |
+| "That instance doesn't exist" on gfx950 | fp4 / mxfp4 built only when `GPU_TARGETS` includes gfx950 | add gfx950 at configure time and rebuild |
 | Cannot sweep where you deploy | `ckProfiler` is not in the runtime image | sweep on a dev node, or use a library that tunes at runtime (aiter) |
 
 The full trap list, indexed by symptom, is in `ck_traps.md`.
@@ -132,5 +132,5 @@ The full trap list, indexed by symptom, is in `ck_traps.md`.
   https://github.com/ROCm/composable_kernel/tree/develop/example/ck_tile/01_fmha
 - Instance selection and the profiler:
   https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/optimizing-with-composable-kernel.html
-- CK-Tile dispatcher, persistent async input scheduler, fp4 `DTYPES` gating:
+- CK-Tile dispatcher, persistent async input scheduler, `DTYPES` values:
   https://github.com/ROCm/composable_kernel/blob/develop/CHANGELOG.md

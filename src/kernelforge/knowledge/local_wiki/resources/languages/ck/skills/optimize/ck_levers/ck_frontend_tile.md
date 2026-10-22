@@ -58,7 +58,8 @@ computes the wrong thing.
 
 ### The verbs
 `load_tile`, `store_tile`, `update_tile`, `async_load_tile` (global straight to LDS, no VGPR staging),
-`shuffle_tile` (redistribute across lanes — this is how a transpose happens), `slice_tile`,
+`shuffle_tile` (redistribute across lanes — this is how a transpose happens), `get_slice_tile` /
+`set_slice_tile`,
 `sweep_tile` (run a lambda over the lane's own elements), and `block_tile_reduce` (the primitive FMHA
 uses for row-max and row-sum).
 
@@ -82,17 +83,18 @@ from **g**lobal, **B** from **g**lobal, **C** held in **r**egisters, **Comp**ute
 | Pipeline | When |
 |---|---|
 | `GemmPipelineAGmemBGmemCRegV1` | single-buffered, low VGPR pressure — memory-bound work, or learning the structure |
-| **`GemmPipelineAgBgCrCompV3`** | **double-buffered LDS with 2-stage prefetch — the compute-bound default** |
-| `GemmPipelineAgBgCrMemV3` / `...CompV4` | memory-optimized, or deeper prefetch for very large K and fp8-dense cases |
+| **`GemmPipelineAgBgCrCompV3`** | **2-stage global prefetch (single LDS buffer unless `DoubleSmemBuffer`) — the compute-bound default** |
+| `GemmPipelineAgBgCrMem` / `...CompV4` | memory-optimized with 2–8 global prefetch stages, or compute with a required double LDS buffer |
 | `*_async` persistent | direct-to-LDS with no VGPR staging — the current LLM GEMM and MoE path |
 
 **Policy** — `UniversalGemmPipelineAgBgCrPolicy` and relatives — is where the layout thinking lives.
 `MakeADramTileDistribution` and `MakeBDramTileDistribution` produce the global-load distributions and
 the per-lane vector width; `MakeALdsBlockDescriptor` lays out LDS with an XOR swizzle chosen to avoid
-bank conflicts; `GetWarpGemm()` picks the matrix-core instruction.
+bank conflicts; `GetBlockGemm()` picks the matrix-core instruction (through `WarpGemmDispatcher`).
 
-> **If you customized that swizzle, re-derive it.** It was designed against 32 banks. gfx950 has
-> **64**, and a swizzle that was conflict-free at 32 is not automatically conflict-free at 64. See
+> **If you customized that swizzle, re-derive it.** The upstream policy sizes it from `get_n_lds_banks()`
+> (64 on gfx950), but a hand-written swizzle derived for 32 banks is not automatically conflict-free at
+> 64. See
 > `../../../../../hardware/mi350_lds.md`.
 
 **WarpGemm** is the seam where ck_tile touches the matrix core — `operator()` is a thin wrapper over
@@ -114,7 +116,7 @@ bf16), and the shuffle granularity `MXdlPerWavePerShuffle`.
 ```bash
 sh ../script/cmake-ck-dev.sh ../ gfx950
 make tile_example_gemm_basic -j     && ./bin/tile_example_gemm_basic     -m=4096 -n=4096 -k=4096 -v=1
-make tile_example_universal_gemm -j && ./bin/tile_example_universal_gemm -m=4096 -n=4096 -k=4096 -v=0
+make tile_example_gemm_universal -j && ./bin/tile_example_gemm_universal -m=4096 -n=4096 -k=4096 -v=0
 ```
 
 `-v 1` turns on the example's own reference check. Use it while iterating; turn it off to time.
@@ -133,7 +135,7 @@ make tile_example_universal_gemm -j && ./bin/tile_example_universal_gemm -m=4096
 | Kernel compiles, produces wrong values | hand-written `tile_distribution_encoding` | let the Policy generate it |
 | LDS conflicts after porting from MI300X | XOR swizzle derived for 32 banks | re-derive for 64 banks |
 | Following docs from the old repo | standalone `composable_kernel` is deprecated | use `rocm-libraries/projects/composablekernel/` |
-| `ckProfiler` shows nothing for your kernel | it does not sweep ck_tile at all | use the example's own bench harness |
+| `ckProfiler` shows nothing for your kernel | it does not sweep ck_tile GEMM or FMHA (its only ck_tile ops are `grouped_conv_*_tile`) | use the example's own bench harness |
 | Reading the window declaration, seeing no traffic | windows only declare addresses | the loads live in the pipeline and epilogue |
 
 Full trap list, indexed by symptom: `ck_traps.md`.

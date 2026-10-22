@@ -34,8 +34,9 @@ silently rather than erroring.
 ---
 
 ### §1 Skipping `IsSupportedArgument()`
-It gates M/N/K divisibility against the tile, K against `KPerBlock × KBatch`, pointer alignment against
-`AK1`/`BK1`, and layout/spec. **An instance forced past a `false` returns garbage, not an error.**
+It gates M/N/K divisibility against the tile, K against `KPerBlock × KBatch`, `K` and the contiguous
+dimension against `AK1`/`BK1` and the load vector width (not pointer alignment), and layout/spec.
+**An instance forced past a `false` returns garbage, not an error.**
 **Fix:** always gate. For non-divisible shapes use `GemmSpecialization::MNKPadding` (small perf cost).
 
 ### §2 "ck_tile is the new fast path" — not for dense square GEMM
@@ -57,8 +58,9 @@ Standalone `ROCm/composable_kernel` is **DEPRECATED** → development is in
 
 ### §5 Building for every gfx and every dtype
 CK's full build is huge and slow.
-**Fix:** scope `GPU_TARGETS=gfx950` and build only the needed instance group. Note gfx950 fp4/mxfp4 sit
-behind `DTYPES` flags and will not appear unless enabled. → `ck_instance_codegen.md`
+**Fix:** scope `GPU_TARGETS=gfx950` and build only the needed instance group. Note fp4/mxfp4 (MX)
+instances are built only when gfx950 is in `GPU_TARGETS`; a gfx942-only build drops them.
+→ `ck_instance_codegen.md`
 
 ### §6 `ckProfiler` missing in deployment images
 No CK instance sweep there, so you cannot tune on box.
@@ -86,8 +88,9 @@ Halves effective HBM bandwidth, silently.
 → `ck_gemm_stack.md`
 
 ### §11 Defaulting to 32×32 MFMA
-Two independent reasons it loses: **16 C-registers/lane vs 16×16's 4** (occupancy), and it **draws more
-power so the part clocks lower** (max-achievable FLOPs).
+Two independent reasons it loses: a coarser register granule (**16 C-registers/lane per instruction vs
+16×16's 4**; the same total for a given wave tile), and it **draws more power so the part clocks lower**
+(max-achievable FLOPs).
 **Fix:** default 16×16; test 32×32 only for a specific large square shape.
 
 ---

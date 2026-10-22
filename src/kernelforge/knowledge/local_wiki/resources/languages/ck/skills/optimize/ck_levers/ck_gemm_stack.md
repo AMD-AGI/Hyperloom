@@ -62,8 +62,9 @@ a 32-lane architecture, this equation is where it fails.
 
 ## Rule 2 — `KPerBlock` follows the MFMA's K-density
 `KPerBlock` must be a multiple of `AK1 × (the MFMA's K density)`. The practical consequence: switching
-bf16 → fp8 doubles the K density, so `KPerBlock` can double too. A configuration ported from bf16 to
-fp8 without touching `KPerBlock` leaves half the available K-depth on the table.
+bf16 → fp8 raises the MFMA's K per instruction — 2× on gfx942 (16×16×16 → 16×16×32), 4× on gfx950
+(16×16×32 → 16×16×128 `f8f6f4`, CK's default fp8 MFMA there) — so `KPerBlock` can grow too. A
+configuration ported from bf16 to fp8 without touching `KPerBlock` leaves K-depth on the table.
 
 ## Rule 3 — size the grid to the device, not to habit
 ```
@@ -86,9 +87,9 @@ Pick `AK1` / `BK1` so that each lane's global load is **at least 128 bits wide**
 | fp8 | 16 | 16 × 8 bit = 128 bit |
 
 This is the highest-leverage load decision in the whole stack. **Below 128 bits you lose roughly half
-your effective HBM bandwidth**, and the kernel will still be correct, so nothing tells you. Alignment
-is a hard requirement too — pointers not aligned to the vector width cause the instance to be rejected
-outright.
+your effective HBM bandwidth**, and the kernel will still be correct, so nothing tells you. Divisibility
+is a hard requirement too — a `K` (or contiguous dimension) not divisible by the vector width gets the
+instance rejected outright; `IsSupportedArgument` does not inspect pointer alignment.
 
 ## A concrete instance, and how to read it
 The bf16 4096³ RCR winner from Issue #1727, measured on MI300X:
@@ -99,7 +100,7 @@ AK1 = BK1 = 8 · Intrawave · v3 · PrefetchStages 2        →  615 TFLOP/s
 ```
 
 The ck_tile spelling of the same thing is `GemmPipelineAgBgCrCompV3` at that tile, with
-`UniversalGemmPipelineAgBgCrPolicy::GetWarpGemm()` choosing the WarpGemm.
+`UniversalGemmPipelineAgBgCrPolicy::GetBlockGemm()` choosing the WarpGemm.
 
 **Do not copy those numbers onto gfx950.** Three things moved underneath them: the bf16 MFMA family is
 now 16×16×32 and 32×32×16, the CU count is 256 rather than 304, and 160 KiB of LDS permits a deeper
@@ -109,12 +110,12 @@ re-measuring.
 
 **Decode is a different regime.** Small M means the prefill answer is wrong in every dimension: shrink
 `MPerBlock` (16 or 32 against N=256), turn on split-K (`KBatch ≥ 2`) so there is enough work to fill
-256 CUs, switch to Interwave, and use the 16×16 MFMA.
+256 CUs, switch to Interwave (which exists only for pipeline v1/v2), and use the 16×16 MFMA.
 
 ## Verify
 | Check | How | Pass condition |
 |---|---|---|
-| Throughput is competitive | `ckProfiler gemm <args>`, then the same shape through hipBLASLt | within reach of the library, or better |
+| Throughput is competitive | `ckProfiler gemm_universal <args>`, then the same shape through hipBLASLt | within reach of the library, or better |
 | Loads are wide enough | disassemble the K-loop | `buffer_load_dwordx4` present |
 | Loads overlap the math | same disassembly | `s_waitcnt lgkmcnt(1)` before `v_mfma` — not `lgkmcnt(0)` |
 | Nothing spilled | same disassembly | no `scratch_` traffic, no run of `v_accvgpr` moves |
@@ -124,12 +125,12 @@ The disassembly answers three of these four. Get in the habit of reading it befo
 ## Failure modes
 | Symptom | Cause | Fix |
 |---|---|---|
-| `IsSupportedArgument()` is false | M/N/K not divisible by the tile, or a pointer not aligned to `AK1`/`BK1` | add `GemmSpecialization::MNKPadding`, or fix the alignment |
+| `IsSupportedArgument()` is false | M/N/K not divisible by the tile, or `K`/the contiguous dimension not divisible by `AK1`/`BK1` or the load vector width | add `GemmSpecialization::MNKPadding`, or use a narrower vector width |
 | Roughly half the expected bandwidth | the per-lane load fell under 128 bits | raise `AK1`/`BK1` to hit 128 bit |
 | **Throughput falls as the tile grows** | past the VGPR/AGPR budget: the compiler starts moving through `v_accvgpr` and spilling to `scratch_` (LLVM #131954) | shrink the tile. Confirm in the disassembly — the config alone will not show it |
-| 32×32 slower than 16×16 | 32×32 holds 16 C registers per lane against 16×16's 4, **and** draws more power so clocks drop | default to 16×16; treat 32×32 as something to measure, not assume |
+| 32×32 slower than 16×16 | 32×32 holds 16 C registers per lane per instruction against 16×16's 4 (the same total for a given wave tile), **and** draws more power so clocks drop | default to 16×16; treat 32×32 as something to measure, not assume |
 | Steady state fine, tail latency bad | grid is not near a multiple of 256 | resize the block tile |
-| bf16 config moved to fp8, no gain | `KPerBlock` never updated for the doubled K density | raise it |
+| bf16 config moved to fp8, no gain | `KPerBlock` never updated for the higher fp8 K density | raise it |
 
 Full trap list, indexed by symptom: `ck_traps.md`.
 

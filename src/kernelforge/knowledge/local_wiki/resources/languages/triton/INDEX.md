@@ -52,14 +52,14 @@ exploration, or the `torch.compile`/Inductor `max-autotune` path.
 - **`num_stages` only does anything on a loop the pipeliner can schedule** — a `for`/`tl.range` with a
   loop-invariant bound and addresses affine in the induction variable. A `while` bounded by a `tl.load`,
   or a `tl.load` addressed from another `tl.load`, silently forfeits pipelining **and**
-  `knobs.amd.use_async_copy` (default-on on gfx950). Rewriting a data-dependent gather as
-  "shape-static `tl.range` + mask" once ran **~2× faster while visiting 2–4× more blocks**
+  `knobs.amd.use_async_copy` (off by default in Triton 3.7.0; `TRITON_HIP_USE_ASYNC_COPY=1`). Rewriting
+  a data-dependent gather as "shape-static `tl.range` + mask" once ran **~2× faster while visiting 2–4× more blocks**
   (`local_knowledge/common_methodology/optimization/lever_loop_form.md`).
 - **LDS = 64 KB/CU (CDNA3) / 160 KB (CDNA4)**, **512 VGPR/EU** (8-granule) — big tiles silently drop to
   1 wg/CU or fail to compile.
-- **FP8 is FNUZ on CDNA3, OCP on CDNA4** — OCP `float8_e4m3fn` into `tl.dot` on gfx942 fails to lower; use `*_fnuz`.
+- **FP8 is FNUZ on CDNA3, OCP on CDNA4** — OCP `float8_e4m3fn` into `tl.dot` on gfx942 has no fp8 MFMA: Triton 3.7.0 silently upcasts it to fp16; use `*_fnuz`.
 - **AMD-only knobs take effect only inside `triton.Config({...})`** — setting them as Python variables does nothing.
-- **`mfma_16x16` > `mfma_32x32`**, ≥1024 programs, 8-multiple tiles, `OPTIMIZE_EPILOGUE=1` (avoid the 512B Tagram hotspot).
+- **`mfma_16x16` > `mfma_32x32`**, ≥1024 programs, 8-multiple tiles, no 512 B-multiple leading dims (Tagram hotspot). `OPTIMIZE_EPILOGUE` is not read by Triton 3.7.0 — its epilogue pass stores from the MFMA layout by default.
 - **A config is not trusted until you've read the AMDGCN** — autotune timing catches *what*, the ISA catches *why* (scalar loads, spills, FNUZ mismatch).
 
 ## Start here — problem → files → order

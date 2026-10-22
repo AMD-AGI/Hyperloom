@@ -15,9 +15,11 @@ Measurement-driven diagnosis for Composable Kernel. Hardware peaks live in `loca
 
 ## 1. Sweep instances (classic) or validate (ck_tile)
 ```bash
-ckProfiler gemm <layout,dtype,M,N,K,...>     # classic: prints every instance's TFLOP/s + GB/s
-./bin/tile_example_universal_gemm -m=4096 -n=4096 -k=4096 -v=1   # ck_tile: built-in reference check
+ckProfiler gemm_universal <layout,dtype,M,N,K,...>   # classic: prints every instance's TFLOP/s + GB/s
+./bin/tile_example_gemm_universal -m=4096 -n=4096 -k=4096 -v=1   # ck_tile: built-in reference check
 ```
+`gemm_universal` sweeps the v3 (`DeviceGemmV2` / `DeviceGemm_Xdl_CShuffleV3`) instances; `ckProfiler gemm`
+sweeps the older `DeviceGemm` family and never shows them.
 The top `ckProfiler` line is your pinned instance. Record its TFLOP/s + GB/s + the instance string, with
 date — re-sweep after any CK/ROCm bump (instance IDs drift). Reference: bf16 4096³ RCR MI300X winning
 instance ≈ **615 TFLOP/s** (256×256×64, 32×32, v3/Intrawave, #1727).
@@ -40,7 +42,8 @@ rocprofv3 --kernel-trace --stats -f csv -- <run>
 ## 3. Tune order (highest-leverage first)
 Per [../optimize/ck_levers/ck_tuning_knobs.md](../optimize/ck_levers/ck_tuning_knobs.md): **block tile → KPerBlock → pipeline
 version/scheduler → MFMA tile → wave map → load vector width**. Tune block tile + pipeline first;
-everything else is second-order. Aim `ceil(M/MPerBlock)·ceil(N/NPerBlock) ≈ k·304`.
+everything else is second-order. Aim `ceil(M/MPerBlock)·ceil(N/NPerBlock) ≈ k·CUs` (304 on MI300X, 256 on
+gfx950).
 
 ## 4. Cross-check & gate
 - Compare the pinned CK instance against **hipBLASLt solidx** and the **aiter tuned config** at the same

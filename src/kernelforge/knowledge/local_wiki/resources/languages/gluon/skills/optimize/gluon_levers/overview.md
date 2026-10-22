@@ -114,9 +114,9 @@ Two more boundaries on that table:
 ## Wave scheduling: the two patterns that work on CDNA
 
 Do not port NVIDIA's producer/consumer warp specialization. It reaches only ~80% of peak BF16 GEMM on
-MI355X because static register allocation starves the producer waves, and `gl.warp_specialize` is
-Hopper-and-newer NVIDIA only in any case. The two patterns that reach peak are **8-wave ping-pong** and
-**4-wave interleave**; mechanics, primitives and the CDNA3/CDNA4 generality claim are in
+MI355X because static register allocation starves the producer waves, and `gl.warp_specialize` has no
+CDNA path in any case (NVIDIA Hopper+ and AMD gfx1250 only). The two patterns that reach peak are
+**8-wave ping-pong** and **4-wave interleave**; mechanics, primitives and the CDNA3/CDNA4 generality claim are in
 [`../../../API_docs/amd_targets.md`](../../../API_docs/amd_targets.md) § 5.
 
 Prefer **4-wave interleave** when you have a choice: it needs no `#pragma unroll` tuning and holds up

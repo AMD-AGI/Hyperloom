@@ -21,18 +21,19 @@ Diagnostic workflow for Triton kernels on AMD Instinct (MI300X gfx942, MI350/MI3
 ## Step 1: classify the symptom
 | Symptom | Likely cause | Go to |
 |---|---|---|
-| `Unsupported conversion from 'f8E4M3FN'` | OCP fp8 into `tl.dot` on gfx942 | §2 |
+| fp8 GEMM on gfx942 emits `v_mfma_*_f16`, not `*_fp8_fp8` | OCP fp8 into `tl.dot` (Triton 3.7.0 upcasts it) | §2 |
 | Wrong numbers, ~2× off, fp8 path | FNUZ vs OCP dialect mismatch | §2 |
 | Correct but 3–5× slow | `num_warps=8` VGPR spill to scratch | §3 |
-| Compile fail / occupancy = 1 | tile too big for 64 KB LDS, or `num_stages` too high | §4 |
+| Compile fail / occupancy = 1 | tile too big for LDS (64 KB gfx942 / 160 KB gfx950), or `num_stages` too high | §4 |
 | A tuned knob "does nothing" | AMD knob set as Python var, not in `triton.Config({...})` | §5 |
 | Wrong reduction / wasted lanes | reduced dim < 64 (wave64) | §6 |
 | "Win" that vanishes at e2e | isolated speedup, not gated through serving seam | §7 |
 
-## 2. fp8 FNUZ vs OCP (the silent 2× / lowering error)
+## 2. fp8 FNUZ vs OCP (the silent 2× / silent fp16 upcast)
 - **gfx942 MFMA consumes FNUZ fp8**: `tl.float8e4b8` (E4M3 fnuz) / `tl.float8e5b16` (E5M2 fnuz).
-- Passing OCP `float8_e4m3fn` (`tl.float8e4nv`) into `tl.dot` on gfx942 → `Unsupported conversion
-  'f8E4M3FN'`. Reading the wrong dialect (bias differs by 1) is a **2× silent error**, not a crash.
+- Passing OCP `float8_e4m3fn` (`tl.float8e4nv`) into `tl.dot` on gfx942 → Triton 3.7.0 silently
+  upcasts both operands to fp16 (`v_mfma_f32_16x16x16_f16`): correct but slow, no fp8 MFMA. Reading the
+  wrong dialect (bias differs by 1) is a **2× silent error**, not a crash.
 - Fix: normalize checkpoints with `normalize_e4m3fn_to_e4m3fnuz` (sglang PR #2601) before the matmul.
   On gfx950 use OCP fp8 / MXFP block-scaled.
 
@@ -45,7 +46,8 @@ scratch (HBM) → 3–5× slower. **Start GEMM at `num_warps=4`**; memory-bound 
 - LDS = **64 KB/CU** (CDNA3) / 160 KB (CDNA4). Big tiles × `num_stages` overflow LDS → occupancy 1 or
   compile failure. LDS bytes ≈ `(BLOCK_M·BLOCK_K + BLOCK_K·BLOCK_N)·elem·num_stages`.
 - `num_stages`: single GEMM **2**, fused FA **1**, no-GEMM **1**. Higher only buffers more loads and
-  crushes occupancy. `OPTIMIZE_EPILOGUE=1` frees the epilogue LDS round-trip for GEMM.
+  crushes occupancy. The epilogue needs no LDS round-trip: Triton 3.7.0 stores straight from the MFMA
+  layout by default (`OPTIMIZE_EPILOGUE` is not read).
 
 ## 5. AMD knobs silently ignored
 `matrix_instr_nonkdim`, `kpack`, `waves_per_eu`, `schedule_hint` are `HIPOptions` fields — they take
@@ -65,7 +67,7 @@ band. An isolated 0.99–1.47× can be a net e2e loss.
 ## 8. ISA verification (real regression vs autotune noise)
 ```bash
 AMDGCN_ENABLE_DUMP=1 MLIR_ENABLE_DUMP=1 TRITON_PRINT_AUTOTUNING=1 TRITON_ALWAYS_COMPILE=1 \
-  python my_kernel.py 2> dump.txt
+  python my_kernel.py > dump.txt 2>&1      # the AMDGCN dump goes to stdout, the MLIR dump to stderr
 grep -E ".vgpr_count|.private_segment_fixed_size|.group_segment_fixed_size" dump.txt
 ```
 | Look for | Good | Bad → retune |
@@ -73,8 +75,8 @@ grep -E ".vgpr_count|.private_segment_fixed_size|.group_segment_fixed_size" dump
 | Global loads | `global_load_dwordx4` / `buffer_load_dwordx4` | `global_load_dword` (scalar) |
 | Masked tail | `buffer_load_*` (HW bounds) | `global_load_*` + `v_cmp` predication |
 | LDS access | `ds_read_b128` | `ds_read_b32`/`b64` (bump `kpack`/`BLOCK_K`) |
-| MFMA | dense `v_mfma_f32_16x16x16` | `v_mfma_f32_32x32x8` (compare) or sparse |
-| Accumulator | AGPR, no moves in loop | `v_accvgpr_read/write` in loop |
+| MFMA | dense `v_mfma_f32_16x16x16_*` (gfx942) / `16x16x32_*` (gfx950, fp16/bf16) | `32x32x8_*` / `32x32x16_*` (compare) or sparse |
+| Accumulator | VGPR or AGPR, no moves in loop | `v_accvgpr_read/write` in loop |
 | Scratch | `.private_segment_fixed_size: 0` | nonzero → spilling |
 
 Full workflow: [../optimize/triton_levers/triton_isa_check.md](../optimize/triton_levers/triton_isa_check.md).

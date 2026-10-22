@@ -33,16 +33,18 @@ they drift between upstream and `ROCm/triton`.
 | `waves_per_eu` | **AMD** | 0–8 | 0 | force occupancy by trimming VGPRs |
 | `kpack` | **AMD** | 1, 2 | 1 | LDS read width — **gfx942 only** |
 | `schedule_hint` | **AMD** | none / attention / memory-bound-attention | none | attention scheduling |
-| `OPTIMIZE_EPILOGUE` | env | 0/1 | 0 | **set 1 for GEMM** |
-| `maxnreg` | standard | int | None | hard VGPR cap (rarely needed) |
+| `OPTIMIZE_EPILOGUE` | env | — | — | **not read by Triton 3.7.0** — the epilogue pass always runs |
+| `maxnreg` | standard | int | None | CUDA-only; **not a `HIPOptions` field, dropped on AMD** |
 
 ## `matrix_instr_nonkdim` — MFMA size
 
 `16` → the 16×16 MFMA family (**recommended**). `32` → 32×32, which needs `BLOCK_M`, `BLOCK_N`
 divisible by 32.
 
-**Prefer 16 for two independent reasons**: 16×16 carries **4 C-registers/lane** vs 32×32's **16** (that
-4× comes out of the 512-register budget), *and* the 32×32 op draws more power so the part clocks lower.
+**Prefer 16 for two independent reasons**: 16×16 carries **4 C-registers/lane** per instruction vs
+32×32's **16** — the same total for a given `BLOCK_M×BLOCK_N` (a 128×128 bf16 tile on gfx950 compiles to
+198 vs 202 VGPRs), so the difference is granularity, not 4× the registers — *and* the 32×32 op draws
+more power so the part clocks lower.
 Only switch if 32 measurably wins on your shape.
 
 ## `waves_per_eu` — occupancy via register trimming
@@ -115,18 +117,19 @@ for FA-style chained dots (built on LLVM `sched_group_barrier` / IGLP).
 
 **Experimental** — older `ROCm/triton` forks used `instruction_sched_variant`
 (`default`/`iglp0`/`iglp1`). Always grep for it. Leave at `none` unless tuning attention; the GEMM gain
-is small. Raw control: `llvm_fn_attrs="amdgpu-sched-strategy=iterative-ilp"`.
+is small. `memory-bound-attention` is what sets the LLVM attribute `amdgpu-sched-strategy=iterative-ilp`;
+Triton 3.7.0 has no `llvm_fn_attrs` option to set it directly.
 
 ## Env and `knobs.amd.*`
 
 | Variable | Effect | Recommendation |
 |---|---|---|
-| `OPTIMIZE_EPILOGUE=1` | drops the epilogue `convert_layout` | **ON for GEMM** |
+| `OPTIMIZE_EPILOGUE=1` | not read by Triton 3.7.0; the epilogue already stores from the MFMA layout | nothing to set |
 | `TRITON_PRINT_AUTOTUNING=1` | prints the winner + timing | ON while tuning |
 | `AMDGCN_ENABLE_DUMP=1` | dump ISA | check `_dwordx4`, `ds_*_b128` |
 | `MLIR_ENABLE_DUMP=1` | dump TTGIR / TritonAMDGPU IR | check MFMA layout, LDS bytes |
-| `knobs.amd.use_buffer_ops` | `buffer_load/store` (HW bounds-checked) | **ON for masked loads — not default!** |
-| `knobs.amd.use_async_copy` | `global_load_lds` direct-to-LDS | **default on gfx950**; experimental gfx942 |
+| `knobs.amd.use_buffer_ops` | `buffer_load/store` (HW bounds-checked) | **default on** in Triton 3.7.0 (`AMDGCN_USE_BUFFER_OPS`), only for tensors under 2 GiB |
+| `knobs.amd.use_async_copy` | `global_load_lds` direct-to-LDS | **off by default** in Triton 3.7.0; `TRITON_HIP_USE_ASYNC_COPY=1`; experimental gfx942 |
 | `knobs.amd.use_block_pingpong` | ping-pong two warp groups (needs stages > 1) | try for GEMM |
 | `TRITON_ALWAYS_COMPILE=1` | bypass the kernel cache | force a re-tune |
 
@@ -160,7 +163,7 @@ def _prune(configs, named_args, **kw):
     return out or configs[:1]
 
 @triton.autotune(_space(), key=["M","N","K"],
-                 prune_configs_by={"early_config_prune": _prune}, warmup=25, rep=100)
+                 prune_configs_by={"early_config_prune": _prune})   # warmup=/rep= are deprecated
 @triton.jit
 def gemm(...): ...      # body from triton_templates.md
 ```

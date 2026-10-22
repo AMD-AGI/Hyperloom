@@ -13,7 +13,7 @@ sources:
 # Kernel templates
 
 Starting bodies that are **already CDNA-tuned**: wave64-aware, `num_warps` low, ≥1024 programs,
-MFMA-16, `OPTIMIZE_EPILOGUE=1`. Copy one, then tune with `triton_knob_space.md`.
+MFMA-16. Copy one, then tune with `triton_knob_space.md`.
 
 ## Route here when
 You know what you are writing (GEMM / attention / reduction) and want a correct starting point instead
@@ -59,7 +59,7 @@ def gemm(a_ptr, b_ptr, c_ptr, M, N, K,
     a_ptrs = a_ptr + offs_m[:,None]*sam + offs_k[None,:]*sak
     b_ptrs = b_ptr + offs_k[:,None]*sbk + offs_n[None,:]*sbn
 
-    acc = tl.zeros((BLOCK_M, BLOCK_N), tl.float32)          # -> AGPR accumulator
+    acc = tl.zeros((BLOCK_M, BLOCK_N), tl.float32)          # -> MFMA accumulator (VGPR or AGPR)
     for k in range(0, tl.cdiv(K, BLOCK_K)):
         km = offs_k[None,:] < K - k*BLOCK_K
         a = tl.load(a_ptrs, mask=km, other=0.0)             # -> global_load_dwordx4
@@ -67,7 +67,7 @@ def gemm(a_ptr, b_ptr, c_ptr, M, N, K,
         acc = tl.dot(a, b, acc)                             # -> ds_read_b128 + v_mfma
         a_ptrs += BLOCK_K*sak; b_ptrs += BLOCK_K*sbk
 
-    c = acc.to(c_ptr.dtype.element_ty)                      # OPTIMIZE_EPILOGUE=1 drops the convert
+    c = acc.to(c_ptr.dtype.element_ty)                      # stored from the MFMA layout, no convert
     ocm = pid_m*BLOCK_M + tl.arange(0, BLOCK_M)
     ocn = pid_n*BLOCK_N + tl.arange(0, BLOCK_N)
     tl.store(c_ptr + scm*ocm[:,None] + scn*ocn[None,:], c,
@@ -105,7 +105,7 @@ trap in both directions:
 | Target | dtype | Note |
 |---|---|---|
 | **gfx950** | OCP `float8e4nv` / `float8e5` | also MXFP block-scaled via `mfma_scale_*_f8f6f4` |
-| gfx942 | `tl.float8e4b8` (E4M3 fnuz) / `tl.float8e5b16` | OCP `float8_e4m3fn` raises `Unsupported conversion 'f8E4M3FN'` |
+| gfx942 | `tl.float8e4b8` (E4M3 fnuz) / `tl.float8e5b16` | OCP `float8_e4m3fn` is silently upcast to fp16 by Triton 3.7.0 (`v_mfma_f32_16x16x16_f16`, no fp8 MFMA) |
 
 ```python
 a = a.to(tl.float8e4nv)          # gfx950: OCP

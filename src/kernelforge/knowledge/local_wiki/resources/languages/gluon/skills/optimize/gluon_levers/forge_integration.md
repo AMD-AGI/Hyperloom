@@ -27,8 +27,9 @@ measurement honest, and which version traps burn a whole session.
 2. **Probe the toolchain before you write anything.** Gluon is `triton.experimental`, it is not
    stabilized, and 3.7.0 shipped with a symbol missing that breaks its own tutorial.
 3. **Environment variables are part of the measurement, not part of the kernel.** `TRITON_ENABLE_LLIR_SCHED`
-   and `TRITON_ENABLE_AMDGCN_AS` change the generated code. A number measured with them set is not
-   comparable to one measured without unless they travel with the candidate.
+   and `TRITON_ENABLE_AMDGCN_AS` change the generated code on the tutorials' pinned Triton build (stock
+   Triton 3.7.0 reads neither). A number measured with them set is not comparable to one measured
+   without unless they travel with the candidate.
 4. **A high SNR is not a correctness proof.** A layout or scale-packing error produces plausible
    garbage that still averages well; the driver's correctness suite is what decides a KEEP, so read
    what it reports per case rather than the aggregate figure.
@@ -159,7 +160,8 @@ error in your report — it saves every later session the same discovery.
 ### Environment variables change the generated code
 `TRITON_ENABLE_LLIR_SCHED=1` and `TRITON_ENABLE_AMDGCN_AS=1` are not runtime tuning — they change the
 instruction schedule and the register allocation. They are the difference between two of the rungs in
-the AMD ladder. Inside a campaign there are exactly two honest ways to use them:
+the AMD ladder. Stock Triton 3.7.0 does not read either variable, so on a stock wheel they do nothing.
+Inside a campaign there are exactly two honest ways to use them:
 
 - **Make them travel with the candidate** — set them from the kernel module's own import path (e.g.
   `os.environ.setdefault(...)` before the first compile) so any measurement of that source includes

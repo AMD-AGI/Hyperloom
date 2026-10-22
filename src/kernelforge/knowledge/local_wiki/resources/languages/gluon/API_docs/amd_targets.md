@@ -50,8 +50,8 @@ triton.experimental.gluon.language.amd
 | `AMDMFMALayout` / `DotOperandLayout` re-export | ❌ (use `gl.amd.AMDMFMALayout`) | ✅ |
 
 So on CDNA3 the Gluon-specific win narrows to buffer ops plus hand-authored pipelining and wave
-scheduling; **the async-copy-to-LDS rung and the whole scaled-MFMA route are CDNA4-only at the Gluon
-API level.** Plan a CDNA3 kernel accordingly rather than discovering it three rungs in.
+scheduling; **the whole scaled-MFMA route is CDNA4-only, and async copy to LDS on CDNA3 is limited to
+≤32 bits per lane** (§ 2). Plan a CDNA3 kernel accordingly rather than discovering it three rungs in.
 
 ## TL;DR
 Three AMD mechanisms carry essentially all of the win:
@@ -112,8 +112,11 @@ The commit/wait pair mirrors the TritonGPU-dialect async-group semantics shared 
 `cp.async` path; the AMD-specific piece is `buffer_load_to_shared`, which fuses the buffer addressing
 above with a direct global→LDS write.
 
-**There is no `async_copy` in the `cdna3` namespace** — see the table above. A CDNA3 kernel stages
-through registers and writes LDS explicitly, which is exactly the cost this rung removes on CDNA4.
+**There is no `async_copy` in the `cdna3` namespace** — see the table above. On Triton 3.7.0 the
+`cdna4.async_copy` ops still compile for gfx942, but only at ≤32 bits per lane (`global_load_lds_dword`,
+`buffer_load_dword … lds`); a 128-bit copy fails to legalize, because gfx942 has no `dwordx3`/`dwordx4`
+direct-to-LDS form. A CDNA3 kernel that needs wide loads stages through registers and writes LDS
+explicitly, which is exactly the cost this rung removes on CDNA4.
 
 **Why it matters, in measured terms.** Staging global data through registers before writing LDS costs
 a full register-residency phase: ROCm's own tuning work reports that switching a reference GEMM to
@@ -202,8 +205,9 @@ numbers rather than an error. See `../triton/` and the `hardware/` numerics card
 
 ## 5. Wave scheduling — what is and is not available
 
-**`gl.warp_specialize` is Hopper-and-newer NVIDIA only.** There is no CDNA path through it, and there
-should not be: on MI355X wave specialization reaches only **~80% of peak BF16 GEMM**, because AMD's
+**`gl.warp_specialize` lowers only on NVIDIA Hopper+ and, on AMD, gfx1250** — Triton 3.7.0 rejects it
+on gfx942/gfx950 ("Warp specialization is only supported on gfx1250"). There is no CDNA path through it,
+and there should not be: on MI355X wave specialization reaches only **~80% of peak BF16 GEMM**, because AMD's
 static register allocation starves the producer waves. The two patterns that do reach peak, both from
 HipKittens (arXiv 2511.08083):
 
@@ -231,6 +235,10 @@ Two runtime-enabled passes matter enough that the AMD ladder treats them as part
 TRITON_ENABLE_LLIR_SCHED=1     # LLIR-level pass: interleaves MFMA with memory ops from a throughput model
 TRITON_ENABLE_AMDGCN_AS=1      # post-assembly peephole
 ```
+
+Stock Triton 3.7.0 reads neither variable (both are absent from its Python sources and `libtriton.so`),
+so on a stock wheel setting them changes nothing; the ladder ran on the Triton tag the AMD tutorials pin
+(`../skills/optimize/gluon_levers/forge_integration.md` § Version traps).
 
 - **`llirSched`** interleaves MFMA and memory instructions using a throughput model, and **disables
   LLVM's pre-RA and post-RA machine schedulers** to preserve that ordering. Without it the backend
