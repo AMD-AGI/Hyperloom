@@ -185,7 +185,6 @@ def test_sigkill_drain_is_bounded_when_an_escaped_descendant_holds_the_pipes(tmp
     )
     monkeypatch.setenv("GEAK_E2E_RUNNER", str(runner))
     monkeypatch.setenv("GEAK_FLUSH_GRACE_S", "1")
-    monkeypatch.setattr(psr, "KILLED_DRAIN_TIMEOUT_S", 1.0)
 
     started = time.monotonic()
     try:
