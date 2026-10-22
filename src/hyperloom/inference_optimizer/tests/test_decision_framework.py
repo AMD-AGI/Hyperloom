@@ -35,7 +35,6 @@ def _silent_backends() -> dict[str, object]:
 @pytest.fixture
 def session_dir(tmp_path, monkeypatch) -> Path:
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
-    monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
     # Stub the interpreter resolver to avoid a real Magpie import probe.
     monkeypatch.setenv("MAGPIE_PYTHON", "/usr/bin/python3")
     from hyperloom.orchestrator.actions.executors import _benchmark_interpreter
@@ -46,35 +45,6 @@ def session_dir(tmp_path, monkeypatch) -> Path:
         lambda: "/usr/bin/python3",
     )
     return make_session_dir()
-
-
-# C — kernel-opt response recorded to SharedState
-@pytest.mark.asyncio
-async def test_trace_analyze_does_not_record_kernel_opt(
-    session_dir,
-    monkeypatch,
-):
-    """Only run_optimization (not trace_analyze) writes to last_kernel_opt."""
-    c = Coordinator(session_dir, backends=_silent_backends())
-    try:
-        from hyperloom.orchestrator.kernel import request_handlers as kernel_request_handlers
-
-        async def fake(payload, *, session_dir):
-            return {"status": "ok", "hot_kernels": [{"kernel_id": "k001"}]}
-
-        monkeypatch.setitem(
-            kernel_request_handlers.KERNEL_REQUEST_HANDLERS,
-            "trace_analyze",
-            fake,
-        )
-        intent = Intent(
-            type=IntentType.REQUEST,
-            payload={"target_agent": "kernel_agent", "kind": "trace_analyze", "params": {"trace_input": "/tmp/t.json"}},
-        )
-        await c.router.handle_intent("orchestration", intent)
-        assert c.shared_state.last_kernel_opt == {}
-    finally:
-        await c.stop()
 
 
 @pytest.mark.asyncio

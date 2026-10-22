@@ -182,15 +182,11 @@ class V6GradingTputGuard(TypedDict, total=False):
 
 
 class V6Grading(TypedDict, total=False):
-    """The axis this session was configured to grade on.
+    """The grading mode this session was started in.
 
-    The session-level setting and only that. What a promotion was actually
-    decided on is ``outcome.validation.graded_on``, read off the promotion
-    itself. On a session that promoted anything the two agree, because a
-    comparison that cannot supply the configured axis pair fails rather than
-    settling for another axis -- no promotion is ever graded off-objective.
-    Neither field resolves the other even so: a session can be configured for
-    an axis and promote nothing on it.
+    ``objective`` is a start-time mode marker (``e2e_norm_intvty_p90`` on an interactivity session), not the
+    promotion axis: that is ``outcome.validation.graded_on`` / ``outcome.final.graded_on``, absent when nothing
+    was adopted and the adoption axis when nothing was validated.
     """
 
     benchmark_mode: str
@@ -506,11 +502,10 @@ class V6RooflineKernel(TypedDict, total=False):
     the kernel worth optimizing is often a cheap one running at low efficiency,
     which is exactly what a top-N-by-cost cut removes.
 
-    The two analysis routes agree on identity and cost and diverge on
-    provenance: the bypass route measures attainment against a real rocprof
-    ceiling and sets ``roofline_measured`` / ``roofline_attainment_pct``, where
-    TraceLens has only its analytical model. The absent field is itself the
-    answer to "was this number measured"."""
+    The two analysis routes agree on identity and cost and diverge in the
+    tail: the bypass route reports ``roofline_attainment_pct`` from its
+    analytical model, which TraceLens rows do not carry. ``roofline_source``
+    says whether a row's bound came from a model or is a placeholder."""
 
     kernel_id: str
     name: str
@@ -529,11 +524,9 @@ class V6RooflineKernel(TypedDict, total=False):
     roofline_attainment_pct: float | None
     roofline_name: str | None
     roofline_source: str
-    roofline_measured: bool
     suggestion: str
     recommended_actions: list[str]
     reusable_native_kernel: bool
-    rocprof_roofline: dict[str, Any] | None
 
 
 class V6RooflineKernelTable(TypedDict, total=False):
@@ -1409,8 +1402,8 @@ class V6StackValidation(TypedDict, total=False):
     source: str
     measurement_basis: str
     #: The axis the figure was graded on, so an intvty-graded gain is not later
-    #: read as an output gain. Always the axis the session was configured for:
-    #: only a comparison the orchestrator found comparable is recorded here.
+    #: read as an output gain. Only a comparison the orchestrator found
+    #: comparable is recorded here.
     graded_objective: str
     #: The graded axes of the measurement that produced the figure, recorded
     #: beside it because a later revalidation moves the cumulative gain without
@@ -2048,6 +2041,7 @@ class V6KernelRewriteE2E(TypedDict, total=False):
     decision: str | None
     patch_path: str | None
     target_file: str | None
+    graded_objective: str | None
 
 
 class V6KernelRebenchEngagement(TypedDict, total=False):
@@ -2358,6 +2352,7 @@ class V6KernelAttempt(TypedDict, total=False):
     backends_tried: list[str]
     speedup: float | None
     gain_pct: float | None
+    gain_axis: str | None  # kernel_micro, output_throughput or the gate's graded axis
     compile_status: str
     correctness: bool | None
     artifact_path: str
@@ -2386,6 +2381,7 @@ class V6KernelDeliveredRow(TypedDict, total=False):
     ref: str
     kernel_id: str
     gain_pct: float | None
+    gain_axis: str | None
     settled_by: str
 
 

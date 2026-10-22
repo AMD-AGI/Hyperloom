@@ -14,10 +14,9 @@ from typing import Any
 
 import pytest
 
-from hyperloom.common import llm_config
+from hyperloom.common import agent_cli, llm_config
 from hyperloom.common.deadline import Deadline
 
-import hyperloom.orchestrator.roles.claude as claude_role
 import hyperloom.orchestrator.specialists.agent_cli_config as agent_cli_config
 import hyperloom.orchestrator.specialists.subprocess_ as sp
 from hyperloom.inference_optimizer.trace import parse_usage as pu
@@ -29,7 +28,6 @@ SpecialistAgentUnavailableError = agent_cli_config.SpecialistAgentUnavailableErr
 SpecialistSubprocessConfig = sp.SpecialistSubprocessConfig
 SpecialistSubprocessDispatcher = sp.SpecialistSubprocessDispatcher
 _build_specialist_env = agent_cli_config._build_specialist_env
-resolve_codex_executable = sp.resolve_codex_executable
 preferred_agent_backend = llm_config.preferred_agent_backend
 
 # Every provider-shape signal ``llm_config`` consults, so a test can pin an exact deployment shape instead of
@@ -480,12 +478,12 @@ def test_resolve_codex_executable_prefers_explicit_then_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Explicit config wins, then ``codex`` on PATH, then the SDK's runtime."""
-    assert resolve_codex_executable("/opt/custom/codex") == "/opt/custom/codex"
+    assert agent_cli.resolve_codex_executable("/opt/custom/codex") == "/opt/custom/codex"
 
     bin_dir = tmp_path / "bin"
     on_path = _write_executable(bin_dir / "codex", "#!/usr/bin/env bash\nexit 0\n")
     monkeypatch.setenv("PATH", str(bin_dir))
-    assert resolve_codex_executable() == str(on_path)
+    assert agent_cli.resolve_codex_executable() == str(on_path)
 
 
 def test_resolve_claude_executable_prefers_the_pin_then_the_record_then_path(
@@ -499,13 +497,13 @@ def test_resolve_claude_executable_prefers_the_pin_then_the_record_then_path(
     monkeypatch.setenv("PATH", str(on_path.parent))
     monkeypatch.setenv("HYPERLOOM_CLAUDE_CLI_PATH", str(pinned))
     monkeypatch.setenv("GEAK_CLAUDE_BIN", str(recorded))
-    assert claude_role.resolve_claude_executable() == str(pinned)
+    assert agent_cli.resolve_claude_executable() == str(pinned)
 
     monkeypatch.delenv("HYPERLOOM_CLAUDE_CLI_PATH")
-    assert claude_role.resolve_claude_executable() == str(recorded)
+    assert agent_cli.resolve_claude_executable() == str(recorded)
 
     monkeypatch.delenv("GEAK_CLAUDE_BIN")
-    assert claude_role.resolve_claude_executable() == str(on_path)
+    assert agent_cli.resolve_claude_executable() == str(on_path)
 
 
 def test_resolve_claude_executable_reports_absence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -513,13 +511,13 @@ def test_resolve_claude_executable_reports_absence(tmp_path: Path, monkeypatch: 
     monkeypatch.setenv("PATH", "/nonexistent")
     monkeypatch.delenv("HYPERLOOM_CLAUDE_CLI_PATH", raising=False)
     monkeypatch.delenv("GEAK_CLAUDE_BIN", raising=False)
-    assert claude_role.resolve_claude_executable() == ""
+    assert agent_cli.resolve_claude_executable() == ""
 
     not_executable = tmp_path / "claude"
     not_executable.write_text("", encoding="utf-8")
     monkeypatch.setenv("HYPERLOOM_CLAUDE_CLI_PATH", str(not_executable))
     monkeypatch.setenv("GEAK_CLAUDE_BIN", str(not_executable))
-    assert claude_role.resolve_claude_executable() == ""
+    assert agent_cli.resolve_claude_executable() == ""
 
 
 def test_resolve_codex_executable_falls_back_to_the_sdk_runtime(
@@ -527,7 +525,7 @@ def test_resolve_codex_executable_falls_back_to_the_sdk_runtime(
 ) -> None:
     """A pod that never ran the npm install still finds the pinned runtime."""
     monkeypatch.setenv("PATH", "/nonexistent")
-    resolved = resolve_codex_executable()
+    resolved = agent_cli.resolve_codex_executable()
     # The SDK runtime is an install-time dependency of ``openai-codex``; when it is absent the resolver reports that
     # rather than guessing a name.
     if resolved:
@@ -610,10 +608,7 @@ def test_cli_refuses_to_boot_an_openai_only_run_without_a_codex_runtime(
     from hyperloom.inference_optimizer.cli import executors
 
     _pin_provider_env(monkeypatch, _OPENAI_ONLY_ENV)
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.specialists.subprocess_.resolve_codex_executable",
-        lambda explicit="": "",
-    )
+    monkeypatch.setattr(agent_cli, "resolve_codex_executable", lambda explicit="": "")
     args = argparse.Namespace(
         claude_model="claude-opus-5",
         codex_model="gpt-5.5",

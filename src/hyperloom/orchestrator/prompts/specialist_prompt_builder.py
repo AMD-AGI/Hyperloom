@@ -24,13 +24,14 @@ from typing import Any, Callable
 from hyperloom.common.perf_metric import is_agentx_mode
 from hyperloom.common.prompt_safety import defang_prompt_structure
 from hyperloom.inference_optimizer.framework_registry import python_package
-from .agentx_context import corpus_lines, grading_lines
+from .agentx_context import corpus_lines, grading_lines, launch_ownership_lines
 from .proposal_schemas import (
     EXPLORE_VARIANT_CONTRACT,
     EXPLORE_VARIANT_EXAMPLE,
     UPSTREAM_CANDIDATE_CONTRACT,
     UPSTREAM_CANDIDATE_EXAMPLE,
 )
+from .speculative_decoding_focus import speculative_decoding_focus
 from ..measurement.runtime_findings import CORRECTNESS_FIX_MAX_DROP_PCT, CORRECTNESS_FIX_RULES
 
 from ..specialists.domains import (
@@ -829,6 +830,11 @@ def _focus_custom_specialist(inp: SpecialistPromptInputs) -> list[str]:
     return text.splitlines() if text else []
 
 
+def _focus_speculative_decoding_specialist(inp: SpecialistPromptInputs) -> list[str]:
+    """Render the speculative-decoding focus for this session's target model."""
+    return speculative_decoding_focus(model_name=inp.model_name, model_path=inp.model_path, model_info=inp.model_info)
+
+
 _DOMAIN_FOCUS_TEMPLATES: dict[str, "Callable[[SpecialistPromptInputs], list[str]]"] = {
     "serving_specialist": _focus_serving_specialist,
     "framework_rewrite_specialist": _focus_framework_rewrite_specialist,
@@ -836,6 +842,7 @@ _DOMAIN_FOCUS_TEMPLATES: dict[str, "Callable[[SpecialistPromptInputs], list[str]
     "comm_specialist": _focus_comm_specialist,
     "compiler_specialist": _focus_compiler_specialist,
     "system_specialist": _focus_system_specialist,
+    "speculative_decoding_specialist": _focus_speculative_decoding_specialist,
     "candidate_discovery_specialist": _focus_candidate_discovery_specialist,
     "research_scout_specialist": _focus_research_scout_specialist,
     "static_recon_specialist": _focus_static_recon_specialist,
@@ -928,6 +935,9 @@ class SpecialistPromptInputs:
     # Framework package directory relative to the worktree; empty without a worktree.
     worktree_package_dir: str = ""
 
+    # Target model identity warmed from SharedState.model_name / model_path; "" => not recorded.
+    model_name: str = ""
+    model_path: str = ""
     # Structured model architecture features mirrored from SharedState.model_info;
     # machine-parseable companion to ``arch_notes``. Empty dict => not warmed.
     model_info: dict[str, Any] = field(default_factory=dict)
@@ -996,7 +1006,8 @@ def _authors_patches(inp: SpecialistPromptInputs) -> bool:
 #: something to raise the sights from. ``enablement_specialist`` is absent
 #: because its ladder book says climb only as far as runnability needs;
 #: ``framework_rewrite_specialist`` because it authors source rewrites and
-#: nothing else, and already carries its own "Where the wins are" taxonomy.
+#: nothing else, and already carries its own "Where the wins are" taxonomy;
+#: ``speculative_decoding_specialist`` because its focus names no flags at all.
 _THROUGHPUT_AUTHORING_DOMAINS = frozenset(
     {
         "serving_specialist",
@@ -1427,6 +1438,7 @@ def _section_hardware(inp: SpecialistPromptInputs) -> list[str]:
         # The corpus fixes the request shape, so ISL/OSL carry no information.
         workload_rows += corpus_lines(inp.agentx_corpus_shape)
         workload_rows += grading_lines(inp.agentx_grading, inp.agentx_backend)
+        workload_rows += launch_ownership_lines(inp.agentx_backend)
     else:
         if inp.isl > 0:
             workload_rows.append(f"- ISL (input seq len): {inp.isl}")

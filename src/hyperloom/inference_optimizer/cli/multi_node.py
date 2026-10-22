@@ -165,14 +165,8 @@ def _replay_kernel_patches_for_multi_node(args: argparse.Namespace) -> None:
     nodes = max(1, int(getattr(args, "nodes", 1) or 1))
     if nodes < 2:
         return
-    session_dir = _session_dir_resolve()
-    workspace_root = session_dir / "kernel-agent-workspace"
-    if not workspace_root.is_dir():
-        return
-
+    workspace_root = _session_dir_resolve() / "kernel-agent-workspace"
     manifests: list[Path] = sorted(workspace_root.rglob("manifest.json"))
-    if not manifests:
-        return
 
     replayed = 0
     skipped = 0

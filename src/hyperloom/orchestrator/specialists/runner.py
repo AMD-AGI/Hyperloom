@@ -668,6 +668,8 @@ class SpecialistRunner:
                     else ""
                 ),
                 source_hint_directories=tuple(params.get("source_hint_directories") or ()),
+                model_name=str(params.get("model_name") or ""),
+                model_path=str(params.get("model_path") or ""),
                 model_info=dict(params.get("model_info") or {}),
                 static_recon_checklist=str(params.get("static_recon_checklist") or ""),
                 enablement_source_context=str(params.get("enablement_source_context") or ""),

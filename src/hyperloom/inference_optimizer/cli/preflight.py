@@ -31,13 +31,16 @@ from hyperloom.common.env_safety import (
     is_allowed_kernel_agent_env_key,
     is_python_package_root,
 )
+from hyperloom.common.agent_cli import resolve_claude_executable, resolve_codex_executable
 from hyperloom.common.llm_config import (
+    AGENT_BACKEND_CODEX,
     CLAUDE_OAUTH_TOKEN_ENV,
     DEFAULT_CLAUDE_MODEL,
     LEGACY_DEEPSEEK_ENV_KEYS,
     anthropic_synthesizable_key,
     deepseek_compat_env,
     has_anthropic_credential,
+    preferred_agent_backend,
     provider_model_defaults,
     with_synthesized_anthropic_keys,
 )
@@ -997,37 +1000,21 @@ def _check_serving_framework(args, benchmark_python: str) -> dict[str, Any]:
     ).strip().lower() or framework_registry.DEFAULT_FRAMEWORK
 
     if framework_registry.is_scriptable(framework):
-        return {
-            "status": "skipped",
-            "skip_reason": "scriptable_framework",
-            "target": framework,
-        }
+        return {"status": "skipped", "skip_reason": "scriptable_framework", "target": framework}
     if os.environ.get(SKIP_FRAMEWORK_CHECK_ENV, "").strip():
         print(f"Preflight: {SKIP_FRAMEWORK_CHECK_ENV} set; skipping the {framework} importability check")
-        return {
-            "status": "skipped",
-            "skip_reason": "skip_framework_check_env",
-            "target": framework,
-        }
+        return {"status": "skipped", "skip_reason": "skip_framework_check_env", "target": framework}
     remote_base_url = os.environ.get("BENCHMARK_BASE_URL", "").strip()
     if remote_base_url:
         print(f"Preflight: BENCHMARK_BASE_URL={remote_base_url}; skipping the local {framework} check (remote server)")
-        return {
-            "status": "skipped",
-            "skip_reason": "remote_benchmark_url",
-            "target": framework,
-        }
+        return {"status": "skipped", "skip_reason": "remote_benchmark_url", "target": framework}
 
     from hyperloom.inference_optimizer.multi_node._internal.external_state import external_service_url
     from hyperloom.orchestrator.actions.executors._multi_node_env import is_multi_node
 
     if is_multi_node() and external_service_url():
         print(f"Preflight: external multi-node mode; skipping the local {framework} check (serving is on remote pods)")
-        return {
-            "status": "skipped",
-            "skip_reason": "external_multi_node",
-            "target": framework,
-        }
+        return {"status": "skipped", "skip_reason": "external_multi_node", "target": framework}
 
     interpreters = _framework_probe_interpreters(framework, benchmark_python)
     found, probe = _resolve_framework_build(framework, interpreters)
@@ -1051,6 +1038,13 @@ def _check_serving_framework(args, benchmark_python: str) -> dict[str, Any]:
     if found and probe.verdict is not False:
         os.environ[RESOLVED_FRAMEWORK_PYTHON_ENV] = found
         os.environ[RESOLVED_FRAMEWORK_ENV] = framework
+    return _report_framework_probe(framework, found, probe, interpreters)
+
+
+def _report_framework_probe(
+    framework: str, found: str | None, probe: _Probe, interpreters: list[str]
+) -> dict[str, Any]:
+    """Report a usable or unverifiable probe; anything else goes to ``_report_unusable_framework``."""
     evidence = _rocm_evidence(framework)
     if found and probe.verdict is True:
         print(f"Preflight: {framework} importable ({found}); {evidence} confirms a ROCm build")
@@ -1085,7 +1079,14 @@ def _check_serving_framework(args, benchmark_python: str) -> dict[str, Any]:
             "message": probe.detail or "framework probe timed out",
             "detail": {"probe_interpreter": None, "rocm_verified": None},
         }
+    return _report_unusable_framework(framework, found, probe, interpreters)
 
+
+def _report_unusable_framework(
+    framework: str, found: str | None, probe: _Probe, interpreters: list[str]
+) -> dict[str, Any]:
+    """Warn about, or stop the run on, a serving framework that is missing here or is not a ROCm build."""
+    evidence = _rocm_evidence(framework)
     # Every path below stops the run, so it needs a remedy that works.
     probed = "\n".join(f"  - {python_exe}" for python_exe in interpreters)
     if framework not in _SETUP_INSTALLABLE_FRAMEWORKS:
@@ -1648,15 +1649,12 @@ def _check_kernel_tuning_clis() -> dict[str, Any]:
     }
 
 
-def _check_node_claude_cli() -> None:
-    """WARN-only presence check for bundled agent CLIs (node/claude/codex)."""
-    missing = [t for t in ("node", "claude", "codex") if shutil.which(t) is None]
-    if missing:
-        print(
-            f"Preflight: WARNING — CLI(s) not on PATH: {missing}. "
-            f"ClaudeBackend / CodexBackend may fall back to direct HTTP. "
-            f"Run src/hyperloom/inference_optimizer/assets/install.sh to bring them in."
-        )
+def _check_agent_cli() -> None:
+    """WARN when the CLI this deployment's specialists run cannot be resolved; launching them will fail."""
+    backend = preferred_agent_backend()
+    resolve = resolve_codex_executable if backend == AGENT_BACKEND_CODEX else resolve_claude_executable
+    if not resolve():
+        print(f"Preflight: WARNING — no {backend} CLI; specialists cannot start without it (assets/install.sh).")
 
 
 def _emit_preflight_diagnostics(
@@ -2551,8 +2549,7 @@ def _preflight(
 
     inferencex_path = _prepare_inferencex(install_event, magpie_active=_magpie_backend_active)
 
-    # --- node / claude / codex CLI presence (WARN-only) ---
-    _check_node_claude_cli()
+    _check_agent_cli()
 
     _check_kernel_and_tracelens_clis(install_event, args)
 
