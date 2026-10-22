@@ -8379,3 +8379,17 @@ def test_a_keep_that_cannot_be_committed_is_reverted_as_a_crash(tmp_path, monkey
     assert result.validation_summary == f"COMMIT FAILED: {failure}"
     assert (workspace / "kernel.py").read_text() == "def kernel():\n    return 1\n"
     assert not (workspace / "forge_experiments" / "pending_keep.json").exists()
+
+
+@pytest.mark.parametrize(
+    ("deadline_in", "expected"),
+    [(None, 2 * 3600 - 600), (1800, 1800), (-60, 0)],
+)
+def test_the_budget_ends_at_the_absolute_deadline_when_that_comes_first(monkeypatch, deadline_in, expected):
+    """A resume restarts the --max-hours clock; --deadline-unix holds every segment of the campaign to one end."""
+    now = 1_000_000.0
+    monkeypatch.setattr(runner_module.time, "time", lambda: now)
+    loop = object.__new__(IterationLoop)
+    loop.start_time = now - 600
+    loop.ic = SimpleNamespace(max_time_hours=2.0, deadline_unix=None if deadline_in is None else now + deadline_in)
+    assert IterationLoop._time_remaining(loop) == pytest.approx(expected)

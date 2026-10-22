@@ -2650,9 +2650,15 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             log.debug("failed to publish dashboard", exc_info=True)
 
     def _time_remaining(self) -> float:
-        """Seconds remaining in the budget."""
-        elapsed = time.time() - self.start_time
-        return max(0, self.ic.max_time_hours * 3600 - elapsed)
+        """Seconds remaining in the budget: --max-hours from this start, or less when the absolute deadline is sooner.
+
+        A resumed campaign starts its --max-hours clock again; --deadline-unix is what holds every segment of it to
+        one end.
+        """
+        remaining = self.ic.max_time_hours * 3600 - (time.time() - self.start_time)
+        if self.ic.deadline_unix is not None:
+            remaining = min(remaining, self.ic.deadline_unix - time.time())
+        return max(0, remaining)
 
     def _analysis_deadline_unix(self) -> float:
         """Absolute Analysis deadline preserving iteration/finalization reserve."""
