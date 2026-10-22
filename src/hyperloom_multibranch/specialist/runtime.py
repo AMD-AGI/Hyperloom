@@ -7,7 +7,9 @@ A branch started with neither a direction nor a repair takes one of the session'
 :data:`~hyperloom_multibranch.specialist.directions.DIRECTIONS` that no branch has held yet, so the branches split the
 work instead of all sweeping the same settings, and a stopped branch's direction is not handed out again while another
 was never tried. Once each was held, it takes the one the fewest branches held over the session, then the one the
-fewest running branches hold. A direction given to a branch counts when it is one of these.
+fewest running branches hold. A direction given to a branch counts when it is one of these. A direction whose
+specialist gave up finding nothing to test is not dealt again on that start commit while another is left there: a
+later head may open it again, the same one would not.
 
 A session that crashes is restarted on its branch, at most ``MAX_RESTARTS`` times within ``RESTART_WINDOW_S``, and a
 lost one at most ``MAX_LOSS_RESTARTS`` times in a row with no session working in between: a loss takes the heartbeat
@@ -134,12 +136,13 @@ class SpecialistRuntime:
         self._pacing = pacing
         self._branches: dict[str, _Branch] = {}
         self._held: Counter[str] = Counter()
+        self._given_up: set[tuple[str, str]] = set()
 
     async def start(self, branch: str, start_commit: str, task: BranchTask = BranchTask()) -> None:
         if branch in self._branches:
             raise ValueError(f"branch {branch!r} already has a specialist")
         if not task.direction.strip() and task.repair is None:
-            task = replace(task, direction=self._least_held())
+            task = replace(task, direction=self._least_held(start_commit))
         if task.direction in DIRECTIONS:
             self._held[task.direction] += 1
         state = _Branch(branch, start_commit, task, self._notebook_for(branch))
@@ -195,6 +198,7 @@ class SpecialistRuntime:
                 await state.session.stop()
                 logger.info("the specialist of %s found nothing to test: %s", state.name, error)
                 state.session, state.gave_up = None, True
+                self._given_up.add((state.start_commit, state.task.direction))
                 await _notice(state, f"the specialist found nothing to test ({error}); it is not restarted")
                 return
             except Exception as error:
@@ -221,9 +225,10 @@ class SpecialistRuntime:
                 await _notice(state, f"the specialist {why} ({error!r}); it is not restarted")
                 return
 
-    def _least_held(self) -> str:
+    def _least_held(self, start_commit: str) -> str:
         running = [state.task.direction for state in self._branches.values()]
-        return min(DIRECTIONS, key=lambda d: (self._held[d], running.count(d)))
+        open_here = [d for d in DIRECTIONS if (start_commit, d) not in self._given_up] or list(DIRECTIONS)
+        return min(open_here, key=lambda d: (self._held[d], running.count(d)))
 
     async def _judge(self, state: _Branch, judge: BranchJudge) -> None:
         try:

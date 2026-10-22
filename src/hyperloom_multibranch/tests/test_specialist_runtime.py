@@ -257,6 +257,29 @@ async def test_a_direction_given_to_a_branch_counts_as_held(session):
     assert runs.started[1].start.task.direction == DIRECTIONS[1]
 
 
+async def test_a_direction_a_specialist_gave_up_on_is_not_dealt_again_on_the_same_start_commit(session):
+    runs = _Runs(errors=(_idle(),))
+    runtime = session.runtime(runs)
+    head = await session.repo.head(BRANCH)
+    first = [BRANCH, *(f"b{index}" for index in range(1, len(DIRECTIONS)))]
+
+    for name in first:
+        await runtime.start(name, head)
+    await _until(lambda: _any_notice(session, "not restarted"), "the first specialist to give up")
+    for name in first:
+        await runtime.stop(name)
+    await runtime.start("same", head)
+    await runtime.start("moved", "f" * 40)
+    await _until(lambda: _true(len(runs.started) == len(first) + 2), "the late specialists to start")
+    for name in ("same", "moved"):
+        await runtime.stop(name)
+
+    directions = {run.start.branch: run.start.task.direction for run in runs.started}
+    assert directions[BRANCH] == DIRECTIONS[0]
+    assert directions["same"] == DIRECTIONS[1]
+    assert directions["moved"] == DIRECTIONS[0]
+
+
 async def test_past_the_restarts_a_window_allows_the_specialist_stays_down(session):
     runs = _Runs(crashes=10)
     runtime = session.runtime(runs)
