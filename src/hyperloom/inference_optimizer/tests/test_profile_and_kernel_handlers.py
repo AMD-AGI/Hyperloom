@@ -1164,6 +1164,7 @@ def test_instrumentation_preflight_names_the_checks_it_dooms(tmp_path, monkeypat
 
     from hyperloom.orchestrator.actions.executors.profile import (
         CHECK_INSTRUMENTATION_PREFLIGHT,
+        CHECK_PHASE_COVERAGE,
         CHECK_SGLANG_SHAPE_PROFILER,
         CHECK_STEP_ANNOTATIONS,
         _TraceProbe,
@@ -1187,11 +1188,16 @@ def test_instrumentation_preflight_names_the_checks_it_dooms(tmp_path, monkeypat
     assert row["detail"]["shape_discovery_flag_present"] is False
     assert row["detail"]["predicts_failure_of"] == [CHECK_STEP_ANNOTATIONS, CHECK_SGLANG_SHAPE_PROFILER]
 
-    # It has to lead the list: everything after it is a consequence, not an independent finding.
+    # It has to lead the list: everything after it is a consequence, not an independent finding. The phase-coverage
+    # check is appended last (skipped here — no trace_split dir).
     validate = _build_trace_validate(
         {"checks": [{"check_id": "later"}]}, _TraceProbe(tmp_path, "sglang"), preflight=row
     )
-    assert [c["check_id"] for c in validate["checks"]] == [CHECK_INSTRUMENTATION_PREFLIGHT, "later"]
+    assert [c["check_id"] for c in validate["checks"]] == [
+        CHECK_INSTRUMENTATION_PREFLIGHT,
+        "later",
+        CHECK_PHASE_COVERAGE,
+    ]
 
 
 def test_instrumentation_preflight_passes_on_a_healthy_patch(tmp_path, monkeypatch):
