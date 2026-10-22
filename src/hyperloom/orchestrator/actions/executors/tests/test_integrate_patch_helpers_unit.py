@@ -12,6 +12,11 @@ import pytest
 
 from hyperloom.orchestrator.actions.executors import _git as gitmod
 from hyperloom.orchestrator.actions.executors import integrate_patch as ip
+from hyperloom.orchestrator.actions.executors import _integrate_enablement_gate as integrate_enablement_gate
+from hyperloom.orchestrator.actions.executors import _patch_git as patch_git
+from hyperloom.orchestrator.actions.executors import _patch_sources as patch_sources
+from hyperloom.orchestrator.actions.executors import _integrate_refusals as integrate_refusals
+from hyperloom.orchestrator.actions.executors import _integrate_results as integrate_results
 
 
 class _CP:
@@ -21,7 +26,7 @@ class _CP:
 
 
 def test_now_iso():
-    assert "T" in ip._now_iso()
+    assert "T" in integrate_results._now_iso()
 
 
 def test_integrate_patch_uses_shared_benchmark_deadline():
@@ -51,7 +56,8 @@ def test_recorded_root_covers_selected_patches(tmp_path, metadata, selected, exp
         (tmp_path / path).touch()
     payload = {"patch_roots": metadata, "patches_written": ["harvest.patch"]}
     assert (
-        ip._sole_patch_root(payload, [tmp_path / path for path in selected], specialist_workspace=tmp_path) == expected
+        patch_sources._sole_patch_root(payload, [tmp_path / path for path in selected], specialist_workspace=tmp_path)
+        == expected
     )
 
 
@@ -71,13 +77,13 @@ def test_recorded_root_matches_resolved_patch_identity(tmp_path, relative, confl
         metadata[str(patch)] = "/sglang"
     payload = {"patch_roots": metadata}
 
-    result = ip._sole_patch_root(payload, [patch.resolve()], specialist_workspace=alias)
+    result = patch_sources._sole_patch_root(payload, [patch.resolve()], specialist_workspace=alias)
 
     assert result == (None if conflicting_alias else "/aiter")
 
 
 def test_resolve_framework_root_explicit_dir(tmp_path):
-    assert ip._resolve_framework_root(str(tmp_path)) == tmp_path
+    assert patch_sources._resolve_framework_root(str(tmp_path)) == tmp_path
 
 
 def test_recorded_roots_with_external_localization_require_full_resolution(tmp_path):
@@ -88,14 +94,14 @@ def test_recorded_roots_with_external_localization_require_full_resolution(tmp_p
     localization = tmp_path / "localization.patch"
     localization.touch()
     payload = {"patch_roots": {str(authored): "/aiter", str(localization): "/aiter"}}
-    assert ip._sole_patch_root(payload, [authored, localization], specialist_workspace=workspace) is None
+    assert patch_sources._sole_patch_root(payload, [authored, localization], specialist_workspace=workspace) is None
 
 
 def test_recorded_root_with_nul_declines_fast_path(tmp_path):
     patch = tmp_path / "a.patch"
     patch.touch()
     assert (
-        ip._sole_patch_root(
+        patch_sources._sole_patch_root(
             {"patch_roots": {"a.patch": "/bad\0root"}},
             [patch],
             specialist_workspace=tmp_path,
@@ -113,7 +119,7 @@ def test_recorded_roots_compare_directory_identity(tmp_path):
     for patch in patches:
         patch.touch()
     payload = {"patch_roots": {"a.patch": str(root) + "/", "b.patch": "alias"}}
-    assert ip._sole_patch_root(payload, patches, specialist_workspace=tmp_path) == str(root)
+    assert patch_sources._sole_patch_root(payload, patches, specialist_workspace=tmp_path) == str(root)
 
 
 @pytest.mark.parametrize("failing_path", ["a.patch", "aiter"])
@@ -130,18 +136,18 @@ def test_recorded_roots_decline_unresolvable_paths(tmp_path, monkeypatch, failin
 
     monkeypatch.setattr(Path, "resolve", failing_resolve)
     payload = {"patch_roots": {"a.patch": "aiter"}}
-    assert ip._sole_patch_root(payload, [patch], specialist_workspace=tmp_path) is None
+    assert patch_sources._sole_patch_root(payload, [patch], specialist_workspace=tmp_path) is None
 
 
 def test_resolve_framework_root_create_requires_explicit_root(tmp_path, monkeypatch):
     root = tmp_path / "framework"
     root.mkdir()
     create = "diff --git a/new.py b/new.py\n--- /dev/null\n+++ b/new.py\n@@ -0,0 +1 @@\n+new\n"
-    monkeypatch.setattr(ip, "resolve_kernel_search_roots", lambda: [str(root)])
-    monkeypatch.setattr(ip, "resolve_session_framework_root", lambda: "")
+    monkeypatch.setattr(patch_sources, "resolve_kernel_search_roots", lambda: [str(root)])
+    monkeypatch.setattr(patch_sources, "resolve_session_framework_root", lambda: "")
 
-    assert ip._resolve_framework_root(None, patch_texts=[create]) is None
-    assert ip._resolve_framework_root(str(root), patch_texts=[create]) == root
+    assert patch_sources._resolve_framework_root(None, patch_texts=[create]) is None
+    assert patch_sources._resolve_framework_root(str(root), patch_texts=[create]) == root
 
 
 def test_resolve_framework_root_rejects_ambiguous_matches(tmp_path, monkeypatch):
@@ -151,24 +157,24 @@ def test_resolve_framework_root_rejects_ambiguous_matches(tmp_path, monkeypatch)
         (root / "file.py").write_text("old\n", encoding="utf-8")
     patch = "diff --git a/file.py b/file.py\n--- a/file.py\n+++ b/file.py\n@@ -1 +1 @@\n-old\n+new\n"
     monkeypatch.setattr(
-        ip,
+        patch_sources,
         "resolve_kernel_search_roots",
         lambda: [str(root) for root in roots],
     )
-    monkeypatch.setattr(ip, "resolve_session_framework_root", lambda: "")
+    monkeypatch.setattr(patch_sources, "resolve_session_framework_root", lambda: "")
 
-    assert ip._resolve_framework_root(None, patch_texts=[patch]) is None
+    assert patch_sources._resolve_framework_root(None, patch_texts=[patch]) is None
 
 
 def test_resolve_framework_root_unresolvable_explicit_rejected(tmp_path):
     """Broken symlinks for explicit overrides are rejected without raising."""
     broken = tmp_path / "broken-link"
     broken.symlink_to(tmp_path / "missing-target")
-    assert ip._resolve_framework_root(str(broken)) is None
+    assert patch_sources._resolve_framework_root(str(broken)) is None
 
 
 def test_resolve_framework_root_explicit_missing_rejected():
-    assert ip._resolve_framework_root("/no/such/dir") is None
+    assert patch_sources._resolve_framework_root("/no/such/dir") is None
 
 
 def _commit_tree(checkout: Path, *files: str) -> None:
@@ -190,22 +196,24 @@ def _commit_tree(checkout: Path, *files: str) -> None:
 def test_resolve_framework_root_non_git_framework_tree_is_its_own_root(tmp_path, monkeypatch):
     plain = tmp_path / "plain"
     plain.mkdir()
-    monkeypatch.setattr(ip, "resolve_kernel_search_roots", lambda: [str(plain)])
-    monkeypatch.setattr(ip, "resolve_session_framework_root", lambda: "")
-    monkeypatch.setattr(ip, "resolve_framework_tree", lambda framework: str(plain) if framework == "vllm" else "")
+    monkeypatch.setattr(patch_sources, "resolve_kernel_search_roots", lambda: [str(plain)])
+    monkeypatch.setattr(patch_sources, "resolve_session_framework_root", lambda: "")
+    monkeypatch.setattr(
+        patch_sources, "resolve_framework_tree", lambda framework: str(plain) if framework == "vllm" else ""
+    )
     monkeypatch.setenv("FRAMEWORK", "vllm")
-    assert ip._resolve_framework_root(None) == plain
+    assert patch_sources._resolve_framework_root(None) == plain
 
 
 def test_resolve_framework_root_without_a_named_tree_takes_no_discovered_root(tmp_path, monkeypatch):
     """A discovery order is not a name: with no tree named, no search root stands in for one."""
     checkout = tmp_path / "InferenceX"
     _commit_tree(checkout, "benchmarks/benchmark_lib.sh")
-    monkeypatch.setattr(ip, "resolve_kernel_search_roots", lambda: [str(checkout)])
-    monkeypatch.setattr(ip, "resolve_session_framework_root", lambda: "")
-    monkeypatch.setattr(ip, "resolve_framework_tree", lambda framework: "")
+    monkeypatch.setattr(patch_sources, "resolve_kernel_search_roots", lambda: [str(checkout)])
+    monkeypatch.setattr(patch_sources, "resolve_session_framework_root", lambda: "")
+    monkeypatch.setattr(patch_sources, "resolve_framework_tree", lambda framework: "")
     monkeypatch.delenv("FRAMEWORK", raising=False)
-    assert ip._resolve_framework_root(None, patch_paths=[]) is None
+    assert patch_sources._resolve_framework_root(None, patch_paths=[]) is None
 
 
 def test_resolve_framework_root_artifact_only_prefers_the_framework_checkout(tmp_path, monkeypatch):
@@ -215,12 +223,14 @@ def test_resolve_framework_root_artifact_only_prefers_the_framework_checkout(tmp
     checkout = tmp_path / "sglang"
     _commit_tree(checkout, "python/sglang/__init__.py")
     package = checkout / "python" / "sglang"
-    monkeypatch.setattr(ip, "resolve_kernel_search_roots", lambda: [str(inferencex), str(package)])
-    monkeypatch.setattr(ip, "resolve_session_framework_root", lambda: "")
-    monkeypatch.setattr(ip, "resolve_framework_tree", lambda framework: str(package) if framework == "sglang" else "")
+    monkeypatch.setattr(patch_sources, "resolve_kernel_search_roots", lambda: [str(inferencex), str(package)])
+    monkeypatch.setattr(patch_sources, "resolve_session_framework_root", lambda: "")
+    monkeypatch.setattr(
+        patch_sources, "resolve_framework_tree", lambda framework: str(package) if framework == "sglang" else ""
+    )
     monkeypatch.setenv("FRAMEWORK", "sglang")
 
-    assert ip._resolve_framework_root(None, patch_paths=[]) == checkout
+    assert patch_sources._resolve_framework_root(None, patch_paths=[]) == checkout
 
 
 @pytest.mark.parametrize("image_has_source_checkout", [True, False])
@@ -239,13 +249,13 @@ def test_resolve_framework_root_without_patches_takes_the_installed_package_itse
         _commit_tree(source_checkout, "vllm/__init__.py")
         roots.append(source_checkout)
     roots.append(site_packages)
-    monkeypatch.setattr(ip, "resolve_kernel_search_roots", lambda: [str(r) for r in roots])
-    monkeypatch.setattr(ip, "resolve_session_framework_root", lambda: "")
-    monkeypatch.setattr(ip, "resolve_framework_tree", lambda framework: str(site_packages))
+    monkeypatch.setattr(patch_sources, "resolve_kernel_search_roots", lambda: [str(r) for r in roots])
+    monkeypatch.setattr(patch_sources, "resolve_session_framework_root", lambda: "")
+    monkeypatch.setattr(patch_sources, "resolve_framework_tree", lambda framework: str(site_packages))
     monkeypatch.setenv("FRAMEWORK", "vllm")
     monkeypatch.setenv("INFERENCEX_PATH", str(inferencex))
 
-    assert ip._resolve_framework_root(None, patch_paths=[]) == site_packages
+    assert patch_sources._resolve_framework_root(None, patch_paths=[]) == site_packages
 
 
 def test_resolve_framework_root_ignores_a_repository_that_does_not_track_the_package(tmp_path, monkeypatch):
@@ -255,77 +265,77 @@ def test_resolve_framework_root_ignores_a_repository_that_does_not_track_the_pac
     package = project / ".venv" / "lib" / "site-packages" / "vllm"
     package.mkdir(parents=True)
     (package / "__init__.py").write_text("", encoding="utf-8")
-    monkeypatch.setattr(ip, "resolve_kernel_search_roots", lambda: [str(package)])
-    monkeypatch.setattr(ip, "resolve_session_framework_root", lambda: "")
-    monkeypatch.setattr(ip, "resolve_framework_tree", lambda framework: str(package))
+    monkeypatch.setattr(patch_sources, "resolve_kernel_search_roots", lambda: [str(package)])
+    monkeypatch.setattr(patch_sources, "resolve_session_framework_root", lambda: "")
+    monkeypatch.setattr(patch_sources, "resolve_framework_tree", lambda framework: str(package))
     monkeypatch.setenv("FRAMEWORK", "vllm")
 
-    assert ip._resolve_framework_root(None, patch_paths=[]) == package
+    assert patch_sources._resolve_framework_root(None, patch_paths=[]) == package
 
 
 def test_resolve_framework_root_none(monkeypatch):
-    monkeypatch.setattr(ip, "resolve_kernel_search_roots", list)
-    monkeypatch.setattr(ip, "resolve_session_framework_root", lambda: "")
-    assert ip._resolve_framework_root(None) is None
+    monkeypatch.setattr(patch_sources, "resolve_kernel_search_roots", list)
+    monkeypatch.setattr(patch_sources, "resolve_session_framework_root", lambda: "")
+    assert patch_sources._resolve_framework_root(None) is None
 
 
 def test_run_git_apply_spawn_fail(tmp_path, monkeypatch):
     monkeypatch.setattr(gitmod.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError("git")))
-    ok, err = ip._run_git_apply(tmp_path, tmp_path / "p.patch", p_level=1, check_only=True)
+    ok, err = patch_git._run_git_apply(tmp_path, tmp_path / "p.patch", p_level=1, check_only=True)
     assert ok is False
     assert "spawn failed" in err
 
 
 def test_run_git_apply_success(tmp_path, monkeypatch):
     monkeypatch.setattr(gitmod.subprocess, "run", lambda *a, **k: _CP(0, ""))
-    ok, err = ip._run_git_apply(tmp_path, tmp_path / "p.patch", p_level=1, check_only=True)
+    ok, err = patch_git._run_git_apply(tmp_path, tmp_path / "p.patch", p_level=1, check_only=True)
     assert ok is True
 
 
 def test_preflight_missing_targets_read_error(tmp_path):
     # A directory path -> read_text raises OSError -> skipped
-    records = ip._preflight_missing_targets(tmp_path, [tmp_path])
+    records = integrate_refusals._preflight_missing_targets(tmp_path, [tmp_path])
     assert records == []
 
 
 def test_preflight_missing_targets_records(tmp_path, monkeypatch):
     patch = tmp_path / "p.patch"
     patch.write_text("--- a/ghost.py\n+++ b/ghost.py\n", encoding="utf-8")
-    monkeypatch.setattr(ip, "patch_targets_missing", lambda text, root: ["a/ghost.py"])
-    records = ip._preflight_missing_targets(tmp_path, [patch])
+    monkeypatch.setattr(integrate_refusals, "patch_targets_missing", lambda text, root: ["a/ghost.py"])
+    records = integrate_refusals._preflight_missing_targets(tmp_path, [patch])
     assert records[0]["missing_targets"] == ["a/ghost.py"]
 
 
 def test_git_apply_check_only_after_detect(tmp_path, monkeypatch):
-    monkeypatch.setattr(ip, "_detect_p_level", lambda *a, **k: 2)
-    ok, err = ip._git_apply(tmp_path, tmp_path / "p.patch", check_only=True)
+    monkeypatch.setattr(patch_git, "_detect_p_level", lambda *a, **k: 2)
+    ok, err = patch_git._git_apply(tmp_path, tmp_path / "p.patch", check_only=True)
     assert ok is True and err == ""
 
 
 def test_git_apply_no_level(tmp_path, monkeypatch):
-    monkeypatch.setattr(ip, "_detect_p_level", lambda *a, **k: None)
-    monkeypatch.setattr(ip, "_run_git_apply", lambda *a, **k: (False, "no apply"))
-    ok, err = ip._git_apply(tmp_path, tmp_path / "p.patch")
+    monkeypatch.setattr(patch_git, "_detect_p_level", lambda *a, **k: None)
+    monkeypatch.setattr(patch_git, "_run_git_apply", lambda *a, **k: (False, "no apply"))
+    ok, err = patch_git._git_apply(tmp_path, tmp_path / "p.patch")
     assert ok is False
 
 
 def test_git_apply_real_apply(tmp_path, monkeypatch):
-    monkeypatch.setattr(ip, "_detect_p_level", lambda *a, **k: 1)
-    monkeypatch.setattr(ip, "_run_git_apply", lambda *a, **k: (True, ""))
-    ok, _ = ip._git_apply(tmp_path, tmp_path / "p.patch", check_only=False)
+    monkeypatch.setattr(patch_git, "_detect_p_level", lambda *a, **k: 1)
+    monkeypatch.setattr(patch_git, "_run_git_apply", lambda *a, **k: (True, ""))
+    ok, _ = patch_git._git_apply(tmp_path, tmp_path / "p.patch", check_only=False)
     assert ok is True
 
 
 def test_git_apply_reverse_success(tmp_path, monkeypatch):
     # check passes at level 1, then real reverse-apply succeeds
     monkeypatch.setattr(gitmod.subprocess, "run", lambda *a, **k: _CP(0, ""))
-    ok, err = ip._git_apply_reverse(tmp_path, tmp_path / "p.patch")
+    ok, err = patch_git._git_apply_reverse(tmp_path, tmp_path / "p.patch")
     assert ok is True
 
 
 def test_git_apply_reverse_check_spawn_fail(tmp_path, monkeypatch):
     monkeypatch.setattr(gitmod.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError("git")))
-    ok, err = ip._git_apply_reverse(tmp_path, tmp_path / "p.patch")
+    ok, err = patch_git._git_apply_reverse(tmp_path, tmp_path / "p.patch")
     assert ok is False and "spawn failed" in err
 
 
@@ -338,7 +348,7 @@ def test_git_apply_reverse_real_fails(tmp_path, monkeypatch):
         return _CP(0, "") if calls["n"] == 1 else _CP(1, "reverse failed")
 
     monkeypatch.setattr(gitmod.subprocess, "run", _run)
-    ok, err = ip._git_apply_reverse(tmp_path, tmp_path / "p.patch")
+    ok, err = patch_git._git_apply_reverse(tmp_path, tmp_path / "p.patch")
     assert ok is False and "reverse failed" in err
 
 
@@ -352,13 +362,13 @@ def test_git_apply_reverse_real_spawn_fail(tmp_path, monkeypatch):
         raise FileNotFoundError("git")  # real reverse-apply spawn fails
 
     monkeypatch.setattr(gitmod.subprocess, "run", _run)
-    ok, err = ip._git_apply_reverse(tmp_path, tmp_path / "p.patch")
+    ok, err = patch_git._git_apply_reverse(tmp_path, tmp_path / "p.patch")
     assert ok is False and "spawn failed" in err
 
 
 def test_git_apply_reverse_no_level(tmp_path, monkeypatch):
     monkeypatch.setattr(gitmod.subprocess, "run", lambda *a, **k: _CP(1, "no"))
-    ok, err = ip._git_apply_reverse(tmp_path, tmp_path / "p.patch")
+    ok, err = patch_git._git_apply_reverse(tmp_path, tmp_path / "p.patch")
     assert ok is False and "no matching -p level" in err
 
 
@@ -373,7 +383,7 @@ def test_patch_touched_paths_returns_only_patched_file(tmp_path):
     patch = tmp_path / "p.patch"
     patch.write_text(_DIFF, encoding="utf-8")
 
-    touched = ip._patch_touched_paths(tmp_path, [patch])
+    touched = integrate_enablement_gate._patch_touched_paths(tmp_path, [patch])
     assert touched == ["pkg/mod.py"]
     assert "unrelated.py" not in touched
 
@@ -384,7 +394,7 @@ def test_patch_touched_paths_skips_unresolvable_and_creations(tmp_path):
     create = "--- /dev/null\n+++ b/new.py\n@@ -0,0 +1 @@\n+content\n"
     patch = tmp_path / "c.patch"
     patch.write_text(create, encoding="utf-8")
-    assert ip._patch_touched_paths(tmp_path, [patch]) == ["new.py"]
+    assert integrate_enablement_gate._patch_touched_paths(tmp_path, [patch]) == ["new.py"]
 
 
 def test_patch_touched_paths_emits_deleted_path(tmp_path):
@@ -392,7 +402,7 @@ def test_patch_touched_paths_emits_deleted_path(tmp_path):
     delete = "--- a/pkg/gone.py\n+++ /dev/null\n@@ -1 +0,0 @@\n-content\n"
     patch = tmp_path / "d.patch"
     patch.write_text(delete, encoding="utf-8")
-    assert ip._patch_touched_paths(tmp_path, [patch]) == ["pkg/gone.py"]
+    assert integrate_enablement_gate._patch_touched_paths(tmp_path, [patch]) == ["pkg/gone.py"]
 
 
 def test_patch_touched_paths_mixed_create_and_delete(tmp_path):
@@ -401,7 +411,7 @@ def test_patch_touched_paths_mixed_create_and_delete(tmp_path):
     mixed = "--- /dev/null\n+++ b/kept.py\n@@ -0,0 +1 @@\n+hi\n--- a/dropped.py\n+++ /dev/null\n@@ -1 +0,0 @@\n-bye\n"
     patch = tmp_path / "m.patch"
     patch.write_text(mixed, encoding="utf-8")
-    assert sorted(ip._patch_touched_paths(tmp_path, [patch])) == [
+    assert sorted(integrate_enablement_gate._patch_touched_paths(tmp_path, [patch])) == [
         "dropped.py",
         "kept.py",
     ]
@@ -416,7 +426,7 @@ def test_git_commit_kept_no_paths_is_benign_noop(tmp_path, monkeypatch):
         return _CP(0, "")
 
     monkeypatch.setattr(gitmod.subprocess, "run", _run)
-    ok, note = ip._git_commit_kept(tmp_path, "msg", [])
+    ok, note = integrate_enablement_gate._git_commit_kept(tmp_path, "msg", [])
     assert ok is True
     assert called["n"] == 0  # never invoked git
 
@@ -429,7 +439,7 @@ def test_git_commit_kept_scopes_add_to_paths(tmp_path, monkeypatch):
         return _CP(0, "")
 
     monkeypatch.setattr(gitmod.subprocess, "run", _run)
-    ok, _ = ip._git_commit_kept(tmp_path, "msg", ["pkg/mod.py"])
+    ok, _ = integrate_enablement_gate._git_commit_kept(tmp_path, "msg", ["pkg/mod.py"])
     assert ok is True
     add_cmd = captured["cmds"][0]
     # The add must be pathspec-scoped, never a blanket "git add -A" of the tree.
@@ -455,13 +465,13 @@ def test_git_commit_kept_note_is_empty_only_on_a_real_commit(tmp_path):
     target.write_text("x = 1\n", encoding="utf-8")
 
     # A real tree change commits and reports an empty note (HEAD advances).
-    ok, note = ip._git_commit_kept(tmp_path, "keep-1", ["pkg/mod.py"])
+    ok, note = integrate_enablement_gate._git_commit_kept(tmp_path, "keep-1", ["pkg/mod.py"])
     assert ok is True
     assert note == ""
 
     # Re-committing the same, unchanged path is a benign no-op: HEAD does not advance, so the note must be non-empty
     # and the harvest must be skipped.
-    ok, note = ip._git_commit_kept(tmp_path, "keep-2", ["pkg/mod.py"])
+    ok, note = integrate_enablement_gate._git_commit_kept(tmp_path, "keep-2", ["pkg/mod.py"])
     assert ok is True
     assert note == "nothing to commit"
 
@@ -469,7 +479,7 @@ def test_git_commit_kept_note_is_empty_only_on_a_real_commit(tmp_path):
 def test_git_reset_clean_spawn_fail(tmp_path, monkeypatch):
     """git reset spawn failure is reported directly."""
     monkeypatch.setattr(gitmod.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError("git")))
-    ok, err = ip._git_reset_clean(tmp_path, "HEAD")
+    ok, err = patch_git._git_reset_clean(tmp_path, "HEAD")
     assert ok is False and "reset spawn failed" in err
 
 
@@ -478,7 +488,7 @@ def test_stash_if_dirty_clean_tree(tmp_path, monkeypatch):
     monkeypatch.setattr(
         gitmod.subprocess, "run", lambda *a, **k: type("CP", (), {"returncode": 0, "stdout": "", "stderr": ""})()
     )
-    state, note = ip._git_stash_if_dirty(tmp_path)
+    state, note = patch_git._git_stash_if_dirty(tmp_path)
     assert state == "clean"
 
 
@@ -493,7 +503,7 @@ def test_stash_if_dirty_stash_success(tmp_path, monkeypatch):
         return type("CP", (), {"returncode": 0, "stdout": "", "stderr": ""})()
 
     monkeypatch.setattr(gitmod.subprocess, "run", _run)
-    state, note = ip._git_stash_if_dirty(tmp_path)
+    state, note = patch_git._git_stash_if_dirty(tmp_path)
     assert state == "stashed"
     assert any("stash" in c for c in calls[-1])
 
@@ -507,7 +517,7 @@ def test_stash_if_dirty_stash_fails(tmp_path, monkeypatch):
         return type("CP", (), {"returncode": 1, "stdout": "", "stderr": "cannot stash"})()
 
     monkeypatch.setattr(gitmod.subprocess, "run", _run)
-    state, note = ip._git_stash_if_dirty(tmp_path)
+    state, note = patch_git._git_stash_if_dirty(tmp_path)
     assert state == "failed"
     assert "cannot stash" in note
 
@@ -515,7 +525,7 @@ def test_stash_if_dirty_stash_fails(tmp_path, monkeypatch):
 def test_stash_if_dirty_status_exception(tmp_path, monkeypatch):
     """git status throws → returns 'failed'."""
     monkeypatch.setattr(gitmod.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError("git")))
-    state, note = ip._git_stash_if_dirty(tmp_path)
+    state, note = patch_git._git_stash_if_dirty(tmp_path)
     assert state == "failed"
 
 
@@ -531,7 +541,7 @@ def test_reset_clean_discards_candidate_dirty_without_stashing(tmp_path):
     sp.run(["git", "-C", str(tmp_path), "commit", "-m", "init"], capture_output=True)
     (tmp_path / "f.py").write_text("dirty\n")
     (tmp_path / "new_candidate.py").write_text("candidate\n")
-    ok, err = ip._git_reset_clean(tmp_path, "HEAD")
+    ok, err = patch_git._git_reset_clean(tmp_path, "HEAD")
     assert ok is True
     assert (tmp_path / "f.py").read_text() == "orig\n"
     assert not (tmp_path / "new_candidate.py").exists()
@@ -561,7 +571,7 @@ def test_a_revert_pops_the_stash_back_after_the_candidate_staged_a_file_the_stas
     repo.mkdir()
     base = _committed_repo(repo)
     (repo / "shared.py").write_text("user\n")
-    state, stash_ref = ip._git_stash_if_dirty(repo)
+    state, stash_ref = patch_git._git_stash_if_dirty(repo)
     assert state == "stashed"
     stash_oid = _git_out(repo, "rev-parse", stash_ref).strip()
     (repo / "shared.py").write_text("candidate\n")
@@ -598,23 +608,23 @@ def test_a_patch_that_does_not_apply_leaves_the_tree_untouched(tmp_path):
         "diff --git a/g.py b/g.py\nnew file mode 100644\n--- /dev/null\n+++ b/g.py\n@@ -0,0 +1 @@\n+created\n"
     )
 
-    ok, _, feedback = ip._git_apply_collect_feedback(repo, patch)
+    ok, _, feedback = patch_git._git_apply_collect_feedback(repo, patch)
 
     assert not ok and feedback is not None
     assert _git_out(repo, "status", "--porcelain") == ""
 
 
 def test_restore_stash_if_needed_clean_noop(tmp_path):
-    assert ip._git_restore_stash_if_needed(tmp_path, "clean", "") == ""
+    assert patch_git._git_restore_stash_if_needed(tmp_path, "clean", "") == ""
 
 
 def test_accepted_attempt_reports_stash_failure_without_claiming_completion(tmp_path, monkeypatch):
     from types import SimpleNamespace
 
     monkeypatch.setattr(
-        ip, "_run_git_cp", lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout="oid stash@{0}\n")
+        patch_git, "_run_git_cp", lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout="oid stash@{0}\n")
     )
-    monkeypatch.setattr(ip, "_git_restore_stash_if_needed", lambda *a, **k: "boom")
+    monkeypatch.setattr(patch_git, "_git_restore_stash_if_needed", lambda *a, **k: "boom")
     pending = {
         "framework_source_root": str(tmp_path),
         "recovery": {
@@ -634,13 +644,13 @@ def test_resolve_patch_paths_scan(tmp_path):
     base.mkdir()
     (base / "a.patch").write_text("x", encoding="utf-8")
     (base / "b.diff").write_text("y", encoding="utf-8")
-    out = ip._resolve_patch_paths(specialist_workspace=tmp_path, explicit_patches=None, done_payload=None)
+    out = patch_sources._resolve_patch_paths(specialist_workspace=tmp_path, explicit_patches=None, done_payload=None)
     names = sorted(p.name for p in out)
     assert names == ["a.patch", "b.diff"]
 
 
 def test_resolve_patch_paths_missing_logged(tmp_path):
-    out = ip._resolve_patch_paths(
+    out = patch_sources._resolve_patch_paths(
         specialist_workspace=tmp_path, explicit_patches=["/no/such/file.patch"], done_payload=None
     )
     assert out == []
@@ -649,7 +659,7 @@ def test_resolve_patch_paths_missing_logged(tmp_path):
 def test_resolve_patch_paths_from_done_payload(tmp_path):
     p = tmp_path / "x.patch"
     p.write_text("z", encoding="utf-8")
-    out = ip._resolve_patch_paths(
+    out = patch_sources._resolve_patch_paths(
         specialist_workspace=tmp_path, explicit_patches=None, done_payload={"patches_written": [str(p)]}
     )
     assert out[0].name == "x.patch"
@@ -662,7 +672,9 @@ def test_resolve_patch_paths_drops_outside_workspace(tmp_path):
     # A real, existing file that lives OUTSIDE the workspace.
     outside = tmp_path / "evil.patch"
     outside.write_text("z", encoding="utf-8")
-    out = ip._resolve_patch_paths(specialist_workspace=workspace, explicit_patches=[str(outside)], done_payload=None)
+    out = patch_sources._resolve_patch_paths(
+        specialist_workspace=workspace, explicit_patches=[str(outside)], done_payload=None
+    )
     assert out == []
 
 
@@ -672,7 +684,9 @@ def test_resolve_patch_paths_accepts_inside_workspace(tmp_path):
     (workspace / "worktree" / "patches").mkdir(parents=True)
     good = workspace / "worktree" / "patches" / "ok.patch"
     good.write_text("z", encoding="utf-8")
-    out = ip._resolve_patch_paths(specialist_workspace=workspace, explicit_patches=[str(good)], done_payload=None)
+    out = patch_sources._resolve_patch_paths(
+        specialist_workspace=workspace, explicit_patches=[str(good)], done_payload=None
+    )
     assert [p.name for p in out] == ["ok.patch"]
 
 
@@ -684,18 +698,18 @@ def test_resolve_patch_paths_containment_survives_symlinked_workspace(tmp_path):
     good.write_text("z", encoding="utf-8")
     link = tmp_path / "link_ws"
     link.symlink_to(real)
-    out = ip._resolve_patch_paths(
+    out = patch_sources._resolve_patch_paths(
         specialist_workspace=link, explicit_patches=[str(link / "patches" / "ok.patch")], done_payload=None
     )
     assert [p.name for p in out] == ["ok.patch"]
 
 
 def test_read_done_payload(tmp_path):
-    assert ip._read_done_payload(tmp_path) is None
+    assert patch_sources._read_done_payload(tmp_path) is None
     (tmp_path / "specialist_done.json").write_text("{bad", encoding="utf-8")
-    assert ip._read_done_payload(tmp_path) is None
+    assert patch_sources._read_done_payload(tmp_path) is None
     (tmp_path / "specialist_done.json").write_text('{"ok": 1}', encoding="utf-8")
-    assert ip._read_done_payload(tmp_path) == {"ok": 1}
+    assert patch_sources._read_done_payload(tmp_path) == {"ok": 1}
 
 
 def _executor():
@@ -705,9 +719,9 @@ def _executor():
 @pytest.mark.parametrize("head,checkout_ok", [("base", True), ("changed", True), ("base", False)])
 def test_restore_uses_exact_attempt_git_base_or_refuses(tmp_path, monkeypatch, head, checkout_ok):
     calls = []
-    monkeypatch.setattr(ip, "_git_head_sha", lambda _root: head)
+    monkeypatch.setattr(patch_git, "_git_head_sha", lambda _root: head)
     monkeypatch.setattr(
-        ip, "_git_reset_clean", lambda root, _base, **_kwargs: (calls.append(root) or checkout_ok, "denied")
+        patch_git, "_git_reset_clean", lambda root, _base, **_kwargs: (calls.append(root) or checkout_ok, "denied")
     )
     pending = {
         "framework_source_root": str(tmp_path),
@@ -760,16 +774,16 @@ class _Verdict:
 
 
 def test_enforce_critic_gate_noop_when_no_shared_state():
-    assert ip._enforce_critic_gate(None, "spec") is None
+    assert integrate_refusals._enforce_critic_gate(None, "spec") is None
 
 
 def test_enforce_critic_gate_passes_on_permissive_verdict():
-    assert ip._enforce_critic_gate(_Verdict("approve"), "spec") is None
-    assert ip._enforce_critic_gate(_Verdict("advise"), "spec") is None
+    assert integrate_refusals._enforce_critic_gate(_Verdict("approve"), "spec") is None
+    assert integrate_refusals._enforce_critic_gate(_Verdict("advise"), "spec") is None
 
 
 def test_enforce_critic_gate_rejects_on_non_permissive_verdict():
-    out = ip._enforce_critic_gate(_Verdict("reject"), "spec-1")
+    out = integrate_refusals._enforce_critic_gate(_Verdict("reject"), "spec-1")
     assert out is not None
     assert out["status"] == "rejected_by_critic"
     assert out["specialist_task_id"] == "spec-1"
@@ -778,7 +792,7 @@ def test_enforce_critic_gate_rejects_on_non_permissive_verdict():
 
 
 def test_enforce_critic_gate_rejects_when_no_verdict_on_record():
-    out = ip._enforce_critic_gate(_Verdict(""), "spec-2")
+    out = integrate_refusals._enforce_critic_gate(_Verdict(""), "spec-2")
     assert out is not None
     assert out["status"] == "rejected_by_critic"
     assert "no Critic verdict on record" in out["reason"]
@@ -789,7 +803,7 @@ def test_enforce_critic_gate_handles_state_without_verdict_method():
         pass
 
     # AttributeError on get_specialist_patch_verdict is treated as "no verdict".
-    out = ip._enforce_critic_gate(_NoMethod(), "spec-4")
+    out = integrate_refusals._enforce_critic_gate(_NoMethod(), "spec-4")
     assert out is not None
     assert out["status"] == "rejected_by_critic"
 
@@ -874,7 +888,7 @@ def test_harvest_realized_diff_refuses_an_empty_path_set(tmp_path):
 
 def test_measured_against_reports_the_rebound_stack_not_the_dispatch_one():
     """The anchor is the drift-resolved one the gate graded on, not params."""
-    stack = ip._measured_against(
+    stack = integrate_refusals._measured_against(
         {
             "base_tput": 90.0,
             "accuracy_baseline": 0.81,
@@ -900,7 +914,7 @@ def test_measured_against_reports_the_rebound_stack_not_the_dispatch_one():
 
 def test_measured_against_leaves_an_unmeasured_anchor_null():
     """A zero anchor is no anchor; reporting it as 0.0 would read as a measurement."""
-    stack = ip._measured_against({}, base_tput=0.0)
+    stack = integrate_refusals._measured_against({}, base_tput=0.0)
 
     assert stack["throughput"] is None
     assert stack["accuracy"] is None

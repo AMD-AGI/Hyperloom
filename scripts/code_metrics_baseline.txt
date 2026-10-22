@@ -16,11 +16,10 @@ cognitive-complexity src/hyperloom/inference_optimizer/reference_script.py::_ext
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/_grid_base.py::coerce_extra_envs 38
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/_multi_node_server_lifecycle.py::_wait_for_server_health_async 45
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/_patch_snapshot.py::_patch_touched_paths_split 32
+cognitive-complexity src/hyperloom/orchestrator/actions/executors/_patch_sources.py::_resolve_patch_paths 36
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/_ray_serving.py::ServingLease._await_or_cancel 32
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/benchmark_result.py::_rescue_candidate_paths 39
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/benchmark_result.py::harvest_leaked_artifacts 51
-cognitive-complexity src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._stage_apply 33
-cognitive-complexity src/hyperloom/orchestrator/actions/executors/integrate_patch.py::_resolve_patch_paths 36
 cognitive-complexity src/hyperloom/orchestrator/delivery/ledger.py::restore_records 33
 cognitive-complexity src/hyperloom/orchestrator/enablement/build.py::EnablementBuild.maybe_escalate_to_targeted_build 36
 cognitive-complexity src/hyperloom/orchestrator/kernel/conc_sweep.py::_sweep_one_arm_single_server 68
@@ -149,7 +148,7 @@ duplicated-lines src/hyperloom/inference_optimizer/tests/test_workload_envs.py 3
 duplicated-lines src/hyperloom/inference_optimizer/tests/test_workload_envs_branches_unit.py 395
 duplicated-lines src/hyperloom/orchestrator/actions/executors/tests/test_baseline_eval_fallback.py 98
 duplicated-lines src/hyperloom/orchestrator/actions/executors/tests/test_integrate_patch_artifacts_unit.py 40
-duplicated-lines src/hyperloom/orchestrator/actions/executors/tests/test_integrate_patch_coverage_unit.py 80
+duplicated-lines src/hyperloom/orchestrator/actions/executors/tests/test_integrate_patch_coverage_unit.py 52
 duplicated-lines src/hyperloom/orchestrator/actions/executors/tests/test_integrate_patch_helpers_unit.py 12
 duplicated-lines src/hyperloom/orchestrator/enablement/runtime/tests/test_targeted_build_recipes.py 34
 duplicated-lines src/hyperloom/orchestrator/kernel/tests/test_forge_server_log_evidence.py 48
@@ -303,15 +302,6 @@ function-lines src/hyperloom/orchestrator/actions/executors/baseline.py::Benchma
 function-lines src/hyperloom/orchestrator/actions/executors/baseline.py::BenchmarkRunExecutor._run_single_benchmark 94
 function-lines src/hyperloom/orchestrator/actions/executors/benchmark_result.py::harvest_leaked_artifacts 85
 function-lines src/hyperloom/orchestrator/actions/executors/bypass_engine.py::build_server_command 96
-function-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._bench_patch 223
-function-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._enablement_keep_records 110
-function-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._gate_enablement 222
-function-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._gate_perf 241
-function-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._keep_inert_switches 92
-function-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._stage_apply 200
-function-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._stage_provision_attempt_runtime 105
-function-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._stage_resolve 104
-function-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._switch_off_parity 116
 function-lines src/hyperloom/orchestrator/actions/executors/profile.py::ProfileExecutor._after_materialize_config 92
 function-lines src/hyperloom/orchestrator/actions/executors/report.py::ReportExecutor.__call__ 97
 function-lines src/hyperloom/orchestrator/actions/executors/report.py::_build_summary_dict 86
@@ -468,7 +458,6 @@ module-lines src/hyperloom/orchestrator/actions/executors/_kv_metrics.py 1578
 module-lines src/hyperloom/orchestrator/actions/executors/_workload_envs.py 2126
 module-lines src/hyperloom/orchestrator/actions/executors/baseline.py 4050
 module-lines src/hyperloom/orchestrator/actions/executors/explore.py 1834
-module-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py 4691
 module-lines src/hyperloom/orchestrator/actions/executors/profile.py 1393
 module-lines src/hyperloom/orchestrator/actions/executors/report.py 1351
 module-lines src/hyperloom/orchestrator/actions/executors/roofline.py 1303

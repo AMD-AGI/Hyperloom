@@ -83,7 +83,7 @@ from ..kernel.geak_config import (
 from ..state.round_store import ABANDONED, FAILED
 from ..state.task_registry import Task
 from ..actions.executors.benchmark_result import is_valid_measurement
-from ..actions.executors.integrate_patch import KEEP_STATUSES
+from ..actions.executors._integrate_vocabulary import KEEP_STATUSES
 from ..actions.executors._accuracy_gate import (
     BASELINE_EVAL_ACCURACY_FLOOR_KEY,
     BASELINE_EVAL_CONTRACT_FINGERPRINT_KEY,
@@ -3746,7 +3746,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
         Returns:
             A summary ``{"reversed": [...], "failed": [...]}``.
         """
-        from ..actions.executors.integrate_patch import restore_pending_integrate
+        from ..actions.executors._patch_git import restore_pending_integrate
         from ..actions.executors.source_tree_identity import settle_replaced_tree, tree_replaced
 
         if tree_replaced(pending, gone_scope):
