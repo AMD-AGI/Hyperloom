@@ -357,6 +357,47 @@ async def test_compose_prompt_keeps_per_tick_values_out_of_the_context(coordinat
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("cached", [True, False])
+async def test_reactor_turn_hands_a_caching_backend_the_context_as_its_system_prompt(coordinator_with_mocks, cached):
+    c = coordinator_with_mocks
+    backend = c.backends["orchestration"]
+    backend.system_prompt_cached = cached
+    try:
+        composed = await c.conversation.compose_prompt("orchestration")
+        await c.reactor_pass("orchestration", request="ASK")
+        (call,) = backend.calls
+
+        if cached:
+            assert composed.context in call["system_prompt"]
+            assert "=== Phase ===" in call["prompt"]
+            assert "=== Shared session state ===" not in call["prompt"]
+        else:
+            assert composed.context not in (call["system_prompt"] or "")
+            assert "=== Shared session state ===" in call["prompt"]
+            assert "=== Phase ===" in call["prompt"]
+        assert call["prompt"].endswith("ASK")
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_conversation_row_joins_the_context_to_the_backend_prompt(coordinator_with_mocks):
+    import json
+
+    from hyperloom.inference_optimizer.session.session_paths import conversations_path
+    from hyperloom.orchestrator.roles.base import BackendTurnResult
+
+    c = coordinator_with_mocks
+    try:
+        result = BackendTurnResult(intents=[], raw_text="", metadata={"prompt": "TURN", "response": "R"})
+        c.conversation.record_reactor_conversation("orchestration", result, context="CONTEXT")
+        (row,) = [json.loads(line) for line in conversations_path(c.session_dir).read_text().splitlines()]
+        assert row["prompt"] == "CONTEXT\nTURN"
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
 async def test_compose_prompt_orchestration_renders_warm_start_when_set(
     coordinator_with_mocks,
     session_dir,

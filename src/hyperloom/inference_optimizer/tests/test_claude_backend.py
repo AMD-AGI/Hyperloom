@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -914,6 +915,7 @@ async def test_options_includes_system_prompt_and_max_turns():
     async def q(*, prompt, options):
         captured["options_kwargs"] = options.kwargs
         captured["prompt"] = prompt
+        captured["system_prompt_text"] = Path(options.kwargs["system_prompt"]["path"]).read_text(encoding="utf-8")
         return
         yield  # make it a generator
 
@@ -927,11 +929,43 @@ async def test_options_includes_system_prompt_and_max_turns():
     # max_turns is floored to _RAW_COMPLETION_MIN_MAX_TURNS (8) for every mode: Claude Code counts its own messages as
     # turns, so a literal max_turns=3 would trip before the model can emit an intent.
     assert captured["options_kwargs"]["max_turns"] == 8
-    assert captured["options_kwargs"]["system_prompt"] == "sys"
+    assert captured["options_kwargs"]["system_prompt"]["type"] == "file"
+    assert captured["system_prompt_text"] == "sys"
     assert "Read" in captured["options_kwargs"]["allowed_tools"]
     assert captured["options_kwargs"]["tools"] == ["Read"]
     # Output instructions appended to prompt
     assert "OUTPUT FORMAT" in captured["prompt"]
+
+
+@pytest.mark.asyncio
+async def test_a_repeated_system_prompt_is_handed_over_as_one_file():
+    paths: list[str] = []
+
+    async def q(*, prompt, options):
+        paths.append(options.kwargs["system_prompt"]["path"])
+        return
+        yield
+
+    backend = ClaudeBackend(sdk_query_factory=q, sdk_options_cls=FakeOptions, enable_mcp_emit_intent=False)
+    for system_prompt in ("first", "first", "second"):
+        await backend.run("p", system_prompt=system_prompt)
+
+    assert paths[0] == paths[1] != paths[2]
+    assert Path(paths[2]).read_text(encoding="utf-8") == "second"
+
+
+@pytest.mark.asyncio
+async def test_no_system_prompt_file_without_a_system_prompt():
+    captured: dict[str, Any] = {}
+
+    async def q(*, prompt, options):
+        captured["kwargs"] = options.kwargs
+        return
+        yield
+
+    backend = ClaudeBackend(sdk_query_factory=q, sdk_options_cls=FakeOptions, enable_mcp_emit_intent=False)
+    await backend.run("p", system_prompt=None)
+    assert "system_prompt" not in captured["kwargs"]
 
 
 @pytest.mark.asyncio

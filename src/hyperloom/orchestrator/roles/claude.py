@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import signal
+import tempfile
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -360,6 +361,8 @@ class ClaudeBackend:
     name: str = "claude"
     # Which prompt modules describe a surface this backend actually has.
     transport = TRANSPORT_TOOLS
+    # The system prompt is cached across turns, so stable session context belongs in it.
+    system_prompt_cached = True
     calls: list[dict[str, Any]] = field(default_factory=list)
     mcp_server_config: Any | None = field(default=None, init=False)
     mcp_tool_name: str | None = field(default=None, init=False)
@@ -377,6 +380,8 @@ class ClaudeBackend:
     _abandoned_turns: set[asyncio.Task[Any]] = field(default_factory=set, init=False)
     # Stops of turns whose caller was cancelled: they outlive that caller, so they are held here until they finish.
     _turn_stoppers: set[asyncio.Task[Any]] = field(default_factory=set, init=False)
+    # Holds the system prompt files, which the CLI reads from disk because its command-line arguments are capped at 128 KiB.
+    _system_prompt_dir: tempfile.TemporaryDirectory[str] | None = field(default=None, init=False)
 
     def __post_init__(self) -> None:
         """Resolve the SDK and optionally register the ``emit_intent`` tool."""
@@ -771,13 +776,22 @@ class ClaudeBackend:
         if cli_path:
             kwargs["cli_path"] = cli_path
         if system_prompt:
-            kwargs["system_prompt"] = system_prompt
+            kwargs["system_prompt"] = self._system_prompt_file(system_prompt)
         self._apply_sdk_env_options(kwargs)
         if turn_marker:
             # options.env is merged over the inherited environment, so a marker-only dict changes nothing else.
             kwargs["env"] = {**dict(kwargs.get("env") or {}), _TURN_MARKER_ENV: turn_marker}
         self._apply_effort_options(kwargs)
         return kwargs
+
+    def _system_prompt_file(self, system_prompt: str) -> dict[str, str]:
+        """The SDK option that hands the CLI ``system_prompt`` as a file, written once per distinct text."""
+        if self._system_prompt_dir is None:
+            self._system_prompt_dir = tempfile.TemporaryDirectory(prefix="hyperloom-system-prompt-")
+        path = Path(self._system_prompt_dir.name) / f"{hashlib.sha256(system_prompt.encode()).hexdigest()}.md"
+        if not path.exists():
+            path.write_text(system_prompt, encoding="utf-8")
+        return {"type": "file", "path": str(path)}
 
     @staticmethod
     def _raw_completion_option_kwargs(disallowed_tools: list[str] | None) -> dict[str, Any]:

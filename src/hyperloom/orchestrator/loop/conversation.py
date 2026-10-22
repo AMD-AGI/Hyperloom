@@ -79,6 +79,15 @@ class ComposedPrompt:
         return f"{self.context}\n{self.turn}"
 
 
+@dataclass(frozen=True)
+class TurnPrompt:
+    """What one reactor turn hands its backend; ``context`` is the part of the prompt carried in ``system_prompt``."""
+
+    system_prompt: str
+    prompt: str
+    context: str
+
+
 def _fit_to_budget(lines: list[str], budget_chars: int) -> list[str]:
     """Return the leading ``lines`` that fit in ``budget_chars``.
 
@@ -484,8 +493,10 @@ class ConversationCollaborator(CoordinatorCollaborator):
         self,
         agent_name: str,
         result: BackendTurnResult,
+        *,
+        context: str = "",
     ) -> None:
-        """Append one ``conversations.jsonl`` row for a reactor turn"""
+        """Append one ``conversations.jsonl`` row for a reactor turn; ``context`` is the prompt part the backend received as its system prompt."""
         metadata = result.metadata or {}
         prompt = metadata.get("prompt")
         response = metadata.get("response")
@@ -501,7 +512,7 @@ class ConversationCollaborator(CoordinatorCollaborator):
             tick=int(self.shared_state.tick or 0),
             phase=(self.shared_state.phase or "") or None,
             model=metadata.get("model"),
-            prompt=prompt or "",
+            prompt=f"{context}\n{prompt}" if context else prompt or "",
             response=response or "",
         )
         append_conversation(session_dir=self.session_dir, record=record)
@@ -639,6 +650,14 @@ class ConversationCollaborator(CoordinatorCollaborator):
         turn.extend(await self._render_inbox_sections(agent_name))
 
         return ComposedPrompt(context="\n".join(context), turn="\n".join(turn))
+
+    async def compose_turn(self, agent_name: str, backend: Any) -> TurnPrompt:
+        """Compose the system prompt and prompt for one turn; a backend that caches its system prompt carries the session context there."""
+        system_prompt = await self.load_system_prompt(agent_name)
+        composed = await self.compose_prompt(agent_name)
+        if getattr(backend, "system_prompt_cached", False):
+            return TurnPrompt(f"{system_prompt}\n\n{composed.context}", composed.turn, composed.context)
+        return TurnPrompt(system_prompt, composed.text, "")
 
     async def advance_rendered_cursor(self, agent_name: str) -> None:
         """Advance an agent's read cursor to the last message its prompt rendered."""
