@@ -10,14 +10,11 @@ cognitive-complexity src/hyperloom/inference_optimizer/breakdown/recorder/kernel
 cognitive-complexity src/hyperloom/inference_optimizer/breakdown/reporters/_renderers/final.py::render 31
 cognitive-complexity src/hyperloom/inference_optimizer/cli/__init__.py::_run_optimize 36
 cognitive-complexity src/hyperloom/inference_optimizer/framework_paths.py::_discover_installed_framework_roots 43
-cognitive-complexity src/hyperloom/inference_optimizer/grid_server_args.py::_reserialize_json_blobs 45
 cognitive-complexity src/hyperloom/inference_optimizer/grid_server_args.py::dedupe_extra_server_args 34
-cognitive-complexity src/hyperloom/inference_optimizer/grid_server_args.py::remove_server_args 37
 cognitive-complexity src/hyperloom/inference_optimizer/multi_node/scripts/kill_multinode.py::_gpu_used_mb_for_pgids 32
 cognitive-complexity src/hyperloom/inference_optimizer/multi_node/scripts/launch_infera_node.py::_reap_stale_engine_ports 51
 cognitive-complexity src/hyperloom/inference_optimizer/reference_script.py::_extract_server_args 40
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/_grid_base.py::coerce_extra_envs 38
-cognitive-complexity src/hyperloom/orchestrator/actions/executors/_grid_runner.py::run_grid 177
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/_multi_node_server_lifecycle.py::_wait_for_server_health_async 45
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/_patch_snapshot.py::_patch_touched_paths_split 32
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/_ray_serving.py::ServingLease._await_or_cancel 32
@@ -95,7 +92,6 @@ cognitive-complexity src/kernelforge/orchestrator/analysis.py::AnalysisAgentServ
 cognitive-complexity src/kernelforge/orchestrator/orchestration.py::OrchestrationAgent._bind_dispatch 39
 cognitive-complexity src/kernelforge/orchestrator/orchestration.py::OrchestrationService.run 33
 cognitive-complexity src/kernelforge/rewrite_by_flydsl/ingest.py::discover_source_entry 31
-cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/_grid_runner.py::run_grid 55
 cyclomatic-complexity src/hyperloom/orchestrator/kernel/conc_sweep.py::_sweep_one_arm_single_server 33
 cyclomatic-complexity src/hyperloom/orchestrator/kernel/conc_sweep.py::run_conc_sweep 26
 cyclomatic-complexity src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._promote_baseline 29
@@ -320,9 +316,9 @@ function-lines src/hyperloom/inference_optimizer/multi_node/scripts/kernel_patch
 function-lines src/hyperloom/inference_optimizer/multi_node/scripts/kill_multinode.py::main 98
 function-lines src/hyperloom/orchestrator/actions/executors/_accuracy_gate.py::parse_eval_results 83
 function-lines src/hyperloom/orchestrator/actions/executors/_gpu_pin.py::resolve_gpu_pin 105
-function-lines src/hyperloom/orchestrator/actions/executors/_grid_runner.py::_build_variant_yaml 135
+function-lines src/hyperloom/orchestrator/actions/executors/_grid_runner.py::_build_variant_yaml 98
 function-lines src/hyperloom/orchestrator/actions/executors/_grid_runner.py::_run_magpie 93
-function-lines src/hyperloom/orchestrator/actions/executors/_grid_runner.py::run_grid 1014
+function-lines src/hyperloom/orchestrator/actions/executors/_grid_runner.py::run_grid 105
 function-lines src/hyperloom/orchestrator/actions/executors/_kernel_agent_tool.py::materialize_unified_patch_snapshot 94
 function-lines src/hyperloom/orchestrator/actions/executors/_multi_node_server_lifecycle.py::_wait_for_published_service_ready_async 87
 function-lines src/hyperloom/orchestrator/actions/executors/_multi_node_server_lifecycle.py::_wait_for_server_health_async 137
@@ -524,9 +520,9 @@ module-lines src/hyperloom/inference_optimizer/cli/model_gate.py 1759
 module-lines src/hyperloom/inference_optimizer/cli/preflight.py 2645
 module-lines src/hyperloom/inference_optimizer/multi_node/cli.py 1804
 module-lines src/hyperloom/inference_optimizer/roofline_ceiling.py 1425
-module-lines src/hyperloom/orchestrator/actions/executors/_grid_runner.py 2079
+module-lines src/hyperloom/orchestrator/actions/executors/_grid_runner.py 2045
 module-lines src/hyperloom/orchestrator/actions/executors/_kv_metrics.py 1578
-module-lines src/hyperloom/orchestrator/actions/executors/_workload_envs.py 2150
+module-lines src/hyperloom/orchestrator/actions/executors/_workload_envs.py 2126
 module-lines src/hyperloom/orchestrator/actions/executors/baseline.py 4050
 module-lines src/hyperloom/orchestrator/actions/executors/explore.py 1834
 module-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py 4691
