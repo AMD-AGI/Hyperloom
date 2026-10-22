@@ -6,7 +6,7 @@ import filecmp
 import json
 import shutil
 from pathlib import Path
-from typing import Any, Iterable, NamedTuple
+from typing import Any, Callable, Iterable, NamedTuple
 
 MANIFEST_NAME = "manifest.json"
 SCHEMA_VERSION = 2
@@ -129,11 +129,15 @@ class SourceLayerInstall(NamedTuple):
     unreproducible: list[str]
     #: Every file the kept states cover, relative to the framework root that holds it.
     kept: dict[Path, list[str]]
+    #: Paths left alone because the tree holds committed work newer than their kept state.
+    superseded: list[str]
 
 
-def _kept_final_states(stack: Iterable[dict[str, Any]], result: SourceLayerInstall) -> dict[Path, tuple[str, Path]]:
-    """Map each file a kept source patch touches to its last kept ``(op, snapshot file)``, in stack order."""
-    final: dict[Path, tuple[str, Path]] = {}
+def _kept_final_states(
+    stack: Iterable[dict[str, Any]], result: SourceLayerInstall
+) -> dict[tuple[Path, str], tuple[str, Path]]:
+    """Map each ``(framework root, rel)`` a kept source patch touches to its last kept ``(op, snapshot file)``."""
+    final: dict[tuple[Path, str], tuple[str, Path]] = {}
     for entry in stack:
         if not isinstance(entry, dict) or entry.get("scope") != "source_patch":
             continue
@@ -156,37 +160,46 @@ def _kept_final_states(stack: Iterable[dict[str, Any]], result: SourceLayerInsta
             if rel is None:
                 result.failed.append(f"{variant}: manifest names an unusable path {row!r}")
                 continue
-            final[Path(root) / rel] = (str(row.get("op") or ""), snapshot_dir / _FILES / rel)
+            final[(Path(root), rel)] = (str(row.get("op") or ""), snapshot_dir / _FILES / rel)
             covered = result.kept.setdefault(Path(root), [])
             if rel not in covered:
                 covered.append(rel)
     return final
 
 
-def install_source_layers(stack: Iterable[dict[str, Any]]) -> SourceLayerInstall:
+def install_source_layers(
+    stack: Iterable[dict[str, Any]],
+    superseded: Callable[[Path, str, str, Path], bool] = lambda root, rel, op, source: False,
+) -> SourceLayerInstall:
     """Put every kept source patch's final file state on its framework tree, and confirm each file is in place.
 
-    A tree that already holds the kept state is left untouched. The checks and writes run in stack order, so a
-    file two patches touch ends in the last one's state.
+    A tree that already holds the kept state is left untouched, and so is a file ``superseded(root, rel, op, source)``
+    says the tree has moved past. The checks and writes run in stack order, so a file two patches touch ends in the
+    last one's state.
     """
-    result = SourceLayerInstall([], [], [], {})
-    for dest, (op, source) in _kept_final_states(stack, result).items():
+    result = SourceLayerInstall([], [], [], {}, [])
+    for (root, rel), (op, source) in _kept_final_states(stack, result).items():
+        dest = root / rel
         try:
             if op == "delete":
-                if dest.exists():
-                    dest.unlink()
-                    result.installed.append(str(dest))
-                continue
-            if op != _OP_UPSERT or not source.is_file():
+                if not dest.exists():
+                    continue
+            elif op != _OP_UPSERT or not source.is_file():
                 result.failed.append(f"{dest}: the snapshot holds no {op or 'unrecorded'} state for it")
                 continue
-            if dest.is_file() and filecmp.cmp(source, dest, shallow=False):
+            elif dest.is_file() and filecmp.cmp(source, dest, shallow=False):
                 continue
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, dest)
-            if not filecmp.cmp(source, dest, shallow=False):
-                result.failed.append(f"{dest}: differs from the snapshot after it was written")
+            if superseded(root, rel, op, source):
+                result.superseded.append(str(dest))
                 continue
+            if op == "delete":
+                dest.unlink()
+            else:
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, dest)
+                if not filecmp.cmp(source, dest, shallow=False):
+                    result.failed.append(f"{dest}: differs from the snapshot after it was written")
+                    continue
             result.installed.append(str(dest))
         except OSError as exc:
             result.failed.append(f"{dest}: {exc}")

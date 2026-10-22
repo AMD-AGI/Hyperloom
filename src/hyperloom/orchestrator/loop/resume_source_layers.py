@@ -18,14 +18,39 @@ from ..source_snapshot import SourceLayerInstall, install_source_layers
 
 log = logging.getLogger(__name__)
 
+_GIT_QUERY_TIMEOUT_S = 30.0
+
 
 def _stageable(root: Path, rels: list[str]) -> list[str]:
     """The kept paths git can stage: present on disk or tracked. A deletion HEAD already carries matches neither."""
-    cp = _run_git_cp(["-C", str(root), "ls-files", "--", *rels], timeout=30.0)
+    cp = _run_git_cp(["-C", str(root), "ls-files", "--", *rels], timeout=_GIT_QUERY_TIMEOUT_S)
     if cp is None or cp.returncode != 0:
         return rels
     tracked = set(cp.stdout.splitlines())
     return [rel for rel in rels if rel in tracked or (root / rel).exists()]
+
+
+def _committed_past(root: Path, rel: str, op: str, source: Path) -> bool:
+    """Whether HEAD's history already carries ``rel``'s kept state, so the different content now is later work.
+
+    A fresh tree never held the kept state, so this is False there and the layer is installed. A root that is not a
+    git tree has no history to tell the two apart.
+    """
+    if not _is_git_tree(root):
+        return False
+    if op == "delete":
+        query = ["--diff-filter=D"]
+    else:
+        blob = _run_git_cp(
+            ["-C", str(root), "hash-object", f"--path={rel}", "--", str(source)], timeout=_GIT_QUERY_TIMEOUT_S
+        )
+        if blob is None or blob.returncode != 0:
+            return False
+        query = [f"--find-object={blob.stdout.strip()}"]
+    cp = _run_git_cp(
+        ["-C", str(root), "log", "-1", "--format=%H", *query, "HEAD", "--", rel], timeout=_GIT_QUERY_TIMEOUT_S
+    )
+    return cp is not None and cp.returncode == 0 and bool(cp.stdout.strip())
 
 
 def _commit_installed_layers(result: SourceLayerInstall) -> list[str]:
@@ -35,9 +60,11 @@ def _commit_installed_layers(result: SourceLayerInstall) -> list[str]:
     benched away. A root that is not a git tree is left as installed.
     """
     failed = []
+    superseded = set(result.superseded)
     for root, rels in result.kept.items():
         if not _is_git_tree(root):
             continue
+        rels = [rel for rel in rels if str(root / rel) not in superseded]
         ok, note = _git_commit_kept(root, "hyperloom resume: reinstall kept source layer", _stageable(root, rels))
         if not ok:
             failed.append(f"{root}: {note or 'git commit failed'}")
@@ -50,10 +77,12 @@ def install_kept_source_layers(state: Any, session_dir: Path, report: dict[str, 
     The patches live on the framework tree and the session records them in durable snapshots, so a resume onto a
     fresh tree would otherwise bench every candidate against the stock source.
     """
-    result = install_source_layers(state.optimization_stack or [])
+    result = install_source_layers(state.optimization_stack or [], superseded=_committed_past)
     report["warnings"].extend(
         {"kind": "source_layer_not_reproducible", "variant": variant} for variant in result.unreproducible
     )
+    if result.superseded:
+        report["warnings"].append({"kind": "source_layer_superseded", "files": list(result.superseded)})
     if result.installed:
         log.warning("resume: installed %d kept source file(s) the framework tree did not hold", len(result.installed))
         report["fixes"].append({"kind": "reinstalled_source_layer", "files": list(result.installed)})

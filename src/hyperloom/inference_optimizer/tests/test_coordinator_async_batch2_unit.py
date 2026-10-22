@@ -614,6 +614,66 @@ async def test_resume_does_not_halt_on_a_kept_delete_the_git_tree_already_commit
     assert _git(tree, "rev-parse", "HEAD") == head
 
 
+def _captured_keep(tmp_path: Path, tree: Path, name: str, rels: list[str], deleted: tuple[str, ...] = ()) -> dict:
+    """Commit the tree's current edits as a KEEP and snapshot them the way integrate_patch does."""
+    from hyperloom.orchestrator.source_snapshot import snapshot_source_layer
+
+    _git(tree, "add", "-A")
+    _git(tree, "commit", "-q", "-m", f"hyperloom KEEP {name}")
+    snap = snapshot_source_layer(
+        framework_root=tree,
+        base_sha=_git(tree, "rev-parse", "HEAD").strip(),
+        rel_paths=rels,
+        dest_dir=tmp_path / "optimization_stack" / "src" / name,
+        declared_ops=dict.fromkeys(deleted, "delete"),
+    )
+    assert snap is not None
+    return {
+        "action": "integrate_patch",
+        "scope": "source_patch",
+        "variant_name": name,
+        "framework_root": str(tree),
+        "source_snapshot": snap["snapshot_dir"],
+        "source_snapshot_complete": snap["complete"],
+    }
+
+
+@pytest.mark.asyncio
+async def test_resume_keeps_committed_work_newer_than_the_kept_snapshot(coord: Coordinator, tmp_path: Path) -> None:
+    tree = _git_framework_tree(tmp_path)
+    (tree / "envs.py").write_text("stock envs\nA_KV_WINDOW = 1\n", encoding="utf-8")
+    entry = _captured_keep(tmp_path, tree, "kv_window", ["envs.py"])
+    (tree / "envs.py").write_text("stock envs\nA_KV_WINDOW = 1\nB_FUSED_MOE_REWRITE = 0\n", encoding="utf-8")
+    _git(tree, "commit", "-q", "-am", "hyperloom KEEP_INERT fused_moe")
+    head = _git(tree, "rev-parse", "HEAD")
+    _resume_with_stack(coord, [entry])
+
+    report = await coord.writeback._resume_consistency_pass()
+
+    assert (tree / "envs.py").read_text(encoding="utf-8") == "stock envs\nA_KV_WINDOW = 1\nB_FUSED_MOE_REWRITE = 0\n"
+    assert _git(tree, "rev-parse", "HEAD") == head
+    assert not any(isinstance(fix, dict) and fix.get("kind") == "reinstalled_source_layer" for fix in report["fixes"])
+    assert {"kind": "source_layer_superseded", "files": [str(tree / "envs.py")]} in report["warnings"]
+
+
+@pytest.mark.asyncio
+async def test_resume_keeps_a_file_committed_work_restored_after_a_kept_delete(
+    coord: Coordinator, tmp_path: Path
+) -> None:
+    tree = _git_framework_tree(tmp_path)
+    (tree / "v1" / "mla.py").unlink()
+    entry = _captured_keep(tmp_path, tree, "drop_mla", ["v1/mla.py"], deleted=("v1/mla.py",))
+    (tree / "v1" / "mla.py").write_text("rewritten mla\n", encoding="utf-8")
+    _git(tree, "add", "-A")
+    _git(tree, "commit", "-q", "-m", "hyperloom KEEP_INERT mla_rewrite")
+    _resume_with_stack(coord, [entry])
+
+    await coord.writeback._resume_consistency_pass()
+
+    assert (tree / "v1" / "mla.py").read_text(encoding="utf-8") == "rewritten mla\n"
+    assert _git(tree, "status", "--porcelain") == ""
+
+
 @pytest.mark.asyncio
 async def test_resume_halts_when_the_reinstalled_source_layer_cannot_be_committed(
     coord: Coordinator, tmp_path: Path
