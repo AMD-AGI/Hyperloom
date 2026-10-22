@@ -1002,9 +1002,10 @@ and input variables are always required, and a variable that is set is checked e
 | `AWS_ACCESS_KEY_ID`<br>`AWS_SECRET_ACCESS_KEY` | When results are archived, and always as a pair | Archive credentials. `AWS_SESSION_TOKEN` is optional, and `AWS_ENDPOINT_URL_S3` (an `http(s)` URL) too. |
 | `NODE_NAME`<br>`CLAW_SESSION_ID` | No | Physical node name and session id, read when set. |
 
-The sandbox keys, the MCP token and the archive credentials are held in an object that prints as `Secret(<redacted>)`, are removed
-from the process environment once read (`take_host_info`), and are on the credential list in `hyperloom.common.env_safety`, so a
-child process never inherits them.
+Once read, every host-only input above is removed from the process environment (`take_host_info`), so a child process started
+without an explicit `env=` does not inherit it; `HostInfo` holds the values and code passes them on. `NODE_NAME` and `CLAW_SESSION_ID`
+stay, because other code reads them. The sandbox keys, the MCP token and the archive credentials are held in an object that prints as
+`Secret(<redacted>)`, and are also on the credential list in `hyperloom.common.env_safety`.
 
 ## Variables intentionally not exposed
 

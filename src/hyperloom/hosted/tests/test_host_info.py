@@ -6,6 +6,7 @@ from __future__ import annotations
 import copy
 import dataclasses
 import json
+import os
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -202,12 +203,19 @@ def test_reading_does_not_modify_the_environment(env):
     assert env == before
 
 
-def test_take_removes_the_credentials_and_keeps_the_rest(env):
+def test_take_removes_every_host_only_input_and_keeps_the_ones_others_read(env):
+    env["USER_DATA_PATH"] = "/data"
     info = take_host_info(env, require=_ALL_GROUPS)
 
-    assert not set(host_info.SECRET_VARS) & set(env)
-    assert env[Var.RUN_ID] == "run-1"
+    assert not set(host_info.HOST_ONLY_VARS) & set(env)
+    assert {name: env[name] for name in env} == {
+        "NODE_NAME": "node-3",
+        "CLAW_SESSION_ID": "sess-9",
+        "USER_DATA_PATH": "/data",
+    }
     assert info.mcp_token.reveal() == _SECRETS[Var.MCP_TOKEN]
+    assert info.run_id == "run-1"
+    assert set(host_info.SECRET_VARS) <= set(host_info.HOST_ONLY_VARS)
 
 
 def test_take_leaves_the_environment_alone_when_the_read_fails(env):
@@ -274,18 +282,18 @@ def test_a_child_environment_built_through_env_safety_lacks_each_credential(name
     assert name not in env_safety.scrub_benchmark_process_env({name: "credential", "PATH": "/bin"})
 
 
-def test_a_real_child_process_does_not_see_a_credential_taken_from_the_environment(env, monkeypatch):
-    for name, value in env.items():
+def test_a_child_started_without_env_sees_none_of_the_removed_inputs_and_still_sees_the_kept_ones(env, monkeypatch):
+    for name, value in {**env, "USER_DATA_PATH": "/data"}.items():
         monkeypatch.setenv(name, value)
-    import os
 
     take_host_info(os.environ, require=_ALL_GROUPS)
     out = subprocess.run(
         [sys.executable, "-c", "import os, json; print(json.dumps(sorted(os.environ)))"],
-        env=env_safety.build_benchmark_env(),
         capture_output=True,
         text=True,
         check=True,
     ).stdout
 
-    assert not [name for name in host_info.SECRET_VARS if name in json.loads(out)]
+    seen = set(json.loads(out))
+    assert not [name for name in host_info.HOST_ONLY_VARS if name in seen]
+    assert {"NODE_NAME", "CLAW_SESSION_ID", "USER_DATA_PATH"} <= seen

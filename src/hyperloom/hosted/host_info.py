@@ -18,8 +18,9 @@ it is then checked like a required one and read into its field.
 Credentials (sandbox keys, the MCP token, archive credentials) are held in
 :class:`Secret`, whose ``repr``, ``str`` and format output never contain the
 value, and no error message here carries a value, only variable names and a
-reason.  :func:`take_host_info` also removes the credential variables from the
-environment it read, so a child process cannot inherit them; the same names are
+reason.  :func:`take_host_info` also removes every host-only input from the
+environment it read, so a child process started without an explicit ``env=``
+cannot inherit them; the credential names are also
 in :data:`hyperloom.common.env_safety.BENCHMARK_SECRET_ENV_NAMES`.
 """
 
@@ -70,6 +71,16 @@ SECRET_VARS: tuple[str, ...] = (
     Var.AWS_ACCESS_KEY_ID,
     Var.AWS_SECRET_ACCESS_KEY,
     Var.AWS_SESSION_TOKEN,
+)
+
+
+#: Variables other code reads from the environment, so :func:`take_host_info` leaves them in place.
+_KEPT_IN_ENVIRONMENT: frozenset[str] = frozenset({Var.NODE_NAME, Var.CLAW_SESSION_ID})
+
+#: Every host-only input: removed from the environment once read, so a child process started without an
+#: explicit ``env=`` does not inherit it.  The values live on :class:`HostInfo` from then on.
+HOST_ONLY_VARS: tuple[str, ...] = tuple(
+    value for name, value in vars(Var).items() if not name.startswith("_") and value not in _KEPT_IN_ENVIRONMENT
 )
 
 
@@ -417,11 +428,13 @@ def read_host_info(env: Mapping[str, str], *, require: Collection[HostGroup] = D
 
 
 def take_host_info(environ: MutableMapping[str, str], *, require: Collection[HostGroup] = DEFAULT_REQUIRE) -> HostInfo:
-    """:func:`read_host_info`, then remove the credential variables from *environ*.
+    """:func:`read_host_info`, then remove every host-only input from *environ* (:data:`HOST_ONLY_VARS`).
+
+    ``NODE_NAME`` and ``CLAW_SESSION_ID`` stay: other code reads them.
 
     Nothing is removed when the read fails, so the caller can still report on the environment it was given.
     """
     info = read_host_info(environ, require=require)
-    for name in SECRET_VARS:
+    for name in HOST_ONLY_VARS:
         environ.pop(name, None)
     return info
