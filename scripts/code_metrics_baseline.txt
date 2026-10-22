@@ -68,10 +68,10 @@ cognitive-complexity src/hyperloom/orchestrator/phases/prelude.py::PreludePhase.
 cognitive-complexity src/hyperloom/orchestrator/phases/prelude.py::_merge_named_current_recipe_configs 32
 cognitive-complexity src/hyperloom/orchestrator/policy/gate.py::PolicyGate._validate_payload_paths 39
 cognitive-complexity src/hyperloom/orchestrator/roles/claude.py::ClaudeBackend._update_turn_options 32
+cognitive-complexity src/hyperloom/orchestrator/specialists/agent_cli_config.py::_codex_mcp_config 36
 cognitive-complexity src/hyperloom/orchestrator/specialists/dispatch.py::SpecialistDispatchCollaborator.warm_specialist_params 93
 cognitive-complexity src/hyperloom/orchestrator/specialists/subprocess_.py::SpecialistSubprocessDispatcher._reap_loop 47
-cognitive-complexity src/hyperloom/orchestrator/specialists/subprocess_.py::SpecialistSubprocessDispatcher.run 97
-cognitive-complexity src/hyperloom/orchestrator/specialists/subprocess_.py::_codex_mcp_config 99
+cognitive-complexity src/hyperloom/orchestrator/specialists/subprocess_.py::SpecialistSubprocessDispatcher.run 90
 cognitive-complexity src/hyperloom/orchestrator/state/gaps.py::GapsStateMixin.upsert_gap 31
 cognitive-complexity src/hyperloom/orchestrator/state/shared_state.py::SharedState._append_roofline_snapshot_history 39
 cognitive-complexity src/hyperloom/orchestrator/state/shared_state.py::SharedState._build_explore_search 45
@@ -114,8 +114,7 @@ cyclomatic-complexity src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._
 cyclomatic-complexity src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._run_geak_kernel_phase 47
 cyclomatic-complexity src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._validate_gemm_tuning_e2e 36
 cyclomatic-complexity src/hyperloom/orchestrator/specialists/dispatch.py::SpecialistDispatchCollaborator.warm_specialist_params 39
-cyclomatic-complexity src/hyperloom/orchestrator/specialists/subprocess_.py::SpecialistSubprocessDispatcher.run 39
-cyclomatic-complexity src/hyperloom/orchestrator/specialists/subprocess_.py::_codex_mcp_config 28
+cyclomatic-complexity src/hyperloom/orchestrator/specialists/subprocess_.py::SpecialistSubprocessDispatcher.run 36
 cyclomatic-complexity src/hyperloom/orchestrator/trace_analysis/bypass_trace_analysis.py::main 24
 cyclomatic-complexity src/hyperloom/orchestrator/trace_analysis/tracelens_analysis.py::main 44
 dead-code src/hyperloom/orchestrator/actions/executors/_grid_runner.py::SessionDirField.__get__:objtype 1
@@ -456,8 +455,7 @@ function-lines src/hyperloom/orchestrator/specialists/rebench.py::run_specialist
 function-lines src/hyperloom/orchestrator/specialists/runner.py::SpecialistRunner._prepare 192
 function-lines src/hyperloom/orchestrator/specialists/subprocess_.py::SpecialistSubprocessDispatcher._build_codex_launch 97
 function-lines src/hyperloom/orchestrator/specialists/subprocess_.py::SpecialistSubprocessDispatcher._reap_loop 126
-function-lines src/hyperloom/orchestrator/specialists/subprocess_.py::SpecialistSubprocessDispatcher.run 348
-function-lines src/hyperloom/orchestrator/specialists/subprocess_.py::_codex_mcp_config 139
+function-lines src/hyperloom/orchestrator/specialists/subprocess_.py::SpecialistSubprocessDispatcher.run 301
 function-lines src/hyperloom/orchestrator/state/shared_state.py::SharedState._append_roofline_snapshot_history 148
 function-lines src/hyperloom/orchestrator/state/shared_state.py::SharedState.record_trace_analyze 110
 function-lines src/hyperloom/orchestrator/state/shared_state.py::resolve_graded_comparison 99
@@ -571,8 +569,8 @@ module-lines src/hyperloom/orchestrator/phases/prelude.py 2529
 module-lines src/hyperloom/orchestrator/policy/gate.py 1577
 module-lines src/hyperloom/orchestrator/prompts/prompt_builder.py 1205
 module-lines src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py 2556
-module-lines src/hyperloom/orchestrator/specialists/runner.py 1455
-module-lines src/hyperloom/orchestrator/specialists/subprocess_.py 1737
+module-lines src/hyperloom/orchestrator/specialists/runner.py 1453
+module-lines src/hyperloom/orchestrator/specialists/subprocess_.py 1401
 module-lines src/hyperloom/orchestrator/state/shared_state.py 2548
 module-lines src/hyperloom/orchestrator/trace_analysis/tracelens_analysis.py 5276
 module-lines src/hyperloom/orchestrator/trace_analysis/tracelens_skill_runner.py 1309
