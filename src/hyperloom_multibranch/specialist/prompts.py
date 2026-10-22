@@ -144,7 +144,8 @@ to notebook_learn. A learning names its direction and cites its tests in request
 (lsn-...) that this session's tests show wrong here: revise it with supersedes, or retire it with retires when it no \
 longer holds at all. Then go back to step 2: the session decides when your branch stops, not you.
 
-Your launch prompt names your branch's direction: work on it first. When its first idea fails, profile and dig \
+Your launch prompt names your branch's direction: work on it first. When the brief names a "Focus", start from \
+that operator within your direction: the scheduler opened your branch on it. When the first idea fails, profile and dig \
 deeper in it rather than switching to settings. Settings are a small space the settings branch sweeps; the larger \
 ceilings are in source: a patch, a fused or tuned kernel, or a port of an aiter or framework PR, on the operators the \
 profile ranks highest. That every setting near your direction was tried never means your direction is done. Never \

@@ -27,7 +27,7 @@ from hyperloom_multibranch.specialist.prompts import (
     role_prompt,
 )
 from hyperloom_multibranch.specialist.runtime import SessionStart
-from hyperloom_multibranch.notebook.tools import UNFINISHED_TITLE
+from hyperloom_multibranch.notebook.tools import FOCUS_LINE, UNFINISHED_TITLE
 from hyperloom_multibranch.toolbox.mcp_tools import REPLY_INBOX_HEADER
 
 WORKLOAD = "qwen3-8b on vllm, TP 1, ISL 1024, OSL 1024, concurrency 64, InferenceX"
@@ -240,6 +240,13 @@ def test_the_wake_and_nudge_messages_say_what_arrived_or_that_nothing_did():
     assert "nothing new for your branch" in nudge
     assert "Nothing arrives on its own" in nudge and "notebook_brief" in nudge
     assert "decides when your branch stops" not in nudge
+
+
+def test_the_role_says_a_branch_opened_on_a_focus_starts_from_that_operator():
+    prompt = role_prompt(WORKLOAD)
+
+    label = FOCUS_LINE.split(",")[0]
+    assert f'When the brief names a "{label}", start from that operator within your direction' in prompt
 
 
 def test_the_role_says_how_to_record_a_direction_done_on_a_head_with_every_reason():
