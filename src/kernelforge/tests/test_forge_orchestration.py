@@ -168,6 +168,7 @@ def test_factory_uses_same_runtime_for_independent_critic_backend(
             specialist_probe_max=6,
             specialist_probe_budget_sec=600.0,
             specialist_probe_scratch_root="",
+            knowledge_wiki_root="",
         ),
         enable_plan_critic=True,
     )

@@ -180,6 +180,11 @@ class AgentRole:
     tool_policy: AgentToolPolicy | None = None
 
 
+# What a ``python -m kernelforge...`` stdio MCP server needs from this process to start from a checkout and would not
+# otherwise get.
+PYTHON_LAUNCH_ENV_VARS = ("PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV", "CONDA_PREFIX")
+
+
 @dataclass(frozen=True)
 class StdioMcpServer:
     """Describe one provider-neutral stdio MCP server."""

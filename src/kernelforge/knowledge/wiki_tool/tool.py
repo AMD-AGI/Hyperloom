@@ -16,7 +16,7 @@ from pathlib import Path
 import sys
 from typing import TYPE_CHECKING
 
-from kernelforge.agent_backends.base import StdioMcpServer
+from kernelforge.agent_backends.base import PYTHON_LAUNCH_ENV_VARS, StdioMcpServer
 from kernelforge.knowledge.wiki_tool.contract import (
     CALL_TIMEOUT_SEC,
     LOG_ENV,
@@ -26,13 +26,15 @@ from kernelforge.knowledge.wiki_tool.contract import (
 )
 
 if TYPE_CHECKING:
+    from kernelforge.agent_backends.base import AgentBackend
+    from kernelforge.agent_backends.registry import AgentProvider
     from kernelforge.config import Config
 
 SERVER_KEY = "knowledge_wiki"
 LOG_NAME = "knowledge_wiki_calls.jsonl"
 
-# What the server's own launch needs; the MCP client does not forward the parent environment.
-_CHILD_ENV_VARS = ("PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV", "CONDA_PREFIX", "PATH", "LD_LIBRARY_PATH")
+# The server's launch, and what the checkout's scripts it runs need to find their programs and libraries.
+_CHILD_ENV_VARS = (*PYTHON_LAUNCH_ENV_VARS, "PATH", "LD_LIBRARY_PATH")
 
 
 @dataclass(frozen=True)
@@ -44,12 +46,13 @@ class KnowledgeWikiTool:
 
     @classmethod
     def from_config(cls, config: Config) -> KnowledgeWikiTool | None:
-        root = str(getattr(config, "knowledge_wiki_root", "") or "").strip()
-        if not root:
+        if not config.knowledge_wiki_root:
             return None
-        log = str(getattr(config, "knowledge_wiki_log", "") or "").strip()
-        log_path = Path(log) if log else Path(config.experiments_dir) / LOG_NAME
-        return cls(root=Path(root), log_path=log_path)
+        log = config.knowledge_wiki_log
+        return cls(
+            root=Path(config.knowledge_wiki_root),
+            log_path=Path(log) if log else Path(config.experiments_dir) / LOG_NAME,
+        )
 
     @property
     def tool_names(self) -> tuple[str, ...]:
@@ -79,9 +82,9 @@ def wiki_tool_names(tool: KnowledgeWikiTool | None) -> tuple[str, ...]:
     return () if tool is None else tool.tool_names
 
 
-def require_mcp_backend(tool: KnowledgeWikiTool | None, backend, role: str) -> None:
-    """Refuse a configured knowledge base on a backend that would silently drop it."""
-    capabilities = getattr(backend, "capabilities", None)
-    if tool is not None and not getattr(capabilities, "mcp", False):
-        name = getattr(backend, "name", type(backend).__name__)
-        raise ValueError(f"the knowledge base needs an MCP-capable backend, but the {role} backend {name} is not")
+def require_mcp_backend(tool: KnowledgeWikiTool | None, backend: AgentBackend | AgentProvider, role: str) -> None:
+    """Refuse a configured knowledge base on a backend, or a provider, whose sessions would silently drop it."""
+    if tool is not None and not backend.capabilities.mcp:
+        raise ValueError(
+            f"the knowledge base needs an MCP-capable backend, but the {role} backend {backend.name} is not"
+        )
