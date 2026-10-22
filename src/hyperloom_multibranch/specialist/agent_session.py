@@ -9,7 +9,9 @@ rebuilt at that head when the setup can, and the branch log. A Claude CLI keeps 
 when a turn ends, the session waits, keeping its heartbeat, until something arrives for the branch (an inbox item or a
 runtime notice) and sends it to the CLI as the next message, so the model goes on with its whole conversation. A turn
 that ends with no test of the branch running waits a patience for something to arrive, and is nudged when nothing did;
-``IDLE_TURNS`` such turns in a row end the session with :class:`SessionIdle`, which is no crash.
+``IDLE_TURNS`` such turns in a row end the session with :class:`SessionIdle`, which is no crash. A turn that called
+tools counts half: a model reading, writing a patch or having a claim refused is working, yet one that never submits
+still ends.
 A session that ends as a session should, its CLI exiting or its deadline reached, is followed by a fresh one: a
 branch runs until the scheduler stops it. One that ends within ``min_session_seconds`` while its branch has a test in
 flight ended to wait for it: the next launch starts once that test has its result. One that is lost, exits with an
@@ -75,6 +77,8 @@ NUDGE_WAITS_S = (60.0, 180.0, 300.0)
 #: Idle turns in a row that end a session, all but the last nudged: a model that keeps stopping must not be woken
 #: forever.
 IDLE_TURNS = len(NUDGE_WAITS_S)
+#: What an idle turn adds to a session's strain: a silent one twice what one that called tools does.
+_SILENT, _WORKED = 2, 1
 #: A session silent this long, with no log growth, CPU work or tool call in flight, is hung: a test takes about eight
 #: minutes and one reasoning step can take as long, and Claude streams its reasoning into the log.
 SPECIALIST_LOST_AFTER_S = 600.0
@@ -221,12 +225,14 @@ class AgentSession:
         self._handle: AgentHandle | None = None
         self._beat: Beat | None = None
         self._recorded: Mapping[str, TokenCounts] = {}
+        self._requested: frozenset[str] = frozenset()
 
     async def preflight(self) -> None:
         """Nothing to prepare: the CLI is the image's and the worktree the session's."""
 
     async def run(self) -> None:
         grant = self._setup.tokens.issue(self._start.branch, frozenset({SCOPE_SPECIALIST}))
+        self._requested = await self._branch_requests()
         last_end = ""
         while not self._stopped.is_set():
             last_end = await self._session(grant, last_end)
@@ -281,20 +287,22 @@ class AgentSession:
         turns = TurnLog(self._place.workspace / PROCESS_LOG) if self._setup.command.interactive else None
         seen = _Seen((await self._place.notebook.poll(self._start.branch)).cursor, logged)
         waits = self._setup.nudge_waits_s
-        sent = idle = 0
+        sent = strain = quiet = 0
         while True:
             status = await self._wait(handle, turns, sent + 1)
             if status is not None:
                 return status
             await self._record_cost()
-            message = await self._wake(handle, seen, waits[idle])
+            message = await self._wake(handle, seen, waits[min(strain // _SILENT, len(waits) - 1)])
             if message is None:
                 return await self._setup.runner.poll(handle)
-            idle = 0 if message else idle + 1
-            if idle == len(waits):
+            strain = 0 if message else strain + (_WORKED if turns is not None and turns.worked() else _SILENT)
+            quiet = 0 if message else quiet + 1
+            if strain >= _SILENT * len(waits):
                 self._handle = None
                 await self._finish(handle, cancel=True)
-                raise SessionIdle(f"its model ended {idle} turns in a row with nothing to test")
+                tested = await self._branch_requests() != self._requested
+                raise SessionIdle(f"its model ended {quiet} turns in a row with nothing to test", tested=tested)
             try:
                 await self._setup.runner.send(handle, self._setup.command.message(message or nudge_message()).encode())
             except AgentEnded:
@@ -330,6 +338,16 @@ class AgentSession:
             with contextlib.suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(self._stopped.wait(), self._setup.poll_seconds)
         return None
+
+    async def _branch_requests(self) -> frozenset[str]:
+        """The branch's candidate tests: a profile measures no candidate, so it does not reset an idle count."""
+        branch = self._start.branch
+        records = (await self._place.notebook.snapshot()).records
+        return frozenset(
+            record.request_id
+            for record in records
+            if record.request.branch == branch and record.request.kind is TestKind.TEST
+        )
 
     async def _tests_in_flight(self) -> bool:
         branch = self._start.branch
@@ -474,6 +492,11 @@ class TurnLog:
 
     def __init__(self, process_log: Path) -> None:
         self._path, self._offset, self._partial, self._ended = process_log, 0, b"", 0
+        self._tools = self._last_tools = 0
+
+    def worked(self) -> bool:
+        """Whether the last turn that ended called a tool."""
+        return self._last_tools > 0
 
     def ended(self) -> int:
         try:
@@ -485,12 +508,22 @@ class TurnLog:
         self._offset += len(appended)
         *lines, self._partial = (self._partial + appended).split(b"\n")
         for line in lines:
-            if b'"result"' not in line:
+            if b'"result"' not in line and b'"tool_use"' not in line:
                 continue
             with contextlib.suppress(json.JSONDecodeError):
-                row = json.loads(line)
-                self._ended += isinstance(row, dict) and row.get("type") == "result"
+                self._read(json.loads(line))
         return self._ended
+
+    def _read(self, row: object) -> None:
+        if not isinstance(row, dict):
+            return
+        if row.get("type") == "result":
+            self._ended += 1
+            self._last_tools, self._tools = self._tools, 0
+            return
+        content = row.get("message", {}).get("content") if row.get("type") == "assistant" else None
+        if isinstance(content, list):
+            self._tools += sum(isinstance(item, dict) and item.get("type") == "tool_use" for item in content)
 
 
 def _less(counts: TokenCounts, earlier: TokenCounts) -> TokenCounts:

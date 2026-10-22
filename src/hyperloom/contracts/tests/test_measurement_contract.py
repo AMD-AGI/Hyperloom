@@ -277,6 +277,20 @@ def test_a_document_written_before_the_repro_verdict_loads_with_none() -> None:
     assert TestResult.from_document(document).repro_verdict == ""
 
 
+def test_a_cold_start_round_trips_and_a_document_written_before_it_loads_with_none() -> None:
+    assert _roundtrip(_result(cold_start_seconds=82.2)).cold_start_seconds == 82.2
+    document = _result().to_document()
+    del document["cold_start_seconds"]
+    assert TestResult.from_document(document).cold_start_seconds is None
+
+
+def test_a_cold_start_is_a_finite_number_that_is_not_negative() -> None:
+    with pytest.raises(MeasurementError, match="cold_start_seconds cannot be negative"):
+        _result(cold_start_seconds=-0.5)
+    with pytest.raises(MeasurementError, match="cold_start_seconds must be a finite number"):
+        _result(cold_start_seconds=float("inf"))
+
+
 def test_a_repro_verdict_is_one_of_the_two_verdicts() -> None:
     with pytest.raises(MeasurementError, match="repro_verdict must be"):
         _result(repro_verdict="fixed")

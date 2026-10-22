@@ -7,8 +7,8 @@ gate's session service, the specialist runtime on them and the MCP service that 
 :func:`local_peers` builds them inside the session directory: the repository at ``MB-repo``, the toolbox's
 sandboxes, archive, submit log and measurement points under ``MB-toolbox``, and the patch and kernel files its
 environment compiler reads, like the repository, from the session's blob store at ``MB-blobs``. The MCP service listens on loopback for the whole session and hands every toolbox call to the loop the peers were built
-on; its learnings tool recalls this session's learnings only, as MB1 runs on no Experience KB
-(:func:`~hyperloom_multibranch.scheduling.mb_fakes.mb_fake_learning_recall`). Every test is measured on a
+on; its learnings tool recalls this session's learnings and past sessions' lessons from the RSI lesson pool, and none
+from the Experience KB, as MB1 runs on none (:func:`specialist_recall`). Every test is measured on a
 :class:`MeasurementHost`: this machine's cards, the image the launcher names in ``HYPERLOOM_ACTIVE_IMAGE_REF`` and
 ``HYPERLOOM_ACTIVE_IMAGE_DIGEST``, the Magpie commit Hyperloom pins and an InferenceX checkout at the commit the
 workload's benchmark pins (:class:`InferenceXCheckout`); the canonical measurement is rendered with the workload's model
@@ -52,13 +52,15 @@ from hyperloom_multibranch.contracts.notebook.interfaces import BranchLogStore, 
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import SpecialistTokens
 from hyperloom_multibranch.notebook import BriefTriggers, LocalNotebook
+from hyperloom_multibranch.notebook.learning_search import LEARNINGS_LOG, RetrievalLog
 from hyperloom_multibranch.notebook.rsi.briefing import SessionBriefs
+from hyperloom_multibranch.notebook.rsi.lesson_recall import LessonRecall
+from hyperloom_multibranch.notebook.rsi.lessons import LessonPool
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
 from hyperloom_multibranch.rulegate.gate import RuleGate
 from hyperloom_multibranch.rulegate.regression import RegressionSet, ReproRunner
 from hyperloom_multibranch.rulegate.rules import AgentXRule, InferenceXRule, Rule
 from hyperloom_multibranch.rulegate.service import GateService
-from hyperloom_multibranch.scheduling.mb_fakes import mb_fake_learning_recall
 from hyperloom_multibranch.scheduling.peers import PeerFactory, Peers, PeerSetup, PeersUnavailable
 from hyperloom_multibranch.scheduling.settings import Workload
 from hyperloom_multibranch.specialist.fix_check import FixChecking
@@ -201,6 +203,14 @@ def _canonical(out_dir: Path, workload: Workload, host: MeasurementHost) -> Cano
     )
 
 
+def specialist_recall(reports: Path) -> LessonRecall:
+    """The specialists' learnings recall: this session's learnings, then past sessions' lessons from the RSI lesson
+    pool beside the environment's archive, each retrieval logged in ``reports``; no Experience KB, as MB1 runs on
+    none (board #22)."""
+
+    return LessonRecall(pool=LessonPool.from_env(), log=RetrievalLog(reports / LEARNINGS_LOG))
+
+
 def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: PeerSetup) -> Peers:
     """The session's peers on this machine; exports the workload into this process (:func:`_export_workload`).
 
@@ -211,7 +221,6 @@ def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: Peer
     from hyperloom.hosted.mcp_server import McpServer, McpServerConfig
     from hyperloom.measure.compile import EnvironmentCompiler
     from hyperloom.measure.hosted_spec import SpecContext
-    from hyperloom_multibranch.notebook.learning_search import LEARNINGS_LOG, RetrievalLog
     from hyperloom_multibranch.toolbox.local_hosted import LocalSession, build_local_toolbox
     from hyperloom_multibranch.toolbox.mcp_tools import (
         McpSpecialistTokens,
@@ -255,7 +264,7 @@ def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: Peer
         return LocalNotebook(layout.notebook, Writer(Role.SPECIALIST_RUNTIME, branch, branch), briefs=BriefTriggers())
 
     mcp = McpServer(McpServerConfig(host_token=secrets.token_hex(32)), campaign=layout.session_id)
-    learnings = mb_fake_learning_recall(RetrievalLog(layout.reports / LEARNINGS_LOG))
+    learnings = specialist_recall(layout.reports)
     briefs = SessionBriefs(
         LocalNotebook(layout.notebook, Writer(Role.OBSERVER, BRIEFS_READER)),
         metric=workload.metric,
@@ -505,6 +514,7 @@ __all__ = [
     "require_framework_package",
     "specialist_command",
     "specialist_model",
+    "specialist_recall",
     "workload_environment",
     "workload_rule",
 ]

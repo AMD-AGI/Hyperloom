@@ -40,6 +40,7 @@ from hyperloom_multibranch.notebook.knowledge.tests.fakes import FakeRecipeStore
 from hyperloom_multibranch.contracts.notebook.records import REPLAY_TOOL
 from hyperloom_multibranch.notebook.knowledge import warm_start
 from hyperloom_multibranch.notebook.knowledge.warm_start import (
+    PreparedReplay,
     ReplayTarget,
     WarmLead,
     identity_labels,
@@ -184,6 +185,17 @@ def test_a_lead_without_values_renders_what_it_has(store: FakeRecipeStore) -> No
     assert older.gain_pct == 0.0 and older.render().endswith(": +0.00% [older]")
 
 
+def test_a_lead_lists_its_launch_arguments_without_the_context_length_and_watchdog_it_was_measured_with(
+    store: FakeRecipeStore,
+) -> None:
+    config = store.views[OLDER_ID]["knowledge"]["value"]["config"]
+    config["extra_server_args"] = "--context-length 6144 --watchdog-timeout 1800 --enable-expert-parallel"
+
+    older = warm_leads(RemoteRecipeClient(store), PROFILE)[1]
+
+    assert older.server_args == "--enable-expert-parallel"
+
+
 def _failed(cause: Exception) -> KBStoreError:
     error = KBStoreError(f"POST /v1/kb/search failed: {cause!r}")
     error.__cause__ = cause
@@ -304,6 +316,23 @@ def test_a_replay_keeps_the_heads_upstream_for_a_component_the_head_has_and_brin
 
     assert on_root is not None
     assert apply(ROOT, on_root.delta).components == (ComponentPatches("vllm", VLLM, VLLM_AT, (PATCH,)), aiter)
+
+
+def test_a_replay_keeps_the_heads_context_length_and_watchdog_and_drops_the_champions() -> None:
+    launch = LaunchConfig("--max-num-seqs 256 --context-length 6144 --watchdog-timeout 1800", CHAMPION.launch.envs)
+    capped = replace(CHAMPION, launch=launch)
+    found = PreparedReplay(EXACT_ID, capped, capped.launch)
+    served = replace(ROOT, launch=LaunchConfig("--max-num-seqs 128 --max-model-len 9216 --watchdog-timeout 600"))
+    reordered = replace(CHAMPION, launch=LaunchConfig("--context-length=8192 --max-num-seqs 256", CHAMPION.launch.envs))
+
+    on_root, on_served = found.on(ROOT, "c0"), found.on(served, "c1")
+
+    assert on_root is not None and on_served is not None
+    assert apply(ROOT, on_root.delta).launch == CHAMPION.launch and found.is_on(apply(ROOT, on_root.delta))
+    made = apply(served, on_served.delta).launch.server_args
+    assert made == "--max-num-seqs 256 --max-model-len 9216 --watchdog-timeout 600"
+    assert found.is_on(reordered) and found.on(reordered, "c2") is None
+    assert not found.is_on(ROOT) and not found.is_on(replace(reordered, kernels=()))
 
 
 @pytest.mark.parametrize(

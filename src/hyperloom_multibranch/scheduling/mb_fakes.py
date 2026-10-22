@@ -14,8 +14,6 @@ from pathlib import Path
 
 from hyperloom_kb import NoOpExperienceKB
 from hyperloom_multibranch.contracts.notebook.records import NotebookSnapshot
-from hyperloom_multibranch.notebook.knowledge.learning_recall import LearningRecall
-from hyperloom_multibranch.notebook.learning_search import RetrievalLog
 from hyperloom_multibranch.notebook.rsi.session import (
     DISABLED,
     CloseStep,
@@ -24,19 +22,9 @@ from hyperloom_multibranch.notebook.rsi.session import (
     close_knowledge,
 )
 
-#: Why CLOSE wrote nothing to the Experience KB and the specialists recall no past session's learnings: MB1 runs on no
-#: Experience KB, by @zgong's decision (board #22). The online Experience KB service replaces it in a later milestone.
+#: Why CLOSE wrote nothing to the Experience KB: MB1 runs on no Experience KB, by @zgong's decision (board #22). The
+#: online Experience KB service replaces it in a later milestone.
 MB_FAKE_EXPERIENCE_KB = "mb_fake_experience_kb"
-
-
-def mb_fake_learning_recall(log: RetrievalLog) -> LearningRecall:
-    """The specialists' learnings recall on no Experience KB: this session's learnings only, logged to ``log``.
-
-    Stands in for the recall on the online Experience KB service (:data:`MB_FAKE_EXPERIENCE_KB`); replaced by
-    ``LearningRecall.from_env`` once a session uses that service.
-    """
-
-    return LearningRecall(None, log=log)
 
 
 def mb_fake_close_knowledge(
@@ -63,5 +51,4 @@ def _faked(step: CloseStep) -> CloseStep:
 __all__ = [
     "MB_FAKE_EXPERIENCE_KB",
     "mb_fake_close_knowledge",
-    "mb_fake_learning_recall",
 ]

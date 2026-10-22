@@ -402,8 +402,9 @@ async def test_the_brief_comes_from_the_briefing_the_tools_are_given(tools_of: T
     assert local.splitlines()[:3] == [
         "Startup brief from c1",
         "Tried:",
-        "- moe gemm / tuned kernel on c0: committed +4.00% (add args --max-num-seqs 256)",
+        "- moe gemm / tuned kernel on c1: recorded_only +0.30% (add args --max-num-seqs 512)",
     ]
+    assert "- moe gemm / tuned kernel on c0: committed +4.00% (add args --max-num-seqs 256)" in local
     assert "- scheduler / chunked prefill on c0: not judged" in local
     assert "Lessons:\n- lesson 0" in briefed and "... 5 more\nLeads:\n- recipe: try expert parallel" in briefed
 

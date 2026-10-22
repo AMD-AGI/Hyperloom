@@ -62,9 +62,12 @@ Since your last turn ended, this arrived for your branch:
 Read what bears on your work (test_result, notebook_brief) and carry on from where you stopped."""
 _WAKE_ITEM = "- {kind} {pointer}: {summary}"
 _NUDGE = """\
-Your turn ended with no test of yours running and nothing new for your branch. The session decides when your branch \
-stops. Settings run out; source work does not: take the operator the profile ranks highest in your direction and \
-write a patch, a fused or tuned kernel, or a port of a PR the image lacks, and test it."""
+Your turn ended with no test of yours running and nothing new for your branch. Nothing arrives on its own: a brief \
+comes only when the integration head moves, and no one hands your branch a new direction, so read notebook_brief for \
+your head and act now. Settings run out; source work does not: take the operator the profile ranks highest in your \
+direction and write a patch, a fused or tuned kernel, or a port of a PR the image lacks, and test it. If your \
+direction is done on this head, take another of the session's directions. Turns that end with nothing to test stop \
+your branch."""
 _LAUNCH = (
     _REPAIR,
     _DIRECTION,
@@ -118,9 +121,12 @@ extra_server_args is one string of command-line flags; a key the delta does not 
 lists the keys it takes. For source, \
 call worktree_sync, edit the files in your worktree, and call worktree_check with the component until it passes (the \
 files compile and the package imports with your change); then worktree_patch returns the delta and the parent commit \
-to test. Submit the delta worktree_patch returns as it is: never set upstream_ref or upstream_repo on a component your \
+to test. When your change adds a code path, put a one-time log line on the path it adds, and when its result is \
+flat or worse, check the test's server.log shows that line before you call the idea dead: a patch that never ran \
+measured nothing. Submit the delta worktree_patch returns as it is: never set upstream_ref or upstream_repo on a component your \
 head already has, which the toolbox refuses as upstream_label_unsupported. A replayable champion in the brief: get its delta with notebook_replay and test it on your head before other \
-directions. A lead under "Unfinished in this session" in the brief is a change another branch measured \
+directions. A champion the brief lists as "already on your head, nothing to replay" is in your head already: build on \
+it, do not test it again. A lead under "Unfinished in this session" in the brief is a change another branch measured \
 but left unfinished: finish one in your direction the same way before starting a new idea.
 4. Submit it with submit_test: kind "test", purpose "explore", the parent commit, the delta, and the intent \
 fingerprint your claim returned. The delta must carry the change you claimed: a server argument or environment \
@@ -141,13 +147,20 @@ to notebook_learn. A learning names its direction and cites its tests in request
 (lsn-...) that this session's tests show wrong here: revise it with supersedes, or retire it with retires when it no \
 longer holds at all. Then go back to step 2: the session decides when your branch stops, not you.
 
-Your launch prompt names your branch's direction: work on it first. When its first idea fails, profile and dig \
+Your launch prompt names your branch's direction: work on it first. When the brief names a "Focus", start from \
+that operator within your direction: the scheduler opened your branch on it. When the first idea fails, profile and dig \
 deeper in it rather than switching to settings. Settings are a small space the settings branch sweeps; the larger \
 ceilings are in source: a patch, a fused or tuned kernel, or a port of an aiter or framework PR, on the operators the \
 profile ranks highest. That every setting near your direction was tried never means your direction is done. Never \
 end a turn to wait for a brief: one comes only when the session moves, and a branch that keeps finding nothing to \
 test is stopped. Once it is done, with nothing promising left in it (a tuning pass \
-can be done within the hour), take another of the session's directions, preferring one no running branch covers: \
+can be done within the hour), record that before you move on: one branch-log entry that starts with "EXHAUSTED " \
+and goes on with one JSON object with the keys direction (the name of the session's direction exactly as listed \
+below), head (your head commit), tried (the request ids of its \
+tests, at least one: a direction you have not tested is not done), why (no_ceiling_above_bar, \
+all_tested_or_claimed, blocked_by_tool or needs_capability), detail (one sentence) and reopen_if (what would make \
+it worth trying again). It is kept for the record and for later sessions and does not \
+stop your branch. Then take another of the session's directions, preferring one no running branch covers: \
 {{directions}}.
 
 What has found gains on ROCm before, in any direction:
@@ -227,7 +240,10 @@ the reviewer is recorded only, and a notice says why. A gain that carries a case
 
 Rules:
 - Write only in your worktree and your workspace; the source base and other branches' worktrees are not yours.
-- Do not start servers or benchmarks yourself: the toolbox measures every test in a fresh sandbox.
+- Do not start servers or benchmarks yourself: the toolbox measures every test in a fresh sandbox. You have no GPU of \
+your own: submit_test is how you measure. A kernel, a tuned table or a patch you cannot verify offline is what a test \
+is for, so submit the candidate the evidence favours rather than wait for certainty; a flat or failed result tells \
+the next candidate something.
 - A candidate is one intent, so its result says what that intent is worth. Small changes, each too small to clear \
 the bar alone, may go together as one intent: name every change in its mechanism and give as target_share_pct the \
 summed share of the operators they speed up.

@@ -197,10 +197,10 @@ async def test_a_session_stop_voids_every_fork_queued_for_a_slot(tmp_path: Path,
 async def test_a_failed_branch_stop_does_not_hold_up_the_end_of_exploration(tmp_path: Path) -> None:
     session = await Stage(tmp_path, refusing=frozenset({"b01"})).opened()
 
-    await session.stopper.end_exploration(SessionStopReason.GLOBAL_CONVERGED)
+    await session.stopper.end_exploration(SessionStopReason.JUDGE_STOPPED)
 
-    ended = _ended(SessionStopReason.GLOBAL_CONVERGED)
-    fork = _ended_with_b01(SessionStopReason.GLOBAL_CONVERGED)
+    ended = _ended(SessionStopReason.JUDGE_STOPPED)
+    fork = _ended_with_b01(SessionStopReason.JUDGE_STOPPED)
     assert (session.stops()["b01"], session.stops()["b03"]) == (ended, fork)
     assert sorted(session.toolbox.cancelled) == ["b01", "b03"]
 
@@ -249,9 +249,9 @@ async def test_a_specialist_that_did_not_stop_at_the_end_of_explore_is_asked_aga
 ) -> None:
     monkeypatch.setattr(branches, "SPECIALIST_CALL_SECONDS", 0.1)
     session = await Stage(tmp_path, hanging=frozenset({"b01"})).opened()
-    await session.stopper.end_exploration(SessionStopReason.GLOBAL_CONVERGED)
+    await session.stopper.end_exploration(SessionStopReason.JUDGE_STOPPED)
 
-    report = await session.stopper.stop_everything(SessionStopReason.GLOBAL_CONVERGED, HARD_STOP)
+    report = await session.stopper.stop_everything(SessionStopReason.JUDGE_STOPPED, HARD_STOP)
 
     assert session.sessions.stopped == ["b01"] and session.sessions.running == {"b01"}
     assert report.failures == ("the specialist of b01 did not confirm its stop",) and not report.clean
@@ -300,7 +300,7 @@ async def test_every_test_is_withdrawn_whatever_branch_it_is_of(tmp_path: Path) 
     )
     session.sessions.hanging = frozenset({"b01"})
 
-    report = await session.stopper.stop_everything(SessionStopReason.GLOBAL_CONVERGED, NOW + SHORT_GRACE)
+    report = await session.stopper.stop_everything(SessionStopReason.JUDGE_STOPPED, NOW + SHORT_GRACE)
 
     assert STOP_OVERRAN in report.failures
     assert held in session.toolbox.withdrawn and "b01" not in session.toolbox.cancelled
@@ -311,7 +311,7 @@ async def test_a_test_the_toolbox_still_holds_makes_the_report_unclean(tmp_path:
     session.toolbox.executor.gate.clear()
     await session.toolbox.submit_test(TestRequest(TestKind.TEST, Purpose.EXPLORE, "b01", session.root, delta=_CHANGE))
 
-    report = await session.stopper.stop_everything(SessionStopReason.GLOBAL_CONVERGED, HARD_STOP)
+    report = await session.stopper.stop_everything(SessionStopReason.JUDGE_STOPPED, HARD_STOP)
 
     assert report.queue is not None and report.queue.running_by_branch == {"b01": 1}
     assert not report.clean

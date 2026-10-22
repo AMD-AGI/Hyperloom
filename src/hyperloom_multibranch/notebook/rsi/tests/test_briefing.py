@@ -41,9 +41,10 @@ from hyperloom_multibranch.notebook.knowledge.tests.fakes import (
 from hyperloom_multibranch.contracts.notebook.records import PeerReplay, WarmReplay
 from hyperloom_multibranch.notebook.knowledge.warm_start import PreparedReplay, WarmLead
 from hyperloom_multibranch.notebook.learning_search import LEARNINGS_LOG, RetrievalLog
-from hyperloom_multibranch.notebook.rsi.briefing import CrossSessionBriefing, SessionBriefs
+from hyperloom_multibranch.notebook.rsi.briefing import ON_HEAD, CrossSessionBriefing, SessionBriefs
 from hyperloom_multibranch.notebook.tests.factories import FakeClock, judgement, profile, request, result
 from hyperloom_multibranch.notebook.tests.sessions import METRIC, SPLIT_KV, scripted_session
+from hyperloom_multibranch.notebook.tools import FOCUS_LINE
 
 SAME = {
     "model": "deepseek-ai/DeepSeek-R1",
@@ -195,11 +196,13 @@ class _Repo:
 
     heads: dict[str, str]
     recipes: dict[str, Recipe]
+    reads: list[str] = dataclasses.field(default_factory=list)
 
     async def head(self, branch: str) -> str:
         return self.heads[branch]
 
     async def read_recipe(self, commit: str) -> Recipe:
+        self.reads.append(commit)
         return self.recipes[commit]
 
 
@@ -230,6 +233,51 @@ async def test_a_lead_with_a_replay_says_how_to_replay_it_and_the_briefing_repla
     )
     assert await briefing.warm_replay("inference:none") is None
     assert await CrossSessionBriefing(notebook, warm=warm, branch="s3").warm_replay(LEAD.canonical_id) is None
+
+
+def _champion_merged(unpacked: str) -> tuple[tuple[WarmLead, ...], _Repo]:
+    """The scripted session's ``c1`` as the warm-start champion's recipe, and ``i1``, which merged it, tuned past it."""
+
+    image = "sha256:" + "a" * 64
+    prepared = PreparedReplay(LEAD.canonical_id, None, LaunchConfig("--enable-expert-parallel"), unpacked)
+    recipes = {
+        "c0": Recipe(image, LaunchConfig("--max-num-seqs 128")),
+        "c1": Recipe(image, LaunchConfig("--enable-expert-parallel")),
+        "i1": Recipe(image, LaunchConfig("--enable-expert-parallel --max-num-seqs 256")),
+    }
+    return (dataclasses.replace(LEAD, replay=prepared),), _Repo({"s3": "i1"}, recipes)
+
+
+async def test_a_champion_the_start_commit_builds_on_is_named_on_the_head_and_not_replayed_again(
+    tmp_path: Path,
+) -> None:
+    notebook = await scripted_session(tmp_path / "notebook", FakeClock())
+    unpacked = "the record holds no patch or kernel files"
+    warm, repo = _champion_merged(unpacked)
+    briefing = CrossSessionBriefing(notebook, warm=warm, branch="s3", repo=repo)
+
+    on_head, on_root = await briefing.startup_brief("i1"), await briefing.startup_brief("c0")
+
+    assert on_head.lessons[0] == f"{ON_HEAD}: recipe inference:older: +10.00% `--enable-expert-parallel` [older]"
+    assert not [lead for lead in on_head.leads if lead.startswith("recipe:")]
+    assert on_root.leads[0] == (
+        "recipe: inference:older: +10.00% `--enable-expert-parallel` [older]; "
+        f"replay on your head with notebook_replay: its launch config only, {unpacked}"
+    )
+    with pytest.raises(ValueError, match="your head i1 builds on c1, which is its recipe"):
+        await briefing.warm_replay(LEAD.canonical_id)
+
+
+async def test_the_session_reads_each_commits_recipe_once_to_find_the_champions_on_a_head(tmp_path: Path) -> None:
+    notebook = await scripted_session(tmp_path / "notebook", FakeClock())
+    warm, repo = _champion_merged("the record holds no patch or kernel files")
+    briefs = SessionBriefs(notebook, warm=warm, repo=repo)
+
+    first = await briefs.text("s3", "i1")
+    again = await briefs.text("s4", "i1")
+
+    assert first == again and ON_HEAD in first
+    assert sorted(repo.reads) == ["c0", "c1", "i1"]
 
 
 async def test_another_branchs_tested_change_is_replayed_on_the_branch_head_as_it_was_tested(tmp_path: Path) -> None:
@@ -416,6 +464,19 @@ async def test_a_read_that_did_not_complete_is_read_again_at_the_next_brief(tmp_
     await briefs.text("s3", "c1")
 
     assert len(failed.calls) == 2
+
+
+async def test_the_brief_names_the_focus_the_scheduler_opened_the_branch_on_and_keeps_it_at_a_restart(
+    tmp_path: Path,
+) -> None:
+    notebook = await scripted_session(tmp_path / "notebook", FakeClock())
+    briefs = SessionBriefs(notebook)
+    briefs.for_branch("s3", "gemm")
+
+    restarted, unfocused = await briefs.text("s3", "c1"), await briefs.text("s4", "c1")
+
+    assert restarted.splitlines()[:2] == ["Startup brief from c1", f"{FOCUS_LINE}gemm"]
+    assert not any(line.startswith(FOCUS_LINE) for line in unfocused.splitlines())
 
 
 async def test_each_branch_keeps_its_focus_and_every_branch_shares_one_index_and_cache(tmp_path: Path) -> None:

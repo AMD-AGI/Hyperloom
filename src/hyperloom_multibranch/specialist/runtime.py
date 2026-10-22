@@ -7,21 +7,24 @@ A branch started with no direction, no repair and no third-party agent takes one
 :data:`~hyperloom_multibranch.specialist.directions.DIRECTIONS` that no branch has held yet, so the branches split the
 work instead of all sweeping the same settings, and a stopped branch's direction is not handed out again while another
 was never tried. Once each was held, it takes the one the fewest branches held over the session, then the one the
-fewest running branches hold. A direction given to a branch counts when it is one of these.
+fewest running branches hold. A direction given to a branch counts when it is one of these. A direction whose
+specialist gave up finding nothing to test is not dealt again on that start commit while another is left there, nor on
+the head its last :mod:`~hyperloom_multibranch.specialist.exhausted` record names, and neither is one any branch's
+record names done on the commit a branch starts at: a later head may open it again, the same one would not.
 
 A branch's first session is made ready once (``preflight``); one that cannot be gives the specialist up with every
 reason in a notice, and a restart does not repeat it. A session that crashes is restarted on its branch, at most
 ``MAX_RESTARTS`` times within ``RESTART_WINDOW_S``, and a lost one at most ``MAX_LOSS_RESTARTS`` times in a row with no
 session working in between: a loss takes the heartbeat timeout, so losses alone never fill the window. A session that
-ends idle, its model finding nothing to test, is no crash and is not restarted: a restart reads the model's own
-conclusion back from the branch log and ends idle again, so the specialist gives up and the scheduler stops the branch,
-freeing its slot for a fresh branch with its own direction. A session that finished, a third-party agent that ended its
-run and whose last keep settled, ends its specialist the same way. Past any of these the branch keeps its judge, which
-settles what was already measured, and the scheduler stops it once nothing of it waits for a confirm; ``status`` tells
-it. A judge that fails is a defect of this code, not of the specialist: it is not restarted, and the branch's session is
-stopped so no candidate is measured that nothing would judge. Both leave a notice in the branch log. While the
-specialist writes a change, the runtime renews the claims it holds, so a claim does not lapse while a model thinks; once
-a test carries a claim, the toolbox renews it.
+ends idle, its model finding nothing to test, is no crash: the branch gets one fresh session, briefed again at its head,
+and ``MAX_IDLE_SESSIONS`` idle sessions in a row end it, a session that submitted a test starting the count again. Then
+the specialist gives up and the scheduler stops the branch, freeing its slot for a fresh branch with its own direction.
+A session that finished, a third-party agent that ended its run and whose last keep settled, ends its specialist the
+same way. Past any of these the branch keeps its judge, which settles what was already measured, and the scheduler
+stops it once nothing of it waits for a confirm; ``status`` tells it. A judge that fails is a defect of this code, not
+of the specialist: it is not restarted, and the branch's session is stopped so no candidate is measured that nothing
+would judge. Both leave a notice in the branch log. While the specialist writes a change, the runtime renews the claims
+it holds, so a claim does not lapse while a model thinks; once a test carries a claim, the toolbox renews it.
 """
 
 from __future__ import annotations
@@ -39,6 +42,7 @@ from hyperloom_multibranch.contracts.lifecycle import BranchTask, SpecialistStat
 from hyperloom_multibranch.contracts.notebook.interfaces import ClaimService, NotebookError
 from hyperloom_multibranch.contracts.notebook.vocab import ClaimStatus
 from hyperloom_multibranch.specialist.directions import DIRECTIONS
+from hyperloom_multibranch.specialist.exhausted import exhausted_records, latest_exhausted, session_direction
 from hyperloom_multibranch.specialist.judging import NOTICE, BranchJudge, JudgeNotebook, Judging
 
 logger = logging.getLogger(__name__)
@@ -46,6 +50,7 @@ logger = logging.getLogger(__name__)
 MAX_RESTARTS = 3
 RESTART_WINDOW_S = 600.0
 MAX_LOSS_RESTARTS = 2
+MAX_IDLE_SESSIONS = 2
 
 
 class RuntimeNotebook(JudgeNotebook, ClaimService, Protocol):
@@ -64,7 +69,12 @@ class SessionCrashed(RuntimeError):
 
 
 class SessionIdle(RuntimeError):
-    """A run of a branch's specialist ended because its model kept finding nothing to test."""
+    """A run of a branch's specialist ended because its model kept finding nothing to test; ``tested`` says whether
+    the run submitted a test before it did."""
+
+    def __init__(self, message: str, *, tested: bool = False) -> None:
+        super().__init__(message)
+        self.tested = tested
 
 
 class SessionFinished(RuntimeError):
@@ -154,12 +164,15 @@ class SpecialistRuntime:
         self._pacing = pacing
         self._branches: dict[str, _Branch] = {}
         self._held: Counter[str] = Counter()
+        self._closed: set[tuple[str, str]] = set()
 
     async def start(self, branch: str, start_commit: str, task: BranchTask = BranchTask()) -> None:
         if branch in self._branches:
             raise ValueError(f"branch {branch!r} already has a specialist")
         if not task.direction.strip() and task.repair is None and not task.agent:
-            task = replace(task, direction=self._least_held())
+            for state in self._branches.values():
+                await self._learn_exhausted(state)
+            task = replace(task, direction=self._least_held(start_commit))
         if task.direction in DIRECTIONS:
             self._held[task.direction] += 1
         state = _Branch(branch, start_commit, task, self._notebook_for(branch))
@@ -201,10 +214,11 @@ class SpecialistRuntime:
         for task in others:
             task.cancel()
         await asyncio.gather(*others, return_exceptions=True)
+        await self._learn_exhausted(state)
 
     async def _supervise(self, state: _Branch) -> None:
         crashes: deque[float] = deque()
-        losses = 0
+        losses = idle = 0
         ready = False
         while True:
             start = SessionStart(state.name, state.start_commit, state.k, state.task)
@@ -223,8 +237,15 @@ class SpecialistRuntime:
             except SessionIdle as error:
                 await state.session.stop()
                 logger.info("the specialist of %s found nothing to test: %s", state.name, error)
+                idle = 0 if error.tested else idle + 1
+                if idle < MAX_IDLE_SESSIONS:
+                    await _notice(
+                        state, f"the specialist found nothing to test ({error}); the branch starts a fresh session"
+                    )
+                    continue
                 state.session, state.gave_up = None, True
-                await _notice(state, f"the specialist found nothing to test ({error}); it is not restarted")
+                record = await self._close_direction(state)
+                await _notice(state, f"the specialist found nothing to test ({error}); it is not restarted{record}")
                 return
             except Exception as error:
                 logger.exception("the specialist of %s crashed", state.name)
@@ -280,9 +301,33 @@ class SpecialistRuntime:
         await _notice(state, f"the specialist's preflight failed ({why}); it is not started")
         return False
 
-    def _least_held(self) -> str:
+    async def _close_direction(self, state: _Branch) -> str:
+        """Deal the given-up branch's direction to no new branch on its start commit or on the head its specialist's
+        last exhausted record names; that record as the give-up notice quotes it, ``""`` without one."""
+        self._closed.add((state.start_commit, state.task.direction))
+        exhausted = latest_exhausted(await state.notebook.branch_log(state.name))
+        if exhausted is None:
+            return ""
+        self._closed.add((exhausted.head, state.task.direction))
+        return f"; its last exhausted record: {exhausted.summary()}"
+
+    async def _learn_exhausted(self, state: _Branch) -> None:
+        """Close, on its head, each of the session's directions that ``state``'s specialist recorded exhausted."""
+        for exhausted in exhausted_records(await state.notebook.branch_log(state.name)):
+            direction = session_direction(exhausted.direction)
+            if direction is None:
+                logger.warning(
+                    "an exhausted record of %s names none of the session's directions: %r",
+                    state.name,
+                    exhausted.direction,
+                )
+                continue
+            self._closed.add((exhausted.head, direction))
+
+    def _least_held(self, start_commit: str) -> str:
         running = [state.task.direction for state in self._branches.values()]
-        return min(DIRECTIONS, key=lambda d: (self._held[d], running.count(d)))
+        open_here = [d for d in DIRECTIONS if (start_commit, d) not in self._closed] or list(DIRECTIONS)
+        return min(open_here, key=lambda d: (self._held[d], running.count(d)))
 
     async def _judge(self, state: _Branch, judge: BranchJudge) -> None:
         try:
@@ -323,6 +368,7 @@ def _log_failure(task: asyncio.Task[None]) -> None:
 
 
 __all__ = [
+    "MAX_IDLE_SESSIONS",
     "MAX_LOSS_RESTARTS",
     "MAX_RESTARTS",
     "RESTART_WINDOW_S",

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import math
 import statistics
+from collections import deque
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
@@ -317,20 +318,43 @@ def _value_or_empty(state: NotebookState, view: LineageView, commit_id: str) -> 
 
 
 def startup_brief(state: NotebookState, view: LineageView, start_commit: str) -> StartupBrief:
-    """What specialists tried on the start commit and on every state it builds on, merged branches included."""
+    """What specialists tried on the start commit and on every state it builds on, merged branches included.
+
+    The start commit's tests come first, then those of the commits the fewest parent or merge steps from it, the
+    latest first on each step, so a brief that shows only the first of them shows the nearest.
+    """
 
     if view.commit(start_commit) is None:
         raise NotRecorded(f"no commit {start_commit}")
-    ancestry = set(view.ancestry(start_commit))
-    tried = tuple(
-        _tried(state, record)
+    steps = _steps_from(view, start_commit)
+    found = [
+        record
         for record in state.records()
         if record.request.kind is TestKind.TEST
         and record.request.branch != INTEGRATION_BRANCH
-        and record.request.parent_commit in ancestry
+        and record.request.parent_commit in steps
         and (record.in_flight or record.measured)
-    )
+    ]
+    nearest = sorted(range(len(found)), key=lambda index: (steps[found[index].request.parent_commit], -index))
+    tried = tuple(_tried(state, found[index]) for index in nearest)
     return StartupBrief(start_commit=start_commit, tried=tried, op_shares=state.op_shares.get(start_commit))
+
+
+def _steps_from(view: LineageView, commit: str) -> dict[str, int]:
+    """``commit`` and every commit it builds on, through parents and the sources merges brought in, by the fewest
+    steps from it."""
+
+    by_id = {node.commit_id: node for node in view.commits}
+    steps = {commit: 0}
+    pending = deque([commit])
+    while pending:
+        current = pending.popleft()
+        node = by_id.get(current)
+        for source in (node.parent_commit, *node.merged_from) if node is not None else ():
+            if source in by_id and source not in steps:
+                steps[source] = steps[current] + 1
+                pending.append(source)
+    return steps
 
 
 def _tried(state: NotebookState, record: TestRecord) -> TriedDirection:

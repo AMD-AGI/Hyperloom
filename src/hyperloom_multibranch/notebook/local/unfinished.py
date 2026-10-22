@@ -10,20 +10,24 @@
   is the integrator's to offer again, not a lead;
 * a measured explore that kept accuracy, gained, and fell short of its bar by less than :data:`NEAR_BAR_PCT`;
 * a blocked candidate whose repair never finished;
-* an explore withdrawn before its result, a branch stop's withdrawal included.
+* an explore withdrawn before its result, a branch stop's withdrawal included, unless another explore measured its
+  change.
 
-A lead drops out once its direction is tested again on any branch, its own confirm aside, or a branch holds a claim on
-it, so two later branches do not chase the same one; a commit drops out once the integrator offers it again. The leads
+A lead drops out once its direction or its change is tested again on any branch, its own confirm aside, or a branch
+holds a claim on it, so two later branches do not chase the same one: a replay claims an intent of its own, but tests
+the lead's change, with its delta or, made with ``notebook_replay``, with one made for its own head and an intent
+naming the lead. A commit drops out once the integrator offers it again. The leads
 come in that order, unstackable commits and near misses by gain, unfinished repairs and withdrawn explores newest
-first, at most :data:`MAX_UNFINISHED` of them.
+first, one for each direction and each change, at most :data:`MAX_UNFINISHED` of them.
 """
 
 from __future__ import annotations
 
-from collections.abc import Collection, Sequence
+from collections.abc import Collection, Mapping, Sequence
 
+from hyperloom.contracts.recipe import RecipeDelta
 from hyperloom_multibranch.contracts.notebook.peers import Purpose, TestKind
-from hyperloom_multibranch.contracts.notebook.records import LineageView, TestRecord, UnfinishedLead
+from hyperloom_multibranch.contracts.notebook.records import REPLAY_TARGET, LineageView, TestRecord, UnfinishedLead
 from hyperloom_multibranch.contracts.notebook.vocab import (
     INTEGRATION_BRANCH,
     Conclusion,
@@ -38,6 +42,7 @@ from hyperloom_multibranch.notebook.local.views import committed
 NEAR_BAR_PCT = 0.5
 MAX_UNFINISHED = 8
 _REPAIRING = frozenset({Conclusion.DIAGNOSIS_PENDING, Conclusion.REPAIR_REQUESTED})
+_NO_CHANGE = RecipeDelta().fingerprint()
 
 
 def _lead(state: NotebookState, record: TestRecord, reason: UnfinishedReason, detail: str = "") -> UnfinishedLead:
@@ -103,21 +108,56 @@ def _not_stackable(state: NotebookState, view: LineageView) -> list[UnfinishedLe
     return leads
 
 
-def _taken_up(record: TestRecord, records: Sequence[TestRecord], held: Collection[str]) -> bool:
-    """Whether a later test on any branch, not ``record``'s own confirm, tried ``record``'s direction again, or a
-    branch holds a claim on it."""
+def _replayed(state: NotebookState, records: Sequence[TestRecord]) -> dict[str, str]:
+    """What each replay made with ``notebook_replay`` replays, by its request id: its intent names it."""
+
+    replayed = {}
+    for record in records:
+        intent = state.intents.get(record.request.intent_fingerprint or "")
+        if intent is not None and intent.target == REPLAY_TARGET:
+            replayed[record.request_id] = intent.mechanism
+    return replayed
+
+
+def _taken_up(
+    record: TestRecord, records: Sequence[TestRecord], held: Collection[str], replayed: Mapping[str, str]
+) -> bool:
+    """Whether a later test on any branch, not ``record``'s own confirm, tried ``record``'s direction or its change
+    again, or a branch holds a claim on its direction."""
 
     fingerprint = record.request.intent_fingerprint
-    if fingerprint is None:
-        return False
-    if fingerprint in held:
+    if fingerprint is not None and fingerprint in held:
         return True
     return any(
-        other.request.intent_fingerprint == fingerprint
+        (
+            (fingerprint is not None and other.request.intent_fingerprint == fingerprint)
+            or _tests_the_change(other, record, replayed)
+        )
         and other.requested_at > record.requested_at
         and other.request.retest_of != record.request_id
         and other.withdrawn_at is None
         and other.request.kind is TestKind.TEST
+        for other in records
+    )
+
+
+def _tests_the_change(other: TestRecord, record: TestRecord, replayed: Mapping[str, str]) -> bool:
+    """Whether the explore ``other`` tests ``record``'s change: its delta, or a replay of ``record`` made for another
+    head. The merge of a commit and its confirm test the change too, but finish nothing of it."""
+
+    if other.request.purpose is not Purpose.EXPLORE:
+        return False
+    change = record.request.action_fingerprint
+    return replayed.get(other.request_id) == record.request_id or (
+        change != _NO_CHANGE and other.request.action_fingerprint == change
+    )
+
+
+def _measured_elsewhere(record: TestRecord, records: Sequence[TestRecord], replayed: Mapping[str, str]) -> bool:
+    """Whether another explore measured ``record``'s change, before it or after."""
+
+    return any(
+        other.request_id != record.request_id and other.measured and _tests_the_change(other, record, replayed)
         for other in records
     )
 
@@ -130,8 +170,9 @@ def unfinished_leads(state: NotebookState, view: LineageView, held: Collection[s
     """The session's unfinished leads, in the module's order; ``held`` are the intent fingerprints branches claim."""
 
     records = state.records()
+    replayed = _replayed(state, records)
     newest = sorted(records, key=lambda item: -item.requested_at)
-    untaken = {record.request_id for record in records if not _taken_up(record, records, held)}
+    untaken = {record.request_id for record in records if not _taken_up(record, records, held, replayed)}
     explores = [record for record in newest if _explore(record) and record.request_id in untaken]
     near = [
         _lead(state, record, UnfinishedReason.NEAR_BAR, f"bar {record.judgement.threshold_pct:.2f}%")
@@ -146,18 +187,32 @@ def unfinished_leads(state: NotebookState, view: LineageView, held: Collection[s
     withdrawn = [
         _lead(state, record, UnfinishedReason.WITHDRAWN, record.withdrawal_reason)
         for record in explores
-        if record.withdrawn_at is not None and record.result is None
+        if record.withdrawn_at is not None
+        and record.result is None
+        and not _measured_elsewhere(record, records, replayed)
     ]
     unstackable = [lead for lead in _not_stackable(state, view) if lead.request_id in untaken]
-    fingerprints = {record.request_id: record.request.intent_fingerprint or record.request_id for record in records}
-    leads: list[UnfinishedLead] = []
-    directions: set[str] = set()
-    for lead in (*_by_gain(unstackable), *_by_gain(near), *repairs, *withdrawn):
-        direction = fingerprints[lead.request_id]
-        if direction not in directions:
-            directions.add(direction)
-            leads.append(lead)
+    leads = _distinct((*_by_gain(unstackable), *_by_gain(near), *repairs, *withdrawn), records, replayed)
     return tuple(leads[:MAX_UNFINISHED])
+
+
+def _distinct(
+    leads: Sequence[UnfinishedLead], records: Sequence[TestRecord], replayed: Mapping[str, str]
+) -> list[UnfinishedLead]:
+    """The first of ``leads`` for each direction and for each change, a replay's change being the one it replays."""
+
+    requests = {record.request_id: record.request for record in records}
+    kept: list[UnfinishedLead] = []
+    seen: set[str] = set()
+    for lead in leads:
+        request = requests[lead.request_id]
+        keys = {request.intent_fingerprint or lead.request_id, replayed.get(lead.request_id, lead.request_id)}
+        if request.action_fingerprint != _NO_CHANGE:
+            keys.add(request.action_fingerprint)
+        if not keys & seen:
+            seen |= keys
+            kept.append(lead)
+    return kept
 
 
 __all__ = ["MAX_UNFINISHED", "NEAR_BAR_PCT", "unfinished_leads"]

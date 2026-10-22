@@ -22,6 +22,7 @@ from hyperloom.measure import local
 from hyperloom.measure.local import SUPPORTED_KINDS, LocalMeasurementBackend, TestCallRefused
 from hyperloom.measure.repro import read_verdict
 from hyperloom.measure.socket import RoundPlan, SessionFacts, TestCall
+from hyperloom.measure.tests import eval_refusal_logs, test_log_causes
 from hyperloom.measure.tests._inferencex import CLIENT, CLIENT_PATH, LIBRARY, LIBRARY_PATH, stock_checkout
 from hyperloom.orchestrator.actions.executors import (
     ORCHESTRATOR_CANCELLED_RETURNCODE,
@@ -1421,6 +1422,68 @@ RuntimeError: Session is closed
 _ACCESS_400 = '[2026-10-21 06:27:25] INFO:     127.0.0.1:58342 - "POST /v1/completions HTTP/1.1" 400 Bad Request\n'
 
 
+def test_a_refused_evaluation_names_the_refusal_that_a_flood_of_tracebacks_pushed_out_of_the_log_tail(
+    grid, server, tmp_path
+):
+    workspace = tmp_path / "ws" / "warmup"
+    workspace.mkdir(parents=True)
+    (workspace / "server.log").write_text(eval_refusal_logs.server_log(), encoding="utf-8")
+    (workspace / "benchmark_stderr.log").write_text(eval_refusal_logs.benchmark_stderr(), encoding="utf-8")
+    (workspace / "eval_returncode").write_text("1", encoding="utf-8")
+    grid.answers.update(
+        warmup=grid.result(
+            "warmup",
+            returncode=1,
+            output_throughput=6245.9,
+            server_log_path=str(workspace / "server.log"),
+            nonfatal_warnings=["nonzero_rc_after_complete_protocol:1"],
+        ),
+        test=grid.result("test"),
+    )
+
+    outcome = _run(_graded_call(tmp_path))
+
+    assert (outcome.returncode, outcome.failure_class) == (1, "candidate")
+    reason = outcome.failure_reason or ""
+    assert reason.startswith("lm_eval_http_400: "), "the refusal, not the generic end of the evaluation"
+    assert "max_completion_tokens is too large: 4096" in reason and "at most 2304 completion tokens" in reason
+
+
+def _log_with_refusal_at(tmp_path: Path, *, from_end: int, size: int) -> Path:
+    """A log of ``size`` bytes of progress lines whose refusal line starts ``from_end`` bytes before its end."""
+    line = eval_refusal_logs.REFUSAL + "\n"
+    filler = "Requesting API: 100%|##########| 1319/1319\n"
+    body = bytearray((filler * (size // len(filler) + 1)).encode()[:size])
+    start = size - from_end
+    body[start - 1 : start + len(line)] = b"\n" + line.encode()
+    path = tmp_path / "benchmark_stderr.log"
+    path.write_bytes(bytes(body))
+    return path
+
+
+@pytest.mark.parametrize(
+    "from_end",
+    [
+        3 * (1 << 20) + 500,  # a few blocks up, inside one block
+        (1 << 20) + 100,  # the line starts just above the first block's start: it ends inside that block
+        (1 << 20) + len(eval_refusal_logs.REFUSAL) // 2,  # and the block boundary cuts the line in two
+    ],
+)
+def test_the_refusal_is_found_wherever_it_sits_in_the_scanned_part_of_a_log(tmp_path, from_end):
+    path = _log_with_refusal_at(tmp_path, from_end=from_end, size=5 * (1 << 20))
+
+    assert local._read_refusal(path) == eval_refusal_logs.REFUSAL, "the whole line, not the half a block cut"
+
+
+def test_a_refusal_older_than_the_scanned_part_of_a_log_is_not_searched_for(tmp_path):
+    path = _log_with_refusal_at(
+        tmp_path, from_end=local._REFUSAL_SCAN_CHARS + 1000, size=local._REFUSAL_SCAN_CHARS + 2000
+    )
+
+    assert local._read_refusal(path) == ""
+    assert local._read_refusal(tmp_path / "missing.log") == ""
+
+
 def test_an_evaluation_that_fails_after_a_whole_protocol_is_classified_from_the_logs_it_wrote(grid, server, tmp_path):
     workspace = tmp_path / "ws" / "warmup"
     workspace.mkdir(parents=True)
@@ -1441,8 +1504,94 @@ def test_an_evaluation_that_fails_after_a_whole_protocol_is_classified_from_the_
 
     outcome = _run(_graded_call(tmp_path))
 
-    assert [(r.phase, r.returncode) for r in outcome.rounds] == [("warmup", 1), ("accuracy", 1), ("measure", 0)]
+    assert [c["grid"][0].name for c in grid.calls] == ["warmup"], "a refused evaluation settles the test"
+    assert [(r.phase, r.returncode) for r in outcome.rounds] == [("warmup", 1), ("accuracy", 1)]
     assert (outcome.returncode, outcome.failure_class) == (1, "unclear")
     reason = outcome.failure_reason or ""
     assert reason.startswith("lm_eval_http_400: "), "the refusal, not the session the client closed after it"
     assert "longer than the model's context length (400 tokens)" in reason
+    assert len(server.teardowns) == 1, "the server the warmup left up is reclaimed although no measured round runs"
+
+
+def _warmup_with_logs(grid: _Grid, tmp_path: Path, server_log: str, *, returncode: int) -> None:
+    """A warmup round that ran its whole protocol (so its status is ``succeeded``) and left ``server_log``."""
+    workspace = tmp_path / "ws" / "warmup"
+    workspace.mkdir(parents=True)
+    (workspace / "server.log").write_text(server_log, encoding="utf-8")
+    grid.answers.update(
+        warmup=grid.result(
+            "warmup", returncode=returncode, output_throughput=1111.0, server_log_path=str(workspace / "server.log")
+        ),
+        test=grid.result("test"),
+    )
+
+
+@pytest.mark.parametrize(
+    ("log", "failure_class", "reason"),
+    [
+        (
+            test_log_causes.ILLEGAL_ADDRESS_LOG,
+            "candidate",
+            "hip_runtime_error: Exception: Capture cuda graph failed: HIP error: an illegal memory access was encountered",
+        ),
+        (
+            test_log_causes.FASTSAFETENSORS_LOG,
+            "candidate",
+            "import_error: ImportError: Please install fastsafetensors via `pip install fastsafetensors`",
+        ),
+        (
+            test_log_causes.ARGPARSE_LOG,
+            "candidate",
+            "serve_flag: launch_server.py: error: ambiguous option: --chunked-prefill could match",
+        ),
+        (
+            test_log_causes.PYTHON_EXCEPTION_LOG,
+            "unclear",
+            "python_exception: AssertionError: M must be a multiple of 16, got 63",
+        ),
+    ],
+    ids=["hip_runtime_error", "import_error", "serve_flag", "python_exception"],
+)
+def test_a_warmup_whose_server_crashed_or_refused_to_serve_ends_the_test_with_no_measured_round(
+    grid, server, tmp_path, log, failure_class, reason
+):
+    _warmup_with_logs(grid, tmp_path, log, returncode=1)
+
+    outcome = _run(_graded_call(tmp_path))
+
+    assert [c["grid"][0].name for c in grid.calls] == ["warmup"], "no measured round boots a server that cannot serve"
+    assert [r.phase for r in outcome.rounds] == ["warmup", "accuracy"] and outcome.returncode == 1
+    assert outcome.failure_class == failure_class
+    assert (outcome.failure_reason or "").startswith(reason)
+    assert len(server.teardowns) == 1
+
+
+@pytest.mark.parametrize(
+    ("log", "failure_class", "reason"),
+    [
+        (test_log_causes.PLAIN_LOG, "unclear", "no_known_signature"),
+        ("OSError: [Errno 98] Address already in use\n", "infra", "port_in_use"),
+    ],
+    ids=["no_known_signature", "port_in_use"],
+)
+def test_a_warmup_that_failed_for_a_cause_no_log_names_keeps_the_measured_round_as_before(
+    grid, server, tmp_path, log, failure_class, reason
+):
+    _warmup_with_logs(grid, tmp_path, log, returncode=1)
+
+    outcome = _run(_graded_call(tmp_path))
+
+    assert [c["grid"][0].name for c in grid.calls] == ["warmup", "test"]
+    assert [(r.phase, r.returncode) for r in outcome.rounds] == [("warmup", 1), ("accuracy", 1), ("measure", 0)]
+    assert (outcome.failure_class, outcome.failure_reason) == (failure_class, reason)
+
+
+def test_a_warmup_whose_server_log_is_healthy_goes_on_to_the_measured_round(grid, server, tmp_path):
+    _warmup_with_logs(grid, tmp_path, test_log_causes.SERVER_LOG_WITH_BAD_REQUEST, returncode=0)
+    _lm_eval_results(Path(grid.answers["warmup"].workspace) / "eval_output", 0.64)
+
+    outcome = _run(_graded_call(tmp_path))
+
+    assert [c["grid"][0].name for c in grid.calls] == ["warmup", "test"]
+    assert [(r.phase, r.returncode) for r in outcome.rounds] == [("warmup", 0), ("accuracy", 0), ("measure", 0)]
+    assert (outcome.returncode, outcome.failure_class, outcome.failure_reason) == (0, None, None)

@@ -22,7 +22,7 @@ import pytest
 import yaml
 
 from hyperloom.measure import boot_watch, local
-from hyperloom.measure.boot_watch import BOOT_SHARE, boot_limit_sec
+from hyperloom.measure.boot_watch import BOOT_SHARE, boot_limit_sec, boot_seconds
 from hyperloom.measure.local import LocalMeasurementBackend
 from hyperloom.measure.returncodes import SERVER_BOOT_TIMEOUT_RC
 from hyperloom.measure.socket import TestCall
@@ -192,3 +192,29 @@ def test_the_literals_the_guard_copies_equal_their_definitions() -> None:
 
     assert boot_watch._READY_STAMP == kill._READY_STAMP_NAME
     assert set(boot_watch._SERVER_FRAMEWORKS) == set(engine.SERVER_FRAMEWORKS)
+
+
+def _stamp(directory: Path, text: str) -> None:
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "server_ready_at").write_text(text, encoding="utf-8")
+
+
+def test_the_boot_of_a_test_is_the_longest_boot_its_round_stamps_record(tmp_path: Path) -> None:
+    _stamp(tmp_path / "variant_00_warmup", "1792596681.010 82.221\n")  # the stamps of a real graded test
+    _stamp(tmp_path / "variant_00_test", "1792596811.700 0.000\n")  # its measured round found the server ready
+
+    assert boot_seconds(tmp_path) == 82.221
+
+
+def test_a_test_whose_rounds_all_found_a_server_ready_booted_none(tmp_path: Path) -> None:
+    _stamp(tmp_path / "variant_00_test", "1792596811.700 0.000\n")
+
+    assert boot_seconds(tmp_path) is None
+
+
+def test_a_test_with_no_stamp_or_a_stamp_that_cannot_be_read_has_no_boot(tmp_path: Path) -> None:
+    assert boot_seconds(tmp_path) is None
+    assert boot_seconds(tmp_path / "never_landed") is None
+    for text in ("", "1792596681.010\n", "1792596681.010 soon\n", "1792596681.010 nan\n", "1792596681.010 inf\n"):
+        _stamp(tmp_path / "bad", text)
+        assert boot_seconds(tmp_path) is None, text

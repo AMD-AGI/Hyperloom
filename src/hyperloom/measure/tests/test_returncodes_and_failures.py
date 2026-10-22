@@ -16,6 +16,7 @@ from hyperloom.measure.failures import (
     FailureClass,
     FailureClassification,
     classify_test_failure,
+    decides_test,
 )
 
 IMPORT_ERROR_LOG = (
@@ -190,3 +191,25 @@ def test_either_phrase_of_the_bind_failure_is_enough_and_it_beats_a_candidate_si
 
 def test_a_successful_exit_is_not_changed_by_a_bind_message_in_its_log() -> None:
     assert _classify(returncode=0, logs=[BIND_LOG]).disposition is Disposition.SUCCEEDED
+
+
+@pytest.mark.parametrize(
+    ("verdict", "decides"),
+    [
+        (FailureClassification(Disposition.FAILED, FailureClass.CANDIDATE, "hip_runtime_error: HIP error: x"), True),
+        (FailureClassification(Disposition.FAILED, FailureClass.CANDIDATE, "import_error"), True),
+        (FailureClassification(Disposition.FAILED, FailureClass.CANDIDATE, "serve_flag: bad flag"), True),
+        (FailureClassification(Disposition.FAILED, FailureClass.CANDIDATE, "eval_runtime_failure"), True),
+        (FailureClassification(Disposition.FAILED, FailureClass.CANDIDATE, "lm_eval_http_400: refused"), True),
+        (FailureClassification(Disposition.FAILED, FailureClass.UNCLEAR, "lm_eval_http_400: refused"), True),
+        (FailureClassification(Disposition.FAILED, FailureClass.UNCLEAR, "python_exception: ValueError: x"), True),
+        (FailureClassification(Disposition.FAILED, FailureClass.CANDIDATE, "server_boot_timeout: 900s"), True),
+        (FailureClassification(Disposition.FAILED, FailureClass.UNCLEAR, "no_known_signature"), False),
+        (FailureClassification(Disposition.FAILED, FailureClass.UNCLEAR, "server_stalled"), False),
+        (FailureClassification(Disposition.FAILED, FailureClass.INFRA, "port_in_use"), False),
+        (FailureClassification(Disposition.STOPPED, failure_reason="session_time_exhausted"), False),
+        (FailureClassification(Disposition.SUCCEEDED), False),
+    ],
+)
+def test_only_a_crashed_or_refusing_server_or_a_failed_evaluation_settles_a_test(verdict, decides) -> None:
+    assert decides_test(verdict) is decides

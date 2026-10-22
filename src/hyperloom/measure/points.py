@@ -29,6 +29,7 @@ from hyperloom.contracts.measurement import TestKind, TestRequest
 from hyperloom.contracts.recipe import LaunchConfig, Recipe, RecipeError
 from hyperloom.inference_optimizer import framework_registry
 from hyperloom.measure.compile import CompiledEnvironment, EnvironmentCompiler
+from hyperloom.measure.eval_context import check_eval_context
 from hyperloom.measure.surface import (
     MeasurementSurface,
     benchmark_envs,
@@ -168,7 +169,9 @@ def generate_points(
     """One YAML per concurrency level, all sharing one service, each checked against its request.
 
     Raises :class:`~hyperloom.measure.surface.SurfaceViolation` when the recipe or the rendered point changes the
-    measurement surface, and :class:`PointError` when the rendered point does not carry the recipe's launch settings.
+    measurement surface, :class:`PointError` when the rendered point does not carry the recipe's launch settings, and
+    :class:`~hyperloom.measure.eval_context.EvalContextError` when an accuracy point's launch serves less context than
+    its evaluation runs in.
     """
 
     if accuracy and canonical.agentx:
@@ -192,6 +195,9 @@ def generate_points(
         check_surface(config, canonical.surface)
         check_point(config, concurrency=level, accuracy=accuracy, reference=point_values(reference))
         _check_launch_present(config, launch, environment.envs)
+        if accuracy:
+            envs, carried = _launch_carriers(config)
+            check_eval_context(envs, carried or "")
         points.append(out_dir / name)
     return tuple(points)
 

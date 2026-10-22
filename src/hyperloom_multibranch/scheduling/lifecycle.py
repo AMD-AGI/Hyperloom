@@ -120,6 +120,9 @@ CHALLENGER_KEY = "frontier_challenger"
 CHALLENGER_EVERY = 4
 #: The ``policy_versions`` key of the grace, :data:`SETTLED_TESTS`: a scorer's record compares only within one grace.
 GRACE_KEY = "grace"
+#: The ``policy_versions`` key of the RSI lesson pool's digest as the specialists' recall read it, empty for no pool:
+#: two sessions of one build that were shown different past lessons differ here.
+LESSONS_KEY = "lessons"
 SCORER_FALLBACK_REASON = "frontier scorer fell back"
 FORCED_DEFAULT_EVIDENCE = f"{DEFAULT_POLICY}: --frontier-policy default"
 PINNED_EVIDENCE = "pinned by --frontier-scorer"
@@ -131,7 +134,7 @@ COMPLETED_REASONS = frozenset(
         SessionStopReason.TIME_EXHAUSTED,
         SessionStopReason.GPU_HOURS_EXHAUSTED,
         SessionStopReason.LLM_BUDGET_EXHAUSTED,
-        SessionStopReason.GLOBAL_CONVERGED,
+        SessionStopReason.JUDGE_STOPPED,
     }
 )
 #: The distribution this package ships in (pyproject.toml ``[project] name``).
@@ -250,6 +253,8 @@ class Session:
         self._judge = Judge(recorded(services.judge_completion, self._notebook, UsageSource.JUDGE), layout.judge, clock)
         scorer = recorded(services.scorer_completion, self._notebook, UsageSource.SCORER)
         self._scorers = ScorerAuthoring(scorer, services.scorer_model)
+        curator = recorded(services.scorer_completion, self._notebook, UsageSource.CURATOR)
+        self._curator = ScorerAuthoring(curator, services.scorer_model)
         self._similarity = BranchSimilarity(peers.repo, self._roster)
         profiler = IntegrationProfiler(peers.toolbox, tests, self._notebook, clock)
         self._events = SessionEvents(self._notebook, self._decisions, profiler, peers.toolbox, settings.workload.tp)
@@ -461,12 +466,14 @@ class Session:
         return choice
 
     def _policy_versions(self) -> dict[str, str]:
+        learnings = self._briefs.learnings
         return {
             **POLICY_VERSIONS,
             FRONTIER_POLICY_KEY: self._frontier.label,
             FRONTIER_SCORER_KEY: self._frontier.scorer.label,
             CHALLENGER_KEY: "1" if self._challenger else "0",
             GRACE_KEY: str(SETTLED_TESTS),
+            LESSONS_KEY: learnings.past_revision() if learnings is not None else "",
         }
 
     def _choose(self, choice: PolicyChoice) -> None:
@@ -503,7 +510,7 @@ class Session:
 
     def _closer(self) -> Closer:
         sources = ExportSources(self._notebook, self._repo, self._blobs, self._dashboard(self._scoring()))
-        services = ExportServices(self._recipe_kb, self._scorers)
+        services = ExportServices(self._recipe_kb, self._scorers, self._curator)
         closing = SessionExports(self._layout, sources, self._metric, self._budget_seconds, services)
         return Closer(self._layout, self._stopper, closing, self._clock)
 
@@ -526,8 +533,8 @@ class Session:
         integration = integration_row(progress)
         if integration is None:
             raise RuntimeError("the notebook has no integration branch after PRELUDE recorded its root")
-        return choose_candidates(
-            progress, integration.head_commit, integration.head_value, self._settings.workload.metric
+        return await choose_candidates(
+            progress, integration.head_commit, integration.head_value, self._settings.workload.metric, self._repo
         )
 
     async def _close(self, ending: SessionOutcome, hard_stop: HardStop) -> SessionOutcome:
@@ -676,6 +683,7 @@ __all__ = [
     "FORCED_DEFAULT_EVIDENCE",
     "FRONTIER_SCORER_KEY",
     "GRACE_KEY",
+    "LESSONS_KEY",
     "SCORER_FALLBACK_REASON",
     "PINNED_EVIDENCE",
     "FRONTIER_POLICY_KEY",

@@ -29,10 +29,11 @@ POINT = """\
 benchmark:
   envs:
     CONC: '4'
+    ISL: '256'
     OSL: 64
     RANDOM_RANGE_RATIO: '1'
 """
-HINTS = {"split_conc": "4", "split_osl": "64", "split_r": "1"}
+HINTS = {"split_conc": "4", "split_osl": "64", "split_r": "1", "split_isl": "256"}
 DEGRADED = {"mode": "deterministic-fallback", "trace_quality": "poor", "warnings": ["graph-under-recorded"]}
 
 
@@ -155,9 +156,10 @@ async def test_the_splitter_hints_are_the_point_configs_not_the_environment(
 @pytest.mark.parametrize(
     ("point", "hints"),
     [
-        (POINT.replace("    CONC: '4'\n", ""), {"split_osl": "64", "split_r": "1"}),
+        (POINT.replace("    CONC: '4'\n", ""), {"split_osl": "64", "split_r": "1", "split_isl": "256"}),
+        (POINT.replace("    ISL: '256'\n", ""), {"split_conc": "4", "split_osl": "64", "split_r": "1"}),
         ("benchmark: [not, a, mapping", {}),
-        (POINT.replace("'4'", "many").replace("64", "0").replace("'1'", "2"), {}),
+        (POINT.replace("'4'", "many").replace("64", "0").replace("'1'", "2").replace("'256'", "-1"), {}),
     ],
 )
 async def test_a_point_that_cannot_give_a_hint_gives_none_and_the_analysis_still_runs(

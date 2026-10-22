@@ -165,6 +165,14 @@ async def test_default_priority_follows_the_purpose_and_queue_state_shows_it() -
     await box.drain()
 
 
+async def test_the_cold_start_is_unknown_until_a_test_settled_and_then_the_attempt_time() -> None:
+    box = _toolbox(attempt_seconds=420.0)
+    assert (await box.queue_state()).cold_start_seconds is None
+    await box.submit_test(_request())
+    await box.drain()
+    assert (await box.queue_state()).cold_start_seconds == 420.0
+
+
 async def test_progress_counts_the_tests_queued_ahead_and_times_the_running_one() -> None:
     box = _toolbox(max_parallel_tests=1, default_k=9)
     running = await box.submit_test(_request(priority=2))  # starts at once, held by the gate

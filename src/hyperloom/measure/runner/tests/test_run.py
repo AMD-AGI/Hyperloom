@@ -5,32 +5,40 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import subprocess
+import sys
 
 import pytest
 import yaml
 
+from hyperloom.contracts.recipe import RecipeDelta
 from hyperloom.measure import signing
 from hyperloom.measure.bundle import BundleExpectation, verify_bundle
+from hyperloom.measure.compile import LocalBlobStore, PackageBase, compile_environment
+from hyperloom.measure.hosted_spec import dir_manifest_sha256
 from hyperloom.measure.manifest import ResultManifest
+from hyperloom.measure.pins import IMAGE_DIGEST_VAR
+from hyperloom.measure.points import default_canonical, generate_points
 from hyperloom.measure.runner import run as runner
 from hyperloom.measure.returncodes import SERVER_BOOT_TIMEOUT_RC
 from hyperloom.measure.runner.hardware import EccCounts, GpuFacts
 from hyperloom.measure.socket import RoundOutcome, TestCall, TestOutcome
 from hyperloom.measure.spec import MeasurementSpec
+from hyperloom.measure.tests._recipes import IMAGE, recipe_with
 from hyperloom.measure.tests.bundle_factory import REQUEST_ID, spec_document
 from hyperloom.contracts.measurement import SandboxFacts
+from hyperloom.orchestrator.actions.executors._workload_envs import default_baseline_config
 
+SHEET_IMAGE = spec_document()["image"]["digest"]
 POINT = {"benchmark": {"model": "/m", "framework": "sglang", "envs": {"TP": 1, "CONC": 4, "RUN_EVAL": "false"}}}
 
 
 def _sheet(**changes) -> dict:
     document = spec_document()
     text = yaml.safe_dump(POINT)
-    import hashlib
-
     document["config"] = [{"yaml": text, "sha256": hashlib.sha256(text.encode()).hexdigest()}]
     document["attachments"] = []
     document["environment"] = {"roots": [], "runtime": None, "blob_root": "/b"}
@@ -79,10 +87,15 @@ def env(tmp_path, key, monkeypatch):
         "MASTER_ADDR": "x",
         "PET_RANK": "0",
         "NCCL_IB_SL": "9",
+        IMAGE_DIGEST_VAR: SHEET_IMAGE,
     }
     monkeypatch.setattr(runner, "ensure_inferencex", lambda commit, cache: tmp_path / "ix")
-    monkeypatch.setattr(runner.hardware, "read_gpu_facts", lambda visible: None)
-    monkeypatch.setattr(runner.hardware, "ecc_counts", lambda visible: None)
+    # a machine that answers every question: the sheet's card, no errors, nothing resident
+    monkeypatch.setattr(
+        runner.hardware, "read_gpu_facts", lambda visible: [GpuFacts(0, "AMD Instinct MI355X", 1400.0, "SPX/NPS1")]
+    )
+    monkeypatch.setattr(runner.hardware, "ecc_counts", lambda visible: {0: EccCounts(0, 0)})
+    monkeypatch.setattr(runner.hardware, "busy_gpus", lambda visible: [])
     return environ
 
 
@@ -395,3 +408,423 @@ def test_a_signing_key_file_that_cannot_be_removed_stops_the_runner_at_start(tmp
     assert _go(tmp_path, env, _sheet()) != 0
 
     assert _status(tmp_path)["error_class"] == "runner_start_failed" and backend.calls == []
+
+
+# --- the start-up check of the cards, the image, and the node after the test ---------------------------------------
+
+
+def test_a_visible_card_that_holds_memory_stops_the_runner_before_it_waits_for_a_sheet(tmp_path, env, monkeypatch):
+    seen: list[list[int]] = []
+    monkeypatch.setattr(runner.hardware, "busy_gpus", lambda visible: seen.append(visible) or [0])
+    backend = _Backend(_ok)
+    monkeypatch.setattr(runner, "LocalMeasurementBackend", backend)
+
+    assert _go(tmp_path, env, None) == 2
+
+    status = _status(tmp_path)
+    assert status["error_class"] == "runner_start_failed" and "GPU 0 already holds memory" in status["message"]
+    assert seen == [[0]], "only the cards this sandbox may use are asked about"
+    assert backend.calls == [] and not (tmp_path / "out" / "manifest.json").exists()
+
+
+def test_a_free_card_lets_the_test_run_and_leaves_no_note(tmp_path, env, monkeypatch):
+    monkeypatch.setattr(runner, "LocalMeasurementBackend", _Backend(_ok))
+
+    assert _go(tmp_path, env, _sheet()) == 0
+
+    assert _status(tmp_path) == {"state": "succeeded", "error_class": None, "message": ""}
+
+
+def test_memory_use_that_cannot_be_read_is_not_a_refusal_but_is_written_down(tmp_path, env, monkeypatch):
+    monkeypatch.setattr(runner.hardware, "busy_gpus", lambda visible: None)
+    monkeypatch.setattr(runner, "LocalMeasurementBackend", _Backend(_ok))
+
+    assert _go(tmp_path, env, _sheet()) == 0
+
+    assert "memory use could not be read" in _status(tmp_path)["message"]
+
+
+def test_a_machine_on_another_image_is_a_preflight_mismatch(tmp_path, env, monkeypatch):
+    other = "sha256:" + "99" * 32
+    env[IMAGE_DIGEST_VAR] = other
+    backend = _Backend(_ok)
+    monkeypatch.setattr(runner, "LocalMeasurementBackend", backend)
+
+    assert _go(tmp_path, env, _sheet()) == 4
+
+    status = _status(tmp_path)
+    assert status["error_class"] == "preflight_mismatch" and backend.calls == []
+    assert other in status["message"] and SHEET_IMAGE in status["message"]
+
+
+def test_a_machine_that_does_not_state_its_image_is_not_refused_but_the_run_says_so(tmp_path, env, monkeypatch):
+    del env[IMAGE_DIGEST_VAR]
+    monkeypatch.setattr(runner, "LocalMeasurementBackend", _Backend(_ok))
+
+    assert _go(tmp_path, env, _sheet()) == 0
+
+    assert f"{IMAGE_DIGEST_VAR} is not set" in _status(tmp_path)["message"]
+
+
+def test_fewer_gpus_visible_after_the_test_are_a_node_fault_and_no_result(tmp_path, env, monkeypatch):
+    two = [
+        GpuFacts(0, "AMD Instinct MI355X", 1400.0, "SPX/NPS1"),
+        GpuFacts(1, "AMD Instinct MI355X", 1400.0, "SPX/NPS1"),
+    ]
+    reads = iter([two, two[:1]])
+    env["ROCR_VISIBLE_DEVICES"] = "0,1"
+    monkeypatch.setattr(runner.hardware, "read_gpu_facts", lambda visible: next(reads))
+    monkeypatch.setattr(runner.hardware, "busy_gpus", lambda visible: [])
+    monkeypatch.setattr(runner.hardware, "ecc_counts", lambda visible: {0: EccCounts(0, 0), 1: EccCounts(0, 0)})
+    monkeypatch.setattr(runner, "LocalMeasurementBackend", _Backend(_ok))
+
+    assert _go(tmp_path, env, _sheet(hardware={**_sheet()["hardware"], "gpu_count": 2})) == 5
+
+    assert _status(tmp_path)["error_class"] == "node_fault" and "fewer GPUs" in _status(tmp_path)["message"]
+    assert not (tmp_path / "out" / "manifest.json").exists()
+
+
+def test_gpus_that_answered_before_the_test_and_do_not_after_it_are_a_node_fault(tmp_path, env, monkeypatch):
+    reads = iter([[GpuFacts(0, "AMD Instinct MI355X", 1400.0, "SPX/NPS1")], None])
+    monkeypatch.setattr(runner.hardware, "read_gpu_facts", lambda visible: next(reads))
+    monkeypatch.setattr(runner, "LocalMeasurementBackend", _Backend(_ok))
+
+    assert _go(tmp_path, env, _sheet()) == 5
+
+    assert _status(tmp_path)["error_class"] == "node_fault" and "cannot be read after" in _status(tmp_path)["message"]
+
+
+@pytest.mark.parametrize(
+    ("before", "after", "said"),
+    [
+        (None, None, "before and after the test"),
+        ({0: EccCounts(0, 0)}, None, "after the test"),
+        (None, {0: EccCounts(0, 0)}, "before the test"),
+    ],
+)
+def test_ecc_counts_that_cannot_be_read_give_no_verdict_and_the_run_says_so(
+    tmp_path, env, monkeypatch, before, after, said
+):
+    counts = iter([before, after])
+    monkeypatch.setattr(runner.hardware, "ecc_counts", lambda visible: next(counts))
+    monkeypatch.setattr(runner, "LocalMeasurementBackend", _Backend(_ok))
+
+    assert _go(tmp_path, env, _sheet()) == 0
+
+    message = _status(tmp_path)["message"]
+    assert f"ECC counts could not be read {said}" in message and "no ECC verdict" in message
+
+
+def test_gpu_facts_that_cannot_be_read_are_not_compared_and_the_run_says_so(tmp_path, env, monkeypatch):
+    monkeypatch.setattr(runner.hardware, "read_gpu_facts", lambda visible: None)
+    monkeypatch.setattr(runner, "LocalMeasurementBackend", _Backend(_ok))
+
+    assert _go(tmp_path, env, _sheet()) == 0
+
+    assert "could not be read; they were not compared" in _status(tmp_path)["message"]
+
+
+# --- what the runner refuses in the sheet before it runs anything --------------------------------------------------
+
+
+def _blob(tmp_path, data: bytes, *, stored_as: bytes | None = None) -> str:
+    """Put ``data`` into the sandbox's /in/blobs under the name of ``stored_as`` (default: its own hash)."""
+    name = hashlib.sha256(data if stored_as is None else stored_as).hexdigest()
+    (tmp_path / "in" / "blobs").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "in" / "blobs" / name).write_bytes(data)
+    return f"sha256:{name}"
+
+
+def _refused(tmp_path, env, monkeypatch, sheet: dict, message: str) -> None:
+    backend = _Backend(_ok)
+    monkeypatch.setattr(runner, "LocalMeasurementBackend", backend)
+
+    assert _go(tmp_path, env, sheet) == 3
+
+    status = _status(tmp_path)
+    assert status["error_class"] == "spec_rejected" and message in status["message"], status
+    assert backend.calls == [] and not (tmp_path / "out" / "manifest.json").exists()
+
+
+def test_a_config_whose_hash_is_not_its_text_is_spec_rejected(tmp_path, env, monkeypatch):
+    sheet = _sheet()
+    sheet["config"][0]["sha256"] = "0" * 64
+
+    _refused(tmp_path, env, monkeypatch, sheet, "does not match the YAML text")
+
+
+def test_an_attachment_blob_that_is_not_its_address_is_spec_rejected(tmp_path, env, monkeypatch):
+    address = _blob(tmp_path, b"tampered", stored_as=b"what the sheet names")
+    attachment = {"id": "csv1", "kind": "file", "blob": address, "manifest_sha256": "44" * 32}
+
+    _refused(tmp_path, env, monkeypatch, _sheet(attachments=[attachment]), "does not hash to")
+
+
+def test_a_blob_that_is_not_in_the_sandbox_is_spec_rejected(tmp_path, env, monkeypatch):
+    attachment = {"id": "csv1", "kind": "file", "blob": "sha256:" + "33" * 32, "manifest_sha256": "44" * 32}
+    (tmp_path / "in").mkdir()
+
+    _refused(tmp_path, env, monkeypatch, _sheet(attachments=[attachment]), "is not in /in/blobs")
+
+
+def test_a_framework_file_blob_that_is_not_its_address_is_spec_rejected(tmp_path, env, monkeypatch):
+    point = yaml.safe_dump(
+        {
+            "benchmark": {
+                **POINT["benchmark"],
+                "envs": {**POINT["benchmark"]["envs"], "HYPERLOOM_FRAMEWORK_PYTHON": sys.executable},
+            }
+        }
+    )
+    address = _blob(tmp_path, b"MARKER = 1\n", stored_as=b"another file")
+    entry = {"path": "__init__.py", "op": "upsert", "blob": address, "mode": "0644"}
+    root = {
+        "id": "yaml",
+        "kind": "package",
+        "import_name": "yaml",
+        "dist": {"name": "PyYAML", "version": "0"},
+        "entries": [entry],
+    }
+    sheet = _sheet(
+        config=[{"yaml": point, "sha256": hashlib.sha256(point.encode()).hexdigest()}],
+        environment={"roots": [root], "runtime": None, "blob_root": "/b"},
+    )
+
+    _refused(tmp_path, env, monkeypatch, sheet, "does not hash to")
+
+
+def _snapshot(tmp_path) -> tuple[str, str]:
+    """A snapshot directory of two files and the manifest hash a sheet would name for it."""
+    root = tmp_path / "snapshot"
+    (root / "lib").mkdir(parents=True)
+    (root / "lib" / "a.py").write_text("a = 1\n")
+    (root / "b.cfg").write_text("b\n")
+    entries = [
+        (rel, (root / rel).stat().st_size, hashlib.sha256((root / rel).read_bytes()).hexdigest())
+        for rel in ("b.cfg", "lib/a.py")
+    ]
+    return str(root), dir_manifest_sha256(entries)
+
+
+def _with_snapshot(snapshot: str, manifest: str) -> dict:
+    return _sheet(
+        environment={"roots": [], "runtime": {"snapshot": snapshot, "manifest_sha256": manifest}, "blob_root": "/b"}
+    )
+
+
+def test_a_runtime_snapshot_that_is_its_manifest_lets_the_test_run(tmp_path, env, monkeypatch):
+    backend = _Backend(_ok)
+    monkeypatch.setattr(runner, "LocalMeasurementBackend", backend)
+
+    assert _go(tmp_path, env, _with_snapshot(*_snapshot(tmp_path))) == 0
+
+    assert len(backend.calls) == 1
+
+
+@pytest.mark.parametrize(
+    ("damage", "message"),
+    [
+        (lambda root: (root / "lib" / "a.py").write_text("a = 2\n"), "does not match its manifest hash"),
+        (lambda root: (root / "extra.py").write_text("x\n"), "does not match its manifest hash"),
+        (lambda root: (root / "b.cfg").unlink(), "does not match its manifest hash"),
+        (lambda root: (root / "link").symlink_to("/etc/passwd"), "holds a symbolic link"),
+        (lambda root: shutil.rmtree(root), "is not a directory"),
+    ],
+    ids=["changed", "added", "removed", "link", "gone"],
+)
+def test_a_runtime_snapshot_that_is_not_its_manifest_is_spec_rejected(tmp_path, env, monkeypatch, damage, message):
+    snapshot, manifest = _snapshot(tmp_path)
+    damage(tmp_path / "snapshot")
+
+    _refused(tmp_path, env, monkeypatch, _with_snapshot(snapshot, manifest), message)
+
+
+def test_a_model_file_that_is_not_its_recorded_hash_is_spec_rejected(tmp_path, env, monkeypatch):
+    model = tmp_path / "model"
+    model.mkdir()
+    (model / "config.json").write_text('{"hidden": 1}')
+    point = yaml.safe_dump({"benchmark": {**POINT["benchmark"], "model": str(model)}})
+    sheet = _sheet(
+        config=[{"yaml": point, "sha256": hashlib.sha256(point.encode()).hexdigest()}],
+        model_hashes={"config.json": hashlib.sha256(b'{"hidden": 2}').hexdigest()},
+    )
+
+    _refused(tmp_path, env, monkeypatch, sheet, "model file config.json differs from the recorded hash")
+
+
+def test_a_model_file_that_is_its_recorded_hash_lets_the_test_run(tmp_path, env, monkeypatch):
+    model = tmp_path / "model"
+    model.mkdir()
+    (model / "config.json").write_text('{"hidden": 1}')
+    point = yaml.safe_dump({"benchmark": {**POINT["benchmark"], "model": str(model)}})
+    sheet = _sheet(
+        config=[{"yaml": point, "sha256": hashlib.sha256(point.encode()).hexdigest()}],
+        model_hashes={"config.json": hashlib.sha256(b'{"hidden": 1}').hexdigest()},
+    )
+    monkeypatch.setattr(runner, "LocalMeasurementBackend", _Backend(_ok))
+
+    assert _go(tmp_path, env, sheet) == 0
+
+
+def test_a_recorded_model_file_the_machine_does_not_have_is_spec_rejected(tmp_path, env, monkeypatch):
+    sheet = _sheet(model_hashes={"config.json": "77" * 32})
+
+    _refused(tmp_path, env, monkeypatch, sheet, "model file config.json unreadable")
+
+
+# --- the measurement surface the runner signs (design 4.20) --------------------------------------------------------
+
+
+def _surface_run(tmp_path, env, key, name: str, config: dict) -> str | None:
+    """Run the sheet for ``config`` in its own directory; the ``surface_sha256`` of the signed manifest."""
+    root = tmp_path / name
+    root.mkdir()
+    key_file = root / "key.pem"
+    key_file.write_bytes(signing.private_key_pem(key))
+    text = yaml.safe_dump(config)
+    sheet = _sheet(config=[{"yaml": text, "sha256": hashlib.sha256(text.encode()).hexdigest()}])
+
+    assert _go(root, {**env, "HYPERLOOM_SIGNING_KEY_FILE": str(key_file)}, sheet) == 0, _status(root)
+
+    return ResultManifest.from_bytes((root / "out" / "manifest.json").read_bytes()).surface_sha256
+
+
+def _surface_config(tmp_path, **envs) -> dict:
+    model = tmp_path / "model"
+    model.mkdir(exist_ok=True)
+    (model / "config.json").write_text('{"hidden": 1}')
+    scripts = tmp_path / "ix" / "benchmarks"
+    scripts.mkdir(parents=True, exist_ok=True)
+    (scripts / "run.sh").write_text("run --isl $ISL\n")
+    values = {"TP": 1, "CONC": 4, "RUN_EVAL": "false", "ISL": 1024, "OSL": 1024, **envs}
+    benchmark = {"model": str(model), "framework": "sglang", "benchmark_script": "run.sh", "envs": values}
+    return {"benchmark": benchmark}
+
+
+def test_the_runner_signs_the_surface_of_the_yaml_it_executes(tmp_path, env, key, monkeypatch):
+    monkeypatch.setattr(runner, "LocalMeasurementBackend", _Backend(_ok))
+
+    first = _surface_run(tmp_path, env, key, "first", _surface_config(tmp_path))
+    again = _surface_run(tmp_path, env, key, "again", _surface_config(tmp_path))
+    other_request = _surface_run(tmp_path, env, key, "conc", _surface_config(tmp_path, CONC=64, RUN_EVAL="true"))
+
+    assert first is not None and len(first) == 64
+    assert again == first and other_request == first, "the request's own settings are not part of the surface"
+
+
+def _rewrite(path_in_tmp: str, text: str):
+    """A change that rewrites one of the surface's files and keeps the YAML."""
+
+    def change(tmp_path, config):
+        (tmp_path / path_in_tmp).write_text(text)
+        return config
+
+    return change
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        lambda tmp_path, config: _surface_config(tmp_path, ISL=2048),
+        lambda tmp_path, config: _surface_config(tmp_path, MAGPIE_EVAL_LIMIT=5),
+        _rewrite("ix/benchmarks/run.sh", "run --other\n"),
+        _rewrite("model/config.json", '{"hidden": 2}'),
+    ],
+    ids=["workload", "evaluation", "benchmark_script_content", "model_file"],
+)
+def test_a_changed_surface_input_changes_the_signed_hash(tmp_path, env, key, monkeypatch, change):
+    monkeypatch.setattr(runner, "LocalMeasurementBackend", _Backend(_ok))
+    config = _surface_config(tmp_path)
+    before = _surface_run(tmp_path, env, key, "before", config)
+
+    after = _surface_run(tmp_path, env, key, "after", change(tmp_path, config))
+
+    assert after != before
+
+
+@pytest.fixture
+def accepted(tmp_path, monkeypatch):
+    """What acceptance makes of a request: the canonical surface and the YAML of its point, from the real renderer."""
+    for name in (
+        "CONC",
+        "ISL",
+        "OSL",
+        "RANDOM_RANGE_RATIO",
+        "RUN_EVAL",
+        "TP",
+        "EP",
+        "PORT",
+        "MAX_MODEL_LEN",
+        "PRECISION",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    for name in (
+        "MAGPIE_EVAL_TASKS",
+        "MAGPIE_EVAL_LIMIT",
+        "MAGPIE_EVAL_TOKENIZED_REQUESTS",
+        "INFERENCE_OPTIMIZER_SERVER_ARGS",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("FRAMEWORK", "sglang")
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path / "userdata"))
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
+    model = tmp_path / "model"
+    model.mkdir()
+    (model / "config.json").write_text("{}")
+    canonical = default_canonical(
+        tmp_path / "canonical", primary_concurrency=32, config_path=default_baseline_config(), model_path=str(model)
+    )
+    base = PackageBase("sglang", tmp_path, None, None)
+    environment = compile_environment(
+        recipe_with(),
+        RecipeDelta(),
+        blobs=LocalBlobStore(tmp_path / "blobs"),
+        active_image_digest=IMAGE,
+        locator=lambda _l: base,
+    )
+    (point,) = generate_points(environment, canonical, tmp_path / "points", concurrency=(8,))
+    return canonical, point
+
+
+def test_the_hash_the_runner_signs_is_the_one_acceptance_computed_for_the_same_request(
+    tmp_path, env, key, monkeypatch, accepted
+):
+    canonical, point = accepted
+    text = point.read_text()
+    monkeypatch.setattr(runner, "LocalMeasurementBackend", _Backend(_ok))
+
+    signed = _surface_run(tmp_path, env, key, "run", yaml.safe_load(text))
+
+    assert signed == canonical.surface.sha256
+
+    (tmp_path / "model" / "config.json").write_text('{"changed": true}')
+    assert _surface_run(tmp_path, env, key, "later", yaml.safe_load(text)) != canonical.surface.sha256
+
+
+def test_under_magpie_the_signed_script_hash_is_of_the_launcher_the_backend_installs(tmp_path, env, key, monkeypatch):
+    """The backend overwrites the checkout's script with Magpie's launcher; the surface is of the file that runs."""
+    magpie = tmp_path / "magpie-checkout"
+    (magpie / "Magpie" / "scripts" / "benchmark").mkdir(parents=True)
+    (magpie / "Magpie" / "scripts" / "benchmark" / "run.sh").write_text("magpie launcher\n")
+    monkeypatch.setattr(runner, "ensure_magpie", lambda commit, cache: magpie)
+    monkeypatch.setenv("MAGPIE_PATH", str(magpie))
+    monkeypatch.setattr(runner, "LocalMeasurementBackend", _Backend(_ok))
+    config = _surface_config(tmp_path)
+
+    def signed(name: str, sheet_backend: str) -> str | None:
+        root = tmp_path / name
+        root.mkdir()
+        (root / "key.pem").write_bytes(signing.private_key_pem(key))
+        text = yaml.safe_dump(config)
+        sheet = _sheet(config=[{"yaml": text, "sha256": hashlib.sha256(text.encode()).hexdigest()}])
+        sheet["procedure"]["benchmark_backend"] = sheet_backend
+        assert _go(root, {**env, "HYPERLOOM_SIGNING_KEY_FILE": str(root / "key.pem")}, sheet) == 0, _status(root)
+        return ResultManifest.from_bytes((root / "out" / "manifest.json").read_bytes()).surface_sha256
+
+    stale_checkout = signed("bypass", "bypass")  # no launcher installed: the script is the checkout's own
+    installed = signed("magpie", "magpie")
+    (tmp_path / "ix" / "benchmarks" / "run.sh").write_text("magpie launcher\n")
+    already_installed = signed("settled", "bypass")
+
+    assert installed != stale_checkout
+    assert installed == already_installed

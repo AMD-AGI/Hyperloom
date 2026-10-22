@@ -39,6 +39,7 @@ from hyperloom_multibranch.scheduling.final import (
     FinalCandidate,
     FinalCandidates,
     PRIMARY_POINT_ONLY,
+    REPRODUCTION_POINT_ONLY,
     FinalSelector,
     choose_candidates,
     pick_final,
@@ -71,6 +72,8 @@ START = 100.0
 VALIDATION_SECONDS = 24 * 3600.0
 INTEGRATION = FinalCandidate("integration", INTEGRATION_BRANCH, "i1", 1040.0)
 BRANCH = FinalCandidate("best_branch", "b02", "c7", 1060.0)
+#: What a test of either committed tag measures, where the tests are about which commits are candidates at all.
+CURVES: Curves = {frozenset({"i1"}): {MAIN_POINT: 1040.0}, frozenset({"c7"}): {MAIN_POINT: 1060.0}}
 
 
 def _row(branch: str, head: str, value: float | None, commits: int = 1, running: bool = True) -> BranchProgress:
@@ -78,28 +81,41 @@ def _row(branch: str, head: str, value: float | None, commits: int = 1, running:
     return BranchProgress(branch, running, "c0", head, 3, commits, 0.0, values)
 
 
-def test_the_best_single_branch_is_chosen_over_every_branch_whatever_stopped_it() -> None:
+async def test_the_best_single_branch_is_chosen_over_every_branch_whatever_stopped_it(tmp_path: Path) -> None:
+    bench = await Bench(tmp_path).build(CURVES)
     progress = (
-        _row("b01", "c5", 1100.0, running=False),
-        _row("b02", "c7", 1060.0, running=False),
-        _row("b03", "i1", 1200.0),
+        _row("b01", bench.commits["i1"], 1100.0, running=False),
+        _row("b02", bench.commits["c7"], 1060.0, running=False),
+        _row("b03", bench.root, 1200.0),
         _row("b04", "c0", 1300.0, commits=0),
         _row("b05", "c9", None),
     )
 
-    candidates = choose_candidates(progress, "i1", {METRIC: 1040.0}, METRIC)
+    candidates = await choose_candidates(progress, bench.root, {METRIC: 1040.0}, METRIC, bench.repo)
 
-    assert candidates.integration == INTEGRATION
-    assert candidates.best_branch == FinalCandidate("best_branch", "b01", "c5", 1100.0)
+    assert candidates.integration == FinalCandidate("integration", INTEGRATION_BRANCH, bench.root, 1040.0)
+    assert candidates.best_branch == FinalCandidate("best_branch", "b01", bench.commits["i1"], 1100.0)
 
 
-def test_without_a_committed_branch_only_the_integration_head_is_a_candidate() -> None:
-    rows = (_row(INTEGRATION_BRANCH, "i1", 1040.0), _row("b01", "c0", None, commits=0))
+async def test_the_branch_whose_recipe_the_integration_head_already_carries_is_no_candidate(tmp_path: Path) -> None:
+    bench = await Bench(tmp_path).build(CURVES)
+    twin = await bench.commit_on("b03", "i1", 1040.0)
+    progress = (_row("b02", bench.commits["c7"], 1060.0), _row("b03", twin, 1200.0))
 
-    candidates = choose_candidates(rows, "i1", {}, METRIC)
+    candidates = await choose_candidates(progress, bench.commits["i1"], {METRIC: 1040.0}, METRIC, bench.repo)
+
+    assert twin != bench.commits["i1"]
+    assert candidates.best_branch == FinalCandidate("best_branch", "b02", bench.commits["c7"], 1060.0)
+
+
+async def test_without_a_committed_branch_only_the_integration_head_is_a_candidate(tmp_path: Path) -> None:
+    bench = await Bench(tmp_path).build(CURVES)
+    rows = (_row(INTEGRATION_BRANCH, bench.root, 1040.0), _row("b01", "c0", None, commits=0))
+
+    candidates = await choose_candidates(rows, bench.root, {}, METRIC, bench.repo)
 
     assert candidates.best_branch is None
-    assert candidates.each == (FinalCandidate("integration", INTEGRATION_BRANCH, "i1", None),)
+    assert candidates.each == (FinalCandidate("integration", INTEGRATION_BRANCH, bench.root, None),)
 
 
 def _check(candidate: FinalCandidate, curve: dict[int, float], accuracy_passed: bool = True) -> CandidateCheck:
@@ -198,7 +214,7 @@ class Bench:
 
     async def build(self, curves: Curves) -> Bench:
         self.repo = GitExperimentRepo(self.tmp_path / "repo", LocalBlobStore(self.tmp_path / "blobs"))
-        root = await self.repo.init_root(Recipe(BASE_IMAGE_DIGEST))
+        self.root = root = await self.repo.init_root(Recipe(BASE_IMAGE_DIGEST))
         scheduler = self.handle(Role.SCHEDULER)
         await scheduler.record_lineage(LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id=root))
         self.toolbox = RecordingToolbox(self.handle(Role.TOOLBOX), recipe_effect(self.tmp_path / "repo", curves))
@@ -206,12 +222,20 @@ class Bench:
         self.gate = session_gate(self.handle(Role.GATE), self.toolbox)
         baseline = integration_test_request(TestKind.TEST, Purpose.BASELINE, root)
         await self.gate.establish_baseline(root, [await self.tests.submit(baseline) for _ in range(BASELINE_TESTS)])
-        settler = RuleGate(self.handle(Role.GATE), self.repo, NoForks(), self.toolbox)
+        self.settler = RuleGate(self.handle(Role.GATE), self.repo, NoForks(), self.toolbox)
+        self.scheduler = scheduler
         for branch, tag, value in (("b01", "i1", 1040.0), ("b02", "c7", 1060.0)):
-            await scheduler.record_lineage(LineageEvent(LineageKind.OPEN, branch, from_commit=root, reason="first"))
-            await self.repo.create_branch(branch, root)
-            self.commits[tag] = await self._commit(settler, branch, tag, value)
+            self.commits[tag] = await self.commit_on(branch, tag, value)
         return self
+
+    async def commit_on(self, branch: str, tag: str, value: float) -> str:
+        """``tag``'s change opened on ``branch`` off the root and settled at ``value``; committing one tag on two
+        branches is how one recipe comes to sit on two commits, as a merge of a branch's work leaves it."""
+
+        event = LineageEvent(LineageKind.OPEN, branch, from_commit=self.root, reason="first")
+        await self.scheduler.record_lineage(event)
+        await self.repo.create_branch(branch, self.root)
+        return await self._commit(self.settler, branch, tag, value)
 
     async def _commit(self, settler: RuleGate, branch: str, tag: str, value: float) -> str:
         """``tag``'s change measured on ``branch`` and settled as a gain recorded at ``value``, as the specialist
@@ -290,15 +314,17 @@ async def test_an_agentx_candidate_is_measured_at_the_primary_operating_point_al
     assert choice.reason == f"the higher {GRADED_INTVTY_P50} at conc {CONC}; {PRIMARY_POINT_ONLY}"
 
 
-async def test_an_unmeasured_test_a_failed_sweep_or_a_failed_accuracy_disqualifies(tmp_path: Path) -> None:
+async def test_an_unmeasured_test_or_a_failed_accuracy_disqualifies_a_failed_sweep_does_not(tmp_path: Path) -> None:
     bench = await Bench(tmp_path).build({frozenset({"i1"}): {MAIN_POINT: 1040.0}})
     bench.fail("c7", Fate.MEASUREMENT)
     bench.fail("i1", Fate.CANDIDATE, TestKind.SWEEP)
 
     choice = await bench.selector().select(bench.candidates())
 
-    assert choice.chosen is None
-    assert choice.checks[0].error == "the sweep ended candidate_failed (serve_flag)"
+    assert choice.chosen == choice.checks[0].candidate
+    assert (dict(choice.checks[0].curve), choice.checks[0].error) == ({CONC: pytest.approx(1040.0)}, "")
+    assert "the sweep ended candidate_failed (serve_flag)" in choice.reason
+    assert REPRODUCTION_POINT_ONLY in choice.reason
     assert "measurement_failed" in choice.checks[1].error
 
     bench = await Bench(tmp_path / "again").build({frozenset({"i1"}): {MAIN_POINT: 1040.0, CONC: 1040.0}})
@@ -367,15 +393,18 @@ class CrashedSweepTests(SessionTests):
         )
 
 
-async def test_a_sweep_that_failed_after_measuring_the_primary_conc_disqualifies(tmp_path: Path) -> None:
+async def test_a_sweep_that_crashed_leaves_the_candidate_ranked_on_its_reproduction(tmp_path: Path) -> None:
     bench = await Bench(tmp_path).build({frozenset({"i1"}): {MAIN_POINT: 1040.0}})
     bench.tests = CrashedSweepTests(bench.toolbox, bench.time.clock)
 
     choice = await bench.selector().select(bench.candidates(both=False))
 
     [check] = choice.checks
-    assert choice.chosen is None and check.reproduced and check.accuracy_passed
-    assert (check.curve, check.error) == ({}, "the sweep ended candidate_failed (server crashed)")
+    assert choice.chosen == check.candidate and check.reproduced and check.accuracy_passed
+    assert (dict(check.curve), check.error) == ({CONC: pytest.approx(1040.0)}, "")
+    assert check.degraded_concs == ()
+    assert "the sweep ended candidate_failed (server crashed)" in choice.reason
+    assert REPRODUCTION_POINT_ONLY in choice.reason
 
 
 async def test_final_waits_for_its_validation_however_long_it_runs(tmp_path: Path) -> None:

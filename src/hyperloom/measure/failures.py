@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from enum import Enum
 
 from hyperloom.common.failure_signature import (
+    EVAL_RUNTIME_FAILURE,
     HIP_KERNEL_MISSING,
     HIP_RUNTIME_ERROR,
     IMPORT_ERROR,
@@ -74,6 +75,7 @@ PORT_IN_USE_REASON = "port_in_use"
 #: The server did not report ready within the boot limit (``hyperloom.measure.boot_watch``).
 SERVER_BOOT_TIMEOUT_REASON = "server_boot_timeout"
 #: The two causes an unclear failure names when its log carries them; the reason is ``<prefix>: <the log's line>``.
+#: A failure the log only calls a crashed evaluation names the refused request too, when the log carries one.
 LM_EVAL_BAD_REQUEST_REASON = "lm_eval_http_400"
 PYTHON_EXCEPTION_REASON = "python_exception"
 NO_KNOWN_SIGNATURE_REASON = "no_known_signature"
@@ -84,6 +86,21 @@ _QUOTED_KINDS = {
     HIP_KERNEL_MISSING: log_causes.missing_hip_kernel,
     HIP_RUNTIME_ERROR: log_causes.hip_error,
 }
+#: The causes that decide a test on their own once the warmup or the accuracy round states one: the server crashed or
+#: refused to serve, or its evaluation failed. Measuring what is left would only boot a server that cannot serve; any
+#: other end (a port taken, an unnamed log, a stalled server) keeps the rounds after it, since a later round's logs can
+#: still name the cause. The names are the part of a reason before its ``: <the log's line>``.
+_DECISIVE_REASONS = frozenset(
+    {
+        HIP_RUNTIME_ERROR,
+        IMPORT_ERROR,
+        SERVE_FLAG,
+        EVAL_RUNTIME_FAILURE,
+        LM_EVAL_BAD_REQUEST_REASON,
+        PYTHON_EXCEPTION_REASON,
+        SERVER_BOOT_TIMEOUT_REASON,
+    }
+)
 _PORT_IN_USE = re.compile(r"address already in use|\[Errno 98\]", re.IGNORECASE)
 
 # Sentinel return codes of the local flow (``orchestrator/actions/executors/_subprocess_kill.py``). The names stay
@@ -177,6 +194,12 @@ def classify_test_failure(
     return _from_unnamed_logs(text)
 
 
+def decides_test(verdict: FailureClassification) -> bool:
+    """Whether ``verdict`` names a cause that settles the test, so the rounds that are left need not run."""
+    reason = verdict.failure_reason or ""
+    return verdict.disposition is Disposition.FAILED and reason.split(":", 1)[0] in _DECISIVE_REASONS
+
+
 def _from_error_class(error_class: str) -> FailureClassification:
     if error_class in INFRA_ERROR_CLASSES:
         return _infra(error_class)
@@ -192,6 +215,10 @@ def _named_by_logs(text: str) -> FailureClassification | None:
     if _PORT_IN_USE.search(text):
         return _infra(PORT_IN_USE_REASON)
     signature = classify_failure(text)
+    if signature.kind == EVAL_RUNTIME_FAILURE:
+        refusal = log_causes.bad_request(text)
+        if refusal:
+            return _candidate(f"{LM_EVAL_BAD_REQUEST_REASON}: {refusal}")
     if signature.is_actionable:
         # The signature names the kind; the line of the log that states it names the flag or the module.
         reader = _QUOTED_KINDS.get(signature.kind)

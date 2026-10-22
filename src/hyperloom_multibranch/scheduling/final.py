@@ -4,10 +4,13 @@
 """FINAL: which commit the session hands on, the integration head or the best single branch's head.
 
 The candidates are the integration head and the specialist head with the highest recorded value, whatever stopped
-its branch. Each is validated through the toolbox as a session measurement: one ``SWEEP`` test over the workload's
+its branch, unless that head carries the recipe the integration head already carries, which a merge of its work
+leaves behind. Each is validated through the toolbox as a session measurement: one ``SWEEP`` test over the workload's
 :attr:`~hyperloom_multibranch.scheduling.settings.Workload.final_concs`, read per conc from its rounds, and a
 cold-start reproduction the rule gate measures against the commit's own recorded value and holds to the accuracy gate,
-and the regression set of the commit's own ancestry run on the commit itself. The toolbox measures a
+and the regression set of the commit's own ancestry run on the commit itself. A sweep that gives no value at the
+operating point that decides does not void the candidate: the reproduction measured the same commit there, so the
+candidate is ranked on that one point and the choice's reason says so. The toolbox measures a
 sweep over the concs its request names and the primary one alone when it names none, so FINAL names them. FINAL
 waits for every validation test it started, past its reserve and the session's deadline if need be.
 The primary operating point (the workload's conc) decides; a candidate
@@ -28,7 +31,9 @@ from hyperloom.contracts.measurement import Purpose, TestKind, TestResult, Valid
 from hyperloom_multibranch.contracts.gate import NotMeasured
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.notebook.records import BranchProgress
+from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import RequestRejected, TestWithdrawn
+from hyperloom_multibranch.notebook.changes import same_recipe
 from hyperloom_multibranch.scheduling.integrator import defects_beyond_gain
 from hyperloom_multibranch.scheduling.requests import (
     NO_DELTA,
@@ -48,6 +53,10 @@ MB_REPRODUCTION_TOLERANCE_PCT = 5.0
 
 MEASURE_PHASE = "measure"
 PRIMARY_POINT_ONLY = "measured at the primary operating point alone: the workload defines no conc sweep"
+#: A candidate whose sweep gave no value at the operating point that decides is ranked on its cold-start
+#: reproduction, which measured the same commit there. It then has no other operating point, so it degrades nowhere
+#: and the degradation rule holds nothing against it.
+REPRODUCTION_POINT_ONLY = "ranked on its cold-start reproduction at the primary operating point"
 
 INTEGRATION_LABEL = "integration"
 BEST_BRANCH_LABEL = "best_branch"
@@ -92,23 +101,40 @@ def _branch_candidate(row: BranchProgress, integration_head: str, metric: str) -
     return FinalCandidate(BEST_BRANCH_LABEL, row.branch, row.head_commit, value)
 
 
-def choose_candidates(
+async def choose_candidates(
     progress: Sequence[BranchProgress],
     integration_head: str,
     integration_value: Mapping[str, float],
     metric: str,
+    repo: ExperimentRepo,
 ) -> FinalCandidates:
     """The integration head and the specialist head with the highest recorded ``metric`` over every branch the
     notebook knows.
 
-    A branch with no commit, or whose head is the integration head, offers no single-branch candidate.
+    A branch with no commit offers no single-branch candidate, and neither does one whose head carries the recipe the
+    integration head already carries: a merge writes the branch's work as a new commit, so the two differ by commit
+    and are one recipe, which FINAL would otherwise validate twice. The next branch down then stands for the session's
+    single-branch work instead.
     """
 
     offered = [_branch_candidate(row, integration_head, metric) for row in progress]
-    ranked = [candidate for candidate in offered if candidate is not None]
-    best = max(ranked, key=lambda candidate: candidate.recorded_value, default=None)
+    ranked = sorted((row for row in offered if row is not None), key=lambda candidate: -candidate.recorded_value)
     integration = FinalCandidate(INTEGRATION_LABEL, INTEGRATION_BRANCH, integration_head, integration_value.get(metric))
-    return FinalCandidates(integration, best)
+    return FinalCandidates(integration, await _best_of_its_own(ranked, integration_head, repo))
+
+
+async def _best_of_its_own(
+    ranked: Sequence[FinalCandidate], integration_head: str, repo: ExperimentRepo
+) -> FinalCandidate | None:
+    """The first of ``ranked`` whose commit is not the integration head's recipe over again."""
+
+    if not ranked:
+        return None
+    head = await repo.read_recipe(integration_head)
+    for candidate in ranked:
+        if not same_recipe(await repo.read_recipe(candidate.commit), head):
+            return candidate
+    return None
 
 
 @dataclass(frozen=True)
@@ -116,7 +142,8 @@ class CandidateCheck:
     """What validating one candidate found.
 
     ``curve`` is the sweep's primary metric per conc, without the concs it measured nothing at; ``degraded_concs``
-    are the sweep points that fell below the other candidate's.
+    are the sweep points that fell below the other candidate's. ``note`` says what the choice's reason should carry
+    about how this candidate was measured, for a candidate that was still ranked on something short of a whole sweep.
     """
 
     candidate: FinalCandidate
@@ -126,6 +153,7 @@ class CandidateCheck:
     regression_passed: bool = False
     degraded_concs: tuple[int, ...] = ()
     error: str = ""
+    note: str = ""
 
     @property
     def eligible(self) -> bool:
@@ -184,17 +212,23 @@ def pick_final(checks: tuple[CandidateCheck, ...], metric: str, conc: int) -> Fi
         reason = f"every candidate degrades somewhere in the sweep; the higher {metric} at conc {conc} decides"
     else:
         reason = f"the higher {metric} at conc {conc}"
-    return FinalChoice(chosen.candidate, marked, reason, metric, conc)
+    notes = "; ".join(check.note for check in marked if check.note)
+    return FinalChoice(chosen.candidate, marked, f"{reason}; {notes}" if notes else reason, metric, conc)
 
 
 @dataclass(frozen=True)
 class _Reproduction:
     """A cold start of a candidate: ``reproduced`` when it measures within :data:`MB_REPRODUCTION_TOLERANCE_PCT` of the
     commit's own recorded value and nothing but the missing gain refused it (not dropped requests, a broken guard, a
-    pair that did not measure the same work), and ``accuracy_passed`` when it clears the accuracy gate."""
+    pair that did not measure the same work), and ``accuracy_passed`` when it clears the accuracy gate.
+
+    ``value`` is what it measured of the primary metric at the operating point that decides, which is the sweep's
+    primary point: the candidate is ranked on it when the sweep gave nothing there.
+    """
 
     reproduced: bool
     accuracy_passed: bool
+    value: float | None
 
 
 class FinalSelector:
@@ -232,21 +266,29 @@ class FinalSelector:
         repro = asyncio.ensure_future(self._reproduction(candidate.commit))
         regression = asyncio.ensure_future(self._regression.check(candidate.commit, NO_DELTA, sources=()))
         await together(sweep, repro, regression)
-        swept = sweep.result()
-        measured = swept.validity is Validity.SUCCEEDED
+        swept, reproduction = sweep.result(), repro.result()
         check = CandidateCheck(
             candidate,
-            sweep_curve(swept, self._metric) if measured else {},
-            repro.result().accuracy_passed,
-            repro.result().reproduced,
+            sweep_curve(swept, self._metric) if swept.validity is Validity.SUCCEEDED else {},
+            reproduction.accuracy_passed,
+            reproduction.reproduced,
             regression.result().passed,
         )
-        if not measured:
-            reason = swept.failure_reason or "no reason given"
-            return replace(check, error=f"the sweep ended {swept.validity.value} ({reason})")
-        if self._workload.conc not in check.curve:
-            return replace(check, error=f"the sweep has no {self._metric} at the primary conc {self._workload.conc}")
-        return check
+        if self._workload.conc in check.curve:
+            return check
+        missing = self._no_primary_point(swept)
+        if reproduction.value is None:
+            return replace(check, error=missing)
+        return replace(
+            check, curve={self._workload.conc: reproduction.value}, note=f"{missing}, {REPRODUCTION_POINT_ONLY}"
+        )
+
+    def _no_primary_point(self, swept: TestResult) -> str:
+        """Why the sweep gave no value of the primary metric at the conc that decides."""
+
+        if swept.validity is not Validity.SUCCEEDED:
+            return f"the sweep ended {swept.validity.value} ({swept.failure_reason or 'no reason given'})"
+        return f"the sweep has no {self._metric} at the primary conc {self._workload.conc}"
 
     async def _sweep(self, commit: str) -> TestResult:
         concs = self._workload.final_concs
@@ -262,13 +304,15 @@ class FinalSelector:
         judgement = await self._gate.compare(request_id)
         held = judgement.gain_pct >= -MB_REPRODUCTION_TOLERANCE_PCT
         reproduced = held and not defects_beyond_gain(judgement)
-        return _Reproduction(reproduced, await self._gate.accuracy_passes(request_id))
+        accuracy = await self._gate.accuracy_passes(request_id)
+        return _Reproduction(reproduced, accuracy, judgement.recorded_value.get(self._metric))
 
 
 __all__ = [
     "MB_REPRODUCTION_TOLERANCE_PCT",
     "MB_SWEEP_DEGRADATION_PCT",
     "PRIMARY_POINT_ONLY",
+    "REPRODUCTION_POINT_ONLY",
     "CandidateCheck",
     "FinalCandidate",
     "FinalCandidates",

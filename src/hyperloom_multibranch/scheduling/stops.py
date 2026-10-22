@@ -51,7 +51,9 @@ class SessionStopReason(str, Enum):
     GPU_HOURS_EXHAUSTED = "gpu_hours_exhausted"
     #: The specialists' recorded LLM spend reached ``--max-llm-usd``; FINAL still runs.
     LLM_BUDGET_EXHAUSTED = "llm_budget_exhausted"
-    GLOBAL_CONVERGED = "global_converged"
+    #: The judge answered ``stop_session``: nothing measures convergence, so this is its judgement and not a
+    #: measurement. FINAL still runs, and the session counts as one that ran its course.
+    JUDGE_STOPPED = "judge_stopped"
     SIGNAL = "signal"
     PRELUDE_FAILED = "prelude_baseline_failed"
     #: The toolbox has fewer usable cards than one test needs; FINAL is skipped and the session failed.

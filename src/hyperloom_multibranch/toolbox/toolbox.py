@@ -334,7 +334,7 @@ class RealToolbox:
         """Start ``tracelens`` or ``roofline`` for ``branch`` on its head commit; returns the job id at once.
 
         The commit is the head of the branch in the experiment repository, read here at submission; it is never taken
-        from ``params``. ``profile_request_id`` is kept only for a PROFILE test of this branch on that commit.
+        from ``params``. ``profile_request_id`` is kept only for a PROFILE test of that commit, whichever branch ran it.
         """
 
         self._analysis_jobs(tool)
@@ -503,6 +503,8 @@ class RealToolbox:
     async def _run(self, item: QueuedTest) -> None:
         try:
             result = await self._execute(item)
+            if result.cold_start_seconds is not None:
+                self.record_cold_start(result.cold_start_seconds)
             entry = self._log.get(item.request_id)
             if entry is not None:
                 await self._record_and_write(entry, {"result": result.to_document()})

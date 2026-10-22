@@ -3,10 +3,12 @@
 
 import asyncio
 import itertools
+import json
 
 import pytest
 
 from hyperloom.contracts.recipe import LaunchConfig, Recipe
+from hyperloom_multibranch.contracts.branch_log import BranchLogEntry, BranchLogType
 from hyperloom_multibranch.contracts.fork import AdmissionStatus, RepairRequest
 from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
 from hyperloom_multibranch.contracts.lifecycle import BranchTask, SpecialistStatus
@@ -18,6 +20,7 @@ from hyperloom_multibranch.notebook.tests.factories import delta, intent
 from hyperloom_multibranch.rulegate.gate import RuleGate
 from hyperloom_multibranch.rulegate.rules import InferenceXRule
 from hyperloom_multibranch.specialist.directions import DIRECTIONS
+from hyperloom_multibranch.specialist.exhausted import EXHAUSTED_PREFIX
 from hyperloom_multibranch.specialist.judging import NOTICE, Judging
 from hyperloom_multibranch.specialist.runtime import (
     MAX_LOSS_RESTARTS,
@@ -268,6 +271,30 @@ async def test_a_direction_given_to_a_branch_counts_as_held(session):
     assert runs.started[1].start.task.direction == DIRECTIONS[1]
 
 
+async def test_a_direction_a_specialist_gave_up_on_is_not_dealt_again_on_the_same_start_commit(session):
+    runs = _Runs(errors=(_idle(), _idle()))
+    runtime = session.runtime(runs)
+    head = await session.repo.head(BRANCH)
+    others = [f"b{index}" for index in range(1, len(DIRECTIONS))]
+
+    await runtime.start(BRANCH, head)
+    await _until(lambda: _any_notice(session, "not restarted"), "the first specialist to give up")
+    for name in others:
+        await runtime.start(name, head)
+    for name in (BRANCH, *others):
+        await runtime.stop(name)
+    await runtime.start("same", head)
+    await runtime.start("moved", "f" * 40)
+    await _until(lambda: _true(len(runs.started) == len(others) + 4), "the late specialists to start")
+    for name in ("same", "moved"):
+        await runtime.stop(name)
+
+    directions = {run.start.branch: run.start.task.direction for run in runs.started}
+    assert directions[BRANCH] == DIRECTIONS[0]
+    assert directions["same"] == DIRECTIONS[1]
+    assert directions["moved"] == DIRECTIONS[0]
+
+
 async def test_past_the_restarts_a_window_allows_the_specialist_stays_down(session):
     runs = _Runs(crashes=10)
     runtime = session.runtime(runs)
@@ -372,12 +399,12 @@ async def test_a_session_that_cannot_be_built_or_made_ready_gives_its_specialist
     await runtime.stop(BRANCH)
 
 
-def _idle() -> SessionIdle:
-    return SessionIdle("its model ended 3 turns in a row with nothing to test")
+def _idle(tested: bool = False) -> SessionIdle:
+    return SessionIdle("its model ended 3 turns in a row with nothing to test", tested=tested)
 
 
 @pytest.mark.parametrize("kind", ["", "direction", "repair"])
-async def test_an_idle_session_ends_its_specialist_with_no_restart_and_no_crash(session, kind):
+async def test_two_idle_sessions_in_a_row_end_the_specialist_after_one_fresh_session_and_no_crash(session, kind):
     blocked = Judgement(Verdict.BLOCKED, 3.0, 2.0, ("s0-4", "s0-5"), {"output_throughput": 1030.0}, False)
     repair = RepairRequest(intent("s0", "c0"), delta(), blocked, "per-tensor KV scales; scale per head")
     tasks = {"": BranchTask(), "direction": BranchTask(direction="the user's own"), "repair": BranchTask(repair=repair)}
@@ -387,10 +414,91 @@ async def test_an_idle_session_ends_its_specialist_with_no_restart_and_no_crash(
     await runtime.start(BRANCH, await session.repo.head(BRANCH), tasks[kind])
     await _until(lambda: _any_notice(session, "not restarted"), "the runtime to give up")
 
-    assert len(runs.started) == 1
-    assert any("found nothing to test" in notice for notice in await session.notices())
+    assert len(runs.started) == 2
+    notices = await session.notices()
+    assert any("starts a fresh session" in notice for notice in notices)
+    assert any("found nothing to test" in notice and "not restarted" in notice for notice in notices)
     assert await runtime.status(BRANCH) == SpecialistStatus(False, 0, 0, True, False)
     await runtime.stop(BRANCH)
+
+
+async def test_a_specialist_s_exhausted_record_is_in_its_give_up_notice_and_closes_its_direction_on_that_head(session):
+    runs = _Runs(errors=(_idle(), _idle()))
+    runtime = session.runtime(runs)
+    head, moved = await session.repo.head(BRANCH), "e" * 40
+    record = {"direction": DIRECTIONS[0], "head": moved, "tried": ["r1"], "why": "blocked_by_tool"}
+    record |= {"detail": "start_analysis refused the head's profile", "reopen_if": "the analysis is allowed"}
+    entry = BranchLogEntry(BRANCH, BranchLogType.RESULT, EXHAUSTED_PREFIX + json.dumps(record))
+    await LocalNotebook(session.root, Writer(Role.SPECIALIST_RUNTIME, BRANCH, BRANCH)).append_branch_log(entry)
+
+    await runtime.start(BRANCH, head)
+    await _until(lambda: _any_notice(session, "not restarted"), "the specialist to give up")
+    await runtime.stop(BRANCH)
+    await runtime.start("next", moved)
+    await _until(lambda: _true(len(runs.started) == 3), "the next specialist to start")
+    await runtime.stop("next")
+
+    (given_up,) = [notice for notice in await session.notices() if "not restarted" in notice]
+    assert "blocked_by_tool: start_analysis refused the head's profile" in given_up
+    assert runs.started[-1].start.task.direction == DIRECTIONS[1]
+
+
+async def test_a_direction_a_running_or_stopped_branch_recorded_exhausted_on_a_head_is_not_dealt_there(session):
+    runs = _Runs()
+    runtime = session.runtime(runs)
+    head = await session.repo.head(BRANCH)
+    fusion = DIRECTIONS[2].split(":")[0].upper()
+    record = {"direction": f" {fusion} ", "head": head, "tried": ["r1"], "why": "no_ceiling_above_bar"}
+    record |= {"detail": "no elementwise op above the bar is left", "reopen_if": "the head moves"}
+
+    await runtime.start(BRANCH, head)
+    entry = BranchLogEntry(BRANCH, BranchLogType.RESULT, EXHAUSTED_PREFIX + json.dumps(record))
+    await LocalNotebook(session.root, Writer(Role.SPECIALIST_RUNTIME, BRANCH, BRANCH)).append_branch_log(entry)
+    await runtime.start("b1", head)
+    await runtime.start("next", head)
+    await _until(lambda: _true(len(runs.started) == 3), "the first specialists to start")
+    for name in (BRANCH, "b1"):
+        await runtime.stop(name)
+    await runtime.start("later", head)
+    await _until(lambda: _true(len(runs.started) == 4), "the specialists to start")
+    for name in ("next", "later"):
+        await runtime.stop(name)
+
+    directions = {run.start.branch: run.start.task.direction for run in runs.started}
+    assert DIRECTIONS[2] not in (directions["next"], directions["later"])
+    assert (directions["next"], directions["later"]) == (DIRECTIONS[3], DIRECTIONS[4])
+
+
+async def test_an_exhausted_record_naming_no_session_direction_closes_nothing_and_is_logged(session, caplog):
+    runs = _Runs()
+    runtime = session.runtime(runs)
+    head = await session.repo.head(BRANCH)
+    record = {"direction": "rope and norm fusions", "head": head, "tried": ["r1"], "why": "no_ceiling_above_bar"}
+    record |= {"detail": "no elementwise op above the bar is left", "reopen_if": "the head moves"}
+
+    await runtime.start(BRANCH, head)
+    entry = BranchLogEntry(BRANCH, BranchLogType.RESULT, EXHAUSTED_PREFIX + json.dumps(record))
+    await LocalNotebook(session.root, Writer(Role.SPECIALIST_RUNTIME, BRANCH, BRANCH)).append_branch_log(entry)
+    await runtime.start("b1", head)
+    await runtime.start("next", head)
+    await _until(lambda: _true(len(runs.started) == 3), "the specialists to start")
+    for name in (BRANCH, "b1", "next"):
+        await runtime.stop(name)
+
+    assert runs.started[-1].start.task.direction == DIRECTIONS[2]
+    assert "names none of the session's directions" in caplog.text
+
+
+async def test_an_idle_session_that_submitted_a_test_starts_the_count_again(session):
+    runs = _Runs(errors=(_idle(), _idle(tested=True), _idle()))
+    runtime = session.runtime(runs)
+
+    await runtime.start(BRANCH, await session.repo.head(BRANCH))
+    await _until(lambda: _true(len(runs.started) == 4), "a fresh session after each idle one")
+    status = await runtime.status(BRANCH)
+    await runtime.stop(BRANCH)
+
+    assert not status.gave_up
 
 
 async def test_the_status_is_known_only_while_the_runtime_runs_the_branch(session):

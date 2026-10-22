@@ -5,7 +5,8 @@
 
 Steps: the request validates (3.7, done by its constructor, plus the toolbox's own: no preset ``request_id``, a
 ``retest_of`` that names an accepted request, a PROFILE that no live profile already covers); the parent recipe is read from the experiment repository; the delta
-applies and the environment compiles; the measurement surface matches the canonical one. Compile, points and surface come from
+applies and the environment compiles; the measurement surface matches the canonical one, and a test that carries the accuracy
+evaluation serves a context that evaluation can run in. Compile, points, surface and the evaluation's context come from
 hosted measurement (``hyperloom.measure``) through the one :class:`MeasurementPlanner` seam.
 """
 
@@ -18,6 +19,7 @@ from typing import Protocol
 from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest
 from hyperloom.contracts.recipe import Recipe, RecipeDelta, RecipeError, apply
 from hyperloom.measure.compile import BaseImageMismatchError
+from hyperloom.measure.eval_context import EvalContextError
 from hyperloom.measure.fake_gain import (
     CONTEXT_COPY_REFUSAL,
     SPECULATIVE_DECODING_PINNED,
@@ -35,6 +37,7 @@ _TUNABLEOP_ENABLED = "PYTORCH_TUNABLEOP_ENABLED"
 _TUNABLEOP_TUNING = "PYTORCH_TUNABLEOP_TUNING"
 _TUNABLEOP_TABLE = "PYTORCH_TUNABLEOP_FILENAME"
 ONLINE_TUNING_CODE = "online_tuning_unsupported"
+CONTEXT_BELOW_EVAL_CODE = "context_below_eval"
 ONLINE_TUNING_REASON = (
     f"{_TUNABLEOP_ENABLED}=1 without {_TUNABLEOP_TUNING}=0 tunes every GEMM shape the first time the server runs it: at "
     "boot, in the warmup, and for each new prompt length of the evaluation. The test then takes a time no candidate "
@@ -110,7 +113,8 @@ class MeasurementPlanner(Protocol):
     """Compiles the test environment, generates the measurement points and checks the surface (acceptance steps 2 to 4).
 
     Raises ``RecipeError`` when it cannot: a ``SurfaceViolation`` means the measurement surface differs, a
-    ``BaseImageMismatchError`` a recipe on another image, any other error a delta or patch that does not build.
+    ``BaseImageMismatchError`` a recipe on another image, an ``EvalContextError`` a launch whose context the accuracy
+    evaluation cannot run in, any other error a delta or patch that does not build.
     The returned object is handed to the executor with every attempt.
     """
 
@@ -260,5 +264,7 @@ class Acceptance:
             ) from error
         except BaseImageMismatchError as error:
             raise RequestRejected(str(error), "base_image_mismatch") from error
+        except EvalContextError as error:
+            raise RequestRejected(str(error), CONTEXT_BELOW_EVAL_CODE) from error
         except RecipeError as error:
             raise RequestRejected(f"the environment does not compile: {error}", "delta_not_applicable") from error

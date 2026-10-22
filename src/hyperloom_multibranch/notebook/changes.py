@@ -1,18 +1,30 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""A recipe delta in one line: what a test changed, for briefs and tool replies.
+"""A recipe delta in one line: what a test changed, for briefs and tool replies; and whether two recipes differ at all.
 
 A brief that only names a direction (target, mechanism, layer) leaves a specialist to guess what was actually tried;
 the line names the arguments and environment set or removed, the components moved or patched, and the kernels added
 or dropped, in the order :func:`hyperloom.contracts.recipe.apply` applies them.
+
+:func:`same_recipe` is the one rule for two recipes being the same, which a merge writes as a new commit: a replay
+asks it of a champion and a head, FINAL of two candidates.
 """
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import PurePosixPath
 
-from hyperloom.contracts.recipe import ArgsMode, ComponentChange, ConfigDelta, RecipeDelta
+from hyperloom.contracts.recipe import (
+    ArgsMode,
+    ComponentChange,
+    ConfigDelta,
+    Recipe,
+    RecipeDelta,
+    delta_between,
+    diff,
+)
 
 NO_CHANGE = "no change"
 LIST = ", "
@@ -64,4 +76,17 @@ def describe_change(delta: RecipeDelta) -> str:
     return PARTS.join(parts) or NO_CHANGE
 
 
-__all__ = ["NO_CHANGE", "describe_change"]
+def same_recipe(first: Recipe, second: Recipe) -> bool:
+    """Whether ``first`` is ``second`` already: no component or kernel artifact :func:`delta_between` would change, and
+    the same server arguments and environment, flag by flag whatever their order.
+
+    Raises ``RecipeError`` for a component the two take from different upstream repositories, as ``delta_between``
+    does.
+    """
+
+    change = diff(first, second)
+    rest = replace(delta_between(first, second), config=ConfigDelta())
+    return not (change.args or change.envs) and rest == RecipeDelta()
+
+
+__all__ = ["NO_CHANGE", "describe_change", "same_recipe"]

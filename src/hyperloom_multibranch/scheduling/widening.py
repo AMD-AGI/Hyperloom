@@ -52,10 +52,20 @@ def toolbox_headroom(caps: RosterCaps, queue_state: QueueState) -> int:
 
 def refill_focus(asked: tuple[str, ...], count: int, shares: OpShares | None) -> tuple[str, ...]:
     """The focus of each of ``count`` branches opened after the opening batch, in order: the op the judge ``asked``
-    for it, else the largest of ``shares``, the start commit's op shares; ``""`` when neither names one."""
+    for it, else one of the largest ops of ``shares``, the start commit's op shares; ``""`` when neither names one.
 
-    default = next((op for op, _ in shares.largest(1)), "") if shares is not None else ""
-    return tuple((asked[index] if index < len(asked) else "") or default for index in range(count))
+    The branches the judge left without a focus take those ops in turn, wrapping when the batch outruns them, so a
+    refill spreads over the profile instead of sending every branch it opens at the one largest op.
+    """
+
+    largest = [op for op, _ in shares.largest(count)] if shares is not None else []
+    focus, taken = [], 0
+    for index in range(count):
+        chosen = asked[index] if index < len(asked) else ""
+        if not chosen and largest:
+            chosen, taken = largest[taken % len(largest)], taken + 1
+        focus.append(chosen)
+    return tuple(focus)
 
 
 class Widening:

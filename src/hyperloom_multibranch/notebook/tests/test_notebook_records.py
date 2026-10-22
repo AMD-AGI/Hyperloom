@@ -60,7 +60,8 @@ from hyperloom_multibranch.contracts.notebook.vocab import (
     UsageSource,
 )
 from hyperloom_multibranch.notebook import LocalNotebook
-from hyperloom_multibranch.notebook.tests.factories import TTL, delta, intent, judgement, request, result
+from hyperloom_multibranch.notebook.tests.factories import FakeClock, TTL, delta, intent, judgement, request, result
+from hyperloom_multibranch.notebook.tests.sessions import scripted_session
 
 Open = Callable[..., LocalNotebook]
 ROOT_RECIPE = DIGEST_PREFIX + "a" * 64
@@ -295,6 +296,17 @@ async def test_a_withdrawn_test_is_no_test_of_its_branch_and_no_direction_tried(
 
     assert row.tests == 1
     assert [item.request_id for item in brief.tried] == ["r1"]
+
+
+async def test_the_brief_lists_the_start_commits_tests_first_then_the_nearest_commits_latest_first(
+    tmp_path: Path,
+) -> None:
+    notebook = await scripted_session(tmp_path / "notebook", FakeClock())
+
+    on_c1, on_merge = await notebook.startup_brief("c1"), await notebook.startup_brief("i1")
+
+    assert [item.request_id for item in on_c1.tried] == ["r4", "r5", "r3", "r2", "r1"]
+    assert [item.commit_id for item in on_merge.tried] == ["c1", "c0", "c0", "c0", "c0"]
 
 
 async def test_a_failed_measurement_keeps_its_cost_frees_its_claim_and_takes_no_judgement(open_as: Open) -> None:

@@ -19,6 +19,7 @@ from hyperloom.measure.compile import (
     PackageBase,
     compile_environment,
 )
+from hyperloom.inference_optimizer.session.paths import asset_root
 from hyperloom.measure.points import (
     PointError,
     accept_measurement,
@@ -234,6 +235,18 @@ def test_a_profile_point_replays_graphs_node_by_node_so_the_profiler_records_eve
     assert "DEBUG_CLR_GRAPH_PACKET_CAPTURE" not in load(normal)["benchmark"]["envs"], (
         "a measured point replays as shipped"
     )
+
+
+@pytest.mark.parametrize("framework", ["sglang", "vllm", "atom"])
+def test_every_shipped_profile_configuration_replays_graphs_node_by_node_and_no_baseline_does(framework):
+    """The setting is the HIP runtime's, so the vLLM and ATOM profiles carry it as the SGLang one does."""
+
+    configs = asset_root() / "assets" / "configs"
+    profile = load(configs / f"profile_{framework}.yaml")["benchmark"]["envs"]
+    baseline = load(configs / f"baseline_{framework}.yaml")["benchmark"]["envs"]
+
+    assert profile["DEBUG_CLR_GRAPH_PACKET_CAPTURE"] == "0"
+    assert "DEBUG_CLR_GRAPH_PACKET_CAPTURE" not in baseline
 
 
 def test_a_normal_point_does_not_turn_the_profiler_on(canonical, blobs, tmp_path):

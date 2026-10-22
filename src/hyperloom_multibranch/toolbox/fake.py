@@ -32,7 +32,6 @@ from hyperloom_multibranch.contracts.notebook.records import QuarantineEvent, Wi
 from hyperloom_multibranch.contracts.toolbox import (
     CancelOutcome,
     MeasurementCapacity,
-    QueueState,
     RequestRejected,
     WorkloadKind,
 )
@@ -194,6 +193,7 @@ class FakeExecutor:
             finished_at=self.now,
             gpu_seconds=gpu_seconds,
             profile_location=f"tests/{request_id}/profile" if measured and request.kind is TestKind.PROFILE else "",
+            cold_start_seconds=self.config.attempt_seconds,
         )
 
     @staticmethod
@@ -320,11 +320,6 @@ class FakeToolbox(RealToolbox):
     async def cancel(self, request_id: str) -> CancelOutcome:
         await self._ensure_started()
         return await super().cancel(request_id)
-
-    async def queue_state(self) -> QueueState:
-        if self.results:
-            self.record_cold_start(self.config.attempt_seconds)
-        return await super().queue_state()
 
     @property
     def single_node(self) -> bool:

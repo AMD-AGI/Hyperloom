@@ -5,10 +5,11 @@
 
 The caller names the tool and its own parameters. The commit the analysis is about is never the caller's: it is the
 head of the caller's branch in the experiment repository, read here. ``profile_request_id`` is kept only when the
-notebook holds a PROFILE test of that id, asked by the same branch, on that commit. The trace and the trace splitter's
-workload hints are that profile test's own: the caller names neither. The scheduler's own request, for the trace the
-PRELUDE child profiled, is built here too (:func:`root_profile_request`), its hints read from the child's point config by
-the same rule.
+notebook holds a PROFILE test of that id on that commit, whichever branch asked for it: a profile describes a commit,
+and ``submit_test`` refuses a second profile of a commit with the id of the first (``profile_exists``). The trace and
+the trace splitter's workload hints are that profile test's own: the caller names neither. The scheduler's own request,
+for the trace the PRELUDE child profiled, is built here too (:func:`root_profile_request`), its hints read from the
+child's point config by the same rule.
 """
 
 from __future__ import annotations
@@ -28,7 +29,7 @@ from hyperloom_multibranch.contracts.toolbox import RequestRejected
 from hyperloom_multibranch.toolbox.tools.base import ToolRequest
 from hyperloom_multibranch.toolbox.tools.op_shares import COMMIT_PARAM, PROFILE_REQUEST_PARAM
 from hyperloom_multibranch.toolbox.tools.roofline import ROOFLINE_TOOL, TRACELENS_TOOL
-from hyperloom_multibranch.toolbox.tools.tracelens_report import REPORT_ROUTE, SPLIT_HINTS, split_hint
+from hyperloom_multibranch.toolbox.tools.tracelens_report import REPORT_ROUTE, WORKLOAD_HINTS, split_hint
 
 ANALYSIS_TOOLS = (TRACELENS_TOOL, ROOFLINE_TOOL)
 CODE_TOOL_NOT_ALLOWED = "tool_not_allowed"
@@ -43,7 +44,7 @@ TRACE_INPUT_PARAM = "trace_input"
 ANALYSIS_ROUTE_PARAM = "analysis_route"
 ROOT_PROFILE_JOB_PREFIX = "prelude:"
 TRACE_GLOB = "*.trace.json*"
-SPLIT_HINT_PARAMS = tuple(key for _, key, _ in SPLIT_HINTS)
+SPLIT_HINT_PARAMS = tuple(key for _, key, _ in WORKLOAD_HINTS)
 #: The YAML the grid runner wrote for the point a test ran, in the test's landed directory; a profile test runs one.
 POINT_CONFIG_GLOB = "variant_*/config.yaml"
 _POINT_CONFIG_MAX_BYTES = 1 << 20
@@ -73,15 +74,20 @@ async def _head(repo: ExperimentRepo, branch: str) -> str:
 async def _verified_profile(
     records: RecordSearch | None, branch: str, commit: str, request_id: str
 ) -> TestRecord | None:
-    """The PROFILE record ``request_id`` (branch and head commit checked), or ``None`` when no id was given."""
+    """The PROFILE record ``request_id`` of the head ``commit`` of ``branch``, or ``None`` when no id was given.
+
+    What a profile describes is a commit, so any branch's profile of ``commit`` qualifies (``records.profiles`` is the
+    same commit identity ``profile_exists`` keys on); the branch that ran it does not matter. A profile of another
+    commit, or an id the notebook holds no profile for, is refused.
+    """
     if not request_id:
         return None
     found = await records.profiles(commit) if records is not None else ()
     for record in found:
-        if record.request_id == request_id and record.request.branch_id == branch:
+        if record.request_id == request_id:
             return record
     raise RequestRejected(
-        f"{request_id!r} is not a profile test of branch {branch!r} on its head commit {commit}",
+        f"{request_id!r} is not a profile test of {commit}, the head commit of branch {branch!r}",
         CODE_PROFILE_UNVERIFIED,
     )
 
@@ -127,13 +133,14 @@ def _point_envs(path: Path, root: Path) -> Mapping[str, Any]:
 
 
 def point_split_hints(point: Path, root: Path) -> dict[str, str]:
-    """The trace splitter's workload hints, by request key, read from the point YAML at ``point`` inside ``root``.
+    """The workload hints (the splitter's, and the prompt length the op shares are weighted by), by request key, read from
+    the point YAML at ``point`` inside ``root``.
 
     A point that cannot be read, a missing variable or a value the splitter would not take gives no hint for it, and the
-    splitter then picks its window without that hint.
+    splitter then picks its window without that hint (a report without the workload has no op shares to weight).
     """
     envs = _point_envs(point, root.resolve())
-    found = {key: split_hint(flag, envs[name]) for flag, key, name in SPLIT_HINTS if name in envs}
+    found = {key: split_hint(flag, envs[name]) for flag, key, name in WORKLOAD_HINTS if name in envs}
     return {key: hint for key, hint in found.items() if hint is not None}
 
 

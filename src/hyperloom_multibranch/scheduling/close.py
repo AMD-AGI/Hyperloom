@@ -26,7 +26,7 @@ from hyperloom.contracts.recipe import RecipeError
 from hyperloom_multibranch.contracts.notebook.interfaces import NotebookError
 from hyperloom_multibranch.notebook.codec import encode
 from hyperloom_multibranch.scheduling.clock import Clock
-from hyperloom_multibranch.scheduling.exports import CloseExports, SessionExports
+from hyperloom_multibranch.scheduling.exports import CloseExports, SessionExports, step_lines
 from hyperloom_multibranch.scheduling.final import FinalChoice
 from hyperloom_multibranch.scheduling.layout import SessionLayout
 from hyperloom_multibranch.scheduling.processes import live_processes
@@ -153,16 +153,9 @@ def _export_lines(exports: CloseExports | None) -> list[str]:
     if exports is None:
         return ["Exports: not finished"]
     kb = exports.kb_write_back
-    knowledge = exports.knowledge
-    steps = {
-        "Experiences": knowledge.experiences,
-        "Learnings": knowledge.learnings,
-        "Archive": knowledge.archive,
-        "Scorers": exports.scorers,
-    }
     return [
         f"Recipe KB write-back: {kb.status} {kb.reason}".rstrip(),
-        *(f"{name}: {step.status} {step.reason}".rstrip() for name, step in steps.items()),
+        *step_lines(exports.knowledge_steps()),
         f"Breakdown: {exports.breakdown}",
         f"Dashboard: {exports.dashboard.html}",
     ]

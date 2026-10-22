@@ -211,7 +211,7 @@ def test_the_prompt_shows_and_explains_the_gpu_hours_and_llm_dollars_used() -> N
     )
 
 
-def test_a_branch_row_shows_what_is_known_of_its_specialist_and_the_prompt_says_to_stop_one_that_gave_up() -> None:
+def test_a_branch_row_shows_what_is_known_of_its_specialist_and_a_gave_up_one_is_left_to_the_scheduler() -> None:
     gave_up = SpecialistStatus(running=False, crashes=4, lost=1, gave_up=True, judge_failed=False)
     judging_failed = SpecialistStatus(running=False, crashes=0, lost=6, gave_up=False, judge_failed=True)
 
@@ -231,8 +231,17 @@ def test_a_branch_row_shows_what_is_known_of_its_specialist_and_the_prompt_says_
     prompt = " ".join(JUDGE_SYSTEM_PROMPT.split())
     for field in ("crashes", "lost", "gave_up", "judge_failed"):
         assert f"({field})" in prompt
-    assert "A branch whose specialist gave up or whose judging failed makes no more progress" in prompt
+    assert "The scheduler stops a gave-up branch itself" in prompt
+    assert "A branch whose judging failed makes no more progress" in prompt
+    assert "gave up or whose judging failed" not in prompt
     assert "weigh a specialist's lost count against its progress" in prompt
+
+
+def test_the_prompt_says_a_free_slot_may_be_opened_without_a_stop() -> None:
+    prose = " ".join(JUDGE_SYSTEM_PROMPT.split())
+
+    assert "free_branch_slots counts the branches you may open at this call having stopped nothing" in prose
+    assert "Leaving a free slot unopened needs a reason; opening into it does not." in prose
 
 
 def test_a_branch_whose_specialist_is_not_known_shows_none() -> None:
@@ -348,9 +357,18 @@ def test_prompt_shows_and_explains_whether_a_branch_opened_now_would_pay_off() -
 
 def test_prompt_says_the_cold_start_is_unknown_before_the_first_one() -> None:
     state = _state(_view(widening=replace(WIDENING, cold_start_seconds=None)))
+    prose = " ".join(JUDGE_SYSTEM_PROMPT.split())
 
     assert state["cold_start"] == "unknown"
-    assert '"unknown"' in JUDGE_SYSTEM_PROMPT
+    assert '"unknown" until the session\'s first test has waited through one' in prose
+    assert "min_useful_seconds is then the trend window alone" in prose
+
+
+def test_prompt_weighs_an_early_stop_against_the_explore_time_left() -> None:
+    prose = " ".join(JUDGE_SYSTEM_PROMPT.split())
+
+    assert "refill the free slots rather than stop the session" in prose
+    assert "an early stop is your judgement that the time left cannot be spent at all" in prose
 
 
 def test_the_prompt_version_is_derived_from_the_prompt_text() -> None:

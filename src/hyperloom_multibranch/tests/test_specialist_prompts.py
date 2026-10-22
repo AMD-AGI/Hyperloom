@@ -17,6 +17,7 @@ from hyperloom_multibranch.contracts.notebook.records import BranchLogRecord, In
 from hyperloom_multibranch.contracts.notebook.vocab import InboxKind
 from hyperloom_multibranch.specialist import prompts
 from hyperloom_multibranch.specialist.directions import DIRECTIONS
+from hyperloom_multibranch.specialist.exhausted import EXHAUSTED_PREFIX, ExhaustedWhy
 from hyperloom_multibranch.specialist.prompts import (
     ENTRY_CHARS,
     RECENT_ENTRIES,
@@ -26,7 +27,8 @@ from hyperloom_multibranch.specialist.prompts import (
     role_prompt,
 )
 from hyperloom_multibranch.specialist.runtime import SessionStart
-from hyperloom_multibranch.notebook.tools import UNFINISHED_TITLE
+from hyperloom_multibranch.notebook.rsi.briefing import ON_HEAD
+from hyperloom_multibranch.notebook.tools import FOCUS_LINE, UNFINISHED_TITLE
 from hyperloom_multibranch.toolbox.mcp_tools import REPLY_INBOX_HEADER
 
 WORKLOAD = "qwen3-8b on vllm, TP 1, ISL 1024, OSL 1024, concurrency 64, InferenceX"
@@ -122,7 +124,7 @@ def test_the_role_works_its_direction_first_and_then_moves_to_one_no_branch_cove
     assert "Your launch prompt names your branch's direction: work on it first." in prompt
     assert "dig deeper in it rather than switching to settings" in prompt
     assert "take another of the session's directions, preferring one no running branch covers" in prompt
-    assert "server.log fixes; GEMM tuning; Fusion; Server arguments and environment variables; ROCm code gaps" in prompt
+    assert "Fast path checks; GEMM tuning; Fusion; Server arguments and environment variables; ROCm code gaps" in prompt
 
 
 def test_the_role_carries_what_found_gains_on_rocm_with_examples():
@@ -235,7 +237,48 @@ def test_the_wake_and_nudge_messages_say_what_arrived_or_that_nothing_did():
 
     woken = prompts.wake_message([item], [])
     assert "this arrived for your branch" in woken and "- judgement r7: r7 measured +2.1%: committed" in woken
-    assert "nothing new for your branch" in prompts.nudge_message()
+    nudge = prompts.nudge_message()
+    assert "nothing new for your branch" in nudge
+    assert "Nothing arrives on its own" in nudge and "notebook_brief" in nudge
+    assert "decides when your branch stops" not in nudge
+
+
+def test_the_fast_path_direction_proves_a_path_ran_and_leaves_untuned_gemms_to_gemm_tuning():
+    (direction,) = [text for text in DIRECTIONS if text.startswith("Fast path checks:")]
+
+    assert "a one-time log line" in direction and "eager or plain torch path" in direction
+    assert "untuned GEMM shapes belong to the GEMM tuning branch" in direction
+
+
+def test_the_role_says_a_flat_patch_is_checked_to_have_run_before_its_idea_is_dropped():
+    prompt = role_prompt(WORKLOAD)
+
+    assert "put a one-time log line on the path it adds" in prompt
+    assert "check the test's server.log shows that line before you call the idea dead" in prompt
+
+
+def test_the_role_says_a_branch_opened_on_a_focus_starts_from_that_operator():
+    prompt = role_prompt(WORKLOAD)
+
+    label = FOCUS_LINE.split(",")[0]
+    assert f'When the brief names a "{label}", start from that operator within your direction' in prompt
+
+
+def test_the_role_says_how_to_record_a_direction_done_on_a_head_with_every_reason():
+    prompt = role_prompt(WORKLOAD)
+
+    assert f'starts with "{EXHAUSTED_PREFIX}"' in prompt
+    assert all(why.value in prompt for why in ExhaustedWhy)
+    assert "does not stop your branch" in prompt
+    assert "at least one: a direction you have not tested is not done" in prompt
+    assert "direction (the name of the session's direction exactly as listed below" in prompt
+
+
+def test_the_role_says_a_test_is_how_a_specialist_without_a_gpu_measures_a_candidate():
+    prompt = role_prompt(WORKLOAD)
+
+    assert "You have no GPU of your own: submit_test is how you measure" in prompt
+    assert "a flat or failed result tells the next candidate something" in prompt
 
 
 def test_the_role_says_a_brief_item_asks_for_the_brief_again_before_the_next_claim():
@@ -249,6 +292,7 @@ def test_the_role_tests_a_replayable_champion_on_the_head_before_other_direction
     prompt = role_prompt(WORKLOAD)
 
     assert "get its delta with notebook_replay and test it on your head before other directions" in prompt
+    assert f'A champion the brief lists as "{ON_HEAD}" is in your head already: build on it' in prompt
 
 
 def test_the_role_says_settings_running_out_never_ends_a_direction_and_no_brief_comes_by_waiting():
@@ -360,7 +404,7 @@ def test_every_launch_shows_the_branch_s_direction_before_the_brief():
 def test_the_session_s_directions_are_distinct_and_lead_with_the_four_a_small_session_takes():
     assert len(set(DIRECTIONS)) == len(DIRECTIONS) == 7
     assert [text.split(":")[0] for text in DIRECTIONS[:4]] == [
-        "server.log fixes",
+        "Fast path checks",
         "GEMM tuning",
         "Fusion",
         "Server arguments and environment variables",

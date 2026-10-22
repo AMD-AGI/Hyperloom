@@ -24,6 +24,12 @@ again after a server error or a dropped connection, waiting :data:`KB_RETRY_SECO
 artifacts too, their files downloaded from the KB into the session's blob store. A champion built on another image, or
 one whose files the KB does not hold, replays its launch config only. The specialist's ``notebook_replay`` makes the
 change for its own branch head, since a gain lands only on the head it was measured against.
+
+A replay leaves the flags of :data:`HEAD_FLAGS` to the head it is made for: the champion's context length and
+scheduler watchdog are dropped, and the head's, if it sets them, kept. A record can carry the ones the launcher set for
+the session that measured it, and the launcher sets both again for this one when a recipe leaves them out. The cap a
+champion was measured with is no optimization, and one below what this session's accuracy evaluation runs in is refused
+as ``context_below_eval``. A lead's launch arguments are listed without them for the same reason.
 """
 
 from __future__ import annotations
@@ -39,8 +45,14 @@ from pathlib import Path
 from typing import Any, Protocol, TypeVar
 
 from hyperloom.contracts.recipe import LaunchConfig, Recipe, RecipeDelta, RecipeError, delta_between
+from hyperloom.inference_optimizer.grid_server_args import (
+    merge_server_args,
+    remove_server_args,
+    tokenize_server_args_preserving_json,
+)
 from hyperloom.inference_optimizer.recipe_snapshot_constants import F_LABEL_FRAMEWORK_VERSION, canonical_labels
 from hyperloom.measure.compile import LOADABLE_KERNEL_KINDS, BlobError, BlobStore
+from hyperloom.measure.eval_context import CONTEXT_FLAGS
 from hyperloom.orchestrator.knowledge.remote_recipe.client import KBStoreError
 from hyperloom.orchestrator.knowledge.remote_recipe.models import (
     CONFIG_SECTION,
@@ -50,6 +62,7 @@ from hyperloom.orchestrator.knowledge.remote_recipe.models import (
 from hyperloom.orchestrator.knowledge.remote_recipe.values import knowledge_to_warm_recipe
 from hyperloom_multibranch.contracts.notebook.peers import IntentLayer
 from hyperloom_multibranch.contracts.notebook.records import REPLAY_TOOL, SessionProfile, WarmReplay
+from hyperloom_multibranch.notebook.changes import same_recipe
 from hyperloom_multibranch.notebook.knowledge.lessons import listed
 from hyperloom_multibranch.notebook.knowledge.recipe_kb import from_recipe_kb_value, overlay_ref
 from hyperloom_multibranch.notebook.knowledge.recipe_writeback import recipe_identity
@@ -58,6 +71,9 @@ log = logging.getLogger(__name__)
 
 MAX_CANDIDATES = 20
 PAGE_SIZE = 50
+#: The flags a replay leaves to the head: the context length a server serves (``--context-length`` on SGLang,
+#: ``--max-model-len`` on vLLM), and SGLang's scheduler watchdog.
+HEAD_FLAGS = (*CONTEXT_FLAGS, "--watchdog-timeout")
 #: How many of the best leads get a replay; each whole one downloads the champion's files.
 REPLAY_LEADS = 3
 #: The waits before each new ask of a read that failed transiently; one more ask follows the last wait.
@@ -138,19 +154,56 @@ class PreparedReplay:
     reason: str = ""
 
     def on(self, head: Recipe, parent_commit: str) -> WarmReplay | None:
-        """The change that makes ``head``, the recipe of ``parent_commit``, into the champion's; ``None`` when they
-        are alike. A component the head has keeps the head's upstream repository and commit, as a merge keeps it: the
-        session builds it from its image, so the champion's upstream label names nothing to rebuild."""
+        """The change that makes ``head``, the recipe of ``parent_commit``, into the champion's; ``None`` when ``head``
+        is the champion's already (:meth:`is_on`).
 
-        wanted = self.recipe if self.recipe is not None else replace(head, launch=self.launch)
-        delta = delta_between(head, _on_head_upstreams(wanted, head))
-        if delta == RecipeDelta():
+        A component the head has keeps the head's upstream repository and commit, as a merge keeps it: the session
+        builds it from its image, so the champion's upstream label names nothing to rebuild. The head keeps its flags of
+        :data:`HEAD_FLAGS` as well.
+        """
+
+        if self.is_on(head):
             return None
+        delta = delta_between(head, self._wanted(head))
         return WarmReplay(self.canonical_id, parent_commit, delta, delta_layer(delta), self.reason)
+
+    def is_on(self, recipe: Recipe) -> bool:
+        """Whether ``recipe`` is the champion's already (:func:`same_recipe`), its flags of :data:`HEAD_FLAGS` aside."""
+
+        return same_recipe(recipe, self._wanted(recipe))
 
     def describe(self) -> str:
         what = "the whole recipe" if self.recipe is not None else f"its launch config only, {self.reason}"
         return f"replay on your head with {REPLAY_TOOL}: {what}"
+
+    def _wanted(self, head: Recipe) -> Recipe:
+        champion = self.recipe if self.recipe is not None else replace(head, launch=self.launch)
+        args = _with_head_flags(champion.launch.server_args, head.launch.server_args)
+        return replace(_on_head_upstreams(champion, head), launch=replace(champion.launch, server_args=args))
+
+
+def _head_args(server_args: str) -> tuple[str, ...]:
+    """The arguments of ``server_args`` that set a flag of :data:`HEAD_FLAGS`, each flag with its value."""
+
+    parsed = tokenize_server_args_preserving_json(server_args)
+    tokens = parsed[1] if parsed is not None else []
+    found: list[str] = []
+    for index, token in enumerate(tokens):
+        if token.partition("=")[0] not in HEAD_FLAGS:
+            continue
+        value = tokens[index + 1] if "=" not in token and index + 1 < len(tokens) else ""
+        found.append(f"{token} {value}" if value and not value.startswith("-") else token)
+    return tuple(found)
+
+
+def _with_head_flags(server_args: str, head_args: str) -> str:
+    """``server_args`` with the flags of :data:`HEAD_FLAGS` ``head_args`` sets: its own dropped, the head's kept."""
+
+    own, kept = _head_args(server_args), _head_args(head_args)
+    if own == kept:
+        return server_args
+    args = remove_server_args(server_args, HEAD_FLAGS) if own else server_args
+    return merge_server_args(args, *kept)
 
 
 def _on_head_upstreams(wanted: Recipe, head: Recipe) -> Recipe:
@@ -181,12 +234,17 @@ class WarmLead:
     differing: Mapping[str, tuple[str, str]] = field(default_factory=dict)
     replay: PreparedReplay | None = None
 
-    def describe(self) -> str:
+    def summary(self) -> str:
+        """The champion: its id, where its scope differs from this session's, its gain, launch arguments and session."""
+
         gain = "n/a" if self.gain_pct is None else f"{self.gain_pct:+.2f}%"
         where = "".join(f", {key} {theirs} (here {ours})" for key, (theirs, ours) in self.differing.items())
         args = f" `{self.server_args}`" if self.server_args else ""
+        return f"{self.canonical_id}{where}: {gain}{args} [{self.session_id}]"
+
+    def describe(self) -> str:
         replay = f"; {self.replay.describe()}" if self.replay is not None else ""
-        return f"{self.canonical_id}{where}: {gain}{args} [{self.session_id}]{replay}"
+        return f"{self.summary()}{replay}"
 
     def render(self) -> str:
         return f"- {self.describe()}"
@@ -233,7 +291,7 @@ def lead_of(
         scope=scope.as_dict(),
         gain_pct=_number(row.get("validated_gain_pct")),
         best_throughput=_number(row.get("best_throughput")),
-        server_args=server_args,
+        server_args=_with_head_flags(server_args, ""),
         envs=envs,
         replayable=row.get("replay_material_available") is True,
         lessons=listed(map(str, row.get("lessons") or ())),
@@ -402,6 +460,7 @@ def delta_layer(delta: RecipeDelta) -> IntentLayer:
 
 
 __all__ = [
+    "HEAD_FLAGS",
     "KB_RETRY_SECONDS",
     "MAX_CANDIDATES",
     "REPLAY_LEADS",

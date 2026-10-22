@@ -4,12 +4,13 @@
 """What the machine says about its GPUs: model, power cap, partition mode, ECC counts, memory in use (design 4.8.2).
 
 Everything is read through ``amd-smi`` and ``rocm-smi`` and is ``None`` when it cannot be read; a value that could not
-be read is never filled in, and a check that needs it is not made.
+be read is never filled in, and a check that needs it is not made (the runner records that it was not).
 """
 
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 from collections.abc import Callable, Sequence
@@ -22,7 +23,7 @@ from hyperloom.common.gpu_identity import (
     gpu_type_for_device_id,
     normalise_device_id,
 )
-from hyperloom.common.rocm_smi import gpu_vram_usage, vram_busy
+from hyperloom.common.rocm_smi import GpuVram, gpu_vram_usage, vram_busy
 
 __all__ = ["GpuFacts", "EccCounts", "busy_gpus", "check_hardware", "ecc_counts", "read_gpu_facts"]
 
@@ -53,15 +54,25 @@ class EccCounts:
     uncorrectable: int
 
 
-def run_amd_smi(args: Sequence[str]) -> str | None:
-    """The stdout of ``amd-smi <args>``, or ``None`` when it is missing, fails or times out."""
-    if not shutil.which("amd-smi"):
+def _run_tool(tool: str, args: Sequence[str]) -> str | None:
+    """The stdout of ``<tool> <args>``, or ``None`` when the tool is missing, fails or times out."""
+    if not shutil.which(tool):
         return None
     try:
-        done = subprocess.run(["amd-smi", *args], capture_output=True, text=True, timeout=_TIMEOUT_SEC)
+        done = subprocess.run([tool, *args], capture_output=True, text=True, timeout=_TIMEOUT_SEC)
     except (OSError, subprocess.SubprocessError):
         return None
     return done.stdout if done.returncode == 0 else None
+
+
+def run_amd_smi(args: Sequence[str]) -> str | None:
+    """The stdout of ``amd-smi <args>``, or ``None`` when it is missing, fails or times out."""
+    return _run_tool("amd-smi", args)
+
+
+def run_rocm_smi(args: Sequence[str]) -> str | None:
+    """The stdout of ``rocm-smi <args>``, or ``None`` when it is missing, fails or times out."""
+    return _run_tool("rocm-smi", args)
 
 
 def _gpu_data(args: Sequence[str], run: Runner) -> list[dict[str, Any]] | None:
@@ -112,8 +123,7 @@ def read_gpu_facts(visible: Sequence[int], run: Runner = run_amd_smi) -> list[Gp
     return facts
 
 
-def ecc_counts(visible: Sequence[int], run: Runner = run_amd_smi) -> dict[int, EccCounts] | None:
-    """Accumulated correctable and uncorrectable ECC counts per visible GPU, or ``None`` when they cannot be read."""
+def _amd_smi_ecc(visible: Sequence[int], run: Runner) -> dict[int, EccCounts] | None:
     data = _gpu_data(["metric", "--ecc", _JSON], run)
     if data is None:
         return None
@@ -126,10 +136,50 @@ def ecc_counts(visible: Sequence[int], run: Runner = run_amd_smi) -> dict[int, E
     return counts if counts and set(counts) == set(visible) else None
 
 
-def busy_gpus() -> list[int] | None:
-    """Indices of GPUs with memory resident, or ``None`` when memory use cannot be read."""
-    usage = gpu_vram_usage()
-    return None if usage is None else [index for index, gpu in enumerate(usage) if vram_busy(gpu)]
+_RAS_GPU = re.compile(r"^GPU\[(\d+)\]:")
+_RAS_BLOCK = re.compile(r"^\s*\w+\s+(?:ENABLED|DISABLED)\s+(\d+)\s+(\d+)\s*$")
+
+
+def _rocm_smi_ras(visible: Sequence[int], run: Runner) -> dict[int, EccCounts] | None:
+    """The counts ``rocm-smi --showrasinfo`` prints per block, summed per GPU; a block without counts adds nothing.
+
+    A GPU whose section has no block with counts says nothing about its errors, so it is not in the result.
+    """
+    raw = run(["--showrasinfo"])
+    if raw is None:
+        return None
+    totals: dict[int, list[int]] = {}
+    gpu: int | None = None
+    for line in raw.splitlines():
+        header, block = _RAS_GPU.match(line), _RAS_BLOCK.match(line)
+        if header:
+            gpu = int(header.group(1))
+        elif block and gpu is not None:
+            sums = totals.setdefault(gpu, [0, 0])
+            sums[0] += int(block.group(1))
+            sums[1] += int(block.group(2))
+    counts = {index: EccCounts(*sums) for index, sums in totals.items() if index in visible}
+    return counts if counts and set(counts) == set(visible) else None
+
+
+def ecc_counts(
+    visible: Sequence[int], run: Runner = run_amd_smi, ras: Runner = run_rocm_smi
+) -> dict[int, EccCounts] | None:
+    """Accumulated correctable and uncorrectable ECC counts per visible GPU, or ``None`` when they cannot be read.
+
+    ``amd-smi metric --ecc`` first; when it is missing or does not give every visible GPU, the RAS information of
+    ``rocm-smi``.
+    """
+    counts = _amd_smi_ecc(visible, run)
+    return counts if counts is not None else _rocm_smi_ras(visible, ras)
+
+
+def busy_gpus(visible: Sequence[int], usage: Callable[[], list[GpuVram] | None] = gpu_vram_usage) -> list[int] | None:
+    """The visible GPUs that have memory resident, or ``None`` when the memory use of any of them cannot be read."""
+    used = usage()
+    if used is None or any(index >= len(used) for index in visible):
+        return None
+    return [index for index in visible if vram_busy(used[index])]
 
 
 def _wrong_card(gpu: GpuFacts, gpu_type: str) -> bool:
