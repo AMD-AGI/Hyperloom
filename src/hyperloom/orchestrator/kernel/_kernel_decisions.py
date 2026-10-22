@@ -373,7 +373,6 @@ def record_kernel_integrate_result(
     """Persist one integrate E2E result and reject exhausted patch attempts."""
     if max_fault_attempts is None:
         max_fault_attempts = _MAX_INTEGRATE_FAULT_ATTEMPTS
-
     if not isinstance(result, dict):
         return None
     result, pending_record = _bind_result_to_pending(state, result)
@@ -396,6 +395,7 @@ def record_kernel_integrate_result(
             "is_fault": is_fault,
             "new_tput": result.get("new_tput"),
             "gain_pct": result.get("gain_pct"),
+            "graded_objective": result.get("graded_objective"),
             "accuracy": result.get("accuracy"),
             "accuracy_pass": result.get("accuracy_pass"),
             "decision_reason": result.get("decision_reason"),

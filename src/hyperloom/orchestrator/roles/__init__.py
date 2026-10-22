@@ -7,6 +7,7 @@ from .base import Backend, BackendError, BackendTurnResult
 from .claude import ClaudeBackend
 from .codex import CodexBackend
 from .critic_agent import CriticAgentBackend, RuntimeCall, RuntimeCaller
+from .deepseek import DeepSeekBackend
 from .mcp_context_tools import (
     CONTEXT_TOOL_NAMES,
     CONTEXT_TOOL_QUALIFIED_NAMES,
@@ -43,6 +44,7 @@ __all__ = [
     "CodexBackend",
     "ContextProvider",
     "CriticAgentBackend",
+    "DeepSeekBackend",
     "EMIT_INTENT_TOOL_NAME",
     "EMIT_INTENT_TOOL_QUALIFIED",
     "MCP_SERVER_NAME",
