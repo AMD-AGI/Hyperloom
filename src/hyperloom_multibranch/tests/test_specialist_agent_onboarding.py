@@ -15,6 +15,7 @@ from hyperloom_multibranch.specialist.agent_onboarding import (
     AgentSpec,
     CommandResult,
     OnboardingSetup,
+    agent_env,
     make_ready,
     split_source,
 )
@@ -186,3 +187,26 @@ async def test_a_ref_that_cannot_be_checked_out_fails_every_attempt(tmp_path: Pa
 
     assert all("checking out no-such-ref" in reason for reason in failed.value.reasons)
     assert not sandbox.ran
+
+
+def test_the_docker_shim_reads_a_device_index_the_agent_gives_as_one_of_its_own_cards(tmp_path: Path) -> None:
+    docker = Path(agent_env(tmp_path)["PATH"].split(os.pathsep)[0]) / "docker"
+    sandbox = {**os.environ, "ROCR_VISIBLE_DEVICES": "5,7"}
+
+    def visible(index: str) -> subprocess.CompletedProcess[str]:
+        argv = [
+            str(docker),
+            "exec",
+            "-e",
+            f"ROCR_VISIBLE_DEVICES={index}",
+            "c",
+            "sh",
+            "-c",
+            "echo $ROCR_VISIBLE_DEVICES",
+        ]
+        return subprocess.run(argv, env=sandbox, capture_output=True, text=True)
+
+    assert visible("0").stdout.strip() == "5" and visible("1,0").stdout.strip() == "7,5"
+    assert visible("").stdout.strip() == "5,7"
+    refused = visible("2")
+    assert refused.returncode != 0 and "card" in refused.stderr
