@@ -125,7 +125,8 @@ to test. When your change adds a code path, put a one-time log line on the path 
 flat or worse, check the test's server.log shows that line before you call the idea dead: a patch that never ran \
 measured nothing. Submit the delta worktree_patch returns as it is: never set upstream_ref or upstream_repo on a component your \
 head already has, which the toolbox refuses as upstream_label_unsupported. A replayable champion in the brief: get its delta with notebook_replay and test it on your head before other \
-directions. A lead under "Unfinished in this session" in the brief is a change another branch measured \
+directions. A champion the brief lists as "already on your head, nothing to replay" is in your head already: build on \
+it, do not test it again. A lead under "Unfinished in this session" in the brief is a change another branch measured \
 but left unfinished: finish one in your direction the same way before starting a new idea.
 4. Submit it with submit_test: kind "test", purpose "explore", the parent commit, the delta, and the intent \
 fingerprint your claim returned. The delta must carry the change you claimed: a server argument or environment \

@@ -27,6 +27,7 @@ from hyperloom_multibranch.specialist.prompts import (
     role_prompt,
 )
 from hyperloom_multibranch.specialist.runtime import SessionStart
+from hyperloom_multibranch.notebook.rsi.briefing import ON_HEAD
 from hyperloom_multibranch.notebook.tools import FOCUS_LINE, UNFINISHED_TITLE
 from hyperloom_multibranch.toolbox.mcp_tools import REPLY_INBOX_HEADER
 
@@ -291,6 +292,7 @@ def test_the_role_tests_a_replayable_champion_on_the_head_before_other_direction
     prompt = role_prompt(WORKLOAD)
 
     assert "get its delta with notebook_replay and test it on your head before other directions" in prompt
+    assert f'A champion the brief lists as "{ON_HEAD}" is in your head already: build on it' in prompt
 
 
 def test_the_role_says_settings_running_out_never_ends_a_direction_and_no_brief_comes_by_waiting():
