@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Collection, Mapping, NamedTuple, Sequence
 
-from hyperloom.common.coerce import recorded_float, to_float, to_int
+from hyperloom.common.coerce import first_float, recorded_float, to_float, to_int, to_mapping, to_str_list
 from hyperloom.common.io import JsonLineFormat, append_jsonl
 from hyperloom.inference_optimizer.breakdown.recorder import close_out as _close_out
 from hyperloom.inference_optimizer.breakdown.recorder.framework_event import (
@@ -130,22 +130,9 @@ _VARIANT_DETAIL_METRICS: tuple[str, ...] = (
 class FactRecord:
     """One settled outcome to write to the Recipe KB as a lesson or a pitfall.
 
-    Attributes:
-        task: The completed task (provides task_id).
-        source_session_id: Hyperloom-local session id stamped on provenance.
-        is_keep: True when the outcome is a validated KEEP.
-        change: Summarized change string (used in the statement).
-        gain_pct: Measured gain percentage, or ``None``.
-        throughput_after: Measured throughput after the change, or ``None``.
-        best_config_candidate: Pre-extracted best-config dict (differs between
-            per-task and per-variant callers).
-        evidence_refs: Evidence reference strings stamped on the provenance
-            (task-only or task+variant refs).
-        pitfall_severity_dict: The dict passed to ``_pitfall_severity_for``
-            (per-task passes the result dict; per-variant passes a merged
-            metrics + outcome dict).
-        variant_name: Variant name, present only for per-variant calls; added to
-            ``provenance_details`` when non-None.
+    ``pitfall_severity_dict`` is the result dict per-task, and the variant's merged
+    metrics + outcome per-variant. ``variant_name`` is set only by the per-variant
+    caller, and reaching ``provenance_details`` is what it is for.
     """
 
     task: "Task"
@@ -185,11 +172,6 @@ class _VariantMeasurement(NamedTuple):
     detail: dict[str, Any]
 
 
-class _VariantFailure(NamedTuple):
-    error_class: str | None
-    reason: str | None
-
-
 def _remote_result_type(status: str, reason: str) -> str:
     """The ``close_out.RESULT_*`` code for a remote KB Store write result.
 
@@ -208,11 +190,10 @@ def _remote_result_type(status: str, reason: str) -> str:
 
 
 def _predicted_gain(*sources: dict[str, Any] | None) -> float | None:
-    """First non-zero ``predicted_gain_pct`` (``to_float``-parsed) across ordered sources.
+    """First non-zero ``predicted_gain_pct`` across ordered sources.
 
-    Sources are checked in order; a non-zero prediction wins. Returns ``None``
-    when none carry a usable value so the journal row stays ``predicted``-free
-    for unpredicted (default-grid) changes rather than recording a fake 0.
+    ``None`` when none carry one, so the journal row for an unpredicted
+    (default-grid) change stays ``predicted``-free rather than recording a fake 0.
     """
     for src in sources:
         if not isinstance(src, dict):
@@ -224,15 +205,7 @@ def _predicted_gain(*sources: dict[str, Any] | None) -> float | None:
 
 
 def _extra_server_args(payload: Mapping[str, Any]) -> str:
-    """Read canonical ``extra_server_args`` from a payload."""
-    value = payload.get("extra_server_args")
-    if value is None:
-        return ""
-    if isinstance(value, str):
-        return value
-    if isinstance(value, (list, tuple)):
-        return " ".join(str(v).strip() for v in value if str(v).strip())
-    return str(value)
+    return " ".join(to_str_list(payload.get("extra_server_args")))
 
 
 def _record_config_run(coord: Any, *, task: Any, result_dict: Mapping[str, Any]) -> None:
@@ -521,22 +494,11 @@ def _variant_verdict(outcome: str, adopted: bool) -> Verdict:
     return Verdict.REFUSED
 
 
-def _variant_measurement(metrics: Any) -> _VariantMeasurement:
-    if not isinstance(metrics, dict):
-        return _VariantMeasurement(gain_pct=None, throughput_after=None, detail={})
+def _variant_measurement(metrics: Mapping[str, Any]) -> _VariantMeasurement:
     return _VariantMeasurement(
         gain_pct=to_float(metrics.get("gain_pct")),
         throughput_after=to_float(metrics.get("output_throughput")),
         detail={key: metrics[key] for key in _VARIANT_DETAIL_METRICS if metrics.get(key) is not None},
-    )
-
-
-def _variant_failure(variant_outcome: Mapping[str, Any], outcome: str) -> _VariantFailure:
-    if outcome != OUTCOME_REVERT:
-        return _VariantFailure(error_class=None, reason=None)
-    return _VariantFailure(
-        error_class=str(variant_outcome.get("error_class") or "") or None,
-        reason=str(variant_outcome.get("reason") or "") or None,
     )
 
 
@@ -549,22 +511,12 @@ def _variant_change_attrs(variant_attrs: Any, variant_name: str) -> dict[str, An
 
 
 def _finalize_outcome(*, status: str, reason: str, backend: str, result_type: str) -> dict[str, Any]:
-    return {
-        "status": status,
-        "reason": reason,
-        "backend": backend,
-        "result_type": result_type,
-    }
+    return {"status": status, "reason": reason, "backend": backend, "result_type": result_type}
 
 
 def _finalize_error(exc: BaseException, *, reason: str, backend: str, result_type: str) -> dict[str, Any]:
-    return {
-        "status": "error",
-        "reason": reason,
-        "backend": backend,
-        "result_type": result_type,
-        "error_class": type(exc).__name__,
-    }
+    failed = _finalize_outcome(status="error", reason=reason, backend=backend, result_type=result_type)
+    return {**failed, "error_class": type(exc).__name__}
 
 
 class RecipeJournalCollaborator(CoordinatorCollaborator):
@@ -597,7 +549,7 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
             journal.append_entry(
                 JournalEntry(
                     phase=self.journal_entry_phase(),
-                    lever_kind=lever_kind_for_task(lift_kind, result if isinstance(result, dict) else None),
+                    lever_kind=lever_kind_for_task(lift_kind, result),
                     iter=int(self.shared_state.tick or 0),
                     kind=kind,
                     change=change,
@@ -614,14 +566,7 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
             log.exception("integrate journal append failed")
 
     def _source_session_id(self) -> str:
-        """Return the hyperloom-local session id used as source_session_id on KB fact writes.
-
-        NOT a KB-side session id; prefers recipe_kb_session_id, falls back to session_dir.name.
-
-        Returns:
-            The hyperloom-local session id (recipe_kb_session_id when set, else
-            ``session_dir.name``).
-        """
+        """The hyperloom-local session id stamped on KB fact writes, never a KB-side one."""
         return str(self.shared_state.recipe_kb_session_id or "") or self.session_dir.name
 
     async def fact_write_hook(
@@ -634,12 +579,8 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
     ) -> None:
         """Per-task fact-write entry point (per_variant for explore grids, else per-task).
 
-        Args:
-            task: The completed task being recorded.
-            result: The task's :class:`SubAgentResult` (or result dict).
-            verdict: The settlement verdict.
-            adopted_variants: Fingerprints of the explore winners whose lift
-                landed; a per-variant KEEP outside it did not adopt anything.
+        ``adopted_variants`` holds the fingerprints of the explore winners whose lift
+        landed; a per-variant KEEP outside it did not adopt anything.
         """
         result_dict = _result_payload(result)
         source_session_id = self._source_session_id()
@@ -674,12 +615,7 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         self.shared_state.save(self.session_dir)
 
     def ensure_journal(self) -> Journal:
-        """Lazy-instantiate the per-session :class:`Journal` (load_or_create reads an existing file on resume).
-
-        Returns:
-            The per-session :class:`Journal` instance (created on first call,
-            with the baseline backfilled on subsequent calls).
-        """
+        """Lazy-instantiate the per-session :class:`Journal` (load_or_create reads an existing file on resume)."""
         existing = self._journal
         if existing is None:
             ss = self.shared_state
@@ -700,22 +636,8 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         self,
         result_dict: dict[str, Any] | None,
     ) -> str | None:
-        """Decide whether a failed result warrants a pitfall row.
-
-        ``crash`` / ``oom`` / ``hang`` / ``detokenizer_stall`` on ``error_class``,
-        or ``crash`` / ``oom`` / ``hang`` on ``status``, yield
-        ``SEVERITY_CRASH``; a ``gain_pct`` at or below
-        ``PITFALL_REGRESS_THRESHOLD_PCT`` (-5.0) yields ``SEVERITY_REGRESS``;
-        otherwise ``None``.
-
-        Args:
-            result_dict: The failed task's result dict; non-dict yields ``None``.
-
-        Returns:
-            The pitfall severity (``SEVERITY_CRASH`` / ``SEVERITY_REGRESS``), or
-            ``None`` when no pitfall is warranted.
-        """
-        if not isinstance(result_dict, dict):
+        """The severity of the pitfall a failed result warrants, or ``None`` for no pitfall."""
+        if not result_dict:
             return None
         error_class = str(result_dict.get("error_class") or "").lower()
         # ``detokenizer_stall`` is a hang in all but name; record it as a
@@ -725,34 +647,20 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         status = str(result_dict.get("status") or "").lower()
         if status in ("crash", "oom", "hang"):
             return _SEVERITY_CRASH
-        gain = result_dict.get("gain_pct")
-        try:
-            gain_pct = float(gain) if gain is not None else None
-        except (TypeError, ValueError):
-            gain_pct = None
+        gain_pct = to_float(result_dict.get("gain_pct"))
         if gain_pct is not None and gain_pct <= self.PITFALL_REGRESS_THRESHOLD_PCT:
             return _SEVERITY_REGRESS
         return None
 
     def journal_entry_phase(self) -> str:
-        """Return the current phase label for journal entries.
-
-        Returns:
-            str: The uppercased phase name, or ``"UNKNOWN"`` when unset.
-        """
+        """The uppercased phase name journal entries are stamped with, ``"UNKNOWN"`` when unset."""
         return str(self.shared_state.phase or "").strip().upper() or "UNKNOWN"
 
     def _record_fact_impl(self, fact: FactRecord) -> None:
-        """Shared KB write for _record_fact_per_task and _record_fact_per_variant.
+        """Write one KB lesson (KEEP with positive gain) or one KB pitfall (REVERT/failure).
 
-        Writes one KB lesson (on KEEP with positive gain) or one KB pitfall
-        (on REVERT/failure) to the recipe row, then returns.  Call only after
-        the journal entry has been appended and ``recipe_kb`` is confirmed
-        non-None by the caller.
-
-        Args:
-            fact: The completed task, its outcome and the evidence to stamp on
-                the provenance.
+        Call only after the journal entry has been appended and ``recipe_kb`` is
+        confirmed non-None by the caller.
         """
         state = self.shared_state
         now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -820,23 +728,16 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         result_dict: dict[str, Any],
         verdict: Verdict,
     ) -> None:
-        """Per-task fact write — one journal row + maybe one KB fact (source_session_id is hyperloom-local).
+        """Per-task fact write — one journal row + maybe one KB fact.
 
-        Args:
-            task: The completed task being recorded.
-            source_session_id: The hyperloom-local session id stamped on the
-                fact provenance.
-            result_dict: The task result dict.
-            verdict: The settlement verdict (ADOPTED → KEEP and a lesson, else
-                a non-KEEP row and maybe a pitfall).
+        ``ADOPTED`` journals a KEEP and may write a lesson; any other verdict
+        journals a non-KEEP row and may write a pitfall.
         """
         journal = self.ensure_journal()
         # integrate_patch reports its delta under ``delta_pct``;
         # fall back to it so a reverted/kept patch shows its REAL measured delta
         # in the journal instead of a null gain.
-        gain_pct = to_float(result_dict.get("gain_pct"))
-        if gain_pct is None:
-            gain_pct = to_float(result_dict.get("delta_pct"))
+        gain_pct = first_float(result_dict.get("gain_pct"), result_dict.get("delta_pct"))
         throughput_after = to_float(result_dict.get("output_throughput"))
         kind = classify_change_kind(task.kind, None)
         change = summarize_change(task.kind, None, result_dict)
@@ -853,7 +754,7 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         journal.append_entry(
             JournalEntry(
                 phase=self.journal_entry_phase(),
-                lever_kind=lever_kind_for_task(kind, result_dict if isinstance(result_dict, dict) else None),
+                lever_kind=lever_kind_for_task(kind, result_dict),
                 iter=int(self.shared_state.tick or 0),
                 kind=kind,
                 change=change,
@@ -897,16 +798,10 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         kind: str,
         severity: str | None = None,
     ) -> str:
-        """Build the lesson statement / pitfall description hashed into the KB canonical_id; MUST exclude volatile fields (e.g. gain_pct) so N sessions merge instead of producing N rows. Identity = framework + change + model/hw.
+        """Build the lesson statement / pitfall description hashed into the KB canonical_id.
 
-        Args:
-            change: The summarized change description.
-            kind: ``"lesson"`` or ``"pitfall"`` — selects the rendered form.
-            severity: The pitfall severity, rendered only when ``kind`` is
-                ``"pitfall"``.
-
-        Returns:
-            The identity-stable statement / description string.
+        Identity is framework + change + model/hw. It MUST exclude volatile fields
+        (``gain_pct`` and the like) so N sessions merge instead of producing N rows.
         """
         framework = str(self.shared_state.framework or "").strip()
         fw_tag = f"[{framework or '?'}] "
@@ -925,16 +820,9 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         stack_depth: int,
         measured_at: str,
     ) -> dict[str, Any]:
-        """Structured ``measured_impact`` payload (dict not legacy string so consumers parse without regex); stack_depth = stack length before this lesson lands.
+        """Structured ``measured_impact`` payload, a dict rather than a legacy string so consumers parse without regex.
 
-        Args:
-            gain_pct: The measured gain percent, or ``None``.
-            throughput_after: Throughput after the change, or ``None``.
-            stack_depth: Optimization-stack length before this lesson lands.
-            measured_at: ISO timestamp of the measurement.
-
-        Returns:
-            A compact ``measured_impact`` dict with ``None`` fields stripped.
+        ``stack_depth`` is the optimization-stack length before this lesson lands.
         """
         out: dict[str, Any] = {
             "gain_pct": float(gain_pct) if gain_pct is not None else None,
@@ -964,14 +852,15 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
             return
         outcome = derive_journal_outcome(_variant_verdict(outcome_raw, adopted), variant_outcome)
         variant_name = str(variant_outcome.get("variant_name") or "")
-        metrics = variant_outcome.get("metrics") or {}
+        metrics = to_mapping(variant_outcome.get("metrics"))
         measurement = _variant_measurement(metrics)
         variant_attrs = variant_outcome.get("variant") or {}
         attrs = variant_attrs if isinstance(variant_attrs, dict) else None
         kind = classify_change_kind(task.kind, attrs)
         change_attrs = _variant_change_attrs(variant_attrs, variant_name)
         change = summarize_change(task.kind, change_attrs, None)
-        failure = _variant_failure(variant_outcome, outcome)
+        # Only a measured loss carries a failure; a refusal has nothing to report.
+        reverted = outcome == OUTCOME_REVERT
         tick = int(self.shared_state.tick or 0)
         journal.append_entry(
             JournalEntry(
@@ -983,8 +872,8 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
                 outcome=outcome,
                 gain_pct=measurement.gain_pct,
                 throughput_after=measurement.throughput_after,
-                error_class=failure.error_class,
-                reason=failure.reason,
+                error_class=(str(variant_outcome.get("error_class") or "") or None) if reverted else None,
+                reason=(str(variant_outcome.get("reason") or "") or None) if reverted else None,
                 task_id=task.task_id,
                 variant_name=variant_name,
                 provenance=str(variant_outcome.get("provenance") or ""),
@@ -1017,7 +906,7 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
                 # Workload-shape tags — see _record_fact_per_task.
                 evidence_refs=[f"log:task-{task.task_id}", f"variant:{variant_name}"],
                 pitfall_severity_dict={
-                    **(metrics if isinstance(metrics, dict) else {}),
+                    **metrics,
                     "error_class": variant_outcome.get("error_class"),
                     "status": variant_outcome.get("outcome"),
                 },
@@ -1173,10 +1062,7 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         )
 
     def _write_back_scope(self) -> dict[str, Any]:
-        """The workload dimensions the published recipe is partitioned by.
-
-        Matches the ``RecipeScope`` shape the section already published.
-        """
+        """The workload dimensions the published recipe is partitioned by, in ``RecipeScope`` shape."""
         state = self.shared_state
         return {
             "kernel_optimizer": str(state.kernel_optimizer or ""),
@@ -1421,7 +1307,7 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
             return {}
         tick = int(self.shared_state.tick or 0)
         cache = self._local_recipe_cache
-        if isinstance(cache, tuple) and len(cache) == 2 and cache[0] == tick:
+        if cache is not None and cache[0] == tick:
             return cache[1]
         row = self.recipe_kb.get_authoritative_recipe(canonical_id=self.workload_canonical_id()) or {}
         self._local_recipe_cache = (tick, row)
@@ -1475,15 +1361,8 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
             _extra_server_args(live_bc).strip()
             or (isinstance(live_bc.get("extra_envs"), Mapping) and live_bc.get("extra_envs"))
         )
-        try:
-            live_tput = float(live.get("best_throughput") or 0.0)
-        except (TypeError, ValueError):
-            live_tput = 0.0
-        try:
-            new_tput = float(throughput_after or 0.0)
-        except (TypeError, ValueError):
-            new_tput = 0.0
-
+        live_tput = recorded_float(live.get("best_throughput"))
+        new_tput = recorded_float(throughput_after)
         if not live_has_config or (new_tput > 0.0 and new_tput >= live_tput):
             overrides: dict[str, Any] = {
                 "best_config": dict(best_config_candidate),
