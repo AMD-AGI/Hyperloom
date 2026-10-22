@@ -211,7 +211,7 @@ def test_the_prompt_shows_and_explains_the_gpu_hours_and_llm_dollars_used() -> N
     )
 
 
-def test_a_branch_row_shows_what_is_known_of_its_specialist_and_the_prompt_says_to_stop_one_that_gave_up() -> None:
+def test_a_branch_row_shows_what_is_known_of_its_specialist_and_a_gave_up_one_is_left_to_the_scheduler() -> None:
     gave_up = SpecialistStatus(running=False, crashes=4, lost=1, gave_up=True, judge_failed=False)
     judging_failed = SpecialistStatus(running=False, crashes=0, lost=6, gave_up=False, judge_failed=True)
 
@@ -231,8 +231,17 @@ def test_a_branch_row_shows_what_is_known_of_its_specialist_and_the_prompt_says_
     prompt = " ".join(JUDGE_SYSTEM_PROMPT.split())
     for field in ("crashes", "lost", "gave_up", "judge_failed"):
         assert f"({field})" in prompt
-    assert "A branch whose specialist gave up or whose judging failed makes no more progress" in prompt
+    assert "The scheduler stops a gave-up branch itself" in prompt
+    assert "A branch whose judging failed makes no more progress" in prompt
+    assert "gave up or whose judging failed" not in prompt
     assert "weigh a specialist's lost count against its progress" in prompt
+
+
+def test_the_prompt_says_a_free_slot_may_be_opened_without_a_stop() -> None:
+    prose = " ".join(JUDGE_SYSTEM_PROMPT.split())
+
+    assert "free_branch_slots counts the branches you may open at this call having stopped nothing" in prose
+    assert "Leaving a free slot unopened needs a reason; opening into it does not." in prose
 
 
 def test_a_branch_whose_specialist_is_not_known_shows_none() -> None:

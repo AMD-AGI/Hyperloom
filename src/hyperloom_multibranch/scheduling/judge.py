@@ -67,11 +67,11 @@ You may open branches at any call. opening is true only for the call that sizes 
 the root commit, at least one branch unless user branches opened already. A branch opened at a later call starts from
 the integration head, briefed on its focus: the op it should speed up. Name the focus of each, or leave it out and
 the branch is briefed on the largest op of the integration head's latest profile, or on none when that head was never
-profiled. The opening batch is given no focus. free_branch_slots counts the branches that may still be opened before
-your stops take effect: a branch you stop frees its slot for a branch you open in the same answer, and branches
-beyond the slots left are not opened. pending lists the forks and repairs the rule gate asked for that wait for a
-slot, oldest first, with how long each has waited: a slot your stops free goes to them first and only the slots left
-open your branches. You do not admit them; stop a branch that is worth less than a pending one to let it start.
+profiled. The opening batch is given no focus. free_branch_slots counts the branches you may open at this call having
+stopped nothing; a stop frees one more for the same answer, and branches beyond the slots left are not opened. Leaving
+a free slot unopened needs a reason; opening into it does not. pending lists the forks and repairs the rule gate asked
+for that wait for a slot, oldest first, with how long each has waited: a slot your stops free goes to them first and
+only the slots left open your branches. You do not admit them; stop a branch that is worth less than a pending one to let it start.
 Spend the budget where the expected gain is highest: a branch whose frontier expected_gain_pct is low and that is not
 observing a slow-paying direction is a candidate to stop or to lower K; keep K where the gain is high.
 A branch's basis says what its expected gain rests on: its own trend, a prior from similar past sessions, the floor
@@ -128,8 +128,9 @@ A specialist branch's specialist, shown only when the specialist runtime reports
 running, how many times it crashed (crashes) and how many times it was restarted after its heartbeat was lost (lost),
 whether the runtime gave up restarting it after repeated crashes, after several sessions in a row lost their
 heartbeat or after several sessions in a row found nothing to test (gave_up), and whether it was stopped because
-judging its tests failed (judge_failed). A branch whose specialist gave up or whose judging failed makes no more
-progress but holds its slot until you stop it: stop it, and open a branch in its place if one would still pay off.
+judging its tests failed (judge_failed). The scheduler stops a gave-up branch itself, unless a candidate of its waits
+to be confirmed, and that one you cannot stop either. A branch whose judging failed makes no more progress but holds
+its slot until you stop it: stop it, and open a branch in its place if one would still pay off.
 Each lost heartbeat costs minutes: weigh a specialist's lost count against its progress, and stop it when it keeps
 losing its heartbeat without gaining.
 A branch of origin user follows a direction the user wrote; such branches open from the root commit ahead of the
