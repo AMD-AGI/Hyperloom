@@ -324,10 +324,34 @@ async def test_compose_prompt_emits_phase_block_for_every_role(
     c = coordinator_with_mocks
     try:
         for role in ("orchestration", "critic"):
-            prompt = await c.conversation.compose_prompt(role)
+            prompt = (await c.conversation.compose_prompt(role)).text
             assert "=== Phase ===" in prompt, f"{role}: phase block missing"
             assert "phase     : PRELUDE" in prompt, f"{role}: phase value missing"
             assert "allowed" in prompt, f"{role}: allowed-actions line missing"
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_compose_prompt_keeps_per_tick_values_out_of_the_context(coordinator_with_mocks):
+    c = coordinator_with_mocks
+    try:
+        before = await c.conversation.compose_prompt("orchestration")
+        c.shared_state.tick = int(c.shared_state.tick or 0) + 7
+        c.shared_state.agent_last_active["orchestration"] = 1.0
+        c.shared_state.phase_started_ts = "2026-01-01T00:00:00+00:00"
+        after = await c.conversation.compose_prompt("orchestration")
+
+        assert after.context == before.context
+        assert after.turn != before.turn
+        for heading in ("=== Phase ===", "=== Mission progress ===", "=== Tick ===", "=== Inbox for orchestration"):
+            assert heading in after.turn
+            assert heading not in after.context
+        assert f"tick={c.shared_state.tick}" in after.turn
+        assert "tick=" not in after.context
+        assert "agent_last_active=" not in after.context
+        assert after.context.startswith("SESSION_DIR=")
+        assert "=== Shared session state ===" in after.context
     finally:
         await c.stop()
 
@@ -349,7 +373,7 @@ async def test_compose_prompt_orchestration_renders_warm_start_when_set(
             },
         }
         c.shared_state.save(session_dir)
-        prompt = await c.conversation.compose_prompt("orchestration")
+        prompt = (await c.conversation.compose_prompt("orchestration")).text
         assert "=== Warm start (Recipe KB T0) ===" in prompt
         assert "tier=exact" in prompt
         assert "best_throughput=2100" in prompt
@@ -363,7 +387,7 @@ async def test_compose_prompt_orchestration_omits_warm_start_when_empty(
 ):
     c = coordinator_with_mocks
     try:
-        prompt = await c.conversation.compose_prompt("orchestration")
+        prompt = (await c.conversation.compose_prompt("orchestration")).text
         assert "=== Warm start" not in prompt
     finally:
         await c.stop()
@@ -378,7 +402,7 @@ async def test_compose_prompt_omits_specialist_health_block(
     """The periodic specialist block is intentionally gone (see conversation.py)."""
     c = coordinator_with_mocks
     try:
-        prompt = await c.conversation.compose_prompt(agent_name)
+        prompt = (await c.conversation.compose_prompt(agent_name)).text
         assert "Specialist health" not in prompt
         assert "stale" not in prompt.lower()
     finally:

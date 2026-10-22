@@ -1081,7 +1081,7 @@ class Coordinator:
         """Body of :meth:`reactor_pass`."""
         backend = self.backends[agent_name]
         sys_prompt = await self.conversation.load_system_prompt(agent_name)
-        prompt = await self.conversation.compose_prompt(agent_name)
+        prompt = (await self.conversation.compose_prompt(agent_name)).text
         if request:
             prompt = f"{prompt}\n\n{request}"
         tools = self.policy.allowed_tools_for_agent(agent_name)
