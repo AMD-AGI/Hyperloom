@@ -3,9 +3,9 @@
 
 """A specialist's record that its direction is done on a head: one branch-log entry, ``EXHAUSTED`` and a JSON object.
 
-It is kept for the record and stops nothing. When the branch gives up, the runtime quotes the latest one in its notice
-and deals that direction to no new branch on that head. ``why`` is a closed vocabulary so that give-ups can be counted
-by cause.
+It is kept for the record and stops nothing; one that cites no test is no record, as an untested direction is not
+done. When the branch gives up, the runtime quotes the latest one in its notice and deals that direction to no new
+branch on that head. ``why`` is a closed vocabulary so that give-ups can be counted by cause.
 """
 
 from __future__ import annotations
@@ -47,6 +47,8 @@ def read_exhausted(content: str) -> Exhausted | None:
         return None
     try:
         document = json.loads(content[len(EXHAUSTED_PREFIX) :])
+        if not document["tried"]:
+            return None
         return Exhausted(
             str(document["direction"]),
             str(document["head"]),

@@ -31,3 +31,7 @@ def test_an_entry_that_is_no_record_or_is_malformed_reads_as_none():
     assert read_exhausted(EXHAUSTED_PREFIX + "{not json") is None
     assert read_exhausted(EXHAUSTED_PREFIX + json.dumps({**RECORD, "why": "bored"})) is None
     assert read_exhausted(EXHAUSTED_PREFIX + json.dumps({k: v for k, v in RECORD.items() if k != "head"})) is None
+
+
+def test_a_record_that_cites_no_test_is_no_record():
+    assert read_exhausted(EXHAUSTED_PREFIX + json.dumps({**RECORD, "tried": []})) is None
