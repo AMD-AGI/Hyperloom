@@ -41,15 +41,20 @@ _GIT_IDENTITY = {
 }
 _FIXED_CONFIG = ("-c", "core.autocrlf=false", "-c", "core.safecrlf=false", "-c", "diff.noprefix=false")
 _STAGE = ("add", "--all", "--")
+_HEAD = "HEAD"
+#: Pathspecs that leave out the built files of :data:`SKIPPED`, for a tree whose editor may have written them.
+_UNPATCHABLE = tuple(f":(glob,exclude)**/{name}" + ("" if name.startswith("*") else "/**") for name in SKIPPED)
 
 
 class WorktreeError(RuntimeError):
     """A git command on the source base or a worktree failed."""
 
 
-def _git(cwd: Path, *args: str, stdin: bytes | None = None) -> str:
+def _git(cwd: Path, *args: str, stdin: bytes | None = None, index: Path | None = None) -> str:
     # An inherited GIT_* (GIT_DIR inside a hook) would aim the command at another repository.
     env = {key: value for key, value in os.environ.items() if not key.upper().startswith("GIT_")}
+    if index is not None:
+        env["GIT_INDEX_FILE"] = str(index)
     done = subprocess.run(
         ["git", *_FIXED_CONFIG, *args],
         cwd=cwd,
@@ -137,7 +142,7 @@ class BranchWorktree:
         Uncommitted edits are dropped, so a change made against an older head never reaches a diff against this one.
         """
         if self.head() == head:
-            self._reset("HEAD")
+            self._reset(_HEAD)
             return
         self._reset(BASE_BRANCH)
         with tempfile.TemporaryDirectory(prefix="mb-sync-") as scratch:
@@ -150,6 +155,27 @@ class BranchWorktree:
     def diff(self, component: str) -> str:
         """The worktree's change to ``component`` against its head, as the patch the toolbox applies; empty when none."""
         return self._staged_diff(component, "--no-color", "--no-ext-diff")
+
+    def commit(self) -> str:
+        """The git commit the worktree's HEAD is at."""
+        return _git(self.path, "rev-parse", _HEAD).strip()
+
+    def diff_from(self, commit: str, component: str) -> str:
+        """The worktree's files of ``component`` against its git commit ``commit``, whatever was committed on top of it
+        since, as the patch the toolbox applies; empty when none.
+
+        It is read through an index of its own: whoever edits the worktree (a third-party agent) may be using the
+        worktree's index, and a stage there would race its commits.
+        """
+        layout = self._layouts.get(component)
+        if layout is None:
+            raise UnsupportedComponentError(f"{component} has no package layout")
+        paths = (layout.upstream_prefix, *_UNPATCHABLE)
+        with tempfile.TemporaryDirectory(prefix="mb-diff-") as scratch:
+            index = Path(scratch) / "index"
+            _git(self.path, "read-tree", commit, index=index)
+            _git(self.path, *_STAGE, *paths, index=index)
+            return _git(self.path, "diff", "--cached", "--no-color", "--no-ext-diff", commit, "--", *paths, index=index)
 
     def changed(self, component: str) -> Changes:
         """The files the worktree's change to ``component`` writes and deletes against its head."""
@@ -169,7 +195,7 @@ class BranchWorktree:
         if layout is None:
             raise UnsupportedComponentError(f"{component} has no package layout")
         _git(self.path, *_STAGE, layout.upstream_prefix)
-        return _git(self.path, "diff", "--cached", *options, "HEAD", "--", layout.upstream_prefix)
+        return _git(self.path, "diff", "--cached", *options, _HEAD, "--", layout.upstream_prefix)
 
 
 __all__ = ["BASE_BRANCH", "HEAD_SUBJECT", "SKIPPED", "BranchWorktree", "Changes", "SourceBase", "WorktreeError"]

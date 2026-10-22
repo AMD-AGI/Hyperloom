@@ -43,10 +43,25 @@ state.write_text(json.dumps({"keeps": [], "note": ""}))
 for step, seqs in enumerate((256, 512), start=1):
     time.sleep(0.3)
     target.write_text(f"max_num_seqs = {seqs}\\n")
+    COMMIT
     state.write_text(json.dumps({"keeps": [{"decision": "KEEP"}] * step, "note": f"seqs {seqs}"}))
 time.sleep(0.3)
 sys.exit(EXIT)
 """
+
+#: What an agent that commits each candidate in its workspace, as Arbor does, runs after each change.
+COMMITS = (
+    'import subprocess; subprocess.run("git add -A && git -c user.name=a -c user.email=a@a commit -qm keep", '
+    "shell=True, cwd=config['workspace'], check=True)"
+)
+
+
+async def _until(condition, what: str, seconds: float = 10.0) -> None:
+    for _ in range(int(seconds / 0.05)):
+        if condition():
+            return
+        await asyncio.sleep(0.05)
+    raise AssertionError(f"timed out waiting for {what}")
 
 
 class LocalProcess:
@@ -104,10 +119,11 @@ class Toolbox:
         return accepted.request_id or ""
 
 
-def _agent_repo(tmp_path: Path, exit_code: int) -> Path:
+def _agent_repo(tmp_path: Path, exit_code: int, commits: bool) -> Path:
     repo = tmp_path / "agent-repo"
     repo.mkdir()
-    (repo / "agent.py").write_text(AGENT.replace("EXIT", str(exit_code)), encoding="utf-8")
+    script = AGENT.replace("EXIT", str(exit_code)).replace("COMMIT", COMMITS if commits else "pass")
+    (repo / "agent.py").write_text(script, encoding="utf-8")
     for argv in (
         ["git", "init", "-q"],
         ["git", "add", "."],
@@ -136,7 +152,7 @@ def _manifest(workspace: str) -> str:
     )
 
 
-async def _session(tmp_path: Path, exit_code: int):
+async def _session(tmp_path: Path, exit_code: int, *, commits: bool = False):
     rig = await branch_rig(tmp_path, ROOT, BRANCH)
     base, repo, root, notebook = rig.base, rig.repo, rig.root, rig.notebook
     toolbox_notebook = LocalNotebook(tmp_path / "notebook", Writer(Role.TOOLBOX, "toolbox"))
@@ -156,18 +172,20 @@ async def _session(tmp_path: Path, exit_code: int):
     setup = AutonomousSetup(onboarding, spec, toolbox, repo, "vllm", poll_seconds=0.05)
     place = BranchPlace(worktree, notebook, tmp_path / BRANCH / "session")
     place.workspace.mkdir(parents=True)
-    source = str(_agent_repo(tmp_path, exit_code))
+    source = str(_agent_repo(tmp_path, exit_code, commits))
     start = SessionStart(BRANCH, root, 1, BranchTask(agent=source))
     return AutonomousSession(start, setup, place), toolbox, toolbox_notebook, repo, notebook
 
 
-async def test_an_agent_s_keeps_are_imported_one_at_a_time_against_the_branch_head(tmp_path: Path) -> None:
-    session, toolbox, toolbox_notebook, repo, notebook = await _session(tmp_path, exit_code=0)
+@pytest.mark.parametrize("commits", [False, True], ids=["edits", "commits"])
+async def test_an_agent_s_keeps_are_imported_one_at_a_time_against_the_branch_head(
+    tmp_path: Path, commits: bool
+) -> None:
+    session, toolbox, toolbox_notebook, repo, notebook = await _session(tmp_path, exit_code=0, commits=commits)
 
     await session.preflight()
     running = asyncio.create_task(session.run())
-    while not toolbox.requests:
-        await asyncio.sleep(0.05)
+    await _until(lambda: toolbox.requests, "the first import")
     await asyncio.sleep(1.0)
     assert len(toolbox.requests) == 1
     await toolbox_notebook.write_result(result("r1"))

@@ -44,6 +44,8 @@ from hyperloom_multibranch.specialist.tools import sync_to_head
 log = logging.getLogger(__name__)
 
 MANIFEST_FILE = "agent-manifest.json"
+#: Holds the workspace's git commit at the root, which every keep is read against: the agent may commit on top of it.
+ROOT_FILE = "agent-root"
 AGENT_DIR = "agent"
 
 
@@ -76,6 +78,7 @@ class AutonomousSession:
 
     async def preflight(self) -> None:
         await sync_to_head(self._setup.repo, self._start.branch, self._place.worktree)
+        (self._place.workspace / ROOT_FILE).write_text(self._place.worktree.commit(), encoding=ENCODING)
         spec = self._setup.spec(self._place.worktree.path)
         ready = await make_ready(self._start.task.agent, spec, self._agent_dir, self._setup.onboarding)
         self._manifest, self._process = ready.manifest, ready.process
@@ -166,7 +169,8 @@ class AutonomousSession:
     def _read(self, manifest: AgentManifest, seq: int) -> KeptChange:
         """The agent's state now; an agent that keeps no config of its own runs with the root's."""
 
-        patch = without_file(self._place.worktree.diff(self._setup.component), manifest)
+        root = (self._place.workspace / ROOT_FILE).read_text(encoding=ENCODING).strip()
+        patch = without_file(self._place.worktree.diff_from(root, self._setup.component), manifest)
         source, summary = manifest.config_source, self._summary(manifest)
         if source is None:
             spec = self._setup.spec(self._place.worktree.path)

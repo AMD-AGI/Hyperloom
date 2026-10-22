@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
+import subprocess
+
 import pytest
 
 from hyperloom.contracts.recipe import ComponentPatches, PatchRef
@@ -50,6 +52,25 @@ def test_a_change_in_a_worktree_is_a_patch_the_toolbox_applies_to_the_installed_
     stack = ComponentPatches("vllm", VLLM, "1" * 40, (ref,))
     root = apply_patch_stack(stack, COMPONENT_LAYOUTS["vllm"], installed, blobs)
     assert sorted(entry.path for entry in root.entries) == ["config.py", "lpm.py"]
+
+
+def test_a_diff_from_a_commit_holds_what_was_committed_since_without_touching_the_worktree_s_index(tmp_path, base):
+    worktree = base.worktree("s1", tmp_path / "s1")
+    worktree.sync("c0", [])
+    root = worktree.commit()
+    (worktree.path / "vllm" / "config.py").write_bytes(b"max_num_seqs = 256\n")
+    subprocess.run(["git", "-c", "user.name=a", "-c", "user.email=a@a", "commit", "-qam", "keep"], cwd=worktree.path)
+    (worktree.path / "vllm" / "scheduler.py").write_bytes(b"policy = 'lpm'\n")
+    (worktree.path / "vllm" / "__pycache__").mkdir()
+    (worktree.path / "vllm" / "__pycache__" / "scheduler.cpython-312.pyc").write_bytes(b"\x00compiled")
+    status = ["git", "status", "--porcelain", "--ignored"]
+    before = subprocess.run(status, cwd=worktree.path, capture_output=True).stdout
+
+    patch = worktree.diff_from(root, "vllm")
+
+    assert "+max_num_seqs = 256" in patch and "+policy = 'lpm'" in patch and "pyc" not in patch
+    assert worktree.diff_from(worktree.commit(), "vllm").count("diff --git") == 1
+    assert subprocess.run(status, cwd=worktree.path, capture_output=True).stdout == before
 
 
 def test_a_sync_drops_the_edits_and_lays_the_head_patches_over_the_installed_sources(tmp_path, base):
