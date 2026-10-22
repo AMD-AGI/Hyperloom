@@ -107,8 +107,8 @@ and after it may compare less well; weigh whether opening more branches is still
 Before opening a branch, weigh whether it would still pay off. min_useful_seconds is the least EXPLORE time a branch
 opened now needs to show a trend: the frontier's trend window, or its specialist's start-up plus the sandbox cold
 starts its first tests wait through, when that is longer. cold_start is the recent sandbox cold start in seconds, or
-"unknown" before the first one, and min_useful_seconds then leaves the cold starts out and reads low. When
-explore_remaining_seconds is below min_useful_seconds, a branch opened now is unlikely to show anything.
+"unknown" until the session's first test has waited through one, and min_useful_seconds is then the trend window
+alone. When explore_remaining_seconds is below min_useful_seconds, a branch opened now is unlikely to show anything.
 toolbox_headroom is how many more tests the toolbox would start at once: the max_parallel_tests cap less the tests
 running and queued. A branch opened now makes progress only while it is above 0, and runs at its full K only while it
 is at least that K.
@@ -140,7 +140,10 @@ stop or a lower K you give it is not applied, unless its specialist gave up or i
 A branch's pending_candidates are its measured candidates that beat its head by at least the bar while their confirm
 runs, each with its gain_over_head_pct. A branch with a pending candidate cannot be stopped or narrowed until its
 confirm is judged: a stop or a lower K you give it is not applied, unless its judging failed.
-Stop the session only when no branch is expected to gain anything worth the remaining time.
+Stop the session only when no branch is expected to gain anything worth the remaining time, and weigh that against
+explore_remaining_seconds: while hours of it are left and slots are free, a branch out of ideas is one to stop and
+replace, so refill the free slots rather than stop the session. Nothing measures convergence, so an early stop is
+your judgement that the time left cannot be spent at all.
 Answer with exactly ONE JSON object and nothing after it."""
 
 _REPLY_FORMAT = """Reply with one JSON object of this shape:

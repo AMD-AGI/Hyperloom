@@ -357,9 +357,18 @@ def test_prompt_shows_and_explains_whether_a_branch_opened_now_would_pay_off() -
 
 def test_prompt_says_the_cold_start_is_unknown_before_the_first_one() -> None:
     state = _state(_view(widening=replace(WIDENING, cold_start_seconds=None)))
+    prose = " ".join(JUDGE_SYSTEM_PROMPT.split())
 
     assert state["cold_start"] == "unknown"
-    assert '"unknown"' in JUDGE_SYSTEM_PROMPT
+    assert '"unknown" until the session\'s first test has waited through one' in prose
+    assert "min_useful_seconds is then the trend window alone" in prose
+
+
+def test_prompt_weighs_an_early_stop_against_the_explore_time_left() -> None:
+    prose = " ".join(JUDGE_SYSTEM_PROMPT.split())
+
+    assert "refill the free slots rather than stop the session" in prose
+    assert "an early stop is your judgement that the time left cannot be spent at all" in prose
 
 
 def test_the_prompt_version_is_derived_from_the_prompt_text() -> None:
