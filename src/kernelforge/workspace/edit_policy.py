@@ -48,11 +48,6 @@ FORGE_LOOP_OUTPUT_DIRNAME = "forge_experiments"
 
 _BOOKKEEPING_DIRNAMES = frozenset({".git", FORGE_LOOP_OUTPUT_DIRNAME})
 
-# A file the caller declares editable can share a name with a test: ROCmBench colocates each kernel with its tests
-# in one test_*.py. Only these name patterns yield to a declared target. The rest of the measurement surface stays
-# protected however it is declared, and the caller polices what inside such a file may change.
-TARGET_RECLAIMABLE_GLOBS = frozenset({"test_*.py", "*_test.py", "*_test.cpp", "*_test.cu", "*_test.hip"})
-
 PROTECTED_DIRS = frozenset(
     {
         "benchmark",
@@ -72,32 +67,22 @@ def is_protected_path(
     workspace: str | Path | None = None,
     exact_paths: Iterable[str | Path] = (),
     extra_globs: Iterable[str] = (),
-    editable_paths: Iterable[str | Path] = (),
 ) -> bool:
-    """Return whether ``path`` belongs to the authoritative measurement surface.
-
-    ``editable_paths`` are the files the caller declares as targets; one of them escapes only the test-name
-    patterns in ``TARGET_RECLAIMABLE_GLOBS``, never an exact path, a protected directory or another pattern.
-    """
+    """Return whether ``path`` belongs to the authoritative measurement surface."""
 
     raw = Path(path).expanduser()
     root = Path(workspace).expanduser().resolve() if workspace else None
     absolute = raw.resolve() if raw.is_absolute() else ((root / raw).resolve() if root else raw.resolve())
-
-    def resolved(items: Iterable[str | Path]) -> set[Path]:
-        paths: set[Path] = set()
-        for item in items:
-            if not str(item or "").strip():
-                continue
-            candidate = Path(item).expanduser()
-            paths.add(
-                candidate.resolve()
-                if candidate.is_absolute()
-                else ((root / candidate).resolve() if root else candidate.resolve())
-            )
-        return paths
-
-    protected_abs = resolved(exact_paths)
+    protected_abs: set[Path] = set()
+    for item in exact_paths:
+        if not str(item or "").strip():
+            continue
+        candidate = Path(item).expanduser()
+        protected_abs.add(
+            candidate.resolve()
+            if candidate.is_absolute()
+            else ((root / candidate).resolve() if root else candidate.resolve())
+        )
     if absolute in protected_abs:
         return True
 
@@ -110,8 +95,6 @@ def is_protected_path(
     if any(part.lower() in PROTECTED_DIRS for part in relative.parts[:-1]):
         return True
     patterns = (*PROTECTED_GLOBS, *tuple(extra_globs))
-    if absolute in resolved(editable_paths):
-        patterns = tuple(pattern for pattern in patterns if pattern not in TARGET_RECLAIMABLE_GLOBS)
     relative_posix = relative.as_posix()
     return any(
         fnmatch.fnmatch(relative.name, pattern) or fnmatch.fnmatch(relative_posix, pattern) for pattern in patterns
@@ -123,10 +106,8 @@ def protected_path_inventory(
     *,
     exact_paths: Iterable[str | Path] = (),
     extra_globs: Iterable[str] = (),
-    editable_paths: Iterable[str | Path] = (),
 ) -> tuple[Path, ...]:
     """Return every protected filesystem entry under ``workspace`` recursively."""
-    editable = tuple(editable_paths)
 
     root = Path(workspace).expanduser().resolve()
     if not root.is_dir():
@@ -172,7 +153,6 @@ def protected_path_inventory(
                 workspace=root,
                 exact_paths=exact,
                 extra_globs=globs,
-                editable_paths=editable,
             ):
                 inventory.add(Path(os.path.abspath(candidate)))
     return tuple(sorted(inventory, key=str))
