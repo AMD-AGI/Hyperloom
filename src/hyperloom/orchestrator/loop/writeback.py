@@ -55,6 +55,7 @@ from hyperloom.inference_optimizer.breakdown.stop_reasons import (
     PATCH_RECOVERY_INCOMPLETE_STOP_REASON,
 )
 from ..phases.machine_state import PHASE_ENABLEMENT, record_lifecycle_event
+from .resume_source_layers import install_kept_source_layers
 from ..actions.stop_attribution import stopped_by_the_run_class
 from ..bringup import ARGV_INVALID
 from ..framework.artifacts import candidate_key
@@ -3572,14 +3573,14 @@ class WritebackCollaborator(CoordinatorCollaborator):
         # (1c) Combined PRELUDE replay: no benchmark verdict survived the
         # restart, so restore both Recipe and Kernel trees before continuing.
         await self._resume_recover_pending_warm_replay(report)
-        # (1d) Orphaned revalidation tasks: if enablement_validation_pending is set
-        # but the tracked revalidation task is already terminal, unstick the window
-        # so a fresh revalidation can be enqueued -- closed and charged to the
+        # (1d) Orphaned revalidation tasks: if enablement_validation_pending is set but the tracked revalidation task
+        # is already terminal, unstick the window so a fresh revalidation can be enqueued -- closed and charged to the
         # stall counter, or reopened uncharged when the run cancelled the row.
         await self._resume_recover_pending_revalidation(report)
-        # (2) Orphaned KEEPs: replay integrate_patch KEEPs
-        # that crashed before the append landed; surface ambiguous ones loudly.
+        # (2) Replay orphaned KEEPs that crashed before the append, then (2b) put the kept source patches on the tree.
         await self._resume_recover_orphaned_keeps(report)
+        if halt := install_kept_source_layers(state, self.session_dir, report):
+            raise IntegrateRecoveryIncomplete(halt)
 
         # (3) A config with no stack behind it cannot be reproduced.
         if state.current_best and not state.optimization_stack:
@@ -3614,8 +3615,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                     }
                 )
 
-        # (4) Validation-watermark compensation: unvalidated KEEPs are reported
-        # and one full-stack rebench is enqueued to measure them.
+        # (4) Validation-watermark compensation: report unvalidated KEEPs and enqueue one full-stack rebench for them.
         if state.optimization_stack_has_unvalidated_keeps():
             stack = [e for e in (state.optimization_stack or []) if isinstance(e, dict)]
             vlen = int(state.cumulative_gain_validated_stack_len or 0)
