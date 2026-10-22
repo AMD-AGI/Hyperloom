@@ -17,7 +17,7 @@ from kernelforge.agent_backends.claude import (
     ClaudeBackendError,
     _supports_adaptive_thinking,
 )
-from kernelforge.llm.git import git
+from kernelforge.tools.git import git
 from kernelforge.orchestrator.agent import _make_session_summarizer
 
 

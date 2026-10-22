@@ -24,6 +24,18 @@ def to_float(value: Any, default: _T | None = None) -> float | _T | None:
     return result if math.isfinite(result) else default
 
 
+def recorded_float(value: Any, default: float = 0.0) -> float:
+    """Coerce a recorded value to ``float``, keeping ``inf``, ``nan`` and ``bool`` as they were recorded.
+
+    :func:`to_float` returns *default* for those three instead, which would
+    render a degenerate figure as one nobody can tell from a real measurement.
+    """
+    try:
+        return float(value or default)
+    except (TypeError, ValueError):
+        return default
+
+
 def to_int(value: Any, default: _T | None = None) -> int | _T | None:
     """Coerce *value* to ``int``, rejecting ``bool``, ``None``, and non-finite floats."""
     if value is None or isinstance(value, bool):
@@ -116,6 +128,7 @@ def to_list(value: Any) -> list[Any]:
 
 __all__ = [
     "to_float",
+    "recorded_float",
     "to_int",
     "first_float",
     "first_int",

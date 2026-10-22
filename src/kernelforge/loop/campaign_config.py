@@ -15,7 +15,7 @@ import subprocess
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
-from kernelforge.llm.git import git
+from kernelforge.tools.git import git
 from kernelforge.kernel_backends.constants import KERNEL_BACKENDS
 from kernelforge.knowledge.kb_store.identity.source_resolution import (
     KernelSources,

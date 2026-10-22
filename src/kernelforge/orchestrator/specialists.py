@@ -24,7 +24,7 @@ from kernelforge.agent_backends import (
     watchdog_timeout_sec,
 )
 from kernelforge.agent_backends.session_resume import is_api_failure
-from kernelforge.llm.process_reaping import ReapReport, reap_processes_under
+from kernelforge.tools.process_reaping import ReapReport, reap_processes_under
 from kernelforge.orchestrator.specialist_probe import (
     ANALYSIS_RESERVE_SEC,
     BUDGET_EXHAUSTED,

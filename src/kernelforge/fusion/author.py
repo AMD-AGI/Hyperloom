@@ -40,7 +40,7 @@ from .llm_failure import (
 )
 from .harness_contract import harness_contract, trace_kernels_block
 from .validate import DEFAULT_TARGET_SPEEDUP
-from kernelforge.llm.git import git_bytes
+from kernelforge.tools.git import git_bytes
 
 log = logging.getLogger("forge_fusion")
 
