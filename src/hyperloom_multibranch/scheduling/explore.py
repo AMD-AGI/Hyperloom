@@ -175,7 +175,7 @@ class Explorer:
         if opening is None:
             await self._open_batch(0 if specialist_open(self._roster.entries()) else 1, 1, first_batch)
         elif await self._apply(opening, first_batch):
-            return SessionStopReason.GLOBAL_CONVERGED
+            return SessionStopReason.JUDGE_STOPPED
         if self._clock.now() >= window.explore_end:
             return SessionStopReason.TIME_EXHAUSTED
         await self._dashboard.refresh()
@@ -214,7 +214,7 @@ class Explorer:
                 next_judge = now + self._interval
                 decision = await self._ask(window, opening=False)
                 if decision is not None and await self._apply(decision, await self._refill(window)):
-                    return SessionStopReason.GLOBAL_CONVERGED
+                    return SessionStopReason.JUDGE_STOPPED
                 await self._dashboard.refresh()
             await self._clock.sleep(min(EXPLORE_TICK_SECONDS, window.explore_end - now))
         return SessionStopReason.TIME_EXHAUSTED

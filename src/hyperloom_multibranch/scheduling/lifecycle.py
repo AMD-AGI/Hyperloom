@@ -134,7 +134,7 @@ COMPLETED_REASONS = frozenset(
         SessionStopReason.TIME_EXHAUSTED,
         SessionStopReason.GPU_HOURS_EXHAUSTED,
         SessionStopReason.LLM_BUDGET_EXHAUSTED,
-        SessionStopReason.GLOBAL_CONVERGED,
+        SessionStopReason.JUDGE_STOPPED,
     }
 )
 #: The distribution this package ships in (pyproject.toml ``[project] name``).

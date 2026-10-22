@@ -33,7 +33,7 @@ def _outcome(reason: SessionStopReason, final: FinalChoice | None, stop: StopRep
     return SessionOutcome(reason, final, close, error)
 
 
-@pytest.mark.parametrize("reason", [SessionStopReason.TIME_EXHAUSTED, SessionStopReason.GLOBAL_CONVERGED])
+@pytest.mark.parametrize("reason", [SessionStopReason.TIME_EXHAUSTED, SessionStopReason.JUDGE_STOPPED])
 def test_a_session_that_ran_its_course_and_stopped_clean_exits_zero(reason: SessionStopReason) -> None:
     assert _outcome(reason, CHOSEN, CLEAN).exit_code == 0
 

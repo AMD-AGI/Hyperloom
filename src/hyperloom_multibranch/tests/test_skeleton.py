@@ -1128,7 +1128,7 @@ async def test_a_judge_soft_stop_ends_explore_early_and_still_runs_final(tmp_pat
 
     outcome = await stage.run()
 
-    assert (outcome.stop_reason, outcome.error, outcome.exit_code) == (SessionStopReason.GLOBAL_CONVERGED, "", 0)
+    assert (outcome.stop_reason, outcome.error, outcome.exit_code) == (SessionStopReason.JUDGE_STOPPED, "", 0)
     explore_end = SessionBudget.from_hours(SETTINGS.max_hours, START).phases_after_prelude(START, 0.0).explore_end
     [final_phase] = [row for row in _decisions(stage) if row["kind"] == "phase" and row["reason"] == "final"]
     assert float(str(final_phase["at"])) < explore_end
@@ -1146,7 +1146,7 @@ async def test_a_specialist_that_never_stops_at_the_end_of_explore_does_not_hold
 
     outcome = await stage.run()
 
-    assert (outcome.stop_reason, outcome.error) == (SessionStopReason.GLOBAL_CONVERGED, "")
+    assert (outcome.stop_reason, outcome.error) == (SessionStopReason.JUDGE_STOPPED, "")
     assert outcome.final is not None and outcome.final.chosen is not None
     [stop] = [row for row in _decisions(stage) if row["kind"] == "stop" and row["branch"] == "b01"]
     assert [failure.split(":")[0] for failure in stop["detail"]["failures"]] == ["TimeoutError"]
@@ -1176,7 +1176,7 @@ async def test_a_first_signal_during_close_cuts_it_short_after_one_close_grace(t
 
     outcome = await stage.run()
 
-    assert outcome.stop_reason is SessionStopReason.GLOBAL_CONVERGED and outcome.final is not None
+    assert outcome.stop_reason is SessionStopReason.JUDGE_STOPPED and outcome.final is not None
     assert CUT_SHORT in outcome.error and outcome.close is not None
     assert outcome.close.stop.failures == (CUT_SHORT, TOOLBOX_CLOSE_OVERRAN)
     [close] = [row for row in _decisions(stage) if row["kind"] == "phase" and row["reason"] == "close"]
@@ -1205,7 +1205,7 @@ async def test_a_soft_stop_on_the_opening_call_opens_no_branch(tmp_path: Path) -
 
     outcome = await stage.run()
 
-    assert (outcome.stop_reason, outcome.error) == (SessionStopReason.GLOBAL_CONVERGED, "")
+    assert (outcome.stop_reason, outcome.error) == (SessionStopReason.JUDGE_STOPPED, "")
     assert stage.sessions.started == {} and outcome.final is not None
 
 

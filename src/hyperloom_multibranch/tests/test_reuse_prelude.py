@@ -89,7 +89,7 @@ async def test_a_session_reusing_an_earlier_prelude_starts_no_child_and_measures
 
     outcome = await stage.run()
 
-    assert (outcome.stop_reason, outcome.error, outcome.exit_code) == (SessionStopReason.GLOBAL_CONVERGED, "", 0)
+    assert (outcome.stop_reason, outcome.error, outcome.exit_code) == (SessionStopReason.JUDGE_STOPPED, "", 0)
     assert stage.processes.argv == ()
     child_session = _rooted(earlier)["detail"]["child_session"]
     assert reused == ReusedPrelude(str(earlier.layout.root), str(child_session), earlier_root.digest())
