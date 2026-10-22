@@ -7,10 +7,10 @@ The single-lineage breakdown describes one lineage of phases. A multi-branch ses
 export has its own schema version and its own sections:
 
 * ``metadata``: the session profile, the manifest fingerprint of each activity, and ``session``, the block Pulse reads
-  for both flows (the session id, and the Claw session, code revision, image and node a hosted run is given). In a
-  hosted run it also holds, as written, the records the hosted measurement and the agent plug append in the session
-  directory: ``measurement_sandboxes`` (one per test, keyed by ``request_id`` as ``tests`` are) and
-  ``specialist_resources``.
+  for both flows (the session id, the source revision the session ran on, and the Claw session, framework image and
+  node a hosted run is given). In a hosted run it also holds, as written, what the run leaves in the session directory:
+  ``plugs``, ``hosted_measurement`` and ``container_resources``, and the records ``measurement_sandboxes`` (one per
+  test, keyed by ``request_id`` as ``tests`` are) and ``specialist_resources``.
 * ``baseline``: the root's recorded values, dispersion and thresholds.
 * ``lineage``: every commit and branch, with when each was made, opened or stopped, and a commit's recipe digest when
   its writer named it.
@@ -44,9 +44,9 @@ SCHEMA_VERSION = "multibranch-2"
 EXPORTER_VERSION = "hyperloom-multibranch-breakdown-2"
 FILENAME = "session_breakdown.json"
 #: The environment variables a hosted run's ``metadata.session`` reads, by key; a run Claw did not host leaves them null.
+#: ``image`` is the framework image the CampaignSpec names, which Pulse keys its leaderboard on.
 SESSION_VARIABLES = {
     "claw_session_id": "CLAW_SESSION_ID",
-    "code_revision": "HYPERLOOM_CODE_REVISION",
     "image": "HYPERLOOM_IMAGE",
     "node_name": "NODE_NAME",
 }
@@ -54,6 +54,12 @@ SESSION_VARIABLES = {
 HOSTED_RECORDS = {
     "measurement_sandboxes": Path("hosted/measurement_sandboxes.jsonl"),
     "specialist_resources": Path("agents/resources.jsonl"),
+}
+#: The documents a hosted run writes in the session directory, by the ``metadata`` key the breakdown copies them under.
+HOSTED_DOCUMENTS = {
+    "plugs": Path("plugs.resolved.json"),
+    "hosted_measurement": Path("hosted/measurement_stats.json"),
+    "container_resources": Path("agents/container_resources.json"),
 }
 
 
@@ -103,21 +109,33 @@ def session_spend(snapshot: NotebookSnapshot) -> dict[str, object]:
     }
 
 
-def session_metadata(snapshot: NotebookSnapshot, environ: Mapping[str, str]) -> dict[str, object]:
-    """The ``metadata.session`` block: the session id, and what :data:`SESSION_VARIABLES` name, null where unset."""
+def session_metadata(
+    snapshot: NotebookSnapshot, environ: Mapping[str, str], code_revision: str | None = None
+) -> dict[str, object]:
+    """The ``metadata.session`` block: the session id, the source revision the session ran on as it recorded it at
+    start, and what :data:`SESSION_VARIABLES` name; null where unset."""
 
     session_id = snapshot.profile.session_id if snapshot.profile is not None else None
-    return {"session_id": session_id, **{key: environ.get(name) or None for key, name in SESSION_VARIABLES.items()}}
+    named = {key: environ.get(name) or None for key, name in SESSION_VARIABLES.items()}
+    return {"session_id": session_id, "code_revision": code_revision or None, **named}
 
 
-def hosted_records(session_dir: Path | None) -> dict[str, list[object]]:
-    """The rows of each :data:`HOSTED_RECORDS` file in ``session_dir``, as written, by its key; a file that is not there
-    gives no key, and a line that is no JSON, as a half-written last line is, is left out."""
+def hosted_records(session_dir: Path | None) -> dict[str, object]:
+    """What a hosted run left in ``session_dir``, as written, by its ``metadata`` key: each :data:`HOSTED_DOCUMENTS`
+    file's document, and each :data:`HOSTED_RECORDS` file's rows. A file that is not there gives no key; a document
+    that is no JSON gives none either, and a row that is no JSON, as a half-written last line is, is left out."""
 
-    found: dict[str, list[object]] = {}
+    if session_dir is None:
+        return {}
+    found: dict[str, object] = {}
+    for key, relative in HOSTED_DOCUMENTS.items():
+        try:
+            found[key] = json.loads((session_dir / relative).read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError):
+            continue
     for key, relative in HOSTED_RECORDS.items():
-        path = session_dir / relative if session_dir is not None else None
-        if path is None or not path.is_file():
+        path = session_dir / relative
+        if not path.is_file():
             continue
         rows: list[object] = []
         for line in path.read_text(encoding="utf-8").splitlines():
@@ -144,6 +162,7 @@ def build_breakdown(
     knowledge: Mapping[str, object] | None = None,
     session_dir: Path | None = None,
     environ: Mapping[str, str] | None = None,
+    code_revision: str | None = None,
 ) -> dict[str, object]:
     """The breakdown document of ``snapshot``, stamped with the time the snapshot was taken.
 
@@ -151,7 +170,8 @@ def build_breakdown(
     and their measurements, as JSON-ready data. ``knowledge`` is what CLOSE's knowledge steps did, as the
     ``rsi.session`` close reports them (``KnowledgeClose.document()``); ``close`` has it only when given.
     ``session_dir`` is where a hosted run's records are read from, and ``environ`` its variables (the process's by
-    default).
+    default); ``code_revision`` is the source revision the session's manifest recorded at start, which a process that
+    exports another run's session, such as ``final-only``, does not have in its environment.
     """
 
     close: dict[str, object] = {
@@ -168,7 +188,7 @@ def build_breakdown(
         "metadata": {
             "session_profile": encode(snapshot.profile),
             "manifest_fingerprints": encode(snapshot.fingerprints),
-            "session": session_metadata(snapshot, os.environ if environ is None else environ),
+            "session": session_metadata(snapshot, os.environ if environ is None else environ, code_revision),
             **hosted_records(session_dir),
         },
         "baseline": encode(snapshot.baseline),
@@ -194,6 +214,7 @@ def write_breakdown(directory: Path, breakdown: Mapping[str, object]) -> Path:
 __all__ = [
     "EXPORTER_VERSION",
     "FILENAME",
+    "HOSTED_DOCUMENTS",
     "HOSTED_RECORDS",
     "SCHEMA_VERSION",
     "SESSION_VARIABLES",
