@@ -30,6 +30,8 @@ from hyperloom.inference_optimizer.breakdown.stop_reasons import PATCH_RECOVERY_
 from hyperloom.orchestrator.loop.writeback import IntegrateRecoveryIncomplete
 from hyperloom.orchestrator.state.task_registry import Task
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
+from hyperloom.orchestrator.actions.executors import _patch_artifacts as patch_artifacts
+from hyperloom.orchestrator.actions.executors import _patch_sources as patch_sources
 
 
 def _idle_intent() -> Intent:
@@ -404,8 +406,9 @@ def pending_candidate(coord: Coordinator, tmp_path: Path, monkeypatch):
 
     root = tmp_path / "candidate-framework"
     init_git_repo(root, seed_file="cfg.json", seed_text="A\n")
-    monkeypatch.setattr(ip, "resolve_kernel_search_roots", lambda: (str(root),))
-    monkeypatch.setattr(ip, "resolve_session_framework_root", lambda: str(root))
+    for module in (patch_sources, patch_artifacts):
+        monkeypatch.setattr(module, "resolve_kernel_search_roots", lambda: (str(root),))
+    monkeypatch.setattr(patch_sources, "resolve_session_framework_root", lambda: str(root))
     monkeypatch.setattr(_multi_node_env, "is_multi_node", lambda: False)
     workspace = runs_dir(coord.session_dir, "specialist", "spec-restore")
     workspace.mkdir(parents=True)
@@ -602,8 +605,9 @@ async def test_reused_output_directory_never_reuses_prior_attempt_preimages(coor
     root.mkdir()
     output = tmp_path / "reused-output"
     target = root / "cfg.json"
-    monkeypatch.setattr(ip, "resolve_kernel_search_roots", lambda: (str(root),))
-    monkeypatch.setattr(ip, "resolve_session_framework_root", lambda: str(root))
+    for module in (patch_sources, patch_artifacts):
+        monkeypatch.setattr(module, "resolve_kernel_search_roots", lambda: (str(root),))
+    monkeypatch.setattr(patch_sources, "resolve_session_framework_root", lambda: str(root))
     monkeypatch.setattr(_multi_node_env, "is_multi_node", lambda: False)
     executor = ip.IntegratePatchExecutor(session_dir=coord.session_dir)
     for index, content in enumerate(("KEPT", "CANDIDATE")):
@@ -679,7 +683,7 @@ def crashed_integrate_window(coord: Coordinator, pending_candidate):
     writes before the bus sees anything. ``outcome_status=None`` is the crash
     that happened first: the phase is on disk, the runner never finished.
     """
-    from hyperloom.orchestrator.actions.executors.integrate_patch import restore_pending_integrate
+    from hyperloom.orchestrator.actions.executors._patch_git import restore_pending_integrate
     from hyperloom.orchestrator.state.shared_state import SharedState
 
     async def crash(*, keep: bool, outcome_status: str | None = None, cleanup_confirmed: bool = True):
@@ -1540,7 +1544,7 @@ async def test_resume_consistency_replays_pending_integrate_with_kept_result(coo
 
 @pytest.mark.asyncio
 async def test_resume_refuses_legacy_patch_without_task_evidence(coord: Coordinator, monkeypatch) -> None:
-    import hyperloom.orchestrator.actions.executors.integrate_patch as ip
+    from hyperloom.orchestrator.actions.executors import _patch_git as patch_git
 
     reversed_calls: list[str] = []
 
@@ -1548,7 +1552,7 @@ async def test_resume_refuses_legacy_patch_without_task_evidence(coord: Coordina
         reversed_calls.append(str(patch))
         return True, ""
 
-    monkeypatch.setattr(ip, "_git_apply_reverse", _fake_reverse)
+    monkeypatch.setattr(patch_git, "_git_apply_reverse", _fake_reverse)
     coord.writeback._resumed_from["is_resume"] = True
     coord.shared_state.pending_integrate = {
         "task_id": "ti-crash",

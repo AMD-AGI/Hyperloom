@@ -34,7 +34,7 @@ from hyperloom.inference_optimizer.grid_server_args import (
     merge_server_args,
     tokenize_server_args_preserving_json,
 )
-from ..actions.executors.integrate_patch import PATCH_SOURCE_UPSTREAM_PR, RESULT_BENCHED
+from ..actions.executors import _integrate_vocabulary
 from ..specialists.profile import is_authoring_specialist
 from hyperloom.common.framework_arm import LOCAL_EXPLORE_CANDIDATE_PREFIX
 from hyperloom.orchestrator.lever import LEVER_SOURCE_PATCH, LEVER_UPSTREAM_PR, patch_lever_kind, patch_owner_phase
@@ -686,7 +686,7 @@ def _record_source_attempt(
         source_ref=first_str(params.get("framework_agent_candidate_id"), attempt.candidate_id),
         decision=attempt.status,
         adopted=attempt.adopted,
-        benched=bool(result.get(RESULT_BENCHED)),
+        benched=bool(result.get(_integrate_vocabulary.RESULT_BENCHED)),
         **_attempt_outcome_fields(attempt, result=result, params=params),
         **measured_against,
         **config_delta,
@@ -1801,7 +1801,7 @@ class FrameworkPhase(ProposalBench):
             "candidate": candidate,
             "batch_id": candidate.get("batch_id") or "",
             # One action lands every patch; this says where the diff comes from.
-            "patch_source": PATCH_SOURCE_UPSTREAM_PR,
+            "patch_source": _integrate_vocabulary.PATCH_SOURCE_UPSTREAM_PR,
             "lever_kind": LEVER_UPSTREAM_PR,
             # The authored-outcome bridge, the candidate-processed dedup, the batch max-gain roll-up and phase
             # attribution all key on these two markers.

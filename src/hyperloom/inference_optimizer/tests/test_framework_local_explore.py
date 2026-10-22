@@ -306,7 +306,7 @@ def test_forward_enablement_carriers_boot_origin_noop():
 def test_dispatched_verdict_reaches_the_integrate_task():
     """The integrate task derives its rungs from the verdict, so a boot-origin round must carry it."""
     from hyperloom.common.failure_signature import classify_failure
-    from hyperloom.orchestrator.actions.executors.integrate_patch import _enablement_gap
+    from hyperloom.orchestrator.actions.executors._enablement_config import _enablement_gap
     from hyperloom.orchestrator.phases.framework import _forward_enablement_carriers
 
     signature = classify_failure("ValueError: Model architectures ['Glm5ForCausalLM'] are not supported for now.")

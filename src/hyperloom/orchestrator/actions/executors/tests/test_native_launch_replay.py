@@ -12,7 +12,14 @@ import pytest
 import yaml
 
 from hyperloom.inference_optimizer.agentx.report import native_launch_evidence
-from hyperloom.orchestrator.actions.executors import _grid_runner, _ray_serving, explore, integrate_patch
+from hyperloom.orchestrator.actions.executors import (
+    _grid_runner,
+    _integrate_bench,
+    _integrate_results,
+    _ray_serving,
+    explore,
+    integrate_patch,
+)
 from hyperloom.orchestrator.actions.executors._grid_base import GridVariant, VariantResult
 from hyperloom.orchestrator.actions.executors._launch_evidence import persist_launch_evidence
 from hyperloom.orchestrator.actions.executors._workload_envs import (
@@ -139,7 +146,7 @@ def _stub_gpu(monkeypatch, session, *, effective):
         ]
 
     monkeypatch.setattr(explore, "run_grid", run_grid)
-    monkeypatch.setattr(integrate_patch, "run_grid", run_grid)
+    monkeypatch.setattr(_integrate_bench, "run_grid", run_grid)
     return observed
 
 
@@ -226,7 +233,7 @@ async def test_accepted_appended_only_ablation_survives_integrate_patch(native_s
     assert len(next_round["winners"]) == 1, next_round
     winner = next_round["winners"][0]
     bench, _ = await integrate_patch.IntegratePatchExecutor(session_dir=tmp_path)._bench_patch(
-        integrate_patch._PatchBench(
+        _integrate_results._PatchBench(
             params={"config_path": str(session.config), **stack_base_params(winner)},
             output_root=tmp_path / "integrate",
             specialist_task_id="accepted-ablation",
@@ -287,7 +294,7 @@ async def test_explicit_recipe_replacement_survives_following_keep_and_replay(na
         base=stack_base_params(winner),
     )
     bench, _ = await integrate_patch.IntegratePatchExecutor(session_dir=tmp_path)._bench_patch(
-        integrate_patch._PatchBench(
+        _integrate_results._PatchBench(
             params={"config_path": str(session.config), **stack_base_params(winner)},
             output_root=tmp_path / "integrate-replaced-stack",
             specialist_task_id="after-replacement",

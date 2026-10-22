@@ -21,23 +21,24 @@ from hyperloom.orchestrator.tests._helpers import (
 )
 
 from hyperloom.orchestrator.actions.executors import _setup_replay as sr_mod
+from hyperloom.orchestrator.actions.executors import _patch_sources as patch_sources
 from hyperloom.orchestrator.actions.executors._accuracy_gate import framework_run_eval_envs
-from hyperloom.orchestrator.actions.executors.integrate_patch import (
-    RESULT_BENCHED,
-    IntegratePatchExecutor,
-    _PatchBench,
-    _apply_patch_no_git,
-    _git_apply,
-    _git_apply_reverse,
-    _is_git_tree,
-    _resolve_framework_root,
-    _resolve_patch_paths,
-)
+from hyperloom.orchestrator.actions.executors._integrate_results import _PatchBench
+from hyperloom.orchestrator.actions.executors._patch_git import _git_apply, _git_apply_reverse
+from hyperloom.orchestrator.actions.executors._patch_sources import _resolve_framework_root, _resolve_patch_paths
+from hyperloom.orchestrator.actions.executors._integrate_enablement_gate import _is_git_tree
+from hyperloom.orchestrator.actions.executors._patch_git import _apply_patch_no_git
+from hyperloom.orchestrator.actions.executors._integrate_vocabulary import RESULT_BENCHED
+from hyperloom.orchestrator.actions.executors.integrate_patch import IntegratePatchExecutor
 from hyperloom.common.bringup import LadderStage
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
 from hyperloom.orchestrator.rehearsal import boot_log_for
 from hyperloom.orchestrator.state.shared_state import EnablementRound
 from hyperloom.orchestrator.state.task_registry import Task
+from hyperloom.orchestrator.actions.executors import _integrate_bench as integrate_bench
+from hyperloom.orchestrator.actions.executors import _integrate_resolve as integrate_resolve
+from hyperloom.orchestrator.actions.executors import _integrate_apply as integrate_apply
+from hyperloom.orchestrator.actions.executors import _integrate_results as integrate_results
 
 
 _VALID_PATCH = """\
@@ -90,7 +91,6 @@ def _stub_external_integrate_operations(monkeypatch):
 
     from hyperloom.agents.framework.sources import github
     from hyperloom.orchestrator.actions.executors import _multi_node_env, _ray_serving
-    from hyperloom.orchestrator.actions.executors import integrate_patch as ip
     from hyperloom.orchestrator.enablement.recipe import keep_probe
     from hyperloom.orchestrator.enablement.runtime import adapters
 
@@ -99,8 +99,8 @@ def _stub_external_integrate_operations(monkeypatch):
 
     monkeypatch.setattr(_multi_node_env, "is_multi_node", lambda: False)
     monkeypatch.setattr(_ray_serving, "maybe_serving_lease", lambda **_kwargs: None)
-    monkeypatch.setattr(ip, "run_grid", forbidden)
-    monkeypatch.setattr(ip, "materialize_candidate_patches", forbidden)
+    monkeypatch.setattr(integrate_bench, "run_grid", forbidden)
+    monkeypatch.setattr(integrate_resolve, "materialize_candidate_patches", forbidden)
     monkeypatch.setattr(github, "pr_patches", forbidden)
     monkeypatch.setattr(github, "fetch_raw_file", forbidden)
     monkeypatch.setattr(
@@ -305,7 +305,7 @@ def test_resolve_framework_root_picks_explicit_when_dir(tmp_path: Path, monkeypa
     repo = tmp_path / "repo"
     init_git_repo(repo)
     monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors.integrate_patch.resolve_kernel_search_roots",
+        "hyperloom.orchestrator.actions.executors._patch_sources.resolve_kernel_search_roots",
         lambda: [str(repo)],
     )
     root = _resolve_framework_root(str(repo))
@@ -340,7 +340,7 @@ def _root_resolution_repos(tmp_path: Path, monkeypatch):
     init_git_repo(session)
 
     monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors.integrate_patch.resolve_kernel_search_roots",
+        "hyperloom.orchestrator.actions.executors._patch_sources.resolve_kernel_search_roots",
         lambda: [str(unrelated), str(session)],
     )
     monkeypatch.setenv("FRAMEWORK_REPO_PATH", str(session))
@@ -491,7 +491,6 @@ async def test_same_executor_second_early_return_does_not_reuse_runtime(tmp_path
     from types import SimpleNamespace
 
     from hyperloom.agents.framework import isolation
-    from hyperloom.orchestrator.actions.executors import integrate_patch as ip
     from hyperloom.orchestrator.enablement.runtime import adapters
     from hyperloom.common.failure_signature import classify_failure
     from hyperloom.orchestrator.enablement.runtime.stack_actions import (
@@ -533,8 +532,8 @@ async def test_same_executor_second_early_return_does_not_reuse_runtime(tmp_path
             probe=lambda *_args: True,
         ),
     )
-    monkeypatch.setattr(ip, "_candidate_mutation_roots", lambda **_kwargs: [])
-    monkeypatch.setattr(ip, "_resolve_framework_root", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(integrate_apply, "_candidate_mutation_roots", lambda **_kwargs: [])
+    monkeypatch.setattr(patch_sources, "_resolve_framework_root", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(sr_mod, "run_setup_commands", forbidden)
     executor = IntegratePatchExecutor(session_dir=session)
     monkeypatch.setattr(executor, "_bench_patch", forbidden)
@@ -633,7 +632,6 @@ async def test_same_executor_new_attempt_precedes_second_resolve_early_return(tm
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failure", [None, {"status": "failed", "error_class": "diff_unavailable"}])
 async def test_upstream_resolve_threads_attempt_and_preserves_fetch_failure(tmp_path, monkeypatch, failure):
-    from hyperloom.orchestrator.actions.executors import integrate_patch as ip
     from hyperloom.orchestrator.actions.executors._patch_source_pr import PrMaterialization
     from hyperloom.orchestrator.state.shared_state import SharedState
 
@@ -647,8 +645,8 @@ async def test_upstream_resolve_threads_attempt_and_preserves_fetch_failure(tmp_
         captured.append(kwargs)
         return PrMaterialization(mode="diff_url", failure=failure)
 
-    monkeypatch.setattr(ip, "_resolve_framework_root", lambda *_args, **_kwargs: root)
-    monkeypatch.setattr(ip, "materialize_candidate_patches", materialize)
+    monkeypatch.setattr(integrate_resolve, "_resolve_framework_root", lambda *_args, **_kwargs: root)
+    monkeypatch.setattr(integrate_resolve, "materialize_candidate_patches", materialize)
     candidate = {"repo": "ROCm/vllm", "pr_number": 123}
     ctx = _make_ctx(
         "upstream",
@@ -1698,7 +1696,6 @@ async def _round_exiting_after_setup(tmp_path: Path, monkeypatch, *, arrange, pa
     """
     from types import SimpleNamespace
 
-    from hyperloom.orchestrator.actions.executors import integrate_patch as ip_mod
     from hyperloom.orchestrator.enablement.recipe.setup_ledger import SetupExecution, build_execution_row
     from hyperloom.orchestrator.state._shared_state.enablement_round import EnablementRound
 
@@ -1725,7 +1722,7 @@ async def _round_exiting_after_setup(tmp_path: Path, monkeypatch, *, arrange, pa
         return [cmd]
 
     monkeypatch.setattr(sr_mod, "run_setup_commands", _installed)
-    arrange(ip_mod, monkeypatch)
+    arrange(monkeypatch)
 
     shared_state = SimpleNamespace(
         phase="FRAMEWORK_AGENT",
@@ -1760,7 +1757,7 @@ def _assert_ledger_survived(ledger):
 
 
 def _fake_spec(repo: Path):
-    from hyperloom.orchestrator.actions.executors.integrate_patch import _ArtifactSpec
+    from hyperloom.orchestrator.actions.executors._patch_artifacts import _ArtifactSpec
 
     return _ArtifactSpec(
         source=repo / "src.py",
@@ -1775,7 +1772,7 @@ def _fake_spec(repo: Path):
 @pytest.mark.asyncio
 async def test_setup_ledger_is_durable_before_a_patch_apply_failure(tmp_path: Path, monkeypatch):
     result, ledger = await _round_exiting_after_setup(
-        tmp_path, monkeypatch, arrange=lambda _m, _mp: None, patch_contents=[_BAD_PATCH]
+        tmp_path, monkeypatch, arrange=lambda _mp: None, patch_contents=[_BAD_PATCH]
     )
     assert result["status"] == "apply_failed"
     _assert_ledger_survived(ledger)
@@ -1785,7 +1782,7 @@ async def test_setup_ledger_is_durable_before_a_patch_apply_failure(tmp_path: Pa
 async def test_a_round_continues_the_durable_ledger_seq(tmp_path: Path, monkeypatch):
     earlier = [{"seq": 2, "round_task_id": "t-earlier"}, {"seq": 7, "round_task_id": "t-earlier"}]
     _result, ledger = await _round_exiting_after_setup(
-        tmp_path, monkeypatch, arrange=lambda _m, _mp: None, patch_contents=[_BAD_PATCH], ledger=earlier
+        tmp_path, monkeypatch, arrange=lambda _mp: None, patch_contents=[_BAD_PATCH], ledger=earlier
     )
     assert ledger[:2] == earlier
     assert [(row["seq"], row["round_task_id"], row["source"]) for row in ledger[2:]] == [
@@ -1795,8 +1792,8 @@ async def test_a_round_continues_the_durable_ledger_seq(tmp_path: Path, monkeypa
 
 @pytest.mark.asyncio
 async def test_setup_ledger_is_durable_before_a_refused_stash(tmp_path: Path, monkeypatch):
-    def _refuse(mod, mp):
-        mp.setattr(mod, "_git_stash_if_dirty", lambda _root: ("failed", "user changes present"))
+    def _refuse(mp):
+        mp.setattr(integrate_apply, "_git_stash_if_dirty", lambda _root: ("failed", "user changes present"))
 
     result, ledger = await _round_exiting_after_setup(tmp_path, monkeypatch, arrange=_refuse)
     assert result["error_class"] == "stash_failed"
@@ -1805,9 +1802,15 @@ async def test_setup_ledger_is_durable_before_a_refused_stash(tmp_path: Path, mo
 
 @pytest.mark.asyncio
 async def test_setup_ledger_is_durable_before_a_failed_artifact_validation(tmp_path: Path, monkeypatch):
-    def _reject(mod, mp):
-        mp.setattr(mod, "_resolve_artifact_specs", lambda **_kw: ([_fake_spec(tmp_path / "framework")], []))
-        mp.setattr(mod, "_validate_aiter_gemm_artifacts", lambda *_a, **_k: [{"artifact": "cfg.csv", "error": "arch"}])
+    def _reject(mp):
+        mp.setattr(
+            integrate_results, "_resolve_artifact_specs", lambda **_kw: ([_fake_spec(tmp_path / "framework")], [])
+        )
+        mp.setattr(
+            integrate_results,
+            "_validate_aiter_gemm_artifacts",
+            lambda *_a, **_k: [{"artifact": "cfg.csv", "error": "arch"}],
+        )
 
     result, ledger = await _round_exiting_after_setup(tmp_path, monkeypatch, arrange=_reject)
     assert result["status"] == "apply_failed"
@@ -1816,11 +1819,13 @@ async def test_setup_ledger_is_durable_before_a_failed_artifact_validation(tmp_p
 
 @pytest.mark.asyncio
 async def test_setup_ledger_is_durable_before_an_artifact_install_failure(tmp_path: Path, monkeypatch):
-    def _fail_install(mod, mp):
-        mp.setattr(mod, "_resolve_artifact_specs", lambda **_kw: ([_fake_spec(tmp_path / "framework")], []))
-        mp.setattr(mod, "_validate_aiter_gemm_artifacts", lambda *_a, **_k: [])
+    def _fail_install(mp):
         mp.setattr(
-            mod.IntegratePatchExecutor,
+            integrate_results, "_resolve_artifact_specs", lambda **_kw: ([_fake_spec(tmp_path / "framework")], [])
+        )
+        mp.setattr(integrate_results, "_validate_aiter_gemm_artifacts", lambda *_a, **_k: [])
+        mp.setattr(
+            integrate_bench.BenchStageMixin,
             "_apply_artifacts",
             lambda _self, _specs, *, backup_root: ([], [{"artifact": "cfg.csv", "error": "install_failed"}]),
         )
@@ -1840,7 +1845,6 @@ async def test_base_sha_is_captured_before_the_setup_commands_run(tmp_path: Path
     """
     from types import SimpleNamespace
 
-    from hyperloom.orchestrator.actions.executors import integrate_patch as ip_mod
     from hyperloom.orchestrator.state._shared_state.enablement_round import EnablementRound
 
     session_dir = tmp_path / "session"
@@ -1859,7 +1863,7 @@ async def test_base_sha_is_captured_before_the_setup_commands_run(tmp_path: Path
         return [cmd for cmd, _source in commands]
 
     monkeypatch.setattr(sr_mod, "run_setup_commands", _installing_commits)
-    monkeypatch.setattr(ip_mod, "resolve_session_framework_root", lambda: str(repo))
+    monkeypatch.setattr(patch_sources, "resolve_session_framework_root", lambda: str(repo))
 
     shared_state = SimpleNamespace(
         phase="FRAMEWORK_AGENT",
@@ -1899,7 +1903,6 @@ async def test_base_sha_of_an_explicit_root_predates_the_setup_commands(tmp_path
     """
     from types import SimpleNamespace
 
-    from hyperloom.orchestrator.actions.executors import integrate_patch as ip_mod
     from hyperloom.orchestrator.state._shared_state.enablement_round import EnablementRound
 
     session_dir = tmp_path / "session"
@@ -1920,7 +1923,7 @@ async def test_base_sha_of_an_explicit_root_predates_the_setup_commands(tmp_path
         return [cmd for cmd, _source in commands]
 
     monkeypatch.setattr(sr_mod, "run_setup_commands", _installing_commits)
-    monkeypatch.setattr(ip_mod, "resolve_session_framework_root", lambda: str(session_root))
+    monkeypatch.setattr(patch_sources, "resolve_session_framework_root", lambda: str(session_root))
 
     shared_state = SimpleNamespace(
         phase="FRAMEWORK_AGENT",
@@ -1952,30 +1955,32 @@ async def test_base_sha_of_an_explicit_root_predates_the_setup_commands(tmp_path
 
 
 def test_candidate_roots_name_the_declared_root_beside_the_session_one(tmp_path: Path, monkeypatch):
-    from hyperloom.orchestrator.actions.executors import integrate_patch as ip_mod
+    from hyperloom.orchestrator.actions.executors import _patch_sources as patch_sources
 
     session_root = tmp_path / "repo"
     explicit_root = tmp_path / "framework"
     session_root.mkdir()
     explicit_root.mkdir()
-    monkeypatch.setattr(ip_mod, "resolve_session_framework_root", lambda: str(session_root))
+    monkeypatch.setattr(patch_sources, "resolve_session_framework_root", lambda: str(session_root))
 
-    roots = ip_mod._candidate_mutation_roots(params={"framework_source_root": str(explicit_root)}, done_payload=None)
+    roots = patch_sources._candidate_mutation_roots(
+        params={"framework_source_root": str(explicit_root)}, done_payload=None
+    )
     assert roots == [str(session_root), str(explicit_root)]
 
 
 def test_candidate_roots_cover_the_patch_and_artifact_bindings(tmp_path: Path, monkeypatch):
     """Every tree the round could touch is named before any of them is touched."""
-    from hyperloom.orchestrator.actions.executors import integrate_patch as ip_mod
+    from hyperloom.orchestrator.actions.executors import _patch_sources as patch_sources
 
     primary = tmp_path / "primary"
     other = tmp_path / "second"
     primary.mkdir()
     other.mkdir()
-    monkeypatch.setattr(ip_mod, "resolve_session_framework_root", lambda: str(primary))
-    monkeypatch.setattr(ip_mod, "_resolve_artifact_target", lambda _t: (other / "a.csv", "a.csv", other))
+    monkeypatch.setattr(patch_sources, "resolve_session_framework_root", lambda: str(primary))
+    monkeypatch.setattr(patch_sources, "_resolve_artifact_target", lambda _t: (other / "a.csv", "a.csv", other))
 
-    roots = ip_mod._candidate_mutation_roots(
+    roots = patch_sources._candidate_mutation_roots(
         params={"artifacts": [{"source": "s", "target": "a.csv"}]},
         done_payload={"patch_roots": {"/p/1.patch": str(tmp_path / "third")}},
     )
@@ -2087,14 +2092,14 @@ def test_apply_patch_no_git_rejects_path_traversal_before_apply(
 
 def test_derive_lane_enablement():
     """_derive_lane returns 'enablement' when params.enablement is set."""
-    from hyperloom.orchestrator.actions.executors.integrate_patch import _derive_lane
+    from hyperloom.orchestrator.actions.executors._integrate_refusals import _derive_lane
 
     assert _derive_lane({"enablement": True}) == "enablement"
 
 
 def test_derive_lane_perf_framework():
     """_derive_lane returns 'perf_framework' for framework_agent_authoring params."""
-    from hyperloom.orchestrator.actions.executors.integrate_patch import _derive_lane
+    from hyperloom.orchestrator.actions.executors._integrate_refusals import _derive_lane
 
     assert _derive_lane({"framework_agent_authoring": True}) == "perf_framework"
     assert _derive_lane({"framework_agent_candidate_id": "x"}) == "perf_framework"
@@ -2102,7 +2107,7 @@ def test_derive_lane_perf_framework():
 
 def test_derive_lane_perf_explore():
     """_derive_lane returns 'perf_explore' for plain explore params."""
-    from hyperloom.orchestrator.actions.executors.integrate_patch import _derive_lane
+    from hyperloom.orchestrator.actions.executors._integrate_refusals import _derive_lane
 
     assert _derive_lane({}) == "perf_explore"
     assert _derive_lane({"specialist_task_id": "abc"}) == "perf_explore"
@@ -2117,7 +2122,6 @@ async def test_bench_patch_holds_and_closes_serving_lease(tmp_path: Path):
     from unittest.mock import MagicMock, patch
 
     from hyperloom.orchestrator.actions.executors import _ray_serving
-    from hyperloom.orchestrator.actions.executors import integrate_patch as ip_mod
     from hyperloom.orchestrator.actions.executors._grid_runner import VariantResult
 
     session_dir = tmp_path / "session"
@@ -2134,8 +2138,8 @@ async def test_bench_patch_holds_and_closes_serving_lease(tmp_path: Path):
 
     lease = MagicMock()
     with (
-        patch.object(ip_mod, "run_grid", new=fake_run_grid),
-        patch.object(ip_mod, "prepare_grid_benchmark_config", return_value=config_path),
+        patch.object(integrate_bench, "run_grid", new=fake_run_grid),
+        patch.object(integrate_bench, "prepare_grid_benchmark_config", return_value=config_path),
         patch.object(_ray_serving, "maybe_serving_lease", return_value=lease),
     ):
         await executor._bench_patch(
@@ -2157,7 +2161,6 @@ async def test_bench_patch_routes_variant_args_and_envs_separately(tmp_path: Pat
     from unittest.mock import patch
 
     from hyperloom.orchestrator.actions.executors import _ray_serving
-    from hyperloom.orchestrator.actions.executors import integrate_patch as ip_mod
     from hyperloom.orchestrator.actions.executors._grid_runner import VariantResult
 
     config_path = tmp_path / "baseline.yaml"
@@ -2179,8 +2182,8 @@ async def test_bench_patch_routes_variant_args_and_envs_separately(tmp_path: Pat
         ]
 
     with (
-        patch.object(ip_mod, "run_grid", new=fake_run_grid),
-        patch.object(ip_mod, "prepare_grid_benchmark_config", return_value=config_path),
+        patch.object(integrate_bench, "run_grid", new=fake_run_grid),
+        patch.object(integrate_bench, "prepare_grid_benchmark_config", return_value=config_path),
         patch.object(_ray_serving, "maybe_serving_lease", return_value=None),
     ):
         await executor._bench_patch(
@@ -2209,7 +2212,6 @@ async def test_bench_patch_routes_variant_args_and_envs_separately(tmp_path: Pat
 @pytest.mark.parametrize("status", ["succeeded", "failed"])
 async def test_bench_patch_preserves_measurement_and_protocol(tmp_path: Path, monkeypatch, status: str):
     from hyperloom.orchestrator.actions.executors import _ray_serving
-    from hyperloom.orchestrator.actions.executors import integrate_patch as ip_mod
     from hyperloom.orchestrator.actions.executors._grid_runner import VariantResult
 
     config_path = tmp_path / "baseline.yaml"
@@ -2250,8 +2252,8 @@ async def test_bench_patch_preserves_measurement_and_protocol(tmp_path: Path, mo
     async def fake_run_grid(**_kwargs):
         return [measured]
 
-    monkeypatch.setattr(ip_mod, "run_grid", fake_run_grid)
-    monkeypatch.setattr(ip_mod, "prepare_grid_benchmark_config", lambda *_args, **_kwargs: config_path)
+    monkeypatch.setattr(integrate_bench, "run_grid", fake_run_grid)
+    monkeypatch.setattr(integrate_bench, "prepare_grid_benchmark_config", lambda *_args, **_kwargs: config_path)
     monkeypatch.setattr(_ray_serving, "maybe_serving_lease", lambda **_kwargs: None)
     executor = IntegratePatchExecutor(session_dir=tmp_path)
     bench, gate = await executor._bench_patch(
@@ -2331,7 +2333,6 @@ async def test_executor_grades_real_patch_bench(
     from types import SimpleNamespace
 
     from hyperloom.orchestrator.actions.executors import _ray_serving
-    from hyperloom.orchestrator.actions.executors import integrate_patch as ip_mod
     from hyperloom.orchestrator.actions.executors._grid_runner import VariantResult
 
     monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
@@ -2372,8 +2373,8 @@ async def test_executor_grades_real_patch_bench(
     async def fake_run_grid(**_kwargs):
         return [measured]
 
-    monkeypatch.setattr(ip_mod, "run_grid", fake_run_grid)
-    monkeypatch.setattr(ip_mod, "prepare_grid_benchmark_config", lambda *_args, **_kwargs: config_path)
+    monkeypatch.setattr(integrate_bench, "run_grid", fake_run_grid)
+    monkeypatch.setattr(integrate_bench, "prepare_grid_benchmark_config", lambda *_args, **_kwargs: config_path)
     monkeypatch.setattr(_ray_serving, "maybe_serving_lease", lambda **_kwargs: None)
     state = SimpleNamespace(
         phase="FRAMEWORK_AGENT",
@@ -2455,8 +2456,6 @@ async def test_executor_rebinds_base_from_live_current_best(tmp_path: Path, monk
     from types import SimpleNamespace
     from unittest.mock import patch
 
-    from hyperloom.orchestrator.actions.executors import integrate_patch as ip_mod
-
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     repo = tmp_path / "framework"
@@ -2512,7 +2511,7 @@ async def test_executor_rebinds_base_from_live_current_best(tmp_path: Path, monk
     )
     ctx = RunnerContext(task=task, lease=None, extra={"shared_state": live_state})
 
-    with patch.object(ip_mod, "prepare_grid_benchmark_config", return_value=tmp_path / "cfg.yaml"):
+    with patch.object(integrate_bench, "prepare_grid_benchmark_config", return_value=tmp_path / "cfg.yaml"):
         (tmp_path / "cfg.yaml").write_text("benchmark: {}\n", encoding="utf-8")
         result = await executor(ctx)
 
@@ -2567,7 +2566,6 @@ async def test_bench_patch_captures_effective_config(
     """The bench reports the config off the variant it launched, not a re-derivation."""
     from unittest.mock import patch
 
-    from hyperloom.orchestrator.actions.executors import integrate_patch as ip_mod
     from hyperloom.orchestrator.actions.executors._grid_runner import VariantResult
 
     session_dir = tmp_path / "session"
@@ -2585,8 +2583,8 @@ async def test_bench_patch_captures_effective_config(
             task_params[key] = params[key]
 
     with (
-        patch.object(ip_mod, "run_grid", new=fake_run_grid),
-        patch.object(ip_mod, "prepare_grid_benchmark_config", return_value=config_path),
+        patch.object(integrate_bench, "run_grid", new=fake_run_grid),
+        patch.object(integrate_bench, "prepare_grid_benchmark_config", return_value=config_path),
     ):
         bench, _ = await executor._bench_patch(
             _PatchBench(params=task_params, output_root=tmp_path / "out", specialist_task_id="task-abcd1234"),
@@ -2672,7 +2670,7 @@ async def test_executor_refuses_an_unvetted_blob_without_invoking_git(tmp_path: 
         raise AssertionError("git apply was reached with an unvetted patch")
 
     monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors.integrate_patch._git_apply_collect_feedback",
+        "hyperloom.orchestrator.actions.executors._patch_git._git_apply_collect_feedback",
         _explode,
     )
 
@@ -2711,7 +2709,6 @@ async def test_mlperf_integrate_patch_is_gated_on_inline_accuracy(tmp_path: Path
     from types import SimpleNamespace
 
     from hyperloom.orchestrator.actions.executors import _ray_serving
-    from hyperloom.orchestrator.actions.executors import integrate_patch as ip_mod
     from hyperloom.orchestrator.actions.executors._grid_runner import VariantResult
 
     monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
@@ -2743,8 +2740,8 @@ async def test_mlperf_integrate_patch_is_gated_on_inline_accuracy(tmp_path: Path
     async def fake_run_grid(**_kwargs):
         return [measured]
 
-    monkeypatch.setattr(ip_mod, "run_grid", fake_run_grid)
-    monkeypatch.setattr(ip_mod, "prepare_grid_benchmark_config", lambda *_args, **_kwargs: config_path)
+    monkeypatch.setattr(integrate_bench, "run_grid", fake_run_grid)
+    monkeypatch.setattr(integrate_bench, "prepare_grid_benchmark_config", lambda *_args, **_kwargs: config_path)
     monkeypatch.setattr(_ray_serving, "maybe_serving_lease", lambda **_kwargs: None)
     state = SimpleNamespace(
         phase="FRAMEWORK_AGENT",
@@ -2782,7 +2779,6 @@ async def test_unreadable_head_refuses_before_the_operator_work_is_stashed(tmp_p
     uncommitted work stays parked in the stash behind a sentinel that blocks
     every later round.
     """
-    from hyperloom.orchestrator.actions.executors import integrate_patch as ip
     from hyperloom.orchestrator.state.shared_state import SharedState
 
     session_dir = tmp_path / "session"
@@ -2793,7 +2789,7 @@ async def test_unreadable_head_refuses_before_the_operator_work_is_stashed(tmp_p
     _write_specialist_workspace(session_dir, "t-spec-head")
     # A HEAD that stays unreadable also fails the stash, so only a failed read
     # that the stash survives reaches this path; the read alone is stubbed.
-    monkeypatch.setattr(ip, "_git_head_sha", lambda _root: "")
+    monkeypatch.setattr(integrate_apply, "_git_head_sha", lambda _root: "")
     state = SharedState()
     state.record_specialist_patch_verdict("t-spec-head", "approve")
     ctx = _make_ctx(
@@ -2828,7 +2824,6 @@ async def test_a_scriptable_source_patch_over_the_latency_budget_is_reverted(
     from types import SimpleNamespace
 
     from hyperloom.orchestrator.actions.executors import _ray_serving
-    from hyperloom.orchestrator.actions.executors import integrate_patch as ip_mod
     from hyperloom.orchestrator.actions.executors._grid_runner import VariantResult
 
     monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
@@ -2854,8 +2849,8 @@ async def test_a_scriptable_source_patch_over_the_latency_budget_is_reverted(
     async def fake_run_grid(**_kwargs):
         return [measured]
 
-    monkeypatch.setattr(ip_mod, "run_grid", fake_run_grid)
-    monkeypatch.setattr(ip_mod, "prepare_grid_benchmark_config", lambda *_args, **_kwargs: config_path)
+    monkeypatch.setattr(integrate_bench, "run_grid", fake_run_grid)
+    monkeypatch.setattr(integrate_bench, "prepare_grid_benchmark_config", lambda *_args, **_kwargs: config_path)
     monkeypatch.setattr(_ray_serving, "maybe_serving_lease", lambda **_kwargs: None)
     state = SimpleNamespace(
         phase="FRAMEWORK_AGENT",
@@ -2959,7 +2954,6 @@ async def test_a_source_patch_over_the_power_budget_is_reverted(
     from types import SimpleNamespace
 
     from hyperloom.orchestrator.actions.executors import _ray_serving
-    from hyperloom.orchestrator.actions.executors import integrate_patch as ip_mod
     from hyperloom.orchestrator.actions.executors._grid_runner import VariantResult
 
     monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
@@ -2985,8 +2979,8 @@ async def test_a_source_patch_over_the_power_budget_is_reverted(
     async def fake_run_grid(**_kwargs):
         return [measured]
 
-    monkeypatch.setattr(ip_mod, "run_grid", fake_run_grid)
-    monkeypatch.setattr(ip_mod, "prepare_grid_benchmark_config", lambda *_args, **_kwargs: config_path)
+    monkeypatch.setattr(integrate_bench, "run_grid", fake_run_grid)
+    monkeypatch.setattr(integrate_bench, "prepare_grid_benchmark_config", lambda *_args, **_kwargs: config_path)
     monkeypatch.setattr(_ray_serving, "maybe_serving_lease", lambda **_kwargs: None)
     state = SimpleNamespace(
         phase="FRAMEWORK_AGENT",
