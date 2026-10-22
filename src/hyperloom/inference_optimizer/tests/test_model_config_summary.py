@@ -28,6 +28,26 @@ def test_summary_missing_config_returns_empty(tmp_path: Path) -> None:
     assert summarize_model_config("") == {}
 
 
+@pytest.mark.parametrize(
+    "mtp_field",
+    [
+        {"num_nextn_predict_layers": 1},
+        {"mtp_num_hidden_layers": 1},
+        {"num_mtp_modules": 1},
+        {"text_config": {"model_type": "glm5_next_text", "num_nextn_predict_layers": 1}},
+    ],
+)
+def test_summary_reports_mtp_layers_under_every_family_field(tmp_path: Path, mtp_field: dict) -> None:
+    m = _write_config(tmp_path / "m", {"model_type": "x", **mtp_field})
+    assert summarize_model_config(str(m))["mtp_layers"] == 1
+
+
+@pytest.mark.parametrize("payload", [{}, {"num_nextn_predict_layers": 0}])
+def test_summary_reports_zero_mtp_layers_for_a_model_without_them(tmp_path: Path, payload: dict) -> None:
+    m = _write_config(tmp_path / "m", {"model_type": "llama", **payload})
+    assert summarize_model_config(str(m))["mtp_layers"] == 0
+
+
 def test_summary_mha(tmp_path: Path) -> None:
     m = _write_config(
         tmp_path / "m",
