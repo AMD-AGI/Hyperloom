@@ -4,7 +4,8 @@
 """FINAL: which commit the session hands on, the integration head or the best single branch's head.
 
 The candidates are the integration head and the specialist head with the highest recorded value, whatever stopped
-its branch. Each is validated through the toolbox as a session measurement: one ``SWEEP`` test over the workload's
+its branch, unless that head carries the recipe the integration head already carries, which a merge of its work
+leaves behind. Each is validated through the toolbox as a session measurement: one ``SWEEP`` test over the workload's
 :attr:`~hyperloom_multibranch.scheduling.settings.Workload.final_concs`, read per conc from its rounds, and a
 cold-start reproduction the rule gate measures against the commit's own recorded value and holds to the accuracy gate,
 and the regression set of the commit's own ancestry run on the commit itself. A sweep that gives no value at the
@@ -30,7 +31,9 @@ from hyperloom.contracts.measurement import Purpose, TestKind, TestResult, Valid
 from hyperloom_multibranch.contracts.gate import NotMeasured
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.notebook.records import BranchProgress
+from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import RequestRejected, TestWithdrawn
+from hyperloom_multibranch.notebook.changes import same_recipe
 from hyperloom_multibranch.scheduling.integrator import defects_beyond_gain
 from hyperloom_multibranch.scheduling.requests import (
     NO_DELTA,
@@ -98,23 +101,40 @@ def _branch_candidate(row: BranchProgress, integration_head: str, metric: str) -
     return FinalCandidate(BEST_BRANCH_LABEL, row.branch, row.head_commit, value)
 
 
-def choose_candidates(
+async def choose_candidates(
     progress: Sequence[BranchProgress],
     integration_head: str,
     integration_value: Mapping[str, float],
     metric: str,
+    repo: ExperimentRepo,
 ) -> FinalCandidates:
     """The integration head and the specialist head with the highest recorded ``metric`` over every branch the
     notebook knows.
 
-    A branch with no commit, or whose head is the integration head, offers no single-branch candidate.
+    A branch with no commit offers no single-branch candidate, and neither does one whose head carries the recipe the
+    integration head already carries: a merge writes the branch's work as a new commit, so the two differ by commit
+    and are one recipe, which FINAL would otherwise validate twice. The next branch down then stands for the session's
+    single-branch work instead.
     """
 
     offered = [_branch_candidate(row, integration_head, metric) for row in progress]
-    ranked = [candidate for candidate in offered if candidate is not None]
-    best = max(ranked, key=lambda candidate: candidate.recorded_value, default=None)
+    ranked = sorted((row for row in offered if row is not None), key=lambda candidate: -candidate.recorded_value)
     integration = FinalCandidate(INTEGRATION_LABEL, INTEGRATION_BRANCH, integration_head, integration_value.get(metric))
-    return FinalCandidates(integration, best)
+    return FinalCandidates(integration, await _best_of_its_own(ranked, integration_head, repo))
+
+
+async def _best_of_its_own(
+    ranked: Sequence[FinalCandidate], integration_head: str, repo: ExperimentRepo
+) -> FinalCandidate | None:
+    """The first of ``ranked`` whose commit is not the integration head's recipe over again."""
+
+    if not ranked:
+        return None
+    head = await repo.read_recipe(integration_head)
+    for candidate in ranked:
+        if not same_recipe(await repo.read_recipe(candidate.commit), head):
+            return candidate
+    return None
 
 
 @dataclass(frozen=True)

@@ -532,8 +532,8 @@ class Session:
         integration = integration_row(progress)
         if integration is None:
             raise RuntimeError("the notebook has no integration branch after PRELUDE recorded its root")
-        return choose_candidates(
-            progress, integration.head_commit, integration.head_value, self._settings.workload.metric
+        return await choose_candidates(
+            progress, integration.head_commit, integration.head_value, self._settings.workload.metric, self._repo
         )
 
     async def _close(self, ending: SessionOutcome, hard_stop: HardStop) -> SessionOutcome:
