@@ -42,9 +42,8 @@ def _origin_of(entry: object) -> str:
     return f"{name}=={version}" if name and version else ""
 
 
-def _load(entry: object, group: str) -> EntryPointObject:
+def _load(entry: object, name: str, group: str) -> EntryPointObject:
     """Load one entry point; a callable that is not a factory result is called with no arguments."""
-    name = str(getattr(entry, "name", ""))
     origin = _origin_of(entry)
     try:
         loaded = entry.load()  # type: ignore[attr-defined]
@@ -75,7 +74,8 @@ def iter_entry_point_objects(group: str, *, legacy_groups: tuple[str, ...] = ())
             yield EntryPointObject(name=DISCOVERY_FAILED, group=current, error=f"{type(exc).__name__}: {exc}")
             return
         for entry in entries:
-            if getattr(entry, "name", None) in seen:
+            name = str(getattr(entry, "name", ""))
+            if name in seen:
                 continue
-            seen.add(str(getattr(entry, "name", "")))
-            yield _load(entry, current)
+            seen.add(name)
+            yield _load(entry, name, current)
