@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import logging
 from pathlib import Path
@@ -12,8 +13,10 @@ from typing import Any
 
 import pytest
 
+from hyperloom.inference_optimizer.cli.multi_node import _prepare_multi_node_state, _resolve_mn_backend
 from hyperloom.inference_optimizer.multi_node._internal import external_state as ext
 from hyperloom.inference_optimizer.multi_node._internal import topology_file as topo
+from hyperloom.inference_optimizer.multi_node.state_paths import resolve_state_file
 
 _LEGACY_NAMES = topo.COVERED_NAMES + ("PD_MODE", "PD_PREFILL_NODES", "PD_DECODE_NODES")
 
@@ -313,3 +316,50 @@ def test_agreeing_legacy_variables_do_not_warn(
     with caplog.at_level(logging.WARNING, logger=topo.log.name):
         _state_from_file(monkeypatch, _write(tmp_path / "t.json", doc))
     assert not [r for r in caplog.records if r.name == topo.log.name]
+
+
+def _optimize_args(**overrides: Any) -> argparse.Namespace:
+    values = {"nodes": 2, "mn_backend": None, "mn_image": None, "model": "/models/test", "no_kernel": True}
+    return argparse.Namespace(**{**values, **overrides})
+
+
+def _session(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    session = tmp_path / "session"
+    session.mkdir()
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", str(session))
+    monkeypatch.setenv("BENCHMARK_BASE_URL", "")  # restored by monkeypatch; the launch sets it
+    monkeypatch.setenv("MAGPIE_RUN_PHASE", "")
+
+
+def test_the_files_backend_is_the_launch_backend_when_no_flag_or_variable_says_otherwise(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """optimize --nodes 2 without --mn-backend must not turn an infera file into rayjob."""
+    doc = _infera_doc(tmp_path, prefill=[], decode=[], worker=["10.0.1.4", "10.0.1.5"])
+    monkeypatch.setenv(topo.TOPOLOGY_FILE_ENV, str(_write(tmp_path / "t.json", doc)))
+    assert _resolve_mn_backend(_optimize_args()) == "infera"
+    assert _resolve_mn_backend(_optimize_args(mn_backend="rayjob")) == "rayjob"  # an explicit flag still wins
+
+    _session(monkeypatch, tmp_path)
+    _prepare_multi_node_state(_optimize_args())
+    saved = json.loads(resolve_state_file().read_text(encoding="utf-8"))
+    assert (saved["backend"], saved["worker_pod_ips"], saved["external"]) == ("infera", ["10.0.1.4", "10.0.1.5"], True)
+
+
+def test_launch_with_an_unusable_topology_file_exits_2_naming_the_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _set_valid_legacy_env(monkeypatch)
+    _session(monkeypatch, tmp_path)
+    bad = tmp_path / "topology.json"
+    bad.write_text("{", encoding="utf-8")
+    monkeypatch.setenv(topo.TOPOLOGY_FILE_ENV, str(bad))
+    with pytest.raises(SystemExit) as caught:
+        _prepare_multi_node_state(_optimize_args())
+    assert caught.value.code == 2
+    err = capsys.readouterr().err
+    assert str(bad) in err
+    assert "not valid JSON" in err
+    with pytest.raises(SystemExit) as caught_backend:
+        _resolve_mn_backend(_optimize_args())
+    assert caught_backend.value.code == 2

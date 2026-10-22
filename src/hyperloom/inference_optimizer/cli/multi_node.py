@@ -20,10 +20,31 @@ from ..session.paths import (
 log = logging.getLogger(__name__)
 
 
+def _topology_file_overlay() -> dict[str, str] | None:
+    """The CLAW_TOPOLOGY_FILE view of the hand-off, or exit 2 naming the file when it cannot be used."""
+    from ..multi_node._internal.topology_file import TopologyHandoffError, topology_file_overlay
+
+    try:
+        return topology_file_overlay()
+    except TopologyHandoffError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        sys.exit(2)
+
+
+def _hand_off_service_url() -> str:
+    """The handed-over cluster's URL; a named but unusable topology file exits 2 before any state is built."""
+    from ..multi_node._internal.external_state import external_service_url
+
+    _topology_file_overlay()
+    return external_service_url()
+
+
 def _resolve_mn_backend(args: argparse.Namespace) -> str:
-    """Multi-node backend selector: --mn-backend > $INFERENCE_OPTIMIZER_MN_BACKEND > rayjob."""
+    """Multi-node backend selector: --mn-backend > $CLAW_TOPOLOGY_FILE backend > $INFERENCE_OPTIMIZER_MN_BACKEND > rayjob."""
+    from_file = (_topology_file_overlay() or {}).get("INFERENCE_OPTIMIZER_MN_BACKEND", "")
     backend = (
         (getattr(args, "mn_backend", None) or "").strip()
+        or from_file
         or os.environ.get("INFERENCE_OPTIMIZER_MN_BACKEND", "").strip()
         or os.environ.get("MN_BACKEND", "").strip()
         or "rayjob"
@@ -47,12 +68,11 @@ def _prepare_multi_node_state(args: argparse.Namespace) -> None:
         build_external_state_from_env,
         external_has_server_control,
         external_has_ssh_control,
-        external_service_url,
     )
     from ..multi_node.cli import _save_state
     from hyperloom.orchestrator.actions.executors._multi_node_env import export_ray_address_to_os
 
-    if not external_service_url():
+    if not _hand_off_service_url():
         print(
             "ERROR: --nodes >= 2 requires a cluster provisioned by the platform. "
             "Set HYPERLOOM_MN_EXT_SERVICE_URL (plus HYPERLOOM_MN_EXT_SSH_KEY and "
