@@ -2793,11 +2793,9 @@ class FrameworkPhase(ProposalBench):
         if state.baseline_config_path:
             params["config_path"] = state.baseline_config_path
         inject_stack_base_params(params, state, anchor=True)
-        last_bl = state.last_baseline or {}
-        if isinstance(last_bl, dict):
-            bs = str(last_bl.get("benchmark_script") or "").strip()
-            if bs:
-                params["benchmark_script"] = bs
+        benchmark_script = state.accepted_baseline_script()
+        if benchmark_script:
+            params["benchmark_script"] = benchmark_script
         lanes, ttl = self._coord.dispatcher.registry_lanes_ttl("explore")
         etask, was_existing = await self.tasks.create_or_return_existing(
             kind="explore",

@@ -197,12 +197,12 @@ class RuntimeWorkload:
 
 
 def _read_baseline_yaml_benchmark(state: Any) -> dict[str, Any]:
-    """Read ``benchmark`` from the materialized baseline yaml."""
-    last_bl = getattr(state, "last_baseline", None) or {}
-    if not isinstance(last_bl, dict):
-        return {}
-    extras = last_bl.get("extras") or {}
-    cfg_path = extras.get("materialized_config") if isinstance(extras, dict) else ""
+    """Read ``benchmark`` from the materialized yaml of the accepted baseline anchor.
+
+    ``last_baseline`` is the latest attempt, which may be a rejected re-baseline or, inside promotion, the
+    attempt before the one being promoted; ``baseline_config_path`` is set when an anchor is accepted.
+    """
+    cfg_path = str(getattr(state, "baseline_config_path", "") or "")
     if not cfg_path:
         return {}
     import yaml as _yaml  # type: ignore[reportMissingModuleSource]
@@ -244,10 +244,7 @@ def _server_args_from_envs(envs: dict[str, Any]) -> str:
 
 def _read_baseline_yaml_server_args(state: Any) -> str:
     """Read the runtime server args from the materialized baseline yaml."""
-    yaml_args = _server_args_from_envs(_benchmark_envs(_read_baseline_yaml_benchmark(state)))
-    if yaml_args:
-        return yaml_args
-    return _server_args_from(getattr(state, "last_baseline", None))
+    return _server_args_from_envs(_benchmark_envs(_read_baseline_yaml_benchmark(state)))
 
 
 def _server_args_env_override(entry: Any) -> str:
@@ -271,11 +268,6 @@ def _server_args_payload(entry: Any) -> str:
     return ""
 
 
-def _server_args_from(entry: Any) -> str:
-    """Extract the final server-args string from one state entry."""
-    return _server_args_env_override(entry) or _server_args_payload(entry)
-
-
 def _achieved_arm_source(state: Any) -> str:
     """Which arm the roofline ``achieved`` throughput comes from."""
     t = (getattr(state, "current_best", None) or {}).get("tput")
@@ -286,7 +278,7 @@ def _achieved_arm_source(state: Any) -> str:
 
 def _collect_runtime_server_args(state: Any, *, arm: str | None = None) -> str:
     """Server args for the arm the ceiling is actually compared against."""
-    base_args = _read_baseline_yaml_server_args(state) or _server_args_from(getattr(state, "last_baseline", None))
+    base_args = _read_baseline_yaml_server_args(state)
     resolved_arm = arm or _achieved_arm_source(state)
     if resolved_arm == "current_best":
         current_best = getattr(state, "current_best", None)
