@@ -101,7 +101,7 @@ value.
      plain-text follow-up for the gateway's `/v1` URL.
    - Write `OPENAI_API_KEY=<PLEASE_FILL_IN>` unless already set to a
      non-placeholder value.
-   - Ask `CODEX_MODEL`: options `Use default (gpt-5.6-sol)` / `Custom`. The
+   - Ask `CODEX_MODEL`: options `Use default (gpt-6-astra)` / `Custom`. The
      model must be one that endpoint serves (list them with
      `curl "$OPENAI_BASE_URL/models"`); a custom endpoint usually needs `Custom`.
    - The Codex runtime (`openai_codex`, from the `llm` extra) is installed by the
@@ -477,6 +477,12 @@ ATOM even if SGLang or vLLM is also installed. In `docker` mode, skip this until
 the demo skill runs setup inside the container. Read
 `.env` back and check it:
 
+- In `baremetal` mode, re-check the chosen LLM side(s) after the backend returns,
+  not only before it runs. Confirm each selected base URL and model still matches
+  the user's choice and each selected key/token is set (without printing secrets).
+  For `Both`, verify `OPENAI_BASE_URL`, `OPENAI_API_KEY`, and `CODEX_MODEL` remain
+  alongside the Anthropic side. If any selected value was removed or changed,
+  stop and report the setup failure instead of continuing to a demo.
 - If `FRAMEWORK` is set, report it. Downstream demo skills read this value.
 - If `HYPERLOOM_RUN_MODE` is `docker`, an unset `FRAMEWORK` is expected: the
   container has not run yet, so the host has no importable serving framework.
