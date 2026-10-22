@@ -1379,8 +1379,20 @@ async def test_specialist_user_is_refused_on_the_ray_gpu_actor_path(tmp_path, mo
 
 
 _DEMOTE_USER = "nobody"
+
+
+def _account_exists(name: str) -> bool:
+    import pwd
+
+    try:
+        pwd.getpwnam(name)
+    except KeyError:
+        return False
+    return True
+
+
 _demote_skip = pytest.mark.skipif(
-    os.geteuid() != 0 or not any(line.startswith(f"{_DEMOTE_USER}:") for line in open("/etc/passwd")),
+    os.geteuid() != 0 or not _account_exists(_DEMOTE_USER),
     reason=f"demoting needs root and an existing {_DEMOTE_USER!r} account; the test creates no users",
 )
 
@@ -1409,12 +1421,12 @@ async def test_demoted_specialist_writes_its_worktree_and_cannot_read_the_apps_f
         init_git_repo(repo)
         monkeypatch.setenv("FRAMEWORK_REPO_PATH", str(repo))
         monkeypatch.setenv("HYPERLOOM_SPECIALIST_USER", _DEMOTE_USER)
-        secret = base / "app_secret"
-        secret.write_text("app-credential", encoding="utf-8")
-        secret.chmod(0o600)
+        private_file = base / "app_private"
+        private_file.write_text("private-marker", encoding="utf-8")
+        private_file.chmod(0o600)
         role = base / "bin" / "claude"
         role.parent.mkdir()
-        role.write_text(_DEMOTED_ROLE.format(secret=secret), encoding="utf-8")
+        role.write_text(_DEMOTED_ROLE.format(secret=private_file), encoding="utf-8")
         role.chmod(0o755)
         session_dir = base / "session"
         session_dir.mkdir()
@@ -1438,7 +1450,7 @@ async def test_demoted_specialist_writes_its_worktree_and_cannot_read_the_apps_f
         assert result.status == "succeeded", result.error
         assert proof["proof_uid.txt"] == str(entry.pw_uid)
         assert proof["proof_home.txt"] == entry.pw_dir
-        assert "app-credential" not in proof["proof_secret.txt"]
+        assert "private-marker" not in proof["proof_secret.txt"]
         assert proof["proof_secret.rc"] != "0"
         assert "Permission denied" in proof["proof_secret.err"]
         # It edited its own worktree and git there still answers (no "dubious ownership").

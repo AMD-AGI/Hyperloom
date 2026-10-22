@@ -121,13 +121,13 @@ def test_child_runs_as_the_named_uid_and_group():
 
 @needs_root
 def test_child_cannot_read_an_app_owned_private_file(shared_tmp):
-    secret = shared_tmp / "secret"
-    secret.write_text("key", encoding="utf-8")
-    secret.chmod(0o600)
-    out = _run_as_unprivileged(f"cat {secret}")
+    private_file = shared_tmp / "private_file"
+    private_file.write_text("marker", encoding="utf-8")
+    private_file.chmod(0o600)
+    out = _run_as_unprivileged(f"cat {private_file}")
     assert out.returncode != 0
     assert "Permission denied" in out.stderr
-    assert "key" not in out.stdout
+    assert "marker" not in out.stdout
 
 
 @needs_root
