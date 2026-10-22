@@ -15,7 +15,7 @@ from hyperloom.orchestrator.actions.executors.roofline import (
 )
 from hyperloom.orchestrator.roles import MockBackend, ScriptedPlan
 from hyperloom.orchestrator.loop.coordinator import Coordinator
-from hyperloom.orchestrator.loop.intent_router import _lifecycle_paths
+from hyperloom.orchestrator.loop.kernel_request import lifecycle_paths
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
 from hyperloom.orchestrator.state.task_registry import Task
@@ -52,7 +52,7 @@ def test_lifecycle_paths_extracts_present_path_keys():
         "not_a_path_key": "ignored",
         "best_artifact_path": "/tmp/best.py",
     }
-    out = _lifecycle_paths(payload)
+    out = lifecycle_paths(payload)
     assert out == {
         "trace_input": "/tmp/trace.json.gz",
         "candidates_path": "/tmp/kc.json",
@@ -70,14 +70,14 @@ def test_lifecycle_paths_surfaces_tracelens_report_keys():
         "cli_log_path": "/tmp/run/cli.log",
         "candidates_path": "/tmp/run/kernel_candidates.json",
     }
-    out = _lifecycle_paths(payload)
+    out = lifecycle_paths(payload)
     assert out == payload
 
 
 def test_lifecycle_paths_handles_non_dict():
-    assert _lifecycle_paths(None) == {}
-    assert _lifecycle_paths("nope") == {}
-    assert _lifecycle_paths([1, 2]) == {}
+    assert lifecycle_paths(None) == {}
+    assert lifecycle_paths("nope") == {}
+    assert lifecycle_paths([1, 2]) == {}
 
 
 @pytest.mark.asyncio
@@ -322,6 +322,32 @@ async def test_roofline_executor_emits_lifecycle_end(tmp_path):
     assert ev["artifacts"]["analysis_md_path"] == str(md)
     assert "duration_s" in ev
     assert ev["seq"] > start["seq"]
+
+
+def _raising_save(error: BaseException):
+    def _save(_session_dir):
+        raise error
+
+    return _save
+
+
+def test_roofline_lifecycle_keeps_the_event_when_the_state_write_fails(tmp_path, monkeypatch):
+    (tmp_path / "state.json").write_text("{}", encoding="utf-8")
+    state = SharedState()
+    monkeypatch.setattr(state, "save", _raising_save(OSError("disk full")))
+
+    RooflineExecutor(shared_state=state)._record_lifecycle(tmp_path, status="START")
+
+    assert [(e["step"], e["status"]) for e in state.lifecycle] == [("roofline", "START")]
+
+
+def test_roofline_lifecycle_lets_a_state_serialization_bug_propagate(tmp_path, monkeypatch):
+    (tmp_path / "state.json").write_text("{}", encoding="utf-8")
+    state = SharedState()
+    monkeypatch.setattr(state, "save", _raising_save(TypeError("not JSON serializable")))
+
+    with pytest.raises(TypeError, match="not JSON serializable"):
+        RooflineExecutor(shared_state=state)._record_lifecycle(tmp_path, status="START")
 
 
 @pytest.mark.asyncio

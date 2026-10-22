@@ -19,7 +19,8 @@ from .session_paths import (
 )
 
 
-SCHEMA_VERSION_V6 = "hyperloom.session_breakdown.v6.0"
+# Symbol name is historical; the value is the current schema version.
+SCHEMA_VERSION_V6 = "hyperloom.session_breakdown.v6.1"
 _PENDING_INSTALL_ATTR = "_sbd_v6_install_event"
 _STORAGE_SEQUENCE_KEY = "__sbd_v6_timeline_sequence"
 # ``roofline``, ``kernel`` and ``baseline`` all recur within one session -- one
@@ -214,7 +215,7 @@ def record_write_warning(
             make_parents=True,
             fmt=JsonLineFormat(ensure_ascii=False, sort_keys=True),
         )
-    except Exception:  # noqa: BLE001 — warning persistence cannot change runtime behavior
+    except (OSError, ValueError):  # warning persistence cannot change runtime behavior
         return False
     return True
 

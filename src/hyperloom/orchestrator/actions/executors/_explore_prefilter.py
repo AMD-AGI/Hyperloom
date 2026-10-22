@@ -36,12 +36,13 @@ from typing import Any
 
 import yaml
 
-from hyperloom.common.coerce import to_str_list
+from hyperloom.common.coerce import to_float, to_str_list
 from hyperloom.inference_optimizer.canonical_fingerprint import workload_signature
 from hyperloom.inference_optimizer.grading import resolved_grading
 
 from . import _explore_reuse as reuse
 from ._explore_projection import ProjectionRequest, projection_enabled, route_variants
+from ._explore_remeasure import _is_noop_filter_exempt
 from ._explore_screen import screen_enabled, screen_variants
 from ._grid_base import GridVariant
 from ._grid_runner import _build_variant_yaml
@@ -119,6 +120,20 @@ class RoundContext:
     keep_threshold_pct: float
     decision_protocol: str
     session_dir: Path | None = None
+
+    @classmethod
+    def of_round(cls, explore_round: Any) -> RoundContext:
+        """The context of an ``explore._ExploreRound`` once its schedule is open."""
+        return cls(
+            config_path=explore_round.config_path,
+            output_root=explore_round.output_root,
+            state=explore_round.ss,
+            build=explore_round.build,
+            inherited_args=explore_round.inherited_args,
+            keep_threshold_pct=explore_round.keep_threshold_pct,
+            decision_protocol="warm" if explore_round.use_warm_decision else "cold",
+            session_dir=explore_round.session_dir,
+        )
 
     @functools.cached_property
     def base_bench(self) -> dict[str, Any]:
@@ -236,9 +251,14 @@ def _drop_known_reverts(
 
 
 async def prefilter_variants(
-    variants: list[GridVariant], ctx: RoundContext, stack: Stack, protected: frozenset[str] = frozenset()
+    variants: list[GridVariant], ctx: RoundContext, stack: Stack, revalidation: bool = False
 ) -> Prefiltered:
-    """Run the enabled filters over ``variants`` on ``stack``; names in ``protected`` always survive."""
+    """Run the enabled filters over ``variants`` on ``stack``.
+
+    A revalidation round, a config replay and a resumed revalidation re-measure a config on purpose, so none of
+    them is ever filtered.
+    """
+    protected = {gv.name for gv in variants if revalidation or _is_noop_filter_exempt(gv)}
     candidates = [gv for gv in variants if gv.name not in protected]
     if not candidates or not (reuse.reuse_enabled() or screen_enabled() or projection_enabled()):
         return Prefiltered(list(variants))
@@ -268,6 +288,17 @@ class Verdict:
     anchor_tput: float
     round_id: str
     stack: Stack
+
+    @classmethod
+    def of_row(cls, row: dict[str, Any]) -> Verdict:
+        """From the tested-ledger row of a decision round, which records the stack and anchor it was judged on."""
+        return cls(
+            outcome=str(row.get("outcome") or ""),
+            reason=str(row.get("reason") or ""),
+            anchor_tput=to_float(row.get("base_tput"), 0.0) or 0.0,
+            round_id=str(row.get("round_id") or ""),
+            stack=Stack.from_measured(row.get("measured_against") or {}),
+        )
 
 
 def _record_revert(ctx: RoundContext, gv: GridVariant, result: Any, verdict: Verdict) -> None:
@@ -308,9 +339,10 @@ def _record_anchor(ctx: RoundContext, gv: GridVariant, result: Any, verdict: Ver
         log.warning("explore: could not record %s as an InferaSim anchor (%s)", gv.name, exc)
 
 
-async def record_decision_round(ctx: RoundContext, gv: GridVariant, result: Any, verdict: Verdict) -> None:
+async def record_decision_round(ctx: RoundContext, gv: GridVariant, result: Any, row: dict[str, Any]) -> None:
     """Keep what a measured decision round can tell later rounds; a no-op unless a store is configured."""
     if getattr(result, "status", "") != "succeeded":
         return
+    verdict = Verdict.of_row(row)
     await asyncio.to_thread(_record_revert, ctx, gv, result, verdict)
     await asyncio.to_thread(_record_anchor, ctx, gv, result, verdict)

@@ -59,15 +59,15 @@ def serving_slot_busy() -> bool:
     """Best-effort check: is Ray's whole-machine ``serving_slot`` currently held?"""
     if not ray_gpu_specialist_exec_enabled():
         return False
-    try:
-        import ray
+    import ray
 
-        if not ray.is_initialized():
-            return False
-        avail = ray.available_resources()
-        return float(avail.get("serving_slot", 1.0)) < 1.0
-    except Exception:  # noqa: BLE001 — best-effort; never block dispatch
+    if not ray.is_initialized():
         return False
+    try:
+        avail = ray.available_resources()
+    except (ray.exceptions.RayError, OSError):
+        return False
+    return float(avail.get("serving_slot", 1.0)) < 1.0
 
 
 def align_hip_with_ray_rocr(env: dict[str, str]) -> dict[str, str]:
@@ -210,7 +210,7 @@ def mark_ray_backend_unhealthy() -> None:
         import ray
 
         ray.shutdown()
-    except Exception:  # noqa: BLE001 - recovery must never raise
+    except (RuntimeError, OSError):
         pass
     if _BACKEND is not None:
         _BACKEND._ensured = False

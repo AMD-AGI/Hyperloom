@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import Mock
 
+import httpx
 import pytest
 
 from hyperloom.common import claude_oneshot
@@ -1879,10 +1880,14 @@ def test_probe_llm_catalog_retries_on_transient_error_then_succeeds(monkeypatch)
     def _flaky_get(url, **kwargs):
         attempt[0] += 1
         if attempt[0] <= 2:
-            raise RuntimeError(f"transient {attempt[0]}")
+            raise httpx.ConnectError(f"transient {attempt[0]}")
         return _FakeResp(200, {"data": [{"id": "claude-opus-4-7"}]})
 
-    fake_httpx = type("FakeHttpx", (), {"get": staticmethod(_flaky_get)})
+    fake_httpx = type(
+        "FakeHttpx",
+        (),
+        {"get": staticmethod(_flaky_get), "HTTPError": httpx.HTTPError, "InvalidURL": httpx.InvalidURL},
+    )
     monkeypatch.setitem(sys.modules, "httpx", fake_httpx)
 
     ids = cli._probe_llm_catalog(
@@ -2056,6 +2061,14 @@ def test_smoke_test_codex_model_falls_back_to_next_rung(monkeypatch, capsys):
     assert "falling back" in out
 
 
+def test_smoke_test_codex_model_falls_back_from_the_default_to_the_previous_default(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "_probe_llm_catalog", lambda **kw: {"gpt-5.6-sol", "gpt-5.5"})
+    args = _make_args(codex_model="gpt-6-astra", critic_mock=False)
+    cli._smoke_test_codex_model(args, ("https://anthropic", "https://openai/v1"))
+
+    assert args.codex_model == "gpt-5.6-sol"
+
+
 def test_smoke_test_codex_model_ladder_skips_missing_rungs(monkeypatch, capsys):
     monkeypatch.setattr(cli, "_probe_llm_catalog", lambda **kw: {"gpt-5.4", "gpt-4.1"})
     args = _make_args(codex_model="gpt-5.6-sol", critic_mock=False)
@@ -2157,7 +2170,7 @@ def _record_critic_probes(monkeypatch, *, fail: bool = False) -> list[tuple[str,
 def test_critic_reviews_with_the_orchestration_model_by_default(monkeypatch, capsys):
     """A launch that sets CODEX_MODEL still reviews with the Claude-side model orchestration runs on."""
     sent = _record_critic_probes(monkeypatch)
-    monkeypatch.setattr(cli, "orchestration_runs_on_codex", lambda **kw: False)
+    monkeypatch.setattr(cli, "critic_on_codex_side", lambda **kw: False)
     args = _make_args(claude_model="glm-5-3", codex_model="gpt-5.4", critic_mock=False, critic_protocol="auto")
 
     cli._probe_critic_review_model(args, codex_follows_claude=False)
@@ -2168,7 +2181,7 @@ def test_critic_reviews_with_the_orchestration_model_by_default(monkeypatch, cap
 
 def test_critic_follows_an_orchestration_that_runs_on_codex(monkeypatch):
     sent = _record_critic_probes(monkeypatch)
-    monkeypatch.setattr(cli, "orchestration_runs_on_codex", lambda **kw: True)
+    monkeypatch.setattr(cli, "critic_on_codex_side", lambda **kw: True)
     args = _make_args(claude_model="gpt-5.5", codex_model="gpt-5.5", critic_mock=False, critic_protocol="auto")
 
     cli._probe_critic_review_model(args, codex_follows_claude=False)
@@ -2178,7 +2191,7 @@ def test_critic_follows_an_orchestration_that_runs_on_codex(monkeypatch):
 
 def test_an_explicit_critic_protocol_reviews_with_that_sides_model(monkeypatch):
     sent = _record_critic_probes(monkeypatch)
-    monkeypatch.setattr(cli, "orchestration_runs_on_codex", lambda **kw: False)
+    monkeypatch.setattr(cli, "critic_on_codex_side", lambda **kw: False)
     monkeypatch.setenv("OPENAI_BASE_URL", "https://gw.example/v1")
     monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
     args = _make_args(claude_model="glm-5-3", codex_model="gpt-5.6-sol", critic_mock=False, critic_protocol="openai")
@@ -2190,7 +2203,7 @@ def test_an_explicit_critic_protocol_reviews_with_that_sides_model(monkeypatch):
 
 def test_a_critic_model_that_cannot_answer_stops_the_launch_without_a_fallback(monkeypatch, capsys):
     sent = _record_critic_probes(monkeypatch, fail=True)
-    monkeypatch.setattr(cli, "orchestration_runs_on_codex", lambda **kw: False)
+    monkeypatch.setattr(cli, "critic_on_codex_side", lambda **kw: False)
     args = _make_args(claude_model="glm-5-3", codex_model="gpt-5.4", critic_mock=False, critic_protocol="auto")
 
     with pytest.raises(SystemExit) as exc_info:

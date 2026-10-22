@@ -28,9 +28,8 @@ def _state(idle_ticks, *, idle_seconds=ms._kernel_idle_min_seconds()):
 
 def _patch(monkeypatch, *, work_pending):
     monkeypatch.setattr(ms, "kernel_work_pending", lambda s: work_pending)
-    # Keep the hard budget/cap exits inert so only the idle logic decides.
+    # Keep the hard budget exits inert so only the idle logic decides.
     monkeypatch.setattr(ms, "phase_budget_remaining_seconds", lambda s, **k: 9_999.0)
-    monkeypatch.setattr(ms, "phase_cap_seconds", lambda s: None)
 
 
 def test_idle_at_threshold_winds_down_to_sweep(monkeypatch):

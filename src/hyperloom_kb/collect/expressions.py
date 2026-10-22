@@ -449,15 +449,15 @@ def _binding_name(value: Any, where: str) -> str:
 
 
 def _compile_call(node: Mapping[str, Any], names: frozenset[str], where: str) -> Expression:
-    heads = [key for key in node if key in BUILTINS]
+    heads = BUILTINS.intersection(node)
     if len(heads) != 1:
         raise MappingError(
             f"{where}: a mapping must be exactly one built-in call "
             f"(known: {', '.join(sorted(BUILTINS))}); got keys {sorted(map(str, node))}"
         )
-    head = str(heads[0])
+    (head,) = heads
     allowed = STRUCTURED.get(head, frozenset({head}))
-    extra = sorted(str(key) for key in node if key not in allowed)
+    extra = sorted(map(str, node.keys() - allowed))
     if extra:
         raise MappingError(f"{where}: {head} does not accept {', '.join(extra)}")
     location = f"{where}.{head}"

@@ -15,6 +15,9 @@ from hyperloom.orchestrator.roles import (
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.state.objective import TargetGainObjective
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
+from hyperloom.orchestrator.knowledge.recipe_journal import (
+    workload_kb_tags,
+)
 from hyperloom.orchestrator.loop.dispatcher import HeldLeases
 
 
@@ -560,7 +563,7 @@ def test_collect_workload_tags(coord: Coordinator, monkeypatch) -> None:
         "workload_mode": "serving",
     }
 
-    assert coord.recipe_journal._collect_workload_tags() == {
+    assert workload_kb_tags(coord.shared_state) == {
         "framework": "sglang",
         "model_class": "moe",
         "model_name": "Qwen3-32B",
@@ -591,19 +594,19 @@ def test_workload_tags_read_ep_from_the_env_only_without_a_shared_state_value(co
     ss = coord.shared_state
     ss.ep = 8
 
-    tags = coord.recipe_journal._collect_workload_tags()
+    tags = workload_kb_tags(coord.shared_state)
     assert tags["ep"] == 8
     assert tags["pp"] == 3
 
     ss.ep = 0
-    assert coord.recipe_journal._collect_workload_tags()["ep"] == 2
+    assert workload_kb_tags(coord.shared_state)["ep"] == 2
 
 
 def test_an_unparseable_or_non_positive_parallelism_env_is_not_tagged(coord: Coordinator, monkeypatch) -> None:
     monkeypatch.setenv("EP", "two")
     monkeypatch.setenv("PP", "0")
 
-    tags = coord.recipe_journal._collect_workload_tags()
+    tags = workload_kb_tags(coord.shared_state)
     assert "ep" not in tags
     assert "pp" not in tags
 
@@ -618,7 +621,7 @@ def test_workload_tags_survive_a_resumed_null_fingerprint_meta(coord: Coordinato
     ss.stack_fingerprint_meta = None
     ss.baseline_workload_extra = None
 
-    assert coord.recipe_journal._collect_workload_tags() == {"framework": "vllm"}
+    assert workload_kb_tags(coord.shared_state) == {"framework": "vllm"}
 
 
 def test_unknown_and_empty_fingerprint_entries_are_not_tagged(coord: Coordinator, monkeypatch) -> None:
@@ -634,31 +637,8 @@ def test_unknown_and_empty_fingerprint_entries_are_not_tagged(coord: Coordinator
         "image_digest": "sha256:abc",
     }
 
-    tags = coord.recipe_journal._collect_workload_tags()
+    tags = workload_kb_tags(coord.shared_state)
     assert tags == {"framework": "vllm", "image_digest": "sha256:abc"}
-
-
-def test_build_kernel_optimizations_from_state(coord: Coordinator) -> None:
-    ss = coord.shared_state
-    ss.kernel_opt_attempts = {
-        "k1": {
-            "last_decision": "KEEP",
-            "last_micro_speedup": 1.3,
-            "last_source_file": "a.py",
-            "last_artifact_path": "a.so",
-        },
-        "k2": {"last_decision": "REVERT", "last_micro_speedup": 1.1},
-    }
-    ss.kernel_integrate_attempts = {
-        "i1": {"kernel_id": "k1", "last_decision": "KEEP", "best_gain_pct": 5.0, "attempts": [{"new_tput": 210.0}]},
-    }
-    out = coord.recipe_journal._build_kernel_optimizations_from_state()
-    assert len(out) == 1  # only the KEEP'd k1
-    row = out[0]
-    assert row["kernel_id"] == "k1"
-    assert row["integrated"] is True
-    assert row["e2e_gain_pct"] == 5.0
-    assert row["e2e_tput"] == 210.0
 
 
 # -- phase denial gate -----------------------------------------------------
@@ -717,10 +697,9 @@ def test_skip_gemm_tuning_env(coord: Coordinator, monkeypatch) -> None:
 
 def test_gemm_tuning_required_before_kernel_opt(coord: Coordinator, monkeypatch) -> None:
     monkeypatch.delenv("INFERENCE_OPTIMIZER_SKIP_GEMM_TUNING", raising=False)
-    monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
     ss = coord.shared_state
     ss.last_gemm_tuning = {}
-    # forge backend: any precision on a supported framework is eligible.
+    # Any precision on a supported framework is eligible.
     ss.framework = "sglang"
     ss.precision = "fp16"
     assert coord.phase_kernel._gemm_tuning_required_before_kernel_opt() is True
@@ -828,10 +807,10 @@ def test_first_present() -> None:
 
 
 def test_lifecycle_paths() -> None:
-    from hyperloom.orchestrator.loop.intent_router import _lifecycle_paths
+    from hyperloom.orchestrator.loop.kernel_request import lifecycle_paths
 
-    assert _lifecycle_paths("not-a-dict") == {}
-    out = _lifecycle_paths({"patch_path": "/a/p.diff", "workspace": "", "other": "x"})
+    assert lifecycle_paths("not-a-dict") == {}
+    out = lifecycle_paths({"patch_path": "/a/p.diff", "workspace": "", "other": "x"})
     assert out == {"patch_path": "/a/p.diff"}
 
 

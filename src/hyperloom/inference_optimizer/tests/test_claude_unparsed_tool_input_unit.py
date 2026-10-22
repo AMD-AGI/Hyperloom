@@ -5,12 +5,14 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Any
 
 import pytest
 
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
+from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.orchestrator.roles.claude import ClaudeBackend, _intent_fingerprint
 from hyperloom.orchestrator.roles.mcp_emit_intent import (
     EMIT_INTENT_TOOL_NAME,
@@ -170,8 +172,17 @@ _WRAPPER_EMIT = {"__unparsedToolInput": {"raw": _WRAPPER_RAW, "len": len(_WRAPPE
 _MIXED_EMIT = {**_NATIVE_EMIT, **_WRAPPER_EMIT}
 _WRAPPER_WITH_JUNK = {**_WRAPPER_EMIT, "junk": 1}
 
+_ORCHESTRATION_INTENTS = default_role_registry()["orchestration"].allowed_intents
+_CRITIC_INTENTS = default_role_registry()["critic"].allowed_intents
+_REVIEW_VERDICT_NATIVE = {
+    "intent_type": "review_verdict",
+    "payload": {"target_proposal_msg_id": "p1", "verdict": "approve"},
+}
+_REVIEW_VERDICT_RAW = json.dumps(_REVIEW_VERDICT_NATIVE)
+_REVIEW_VERDICT_WRAPPER = {"__unparsedToolInput": {"raw": _REVIEW_VERDICT_RAW, "len": len(_REVIEW_VERDICT_RAW)}}
 
-def _registered_emit_intent_tool() -> Any:
+
+def _registered_emit_intent_tool(allowed_intents: frozenset[IntentType] | None = None) -> Any:
     """The emit_intent tool as the real SDK decorator registers it."""
     sdk = pytest.importorskip("claude_agent_sdk")
     captured: list[Any] = []
@@ -179,7 +190,7 @@ def _registered_emit_intent_tool() -> Any:
     def capture(name: str, version: str, tools: list[Any]) -> None:
         captured.extend(tools)
 
-    build_emit_intent_server(sdk_module=sdk, server_factory=capture)
+    build_emit_intent_server(sdk_module=sdk, server_factory=capture, allowed_intents=allowed_intents)
     tool = next((t for t in captured if getattr(t, "name", None) == EMIT_INTENT_TOOL_NAME), None)
     if tool is None:
         pytest.skip("SDK did not register the emit_intent tool")
@@ -188,20 +199,34 @@ def _registered_emit_intent_tool() -> Any:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "arguments,accepted",
+    "allowed_intents,arguments,accepted",
     [
-        (_NATIVE_EMIT, True),
-        (_WRAPPER_EMIT, True),
-        (_MIXED_EMIT, True),
-        ({"nonsense": 1}, False),
-        (_WRAPPER_WITH_JUNK, False),
+        (None, _NATIVE_EMIT, True),
+        (None, _WRAPPER_EMIT, True),
+        (None, _MIXED_EMIT, True),
+        (None, {"nonsense": 1}, False),
+        (None, _WRAPPER_WITH_JUNK, False),
+        (_CRITIC_INTENTS, _REVIEW_VERDICT_NATIVE, True),
+        (_CRITIC_INTENTS, _REVIEW_VERDICT_WRAPPER, True),
+        (_ORCHESTRATION_INTENTS, _REVIEW_VERDICT_NATIVE, False),
     ],
-    ids=["native", "wrapper", "native-with-wrapper", "junk", "wrapper-with-junk"],
+    ids=[
+        "native",
+        "wrapper",
+        "native-with-wrapper",
+        "junk",
+        "wrapper-with-junk",
+        "critic-native-in-role",
+        "critic-wrapper-in-role",
+        "orchestration-native-out-of-role",
+    ],
 )
-async def test_registered_schema_and_handler_agree(arguments: dict[str, Any], accepted: bool) -> None:
+async def test_registered_schema_and_handler_agree(
+    allowed_intents: frozenset[IntentType] | None, arguments: dict[str, Any], accepted: bool
+) -> None:
     """The declared schema gates the call before the handler ever runs, so a shape the handler accepts but the schema rejects can never land."""
     jsonschema = pytest.importorskip("jsonschema")
-    tool = _registered_emit_intent_tool()
+    tool = _registered_emit_intent_tool(allowed_intents)
 
     if accepted:
         jsonschema.validate(instance=arguments, schema=tool.input_schema)
@@ -211,6 +236,36 @@ async def test_registered_schema_and_handler_agree(arguments: dict[str, Any], ac
 
     result = await tool.handler(arguments)
     assert ("is_error" not in result) is accepted
+
+
+def _assert_names_the_orchestration_intents(refusal: str) -> None:
+    assert "'review_verdict'" in refusal
+    for intent_type in _ORCHESTRATION_INTENTS:
+        assert intent_type.value in refusal
+
+
+def test_registered_schema_refuses_a_native_out_of_role_intent() -> None:
+    """The SDK returns the schema validation message to the model before the handler runs, so the role's enum is what refuses a native call, naming the types the role may emit."""
+    jsonschema = pytest.importorskip("jsonschema")
+    tool = _registered_emit_intent_tool(_ORCHESTRATION_INTENTS)
+
+    with pytest.raises(jsonschema.ValidationError) as exc:
+        jsonschema.validate(instance=_REVIEW_VERDICT_NATIVE, schema=tool.input_schema)
+
+    _assert_names_the_orchestration_intents(exc.value.message)
+
+
+@pytest.mark.asyncio
+async def test_registered_handler_refuses_a_wrapped_out_of_role_intent() -> None:
+    """The enum cannot see inside the parser wrapper, so the handler refuses that form in the same turn instead."""
+    jsonschema = pytest.importorskip("jsonschema")
+    tool = _registered_emit_intent_tool(_ORCHESTRATION_INTENTS)
+    jsonschema.validate(instance=_REVIEW_VERDICT_WRAPPER, schema=tool.input_schema)
+
+    result = await tool.handler(_REVIEW_VERDICT_WRAPPER)
+
+    assert result["is_error"] is True
+    _assert_names_the_orchestration_intents(result["content"][0]["text"])
 
 
 @pytest.mark.asyncio

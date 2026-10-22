@@ -491,6 +491,21 @@ def test_get_file_patch_passes_the_path_parameter(monkeypatch):
     assert "path=a%2Fb.py" in seen[0]
 
 
+def test_file_patch_requires_the_documented_field(monkeypatch):
+    _install(monkeypatch, lambda url: _FakeResponse('{"diff": "legacy"}'))
+
+    with pytest.raises(PRContractError, match="must contain 'patch'"):
+        PRMonitorClient("https://host/pr-monitor").get_file_patch("ROCm/aiter", 7, "a.py")
+
+
+@pytest.mark.parametrize("files", [{}, "", 0, ["not-an-object"]])
+def test_get_pr_detail_rejects_invalid_file_lists(monkeypatch, files):
+    _install(monkeypatch, lambda url: _FakeResponse(json.dumps({"files": files})))
+
+    with pytest.raises(PRContractError, match="'files'"):
+        PRMonitorClient("https://host/pr-monitor").get_pr_detail("ROCm/aiter", 7)
+
+
 def test_pr_request_builds_a_get_many_tuple():
     client = PRMonitorClient("https://host/pr-monitor")
 

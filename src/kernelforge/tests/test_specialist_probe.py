@@ -10,11 +10,12 @@ from pathlib import Path
 
 import pytest
 
-from kernelforge.llm.process_reaping import ReapReport
+from kernelforge.tools.process_reaping import ReapReport
 
 from kernelforge.agent_backends import AgentCapabilities, AgentRunResult
 from kernelforge.config import Config
-from kernelforge.mcp_server import probe_stdio_server as probe_server
+from kernelforge.orchestrator import specialist_probe
+from kernelforge.orchestrator import specialist_probe_server as probe_server
 from kernelforge.orchestrator.contracts import (
     CaseEvidence,
     OrchestrationContext,
@@ -31,12 +32,12 @@ from kernelforge.orchestrator.specialists import (
 
 def _refusing_load_sandbox(env):
     """Stand in for a server that would refuse the session it was handed."""
-    raise probe_server.ProbeSandboxError("the ledger volume went away")
+    raise specialist_probe.ProbeSandboxError("the ledger volume went away")
 
 
 def _patch_primitive(monkeypatch, primitive) -> None:
     """Stand PR-1's seam in or out, strictly."""
-    monkeypatch.setattr(probe_server, "resolve_probe_primitive", lambda: primitive)
+    monkeypatch.setattr(specialist_probe, "resolve_probe_primitive", lambda: primitive)
 
 
 def _definition() -> SpecialistDefinition:
@@ -93,7 +94,7 @@ class _McpBackend:
         server = spec.mcp_servers.get("specialist_probe")
         if server is not None and self.ledger:
             # Stand in for the probe server the session would have spawned.
-            path = Path(server.env[probe_server.LEDGER_ENV])
+            path = Path(server.env[specialist_probe.LEDGER_ENV])
             path.parent.mkdir(parents=True, exist_ok=True)
             with path.open("a", encoding="utf-8") as handle:
                 for record in self.ledger:
@@ -137,7 +138,7 @@ async def test_probe_is_offered_without_reaching_the_canonical_tree(tmp_path, mo
                 "probe_index": 1,
                 "label": "block-1024-vs-256",
                 "case_id": "case-a",
-                "status": probe_server.MEASURED,
+                "status": specialist_probe.MEASURED,
                 "case_ms": 0.87,
                 "detail": "",
             }
@@ -155,7 +156,7 @@ async def test_probe_is_offered_without_reaching_the_canonical_tree(tmp_path, mo
 
     spec = backend.specs[0]
     server = spec.mcp_servers["specialist_probe"]
-    scratch = Path(server.env[probe_server.SCRATCH_ENV])
+    scratch = Path(server.env[specialist_probe.SCRATCH_ENV])
 
     assert spec.writable is False
     assert spec.tool_policy.write is False
@@ -164,7 +165,7 @@ async def test_probe_is_offered_without_reaching_the_canonical_tree(tmp_path, mo
     assert spec.tool_policy.extra_tools == ("mcp__specialist_probe__probe_variant",)
     assert workspace not in scratch.parents and scratch != workspace
     assert scratch.is_dir()
-    assert server.env[probe_server.WORKSPACE_ENV] == str(workspace.resolve())
+    assert server.env[specialist_probe.WORKSPACE_ENV] == str(workspace.resolve())
     assert "mcp__specialist_probe__probe_variant" in spec.system_prompt
     assert _fingerprint(workspace) == before
     assert outcome.succeeded
@@ -202,7 +203,7 @@ async def test_an_earlier_rounds_probes_are_not_reported_as_this_rounds(tmp_path
                 "probe_index": 1,
                 "label": "last-round",
                 "case_id": "case-a",
-                "status": probe_server.MEASURED,
+                "status": specialist_probe.MEASURED,
                 "case_ms": 9.9,
             }
         )
@@ -239,7 +240,7 @@ async def test_missing_measurement_primitive_is_reported_not_hidden(tmp_path, mo
 
     assert backend.specs[0].mcp_servers == {}
     assert backend.specs[0].tool_policy.extra_tools == ()
-    assert probe_server.PRIMITIVE_PATH in outcome.content
+    assert specialist_probe.PRIMITIVE_PATH in outcome.content
     assert "argued, not measured" in outcome.content
 
 
@@ -276,7 +277,7 @@ async def test_probe_record_survives_a_failed_specialist(tmp_path, monkeypatch) 
                 "probe_index": 1,
                 "label": "block-1024-vs-256",
                 "case_id": "case-a",
-                "status": probe_server.FAILED,
+                "status": specialist_probe.FAILED,
                 "detail": "compile error",
             }
         ],
@@ -374,7 +375,7 @@ async def test_an_unreadable_probe_ledger_is_reported_as_partial(tmp_path, monke
                 "probe_index": 1,
                 "label": "widen",
                 "case_id": "case-a",
-                "status": probe_server.MEASURED,
+                "status": specialist_probe.MEASURED,
                 "case_ms": 0.87,
             }
         ],
@@ -423,7 +424,7 @@ async def _crashing_primitive(**_kwargs):
     raise RuntimeError("hipcc exited 1")
 
 
-def _sandbox(tmp_path, **overrides) -> probe_server.ProbeSandbox:
+def _sandbox(tmp_path, **overrides) -> specialist_probe.ProbeSandbox:
     scratch = tmp_path / "scratch"
     scratch.mkdir(exist_ok=True)
     workspace = tmp_path / "canonical"
@@ -441,7 +442,7 @@ def _sandbox(tmp_path, **overrides) -> probe_server.ProbeSandbox:
     }
     (tmp_path / "device.lock").touch()
     defaults.update(overrides)
-    return probe_server.ProbeSandbox(**defaults)
+    return specialist_probe.ProbeSandbox(**defaults)
 
 
 def _ledger(sandbox) -> list[dict]:
@@ -455,7 +456,7 @@ async def test_server_probe_records_a_measurement_without_editing_the_workspace(
     (sandbox.workspace / "kernel.py").write_text("BLOCK = 256\n", encoding="utf-8")
     before = _fingerprint(sandbox.workspace)
 
-    result = await probe_server.probe_variant(
+    result = await specialist_probe.probe_variant(
         {
             "label": "widen",
             "driver_script": "driver.py",
@@ -463,17 +464,17 @@ async def test_server_probe_records_a_measurement_without_editing_the_workspace(
             "constants": {"BLOCK": 1024},
         },
         sandbox=sandbox,
-        budget=probe_server.ProbeBudget(),
+        budget=specialist_probe.ProbeBudget(),
     )
 
-    assert result["status"] == probe_server.MEASURED
+    assert result["status"] == specialist_probe.MEASURED
     assert result["case_ms"] == 0.87
     assert "not an acceptance-gate result" in result["evidence"]
     assert result["kind"] == "exploratory"
     assert result["driver_script"] == str(sandbox.workspace / "driver.py")
     assert _fingerprint(sandbox.workspace) == before
     assert sandbox.ledger_path.is_relative_to(sandbox.scratch_root)
-    assert _ledger(sandbox)[0]["status"] == probe_server.MEASURED
+    assert _ledger(sandbox)[0]["status"] == specialist_probe.MEASURED
 
 
 @pytest.mark.asyncio
@@ -497,7 +498,7 @@ async def test_server_passes_verbatim_names_and_records_what_was_read(tmp_path, 
     _patch_primitive(monkeypatch, _recording_primitive)
     sandbox = _sandbox(tmp_path)
 
-    result = await probe_server.probe_variant(
+    result = await specialist_probe.probe_variant(
         {
             "label": "bound",
             "driver_script": "driver.py",
@@ -506,11 +507,11 @@ async def test_server_passes_verbatim_names_and_records_what_was_read(tmp_path, 
             "prefix_constants": False,
         },
         sandbox=sandbox,
-        budget=probe_server.ProbeBudget(),
+        budget=specialist_probe.ProbeBudget(),
     )
 
     assert seen["prefix_constants"] is False
-    assert result["status"] == probe_server.MEASURED
+    assert result["status"] == specialist_probe.MEASURED
     assert result["case_selection"] == "whole_suite"
     # The ledger has to keep the difference between a confirmed number and one nothing was seen to read.
     assert _ledger(sandbox)[0]["override_consumption"] == {"GPTOSS_BOUND": "unread"}
@@ -526,10 +527,10 @@ async def test_server_defaults_to_the_sweep_prefix(tmp_path, monkeypatch) -> Non
 
     _patch_primitive(monkeypatch, _recording_primitive)
 
-    await probe_server.probe_variant(
+    await specialist_probe.probe_variant(
         {"label": "widen", "driver_script": "driver.py", "case_id": "case-a"},
         sandbox=_sandbox(tmp_path),
-        budget=probe_server.ProbeBudget(),
+        budget=specialist_probe.ProbeBudget(),
     )
 
     assert seen["prefix_constants"] is True
@@ -539,8 +540,8 @@ async def test_server_defaults_to_the_sweep_prefix(tmp_path, monkeypatch) -> Non
 async def test_server_refuses_a_non_boolean_prefix_constants(tmp_path, monkeypatch) -> None:
     _patch_primitive(monkeypatch, _stub_primitive)
 
-    with pytest.raises(probe_server.InvalidParamsError):
-        await probe_server.probe_variant(
+    with pytest.raises(specialist_probe.ProbeRequestError):
+        await specialist_probe.probe_variant(
             {
                 "label": "widen",
                 "driver_script": "driver.py",
@@ -548,7 +549,7 @@ async def test_server_refuses_a_non_boolean_prefix_constants(tmp_path, monkeypat
                 "prefix_constants": "false",
             },
             sandbox=_sandbox(tmp_path),
-            budget=probe_server.ProbeBudget(),
+            budget=specialist_probe.ProbeBudget(),
         )
 
 
@@ -557,39 +558,39 @@ async def test_server_reports_a_crashed_probe(tmp_path, monkeypatch) -> None:
     _patch_primitive(monkeypatch, _crashing_primitive)
     sandbox = _sandbox(tmp_path)
 
-    result = await probe_server.probe_variant(
+    result = await specialist_probe.probe_variant(
         {"label": "widen", "driver_script": "driver.py", "case_id": "case-a"},
         sandbox=sandbox,
-        budget=probe_server.ProbeBudget(),
+        budget=specialist_probe.ProbeBudget(),
     )
 
-    assert result["status"] == probe_server.FAILED
+    assert result["status"] == specialist_probe.FAILED
     assert "hipcc exited 1" in result["detail"]
-    assert _ledger(sandbox)[0]["status"] == probe_server.FAILED
+    assert _ledger(sandbox)[0]["status"] == specialist_probe.FAILED
 
 
 @pytest.mark.asyncio
 async def test_server_reports_an_exhausted_count_budget(tmp_path, monkeypatch) -> None:
     _patch_primitive(monkeypatch, _stub_primitive)
     sandbox = _sandbox(tmp_path, max_probes=1)
-    budget = probe_server.ProbeBudget()
+    budget = specialist_probe.ProbeBudget()
 
-    await probe_server.probe_variant(
+    await specialist_probe.probe_variant(
         {"label": "first", "driver_script": "driver.py", "case_id": "case-a"},
         sandbox=sandbox,
         budget=budget,
     )
-    result = await probe_server.probe_variant(
+    result = await specialist_probe.probe_variant(
         {"label": "second", "driver_script": "driver.py", "case_id": "case-a"},
         sandbox=sandbox,
         budget=budget,
     )
 
-    assert result["status"] == probe_server.BUDGET_EXHAUSTED
+    assert result["status"] == specialist_probe.BUDGET_EXHAUSTED
     assert "probe count budget of 1 is spent" in result["detail"]
     assert [record["status"] for record in _ledger(sandbox)] == [
-        probe_server.MEASURED,
-        probe_server.BUDGET_EXHAUSTED,
+        specialist_probe.MEASURED,
+        specialist_probe.BUDGET_EXHAUSTED,
     ]
 
 
@@ -597,15 +598,15 @@ async def test_server_reports_an_exhausted_count_budget(tmp_path, monkeypatch) -
 async def test_server_reports_an_exhausted_wallclock_budget(tmp_path, monkeypatch) -> None:
     _patch_primitive(monkeypatch, _stub_primitive)
     sandbox = _sandbox(tmp_path, budget_sec=30.0)
-    budget = probe_server.ProbeBudget(attempts=1, seconds_used=30.0)
+    budget = specialist_probe.ProbeBudget(attempts=1, seconds_used=30.0)
 
-    result = await probe_server.probe_variant(
+    result = await specialist_probe.probe_variant(
         {"label": "widen", "driver_script": "driver.py", "case_id": "case-a"},
         sandbox=sandbox,
         budget=budget,
     )
 
-    assert result["status"] == probe_server.BUDGET_EXHAUSTED
+    assert result["status"] == specialist_probe.BUDGET_EXHAUSTED
     assert "wall-clock budget of 30s is spent" in result["detail"]
 
 
@@ -614,23 +615,23 @@ async def test_server_reports_the_missing_primitive(tmp_path, monkeypatch) -> No
     _patch_primitive(monkeypatch, None)
     sandbox = _sandbox(tmp_path)
 
-    result = await probe_server.probe_variant(
+    result = await specialist_probe.probe_variant(
         {"label": "widen", "driver_script": "driver.py", "case_id": "case-a"},
         sandbox=sandbox,
-        budget=probe_server.ProbeBudget(),
+        budget=specialist_probe.ProbeBudget(),
     )
 
-    assert result["status"] == probe_server.UNAVAILABLE
-    assert probe_server.PRIMITIVE_PATH in result["detail"]
-    assert _ledger(sandbox)[0]["status"] == probe_server.UNAVAILABLE
+    assert result["status"] == specialist_probe.UNAVAILABLE
+    assert specialist_probe.PRIMITIVE_PATH in result["detail"]
+    assert _ledger(sandbox)[0]["status"] == specialist_probe.UNAVAILABLE
 
 
 @pytest.mark.asyncio
 async def test_a_refused_sandbox_reaches_the_ledger_the_parent_reads(tmp_path, monkeypatch) -> None:
     ledger = tmp_path / "scratch" / "memory-1" / "probe_ledger.jsonl"
-    monkeypatch.setenv(probe_server.LEDGER_ENV, str(ledger))
-    monkeypatch.delenv(probe_server.SCRATCH_ENV, raising=False)
-    monkeypatch.delenv(probe_server.WORKSPACE_ENV, raising=False)
+    monkeypatch.setenv(specialist_probe.LEDGER_ENV, str(ledger))
+    monkeypatch.delenv(specialist_probe.SCRATCH_ENV, raising=False)
+    monkeypatch.delenv(specialist_probe.WORKSPACE_ENV, raising=False)
     server = probe_server.ProbeServer()
 
     for label in ("widen", "narrow"):
@@ -640,21 +641,21 @@ async def test_a_refused_sandbox_reaches_the_ledger_the_parent_reads(tmp_path, m
         )
     result = json.loads(payload["content"][0]["text"])
 
-    assert result["status"] == probe_server.REFUSED
+    assert result["status"] == specialist_probe.REFUSED
     assert "probe sandbox unusable" in result["detail"]
     recorded = [json.loads(line) for line in ledger.read_text(encoding="utf-8").splitlines() if line.strip()]
     assert [record["status"] for record in recorded] == [
-        probe_server.REFUSED,
-        probe_server.REFUSED,
+        specialist_probe.REFUSED,
+        specialist_probe.REFUSED,
     ]
     assert [record["label"] for record in recorded] == ["widen", "narrow"]
 
 
 @pytest.mark.asyncio
 async def test_a_refusal_with_no_ledger_to_reach_says_so(monkeypatch) -> None:
-    monkeypatch.delenv(probe_server.LEDGER_ENV, raising=False)
-    monkeypatch.delenv(probe_server.SCRATCH_ENV, raising=False)
-    monkeypatch.delenv(probe_server.WORKSPACE_ENV, raising=False)
+    monkeypatch.delenv(specialist_probe.LEDGER_ENV, raising=False)
+    monkeypatch.delenv(specialist_probe.SCRATCH_ENV, raising=False)
+    monkeypatch.delenv(specialist_probe.WORKSPACE_ENV, raising=False)
     server = probe_server.ProbeServer()
 
     payload = await server.handle_tool_call(
@@ -663,7 +664,7 @@ async def test_a_refusal_with_no_ledger_to_reach_says_so(monkeypatch) -> None:
     )
     result = json.loads(payload["content"][0]["text"])
 
-    assert result["status"] == probe_server.REFUSED
+    assert result["status"] == specialist_probe.REFUSED
     assert "reaches no ledger" in result["detail"]
 
 
@@ -677,7 +678,7 @@ async def test_the_refusals_the_server_records_are_reported_as_refusals(tmp_path
                 "probe_index": index,
                 "label": f"probe-{index}",
                 "case_id": "case-a",
-                "status": probe_server.REFUSED,
+                "status": specialist_probe.REFUSED,
                 "detail": "probe sandbox unusable: the ledger volume went away",
             }
             for index in (1, 2)
@@ -706,15 +707,15 @@ async def test_a_driver_outside_the_workspace_is_refused_and_recorded(tmp_path, 
     outside.parent.mkdir()
     outside.write_text("print('wall_ms: 1.0')\n", encoding="utf-8")
 
-    result = await probe_server.probe_variant(
+    result = await specialist_probe.probe_variant(
         {"label": "widen", "driver_script": str(outside), "case_id": "case-a"},
         sandbox=sandbox,
-        budget=probe_server.ProbeBudget(),
+        budget=specialist_probe.ProbeBudget(),
     )
 
-    assert result["status"] == probe_server.REFUSED
+    assert result["status"] == specialist_probe.REFUSED
     assert "is not a file inside the canonical workspace" in result["detail"]
-    assert _ledger(sandbox)[0]["status"] == probe_server.REFUSED
+    assert _ledger(sandbox)[0]["status"] == specialist_probe.REFUSED
 
 
 @pytest.mark.asyncio
@@ -722,16 +723,16 @@ async def test_a_primitive_that_returns_no_timing_is_a_failed_probe(tmp_path, mo
     _patch_primitive(monkeypatch, _failing_primitive)
     sandbox = _sandbox(tmp_path)
 
-    result = await probe_server.probe_variant(
+    result = await specialist_probe.probe_variant(
         {"label": "widen", "driver_script": "driver.py", "case_id": "case-a"},
         sandbox=sandbox,
-        budget=probe_server.ProbeBudget(),
+        budget=specialist_probe.ProbeBudget(),
     )
 
-    assert result["status"] == probe_server.FAILED
+    assert result["status"] == specialist_probe.FAILED
     assert "case_ms" not in result
     assert "CONFIGURATION DID NOT RUN" in result["detail"]
-    assert _ledger(sandbox)[0]["status"] == probe_server.FAILED
+    assert _ledger(sandbox)[0]["status"] == specialist_probe.FAILED
 
 
 @pytest.mark.asyncio
@@ -741,32 +742,32 @@ async def test_a_probe_that_overruns_its_ceiling_is_a_failed_probe(tmp_path, mon
 
     _patch_primitive(monkeypatch, _hanging_primitive)
     sandbox = _sandbox(tmp_path, budget_sec=0.01)
-    budget = probe_server.ProbeBudget()
+    budget = specialist_probe.ProbeBudget()
 
     async def _immediate(coro, timeout):
         coro.close()
         raise asyncio.TimeoutError
 
-    monkeypatch.setattr(probe_server.asyncio, "wait_for", _immediate)
-    result = await probe_server.probe_variant(
+    monkeypatch.setattr(specialist_probe.asyncio, "wait_for", _immediate)
+    result = await specialist_probe.probe_variant(
         {"label": "widen", "driver_script": "driver.py", "case_id": "case-a"},
         sandbox=sandbox,
         budget=budget,
     )
 
-    assert result["status"] == probe_server.FAILED
+    assert result["status"] == specialist_probe.FAILED
     assert "ceiling" in result["detail"]
     assert budget.attempts == 1
-    assert _ledger(sandbox)[0]["status"] == probe_server.FAILED
+    assert _ledger(sandbox)[0]["status"] == specialist_probe.FAILED
 
 
 def test_the_seam_is_callable_the_way_the_probe_calls_it() -> None:
     """Whatever this build provides under PR-1's name must take the probe's call."""
-    primitive, unusable = probe_server.probe_primitive_status()
+    primitive, unusable = specialist_probe.probe_primitive_status()
 
-    assert probe_server.PRIMITIVE_PATH.endswith(".sweep_case")
+    assert specialist_probe.PRIMITIVE_PATH.endswith(".sweep_case")
     if primitive is None:
-        assert probe_server.PRIMITIVE_PATH in unusable
+        assert specialist_probe.PRIMITIVE_PATH in unusable
     else:
         assert unusable == ""
 
@@ -778,13 +779,13 @@ def test_load_sandbox_rejects_a_scratch_root_inside_the_canonical_tree(
     scratch = workspace / "scratch"
     scratch.mkdir(parents=True)
 
-    with pytest.raises(probe_server.ProbeSandboxError, match="overlaps"):
-        probe_server.load_sandbox(
+    with pytest.raises(specialist_probe.ProbeSandboxError, match="overlaps"):
+        specialist_probe.load_sandbox(
             {
-                probe_server.SCRATCH_ENV: str(scratch),
-                probe_server.WORKSPACE_ENV: str(workspace),
-                probe_server.MAX_PROBES_ENV: "4",
-                probe_server.BUDGET_SEC_ENV: "60",
+                specialist_probe.SCRATCH_ENV: str(scratch),
+                specialist_probe.WORKSPACE_ENV: str(workspace),
+                specialist_probe.MAX_PROBES_ENV: "4",
+                specialist_probe.BUDGET_SEC_ENV: "60",
             }
         )
 
@@ -795,13 +796,13 @@ def test_load_sandbox_rejects_a_missing_budget(tmp_path) -> None:
     workspace.mkdir()
     scratch.mkdir()
 
-    with pytest.raises(probe_server.ProbeSandboxError, match="greater than zero"):
-        probe_server.load_sandbox(
+    with pytest.raises(specialist_probe.ProbeSandboxError, match="greater than zero"):
+        specialist_probe.load_sandbox(
             {
-                probe_server.SCRATCH_ENV: str(scratch),
-                probe_server.WORKSPACE_ENV: str(workspace),
-                probe_server.MAX_PROBES_ENV: "0",
-                probe_server.BUDGET_SEC_ENV: "60",
+                specialist_probe.SCRATCH_ENV: str(scratch),
+                specialist_probe.WORKSPACE_ENV: str(workspace),
+                specialist_probe.MAX_PROBES_ENV: "0",
+                specialist_probe.BUDGET_SEC_ENV: "60",
             }
         )
 
@@ -870,7 +871,7 @@ async def test_the_probe_child_is_given_the_environment_its_driver_needs(tmp_pat
     monkeypatch.setenv("HSA_XNACK", "1")
     monkeypatch.setenv("TRITON_CACHE_DIR", "/cache/triton")
     monkeypatch.setenv("SOME_UNRELATED_SECRET", "do-not-forward")
-    monkeypatch.setenv(probe_server.MAX_PROBES_ENV, "999")
+    monkeypatch.setenv(specialist_probe.MAX_PROBES_ENV, "999")
     backend = _McpBackend()
     agent = SpecialistAgent(
         definition=_definition(),
@@ -891,7 +892,7 @@ async def test_the_probe_child_is_given_the_environment_its_driver_needs(tmp_pat
     assert env["TRITON_CACHE_DIR"] == "/cache/triton"
     assert "SOME_UNRELATED_SECRET" not in env
     # The sandbox definition wins over anything inherited under the same name.
-    assert env[probe_server.MAX_PROBES_ENV] == "4"
+    assert env[specialist_probe.MAX_PROBES_ENV] == "4"
 
 
 @pytest.mark.asyncio
@@ -913,8 +914,8 @@ async def test_a_probe_locks_the_same_device_sentinel_the_fanout_lanes_do(tmp_pa
     await agent.run(_assignment(), _context(workspace))
 
     env = backend.specs[0].mcp_servers["specialist_probe"].env
-    assert env[probe_server.DEVICE_LOCK_ENV] == str(campaign_device_lock_path(workspace))
-    assert not Path(env[probe_server.DEVICE_LOCK_ENV]).is_relative_to(workspace)
+    assert env[specialist_probe.DEVICE_LOCK_ENV] == str(campaign_device_lock_path(workspace))
+    assert not Path(env[specialist_probe.DEVICE_LOCK_ENV]).is_relative_to(workspace)
 
 
 @pytest.mark.asyncio
@@ -944,14 +945,14 @@ async def test_a_probe_with_no_device_sentinel_measures_nothing(tmp_path, monkey
     _patch_primitive(monkeypatch, _stub_primitive)
     sandbox = _sandbox(tmp_path, device_lock=None)
 
-    result = await probe_server.probe_variant(
+    result = await specialist_probe.probe_variant(
         {"label": "widen", "driver_script": "driver.py", "case_id": "case-a"},
         sandbox=sandbox,
-        budget=probe_server.ProbeBudget(),
+        budget=specialist_probe.ProbeBudget(),
     )
 
-    assert result["status"] == probe_server.UNAVAILABLE
-    assert probe_server.DEVICE_LOCK_ENV in result["detail"]
+    assert result["status"] == specialist_probe.UNAVAILABLE
+    assert specialist_probe.DEVICE_LOCK_ENV in result["detail"]
 
 
 @pytest.mark.asyncio
@@ -960,14 +961,14 @@ async def test_waiting_for_a_busy_device_is_charged_and_bounded(tmp_path, monkey
     import fcntl
 
     _patch_primitive(monkeypatch, _stub_primitive)
-    monkeypatch.setattr(probe_server, "DEVICE_LOCK_POLL_SEC", 0.01)
+    monkeypatch.setattr(specialist_probe, "DEVICE_LOCK_POLL_SEC", 0.01)
     sandbox = _sandbox(tmp_path, budget_sec=0.2)
-    budget = probe_server.ProbeBudget()
+    budget = specialist_probe.ProbeBudget()
     sandbox.device_lock.touch()
     holder = sandbox.device_lock.open("a+", encoding="utf-8")
     fcntl.flock(holder.fileno(), fcntl.LOCK_EX)
     try:
-        result = await probe_server.probe_variant(
+        result = await specialist_probe.probe_variant(
             {"label": "widen", "driver_script": "driver.py", "case_id": "case-a"},
             sandbox=sandbox,
             budget=budget,
@@ -976,77 +977,77 @@ async def test_waiting_for_a_busy_device_is_charged_and_bounded(tmp_path, monkey
         fcntl.flock(holder.fileno(), fcntl.LOCK_UN)
         holder.close()
 
-    assert result["status"] == probe_server.DEVICE_BUSY
+    assert result["status"] == specialist_probe.DEVICE_BUSY
     assert "nothing was measured" in result["detail"]
     assert budget.attempts == 1
     assert budget.seconds_used > 0.0
-    assert _ledger(sandbox)[0]["status"] == probe_server.DEVICE_BUSY
+    assert _ledger(sandbox)[0]["status"] == specialist_probe.DEVICE_BUSY
 
 
 def test_a_probe_budget_never_outlasts_the_session_that_pays_for_it() -> None:
     """The configured budget is a ceiling, not an entitlement."""
     # Plenty of session: the configured budget stands.
-    assert probe_server.probe_budget_sec(configured_remaining=600.0, session_remaining=1800.0) == 600.0
+    assert specialist_probe.probe_budget_sec(configured_remaining=600.0, session_remaining=1800.0) == 600.0
     # Little session left: half of what remains, not the configured 600.
-    assert probe_server.probe_budget_sec(configured_remaining=600.0, session_remaining=300.0) == 150.0
+    assert specialist_probe.probe_budget_sec(configured_remaining=600.0, session_remaining=300.0) == 150.0
     # Overspent, or no session left at all: nothing.
-    assert probe_server.probe_budget_sec(configured_remaining=-5.0, session_remaining=1800.0) == 0.0
-    assert probe_server.probe_budget_sec(configured_remaining=600.0, session_remaining=0.0) == 0.0
+    assert specialist_probe.probe_budget_sec(configured_remaining=-5.0, session_remaining=1800.0) == 0.0
+    assert specialist_probe.probe_budget_sec(configured_remaining=600.0, session_remaining=0.0) == 0.0
     # No declared session deadline leaves the configured budget alone.
-    assert probe_server.probe_budget_sec(configured_remaining=600.0, session_remaining=math.inf) == 600.0
+    assert specialist_probe.probe_budget_sec(configured_remaining=600.0, session_remaining=math.inf) == 600.0
 
 
 def test_a_probe_ceiling_leaves_the_session_time_to_write_its_analysis() -> None:
     """``int(budget_sec)`` truncated a fractional budget to an instant timeout."""
-    assert probe_server.probe_timeout_sec(budget_remaining=600.0, session_remaining=1800.0, requested=600.0) == 600
+    assert specialist_probe.probe_timeout_sec(budget_remaining=600.0, session_remaining=1800.0, requested=600.0) == 600
     # The session, not the budget, is what is short here.
-    assert probe_server.probe_timeout_sec(budget_remaining=600.0, session_remaining=300.0, requested=600.0) == int(
-        300 - probe_server.ANALYSIS_RESERVE_SEC
+    assert specialist_probe.probe_timeout_sec(budget_remaining=600.0, session_remaining=300.0, requested=600.0) == int(
+        300 - specialist_probe.ANALYSIS_RESERVE_SEC
     )
     # Never zero, which some backends read as "time out immediately".
-    assert probe_server.probe_timeout_sec(budget_remaining=0.5, session_remaining=1800.0, requested=0.5) == 1
-    assert probe_server.probe_timeout_sec(budget_remaining=600.0, session_remaining=10.0, requested=600.0) == 1
+    assert specialist_probe.probe_timeout_sec(budget_remaining=0.5, session_remaining=1800.0, requested=0.5) == 1
+    assert specialist_probe.probe_timeout_sec(budget_remaining=600.0, session_remaining=10.0, requested=600.0) == 1
 
 
 @pytest.mark.asyncio
 async def test_a_probe_that_would_leave_no_time_for_the_analysis_is_refused(tmp_path, monkeypatch) -> None:
     """A specialist killed mid-probe returns no analysis, and the round raises."""
     _patch_primitive(monkeypatch, _stub_primitive)
-    monkeypatch.setattr(probe_server, "wall_clock", lambda: 1_000.0)
+    monkeypatch.setattr(specialist_probe, "wall_clock", lambda: 1_000.0)
     sandbox = _sandbox(
         tmp_path,
         # 90s of session left, and 120s of that is reserved for the analysis.
         session_deadline=1_090.0,
     )
-    budget = probe_server.ProbeBudget()
+    budget = specialist_probe.ProbeBudget()
 
-    result = await probe_server.probe_variant(
+    result = await specialist_probe.probe_variant(
         {"label": "widen", "driver_script": "driver.py", "case_id": "case-a"},
         sandbox=sandbox,
         budget=budget,
     )
 
-    assert result["status"] == probe_server.BUDGET_EXHAUSTED
+    assert result["status"] == specialist_probe.BUDGET_EXHAUSTED
     assert "reserved for writing the analysis" in result["detail"]
     assert "stop probing" in result["detail"]
     # Refusing costs an attempt, so the same question is not asked all session.
     assert budget.attempts == 1
-    assert _ledger(sandbox)[0]["status"] == probe_server.BUDGET_EXHAUSTED
+    assert _ledger(sandbox)[0]["status"] == specialist_probe.BUDGET_EXHAUSTED
 
 
 @pytest.mark.asyncio
 async def test_a_probe_still_runs_while_the_session_has_room_for_both(tmp_path, monkeypatch) -> None:
     _patch_primitive(monkeypatch, _stub_primitive)
-    monkeypatch.setattr(probe_server, "wall_clock", lambda: 1_000.0)
+    monkeypatch.setattr(specialist_probe, "wall_clock", lambda: 1_000.0)
     sandbox = _sandbox(tmp_path, session_deadline=1_000.0 + 1800.0)
 
-    result = await probe_server.probe_variant(
+    result = await specialist_probe.probe_variant(
         {"label": "widen", "driver_script": "driver.py", "case_id": "case-a"},
         sandbox=sandbox,
-        budget=probe_server.ProbeBudget(),
+        budget=specialist_probe.ProbeBudget(),
     )
 
-    assert result["status"] == probe_server.MEASURED
+    assert result["status"] == specialist_probe.MEASURED
 
 
 @pytest.mark.asyncio
@@ -1067,8 +1068,10 @@ async def test_the_mcp_tool_timeout_is_not_the_raw_budget(tmp_path, monkeypatch)
     server = backend.specs[0].mcp_servers["specialist_probe"]
     # Plus the grace the server itself allows the primitive: a client that timed out first would kill the call before
     # ``_record`` wrote anything.
-    assert server.tool_timeout_sec == (int(300 - probe_server.ANALYSIS_RESERVE_SEC) + probe_server.PROBE_TOOL_GRACE_SEC)
-    assert float(server.env[probe_server.SESSION_DEADLINE_ENV]) > 0.0
+    assert server.tool_timeout_sec == (
+        int(300 - specialist_probe.ANALYSIS_RESERVE_SEC) + specialist_probe.PROBE_TOOL_GRACE_SEC
+    )
+    assert float(server.env[specialist_probe.SESSION_DEADLINE_ENV]) > 0.0
 
 
 # --- the round, not the assignment, is what the budget bounds ----------------
@@ -1079,8 +1082,8 @@ def test_the_probe_budget_is_shared_by_the_specialists_of_one_round(
 ) -> None:
     """Each server process has its own budget object; the round has one budget."""
     shared = tmp_path / "round_budget.json"
-    first = probe_server.ProbeBudget(path=shared)
-    second = probe_server.ProbeBudget(path=shared)
+    first = specialist_probe.ProbeBudget(path=shared)
+    second = specialist_probe.ProbeBudget(path=shared)
 
     first.spend(attempts=1, seconds=12.0)
     second.spend(attempts=1, seconds=8.0)
@@ -1105,7 +1108,7 @@ async def test_a_rounds_scratch_tree_does_not_outlive_the_round(tmp_path, monkey
                     "probe_index": 1,
                     "label": "widen",
                     "case_id": "case-a",
-                    "status": probe_server.MEASURED,
+                    "status": specialist_probe.MEASURED,
                     "case_ms": 0.87,
                 }
             ]
@@ -1180,7 +1183,7 @@ async def _run_one_round(tmp_path, monkeypatch, *, probe=None):
                     "probe_index": 1,
                     "label": "widen",
                     "case_id": "case-a",
-                    "status": probe_server.MEASURED,
+                    "status": specialist_probe.MEASURED,
                     "case_ms": 0.87,
                 }
             ]
@@ -1334,14 +1337,14 @@ def test_a_scratch_root_that_contains_the_workspace_is_refused(tmp_path, caplog)
 async def test_a_refused_probe_costs_one_of_the_round_count(tmp_path, monkeypatch) -> None:
     _patch_primitive(monkeypatch, _stub_primitive)
     sandbox = _sandbox(tmp_path, max_probes=2)
-    budget = probe_server.ProbeBudget()
+    budget = specialist_probe.ProbeBudget()
     outside = tmp_path / "elsewhere" / "driver.py"
     outside.parent.mkdir()
     outside.write_text("print('wall_ms: 1.0')\n", encoding="utf-8")
 
     statuses = []
     for _ in range(3):
-        result = await probe_server.probe_variant(
+        result = await specialist_probe.probe_variant(
             {"label": "widen", "driver_script": str(outside), "case_id": "case-a"},
             sandbox=sandbox,
             budget=budget,
@@ -1349,9 +1352,9 @@ async def test_a_refused_probe_costs_one_of_the_round_count(tmp_path, monkeypatc
         statuses.append(result["status"])
 
     assert statuses == [
-        probe_server.REFUSED,
-        probe_server.REFUSED,
-        probe_server.BUDGET_EXHAUSTED,
+        specialist_probe.REFUSED,
+        specialist_probe.REFUSED,
+        specialist_probe.BUDGET_EXHAUSTED,
     ]
     assert budget.attempts == 3
 
@@ -1360,32 +1363,32 @@ async def test_a_refused_probe_costs_one_of_the_round_count(tmp_path, monkeypatc
 async def test_an_unavailable_primitive_costs_one_of_the_round_count(tmp_path, monkeypatch) -> None:
     _patch_primitive(monkeypatch, None)
     sandbox = _sandbox(tmp_path, max_probes=1)
-    budget = probe_server.ProbeBudget()
+    budget = specialist_probe.ProbeBudget()
 
-    first = await probe_server.probe_variant(
+    first = await specialist_probe.probe_variant(
         {"label": "widen", "driver_script": "driver.py", "case_id": "case-a"},
         sandbox=sandbox,
         budget=budget,
     )
-    second = await probe_server.probe_variant(
+    second = await specialist_probe.probe_variant(
         {"label": "widen", "driver_script": "driver.py", "case_id": "case-a"},
         sandbox=sandbox,
         budget=budget,
     )
 
-    assert first["status"] == probe_server.UNAVAILABLE
-    assert second["status"] == probe_server.BUDGET_EXHAUSTED
+    assert first["status"] == specialist_probe.UNAVAILABLE
+    assert second["status"] == specialist_probe.BUDGET_EXHAUSTED
 
 
 def test_a_ledger_stops_growing_at_its_cap(tmp_path) -> None:
     """The parent reads this file back in full; refusals are unbounded in nothing."""
     ledger = tmp_path / "probe_ledger.jsonl"
 
-    for index in range(probe_server.MAX_LEDGER_RECORDS + 5):
-        probe_server._append_line(ledger, {"probe_index": index, "status": "refused"})
+    for index in range(specialist_probe.MAX_LEDGER_RECORDS + 5):
+        specialist_probe._append_line(ledger, {"probe_index": index, "status": "refused"})
 
     lines = [json.loads(line) for line in ledger.read_text(encoding="utf-8").splitlines() if line.strip()]
-    assert len(lines) == probe_server.MAX_LEDGER_RECORDS + 1
+    assert len(lines) == specialist_probe.MAX_LEDGER_RECORDS + 1
     assert lines[-1]["label"] == "ledger-full"
     assert "dropped and unrecorded" in lines[-1]["detail"]
 
@@ -1398,9 +1401,9 @@ def test_a_primitive_that_explodes_on_import_is_reported_unavailable(
     def _explode():
         raise RuntimeError("the ROCm runtime is not installed")
 
-    monkeypatch.setattr(probe_server, "resolve_probe_primitive", _explode)
+    monkeypatch.setattr(specialist_probe, "resolve_probe_primitive", _explode)
 
-    primitive, unusable = probe_server.probe_primitive_status()
+    primitive, unusable = specialist_probe.probe_primitive_status()
 
     assert primitive is None
     assert "could not be imported" in unusable
@@ -1458,24 +1461,24 @@ async def test_the_probe_child_inherits_the_campaigns_aiter_cache_isolation(tmp_
 def test_a_non_positive_requested_ceiling_falls_back_to_the_default() -> None:
     """``requested <= 0`` matched the outer test and failed the inner one."""
     assert (
-        probe_server.probe_timeout_sec(budget_remaining=600.0, session_remaining=1800.0, requested=None)
-        == probe_server.DEFAULT_PROBE_TIMEOUT_SEC
+        specialist_probe.probe_timeout_sec(budget_remaining=600.0, session_remaining=1800.0, requested=None)
+        == specialist_probe.DEFAULT_PROBE_TIMEOUT_SEC
     )
     assert (
-        probe_server.probe_timeout_sec(budget_remaining=600.0, session_remaining=1800.0, requested=0)
-        == probe_server.DEFAULT_PROBE_TIMEOUT_SEC
+        specialist_probe.probe_timeout_sec(budget_remaining=600.0, session_remaining=1800.0, requested=0)
+        == specialist_probe.DEFAULT_PROBE_TIMEOUT_SEC
     )
     assert (
-        probe_server.probe_timeout_sec(budget_remaining=600.0, session_remaining=1800.0, requested=-5)
-        == probe_server.DEFAULT_PROBE_TIMEOUT_SEC
+        specialist_probe.probe_timeout_sec(budget_remaining=600.0, session_remaining=1800.0, requested=-5)
+        == specialist_probe.DEFAULT_PROBE_TIMEOUT_SEC
     )
     assert (
-        probe_server.probe_timeout_sec(budget_remaining=600.0, session_remaining=1800.0, requested=True)
-        == probe_server.DEFAULT_PROBE_TIMEOUT_SEC
+        specialist_probe.probe_timeout_sec(budget_remaining=600.0, session_remaining=1800.0, requested=True)
+        == specialist_probe.DEFAULT_PROBE_TIMEOUT_SEC
     )
     assert (
-        probe_server.probe_timeout_sec(budget_remaining=600.0, session_remaining=1800.0, requested="60")
-        == probe_server.DEFAULT_PROBE_TIMEOUT_SEC
+        specialist_probe.probe_timeout_sec(budget_remaining=600.0, session_remaining=1800.0, requested="60")
+        == specialist_probe.DEFAULT_PROBE_TIMEOUT_SEC
     )
 
 
@@ -1487,7 +1490,7 @@ async def test_a_session_too_small_for_one_probe_is_never_offered_one(tmp_path, 
     agent = SpecialistAgent(
         definition=_definition(),
         backend=backend,
-        timeout_sec=int(probe_server.ANALYSIS_RESERVE_SEC),
+        timeout_sec=int(specialist_probe.ANALYSIS_RESERVE_SEC),
         max_turns=4,
         probe=_probe(tmp_path),
     )
@@ -1519,10 +1522,10 @@ async def test_the_prompt_states_the_ceiling_the_client_enforces(tmp_path, monke
 
     spec = backend.specs[0]
     server = spec.mcp_servers["specialist_probe"]
-    ceiling = probe_server.probe_timeout_sec(budget_remaining=600.0, session_remaining=1800.0, requested=600.0)
+    ceiling = specialist_probe.probe_timeout_sec(budget_remaining=600.0, session_remaining=1800.0, requested=600.0)
     # The client must outlast the server, or ``_record`` never writes the ledger line that is the only channel back to
     # the parent.
-    assert server.tool_timeout_sec == ceiling + probe_server.PROBE_TOOL_GRACE_SEC
+    assert server.tool_timeout_sec == ceiling + specialist_probe.PROBE_TOOL_GRACE_SEC
     assert server.tool_timeout_sec > ceiling
     assert f"{ceiling}s" in spec.system_prompt
 
@@ -1531,7 +1534,7 @@ def test_an_unreachable_round_budget_is_reported_not_silently_per_process(tmp_pa
     """Falling back per process gives every specialist a full budget of its own."""
     blocker = tmp_path / "not-a-directory"
     blocker.write_text("", encoding="utf-8")
-    budget = probe_server.ProbeBudget(path=blocker / "round_budget.json")
+    budget = specialist_probe.ProbeBudget(path=blocker / "round_budget.json")
 
     with caplog.at_level("WARNING"):
         budget.spend(attempts=1, seconds=5.0)
@@ -1548,17 +1551,17 @@ async def test_a_probe_whose_shared_budget_is_unreachable_measures_nothing(tmp_p
     blocker = tmp_path / "not-a-directory"
     blocker.write_text("", encoding="utf-8")
     sandbox = _sandbox(tmp_path)
-    budget = probe_server.ProbeBudget(path=blocker / "round_budget.json")
+    budget = specialist_probe.ProbeBudget(path=blocker / "round_budget.json")
 
-    result = await probe_server.probe_variant(
+    result = await specialist_probe.probe_variant(
         {"label": "widen", "driver_script": "driver.py", "case_id": "case-a"},
         sandbox=sandbox,
         budget=budget,
     )
 
-    assert result["status"] == probe_server.UNAVAILABLE
+    assert result["status"] == specialist_probe.UNAVAILABLE
     assert "shared probe budget" in result["detail"]
-    assert _ledger(sandbox)[0]["status"] == probe_server.UNAVAILABLE
+    assert _ledger(sandbox)[0]["status"] == specialist_probe.UNAVAILABLE
 
 
 @pytest.mark.asyncio
@@ -1568,25 +1571,25 @@ async def test_a_non_utf8_round_budget_does_not_escape_the_handler(tmp_path, mon
     shared = tmp_path / "round_budget.json"
     shared.write_bytes(b"\xff\xfe garbage \x00")
     sandbox = _sandbox(tmp_path)
-    budget = probe_server.ProbeBudget(path=shared)
+    budget = specialist_probe.ProbeBudget(path=shared)
 
-    result = await probe_server.probe_variant(
+    result = await specialist_probe.probe_variant(
         {"label": "widen", "driver_script": "driver.py", "case_id": "case-a"},
         sandbox=sandbox,
         budget=budget,
     )
 
-    assert result["status"] == probe_server.MEASURED
+    assert result["status"] == specialist_probe.MEASURED
     assert budget.attempts == 1
-    assert _ledger(sandbox)[0]["status"] == probe_server.MEASURED
+    assert _ledger(sandbox)[0]["status"] == specialist_probe.MEASURED
 
 
 @pytest.mark.asyncio
 async def test_the_gate_is_re_checked_after_waiting_for_the_device(tmp_path, monkeypatch) -> None:
     """A full-length wait can push the session under the analysis reserve."""
     clock = {"wall": 1_000.0, "mono": 0.0}
-    monkeypatch.setattr(probe_server, "wall_clock", lambda: clock["wall"])
-    monkeypatch.setattr(probe_server, "monotonic_clock", lambda: clock["mono"])
+    monkeypatch.setattr(specialist_probe, "wall_clock", lambda: clock["wall"])
+    monkeypatch.setattr(specialist_probe, "monotonic_clock", lambda: clock["mono"])
 
     called = []
 
@@ -1601,24 +1604,24 @@ async def test_the_gate_is_re_checked_after_waiting_for_the_device(tmp_path, mon
         clock["mono"] += 125.0
         return path.open("r+", encoding="utf-8")
 
-    monkeypatch.setattr(probe_server, "acquire_device_lock", _slow_lock)
+    monkeypatch.setattr(specialist_probe, "acquire_device_lock", _slow_lock)
     # 240s of session: the gate passes before the wait and fails after it.
     sandbox = _sandbox(tmp_path, budget_sec=600.0, session_deadline=1_240.0)
-    budget = probe_server.ProbeBudget()
+    budget = specialist_probe.ProbeBudget()
 
-    result = await probe_server.probe_variant(
+    result = await specialist_probe.probe_variant(
         {"label": "widen", "driver_script": "driver.py", "case_id": "case-a"},
         sandbox=sandbox,
         budget=budget,
     )
 
     assert called == []
-    assert result["status"] == probe_server.BUDGET_EXHAUSTED
+    assert result["status"] == specialist_probe.BUDGET_EXHAUSTED
     assert "waiting for the device" in result["detail"]
     assert "ceiling" not in result["detail"]
     assert result["duration_sec"] == 125.0
     assert budget.attempts == 1
-    assert _ledger(sandbox)[0]["status"] == probe_server.BUDGET_EXHAUSTED
+    assert _ledger(sandbox)[0]["status"] == specialist_probe.BUDGET_EXHAUSTED
 
 
 def test_a_session_deadline_that_is_not_a_time_is_refused(tmp_path) -> None:
@@ -1628,18 +1631,18 @@ def test_a_session_deadline_that_is_not_a_time_is_refused(tmp_path) -> None:
     scratch.mkdir()
     workspace.mkdir()
     base = {
-        probe_server.SCRATCH_ENV: str(scratch),
-        probe_server.WORKSPACE_ENV: str(workspace),
-        probe_server.MAX_PROBES_ENV: "4",
-        probe_server.BUDGET_SEC_ENV: "60",
+        specialist_probe.SCRATCH_ENV: str(scratch),
+        specialist_probe.WORKSPACE_ENV: str(workspace),
+        specialist_probe.MAX_PROBES_ENV: "4",
+        specialist_probe.BUDGET_SEC_ENV: "60",
     }
 
     for raw in ("nan", "inf", "-inf", "0.000", "-5"):
-        with pytest.raises(probe_server.ProbeSandboxError, match="Unix timestamp"):
-            probe_server.load_sandbox({**base, probe_server.SESSION_DEADLINE_ENV: raw})
+        with pytest.raises(specialist_probe.ProbeSandboxError, match="Unix timestamp"):
+            specialist_probe.load_sandbox({**base, specialist_probe.SESSION_DEADLINE_ENV: raw})
 
     # Absent stays fail-open: the configured probe budget still bounds it.
-    sandbox = probe_server.load_sandbox(base)
+    sandbox = specialist_probe.load_sandbox(base)
     assert sandbox.session_deadline is None
     assert sandbox.session_remaining_sec() == math.inf
 
@@ -1655,20 +1658,20 @@ def test_a_setup_with_no_deadline_omits_the_variable(tmp_path) -> None:
     )
 
     assert setup.session_deadline is None
-    assert probe_server.SESSION_DEADLINE_ENV not in setup.server_env()
+    assert specialist_probe.SESSION_DEADLINE_ENV not in setup.server_env()
 
 
 @pytest.mark.asyncio
 async def test_every_result_carries_the_three_numbers_promised(tmp_path, monkeypatch) -> None:
     """The description promised a third number the record never carried."""
     _patch_primitive(monkeypatch, _stub_primitive)
-    monkeypatch.setattr(probe_server, "wall_clock", lambda: 1_000.0)
+    monkeypatch.setattr(specialist_probe, "wall_clock", lambda: 1_000.0)
     sandbox = _sandbox(tmp_path, session_deadline=1_000.0 + 1800.0)
 
-    result = await probe_server.probe_variant(
+    result = await specialist_probe.probe_variant(
         {"label": "widen", "driver_script": "driver.py", "case_id": "case-a"},
         sandbox=sandbox,
-        budget=probe_server.ProbeBudget(),
+        budget=specialist_probe.ProbeBudget(),
     )
 
     assert result["probes_remaining"] == 1
@@ -1685,19 +1688,19 @@ async def test_every_result_carries_the_three_numbers_promised(tmp_path, monkeyp
 async def test_the_ledger_full_marker_is_written_before_the_refusals_go_quiet(tmp_path, monkeypatch) -> None:
     """A truncated ledger that reads like a short one is what the marker prevents."""
     ledger = tmp_path / "scratch" / "memory-1" / "probe_ledger.jsonl"
-    monkeypatch.setenv(probe_server.LEDGER_ENV, str(ledger))
-    monkeypatch.delenv(probe_server.SCRATCH_ENV, raising=False)
-    monkeypatch.delenv(probe_server.WORKSPACE_ENV, raising=False)
+    monkeypatch.setenv(specialist_probe.LEDGER_ENV, str(ledger))
+    monkeypatch.delenv(specialist_probe.SCRATCH_ENV, raising=False)
+    monkeypatch.delenv(specialist_probe.WORKSPACE_ENV, raising=False)
     server = probe_server.ProbeServer()
 
-    for _ in range(probe_server.MAX_LEDGER_RECORDS + 3):
+    for _ in range(specialist_probe.MAX_LEDGER_RECORDS + 3):
         await server.handle_tool_call(
             "probe_variant",
             {"label": "widen", "driver_script": "driver.py", "case_id": "case-a"},
         )
 
     lines = [json.loads(line) for line in ledger.read_text(encoding="utf-8").splitlines() if line.strip()]
-    assert len(lines) == probe_server.MAX_LEDGER_RECORDS + 1
+    assert len(lines) == specialist_probe.MAX_LEDGER_RECORDS + 1
     assert lines[-1]["label"] == "ledger-full"
 
 
@@ -1708,13 +1711,13 @@ async def test_a_device_sentinel_that_does_not_exist_measures_nothing(tmp_path, 
     missing = tmp_path / "no-such-sentinel.lock"
     sandbox = _sandbox(tmp_path, device_lock=missing)
 
-    result = await probe_server.probe_variant(
+    result = await specialist_probe.probe_variant(
         {"label": "widen", "driver_script": "driver.py", "case_id": "case-a"},
         sandbox=sandbox,
-        budget=probe_server.ProbeBudget(),
+        budget=specialist_probe.ProbeBudget(),
     )
 
-    assert result["status"] == probe_server.UNAVAILABLE
+    assert result["status"] == specialist_probe.UNAVAILABLE
     assert str(missing) in result["detail"]
     assert not missing.exists()
 
@@ -1725,17 +1728,17 @@ async def test_the_probe_index_counts_this_assignments_own_attempts(tmp_path, mo
     _patch_primitive(monkeypatch, _stub_primitive)
     shared = tmp_path / "round_budget.json"
     sandbox = _sandbox(tmp_path, max_probes=6)
-    mine = probe_server.ProbeBudget(path=shared)
-    sibling = probe_server.ProbeBudget(path=shared)
+    mine = specialist_probe.ProbeBudget(path=shared)
+    sibling = specialist_probe.ProbeBudget(path=shared)
 
     sibling.spend(attempts=1, seconds=1.0)
-    first = await probe_server.probe_variant(
+    first = await specialist_probe.probe_variant(
         {"label": "widen", "driver_script": "driver.py", "case_id": "case-a"},
         sandbox=sandbox,
         budget=mine,
     )
     sibling.spend(attempts=1, seconds=1.0)
-    second = await probe_server.probe_variant(
+    second = await specialist_probe.probe_variant(
         {"label": "narrow", "driver_script": "driver.py", "case_id": "case-a"},
         sandbox=sandbox,
         budget=mine,

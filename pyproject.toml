@@ -36,6 +36,12 @@ llm = [
     "openai>=1.50",
     "httpx>=0.27",
 ]
+# The DeepSeek Harness agent runtime, lazy-imported by the harness role. Kept
+# out of ``llm`` because no role selects it on credentials alone: it is reachable
+# only by naming it, so a deployment that does not is not made to carry it.
+deepseek = [
+    "deepseek-harness-sdk>=0.1.5rc1",
+]
 # Critic-agent web tools (web_search / web_fetch).
 web = [
     "markdownify>=0.11",
@@ -168,8 +174,8 @@ hyperloom-kb-collect = "hyperloom_kb.collect.cli:main"
 # subdirectories that are NOT packages. ``packages.find.exclude`` keeps
 # ``*.tests`` out of the *package* list, but the sweep then re-added the very
 # same files as package *data*: the wheel shipped 627 test entries before forge
-# was vendored and 833 after (all of ``kernelforge/tests/`` and
-# ``kernelforge/gemm_tune/tests/``). ``scripts/check_wheel_contents.py`` has
+# was vendored and 833 after (all under ``kernelforge/tests/``).
+# ``scripts/check_wheel_contents.py`` has
 # been reporting this; it is the ``packaging.yml`` wheel-contents job.
 #
 # Turning the sweep off makes ``[tool.setuptools.package-data]`` below the sole
@@ -427,8 +433,8 @@ omit = [
     "src/kernelforge/fusion/source_snapshot.py",
     # GPU toolchain + profilers: shell out to rocprofv3 / rocprof-compute /
     # ninja / the build system and require real hardware.
-    "src/kernelforge/mcp_server/tools/bench.py",
-    "src/kernelforge/mcp_server/tools/registers.py",
+    "src/kernelforge/evaluation/benchmark/runner.py",
+    "src/kernelforge/evaluation/profiling/registers.py",
     "src/kernelforge/loop/runner.py",
     # Claude Agent SDK transport (spawns the agent CLI, network).
     "src/kernelforge/orchestrator/agent.py",
@@ -649,7 +655,7 @@ ignorelist = ["aiter"]
 "src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py" = ["E402"]
 "src/hyperloom/agents/critic/runtime/decision_reviewer.py" = ["E402"]
 # The import sits under the comment block explaining why the attribute name is
-# shared with kernelforge.llm rather than redeclared here.
+# shared with kernelforge.agent_backends rather than redeclared here.
 "src/kernelforge/fusion/llm_failure.py" = ["E402"]
 # Sphinx reads the module-level name ``copyright``.
 "docs/conf.py" = ["A001"]
@@ -657,7 +663,7 @@ ignorelist = ["aiter"]
 # ``subprocess.run(input=...)`` and ``BaseHTTPRequestHandler.log_message(format, ...)``.
 # Renaming them would break keyword callers / the override.
 "src/hyperloom/orchestrator/actions/executors/_git.py" = ["A002"]
-"src/kernelforge/llm/git.py" = ["A002"]
+"src/kernelforge/tools/git.py" = ["A002"]
 "src/hyperloom_kb/http_service.py" = ["A002"]
 # Naive local-time timestamps are part of these files' on-disk / directory-name
 # formats (persisted ``isoformat()`` strings, log-clock parsing); making them

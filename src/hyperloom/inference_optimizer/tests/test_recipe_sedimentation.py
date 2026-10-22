@@ -17,6 +17,10 @@ from hyperloom.orchestrator.roles.mock_backend import (
 )
 from hyperloom.orchestrator.loop.coordinator import AdvisoryServices, Coordinator
 from hyperloom.orchestrator.knowledge.recipe_kb import LocalRecipeStore, RecipeKB
+from hyperloom.orchestrator.knowledge.recipe_journal import (
+    attempt_provenance,
+    recipe_attrs_from_state,
+)
 
 
 def _make_coordinator(tmp_path: Path) -> Coordinator:
@@ -67,7 +71,7 @@ def test_collect_attempt_provenance_maps_keep_and_revert(tmp_path):
         },
     )
 
-    kept, kept_by_gap, reverted = coord.recipe_journal._collect_attempt_provenance()
+    kept, kept_by_gap, reverted = attempt_provenance(coord.shared_state)
     assert kept == {"mtp_on": "https://pr/123"}
     assert kept_by_gap == {"gap.research_hint.0": "https://pr/123"}
     assert len(reverted) == 1
@@ -106,7 +110,7 @@ def test_provenance_resolves_by_gap_id_when_name_mismatches(tmp_path):
         },
     )
 
-    attrs = coord.recipe_journal._build_recipe_attrs_from_state()
+    attrs = recipe_attrs_from_state(coord.shared_state, coord.session_dir.name)
     row = next(x for x in attrs["what_worked"] if x["name"] == "k007")
     assert row["source"] == "https://pr/777"
 
@@ -142,7 +146,7 @@ def test_build_recipe_attrs_sediments_source_and_revert(tmp_path):
         },
     )
 
-    attrs = coord.recipe_journal._build_recipe_attrs_from_state()
+    attrs = recipe_attrs_from_state(coord.shared_state, coord.session_dir.name)
     ww = attrs["what_worked"]
     mtp = next(x for x in ww if x["name"] == "mtp_on")
     assert mtp["source"] == "https://pr/123"
@@ -174,7 +178,7 @@ def test_sediment_toggle_off_keeps_recipe_ephemeral(tmp_path):
         },
     )
 
-    attrs = coord.recipe_journal._build_recipe_attrs_from_state()
+    attrs = recipe_attrs_from_state(coord.shared_state, coord.session_dir.name)
     mtp = next(x for x in attrs["what_worked"] if x["name"] == "mtp_on")
     assert "source" not in mtp
 
@@ -219,7 +223,7 @@ def test_experience_rows_survive_the_kb_round_trip(tmp_path):
         model="m",
         hardware="h",
         framework_name="f",
-        # Exactly what recipe_journal._build_recipe_attrs_from_state emits.
+        # Exactly what recipe_journal.recipe_attrs_from_state emits.
         what_worked=[
             {
                 "name": "mtp_on",

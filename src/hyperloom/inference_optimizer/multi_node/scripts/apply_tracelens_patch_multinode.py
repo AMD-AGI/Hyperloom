@@ -206,14 +206,14 @@ def _installed_sglang_version(sglang_module: Any) -> str:
         from sglang.version import __version__ as module_version  # type: ignore[import-not-found]
 
         version = (module_version or "").strip()
-    except Exception:  # noqa: BLE001
+    except ImportError:
         version = ""
     if not version:
         try:
             import importlib.metadata as _md
 
             version = (_md.version("sglang") or "").strip()
-        except Exception:  # noqa: BLE001
+        except _md.PackageNotFoundError:
             version = ""
     if not version:
         version = (getattr(sglang_module, "__version__", "") or "").strip()
@@ -233,7 +233,7 @@ def _sglang_anchor_path(sglang_module: Any) -> Path | None:
 
         if _spm.__file__:
             return Path(_spm.__file__)
-    except Exception:  # noqa: BLE001
+    except ImportError:
         pass
     search_path = list(getattr(sglang_module, "__path__", []) or [])
     return Path(search_path[0]) if search_path else None
@@ -289,6 +289,38 @@ def _apply_patch_set(patches: tuple[Path, ...], apply_root: Path, strip: int) ->
     return [path.name for path in applied], ""
 
 
+def _sentinel_path(apply_root: Path, strip: int, relpath: str) -> Path:
+    """``relpath`` (repo-relative) under ``apply_root``; strip=1: apply_root is the repo root; strip=3: the wheel sglang/ dir."""
+    return apply_root / Path(*Path(relpath).parts[strip - 1 :])
+
+
+def _markers_already_applied(apply_root: Path, strip: int, *, graph_capture: bool) -> bool:
+    """True when the patch-set sentinel markers are already present under ``apply_root``."""
+    rel = _GC_SENTINEL_RELPATH if graph_capture else _SENTINEL_RELPATH
+    markers = _GC_SENTINEL_MARKERS if graph_capture else _SENTINEL_MARKERS
+    return _all_markers_present(_sentinel_path(apply_root, strip, rel), markers) and (
+        graph_capture
+        or _all_markers_present(_sentinel_path(apply_root, strip, _EXTRA_SENTINEL_RELPATH), _EXTRA_SENTINEL_MARKERS)
+    )
+
+
+def _sglang_apply_layout(sglang: Any) -> tuple[tuple[Path, int] | None, str]:
+    """``(apply_root, strip)`` for imported sglang, or ``(None, error)``."""
+    anchor_path = _sglang_anchor_path(sglang)
+    if anchor_path is None:
+        return None, (
+            "cannot locate sglang install root (sglang.__file__ is None, "
+            "scheduler_profiler_mixin not importable, __path__ empty)"
+        )
+    layout = _resolve_sglang_install(anchor_path)
+    if layout is None:
+        return None, (
+            f"unrecognised sglang layout at {anchor_path} "
+            "(expected editable .../python/sglang/... or wheel .../site-packages/sglang/...)"
+        )
+    return layout, ""
+
+
 def _apply_on_pod(
     *,
     tracelens_root: str,
@@ -300,10 +332,9 @@ def _apply_on_pod(
 
     ``patch_set`` is the controller's choice and wins over the pod-side gate.
     """
-    host = socket.gethostname()
     started = time.time()
     result: dict[str, Any] = {
-        "host": host,
+        "host": socket.gethostname(),
         "status": "unknown",
         "sglang_version": None,
         "patches_applied": [],
@@ -314,52 +345,26 @@ def _apply_on_pod(
     try:
         try:
             import sglang  # type: ignore[import-not-found]
-        except Exception as e:  # noqa: BLE001
+        except (ImportError, OSError) as e:
             result["status"] = "failed"
             result["error"] = f"sglang not importable: {e}"
             return result
-
         version = _installed_sglang_version(sglang)
         result["sglang_version"] = version or None
         if sglang_version_pin and version and version != sglang_version_pin:
             _log(f"version pin {sglang_version_pin!r} != installed {version!r} — proceeding (pin is advisory)")
-
-        anchor_path = _sglang_anchor_path(sglang)
-        if anchor_path is None:
-            result["status"] = "failed"
-            result["error"] = (
-                "cannot locate sglang install root (sglang.__file__ is None, "
-                "scheduler_profiler_mixin not importable, __path__ empty)"
-            )
-            return result
-        layout = _resolve_sglang_install(anchor_path)
+        layout, layout_error = _sglang_apply_layout(sglang)
         if layout is None:
             result["status"] = "failed"
-            result["error"] = (
-                f"unrecognised sglang layout at {anchor_path} "
-                "(expected editable .../python/sglang/... or wheel "
-                ".../site-packages/sglang/...)"
-            )
+            result["error"] = layout_error
             return result
         apply_root, strip = layout
         graph_capture = (patch_set == _PATCH_SET_GRAPH_CAPTURE) if patch_set else _uses_gc_patch(version)
         result["patch_set"] = _PATCH_SET_GRAPH_CAPTURE if graph_capture else _PATCH_SET_ROOFLINE
-        sentinel_rel = _GC_SENTINEL_RELPATH if graph_capture else _SENTINEL_RELPATH
-        sentinel_markers = _GC_SENTINEL_MARKERS if graph_capture else _SENTINEL_MARKERS
-        # strip=1: apply_root is the repo root; strip=3: the wheel sglang/ dir.
-        if strip == 1:
-            sentinel_path = apply_root / sentinel_rel
-            extra_sentinel = apply_root / _EXTRA_SENTINEL_RELPATH
-        else:
-            sentinel_path = apply_root / Path(*Path(sentinel_rel).parts[2:])
-            extra_sentinel = apply_root / Path(*Path(_EXTRA_SENTINEL_RELPATH).parts[2:])
-
-        extra_ok = graph_capture or _all_markers_present(extra_sentinel, _EXTRA_SENTINEL_MARKERS)
-        if _all_markers_present(sentinel_path, sentinel_markers) and extra_ok:
+        if _markers_already_applied(apply_root, strip, graph_capture=graph_capture):
             result["status"] = "skipped"
             result["patches_skipped_already_present"] = True
             return result
-
         patches_dir, skip_reason, error = _resolve_patches_dir(tracelens_root, version, graph_capture=graph_capture)
         if skip_reason:
             result["status"] = "skipped"
@@ -375,7 +380,6 @@ def _apply_on_pod(
             result["status"] = "failed"
             result["error"] = f"no *.patch files in {patches_dir}"
             return result
-
         applied, apply_error = _apply_patch_set(patches, apply_root, strip)
         result["patches_applied"] = applied
         if apply_error:
@@ -387,6 +391,7 @@ def _apply_on_pod(
     except Exception as e:  # noqa: BLE001 - actor must never raise
         result["status"] = "failed"
         result["error"] = f"unexpected: {type(e).__name__}: {e}"
+        _log(result["error"])
         return result
     finally:
         result["elapsed_sec"] = round(time.time() - started, 3)

@@ -9,6 +9,7 @@ import asyncio
 import contextlib
 import json
 import glob
+import logging
 import os
 import pathlib
 import shutil
@@ -20,12 +21,13 @@ import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from kernelforge.loop.aiter_cache import cleanup_current_owned_aiter_locks
-from kernelforge.loop.profile_contract import PROFILE_RUN_FLAG
-from kernelforge.loop.scoring import DEFAULT_SNR_THRESHOLD_DB
-from kernelforge.mcp_server.tools.bench import BenchRun, bench_wallclock
-from kernelforge.mcp_server.tools.test import test_correctness
+from kernelforge.evaluation.benchmark.runner import BenchRun, bench_wallclock
+from kernelforge.evaluation.correctness.driver import test_correctness
+from kernelforge.evaluation.profiling.contracts import PROFILE_RUN_FLAG
+from kernelforge.evaluation.scoring import DEFAULT_SNR_THRESHOLD_DB
+from kernelforge.tools.aiter_cache import cleanup_current_owned_aiter_locks
 
+log = logging.getLogger(__name__)
 
 # Preflight — deterministic driver-contract validation
 
@@ -520,7 +522,7 @@ async def _count_graph_replays(
         cleanup_current_owned_aiter_locks()
         _cleanup_probe(out_path, probe_dir)
         raise
-    except Exception as exc:  # noqa: BLE001
+    except OSError as exc:
         _cleanup_probe(out_path, probe_dir)
         return PROBE_FAILED, f"{type(exc).__name__}: {exc}"
     tail = ((out.decode(errors="replace") if out else "") + (err.decode(errors="replace") if err else ""))[-400:]
@@ -593,6 +595,156 @@ class DriverContract:
     expected_case_ids: list[str] | None = None
 
 
+def _stage_seconds(since: float) -> float:
+    return round(time.monotonic() - since, 3)
+
+
+@dataclass(frozen=True)
+class _GraphVerdict:
+    """What the one graph probe run concluded: graph timing, and the rank contract it also observes."""
+
+    graph_ok: bool
+    ranks_ok: bool
+
+
+@dataclass
+class _PreflightWork:
+    """Mutable accumulators for one preflight run; stages append reasons, details and diagnostics."""
+
+    reasons: list
+    details: dict
+    diagnostics: dict
+    bench_ok: bool = False
+
+    async def check_correctness(self, driver: str, snr_threshold: float, deadline_unix: float) -> bool:
+        stage_started = time.monotonic()
+        try:
+            cres = await test_correctness(
+                driver_script=driver,
+                driver_args=[],
+                snr_threshold=snr_threshold,
+                timeout_sec=int(_deadline_timeout(deadline_unix, PREFLIGHT_CORRECTNESS_TIMEOUT_S)),
+            )
+            keys = ("passed", "outcome", "snr_db", "allclose", "max_diff", "message")
+            self.details["correctness"] = {k: cres.get(k) for k in keys}
+            self.details["correctness"]["seconds"] = _stage_seconds(stage_started)
+            has_metric = (
+                cres.get("snr_db") is not None or cres.get("allclose") is not None or cres.get("max_diff") is not None
+            )
+            if has_metric:
+                return True
+            self.reasons.append(f"correctness mode produced no SNR/allclose metric ({cres.get('message')})")
+            _record_stage_output(self.diagnostics, "correctness", cres)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("preflight correctness run raised: %s", exc)
+            self.reasons.append(f"correctness run raised {type(exc).__name__}: {exc}")
+            self.diagnostics["correctness"] = "".join(traceback.format_exception(exc))[-DIAG_TAIL_CHARS:]
+        return False
+
+    async def check_bench(self, driver: str, warmup: int, iters: int, expected_case_ids, deadline_unix: float) -> bool:
+        stage_started = time.monotonic()
+        try:
+            bres = await bench_wallclock(
+                BenchRun(driver, driver_args=[], warmup_iters=warmup, bench_iters=iters),
+                timeout_sec=int(_deadline_timeout(deadline_unix, PREFLIGHT_BENCH_TIMEOUT_S)),
+            )
+            reported_cases = bres.get("case_times") or {}
+            self.details["bench"] = {k: bres.get(k) for k in ("success", "median_ms", "message")}
+            self.details["bench"]["case_count"] = len(reported_cases)
+            self.details["bench"]["seconds"] = _stage_seconds(stage_started)
+            # The declared suite is the contract, in both directions.
+            declared = set(expected_case_ids or ())
+            missing_cases = sorted(declared - set(reported_cases))
+            undeclared_cases = sorted(set(reported_cases) - declared) if declared else []
+            self.details["bench"]["expected_case_count"] = len(expected_case_ids or ())
+            self.details["bench"]["missing_cases"] = missing_cases
+            self.details["bench"]["undeclared_cases"] = undeclared_cases
+            if not bres.get("success") or not reported_cases:
+                reason = (
+                    "bench mode must produce an aggregate and case_ms timing for every "
+                    f"suite case ({bres.get('message')})"
+                )
+            elif missing_cases:
+                reason = (
+                    "bench mode reported "
+                    f"{len(reported_cases)} of the {len(expected_case_ids or ())} cases "
+                    "this task declares; no case_ms line for "
+                    f"{', '.join(missing_cases)} — print one line per declared case "
+                    "using its CASE_ID verbatim"
+                )
+            elif undeclared_cases:
+                reason = (
+                    "bench mode reported case_ms for "
+                    f"{', '.join(undeclared_cases)}, which this task does not declare; "
+                    "measure the declared suite exactly, because every case printed "
+                    "here is scored"
+                )
+            else:
+                return True
+            self.reasons.append(reason)
+            _record_stage_output(self.diagnostics, "bench", bres)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("preflight bench run raised: %s", exc)
+            self.reasons.append(f"bench run raised {type(exc).__name__}: {exc}")
+            self.diagnostics["bench"] = "".join(traceback.format_exception(exc))[-DIAG_TAIL_CHARS:]
+        return False
+
+    async def check_graph(
+        self, driver: str, warmup: int, iters: int, contract: DriverContract, deadline_unix: float
+    ) -> _GraphVerdict:
+        failed = _GraphVerdict(graph_ok=False, ranks_ok=contract.require_ranks <= 1)
+        if not self.bench_ok:
+            self.reasons.append("cannot verify graph timing because bench produced no timing")
+            return failed
+        stage_started = time.monotonic()
+        replays, tail = await _count_graph_replays(
+            driver,
+            warmup,
+            iters,
+            timeout_sec=_deadline_timeout(deadline_unix, PREFLIGHT_GRAPH_TIMEOUT_S),
+            require_ranks=contract.require_ranks,
+        )
+        self.details["graph"] = {
+            "replays": replays,
+            "required": iters,
+            "seconds": _stage_seconds(stage_started),
+        }
+        if replays >= iters:
+            return _GraphVerdict(graph_ok=True, ranks_ok=True)
+        self.diagnostics["graph"] = tail
+        if replays == PROBE_DISTRIBUTED_VIOLATION:
+            # A verdict on the driver, not a failure of the probe, so it is
+            # reported against the rank contract rather than graph timing.
+            self.reasons.append(f"distributed measurement contract violated: {tail}")
+        elif replays < 0:
+            self.reasons.append(f"could not verify graph timing (probe failed): {tail[-160:]}")
+        else:
+            self.reasons.append(
+                f"benchmark did not run under a CUDA/HIP graph (observed {replays} "
+                f"graph replays over {iters} timed iterations): {tail[-160:]}"
+            )
+        return failed
+
+    async def check_profile(self, driver: str, deadline_unix: float) -> bool:
+        if not self.bench_ok:
+            self.reasons.append("cannot verify profiling contract because bench produced no timing")
+            return False
+        stage_started = time.monotonic()
+        profile_ok, profile_detail = await _check_profile_contract(
+            driver,
+            timeout_sec=_deadline_timeout(deadline_unix, PREFLIGHT_PROFILE_TIMEOUT_S),
+        )
+        self.details["profile"] = {
+            "ok": profile_ok,
+            "contract": profile_detail if profile_ok else "",
+            "seconds": _stage_seconds(stage_started),
+        }
+        if not profile_ok:
+            self.diagnostics["profile"] = profile_detail
+            self.reasons.append(f"profiling contract failed ({profile_detail})")
+        return profile_ok
+
+
 async def _preflight_async(
     driver: str,
     contract: DriverContract,
@@ -601,193 +753,51 @@ async def _preflight_async(
     *,
     deadline_unix: float = 0.0,
 ) -> PreflightResult:
-    snr_threshold, expected_case_ids = contract.snr_threshold, contract.expected_case_ids
-    require_graph, require_profile, require_ranks = (
-        contract.require_graph,
-        contract.require_profile,
-        contract.require_ranks,
-    )
-    reasons: list[str] = []
-    details: dict = {}
-    diagnostics: dict = {}
     started = time.monotonic()
-
-    def _stage_seconds(since: float) -> float:
-        return round(time.monotonic() - since, 3)
-
     if not driver or not Path(driver).is_file():
         return PreflightResult(
             ok=False,
             correctness_ok=False,
             bench_ok=False,
-            graph_ok=not require_graph,
-            profile_ok=not require_profile,
-            ranks_ok=require_ranks <= 1,
+            graph_ok=not contract.require_graph,
+            profile_ok=not contract.require_profile,
+            ranks_ok=contract.require_ranks <= 1,
             reasons=[f"driver file not found: {driver}"],
         )
 
+    work = _PreflightWork(reasons=[], details={}, diagnostics={})
     # Correctness: the driver must EMIT a parseable metric and not crash.
-    correctness_ok = False
-    stage_started = time.monotonic()
-    try:
-        cres = await test_correctness(
-            driver_script=driver,
-            driver_args=[],
-            snr_threshold=snr_threshold,
-            timeout_sec=int(_deadline_timeout(deadline_unix, PREFLIGHT_CORRECTNESS_TIMEOUT_S)),
-        )
-        details["correctness"] = {
-            k: cres.get(k)
-            for k in (
-                "passed",
-                "outcome",
-                "snr_db",
-                "allclose",
-                "max_diff",
-                "message",
-            )
-        }
-        details["correctness"]["seconds"] = _stage_seconds(stage_started)
-        has_metric = (
-            cres.get("snr_db") is not None or cres.get("allclose") is not None or cres.get("max_diff") is not None
-        )
-        if has_metric:
-            correctness_ok = True
-        else:
-            reasons.append(f"correctness mode produced no SNR/allclose metric ({cres.get('message')})")
-            _record_stage_output(diagnostics, "correctness", cres)
-    except Exception as exc:  # noqa: BLE001
-        reasons.append(f"correctness run raised {type(exc).__name__}: {exc}")
-        diagnostics["correctness"] = "".join(traceback.format_exception(exc))[-DIAG_TAIL_CHARS:]
-
+    correctness_ok = await work.check_correctness(driver, contract.snr_threshold, deadline_unix)
     # Benchmark: the driver must accept --warmup/--iters/--bench-mode and print per-iteration wall_ms or a single
     # median_ms/mean_ms aggregate.
-    bench_ok = False
-    stage_started = time.monotonic()
-    try:
-        bres = await bench_wallclock(
-            BenchRun(driver, driver_args=[], warmup_iters=warmup, bench_iters=iters),
-            timeout_sec=int(_deadline_timeout(deadline_unix, PREFLIGHT_BENCH_TIMEOUT_S)),
-        )
-        reported_cases = bres.get("case_times") or {}
-        details["bench"] = {k: bres.get(k) for k in ("success", "median_ms", "message")}
-        details["bench"]["case_count"] = len(reported_cases)
-        details["bench"]["seconds"] = _stage_seconds(stage_started)
-        # The declared suite is the contract, in both directions.
-        declared = set(expected_case_ids or ())
-        missing_cases = sorted(declared - set(reported_cases))
-        undeclared_cases = sorted(set(reported_cases) - declared) if declared else []
-        details["bench"]["expected_case_count"] = len(expected_case_ids or ())
-        details["bench"]["missing_cases"] = missing_cases
-        details["bench"]["undeclared_cases"] = undeclared_cases
-        if not bres.get("success") or not reported_cases:
-            reasons.append(
-                f"bench mode must produce an aggregate and case_ms timing for every suite case ({bres.get('message')})"
-            )
-            _record_stage_output(diagnostics, "bench", bres)
-        elif missing_cases:
-            reasons.append(
-                "bench mode reported "
-                f"{len(reported_cases)} of the {len(expected_case_ids or ())} cases "
-                "this task declares; no case_ms line for "
-                f"{', '.join(missing_cases)} — print one line per declared case "
-                "using its CASE_ID verbatim"
-            )
-            _record_stage_output(diagnostics, "bench", bres)
-        elif undeclared_cases:
-            reasons.append(
-                "bench mode reported case_ms for "
-                f"{', '.join(undeclared_cases)}, which this task does not declare; "
-                "measure the declared suite exactly, because every case printed "
-                "here is scored"
-            )
-            _record_stage_output(diagnostics, "bench", bres)
-        else:
-            bench_ok = True
-    except Exception as exc:  # noqa: BLE001
-        reasons.append(f"bench run raised {type(exc).__name__}: {exc}")
-        diagnostics["bench"] = "".join(traceback.format_exception(exc))[-DIAG_TAIL_CHARS:]
-
+    work.bench_ok = await work.check_bench(driver, warmup, iters, contract.expected_case_ids, deadline_unix)
     # Graph timing: required only for prepass-produced drivers. One probe run answers both stages: it counts
     # CUDAGraph replays and, for a task that declares several ranks, reports what the ranks actually did.
-    graph_ok = True
-    ranks_ok = require_ranks <= 1
-    if require_graph:
-        graph_ok = False
-        if bench_ok:
-            stage_started = time.monotonic()
-            replays, tail = await _count_graph_replays(
-                driver,
-                warmup,
-                iters,
-                timeout_sec=_deadline_timeout(deadline_unix, PREFLIGHT_GRAPH_TIMEOUT_S),
-                require_ranks=require_ranks,
-            )
-            details["graph"] = {
-                "replays": replays,
-                "required": iters,
-                "seconds": _stage_seconds(stage_started),
-            }
-            if replays >= iters:
-                graph_ok = True
-                ranks_ok = True
-            elif replays == PROBE_DISTRIBUTED_VIOLATION:
-                # A verdict on the driver, not a failure of the probe, so it is
-                # reported against the rank contract rather than graph timing.
-                diagnostics["graph"] = tail
-                reasons.append(f"distributed measurement contract violated: {tail}")
-            elif replays < 0:
-                diagnostics["graph"] = tail
-                reasons.append(f"could not verify graph timing (probe failed): {tail[-160:]}")
-            else:
-                diagnostics["graph"] = tail
-                reasons.append(
-                    f"benchmark did not run under a CUDA/HIP graph (observed {replays} "
-                    f"graph replays over {iters} timed iterations): {tail[-160:]}"
-                )
-        else:
-            reasons.append("cannot verify graph timing because bench produced no timing")
-    elif require_ranks > 1:
+    graph = _GraphVerdict(graph_ok=True, ranks_ok=contract.require_ranks <= 1)
+    if contract.require_graph:
+        graph = await work.check_graph(driver, warmup, iters, contract, deadline_unix)
+    elif contract.require_ranks > 1:
         # The rank observations ride on the graph probe, so there is nothing to
         # conclude from without it.
-        reasons.append(
-            f"cannot verify the {require_ranks}-rank measurement contract because graph timing was not required"
+        work.reasons.append(
+            f"cannot verify the {contract.require_ranks}-rank measurement contract because graph timing was not required"
         )
-
-    if require_ranks > 1:
-        details["distributed"] = {"ok": ranks_ok, "required_ranks": require_ranks}
-
+    if contract.require_ranks > 1:
+        work.details["distributed"] = {"ok": graph.ranks_ok, "required_ranks": contract.require_ranks}
     profile_ok = True
-    if require_profile:
-        profile_ok = False
-        if bench_ok:
-            stage_started = time.monotonic()
-            profile_ok, profile_detail = await _check_profile_contract(
-                driver,
-                timeout_sec=_deadline_timeout(deadline_unix, PREFLIGHT_PROFILE_TIMEOUT_S),
-            )
-            details["profile"] = {
-                "ok": profile_ok,
-                "contract": profile_detail if profile_ok else "",
-                "seconds": _stage_seconds(stage_started),
-            }
-            if not profile_ok:
-                diagnostics["profile"] = profile_detail
-                reasons.append(f"profiling contract failed ({profile_detail})")
-        else:
-            reasons.append("cannot verify profiling contract because bench produced no timing")
-
-    ok = correctness_ok and bench_ok and graph_ok and profile_ok and ranks_ok
+    if contract.require_profile:
+        profile_ok = await work.check_profile(driver, deadline_unix)
+    ok = correctness_ok and work.bench_ok and graph.graph_ok and profile_ok and graph.ranks_ok
     return PreflightResult(
         ok=ok,
         correctness_ok=correctness_ok,
-        bench_ok=bench_ok,
-        graph_ok=graph_ok,
+        bench_ok=work.bench_ok,
+        graph_ok=graph.graph_ok,
         profile_ok=profile_ok,
-        ranks_ok=ranks_ok,
-        reasons=reasons,
-        details=details,
-        diagnostics=diagnostics,
+        ranks_ok=graph.ranks_ok,
+        reasons=work.reasons,
+        details=work.details,
+        diagnostics=work.diagnostics,
         duration_sec=_stage_seconds(started),
     )
 
@@ -803,9 +813,7 @@ def _kill_process_group(proc) -> None:
         try:
             os.killpg(pid, signal.SIGKILL)
             signalled = True
-        except (ProcessLookupError, PermissionError):
-            pass
-        except Exception:  # noqa: BLE001 - group may already be gone
+        except OSError:  # group may already be gone
             pass
     if not signalled:
         with contextlib.suppress(ProcessLookupError, PermissionError):

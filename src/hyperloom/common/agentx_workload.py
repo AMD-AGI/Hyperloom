@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Mapping
+from typing import Any, Mapping
 
 MLPERF_CLIENT_SCRIPT = "mlperf_agentic_client.sh"
 AGENTX_CLIENT_SCRIPTS = frozenset({MLPERF_CLIENT_SCRIPT})
@@ -54,6 +54,20 @@ def agentic_backend(env: Mapping[str, str] | None = None) -> str:
 
 def is_mlperf_backend(env: Mapping[str, str] | None = None) -> bool:
     return agentic_backend(env) == "mlperf"
+
+
+def pin_mlperf_round_concurrency(envs: dict[str, Any]) -> None:
+    """Make ``AGENTIC_CONCURRENCY`` follow this round's ``CONC``.
+
+    The client used to prefer ``AGENTIC_CONCURRENCY``, and the baseline YAML
+    carries it. A conc-sweep rung that only changes ``CONC`` would then be
+    recorded at one concurrency and measured at another.
+    """
+    if not is_mlperf_backend(envs):
+        return
+    conc = envs.get("CONC")
+    if conc not in (None, ""):
+        envs["AGENTIC_CONCURRENCY"] = str(conc)
 
 
 def agentx_client_script(env: Mapping[str, str] | None = None) -> str:

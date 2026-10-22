@@ -199,6 +199,50 @@ def test_patch_safety_report_notes_empty():
     assert ps.PatchSafetyReport().notes() == []
 
 
+# ---- proposals whose env files are not on disk -------------------------------
+def test_a_proposal_pointing_an_env_at_an_unwritten_file_is_dropped_at_admission(tmp_path):
+    """Qwen3-14B-FP8 session 20261014T024938Z: two-step proposals ("author the CSV, then point the env at it") whose
+    first step nothing ran; benched as config arms, their servers died at config load."""
+    written = tmp_path / "tuned.csv"
+    written.write_text("gfx,M,N,K\n", encoding="utf-8")
+    missing = str(tmp_path / "aiter_configs" / "never_written.csv")
+    payload = {
+        "proposal_set": [
+            {"name": "tuned-gemm", "extra_envs": {"AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE": missing}},
+            {"name": "written", "extra_envs": {"AITER_CONFIG_GEMM_BF16": str(written)}},
+            {"name": "flag-only", "extra_args": "--max-num-seqs 64", "extra_envs": {"VLLM_USE_V1": "1"}},
+        ]
+    }
+    dropped = ps.drop_env_ungrounded_proposals(payload)
+    assert [p["name"] for p in payload["proposal_set"]] == ["written", "flag-only"]
+    assert len(dropped) == 1 and dropped[0].startswith("proposal 'tuned-gemm': ")
+    assert missing in dropped[0] and "gemm_tuning" in dropped[0]
+    assert ps.drop_env_ungrounded_proposals({"proposal_set": "not a list"}) == []
+
+
+def test_admit_payload_books_the_gate_and_reports_the_env_drops(tmp_path):
+    missing = str(tmp_path / "never_written.csv")
+    payload = {
+        "summary": "s",
+        "expected_gain_pct": 12,
+        "proposal_set": [{"name": "tuned-gemm", "extra_envs": {"AITER_CONFIG_GEMM_BF16": missing}}],
+    }
+    vetted = (
+        ["a.patch"],
+        [{"path": "b.patch", "verdict": ps.GROUND_MISSING_TARGET, "detail": "missing_target: b"}],
+        {"a.patch": ps.GROUND_APPLIES},
+        False,
+    )
+    report = ps.admit_payload(payload, vetted, {"a.patch": "/src/vllm", "b.patch": "/src/vllm"})
+    assert payload["proposal_set"] == [] and "expected_gain_pct" not in payload
+    assert payload["patches_written"] == ["a.patch"] and payload["patch_roots"] == {"a.patch": "/src/vllm"}
+    assert payload["patches_ungrounded"] == ["missing_target: b"]
+    assert len(payload["proposals_env_ungrounded"]) == 1 and "patches_span_multiple_roots" not in payload
+    assert any("expected_gain_pct" in f for f in report.forbidden_fields)
+    assert report.env_ungrounded == payload["proposals_env_ungrounded"]
+    assert any(n.startswith("proposal_env_file_missing:") for n in report.notes())
+
+
 # ---- scan_numeric_claims ---------------------------------------------------
 def test_scan_numeric_claims():
     payload = {
@@ -567,3 +611,11 @@ def test_the_escape_check_reads_the_paths_the_applier_resolves():
     assert ps.patch_escapes_tree("--- a/ok.py\n+++ b//etc/passwd\n") == "/etc/passwd"
     assert ps.patch_escapes_tree("--- a/../../escape.py\n+++ b/ok.py\n") == "../../escape.py"
     assert ps.patch_escapes_tree("--- /dev/null\n+++ b/new.py\n@@ -0,0 +1 @@\n+x\n") is None
+
+
+def test_explicit_root_without_patch_texts_is_accepted(tmp_path):
+    root = _make_git_repo(tmp_path / "fw", {"a.py": "x\n"})
+    res = ps.resolve_patch_apply_root([], explicit_root=root, candidate_roots=[])
+    assert res.root is not None
+    assert res.root.resolve() == root.resolve()
+    assert res.reason == ""

@@ -25,6 +25,7 @@ from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import (
     assemble_kernel_ext,
     kernel_event_id,
     make_kernel_recorder,
+    record_integrate_axis,
     record_integrate_verdict,
     record_trace_analyze_request,
     reject_geak_attempts,
@@ -93,6 +94,16 @@ def test_one_event_per_entry_with_macro_cycle_at_the_top(tmp_path):
     assert "macro_cycle" not in (ext.get("forge") or {})
     assert ext["entry"]["route"] == ROUTE_FORGE
     assert ext["entry"]["roofline_snapshot_id"] == 4
+    assert ext["entry"] == {
+        "route": ROUTE_FORGE,
+        "route_reason": "kernel_opt_backend_order=forge",
+        "resumed": False,
+        "stack_depth_in": 2,
+        "roofline_snapshot_id": 4,
+        "roofline_snapshot_ts": "2026-09-02T00:00:00",
+        "roofline_baseline_gain_at_snapshot": None,
+        "snapshot_staleness": "fresh",
+    }
 
 
 def test_the_event_is_on_the_timeline_before_it_concludes(tmp_path):
@@ -291,6 +302,7 @@ def test_the_integrate_gate_is_what_settles_a_forge_candidate(tmp_path):
             "ref": "attempt-7",
             "kernel_id": "k001",
             "gain_pct": 6.0,
+            "gain_axis": None,
             "settled_by": "integrate",
         }
     ]
@@ -446,6 +458,7 @@ def test_an_integrate_verdict_lands_after_the_visit_has_closed(tmp_path):
         "decision": "KEEP",
         "patch_path": "patches/k001.diff",
         "target_file": "vllm/attention.py",
+        "graded_objective": None,
     }
 
 
@@ -590,9 +603,7 @@ def test_geak_handoff_and_product_do_not_share_the_accepted_flags_name(tmp_path)
     recorder.record_geak_product(
         accepted_flags=["--enable-torch-compile", "--attention-backend=aiter"],
         accepted_envs={"A": "1", "B": "2"},
-        cfg_hash="deadbeef",
         final_overlay="/s/geak/overlay",
-        final_overlay_digest="d1",
     )
     recorder.finish(tput_after=900.0)
 
@@ -604,7 +615,15 @@ def test_geak_handoff_and_product_do_not_share_the_accepted_flags_name(tmp_path)
         "--enable-torch-compile",
         "--attention-backend=aiter",
     ]
-    assert geak["product"]["cfg_hash"] == "deadbeef"
+    assert set(geak["product"]) == {
+        "accepted_flags",
+        "accepted_envs",
+        "accepted_config",
+        "final_overlay",
+        "final_launch_script",
+        "bench_script",
+        "final_patch",
+    }
 
 
 def test_the_handoff_records_which_cards_geak_was_given(tmp_path):
@@ -1107,6 +1126,34 @@ def test_the_trace_analyze_run_records_the_only_legal_kernel_id_source(tmp_path)
     assert run["roofline_snapshot_id"] == 5
     assert run["reusable_native_kernel_ids"] == ["k001", "k002"]
     assert run["artifacts"]["candidates_path"] == "/s/candidates.json"
+    assert sorted(run) == [
+        "analysis_md_path",
+        "artifacts",
+        "cache_hit",
+        "hot_kernels",
+        "preflight",
+        "request_msg_id",
+        "requested_by",
+        "reusable_native_kernel_ids",
+        "roofline_baseline_gain_at_snapshot",
+        "roofline_snapshot_id",
+        "route",
+        "route_ext",
+        "run_id",
+        "selection",
+        "split",
+        "status",
+        "steady_state",
+        "steady_state_trace",
+        "steps",
+        "tool",
+        "tool_run_id",
+        "top_k",
+        "trace_input",
+        "trigger",
+        "ts",
+        "warnings",
+    ]
     assert run["hot_kernels"]["count"] == 1
 
 
@@ -1769,3 +1816,256 @@ def test_a_verdict_with_no_failure_behind_it_carries_no_error(tmp_path):
     # Absent rather than blank: nothing failed, so there is no class to name.
     assert rebench["final_error_class"] is None
     assert rebench["final_error"] is None
+
+
+def test_a_geak_attempt_reports_the_rebench_gain_and_keeps_the_claim_apart(tmp_path):
+    recorder = _geak_recorder()
+    recorder.record_geak_attempts(
+        {
+            "kernels": [
+                {
+                    "kernel_id": "k001",
+                    "dispatch": {"dispatched": True},
+                    "e2e": {"decision": "KEEP", "integrated": True, "validated": True, "e2e_gain_pct": 40.799},
+                }
+            ]
+        }
+    )
+    recorder.record_geak_claim({}, specs=[{"short_name": "k001", "kernel_id": "k001", "e2e_delta_pct": 40.799}])
+    _geak_rebench(recorder, "geak-rb-1", REBENCH_VALIDATED, base_tput=1000.0, measured_tput=1107.132)
+    recorder.finish(tput_after=1107.132)
+
+    row = _kernel_events(tmp_path)[0]["ext"]["attempts"][0]
+    assert row["settled_by"] == "rebench"
+    assert row["gain_pct"] == 10.7132
+    assert row["gain_axis"] == "output_throughput"
+    assert row["e2e"] == {
+        "integrated": True,
+        "e2e_gain_pct": 10.7132,
+        "validated": True,
+        "decision": "KEEP",
+        "self_reported_e2e_gain_pct": 40.799,
+        "rejection_reason": None,
+        "revalidation_measured_tput": None,
+        "revalidation_current_best_tput": None,
+        "revalidation_provenance": None,
+        "patch_path": None,
+        "target_file": None,
+    }
+
+
+def test_a_geak_attempt_with_no_measurement_has_no_e2e_gain(tmp_path):
+    recorder = _geak_recorder()
+    recorder.record_geak_attempts(
+        {"kernels": [{"kernel_id": "k001", "e2e": {"decision": "KEEP", "integrated": True, "e2e_gain_pct": 40.799}}]}
+    )
+    recorder.finish(tput_after=900.0)
+
+    e2e = _kernel_events(tmp_path)[0]["ext"]["attempts"][0]["e2e"]
+    assert e2e["e2e_gain_pct"] is None
+    assert e2e["self_reported_e2e_gain_pct"] == 40.799
+
+
+def test_a_revoked_geak_keep_keeps_the_claim_it_made(tmp_path):
+    recorder = _geak_recorder()
+    recorder.record_geak_attempts(
+        {"kernels": [{"kernel_id": "k001", "e2e": {"decision": "KEEP", "integrated": True, "e2e_gain_pct": 40.799}}]}
+    )
+    reject_geak_attempts(
+        event=recorder.event_id,
+        measured_tput=850.0,
+        current_best_tput=900.0,
+        provenance="orchestrator_rebench",
+        rejection_reason="no_promote",
+    )
+    recorder.finish(tput_after=900.0)
+
+    e2e = _kernel_events(tmp_path)[0]["ext"]["attempts"][0]["e2e"]
+    assert e2e["e2e_gain_pct"] is None
+    assert e2e["self_reported_e2e_gain_pct"] == 40.799
+
+
+@pytest.mark.parametrize(
+    ("last_gain", "expected"),
+    [(2.0, 2.0), (None, None)],
+)
+def test_the_standing_e2e_gain_is_the_one_the_standing_decision_measured(last_gain, expected):
+    from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import _integrate_e2e
+
+    e2e = _integrate_e2e(
+        [
+            {"decision": "KEEP", "gain_pct": 6.0, "settled_at": "2026-09-02T00:01:00", "attempt_count": 1},
+            {"decision": "REVERT", "gain_pct": last_gain, "settled_at": "2026-09-02T00:09:00", "attempt_count": 2},
+        ]
+    )
+
+    assert e2e == {
+        "integrated": False,
+        "e2e_gain_pct": expected,
+        "validated": None,
+        "decision": "REVERT",
+        "patch_path": None,
+        "target_file": None,
+        "graded_objective": None,
+    }
+
+
+def test_a_geak_candidate_accepted_without_a_rebench_verdict_carries_no_measured_gain(tmp_path):
+    recorder = _geak_recorder()
+    recorder.record_geak_attempts(
+        {
+            "kernels": [
+                {
+                    "kernel_id": "k001",
+                    "dispatch": {"dispatched": True},
+                    "e2e": {"decision": "KEEP", "integrated": True, "validated": True, "e2e_gain_pct": 40.799},
+                }
+            ]
+        }
+    )
+    recorder.record_geak_claim({}, specs=[{"short_name": "k001", "kernel_id": "k001", "e2e_delta_pct": 40.799}])
+    recorder.finish(tput_after=900.0)
+
+    ext = _kernel_events(tmp_path)[0]["ext"]
+    row = ext["attempts"][0]
+    assert (row["settled_by"], row["outcome"], row["gain_pct"]) == ("integrate", "adopted", None)
+    assert row["e2e"]["e2e_gain_pct"] is None
+    assert row["e2e"]["self_reported_e2e_gain_pct"] == 40.799
+    assert ext["outcome"]["delivered"] == [
+        {
+            "route": ROUTE_GEAK,
+            "source_kind": SOURCE_GEAK_AUTHORED_KERNEL,
+            "ref": "k001",
+            "kernel_id": "k001",
+            "gain_pct": None,
+            "gain_axis": None,
+            "settled_by": "integrate",
+        }
+    ]
+    assert ext["outcome"]["verdict"] == "no_improvement"
+    assert ext["outcome"]["reason"] == "nothing measured a gain on the candidates kept"
+
+
+def _gain_fields(row: dict[str, Any]) -> dict[str, Any]:
+    return {key: row[key] for key in ("gain_pct", "gain_axis", "settled_by")}
+
+
+def test_a_lane_gain_is_stated_on_the_kernel_micro_axis(tmp_path):
+    recorder = _forge_recorder()
+    recorder.record_kernel_rewrite(
+        KernelRewriteRun(
+            lane=LaneRunFields(run_id="attempt-7", status="success", micro_decision="keep"),
+            kernel_id="k001",
+            speedup=1.4,
+        )
+    )
+    recorder.finish(tput_after=1000.0)
+
+    ext = _kernel_events(tmp_path)[0]["ext"]
+    assert _gain_fields(ext["attempts"][0]) == {"gain_pct": 40.0, "gain_axis": "kernel_micro", "settled_by": "lane"}
+    assert ext["outcome"]["delivered"] == [
+        {
+            "route": ROUTE_FORGE,
+            "source_kind": SOURCE_KERNEL_REWRITE,
+            "ref": "attempt-7",
+            "kernel_id": "k001",
+            "gain_pct": 40.0,
+            "gain_axis": "kernel_micro",
+            "settled_by": "lane",
+        }
+    ]
+
+
+def test_a_keep_nothing_measured_names_no_gain_axis(tmp_path):
+    recorder = _forge_recorder()
+    recorder.record_kernel_rewrite(
+        KernelRewriteRun(
+            lane=LaneRunFields(run_id="attempt-7", status="success", micro_decision="keep"),
+            kernel_id="k001",
+        )
+    )
+    recorder.finish(tput_after=1000.0)
+
+    row = _kernel_events(tmp_path)[0]["ext"]["attempts"][0]
+    assert _gain_fields(row) == {"gain_pct": None, "gain_axis": None, "settled_by": "lane"}
+
+
+def test_a_rebench_gain_is_stated_on_the_output_throughput_axis(tmp_path):
+    recorder = _geak_with_one_acceptance()
+    _geak_rebench(recorder, "geak-rb-1", REBENCH_VALIDATED)
+    recorder.finish(tput_after=950.0)
+
+    ext = _kernel_events(tmp_path)[0]["ext"]
+    assert _gain_fields(ext["attempts"][0]) == {
+        "gain_pct": 5.5556,
+        "gain_axis": "output_throughput",
+        "settled_by": "rebench",
+    }
+    assert [(row["gain_pct"], row["gain_axis"]) for row in ext["outcome"]["delivered"]] == [
+        (5.5556, "output_throughput")
+    ]
+
+
+def _gated_rewrite(recorder, **verdict: Any) -> None:
+    recorder.record_kernel_rewrite(
+        KernelRewriteRun(
+            lane=LaneRunFields(run_id="attempt-7", status="success", micro_decision="keep", integrate_ref="int-1"),
+            kernel_id="k001",
+            speedup=1.4,
+        )
+    )
+    axis = verdict.pop("graded_objective", "")
+    record_integrate_verdict(macro_cycle=3, integration_id="int-1", kernel_id="k001", decision="KEEP", **verdict)
+    record_integrate_axis(macro_cycle=3, integration_id="int-1", graded_objective=axis)
+
+
+def test_a_gate_gain_is_stated_on_the_axis_the_gate_graded(tmp_path):
+    recorder = _forge_recorder()
+    _gated_rewrite(recorder, gain_pct=6.0, graded_objective="e2e_norm_intvty_p50")
+    recorder.finish(tput_after=1060.0)
+
+    row = _kernel_events(tmp_path)[0]["ext"]["attempts"][0]
+    assert _gain_fields(row) == {"gain_pct": 6.0, "gain_axis": "e2e_norm_intvty_p50", "settled_by": "integrate"}
+
+
+def test_a_gate_gain_with_no_recorded_axis_names_none(tmp_path):
+    recorder = _forge_recorder()
+    _gated_rewrite(recorder, gain_pct=6.0)
+    recorder.finish(tput_after=1060.0)
+
+    row = _kernel_events(tmp_path)[0]["ext"]["attempts"][0]
+    assert _gain_fields(row) == {"gain_pct": 6.0, "gain_axis": None, "settled_by": "integrate"}
+
+
+def test_a_gate_that_measured_nothing_leaves_the_lane_gain_and_its_axis(tmp_path):
+    recorder = _forge_recorder()
+    _gated_rewrite(recorder)
+    recorder.finish(tput_after=1060.0)
+
+    row = _kernel_events(tmp_path)[0]["ext"]["attempts"][0]
+    assert _gain_fields(row) == {"gain_pct": 40.0, "gain_axis": "kernel_micro", "settled_by": "integrate"}
+
+
+def test_a_gemm_tuner_gain_is_stated_on_the_axis_the_campaign_graded(tmp_path):
+    recorder = _forge_recorder()
+    phase = _phase_with_recorder(tmp_path, recorder)
+    phase._record_gemm_tuning_timeline(
+        {
+            "task_id": "gemm-1",
+            "status": "complete",
+            "backend": "forge",
+            "decision": "KEEP",
+            "e2e_gain_pct": 6.9575,
+            "graded_objective": "output_throughput",
+            "tuned_file": "/w/tuners/fmoe_ck/merged_candidate_fmoe.csv",
+            "tuners_run": [
+                {"tuner": "fmoe_ck", "status": "ok", "artifact": "/w/tuners/fmoe_ck/merged_candidate_fmoe.csv"},
+                {"tuner": "a4w4_blockscale", "status": "failed", "error": "no input", "error_class": "input_missing"},
+            ],
+        }
+    )
+    recorder.finish(tput_after=1000.0)
+
+    rows = {row["detail"]["tuner"]: row for row in _kernel_events(tmp_path)[0]["ext"]["attempts"]}
+    assert (rows["fmoe_ck"]["gain_pct"], rows["fmoe_ck"]["gain_axis"]) == (6.9575, "output_throughput")
+    assert (rows["a4w4_blockscale"]["gain_pct"], rows["a4w4_blockscale"]["gain_axis"]) == (None, None)

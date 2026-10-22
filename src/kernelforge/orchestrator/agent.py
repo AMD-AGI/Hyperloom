@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 from dataclasses import dataclass, field, replace
@@ -21,16 +22,18 @@ from kernelforge.agent_backends import (
 )
 from kernelforge.agent_backends.session_resume import run_session_with_api_resume
 from kernelforge.config import Config, resolve_agent_model
-from kernelforge.llm.workspace_policy import TOOL_OWNED_UNTRACKED_GLOBS
-from kernelforge.mcp_server.pr_stdio_server import TOOL_NAMES as PR_TOOL_NAMES
+from kernelforge.workspace.edit_policy import TOOL_OWNED_UNTRACKED_GLOBS
+from kernelforge.knowledge.pr_knowledge.agent_tools import TOOL_NAMES as PR_TOOL_NAMES
 from kernelforge.loop.insession_gate import GateMeasurement, GateScope, InSessionGate
 from kernelforge.loop.lessons import SessionEnd
-from kernelforge.loop.scoring import (
+from kernelforge.evaluation.scoring import (
     KEEP_MEASUREMENT_COUNT,
     KEEP_MIN_MARGIN_FRACTION,
     keep_t_critical,
 )
 from kernelforge.tracker.usage import UsageAccumulator
+
+log = logging.getLogger(__name__)
 
 # Repository / image_kernel tasks ship the correctness reference + tests INSIDE the repo tree (e.g. AITER's
 # op_tests/.../test_<op>.py), which the in-session gate's default protected globs do not catch.
@@ -123,7 +126,8 @@ def _resolve_implementer_backend(config: Config, agent_backend: str | None, usag
             # not to the one being switched to; carrying it across the switch
             # is how a Claude model id reaches the OpenAI-protocol gateway.
             model=resolve_agent_model(agent_backend),
-            settings=config.agent_runtime_settings(),
+            # The executable and provider options, like the model, belong to the resolved provider.
+            settings=replace(config.agent_runtime_settings(), executable="", options={}),
         )
     requested_backend = runtime.provider
     precheck_cwd = (
@@ -239,7 +243,8 @@ async def _run_outer_gate_turns(gate, backend, run_spec: AgentRunSpec, run_resul
                 feedback,
                 usage=usage,
             )
-        except Exception as exc:  # noqa: BLE001 - outer gate remains final
+        except Exception as exc:  # noqa: BLE001 - SDK errors are unbounded; the outer gate stays final
+            log.warning("outer-gate resume failed: %s", exc)
             if getattr(exc, "agent_safety_rejection", False):
                 integrity_error = exc
             gate.end_reason = "resume_error"
@@ -431,18 +436,11 @@ def make_agent_fn(
 
     # Load the kernel backend's prompt as extra domain context; without it the agent gets only the generic
     # instructions below and misses backend discipline (e.g. ck's tile/pipeline tuning + stale-.cuda.o cleaning).
-    kernel_backend_context = ""
-    try:
-        from kernelforge.kernel_backends.base import build_single_kernel_backend_prompt
+    from kernelforge.kernel_backends.base import build_single_kernel_backend_prompt
 
-        kernel_backend_context = build_single_kernel_backend_prompt(
-            config, kernel_backend_name, task_type=task_type, source_paths=source_files
-        )
-    except Exception as e:  # noqa: BLE001
-        print(
-            f"  Warning: kernel_backend prompt load failed for {kernel_backend_name} ({e}); using generic prompt",
-            file=sys.stderr,
-        )
+    kernel_backend_context = build_single_kernel_backend_prompt(
+        config, kernel_backend_name, task_type=task_type, source_paths=source_files
+    )
 
     # The backend prompts name the STEPS (build, run the driver, profile) but not the mechanism, because only this
     # loop knows it: this agent has Bash and the driver documented above, and no build/test/bench/pmc tools. So this
@@ -533,7 +531,7 @@ prints the tables). If this environment lacks rocprof-compute's deps the script 
     if pr_kb_repo and backend.capabilities.mcp:
         pr_mcp_servers["pr_monitor"] = StdioMcpServer(
             command=sys.executable,
-            args=("-m", "kernelforge.mcp_server.pr_stdio_server"),
+            args=("-m", "kernelforge.knowledge.pr_knowledge.mcp_server"),
             env={"PR_KB_REPO": pr_kb_repo, **_pr_kb_child_env()},
             startup_timeout_sec=15,
             # Claude ignores this field; the REST client also enforces a budget.

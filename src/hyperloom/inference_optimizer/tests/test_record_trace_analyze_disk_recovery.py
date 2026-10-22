@@ -180,3 +180,44 @@ def test_recovery_falls_back_to_default_report_name(tmp_path: Path) -> None:
         "aten::_flash_attention_forward",
         "aten::cat",
     ]
+
+
+class _RowSink:
+    """Collects rows written by the recorder."""
+
+    def __init__(self) -> None:
+        self.rows: list[dict] = []
+
+    def record(self, section: str, row: dict, **_kwargs: object) -> None:
+        self.rows.append(row)
+
+
+def test_discovered_kernel_rows_carry_call_count_and_duration(tmp_path: Path) -> None:
+    """Candidate call_count / duration_us survive the cache into discovered_kernels rows."""
+    from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import _write_discovered_kernels
+
+    state = SharedState.load_or_init(tmp_path)
+    state.record_trace_analyze(
+        {"trace_input": "/trace"},
+        {
+            "status": "ok",
+            "hot_kernels": [
+                {
+                    "kernel_id": "k001",
+                    "name": "aten::mm",
+                    "gpu_pct": 40.0,
+                    "call_count": 128,
+                    "duration_us": 681195.0,
+                },
+                {"kernel_id": "k002", "name": "aten::cat", "gpu_pct": 1.0},
+            ],
+        },
+    )
+
+    sink = _RowSink()
+    _write_discovered_kernels(sink, state.last_trace_analyze, provenance="test")
+
+    assert [(r["kernel_id"], r["call_count"], r["duration_us"]) for r in sink.rows] == [
+        ("k001", 128, 681195.0),
+        ("k002", None, None),
+    ]

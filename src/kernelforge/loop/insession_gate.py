@@ -18,22 +18,22 @@ import stat
 import sys
 from typing import Any
 
-from kernelforge.llm.workspace_policy import (
+from kernelforge.workspace.edit_policy import (
     PROTECTED_GLOBS,
     is_protected_path,
     protected_path_inventory,
 )
-from kernelforge.llm.git import git
+from kernelforge.tools.git import git
 from kernelforge.loop.gate_settings import GateMeasurement, GateScope
 from kernelforge.loop.jit_rebuild import JitRebuildUnavailable, force_jit_rebuild_for_changes
-from kernelforge.loop.scoring import (
+from kernelforge.evaluation.scoring import (
     KEEP_MEASUREMENT_COUNT,
     keep_score,
     passes_keep_threshold,
     required_keep_speedup,
 )
-from kernelforge.mcp_server.tools.test import test_correctness
-from kernelforge.mcp_server.tools.bench import (
+from kernelforge.evaluation.correctness.driver import test_correctness
+from kernelforge.evaluation.benchmark.runner import (
     CaseCoverageError,
     calculate_measurement_case_speedups,
     BenchRun,
@@ -106,8 +106,15 @@ _PYTHON_COMMAND_PREFIX = re.compile(
     r"(?<![A-Za-z0-9_])(?:[A-Za-z0-9_./-]*/)?python"
     r"(?:\d+(?:\.\d+)*)?\s+"
     r"(?:-[A-Za-z][^\s;&|]*\s+)*"
-    r"-c(?=\s)",
+    r"-c\s+",
 )
+# Where a ``python -c`` payload word ends, by the quote it opens with: a single-quoted word at the next quote, a
+# double-quoted one at the next quote no backslash escapes, a bare word at whitespace or a command separator.
+_PAYLOAD_WORD_BODY = {
+    "'": re.compile(r"[^']*"),
+    '"': re.compile(r'(?:[^"\\]|\\.)*', re.DOTALL),
+    "": re.compile(r"[^\s;&|]*"),
+}
 # An interpreter as a simple command's verb, which _simple_commands has already reduced to a basename, so
 # `/usr/bin/python3.11` arrives here as `python3.11`.
 _PYTHON_VERB = re.compile(r"^python(?:\d+(?:\.\d+)*)?$")
@@ -187,39 +194,18 @@ def _python_command_payloads(command: str) -> list[tuple[str, int, int]]:
         if match is None:
             break
         start = match.end()
-        while start < len(command) and command[start].isspace():
-            start += 1
         if start >= len(command):
             break
 
         quote = command[start] if command[start] in {"'", '"'} else ""
         content_start = start + 1 if quote else start
-        end = content_start
-        escaped = False
-        while end < len(command):
-            char = command[end]
-            if quote == "'":
-                if char == "'":
-                    break
-            elif quote == '"':
-                if char == '"' and not escaped:
-                    break
-                if char == "\\" and not escaped:
-                    escaped = True
-                    end += 1
-                    continue
-                escaped = False
-            elif char.isspace() or char in ";&|\n":
-                break
-            end += 1
-
-        if quote and (end >= len(command) or command[end] != quote):
+        end = _PAYLOAD_WORD_BODY[quote].match(command, content_start).end()
+        if quote and not command.startswith(quote, end):
             cursor = start + 1
             continue
         payload_end = end + 1 if quote else end
-        raw = command[start:payload_end]
         try:
-            source = shlex.split(raw)[0]
+            source = shlex.split(command[start:payload_end])[0]
         except (ValueError, IndexError):
             cursor = max(payload_end, start + 1)
             continue
@@ -722,7 +708,7 @@ class InSessionGate:
         errors: list[str] = []
         try:
             paths = set(self._iter_snapshot_paths())
-        except Exception as error:  # noqa: BLE001 - an incomplete scan is a verdict
+        except (OSError, RuntimeError, ValueError) as error:  # an incomplete scan is a verdict
             paths = set()
             errors.append(f"protected inventory scan failed: {type(error).__name__}: {error}")
         if include_baseline:
@@ -1078,32 +1064,178 @@ class InSessionGate:
         self.findings.append(reason.strip()[:1200])
         return {"decision": "block", "reason": reason}
 
+    def _stop_for_protected_harness(self, protected_delta: str) -> dict:
+        """Allow or block a stop that still has protected harness changes on disk."""
+        if self.harness_block_count >= self.max_stop_blocks:
+            self.end_reason = "harness_tampered"
+            self._log(
+                f"block cap {self.max_stop_blocks} reached on protected "
+                "harness changes -> allow stop, outer loop force-REVERTs"
+            )
+            return self._allow()
+        self.harness_block_count += 1
+        self._log(f"BLOCK {self.harness_block_count}/{self.max_stop_blocks} (protected harness changed)")
+        return self._harness_block(
+            "Protected benchmark harness/config files changed. Restore "
+            "them before continuing; only kernel implementation files may "
+            f"be modified.\n\n{protected_delta}"
+        )
+
+    def _record_insession_bench(
+        self,
+        bench: dict,
+        wall,
+        mean_case_speedup: float,
+        measurement_scores: list[float],
+    ) -> None:
+        """Publish the in-session bench the outer loop may reuse for this stop."""
+        self.last_wall_ms = wall
+        self.last_mean_case_speedup = mean_case_speedup
+        bench["mean_case_speedup"] = mean_case_speedup
+        bench["measurement_mean_case_speedups"] = measurement_scores
+        bench["candidate_diff_sha256"] = self._candidate_diff_sha256()
+        bench["driver_sha256"] = self._sha256(Path(self.driver_script).resolve())
+        bench["baseline_case_times"] = dict(self.baseline_case_times)
+        bench["best_mean_case_speedup"] = self.best_mean_case_speedup
+        bench["bench_repeat"] = self.bench_repeat
+        self.last_bench_result = bench
+
+    async def _stop_performance_verdict(self) -> dict:
+        """Bench the correct candidate and allow only when it clears the KEEP bar."""
+        self.last_wall_ms = None
+        self.last_mean_case_speedup = None
+        self.last_bench_result = None
+        bench = await measure_wallclock(
+            BenchRun(self.driver_script, driver_args=[], repeat=self.bench_repeat),
+            measurements=KEEP_MEASUREMENT_COUNT,
+            timeout_sec=self.bench_timeout_sec,
+        )
+        wall = bench.get("median_ms")
+        if not bench.get("success"):
+            detail = bench.get("message") or "benchmark failed"
+            self._log(f"BLOCK (benchmark failed: {detail})")
+            return self._block(
+                "The kernel benchmark did not complete all three independent "
+                f"measurements: {detail}. Fix the failure and continue."
+            )
+        try:
+            measurement_scores = calculate_measurement_case_speedups(
+                bench,
+                self.baseline_case_times,
+                expected_measurements=KEEP_MEASUREMENT_COUNT,
+            )
+        except CaseCoverageError as error:
+            self._log(f"BLOCK (case coverage failed: {error})")
+            return self._block(
+                "The kernel benchmark did not report every baseline case, so "
+                f"the candidate cannot be scored safely: {error}. Restore full "
+                "suite coverage and continue."
+            )
+        mean_case_speedup = keep_score(measurement_scores)
+        if mean_case_speedup is None or self.best_mean_case_speedup is None:
+            self.last_wall_ms = wall
+            self._log("BLOCK (pristine scoring state unavailable)")
+            return self._block(
+                "Mean case scoring requires the fixed pristine baseline and "
+                "current best score. Restore canonical scoring state and continue."
+            )
+        self._record_insession_bench(bench, wall, mean_case_speedup, measurement_scores)
+
+        required = required_keep_speedup(self.best_mean_case_speedup, measurement_scores)
+        if passes_keep_threshold(
+            measurement_scores,
+            best_mean_case_speedup=self.best_mean_case_speedup,
+        ):
+            self.passed = True
+            self.end_reason = "converged"
+            self._log(
+                f"ALLOW (correct + faster: mean case speedup mean score={mean_case_speedup:.6f}x >= {required:.6f}x "
+                f"from scores={[round(score, 6) for score in measurement_scores]}; raw mean {wall} ms) "
+                f"edit={self.edit_count}"
+            )
+            return self._allow()
+
+        speedup_txt = f"{mean_case_speedup:.6f}x"
+        wall_txt = f"{wall:.6f}" if wall is not None else "unmeasured"
+        self._log(
+            f"BLOCK (correct but not faster: mean case speedup {speedup_txt}; required={required:.6f}x; "
+            f"raw mean {wall_txt} ms) edit={self.edit_count}"
+        )
+        return self._block(
+            "The kernel is CORRECT but NOT faster than the current best, so it is not good enough to finish.\n"
+            f"Measured mean case speedup={speedup_txt}; required={required:.6f}x; raw mean={wall_txt} ms.\n"
+            "Keep the kernel correct and try a DIFFERENT optimization to reduce wall time, then continue."
+        )
+
+    async def _stop_candidate_verdict(self) -> dict:
+        """Run in-session correctness (and performance) and allow or block the stop."""
+        # Ensure the canonical check compiles the kernel the agent has on disk RIGHT NOW: the SDK hook may run in a
+        # subprocess that did not inherit the loop's AITER_REBUILD, so (re)assert it here. Its measurement is the one
+        # the outer loop reuses, so a shard chosen from a stale source list would decide keep/revert on the previous
+        # iteration's binary.
+        try:
+            force_jit_rebuild_for_changes(
+                self.workspace_root or Path.cwd(),
+                [self.kernel_abs, *self.target_abs],
+            )
+        except JitRebuildUnavailable as error:
+            # The workspace, not the agent: the candidate on disk is intact, and outer canonical validation
+            # asserts the rebuild itself before measuring. Blocking here would only spend turns on a failure no
+            # edit can clear.
+            self.end_reason = "jit_rebuild_unavailable"
+            self.findings.append(f"In-session validation skipped; workspace unavailable: {error}")
+            self._log(
+                f"ALLOW (rebuild unavailable: {error}; outer loop measures this candidate) edit={self.edit_count}"
+            )
+            return self._allow()
+
+        # Correctness — canonical driver, same call the pipeline uses.
+        corr = await test_correctness(
+            driver_script=self.driver_script,
+            driver_args=[],
+            snr_threshold=self.snr_threshold,
+            timeout_sec=self.stage_timeout_sec,
+        )
+        if not corr.get("passed"):
+            outcome = str(corr.get("outcome") or "correctness_failure")
+            if outcome == "timeout":
+                self.end_reason = "validation_timeout"
+                finding = (
+                    "Full-suite correctness timed out in the in-session gate; "
+                    "handing the candidate to outer validation without blocking."
+                )
+                self.findings.append(finding)
+                self._log(f"ALLOW (validation timeout; outer loop will retry once) edit={self.edit_count}")
+                return self._allow()
+            tail = corr.get("output") or corr.get("message") or "correctness failed"
+            self._log(f"BLOCK (validation {outcome}) edit={self.edit_count}")
+            goal = "correct" if self.correctness_only else "correct AND faster"
+            return self._block(
+                "Your change is NOT finished: the kernel fails correctness. "
+                f"Fix the error below and keep going — do not stop until it is {goal}.\n\n"
+                f"{corr.get('message', '')}\n{str(tail)[-1400:]}"
+            )
+
+        # Correctness-only phase (e.g. PORT): there is no performance requirement, so a CORRECT kernel is done.
+        if self.correctness_only:
+            self.passed = True
+            self.end_reason = "converged"
+            self._log(f"ALLOW (correct; correctness-only phase) edit={self.edit_count}")
+            return self._allow()
+        return await self._stop_performance_verdict()
+
     async def _on_stop(self, input_data: dict, tool_use_id: str | None, context: Any) -> dict:
         try:
-            # ── 1) HARNESS PROTECTION (security, first) ───────────────────────
+            # Harness protection (security, first).
             protected_delta = self._protected_changes()
             self.integrity_reason = protected_delta
             self.integrity_violation = bool(protected_delta)
             self.integrity_verdict = "violation" if protected_delta else "clean"
             if protected_delta:
-                # Keep fighting an unrestored harness change only up to the cap.
-                if self.harness_block_count >= self.max_stop_blocks:
-                    self.end_reason = "harness_tampered"
-                    self._log(
-                        f"block cap {self.max_stop_blocks} reached on protected "
-                        "harness changes -> allow stop, outer loop force-REVERTs"
-                    )
-                    return self._allow()
-                self.harness_block_count += 1
-                self._log(f"BLOCK {self.harness_block_count}/{self.max_stop_blocks} (protected harness changed)")
-                return self._harness_block(
-                    "Protected benchmark harness/config files changed. Restore "
-                    "them before continuing; only kernel implementation files may "
-                    f"be modified.\n\n{protected_delta}"
-                )
+                return self._stop_for_protected_harness(protected_delta)
 
-            # ── 3) BUDGET (bounded so the gate never hangs the session) ─────── Checked before the (GPU-costly)
-            # canonical validation so an exhausted session hands off immediately instead of paying for one more bench.
+            # Budget (bounded so the gate never hangs the session). Checked before the (GPU-costly) canonical
+            # validation so an exhausted session hands off immediately instead of paying for one more bench.
             if self.block_count >= self.max_blocks:
                 self.end_reason = "block_budget_exhausted"
                 self._log(
@@ -1113,149 +1245,7 @@ class InSessionGate:
                 )
                 return self._allow()
 
-            # ── 2) SELF-CORRECTION: canonical correctness + benchmark ───────── Ensure the canonical check compiles
-            # the kernel the agent has on disk RIGHT NOW: the SDK hook may run in a subprocess that did not inherit
-            # the loop's AITER_REBUILD, so (re)assert it here. Its measurement is the one the outer loop reuses, so
-            # a shard chosen from a stale source list would decide keep/revert on the previous iteration's binary.
-            try:
-                force_jit_rebuild_for_changes(
-                    self.workspace_root or Path.cwd(),
-                    [self.kernel_abs, *self.target_abs],
-                )
-            except JitRebuildUnavailable as error:
-                # The workspace, not the agent: the candidate on disk is intact, and outer canonical validation
-                # asserts the rebuild itself before measuring. Blocking here would only spend turns on a failure no
-                # edit can clear.
-                self.end_reason = "jit_rebuild_unavailable"
-                self.findings.append(f"In-session validation skipped; workspace unavailable: {error}")
-                self._log(
-                    f"ALLOW (rebuild unavailable: {error}; outer loop measures this candidate) edit={self.edit_count}"
-                )
-                return self._allow()
-
-            # 2a) Correctness — canonical driver, same call the pipeline uses.
-            corr = await test_correctness(
-                driver_script=self.driver_script,
-                driver_args=[],
-                snr_threshold=self.snr_threshold,
-                timeout_sec=self.stage_timeout_sec,
-            )
-            if not corr.get("passed"):
-                outcome = str(corr.get("outcome") or "correctness_failure")
-                if outcome == "timeout":
-                    self.end_reason = "validation_timeout"
-                    finding = (
-                        "Full-suite correctness timed out in the in-session gate; "
-                        "handing the candidate to outer validation without blocking."
-                    )
-                    self.findings.append(finding)
-                    self._log(f"ALLOW (validation timeout; outer loop will retry once) edit={self.edit_count}")
-                    return self._allow()
-                tail = corr.get("output") or corr.get("message") or "correctness failed"
-                self._log(f"BLOCK (validation {outcome}) edit={self.edit_count}")
-                goal = "correct" if self.correctness_only else "correct AND faster"
-                return self._block(
-                    "Your change is NOT finished: the kernel fails correctness. "
-                    f"Fix the error below and keep going — do not stop until it is {goal}.\n\n"
-                    f"{corr.get('message', '')}\n{str(tail)[-1400:]}"
-                )
-
-            # Correctness-only phase (e.g. PORT): there is no performance requirement, so a CORRECT kernel is done.
-            if self.correctness_only:
-                self.passed = True
-                self.end_reason = "converged"
-                self._log(f"ALLOW (correct; correctness-only phase) edit={self.edit_count}")
-                return self._allow()
-
-            # 2b) Performance — three independent canonical measurements.
-            self.last_bench_result = None
-            bench = await measure_wallclock(
-                BenchRun(self.driver_script, driver_args=[], repeat=self.bench_repeat),
-                measurements=KEEP_MEASUREMENT_COUNT,
-                timeout_sec=self.bench_timeout_sec,
-            )
-            wall = bench.get("median_ms")
-            if not bench.get("success"):
-                self.last_wall_ms = None
-                self.last_mean_case_speedup = None
-                self.last_bench_result = None
-                detail = bench.get("message") or "benchmark failed"
-                self._log(f"BLOCK (benchmark failed: {detail})")
-                return self._block(
-                    "The kernel benchmark did not complete all three independent "
-                    f"measurements: {detail}. Fix the failure and continue."
-                )
-            try:
-                measurement_scores = calculate_measurement_case_speedups(
-                    bench,
-                    self.baseline_case_times,
-                    expected_measurements=KEEP_MEASUREMENT_COUNT,
-                )
-            except CaseCoverageError as error:
-                self.last_wall_ms = None
-                self._log(f"BLOCK (case coverage failed: {error})")
-                return self._block(
-                    "The kernel benchmark did not report every baseline case, so "
-                    f"the candidate cannot be scored safely: {error}. Restore full "
-                    "suite coverage and continue."
-                )
-            mean_case_speedup = keep_score(measurement_scores)
-            if mean_case_speedup is None or self.best_mean_case_speedup is None:
-                self.last_wall_ms = wall
-                self.last_mean_case_speedup = None
-                self.last_bench_result = None
-                self._log("BLOCK (pristine scoring state unavailable)")
-                return self._block(
-                    "Mean case scoring requires the fixed pristine baseline and "
-                    "current best score. Restore canonical scoring state and continue."
-                )
-            self.last_wall_ms = wall
-            self.last_mean_case_speedup = mean_case_speedup
-            bench["mean_case_speedup"] = mean_case_speedup
-            bench["measurement_mean_case_speedups"] = measurement_scores
-            bench["candidate_diff_sha256"] = self._candidate_diff_sha256()
-            bench["driver_sha256"] = self._sha256(Path(self.driver_script).resolve())
-            bench["baseline_case_times"] = dict(self.baseline_case_times)
-            bench["best_mean_case_speedup"] = self.best_mean_case_speedup
-            bench["bench_repeat"] = self.bench_repeat
-            self.last_bench_result = bench
-
-            required = required_keep_speedup(self.best_mean_case_speedup, measurement_scores)
-            if passes_keep_threshold(
-                measurement_scores,
-                best_mean_case_speedup=self.best_mean_case_speedup,
-            ):
-                self.passed = True
-                self.end_reason = "converged"
-                self._log(
-                    "ALLOW (correct + faster: mean case speedup "
-                    f"mean score={mean_case_speedup:.6f}x >= {required:.6f}x "
-                    f"from scores="
-                    f"{[round(score, 6) for score in measurement_scores]}; "
-                    f"raw mean {wall} ms) "
-                    f"edit={self.edit_count}"
-                )
-                return self._allow()
-
-            speedup_txt = f"{mean_case_speedup:.6f}x"
-            wall_txt = f"{wall:.6f}" if wall is not None else "unmeasured"
-
-            self._log(
-                "BLOCK (correct but not faster: mean case speedup "
-                f"{speedup_txt}; required="
-                f"{required:.6f}x; "
-                f"raw mean {wall_txt} ms) "
-                f"edit={self.edit_count}"
-            )
-            return self._block(
-                "The kernel is CORRECT but NOT faster than the current best, so it "
-                "is not good enough to finish.\n"
-                f"Measured mean case speedup={speedup_txt}; required="
-                f"{required:.6f}x; "
-                f"raw mean={wall_txt} ms.\n"
-                "Keep the kernel correct and try a DIFFERENT optimization to reduce "
-                "wall time, then continue."
-            )
+            return await self._stop_candidate_verdict()
         except Exception as e:  # noqa: BLE001 - end session but reject candidate
             self.finalize_integrity()
             self.integrity_violation = True

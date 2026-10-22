@@ -280,3 +280,47 @@ def test_an_unreadable_spool_on_finish_does_not_raise(_bound_session, monkeypatc
         lambda *_a, **_k: (_ for _ in ()).throw(OSError("spool down")),
     )
     recorder.finish({"status": "reproduced"})
+
+
+def test_a_rebound_recorder_closes_the_event_the_enqueue_opened(_bound_session, monkeypatch):
+    from hyperloom.inference_optimizer.breakdown.recorder import warm_replay_event
+    from hyperloom.inference_optimizer.session.sbd_v6 import timeline_sequence
+
+    monkeypatch.setattr(warm_replay_event, "_now", lambda: "2026-01-01T00:00:00Z")
+    _recorder()
+    opened = _events(_bound_session)
+    assert len(opened) == 1
+
+    monkeypatch.setattr(warm_replay_event, "_now", lambda: "2026-01-01T01:30:00Z")
+    rebound = _recorder(open_event_on_timeline=False)
+    rebound.finish({"status": "reproduced"})
+
+    events = _events(_bound_session)
+    assert len(events) == 1
+    assert events[0]["id"] == opened[0]["id"]
+    assert events[0]["start_time"] == "2026-01-01T00:00:00Z"
+    assert events[0]["end_time"] == "2026-01-01T01:30:00Z"
+    assert events[0]["ext"]["duration_sec"] == 5400.0
+    assert timeline_sequence(events[0]) == timeline_sequence(opened[0])
+
+
+def test_a_rebind_over_an_unreadable_spool_falls_back_to_a_fresh_recorder(_bound_session, monkeypatch):
+    import errno
+    from pathlib import Path
+
+    from hyperloom.inference_optimizer.breakdown.recorder import assembler
+
+    _recorder()
+    parts = assembler.parts_dir(_bound_session)
+    real_is_dir = Path.is_dir
+
+    def stale(self: Path) -> bool:
+        if self == parts:
+            raise OSError(errno.ESTALE, "Stale file handle")
+        return real_is_dir(self)
+
+    monkeypatch.setattr(Path, "is_dir", stale)
+    rebound = _recorder(open_event_on_timeline=False)
+
+    assert rebound is not None
+    assert rebound._sequence is None

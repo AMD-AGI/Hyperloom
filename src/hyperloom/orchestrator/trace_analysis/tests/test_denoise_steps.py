@@ -91,7 +91,8 @@ class TestCallSiteBinding:
 
     def test_tracelens_binds_requested_and_inferred_correctly(self, tmp_path, monkeypatch):
         from hyperloom.orchestrator.trace_analysis import diffusion_roofline as dr
-        from hyperloom.orchestrator.trace_analysis import tracelens_analysis as tl
+        from hyperloom.orchestrator.trace_analysis import _analysis_reports as analysis_reports
+        from hyperloom.orchestrator.trace_analysis import _trace_inputs as trace_inputs
 
         seen: dict = {}
 
@@ -113,16 +114,15 @@ class TestCallSiteBinding:
             model_name="m",
             framework="xdit",
             target_platform="MI300X",
-            analysis_mode="inference",
             dry_run=False,
             num_denoise_steps=9,
         )
-        tl.write_reports(
+        analysis_reports.write_reports(
             run_dir,
-            tl.TraceInputs(input_type="file", files=[trace]),
+            trace_inputs.TraceInputs(input_type="file", files=[trace]),
             candidates=[],
             args=args,
-            outcome=tl.OrchestratorOutcome(report_path=md),
+            outcome=analysis_reports.OrchestratorOutcome(report_path=md),
         )
         assert seen, "the TraceLens route never reached resolve_perstep_divisor"
         assert seen["requested_steps"] == 9, "the declared count must bind to requested_steps"
