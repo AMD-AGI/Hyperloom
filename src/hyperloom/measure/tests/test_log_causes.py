@@ -17,6 +17,7 @@ import pytest
 
 from hyperloom.measure import log_causes
 from hyperloom.measure.failures import FailureClass, classify_test_failure
+from hyperloom.measure.tests import eval_refusal_logs
 
 ARGPARSE_LOG = (
     "usage: launch_server.py [-h] --model-path MODEL_PATH [--tokenizer-path TOKENIZER_PATH]\n"
@@ -152,6 +153,22 @@ def test_a_refused_evaluation_request_stays_unclear_and_shows_the_servers_messag
     assert failure_class is FailureClass.UNCLEAR
     assert reason.startswith("lm_eval_http_400: ")
     assert "maximum context length is 5120 tokens" in reason
+
+
+def test_an_evaluation_crash_whose_log_holds_a_refusal_names_the_refusal_and_stays_a_candidate_failure() -> None:
+    log = eval_refusal_logs.EVAL_HEAD + eval_refusal_logs.CASCADE + eval_refusal_logs.EVAL_TAIL
+
+    failure_class, reason = _classify(log)
+
+    assert failure_class is FailureClass.CANDIDATE
+    assert reason.startswith("lm_eval_http_400: ")
+    assert "max_completion_tokens is too large: 4096" in reason and "at most 2304 completion tokens" in reason
+
+
+def test_an_evaluation_crash_with_no_refusal_in_its_log_is_still_the_generic_end() -> None:
+    log = eval_refusal_logs.CASCADE + eval_refusal_logs.EVAL_TAIL
+
+    assert _classify(log) == (FailureClass.CANDIDATE, "eval_runtime_failure")
 
 
 def test_a_400_in_the_server_access_log_alone_is_named_too() -> None:

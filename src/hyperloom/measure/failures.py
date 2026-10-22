@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from enum import Enum
 
 from hyperloom.common.failure_signature import (
+    EVAL_RUNTIME_FAILURE,
     HIP_KERNEL_MISSING,
     HIP_RUNTIME_ERROR,
     IMPORT_ERROR,
@@ -74,6 +75,7 @@ PORT_IN_USE_REASON = "port_in_use"
 #: The server did not report ready within the boot limit (``hyperloom.measure.boot_watch``).
 SERVER_BOOT_TIMEOUT_REASON = "server_boot_timeout"
 #: The two causes an unclear failure names when its log carries them; the reason is ``<prefix>: <the log's line>``.
+#: A failure the log only calls a crashed evaluation names the refused request too, when the log carries one.
 LM_EVAL_BAD_REQUEST_REASON = "lm_eval_http_400"
 PYTHON_EXCEPTION_REASON = "python_exception"
 NO_KNOWN_SIGNATURE_REASON = "no_known_signature"
@@ -192,6 +194,10 @@ def _named_by_logs(text: str) -> FailureClassification | None:
     if _PORT_IN_USE.search(text):
         return _infra(PORT_IN_USE_REASON)
     signature = classify_failure(text)
+    if signature.kind == EVAL_RUNTIME_FAILURE:
+        refusal = log_causes.bad_request(text)
+        if refusal:
+            return _candidate(f"{LM_EVAL_BAD_REQUEST_REASON}: {refusal}")
     if signature.is_actionable:
         # The signature names the kind; the line of the log that states it names the flag or the module.
         reader = _QUOTED_KINDS.get(signature.kind)

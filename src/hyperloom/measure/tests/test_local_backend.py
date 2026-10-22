@@ -22,6 +22,7 @@ from hyperloom.measure import local
 from hyperloom.measure.local import SUPPORTED_KINDS, LocalMeasurementBackend, TestCallRefused
 from hyperloom.measure.repro import read_verdict
 from hyperloom.measure.socket import RoundPlan, SessionFacts, TestCall
+from hyperloom.measure.tests import eval_refusal_logs
 from hyperloom.measure.tests._inferencex import CLIENT, CLIENT_PATH, LIBRARY, LIBRARY_PATH, stock_checkout
 from hyperloom.orchestrator.actions.executors import (
     ORCHESTRATOR_CANCELLED_RETURNCODE,
@@ -1419,6 +1420,68 @@ Traceback (most recent call last):
 RuntimeError: Session is closed
 """
 _ACCESS_400 = '[2026-10-21 06:27:25] INFO:     127.0.0.1:58342 - "POST /v1/completions HTTP/1.1" 400 Bad Request\n'
+
+
+def test_a_refused_evaluation_names_the_refusal_that_a_flood_of_tracebacks_pushed_out_of_the_log_tail(
+    grid, server, tmp_path
+):
+    workspace = tmp_path / "ws" / "warmup"
+    workspace.mkdir(parents=True)
+    (workspace / "server.log").write_text(eval_refusal_logs.server_log(), encoding="utf-8")
+    (workspace / "benchmark_stderr.log").write_text(eval_refusal_logs.benchmark_stderr(), encoding="utf-8")
+    (workspace / "eval_returncode").write_text("1", encoding="utf-8")
+    grid.answers.update(
+        warmup=grid.result(
+            "warmup",
+            returncode=1,
+            output_throughput=6245.9,
+            server_log_path=str(workspace / "server.log"),
+            nonfatal_warnings=["nonzero_rc_after_complete_protocol:1"],
+        ),
+        test=grid.result("test"),
+    )
+
+    outcome = _run(_graded_call(tmp_path))
+
+    assert (outcome.returncode, outcome.failure_class) == (1, "candidate")
+    reason = outcome.failure_reason or ""
+    assert reason.startswith("lm_eval_http_400: "), "the refusal, not the generic end of the evaluation"
+    assert "max_completion_tokens is too large: 4096" in reason and "at most 2304 completion tokens" in reason
+
+
+def _log_with_refusal_at(tmp_path: Path, *, from_end: int, size: int) -> Path:
+    """A log of ``size`` bytes of progress lines whose refusal line starts ``from_end`` bytes before its end."""
+    line = eval_refusal_logs.REFUSAL + "\n"
+    filler = "Requesting API: 100%|##########| 1319/1319\n"
+    body = bytearray((filler * (size // len(filler) + 1)).encode()[:size])
+    start = size - from_end
+    body[start - 1 : start + len(line)] = b"\n" + line.encode()
+    path = tmp_path / "benchmark_stderr.log"
+    path.write_bytes(bytes(body))
+    return path
+
+
+@pytest.mark.parametrize(
+    "from_end",
+    [
+        3 * (1 << 20) + 500,  # a few blocks up, inside one block
+        (1 << 20) + 100,  # the line starts just above the first block's start: it ends inside that block
+        (1 << 20) + len(eval_refusal_logs.REFUSAL) // 2,  # and the block boundary cuts the line in two
+    ],
+)
+def test_the_refusal_is_found_wherever_it_sits_in_the_scanned_part_of_a_log(tmp_path, from_end):
+    path = _log_with_refusal_at(tmp_path, from_end=from_end, size=5 * (1 << 20))
+
+    assert local._read_refusal(path) == eval_refusal_logs.REFUSAL, "the whole line, not the half a block cut"
+
+
+def test_a_refusal_older_than_the_scanned_part_of_a_log_is_not_searched_for(tmp_path):
+    path = _log_with_refusal_at(
+        tmp_path, from_end=local._REFUSAL_SCAN_CHARS + 1000, size=local._REFUSAL_SCAN_CHARS + 2000
+    )
+
+    assert local._read_refusal(path) == ""
+    assert local._read_refusal(tmp_path / "missing.log") == ""
 
 
 def test_an_evaluation_that_fails_after_a_whole_protocol_is_classified_from_the_logs_it_wrote(grid, server, tmp_path):

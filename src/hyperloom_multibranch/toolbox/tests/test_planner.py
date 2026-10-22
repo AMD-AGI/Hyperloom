@@ -11,6 +11,7 @@ import pytest
 
 import yaml
 
+from hyperloom.contracts.measurement import Purpose, TestKind
 from hyperloom.contracts.recipe import ComponentChange, ConfigDelta, RecipeDelta
 from hyperloom.inference_optimizer.cli.benchmark_config import AgentXWorkload, write_agentx_benchmark
 from hyperloom.measure.compile import EnvironmentCompiler, LocalBlobStore, PackageBase
@@ -85,6 +86,46 @@ async def test_a_component_that_cannot_be_applied_is_refused_by_acceptance(tmp_p
     with pytest.raises(RequestRejected) as refused:
         await rig.toolbox.submit_test(req(change=change))
     assert refused.value.code == "delta_not_applicable"
+
+
+async def test_an_accuracy_test_whose_launch_serves_less_context_than_its_evaluation_is_refused_with_the_minimum(
+    tmp_path: Path,
+) -> None:
+    rig = build(tmp_path, repo=FakeRepo(recipe_with()), planner=_planner(tmp_path))
+    with pytest.raises(RequestRejected) as refused:
+        await rig.toolbox.submit_test(req(server_args="--context-length 2304"))  # an InferenceX explore: accuracy on
+    assert refused.value.code == "context_below_eval"
+    assert "Serve at least 8192 tokens" in refused.value.reason and "--context-length 2304" in refused.value.reason
+    assert rig.notebook._state().requests == {} and rig.toolbox._log.entries() == []
+
+
+async def test_the_minimum_context_follows_the_point_the_evaluation_runs_on(tmp_path: Path) -> None:
+    rig = build(tmp_path, repo=FakeRepo(recipe_with()), planner=_planner(tmp_path))
+    change = RecipeDelta(config=ConfigDelta(server_args="--context-length 2304", envs={"MAX_MODEL_LEN": "4096"}))
+    with pytest.raises(RequestRejected) as refused:
+        await rig.toolbox.submit_test(req(change=change))
+    assert refused.value.code == "context_below_eval" and "Serve at least 4096 tokens" in refused.value.reason
+
+
+@pytest.mark.parametrize(
+    "server_args", ["--context-length 8192", "--context-length=16384", "--max-running-requests 77"]
+)
+async def test_a_launch_that_serves_the_evaluation_context_or_sets_none_is_accepted(
+    tmp_path: Path, server_args: str
+) -> None:
+    rig = build(tmp_path, repo=FakeRepo(recipe_with()), planner=_planner(tmp_path))
+    await rig.toolbox.submit_test(req(server_args=server_args))
+    await rig.toolbox.drain()
+    assert len(rig.executor.jobs) == 1
+
+
+async def test_a_profile_test_carries_no_evaluation_and_is_not_held_to_its_context(tmp_path: Path) -> None:
+    rig = build(tmp_path, repo=FakeRepo(recipe_with()), planner=_planner(tmp_path))
+    await rig.toolbox.submit_test(
+        req(kind=TestKind.PROFILE, purpose=Purpose.PROFILE, server_args="--context-length 2304")
+    )
+    await rig.toolbox.drain()
+    assert len(rig.executor.jobs) == 1 and rig.executor.jobs[0].request.accuracy is False
 
 
 async def test_an_agentx_session_plans_points_through_the_agentx_launch_overrides(tmp_path: Path) -> None:

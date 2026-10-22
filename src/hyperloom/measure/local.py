@@ -90,6 +90,11 @@ _STOP_RETURNCODES = {
 _BOOT_ONLY_NOTE = "server_lifecycle_boot_only"
 _OUTPUT_POLL_SEC = 5.0
 _LOG_TAIL_CHARS = 64 * 1024
+#: How far back a log is searched for the refusal of an evaluation request, in blocks that overlap by a line's length.
+_MIB = 1 << 20
+_REFUSAL_SCAN_CHARS = 16 * _MIB
+_REFUSAL_BLOCK_CHARS = _MIB
+_REFUSAL_BLOCK_OVERLAP_CHARS = 4096
 _BENCHMARK_STDERR = "benchmark_stderr.log"
 _ACCURACY = "accuracy"
 _UTF8 = "utf-8"
@@ -757,6 +762,30 @@ def _read_tail(path: str | None) -> str:
         return ""
 
 
+def _read_refusal(path: Path) -> str:
+    """The last refusal of an evaluation request the log at ``path`` holds wherever it is in the log, else ``""``.
+
+    The evaluation client prints a refusal when it happens and, once its retries are spent, one traceback for each
+    request that gave up, thousands of them: the tail of the log is those tracebacks and the refusal sits far above.
+    """
+    try:
+        with open(path, "rb") as handle:
+            end = handle.seek(0, os.SEEK_END)
+            floor = max(0, end - _REFUSAL_SCAN_CHARS)
+            while end > floor:
+                start = max(floor, end - _REFUSAL_BLOCK_CHARS)
+                handle.seek(start)
+                block = handle.read(end - start).decode(_UTF8, errors="replace")
+                # The block starts mid-line unless it starts the file; the overlap of the next block holds that line whole.
+                found = log_causes.bad_request(block if start == 0 else block.partition("\n")[2])
+                if found:
+                    return found
+                end = start + _REFUSAL_BLOCK_OVERLAP_CHARS if start > floor else floor
+    except OSError:
+        return ""
+    return ""
+
+
 def _image_digest(call: TestCall) -> str | None:
     environment = call.environment
     return getattr(environment, "image_digest", None) or getattr(environment, "base_image_digest", None)
@@ -796,6 +825,7 @@ def _failure_logs(failing: list[VariantResult]) -> list[str]:
         beside = Path(result.server_log_path).parent
         stderr_logs = [beside / _BENCHMARK_STDERR, *sorted(beside.glob(f"benchmark_*/{_BENCHMARK_STDERR}"))]
         logs.extend(_read_tail(str(path)) for path in [Path(result.server_log_path), *stderr_logs])
+        logs.extend(_read_refusal(path) for path in stderr_logs)
     return logs
 
 
