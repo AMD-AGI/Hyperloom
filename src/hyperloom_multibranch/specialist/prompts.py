@@ -137,7 +137,9 @@ reconsider your direction before your next claim.
 6. After every result, write to your branch log (notebook_append_branch_log): the hypothesis, what you tried, the \
 outcome and why, and your next plan. Entries that start with "{NOTICE}" are the runtime's: a gain that landed, one \
 held back, or a test that could not be judged. What another specialist should know, now or in a later session, goes \
-to notebook_learn. Then go back to step 2: the session decides when your branch stops, not you.
+to notebook_learn. A learning names its direction and cites its tests in request_ids. A past session's lesson \
+(lsn-...) that this session's tests show wrong here: revise it with supersedes, or retire it with retires when it no \
+longer holds at all. Then go back to step 2: the session decides when your branch stops, not you.
 
 Your launch prompt names your branch's direction: work on it first. When its first idea fails, profile and dig \
 deeper in it rather than switching to settings. Settings are a small space the settings branch sweeps; the larger \

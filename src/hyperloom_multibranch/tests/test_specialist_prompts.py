@@ -279,6 +279,13 @@ def test_the_role_gives_the_offline_route_for_a_tunableop_table():
     assert "online_tuning_unsupported" in prompt
 
 
+def test_the_role_says_a_learning_names_its_direction_and_how_a_past_lesson_is_revised_or_retired():
+    prompt = role_prompt(WORKLOAD)
+
+    assert "A learning names its direction and cites its tests in request_ids" in prompt
+    assert "revise it with supersedes" in prompt and "retire it with retires" in prompt
+
+
 def test_the_role_says_how_to_read_a_hip_runtime_error_and_when_a_setting_counts_as_unusable():
     prompt = role_prompt(WORKLOAD)
 
