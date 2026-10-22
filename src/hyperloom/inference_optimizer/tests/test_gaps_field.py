@@ -283,6 +283,23 @@ async def test_refresh_gaps_silent_on_synthetic_partial_capture(coord):
 
 
 @pytest.mark.asyncio
+async def test_prefill_gap_is_retired_once_a_later_profile_covers_prefill(coord):
+    """partial -> refresh (gap raised) -> covered -> refresh (gap retired, not left at severity high)."""
+    s = coord.shared_state
+    s.benchmark_mode = "agentx"
+    wid = coord.recipe_journal.workload_canonical_id()
+
+    s.last_profile_phase_coverage = {"partial": True, "missing": "prefill"}
+    await coord.gap_refresh.refresh_gaps(reason="baseline_done", workload_id=wid)
+    assert any(g["canonical_id"].endswith("#phase_unmeasured:prefill") for g in s.gaps)
+
+    # A later profile captures prefill; the next refresh must remove the resolved row, not just stop re-emitting it.
+    s.last_profile_phase_coverage = {"partial": False, "missing": ""}
+    await coord.gap_refresh.refresh_gaps(reason="specialist_done", workload_id=wid)
+    assert not any(g["canonical_id"].endswith("#phase_unmeasured:prefill") for g in s.gaps)
+
+
+@pytest.mark.asyncio
 async def test_refresh_gaps_dedupes_recurring_failures(coord):
     """The attempts extractor folds repeated (action, error_class) failures into a single gap row, one attempt per failure."""
     s = coord.shared_state
