@@ -223,6 +223,11 @@ class _SourceThenFailBackend:
         payload = json.loads(spec.user_prompt)
         root = Path(payload["analysis_staging_dir"])
         (root / "source_map.md").write_text("# Validated partial source map\n")
+        request = json.loads(Path(payload["request_file"]).read_text())
+        case_root = root / "cases" / request["cases"][0]["directory"]
+        case_root.mkdir(parents=True, exist_ok=True)
+        (case_root / "analysis.md").write_text("# Partial case analysis\n")
+        (case_root / "bottleneck.json").write_text("[]")
         raise RuntimeError("simulated failure after durable source step")
 
 
@@ -833,17 +838,25 @@ async def test_partial_checkpoint_is_exposed_as_orchestration_evidence(
     backend = _SourceThenFailBackend()
     service = _service(tmp_path, backend)
     context = _context(workspace)
+    context = replace(
+        context,
+        cases=(replace(context.cases[0], bottleneck="ORIGINAL"), *context.cases[1:]),
+    )
 
     with pytest.raises(AnalysisBundleError):
         await service.ensure_bundle(context, sources=AnalysisSources(str(kernel), str(driver), [str(kernel)]))
 
     checkpoint = service.apply_checkpoint(context)
     evidence = {item.kind: item for item in checkpoint.evidence_refs}
+    partial_case = checkpoint.cases[0]
 
     assert checkpoint.source_map_path.endswith("source_map.md")
     assert Path(checkpoint.source_map_path).read_text() == ("# Validated partial source map\n")
     # A partial checkpoint narrows the evidence, never the edit surface.
     assert checkpoint.editable_sources == context.editable_sources
+    assert partial_case.bottleneck == "ORIGINAL"
+    assert Path(partial_case.profile_summary_path).read_text() == "# Partial case analysis\n"
+    assert "analysis_checkpoint_interpretation_only" in partial_case.flags
     assert "analysis_artifact_catalog" in evidence
     catalog = json.loads(Path(evidence["analysis_artifact_catalog"].path).read_text())
     source_entry = next(item for item in catalog["artifacts"] if item["kind"] == "source_map")
