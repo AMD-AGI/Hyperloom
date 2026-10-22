@@ -56,10 +56,7 @@ cognitive-complexity src/hyperloom/orchestrator/kernel/apply_kernel_patch.py::fi
 cognitive-complexity src/hyperloom/orchestrator/kernel/apply_kernel_patch.py::revert_kernel_patch 83
 cognitive-complexity src/hyperloom/orchestrator/kernel/conc_sweep.py::_sweep_one_arm_single_server 68
 cognitive-complexity src/hyperloom/orchestrator/kernel/conc_sweep.py::run_conc_sweep 60
-cognitive-complexity src/hyperloom/orchestrator/kernel/controller_patch_integration.py::integrate_controller_patches 38
 cognitive-complexity src/hyperloom/orchestrator/kernel/forge_fusion.py::_normalize_manifest 44
-cognitive-complexity src/hyperloom/orchestrator/kernel/forge_fusion.py::salvage_forge_fusion_from_workspace 41
-cognitive-complexity src/hyperloom/orchestrator/kernel/gemm_shape_coverage.py::align_shapes_to_aiter_keys 33
 cognitive-complexity src/hyperloom/orchestrator/kernel/request_handlers.py::_capture_vllm_tunableop_shapes 75
 cognitive-complexity src/hyperloom/orchestrator/kernel/request_handlers.py::_fill_integrate_defaults_from_state 79
 cognitive-complexity src/hyperloom/orchestrator/kernel/request_handlers.py::_resolve_forge_server_log 49
@@ -490,11 +487,7 @@ function-lines src/hyperloom/orchestrator/kernel/apply_kernel_patch.py::revert_k
 function-lines src/hyperloom/orchestrator/kernel/conc_sweep.py::_build_roofline_ceiling 81
 function-lines src/hyperloom/orchestrator/kernel/conc_sweep.py::_sweep_one_arm_single_server 328
 function-lines src/hyperloom/orchestrator/kernel/conc_sweep.py::run_conc_sweep 243
-function-lines src/hyperloom/orchestrator/kernel/conc_sweep_plot.py::_render 95
-function-lines src/hyperloom/orchestrator/kernel/controller_patch_integration.py::integrate_controller_patches 257
 function-lines src/hyperloom/orchestrator/kernel/forge_fusion.py::_normalize_manifest 147
-function-lines src/hyperloom/orchestrator/kernel/forge_fusion.py::salvage_forge_fusion_from_workspace 82
-function-lines src/hyperloom/orchestrator/kernel/forge_handoff.py::build_serving_context_md 84
 function-lines src/hyperloom/orchestrator/kernel/request_handlers.py::_capture_vllm_tunableop_shapes 256
 function-lines src/hyperloom/orchestrator/kernel/request_handlers.py::_fill_integrate_defaults_from_state 147
 function-lines src/hyperloom/orchestrator/kernel/request_handlers.py::_grade_integrate_accuracy 121
