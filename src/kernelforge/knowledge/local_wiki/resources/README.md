@@ -128,7 +128,6 @@ an external copy:
 | `ck_` | `languages/ck/skills/optimize/ck_levers/` | a CK authoring/tuning lever |
 | `triton_` | `languages/triton/skills/optimize/triton_levers/` | a Triton authoring/tuning lever |
 | `hip_` | `languages/hip/skills/optimize/hip_levers/` | a HIP/C++ authoring lever |
-| `flydsl_` | `languages/flydsl/skills/optimize/flydsl_levers/` | a FlyDSL authoring/tuning lever |
 | `aiter_` | `framework/aiter/skills/optimize/aiter_levers/` | an aiter-dispatch lever for one domain |
 
 `INDEX.md` keeps its name everywhere — it is the loader contract (`build_forge_knowledge` loads a

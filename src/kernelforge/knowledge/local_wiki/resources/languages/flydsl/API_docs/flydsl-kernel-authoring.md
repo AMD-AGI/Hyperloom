@@ -25,8 +25,8 @@ troubleshooting list. Reach for it to *look something up* while writing or revie
 code. If instead you want a *guided, step-by-step procedure* that turns a kernel requirement
 into a finished, tested kernel (classify -> skeleton -> compute -> control flow -> test), use
 the **flydsl-tile-programming** skill, which is the wizard companion to this reference. For
-diagnosing a kernel that already compiles but produces NaN/inf/wrong results, use the
-**debug-flydsl-kernel** skill.
+diagnosing a kernel that already compiles but produces NaN/inf/wrong results, use the FlyDSL
+optimization skill's `bottleneck/debug-flydsl-kernel.md`.
 
 ---
 

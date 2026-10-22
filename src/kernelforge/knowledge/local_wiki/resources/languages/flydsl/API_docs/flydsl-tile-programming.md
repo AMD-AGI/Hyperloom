@@ -6,7 +6,7 @@ description: >
   kernel, porting a Triton kernel to FlyDSL, or learning tile programming by following steps.
   For API lookups, per-op tables, and the exhaustive troubleshooting list, use
   flydsl-kernel-authoring instead; for diagnosing a kernel that already runs and is wrong,
-  use debug-flydsl-kernel.
+  use the FlyDSL optimization skill's debug card.
 allowed-tools: Read Edit Bash Grep Glob Agent
 ---
 

@@ -118,7 +118,9 @@ _SHA256_FORGE_LOOP: dict[str, str] = {
     "aiter": "290f5b86300a62c682789551515fd000dfe395ad2abbea5a68a5e683588fec90",
     "assembly": "67ce0c680f6b603d7c656feb1f1cc1f5eaf1bf4f6afc5d9f368b0361dd4b1492",
     "ck": "d5a880ff37bdd3a1d04d33227aa1e2a7840f7cdee9559043ce14cf40e1ca6ebd",
-    "flydsl": "659dadd861489506bd75bbc4ec9e511f050f6ee03711238fd4c8def1064e1519",
+    # The FlyDSL skills left the packaged KB for an external skill (--skill-dir); flydsl's Knowledge paragraph
+    # now says where technique lives, which moved flydsl alone.
+    "flydsl": "e4edb9c1d172fb94ef6f3940943660f150dacd678d8c535452edecc8ad3afba7",
     # The group-axis rule moved fusion alone: harness contract step 4 now forbids
     # substituting gqa_groups / num_attention_heads for n_local_groups on DSv4 wo_a
     # paths, and reminds authors that H and G are often unequal.

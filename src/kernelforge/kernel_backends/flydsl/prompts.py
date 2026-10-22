@@ -42,8 +42,10 @@ over MFMA instruction usage, register allocation, and data movement.
 
 Backend knowledge is NOT hardcoded in this prompt; it lives in the `<knowledge>` maps
 below and is loaded with the `Read` tool when relevant. The maps cover the AMD hardware
-facts, the backend-agnostic optimization methodology, and the FlyDSL authoring surface
-(API, per-operator cards, profiling/optimize skills) for {config_gpu_target}.
+facts, the backend-agnostic optimization methodology, and the FlyDSL language
+(`languages/flydsl/`) for {config_gpu_target}. Optimization, profiling and debugging
+technique is an external skill: when the knowledge block lists one, read its `SKILL.md`
+before planning a change.
 
 Rules: derive tile sizes / env knobs / MFMA layout for the ACTUAL target arch and
 operator FROM these docs — never rely on memorized numbers, and never copy another

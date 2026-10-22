@@ -1647,6 +1647,8 @@ def forge_loop(request: ForgeLoopRequest):
     overrides["external_skills"] = request.knowledge.skills
     for skill in request.knowledge.skills:
         print(f"  [knowledge] skill {skill.name}: {skill.skill_file}")
+    if kernel_backend == "flydsl" and not request.knowledge.skills:
+        print("  [knowledge] no --skill-dir: FlyDSL optimization technique is an external skill this run will not see")
     if gpu_target:
         os.environ["GPU_TARGET"] = gpu_target
     config = Config.from_env(
