@@ -337,9 +337,14 @@ class AgentSession:
         return None
 
     async def _branch_requests(self) -> frozenset[str]:
+        """The branch's candidate tests: a profile measures no candidate, so it does not reset an idle count."""
         branch = self._start.branch
         records = (await self._place.notebook.snapshot()).records
-        return frozenset(record.request_id for record in records if record.request.branch == branch)
+        return frozenset(
+            record.request_id
+            for record in records
+            if record.request.branch == branch and record.request.kind is TestKind.TEST
+        )
 
     async def _tests_in_flight(self) -> bool:
         branch = self._start.branch
