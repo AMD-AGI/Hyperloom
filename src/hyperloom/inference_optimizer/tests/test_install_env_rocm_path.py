@@ -4,11 +4,8 @@
 
 """Regression tests for the ROCM_PATH written into kernel-agent runtime env.
 
-Ray's native AMD-GPU detector (ray._private.thirdparty.pyamdsmi) looks for
-$ROCM_PATH/lib/librocm_smi64.so, defaulting ROCM_PATH=/opt/rocm when unset. A
-rocm-sdk wheel venv never populates /opt/rocm, so without this the cluster
-silently reports 0 GPUs. These tests cover the resolution being wired into
-write_env_file's persistence, not the GPU-detection consequence itself.
+Covers resolution + persistence in write_env_file; see _resolve_rocm_path's
+own comment in install_kernel_tools.sh for why ROCM_PATH matters to Ray.
 """
 
 from __future__ import annotations

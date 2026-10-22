@@ -1716,13 +1716,7 @@ def test_backend_ensure_reuses_kernel_runtime(monkeypatch: pytest.MonkeyPatch):
 
 
 def test_backend_ensure_fails_fast_on_zero_gpu_cluster(monkeypatch: pytest.MonkeyPatch):
-    """ensure() raises immediately when the cluster it just connected to has no GPU.
-
-    Covers the rocm-sdk-wheel-venv failure mode where Ray's native AMD-GPU
-    detector silently reports 0 GPUs (see _assert_gpu_resources docstring) --
-    this must surface as a loud, immediate error, not a cluster that looks
-    healthy while every GPU action downstream is quietly infeasible.
-    """
+    """ensure() raises immediately when the cluster it just connected to has no GPU."""
     from types import SimpleNamespace
 
     from hyperloom.orchestrator.actions.executors import _ray_runtime as rr

@@ -51,12 +51,10 @@ than at the first benchmark.
 
 ## Sandboxing with `HYPERLOOM_SANDBOX_MODE=bwrap`
 
-Applies to every `--framework`, not just `custom` -- shown here because this
-is where it was first exercised end-to-end. Set
-`HYPERLOOM_SANDBOX_MODE=bwrap` and the CLI re-executes itself inside
-bubblewrap before dispatching, so every subprocess a run later spawns --
-benchmarks, Ray actors, the Claude Code specialist -- is confined without a
-container. Default is `off`.
+Applies to every `--framework`. Set `HYPERLOOM_SANDBOX_MODE=bwrap` and the CLI
+re-executes itself inside bubblewrap before dispatching, so every subprocess a
+run later spawns -- benchmarks, Ray actors, the Claude Code specialist -- is
+confined without a container. Default is `off`.
 
 | Var | Purpose |
 |---|---|
@@ -64,13 +62,12 @@ container. Default is `off`.
 | `HYPERLOOM_SANDBOX_READONLY` | Colon-separated read-only bind roots: model weights, datasets, anything the run must not edit. |
 
 Everything else -- the venv, a source checkout on `PYTHONPATH`, the
-interpreter's external support files, `/usr /lib /lib64 /bin /sbin /etc /opt
-/sys`, GPU devices -- is detected and bound automatically. A system ROCm
-install at `/opt/rocm` needs no extra configuration: `/opt` is one of the
-automatically-bound roots.
+interpreter's support files, `/usr /lib /lib64 /bin /sbin /etc /opt /sys`, GPU
+devices -- is detected and bound automatically, including a system ROCm
+install at `/opt/rocm`.
 
-Run `install.sh` **before** the sandbox is active (it writes into the venv
-and the checkout, which the sandbox makes read-only by design), then launch
+Run `install.sh` before the sandbox is active -- it writes into the venv and
+the checkout, which the sandbox makes read-only -- then launch
 `python -m hyperloom optimize ...` with the env vars above set.
 
 This is an isolation boundary, not a security boundary against hostile code:
@@ -79,22 +76,18 @@ devices are bound in deliberately.
 
 ### Troubleshooting
 
-- **A CLI tool the sandbox needs to launch (Claude Code, codex) is "not
-  found."** The sandbox forces `HOME` to a fresh, empty tmpfs unconditionally,
-  so a tool installed under the real `$HOME` is invisible unless its actual
-  (resolved, non-symlink) directory is also added to
+- **A CLI tool the sandbox launches (Claude Code, codex) is "not found."**
+  `HOME` is forced to an empty tmpfs, so a tool under the real `$HOME` is
+  invisible unless its resolved (non-symlink) directory is also added to
   `HYPERLOOM_SANDBOX_WRITABLE`/`HYPERLOOM_SANDBOX_READONLY`, or relocated
-  outside `$HOME` entirely.
-- **`ray start`/GCS fails to bind when launched from inside another sandboxed
-  or containerized environment** (CI, a devcontainer, nested
-  containerization): check that the real network interface is visible
-  (`ip -4 addr show`) from wherever `hyperloom optimize` actually runs. bwrap
-  mode shares the host network namespace rather than isolating it, so a GCS
-  bind failure here usually means an *outer* layer of sandboxing is
-  restricting network visibility, not bwrap itself.
+  outside `$HOME`.
+- **`ray start`/GCS fails to bind under CI or another sandboxed/containerized
+  launcher:** check that the real network interface is visible
+  (`ip -4 addr show`) from wherever `hyperloom optimize` runs. bwrap shares the
+  host network namespace rather than isolating it, so this usually means an
+  outer sandbox layer is restricting network visibility, not bwrap.
 - **Ray reports 0 GPUs** on a `rocm-sdk` wheel venv: fixed as of this PR
-  (`ROCM_PATH` is now persisted automatically); upgrade if you're still
-  hitting `RayInfeasibleError: cluster has 0.0 GPU(s)`.
+  (`ROCM_PATH` is now persisted automatically).
 
 ## The code checkout
 

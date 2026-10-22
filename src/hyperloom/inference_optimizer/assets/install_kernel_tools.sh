@@ -43,17 +43,10 @@ _resolve_magpie_python() {
   printf '%s' "${candidate:-/opt/venv/bin/python}"
 }
 
-# Resolve ROCM_PATH for a rocm-sdk wheel venv (`uv pip install rocm[...]`),
-# which never populates /opt/rocm -- everything lives under site-packages.
-# Ray's native AMD-GPU detector (ray._private.thirdparty.pyamdsmi, a ctypes
-# binding to the legacy rocm_smi_lib ABI) looks for
-# $ROCM_PATH/lib/librocm_smi64.so and defaults ROCM_PATH=/opt/rocm when unset,
-# so on a wheel install it silently finds nothing and the Ray cluster comes up
-# reporting 0 GPUs -- not a clean failure, since `ctypes.CDLL("")` on a miss
-# succeeds (hands back the process's own symbol table) rather than raising.
-# No-op (leaves ROCM_PATH as the caller set it, or unset) on a standard
-# /opt/rocm image or any host without the `rocm_sdk` package, where the
-# default is already correct. Mirrors export_rocm_sdk_toolchain_root() in
+# Ray's AMD-GPU detector needs ROCM_PATH to find librocm_smi64.so, and
+# defaults to /opt/rocm -- which a rocm-sdk wheel venv never populates,
+# silently leaving Ray reporting 0 GPUs. No-op on a system ROCm install or an
+# operator-set ROCM_PATH. Mirrors export_rocm_sdk_toolchain_root() in
 # install_baremetal.sh, which this file does not source.
 _resolve_rocm_path() {
   if [ -n "${ROCM_PATH:-}" ]; then

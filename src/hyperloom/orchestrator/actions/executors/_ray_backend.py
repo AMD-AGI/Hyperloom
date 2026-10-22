@@ -169,20 +169,10 @@ def _resolve_head_num_gpus(num_gpus: int | None) -> int | None:
 def _assert_gpu_resources(num_gpus: int | None) -> None:
     """Fail fast if the cluster this process just connected to has no GPU.
 
-    A reachable cluster proves nothing about what it can actually run: Ray's
-    native AMD-GPU auto-detection (``ray._private.thirdparty.pyamdsmi``, a
-    ctypes binding to the legacy ``rocm_smi_lib`` ABI) looks for
-    ``$ROCM_PATH/lib/librocm_smi64.so`` and silently reports zero GPUs when it
-    can't find one -- which a rocm-sdk wheel venv never populates at the
-    default ``$ROCM_PATH=/opt/rocm``. Without this check, every GPU action
-    from here on is quietly infeasible and the orchestrator burns real
-    wall-clock and LLM calls proposing fallbacks before the actual cause ever
-    surfaces by accident in a log line, instead of failing here where the
-    cause is one hop away.
-
-    Skipped only when the caller explicitly declared ``num_gpus=0`` -- an
-    operator who asked for a CPU-only cluster gets one; everyone else (no
-    override, or an explicit positive count) gets a real check.
+    A reachable cluster proves nothing about what it can run: Ray's AMD-GPU
+    auto-detection silently reports zero GPUs on a rocm-sdk wheel venv (see
+    the error message below), and every GPU action after that is quietly
+    infeasible. Skipped when the caller explicitly declared ``num_gpus=0``.
     """
     if num_gpus == 0:
         return
