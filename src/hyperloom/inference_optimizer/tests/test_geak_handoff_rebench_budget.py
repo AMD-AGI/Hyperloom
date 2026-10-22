@@ -94,7 +94,6 @@ def test_the_rewrite_controller_returns_with_one_measurement_left_in_the_phase(
 ):
     monkeypatch.setattr(ps, "phase_budget_remaining_seconds", lambda _state, **_kw: phase_left)
     monkeypatch.setattr(ps, "session_remaining_seconds", lambda _state, **_kw: SESSION_LEFT)
-    monkeypatch.setattr(ps, "phase_cap_seconds", lambda _state: None)
 
     soft, hard = coordinator.phase_kernel._kernel_rewrite_controller_timeouts()
 
