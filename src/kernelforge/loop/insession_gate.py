@@ -1105,11 +1105,11 @@ class InSessionGate:
             return None
         self.batch_block_count += 1
         self._log(f"BLOCK {self.batch_block_count}/{len(batch.parts)} (batch unfinished) edit={self.edit_count}")
-        self.findings.append(reason[:1200])
-        return {"decision": "block", "reason": reason}
+        return self._unbudgeted_block(reason)
 
-    def _harness_block(self, reason: str) -> dict:
-        """Block a stop for unrestored harness tampering (does not eat perf budget)."""
+    def _unbudgeted_block(self, reason: str) -> dict:
+        """Block a stop without eating perf budget: unrestored harness tampering and an unfinished batch are each
+        capped by a count of their own."""
         self.findings.append(reason.strip()[:1200])
         return {"decision": "block", "reason": reason}
 
@@ -1124,7 +1124,7 @@ class InSessionGate:
             return self._allow()
         self.harness_block_count += 1
         self._log(f"BLOCK {self.harness_block_count}/{self.max_stop_blocks} (protected harness changed)")
-        return self._harness_block(
+        return self._unbudgeted_block(
             "Protected benchmark harness/config files changed. Restore "
             "them before continuing; only kernel implementation files may "
             f"be modified.\n\n{protected_delta}"
