@@ -420,14 +420,13 @@ def _node_power_settings(declared: DeclaredPowerSettings) -> tuple[dict[str, Any
         read_node_power_settings,
     )
 
-    npm, node_power_limit_w = declared.npm or None, declared.node_power_limit_w
     try:
         node = read_node_power_settings()
     except GpuPowerSettingsError as exc:
-        if npm or node_power_limit_w is not None:
+        if any(declared.node_row().values()):
             return None, f"the declared node power management settings cannot be checked: {exc}"
         return None, ""
-    problems = declared_node_problems(node, npm=npm, node_power_limit_w=node_power_limit_w)
+    problems = declared_node_problems(node, declared)
     if problems:
         return node, "the node is not at the declared power management settings (NPM is set on the BMC): " + "; ".join(
             problems

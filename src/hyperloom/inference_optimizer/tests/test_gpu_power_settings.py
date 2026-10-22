@@ -15,6 +15,7 @@ from hyperloom.common import gpu_power_settings
 from hyperloom.common.gpu_power_settings import (
     DeclaredPowerSettings,
     GpuPowerSettingsError,
+    _parse_node_power,
     _read_gpu_kfd_nodes as _real_read_gpu_kfd_nodes,
     declared_node_problems,
     declared_setting_problems,
@@ -44,15 +45,12 @@ def _node_payload(status="ENABLED", limit=8000):
 
 
 def _fake_run(cmd, **_kwargs):
-    payload = _LIMIT if "--limit" in cmd else _node_payload() if "node" in cmd else _PERF
+    payload = _LIMIT if "--limit" in cmd else _PERF
     return subprocess.CompletedProcess(cmd, 0, json.dumps(payload), "")
 
 
 def _node_reader(status="ENABLED", limit=8000):
-    def _run(cmd, **_kwargs):
-        return subprocess.CompletedProcess(cmd, 0, json.dumps(_node_payload(status, limit)), "")
-
-    return lambda: read_node_power_settings(run=_run)
+    return lambda: _parse_node_power(_node_payload(status, limit))
 
 
 def _no_node_command():
@@ -86,27 +84,33 @@ def test_declared_settings_are_checked_per_card():
 
 
 def test_the_node_settings_are_read_from_amd_smi_json():
-    assert read_node_power_settings(run=_fake_run) == {"npm": "enabled", "node_power_limit_w": 8000.0}
-    assert _node_reader("DISABLED", 0)() == {"npm": "disabled", "node_power_limit_w": 0.0}
+    assert _parse_node_power(_node_payload()) == {"npm": "enabled", "node_power_limit_w": 8000.0}
+    assert _parse_node_power(_node_payload("DISABLED", 0)) == {"npm": "disabled", "node_power_limit_w": 0.0}
+    assert _parse_node_power(_node_payload()[0]) == {"npm": "enabled", "node_power_limit_w": 8000.0}
 
 
-def test_an_amd_smi_without_the_node_command_is_an_error_not_a_disabled_node():
+def test_an_amd_smi_without_the_node_command_is_an_error_not_a_disabled_node(monkeypatch):
+    from hyperloom.common import gpu_power_settings
+
     def _old_amd_smi(cmd, **_kwargs):
         return subprocess.CompletedProcess(cmd, 2, "", "invalid choice: 'node'")
 
-    with pytest.raises(GpuPowerSettingsError):
-        read_node_power_settings(run=_old_amd_smi)
+    monkeypatch.setattr(gpu_power_settings.shutil, "which", lambda _name: "/usr/bin/amd-smi")
+    monkeypatch.setattr(gpu_power_settings.subprocess, "run", _old_amd_smi)
+    with pytest.raises(GpuPowerSettingsError, match="invalid choice"):
+        read_node_power_settings()
 
 
 def test_declared_node_settings_are_checked():
     node = {"npm": "enabled", "node_power_limit_w": 8000.0}
-    assert declared_node_problems(node, npm="enabled", node_power_limit_w=8000.0) == []
-    assert declared_node_problems(node) == []
-    assert declared_node_problems(node, npm="disabled", node_power_limit_w=6000.0) == [
+    assert declared_node_problems(node, DeclaredPowerSettings(npm="enabled", node_power_limit_w=8000.0)) == []
+    assert declared_node_problems(node, DeclaredPowerSettings()) == []
+    assert declared_node_problems(node, DeclaredPowerSettings(npm="disabled", node_power_limit_w=6000.0)) == [
         "node power management is 'enabled', declared 'disabled'",
         "node power limit is 8000.0 W, declared 6000 W",
     ]
-    assert declared_node_problems({"npm": "", "node_power_limit_w": None}, npm="enabled", node_power_limit_w=1.0) == [
+    unread = {"npm": "", "node_power_limit_w": None}
+    assert declared_node_problems(unread, DeclaredPowerSettings(npm="enabled", node_power_limit_w=1.0)) == [
         "node power management is 'unreadable', declared 'enabled'",
         "node power limit is unreadable W, declared 1 W",
     ]

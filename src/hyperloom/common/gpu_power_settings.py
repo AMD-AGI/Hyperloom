@@ -259,11 +259,7 @@ def read_gpu_power_settings(
     return settings
 
 
-def read_node_power_settings(
-    *,
-    run: Callable[..., subprocess.CompletedProcess] = subprocess.run,
-    timeout: float = _READ_TIMEOUT_SEC,
-) -> dict[str, Any]:
+def read_node_power_settings() -> dict[str, Any]:
     """``{"npm": "enabled" | "disabled" | "", "node_power_limit_w": float | None}`` from ``amd-smi node -p``.
 
     The limit is the one firmware enforces, which can sit below the one the BMC was asked for.
@@ -272,7 +268,10 @@ def read_node_power_settings(
         GpuPowerSettingsError: ``amd-smi`` is absent, failed (a release before ROCm 7.2 has no ``node`` command), or
             printed something that is not its JSON.
     """
-    payload = _amd_smi_json(run, timeout, "node", "--power-management")
+    return _parse_node_power(_amd_smi_json(subprocess.run, _READ_TIMEOUT_SEC, "node", "--power-management"))
+
+
+def _parse_node_power(payload: Any) -> dict[str, Any]:
     rows = payload if isinstance(payload, list) else [payload]
     block: dict[str, Any] = next(
         (row["node"] for row in rows if isinstance(row, dict) and isinstance(row.get("node"), dict)), {}
@@ -286,10 +285,9 @@ def read_node_power_settings(
     }
 
 
-def declared_node_problems(
-    node: Mapping[str, Any], *, npm: str | None = None, node_power_limit_w: float | None = None
-) -> list[str]:
+def declared_node_problems(node: Mapping[str, Any], declared: DeclaredPowerSettings) -> list[str]:
     """Why the node is not at the declared NPM settings; empty when it is, or when nothing is declared."""
+    npm, node_power_limit_w = declared.npm, declared.node_power_limit_w
     problems: list[str] = []
     if npm and node.get(NPM) != npm:
         problems.append(f"node power management is {node.get(NPM) or _UNREADABLE!r}, declared {npm!r}")
