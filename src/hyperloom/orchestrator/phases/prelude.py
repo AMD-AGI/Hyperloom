@@ -34,8 +34,9 @@ from hyperloom.inference_optimizer.breakdown.recorder.warm_replay_event import (
 )
 
 from . import machine_state as _phase_state
-from hyperloom.inference_optimizer.grid_server_args import merge_cumulative_extra_server_args
+from hyperloom.inference_optimizer.grid_server_args import compose_server_args, merge_cumulative_extra_server_args
 from hyperloom.inference_optimizer.inferencex_checkout import pick_tree
+from hyperloom.inference_optimizer.roofline_ceiling import read_baseline_server_args
 from hyperloom.inference_optimizer.session.optimization_journal import (
     KIND_OTHER,
     derive_journal_outcome,
@@ -2507,23 +2508,22 @@ class PreludePhase(CoordinatorCollaborator):
         params: dict[str, Any] = {"source": "coordinator_internal", "reason": str(reason), RECIPE_PARAM: recipe}
         if inline_event:
             params[INLINE_EVENT_PARAM] = str(inline_event)
+        bl_args = read_baseline_server_args(state).strip()
         if reason != "prelude_initial":
+            # The profiler boots from the benchmark config, so the stack delta is layered over the baseline's own args.
             inject_stack_base_params(params, state)
+            params["base_extra_args"] = compose_server_args(
+                inherited_args=bl_args,
+                base_extra_args=str(params.get("base_extra_args") or ""),
+                remove_args=params.get("base_remove_args"),
+                args_mode=str(params.get("base_args_mode") or "append"),
+            )
         else:
             # PRELUDE roofline profiles the baseline arm: inject baseline's own server args (never current_best's) so
             # a later warm-replay can't swap in flags that skew the baseline ceiling.
             params.update(self._coord.enablement_revalidation.baseline_launch_params())
-            try:
-                from hyperloom.inference_optimizer.roofline_ceiling import read_baseline_server_args
-
-                bl_args = read_baseline_server_args(state).strip()
-            except Exception:  # noqa: BLE001 — best-effort; empty falls through
-                bl_args = ""
             if bl_args:
                 params["base_extra_args"] = bl_args
-        last_bl = state.last_baseline or {}
-        if isinstance(last_bl, dict):
-            bs = str(last_bl.get("benchmark_script") or "").strip()
-            if bs:
-                params["benchmark_script"] = bs
+        if benchmark_script := state.accepted_baseline_script():
+            params["benchmark_script"] = benchmark_script
         return params

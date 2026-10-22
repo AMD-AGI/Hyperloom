@@ -50,27 +50,21 @@ def pod_targets_from_lists(
     return out
 
 
+def role_ssh_targets(state: dict[str, Any], role: str) -> list[dict[str, Any]]:
+    """SSH targets of one GPU service role (``prefill``, ``decode`` or ``worker``) from multi_node state."""
+    return pod_targets_from_lists(
+        state.get(f"{role}_pods"),
+        state.get(f"{role}_pod_ips"),
+        default_port=int(state.get("ssh_port") or DEFAULT_SSH_PORT) + ssh_role_port_offset(role),
+        default_role=role,
+    )
+
+
 def gpu_ssh_targets_from_state(state: dict[str, Any]) -> list[dict[str, Any]]:
     """Resolve every GPU pod SSH target from multi_node state."""
-    base = int(state.get("ssh_port") or DEFAULT_SSH_PORT)
     if (state.get("pd_mode") or "").lower() == "disaggregated":
-        return pod_targets_from_lists(
-            state.get("prefill_pods"),
-            state.get("prefill_pod_ips"),
-            default_port=base,
-            default_role="prefill",
-        ) + pod_targets_from_lists(
-            state.get("decode_pods"),
-            state.get("decode_pod_ips"),
-            default_port=base + INFERA_SSH_PORT_ROLE_STRIDE,
-            default_role="decode",
-        )
-    return pod_targets_from_lists(
-        state.get("worker_pods"),
-        state.get("worker_pod_ips"),
-        default_port=base,
-        default_role="worker",
-    )
+        return role_ssh_targets(state, "prefill") + role_ssh_targets(state, "decode")
+    return role_ssh_targets(state, "worker")
 
 
 # sglang PD bootstrap rendezvous port (SaFE common.InferaBootstrapPort).

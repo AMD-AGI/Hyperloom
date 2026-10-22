@@ -327,11 +327,11 @@ def _reject_reason(repo: Path, relative: str, resolved: str) -> str:
 def _resolver_backend() -> str:
     """The agent backend a resolver would call, or ``""`` when none can.
 
-    Forge's rewrite lane picks its backend with
-    :func:`preferred_agent_backend`, and the last rung of this ladder is a
-    forge call like any other: an OpenAI-only box has to reach Codex here for
-    the same reason it reaches Codex there, or every overlapping-region lane on
-    that box falls back to the dropped patch this module exists to stop.
+    A resolver is one completion request, not an agent session, so it follows
+    the credentials through :func:`preferred_agent_backend` whichever agent CLI
+    the roles run on, the DeepSeek Harness included. An OpenAI-only box has to
+    reach Codex here, or every overlapping-region lane on that box falls back to
+    the dropped patch this module exists to stop.
     """
     from hyperloom.common.llm_config import (
         AGENT_BACKEND_CODEX,

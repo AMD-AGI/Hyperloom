@@ -450,8 +450,7 @@ it came from. KEEP commits to the live tree so the next candidate stacks on
 top; REVERT does `git reset --hard`. Resume skips completed candidates by
 idempotency key.
 
-The phase exits when both arms are dry, when its budget is spent, or at the
-absolute per-phase cap.
+The phase exits when both arms are dry or when its budget is spent.
 
 ### IR-8 — `--framework atom` is single-node only
 

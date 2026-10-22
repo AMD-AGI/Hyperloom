@@ -11,20 +11,19 @@ import os
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
+from typing import IO
+
+_TAIL_CHARS = 4000
 
 
-#: How long a SIGKILLed tree's pipes are read; a descendant that left the process group can hold them open forever.
-KILLED_DRAIN_TIMEOUT_S: float = 10.0
-
-
-def drain_killed(proc: subprocess.Popen) -> tuple[str, str]:
-    """Return what a SIGKILLed text-mode ``proc`` wrote, stopping after :data:`KILLED_DRAIN_TIMEOUT_S`."""
-    try:
-        return proc.communicate(timeout=KILLED_DRAIN_TIMEOUT_S)
-    except subprocess.TimeoutExpired as exc:
-        return (exc.output or b"").decode(errors="replace"), (exc.stderr or b"").decode(errors="replace")
+def _tail(stream: IO[bytes]) -> str:
+    """The last :data:`_TAIL_CHARS` characters written to ``stream``."""
+    stream.seek(0, os.SEEK_END)
+    stream.seek(max(0, stream.tell() - 4 * _TAIL_CHARS))
+    return stream.read().decode("utf-8", "replace")[-_TAIL_CHARS:]
 
 
 def _resolve_runner() -> str:
@@ -78,39 +77,31 @@ def call_geak(handoff: dict, output_dir: Path, *, timeout_s: int = 43200) -> dic
     env["GEAK_E2E_TIMEOUT_S"] = str(inner_timeout)  # run_e2e's anyio budget
 
     started = time.time()
-    # start_new_session=True -> run_e2e + its vllm/node children share a process group we can signal as a unit
-    # (prevents leaked-server orphans).
-    proc = subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        env=env,
-        start_new_session=True,
-    )
+    # Files, not pipes: a process run_e2e leaves behind still holds its stdio, and must not keep this wait open.
+    with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
+        # start_new_session=True -> run_e2e + its vllm/node children share a process group we can signal as a unit.
+        proc = subprocess.Popen(cmd, stdout=stdout, stderr=stderr, env=env, start_new_session=True)
 
-    def _killpg(sig: int) -> None:
-        try:
-            os.killpg(os.getpgid(proc.pid), sig)
-        except (ProcessLookupError, PermissionError):
-            # Process already exited; nothing to signal.
-            pass
+        def _killpg(sig: int) -> None:
+            try:
+                os.killpg(os.getpgid(proc.pid), sig)
+            except (ProcessLookupError, PermissionError):
+                # Process already exited; nothing to signal.
+                pass
 
-    try:
-        stdout, stderr = proc.communicate(timeout=timeout_s)
-        returncode = proc.returncode
-    except subprocess.TimeoutExpired:
-        # SIGTERM lets run_e2e flush result.json, then escalate to SIGKILL.
-        _killpg(signal.SIGTERM)
         try:
-            stdout, stderr = proc.communicate(timeout=flush_grace)
-            returncode = proc.returncode
+            returncode = proc.wait(timeout=timeout_s)
         except subprocess.TimeoutExpired:
-            _killpg(signal.SIGKILL)
-            stdout, stderr = drain_killed(proc)
-            returncode = -1
-    stdout_tail = (stdout or "")[-4000:]
-    stderr_tail = (stderr or "")[-4000:]
+            # SIGTERM lets run_e2e flush result.json, then escalate to SIGKILL.
+            _killpg(signal.SIGTERM)
+            try:
+                returncode = proc.wait(timeout=flush_grace)
+            except subprocess.TimeoutExpired:
+                _killpg(signal.SIGKILL)
+                proc.wait()
+                returncode = -1
+        stdout_tail = _tail(stdout)
+        stderr_tail = _tail(stderr)
 
     result: dict = {}
     if result_path.is_file():

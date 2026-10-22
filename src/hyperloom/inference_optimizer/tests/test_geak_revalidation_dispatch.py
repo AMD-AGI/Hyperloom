@@ -16,6 +16,7 @@ import pytest
 from hyperloom.orchestrator.actions.executors._grid_runner import GridVariant
 from hyperloom.orchestrator.actions.executors._proposal_identity import effective_fingerprint
 from hyperloom.orchestrator.actions.executors._server_lifecycle import GpuHandoff
+from hyperloom.orchestrator.actions.executors._subprocess_kill import REAP_MARK_ENV, run_with_session_kill
 from hyperloom.orchestrator.phases import machine_state as ps
 from hyperloom.orchestrator.state.shared_state import ESCALATE_HINT_SKIP_TO_SWEEP
 
@@ -937,9 +938,10 @@ def _stub_geak_runner_call(monkeypatch, outcome) -> list[str]:
     """Replace only the GEAK runner's own thread call; every other one runs.
 
     ``asyncio.to_thread`` is shared, so the phase's bus and file work travels
-    through it too — dispatching on the runner closure keeps those real. The
+    through it too — dispatching on the geak_runner launch keeps those real. The
     hand-off's GPU check reports the cards free, so the outcome does not hang
-    on what the test host's GPUs hold.
+    on what the test host's GPUs hold. The launch must mark the run, or what it
+    leaves running survives it.
 
     Returns the list the interceptions are recorded in, so a test can prove the
     phase reached the runner rather than returning at an earlier gate.
@@ -952,9 +954,9 @@ def _stub_geak_runner_call(monkeypatch, outcome) -> list[str]:
     calls: list[str] = []
 
     async def _to_thread(func, /, *args, **kwargs):
-        qualname = getattr(func, "__qualname__", "")
-        if qualname.endswith("_run_geak_kernel_phase.<locals>._run"):
-            calls.append(qualname)
+        if func is run_with_session_kill and "hyperloom.orchestrator.kernel.geak_runner" in args[0]:
+            assert kwargs["env"].get(REAP_MARK_ENV)
+            calls.append("geak_runner")
             return outcome()
         return await original_to_thread(func, *args, **kwargs)
 
@@ -1237,6 +1239,28 @@ async def test_invalid_handoff_configuration_never_launches_geak(coordinator, mo
     assert event["status"] == "failed"
     assert event["ext"]["outcome"]["error_class"] == "invalid_env_spec"
     assert not await coordinator.tasks.queued()
+
+
+@pytest.mark.asyncio
+async def test_native_geak_proxy_refusal_is_not_an_invalid_env_spec(coordinator, monkeypatch):
+    """A native-AgentX proposal refusing an unverified Magpie launch is its own fault, not a serialization one.
+
+    ``invalid_env_spec`` names exactly one failure: the accepted launch configuration could not be
+    serialized. A refusal raised further down the handoff build must reach the caller instead of being
+    relabelled as one.
+    """
+    refusal = "Native AgentX GEAK proposals require a Magpie-verified server launch"
+
+    def refuse(*_args, **_kwargs):
+        raise ValueError(refusal)
+
+    monkeypatch.setattr("hyperloom.inference_optimizer.agentx.geak_proxy.seed_native_geak_proxy", refuse)
+    coordinator.shared_state.benchmark_mode = "agentx"
+
+    with pytest.raises(ValueError, match=refusal):
+        await coordinator.phase_kernel._run_geak_kernel_phase(from_phase="EXPLORE")
+
+    assert (coordinator.shared_state.geak_result or {}).get("error_class") != "invalid_env_spec"
 
 
 @pytest.mark.asyncio

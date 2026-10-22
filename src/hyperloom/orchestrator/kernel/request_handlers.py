@@ -2124,11 +2124,9 @@ async def _capture_block_fp8_profile_shapes(run: _ShapeCaptureRun, state: Any, p
 
     task_params = _capture_task_params(run, state, payload)
     task_params["workspace_path"] = str(run.capture_dir / "tracelens")
-    last_baseline = getattr(state, "last_baseline", None)
-    if isinstance(last_baseline, dict):
-        benchmark_script = str(last_baseline.get("benchmark_script") or "").strip()
-        if benchmark_script:
-            task_params["benchmark_script"] = benchmark_script
+    benchmark_script = state.accepted_baseline_script()
+    if benchmark_script:
+        task_params["benchmark_script"] = benchmark_script
     benchmark_result, fault = await _served_capture_workload(
         RooflineExecutor(shared_state=state), run, state, task_params
     )
@@ -3417,9 +3415,9 @@ def _resolve_forge_agent(
     Shared by forge-fusion and the rewrite lane, which uses the same model
     ladder via :func:`llm_config.resolve_forge_llm_model`. A valid explicit
     ``agent_backend`` or ``llm_model`` in the request wins; otherwise
-    :func:`llm_config.preferred_agent_backend` decides, so this role cannot
-    disagree with the specialists, the TraceLens runner or the Forge registry
-    about which backend a box is configured for.
+    :func:`llm_config.resolve_agent_backend` decides (an explicit ``INFERENCE_OPTIMIZER_AGENT_BACKEND``, else the
+    credential-ranked choice), so this role cannot disagree with the orchestration role or the Forge registry about
+    which backend a box is configured for.
 
     Model id precedence (after the backend is chosen) is owned by
     :func:`llm_config.resolve_forge_llm_model`.
@@ -3427,15 +3425,15 @@ def _resolve_forge_agent(
 
 
     Raises:
-        ValueError: If ``agent_backend`` is not ``"claude"`` or ``"codex"``.
+        ValueError: If ``agent_backend`` is not a known harness name.
     """
     source = env if env is not None else os.environ
-    known_backends = {llm_config.AGENT_BACKEND_CLAUDE, llm_config.AGENT_BACKEND_CODEX}
+    known_backends = set(llm_config.AGENT_BACKEND_CHOICES)
     explicit_backend = str(payload.get("agent_backend") or "").strip().lower()
     if explicit_backend and explicit_backend not in known_backends:
-        raise ValueError(f"agent_backend={payload.get('agent_backend')!r} is invalid; choose 'claude' or 'codex'")
+        raise ValueError(f"agent_backend={explicit_backend!r} is invalid; choose one of {sorted(known_backends)}")
 
-    agent_backend = explicit_backend or llm_config.preferred_agent_backend(source)
+    agent_backend = explicit_backend or llm_config.resolve_agent_backend(source)
     llm_model = llm_config.resolve_forge_llm_model(
         agent_backend,
         env=source,

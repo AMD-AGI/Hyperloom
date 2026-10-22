@@ -2375,7 +2375,7 @@ def _measurement_loop(monkeypatch, benchmark_result, workspace_dir="."):
     report = SimpleNamespace(
         all_passed=True,
         results=[
-            SimpleNamespace(stage=5, stage_name="full", passed=True, snr_db=40.0),
+            SimpleNamespace(stage=5, stage_name="full", passed=True, status_label="PASS", snr_db=40.0),
         ],
         summary=lambda: "PASS",
     )
@@ -5678,6 +5678,45 @@ def test_reconcile_republishes_a_best_a_stale_manifest_does_not_name(
     assert loop.persistence_degraded is False
 
 
+def test_resume_publication_diff_failure_degrades_persistence_without_propagating(
+    tmp_path,
+    monkeypatch,
+    caplog,
+):
+    loop, workspace = _make_loop(tmp_path, monkeypatch)
+    loop.best_publisher = runner_module.BestResultPublisher(str(workspace))
+    loop.archive = runner_module.CandidateArchive(str(workspace), loop.ic.kernel_file)
+    base_commit = loop._git("rev-parse", "HEAD").strip()
+    (workspace / "kernel.py").write_text("def kernel():\n    return 2\n")
+    best_commit = loop._git_commit("best candidate")
+    loop.ic.campaign_base_commit = base_commit
+    loop.run_state = RunState(campaign_id="campaign", session_index=2, baseline_wall_ms=1.0)
+    loop.run_state.best = BestRecord(
+        iteration=1,
+        wall_ms=0.8,
+        mean_case_speedup=1.25,
+        commit_hash=best_commit,
+        source="iteration",
+    )
+    failure = GitError(128, ["git", "diff"], "", "fatal: bad object")
+    real_git = runner_module.git
+
+    def fail_publication_diff(*args, **kwargs):
+        if args == ("diff", base_commit, best_commit, "--", "."):
+            raise failure
+        return real_git(*args, **kwargs)
+
+    monkeypatch.setattr(runner_module, "git", fail_publication_diff)
+
+    with caplog.at_level("WARNING", logger=runner_module.__name__):
+        loop._reconcile_best_publication()
+
+    assert loop.persistence_degraded is True
+    assert loop.persistence_errors == [f"publish best iteration 1: {failure}"]
+    assert caplog.messages == ["failed to publish best result"]
+    assert caplog.records[0].levelname == "WARNING"
+
+
 def test_intervention_reset_is_persisted_before_agent_runs(tmp_path, monkeypatch):
     loop, workspace = _make_loop(
         tmp_path,
@@ -7829,6 +7868,7 @@ class _StubStage:
     def __init__(self, stage, name, snr_db):
         self.stage, self.stage_name, self.snr_db = stage, name, snr_db
         self.passed = True
+        self.status_label = "PASS"
 
 
 class _StubReport:

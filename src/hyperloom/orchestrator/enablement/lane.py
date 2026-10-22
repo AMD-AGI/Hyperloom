@@ -438,6 +438,39 @@ class EnablementLane(CoordinatorCollaborator):
         if await self.tasks.cancel_if_queued(holder, kind="specialist", reason="enablement_round_settled"):
             log.info("ENABLEMENT: cancelled specialist %s; its round was settled before it started", holder)
 
+    async def on_baseline_promoted(self) -> None:
+        """Take a baseline promoted outside a pending revalidation: an anchor ends a boot-origin lane.
+
+        A boot-origin lane exists to make the combo boot, so an anchor reached by any route leaves it nothing to
+        bring up. An eval-origin lane starts from a combo that already boots; only its revalidation ends it.
+        """
+        state = self.shared_state
+        if (
+            (state.phase or "").strip().upper() == PHASE_ENABLEMENT
+            and state.enablement.origin != "eval"
+            and state.enablement.accepts_rounds
+            and float(state.baseline_tput or 0.0) > 0.0
+        ):
+            await self.close_booted(reason="baseline anchored")
+            return
+        state.enablement.origin = ""
+        state.enablement.pending = False
+
+    async def close_booted(self, *, reason: str) -> None:
+        """End the lane on a combo that boots: mark it succeeded, settle its open round and close its event.
+
+        Once the lane no longer accepts rounds, an integrate that executes afterwards is graded as any other
+        candidate rather than as an enablement round.
+        """
+        enablement = self.shared_state.enablement
+        enablement.succeeded = True
+        enablement.validation_pending = False
+        enablement.revalidation_task_id = ""
+        enablement.origin = ""
+        enablement.pending = False
+        await self.settle_enablement_round(BOOTED, reason=reason)
+        await self.close_lane_event(outcome=enablement_event.OUTCOME_SUCCEEDED, reason=reason)
+
     async def close_lane_event(self, *, outcome: str, reason: str) -> None:
         """Close the enablement lane's event on the terminal it just reached.
 
