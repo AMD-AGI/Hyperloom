@@ -36,7 +36,14 @@ forge_experiments/
     intervention_iter_NNN.md
     latest.md
   best/
+  dashboard.json
+  dashboard.html
 ```
+
+`dashboard.html` is a static page that reloads itself every minute. The loop re-renders it, with the
+`dashboard.json` snapshot it was built from, at the start of a run, after every iteration and when the run
+ends. It reads only the files above plus the LLM usage ledger and writes nothing else; a failed render is
+recorded as a persistence error and never stops the loop.
 
 The loader accepts exactly the field set the current code writes: a checkpoint
 with a missing or unknown field, top-level or nested, is rejected rather than

@@ -535,6 +535,10 @@ class IterationConfig:
     # nothing left worth buying and stops. Zero disables the gate, which is the default: a ceiling is an estimate
     # with no framework-side check on its arithmetic, so stopping on one is something an operator opts into.
     roofline_target: float = 0.0
+    # How the dashboard names the anchor every score divides by, and the per-case speedup the caller serves a case
+    # at (none: the dashboard draws no threshold).
+    anchor_label: str = "the starting kernel"
+    serving_speedup: float | None = None
 
     def __post_init__(self) -> None:
         # Validated here rather than at the CLI boundary alone, so a pattern can never reach the commit/delete sites
@@ -2564,6 +2568,31 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             self.persistence_errors.append(f"publish optimization history: {error}")
             self.persistence_errors = self.persistence_errors[-10:]
             log.debug("failed to publish optimization history", exc_info=True)
+
+    def _publish_dashboard(self, status: str = "running") -> None:
+        """Re-render the campaign dashboard from its durable files; a failure is recorded, never raised."""
+        from kernelforge.loop.dashboard import LiveStatus, publish_dashboard
+        from kernelforge.tracker.usage_ledger import ledger_path
+
+        deadlines = [self.ic.deadline_unix] if self.ic.deadline_unix else []
+        if self.start_time:
+            deadlines.append(self.start_time + self.ic.max_time_hours * 3600)
+        experiments_dir = getattr(self.config, "experiments_dir", None)
+        live = LiveStatus(
+            status=status,
+            termination_reason=self.termination_reason or "",
+            deadline_unix=min(deadlines) if deadlines else None,
+            time_remaining_sec=self._time_remaining() if self.start_time else None,
+            anchor_label=getattr(self.ic, "anchor_label", ""),
+            serving_speedup=getattr(self.ic, "serving_speedup", None),
+            usage_path=str(ledger_path(experiments_dir)) if experiments_dir else "",
+        )
+        try:
+            publish_dashboard(self.state_store.root, live)
+        except (OSError, ValueError) as error:
+            self.persistence_errors.append(f"publish dashboard: {error}")
+            self.persistence_errors = self.persistence_errors[-10:]
+            log.debug("failed to publish dashboard", exc_info=True)
 
     def _time_remaining(self) -> float:
         """Seconds remaining in the budget."""
@@ -5384,6 +5413,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         # Persist the run's total LLM token spend onto the experiment record so external callers can read the token
         # cost.
         self._checkpoint_llm_usage()
+        self._publish_dashboard(status=self.run_state.session_status or "stopped")
 
         if self.experiment:
             self.tracker.mark_complete(self.experiment.experiment_id)
@@ -5601,6 +5631,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             archived_path=archived_path,
         )
         self._publish_optimization_history()
+        self._publish_dashboard()
 
         if callbacks.on_iteration:
             callbacks.on_iteration(result)
@@ -6010,6 +6041,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             session_sink=session_sink,
         )
         self._publish_optimization_history()
+        self._publish_dashboard()
         if on_iteration:
             on_iteration(result)
 
@@ -6288,6 +6320,8 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         # Once the anchor is settled and verified, so the estimate is handed the case set the objective scores and
         # latencies from the campaign's own clock.
         await self._establish_ceiling()
+        self._publish_dashboard()
+
         # A crash immediately after a verified commit can leave the KEEP's archive unfinished.
         await self._finish_recovered_pending_keep()
         self._restore_lane_queue()

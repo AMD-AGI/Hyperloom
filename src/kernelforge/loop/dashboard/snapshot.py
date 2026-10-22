@@ -1,0 +1,154 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+"""What the dashboard shows, read from the files a campaign already writes."""
+
+from __future__ import annotations
+
+import json
+import time
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Any
+
+DASHBOARD_JSON = "dashboard.json"
+DASHBOARD_HTML = "dashboard.html"
+_RECENT_EVENTS = 15
+_TEXT_LIMIT = 6000
+# Events worth a line in the recent-events panel; iteration results have their own panels.
+_NOTABLE_EVENTS = frozenset(
+    {
+        "session_started",
+        "run_terminated",
+        "analysis_result",
+        "supervisor_ruling",
+        "relay_profile_switched",
+        "search_policy_decision",
+        "merge_attempt_started",
+        "merge_attempt_result",
+        "operator_message_consumed",
+        "direction_added",
+        "direction_audit",
+        "null_control",
+        "incumbent_tree_reset",
+    }
+)
+
+
+@dataclass(frozen=True)
+class LiveStatus:
+    """What only the running loop knows: its state, its clock, and how its scores are anchored."""
+
+    status: str
+    termination_reason: str = ""
+    deadline_unix: float | None = None
+    time_remaining_sec: float | None = None
+    anchor_label: str = ""
+    serving_speedup: float | None = None
+    usage_path: str = ""
+
+
+def _read_json(path: Path) -> Any:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def _read_text(path: Path, limit: int = _TEXT_LIMIT) -> str:
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    return text if len(text) <= limit else text[:limit] + "\n…"
+
+
+def _read_events(path: Path) -> list[dict]:
+    events: list[dict] = []
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return events
+    for line in lines:
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(event, dict):
+            events.append(event)
+    return events
+
+
+def _iteration_row(event: dict) -> dict:
+    return {
+        "iter": event.get("iter"),
+        "ts": event.get("ts", ""),
+        "decision": str(event.get("decision") or ""),
+        "score": event.get("mean_case_speedup"),
+        "best_after": event.get("best_after_mean_case_speedup"),
+        "plan": str(event.get("plan") or ""),
+        "model": str(event.get("agent_model") or ""),
+        "session_end_reason": str(event.get("session_end_reason") or ""),
+        "lane_id": event.get("lane_id"),
+        "direction_id": event.get("direction_id"),
+        "keep_bar": event.get("keep_bar"),
+    }
+
+
+def _event_summary(event: dict) -> dict:
+    detail = {key: value for key, value in event.items() if key not in {"type", "iter", "ts"}}
+    text = ", ".join(f"{key}={value}" for key, value in detail.items() if value not in (None, "", [], {}))
+    return {"type": event.get("type", ""), "iter": event.get("iter"), "ts": event.get("ts", ""), "detail": text[:300]}
+
+
+def _cases(state: dict) -> list[dict]:
+    anchor = state.get("baseline_case_times") or {}
+    best = state.get("best_case_times") or {}
+    unscored = set(state.get("unscored_cases") or [])
+    return [
+        {"case_id": case_id, "anchor_ms": anchor_ms, "best_ms": best.get(case_id), "unscored": case_id in unscored}
+        for case_id, anchor_ms in anchor.items()
+    ]
+
+
+def _campaign(state: dict) -> dict:
+    keys = (
+        "campaign_id",
+        "git_branch",
+        "session_status",
+        "session_index",
+        "iteration",
+        "search_mode",
+        "termination_reason",
+        "search_start_mean_case_speedup",
+    )
+    view = {key: state.get(key) for key in keys}
+    view["cumulative"] = state.get("cumulative") or {}
+    view["best"] = state.get("best") or {}
+    view["stall"] = state.get("stall") or {}
+    return view
+
+
+def collect_snapshot(campaign_root: Path, live: LiveStatus | None = None) -> dict:
+    """Everything one render needs, as plain JSON. Without ``live`` the previous render's live block is reused."""
+    campaign_root = Path(campaign_root)
+    state = _read_json(campaign_root / "run_state.json") or {}
+    events = _read_events(campaign_root / "events.jsonl")
+    if live is not None:
+        live_block = asdict(live)
+    else:
+        previous = _read_json(campaign_root / DASHBOARD_JSON) or {}
+        live_block = previous.get("live") or {}
+    usage_path = Path(live_block.get("usage_path") or campaign_root / "llm_usage.json")
+    notable = [event for event in events if event.get("type") in _NOTABLE_EVENTS]
+    return {
+        "rendered_at": time.time(),
+        "campaign_root": str(campaign_root),
+        "live": live_block,
+        "campaign": _campaign(state),
+        "iterations": [_iteration_row(event) for event in events if event.get("type") == "iteration_result"],
+        "cases": _cases(state),
+        "usage": _read_json(usage_path) or {},
+        "supervisor": _read_text(campaign_root / "supervisor" / "latest.md"),
+        "events": [_event_summary(event) for event in notable[-_RECENT_EVENTS:]],
+    }

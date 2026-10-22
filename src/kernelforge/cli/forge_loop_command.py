@@ -183,6 +183,22 @@ def _load_external_baseline(path: str) -> tuple[float, dict[str, float]]:
     return wall_ms, case_times
 
 
+def _load_anchor_presentation(path: str) -> tuple[str, float | None]:
+    """The optional ``label`` and ``serving_speedup`` a ``--baseline-json`` file gives its anchor, for the dashboard."""
+    payload = json.loads(Path(path).read_text())
+    label = str(payload.get("label") or "the --baseline-json anchor")
+    serving = payload.get("serving_speedup")
+    if serving is None:
+        return label, None
+    try:
+        serving = float(serving)
+    except (TypeError, ValueError):
+        raise click.BadParameter("--baseline-json 'serving_speedup' must be a number")
+    if not math.isfinite(serving) or serving <= 0.0:
+        raise click.BadParameter("--baseline-json 'serving_speedup' must be finite and positive")
+    return label, serving
+
+
 # ─── Autonomous Forge loop command ───
 
 
@@ -1742,6 +1758,7 @@ def forge_loop(request: ForgeLoopRequest):
         external_baseline_ms, external_baseline_case_times = _load_external_baseline(baseline_json)
         iter_config.baseline_case_times = dict(external_baseline_case_times)
         iter_config.pristine_baseline_wall_ms = external_baseline_ms
+        iter_config.anchor_label, iter_config.serving_speedup = _load_anchor_presentation(baseline_json)
     tracker = ExperimentTracker(config.experiments_dir)
     # Published at a fixed path from the first call onwards, so a caller that never asked for --result-json, or that
     # loses this process outright, can still read what the run spent.
