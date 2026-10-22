@@ -51,7 +51,7 @@ h1{font-size:20px;margin:0 0 4px}h2{font-size:15px;margin:0 0 10px}
 .tile .label{color:var(--text-secondary);font-size:13px}.tile .value{font-size:26px;font-weight:600;margin-top:4px}
 .hero .value{font-size:38px;white-space:nowrap}.tile .note{color:var(--muted);font-size:12px;margin-top:2px}
 table{border-collapse:collapse;width:100%;font-variant-numeric:tabular-nums}
-th,td{text-align:left;padding:4px 8px;border-bottom:1px solid var(--grid);vertical-align:top}
+th,td{text-align:left;padding:4px 8px;border-bottom:1px solid var(--grid);vertical-align:top;overflow-wrap:anywhere}
 th{color:var(--text-secondary);font-weight:600}td.num,th.num{text-align:right}
 .status{display:inline-flex;gap:4px;align-items:center}
 .dot{display:inline-block;width:10px;height:10px;border-radius:50%}
@@ -169,9 +169,19 @@ def _best_tile(campaign: dict) -> str:
 def _time_left(snapshot: dict) -> float | None:
     """From the deadline when there is one, so a page re-rendered later does not show a stale countdown."""
     live = snapshot.get("live") or {}
+    if live.get("status") not in (None, "running"):
+        return 0.0
     if live.get("deadline_unix"):
         return float(live["deadline_unix"]) - float(snapshot.get("rendered_at") or time.time())
     return live.get("time_remaining_sec")
+
+
+def _time_tile(snapshot: dict, deadline_text: str) -> str:
+    live = snapshot.get("live") or {}
+    if live.get("status") not in (None, "running"):
+        reason = live.get("termination_reason") or (snapshot.get("campaign") or {}).get("termination_reason") or ""
+        return _tile("Time left", "ended", escape(reason or str(live.get("status"))))
+    return _tile("Time left", _duration(_time_left(snapshot)), escape(deadline_text))
 
 
 def _tiles(snapshot: dict) -> str:
@@ -193,7 +203,7 @@ def _tiles(snapshot: dict) -> str:
                     escape(str(counters.get("iterations") or 0)),
                     f"{counters.get('kept') or 0} kept · {counters.get('reverted') or 0} reverted",
                 ),
-                _tile("Time left", _duration(_time_left(snapshot)), escape(deadline_text)),
+                _time_tile(snapshot, deadline_text),
                 _tile("LLM spend", cost_text, f"{tokens:,} tokens · {usage.get('calls') or 0} calls"),
                 _noise_tile(snapshot),
             ]
@@ -202,8 +212,11 @@ def _tiles(snapshot: dict) -> str:
     )
 
 
-def _score_chart(rows: list[dict]) -> str:
+def _score_chart(rows: list[dict], start: float | None = None) -> str:
     points = [row for row in rows if row.get("iter") is not None]
+    if start is not None and points:
+        # Where the search began, so a single round still draws the step it made.
+        points = [{"iter": 0, "decision": "start", "best_after": start}, *points]
     scored = [row for row in points if row.get("score") is not None or row.get("best_after") is not None]
     if not scored:
         return "<div class='card'><h2>Score by iteration</h2><div class='sub'>No measured iteration yet.</div></div>"
@@ -260,7 +273,7 @@ def _score_chart(rows: list[dict]) -> str:
                 f'stroke="var(--surface-1)" stroke-width="2"><title>KEEP at iteration {it}: '
                 f"{_fmt(row['best_after'])}×</title></circle>"
             )
-    parts.append(f'<text x="{left}" y="{height - 6}">iteration {first}</text>')
+    parts.append(f'<text x="{left}" y="{height - 6}">{"start" if first == 0 else f"iteration {first}"}</text>')
     parts.append(f'<text x="{width - right}" y="{height - 6}" text-anchor="end">iteration {last}</text></svg>')
     legend = (
         "<div class='legend'><span><svg width='18' height='8'><line x1='0' x2='18' y1='4' y2='4' "
@@ -269,7 +282,7 @@ def _score_chart(rows: list[dict]) -> str:
         "<span><svg width='18' height='8'><line x1='0' x2='18' y1='4' y2='4' stroke='var(--axis)'/></svg> "
         "anchor (1.0×)</span></div>"
     )
-    return f"<div class='card'><h2>Score by iteration</h2>{legend}{''.join(parts)}{_iteration_table(points)}</div>"
+    return f"<div class='card'><h2>Score by iteration</h2>{legend}{''.join(parts)}{_iteration_table(rows)}</div>"
 
 
 def _ticks(low: float, high: float, target: int = 4) -> list[float]:
@@ -553,7 +566,7 @@ def _round_entry(entry: dict, *, open_: bool) -> str:
         verdict.append(f"{entry['turns']} turns")
     sections = [
         ("Plan", entry.get("plan")),
-        ("What the implementer reports", entry.get("rationale")),
+        ("What the implementer reports", entry.get("account")),
         ("Why it failed", entry.get("validation")),
         ("Verdict", " · ".join(verdict)),
     ]
@@ -582,7 +595,7 @@ def render_dashboard(snapshot: dict) -> str:
     body = [
         _header(snapshot),
         _tiles(snapshot),
-        _score_chart(rows),
+        _score_chart(rows, (snapshot.get("campaign") or {}).get("search_start_mean_case_speedup")),
         _decision_strip(rows),
         _inbox_panel(snapshot),
         _rounds_panel(snapshot),

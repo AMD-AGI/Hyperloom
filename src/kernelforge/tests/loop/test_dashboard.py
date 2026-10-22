@@ -111,6 +111,20 @@ def test_each_round_says_what_was_planned_what_was_done_and_why_it_failed(campai
     assert "Prefetch B two tiles ahead" in rounds and "(+5.00% vs best 1.0000×)" in rounds
 
 
+def test_a_round_is_told_from_its_lesson_record_when_there_is_one(campaign: Path) -> None:
+    (campaign / "lessons").mkdir()
+    (campaign / "lessons" / "iter_002.md").write_text("**What was built:** a two-stage <b>prefetch</b>.\nOUTCOME: KEEP")
+    rounds = publish_dashboard(campaign, _live()).read_text().split("<h2>Rounds</h2>")[1]
+    round_2 = rounds[rounds.index("id='round-2'") : rounds.index("id='round-1'")]
+    assert "a two-stage &lt;b&gt;prefetch&lt;/b&gt;." in round_2 and "Moved B loads up" not in round_2
+
+
+def test_a_run_that_ended_says_so_instead_of_counting_down(campaign: Path) -> None:
+    html = publish_dashboard(campaign, _live(status="paused", termination_reason="budget_exhausted")).read_text()
+    tile = html[html.index(">Time left<") :].split("</div></div>")[0]
+    assert ">ended<" in tile and "budget_exhausted" in tile
+
+
 def test_the_page_carries_a_message_form_even_with_an_empty_inbox(campaign: Path) -> None:
     html = publish_dashboard(campaign, _live()).read_text()
     assert "<form class='say' method='post' action='say'>" in html

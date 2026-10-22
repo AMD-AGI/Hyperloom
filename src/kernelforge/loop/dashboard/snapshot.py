@@ -22,7 +22,7 @@ _RECENT_EVENTS = 15
 _TEXT_LIMIT = 6000
 _RECENT_ROUNDS = 30
 # How much of each round's own words the page carries: the plan, the implementer's account, the failure.
-_ROUND_TEXT_LIMITS = {"plan": 2000, "rationale": 4000, "validation": 1500}
+_ROUND_TEXT_LIMITS = {"plan": 2000, "account": 6000, "validation": 1500}
 _VALIDATION_FAILURES = frozenset(
     {"REVERT_VALIDATION", "REVERT_VALIDATION_TIMEOUT", "REVERT_VALIDATION_ERROR", "BUILD_FAILED", "CRASH"}
 )
@@ -119,10 +119,15 @@ def _clip(text: str, limit: int) -> str:
 
 
 def _round(campaign_root: Path, event: dict) -> dict:
-    """One iteration as a reviewer reads it: what was planned, what the implementer says it did, and the verdict."""
+    """One iteration as a reviewer reads it: what was planned, what the implementer says it did, and the verdict.
+
+    The implementer's account is its lesson record (what it built, how it checked it, what each variant timed, what
+    it ruled out); the candidate's rationale, the opening of its session, stands in only when there is no lesson.
+    """
     iteration = int(event.get("iter") or 0)
     folder = campaign_root / "candidates" / f"iter_{iteration:03d}"
     meta = _read_json(folder / "meta.json") or {}
+    lesson = _read_text(campaign_root / "lessons" / f"iter_{iteration:03d}.md", _ROUND_TEXT_LIMITS["account"])
     decision = str(event.get("decision") or "")
     validation = _read_text(folder / "validation.txt") if decision in _VALIDATION_FAILURES else ""
     return _iteration_row(event) | {
@@ -130,7 +135,7 @@ def _round(campaign_root: Path, event: dict) -> dict:
         "delta_vs_best_pct": meta.get("delta_vs_best_pct"),
         "turns": event.get("turns"),
         "plan": _clip(str(meta.get("plan") or event.get("plan") or ""), _ROUND_TEXT_LIMITS["plan"]),
-        "rationale": _clip(str(meta.get("rationale") or ""), _ROUND_TEXT_LIMITS["rationale"]),
+        "account": _clip(lesson or str(meta.get("rationale") or ""), _ROUND_TEXT_LIMITS["account"]),
         "validation": _clip(validation, _ROUND_TEXT_LIMITS["validation"]),
     }
 
