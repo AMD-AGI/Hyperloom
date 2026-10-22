@@ -40,7 +40,7 @@ from kernelforge.loop.wiki_guidance import (
 from kernelforge.loop.wiki_playbook import SUPPORT_PROFILING, declined, parse_playbook
 from kernelforge.orchestrator.contracts import OrchestrationContext, OrchestrationRunResult
 from kernelforge.orchestrator.orchestration import OrchestrationInfrastructureError, OrchestrationOutputError
-from kernelforge.orchestrator.wiki_batch import PHASE_FREE, PHASE_GUIDED
+from kernelforge.orchestrator.wiki_batch import NO_BATCH, OPEN_STATUSES, PHASE_FREE, PHASE_GUIDED, BatchSession
 
 log = logging.getLogger(__name__)
 
@@ -79,10 +79,11 @@ class WikiGuidedRounds:
         self.state: GuidanceState = self.store.load() if resume else GuidanceState()
         self.knowledge_wiki = knowledge_wiki
         self.sinks = sinks
-        # The plan the current iteration measures, read when its outcome credits the ledger, and the batch it
-        # implements in its one session.
+        # The plan the current iteration measures, read when its outcome credits the ledger, the batch it implements in
+        # its one session, and the parts that session was given.
         self.plan_text = ""
         self.batch: list[str] = []
+        self.session = NO_BATCH
         if self.state.phase == PHASE_FREE:
             self._withdraw()
         if not resume:
@@ -92,6 +93,7 @@ class WikiGuidedRounds:
     def start_iteration(self) -> None:
         self.plan_text = ""
         self.batch = []
+        self.session = NO_BATCH
 
     def implementer_note(self) -> str:
         return render_for_implementer(self.state)
@@ -271,6 +273,7 @@ class WikiGuidedRounds:
             groups = [group or batch_group for group, batch_group in zip(groups, batch)]
         # The batch the measurement decides about is the round's, whatever its part plans happen to cite.
         self.batch = list(batch)
+        self.session = BatchSession(tuple((group, self._open_items(group)) for group in groups if group))
         self.sinks.append_event(
             make_event("wiki_batch_planned", iteration, parts=len(plans), groups=[group or None for group in groups])
         )
@@ -324,6 +327,16 @@ class WikiGuidedRounds:
         groups = {item.item_id: item.group for item in playbook.items}
         claimed, _ = cited_items(plan, self.state.ledger)
         return groups[claimed[0]] if claimed else ""
+
+    def _open_items(self, group_id: str) -> tuple[str, ...]:
+        playbook = self.state.playbook
+        if playbook is None:
+            return ()
+        return tuple(
+            item.item_id
+            for item in playbook.items
+            if item.group == group_id and self.state.ledger[item.item_id].status in OPEN_STATUSES
+        )
 
     def _group_label(self, group_id: str) -> str:
         playbook = self.state.playbook

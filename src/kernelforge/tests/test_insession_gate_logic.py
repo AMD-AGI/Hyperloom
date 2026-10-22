@@ -6,11 +6,14 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import json
 import subprocess
+import time
 from pathlib import Path
 
 from kernelforge.loop.gate_settings import GateMeasurement, GateScope
 from kernelforge.loop.insession_gate import InSessionGate
+from kernelforge.orchestrator.wiki_batch import BatchSession
 
 _MEASUREMENT_FIELDS = [field.name for field in dataclasses.fields(GateMeasurement)]
 _SCOPE_FIELDS = [field.name for field in dataclasses.fields(GateScope)]
@@ -271,6 +274,63 @@ def test_stop_allows_when_correct_and_faster(tmp_path, monkeypatch):
     assert gate.end_reason == "converged"
 
 
+def _batch(*, wrap_up_in_sec: float = 3000.0) -> BatchSession:
+    """A two-part batch session whose wrap-up time is ``wrap_up_in_sec`` from now."""
+    return BatchSession((("G1", ("P1",)), ("G2", ("P2",))), wrap_up_at=time.time() + wrap_up_in_sec)
+
+
+def test_stop_sends_back_a_batch_session_with_parts_left_before_its_wrap_up(tmp_path, monkeypatch):
+    gate, _ = _gate(tmp_path, batch=_batch())
+    _patch_canonical(monkeypatch, correct=True, wall_ms=0.5)
+    stop = {"last_assistant_message": "[playbook:P1]\n[playbook-untried:P2 not reached]\nSUBMIT_CANDIDATE"}
+
+    out = _run(gate._on_stop(stop, None, None))
+
+    assert out["decision"] == "block"
+    assert "part 2 of 2 (playbook group G2): P2" in out["reason"]
+    # A correct and faster kernel sent back for its batch spends none of the perf loop's budget.
+    assert (gate.passed, gate.block_count, gate.batch_block_count) == (False, 0, 1)
+    done = {"last_assistant_message": "[playbook:P1]\n[playbook-skip:P2 slower on every case]"}
+    assert _run(gate._on_stop(done, None, None)) == {}
+    assert gate.passed is True
+
+
+def test_stop_sends_a_batch_session_back_at_most_once_per_part(tmp_path, monkeypatch):
+    gate, _ = _gate(tmp_path, batch=_batch())
+    _patch_canonical(monkeypatch, correct=True, wall_ms=0.5)
+    stop = {"last_assistant_message": "[playbook-untried:P1, P2 not reached]"}
+
+    decisions = [_run(gate._on_stop(stop, None, None)).get("decision") for _ in range(3)]
+
+    assert decisions == ["block", "block", None]
+
+
+def test_stop_reads_a_batch_sessions_last_word_from_its_transcript(tmp_path, monkeypatch):
+    gate, _ = _gate(tmp_path, batch=_batch())
+    _patch_canonical(monkeypatch, correct=True, wall_ms=0.5)
+    transcript = tmp_path / "transcript.jsonl"
+    entries = [
+        {"type": "assistant", "message": {"content": [{"type": "text", "text": "[playbook:P1, P2]"}]}},
+        {"type": "user", "message": {"content": "tool output"}},
+        {"type": "assistant", "message": {"content": [{"type": "text", "text": "[playbook:P1]"}]}},
+    ]
+    transcript.write_text("\n".join(json.dumps(entry) for entry in entries) + "\nnot json\n")
+
+    out = _run(gate._on_stop({"transcript_path": str(transcript)}, None, None))
+
+    assert "part 2 of 2" in out["reason"]
+
+
+def test_stop_lets_a_batch_session_go_at_its_wrap_up_or_when_its_last_word_is_unknown(tmp_path, monkeypatch):
+    _patch_canonical(monkeypatch, correct=True, wall_ms=0.5)
+    stop = {"last_assistant_message": "[playbook:P1]"}
+    late, _ = _gate(tmp_path / "late", batch=_batch(wrap_up_in_sec=-1.0))
+    unknown, _ = _gate(tmp_path / "unknown", batch=_batch())
+
+    assert _run(late._on_stop(stop, None, None)) == {}
+    assert _run(unknown._on_stop({"transcript_path": str(tmp_path / "missing.jsonl")}, None, None)) == {}
+
+
 def test_stop_gate_invokes_driver_without_shape_selectors(tmp_path, monkeypatch):
     gate, _ = _gate(tmp_path)
     calls = []
@@ -385,7 +445,7 @@ def test_performance_verdict_clears_stale_bench_state_on_coverage_failure(tmp_pa
 
     monkeypatch.setattr(gate_module, "measure_wallclock", benchmark)
 
-    out = _run(gate._stop_performance_verdict())
+    out = _run(gate._stop_performance_verdict({}))
 
     assert out["decision"] == "block"
     assert (gate.last_bench_result, gate.last_mean_case_speedup, gate.last_wall_ms) == (None, None, None)
@@ -398,7 +458,7 @@ def test_performance_verdict_keeps_current_wall_when_scoring_is_unavailable(tmp_
     gate.last_wall_ms = 9.0
     _patch_canonical(monkeypatch, wall_ms=0.5)
 
-    out = _run(gate._stop_performance_verdict())
+    out = _run(gate._stop_performance_verdict({}))
 
     assert out["decision"] == "block"
     assert (gate.last_bench_result, gate.last_mean_case_speedup, gate.last_wall_ms) == (None, None, 0.5)

@@ -4513,6 +4513,24 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         knowledge_wiki = KnowledgeWikiTool.from_config(self.config)
         return WikiGuidedRounds(self.ic.workspace_dir, knowledge_wiki=knowledge_wiki, resume=resume, sinks=sinks)
 
+    def _agent_extras(self, agent_fn, session_sink: dict) -> dict:
+        """The optional arguments ``agent_fn`` declares: the in-session gate's current best mean case speedup and
+        immutable pristine per-case timings, the session sink that hands back findings and the resumed-session
+        factual-record callback, and the knowledge base batch the session implements."""
+        try:
+            params = inspect.signature(agent_fn).parameters
+        except (ValueError, TypeError):
+            log.debug("could not introspect agent_fn signature", exc_info=True)
+            return {}
+        extras = {
+            "baseline_case_times": dict(self._baseline_case_times),
+            "best_mean_case_speedup": self.best_mean_case_speedup,
+            "session_sink": session_sink,
+        }
+        if self.wiki_rounds is not None:
+            extras["batch"] = self.wiki_rounds.session
+        return {name: value for name, value in extras.items() if name in params}
+
     def _with_guidance_note(self, history: str) -> str:
         """The Implementer's history headed by the guidance phase note, when the campaign is guided."""
         note = self.wiki_rounds.implementer_note() if self.wiki_rounds is not None else ""
@@ -5812,20 +5830,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
                 digest=digest,
                 optimization_plan_path=optimization_plan_path,
             )
-            # Pass extras only to agent_fns that declare them: the in-session gate uses the current best mean case
-            # speedup and immutable pristine per-case timings; session_sink hands back findings and the
-            # resumed-session factual-record callback.
-            extra_kwargs = {}
-            try:
-                params = inspect.signature(agent_fn).parameters
-                if "baseline_case_times" in params:
-                    extra_kwargs["baseline_case_times"] = dict(self._baseline_case_times)
-                if "best_mean_case_speedup" in params:
-                    extra_kwargs["best_mean_case_speedup"] = self.best_mean_case_speedup
-                if "session_sink" in params:
-                    extra_kwargs["session_sink"] = session_sink
-            except (ValueError, TypeError):
-                log.debug("could not introspect agent_fn signature", exc_info=True)
+            extra_kwargs = self._agent_extras(agent_fn, session_sink)
             agent_error = None
             try:
                 rationale = await agent_fn(

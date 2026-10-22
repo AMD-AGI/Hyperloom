@@ -9,6 +9,7 @@ import ast
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 import hashlib
+import json
 import os
 from pathlib import Path
 import re
@@ -16,6 +17,7 @@ import shlex
 import shutil
 import stat
 import sys
+import time
 from typing import Any
 
 from kernelforge.workspace.edit_policy import (
@@ -26,6 +28,7 @@ from kernelforge.workspace.edit_policy import (
 from kernelforge.tools.git import git
 from kernelforge.loop.gate_settings import GateMeasurement, GateScope
 from kernelforge.loop.jit_rebuild import JitRebuildUnavailable, force_jit_rebuild_for_changes
+from kernelforge.loop.wiki_guidance import batch_unfinished
 from kernelforge.evaluation.scoring import (
     KEEP_MEASUREMENT_COUNT,
     keep_score,
@@ -120,6 +123,37 @@ _PAYLOAD_WORD_BODY = {
 _PYTHON_VERB = re.compile(r"^python(?:\d+(?:\.\d+)*)?$")
 # A shell whose ``-c`` argument is another command line rather than one of its own.
 _SHELL_VERBS = frozenset({"sh", "bash", "zsh", "dash", "ksh"})
+
+
+def _transcript_text(entry: object) -> str:
+    """The text of one transcript line when it is an assistant message, else ``""``."""
+    if not isinstance(entry, dict) or entry.get("type") != "assistant":
+        return ""
+    content = (entry.get("message") or {}).get("content")
+    blocks = content if isinstance(content, list) else [{"type": "text", "text": content}]
+    return "\n".join(
+        str(block.get("text") or "") for block in blocks if isinstance(block, dict) and block.get("type") == "text"
+    )
+
+
+def _last_message(input_data: dict) -> str | None:
+    """The session's last message: given to the Stop hook by newer runtimes, else the transcript's last assistant
+    text; ``None`` when neither can be read."""
+    message = input_data.get("last_assistant_message")
+    if isinstance(message, str):
+        return message
+    try:
+        lines = Path(str(input_data.get("transcript_path") or "")).read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    for line in reversed(lines):
+        try:
+            text = _transcript_text(json.loads(line))
+        except ValueError:
+            continue
+        if text.strip():
+            return text
+    return None
 
 
 def _unquote(token: str) -> str:
@@ -471,6 +505,7 @@ class InSessionGate:
         # Harness-protection blocks only (bounded separately by max_stop_blocks), so a non-cooperating tamperer is
         # capped independently of the perf loop.
         self.harness_block_count = 0
+        self.batch, self.batch_block_count = scope.batch, 0
         self.passed = False
         self.last_wall_ms: float | None = None
         self.last_mean_case_speedup: float | None = None
@@ -1059,6 +1094,20 @@ class InSessionGate:
         self.findings.append(reason.strip()[:1200])
         return {"decision": "block", "reason": reason}
 
+    def _batch_unfinished(self, input_data: dict) -> dict | None:
+        """Send back a batch session that stops with parts left before its wrap-up time, at most once per part and
+        without eating perf budget."""
+        batch = self.batch
+        if batch is None or self.batch_block_count >= len(batch.parts):
+            return None
+        reason = batch_unfinished(batch, _last_message(input_data), now=time.time())
+        if not reason:
+            return None
+        self.batch_block_count += 1
+        self._log(f"BLOCK {self.batch_block_count}/{len(batch.parts)} (batch unfinished) edit={self.edit_count}")
+        self.findings.append(reason[:1200])
+        return {"decision": "block", "reason": reason}
+
     def _harness_block(self, reason: str) -> dict:
         """Block a stop for unrestored harness tampering (does not eat perf budget)."""
         self.findings.append(reason.strip()[:1200])
@@ -1100,8 +1149,8 @@ class InSessionGate:
         bench["bench_repeat"] = self.bench_repeat
         self.last_bench_result = bench
 
-    async def _stop_performance_verdict(self) -> dict:
-        """Bench the correct candidate and allow only when it clears the KEEP bar."""
+    async def _stop_performance_verdict(self, input_data: dict) -> dict:
+        """Bench the correct candidate and allow only when it clears the KEEP bar and leaves no batch part undone."""
         self.last_wall_ms = None
         self.last_mean_case_speedup = None
         self.last_bench_result = None
@@ -1146,6 +1195,9 @@ class InSessionGate:
             measurement_scores,
             best_mean_case_speedup=self.best_mean_case_speedup,
         ):
+            unfinished = self._batch_unfinished(input_data)
+            if unfinished:
+                return unfinished
             self.passed = True
             self.end_reason = "converged"
             self._log(
@@ -1167,7 +1219,7 @@ class InSessionGate:
             "Keep the kernel correct and try a DIFFERENT optimization to reduce wall time, then continue."
         )
 
-    async def _stop_candidate_verdict(self) -> dict:
+    async def _stop_candidate_verdict(self, input_data: dict) -> dict:
         """Run in-session correctness (and performance) and allow or block the stop."""
         # Ensure the canonical check compiles the kernel the agent has on disk RIGHT NOW: the SDK hook may run in a
         # subprocess that did not inherit the loop's AITER_REBUILD, so (re)assert it here. Its measurement is the one
@@ -1222,7 +1274,7 @@ class InSessionGate:
             self.end_reason = "converged"
             self._log(f"ALLOW (correct; correctness-only phase) edit={self.edit_count}")
             return self._allow()
-        return await self._stop_performance_verdict()
+        return await self._stop_performance_verdict(input_data)
 
     async def _on_stop(self, input_data: dict, tool_use_id: str | None, context: Any) -> dict:
         try:
@@ -1245,7 +1297,7 @@ class InSessionGate:
                 )
                 return self._allow()
 
-            return await self._stop_candidate_verdict()
+            return await self._stop_candidate_verdict(input_data)
         except Exception as e:  # noqa: BLE001 - end session but reject candidate
             self.finalize_integrity()
             self.integrity_violation = True

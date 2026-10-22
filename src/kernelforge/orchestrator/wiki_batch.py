@@ -14,8 +14,9 @@ that implements the whole batch.
 from __future__ import annotations
 
 import re
+import time
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from kernelforge.orchestrator.contracts import (
@@ -38,6 +39,30 @@ STATUS_FAILED = "FAILED"
 STATUS_SKIPPED = "SKIPPED"
 # Items a batch may still implement.
 OPEN_STATUSES = frozenset({STATUS_PENDING})
+
+# What a batch session keeps before its deadline for wrapping up: at least this, or this share of the session.
+BATCH_RESERVE_MIN_SEC = 600.0
+BATCH_RESERVE_SHARE = 1 / 6
+
+# The Implementer's stopping rule in a batch session, in place of submitting the first improvement.
+BATCH_STOP_RULE = """\
+4. This session implements a knowledge base batch: every part of the plan, in
+   order, on this one kernel. After each part, check correctness and time the
+   cases; keep the part when the kernel is correct and not slower than before
+   it, otherwise revert that part's edits, and go on to the next part either
+   way. Do NOT submit after the first improvement: submit after the last part,
+   or at the wrap-up time the session deadline gives. Leave a part out only
+   when its precondition proves false or it measured worse, and record that
+   with the evidence as [playbook-skip:...]; being hard or long is not a
+   reason. A stop before then with parts left is sent back."""
+
+BATCH_DEADLINE = (
+    "## Session deadline\n"
+    "This session ends at {ends} UTC, about {minutes} minutes from now; `date -u` shows the time. Keep working through "
+    "the batch's parts until {wrap_up} UTC. From then on start no new part: finish or revert the part in hand, list "
+    "every item you did not get to as [playbook-untried:...], and submit. A session cut off mid-turn hands off "
+    "nothing.\n"
+)
 
 # The builder's role, and the analyst of one batch group. The analyst is registered beside the angle specialists only
 # when the campaign has a knowledge base, and never offered to the dispatch planner, so an unguided round can never be
@@ -138,6 +163,37 @@ class BatchPart:
     @property
     def label(self) -> str:
         return f"{self.group_id} {self.title}"
+
+
+def _utc(epoch: float) -> str:
+    return time.strftime("%H:%M", time.gmtime(epoch))
+
+
+@dataclass(frozen=True)
+class BatchSession:
+    """What one Implementer session implements as a batch: each part's playbook group and open items, in order, and
+    the session's clock once it starts. ``NO_BATCH`` for every other session."""
+
+    parts: tuple[tuple[str, tuple[str, ...]], ...] = ()
+    ends_at: float = 0.0
+    # From this wall-clock time on the session may submit with parts left.
+    wrap_up_at: float = 0.0
+
+    def timed(self, session_sec: float, *, now: float) -> BatchSession:
+        reserve = max(BATCH_RESERVE_MIN_SEC, session_sec * BATCH_RESERVE_SHARE)
+        return replace(self, ends_at=now + session_sec, wrap_up_at=now + session_sec - reserve)
+
+    def stop_rule(self, default: str) -> str:
+        return BATCH_STOP_RULE if self.parts else default
+
+    def deadline_section(self, default: str, *, now: float) -> str:
+        if not self.parts:
+            return default
+        minutes = max(1, round((self.ends_at - now) / 60))
+        return BATCH_DEADLINE.format(ends=_utc(self.ends_at), minutes=minutes, wrap_up=_utc(self.wrap_up_at))
+
+
+NO_BATCH = BatchSession()
 
 
 def guided_batch(context: OrchestrationContext) -> list[str]:
