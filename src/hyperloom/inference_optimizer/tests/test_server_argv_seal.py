@@ -40,13 +40,19 @@ _COMPOSERS = (
     (_grid_runner, "_build_variant_yaml"),
 )
 
-#: The functions allowed to write the argument env: the two composers, the two
-#: helpers they delegate a step to -- the per-flag merge every injection goes
-#: through and the final guards -- all of which run above the seal, plus the
-#: seal itself and the re-seal a repair is written back through.
+#: The functions allowed to write the argument env: the phases a composer delegates
+#: to -- each source merged in turn, the profiler flags, the caller's removals and the
+#: final guards -- all of which run above the seal, plus the composer that still writes
+#: the env itself, the seal, and the re-seal a repair is written back through.
 _WRITERS = frozenset(
     {
-        "materialize_config_with_envs",
+        "_bound_vllm_profiler_capture",
+        "_publish_profile_request_body",
+        "_seed_reference_launch",
+        "_merge_caller_overrides",
+        "_settle_merged_server_args",
+        "_apply_caller_removals",
+        "_restate_profile_capture",
         "add_server_arg_unless_pinned",
         "_finalize_framework_server_args",
         "_build_variant_yaml",

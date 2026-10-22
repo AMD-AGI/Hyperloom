@@ -1690,11 +1690,6 @@ class TestKernelE2EMeasurementPromotion:
         state = coord.shared_state
         state.current_best.update(extra_server_args="--page-size 32", extra_envs={"TUNED_ENV": "1"})
         state.baseline_config_path = "/live/base.yaml"
-        state.last_kernel_opt = {
-            "kernel_id": "unrelated",
-            "patch_path": "/unrelated.patch",
-            "target_file": "/unrelated.py",
-        }
         state.save(coord.session_dir)
         return {
             "source": "forge_gemm_paired",
@@ -1939,10 +1934,6 @@ class TestKernelE2EMeasurementPromotion:
             pytest.param({"target_file": "/unexpected.py"}, id="target_file"),
             pytest.param({"source_file": "/unexpected.py"}, id="source_file"),
             pytest.param({"snapshot_dir": "/unexpected-snapshot"}, id="snapshot_dir"),
-            pytest.param(
-                {"preapplied_apply_result": {"status": "ok", "manifest_path": "/unexpected-manifest.json"}},
-                id="preapplied_apply_result",
-            ),
         ],
     )
     async def test_gemm_paired_native_handler_rejects_artifacts(

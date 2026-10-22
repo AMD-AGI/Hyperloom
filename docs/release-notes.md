@@ -24,6 +24,13 @@ it.
   `RUN_EVAL` process-environment override and the `disable_run_eval` task
   param are removed, and a baseline whose eval fails stops the run instead of
   retrying with `RUN_EVAL=false`.
+- **A GEAK run no longer leaves processes running after KERNEL_AGENT.** The
+  KERNEL phase marks every process its GEAK run starts and stops all of them
+  when the run returns, times out or is cancelled, including A/B legs started
+  with `setsid nohup`, so SWEEP no longer boots next to a GEAK server.
+  `GEAK_TERM_GRACE_S` is removed: the outer kill is now only a backstop, and
+  run_e2e's chance to flush `result.json` is the `GEAK_FLUSH_GRACE_S` window
+  geak_runner already gives it before that kill.
 
 ## Hyperloom 1.1.4 release
 

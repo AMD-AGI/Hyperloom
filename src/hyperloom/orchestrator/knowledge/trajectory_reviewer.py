@@ -11,7 +11,7 @@ from typing import Any
 from hyperloom.inference_optimizer.session.optimization_journal import (
     OUTCOME_NO_PROMOTE,
     OUTCOME_REVERT,
-    Journal,
+    read_journal_entries,
 )
 from hyperloom.inference_optimizer.roofline_snapshot import BOTTLENECK_DOMAIN_HINTS, dominant_direction
 
@@ -19,19 +19,6 @@ from hyperloom.inference_optimizer.roofline_snapshot import BOTTLENECK_DOMAIN_HI
 _EXHAUSTED_MIN_ATTEMPTS: int = 2
 #: Marginal gain (%) below which a non-promoting cluster is treated as a dead end.
 _EXHAUSTED_MAX_GAIN_PCT: float = 1.0
-
-
-def _load_journal_entries(session_dir: Path, shared_state: Any) -> list[Any]:
-    """Return journal entries (empty on miss); header fields are read-only here."""
-    journal = Journal.load_or_create(
-        session_dir,
-        Journal(
-            session_id=str(getattr(shared_state, "session_id", "") or ""),
-            model=str(getattr(shared_state, "model_name", "") or ""),
-            hardware=str(getattr(shared_state, "hardware", "") or ""),
-        ),
-    )
-    return list(getattr(journal, "entries", []) or [])
 
 
 def _exhausted_clusters(entries: list[Any]) -> list[dict[str, Any]]:
@@ -81,7 +68,7 @@ def build_trajectory_digest(
     max_directions: int = 5,
 ) -> str:
     """Render the advisory trajectory-review block; ``\"\"`` when nothing to report."""
-    entries = _load_journal_entries(Path(session_dir), shared_state)
+    entries = read_journal_entries(Path(session_dir))
     snaps = [s for s in (getattr(shared_state, "roofline_snapshots", None) or []) if isinstance(s, dict)]
     dead = _exhausted_clusters(entries)
     stalled = _stalled_cycle_count(shared_state)

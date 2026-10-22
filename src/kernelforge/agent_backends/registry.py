@@ -13,7 +13,7 @@ from dataclasses import dataclass, replace
 from importlib import metadata
 from typing import Callable, Mapping
 
-from hyperloom.common.llm_config import DEFAULT_CLAUDE_MODEL, DEFAULT_CODEX_MODEL
+from hyperloom.common.llm_config import DEFAULT_CLAUDE_MODEL, DEFAULT_CODEX_MODEL, DEFAULT_DEEPSEEK_HARNESS_MODEL
 from hyperloom.common.reasoning_effort import DEFAULT_REASONING_EFFORT
 from kernelforge.agent_backends.base import (
     AgentBackend,
@@ -64,6 +64,9 @@ class AgentProvider:
     availability: Callable[[], bool] = _always_available
     credentialed: Callable[[Mapping[str, str]], bool] = _credential_unproven
     owns_model: Callable[[str], bool] = _owns_no_model
+    #: Whether :func:`select_default_agent_provider` may pick this provider on
+    #: its own. A provider that only an explicit name should reach sets False.
+    auto_selectable: bool = True
 
     def __post_init__(self) -> None:
         """Validate stable provider metadata at registration time."""
@@ -186,7 +189,7 @@ def select_default_agent_provider(preferred_model: str = "") -> AgentProvider:
             log.warning("agent provider %s check failed: %s", provider.name, exc)
             return False
 
-    providers = list(_providers.values())
+    providers = [provider for provider in _providers.values() if provider.auto_selectable]
     if model:
         runnable_owners = [
             provider
@@ -327,6 +330,13 @@ def _create_codex_backend(runtime: AgentRuntimeConfig) -> AgentBackend:
     return CodexBackend(runtime=runtime)
 
 
+def _create_deepseek_backend(runtime: AgentRuntimeConfig) -> AgentBackend:
+    """Construct the built-in DeepSeek Harness backend lazily."""
+    from kernelforge.agent_backends.deepseek import DeepSeekHarnessBackend
+
+    return DeepSeekHarnessBackend(runtime=runtime)
+
+
 def _claude_available() -> bool:
     """Return whether the optional Claude SDK is installed."""
     from hyperloom.common import llm_config
@@ -339,6 +349,13 @@ def _codex_available() -> bool:
     from hyperloom.common import llm_config
 
     return llm_config.codex_agent_sdk_installed()
+
+
+def _deepseek_available() -> bool:
+    """Return whether the optional DeepSeek Harness SDK is installed."""
+    from hyperloom.common import llm_config
+
+    return llm_config.deepseek_harness_sdk_installed()
 
 
 def _claude_credentialed(env: Mapping[str, str]) -> bool:
@@ -415,6 +432,26 @@ register_agent_provider(
         availability=_codex_available,
         credentialed=_codex_credentialed,
         owns_model=_codex_owns_model,
+    )
+)
+register_agent_provider(
+    AgentProvider(
+        name="deepseek",
+        factory=_create_deepseek_backend,
+        default_model=DEFAULT_DEEPSEEK_HARNESS_MODEL,
+        capabilities=AgentCapabilities(
+            writable=True,
+            resumable=True,
+            sandbox=True,
+            probe=True,
+            requires_workspace_cwd=True,
+            session_env=True,
+            workspace_guard=True,
+        ),
+        availability=_deepseek_available,
+        # It authenticates on the same OpenAI-compatible line as Codex, so ranking it would let an installed SDK
+        # select it on a box that never asked for the harness.
+        auto_selectable=False,
     )
 )
 

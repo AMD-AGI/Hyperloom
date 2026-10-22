@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -90,6 +91,24 @@ def _build_recipe_kb_dispatcher(
     return kb
 
 
+def _mirror_stack_fingerprint_meta(
+    state: SharedState,
+    stack_fp: Mapping[str, Any],
+    image_digest: str,
+) -> None:
+    """Copy usable stack fingerprint fields onto SharedState for the CLOSE-time recipe write."""
+    if not stack_fp:
+        return
+    merged_meta = dict(state.stack_fingerprint_meta)
+    for key, value in stack_fp.items():
+        if value not in (None, "", "unknown"):
+            merged_meta[str(key)] = value
+    if image_digest and image_digest != "unknown":
+        merged_meta["image_digest"] = image_digest
+    if merged_meta:
+        state.stack_fingerprint_meta = merged_meta
+
+
 def _bootstrap_recipe_kb(
     args: argparse.Namespace,
     *,
@@ -103,7 +122,6 @@ def _bootstrap_recipe_kb(
         return None
 
     kb = _build_recipe_kb_dispatcher(args)
-
     state = SharedState.load_or_init(session_dir)
     workload = (
         state.model_name
@@ -114,16 +132,7 @@ def _bootstrap_recipe_kb(
     hw = state.gpu_type or manifest.get("gpu_type", "") or "unknown_gpu"
     stack_fp = manifest.get("stack_fingerprint") or {}
     image_digest = manifest.get("image") or ""
-    # Mirror version + image fingerprint onto SharedState for the CLOSE-time recipe write.
-    if isinstance(stack_fp, dict) and stack_fp:
-        merged_meta = dict(getattr(state, "stack_fingerprint_meta", {}) or {})
-        for key, value in stack_fp.items():
-            if value not in (None, "", "unknown"):
-                merged_meta[str(key)] = value
-        if image_digest and image_digest != "unknown":
-            merged_meta["image_digest"] = image_digest
-        if merged_meta:
-            state.stack_fingerprint_meta = merged_meta
+    _mirror_stack_fingerprint_meta(state, stack_fp, image_digest)
     extra_attrs = {
         "framework_name": state.framework or manifest.get("framework", ""),
         "model_class": state.model_class or "",
@@ -150,11 +159,7 @@ def _bootstrap_recipe_kb(
                 )
                 args.kb_degraded_reason = getattr(args, "kb_degraded_reason", None) or "recipe_scope_invalid"
                 return kb
-            t0_kb = RemoteWarmRecipeAdapter(
-                HyperloomRemoteKB.from_env(),
-                warm_start_dir,
-                recipe_scope,
-            )
+            t0_kb = RemoteWarmRecipeAdapter(HyperloomRemoteKB.from_env(), warm_start_dir, recipe_scope)
             _publish_section_dirs(session_dir, warm_start_dir)
         else:
             _attach_recipe_audit_hook(kb, session_dir)

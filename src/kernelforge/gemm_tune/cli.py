@@ -99,7 +99,11 @@ def _demand_from_serving_log(server_log: str, output_dir: Path) -> str:
 
 
 def _load_demand_report(demand_json: str) -> dict | None:
-    """Parse the demand file once, for both selection and the coverage report."""
+    """Parse the demand file once, for both selection and the coverage report.
+
+    Selection needs the tables the runtime consulted, and the coverage report needs the same document to say what
+    stayed uncovered.
+    """
     if not demand_json:
         return None
     from .evidence import load_demand
@@ -296,6 +300,55 @@ def _existing_file_or_blank(value: str, option: str) -> str:
     return value
 
 
+def _usable_sources(sources: ShapeSources, output_dir: Path) -> ShapeSources:
+    """The shape inputs with inline shapes-JSON content materialized and every option naming no file blanked.
+
+    Callers sometimes pass inline JSON content instead of a file path.
+    """
+    return dataclasses.replace(
+        sources,
+        shapes_json=_normalize_inline_shapes_json(sources.shapes_json, output_dir),
+        untuned_csv=_existing_file_or_blank(sources.untuned_csv, OPT_UNTUNED_CSV),
+        moe_untuned_csv=_existing_file_or_blank(sources.moe_untuned_csv, "--moe-untuned-csv"),
+        shapes_manifest=_existing_file_or_blank(sources.shapes_manifest, OPT_SHAPES_MANIFEST),
+        demand_json=_existing_file_or_blank(sources.demand_json, OPT_DEMAND),
+    )
+
+
+def _with_serving_log_demand(sources: ShapeSources | RoutingInputs, output_dir: Path) -> ShapeSources | RoutingInputs:
+    """The inputs, with demand read off the serving log when no demand file was given.
+
+    The serving log is already handed to us for MoE stage detection, and it is the same log the demand parser reads.
+    """
+    server_log = sources.kernel_signature_log
+    if sources.demand_json or not server_log or not _safe_is_file(server_log):
+        return sources
+    return dataclasses.replace(sources, demand_json=_demand_from_serving_log(server_log, output_dir))
+
+
+def _route(
+    profile: Any, target: RoutingTarget, sources: ShapeSources | RoutingInputs, demand_report: dict | None
+) -> list:
+    """The tuners routed for this model and these inputs; ``plan`` asks the router exactly what ``run`` does."""
+    from .router import select_tuners
+
+    return select_tuners(
+        profile,
+        framework=target.framework,
+        precision=target.precision,
+        quant_type=target.quant_type,
+        gpu_type=target.gpu_type,
+        kernel_signature_log=sources.kernel_signature_log or None,
+        has_untuned_csv=bool(sources.untuned_csv),
+        # A demand file is a shape source like the others, and a stronger one: it lists the keys the runtime actually
+        # asked for.
+        has_shapes_json=bool(sources.shapes_json or sources.shapes_manifest or sources.demand_json),
+        has_tunableop_input=bool(sources.tunableop_input),
+        # ...and a stronger *selection* input for the same reason.
+        demand_report=demand_report,
+    )
+
+
 def _write_gpu_check(output_dir: Path) -> None:
     """Record what the GPUs are doing before tuning starts, and warn when they are busy."""
     from .utils import check_gpu_status
@@ -359,6 +412,73 @@ def _cap_tuner_count(tuner_specs: list, max_tuners: int) -> list:
     return kept
 
 
+def _apply_tuner_choice(tuner_specs: list, choice: TunerChoice, quant_type: str, output_dir: Path) -> list:
+    """The routed set narrowed to a forced ``--tuner`` and cut to ``--max-tuners``; exits when the forced one cannot run."""
+    if choice.tuner:
+        from .router import TunerSpec
+
+        tuner_specs = [t for t in tuner_specs if t.name == choice.tuner]
+        if not tuner_specs and choice.tuner in _tuner_registry():
+            log.warning(
+                "Requested tuner %r not auto-selected (quant_type=%r); honoring explicit --tuner anyway.",
+                choice.tuner,
+                quant_type,
+            )
+            tuner_specs = [TunerSpec(choice.tuner, priority=20, estimated_minutes=20)]
+        if not tuner_specs:
+            log.error("Requested tuner %r not applicable for this model/framework", choice.tuner)
+            _exit_failed(
+                output_dir,
+                error=f"Tuner {choice.tuner!r} not applicable",
+                error_class="tuner_not_applicable",
+            )
+    # 0 means no ceiling was supplied.
+    if choice.max_tuners > 0:
+        tuner_specs = _cap_tuner_count(tuner_specs, choice.max_tuners)
+    return tuner_specs
+
+
+def _write_plan(ctx: TuneContext, tuner_specs: list, model_path: str, global_timeout: int) -> None:
+    """Record what this run will try in ``plan.json``, and warn when its estimate exceeds the global timeout."""
+    runnable = [t for t in tuner_specs if t.should_run]
+    total_est_min = sum(t.estimated_minutes for t in runnable)
+    plan = {
+        "model_path": model_path,
+        "framework": ctx.framework,
+        "precision": ctx.precision,
+        "quant_type": ctx.quant_type,
+        "gpu_type": ctx.gpu_type,
+        "tokens": ctx.tokens,
+        "tuners": [
+            {
+                "name": t.name,
+                "will_run": t.should_run,
+                "skip_reason": t.skip_reason,
+                "estimated_minutes": t.estimated_minutes,
+            }
+            for t in tuner_specs
+        ],
+        "total_estimated_minutes": total_est_min,
+    }
+    (ctx.output_dir / "plan.json").write_text(json.dumps(plan, indent=2), encoding="utf-8")
+    log.info(
+        "Plan: %d tuners (%d will run, %d skipped), estimated %.0f min total",
+        len(tuner_specs),
+        len(runnable),
+        len(tuner_specs) - len(runnable),
+        total_est_min,
+    )
+    if global_timeout > 0 and total_est_min * 60 > global_timeout:
+        log.warning(
+            "Estimated total time (%.0f min) exceeds global timeout (%d s / %.0f min). "
+            "Lower-priority tuners may be skipped. Consider increasing --global-timeout "
+            "or reducing --tokens coverage.",
+            total_est_min,
+            global_timeout,
+            global_timeout / 60,
+        )
+
+
 def _tuner_context_for(ctx: Any, spec: Any, effective_timeout: int) -> Any:
     """A per-tuner context copy, so one tuner's bounds cannot leak into the next."""
     import dataclasses
@@ -376,14 +496,7 @@ def _tuner_context_for(ctx: Any, spec: Any, effective_timeout: int) -> Any:
     return dataclasses.replace(tuner_ctx, tokens=list(spec.token_hint), token_hint=list(spec.token_hint))
 
 
-def _execute_tuners(
-    tuner_specs: list,
-    ctx: Any,
-    *,
-    timeout: int,
-    global_timeout: int,
-    global_deadline: float,
-) -> tuple[list, list[tuple[str, str]]]:
+def _execute_tuners(tuner_specs: list, ctx: Any, global_deadline: float) -> tuple[list, list[tuple[str, str]]]:
     """Run each tuner that still earns its place, and say why the others did not."""
     from .candidates import is_candidate
 
@@ -405,7 +518,7 @@ def _execute_tuners(
             log.warning("SKIP %s: global timeout exceeded", spec.name)
             continue
         # Cap per-tuner timeout to remaining global budget.
-        effective_timeout = min(timeout, int(remaining)) if global_timeout > 0 else timeout
+        effective_timeout = int(min(ctx.timeout_s, remaining))
         log.info("Running tuner: %s (timeout=%ds)", spec.name, effective_timeout)
         tuner_instance = _create_tuner(spec.name, _tuner_context_for(ctx, spec, effective_timeout))
         if tuner_instance is None:
@@ -526,6 +639,27 @@ class TuneRequest:
     kb_current_lib: str
     verbose: bool
 
+    def tune_context(
+        self, profile: Any, target: RoutingTarget, sources: ShapeSources, tokens: list[int]
+    ) -> TuneContext:
+        """The context every tuner starts from: this request on the resolved target and the usable shape inputs."""
+        from .tuners.base import TuneContext
+
+        return TuneContext(
+            profile=profile,
+            **dataclasses.asdict(target),
+            tp=self.workload.tp,
+            conc=self.workload.conc,
+            tokens=tokens,
+            mp=self.mp,
+            output_dir=Path(self.output_dir),
+            **dataclasses.asdict(self.bench),
+            timeout_s=self.timeouts.timeout,
+            thorough=self.thorough,
+            **{name: Path(value) for name, value in dataclasses.asdict(sources).items() if value},
+            gpu_ids=self.gpus.gpu_ids,
+        )
+
 
 @gemm_tune.command()
 @option_group(
@@ -630,10 +764,9 @@ class TuneRequest:
 def run(request: TuneRequest):
     """Run GEMM tuning for the specified model and framework."""
     from .model_analyzer import analyze_model
-    from .router import resolve_gpu_type, select_tuners
+    from .router import resolve_gpu_type
     from .shapes import compute_token_coverage
     from .utils import emit_result_json
-    from .tuners.base import TuneContext
     from .report import build_report, write_report
 
     output_path = Path(request.output_dir)
@@ -645,19 +778,7 @@ def run(request: TuneRequest):
         target = dataclasses.replace(request.target, gpu_type=resolve_gpu_type(request.target.gpu_type))
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
-
-    # Defensive input normalization: callers sometimes pass inline JSON content instead of a file path.
-    sources = request.sources
-    shapes_json = _normalize_inline_shapes_json(sources.shapes_json, output_path)
-    untuned_csv = _existing_file_or_blank(sources.untuned_csv, OPT_UNTUNED_CSV)
-    moe_untuned_csv = _existing_file_or_blank(sources.moe_untuned_csv, "--moe-untuned-csv")
-    shapes_manifest = _existing_file_or_blank(sources.shapes_manifest, OPT_SHAPES_MANIFEST)
-    demand_json = _existing_file_or_blank(sources.demand_json, OPT_DEMAND)
-    kernel_signature_log = sources.kernel_signature_log
-
-    # The serving log is already handed to us for MoE stage detection, and it is the same log the demand parser reads.
-    if not demand_json and kernel_signature_log and _safe_is_file(kernel_signature_log):
-        demand_json = _demand_from_serving_log(kernel_signature_log, output_path)
+    sources = _with_serving_log_demand(_usable_sources(request.sources, output_path), output_path)
 
     log.info("kernelforge gemm-tune starting (artifact layout v%s)", __version__)
     log.info("Model: %s, Framework: %s, Precision: %s", request.model_path, target.framework, target.precision)
@@ -669,14 +790,12 @@ def run(request: TuneRequest):
     if preflight_hard:
         raise click.ClickException("aiter preflight failed: " + "; ".join(preflight_hard))
 
-    # Analyze model
     try:
         profile = analyze_model(request.model_path)
     except Exception as exc:  # noqa: BLE001 - model analysis is third-party
         log.error("Model analysis failed: %s", exc)
         _exit_failed(output_path, error=str(exc), error_class=type(exc).__name__)
 
-    # Compute token coverage.
     try:
         explicit_tokens = _explicit_token_list(request.workload.tokens)
     except ValueError as exc:
@@ -684,134 +803,18 @@ def run(request: TuneRequest):
     token_list = compute_token_coverage(conc=request.workload.conc, explicit_tokens=explicit_tokens)
     log.info("Token coverage: %s", token_list)
 
-    # Parsed once: selection needs the tables the runtime consulted, and the coverage report needs the same document
-    # to say what stayed uncovered.
-    demand_report = _load_demand_report(demand_json)
-
-    # Select tuners
-    tuner_specs = select_tuners(
-        profile,
-        framework=target.framework,
-        precision=target.precision,
-        quant_type=target.quant_type,
-        gpu_type=target.gpu_type,
-        kernel_signature_log=kernel_signature_log or None,
-        has_untuned_csv=bool(untuned_csv),
-        # A demand file is a shape source like the others, and a stronger one: it lists the keys the runtime actually
-        # asked for.
-        has_shapes_json=bool(shapes_json or shapes_manifest or demand_json),
-        has_tunableop_input=bool(sources.tunableop_input),
-        # ...and a stronger *selection* input for the same reason.
-        demand_report=demand_report,
-    )
-
+    demand_report = _load_demand_report(sources.demand_json)
+    tuner_specs = _route(profile, target, sources, demand_report)
     # What the runtime asked for that nothing selected can write.
-    coverage_gap_list = _coverage_gaps(demand_report, tuner_specs, output_path)
+    _coverage_gaps(demand_report, tuner_specs, output_path)
+    tuner_specs = _apply_tuner_choice(tuner_specs, request.choice, target.quant_type, output_path)
 
-    # If --tuner specified, filter to only that one.
-    tuner = request.choice.tuner
-    if tuner:
-        from .router import TunerSpec
-
-        selected = [t for t in tuner_specs if t.name == tuner]
-        if not selected and tuner in _tuner_registry():
-            log.warning(
-                "Requested tuner %r not auto-selected (quant_type=%r); honoring explicit --tuner anyway.",
-                tuner,
-                target.quant_type,
-            )
-            selected = [TunerSpec(tuner, priority=20, estimated_minutes=20)]
-        tuner_specs = selected
-        if not tuner_specs:
-            log.error("Requested tuner %r not applicable for this model/framework", tuner)
-            _exit_failed(
-                output_path,
-                error=f"Tuner {tuner!r} not applicable",
-                error_class="tuner_not_applicable",
-            )
-
-    # 0 means no ceiling was supplied.
-    if request.choice.max_tuners > 0:
-        tuner_specs = _cap_tuner_count(tuner_specs, request.choice.max_tuners)
-
-    # Write plan
-    plan = {
-        "model_path": request.model_path,
-        "framework": target.framework,
-        "precision": target.precision,
-        "quant_type": target.quant_type,
-        "gpu_type": target.gpu_type,
-        "tokens": token_list,
-        "tuners": [
-            {
-                "name": t.name,
-                "will_run": t.should_run,
-                "skip_reason": t.skip_reason,
-                "estimated_minutes": t.estimated_minutes,
-            }
-            for t in tuner_specs
-        ],
-        "total_estimated_minutes": sum(t.estimated_minutes for t in tuner_specs if t.should_run),
-    }
-    (output_path / "plan.json").write_text(json.dumps(plan, indent=2), encoding="utf-8")
-
-    runnable = [t for t in tuner_specs if t.should_run]
-    total_est_min = sum(t.estimated_minutes for t in runnable)
-    log.info(
-        "Plan: %d tuners (%d will run, %d skipped), estimated %.0f min total",
-        len(tuner_specs),
-        len(runnable),
-        sum(1 for t in tuner_specs if not t.should_run),
-        total_est_min,
-    )
-
-    # Budget warning: if global_timeout is set but estimated time exceeds it
+    ctx = request.tune_context(profile, target, sources, token_list)
     global_timeout = request.timeouts.global_timeout
-    if global_timeout > 0 and total_est_min * 60 > global_timeout:
-        log.warning(
-            "Estimated total time (%.0f min) exceeds global timeout (%d s / %.0f min). "
-            "Lower-priority tuners may be skipped. Consider increasing --global-timeout "
-            "or reducing --tokens coverage.",
-            total_est_min,
-            global_timeout,
-            global_timeout / 60,
-        )
-
-    # Build context
-    ctx = TuneContext(
-        profile=profile,
-        framework=target.framework,
-        precision=target.precision,
-        quant_type=target.quant_type,
-        gpu_type=target.gpu_type,
-        tp=request.workload.tp,
-        conc=request.workload.conc,
-        tokens=token_list,
-        mp=request.mp,
-        output_dir=output_path,
-        iters=request.bench.iters,
-        warmup=request.bench.warmup,
-        min_improvement_pct=request.bench.min_improvement_pct,
-        timeout_s=request.timeouts.timeout,
-        thorough=request.thorough,
-        untuned_csv=Path(untuned_csv) if untuned_csv else None,
-        moe_untuned_csv=Path(moe_untuned_csv) if moe_untuned_csv else None,
-        shapes_json=Path(shapes_json) if shapes_json else None,
-        shapes_manifest=Path(shapes_manifest) if shapes_manifest else None,
-        demand_json=Path(demand_json) if demand_json else None,
-        tunableop_input=Path(sources.tunableop_input) if sources.tunableop_input else None,
-        kernel_signature_log=Path(kernel_signature_log) if kernel_signature_log else None,
-        gpu_ids=request.gpus.gpu_ids,
-    )
+    _write_plan(ctx, tuner_specs, request.model_path, global_timeout)
 
     global_deadline = (start_time + global_timeout) if global_timeout > 0 else float("inf")
-    results, skipped = _execute_tuners(
-        tuner_specs,
-        ctx,
-        timeout=request.timeouts.timeout,
-        global_timeout=global_timeout,
-        global_deadline=global_deadline,
-    )
+    results, skipped = _execute_tuners(tuner_specs, ctx, global_deadline)
 
     # Last, and only on what the selected tuners left behind: by now they have
     # all run, so a generated tuner cannot take time from one that would have
@@ -822,13 +825,8 @@ def run(request: TuneRequest):
         if generated is not None:
             results.append(generated)
 
-    # Build report
-    total_elapsed = time.time() - start_time
-    report = build_report(results, skipped, ctx, started_at, total_elapsed)
-
-    # Write report to file
-    report_path = write_report(report, output_path)
-    log.info("Report written to %s", report_path)
+    report = build_report(results, skipped, ctx, started_at, time.time() - start_time)
+    log.info("Report written to %s", write_report(report, output_path))
 
     # Only when a candidate was produced: the manifest carries provenance + trace linkage + weighted coverage + the
     # CSV hash, none of which mean anything without a tuned CSV to describe.
@@ -837,17 +835,12 @@ def run(request: TuneRequest):
             report,
             results,
             output_path,
-            shape_manifest_path=shapes_manifest or None,
+            shape_manifest_path=sources.shapes_manifest or None,
             tuner_lib_version=request.kb_current_lib,
         )
 
-    # Emit sentinel-wrapped JSON to stdout
     emit_result_json(report.to_dict())
-
-    # Exit code
-    if report.status == "failed":
-        raise SystemExit(1)
-    raise SystemExit(0)
+    raise SystemExit(1 if report.status == "failed" else 0)
 
 
 @gemm_tune.command()
@@ -922,34 +915,19 @@ def plan(model_path: str, target: RoutingTarget, inputs: RoutingInputs):
     import tempfile
 
     from .model_analyzer import analyze_model
-    from .router import resolve_gpu_type, select_tuners
+    from .router import resolve_gpu_type
 
     profile = analyze_model(model_path)
     try:
         target = dataclasses.replace(target, gpu_type=resolve_gpu_type(target.gpu_type))
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
-    kernel_signature_log = inputs.kernel_signature_log
-    demand_json = inputs.demand_json
 
     # Same derivation as `run`, or the preview answers a different question than the thing it previews: a serving log
     # that unblocks TunableOp there would show it skipped here.
     with tempfile.TemporaryDirectory(prefix="forge-plan-") as scratch:
-        if not demand_json and kernel_signature_log and _safe_is_file(kernel_signature_log):
-            demand_json = _demand_from_serving_log(kernel_signature_log, Path(scratch))
-
-        tuner_specs = select_tuners(
-            profile,
-            framework=target.framework,
-            precision=target.precision,
-            quant_type=target.quant_type,
-            gpu_type=target.gpu_type,
-            kernel_signature_log=kernel_signature_log or None,
-            has_untuned_csv=bool(inputs.untuned_csv),
-            has_shapes_json=bool(inputs.shapes_json or inputs.shapes_manifest or demand_json),
-            has_tunableop_input=bool(inputs.tunableop_input),
-            demand_report=_load_demand_report(demand_json),
-        )
+        inputs = _with_serving_log_demand(inputs, Path(scratch))
+        tuner_specs = _route(profile, target, inputs, _load_demand_report(inputs.demand_json))
 
     click.echo(f"Model: {model_path}")
     click.echo(f"  Architecture: {profile.architecture}")
