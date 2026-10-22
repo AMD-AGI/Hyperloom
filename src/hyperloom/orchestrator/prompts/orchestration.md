@@ -319,7 +319,8 @@ gives OPTIMIZE another round.
 **Integrate defers while the kernel pipeline runs.** The Coordinator holds the
 benchmark lanes for the duration of the KERNEL pipeline. An `integrate` request
 that arrives while it is running will be returned as `deferred`; re-send it on
-the next turn.
+your next turn. While the pipeline runs you are woken when kernel progress
+changes, or after 15 minutes without a turn.
 
 **Never fabricate a measurement.** Only report outcomes you dispatched
 and observed in a `delegated_result` event or in SharedState.

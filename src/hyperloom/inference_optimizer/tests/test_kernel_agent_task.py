@@ -586,3 +586,56 @@ async def test_phase_transition_drops_queued_work_the_next_phase_does_not_allow(
 def test_specialist_is_allowed_in_enablement_but_not_in_kernel():
     assert "specialist" in ps.PHASE_ALLOWED_ACTIONS[ps.PHASE_ENABLEMENT]
     assert "specialist" not in ps.PHASE_ALLOWED_ACTIONS[ps.PHASE_KERNEL_AGENT]
+
+
+@pytest.mark.parametrize(
+    ("phase", "fingerprint", "idle_sec", "expected"),
+    [
+        (ps.PHASE_KERNEL_AGENT, "fp-a", 10.0, False),
+        (ps.PHASE_KERNEL_AGENT, "fp-b", 10.0, True),
+        (ps.PHASE_KERNEL_AGENT, "fp-a", 901.0, True),
+        (ps.PHASE_SWEEP, "fp-a", 10.0, True),
+    ],
+)
+def test_orchestration_turn_in_kernel_needs_kernel_progress_or_the_heartbeat(
+    coord, phase, fingerprint, idle_sec, expected
+):
+    st = coord.shared_state
+    st.phase = phase
+    st.kernel_progress_fingerprint = "fp-a"
+    now = time.time()
+    st.agent_last_active["orchestration"] = now
+    assert coord.conversation.admits_turn("orchestration", now)
+
+    st.kernel_progress_fingerprint = fingerprint
+
+    assert coord.conversation.admits_turn("orchestration", now + idle_sec) is expected
+
+
+async def test_kernel_ticks_run_orchestration_only_on_admitted_turns(coord, monkeypatch):
+    c = coord
+    st = c.shared_state
+    st.phase = ps.PHASE_KERNEL_AGENT
+    st.kernel_progress_fingerprint = "fp-a"
+    turns: list[str] = []
+
+    async def _noop(*_args, **_kwargs):
+        return None
+
+    async def _turn(name, **_kwargs):
+        turns.append(name)
+        st.agent_last_active[name] = time.time()
+
+    monkeypatch.setattr(c, "reactor_pass", _turn)
+    monkeypatch.setattr(c.reconciler, "run", _noop)
+    monkeypatch.setattr(c.phase_machine, "advance_phase_if_needed", _noop)
+    monkeypatch.setattr(c.dispatcher, "pump_dispatcher_once", _noop)
+    monkeypatch.setattr(c.enablement_lane, "pump_enablement_safely", _noop)
+    c.phase_machine.pump_table = {ps.PHASE_KERNEL_AGENT: _noop}
+    c._last_maintenance_ts = time.monotonic()
+
+    await c.tick(2)
+    st.kernel_progress_fingerprint = "fp-b"
+    await c.tick(1)
+
+    assert turns == ["orchestration", "critic", "critic", "orchestration", "critic"]

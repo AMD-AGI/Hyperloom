@@ -64,6 +64,8 @@ _QUESTIONS_PROMPT_CHARS = 6_000
 _INBOX_PROMPT_CHARS = 40_000
 # Task kinds that queue for the benchmark lane, in the order the backlog line lists them.
 _BENCH_LANE_KINDS = ("integrate_patch", "explore")
+# Longest a KERNEL_AGENT session goes without an Orchestration turn while kernel progress is unchanged.
+_KERNEL_ORCHESTRATION_HEARTBEAT_SEC = 900.0
 
 
 @dataclass(frozen=True)
@@ -279,6 +281,8 @@ class ConversationCollaborator(CoordinatorCollaborator):
         self.kb_last_read: ExperienceKBEvidence | None = None
         # Per-agent (seq, msg_id) of the last message its prompt rendered.
         self._rendered_cursor: dict[str, tuple[int, str]] = {}
+        # The kernel progress fingerprint at Orchestration's last admitted KERNEL turn.
+        self._admitted_kernel_fingerprint = ""
 
     async def _kb_prompt_block(self, untested_proposals: str) -> str:
         """Read shared Experience evidence once per FRAMEWORK_AGENT orchestration tick."""
@@ -650,6 +654,24 @@ class ConversationCollaborator(CoordinatorCollaborator):
         turn.extend(await self._render_inbox_sections(agent_name))
 
         return ComposedPrompt(context="\n".join(context), turn="\n".join(turn))
+
+    def admits_turn(self, agent_name: str, now_unix: float) -> bool:
+        """Whether ``agent_name`` takes a turn this tick; Orchestration in KERNEL_AGENT needs kernel progress or the heartbeat.
+
+        The kernel pipeline holds the lanes, so Orchestration can only act once its progress fingerprint moves.
+        """
+        state = self.shared_state
+        if agent_name != "orchestration" or str(state.phase or "").upper() != _phase_state.PHASE_KERNEL_AGENT:
+            return True
+        fingerprint = str(state.kernel_progress_fingerprint or "")
+        last_turn = float(state.agent_last_active.get("orchestration") or 0.0)
+        if (
+            fingerprint == self._admitted_kernel_fingerprint
+            and now_unix - last_turn < _KERNEL_ORCHESTRATION_HEARTBEAT_SEC
+        ):
+            return False
+        self._admitted_kernel_fingerprint = fingerprint
+        return True
 
     async def compose_turn(self, agent_name: str, backend: Any) -> TurnPrompt:
         """Compose the system prompt and prompt for one turn; a backend that caches its system prompt carries the session context there."""
