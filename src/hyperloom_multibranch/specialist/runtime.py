@@ -9,8 +9,8 @@ work instead of all sweeping the same settings, and a stopped branch's direction
 was never tried. Once each was held, it takes the one the fewest branches held over the session, then the one the
 fewest running branches hold. A direction given to a branch counts when it is one of these. A direction whose
 specialist gave up finding nothing to test is not dealt again on that start commit while another is left there, nor on
-the head its last :mod:`~hyperloom_multibranch.specialist.exhausted` record names: a later head may open it again, the
-same one would not.
+the head its last :mod:`~hyperloom_multibranch.specialist.exhausted` record names, and neither is one any branch's
+record names done on the commit a branch starts at: a later head may open it again, the same one would not.
 
 A session that crashes is restarted on its branch, at most ``MAX_RESTARTS`` times within ``RESTART_WINDOW_S``, and a
 lost one at most ``MAX_LOSS_RESTARTS`` times in a row with no session working in between: a loss takes the heartbeat
@@ -39,8 +39,8 @@ from hyperloom_multibranch.contracts.branch_log import BranchLogEntry, BranchLog
 from hyperloom_multibranch.contracts.lifecycle import BranchTask, SpecialistStatus
 from hyperloom_multibranch.contracts.notebook.interfaces import ClaimService, NotebookError
 from hyperloom_multibranch.contracts.notebook.vocab import ClaimStatus
-from hyperloom_multibranch.specialist.directions import DIRECTIONS
-from hyperloom_multibranch.specialist.exhausted import latest_exhausted
+from hyperloom_multibranch.specialist.directions import DIRECTIONS, direction_name
+from hyperloom_multibranch.specialist.exhausted import exhausted_records, latest_exhausted
 from hyperloom_multibranch.specialist.judging import NOTICE, BranchJudge, JudgeNotebook, Judging
 
 logger = logging.getLogger(__name__)
@@ -145,12 +145,14 @@ class SpecialistRuntime:
         self._pacing = pacing
         self._branches: dict[str, _Branch] = {}
         self._held: Counter[str] = Counter()
-        self._given_up: set[tuple[str, str]] = set()
+        self._closed: set[tuple[str, str]] = set()
 
     async def start(self, branch: str, start_commit: str, task: BranchTask = BranchTask()) -> None:
         if branch in self._branches:
             raise ValueError(f"branch {branch!r} already has a specialist")
         if not task.direction.strip() and task.repair is None:
+            for state in self._branches.values():
+                await self._learn_exhausted(state)
             task = replace(task, direction=self._least_held(start_commit))
         if task.direction in DIRECTIONS:
             self._held[task.direction] += 1
@@ -193,6 +195,7 @@ class SpecialistRuntime:
         for task in others:
             task.cancel()
         await asyncio.gather(*others, return_exceptions=True)
+        await self._learn_exhausted(state)
 
     async def _supervise(self, state: _Branch) -> None:
         crashes: deque[float] = deque()
@@ -243,16 +246,24 @@ class SpecialistRuntime:
     async def _close_direction(self, state: _Branch) -> str:
         """Deal the given-up branch's direction to no new branch on its start commit or on the head its specialist's
         last exhausted record names; that record as the give-up notice quotes it, ``""`` without one."""
-        self._given_up.add((state.start_commit, state.task.direction))
+        self._closed.add((state.start_commit, state.task.direction))
         exhausted = latest_exhausted(await state.notebook.branch_log(state.name))
         if exhausted is None:
             return ""
-        self._given_up.add((exhausted.head, state.task.direction))
+        self._closed.add((exhausted.head, state.task.direction))
         return f"; its last exhausted record: {exhausted.summary()}"
+
+    async def _learn_exhausted(self, state: _Branch) -> None:
+        """Close, on its head, each of the session's directions that ``state``'s specialist recorded exhausted."""
+        for exhausted in exhausted_records(await state.notebook.branch_log(state.name)):
+            named = exhausted.direction.strip().lower()
+            for direction in DIRECTIONS:
+                if named.startswith(direction_name(direction).lower()):
+                    self._closed.add((exhausted.head, direction))
 
     def _least_held(self, start_commit: str) -> str:
         running = [state.task.direction for state in self._branches.values()]
-        open_here = [d for d in DIRECTIONS if (start_commit, d) not in self._given_up] or list(DIRECTIONS)
+        open_here = [d for d in DIRECTIONS if (start_commit, d) not in self._closed] or list(DIRECTIONS)
         return min(open_here, key=lambda d: (self._held[d], running.count(d)))
 
     async def _judge(self, state: _Branch, judge: BranchJudge) -> None:

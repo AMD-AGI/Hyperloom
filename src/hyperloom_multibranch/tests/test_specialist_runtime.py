@@ -373,6 +373,32 @@ async def test_a_specialist_s_exhausted_record_is_in_its_give_up_notice_and_clos
     assert runs.started[-1].start.task.direction == DIRECTIONS[1]
 
 
+async def test_a_direction_a_running_or_stopped_branch_recorded_exhausted_on_a_head_is_not_dealt_there(session):
+    runs = _Runs()
+    runtime = session.runtime(runs)
+    head = await session.repo.head(BRANCH)
+    fusion = DIRECTIONS[2].split(":")[0]
+    record = {"direction": fusion + " (rope)", "head": head, "tried": ["r1"], "why": "no_ceiling_above_bar"}
+    record |= {"detail": "no elementwise op above the bar is left", "reopen_if": "the head moves"}
+
+    await runtime.start(BRANCH, head)
+    entry = BranchLogEntry(BRANCH, BranchLogType.RESULT, EXHAUSTED_PREFIX + json.dumps(record))
+    await LocalNotebook(session.root, Writer(Role.SPECIALIST_RUNTIME, BRANCH, BRANCH)).append_branch_log(entry)
+    await runtime.start("b1", head)
+    await runtime.start("next", head)
+    await _until(lambda: _true(len(runs.started) == 3), "the first specialists to start")
+    for name in (BRANCH, "b1"):
+        await runtime.stop(name)
+    await runtime.start("later", head)
+    await _until(lambda: _true(len(runs.started) == 4), "the specialists to start")
+    for name in ("next", "later"):
+        await runtime.stop(name)
+
+    directions = {run.start.branch: run.start.task.direction for run in runs.started}
+    assert DIRECTIONS[2] not in (directions["next"], directions["later"])
+    assert (directions["next"], directions["later"]) == (DIRECTIONS[3], DIRECTIONS[4])
+
+
 async def test_an_idle_session_that_submitted_a_test_starts_the_count_again(session):
     runs = _Runs(errors=(_idle(), _idle(tested=True), _idle()))
     runtime = session.runtime(runs)

@@ -4,8 +4,8 @@
 """A specialist's record that its direction is done on a head: one branch-log entry, ``EXHAUSTED`` and a JSON object.
 
 It is kept for the record and stops nothing; one that cites no test is no record, as an untested direction is not
-done. When the branch gives up, the runtime quotes the latest one in its notice and deals that direction to no new
-branch on that head. ``why`` is a closed vocabulary so that give-ups can be counted by cause.
+done. The runtime deals the session's direction a record names to no new branch on that record's head, and when the
+branch gives up, it quotes the latest one in its notice. ``why`` is a closed vocabulary so that give-ups can be counted by cause.
 """
 
 from __future__ import annotations
@@ -61,13 +61,17 @@ def read_exhausted(content: str) -> Exhausted | None:
         return None
 
 
+def exhausted_records(records: Iterable[BranchLogRecord]) -> list[Exhausted]:
+    """The well-formed records among a branch's log entries, oldest first."""
+
+    return [found for record in records if (found := read_exhausted(record.entry.content)) is not None]
+
+
 def latest_exhausted(records: Iterable[BranchLogRecord]) -> Exhausted | None:
     """The latest well-formed record among a branch's log entries."""
 
-    found = None
-    for record in records:
-        found = read_exhausted(record.entry.content) or found
-    return found
+    found = exhausted_records(records)
+    return found[-1] if found else None
 
 
-__all__ = ["EXHAUSTED_PREFIX", "Exhausted", "ExhaustedWhy", "latest_exhausted", "read_exhausted"]
+__all__ = ["EXHAUSTED_PREFIX", "Exhausted", "ExhaustedWhy", "exhausted_records", "latest_exhausted", "read_exhausted"]
