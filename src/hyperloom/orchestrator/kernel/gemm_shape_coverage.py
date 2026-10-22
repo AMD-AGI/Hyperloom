@@ -133,16 +133,15 @@ def align_shapes_to_aiter_keys(
 
     budget = max(len(nk_pairs), int(max_shapes))
     kept = set(ladder_rows)
-    if len(kept) > budget:
-        # Drop the smallest rungs first, but never leave an (N, K) with no row.
-        for m in ladder:
+    # The budget is at least one row per (N, K), so the break fires before the
+    # last rung and no (N, K) is left without a row.
+    for m in ladder:
+        if len(kept) <= budget:
+            break
+        for n, k in nk_pairs:
             if len(kept) <= budget:
                 break
-            for n, k in nk_pairs:
-                if len(kept) <= budget:
-                    break
-                if len([1 for _m, _n, _k in kept if (_n, _k) == (n, k)]) > 1:
-                    kept.discard((m, n, k))
+            kept.discard((m, n, k))
     for shape in sorted(fine_rows, key=lambda s: s[0], reverse=True):
         if len(kept) >= budget:
             break
