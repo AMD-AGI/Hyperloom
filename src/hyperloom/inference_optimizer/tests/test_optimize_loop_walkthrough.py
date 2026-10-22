@@ -104,8 +104,8 @@ async def test_a_baseline_carries_the_run_into_the_optimisation_phase_with_work(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("kernel_optimizer", "result_field", "result_key", "expected"),
-    # Neither route starts its work: with no measured baseline, the round held back to measure it is the benchmark
-    # hard cap, which outlasts this KERNEL slice.
+    # GEAK is skipped for want of KERNEL budget. The forge controller starts on what is left of the KERNEL slice after
+    # one benchmark round (the hard cap, with no measured baseline) and finds no opportunity.
     [
         ("geak", "geak_result", "error_class", "insufficient_budget"),
         ("forge", "kernel_rewrite_controller_result", "status", "no_opportunity"),
