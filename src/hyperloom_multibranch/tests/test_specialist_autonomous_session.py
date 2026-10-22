@@ -6,7 +6,9 @@ import json
 import os
 import signal
 import subprocess
+import time
 from collections.abc import Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
@@ -20,9 +22,9 @@ from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.tests.factories import result
 from hyperloom_multibranch.specialist.agent_onboarding import AgentSpec, CommandResult, OnboardingSetup
 from hyperloom_multibranch.specialist.agent_session import BranchPlace
-from hyperloom_multibranch.specialist.autonomous_session import AutonomousSession, AutonomousSetup
+from hyperloom_multibranch.specialist.autonomous_session import AGENT_DIR, AutonomousSession, AutonomousSetup
 from hyperloom_multibranch.specialist.judging import NOTICE
-from hyperloom_multibranch.specialist.runtime import SessionCrashed, SessionStart
+from hyperloom_multibranch.specialist.runtime import SessionCrashed, SessionFinished, SessionStart
 from hyperloom_multibranch.tests.branch_rig import branch_rig
 
 BRANCH = "a1"
@@ -32,28 +34,41 @@ ROOT = Recipe(
     components=(ComponentPatches("vllm", "https://github.com/vllm-project/vllm", "1" * 40),),
 )
 
-#: An agent that keeps two changes to its workspace's config.py, a little apart, then ends with ``EXIT``.
+#: An agent that, every ``gap`` seconds, writes each of ``keeps`` to its workspace's config.py and to the config it
+#: runs with, commits it when ``commits`` is set, as Arbor does, and records the keep; it ends with ``exit`` after
+#: ``tail`` more seconds.
 AGENT = """
-import json, pathlib, sys, time
+import json, pathlib, subprocess, sys, time
 config = json.loads(pathlib.Path("campaign.json").read_text())
-target = pathlib.Path(config["workspace"]) / "vllm" / "config.py"
+workspace = pathlib.Path(config["workspace"])
 state = pathlib.Path("run/state.json")
 state.parent.mkdir(exist_ok=True)
 state.write_text(json.dumps({"keeps": [], "note": ""}))
-for step, seqs in enumerate((256, 512), start=1):
-    time.sleep(0.3)
-    target.write_text(f"max_num_seqs = {seqs}\\n")
-    COMMIT
+for step, seqs in enumerate(config["keeps"], start=1):
+    time.sleep(config["gap"])
+    (workspace / "vllm" / "config.py").write_text(f"max_num_seqs = {seqs}\\n")
+    (workspace / "agent-config.json").write_text(json.dumps({"args": config["args"].format(seqs=seqs), "envs": {}}))
+    if config["commits"]:
+        subprocess.run("git add -A && git -c user.name=a -c user.email=a@a commit -qm k", shell=True, cwd=workspace)
     state.write_text(json.dumps({"keeps": [{"decision": "KEEP"}] * step, "note": f"seqs {seqs}"}))
-time.sleep(0.3)
-sys.exit(EXIT)
+time.sleep(config["tail"])
+sys.exit(config["exit"])
 """
+KEEPS = {"path": "run/state.json", "field": "keeps", "where": {"decision": "KEEP"}}
+CONFIG_SOURCE = {"path": "agent-config.json", "server_args": "args", "envs": "envs"}
 
-#: What an agent that commits each candidate in its workspace, as Arbor does, runs after each change.
-COMMITS = (
-    'import subprocess; subprocess.run("git add -A && git -c user.name=a -c user.email=a@a commit -qm keep", '
-    "shell=True, cwd=config['workspace'], check=True)"
-)
+
+@dataclass(frozen=True)
+class Agent:
+    keeps: tuple[int, ...] = (256, 512)
+    gap: float = 0.3
+    tail: float = 0.3
+    exit: int = 0
+    commits: bool = False
+    args: str = "--max-num-seqs {seqs}"
+    keep: object = field(default_factory=lambda: KEEPS)
+    config_source: object = None
+    resume: str = ""
 
 
 async def _until(condition, what: str, seconds: float = 10.0) -> None:
@@ -85,7 +100,7 @@ class LocalSandbox:
     """Runs commands as local processes, each in a process group of its own."""
 
     def __init__(self, logs: Path) -> None:
-        self._logs, self.started = logs, []
+        self._logs, self.started, self.envs = logs, [], []
 
     async def run(self, command: str, cwd: Path, env: Mapping[str, str], timeout: float) -> CommandResult:
         done = subprocess.run(command, shell=True, cwd=cwd, env={**os.environ, **env}, capture_output=True, text=True)
@@ -103,6 +118,7 @@ class LocalSandbox:
             start_new_session=True,
         )
         self.started.append(command)
+        self.envs.append(dict(env))
         return LocalProcess(process, log)
 
 
@@ -119,11 +135,10 @@ class Toolbox:
         return accepted.request_id or ""
 
 
-def _agent_repo(tmp_path: Path, exit_code: int, commits: bool) -> Path:
+def _agent_repo(tmp_path: Path) -> Path:
     repo = tmp_path / "agent-repo"
     repo.mkdir()
-    script = AGENT.replace("EXIT", str(exit_code)).replace("COMMIT", COMMITS if commits else "pass")
-    (repo / "agent.py").write_text(script, encoding="utf-8")
+    (repo / "agent.py").write_text(AGENT, encoding="utf-8")
     for argv in (
         ["git", "init", "-q"],
         ["git", "add", "."],
@@ -133,18 +148,19 @@ def _agent_repo(tmp_path: Path, exit_code: int, commits: bool) -> Path:
     return repo
 
 
-def _manifest(workspace: str) -> str:
+def _manifest(workspace: str, agent: Agent) -> str:
+    plan = {"keeps": list(agent.keeps), "gap": agent.gap, "tail": agent.tail, "exit": agent.exit}
     return json.dumps(
         {
             "source": "agent",
             "commit": "c",
             "install": [],
             "config_file": "campaign.json",
-            "config": {"workspace": workspace},
+            "config": {"workspace": workspace, "commits": agent.commits, "args": agent.args, **plan},
             "launch": "python3 agent.py",
-            "resume": "",
-            "keep": {"path": "run/state.json", "field": "keeps", "where": {"decision": "KEEP"}},
-            "config_source": None,
+            "resume": agent.resume,
+            "keep": agent.keep,
+            "config_source": agent.config_source,
             "summary_field": "note",
             "result_dir": "",
             "needs": [],
@@ -152,15 +168,33 @@ def _manifest(workspace: str) -> str:
     )
 
 
-async def _session(tmp_path: Path, exit_code: int, *, commits: bool = False):
+@dataclass
+class Rig:
+    session: AutonomousSession
+    sandbox: LocalSandbox
+    toolbox: Toolbox
+    toolbox_notebook: LocalNotebook
+    repo: object
+    notebook: LocalNotebook
+    blobs: LocalBlobStore
+    restart: object
+
+    async def notices(self) -> list[str]:
+        return [record.entry.content for record in await self.notebook.branch_log(BRANCH)]
+
+    def patch(self, request: TestRequest) -> str:
+        [change] = request.delta.components
+        return self.blobs.get(change.add_patches[0].sha256).decode()
+
+
+async def _rig(tmp_path: Path, agent: Agent = Agent(), *, poll: float = 0.05, clock=time.time) -> Rig:
     rig = await branch_rig(tmp_path, ROOT, BRANCH)
-    base, repo, root, notebook = rig.base, rig.repo, rig.root, rig.notebook
     toolbox_notebook = LocalNotebook(tmp_path / "notebook", Writer(Role.TOOLBOX, "toolbox"))
-    worktree = base.worktree(BRANCH, tmp_path / BRANCH / "agent-workspace")
+    worktree = rig.base.worktree(BRANCH, tmp_path / BRANCH / "agent-workspace")
     sandbox, toolbox = LocalSandbox(tmp_path / "logs"), Toolbox(toolbox_notebook)
 
     async def onboard(checkout: Path, prompt: str) -> str:
-        return _manifest(str(worktree.path))
+        return _manifest(str(worktree.path), agent)
 
     def spec(workspace: Path) -> AgentSpec:
         return AgentSpec(
@@ -169,44 +203,136 @@ async def _session(tmp_path: Path, exit_code: int, *, commits: bool = False):
         )  # fmt: skip
 
     onboarding = OnboardingSetup(sandbox, onboard, start_seconds=5.0, poll_seconds=0.05)
-    setup = AutonomousSetup(onboarding, spec, toolbox, repo, "vllm", poll_seconds=0.05)
-    place = BranchPlace(worktree, notebook, tmp_path / BRANCH / "session")
+    setup = AutonomousSetup(
+        onboarding, spec, toolbox, rig.repo, "vllm", poll_seconds=poll, settle_seconds=0.3, clock=clock
+    )
+    place = BranchPlace(worktree, rig.notebook, tmp_path / BRANCH / "session")
     place.workspace.mkdir(parents=True)
-    source = str(_agent_repo(tmp_path, exit_code, commits))
-    start = SessionStart(BRANCH, root, 1, BranchTask(agent=source))
-    return AutonomousSession(start, setup, place), toolbox, toolbox_notebook, repo, notebook
+    start = SessionStart(BRANCH, rig.root, 1, BranchTask(agent=str(_agent_repo(tmp_path))))
+
+    def restart() -> AutonomousSession:
+        return AutonomousSession(start, setup, place)
+
+    blobs = LocalBlobStore(tmp_path / "blobs")
+    return Rig(restart(), sandbox, toolbox, toolbox_notebook, rig.repo, rig.notebook, blobs, restart)
 
 
 @pytest.mark.parametrize("commits", [False, True], ids=["edits", "commits"])
 async def test_an_agent_s_keeps_are_imported_one_at_a_time_against_the_branch_head(
     tmp_path: Path, commits: bool
 ) -> None:
-    session, toolbox, toolbox_notebook, repo, notebook = await _session(tmp_path, exit_code=0, commits=commits)
+    rig = await _rig(tmp_path, Agent(commits=commits))
 
-    await session.preflight()
-    running = asyncio.create_task(session.run())
-    await _until(lambda: toolbox.requests, "the first import")
+    await rig.session.preflight()
+    running = asyncio.create_task(rig.session.run())
+    await _until(lambda: rig.toolbox.requests, "the first import")
     await asyncio.sleep(1.0)
-    assert len(toolbox.requests) == 1
-    await toolbox_notebook.write_result(result("r1"))
-    await asyncio.wait_for(running, 10)
+    assert len(rig.toolbox.requests) == 1
+    await rig.toolbox_notebook.write_result(result("r1"))
+    await _until(lambda: len(rig.toolbox.requests) == 2, "the second import")
+    await rig.toolbox_notebook.write_result(result("r2"))
+    with pytest.raises(SessionFinished):
+        await asyncio.wait_for(running, 10)
 
-    first, last = toolbox.requests[0], toolbox.requests[-1]
-    assert (first.branch_id, first.parent_commit, first.intent_fingerprint) == (BRANCH, await repo.head(BRANCH), None)
-    [change] = last.delta.components
-    assert change.component == "vllm" and not change.remove_patches
-    patch = LocalBlobStore(tmp_path / "blobs").get(change.add_patches[0].sha256).decode()
-    assert "+max_num_seqs = 512" in patch and "-max_num_seqs = 128" in patch
-    notices = [record.entry.content for record in await notebook.branch_log(BRANCH)]
-    assert any(note.startswith(f"{NOTICE} keep") and "seqs 512" in note for note in notices)
+    first, last = rig.toolbox.requests
+    assert (first.branch_id, first.parent_commit, first.intent_fingerprint) == (
+        BRANCH, await rig.repo.head(BRANCH), None,
+    )  # fmt: skip
+    assert "+max_num_seqs = 256" in rig.patch(first)
+    assert "+max_num_seqs = 512" in rig.patch(last) and "-max_num_seqs = 128" in rig.patch(last)
+    notices = await rig.notices()
+    assert any(note.startswith(f"{NOTICE} keep 2") and "seqs 512" in note for note in notices)
     assert notices[-1] == f"{NOTICE} the agent finished its run"
 
 
-async def test_an_agent_that_exits_non_zero_is_a_crash_with_its_last_output(tmp_path: Path) -> None:
-    session, *_ = await _session(tmp_path, exit_code=3)
+async def test_an_import_waits_while_the_last_one_is_measured_or_judged(tmp_path: Path) -> None:
+    later = [0.0]
+    rig = await _rig(tmp_path, Agent(tail=30.0), clock=lambda: time.time() + later[0])
 
-    await session.preflight()
+    await rig.session.preflight()
+    running = asyncio.create_task(rig.session.run())
+    await _until(lambda: rig.toolbox.requests, "the first import")
+    await asyncio.sleep(0.6)
+    await rig.toolbox_notebook.write_result(result("r1"))
+    await asyncio.sleep(0.2)
+    assert len(rig.toolbox.requests) == 1
+    later[0] = 1.0
+    await _until(lambda: len(rig.toolbox.requests) == 2, "the import once the first one is judged")
+
+    await rig.session.stop()
+    await asyncio.wait_for(running, 10)
+
+
+async def test_an_agent_that_exits_non_zero_is_a_crash_with_its_last_output(tmp_path: Path) -> None:
+    rig = await _rig(tmp_path, Agent(keeps=(), exit=3))
+
+    await rig.session.preflight()
 
     with pytest.raises(SessionCrashed, match="exited 3"):
-        await asyncio.wait_for(session.run(), 10)
-    await session.stop()
+        await asyncio.wait_for(rig.session.run(), 10)
+    await rig.session.stop()
+
+
+async def test_a_keep_waiting_at_a_crash_is_imported_by_the_resumed_run_with_the_docker_shim(tmp_path: Path) -> None:
+    rig = await _rig(tmp_path, Agent(exit=3, resume="sleep 30"))
+
+    await rig.session.preflight()
+    with pytest.raises(SessionCrashed):
+        await asyncio.wait_for(rig.session.run(), 10)
+    await rig.session.stop()
+    assert len(rig.toolbox.requests) == 1
+    resumed = rig.restart()
+    running = asyncio.create_task(resumed.run())
+    await rig.toolbox_notebook.write_result(result("r1"))
+    await _until(lambda: len(rig.toolbox.requests) == 2, "the waiting keep")
+
+    assert rig.sandbox.started[-1] == "sleep 30"
+    assert rig.sandbox.envs[-1]["PATH"].startswith(str(tmp_path / BRANCH / "session" / AGENT_DIR / "bin"))
+    assert "+max_num_seqs = 512" in rig.patch(rig.toolbox.requests[-1])
+    await resumed.stop()
+    await asyncio.wait_for(running, 10)
+
+
+async def test_a_keep_file_with_no_counter_is_one_keep_at_each_change(tmp_path: Path) -> None:
+    rig = await _rig(tmp_path, Agent(keeps=(256,), keep={"path": "run/state.json"}, tail=30.0))
+
+    await rig.session.preflight()
+    running = asyncio.create_task(rig.session.run())
+    await _until(lambda: rig.toolbox.requests, "the import")
+
+    assert "+max_num_seqs = 256" in rig.patch(rig.toolbox.requests[0])
+    await rig.session.stop()
+    await asyncio.wait_for(running, 10)
+
+
+@pytest.mark.parametrize(
+    ("args", "source", "why"),
+    [
+        ("--max-num-seqs {seqs}", {**CONFIG_SOURCE, "server_args": "envs"}, "cannot be read"),
+        ("--max-num-seqs {seqs} /models/m", CONFIG_SOURCE, "is no recipe change"),
+    ],
+    ids=["unreadable", "positional"],
+)
+async def test_a_keep_that_cannot_be_imported_is_noted_once_and_the_run_goes_on(
+    tmp_path: Path, args: str, source: dict[str, str], why: str
+) -> None:
+    rig = await _rig(tmp_path, Agent(keeps=(256,), args=args, config_source=source, tail=0.6))
+
+    await rig.session.preflight()
+    with pytest.raises(SessionFinished):
+        await asyncio.wait_for(rig.session.run(), 10)
+
+    assert not rig.toolbox.requests
+    assert len([note for note in await rig.notices() if f"keep 1 {why}" in note]) == 1
+
+
+async def test_a_keep_made_just_before_the_agent_exits_is_imported(tmp_path: Path) -> None:
+    rig = await _rig(tmp_path, Agent(keeps=(256,), gap=0.2, tail=0.0), poll=1.0)
+
+    await rig.session.preflight()
+    running = asyncio.create_task(rig.session.run())
+    await _until(lambda: rig.toolbox.requests, "the last keep", seconds=5.0)
+    await rig.toolbox_notebook.write_result(result("r1"))
+
+    with pytest.raises(SessionFinished):
+        await asyncio.wait_for(running, 10)

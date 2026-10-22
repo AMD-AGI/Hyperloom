@@ -163,7 +163,7 @@ async def make_ready(source: str, spec: AgentSpec, agent_dir: Path, setup: Onboa
     for attempt in range(1, setup.attempts + 1):
         try:
             return await _attempt(source, spec, agent_dir, setup, tuple(failures))
-        except AttemptFailed as error:
+        except (AttemptFailed, OSError) as error:
             failures.append(f"attempt {attempt}: {error}")
     raise PreflightFailed(failures)
 
@@ -180,13 +180,19 @@ async def _attempt(
         raise AttemptFailed(f"the manifest: {error}") from error
     (checkout / manifest.config_file).parent.mkdir(parents=True, exist_ok=True)
     (checkout / manifest.config_file).write_text(json.dumps(manifest.config, indent=2), encoding=ENCODING)
-    env = _shim_env(agent_dir)
+    env = agent_env(agent_dir)
     for command in manifest.install:
         done = await setup.sandbox.run(command, checkout, env, setup.install_seconds)
         if done.returncode != 0:
             raise AttemptFailed(f"install `{command}` exited {done.returncode}: {tail(done.output)}")
     process = await setup.sandbox.start(manifest.launch, checkout, env)
-    await _started(process, manifest, checkout, setup)
+    started = False
+    try:
+        await _started(process, manifest, checkout, setup)
+        started = True
+    finally:
+        if not started:
+            await process.kill()
     return ReadyAgent(manifest, checkout, process)
 
 
@@ -236,7 +242,10 @@ def split_source(source: str) -> tuple[str, str]:
     return url, ref
 
 
-def _shim_env(agent_dir: Path) -> dict[str, str]:
+def agent_env(agent_dir: Path) -> dict[str, str]:
+    """What the agent of ``agent_dir`` runs with on top of its sandbox's environment: :data:`DOCKER_SHIM` first on its
+    ``PATH``."""
+
     shim = agent_dir / SHIM_DIR / "docker"
     shim.parent.mkdir(parents=True, exist_ok=True)
     shim.write_text(DOCKER_SHIM, encoding=ENCODING)
@@ -317,6 +326,7 @@ __all__ = [
     "CommandResult",
     "OnboardingSetup",
     "ReadyAgent",
+    "agent_env",
     "make_ready",
     "onboarding_prompt",
     "split_source",

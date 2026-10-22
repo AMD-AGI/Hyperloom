@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
+import asyncio
 import json
 import os
 import subprocess
@@ -145,6 +146,20 @@ async def test_each_failed_attempt_reaches_the_next_prompt_and_three_give_up(tmp
     assert reasons[1].startswith("attempt 2: install `pip install agent` exited 1") and "no matching" in reasons[1]
     assert reasons[2].startswith("attempt 3: `python3 -m agent run` exited 127") and "not found" in reasons[2]
     assert reasons[0] in onboard.prompts[1] and reasons[1] in onboard.prompts[2]
+
+
+async def test_an_agent_started_by_a_preflight_that_is_cancelled_is_killed(tmp_path: Path) -> None:
+    repo, process = _agent_repo(tmp_path), Process(None)
+    sandbox, onboard = Sandbox([process]), Onboarder([_manifest()])
+    setup = OnboardingSetup(sandbox, onboard, start_seconds=30.0, poll_seconds=0.05)
+
+    preflight = asyncio.create_task(make_ready(str(repo), SPEC, tmp_path / "agent", setup))
+    await asyncio.sleep(0.5)
+    preflight.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await preflight
+    assert process.killed
 
 
 def test_a_source_ref_follows_its_last_at_unless_that_names_a_host() -> None:

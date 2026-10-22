@@ -13,6 +13,8 @@ a kept change shows (:class:`KeepSignal`), where the agent keeps the server argu
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
@@ -81,6 +83,15 @@ class KeepSignal:
         if not isinstance(where, Mapping):
             raise ManifestError(f"keep.where must be an object, got {where!r}")
         return cls(_relative(fields.get("path"), "keep.path"), str(fields.get("field", "")), dict(where))
+
+    def mark(self, raw: bytes) -> int | str:
+        """What the keep file's bytes ``raw`` say of the keeps: the count of :meth:`count`, or, with no ``counter``,
+        the digest of the file, whose every change is one keep; raise ``ValueError``, ``KeyError`` or ``IndexError``
+        when it cannot be read, as a file the agent is writing cannot."""
+
+        if not self.counter:
+            return hashlib.sha256(raw).hexdigest()
+        return self.count(json.loads(raw))
 
     def count(self, state: object) -> int:
         """The keeps the parsed keep file ``state`` records."""
