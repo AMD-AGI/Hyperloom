@@ -357,3 +357,4 @@ reuse lint
 | `.github/workflows/secret-scan.yml` | Gitleaks |
 | `.github/workflows/reuse-lint.yml` | REUSE |
 | `.github/workflows/codeql.yml` | CodeQL security analysis |
+
