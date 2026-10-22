@@ -350,6 +350,8 @@ def _fp8_is_per_channel_per_token(model_path: str) -> bool:
 _MLA_KEYS = ("kv_lora_rank", "qk_rope_head_dim", "qk_nope_head_dim", "q_lora_rank")
 _MOE_EXPERT_KEYS = ("num_experts", "n_routed_experts", "num_local_experts")
 _SHARED_EXPERT_KEYS = ("n_shared_experts", "num_shared_experts", "moe_num_shared_experts")
+# Each family names its multi-token-prediction layer count differently (DeepSeek/GLM, Qwen3.5, MiniMax).
+_MTP_LAYER_KEYS = ("num_nextn_predict_layers", "mtp_num_hidden_layers", "num_mtp_modules")
 # Nested text-tower config keys used by multimodal wrappers (priority order).
 _TEXT_SCOPE_KEYS = ("text_config", "llm_config", "language_config")
 # Base-family tokens for derived/hybrid model_types (longest first).
@@ -577,6 +579,8 @@ def summarize_model_config(model_path: str) -> dict:
             out[key] = value
 
     out.update(_moe_shape(cfg))
+    # Always written, so an absent key marks a summary that predates the field, not a model without MTP.
+    out["mtp_layers"] = _first_int_under(cfg, _MTP_LAYER_KEYS)
 
     quant = _derive_quantization(cfg)
     if quant:

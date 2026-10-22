@@ -23,10 +23,19 @@ class ValidationResult:
     snr_db: float | None = None
     output: str = ""  # full driver output tail on failure (for the experience ledger)
 
+    @property
+    def status_label(self) -> str:
+        if self.passed:
+            return "PASS"
+        if self.outcome == "timeout":
+            return "TIMEOUT"
+        if self.outcome in {"driver_error", "invalid_result"}:
+            return "ERROR"
+        return "FAIL"
+
     def __str__(self):
-        status = _status_label(self.outcome, self.passed)
         snr = f" (SNR={self.snr_db:.1f} dB)" if self.snr_db is not None else ""
-        return f"  Stage {self.stage} [{self.stage_name}]: {status}{snr} — {self.details}"
+        return f"  Stage {self.stage} [{self.stage_name}]: {self.status_label}{snr} — {self.details}"
 
 
 @dataclass
@@ -65,9 +74,8 @@ class ValidationReport:
     def summary(self) -> str:
         lines = ["Validation Pipeline:"]
         for r in self.results:
-            status = _status_label(r.outcome, r.passed)
             snr = f" SNR={r.snr_db:.1f}dB" if r.snr_db is not None else ""
-            lines.append(f"  {r.stage}. {r.stage_name}: {status}{snr}")
+            lines.append(f"  {r.stage}. {r.stage_name}: {r.status_label}{snr}")
         verdict = "ALL PASSED" if self.all_passed else f"FAILED at stage {self.failed_stage}"
         lines.append(f"  Verdict: {verdict}")
         return "\n".join(lines)
@@ -98,13 +106,3 @@ async def run_validation_pipeline(
             )
         ]
     )
-
-
-def _status_label(outcome: str, passed: bool) -> str:
-    if passed:
-        return "PASS"
-    if outcome == "timeout":
-        return "TIMEOUT"
-    if outcome in {"driver_error", "invalid_result"}:
-        return "ERROR"
-    return "FAIL"

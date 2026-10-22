@@ -53,6 +53,10 @@ def first_int(*values: Any, default: _T | None = None) -> int | _T | None:
     return default
 
 
+def first_text(*values: Any) -> str:
+    return str(next((value for value in values if value), "")).strip()
+
+
 def optional_positive_int(value: Any, default: _T | None = None) -> int | _T | None:
     """Coerce *value* to a strictly positive ``int``, else *default*."""
     parsed = to_int(value)
