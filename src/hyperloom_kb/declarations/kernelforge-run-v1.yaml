@@ -10,10 +10,10 @@
 # provenance.extra holds the candidate's metadata, which never reaches a prompt: meta, the whole meta.json
 # KernelForge archived for the candidate, verbatim, among it the commit it kept the candidate as, the mean case
 # speedup it decided on, the per-case times, every benchmark measurement, and a single session's turns and end reason;
-# llm_backend and llm_model, the Implementer the run's forge-loop.log names; kb_record, the record KernelForge's own
-# experience KB filed a kept candidate under; candidate_origin, session or lane; analysis_generation, the Analysis
-# generation reflection.analysis_report comes from, as analysis/<commit>/generation-NNN under forge_experiments; and
-# analysis_report_omitted, why a report too long for a text field is not held.
+# kb_record, the record KernelForge's own experience KB filed a kept candidate under; candidate_origin, session or
+# lane; analysis_generation, the Analysis generation reflection.analysis_report comes from, as
+# analysis/<commit>/generation-NNN under forge_experiments; and analysis_report_omitted, why a report too long for a
+# text field is not held.
 # An Experience carries no raw logs and none of the profiler's output: the only files it links are the plan, the
 # measured kernel, and the archived diff of every file the commit touched (candidates/iter_NNN/change.diff). The diff
 # and the kernel file are different records: the diff has every file the commit touched and not the kernel's unchanged

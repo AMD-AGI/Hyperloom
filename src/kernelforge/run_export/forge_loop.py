@@ -7,7 +7,7 @@ The run is a workspace's ``forge_experiments/`` directory, recognized by its ``c
 ``run_state.json``. Every attempt that produced a diff is archived as ``candidates/iter_NNN/meta.json``, and each one
 is a unit: seq N, the candidate iteration N measured and Kernel Forge's decision on it, under the run's
 ``campaign_id`` as ``run_id``. The forge-loop's stdout log has no timestamps, so a unit's times come from the run's
-``events.jsonl``, and the log is read only for the Implementer it names and the record of Kernel Forge's own
+``events.jsonl``, and the log is read only for the kernel it announces and the record of Kernel Forge's own
 experience KB each kept candidate was written as.
 
 A log belongs to the run whose workspace path shares the most trailing components with the kernel path the log
@@ -48,7 +48,6 @@ _STARTED = "iteration_started"
 _RESULT = "iteration_result"
 _LOOP_BANNER = "Starting autonomous iteration loop"
 _KERNEL_LINE = re.compile(r"^  Kernel: (.+)$", re.M)
-_IMPLEMENTER_LINE = re.compile(r"^[ \t]*Implementer: (\S+) / (\S+)[ \t]*$", re.M)
 _ITERATION_HEADER = re.compile(r"^--- Iteration (\d+)\b")
 _KB_WRITTEN = re.compile(r"^\s*\[kb\] experience written: (\S+)")
 _CANDIDATE_DIR = re.compile(r"^iter_(\d+)$")
@@ -60,12 +59,10 @@ _CLOCK = re.compile(r"^(\d{4}-\d\d-\d\d) (\d\d:\d\d:\d\d)$")
 
 @dataclass(frozen=True)
 class _LoopLog:
-    """One forge-loop stdout log: the kernels its runs announced, the first Implementer it names, and the KB records
-    its iterations wrote."""
+    """One forge-loop stdout log: the kernels its runs announced, and the KB records its iterations wrote."""
 
     path: Path
     kernels: tuple[str, ...]
-    implementer: dict[str, str]
     kb_records: dict[int, str]
 
 
@@ -144,9 +141,7 @@ def _loop_logs(records: list[FileRecord]) -> list[_LoopLog]:
         text = read_text(record.path)
         if _LOOP_BANNER not in text:
             continue
-        implementer = _IMPLEMENTER_LINE.search(text)
-        named = {"llm_backend": implementer.group(1), "llm_model": implementer.group(2)} if implementer else {}
-        logs.append(_LoopLog(record.path, tuple(_KERNEL_LINE.findall(text)), named, _kb_records(text)))
+        logs.append(_LoopLog(record.path, tuple(_KERNEL_LINE.findall(text)), _kb_records(text)))
     return logs
 
 
@@ -272,7 +267,6 @@ def _run_units(experiments: Path, logs: list[_LoopLog]) -> list[dict[str, Any]]:
         label=workspace.name,
         run_id=campaign_id,
         identity=campaign_identity(config),
-        provenance=next((log.implementer for log in logs if log.implementer), {}),
     )
     kb_records = {seq: record for log in logs for seq, record in log.kb_records.items()}
     plain = _PlainRun(run, experiments, times, kb_records)

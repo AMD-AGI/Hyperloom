@@ -20,12 +20,11 @@ class CandidateOrigin(str, Enum):
 
 @dataclass(frozen=True)
 class Run:
-    """What every unit of one run carries: the run's label in unit ids, its run id, conditions, and provenance."""
+    """What every unit of one run carries: the run's label in unit ids, its run id, and its conditions."""
 
     label: str
     run_id: str
     identity: dict[str, Any]
-    provenance: dict[str, Any]
 
     def unit(self, name: str, seq: int, **own_provenance: Any) -> dict[str, Any]:
         """A unit's common keys; ``own_provenance`` is the unit's own provenance, such as its ``meta.json``."""
@@ -35,7 +34,7 @@ class Run:
             "run_id": self.run_id,
             "seq": seq,
             "identity": self.identity,
-            "provenance": {**self.provenance, **{key: value for key, value in own_provenance.items() if value}},
+            "provenance": {key: value for key, value in own_provenance.items() if value},
         }
 
 
