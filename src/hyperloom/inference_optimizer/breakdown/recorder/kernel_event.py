@@ -788,14 +788,18 @@ def _attempt(**fields: Any) -> dict[str, Any]:
     return row
 
 
-def _lane_attempt(row: Mapping[str, Any]) -> dict[str, Any]:
+def _lane_attempt(row: Mapping[str, Any], integrate_by_id: Mapping[str, list[dict[str, Any]]]) -> dict[str, Any]:
     """Normalize one forge lane row.
 
     A lane states its own verdict in ``micro_decision``; anything it did not
     keep it declined, and that is what ``accepted`` records. Fusion says the
-    same thing a second way, through ``applied``.
+    same thing a second way, through ``applied``. A lane that states no e2e
+    result of its own takes the one its integrate gate ruled, and only an
+    authored integration reference can link a lane to that gate.
     """
     decision = str(row.get("micro_decision") or "").upper()
+    integrate_ref = _text(row.get("integrate_ref"))
+    gate_rows = integrate_by_id.get(integrate_ref, []) if integrate_ref else []
     gain = lane_gain_pct(row)
     return _attempt(
         attempt_id=_text(row.get("run_id")),
@@ -821,8 +825,8 @@ def _lane_attempt(row: Mapping[str, Any]) -> dict[str, Any]:
         failure_reason=_text(row.get("failure_reason")),
         micro_decision=decision,
         accepted=decision == "KEEP" or bool(row.get("applied")),
-        integrate_ref=_text(row.get("integrate_ref")),
-        e2e=_as_dict(row.get("e2e")) or None,
+        integrate_ref=integrate_ref,
+        e2e=_as_dict(row.get("e2e")) or _integrate_e2e(gate_rows),
         detail={key: value for key, value in row.items() if key not in _LANE_PROMOTED},
     )
 
@@ -1897,26 +1901,132 @@ _STATUS_BY_VERDICT = {
 }
 
 
-def _geak_settlement(attempts: list[dict[str, Any]]) -> tuple[str, list[str]]:
-    """Pick the GEAK verdict the acceptances may be settled against.
+def _geak_rebench(rebench_rows: list[dict[str, Any]], stated: Mapping[str, Any]) -> dict[str, Any]:
+    """How GEAK's re-measurement campaign was bounded, and the verdict its acceptances settle against.
 
     GEAK may rebench the same candidate up to its per-cycle ceiling, so unlike a
     forge lane it can end the entry holding several settled verdicts. Taking the
     newest would let a KEEP after a REVERT read as an adoption; two settled
     verdicts that disagree is a fact worth seeing, so the candidate stays
-    pending and neither verdict is honoured.
-
-    Returns:
-        tuple[str, list[str]]: The attempt id to settle against -- ``""`` when
-            none may be -- and the conflicting decisions, when they conflicted.
+    pending and neither verdict is honoured: ``settled_against`` is empty and
+    ``conflicting_decisions`` names them.
     """
-    settled = [row for row in attempts if str(row.get("decision") or "")]
-    decisions = {str(row.get("decision")) for row in settled}
-    if len(decisions) == 1:
-        return str(settled[-1].get("attempt_id") or ""), []
-    if settled:
-        return "", sorted(decisions)
-    return "", []
+    ledger = group_rows(rebench_rows, "ledger").get(LEDGER_GEAK, [])
+    settled = [row for row in ledger if str(row.get("decision") or "")]
+    decisions = sorted({str(row.get("decision")) for row in settled})
+    rebench = {
+        "required": bool(ledger) or bool(stated),
+        "max_attempts": _int_or_none(stated.get("max_attempts")),
+        "attempts_used": len(ledger),
+        "settled_against": str(settled[-1].get("attempt_id") or "") if len(decisions) == 1 else "",
+        "final_status": _text(stated.get("final_status")),
+        "final_error_class": _text(stated.get("final_error_class")),
+        "final_error": _text(stated.get("final_error")),
+    }
+    if len(decisions) > 1:
+        rebench["conflicting_decisions"] = decisions
+    return rebench
+
+
+def _forge(
+    header: Mapping[str, Any],
+    rows: Mapping[str, list[dict[str, Any]]],
+    parts: Mapping[str, list[dict[str, Any]]],
+    *,
+    event: str,
+) -> dict[str, Any] | None:
+    """What only forge did on this visit, or ``None`` when forge did not run.
+
+    The re-profile dispatched the roofline executor inline, so its rows are in
+    this event under the task id the re-profile recorded.
+    """
+    reprofile = _as_dict(header.get("forge_reprofile")) or None
+    if reprofile:
+        reprofile = {
+            **reprofile,
+            "run": assemble_roofline_action(parts, event=event, task_id=str(reprofile.get("task_id") or "")),
+        }
+    trace_runs = wire_rows(rows[SECTION_TRACE_ANALYZE])
+    discovered = wire_rows(rows[SECTION_DISCOVERED], drop=("event_id", "rank"))
+    if not (reprofile or trace_runs or rows[SECTION_LANE_RUN] or discovered):
+        return None
+    return {
+        "engaged": True,
+        "reprofile": reprofile,
+        "trace_analyze_runs": trace_runs,
+        "discovered_kernels": discovered,
+        "recommended_kernels": [row for row in discovered if row.get("selected")],
+    }
+
+
+def _geak(
+    header: Mapping[str, Any],
+    rows: Mapping[str, list[dict[str, Any]]],
+    acceptances: Mapping[str, list[dict[str, Any]]],
+    rebench: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """What only GEAK did on this visit, in causal order, or ``None`` when GEAK did not run."""
+    # ``acceptance_kind`` and ``source_kind`` are the fields that chose which of the two arrays a row landed in, so on
+    # the wire the array itself says it.
+    acceptance_drop = ("event_id", "ordinal", "acceptance_kind", "source_kind")
+    authored = wire_rows(acceptances.get(_ACCEPTANCE_AUTHORED, []), drop=acceptance_drop)
+    env_selections = wire_rows(acceptances.get(_ACCEPTANCE_ENV, []), drop=acceptance_drop)
+    handoff = _as_dict(header.get("geak_handoff")) or None
+    delegation = _as_dict(header.get("geak_delegation")) or None
+    claim = _as_dict(header.get("geak_claim")) or None
+    product = _as_dict(header.get("geak_product")) or None
+    if not (handoff or delegation or claim or product or rebench["required"] or rows[SECTION_GEAK_ATTEMPT] or authored):
+        return None
+    if claim is not None or authored or env_selections:
+        claim = {
+            **(claim or {}),
+            "authored_kernels": authored,
+            "env_selections": env_selections,
+            "kernels_optimized": len(authored),
+            "accepted_heads_count": sum(1 for row in authored + env_selections if row.get("lane") == "headQueue"),
+        }
+    return {
+        "engaged": True,
+        "handoff": handoff,
+        "delegation": delegation,
+        "discovery_runs": wire_rows(rows[SECTION_GEAK_DISCOVERY]),
+        "claim": claim,
+        "product": product,
+        "rebench": rebench,
+    }
+
+
+def _outcome(header: Mapping[str, Any], attempts: list[dict[str, Any]]) -> dict[str, Any]:
+    """How the visit ran: the verdict its settled attempts support, beside what the phase stated at exit."""
+    stated = _as_dict(header.get("outcome"))
+    failure = _as_dict(header.get("failure"))
+    verdict, reason = _derive_verdict(attempts, failure=failure)
+    return {
+        "route": _text(header.get("route")) or "",
+        "verdict": verdict,
+        "reason": reason,
+        "error_class": _text(failure.get("error_class")),
+        "failed_stage": _text(failure.get("stage")),
+        "exit_reason": _text(stated.get("exit_reason")),
+        "throughput": _throughput(stated),
+        "cumulative_gain_validated_out": _float_or_none(stated.get("cumulative_gain_validated_out")),
+        "stack_depth_out": _int_or_none(stated.get("stack_depth_out")),
+        "delivered": _delivered(attempts),
+        "stack_delta": _as_dict(stated.get("stack_delta")) or {"added": [], "removed": []},
+    }
+
+
+#: The fields one event's rows are ordered by, per section.
+_ROW_ORDER: dict[str, tuple[str, ...]] = {
+    SECTION_TRACE_ANALYZE: ("ts", "run_id"),
+    SECTION_LANE_RUN: ("started_at", "run_id"),
+    SECTION_REBENCH: ("dispatched_at", "attempt_id"),
+    SECTION_GEAK_DISCOVERY: ("ordinal", "source"),
+    SECTION_GEAK_ATTEMPT: ("ordinal", "kernel_id"),
+    SECTION_GEAK_ACCEPTANCE: ("ordinal", "kernel_id", "selection"),
+    SECTION_DISCOVERED: ("snapshot_id", "rank"),
+    SECTION_INTEGRATE: ("settled_at", "integration_id"),
+}
 
 
 def assemble_kernel_ext(
@@ -1925,163 +2035,34 @@ def assemble_kernel_ext(
     event: str,
 ) -> tuple[dict[str, Any], str]:
     """Assemble one kernel event's ``ext`` out of its recorded rows."""
-    event_rows = rows_for_event(parts.get(SECTION_EVENT) or [], event)
+    event_rows = rows_for_event(parts[SECTION_EVENT], event)
     header = event_rows[0] if event_rows else {}
+    rows = {
+        section: sort_rows(rows_for_event(parts[section], event), keys=keys) for section, keys in _ROW_ORDER.items()
+    }
 
-    trace_runs = wire_rows(
-        sort_rows(
-            rows_for_event(parts.get(SECTION_TRACE_ANALYZE) or [], event),
-            keys=("ts", "run_id"),
-        )
-    )
-    lane_rows = sort_rows(
-        rows_for_event(parts.get(SECTION_LANE_RUN) or [], event),
-        keys=("started_at", "run_id"),
-    )
-    rebench_rows = sort_rows(
-        rows_for_event(parts.get(SECTION_REBENCH) or [], event),
-        keys=("dispatched_at", "attempt_id"),
-    )
-    discovery_rows = wire_rows(
-        sort_rows(
-            rows_for_event(parts.get(SECTION_GEAK_DISCOVERY) or [], event),
-            keys=("ordinal", "source"),
-        )
-    )
-    geak_kernel_rows = wire_rows(
-        sort_rows(
-            rows_for_event(parts.get(SECTION_GEAK_ATTEMPT) or [], event),
-            keys=("ordinal", "kernel_id"),
-        )
-    )
-    acceptance_rows = sort_rows(
-        rows_for_event(parts.get(SECTION_GEAK_ACCEPTANCE) or [], event),
-        keys=("ordinal", "kernel_id", "selection"),
-    )
-    discovered_rows = wire_rows(
-        sort_rows(
-            rows_for_event(parts.get(SECTION_DISCOVERED) or [], event),
-            keys=("snapshot_id", "rank"),
-        ),
-        drop=("event_id", "rank"),
-    )
-    recommended_rows = [row for row in discovered_rows if row.get("selected")]
-    integrate_rows = sort_rows(
-        rows_for_event(parts.get(SECTION_INTEGRATE) or [], event),
-        keys=("settled_at", "integration_id"),
-    )
-
-    geak_ledger = group_rows(rebench_rows, "ledger").get(LEDGER_GEAK, [])
-    acceptances = group_rows(acceptance_rows, "acceptance_kind")
-    geak_ref, conflicting = _geak_settlement(geak_ledger)
-
-    # Only an authored integration reference can link a lane to an E2E gate.
-    integrate_by_id = group_rows(integrate_rows, "integration_id")
-    attempts = [_lane_attempt(row) for row in lane_rows]
-    attempts.extend(_geak_attempt(row) for row in geak_kernel_rows)
-    for row in attempts:
-        if row["e2e"] is not None:
-            continue
-        if row["integrate_ref"]:
-            row["e2e"] = _integrate_e2e(integrate_by_id.get(row["integrate_ref"], []))
-    attempts.extend(_merge_acceptances(attempts, acceptances, geak_ref=geak_ref))
+    acceptances = group_rows(rows[SECTION_GEAK_ACCEPTANCE], "acceptance_kind")
+    rebench = _geak_rebench(rows[SECTION_REBENCH], _as_dict(header.get("geak_rebench")))
+    integrate_by_id = group_rows(rows[SECTION_INTEGRATE], "integration_id")
+    attempts = [_lane_attempt(row, integrate_by_id) for row in rows[SECTION_LANE_RUN]]
+    attempts.extend(_geak_attempt(row) for row in wire_rows(rows[SECTION_GEAK_ATTEMPT]))
+    attempts.extend(_merge_acceptances(attempts, acceptances, geak_ref=rebench["settled_against"]))
     # A row whose producer stated no start time sorts after the ones that did,
     # rather than ahead of them where an empty string would put it.
     attempts.sort(
         key=lambda row: (not row.get("started_at"), str(row.get("started_at") or ""), str(row.get("attempt_id") or ""))
     )
+    verdicts = {str(row.get("attempt_id")): row for row in rows[SECTION_REBENCH] if row.get("attempt_id")}
+    _settle(attempts, verdicts, geak_conflicted="conflicting_decisions" in rebench)
 
-    verdicts = {str(row.get("attempt_id")): row for row in rebench_rows if row.get("attempt_id")}
-    _settle(attempts, verdicts, geak_conflicted=bool(conflicting))
-
-    # ``acceptance_kind`` and ``source_kind`` are the fields that chose which of the two arrays a row landed in, so on
-    # the wire the array itself says it.
-    acceptance_drop = ("event_id", "ordinal", "acceptance_kind", "source_kind")
-    authored = wire_rows(acceptances.get(_ACCEPTANCE_AUTHORED, []), drop=acceptance_drop)
-    env_selections = wire_rows(acceptances.get(_ACCEPTANCE_ENV, []), drop=acceptance_drop)
-
-    reprofile = _as_dict(header.get("forge_reprofile")) or None
-    if reprofile:
-        # The re-profile dispatched the roofline executor inline, so its rows are in this event under the task id the
-        # re-profile recorded.
-        reprofile = {
-            **reprofile,
-            "run": assemble_roofline_action(parts, event=event, task_id=str(reprofile.get("task_id") or "")),
-        }
-    forge_engaged = bool(reprofile or trace_runs or lane_rows or discovered_rows)
-    forge: dict[str, Any] | None = None
-    if forge_engaged:
-        forge = {
-            "engaged": True,
-            "reprofile": reprofile,
-            "trace_analyze_runs": trace_runs,
-            "discovered_kernels": discovered_rows,
-            "recommended_kernels": recommended_rows,
-        }
-
-    handoff = _as_dict(header.get("geak_handoff")) or None
-    delegation = _as_dict(header.get("geak_delegation")) or None
-    claim_block = _as_dict(header.get("geak_claim")) or None
-    product = _as_dict(header.get("geak_product")) or None
-    rebench_block = _as_dict(header.get("geak_rebench"))
-    geak_engaged = bool(
-        handoff or delegation or claim_block or product or rebench_block or geak_ledger or geak_kernel_rows or authored
-    )
-    geak: dict[str, Any] | None = None
-    if geak_engaged:
-        claim: dict[str, Any] | None = None
-        if claim_block is not None or authored or env_selections:
-            claim = {
-                **(claim_block or {}),
-                "authored_kernels": authored,
-                "env_selections": env_selections,
-                "kernels_optimized": len(authored),
-                "accepted_heads_count": sum(1 for row in authored + env_selections if row.get("lane") == "headQueue"),
-            }
-        rebench = {
-            "required": bool(geak_ledger) or bool(rebench_block),
-            "max_attempts": _int_or_none(rebench_block.get("max_attempts")),
-            "attempts_used": len(geak_ledger),
-            "settled_against": geak_ref,
-            "final_status": _text(rebench_block.get("final_status")),
-            "final_error_class": _text(rebench_block.get("final_error_class")),
-            "final_error": _text(rebench_block.get("final_error")),
-        }
-        if conflicting:
-            rebench["conflicting_decisions"] = conflicting
-        geak = {
-            "engaged": True,
-            "handoff": handoff,
-            "delegation": delegation,
-            "discovery_runs": discovery_rows,
-            "claim": claim,
-            "product": product,
-            "rebench": rebench,
-        }
-
-    outcome_block = _as_dict(header.get("outcome"))
-    route = _text(header.get("route")) or _text(_as_dict(header.get("entry")).get("route"))
-    failure = _as_dict(header.get("failure"))
-    verdict, reason = _derive_verdict(attempts, failure=failure)
-    outcome = {
-        "route": route or "",
-        "verdict": verdict,
-        "reason": reason,
-        "error_class": _text(failure.get("error_class")),
-        "failed_stage": _text(failure.get("stage")),
-        "exit_reason": _text(outcome_block.get("exit_reason")),
-        "throughput": _throughput(outcome_block),
-        "cumulative_gain_validated_out": _float_or_none(outcome_block.get("cumulative_gain_validated_out")),
-        "stack_depth_out": _int_or_none(outcome_block.get("stack_depth_out")),
-        "delivered": _delivered(attempts),
-        "stack_delta": _as_dict(outcome_block.get("stack_delta")) or {"added": [], "removed": []},
-    }
-
+    forge = _forge(header, rows, parts, event=event)
+    geak = _geak(header, rows, acceptances, rebench)
+    outcome = _outcome(header, attempts)
     ext: dict[str, Any] = {
         "macro_cycle": _int_or_none(header.get("macro_cycle")) or 0,
         "in_flight_stage": _text(header.get("in_flight_stage")),
         "entry": _as_dict(header.get("entry")),
-        "failure": failure or None,
+        "failure": _as_dict(header.get("failure")) or None,
         # Every candidate either route produced, in one shape. The two routes
         # run different machinery and state their results under different
         # names; normalizing here is what lets one reader replay the visit
@@ -2090,11 +2071,11 @@ def assemble_kernel_ext(
         # The re-measurements that settled them. Only GEAK runs one today, but
         # the attempts above point at these rows by id, so they sit beside the
         # attempts rather than inside the route that happened to dispatch them.
-        "rebench": wire_rows(rebench_rows),
+        "rebench": wire_rows(rows[SECTION_REBENCH]),
         # Sibling of the two routes rather than nested in either: the gate is
         # the orchestrator's and rules on whatever the visit produced, so a
         # patch from GEAK and one from forge go through the same one.
-        "integrate": wire_rows(integrate_rows, drop=("event_id",)),
+        "integrate": wire_rows(rows[SECTION_INTEGRATE], drop=("event_id",)),
         # The end-to-end measurements the visit ran as sub-steps -- candidate
         # A/B, stack validation, vLLM shape capture. Each went through the
         # baseline executor inline, so its rows are in this event, and its task
@@ -2124,7 +2105,7 @@ def assemble_kernel_ext(
     # delivered before it raised, and reporting the event as succeeded on the
     # strength of that win is the crashed phase reading as a clean one. The
     # verdict keeps the win, because an instrument did measure it.
-    return ext, _text(header.get("closed_status")) or _STATUS_BY_VERDICT[verdict]
+    return ext, _text(header.get("closed_status")) or _STATUS_BY_VERDICT[outcome["verdict"]]
 
 
 def make_kernel_recorder(
