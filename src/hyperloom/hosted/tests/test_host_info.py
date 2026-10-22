@@ -17,15 +17,7 @@ from hyperloom.hosted import host_info
 from hyperloom.hosted.host_info import HostGroup, HostInfoError, Var, read_host_info, take_host_info
 
 # Distinct, recognisable values, so a leak anywhere is found by a plain substring search.
-_SECRETS = {
-    Var.MCP_TOKEN: "tok-mcp-7f3a91c2",
-    Var.SANDBOX_KEY_MEASUREMENT: "key-meas-5b21d0e8",
-    Var.SANDBOX_KEY_SUBRUN: "key-sub-98c4aa17",
-    Var.SANDBOX_KEY_DEV: "key-dev-0d6e3b55",
-    Var.AWS_ACCESS_KEY_ID: "akid-3e8f12ab",
-    Var.AWS_SECRET_ACCESS_KEY: "asec-61b7c9d4",
-    Var.AWS_SESSION_TOKEN: "stok-a45e0f72",
-}
+_SECRETS = {name: f"sentinel-{index}-{index}{index}{index}" for index, name in enumerate(host_info.SECRET_VARS)}
 _ALL_GROUPS = tuple(HostGroup)
 
 
