@@ -5,10 +5,11 @@
 
 The caller names the tool and its own parameters. The commit the analysis is about is never the caller's: it is the
 head of the caller's branch in the experiment repository, read here. ``profile_request_id`` is kept only when the
-notebook holds a PROFILE test of that id, asked by the same branch, on that commit. The trace and the trace splitter's
-workload hints are that profile test's own: the caller names neither. The scheduler's own request, for the trace the
-PRELUDE child profiled, is built here too (:func:`root_profile_request`), its hints read from the child's point config by
-the same rule.
+notebook holds a PROFILE test of that id on that commit, whichever branch asked for it: a profile describes a commit,
+and ``submit_test`` refuses a second profile of a commit with the id of the first (``profile_exists``). The trace and
+the trace splitter's workload hints are that profile test's own: the caller names neither. The scheduler's own request,
+for the trace the PRELUDE child profiled, is built here too (:func:`root_profile_request`), its hints read from the
+child's point config by the same rule.
 """
 
 from __future__ import annotations
@@ -73,15 +74,20 @@ async def _head(repo: ExperimentRepo, branch: str) -> str:
 async def _verified_profile(
     records: RecordSearch | None, branch: str, commit: str, request_id: str
 ) -> TestRecord | None:
-    """The PROFILE record ``request_id`` (branch and head commit checked), or ``None`` when no id was given."""
+    """The PROFILE record ``request_id`` of the head ``commit`` of ``branch``, or ``None`` when no id was given.
+
+    What a profile describes is a commit, so any branch's profile of ``commit`` qualifies (``records.profiles`` is the
+    same commit identity ``profile_exists`` keys on); the branch that ran it does not matter. A profile of another
+    commit, or an id the notebook holds no profile for, is refused.
+    """
     if not request_id:
         return None
     found = await records.profiles(commit) if records is not None else ()
     for record in found:
-        if record.request_id == request_id and record.request.branch_id == branch:
+        if record.request_id == request_id:
             return record
     raise RequestRejected(
-        f"{request_id!r} is not a profile test of branch {branch!r} on its head commit {commit}",
+        f"{request_id!r} is not a profile test of {commit}, the head commit of branch {branch!r}",
         CODE_PROFILE_UNVERIFIED,
     )
 

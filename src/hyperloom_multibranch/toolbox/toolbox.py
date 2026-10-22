@@ -334,7 +334,7 @@ class RealToolbox:
         """Start ``tracelens`` or ``roofline`` for ``branch`` on its head commit; returns the job id at once.
 
         The commit is the head of the branch in the experiment repository, read here at submission; it is never taken
-        from ``params``. ``profile_request_id`` is kept only for a PROFILE test of this branch on that commit.
+        from ``params``. ``profile_request_id`` is kept only for a PROFILE test of that commit, whichever branch ran it.
         """
 
         self._analysis_jobs(tool)

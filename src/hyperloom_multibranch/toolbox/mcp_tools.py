@@ -154,7 +154,7 @@ _START_ANALYSIS: dict[str, Any] = {
         },
         "profile_request_id": {
             "type": _STRING,
-            "description": "The id of a profile test of this branch whose trace is analysed; required for tracelens, checked by the server.",
+            "description": "The id of a profile test of this branch's head commit, run by any branch, whose trace is analysed; required for tracelens, checked by the server.",
         },
     },
     "required": ["tool"],
@@ -678,7 +678,7 @@ def register_specialist_tools(
         description=(
             "Start tracelens (analyse a trace) or roofline (profile, then analyse) for this branch; returns the job "
             "id at once and the result arrives in poll_inbox. The commit analysed is this branch's head, set by the "
-            "server; with a profile_request_id of a profile test of this branch the pointer carries its op shares."
+            "server; with a profile_request_id of any branch's profile test of it the pointer carries its op shares."
         ),
         schema=_START_ANALYSIS,
         handler=_start_analysis(options.analysis, toolbox_loop),

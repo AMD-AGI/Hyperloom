@@ -19,6 +19,7 @@ import pytest
 from hyperloom.contracts.measurement import Purpose, TestKind
 from hyperloom.hosted.mcp_server import McpServer, McpServerConfig
 from hyperloom_multibranch.contracts.notebook import Role, Writer
+from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.notebook.records import ToolResultPointer
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.toolbox.mcp_tools import (
@@ -199,7 +200,7 @@ async def test_any_other_tool_is_refused_with_its_reason(stack: Stack, tool: str
     assert stack.tools["profile"].requests == []
 
 
-async def test_a_profile_request_id_is_kept_only_for_a_profile_test_of_this_branch_and_commit(stack: Stack) -> None:
+async def test_a_profile_request_id_is_kept_only_for_a_profile_test_of_this_commit(stack: Stack) -> None:
     stack.rig.repo.heads["b1"] = PARENT  # the commit the profile test ran on
     mine = await _profile_test(stack)
     job = json.loads(_text(await stack.start(tool="tracelens", profile_request_id=mine)))
@@ -210,16 +211,36 @@ async def test_a_profile_request_id_is_kept_only_for_a_profile_test_of_this_bran
     assert request.params["trace_input"] == "traces/p1"  # the profile record's own location; the rig has no root
 
 
-async def test_a_profile_request_id_of_another_branch_or_commit_or_unknown_is_refused(stack: Stack) -> None:
+async def test_a_branch_whose_head_is_the_commit_integration_profiled_analyses_that_profile(stack: Stack) -> None:
+    # profile_exists points a refill branch at the profile another branch ran on the same commit: it must be analysable
+    stack.rig.repo.heads["b1"] = HEAD
+    theirs = await _profile_test(stack, INTEGRATION_BRANCH, commit=HEAD)
+    job = json.loads(_text(await stack.start(tool="tracelens", profile_request_id=theirs)))["job_id"]
+    assert await stack.jobs.wait(job) is not None
+    (request,) = stack.tools["tracelens"].requests
+    assert (request.branch, request.params["commit_id"]) == ("b1", HEAD)
+    assert request.params["trace_input"] == "traces/p1"  # integration's own trace, read off its record
+    (pointer,) = stack.capture.pointers
+    assert (pointer.branch, pointer.commit_id, pointer.profile_request_id) == ("b1", HEAD, theirs)
+
+
+async def test_the_profile_another_branch_ran_is_that_of_the_commit_not_of_the_branch(stack: Stack) -> None:
     stack.rig.repo.heads["b1"] = PARENT
     stack.rig.repo.heads["b2"] = PARENT
     theirs = await _profile_test(stack, "b2")
-    stack.rig.repo.heads["b1"] = HEAD  # b1 has moved on: a profile of PARENT is not of its head
-    for wrong in (theirs, "no-such-request"):
+    job = json.loads(_text(await stack.start(tool="roofline", profile_request_id=theirs)))["job_id"]
+    await stack.jobs.wait(job)
+    (request,) = stack.tools["roofline"].requests
+    assert (request.branch, request.params["commit_id"]) == ("b1", PARENT)
+
+
+async def test_a_profile_of_another_commit_or_an_unknown_request_is_refused(stack: Stack) -> None:
+    theirs = await _profile_test(stack, "b2", commit=PARENT)
+    integration = await _profile_test(stack, INTEGRATION_BRANCH, commit=HEAD)
+    stack.rig.repo.heads["b1"] = "moved-on"  # a profile of PARENT or HEAD is not of b1's head, whoever ran it
+    for wrong in (theirs, integration, "no-such-request"):
         text = await stack.refused(tool="tracelens", profile_request_id=wrong)
         assert "profile_request_unverified" in text
-    stack.rig.repo.heads["b1"] = PARENT
-    assert "profile_request_unverified" in await stack.refused(tool="tracelens", profile_request_id=theirs)
     assert stack.tools["tracelens"].requests == []
 
 
