@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 
-from hyperloom.orchestrator.trace_analysis import tracelens_analysis as tl
+from hyperloom.orchestrator.trace_analysis import _candidate_assembly as candidate_assembly
 
 from hyperloom.common import kernel_source_contract as ksc
 
@@ -121,7 +121,7 @@ def test_validate_rejects_non_finite_and_out_of_range_confidence():
 
 def test_projection_echoes_each_tracelens_resolver_method():
     """Each candidate carries a resolve_kernel_source method; an unknown one degrades to unresolved."""
-    got = tl.build_source_resolution_entries(
+    got = candidate_assembly.build_source_resolution_entries(
         [
             {
                 "kernel_id": "k1",
@@ -172,7 +172,7 @@ def test_projection_echoes_each_tracelens_resolver_method():
 
 def test_written_artifact_satisfies_its_own_contract(tmp_path):
     out = tmp_path / ksc.SOURCE_RESOLUTION_FILENAME
-    tl.write_source_resolution_artifact(
+    candidate_assembly.write_source_resolution_artifact(
         [
             {
                 "kernel_id": "k1",
@@ -197,7 +197,7 @@ def test_collective_symbol_index_row_does_not_suppress_the_artifact(tmp_path):
     validates and the whole file is written rather than suppressed.
     """
     out = tmp_path / ksc.SOURCE_RESOLUTION_FILENAME
-    tl.write_source_resolution_artifact(
+    candidate_assembly.write_source_resolution_artifact(
         [
             {
                 "kernel_id": "k1",

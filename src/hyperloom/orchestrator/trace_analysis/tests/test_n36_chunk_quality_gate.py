@@ -13,9 +13,9 @@ import pytest
 
 @pytest.fixture(scope="module")
 def tl_module():
-    from hyperloom.orchestrator.trace_analysis import tracelens_analysis
+    from hyperloom.orchestrator.trace_analysis import _trace_gates
 
-    return tracelens_analysis
+    return _trace_gates
 
 
 def _write_exec_details(
