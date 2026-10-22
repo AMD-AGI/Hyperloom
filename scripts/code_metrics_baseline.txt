@@ -571,7 +571,7 @@ function-lines src/kernelforge/loop/task_preflight.py::_count_graph_replays 68
 function-lines src/kernelforge/loop/task_preparer.py::_commit_prepared_task 61
 function-lines src/kernelforge/loop/task_preparer.py::prepare_task 216
 function-lines src/kernelforge/loop/task_preparer_prompts.py::_build_prompt 54
-function-lines src/kernelforge/orchestrator/agent.py::make_agent_fn 250
+function-lines src/kernelforge/orchestrator/agent.py::make_agent_fn 249
 function-lines src/kernelforge/orchestrator/agent.py::make_agent_fn.agent_fn 114
 function-lines src/kernelforge/orchestrator/analysis.py::AnalysisAgentService._finalize_framework_artifacts 74
 function-lines src/kernelforge/orchestrator/analysis.py::AnalysisAgentService._has_valid_profile_evidence 53
@@ -582,7 +582,6 @@ function-lines src/kernelforge/orchestrator/analysis.py::AnalysisAgentService.ap
 function-lines src/kernelforge/orchestrator/analysis.py::AnalysisAgentService.ensure_bundle 69
 function-lines src/kernelforge/orchestrator/analysis.py::AnalysisBundle.apply 52
 function-lines src/kernelforge/orchestrator/contracts.py::OrchestrationContext.__post_init__ 75
-function-lines src/kernelforge/orchestrator/orchestration.py::OrchestrationAgent._bind_dispatch 63
 function-lines src/kernelforge/orchestrator/orchestration.py::OrchestrationAgent._parse_cross_cutting_move 61
 function-lines src/kernelforge/orchestrator/orchestration.py::OrchestrationAgent._partition_round 105
 function-lines src/kernelforge/orchestrator/orchestration.py::OrchestrationAgent._synthesize_optimization_plan_result 63
@@ -590,7 +589,7 @@ function-lines src/kernelforge/orchestrator/orchestration.py::OrchestrationAgent
 function-lines src/kernelforge/orchestrator/orchestration.py::OrchestrationAgent.revise_optimization_plan 61
 function-lines src/kernelforge/orchestrator/orchestration.py::OrchestrationService._narrow_round 54
 function-lines src/kernelforge/orchestrator/orchestration.py::OrchestrationService._revise_round 68
-function-lines src/kernelforge/orchestrator/orchestration.py::OrchestrationService.run 110
+function-lines src/kernelforge/orchestrator/orchestration.py::OrchestrationService.run 106
 function-lines src/kernelforge/orchestrator/orchestration.py::make_orchestration_service 63
 function-lines src/kernelforge/orchestrator/plan_critic.py::PlanCriticAgent._repaired_width_ruling 62
 function-lines src/kernelforge/orchestrator/plan_critic.py::PlanCriticAgent.review 66
