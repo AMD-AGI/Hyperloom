@@ -264,6 +264,39 @@ def test_the_role_says_worktree_patch_names_a_new_component_s_upstream_and_when_
     assert "set them only when its reply carries a note saying so" in prompt
 
 
+def test_the_gemm_direction_and_the_role_put_a_path_switch_before_hand_picked_rows():
+    (direction,) = [text for text in DIRECTIONS if text.startswith("GEMM tuning:")]
+    prompt = role_prompt(WORKLOAD)
+
+    assert "switch its kernel path before picking rows by hand" in direction
+    assert "picking a tile or a split-K for it without timing it is a guess" in prompt
+    assert "a row at a padded M covers every batch size that pads to it" in prompt
+
+
+def test_the_fast_path_direction_reads_the_branch_conditions_the_log_does_not_report():
+    (direction,) = [text for text in DIRECTIONS if text.startswith("Fast path checks:")]
+    prompt = role_prompt(WORKLOAD)
+
+    assert "read the branch conditions on its call path" in direction
+    assert "Work sized to a buffer rather than the live batch" in prompt
+    assert "a shape someone validated, not a hardware bound" in prompt
+
+
+def test_the_existing_prs_direction_says_how_to_search_check_and_record_a_pr():
+    (direction,) = [text for text in DIRECTIONS if text.startswith("Existing PRs and patches:")]
+
+    assert "WebSearch" in direction and "WebFetch" in direction
+    assert "record each PR's verdict with notebook_learn" in direction
+
+
+def test_a_branch_with_no_candidate_buys_the_missing_number_before_it_stops():
+    prompt = role_prompt(WORKLOAD)
+
+    assert "no candidate clears the bar is a missing measurement, not a stop" in prompt
+    assert "the cheapest test that would prove it wrong" in prompt
+    assert "buy the number first" in prompts.nudge_message()
+
+
 def test_the_role_says_a_branch_opened_on_a_focus_starts_from_that_operator():
     prompt = role_prompt(WORKLOAD)
 
