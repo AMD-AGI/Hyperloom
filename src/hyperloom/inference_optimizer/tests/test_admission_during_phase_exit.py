@@ -20,7 +20,12 @@ def _dispatcher(*, frozen: bool) -> DispatcherCollaborator:
     """A dispatcher whose only live parts are the freeze flag and the gates below it."""
     dispatcher = DispatcherCollaborator.__new__(DispatcherCollaborator)
     dispatcher.admission_frozen = frozen
-    dispatcher._coord = SimpleNamespace(tasks=SimpleNamespace(queued=_no_queued), action_registry={})
+    dispatcher._coord = SimpleNamespace(
+        tasks=SimpleNamespace(queued=_no_queued),
+        # Resolved before the specialist gate reads the action name.
+        shared_state=SimpleNamespace(find_gap=lambda _cid: None),
+        action_registry={},
+    )
     dispatcher._phase_denial_for_action = lambda _a: None
     dispatcher._sequence_denial_for_action = lambda _a: None
     dispatcher.time_budget_denial_for_action = lambda _a, **_kw: None
