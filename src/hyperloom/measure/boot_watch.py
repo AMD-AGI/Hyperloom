@@ -13,6 +13,7 @@ cancels the scope the launcher's watchdog listens to, which reaps the whole proc
 from __future__ import annotations
 
 import contextlib
+import math
 import threading
 import time
 from collections.abc import Iterator, Mapping
@@ -21,7 +22,7 @@ from typing import Any
 
 from hyperloom.orchestrator.actions.cancel_channel import CancelScope
 
-__all__ = ["BOOT_CANCEL_REASON", "BOOT_SHARE", "BootGuard", "boot_limit_sec"]
+__all__ = ["BOOT_CANCEL_REASON", "BOOT_SHARE", "BootGuard", "boot_limit_sec", "boot_seconds"]
 
 #: The ``reason`` the guard cancels the scope with.
 BOOT_CANCEL_REASON = "server_boot_timeout"
@@ -31,7 +32,7 @@ BOOT_SHARE = 0.5
 #: The frameworks whose server prints a ready banner the launcher detects; another framework has no stamp to wait for.
 _SERVER_FRAMEWORKS = ("sglang", "vllm", "atom")
 #: Written by the launcher next to ``server.log`` (``_subprocess_kill``); its first field is the wall-clock second the
-#: server reported ready.
+#: server reported ready, its second the seconds the boot took from the spawn (0 for a server the round found ready).
 _READY_STAMP = "server_ready_at"
 _MAX_POLL_SEC = 2.0
 
@@ -101,3 +102,26 @@ def _stamped_at(stamp: Path) -> float:
         return float(stamp.read_text(encoding="utf-8").split()[0])
     except (OSError, ValueError, IndexError):
         return 0.0
+
+
+def boot_seconds(directory: Path) -> float | None:
+    """The longest server boot the ready stamps below ``directory`` record, or ``None`` when no round booted a server.
+
+    A test boots its server once, in its first round, and its later rounds reuse it and stamp no boot, so the longest
+    one is the boot of the test. A stamp that cannot be read is no boot.
+    """
+    try:
+        stamps = list(directory.rglob(_READY_STAMP))
+    except OSError:
+        return None
+    booted = [seconds for seconds in map(_booted_in, stamps) if seconds > 0.0]
+    return max(booted, default=None)
+
+
+def _booted_in(stamp: Path) -> float:
+    """The seconds the boot a stamp records took; ``0.0`` for a stamp that records none or cannot be read."""
+    try:
+        seconds = float(stamp.read_text(encoding="utf-8").split()[1])
+    except (OSError, ValueError, IndexError):
+        return 0.0
+    return seconds if math.isfinite(seconds) else 0.0

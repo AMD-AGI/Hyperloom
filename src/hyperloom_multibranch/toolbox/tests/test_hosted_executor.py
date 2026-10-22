@@ -57,6 +57,7 @@ class ScriptedBackend:
     modes: list[str]
     calls: int = 0
     seen: list[TestOutcome] = field(default_factory=list)
+    stamps: dict[str, str] = field(default_factory=dict)  # files the sandbox's rounds leave in the landed output
 
     name = "hosted"
 
@@ -69,6 +70,9 @@ class ScriptedBackend:
         self.calls += 1
         point_yaml(self.point.parent, self.point.name, fake_mode=mode)
         outcome = self.inner.run_test(call)  # type: ignore[attr-defined]
+        for name, text in self.stamps.items():
+            (call.output_dir / name).parent.mkdir(parents=True, exist_ok=True)
+            (call.output_dir / name).write_text(text, encoding="utf-8")
         self.seen.append(outcome)
         return outcome
 
@@ -133,6 +137,34 @@ async def test_a_verified_measurement_is_a_succeeded_result_with_its_audit_data(
     assert len(result.attempts) == 1 and scripted.calls == 1
     notebook_record = await tb.notebook.record(request_id)
     assert notebook_record.result is not None and notebook_record.result.manifest_sha256 == result.manifest_sha256
+
+
+#: The ready stamps of a real graded test: its warmup round booted the server, its measured round found it ready.
+REAL_STAMPS = {
+    "variant_00_warmup/server_ready_at": "1792596681.010 82.221\n",
+    "variant_00_test/server_ready_at": "1792596811.700 0.000\n",
+}
+
+
+@pytest.mark.parametrize("mode", [OK, CANDIDATE])
+async def test_a_result_carries_the_boot_its_rounds_stamped_whether_or_not_the_test_succeeded(
+    tmp_path: Path, rig, mode: str
+) -> None:
+    r = rig()
+    tb, scripted = _toolbox(tmp_path, r, mode)
+    scripted.stamps = REAL_STAMPS
+    _, result = await _run(tb)
+    assert result.cold_start_seconds == 82.221
+    assert (await tb.toolbox.queue_state()).cold_start_seconds == 82.221
+
+
+async def test_a_result_with_no_stamp_has_no_cold_start_and_the_queue_keeps_its_last_one(tmp_path: Path, rig) -> None:
+    r = rig()
+    tb, scripted = _toolbox(tmp_path, r, OK)
+    tb.toolbox.record_cold_start(75.0)
+    _, result = await _run(tb)
+    assert result.cold_start_seconds is None
+    assert (await tb.toolbox.queue_state()).cold_start_seconds == 75.0
 
 
 class _Overlay:

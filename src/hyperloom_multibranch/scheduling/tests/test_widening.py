@@ -24,6 +24,7 @@ from hyperloom_multibranch.scheduling.widening import (
     refill_focus,
     toolbox_headroom,
 )
+from hyperloom_multibranch.toolbox.tests.helpers import ScriptedExecutor, build, ok, req
 
 METRIC = "output_throughput"
 THREE_HOURS = 3 * 3600.0
@@ -80,6 +81,24 @@ def test_signals_read_the_queue_the_toolbox_reports_now(tmp_path: Path) -> None:
     assert asyncio.run(widening.signals()) == WideningSignals(SPECIALIST_START_SECONDS, None, 5)
     toolbox.state = _queue(running=2, cold_start=100.0)
     assert asyncio.run(widening.signals()) == WideningSignals(SPECIALIST_START_SECONDS + 200.0, 100.0, 6)
+
+
+def test_the_cold_start_the_real_toolbox_measured_is_what_the_signals_carry_to_the_judge(tmp_path: Path) -> None:
+    rig = build(tmp_path, executor=ScriptedExecutor([lambda job: ok(job, cold_start_seconds=82.2)]))
+    roster = Roster(CAPS, tmp_path / "MB-roster.json", Clock(now=lambda: 0.0))
+    widening = Widening(rig.toolbox, roster, FrontierPolicy(METRIC, window_seconds=60.0))
+
+    async def signals_after_a_test() -> tuple[WideningSignals, WideningSignals]:
+        before = await widening.signals()
+        await rig.toolbox.submit_test(req())
+        await rig.toolbox.drain()
+        return before, await widening.signals()
+
+    before, after = asyncio.run(signals_after_a_test())
+
+    assert (before.cold_start_seconds, before.min_useful_seconds) == (None, SPECIALIST_START_SECONDS)
+    assert after.cold_start_seconds == 82.2
+    assert after.min_useful_seconds == SPECIALIST_START_SECONDS + MB_MIN_USEFUL_COLD_STARTS * 82.2
 
 
 SHARES = OpShares("c-head", "job-1", "profile-1", {"attention": 22.0, "moe_gemm": 41.5, "allreduce": 9.0})

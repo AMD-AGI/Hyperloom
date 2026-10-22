@@ -544,6 +544,8 @@ class TestResult:
 
     ``output_dir`` is relative to the session directory. The four fingerprints come from the signed result manifest.
     The timing, cost and profile fields are what the notebook asks of the toolbox beyond the measurement itself.
+    ``cold_start_seconds`` is how long the test's server took from its spawn to be ready, measured by the sandbox that
+    ran it; ``None`` when the test booted none or nothing recorded it.
     ``repro_verdict`` is the one outcome of a ``repro`` test: ``""`` for any other test, ``"reproduced"`` or
     ``"not_reproduced"`` for a repro test that ran its case to the end (``SUCCEEDED`` only).
     A document written while the greedy decode pass existed may carry ``decode_outputs`` and ``decode_identity``; they
@@ -572,6 +574,7 @@ class TestResult:
     profile_location: str = ""
     repro_verdict: str = ""
     nonfatal_warnings: tuple[str, ...] = ()
+    cold_start_seconds: float | None = None
 
     def __post_init__(self) -> None:
         _text(self.request_id, "request_id")
@@ -590,6 +593,9 @@ class TestResult:
         for value, what in ((self.queued_at, "queued_at"), (self.started_at, "started_at")):
             _optional_number(value, what)
         _optional_number(self.finished_at, "finished_at")
+        cold_start = _optional_number(self.cold_start_seconds, "cold_start_seconds")
+        if cold_start is not None and cold_start < 0:
+            raise MeasurementError(f"cold_start_seconds cannot be negative, got {cold_start}")
         self._check_repro_verdict()
         _strings(self.nonfatal_warnings, "nonfatal_warnings")
 
@@ -639,6 +645,7 @@ class TestResult:
             "profile_location": self.profile_location,
             "repro_verdict": self.repro_verdict,
             "nonfatal_warnings": list(self.nonfatal_warnings),
+            "cold_start_seconds": self.cold_start_seconds,
         }
 
     @classmethod
@@ -666,6 +673,7 @@ class TestResult:
             profile_location=f.get("profile_location", ""),
             repro_verdict=f.get("repro_verdict", ""),
             nonfatal_warnings=tuple(_items(f.get("nonfatal_warnings", ()), "nonfatal_warnings")),
+            cold_start_seconds=f.get("cold_start_seconds"),
         )
 
 

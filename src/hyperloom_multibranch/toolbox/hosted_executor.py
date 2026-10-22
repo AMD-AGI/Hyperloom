@@ -46,6 +46,7 @@ from hyperloom.contracts.measurement import (
 from hyperloom.measure.fake_gain import PREFIX_CACHE_OFF_ERROR_CLASS, baseline_prefix_cache_refusal
 from hyperloom.measure.failures import Disposition, classify_test_failure
 from hyperloom.measure.archive import ArchiveError
+from hyperloom.measure.boot_watch import boot_seconds
 from hyperloom.measure.bundle import RecordedBundle, ResultRejected
 from hyperloom.measure.hosted import HostedMeasurementBackend, Reverified
 from hyperloom.measure.hosted_log import STATE_FINISHED, STATE_SENT, STATE_SUBMITTED, Record
@@ -244,6 +245,7 @@ class HostedExecutor:
             profile_location=location,
             repro_verdict=verdict,
             nonfatal_warnings=_warnings_of(outcome.rounds) if failure is None else (),
+            cold_start_seconds=boot_seconds(call.output_dir),
             **audit,
         )
 

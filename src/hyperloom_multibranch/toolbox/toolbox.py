@@ -503,6 +503,8 @@ class RealToolbox:
     async def _run(self, item: QueuedTest) -> None:
         try:
             result = await self._execute(item)
+            if result.cold_start_seconds is not None:
+                self.record_cold_start(result.cold_start_seconds)
             entry = self._log.get(item.request_id)
             if entry is not None:
                 await self._record_and_write(entry, {"result": result.to_document()})
