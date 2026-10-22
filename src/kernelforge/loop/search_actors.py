@@ -25,6 +25,7 @@ class SearchActorBundle:
     orchestration_service: Any = None
     agent_factory: Callable | None = None
     supervisor_fn: Callable | None = None
+    start_selector: Any = None
 
 
 class SearchActorPool:

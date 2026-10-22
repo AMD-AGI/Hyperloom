@@ -18,6 +18,7 @@ import kernelforge.loop.recovery as recovery_module
 import kernelforge.orchestrator.agent as agent_module
 import kernelforge.orchestrator.analysis as analysis_module
 import kernelforge.orchestrator.orchestration as orchestration_module
+import kernelforge.orchestrator.start_selector as start_selector_module
 import kernelforge.orchestrator.supervisor as supervisor_module
 from kernelforge.cli import main
 from kernelforge.cli.session_budget import _forge_session_timeout_sec
@@ -43,6 +44,7 @@ from kernelforge.loop.run_state import (
     WorkspaceLockError,
 )
 from kernelforge.loop.runner import IterationConfig, IterationLoop
+from kernelforge.loop.search_tree import SearchStrategy
 
 
 # The forge-loop CLI activates per-workspace aiter cache isolation, which writes AITER_ROOT_DIR / AITER_JIT_DIR (and
@@ -888,6 +890,66 @@ def test_multi_lane_long_horizon_reports_the_critic_it_enabled(
     assert captured["agent_fn_setup"].task.profiling_enabled is True
     assert captured["orchestration_service_kwargs"]["enable_plan_critic"] is True
     assert "Plan Critic: enabled (long-horizon, same backend/model)" in result.output
+
+
+def test_a_linear_campaign_keeps_three_lanes_merge_stacking_and_the_supervisor(tmp_path, monkeypatch):
+    captured = _install_cli_fakes(monkeypatch, tmp_path)
+
+    result, workspace = _invoke_forge_loop(tmp_path, [])
+
+    assert result.exit_code == 0, result.output
+    loop = captured["loops"][-1]
+    assert (loop.ic.search_strategy, loop.ic.lanes, loop.ic.merge_stacking) == (SearchStrategy.LINEAR, 3, True)
+    assert captured["run_kwargs"]["agents"].start_selector is None
+    assert CampaignConfigStore(str(workspace)).load().search_strategy is SearchStrategy.LINEAR
+
+
+def test_a_tree_campaign_runs_one_lane_with_a_start_selector_and_no_supervisor(tmp_path, monkeypatch):
+    captured = _install_cli_fakes(monkeypatch, tmp_path)
+    selector = object()
+    monkeypatch.setattr(start_selector_module, "make_start_selector", lambda **_kwargs: selector)
+    monkeypatch.setattr(
+        supervisor_module, "make_supervisor_fn", lambda **_kwargs: pytest.fail("tree builds a Supervisor")
+    )
+
+    result, workspace = _invoke_forge_loop(tmp_path, ["--search-strategy", "tree"])
+
+    assert result.exit_code == 0, result.output
+    loop = captured["loops"][-1]
+    assert (loop.ic.search_strategy, loop.ic.lanes, loop.ic.merge_stacking) == (SearchStrategy.TREE, 1, False)
+    agents = captured["run_kwargs"]["agents"]
+    assert (agents.start_selector, agents.supervisor_fn, agents.agent_factory) == (selector, None, None)
+    assert CampaignConfigStore(str(workspace)).load().search_strategy is SearchStrategy.TREE
+
+
+@pytest.mark.parametrize(
+    ("extra", "message"),
+    [
+        (["--lanes", "2"], "drop --lanes 2"),
+        (["--merge-stacking"], "drop --merge-stacking"),
+    ],
+)
+def test_a_tree_campaign_refuses_what_it_cannot_honour(tmp_path, monkeypatch, extra, message):
+    _install_cli_fakes(monkeypatch, tmp_path)
+
+    result, _workspace = _invoke_forge_loop(tmp_path, ["--search-strategy", "tree", *extra])
+
+    assert result.exit_code != 0
+    assert message in result.output
+
+
+def test_a_resume_cannot_change_the_search_strategy(tmp_path, monkeypatch):
+    _install_cli_fakes(monkeypatch, tmp_path)
+
+    result, _workspace = _invoke_forge_loop(
+        tmp_path,
+        ["--resume", "--search-strategy", "tree"],
+        existing_config=True,
+        include_campaign_inputs=False,
+    )
+
+    assert result.exit_code != 0
+    assert "the strategy cannot change on resume" in result.output
 
 
 def test_forge_loop_can_disable_all_experience_kb_io(tmp_path, monkeypatch):

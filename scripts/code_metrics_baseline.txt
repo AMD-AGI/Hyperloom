@@ -498,7 +498,7 @@ function-lines src/kernelforge/agent_backends/claude.py::ClaudeBackend._query_on
 function-lines src/kernelforge/agent_backends/codex.py::CodexBackend._execute 105
 function-lines src/kernelforge/agent_backends/codex.py::CodexBackend.probe 83
 function-lines src/kernelforge/agent_backends/session_resume.py::run_session_with_api_resume 98
-function-lines src/kernelforge/cli/forge_loop_command.py::forge_loop 503
+function-lines src/kernelforge/cli/forge_loop_command.py::forge_loop 501
 function-lines src/kernelforge/evaluation/benchmark/runner.py::bench_wallclock 110
 function-lines src/kernelforge/evaluation/correctness/canonical.py::_run_canonical_suite 95
 function-lines src/kernelforge/fusion/author.py::build_author_prompt 87
@@ -536,7 +536,6 @@ function-lines src/kernelforge/knowledge/kb_store/reader.py::_read_top_solutions
 function-lines src/kernelforge/loop/analysis_evidence.py::AnalysisEvidenceMixin._apply_last_analysis_evidence 160
 function-lines src/kernelforge/loop/analysis_evidence.py::AnalysisEvidenceMixin._render_analysis_evidence_for_implementer 84
 function-lines src/kernelforge/loop/analysis_refresh_policy.py::decide_analysis_refresh 85
-function-lines src/kernelforge/loop/archive.py::CandidateArchive.render_digest 84
 function-lines src/kernelforge/loop/campaign_setup.py::resolve_campaign 105
 function-lines src/kernelforge/loop/insession_gate.py::InSessionGate.__init__ 84
 function-lines src/kernelforge/loop/knowledge_integration.py::_try_apply_candidate 126

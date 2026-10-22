@@ -30,6 +30,7 @@ from kernelforge.knowledge.kb_store.identity.kernel_names import derive_kernel_n
 from kernelforge.loop.new_path_allowlist import normalize_commit_new_paths
 from kernelforge.tools.durable_io import atomic_write_text
 from kernelforge.loop.agent_relay import AgentRelayPolicy
+from kernelforge.loop.search_tree import SearchStrategy
 from kernelforge.evaluation.scoring import DEFAULT_SNR_THRESHOLD_DB
 
 
@@ -77,6 +78,7 @@ class CampaignConfig:
     # ``IterationConfig.commit_new_paths``).
     commit_new_paths: list[str] = field(default_factory=list)
     agent_relay: AgentRelayPolicy | None = None
+    search_strategy: SearchStrategy = SearchStrategy.LINEAR
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -122,6 +124,7 @@ class CampaignConfig:
             agent_relay=(
                 AgentRelayPolicy.from_dict(payload["agent_relay"]) if payload["agent_relay"] is not None else None
             ),
+            search_strategy=SearchStrategy(payload["search_strategy"]),
         )
         if config.nproc_per_node < 1:
             raise ValueError("campaign nproc_per_node must be positive")
@@ -234,6 +237,7 @@ class CampaignConfigStore:
             raise ValueError("campaign config must be a JSON object")
         if "agent_relay" not in payload:
             payload["agent_relay"] = None
+        payload.setdefault("search_strategy", SearchStrategy.LINEAR.value)
         return CampaignConfig.from_dict(payload)
 
     def save(
@@ -458,6 +462,7 @@ class CampaignInputs:
     commit_new_paths: tuple[str, ...] = ()
     # The Agent profiles a blockage may relay between, fixed when the campaign is created.
     agent_relay: AgentRelayPolicy | None = None
+    search_strategy: SearchStrategy = SearchStrategy.LINEAR
 
 
 def _normalized_sources(workspace: Path, kernel: str, source_files: str) -> list[str]:
@@ -541,7 +546,6 @@ def create_campaign_config(
         kernel_absolute,
         target_functions=resolved_targets,
     )
-    program_md_sha256 = _program_md_sha256(inputs.program_md_file)
     resolved_snr_threshold = float(inputs.snr_threshold)
     if not math.isfinite(resolved_snr_threshold) or resolved_snr_threshold <= 0:
         raise ValueError("SNR threshold must be a positive finite float")
@@ -551,7 +555,7 @@ def create_campaign_config(
         driver_sha256=hashlib.sha256((workspace / driver_path).read_bytes()).hexdigest(),
         source_files=normalized_sources,
         program_md_path="forge_experiments/program.md" if inputs.program_md_file else "",
-        program_md_sha256=program_md_sha256,
+        program_md_sha256=_program_md_sha256(inputs.program_md_file),
         snr_threshold=resolved_snr_threshold,
         gpu_target=(inputs.gpu_target or "").strip() or detect_gpu_target(),
         gpu_type=(inputs.gpu_type if inputs.gpu_type is not None else "mi355x").strip().lower(),
@@ -569,4 +573,5 @@ def create_campaign_config(
         bench_repeat=max(1, int(inputs.bench_repeat or 1)),
         commit_new_paths=normalize_commit_new_paths(list(inputs.commit_new_paths)),
         agent_relay=inputs.agent_relay,
+        search_strategy=inputs.search_strategy,
     )

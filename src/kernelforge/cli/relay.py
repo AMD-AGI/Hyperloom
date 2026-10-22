@@ -32,6 +32,7 @@ from kernelforge.loop.agent_relay import (
     select_start_profile,
 )
 from kernelforge.loop.search_actors import SearchActorBundle, SearchActorPool
+from kernelforge.loop.search_tree import SearchStrategy
 from kernelforge.orchestrator.agent import ImplementerSetup
 
 
@@ -50,6 +51,8 @@ class SearchActorBuildContext:
     supervisor_backend: str = ""
     # This session's relay; ``None`` for a campaign without relay, whose one actor may fall back to another provider.
     relay: AgentRelayConfig | None = None
+    # A tree campaign changes direction through its start selector, so its actors carry no Supervisor.
+    search_strategy: SearchStrategy = SearchStrategy.LINEAR
 
     def build(self, profile: AgentProfile) -> SearchActorBundle:
         """Build and probe all profile-bound planning and implementation services."""
@@ -59,6 +62,7 @@ class SearchActorBuildContext:
         )
         from kernelforge.orchestrator.agent import make_agent_fn
         from kernelforge.orchestrator.orchestration import make_orchestration_service
+        from kernelforge.orchestrator.start_selector import make_start_selector
         from kernelforge.orchestrator.supervisor import make_supervisor_fn
 
         actor_config = self._profile_config(profile) if self.relay is not None else self.config
@@ -79,6 +83,9 @@ class SearchActorBuildContext:
             definitions=self.specialist_definitions,
             enable_plan_critic=self.critic_enabled,
         )
+        if self.search_strategy is SearchStrategy.TREE:
+            start_selector = make_start_selector(config=actor_config, usage=self.usage)
+            return SearchActorBundle(effective_profile, actor_fn, orchestration, lane_factory, None, start_selector)
         supervisor_provider = self.supervisor_backend or profile.provider
         supervisor = make_supervisor_fn(
             program_md=self.program_md,

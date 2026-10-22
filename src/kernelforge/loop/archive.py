@@ -12,11 +12,18 @@ import shutil
 import stat
 import tempfile
 import time
+from collections.abc import Collection
 from dataclasses import dataclass
 from pathlib import Path
 from kernelforge.tools.durable_io import atomic_write_text, fsync_directory
 
 log = logging.getLogger(__name__)
+
+# How many prior attempts the digest shows in full: at most this many, drawn from the KEEPs, the best near-misses
+# and the most recent attempts.
+DIGEST_FULL_DIFFS = 5
+DIGEST_NEAR_MISSES = 3
+DIGEST_RECENT = 2
 
 
 @dataclass
@@ -584,16 +591,26 @@ class CandidateArchive:
         rows.sort(key=lambda e: e.get("iter", 0))
         return rows, True
 
+    def _archive_pointer(self) -> list[str]:
+        """Layer 3 of the digest: where every prior attempt's full solution lives."""
+        return [
+            "## Solution archive — your lineage so far",
+            "Every prior attempt's FULL kernel + measurements are saved under:",
+            f"  {self.root}/iter_NNN/",
+            "    kernel.py  change.diff  meta.json  validation.txt",
+            "Read any of them (Read tool, or `git show <commit>`) to study, reuse, or",
+            "COMBINE prior approaches — the file on disk is only the current best.",
+            "",
+        ]
+
     def render_digest(
         self,
-        max_full_diffs: int = 5,
         max_diff_lines: int = 80,
-        near_miss_count: int = 3,
-        recent_count: int = 2,
         max_table_rows: int = 60,
+        scope: Collection[int] | None = None,
     ) -> str:
-        """Build the prompt digest of the solution lineage (Layers 1-3)."""
-        index = self.load_index()
+        """Build the prompt digest of the solution lineage (Layers 1-3), from the ``scope`` iterations when given."""
+        index = [entry for entry in self.load_index() if scope is None or entry.get("iter") in scope]
         if not index:
             return ""
 
@@ -609,15 +626,7 @@ class CandidateArchive:
         ]
         best = max(kept_speedups) if kept_speedups else 1.0
 
-        out: list[str] = []
-        # Layer 3 — pointer to the full archive.
-        out.append("## Solution archive — your lineage so far")
-        out.append("Every prior attempt's FULL kernel + measurements are saved under:")
-        out.append(f"  {self.root}/iter_NNN/")
-        out.append("    kernel.py  change.diff  meta.json  validation.txt")
-        out.append("Read any of them (Read tool, or `git show <commit>`) to study, reuse, or")
-        out.append("COMBINE prior approaches — the file on disk is only the current best.")
-        out.append("")
+        out = self._archive_pointer()
 
         # Layer 1 — trajectory table.
         anchor = ""
@@ -638,7 +647,7 @@ class CandidateArchive:
         out.extend(self._row(e) for e in rows)
 
         # Layer 2 — curated full diffs.
-        selected = self._select_for_diffs(index, max_full_diffs, near_miss_count, recent_count)
+        selected = self._select_for_diffs(index, DIGEST_FULL_DIFFS, DIGEST_NEAR_MISSES, DIGEST_RECENT)
         if selected:
             out.append("")
             out.append("### Notable prior solutions (full change diff vs the state each built on)")

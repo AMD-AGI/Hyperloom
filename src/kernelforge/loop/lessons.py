@@ -9,7 +9,7 @@ import ast
 import contextlib
 import logging
 import re
-from collections.abc import Iterable, Sequence
+from collections.abc import Collection, Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from kernelforge.tools.durable_io import atomic_write_text
@@ -833,9 +833,10 @@ class LessonStore:
         *,
         current_cases: Sequence[str] = (),
         kernel_source: str | Sequence[str | None] | None = None,
+        scope: Collection[int] | None = None,
     ) -> str:
-        """The lesson block injected into the next implementer prompt."""
-        iterations = self.existing_iterations()
+        """The lesson block injected into the next implementer prompt, from the ``scope`` iterations when given."""
+        iterations = [number for number in self.existing_iterations() if scope is None or number in scope]
         if not iterations:
             return ""
 

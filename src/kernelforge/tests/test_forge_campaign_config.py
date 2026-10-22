@@ -23,6 +23,7 @@ from kernelforge.loop.campaign_config import (
     validate_pending_campaign_head,
 )
 from kernelforge.loop.agent_relay import AgentProfileSpec, AgentRelayPolicy
+from kernelforge.loop.search_tree import SearchStrategy
 from kernelforge.llm.git import GitError
 
 
@@ -124,6 +125,25 @@ def test_campaign_persists_the_relay_policy_but_no_model(tmp_path, monkeypatch):
         {"profile_id": "claude", "provider": "claude"},
         {"profile_id": "codex", "provider": "codex"},
     ]
+
+
+def test_campaign_persists_its_search_strategy_and_reads_an_older_config_as_linear(tmp_path, monkeypatch):
+    workspace, kernel, _helper, driver = _git_workspace(tmp_path)
+    monkeypatch.setenv("GPU_TARGET", "gfx950")
+    config = create_campaign_config(
+        str(workspace),
+        CampaignInputs(kernel=str(kernel), driver=str(driver), search_strategy=SearchStrategy.TREE),
+    )
+    store = CampaignConfigStore(str(workspace))
+    store.save(config)
+
+    payload = json.loads(store.path.read_text())
+    assert payload["search_strategy"] == "tree"
+    assert store.load().search_strategy is SearchStrategy.TREE
+
+    del payload["search_strategy"]
+    store.path.write_text(json.dumps(payload))
+    assert store.load().search_strategy is SearchStrategy.LINEAR
 
 
 def test_the_operator_is_settled_before_the_loop_can_rename_it(tmp_path, monkeypatch):
