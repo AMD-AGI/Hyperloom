@@ -291,6 +291,7 @@ class CrossSessionBriefing(StartupBriefProvider):
             tried,
             lessons=tuple(item.text for item in kept if item.lesson),
             leads=tuple(item.text for item in kept if not item.lesson),
+            focus=self.focus,
         )
 
 

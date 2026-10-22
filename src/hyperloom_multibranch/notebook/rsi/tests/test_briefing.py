@@ -44,6 +44,7 @@ from hyperloom_multibranch.notebook.learning_search import LEARNINGS_LOG, Retrie
 from hyperloom_multibranch.notebook.rsi.briefing import CrossSessionBriefing, SessionBriefs
 from hyperloom_multibranch.notebook.tests.factories import FakeClock, judgement, profile, request, result
 from hyperloom_multibranch.notebook.tests.sessions import METRIC, SPLIT_KV, scripted_session
+from hyperloom_multibranch.notebook.tools import FOCUS_LINE
 
 SAME = {
     "model": "deepseek-ai/DeepSeek-R1",
@@ -416,6 +417,19 @@ async def test_a_read_that_did_not_complete_is_read_again_at_the_next_brief(tmp_
     await briefs.text("s3", "c1")
 
     assert len(failed.calls) == 2
+
+
+async def test_the_brief_names_the_focus_the_scheduler_opened_the_branch_on_and_keeps_it_at_a_restart(
+    tmp_path: Path,
+) -> None:
+    notebook = await scripted_session(tmp_path / "notebook", FakeClock())
+    briefs = SessionBriefs(notebook)
+    briefs.for_branch("s3", "gemm")
+
+    restarted, unfocused = await briefs.text("s3", "c1"), await briefs.text("s4", "c1")
+
+    assert restarted.splitlines()[:2] == ["Startup brief from c1", f"{FOCUS_LINE}gemm"]
+    assert not any(line.startswith(FOCUS_LINE) for line in unfocused.splitlines())
 
 
 async def test_each_branch_keeps_its_focus_and_every_branch_shares_one_index_and_cache(tmp_path: Path) -> None:

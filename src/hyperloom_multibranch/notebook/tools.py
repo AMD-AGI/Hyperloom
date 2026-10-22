@@ -79,6 +79,7 @@ UNCHANGED = "measured without a change: its delta was empty"
 UNFINISHED_TITLE = (
     f"Unfinished in this session (finish one: {REPLAY_TOOL} with its request_id makes its change for your head):"
 )
+FOCUS_LINE = "Focus, the bottleneck the scheduler opened this branch on: "
 _UNFINISHED = {
     UnfinishedReason.NOT_STACKABLE: "committed, merge not stackable",
     UnfinishedReason.NEAR_BAR: "kept accuracy, just short of its bar",
@@ -237,6 +238,8 @@ def _unfinished(item: UnfinishedLead) -> str:
 
 def render_brief(brief: StartupBrief) -> str:
     sections = [f"Startup brief from {brief.start_commit}"]
+    if brief.focus:
+        sections.append(f"{FOCUS_LINE}{brief.focus}")
     for title, items in (
         ("Ceilings (largest ops; claim with target_share_pct):", _ceilings(brief.op_shares)),
         ("Tried:", [_tried(item) for item in brief.tried]),
@@ -595,6 +598,7 @@ def notebook_tools(
 __all__ = [
     "CEILING_OPS",
     "ERROR",
+    "FOCUS_LINE",
     "LINE_CHARS",
     "MAX_LINES",
     "MAX_REPLY_CHARS",
