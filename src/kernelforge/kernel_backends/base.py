@@ -65,6 +65,7 @@ def build_single_kernel_backend_prompt(
         include_aiter=include_aiter,
         include_mori=include_mori,
         defer_all=bool(getattr(config, "defer_knowledge_maps", False)),
+        skills=tuple(getattr(config, "external_skills", ())),
     )
 
     # The backend is resolved here and nowhere else, so this is the one place that can pair a prompt with the gate the

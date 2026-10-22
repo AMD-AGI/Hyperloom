@@ -158,6 +158,7 @@ class AnalysisEvidenceMixin:
                     # and analysis prompt, so the ablation has to reach it too or
                     # it only measures half the knowledge block's cost.
                     defer_all=bool(getattr(self.config, "defer_knowledge_maps", False)),
+                    skills=tuple(getattr(self.config, "external_skills", ())),
                 )
             except OSError:
                 log.debug("failed to build orchestration knowledge index", exc_info=True)

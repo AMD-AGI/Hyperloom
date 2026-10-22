@@ -862,3 +862,19 @@ async def test_partial_checkpoint_is_exposed_as_orchestration_evidence(
     source_entry = next(item for item in catalog["artifacts"] if item["kind"] == "source_map")
     assert source_entry["status"] == "AVAILABLE"
     assert "call graph" in source_entry["available_information"]
+
+
+async def test_analysis_session_can_read_an_external_skill(tmp_path) -> None:
+    from kernelforge.knowledge.local_wiki.skills import resolve_external_skill
+
+    workspace, kernel, driver = _workspace(tmp_path)
+    skill_root = tmp_path / "skills" / "flydsl-kernel-optimization"
+    skill_root.mkdir(parents=True)
+    (skill_root / "SKILL.md").write_text("---\nname: flydsl-kernel-optimization\n---\n# Skill\n")
+    backend = _BundleBackend()
+    service = _service(tmp_path, backend)
+    service.config.external_skills = (resolve_external_skill(skill_root),)
+
+    await service.ensure_bundle(_context(workspace), sources=AnalysisSources(str(kernel), str(driver), [str(kernel)]))
+
+    assert str(skill_root.resolve()) in backend.specs[0].additional_directories

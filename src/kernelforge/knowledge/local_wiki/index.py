@@ -8,8 +8,12 @@ from __future__ import annotations
 import re
 from collections.abc import Sequence
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from kernelforge.resources import resource_path
+
+if TYPE_CHECKING:
+    from kernelforge.knowledge.local_wiki.skills import ExternalSkill
 
 # The stable logical name resolves to this package's resources in built wheels
 # and to an operator override when one is configured.
@@ -277,6 +281,24 @@ def _render_pointer(root: Path, rel: str, *, carried: bool = True) -> str:
     return f"{header}\n\nMap not inlined{what}. {call}"
 
 
+def _render_skill(skill: ExternalSkill) -> str:
+    """Point at one external skill: where it is, what it covers, and how the paths it gives resolve."""
+    lines = [f"## skill {skill.name}/  —  base: {skill.root}", ""]
+    if skill.description:
+        lines += [skill.description, ""]
+    lines.append(
+        f"`Read` `{skill.skill_file}` before planning or editing a kernel it covers; it routes to the cards "
+        f"beneath it. A path it lists relative to its own folder resolves against the `base:` above, and a "
+        f"sibling skill it links as `../<name>/SKILL.md` is `{skill.root.parent}/<name>/SKILL.md`."
+    )
+    if skill.repository_root is not None:
+        lines.append(
+            f"A path it gives relative to its repository resolves against `{skill.repository_root}`. A section "
+            "it scopes to that repository applies only when this task lives in that repository."
+        )
+    return "\n".join(lines)
+
+
 def build_forge_knowledge(
     root: str | Path | None = None,
     *,
@@ -284,6 +306,7 @@ def build_forge_knowledge(
     include_aiter: bool = False,
     include_mori: bool = False,
     defer_all: bool = False,
+    skills: Sequence[ExternalSkill] = (),
 ) -> str:
     """Assemble the layered knowledge block for one forge-loop kernel task.
 
@@ -297,9 +320,12 @@ def build_forge_knowledge(
     ``defer_all`` renders EVERY level as a pointer rather than only the carried
     language -- what ``Config.defer_knowledge_maps`` (on by default) selects.
     Called directly, the maps stay inlined unless it is set.
+
+    ``skills`` are folders outside the KB, each with a ``SKILL.md``; every one
+    is rendered after the KB levels as a pointer to that file.
     """
     root_path = Path(root) if root else _DEFAULT_ROOT
-    if not root_path.exists():
+    if not root_path.exists() and not skills:
         return ""
 
     rels: list[str] = list(_MANDATORY_PILLARS)
@@ -327,6 +353,7 @@ def build_forge_knowledge(
         return _render_pointer(root_path, rel, carried=not defer_all)
 
     sections = [s for s in (render(rel) for rel in rels) if s]
+    sections += [_render_skill(skill) for skill in skills]
     if not sections:
         return ""
 

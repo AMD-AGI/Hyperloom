@@ -27,11 +27,13 @@ from kernelforge.cli.options import (
     _agent_runtime_options,
     _agent_runtime_overrides,
     _gpu_options,
+    _resolve_skill_dirs,
     _roofline_ceiling_option,
     _validate_max_hours,
     _validate_optional_agent_provider,
     _validate_roofline_target,
 )
+from kernelforge.knowledge.local_wiki.skills import ExternalSkill
 from kernelforge.option_groups import option_group
 from kernelforge.cli.pr_references import (
     PR_KB_BUDGET_SEC,
@@ -1094,12 +1096,13 @@ class TaskIdentity:
 
 @dataclass(frozen=True)
 class KnowledgeOptions:
-    """The experience-KB and PR-KB switches, and the producer the records belong to."""
+    """The experience-KB and PR-KB switches, the producer the records belong to, and external skills."""
 
     experience_kb: bool
     kb_warmstart_enabled: bool
     producer: str
     pr_kb: bool | None
+    skills: tuple[ExternalSkill, ...]
 
 
 @dataclass(frozen=True)
@@ -1432,6 +1435,16 @@ class ForgeLoopRequest:
             "as Implementer prior knowledge (default off). Falls back to "
             "PR_KB_ENABLE when unset.",
         ),
+        click.option(
+            "--skill-dir",
+            "skills",
+            multiple=True,
+            type=click.Path(exists=True, file_okay=False, resolve_path=True),
+            callback=_resolve_skill_dirs,
+            help="A folder holding a SKILL.md, such as the optimization skill a kernel "
+            "repository keeps; every agent is pointed at it after the packaged "
+            "knowledge maps. Repeatable. Applies to this invocation only.",
+        ),
     ),
     option_group(
         "probe",
@@ -1631,6 +1644,9 @@ def forge_loop(request: ForgeLoopRequest):
         if _value is not None:
             overrides[_name] = _value
     overrides.update(agent_runtime_overrides)
+    overrides["external_skills"] = request.knowledge.skills
+    for skill in request.knowledge.skills:
+        print(f"  [knowledge] skill {skill.name}: {skill.skill_file}")
     if gpu_target:
         os.environ["GPU_TARGET"] = gpu_target
     config = Config.from_env(

@@ -1357,6 +1357,10 @@ class AnalysisAgentService:
                         additional_directories=[
                             context.workspace,
                             str(assert_sandbox_grant(self.config.local_knowledge_dir, what="local_knowledge_dir")),
+                            *(
+                                str(assert_sandbox_grant(skill.root, what=f"skill {skill.name}"))
+                                for skill in getattr(self.config, "external_skills", ())
+                            ),
                         ],
                         allow_untracked=True,
                         tool_policy=AgentToolPolicy(

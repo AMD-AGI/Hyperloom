@@ -9,6 +9,7 @@ import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from hyperloom.common import llm_config
 from hyperloom.common.env import env_bool, env_flag
@@ -19,6 +20,9 @@ from hyperloom.common.reasoning_effort import (
 )
 from kernelforge.knowledge.kb_store.config import KnowledgeConfig
 from kernelforge.resources import default_project_root, resource_path
+
+if TYPE_CHECKING:
+    from kernelforge.knowledge.local_wiki.skills import ExternalSkill
 
 
 def resolve_agent_model(agent_backend: str) -> str:
@@ -177,6 +181,9 @@ class Config:
     # None means "unset, defer to the env var" -- see include_mori_kb above for
     # why a plain bool would make an explicit False indistinguishable.
     defer_knowledge_maps: bool | None = field(default=None)
+
+    # Skill folders outside the packaged tree (``--skill-dir``), pointed at in every knowledge block.
+    external_skills: tuple[ExternalSkill, ...] = ()
 
     def __post_init__(self):
         """Derive paths and validate provider-specific runtime settings."""
@@ -346,4 +353,5 @@ class Config:
             knowledge_config=knowledge_config,
             include_mori_kb=overrides.get("include_mori_kb"),
             defer_knowledge_maps=overrides.get("defer_knowledge_maps"),
+            external_skills=tuple(overrides.get("external_skills", ())),
         )

@@ -25,6 +25,16 @@ def _validate_max_hours(ctx, param, value):
     return value
 
 
+def _resolve_skill_dirs(_ctx, _param, values):
+    """Read each ``--skill-dir`` folder now, so one without a SKILL.md stops the command before it starts."""
+    from kernelforge.knowledge.local_wiki.skills import resolve_external_skill
+
+    try:
+        return tuple(resolve_external_skill(value) for value in values or ())
+    except ValueError as error:
+        raise click.BadParameter(str(error)) from error
+
+
 def _normalize_gpu_type(_ctx, _param, value):
     """Canonicalize the hardware SKU used in KB identities."""
     if value is None:
