@@ -175,3 +175,52 @@ def test_sticky_workspace_keeps_the_apps_files_from_the_child(shared_tmp):
     out = _run_as_unprivileged(f"rm -f {ws}/prompt.md")
     assert out.returncode != 0
     assert (ws / "prompt.md").exists()
+
+
+@pytest.mark.skipif(not _account_exists(UNPRIVILEGED), reason=f"no {UNPRIVILEGED!r} account")
+def test_a_symlink_as_the_root_of_the_shared_tree_is_refused(tmp_path):
+    spec = resolve_run_as(UNPRIVILEGED)
+    assert spec is not None
+    target = tmp_path / "app_owned"
+    target.mkdir()
+    (target / "key").write_text("k", encoding="utf-8")
+    (target / "key").chmod(0o600)
+    link = tmp_path / "wt"
+    link.symlink_to(target)
+    with pytest.raises(OSError, match="symlink"):
+        spec.share_tree(link)
+    assert stat.S_IMODE((target / "key").stat().st_mode) == 0o600
+
+
+@needs_root
+def test_share_tree_leaves_git_alone(shared_tmp):
+    spec = resolve_run_as(UNPRIVILEGED)
+    assert spec is not None
+    (shared_tmp / ".git").write_text("gitdir: /elsewhere", encoding="utf-8")
+    (shared_tmp / "sub" / ".git").mkdir(parents=True)
+    (shared_tmp / "sub" / ".git" / "HEAD").write_text("ref", encoding="utf-8")
+    (shared_tmp / "sub" / "f.py").write_text("x", encoding="utf-8")
+    before = {
+        p: (p.stat().st_gid, stat.S_IMODE(p.stat().st_mode))
+        for p in (shared_tmp / ".git", shared_tmp / "sub" / ".git" / "HEAD")
+    }
+    spec.share_tree(shared_tmp)
+    assert {p: (p.stat().st_gid, stat.S_IMODE(p.stat().st_mode)) for p in before} == before
+    assert (shared_tmp / "sub" / "f.py").stat().st_gid == spec.gid
+
+
+@needs_root
+def test_demoted_child_files_are_group_writable_and_a_plain_launch_keeps_the_umask(shared_tmp):
+    spec = resolve_run_as(UNPRIVILEGED)
+    assert spec is not None
+    spec.share_tree(shared_tmp)
+    assert spec.popen_kwargs()["umask"] == 0o002
+    out = _run_as_unprivileged(f"umask; cd {shared_tmp} && touch made")
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.strip() == "0002"
+    assert (shared_tmp / "made").stat().st_mode & stat.S_IWGRP
+    # Without a demote nothing sets a umask, so a child inherits the app's own.
+    plain = subprocess.run(["/bin/sh", "-c", "umask"], capture_output=True, text=True, check=True)
+    app_umask = os.umask(0)
+    os.umask(app_umask)
+    assert plain.stdout.strip() == f"{app_umask:04o}"

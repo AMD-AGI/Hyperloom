@@ -90,9 +90,13 @@ class RunAs:
         directories get the setgid bit (new entries keep the group) and every
         entry gets group read and write. ``sticky`` additionally stops the
         child deleting the app's own files in the top directory. Symlinks are
-        not followed. Needs root or membership in the group; raises ``OSError``
+        not followed, and a ``root`` that is itself a symlink is refused.
+        ``.git`` is left alone: the child does no git writes. Needs root or
+        membership in the group; raises ``OSError``
         otherwise, so a launcher cannot start a child that cannot write.
         """
+        if root.is_symlink():
+            raise OSError(f"refusing to share {root}: it is a symlink")
         for path in _walk(root):
             st = path.lstat()
             if st.st_gid != self.gid:
@@ -108,10 +112,12 @@ class RunAs:
 
 
 def _walk(root: Path) -> Iterable[Path]:
+    """``root`` and everything below it, never following a link and never entering or touching ``.git``."""
     yield root
     for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        dirnames[:] = [d for d in dirnames if d != ".git"]
         base = Path(dirpath)
-        for name in (*dirnames, *filenames):
+        for name in (*dirnames, *(f for f in filenames if f != ".git")):
             yield base / name
 
 
