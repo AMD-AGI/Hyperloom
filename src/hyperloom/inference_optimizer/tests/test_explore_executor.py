@@ -206,10 +206,12 @@ def _noop_filter_kwargs(tmp_path: Path, **overrides: object) -> dict:
         "model_path": None,
         "gpu_type": None,
         "benchmark_script": None,
-        "observed_server_config": _stack_config(),
-        "observed_server_env": _stack_env(),
     }
     kwargs.update(overrides)
+    kwargs["observed"] = (
+        kwargs.pop("observed_server_config", _stack_config()),
+        kwargs.pop("observed_server_env", _stack_env()),
+    )
     return kwargs
 
 
@@ -3127,6 +3129,68 @@ async def test_explore_executor_sglang_empty_grid_still_fails_with_empty_grid(
     res = await sub.run_task(task)
     assert res.result["status"] == "failed"
     assert res.result["error_class"] == "empty_grid"
+
+
+def _lever_state() -> SharedState:
+    """A session whose specialist has authored two dormant, dependency-chained rewrite levers."""
+    from hyperloom.orchestrator.actions.executors import _framework_switch_manifest as manifest
+
+    switches, problems = manifest.parse_manifest(
+        [
+            {"switch": "HL_HOIST", "category": "hoist_loop_invariant", "enables": ["HL_CACHE"]},
+            {"switch": "HL_CACHE", "category": "memoize_invariant"},
+        ]
+    )
+    assert problems == []
+    state = SharedState(framework="sglang")
+    assert state.record_authored_framework_levers(switches, default_on=False)
+    return state
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("with_llm_proposal", [False, True])
+async def test_explore_executor_measures_and_attributes_authored_levers(
+    sub_agent_runner,
+    tmp_path,
+    monkeypatch,
+    with_llm_proposal,
+):
+    """Seeded levers reach the runner and return measured attribution, with or without LLM proposals."""
+    sub, tr, _ = sub_agent_runner
+    base = tmp_path / "base_lever_grid.yaml"
+    _write_baseline_yaml(base)
+    sub.shared_state = _lever_state()
+    _force_cold_decision(monkeypatch)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "0")
+    measurements = iter((900.0, 1000.0, 1100.0))
+
+    def _fake_run(cmd, *args, **kwargs):
+        slot = Path(cmd[cmd.index("--output-dir") + 1])
+        _fake_workspace(slot, tput=next(measurements))
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr("hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill", _fake_run)
+    grid = [{"name": "llm_proposal", "extra_server_args": "--max-num-seqs 256"}] if with_llm_proposal else []
+
+    task = await tr.create(
+        kind="explore",
+        params={
+            "config_path": str(base),
+            "base_tput": 800.0,
+            "grid": grid,
+        },
+        idempotency_key="ex-fwlever-seeded-with-llm-grid",
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+    res = await sub.run_task(task)
+
+    assert res.result["status"] == "succeeded"
+    names = [row["variant_name"] for row in res.result["per_variant_outcomes"]]
+    assert names == ["fwlever_hl_hoist", "fwlever_hl_cache"] + (["llm_proposal"] if with_llm_proposal else [])
+    attributions = res.result["framework_lever_attributions"]
+    assert [row["switch"] for row in attributions] == ["HL_HOIST", "HL_CACHE"]
+    assert [row["gain_pct"] for row in attributions] == pytest.approx([12.5, 11.1111])
+    assert all(row["outcome"] == "KEEP" and row["source"] == "additive" for row in attributions)
 
 
 @pytest.mark.asyncio

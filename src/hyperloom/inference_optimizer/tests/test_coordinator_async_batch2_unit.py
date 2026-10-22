@@ -182,6 +182,56 @@ async def test_context_inbox_reader_with_events(coord: Coordinator) -> None:
     assert isinstance(out, str)
 
 
+@pytest.mark.asyncio
+async def test_context_inbox_reader_survives_scalar_specialist_findings(coord: Coordinator) -> None:
+    """``new_findings`` / ``residual_questions`` reach the row from the specialist's own JSON.
+
+    The schema asks for a list, but a model writes it, so a bare scalar can arrive
+    there. The inbox is rendered on every orchestration round, so a scalar that
+    raises costs the whole session, not one row, and one counted by ``len`` reports
+    the character count of a string as a finding count.
+    """
+    for findings, questions in ((5, 3), ("one finding", "is the tokenizer the bound?")):
+        await coord.bus.append_and_seq(
+            Message.new(
+                "kernel_agent",
+                "orchestration",
+                "delegated_result",
+                {
+                    "kind": "specialist",
+                    "state": "done",
+                    "result": {
+                        "specialist_done": {
+                            "summary": "fp8 kv cache holds",
+                            "new_findings": findings,
+                            "residual_questions": questions,
+                        }
+                    },
+                },
+            )
+        )
+        out = coord.conversation._context_inbox_reader()
+        assert "fp8 kv cache holds" in out
+        assert "findings=1" in out
+        assert "questions=1" in out
+
+    await coord.bus.append_and_seq(
+        Message.new(
+            "kernel_agent",
+            "orchestration",
+            "delegated_result",
+            {
+                "kind": "specialist",
+                "state": "done",
+                "result": {"specialist_done": {"new_findings": ["a", "b"], "residual_questions": ["q"]}},
+            },
+        )
+    )
+    out = coord.conversation._context_inbox_reader()
+    assert "findings=2" in out
+    assert "questions=1" in out
+
+
 # -- _context_recent_outcomes_reader ----------------------------------------
 def test_recent_outcomes_reader_empty(coord: Coordinator) -> None:
     assert coord.conversation._context_recent_outcomes_reader() == "(no recent outcomes)"

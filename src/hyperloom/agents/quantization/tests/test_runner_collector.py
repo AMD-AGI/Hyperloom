@@ -120,3 +120,77 @@ def test_resolve_quantized_dir_pyyaml_missing(tmp_path: Path, monkeypatch) -> No
     monkeypatch.setattr(builtins, "__import__", fake_import)
     path, present, err = rc._resolve_quantized_dir(tmp_path)
     assert (path, present, err) == (None, True, "pyyaml_missing")
+
+
+async def test_an_attempt_runs_on_the_harness_when_the_platform_names_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from hyperloom.common import llm_config
+    from hyperloom.common.deepseek_task import DeepSeekTaskResult
+
+    skill = tmp_path / "SKILL.md"
+    skill.write_text("contract", encoding="utf-8")
+    seen: dict[str, object] = {}
+
+    async def _drive(request, owed=None):
+        seen["request"], seen["owed"] = request, owed
+        return DeepSeekTaskResult(text="quantized", error="")
+
+    monkeypatch.setattr(llm_config, "resolve_agent_backend", lambda: llm_config.AGENT_BACKEND_DEEPSEEK)
+    monkeypatch.setattr(runner, "run_deepseek_task", _drive)
+    logs: list[str] = []
+
+    result = await runner.run_one_attempt(
+        runner.AttemptContext(user_prompt="quantize", workspace=tmp_path / "ws", quark_root=tmp_path, attempt_number=2),
+        skill_path=skill,
+        model="deepseek-v4-flash",
+        log=logs.append,
+    )
+
+    request = seen["request"]
+    assert request.cwd == tmp_path / "ws" and request.writable
+    assert request.child_env is not None
+    assert seen["owed"] is not None
+    assert result.raw_text == "quantized" and result.sdk_error == ""
+    assert any("DeepSeek runner" in line and "attempt=2" in line for line in logs)
+
+
+def test_an_attempt_is_unfinished_until_it_is_blocked_or_has_reached_evaluation(tmp_path: Path) -> None:
+    """An attempt that stops after one reply must not read as a quantized model whose path is ``None``."""
+    assert not runner._attempt_finished(tmp_path)
+
+    (tmp_path / "last_phase.txt").write_text("export\n", encoding="utf-8")
+    assert not runner._attempt_finished(tmp_path)
+
+    (tmp_path / "last_phase.txt").write_text("eval\n", encoding="utf-8")
+    assert runner._attempt_finished(tmp_path)
+
+
+def test_a_blocked_attempt_is_finished(tmp_path: Path) -> None:
+    (tmp_path / "blocked.md").write_text("outcome: must_have_weights_missing\n", encoding="utf-8")
+
+    assert runner._attempt_finished(tmp_path)
+
+
+async def test_an_interactive_attempt_is_not_continued(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Its checkpoints wait for an answer a headless session never gets."""
+    from hyperloom.common import llm_config
+    from hyperloom.common.deepseek_task import DeepSeekTaskResult
+
+    skill = tmp_path / "SKILL.md"
+    skill.write_text("contract", encoding="utf-8")
+    seen: dict[str, object] = {}
+
+    async def _drive(request, owed=None):
+        seen["owed"] = owed
+        return DeepSeekTaskResult()
+
+    monkeypatch.setattr(llm_config, "resolve_agent_backend", lambda: llm_config.AGENT_BACKEND_DEEPSEEK)
+    monkeypatch.setattr(runner, "run_deepseek_task", _drive)
+
+    await runner.run_one_attempt(
+        runner.AttemptContext(user_prompt="q", workspace=tmp_path / "ws", quark_root=tmp_path, interactive=True),
+        skill_path=skill,
+    )
+
+    assert seen["owed"] is None

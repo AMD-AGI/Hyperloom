@@ -59,6 +59,7 @@ def observe_bringup(
         WRAPPER_STDOUT,
         BootStreams,
         classify,
+        failure_region,
     )
     from hyperloom.orchestrator.bringup.trees import read_trees
 
@@ -76,7 +77,7 @@ def observe_bringup(
     # An unset ``evidence_ref`` means no stream carried anything; any other
     # value names one of the slots above.
     evidence = streams[observation.evidence_ref] if observation.evidence_ref else ""
-    return BringupVerdict(observation=observation, signature=classify_failure(evidence))
+    return BringupVerdict(observation=observation, signature=classify_failure(failure_region(evidence)))
 
 
 def verdict_of(observation: "BootObservation") -> BringupVerdict:

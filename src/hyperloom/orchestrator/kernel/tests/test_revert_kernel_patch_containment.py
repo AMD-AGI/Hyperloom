@@ -16,8 +16,10 @@ the target would break those legitimate reverts.
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import logging
+import os
 from pathlib import Path
 
 from hyperloom.orchestrator.kernel import apply_kernel_patch as apk
@@ -160,3 +162,48 @@ def test_source_backups_tampered_backup_path_is_skipped(tmp_path, caplog):
     assert target.read_text(encoding="utf-8") == "patched2\n"
     assert str(target) not in res["restored_paths"]
     assert "untrusted backup_path" in caplog.text
+
+
+def test_retrying_partial_revert_invalidates_bytecode_from_unrestored_source(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(apk.tempfile, "gettempdir", lambda: str(tmp_path / "cache_tmp"))
+    backup_dir = tmp_path / "backup"
+    backup_dir.mkdir()
+    framework = tmp_path / "framework"
+    framework.mkdir()
+    entries = []
+    for name in ("pending.py", "restored.py"):
+        target = framework / name
+        target.write_text("VALUE = 2\n", encoding="utf-8")
+        backup = backup_dir / name
+        backup.write_text("VALUE = 1\n", encoding="utf-8")
+        # Equal timestamp and size make stale bytecode indistinguishable by Python's normal cache check.
+        for path in (target, backup):
+            os.utime(path, (1_700_000_000, 1_700_000_000))
+        entries.append({"path": str(target), "backup_path": str(backup), "disposition": "modified"})
+    valid_backup = entries[0]["backup_path"]
+    entries[0]["backup_path"] = str(tmp_path / "untrusted.py")
+    manifest_file = _write_manifest(backup_dir, {"source_backups": entries})
+
+    first = apk.revert_kernel_patch(manifest_file)
+    assert first["status"] == "partial"
+    pending = framework / "pending.py"
+
+    def load_value():
+        spec = importlib.util.spec_from_file_location("revert_cache_probe", pending)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module.VALUE
+
+    assert load_value() == 2
+    bytecode = Path(importlib.util.cache_from_source(str(pending)))
+    assert bytecode.is_file()
+    manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
+    manifest["source_backups"][0]["backup_path"] = valid_backup
+    _write_manifest(backup_dir, manifest)
+
+    retried = apk.revert_kernel_patch(manifest_file)
+
+    assert retried["status"] == "ok"
+    assert pending.read_text(encoding="utf-8") == "VALUE = 1\n"
+    assert load_value() == 1

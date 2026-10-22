@@ -21,7 +21,7 @@ from hyperloom.inference_optimizer import cli
 from hyperloom.inference_optimizer.cli import backends as bk
 from hyperloom.inference_optimizer.cli import credentials as cr
 from hyperloom.inference_optimizer.cli import preflight as pf
-from hyperloom.orchestrator.specialists.subprocess_ import _SPECIALIST_SECRET_ENV_ALLOWLIST
+from hyperloom.orchestrator.specialists.agent_cli_config import _SPECIALIST_SECRET_ENV_ALLOWLIST
 
 _FAKE_CREDENTIAL_ENV = "ANTHROPIC_FAKE_CREDENTIAL_FOR_TEST"
 

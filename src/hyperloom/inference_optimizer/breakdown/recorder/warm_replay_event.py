@@ -25,6 +25,8 @@ import time
 from collections.abc import Mapping
 from typing import Any
 
+from hyperloom.common.coerce import to_unix
+
 from .event_fields import (
     as_dict as _as_dict,
     failure_row as _failure_row,
@@ -212,6 +214,7 @@ class WarmReplayEventRecorder:
         self._t0 = time.monotonic()
         self._start_time = _now()
         self._sequence: int | None = None
+        self._rebound = False
         self._closed = False
         self._task_id = str(task_id or "")
         # Gates are stamped at seconds precision and several rule inside one
@@ -257,6 +260,32 @@ class WarmReplayEventRecorder:
             producer=PRODUCER,
             ext={"request": dict(self._request)},
         )
+
+    def _duration_sec(self, end_time: str) -> float:
+        """Seconds from the opening to ``end_time``; a rebound recorder measures from the restored start."""
+        started, ended = to_unix(self._start_time), to_unix(end_time)
+        if self._rebound and started is not None and ended is not None:
+            return round(ended - started, 3)
+        return round(time.monotonic() - self._t0, 3)
+
+    def rebind(self) -> None:
+        """Take over the event an earlier tick opened.
+
+        The stored sequence and start time are restored from the event-level
+        fragment, so the close updates the same timeline entry, keeps its
+        original start and measures the arc from it. An unreadable spool leaves
+        the recorder as freshly built.
+        """
+        from .assembler import recorded_rows
+        from ...session.sbd_v6 import timeline_sequence
+
+        rows = recorded_rows(SECTION_EVENT, event=self.event_id)
+        stored = rows[0] if rows else {}
+        self._sequence = timeline_sequence(stored)
+        restored = str(stored.get("start_time") or "")
+        if restored:
+            self._start_time = restored
+            self._rebound = True
 
     def record_measurement(
         self,
@@ -489,7 +518,7 @@ class WarmReplayEventRecorder:
                 **payload,
                 "status": str(status),
                 "end_time": end_time,
-                "duration_sec": round(time.monotonic() - self._t0, 3),
+                "duration_sec": self._duration_sec(end_time),
             },
         )
         from .assembler import warm_replay_event_parts
@@ -611,4 +640,6 @@ def make_warm_replay_recorder(
     )
     if open_event_on_timeline:
         recorder.begin()
+    else:
+        recorder.rebind()
     return recorder

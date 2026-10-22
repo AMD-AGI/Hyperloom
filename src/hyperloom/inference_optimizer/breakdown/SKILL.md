@@ -32,7 +32,7 @@ authoritative.
 | `schema_version`    | The wire contract. Gate features on the **major** version, not the exact string.                         |
 | `exported_at_utc`   | When this export was built.                                                                              |
 | `exporter_version`  | Which exporter built it.                                                                                 |
-| `metadata`          | Session identity, launch configuration, `grading` -- the axis this session was configured to rank on -- component versions, Langfuse receipt, and `warnings`, how the export itself went, reported once and only here. |
+| `metadata`          | Session identity, launch configuration, `grading` -- the mode marker the session started in, not the axis promotions were decided on (`outcome.validation.graded_on`) -- component versions, Langfuse receipt, and `warnings`, how the export itself went, reported once and only here. |
 | `outcome`           | Terminal status, stage reached, stop reason, the `baseline` and `final` measured results with the graded axes each reported, the `validation` that reconciles the stack's parts against its total on one axis, named by `graded_on`, and `variants`, the framework phase's bench runs counted by how each ended. |
 | `timeline`          | The run itself: one event per stage, oldest first, each carrying its span, status, and an `ext` block of what that kind of stage records. Startup source events live under `reports/sbd_v6/timeline/`. |
 | `close`             | What the session settled at close: the steps the sequencer ran and the artifacts it published. |
@@ -157,7 +157,9 @@ this reference is partial — `breakdown/exporter.py` is authoritative.
 - New exports carry `hyperloom.session_breakdown.v6.1`. 6.1 changes three
   things inside the 6 major, a declared exception to the major-bump rule: it
   renames one key, removes keys no producer populated (disposition: removed in
-  6.1, never populated), and reports `attributed_gain_pct`,
+  6.1, never populated) or that only carried a constant (`roofline_measured`,
+  the baseline action's `convergence`; disposition: removed in 6.1, constant),
+  and reports `attributed_gain_pct`,
   `unattributed_gain_pct` and run `empty` as null when unmeasured or not
   provided. `throughput_tok_s_per_gpu` in `outcome.baseline`, `outcome.final`
   and the `baseline` event measurement is now `output_throughput`, and the old key is

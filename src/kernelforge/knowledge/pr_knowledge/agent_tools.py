@@ -7,4 +7,4 @@ from __future__ import annotations
 
 # Prefixed so they cannot collide with the upstream PR Monitor's own MCP tools; agents see them as
 # mcp__pr_monitor__<name>.
-TOOL_NAMES = ("pr_find_references", "pr_get_reference", "pr_get_file_patch")
+TOOL_NAMES = ("pr_find_references", "pr_get_reference", "pr_get_file_patch", "pr_check_inclusion")

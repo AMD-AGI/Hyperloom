@@ -34,8 +34,9 @@ from .backends import (
     ModelRouting,
     _build_backends,
     _build_proposal_scorer,
+    _orchestration_banner,
     critic_review_target,
-    orchestration_runs_on_codex,
+    critic_on_codex_side,
 )
 from .model_gate import (
     _load_model_max_position_embeddings,
@@ -823,7 +824,7 @@ def _probe_critic_review_model(
     try:
         protocol, model = critic_review_target(
             args.critic_protocol,
-            orchestration_on_codex=orchestration_runs_on_codex(
+            orchestration_on_codex=critic_on_codex_side(
                 codex_follows_claude=codex_follows_claude, claude_follows_codex=claude_follows_codex
             ),
             claude_model=args.claude_model,
@@ -1813,10 +1814,6 @@ def _reexport_session_environment(
     _enforce_expected_framework(state.framework)
     os.environ["FRAMEWORK"] = state.framework
     print(f"  re-exported FRAMEWORK : {state.framework}")
-    # KERNEL_OPT_BACKEND_ORDER lives in the process environment, not in the session, so
-    # it is gone in this new process. Without re-applying the default, a resumed atom
-    # session runs GEAK while the persisted state still reads 'forge' -- and silently,
-    # because the warning for an operator-named backend lives in the same function.
     if state.framework == "atom":
         _apply_atom_auto_tighten(args)
     if state.gpu_type:
@@ -2532,6 +2529,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             codex_model=args.codex_model,
             codex_follows_claude=codex_follows_claude,
             claude_follows_codex=claude_follows_codex,
+            deepseek_model=llm_config.resolve_forge_llm_model(llm_config.AGENT_BACKEND_DEEPSEEK),
         ),
         CriticSetup(
             choice=critic_choice,
@@ -2630,21 +2628,10 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         session_dir, prompts=prompts, orchestration_phase=_initial_phase, macro_cycle=_initial_macro_cycle
     )
 
-    def _backend_kind(role: str) -> str:
-        backend = backends.get(role)
-        name = str(getattr(backend, "name", "") or "").strip().lower()
-        if name == "claude":
-            return "Claude"
-        if name == "codex":
-            return "Codex"
-        if backend is None:
-            return "DISABLED"
-        return backend.__class__.__name__
-
-    orchestration_str = (
-        f"Claude({args.claude_model})"
-        if _backend_kind("orchestration") == "Claude"
-        else f"{_backend_kind('orchestration')}({args.codex_model})"
+    orchestration_str = _orchestration_banner(
+        backends.get("orchestration"),
+        claude_model=args.claude_model,
+        codex_model=args.codex_model,
     )
     kernel_str = "DISABLED" if no_kernel else "programmatic"
     if critic_choice == "mock":

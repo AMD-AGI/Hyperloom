@@ -14,21 +14,20 @@ from typing import Any
 
 import pytest
 
-from hyperloom.common import llm_config
+from hyperloom.common import agent_cli, llm_config
 from hyperloom.common.deadline import Deadline
 
-import hyperloom.orchestrator.roles.claude as claude_role
+import hyperloom.orchestrator.specialists.agent_cli_config as agent_cli_config
 import hyperloom.orchestrator.specialists.subprocess_ as sp
 from hyperloom.inference_optimizer.trace import parse_usage as pu
 from hyperloom.orchestrator.specialists.subprocess_ import SpecialistSpawn
 
 AGENT_BACKEND_CLAUDE = llm_config.AGENT_BACKEND_CLAUDE
 AGENT_BACKEND_CODEX = llm_config.AGENT_BACKEND_CODEX
-SpecialistAgentUnavailableError = sp.SpecialistAgentUnavailableError
+SpecialistAgentUnavailableError = agent_cli_config.SpecialistAgentUnavailableError
 SpecialistSubprocessConfig = sp.SpecialistSubprocessConfig
 SpecialistSubprocessDispatcher = sp.SpecialistSubprocessDispatcher
-_build_specialist_env = sp._build_specialist_env
-resolve_codex_executable = sp.resolve_codex_executable
+_build_specialist_env = agent_cli_config._build_specialist_env
 preferred_agent_backend = llm_config.preferred_agent_backend
 
 # Every provider-shape signal ``llm_config`` consults, so a test can pin an exact deployment shape instead of
@@ -176,15 +175,15 @@ async def test_openai_only_deployment_runs_the_specialist_on_the_codex_cli(
     assert result.done_payload is not None, "no specialist_done.json was harvested"
     assert result.done_payload["summary"] == "fake codex specialist run"
     # Token spend, reply text and shell calls all have to survive the swap.
-    assert result.usage == {
+    assert result.trace.usage == {
         "input_tokens": 24099 - 11648,
         "output_tokens": 44,
         "cache_creation_input_tokens": None,
         "cache_read_input_tokens": 11648,
         "reasoning_output_tokens": 0,
     }
-    assert result.response == "DONE"
-    assert [call["tool"] for call in result.tool_calls] == ["Bash"]
+    assert result.trace.response == "DONE"
+    assert [call["tool"] for call in result.trace.tool_calls] == ["Bash"]
 
 
 @pytest.mark.asyncio
@@ -277,7 +276,7 @@ def _build_cmd(tmp_path: Path, **cfg_overrides: object) -> list[str]:
         base_env = {
             k: v
             for k, v in _os.environ.items()
-            if k in sp._SPECIALIST_ENV_ALLOWLIST | sp._SPECIALIST_SECRET_ENV_ALLOWLIST
+            if k in agent_cli_config._SPECIALIST_ENV_ALLOWLIST | agent_cli_config._SPECIALIST_SECRET_ENV_ALLOWLIST
         }
         cmd, _ = dispatcher._build_codex_launch(
             workspace=workspace,
@@ -479,12 +478,12 @@ def test_resolve_codex_executable_prefers_explicit_then_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Explicit config wins, then ``codex`` on PATH, then the SDK's runtime."""
-    assert resolve_codex_executable("/opt/custom/codex") == "/opt/custom/codex"
+    assert agent_cli.resolve_codex_executable("/opt/custom/codex") == "/opt/custom/codex"
 
     bin_dir = tmp_path / "bin"
     on_path = _write_executable(bin_dir / "codex", "#!/usr/bin/env bash\nexit 0\n")
     monkeypatch.setenv("PATH", str(bin_dir))
-    assert resolve_codex_executable() == str(on_path)
+    assert agent_cli.resolve_codex_executable() == str(on_path)
 
 
 def test_resolve_claude_executable_prefers_the_pin_then_the_record_then_path(
@@ -498,13 +497,13 @@ def test_resolve_claude_executable_prefers_the_pin_then_the_record_then_path(
     monkeypatch.setenv("PATH", str(on_path.parent))
     monkeypatch.setenv("HYPERLOOM_CLAUDE_CLI_PATH", str(pinned))
     monkeypatch.setenv("GEAK_CLAUDE_BIN", str(recorded))
-    assert claude_role.resolve_claude_executable() == str(pinned)
+    assert agent_cli.resolve_claude_executable() == str(pinned)
 
     monkeypatch.delenv("HYPERLOOM_CLAUDE_CLI_PATH")
-    assert claude_role.resolve_claude_executable() == str(recorded)
+    assert agent_cli.resolve_claude_executable() == str(recorded)
 
     monkeypatch.delenv("GEAK_CLAUDE_BIN")
-    assert claude_role.resolve_claude_executable() == str(on_path)
+    assert agent_cli.resolve_claude_executable() == str(on_path)
 
 
 def test_resolve_claude_executable_reports_absence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -512,13 +511,13 @@ def test_resolve_claude_executable_reports_absence(tmp_path: Path, monkeypatch: 
     monkeypatch.setenv("PATH", "/nonexistent")
     monkeypatch.delenv("HYPERLOOM_CLAUDE_CLI_PATH", raising=False)
     monkeypatch.delenv("GEAK_CLAUDE_BIN", raising=False)
-    assert claude_role.resolve_claude_executable() == ""
+    assert agent_cli.resolve_claude_executable() == ""
 
     not_executable = tmp_path / "claude"
     not_executable.write_text("", encoding="utf-8")
     monkeypatch.setenv("HYPERLOOM_CLAUDE_CLI_PATH", str(not_executable))
     monkeypatch.setenv("GEAK_CLAUDE_BIN", str(not_executable))
-    assert claude_role.resolve_claude_executable() == ""
+    assert agent_cli.resolve_claude_executable() == ""
 
 
 def test_resolve_codex_executable_falls_back_to_the_sdk_runtime(
@@ -526,7 +525,7 @@ def test_resolve_codex_executable_falls_back_to_the_sdk_runtime(
 ) -> None:
     """A pod that never ran the npm install still finds the pinned runtime."""
     monkeypatch.setenv("PATH", "/nonexistent")
-    resolved = resolve_codex_executable()
+    resolved = agent_cli.resolve_codex_executable()
     # The SDK runtime is an install-time dependency of ``openai-codex``; when it is absent the resolver reports that
     # rather than guessing a name.
     if resolved:
@@ -609,10 +608,7 @@ def test_cli_refuses_to_boot_an_openai_only_run_without_a_codex_runtime(
     from hyperloom.inference_optimizer.cli import executors
 
     _pin_provider_env(monkeypatch, _OPENAI_ONLY_ENV)
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.specialists.subprocess_.resolve_codex_executable",
-        lambda explicit="": "",
-    )
+    monkeypatch.setattr(agent_cli, "resolve_codex_executable", lambda explicit="": "")
     args = argparse.Namespace(
         claude_model="claude-opus-5",
         codex_model="gpt-5.5",
@@ -1277,7 +1273,7 @@ def test_codex_mcp_env_accepts_identical_benign_existing_value(
         encoding="utf-8",
     )
 
-    lines, additions = sp._codex_mcp_config(
+    lines, additions = agent_cli_config._codex_mcp_config(
         str(mcp_path),
         source={"SHARED_BENIGN_SETTING": "same-value"},
         child_env={"SHARED_BENIGN_SETTING": "same-value"},
@@ -1445,3 +1441,44 @@ def test_specialist_model_help_describes_generic_selected_backend_override() -> 
     subparsers = next(action for action in parser._actions if isinstance(action, argparse._SubParsersAction))
     help_text = " ".join(subparsers.choices["optimize"].format_help().split())
     assert "selected specialist backend" in help_text
+
+
+def _write_mcp_config(tmp_path: Path, servers: dict[str, Any]) -> str:
+    path = tmp_path / "mcp.json"
+    path.write_text(json.dumps({"mcpServers": servers}), encoding="utf-8")
+    return str(path)
+
+
+def test_load_mcp_servers_validates_without_naming_any_cli(tmp_path: Path) -> None:
+    """Both renderers read this list, so what it rejects is rejected for either CLI."""
+    servers = agent_cli_config.load_mcp_servers(
+        _write_mcp_config(
+            tmp_path,
+            {
+                "web": {"url": "https://mcp.example.invalid/x", "headers": {"Authorization": "Bearer ${TOKEN}"}},
+                "local": {"command": "node", "args": ["srv.js"], "env": {"MODE": "fast"}},
+            },
+        )
+    )
+
+    web, local = servers
+    assert web.is_http and web.url == "https://mcp.example.invalid/x"
+    assert web.headers == (("Authorization", "Bearer ${TOKEN}"),)
+    assert not local.is_http and local.command == "node" and local.args == ("srv.js",)
+    assert local.env == (("MODE", "fast"),)
+
+
+@pytest.mark.parametrize(
+    ("server", "message"),
+    [
+        ({"type": "sse", "url": "https://x.invalid"}, "unsupported transport"),
+        ({"url": "https://x.invalid", "command": "node", "type": "http", "extra": 1}, "unsupported HTTP fields"),
+        ({"url": "ftp://x.invalid"}, "invalid HTTP URL"),
+        ({"url": "https://user:pw@x.invalid"}, "embeds credentials"),
+        ({"command": "node", "args": [1]}, "args must be a list of strings"),
+        ({"command": "node", "env": {"LD_PRELOAD": "x"}}, "unsafe or invalid env entry"),
+    ],
+)
+def test_load_mcp_servers_rejects_what_no_cli_may_run(tmp_path: Path, server: dict[str, Any], message: str) -> None:
+    with pytest.raises(agent_cli_config.SpecialistAgentUnavailableError, match=message):
+        agent_cli_config.load_mcp_servers(_write_mcp_config(tmp_path, {"srv": server}))

@@ -2181,19 +2181,6 @@ class TestCoerceRuntimeValue:
         assert ta._coerce_runtime_value(value) == expected
 
 
-class TestBackendOrder:
-    def test_kernel_opt_backends_alias_does_not_enable_forge(self, monkeypatch):
-        monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
-        monkeypatch.delenv("CURSOR_API_KEY", raising=False)
-
-        assert krh._raw_kernel_backend_order() == ["geak"]
-
-    def test_kernel_opt_backends_alias_with_mixed_values_stays_geak_only(self, monkeypatch):
-        monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
-
-        assert krh._raw_kernel_backend_order() == ["geak"]
-
-
 class TestCandidateEnvAllowed:
     @pytest.mark.parametrize("name", ["AWS_SECRET_ACCESS_KEY", "ANTHROPIC_API_KEY"])
     def test_sensitive_env_blocked(self, name):
@@ -2573,7 +2560,8 @@ class TestRunGemmTuningHandler:
         assert "PYTORCH_TUNABLEOP_ENABLED" not in task.params["unset_envs"]
         assert captured["init"]["shared_state"] is state
 
-    def test_vllm_block_fp8_profile_capture_uses_standard_roofline(self, tmp_path, monkeypatch):
+    @pytest.mark.parametrize("roofline_status", ["succeeded", "recovered"])
+    def test_vllm_block_fp8_profile_capture_uses_standard_roofline(self, tmp_path, monkeypatch, roofline_status):
         import gzip
 
         from hyperloom.orchestrator.actions.executors import baseline as baseline_module
@@ -2620,7 +2608,7 @@ class TestRunGemmTuningHandler:
             async def __call__(self, ctx):
                 captured["task"] = ctx.task
                 return {
-                    "status": "succeeded",
+                    "status": roofline_status,
                     "steady_state_trace": str(steady_trace),
                 }
 
@@ -2969,8 +2957,6 @@ class TestRunGemmTuningHandler:
         )
 
     def test_explicit_tunableop_input_bypasses_vllm_shape_capture(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
-
         model = tmp_path / "model"
         model.mkdir()
         (model / "config.json").write_text(json.dumps({"hidden_size": 5120, "intermediate_size": 17408}))
@@ -3015,8 +3001,6 @@ class TestRunGemmTuningHandler:
         assert result["status"] == "ok"
 
     def test_vllm_dense_without_shapes_captures_tunableop_input(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
-
         model = tmp_path / "model"
         model.mkdir()
         (model / "config.json").write_text(
@@ -3083,8 +3067,6 @@ class TestRunGemmTuningHandler:
         assert result["status"] == "ok"
 
     def test_vllm_dense_capture_failure_stops_before_forge(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
-
         model = tmp_path / "model"
         model.mkdir()
         (model / "config.json").write_text(json.dumps({"hidden_size": 5120, "intermediate_size": 17408}))
@@ -3125,8 +3107,6 @@ class TestRunGemmTuningHandler:
 
     def test_vllm_block_fp8_reuses_roofline_trace_without_recapture(self, tmp_path, monkeypatch):
         import gzip
-
-        monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
 
         model = tmp_path / "model"
         model.mkdir()
@@ -3251,7 +3231,6 @@ class TestRunGemmTuningHandler:
 
         from hyperloom.orchestrator.actions.executors import roofline as roofline_module
 
-        monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
         model = tmp_path / "model"
         model.mkdir()
         (model / "config.json").write_text(
@@ -3596,8 +3575,6 @@ class TestRunGemmTuningHandler:
         assert reused["shape_count"] == 1
 
     def test_vllm_block_fp8_routes_profile_shapes_to_aiter(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
-
         model = tmp_path / "model"
         model.mkdir()
         (model / "config.json").write_text(
@@ -3679,7 +3656,6 @@ class TestRunGemmTuningHandler:
         assert result["status"] == "ok"
 
     def test_forge_uses_runtime_fp8_blockscale_for_aiter_backend(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
         model_dir = tmp_path / "qwen"
         model_dir.mkdir()
         state = SharedState(
@@ -3731,7 +3707,6 @@ class TestRunGemmTuningHandler:
         """run_gemm_tuning_handler appends a source-attribution audit row backfilled as a ``gemm_tuning:<engine>`` span."""
         from hyperloom.inference_optimizer.session.session_paths import gemm_tuning_steps_path
 
-        monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
         model_dir = tmp_path / "qwen"
         model_dir.mkdir()
         state = SharedState(
@@ -3781,7 +3756,6 @@ class TestRunGemmTuningHandler:
         assert "error_class" not in row["tuners_run"][0]
 
     def test_forge_uses_per_token_only_for_explicit_env(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
         model_dir = tmp_path / "qwen"
         model_dir.mkdir()
         state = SharedState(
@@ -3827,7 +3801,6 @@ class TestRunGemmTuningHandler:
 
     def test_forge_fallback_to_session_precision_when_no_quantization(self, tmp_path, monkeypatch):
         """When current_best has no --quantization, fall back to state.precision."""
-        monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
         model_dir = tmp_path / "moe"
         model_dir.mkdir()
         state = SharedState(

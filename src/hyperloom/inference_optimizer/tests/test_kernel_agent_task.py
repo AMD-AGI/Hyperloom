@@ -118,6 +118,15 @@ def test_kernel_agent_is_catalogued_as_a_coordinator_internal_lane_holder():
     assert "kernel_agent" not in ps.allowed_actions_for(ps.PHASE_KERNEL_AGENT)
 
 
+@pytest.mark.parametrize(("recorded", "env", "expected"), [("geak", "forge", True), ("forge", "", False)])
+def test_the_recorded_backend_routes_kernel_whatever_the_environment_says(coord, monkeypatch, recorded, env, expected):
+    """A resumed process may carry a different environment; the session keeps the backend it started on."""
+    monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", env)
+    coord.shared_state.kernel_optimizer = recorded
+
+    assert coord.phase_kernel.geak_enabled() is expected
+
+
 @pytest.mark.asyncio
 async def test_entering_kernel_enqueues_one_lane_holding_task_and_returns(coord, monkeypatch):
     """The entry hook only enqueues; the phase's work never runs on the tick that entered it."""

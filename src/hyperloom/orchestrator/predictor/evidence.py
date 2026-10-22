@@ -142,7 +142,7 @@ def parse_operators(text: str) -> dict[str, Any] | None:
 
 
 def p_item_index(text: str) -> dict[str, dict[str, Any]]:
-    """Operation name to its first P-item row: the args and call count ``hot_kernels_top15`` lacks."""
+    """Operation name to its first P-item row, which carries the operand args ``hot_kernels_top15`` lacks."""
     index: dict[str, dict[str, Any]] = {}
     for _, rows in _p_item_groups(text):
         for row in rows:
