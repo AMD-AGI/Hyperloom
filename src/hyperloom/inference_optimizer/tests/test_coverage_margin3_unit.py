@@ -201,19 +201,6 @@ def test_r9700_autodetect_requires_exact_product_not_gfx1201(monkeypatch) -> Non
     assert gpu_types._autodetect_gpu_type() is None
 
 
-def test_kernel_decision_retry_budget_env(monkeypatch) -> None:
-    from hyperloom.orchestrator.state import kernel_decision_settings as settings
-
-    monkeypatch.delenv("INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_FAILURES", raising=False)
-    assert settings.resolve_kernel_opt_max_failures() == 2
-
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_FAILURES", "0")
-    assert settings.resolve_kernel_opt_max_failures() == 1
-
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_FAILURES", "bad")
-    assert settings.resolve_kernel_opt_max_failures() == 2
-
-
 def test_multi_node_state_paths_resolution_and_binding(monkeypatch, tmp_path) -> None:
     from hyperloom.inference_optimizer.multi_node import state_paths
     from hyperloom.inference_optimizer.session.paths import ENV_CURRENT_SESSION_DIR

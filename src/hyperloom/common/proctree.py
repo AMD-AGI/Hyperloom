@@ -23,6 +23,8 @@ TERM_GRACE_SEC: float = 5.0
 #: How often a wait looks at what it is waiting for.
 _POLL_SEC: float = 0.05
 
+_PROC = Path("/proc")
+
 __all__ = [
     "TERM_GRACE_SEC",
     "ProcessId",
@@ -32,6 +34,7 @@ __all__ = [
     "group_alive",
     "group_members",
     "kill_tree",
+    "marked_pids",
     "proc_identity",
     "running",
     "signal_group",
@@ -79,7 +82,7 @@ def descendants(root_pid: int) -> list[ProcessId]:
         OSError: When ``/proc`` cannot be listed.
     """
     children: dict[int, list[ProcessId]] = {}
-    for entry in Path("/proc").iterdir():
+    for entry in _PROC.iterdir():
         if not entry.name.isdigit():
             continue
         pid = int(entry.name)
@@ -190,6 +193,37 @@ def signal_group(pgid: int, sig: int, *, what: str = "process group") -> bool | 
     return True
 
 
+def marked_pids(env_key: str, value: str) -> list[int]:
+    """Return every process whose environment carries ``env_key=value``.
+
+    A mark set in a child's environment is inherited by everything it starts, however that detaches, so it finds
+    what neither the process tree nor a process group still reaches.
+
+    Args:
+        env_key: The environment variable that carries the mark.
+        value: The mark to match exactly.
+
+    Returns:
+        list[int]: The marked pids, empty when ``/proc`` cannot be listed.
+    """
+    entry_bytes = f"{env_key}={value}".encode()
+    pids: list[int] = []
+    try:
+        entries = list(_PROC.iterdir())
+    except OSError:
+        return pids
+    for entry in entries:
+        if not entry.name.isdigit():
+            continue
+        try:
+            environ = (entry / "environ").read_bytes()
+        except OSError:
+            continue
+        if entry_bytes in environ.split(b"\0"):
+            pids.append(int(entry.name))
+    return pids
+
+
 def group_members(pgid: int) -> list[tuple[int, int, str]]:
     """Return the live members of one process group.
 
@@ -202,7 +236,7 @@ def group_members(pgid: int) -> list[tuple[int, int, str]]:
     """
     members: list[tuple[int, int, str]] = []
     try:
-        entries = list(Path("/proc").iterdir())
+        entries = list(_PROC.iterdir())
     except OSError:
         return members
     for entry in entries:

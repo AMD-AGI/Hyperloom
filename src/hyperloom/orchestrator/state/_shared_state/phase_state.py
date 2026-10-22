@@ -277,7 +277,7 @@ class _PhaseStateMixin:
             self.specialist_rounds = self.specialist_rounds[-cap:]
 
     def record_attempt(self, attempt: dict[str, Any]) -> None:
-        """Append one measured attempt; stamps the cycle the dryness judgment filters on."""
+        """Append one resolved attempt; stamps the cycle the dryness judgment filters on."""
         row = dict(attempt)
         row.setdefault("cycle", int(self.macro_cycle or 0))
         self.attempts.append(row)

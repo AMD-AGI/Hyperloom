@@ -13,9 +13,9 @@ from importlib.resources import files
 from typing import Any, Mapping
 
 _CONTRACT_PACKAGE = "hyperloom.inference_optimizer.breakdown"
-CURRENT_WORKFLOW_CONTRACT_VERSION = "hyperloom.workflow_evaluation.v2"
-_CONTRACT_PATH = "contracts/workflow_contract.v2.json"
-_SCHEMA_PATH = "contracts/session_breakdown.v6.workflow-evaluation.v2.schema.json"
+CURRENT_WORKFLOW_CONTRACT_VERSION = "hyperloom.workflow_evaluation.v3"
+_CONTRACT_PATH = "contracts/workflow_contract.v3.json"
+_SCHEMA_PATH = "contracts/session_breakdown.v6.workflow-evaluation.v3.schema.json"
 
 
 @lru_cache(maxsize=1)

@@ -293,6 +293,19 @@ value. The observed cap and perf level are recorded in the platform
 fingerprint whether or not they are asserted. Neither can be checked on a
 multi-node session, so asserting one there refuses.
 
+Node Power Management (NPM, MI350 series) is the node-wide counterpart: when it
+is enabled, firmware holds the sum of every card's power to a node limit and
+moves power between cards, so a card's throughput also depends on what the
+other cards draw. Its state and the limit firmware enforces, as
+`amd-smi node -p` reports them, are recorded in the same record under `node`
+(left out where `amd-smi` has no `node` command, before ROCm 7.2).
+`--node-power-management enabled|disabled` and `--node-power-limit-w` assert
+them the same way, refusing a launch or resume whose node differs or cannot be
+read. They are only ever asserted: NPM is enabled and its limit set on the
+BMC, and `--apply-gpu-power-settings` never changes them. The enforced limit
+can sit below the one the BMC was asked for, since firmware clamps it to the
+node's maximum, so assert the value `amd-smi` reports.
+
 ### Applying the power settings (opt-in)
 
 `--apply-gpu-power-settings` permits the session to set the declared
@@ -531,8 +544,11 @@ look very different from Orchestration's side:
   taking a turn in it.
 - **On a GEAK win**, the same `kernel_agent` task re-measures the candidate on
   the orchestrator's own harness under the lanes it already holds, and writes
-  the headline from that measurement before it returns. KERNEL leaves once the
-  task settles, or when its phase budget runs out.
+  the headline from that measurement before it returns. A candidate whose
+  launch config, applied over `current_best`, launches what `current_best`
+  already runs, and that carries no loadable overlay, is settled as
+  `no_material` without being measured. KERNEL leaves once the task settles, or
+  when its phase budget runs out.
 - **Forge (`KERNEL_OPT_BACKEND_ORDER=forge`)**: the phase runs the deterministic
   KERNEL-entry ladder — GEMM tuning, then the fusion lane, then the kernel
   rewrite controller, which selects its own operators and publishes patches
@@ -575,12 +591,21 @@ default. See the [AgentX workflow](../how-to/optimize.md#optimize-an-agentx-work
 for supported workload controls.
 
 Results update `last_conc_sweep` and feed the final report and breakdown.
-The phase exits on `sweep_done` (or `sweep_failed`). While the sweep it
+A ladder that fails closes the phase as `sweep_failed`; one that finishes
+(`sweep_done`) loops back or closes on the reason below. While the sweep it
 enqueued is still running, SWEEP's own budget and cap wait for the budget the
 sweep was granted (plus its lease grace); the session deadline does not. A
 sweep the orchestrator cancels stops its ladder at once and records
 `cancelled`, so the phase closes on whatever ordered the cancel rather than on
 `sweep_failed`.
+
+When SWEEP does not loop back, the close names what refused the next
+macro-cycle: `target_reached`, `global_converged` (consecutive cycles without
+gain, or every direction saturated) or `time_exhausted` (less session time
+left than the reloop floor). The refusing rule is kept in the transition
+evidence as `reloop_blocked`. A run without `FRAMEWORK_AGENT` has no next
+cycle to refuse, so it closes on the ladder's own reason unless the target was
+reached.
 
 ## CLOSE
 

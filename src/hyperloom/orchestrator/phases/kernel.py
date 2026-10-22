@@ -10,7 +10,6 @@ import json
 import logging as _logging
 import os
 import shlex
-import signal
 import subprocess
 import sys
 import time
@@ -254,7 +253,7 @@ class KernelExitFacts:
 class KernelPhase(CoordinatorCollaborator):
     """KERNEL_AGENT phase handler: drives kernel-level optimization tasks."""
 
-    # Relative-change floor for the pre-GEAK reprofile: effectively "any change", absorbing float noise.
+    # Relative-change floor for the Forge kernel-entry reprofile: effectively "any change", absorbing float noise.
     _REPROFILE_CHANGE_TOL: float = 1e-5
 
     async def exit_facts(self) -> KernelExitFacts:
@@ -346,8 +345,7 @@ class KernelPhase(CoordinatorCollaborator):
 
     def _profile_workload_changed(self) -> bool:
         """Whether the latest trace predates the active serving workload."""
-        status = str(self.shared_state.last_profile_status or "").strip().lower()
-        if status and status != "succeeded":
+        if self.shared_state.last_profile_status and not self.shared_state.profile_trace_usable():
             return True
         recorded = self.shared_state.last_profile_workload
         if not isinstance(recorded, dict) or not recorded:
@@ -442,7 +440,6 @@ class KernelPhase(CoordinatorCollaborator):
         )
         if after > 0 and snapshot_landed:
             self.shared_state.last_roofline_tput = after
-            self.shared_state.last_profile_status = "succeeded"
             # Record the workload (incl. serving_config) that this trace reflects; _profile_config_changed derives the
             # config signature from it, so last_profile_args stays the plain-args field it is everywhere else.
             self.shared_state.last_profile_workload = self.shared_state.profile_workload_context()
@@ -464,9 +461,7 @@ class KernelPhase(CoordinatorCollaborator):
 
     def geak_enabled(self) -> bool:
         """Whether the KERNEL_AGENT phase is delegated to the GEAK e2e optimizer."""
-        from ..kernel.request_handlers import geak_selected
-
-        return geak_selected()
+        return self.shared_state.kernel_optimizer == "geak"
 
     def timeline(self) -> Any:
         """The in-flight kernel timeline recorder, or ``None``."""
@@ -1226,6 +1221,51 @@ class KernelPhase(CoordinatorCollaborator):
         benchmark_mode = str(self.shared_state.benchmark_mode or "").strip()
         return is_agentx_mode(benchmark_mode) if benchmark_mode else agentx_enabled()
 
+    async def _launch_geak_runner(
+        self, handoff_path: Path, *, timeouts: tuple[int, int, bool], from_phase: str
+    ) -> subprocess.CompletedProcess:
+        """Run geak_runner on ``handoff_path`` under :meth:`_geak_timeouts`; raise TimeoutExpired at its kill cap.
+
+        geak_runner gives run_e2e its own SIGTERM grace to flush result.json before ``runner_timeout`` +
+        ``GEAK_FLUSH_GRACE_S``, inside the kill cap. The launch marks the run, so whatever it left running is
+        reaped when it returns, however it detached.
+        """
+        from ..actions.executors._subprocess_kill import REAP_MARK_ENV, run_with_session_kill
+
+        runner_timeout, kill_timeout, budget_known = timeouts
+        cmd = [
+            sys.executable,
+            "-m",
+            _GEAK_RUNNER_MODULE,
+            str(handoff_path),
+            str(handoff_path.parent),
+            "--timeout-s",
+            str(runner_timeout),
+        ]
+        log.info(
+            "KERNEL entry: delegating to GEAK e2e (from=%s) runner_timeout=%ds kill_timeout=%ds budget_known=%s cmd=%s",
+            from_phase or "<unknown>",
+            runner_timeout,
+            kill_timeout,
+            budget_known,
+            " ".join(cmd),
+        )
+        # GEAK must search and gate on the axis this session keeps candidates on: a kernel accepted on another
+        # axis need not move that one. geak_metric_axis owns the mapping and its rationale.
+        metric, _ = geak_metric_axis(
+            benchmark_mode=str(self.shared_state.benchmark_mode or ""),
+            grading=self.shared_state.grading or None,
+        )
+        runner_env = dict(os.environ)
+        runner_env["E2E_METRIC"] = metric
+        runner_env[REAP_MARK_ENV] = uuid.uuid4().hex
+        # Only injection point needed for the whole GEAK chain: geak_runner and run_e2e both hand their full
+        # environment to the child, so the tag reaches the Claude CLI that actually spends.
+        from hyperloom.common.llm_attribution import inject_env
+
+        inject_env(runner_env, component="geak", operation="optimize_kernel")
+        return await asyncio.to_thread(run_with_session_kill, cmd, env=runner_env, timeout=kill_timeout)
+
     async def _run_geak_kernel_phase(self, *, from_phase: str) -> None:
         """Delegate the KERNEL_AGENT phase to GEAK (one whole-pipeline e2e run)."""
         state = self.shared_state
@@ -1556,6 +1596,7 @@ class KernelPhase(CoordinatorCollaborator):
             state.save(self.session_dir)
             return True
 
+        handoff_cards = _resolve_handoff_physical_gpus(gpu_ids=_gpu_ids, gpu_ids_space=_gpu_ids_space, gpu_pin=gpu_pin)
         # Crash-recovery: a validated result.json written before a coordinator crash is promoted on resume, guarded by
         # ``_geak_win_already_recorded`` so a prior cycle's result.json does not short-circuit a fresh entry.
         result_path = out_dir / "result.json"
@@ -1568,10 +1609,9 @@ class KernelPhase(CoordinatorCollaborator):
             )
             if not _promote_recovered_result(recovered, recovered_from="existing_result_json"):
                 return
-            await self._revalidate_geak_candidate(reason="geak_e2e_win_recovered")
+            await self._revalidate_geak_candidate(reason="geak_e2e_win_recovered", handoff_cards=handoff_cards)
             return
 
-        handoff_cards = _resolve_handoff_physical_gpus(gpu_ids=_gpu_ids, gpu_ids_space=_gpu_ids_space, gpu_pin=gpu_pin)
         still_busy = await self._free_gpus_for_geak(handoff_cards)
         if still_busy:
             _finish_skip({"status": "error", "error_class": "gpus_busy_at_handoff", "error": still_busy})
@@ -1602,80 +1642,12 @@ class KernelPhase(CoordinatorCollaborator):
             )
             return
 
-        cmd = [
-            sys.executable,
-            "-m",
-            _GEAK_RUNNER_MODULE,
-            str(handoff_path),
-            str(out_dir),
-            "--timeout-s",
-            str(runner_timeout),
-        ]
-        log.info(
-            "KERNEL entry: delegating to GEAK e2e (from=%s) runner_timeout=%ds kill_timeout=%ds budget_known=%s cmd=%s",
-            from_phase or "<unknown>",
-            runner_timeout,
-            kill_timeout,
-            budget_known,
-            " ".join(cmd),
-        )
-
-        # Run in its own process group so a timeout can SIGTERM the whole runner -> run_e2e -> vllm/node tree (grace
-        # to flush result.json), then SIGKILL, instead of orphaning run_e2e + its servers.
-        term_grace = env_int("GEAK_TERM_GRACE_S", default=180)
-
-        # GEAK must search and gate on the axis this session keeps candidates on: a kernel accepted on another
-        # axis need not move that one. geak_metric_axis owns the mapping and its rationale.
-        _geak_e2e_metric, _ = geak_metric_axis(
-            benchmark_mode=str(state.benchmark_mode or ""),
-            grading=state.grading or None,
-        )
-
-        def _run() -> subprocess.CompletedProcess:
-            runner_env = dict(os.environ)
-            runner_env["E2E_METRIC"] = _geak_e2e_metric
-            # Only injection point needed for the whole GEAK chain: geak_runner and run_e2e both hand their full
-            # environment to the child, so the tag reaches the Claude CLI that actually spends.
-            from hyperloom.common.llm_attribution import inject_env
-
-            inject_env(runner_env, component="geak", operation="optimize_kernel")
-            p = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                env=runner_env,
-                start_new_session=True,
-            )
-
-            def _killpg(sig: int) -> None:
-                try:
-                    os.killpg(os.getpgid(p.pid), sig)
-                except (ProcessLookupError, PermissionError):
-                    # Process already exited; nothing to signal.
-                    pass
-
-            try:
-                out, err = p.communicate(timeout=kill_timeout)
-            except subprocess.TimeoutExpired:
-                _killpg(signal.SIGTERM)
-                try:
-                    out, err = p.communicate(timeout=term_grace)
-                except subprocess.TimeoutExpired:
-                    _killpg(signal.SIGKILL)
-                    out, err = p.communicate()
-                raise subprocess.TimeoutExpired(
-                    cmd,
-                    kill_timeout,
-                    output=out,
-                    stderr=err,
-                )
-            return subprocess.CompletedProcess(cmd, p.returncode, out, err)
-
         runner_started_at = datetime.now(timezone.utc).isoformat()
         runner_started_monotonic = time.monotonic()
         try:
-            proc = await asyncio.to_thread(_run)
+            proc = await self._launch_geak_runner(
+                handoff_path, timeouts=(runner_timeout, kill_timeout, budget_known), from_phase=from_phase
+            )
             stderr_tail = (proc.stderr or "")[-2000:]
             if proc.returncode != 0:
                 log.warning("GEAK runner rc=%s: %s", proc.returncode, stderr_tail)
@@ -1700,8 +1672,9 @@ class KernelPhase(CoordinatorCollaborator):
                     kill_timeout_s=kill_timeout,
                 ):
                     return
-                await self._wait_for_gpus_before_rebench(handoff_cards)
-                await self._revalidate_geak_candidate(reason="geak_e2e_win_sigterm_recovered")
+                await self._revalidate_geak_candidate(
+                    reason="geak_e2e_win_sigterm_recovered", handoff_cards=handoff_cards
+                )
                 return
             _finish_skip(
                 {
@@ -1803,13 +1776,11 @@ class KernelPhase(CoordinatorCollaborator):
         self._record_geak_kernel_journey(result)
         # The same-harness rebench is the only path that writes the headline.
         if str(result.get("status") or "") == "ok":
-            await self._wait_for_gpus_before_rebench(handoff_cards)
-            await self._revalidate_geak_candidate(reason="geak_e2e_win")
+            await self._revalidate_geak_candidate(reason="geak_e2e_win", handoff_cards=handoff_cards)
         elif _geak_has_accepted_kernel(result):
             # A no_gain headline over an accepted, parity-checked kernel still deserves the measurement — the rebench
             # is what decides, and without it the kernel is lost with no number attached to it.
-            await self._wait_for_gpus_before_rebench(handoff_cards)
-            await self._revalidate_geak_candidate(reason="geak_e2e_accepted_kernel")
+            await self._revalidate_geak_candidate(reason="geak_e2e_accepted_kernel", handoff_cards=handoff_cards)
         self._coord.phase_machine.record_phase_entry_evidence(
             geak={
                 "status": result.get("status"),
@@ -1837,21 +1808,19 @@ class KernelPhase(CoordinatorCollaborator):
         )
         state.save(self.session_dir)
 
-    async def _revalidate_geak_candidate(self, *, reason: str) -> None:
+    async def _revalidate_geak_candidate(self, *, reason: str, handoff_cards: list[int] | None) -> None:
         """Measure the GEAK candidate on the orchestrator harness and settle its verdict.
 
         The 2b rebench runs as a step of the ``kernel_agent`` task, under the
         lanes it holds, and its result goes through the same promotion a
         dispatched explore would. A candidate the grid cannot carry goes to the
-        GEAK-harness replay (2a) instead.
+        GEAK-harness replay (2a) instead. ``handoff_cards`` are drained only
+        when a measurement follows.
         """
         state = self.shared_state
         params = self._coord.writeback.geak_rebench_params(reason=reason)
         from .geak_native_revalidation import ORIGIN, finish_invalid_source, revalidate_source
 
-        if params.get("origin") == ORIGIN:
-            await revalidate_source(self._coord, params)
-            return
         if params.get("reason") == "geak_native_source_invalid":
             finish_invalid_source(self._coord, str(params["error"]))
             return
@@ -1859,9 +1828,12 @@ class KernelPhase(CoordinatorCollaborator):
         if skip_reason == "geak_invalid_config":
             return
         if skip_reason == "geak_no_material":
-            state.geak_result = {**state.geak_result, "revalidation_status": "no_material"}
-            state.geak_pending = {}
+            self._coord.writeback.settle_geak_no_material()
             state.save(self.session_dir)
+            return
+        await self._wait_for_gpus_before_rebench(handoff_cards)
+        if params.get("origin") == ORIGIN:
+            await revalidate_source(self._coord, params)
             return
         if skip_reason is not None:
             await self._revalidate_on_geak_harness(decline_reason=str(skip_reason))
@@ -3936,7 +3908,6 @@ class KernelPhase(CoordinatorCollaborator):
                 "skipped_count": 0,
             }
         self._record_kernel_rewrite_controller_timeline(result)
-        self.shared_state.kernel_optimizer = "forge"
         self.shared_state.kernel_rewrite_controller_result = result
         # The summary rides a ``response`` message the inbox dumps raw once.
         _integration = result.get("integration")

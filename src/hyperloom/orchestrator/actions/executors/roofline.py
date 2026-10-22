@@ -1173,13 +1173,14 @@ class RooflineExecutor:
         attribution_degraded: bool,
         started: float,
     ) -> dict[str, Any]:
-        """Record the pair the action concluded from, close the event as succeeded and build the result."""
+        """Record the concluded pair, close the event and build the result; ``recovered`` if the trace was salvaged."""
         profile, analysis = analysed.profile, analysed.analysis
+        status = "succeeded" if profile.warning is None else "recovered"
         trace_path = str(analysis.payload["trace_input"])
         hot = _hot_kernels(analysis.result)
         self.shared_state.last_profile_trace = trace_path
         self.shared_state.last_profile_launch_evidence_path = str(profile.result.get("launch_evidence_path") or "")
-        self.shared_state.last_profile_status = "succeeded"
+        self.shared_state.last_profile_status = status
         self.shared_state.record_profile_workload(profile.params, arm=analysis.payload["roofline_arm"])
         self.shared_state.record_trace_analyze(analysis.payload, analysis.result)
         cached = self.shared_state.last_trace_analyze or {}
@@ -1198,7 +1199,7 @@ class RooflineExecutor:
             duration_s=time.monotonic() - started,
         )
         result = {
-            "status": "succeeded",
+            "status": status,
             "executed_at_iso": _now_iso(),
             "snapshot_id": cached.get("roofline_snapshot_id"),
             "last_profile_trace": trace_path,
@@ -1209,10 +1210,8 @@ class RooflineExecutor:
             # True when trace_analyze produced 0 hot kernels because cuda-graph folding stripped per-kernel
             # attribution.
             "kernel_attribution_degraded": attribution_degraded,
+            **({"profile_warning": profile.warning} if profile.warning is not None else {}),
         }
-        if profile.warning is not None:
-            result["profile_recovered"] = True
-            result["profile_warning"] = profile.warning
         if recorder is not None:
             snapshots = self.shared_state.roofline_snapshots
             recorder.finish_succeeded(
