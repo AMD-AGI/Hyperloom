@@ -878,6 +878,63 @@ class _Probe(NamedTuple):
     verdict: bool | None
     detail: str = ""
     timed_out: bool = False
+    device_init_failed: bool = False
+
+
+# A probe that reached torch and then could not initialise a single device is not an unclear verdict: the serving
+# process dies on the same import. These are the messages torch raises when the ROCm/HIP runtime enumerates no
+# usable device (the ROCm build keeps torch's CUDA wording).
+_DEVICE_INIT_FAILURE_MARKERS = (
+    "no cuda gpus are available",
+    "no rocm-capable device is detected",
+    "cuda driver initialization failed",
+    "invalid device ordinal",
+)
+
+
+def _is_device_init_failure(stderr: str | None) -> bool:
+    """Whether a probe's stderr shows torch finding no usable GPU."""
+    text = (stderr or "").lower()
+    return any(marker in text for marker in _DEVICE_INIT_FAILURE_MARKERS)
+
+
+def _rocm_smi_visible_gpus() -> tuple[int | None, str | None]:
+    """GPU count ``rocm-smi`` reports, else ``(None, skip_reason)`` when it cannot answer."""
+    try:
+        proc = subprocess.run(
+            ["rocm-smi", "--showid"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, PermissionError, OSError):
+        return None, "rocm_smi_unavailable"
+    if proc.returncode != 0:
+        return None, "rocm_smi_failed"
+    # rocm-smi --showid emits multiple GPU[ lines per GPU; deduplicate by GPU index.
+    visible_indices: set[str] = set()
+    for line in (proc.stdout or "").splitlines():
+        stripped = line.strip()
+        if stripped.startswith("GPU["):
+            idx, _, _ = stripped[4:].partition("]")
+            if idx:
+                visible_indices.add(idx)
+    return len(visible_indices), None
+
+
+def _device_visibility_contradiction(python_exe: str) -> str:
+    """Name the rocm-smi-sees-N / torch-sees-none split, with the masks in force."""
+    visible, _skip_reason = _rocm_smi_visible_gpus()
+    masks = (
+        ", ".join(
+            f"{name}={os.environ[name]!r}"
+            for name in ("ROCR_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES")
+            if name in os.environ
+        )
+        or "no visible-device mask set"
+    )
+    seen = "rocm-smi could not be read" if visible is None else f"rocm-smi reports {visible} GPU(s)"
+    return f"{seen} while torch in {python_exe} initialises none; masks in force: {masks}."
 
 
 def _rocm_evidence(framework: str) -> str:
@@ -941,12 +998,16 @@ def _probe_rocm_build(framework: str, python_exe: str) -> _Probe:
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         return _Probe(None, _probe_failure_detail(exc), isinstance(exc, subprocess.TimeoutExpired))
-    detail = _probe_stderr_tail(getattr(proc, "stderr", ""))
+    stderr = getattr(proc, "stderr", "")
+    detail = _probe_stderr_tail(stderr)
     if proc.returncode == 0:
         return _Probe(True, detail)
     # Absent torch (3) and a signal death (negative rc, which a broken ROCm stack can trigger on ``import torch``)
-    # both mean no verdict was reached.
-    return _Probe(False, detail) if proc.returncode == 1 else _Probe(None, detail)
+    # both mean no verdict was reached -- unless the traceback shows torch initialising zero devices, which the
+    # server launch will reproduce verbatim.
+    if proc.returncode == 1:
+        return _Probe(False, detail)
+    return _Probe(None, detail, device_init_failed=_is_device_init_failure(stderr))
 
 
 def _framework_importable(framework: str, python_exe: str) -> _Probe:
@@ -985,7 +1046,12 @@ def _resolve_framework_build(framework: str, interpreters: list[str]) -> tuple[s
         if probe.timed_out:
             return inconclusive or (python_exe, probe)
         if probe.verdict is None:
-            inconclusive = inconclusive or (python_exe, probe)
+            # A reproduced device-init failure outranks a merely unclear probe: it is the one verdict that names
+            # why the server will die.
+            if probe.device_init_failed and not (inconclusive and inconclusive[1].device_init_failed):
+                inconclusive = (python_exe, probe)
+            else:
+                inconclusive = inconclusive or (python_exe, probe)
         else:
             refuted = refuted or (python_exe, probe)
     return inconclusive or refuted or (None, missing)
@@ -1054,6 +1120,23 @@ def _report_framework_probe(
             "target": framework,
             "detail": {"probe_interpreter": found, "rocm_verified": True},
         }
+    if found and probe.device_init_failed:
+        # Not "could not verify": the probe reproduced, in the very interpreter that will launch the server, the
+        # device-init failure the server dies on. No TP value, retry or config change repairs it, so the run stops
+        # here with the traceback instead of admitting a baseline that cannot start.
+        contradiction = _device_visibility_contradiction(found)
+        print(
+            f"\nERROR: {framework} is importable ({found}) but torch there cannot initialize any GPU."
+            f"{_probe_detail_block(probe.detail)}\n\n"
+            f"{contradiction}\n"
+            "The serving process imports the same stack, so it would die the same way\n"
+            "before its port is up. This is a node or container device-access problem\n"
+            "(device files, ROCr init, visible-device masking or partitioning), not a\n"
+            "benchmark-configuration one; restore GPU access on this host, then retry.\n\n"
+            f"To proceed anyway, set {SKIP_FRAMEWORK_CHECK_ENV}=1.",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
     if found and probe.verdict is None:
         print(
             f"Preflight: WARNING — {framework} is importable ({found}) but could not verify a ROCm build "
@@ -1442,34 +1525,13 @@ def _check_gpu_visibility() -> dict[str, Any]:
             "skip_reason": "external_multi_node",
             "detail": {"visible": None, "tp_requested": None, "warn": None},
         }
-    try:
-        proc = subprocess.run(
-            ["rocm-smi", "--showid"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired, PermissionError, OSError):
+    visible, skip_reason = _rocm_smi_visible_gpus()
+    if visible is None:
         return {
             "status": "skipped",
-            "skip_reason": "rocm_smi_unavailable",
+            "skip_reason": skip_reason,
             "detail": {"visible": None, "tp_requested": None, "warn": None},
         }
-    if proc.returncode != 0:
-        return {
-            "status": "skipped",
-            "skip_reason": "rocm_smi_failed",
-            "detail": {"visible": None, "tp_requested": None, "warn": None},
-        }
-    # rocm-smi --showid emits multiple GPU[ lines per GPU; deduplicate by GPU index.
-    visible_indices: set[str] = set()
-    for line in (proc.stdout or "").splitlines():
-        stripped = line.strip()
-        if stripped.startswith("GPU["):
-            idx, _, _ = stripped[4:].partition("]")
-            if idx:
-                visible_indices.add(idx)
-    visible = len(visible_indices)
     try:
         wanted = int(os.environ.get("TP", "1") or "1")
     except ValueError:

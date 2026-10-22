@@ -411,6 +411,114 @@ def test_inconclusive_warning_surfaces_the_probe_stderr_tail(monkeypatch, capsys
     assert "noise-0" not in out
 
 
+_DEVICE_INIT_TRACEBACK = (
+    "Traceback (most recent call last):\n"
+    '  File "<string>", line 7, in verdict\n'
+    "    torch._C._cuda_init()\n"
+    "RuntimeError: No CUDA GPUs are available\n"
+)
+
+
+def test_a_reproduced_device_init_failure_blocks_the_run(monkeypatch, capsys):
+    """torch initialising zero devices is a verdict, not an unclear probe: the server dies the same way."""
+    _dying_rocm_probe(monkeypatch, _DEVICE_INIT_TRACEBACK, returncode=3)
+
+    with pytest.raises(SystemExit) as excinfo:
+        preflight._check_serving_framework(_args("vllm"), "/usr/bin/python3")
+
+    assert excinfo.value.code == 2
+    err = capsys.readouterr().err
+    assert "cannot initialize any GPU" in err
+    # The traceback the baseline would otherwise only show as a dead server.
+    assert "No CUDA GPUs are available" in err
+    assert _SKIP_ENV in err
+
+
+def test_the_blocking_message_names_the_rocm_smi_contradiction(monkeypatch, capsys):
+    """rocm-smi sees cards while torch sees none: that split is the operator's actual signal."""
+    _dying_rocm_probe(monkeypatch, _DEVICE_INIT_TRACEBACK, returncode=3)
+    monkeypatch.setattr(preflight, "_rocm_smi_visible_gpus", lambda: (8, None))
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "0,1,2,3")
+
+    with pytest.raises(SystemExit):
+        preflight._check_serving_framework(_args("vllm"), "/usr/bin/python3")
+
+    err = capsys.readouterr().err
+    assert "rocm-smi reports 8 GPU(s)" in err
+    assert "ROCR_VISIBLE_DEVICES='0,1,2,3'" in err
+    assert "device-access" in err
+
+
+def test_an_unreadable_rocm_smi_still_blocks(monkeypatch, capsys):
+    """The contradiction is a diagnostic extra; a missing rocm-smi must not turn the block into a warning."""
+    _dying_rocm_probe(monkeypatch, _DEVICE_INIT_TRACEBACK, returncode=3)
+    monkeypatch.setattr(preflight, "_rocm_smi_visible_gpus", lambda: (None, "rocm_smi_unavailable"))
+
+    with pytest.raises(SystemExit) as excinfo:
+        preflight._check_serving_framework(_args("vllm"), "/usr/bin/python3")
+
+    assert excinfo.value.code == 2
+    err = capsys.readouterr().err
+    assert "rocm-smi could not be read" in err
+    assert "no visible-device mask set" in err
+
+
+def test_an_unrelated_broken_stack_still_only_warns(monkeypatch, capsys):
+    """A probe that never reached a device says nothing about devices, so it keeps warning."""
+    _dying_rocm_probe(monkeypatch, "ImportError: libamdhip64.so: cannot open shared object file")
+
+    result = preflight._check_serving_framework(_args("sglang"), "/usr/bin/python3")
+
+    assert result["status"] == "warned"
+    assert "could not verify" in capsys.readouterr().out
+
+
+def test_the_escape_hatch_still_clears_a_device_init_failure(monkeypatch):
+    """The block must stay skippable, like every other framework verdict."""
+    monkeypatch.setenv(_SKIP_ENV, "1")
+    _refuse_probe(monkeypatch)
+
+    result = preflight._check_serving_framework(_args("vllm"), "/usr/bin/python3")
+
+    assert result["status"] == "skipped"
+
+
+@pytest.mark.parametrize("returncode", [3, -11])
+def test_probe_flags_a_device_init_failure_on_any_unclear_exit(monkeypatch, returncode):
+    """Both a caught exception (rc 3) and a signal death carry the device-init traceback."""
+
+    class _Proc:
+        def __init__(self, rc, err):
+            self.returncode = rc
+            self.stdout = ""
+            self.stderr = err
+
+    monkeypatch.setattr(preflight.subprocess, "run", lambda *_a, **_k: _Proc(returncode, _DEVICE_INIT_TRACEBACK))
+    probe = preflight._probe_rocm_build("vllm", "/usr/bin/python3")
+
+    assert probe.verdict is None
+    assert probe.device_init_failed is True
+
+    monkeypatch.setattr(preflight.subprocess, "run", lambda *_a, **_k: _Proc(returncode, "ImportError: no libhip"))
+
+    assert preflight._probe_rocm_build("vllm", "/usr/bin/python3").device_init_failed is False
+
+
+def test_a_device_init_failure_outranks_a_merely_unclear_candidate(isolated_vllm, monkeypatch):
+    """Among several candidates, the one that named why the server dies is the one to report."""
+    monkeypatch.setattr(preflight, "_framework_importable", lambda _fw, _py: preflight._Probe(True))
+    probes = {
+        "/usr/bin/python3": preflight._Probe(None, "unclear"),
+        isolated_vllm: preflight._Probe(None, _DEVICE_INIT_TRACEBACK, device_init_failed=True),
+    }
+    monkeypatch.setattr(preflight, "_probe_rocm_build", lambda _fw, py: probes[py])
+
+    found, probe = preflight._resolve_framework_build("vllm", ["/usr/bin/python3", isolated_vllm])
+
+    assert found == isolated_vllm
+    assert probe.device_init_failed is True
+
+
 def test_probe_stderr_tail_is_bounded():
     """A ROCm import traceback can be enormous; the warning must stay readable."""
     tail = preflight._probe_stderr_tail("\n".join(f"line-{i} " + "x" * 400 for i in range(500)))
