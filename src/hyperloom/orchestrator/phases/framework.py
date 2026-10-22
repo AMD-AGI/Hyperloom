@@ -29,7 +29,7 @@ if TYPE_CHECKING:
     from ..state.task_registry import Task
     from .machine import Transition
 from ..loop.proposals import PendingProposal, integrate_review_in_flight, record_proposal
-from hyperloom.inference_optimizer.grid_server_args import dedupe_extra_server_args
+from hyperloom.inference_optimizer.grid_server_args import ARGS_MODE_APPEND, ARGS_MODE_REPLACE, dedupe_extra_server_args
 from hyperloom.inference_optimizer.grid_server_args import (
     merge_server_args,
     tokenize_server_args_preserving_json,
@@ -46,6 +46,46 @@ log = _logging.getLogger(__name__)
 _LOCAL_EXPLORE_MAX_ATTEMPTS: int = 3
 # Unified authored-lane max attempts (apply-failure retries + Critic reauthor).
 _AUTHORED_LANE_MAX_ATTEMPTS: int = 3
+# Share of changed lines a proposed patch repeats from an already-measured one before the review is told. Set where
+# two ports of one upstream change land and a follow-up to a measured patch does not; it informs, never refuses.
+_PATCH_OVERLAP_MIN_RATIO: float = 0.5
+
+
+#: The one ledger outcome that reports a round which reached a measurement. The
+#: others name a round that ended before one: a patch that would not apply, a
+#: server that failed its smoke, a parity check that could not conclude. Their
+#: ``tps_delta_pct`` is the zero the record defaults to, not a result.
+_LEDGER_OUTCOME_MEASURED: str = "integrated"
+
+
+def _measured_short_of_keep(rec: dict[str, Any], keep_threshold_pct: float) -> bool:
+    """Whether a ledger record is a completed measurement that did not clear the KEEP bar.
+
+    Separating this from "the round never measured" is what keeps a direction
+    alive: a GLM-5.3 session spent three rounds on enabling the prefix cache and
+    all three died before the server was serving, which says nothing about the
+    idea --- and the idea was worth 94% of the run's prefill. Recorded as a
+    result, it would have retired a correct direction permanently.
+    """
+    if str(rec.get("outcome") or "") != _LEDGER_OUTCOME_MEASURED:
+        return False
+    return to_float(rec.get("tps_delta_pct"), default=0.0) < keep_threshold_pct
+
+
+def _measured_on_this_stack(rec: dict[str, Any], state: Any) -> bool:
+    """Whether a ledger record's throughput was measured on the model, GPU and precision running now.
+
+    The ledger is one file under the workspace root, shared by every session
+    that root has ever served, and a config's throughput is a property of the
+    stack as much as of the config: a lever worth +0.4% on Qwen3-8B/MI300X says
+    nothing about GLM-5.3 on MI355X. The accuracy gate above this one matches
+    on the fingerprint alone because an accuracy regression travels with the
+    config; a throughput number does not.
+    """
+    return all(
+        str(rec.get(field) or "").strip() == str(getattr(state, field, "") or "").strip()
+        for field in ("model_class", "gpu_type", "precision")
+    )
 
 
 def _framework_config_levers_from_done(
@@ -126,12 +166,54 @@ def _framework_config_levers_from_done(
                         continue
                 else:
                     extra_server_args = parsed_args[0]
-        if extra_server_args or extra_envs:
+        controls = _lever_controls(entry)
+        if extra_server_args or extra_envs or controls.get("remove_args") or controls.get("unset_envs"):
             return {
+                "name": str(entry.get("name") or ""),
                 "extra_server_args": extra_server_args,
                 "extra_envs": extra_envs,
+                **controls,
             }
     return {}
+
+
+def _lever_controls(entry: dict[str, Any]) -> dict[str, Any]:
+    """The ablation half of a config lever: what it drops, not only what it appends.
+
+    A proposal that only removes a flag -- the way a baked-in
+    ``--disable-radix-cache`` is turned off -- carries no ``extra_args`` at all,
+    so a reader that looks only at what is appended sees an empty lever and
+    walks past it to the next proposal. That is how the agentic GLM-5.3 session
+    launched one proposal's name against another proposal's arguments.
+    """
+    remove_args = [text for text in (str(a).strip() for a in (entry.get("remove_args") or [])) if text]
+    unset_envs = [text for text in (str(e).strip() for e in (entry.get("unset_envs") or [])) if text]
+    mode = str(entry.get("args_mode") or ARGS_MODE_APPEND).strip().lower()
+    return {
+        "remove_args": remove_args,
+        "unset_envs": unset_envs,
+        "args_mode": mode if mode in {ARGS_MODE_APPEND, ARGS_MODE_REPLACE} else ARGS_MODE_APPEND,
+    }
+
+
+def _framework_config_deliverable(config_levers: dict[str, Any]) -> dict[str, Any]:
+    """The ``integrate_patch`` params a config-lever round is proposed with.
+
+    The name has to come from the proposal the levers came from. Reading
+    ``proposal_set[0]`` instead launched one proposal's name against another's
+    arguments whenever the first proposal was ablation-only. A lever that only
+    drops a flag needs its ablation carried too, or it reaches the launcher as a
+    no-op.
+    """
+    return {
+        "patch_name": str(config_levers.get("name") or ""),
+        "extra_server_args": str(config_levers.get("extra_server_args") or ""),
+        "extra_envs": dict(config_levers.get("extra_envs") or {}),
+        "remove_args": list(config_levers.get("remove_args") or []),
+        "unset_envs": list(config_levers.get("unset_envs") or []),
+        "args_mode": str(config_levers.get("args_mode") or ARGS_MODE_APPEND),
+        "framework_agent_authoring": True,
+    }
 
 
 def _resolvable_artifacts_from_done(
@@ -358,6 +440,13 @@ class AuthoringRetry(NamedTuple):
     attempt: int = 1
     retry_feedback: list[dict[str, Any]] | None = None
     vetting_drops: list[str] | None = None
+
+
+class _IntegrateReview(NamedTuple):
+    """What accompanies a specialist deliverable to its synthetic ``integrate_patch`` review."""
+
+    observation: dict[str, Any]
+    overlaps_measured: list[dict[str, Any]] | None = None
 
 
 class ProgressStamp(NamedTuple):
@@ -754,8 +843,36 @@ class FrameworkPhase(ProposalBench):
         """Record an authored patch's settled outcome, then re-arm or drain the authored lane."""
         if (task.params or {}).get("framework_agent_authoring"):
             self._record_framework_agent_authored_outcome(task=task, result=result, adopted=verdict is Verdict.ADOPTED)
+        self._record_measured_patch_set(task, verdict)
         await self._maybe_rearm_authored_lane(result.result)
         await self._drain_apply_fail_retry_pending()
+
+    def _record_measured_patch_set(self, task: "Task", verdict: Verdict) -> None:
+        """Note the lines this round's patch changed, so a later proposal can be told it repeats them."""
+        from ..framework.patch_overlap import patch_set_identity
+
+        params = task.params or {}
+        files, line_keys = patch_set_identity(params.get("patches"))
+        if not line_keys:
+            return
+        self.shared_state.record_measured_patch_set(
+            task_id=str(task.task_id or ""),
+            patch_name=str(params.get("patch_name") or ""),
+            files=files,
+            line_keys=line_keys,
+            outcome=verdict.name.lower(),
+        )
+
+    def _measured_patch_overlaps(self, patch_paths: Any) -> list[dict[str, Any]]:
+        """Measured rounds whose patch changed much the same lines as *patch_paths*."""
+        from ..framework.patch_overlap import overlapping_measured, patch_set_identity
+
+        _files, line_keys = patch_set_identity(patch_paths)
+        return overlapping_measured(
+            line_keys,
+            self.shared_state.measured_patch_sets,
+            min_ratio=_PATCH_OVERLAP_MIN_RATIO,
+        )
 
     def record_unpromoted_candidate(self, task: "Task", result_payload: dict[str, Any]) -> None:
         """Stamp ``no_result_failed`` for an upstream-PR candidate task that settled without a promotable result."""
@@ -2973,16 +3090,19 @@ class FrameworkPhase(ProposalBench):
             spec_params,
             done_payload,
             deliverable,
-            observation={
-                "kind": "specialist_patch_autosubmitted_for_review",
-                "patches": [str(x) for x in patches][:8],
-                # Artifact-only deliverables: record their install targets.
-                "artifacts_written": [
-                    str((a or {}).get("target") or "")
-                    for a in (done_payload.get("artifacts_written") or [])
-                    if isinstance(a, dict)
-                ][:8],
-            },
+            review=_IntegrateReview(
+                observation={
+                    "kind": "specialist_patch_autosubmitted_for_review",
+                    "patches": [str(x) for x in patches][:8],
+                    # Artifact-only deliverables: record their install targets.
+                    "artifacts_written": [
+                        str((a or {}).get("target") or "")
+                        for a in (done_payload.get("artifacts_written") or [])
+                        if isinstance(a, dict)
+                    ][:8],
+                },
+                overlaps_measured=self._measured_patch_overlaps(patches),
+            ),
         )
 
     async def maybe_autosubmit_framework_config(
@@ -3040,13 +3160,15 @@ class FrameworkPhase(ProposalBench):
             sid,
             spec_params,
             done_payload,
-            {"extra_server_args": extra_server_args, "extra_envs": extra_envs, "framework_agent_authoring": True},
-            observation={
-                "kind": "framework_config_autosubmitted_for_review",
-                "candidate_id": candidate_id,
-                "extra_server_args": extra_server_args,
-                "extra_envs": dict(extra_envs),
-            },
+            _framework_config_deliverable(config_levers),
+            review=_IntegrateReview(
+                observation={
+                    "kind": "framework_config_autosubmitted_for_review",
+                    "candidate_id": candidate_id,
+                    "extra_server_args": extra_server_args,
+                    "extra_envs": dict(extra_envs),
+                },
+            ),
         )
         if pending is not None:
             log.info(
@@ -3063,7 +3185,7 @@ class FrameworkPhase(ProposalBench):
         done_payload: dict[str, Any],
         deliverable: dict[str, Any],
         *,
-        observation: dict[str, Any],
+        review: "_IntegrateReview",
     ) -> PendingProposal | None:
         """Propose a specialist deliverable to the Critic as a synthetic integrate_patch; idempotent per specialist.
 
@@ -3073,7 +3195,10 @@ class FrameworkPhase(ProposalBench):
                 enablement context travel to integrate_patch.
             done_payload: The specialist's ``specialist_done`` payload.
             deliverable: The integrate_patch params that say what to apply.
-            observation: The bus observation recorded with the proposal.
+            review: What accompanies the proposal to the review -- the bus
+                observation, and the measured rounds the deliverable's patch
+                repeats so the review can weigh a re-measurement without
+                anything being refused.
 
         Returns:
             The recorded proposal, or ``None`` when the Critic already ruled on
@@ -3084,26 +3209,30 @@ class FrameworkPhase(ProposalBench):
         ):
             return None
         params = _integrate_review_params(sid, spec_params, done_payload, deliverable)
+        payload: dict[str, Any] = {
+            "action_name": "integrate_patch",
+            "provenance": "specialist",
+            "predicted_gain_pct": 0.0,
+            "params": params,
+        }
+        if review.overlaps_measured:
+            payload["overlaps_measured"] = review.overlaps_measured
         pending = await record_proposal(
             self._coord,
             from_agent="coordinator",
             action_name="integrate_patch",
             predicted_gain_pct=0.0,
-            payload={
-                "action_name": "integrate_patch",
-                "provenance": "specialist",
-                "predicted_gain_pct": 0.0,
-                "params": params,
-            },
+            payload=payload,
         )
         await self.bus.record_observation(
             "coordinator",
             "observation",
             {
-                **observation,
+                **review.observation,
                 "specialist_task_id": sid,
                 "proposal_msg_id": pending.proposal_msg_id,
                 "patch_name": params["patch_name"],
+                **({"overlaps_measured": review.overlaps_measured} if review.overlaps_measured else {}),
             },
         )
         try:
@@ -3113,7 +3242,7 @@ class FrameworkPhase(ProposalBench):
         return pending
 
     def _config_lever_known_bad(self, config_levers: dict[str, Any]) -> bool:
-        """True when this exact config already lost an accuracy gate.
+        """True when this exact config already lost an accuracy gate, or already measured short of KEEP.
 
         Different upstream PRs often reduce to the same server args / envs, so
         the ledger is keyed by content fingerprint rather than by PR.
@@ -3126,7 +3255,11 @@ class FrameworkPhase(ProposalBench):
             fingerprint = canonical_fingerprint(
                 config_levers.get("extra_server_args"),
                 config_levers.get("extra_envs"),
+                remove_args=config_levers.get("remove_args"),
+                unset_envs=config_levers.get("unset_envs"),
+                args_mode=str(config_levers.get("args_mode") or ARGS_MODE_APPEND),
             )
+            threshold = _phase_state.resolve_keep_threshold(self.state)
             for rec in read_pr_ledger():
                 if str(rec.get("applicability") or "") != fingerprint:
                     continue
@@ -3135,6 +3268,15 @@ class FrameworkPhase(ProposalBench):
                         "FRAMEWORK: skipping config lever %s — accuracy %.2f%% on %s",
                         fingerprint,
                         to_float(rec.get("accuracy_delta_pct"), default=0.0),
+                        rec.get("pr_url") or "a prior candidate",
+                    )
+                    return True
+                if _measured_on_this_stack(rec, self.state) and _measured_short_of_keep(rec, threshold):
+                    log.info(
+                        "FRAMEWORK: skipping config lever %s — already measured at %+.2f%% against a %.2f%% bar on %s",
+                        fingerprint,
+                        to_float(rec.get("tps_delta_pct"), default=0.0),
+                        threshold,
                         rec.get("pr_url") or "a prior candidate",
                     )
                     return True

@@ -16,9 +16,13 @@ LANE_GEMM = "gemm"
 #: tuner. This is only the fallback for a tuner that reports none.
 GEMM_DEFAULT_TARGET_SEC = 20 * 60
 
-#: fusion: no admission floor and no per-recipe estimate, so its ceiling is a
-#: count rather than a division. Travels to forge-fuse as ``--max-recipes``.
+#: fusion: the most recipes one lane may attempt. Travels to forge-fuse as ``--max-recipes``.
 FUSION_MAX_TARGETS = 3
+
+#: fusion: what one recipe is priced at, so a share too small to pay for even one leaves the lane unfundable
+#: instead of taking whatever seconds remain. Held at the sibling lane's per-target price rather than invented:
+#: both buy one forge target out of the same phase share, and nothing here has measured them apart.
+FUSION_DEFAULT_TARGET_SEC = GEMM_DEFAULT_TARGET_SEC
 
 #: Held back from the phase share so the lanes cannot consume the time the phase
 #: itself needs to close out.
@@ -56,6 +60,16 @@ class LaneAllocation:
     def is_fundable(self) -> bool:
         """Whether the share pays for at least one target."""
         return self.max_targets > 0
+
+    @property
+    def is_underfunded(self) -> bool:
+        """Whether a share that was derived is too small to pay for one target.
+
+        Distinct from ``not is_fundable``: a zero share means no budget could be derived at all -- an unbounded
+        session has no remaining-minutes to divide -- and that is not the same as a phase with minutes left that
+        cannot pay for the work. Only the latter is a reason to decline.
+        """
+        return self.budget_sec > 0 and self.max_targets == 0
 
 
 def phase_budget_sec(remaining_minutes: object, *, reserve_sec: int = PHASE_RESERVE_SEC) -> int:
@@ -106,7 +120,7 @@ def max_targets(
     if lane == LANE_GEMM:
         return _greedy_fit(budget_sec, target_costs_sec)
     if lane == LANE_FUSION:
-        return FUSION_MAX_TARGETS if budget_sec > 0 else 0
+        return min(FUSION_MAX_TARGETS, budget_sec // FUSION_DEFAULT_TARGET_SEC)
     raise LaneBudgetError(f"unknown lane {lane!r}")
 
 

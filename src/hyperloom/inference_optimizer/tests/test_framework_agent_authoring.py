@@ -740,10 +740,12 @@ def test_config_levers_helper_extracts_from_proposal_set():
         ],
     }
     levers = _framework_config_levers_from_done(done)
-    assert levers == {
-        "extra_server_args": "--speculative-num-steps 3 --enable-mtp",
-        "extra_envs": {"VLLM_USE_MTP": "1"},
-    }
+    assert levers["extra_server_args"] == "--speculative-num-steps 3 --enable-mtp"
+    assert levers["extra_envs"] == {"VLLM_USE_MTP": "1"}
+    # The lever names the proposal it came from, and carries what that proposal ablates.
+    assert levers["name"]
+    assert levers["remove_args"] == []
+    assert levers["args_mode"] == "append"
 
     # A patch alongside a non-atomic lever, while optimizing: the patch is its own
     # outcome and the lever is judged on its own, so nothing rides with the patch.

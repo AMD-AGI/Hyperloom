@@ -490,16 +490,48 @@ class ConversationCollaborator(CoordinatorCollaborator):
         append_conversation(session_dir=self.session_dir, record=record)
 
     async def _explore_grid_fingerprints(self) -> set[str]:
-        """Content fingerprints of the variants in every queued or running explore grid."""
-        from ..actions.executors._proposal_identity import content_fingerprint
+        """Content fingerprints of the variants in every queued or running explore grid.
 
-        return {
-            content_fingerprint(variant)
-            for task in (*await self.tasks.queued(), *await self.tasks.running())
-            if task.kind == "explore"
-            for variant in (task.params or {}).get("grid") or ()
-            if isinstance(variant, dict)
-        }
+        The dispatcher owns this reading: it is the same set the enqueue gate
+        narrows a proposed grid against, and two copies would drift into the
+        prompt promising one thing while admission did another.
+        """
+        return await self._coord.dispatcher.queued_grid_variants()
+
+    async def _affordable_actions_line(self) -> str:
+        """Which of this phase's actions the budget can still pay for, after what is already queued.
+
+        The phase block reports how much budget is left but not what a round
+        costs, and the admission gate prices one action against the phase clock
+        without subtracting the work already committed to it. Both readings say
+        "affordable" while the queue is oversubscribed.
+
+        A FRAMEWORK_AGENT phase observed on 2026-10-15 proposed thirteen explore
+        rounds over 39 minutes and measured four. By the fifth proposal the
+        queue already held more minutes of work than the phase had left; the
+        remaining nine waited, then were dropped in one batch when the budget
+        ran out --- each already reasoned about and reviewed.
+
+        Priced through the dispatcher's own gate so the prompt and admission
+        cannot disagree, minus what the queue has already spoken for.
+        """
+        dispatcher = getattr(self._coord, "dispatcher", None)
+        if dispatcher is None:
+            return ""
+        phase = str(getattr(self.shared_state, "phase", "") or "")
+        actions = _phase_state.allowed_actions_for(phase)
+        if not actions:
+            return ""
+        committed_min = await dispatcher.queued_cost_minutes()
+        rows: list[str] = []
+        for action in actions:
+            denial = dispatcher.time_budget_denial_for_action(
+                action,
+                already_committed_minutes=committed_min,
+            )
+            rows.append(action if denial is None else f"{action}(unaffordable)")
+        queued_note = f" (queue already holds ~{committed_min:.0f} min)" if committed_min > 0 else ""
+        return f"=== Affordable now{queued_note} ===\n" + ", ".join(rows)
 
     async def compose_prompt(self, agent_name: str) -> str:
         """Compose the prompt for *agent_name*: session context + inbox tail (with canonical msg_id per inbox row)."""
@@ -515,6 +547,9 @@ class ConversationCollaborator(CoordinatorCollaborator):
             sections.append(phase_block)
 
         if agent_name == "orchestration":
+            affordable = await self._affordable_actions_line()
+            if affordable:
+                sections.append(affordable)
             sections.append("=== Mission progress ===")
             sections.append(self.shared_state.to_mission_summary())
             deadline = self._coord.run_deadline

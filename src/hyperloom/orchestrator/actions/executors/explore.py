@@ -18,7 +18,7 @@ import yaml
 
 from hyperloom.common.coerce import to_str_list
 from hyperloom.common.gain_math import gain_pct
-from hyperloom.common.launch_log_evidence import settings_the_engine_rewrote
+from hyperloom.common.launch_log_evidence import launch_flag_setting_name, settings_the_engine_rewrote
 from hyperloom.common.model_paths import resolve_session_model_path
 from hyperloom.common.perf_metric import (
     GRADED_DURATION,
@@ -142,6 +142,55 @@ def _decision_fields(gv: Any) -> dict[str, Any]:
         "reasoning_origin": str(getattr(gv, "reasoning_origin", "") or ""),
         "experience_citations": list(getattr(gv, "experience_citations", []) or []),
     }
+
+
+def _flag_still_in_effect(flag: str, argv_flags: set[str], resolved: dict[str, Any], framework: str) -> bool | None:
+    """Whether one ablated flag still reached the server, or ``None`` when the evidence cannot say.
+
+    An argv record settles any flag shape. Without one -- SGLang prints no argv
+    line, so its runs never have one -- the engine's own resolved settings
+    answer for a flag whose setting it reports as a boolean, since such a flag
+    carries no value and the engine reports false once it is dropped. A setting
+    holding anything else falls back to an engine default that no record names,
+    so that case stays unanswered rather than guessed.
+    """
+    name = flag.split("=", 1)[0]
+    if argv_flags:
+        return name in argv_flags
+    setting = launch_flag_setting_name(name, framework)
+    value = resolved.get(setting)
+    return value if isinstance(value, bool) else None
+
+
+def _ablation_realized(remove_args: Any, launch_evidence: Any) -> dict[str, Any] | None:
+    """Whether the flags a variant asked to drop are gone from the server it actually measured.
+
+    A variant that ablates a flag and then measures nothing has two readings --
+    the flag never came off, or it came off and the hypothesis was wrong -- and
+    they lead opposite ways. The agentic GLM-5.3 session had no way to tell them
+    apart: its radix-cache variant ran against a server that still carried
+    ``--disable-radix-cache``, because the benchmark harness re-injects its own
+    default for any flag the request does not itself mention, and removal only
+    ever pruned the request. It read the resulting null as the hypothesis
+    failing and moved on, leaving the direction untested.
+
+    Returns:
+        ``None`` unless every requested flag could be judged, so a caller cannot
+        mistake "unknown" for "confirmed".
+    """
+    wanted = [text for text in (str(arg).strip() for arg in (remove_args or [])) if text]
+    if not wanted:
+        return None
+    evidence = launch_evidence if isinstance(launch_evidence, Mapping) else {}
+    argv_flags = {token.split("=", 1)[0] for token in str(evidence.get("observed_server_launch_flags") or "").split()}
+    observed_config = evidence.get("observed_server_config")
+    resolved = dict(observed_config) if isinstance(observed_config, Mapping) else {}
+    framework = str(evidence.get("framework") or "")
+    verdicts = [(flag, _flag_still_in_effect(flag, argv_flags, resolved, framework)) for flag in wanted]
+    if any(state is None for _, state in verdicts):
+        return None
+    still = [flag for flag, state in verdicts if state]
+    return {"requested": wanted, "still_present": still, "took_effect": not still}
 
 
 def _variant_with_eval_off(gv: Any) -> Any:
@@ -1793,6 +1842,9 @@ class ExploreExecutor:
                             "provenance": provenance,
                             "error_class": r.error_class or "",
                             "server_log_path": r.server_log_path,
+                            "ablation_realized": _ablation_realized(
+                                control_fields.get("remove_args"), r.launch_evidence
+                            ),
                         }
                     )
                     losers.append(
@@ -1899,6 +1951,9 @@ class ExploreExecutor:
                     "reason": reasons_by_fp.get(fp_key, ""),
                     "error_class": str(te.get("error_class") or ""),
                     "failure_attribution": failure_attribution,
+                    # Whether the ablation this variant asked for reached the server, so a null
+                    # result is not read as the ablation having been blocked.
+                    "ablation_realized": te.get("ablation_realized"),
                     "server_log_path": te.get("server_log_path"),
                     "workspace": te.get("workspace"),
                     "raw_result_path": te.get("raw_result_path"),

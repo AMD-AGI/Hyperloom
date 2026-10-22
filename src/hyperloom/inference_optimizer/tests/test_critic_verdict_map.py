@@ -1839,7 +1839,7 @@ def _delegate_coord(tmp_path: Path):
     c.bus = _StubBus()
     c.bus.record_observation = AsyncMock()  # type: ignore[method-assign]
     c.router.record_policy_denied = AsyncMock()  # type: ignore[method-assign]
-    c.dispatcher.admission_denial_for_action = lambda *a, **k: None  # type: ignore[method-assign]
+    c.dispatcher.admission_denial_for_action = AsyncMock(return_value=None)  # type: ignore[method-assign]
     c.dispatcher.registry_lanes_ttl = lambda _name: (set(), 0)  # type: ignore[method-assign]
     c.policy = None
     return c
@@ -1957,6 +1957,13 @@ async def test_delegate_sweep_seeds_the_stack_too(tmp_path: Path):
     created: list[dict[str, Any]] = []
 
     class _TaskRegistry:
+        # The enqueue gate narrows a proposed grid against what the queue already holds.
+        async def queued(self):
+            return []
+
+        async def running(self):
+            return []
+
         async def create_or_return_existing(self, **kwargs: Any):
             created.append(dict(kwargs["params"]))
             from hyperloom.orchestrator.state.task_registry import Task

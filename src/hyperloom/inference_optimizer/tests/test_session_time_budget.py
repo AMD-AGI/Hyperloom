@@ -366,17 +366,17 @@ class TestAdmissionGateOrder:
     def test_the_baseline_prerequisite_is_reported_before_the_budget(self, proposing_coord: Coordinator):
         proposing_coord.shared_state.baseline_tput = 0.0
         _set_budget(proposing_coord, minutes=1)
-        denied = proposing_coord.dispatcher.admission_denial_for_action(_PROPOSABLE_ACTION)
+        denied = asyncio.run(proposing_coord.dispatcher.admission_denial_for_action(_PROPOSABLE_ACTION))
         assert denied is not None and denied.rule == "execution_order"
 
     def test_the_budget_gate_runs_once_the_sequence_gate_passes(self, proposing_coord: Coordinator):
         _set_budget(proposing_coord, minutes=5)
-        denied = proposing_coord.dispatcher.admission_denial_for_action(_PROPOSABLE_ACTION)
+        denied = asyncio.run(proposing_coord.dispatcher.admission_denial_for_action(_PROPOSABLE_ACTION))
         assert denied is not None and denied.rule == "time_budget"
 
     def test_an_action_clearing_both_gates_is_admitted(self, proposing_coord: Coordinator):
         _set_budget(proposing_coord, minutes=600)
-        assert proposing_coord.dispatcher.admission_denial_for_action(_PROPOSABLE_ACTION) is None
+        assert asyncio.run(proposing_coord.dispatcher.admission_denial_for_action(_PROPOSABLE_ACTION)) is None
 
 
 def _catalogue_cost_min(action: str) -> float:
@@ -399,7 +399,7 @@ class TestThePhaseBudgetGate:
         _set_budget(coord, minutes=600)
         _set_phase_budget(coord, monkeypatch, phase=phase, minutes_left=5)
 
-        denied = coord.dispatcher.admission_denial_for_action(action)
+        denied = asyncio.run(coord.dispatcher.admission_denial_for_action(action))
 
         assert isinstance(denied, PolicyDenied)
         assert denied.rule == "phase_time_budget"
@@ -408,7 +408,7 @@ class TestThePhaseBudgetGate:
     def test_a_phase_without_a_search_budget_answers_only_to_the_session(self, coord: Coordinator, monkeypatch):
         _set_budget(coord, minutes=600)
         _set_phase_budget(coord, monkeypatch, phase="PRELUDE", minutes_left=1)
-        assert coord.dispatcher.admission_denial_for_action(_BASELINE_ACTION) is None
+        assert asyncio.run(coord.dispatcher.admission_denial_for_action(_BASELINE_ACTION)) is None
 
     @pytest.mark.asyncio
     async def test_a_queued_task_the_phase_outlived_is_dropped_before_dispatch(self, coord: Coordinator, monkeypatch):

@@ -263,21 +263,17 @@ async def test_kernel_agent_dispatch_keeps_authoring_phase_and_validates_contrac
     )
 
 
+def _arm_terminal_controller(st):
+    st.kernel_optimizer = "forge"
+    st.kernel_rewrite_controller_result = {
+        "status": sorted(ps.CONTROLLER_TERMINAL_STATUSES)[0],
+        "macro_cycle": 0,
+    }
+
+
 @pytest.mark.parametrize(
     ("label", "arm", "reason"),
     [
-        (
-            "controller finished",
-            lambda st: (
-                setattr(st, "kernel_optimizer", "forge"),
-                setattr(
-                    st,
-                    "kernel_rewrite_controller_result",
-                    {"status": sorted(ps.CONTROLLER_TERMINAL_STATUSES)[0], "macro_cycle": 0},
-                ),
-            ),
-            "kernel_controller_done",
-        ),
         (
             "idle streak",
             lambda st: (
@@ -288,7 +284,7 @@ async def test_kernel_agent_dispatch_keeps_authoring_phase_and_validates_contrac
         ),
     ],
 )
-def test_kernel_agent_in_flight_blocks_every_leverage_exit(label, arm, reason):
+def test_kernel_agent_in_flight_blocks_an_idle_queue_exit(label, arm, reason):
     st = SharedState(session_id="s")
     _arm_kernel_phase(st)
     arm(st)
@@ -301,6 +297,23 @@ def test_kernel_agent_in_flight_blocks_every_leverage_exit(label, arm, reason):
     assert inputs["pending_work"]["kernel_agent_in_flight"] is True
     assert ps.compute_next_phase(st, kernel_work_in_flight=True) is None, label
     assert ps.replay_next_phase(inputs) is None, label
+
+
+def test_a_terminal_controller_exits_even_while_the_agent_is_in_flight():
+    """``kernel_agent`` holds every serving lane to the phase budget, so a reported controller must not be waited out."""
+    st = SharedState(session_id="s")
+    _arm_kernel_phase(st)
+    _arm_terminal_controller(st)
+
+    transition = ps.compute_next_phase(st, kernel_work_in_flight=True)
+
+    assert transition is not None
+    assert transition[1] == "kernel_controller_done"
+    assert transition[2]["agent_in_flight"] is True
+    inputs = ps.workflow_predicate_inputs(st, kernel_work_in_flight=True)
+    replayed = ps.replay_next_phase(inputs)
+    assert replayed is not None
+    assert (replayed[0], replayed[1]) == (transition[0], "kernel_controller_done")
 
 
 def test_kernel_agent_in_flight_never_blocks_a_budget_exit():

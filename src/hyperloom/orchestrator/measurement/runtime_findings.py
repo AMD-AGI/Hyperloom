@@ -108,6 +108,21 @@ _LINE_RULES: tuple[_LineRule, ...] = (
         subject=_named("multimem_all_gather"),
         frameworks=frozenset({"sglang"}),
     ),
+    # A kernel trapped. Every rank's queue dies with it, so the next collective never completes and a watchdog
+    # reports a timeout ten minutes later -- which is the loudest line in the log and the wrong place to look.
+    _LineRule(
+        rule_id="device.queue_exception",
+        category=CORRECTNESS,
+        patterns=(re.compile(r"Queue error: (HSA_STATUS_ERROR_\w+)"),),
+        subject=_first_group_or_match,
+    ),
+    # Distinct from the trap above: this one names an address the kernel should not have touched.
+    _LineRule(
+        rule_id="device.memory_fault",
+        category=CORRECTNESS,
+        patterns=(re.compile(r"Memory access fault by GPU node-(\d+)"),),
+        subject=_first_group_or_match,
+    ),
 )
 
 _ENGINE_ADJUSTED = "engine_adjusted"
@@ -304,8 +319,32 @@ def render_runtime_findings(measurement: Mapping[str, Any]) -> str:
         for f in findings
         if f["status"] == DETECTED
     )
+    lines.extend(_device_fault_reading(findings))
     clear = [f["rule_id"] for f in findings if f["status"] == NOT_DETECTED]
     if clear:
         lines.append(f"- not_detected: {', '.join(clear)}")
     lines.extend(f"- unknown: {f['rule_id']} ({f['reason']})" for f in findings if f["status"] == UNKNOWN)
     return "\n".join(lines)
+
+
+def _device_fault_reading(findings: list[dict[str, Any]]) -> list[str]:
+    """Say which kind of device fault this was, because the log's loudest line is not the one that caused it.
+
+    A trapped kernel kills its rank's queue, so the next collective never completes and a watchdog reports a
+    timeout minutes later. That timeout is the last and loudest error in the log and it points at the collectives,
+    which is the wrong place: on the GLM-5.3 run where this was traced by hand, the queue exceptions landed at
+    19:31 and the NCCL watchdog fired at 19:41 on an all-reduce that was only waiting for a dead queue.
+    """
+    detected = {f["rule_id"] for f in findings if f["status"] == DETECTED}
+    if "device.queue_exception" not in detected:
+        return []
+    if "device.memory_fault" in detected:
+        return [
+            "- reading: a kernel touched an address it should not have. The faulting access is the cause; any "
+            "collective timeout after it is downstream of the dead queue."
+        ]
+    return [
+        "- reading: the queue died without a memory fault, so a kernel trapped rather than ran off its "
+        "allocation -- a device-side assert, which is what a non-finite value reaching a checked op looks like. "
+        "Any collective timeout after it is downstream of the dead queue, not a communication problem."
+    ]

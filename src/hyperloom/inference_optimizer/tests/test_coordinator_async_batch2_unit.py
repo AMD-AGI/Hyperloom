@@ -12,6 +12,7 @@ import logging
 import os
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -2415,7 +2416,7 @@ async def test_direct_integrate_proposal_inherits_specialist_owner(
     monkeypatch.setattr(
         coord.dispatcher,
         "admission_denial_for_action",
-        lambda _action, **_kw: None,
+        AsyncMock(return_value=None),
     )
     await coord.router._handle_propose_action(
         "orchestration",

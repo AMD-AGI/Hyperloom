@@ -16,6 +16,8 @@ from typing import Any
 
 from hyperloom.common import io as _common_io
 from hyperloom.common.platform_probe import platform_fingerprint
+from hyperloom.orchestrator.measurement.host_input_cost import input_cost, render_input_cost
+from hyperloom.orchestrator.measurement.intvty_samples import comparison_interval, comparison_regimes
 
 from ...bus.message_bus import MessageBus
 from ...bus.storage.connection import SqliteConnection
@@ -31,6 +33,11 @@ from ...state.shared_state import SharedState
 
 
 log = logging.getLogger(__name__)
+
+
+def _reference_workspace(state: Any) -> str:
+    """The run a comparison grades against: the baseline, until a KEEP replaces it."""
+    return str(getattr(state, "baseline_workspace", "") or "")
 
 
 def _count_server_boot_failures(session_dir: Path | None) -> int:
@@ -372,6 +379,9 @@ def _format_composite_perf_section(summary: dict[str, Any]) -> list[str]:
         gain = comparison["gain_pct"]
         gain_text = f"{gain:+.2f}%" if gain is not None else "unavailable"
         lines.append(f"- comparison gain     : `{gain_text}` (diagnostic; not a cumulative validation)")
+        lines.extend(_format_comparison_interval(comparison.get("interval")))
+        lines.extend(_format_comparison_regimes(comparison.get("regimes")))
+        lines.extend(render_input_cost(comparison.get("input_cost")))
         lines.append(f"- comparable          : `{str(comparison['comparable']).lower()}`")
         if comparison["degrade_reason"]:
             lines.append(f"- degrade reason      : `{comparison['degrade_reason']}`")
@@ -491,6 +501,18 @@ def _build_summary_dict(
             "reference": graded.reference,
             "candidate": graded.candidate,
             "gain_pct": gain_pct(graded.candidate, graded.reference),
+            # Read off the two runs' per-request exports; absent when either run no longer has them.
+            "interval": comparison_interval(
+                (state.current_best or {}).get("workspace"),
+                _reference_workspace(state),
+                graded.objective,
+            ),
+            "regimes": comparison_regimes(
+                (state.current_best or {}).get("workspace"),
+                _reference_workspace(state),
+            ),
+            # Read off the current best's own requests: a front-end cost is a property of one run, not of a pair.
+            "input_cost": input_cost((state.current_best or {}).get("workspace") or _reference_workspace(state)),
             "comparable": graded.comparable,
             "degrade_reason": graded.degrade_reason,
             "verdict": graded.verdict,
@@ -508,6 +530,7 @@ def _build_summary_dict(
         "has_unvalidated_keeps": _safe_call(state, "optimization_stack_has_unvalidated_keeps", False),
         "untried_hot_reusable_kernels": list(_safe_call(state, "untried_hot_reusable_kernels", []) or []),
         "pending_keep_kernels": list(_safe_call(state, "pending_keep_kernel_ids", []) or []),
+        "unpromoted_keeps": list(getattr(state, "unpromoted_keeps", None) or []),
         "crash_count": state.crash_count,
         "server_boot_failures": _count_server_boot_failures(session_dir),
         "pruned_families": state.pruned_families,
@@ -767,12 +790,50 @@ def _format_compute_partition_section(summary: dict[str, Any]) -> list[str]:
     return lines
 
 
+def _format_comparison_interval(interval: Any) -> list[str]:
+    """Render the request-sampling interval behind a reported gain, and say what it does not cover."""
+    if not isinstance(interval, dict) or interval.get("ci_low_pct") is None:
+        return []
+    separable = "" if interval.get("crosses_zero") else " — separable from no change"
+    note = " ⚠ not separable from no change on this run's requests" if interval.get("crosses_zero") else separable
+    return [
+        f"- gain CI{' ' * 13}: `[{interval['ci_low_pct']:+.2f}%, {interval['ci_high_pct']:+.2f}%]` "
+        f"({interval.get('confidence', 0.95):.0%}, n={interval['n_candidate']} vs {interval['n_reference']} "
+        f"requests){note}",
+        "  *Request sampling only; run-to-run spread on this workload is larger and is not in this interval.*",
+    ]
+
+
+def _format_comparison_regimes(regimes: Any) -> list[str]:
+    """Render how stalled each side of a comparison was, and say when the pair spans two host states."""
+    if not isinstance(regimes, dict):
+        return []
+    ratio = regimes.get("inflation_ratio")
+    if ratio is None:
+        return []
+
+    def _inflation(side: str) -> str:
+        fingerprint = regimes.get(side) or {}
+        return f"{fingerprint.get('ttft_inflation', float('nan')):.2f}"
+
+    flag = (
+        " ⚠ the two runs were in different host states; the gain above is not a like-for-like comparison"
+        if regimes.get("cross_regime")
+        else ""
+    )
+    return [
+        f"- stall inflation    : candidate `{_inflation('candidate')}` vs reference `{_inflation('reference')}` "
+        f"(TTFT mean/median, ratio `{ratio:.2f}`){flag}"
+    ]
+
+
 def _format_completeness_annotations(summary: dict[str, Any]) -> list[str]:
-    """Render honesty annotations for work left unfinished (unvalidated KEEPs, untried hot kernels, KEEPs awaiting integrate)."""
+    """Render honesty annotations for work left unfinished (unvalidated KEEPs, untried hot kernels, KEEPs awaiting integrate, refused promotions)."""
     unvalidated = bool(summary.get("has_unvalidated_keeps"))
     untried = list(summary.get("untried_hot_reusable_kernels") or [])
     pending_keeps = list(summary.get("pending_keep_kernels") or [])
-    if not (unvalidated or untried or pending_keeps):
+    unpromoted = list(summary.get("unpromoted_keeps") or [])
+    if not (unvalidated or untried or pending_keeps or unpromoted):
         return []
     lines: list[str] = ["## Completeness annotations", ""]
     if unvalidated:
@@ -784,8 +845,27 @@ def _format_completeness_annotations(summary: dict[str, Any]) -> list[str]:
     if pending_keeps:
         lines.append(f"- ⚠ kernel_opt KEEPs awaiting integrate: {', '.join(pending_keeps)}.")
     if untried:
-        lines.append(f"- ⚠ reusable hot kernels no backend produced a patch for: {', '.join(untried)}.")
+        lines.append(f"- ⚠ reusable hot kernels with no kernel_opt attempt: {', '.join(untried)}.")
+    lines.extend(_format_unpromoted_keeps(unpromoted))
     lines.append("")
+    return lines
+
+
+def _format_unpromoted_keeps(unpromoted: list[dict[str, Any]]) -> list[str]:
+    """Render the measured winners promotion refused, so an empty stack states why it is empty."""
+    if not unpromoted:
+        return []
+    lines = [
+        f"- ⚠ {len(unpromoted)} measured winner(s) were refused promotion onto `current_best`; "
+        "a headline gain of 0% with refusals listed here means the session measured a win it did not keep.",
+        "",
+        "| action | reason | detail |",
+        "|---|---|---|",
+    ]
+    lines.extend(
+        f"| `{entry.get('action', '?')}` | `{entry.get('reason', '?')}` | {entry.get('detail', '')} |"
+        for entry in unpromoted
+    )
     return lines
 
 

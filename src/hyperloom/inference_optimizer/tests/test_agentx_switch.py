@@ -79,6 +79,39 @@ def test_switch_off_no_agentx_leakage(tmp_path, monkeypatch):
 # ── ON path: authoritative overwrite + env injection ─────────────────────────
 
 
+def test_switch_on_declares_the_run_agentic_to_the_harness(tmp_path, monkeypatch):
+    """The harness decides the context cap and the server's prefix cache by run type, and reads its own signal.
+
+    Naming the AgentX client script is not that signal, so without this an
+    AgentX replay is served as a fixed-sequence throughput sweep.
+    """
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "true")
+    # Only the MLPerf backend goes through this switch: the native Magpie backend pops benchmark_script and drives
+    # Magpie's managed server, so there is no generic script for the signal to reach.
+    monkeypatch.setenv("HYPERLOOM_AGENTIC_BACKEND", "mlperf")
+    src = _write(tmp_path / "base.yaml", framework="sglang")
+
+    envs = _materialize(src, tmp_path / "out", gpu_type="mi355x", model_path="/m")["envs"]
+
+    assert envs["IS_AGENTIC"] == "1"
+    # The one setting the harness then demands; AgentX keeps its reuse in the GPU KV pool.
+    assert envs["KV_OFFLOADING"] == "none"
+    assert "KV_OFFLOAD_BACKEND" not in envs
+
+
+def test_switch_off_declares_nothing_agentic(tmp_path, monkeypatch):
+    """A throughput sweep must keep the harness defaults the signal turns off."""
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("HYPERLOOM_AGENTIC_BACKEND", "mlperf")
+    src = _write(tmp_path / "base.yaml", framework="sglang")
+
+    envs = _materialize(src, tmp_path / "out", gpu_type="mi355x", model_path="/m")["envs"]
+
+    assert "IS_AGENTIC" not in envs
+    assert "KV_OFFLOADING" not in envs
+
+
 def _pin_extra_env(monkeypatch, **pins):
     """Pin as ``_export_operator_launch_shape`` does: each name in the environment, plus the handoff blob."""
     monkeypatch.setenv("INFERENCE_OPTIMIZER_EXTRA_ENV", json.dumps(pins))

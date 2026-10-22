@@ -1338,16 +1338,21 @@ def _kernel_idle_exit(plateau: dict[str, Any], now_unix: Any) -> tuple[str, dict
 def _kernel_exit(inputs: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
     pending = dict(inputs.get("pending_work") or {})
     plateau = dict(inputs.get("plateau") or {})
+    agent_in_flight = bool(pending.get("kernel_agent_in_flight"))
     work_pending = bool(pending.get("kernel_work_pending"))
-    if not bool(pending.get("kernel_agent_in_flight")):
-        controller_settled = _controller_round_settled(pending, inputs.get("macro_cycle"))
-        if controller_settled and not work_pending:
-            return "kernel_controller_done", {
-                "controller_status": pending.get("controller_status"),
-                "patch_count": int(pending.get("controller_patch_count") or 0),
-                "task_count": int(pending.get("controller_task_count") or 0),
-                "reason": str(pending.get("controller_reason") or ""),
-            }
+    # The one exit that does not wait for an idle queue. ``kernel_agent`` holds every serving lane until the phase
+    # budget ends it, so a controller that has already reported terminal with nothing pending would otherwise spend
+    # the rest of the phase on work that cannot produce a KEEP. The transition barrier stops the in-flight task, so
+    # the next phase still starts on quiet GPUs.
+    if _controller_round_settled(pending, inputs.get("macro_cycle")) and not work_pending:
+        return "kernel_controller_done", {
+            "controller_status": pending.get("controller_status"),
+            "patch_count": int(pending.get("controller_patch_count") or 0),
+            "task_count": int(pending.get("controller_task_count") or 0),
+            "reason": str(pending.get("controller_reason") or ""),
+            "agent_in_flight": agent_in_flight,
+        }
+    if not agent_in_flight:
         if not work_pending:
             return "kernel_no_more_leverage", {"evidence": "kernel_settled"}
         idle = _kernel_idle_exit(plateau, inputs.get("now_unix"))

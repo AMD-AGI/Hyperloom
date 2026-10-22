@@ -413,6 +413,8 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     # Baseline AgentX perf snapshot: the slow-tail e2e_norm_intvty_p90 objective plus total_throughput and the
     # reported axes the summary renders.
     baseline_perf: dict[str, Any] = field(default_factory=dict)
+    # Run directory the anchor's axes were measured in; the per-request exports under it back the reported interval.
+    baseline_workspace: str = ""
     baseline_accuracy: float = 0.0
     # Standalone baseline-arm roofline ceiling computed right after baseline lands; backs up snapshot ceiling so the
     # frontend has data even when the roofline (profile + trace_analyze) step fails.
@@ -510,6 +512,13 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     warm_replay_min_confidence: float = 0.7
     # Full accepted configuration stack across action families; current_best keeps the materialized full args/env.
     optimization_stack: list[dict[str, Any]] = field(default_factory=list)
+    # Measured winners ``lift_to_current_best`` refused, newest last. A KEEP is recorded by the lane that measured it,
+    # while promotion is decided here, so without this record a refusal is invisible: the report reads an empty stack
+    # and prints 0% for a session that did measure a win.
+    unpromoted_keeps: list[dict[str, Any]] = field(default_factory=list)
+    # Authored patches this session spent a benchmark round on, keyed by the lines they changed rather than by what
+    # they were named, so a later proposal can be told it repeats one. Newest last, capped.
+    measured_patch_sets: list[dict[str, Any]] = field(default_factory=list)
     # Index-aligned with ``optimization_stack``: per-entry incremental gain pct; missing => None.
     gain_per_stack_entry: list[float | None] = field(default_factory=list)
     # Total gain over ``baseline_tput``, stamped only from a measurement taken with the whole stack applied;
@@ -2544,6 +2553,39 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         return len(self.optimization_stack) > int(self.cumulative_gain_validated_stack_len) or int(
             self.working_recipe_generation
         ) != int(self.validated_recipe_generation)
+
+    def record_unpromoted_keep(self, *, action: str, reason: str, detail: str) -> None:
+        """Record a measured winner that was refused promotion onto ``current_best``."""
+        self.unpromoted_keeps.append(
+            {"action": action, "reason": reason, "detail": detail, "ts": now_iso()},
+        )
+
+    def record_measured_patch_set(
+        self,
+        *,
+        task_id: str,
+        patch_name: str,
+        files: list[str],
+        line_keys: list[str],
+        outcome: str,
+    ) -> None:
+        """Record that a benchmark round was spent on the patch these lines describe."""
+        from ..framework.patch_overlap import MAX_MEASURED
+
+        if not line_keys:
+            return
+        self.measured_patch_sets.append(
+            {
+                "task_id": task_id,
+                "patch_name": patch_name,
+                "files": files,
+                "line_keys": line_keys,
+                "outcome": outcome,
+                "ts": now_iso(),
+            }
+        )
+        if len(self.measured_patch_sets) > MAX_MEASURED:
+            self.measured_patch_sets = self.measured_patch_sets[-MAX_MEASURED:]
 
 
 __all__ = ["SharedState", "timed_teardown_step"]
