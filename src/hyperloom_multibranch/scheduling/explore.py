@@ -170,7 +170,7 @@ class Explorer:
         specialist branch is open.
         """
 
-        await self._open_users(window)
+        await self._open_named(window)
         opening = await self._ask(window, opening=True)
         first_batch = BatchStart(BranchOrigin.FIRST_BATCH, window.root_commit, window.explore_end)
         if opening is None:
@@ -192,7 +192,7 @@ class Explorer:
             finally:
                 await self._integrator.abandon()
 
-    async def _open_users(self, window: ExploreWindow) -> None:
+    async def _open_named(self, window: ExploreWindow) -> None:
         if self._clock.now() < window.explore_end:
             await self._branches.open_user_branches(window.user_directions, window.root_commit, window.explore_end)
             await self._branches.open_agent_branches(window.agents, window.root_commit, window.explore_end)

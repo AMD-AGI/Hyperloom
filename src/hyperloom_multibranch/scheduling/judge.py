@@ -65,9 +65,9 @@ how many branches to open, each branch's K (the integration branch included), wh
 why, and whether the whole session should stop early.
 You may open branches at any call. opening is true only for the call that sizes the opening batch, which opens from
 the root commit, at least one branch unless user branches opened already (an agent's branch does not count). A
-branch opened at a later call starts from the integration head, briefed on its focus: the op it should speed up. Name the focus of each, or leave it out and
-the branch is briefed on the largest op of the integration head's latest profile, or on none when that head was never
-profiled. The opening batch is given no focus. free_branch_slots counts the branches you may open at this call having
+branch opened at a later call starts from the integration head, briefed on its focus: the op it should speed up. Name
+the focus of each, or leave it out and the branch is briefed on the largest op of the integration head's latest
+profile, or on none when that head was never profiled. The opening batch is given no focus. free_branch_slots counts the branches you may open at this call having
 stopped nothing; a stop frees one more for the same answer, and branches beyond the slots left are not opened. Leaving
 a free slot unopened needs a reason; opening into it does not. pending lists the forks and repairs the rule gate asked
 for that wait for a slot, oldest first, with how long each has waited: a slot your stops free goes to them first and
@@ -281,7 +281,7 @@ class StopOrder:
 
 @dataclass(frozen=True)
 class HeldOrder:
-    """A stop or a lower K the judge gave a held branch, refused for ``reason``."""
+    """A stop or a K the judge gave a held or unsteered branch, refused for ``reason``."""
 
     branch: str
     reason: HoldReason
@@ -544,8 +544,8 @@ def hold_decision(
     decision: JudgeDecision, held: Mapping[str, HoldReason], roster: Iterable[BranchEntry]
 ) -> JudgeDecision:
     """``decision`` without the stops and the lower K orders of the ``held`` branches, and without any K order for a
-    branch the judge does not steer whatever holds it, each named in ``held`` once; ``roster`` gives the K a branch
-    runs at now and its origin. Applying it twice changes nothing more."""
+    branch the judge does not steer, held or not, each named in ``held`` once; ``roster`` gives the K a branch runs at
+    now and its origin. Applying it twice changes nothing more."""
 
     entries = tuple(roster)
     running_k = {entry.branch: entry.k for entry in entries}
@@ -554,13 +554,11 @@ def hold_decision(
     refused_ks = [
         order
         for order in decision.k
-        if order.branch in held
-        and (
-            order.k < running_k[order.branch] or order.branch in unsteered or held[order.branch] is HoldReason.UNSTEERED
-        )
+        if order.branch in unsteered or (order.branch in held and order.k < running_k[order.branch])
     ]
     named = {item.branch: item for item in decision.held} | {
-        order.branch: HeldOrder(order.branch, held[order.branch]) for order in (*refused_stops, *refused_ks)
+        order.branch: HeldOrder(order.branch, held.get(order.branch, HoldReason.UNSTEERED))
+        for order in (*refused_stops, *refused_ks)
     }
     return replace(
         decision,

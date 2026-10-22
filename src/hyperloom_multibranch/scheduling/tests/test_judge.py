@@ -750,6 +750,8 @@ def test_an_autonomous_branch_is_never_steered_by_the_judge_but_a_pending_confir
     applied = hold_decision(decision, held, roster)
     assert (applied.stop, applied.k) == ((), ())
     assert [order.branch for order in applied.held] == ["b04", "b05"]
+    judge_failed = hold_decision(JudgeDecision(k=(KOrder("b04", 3),)), {}, roster)
+    assert (judge_failed.k, [order.reason for order in judge_failed.held]) == ((), [HoldReason.UNSTEERED])
     rows = {row["branch"]: row for row in _state(_view(roster=roster, held=held))["branches"]}
     assert rows["b04"]["steered"] is False and "steered" not in rows["b01"]
     prompt = " ".join(JUDGE_SYSTEM_PROMPT.split())
