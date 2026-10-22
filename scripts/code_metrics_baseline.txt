@@ -20,7 +20,6 @@ cognitive-complexity src/hyperloom/orchestrator/actions/executors/_patch_snapsho
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/_ray_serving.py::ServingLease._await_or_cancel 32
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/benchmark_result.py::_rescue_candidate_paths 39
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/benchmark_result.py::harvest_leaked_artifacts 51
-cognitive-complexity src/hyperloom/orchestrator/actions/executors/explore.py::ExploreExecutor.__call__ 369
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._stage_apply 33
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/integrate_patch.py::_resolve_patch_paths 36
 cognitive-complexity src/hyperloom/orchestrator/delivery/ledger.py::restore_records 33
@@ -98,7 +97,6 @@ cognitive-complexity src/kernelforge/orchestrator/analysis.py::AnalysisAgentServ
 cognitive-complexity src/kernelforge/orchestrator/orchestration.py::OrchestrationAgent._bind_dispatch 39
 cognitive-complexity src/kernelforge/orchestrator/orchestration.py::OrchestrationService.run 33
 cognitive-complexity src/kernelforge/rewrite_by_flydsl/ingest.py::discover_source_entry 31
-cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/explore.py::ExploreExecutor.__call__ 76
 cyclomatic-complexity src/hyperloom/orchestrator/kernel/conc_sweep.py::_sweep_one_arm_single_server 33
 cyclomatic-complexity src/hyperloom/orchestrator/kernel/conc_sweep.py::run_conc_sweep 26
 cyclomatic-complexity src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._promote_baseline 29
@@ -264,7 +262,6 @@ function-args src/hyperloom/orchestrator/actions/executors/baseline.py::Benchmar
 function-args src/hyperloom/orchestrator/actions/executors/baseline.py::BenchmarkRunExecutor._run_single_benchmark 13
 function-args src/hyperloom/orchestrator/actions/executors/baseline.py::BenchmarkRunExecutor._write_lifecycle_config 6
 function-args src/hyperloom/orchestrator/actions/executors/baseline.py::_stopped_round_result 7
-function-args src/hyperloom/orchestrator/actions/executors/explore.py::filter_baseline_noop_variants 13
 function-args src/hyperloom/orchestrator/bringup/argv_preflight.py::check_server_argv 7
 function-args src/hyperloom/orchestrator/kernel/controller_patch_integration.py::integrate_controller_patches 6
 function-args src/hyperloom/orchestrator/kernel/geak_config.py::_geak_revalidation_decision 6
@@ -345,8 +342,6 @@ function-lines src/hyperloom/orchestrator/actions/executors/baseline.py::Benchma
 function-lines src/hyperloom/orchestrator/actions/executors/baseline.py::BenchmarkRunExecutor._run_single_benchmark 94
 function-lines src/hyperloom/orchestrator/actions/executors/benchmark_result.py::harvest_leaked_artifacts 85
 function-lines src/hyperloom/orchestrator/actions/executors/bypass_engine.py::build_server_command 96
-function-lines src/hyperloom/orchestrator/actions/executors/explore.py::ExploreExecutor.__call__ 1124
-function-lines src/hyperloom/orchestrator/actions/executors/explore.py::filter_baseline_noop_variants 99
 function-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._bench_patch 223
 function-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._enablement_keep_records 110
 function-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._gate_enablement 222
@@ -545,7 +540,7 @@ module-lines src/hyperloom/orchestrator/actions/executors/_grid_runner.py 2045
 module-lines src/hyperloom/orchestrator/actions/executors/_kv_metrics.py 1578
 module-lines src/hyperloom/orchestrator/actions/executors/_workload_envs.py 2126
 module-lines src/hyperloom/orchestrator/actions/executors/baseline.py 4050
-module-lines src/hyperloom/orchestrator/actions/executors/explore.py 1880
+module-lines src/hyperloom/orchestrator/actions/executors/explore.py 1834
 module-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py 4691
 module-lines src/hyperloom/orchestrator/actions/executors/profile.py 1393
 module-lines src/hyperloom/orchestrator/actions/executors/report.py 1351
@@ -584,7 +579,6 @@ module-lines src/kernelforge/orchestrator/orchestration.py 1831
 nested-blocks src/hyperloom/inference_optimizer/framework_paths.py::_discover_installed_framework_roots 6
 nested-blocks src/hyperloom/inference_optimizer/trace/tool_events.py::stream_json_tool_events 6
 nested-blocks src/hyperloom/orchestrator/actions/executors/_multi_node_server_lifecycle.py::_wait_for_server_health_async 6
-nested-blocks src/hyperloom/orchestrator/actions/executors/explore.py::ExploreExecutor.__call__ 6
 nested-blocks src/hyperloom/orchestrator/measurement/runtime_findings.py::_scan_lines 6
 nested-blocks src/hyperloom/orchestrator/specialists/subprocess_.py::SpecialistSubprocessDispatcher.run 6
 nested-blocks src/hyperloom/orchestrator/trace_analysis/tracelens_analysis.py::main 7
