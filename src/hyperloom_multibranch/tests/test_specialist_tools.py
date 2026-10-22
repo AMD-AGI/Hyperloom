@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
+import subprocess
 from types import SimpleNamespace
 
 import pytest
@@ -102,3 +103,67 @@ async def test_a_component_the_worktree_holds_no_source_of_is_refused(rig):
     for tool in ("worktree_check", "worktree_patch"):
         with pytest.raises(InvalidParamsError, match="no source of sglang"):
             await rig.server.call(tool, component="sglang")
+
+
+def _installed_checkout(tmp_path, version_suffix: str = "") -> PackageBase:
+    """A package installed in place from a git checkout, as the image's frameworks are; its version names the commit
+    it was built from unless ``version_suffix`` says otherwise."""
+    checkout = tmp_path / "checkout"
+    package = checkout / "vllm"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_bytes(b"")
+    (package / "config.py").write_bytes(b"max_num_seqs = 128\n")
+    for argv in (
+        ["init", "-q"],
+        ["remote", "add", "origin", "https://github.com/vllm-project/vllm.git"],
+        ["add", "."],
+        ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "built"],
+    ):
+        subprocess.run(["git", *argv], cwd=checkout, check=True)
+    commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=checkout, check=True, capture_output=True, text=True)
+    version = version_suffix or f"0.11.0.dev1+g{commit.stdout.strip()[:10]}"
+    return PackageBase("vllm", package, "vllm", version)
+
+
+async def _new_component_rig(tmp_path, installed: PackageBase):
+    bare = Recipe(ROOT.base_image_digest, ROOT.launch)
+    base = SourceBase(tmp_path / "source", locator=lambda _layout: installed)
+    base.build(["vllm"])
+    blobs = LocalBlobStore(tmp_path / "blobs")
+    repo = GitExperimentRepo(tmp_path / "experiments.git", blobs, lambda _layout: installed)
+    root = await repo.init_root(bare)
+    await repo.create_branch(BRANCH, root)
+    server = _Server()
+
+    def worktrees(branch):
+        return base.worktree(branch, tmp_path / "worktrees" / branch)
+
+    register_worktree_tools(server, repo=repo, worktrees=worktrees, locator=lambda _layout: installed)
+    await server.call("worktree_sync")
+    (worktrees(BRANCH).path / "vllm/config.py").write_bytes(b"max_num_seqs = 256\n")
+    return server, bare
+
+
+async def test_a_patch_to_a_component_new_on_the_head_names_the_installed_upstream_commit(tmp_path):
+    installed = _installed_checkout(tmp_path)
+    server, bare = await _new_component_rig(tmp_path, installed)
+    built = subprocess.run(["git", "rev-parse", "HEAD"], cwd=installed.path, check=True, capture_output=True, text=True)
+
+    taken = await server.call("worktree_patch", component="vllm")
+
+    component = apply(bare, RecipeDelta.from_document(taken["delta"])).component("vllm")
+    assert (component.upstream_repo, component.upstream_ref) == (
+        "https://github.com/vllm-project/vllm.git",
+        built.stdout.strip(),
+    )
+    assert "note" not in taken
+
+
+async def test_a_new_component_whose_install_names_no_commit_is_said_so_with_the_patch(tmp_path):
+    server, _bare = await _new_component_rig(tmp_path, _installed_checkout(tmp_path, version_suffix="0.11.0"))
+
+    taken = await server.call("worktree_patch", component="vllm")
+
+    change = RecipeDelta.from_document(taken["delta"]).components[0]
+    assert change.upstream_ref is None and change.add_patches
+    assert "set upstream_repo and upstream_ref" in taken["note"]

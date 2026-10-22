@@ -257,6 +257,13 @@ def test_the_role_says_a_flat_patch_is_checked_to_have_run_before_its_idea_is_dr
     assert "check the test's server.log shows that line before you call the idea dead" in prompt
 
 
+def test_the_role_says_worktree_patch_names_a_new_component_s_upstream_and_when_to_set_it_by_hand():
+    prompt = role_prompt(WORKLOAD)
+
+    assert "for a component new on your head it names the upstream commit already" in prompt
+    assert "set them only when its reply carries a note saying so" in prompt
+
+
 def test_the_role_says_a_branch_opened_on_a_focus_starts_from_that_operator():
     prompt = role_prompt(WORKLOAD)
 

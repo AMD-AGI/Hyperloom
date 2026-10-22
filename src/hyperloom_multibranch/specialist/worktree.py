@@ -12,6 +12,7 @@ against its head, a patch the toolbox applies where it applies every other.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -22,6 +23,7 @@ from pathlib import Path
 from hyperloom.measure.compile import (
     COMPONENT_LAYOUTS,
     ComponentLayout,
+    PackageBase,
     PackageLocator,
     UnsupportedComponentError,
     locate_installed_package,
@@ -41,10 +43,37 @@ _GIT_IDENTITY = {
 }
 _FIXED_CONFIG = ("-c", "core.autocrlf=false", "-c", "core.safecrlf=false", "-c", "diff.noprefix=false")
 _STAGE = ("add", "--all", "--")
+_QUIET = "--quiet"
 
 
 class WorktreeError(RuntimeError):
     """A git command on the source base or a worktree failed."""
+
+
+#: The commit a source build's version names, as setuptools-scm writes it: ``0.5.21.dev20261008+g11b1fb21de``.
+_BUILT_FROM = re.compile(r"\+g([0-9a-f]{7,40})")
+
+
+@dataclass(frozen=True)
+class Upstream:
+    """The repository and the full commit an installed package was built from."""
+
+    repo: str
+    commit: str
+
+
+def installed_upstream(package: PackageBase) -> Upstream | None:
+    """Where ``package`` was built from: the commit its version names, resolved in the checkout it is installed from,
+    and that checkout's origin; ``None`` when the version names no commit or no checkout holds it."""
+    named = _BUILT_FROM.search(package.dist_version or "")
+    if named is None:
+        return None
+    try:
+        commit = _git(package.path, "rev-parse", "--verify", _QUIET, f"{named.group(1)}^{{commit}}").strip()
+        repo = _git(package.path, "remote", "get-url", "origin").strip()
+    except WorktreeError:
+        return None
+    return Upstream(repo, commit) if commit and repo else None
 
 
 def _git(cwd: Path, *args: str, stdin: bytes | None = None) -> str:
@@ -66,7 +95,7 @@ def _git(cwd: Path, *args: str, stdin: bytes | None = None) -> str:
 
 def _commit_all(cwd: Path, message: str) -> None:
     _git(cwd, *_STAGE)
-    _git(cwd, "commit", "--quiet", "--allow-empty", "-m", message)
+    _git(cwd, "commit", _QUIET, "--allow-empty", "-m", message)
 
 
 class SourceBase:
@@ -162,7 +191,7 @@ class BranchWorktree:
 
     def _reset(self, commit: str) -> None:
         _git(self.path, "reset", "--hard", commit)
-        _git(self.path, "clean", "-fdx", "--quiet")
+        _git(self.path, "clean", "-fdx", _QUIET)
 
     def _staged_diff(self, component: str, *options: str) -> str:
         layout = self._layouts.get(component)
@@ -172,4 +201,14 @@ class BranchWorktree:
         return _git(self.path, "diff", "--cached", *options, "HEAD", "--", layout.upstream_prefix)
 
 
-__all__ = ["BASE_BRANCH", "HEAD_SUBJECT", "SKIPPED", "BranchWorktree", "Changes", "SourceBase", "WorktreeError"]
+__all__ = [
+    "BASE_BRANCH",
+    "HEAD_SUBJECT",
+    "SKIPPED",
+    "BranchWorktree",
+    "Changes",
+    "SourceBase",
+    "Upstream",
+    "WorktreeError",
+    "installed_upstream",
+]

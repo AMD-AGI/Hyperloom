@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
+from dataclasses import replace
 from typing import Any
 
 from hyperloom.contracts.recipe import ComponentChange, RecipeDelta
@@ -26,7 +27,7 @@ from hyperloom.measure.compile import (
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import SCOPE_SPECIALIST
 from hyperloom_multibranch.specialist.precheck import CheckFailed, check_change
-from hyperloom_multibranch.specialist.worktree import BranchWorktree
+from hyperloom_multibranch.specialist.worktree import BranchWorktree, installed_upstream
 
 #: The worktree of a branch; the runtime adds it before the branch's specialist first runs.
 WorktreeFor = Callable[[str], BranchWorktree]
@@ -78,9 +79,12 @@ def register_worktree_tools(
     )
     server.register(
         "worktree_patch",
-        description="Store your worktree's change to one component as a patch; returns the delta and parent to test.",
+        description=(
+            "Store your worktree's change to one component as a patch; returns the delta and parent to test. A component "
+            "new on your head gets the upstream commit its installed package was built from."
+        ),
         schema=_PATCH,
-        handler=_patch(repo, worktrees),
+        handler=_patch(repo, worktrees, locator),
         **own,
     )
 
@@ -110,7 +114,9 @@ def _check(worktrees: WorktreeFor, locator: PackageLocator) -> Callable[[dict[st
     return handle
 
 
-def _patch(repo: ExperimentRepo, worktrees: WorktreeFor) -> Callable[[dict[str, Any], CallContext], Any]:
+def _patch(
+    repo: ExperimentRepo, worktrees: WorktreeFor, locator: PackageLocator
+) -> Callable[[dict[str, Any], CallContext], Any]:
     async def handle(arguments: dict[str, Any], ctx: CallContext) -> dict[str, Any]:
         branch, component = ctx.principal.branch, arguments["component"]
         worktree = worktrees(branch)
@@ -123,8 +129,18 @@ def _patch(repo: ExperimentRepo, worktrees: WorktreeFor) -> Callable[[dict[str, 
         if not text:
             raise ToolError(f"your worktree has no change to {component}")
         ref = await repo.store_patch(component, text)
-        delta = RecipeDelta(components=(ComponentChange(component, add_patches=(ref,)),))
-        return {"parent_commit": head, "patch": ref.to_document(), "delta": delta.to_document()}
+        change = ComponentChange(component, add_patches=(ref,))
+        taken: dict[str, Any] = {"parent_commit": head, "patch": ref.to_document()}
+        if all(present.component != component for present in (await repo.read_recipe(head)).components):
+            upstream = await asyncio.to_thread(installed_upstream, locator(COMPONENT_LAYOUTS[component]))
+            if upstream is None:
+                taken["note"] = (
+                    f"{component} is new on your head and its installed package names no commit it was built from: "
+                    "set upstream_repo and upstream_ref in the delta to the repository and full commit it came from"
+                )
+            else:
+                change = replace(change, upstream_repo=upstream.repo, upstream_ref=upstream.commit)
+        return {**taken, "delta": RecipeDelta(components=(change,)).to_document()}
 
     return handle
 
