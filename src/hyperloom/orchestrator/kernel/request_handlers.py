@@ -2124,11 +2124,9 @@ async def _capture_block_fp8_profile_shapes(run: _ShapeCaptureRun, state: Any, p
 
     task_params = _capture_task_params(run, state, payload)
     task_params["workspace_path"] = str(run.capture_dir / "tracelens")
-    last_baseline = getattr(state, "last_baseline", None)
-    if isinstance(last_baseline, dict):
-        benchmark_script = str(last_baseline.get("benchmark_script") or "").strip()
-        if benchmark_script:
-            task_params["benchmark_script"] = benchmark_script
+    benchmark_script = state.accepted_baseline_script()
+    if benchmark_script:
+        task_params["benchmark_script"] = benchmark_script
     benchmark_result, fault = await _served_capture_workload(
         RooflineExecutor(shared_state=state), run, state, task_params
     )

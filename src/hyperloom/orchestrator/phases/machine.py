@@ -22,7 +22,6 @@ log = _logging.getLogger(__name__)
 # SWEEP budget exits end the run for lack of time; every other CLOSE transition reason is itself a stop reason.
 _BUDGET_EXIT_STOP_REASONS = {
     "sweep_budget_exhausted": "time_exhausted",
-    "sweep_budget_cap": "time_exhausted",
 }
 
 # The FRAMEWORK_AGENT exit reason for a plateau or an LLM hint; budget and terminal exits never wait.

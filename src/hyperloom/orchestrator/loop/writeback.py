@@ -80,7 +80,7 @@ from ..kernel.geak_config import (
     _geak_sweep_measured_tput,
     _normalize_geak_overlay_dir,
 )
-from ..state.round_store import ABANDONED, BOOTED, FAILED
+from ..state.round_store import ABANDONED, FAILED
 from ..state.task_registry import Task
 from ..actions.executors.benchmark_result import is_valid_measurement
 from ..actions.executors.integrate_patch import KEEP_STATUSES
@@ -96,6 +96,7 @@ from ..actions.executors._accuracy_gate import (
     accuracy_passed,
 )
 from ..knowledge.agent_kb import PatchKB
+from .launch_controls import kept_launch_controls
 from .proposals import PendingProposal
 from ..measurement.integrate_performance import integrate_measurement_fields
 from ..measurement.runtime_findings import KEEP_REASON_CORRECTNESS_FIX
@@ -1700,9 +1701,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
         # next round's anchor has no snapshot, and the session degrades to
         # output grading permanently after the first KEEP.
         current_best.update(graded_axes_of(cand_source))
-        for _ctrl_key in ("remove_args", "unset_envs", "args_mode"):
-            if bv.get(_ctrl_key):
-                current_best[_ctrl_key] = bv.get(_ctrl_key)
+        current_best.update(kept_launch_controls(bv, previous))
         if bv.get("effective_extra_server_args"):
             current_best["effective_extra_server_args"] = dedupe_extra_server_args(
                 strip_benchmark_harness_flags(bv.get("effective_extra_server_args"))
@@ -1883,17 +1882,6 @@ class WritebackCollaborator(CoordinatorCollaborator):
                     floor = float(getattr(self.shared_state.enablement, "accuracy_floor", 0.0) or 0.0)
                     generation = int(getattr(self.shared_state.enablement, "revalidation_generation", 0) or 0)
                     if accuracy_meets_floor(acc, floor):
-                        self.shared_state.enablement.succeeded = True
-                        self.shared_state.enablement.validation_pending = False
-                        self.shared_state.enablement.revalidation_task_id = ""
-                        self.shared_state.enablement.origin = ""
-                        self.shared_state.enablement.pending = False
-                        await self._coord.enablement_lane.settle_enablement_round(
-                            BOOTED, reason="revalidation_promoted"
-                        )
-                        # This promote is the lane's terminal: the KEEP that
-                        # preceded it was provisional, so the round that landed
-                        # it did not close the lane.
                         enablement_event.record_revalidation_outcome(
                             generation=generation,
                             promoted=True,
@@ -1901,10 +1889,10 @@ class WritebackCollaborator(CoordinatorCollaborator):
                             accuracy=acc,
                             accuracy_floor=floor,
                         )
-                        await self._coord.enablement_lane.close_lane_event(
-                            outcome=enablement_event.OUTCOME_SUCCEEDED,
-                            reason="revalidation promoted",
-                        )
+                        # This promote is the lane's terminal: the KEEP that
+                        # preceded it was provisional, so the round that landed
+                        # it did not close the lane.
+                        await self._coord.enablement_lane.close_booted(reason="revalidation promoted")
                     else:
                         # Sub-floor accuracy on the tracked revalidation: rearm the
                         # specialist loop without clearing the frozen trigger identity.
@@ -1938,8 +1926,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                     self.shared_state.enablement.origin = ""
                     self.shared_state.enablement.pending = False
             else:
-                self.shared_state.enablement.origin = ""
-                self.shared_state.enablement.pending = False
+                await self._coord.enablement_lane.on_baseline_promoted()
             changed = True
         # Performance / accuracy / config / wall-clock describe the anchor run, so they only
         # move when the anchor itself moves; otherwise the recorded reference

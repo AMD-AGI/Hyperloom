@@ -50,7 +50,6 @@ def test_split_env_and_flags_falls_back_on_shlex_error() -> None:
 
 def test_accepted_config_uses_published_env_map_for_revalidation() -> None:
     from hyperloom.orchestrator.actions.executors._grid_base import GridVariant
-    from hyperloom.orchestrator.phases.kernel import KernelPhase
 
     config = {
         "flags": "--mem-fraction-static 0.95",
@@ -58,7 +57,7 @@ def test_accepted_config_uses_published_env_map_for_revalidation() -> None:
         "env_map": {"SGLANG_USE_AITER": "1", "RUN_EVAL": "true", "BACKEND": "sglang"},
         "env_unparsed": ["EXTRA_ENV=).", "--discarded-prose"],
     }
-    flags, envs = KernelPhase._parse_geak_accepted_config({"accepted_config": config})
+    flags, envs = _accepted_config_as_variant(config)
     variant = GridVariant(name="geak_revalidate", extra_server_args=flags, extra_envs=envs)
     assert variant.extra_server_args == config["flags"]
     assert variant.extra_envs == config["env_map"]

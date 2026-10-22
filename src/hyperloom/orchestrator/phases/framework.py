@@ -306,15 +306,9 @@ def predictor_budget(state: SessionView) -> PhaseBudget:
     """The FRAMEWORK clock a predictor request is conditioned on, read when the request goes out."""
     from ..predictor.payload import PhaseBudget
 
-    limits: list[float] = []
     remaining = _phase_state.phase_budget_remaining_seconds(state)
-    if remaining is not None:
-        limits.append(float(remaining))
-    cap = _phase_state.phase_cap_seconds(state)
-    if cap is not None:
-        limits.append(float(cap) - float(_phase_state.phase_cumulative_seconds(state)))
     return PhaseBudget(
-        headroom_sec=min(limits) if limits else None,
+        headroom_sec=None if remaining is None else float(remaining),
         elapsed_sec=_phase_state.phase_elapsed_seconds(state),
         keep_threshold_pct=_phase_state.resolve_keep_threshold(state),
     )
@@ -2799,11 +2793,9 @@ class FrameworkPhase(ProposalBench):
         if state.baseline_config_path:
             params["config_path"] = state.baseline_config_path
         inject_stack_base_params(params, state, anchor=True)
-        last_bl = state.last_baseline or {}
-        if isinstance(last_bl, dict):
-            bs = str(last_bl.get("benchmark_script") or "").strip()
-            if bs:
-                params["benchmark_script"] = bs
+        benchmark_script = state.accepted_baseline_script()
+        if benchmark_script:
+            params["benchmark_script"] = benchmark_script
         lanes, ttl = self._coord.dispatcher.registry_lanes_ttl("explore")
         etask, was_existing = await self.tasks.create_or_return_existing(
             kind="explore",
