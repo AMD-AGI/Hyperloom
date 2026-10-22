@@ -25,6 +25,8 @@ handlers and integrating external components.
 | Style, module layout, tests, shell/YAML, commit hygiene, REUSE, local setup | [`docs/contributing/style-guide.md`](docs/contributing/style-guide.md) |
 | PR checklist / AI review prompt | [`.github/PULL_REQUEST_TEMPLATE.md`](.github/PULL_REQUEST_TEMPLATE.md), [`.github/copilot-instructions.md`](.github/copilot-instructions.md) |
 | Reviewing a PR: the shared procedure and the rules it checks | [`.claude/skills/review-pr/`](.claude/skills/review-pr/) |
+| Before building an optimization: whether it already exists in an open or merged upstream PR, and in your tree | [`.claude/skills/check-prior-art/`](.claude/skills/check-prior-art/) |
+| Before taking up an upstream PR: whether an AMD deployment runs the code it changes, whether your tree has it, and what to do with it | [`.claude/skills/analyze-upstream-pr/`](.claude/skills/analyze-upstream-pr/) |
 
 Ships two packages: `src/hyperloom/` (the optimizer) and `src/kernelforge/` (the Forge
 kernel backend). Both are exercised in CI.
