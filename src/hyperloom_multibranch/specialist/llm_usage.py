@@ -16,7 +16,7 @@ from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from hyperloom_multibranch.contracts.llm_prices import TokenCounts
+from hyperloom_multibranch.contracts.llm_prices import TokenCounts, price_of
 
 #: The model of calls the log does not name (codex turns): the launch's own model.
 UNNAMED = ""
@@ -60,6 +60,16 @@ def launch_usage(process_log: Path) -> LaunchUsage:
     return LaunchUsage(tokens, session_id)
 
 
+def launch_cost(tokens: Mapping[str, TokenCounts], model: str) -> float | None:
+    """What a launch's calls of :attr:`LaunchUsage.tokens` cost at the gateway's prices, a call the log names no model
+    of priced as ``model``'s; ``None`` when one of their models has no price."""
+
+    prices = [(price_of(name or model), counts) for name, counts in tokens.items()]
+    if any(price is None for price, _ in prices):
+        return None
+    return sum(price.cost_usd(counts) for price, counts in prices if price is not None)
+
+
 def _rows(process_log: Path) -> Iterator[Mapping[str, object]]:
     try:
         handle = process_log.open(encoding="utf-8", errors="replace")
@@ -87,4 +97,4 @@ def _count(usage: Mapping[str, object], key: str) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
 
 
-__all__ = ["UNNAMED", "LaunchUsage", "launch_usage"]
+__all__ = ["UNNAMED", "LaunchUsage", "launch_cost", "launch_usage"]

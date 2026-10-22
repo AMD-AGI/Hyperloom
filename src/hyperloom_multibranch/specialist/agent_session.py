@@ -47,14 +47,14 @@ from hyperloom.orchestrator.specialists.agent_runner import (
     InteractiveAgentRunner,
     McpEndpoint,
 )
-from hyperloom_multibranch.contracts.llm_prices import TokenCounts, price_of
+from hyperloom_multibranch.contracts.llm_prices import TokenCounts
 from hyperloom_multibranch.contracts.notebook.interfaces import BranchLogStore, Inbox, UsageSink
 from hyperloom_multibranch.contracts.notebook.records import InboxItem, LlmUsage, NotebookSnapshot, TestRecord
 from hyperloom_multibranch.contracts.notebook.vocab import InboxKind, UsageSource
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import SCOPE_SPECIALIST, SpecialistGrant, SpecialistTokens
 from hyperloom_multibranch.specialist.judging import NOTICE
-from hyperloom_multibranch.specialist.llm_usage import launch_usage
+from hyperloom_multibranch.specialist.llm_usage import launch_cost, launch_usage
 from hyperloom_multibranch.specialist.prompts import launch_prompt, nudge_message, wake_message
 from hyperloom_multibranch.specialist.runtime import SessionCrashed, SessionIdle, SessionStart
 from hyperloom_multibranch.specialist.tools import sync_to_head
@@ -443,15 +443,14 @@ class AgentSession:
             return
         self._recorded = used.tokens
         total = sum(added.values(), TokenCounts())
-        usage = LlmUsage(self._start.branch, UsageSource.SPECIALIST, self._cost(added), total, used.session_id)
+        usage = LlmUsage(
+            self._start.branch,
+            UsageSource.SPECIALIST,
+            launch_cost(added, self._setup.command.model),
+            total,
+            used.session_id,
+        )
         await self._place.notebook.record_llm_usage(usage)
-
-    def _cost(self, tokens: Mapping[str, TokenCounts]) -> float | None:
-        """What a launch's calls cost, ``None`` when one of their models has no price."""
-        prices = [(price_of(model or self._setup.command.model), counts) for model, counts in tokens.items()]
-        if any(price is None for price, _ in prices):
-            return None
-        return sum(price.cost_usd(counts) for price, counts in prices if price is not None)
 
 
 @dataclass
