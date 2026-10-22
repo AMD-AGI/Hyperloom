@@ -42,6 +42,22 @@ _resolve_magpie_python() {
   fi
   printf '%s' "${candidate:-/opt/venv/bin/python}"
 }
+
+# Ray's AMD-GPU detector needs ROCM_PATH to find librocm_smi64.so, and
+# defaults to /opt/rocm -- which a rocm-sdk wheel venv never populates,
+# silently leaving Ray reporting 0 GPUs. No-op on a system ROCm install or an
+# operator-set ROCM_PATH. Mirrors export_rocm_sdk_toolchain_root() in
+# install_baremetal.sh, which this file does not source.
+_resolve_rocm_path() {
+  if [ -n "${ROCM_PATH:-}" ]; then
+    printf '%s' "$ROCM_PATH"
+    return 0
+  fi
+  local root
+  root="$("$PYTHON" -m rocm_sdk path --root 2>/dev/null)" || return 0
+  [ -n "$root" ] && [ -d "$root" ] && printf '%s' "$root"
+}
+ROCM_PATH="$(_resolve_rocm_path)"
 MAGPIE_PYTHON="$(_resolve_magpie_python)"
 # Join PYTHONPATH-style entries in order, dropping empties and duplicates so
 # repeated composition stays idempotent. Earlier arguments win their position.
@@ -979,6 +995,7 @@ write_env_file() {
     [ -n "${MAGPIE_PYTHON:-}" ] && echo "export MAGPIE_PYTHON='${MAGPIE_PYTHON}'"
     [ -n "${PYTHONPATH:-}" ] && echo "export PYTHONPATH='${PYTHONPATH}'"
     [ -n "${INFERENCEX_PATH:-}" ] && echo "export INFERENCEX_PATH='${INFERENCEX_PATH}'"
+    [ -n "${ROCM_PATH:-}" ] && echo "export ROCM_PATH='${ROCM_PATH}'"
     # The kernel-agent drives Claude Code, so only the Anthropic side is
     # exported here; gateway/OpenAI credentials are never persisted.
     [ -n "${_anthropic_url}" ] && _emit_credential_fallback ANTHROPIC_BASE_URL "${_anthropic_url}"
@@ -1041,6 +1058,7 @@ write_env_file() {
   [ -n "${MAGPIE_PYTHON:-}" ] && upsert_dotenv_var MAGPIE_PYTHON "$MAGPIE_PYTHON"
   [ -n "${PYTHONPATH:-}" ] && upsert_dotenv_var PYTHONPATH "$PYTHONPATH"
   [ -n "${INFERENCEX_PATH:-}" ] && upsert_dotenv_var INFERENCEX_PATH "$INFERENCEX_PATH"
+  [ -n "${ROCM_PATH:-}" ] && upsert_dotenv_var ROCM_PATH "$ROCM_PATH"
   # Persist each provider's own canonical vars (write when present, clear when
   # absent) so an operator's .env creds survive a re-install. Never cross-write
   # and never persist gateway aliases, so the two providers stay separated.

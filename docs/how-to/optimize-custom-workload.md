@@ -49,6 +49,46 @@ Neither `--framework-path` nor `--benchmark-scripts-dir` is optional here. With
 no shipped entrypoint to fall back on, a missing path fails at launch rather
 than at the first benchmark.
 
+## Sandboxing with `HYPERLOOM_SANDBOX_MODE=bwrap`
+
+Applies to every `--framework`. Set `HYPERLOOM_SANDBOX_MODE=bwrap` and the CLI
+re-executes itself inside bubblewrap before dispatching, so every subprocess a
+run later spawns -- benchmarks, Ray actors, the Claude Code specialist -- is
+confined without a container. Default is `off`.
+
+| Var | Purpose |
+|---|---|
+| `HYPERLOOM_SANDBOX_WRITABLE` | Colon-separated read-write bind roots: your session workspace, and anything else the run needs to write. |
+| `HYPERLOOM_SANDBOX_READONLY` | Colon-separated read-only bind roots: model weights, datasets, anything the run must not edit. |
+
+Everything else -- the venv, a source checkout on `PYTHONPATH`, the
+interpreter's support files, `/usr /lib /lib64 /bin /sbin /etc /opt /sys`, GPU
+devices -- is detected and bound automatically, including a system ROCm
+install at `/opt/rocm`.
+
+Run `install.sh` before the sandbox is active -- it writes into the venv and
+the checkout, which the sandbox makes read-only -- then launch
+`python -m hyperloom optimize ...` with the env vars above set.
+
+This is an isolation boundary, not a security boundary against hostile code:
+without `--unshare-net` the network is shared with the host, and the GPU
+devices are bound in deliberately.
+
+### Troubleshooting
+
+- **A CLI tool the sandbox launches (Claude Code, codex) is "not found."**
+  `HOME` is forced to an empty tmpfs, so a tool under the real `$HOME` is
+  invisible unless its resolved (non-symlink) directory is also added to
+  `HYPERLOOM_SANDBOX_WRITABLE`/`HYPERLOOM_SANDBOX_READONLY`, or relocated
+  outside `$HOME`.
+- **`ray start`/GCS fails to bind under CI or another sandboxed/containerized
+  launcher:** check that the real network interface is visible
+  (`ip -4 addr show`) from wherever `hyperloom optimize` runs. bwrap shares the
+  host network namespace rather than isolating it, so this usually means an
+  outer sandbox layer is restricting network visibility, not bwrap.
+- **Ray reports 0 GPUs** on a `rocm-sdk` wheel venv: fixed as of this PR
+  (`ROCM_PATH` is now persisted automatically).
+
 ## The code checkout
 
 `--framework-path` is the **code** checkout, which is not the same thing as the
