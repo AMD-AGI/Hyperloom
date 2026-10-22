@@ -1635,22 +1635,19 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         return entry
 
     def _record_integrate_verdict_on_timeline(self, entry: dict[str, Any] | None) -> None:
-        """Mirror one settled integrate verdict onto the KERNEL timeline.
-
-        Args:
-            entry (dict[str, Any] | None): The attempts entry the settlement
-                produced, or ``None`` when nothing settled.
-        """
+        """Mirror one settled integrate verdict onto the KERNEL timeline."""
         if not isinstance(entry, dict):
             return
-        from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import record_integrate_verdict
+        from hyperloom.inference_optimizer.breakdown.recorder import kernel_event
 
         last = (entry.get("attempts") or [{}])[-1]
         last = last if isinstance(last, dict) else {}
         rejected = entry.get("rejected")
-        record_integrate_verdict(
-            macro_cycle=int(getattr(self, "macro_cycle", 0) or 0),
-            integration_id=str(entry.get("integration_id") or ""),
+        cycle = int(getattr(self, "macro_cycle", 0) or 0)
+        integration_id = str(entry.get("integration_id") or "")
+        kernel_event.record_integrate_verdict(
+            macro_cycle=cycle,
+            integration_id=integration_id,
             kernel_id=str(entry.get("kernel_id") or ""),
             decision=str(entry.get("last_decision") or ""),
             status=str(entry.get("last_status") or ""),
@@ -1668,9 +1665,11 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
             extra_server_args=str(entry.get("extra_server_args") or ""),
             basis=str(entry.get("basis") or ""),
             alignment_status=str(entry.get("alignment_status") or ""),
-            # Absent means attributable: every writer that cannot pin the
-            # gain on this one kernel says so explicitly.
+            # Absent means attributable; a writer that cannot pin the gain on this kernel says so.
             gain_attributed=bool(entry.get("validated", True)),
+        )
+        kernel_event.record_integrate_axis(
+            macro_cycle=cycle, integration_id=integration_id, graded_objective=str(last.get("graded_objective") or "")
         )
 
     def record_gemm_tuning(self, result: dict[str, Any]) -> None:
@@ -2129,6 +2128,8 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
                 # TraceLens kernel_category bucket ("" when absent).
                 "kernel_category": entry.get("kernel_category") or "",
                 "gpu_pct": entry.get("gpu_pct"),
+                "call_count": entry.get("call_count"),
+                "duration_us": entry.get("duration_us"),
                 "tracelens_pitem_rank": entry.get("tracelens_pitem_rank"),
                 "impact_score": entry.get("impact_score"),
                 "bottleneck": entry.get("bottleneck"),
@@ -2144,13 +2145,11 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
                 "reusable_native_kernel": reusable,
                 "kernel_contract": entry.get("kernel_contract"),
                 "is_multigpu": entry.get("is_multigpu") is True,
-                # Names the deterministic extractor a row came from, so a reader need not re-derive provenance from
-                # the kernel name alone.
+                # Names the deterministic extractor the row came from.
                 "candidate_source": entry.get("candidate_source") or "",
                 "recommended_backends": entry.get("recommended_backends") or [],
                 "recommended_actions": entry.get("recommended_actions") or [],
-                # Vendor-playbook fields (mori's dispatch+combine is the first case -- see
-                # _vendor_operator_playbooks.py).
+                # Vendor-playbook fields; see _vendor_operator_playbooks.py.
                 "patch_strategy": entry.get("patch_strategy") or "",
                 "vendor_playbook_group_id": entry.get("vendor_playbook_group_id") or "",
                 "vendor_playbook_aggregate_gpu_pct": entry.get("vendor_playbook_aggregate_gpu_pct"),

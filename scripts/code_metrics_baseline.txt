@@ -719,7 +719,7 @@ function-lines src/kernelforge/orchestrator/specialists.py::SpecialistAgent.run 
 function-lines src/kernelforge/rewrite_by_flydsl/applyback.py::_publish_patch 115
 function-lines src/kernelforge/rewrite_by_flydsl/kb.py::write_flydsl_kb_solution 85
 function-lines src/kernelforge/rewrite_by_flydsl/optimize.py::run_optimize 125
-module-lines src/hyperloom/inference_optimizer/breakdown/recorder/kernel_event.py 2160
+module-lines src/hyperloom/inference_optimizer/breakdown/recorder/kernel_event.py 2151
 module-lines src/hyperloom/inference_optimizer/breakdown/schema.py 2681
 module-lines src/hyperloom/inference_optimizer/cli/__init__.py 2569
 module-lines src/hyperloom/inference_optimizer/cli/model_gate.py 1815
@@ -752,7 +752,7 @@ module-lines src/hyperloom/orchestrator/prompts/prompt_builder.py 1205
 module-lines src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py 2556
 module-lines src/hyperloom/orchestrator/specialists/runner.py 1455
 module-lines src/hyperloom/orchestrator/specialists/subprocess_.py 1737
-module-lines src/hyperloom/orchestrator/state/shared_state.py 2549
+module-lines src/hyperloom/orchestrator/state/shared_state.py 2548
 module-lines src/hyperloom/orchestrator/trace_analysis/tracelens_analysis.py 5276
 module-lines src/hyperloom/orchestrator/trace_analysis/tracelens_skill_runner.py 1322
 module-lines src/kernelforge/fusion/author.py 1322
