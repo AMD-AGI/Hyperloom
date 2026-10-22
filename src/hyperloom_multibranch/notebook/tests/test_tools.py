@@ -443,16 +443,21 @@ def test_a_test_tried_without_a_change_says_so_rather_than_reading_as_no_gain() 
     ]
 
 
-def test_the_brief_lists_the_start_commits_largest_ops_with_their_ceilings_before_what_was_tried() -> None:
-    shares = OpShares("c1", "job-1", "", {f"op{index}": float(index) for index in range(1, 8)} | {"gemm": 50.0})
-    profiled = render_brief(StartupBrief("c1", (), op_shares=shares)).splitlines()
+def test_the_brief_lists_every_op_of_at_least_one_percent_with_its_ceiling_before_what_was_tried() -> None:
+    many = OpShares("c1", "job-1", "", {f"op{index}": index / 2 for index in range(1, 20)} | {"gemm": 50.0})
+    few = OpShares("c1", "job-2", "", {"gemm": 50.0, "norm": 1.0, "copy": 0.9})
+    profiled = render_brief(StartupBrief("c1", (), op_shares=many)).splitlines()
 
     assert profiled[1:4] == [
         "Ceilings (largest ops; claim with target_share_pct):",
         "- gemm: 50.0% of GPU time, at most +100.0%",
-        "- op7: 7.0% of GPU time, at most +7.5%",
+        "- op19: 9.5% of GPU time, at most +10.5%",
     ]
     assert len(profiled) == 2 + CEILING_OPS
+    assert render_brief(StartupBrief("c1", (), op_shares=few)).splitlines()[2:] == [
+        "- gemm: 50.0% of GPU time, at most +100.0%",
+        "- norm: 1.0% of GPU time, at most +1.0%",
+    ]
     assert "Ceilings" not in render_brief(StartupBrief("c1", ()))
 
 

@@ -71,7 +71,12 @@ TOOL_PREFIX = "notebook_"
 LINE_CHARS = 160
 MAX_LINES = 20
 MAX_REPLY_CHARS = 4000
-CEILING_OPS = 5
+#: The brief's ceilings name every op of at least :data:`CEILING_MIN_SHARE_PCT` of GPU time, the largest first, up to
+#: this many, so that a direction on small ops can name its targets and claim several together.
+CEILING_OPS = 12
+CEILING_MIN_SHARE_PCT = 1.0
+#: The largest ops a one-line reply names.
+LINE_OPS = 5
 ERROR = "error:"
 UNKNOWN = "unknown"
 #: A test a branch measured with an empty delta measured its parent, so its outcome says nothing about the direction.
@@ -175,7 +180,7 @@ def render_claim(claim: Claim) -> str:
 
 def render_ops(shares: OpShares) -> str:
     largest = ", ".join(
-        f"{op} {share:.1f}% (ceiling +{amdahl_ceiling_pct(share):.1f}%)" for op, share in shares.largest(CEILING_OPS)
+        f"{op} {share:.1f}% (ceiling +{amdahl_ceiling_pct(share):.1f}%)" for op, share in shares.largest(LINE_OPS)
     )
     return clip(f"largest ops on {shares.commit_id} ({shares.job_id}): {largest}")
 
@@ -224,7 +229,11 @@ def _tried(item: TriedDirection) -> str:
 
 def _ceilings(shares: OpShares | None) -> list[str]:
     largest = shares.largest(CEILING_OPS) if shares is not None else ()
-    return [f"- {op}: {share:.1f}% of GPU time, at most +{amdahl_ceiling_pct(share):.1f}%" for op, share in largest]
+    return [
+        f"- {op}: {share:.1f}% of GPU time, at most +{amdahl_ceiling_pct(share):.1f}%"
+        for op, share in largest
+        if share >= CEILING_MIN_SHARE_PCT
+    ]
 
 
 def _unfinished(item: UnfinishedLead) -> str:
@@ -596,6 +605,7 @@ def notebook_tools(
 
 
 __all__ = [
+    "CEILING_MIN_SHARE_PCT",
     "CEILING_OPS",
     "ERROR",
     "FOCUS_LINE",
