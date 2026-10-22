@@ -135,6 +135,10 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         "inputSchema": {"type": _OBJECT, "properties": {**_REASON_PROPERTY}, "required": [_REASON]},
     },
 ]
+# The arguments each tool declares, the only ones a call log records; the reason is logged once, on its own.
+_ARGUMENT_KEYS = {
+    tool["name"]: tuple(key for key in tool["inputSchema"]["properties"] if key != _REASON) for tool in TOOL_DEFINITIONS
+}
 
 
 def _text_argument(arguments: dict[str, Any], name: str, *, required: bool) -> str:
@@ -270,6 +274,14 @@ class KnowledgeWikiServer:
             output = f"{output}\n{result.stderr}" if output.strip() else result.stderr
         return result.returncode, output
 
+    def _require_inside_root(self, page_id: str) -> None:
+        """Refuse a page path outside the checkout: its own script reads a path as given, so only this check holds it."""
+        if self.root is None:
+            return
+        path = Path(page_id.strip())
+        if path.is_absolute() or not (self.root / path).resolve().is_relative_to(self.root):
+            raise InvalidParamsError("page_id must name a page inside the knowledge base")
+
     async def handle_tool_call(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         """Run one tool call, log it, and return its output as MCP content."""
         if name not in TOOL_NAMES:
@@ -278,6 +290,8 @@ class KnowledgeWikiServer:
         reason = _text_argument(arguments, _REASON, required=True)
         if name != GUIDE:
             script_arguments(name, arguments)
+        if name == PAGE:
+            self._require_inside_root(arguments["page_id"])
         started = time.monotonic()
         code, output = await asyncio.to_thread(self._run, name, arguments)
         text, truncated = _bounded(output)
@@ -287,7 +301,7 @@ class KnowledgeWikiServer:
                 "role": self.role,
                 "command": name,
                 _REASON: reason,
-                "args": arguments,
+                "args": {key: arguments[key] for key in _ARGUMENT_KEYS[name] if key in arguments},
                 "exit_code": code,
                 "duration_s": round(time.monotonic() - started, 3),
                 "output_chars": len(output),
