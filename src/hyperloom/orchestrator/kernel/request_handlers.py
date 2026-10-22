@@ -13,6 +13,7 @@ Dispatch table is exposed via :data:`KERNEL_REQUEST_HANDLERS` for test monkey-pa
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import functools
 import importlib
 import importlib.util
@@ -25,11 +26,8 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Mapping
+from typing import Any, Awaitable, Callable, Iterator, Mapping, NamedTuple
 
-from hyperloom.orchestrator.trace_analysis._capture_shapes import (
-    is_capture_fragment as _shared_is_capture_fragment,
-)
 from hyperloom.common import codex_session, llm_config
 from hyperloom.common.checkpoint_quant import checkpoint_format
 from hyperloom.common.coerce import to_str_list
@@ -37,6 +35,9 @@ from hyperloom.common.env import env_bool, is_truthy
 from hyperloom.common.gpu_identity import is_gfx_arch
 from hyperloom.common.io import JsonLineFormat, append_jsonl
 from hyperloom.common.unified_diff import PatchOp, repo_relative_manifest
+from hyperloom.orchestrator.trace_analysis._capture_shapes import (
+    is_capture_fragment as _shared_is_capture_fragment,
+)
 from ..actions.executors._kernel_agent_tool import (
     HandlerResult,
     _maybe_apply_kernel_patch,
@@ -72,10 +73,6 @@ KERNEL_STACK_VALIDATION_KEEP_THRESHOLD_PCT = 1.0
 _FRAMEWORK_APPLYBACK_ARTIFACT_KIND = "framework_applyback"
 _INTEGRATE_ACCURACY_VALIDATION_TIER = "integrate_e2e_accuracy"
 
-# Mirrors the completion ceiling the inferencex eval shim installs; kept in sync
-# so the feasibility check reasons about the budget the eval will really ask for.
-_EVAL_DEFAULT_MAX_TOKENS = 4096
-
 
 def _vram_guarded_server_args(extra_args: str) -> str:
     """Optionally cap ``--gpu-memory-utilization`` for the integrate re-baseline.
@@ -84,12 +81,6 @@ def _vram_guarded_server_args(extra_args: str) -> str:
     ``--gpu-memory-utilization``, append a conservative cap
     (``HL_INTEGRATE_VRAM_UTIL_CAP``, default 0.90) so a re-baseline server cannot
     OOM. A strict no-op when the flag is off or a util is already specified.
-
-    Args:
-        extra_args: The resolved ``extra_server_args`` string for the server.
-
-    Returns:
-        str: ``extra_args`` unchanged, or with a util cap appended.
     """
     if not _honest_flag("HL_INTEGRATE_VRAM_GUARD"):
         return extra_args
@@ -119,13 +110,6 @@ def _confirm_source_imported(source_file: str, workspace: str | Path | None) -> 
     * ``False`` — the server log is readable and the basename never appears
       anywhere (positive evidence the patched file was not exercised).
     * ``None``  — unknown (no source_file, no readable log) — never penalized.
-
-    Args:
-        source_file: Resolved path of the patched kernel source.
-        workspace: Re-baseline workspace dir (holds ``server.log``).
-
-    Returns:
-        bool | None: Tri-state confirmation as described above.
     """
     if not source_file or not workspace:
         return None
@@ -171,14 +155,6 @@ def _confirm_sources_imported(
     * ``None``  — anything mixed. A module can be imported lazily or folded
       into another, so partial evidence is recorded for audit rather than held
       against the patch.
-
-    Args:
-        source_files: Paths the patch wrote; duplicates and blanks are ignored.
-        workspace: Re-baseline workspace dir (holds ``server.log``).
-
-    Returns:
-        tuple[bool | None, dict[str, bool | None]]: The aggregate tri-state and
-            the per-file verdicts kept for audit.
     """
     ordered = list(dict.fromkeys(path for path in source_files if str(path or "").strip()))
     if not ordered:
@@ -224,11 +200,7 @@ def _preapplied_snapshot_payload(payload: dict) -> dict:
     keeps the diff a manifest of changed paths only, which is what lets the
     normal apply run its backup, invalidation, fan-out and rebuild.
 
-    Args:
-        payload (dict): Integrate payload naming the patch and its repo root.
 
-    Returns:
-        dict: The payload with ``snapshot_dir`` pointing at the captured files.
 
     Raises:
         RuntimeError: If the repo root is unknown or a written path is missing
@@ -258,14 +230,6 @@ def _find_selected_kernel_source(state: Any, kernel_id: str) -> str:
 
     Searches ``state.last_trace_analyze`` (preferring ``hot_kernels_top15``,
     falling back to ``hot_kernels``) for the entry matching ``kernel_id``.
-
-    Args:
-        state (Any): SharedState snapshot exposing ``last_trace_analyze``.
-        kernel_id (str): Kernel identifier to match.
-
-    Returns:
-        str: The matching candidate's ``source_file``, or an empty string when
-            no match is found.
     """
     kernels = (
         (state.last_trace_analyze or {}).get("hot_kernels_top15")
@@ -288,6 +252,14 @@ class AmbiguousIntegrationTarget(Exception):
     """
 
 
+def _is_paired_gemm_measurement(payload: Mapping[str, Any]) -> bool:
+    return payload.get("source") == "forge_gemm_paired"
+
+
+def _integrate_mode(payload: Mapping[str, Any]) -> str:
+    return str(payload.get("mode") or "patch").strip().lower()
+
+
 def _fill_integrate_defaults_from_state(
     payload: dict,
     *,
@@ -299,22 +271,17 @@ def _fill_integrate_defaults_from_state(
     bare ``{"kernel_id": ...}`` payloads. Always returns a shallow copy; never
     raises on a missing snapshot.
 
-    Args:
-        payload: The integrate request payload.
-        session_dir: Session directory to load SharedState from.
 
-    Returns:
-        A shallow copy of ``payload`` with defaults filled from state.
 
     Raises:
         AmbiguousIntegrationTarget: The payload carries no ``integration_id``
             that resolves and its ``kernel_id`` matches more than one pending
             record.
     """
-    from ..state.shared_state import SharedState, resolve_grading_anchor_tput
+    from ..state.shared_state import SharedState
 
     resolved = dict(payload)
-    if resolved.get("source") == "forge_gemm_paired":
+    if _is_paired_gemm_measurement(resolved):
         reference = resolved.get("paired_reference")
         if (
             not isinstance(reference, dict)
@@ -328,104 +295,96 @@ def _fill_integrate_defaults_from_state(
         return resolved
     state = SharedState.load_or_init(session_dir)
 
-    integration_id = str(resolved.get("integration_id") or "")
-    pending_records = state.pending_kernel_integration_records()
-    pending_record = next(
-        (record for record in pending_records if str(record.get("integration_id") or "") == integration_id),
-        None,
-    )
+    records = state.pending_kernel_integration_records()
+    pending_record = _pending_integration_record(records, str(resolved.get("integration_id") or ""))
     if pending_record is None and resolved.get("kernel_id"):
-        requested_kernel_id = str(resolved.get("kernel_id") or "")
-        requested_task_key = str(resolved.get("task_group_key") or "")
-        candidates = [
-            record
-            for record in pending_records
-            if str(record.get("kernel_id") or "") == requested_kernel_id
-            and (not requested_task_key or str(record.get("task_group_key") or "") == requested_task_key)
-        ]
-        if len(candidates) > 1:
-            # Siblings of one nomination round share a kernel_id, so picking any
-            # of them would bind the verdict to a record nobody named.
-            raise AmbiguousIntegrationTarget(
-                f"integrate refused: kernel_id={requested_kernel_id!r} matches "
-                f"{len(candidates)} pending integration records; an explicit "
-                "integration_id is required to bind the KEEP/REVERT verdict. "
-                f"candidates={sorted(str(record.get('integration_id') or '') for record in candidates)!r}"
-            )
-        pending_record = candidates[0] if candidates else None
+        pending_record = _sole_pending_record_for_kernel(records, resolved)
     if pending_record is not None:
-        resolved.setdefault(
-            "integration_id",
-            str(pending_record.get("integration_id") or ""),
-        )
-        resolved.setdefault(
-            "kernel_id",
-            str(pending_record.get("kernel_id") or ""),
-        )
-        resolved.setdefault(
-            "task_group_key",
-            str(pending_record.get("task_group_key") or ""),
-        )
-        resolved.setdefault(
-            "identity_route",
-            str(pending_record.get("identity_route") or ""),
-        )
-        resolved.setdefault(
-            "artifact_kind",
-            str(pending_record.get("artifact_kind") or ""),
-        )
-        resolved.setdefault(
-            "integration_validation_status",
-            str(pending_record.get("integration_validation_status") or ""),
-        )
-        # Fusion siblings carry three facts the generic drain cannot infer. The
-        # env flags gate the fused path (unset => the patch measures as the eager
-        # path and REVERTs a real win); the keep bar is fusion-specific; the
-        # action label routes the promoted stack row. Fold them in HERE, before
-        # the extra_envs merge below, so the fused path is active during e2e.
-        if str(pending_record.get("source") or "") == "forge_fusion":
-            resolved.setdefault("source", "forge_fusion")
-            resolved.setdefault("action_label", str(pending_record.get("action_label") or "fusion"))
-            fusion_env_flags = pending_record.get("fusion_env_flags")
-            if isinstance(fusion_env_flags, dict) and fusion_env_flags:
-                requested = resolved.get("extra_envs")
-                requested = dict(requested) if isinstance(requested, dict) else {}
-                # The sibling's own flags win over anything already requested.
-                resolved["extra_envs"] = {**requested, **{str(k): str(v) for k, v in fusion_env_flags.items()}}
-            if "keep_threshold_pct" not in resolved and pending_record.get("keep_threshold_pct") is not None:
-                try:
-                    resolved["keep_threshold_pct"] = float(pending_record.get("keep_threshold_pct"))
-                except (TypeError, ValueError):
-                    pass
+        resolved.setdefault("integration_id", str(pending_record.get("integration_id") or ""))
+        resolved.setdefault("kernel_id", str(pending_record.get("kernel_id") or ""))
+        _fill_pending_record_identity(resolved, pending_record)
+        _fill_fusion_sibling_defaults(resolved, pending_record)
 
     current_best = getattr(state, "current_best", None) or {}
+    _fill_integrate_recipe_from_current_best(resolved, state, current_best)
+    _merge_integrate_extra_envs(resolved, payload, current_best)
+    return resolved
+
+
+def _sole_pending_record_for_kernel(records: list[dict], resolved: Mapping[str, Any]) -> dict | None:
+    requested_kernel_id = str(resolved.get("kernel_id") or "")
+    requested_task_key = str(resolved.get("task_group_key") or "")
+    candidates = [
+        record
+        for record in records
+        if str(record.get("kernel_id") or "") == requested_kernel_id
+        and (not requested_task_key or str(record.get("task_group_key") or "") == requested_task_key)
+    ]
+    if len(candidates) > 1:
+        raise AmbiguousIntegrationTarget(
+            f"integrate refused: kernel_id={requested_kernel_id!r} matches "
+            f"{len(candidates)} pending integration records; an explicit "
+            "integration_id is required to bind the KEEP/REVERT verdict. "
+            f"candidates={sorted(str(record.get('integration_id') or '') for record in candidates)!r}"
+        )
+    return candidates[0] if candidates else None
+
+
+def _fill_fusion_sibling_defaults(resolved: dict, pending_record: Mapping[str, Any]) -> None:
+    if str(pending_record.get("source") or "") != "forge_fusion":
+        return
+    resolved.setdefault("source", "forge_fusion")
+    resolved.setdefault("action_label", str(pending_record.get("action_label") or "fusion"))
+    fusion_env_flags = pending_record.get("fusion_env_flags")
+    if isinstance(fusion_env_flags, dict) and fusion_env_flags:
+        requested = resolved.get("extra_envs")
+        requested = dict(requested) if isinstance(requested, dict) else {}
+        # The sibling's own flags win over anything already requested.
+        resolved["extra_envs"] = {**requested, **{str(k): str(v) for k, v in fusion_env_flags.items()}}
+    if "keep_threshold_pct" not in resolved and pending_record.get("keep_threshold_pct") is not None:
+        try:
+            resolved["keep_threshold_pct"] = float(pending_record.get("keep_threshold_pct"))
+        except (TypeError, ValueError):
+            pass
+
+
+def _fill_integrate_recipe_from_current_best(
+    resolved: dict,
+    state: Any,
+    current_best: Mapping[str, Any],
+) -> None:
+    from ..state.shared_state import resolve_grading_anchor_tput
 
     if float(resolved.get("base_tput", 0.0) or 0.0) <= 0:
-        # ``extra_server_args`` below is filled from current_best, so the
-        # candidate must be graded against that recipe too.
-        bt = resolve_grading_anchor_tput(state)
-        if bt > 0:
-            resolved["base_tput"] = bt
+        anchor_tput = resolve_grading_anchor_tput(state)
+        if anchor_tput > 0:
+            resolved["base_tput"] = anchor_tput
 
     if not resolved.get("config_path"):
-        cfg = getattr(state, "baseline_config_path", "") or ""
-        if cfg:
-            resolved["config_path"] = cfg
+        config_path = getattr(state, "baseline_config_path", "") or ""
+        if config_path:
+            resolved["config_path"] = config_path
 
     if not resolved.get("extra_server_args"):
-        cb_args = current_best.get("extra_server_args") or ""
-        if cb_args:
-            resolved["extra_server_args"] = cb_args
+        inherited_args = current_best.get("extra_server_args") or ""
+        if inherited_args:
+            resolved["extra_server_args"] = inherited_args
     for key in ("remove_args", "unset_envs"):
         resolved[key] = to_str_list(resolved.get(key, current_best.get(key)))
     resolved.setdefault("args_mode", current_best.get("args_mode") or "append")
+
+
+def _merge_integrate_extra_envs(
+    resolved: dict,
+    payload: Mapping[str, Any],
+    current_best: Mapping[str, Any],
+) -> None:
     current_envs = current_best.get("extra_envs")
     current_envs = dict(current_envs) if isinstance(current_envs, dict) else {}
     for key in resolved["unset_envs"]:
         current_envs.pop(key, None)
     requested_envs = resolved.get("extra_envs")
     requested_envs = dict(requested_envs) if isinstance(requested_envs, dict) else {}
-    # A candidate can replace an inherited removal, not its own explicit unset.
     if "unset_envs" not in payload:
         resolved["unset_envs"] = [key for key in resolved["unset_envs"] if key not in requested_envs]
     else:
@@ -465,6 +424,57 @@ def _fill_integrate_snapshot_from_bundle(resolved: dict, bundle: Any) -> None:
             resolved["patch_write_paths"] = write_paths
 
 
+def _pending_integration_record(records: list[dict], integration_id: str) -> dict | None:
+    return next(
+        (record for record in records if str(record.get("integration_id") or "") == integration_id),
+        None,
+    )
+
+
+def _fill_pending_record_identity(resolved: dict, pending_record: Mapping[str, Any]) -> None:
+    for key in ("task_group_key", "identity_route", "artifact_kind", "integration_validation_status"):
+        resolved.setdefault(key, str(pending_record.get(key) or ""))
+
+
+def _bind_integrate_to_pending_record(resolved: dict, pending_record: Mapping[str, Any]) -> None:
+    resolved["kernel_id"] = str(pending_record.get("kernel_id") or resolved.get("kernel_id") or "")
+    resolved["integration_id"] = str(pending_record.get("integration_id") or resolved.get("integration_id") or "")
+    _fill_pending_record_identity(resolved, pending_record)
+    _fill_integrate_snapshot_from_bundle(resolved, pending_record.get("artifact_bundle"))
+    if not resolved.get("snapshot_dir") and pending_record.get("snapshot_dir"):
+        resolved["snapshot_dir"] = str(pending_record["snapshot_dir"])
+    if not resolved.get("patch_path"):
+        resolved["patch_path"] = str(
+            pending_record.get("deploy_patch_path") or pending_record.get("artifact_path") or ""
+        )
+    if not resolved.get("kernel_repo") and pending_record.get("deploy_repo_root"):
+        resolved["kernel_repo"] = str(pending_record["deploy_repo_root"])
+    if not resolved.get("source_file") and pending_record.get("source_file"):
+        resolved["source_file"] = str(pending_record["source_file"])
+
+
+def _missing_integration_inputs(resolved: dict) -> HandlerResult | None:
+    patch_path = str(resolved.get("patch_path") or "").strip()
+    target_file = str(resolved.get("target_file") or resolved.get("source_file") or "").strip()
+    if patch_path and target_file:
+        return None
+    missing = []
+    if not patch_path:
+        missing.append("patch_path")
+    if not target_file:
+        missing.append("target_file/source_file")
+    return {
+        "status": "failed",
+        "error_class": "missing_integration_inputs",
+        "error": "integrate requires an optimized artifact and target source before E2E",
+        "decision": "REVERT",
+        "kernel_id": str(resolved.get("kernel_id") or "") or None,
+        "patch_path": patch_path or None,
+        "target_file": target_file or None,
+        "missing": missing,
+    }
+
+
 def _resolve_integrate_payload(payload: dict, *, session_dir: Path) -> tuple[dict, HandlerResult | None]:
     """Fill integrate inputs from SharedState when Orchestration sends only kernel_id (artifact from the queued integration, source from ``last_trace_analyze``).
 
@@ -480,78 +490,21 @@ def _resolve_integrate_payload(payload: dict, *, session_dir: Path) -> tuple[dic
     from ..state.shared_state import SharedState
 
     resolved = dict(payload)
-    kernel_id = str(resolved.get("kernel_id") or "")
     state = SharedState.load_or_init(session_dir)
-    integration_id = str(resolved.get("integration_id") or "")
-    pending_record = next(
-        (
-            record
-            for record in state.pending_kernel_integration_records()
-            if str(record.get("integration_id") or "") == integration_id
-        ),
-        None,
+    pending_record = _pending_integration_record(
+        state.pending_kernel_integration_records(),
+        str(resolved.get("integration_id") or ""),
     )
     if pending_record is not None:
-        kernel_id = str(pending_record.get("kernel_id") or kernel_id)
-        resolved["kernel_id"] = kernel_id
-        resolved["integration_id"] = str(pending_record.get("integration_id") or integration_id)
-        resolved.setdefault(
-            "task_group_key",
-            str(pending_record.get("task_group_key") or ""),
-        )
-        resolved.setdefault(
-            "identity_route",
-            str(pending_record.get("identity_route") or ""),
-        )
-        # Provenance travels with the artifact so the serving verdict can tell a
-        # reference-only apply-back from one already proven in place.
-        resolved.setdefault(
-            "artifact_kind",
-            str(pending_record.get("artifact_kind") or ""),
-        )
-        resolved.setdefault(
-            "integration_validation_status",
-            str(pending_record.get("integration_validation_status") or ""),
-        )
-        _fill_integrate_snapshot_from_bundle(
-            resolved,
-            pending_record.get("artifact_bundle"),
-        )
-        if not resolved.get("snapshot_dir") and pending_record.get("snapshot_dir"):
-            resolved["snapshot_dir"] = str(pending_record["snapshot_dir"])
-        if not resolved.get("patch_path"):
-            resolved["patch_path"] = str(
-                pending_record.get("deploy_patch_path") or pending_record.get("artifact_path") or ""
-            )
-        if not resolved.get("kernel_repo") and pending_record.get("deploy_repo_root"):
-            resolved["kernel_repo"] = str(pending_record["deploy_repo_root"])
-        if not resolved.get("source_file") and pending_record.get("source_file"):
-            resolved["source_file"] = str(pending_record["source_file"])
+        _bind_integrate_to_pending_record(resolved, pending_record)
+    kernel_id = str(resolved.get("kernel_id") or "")
 
     if kernel_id and not (resolved.get("target_file") or resolved.get("source_file")):
         source = _find_selected_kernel_source(state, kernel_id)
         if source:
             resolved["source_file"] = source
 
-    patch_path = str(resolved.get("patch_path") or "").strip()
-    target_file = str(resolved.get("target_file") or resolved.get("source_file") or "").strip()
-    if not patch_path or not target_file:
-        missing = []
-        if not patch_path:
-            missing.append("patch_path")
-        if not target_file:
-            missing.append("target_file/source_file")
-        return resolved, {
-            "status": "failed",
-            "error_class": "missing_integration_inputs",
-            "error": "integrate requires an optimized artifact and target source before E2E",
-            "decision": "REVERT",
-            "kernel_id": kernel_id or None,
-            "patch_path": patch_path or None,
-            "target_file": target_file or None,
-            "missing": missing,
-        }
-    return resolved, None
+    return resolved, _missing_integration_inputs(resolved)
 
 
 def _normalize_precision(value: Any) -> str:
@@ -567,6 +520,14 @@ def _normalize_precision(value: Any) -> str:
     return str(value or "").strip().lower()
 
 
+def _requested_framework(payload: dict, state: Any, fallback: str = "") -> str:
+    return _requested_setting(payload, state, "framework", fallback).lower()
+
+
+def _requested_setting(payload: dict, state: Any, key: str, fallback: str = "") -> str:
+    return str(payload.get(key) or getattr(state, key, "") or fallback).strip()
+
+
 def _lane_budget(state: Any, lane: str, *, gemm_target_costs_sec: tuple[int, ...] = ()) -> LaneAllocation | None:
     """Derive one lane's share of the phase's remaining time.
 
@@ -574,18 +535,6 @@ def _lane_budget(state: Any, lane: str, *, gemm_target_costs_sec: tuple[int, ...
     the lanes and returns, per lane, both a second budget and how many targets that
     budget can fund. Every lane draws its share from this single probe of session
     state, so the shares stay parts of one whole.
-
-    Args:
-        state: SharedState exposing ``remaining_minutes()``.
-        lane: Which lane's allocation to return.
-        gemm_target_costs_sec: Per-tuner estimates in the router's priority order;
-            only the gemm lane's target ceiling consumes them.
-
-    Returns:
-        That lane's ``LaneAllocation``, or ``None`` when the session is bounded and
-        the share cannot fund one target, so the lane must not start. An unbounded
-        session yields a zero budget and ``max_targets == 0``, which the caller
-        reads as "no allocation to make".
     """
     remaining = _lane_remaining_minutes(state)
     allocation = _allocate_lane_budgets(remaining, gemm_target_costs_sec=gemm_target_costs_sec)[lane]
@@ -606,13 +555,6 @@ def _lane_remaining_minutes(state: Any) -> float | None:
 
     The session clock alone overfunds a phase that has already spent most of its
     own slice, and work planned past the phase exit is cut off partway through.
-
-    Args:
-        state: SharedState exposing ``remaining_minutes()`` and the phase clock.
-
-    Returns:
-        The binding remaining minutes, or ``None`` when the session is unbounded
-        and there is no finite budget to divide.
     """
     from ..phases.machine_state import phase_budget_remaining_seconds
 
@@ -633,15 +575,6 @@ def _gemm_tuning_timeout_sec(payload: dict, *, lane_budget_sec: int = 0) -> int:
     ``HYPERLOOM_GEMM_TUNING_TIMEOUT_SEC`` env var -- both operator inputs, so both
     outrank a derived budget -- then the lane's share of the phase, then the module
     default; the result is floored at 60 seconds.
-
-    Args:
-        payload (dict): Request payload that may carry ``timeout_sec``.
-        lane_budget_sec (int): The gemm lane's share of the phase. ``0`` means there
-            is no share to take, as in an unbounded session, and keeps the module
-            default rather than collapsing an unattended lane to a zero-second timeout.
-
-    Returns:
-        int: The resolved timeout in seconds (>= 60).
     """
     raw = payload.get("timeout_sec") or os.environ.get(
         "HYPERLOOM_GEMM_TUNING_TIMEOUT_SEC",
@@ -670,22 +603,6 @@ def _gemm_router_targets(
 
     The router is the only place a per-tuner runtime estimate exists, and it
     returns them already in the execution order the gemm lane ceiling assumes.
-
-    Args:
-        model_path (str): Local model directory the router profiles.
-        framework (str): Routed forge framework (``sglang``/``vllm``/``vllm-aiter``).
-        precision (str): Resolved precision label.
-        quant_type (str): Resolved quantisation type.
-        gpu_type (str): Target GPU identifier.
-        kernel_signature_log (str): Server log used to detect 1-stage ASM.
-        has_untuned_csv (bool): Whether an untuned CSV shape source was resolved.
-        has_shapes_json (bool): Whether any JSON shape source was resolved.
-        has_tunableop_input (bool): Whether TunableOp rows were resolved.
-
-    Returns:
-        tuple[tuple[str, int], ...]: ``(tuner name, seconds)`` per runnable tuner in
-            priority order, or an empty tuple when the router cannot be consulted,
-            which leaves the lane ceiling on its own per-target default.
     """
     try:
         from kernelforge.gemm_tune.model_analyzer import analyze_model
@@ -814,14 +731,6 @@ def _gemm_tuning_workspace(payload: dict, *, session_dir: Path) -> Path:
     Honors an explicit ``payload['workspace_path']``; otherwise builds a path
     under ``<session_dir>/runs/gemm_tuning/`` keyed by ``task_id`` /
     ``request_id`` (or a timestamped fallback).
-
-    Args:
-        payload (dict): Request payload that may carry ``workspace_path``,
-            ``task_id`` or ``request_id``.
-        session_dir (Path): Session directory used to build the default path.
-
-    Returns:
-        Path: The resolved (not yet created) workspace directory.
     """
     raw = payload.get("workspace_path")
     if raw:
@@ -972,15 +881,12 @@ def _resolve_forge_precision_and_quant(state, payload: dict) -> tuple[str, str]:
     """
     from hyperloom.inference_optimizer.roofline_ceiling import _parse_server_arg, resolve_runtime_workload
 
-    framework = str(payload.get("framework") or getattr(state, "framework", "") or "").strip().lower()
+    quant_type = str(payload.get("quant_type") or "auto").strip()
 
     if payload.get("precision"):
         precision = _normalize_precision(payload["precision"])
-        quant_type = str(payload.get("quant_type") or "auto").strip()
         if precision == "fp8" and quant_type.lower() == "auto":
-            model_path = str(payload.get("model_path") or getattr(state, "model_path", "") or "").strip()
-            gpu_type = str(payload.get("gpu_type") or getattr(state, "gpu_type", "") or "").strip()
-            quant_type = _resolve_fp8_quant_type(model_path, gpu_type, framework)
+            quant_type = _requested_fp8_quant_type(state, payload)
         return precision, quant_type
 
     # Resolve from actual server args (baseline yaml + current_best overlay).
@@ -1001,9 +907,7 @@ def _resolve_forge_precision_and_quant(state, payload: dict) -> tuple[str, str]:
         if per_token_signal:
             quant_type = "per_token"
         else:
-            model_path = str(payload.get("model_path") or getattr(state, "model_path", "") or "").strip()
-            gpu_type = str(payload.get("gpu_type") or getattr(state, "gpu_type", "") or "").strip()
-            quant_type = _resolve_fp8_quant_type(model_path, gpu_type, framework)
+            quant_type = _requested_fp8_quant_type(state, payload)
         return precision, quant_type
 
     if quantization_arg in ("fp4", "mxfp4"):
@@ -1013,16 +917,22 @@ def _resolve_forge_precision_and_quant(state, payload: dict) -> tuple[str, str]:
     # is one label for layers the checkpoint can store differently (MXFP4 experts, fp8 attention), and forge can tell
     # them apart only when it is left to route each lane itself.
     precision = _normalize_precision(state.precision)
-    quant_type = str(payload.get("quant_type") or "auto").strip()
-    model_path = str(payload.get("model_path") or getattr(state, "model_path", "") or "").strip()
+    model_path = _requested_setting(payload, state, "model_path")
     if precision and precision == checkpoint_format((_read_model_config(model_path) or {}).get("quantization_config")):
         return "auto", quant_type
     if not precision:
         precision = "bf16"
     if precision == "fp8" and quant_type.lower() == "auto":
-        gpu_type = str(payload.get("gpu_type") or getattr(state, "gpu_type", "") or "").strip()
-        quant_type = _resolve_fp8_quant_type(model_path, gpu_type, framework)
+        quant_type = _requested_fp8_quant_type(state, payload)
     return precision, quant_type
+
+
+def _requested_fp8_quant_type(state, payload: dict) -> str:
+    return _resolve_fp8_quant_type(
+        _requested_setting(payload, state, "model_path"),
+        _requested_setting(payload, state, "gpu_type"),
+        _requested_framework(payload, state),
+    )
 
 
 #: An aiter dispatch line, hit or miss. Either one proves the process actually
@@ -1348,14 +1258,13 @@ def _resolve_forge_shapes(
     candidates: list[str] = []
 
     # Prefer explicit artifact fields when TraceLens exposes them.
-    for key in ("shapes_json", "shapes_path"):
-        raw = str(last_trace.get(key) or "").strip()
-        if raw:
-            candidates.append(raw)
     artifact_paths = last_trace.get("artifact_paths")
-    if isinstance(artifact_paths, dict):
-        for key in ("shapes_json", "shapes", "gemm_shapes_json"):
-            raw = str(artifact_paths.get(key) or "").strip()
+    for source, keys in (
+        (last_trace, ("shapes_json", "shapes_path")),
+        (artifact_paths if isinstance(artifact_paths, dict) else {}, ("shapes_json", "shapes", "gemm_shapes_json")),
+    ):
+        for key in keys:
+            raw = str(source.get(key) or "").strip()
             if raw:
                 candidates.append(raw)
     # Fallback: check beside candidates_path.
@@ -1860,23 +1769,6 @@ def _align_forge_shapes_for_aiter(
     return out, {**report, "applied": True, "source_shapes_json": shapes_json}
 
 
-_VLLM_BLOCK_FP8_TRACE_OPS = (
-    "w8a8_triton_block_scaled_mm",
-    "rocm_aiter_gemm_a8w8_blockscale",
-    "rocm_aiter_triton_gemm_a8w8_blockscale",
-)
-
-
-def _is_vllm_block_fp8(precision: str, quant_type: str) -> bool:
-    """Return whether vLLM runs the block-scaled FP8 linear kernel path."""
-    return precision == "fp8" and quant_type.strip().lower() in {
-        "blockscale",
-        "block_scale",
-        "a8w8_blockscale",
-        "fp8_blockscale",
-    }
-
-
 #: Markers that identify which kernels aiter is serving, read off a server log.
 #: ``bf16_tuned_gemm.csv`` means dense linears resolve through
 #: ``aiter/tuned_gemm.py`` (Forge's ``sglang_dense_bf16`` writes that table via
@@ -2196,6 +2088,175 @@ def _warn_if_moe_routing_is_coarser_than_the_log(server_log: str, flags: dict[st
         )
 
 
+async def _served_capture_workload(
+    executor: Any,
+    run: _ShapeCaptureRun,
+    capture_state: Any,
+    task_params: dict[str, Any],
+) -> tuple[dict[str, Any], HandlerResult | None]:
+    from ..loop.sub_agent_runner import RunnerContext
+    from ..state.task_registry import Task
+
+    ctx = RunnerContext(
+        task=Task(
+            task_id=run.task_id,
+            kind="gemm_shape_capture",
+            state="running",
+            params=task_params,
+            idempotency_key=f"{run.task_id}-run",
+        ),
+        lease=None,
+    )
+    ctx.extra = {
+        "shared_state": capture_state,
+        "session_dir": run.session_dir,
+        "workspace": run.capture_dir,
+    }
+    try:
+        benchmark_result = await executor(ctx)
+    except Exception as exc:  # noqa: BLE001 - convert capture launch faults to a stable result
+        return {}, _shape_capture_failure(f"vLLM TunableOp shape capture raised {exc!r}", run.capture_dir)
+    return (benchmark_result if isinstance(benchmark_result, dict) else {}), None
+
+
+async def _capture_block_fp8_profile_shapes(run: _ShapeCaptureRun, state: Any, payload: dict) -> HandlerResult:
+    from ..actions.executors.roofline import RooflineExecutor
+
+    task_params = _capture_task_params(run, state, payload)
+    task_params["workspace_path"] = str(run.capture_dir / "tracelens")
+    last_baseline = getattr(state, "last_baseline", None)
+    if isinstance(last_baseline, dict):
+        benchmark_script = str(last_baseline.get("benchmark_script") or "").strip()
+        if benchmark_script:
+            task_params["benchmark_script"] = benchmark_script
+    benchmark_result, fault = await _served_capture_workload(
+        RooflineExecutor(shared_state=state), run, state, task_params
+    )
+    if fault is not None:
+        return fault
+
+    steady_state_trace = str(benchmark_result.get("steady_state_trace") or "").strip()
+    shapes_json, shape_count = "", 0
+    if steady_state_trace:
+        shapes_json, shape_count = _extract_vllm_block_fp8_profile_shapes(
+            Path(steady_state_trace),
+            output_dir=run.capture_dir,
+        )
+    if benchmark_result.get("status") in {"succeeded", "recovered"} and shape_count > 0:
+        return {
+            "status": "ok",
+            "shapes_json": shapes_json,
+            "shape_capture_workspace": str(run.capture_dir),
+            "shape_count": shape_count,
+            "capture_mode": "block_fp8_profile",
+            "source_profile_trace": steady_state_trace,
+        }
+    return _shape_capture_failure(
+        f"vLLM block-FP8 profile capture produced no structured GEMM shapes{_benchmark_failure_detail(benchmark_result)}",
+        run.capture_dir,
+        shape_count=shape_count,
+        capture_mode="block_fp8_profile",
+    )
+
+
+async def _capture_tunableop_recording(run: _ShapeCaptureRun, state: Any, payload: dict) -> HandlerResult:
+    import copy
+
+    from ..actions.executors.baseline import BaselineExecutor
+
+    config_path = str(payload.get("config_path") or getattr(state, "baseline_config_path", "") or "").strip()
+    if not config_path or not Path(config_path).is_file():
+        return _shape_capture_failure(
+            "vLLM TunableOp shape capture requires an existing baseline_config_path",
+            run.capture_dir,
+        )
+    try:
+        capture_port = _resolve_shape_capture_port(payload.get("shape_capture_port"))
+    except ValueError as exc:
+        return _shape_capture_failure(str(exc), run.capture_dir)
+
+    try:
+        timeout_sec = int(
+            payload.get("shape_capture_timeout_sec")
+            or os.environ.get("HYPERLOOM_GEMM_SHAPE_CAPTURE_TIMEOUT_SEC")
+            or _DEFAULT_CAPTURE_TIMEOUT_SEC
+        )
+    except (TypeError, ValueError):
+        timeout_sec = _DEFAULT_CAPTURE_TIMEOUT_SEC
+
+    # unset_envs is applied after extra_envs, so any PYTORCH_TUNABLEOP_* name left here strips the recording.
+    kept_unset = [name for name in run.unset_envs if not name.startswith("PYTORCH_TUNABLEOP_")]
+    task_params = _capture_task_params(run, state, payload)
+    task_params.update(
+        {
+            "extra_envs": _tunableop_recording_envs(run.envs, capture_port, run.capture_dir),
+            "unset_envs": [*kept_unset, "HL_TUNABLEOP_MODE", "HL_TUNABLEOP_FILE", "HL_TUNABLEOP_VERBOSE"],
+            "remove_args": [*run.remove_args, "--port"],
+            "config_path": config_path,
+            "timeout_sec": max(60, timeout_sec),
+            "baseline_double_run": False,
+        }
+    )
+    capture_state = copy.deepcopy(state)
+    capture_state.baseline_eager_fallback = False
+    benchmark_result, fault = await _served_capture_workload(
+        BaselineExecutor(session_dir=run.session_dir, shared_state=capture_state),
+        run,
+        capture_state,
+        task_params,
+    )
+    if fault is not None:
+        return fault
+
+    untuned_base = run.capture_dir / _TUNABLEOP_UNTUNED_NAME
+    row_count = _merge_tunableop_untuned_files(untuned_base)
+    if benchmark_result.get("status") == "succeeded" and row_count > 0:
+        return {
+            "status": "ok",
+            "tunableop_input": str(untuned_base),
+            "shape_capture_workspace": str(run.capture_dir),
+            "shape_count": row_count,
+        }
+    try:
+        untuned_base.unlink(missing_ok=True)
+    except OSError:
+        log.debug("shape capture: failed to remove incomplete TunableOp recording %s", untuned_base, exc_info=True)
+    return _shape_capture_failure(
+        f"vLLM TunableOp shape capture produced no complete workload recording"
+        f"{_benchmark_failure_detail(benchmark_result)}",
+        run.capture_dir,
+        shape_count=row_count,
+    )
+
+
+#: Filenames PyTorch TunableOp reads and writes inside one capture directory.
+_TUNABLEOP_UNTUNED_NAME = "tunableop_untuned.csv"
+
+
+_TUNABLEOP_RESULTS_NAME = "tunableop_results.csv"
+
+
+#: How long a recording pass may serve the workload when nothing else says.
+_DEFAULT_CAPTURE_TIMEOUT_SEC = 1800
+
+
+#: The vLLM operators whose profiled arguments carry a block-FP8 GEMM's shape.
+_VLLM_BLOCK_FP8_TRACE_OPS = (
+    "w8a8_triton_block_scaled_mm",
+    "rocm_aiter_gemm_a8w8_blockscale",
+    "rocm_aiter_triton_gemm_a8w8_blockscale",
+)
+
+
+def _is_vllm_block_fp8(precision: str, quant_type: str) -> bool:
+    return precision == "fp8" and quant_type.strip().lower() in {
+        "blockscale",
+        "block_scale",
+        "a8w8_blockscale",
+        "fp8_blockscale",
+    }
+
+
 def _vllm_block_fp8_profile_capture_required(
     *,
     framework: str,
@@ -2495,73 +2556,45 @@ def _merge_tunableop_untuned_files(base_path: Path) -> int:
     return len(rows)
 
 
-async def _capture_vllm_tunableop_shapes(
+class _ShapeCaptureRun(NamedTuple):
+    capture_dir: Path
+    session_dir: Path
+    task_id: str
+    envs: dict[str, str]
+    server_args: str
+    remove_args: list[str]
+    unset_envs: list[str]
+    args_mode: str
+
+
+def _shape_capture_failure(
+    error: str,
+    capture_dir: Path,
     *,
-    state: Any,
-    session_dir: Path,
-    payload: dict,
-    workspace: Path,
+    shape_count: int | None = None,
+    capture_mode: str = "",
 ) -> HandlerResult:
-    """Record real vLLM GEMMs using TunableOp or a block-FP8 profiler trace."""
-    from ..actions.executors.baseline import BaselineExecutor
-    from ..loop.sub_agent_runner import RunnerContext
-    from ..state.task_registry import Task
-
-    capture_dir = workspace / "shape_capture" / f"attempt-{time.time_ns()}"
-    capture_dir.mkdir(parents=True, exist_ok=True)
-    untuned_base = capture_dir / "tunableop_untuned.csv"
-    results_base = capture_dir / "tunableop_results.csv"
-    profile_mode = payload.get("_shape_capture_mode") == "block_fp8_profile"
-
-    config_path = str(payload.get("config_path") or getattr(state, "baseline_config_path", "") or "").strip()
-    if not profile_mode and (not config_path or not Path(config_path).is_file()):
-        return {
-            "status": "failed",
-            "decision": "REVERT",
-            "requires_e2e_validation": False,
-            "error_class": "shape_capture_failed",
-            "error": "vLLM TunableOp shape capture requires an existing baseline_config_path",
-            "shape_capture_workspace": str(capture_dir),
-        }
-
-    current_best = getattr(state, "current_best", None) or {}
-    inherited_envs = dict(current_best.get("extra_envs") or {})
-    inherited_envs.update(dict(payload.get("extra_envs") or {}))
-    capture_envs = {
-        str(key): str(value)
-        for key, value in inherited_envs.items()
-        if profile_mode or not str(key).startswith(("PYTORCH_TUNABLEOP_", "HL_TUNABLEOP_"))
+    failure: HandlerResult = {
+        "status": "failed",
+        "decision": "REVERT",
+        "requires_e2e_validation": False,
+        "error_class": "shape_capture_failed",
+        "error": error,
+        "shape_capture_workspace": str(capture_dir),
     }
-    if not profile_mode:
-        try:
-            capture_port = _resolve_shape_capture_port(payload.get("shape_capture_port"))
-        except ValueError as exc:
-            return {
-                "status": "failed",
-                "decision": "REVERT",
-                "requires_e2e_validation": False,
-                "error_class": "shape_capture_failed",
-                "error": str(exc),
-                "shape_capture_workspace": str(capture_dir),
-            }
-        capture_envs.update(
-            {
-                "PORT": str(capture_port),
-                "RUN_EVAL": "false",
-            }
-        )
-        capture_envs.update(
-            {
-                "HL_TUNABLEOP_MODE": "",
-                "HL_TUNABLEOP_FILE": "",
-                "HL_TUNABLEOP_VERBOSE": "",
-                "PYTORCH_TUNABLEOP_ENABLED": "1",
-                "PYTORCH_TUNABLEOP_TUNING": "0",
-                "PYTORCH_TUNABLEOP_RECORD_UNTUNED": "1",
-                "PYTORCH_TUNABLEOP_UNTUNED_FILENAME": str(untuned_base),
-                "PYTORCH_TUNABLEOP_FILENAME": str(results_base),
-            }
-        )
+    if shape_count is not None:
+        failure["shape_count"] = shape_count
+    if capture_mode:
+        failure["capture_mode"] = capture_mode
+    return failure
+
+
+def _benchmark_failure_detail(benchmark_result: Mapping[str, Any]) -> str:
+    error = str(benchmark_result.get("error") or benchmark_result.get("error_class") or "").strip()
+    return f": {error}" if error else ""
+
+
+def _fill_capture_workload_envs(envs: dict[str, str], state: Any, payload: dict) -> None:
     for env_name, state_name in (
         ("TP", "tp"),
         ("CONC", "conc"),
@@ -2571,7 +2604,7 @@ async def _capture_vllm_tunableop_shapes(
     ):
         value = payload.get(state_name)
         if value in (None, ""):
-            value = capture_envs.get(env_name)
+            value = envs.get(env_name)
         if value in (None, ""):
             value = getattr(state, state_name, 0)
         try:
@@ -2579,178 +2612,90 @@ async def _capture_vllm_tunableop_shapes(
         except (TypeError, ValueError):
             resolved = 0
         if resolved > 0:
-            capture_envs[env_name] = str(resolved)
+            envs[env_name] = str(resolved)
 
-    try:
-        timeout_sec = int(
-            payload.get("shape_capture_timeout_sec")
-            or os.environ.get("HYPERLOOM_GEMM_SHAPE_CAPTURE_TIMEOUT_SEC")
-            or 1800
-        )
-    except (TypeError, ValueError):
-        timeout_sec = 1800
-    timeout_sec = max(60, timeout_sec)
 
-    task_id = f"{str(payload.get('task_id') or workspace.name)}-shape-capture"
-    extra_server_args = (
-        str(payload.get("extra_server_args") or "")
-        if "extra_server_args" in payload
-        else str(current_best.get("extra_server_args") or "")
-    )
+def _shape_capture_run(state: Any, payload: dict, workspace: Path, session_dir: Path) -> _ShapeCaptureRun:
+    capture_dir = workspace / "shape_capture" / f"attempt-{time.time_ns()}"
+    capture_dir.mkdir(parents=True, exist_ok=True)
+    current_best = getattr(state, "current_best", None) or {}
+
+    inherited_envs = dict(current_best.get("extra_envs") or {})
+    inherited_envs.update(dict(payload.get("extra_envs") or {}))
+    envs = {str(key): str(value) for key, value in inherited_envs.items()}
+    _fill_capture_workload_envs(envs, state, payload)
+
     inherited_unset = payload.get("unset_envs", current_best.get("unset_envs")) or []
-    if isinstance(inherited_unset, str):
-        capture_unset_envs = [inherited_unset]
-    else:
-        capture_unset_envs = [str(key) for key in inherited_unset]
-    if not profile_mode:
-        # unset_envs is applied after extra_envs, so any PYTORCH_TUNABLEOP_* name left here (hard-coded or
-        # inherited from the payload or current best) strips the recording and the capture records nothing.
-        capture_unset_envs = [name for name in capture_unset_envs if not name.startswith("PYTORCH_TUNABLEOP_")]
-        capture_unset_envs.extend(["HL_TUNABLEOP_MODE", "HL_TUNABLEOP_FILE", "HL_TUNABLEOP_VERBOSE"])
     inherited_remove = payload.get("remove_args", current_best.get("remove_args")) or []
-    if isinstance(inherited_remove, str):
-        capture_remove_args = [inherited_remove]
-    else:
-        capture_remove_args = [str(arg) for arg in inherited_remove]
-    if not profile_mode:
-        capture_remove_args.append("--port")
+    return _ShapeCaptureRun(
+        capture_dir=capture_dir,
+        session_dir=session_dir,
+        task_id=f"{str(payload.get('task_id') or workspace.name)}-shape-capture",
+        envs=envs,
+        server_args=(
+            str(payload.get("extra_server_args") or "")
+            if "extra_server_args" in payload
+            else str(current_best.get("extra_server_args") or "")
+        ),
+        remove_args=[inherited_remove] if isinstance(inherited_remove, str) else [str(arg) for arg in inherited_remove],
+        unset_envs=[inherited_unset] if isinstance(inherited_unset, str) else [str(key) for key in inherited_unset],
+        args_mode=str(payload.get("args_mode") or current_best.get("args_mode") or "append"),
+    )
+
+
+def _capture_task_params(run: _ShapeCaptureRun, state: Any, payload: dict) -> dict[str, Any]:
     from hyperloom.inference_optimizer.breakdown.recorder.event_ids import INLINE_EVENT_PARAM
     from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import kernel_event_id
 
-    task_params: dict[str, Any] = {
-        "output_dir": str(capture_dir),
+    return {
+        "output_dir": str(run.capture_dir),
         "framework": "vllm",
         "model_path": str(payload.get("model_path") or getattr(state, "model_path", "") or ""),
         "gpu_type": str(payload.get("gpu_type") or getattr(state, "gpu_type", "") or ""),
-        "extra_server_args": extra_server_args,
-        "extra_envs": capture_envs,
-        "remove_args": capture_remove_args,
-        "unset_envs": capture_unset_envs,
-        "args_mode": str(payload.get("args_mode") or current_best.get("args_mode") or "append"),
+        "extra_server_args": run.server_args,
+        "extra_envs": run.envs,
+        "remove_args": run.remove_args,
+        "unset_envs": run.unset_envs,
+        "args_mode": run.args_mode,
         # Either arm of the capture is a sub-step of the KERNEL phase's own
         # event, not a dispatched measurement, so it records into that event
         # rather than leaving one of its own.
         INLINE_EVENT_PARAM: kernel_event_id(int(getattr(state, "macro_cycle", 0) or 0)),
     }
-    if profile_mode:
-        task_params["workspace_path"] = str(capture_dir / "tracelens")
-        last_baseline = getattr(state, "last_baseline", None)
-        if isinstance(last_baseline, dict):
-            benchmark_script = str(last_baseline.get("benchmark_script") or "").strip()
-            if benchmark_script:
-                task_params["benchmark_script"] = benchmark_script
-    else:
-        task_params.update(
-            {
-                "config_path": config_path,
-                "timeout_sec": timeout_sec,
-                "baseline_double_run": False,
-            }
-        )
-    task = Task(
-        task_id=task_id,
-        kind="gemm_shape_capture",
-        state="running",
-        params=task_params,
-        idempotency_key=f"{task_id}-run",
+
+
+def _tunableop_recording_envs(inherited: Mapping[str, str], port: int, capture_dir: Path) -> dict[str, str]:
+    envs = {
+        key: value for key, value in inherited.items() if not key.startswith(("PYTORCH_TUNABLEOP_", "HL_TUNABLEOP_"))
+    }
+    envs.update(
+        {
+            "PORT": str(port),
+            "RUN_EVAL": "false",
+            "HL_TUNABLEOP_MODE": "",
+            "HL_TUNABLEOP_FILE": "",
+            "HL_TUNABLEOP_VERBOSE": "",
+            "PYTORCH_TUNABLEOP_ENABLED": "1",
+            "PYTORCH_TUNABLEOP_TUNING": "0",
+            "PYTORCH_TUNABLEOP_RECORD_UNTUNED": "1",
+            "PYTORCH_TUNABLEOP_UNTUNED_FILENAME": str(capture_dir / _TUNABLEOP_UNTUNED_NAME),
+            "PYTORCH_TUNABLEOP_FILENAME": str(capture_dir / _TUNABLEOP_RESULTS_NAME),
+        }
     )
-    ctx = RunnerContext(task=task, lease=None)
-    import copy
+    return envs
 
-    if profile_mode:
-        capture_state = state
-    else:
-        capture_state = copy.deepcopy(state)
-        capture_state.baseline_eager_fallback = False
-    ctx.extra = {
-        "shared_state": capture_state,
-        "session_dir": session_dir,
-        "workspace": capture_dir,
-    }
 
-    try:
-        if profile_mode:
-            from ..actions.executors.roofline import RooflineExecutor
-
-            benchmark_result = await RooflineExecutor(
-                shared_state=capture_state,
-            )(ctx)
-        else:
-            benchmark_result = await BaselineExecutor(
-                session_dir=session_dir,
-                shared_state=capture_state,
-            )(ctx)
-    except Exception as exc:  # noqa: BLE001 - convert capture launch faults to a stable result
-        return {
-            "status": "failed",
-            "decision": "REVERT",
-            "requires_e2e_validation": False,
-            "error_class": "shape_capture_failed",
-            "error": f"vLLM TunableOp shape capture raised {exc!r}",
-            "shape_capture_workspace": str(capture_dir),
-        }
-
-    if not isinstance(benchmark_result, dict):
-        benchmark_result = {}
-    if profile_mode:
-        steady_state_trace = str(benchmark_result.get("steady_state_trace") or "").strip()
-        if steady_state_trace:
-            shapes_json, shape_count = _extract_vllm_block_fp8_profile_shapes(
-                Path(steady_state_trace),
-                output_dir=capture_dir,
-            )
-        else:
-            shapes_json, shape_count = "", 0
-        if benchmark_result.get("status") in {"succeeded", "recovered"} and shape_count > 0:
-            return {
-                "status": "ok",
-                "shapes_json": shapes_json,
-                "shape_capture_workspace": str(capture_dir),
-                "shape_count": shape_count,
-                "capture_mode": "block_fp8_profile",
-                "source_profile_trace": steady_state_trace,
-            }
-        benchmark_error = str(benchmark_result.get("error") or benchmark_result.get("error_class") or "").strip()
-        detail = f": {benchmark_error}" if benchmark_error else ""
-        return {
-            "status": "failed",
-            "decision": "REVERT",
-            "requires_e2e_validation": False,
-            "error_class": "shape_capture_failed",
-            "error": f"vLLM block-FP8 profile capture produced no structured GEMM shapes{detail}",
-            "shape_capture_workspace": str(capture_dir),
-            "shape_count": shape_count,
-            "capture_mode": "block_fp8_profile",
-        }
-
-    row_count = _merge_tunableop_untuned_files(untuned_base)
-    if benchmark_result.get("status") != "succeeded" or row_count == 0:
-        try:
-            untuned_base.unlink(missing_ok=True)
-        except OSError:
-            log.debug(
-                "shape capture: failed to remove incomplete TunableOp recording %s",
-                untuned_base,
-                exc_info=True,
-            )
-        benchmark_error = str(benchmark_result.get("error") or benchmark_result.get("error_class") or "").strip()
-        detail = f": {benchmark_error}" if benchmark_error else ""
-        return {
-            "status": "failed",
-            "decision": "REVERT",
-            "requires_e2e_validation": False,
-            "error_class": "shape_capture_failed",
-            "error": f"vLLM TunableOp shape capture produced no complete workload recording{detail}",
-            "shape_capture_workspace": str(capture_dir),
-            "shape_count": row_count,
-        }
-
-    return {
-        "status": "ok",
-        "tunableop_input": str(untuned_base),
-        "shape_capture_workspace": str(capture_dir),
-        "shape_count": row_count,
-    }
+async def _capture_vllm_tunableop_shapes(
+    *,
+    state: Any,
+    session_dir: Path,
+    payload: dict,
+    workspace: Path,
+) -> HandlerResult:
+    run = _shape_capture_run(state, payload, workspace, session_dir)
+    if payload.get("_shape_capture_mode") == "block_fp8_profile":
+        return await _capture_block_fp8_profile_shapes(run, state, payload)
+    return await _capture_tunableop_recording(run, state, payload)
 
 
 async def _invoke_forge_gemm_tune(input_payload: dict[str, Any], timeout: int) -> dict[str, Any]:
@@ -2779,6 +2724,380 @@ async def _invoke_forge_gemm_tune(input_payload: dict[str, Any], timeout: int) -
         }
     result = _parse_forge_gemm_sentinel(stdout)
     return result if result is not None else _shape_tool_result(rc, stdout, stderr)
+
+
+def _bridge_forge_decision(
+    result: dict[str, Any],
+    *,
+    raw_model_path: str,
+    session_dir: Path,
+) -> None:
+    micro = str(result.get("micro_decision") or "").strip().lower()
+    if micro == "candidate" and result.get("recommended_env"):
+        result.setdefault("decision", "KEEP")
+        # Make the tuned CSV durable + recipe-portable (mirrors integrate_patch's
+        # source-layer snapshot): copy it into the serving aiter config dir,
+        # repoint the env there, and snapshot it so the KEEP survives with the
+        # recipe instead of referencing the ephemeral tuner-workspace path.
+        # Keep the logical ID here: a resolved HF snapshot basename is a commit
+        # hash, which would make durable artifact names unstable across revisions.
+        _durable_envs, _snap_dir = _persist_forge_gemm_csv_durably(
+            dict(result["recommended_env"]),
+            model_path=raw_model_path,
+            session_dir=session_dir,
+        )
+        result.setdefault("extra_envs", _durable_envs)
+        if _snap_dir:
+            result.setdefault("source_snapshot", _snap_dir)
+        # Derive best_speedup from tuners_run when absent.
+        if "best_speedup" not in result:
+            best = 1.0
+            for t in result.get("tuners_run") or []:
+                if isinstance(t, dict):
+                    sp = float(t.get("best_micro_speedup") or 1.0)
+                    if sp > best:
+                        best = sp
+            if best > 1.0:
+                result["best_speedup"] = best
+        # Micro-only result: E2E validation still needed.
+        result.setdefault("requires_e2e_validation", True)
+    elif micro in ("no_improvement", "skipped"):
+        # Left unadorned on purpose: the wordings below are only legible against it.
+        result.setdefault("decision", "REVERT")
+    elif micro in _FORGE_BARREN_MICRO_DECISIONS:
+        result.setdefault("decision", "REVERT")
+        if micro == "failed":
+            result.setdefault("status", "failed")
+        result.setdefault("error_class", f"forge_{micro}")
+
+
+class _ForgeGemmRun(NamedTuple):
+    session_dir: Path
+    workspace: Path
+    framework: str
+    tuning_framework: str
+    precision: str
+    quant_type: str
+    gpu_type: str
+    tp: int
+    conc: int
+    mp: int
+    model_dir: str
+    model_id: str
+    server_log: str
+    thorough: bool
+
+
+class _ForgeShapeSources(NamedTuple):
+    tokens: str
+    shapes_json: str
+    untuned_csv: str
+    moe_untuned_csv: str
+    moe_key_report: dict[str, Any]
+    tunableop_input: str
+    shapes_manifest: str
+    demand_json: str
+    capture: HandlerResult | None
+
+
+def _requested_existing_file(payload: dict, key: str) -> str:
+    path = str(payload.get(key) or "").strip()
+    return path if _path_is_existing_file(path) else ""
+
+
+def _forge_gemm_run(state: Any, payload: dict, session_dir: Path) -> _ForgeGemmRun:
+    from hyperloom.common.model_paths import resolve_serving_model_path
+    from hyperloom.common.visible_devices import detect_gpu_count
+    from hyperloom.inference_optimizer.model_config_utils import resolve_local_model_dir
+
+    workspace = _gemm_tuning_workspace(payload, session_dir=session_dir)
+    workspace.mkdir(parents=True, exist_ok=True)
+    # Resolve precision from actual runtime, not just session-level state.
+    precision, quant_type = _resolve_forge_precision_and_quant(state, payload)
+
+    # Bootstrap already walked HL_MODEL_BASE and the hub cache to decide what to
+    # serve; probing only the hub cache here would reject a repo id that the
+    # running server resolved fine.
+    model_id = _requested_setting(payload, state, "model_path", os.environ.get("MODEL_PATH") or "")
+    model_dir = resolve_local_model_dir(resolve_serving_model_path(model_id) or model_id) if model_id else None
+
+    tp = int(payload.get("tp") or state.tp or os.environ.get("TP") or 1)
+    # Default mp = all visible GPUs.
+    detected_gpus = detect_gpu_count() or tp
+    mp = int(payload.get("mp") or os.environ.get("FORGE_GEMM_TUNE_MP") or detected_gpus)
+    return _ForgeGemmRun(
+        session_dir=session_dir,
+        workspace=workspace,
+        framework=_requested_framework(payload, state, "sglang"),
+        tuning_framework="",
+        precision=precision,
+        quant_type=quant_type,
+        gpu_type=_requested_setting(payload, state, "gpu_type", os.environ.get("GPU_TYPE") or "mi300x").lower(),
+        tp=tp,
+        conc=int(payload.get("conc") or state.conc or os.environ.get("CONC") or 64),
+        mp=mp,
+        model_dir=str(model_dir) if model_dir is not None else "",
+        model_id=model_id,
+        server_log="",
+        # Exhaustive search when budget allows (>= 24h) and mp >= 4.
+        thorough=bool(float(getattr(state, "max_minutes", 0) or 0) >= 1440 and mp >= 4),
+    )
+
+
+async def _forge_shape_sources(state: Any, payload: dict, run: _ForgeGemmRun) -> _ForgeShapeSources:
+    tokens = _normalize_tokens(payload.get("tokens"))
+    if not tokens and run.server_log:
+        tokens = _normalize_tokens(await asyncio.to_thread(_tokens_from_serving_log, run.server_log))
+        if tokens:
+            log.info("GEMM: derived --tokens=%s from observed M in %s", tokens, run.server_log)
+
+    moe_untuned_csv = _requested_existing_file(payload, "moe_untuned_csv")
+    moe_key_report: dict[str, Any] = {}
+    if not moe_untuned_csv:
+        moe_untuned_csv, moe_key_report = _write_fmoe_untuned_csv_from_log(run.server_log, tokens, run.workspace)
+
+    shapes_json = _normalize_forge_shapes_json(payload.get("shapes_json"), run.workspace)
+    untuned_csv = _requested_existing_file(payload, "untuned_csv")
+    if not shapes_json and not untuned_csv and run.framework != "vllm":
+        shapes_json = _resolve_forge_shapes(state, run.session_dir, require_fresh_profile=True, precision=run.precision)
+        if not shapes_json:
+            untuned_csv = _resolve_forge_untuned_csv(run.session_dir, run.precision, run.quant_type, run.model_dir)
+
+    return _ForgeShapeSources(
+        tokens=tokens,
+        shapes_json=shapes_json,
+        untuned_csv=untuned_csv,
+        moe_untuned_csv=moe_untuned_csv,
+        moe_key_report=moe_key_report,
+        tunableop_input=str(payload.get("tunableop_input") or "").strip(),
+        shapes_manifest="",
+        demand_json=_requested_existing_file(payload, "demand_json"),
+        capture=None,
+    )
+
+
+def _profiled_block_fp8_shapes(
+    state: Any,
+    payload: dict,
+    run: _ForgeGemmRun,
+    sources: _ForgeShapeSources,
+) -> _ForgeShapeSources:
+    if not _vllm_block_fp8_profile_capture_required(
+        framework=run.framework,
+        precision=run.precision,
+        quant_type=run.quant_type,
+        shapes_json=sources.shapes_json,
+        tunableop_input=sources.tunableop_input,
+        dry_run=bool(payload.get("dry_run")),
+    ):
+        return sources
+    traced_shapes = _resolve_forge_shapes(state, run.session_dir, require_fresh_profile=True, precision=run.precision)
+    if traced_shapes:
+        return sources._replace(shapes_json=traced_shapes, untuned_csv="")
+    reused = _reuse_vllm_block_fp8_roofline_shapes(
+        state,
+        workspace=run.workspace,
+        current_workload=state.current_profile_workload_context(payload),
+    )
+    if reused is None:
+        return sources
+    return sources._replace(shapes_json=str(reused["shapes_json"]), untuned_csv="", capture=reused)
+
+
+async def _captured_forge_shapes(
+    state: Any,
+    payload: dict,
+    run: _ForgeGemmRun,
+    sources: _ForgeShapeSources,
+    priced_lane: Any,
+) -> tuple[_ForgeShapeSources, HandlerResult | None]:
+    sources = _profiled_block_fp8_shapes(state, payload, run, sources)
+    block_fp8_capture = _vllm_block_fp8_profile_capture_required(
+        framework=run.framework,
+        precision=run.precision,
+        quant_type=run.quant_type,
+        shapes_json=sources.shapes_json,
+        tunableop_input=sources.tunableop_input,
+        dry_run=bool(payload.get("dry_run")),
+    )
+    # Keyed on the routed framework: a run handed to the AITER tuner family has
+    # no use for a TunableOp recording pass, and paying for one costs a full
+    # extra server boot.
+    tunableop_capture = (
+        _vllm_dense_shape_capture_required(
+            framework=run.tuning_framework,
+            model_path=run.model_dir,
+            shapes_json=sources.shapes_json,
+            tunableop_input=sources.tunableop_input,
+            dry_run=bool(payload.get("dry_run")),
+        )
+        and not block_fp8_capture
+    )
+    if not block_fp8_capture and not tunableop_capture:
+        return sources, None
+    # A capture costs a full extra server boot, wasted on a lane the phase cannot fund once it has the shapes.
+    lane_after_capture = await priced_lane(
+        has_untuned_csv=tunableop_capture and bool(sources.untuned_csv),
+        has_shapes_json=block_fp8_capture,
+        has_tunableop_input=tunableop_capture,
+    )
+    if lane_after_capture is None:
+        return sources, _unfunded_lane_skip(LANE_GEMM)
+
+    capture_payload = dict(payload)
+    if block_fp8_capture:
+        capture_payload["_shape_capture_mode"] = "block_fp8_profile"
+    capture = await _capture_vllm_tunableop_shapes(
+        state=state,
+        session_dir=run.session_dir,
+        payload=capture_payload,
+        workspace=run.workspace,
+    )
+    if capture.get("status") != "ok":
+        return sources, _stamp_forge_gemm_provenance(capture, run)
+    captured = sources._replace(
+        tunableop_input=str(capture.get("tunableop_input") or "").strip(),
+        capture=capture,
+    )
+    captured_shapes = str(capture.get("shapes_json") or "").strip()
+    if not captured_shapes:
+        return captured, None
+    # Forge dense tuners prefer untuned_csv over shapes_json. A fresh profile
+    # capture is workload-matched and must supersede any stale specialist CSV
+    # resolved before the capture pass.
+    return captured._replace(shapes_json=captured_shapes, untuned_csv=""), None
+
+
+async def _forge_dense_shape_manifest(
+    state: Any,
+    payload: dict,
+    run: _ForgeGemmRun,
+    sources: _ForgeShapeSources,
+) -> str:
+    requested = str(payload.get("shapes_manifest") or "").strip()
+    if requested:
+        return requested if _path_is_existing_file(requested) else ""
+    if sources.untuned_csv or sources.shapes_json:
+        log.debug(
+            "GEMM: not scavenging a trace shape manifest; this run already has "
+            "a workload-matched dense-shape source (%s)",
+            "untuned_csv" if sources.untuned_csv else "shapes_json",
+        )
+        return ""
+    # Off the event loop for the same reason: a ``**/`` walk of a session tree
+    # that holds thousands of run artifacts.
+    scavenged = await asyncio.to_thread(_resolve_trace_shape_manifest, state, run.session_dir)
+    return scavenged if _path_is_existing_file(scavenged) else ""
+
+
+def _forge_gemm_tune_input(
+    payload: dict,
+    run: _ForgeGemmRun,
+    sources: _ForgeShapeSources,
+    timeout: int,
+    tuner_ceiling: int,
+) -> dict[str, Any]:
+    return {
+        "model_path": run.model_dir,
+        "framework": run.tuning_framework,
+        "precision": run.precision,
+        "quant_type": run.quant_type,
+        "gpu_type": run.gpu_type,
+        "tp": run.tp,
+        "conc": run.conc,
+        "mp": run.mp,
+        "output_dir": str(run.workspace),
+        # Passing the same value to both made the producer's own
+        # min(per_tuner, remaining) an identity, so the first tuner could
+        # consume the entire session and every later one was skipped for lack of
+        # time. The per-target cap must stay strictly below the global one.
+        "timeout": gemm_per_tuner_timeout_sec(timeout),
+        # Bounds the whole session across all tuners.
+        "global_timeout": timeout,
+        "skip_gpu_check": True,
+        "tokens": sources.tokens,
+        "untuned_csv": sources.untuned_csv,
+        "moe_untuned_csv": sources.moe_untuned_csv,
+        "shapes_json": sources.shapes_json,
+        "shapes_manifest": sources.shapes_manifest,
+        "demand_json": sources.demand_json,
+        "tunableop_input": sources.tunableop_input,
+        "kernel_signature_log": run.server_log,
+        "tuner": str(payload.get("tuner") or ""),
+        # How many routed tuners the lane's share pays for. Omitted when none
+        # could be derived, which leaves the producer's own routing intact.
+        **({"max_tuners": tuner_ceiling} if tuner_ceiling > 0 else {}),
+        "thorough": run.thorough,
+    }
+
+
+def _stamp_forge_gemm_provenance(
+    result: HandlerResult,
+    run: _ForgeGemmRun,
+    tuning_framework: str = "",
+) -> HandlerResult:
+    result.setdefault("backend", "forge")
+    result.setdefault("engine", "forge")
+    result.setdefault("workspace", str(run.workspace))
+    result.setdefault("precision", run.precision)
+    result.setdefault("framework", run.framework)
+    if tuning_framework:
+        result.setdefault("tuning_framework", tuning_framework)
+    result.setdefault("model_path", run.model_id)
+    return result
+
+
+def _report_forge_shape_provenance(
+    result: HandlerResult,
+    sources: _ForgeShapeSources,
+    shape_alignment: dict[str, Any] | None,
+) -> None:
+    if sources.moe_key_report:
+        result.setdefault("moe_key_source", sources.moe_key_report)
+    if shape_alignment is not None:
+        result.setdefault("shape_alignment", shape_alignment)
+    if sources.capture is None:
+        return
+    result.setdefault(
+        "shape_capture",
+        {
+            "status": "ok",
+            "workspace": sources.capture.get("shape_capture_workspace"),
+            "tunableop_input": sources.tunableop_input,
+            "shapes_json": sources.shapes_json,
+            "shape_count": sources.capture.get("shape_count"),
+            "capture_mode": sources.capture.get("capture_mode", "tunableop"),
+            "source_profile_trace": sources.capture.get("source_profile_trace"),
+        },
+    )
+
+
+def _fill_forge_tuner_outcomes(result: HandlerResult, workspace: Path) -> None:
+    on_disk = _read_forge_result_json(workspace)
+    for key in ("tuners_skipped", "failed_tuners"):
+        if not result.get(key) and on_disk.get(key):
+            result[key] = on_disk[key]
+    if not result.get("skip_reason"):
+        reason = _derive_gemm_skip_reason(result.get("tuners_skipped"))
+        if reason:
+            result["skip_reason"] = reason
+    failed = result.get("failed_tuners")
+    for row in failed if isinstance(failed, list) else []:
+        if isinstance(row, dict):
+            log.warning(
+                "forge gemm tuner %s failed (%s): %s",
+                row.get("tuner") or "?",
+                row.get("error_class") or "?",
+                row.get("error") or "",
+            )
+    rows = result.get("tuners_run")
+    rows = rows if isinstance(rows, list) else []
+    for key in ("error_class", "error"):
+        if result.get(key):
+            continue
+        reported = next((str(row[key]) for row in rows if isinstance(row, dict) and row.get(key)), "")
+        if reported:
+            result[key] = reported
 
 
 async def _run_forge_gemm_tuning(
@@ -2819,26 +3138,10 @@ async def _run_forge_gemm_tuning(
             "backend": "forge",
         }
 
-    # Resolve precision from actual runtime, not just session-level state.
-    precision, quant_type = _resolve_forge_precision_and_quant(state, payload)
-    framework = str(payload.get("framework") or state.framework or "sglang").strip().lower()
-
-    workspace = _gemm_tuning_workspace(payload, session_dir=session_dir)
-    workspace.mkdir(parents=True, exist_ok=True)
-
-    raw_model_path = str(payload.get("model_path") or state.model_path or os.environ.get("MODEL_PATH") or "").strip()
-    if not raw_model_path:
+    run = _forge_gemm_run(state, payload, session_dir)
+    if not run.model_id:
         return {"status": "failed", "error_class": "model_path_missing", "error": "model_path is required"}
-    from hyperloom.common.model_paths import resolve_serving_model_path
-    from hyperloom.inference_optimizer.model_config_utils import (
-        resolve_local_model_dir,
-    )
-
-    # Bootstrap already walked HL_MODEL_BASE and the hub cache to decide what to
-    # serve; probing only the hub cache here would reject a repo id that the
-    # running server resolved fine.
-    resolved_model_dir = resolve_local_model_dir(resolve_serving_model_path(raw_model_path) or raw_model_path)
-    if resolved_model_dir is None:
+    if not run.model_dir:
         # Forge needs the config on disk to derive shapes, so it cannot run --
         # but not running one tuning backend is a skip, not a session failure.
         # Reporting it as failed would spend a REVERT verdict on an experiment
@@ -2847,406 +3150,72 @@ async def _run_forge_gemm_tuning(
             "status": "skipped",
             "error_class": "model_path_unavailable",
             "skip_reason": (
-                f"Model path {raw_model_path!r} is neither an existing local "
+                f"Model path {run.model_id!r} is neither an existing local "
                 "directory nor an available Hugging Face cache snapshot"
             ),
             "backend": "forge",
         }
-    resolved_model_path = str(resolved_model_dir)
-
-    tp = int(payload.get("tp") or state.tp or os.environ.get("TP") or 1)
-    conc = int(payload.get("conc") or state.conc or os.environ.get("CONC") or 64)
-    gpu_type = str(payload.get("gpu_type") or state.gpu_type or os.environ.get("GPU_TYPE") or "mi300x").strip().lower()
-    tokens = _normalize_tokens(payload.get("tokens"))
-    # Default mp = all visible GPUs.
-    from hyperloom.common.visible_devices import detect_gpu_count
-
-    detected_gpus = detect_gpu_count() or tp
-    mp = int(payload.get("mp") or os.environ.get("FORGE_GEMM_TUNE_MP") or detected_gpus)
-
-    # Resolve server log for 1-stage ASM detection.
-    kernel_sig_log = str(payload.get("kernel_signature_log") or "").strip()
-    if not kernel_sig_log:
-        # Off the event loop: this walks runs/ and byte-scans server logs that
-        # measure ~17MB apiece on the fleet. Inline, it stalled every other
-        # coroutine on this orchestrator -- heartbeats included -- for the
-        # duration.
-        kernel_sig_log = await asyncio.to_thread(_resolve_forge_server_log, state, session_dir)
-
-    # Explicit operator/benchmark input wins. Automatic SGLang priority is:
-    # latest TraceLens runtime profile, specialist-worktree CSV fallback, then
-    # Forge's config-derived fallback. A specialist checkout is not sufficient
-    # evidence that its static CSV came from the active benchmark. vLLM instead
-    # requires native TunableOp rows or a workload-matched block-FP8 profile.
-    shapes_json = _normalize_forge_shapes_json(payload.get("shapes_json"), workspace)
-    untuned_csv = str(payload.get("untuned_csv") or "").strip()
-    if untuned_csv and not _path_is_existing_file(untuned_csv):
-        # Guard against inline content / stale paths.
-        untuned_csv = ""
-    if not shapes_json and not untuned_csv and framework != "vllm":
-        shapes_json = _resolve_forge_shapes(
-            state,
-            session_dir,
-            require_fresh_profile=True,
-            precision=precision,
-        )
-        if not shapes_json:
-            untuned_csv = _resolve_forge_untuned_csv(
-                session_dir,
-                precision,
-                quant_type,
-                resolved_model_path,
-            )
-
-    # forge's own fallback derives --tokens from ``conc``, which is a guess
-    # about M. The serving log records the M values the model actually ran, so
-    # prefer those whenever a log with dispatch evidence was resolved.
-    #
-    # This has to happen BEFORE the MoE untuned CSV is built, not just before
-    # the payload is assembled: ``_write_fmoe_untuned_csv_from_log`` consumes
-    # ``tokens`` directly, and its fallback for an empty one is ``[1]``. Derived
-    # afterwards, the dense lane would get the full observed sweep while the MoE
-    # lane gets a table with a single M=1 row, which misses on every prefill and
-    # large-batch lookup and is reverted as no_shape_key_matched.
-    if not tokens and kernel_sig_log:
-        tokens = _normalize_tokens(await asyncio.to_thread(_tokens_from_serving_log, kernel_sig_log))
-        if tokens:
-            log.info("GEMM: derived --tokens=%s from observed M in %s", tokens, kernel_sig_log)
-
-    # MoE shapes come from the runtime, never from inference. The dispatch tuple
-    # in the server log states the quantisation pair, the per-partition inter_dim
-    # and the EP-inflated expert/topk counts; none of the three is recoverable
-    # from the model config, and guessing them is what produced tuned tables no
-    # runtime lookup could reach.
-    moe_untuned_csv = str(payload.get("moe_untuned_csv") or "").strip()
-    if moe_untuned_csv and not _path_is_existing_file(moe_untuned_csv):
-        moe_untuned_csv = ""
-    moe_key_report: dict[str, Any] = {}
-    if not moe_untuned_csv:
-        moe_untuned_csv, moe_key_report = _write_fmoe_untuned_csv_from_log(kernel_sig_log, tokens, workspace)
-
-    tunableop_input = str(payload.get("tunableop_input") or "").strip()
-    forge_framework = _forge_framework_for_vllm(
-        framework=framework,
-        precision=precision,
-        quant_type=quant_type,
-        tunableop_input=tunableop_input,
-        **_resolve_vllm_aiter_routing(
-            model_path=resolved_model_path,
-            server_log=kernel_sig_log,
-            tp=tp,
+    # Off the event loop: this walks runs/ and byte-scans server logs that measure
+    # ~17MB apiece on the fleet. Inline, it stalled every other coroutine on this
+    # orchestrator -- heartbeats included -- for the duration.
+    server_log = str(payload.get("kernel_signature_log") or "").strip() or await asyncio.to_thread(
+        _resolve_forge_server_log, state, session_dir
+    )
+    run = run._replace(
+        server_log=server_log,
+        tuning_framework=_forge_framework_for_vllm(
+            framework=run.framework,
+            precision=run.precision,
+            quant_type=run.quant_type,
+            tunableop_input=str(payload.get("tunableop_input") or "").strip(),
+            **_resolve_vllm_aiter_routing(model_path=run.model_dir, server_log=server_log, tp=run.tp),
         ),
-    )
-    shape_capture: HandlerResult | None = None
-    block_fp8_profile_capture = _vllm_block_fp8_profile_capture_required(
-        framework=framework,
-        precision=precision,
-        quant_type=quant_type,
-        shapes_json=shapes_json,
-        tunableop_input=tunableop_input,
-        dry_run=bool(payload.get("dry_run")),
-    )
-    if block_fp8_profile_capture:
-        # Decode steps replay inside a CUDA Graph and therefore emit no Kineto
-        # *op* events, so every profile-derived block-FP8 shape set structurally
-        # carries prefill M only -- measured on a real capture, the decode-only
-        # trace split yields zero block-FP8 events while the prefill splits yield
-        # M=2095. Tuning that alone optimizes an operating point the workload
-        # barely uses. TraceLens candidates are built from the device kernel
-        # timeline, which does see through the graph and carries the decode M
-        # that dominates throughput, so prefer them. ``require_fresh_profile``
-        # keeps the vLLM rule that shapes must be workload-matched, and
-        # ``precision`` keeps BF16 heads out of an FP8 tuner's input.
-        traced_shapes = _resolve_forge_shapes(
-            state,
-            session_dir,
-            require_fresh_profile=True,
-            precision=precision,
-        )
-        if traced_shapes:
-            shapes_json = traced_shapes
-            untuned_csv = ""
-            block_fp8_profile_capture = False
-    if block_fp8_profile_capture:
-        shape_capture = _reuse_vllm_block_fp8_roofline_shapes(
-            state,
-            workspace=workspace,
-            current_workload=state.current_profile_workload_context(payload),
-        )
-        if shape_capture is not None:
-            shapes_json = str(shape_capture["shapes_json"])
-            untuned_csv = ""
-            block_fp8_profile_capture = False
-    tunableop_capture = (
-        # Keyed on the routed framework: a run handed to the AITER tuner family
-        # has no use for a TunableOp recording pass, and paying for one costs a
-        # full extra server boot.
-        _vllm_dense_shape_capture_required(
-            framework=forge_framework,
-            model_path=resolved_model_path,
-            shapes_json=shapes_json,
-            tunableop_input=tunableop_input,
-            dry_run=bool(payload.get("dry_run")),
-        )
-        and not block_fp8_profile_capture
     )
     priced_gemm_lane = functools.partial(
         _priced_gemm_lane,
         state,
-        model_path=resolved_model_path,
-        framework=forge_framework,
-        precision=precision,
-        quant_type=quant_type,
-        gpu_type=gpu_type,
-        kernel_signature_log=kernel_sig_log,
+        model_path=run.model_dir,
+        framework=run.tuning_framework,
+        precision=run.precision,
+        quant_type=run.quant_type,
+        gpu_type=run.gpu_type,
+        kernel_signature_log=run.server_log,
     )
-    if block_fp8_profile_capture or tunableop_capture:
-        # A capture costs a full extra server boot, wasted on a lane the phase cannot fund once it has the shapes.
-        lane_after_capture = await priced_gemm_lane(
-            has_untuned_csv=tunableop_capture and bool(untuned_csv),
-            has_shapes_json=block_fp8_profile_capture,
-            has_tunableop_input=tunableop_capture,
-        )
-        if lane_after_capture is None:
-            return _unfunded_lane_skip(LANE_GEMM)
-        capture_payload = dict(payload)
-        if block_fp8_profile_capture:
-            capture_payload["_shape_capture_mode"] = "block_fp8_profile"
-        shape_capture = await _capture_vllm_tunableop_shapes(
-            state=state,
-            session_dir=session_dir,
-            payload=capture_payload,
-            workspace=workspace,
-        )
-        if shape_capture.get("status") != "ok":
-            shape_capture.setdefault("backend", "forge")
-            shape_capture.setdefault("engine", "forge")
-            shape_capture.setdefault("workspace", str(workspace))
-            shape_capture.setdefault("precision", precision)
-            shape_capture.setdefault("framework", framework)
-            shape_capture.setdefault("model_path", raw_model_path)
-            return shape_capture
-        tunableop_input = str(shape_capture.get("tunableop_input") or "").strip()
-        captured_shapes = str(shape_capture.get("shapes_json") or "").strip()
-        if captured_shapes:
-            shapes_json = captured_shapes
-            # Forge dense tuners prefer untuned_csv over shapes_json. A fresh
-            # profile capture is workload-matched and must supersede any stale
-            # specialist CSV resolved before the capture pass.
-            untuned_csv = ""
 
-    # forge prefers the manifest over shapes_json as a dense-shape source, and
-    # an explicit demand.json over re-deriving demand from the serving log.
-    # Both are optional: forge drops a path that is not there, with a warning.
-    shapes_manifest = str(payload.get("shapes_manifest") or "").strip()
-    if not shapes_manifest:
-        # Scavenge one from the session only when nothing more specific was
-        # produced for THIS run. forge ranks the manifest at priority 0 on the
-        # premise that it was explicitly supplied; a manifest found by walking
-        # the session tree carries no such promise -- it can come from an
-        # earlier run at a different precision or with different server args,
-        # and there is no consistency check to catch that. Letting it win would
-        # discard a block-FP8 profile capture or a TunableOp shape capture that
-        # deliberately cleared ``untuned_csv`` so the fresh result would be
-        # used, and would bypass ``_align_forge_shapes_for_aiter`` as well.
-        if untuned_csv or shapes_json:
-            log.debug(
-                "GEMM: not scavenging a trace shape manifest; this run already has "
-                "a workload-matched dense-shape source (%s)",
-                "untuned_csv" if untuned_csv else "shapes_json",
-            )
-        else:
-            # Off the event loop for the same reason: a ``**/`` walk of a
-            # session tree that holds thousands of run artifacts.
-            shapes_manifest = await asyncio.to_thread(_resolve_trace_shape_manifest, state, session_dir)
-    if shapes_manifest and not _path_is_existing_file(shapes_manifest):
-        shapes_manifest = ""
-    demand_json = str(payload.get("demand_json") or "").strip()
-    if demand_json and not _path_is_existing_file(demand_json):
-        demand_json = ""
+    sources = await _forge_shape_sources(state, payload, run)
+    sources, capture_failure = await _captured_forge_shapes(state, payload, run, sources, priced_gemm_lane)
+    if capture_failure is not None:
+        return capture_failure
+    sources = sources._replace(shapes_manifest=await _forge_dense_shape_manifest(state, payload, run, sources))
 
     gemm_lane = await priced_gemm_lane(
-        has_untuned_csv=bool(untuned_csv),
-        has_shapes_json=bool(shapes_json or shapes_manifest or demand_json),
-        has_tunableop_input=bool(tunableop_input),
+        has_untuned_csv=bool(sources.untuned_csv),
+        has_shapes_json=bool(sources.shapes_json or sources.shapes_manifest or sources.demand_json),
+        has_tunableop_input=bool(sources.tunableop_input),
     )
     if gemm_lane is None:
         return _unfunded_lane_skip(LANE_GEMM)
     timeout = _gemm_tuning_timeout_sec(payload, lane_budget_sec=gemm_lane.budget_sec)
-    requested_tuners = _positive_int(payload.get("max_tuners"))
-    # An explicit payload value stays an operator/test escape hatch; a named
-    # ``tuner`` already narrows the set to one, so no ceiling is needed then.
-    if str(payload.get("tuner") or "").strip():
-        gemm_tuner_ceiling = 0
-    else:
-        gemm_tuner_ceiling = requested_tuners if requested_tuners > 0 else gemm_lane.max_targets
-    session_max_min = float(getattr(state, "max_minutes", 0) or 0)
     shape_alignment: dict[str, Any] | None = None
-    if shapes_json:
-        shapes_json, shape_alignment = _align_forge_shapes_for_aiter(
-            shapes_json,
-            forge_framework=forge_framework,
-            workspace=workspace,
+    if sources.shapes_json:
+        aligned_shapes, shape_alignment = _align_forge_shapes_for_aiter(
+            sources.shapes_json,
+            forge_framework=run.tuning_framework,
+            workspace=run.workspace,
             budget_sec=timeout,
-            mp=mp,
+            mp=run.mp,
         )
+        sources = sources._replace(shapes_json=aligned_shapes)
 
-    input_payload = {
-        "model_path": resolved_model_path,
-        "framework": forge_framework,
-        "precision": precision,
-        "quant_type": quant_type,
-        "gpu_type": gpu_type,
-        "tp": tp,
-        "conc": conc,
-        "mp": mp,
-        "output_dir": str(workspace),
-        # Passing the same value to both made the producer's own
-        # min(per_tuner, remaining) an identity, so the first tuner could
-        # consume the entire session and every later one was skipped for lack of
-        # time. The per-target cap must stay strictly below the global one.
-        "timeout": gemm_per_tuner_timeout_sec(timeout),
-        # Bounds the whole session across all tuners.
-        "global_timeout": timeout,
-        "skip_gpu_check": True,
-        "tokens": tokens,
-        "untuned_csv": untuned_csv,
-        "moe_untuned_csv": moe_untuned_csv,
-        "shapes_json": shapes_json,
-        "shapes_manifest": shapes_manifest,
-        "demand_json": demand_json,
-        "tunableop_input": tunableop_input,
-        "kernel_signature_log": kernel_sig_log,
-        "tuner": str(payload.get("tuner") or ""),
-        # How many routed tuners the lane's share pays for. Omitted when none
-        # could be derived, which leaves the producer's own routing intact.
-        **({"max_tuners": gemm_tuner_ceiling} if gemm_tuner_ceiling > 0 else {}),
-        # Exhaustive search when budget allows (>= 24h) and mp >= 4.
-        "thorough": bool(session_max_min >= 1440 and mp >= 4),
-    }
-    result = await _invoke_forge_gemm_tune(input_payload, timeout)
-
-    result.setdefault("backend", "forge")
-    # Tag the tuning engine so the breakdown attributes this run to forge.
-    result.setdefault("engine", "forge")
-    result.setdefault("workspace", str(workspace))
-    result.setdefault("precision", precision)
-    result.setdefault("framework", framework)
-    result.setdefault("tuning_framework", forge_framework)
-    result.setdefault("model_path", raw_model_path)
-    if moe_key_report:
-        # Kept even when nothing was tunable: "no MoE problem was observed" and
-        # "the observed pair is one aiter cannot tune" lead to different actions,
-        # and neither is visible from the tuner's own status.
-        result.setdefault("moe_key_source", moe_key_report)
-    if shape_alignment is not None:
-        result.setdefault("shape_alignment", shape_alignment)
-    if shape_capture is not None:
-        result.setdefault(
-            "shape_capture",
-            {
-                "status": "ok",
-                "workspace": shape_capture.get("shape_capture_workspace"),
-                "tunableop_input": tunableop_input,
-                "shapes_json": shapes_json,
-                "shape_count": shape_capture.get("shape_count"),
-                "capture_mode": shape_capture.get("capture_mode", "tunableop"),
-                "source_profile_trace": shape_capture.get("source_profile_trace"),
-            },
-        )
-
-    # Surface why forge skipped: merge per-tuner skip reasons from the on-disk
-    # result.json and derive a top-level skip_reason.
-    if not result.get("tuners_skipped"):
-        disk_skipped = _read_forge_result_json(workspace).get("tuners_skipped")
-        if disk_skipped:
-            result["tuners_skipped"] = disk_skipped
-    if not result.get("skip_reason"):
-        reason = _derive_gemm_skip_reason(result.get("tuners_skipped"))
-        if reason:
-            result["skip_reason"] = reason
-
-    # Surface crashed tuners. forge lists every failure in ``failed_tuners``
-    # regardless of the overall decision; dropped here, a dense tuner winning
-    # would hide a MoE tuner's crash, and a KEEP would read as "no headroom
-    # elsewhere" when siblings had in fact hard-failed.
-    # Backfill from disk when the sentinel omitted it (mirrors tuners_skipped),
-    # keep it on the envelope for the trace row / breakdown, and log it so the
-    # failure is never silent even when the session is kept.
-    if not result.get("failed_tuners"):
-        disk_failed = _read_forge_result_json(workspace).get("failed_tuners")
-        if disk_failed:
-            result["failed_tuners"] = disk_failed
-    _failed_tuners = result.get("failed_tuners")
-    if isinstance(_failed_tuners, list) and _failed_tuners:
-        for _f in _failed_tuners:
-            if not isinstance(_f, dict):
-                continue
-            log.warning(
-                "forge gemm tuner %s failed (%s): %s",
-                _f.get("tuner") or "?",
-                _f.get("error_class") or "?",
-                _f.get("error") or "",
-            )
-
-    # The breakdown and the stack read the envelope, not the jsonl audit row, so
-    # a tuner's own error class has to surface here too. Lifted before the bridge
-    # so a specific class outranks the generic wording. ``tuners_run`` is forge's
-    # JSON and may be any shape; this is bookkeeping and must not raise.
-    _tuner_rows = result.get("tuners_run")
-    if not isinstance(_tuner_rows, list):
-        _tuner_rows = []
-    if not result.get("error_class"):
-        for _t in _tuner_rows:
-            if isinstance(_t, dict) and _t.get("error_class"):
-                result["error_class"] = str(_t["error_class"])
-                break
-    if not result.get("error"):
-        for _t in _tuner_rows:
-            if isinstance(_t, dict) and _t.get("error"):
-                result["error"] = str(_t["error"])
-                break
-
-    # Bridge forge schema → coordinator schema: a "candidate" micro_decision with
-    # recommended_env becomes decision="KEEP" + extra_envs.
-    micro = str(result.get("micro_decision") or "").strip().lower()
-    if micro == "candidate" and result.get("recommended_env"):
-        result.setdefault("decision", "KEEP")
-        # Make the tuned CSV durable + recipe-portable (mirrors integrate_patch's
-        # source-layer snapshot): copy it into the serving aiter config dir,
-        # repoint the env there, and snapshot it so the KEEP survives with the
-        # recipe instead of referencing the ephemeral tuner-workspace path.
-        # Keep the logical ID here: a resolved HF snapshot basename is a commit
-        # hash, which would make durable artifact names unstable across revisions.
-        _durable_envs, _snap_dir = _persist_forge_gemm_csv_durably(
-            dict(result["recommended_env"]),
-            model_path=raw_model_path,
-            session_dir=session_dir,
-        )
-        result.setdefault("extra_envs", _durable_envs)
-        if _snap_dir:
-            result.setdefault("source_snapshot", _snap_dir)
-        # Derive best_speedup from tuners_run when absent.
-        if "best_speedup" not in result:
-            best = 1.0
-            for t in result.get("tuners_run") or []:
-                if isinstance(t, dict):
-                    sp = float(t.get("best_micro_speedup") or 1.0)
-                    if sp > best:
-                        best = sp
-            if best > 1.0:
-                result["best_speedup"] = best
-        # Micro-only result: E2E validation still needed.
-        result.setdefault("requires_e2e_validation", True)
-    elif micro in ("no_improvement", "skipped"):
-        # Left unadorned on purpose: the wordings below are only legible against it.
-        result.setdefault("decision", "REVERT")
-    elif micro in _FORGE_BARREN_MICRO_DECISIONS:
-        result.setdefault("decision", "REVERT")
-        if micro == "failed":
-            result.setdefault("status", "failed")
-        result.setdefault("error_class", f"forge_{micro}")
-
+    requested_tuners = _positive_int(payload.get("max_tuners"))
+    tuner_ceiling = 0 if str(payload.get("tuner") or "").strip() else (requested_tuners or gemm_lane.max_targets)
+    result = await _invoke_forge_gemm_tune(
+        _forge_gemm_tune_input(payload, run, sources, timeout, tuner_ceiling), timeout
+    )
+    _stamp_forge_gemm_provenance(result, run, tuning_framework=run.tuning_framework)
+    _report_forge_shape_provenance(result, sources, shape_alignment)
+    _fill_forge_tuner_outcomes(result, run.workspace)
+    _bridge_forge_decision(result, raw_model_path=run.model_id, session_dir=run.session_dir)
     return result
 
 
@@ -3401,13 +3370,6 @@ def _resolve_fusion_decode_trace(state) -> str:
     which is every non-AgentX sglang/vLLM profile. A directory therefore resolves to the
     newest capture in it, which is this run's too: the directory is the round's own
     ``trace_dir``.
-
-    Args:
-        state: The session ``SharedState``.
-
-    Returns:
-        str: The decode trace file to discover against, or ``""`` when this run has
-            no usable trace yet.
     """
     trace = str(getattr(state, "last_profile_trace", "") or "").strip()
     if not trace:
@@ -3462,12 +3424,7 @@ def _resolve_forge_agent(
     Model id precedence (after the backend is chosen) is owned by
     :func:`llm_config.resolve_forge_llm_model`.
 
-    Args:
-        payload: Kernel request payload.
-        env: Provider environment to inspect; defaults to ``os.environ``.
 
-    Returns:
-        The canonical ``(agent_backend, llm_model)`` pair.
 
     Raises:
         ValueError: If ``agent_backend`` is not ``"claude"`` or ``"codex"``.
@@ -3501,14 +3458,7 @@ def _resolve_forge_fusion_sandbox_mode(
     validated by that same resolver so both backends share one policy vocabulary
     and unsafe bypass cannot reach the subprocess.
 
-    Args:
-        payload: Kernel request payload.
-        agent_backend: The already-resolved ``"claude"`` or ``"codex"`` backend.
-        env: Environment overlay for the canonical resolver; defaults to the
-            process environment.
 
-    Returns:
-        A validated KernelForge sandbox mode.
 
     Raises:
         CodexSessionUnavailableError: If the mode is unknown or bypass lacks
@@ -3565,7 +3515,7 @@ async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResul
             "kept": False,
         }
 
-    model_path = str(payload.get("model_path") or state.model_path or os.environ.get("MODEL_PATH") or "").strip()
+    model_path = _requested_setting(payload, state, "model_path", os.environ.get("MODEL_PATH") or "")
     if not model_path:
         return {
             "status": "failed",
@@ -3593,7 +3543,7 @@ async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResul
             "kept": False,
         }
 
-    framework = str(payload.get("framework") or state.framework or "sglang").strip().lower()
+    framework = _requested_framework(payload, state, "sglang")
     gpu = str(payload.get("gpu") or "0").strip()
     try:
         agent_backend, llm_model = _resolve_forge_agent(payload)
@@ -3719,10 +3669,6 @@ def _trace_gemm_tuning_run(result: Any, *, session_dir: Path) -> None:
     Distils the run result into a compact source-attribution row (engine,
     decision, speedup, per-tuner summary) appended to
     ``reports/trace/gemm_tuning.jsonl``. Best-effort; any failure is swallowed.
-
-    Args:
-        result: The GEMM-tuning handler result envelope.
-        session_dir: Session directory the audit row is appended under.
     """
     if not isinstance(result, dict):
         return
@@ -3838,14 +3784,6 @@ def _compiled_registry_error_text(
 
     The excerpt names the kernel aiter could not find, which is the only thing that
     identifies the module at fault when the round's env does not.
-
-    Args:
-        workspace: The integrate run's workspace.
-        after_sizes: Per-log byte offsets to read from, so a retry does not re-read
-            the failure that armed it.
-
-    Returns:
-        The matching log text, empty when no log shows a mismatch.
     """
     from ..actions.executors._aiter_jit import is_aiter_jit_registry_mismatch
 
@@ -3892,6 +3830,12 @@ def _integrate_extra_envs(ctx: Any) -> dict[str, str] | None:
         if isinstance(envs, dict):
             return envs
     return None
+
+
+def _lock_cleanup_allows_retry(cleanup: dict[str, Any]) -> bool:
+    if cleanup.get("skipped_live") or cleanup.get("errors"):
+        return False
+    return bool(cleanup.get("deleted")) or (cleanup.get("scanned", 0) == 0 and not cleanup.get("skipped_fresh"))
 
 
 async def _run_integrate_rebaseline_with_lock_retry(
@@ -3971,12 +3915,7 @@ async def _run_integrate_rebaseline_with_lock_retry(
         "retry_attempted": False,
     }
 
-    # A live compiler may legitimately own the observed lock. When liveness is
-    # unknown, a fresh skipped lock is also not safe to remove. Retry only after
-    # at least one deletion or after confirming the lock disappeared.
-    cleanup_safe = not cleanup.get("skipped_live") and not cleanup.get("errors")
-    lock_removed = bool(cleanup.get("deleted")) or (cleanup.get("scanned", 0) == 0 and not cleanup.get("skipped_fresh"))
-    if not (cleanup_safe and lock_removed):
+    if not _lock_cleanup_allows_retry(cleanup):
         return result
 
     log.warning(
@@ -4007,12 +3946,321 @@ async def _run_integrate_rebaseline_with_lock_retry(
     return retry_result
 
 
+class _SourceImport(NamedTuple):
+    confirmed: bool | None
+    evidence: dict[str, bool | None]
+    decision: str
+    downgraded: bool
+
+
+def _applied_patch_result(
+    payload: dict[str, Any],
+    *,
+    session_dir: str,
+    preapplied_git_patch: bool,
+) -> dict[str, Any]:
+    # A controller publication is git-applied to the worktree before the validator
+    # runs, so its final bytes are already on disk; apply reads them as a snapshot
+    # instead of mistaking the diff for replacement source. Skipping the apply
+    # outright would also skip the cache invalidation, multi-node fan-out and
+    # rebuild the measurement depends on. Only an in-process caller can set this:
+    # an agent's integrate params land in ``payload`` verbatim, so the payload
+    # cannot carry the trust.
+    return _maybe_apply_kernel_patch(
+        _preapplied_snapshot_payload(payload) if preapplied_git_patch else payload,
+        session_dir=session_dir,
+        kernel_id=payload.get("kernel_id"),
+    )
+
+
+def _integrate_failure(
+    payload: dict[str, Any],
+    apply_result: dict[str, Any],
+    *,
+    error_class: str,
+    error: str,
+    decision: str,
+    **extra: Any,
+) -> HandlerResult:
+    return {
+        "status": "failed",
+        "error_class": error_class,
+        "error": error,
+        "decision": decision,
+        "kernel_id": payload.get("kernel_id"),
+        "patch_path": payload.get("patch_path"),
+        "target_file": payload.get("target_file") or payload.get("source_file"),
+        "apply_result": apply_result,
+        "revert_result": _maybe_revert_kernel_patch(apply_result),
+        **extra,
+    }
+
+
+def _unmeasured_integration_failure(
+    payload: dict[str, Any],
+    *,
+    apply_result: dict[str, Any],
+    bench_result: Any,
+) -> HandlerResult:
+    rebaseline_error_class = (
+        str((bench_result or {}).get("error_class") or "").strip() if isinstance(bench_result, dict) else ""
+    ) or "bench_exception"
+    # A run the stop class claims measured nothing, so the patch has no verdict to answer for.
+    stopped = stopped_by_the_run_class(rebaseline_error_class)
+    return _integrate_failure(
+        payload,
+        apply_result,
+        error_class=stopped.error_class if stopped is not None else rebaseline_error_class,
+        error=stopped.interrupted if stopped is not None else "re-baseline did not succeed",
+        decision="NEEDS_REVIEW" if stopped is not None else "REVERT",
+        rebaseline_detail=bench_result,
+    )
+
+
+def _confirm_source_import(
+    payload: dict[str, Any],
+    *,
+    workspace: Any,
+    decision: str,
+) -> _SourceImport:
+    if not _honest_flag("HL_CONFIRM_SOURCE_IMPORTED"):
+        return _SourceImport(confirmed=None, evidence={}, decision=decision, downgraded=False)
+    # Grade the whole write set; the single target is the fallback for a
+    # patch whose bundle declared none.
+    written = [str(path) for path in (payload.get("patch_write_paths") or []) if str(path or "").strip()]
+    if not written:
+        written = [str(payload.get("target_file") or payload.get("source_file") or "")]
+    confirmed, evidence = _confirm_sources_imported(written, workspace)
+    downgraded = decision == "KEEP" and confirmed is False and _honest_flag("HL_CONFIRM_SOURCE_IMPORTED_STRICT")
+    return _SourceImport(
+        confirmed=confirmed,
+        evidence=evidence,
+        decision="NEEDS_REVIEW" if downgraded else decision,
+        downgraded=downgraded,
+    )
+
+
+class _IntegrateRebaseline(NamedTuple):
+    workspace: Path
+    server_args: str
+    executor: Any
+    ctx: Any
+
+
+class _IntegrateVerdict(NamedTuple):
+    payload: dict
+    bench_result: dict[str, Any]
+    performance: Any
+    cleanup: dict[str, Any]
+    accuracy_gate: dict[str, Any] | None
+    source_import: _SourceImport
+    rebuild_check: HandlerResult
+    server_args: str
+
+
+def _request_overrides_serving_controls(payload: Mapping[str, Any]) -> bool:
+    return (
+        bool(to_str_list(payload.get("remove_args")))
+        or bool(to_str_list(payload.get("unset_envs")))
+        or str(payload.get("args_mode") or "append").strip().lower() == "replace"
+    )
+
+
+def _integrate_request_refusal(payload: dict, *, requested_controls: bool) -> HandlerResult | None:
+    if float(payload.get("base_tput", 0.0)) <= 0:
+        return {
+            "status": "failed",
+            "error": "integrate_handler requires base_tput > 0 to compute KEEP/REVERT",
+        }
+    paired_measurement = _is_paired_gemm_measurement(payload)
+    if paired_measurement and any(
+        payload.get(key) for key in ("patch_path", "target_file", "source_file", "snapshot_dir")
+    ):
+        raise ValueError("GEMM paired measurement cannot apply a kernel artifact")
+    if _integrate_mode(payload) != "env_only":
+        return None
+    if (
+        payload.get("extra_envs")
+        or str(payload.get("extra_server_args") or "").strip()
+        or requested_controls
+        or paired_measurement
+    ):
+        return None
+    return {
+        "status": "failed",
+        "error_class": "env_only_missing_envs",
+        "error": "env_only integrate requires runtime configuration or an explicit paired reference",
+    }
+
+
+def _unapplied_patch_failure(payload: dict, apply_result: dict) -> HandlerResult | None:
+    status = apply_result.get("status")
+    if status == "ok":
+        return None
+    if status == "failed":
+        apply_reason = str(apply_result.get("error") or apply_result.get("reason") or "").strip()
+        error_class = "apply_failed"
+        error = f"kernel patch apply failed: {apply_reason}" if apply_reason else "kernel patch apply failed"
+    else:
+        error_class = "patch_not_applied"
+        error = "kernel patch was not applied; refusing to run E2E benchmark"
+    return {
+        "status": "failed",
+        "error_class": error_class,
+        "error": error,
+        "decision": "REVERT",
+        "apply_result": apply_result,
+        "kernel_id": payload.get("kernel_id"),
+        "patch_path": payload.get("patch_path"),
+        "target_file": payload.get("target_file") or payload.get("source_file"),
+    }
+
+
+def _integrate_rebaseline(
+    payload: dict,
+    state: Any,
+    *,
+    session_dir: Path,
+    performance_policy: dict[str, float],
+) -> _IntegrateRebaseline:
+    from hyperloom.inference_optimizer.breakdown.recorder.event_ids import INLINE_EVENT_PARAM
+    from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import kernel_event_id
+    from hyperloom.inference_optimizer.session.session_paths import fs_safe_id, unique_runs_dir
+    from ..actions.executors.baseline import BaselineExecutor
+    from ..loop.sub_agent_runner import RunnerContext
+    from ..state.task_registry import Task
+
+    # VRAM barrier (HL_HONEST_E2E umbrella, default ON; opt out with
+    # HL_HONEST_E2E=0 or HL_INTEGRATE_VRAM_GUARD=0): cap re-baseline util on
+    # vLLM so the integrate server cannot OOM on a tighter node.
+    extra_args = _vram_guarded_server_args(str(payload.get("extra_server_args") or "").strip())
+    # A fusion sibling's kernel_id is its operator name (``llm:<recipe>``), which
+    # only reaches this handler now that fusion lands through the generic queue.
+    # It is a legal id but not a legal directory name everywhere -- fold it.
+    task_id = f"integrate-{fs_safe_id(payload.get('kernel_id'))}"
+    workspace = unique_runs_dir(session_dir, "integrate", task_id)
+    keep_policy = (
+        {} if _is_paired_gemm_measurement(payload) else {"post_measure_accuracy_keep_policy": performance_policy}
+    )
+    task = Task(
+        task_id=task_id,
+        kind="baseline",
+        state="running",
+        params={
+            "config_path": payload.get("config_path"),
+            "output_dir": str(workspace),
+            "extra_server_args": extra_args,
+            "extra_envs": dict(payload.get("extra_envs") or {}),
+            "remove_args": to_str_list(payload.get("remove_args")),
+            "unset_envs": to_str_list(payload.get("unset_envs")),
+            "args_mode": str(payload.get("args_mode") or "append"),
+            # The only artifact that patches FlyDSL sources, so the only run that
+            # needs the JIT cache key widened.
+            "flydsl_source_dirs": (str(payload.get("artifact_kind") or "") == _FRAMEWORK_APPLYBACK_ARTIFACT_KIND),
+            "defer_accuracy_until_after_measure": True,
+            "post_measure_accuracy_min_tput": performance_policy["base_tput"]
+            * (1.0 + performance_policy["keep_threshold_pct"] / 100.0),
+            **keep_policy,
+            # Synthetic kind="baseline": candidate A/B validation against the
+            # already-anchored reference. It runs eval for the kernel accuracy
+            # gate but never establishes a replacement quality reference.
+            "quality_ref_exempt": True,
+            # A sub-step of the KERNEL phase's own event, not a dispatched
+            # measurement, so it records into that event rather than leaving a
+            # baseline event of its own.
+            INLINE_EVENT_PARAM: kernel_event_id(int(getattr(state, "macro_cycle", 0) or 0)),
+        },
+        idempotency_key=f"{task_id}-rebaseline",
+    )
+    return _IntegrateRebaseline(
+        workspace=workspace,
+        server_args=extra_args,
+        executor=BaselineExecutor(session_dir=session_dir, shared_state=state),
+        ctx=RunnerContext(task=task, lease=None),
+    )
+
+
+@contextlib.contextmanager
+def _forced_cpp_itfs_rebuild(apply_result: dict) -> Iterator[None]:
+    if not (apply_result.get("cpp_itfs_cache_backup") or {}).get("is_cpp_itfs"):
+        yield
+        return
+    previous = os.environ.get("AITER_REBUILD")
+    os.environ["AITER_REBUILD"] = "1"
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop("AITER_REBUILD", None)
+        else:
+            os.environ["AITER_REBUILD"] = previous
+
+
+async def _multi_node_restart_failure(
+    rebaseline: _IntegrateRebaseline,
+    payload: dict,
+    apply_result: dict,
+) -> HandlerResult | None:
+    from ..actions.executors._multi_node_env import is_multi_node
+
+    if not is_multi_node():
+        return None
+    from ..actions.executors._multi_node_server_lifecycle import (
+        ServerRestartFailed,
+        restart_server_for_round,
+    )
+
+    try:
+        await restart_server_for_round(
+            extra_server_args=rebaseline.server_args,
+            framework=os.environ.get("FRAMEWORK") or None,
+            model_path=(str(payload.get("model_path") or "").strip() or os.environ.get("MODEL_PATH") or None),
+            tp=int(os.environ.get("TP") or 0) or None,
+            ep=int(os.environ.get("EP") or 0) or None,
+            force_full_restart=True,
+        )
+    except ServerRestartFailed as exc:
+        return _integrate_failure(
+            payload,
+            apply_result,
+            error_class="mn_server_restart_failed_post_patch",
+            error=str(exc),
+            decision="REVERT",
+        )
+    ctx = rebaseline.ctx
+    ctx.extra = {**(getattr(ctx, "extra", None) or {}), "mn_round_restarted": True}
+    return None
+
+
+def _cpp_itfs_rebuild_check(apply_result: dict) -> HandlerResult:
+    from ..actions.executors._multi_node_env import is_multi_node
+
+    cpp_itfs_backup = apply_result.get("cpp_itfs_cache_backup") or {}
+    if not cpp_itfs_backup.get("is_cpp_itfs") or is_multi_node():
+        return {"verified": True, "status": "skipped"}
+    return apply_kernel_patch.verify_cpp_itfs_rebuilt(cpp_itfs_backup)
+
+
+def _applyback_verdict_pending(payload: Mapping[str, Any]) -> bool:
+    return (
+        str(payload.get("artifact_kind") or "") == _FRAMEWORK_APPLYBACK_ARTIFACT_KIND
+        and str(payload.get("integration_validation_status") or "") != "passed"
+    )
+
+
+log = logging.getLogger(__name__)
+
+
+# Mirrors the completion ceiling the inferencex eval shim installs; kept in sync
+# so the feasibility check reasons about the budget the eval will really ask for.
+_EVAL_DEFAULT_MAX_TOKENS = 4096
+
+
 def _eval_generation_budget() -> int:
     """Completion tokens the eval harness reserves per sample.
 
-    Mirrors the clamp installed by the inferencex shim: ``HYPERLOOM_EVAL_MAX_TOKENS``
-    when it parses as a positive integer, else the shim's own default. ``0``
-    means the operator disabled the clamp, so no budget can be assumed.
+    Mirrors the clamp installed by the inferencex shim: ``HYPERLOOM_EVAL_MAX_TOKENS`` when it parses as a
+    positive integer, else the shim's own default.
     """
     raw = (os.environ.get("HYPERLOOM_EVAL_MAX_TOKENS") or "").strip()
     if not raw:
@@ -4024,71 +4272,53 @@ def _eval_generation_budget() -> int:
     return value if value >= 0 else _EVAL_DEFAULT_MAX_TOKENS
 
 
+def _integrate_eval_score(bench_result: dict[str, Any], workspace: Path) -> dict[str, Any]:
+    from ..actions.executors._accuracy_gate import parse_eval_results
+
+    measured = bench_result.get("accuracy")
+    attached = {
+        "accuracy": float(measured) if isinstance(measured, (int, float)) else None,
+        "task": str(bench_result.get("accuracy_task") or ""),
+        "metric": str(bench_result.get("accuracy_metric") or ""),
+        "source_file": str(bench_result.get("accuracy_source") or ""),
+    }
+    if attached["accuracy"] is not None:
+        return attached
+    eval_out = parse_eval_results(workspace, framework=os.environ.get("FRAMEWORK") or None)
+    parsed = eval_out.get("accuracy")
+    if not isinstance(parsed, (int, float)):
+        return attached
+    return {
+        "accuracy": float(parsed),
+        "task": str(eval_out.get("task") or ""),
+        "metric": str(eval_out.get("metric") or ""),
+        "source_file": str(eval_out.get("source_file") or ""),
+    }
+
+
 def _grade_integrate_accuracy(
     bench_result: dict[str, Any],
     *,
-    session_dir: Path,
+    baseline_accuracy: float,
     workspace: Path,
     strict: bool = False,
     server_args: str = "",
 ) -> dict[str, Any]:
     """Grade a kernel re-baseline's accuracy against the session baseline.
 
-    The staged re-baseline already ran the serving eval after hot throughput
-    passed, so the score is read back rather than re-measured. A measured drop
-    beyond ``ACCURACY_THRESHOLD`` blocks the KEEP. A missing verdict blocks only
-    when a positive baseline accuracy proves eval works in this environment;
-    otherwise the gate degrades to throughput-only so eval-less setups are not
-    universally blocked.
-
-    The preferred path is the accuracy attached by BaselineExecutor's staged
-    accuracy round. Workspace parsing remains as a compatibility fallback for
-    older runs where eval lived in the warmup slot.
-
-    Args:
-        bench_result: The re-baseline result dict from ``BaselineExecutor``.
-        session_dir: Session directory used to resolve ``baseline_accuracy``.
-        workspace: The integrate task workspace holding both round slots.
-        strict: Grade an artifact whose correctness has only ever been proven
-            against a reference. This serving run is its first and only
-            end-to-end evidence, so the operator opt-out does not apply and a
-            gate that produced no verdict blocks instead of degrading.
-
-    Returns:
-        ``{"blocked": bool, "accuracy_pass": bool | None, "reason": str,
-        "degraded": bool, "accuracy": float | None, "baseline_accuracy": float,
-        "task": str, "metric": str, "source_file": str}``.
+    The staged re-baseline already ran the serving eval after hot throughput passed, so the score is read
+    back rather than re-measured.
     """
     from ..actions.executors._accuracy_gate import (
         accuracy_keep_block,
         accuracy_passed,
-        parse_eval_results,
         require_kernel_accuracy_default,
         resolve_served_context,
         served_context_hosts_eval,
     )
 
-    baseline_accuracy = 0.0
-    try:
-        from ..state.shared_state import SharedState
-
-        baseline_accuracy = float(SharedState.load_or_init(session_dir).baseline_accuracy or 0.0)
-    except Exception:
-        log.debug("integrate_handler: could not resolve baseline_accuracy", exc_info=True)
-
-    measured = bench_result.get("accuracy")
-    new_accuracy = float(measured) if isinstance(measured, (int, float)) else None
-    task = str(bench_result.get("accuracy_task") or "")
-    metric = str(bench_result.get("accuracy_metric") or "")
-    source_file = str(bench_result.get("accuracy_source") or "")
-    if new_accuracy is None:
-        eval_out = parse_eval_results(workspace, framework=os.environ.get("FRAMEWORK") or None)
-        parsed = eval_out.get("accuracy")
-        if isinstance(parsed, (int, float)):
-            new_accuracy = float(parsed)
-            task = str(eval_out.get("task") or "")
-            metric = str(eval_out.get("metric") or "")
-            source_file = str(eval_out.get("source_file") or "")
+    scored = _integrate_eval_score(bench_result, workspace)
+    new_accuracy = scored["accuracy"]
 
     accuracy_pass: bool | None = None
     if new_accuracy is not None and baseline_accuracy > 0:
@@ -4131,7 +4361,7 @@ def _grade_integrate_accuracy(
         degraded,
         "n/a" if new_accuracy is None else f"{new_accuracy:.4f}",
         baseline_accuracy,
-        source_file or "none",
+        scored["source_file"] or "none",
     )
     return {
         "blocked": blocked,
@@ -4139,12 +4369,138 @@ def _grade_integrate_accuracy(
         "reason": reason,
         "degraded": degraded,
         "infeasible": infeasible,
-        "accuracy": new_accuracy,
         "baseline_accuracy": baseline_accuracy,
-        "task": task,
-        "metric": metric,
-        "source_file": source_file,
+        **scored,
     }
+
+
+def _integrate_accuracy_verdict(
+    payload: dict,
+    bench_result: dict[str, Any],
+    rebaseline: _IntegrateRebaseline,
+    performance: Any,
+    baseline_accuracy: float,
+) -> tuple[dict[str, Any] | None, str]:
+    if performance.decision != "KEEP":
+        return None, performance.decision
+    gate = _grade_integrate_accuracy(
+        bench_result,
+        baseline_accuracy=baseline_accuracy,
+        workspace=rebaseline.workspace,
+        strict=_applyback_verdict_pending(payload),
+        server_args=rebaseline.server_args,
+    )
+    if not gate["blocked"] or gate["infeasible"]:
+        return gate, "KEEP"
+    # A measured regression is hard negative evidence -> REVERT. A missing
+    # verdict is only an evidence gap -> NEEDS_REVIEW.
+    return gate, ("REVERT" if gate["accuracy_pass"] is False else "NEEDS_REVIEW")
+
+
+def _settled_patch(decision: str, apply_result: dict, *, caller_owns_durability: bool) -> dict[str, Any]:
+    if decision != "KEEP":
+        finalize_result: HandlerResult = {"status": "skipped", "reason": "non-KEEP decision"}
+    elif caller_owns_durability:
+        finalize_result = {"status": "skipped", "reason": "caller owns the KEEP's durability"}
+    else:
+        finalize_result = _maybe_finalize_kernel_patch(apply_result)
+    revert_result = (
+        {"status": "skipped", "reason": "KEEP decision"}
+        if decision == "KEEP"
+        else _maybe_revert_kernel_patch(apply_result)
+    )
+    top_status, patch_cleanup_status, patch_cleanup_action = _cleanup_verdict(
+        decision=decision,
+        revert_result=revert_result,
+        finalize_result=finalize_result,
+        revert_required=decision != "KEEP" and bool(apply_result.get("manifest_path")),
+    )
+    return {
+        "status": top_status,
+        "decision": decision,
+        "patch_cleanup_status": patch_cleanup_status,
+        "patch_cleanup_action": patch_cleanup_action,
+        "apply_result": apply_result,
+        "revert_result": revert_result,
+        "finalize_result": finalize_result,
+    }
+
+
+def _integrate_result(verdict: _IntegrateVerdict) -> HandlerResult:
+    payload = verdict.payload
+    bench_result = verdict.bench_result
+    result: dict[str, Any] = {
+        **verdict.cleanup,
+        "kernel_id": payload.get("kernel_id"),
+        "patch_path": payload.get("patch_path"),
+        "target_file": payload.get("target_file") or payload.get("source_file"),
+        "base_tput": float(payload.get("base_tput", 0.0)),
+        "new_tput": float(bench_result.get("output_throughput") or 0.0),
+        "gain_pct": verdict.performance.gain_pct,
+        "graded_objective": verdict.performance.graded.objective,
+        "bench_result": bench_result,
+        "report_path": bench_result.get("report_path"),
+        "workspace": bench_result.get("workspace"),
+        "extra_server_args": verdict.server_args,
+        "extra_envs": dict(payload.get("extra_envs") or {}),
+        "rebuild_check": verdict.rebuild_check,
+        "task_group_key": str(payload.get("task_group_key") or ""),
+        "identity_route": str(payload.get("identity_route") or ""),
+        "integration_id": str(payload.get("integration_id") or ""),
+    }
+    # Fusion provenance rides through so the KEEP writeback lifts the stack row as
+    # ``fusion`` (not ``integrate``) and sets ``last_fusion_integrate`` -- both are
+    # read by the idempotency short-circuit and the remote-recipe fusion export.
+    if str(payload.get("source") or "") == "forge_fusion":
+        result["source"] = "forge_fusion"
+        result["action_label"] = str(payload.get("action_label") or "fusion")
+    if _integrate_mode(payload) == "env_only":
+        result["advisory"] = (
+            "env_only mode: the E2E benchmark measured the configuration change only, not a code patch."
+        )
+    if result["status"] == "failed":
+        result["error_class"] = "patch_revert_incomplete"
+        result["error"] = str(result["revert_result"].get("error") or "Kernel patch revert did not complete")
+    _explain_integrate_decision(result, verdict)
+    return result
+
+
+def _explain_integrate_decision(result: HandlerResult, verdict: _IntegrateVerdict) -> None:
+    performance = verdict.performance
+    graded = performance.graded
+    source_import = verdict.source_import
+    if graded.graded_on_intvty and graded.verdict == "REVERT":
+        result["decision_reason"] = "intvty_regression"
+    keep_threshold_pct = float(verdict.payload.get("keep_threshold_pct", 1.0))
+    if performance.stack_positive_keep and performance.gain_pct <= keep_threshold_pct:
+        result["decision_reason"] = "stack_positive_increment"
+        result["stack_incremental_gain_pct"] = performance.stack_incremental_gain_pct
+        result["stack_incremental_keep_threshold_pct"] = STACK_INCREMENTAL_KEEP_THRESHOLD_PCT
+    if source_import.confirmed is not None:
+        result["source_import_confirmed"] = source_import.confirmed
+    if len(source_import.evidence) > 1:
+        result["source_import_evidence"] = source_import.evidence
+    if source_import.downgraded:
+        result["decision_reason"] = "source_not_confirmed_imported"
+    gate = verdict.accuracy_gate
+    if gate is not None:
+        result["accuracy"] = gate["accuracy"]
+        result["baseline_accuracy"] = gate["baseline_accuracy"]
+        result["accuracy_pass"] = gate["accuracy_pass"]
+        result["accuracy_gate"] = gate
+        if gate["blocked"]:
+            result["decision_reason"] = (
+                "accuracy_regression" if gate["accuracy_pass"] is False else "accuracy_evidence_missing"
+            )
+    if not _applyback_verdict_pending(verdict.payload):
+        return
+    result["artifact_kind"] = _FRAMEWORK_APPLYBACK_ARTIFACT_KIND
+    # Only a KEEP settles the outstanding verdict. A non-KEEP is left unstamped:
+    # the attempt ledger already distinguishes a rejection from a retryable
+    # fault, and this field must not blur the two.
+    if result["decision"] == "KEEP":
+        result["integration_validation_status"] = "passed"
+        result["validation_tier"] = _INTEGRATE_ACCURACY_VALIDATION_TIER
 
 
 async def integrate_handler(
@@ -4167,537 +4523,143 @@ async def integrate_handler(
     ``{integration_id}``) payload is accepted. Optional: patch_path,
     target_file, snapshot_dir, kernel_repo, config_path, extra_server_args,
     extra_envs, source, task_group_key, keep_threshold_pct (1.0). The baseline
-    benchmark launch applies the invocation's fixed benchmark timeout policy. Returns ``{status, decision, base_tput, new_tput,
-    gain_pct, kernel_id, patch_path, report_path, workspace}``.
+    benchmark launch applies the invocation's fixed benchmark timeout policy.
 
-    Args:
-        payload: The integrate request payload.
-        session_dir: Session directory for workspace and state.
-
-    Returns:
-        A ``HandlerResult`` with the KEEP/REVERT decision and re-baseline
-        metrics (``status``, ``decision``, ``base_tput``, ``new_tput``,
-        ``gain_pct``, ``kernel_id``, ``patch_path``, ``report_path``,
-        ``workspace``), plus ``accuracy`` / ``baseline_accuracy`` /
-        ``accuracy_pass`` / ``accuracy_gate`` when the gate was graded.
-        ``base_tput`` / ``new_tput`` remain output throughput; ``gain_pct``
-        follows ``graded_objective`` and ``bench_result`` retains the E2E measurement.
+    Returns the KEEP/REVERT decision and re-baseline metrics (``status``,
+    ``decision``, ``base_tput``, ``new_tput``, ``gain_pct``, ``kernel_id``,
+    ``patch_path``, ``report_path``, ``workspace``), plus ``accuracy`` /
+    ``baseline_accuracy`` / ``accuracy_pass`` / ``accuracy_gate`` when the gate
+    was graded. ``base_tput`` / ``new_tput`` remain output throughput;
+    ``gain_pct`` follows ``graded_objective`` and ``bench_result`` retains the
+    E2E measurement.
     """
-    from ..actions.executors.baseline import BaselineExecutor
-    from hyperloom.inference_optimizer.breakdown.recorder.event_ids import INLINE_EVENT_PARAM
-    from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import kernel_event_id
+    from ..actions.executors._accuracy_gate import EVAL_KIND_CONTEXT_TOO_SMALL
     from ..actions.executors.benchmark_result import is_valid_measurement
-    from ..loop.sub_agent_runner import RunnerContext
     from ..measurement.integrate_performance import assess_integrate_performance
     from ..state.shared_state import SharedState
-    from ..state.task_registry import Task
 
-    requested_controls = (
-        bool(to_str_list(payload.get("remove_args")))
-        or bool(to_str_list(payload.get("unset_envs")))
-        or str(payload.get("args_mode") or "append").strip().lower() == "replace"
-    )
+    requested_controls = _request_overrides_serving_controls(payload)
     # Fill defaults from SharedState before the ``base_tput > 0`` check so a bare
     # {kernel_id} payload isn't failed with a phantom "missing base_tput".
     payload = _fill_integrate_defaults_from_state(payload, session_dir=session_dir)
-
-    base_tput = float(payload.get("base_tput", 0.0))
-    if base_tput <= 0:
-        return {
-            "status": "failed",
-            "error": "integrate_handler requires base_tput > 0 to compute KEEP/REVERT",
-        }
+    refusal = _integrate_request_refusal(payload, requested_controls=requested_controls)
+    if refusal is not None:
+        return refusal
 
     # Coordinator-internal: config-only measurements opt in explicitly; agent
     # integrate requests retain main's patch-resolution contract.
-    mode = str(payload.get("mode") or "patch").strip().lower()
-    paired_measurement = payload.get("source") == "forge_gemm_paired"
-    if paired_measurement and any(
-        payload.get(key)
-        for key in ("patch_path", "target_file", "source_file", "snapshot_dir", "preapplied_apply_result")
-    ):
-        raise ValueError("GEMM paired measurement cannot apply a kernel artifact")
-    if mode == "env_only":
-        if not (
-            payload.get("extra_envs")
-            or str(payload.get("extra_server_args") or "").strip()
-            or requested_controls
-            or paired_measurement
-        ):
-            return {
-                "status": "failed",
-                "error_class": "env_only_missing_envs",
-                "error": "env_only integrate requires runtime configuration or an explicit paired reference",
-            }
-    else:
-        payload, missing_inputs = _resolve_integrate_payload(
-            payload,
-            session_dir=session_dir,
-        )
+    mode = _integrate_mode(payload)
+    paired_measurement = _is_paired_gemm_measurement(payload)
+    if mode != "env_only":
+        payload, missing_inputs = _resolve_integrate_payload(payload, session_dir=session_dir)
         if missing_inputs is not None:
             return missing_inputs
 
     state = SharedState.load_or_init(session_dir)
-    patch_path = payload.get("patch_path")
-    kernel_id = payload.get("kernel_id")
-    preapplied = payload.get("preapplied_apply_result")
-    if isinstance(preapplied, dict) and preapplied.get("status") == "ok":
-        manifest_path = Path(str(preapplied.get("manifest_path") or ""))
-        patches_root = (Path(session_dir) / "patches").resolve()
-        try:
-            trusted_preapplied = manifest_path.is_file() and manifest_path.resolve().is_relative_to(patches_root)
-        except OSError:
-            trusted_preapplied = False
-        apply_result = (
-            dict(preapplied)
-            if trusted_preapplied
-            else {
-                "status": "failed",
-                "error_class": "untrusted_preapplied_manifest",
-                "error": f"invalid pre-applied manifest: {manifest_path}",
-            }
-        )
-    elif preapplied_git_patch:
-        # A controller publication is git-applied to the worktree before the
-        # validator runs, so its final bytes are already on disk; apply reads them
-        # as a snapshot instead of mistaking the diff for replacement source.
-        # Skipping the apply outright would also skip the cache invalidation,
-        # multi-node fan-out and rebuild the measurement depends on.
-        # Only an in-process caller can set this: an agent's integrate params
-        # land in ``payload`` verbatim, so the payload cannot carry the trust.
-        apply_result = _maybe_apply_kernel_patch(
-            _preapplied_snapshot_payload(payload),
-            session_dir=session_dir,
-            kernel_id=kernel_id,
-        )
-    else:
-        apply_result = _maybe_apply_kernel_patch(
-            payload,
-            session_dir=session_dir,
-            kernel_id=kernel_id,
-        )
+    apply_result = _applied_patch_result(payload, session_dir=session_dir, preapplied_git_patch=preapplied_git_patch)
     if mode == "env_only" and apply_result.get("status") == "skipped":
         apply_result = {
             "status": "ok",
             "reason": "env_only_no_patch_applied",
-            "kernel_id": kernel_id,
+            "kernel_id": payload.get("kernel_id"),
         }
     log.info("integrate_handler: apply_result=%s", apply_result)
-    if apply_result.get("status") == "failed":
-        # Apply crash: the patch was never measured. Stamp a top-level fault
-        # error_class so SharedState routes this through the fault retry budget.
-        apply_reason = str(apply_result.get("error") or apply_result.get("reason") or "").strip()
-        return {
-            "status": "failed",
-            "error_class": "apply_failed",
-            "error": (f"kernel patch apply failed: {apply_reason}" if apply_reason else "kernel patch apply failed"),
-            "decision": "REVERT",
-            "apply_result": apply_result,
-            "kernel_id": kernel_id,
-            "patch_path": patch_path,
-            "target_file": payload.get("target_file") or payload.get("source_file"),
-        }
-    if apply_result.get("status") != "ok":
-        return {
-            "status": "failed",
-            "error_class": "patch_not_applied",
-            "error": "kernel patch was not applied; refusing to run E2E benchmark",
-            "decision": "REVERT",
-            "apply_result": apply_result,
-            "kernel_id": kernel_id,
-            "patch_path": patch_path,
-            "target_file": payload.get("target_file") or payload.get("source_file"),
-        }
+    unapplied = _unapplied_patch_failure(payload, apply_result)
+    if unapplied is not None:
+        return unapplied
 
-    keep_threshold_pct = float(payload.get("keep_threshold_pct", 1.0))
+    base_tput = float(payload.get("base_tput", 0.0))
     performance_policy = {
         "base_tput": base_tput,
-        "keep_threshold_pct": keep_threshold_pct,
+        "keep_threshold_pct": float(payload.get("keep_threshold_pct", 1.0)),
         "stack_incremental_keep_threshold_pct": STACK_INCREMENTAL_KEEP_THRESHOLD_PCT,
     }
-    extra_args = str(payload.get("extra_server_args") or "").strip()
-    # VRAM barrier (HL_HONEST_E2E umbrella, default ON; opt out with
-    # HL_HONEST_E2E=0 or HL_INTEGRATE_VRAM_GUARD=0): cap re-baseline util on
-    # vLLM so the integrate server cannot OOM on a tighter node.
-    extra_args = _vram_guarded_server_args(extra_args)
-
-    # Wrap BaselineExecutor in a Task/RunnerContext.
-    from hyperloom.inference_optimizer.session.session_paths import fs_safe_id, unique_runs_dir
-
-    # A fusion sibling's kernel_id is its operator name (``llm:<recipe>``), which
-    # only reaches this handler now that fusion lands through the generic queue.
-    # It is a legal id but not a legal directory name everywhere -- fold it.
-    fake_task_id = f"integrate-{fs_safe_id(kernel_id)}"
-    workspace = unique_runs_dir(session_dir, "integrate", fake_task_id)
-    baseline_executor = BaselineExecutor(session_dir=session_dir, shared_state=state)
-    fake_task = Task(
-        task_id=fake_task_id,
-        kind="baseline",
-        state="running",
-        params={
-            "config_path": payload.get("config_path"),
-            "output_dir": str(workspace),
-            "extra_server_args": extra_args,
-            "extra_envs": dict(payload.get("extra_envs") or {}),
-            "remove_args": to_str_list(payload.get("remove_args")),
-            "unset_envs": to_str_list(payload.get("unset_envs")),
-            "args_mode": str(payload.get("args_mode") or "append"),
-            # The only artifact that patches FlyDSL sources, so the only run that
-            # needs the JIT cache key widened.
-            "flydsl_source_dirs": (str(payload.get("artifact_kind") or "") == _FRAMEWORK_APPLYBACK_ARTIFACT_KIND),
-            "defer_accuracy_until_after_measure": True,
-            "post_measure_accuracy_min_tput": base_tput * (1.0 + keep_threshold_pct / 100.0),
-            **({"post_measure_accuracy_keep_policy": performance_policy} if not paired_measurement else {}),
-            # Synthetic kind="baseline": candidate A/B validation against the
-            # already-anchored reference. It runs eval for the kernel accuracy
-            # gate but never establishes a replacement quality reference.
-            "quality_ref_exempt": True,
-            # A sub-step of the KERNEL phase's own event, not a dispatched
-            # measurement, so it records into that event rather than leaving a
-            # baseline event of its own.
-            INLINE_EVENT_PARAM: kernel_event_id(int(getattr(state, "macro_cycle", 0) or 0)),
-        },
-        idempotency_key=f"{fake_task_id}-rebaseline",
-    )
-    ctx = RunnerContext(task=fake_task, lease=None)
-
-    # aiter cpp_itfs kernels recompile at runtime and its cache hashes params not
-    # source, so set AITER_REBUILD=1 for the re-baseline server to force a rebuild
-    # of the patched kernel. Scoped to cpp_itfs applies and always restored.
-    cpp_itfs_backup = apply_result.get("cpp_itfs_cache_backup") or {}
-    force_aiter_rebuild = bool(cpp_itfs_backup.get("is_cpp_itfs"))
-    _prev_aiter_rebuild = os.environ.get("AITER_REBUILD")
-    if force_aiter_rebuild:
-        os.environ["AITER_REBUILD"] = "1"
-
-    def _restore_aiter_rebuild_env() -> None:
-        """Restore the ``AITER_REBUILD`` env var to its prior value.
-
-        No-op unless a forced rebuild was applied for this re-baseline.
-        """
-        if not force_aiter_rebuild:
-            return
-        if _prev_aiter_rebuild is None:
-            os.environ.pop("AITER_REBUILD", None)
-        else:
-            os.environ["AITER_REBUILD"] = _prev_aiter_rebuild
-
-    # Multi-node: force a FULL sglang restart so it re-imports the patched
-    # modules (a resume would measure the pre-patch process). mn_round_restarted
-    # stops a double restart; force_full_restart scopes the resume override here.
-    from ..actions.executors._multi_node_env import is_multi_node
-
-    # This must run even when the regular JIT cache is warm: cpp_itfs attention
-    # uses the separate AITER_ROOT_DIR/build tree and can carry a stale baton
-    # from a timed-out Forge driver.
-    _sweep_integrate_aiter_locks(reason="integrate server startup")
-
-    if is_multi_node():
-        from ..actions.executors._multi_node_server_lifecycle import (
-            ServerRestartFailed,
-            restart_server_for_round,
-        )
-
+    rebaseline = _integrate_rebaseline(payload, state, session_dir=session_dir, performance_policy=performance_policy)
+    with _forced_cpp_itfs_rebuild(apply_result):
+        # The sweep runs even when the regular JIT cache is warm: cpp_itfs attention
+        # uses the separate AITER_ROOT_DIR/build tree and can carry a stale baton
+        # from a timed-out Forge driver.
+        _sweep_integrate_aiter_locks(reason="integrate server startup")
+        restart_failure = await _multi_node_restart_failure(rebaseline, payload, apply_result)
+        if restart_failure is not None:
+            return restart_failure
         try:
-            await restart_server_for_round(
-                extra_server_args=extra_args,
-                framework=os.environ.get("FRAMEWORK") or None,
-                model_path=(str(payload.get("model_path") or "").strip() or os.environ.get("MODEL_PATH") or None),
-                tp=int(os.environ.get("TP") or 0) or None,
-                ep=int(os.environ.get("EP") or 0) or None,
-                force_full_restart=True,
+            bench_result = await _run_integrate_rebaseline_with_lock_retry(
+                rebaseline.executor,
+                rebaseline.ctx,
+                workspace=rebaseline.workspace,
+                reason=f"integrate {payload.get('kernel_id') or 'anonymous'} rebaseline",
             )
-            ctx.extra = {**(getattr(ctx, "extra", None) or {}), "mn_round_restarted": True}
-        except ServerRestartFailed as exc:
-            _restore_aiter_rebuild_env()
-            revert_result = _maybe_revert_kernel_patch(apply_result)
-            return {
-                "status": "failed",
-                "error_class": "mn_server_restart_failed_post_patch",
-                "error": str(exc),
-                "kernel_id": kernel_id,
-                "patch_path": patch_path,
-                "apply_result": apply_result,
-                "revert_result": revert_result,
-                "decision": "REVERT",
-            }
-
-    try:
-        bench_result = await _run_integrate_rebaseline_with_lock_retry(
-            baseline_executor,
-            ctx,
-            workspace=workspace,
-            reason=f"integrate {kernel_id or 'anonymous'} rebaseline",
-        )
-    except Exception as exc:  # noqa: BLE001
-        revert_result = _maybe_revert_kernel_patch(apply_result)
-        return {
-            "status": "failed",
-            "error_class": "rebaseline_exception",
-            "error": repr(exc),
-            "kernel_id": kernel_id,
-            "patch_path": patch_path,
-            "target_file": payload.get("target_file") or payload.get("source_file"),
-            "apply_result": apply_result,
-            "revert_result": revert_result,
-        }
-    finally:
-        # Restore AITER_REBUILD on every path so the override never leaks past
-        # this integrate.
-        _restore_aiter_rebuild_env()
-
+        except Exception as exc:  # noqa: BLE001
+            return _integrate_failure(
+                payload, apply_result, error_class="rebaseline_exception", error=repr(exc), decision="REVERT"
+            )
     if not is_valid_measurement(bench_result):
-        revert_result = _maybe_revert_kernel_patch(apply_result)
-        # The re-baseline produced no usable measurement, so the patch was never
-        # fairly scored. Surface a top-level fault error_class (the re-baseline's
-        # own when present, else bench_exception) so this routes through the fault
-        # retry budget rather than being discarded as a genuine REVERT.
-        rebaseline_error_class = (
-            str((bench_result or {}).get("error_class") or "").strip() if isinstance(bench_result, dict) else ""
-        ) or "bench_exception"
-        stopped = stopped_by_the_run_class(rebaseline_error_class)
-        if stopped is not None:
-            # Nothing was measured, so the patch has no verdict to answer for.
-            return {
-                "status": "failed",
-                "error_class": stopped.error_class,
-                "error": stopped.interrupted,
-                "decision": "NEEDS_REVIEW",
-                "rebaseline_detail": bench_result,
-                "kernel_id": kernel_id,
-                "patch_path": patch_path,
-                "target_file": payload.get("target_file") or payload.get("source_file"),
-                "apply_result": apply_result,
-                "revert_result": revert_result,
-            }
-        return {
-            "status": "failed",
-            "error_class": rebaseline_error_class,
-            "error": "re-baseline did not succeed",
-            "decision": "REVERT",
-            "rebaseline_detail": bench_result,
-            "kernel_id": kernel_id,
-            "patch_path": patch_path,
-            "target_file": payload.get("target_file") or payload.get("source_file"),
-            "apply_result": apply_result,
-            "revert_result": revert_result,
-        }
+        return _unmeasured_integration_failure(payload, apply_result=apply_result, bench_result=bench_result)
 
-    # Don't score a stale binary: for cpp_itfs targets the served kernel is
-    # runtime-compiled, so a reused params-hashed lib.so would measure the
-    # PRE-patch kernel. Assert a fresh lib.so (newer than the invalidation) landed
-    # before trusting gain_pct; otherwise flag for review.
-    #
-    # Single-node only: in multi-node the served cache lives on the serving pod,
-    # so AITER_REBUILD=1 on the pod restart is the mechanism and this local check
-    # is skipped. verify_cpp_itfs_rebuilt() returns verified=True off the
-    # cpp_itfs path, so this gate is a strict no-op there.
-    rebuild_check: HandlerResult = {"verified": True, "status": "skipped"}
-    if force_aiter_rebuild and not is_multi_node():
-        rebuild_check = apply_kernel_patch.verify_cpp_itfs_rebuilt(cpp_itfs_backup)
-        if not rebuild_check.get("verified", True):
-            revert_result = _maybe_revert_kernel_patch(apply_result)
-            return {
-                "status": "failed",
-                "error_class": "cpp_itfs_rebuild_not_verified",
-                "error": (
-                    "re-baseline did not produce a freshly-built cpp_itfs "
-                    "lib.so; refusing to score a possibly-stale binary"
-                ),
-                "decision": "NEEDS_REVIEW",
-                "kernel_id": kernel_id,
-                "patch_path": patch_path,
-                "target_file": payload.get("target_file") or payload.get("source_file"),
-                "apply_result": apply_result,
-                "revert_result": revert_result,
-                "rebuild_check": rebuild_check,
-            }
+    rebuild_check = _cpp_itfs_rebuild_check(apply_result)
+    if not rebuild_check.get("verified", True):
+        return _integrate_failure(
+            payload,
+            apply_result,
+            error_class="cpp_itfs_rebuild_not_verified",
+            error=(
+                "re-baseline did not produce a freshly-built cpp_itfs lib.so; refusing to score a possibly-stale binary"
+            ),
+            decision="NEEDS_REVIEW",
+            rebuild_check=rebuild_check,
+        )
 
-    new_tput = float(bench_result.get("output_throughput") or 0.0)
     if paired_measurement:
         return {
             "status": "ok",
             "decision": "NEEDS_REVIEW",
             "base_tput": base_tput,
-            "new_tput": new_tput,
+            "new_tput": float(bench_result.get("output_throughput") or 0.0),
             "bench_result": bench_result,
             "workspace": bench_result.get("workspace"),
         }
     performance = assess_integrate_performance(state, bench_result, **performance_policy)
-    graded = performance.graded
-    if graded.degrade_reason:
-        log.info("integrate_handler: grading unavailable (%s)", graded.degrade_reason)
-    gain_pct = performance.gain_pct
-    stack_incremental_gain_pct = performance.stack_incremental_gain_pct
-    stack_positive_keep = performance.stack_positive_keep
-    decision = performance.decision
-
-    # Accuracy gate: a kernel patch only KEEPs if it also holds accuracy. Graded
-    # ONLY for a candidate that already cleared the throughput bar, so a
-    # regressing patch never spends a verdict on itself, and graded from the
-    # re-baseline's own eval output, so the verdict costs no extra GPU time.
-    # Placed ahead of the optional source-import pass so a patch that loses
-    # accuracy short-circuits before it runs.
-    # An apply-back carries only reference correctness, so this run is the sole
-    # end-to-end evidence it will ever get.
-    # Anything other than a recorded pass still owes the verdict, so an absent or
-    # unrecognised status keeps the gate armed rather than disarming it.
-    applyback_pending = (
-        str(payload.get("artifact_kind") or "") == _FRAMEWORK_APPLYBACK_ARTIFACT_KIND
-        and str(payload.get("integration_validation_status") or "") != "passed"
+    if performance.graded.degrade_reason:
+        log.info("integrate_handler: grading unavailable (%s)", performance.graded.degrade_reason)
+    # Read after the re-baseline, not before it: the executor shares this state
+    # object and a salvaged sibling accuracy during the run republishes the
+    # reference this candidate is graded against.
+    accuracy_gate, accuracy_decision = _integrate_accuracy_verdict(
+        payload, bench_result, rebaseline, performance, float(state.baseline_accuracy or 0.0)
     )
-    accuracy_gate: dict[str, Any] | None = None
-    if decision == "KEEP":
-        accuracy_gate = _grade_integrate_accuracy(
-            bench_result,
-            session_dir=session_dir,
-            workspace=workspace,
-            strict=applyback_pending,
-            server_args=extra_args,
+    if accuracy_gate is not None and accuracy_gate["blocked"] and accuracy_gate["infeasible"]:
+        # A gate that cannot run under this serving configuration measured nothing
+        # about the patch, so it is an integration fault: faults carry their own
+        # budget and never spend one of the attempts a patch gets to prove itself.
+        return _integrate_failure(
+            payload,
+            apply_result,
+            error_class=EVAL_KIND_CONTEXT_TOO_SMALL,
+            error=accuracy_gate["reason"],
+            decision="NEEDS_REVIEW",
+            gain_pct=performance.gain_pct,
+            accuracy_gate=accuracy_gate,
         )
-        if accuracy_gate["blocked"]:
-            if accuracy_gate.get("infeasible"):
-                # The gate cannot run under this configuration, so this round
-                # measured nothing about the patch. Report it as an integration
-                # fault: faults carry their own budget and never consume one of
-                # the three attempts a patch gets to prove itself.
-                from ..actions.executors._accuracy_gate import (
-                    EVAL_KIND_CONTEXT_TOO_SMALL,
-                )
 
-                revert_result = _maybe_revert_kernel_patch(apply_result)
-                return {
-                    "status": "failed",
-                    "error_class": EVAL_KIND_CONTEXT_TOO_SMALL,
-                    "error": accuracy_gate["reason"],
-                    "decision": "NEEDS_REVIEW",
-                    "gain_pct": gain_pct,
-                    "accuracy_gate": accuracy_gate,
-                    "revert_result": revert_result,
-                }
-            # A measured regression is hard negative evidence -> REVERT. A
-            # missing verdict is only an evidence gap -> NEEDS_REVIEW.
-            decision = "REVERT" if accuracy_gate["accuracy_pass"] is False else "NEEDS_REVIEW"
-
-    # import-grep source confirmation (HL_HONEST_E2E umbrella, default ON; opt
-    # out with HL_HONEST_E2E=0 or HL_CONFIRM_SOURCE_IMPORTED=0). Advisory:
-    # annotate whether the served process imported/compiled the patched source.
-    # Only the strict sub-flag enforces it, and only on positive non-import
-    # evidence (confirmed is False); an "unknown" (None) never penalizes.
-    source_import_confirmed: bool | None = None
-    source_import_evidence: dict[str, bool | None] = {}
-    source_not_imported_downgrade = False
-    if _honest_flag("HL_CONFIRM_SOURCE_IMPORTED"):
-        # Grade the whole write set; the single target is the fallback for a
-        # patch whose bundle declared none.
-        _written = [str(path) for path in (payload.get("patch_write_paths") or []) if str(path or "").strip()]
-        if not _written:
-            _written = [str(payload.get("target_file") or payload.get("source_file") or "")]
-        source_import_confirmed, source_import_evidence = _confirm_sources_imported(
-            _written,
-            bench_result.get("workspace"),
-        )
-        if (
-            decision == "KEEP"
-            and source_import_confirmed is False
-            and _honest_flag("HL_CONFIRM_SOURCE_IMPORTED_STRICT")
-        ):
-            decision = "NEEDS_REVIEW"
-            source_not_imported_downgrade = True
-
-    revert_result = (
-        {"status": "skipped", "reason": "KEEP decision"}
-        if decision == "KEEP"
-        else _maybe_revert_kernel_patch(apply_result)
+    # Only the strict sub-flag enforces the confirmation; an unknown never penalizes.
+    confirmation = _confirm_source_import(
+        payload,
+        workspace=bench_result.get("workspace"),
+        decision=accuracy_decision,
     )
-    if decision != "KEEP":
-        finalize_result = {"status": "skipped", "reason": "non-KEEP decision"}
-    elif preapplied_git_patch:
-        # Only the caller's own commit makes a pre-applied KEEP durable, so the
-        # caller owns finalize. Dropping the backups here would strand the
-        # fanned-out pod-side patch if that commit then failed.
-        finalize_result = {"status": "skipped", "reason": "caller owns the KEEP's durability"}
-    else:
-        finalize_result = _maybe_finalize_kernel_patch(apply_result)
-    revert_required = decision != "KEEP" and bool(apply_result.get("manifest_path"))
-    top_status, patch_cleanup_status, patch_cleanup_action = _cleanup_verdict(
-        decision=decision,
-        revert_result=revert_result,
-        finalize_result=finalize_result,
-        revert_required=revert_required,
-    )
-
-    result: dict[str, Any] = {
-        "status": top_status,
-        "decision": decision,
-        "patch_cleanup_status": patch_cleanup_status,
-        "patch_cleanup_action": patch_cleanup_action,
-        "kernel_id": kernel_id,
-        "patch_path": patch_path,
-        "target_file": payload.get("target_file") or payload.get("source_file"),
-        "base_tput": base_tput,
-        "new_tput": new_tput,
-        "gain_pct": gain_pct,
-        "graded_objective": graded.objective,
-        "bench_result": bench_result,
-        "report_path": bench_result.get("report_path"),
-        "workspace": bench_result.get("workspace"),
-        "extra_server_args": extra_args,
-        "extra_envs": dict(payload.get("extra_envs") or {}),
-        "apply_result": apply_result,
-        "revert_result": revert_result,
-        "finalize_result": finalize_result,
-        "rebuild_check": rebuild_check,
-        "task_group_key": str(payload.get("task_group_key") or ""),
-        "identity_route": str(payload.get("identity_route") or ""),
-        "integration_id": str(payload.get("integration_id") or ""),
-    }
-    # Fusion provenance rides through so the KEEP writeback lifts the stack row as
-    # ``fusion`` (not ``integrate``) and sets ``last_fusion_integrate`` -- both are
-    # read by the idempotency short-circuit and the remote-recipe fusion export.
-    if str(payload.get("source") or "") == "forge_fusion":
-        result["source"] = "forge_fusion"
-        result["action_label"] = str(payload.get("action_label") or "fusion")
-    if mode == "env_only":
-        result["advisory"] = (
-            "env_only mode: the E2E benchmark measured the configuration change only, not a code patch."
+    return _integrate_result(
+        _IntegrateVerdict(
+            payload=payload,
+            bench_result=bench_result,
+            performance=performance,
+            cleanup=_settled_patch(confirmation.decision, apply_result, caller_owns_durability=preapplied_git_patch),
+            accuracy_gate=accuracy_gate,
+            source_import=confirmation,
+            rebuild_check=rebuild_check,
+            server_args=rebaseline.server_args,
         )
-    if top_status == "failed":
-        result["error_class"] = "patch_revert_incomplete"
-        result["error"] = str(revert_result.get("error") or "Kernel patch revert did not complete")
-    if graded.graded_on_intvty and graded.verdict == "REVERT":
-        result["decision_reason"] = "intvty_regression"
-    if stack_positive_keep and gain_pct <= keep_threshold_pct:
-        result["decision_reason"] = "stack_positive_increment"
-        result["stack_incremental_gain_pct"] = stack_incremental_gain_pct
-        result["stack_incremental_keep_threshold_pct"] = STACK_INCREMENTAL_KEEP_THRESHOLD_PCT
-    if source_import_confirmed is not None:
-        result["source_import_confirmed"] = source_import_confirmed
-    if len(source_import_evidence) > 1:
-        result["source_import_evidence"] = source_import_evidence
-    if source_not_imported_downgrade:
-        result["decision_reason"] = "source_not_confirmed_imported"
-    # Recorded last so a blocking accuracy verdict owns ``decision_reason``: it
-    # is the reason this candidate lost its KEEP, outranking the throughput-side
-    # annotations above.
-    if accuracy_gate is not None:
-        result["accuracy"] = accuracy_gate["accuracy"]
-        result["baseline_accuracy"] = accuracy_gate["baseline_accuracy"]
-        result["accuracy_pass"] = accuracy_gate["accuracy_pass"]
-        result["accuracy_gate"] = accuracy_gate
-        if accuracy_gate["blocked"]:
-            result["decision_reason"] = (
-                "accuracy_regression" if accuracy_gate["accuracy_pass"] is False else "accuracy_evidence_missing"
-            )
-    if applyback_pending:
-        result["artifact_kind"] = _FRAMEWORK_APPLYBACK_ARTIFACT_KIND
-        # Only a KEEP settles the outstanding verdict. A non-KEEP is left
-        # unstamped: the attempt ledger already distinguishes a rejection from a
-        # retryable fault, and this field must not blur the two.
-        if decision == "KEEP":
-            result["integration_validation_status"] = "passed"
-            result["validation_tier"] = _INTEGRATE_ACCURACY_VALIDATION_TIER
-    return result
+    )
 
 
 # Kernel-agent programmatic dispatch table.

@@ -182,15 +182,11 @@ class V6GradingTputGuard(TypedDict, total=False):
 
 
 class V6Grading(TypedDict, total=False):
-    """The axis this session was configured to grade on.
+    """The grading mode this session was started in.
 
-    The session-level setting and only that. What a promotion was actually
-    decided on is ``outcome.validation.graded_on``, read off the promotion
-    itself. On a session that promoted anything the two agree, because a
-    comparison that cannot supply the configured axis pair fails rather than
-    settling for another axis -- no promotion is ever graded off-objective.
-    Neither field resolves the other even so: a session can be configured for
-    an axis and promote nothing on it.
+    ``objective`` is a start-time mode marker (``e2e_norm_intvty_p90`` on an interactivity session), not the
+    promotion axis: that is ``outcome.validation.graded_on`` / ``outcome.final.graded_on``, absent when nothing
+    was adopted and the adoption axis when nothing was validated.
     """
 
     benchmark_mode: str
@@ -1406,8 +1402,8 @@ class V6StackValidation(TypedDict, total=False):
     source: str
     measurement_basis: str
     #: The axis the figure was graded on, so an intvty-graded gain is not later
-    #: read as an output gain. Always the axis the session was configured for:
-    #: only a comparison the orchestrator found comparable is recorded here.
+    #: read as an output gain. Only a comparison the orchestrator found
+    #: comparable is recorded here.
     graded_objective: str
     #: The graded axes of the measurement that produced the figure, recorded
     #: beside it because a later revalidation moves the cumulative gain without
@@ -2045,6 +2041,7 @@ class V6KernelRewriteE2E(TypedDict, total=False):
     decision: str | None
     patch_path: str | None
     target_file: str | None
+    graded_objective: str | None
 
 
 class V6KernelRebenchEngagement(TypedDict, total=False):
@@ -2355,6 +2352,7 @@ class V6KernelAttempt(TypedDict, total=False):
     backends_tried: list[str]
     speedup: float | None
     gain_pct: float | None
+    gain_axis: str | None  # kernel_micro, output_throughput or the gate's graded axis
     compile_status: str
     correctness: bool | None
     artifact_path: str
@@ -2383,6 +2381,7 @@ class V6KernelDeliveredRow(TypedDict, total=False):
     ref: str
     kernel_id: str
     gain_pct: float | None
+    gain_axis: str | None
     settled_by: str
 
 
