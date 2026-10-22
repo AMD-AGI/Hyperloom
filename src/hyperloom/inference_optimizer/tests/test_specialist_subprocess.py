@@ -1322,3 +1322,154 @@ async def test_gpu_specialist_env_keeps_its_cards_and_shared_caches(tmp_path, mo
     env = await _spawn_env(tmp_path, monkeypatch, gpu_ids=(0, 1))
     assert env["HIP_VISIBLE_DEVICES"] == env["ROCR_VISIBLE_DEVICES"] == "0,1"
     assert "TRITON_CACHE_DIR" not in env and "AITER_JIT_DIR" not in env
+
+
+async def _run_spawn(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **spawn_kwargs: Any) -> tuple[Any, list[dict]]:
+    """Run one local spawn against a ``Popen`` that records its kwargs and refuses to start."""
+    popen_kwargs: list[dict] = []
+
+    def _popen(_cmd, **kwargs):
+        popen_kwargs.append(kwargs)
+        raise OSError("spawn refused by test")
+
+    monkeypatch.setattr(subprocess_.subprocess, "Popen", _popen)
+    disp = SpecialistSubprocessDispatcher(config=SpecialistSubprocessConfig(poll_interval_seconds=0.01))
+    spawn = SpecialistSpawn(
+        task_id="t-user",
+        workspace=tmp_path / "ws",
+        worktree=None,
+        worktree_base=None,
+        system_prompt="sys",
+        user_prompt="usr",
+        disallowed_tools=frozenset(),
+        max_turns=1,
+        deadline=Deadline.after(5.0),
+        **spawn_kwargs,
+    )
+    return await disp.run(spawn), popen_kwargs
+
+
+async def test_specialist_user_unset_spawns_exactly_as_before(tmp_path, monkeypatch):
+    monkeypatch.delenv("HYPERLOOM_SPECIALIST_USER", raising=False)
+    result, popen_kwargs = await _run_spawn(tmp_path, monkeypatch)
+    assert "spawn refused by test" in (result.error or "")
+    assert len(popen_kwargs) == 1
+    assert not {"user", "group", "extra_groups", "umask"} & popen_kwargs[0].keys()
+
+
+@pytest.mark.parametrize(
+    ("user", "needle"),
+    [("no-such-user-d16", "no such user"), ("root", "uid 0")],
+)
+async def test_specialist_user_that_cannot_be_used_fails_the_task_without_spawning(tmp_path, monkeypatch, user, needle):
+    monkeypatch.setenv("HYPERLOOM_SPECIALIST_USER", user)
+    result, popen_kwargs = await _run_spawn(tmp_path, monkeypatch)
+    assert popen_kwargs == []
+    assert "specialist user refused" in (result.error or "")
+    assert needle in (result.error or "")
+
+
+async def test_specialist_user_is_refused_on_the_ray_gpu_actor_path(tmp_path, monkeypatch):
+    monkeypatch.setenv("HYPERLOOM_SPECIALIST_USER", "nobody")
+    result, popen_kwargs = await _run_spawn(tmp_path, monkeypatch, gpu_lease=object())
+    assert popen_kwargs == []
+    assert "Ray GPU actor" in (result.error or "")
+
+
+_DEMOTE_USER = "nobody"
+_demote_skip = pytest.mark.skipif(
+    os.geteuid() != 0 or not any(line.startswith(f"{_DEMOTE_USER}:") for line in open("/etc/passwd")),
+    reason=f"demoting needs root and an existing {_DEMOTE_USER!r} account; the test creates no users",
+)
+
+_DEMOTED_ROLE = """#!/bin/sh
+id -u > proof_uid.txt
+echo "$HOME" > proof_home.txt
+echo edited >> src.py
+cat {secret} > proof_secret.txt 2> proof_secret.err; echo $? > proof_secret.rc
+git status --porcelain > proof_git.txt 2> proof_git.err; echo $? > proof_git.rc
+echo '{{"gap_canonical_id": "gap.test.example", "domain": "serving_specialist", "proposal_set": [],
+"patches_written": [], "summary": "demoted", "confidence": 0.5}}' > specialist_done.json
+"""
+
+
+@_demote_skip
+async def test_demoted_specialist_writes_its_worktree_and_cannot_read_the_apps_files(monkeypatch):
+    import pwd
+    import shutil
+    import tempfile
+
+    entry = pwd.getpwnam(_DEMOTE_USER)
+    base = Path(tempfile.mkdtemp(prefix="d16."))
+    try:
+        base.chmod(0o755)  # the demoted account must be able to traverse to the fake CLI and the checkout
+        repo = base / "framework"
+        init_git_repo(repo)
+        monkeypatch.setenv("FRAMEWORK_REPO_PATH", str(repo))
+        monkeypatch.setenv("HYPERLOOM_SPECIALIST_USER", _DEMOTE_USER)
+        secret = base / "app_secret"
+        secret.write_text("app-credential", encoding="utf-8")
+        secret.chmod(0o600)
+        role = base / "bin" / "claude"
+        role.parent.mkdir()
+        role.write_text(_DEMOTED_ROLE.format(secret=secret), encoding="utf-8")
+        role.chmod(0o755)
+        session_dir = base / "session"
+        session_dir.mkdir()
+        session_dir.chmod(0o755)
+        runner = SpecialistRunner(
+            subprocess_config=SpecialistSubprocessConfig(
+                claude_executable=str(role),
+                model="",
+                framework_source_roots=(str(repo),),
+                poll_interval_seconds=0.2,
+            ),
+            session_dir=session_dir,
+            default_max_turns=2,
+        )
+
+        result = await runner.run(_make_runner_ctx("t-demoted"))
+
+        workspace = session_dir / "runs" / "specialist" / "t-demoted"
+        worktree = workspace / "worktree"
+        proof = {p.name: p.read_text(encoding="utf-8").strip() for p in worktree.glob("proof_*")}
+        assert result.status == "succeeded", result.error
+        assert proof["proof_uid.txt"] == str(entry.pw_uid)
+        assert proof["proof_home.txt"] == entry.pw_dir
+        assert "app-credential" not in proof["proof_secret.txt"]
+        assert proof["proof_secret.rc"] != "0"
+        assert "Permission denied" in proof["proof_secret.err"]
+        # It edited its own worktree and git there still answers (no "dubious ownership").
+        assert (worktree / "src.py").read_text(encoding="utf-8").endswith("edited\n")
+        assert proof["proof_git.rc"] == "0", proof["proof_git.err"]
+        # The app's prompt and log stay private to it.
+        assert (workspace / "prompt.md").stat().st_mode & 0o077 == 0
+        assert (workspace / "process.log").stat().st_mode & 0o077 == 0
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
+@_demote_skip
+def test_demote_shares_a_worktree_that_lives_outside_the_workspace(tmp_path, monkeypatch):
+    monkeypatch.setenv("HYPERLOOM_SPECIALIST_USER", _DEMOTE_USER)
+    request = SpecialistSpawn(
+        task_id="t-outside",
+        workspace=tmp_path / "ws",
+        worktree=tmp_path / "elsewhere",
+        worktree_base=None,
+        system_prompt="sys",
+        user_prompt="usr",
+        disallowed_tools=frozenset(),
+        max_turns=1,
+        deadline=Deadline.after(5.0),
+    )
+    request.workspace.mkdir()
+    request.worktree.mkdir()
+    (request.workspace / "prompt.md").write_text("p", encoding="utf-8")
+    run_as = subprocess_.specialist_run_as()
+
+    kwargs = subprocess_._demote_launch_kwargs(run_as, request, {})
+
+    assert request.worktree.stat().st_gid == kwargs["group"]
+    assert request.worktree.stat().st_mode & 0o2070 == 0o2070
+    assert (request.workspace / "prompt.md").stat().st_mode & 0o077 == 0

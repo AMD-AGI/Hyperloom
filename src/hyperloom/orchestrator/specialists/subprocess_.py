@@ -53,6 +53,7 @@ from hyperloom.common.llm_config import (
 from hyperloom.common.env_safety import (
     redact_file_in_place,
 )
+from hyperloom.common.run_as import RunAs, RunAsError, specialist_run_as
 from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
 from hyperloom.common.proctree import collect_tree, kill_tree
 
@@ -433,6 +434,26 @@ class ReapWatch:
 
 
 # Dispatcher
+def _demote_launch_kwargs(run_as: RunAs | None, request: Any, env: dict[str, str]) -> dict[str, Any]:
+    """Make the specialist's tree writable by ``run_as`` and return its ``Popen`` kwargs.
+
+    ``None`` (no ``HYPERLOOM_SPECIALIST_USER``) returns no kwargs and touches
+    nothing. The workspace is shared with the sticky bit so the child cannot
+    delete the app's own prompt and log; a worktree outside the workspace is shared as is.
+    """
+    if run_as is None:
+        return {}
+    run_as.share_tree(request.workspace, sticky=True)
+    for private in ("prompt.md", _PROCESS_LOG_NAME):
+        # The app's own files in the shared workspace stay private to it.
+        if (request.workspace / private).exists():
+            (request.workspace / private).chmod(0o600)
+    if request.worktree is not None and request.workspace not in request.worktree.parents:
+        run_as.share_tree(request.worktree)
+    run_as.apply_env(env, safe_dirs=[request.worktree] if request.worktree is not None else ())
+    return run_as.popen_kwargs()
+
+
 class SpecialistSubprocessDispatcher:
     """Spawn + reap one agent-CLI subprocess for a specialist task.
 
@@ -494,6 +515,21 @@ class SpecialistSubprocessDispatcher:
             partial_candidates.append(request.worktree / "specialist_done.partial.json")
         partial_candidates.append(request.workspace / "specialist_done.partial.json")
         heartbeat_file = request.workspace / "heartbeat.json"
+
+        # A requested demote that cannot be honoured fails the task: running the
+        # specialist as the app user would defeat the point of asking.
+        try:
+            run_as = specialist_run_as()
+            if run_as is not None and request.gpu_lease is not None:
+                raise RunAsError("the Ray GPU actor path cannot run the specialist as another user")
+        except RunAsError as exc:
+            return SpecialistSubprocessResult(
+                done_payload=None,
+                exit_code=None,
+                elapsed_seconds=0.0,
+                process_log_path=str(process_log),
+                error=f"specialist user refused: {exc}",
+            )
 
         # Compose a minimal env. Provider credentials are inherited by default
         # for compatibility with deployments that authenticate the agent CLI
@@ -637,6 +673,7 @@ class SpecialistSubprocessDispatcher:
                         pass
                     stdin_fh: Any = None
                     try:
+                        demote = await asyncio.to_thread(_demote_launch_kwargs, run_as, request, env)
                         stdin_fh = prompt_file.open("rb")
                         proc = subprocess.Popen(
                             cmd,
@@ -646,6 +683,7 @@ class SpecialistSubprocessDispatcher:
                             env=env,
                             cwd=str(request.worktree or request.workspace),
                             start_new_session=True,
+                            **demote,
                         )
                     except (FileNotFoundError, OSError) as exc:
                         log_fh.close()
