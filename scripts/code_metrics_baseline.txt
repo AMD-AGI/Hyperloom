@@ -57,7 +57,7 @@ cognitive-complexity src/hyperloom/orchestrator/phases/framework.py::FrameworkPh
 cognitive-complexity src/hyperloom/orchestrator/phases/framework.py::_framework_config_levers_from_done 81
 cognitive-complexity src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._gemm_e2e_candidates 34
 cognitive-complexity src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._merge_gemm_candidate_with_runtime 83
-cognitive-complexity src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._run_geak_kernel_phase 122
+cognitive-complexity src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._run_geak_kernel_phase 121
 cognitive-complexity src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._validate_gemm_tuning_e2e 106
 cognitive-complexity src/hyperloom/orchestrator/phases/kernel.py::KernelPhase.promote_geak_from_candidate 56
 cognitive-complexity src/hyperloom/orchestrator/phases/prelude.py::PreludePhase._collect_warm_kernel_plan 33
@@ -108,7 +108,7 @@ cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/report.py::_f
 cyclomatic-complexity src/hyperloom/orchestrator/kernel/conc_sweep.py::_sweep_one_arm_single_server 33
 cyclomatic-complexity src/hyperloom/orchestrator/kernel/conc_sweep.py::run_conc_sweep 26
 cyclomatic-complexity src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._merge_gemm_candidate_with_runtime 42
-cyclomatic-complexity src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._run_geak_kernel_phase 49
+cyclomatic-complexity src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._run_geak_kernel_phase 47
 cyclomatic-complexity src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._validate_gemm_tuning_e2e 36
 cyclomatic-complexity src/hyperloom/orchestrator/specialists/dispatch.py::SpecialistDispatchCollaborator.warm_specialist_params 39
 cyclomatic-complexity src/hyperloom/orchestrator/specialists/subprocess_.py::SpecialistSubprocessDispatcher.run 39
@@ -423,7 +423,7 @@ function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._maybe_r
 function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._merge_gemm_candidate_with_runtime 151
 function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._record_geak_candidate 99
 function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._record_gemm_tuning_timeline 88
-function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._run_geak_kernel_phase 467
+function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._run_geak_kernel_phase 454
 function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._run_kernel_rewrite_controller 127
 function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._validate_gemm_tuning_e2e 425
 function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase.promote_geak_from_candidate 165

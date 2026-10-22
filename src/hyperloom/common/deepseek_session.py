@@ -70,9 +70,10 @@ class DeepSeekSessionResult:
     usage: dict[str, int] = field(default_factory=dict)
     session_id: str = ""
     error: str = ""
+    finish_reason: str = ""
 
 
-def _load_harness_sdk() -> Any:
+def load_harness_sdk() -> Any:
     """Import the harness SDK, naming the extra that provides it when absent."""
     try:
         import deepseek_harness
@@ -83,9 +84,9 @@ def _load_harness_sdk() -> Any:
     return deepseek_harness
 
 
-def _sdk_failures() -> tuple[type[BaseException], ...]:
+def sdk_failures() -> tuple[type[BaseException], ...]:
     """The failures a harness call is expected to end in: the SDK's own, a timeout, or the OS refusing."""
-    errors = _load_harness_sdk().errors
+    errors = load_harness_sdk().errors
     return (errors.HarnessError, asyncio.TimeoutError, TimeoutError, OSError)
 
 
@@ -111,6 +112,67 @@ def with_deepseek_gateway(env: Mapping[str, str]) -> dict[str, str]:
     merged["DEEPSEEK_BASE_URL"] = gateway.base_url
     merged["DEEPSEEK_API_KEY"] = gateway.api_key
     return merged
+
+
+def child_environment(overrides: Mapping[str, str] | None, permission_mode: str) -> dict[str, str]:
+    """Build the environment a harness runtime subprocess is spawned with.
+
+    ``overrides`` is applied over the process environment before the gateway is
+    resolved, so a caller that scopes the gateway per session is honoured.
+    """
+    base = os.environ.copy()
+    if overrides:
+        base.update(overrides)
+    env = with_deepseek_gateway(base)
+    env["DSH_PERMISSION_MODE"] = permission_mode
+    # These outrank -C and cwd, so a caller that set them to reach one
+    # repository would answer every git command the session runs anywhere.
+    env.pop("GIT_DIR", None)
+    env.pop("GIT_WORK_TREE", None)
+    return env
+
+
+@dataclass(frozen=True)
+class HarnessLaunch:
+    """What a harness runtime is initialized with."""
+
+    dsh_home: Path
+    cwd: Path
+    model: str
+    reasoning_effort: str
+    env: Mapping[str, str]
+    request_timeout_sec: float
+    initialize_timeout_sec: float = _INITIALIZE_TIMEOUT_SEC
+
+
+def start_harness(sdk: Any, launch: HarnessLaunch) -> Any:
+    """Construct a harness and run its handshake, stopping the runtime if the handshake fails.
+
+    Construction is lazy in the SDK, so only the handshake proves the binary
+    runs and the model and effort are accepted.
+    """
+    workspace = str(launch.cwd)
+    harness = sdk.DeepSeekHarness(
+        dsh_home=str(launch.dsh_home),
+        cwd=workspace,
+        # The harness reads its sandbox root from the subprocess working
+        # directory, so a runtime rooted anywhere else would confine a
+        # read-only session to the wrong tree.
+        runtime_cwd=workspace,
+        provider=DEEPSEEK_PROVIDER_ROUTE,
+        model=launch.model,
+        reasoning_effort=launch.reasoning_effort,
+        env=dict(launch.env),
+        initialize_timeout_seconds=launch.initialize_timeout_sec,
+        request_timeout_seconds=launch.request_timeout_sec,
+    )
+    try:
+        harness.start()
+    except BaseException:
+        with contextlib.suppress(*sdk_failures()):
+            harness.close()
+        raise
+    return harness
 
 
 def usage_from_events(events: list[dict[str, Any]]) -> dict[str, int]:
@@ -190,6 +252,7 @@ def normalize_run_result(result: Any, session_id: str) -> DeepSeekSessionResult:
         usage=usage_from_events(events),
         session_id=resolved_id,
         error=error,
+        finish_reason=finish_reason,
     )
 
 
@@ -228,22 +291,13 @@ class DeepSeekSession:
 
     def _child_environment(self) -> dict[str, str]:
         """Build the environment the harness runtime subprocess is spawned with."""
-        base = os.environ.copy()
-        if self.env:
-            base.update(self.env)
-        env = with_deepseek_gateway(base)
-        env["DSH_PERMISSION_MODE"] = self.permission_mode
-        # These outrank -C and cwd, so a caller that set them to reach one
-        # repository would answer every git command the session runs anywhere.
-        env.pop("GIT_DIR", None)
-        env.pop("GIT_WORK_TREE", None)
-        return env
+        return child_environment(self.env, self.permission_mode)
 
     async def start(self) -> None:
         """Spawn the harness runtime and mount its plugin composition."""
         if self._harness is not None:
             return
-        sdk = _load_harness_sdk()
+        sdk = load_harness_sdk()
         assert self.dsh_home is not None  # set in __post_init__
         try:
             self.dsh_home.mkdir(parents=True, exist_ok=True)
@@ -252,36 +306,25 @@ class DeepSeekSession:
         child_env = self._child_environment()
         try:
             self._harness = await asyncio.to_thread(self._spawn, sdk, child_env)
-        except _sdk_failures() as exc:
+        except sdk_failures() as exc:
             raise DeepSeekSessionUnavailableError(f"the DeepSeek Harness runtime failed to start: {exc}") from exc
 
     def _spawn(self, sdk: Any, child_env: dict[str, str]) -> Any:
-        """Construct the harness and run its handshake, stopping the runtime if the handshake fails."""
-        workspace = str(self.cwd)
-        harness = sdk.DeepSeekHarness(
-            dsh_home=str(self.dsh_home),
-            cwd=workspace,
-            # The harness reads its sandbox root from the subprocess working
-            # directory, so a runtime rooted anywhere else would confine a
-            # read-only session to the wrong tree.
-            runtime_cwd=workspace,
-            provider=DEEPSEEK_PROVIDER_ROUTE,
-            model=self.model,
-            # Initialization refuses an empty or unsupported effort, so an
-            # unset one takes the shared default and an unsupported one is
-            # rounded up to a level the harness has.
-            reasoning_effort=harness_reasoning_effort(self.reasoning_effort or DEFAULT_REASONING_EFFORT),
-            env=child_env,
-            initialize_timeout_seconds=_INITIALIZE_TIMEOUT_SEC,
-            request_timeout_seconds=self.request_timeout_sec,
+        assert self.dsh_home is not None  # set in __post_init__
+        return start_harness(
+            sdk,
+            HarnessLaunch(
+                dsh_home=self.dsh_home,
+                cwd=self.cwd,
+                model=self.model,
+                # Initialization refuses an empty or unsupported effort, so an
+                # unset one takes the shared default and an unsupported one is
+                # rounded up to a level the harness has.
+                reasoning_effort=harness_reasoning_effort(self.reasoning_effort or DEFAULT_REASONING_EFFORT),
+                env=child_env,
+                request_timeout_sec=self.request_timeout_sec,
+            ),
         )
-        try:
-            harness.start()
-        except BaseException:
-            with contextlib.suppress(*_sdk_failures()):
-                harness.close()
-            raise
-        return harness
 
     def reset_conversation(self) -> None:
         """Drop the held conversation so the next turn opens a fresh one.
@@ -314,7 +357,7 @@ class DeepSeekSession:
         except asyncio.CancelledError:
             await self.aclose()
             raise
-        except _sdk_failures() as exc:
+        except sdk_failures() as exc:
             await self.aclose()
             raise DeepSeekSessionError(f"the harness turn failed: {exc}") from exc
         result = normalize_run_result(sdk_result, session_id)
@@ -327,7 +370,7 @@ class DeepSeekSession:
         self._session_id = ""
         if harness is None:
             return
-        with contextlib.suppress(*_sdk_failures()):
+        with contextlib.suppress(*sdk_failures()):
             await asyncio.to_thread(harness.close)
 
 
@@ -339,7 +382,12 @@ __all__ = [
     "DeepSeekSessionResult",
     "DeepSeekSessionTimeoutError",
     "DeepSeekSessionUnavailableError",
+    "HarnessLaunch",
+    "child_environment",
+    "load_harness_sdk",
     "normalize_run_result",
+    "sdk_failures",
+    "start_harness",
     "turn_end_failure",
     "usage_from_events",
     "with_deepseek_gateway",
