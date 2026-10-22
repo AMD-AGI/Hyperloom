@@ -756,7 +756,7 @@ class TestSessionWiring:
             lambda *a, **kw: pytest.fail("must not apply without --apply-gpu-power-settings"),
         )
         monkeypatch.setattr(gpu_power_apply, "orphaned_power_settings_warning", lambda: "GPU 4 left")
-        monkeypatch.setattr(bootstrap, "resolve_gpu_power_settings", lambda **kw: ({"declared": {}}, ""))
+        monkeypatch.setattr(bootstrap, "resolve_gpu_power_settings", lambda *a, **kw: ({"declared": {}}, ""))
         args = SimpleNamespace(apply_gpu_power_settings=False)
         record = bootstrap.resolve_launch_gpu_power(args, nodes=1, owner="s")
         assert "applied" not in record
@@ -791,7 +791,7 @@ class TestSessionWiring:
     def test_a_launch_records_what_it_applied(self, monkeypatch):
         monkeypatch.setattr(gpu_power_apply, "apply_for_session", lambda *a, **kw: {"by": "hyperloom", "gpus": [4]})
         monkeypatch.setattr(
-            bootstrap, "resolve_gpu_power_settings", lambda **kw: ({"declared": {"power_cap_w": 1000.0}}, "")
+            bootstrap, "resolve_gpu_power_settings", lambda *a, **kw: ({"declared": {"power_cap_w": 1000.0}}, "")
         )
         args = SimpleNamespace(apply_gpu_power_settings=True, gpu_power_cap_w=1000.0)
         record = bootstrap.resolve_launch_gpu_power(args, nodes=1, owner="s")
@@ -800,7 +800,7 @@ class TestSessionWiring:
     def test_a_resume_of_an_applied_session_says_to_pass_the_flag_again(self, monkeypatch):
         monkeypatch.setattr(gpu_power_apply, "apply_for_session", lambda *a, **kw: {})
         monkeypatch.setattr(
-            bootstrap, "resolve_gpu_power_settings", lambda **kw: ({}, "GPU 4 power cap is 1400 W, declared 1000 W")
+            bootstrap, "resolve_gpu_power_settings", lambda *a, **kw: ({}, "GPU 4 power cap is 1400 W, declared 1000 W")
         )
         state = SimpleNamespace(
             gpu_power_settings={"declared": {"power_cap_w": 1000.0}, "applied": {"by": "hyperloom"}},
