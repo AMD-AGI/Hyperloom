@@ -8,6 +8,10 @@ from __future__ import annotations
 import json
 
 from hyperloom.orchestrator.kernel import request_handlers as krh
+from hyperloom.orchestrator.kernel import _aiter_tuner_support as aiter_tuner_support
+from hyperloom.orchestrator.kernel import serving_log_evidence as serving_log_evidence
+from hyperloom.orchestrator.kernel import _shape_capture as shape_capture
+from hyperloom.orchestrator.kernel import _vllm_aiter_routing as vllm_aiter_routing
 
 AITER_BF16_MISS = (
     "(EngineCore pid=1) [aiter] shape is M:1024, N:151936, K:5120 dtype='torch.bfloat16' "
@@ -78,21 +82,21 @@ REAL_UNQUOTED_ACTIVATION = (
 
 class TestAiterServingEvidence:
     def test_detects_bf16_dense(self, tmp_path):
-        assert krh._aiter_serving_evidence(_log(tmp_path, AITER_BF16_MISS)) == {"bf16_dense"}
+        assert serving_log_evidence._aiter_serving_evidence(_log(tmp_path, AITER_BF16_MISS)) == {"bf16_dense"}
 
     def test_detects_fused_moe(self, tmp_path):
-        assert krh._aiter_serving_evidence(_log(tmp_path, AITER_FUSED_MOE)) == {"fused_moe"}
+        assert serving_log_evidence._aiter_serving_evidence(_log(tmp_path, AITER_FUSED_MOE)) == {"fused_moe"}
 
     def test_detects_mxfp4_moe_backend_line(self, tmp_path):
         line = "INFO [mxfp4.py:513] Using 'AITER_MXFP4_BF16' Mxfp4 MoE backend."
-        assert krh._aiter_serving_evidence(_log(tmp_path, line)) == {"fused_moe"}
+        assert serving_log_evidence._aiter_serving_evidence(_log(tmp_path, line)) == {"fused_moe"}
 
     def test_no_evidence(self, tmp_path):
-        assert krh._aiter_serving_evidence(_log(tmp_path, "INFO server started\n")) == set()
+        assert serving_log_evidence._aiter_serving_evidence(_log(tmp_path, "INFO server started\n")) == set()
 
     def test_missing_log(self, tmp_path):
-        assert krh._aiter_serving_evidence("") == set()
-        assert krh._aiter_serving_evidence(str(tmp_path / "absent.log")) == set()
+        assert serving_log_evidence._aiter_serving_evidence("") == set()
+        assert serving_log_evidence._aiter_serving_evidence(str(tmp_path / "absent.log")) == set()
 
 
 def _moe_tuple(
@@ -116,19 +120,19 @@ class TestCkMoeTunerSupport:
     def test_bf16_activation_with_fp4_weights_is_unsupported(self, tmp_path):
         """Measured: candidate generation raises 'Unsupported data type combination'."""
         log = _log(tmp_path, _moe_tuple("torch.bfloat16", "torch.float4_e2m1fn_x2"))
-        assert not krh._aiter_ck_moe_tuner_supports(log)
+        assert not aiter_tuner_support._aiter_ck_moe_tuner_supports(log)
 
     def test_fp8_activation_with_fp4_weights_is_supported(self, tmp_path):
         log = _log(tmp_path, _moe_tuple("torch.float8_e4m3fn", "torch.float4_e2m1fn_x2"))
-        assert krh._aiter_ck_moe_tuner_supports(log)
+        assert aiter_tuner_support._aiter_ck_moe_tuner_supports(log)
 
     def test_fp4_activation_and_weights_is_supported(self, tmp_path):
         log = _log(tmp_path, _moe_tuple("torch.float4_e2m1fn_x2", "torch.float4_e2m1fn_x2"))
-        assert krh._aiter_ck_moe_tuner_supports(log)
+        assert aiter_tuner_support._aiter_ck_moe_tuner_supports(log)
 
     def test_unquantised_bf16_moe_is_supported(self, tmp_path):
         log = _log(tmp_path, _moe_tuple("torch.bfloat16", "torch.bfloat16", "QuantType.No"))
-        assert krh._aiter_ck_moe_tuner_supports(log)
+        assert aiter_tuner_support._aiter_ck_moe_tuner_supports(log)
 
     def test_a_mixed_log_stays_tunable_because_rows_are_filtered(self, tmp_path):
         """One checkpoint dispatches several pairs; the tunable ones still count."""
@@ -138,7 +142,7 @@ class TestCkMoeTunerSupport:
             + "\n"
             + _moe_tuple("torch.bfloat16", "torch.float4_e2m1fn_x2", expert=257, topk=5),
         )
-        assert krh._aiter_ck_moe_tuner_supports(log)
+        assert aiter_tuner_support._aiter_ck_moe_tuner_supports(log)
 
     def test_an_entirely_unsupported_log_is_rejected(self, tmp_path):
         log = _log(
@@ -147,18 +151,18 @@ class TestCkMoeTunerSupport:
             + "\n"
             + _moe_tuple("torch.bfloat16", "torch.float4_e2m1fn_x2", expert=257, topk=5),
         )
-        assert not krh._aiter_ck_moe_tuner_supports(log)
+        assert not aiter_tuner_support._aiter_ck_moe_tuner_supports(log)
 
     def test_moe_evidence_without_a_parseable_tuple_defers_to_forge(self, tmp_path):
         log = _log(tmp_path, "INFO Using 'AITER_MXFP4_BF16' Mxfp4 MoE backend.\n")
-        assert krh._aiter_ck_moe_tuner_supports(log)
+        assert aiter_tuner_support._aiter_ck_moe_tuner_supports(log)
 
 
 class TestDispatchKeyExtraction:
     """The parser must read every wording aiter actually emits."""
 
     def test_matches_the_plain_default_wording(self, tmp_path):
-        keys = krh._aiter_fused_moe_dispatch_keys(_log(tmp_path, REAL_2STAGE_DEFAULT))
+        keys = aiter_tuner_support._aiter_fused_moe_dispatch_keys(_log(tmp_path, REAL_2STAGE_DEFAULT))
         assert len(keys) == 1
         assert keys[0]["inter_dim"] == "512"
         assert keys[0]["q_dtype_a"] == "torch.float8_e4m3fn"
@@ -167,19 +171,19 @@ class TestDispatchKeyExtraction:
         assert keys[0]["topk"] == "6"
 
     def test_matches_the_flydsl_fallback_wording(self, tmp_path):
-        keys = krh._aiter_fused_moe_dispatch_keys(_log(tmp_path, REAL_NO_TUNED_FLYDSL))
+        keys = aiter_tuner_support._aiter_fused_moe_dispatch_keys(_log(tmp_path, REAL_NO_TUNED_FLYDSL))
         assert len(keys) == 1
         assert keys[0]["inter_dim"] == "512"
 
     def test_matches_the_wording_that_interposes_kernel_names(self, tmp_path):
         """This form puts its own parenthesised group before the tuple."""
-        keys = krh._aiter_fused_moe_dispatch_keys(_log(tmp_path, REAL_2STAGE_WITH_KERNEL_NAMES))
+        keys = aiter_tuner_support._aiter_fused_moe_dispatch_keys(_log(tmp_path, REAL_2STAGE_WITH_KERNEL_NAMES))
         assert len(keys) == 1
         assert keys[0]["model_dim"] == "7168"
         assert keys[0]["expert"] == "384"
 
     def test_matches_the_unquoted_activation_repr(self, tmp_path):
-        keys = krh._aiter_fused_moe_dispatch_keys(_log(tmp_path, REAL_UNQUOTED_ACTIVATION))
+        keys = aiter_tuner_support._aiter_fused_moe_dispatch_keys(_log(tmp_path, REAL_UNQUOTED_ACTIVATION))
         assert len(keys) == 1
         assert keys[0]["act_type"] == "ActivationType.Silu"
         assert keys[0]["expert"] == "65"
@@ -188,19 +192,19 @@ class TestDispatchKeyExtraction:
     def test_dedupes_on_everything_but_the_token_count(self, tmp_path):
         a = REAL_2STAGE_DEFAULT
         b = REAL_2STAGE_DEFAULT.replace("256, 256, 4096", "256, 512, 4096")
-        keys = krh._aiter_fused_moe_dispatch_keys(_log(tmp_path, a + "\n" + b))
+        keys = aiter_tuner_support._aiter_fused_moe_dispatch_keys(_log(tmp_path, a + "\n" + b))
         assert len(keys) == 1
 
     def test_keeps_distinct_problems_from_one_model(self, tmp_path):
         """The EP path inflates expert/topk by one; that is a separate problem."""
         a = _moe_tuple("torch.float8_e4m3fn", "torch.float4_e2m1fn_x2")
         b = _moe_tuple("torch.float8_e4m3fn", "torch.float4_e2m1fn_x2", expert=129, topk=5)
-        keys = krh._aiter_fused_moe_dispatch_keys(_log(tmp_path, a + "\n" + b))
+        keys = aiter_tuner_support._aiter_fused_moe_dispatch_keys(_log(tmp_path, a + "\n" + b))
         assert len(keys) == 2
 
     def test_missing_log(self, tmp_path):
-        assert krh._aiter_fused_moe_dispatch_keys("") == []
-        assert krh._aiter_fused_moe_dispatch_keys(str(tmp_path / "absent.log")) == []
+        assert aiter_tuner_support._aiter_fused_moe_dispatch_keys("") == []
+        assert aiter_tuner_support._aiter_fused_moe_dispatch_keys(str(tmp_path / "absent.log")) == []
 
 
 class TestDtypePairSupport:
@@ -215,19 +219,19 @@ class TestDtypePairSupport:
             ("torch.float8_e4m3fnuz", "torch.float4_e2m1fn_x2"),
             ("torch.float4_e2m1fn_x2", "torch.float4_e2m1fn_x2"),
         ):
-            assert krh._aiter_moe_dtype_pair_supported(act, weight), (act, weight)
+            assert aiter_tuner_support._aiter_moe_dtype_pair_supported(act, weight), (act, weight)
 
     def test_bf16_activation_with_fp4_weight_is_the_known_rejection(self):
-        assert not krh._aiter_moe_dtype_pair_supported("torch.bfloat16", "torch.float4_e2m1fn_x2")
+        assert not aiter_tuner_support._aiter_moe_dtype_pair_supported("torch.bfloat16", "torch.float4_e2m1fn_x2")
 
     def test_int8_activation_does_not_qualify_for_the_a8w4_family(self):
         """The a8w4 branch requires an FP8 activation specifically."""
-        assert not krh._aiter_moe_dtype_pair_supported("torch.int8", "torch.float4_e2m1fn_x2")
+        assert not aiter_tuner_support._aiter_moe_dtype_pair_supported("torch.int8", "torch.float4_e2m1fn_x2")
 
 
 class TestWriteFmoeUntunedCsvFromLog:
     def test_writes_one_row_per_problem_and_token(self, tmp_path):
-        path, report = krh._write_fmoe_untuned_csv_from_log(
+        path, report = aiter_tuner_support._write_fmoe_untuned_csv_from_log(
             _log(tmp_path, REAL_2STAGE_DEFAULT), [4, 512], tmp_path / "ws"
         )
         rows = [line for line in open(path, encoding="utf-8").read().splitlines() if line]
@@ -262,7 +266,7 @@ class TestWriteFmoeUntunedCsvFromLog:
             + "\n"
             + _moe_tuple("torch.bfloat16", "torch.float4_e2m1fn_x2", expert=129),
         )
-        path, report = krh._write_fmoe_untuned_csv_from_log(log, [8], tmp_path / "ws")
+        path, report = aiter_tuner_support._write_fmoe_untuned_csv_from_log(log, [8], tmp_path / "ws")
 
         body = open(path, encoding="utf-8").read()
         assert "torch.bfloat16,torch.float4_e2m1fn_x2" not in body
@@ -272,7 +276,7 @@ class TestWriteFmoeUntunedCsvFromLog:
 
     def test_no_tunable_problem_yields_no_csv(self, tmp_path):
         log = _log(tmp_path, _moe_tuple("torch.bfloat16", "torch.float4_e2m1fn_x2"))
-        path, report = krh._write_fmoe_untuned_csv_from_log(log, [8], tmp_path / "ws")
+        path, report = aiter_tuner_support._write_fmoe_untuned_csv_from_log(log, [8], tmp_path / "ws")
 
         assert path == ""
         assert report["observed"] == 1
@@ -287,14 +291,14 @@ class TestWriteFmoeUntunedCsvFromLog:
 
         monkeypatch.setattr(krh.Path, "write_text", _boom)
 
-        path, report = krh._write_fmoe_untuned_csv_from_log(log, [8], tmp_path / "ws")
+        path, report = aiter_tuner_support._write_fmoe_untuned_csv_from_log(log, [8], tmp_path / "ws")
 
         assert path == ""
         assert report["tunable"] == 1
         assert "No space left on device" in report["write_error"]
 
     def test_no_moe_evidence_yields_no_csv(self, tmp_path):
-        path, report = krh._write_fmoe_untuned_csv_from_log(
+        path, report = aiter_tuner_support._write_fmoe_untuned_csv_from_log(
             _log(tmp_path, "INFO server started\n"), [8], tmp_path / "ws"
         )
         assert path == ""
@@ -303,13 +307,13 @@ class TestWriteFmoeUntunedCsvFromLog:
 
 class TestResolveVllmAiterRouting:
     def test_dense_bf16_model(self, tmp_path):
-        flags = krh._resolve_vllm_aiter_routing(
+        flags = vllm_aiter_routing._resolve_vllm_aiter_routing(
             model_path=_model(tmp_path), server_log=_log(tmp_path, AITER_BF16_MISS), tp=1
         )
         assert flags == {"aiter_bf16_dense": True, "aiter_fused_moe": False}
 
     def test_moe_model_on_aiter_fused_moe(self, tmp_path):
-        flags = krh._resolve_vllm_aiter_routing(
+        flags = vllm_aiter_routing._resolve_vllm_aiter_routing(
             model_path=_model(tmp_path, moe=True),
             server_log=_log(tmp_path, AITER_FUSED_MOE),
             tp=1,
@@ -319,7 +323,7 @@ class TestResolveVllmAiterRouting:
         assert flags["aiter_bf16_dense"] is False
 
     def test_moe_blocked_when_the_tuner_rejects_the_dtype_pair(self, tmp_path):
-        flags = krh._resolve_vllm_aiter_routing(
+        flags = vllm_aiter_routing._resolve_vllm_aiter_routing(
             model_path=_model(tmp_path, moe=True),
             server_log=_log(tmp_path, AITER_FUSED_MOE_BF16_FP4),
             tp=1,
@@ -328,7 +332,7 @@ class TestResolveVllmAiterRouting:
 
     def test_moe_blocked_when_ck_cannot_serve_the_shard(self, tmp_path):
         """moe_intermediate_size=1536 shards to 192 at tp=8, which CK rejects."""
-        flags = krh._resolve_vllm_aiter_routing(
+        flags = vllm_aiter_routing._resolve_vllm_aiter_routing(
             model_path=_model(tmp_path, moe=True),
             server_log=_log(tmp_path, AITER_FUSED_MOE),
             tp=8,
@@ -336,7 +340,7 @@ class TestResolveVllmAiterRouting:
         assert flags["aiter_fused_moe"] is False
 
     def test_no_evidence_routes_nothing(self, tmp_path):
-        flags = krh._resolve_vllm_aiter_routing(
+        flags = vllm_aiter_routing._resolve_vllm_aiter_routing(
             model_path=_model(tmp_path), server_log=_log(tmp_path, "INFO up\n"), tp=1
         )
         assert flags == {"aiter_bf16_dense": False, "aiter_fused_moe": False}
@@ -345,7 +349,7 @@ class TestResolveVllmAiterRouting:
 class TestForgeFrameworkRouting:
     def test_bf16_with_aiter_evidence_routes_to_aiter_family(self):
         assert (
-            krh._forge_framework_for_vllm(
+            vllm_aiter_routing._forge_framework_for_vllm(
                 framework="vllm",
                 precision="bf16",
                 quant_type="none",
@@ -357,7 +361,7 @@ class TestForgeFrameworkRouting:
 
     def test_bf16_without_evidence_keeps_tunableop_path(self):
         assert (
-            krh._forge_framework_for_vllm(
+            vllm_aiter_routing._forge_framework_for_vllm(
                 framework="vllm",
                 precision="bf16",
                 quant_type="none",
@@ -369,7 +373,7 @@ class TestForgeFrameworkRouting:
 
     def test_block_fp8_routing_is_unchanged(self):
         assert (
-            krh._forge_framework_for_vllm(
+            vllm_aiter_routing._forge_framework_for_vllm(
                 framework="vllm",
                 precision="fp8",
                 quant_type="blockscale",
@@ -380,7 +384,7 @@ class TestForgeFrameworkRouting:
 
     def test_explicit_tunableop_input_wins(self):
         assert (
-            krh._forge_framework_for_vllm(
+            vllm_aiter_routing._forge_framework_for_vllm(
                 framework="vllm",
                 precision="bf16",
                 quant_type="none",
@@ -392,7 +396,7 @@ class TestForgeFrameworkRouting:
 
     def test_sglang_is_untouched(self):
         assert (
-            krh._forge_framework_for_vllm(
+            vllm_aiter_routing._forge_framework_for_vllm(
                 framework="sglang",
                 precision="bf16",
                 quant_type="none",
@@ -404,7 +408,7 @@ class TestForgeFrameworkRouting:
 
     def test_fp8_per_token_dense_still_uses_the_vllm_branch(self):
         assert (
-            krh._forge_framework_for_vllm(
+            vllm_aiter_routing._forge_framework_for_vllm(
                 framework="vllm",
                 precision="fp8",
                 quant_type="per_token",
@@ -417,7 +421,7 @@ class TestForgeFrameworkRouting:
     def test_aiter_fused_moe_routes_regardless_of_precision(self):
         for precision in ("mxfp4", "fp8", "bf16"):
             assert (
-                krh._forge_framework_for_vllm(
+                vllm_aiter_routing._forge_framework_for_vllm(
                     framework="vllm",
                     precision=precision,
                     quant_type="auto",
@@ -429,7 +433,7 @@ class TestForgeFrameworkRouting:
 
     def test_triton_moe_runtime_keeps_the_vllm_branch(self):
         assert (
-            krh._forge_framework_for_vllm(
+            vllm_aiter_routing._forge_framework_for_vllm(
                 framework="vllm",
                 precision="mxfp4",
                 quant_type="auto",
@@ -443,14 +447,14 @@ class TestForgeFrameworkRouting:
 class TestTunableOpCaptureIsSkippedWhenRouted:
     def test_routed_framework_skips_the_recording_pass(self, tmp_path):
         """A vllm-aiter run must not pay for a TunableOp server boot."""
-        assert not krh._vllm_dense_shape_capture_required(
+        assert not shape_capture._vllm_dense_shape_capture_required(
             framework="vllm-aiter",
             model_path=_model(tmp_path),
             shapes_json="",
             tunableop_input="",
             dry_run=False,
         )
-        assert krh._vllm_dense_shape_capture_required(
+        assert shape_capture._vllm_dense_shape_capture_required(
             framework="vllm",
             model_path=_model(tmp_path),
             shapes_json="",
