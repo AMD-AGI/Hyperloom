@@ -288,9 +288,8 @@ It reads:
 - `provenance.extra` from the logs, which never reaches a prompt: `meta`, the
   candidate's whole `meta.json` verbatim, among it the commit KernelForge kept
   the candidate as, the mean case speedup it decided on, the per-case times,
-  and every benchmark measurement; `llm_backend` and `llm_model`, the
-  Implementer the run's `forge-loop.log` names; `kb_record`, the record
-  KernelForge's own experience KB filed a kept candidate under;
+  and every benchmark measurement; `kb_record`, the record KernelForge's own
+  experience KB filed a kept candidate under;
   `candidate_origin`, `session` or `lane`; and `analysis_generation`, the
   `analysis/<commit>/generation-NNN` the Analysis report comes from.
 

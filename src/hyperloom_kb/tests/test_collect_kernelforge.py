@@ -52,8 +52,6 @@ def _session_unit(files: dict[str, Path], **fields: Any) -> dict[str, Any]:
         "seq": 1,
         "identity": {"operator": "_softmax_kernel", "kernel": "softmax", "backend": "triton", "gpu": "mi300x"},
         "provenance": {
-            "llm_backend": "claude",
-            "llm_model": "Claude-Opus-5",
             "candidate_origin": "session",
             "meta": {
                 "commit_hash": "abc1234",

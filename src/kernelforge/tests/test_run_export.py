@@ -173,14 +173,12 @@ def _plain_run(
     return experiments
 
 
-def _loop_log(
-    path: Path, workspace: str, implementer: str = "claude / Claude-Opus-5", kb_record: str = KB_RECORD
-) -> Path:
+def _loop_log(path: Path, workspace: str, kb_record: str = KB_RECORD) -> Path:
     """A forge-loop stdout log of the fixture's three iterations; it names the kernel by the absolute path the run
     had, and the KB record written after the KEEP and rewritten after the loop."""
 
     text = (
-        f"  Implementer: {implementer}\n"
+        "  Agent profile: claude / Claude-Opus-5: available\n"
         "Starting autonomous iteration loop\n"
         f"  Kernel: /home/someone/kernelforge-runs/{workspace}/softmax_kernel.py\n"
         "--- Iteration 1 (best mean case speedup: 1.000000x, remaining: 110 min) ---\n"
@@ -262,8 +260,6 @@ def test_a_single_session_candidate_becomes_a_complete_unit(tmp_path: Path) -> N
         "seq": 1,
         "identity": {"operator": "_softmax_kernel", "kernel": "softmax", "backend": "triton", "gpu": "mi300x"},
         "provenance": {
-            "llm_backend": "claude",
-            "llm_model": "Claude-Opus-5",
             "kb_record": KB_RECORD,
             "candidate_origin": "session",
             "meta": _meta(experiments, 1),
@@ -387,44 +383,28 @@ def test_a_candidate_without_an_archived_diff_links_no_diff_file(tmp_path: Path)
 def test_each_log_attaches_to_the_run_whose_kernel_it_announces(tmp_path: Path) -> None:
     _plain_run(tmp_path / "a", name="softmax-a", campaign_id="campaign-a")
     _plain_run(tmp_path / "b", name="softmax-b", campaign_id="campaign-b")
-    _loop_log(
-        tmp_path / "a" / "forge-loop.log", "softmax-a", implementer="claude / Claude-Sonnet-5", kb_record="record-a"
-    )
-    _loop_log(tmp_path / "b" / "forge-loop.log", "softmax-b", implementer="codex / gpt-5", kb_record="record-b")
+    _loop_log(tmp_path / "a" / "forge-loop.log", "softmax-a", kb_record="record-a")
+    _loop_log(tmp_path / "b" / "forge-loop.log", "softmax-b", kb_record="record-b")
 
     units = _units(tmp_path)
 
     first, second = units["softmax-a/iteration-1"], units["softmax-b/iteration-1"]
-    assert (first["run_id"], first["provenance"]["llm_model"], first["provenance"]["kb_record"]) == (
-        "campaign-a",
-        "Claude-Sonnet-5",
-        "record-a",
-    )
-    assert (second["run_id"], second["provenance"]["llm_backend"], second["provenance"]["kb_record"]) == (
-        "campaign-b",
-        "codex",
-        "record-b",
-    )
+    assert (first["run_id"], first["provenance"]["kb_record"]) == ("campaign-a", "record-a")
+    assert (second["run_id"], second["provenance"]["kb_record"]) == ("campaign-b", "record-b")
 
 
 def test_runs_whose_workspaces_share_a_name_keep_their_own_logs(tmp_path: Path) -> None:
     """Both runs' workspaces are ``ws``, and their logs name the paths the run directories had in a container, so only
     the run directory tells their logs apart."""
 
-    models = {"a": "Claude-Opus-5", "b": "Claude-Sonnet-5"}
-    for run, model in models.items():
+    for run in ("a", "b"):
         _plain_run(tmp_path / run, name="ws", campaign_id=f"campaign-{run}")
-        _loop_log(
-            tmp_path / run / "forge-loop.log", f"{run}/ws", implementer=f"claude / {model}", kb_record=f"record-{run}"
-        )
+        _loop_log(tmp_path / run / "forge-loop.log", f"{run}/ws", kb_record=f"record-{run}")
 
     units = {(unit["run_id"], unit["seq"]): unit for unit in normalize([tmp_path])["runs"]}
 
-    kept = [units[(f"campaign-{run}", 1)]["provenance"] for run in models]
-    assert [(provenance["llm_model"], provenance["kb_record"]) for provenance in kept] == [
-        ("Claude-Opus-5", "record-a"),
-        ("Claude-Sonnet-5", "record-b"),
-    ]
+    kept = [units[(f"campaign-{run}", 1)]["provenance"] for run in ("a", "b")]
+    assert [provenance["kb_record"] for provenance in kept] == ["record-a", "record-b"]
 
 
 def test_only_a_kept_candidate_carries_the_kb_record_its_iteration_wrote(tmp_path: Path) -> None:
@@ -621,7 +601,8 @@ def test_the_exported_document_collects_through_the_packaged_mapping(tmp_path: P
     assert row.experience.outcome == {"decision": "KEEP", "candidate_wall_ms": 0.044}
     assert row.experience.rationale["reasoning"] == SESSION_LESSON.strip()
     assert "lesson" not in row.experience.reflection
-    assert row.experience.provenance.extra["llm_model"] == "Claude-Opus-5"
+    assert "llm_backend" not in row.experience.provenance.extra
+    assert "llm_model" not in row.experience.provenance.extra
     assert row.experience.provenance.extra["meta"] == _meta(tmp_path / "logs" / WORKSPACE / "forge_experiments", 1)
     assert row.experience.raw_logs == ()
     assert {row.unit_id: row.reason.split(":")[0] for row in report.skipped} == {

@@ -532,9 +532,8 @@ metadata. It carries the candidate's whole
 `meta.json` as its metadata, and the run's operator, the kernel name
 KernelForge files its KB records under, its framework, backend, GPU, and the
 benchmark driver's SHA-256 from `campaign_config.json`. The run's
-`forge-loop.log` gives the Implementer's backend and model and the record
-KernelForge's own experience KB filed a kept candidate under; the log is only
-read, and no entry names it or records its path.
+`forge-loop.log` gives the record KernelForge's own experience KB filed a kept
+candidate under; the log is only read, and no entry names it or records its path.
 
 A log belongs to the run whose workspace path ends most like the kernel path
 it announces, which may differ in its leading directories, as for a run made in
