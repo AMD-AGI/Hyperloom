@@ -8,13 +8,12 @@ from __future__ import annotations
 import os
 from typing import Any
 
-from hyperloom.common.agentx_workload import is_agentx_client_script
+from hyperloom.common.agentx_workload import is_agentx_client_script, pin_mlperf_round_concurrency
 from hyperloom.inference_optimizer.gpu_types import gpu_runner_type
 
 from ._workload_envs import (
     apply_agentx_switch,
     apply_scriptable_runtime_defaults,
-    pin_mlperf_round_concurrency,
 )
 
 
