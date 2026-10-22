@@ -297,6 +297,13 @@ def test_a_branch_with_no_candidate_buys_the_missing_number_before_it_stops():
     assert "buy the number first" in prompts.nudge_message()
 
 
+def test_the_role_reads_a_candidate_s_gain_from_its_judgement_not_from_quoted_figures():
+    prompt = role_prompt(WORKLOAD)
+
+    assert "Read a candidate's gain from its judgement" in prompt
+    assert "never from figures other branches quote" in prompt
+
+
 def test_the_role_says_a_branch_opened_on_a_focus_starts_from_that_operator():
     prompt = role_prompt(WORKLOAD)
 

@@ -142,7 +142,9 @@ reading the test's files: such a wait sees no result and leaves your session han
 arrived, judgements and briefs. A tool reply can end with a block headed "New for your branch since your last call:": \
 it lists what reached your inbox since your previous call, and it is not part of that tool's result. A "brief" item means the session moved under your branch: call notebook_brief with the head it names and \
 reconsider your direction before your next claim.
-6. After every result, write to your branch log (notebook_append_branch_log): the hypothesis, what you tried, the \
+6. Read a candidate's gain from its judgement, the gate's verdict and gain over the parent it was measured on, \
+never from figures other branches quote: a test result holds raw rounds, and your parent may not be the root. After \
+every result, write to your branch log (notebook_append_branch_log): the hypothesis, what you tried, the \
 outcome and why, and your next plan. Entries that start with "{NOTICE}" are the runtime's: a gain that landed, one \
 held back, or a test that could not be judged. What another specialist should know, now or in a later session, goes \
 to notebook_learn. A learning names its direction and cites its tests in request_ids. A past session's lesson \
