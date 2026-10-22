@@ -22,6 +22,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
+from hyperloom.common.jsonio import read_json_strict
 from hyperloom.contracts.recipe import RecipeError
 from hyperloom.measure.compile import BlobError, BlobStore
 from hyperloom.orchestrator.knowledge.remote_recipe import KBStoreError
@@ -70,6 +71,16 @@ def step_lines(steps: Mapping[str, CloseStep]) -> list[str]:
     return [
         f"{name.replace('_', ' ').capitalize()}: {step.status} {step.reason}".rstrip() for name, step in steps.items()
     ]
+
+
+def _code_revision(manifest: Path) -> str | None:
+    """The source revision the session ran on, as its manifest recorded it at start; ``None`` where it names none."""
+
+    try:
+        version = read_json_strict(manifest, require_dict=True).get("code_version")
+    except (OSError, ValueError):
+        return None
+    return (str(version.get("git_sha") or "") or None) if isinstance(version, Mapping) else None
 
 
 @dataclass(frozen=True)
@@ -177,6 +188,7 @@ class SessionExports:
             kb_write_back=kb_write_back,
             knowledge=stepped,
             session_dir=self._layout.root,
+            code_revision=_code_revision(self._layout.manifest),
         )
         breakdown = write_breakdown(self._layout.reports, document)
         dashboard = await self._dashboard.write(queue)
