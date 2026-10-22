@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, NoReturn, Sequence
 import click
 
 from kernelforge.cli.lanes import LaneBinding
+from kernelforge.cli.loop_shape import LoopShape, loop_shape_options, settle_loop_shape
 from kernelforge.cli.options import (
     AgentRuntimeOptions,
     CeilingSwitch,
@@ -64,6 +65,7 @@ from kernelforge.loop.knowledge_integration import (
     mark_kb_reference_rejected,
     write_experience_to_kb,
 )
+from kernelforge.loop.search_tree import SearchStrategy
 from kernelforge.loop.recovery import (
     CallerRecovery,
     atomic_write_json,
@@ -1070,15 +1072,20 @@ class AgentRoleOptions:
     profiling: bool
 
 
-@dataclass(frozen=True)
-class LoopShape:
-    """How the loop measures and how many candidates each round explores."""
-
-    nproc_per_node: int
-    lanes: int
-    merge_stacking: bool
-    bench_repeat: int
-    commit_new_paths: tuple[str, ...]
+def _config_overrides(campaign: CampaignConfig, probe: SpecialistProbeOptions, agent_overrides: dict) -> dict:
+    """What one session's ``Config.from_env`` is given: the campaign's identity, the probe options, the agent runtime."""
+    overrides = {"gpu_target": campaign.gpu_target, "gpu_type": campaign.gpu_type, "producer": campaign.producer}
+    # Only what was actually asked for: an override present with a None value still wins over ``Config.from_env``'s
+    # environment lookup, which is what made the FORGE_SPECIALIST_PROBE* variables dead on this path.
+    for name, value in (
+        ("specialist_probe", probe.specialist_probe),
+        ("specialist_probe_max", probe.specialist_probe_max),
+        ("specialist_probe_budget_sec", probe.specialist_probe_budget_sec),
+        ("specialist_probe_scratch_root", probe.specialist_probe_scratch_root),
+    ):
+        if value is not None:
+            overrides[name] = value
+    return {**overrides, **agent_overrides}
 
 
 @dataclass(frozen=True)
@@ -1267,69 +1274,7 @@ class ForgeLoopRequest:
             "--no-profiling disables collection for every duration.",
         ),
     ),
-    option_group(
-        "loop_shape",
-        LoopShape,
-        click.option(
-            "--nproc-per-node",
-            default=1,
-            type=click.IntRange(min=1),
-            help="Ranks the driver self-launches via torchrun (collective tasks "
-            "such as all-reduce). >1 profiles EVERY rank in its own "
-            "rocprofv3 session, because wrapping the driver would only "
-            "profile the launcher process, which runs no kernel. Default 1 "
-            "(single-GPU, unchanged behavior).",
-        ),
-        click.option(
-            "--lanes",
-            default=3,
-            type=click.IntRange(min=1, max=8),
-            help="Implementer lanes per round. Above 1 the round's analysis is "
-            "partitioned into that many non-overlapping plans, each run "
-            "concurrently in its own workspace copy, and each candidate is "
-            "measured on its own. Default 3: the lanes of a round run "
-            "concurrently, so a lane costs a session rather than a share "
-            "of the round's wall clock, and three is what the three "
-            "specialist analyses can be divided into. The partition "
-            "returns fewer when the evidence supports fewer. Above 1 "
-            "needs a provider that declares session_env and is refused on "
-            "one that does not; a provider without stop_hooks runs and is "
-            "warned, because it can waste a round but not misreport one.",
-        ),
-        click.option(
-            "--merge-stacking/--no-merge-stacking",
-            default=True,
-            help="Once consecutive iterations stop producing a new best, spend "
-            "one iteration measuring two archived rejected gains applied "
-            "together, chosen for winning on different cases. Costs a "
-            "measurement but no Implementer session. Default on; this "
-            "applies at every --lanes setting, so turn it off to compare "
-            "against a run that predates it.",
-        ),
-        click.option(
-            "--bench-repeat",
-            default=1,
-            type=click.IntRange(min=1),
-            help="How many times each bench repeats its measurement in-process, "
-            "reporting the per-case median. Default 1 (single shot). >1 "
-            "shrinks run-to-run spread. Requires a driver that accepts "
-            "--repeat; the flag is omitted entirely when this is 1.",
-        ),
-        click.option(
-            "--commit-new-path",
-            "commit_new_paths",
-            multiple=True,
-            help="Workspace-relative path or glob naming a file the agent may "
-            "CREATE and still have committed with a KEEP (repeatable, e.g. "
-            "--commit-new-path configs/*.json). Untracked files are "
-            "otherwise never staged and never removed by a REVERT. A '*' "
-            "does not cross a directory separator and '**' is rejected; "
-            "name each level instead. Protected measurement paths are "
-            "never admitted however they are spelled. Immutable per "
-            "campaign: it is snapshotted into campaign_config.json and "
-            "read back on --resume.",
-        ),
-    ),
+    loop_shape_options,
     _roofline_ceiling_option(
         "Estimate the per-shape theoretical achievable latency the campaign "
         "measures its attainment against. 'off' (default) skips it. 'on' estimates "
@@ -1580,6 +1525,7 @@ def forge_loop(request: ForgeLoopRequest):
                 bench_repeat=request.loop_shape.bench_repeat,
                 commit_new_paths=tuple(request.loop_shape.commit_new_paths),
                 agent_relay=requested_relay_policy,
+                search_strategy=SearchStrategy(request.loop_shape.search_strategy or SearchStrategy.LINEAR),
             ),
             resume=resume,
             prepare_task=request.prepare_task,
@@ -1588,6 +1534,7 @@ def forge_loop(request: ForgeLoopRequest):
         raise click.ClickException(str(error)) from error
 
     campaign = resolution.campaign
+    loop_shape = settle_loop_shape(request.loop_shape, campaign.search_strategy)
     program_text = resolution.program_text
     campaign_save_deferred = resolution.save_deferred
 
@@ -1602,12 +1549,10 @@ def forge_loop(request: ForgeLoopRequest):
     target_functions_list = list(campaign.target_functions)
     snr_threshold = campaign.snr_threshold
     gpu_target = campaign.gpu_target
-    gpu_type = campaign.gpu_type
     kernel_backend = campaign.kernel_backend
     task_type = campaign.task_type
     git_branch = campaign.git_branch
     operator_name = campaign.operator_name
-    producer = campaign.producer
     # Measurement semantics come from the campaign, never from this invocation's defaults.
     nproc_per_node = campaign.nproc_per_node
     bench_repeat = campaign.bench_repeat
@@ -1616,27 +1561,12 @@ def forge_loop(request: ForgeLoopRequest):
     commit_new_paths = list(campaign.commit_new_paths)
     profiling_enabled = bool(request.roles.profiling and long_horizon)
 
-    overrides = {"gpu_target": gpu_target}
-    overrides["gpu_type"] = gpu_type
-    overrides["producer"] = producer
-    # Only what was actually asked for: an override present with a None value still wins over ``Config.from_env``'s
-    # environment lookup, which is what made the FORGE_SPECIALIST_PROBE* variables dead on this path.
-    probe = request.probe
-    for _name, _value in (
-        ("specialist_probe", probe.specialist_probe),
-        ("specialist_probe_max", probe.specialist_probe_max),
-        ("specialist_probe_budget_sec", probe.specialist_probe_budget_sec),
-        ("specialist_probe_scratch_root", probe.specialist_probe_scratch_root),
-    ):
-        if _value is not None:
-            overrides[_name] = _value
-    overrides.update(agent_runtime_overrides)
     if gpu_target:
         os.environ["GPU_TARGET"] = gpu_target
     config = Config.from_env(
         workspace=str(workspace),
         knowledge_config=knowledge_config,
-        **overrides,
+        **_config_overrides(campaign, request.probe, agent_runtime_overrides),
     )
     from kernelforge.cli.relay import probe_agent_profiles, resolve_session_relay
 
@@ -1709,8 +1639,9 @@ def forge_loop(request: ForgeLoopRequest):
         nproc_per_node=nproc_per_node,
         # Measurement fidelity: in-process repeats within each independent bench.
         bench_repeat=bench_repeat,
-        lanes=request.loop_shape.lanes,
-        merge_stacking=request.loop_shape.merge_stacking,
+        lanes=loop_shape.lanes,
+        merge_stacking=loop_shape.merge_stacking,
+        search_strategy=campaign.search_strategy,
         # New files a KEEP may carry; a REVERT removes exactly the same set.
         commit_new_paths=commit_new_paths,
         # The attainment of the per-shape ceiling that ends the run; the ceiling itself is estimated inside the loop.
@@ -1891,12 +1822,13 @@ def forge_loop(request: ForgeLoopRequest):
         config=config,
         setup=implementer_setup,
         lane_binding=LaneBinding(iter_config.workspace_dir, driver, source_files_list),
-        lanes=request.loop_shape.lanes,
+        lanes=loop_shape.lanes,
         program_md=program_md,
         specialist_definitions=specialist_definitions,
         critic_enabled=critic_enabled,
         usage=usage,
         supervisor_backend=request.roles.supervisor_backend,
+        search_strategy=campaign.search_strategy,
     )
     try:
         actors = start_search_actors(
@@ -1943,10 +1875,11 @@ def forge_loop(request: ForgeLoopRequest):
         loop_runner.run(
             LoopAgents(
                 agent_fn=start_bundle.agent_fn,
-                agent_factory=start_bundle.agent_factory if request.loop_shape.lanes > 1 else None,
+                agent_factory=start_bundle.agent_factory if loop_shape.lanes > 1 else None,
                 analysis_service=analysis_service,
                 orchestration_service=start_bundle.orchestration_service,
                 supervisor_fn=start_bundle.supervisor_fn,
+                start_selector=start_bundle.start_selector,
                 search_actors=actors.loop_search_actors,
             ),
             callbacks=LoopCallbacks(

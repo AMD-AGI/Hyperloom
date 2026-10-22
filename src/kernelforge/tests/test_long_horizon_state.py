@@ -43,10 +43,7 @@ from kernelforge.loop.run_state import (
     should_resume,
     start_session,
 )
-from kernelforge.loop.runner import (
-    LONG_HORIZON_OUTCOME_WINDOW,
-    _long_horizon_header,
-)
+from kernelforge.loop.prompt_view import LONG_HORIZON_OUTCOME_WINDOW, long_horizon_header
 
 # The header's own rendering budgets, read from the definition that owns them so the expectations below cannot drift
 # from the defaults the loop relies on.
@@ -729,7 +726,7 @@ def test_loop_header_scores_every_pin_and_fills_the_recent_budget(tmp_path):
     state = _state_with_best_pin_held_against_near_misses()
     store = _store_with_live_iteration_events(tmp_path, range(1, 12))
 
-    header = _long_horizon_header(state, store)
+    header = long_horizon_header(state, store)
 
     attempts = _rendered_attempt_iterations(header)
     assert attempts == [6, 7, 8, 9, 10, 11]

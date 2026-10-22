@@ -9,6 +9,7 @@ import json
 import logging
 import re
 import subprocess
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -231,7 +232,12 @@ class AnalysisEvidenceMixin:
                     ),
                 )
             )
-        lesson_iterations = self.lessons.existing_iterations() if getattr(self, "lessons", None) is not None else []
+        scope = self._history_scope()
+        lesson_iterations = [
+            number
+            for number in (self.lessons.existing_iterations() if getattr(self, "lessons", None) is not None else [])
+            if scope is None or number in scope
+        ]
         if lesson_iterations:
             refs.append(
                 EvidenceRef(
@@ -309,25 +315,49 @@ class AnalysisEvidenceMixin:
         if self._looks_like_git_commit(recorded) and self._published_analysis_bundle_root(recorded) is not None:
             self._last_published_analysis_commit = recorded
             return
-        for event in reversed(list(self.state_store.read_events())):
-            if event.get("type") != "analysis_result":
-                continue
-            if event.get("status") != "published":
-                continue
+        event = self._latest_published_analysis_event()
+        if event is not None:
             commit = str(event.get("analysis_commit") or "").strip()
-            if self._looks_like_git_commit(commit) and self._published_analysis_bundle_root(commit) is not None:
-                self._last_published_analysis_commit = commit
-                self.run_state.analysis.evidence_commit = commit
-                self.run_state.analysis.evidence_status = str(event.get("available_tier") or "published")
-                current_best_commit = self.run_state.best.commit_hash or self.run_state.head_commit
-                if commit == current_best_commit:
-                    self.run_state.analysis.evidence_mean_case_speedup = self.run_state.best.mean_case_speedup or 1.0
-                return
+            self._last_published_analysis_commit = commit
+            self.run_state.analysis.evidence_commit = commit
+            self.run_state.analysis.evidence_status = str(event.get("available_tier") or "published")
+            current_best_commit = self.run_state.best.commit_hash or self.run_state.head_commit
+            if commit == current_best_commit:
+                self.run_state.analysis.evidence_mean_case_speedup = self.run_state.best.mean_case_speedup or 1.0
+            return
         head_lines = self._git("rev-parse", "HEAD").splitlines()
         if head_lines and self._looks_like_git_commit(head_lines[0]):
             self._last_published_analysis_commit = self._nearest_published_analysis_commit(head_lines[0])
             if self._last_published_analysis_commit:
                 self.run_state.analysis.evidence_commit = self._last_published_analysis_commit
+
+    def _latest_published_analysis_event(self, commit: str = "") -> dict | None:
+        """The newest ``analysis_result`` event whose bundle is still published, for ``commit`` when one is named."""
+        for event in reversed(list(self.state_store.read_events())):
+            if event.get("type") != "analysis_result" or event.get("status") != "published":
+                continue
+            published = str(event.get("analysis_commit") or "").strip()
+            if commit and published != commit:
+                continue
+            if self._looks_like_git_commit(published) and self._published_analysis_bundle_root(published) is not None:
+                return event
+        return None
+
+    def _adopt_nearest_evidence(self, commit: str, evidence_score: Callable[[str], float | None]) -> None:
+        """Point the evidence state at the nearest analyzed ancestor of a commit the loop has just moved to.
+
+        ``evidence_score`` is the incumbent score the evidence commit was analyzed at, which the refresh policy
+        measures the gain since the evidence against.
+        """
+        self._active_analysis_context = None
+        self._analysis_bundle = None
+        evidence = self._nearest_published_analysis_commit(commit)
+        event = self._latest_published_analysis_event(evidence) if evidence else None
+        state = self.run_state.analysis
+        state.evidence_commit = evidence
+        state.evidence_mean_case_speedup = evidence_score(evidence) if evidence else None
+        state.evidence_status = str(event.get("available_tier") or "published") if event is not None else ""
+        self._last_published_analysis_commit = evidence
 
     def _incremental_analysis_input(
         self,

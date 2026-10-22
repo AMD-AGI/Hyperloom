@@ -65,6 +65,8 @@ from kernelforge.loop.jit_rebuild import (
 from kernelforge.loop.agent_relay import apply_relay_keep, apply_relay_search_outcome
 from kernelforge.loop.analysis_runtime import AnalysisRuntimeMixin
 from kernelforge.loop.relay_runtime import RelayRuntimeMixin
+from kernelforge.loop.search_tree import SearchStrategy
+from kernelforge.loop.tree_runtime import TreeSearchRuntimeMixin
 from kernelforge.loop.search_policy import (
     MARGINAL_GAIN_SCAN_WINDOW,
     MARGINAL_GAIN_WINDOW,
@@ -82,7 +84,6 @@ from kernelforge.loop.round_budget import (
     estimate_measurement_sec,
 )
 from kernelforge.loop.run_state import (
-    MAX_PINNED_ITERATIONS,
     ORCHESTRATION_CIRCUIT_OPEN,
     SESSION_COMPLETED,
     SESSION_PAUSED,
@@ -118,10 +119,7 @@ from kernelforge.orchestrator.supervisor import (
     load_latest_supervisor_ruling,
     persist_supervisor_ruling,
 )
-from kernelforge.loop.prompt_view import (
-    MAX_RECENT_ATTEMPT_LINES,
-    render_long_horizon_header,
-)
+from kernelforge.loop.prompt_view import compact_history_entry, long_horizon_header
 from kernelforge.loop.reporting import BestResultPublisher, KeepBundle, KeepIdentity, KeepScore
 from kernelforge.evaluation.benchmark.runner import (
     CaseCoverageError,
@@ -173,12 +171,6 @@ from kernelforge.evaluation.profiling.registers import check_registers
 from kernelforge.tracker import CampaignSegment, ExperimentTracker, Experiment, ExperimentSubject
 
 log = logging.getLogger(__name__)
-
-# How many recent iteration outcomes the long-horizon prompt header is built from.
-LONG_HORIZON_OUTCOME_WINDOW = max(
-    MAX_PINNED_ITERATIONS,
-    MAX_RECENT_ATTEMPT_LINES,
-)
 
 # Where a campaign writes its own output inside the workspace.
 LOOP_ARTIFACT_ROOT = "forge_experiments"
@@ -399,6 +391,19 @@ def _lane_prompt(plan: str, *, serialized_driver: Path) -> str:
     )
 
 
+def _keep_commit_message(result: "IterationResult", *, rationale: str, plan: str, start: str) -> str:
+    """A KEEP's commit message: its headline, then the solution and measurement it was kept on."""
+    case_times = dict((result.bench_detail or {}).get("case_times") or {})
+    body = [
+        f"plan: {' '.join((plan or '').split()) or 'unspecified'}",
+        f"start: {start}",
+        f"mean case speedup: {result.mean_case_speedup}",
+        "case ms: " + ", ".join(f"{case_id}={case_ms}" for case_id, case_ms in sorted(case_times.items())),
+        f"snr_db: {result.snr_db}",
+    ]
+    return f"iter-{result.iteration}: {rationale[:72]}\n\n" + "\n".join(body)
+
+
 @contextlib.contextmanager
 def _defer_termination_signals(enabled: bool):
     """Delay SIGTERM/SIGINT across best-commit checkpoint publication."""
@@ -523,6 +528,7 @@ class IterationConfig:
     lanes: int = 1
     # Whether a stalled search may spend an iteration measuring two archived rejected gains applied together.
     merge_stacking: bool = True
+    search_strategy: SearchStrategy = SearchStrategy.LINEAR
     # Ranks the driver self-launches (via torchrun) for a collective task. >1 switches profiling to the per-rank
     # backend, because wrapping the outer process would only profile the launcher, which runs no kernel.
     nproc_per_node: int = 1
@@ -631,7 +637,8 @@ class LoopAgents:
     analysis_service: Any = None
     orchestration_service: Any = None
     supervisor_fn: Any = None
-    # Every relay profile's search actor; when set, the loop selects among them and the four above are its start actor.
+    start_selector: Any = None
+    # Every relay profile's search actor; when set, the loop selects among them and the five above are its start actor.
     search_actors: SearchActorPool | None = None
 
 
@@ -654,6 +661,7 @@ def _with_search_actor(agents: LoopAgents, bundle) -> LoopAgents:
         agent_factory=bundle.agent_factory,
         orchestration_service=bundle.orchestration_service,
         supervisor_fn=bundle.supervisor_fn,
+        start_selector=bundle.start_selector,
     )
 
 
@@ -738,7 +746,7 @@ class WindowGain:
             )
 
 
-class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
+class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin, TreeSearchRuntimeMixin):
     """Autonomous kernel optimization loop."""
 
     def __init__(
@@ -1034,7 +1042,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         benchmark.setdefault("median_ms", result.wall_ms)
         publication_base = self.ic.campaign_base_commit or base_head
         publication_patch, publication_changed_files = self._candidate_changes(publication_base)
-        commit_message = f"iter-{result.iteration}: {rationale[:72]}"
+        commit_message = _keep_commit_message(result, rationale=rationale, plan=plan, start=base_head)
         return {
             "campaign_id": self.run_state.campaign_id,
             "session_index": self.run_state.session_index,
@@ -1078,7 +1086,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             "commit_message": commit_message,
             "commit_subject": commit_message.splitlines()[0],
             "task_fingerprint": self._task_fingerprint(),
-            "git_branch": self.ic.git_branch,
+            "git_branch": self._active_branch(),
         }
 
     def _inspect_pending_keep(self, state: RunState, pending: dict) -> str:
@@ -1102,15 +1110,14 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             raise ValueError("pending KEEP state task fingerprint mismatch")
         if pending.get("task_fingerprint") != self._task_fingerprint():
             raise ValueError("pending KEEP task fingerprint mismatch")
-        if state.git_branch and state.git_branch != pending.get("git_branch"):
-            raise ValueError("pending KEEP state branch mismatch")
-        if pending.get("git_branch") != self.ic.git_branch:
+        expected_branch = self._active_branch()
+        if pending.get("git_branch") != expected_branch:
             raise ValueError("pending KEEP branch mismatch")
 
         current_branch = self._git("branch", "--show-current").splitlines()[0]
-        if current_branch != self.ic.git_branch:
+        if current_branch != expected_branch:
             raise ValueError(
-                f"branch mismatch: workspace is on {current_branch or 'detached HEAD'}, expected {self.ic.git_branch}"
+                f"branch mismatch: workspace is on {current_branch or 'detached HEAD'}, expected {expected_branch}"
             )
         current_head = self._git("rev-parse", "HEAD").splitlines()[0]
         state_anchor = state.best.commit_hash or state.head_commit
@@ -1176,9 +1183,10 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         current_branch = self._git("branch", "--show-current").splitlines()[0]
         if state.git_branch and state.git_branch != self.ic.git_branch:
             raise ValueError(f"branch mismatch: state uses {state.git_branch}, configuration uses {self.ic.git_branch}")
-        if current_branch != self.ic.git_branch:
+        expected_branch = self._active_branch()
+        if current_branch != expected_branch:
             raise ValueError(
-                f"branch mismatch: workspace is on {current_branch or 'detached HEAD'}, expected {self.ic.git_branch}"
+                f"branch mismatch: workspace is on {current_branch or 'detached HEAD'}, expected {expected_branch}"
             )
 
         current_head = self._git("rev-parse", "HEAD").splitlines()[0]
@@ -1199,6 +1207,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             raise ValueError(f"resume state not found: {store.state_path}")
         state = store.load()
         self.state_store = store
+        self._reconcile_tree_seat(state)
         pending = self._load_pending_keep()
         planned, status, _result, _append_keep = self._plan_resume_recovery(
             state,
@@ -1627,8 +1636,8 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         best_before: float | None,
         pending: dict | None = None,
     ) -> bool:
-        """Publish one KEEP before another Agent session may start."""
-        if not result.kept or not result.commit_hash:
+        """Publish one KEEP that is the campaign's best before another Agent session may start."""
+        if not result.kept or not result.commit_hash or not self._is_new_global_best(result):
             return False
         baseline = (
             (pending or {}).get("pristine_baseline_wall_ms")
@@ -2467,7 +2476,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
 
     def _reconcile_best_publication(self) -> None:
         """Repair manifest and derived best views from the durable run state."""
-        best = self.run_state.best
+        best = self._published_best_record()
         if not best.commit_hash or best.wall_ms is None or best.mean_case_speedup is None:
             return
         # A resumed session recomputes session_index and experiment_id, which legitimately differ from what the stored
@@ -4323,23 +4332,25 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             window=MARGINAL_GAIN_WINDOW,
             since_iteration=self.run_state.stall.last_supervisor_iter,
         )
-        decision = self.search_policy_engine.decide(
-            SearchState(
-                best_source=self.run_state.best.source,
-                no_improvement_iters=self.run_state.stall.unresolved_stall_iters,
-                current_mode=self.run_state.search_mode,
-                residence_iterations_remaining=(self.run_state.search_mode_residence_remaining),
-                diversification_cycle_completed=(self.run_state.diversification_cycle_completed),
-            ),
-            stall_threshold=self.ic.supervise_after,
-            recent=RecentProgress(
-                consecutive_no_changes=self._consecutive_no_changes(
-                    self.state_store.recent_results(NO_CHANGES_STREAK_WINDOW)
+        decision = self._tree_search_policy() or self._relay_search_policy(
+            iteration,
+            self.search_policy_engine.decide(
+                SearchState(
+                    best_source=self.run_state.best.source,
+                    no_improvement_iters=self.run_state.stall.unresolved_stall_iters,
+                    current_mode=self.run_state.search_mode,
+                    residence_iterations_remaining=(self.run_state.search_mode_residence_remaining),
+                    diversification_cycle_completed=(self.run_state.diversification_cycle_completed),
                 ),
-                window_gain_ratio=window_gain.ratio,
+                stall_threshold=self.ic.supervise_after,
+                recent=RecentProgress(
+                    consecutive_no_changes=self._consecutive_no_changes(
+                        self.state_store.recent_results(NO_CHANGES_STREAK_WINDOW)
+                    ),
+                    window_gain_ratio=window_gain.ratio,
+                ),
             ),
         )
-        decision = self._relay_search_policy(iteration, decision)
         previous_mode = self.run_state.search_mode
         previous_reasons = tuple(self.run_state.search_reason_codes)
         self.run_state.search_mode = decision.mode
@@ -4954,6 +4965,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         overwriting it would silently discard the earlier campaign's evidence.
         """
         if self.resume:
+            self._reconcile_tree_seat(self.run_state)
             self._validate_resume_scoring_state(self.run_state)
             # Pending KEEP reconciliation promotes the committed candidate and checkpoints scoring state.
             self._restore_scoring_state()
@@ -5135,6 +5147,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
 
         print("Starting autonomous iteration loop")
         print(f"  Kernel: {self.ic.kernel_file}")
+        print(f"  Search strategy: {self.ic.search_strategy.value}")
         print(f"  Target: {self.ic.target_wall_ms} ms")
         print(
             f"  Budget: {self.ic.max_time_hours}h "
@@ -5352,6 +5365,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         # Whatever the last iteration cost belongs to this campaign's history even though no further round will read
         # it: a resumed session will.
         self._close_round()
+        self._rest_on_global_best()
         self.best_publisher.refresh_round_budget(self._round_budget_summary())
 
         # Persist the terminal control state so a resume/inspection sees why the run ended and what the final best
@@ -5474,22 +5488,27 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
                     self.best_mean_case_speedup = result.mean_case_speedup
                 # Bridge to the caller's checkpoint sink (main): lets the CLI persist a Hyperloom-recovery
                 # checkpoint JSON alongside our run-state durability.
-                if result.kept and on_best_committed:
+                if result.kept and on_best_committed and self._is_new_global_best(result):
                     on_best_committed(result)
                 if keep_checkpoint_finalized:
                     self._clear_pending_keep()
             if result.kept:
-                improvement = ""
-                if best_mean_case_speedup_before and result.mean_case_speedup:
-                    pct = (result.mean_case_speedup / best_mean_case_speedup_before - 1.0) * 100
-                    improvement = f" ({pct:+.1f}% vs previous best)"
-                snr_str = f" SNR={result.snr_db:.1f}dB" if result.snr_db is not None else ""
-                print(
-                    f"  [KEEP] mean case speedup={result.mean_case_speedup:.6f}x "
-                    f"— NEW BEST{improvement}; raw mean={raw_wall_txt}"
-                    f"{snr_str} ({elapsed:.0f}s)"
-                )
+                self._print_keep(result, before=best_mean_case_speedup_before, raw_wall=raw_wall_txt, elapsed=elapsed)
         return _Ruling(pending_keep, keep_checkpoint_finalized, commit_hash)
+
+    def _print_keep(self, result, *, before: float | None, raw_wall: str, elapsed: float) -> None:
+        """Report one KEEP: a new best, or in a tree campaign a new node that beat the node it started from."""
+        headline, reference = (
+            ("NEW BEST", "previous best") if self._is_new_global_best(result) else ("NEW TREE NODE", "its start")
+        )
+        improvement = ""
+        if before and result.mean_case_speedup:
+            improvement = f" ({(result.mean_case_speedup / before - 1.0) * 100:+.1f}% vs {reference})"
+        snr = f" SNR={result.snr_db:.1f}dB" if result.snr_db is not None else ""
+        print(
+            f"  [KEEP] mean case speedup={result.mean_case_speedup:.6f}x — {headline}{improvement}; "
+            f"raw mean={raw_wall}{snr} ({elapsed:.0f}s)"
+        )
 
     async def _close_iteration(
         self,
@@ -5510,6 +5529,8 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         iteration, session_sink, best_before = frame.iteration, frame.session_sink, frame.best_before
         merge_pair, merge_diff = frame.merge
         pending_keep, keep_checkpoint_finalized, commit_hash = ruling
+        decision_label = _decision_label(result)
+        self._record_tree_attempt(result, decision=decision_label, plan=session_sink.get("plan", ""))
         # Remote/external work belongs outside the SIGTERM deferral window but still precedes potentially long
         # post-KEEP profiling.
         if keep_checkpoint_finalized and pending_keep is not None:
@@ -5519,7 +5540,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
                 best_before=best_before,
                 pending=pending_keep,
             )
-        if result.kept and callbacks.on_best_ready:
+        if result.kept and callbacks.on_best_ready and self._is_new_global_best(result):
             callbacks.on_best_ready(result)
 
         if self.experiment:
@@ -5539,14 +5560,10 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
 
         # Reduce this finished iteration into the durable run state + append a factual event, then checkpoint.
         if not keep_checkpoint_finalized:
-            self._record_iteration_outcome(
-                result,
-                plan=session_sink.get("plan", ""),
-            )
+            self._record_iteration_outcome(result, plan=session_sink.get("plan", ""))
 
         # The verdict is now known, so ask the just-finished implementer session to record what it explored, then
         # stamp the measured outcome onto the same document.
-        decision_label = _decision_label(result)
         if merge_diff and merge_pair is not None:
             print(
                 f"  [merge] iterations {merge_pair[0].iteration}+"
@@ -5989,6 +6006,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         iteration, session_sink = frame.iteration, frame.session_sink
         optimization_plan_path, optimization_plan_created = round_plan.path, round_plan.executable
         self.results.append(result)
+        self._record_tree_attempt(result, decision=decision_label, plan=session_sink.get("plan", ""))
         self._apply_iteration_planning_state(
             optimization_plan_created=optimization_plan_created,
         )
@@ -6033,11 +6051,8 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         # prior kernel. * the LESSON documents — what each recent session actually explored, in its own words,
         # including the directions it abandoned (which leave no diff behind). * the experience LEDGER —
         # objective toolchain observations distilled from machine-verified failure signatures.
-        lh_header = _long_horizon_header(
-            self.run_state,
-            self.state_store,
-            self.handoff_store,
-        )
+        scope = self._history_scope()
+        lh_header = long_horizon_header(self.run_state, self.state_store, self.handoff_store, scope=scope)
 
         # Lesson documents from the most recent iterations, verbatim, plus the absolute path of the directory
         # holding every past one.
@@ -6046,6 +6061,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             lessons_txt = self.lessons.render_for_prompt(
                 current_cases=self._scored_case_ids(),
                 kernel_source=self._kernel_source_for_scope(),
+                scope=scope,
             )
 
         ledger_txt = ""
@@ -6066,7 +6082,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         if lessons_txt:
             print(f"  [agent] injected lesson documents: {len(lessons_txt)} chars")
         if not history:
-            history = "\n".join(_compact_history_entry(r) for r in self.results[-5:])
+            history = "\n".join(compact_history_entry(r) for r in self.results[-5:])
         analysis_evidence = self._render_analysis_evidence_for_implementer()
         if analysis_evidence:
             history = f"{analysis_evidence}\n\n{history}"
@@ -6290,6 +6306,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         await self._establish_ceiling()
         # A crash immediately after a verified commit can leave the KEEP's archive unfinished.
         await self._finish_recovered_pending_keep()
+        self._begin_search_tree()
         self._restore_lane_queue()
         # The previous round's verdict: a REPLACE is spent on the round after the one it judged, and the budget often
         # ends between the two.
@@ -6372,9 +6389,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         iteration = self.run_state.next_iteration - 1
         while True:
             iteration += 1
-            # Build the lineage digest once per iteration — reused by BOTH the supervisor (trajectory to review) and
-            # the implementer (prompt history).
-            digest = self.archive.render_digest()
+            self._rest_on_global_best()
             stop, hazard = self._stop_condition_met(iteration)
             if stop:
                 break
@@ -6384,6 +6399,10 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             round_lanes = self._price_round(iteration)
             if round_lanes is None:
                 break
+            await self._seat_tree_start(iteration, actors.start_selector)
+            # Build the lineage digest once per iteration — reused by BOTH the supervisor (trajectory to review) and
+            # the implementer (prompt history).
+            digest = self.archive.render_digest(scope=self._history_scope())
             await self._open_iteration(
                 iteration=iteration,
                 digest=digest,
@@ -6468,43 +6487,3 @@ def _decision_label(result: IterationResult) -> str:
             return "REVERT_VALIDATION_ERROR"
         return "REVERT_VALIDATION"
     return "KEEP" if result.kept else "REVERT_PERF"
-
-
-def _long_horizon_header(
-    state: RunState,
-    store: LoopStateStore,
-    handoff_store: HandoffStore | None = None,
-) -> str:
-    """The compact long-horizon header for the Implementer prompt, or \"\"."""
-    outcomes = store.recent_results(LONG_HORIZON_OUTCOME_WINDOW)
-    return render_long_horizon_header(
-        state,
-        outcomes,
-        include_handoffs=bool(handoff_store and handoff_store.latest()),
-    )
-
-
-def _compact_history_entry(r: IterationResult) -> str:
-    """One-line history entry for the agent prompt — keeps tokens bounded."""
-    rat = (r.agent_rationale or "").replace("\n", " ").strip()[:80]
-    if not r.validation_passed:
-        last = ""
-        if r.validation_summary:
-            lines = [ln for ln in r.validation_summary.splitlines() if ln.strip()]
-            if lines:
-                last = lines[-1][:60]
-        return f"iter {r.iteration} REVERT(validation) last='{last}' rat='{rat}'"
-    parts = [f"iter {r.iteration}", "KEEP" if r.kept else "REVERT(perf)"]
-    if r.mean_case_speedup is not None:
-        parts.append(f"mean_case_speedup={r.mean_case_speedup:.4f}x")
-    if r.wall_ms is not None:
-        parts.append(f"wall={r.wall_ms:.3f}ms")
-    if r.snr_db is not None:
-        parts.append(f"snr={r.snr_db:.1f}dB")
-    if r.vgpr:
-        parts.append(f"vgpr={r.vgpr}")
-    if r.pmc_diagnosis:
-        parts.append(f"pmc='{r.pmc_diagnosis[:40]}'")
-    if rat:
-        parts.append(f"rat='{rat}'")
-    return " ".join(parts)
