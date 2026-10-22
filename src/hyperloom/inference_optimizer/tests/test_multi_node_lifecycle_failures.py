@@ -151,3 +151,24 @@ def test_log_sweep_skips_a_pod_whose_ssh_cannot_run(collect, state, error) -> No
 def test_log_sweep_lets_an_unexpected_ssh_failure_propagate(collect) -> None:
     with pytest.raises(RuntimeError, match="ssh bug"):
         collect(_SSH_STATE, _ssh_answering("10.0.0.1", RuntimeError("ssh bug")))
+
+
+def test_invalid_health_poll_collects_logs_and_retries_the_started_server(monkeypatch) -> None:
+    from hyperloom.inference_optimizer.multi_node import cli
+    from hyperloom.inference_optimizer.multi_node._internal import external_state
+
+    calls: list[str] = []
+    monkeypatch.setattr(life, "is_multi_node", lambda: True)
+    monkeypatch.setattr(life, "_read_state", dict)
+    monkeypatch.setattr(external_state, "external_service_url", lambda: "")
+    monkeypatch.setenv("HYPERLOOM_MN_HEALTH_POLL_S", "invalid")
+    monkeypatch.setenv("HYPERLOOM_MN_RESTART_RECLAIM_RETRY", "1")
+    monkeypatch.delenv("TRACELENS_ROOT", raising=False)
+    monkeypatch.setattr(cli, "cmd_restart_server", lambda _ns: calls.append("restart") or 0)
+    monkeypatch.setattr(cli, "kill_inference_for_kernel_agent_best_effort", lambda: calls.append("reclaim"))
+    monkeypatch.setattr(life, "_collect_worker_server_logs", lambda _state, _why: calls.append("logs"))
+
+    with pytest.raises(life.ServerRestartFailed, match="HYPERLOOM_MN_HEALTH_POLL_S"):
+        asyncio.run(life.restart_server_for_round(framework="vllm", model_path="/model", tp=1, ep=1))
+
+    assert calls == ["restart", "logs", "reclaim", "restart", "logs"]

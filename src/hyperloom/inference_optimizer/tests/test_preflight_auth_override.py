@@ -2170,7 +2170,7 @@ def _record_critic_probes(monkeypatch, *, fail: bool = False) -> list[tuple[str,
 def test_critic_reviews_with_the_orchestration_model_by_default(monkeypatch, capsys):
     """A launch that sets CODEX_MODEL still reviews with the Claude-side model orchestration runs on."""
     sent = _record_critic_probes(monkeypatch)
-    monkeypatch.setattr(cli, "orchestration_runs_on_codex", lambda **kw: False)
+    monkeypatch.setattr(cli, "critic_on_codex_side", lambda **kw: False)
     args = _make_args(claude_model="glm-5-3", codex_model="gpt-5.4", critic_mock=False, critic_protocol="auto")
 
     cli._probe_critic_review_model(args, codex_follows_claude=False)
@@ -2181,7 +2181,7 @@ def test_critic_reviews_with_the_orchestration_model_by_default(monkeypatch, cap
 
 def test_critic_follows_an_orchestration_that_runs_on_codex(monkeypatch):
     sent = _record_critic_probes(monkeypatch)
-    monkeypatch.setattr(cli, "orchestration_runs_on_codex", lambda **kw: True)
+    monkeypatch.setattr(cli, "critic_on_codex_side", lambda **kw: True)
     args = _make_args(claude_model="gpt-5.5", codex_model="gpt-5.5", critic_mock=False, critic_protocol="auto")
 
     cli._probe_critic_review_model(args, codex_follows_claude=False)
@@ -2191,7 +2191,7 @@ def test_critic_follows_an_orchestration_that_runs_on_codex(monkeypatch):
 
 def test_an_explicit_critic_protocol_reviews_with_that_sides_model(monkeypatch):
     sent = _record_critic_probes(monkeypatch)
-    monkeypatch.setattr(cli, "orchestration_runs_on_codex", lambda **kw: False)
+    monkeypatch.setattr(cli, "critic_on_codex_side", lambda **kw: False)
     monkeypatch.setenv("OPENAI_BASE_URL", "https://gw.example/v1")
     monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
     args = _make_args(claude_model="glm-5-3", codex_model="gpt-5.6-sol", critic_mock=False, critic_protocol="openai")
@@ -2203,7 +2203,7 @@ def test_an_explicit_critic_protocol_reviews_with_that_sides_model(monkeypatch):
 
 def test_a_critic_model_that_cannot_answer_stops_the_launch_without_a_fallback(monkeypatch, capsys):
     sent = _record_critic_probes(monkeypatch, fail=True)
-    monkeypatch.setattr(cli, "orchestration_runs_on_codex", lambda **kw: False)
+    monkeypatch.setattr(cli, "critic_on_codex_side", lambda **kw: False)
     args = _make_args(claude_model="glm-5-3", codex_model="gpt-5.4", critic_mock=False, critic_protocol="auto")
 
     with pytest.raises(SystemExit) as exc_info:
