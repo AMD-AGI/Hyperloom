@@ -140,11 +140,12 @@ class HeldRepo(GitExperimentRepo):
 
 
 def _package(root: Path) -> PackageBase:
-    """The installed ``vllm`` the repository applies merged patches to: one file that reads ``old``."""
+    """The installed ``vllm`` the repository applies merged patches to: two files that read ``old``."""
 
     package = root / COMPONENT
     package.mkdir(parents=True)
     (package / "x.py").write_text("old\n")
+    (package / "y.py").write_text("old\n")
     return PackageBase(COMPONENT, package, None, None)
 
 
@@ -532,6 +533,27 @@ async def test_a_merge_test_the_candidate_failed_is_not_tried_again_on_a_head_it
     assert rounds[0] is not None and "candidate_failed" in rounds[0].reason and "serve_flag" in rounds[0].reason
     assert rounds[3] is None
     tried = [test for test in bench.merge_tests().values() if f"{TAG_FLAG}apart" in test.delta.config.server_args]
+    assert len(tried) == 1
+
+
+async def test_a_not_stackable_commit_is_not_tried_again_on_a_head_that_patched_the_component_elsewhere(
+    bench: Bench,
+) -> None:
+    aside = await bench.repo.store_patch(COMPONENT, _patch_text("y.py", "old", "aside"))
+    pinned = ComponentChange(COMPONENT, UPSTREAM_REF, UPSTREAM_REPO, add_patches=(aside,))
+    delta = RecipeDelta(config=ConfigDelta(server_args=f"{TAG_FLAG}aside"), components=(pinned,))
+    elsewhere = await _committed_elsewhere(bench, delta, 9.0)
+
+    rounds = [await _one(bench) for _ in range(4)]
+
+    c1, c2 = bench.commits["c1"], bench.commits["c2"]
+    assert [(report.candidate, report.outcome) for report in rounds if report is not None] == [
+        (elsewhere, MergeOutcome.NOT_STACKABLE),
+        (c1, MergeOutcome.MERGED),
+        (c2, MergeOutcome.MERGED),
+    ]
+    assert rounds[3] is None
+    tried = [test for test in bench.merge_tests().values() if f"{TAG_FLAG}aside" in test.delta.config.server_args]
     assert len(tried) == 1
 
 
