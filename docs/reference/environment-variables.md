@@ -279,7 +279,6 @@ The following variables control the kernel optimization backend ladder.
 | `GEAK_E2E_TIMEOUT_S` | `43200` | GEAK end-to-end timeout in seconds. Used as the fallback when no run deadline is set. A malformed value raises `EnvValueError`. |
 | `GEAK_BUDGET_MARGIN_S` | `300` | Seconds subtracted from the remaining kill budget before passing the runner timeout to GEAK, so the runner self-stops before the hard subprocess kill. A malformed value raises `EnvValueError`. |
 | `GEAK_MIN_RUN_S` | `600` | Minimum GEAK runner seconds required to attempt a run. If the remaining budget is below this, GEAK is skipped and the phase winds down to SWEEP. A malformed value raises `EnvValueError`. |
-| `GEAK_TERM_GRACE_S` | `180` | Grace period in seconds between SIGTERM and SIGKILL for the GEAK subprocess tree. A malformed value raises `EnvValueError`. |
 
 ---
 
