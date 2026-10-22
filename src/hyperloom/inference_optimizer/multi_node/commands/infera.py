@@ -295,24 +295,106 @@ def _infera_servers_alive(
     return True
 
 
+def _infera_launch_pd_groups(
+    state: dict[str, Any], args: argparse.Namespace, framework: str, kv: str, fanout: _FanoutOptions
+) -> tuple[int, dict[str, Any]]:
+    """Launch the prefill and decode groups, then record in ``state`` the PD topology they were launched with."""
+    if framework != "sglang":
+        raise _mn_cli.ConfigurationError("PD disaggregation is sglang-only on the Infera backend")
+    # Prefill group + decode group: each is its own LWS, each pod uses its own
+    # $LWS_WORKER_INDEX/$LWS_LEADER_ADDRESS.
+    prefill_targets = infera_support.role_ssh_targets(state, "prefill")
+    decode_targets = infera_support.role_ssh_targets(state, "decode")
+    # A PD restart needs both legs.
+    missing = [role for role, targets in (("prefill", prefill_targets), ("decode", decode_targets)) if not targets]
+    if missing:
+        raise _mn_cli.ConfigurationError(
+            f"PD disaggregation was requested but the state records no {' or '.join(missing)} pods. "
+            f"state pd_mode={state.get('pd_mode')!r}: the pod lists are chosen by the state's own mode, "
+            f"so a PD hand-off needs PD_MODE=disaggregated (or --pd-mode disaggregated on `optimize`, "
+            f"which exports it) alongside HYPERLOOM_MN_EXT_PREFILL_IPS / _DECODE_IPS."
+        )
+    pn, dn = _resolve_pd_node_counts(args, state, prefill_targets=prefill_targets, decode_targets=decode_targets)
+    shared_ep = int(getattr(args, "ep", 1) or 1)
+    shared_extra = getattr(args, "extra_args", "") or ""
+    rc_total = 0
+    all_results: dict[str, Any] = {}
+    for role, targets, rnnodes in (("prefill", prefill_targets, pn), ("decode", decode_targets, dn)):
+        # Per-role TP / EP / extra-args; 0 / "" falls back to the shared --tp / --ep / --extra-args.
+        rtp = int(getattr(args, f"pd_{role}_tp", 0) or 0) or int(args.tp)
+        rep = int(getattr(args, f"pd_{role}_ep", 0) or 0) or shared_ep
+        rextra = (shared_extra + " " + (getattr(args, f"pd_{role}_extra_args", "") or "")).strip()
+        launch_args = infera_support.build_node_launch_args(
+            infera_support.NodeLaunch(
+                framework=framework,
+                model=args.model,
+                tp=rtp,
+                nnodes=max(1, rnnodes),
+                ep=rep,
+                extra_args=rextra,
+                disagg_mode=role,
+                kv_transfer_backend=kv,
+            )
+        )
+        info(
+            f"infera restart-server PD {role}: tp={rtp} ep={rep} "
+            f"nnodes={rnnodes} pods={len(targets)} kv={kv} extra={rextra!r}"
+        )
+        rc, all_results[role] = _infera_fanout_launch(
+            state, launch_args, list(targets), label=f"restart-{role}", options=fanout
+        )
+        rc_total = rc_total or rc
+    # Persist inferred PD topology so resume fast-path and KB keys match launch.
+    state["pd_prefill_nodes"] = pn
+    state["pd_decode_nodes"] = dn
+    state["last_restart_pd_prefill_nodes"] = pn
+    state["last_restart_pd_decode_nodes"] = dn
+    state["last_restart_pd_prefill_tp"] = int(getattr(args, "pd_prefill_tp", 0) or 0)
+    state["last_restart_pd_decode_tp"] = int(getattr(args, "pd_decode_tp", 0) or 0)
+    # The orchestrator's PD arg resolution reads this key as its fallback tier between an explicit argument and
+    # $PD_TRANSFER_BACKEND.
+    state["last_restart_pd_transfer_backend"] = kv
+    state["last_restart_pd_prefill_ep"] = int(getattr(args, "pd_prefill_ep", 0) or 0)
+    state["last_restart_pd_decode_ep"] = int(getattr(args, "pd_decode_ep", 0) or 0)
+    state["last_restart_pd_prefill_extra_args"] = getattr(args, "pd_prefill_extra_args", "") or ""
+    state["last_restart_pd_decode_extra_args"] = getattr(args, "pd_decode_extra_args", "") or ""
+    return rc_total, all_results
+
+
+def _infera_launch_workers(
+    state: dict[str, Any], args: argparse.Namespace, framework: str, fanout: _FanoutOptions
+) -> tuple[int, dict[str, Any]]:
+    """Launch one aggregated server group across every worker pod."""
+    nnodes = int(state.get("nodes") or 1)
+    worker_targets = infera_support.role_ssh_targets(state, "worker")
+    launch_args = infera_support.build_node_launch_args(
+        infera_support.NodeLaunch(
+            framework=framework,
+            model=args.model,
+            tp=args.tp,
+            nnodes=nnodes,
+            ep=int(getattr(args, "ep", 1) or 1),
+            extra_args=getattr(args, "extra_args", "") or "",
+        )
+    )
+    info(
+        f"infera restart-server: framework={framework} model={args.model} "
+        f"tp={args.tp} nnodes={nnodes} workers={len(worker_targets)}"
+    )
+    rc, results = _infera_fanout_launch(state, launch_args, list(worker_targets), label="restart", options=fanout)
+    return rc, {"worker": results}
+
+
 def _infera_restart_server(args: argparse.Namespace) -> int:
     """Infera restart: SSH fan-out launch_infera_node.py to every worker pod."""
     state = _infera_require_state()
     framework = (args.framework or state.get("framework") or "sglang").lower()
     if framework not in ("sglang", "vllm"):
         raise _mn_cli.ConfigurationError(f"unsupported framework: {framework!r}")
-    shared_extra = getattr(args, "extra_args", "") or ""
     try:
-        validate_server_args(shared_extra, context="infera restart-server --extra-args")
-        if getattr(args, "pd_prefill_extra_args", ""):
+        for flag in ("extra_args", "pd_prefill_extra_args", "pd_decode_extra_args"):
             validate_server_args(
-                getattr(args, "pd_prefill_extra_args", "") or "",
-                context="infera restart-server --pd-prefill-extra-args",
-            )
-        if getattr(args, "pd_decode_extra_args", ""):
-            validate_server_args(
-                getattr(args, "pd_decode_extra_args", "") or "",
-                context="infera restart-server --pd-decode-extra-args",
+                getattr(args, flag, "") or "", context=f"infera restart-server --{flag.replace('_', '-')}"
             )
     except ServerArgsRejected as exc:
         err(str(exc))
@@ -328,10 +410,6 @@ def _infera_restart_server(args: argparse.Namespace) -> int:
     # on this fabric anyway.
     kv = getattr(args, "pd_transfer_backend", "") or ""
     fanout = _FanoutOptions(_mn_cli._poll_timeout_from_args(args), getattr(args, "print_logs", False))
-    rc_total = 0
-    all_results: dict[str, Any] = {}
-    pd_prefill_nodes = 0
-    pd_decode_nodes = 0
 
     # Resume fast-path (parity with the RayJob path): if this restart's config matches the last successful launch AND
     # every GPU pod's prior server is still alive, skip the SSH kill+relaunch (which re-triggers a multi-minute MoE
@@ -358,106 +436,9 @@ def _infera_restart_server(args: argparse.Namespace) -> int:
             return 0
 
     if pd_mode == "disaggregated":
-        if framework != "sglang":
-            raise _mn_cli.ConfigurationError("PD disaggregation is sglang-only on the Infera backend")
-        # Prefill group + decode group: each is its own LWS, each pod uses its own
-        # $LWS_WORKER_INDEX/$LWS_LEADER_ADDRESS.
-        prefill_targets = infera_support.pod_targets_from_lists(
-            state.get("prefill_pods"),
-            state.get("prefill_pod_ips"),
-            default_port=_mn_cli._infera_default_ssh_port(state),
-            default_role="prefill",
-        )
-        decode_targets = infera_support.pod_targets_from_lists(
-            state.get("decode_pods"),
-            state.get("decode_pod_ips"),
-            default_port=_mn_cli._infera_default_ssh_port(state) + infera_support.INFERA_SSH_PORT_ROLE_STRIDE,
-            default_role="decode",
-        )
-        # A PD restart needs both legs.
-        missing = [role for role, targets in (("prefill", prefill_targets), ("decode", decode_targets)) if not targets]
-        if missing:
-            raise _mn_cli.ConfigurationError(
-                f"PD disaggregation was requested but the state records no {' or '.join(missing)} pods. "
-                f"state pd_mode={state.get('pd_mode')!r}: the pod lists are chosen by the state's own mode, "
-                f"so a PD hand-off needs PD_MODE=disaggregated (or --pd-mode disaggregated on `optimize`, "
-                f"which exports it) alongside HYPERLOOM_MN_EXT_PREFILL_IPS / _DECODE_IPS."
-            )
-        pd_prefill_nodes, pd_decode_nodes = _resolve_pd_node_counts(
-            args,
-            state,
-            prefill_targets=prefill_targets,
-            decode_targets=decode_targets,
-        )
-        pn, dn = pd_prefill_nodes, pd_decode_nodes
-        ptp = int(getattr(args, "pd_prefill_tp", 0) or 0) or int(args.tp)
-        dtp = int(getattr(args, "pd_decode_tp", 0) or 0) or int(args.tp)
-        # Per-role EP / extra-args; 0 / "" falls back to the shared --ep / --extra-args.
-        shared_ep = int(getattr(args, "ep", 1) or 1)
-        shared_extra = getattr(args, "extra_args", "") or ""
-        pep = int(getattr(args, "pd_prefill_ep", 0) or 0) or shared_ep
-        dep = int(getattr(args, "pd_decode_ep", 0) or 0) or shared_ep
-        prefill_extra = (shared_extra + " " + (getattr(args, "pd_prefill_extra_args", "") or "")).strip()
-        decode_extra = (shared_extra + " " + (getattr(args, "pd_decode_extra_args", "") or "")).strip()
-        for role, targets, rnnodes, rtp, rep, rextra in (
-            ("prefill", prefill_targets, pn, ptp, pep, prefill_extra),
-            ("decode", decode_targets, dn, dtp, dep, decode_extra),
-        ):
-            launch_args = infera_support.build_node_launch_args(
-                infera_support.NodeLaunch(
-                    framework=framework,
-                    model=args.model,
-                    tp=rtp,
-                    nnodes=max(1, rnnodes),
-                    ep=rep,
-                    extra_args=rextra,
-                    disagg_mode=role,
-                    kv_transfer_backend=kv,
-                )
-            )
-            info(
-                f"infera restart-server PD {role}: tp={rtp} ep={rep} "
-                f"nnodes={rnnodes} pods={len(targets)} kv={kv} extra={rextra!r}"
-            )
-            rc, results = _infera_fanout_launch(
-                state,
-                launch_args,
-                list(targets),
-                label=f"restart-{role}",
-                options=fanout,
-            )
-            rc_total = rc_total or rc
-            all_results[role] = results
+        rc_total, all_results = _infera_launch_pd_groups(state, args, framework, kv, fanout)
     else:
-        nnodes = int(state.get("nodes") or 1)
-        worker_targets = infera_support.pod_targets_from_lists(
-            state.get("worker_pods"),
-            state.get("worker_pod_ips"),
-            default_port=_mn_cli._infera_default_ssh_port(state),
-            default_role="worker",
-        )
-        launch_args = infera_support.build_node_launch_args(
-            infera_support.NodeLaunch(
-                framework=framework,
-                model=args.model,
-                tp=args.tp,
-                nnodes=nnodes,
-                ep=int(getattr(args, "ep", 1) or 1),
-                extra_args=getattr(args, "extra_args", "") or "",
-            )
-        )
-        info(
-            f"infera restart-server: framework={framework} model={args.model} "
-            f"tp={args.tp} nnodes={nnodes} workers={len(worker_targets)}"
-        )
-        rc_total, results = _infera_fanout_launch(
-            state,
-            launch_args,
-            list(worker_targets),
-            label="restart",
-            options=fanout,
-        )
-        all_results["worker"] = results
+        rc_total, all_results = _infera_launch_workers(state, args, framework, fanout)
 
     state["last_restart_framework"] = framework
     state["last_restart_model"] = args.model
@@ -466,21 +447,6 @@ def _infera_restart_server(args: argparse.Namespace) -> int:
     state["last_restart_pd_mode"] = pd_mode
     state["last_restart_extra_args"] = _mn_cli._normalize_extra_args(getattr(args, "extra_args", ""))
     state["last_restart_forward_env"] = _mn_cli.per_round_forward_overrides()
-    if pd_mode == "disaggregated":
-        # Persist inferred PD topology so resume fast-path and KB keys match launch.
-        state["pd_prefill_nodes"] = pd_prefill_nodes
-        state["pd_decode_nodes"] = pd_decode_nodes
-        state["last_restart_pd_prefill_nodes"] = pd_prefill_nodes
-        state["last_restart_pd_decode_nodes"] = pd_decode_nodes
-        state["last_restart_pd_prefill_tp"] = int(getattr(args, "pd_prefill_tp", 0) or 0)
-        state["last_restart_pd_decode_tp"] = int(getattr(args, "pd_decode_tp", 0) or 0)
-        # The orchestrator's PD arg resolution reads this key as its fallback tier between an explicit argument and
-        # $PD_TRANSFER_BACKEND.
-        state["last_restart_pd_transfer_backend"] = kv
-        state["last_restart_pd_prefill_ep"] = int(getattr(args, "pd_prefill_ep", 0) or 0)
-        state["last_restart_pd_decode_ep"] = int(getattr(args, "pd_decode_ep", 0) or 0)
-        state["last_restart_pd_prefill_extra_args"] = getattr(args, "pd_prefill_extra_args", "") or ""
-        state["last_restart_pd_decode_extra_args"] = getattr(args, "pd_decode_extra_args", "") or ""
     state["last_restart_results"] = all_results
     _mn_cli._save_state(state)
     print(
