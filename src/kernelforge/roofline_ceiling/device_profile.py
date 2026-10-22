@@ -24,13 +24,12 @@ import re
 import shutil
 import subprocess
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
+from hyperloom.common import gpu_partition
 from kernelforge.fusion.gpu_arch import canon_arch, detect_arch
 
 _MARKETING_RE = re.compile(r"^\s*Marketing Name:\s*(AMD Instinct\s+\S+)", re.MULTILINE)
-_COMPUTE_PARTITION_RE = re.compile(r"Compute Partition:\s*(\S+)")
-_MEMORY_PARTITION_RE = re.compile(r"Memory Partition:\s*(\S+)")
 
 
 @dataclass(frozen=True)
@@ -73,6 +72,20 @@ def _run_text(argv: list[str], timeout_sec: float = 20.0) -> str:
     return (completed.stdout or "") + (completed.stderr or "")
 
 
+def _partition_label(reader: Callable[[int], str]) -> str:
+    """Read one partition-mode field via ``gpu_partition``, degrading to "" like every other identity field here.
+
+    ``gpu_partition`` does not filter the literal string ``"N/A"`` amd-smi reports for hardware that does not
+    partition at all (an APU, or a card whose ROCm build dropped partition info from ``static``, per the plan's
+    6.4.2/7.0 schema notes) -- that is this module's call to make, not the shared reader's, so it is made here.
+    """
+    try:
+        mode = reader(0)
+    except gpu_partition.PartitionError:
+        return ""
+    return mode if mode and mode != "N/A" else ""
+
+
 def describe_device(arch: str = "") -> DeviceIdentity:
     """Identify this machine's measurable configuration.
 
@@ -80,17 +93,18 @@ def describe_device(arch: str = "") -> DeviceIdentity:
     "not determined" rather than "absent", and the analyst is told as much: a
     machine whose partition mode could not be read is one whose roofs deserve a
     lower confidence, not one assumed to be in the default mode.
+
+    Compute/memory partition go through ``hyperloom.common.gpu_partition`` (``amd-smi partition``) rather than a
+    parser of this module's own: ``observe_partition`` is not used here because it also sizes the partition against
+    the per-board CU/VRAM table, which this identity-only probe has no use for and should not pay the cost of.
     """
     resolved = canon_arch(arch) or detect_arch()
     marketing = _MARKETING_RE.search(_run_text(["rocminfo"]))
-    partitions = _run_text(["rocm-smi", "--showcomputepartition", "--showmemorypartition"])
-    compute = _COMPUTE_PARTITION_RE.search(partitions)
-    memory = _MEMORY_PARTITION_RE.search(partitions)
     return DeviceIdentity(
         arch=resolved,
         device_name=(marketing.group(1).strip() if marketing else ""),
-        compute_partition=(compute.group(1).strip() if compute else ""),
-        memory_partition=(memory.group(1).strip() if memory else ""),
+        compute_partition=_partition_label(gpu_partition.read_partition_mode),
+        memory_partition=_partition_label(gpu_partition.read_memory_partition_mode),
     )
 
 

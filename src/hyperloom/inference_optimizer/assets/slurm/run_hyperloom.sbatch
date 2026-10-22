@@ -97,10 +97,40 @@ chmod +x "$INCONTAINER"
 #
 # Every branch below is spelled as `if`, not `cmd && ...`: this file runs under
 # `set -e`, where a failing AND-list aborts the job.
+# amd-smi has no VRAM% field (rocm-smi's was already a derived value) --
+# compute it from used_vram/total_vram instead. Read those two keys by exact
+# name only: amd-smi's mem_usage also carries *_gtt (GTT, not VRAM -- on an
+# APU GTT can be ~24x VRAM, so a loose "*vram*" match would silently report a
+# wildly inflated number instead of failing).
 hl_vram_max() {
-  rocm-smi --showmemuse 2>/dev/null \
-    | grep -oE 'GPU Memory Allocated \(VRAM%\): [0-9]+' \
-    | awk '{if ($NF > m) m = $NF} END {print m+0}'
+  local raw
+  raw="$(amd-smi metric --mem-usage --json 2>/dev/null)" || true
+  printf '%s' "$raw" | python3 -c '
+import json, sys
+
+def _val(x):
+    if isinstance(x, dict):
+        x = x.get("value")
+    try:
+        return float(x)
+    except (TypeError, ValueError):
+        return None
+
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    data = {}
+
+best = 0
+for gpu in data.get("gpu_data", []) or []:
+    mem = gpu.get("mem_usage") or {}
+    used = _val(mem.get("used_vram"))
+    total = _val(mem.get("total_vram"))
+    if used is None or total is None or total <= 0:
+        continue
+    best = max(best, int(used * 100 / total))
+print(best)
+' 2>/dev/null || echo 0
 }
 
 hl_kill_container_cgroup() {

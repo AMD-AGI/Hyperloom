@@ -14,8 +14,8 @@ from hyperloom.common.gpu_identity import AMD_GPU_DISPATCH_IDENTITIES
 #: let a board have a dispatch identity that ``_resolve_amd_gpu_type`` refused.
 _AMD_GPU_TYPES = frozenset(AMD_GPU_DISPATCH_IDENTITIES)
 
-#: rocm-smi product tags, reverse-sorted so a longer tag is tested before any
-#: tag that is a prefix of it -- an "MI300XL" must not be claimed by "MI300X".
+#: Product tags matched against amd-smi's marketing name, reverse-sorted so a longer tag is tested before any tag
+#: that is a prefix of it -- an "MI300XL" must not be claimed by "MI300X".
 _PRODUCT_TAGS: tuple[str, ...] = tuple(sorted((t.upper() for t in _AMD_GPU_TYPES), reverse=True))
 
 _GFX_TO_RUNNER: dict[str, str] = {
@@ -55,26 +55,37 @@ def _resolve_gpu_type(
 
 
 def _autodetect_gpu_type() -> str | None:
-    """Return mi300x|mi308x|mi325x|mi355x or None if undetectable."""
-    import subprocess
+    """Return mi300x|mi308x|mi325x|mi355x|radeon8060s|... or None if undetectable.
 
-    try:
-        out = subprocess.run(
-            ["rocm-smi", "--showproductname"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        ).stdout.upper()
-        # Spaces dropped so a derived tag matches the spelling rocm-smi prints:
-        # radeon8060s appears as "Radeon 8060S Graphics".
-        out = out.replace(" ", "")
+    ``amd-smi static --asic`` replaces the old ``rocm-smi --showproductname`` plus torch ``gcnArchName`` pair: one
+    call returns both the marketing name and the gfx target, where ``rocm-smi`` gave only the former -- and on
+    gfx1151 gave nothing usable either way: ``Card Series: N/A`` on ROCm 7.2.3, the generic ``AMD Radeon Graphics``
+    on 7.15. Neither matches a product tag, so the board resolved to ``unknown_gpu`` (see PR #1483).
+
+    Note the marketing name is not always resolved on the older stack either: amd-smi 26.2.2 (ROCm 7.2.3) reports
+    ``market_name`` as the bare device id ``0x1586`` for this part, which is why the ``target_graphics_version`` tier
+    below exists rather than being treated as redundant.
+    """
+    from hyperloom.common.amd_smi import gpu_asic_info
+
+    asics = gpu_asic_info()
+    if asics:
+        asic = asics[0]
+        # Spaces dropped so a derived tag matches the spelling amd-smi prints: radeon8060s appears as "AMD Radeon
+        # 8060S Graphics".
+        market = asic.market_name.upper().replace(" ", "")
         for tag in _PRODUCT_TAGS:
-            if tag in out:
+            if tag in market:
                 return tag.lower()
-    except (FileNotFoundError, subprocess.TimeoutExpired, PermissionError, OSError):
-        # rocm-smi missing / slow / not permitted; fall through to the torch gcnArchName probe below (autodetect is
-        # best-effort).
-        pass
+        # No marketing-name tag matched -- e.g. an unreleased board whose market_name degrades to a bare device id.
+        # amd-smi already returned the gfx target in this same call, so try that before falling to torch below.
+        gfx = str(asic.target_graphics_version or "").strip().lower()
+        if gfx in _GFX_TO_RUNNER:
+            return _GFX_TO_RUNNER[gfx]
+    # amd-smi is absent/failed, or answered with neither a known tag nor a known gfx target: fall back to torch's
+    # own gcnArchName probe. This no longer fills a gap in amd-smi's data (static --asic already carries
+    # target_graphics_version), but it is still the only read that works in a container image that ships torch+ROCm
+    # without the amd-smi CLI, so it keeps earning its place as a last resort.
     try:
         import torch
 

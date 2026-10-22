@@ -316,21 +316,29 @@ def test_extract_rescue_skips_no_throughput(tmp_path, monkeypatch):
 
 # ---- _row_to_gpu_sample ----------------------------------------------------
 def test_row_to_gpu_sample_picks_metrics():
+    """The amd-smi header the pod sampler writes. ``vram_pct`` is computed, because amd-smi has no percent field."""
     header = [
-        "timestamp",
-        "Temperature (Junction) (C)",
-        "Average Socket Power (W)",
-        "sclk clock (MHz)",
-        "GPU use (%)",
-        "VRAM% ",
+        "ts",
+        "junction",
+        "socket_power",
+        "gfx_0_clk",
+        "gfx_activity",
+        "used_vram",
+        "total_vram",
     ]
-    row = ["1000", "55", "310.5", "1400", "88", "42"]
+    row = ["1000", "55", "310.5", "1400", "88", "860", "2048"]
     s = br._row_to_gpu_sample(header, row)
     assert s["temperature_c"] == 55
     assert s["power_w"] == 310.5
     assert s["clock_mhz"] == 1400
     assert s["gpu_util_pct"] == 88
-    assert s["vram_pct"] == 42
+    assert s["vram_pct"] == 41.99
+
+
+def test_row_to_gpu_sample_ignores_a_legacy_rocm_smi_header():
+    """The rocm-smi header is no longer parsed: the sampler ships with this build, so it cannot produce one."""
+    header = ["timestamp", "Temperature (Junction) (C)", "GPU Memory Allocated (VRAM%)"]
+    assert br._row_to_gpu_sample(header, ["1000", "55", "42"]) == {}
 
 
 def test_row_to_gpu_sample_empty_when_no_numeric():
@@ -380,7 +388,7 @@ def test_harvest_mn_gpu_metrics_folds_pod_csvs(monkeypatch, tmp_path):
     shared.mkdir()
     monkeypatch.setenv("HYPERLOOM_MN_SERVER_LOG_DIR", str(shared))
 
-    header = "timestamp,Temperature (Junction) (C),Average Socket Power (W)"
+    header = "ts,junction,socket_power"
     (shared / "gpu_metrics_10.0.0.1.csv").write_text(f"{header}\n1000,55,300\n1001,56,310\n", encoding="utf-8")
     (shared / "gpu_metrics_10.0.0.2.csv").write_text(f"{header}\n1000,50,280\n", encoding="utf-8")
 

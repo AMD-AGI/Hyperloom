@@ -810,7 +810,7 @@ PATH="$(dirname "$PYTHON"):${PATH:-/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr
 export PATH
 
 # --- 0a. Torch compatibility gate (ROCm-aware) ---
-# If rocm-smi reports devices, the resolved PYTHON must already have a
+# If amd-smi reports devices, the resolved PYTHON must already have a
 # ROCm-built torch importable. Two failure modes we explicitly catch:
 #   1. torch missing entirely on a ROCm pod -- letting pip install proceed
 #      will pull the NVIDIA CUDA wheel from PyPI (default `torch`).
@@ -825,7 +825,7 @@ ensure_torch_compatible_with_gpu() {
   if [ "${ONLY_AIPERF:-0}" -eq 1 ]; then
     return 0
   fi
-  if ! command -v rocm-smi >/dev/null 2>&1; then
+  if ! command -v amd-smi >/dev/null 2>&1; then
     return 0
   fi
   # Both probes below touch the GPU, so both hang forever on a wedged driver --
@@ -844,9 +844,9 @@ ensure_torch_compatible_with_gpu() {
   # allocation and names the cause; SKIP_TORCH_GATE covers a node that is merely
   # slow, the same way it already covers this gate's other verdicts.
   local smi_rc=0
-  timeout 60 rocm-smi --showid >/dev/null 2>&1 || smi_rc=$?
+  timeout 60 amd-smi list >/dev/null 2>&1 || smi_rc=$?
   if [ "$smi_rc" -eq 124 ]; then
-    warn "rocm-smi --showid did not answer within 60s -- the GPU driver on this node looks wedged"
+    warn "amd-smi list did not answer within 60s -- the GPU driver on this node looks wedged"
     if [ "${INFERENCE_OPTIMIZER_SKIP_TORCH_GATE:-0}" != "1" ]; then
       die "refusing to install on a node whose GPU probe hangs (INFERENCE_OPTIMIZER_SKIP_TORCH_GATE=1 to continue anyway)"
     fi
@@ -887,7 +887,7 @@ PY
   local rc; rc="$("$PYTHON" -c "import json,sys; d=json.loads(sys.argv[1]); print(d.get('rc',0))" "$probe" 2>/dev/null || echo 0)"
   if [ "$rc" = "2" ]; then
     warn "torch is NOT importable from PYTHON=${PYTHON}"
-    warn "this pod has ROCm GPUs (rocm-smi works) -- letting pip install proceed"
+    warn "this pod has ROCm GPUs (amd-smi works) -- letting pip install proceed"
     warn "would pull plain 'torch' from PyPI (= NVIDIA CUDA wheel) and break"
     warn "downstream RAG / baseline / kernel steps with 'Found no NVIDIA driver'."
     warn "Fixes (pick one):"
@@ -904,7 +904,7 @@ PY
   local tv;  tv="$("$PYTHON"  -c "import json,sys; d=json.loads(sys.argv[1]); print(d.get('torch_version') or '')" "$probe" 2>/dev/null || echo "")"
   if [ -z "$hip" ]; then
     warn "torch=${tv} in PYTHON=${PYTHON} is NOT a ROCm build (torch.version.hip is None)"
-    warn "but this pod reports ROCm GPUs via rocm-smi. RAG-index / baseline / kernel"
+    warn "but this pod reports ROCm GPUs via amd-smi. RAG-index / baseline / kernel"
     warn "steps will crash at torch._C._cuda_init() with 'Found no NVIDIA driver'."
     warn "Fixes (pick one):"
     warn "  * use the canonical ROCm stack:   unset PYTHON; install.sh will pick /opt/venv"
