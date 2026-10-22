@@ -194,7 +194,7 @@ class DeclaredPowerSettings:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "perf_level", normalize_perf_level(self.perf_level) if self.perf_level else "")
-        object.__setattr__(self, "npm", str(self.npm or "").lower())
+        object.__setattr__(self, "npm", str(self.npm).lower())
 
     def as_row(self) -> dict[str, Any]:
         """The per-card settings keyed as a card's reading is; the only ones a session may apply."""

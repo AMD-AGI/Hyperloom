@@ -344,7 +344,7 @@ def _per_gpu_launch_error(args: Any, available_gpus: set[int] | None) -> str:
 def resolve_launch_gpu_power(args: Any, *, nodes: int, owner: str) -> dict[str, Any]:
     """The launch's GPU power settings record; exits 2 before anything runs when the declared settings cannot be
     applied or a requested power budget cannot be measured or checked. Nothing is applied when a budget is refused."""
-    from hyperloom.common.gpu_power_settings import DeclaredPowerSettings, GpuPowerSettingsError, visible_gpu_indices
+    from hyperloom.common.gpu_power_settings import GpuPowerSettingsError, visible_gpu_indices
 
     gpu_power: dict[str, Any] = {}
     mask: set[int] | None = None
@@ -387,8 +387,6 @@ def resume_gpu_power_settings(args: Any, state: Any) -> tuple[dict[str, Any], st
 
     A session that applied its settings restored them when it exited, so its resume must apply them again.
     """
-    from hyperloom.common.gpu_power_settings import DeclaredPowerSettings
-
     archived = dict(getattr(state, "gpu_power_settings", None) or {})
     declared = dict(archived.get(_DECLARED) or {})
     apply = bool(getattr(args, "apply_gpu_power_settings", False))
