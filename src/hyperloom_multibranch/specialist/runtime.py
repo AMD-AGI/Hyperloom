@@ -208,8 +208,8 @@ class SpecialistRuntime:
         ready = False
         while True:
             start = SessionStart(state.name, state.start_commit, state.k, state.task)
-            state.session = self._sessions(start)
-            if not ready and not await self._preflight(state, state.session):
+            state.session = await self._built(state, start)
+            if state.session is None or not ready and not await self._preflight(state, state.session):
                 return
             ready = True
             try:
@@ -250,18 +250,35 @@ class SpecialistRuntime:
                 await _notice(state, f"the specialist {why} ({error!r}); it is not restarted")
                 return
 
+    async def _built(self, state: _Branch, start: SessionStart) -> Session | None:
+        """The branch's next session; ``None``, its specialist given up with the reason, when it cannot be built."""
+
+        try:
+            return self._sessions(start)
+        except Exception as error:
+            logger.exception("the session of %s cannot be built", state.name)
+            state.gave_up = True
+            await _notice(state, f"the specialist's session cannot be built ({error}); it is not started")
+            return None
+
     async def _preflight(self, state: _Branch, session: Session) -> bool:
-        """Make the branch's first session ready; give the specialist up, with every reason, when it cannot be."""
+        """Make the branch's first session ready; give the specialist up, with every reason, when it cannot be: a
+        failure the preflight names, or one it did not foresee, which leaves the branch as unready."""
 
         try:
             await session.preflight()
         except PreflightFailed as error:
-            await session.stop()
+            why = str(error)
             logger.warning("the specialist of %s could not be made ready: %s", state.name, error)
-            state.session, state.gave_up = None, True
-            await _notice(state, f"the specialist's preflight failed ({error}); it is not started")
-            return False
-        return True
+        except Exception as error:
+            why = repr(error)
+            logger.exception("the preflight of %s failed", state.name)
+        else:
+            return True
+        await session.stop()
+        state.session, state.gave_up = None, True
+        await _notice(state, f"the specialist's preflight failed ({why}); it is not started")
+        return False
 
     def _least_held(self) -> str:
         running = [state.task.direction for state in self._branches.values()]

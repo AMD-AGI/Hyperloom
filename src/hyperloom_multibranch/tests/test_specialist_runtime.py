@@ -352,6 +352,26 @@ async def test_a_finished_session_ends_its_specialist_with_no_restart_and_no_cra
     await runtime.stop(BRANCH)
 
 
+@pytest.mark.parametrize("where", ["factory", "preflight"])
+async def test_a_session_that_cannot_be_built_or_made_ready_gives_its_specialist_up_with_the_reason(session, where):
+    runs = _Runs(preflight=OSError("no space left on device"))
+
+    def factory(start: SessionStart) -> _Run:
+        if where == "factory":
+            raise ValueError("branch s1 runs the agent a, which no specialist stands for")
+        return runs(start)
+
+    runtime = session.runtime(factory)
+
+    await runtime.start(BRANCH, await session.repo.head(BRANCH), BranchTask(agent="https://example.com/agent.git"))
+    await _until(lambda: _any_notice(session, "not started"), "the runtime to give up")
+
+    why = "no specialist stands for" if where == "factory" else "no space left"
+    assert any(why in notice for notice in await session.notices())
+    assert await runtime.status(BRANCH) == SpecialistStatus(False, 0, 0, True, False)
+    await runtime.stop(BRANCH)
+
+
 def _idle() -> SessionIdle:
     return SessionIdle("its model ended 3 turns in a row with nothing to test")
 
