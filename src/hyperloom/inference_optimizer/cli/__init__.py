@@ -70,6 +70,7 @@ from .bootstrap import (
     _print_session_skeleton,
     _reconcile_crash_count,
     prepare_plug_host,
+    warn_without_target_gpu,
     running_plug_host,
     _seed_shared_state,
     _snapshot_system_prompts,
@@ -2653,14 +2654,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     print(f"Tick interval   : {args.tick_interval_sec}s")
     print()
 
-    if not (getattr(args, "compare_against_gpu", None) or "").strip():
-        print(
-            "[target_analysis] no --compare-against-gpu set; will write a "
-            "marker JSON at $SESSION_DIR/target_analysis/target_baseline.json "
-            "(reason=no_target_gpu_configured) — set --compare-against-gpu "
-            "to fetch real InferenceX reference data.",
-            file=sys.stderr,
-        )
+    warn_without_target_gpu(args)
 
     stop_reason: str | None = None
     try:

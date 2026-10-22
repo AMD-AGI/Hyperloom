@@ -92,6 +92,19 @@ def running_plug_host(host: PlugHost) -> Iterator[PlugHost]:
             host.close()
 
 
+def warn_without_target_gpu(args: argparse.Namespace) -> None:
+    """Say on stderr that no target GPU was given, so the target analysis writes only its marker file."""
+    if (getattr(args, "compare_against_gpu", None) or "").strip():
+        return
+    print(
+        "[target_analysis] no --compare-against-gpu set; will write a "
+        "marker JSON at $SESSION_DIR/target_analysis/target_baseline.json "
+        "(reason=no_target_gpu_configured) — set --compare-against-gpu "
+        "to fetch real InferenceX reference data.",
+        file=sys.stderr,
+    )
+
+
 def parse_operator_extra_env(args: argparse.Namespace) -> dict[str, str]:
     """Parse ``--extra-env NAME=VALUE`` pins into a mapping."""
     pins: dict[str, str] = {}

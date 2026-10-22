@@ -176,6 +176,34 @@ def _add_custom_specialist_args(opt: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_resume_arguments(opt: argparse.ArgumentParser) -> None:
+    """The ``--resume-from`` and ``--force-resume`` flags of ``optimize``."""
+    opt.add_argument(
+        "--resume-from",
+        type=str,
+        default=None,
+        help="Per-session subdir to resume; the only way to resume a session. "
+        "Skips the SharedState seed and lets the Coordinator replay the "
+        "prior event log + state.json. Must be an absolute path under "
+        "$USER_DATA_PATH (workspace_root), which MUST stay at workspace "
+        "level (/shared/hyperloom-sessions, not the per-session subdir) so "
+        "runtime/ resolution works.",
+    )
+    opt.add_argument(
+        "--force-resume",
+        action="store_true",
+        default=False,
+        help=(
+            "Allow ``--resume-from`` to push past a terminal "
+            "``stop_reason='target_reached'``. "
+            "Without this flag the resume aborts (Issue-G guard, per "
+            "SKILL.md 'Run-time signals': that terminal requires an "
+            "operator-side workload / strategy change before resuming). "
+            "No-op without ``--resume-from``."
+        ),
+    )
+
+
 def _add_plug_arguments(opt: argparse.ArgumentParser) -> None:
     """Add the flags that select which implementation fills each plug socket; absent, every socket stays local."""
     opt.add_argument(
@@ -193,24 +221,23 @@ def _add_plug_arguments(opt: argparse.ArgumentParser) -> None:
         metavar="PATH",
         help="Custom plug manifest (JSON) laid over the profile. Falls back to $HYPERLOOM_MANIFEST.",
     )
-    opt.add_argument(
-        "--plug",
-        dest="plug",
-        action="append",
-        default=[],
-        metavar="SOCKET=IMPL",
-        help="Choose the implementation of one socket; repeatable. The last layer, over profile, manifest and "
-        "$HYPERLOOM_MANIFEST_OVERRIDES.",
-    )
-    opt.add_argument(
-        "--plug-config",
-        dest="plug_config",
-        action="append",
-        default=[],
-        metavar="SOCKET.KEY=VALUE",
-        help="Set one configuration key of a socket's implementation; repeatable. VALUE is read as JSON when it "
-        "parses as JSON, as text otherwise.",
-    )
+    for flag, dest, metavar, text in (
+        (
+            "--plug",
+            "plug",
+            "SOCKET=IMPL",
+            "Choose the implementation of one socket; repeatable. The last layer, over profile, manifest and "
+            "$HYPERLOOM_MANIFEST_OVERRIDES.",
+        ),
+        (
+            "--plug-config",
+            "plug_config",
+            "SOCKET.KEY=VALUE",
+            "Set one configuration key of a socket's implementation; repeatable. VALUE is read as JSON when it "
+            "parses as JSON, as text otherwise.",
+        ),
+    ):
+        opt.add_argument(flag, dest=dest, action="append", default=[], metavar=metavar, help=text)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -630,30 +657,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     add_constraint_arguments(opt)
     add_gpu_power_arguments(opt)
-    opt.add_argument(
-        "--resume-from",
-        type=str,
-        default=None,
-        help="Per-session subdir to resume; the only way to resume a session. "
-        "Skips the SharedState seed and lets the Coordinator replay the "
-        "prior event log + state.json. Must be an absolute path under "
-        "$USER_DATA_PATH (workspace_root), which MUST stay at workspace "
-        "level (/shared/hyperloom-sessions, not the per-session subdir) so "
-        "runtime/ resolution works.",
-    )
-    opt.add_argument(
-        "--force-resume",
-        action="store_true",
-        default=False,
-        help=(
-            "Allow ``--resume-from`` to push past a terminal "
-            "``stop_reason='target_reached'``. "
-            "Without this flag the resume aborts (Issue-G guard, per "
-            "SKILL.md 'Run-time signals': that terminal requires an "
-            "operator-side workload / strategy change before resuming). "
-            "No-op without ``--resume-from``."
-        ),
-    )
+    _add_resume_arguments(opt)
     _add_plug_arguments(opt)
     opt.add_argument(
         "--model-class",
