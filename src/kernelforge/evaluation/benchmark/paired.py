@@ -17,6 +17,7 @@ from dataclasses import asdict, dataclass
 from kernelforge.evaluation.benchmark.runner import BenchRun, bench_wallclock
 
 CANDIDATE, INCUMBENT = "candidate", "incumbent"
+_TAIL_LINES = 8
 
 
 @dataclass(frozen=True)
@@ -85,7 +86,9 @@ async def measure_pairs(
             results[arm] = await bench_wallclock(arms[arm], timeout_sec=timeout_sec)
             if not results[arm].get("success"):
                 detail = results[arm].get("message") or "failed"
-                return PairedMeasurement(tuple(records), f"{arm} arm: {detail}")
+                # The run's last lines say why; the message alone only says that it failed.
+                tail = "\n".join(str(results[arm].get("output") or "").strip().splitlines()[-_TAIL_LINES:])
+                return PairedMeasurement(tuple(records), f"{arm} arm: {detail}" + (f"\n{tail}" if tail else ""))
         ratios = _pair_ratios(results[CANDIDATE], results[INCUMBENT], scored)
         if isinstance(ratios, str):
             return PairedMeasurement(tuple(records), ratios)

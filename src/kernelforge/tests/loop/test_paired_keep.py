@@ -29,6 +29,7 @@ from kernelforge.loop.worktrees import DetachedWorktree, incumbent_tree_path, tr
 DRIVER = """import pathlib, sys
 here = pathlib.Path(__file__).resolve().parent
 if (here / "crash").exists():
+    print("HIP error: out of memory", file=sys.stderr)
     sys.exit(1)
 speed = float((here / "speed.txt").read_text())
 cases = (here / "cases.txt").read_text().split() if (here / "cases.txt").exists() else ["m=8", "m=16"]
@@ -100,6 +101,7 @@ async def test_a_failing_arm_is_named(tmp_path: Path) -> None:
     (Path(incumbent.cwd) / "crash").write_text("")
     measured = await measure_pairs(candidate, incumbent, pairs=3, rng=random.Random(1), timeout_sec=60)
     assert measured.failure.startswith("incumbent arm: BENCH CRASHED")
+    assert measured.failure.endswith("HIP error: out of memory")
 
 
 def test_the_incumbent_tree_follows_head_and_undoes_edits(tmp_path: Path) -> None:
