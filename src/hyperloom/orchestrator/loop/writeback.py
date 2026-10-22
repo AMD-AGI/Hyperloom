@@ -1427,31 +1427,28 @@ class WritebackCollaborator(GeakRevalidation):
         A round the run stopped is none of those things; what it gets instead, and
         why, is :meth:`_reopen_revalidation_window`.
 
-        Args:
-            task: The revalidation baseline task that came back unpromotable.
-            result_payload: Its result, read for the launch/traceback text.
-            err_class: Its ``error_class``, for the log line.
-            stopped_by_the_run: Whether the run stopped the round rather than the
-                round saying anything about the baseline.
+        ``result_payload`` is read for the launch/traceback text, ``err_class`` for the
+        log line, and ``stopped_by_the_run`` says the round, not the baseline, ended.
         """
         state = self.shared_state
         generation = int(state.enablement.revalidation_generation or 0)
+        floor = state.enablement.accuracy_floor
+        tid = str(task.task_id or "")
         if stopped_by_the_run:
             await self._reopen_revalidation_window()
+            enablement_event.record_revalidation_stopped(generation=generation, task_id=tid, accuracy_floor=floor)
         else:
             state.enablement.revalidation_task_id = ""
             state.enablement.validation_pending = False
             await self._coord.enablement_lane.settle_enablement_round(FAILED, reason=err_class or "revalidation_failed")
-        # A window the run stopped measured nothing, so recording it as a failed
-        # revalidation would charge the lane for a clock.
-        enablement_event.record_revalidation_outcome(
-            generation=generation,
-            promoted=False,
-            task_id=str(task.task_id or ""),
-            accuracy_floor=state.enablement.accuracy_floor,
-            error_class="" if stopped_by_the_run else str(err_class or ""),
-            reason="stopped by the run" if stopped_by_the_run else "revalidation baseline failed",
-        )
+            enablement_event.record_revalidation_outcome(
+                generation=generation,
+                promoted=False,
+                task_id=tid,
+                accuracy_floor=floor,
+                error_class=str(err_class or ""),
+                reason="revalidation baseline failed",
+            )
         launch_log = _authorable_launch_log(result_payload, err_class=str(err_class or ""))
         if launch_log:
             observed = str(result_payload.get("boot_observation_path") or "")
@@ -3924,6 +3921,9 @@ class WritebackCollaborator(GeakRevalidation):
                     int(state.enablement.revalidation_generation or 0),
                 )
                 return
+            enablement_event.record_revalidation_cleared(
+                generation=int(state.enablement.revalidation_generation or 0), task_id=tracked_tid
+            )
             state.enablement.validation_pending = False
             state.enablement.revalidation_task_id = ""
             report["fixes"].append({"kind": "cleared_orphaned_revalidation_pending", "task_id": tracked_tid})
