@@ -17,6 +17,7 @@ from hyperloom_multibranch.contracts.notebook.records import BranchLogRecord, In
 from hyperloom_multibranch.contracts.notebook.vocab import InboxKind
 from hyperloom_multibranch.specialist import prompts
 from hyperloom_multibranch.specialist.directions import DIRECTIONS
+from hyperloom_multibranch.specialist.exhausted import EXHAUSTED_PREFIX, ExhaustedWhy
 from hyperloom_multibranch.specialist.prompts import (
     ENTRY_CHARS,
     RECENT_ENTRIES,
@@ -239,6 +240,14 @@ def test_the_wake_and_nudge_messages_say_what_arrived_or_that_nothing_did():
     assert "nothing new for your branch" in nudge
     assert "Nothing arrives on its own" in nudge and "notebook_brief" in nudge
     assert "decides when your branch stops" not in nudge
+
+
+def test_the_role_says_how_to_record_a_direction_done_on_a_head_with_every_reason():
+    prompt = role_prompt(WORKLOAD)
+
+    assert f'starts with "{EXHAUSTED_PREFIX}"' in prompt
+    assert all(why.value in prompt for why in ExhaustedWhy)
+    assert "does not stop your branch" in prompt
 
 
 def test_the_role_says_a_test_is_how_a_specialist_without_a_gpu_measures_a_candidate():
