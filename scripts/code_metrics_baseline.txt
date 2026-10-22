@@ -5,7 +5,6 @@
 cognitive-complexity scripts/platform_audit_bmc.py::main 44
 cognitive-complexity src/hyperloom/inference_optimizer/baseline_comparison/inferencex_client.py::fetch_agentic_interactivity 31
 cognitive-complexity src/hyperloom/inference_optimizer/breakdown/recorder/kernel_event.py::_merge_acceptances 31
-cognitive-complexity src/hyperloom/inference_optimizer/breakdown/recorder/kernel_event.py::assemble_kernel_ext 50
 cognitive-complexity src/hyperloom/inference_optimizer/breakdown/recorder/kernel_event.py::record_geak_attempts 31
 cognitive-complexity src/hyperloom/inference_optimizer/breakdown/reporters/_renderers/final.py::render 31
 cognitive-complexity src/hyperloom/inference_optimizer/cli/__init__.py::_run_optimize 36
@@ -69,11 +68,7 @@ cognitive-complexity src/kernelforge/evaluation/correctness/canonical.py::_run_c
 cognitive-complexity src/kernelforge/fusion/command.py::_run_fusion_autoloop 33
 cognitive-complexity src/kernelforge/fusion/discover.py::ordered_fusion_boundaries_from_trace 38
 cognitive-complexity src/kernelforge/fusion/discover.py::registered_agent_llm_fn 41
-cognitive-complexity src/kernelforge/loop/analysis_evidence.py::AnalysisEvidenceMixin._apply_last_analysis_evidence 46
-cognitive-complexity src/kernelforge/loop/archive.py::CandidateArchive._reconcile_storage 32
 cognitive-complexity src/kernelforge/loop/external_artifacts.py::ExternalArtifactTransaction._copy_tree 33
-cognitive-complexity src/kernelforge/loop/lessons.py::parse_scope_line 33
-cognitive-complexity src/kernelforge/loop/reporting.py::BestResultPublisher.publish 32
 cognitive-complexity src/kernelforge/loop/runner.py::IterationLoop._record_iteration_outcome 40
 cognitive-complexity src/kernelforge/loop/task_preparer.py::prepare_task 37
 cognitive-complexity src/kernelforge/orchestrator/agent.py::make_agent_fn 72
@@ -277,10 +272,8 @@ function-lines scripts/platform_audit_bmc.py::main 131
 function-lines src/hyperloom/agents/critic/runtime/kb_writer.py::KBWriter.write_kb_drafts 110
 function-lines src/hyperloom/agents/quantization/driver/retry.py::quantize_via_prompt 102
 function-lines src/hyperloom/inference_optimizer/breakdown/exporter.py::build 132
-function-lines src/hyperloom/inference_optimizer/breakdown/recorder/kernel_event.py::assemble_kernel_ext 206
 function-lines src/hyperloom/inference_optimizer/breakdown/recorder/kernel_event.py::record_geak_attempts 102
 function-lines src/hyperloom/inference_optimizer/breakdown/recorder/kernel_event.py::record_integrate_verdict 89
-function-lines src/hyperloom/inference_optimizer/breakdown/reporters/_renderers/attribution.py::render 85
 function-lines src/hyperloom/inference_optimizer/breakdown/reporters/_renderers/baseline.py::render 134
 function-lines src/hyperloom/inference_optimizer/breakdown/reporters/_renderers/final.py::render 163
 function-lines src/hyperloom/inference_optimizer/breakdown/reporters/_renderers/session.py::render 92
@@ -453,15 +446,10 @@ function-lines src/kernelforge/kernel_rewrite_controller/opportunity_agent.py::_
 function-lines src/kernelforge/kernel_rewrite_controller/recovery.py::recover_task_result 101
 function-lines src/kernelforge/kernel_rewrite_controller/scheduler.py::dispatch_prepared_tasks 101
 function-lines src/kernelforge/knowledge/kb_store/reader.py::_read_top_solutions_impl 113
-function-lines src/kernelforge/loop/analysis_evidence.py::AnalysisEvidenceMixin._apply_last_analysis_evidence 160
-function-lines src/kernelforge/loop/analysis_evidence.py::AnalysisEvidenceMixin._render_analysis_evidence_for_implementer 84
-function-lines src/kernelforge/loop/analysis_refresh_policy.py::decide_analysis_refresh 85
 function-lines src/kernelforge/loop/archive.py::CandidateArchive.render_digest 84
-function-lines src/kernelforge/loop/campaign_setup.py::resolve_campaign 105
 function-lines src/kernelforge/loop/insession_gate.py::InSessionGate.__init__ 84
 function-lines src/kernelforge/loop/knowledge_integration.py::_try_apply_candidate 126
 function-lines src/kernelforge/loop/lessons.py::build_summary_prompt 111
-function-lines src/kernelforge/loop/reporting.py::BestResultPublisher.publish 161
 function-lines src/kernelforge/loop/runner.py::IterationLoop.__init__ 100
 function-lines src/kernelforge/loop/runner.py::IterationLoop._adopt_validated_warm_start 82
 function-lines src/kernelforge/loop/runner.py::IterationLoop._record_iteration_outcome 107
@@ -482,7 +470,7 @@ function-lines src/kernelforge/orchestrator/specialists.py::SpecialistAgent.run 
 function-lines src/kernelforge/rewrite_by_flydsl/applyback.py::_publish_patch 115
 function-lines src/kernelforge/rewrite_by_flydsl/kb.py::write_flydsl_kb_solution 85
 function-lines src/kernelforge/rewrite_by_flydsl/optimize.py::run_optimize 125
-module-lines src/hyperloom/inference_optimizer/breakdown/recorder/kernel_event.py 2151
+module-lines src/hyperloom/inference_optimizer/breakdown/recorder/kernel_event.py 2132
 module-lines src/hyperloom/inference_optimizer/breakdown/schema.py 2681
 module-lines src/hyperloom/inference_optimizer/cli/__init__.py 2569
 module-lines src/hyperloom/inference_optimizer/cli/model_gate.py 1759
