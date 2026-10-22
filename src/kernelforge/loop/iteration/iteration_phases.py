@@ -11,6 +11,7 @@ from pathlib import Path
 
 from kernelforge.agent_backends.session_resume import EXHAUSTED_END_REASON
 from kernelforge.evaluation.scoring import GateScoring
+from kernelforge.loop.decision_labels import DecisionLabel
 from kernelforge.loop.agent_extras import declared_extras
 from kernelforge.loop.iteration.iteration_types import (
     IterationResult,
@@ -188,7 +189,7 @@ class IterationPhasesMixin:
                             session_end_reason="orchestration_error",
                         ),
                         frame,
-                        decision_label="ORCHESTRATION_ERROR",
+                        decision_label=DecisionLabel.ORCHESTRATION_ERROR.value,
                         on_iteration=on_iteration,
                     )
                     return None
@@ -375,15 +376,15 @@ class IterationPhasesMixin:
                 if new_files_only:
                     self._git_discard_worktree()
                 if agent_error:
-                    decision_label = "AGENT_ERROR"
+                    decision_label = DecisionLabel.AGENT_ERROR.value
                     summary = f"agent_fn error: {agent_error}"
                 elif api_failed:
-                    decision_label = "API_ERROR"
+                    decision_label = DecisionLabel.API_ERROR.value
                     summary = (
                         "LLM API never answered this Session; no candidate was attempted (not an optimization result)"
                     )
                 elif new_files_only:
-                    decision_label = "NO_CHANGES"
+                    decision_label = DecisionLabel.NO_CHANGES.value
                     summary = (
                         "NO TRACKED CHANGES: the whole candidate was in "
                         "new file(s) matching "
@@ -394,7 +395,7 @@ class IterationPhasesMixin:
                         "rather than measured with the next candidate."
                     )
                 else:
-                    decision_label = "NO_CHANGES"
+                    decision_label = DecisionLabel.NO_CHANGES.value
                     summary = "NO TRACKED CHANGES: agent produced no candidate diff"
                 print("  [agent] No tracked source changes; skipping candidate")
                 result = IterationResult(

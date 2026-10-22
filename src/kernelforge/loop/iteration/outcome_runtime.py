@@ -11,6 +11,7 @@ import subprocess
 from pathlib import Path
 
 from kernelforge.evaluation.scoring import beats_current_best
+from kernelforge.loop.decision_labels import DecisionLabel
 from kernelforge.loop.archive import CandidateRecord
 from kernelforge.loop.iteration.best_publication import _require_best_is_keep
 from kernelforge.loop.handoffs import IterationHandoff
@@ -64,11 +65,11 @@ log = logging.getLogger(__name__)
 # mean no candidate was ever measured.
 _LABELS_WITHOUT_A_MEASURED_NEGATIVE = frozenset(
     {
-        "KEEP",
-        "NO_CHANGES",
-        "API_ERROR",
-        "AGENT_ERROR",
-        "ORCHESTRATION_ERROR",
+        DecisionLabel.KEEP.value,
+        DecisionLabel.NO_CHANGES.value,
+        DecisionLabel.API_ERROR.value,
+        DecisionLabel.AGENT_ERROR.value,
+        DecisionLabel.ORCHESTRATION_ERROR.value,
     }
 )
 
@@ -266,7 +267,7 @@ class OutcomeMixin:
         """Build the canonical durable event for one completed iteration."""
         resolved_decision = decision_label or _decision_label(result)
         return make_event(
-            "iteration_result",
+            ITERATION_RESULT,
             result.iteration,
             decision=resolved_decision,
             plan=(plan or "").strip()[:120] or None,

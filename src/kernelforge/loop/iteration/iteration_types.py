@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 from kernelforge.evaluation.scoring import DEFAULT_SNR_THRESHOLD_DB
+from kernelforge.loop.decision_labels import DecisionLabel
 from kernelforge.loop.new_path_allowlist import normalize_commit_new_paths
 from kernelforge.loop.run_state import IterationVerdict
 from kernelforge.loop.search_actors import SearchActorPool
@@ -342,20 +343,20 @@ class IterationResult:
 def _decision_label(result: IterationResult) -> str:
     """The canonical keep/revert label for one finished attempt."""
     if result.integrity_violation:
-        return "REVERT_INTEGRITY"
+        return DecisionLabel.REVERT_INTEGRITY.value
     if result.workspace_contention:
-        return "REVERT_CONTENDED"
+        return DecisionLabel.REVERT_CONTENDED.value
     if result.crashed:
-        return "CRASH"
+        return DecisionLabel.CRASH.value
     if not result.validation_passed:
         if (result.validation_summary or "").startswith("BUILD FAILED"):
-            return "BUILD_FAILED"
+            return DecisionLabel.BUILD_FAILED.value
         if result.validation_outcome == "timeout":
-            return "REVERT_VALIDATION_TIMEOUT"
+            return DecisionLabel.REVERT_VALIDATION_TIMEOUT.value
         if result.validation_outcome in {"driver_error", "invalid_result"}:
-            return "REVERT_VALIDATION_ERROR"
-        return "REVERT_VALIDATION"
-    return "KEEP" if result.kept else "REVERT_PERF"
+            return DecisionLabel.REVERT_VALIDATION_ERROR.value
+        return DecisionLabel.REVERT_VALIDATION.value
+    return DecisionLabel.KEEP.value if result.kept else DecisionLabel.REVERT_PERF.value
 
 
 def _verdict_of(result: "IterationResult", decision: str, plan: str) -> IterationVerdict:
