@@ -11,10 +11,13 @@ import pytest
 from hyperloom.common.coerce import (
     first_float,
     first_int,
+    first_str,
     optional_positive_int,
     recorded_float,
     to_float,
     to_int,
+    to_list,
+    to_mapping,
     to_str_list,
     to_unix,
 )
@@ -195,3 +198,52 @@ class TestToUnix:
 
     def test_custom_default(self):
         assert to_unix("bad", default=0.0) == 0.0
+
+
+class TestFirstStr:
+    def test_returns_first_truthy_as_text(self):
+        assert first_str(None, "", "a", "b") == "a"
+
+    def test_coerces_a_non_string(self):
+        assert first_str(None, 42) == "42"
+
+    def test_all_falsy_is_empty(self):
+        assert first_str(None, "", 0, False, []) == ""
+
+    def test_no_values_is_empty(self):
+        assert first_str() == ""
+
+    def test_zero_is_skipped_not_returned(self):
+        """0 is falsy, so a numeric id of 0 never wins; callers pass ids as strings."""
+        assert first_str(0, "fallback") == "fallback"
+
+
+class TestToMapping:
+    def test_mapping_is_copied(self):
+        source = {"a": 1}
+        result = to_mapping(source)
+        assert result == {"a": 1}
+        assert result is not source
+
+    def test_non_mapping_is_empty(self):
+        for value in (None, [], "a", 42, object()):
+            assert to_mapping(value) == {}
+
+
+class TestToList:
+    def test_list_is_copied(self):
+        source = [1, 2]
+        result = to_list(source)
+        assert result == [1, 2]
+        assert result is not source
+
+    def test_tuple_becomes_list(self):
+        assert to_list((1, 2)) == [1, 2]
+
+    def test_a_string_is_not_a_sequence_here(self):
+        """A string is never exploded into characters; a bare scalar yields nothing."""
+        assert to_list("ab") == []
+
+    def test_non_sequence_is_empty(self):
+        for value in (None, {}, 42, object()):
+            assert to_list(value) == []
