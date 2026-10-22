@@ -251,7 +251,11 @@ def test_the_table_lists_every_kernel_largest_first_with_its_share_time_and_coun
     assert len(lines) == 1 + len(window.rows)
 
 
-@pytest.mark.parametrize("content", [b"not gzip", gzip.compress(b"{"), gzip.compress(b'{"traceEvents": 3}')])
+@pytest.mark.parametrize(
+    "content",
+    [b"not gzip", gzip.compress(b"{", mtime=0), gzip.compress(b'{"traceEvents": 3}', mtime=0)],
+    ids=["not-gzip", "truncated-json", "events-not-a-list"],
+)
 def test_a_trace_that_cannot_be_read_as_events_is_an_error_not_an_empty_window(tmp_path: Path, content: bytes) -> None:
     path = tmp_path / "w.json.gz"
     path.write_bytes(content)
