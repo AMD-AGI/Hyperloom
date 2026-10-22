@@ -466,7 +466,7 @@ def test_a_best_effort_timeline_reports_why_each_patch_that_failed_did(fake_repo
     applied = _apply_warm_patches(params, str(fake_repo), output_dir)
 
     round_result: dict = {}
-    _stamp_warm_patch_outcome(round_result, applied, params, "")
+    _stamp_warm_patch_outcome(round_result, applied, params)
     reported = round_result["warm_patch_result"]["patches"]
 
     assert round_result["warm_patch_result"]["required"] is False
