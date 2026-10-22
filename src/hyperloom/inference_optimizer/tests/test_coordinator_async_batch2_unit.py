@@ -598,6 +598,23 @@ async def test_resume_adds_no_commit_when_the_git_tree_already_carries_the_sourc
 
 
 @pytest.mark.asyncio
+async def test_resume_does_not_halt_on_a_kept_delete_the_git_tree_already_committed(
+    coord: Coordinator, tmp_path: Path
+) -> None:
+    tree = _git_framework_tree(tmp_path)
+    _git(tree, "rm", "-q", "v1/mla.py")
+    _git(tree, "commit", "-q", "-m", "kept delete")
+    head = _git(tree, "rev-parse", "HEAD")
+    entry = _source_layer_entry(tmp_path, "kv_window", tree, {"envs.py": "stock envs\n", "v1/mla.py": None})
+    _resume_with_stack(coord, [entry])
+
+    await coord.writeback._resume_consistency_pass()
+
+    assert coord.shared_state.stop_reason != PATCH_RECOVERY_INCOMPLETE_STOP_REASON
+    assert _git(tree, "rev-parse", "HEAD") == head
+
+
+@pytest.mark.asyncio
 async def test_resume_halts_when_the_reinstalled_source_layer_cannot_be_committed(
     coord: Coordinator, tmp_path: Path
 ) -> None:

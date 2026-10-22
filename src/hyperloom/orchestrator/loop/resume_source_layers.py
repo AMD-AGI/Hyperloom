@@ -11,11 +11,21 @@ from typing import Any
 
 from hyperloom.inference_optimizer.breakdown.stop_reasons import PATCH_RECOVERY_INCOMPLETE_STOP_REASON
 
+from ..actions.executors._git import _run_git_cp
 from ..actions.executors._nogit_patch import _is_git_tree
 from ..actions.executors._patch_snapshot import _git_commit_kept
 from ..source_snapshot import SourceLayerInstall, install_source_layers
 
 log = logging.getLogger(__name__)
+
+
+def _stageable(root: Path, rels: list[str]) -> list[str]:
+    """The kept paths git can stage: present on disk or tracked. A deletion HEAD already carries matches neither."""
+    cp = _run_git_cp(["-C", str(root), "ls-files", "--", *rels], timeout=30.0)
+    if cp is None or cp.returncode != 0:
+        return rels
+    tracked = set(cp.stdout.splitlines())
+    return [rel for rel in rels if rel in tracked or (root / rel).exists()]
 
 
 def _commit_installed_layers(result: SourceLayerInstall) -> list[str]:
@@ -28,7 +38,7 @@ def _commit_installed_layers(result: SourceLayerInstall) -> list[str]:
     for root, rels in result.kept.items():
         if not _is_git_tree(root):
             continue
-        ok, note = _git_commit_kept(root, "hyperloom resume: reinstall kept source layer", rels)
+        ok, note = _git_commit_kept(root, "hyperloom resume: reinstall kept source layer", _stageable(root, rels))
         if not ok:
             failed.append(f"{root}: {note or 'git commit failed'}")
     return failed
