@@ -51,7 +51,7 @@ cognitive-complexity src/kernelforge/fusion/discover.py::registered_agent_llm_fn
 cognitive-complexity src/kernelforge/loop/external_artifacts.py::ExternalArtifactTransaction._copy_tree 33
 cognitive-complexity src/kernelforge/loop/runner.py::IterationLoop._record_iteration_outcome 40
 cognitive-complexity src/kernelforge/loop/task_preparer.py::prepare_task 37
-cognitive-complexity src/kernelforge/orchestrator/agent.py::make_agent_fn 72
+cognitive-complexity src/kernelforge/orchestrator/agent.py::make_agent_fn 70
 cognitive-complexity src/kernelforge/orchestrator/analysis.py::AnalysisAgentService._write_artifact_catalog 32
 cognitive-complexity src/kernelforge/orchestrator/orchestration.py::OrchestrationAgent._bind_dispatch 39
 cognitive-complexity src/kernelforge/orchestrator/orchestration.py::OrchestrationService.run 33

@@ -312,18 +312,6 @@ def _session_end_reason(*, submitted: bool, gate, run_result, result_subtype: st
     return "agent_stopped"
 
 
-def _gate_outcome_tag(gate, end_reason: str, num_turns: int | None) -> str:
-    """The gate outcome, so the outer loop's commit message records whether the session self-converged."""
-    tag = f"[gate edits={gate.edit_count} pass={gate.passed} end={end_reason}"
-    if num_turns is not None:
-        tag += f" turns={num_turns}"
-    if gate.last_mean_case_speedup is not None:
-        tag += f" mean_case_speedup={gate.last_mean_case_speedup:.6f}x"
-    if gate.last_wall_ms is not None:
-        tag += f" raw_mean={gate.last_wall_ms:.4f}ms"
-    return tag + "]"
-
-
 def _fill_session_sink(
     session_sink: dict,
     *,
@@ -900,9 +888,9 @@ Make your change(s) now.
             flush=True,
         )
 
-        text = full or "no rationale provided"
-        if gate is not None:
-            text = f"{_gate_outcome_tag(gate, end_reason, num_turns)} {text}"
+        # The agent's own words, unbounded: each reader caps what it records, and the gate's figures travel in the
+        # session sink rather than in front of the reasoning.
+        rationale = full or "no rationale provided"
 
         # Hand back structured session info so the runner can feed the ExperienceLedger with the gate's objective
         # findings, and (via ``summarize``) ask this exact session to record what it explored.
@@ -920,7 +908,7 @@ Make your change(s) now.
                 ),
             )
 
-        return text[:200]
+        return rationale
 
     setattr(agent_fn, "backend_name", backend.name)
     setattr(agent_fn, "backend_model", backend_model)
