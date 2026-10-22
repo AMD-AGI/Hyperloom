@@ -293,6 +293,19 @@ value. The observed cap and perf level are recorded in the platform
 fingerprint whether or not they are asserted. Neither can be checked on a
 multi-node session, so asserting one there refuses.
 
+Node Power Management (NPM, MI350 series) is the node-wide counterpart: when it
+is enabled, firmware holds the sum of every card's power to a node limit and
+moves power between cards, so a card's throughput also depends on what the
+other cards draw. Its state and the limit firmware enforces, as
+`amd-smi node -p` reports them, are recorded in the same record under `node`
+(left out where `amd-smi` has no `node` command, before ROCm 7.2).
+`--node-power-management enabled|disabled` and `--node-power-limit-w` assert
+them the same way, refusing a launch or resume whose node differs or cannot be
+read. They are only ever asserted: NPM is enabled and its limit set on the
+BMC, and `--apply-gpu-power-settings` never changes them. The enforced limit
+can sit below the one the BMC was asked for, since firmware clamps it to the
+node's maximum, so assert the value `amd-smi` reports.
+
 ### Applying the power settings (opt-in)
 
 `--apply-gpu-power-settings` permits the session to set the declared

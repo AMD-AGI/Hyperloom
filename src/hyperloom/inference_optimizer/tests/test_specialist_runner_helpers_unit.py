@@ -13,6 +13,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from hyperloom.inference_optimizer.trace.agent_trace import AgentTrace
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
 from hyperloom.orchestrator.specialists import runner as sr
 from hyperloom.orchestrator.specialists.runner import (
@@ -563,8 +564,10 @@ def test_record_subprocess_run_emits_one_ledger_row_per_turn(tmp_path):
         ctx,
         prep,
         sr.SpecialistSubprocessResult(
-            turn_usages=[{"input_tokens": 1}, {"input_tokens": 2}],
-            usage={"model": "m", "input_tokens": 3},
+            trace=AgentTrace(
+                turn_usages=[{"input_tokens": 1}, {"input_tokens": 2}],
+                usage={"model": "m", "input_tokens": 3},
+            )
         ),
         "call-1",
         12,
