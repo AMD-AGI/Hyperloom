@@ -8,6 +8,7 @@ import hashlib
 import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Mapping
+from hyperloom.common.coerce import to_float
 from hyperloom.common.framework_arm import is_upstream_pr_prescreen
 from hyperloom.orchestrator.lever import LEVER_CONFIG
 from hyperloom.inference_optimizer.trace.trajectory_trace import EVENT_PROPOSAL, STATUS_QUEUED, record_event
@@ -314,8 +315,18 @@ class ProposalsCollaborator(CoordinatorCollaborator):
         if stamped:
             log.info("explore grid: %d/%d variant(s) credited to the predictor", stamped, len(grid))
 
+    def floor_keep_threshold(self, params: dict[str, Any]) -> None:
+        """Set ``keep_threshold_pct`` to the session's bar, or to the agent's value when that is a finite higher one.
+
+        An agent may only raise the bar: a lower value would KEEP gains the session refuses, a negative one would KEEP
+        regressions, and the stamped value also decides which earlier REVERTs a lower bar reopens.
+        """
+        session_pct = _phase_state.resolve_keep_threshold(self.shared_state)
+        proposed = to_float(params.get("keep_threshold_pct"))
+        params["keep_threshold_pct"] = session_pct if proposed is None else max(proposed, session_pct)
+
     def inject_explore_runtime_params(self, params: dict) -> None:
-        """Inject explore-task operational knobs from SharedState into ``params`` (single source of truth for both propose/Critic and direct-delegate paths). setdefault preserves LLM overrides."""
+        """Inject explore-task operational knobs from SharedState into ``params`` (single source of truth for both propose/Critic and direct-delegate paths). setdefault preserves LLM overrides, except the KEEP bar, which an agent may only raise."""
         br = float(self.shared_state.baseline_runtime_sec or 0.0)
         if br > 0:
             params.setdefault("baseline_runtime_sec", br)
@@ -326,8 +337,7 @@ class ProposalsCollaborator(CoordinatorCollaborator):
         bwr = float(self.shared_state.baseline_warm_runtime_sec or 0.0)
         if bwr > 0:
             params.setdefault("baseline_warm_runtime_sec", bwr)
-        keep = _phase_state.resolve_keep_threshold(self.shared_state)
-        params.setdefault("keep_threshold_pct", keep)
+        self.floor_keep_threshold(params)
         # The round-id seed: the executor holds no cross-round state, so the round
         # it labels itself with has to come from the durable cursor.
         cursor = int((self.shared_state.explore_search or {}).get("cursor") or 0)
@@ -476,7 +486,7 @@ class ProposalsCollaborator(CoordinatorCollaborator):
         """Default an approved integrate_patch's grading context and its patched-eval server."""
         # ``source_phase`` is stamped where the specialist is created and carried from there; a
         # second derivation here would be a second decision, and could write an empty owner.
-        params.setdefault("keep_threshold_pct", _phase_state.resolve_keep_threshold(self.shared_state))
+        self.floor_keep_threshold(params)
         # Seed the patched-eval server with the same base args/config every other eval server uses, else it
         # launches on bare framework defaults and crashes at startup regardless of the patch.
         inject_stack_base_params(params, self.shared_state, anchor=True)

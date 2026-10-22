@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import asyncio
-import json
+import contextlib
 import logging
 import math
 import os
@@ -63,6 +63,7 @@ from ..bus.resource_lock import (
 from ..state.shared_state import SharedState, effective_closing_grace_sec, timed_teardown_step
 from .signals import SignalDrain
 from .intent_router import IntentRouter
+from hyperloom.inference_optimizer.model_config_utils import infer_model_class
 from .sub_agent_runner import SubAgentRunner
 from ..state.task_registry import TaskRegistry, task_dispatch_origin
 from ..collaborator import OrchestrationPrompt
@@ -85,7 +86,6 @@ from hyperloom.inference_optimizer.trace.orchestration_trace import (
     write_mcp_setup_once,
 )
 from hyperloom.common.timeutil import format_exc_brief
-from hyperloom.inference_optimizer.model_config_utils import resolve_local_model_dir
 
 
 log = logging.getLogger(__name__)
@@ -106,103 +106,6 @@ def resolve_reactor_turn_timeout_sec() -> float:
         DEFAULT_REACTOR_TURN_TIMEOUT_SEC,
     )
     return DEFAULT_REACTOR_TURN_TIMEOUT_SEC
-
-
-def _infer_model_class_from_config(model_path: str) -> str:
-    """Infer a deterministic model_class from local model metadata."""
-    raw_path = (model_path or "").strip()
-    payload: dict[str, Any] = {}
-    if raw_path:
-        # ``model_path`` may be an HF repo id; resolve to the local weights dir so the config-based classification
-        # works (the raw string still feeds the keyword fallback below).
-        _resolved = resolve_local_model_dir(raw_path)
-        cfg = (_resolved / "config.json") if _resolved is not None else Path(raw_path) / "config.json"
-        try:
-            if cfg.is_file():
-                data = json.loads(cfg.read_text(encoding="utf-8"))
-                if isinstance(data, dict):
-                    payload = data
-        except (OSError, ValueError):
-            log.debug("model_class inference: failed to read %s", cfg, exc_info=True)
-
-    # A multimodal checkpoint keeps the language model one level down, so the expert counts and the LM architecture
-    # live there rather than at the top. Read both, outer first: a VL wrapper would otherwise classify as dense.
-    payloads: list[dict[str, Any]] = [payload]
-    for nested_key in ("text_config", "llm_config", "language_config"):
-        nested = payload.get(nested_key)
-        if isinstance(nested, dict):
-            payloads.append(nested)
-
-    text_parts: list[str] = [raw_path.lower()]
-    for scope in payloads:
-        arch = scope.get("architectures")
-        if isinstance(arch, list):
-            text_parts.extend(str(x).lower() for x in arch if x)
-        elif arch:
-            text_parts.append(str(arch).lower())
-        for key in ("model_type", "attention_type", "attn_type"):
-            if scope.get(key):
-                text_parts.append(str(scope[key]).lower())
-    text = " ".join(text_parts)
-
-    def _positive_int(*keys: str) -> bool:
-        for scope in payloads:
-            for key in keys:
-                val = scope.get(key)
-                if isinstance(val, bool):
-                    continue
-                try:
-                    if val is not None and int(val) > 0:
-                        return True
-                except (TypeError, ValueError):
-                    continue
-        return False
-
-    is_moe = _positive_int(
-        "num_experts",
-        "n_routed_experts",
-        "num_local_experts",
-        "moe_num_experts",
-    ) or any(
-        k in text
-        for k in (
-            "moe",
-            "mixtral",
-            "deepseek-v2",
-            "deepseek-v3",
-            "deepseek-r1",
-            "kimi",
-            "glm-5",
-            "glm5",
-        )
-    )
-    is_mla = any(
-        k in text
-        for k in (
-            "mla",
-            "multi-head latent",
-            "deepseek",
-            "kimi",
-            "glm-5",
-            "glm5",
-        )
-    )
-    is_nsa = any(
-        k in text
-        for k in (
-            "nsa",
-            "native sparse attention",
-            "glm-5",
-            "glm5",
-        )
-    )
-    if is_moe and is_mla and is_nsa:
-        return "moe_mla_nsa"
-    if is_moe and is_mla:
-        return "moe_mla"
-    if is_moe:
-        return "moe_swa"
-    return "dense"
 
 
 if TYPE_CHECKING:
@@ -280,7 +183,7 @@ class RunOptions:
         max_ticks: Stop after this many ticks, when set.
         stop_when: Custom stop predicate, asked after every tick.
         install_signal_handlers: Whether to arm the stop-signal drain.
-        crash_emergency_threshold: Consecutive tick crashes that end the run.
+        crash_emergency_threshold: Coordinator exceptions within the trailing 24 hours that end the run as ``emergency``.
         closing_grace_sec: Bound on the closing phase; the default when ``None``.
     """
 
@@ -399,7 +302,7 @@ class Coordinator:
         self._pin_source_trees()
         # Derive model_class once at boot if not supplied; never overwrite a resume.
         if not (self.shared_state.model_class or "").strip():
-            self.shared_state.model_class = self._model_class_override or _infer_model_class_from_config(
+            self.shared_state.model_class = self._model_class_override or infer_model_class(
                 self.shared_state.model_path or os.environ.get("MODEL_PATH", "")
             )
         self.state = CoordinatorState()
@@ -610,9 +513,9 @@ class Coordinator:
                 self.shared_state,
                 links=ReconcileLinks(
                     resources=self.policy.resources,
-                    # A callable, not a captured mapping: the resume replay rebuilds
-                    # its contents, so a snapshot taken here would be pre-replay.
+                    # Callables, not snapshots: the resume replay rebuilds the pending proposals after this runs.
                     proposals=lambda: self.state.pending_proposals,
+                    drop_proposal=lambda pending, reason: self.router.settle_dropped_proposal(pending, reason),
                     session_dir=self.session_dir,
                     # The window a revalidation holds is closed by the writeback when
                     # its result is booked; this pass only closes one nobody will.
@@ -1014,6 +917,77 @@ class Coordinator:
         """Live ``(phase, tick)`` for trajectory events recorded inside :meth:`run`."""
         return (self.shared_state.phase or None), int(self.shared_state.tick or 0)
 
+    async def _budget_stop_reason(self, options: RunOptions, *, ticks: int) -> str:
+        """The reason the crash-rate, tick-count and caller-supplied budgets ask the loop to stop for, or ``""``."""
+        crashes = self.shared_state.recent_crash_count(window_sec=_CRASH_EMERGENCY_WINDOW_SEC)
+        if crashes >= options.crash_emergency_threshold:
+            return "emergency"
+        if options.max_ticks is not None and ticks >= options.max_ticks:
+            return "max_ticks"
+        if options.stop_when is None:
+            return ""
+        triggered = options.stop_when(self)
+        if asyncio.iscoroutine(triggered):
+            triggered = await triggered
+        return "custom" if triggered else ""
+
+    async def _closing_phase_spent(self, *, grace_sec: float) -> bool:
+        """True once the closing report has reached a terminal state or its grace window is gone."""
+        closing_deadline = self._closing_deadline
+        report_terminal = await self.phase_close.closing_report_terminal()
+        grace_blown = closing_deadline is not None and closing_deadline.expired()
+        if grace_blown and not report_terminal:
+            log.warning(
+                "Coordinator: closing-grace exhausted (%.0fs) before report task %s finished",
+                grace_sec,
+                self.shared_state.closing_report_task_id,
+            )
+        if report_terminal or grace_blown:
+            return True
+        # Wait on the running work: no reactor turn paces the closing ticks.
+        poll_sec = self.dispatcher.poll_sec
+        await self.dispatcher.wait_for_running_work(
+            timeout=min(poll_sec, seconds_until(closing_deadline, unbounded_cap=poll_sec))
+        )
+        return False
+
+    async def _close_run(self, stop_reason: str, *, ticks: int, tick_failed: bool, max_minutes: float) -> str:
+        """Classify the stop, persist it, and release everything the run still holds."""
+        final_signals: AbstractSet[int] = frozenset()
+        if self._signals is not None:
+            final_signals = self._signals.close()
+            self._signals = None
+        stop_reason = self._classify_stop(final_signals, pending=stop_reason)
+        self._stop_classification = stop_reason
+        self.shared_state.closing_phase = False
+        # Resuming a terminal session can break out before stop_reason is set.
+        self.shared_state.set_stop_reason(
+            stop_reason or self.shared_state.stop_reason or ("coordinator_exception" if tick_failed else "unknown")
+        )
+        self.shared_state.save(self.session_dir)
+        try:
+            await self.phase_close.ensure_close_sequence(reason=self.shared_state.stop_reason)
+        except (asyncio.CancelledError, Exception):
+            log.exception("Coordinator: terminal close sequence did not finish")
+        await self._recipe_kb_t4_hook()
+        log.info(
+            "Coordinator.run: stopped tick=%d reason=%s baseline_tput=%.1f "
+            "cumulative_gain_validated=%.2f%% max_minutes=%.0f",
+            ticks,
+            stop_reason or "unknown",
+            self.shared_state.baseline_tput,
+            self.shared_state.cumulative_gain_validated,
+            max_minutes,
+        )
+        with timed_teardown_step(self.shared_state, "close_backends"):
+            await self._close_backends()
+        # A server outliving the run holds every GPU it was given, so the
+        # session's last act is to reap its own pidfiles.
+        with timed_teardown_step(self.shared_state, "reap_orphaned_servers"):
+            await asyncio.to_thread(reap_orphaned_servers_best_effort, self.session_dir, phase="shutdown")
+        self.shared_state.save(self.session_dir)
+        return stop_reason
+
     async def _run_ticks(self, *, objective: Objective | None, options: RunOptions) -> str:
         """Tick loop and shutdown sequence behind :meth:`run`."""
         objective = objective or TimeOnlyObjective()
@@ -1033,24 +1007,19 @@ class Coordinator:
             closing_grace_sec=options.closing_grace_sec,
         )
 
-        tick_n = 0
+        ticks = 0
         stop_reason = ""
-        last_tick_exc: BaseException | None = None
-        closing_deadline: Deadline | None = None
+        tick_failed = False
         try:
             while not stop_reason:
-                tick_n += 1
+                ticks += 1
                 in_closing = bool(self.shared_state.closing_phase)
                 try:
                     in_closing = await self._tick_once()
-                except (asyncio.CancelledError, KeyboardInterrupt):
-                    raise
                 except Exception as exc:
-                    last_tick_exc = exc
+                    tick_failed = True
                     log.exception("Coordinator.run: tick %d body raised", self.shared_state.tick)
                     self.record_exception(stage="tick_body", exc=exc)
-
-                # check stop conditions
                 if self.stop_requested():
                     stop_reason = self._signal_stop_reason()
                     break
@@ -1064,98 +1033,27 @@ class Coordinator:
                     if grace_sec <= 0:
                         stop_reason = "time_exhausted"
                         break
-                    closing_deadline = await self.phase_close.enter_closing_phase(
-                        grace_sec=grace_sec,
-                    )
-                    self._closing_deadline = closing_deadline
+                    self._closing_deadline = await self.phase_close.enter_closing_phase(grace_sec=grace_sec)
                     continue
-                if in_closing:
-                    report_terminal = await self.phase_close.closing_report_terminal()
-                    grace_blown = closing_deadline is not None and closing_deadline.expired()
-                    if report_terminal or grace_blown:
-                        if grace_blown and not report_terminal:
-                            log.warning(
-                                "Coordinator: closing-grace exhausted (%.0fs) before report task %s finished",
-                                grace_sec,
-                                self.shared_state.closing_report_task_id,
-                            )
-                        stop_reason = "time_exhausted"
-                        break
-                    # No reactor turn paces the closing ticks, so wait on the running work instead.
-                    poll_sec = self.dispatcher.poll_sec
-                    await self.dispatcher.wait_for_running_work(
-                        timeout=min(poll_sec, seconds_until(closing_deadline, unbounded_cap=poll_sec))
-                    )
-                if (
-                    self.shared_state.recent_crash_count(
-                        window_sec=_CRASH_EMERGENCY_WINDOW_SEC,
-                    )
-                    >= options.crash_emergency_threshold
-                ):
-                    stop_reason = "emergency"
+                if in_closing and await self._closing_phase_spent(grace_sec=grace_sec):
+                    stop_reason = "time_exhausted"
                     break
-                if options.max_ticks is not None and tick_n >= options.max_ticks:
-                    stop_reason = "max_ticks"
+                stop_reason = await self._budget_stop_reason(options, ticks=ticks)
+                if stop_reason:
                     break
-                if options.stop_when is not None:
-                    triggered = options.stop_when(self)
-                    if asyncio.iscoroutine(triggered):
-                        triggered = await triggered
-                    if bool(triggered):
-                        stop_reason = "custom"
-                        break
-
-                # Brief wait between ticks to avoid CPU spin while staying signal-responsive; 0.0 keeps tests fast.
                 wait_sec = (
                     options.tick_interval_sec
                     if in_closing
                     else max(options.tick_interval_sec, self._backend_retry_wait_sec())
                 )
                 if wait_sec > 0:
-                    try:
+                    with contextlib.suppress(asyncio.TimeoutError):
                         await asyncio.wait_for(self._stop.wait(), timeout=wait_sec)
                         stop_reason = self._signal_stop_reason()
-                        break
-                    except asyncio.TimeoutError:
-                        # Normal path: no stop signal within the tick interval.
-                        pass
         finally:
-            final_signals: AbstractSet[int] = frozenset()
-            if self._signals is not None:
-                final_signals = self._signals.close()
-                self._signals = None
-            stop_reason = self._classify_stop(final_signals, pending=stop_reason)
-            self._stop_classification = stop_reason
-            if self.shared_state.closing_phase:
-                self.shared_state.closing_phase = False
-            # Resuming a terminal session can break out before stop_reason is set.
-            self.shared_state.set_stop_reason(
-                stop_reason
-                or self.shared_state.stop_reason
-                or ("coordinator_exception" if last_tick_exc is not None else "unknown")
+            stop_reason = await self._close_run(
+                stop_reason, ticks=ticks, tick_failed=tick_failed, max_minutes=max_minutes_value
             )
-            self.shared_state.save(self.session_dir)
-            try:
-                await self.phase_close.ensure_close_sequence(reason=self.shared_state.stop_reason)
-            except (asyncio.CancelledError, Exception):
-                log.exception("Coordinator: terminal close sequence did not finish")
-            await self._recipe_kb_t4_hook()
-            log.info(
-                "Coordinator.run: stopped tick=%d reason=%s baseline_tput=%.1f "
-                "cumulative_gain_validated=%.2f%% max_minutes=%.0f",
-                tick_n,
-                stop_reason or "unknown",
-                self.shared_state.baseline_tput,
-                self.shared_state.cumulative_gain_validated,
-                max_minutes_value,
-            )
-            with timed_teardown_step(self.shared_state, "close_backends"):
-                await self._close_backends()
-            # A server outliving the run holds every GPU it was given, so the
-            # session's last act is to reap its own pidfiles.
-            with timed_teardown_step(self.shared_state, "reap_orphaned_servers"):
-                await asyncio.to_thread(reap_orphaned_servers_best_effort, self.session_dir, phase="shutdown")
-            self.shared_state.save(self.session_dir)
         return stop_reason or self.shared_state.stop_reason
 
     async def _close_backends(self) -> None:

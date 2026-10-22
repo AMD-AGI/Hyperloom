@@ -1814,10 +1814,6 @@ def _reexport_session_environment(
     _enforce_expected_framework(state.framework)
     os.environ["FRAMEWORK"] = state.framework
     print(f"  re-exported FRAMEWORK : {state.framework}")
-    # KERNEL_OPT_BACKEND_ORDER lives in the process environment, not in the session, so
-    # it is gone in this new process. Without re-applying the default, a resumed atom
-    # session runs GEAK while the persisted state still reads 'forge' -- and silently,
-    # because the warning for an operator-named backend lives in the same function.
     if state.framework == "atom":
         _apply_atom_auto_tighten(args)
     if state.gpu_type:

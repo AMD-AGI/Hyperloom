@@ -27,7 +27,7 @@ from typing import Any, Callable, NamedTuple
 # same thing on the same signal, so it waits exactly as long.
 from hyperloom.common.env import env_flag
 from hyperloom.common.proctree import TERM_GRACE_SEC as TERM_GRACE_SECONDS
-from hyperloom.common.proctree import collect_tree, kill_tree, signal_group
+from hyperloom.common.proctree import collect_tree, kill_tree, marked_pids, signal_group
 
 from .bypass_analysis import parse_server_log_throughput
 
@@ -38,6 +38,9 @@ log = logging.getLogger(__name__)
 
 # How long the reaper waits to collect the SIGKILL'd child before giving up on it.
 _REAP_COLLECT_SECONDS: float = 1.0
+
+#: Set in a run's env, its value marks the run: whatever inherited it is reaped on every exit path, however it detached.
+REAP_MARK_ENV: str = "HYPERLOOM_REAP_MARK"
 
 # How long draining a reaped child's capture threads is given.
 _CAPTURE_DRAIN_SECONDS: float = 2.0
@@ -74,11 +77,15 @@ def kill_my_spawned_server(
     proc: subprocess.Popen | None,
     *,
     grace_seconds: float = TERM_GRACE_SECONDS,
+    mark: str = "",
 ) -> None:
-    """Tear down the entire process tree rooted at ``proc``."""
+    """Tear down the entire process tree rooted at ``proc``, and every process carrying ``mark`` in its environment."""
     if proc is None:
         return
+    marked = marked_pids(REAP_MARK_ENV, mark) if mark else []
     if proc.poll() is not None:
+        if marked:
+            kill_tree(collect_tree(marked), grace_sec=grace_seconds, confirm_sec=grace_seconds)
         return
     if os.name != "posix":
         try:
@@ -121,7 +128,7 @@ def kill_my_spawned_server(
         return
 
     try:
-        tree = collect_tree([proc.pid])
+        tree = collect_tree([proc.pid, *marked])
     except OSError as exc:
         # Every caller reaps from a ``finally:``, so an unreadable procfs has to
         # be reported rather than raised on top of whatever sent us here.
@@ -909,8 +916,9 @@ def run_with_session_kill(
     on_output: Callable[[], None] | None = None,
     session_deadline_sec: float | None = None,
 ) -> subprocess.CompletedProcess:
-    """Run a subprocess in its own session and reap descendants on every exit path."""
+    """Run a subprocess in its own session and reap descendants, and what carries ``REAP_MARK_ENV``, on every exit path."""
     child_env = dict(os.environ if env is None else env)
+    mark = child_env.get(REAP_MARK_ENV, "")
     if silence_timeout_sec is not None:
         child_env["PYTHONUNBUFFERED"] = "1"
     scan_offsets = _stale_scan_log_sizes(server_log_path) if server_log_path else {}
@@ -948,11 +956,11 @@ def run_with_session_kill(
                     recorders=_build_round_recorders(server_log_path, child_env),
                 )
             except subprocess.TimeoutExpired as exc:
-                kill_my_spawned_server(proc)
+                kill_my_spawned_server(proc, mark=mark)
                 exc.output, exc.stderr = _finish_capture(capture, text=text)
                 raise
             except _ReapedByWatchdog as exc:
-                kill_my_spawned_server(proc)
+                kill_my_spawned_server(proc, mark=mark)
                 stdout, stderr = _finish_capture(capture, text=text)
                 log.log(
                     exc.log_level,
@@ -973,7 +981,7 @@ def run_with_session_kill(
                 stderr=stderr if stderr is not None else empty,
             )
     finally:
-        kill_my_spawned_server(proc)
+        kill_my_spawned_server(proc, mark=mark)
 
 
 def _finish_capture(capture: _StreamCapture | None, *, text: bool) -> tuple[str | bytes, str | bytes]:
