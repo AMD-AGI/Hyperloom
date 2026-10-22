@@ -403,8 +403,7 @@ async def test_an_exhausted_record_naming_no_session_direction_closes_nothing_an
     runs = _Runs()
     runtime = session.runtime(runs)
     head = await session.repo.head(BRANCH)
-    fusion = DIRECTIONS[2].split(":")[0]
-    record = {"direction": fusion + " (rope)", "head": head, "tried": ["r1"], "why": "no_ceiling_above_bar"}
+    record = {"direction": "rope and norm fusions", "head": head, "tried": ["r1"], "why": "no_ceiling_above_bar"}
     record |= {"detail": "no elementwise op above the bar is left", "reopen_if": "the head moves"}
 
     await runtime.start(BRANCH, head)

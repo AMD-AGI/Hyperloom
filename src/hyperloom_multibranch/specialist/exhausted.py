@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from enum import Enum
 
 from hyperloom_multibranch.contracts.notebook.records import BranchLogRecord
+from hyperloom_multibranch.specialist.directions import DIRECTIONS, direction_name
 
 EXHAUSTED_PREFIX = "EXHAUSTED "
 
@@ -41,12 +42,14 @@ class Exhausted:
 
 
 def read_exhausted(content: str) -> Exhausted | None:
-    """The record ``content`` holds, or ``None`` when it is no record or a malformed one."""
+    """The record ``content`` holds, anywhere in the entry, or ``None`` when it is no record or a malformed one:
+    specialists write it after a note as often as on its own."""
 
-    if not content.startswith(EXHAUSTED_PREFIX):
+    start = content.find(EXHAUSTED_PREFIX + "{")
+    if start < 0:
         return None
     try:
-        document = json.loads(content[len(EXHAUSTED_PREFIX) :])
+        document, _ = json.JSONDecoder().raw_decode(content, start + len(EXHAUSTED_PREFIX))
         if not document["tried"]:
             return None
         return Exhausted(
@@ -59,6 +62,17 @@ def read_exhausted(content: str) -> Exhausted | None:
         )
     except (ValueError, KeyError, TypeError):
         return None
+
+
+def session_direction(named: str) -> str | None:
+    """The session direction a record's ``direction`` names: its name alone, or followed by a qualifier."""
+
+    named = named.strip().lower()
+    for direction in sorted(DIRECTIONS, key=lambda d: -len(direction_name(d))):
+        name = direction_name(direction).lower()
+        if named == name or (named.startswith(name) and not named[len(name)].isalnum()):
+            return direction
+    return None
 
 
 def exhausted_records(records: Iterable[BranchLogRecord]) -> list[Exhausted]:
@@ -74,4 +88,12 @@ def latest_exhausted(records: Iterable[BranchLogRecord]) -> Exhausted | None:
     return found[-1] if found else None
 
 
-__all__ = ["EXHAUSTED_PREFIX", "Exhausted", "ExhaustedWhy", "exhausted_records", "latest_exhausted", "read_exhausted"]
+__all__ = [
+    "EXHAUSTED_PREFIX",
+    "Exhausted",
+    "ExhaustedWhy",
+    "exhausted_records",
+    "latest_exhausted",
+    "read_exhausted",
+    "session_direction",
+]

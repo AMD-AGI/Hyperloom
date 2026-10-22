@@ -39,8 +39,8 @@ from hyperloom_multibranch.contracts.branch_log import BranchLogEntry, BranchLog
 from hyperloom_multibranch.contracts.lifecycle import BranchTask, SpecialistStatus
 from hyperloom_multibranch.contracts.notebook.interfaces import ClaimService, NotebookError
 from hyperloom_multibranch.contracts.notebook.vocab import ClaimStatus
-from hyperloom_multibranch.specialist.directions import DIRECTIONS, direction_name
-from hyperloom_multibranch.specialist.exhausted import exhausted_records, latest_exhausted
+from hyperloom_multibranch.specialist.directions import DIRECTIONS
+from hyperloom_multibranch.specialist.exhausted import exhausted_records, latest_exhausted, session_direction
 from hyperloom_multibranch.specialist.judging import NOTICE, BranchJudge, JudgeNotebook, Judging
 
 logger = logging.getLogger(__name__)
@@ -255,9 +255,8 @@ class SpecialistRuntime:
 
     async def _learn_exhausted(self, state: _Branch) -> None:
         """Close, on its head, each of the session's directions that ``state``'s specialist recorded exhausted."""
-        names = {direction_name(direction).lower(): direction for direction in DIRECTIONS}
         for exhausted in exhausted_records(await state.notebook.branch_log(state.name)):
-            direction = names.get(exhausted.direction.strip().lower())
+            direction = session_direction(exhausted.direction)
             if direction is None:
                 logger.warning(
                     "an exhausted record of %s names none of the session's directions: %r",
