@@ -23,9 +23,6 @@ cognitive-complexity src/hyperloom/orchestrator/actions/executors/integrate_patc
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/integrate_patch.py::_resolve_patch_paths 36
 cognitive-complexity src/hyperloom/orchestrator/delivery/ledger.py::restore_records 33
 cognitive-complexity src/hyperloom/orchestrator/enablement/build.py::EnablementBuild.maybe_escalate_to_targeted_build 36
-cognitive-complexity src/hyperloom/orchestrator/kernel/_kernel_decisions.py::enqueue_nominated_patch 32
-cognitive-complexity src/hyperloom/orchestrator/kernel/_kernel_decisions.py::pending_kernel_integration_records 43
-cognitive-complexity src/hyperloom/orchestrator/kernel/_kernel_decisions.py::record_kernel_integrate_result 52
 cognitive-complexity src/hyperloom/orchestrator/kernel/conc_sweep.py::_sweep_one_arm_single_server 68
 cognitive-complexity src/hyperloom/orchestrator/kernel/conc_sweep.py::run_conc_sweep 60
 cognitive-complexity src/hyperloom/orchestrator/kernel/forge_fusion.py::_normalize_manifest 44
@@ -335,8 +332,7 @@ function-lines src/hyperloom/orchestrator/enablement/lane.py::EnablementLane._ma
 function-lines src/hyperloom/orchestrator/enablement/params.py::EnablementParams._discover_enablement_candidate_refs 87
 function-lines src/hyperloom/orchestrator/enablement/params.py::EnablementParams.build_enablement_specialist_params 114
 function-lines src/hyperloom/orchestrator/enablement/recipe/sufficiency.py::_patch_step_reasons 92
-function-lines src/hyperloom/orchestrator/kernel/_kernel_decisions.py::enqueue_nominated_patch 105
-function-lines src/hyperloom/orchestrator/kernel/_kernel_decisions.py::record_kernel_integrate_result 151
+function-lines src/hyperloom/orchestrator/kernel/_kernel_decisions.py::record_kernel_integrate_result 97
 function-lines src/hyperloom/orchestrator/kernel/apply_kernel_patch.py::_invalidate_aiter_cpp_itfs_cache 102
 function-lines src/hyperloom/orchestrator/kernel/apply_kernel_patch.py::_verify_rebuild_imports 81
 function-lines src/hyperloom/orchestrator/kernel/conc_sweep.py::_build_roofline_ceiling 81
