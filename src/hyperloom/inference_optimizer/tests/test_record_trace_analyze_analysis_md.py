@@ -201,22 +201,7 @@ def test_record_trace_analyze_preserves_kernel_roofline_fields(
     analysis_md = tmp_path / "analysis.md"
     analysis_md.write_text("# hi", encoding="utf-8")
     sidecar = tmp_path / "kernel_roofline.json"
-    sidecar.write_text(
-        json.dumps(
-            {
-                "kernels": [
-                    {
-                        "kernel_id": "k1",
-                        "rocprof_roofline": {
-                            "before_kernel_opt": {"status": "matched", "roofline_efficiency_pct": 31.2},
-                            "after_kernel_opt": {"status": "matched", "roofline_efficiency_pct": 44.0},
-                        },
-                    }
-                ]
-            }
-        ),
-        encoding="utf-8",
-    )
+    sidecar.write_text(json.dumps({"kernels": [{"kernel_id": "k1"}]}), encoding="utf-8")
 
     state = SharedState()
     state.record_trace_analyze(
@@ -258,8 +243,6 @@ def test_record_trace_analyze_preserves_kernel_roofline_fields(
     assert row["compute_utilization_pct"] == 9.1
     assert row["bandwidth_utilization_pct"] == 72.4
     assert row["suggestion"] == "reduce memory traffic"
-    assert row["rocprof_roofline"]["before_kernel_opt"]["roofline_efficiency_pct"] == 31.2
-    assert row["rocprof_roofline"]["after_kernel_opt"]["roofline_efficiency_pct"] == 44.0
     # kernel_category propagates from TraceLens hot_kernels through to the cached row.
     assert row["kernel_category"] == "LayerNorm"
     assert cached["kernel_roofline_top15"][0] == row

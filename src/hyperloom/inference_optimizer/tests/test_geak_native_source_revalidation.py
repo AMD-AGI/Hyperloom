@@ -73,7 +73,7 @@ async def test_declined_review_never_runs_or_promotes_proxy(coordinator, tmp_pat
         raise AssertionError("unapproved source integration must not execute")
 
     monkeypatch.setattr(coordinator.sub, "execute_covered", forbidden)
-    run = asyncio.create_task(coordinator.phase_kernel._revalidate_geak_candidate(reason="unit"))
+    run = asyncio.create_task(coordinator.phase_kernel._revalidate_geak_candidate(reason="unit", handoff_cards=None))
     await _actual_verdict(coordinator, verdict)
     await asyncio.wait_for(run, 2.0)
     assert coordinator.shared_state.geak_pending == {}
@@ -108,7 +108,7 @@ async def test_approved_source_uses_covered_integrator_and_canonical_measurement
         "hyperloom.orchestrator.state.shared_state.resolve_graded_comparison",
         lambda *args, **kwargs: SimpleNamespace(comparable=True, candidate=120.0, reference=100.0),
     )
-    run = asyncio.create_task(coordinator.phase_kernel._revalidate_geak_candidate(reason="unit"))
+    run = asyncio.create_task(coordinator.phase_kernel._revalidate_geak_candidate(reason="unit", handoff_cards=None))
     await _actual_verdict(coordinator, "approve")
     await asyncio.wait_for(run, 2.0)
     assert len(executed) == 1
@@ -135,12 +135,12 @@ async def test_cancelled_covered_run_reuses_review_and_task_identity(coordinator
 
     monkeypatch.setattr(coordinator.sub, "execute_covered", execute)
     monkeypatch.setattr(coordinator.writeback, "promote_to_shared_state", promote)
-    run = asyncio.create_task(coordinator.phase_kernel._revalidate_geak_candidate(reason="unit"))
+    run = asyncio.create_task(coordinator.phase_kernel._revalidate_geak_candidate(reason="unit", handoff_cards=None))
     await _actual_verdict(coordinator, "approve")
     with pytest.raises(asyncio.CancelledError):
         await run
     saved_review = dict(coordinator.shared_state.geak_pending["native_review"])
-    await coordinator.phase_kernel._revalidate_geak_candidate(reason="resume")
+    await coordinator.phase_kernel._revalidate_geak_candidate(reason="resume", handoff_cards=None)
     assert len(tasks) == 2
     assert tasks[0].task_id == tasks[1].task_id == saved_review["task_id"]
     proposals = await coordinator.bus.tail(topic="proposal")
@@ -159,7 +159,7 @@ async def test_missing_declared_patch_fails_without_proxy_harness(coordinator, t
         raise AssertionError("native source failure must not use GEAK proxy harness")
 
     monkeypatch.setattr(coordinator.phase_kernel, "_revalidate_on_geak_harness", forbidden)
-    await coordinator.phase_kernel._revalidate_geak_candidate(reason="unit")
+    await coordinator.phase_kernel._revalidate_geak_candidate(reason="unit", handoff_cards=None)
     assert coordinator.shared_state.geak_pending == {}
     assert coordinator.shared_state.geak_result["revalidation_status"] == "fallback_failed"
     assert "source patch" in coordinator.shared_state.geak_result["revalidation_error"]
@@ -195,7 +195,7 @@ async def test_reviewed_patch_mutation_is_rejected_before_execution(coordinator,
 
     monkeypatch.setattr(native, "_review", mutate_after_review)
     monkeypatch.setattr(coordinator.sub, "execute_covered", forbidden)
-    run = asyncio.create_task(coordinator.phase_kernel._revalidate_geak_candidate(reason="unit"))
+    run = asyncio.create_task(coordinator.phase_kernel._revalidate_geak_candidate(reason="unit", handoff_cards=None))
     await _actual_verdict(coordinator, "approve")
     await asyncio.wait_for(run, 2.0)
     assert coordinator.shared_state.geak_pending == {}
@@ -241,7 +241,7 @@ async def test_source_review_binds_entire_overlay_without_manifest(coordinator, 
 
     monkeypatch.setattr(native, "_review", mutate_after_review)
     monkeypatch.setattr(coordinator.sub, "execute_covered", execute)
-    run = asyncio.create_task(coordinator.phase_kernel._revalidate_geak_candidate(reason="unit"))
+    run = asyncio.create_task(coordinator.phase_kernel._revalidate_geak_candidate(reason="unit", handoff_cards=None))
     await _actual_verdict(coordinator, "approve")
     await asyncio.wait_for(run, 2.0)
     assert coordinator.shared_state.geak_pending == {}
@@ -257,7 +257,7 @@ async def test_source_review_binds_entire_overlay_without_manifest(coordinator, 
 async def test_expired_review_budget_clears_pending_without_promotion(coordinator, tmp_path, monkeypatch):
     _candidate(coordinator, tmp_path)
     monkeypatch.setattr(coordinator.shared_state, "remaining_minutes", lambda: 0.0)
-    await coordinator.phase_kernel._revalidate_geak_candidate(reason="unit")
+    await coordinator.phase_kernel._revalidate_geak_candidate(reason="unit", handoff_cards=None)
     assert coordinator.shared_state.geak_pending == {}
     assert coordinator.shared_state.geak_result["native_source_revalidation"]["verdict"] == "timeout"
     assert not coordinator.shared_state.optimization_stack

@@ -160,12 +160,10 @@ def _kernel_roofline_row(entry: Mapping[str, Any]) -> dict[str, Any] | None:
     """Normalize one row of the analyzer's kernel-roofline table.
 
     The TraceLens and bypass routes agree on the identity and cost fields and
-    diverge in the tail: bypass measures attainment against a real rocprof
-    ceiling (``roofline_attainment_pct`` / ``roofline_measured``) where
-    TraceLens has only its analytical model. Both spellings are kept, because
-    the absent one is itself the answer to "was this number measured". A row
-    carrying no kernel identity cannot be joined to anything and yields
-    ``None``.
+    diverge in the tail: only bypass rows carry ``roofline_attainment_pct``.
+    ``roofline_source`` says whether a row's bound came from a model or is a
+    placeholder. A row carrying no kernel identity cannot be joined to anything
+    and yields ``None``.
     """
     kernel_id = _text_or_none(entry.get("kernel_id"))
     name = _text_or_none(entry.get("name"))
@@ -192,11 +190,9 @@ def _kernel_roofline_row(entry: Mapping[str, Any]) -> dict[str, Any] | None:
         "roofline_attainment_pct": _float_or_none(entry.get("roofline_attainment_pct")),
         "roofline_name": _text_or_none(entry.get("roofline_name")),
         "roofline_source": str(entry.get("roofline_source") or ""),
-        "roofline_measured": bool(entry.get("roofline_measured")),
         "suggestion": _clip(entry.get("suggestion") or ""),
         "recommended_actions": [str(item) for item in _as_list(entry.get("recommended_actions"))],
         "reusable_native_kernel": bool(entry.get("reusable_native_kernel")),
-        "rocprof_roofline": _as_dict(entry.get("rocprof_roofline")) or None,
     }
 
 
