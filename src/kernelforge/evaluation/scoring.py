@@ -14,7 +14,7 @@ KEEP_MEASUREMENT_COUNT = 3
 
 # The KEEP bar, as the one-sided 95% Student-t critical value for the degrees of freedom the sigma estimate actually
 # carries.
-KEEP_T_CRITICAL: Mapping[int, float] = {2: 2.920, 5: 2.015, 8: 1.860}
+KEEP_T_CRITICAL: Mapping[int, float] = {2: 2.920, 3: 2.353, 4: 2.132, 5: 2.015, 8: 1.860}
 
 # Floor under the margin, as a fraction of the incumbent, so a freak run of three near-identical measurements cannot
 # drive the bar to zero.
@@ -266,3 +266,41 @@ def beats_current_best(
         return False
     incumbent = 1.0 if best_mean_case_speedup is None else float(best_mean_case_speedup)
     return float(score) > incumbent
+
+
+# Pairs a paired KEEP starts with, and the most it extends to while the verdict is still open.
+PAIRED_PAIRS = KEEP_MEASUREMENT_COUNT
+PAIRED_MAX_PAIRS = 5
+
+
+def paired_lower_bound(scores: Sequence[float]) -> float | None:
+    """One-sided 95% lower bound on the mean of per-pair incumbent/candidate scores; None below two pairs."""
+    if len(scores) < 2:
+        return None
+    mean = statistics.fmean(scores)
+    return mean - keep_t_critical(len(scores)) * statistics.stdev(scores) / math.sqrt(len(scores))
+
+
+def paired_keep_floor(noise_floor: float | None) -> float:
+    """The margin a paired KEEP must clear: the measured A-vs-A noise floor, never below the fixed floor."""
+    return max(float(noise_floor or 0.0), KEEP_MIN_MARGIN_FRACTION)
+
+
+def passes_paired_keep(scores: Sequence[float], *, floor: float) -> bool:
+    """The candidate beat the incumbent it was timed beside by more than the floor, at 95% confidence."""
+    lower = paired_lower_bound(scores)
+    return lower is not None and lower >= 1.0 + floor
+
+
+def paired_inconclusive(scores: Sequence[float], *, floor: float) -> bool:
+    """The mean clears the floor but its lower bound does not, so more pairs could decide it."""
+    lower = paired_lower_bound(scores)
+    return lower is not None and statistics.fmean(scores) >= 1.0 + floor > lower
+
+
+def noise_floor_from_null(scores: Sequence[float]) -> float | None:
+    """From pairs of the same kernel: how far apart two identical arms can read, as an upper bound."""
+    if len(scores) < 2:
+        return None
+    upper = statistics.fmean(scores) + keep_t_critical(len(scores)) * statistics.stdev(scores) / math.sqrt(len(scores))
+    return max(0.0, upper - 1.0)

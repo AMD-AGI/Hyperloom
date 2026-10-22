@@ -108,6 +108,8 @@ class BenchRun:
     warmup_iters: int = 10
     bench_iters: int = 30
     repeat: int = 1
+    # Where the driver runs; None inherits the loop's own working directory.
+    cwd: str | None = None
 
 
 def bench_command(run: BenchRun) -> list[str]:
@@ -330,6 +332,7 @@ async def bench_wallclock(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         start_new_session=True,
+        cwd=run.cwd,
     )
     try:
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_sec)

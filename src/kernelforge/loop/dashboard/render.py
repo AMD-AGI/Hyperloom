@@ -92,6 +92,26 @@ def _tile(label: str, value: str, note: str = "", *, hero: bool = False) -> str:
     return f'<div class="{css}"><div class="label">{escape(label)}</div><div class="value">{value}</div>{extra}</div>'
 
 
+def _noise_tile(snapshot: dict) -> str:
+    floor = snapshot.get("noise_floor") or {}
+    if not floor:
+        return ""
+    value = floor.get("value")
+    shown = f"{float(value):.2%}" if value is not None else "—"
+    note = f"A-vs-A, {len(floor.get('scores') or [])} pairs at iteration {floor.get('iteration')}"
+    if floor.get("failure"):
+        note = f"last attempt failed: {floor['failure']}"
+    return _tile("Noise floor", shown, escape(note))
+
+
+def _keep_bar(bar) -> str:
+    if not isinstance(bar, dict):
+        return ""
+    if bar.get("mode") == "paired":
+        return f"paired ×{bar.get('pairs')}: lower {_fmt(bar.get('lower'))} vs {1 + float(bar.get('floor') or 0):.4f}"
+    return f"needs {_fmt(bar.get('required'))}"
+
+
 def _header(snapshot: dict) -> str:
     live, campaign = snapshot.get("live") or {}, snapshot.get("campaign") or {}
     status = live.get("status") or campaign.get("session_status") or "unknown"
@@ -134,6 +154,7 @@ def _tiles(snapshot: dict) -> str:
                 ),
                 _tile("Time left", _duration(live.get("time_remaining_sec")), escape(deadline_text)),
                 _tile("LLM spend", cost_text, f"{tokens:,} tokens · {usage.get('calls') or 0} calls"),
+                _noise_tile(snapshot),
             ]
         )
         + "</div>"
@@ -228,12 +249,13 @@ def _iteration_table(rows: list[dict]) -> str:
     body = "".join(
         f"<tr><td class='num'>{escape(str(row.get('iter')))}</td><td>{_status_chip(row.get('decision', ''))}</td>"
         f"<td class='num'>{_fmt(row.get('score'))}</td><td class='num'>{_fmt(row.get('best_after'))}</td>"
+        f"<td>{escape(_keep_bar(row.get('keep_bar')))}</td>"
         f"<td>{escape(str(row.get('direction_id') or ''))}</td><td>{escape(row.get('plan', ''))}</td></tr>"
         for row in reversed(rows)
     )
     return (
         "<details><summary>Iterations as a table</summary><table><tr><th class='num'>iter</th><th>decision</th>"
-        "<th class='num'>score</th><th class='num'>best after</th><th>direction</th><th>plan</th></tr>"
+        "<th class='num'>score</th><th class='num'>best after</th><th>KEEP bar</th><th>direction</th><th>plan</th></tr>"
         f"{body}</table></details>"
     )
 

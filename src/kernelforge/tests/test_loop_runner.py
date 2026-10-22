@@ -2404,6 +2404,7 @@ def _measurement_loop(monkeypatch, benchmark_result, workspace_dir="."):
         validate_stage_timeout_sec=300,
         bench_timeout_sec=300,
         bench_repeat=1,
+        paired_keep=False,
         nproc_per_node=1,
         build_dir=None,
         baseline_wall_ms=5.0,

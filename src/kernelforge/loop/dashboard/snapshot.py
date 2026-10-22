@@ -204,4 +204,5 @@ def collect_snapshot(campaign_root: Path, live: LiveStatus | None = None) -> dic
         "events": [_event_summary(event) for event in notable[-_RECENT_EVENTS:]],
         "inbox": _inbox(campaign_root),
         "directions": _directions(campaign_root, state, events, live_block),
+        "noise_floor": _read_json(campaign_root / "noise_floor.json") or {},
     }

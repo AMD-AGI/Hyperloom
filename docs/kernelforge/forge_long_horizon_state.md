@@ -41,6 +41,7 @@ forge_experiments/
   inbox/
     <posted>.md
     archive/iter_NNN-<posted>.md
+  noise_floor.json
   directions.json
   directions/
     survey_iter_NNN.md
@@ -438,4 +439,6 @@ individual case regressions decide KEEP/REVERT.
 `inbox/` holds operator messages (`kernelforge forge-say`); the loop archives each one it reads. `directions.json`
 exists only with `--early-stop`: the direction ledger's definitions, retirements, surveyed Analysis commits and
 audits. How far each direction has been mined is not stored there; it is folded from the `iteration_result`
-events, whose `direction_id` and `lane_id` name what each candidate pursued.
+events, whose `direction_id` and `lane_id` name what each candidate pursued. `noise_floor.json` exists only with `--paired-keep`: the A-vs-A noise floor, the pair scores it came from and
+its earlier values. The incumbent's worktree for paired timing is `<workspace>.forge-incumbent`, beside the
+workspace rather than in it.

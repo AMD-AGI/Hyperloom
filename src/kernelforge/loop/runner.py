@@ -12,6 +12,7 @@ import functools
 import hashlib
 import inspect
 import json
+import random
 import logging
 import math
 import os
@@ -127,13 +128,16 @@ from kernelforge.loop.prompt_view import (
     render_long_horizon_header,
 )
 from kernelforge.loop.reporting import BestResultPublisher, KeepBundle, KeepIdentity, KeepScore
+from kernelforge.evaluation.benchmark.paired import PairedMeasurement, measure_pairs
 from kernelforge.evaluation.benchmark.runner import (
     CaseCoverageError,
+    aggregate_benchmark_measurements,
     calculate_mean_case_speedup,
     calculate_measurement_case_speedups,
     BenchRun,
     measure_wallclock,
 )
+from kernelforge.loop.worktrees import DetachedWorktree, incumbent_tree_path, sha256_of
 from kernelforge.tools.process_group import communicate_process_group
 from kernelforge.loop.new_path_allowlist import (
     matches_commit_new_paths,
@@ -150,7 +154,14 @@ from kernelforge.evaluation.scoring import (
     beats_current_best,
     keep_score,
     measurement_sigma,
+    noise_floor_from_null,
+    paired_inconclusive,
+    paired_keep_floor,
+    paired_lower_bound,
     passes_keep_threshold,
+    passes_paired_keep,
+    PAIRED_MAX_PAIRS,
+    PAIRED_PAIRS,
     required_keep_speedup,
     rescaled_sigma,
     runs_task_suite_acceptance,
@@ -177,6 +188,9 @@ from kernelforge.evaluation.profiling.registers import check_registers
 from kernelforge.tracker import CampaignSegment, ExperimentTracker, Experiment, ExperimentSubject
 
 log = logging.getLogger(__name__)
+
+# The A-vs-A noise floor a paired KEEP must clear, with how and when it was measured.
+NOISE_FLOOR_FILE = "noise_floor.json"
 
 # How many recent iteration outcomes the long-horizon prompt header is built from.
 LONG_HORIZON_OUTCOME_WINDOW = max(
@@ -567,6 +581,11 @@ class IterationConfig:
     serving_speedup: float | None = None
     # Stop before the budget once every known direction is mined out; off keeps the loop running through stalls.
     early_stop: EarlyStopPolicy = field(default_factory=EarlyStopPolicy)
+    # Decide KEEP by timing the incumbent beside each candidate, against an A-vs-A noise floor measured the same way.
+    paired_keep: bool = False
+    null_control_pairs: int = 5
+    # Re-measure the noise floor every this many iterations; 0 measures it once.
+    null_control_every: int = 0
 
     def __post_init__(self) -> None:
         # Validated here rather than at the CLI boundary alone, so a pattern can never reach the commit/delete sites
@@ -3343,6 +3362,121 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
                 make_event("operator_message_consumed", iteration, name=message.name, text=message.text[:500])
             )
 
+    def _scored_cases(self) -> frozenset[str] | None:
+        if not self._baseline_case_times:
+            return None
+        return frozenset(self._baseline_case_times) - frozenset(self._unscored_cases)
+
+    def _paired_arms(self, iteration: int) -> tuple[BenchRun, BenchRun] | str:
+        """The candidate arm in the workspace and the incumbent arm in a tree at HEAD, or why there is none."""
+        workspace = Path(self.ic.workspace_dir).resolve()
+        tree = DetachedWorktree(workspace, incumbent_tree_path(workspace))
+        head = self._git("rev-parse", "HEAD").strip()
+        reset = tree.ensure_at(head)
+        if reset:
+            self.state_store.append_event(make_event("incumbent_tree_reset", iteration, reason=reset, commit=head))
+        driver = Path(self.ic.driver_script).resolve()
+        incumbent_driver = tree.path / driver.relative_to(workspace)
+        if sha256_of(incumbent_driver) != sha256_of(driver):
+            return "the incumbent tree's driver differs from the workspace's"
+        return (
+            BenchRun(str(driver), driver_args=[], repeat=self.ic.bench_repeat, cwd=str(workspace)),
+            BenchRun(str(incumbent_driver), driver_args=[], repeat=self.ic.bench_repeat, cwd=str(tree.path)),
+        )
+
+    async def _measure_paired(self, iteration: int) -> tuple[dict, PairedMeasurement]:
+        """Pairs of candidate and incumbent, extended while the verdict is open; and the candidate arms as a bench."""
+        arms = self._paired_arms(iteration)
+        if isinstance(arms, str):
+            measurement = PairedMeasurement(failure=arms)
+        else:
+            rng = random.Random(f"{self.run_state.campaign_id}:{iteration}")
+            floor = paired_keep_floor(self._noise_floor())
+            timing = {"rng": rng, "timeout_sec": self.ic.bench_timeout_sec, "scored": self._scored_cases()}
+            measurement = await measure_pairs(*arms, pairs=PAIRED_PAIRS, **timing)
+            while (
+                not measurement.failure
+                and len(measurement.pairs) < PAIRED_MAX_PAIRS
+                and paired_inconclusive(measurement.scores, floor=floor)
+            ):
+                measurement = measurement.extended(await measure_pairs(*arms, pairs=1, **timing))
+        if measurement.failure:
+            bench_result = {"success": False, "message": f"PAIRED MEASUREMENT FAILED: {measurement.failure}"}
+        else:
+            # The anchor-relative score reported beside the verdict comes from the candidate's own arms.
+            candidates = [pair.candidate for pair in measurement.pairs[:KEEP_MEASUREMENT_COUNT]]
+            bench_result = aggregate_benchmark_measurements(candidates)
+        bench_result["paired"] = measurement.to_dict()
+        return bench_result, measurement
+
+    def _paired_keep_bar(self, paired: PairedMeasurement) -> dict:
+        floor = paired_keep_floor(self._noise_floor())
+        lower = paired_lower_bound(paired.scores)
+        return {
+            "mode": "paired",
+            "pairs": len(paired.pairs),
+            "mean": (sum(paired.scores) / len(paired.scores)) if paired.scores else None,
+            "lower": round(lower, 6) if lower is not None else None,
+            "floor": floor,
+            "passes": passes_paired_keep(paired.scores, floor=floor),
+        }
+
+    def _noise_floor_record(self) -> dict:
+        try:
+            return json.loads((self.state_store.root / NOISE_FLOOR_FILE).read_text())
+        except (OSError, ValueError):
+            return {}
+
+    def _noise_floor(self) -> float | None:
+        return self._noise_floor_record().get("value")
+
+    async def _refresh_noise_floor_if_due(self, iteration: int) -> None:
+        """Time the incumbent beside itself, in pairs, to learn how far two identical arms read apart."""
+        if not self.ic.paired_keep:
+            return
+        record = self._noise_floor_record()
+        every = self.ic.null_control_every
+        due = record.get("value") is None or bool(every and iteration - int(record.get("iteration") or 0) >= every)
+        if not due:
+            return
+        started = time.time()
+        arms = self._paired_arms(iteration)
+        if isinstance(arms, str):
+            measurement = PairedMeasurement(failure=arms)
+        else:
+            measurement = await measure_pairs(
+                *arms,
+                pairs=self.ic.null_control_pairs,
+                rng=random.Random(f"{self.run_state.campaign_id}:null:{iteration}"),
+                timeout_sec=self.ic.bench_timeout_sec,
+                scored=self._scored_cases(),
+            )
+        self._observe_measurement(started)
+        value = None if measurement.failure else noise_floor_from_null(measurement.scores)
+        history = (record.get("history") or [])[-9:]
+        if record.get("value") is not None:
+            history.append({"iteration": record.get("iteration"), "value": record.get("value")})
+        atomic_write_text(
+            self.state_store.root / NOISE_FLOOR_FILE,
+            json.dumps(
+                {
+                    "value": value if value is not None else record.get("value"),
+                    "iteration": iteration if value is not None else record.get("iteration"),
+                    "scores": measurement.scores,
+                    "failure": measurement.failure,
+                    "history": history,
+                },
+                indent=2,
+            ),
+        )
+        self.state_store.append_event(
+            make_event(
+                "null_control", iteration, value=value, scores=measurement.scores, failure=measurement.failure or None
+            )
+        )
+        shown = f"{value:.4%}" if value is not None else f"not measured ({measurement.failure})"
+        print(f"  [null control] A-vs-A noise floor {shown}")
+
     def _ledger(self) -> DirectionLedger | None:
         """The campaign's direction ledger, kept only while early stop is on."""
         if not self.ic.early_stop.enabled:
@@ -4044,6 +4178,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             commit_hash=result.commit_hash or None,
             lane_id=result.lane_id or None,
             direction_id=result.direction_id or None,
+            keep_bar=(result.bench_detail or {}).get("keep_bar"),
             best_after_ms=(result.wall_ms if result.kept else self.best_wall_ms),
             best_after_mean_case_speedup=(result.mean_case_speedup if result.kept else self.best_mean_case_speedup),
             is_new_best=result.kept,
@@ -4310,24 +4445,28 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             ),
         )
 
+    def _unpaired_keep_bar(self, measurement_scores: list[float], sigma_resolution: SigmaResolution) -> dict:
+        required = required_keep_speedup(
+            self.best_mean_case_speedup or 1.0,
+            measurement_scores,
+            sigma=sigma_resolution.sigma,
+            sigma_sample_size=sigma_resolution.sample_size,
+        )
+        return {"mode": "unpaired", "required": required, "sigma": sigma_resolution.sigma}
+
     def _emit_bench_scores(
         self,
         bench_result: dict,
         sigma_resolution: SigmaResolution,
         measurement_scores: list[float],
-        bench_error_output: str,
+        keep_bar: dict,
     ) -> None:
-        """Print the KEEP-bar line and any pre-scoring bench-failure tail."""
+        """Print the KEEP-bar line of an unpaired measurement."""
         selected_raw_mean_ms = bench_result.get("median_ms")
         mean_case_speedup = bench_result.get("mean_case_speedup")
         score_text = f"{mean_case_speedup:.6f}x" if mean_case_speedup is not None else "n/a"
         sigma = sigma_resolution.sigma
-        required_score = required_keep_speedup(
-            self.best_mean_case_speedup or 1.0,
-            measurement_scores,
-            sigma=sigma,
-            sigma_sample_size=sigma_resolution.sample_size,
-        )
+        required_score = keep_bar["required"]
         # The bar is a t multiple of the standard error of the mean, so a REVERT is only readable next to the spread
         # that set it and, when one case supplied that spread, next to the case: a weak candidate and a noisy 10 us
         # dispatch print the same mean score.
@@ -4341,10 +4480,24 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             f"raw mean={selected_raw_mean_ms} ms  "
             f"({bench_result.get('message', '')})"
         )
-        if bench_error_output:
-            # The scoring verdict has already overwritten ``message`` with "candidate emitted no per-case timings",
-            # which describes the symptom of a crash as if it were a formatting choice.
-            print(f"  [bench] {bench_error_output}")
+
+    def _emit_paired_scores(self, bench_result: dict, paired: PairedMeasurement, keep_bar: dict) -> None:
+        """Print the KEEP-bar line of a paired measurement."""
+        mean_case_speedup = bench_result.get("mean_case_speedup")
+        score_text = f"{mean_case_speedup:.6f}x" if mean_case_speedup is not None else "n/a"
+        print(
+            f"  [bench] incumbent/candidate per pair={[round(score, 6) for score in paired.scores]}; "
+            f"lower bound={keep_bar['lower']}; floor={keep_bar['floor']:.4%}; "
+            f"mean score={score_text}; raw mean={bench_result.get('median_ms')} ms"
+        )
+
+    def _beats_the_source_caller(self, bench_result: dict) -> bool:
+        """A second-stage ASM result must also beat the original caller's aggregate time; every other backend passes."""
+        if self.ic.kernel_backend != "assembly":
+            return True
+        source_ms = self.ic.pristine_baseline_wall_ms
+        raw_mean_ms = bench_result.get("median_ms")
+        return source_ms is not None and raw_mean_ms is not None and raw_mean_ms < source_ms
 
     def _clears_keep_bar(
         self,
@@ -4363,11 +4516,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             sigma=sigma_resolution.sigma,
             sigma_sample_size=sigma_resolution.sample_size,
         )
-        if improved and self.ic.kernel_backend == "assembly":
-            source_ms = self.ic.pristine_baseline_wall_ms
-            raw_mean_ms = bench_result.get("median_ms")
-            improved = source_ms is not None and raw_mean_ms is not None and raw_mean_ms < source_ms
-        return improved
+        return improved and self._beats_the_source_caller(bench_result)
 
     async def _decide_iteration_keep(
         self,
@@ -4375,6 +4524,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         iter_start: float,
         report,
         bench_result: dict,
+        paired: PairedMeasurement | None = None,
     ) -> IterationResult:
         """Score the bench, check registers, apply the KEEP bar, and build the IterationResult."""
         # A candidate whose bench crashed is reverted for "no speedup" unless the crash itself reaches the agent; the
@@ -4386,8 +4536,22 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         # to dominate an aggregate ratio.
         self._apply_mean_case_speedup_metric(bench_result)
         measurement_scores = list(bench_result.get("measurement_mean_case_speedups") or [])
-        sigma_resolution = await self._resolve_keep_sigma(bench_result, measurement_scores)
-        self._emit_bench_scores(bench_result, sigma_resolution, measurement_scores, bench_error_output)
+        if paired is None:
+            sigma_resolution = await self._resolve_keep_sigma(bench_result, measurement_scores)
+            keep_bar = self._unpaired_keep_bar(measurement_scores, sigma_resolution)
+            self._emit_bench_scores(bench_result, sigma_resolution, measurement_scores, keep_bar)
+            improved = self._clears_keep_bar(bench_result, measurement_scores, sigma_resolution)
+        else:
+            keep_bar = self._paired_keep_bar(paired)
+            self._emit_paired_scores(bench_result, paired, keep_bar)
+            improved = (
+                bool(bench_result.get("success")) and keep_bar["passes"] and self._beats_the_source_caller(bench_result)
+            )
+        bench_result["keep_bar"] = keep_bar
+        if bench_error_output:
+            # The scoring verdict has already overwritten ``message`` with "candidate emitted no per-case timings",
+            # which describes the symptom of a crash as if it were a formatting choice.
+            print(f"  [bench] {bench_error_output}")
         selected_raw_mean_ms = bench_result.get("median_ms")
         mean_case_speedup = bench_result.get("mean_case_speedup")
         snr_db = report.results[-1].snr_db if report.results else None
@@ -4396,8 +4560,6 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         vgpr = reg_result.get("vgpr") if reg_result.get("success") else None
         if vgpr:
             print(f"  [registers] VGPR={vgpr}")
-
-        improved = self._clears_keep_bar(bench_result, measurement_scores, sigma_resolution)
 
         # The numerical contract, which only assembly declares and only it needs. Every other backend was judged by
         # the driver and measured through it since; re-running that verdict here would answer the same question with
@@ -4504,7 +4666,12 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
                 kept=False,
             )
 
-        if benchmark_measurement is not None and self._can_reuse_insession_benchmark(
+        paired = None
+        if self.ic.paired_keep:
+            # The session's own measurement timed the candidate alone, so it cannot decide a paired KEEP.
+            print("  [bench] Timing the candidate beside the incumbent, in pairs...")
+            bench_result, paired = await self._measure_paired(iteration)
+        elif benchmark_measurement is not None and self._can_reuse_insession_benchmark(
             benchmark_measurement,
             attempt_diff=self._working_tree_diff(),
         ):
@@ -4520,7 +4687,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             )
         self._observe_measurement(measurement_started)
         self.last_case_bandwidth = dict(bench_result.get("case_bandwidth") or {})
-        return await self._decide_iteration_keep(iteration, iter_start, report, bench_result)
+        return await self._decide_iteration_keep(iteration, iter_start, report, bench_result, paired)
 
     def _update_search_policy(self, iteration: int) -> SearchPolicyDecision:
         """Derive and persist the search mode before planning an iteration."""
@@ -6396,6 +6563,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         """
         # First, so this iteration's supervisor and planning both see what the operator posted.
         self._consume_operator_messages(iteration)
+        await self._refresh_noise_floor_if_due(iteration)
         supervisor_due = False
         supervisor_reason = ""
         if self.monitor is not None and supervisor_fn is not None:

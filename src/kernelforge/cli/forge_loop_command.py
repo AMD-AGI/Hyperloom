@@ -35,6 +35,7 @@ from kernelforge.cli.options import (
 )
 from kernelforge.knowledge.local_wiki.skills import ExternalSkill
 from kernelforge.loop.early_stop import EarlyStopPolicy
+from kernelforge.loop.worktrees import tree_copy_refusal
 from kernelforge.orchestrator.direction_audit import make_direction_audit_fn
 from kernelforge.option_groups import option_group
 from kernelforge.cli.pr_references import (
@@ -1152,6 +1153,15 @@ class SpecialistProbeOptions:
 
 
 @dataclass(frozen=True)
+class PairedKeepOptions:
+    """Whether KEEP times the incumbent beside each candidate, and how the A-vs-A noise floor is measured."""
+
+    paired_keep: bool
+    null_control_pairs: int
+    null_control_every: int
+
+
+@dataclass(frozen=True)
 class EarlyStopOptions:
     """When the campaign may stop before its budget: directions mined out, recent rounds flat, an audit agreeing."""
 
@@ -1182,6 +1192,7 @@ class ForgeLoopRequest:
     knowledge: KnowledgeOptions
     probe: SpecialistProbeOptions
     early_stop: EarlyStopOptions
+    paired: PairedKeepOptions
     baseline_json: str
     resume: bool
 
@@ -1570,6 +1581,29 @@ class ForgeLoopRequest:
             help="Attempts in a row without a KEEP after which a direction counts as mined out.",
         ),
     ),
+    option_group(
+        "paired",
+        PairedKeepOptions,
+        click.option(
+            "--paired-keep/--no-paired-keep",
+            default=False,
+            help="Time the incumbent beside each candidate, in pairs whose order a coin decides, and KEEP only when "
+            "the lower bound of incumbent/candidate clears 1 + the A-vs-A noise floor (default off: candidates are "
+            "compared with the stored best score). The incumbent runs from a git worktree next to the workspace.",
+        ),
+        click.option(
+            "--null-control-pairs",
+            default=5,
+            type=click.IntRange(min=2),
+            help="Pairs of the incumbent beside itself that measure the noise floor.",
+        ),
+        click.option(
+            "--null-control-every",
+            default=0,
+            type=click.IntRange(min=0),
+            help="Re-measure the noise floor every this many iterations (0: once per campaign).",
+        ),
+    ),
     click.option(
         "--baseline-json",
         default="",
@@ -1826,6 +1860,17 @@ def forge_loop(request: ForgeLoopRequest):
         iter_config.baseline_case_times = dict(external_baseline_case_times)
         iter_config.pristine_baseline_wall_ms = external_baseline_ms
         iter_config.anchor_label, iter_config.serving_speedup = _load_anchor_presentation(baseline_json)
+    if request.paired.paired_keep:
+        refusal = tree_copy_refusal(
+            workspace=workspace, driver=iter_config.driver_script, source_files=iter_config.source_files
+        )
+        if refusal:
+            raise click.BadParameter(
+                f"a second checkout cannot time this kernel: {refusal}", param_hint="--paired-keep"
+            )
+    iter_config.paired_keep = request.paired.paired_keep
+    iter_config.null_control_pairs = request.paired.null_control_pairs
+    iter_config.null_control_every = request.paired.null_control_every
     iter_config.early_stop = EarlyStopPolicy(
         enabled=request.early_stop.early_stop,
         min_directions=request.early_stop.early_stop_min_directions,

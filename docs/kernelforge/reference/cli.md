@@ -153,6 +153,26 @@ and passing one alongside `--resume` is refused rather than silently ignored.
 | `--skill-dir <dir>` | none | A folder holding a `SKILL.md`, such as the optimization skill a kernel repository keeps. Every agent's knowledge block points at it after the packaged maps, with the folder and its repository root to resolve its paths. Repeatable; applies to this invocation only. A folder without `SKILL.md` exits 2. |
 | `--experience-id <id>` | `''` | Unique KB run identity, independent of the checkpoint experiment ID. |
 
+### Paired KEEP
+
+Off by default: a candidate's three measurements are compared with the best score stored when the incumbent was
+kept, so whatever drifted since (clocks, temperature, a neighbour on the node) lands in the comparison. With
+`--paired-keep` each candidate is timed beside the incumbent, in pairs whose order a seeded coin decides; the
+incumbent runs from a git worktree at HEAD next to the workspace (`<workspace>.forge-incumbent`), refreshed before
+every measurement and checked to hold the same driver. A candidate is kept when the one-sided 95% lower bound of
+the per-pair incumbent/candidate ratio clears 1 + the noise floor; an open verdict buys up to two more pairs. The
+noise floor comes from pairs of the incumbent beside itself, measured before the first paired KEEP and recorded in
+`forge_experiments/noise_floor.json`. The in-session measurement cannot decide a paired KEEP and is not reused.
+A task whose kernel only the workspace can run (an editable install, a driver outside the workspace or not committed
+to it, C/C++ JIT sources) is refused. The mode belongs to the invocation, not the campaign: the best score is kept anchor-relative either way, so
+a `--resume` with or without the flag continues the same campaign under the rule it names.
+
+| Option | Default | Meaning |
+|:--|:--|:--|
+| `--paired-keep` / `--no-paired-keep` | off | Decide KEEP from paired timings against the incumbent, as above. |
+| `--null-control-pairs <n>` | 5 | Pairs of the incumbent beside itself that measure the noise floor. |
+| `--null-control-every <n>` | 0 | Re-measure the noise floor every n iterations; 0 measures it once. |
+
 ### Early stop
 
 Off by default: the loop runs through stalls until its budget ends. With `--early-stop` it keeps a ledger of
