@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import contextlib
+import functools
 import hashlib
 import inspect
 import json
@@ -140,6 +141,7 @@ from kernelforge.evaluation.scoring import (
     KEEP_MEASUREMENT_COUNT,
     SIGMA_REMEASURE_BATCH,
     SIGMA_REMEASURE_MAX_ROUNDS,
+    SigmaAttribution,
     attribute_sigma,
     beats_current_best,
     keep_score,
@@ -1083,11 +1085,11 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         """Classify a pending KEEP as uncommitted or the exact expected child."""
         if state.session_status == SESSION_COMPLETED:
             raise ValueError("completed campaign cannot be resumed")
-        base_head = str(pending.get("base_head") or "")
+        base_head = pending["base_head"]
         patch = str(pending.get("patch") or "")
-        iteration = int(pending.get("iteration", 0) or 0)
-        expected_hash = str(pending.get("patch_sha256") or "")
-        if not base_head or not patch or iteration <= 0:
+        iteration = int(pending["iteration"])
+        expected_hash = pending["patch_sha256"]
+        if not base_head or not patch:
             raise ValueError("pending KEEP metadata is incomplete")
         if hashlib.sha256(patch.encode()).hexdigest() != expected_hash:
             raise ValueError("pending KEEP metadata patch checksum mismatch")
@@ -2505,30 +2507,12 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         benchmark = dict(metadata.get("bench") or {})
         benchmark.setdefault("median_ms", best.wall_ms)
         benchmark.setdefault("mean_case_speedup", best.mean_case_speedup)
-        published_patch = ""
-        published_patch_path = str(published.get("patch_path") or "")
-        if published_patch_path:
-            try:
-                published_patch = (self.best_publisher.root / published_patch_path).read_text()
-            except OSError:
-                published_patch = ""
         pending = {
-            "session_index": published.get(
-                "session_index",
-                self.run_state.session_index,
-            ),
-            "experiment_id": published.get(
-                "experiment_id",
-                self.run_state.last_experiment_id,
-            ),
-            "baseline_wall_ms": published.get(
-                "baseline_wall_ms",
-                self.run_state.baseline_wall_ms,
-            ),
+            "session_index": published.get("session_index", self.run_state.session_index),
+            "experiment_id": published.get("experiment_id", self.run_state.last_experiment_id),
+            "baseline_wall_ms": published.get("baseline_wall_ms", self.run_state.baseline_wall_ms),
             "validation_text": validation_text,
             "benchmark": benchmark,
-            "changed_files": (published.get("changed_files") or self._publication_changed_files(best.commit_hash)),
-            "patch": (published_patch or self._publication_patch(best.commit_hash)),
         }
         result = IterationResult(
             iteration=best.iteration,
@@ -2711,6 +2695,16 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             )
         )
         return decision.lanes if decision.admitted else None
+
+    def _price_round(self, iteration: int) -> int | None:
+        """Price the round before anything is spent on it: the lanes it may plan, or ``None`` if none fit."""
+        self._close_round()
+        round_lanes: int | None = self.ic.lanes
+        if not self._lane_queue:
+            round_lanes = self._admit_next_round(iteration)
+            if round_lanes is not None:
+                self._open_round(iteration, lanes=round_lanes)
+        return round_lanes
 
     def _admit_dispatch(self, iteration: int) -> bool:
         """Whether the round now holding plans may start its session."""
@@ -3016,6 +3010,59 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             if case_id not in excluded and isinstance(baseline_ms, (int, float)) and float(baseline_ms) > 0.0
         }
 
+    async def _remeasure_keep_sigma(
+        self,
+        found: SigmaResolution,
+        measured: float,
+        base: SigmaAttribution,
+        series: dict[str, list[float]],
+        baseline: dict[str, float],
+    ) -> SigmaResolution:
+        """Buy extra benches until the dominant case's sigma settles or the budget ends."""
+        dominant = found.dominant_case
+        current = base
+        rounds = 0
+        stopped = ""
+        while rounds < SIGMA_REMEASURE_MAX_ROUNDS and current.dominant_case is not None:
+            remeasure_started = time.time()
+            extra = await measure_wallclock(
+                BenchRun(self.ic.driver_script, driver_args=[], repeat=self.ic.bench_repeat),
+                measurements=SIGMA_REMEASURE_BATCH,
+                timeout_sec=self.ic.bench_timeout_sec,
+            )
+            self._observe_measurement(remeasure_started)
+            rounds += 1
+            extra_series = _measurement_case_times(extra)
+            if not extra.get("success"):
+                stopped = "re-measure bench failed"
+                break
+            if set(series) - set(extra_series):
+                stopped = "re-measure lost a scored case"
+                break
+            for case_id in series:
+                series[case_id].extend(extra_series[case_id])
+            refreshed = attribute_sigma(series, baseline)
+            if refreshed is None:
+                stopped = "re-measure produced no usable spread"
+                break
+            current = refreshed
+        if current is base:
+            return replace(found, rounds=rounds, detail=stopped)
+        share = current.variance_shares.get(dominant)
+        # A case's *share* of the variance is structural -- q61's speedup term is 8x the others', so it holds most of
+        # the variance at any sample size -- and re-measuring cannot be expected to move it.
+        settled = current.case_sigmas[dominant] < base.case_sigmas[dominant]
+        return replace(
+            found,
+            sigma=rescaled_sigma(measured, base, current),
+            variance_share=share if share is not None else found.variance_share,
+            wall_share=current.wall_shares.get(dominant, found.wall_share),
+            rounds=rounds,
+            sample_size=current.sample_size,
+            unstable=current.dominant_case is not None and not settled,
+            detail=stopped,
+        )
+
     async def _resolve_keep_sigma(
         self,
         bench_result: dict,
@@ -3056,10 +3103,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             sample_size=base.sample_size,
         )
         incumbent = self.best_mean_case_speedup or 1.0
-        if not beats_current_best(
-            keep_score(measurement_scores),
-            best_mean_case_speedup=incumbent,
-        ):
+        if not beats_current_best(keep_score(measurement_scores), best_mean_case_speedup=incumbent):
             return replace(found, detail="reverted at every sigma")
         if passes_keep_threshold(
             measurement_scores,
@@ -3068,50 +3112,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             sigma_sample_size=base.sample_size,
         ):
             return replace(found, detail="kept at the measured sigma")
-
-        current = base
-        rounds = 0
-        stopped = ""
-        while rounds < SIGMA_REMEASURE_MAX_ROUNDS and current.dominant_case is not None:
-            remeasure_started = time.time()
-            extra = await measure_wallclock(
-                BenchRun(self.ic.driver_script, driver_args=[], repeat=self.ic.bench_repeat),
-                measurements=SIGMA_REMEASURE_BATCH,
-                timeout_sec=self.ic.bench_timeout_sec,
-            )
-            self._observe_measurement(remeasure_started)
-            rounds += 1
-            extra_series = _measurement_case_times(extra if isinstance(extra, dict) else {})
-            if not (isinstance(extra, dict) and extra.get("success")):
-                stopped = "re-measure bench failed"
-                break
-            if set(series) - set(extra_series):
-                stopped = "re-measure lost a scored case"
-                break
-            for case_id in series:
-                series[case_id].extend(extra_series[case_id])
-            refreshed = attribute_sigma(series, baseline)
-            if refreshed is None:
-                stopped = "re-measure produced no usable spread"
-                break
-            current = refreshed
-
-        if current is base:
-            return replace(found, rounds=rounds, detail=stopped)
-        share = current.variance_shares.get(dominant)
-        # A case's *share* of the variance is structural -- q61's speedup term is 8x the others', so it holds most of
-        # the variance at any sample size -- and re-measuring cannot be expected to move it.
-        settled = current.case_sigmas[dominant] < base.case_sigmas[dominant]
-        return replace(
-            found,
-            sigma=rescaled_sigma(measured, base, current),
-            variance_share=share if share is not None else found.variance_share,
-            wall_share=current.wall_shares.get(dominant, found.wall_share),
-            rounds=rounds,
-            sample_size=current.sample_size,
-            unstable=current.dominant_case is not None and not settled,
-            detail=stopped,
-        )
+        return await self._remeasure_keep_sigma(found, measured, base, series, baseline)
 
     def _case_move_rule(
         self,
@@ -4103,106 +4104,17 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             ),
         )
 
-    async def run_one_iteration(
+    def _emit_bench_scores(
         self,
-        iteration: int,
-        plan: str = "",
-        *,
-        benchmark_measurement: dict | None = None,
-    ) -> IterationResult:
-        """Execute a single build→validate→bench→canonical→decide iteration."""
-        iter_start = time.time()
-        force_jit_rebuild(self._jit_source_files())
-
-        # Step 1: Build (if configured).
-        if self.ic.build_command:
-            proc = await asyncio.create_subprocess_exec(
-                *self.ic.build_command,
-                cwd=self.ic.build_dir or self.ic.workspace_dir,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                start_new_session=True,
-            )
-            stdout, stderr = await communicate_process_group(
-                proc,
-                timeout=self.ic.build_timeout_sec,
-            )
-            if proc.returncode != 0:
-                return IterationResult(
-                    iteration=iteration,
-                    duration_sec=time.time() - iter_start,
-                    validation_passed=False,
-                    validation_summary=f"BUILD FAILED: {_build_failure_tail(stdout, stderr, 500)}",
-                    kept=False,
-                )
-
-        # Step 2: driver-owned full correctness suite.
-        measurement_started = time.time()
-        print("  [validate] Running full correctness suite...")
-        report = await run_validation_pipeline(
-            driver_script=self.ic.driver_script,
-            snr_threshold=self.ic.snr_threshold,
-            timeout_per_stage=self.ic.validate_stage_timeout_sec,
-        )
-        for r in report.results:
-            status = (
-                "PASS"
-                if r.passed
-                else "TIMEOUT"
-                if r.outcome == "timeout"
-                else "ERROR"
-                if r.outcome in {"driver_error", "invalid_result"}
-                else "FAIL"
-            )
-            snr_str = f" SNR={r.snr_db:.1f}dB" if r.snr_db is not None else ""
-            print(f"  [validate] Stage {r.stage} {r.stage_name}: {status}{snr_str}")
-
-        if not report.all_passed:
-            print(f"  [validate] FAILED at stage {report.failed_stage} — skipping bench")
-            self._observe_measurement(measurement_started)
-            return IterationResult(
-                iteration=iteration,
-                duration_sec=time.time() - iter_start,
-                validation_passed=False,
-                validation_summary=report.summary(),
-                validation_outcome=report.failed_outcome,
-                error_output=report.failed_output,
-                kept=False,
-            )
-
-        # Step 3: Benchmark (only if validation passed).
-        if benchmark_measurement is not None and self._can_reuse_insession_benchmark(
-            benchmark_measurement,
-            attempt_diff=self._working_tree_diff(),
-        ):
-            print("  [bench] Reusing in-session three-measurement result...")
-            bench_result = dict(benchmark_measurement)
-            bench_result["reused_from_insession"] = True
-        else:
-            print("  [bench] Running three independent benchmark suites...")
-            bench_result = await measure_wallclock(
-                BenchRun(self.ic.driver_script, driver_args=[], repeat=self.ic.bench_repeat),
-                measurements=KEEP_MEASUREMENT_COUNT,
-                timeout_sec=self.ic.bench_timeout_sec,
-            )
-        self._observe_measurement(measurement_started)
-
-        self.last_case_bandwidth = dict(bench_result.get("case_bandwidth") or {})
+        bench_result: dict,
+        sigma_resolution: SigmaResolution,
+        measurement_scores: list[float],
+        bench_error_output: str,
+    ) -> None:
+        """Print the KEEP-bar line and any pre-scoring bench-failure tail."""
         selected_raw_mean_ms = bench_result.get("median_ms")
-        snr_db = report.results[-1].snr_db if report.results else None
-        # A candidate whose bench crashed is reverted for "no speedup" unless the crash itself reaches the agent; the
-        # tool's output tail is the only place the traceback exists.
-        bench_error_output = (
-            "" if bench_result.get("success") else "BENCH FAILED: " + _bench_failure_detail(bench_result)
-        )
-
-        # Collapse per-case times into an equal-weight mean of per-case speedups, rather than allowing expensive cases
-        # to dominate an aggregate ratio.
-        self._apply_mean_case_speedup_metric(bench_result)
         mean_case_speedup = bench_result.get("mean_case_speedup")
-        measurement_scores = list(bench_result.get("measurement_mean_case_speedups") or [])
         score_text = f"{mean_case_speedup:.6f}x" if mean_case_speedup is not None else "n/a"
-        sigma_resolution = await self._resolve_keep_sigma(bench_result, measurement_scores)
         sigma = sigma_resolution.sigma
         required_score = required_keep_speedup(
             self.best_mean_case_speedup or 1.0,
@@ -4224,41 +4136,66 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             f"({bench_result.get('message', '')})"
         )
         if bench_error_output:
-            # The scoring verdict above has already overwritten ``message`` with "candidate emitted no per-case
-            # timings", which describes the symptom of a crash as if it were a formatting choice.
+            # The scoring verdict has already overwritten ``message`` with "candidate emitted no per-case timings",
+            # which describes the symptom of a crash as if it were a formatting choice.
             print(f"  [bench] {bench_error_output}")
 
-        # Profiling evidence is produced by the commit-bound Analysis Agent.
-        pmc_diagnosis = ""
-        pmc_full = ""
+    def _clears_keep_bar(
+        self,
+        bench_result: dict,
+        measurement_scores: list[float],
+        sigma_resolution: SigmaResolution,
+    ) -> bool:
+        """Whether a measured candidate is a KEEP.
 
-        # Step 5: Register check (optional — requires build artifacts)
-        vgpr = None
+        The mean of the independent pristine-relative scores must clear the current best by the candidate's own
+        measurement noise. A second-stage ASM result must also beat the original caller's aggregate time.
+        """
+        improved = bool(bench_result.get("success")) and passes_keep_threshold(
+            measurement_scores,
+            best_mean_case_speedup=(self.best_mean_case_speedup or 1.0),
+            sigma=sigma_resolution.sigma,
+            sigma_sample_size=sigma_resolution.sample_size,
+        )
+        if improved and self.ic.kernel_backend == "assembly":
+            source_ms = self.ic.pristine_baseline_wall_ms
+            raw_mean_ms = bench_result.get("median_ms")
+            improved = source_ms is not None and raw_mean_ms is not None and raw_mean_ms < source_ms
+        return improved
+
+    async def _decide_iteration_keep(
+        self,
+        iteration: int,
+        iter_start: float,
+        report,
+        bench_result: dict,
+    ) -> IterationResult:
+        """Score the bench, check registers, apply the KEEP bar, and build the IterationResult."""
+        # A candidate whose bench crashed is reverted for "no speedup" unless the crash itself reaches the agent; the
+        # tool's output tail is the only place the traceback exists.
+        bench_error_output = (
+            "" if bench_result.get("success") else "BENCH FAILED: " + _bench_failure_detail(bench_result)
+        )
+        # Collapse per-case times into an equal-weight mean of per-case speedups, rather than allowing expensive cases
+        # to dominate an aggregate ratio.
+        self._apply_mean_case_speedup_metric(bench_result)
+        measurement_scores = list(bench_result.get("measurement_mean_case_speedups") or [])
+        sigma_resolution = await self._resolve_keep_sigma(bench_result, measurement_scores)
+        self._emit_bench_scores(bench_result, sigma_resolution, measurement_scores, bench_error_output)
+        selected_raw_mean_ms = bench_result.get("median_ms")
+        mean_case_speedup = bench_result.get("mean_case_speedup")
+        snr_db = report.results[-1].snr_db if report.results else None
+
         reg_result = await check_registers(build_dir=self.ic.build_dir)
         vgpr = reg_result.get("vgpr") if reg_result.get("success") else None
         if vgpr:
             print(f"  [registers] VGPR={vgpr}")
 
-        # Step 6: the mean of the independent pristine-relative scores must clear the current best by the candidate's
-        # own measurement noise.
-        improved = bool(bench_result.get("success")) and passes_keep_threshold(
-            measurement_scores,
-            best_mean_case_speedup=(self.best_mean_case_speedup or 1.0),
-            sigma=sigma,
-            sigma_sample_size=sigma_resolution.sample_size,
-        )
+        improved = self._clears_keep_bar(bench_result, measurement_scores, sigma_resolution)
 
-        if improved and self.ic.kernel_backend == "assembly":
-            # A second-stage ASM result must also beat the original caller's aggregate time.
-            source_ms = self.ic.pristine_baseline_wall_ms
-            improved = source_ms is not None and selected_raw_mean_ms is not None and selected_raw_mean_ms < source_ms
-
-        # Step 7: the numerical contract, which only assembly declares and only it
-        # needs. Every other backend was judged by the driver in Step 4 and measured
-        # through it since; re-running that verdict here would answer the same
-        # question with the same command, while reading a task configuration whose
-        # shape the engine has no business knowing. The predicate is shared with the
-        # gate description every agent is given, so the two cannot disagree.
+        # The numerical contract, which only assembly declares and only it needs. Every other backend was judged by
+        # the driver and measured through it since; re-running that verdict here would answer the same question with
+        # the same command, while reading a task configuration whose shape the engine has no business knowing.
         canonical_summary = ""
         if improved and runs_task_suite_acceptance(self.ic.kernel_backend):
             canonical_started = time.time()
@@ -4289,26 +4226,95 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
                     vgpr=vgpr,
                     error_output=canonical.output,
                     kept=False,
-                    bench_detail=(bench_result if isinstance(bench_result, dict) else {}),
+                    bench_detail=bench_result,
                 )
-
-        duration = time.time() - iter_start
 
         return IterationResult(
             iteration=iteration,
-            duration_sec=duration,
+            duration_sec=time.time() - iter_start,
             validation_passed=True,
             validation_summary=report.summary() + canonical_summary,
             wall_ms=selected_raw_mean_ms,
             mean_case_speedup=mean_case_speedup,
             snr_db=snr_db,
-            pmc_diagnosis=pmc_diagnosis,
             vgpr=vgpr,
             kept=improved,
-            bench_detail=bench_result if isinstance(bench_result, dict) else {},
-            pmc_full=pmc_full,
+            bench_detail=bench_result,
             error_output=bench_error_output,
         )
+
+    async def run_one_iteration(
+        self,
+        iteration: int,
+        plan: str = "",
+        *,
+        benchmark_measurement: dict | None = None,
+    ) -> IterationResult:
+        """Execute a single build→validate→bench→canonical→decide iteration."""
+        iter_start = time.time()
+        force_jit_rebuild(self._jit_source_files())
+
+        if self.ic.build_command:
+            proc = await asyncio.create_subprocess_exec(
+                *self.ic.build_command,
+                cwd=self.ic.build_dir or self.ic.workspace_dir,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                start_new_session=True,
+            )
+            stdout, stderr = await communicate_process_group(
+                proc,
+                timeout=self.ic.build_timeout_sec,
+            )
+            if proc.returncode != 0:
+                return IterationResult(
+                    iteration=iteration,
+                    duration_sec=time.time() - iter_start,
+                    validation_passed=False,
+                    validation_summary=f"BUILD FAILED: {_build_failure_tail(stdout, stderr, 500)}",
+                    kept=False,
+                )
+
+        measurement_started = time.time()
+        print("  [validate] Running full correctness suite...")
+        report = await run_validation_pipeline(
+            driver_script=self.ic.driver_script,
+            snr_threshold=self.ic.snr_threshold,
+            timeout_per_stage=self.ic.validate_stage_timeout_sec,
+        )
+        for result in report.results:
+            snr_str = f" SNR={result.snr_db:.1f}dB" if result.snr_db is not None else ""
+            print(f"  [validate] Stage {result.stage} {result.stage_name}: {result.status_label}{snr_str}")
+        if not report.all_passed:
+            print(f"  [validate] FAILED at stage {report.failed_stage} — skipping bench")
+            self._observe_measurement(measurement_started)
+            return IterationResult(
+                iteration=iteration,
+                duration_sec=time.time() - iter_start,
+                validation_passed=False,
+                validation_summary=report.summary(),
+                validation_outcome=report.failed_outcome,
+                error_output=report.failed_output,
+                kept=False,
+            )
+
+        if benchmark_measurement is not None and self._can_reuse_insession_benchmark(
+            benchmark_measurement,
+            attempt_diff=self._working_tree_diff(),
+        ):
+            print("  [bench] Reusing in-session three-measurement result...")
+            bench_result = dict(benchmark_measurement)
+            bench_result["reused_from_insession"] = True
+        else:
+            print("  [bench] Running three independent benchmark suites...")
+            bench_result = await measure_wallclock(
+                BenchRun(self.ic.driver_script, driver_args=[], repeat=self.ic.bench_repeat),
+                measurements=KEEP_MEASUREMENT_COUNT,
+                timeout_sec=self.ic.bench_timeout_sec,
+            )
+        self._observe_measurement(measurement_started)
+        self.last_case_bandwidth = dict(bench_result.get("case_bandwidth") or {})
+        return await self._decide_iteration_keep(iteration, iter_start, report, bench_result)
 
     def _update_search_policy(self, iteration: int) -> SearchPolicyDecision:
         """Derive and persist the search mode before planning an iteration."""
@@ -6215,48 +6221,35 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             )
         )
 
-    async def _run_locked(
+    async def _begin_locked_run(
         self,
         agents: LoopAgents,
         *,
         callbacks: LoopCallbacks,
         usage=None,
-    ) -> list[IterationResult]:
-        """Run the autonomous iteration loop."""
-        import functools
-
+    ) -> LoopAgents:
+        """Load durable state, open the session segment, and seed the campaign clock."""
         self._search_actors = agents.search_actors
-
         global print
         print = functools.partial(print, flush=True)  # noqa: A001 - deliberate flush-on-print rebind
-
         self._initialize_campaign_runtime(usage)
-
-        # Durable, file-backed run state + append-only event log.
         self.state_store = LoopStateStore(self.ic.workspace_dir)
         state_exists = self.state_store.state_path.exists()
         self.run_state = self.state_store.load()
         actors = _with_search_actor(agents, self._session_start_bundle())
-        agent_fn, agent_factory, supervisor_fn = actors.agent_fn, actors.agent_factory, actors.supervisor_fn
-        analysis_service, orchestration_service = actors.analysis_service, actors.orchestration_service
-        current_ruling_path = latest_supervisor_ruling_path(self.ic.workspace_dir)
         self._supervisor_ruling = load_latest_supervisor_ruling(self.ic.workspace_dir) if self.resume else ""
-
         # Ownership boundary for anything a candidate creates, taken before this loop touches the workspace.
         self._pre_untracked = self._untracked_snapshot()
-
         self._restore_or_begin_campaign(
             state_exists=state_exists,
-            current_ruling_path=current_ruling_path,
-            agent_fn=agent_fn,
-            orchestration_service=orchestration_service,
+            current_ruling_path=latest_supervisor_ruling_path(self.ic.workspace_dir),
+            agent_fn=actors.agent_fn,
+            orchestration_service=actors.orchestration_service,
             on_best_committed=callbacks.on_best_committed,
         )
-
         # Anchor the campaign clock now that the state carrying what earlier sessions spent is loaded.
         self._campaign_started_at = self.start_time - max(0.0, float(self.run_state.round_costs.campaign_sec))
-
-        if state_exists and reconcile_stale_running_session(self.run_state):
+        if reconcile_stale_running_session(self.run_state):
             self.state_store.append_event(
                 make_event(
                     "session_interrupted",
@@ -6265,7 +6258,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
                 )
             )
             self.state_store.save(self.run_state)
-
+        # Captured before start_session, which increments session_index and clears last_experiment_id.
         parent_experiment_id = self.run_state.last_experiment_id
         next_segment_index = self.run_state.session_index + 1
         self._set_state_identity(self.run_state)
@@ -6284,82 +6277,119 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             ),
         )
         self.run_state.last_experiment_id = self.experiment.experiment_id
-        self.state_store.append_event(
-            make_event(
-                "session_started",
-                self.run_state.iteration,
-            )
-        )
+        self.state_store.append_event(make_event("session_started", self.run_state.iteration))
         self.state_store.save(self.run_state)
-
         self._persist_pr_knowledge()
-        self._announce_run(supervisor_fn)
-
+        self._announce_run(actors.supervisor_fn)
         await self._anchor_speedup_reporting()
-
-        # Seed the run state's baseline and, guardedly, resume a prior best from a reused workspace (only when the
-        # recorded best commit is still HEAD).
         self._seed_and_hydrate_run_state()
         self._adopt_validated_warm_start()
-
         self._verify_baseline_anchor()
-
         # Once the anchor is settled and verified, so the estimate is handed the case set the objective scores and
         # latencies from the campaign's own clock.
         await self._establish_ceiling()
-
         # A crash immediately after a verified commit can leave the KEEP's archive unfinished.
         await self._finish_recovered_pending_keep()
-
-        # Candidates an earlier round bought and never measured.
         self._restore_lane_queue()
-
-        # The previous round's verdict, for the same reason: a REPLACE is spent on the round after the one it judged,
-        # and the budget often ends between the two.
+        # The previous round's verdict: a REPLACE is spent on the round after the one it judged, and the budget often
+        # ends between the two.
         self._restore_critic_ruling()
-
         # Analyze the baseline canonical commit once before any specialist or Implementer session.
-        if analysis_service is not None:
-            await self._resolve_analysis_context(analysis_service)
+        if actors.analysis_service is not None:
+            await self._resolve_analysis_context(actors.analysis_service)
+        return actors
 
+    async def _settle_locked_attempt(
+        self,
+        attempt,
+        frame: _IterationFrame,
+        *,
+        callbacks: LoopCallbacks,
+    ) -> None:
+        """Measure one sourced attempt, stamp it, rule on it, and close the iteration."""
+        (
+            unmeasured_result,
+            commit_hash,
+            rationale,
+            _attempt_source,
+            _attempt_diff,
+            reusable_benchmark,
+            _optimization_plan_path,
+            optimization_plan_executable,
+        ) = attempt
+        # Snapshot the best-so-far BEFORE this iteration is measured, so the archive can record the true delta vs
+        # the standard it had to beat (run_one_iteration mutates self.best_wall_ms on an improvement).
+        frame = replace(
+            frame,
+            best_before=self.best_wall_ms,
+            best_mean_case_speedup_before=self.best_mean_case_speedup,
+        )
+        if unmeasured_result is not None:
+            result = unmeasured_result
+        else:
+            try:
+                result = await self.run_one_iteration(
+                    frame.iteration,
+                    plan=frame.session_sink.get("plan", ""),
+                    **({"benchmark_measurement": reusable_benchmark} if reusable_benchmark is not None else {}),
+                )
+            except Exception as e:  # noqa: BLE001
+                # Turn the crash into a FAILED result (crashed=True) and let it flow through the same
+                # verdict/ledger/archive path.
+                print(f"  [CRASH] iteration {frame.iteration} crashed during run: {e}")
+                result = IterationResult(
+                    iteration=frame.iteration,
+                    duration_sec=0.0,
+                    validation_passed=False,
+                    validation_summary=f"iteration crashed: {e}",
+                    error_output=traceback.format_exc()[-4000:],
+                    kept=False,
+                    crashed=True,
+                )
+        result.commit_hash = commit_hash
+        result.agent_rationale = rationale
+        self._stamp_result_profile(result, frame.session_sink)
+        # Session end reason + turns spent (from the in-session gate / SDK via session_sink) — persisted so a
+        # run's end-reason distribution (edit cap / turn cap / converged / …) is analyzable.
+        result.session_end_reason = frame.session_sink.get("end_reason", "")
+        result.turns = frame.session_sink.get("turns")
+        self._apply_iteration_planning_state(
+            optimization_plan_created=optimization_plan_executable,
+        )
+        ruling = self._rule_on_attempt(result, attempt, frame, on_best_committed=callbacks.on_best_committed)
+        await self._close_iteration(result, attempt, frame, ruling=ruling, callbacks=callbacks)
+
+    async def _run_locked(
+        self,
+        agents: LoopAgents,
+        *,
+        callbacks: LoopCallbacks,
+        usage=None,
+    ) -> list[IterationResult]:
+        """Run the autonomous iteration loop."""
+        actors = await self._begin_locked_run(agents, callbacks=callbacks, usage=usage)
+        analysis_service = actors.analysis_service
         iteration = self.run_state.next_iteration - 1
         while True:
             iteration += 1
-
             # Build the lineage digest once per iteration — reused by BOTH the supervisor (trajectory to review) and
             # the implementer (prompt history).
-            digest = ""
-            if getattr(self, "archive", None) is not None:
-                digest = self.archive.render_digest()
-
-            # Ruled on once per iteration, with the other conditions that decide whether this iteration may run at
-            # all -- and after them, so a run that was stopping anyway never touches the device.
+            digest = self.archive.render_digest()
             stop, hazard = self._stop_condition_met(iteration)
             if stop:
                 break
-
             actors = _with_search_actor(actors, self._iteration_bundle(iteration))
             agent_fn, agent_factory, supervisor_fn = actors.agent_fn, actors.agent_factory, actors.supervisor_fn
             orchestration_service = actors.orchestration_service
-
-            # Price the round before anything is spent on it.
-            self._close_round()
-            round_lanes = self.ic.lanes
-            if not self._lane_queue:
-                admitted_lanes = self._admit_next_round(iteration)
-                if admitted_lanes is None:
-                    break
-                round_lanes = admitted_lanes
-                self._open_round(iteration, lanes=round_lanes)
-
+            round_lanes = self._price_round(iteration)
+            if round_lanes is None:
+                break
             await self._open_iteration(
                 iteration=iteration,
                 digest=digest,
                 supervisor_fn=supervisor_fn,
                 analysis_service=analysis_service,
             )
-
-            # Agent proposes modification
             session_sink: dict = {}
             # What a fan-out round leaves this iteration holding, so the single-session path below spends it instead
             # of buying it again.
@@ -6402,74 +6432,9 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
                 if self._refused_round:
                     break
                 continue
-            (
-                unmeasured_result,
-                commit_hash,
-                rationale,
-                attempt_source,
-                attempt_diff,
-                reusable_benchmark,
-                optimization_plan_path,
-                optimization_plan_executable,
-            ) = attempt
-
-            # Snapshot the best-so-far BEFORE this iteration is measured, so the archive can record the true delta vs
-            # the standard it had to beat (run_one_iteration mutates self.best_wall_ms on an improvement).
-            best_before = self.best_wall_ms
-            best_mean_case_speedup_before = self.best_mean_case_speedup
-            frame = replace(
-                frame,
-                best_before=best_before,
-                best_mean_case_speedup_before=best_mean_case_speedup_before,
-            )
-
-            # Run validation + bench.
-            if unmeasured_result is not None:
-                result = unmeasured_result
-            else:
-                try:
-                    run_kwargs = {}
-                    if reusable_benchmark is not None:
-                        run_kwargs["benchmark_measurement"] = reusable_benchmark
-                    result = await self.run_one_iteration(
-                        iteration,
-                        plan=session_sink.get("plan", ""),
-                        **run_kwargs,
-                    )
-                except Exception as e:  # noqa: BLE001
-                    # Turn the crash into a FAILED result (crashed=True) and let it flow through the same
-                    # verdict/ledger/archive path.
-                    print(f"  [CRASH] iteration {iteration} crashed during run: {e}")
-                    result = IterationResult(
-                        iteration=iteration,
-                        duration_sec=0.0,
-                        validation_passed=False,
-                        validation_summary=f"iteration crashed: {e}",
-                        error_output=traceback.format_exc()[-4000:],
-                        kept=False,
-                        crashed=True,
-                    )
-            result.commit_hash = commit_hash
-            result.agent_rationale = rationale
-            self._stamp_result_profile(result, session_sink)
-            # Session end reason + turns spent (from the in-session gate / SDK via session_sink) — persisted so a
-            # run's end-reason distribution (edit cap / turn cap / converged / …) is analyzable.
-            result.session_end_reason = session_sink.get("end_reason", "")
-            result.turns = session_sink.get("turns")
-
-            if agent_fn is not None:
-                self._apply_iteration_planning_state(
-                    optimization_plan_created=optimization_plan_executable,
-                )
-
-            ruling = self._rule_on_attempt(result, attempt, frame, on_best_committed=callbacks.on_best_committed)
-
-            await self._close_iteration(result, attempt, frame, ruling=ruling, callbacks=callbacks)
-
+            await self._settle_locked_attempt(attempt, frame, callbacks=callbacks)
         self._persist_terminal_state()
-
         self._print_final_report()
-
         return self.results
 
 

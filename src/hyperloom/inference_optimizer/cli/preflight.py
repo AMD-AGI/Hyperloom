@@ -1000,37 +1000,21 @@ def _check_serving_framework(args, benchmark_python: str) -> dict[str, Any]:
     ).strip().lower() or framework_registry.DEFAULT_FRAMEWORK
 
     if framework_registry.is_scriptable(framework):
-        return {
-            "status": "skipped",
-            "skip_reason": "scriptable_framework",
-            "target": framework,
-        }
+        return {"status": "skipped", "skip_reason": "scriptable_framework", "target": framework}
     if os.environ.get(SKIP_FRAMEWORK_CHECK_ENV, "").strip():
         print(f"Preflight: {SKIP_FRAMEWORK_CHECK_ENV} set; skipping the {framework} importability check")
-        return {
-            "status": "skipped",
-            "skip_reason": "skip_framework_check_env",
-            "target": framework,
-        }
+        return {"status": "skipped", "skip_reason": "skip_framework_check_env", "target": framework}
     remote_base_url = os.environ.get("BENCHMARK_BASE_URL", "").strip()
     if remote_base_url:
         print(f"Preflight: BENCHMARK_BASE_URL={remote_base_url}; skipping the local {framework} check (remote server)")
-        return {
-            "status": "skipped",
-            "skip_reason": "remote_benchmark_url",
-            "target": framework,
-        }
+        return {"status": "skipped", "skip_reason": "remote_benchmark_url", "target": framework}
 
     from hyperloom.inference_optimizer.multi_node._internal.external_state import external_service_url
     from hyperloom.orchestrator.actions.executors._multi_node_env import is_multi_node
 
     if is_multi_node() and external_service_url():
         print(f"Preflight: external multi-node mode; skipping the local {framework} check (serving is on remote pods)")
-        return {
-            "status": "skipped",
-            "skip_reason": "external_multi_node",
-            "target": framework,
-        }
+        return {"status": "skipped", "skip_reason": "external_multi_node", "target": framework}
 
     interpreters = _framework_probe_interpreters(framework, benchmark_python)
     found, probe = _resolve_framework_build(framework, interpreters)
@@ -1054,6 +1038,13 @@ def _check_serving_framework(args, benchmark_python: str) -> dict[str, Any]:
     if found and probe.verdict is not False:
         os.environ[RESOLVED_FRAMEWORK_PYTHON_ENV] = found
         os.environ[RESOLVED_FRAMEWORK_ENV] = framework
+    return _report_framework_probe(framework, found, probe, interpreters)
+
+
+def _report_framework_probe(
+    framework: str, found: str | None, probe: _Probe, interpreters: list[str]
+) -> dict[str, Any]:
+    """Report a usable or unverifiable probe; anything else goes to ``_report_unusable_framework``."""
     evidence = _rocm_evidence(framework)
     if found and probe.verdict is True:
         print(f"Preflight: {framework} importable ({found}); {evidence} confirms a ROCm build")
@@ -1088,7 +1079,14 @@ def _check_serving_framework(args, benchmark_python: str) -> dict[str, Any]:
             "message": probe.detail or "framework probe timed out",
             "detail": {"probe_interpreter": None, "rocm_verified": None},
         }
+    return _report_unusable_framework(framework, found, probe, interpreters)
 
+
+def _report_unusable_framework(
+    framework: str, found: str | None, probe: _Probe, interpreters: list[str]
+) -> dict[str, Any]:
+    """Warn about, or stop the run on, a serving framework that is missing here or is not a ROCm build."""
+    evidence = _rocm_evidence(framework)
     # Every path below stops the run, so it needs a remedy that works.
     probed = "\n".join(f"  - {python_exe}" for python_exe in interpreters)
     if framework not in _SETUP_INSTALLABLE_FRAMEWORKS:
