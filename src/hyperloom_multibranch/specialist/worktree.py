@@ -42,8 +42,13 @@ _GIT_IDENTITY = {
 _FIXED_CONFIG = ("-c", "core.autocrlf=false", "-c", "core.safecrlf=false", "-c", "diff.noprefix=false")
 _STAGE = ("add", "--all", "--")
 _HEAD = "HEAD"
-#: Pathspecs that leave out the built files of :data:`SKIPPED`, for a tree whose editor may have written them.
-_UNPATCHABLE = tuple(f":(glob,exclude)**/{name}" + ("" if name.startswith("*") else "/**") for name in SKIPPED)
+
+
+def _unpatchable(prefix: str) -> tuple[str, ...]:
+    """Pathspecs that leave out the built files of :data:`SKIPPED` under ``prefix``, for a tree whose editor may have
+    written them; anchored at ``prefix``, as git 2.34 stages no new file under a nested prefix past an unanchored
+    exclude."""
+    return tuple(f":(glob,exclude){prefix}/**/{name}" + ("" if name.startswith("*") else "/**") for name in SKIPPED)
 
 
 class WorktreeError(RuntimeError):
@@ -170,7 +175,7 @@ class BranchWorktree:
         layout = self._layouts.get(component)
         if layout is None:
             raise UnsupportedComponentError(f"{component} has no package layout")
-        paths = (layout.upstream_prefix, *_UNPATCHABLE)
+        paths = (layout.upstream_prefix, *_unpatchable(layout.upstream_prefix))
         with tempfile.TemporaryDirectory(prefix="mb-diff-") as scratch:
             index = Path(scratch) / "index"
             _git(self.path, "read-tree", commit, index=index)

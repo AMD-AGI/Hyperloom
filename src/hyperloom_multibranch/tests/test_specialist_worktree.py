@@ -105,3 +105,27 @@ def test_each_branch_edits_its_own_worktree(tmp_path, base):
 
     assert (second.path / "vllm" / "config.py").read_bytes() == CONFIG
     assert base.worktree("s1", tmp_path / "s1").head() == "c1"
+
+
+def test_a_diff_from_a_commit_holds_new_files_under_a_nested_package_and_leaves_out_built_ones(tmp_path):
+    package = tmp_path / "site-packages" / "sglang"
+    (package / "srt").mkdir(parents=True)
+    (package / "srt" / "a.py").write_bytes(b"x = 1\n")
+    installed = PackageBase("sglang", package, None, None)
+    base = SourceBase(tmp_path / "source", locator=lambda _layout: installed)
+    base.build(["sglang"])
+    worktree = base.worktree("s1", tmp_path / "s1")
+    worktree.sync("c0", [])
+    root, srt = worktree.commit(), worktree.path / "python" / "sglang" / "srt"
+    (srt / "tuned.csv").write_bytes(b"m,n,k\n")
+    subprocess.run(["git", "add", "-A"], cwd=worktree.path, check=True)
+    subprocess.run(["git", "-c", "user.name=a", "-c", "user.email=a@a", "commit", "-qm", "keep"], cwd=worktree.path)
+    (srt / "kernel.py").write_bytes(b"y = 2\n")
+    (srt / "__pycache__").mkdir()
+    (srt / "__pycache__" / "kernel.cpython-310.pyc").write_bytes(b"\x00compiled")
+    (srt / "ops.so").write_bytes(b"\x7fELF")
+
+    patch = worktree.diff_from(root, "sglang")
+
+    assert "b/python/sglang/srt/tuned.csv" in patch and "b/python/sglang/srt/kernel.py" in patch
+    assert ".pyc" not in patch and "ops.so" not in patch
