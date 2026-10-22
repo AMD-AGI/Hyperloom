@@ -3258,6 +3258,8 @@ def test_runner_uses_analysis_checkpoint_after_session_failure(
     catalog.write_text("{}")
 
     class FailingAnalysisService:
+        profiling_enabled = True
+
         async def ensure_bundle(self, context, **_kwargs):
             raise RuntimeError("analysis interrupted")
 
@@ -4426,6 +4428,8 @@ def test_analysis_service_rechecks_same_commit_for_partial_upgrade(
             return context
 
     class AnalysisService:
+        profiling_enabled = True
+
         async def ensure_bundle(self, context, **_kwargs):
             analysis_calls.append(context.analysis_commit)
             return Bundle(
@@ -4482,8 +4486,11 @@ def test_keep_defers_incremental_analysis_until_next_request(
             self.root.mkdir(parents=True, exist_ok=True)
             (self.root / "manifest.json").write_text("{}")
             (commit_root / "published.json").write_text(json.dumps({"generation_root": self.root.name}))
+            self.manifest = {"status": "READY"}
             self.outcome = SimpleNamespace(
                 checkpoint_level="published",
+                available_tier="profiled",
+                upgrade_exhausted=False,
                 to_dict=dict,
             )
 
@@ -4491,6 +4498,8 @@ def test_keep_defers_incremental_analysis_until_next_request(
             return context
 
     class AnalysisService:
+        profiling_enabled = True
+
         async def ensure_bundle(
             self,
             context,
