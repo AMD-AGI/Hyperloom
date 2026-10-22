@@ -39,6 +39,23 @@ class AttemptRow:
     error_class: str = ""
     provenance: str = ""
 
+    @classmethod
+    def undelivered_round(
+        cls, lever_kind: str, outcome: str, specialist_task_id: str, candidate_id: str
+    ) -> "AttemptRow":
+        """A specialist round that delivered nothing to measure: not adopted, no gain, no throughput."""
+        return cls(
+            lever_kind,
+            outcome,
+            False,
+            None,
+            None,
+            None,
+            task_id=specialist_task_id,
+            candidate_id=candidate_id,
+            specialist_task_id=specialist_task_id,
+        )
+
 
 def record_attempt_row(state: Any, row: AttemptRow) -> None:
     """Append *row*, stamped with the macro-cycle by ``record_attempt``."""

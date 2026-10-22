@@ -28,6 +28,10 @@ cleanup). Only the worktree and the task workspace are passed as writable
 file-system containment beyond that. Behavioural constraints are enforced by
 the prompt iron-rules (patches go through `integrate_patch`, never a direct
 write to a source tree) and by post-hoc Critic + PolicyGate review.
+It loads no user, project or local settings (`--setting-sources=`), so the
+hooks, permissions and env in the operator's `~/.claude/settings.json` or a
+checkout's `.claude/` do not reach it; credentials still come from the
+forwarded environment and the CLI's own config.
 The worktree is a best-effort isolation aid for deployments where the
 framework is installed as a git checkout; it is absent when the framework
 is pip-installed (the default; logged as `no_git_framework_source_root`).
@@ -90,7 +94,7 @@ measure → edit → measure loop on its own cards inside its worktree.
 
 | Key                  | Type     | Required | Description |
 |----------------------|----------|----------|-------------|
-| `tags`               | list     | yes*     | Canonical knowledge-domain tags (`framework`, `kernel`, `communication`, `compiler`, `systems`, `pr_intelligence`, `research_scout`). |
+| `tags`               | list     | yes*     | Canonical knowledge-domain tags (`framework`, `kernel`, `communication`, `compiler`, `systems`, `speculative_decoding`, `pr_intelligence`, `research_scout`). |
 | `domain`             | string   | yes*     | Backward-compatible single-tag alias using a SpecialistDomain key. Required only when `tags` is absent. |
 | `gap_canonical_id`   | string   | yes      | Stable id of the gap (e.g. `gap.framework.cuda_graph_inefficient.session-<sid>`). |
 | `gap_symptom`        | string   | no       | Human summary of the symptom (e.g. `decode kernel at 30% HBM peak`). |

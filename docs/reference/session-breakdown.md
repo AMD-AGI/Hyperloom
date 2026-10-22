@@ -38,8 +38,8 @@ recorded-timeline wire shape:
 ```
 
 6.1 changes three things inside the 6 major, an exception to the compatibility
-rules below: it renames one key, removes keys no producer populated, and
-reports two unmeasured figures as null. `throughput_tok_s_per_gpu` in
+rules below: it renames one key, removes keys no producer populated or that
+only carried a constant, and reports two unmeasured figures as null. `throughput_tok_s_per_gpu` in
 `outcome.baseline`, `outcome.final` and the `baseline` event's `measurement` is
 now `output_throughput`, and the old key is no longer written. The value is
 unchanged: the whole-server output throughput, not a per-GPU figure. Archived
@@ -56,10 +56,17 @@ disposition `removed in 6.1, never populated`:
 - `critic_review.iteration` on framework proposals
 - `kernel_agent` `geak.product.cfg_hash` and `geak.product.final_overlay_digest`
 - `kernel_agent` `entry.budget_remaining_sec`
+- `roofline` event `ext.actions[].kernel_roofline.kernels[].rocprof_roofline`
 
 The `event_id` and `ordinal` row-scope declarations are removed from the schema
 types: they were already stripped before export and never appeared on the wire.
 `conc_sweep` `points[].budget_remaining_sec` is unchanged.
+
+Two keys that only ever carried a constant are removed with the disposition
+`removed in 6.1, constant`: `roofline` event
+`ext.actions[].kernel_roofline.kernels[].roofline_measured` (always `false`;
+`roofline_source` states whether a row's bound is analytical or a placeholder)
+and `baseline` event `ext.actions[].convergence` (always `insufficient_rounds`).
 
 Two figures are null instead of a fabricated default when they were not
 measured or not provided. `outcome.validation.attributed_gain_pct` and
@@ -218,7 +225,7 @@ keep their values, with any recognizable credential inside a value masked.
 Replaying a session takes credentials from its own environment, never from the
 breakdown.
 
-`metadata.grading` — which axis this session was configured to grade on:
+`metadata.grading` — the grading mode this session was started in:
 `benchmark_mode` (`agentx` or `synthetic`), `objective`, and the `tput_guard`
 that rides along with the interactivity objective (`enabled`, `noise_pct`).
 
@@ -230,12 +237,14 @@ document is the output axis by construction, so without this block a consumer
 cannot tell the two kinds of session apart — and on the canonical corpus the
 two axes differ by roughly two orders of magnitude.
 
-This is the session-level *setting*. What a promotion was actually decided on
-is `outcome.validation.graded_on`, read off the promotion itself. On a session
-that promoted anything the two agree, because a comparison that cannot supply
-the configured axis pair fails rather than settling for another axis — nothing
-is ever promoted off-objective. Neither field resolves the other even so: a
-session can be configured for an axis and promote nothing on it.
+`grading.objective` is a mode marker written when the session starts: an
+interactivity session always carries `e2e_norm_intvty_p90`, which is not the
+axis promotions are decided on. The deciding axis is
+`outcome.validation.graded_on` (and `outcome.final.graded_on`), read off the
+promotion itself (`e2e_norm_intvty_p50` on an AgentX replay). A session that
+adopted nothing has no `graded_on`; one that adopted but never validated
+reports the adoption axis.
+
 `tput_guard.noise_pct` is null on a session that predates the band being
 recorded.
 

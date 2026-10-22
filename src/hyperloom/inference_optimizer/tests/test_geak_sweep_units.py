@@ -17,7 +17,6 @@ from hyperloom.common.visible_devices import VISIBLE_DEVICE_VARS
 from hyperloom.orchestrator.actions.executors import _geak_sweep
 from hyperloom.orchestrator.actions.executors._geak_sweep import sweep_via_geak
 from hyperloom.orchestrator.actions.executors._grid_base import coerce_extra_envs
-from hyperloom.orchestrator.kernel.attempt_summary import _backend_results_dir
 from hyperloom.orchestrator.kernel.conc_sweep import _budget_limited_without_valid_pair
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.actions.executors._gpu_pin import (
@@ -509,32 +508,6 @@ def test_budget_limited_without_valid_pair_paths() -> None:
         )
         is True
     )
-
-
-def test_backend_results_dir_keyed_and_single_subdir(tmp_path: Path) -> None:
-    """Resolve the results dir by session key, and via the lone-subdir fallback."""
-    from hyperloom.inference_optimizer.session.session_paths import (
-        kernel_agent_runs_root,
-    )
-
-    # Keyed by ``session_dir.name``.
-    sd = tmp_path / "sess-A"
-    runs = kernel_agent_runs_root(sd)
-    (runs / sd.name / "results").mkdir(parents=True)
-    assert _backend_results_dir(sd, "") == runs / sd.name / "results"
-
-    # Migrated-key recovery: a single subdir under the runs root.
-    sd2 = tmp_path / "sess-B"
-    runs2 = kernel_agent_runs_root(sd2)
-    (runs2 / "migrated-key" / "results").mkdir(parents=True)
-    assert _backend_results_dir(sd2, "") == runs2 / "migrated-key" / "results"
-
-    # Ambiguous (no keyed match, not exactly one subdir) -> None.
-    sd3 = tmp_path / "sess-C"
-    runs3 = kernel_agent_runs_root(sd3)
-    (runs3 / "one").mkdir(parents=True)
-    (runs3 / "two").mkdir(parents=True)
-    assert _backend_results_dir(sd3, "") is None
 
 
 def test_coerce_extra_envs_skips_malformed_tokens() -> None:

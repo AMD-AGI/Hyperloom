@@ -439,7 +439,6 @@ def test_build_kernel_roofline_shape():
     rows = kr["kernels"]
     assert len(rows) == 2
     assert all("kernel_id" in r for r in rows)
-    assert all(r["rocprof_roofline"] is None for r in rows)
     # rows are a superset of the TraceLens kernel_roofline row schema.
     tracelens_row_keys = {
         "kernel_id",
@@ -460,7 +459,6 @@ def test_build_kernel_roofline_shape():
         "roofline_name",
         "recommended_actions",
         "reusable_native_kernel",
-        "rocprof_roofline",
     }
     for r in rows:
         assert tracelens_row_keys.issubset(r.keys())
@@ -490,7 +488,6 @@ def test_build_candidates_fills_analytical_roofline_incl_vendor():
     assert cand["bound_type"] == "compute_bound"
     assert cand["arithmetic_intensity"] > 1000
     assert cand["roofline_source"] == "analytical"
-    assert cand["roofline_measured"] is False  # analytical, not hardware-measured
     assert 0.0 < cand["efficiency_percent"] <= 100.0
 
 
@@ -628,16 +625,14 @@ def test_summary_csv_parseable():
     assert rows and rows[0]["kernel_category"] == "GEMM"
 
 
-def test_roofline_rows_flag_placeholder_not_measured():
-    # The bypass roofline is analytical, not a hardware measurement.
+def test_roofline_rows_flag_placeholder_bound():
     cands = report.build_candidates(_analyze([dict(k) for k in _KERNELS]), framework="vllm", target_platform="MI300X")
     kr = report.build_kernel_roofline(cands, analysis_md_path="/x/a.md", kernel_candidates_path="/x/kc.json")
     assert kr["kernels"]
     for r in kr["kernels"]:
-        assert r.get("roofline_measured") is False
+        assert r["roofline_source"] == "placeholder"
         assert r["bound_type"] == "\u2014"  # em-dash "unknown" marker
-    # candidates carry the same honest marker.
-    assert all(c.get("roofline_measured") is False for c in cands["hot_kernels"])
+    assert all(c["roofline_source"] == "placeholder" for c in cands["hot_kernels"])
 
 
 def test_render_analysis_md_sections_textgen():

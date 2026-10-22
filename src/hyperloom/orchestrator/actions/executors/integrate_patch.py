@@ -4608,9 +4608,8 @@ class IntegratePatchExecutor:
                     "args_mode": args_mode,
                 },
             }
-        # Classified here so the gate compares two observations produced by the
-        # same reader.
-        bench["boot_observation_path"] = self._record_bench_bringup(bench, bench_leg.output_root)
+        # Classified here so the gate compares two observations produced by the same reader.
+        bench["boot_observation_path"] = await asyncio.to_thread(self._observe_bench_boot, bench, bench_leg.output_root)
         # lm-eval writes to ``$EVAL_RESULT_DIR`` under the grid slot, not inside
         # the ``benchmark_*`` workspace. Grade from the slot so the recursive
         # search finds eval output while honoring an explicit ``result_dir``
@@ -4642,7 +4641,7 @@ class IntegratePatchExecutor:
             gate_evidence["enablement_accuracy_metric"] = str(results_payload.get("metric") or "")
         return bench, gate_evidence
 
-    def _record_bench_bringup(self, bench: dict[str, Any], output_root: Path) -> str:
+    def _observe_bench_boot(self, bench: dict[str, Any], output_root: Path) -> str:
         """Classify the server this bench ran against and persist the observation.
 
         Args:

@@ -28,7 +28,6 @@ import json
 import logging
 import os
 import re
-import shutil
 import subprocess
 import time
 from concurrent.futures import CancelledError
@@ -37,6 +36,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 from urllib.parse import urlsplit
 
+from hyperloom.common.agent_cli import resolve_codex_executable
 from hyperloom.common.codex_session import (
     CodexSessionError,
     probe_codex_sandbox_capability,
@@ -92,38 +92,6 @@ class SpecialistAgentUnavailableError(RuntimeError):
     """
 
 
-def resolve_codex_executable(explicit: str = "") -> str:
-    """Resolve the Codex CLI a specialist subprocess should spawn.
-
-    Order: an explicit path, then ``codex`` on ``$PATH`` (what the runtime
-    container installs), then the version-pinned runtime shipped with the Codex
-    SDK. The SDK runtime is last so an operator's own installation still wins,
-    but present at all so a pod that never ran the npm install can still start a
-    specialist.
-
-    Args:
-        explicit: Operator-configured path; returned as-is when non-empty.
-
-    Returns:
-        The resolved executable path, or ``""`` when no Codex runtime exists —
-        the caller reports that instead of spawning a name that cannot run.
-    """
-    pinned = (explicit or "").strip()
-    if pinned:
-        return pinned
-    on_path = shutil.which(AGENT_BACKEND_CODEX)
-    if on_path:
-        return on_path
-    try:
-        # Installed as the ``openai-codex`` SDK's own runtime dependency.
-        from codex_cli_bin import bundled_codex_path  # type: ignore[import-not-found]
-
-        bundled = Path(bundled_codex_path())
-    except ImportError:
-        return ""
-    return str(bundled) if bundled.exists() else ""
-
-
 _SPECIALIST_ENV_ALLOWLIST: frozenset[str] = frozenset(
     {
         "ANTHROPIC_BASE_URL",
@@ -136,6 +104,11 @@ _SPECIALIST_ENV_ALLOWLIST: frozenset[str] = frozenset(
         "CLAUDE_CONFIG_DIR",
         "CLAUDE_MODEL",
         "CODEX_MODEL",
+        # Hugging Face Hub cache, offline switch and mirror. HF_TOKEN stays out; a login under HF_HOME is still read.
+        "HF_ENDPOINT",
+        "HF_HOME",
+        "HF_HUB_CACHE",
+        "HF_HUB_OFFLINE",
         "HOME",
         "HTTPS_PROXY",
         "HTTP_PROXY",
@@ -472,13 +445,6 @@ class SpecialistSubprocessConfig:
 
     model: str = ""
     """Model id for the selected agent CLI. Empty = that CLI's own default."""
-
-    permission_mode: str = "bypassPermissions"
-    """claude-cli ``--permission-mode``.
-
-    A Claude runtime policy only. Worktrees and the tool denylist scope task
-    behavior but are not filesystem containment.
-    """
 
     framework_source_roots: tuple[str, ...] = ()
     """Roots used to seed ``git worktree add`` and as ``--add-dir`` parents.
@@ -1371,8 +1337,13 @@ class SpecialistSubprocessDispatcher:
             "--output-format",
             cfg.output_format,
             "--verbose",
+            # Unattended: any mode that prompts stops the Bash heartbeat, and the run is reaped as stale.
+            # Worktrees and the tool denylist scope behaviour but are not filesystem containment.
             "--permission-mode",
-            cfg.permission_mode,
+            "bypassPermissions",
+            # HOME and CLAUDE_CONFIG_DIR are forwarded for credentials; the operator's settings and hooks are not
+            # the specialist's.
+            "--setting-sources=",
             "--system-prompt-file",
             str(system_prompt_file),
         ]
@@ -1768,5 +1739,4 @@ __all__ = [
     "SpecialistSubprocessDispatcher",
     "SpecialistSubprocessResult",
     "_setup_worktree",
-    "resolve_codex_executable",
 ]
