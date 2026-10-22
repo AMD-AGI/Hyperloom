@@ -215,6 +215,7 @@ def make_supervisor_fn(
     from kernelforge.agent_backends import AgentToolPolicy
     from kernelforge.agent_backends.registry import (
         create_registered_backend,
+        get_agent_provider,
         resolve_agent_runtime,
     )
 
@@ -234,6 +235,8 @@ def make_supervisor_fn(
         runtime = replace(runtime, model=supervisor_model)
     timeout_sec = int(runtime.options.get("supervisor_timeout_sec") or runtime.timeout_sec)
     knowledge_wiki = KnowledgeWikiTool.from_config(config)
+    # The backend is built on the first pass, so the provider's declared capabilities are what can refuse it now.
+    require_mcp_backend(knowledge_wiki, get_agent_provider(runtime.provider), "supervisor")
     selected_backend = None
 
     async def supervisor_fn(
@@ -293,10 +296,7 @@ def make_supervisor_fn(
 
         try:
             if selected_backend is None:
-                candidate = create_registered_backend(runtime)
-                # Checked before it is kept: a kept backend is never checked again.
-                require_mcp_backend(knowledge_wiki, candidate, "supervisor")
-                selected_backend = candidate
+                selected_backend = create_registered_backend(runtime)
                 setattr(supervisor_fn, "backend_name", selected_backend.name)
                 setattr(
                     supervisor_fn,

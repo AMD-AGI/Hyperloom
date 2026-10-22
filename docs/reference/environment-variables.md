@@ -313,7 +313,7 @@ not an operator setting.
 
 | Variable | Default | Description |
 |---|---|---|
-| `FORGE_KNOWLEDGE_WIKI_ROOT` | Unset (off) | Absolute path of the checkout, which must hold `scripts/query.py`, `scripts/get_page.py` and `scripts/grep_wiki.py`; an optional `SKILL.md` is served as its usage guide. A relative path (including one starting with `~`) or a directory missing those scripts is refused when the campaign starts. A configured knowledge base on an agent backend without MCP support is refused too: at startup for the Implementer, Analysis and the planning roles, and on each pass for a supervisor running on such a backend, which skips the pass and says why. The built-in `claude` and `codex` backends support MCP; `deepseek` does not, so it is refused while this is set. |
+| `FORGE_KNOWLEDGE_WIKI_ROOT` | Unset (off) | Absolute path of the checkout, which must hold `scripts/query.py`, `scripts/get_page.py` and `scripts/grep_wiki.py`; an optional `SKILL.md` is served as its usage guide. A relative path (including one starting with `~`) or a directory missing those scripts is refused when the campaign starts. A configured knowledge base on an agent backend without MCP support is refused too: when each role is built at startup, the supervisor by its provider's declared capabilities. The built-in `claude` and `codex` backends support MCP; `deepseek` does not, so it is refused while this is set. |
 | `FORGE_KNOWLEDGE_WIKI_LOG` | `knowledge_wiki_calls.jsonl` in the forge experiments directory | Absolute path of the call log: one JSON line per call with the calling role, the tool, the one-line reason every call must give, its arguments, exit code, duration and the pages it returned. A relative path is refused when the campaign starts. |
 
 ---
