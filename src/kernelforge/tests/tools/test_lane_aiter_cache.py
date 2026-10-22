@@ -24,7 +24,7 @@ from kernelforge.config import Config
 from kernelforge.orchestrator.agent import ImplementerSetup, ImplementerTask
 from kernelforge.tools import aiter_cache
 from kernelforge.loop.fanout import SERIALIZED_DRIVER_NAME
-from kernelforge.llm.git import git
+from kernelforge.tools.git import git
 
 
 @pytest.fixture(autouse=True)

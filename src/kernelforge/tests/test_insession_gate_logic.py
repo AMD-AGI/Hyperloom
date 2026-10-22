@@ -363,6 +363,67 @@ def test_stop_blocks_when_correct_but_not_faster(tmp_path, monkeypatch):
     assert gate.passed is False
 
 
+def test_performance_verdict_clears_stale_bench_state_on_coverage_failure(tmp_path, monkeypatch):
+    gate, _ = _gate(tmp_path)
+    gate.last_bench_result = {"success": True, "median_ms": 9.0}
+    gate.last_mean_case_speedup = 9.0
+    gate.last_wall_ms = 9.0
+
+    async def benchmark(*_args, **_kwargs):
+        return {
+            "success": True,
+            "median_ms": 0.5,
+            "measurements": [
+                {
+                    "success": True,
+                    "case_times": {},
+                    "unscored_cases": [],
+                }
+                for _ in range(3)
+            ],
+        }
+
+    monkeypatch.setattr(gate_module, "measure_wallclock", benchmark)
+
+    out = _run(gate._stop_performance_verdict())
+
+    assert out["decision"] == "block"
+    assert (gate.last_bench_result, gate.last_mean_case_speedup, gate.last_wall_ms) == (None, None, None)
+
+
+def test_performance_verdict_keeps_current_wall_when_scoring_is_unavailable(tmp_path, monkeypatch):
+    gate, _ = _gate(tmp_path, best_mean_case_speedup=None)
+    gate.last_bench_result = {"success": True, "median_ms": 9.0}
+    gate.last_mean_case_speedup = 9.0
+    gate.last_wall_ms = 9.0
+    _patch_canonical(monkeypatch, wall_ms=0.5)
+
+    out = _run(gate._stop_performance_verdict())
+
+    assert out["decision"] == "block"
+    assert (gate.last_bench_result, gate.last_mean_case_speedup, gate.last_wall_ms) == (None, None, 0.5)
+
+
+def test_stop_clears_stale_bench_state_when_benchmark_raises(tmp_path, monkeypatch):
+    gate, _ = _gate(tmp_path)
+    gate.last_bench_result = {"success": True, "median_ms": 9.0}
+    gate.last_mean_case_speedup = 9.0
+    gate.last_wall_ms = 9.0
+
+    async def correctness(**_kwargs):
+        return {"passed": True, "message": ""}
+
+    async def benchmark(*_args, **_kwargs):
+        raise RuntimeError("benchmark crashed")
+
+    monkeypatch.setattr(gate_module, "test_correctness", correctness)
+    monkeypatch.setattr(gate_module, "measure_wallclock", benchmark)
+
+    assert _run(gate._on_stop({}, None, None)) == {}
+    assert gate.end_reason == "gate_error"
+    assert (gate.last_bench_result, gate.last_mean_case_speedup, gate.last_wall_ms) == (None, None, None)
+
+
 def test_correctness_only_allows_without_ever_consulting_the_perf_gate(tmp_path, monkeypatch):
     """PORT-mode contract: with correctness_only=True the gate allows a CORRECT kernel and MUST NOT run the benchmark / perf gate at all."""
     gate, _ = _gate(

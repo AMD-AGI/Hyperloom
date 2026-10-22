@@ -31,11 +31,11 @@ from kernelforge.agent_backends.base import (
 )
 from kernelforge.agent_backends.workspace_guard import WorkspaceGuard
 from hyperloom.common.llm_headers import format_custom_headers
-from kernelforge.llm import (
+from kernelforge.agent_backends.gateway import (
     normalize_anthropic_base_url,
     resolve_anthropic_gateway,
 )
-from kernelforge.llm.process_reaping import (
+from kernelforge.tools.process_reaping import (
     ReapReport,
     install_child_subreaper,
     reap_processes_under,

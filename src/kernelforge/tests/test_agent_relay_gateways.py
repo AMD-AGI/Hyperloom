@@ -13,7 +13,7 @@ import kernelforge.agent_backends.registry as registry
 from kernelforge.agent_backends.base import AgentRuntimeConfig
 from kernelforge.cli.relay import config_for_profile, probe_agent_profile
 from kernelforge.config import Config
-from kernelforge.llm.gateway import anthropic_environment_from_openai, openai_gateway_from_anthropic
+from kernelforge.agent_backends.gateway import anthropic_environment_from_openai, openai_gateway_from_anthropic
 from kernelforge.loop.agent_relay import AgentProfile, AgentRelayConfig
 
 _LINE_ENV = (

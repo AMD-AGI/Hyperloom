@@ -11,7 +11,7 @@ import sys
 
 import pytest
 
-from kernelforge.llm.process_reaping import install_child_subreaper
+from kernelforge.tools.process_reaping import install_child_subreaper
 from kernelforge.tools.process_group import communicate_process_group
 
 

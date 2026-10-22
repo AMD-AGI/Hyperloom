@@ -84,6 +84,16 @@ def _environment_overrides(
     return dict(sorted(merged.items()))
 
 
+def _fenced_section(heading: str, *body: str) -> list[str]:
+    """A Markdown section, opened by a blank line, whose content is one fenced text block."""
+    return ["", heading, "", "```text", *([line for line in body if line] or ["not available"]), "```"]
+
+
+def _bullet_section(heading: str, *body: str) -> list[str]:
+    """A Markdown section, opened by a blank line, whose content is a bullet list."""
+    return ["", heading, "", *([f"- {line}" for line in body if line] or ["- not available"])]
+
+
 def build_serving_context_md(
     state: Any,
     env_spec: Mapping[str, Any] | None = None,
@@ -91,21 +101,19 @@ def build_serving_context_md(
 ) -> str:
     """Render the framework, serving arguments, and environment overrides."""
     context = _workload_context(state)
-    spec = dict(env_spec) if isinstance(env_spec, Mapping) else {}
-    config = spec.get("config") if isinstance(spec.get("config"), Mapping) else {}
-    current_best = getattr(state, "current_best", None) or {}
-    serving_config = context.get("serving_config")
-    serving_config = serving_config if isinstance(serving_config, Mapping) else {}
-
+    spec = env_spec or {}
+    config = spec.get("config") or {}
     resolved_args = str(config.get("server_launch_flags") or context.get("server_args") or "").strip()
-    extra_args = str(
-        config.get("extra_server_args")
-        or current_best.get("extra_server_args")
-        or serving_config.get("extra_server_args")
-        or ""
-    ).strip()
+    # The launch config, then the promoted best, then the profile's own serving block: first one that names them wins.
+    extra_sources = (config, getattr(state, "current_best", None) or {}, context.get("serving_config") or {})
+    extra_args = str(next((s["extra_server_args"] for s in extra_sources if s.get("extra_server_args")), "")).strip()
     envs = _environment_overrides(context, spec)
-    unset_envs = context.get("unset_envs") if isinstance(context.get("unset_envs"), list) else []
+    # Taken from the seal that just ran rather than read back from Git: the
+    # commit it returned is the base every rewrite of that repository diffs
+    # from, and re-reading HEAD would both cost a subprocess per repository
+    # and leave a window in which the two could disagree.
+    sealed = {str(repo): getattr(baseline, "commit", "") for repo, baseline in (baselines or {}).items()}
+    source_roots = tuple(sorted(sealed)) or tuple(map(str, campaign_repositories(state)))
 
     lines = [
         "# Serving Context",
@@ -114,59 +122,25 @@ def build_serving_context_md(
         f"- **Framework version:** `{_display(getattr(state, 'framework_version', ''))}`",
         f"- **Launch recipe:** `{_display(_absolute_path(spec.get('launch_recipe') or getattr(state, 'baseline_config_path', '')))}`",
         f"- **Overlay Python path:** `{_display(_absolute_path(spec.get('overlay_pythonpath')))}`",
-        "",
-        "## Source Repositories",
-        "",
-    ]
-    # Taken from the seal that just ran rather than read back from Git: the
-    # commit it returned is the base every rewrite of that repository diffs
-    # from, and re-reading HEAD would both cost a subprocess per repository
-    # and leave a window in which the two could disagree.
-    sealed = {str(repo): getattr(baseline, "commit", "") for repo, baseline in (baselines or {}).items()}
-    source_roots = tuple(sorted(sealed)) or tuple(str(root) for root in campaign_repositories(state))
-    if source_roots:
         # Reported with the commit each one currently sits at, which the caller
         # sealed just before this was written. That object id is the base every
         # rewrite of this repository diffs from, so a task naming a path Git does
         # not carry there is answerable from this document alone.
-        lines.extend(f"- `{root}` @ `{sealed.get(root) or 'unknown'}`" for root in source_roots)
-    else:
-        lines.append("- not available")
-    lines.extend(
-        [
-            "",
-            "## Resolved Server Arguments",
-            "",
-            "```text",
-            redact_secret_values(resolved_args) if resolved_args else "not available",
-            "```",
-            "",
-            "## Additional Server Arguments",
-            "",
-            "```text",
-            redact_secret_values(extra_args) if extra_args else "not available",
-            "```",
-            "",
+        *_bullet_section(
+            "## Source Repositories",
+            *(f"`{root}` @ `{sealed.get(root) or 'unknown'}`" for root in source_roots),
+        ),
+        *_fenced_section("## Resolved Server Arguments", redact_secret_values(resolved_args)),
+        *_fenced_section("## Additional Server Arguments", redact_secret_values(extra_args)),
+        *_fenced_section(
             "## Environment Variable Overrides",
-            "",
-            "```text",
-        ]
-    )
-    lines.extend(f"{key}={value}" for key, value in envs.items())
-    if not envs:
-        lines.append("not available")
-    lines.extend(
-        [
-            "```",
-            "",
+            *(f"{key}={value}" for key, value in envs.items()),
+        ),
+        *_bullet_section(
             "## Unset Environment Variables",
-            "",
-        ]
-    )
-    if unset_envs:
-        lines.extend(f"- `{_display(value)}`" for value in unset_envs)
-    else:
-        lines.append("- not available")
+            *(f"`{_display(value)}`" for value in context.get("unset_envs") or ()),
+        ),
+    ]
     return "\n".join(lines) + "\n"
 
 

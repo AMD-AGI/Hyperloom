@@ -56,12 +56,18 @@ def _not_object(path: Path, data: Any) -> ValueError:
     return ValueError(f"expected a JSON object at {path}, got {type(data).__name__}")
 
 
-def read_json_strict(path: Path, *, require_dict: bool = False, empty_value: Any = _EMPTY_UNSET) -> Any:
+def read_json_strict(
+    path: Path,
+    *,
+    require_dict: bool = False,
+    empty_value: Any = _EMPTY_UNSET,
+    errors: str = "strict",
+) -> Any:
     """Parse JSON from *path*, raising ``OSError`` / ``ValueError`` on any failure.
 
     ``empty_value``, when given, is returned for a blank file instead of a decode error.
     """
-    text = path.read_text(encoding="utf-8")
+    text = path.read_text(encoding="utf-8", errors=errors)
     if empty_value is not _EMPTY_UNSET and not text.strip():
         data = empty_value
     else:
@@ -77,10 +83,11 @@ def read_json(
     *,
     require_dict: bool = False,
     on_error: Callable[[BaseException], None] | None = None,
+    errors: str = "strict",
 ) -> Any:
     """Parse JSON from *path*; on failure report to ``on_error`` and return ``default``."""
     try:
-        data = read_json_strict(path)
+        data = read_json_strict(path, errors=errors)
     except (OSError, json.JSONDecodeError) as exc:
         if on_error is not None:
             on_error(exc)

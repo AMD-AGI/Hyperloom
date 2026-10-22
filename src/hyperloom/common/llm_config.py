@@ -157,14 +157,28 @@ _OPENAI_SIDE_KEYS: tuple[str, ...] = ("OPENAI_BASE_URL", "OPENAI_API_KEY")
 # A managed gateway carries the credential itself, so it can drive the Claude CLI without naming a key.
 _ANTHROPIC_MANAGED_GATEWAY_ENVS: tuple[str, ...] = ("CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX")
 
-# The two agent CLIs that can drive this repository's agentic roles.
+# The agent CLIs that can drive this repository's agentic roles.
 AGENT_BACKEND_CLAUDE = "claude"
 AGENT_BACKEND_CODEX = "codex"
+AGENT_BACKEND_DEEPSEEK = "deepseek"
+
+#: Names the agent CLI for the agentic roles, overriding the credential-ranked
+#: rule between Claude and Codex. The DeepSeek Harness is reachable only this
+#: way: it returns its intents in the reply body with no schema enforcing them,
+#: so it is a route an operator asks for rather than one a credential shape can
+#: select. The harness model comes from ``DSH_MODEL``. Quantization honours
+#: only ``deepseek``: any other value leaves it on Claude.
+AGENT_BACKEND_ENV = "INFERENCE_OPTIMIZER_AGENT_BACKEND"
+
+AGENT_BACKEND_CHOICES: tuple[str, ...] = (AGENT_BACKEND_CLAUDE, AGENT_BACKEND_CODEX, AGENT_BACKEND_DEEPSEEK)
 
 # The model each backend runs when neither the operator nor a known gateway host names one. This is the last rung of
 # every model ladder in both packages, so it lives beside the backend names it is keyed by.
 DEFAULT_CLAUDE_MODEL = "claude-opus-5-5"
 DEFAULT_CODEX_MODEL = "gpt-6-astra"
+# The harness route mounts DeepSeek's own models only, so this names one of
+# those rather than a gateway deployment.
+DEFAULT_DEEPSEEK_HARNESS_MODEL = "deepseek-v4-flash"
 
 
 def has_anthropic_side(env: Mapping[str, str] | None = None) -> bool:
@@ -231,6 +245,13 @@ def codex_agent_sdk_installed() -> bool:
     return find_spec("openai_codex") is not None
 
 
+def deepseek_harness_sdk_installed() -> bool:
+    """Return whether the optional DeepSeek Harness SDK is installed."""
+    from importlib.util import find_spec
+
+    return find_spec("deepseek_harness") is not None
+
+
 def agent_backend_rank(*, credentialed: bool, sdk_installed: bool) -> tuple[int, int]:
     """Sort key for one agent backend candidate: credential first, then SDK.
 
@@ -249,6 +270,30 @@ def agent_backend_rank(*, credentialed: bool, sdk_installed: bool) -> tuple[int,
 
 # The rank of a candidate that can neither authenticate nor import: no reason to prefer it over any other.
 UNRUNNABLE_AGENT_RANK: tuple[int, int] = agent_backend_rank(credentialed=False, sdk_installed=False)
+
+
+def explicit_agent_backend(env: Mapping[str, str] | None = None, *, env_name: str = AGENT_BACKEND_ENV) -> str:
+    """Return the agent backend ``env_name`` names, or ``""`` when unset.
+
+    Raises:
+        ValueError: When it names no known backend, or the DeepSeek Harness without its SDK.
+    """
+    requested = ((env if env is not None else os.environ).get(env_name) or "").strip().lower()
+    if requested and requested not in AGENT_BACKEND_CHOICES:
+        raise ValueError(f"{env_name}={requested!r} not in {set(AGENT_BACKEND_CHOICES)}")
+    if requested == AGENT_BACKEND_DEEPSEEK and not deepseek_harness_sdk_installed():
+        raise ValueError(f"{env_name}=deepseek requires the DeepSeek Harness SDK: install the 'deepseek' extra")
+    return requested
+
+
+def resolve_agent_backend(env: Mapping[str, str] | None = None) -> str:
+    """Return the harness backend every non-critic agent role should run.
+
+    An explicit :data:`AGENT_BACKEND_ENV` wins over the credential-ranked rule
+    between Claude and Codex. DeepSeek is reachable only through that explicit
+    name: it is not a third candidate in :func:`preferred_agent_backend`.
+    """
+    return explicit_agent_backend(env) or preferred_agent_backend(env)
 
 
 def preferred_agent_backend(env: Mapping[str, str] | None = None) -> str:
@@ -384,6 +429,8 @@ def resolve_forge_llm_model(
     backend = (agent_backend or "").strip().lower()
     if backend == AGENT_BACKEND_CODEX:
         return str(source.get("CODEX_MODEL") or "").strip() or DEFAULT_CODEX_MODEL
+    if backend == AGENT_BACKEND_DEEPSEEK:
+        return str(source.get("DSH_MODEL") or "").strip() or DEFAULT_DEEPSEEK_HARNESS_MODEL
     return str(source.get("CLAUDE_MODEL") or "").strip() or DEFAULT_CLAUDE_MODEL
 
 
@@ -1071,8 +1118,11 @@ def _observe_stream_chunk(observation: RequestObservation, chunk: object) -> Non
 
 
 __all__ = [
+    "AGENT_BACKEND_CHOICES",
     "AGENT_BACKEND_CLAUDE",
     "AGENT_BACKEND_CODEX",
+    "AGENT_BACKEND_DEEPSEEK",
+    "AGENT_BACKEND_ENV",
     "ANTHROPIC_CREDENTIAL_ENV_ORDER",
     "ANTHROPIC_SYNTHESIZABLE_KEY_ENVS",
     "ANTHROPIC_TRANSPORT_HTTP",
@@ -1086,6 +1136,7 @@ __all__ = [
     "DEFAULT_ANTHROPIC_VERSION",
     "DEFAULT_CLAUDE_MODEL",
     "DEFAULT_CODEX_MODEL",
+    "DEFAULT_DEEPSEEK_HARNESS_MODEL",
     "LEGACY_DEEPSEEK_ENV_KEYS",
     "LLMConfigError",
     "OpenAIClientConfig",
@@ -1108,6 +1159,7 @@ __all__ = [
     "claude_sdk_env_options",
     "codex_agent_sdk_installed",
     "deepseek_compat_env",
+    "deepseek_harness_sdk_installed",
     "derive_openai_base_url",
     "dual_protocol_endpoint_pair",
     "endpoint_default_model",
@@ -1124,6 +1176,8 @@ __all__ = [
     "openai_client_kwargs",
     "preferred_agent_backend",
     "provider_model_defaults",
+    "explicit_agent_backend",
+    "resolve_agent_backend",
     "resolve_forge_llm_model",
     "resolve_openai_client_config",
     "with_synthesized_anthropic_keys",

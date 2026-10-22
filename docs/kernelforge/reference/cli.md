@@ -149,7 +149,7 @@ and passing one alongside `--resume` is refused rather than silently ignored.
 | `--experience-kb` / `--no-experience-kb` | on | Read and publish forge-loop experience KB entries. Internal callers with their own KB lifecycle, such as `forge-rewrite-by-flydsl`, disable this explicitly. |
 | `--kb-warmstart` / `--no-kb-warmstart` | on | Apply the best matching KB solution before iteration 1. Only meaningful with `--experience-kb`. A caller that prepares the workspace itself, such as `forge-fuse`, turns this off to keep publishing while never replaying a stored patch over a tree it already staged. |
 | `--producer <name>` | forge-loop's own | System owning the candidate stream these records belong to. A producer has its own index in the KB identity scheme, so a pipeline driving this command as a subprocess keeps its records out of the kernel campaigns' ranking. |
-| `--pr-kb` / `--no-pr-kb` | off | Inject upstream pull-request references from the PR Monitor co-hosted at `${KB_STORE_URL}/pr-monitor/v1`. Falls back to `PR_KB_ENABLE`. |
+| `--pr-kb` / `--no-pr-kb` | off | Inject upstream pull-request references from the PR Monitor co-hosted at `${KB_STORE_URL}/pr-monitor/v1`. Falls back to `PR_KB_ENABLE`. When the repository resolves and the Agent provider supports MCP, the Implementer also gets the `pr_monitor` tools: `pr_find_references`, `pr_get_reference` and `pr_get_file_patch` query the service, and `pr_check_inclusion` answers from local git alone whether a PR is already in a tree: `included` when a commit subject names it, otherwise `unknown`, because local history cannot show that a PR is absent. The check-prior-art contributor skill runs the same probe as `python -m kernelforge.knowledge.pr_knowledge.inclusion`, passing the PR's merge commit sha so that it also matches the PR's commits by sha or patch-id. |
 | `--experience-id <id>` | `''` | Unique KB run identity, independent of the checkpoint experiment ID. |
 
 ### Output
@@ -265,9 +265,9 @@ without reaching an agent, so the selection can be checked before anything is sp
 | `--dry-run` | off | Diagnose and locate only; emit a manifest with a recipe skeleton, no authoring or validation. |
 | `--author` / `--no-author` | on | Author the fused kernel via the LLM. Non-dry-run only. |
 | `--fuse-all-confirmed` | off | Author ALL source-confirmed patterns together rather than only the top one, and A/B all their flags. A compile-pass candidate cannot be authored with them, so it is claimed alone and the rest wait for a later round. |
-| `--agent-backend <name>` | `auto` | `auto`, `claude` or `codex`, for discovery and authoring. |
+| `--agent-backend <name>` | `auto` | `auto`, `claude`, `codex` or `deepseek`, for discovery and authoring. `deepseek` is never chosen by `auto`: name it here or with `INFERENCE_OPTIMIZER_AGENT_BACKEND=deepseek`. |
 | `--agent-sandbox-mode <v>` | `workspace-write` | `workspace-write`, `read-only` or `bypass`. Use `bypass` only when an external sandbox already enforces isolation. |
-| `--model <name>` | provider default | Agent model. An explicit value wins; otherwise `$CODEX_MODEL` / `$CLAUDE_MODEL`, then the registered provider default. |
+| `--model <name>` | provider default | Agent model. An explicit value wins; otherwise `$CODEX_MODEL` / `$CLAUDE_MODEL` / `$DSH_MODEL`, then the registered provider default. |
 | `--max-turns <n>` | `100` | Max authoring turns. |
 | `--max-recipes <n>` | `0` | Cap how many ranked recipes to try. `0` means uncapped, so every discovered recipe is considered; Hyperloom passes the count its fusion lane budget pays for. |
 | `--gpu <id>` | `0` | HIP device id for authoring and A/B. |

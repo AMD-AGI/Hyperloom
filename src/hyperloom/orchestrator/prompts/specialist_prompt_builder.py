@@ -31,6 +31,7 @@ from .proposal_schemas import (
     UPSTREAM_CANDIDATE_CONTRACT,
     UPSTREAM_CANDIDATE_EXAMPLE,
 )
+from .speculative_decoding_focus import speculative_decoding_focus
 from ..measurement.runtime_findings import CORRECTNESS_FIX_MAX_DROP_PCT, CORRECTNESS_FIX_RULES
 
 from ..specialists.domains import (
@@ -731,25 +732,24 @@ def _focus_framework_rewrite_specialist(
         "of cost dominate and neither one owns a GPU kernel, so neither appears in",
         "a kernel breakdown: **redundant recomputation** and **host stalls**.",
         "",
-        "**Rewrite pattern taxonomy** (the categories the evidence is labelled with)",
-        "- **(a) memoize a step- or block-invariant computation.** A pure function",
-        "  called with arguments it already received. Cache the result.",
-        "- **(b) hoist a loop-invariant computation out of the loop.** The value is",
-        "  logically the same each iteration but rebuilt from scratch, so a cache",
-        "  keyed on tensor identity would never hit. Compute once per outer",
-        "  iteration and pass it in. **This is usually an enabler**: on its own it",
-        "  measures flat, and its value is that it makes (a) start hitting.",
-        "- **(c) eliminate a host round-trip or a device-to-host sync.** An object",
-        "  collective agreeing on a shape the ranks could derive locally; an",
+        "**Rewrite pattern taxonomy** (the categories the evidence is labelled with; the backticked name is its id)",
+        "- **(a) `memoize_invariant`: memoize a step- or block-invariant computation.** A pure function called",
+        "  with arguments it already received. Cache the result.",
+        "- **(b) `hoist_loop_invariant`: hoist a loop-invariant computation out of the loop.** The value is",
+        "  logically the same each iteration but rebuilt from scratch, so a cache keyed on tensor identity would",
+        "  never hit. Compute once per outer iteration and pass it in. **This is usually an enabler**: on its own",
+        "  it measures flat, and its value is that it makes (a) start hitting.",
+        "- **(c) `eliminate_host_round_trip` / `eliminate_host_sync`: eliminate a host round-trip or a",
+        "  device-to-host sync.** An object collective agreeing on a shape the ranks could derive locally; an",
         "  `.item()` / `.tolist()` / `.cpu()` on the hot path.",
-        "- **(d) fuse adjacent collectives, GEMMs or concatenations.** Several",
-        "  same-shape payloads issued separately; pack them and issue one.",
-        "- **(e) swap an operator implementation for a vendor kernel.** Read this",
-        "  off the GPU kernel breakdown, not the host evidence.",
-        "- **(f) keep a tensor resident on the device.** A table rebuilt on the",
-        "  host and re-uploaded on every use.",
-        "- **(g) drop no-op glue.** A dtype cast to the dtype the tensor already",
-        "  has; an intermediate materialised only to be immediately consumed.",
+        "- **(d) `fuse_collectives`: fuse adjacent collectives, GEMMs or concatenations.** Several same-shape",
+        "  payloads issued separately; pack them and issue one.",
+        "- **(e) `swap_vendor_kernel`: swap an operator implementation for a vendor kernel.** Read this off the",
+        "  GPU kernel breakdown, not the host evidence.",
+        "- **(f) `keep_device_resident`: keep a tensor resident on the device.** A table rebuilt on the host and",
+        "  re-uploaded on every use.",
+        "- **(g) `drop_noop_glue`: drop no-op glue.** A dtype cast to the dtype the tensor already has; an",
+        "  intermediate materialised only to be immediately consumed.",
         "",
         "**Cache-key recipe (get this wrong and you ship a correctness bug)**",
         "- Key on the COMPLETE argument identity: for a tensor,",
@@ -829,6 +829,11 @@ def _focus_custom_specialist(inp: SpecialistPromptInputs) -> list[str]:
     return text.splitlines() if text else []
 
 
+def _focus_speculative_decoding_specialist(inp: SpecialistPromptInputs) -> list[str]:
+    """Render the speculative-decoding focus for this session's target model."""
+    return speculative_decoding_focus(model_name=inp.model_name, model_path=inp.model_path, model_info=inp.model_info)
+
+
 _DOMAIN_FOCUS_TEMPLATES: dict[str, "Callable[[SpecialistPromptInputs], list[str]]"] = {
     "serving_specialist": _focus_serving_specialist,
     "framework_rewrite_specialist": _focus_framework_rewrite_specialist,
@@ -836,6 +841,7 @@ _DOMAIN_FOCUS_TEMPLATES: dict[str, "Callable[[SpecialistPromptInputs], list[str]
     "comm_specialist": _focus_comm_specialist,
     "compiler_specialist": _focus_compiler_specialist,
     "system_specialist": _focus_system_specialist,
+    "speculative_decoding_specialist": _focus_speculative_decoding_specialist,
     "candidate_discovery_specialist": _focus_candidate_discovery_specialist,
     "research_scout_specialist": _focus_research_scout_specialist,
     "static_recon_specialist": _focus_static_recon_specialist,
@@ -928,6 +934,9 @@ class SpecialistPromptInputs:
     # Framework package directory relative to the worktree; empty without a worktree.
     worktree_package_dir: str = ""
 
+    # Target model identity warmed from SharedState.model_name / model_path; "" => not recorded.
+    model_name: str = ""
+    model_path: str = ""
     # Structured model architecture features mirrored from SharedState.model_info;
     # machine-parseable companion to ``arch_notes``. Empty dict => not warmed.
     model_info: dict[str, Any] = field(default_factory=dict)
@@ -996,7 +1005,8 @@ def _authors_patches(inp: SpecialistPromptInputs) -> bool:
 #: something to raise the sights from. ``enablement_specialist`` is absent
 #: because its ladder book says climb only as far as runnability needs;
 #: ``framework_rewrite_specialist`` because it authors source rewrites and
-#: nothing else, and already carries its own "Where the wins are" taxonomy.
+#: nothing else, and already carries its own "Where the wins are" taxonomy;
+#: ``speculative_decoding_specialist`` because its focus names no flags at all.
 _THROUGHPUT_AUTHORING_DOMAINS = frozenset(
     {
         "serving_specialist",

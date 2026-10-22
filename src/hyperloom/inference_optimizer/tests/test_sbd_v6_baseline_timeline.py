@@ -511,12 +511,10 @@ async def test_the_executor_records_the_rounds_it_actually_ran(tmp_path: Path) -
     async def _run_once(ctx, *, recorder=None, run_index=0, **_kwargs):
         for label in (ROUND_WARMUP, ROUND_MEASURE):
             await executor._run_reported_round(
+                {"recorder": recorder, "run_index": run_index, "timeout_sec": 7800},
                 label=label,
                 config_path=Path("/cfg.yaml"),
                 output_dir=tmp_path / label,
-                recorder=recorder,
-                run_index=run_index,
-                timeout_sec=7800,
             )
         return _measured()
 

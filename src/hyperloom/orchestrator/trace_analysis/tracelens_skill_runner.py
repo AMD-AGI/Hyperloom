@@ -33,6 +33,8 @@ from hyperloom.common.codex_session import (
     CodexTurnRequest,
     run_codex_turn,
 )
+from hyperloom.common import llm_config
+from hyperloom.common.deepseek_task import DeepSeekTaskRequest
 from hyperloom.common.llm_config import claude_sdk_env_options
 from hyperloom.common.llm_config import DEFAULT_CLAUDE_MODEL, DEFAULT_CODEX_MODEL
 from ._capture_shapes import is_capture_dir_name
@@ -49,6 +51,7 @@ from ._task_group_contract import (
 _log = logging.getLogger(__name__)
 
 DEFAULT_ALLOWED_TOOLS = ["Read", "Write", "Edit", "Bash", "Task"]
+_MAX_AGENT_TURNS = 300
 
 # The run config the TraceLens skill reads.
 RUN_CONFIG_NAME = "run.yaml"
@@ -56,19 +59,22 @@ RUN_CONFIG_NAME = "run.yaml"
 # The Codex SDK has no literal Read/Write/Bash/Task tools, and this thread runs
 # without sub-agents, so the skill's tool names have to be mapped to Codex's
 # native shell and patch capabilities before the agent follows them.
-_CODEX_DEVELOPER_INSTRUCTIONS = """\
+_CODEX_RUNTIME_MAPPING = """\
 ## Codex runtime mapping
 Use shell commands to inspect, search and run files, and your native patch/edit
 capability to write them. Where the skill names Read, Write, Edit, Grep, Glob,
 Bash or Task, it describes an equivalent capability rather than a literal tool;
 carry out any sub-agent step yourself, in sequence.
-
-## System instructions
-You are a TraceLens analysis runner inside Hyperloom. Execute only the
-requested standalone analysis workflow. Use absolute paths, write artifacts
-under the requested output directory, and do not modify application source
-code.
 """
+
+# The one system prompt every runtime runs the skill under; each runtime adds only its own tool mapping.
+_TRACELENS_SYSTEM_PROMPT = (
+    "You are a TraceLens analysis runner inside Hyperloom. Execute only the requested standalone analysis workflow. "
+    "Use absolute paths, write artifacts under the requested output directory, and do not modify application "
+    "source code."
+)
+
+_CODEX_DEVELOPER_INSTRUCTIONS = f"{_CODEX_RUNTIME_MAPPING}\n## System instructions\n{_TRACELENS_SYSTEM_PROMPT}\n"
 
 
 # Per-message stream-idle timeout (seconds). The in-process Claude SDK query has
@@ -513,19 +519,6 @@ def _import_sdk() -> tuple[Any, Any]:
     return sdk.query, sdk.ClaudeAgentOptions
 
 
-def _should_use_codex_runner() -> bool:
-    """Return true when the Codex Agent SDK runner should run this skill.
-
-    An OpenAI-only deployment has no Claude credentials to drive the Claude
-    Agent SDK, so the Codex runner is the only one that can execute. The choice
-    itself belongs to :mod:`hyperloom.common.llm_config`, so this cannot
-    disagree with backend selection or the forge kernel_backend.
-    """
-    from hyperloom.common import llm_config  # local import: keep module import-light
-
-    return llm_config.preferred_agent_backend() == llm_config.AGENT_BACKEND_CODEX
-
-
 def _iter_message_text(message: Any) -> Iterable[str]:
     from hyperloom.common.claude_oneshot import message_text
 
@@ -707,27 +700,53 @@ async def _run_tracelens_skill_codex(
         codex_error = f"{type(exc).__name__}: {exc}"
         if run.log:
             run.log(f"[codex-sdk] WARNING: {codex_error}")
-    codex_error = codex_error or result.error
+    return _skill_result(run, runner="codex", label="Codex", raw_text=result.text, error=codex_error or result.error)
 
-    report_path = output_dir / "analysis.md"
+
+def _skill_result(run: _SkillRun, *, runner: str, label: str, raw_text: str, error: str) -> TraceLensSkillRunResult:
+    """The run's artifacts once ``analysis.md`` exists; an agent error after it landed is metadata.
+
+    Raises:
+        RuntimeError: If ``analysis.md`` was not written.
+    """
+    report_path = run.request.output_dir / "analysis.md"
     if not report_path.exists():
-        if codex_error:
-            raise RuntimeError(f"TraceLens Codex runner failed before writing {report_path}: {codex_error}")
-        raise RuntimeError(f"TraceLens Codex runner did not write {report_path}")
-
-    artifact_paths = {
-        "tracelens_agent_report": str(report_path),
-        "tracelens_cmd_prefix": str(run.prefix_path),
-    }
-    if codex_error:
-        artifact_paths["tracelens_agent_sdk_error"] = codex_error
+        if error:
+            raise RuntimeError(f"TraceLens {label} runner failed before writing {report_path}: {error}")
+        raise RuntimeError(f"TraceLens {label} runner did not write {report_path}")
+    artifact_paths = {"tracelens_agent_report": str(report_path), "tracelens_cmd_prefix": str(run.prefix_path)}
+    if error:
+        artifact_paths["tracelens_agent_sdk_error"] = error
     return TraceLensSkillRunResult(
-        output_dir=output_dir,
+        output_dir=run.request.output_dir,
         report_path=report_path,
-        runner="codex",
-        raw_text=result.text,
+        runner=runner,
+        raw_text=raw_text,
         artifact_paths=artifact_paths,
     )
+
+
+def _claude_skill_options(run: _SkillRun, model: str, bounds: _StreamIdleBounds) -> dict[str, Any]:
+    """The Claude Agent SDK options of one skill run, as keyword arguments."""
+    log = run.log
+    kwargs: dict[str, Any] = {
+        "max_turns": _MAX_AGENT_TURNS,
+        "system_prompt": _TRACELENS_SYSTEM_PROMPT,
+        "allowed_tools": DEFAULT_ALLOWED_TOOLS,
+        "stderr": lambda line: log(f"[claude-sdk] {line.rstrip()}") if log else None,
+        "model": model,
+        # Stream events time each model request of the run onto the trajectory ledger.
+        "include_partial_messages": True,
+        # Roots Bash relative paths at TraceLens; harmless in tests via FakeOptions.
+        "cwd": str(run.request.tracelens_root),
+    }
+    kwargs.update(claude_sdk_env_options(model=model, component="tracelens", operation="analyze_trace"))
+    # In print mode the CLI terminates background sub-agents still running 600s
+    # after the main turn goes quiet, before the in-flight bound applies.
+    kwargs.setdefault("env", {})["CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS"] = os.environ.get(
+        "CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS", str(int(bounds.tool * 1000))
+    )
+    return kwargs
 
 
 async def run_tracelens_skill(
@@ -741,20 +760,22 @@ async def run_tracelens_skill(
     """Execute the standalone TraceLens skill on the configured agent runtime.
 
     Prepares the command-prefix cache and orchestrator prompt, then dispatches
-    to the Codex Agent SDK when the deployment has only the OpenAI side
-    configured, and to the Claude Agent SDK otherwise. Either way the presence
+    to the agent runtime :mod:`hyperloom.common.llm_config` selects: the DeepSeek
+    Harness, the Codex Agent SDK, or the Claude Agent SDK. Either way the presence
     of ``analysis.md`` is the source of truth: a runtime error after the report
     was written is recorded as metadata rather than raised.
 
     Args:
         request (TraceLensSkillRequest): The run's inputs.
-        budget_minutes (float): Time budget for the run. The Codex path spends
-            it as the turn's wall-clock timeout (floored at 60s, matching the
-            other TraceLens subprocess timeouts); the Claude path bounds each
-            SDK message by a stream-idle timeout instead.
+        budget_minutes (float): Time budget for the run. The Codex and DeepSeek
+            Harness paths spend it as the wall-clock timeout of the whole
+            session (floored at 60s, matching the other TraceLens subprocess
+            timeouts); the Claude path bounds each SDK message by a
+            stream-idle timeout instead.
         model (str | None): Optional model override. Defaults to
             :data:`DEFAULT_CLAUDE_MODEL` on the Claude SDK path, or ``$CODEX_MODEL`` /
-            :data:`DEFAULT_CODEX_MODEL` on the Codex SDK path.
+            :data:`DEFAULT_CODEX_MODEL` on the Codex SDK path. The DeepSeek
+            Harness path ignores it: the harness session owns its model.
         sdk (SdkEntryPoints): Optional injected query factory, options class
             and Codex turn entry point (used by tests); the query factory and
             options class are imported from the SDK when ``None``, and the
@@ -778,13 +799,29 @@ async def run_tracelens_skill(
     prompt = build_orchestrator_prompt(request)
 
     resolved_model = (model or "").strip()
-    if _should_use_codex_runner() and (
-        sdk.codex_turn_runner is not None or (sdk_query_factory is None and sdk_options_cls is None)
-    ):
+    run = _SkillRun(request, prefix_path, log)
+    runner = llm_config.resolve_agent_backend()
+    no_injected_sdk = sdk_query_factory is None and sdk_options_cls is None
+    timeout_sec = max(60.0, float(budget_minutes) * 60.0)
+    if runner == llm_config.AGENT_BACKEND_DEEPSEEK and no_injected_sdk:
+        from .tracelens_deepseek import drive_tracelens_skill
+
+        session = DeepSeekTaskRequest(
+            prompt=prompt,
+            system_prompt=_TRACELENS_SYSTEM_PROMPT,
+            cwd=tracelens_root,
+            writable=True,
+            log=log,
+            timeout_sec=timeout_sec,
+        )
+        result = await drive_tracelens_skill(session, output_dir / "analysis.md")
+        return _skill_result(run, runner="deepseek", label="DeepSeek", raw_text=result.text, error=result.error)
+
+    if runner == llm_config.AGENT_BACKEND_CODEX and (sdk.codex_turn_runner is not None or no_injected_sdk):
         codex_model = resolved_model or (os.environ.get("CODEX_MODEL") or "").strip() or DEFAULT_CODEX_MODEL
         return await _run_tracelens_skill_codex(
-            _SkillRun(request, prefix_path, log),
-            CodexTurnRequest(prompt, timeout_sec=max(60.0, float(budget_minutes) * 60.0)),
+            run,
+            CodexTurnRequest(prompt, timeout_sec=timeout_sec),
             model=codex_model,
             codex_turn_runner=sdk.codex_turn_runner or run_codex_turn,
         )
@@ -797,39 +834,10 @@ async def run_tracelens_skill(
         os.environ.setdefault("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
         os.environ.setdefault("DISABLE_AUTOUPDATER", "1")
 
-    system_prompt = (
-        "You are a TraceLens analysis runner inside Hyperloom. Execute only "
-        "the requested standalone analysis workflow. Use absolute paths, "
-        "write artifacts under the requested output directory, and do not "
-        "modify application source code."
-    )
-    max_turns = 300
-    kwargs: dict[str, Any] = {
-        "max_turns": max_turns,
-        "system_prompt": system_prompt,
-        "allowed_tools": DEFAULT_ALLOWED_TOOLS,
-        "stderr": lambda line: log(f"[claude-sdk] {line.rstrip()}") if log else None,
-    }
     resolved_model = resolved_model or DEFAULT_CLAUDE_MODEL
-    kwargs["model"] = resolved_model
-    # Stream events time each model request of the run onto the trajectory ledger.
-    kwargs["include_partial_messages"] = True
-    # Roots Bash relative paths at TraceLens; harmless in tests via FakeOptions.
-    kwargs["cwd"] = str(tracelens_root)
-    kwargs.update(
-        claude_sdk_env_options(
-            model=resolved_model,
-            component="tracelens",
-            operation="analyze_trace",
-        )
-    )
     idle_timeout = _resolve_stream_idle_timeout_sec()
-    tool_idle_timeout = _resolve_tool_idle_timeout_sec(idle_timeout)
-    # In print mode the CLI terminates background sub-agents still running 600s
-    # after the main turn goes quiet, before the in-flight bound below applies.
-    kwargs.setdefault("env", {})["CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS"] = os.environ.get(
-        "CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS", str(int(tool_idle_timeout * 1000))
-    )
+    bounds = _StreamIdleBounds(idle_timeout, _resolve_tool_idle_timeout_sec(idle_timeout))
+    kwargs = _claude_skill_options(run, resolved_model, bounds)
 
     try:
         options = sdk_options_cls(**kwargs)
@@ -846,34 +854,13 @@ async def run_tracelens_skill(
     with _TrajectoryCall(resolved_model) as trajectory:
         sdk_error = await _drive_sdk_stream(
             sdk_query_factory(prompt=prompt, options=options),
-            _StreamIdleBounds(idle_timeout, tool_idle_timeout),
+            bounds,
             chunks=chunks,
             observe=trajectory.observe,
             log=log,
         )
         trajectory.finish(sdk_error)
-
-    # Final report is ``analysis.md``.
-    report_path = output_dir / "analysis.md"
-    if not report_path.exists():
-        if sdk_error:
-            raise RuntimeError(f"TraceLens SDK runner failed before writing {report_path}: {sdk_error}")
-        raise RuntimeError(f"TraceLens SDK runner did not write {report_path}")
-
-    artifact_paths = {
-        "tracelens_agent_report": str(report_path),
-        "tracelens_cmd_prefix": str(prefix_path),
-    }
-    if sdk_error:
-        artifact_paths["tracelens_agent_sdk_error"] = sdk_error
-
-    return TraceLensSkillRunResult(
-        output_dir=output_dir,
-        report_path=report_path,
-        runner="claude_agent_sdk",
-        raw_text="\n".join(chunks),
-        artifact_paths=artifact_paths,
-    )
+    return _skill_result(run, runner="claude_agent_sdk", label="SDK", raw_text="\n".join(chunks), error=sdk_error)
 
 
 _IDLE_PCT_TABLE_RE = re.compile(

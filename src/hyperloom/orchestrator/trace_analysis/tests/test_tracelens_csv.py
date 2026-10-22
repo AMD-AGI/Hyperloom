@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import gzip
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -14,6 +15,16 @@ import pytest
 import yaml
 
 from hyperloom.orchestrator.trace_analysis import tracelens_analysis as tla
+from hyperloom.orchestrator.trace_analysis import _analysis_reports as analysis_reports
+from hyperloom.orchestrator.trace_analysis import _candidate_assembly as candidate_assembly
+from hyperloom.orchestrator.trace_analysis import _harness_discovery as harness_discovery
+from hyperloom.orchestrator.trace_analysis import _kernel_classification as kernel_classification
+from hyperloom.orchestrator.trace_analysis import _kernel_roofline as kernel_roofline
+from hyperloom.orchestrator.trace_analysis import _kernel_search as kernel_search
+from hyperloom.orchestrator.trace_analysis import _trace_gates as trace_gates
+from hyperloom.orchestrator.trace_analysis import _trace_inputs as trace_inputs
+from hyperloom.orchestrator.trace_analysis import _trace_shapes as trace_shapes
+from hyperloom.orchestrator.trace_analysis import _trace_split as trace_split
 from hyperloom.orchestrator.trace_analysis import _bypass_report as bypass_report
 from hyperloom.orchestrator.trace_analysis import _idle_gate as idle_gate
 from hyperloom.orchestrator.trace_analysis import _task_group_contract as task_group_contract
@@ -121,7 +132,7 @@ def test_a_filters_python_function_synchronize():
         "cat": "python_function",
         "dur": 88673.57,
     }
-    assert tla.is_kernel_event(sync_event) is False
+    assert kernel_classification.is_kernel_event(sync_event) is False
 
 
 def test_a_filters_cuda_runtime_hipdevicesynchronize():
@@ -131,12 +142,12 @@ def test_a_filters_cuda_runtime_hipdevicesynchronize():
         "cat": "cuda_runtime",
         "dur": 92.225,
     }
-    assert tla.is_kernel_event(runtime_event) is False
+    assert kernel_classification.is_kernel_event(runtime_event) is False
 
 
 def test_a_filters_cpu_op():
     cpu_op = {"name": "aten::matmul", "cat": "cpu_op", "dur": 50.0}
-    assert tla.is_kernel_event(cpu_op) is False
+    assert kernel_classification.is_kernel_event(cpu_op) is False
 
 
 def test_a_accepts_real_kernel_event():
@@ -145,20 +156,20 @@ def test_a_accepts_real_kernel_event():
         "cat": "kernel",
         "dur": 6.48,
     }
-    assert tla.is_kernel_event(real) is True
+    assert kernel_classification.is_kernel_event(real) is True
 
 
 def test_a_accepts_kernel_with_runtime_lookalike_name_but_kernel_cat():
     # Defensive: pathological name + correct cat → still a kernel
     weird = {"name": "void synchronize_kernel<...>", "cat": "kernel", "dur": 1.0}
-    assert tla.is_kernel_event(weird) is True
+    assert kernel_classification.is_kernel_event(weird) is True
 
 
 def test_a_rejects_kernel_cat_when_name_is_runtime_api():
     # Belt-and-braces: even with cat=kernel, names listed in RUNTIME_API_NAMES (caught by mis-tagged traces) are
     # rejected.
     weird = {"name": "hipDeviceSynchronize", "cat": "kernel", "dur": 1.0}
-    assert tla.is_kernel_event(weird) is False
+    assert kernel_classification.is_kernel_event(weird) is False
 
 
 def test_a_top_kernels_no_sync_events_in_real_trace_shape():
@@ -176,7 +187,7 @@ def test_a_top_kernels_no_sync_events_in_real_trace_shape():
         {"name": "void paged_attention_ll4mi_QKV_mfma16_kernel<...>", "cat": "kernel", "dur": 889.0},
     ]
     # Direct call paths used by analyze_trace_files
-    kept = [e for e in events if tla.is_kernel_event(e)]
+    kept = [e for e in events if kernel_classification.is_kernel_event(e)]
     assert len(kept) == 3
     kept_names = {e["name"] for e in kept}
     assert "aiter::add_rmsnorm_quant_kernel<...>" in kept_names
@@ -191,10 +202,10 @@ def test_a_top_kernels_no_sync_events_in_real_trace_shape():
 def test_issue_769_kernel_event_uses_torch_cat_kernel():
     """A real GPU kernel uses cat=='kernel'; the renamed 'kernel_agent' is not a trace category."""
     real_kernel = {"name": "void some_gemm_kernel<...>", "cat": "kernel", "dur": 5.0}
-    assert tla.is_kernel_event(real_kernel) is True
+    assert kernel_classification.is_kernel_event(real_kernel) is True
     # The component-name string 'kernel_agent' must never be treated as a GPU kernel trace category.
     not_a_kernel = {"name": "void some_gemm_kernel<...>", "cat": "kernel_agent", "dur": 5.0}
-    assert tla.is_kernel_event(not_a_kernel) is False
+    assert kernel_classification.is_kernel_event(not_a_kernel) is False
 
 
 def test_issue_769_count_gpu_kernel_events_nonzero_on_healthy_trace(tmp_path):
@@ -212,7 +223,7 @@ def test_issue_769_count_gpu_kernel_events_nonzero_on_healthy_trace(tmp_path):
     trace_path = tmp_path / "healthy.trace.json.gz"
     with gzip.open(trace_path, "wt", encoding="utf-8") as fh:
         json.dump(trace, fh)
-    assert tla.count_gpu_kernel_events(trace_path) == 3
+    assert trace_inputs.count_gpu_kernel_events(trace_path) == 3
 
 
 # Native-only kernel-opt targeting
@@ -220,43 +231,43 @@ def test_compile_generated_kernel_is_not_reusable_native():
     candidate = {
         "name": "triton_poi_fused_add_mul_0",
         "source_file": "/tmp/torchinductor_root/ab/cdef.py",
-        "source_type": tla.source_type_for(
+        "source_type": kernel_classification.source_type_for(
             "triton_poi_fused_add_mul_0",
             "/tmp/torchinductor_root/ab/cdef.py",
         ),
     }
     assert candidate["source_type"] == "runtime_generated"
     assert (
-        tla.is_runtime_generated_kernel(
+        kernel_classification.is_runtime_generated_kernel(
             candidate["name"],
             candidate["source_file"],
         )
         is True
     )
-    assert tla.classify_patchability(candidate)[0] is False
-    assert tla.recommend_backends(candidate) == []
-    assert "not reusable" in tla.build_notes(candidate)
+    assert kernel_classification.classify_patchability(candidate)[0] is False
+    assert candidate_assembly.recommend_backends(candidate) == []
+    assert "not reusable" in candidate_assembly.build_notes(candidate)
 
 
 def test_stable_framework_triton_source_is_reusable_native(monkeypatch):
     candidate = {
         "name": "triton_attention_decode_kernel",
         "source_file": "/sgl-workspace/sglang/python/sglang/srt/layers/attention/triton_ops.py",
-        "source_type": tla.source_type_for(
+        "source_type": kernel_classification.source_type_for(
             "triton_attention_decode_kernel",
             "/sgl-workspace/sglang/python/sglang/srt/layers/attention/triton_ops.py",
         ),
     }
     assert candidate["source_type"] == "triton"
     assert (
-        tla.is_runtime_generated_kernel(
+        kernel_classification.is_runtime_generated_kernel(
             candidate["name"],
             candidate["source_file"],
         )
         is False
     )
-    assert tla.classify_patchability(candidate)[0] is True
-    assert tla.recommend_backends(candidate) == ["forge"]
+    assert kernel_classification.classify_patchability(candidate)[0] is True
+    assert candidate_assembly.recommend_backends(candidate) == ["forge"]
 
 
 def test_recommend_backends_for_python_source():
@@ -267,7 +278,7 @@ def test_recommend_backends_for_python_source():
         "source_type": "python",
         "reusable_native_kernel": True,
     }
-    assert tla.recommend_backends(candidate) == ["forge"]
+    assert candidate_assembly.recommend_backends(candidate) == ["forge"]
 
 
 def test_recommend_backends_for_unknown_source():
@@ -278,7 +289,7 @@ def test_recommend_backends_for_unknown_source():
         "source_type": "unknown",
         "reusable_native_kernel": True,
     }
-    assert tla.recommend_backends(candidate) == ["forge"]
+    assert candidate_assembly.recommend_backends(candidate) == ["forge"]
 
 
 def test_recommend_backends_is_forge_only():
@@ -289,7 +300,7 @@ def test_recommend_backends_is_forge_only():
         "source_type": "triton",
         "reusable_native_kernel": True,
     }
-    ladder = tla.recommend_backends(candidate)
+    ladder = candidate_assembly.recommend_backends(candidate)
     assert ladder == ["forge"], f"forge must be the sole per-kernel backend, got {ladder}"
 
 
@@ -297,14 +308,14 @@ def test_unknown_source_root_is_not_reusable_native():
     candidate = {
         "name": "my_custom_kernel",
         "source_file": "/tmp/random/my_custom_kernel.cu",
-        "source_type": tla.source_type_for(
+        "source_type": kernel_classification.source_type_for(
             "my_custom_kernel",
             "/tmp/random/my_custom_kernel.cu",
         ),
     }
     assert candidate["source_type"] == "hip_cpp"
-    assert tla.classify_patchability(candidate)[0] is False
-    assert tla.recommend_backends(candidate) == []
+    assert kernel_classification.classify_patchability(candidate)[0] is False
+    assert candidate_assembly.recommend_backends(candidate) == []
 
 
 def test_known_rmsnorm_harness_is_registered_without_repo_root(monkeypatch, tmp_path):
@@ -312,41 +323,41 @@ def test_known_rmsnorm_harness_is_registered_without_repo_root(monkeypatch, tmp_
     harness = tmp_path / "aiter" / "op_tests" / "test_rmsnorm2d.py"
     harness.parent.mkdir(parents=True)
     harness.write_text("def test_rmsnorm2d(): pass\n", encoding="utf-8")
-    monkeypatch.setattr(tla, "kernel_search_roots", lambda: (str(tmp_path / "aiter"),))
-    tla._harness_search_bases.cache_clear()
+    monkeypatch.setattr(kernel_search, "kernel_search_roots", lambda: (str(tmp_path / "aiter"),))
+    harness_discovery._harness_search_bases.cache_clear()
 
-    files = tla.find_benchmark_files(
+    files = harness_discovery.find_benchmark_files(
         "_ZN5aiter24add_rmsnorm_quant_kernelIDF16bDF16bLi256EEEv",
         "",
         "/sgl-workspace/aiter/csrc/kernels/rmsnorm_quant_kernels.cu",
     )
-    tla._harness_search_bases.cache_clear()
+    harness_discovery._harness_search_bases.cache_clear()
 
     assert files == [str(harness)]
 
 
 def test_absent_curated_harness_is_not_reported(monkeypatch, tmp_path):
     """A hint that resolves nowhere yields nothing, not an unopenable path."""
-    monkeypatch.setattr(tla, "kernel_search_roots", lambda: (str(tmp_path / "aiter"),))
-    tla._harness_search_bases.cache_clear()
-    files = tla.find_benchmark_files("kernel_paged_attention_2d", "", "/pkg/attention.py")
-    tla._harness_search_bases.cache_clear()
+    monkeypatch.setattr(kernel_search, "kernel_search_roots", lambda: (str(tmp_path / "aiter"),))
+    harness_discovery._harness_search_bases.cache_clear()
+    files = harness_discovery.find_benchmark_files("kernel_paged_attention_2d", "", "/pkg/attention.py")
+    harness_discovery._harness_search_bases.cache_clear()
     assert files == []
 
 
 def test_125_finalize_adds_kernel_category_for_attention():
     cand = {"name": "paged_attention_ll4mi_QKV_mfma16_kernel<bf16>"}
-    assert tla.derive_kernel_category(cand) == "SDPA"
+    assert candidate_assembly.derive_kernel_category(cand) == "SDPA"
 
 
 def test_125_derive_category_explicit_wins_over_heuristic():
     cand = {"name": "Cijk_Alik_GEMM_x", "tracelens_category": "MoE"}
-    assert tla.derive_kernel_category(cand) == "MoE"
+    assert candidate_assembly.derive_kernel_category(cand) == "MoE"
 
 
 def test_125_derive_category_unknown_for_opaque_name():
     cand = {"name": "ZZZ_some_opaque_thunk_42"}
-    assert tla.derive_kernel_category(cand) == "unknown"
+    assert candidate_assembly.derive_kernel_category(cand) == "unknown"
 
 
 def test_125_derive_category_normalizations():
@@ -364,7 +375,7 @@ def test_125_derive_category_normalizations():
         ("aten::bmm", "GEMM"),
     ]
     for name, expected in cases:
-        assert tla.derive_kernel_category({"name": name}) == expected, name
+        assert candidate_assembly.derive_kernel_category({"name": name}) == expected, name
 
 
 def test_125_finalize_outputs_source_path_field():
@@ -379,7 +390,7 @@ def test_125_finalize_outputs_source_path_field():
             "shapes": [[16, 1024]],
         }
     ]
-    out = tla._finalize_candidates(candidates)
+    out = candidate_assembly._finalize_candidates(candidates)
     assert out[0]["source_path"] == "/path/to/rmsnorm.cu"
     assert out[0]["kernel_category"] == "LayerNorm"
 
@@ -402,7 +413,7 @@ def test_finalize_uses_csv_op_category_for_aten_mm(tmp_path):
             "shapes": [[15360, 2048]],
         }
     ]
-    out = tla._finalize_candidates(
+    out = candidate_assembly._finalize_candidates(
         candidates,
         perf_report_csv_dir=csv_dir,
     )
@@ -423,7 +434,7 @@ def test_load_op_category_map_parses_unified_perf_summary(tmp_path):
         "noise_op,,row5\n",
         encoding="utf-8",
     )
-    m = tla.load_op_category_map(csv_dir)
+    m = candidate_assembly.load_op_category_map(csv_dir)
     assert m == {
         "aten::mm": "GEMM",
         "aiter::ck_moe_stage1": "MoE_unfused",
@@ -433,9 +444,9 @@ def test_load_op_category_map_parses_unified_perf_summary(tmp_path):
 
 def test_load_op_category_map_missing_returns_empty(tmp_path):
     """csv absent / wrong path => {} so callers degrade to the name heuristic."""
-    assert tla.load_op_category_map(tmp_path / "nonexistent") == {}
+    assert candidate_assembly.load_op_category_map(tmp_path / "nonexistent") == {}
     (tmp_path / "perf_report_csvs").mkdir()
-    assert tla.load_op_category_map(tmp_path / "perf_report_csvs") == {}
+    assert candidate_assembly.load_op_category_map(tmp_path / "perf_report_csvs") == {}
 
 
 # ── #727 companion: fused-MoE trace-anchored shape capture ────────────────────
@@ -467,7 +478,7 @@ def _write_fused_moe_ops_unique_args(tmp_path):
 def test_resolve_fused_moe_shapes_matches_manual_harness(tmp_path):
     """Operand dims recovered from ops_unique_args.csv match the manual GEAK harness shapes."""
     csv_dir = _write_fused_moe_ops_unique_args(tmp_path)
-    shapes = tla.resolve_fused_moe_shapes_from_csv(csv_dir)
+    shapes = trace_shapes.resolve_fused_moe_shapes_from_csv(csv_dir)
     # gate/up GEMM: A(num_tokens,H) x w1(E,2I,H) -> C(T,2I)
     assert "(15360,2048) bf16" in shapes  # A
     assert "(128,1536,2048) bf16" in shapes  # w1 (2*I=1536)
@@ -486,7 +497,7 @@ def test_resolve_fused_moe_shapes_matches_manual_harness(tmp_path):
 def test_resolve_fused_moe_preserves_invocation_boundaries(tmp_path):
     csv_dir = _write_fused_moe_ops_unique_args(tmp_path)
 
-    cases = tla.resolve_fused_moe_invocation_cases_from_csv(csv_dir)
+    cases = trace_shapes.resolve_fused_moe_invocation_cases_from_csv(csv_dir)
 
     assert len(cases) == 2
     assert "(15360,2048) bf16" in cases[0]["input_shapes"][0]["shape"]
@@ -496,14 +507,14 @@ def test_resolve_fused_moe_preserves_invocation_boundaries(tmp_path):
 
 def test_resolve_fused_moe_shapes_missing_csv_returns_empty(tmp_path):
     """Absent sidecar / no fused-MoE rows => [] so the candidate's empty shapes stay untouched."""
-    assert tla.resolve_fused_moe_shapes_from_csv(tmp_path / "nope") == []
+    assert trace_shapes.resolve_fused_moe_shapes_from_csv(tmp_path / "nope") == []
     csv_dir = tmp_path / "perf_report_csvs"
     csv_dir.mkdir()
     (csv_dir / "ops_unique_args.csv").write_text(
         'name,op category,Input Dims,Input type\naten::mm,GEMM,"((15360, 2048),)","(\'c10::BFloat16\',)"\n',
         encoding="utf-8",
     )
-    assert tla.resolve_fused_moe_shapes_from_csv(csv_dir) == []
+    assert trace_shapes.resolve_fused_moe_shapes_from_csv(csv_dir) == []
 
 
 def test_finalize_grafts_fused_moe_shapes_onto_empty_candidate(tmp_path):
@@ -520,7 +531,7 @@ def test_finalize_grafts_fused_moe_shapes_onto_empty_candidate(tmp_path):
             "tracelens_category": "moe_fused",
         }
     ]
-    out = tla._finalize_candidates(
+    out = candidate_assembly._finalize_candidates(
         candidates,
         perf_report_csv_dir=csv_dir,
     )
@@ -559,7 +570,7 @@ def test_finalize_grafts_csv_shapes_for_other_bucket_attention_candidate(tmp_pat
         }
     ]
 
-    out = tla._finalize_candidates(
+    out = candidate_assembly._finalize_candidates(
         candidates,
         perf_report_csv_dir=csv_dir,
     )
@@ -591,7 +602,7 @@ def test_finalize_does_not_touch_non_moe_or_already_shaped(tmp_path):
             "tracelens_category": "moe_fused",
         },
     ]
-    out = tla._finalize_candidates(
+    out = candidate_assembly._finalize_candidates(
         candidates,
         perf_report_csv_dir=csv_dir,
     )
@@ -612,7 +623,7 @@ def test_finalize_falls_back_to_heuristic_when_csv_missing(tmp_path):
             "shapes": [[1, 1]],
         }
     ]
-    out = tla._finalize_candidates(
+    out = candidate_assembly._finalize_candidates(
         candidates,
         perf_report_csv_dir=tmp_path / "does_not_exist",
     )
@@ -661,12 +672,12 @@ def test_write_reports_enriches_candidates_with_runtime_metadata(tmp_path):
         dry_run=False,
     )
 
-    artifacts = tla.write_reports(
+    artifacts = analysis_reports.write_reports(
         tmp_path / "run",
-        tla.TraceInputs(input_type="file", files=[trace]),
+        trace_inputs.TraceInputs(input_type="file", files=[trace]),
         candidates=[candidate],
         args=args,
-        outcome=tla.OrchestratorOutcome(report_path=analysis_md),
+        outcome=analysis_reports.OrchestratorOutcome(report_path=analysis_md),
     )
     payload = _json.loads(Path(artifacts["kernel_candidates"]).read_text(encoding="utf-8"))
     enriched = payload["hot_kernels"][0]
@@ -703,7 +714,7 @@ def test_load_model_kernel_params_reads_head_dim(tmp_path):
         encoding="utf-8",
     )
 
-    params = tla.load_model_kernel_params(str(model_dir))
+    params = kernel_roofline.load_model_kernel_params(str(model_dir))
 
     assert params["HEAD_SIZE"] == 128
     assert params["NUM_ATTENTION_HEADS"] == 32
@@ -726,7 +737,7 @@ def test_load_model_kernel_params_derives_head_size_from_hidden_size(tmp_path):
         encoding="utf-8",
     )
 
-    params = tla.load_model_kernel_params(str(model_dir))
+    params = kernel_roofline.load_model_kernel_params(str(model_dir))
 
     assert params["HEAD_SIZE"] == 128
     assert params["HIDDEN_SIZE"] == 4096
@@ -752,7 +763,7 @@ def test_load_model_kernel_params_preserves_mla_head_dims(tmp_path):
         encoding="utf-8",
     )
 
-    params = tla.load_model_kernel_params(str(model_dir))
+    params = kernel_roofline.load_model_kernel_params(str(model_dir))
 
     assert "HEAD_SIZE" not in params
     assert params["QK_NOPE_HEAD_DIM"] == 128
@@ -794,12 +805,12 @@ def test_write_reports_enriches_head_size_from_model_config(tmp_path):
         dry_run=False,
     )
 
-    artifacts = tla.write_reports(
+    artifacts = analysis_reports.write_reports(
         tmp_path / "run",
-        tla.TraceInputs(input_type="file", files=[trace]),
+        trace_inputs.TraceInputs(input_type="file", files=[trace]),
         candidates=[candidate],
         args=args,
-        outcome=tla.OrchestratorOutcome(report_path=analysis_md),
+        outcome=analysis_reports.OrchestratorOutcome(report_path=analysis_md),
     )
     payload = _json.loads(Path(artifacts["kernel_candidates"]).read_text(encoding="utf-8"))
 
@@ -828,7 +839,9 @@ def test_write_reports_raises_when_analysis_md_missing(tmp_path):
     args = _make_write_reports_args(trace)
 
     with pytest.raises(RuntimeError, match="did not produce analysis.md"):
-        tla.write_reports(tmp_path / "run", tla.TraceInputs(input_type="file", files=[trace]), candidates=[], args=args)
+        analysis_reports.write_reports(
+            tmp_path / "run", trace_inputs.TraceInputs(input_type="file", files=[trace]), candidates=[], args=args
+        )
 
 
 def test_write_reports_raises_when_existing_report_does_not_exist(tmp_path):
@@ -840,12 +853,12 @@ def test_write_reports_raises_when_existing_report_does_not_exist(tmp_path):
     args = _make_write_reports_args(trace)
 
     with pytest.raises(RuntimeError, match="did not produce analysis.md"):
-        tla.write_reports(
+        analysis_reports.write_reports(
             tmp_path / "run",
-            tla.TraceInputs(input_type="file", files=[trace]),
+            trace_inputs.TraceInputs(input_type="file", files=[trace]),
             candidates=[],
             args=args,
-            outcome=tla.OrchestratorOutcome(report_path=tmp_path / "does-not-exist" / "analysis.md"),
+            outcome=analysis_reports.OrchestratorOutcome(report_path=tmp_path / "does-not-exist" / "analysis.md"),
         )
 
 
@@ -860,12 +873,12 @@ def test_write_reports_does_not_create_filename_aliases(tmp_path):
     analysis_md.write_text("# TraceLens upstream report\n", encoding="utf-8")
     args = _make_write_reports_args(trace)
 
-    artifacts = tla.write_reports(
+    artifacts = analysis_reports.write_reports(
         run_dir,
-        tla.TraceInputs(input_type="file", files=[trace]),
+        trace_inputs.TraceInputs(input_type="file", files=[trace]),
         candidates=[],
         args=args,
-        outcome=tla.OrchestratorOutcome(report_path=analysis_md),
+        outcome=analysis_reports.OrchestratorOutcome(report_path=analysis_md),
     )
 
     # The returned trace_report_path must point at the upstream file, not at a Hyperloom-owned copy.
@@ -887,12 +900,12 @@ def test_write_reports_does_not_mutate_upstream_analysis_md(tmp_path):
     analysis_md.write_text(upstream_body, encoding="utf-8")
     args = _make_write_reports_args(trace)
 
-    tla.write_reports(
+    analysis_reports.write_reports(
         run_dir,
-        tla.TraceInputs(input_type="file", files=[trace]),
+        trace_inputs.TraceInputs(input_type="file", files=[trace]),
         candidates=[],
         args=args,
-        outcome=tla.OrchestratorOutcome(report_path=analysis_md),
+        outcome=analysis_reports.OrchestratorOutcome(report_path=analysis_md),
     )
 
     assert analysis_md.read_text(encoding="utf-8") == upstream_body
@@ -940,12 +953,12 @@ def _write_contract_reports(tmp_path: Path) -> dict[str, str]:
     analysis_md.write_text("# TraceLens stub\n", encoding="utf-8")
     args = _make_write_reports_args(trace)
 
-    return tla.write_reports(
+    return analysis_reports.write_reports(
         tmp_path / "run",
-        tla.TraceInputs(input_type="file", files=[trace]),
+        trace_inputs.TraceInputs(input_type="file", files=[trace]),
         candidates=_contract_candidates(),
         args=args,
-        outcome=tla.OrchestratorOutcome(report_path=analysis_md),
+        outcome=analysis_reports.OrchestratorOutcome(report_path=analysis_md),
     )
 
 
@@ -997,7 +1010,7 @@ def test_count_gpu_kernel_events_distinguishes_cpu_only_and_real_traces(tmp_path
             },
             f,
         )
-    assert tla.count_gpu_kernel_events(cpu_only) == 0
+    assert trace_inputs.count_gpu_kernel_events(cpu_only) == 0
 
     real = tmp_path / "real.json.gz"
     with gzip.open(real, "wt") as f:
@@ -1012,7 +1025,7 @@ def test_count_gpu_kernel_events_distinguishes_cpu_only_and_real_traces(tmp_path
             },
             f,
         )
-    assert tla.count_gpu_kernel_events(real) == 2
+    assert trace_inputs.count_gpu_kernel_events(real) == 2
 
 
 def test_124_tracelens_analysis_fails_fast_on_cpu_only_trace(tmp_path):
@@ -1069,7 +1082,7 @@ def test_124_tracelens_analysis_fails_fast_on_cpu_only_trace(tmp_path):
 
     env_backup = dict(_os.environ)
     try:
-        with patch.object(tla.subprocess, "run", side_effect=fake_run), patch.object(tla.sys, "argv", argv):
+        with patch.object(subprocess, "run", side_effect=fake_run), patch.object(tla.sys, "argv", argv):
             try:
                 rc = tla.main()
             except SystemExit as exc:
@@ -1791,7 +1804,7 @@ def test_discover_trace_inputs_prefers_merged_trace_over_tp0_decode(tmp_path):
     tp1_extend = trace_dir / "177-TP-1-EXTEND.trace.json.gz"
     tp1_extend.write_text("{}", encoding="utf-8")
 
-    kind, traces = tla.discover_trace_inputs(trace_dir)
+    kind, traces = trace_inputs.discover_trace_inputs(trace_dir)
     assert kind == "capture_dir"
     assert traces[0] == merged
     assert traces[-1] == tp0_decode
@@ -1824,7 +1837,7 @@ def test_discover_trace_inputs_prefers_raw_capture_over_split_fragments(tmp_path
     trace_dir = tmp_path / "torch_trace"
     raw = _xdit_roofline_capture(trace_dir)
 
-    kind, traces = tla.discover_trace_inputs(trace_dir)
+    kind, traces = trace_inputs.discover_trace_inputs(trace_dir)
 
     assert kind == "capture_dir"
     assert traces[0] == raw, "the raw capture must be the first candidate"
@@ -1837,13 +1850,13 @@ def test_the_leading_candidate_is_the_one_with_the_kernels(tmp_path):
     trace_dir = tmp_path / "torch_trace"
     _xdit_roofline_capture(trace_dir)
 
-    _kind, traces = tla.discover_trace_inputs(trace_dir)
+    _kind, traces = trace_inputs.discover_trace_inputs(trace_dir)
 
-    assert tla.count_gpu_kernel_events(traces[0]) == 64
+    assert trace_inputs.count_gpu_kernel_events(traces[0]) == 64
     # The fragment that used to be probed first really does look CPU-only, so the old ordering failed for a real
     # reason and not a test artefact.
     fragment = next(p for p in traces if p.name.startswith("decode_only_"))
-    assert tla.count_gpu_kernel_events(fragment) == 0
+    assert trace_inputs.count_gpu_kernel_events(fragment) == 0
 
 
 def test_annotation_sidecars_sort_after_a_capture_even_outside_trace_split(tmp_path):
@@ -1855,7 +1868,7 @@ def test_annotation_sidecars_sort_after_a_capture_even_outside_trace_split(tmp_p
     sidecar = trace_dir / "aaa.trace_annotation_iteration_0.json.gz"
     sidecar.write_text("{}", encoding="utf-8")
 
-    _kind, traces = tla.discover_trace_inputs(trace_dir)
+    _kind, traces = trace_inputs.discover_trace_inputs(trace_dir)
 
     assert traces[0] == raw
     assert traces[-1] == sidecar
@@ -1870,7 +1883,7 @@ def test_fragments_flat_beside_the_capture_are_still_demoted(tmp_path):
         trace_dir / "decode_only_steady_state_prefill_0_decode_1_bs1_conc1_rank_0.trace.json.gz", kernels=0
     )
 
-    _kind, traces = tla.discover_trace_inputs(trace_dir)
+    _kind, traces = trace_inputs.discover_trace_inputs(trace_dir)
 
     assert traces[0] == raw
     assert traces[-1] == flat_fragment
@@ -1885,11 +1898,11 @@ def test_an_eight_rank_flat_capture_does_not_exhaust_the_probe_budget(tmp_path):
         _rank_trace(trace_dir / f"mixed_steady_state_x_rank_{rank}.trace.json.gz", kernels=0)
     captures = [_rank_trace(trace_dir / f"rank_{r}.trace.json.gz", kernels=25) for r in range(8)]
 
-    _kind, traces = tla.discover_trace_inputs(trace_dir)
+    _kind, traces = trace_inputs.discover_trace_inputs(trace_dir)
 
     leading = traces[: tla._KERNEL_PROBE_LIMIT]
     assert any(p in captures for p in leading), "a real capture must be reachable inside the probe budget"
-    assert tla.count_gpu_kernel_events(traces[0]) > 0
+    assert trace_inputs.count_gpu_kernel_events(traces[0]) > 0
 
 
 def test_a_non_trace_sidecar_does_not_lead_discovery(tmp_path):
@@ -1899,7 +1912,7 @@ def test_a_non_trace_sidecar_does_not_lead_discovery(tmp_path):
     sidecar = trace_dir / "trace_split" / "execution_details.json"
     assert sidecar.exists()
 
-    _kind, traces = tla.discover_trace_inputs(trace_dir)
+    _kind, traces = trace_inputs.discover_trace_inputs(trace_dir)
 
     assert traces[0] == raw
     assert traces.index(sidecar) > 0
@@ -1913,7 +1926,7 @@ def test_the_larger_trace_leads_within_a_bucket(tmp_path):
     large = _rank_trace(trace_dir / "zzz_unknown_shape.trace.json.gz", kernels=400)
     assert large.stat().st_size > small.stat().st_size
 
-    _kind, traces = tla.discover_trace_inputs(trace_dir)
+    _kind, traces = trace_inputs.discover_trace_inputs(trace_dir)
 
     assert traces[0] == large
 
@@ -1926,7 +1939,7 @@ def test_merged_trace_still_wins_over_a_raw_rank_capture(tmp_path):
     merged = trace_dir / "merged-42.trace.json.gz"
     merged.write_text("{}", encoding="utf-8")
 
-    _kind, traces = tla.discover_trace_inputs(trace_dir)
+    _kind, traces = trace_inputs.discover_trace_inputs(trace_dir)
 
     assert traces[0] == merged
 
@@ -1998,7 +2011,7 @@ def test_127_splitter_cli_uses_positional_trace_path_and_find_steady_state(
 
     env_backup = dict(_os.environ)
     try:
-        with patch.object(tla.subprocess, "run", side_effect=fake_run), patch.object(tla.sys, "argv", argv):
+        with patch.object(subprocess, "run", side_effect=fake_run), patch.object(tla.sys, "argv", argv):
             try:
                 tla.main()
             except SystemExit as exc:
@@ -2102,7 +2115,7 @@ def _drive_main_capturing_subprocess(tmp_path, extra_argv, env_overrides=None, t
                 _os.environ.pop(k, None)
             else:
                 _os.environ[k] = v
-        with patch.object(tla.subprocess, "run", side_effect=fake_run), patch.object(tla.sys, "argv", argv):
+        with patch.object(subprocess, "run", side_effect=fake_run), patch.object(tla.sys, "argv", argv):
             try:
                 tla.main()
             except SystemExit:
@@ -2202,7 +2215,7 @@ def _drive_main_over_capture_dir(tmp_path, trace_dir, extra_argv=None):
 
     env_backup = dict(_os.environ)
     try:
-        with patch.object(tla.subprocess, "run", side_effect=fake_run), patch.object(tla.sys, "argv", argv):
+        with patch.object(subprocess, "run", side_effect=fake_run), patch.object(tla.sys, "argv", argv):
             try:
                 tla.main()
             except SystemExit:
@@ -2231,7 +2244,7 @@ def test_analysis_input_follows_the_candidate_that_passed_the_preflight(tmp_path
     populated = _rank_trace(trace_dir / "rank_1.trace.json.gz", kernels=12)
     assert empty.stat().st_size > populated.stat().st_size
 
-    _kind, traces = tla.discover_trace_inputs(trace_dir)
+    _kind, traces = trace_inputs.discover_trace_inputs(trace_dir)
     assert traces[0] == empty
 
     captured = _drive_main_over_capture_dir(tmp_path, trace_dir)
@@ -2302,9 +2315,9 @@ def test_capture_only_input_is_rejected_before_the_splitter(tmp_path, capsys):
             _capture_sidecar(capture / f"bs_{bs}_rank{rank}.json.gz")
 
     # Precondition: this is exactly the shape the old check waved through.
-    _kind, traces = tla.discover_trace_inputs(trace_dir)
+    _kind, traces = trace_inputs.discover_trace_inputs(trace_dir)
     assert len(traces) == 6
-    assert tla._count_kernels_if_readable(traces[0])[1] > 0
+    assert trace_inputs._count_kernels_if_readable(traces[0])[1] > 0
 
     captured = _drive_main_over_capture_dir(tmp_path, trace_dir)
 
@@ -2346,23 +2359,23 @@ def test_capture_classification_ignores_an_unrelated_ancestor_dir(tmp_path):
     root.mkdir(parents=True)
     real = _rank_trace(root / "rank_0.trace.json.gz", kernels=7)
 
-    assert not tla._is_capture_fragment(real, tla._capture_classification_root(root))
+    assert not trace_inputs._is_capture_fragment(real, trace_inputs._capture_classification_root(root))
     # A genuine sidecar below the root is still caught.
     nested = _capture_sidecar(root / "capture_traces" / "bs_2_rank0.json.gz")
-    assert tla._is_capture_fragment(nested, tla._capture_classification_root(root))
+    assert trace_inputs._is_capture_fragment(nested, trace_inputs._capture_classification_root(root))
 
 
 def test_bare_bs_prefix_is_not_enough_to_condemn_a_trace(tmp_path):
     """``bs_`` without a batch number must not classify as a sidecar."""
     root = tmp_path / "torch_trace"
     root.mkdir()
-    classify_root = tla._capture_classification_root(root)
+    classify_root = trace_inputs._capture_classification_root(root)
 
-    assert tla._is_capture_fragment(root / "bs_2_rank0.json.gz", classify_root)
-    assert tla._is_capture_fragment(root / "bs_512.json.gz", classify_root)
-    assert tla._is_capture_fragment(root / "graph_capture_rank_0.pt.trace.json.gz", classify_root)
-    assert not tla._is_capture_fragment(root / "bs_baseline.trace.json.gz", classify_root)
-    assert not tla._is_capture_fragment(root / "rank_0.trace.json.gz", classify_root)
+    assert trace_inputs._is_capture_fragment(root / "bs_2_rank0.json.gz", classify_root)
+    assert trace_inputs._is_capture_fragment(root / "bs_512.json.gz", classify_root)
+    assert trace_inputs._is_capture_fragment(root / "graph_capture_rank_0.pt.trace.json.gz", classify_root)
+    assert not trace_inputs._is_capture_fragment(root / "bs_baseline.trace.json.gz", classify_root)
+    assert not trace_inputs._is_capture_fragment(root / "rank_0.trace.json.gz", classify_root)
 
 
 def test_capture_sidecars_sort_behind_a_real_trace(tmp_path):
@@ -2373,7 +2386,7 @@ def test_capture_sidecars_sort_behind_a_real_trace(tmp_path):
     big_sidecar = _capture_sidecar(trace_dir / "capture_traces" / "bs_2_rank0.json.gz", kernels=2)
     assert big_sidecar.stat().st_size > real.stat().st_size
 
-    _kind, traces = tla.discover_trace_inputs(trace_dir)
+    _kind, traces = trace_inputs.discover_trace_inputs(trace_dir)
     assert traces[0] == real
 
 
@@ -2397,15 +2410,15 @@ def test_capture_sidecars_sort_behind_a_real_trace(tmp_path):
 def test_capture_classifier_covers_every_observed_profile_layout(tmp_path, relpath, expected):
     """The classifier keys on shape, so a new layout does not slip through."""
     path = tmp_path / relpath
-    assert tla._is_capture_fragment(path, tmp_path) is expected
+    assert trace_inputs._is_capture_fragment(path, tmp_path) is expected
 
 
 def test_capture_dir_match_is_anchored_so_a_descriptive_name_is_safe(tmp_path):
     """``graph_capture`` anchors in a directory name, unlike in a filename."""
     safe = tmp_path / "torch_profiler_with_graph_capture" / "rank_0.trace.json.gz"
-    assert tla._is_capture_fragment(safe, tmp_path) is False
+    assert trace_inputs._is_capture_fragment(safe, tmp_path) is False
     for capture_dir in ("graph_capture", "graph_capture_profile", "capture_traces"):
-        assert tla._is_capture_fragment(tmp_path / capture_dir / "rank_0.trace.json.gz", tmp_path) is True
+        assert trace_inputs._is_capture_fragment(tmp_path / capture_dir / "rank_0.trace.json.gz", tmp_path) is True
 
 
 def test_discover_capture_folder_finds_the_unpatched_sglang_layout(tmp_path):
@@ -2443,7 +2456,7 @@ def test_unpatched_sglang_capture_sorts_behind_the_workload_trace(tmp_path):
     )
     assert big_capture.stat().st_size > real.stat().st_size
 
-    _kind, traces = tla.discover_trace_inputs(trace_dir)
+    _kind, traces = trace_inputs.discover_trace_inputs(trace_dir)
     assert traces[0] == real
 
 
@@ -2454,7 +2467,7 @@ def test_capture_under_an_ancestor_named_trace_split_still_orders_correctly(tmp_
     fragment = _rank_trace(trace_dir / "aaa_trace_annotation_iteration_1.json.gz", kernels=0)
     capture = _rank_trace(trace_dir / "zzz_rank_0.trace.json.gz", kernels=30)
 
-    _kind, traces = tla.discover_trace_inputs(trace_dir)
+    _kind, traces = trace_inputs.discover_trace_inputs(trace_dir)
 
     assert traces[0] == capture, (
         "the real capture must lead despite the ancestor directory name "
@@ -2471,11 +2484,11 @@ def test_unreadable_leading_candidate_is_not_reported_as_cpu_only(tmp_path):
     corrupt.write_bytes(b"\x1f\x8b" + b"\x00" * 4000)  # gzip magic, truncated body
     _rank_trace(trace_dir / "rank_1.trace.json.gz", kernels=7)
 
-    readable, count = tla._count_kernels_if_readable(corrupt)
+    readable, count = trace_inputs._count_kernels_if_readable(corrupt)
 
     assert readable is False, "a truncated gzip must report as unreadable"
     assert count == 0
-    populated_readable, populated_count = tla._count_kernels_if_readable(trace_dir / "rank_1.trace.json.gz")
+    populated_readable, populated_count = trace_inputs._count_kernels_if_readable(trace_dir / "rank_1.trace.json.gz")
     assert populated_readable is True
     assert populated_count == 7
 
@@ -2627,15 +2640,15 @@ def test_derive_kernel_category_uses_upstream_enum_when_present():
         ("rmsnorm", "LayerNorm"),
     ]:
         cand = {"tracelens_category": raw, "name": "ignored_when_cat_present"}
-        assert tla.derive_kernel_category(cand) == expected, raw
+        assert candidate_assembly.derive_kernel_category(cand) == expected, raw
 
 
 def test_derive_kernel_category_falls_back_to_name_heuristic():
     """Raw-trace fallback path has no tracelens_category; heuristics still apply."""
-    assert tla.derive_kernel_category({"name": "rocblas_gemm_kernel"}) == "GEMM"
-    assert tla.derive_kernel_category({"name": "fmha_fwd_kernel"}) == "SDPA"
-    assert tla.derive_kernel_category({"name": "rmsnorm_fused"}) == "LayerNorm"
-    assert tla.derive_kernel_category({"name": "totally_unknown_op"}) == "unknown"
+    assert candidate_assembly.derive_kernel_category({"name": "rocblas_gemm_kernel"}) == "GEMM"
+    assert candidate_assembly.derive_kernel_category({"name": "fmha_fwd_kernel"}) == "SDPA"
+    assert candidate_assembly.derive_kernel_category({"name": "rmsnorm_fused"}) == "LayerNorm"
+    assert candidate_assembly.derive_kernel_category({"name": "totally_unknown_op"}) == "unknown"
 
 
 def test_classify_patchability_accepts_stable_triton_source():
@@ -2645,13 +2658,13 @@ def test_classify_patchability_accepts_stable_triton_source():
         "source_file": "/sgl-workspace/sglang/python/sglang/srt/layers/attn.py",
         "source_type": "triton",
     }
-    reusable, reason = tla.classify_patchability(cand)
+    reusable, reason = kernel_classification.classify_patchability(cand)
     assert reusable is True
     assert reason == ""
 
 
 def test_classify_patchability_rejects_missing_source_file():
-    reusable, reason = tla.classify_patchability(
+    reusable, reason = kernel_classification.classify_patchability(
         {"name": "rms_norm", "source_type": "triton"},
     )
     assert reusable is False
@@ -2662,8 +2675,8 @@ def test_classify_patchability_rejects_cpp_itfs_py_host_launcher(monkeypatch):
     """A csrc/cpp_itfs/*.py host launcher (device code is in a sibling .cuh/.cpp.jinja) must be skipped, not edited."""
     src = "/path/aiter/csrc/cpp_itfs/pa/pa_ragged.py"
     # Make the reusable-root gate pass deterministically regardless of host env.
-    monkeypatch.setattr(tla, "_reusable_roots", lambda: ("/path/aiter/",))
-    reusable, reason = tla.classify_patchability(
+    monkeypatch.setattr(kernel_classification, "_reusable_roots", lambda: ("/path/aiter/",))
+    reusable, reason = kernel_classification.classify_patchability(
         {"name": "paged_attention_ragged", "source_file": src, "source_type": "python"},
     )
     assert reusable is False
@@ -2672,22 +2685,22 @@ def test_classify_patchability_rejects_cpp_itfs_py_host_launcher(monkeypatch):
 
 def test_library_token_pairing():
     """Library detection keeps kernel<->benchmark same-lib."""
-    assert tla._library_token("/sgl-workspace/aiter/op_tests/test_activation.py") == "aiter"
+    assert harness_discovery._library_token("/sgl-workspace/aiter/op_tests/test_activation.py") == "aiter"
     # sgl-kernel / sgl_kernel normalize to sglang.
-    assert tla._library_token("/sgl-workspace/sglang/sgl-kernel/include/hip/x.cuh") == "sglang"
-    assert tla._library_token("/sgl-workspace/sglang/python/sglang/srt/x.py") == "sglang"
-    assert tla._library_token("/random/path/foo.py") == ""
+    assert harness_discovery._library_token("/sgl-workspace/sglang/sgl-kernel/include/hip/x.cuh") == "sglang"
+    assert harness_discovery._library_token("/sgl-workspace/sglang/python/sglang/srt/x.py") == "sglang"
+    assert harness_discovery._library_token("/random/path/foo.py") == ""
     # A sglang kernel and an aiter test are different libraries -> must not pair.
     src = "/sgl-workspace/sglang/sgl-kernel/include/hip/hip_act_and_mul.cuh"
     test = "/sgl-workspace/aiter/op_tests/test_activation.py"
-    assert tla._library_token(src) != tla._library_token(test)
+    assert harness_discovery._library_token(src) != harness_discovery._library_token(test)
 
 
 def test_classify_patchability_allows_aiter_device_source_unknown_type(monkeypatch):
     """aiter .cu/.cuh device sources are patchable even when source_type is 'unknown' (classifier ran before source_file resolved)."""
     src = "/sgl-workspace/aiter/csrc/py_itfs_ck/mha_batch_prefill_kernels.cu"
-    monkeypatch.setattr(tla, "_reusable_roots", lambda: ("/sgl-workspace/aiter/",))
-    reusable, reason = tla.classify_patchability(
+    monkeypatch.setattr(kernel_classification, "_reusable_roots", lambda: ("/sgl-workspace/aiter/",))
+    reusable, reason = kernel_classification.classify_patchability(
         {"name": "aiter::mha_batch_prefill", "source_file": src, "source_type": "unknown"},
     )
     assert reusable is True, reason
@@ -2696,8 +2709,8 @@ def test_classify_patchability_allows_aiter_device_source_unknown_type(monkeypat
 def test_classify_patchability_still_rejects_aiter_py_dispatcher(monkeypatch):
     """aten::mm -> aiter tuned_gemm.py is a dispatcher (real GEMM is a compiled CK/hipBLASLt lib); editing the .py does nothing, so it stays non-patchable."""
     src = "/sgl-workspace/aiter/aiter/tuned_gemm.py"
-    monkeypatch.setattr(tla, "_reusable_roots", lambda: ("/sgl-workspace/aiter/",))
-    reusable, reason = tla.classify_patchability(
+    monkeypatch.setattr(kernel_classification, "_reusable_roots", lambda: ("/sgl-workspace/aiter/",))
+    reusable, reason = kernel_classification.classify_patchability(
         {"name": "aten::mm", "source_file": src, "source_type": "python", "library": "pytorch native"},
     )
     assert reusable is False
@@ -2706,8 +2719,8 @@ def test_classify_patchability_still_rejects_aiter_py_dispatcher(monkeypatch):
 def test_classify_patchability_keeps_cpp_itfs_device_source(monkeypatch):
     """The real device source (.cuh) under cpp_itfs stays reusable."""
     src = "/path/aiter/csrc/cpp_itfs/pa/pa_kernels.cuh"
-    monkeypatch.setattr(tla, "_reusable_roots", lambda: ("/path/aiter/",))
-    reusable, reason = tla.classify_patchability(
+    monkeypatch.setattr(kernel_classification, "_reusable_roots", lambda: ("/path/aiter/",))
+    reusable, reason = kernel_classification.classify_patchability(
         {"name": "paged_attention", "source_file": src, "source_type": "hip_cpp"},
     )
     assert reusable is True
@@ -2724,7 +2737,7 @@ def test_classify_patchability_rejects_vendor_blas_name_markers():
         "nccl_kernel",
         "aten::copy_",
     ):
-        reusable, reason = tla.classify_patchability(
+        reusable, reason = kernel_classification.classify_patchability(
             {
                 "name": marker_name,
                 "source_file": "/sgl-workspace/aiter/foo.py",
@@ -2737,7 +2750,7 @@ def test_classify_patchability_rejects_vendor_blas_name_markers():
 
 def test_classify_patchability_rejects_aten_without_library():
     """aten::* without a library hint is treated as Tensile / native backend."""
-    reusable, reason = tla.classify_patchability(
+    reusable, reason = kernel_classification.classify_patchability(
         {
             "name": "aten::mm",
             "source_file": "/sgl-workspace/aiter/foo.py",
@@ -2751,7 +2764,7 @@ def test_classify_patchability_rejects_aten_without_library():
 
 def test_classify_patchability_rejects_aten_tensile_library():
     """Explicit library == 'Tensile' is the most common reject path."""
-    reusable, reason = tla.classify_patchability(
+    reusable, reason = kernel_classification.classify_patchability(
         {
             "name": "aten::mm",
             "source_file": "/sgl-workspace/aiter/foo.py",
@@ -2764,7 +2777,7 @@ def test_classify_patchability_rejects_aten_tensile_library():
 
 
 def test_classify_patchability_rejects_runtime_generated_kernel():
-    reusable, reason = tla.classify_patchability(
+    reusable, reason = kernel_classification.classify_patchability(
         {
             "name": "triton_poi_fused_add_0",
             "source_file": "/tmp/torchinductor_root/ab/cdef.py",
@@ -2776,7 +2789,7 @@ def test_classify_patchability_rejects_runtime_generated_kernel():
 
 
 def test_classify_patchability_rejects_unreusable_source_root():
-    reusable, reason = tla.classify_patchability(
+    reusable, reason = kernel_classification.classify_patchability(
         {
             "name": "my_custom_kernel",
             "source_file": "/tmp/random/my_custom_kernel.cu",
@@ -2820,9 +2833,11 @@ def test_build_audit_summary_splits_tasks_and_skipped():
             "gpu_pct": 30.0,
         },
     ]
-    summary = tla.build_audit_summary(
+    summary = analysis_reports.build_audit_summary(
         finalized,
-        subject=tla.AuditSubject(trace_input="/tmp/trace.json.gz", framework="sglang", target_platform="mi300x"),
+        subject=analysis_reports.AuditSubject(
+            trace_input="/tmp/trace.json.gz", framework="sglang", target_platform="mi300x"
+        ),
     )
     assert summary["task_count"] == 1
     assert summary["skipped_count"] == 2
@@ -2844,7 +2859,9 @@ def test_build_audit_summary_splits_tasks_and_skipped():
 
 
 def test_build_audit_summary_handles_empty_input():
-    summary = tla.build_audit_summary([], subject=tla.AuditSubject(trace_input="/tmp/x.json.gz"))
+    summary = analysis_reports.build_audit_summary(
+        [], subject=analysis_reports.AuditSubject(trace_input="/tmp/x.json.gz")
+    )
     assert summary["task_count"] == 0
     assert summary["skipped_count"] == 0
     assert summary["tasks"] == []
@@ -3409,7 +3426,7 @@ def test_py_task_group_merges_launch_paths_of_one_kernel():
             "call_count": 126,
         },
     ]
-    groups = tla.build_task_groups(rows)
+    groups = analysis_reports.build_task_groups(rows)
     assert len(groups) == 1
     assert groups[0]["kernel_ids"] == ["k001", "k002"]
     assert groups[0]["operation_key"] == "_mxfp8_linear_kernel"
@@ -3602,7 +3619,7 @@ def test_build_task_groups_filters_non_reusable():
             "reusable_native_kernel": False,  # filtered out
         },
     ]
-    groups = tla.build_task_groups(cands)
+    groups = analysis_reports.build_task_groups(cands)
     assert len(groups) == 1
     assert groups[0]["kernel_ids"] == ["k001"]
     assert "k002" not in groups[0]["kernel_ids"]
@@ -3610,7 +3627,7 @@ def test_build_task_groups_filters_non_reusable():
 
 # summary.json carries task_groups[] view.
 def test_build_audit_summary_includes_task_groups():
-    summary = tla.build_audit_summary(
+    summary = analysis_reports.build_audit_summary(
         candidates=[],
         task_groups=[
             {
@@ -3626,7 +3643,7 @@ def test_build_audit_summary_includes_task_groups():
                 "aggregate_gpu_pct": 7.5,
             },
         ],
-        subject=tla.AuditSubject(trace_input="/tmp/x.json.gz"),
+        subject=analysis_reports.AuditSubject(trace_input="/tmp/x.json.gz"),
     )
     assert summary["task_group_count"] == 1
 
@@ -3636,14 +3653,14 @@ def test_default_workspace_path_prefers_user_data_path(monkeypatch):
     """USER_DATA_PATH wins over both WORKSPACE_PATH and the hard-coded default."""
     monkeypatch.setenv("USER_DATA_PATH", "/some/user/data")
     monkeypatch.setenv("WORKSPACE_PATH", "/some/legacy/workspace")
-    assert tla._default_workspace_path() == "/some/user/data"
+    assert trace_split._default_workspace_path() == "/some/user/data"
 
 
 def test_default_workspace_path_falls_back_to_workspace_path(monkeypatch):
     """When USER_DATA_PATH is unset, WORKSPACE_PATH is honoured (backwards compat)."""
     monkeypatch.delenv("USER_DATA_PATH", raising=False)
     monkeypatch.setenv("WORKSPACE_PATH", "/legacy/workspace")
-    assert tla._default_workspace_path() == "/legacy/workspace"
+    assert trace_split._default_workspace_path() == "/legacy/workspace"
 
 
 def test_default_workspace_path_final_fallback_to_hyperloom_default(monkeypatch):
@@ -3652,14 +3669,14 @@ def test_default_workspace_path_final_fallback_to_hyperloom_default(monkeypatch)
 
     monkeypatch.delenv("USER_DATA_PATH", raising=False)
     monkeypatch.delenv("WORKSPACE_PATH", raising=False)
-    assert tla._default_workspace_path() == str(session_paths.default_workspace_root())
+    assert trace_split._default_workspace_path() == str(session_paths.default_workspace_root())
 
 
 def test_default_workspace_path_treats_empty_user_data_path_as_unset(monkeypatch):
     """An empty USER_DATA_PATH must not shadow a real WORKSPACE_PATH; ``or`` semantics."""
     monkeypatch.setenv("USER_DATA_PATH", "")
     monkeypatch.setenv("WORKSPACE_PATH", "/legacy/workspace")
-    assert tla._default_workspace_path() == "/legacy/workspace"
+    assert trace_split._default_workspace_path() == "/legacy/workspace"
 
 
 # Idle-% sanity gate on the Executive Summary.
@@ -3760,7 +3777,7 @@ def test_build_high_idle_warning_shape(tmp_path):
     """Pin the high-idle warning shape: code/severity/idle_pct/threshold_pct (rounded)/source/message."""
     report = tmp_path / "analysis.md"
     report.write_text("# noop\n", encoding="utf-8")
-    w = tla._build_high_idle_warning(
+    w = idle_gate.build_high_idle_warning(
         idle_pct=42.567,
         threshold_pct=20.0,
         report_path=report,
@@ -3788,11 +3805,13 @@ def test_build_audit_summary_propagates_trace_health_warnings():
             "message": "test",
         }
     ]
-    summary = tla.build_audit_summary(
+    summary = analysis_reports.build_audit_summary(
         [],
         task_groups=[],
         trace_health_warnings=warnings,
-        subject=tla.AuditSubject(trace_input="/tmp/trace.json.gz", framework="sglang", target_platform="MI300X"),
+        subject=analysis_reports.AuditSubject(
+            trace_input="/tmp/trace.json.gz", framework="sglang", target_platform="MI300X"
+        ),
     )
     assert summary["trace_health_warnings"] == warnings
     assert summary["task_count"] == 0
@@ -3801,10 +3820,12 @@ def test_build_audit_summary_propagates_trace_health_warnings():
 
 def test_build_audit_summary_defaults_trace_health_warnings_to_empty_list():
     """No findings is the empty list, never ``None`` (consumers iterate without a guard)."""
-    summary = tla.build_audit_summary(
+    summary = analysis_reports.build_audit_summary(
         [],
         task_groups=[],
-        subject=tla.AuditSubject(trace_input="/tmp/trace.json.gz", framework="sglang", target_platform="MI300X"),
+        subject=analysis_reports.AuditSubject(
+            trace_input="/tmp/trace.json.gz", framework="sglang", target_platform="MI300X"
+        ),
     )
     assert summary["trace_health_warnings"] == []
 
@@ -3840,7 +3861,7 @@ def test_analysis_mode_unknown_framework_returns_inference():
 def test_low_compute_gate_fires_on_spin_wait_window(monkeypatch, tmp_path):
     """GLM-5.2 regression: 3.99% compute / 0.02% idle must not pass as healthy."""
     monkeypatch.delenv(idle_gate.LOW_COMPUTE_PCT_THRESHOLD_ENV, raising=False)
-    threshold, warning = tla._evaluate_low_compute_gate(3.99, 95.99, tmp_path / "analysis.md")
+    threshold, warning = trace_gates._evaluate_low_compute_gate(3.99, 95.99, tmp_path / "analysis.md")
     assert threshold == 10.0
     assert warning is not None
     assert warning["code"] == "low_gpu_compute_pct"
@@ -3850,14 +3871,14 @@ def test_low_compute_gate_fires_on_spin_wait_window(monkeypatch, tmp_path):
 
 def test_low_compute_gate_passes_healthy_window(monkeypatch, tmp_path):
     monkeypatch.delenv(idle_gate.LOW_COMPUTE_PCT_THRESHOLD_ENV, raising=False)
-    _, warning = tla._evaluate_low_compute_gate(99.3, 0.42, tmp_path / "analysis.md")
+    _, warning = trace_gates._evaluate_low_compute_gate(99.3, 0.42, tmp_path / "analysis.md")
     assert warning is None
 
 
 def test_low_compute_gate_skipped_when_pct_unknown(monkeypatch, tmp_path):
     """No compute row in the report: fail open rather than suppress candidates."""
     monkeypatch.delenv(idle_gate.LOW_COMPUTE_PCT_THRESHOLD_ENV, raising=False)
-    _, warning = tla._evaluate_low_compute_gate(None, None, tmp_path / "analysis.md")
+    _, warning = trace_gates._evaluate_low_compute_gate(None, None, tmp_path / "analysis.md")
     assert warning is None
 
 
@@ -3889,7 +3910,7 @@ def test_extract_compute_pct_from_analysis_md_missing_row(tmp_path):
 
 
 def test_normalize_profiler_op_name_strips_graph_wrappers():
-    n = tla._normalize_profiler_op_name
+    n = kernel_search._normalize_profiler_op_name
     # Launch wrapper + return type + template are peeled to the bare symbol.
     assert n("hipGraphLaunch->void ck::foo_kernel<int>") == "ck::foo_kernel<int>"
     # Plain symbol with no namespace keeps the identifier after stripping void.
@@ -3915,14 +3936,14 @@ def test_normalize_profiler_op_name_strips_graph_wrappers():
 def test_candidate_keywords_recovers_graph_captured_symbols():
     # Before normalization these kept the "hipGraphLaunch->void " prefix and greped to nothing; now they yield the
     # real kernel identifier.
-    kws = tla._candidate_keywords("hipGraphLaunch->void paged_attention_ll4mi_QKV_mfma16_kernel<x>")
+    kws = kernel_search._candidate_keywords("hipGraphLaunch->void paged_attention_ll4mi_QKV_mfma16_kernel<x>")
     assert "paged_attention_ll4mi_QKV_mfma16_kernel" in kws
 
-    kws = tla._candidate_keywords("hipGraphLaunch->_ZN5aiter37dynamic_per_group_scaled_quant_fp8E")
+    kws = kernel_search._candidate_keywords("hipGraphLaunch->_ZN5aiter37dynamic_per_group_scaled_quant_fp8E")
     assert "dynamic_per_group_scaled_quant_fp8E" in kws
 
     # Clean profiler symbol still resolves to the same keyword as before.
-    kws = tla._candidate_keywords("sglang_profiler::fused_moe_triton_kernels_invoke_fused_moe_kernel_427")
+    kws = kernel_search._candidate_keywords("sglang_profiler::fused_moe_triton_kernels_invoke_fused_moe_kernel_427")
     assert kws == ["fused_moe_triton_kernels_invoke_fused_moe_kernel_427"]
 
 
@@ -3932,11 +3953,11 @@ def test_candidate_keywords_recovers_graph_captured_symbols():
 
 def test_idle_gate_graph_guard_skips_suppression_when_under_recorded(monkeypatch):
     monkeypatch.setattr(
-        tla,
+        trace_gates,
         "_graph_coverage_from_raw_trace",
         lambda _tp: {"graph_under_recorded": True, "graph_launch_count": 8},
     )
-    threshold, high_idle, graph_warn = tla._evaluate_idle_gate_with_graph_guard(
+    threshold, high_idle, graph_warn = trace_gates._evaluate_idle_gate_with_graph_guard(
         95.0, Path("analysis.md"), "raw.trace.json"
     )
     assert threshold == 80.0
@@ -3947,8 +3968,8 @@ def test_idle_gate_graph_guard_skips_suppression_when_under_recorded(monkeypatch
 
 
 def test_idle_gate_graph_guard_applies_gate_when_not_under_recorded(monkeypatch):
-    monkeypatch.setattr(tla, "_graph_coverage_from_raw_trace", lambda _tp: {})
-    threshold, high_idle, graph_warn = tla._evaluate_idle_gate_with_graph_guard(
+    monkeypatch.setattr(trace_gates, "_graph_coverage_from_raw_trace", lambda _tp: {})
+    threshold, high_idle, graph_warn = trace_gates._evaluate_idle_gate_with_graph_guard(
         95.0, Path("analysis.md"), "raw.trace.json"
     )
     assert threshold == 80.0
@@ -3962,8 +3983,8 @@ def test_idle_gate_graph_guard_noop_below_threshold(monkeypatch):
     def _boom(_tp):  # pragma: no cover - must not be called
         raise AssertionError("graph coverage probed below threshold")
 
-    monkeypatch.setattr(tla, "_graph_coverage_from_raw_trace", _boom)
-    threshold, high_idle, graph_warn = tla._evaluate_idle_gate_with_graph_guard(
+    monkeypatch.setattr(trace_gates, "_graph_coverage_from_raw_trace", _boom)
+    threshold, high_idle, graph_warn = trace_gates._evaluate_idle_gate_with_graph_guard(
         10.0, Path("analysis.md"), "raw.trace.json"
     )
     assert (high_idle, graph_warn) == (None, None)
@@ -3971,5 +3992,5 @@ def test_idle_gate_graph_guard_noop_below_threshold(monkeypatch):
 
 def test_graph_coverage_from_raw_trace_never_raises():
     # Missing/unreadable trace must degrade to {} (fall back to the plain gate).
-    assert tla._graph_coverage_from_raw_trace(None) == {}
-    assert tla._graph_coverage_from_raw_trace("/no/such/trace.json") == {}
+    assert trace_gates._graph_coverage_from_raw_trace(None) == {}
+    assert trace_gates._graph_coverage_from_raw_trace("/no/such/trace.json") == {}

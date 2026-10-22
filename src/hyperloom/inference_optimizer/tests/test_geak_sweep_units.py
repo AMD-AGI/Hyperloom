@@ -243,6 +243,45 @@ async def test_sweep_via_geak_marks_variant_failed_on_subprocess_error(
 
 
 @pytest.mark.asyncio
+async def test_sweep_keeps_point_artifacts_and_continues_after_accuracy_parse_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bench = _bench_script(tmp_path)
+    visited: list[str] = []
+
+    def run_point(_run, out_dir, _env, _entry):
+        visited.append(out_dir.name)
+        (out_dir / "bench_summary.json").write_text(
+            json.dumps({"output_throughput_tok_s_median": 200.0}), encoding="utf-8"
+        )
+        return subprocess.CompletedProcess([], 0, "", "")
+
+    def parse_accuracy(out_dir, *, framework):
+        if out_dir.name.startswith("variant_0_"):
+            raise ValueError("invalid accuracy artifact")
+        return {"accuracy": 0.9, "source_file": "eval.json"}
+
+    monkeypatch.setattr(_geak_sweep, "_run_with_power_sampling", run_point)
+    monkeypatch.setattr(_geak_sweep, "parse_eval_results", parse_accuracy)
+    result = await sweep_via_geak(
+        result={"bench_script": str(bench), "accepted_config": {}},
+        conc_values=[1, 2],
+        isl_osl_configs=["16:16"],
+        output_root=tmp_path / "sweep",
+        variant_timeout_sec=30,
+    )
+
+    failed, succeeded = result["points"]
+    assert visited == ["variant_0_conc1_isl16_osl16", "variant_1_conc2_isl16_osl16"]
+    assert failed["status"] == "failed"
+    assert "invalid accuracy artifact" in failed["error"]
+    assert Path(failed["launch_evidence_path"]).is_file()
+    assert (Path(failed["workspace"]) / "benchmark_report.json").is_file()
+    assert succeeded["status"] == "succeeded"
+    assert result["promotion_measurement"] == succeeded
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("identity_source", ["handoff", "baseline_recipe"])
 @pytest.mark.parametrize("pin_var", ["HIP_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES"])
 async def test_geak_harness_replay_uses_run_gpu_pin_and_recipe_identity(

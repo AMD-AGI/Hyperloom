@@ -98,7 +98,7 @@ def _roofline(snapshot: dict[str, Any]) -> dict[str, Any] | None:
 def _hot_kernels(
     trace: dict[str, Any], sites: Mapping[str, dict[str, Any]], kernels: Mapping[str, dict[str, Any]]
 ) -> list[dict[str, Any]] | None:
-    """Top hot kernels with the operand args, call count and source location the summary rows lack."""
+    """Top hot kernels, with the operand args, time and call count read from the report or the kernel stats."""
     rows = trace.get("hot_kernels_top15")
     if not isinstance(rows, list) or not rows:
         return None

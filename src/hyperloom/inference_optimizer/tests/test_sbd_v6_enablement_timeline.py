@@ -1024,3 +1024,27 @@ def test_no_surface_of_the_recipe_names_the_authoring_host(_bound_session):
     # The linkage itself must survive: normalizing must not mean discarding.
     assert "a.patch" in blob and "_C.so" in blob
     assert "r1" in blob, "the portable root identifier must remain"
+
+
+def _rendered_facts(**attempts: int) -> list[str]:
+    from hyperloom.inference_optimizer.breakdown.reporters._renderers.enablement import render
+
+    ext = {"mode": "all", "origin": "eval", "attempts": {"count": 1, **attempts}}
+    return render({"timeline": [{"type": "enablement", "status": "running", "ext": ext}]}).key_facts
+
+
+def test_the_report_separates_landed_rounds_from_kept_rounds_awaiting_revalidation():
+    assert _rendered_facts(landed=1, validation_pending=1) == [
+        "Enablement ran 1 authoring round(s) (mode=all, origin=eval).",
+        "1 round(s) landed a fix.",
+        "1 kept round(s) awaiting revalidation.",
+        "Lane outcome: running.",
+    ]
+
+
+def test_the_report_wording_is_unchanged_without_a_pending_keep():
+    assert _rendered_facts(landed=1, validation_pending=0) == [
+        "Enablement ran 1 authoring round(s) (mode=all, origin=eval).",
+        "1 round(s) landed a fix.",
+        "Lane outcome: running.",
+    ]

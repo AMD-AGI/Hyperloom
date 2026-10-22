@@ -25,6 +25,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from hyperloom.orchestrator.trace_analysis import tracelens_analysis as tla
+from hyperloom.orchestrator.trace_analysis import _trace_split as trace_split
 
 
 def _make_vllm_trace(num_steps: int = 10, conc: int = 16) -> dict:
@@ -174,7 +175,7 @@ class TestCollectSplitChunks:
         self._write_dummy_chunk(split_dir, "decode_only_steady_state_test.json.gz")
         self._write_dummy_chunk(split_dir, "prefilldecode_steady_state_test.json.gz")
 
-        chunk, meta, mode_map = tla._collect_split_chunks(
+        chunk, meta, mode_map = trace_split._collect_split_chunks(
             split_dir,
             "mixed",
             tmp_path / "trace.json.gz",
@@ -190,7 +191,7 @@ class TestCollectSplitChunks:
         split_dir.mkdir()
         self._write_dummy_chunk(split_dir, "steady_state_test.json.gz")
 
-        chunk, meta, mode_map = tla._collect_split_chunks(
+        chunk, meta, mode_map = trace_split._collect_split_chunks(
             split_dir,
             "generic",
             tmp_path / "trace.json.gz",
@@ -203,7 +204,7 @@ class TestCollectSplitChunks:
         split_dir = tmp_path / "split"
         split_dir.mkdir()
         with pytest.raises(RuntimeError, match="trace_split_no_steady_state"):
-            tla._collect_split_chunks(
+            trace_split._collect_split_chunks(
                 split_dir,
                 "mixed",
                 tmp_path / "trace.json.gz",
@@ -216,7 +217,7 @@ class TestCollectSplitChunks:
         self._write_dummy_chunk(split_dir, "decode_only_steady_state_test.json.gz")
 
         with pytest.raises(RuntimeError, match="steady_state_chunk_missing"):
-            tla._collect_split_chunks(
+            trace_split._collect_split_chunks(
                 split_dir,
                 "mixed",
                 tmp_path / "trace.json.gz",
@@ -278,9 +279,9 @@ class TestSplitterE2E:
         )
         tl_root = Path(tla.__file__).resolve().parent.parent.parent.parent.parent
 
-        chunk, meta = tla._run_trace_split(
+        chunk, meta = trace_split._run_trace_split(
             args,
-            tla.TraceSplitJob(trace_path, split_dir, tl_root),
+            trace_split.TraceSplitJob(trace_path, split_dir, tl_root),
             log_path,
             [],
         )
@@ -303,9 +304,9 @@ class TestSplitterE2E:
         )
         tl_root = Path(tla.__file__).resolve().parent.parent.parent.parent.parent
 
-        chunk, meta = tla._run_trace_split(
+        chunk, meta = trace_split._run_trace_split(
             args,
-            tla.TraceSplitJob(trace_path, split_dir, tl_root),
+            trace_split.TraceSplitJob(trace_path, split_dir, tl_root),
             log_path,
             [],
         )
