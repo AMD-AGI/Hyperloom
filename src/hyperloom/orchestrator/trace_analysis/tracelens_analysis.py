@@ -59,8 +59,10 @@ from .tracelens_skill_runner import (
     extract_idle_pct_from_analysis_md,
     normalize_upstream_category,
     run_tracelens_skill,
-    tracelens_analysis_mode,
     write_run_config,
+)
+from hyperloom.inference_optimizer.framework_registry import (
+    tracelens_analysis_mode,
 )
 from TraceLens.Agent.Analysis.post_processing import render_analysis_json
 

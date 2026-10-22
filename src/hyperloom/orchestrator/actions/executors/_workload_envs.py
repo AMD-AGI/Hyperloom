@@ -1482,29 +1482,30 @@ def materialize_config_with_envs(
     from hyperloom.inference_optimizer import framework_registry as _fw_reg
 
     _is_scriptable_profile = _fw_reg.is_scriptable(bench.get("framework"))
-    if is_profile and str(bench.get("framework") or "").lower() == "xdit":
+    _bench_fw = str(bench.get("framework") or "").strip().lower()
+    _xdit_extra_env = _fw_reg.extra_args_env("xdit")
+    _is_xdit_profile = is_profile and _bench_fw == _fw_reg.FRAMEWORKS["xdit"].name
+    if _is_xdit_profile:
         from ._server_patcher import ensure_xdit_patched_for_tracelens
 
         xdit_patch_attempted = _tracelens_patch_enabled()
         xdit_patched = xdit_patch_attempted and ensure_xdit_patched_for_tracelens()
-        # Append to the config-declared runner args (``--model``, frame/step
-        # counts) rather than replacing them, so the profile captures the same
-        # workload the baseline measured. ``--profile_wait`` is the sentinel for
-        # an already-appended set, keeping re-materialization of a prior profile
-        # YAML idempotent -- the vLLM path below guards the same way.
-        existing_xdit_args = str(envs.get("EXTRA_XDIT_ARGS", "")).strip()
+        existing_xdit_args = str(envs.get(_xdit_extra_env, "")).strip()
         if "--profile_wait" not in existing_xdit_args:
             profiler_args = (
                 "--profile_wait 1 --profile_capture_phase --profile_with_stack" if xdit_patched else "--profile_wait 1"
             )
-            envs["EXTRA_XDIT_ARGS"] = f"{existing_xdit_args} {profiler_args}".strip()
+            envs[_xdit_extra_env] = f"{existing_xdit_args} {profiler_args}".strip()
         _record_tracelens_patch_status(
             envs,
             attempted=xdit_patch_attempted,
             patched=xdit_patched,
-            framework="xdit",
+            framework=_bench_fw,
             degraded_detail="capture-phase flags",
         )
+    pending_xdit_profiler_args: str = ""
+    if _is_xdit_profile:
+        pending_xdit_profiler_args = str(envs.get(_xdit_extra_env, "")).strip()
     profile_num_prompts: int | None = None
     atom_caps: _AtomTracelensCaps | None = None
     # ``(sentinel, flag)`` pairs remembered so the re-assertion at the very end of
@@ -2153,6 +2154,14 @@ def materialize_config_with_envs(
             )
             # The seal applies the sink-side guard to whatever is left here.
             envs[framework_env] = merge_server_args(profile_args, " ".join(restored))
+    if pending_xdit_profiler_args and framework_env == _xdit_extra_env:
+        current = str(envs.get(framework_env, "")).strip()
+        if "--profile_wait" not in current:
+            log.warning(
+                "profile server args lost xDiT profiler flags (replace_args=%s); restoring.",
+                bool(replace_args),
+            )
+            envs[framework_env] = merge_server_args(current, pending_xdit_profiler_args)
     if atom_caps is not None:
         # After extra_envs / replace_args / remove_args so TraceLens knobs
         # survive the same last-wins path as vLLM profiler bounds. Must land
