@@ -6,6 +6,7 @@ import os
 import shlex
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 from collections.abc import Callable, Sequence
@@ -25,6 +26,12 @@ BASE = {
     "HSA_VISIBLE_DEVICES": "0",
     "ROCR_VISIBLE_DEVICES": "0,1,2,3",
 }
+
+
+@pytest.fixture(autouse=True)
+def _local_temp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path / "local-tmp"))
+    (tmp_path / "local-tmp").mkdir()
 
 
 class _Processes:
@@ -71,8 +78,11 @@ def test_env_drops_masks_and_pins_cards_paths_and_tmpdir(tmp_path: Path) -> None
 
     assert not {"HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES", "GPU_DEVICE_ORDINAL", "HSA_VISIBLE_DEVICES"} & set(env)
     assert env["ROCR_VISIBLE_DEVICES"] == "4,5"
-    assert env["TMPDIR"] == str(tmp_path / "sandbox" / "tmp")
-    assert Path(env["TMPDIR"]).is_dir()
+    # HIP unbundles its code objects in TMPDIR, which fails on a network file system such as the branch's directory.
+    assert Path(env["TMPDIR"]).parent == Path(tempfile.gettempdir()) and Path(env["TMPDIR"]).is_dir()
+    other = LocalAgentSandbox(cards=(6,), python_path=(), root=tmp_path / "other", base_env=BASE)
+    assert other.env({})["TMPDIR"] != env["TMPDIR"]
+    assert _sandbox(tmp_path).env({})["TMPDIR"] == env["TMPDIR"]
     assert env["PYTHONPATH"] == f"{tmp_path / 'worktree' / 'python'}{os.pathsep}/existing"
     assert env["PYTHONDONTWRITEBYTECODE"] == "1"
     assert env["PATH"] == f"{tmp_path / 'sandbox' / 'bin'}{os.pathsep}{shim_path}"

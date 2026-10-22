@@ -21,6 +21,7 @@ fill.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import itertools
 import logging
 import os
@@ -28,6 +29,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
@@ -41,7 +43,9 @@ logger = logging.getLogger(__name__)
 
 BIN_DIR = "bin"
 LOG_DIR = "logs"
-TMP_DIR = "tmp"
+#: Where a sandbox's temporary files go, under the host's local temporary directory: HIP unbundles its code objects
+#: there and fails on a network file system, where the branch's directory usually is.
+TMP_PREFIX = "hyperloom-agent-"
 #: How much of a log :meth:`LocalProcess.output` and a run's result keep: the end, where the cause usually is.
 TAIL_BYTES = 64 * 1024
 #: SIGKILL skips sglang's cleanup and leaves its GPU memory held, so a kill waits this long after SIGTERM first.
@@ -236,7 +240,7 @@ class LocalProcess:
 @dataclass
 class LocalAgentSandbox:
     """Commands on this host, confined to ``cards`` (absolute GPU ids) and marked as the sandbox's, importing
-    ``python_path`` first; ``root`` is the sandbox's own directory, for its temporary files, logs and wrappers.
+    ``python_path`` first; ``root`` is the sandbox's own directory, for its logs and wrappers.
     ``processes`` adopts every command it starts for ``branch``; ``base_env`` is ``os.environ`` when ``None``."""
 
     cards: tuple[int, ...]
@@ -250,7 +254,7 @@ class LocalAgentSandbox:
     _numbers: Iterator[int] = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
-        for name in (BIN_DIR, LOG_DIR, TMP_DIR):
+        for name in (BIN_DIR, LOG_DIR):
             (self.root / name).mkdir(parents=True, exist_ok=True)
         start = max((int(log.name.split("-", 1)[0]) for log in (self.root / LOG_DIR).glob("*-*.log")), default=0)
         self._numbers = itertools.count(start + 1)
@@ -261,6 +265,12 @@ class LocalAgentSandbox:
             wrapper.write_text(script, encoding="utf-8")
             wrapper.chmod(0o755)
 
+    @property
+    def tmp(self) -> Path:
+        """The sandbox's own temporary directory, the same for every sandbox at :attr:`root`."""
+        digest = hashlib.sha256(str(self.root.resolve()).encode()).hexdigest()[:16]
+        return Path(tempfile.gettempdir()) / f"{TMP_PREFIX}{digest}"
+
     def env(self, env: Mapping[str, str]) -> dict[str, str]:
         """The environment a command runs with, ``env`` added; the cards and the wrappers are not ``env``'s to
         change."""
@@ -269,7 +279,8 @@ class LocalAgentSandbox:
         merged = {name: value for name, value in base.items() if name not in GPU_MASK_ENV_NAMES}
         merged["PYTHONPATH"] = os.pathsep.join([*map(str, self.python_path), *filter(None, [base.get("PYTHONPATH")])])
         merged["PYTHONDONTWRITEBYTECODE"] = "1"
-        merged["TMPDIR"] = str(self.root / TMP_DIR)
+        self.tmp.mkdir(exist_ok=True)
+        merged["TMPDIR"] = str(self.tmp)
         merged.update(env)
         merged = {name: value for name, value in merged.items() if name not in GPU_MASK_ENV_NAMES}
         merged["ROCR_VISIBLE_DEVICES"] = ",".join(map(str, self.cards))
