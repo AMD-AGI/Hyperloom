@@ -434,3 +434,41 @@ async def test_server_dead_surfaces_log_excerpt(tmp_path, monkeypatch):
     assert "mla_gluon" in (r.error or ""), "excerpt should mention mla_gluon"
     assert r.server_log_path is not None
     assert r.server_log_path.endswith("server.log")
+
+
+@pytest.mark.asyncio
+async def test_server_dead_cause_read_from_the_harvested_log(tmp_path, monkeypatch):
+    """The cause is summarised from the server.log the leak salvage brings into the slot.
+
+    The dying server writes its log where Magpie leaks it, not into the slot, so a
+    summary taken before ``harvest_leaked_artifacts`` runs names no cause at all.
+    """
+    base = tmp_path / "base.yaml"
+    _write_base_yaml(base)
+    leak_root = tmp_path / "leaked"
+    leak_root.mkdir()
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_LEAK_ROOTS", str(leak_root))
+
+    def _dead(magpie_python, config_path, output_dir, **_k):
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+        (leak_root / "server.log").write_text(
+            "Worker init started\n"
+            "mori_ep_dispatch supports at most 128 experts, got 256\n"
+            "Engine core initialization failed.\n"
+            "Traceback follows\n"
+        )
+        return gr.SERVER_DEAD_RETURNCODE, "", ""
+
+    monkeypatch.setattr(gr, "_run_magpie", _dead)
+    results = await run_grid(
+        base_yaml_path=base,
+        base_extra_args="",
+        grid=[GridVariant("ep256")],
+        output_root=tmp_path / "out",
+    )
+    r = results[0]
+    assert r.status == "failed"
+    assert r.error_class == "server_init_dead"
+    assert "mori_ep_dispatch" in (r.error or ""), "the cause must be read after the log is harvested"
+    assert r.server_log_path is not None
+    assert r.server_log_path.endswith("server.log")

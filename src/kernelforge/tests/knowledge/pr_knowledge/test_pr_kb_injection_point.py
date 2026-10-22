@@ -85,6 +85,7 @@ def test_pr_server_is_registered_when_a_repo_resolved(build_agent_fn):
         "mcp__pr_monitor__pr_find_references",
         "mcp__pr_monitor__pr_get_reference",
         "mcp__pr_monitor__pr_get_file_patch",
+        "mcp__pr_monitor__pr_check_inclusion",
     }
 
 

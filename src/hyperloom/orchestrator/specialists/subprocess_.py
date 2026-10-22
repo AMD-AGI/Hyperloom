@@ -8,11 +8,11 @@ CLI subprocess scoped via ``--add-dir``, and a ``specialist_done.json``
 (+ ``worktree/patches/``) exit signal harvested into the final
 :class:`SpecialistRunResult`.
 
-Two agent CLIs can drive that contract, and the deployment's credential shape
-picks one (:func:`hyperloom.common.llm_config.preferred_agent_backend`):
+Three agent CLIs can drive that contract, and the deployment picks one
+(:func:`hyperloom.common.llm_config.resolve_agent_backend`):
 ``claude --print --output-format stream-json`` authenticates against the
-Anthropic side, and
-``codex exec --json`` against the OpenAI side. An OpenAI-only deployment has no
+Anthropic side, ``codex exec --json`` against the OpenAI side and
+``dsh --profile headless`` through the DeepSeek Harness. An OpenAI-only deployment has no
 Anthropic credential at all, so spawning the Claude CLI there produced a
 ``Not logged in`` exit on every specialist task and silently cost the session
 those domains. Everything around the spawn — worktree setup, the reap loop,
@@ -46,7 +46,9 @@ from hyperloom.common.llm_attribution import inject_env as inject_attribution_en
 from hyperloom.common.llm_config import (
     AGENT_BACKEND_CLAUDE,
     AGENT_BACKEND_CODEX,
-    preferred_agent_backend,
+    AGENT_BACKEND_DEEPSEEK,
+    resolve_agent_backend,
+    resolve_forge_llm_model,
 )
 from hyperloom.common.env_safety import (
     redact_file_in_place,
@@ -61,25 +63,13 @@ from .agent_cli_config import (
     _codex_provider_resolver_overlay,
     _write_private_codex_config,
 )
+from .dsh_launch import DshLaunchRequest, build_dsh_launch, remove_dsh_profiles, resolve_dsh_executable
+from .trace_harvest import harvest_agent_trace
 from ..actions.cancel_channel import cancel_scope_listener, current_cancel_scope
 from ..bringup.trees import head_commit
 from ..loop.sub_agent_runner import ExecutionCleanupUnconfirmed
 from .wall_budget import clear_wall_budget_extension, wall_budget_extension
-from hyperloom.inference_optimizer.trace.parse_usage import (
-    parse_claude_stream_json_response,
-    parse_claude_stream_json_tool_calls,
-    parse_claude_stream_json_turn_usages,
-    parse_claude_stream_json_usage,
-    parse_codex_jsonl_response,
-    parse_codex_jsonl_error,
-    parse_codex_jsonl_tool_calls,
-    parse_codex_jsonl_turn_usages,
-    parse_codex_jsonl_usage,
-)
 from hyperloom.inference_optimizer.trace.agent_trace import AgentTrace
-from hyperloom.inference_optimizer.trace.context_events import record_stream_json_compactions
-from hyperloom.inference_optimizer.trace.request_events import record_stream_json_requests
-from hyperloom.inference_optimizer.trace.tool_events import record_stream_json_tools
 
 
 log = logging.getLogger(__name__)
@@ -102,10 +92,10 @@ class SpecialistSubprocessConfig:
     """
 
     agent_backend: str = ""
-    """Which agent CLI to spawn: ``"claude"``, ``"codex"``, or ``""``.
+    """Which agent CLI to spawn: ``"claude"``, ``"codex"``, ``"deepseek"``, or ``""``.
 
-    Empty resolves the deployment's credential shape per dispatch via
-    :func:`preferred_agent_backend`. The CLI pins it explicitly at boot
+    Empty resolves the deployment's backend per dispatch via
+    :func:`resolve_agent_backend`. The CLI pins it explicitly at boot
     so the backend cannot disagree with the executable and model chosen next to
     it; leaving it empty is for callers that construct a config directly.
     """
@@ -116,6 +106,10 @@ class SpecialistSubprocessConfig:
     codex_executable: str = ""
     """Path / name of the codex CLI binary. Empty resolves it per
     :func:`resolve_codex_executable`."""
+
+    dsh_executable: str = ""
+    """Path / name of the DeepSeek Harness ``dsh`` CLI. Empty resolves it per
+    :func:`resolve_dsh_executable`."""
 
     model: str = ""
     """Model id for the selected agent CLI. Empty = that CLI's own default."""
@@ -381,8 +375,8 @@ class SpecialistSpawn:
             the specialist only as advisory prompt text baked into
             ``system_prompt``.
         disallowed_tools: Tool names to deny in the agent CLI subprocess.
-            Passed as ``--disallowedTools`` to the Claude CLI; has no Codex
-            equivalent (Codex containment uses ``--sandbox``).
+            Passed as ``--disallowedTools`` to the Claude CLI; has no Codex or
+            dsh equivalent (Codex containment uses ``--sandbox``).
         gpu_ids: GPU ids to expose to the subprocess.
         deadline: Absolute instant the reaper kills at. ``None`` means the
             caller set no bound and the reaper falls back to
@@ -706,7 +700,7 @@ class SpecialistSubprocessDispatcher:
                 try:
                     await asyncio.to_thread(redact_file_in_place, process_log, mode=0o600)
                 finally:
-                    clear_wall_budget_extension(request.task_id)
+                    self._release_task(backend, request)
 
         # Parse done.json (best-effort) — first existing candidate.
         done_payload = None
@@ -739,7 +733,7 @@ class SpecialistSubprocessDispatcher:
             targets=_declared_targets(done_payload),
         )
 
-        trace = self._harvest_trace(backend, request.workspace)
+        trace = harvest_agent_trace(backend, request.workspace, process_log)
         if trace.error and (outcome["exit_code"] not in (None, 0) or done_payload is None):
             prior_error = str(outcome.get("error") or "").strip()
             outcome["error"] = f"{prior_error}; {trace.error}" if prior_error else trace.error
@@ -760,6 +754,18 @@ class SpecialistSubprocessDispatcher:
     # Internals
     def _build_launch(self, backend: str, request: SpecialistSpawn, env: dict[str, str]) -> list[str]:
         """Build the CLI argv for ``backend``; child-only values go into ``env``."""
+        if backend == AGENT_BACKEND_DEEPSEEK:
+            dsh_request = DshLaunchRequest(
+                executable=resolve_dsh_executable(self.config.dsh_executable),
+                model=resolve_forge_llm_model(AGENT_BACKEND_DEEPSEEK, explicit=self.config.model),
+                mcp_config_path=self.config.mcp_config_path,
+                workspace=request.workspace,
+                system_prompt=request.system_prompt,
+                user_prompt=request.user_prompt,
+            )
+            launch = build_dsh_launch(dsh_request, env)
+            env.update(launch.env_additions)
+            return launch.cmd
         if backend == AGENT_BACKEND_CODEX:
             # Codex's higher-priority developer instructions live in private task-local config.
             cmd, launch_env_additions = self._build_codex_launch(
@@ -784,55 +790,34 @@ class SpecialistSubprocessDispatcher:
             disallowed_tools=frozenset(request.disallowed_tools),
         )
 
-    def _harvest_trace(self, backend: str, workspace: Path) -> AgentTrace:
-        """Read the run's trace with the parsers for the CLI that wrote it.
-
-        Cumulative session token usage, the reply text that lands in
-        conversations.jsonl, the intel/tool calls, and per-turn usage for
-        fine-grained tracing (which falls back to ``usage`` when absent).
-        """
-        process_log = workspace / _PROCESS_LOG_NAME
-        if backend == AGENT_BACKEND_CODEX:
-            structured_error = parse_codex_jsonl_error(process_log)
-            return AgentTrace(
-                usage=parse_codex_jsonl_usage(process_log),
-                response=parse_codex_jsonl_response(process_log),
-                tool_calls=parse_codex_jsonl_tool_calls(process_log),
-                turn_usages=parse_codex_jsonl_turn_usages(process_log),
-                error=f"codex: {structured_error}" if structured_error else "",
-            )
-        record_stream_json_requests(process_log)
-        record_stream_json_tools(process_log)
-        record_stream_json_compactions(process_log)
-        return AgentTrace(
-            usage=parse_claude_stream_json_usage(process_log),
-            response=parse_claude_stream_json_response(process_log),
-            tool_calls=parse_claude_stream_json_tool_calls(process_log),
-            turn_usages=parse_claude_stream_json_turn_usages(process_log),
-        )
+    @staticmethod
+    def _release_task(backend: str, request: SpecialistSpawn) -> None:
+        """Drop what a task holds once its subprocess is gone, however it ended."""
+        clear_wall_budget_extension(request.task_id)
+        if backend == AGENT_BACKEND_DEEPSEEK:
+            remove_dsh_profiles(request.workspace)
 
     def _agent_backend(self) -> str:
         """Return the agent CLI this dispatch should spawn.
 
         An explicitly configured backend wins; otherwise the deployment's
-        credential shape decides (:func:`preferred_agent_backend`).
+        selection decides (:func:`resolve_agent_backend`).
 
         Returns:
-            str: :data:`AGENT_BACKEND_CLAUDE` or :data:`AGENT_BACKEND_CODEX`.
+            str: :data:`AGENT_BACKEND_CLAUDE`, :data:`AGENT_BACKEND_CODEX` or :data:`AGENT_BACKEND_DEEPSEEK`.
 
         Raises:
-            SpecialistAgentUnavailableError: If the configured backend is not
+            SpecialistAgentUnavailableError: If the selected backend is not
                 one this dispatcher can spawn.
         """
         pinned = (self.config.agent_backend or "").strip().lower()
-        if not pinned:
-            return preferred_agent_backend()
-        if pinned not in (AGENT_BACKEND_CLAUDE, AGENT_BACKEND_CODEX):
+        backend = pinned or resolve_agent_backend()
+        if backend not in (AGENT_BACKEND_CLAUDE, AGENT_BACKEND_CODEX, AGENT_BACKEND_DEEPSEEK):
             raise SpecialistAgentUnavailableError(
                 f"agent_backend={self.config.agent_backend!r} is not one of "
-                f"{AGENT_BACKEND_CLAUDE!r} / {AGENT_BACKEND_CODEX!r}"
+                f"{AGENT_BACKEND_CLAUDE!r} / {AGENT_BACKEND_CODEX!r} / {AGENT_BACKEND_DEEPSEEK!r}"
             )
-        return pinned
+        return backend
 
     def _writable_dirs(self, workspace: Path, worktree: Path | None) -> list[str]:
         """Return the dirs an agent CLI may write, in precedence order.
