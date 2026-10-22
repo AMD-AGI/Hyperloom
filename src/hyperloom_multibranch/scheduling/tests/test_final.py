@@ -39,6 +39,7 @@ from hyperloom_multibranch.scheduling.final import (
     FinalCandidate,
     FinalCandidates,
     PRIMARY_POINT_ONLY,
+    REPRODUCTION_POINT_ONLY,
     FinalSelector,
     choose_candidates,
     pick_final,
@@ -290,15 +291,17 @@ async def test_an_agentx_candidate_is_measured_at_the_primary_operating_point_al
     assert choice.reason == f"the higher {GRADED_INTVTY_P50} at conc {CONC}; {PRIMARY_POINT_ONLY}"
 
 
-async def test_an_unmeasured_test_a_failed_sweep_or_a_failed_accuracy_disqualifies(tmp_path: Path) -> None:
+async def test_an_unmeasured_test_or_a_failed_accuracy_disqualifies_a_failed_sweep_does_not(tmp_path: Path) -> None:
     bench = await Bench(tmp_path).build({frozenset({"i1"}): {MAIN_POINT: 1040.0}})
     bench.fail("c7", Fate.MEASUREMENT)
     bench.fail("i1", Fate.CANDIDATE, TestKind.SWEEP)
 
     choice = await bench.selector().select(bench.candidates())
 
-    assert choice.chosen is None
-    assert choice.checks[0].error == "the sweep ended candidate_failed (serve_flag)"
+    assert choice.chosen == choice.checks[0].candidate
+    assert (dict(choice.checks[0].curve), choice.checks[0].error) == ({CONC: pytest.approx(1040.0)}, "")
+    assert "the sweep ended candidate_failed (serve_flag)" in choice.reason
+    assert REPRODUCTION_POINT_ONLY in choice.reason
     assert "measurement_failed" in choice.checks[1].error
 
     bench = await Bench(tmp_path / "again").build({frozenset({"i1"}): {MAIN_POINT: 1040.0, CONC: 1040.0}})
@@ -367,15 +370,18 @@ class CrashedSweepTests(SessionTests):
         )
 
 
-async def test_a_sweep_that_failed_after_measuring_the_primary_conc_disqualifies(tmp_path: Path) -> None:
+async def test_a_sweep_that_crashed_leaves_the_candidate_ranked_on_its_reproduction(tmp_path: Path) -> None:
     bench = await Bench(tmp_path).build({frozenset({"i1"}): {MAIN_POINT: 1040.0}})
     bench.tests = CrashedSweepTests(bench.toolbox, bench.time.clock)
 
     choice = await bench.selector().select(bench.candidates(both=False))
 
     [check] = choice.checks
-    assert choice.chosen is None and check.reproduced and check.accuracy_passed
-    assert (check.curve, check.error) == ({}, "the sweep ended candidate_failed (server crashed)")
+    assert choice.chosen == check.candidate and check.reproduced and check.accuracy_passed
+    assert (dict(check.curve), check.error) == ({CONC: pytest.approx(1040.0)}, "")
+    assert check.degraded_concs == ()
+    assert "the sweep ended candidate_failed (server crashed)" in choice.reason
+    assert REPRODUCTION_POINT_ONLY in choice.reason
 
 
 async def test_final_waits_for_its_validation_however_long_it_runs(tmp_path: Path) -> None:
