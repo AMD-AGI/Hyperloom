@@ -732,6 +732,18 @@ class IterationResult:
     blockage_epoch: int = 0
 
 
+def _planning_failure(iteration: int, error: str) -> IterationResult:
+    """The iteration a failed planning round produces: no Implementer session ran, so nothing was measured."""
+    return IterationResult(
+        iteration=iteration,
+        duration_sec=0.0,
+        validation_passed=False,
+        validation_summary=f"ORCHESTRATION ERROR: {error}",
+        session_end_reason="orchestration_error",
+        agent_rationale=f"planning failed; no Implementer session: {error}",
+    )
+
+
 @dataclass(frozen=True)
 class WindowGain:
     """The exploit-window trend, or the named reason there is not one."""
@@ -5730,13 +5742,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
                     )
                 if plan_path is None:
                     await self._abandon_iteration(
-                        IterationResult(
-                            iteration=iteration,
-                            duration_sec=0.0,
-                            validation_passed=False,
-                            validation_summary=(f"ORCHESTRATION ERROR: {orchestration_error}"),
-                            session_end_reason="orchestration_error",
-                        ),
+                        _planning_failure(iteration, orchestration_error),
                         frame,
                         decision_label="ORCHESTRATION_ERROR",
                         on_iteration=on_iteration,

@@ -907,6 +907,10 @@ def test_a_planning_outage_is_not_paid_for_twice(tmp_path, monkeypatch):
 
     assert rounds == [2]
     assert decisions == ["ORCHESTRATION_ERROR"]
+    # An iteration no Implementer ran still says why it ended.
+    events = LoopStateStore(str(tmp_path / "workspace")).read_events()
+    [event] = [event for event in events if event.get("type") == "iteration_result"]
+    assert event["rationale"].startswith("planning failed; no Implementer session: ")
 
 
 def test_a_round_that_could_only_plan_one_lane_spends_that_plan(tmp_path, monkeypatch):
