@@ -194,7 +194,9 @@ class KeepCheckpointMixin:
         benchmark.setdefault("median_ms", result.wall_ms)
         publication_base = self.ic.campaign_base_commit or base_head
         publication_patch, publication_changed_files = self._candidate_changes(publication_base)
-        commit_message = f"iter-{result.iteration}: {rationale[:72]}"
+        # One line with no trailing space: git folds a multi-line first paragraph into one subject and trims it, and a
+        # resume compares the subject git recorded with the one stored here.
+        commit_message = f"iter-{result.iteration}: {' '.join(rationale.split())[:72]}".rstrip()
         return {
             "campaign_id": self.run_state.campaign_id,
             "session_index": self.run_state.session_index,
@@ -236,7 +238,7 @@ class KeepCheckpointMixin:
             "blockage_epoch": result.blockage_epoch,
             "search_control": self._search_control_snapshot(),
             "commit_message": commit_message,
-            "commit_subject": commit_message.splitlines()[0],
+            "commit_subject": commit_message,
             "task_fingerprint": self._task_fingerprint(),
             "git_branch": self.ic.git_branch,
         }

@@ -292,7 +292,17 @@ def test_published_keep_survives_interruption_resume_and_later_failure(
     assert experiments[1].parent_experiment_id == experiments[0].experiment_id
 
 
-def test_resume_recovers_keep_committed_before_state_checkpoint(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    "rationale",
+    [
+        "verified candidate",
+        # git folds a multi-line first paragraph into one subject.
+        "widen the loads\nbecause the kernel is bandwidth bound",
+        # git trims a subject whose 72-character cut ends on a space.
+        "a" * 71 + " and the rest of the reason",
+    ],
+)
+def test_resume_recovers_keep_committed_before_state_checkpoint(tmp_path, monkeypatch, rationale):
     workspace, kernel, driver = _initialize_workspace(tmp_path, monkeypatch)
     tracker = ExperimentTracker(workspace / "forge_experiments")
     monkeypatch.setattr(IterationLoop, "run_one_iteration", _successful_iteration)
@@ -301,7 +311,7 @@ def test_resume_recovers_keep_committed_before_state_checkpoint(tmp_path, monkey
         session_sink["plan"] = "recover committed candidate"
         path = Path(kernel_path)
         path.write_text(path.read_text() + "\n# verified candidate\n")
-        return "verified candidate"
+        return rationale
 
     first = _make_loop(
         workspace,
