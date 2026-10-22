@@ -171,7 +171,12 @@ class SessionExports:
         selection = encode(final) if final is not None else None
         stepped = knowledge_document(knowledge, scorers, curation)
         document = build_breakdown(
-            snapshot, final=chosen, selection=selection, kb_write_back=kb_write_back, knowledge=stepped
+            snapshot,
+            final=chosen,
+            selection=selection,
+            kb_write_back=kb_write_back,
+            knowledge=stepped,
+            session_dir=self._layout.root,
         )
         breakdown = write_breakdown(self._layout.reports, document)
         dashboard = await self._dashboard.write(queue)
