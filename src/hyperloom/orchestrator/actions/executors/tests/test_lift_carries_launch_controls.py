@@ -51,3 +51,24 @@ def test_winner_controls_override_previous(tmp_path):
 
     assert coord.writeback.lift_to_current_best("explore", 1200.0, winner) is True
     assert coord.shared_state.current_best["remove_args"] == ["--other"]
+
+
+def test_launch_config_after_an_append_winner_still_removes_the_flags(tmp_path):
+    coord = _coord(tmp_path, {"args_mode": "replace", "remove_args": HICACHE_FLAGS})
+    winner = {"name": "src-patch", "output_throughput": 1200.0, "extra_server_args": "--tp 8"}
+
+    assert coord.writeback.lift_to_current_best("integrate_patch", 1200.0, winner) is True
+
+    launch = coord.writeback.current_best_launch_config()
+    assert launch["args_mode"] == "replace"
+    assert launch["remove_args"] == HICACHE_FLAGS
+
+
+def test_nothing_is_carried_when_the_previous_best_declares_no_controls(tmp_path):
+    coord = _coord(tmp_path, {})
+    winner = {"name": "src-patch", "output_throughput": 1200.0, "extra_server_args": "--tp 8"}
+
+    assert coord.writeback.lift_to_current_best("integrate_patch", 1200.0, winner) is True
+
+    best = coord.shared_state.current_best
+    assert not any(best.get(key) for key in ("args_mode", "remove_args", "unset_envs"))

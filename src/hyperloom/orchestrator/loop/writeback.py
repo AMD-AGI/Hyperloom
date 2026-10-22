@@ -95,6 +95,7 @@ from ..actions.executors._accuracy_gate import (
     accuracy_passed,
 )
 from ..knowledge.agent_kb import PatchKB
+from .launch_controls import kept_launch_controls
 from .proposals import PendingProposal
 from ..measurement.integrate_performance import integrate_measurement_fields
 from ..measurement.runtime_findings import KEEP_REASON_CORRECTNESS_FIX
@@ -1699,11 +1700,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
         # next round's anchor has no snapshot, and the session degrades to
         # output grading permanently after the first KEEP.
         current_best.update(graded_axes_of(cand_source))
-        _ctrl_keys = ("remove_args", "unset_envs", "args_mode")
-        _ctrl_source = bv if any(bv.get(k) for k in _ctrl_keys) else previous
-        for _ctrl_key in _ctrl_keys:
-            if _ctrl_source.get(_ctrl_key):
-                current_best[_ctrl_key] = _ctrl_source.get(_ctrl_key)
+        current_best.update(kept_launch_controls(bv, previous))
         if bv.get("effective_extra_server_args"):
             current_best["effective_extra_server_args"] = dedupe_extra_server_args(
                 strip_benchmark_harness_flags(bv.get("effective_extra_server_args"))
