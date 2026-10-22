@@ -241,7 +241,7 @@ def _xdit_state(tmp_path: Path, model_dir: str, **envs):
         encoding="utf-8",
     )
     return SimpleNamespace(
-        last_baseline={"extras": {"materialized_config": str(cfg)}},
+        baseline_config_path=str(cfg),
         gpu_type="mi300x",
         model_path=model_dir,
         precision="bf16",
@@ -298,7 +298,7 @@ def test_diffusion_geometry_accepts_the_custom_workload_aliases(tmp_path):
         ),
         encoding="utf-8",
     )
-    st = SimpleNamespace(last_baseline={"extras": {"materialized_config": str(cfg)}})
+    st = SimpleNamespace(baseline_config_path=str(cfg))
     assert rc._read_diffusion_num_steps(st) == 30
     assert rc._read_diffusion_resolution(st) == (512, 768)
 
