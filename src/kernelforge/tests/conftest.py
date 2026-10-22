@@ -199,3 +199,11 @@ def isolated_provider_registry(monkeypatch):
     registry.discover_agent_providers()
     monkeypatch.setattr(registry, "_providers", dict(registry._providers))
     monkeypatch.setattr(registry, "_plugin_errors", dict(registry._plugin_errors))
+
+
+def silence_jit_rebuild(monkeypatch) -> None:
+    """Neutralize the aiter rebuild that both campaign start-up and an iteration ask for."""
+    from kernelforge.loop import attempt_verdict, runner
+
+    for module in (runner, attempt_verdict):
+        monkeypatch.setattr(module, "force_jit_rebuild", lambda _files: None)

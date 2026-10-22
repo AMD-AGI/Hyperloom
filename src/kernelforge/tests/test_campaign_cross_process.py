@@ -11,13 +11,14 @@ import time
 
 import pytest
 
-from kernelforge.tests.conftest import SRC_ROOT
+from kernelforge.tests.conftest import SRC_ROOT, silence_jit_rebuild
 
 import kernelforge.loop.runner as runner_module
 from kernelforge.loop.archive import CandidateArchive
 from kernelforge.loop.experience import ExperienceLedger
 from kernelforge.loop.run_state import LoopStateStore
-from kernelforge.loop.runner import IterationConfig, IterationLoop, IterationResult
+from kernelforge.loop.iteration_types import IterationConfig, IterationResult
+from kernelforge.loop.runner import IterationLoop
 from kernelforge.tracker import ExperimentTracker
 
 
@@ -51,7 +52,7 @@ def _initialize_workspace(tmp_path, monkeypatch):
         check=True,
         capture_output=True,
     )
-    monkeypatch.setattr(runner_module, "force_jit_rebuild", lambda _files: None)
+    silence_jit_rebuild(monkeypatch)
     return workspace, kernel, driver
 
 
@@ -683,7 +684,8 @@ import asyncio
 import sys
 from pathlib import Path
 
-from kernelforge.loop.runner import IterationConfig, IterationLoop, LoopAgents
+from kernelforge.loop.iteration_types import IterationConfig, LoopAgents
+from kernelforge.loop.runner import IterationLoop
 from kernelforge.tracker import ExperimentTracker
 
 

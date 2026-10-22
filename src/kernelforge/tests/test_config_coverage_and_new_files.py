@@ -14,11 +14,12 @@ from pathlib import Path
 
 import pytest
 
-from kernelforge.loop.runner import (
+from kernelforge.loop.iteration_types import (
+    CONFIG_COVERAGE_MIN_MOVE_RATIO,
     IterationConfig,
-    IterationLoop,
     IterationResult,
 )
+from kernelforge.loop.runner import IterationLoop
 from kernelforge.orchestrator.contracts import CaseEvidence, OrchestrationContext
 from kernelforge.loop import runner as runner_module
 from kernelforge.loop.campaign_config import CampaignConfigStore
@@ -587,7 +588,7 @@ def test_keep_gate_sized_move_alone_no_longer_counts_as_coverage():
 def test_floor_ratio_is_configurable_and_not_read_off_the_keep_gate():
     from kernelforge.evaluation.scoring import KEEP_MIN_MARGIN_FRACTION
 
-    assert runner_module.CONFIG_COVERAGE_MIN_MOVE_RATIO != KEEP_MIN_MARGIN_FRACTION
+    assert CONFIG_COVERAGE_MIN_MOVE_RATIO != KEEP_MIN_MARGIN_FRACTION
     loop = _coverage_loop({"decode-t64": 10.0})
     loop.ic = replace(loop.ic, config_coverage_min_move_ratio=0.2)
     loop.results = [_keep(1, {"decode-t64": 9.0})]

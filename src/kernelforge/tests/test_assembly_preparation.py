@@ -414,7 +414,8 @@ def test_existing_assembly_and_scope(campaign):
 
 
 def test_no_keep_selects_original_and_can_resume(campaign, monkeypatch):
-    from kernelforge.loop.runner import IterationConfig, IterationLoop
+    from kernelforge.loop.iteration_types import IterationConfig
+    from kernelforge.loop.runner import IterationLoop
     from kernelforge.tracker import ExperimentTracker
 
     root, options = campaign
