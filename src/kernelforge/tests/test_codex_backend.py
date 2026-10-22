@@ -859,18 +859,31 @@ def test_make_agent_fn_dispatches_codex_without_claude_model(
     assert "[gate" not in rationale
 
 
-def test_the_implementer_rationale_comes_back_whole_with_the_gate_on(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    reasoning = (
-        "PLAN: widen the loads\n"
-        + "The profile shows the kernel bandwidth bound, so 128-bit loads should beat best. " * 5
-    )
+_DECLARED_RATIONALE = ("The profile shows the kernel bandwidth bound, so 128-bit loads should beat best. " * 4).strip()
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        (
+            f"Looking at the kernel first.\nRATIONALE: {_DECLARED_RATIONALE}\nPLAN: widen the loads",
+            _DECLARED_RATIONALE,
+        ),
+        ("Looking at the kernel first.\nPLAN: widen the loads", "no rationale provided"),
+    ],
+)
+def test_the_implementer_rationale_is_the_line_it_declares_with_the_gate_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, text: str, expected: str
+):
+    system_prompts: list[str] = []
 
     class Backend:
         name = "codex"
         capabilities = AgentCapabilities()
 
         async def run(self, spec: AgentRunSpec, usage: object = None) -> AgentRunResult:
-            return AgentRunResult(text=reasoning)
+            system_prompts.append(spec.system_prompt)
+            return AgentRunResult(text=text)
 
     def factory(runtime, **_kwargs: object) -> Backend:
         backend = Backend()
@@ -899,10 +912,11 @@ def test_the_implementer_rationale_comes_back_whole_with_the_gate_on(tmp_path: P
 
     rationale = asyncio.run(agent_fn(str(kernel), "", session_sink=session))
 
-    # Longer than the 200 characters it used to be cut to, and with nothing in front of the agent's own words.
-    assert len(reasoning) > 400
-    assert rationale == reasoning
+    # Longer than the 200 characters it used to be cut to, with neither the gate tag nor the rest of the text.
+    assert len(_DECLARED_RATIONALE) > 300
+    assert rationale == expected
     assert session["gate_passed"] is False
+    assert "one line starting with `RATIONALE:`" in system_prompts[0]
 
 
 @pytest.mark.parametrize(
