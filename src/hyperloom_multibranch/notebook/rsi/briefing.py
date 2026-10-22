@@ -15,6 +15,9 @@ Its brief has three parts:
   layer they change (configuration, source), so that one kind of change does not fill them all. The Experience KB's
   schema has no kernel family, so no recalled lead is a kernel change.
 
+A champion the start commit is already, or builds on, is no lead: the lessons name it first, as :data:`ON_HEAD`, and
+``notebook_replay`` refuses to replay it, since its change would undo what the head did since.
+
 At the root before anything was tried, the brief is the first batch's: cross-session content only. Lessons and leads
 together stay under ``max_chars``, the most specific first. Where the brief sits in the prompt and how long it may be
 is xiaofei's call, so the cap is a parameter.
@@ -27,6 +30,7 @@ again. It keeps the focus each branch was given.
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field, replace
@@ -54,7 +58,7 @@ from hyperloom_multibranch.notebook.knowledge.recall import (
     RecallTier,
     recall_experiences,
 )
-from hyperloom_multibranch.notebook.knowledge.warm_start import WarmLead, delta_layer
+from hyperloom_multibranch.notebook.knowledge.warm_start import PreparedReplay, WarmLead, delta_layer
 from hyperloom_multibranch.notebook.learning_search import (
     Retrieval,
     RetrievalSource,
@@ -65,10 +69,14 @@ from hyperloom_multibranch.notebook.learning_search import (
 from hyperloom_multibranch.notebook.rsi.analysis import FailureTier, failures_at, repeated_failures
 from hyperloom_multibranch.notebook.tools import render_brief
 
+log = logging.getLogger(__name__)
+
 DEFAULT_MAX_CHARS = 4000
 KEPT = "keep"
 #: How many learnings of this session, and how many of past sessions, a brief lists at most.
 LEARNINGS = 5
+#: What a brief says, before the champion, of one its start commit is already or builds on.
+ON_HEAD = "already on your head, nothing to replay"
 
 
 class RecipeReads(Protocol):
@@ -177,7 +185,8 @@ class CrossSessionBriefing(StartupBriefProvider):
     ``identities`` looks up the conditions a read's summaries leave out; by default one is built on ``experiences``,
     and passing one index to every briefing of a session reads the export once. ``learnings`` is the session's one
     recall of the specialists' learnings; without it the brief holds this session's only. ``recalls`` keeps the
-    completed reads, so a brief built again reads the Experience KB no more.
+    completed reads, so a brief built again reads the Experience KB no more. ``champions`` keeps the champions each
+    commit read is, by commit, so each commit's recipe is read once a session.
     """
 
     notebook: Notebook
@@ -191,6 +200,7 @@ class CrossSessionBriefing(StartupBriefProvider):
     learnings: LearningRecall | None = None
     recalls: RecallCache | None = None
     repo: RecipeReads | None = None
+    champions: dict[str, frozenset[str]] | None = None
 
     def __post_init__(self) -> None:
         if self.identities is None and self.experiences is not None:
@@ -198,13 +208,49 @@ class CrossSessionBriefing(StartupBriefProvider):
 
     async def warm_replay(self, canonical_id: str) -> WarmReplay | None:
         """The change that replays the champion ``canonical_id`` on this branch's head, a gain landing only on the head
-        it was measured against; ``None`` when PRELUDE prepared no replay of it, or it would change nothing there."""
+        it was measured against; ``None`` when PRELUDE prepared no replay of it, or it would change nothing there.
+        ``ValueError`` when the head is the champion's recipe already or builds on a commit that is."""
 
         prepared = next((lead.replay for lead in self.warm if lead.canonical_id == canonical_id), None)
         if prepared is None or self.repo is None or not self.branch:
             return None
         head = await self.repo.head(self.branch)
+        commit = (await self._on_line(await self.notebook.snapshot(), head)).get(canonical_id)
+        if commit is not None:
+            where = "is its recipe" if commit == head else f"builds on {commit}, which is its recipe"
+            raise ValueError(f"{canonical_id} is on your head already: your head {head} {where}; build on it")
         return prepared.on(await self.repo.read_recipe(head), head)
+
+    async def _on_line(self, snapshot: NotebookSnapshot, commit: str) -> dict[str, str]:
+        """The champions PRELUDE prepared a replay of that ``commit`` is already or builds on, each with the first commit
+        found to be it: ``commit`` itself, then the commits its lineage builds on."""
+
+        prepared = [lead.replay for lead in self.warm if lead.replay is not None]
+        if self.repo is None or not prepared:
+            return {}
+        found: dict[str, str] = {}
+        for item in dict.fromkeys((commit, *snapshot.lineage.ancestry(commit))):
+            for canonical_id in await self._champions_of(self.repo, item, prepared):
+                found.setdefault(canonical_id, item)
+            if len(found) == len(prepared):
+                break
+        return found
+
+    async def _champions_of(self, repo: RecipeReads, commit: str, prepared: Sequence[PreparedReplay]) -> frozenset[str]:
+        """The champions of ``prepared`` whose recipe ``commit``'s is; none when it cannot be read, so they stay leads."""
+
+        kept = self.champions.get(commit) if self.champions is not None else None
+        if kept is not None:
+            return kept
+        try:
+            recipe = await repo.read_recipe(commit)
+            kept = frozenset(item.canonical_id for item in prepared if item.is_on(recipe))
+        except (KeyError, RuntimeError, ValueError) as exc:
+            log.warning("could not read %s to find the warm-start champions it is: %s", commit, exc)
+            return frozenset()
+        if self.champions is not None:
+            self.champions[commit] = kept
+        return kept
 
     async def peer_replay(self, request_id: str) -> PeerReplay:
         """The change another branch's test ``request_id`` tried, to test on this branch's head; ``ValueError`` says
@@ -263,6 +309,7 @@ class CrossSessionBriefing(StartupBriefProvider):
 
         tried = await self.notebook.startup_brief(start_commit)
         snapshot = await self.notebook.snapshot()
+        on_head = await self._on_line(snapshot, start_commit)
         on_line = [item for item in failures_at(snapshot, start_commit) if item.tier is not FailureTier.ELSEWHERE]
         repeated = [
             f"this session: {direction} failed {count} times on the states this one builds on"
@@ -275,9 +322,10 @@ class CrossSessionBriefing(StartupBriefProvider):
             f"{lead.canonical_id}: {text}" for lead in self.warm for text in (*lead.pitfalls, *lead.what_failed)
         ]
         ordered = [
+            *(_Item(True, f"{ON_HEAD}: recipe {lead.summary()}") for lead in self.warm if lead.canonical_id in on_head),
             *(_Item(True, text) for text in listed(repeated)),
             *(_Item(True, f"learnt here: {render_session_learning(record, snapshot)[2:]}") for record in here),
-            *(_recipe(lead) for lead in self.warm),
+            *(_recipe(lead) for lead in self.warm if lead.canonical_id not in on_head),
             *_listed(recalled.leads),
             *(_Item(True, text) for text in listed([*recalled.lessons, *learnt_before, *kb_lessons])),
         ]
@@ -313,6 +361,7 @@ class SessionBriefs:
     repo: RecipeReads | None = None
     _identities: IdentityIndex | None = field(init=False, default=None)
     _recalls: RecallCache = field(init=False, default_factory=RecallCache)
+    _champions: dict[str, frozenset[str]] = field(init=False, default_factory=dict)
     _focus: dict[str, str] = field(init=False, default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -335,6 +384,7 @@ class SessionBriefs:
             learnings=self.learnings,
             recalls=self._recalls,
             repo=self.repo,
+            champions=self._champions,
         )
 
     async def text(self, branch: str, commit: str, focus: str | None = None) -> str:
@@ -343,4 +393,4 @@ class SessionBriefs:
         return render_brief(await self.for_branch(branch, focus).startup_brief(commit))
 
 
-__all__ = ["DEFAULT_MAX_CHARS", "CrossSessionBriefing", "RecallCache", "RecipeReads", "SessionBriefs"]
+__all__ = ["DEFAULT_MAX_CHARS", "ON_HEAD", "CrossSessionBriefing", "RecallCache", "RecipeReads", "SessionBriefs"]
