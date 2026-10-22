@@ -13,9 +13,10 @@ later head may open it again, the same one would not.
 
 A session that crashes is restarted on its branch, at most ``MAX_RESTARTS`` times within ``RESTART_WINDOW_S``, and a
 lost one at most ``MAX_LOSS_RESTARTS`` times in a row with no session working in between: a loss takes the heartbeat
-timeout, so losses alone never fill the window. A session that ends idle, its model finding nothing to test, is no crash
-and is not restarted: a restart reads the model's own conclusion back from the branch log and ends idle again, so the
-specialist gives up and the scheduler stops the branch, freeing its slot for a fresh branch with its own direction. Past
+timeout, so losses alone never fill the window. A session that ends idle, its model finding nothing to test, is no crash:
+the branch gets one fresh session, briefed again at its head, and ``MAX_IDLE_SESSIONS`` idle sessions in a row end it,
+a session that submitted a test starting the count again. Then the specialist gives up and the scheduler stops the
+branch, freeing its slot for a fresh branch with its own direction. Past
 any of these the branch keeps its judge, which settles what was already measured, and the scheduler stops it once
 nothing of it waits for a confirm; ``status`` tells it. A judge that fails is a defect of this code, not of the
 specialist: it is not restarted, and the branch's session is stopped so no candidate is measured that nothing would
@@ -45,6 +46,7 @@ logger = logging.getLogger(__name__)
 MAX_RESTARTS = 3
 RESTART_WINDOW_S = 600.0
 MAX_LOSS_RESTARTS = 2
+MAX_IDLE_SESSIONS = 2
 
 
 class RuntimeNotebook(JudgeNotebook, ClaimService, Protocol):
@@ -63,7 +65,12 @@ class SessionCrashed(RuntimeError):
 
 
 class SessionIdle(RuntimeError):
-    """A run of a branch's specialist ended because its model kept finding nothing to test."""
+    """A run of a branch's specialist ended because its model kept finding nothing to test; ``tested`` says whether
+    the run submitted a test before it did."""
+
+    def __init__(self, message: str, *, tested: bool = False) -> None:
+        super().__init__(message)
+        self.tested = tested
 
 
 class Session(Protocol):
@@ -187,7 +194,7 @@ class SpecialistRuntime:
 
     async def _supervise(self, state: _Branch) -> None:
         crashes: deque[float] = deque()
-        losses = 0
+        losses = idle = 0
         while True:
             start = SessionStart(state.name, state.start_commit, state.k, state.task)
             state.session = self._sessions(start)
@@ -197,6 +204,12 @@ class SpecialistRuntime:
             except SessionIdle as error:
                 await state.session.stop()
                 logger.info("the specialist of %s found nothing to test: %s", state.name, error)
+                idle = 0 if error.tested else idle + 1
+                if idle < MAX_IDLE_SESSIONS:
+                    await _notice(
+                        state, f"the specialist found nothing to test ({error}); the branch starts a fresh session"
+                    )
+                    continue
                 state.session, state.gave_up = None, True
                 self._given_up.add((state.start_commit, state.task.direction))
                 await _notice(state, f"the specialist found nothing to test ({error}); it is not restarted")
@@ -269,6 +282,7 @@ def _log_failure(task: asyncio.Task[None]) -> None:
 
 
 __all__ = [
+    "MAX_IDLE_SESSIONS",
     "MAX_LOSS_RESTARTS",
     "MAX_RESTARTS",
     "RESTART_WINDOW_S",

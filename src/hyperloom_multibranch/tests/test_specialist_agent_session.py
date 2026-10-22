@@ -325,6 +325,42 @@ async def test_idle_turns_in_a_row_with_nothing_running_end_the_session_idle_wit
     assert (rig.runner.cancelled, rig.runner.collected) == ([1], [1])
 
 
+_WORKED = {"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "notebook_brief", "input": {}}]}}
+
+
+async def test_a_turn_that_called_tools_but_tested_nothing_counts_half_an_idle_turn(rig):
+    session = rig.session(nudge_waits_s=NO_WAITS)
+    running = asyncio.create_task(session.run())
+    await _until(lambda: len(rig.runner.specs) == 1, "the launch")
+
+    for nudged in range(1, 2 * IDLE_TURNS):
+        _end_turn(rig, _WORKED)
+        await _until(lambda n=nudged: len(rig.runner.sent) == n, f"nudge {nudged}")
+    _end_turn(rig, _WORKED)
+
+    with pytest.raises(SessionIdle) as idle:
+        await asyncio.wait_for(running, 1)
+    assert len(rig.runner.sent) == 2 * IDLE_TURNS - 1
+    assert not idle.value.tested
+
+
+async def test_an_idle_session_says_whether_it_submitted_a_test(rig):
+    session = rig.session(nudge_waits_s=NO_WAITS)
+    running = asyncio.create_task(session.run())
+    await _until(lambda: len(rig.runner.specs) == 1, "the launch")
+    await rig.toolbox_notebook.write_request(request("r1", intent(BRANCH, rig.root)))
+    await rig.toolbox_notebook.write_result(result("r1"))
+
+    for sent in range(1, IDLE_TURNS + 1):
+        _end_turn(rig)
+        await _until(lambda n=sent: len(rig.runner.sent) == n, f"message {sent}")
+    _end_turn(rig)
+
+    with pytest.raises(SessionIdle) as idle:
+        await asyncio.wait_for(running, 1)
+    assert idle.value.tested
+
+
 async def test_what_arrives_within_the_patience_wakes_the_model_instead_of_a_nudge(rig):
     session = rig.session(nudge_waits_s=(30.0,) * IDLE_TURNS)
     running = asyncio.create_task(session.run())

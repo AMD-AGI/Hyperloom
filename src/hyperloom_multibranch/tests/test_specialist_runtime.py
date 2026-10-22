@@ -258,19 +258,20 @@ async def test_a_direction_given_to_a_branch_counts_as_held(session):
 
 
 async def test_a_direction_a_specialist_gave_up_on_is_not_dealt_again_on_the_same_start_commit(session):
-    runs = _Runs(errors=(_idle(),))
+    runs = _Runs(errors=(_idle(), _idle()))
     runtime = session.runtime(runs)
     head = await session.repo.head(BRANCH)
-    first = [BRANCH, *(f"b{index}" for index in range(1, len(DIRECTIONS)))]
+    others = [f"b{index}" for index in range(1, len(DIRECTIONS))]
 
-    for name in first:
-        await runtime.start(name, head)
+    await runtime.start(BRANCH, head)
     await _until(lambda: _any_notice(session, "not restarted"), "the first specialist to give up")
-    for name in first:
+    for name in others:
+        await runtime.start(name, head)
+    for name in (BRANCH, *others):
         await runtime.stop(name)
     await runtime.start("same", head)
     await runtime.start("moved", "f" * 40)
-    await _until(lambda: _true(len(runs.started) == len(first) + 2), "the late specialists to start")
+    await _until(lambda: _true(len(runs.started) == len(others) + 4), "the late specialists to start")
     for name in ("same", "moved"):
         await runtime.stop(name)
 
@@ -325,12 +326,12 @@ async def test_a_session_that_worked_between_losses_counts_them_again_from_its_o
     await runtime.stop(BRANCH)
 
 
-def _idle() -> SessionIdle:
-    return SessionIdle("its model ended 3 turns in a row with nothing to test")
+def _idle(tested: bool = False) -> SessionIdle:
+    return SessionIdle("its model ended 3 turns in a row with nothing to test", tested=tested)
 
 
 @pytest.mark.parametrize("kind", ["", "direction", "repair"])
-async def test_an_idle_session_ends_its_specialist_with_no_restart_and_no_crash(session, kind):
+async def test_two_idle_sessions_in_a_row_end_the_specialist_after_one_fresh_session_and_no_crash(session, kind):
     blocked = Judgement(Verdict.BLOCKED, 3.0, 2.0, ("s0-4", "s0-5"), {"output_throughput": 1030.0}, False)
     repair = RepairRequest(intent("s0", "c0"), delta(), blocked, "per-tensor KV scales; scale per head")
     tasks = {"": BranchTask(), "direction": BranchTask(direction="the user's own"), "repair": BranchTask(repair=repair)}
@@ -340,10 +341,24 @@ async def test_an_idle_session_ends_its_specialist_with_no_restart_and_no_crash(
     await runtime.start(BRANCH, await session.repo.head(BRANCH), tasks[kind])
     await _until(lambda: _any_notice(session, "not restarted"), "the runtime to give up")
 
-    assert len(runs.started) == 1
-    assert any("found nothing to test" in notice for notice in await session.notices())
+    assert len(runs.started) == 2
+    notices = await session.notices()
+    assert any("starts a fresh session" in notice for notice in notices)
+    assert any("found nothing to test" in notice and "not restarted" in notice for notice in notices)
     assert await runtime.status(BRANCH) == SpecialistStatus(False, 0, 0, True, False)
     await runtime.stop(BRANCH)
+
+
+async def test_an_idle_session_that_submitted_a_test_starts_the_count_again(session):
+    runs = _Runs(errors=(_idle(), _idle(tested=True), _idle()))
+    runtime = session.runtime(runs)
+
+    await runtime.start(BRANCH, await session.repo.head(BRANCH))
+    await _until(lambda: _true(len(runs.started) == 4), "a fresh session after each idle one")
+    status = await runtime.status(BRANCH)
+    await runtime.stop(BRANCH)
+
+    assert not status.gave_up
 
 
 async def test_the_status_is_known_only_while_the_runtime_runs_the_branch(session):
