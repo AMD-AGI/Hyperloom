@@ -309,7 +309,6 @@ function-lines src/hyperloom/inference_optimizer/breakdown/session_package.py::p
 function-lines src/hyperloom/inference_optimizer/cli/__init__.py::_export_partition_shape 101
 function-lines src/hyperloom/inference_optimizer/cli/__init__.py::_run_optimize 273
 function-lines src/hyperloom/inference_optimizer/cli/bootstrap.py::_seed_shared_state 155
-function-lines src/hyperloom/inference_optimizer/cli/executors.py::_build_specialist_executor 90
 function-lines src/hyperloom/inference_optimizer/cli/model_gate.py::_preflight_context_window 123
 function-lines src/hyperloom/inference_optimizer/cli/multi_node.py::_prepare_multi_node_state 90
 function-lines src/hyperloom/inference_optimizer/cli/parser.py::_build_parser 961
@@ -550,7 +549,7 @@ module-lines src/hyperloom/orchestrator/policy/gate.py 1577
 module-lines src/hyperloom/orchestrator/prompts/prompt_builder.py 1205
 module-lines src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py 2556
 module-lines src/hyperloom/orchestrator/specialists/runner.py 1453
-module-lines src/hyperloom/orchestrator/specialists/subprocess_.py 1401
+module-lines src/hyperloom/orchestrator/specialists/subprocess_.py 1386
 module-lines src/hyperloom/orchestrator/state/shared_state.py 2548
 module-lines src/hyperloom/orchestrator/trace_analysis/tracelens_analysis.py 5276
 module-lines src/hyperloom/orchestrator/trace_analysis/tracelens_skill_runner.py 1309

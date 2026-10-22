@@ -273,9 +273,10 @@ def _private_mcp_env_name(
     source: Mapping[str, str],
     additions: Mapping[str, str],
     protected_env_names: frozenset[str],
+    prefix: str = _CODEX_MCP_ENV_PREFIX,
 ) -> str:
     """Return a collision-free child-only variable name for one MCP header."""
-    base = f"{_CODEX_MCP_ENV_PREFIX}{index}"
+    base = f"{prefix}{index}"
     candidate = base
     suffix = 1
     while candidate in source or candidate in additions or candidate in protected_env_names:
