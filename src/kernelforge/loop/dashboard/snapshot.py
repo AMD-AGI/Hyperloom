@@ -11,6 +11,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from kernelforge.loop.direction_ledger import DIRECTIONS_FILE, DirectionLedger, direction_standings, keep_gains
+from kernelforge.loop.early_stop import EarlyStopPolicy, early_stop_standing, window_gain
 from kernelforge.loop.operator_inbox import OperatorInbox
 
 DASHBOARD_JSON = "dashboard.json"
@@ -48,6 +50,7 @@ class LiveStatus:
     anchor_label: str = ""
     serving_speedup: float | None = None
     usage_path: str = ""
+    early_stop: dict | None = None
 
 
 def _read_json(path: Path) -> Any:
@@ -140,6 +143,43 @@ def _inbox(campaign_root: Path) -> dict:
         return {"pending": [], "active": []}
 
 
+def _directions(campaign_root: Path, state: dict, events: list[dict], live_block: dict) -> dict:
+    """The ledger's standings and, while early stop is on, where each of its criteria stands."""
+    if not (campaign_root / DIRECTIONS_FILE).is_file():
+        return {}
+    policy = EarlyStopPolicy(**(live_block.get("early_stop") or {"enabled": True}))
+    ledger = DirectionLedger(campaign_root)
+    results = [event for event in events if event.get("type") == "iteration_result"]
+    gains = keep_gains(results, state.get("search_start_mean_case_speedup"))
+    standings = direction_standings(ledger.directions(), results, exhaust_after=policy.exhaust_after, gains=gains)
+    queue = _read_json(campaign_root / "orchestration" / "lane_queue.json")
+    standing = early_stop_standing(
+        policy,
+        standings,
+        gain=window_gain(results, gains, policy.window_rounds),
+        audits=ledger.audits(),
+        lane_queue_empty=not (queue.get("candidates") if isinstance(queue, dict) else queue),
+        inbox_pending=bool(OperatorInbox(campaign_root.parent).pending()),
+    )
+    return {
+        "ledger": [s.to_view() | {"source": s.direction.source} for s in standings],
+        "audits": ledger.audits(),
+        "policy": {
+            "min_directions": policy.min_directions,
+            "window_rounds": policy.window_rounds,
+            "min_gain": policy.min_gain,
+            "exhaust_after": policy.exhaust_after,
+        },
+        "standing": {
+            "terminal": standing.terminal,
+            "window_gain": standing.window_gain,
+            "criteria_met": standing.criteria_met,
+            "audit_due": standing.audit_due,
+            "unmet": list(standing.reasons),
+        },
+    }
+
+
 def collect_snapshot(campaign_root: Path, live: LiveStatus | None = None) -> dict:
     """Everything one render needs, as plain JSON. Without ``live`` the previous render's live block is reused."""
     campaign_root = Path(campaign_root)
@@ -163,4 +203,5 @@ def collect_snapshot(campaign_root: Path, live: LiveStatus | None = None) -> dic
         "supervisor": _read_text(campaign_root / "supervisor" / "latest.md"),
         "events": [_event_summary(event) for event in notable[-_RECENT_EVENTS:]],
         "inbox": _inbox(campaign_root),
+        "directions": _directions(campaign_root, state, events, live_block),
     }

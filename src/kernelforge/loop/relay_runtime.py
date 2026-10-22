@@ -255,6 +255,8 @@ class RelayRuntimeMixin:
     def _stamp_result_profile(self, result, session_sink: dict) -> None:
         """Attach immutable producer provenance before the outcome is persisted."""
         result.agent_profile_id = str(session_sink.get("agent_profile_id") or "")
+        result.lane_id = str(session_sink.get("lane_id") or "")
+        result.direction_id = str(session_sink.get("direction_id") or "")
         result.blockage_epoch = int(session_sink.get("blockage_epoch") or 0)
         profile = self.run_state.agent_availability_snapshot.profiles.get(result.agent_profile_id)
         if profile is not None:

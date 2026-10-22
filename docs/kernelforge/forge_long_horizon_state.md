@@ -38,6 +38,13 @@ forge_experiments/
   best/
   dashboard.json
   dashboard.html
+  inbox/
+    <posted>.md
+    archive/iter_NNN-<posted>.md
+  directions.json
+  directions/
+    survey_iter_NNN.md
+    audit_iter_NNN.md
 ```
 
 `dashboard.html` is a static page that reloads itself every minute. The loop re-renders it, with the
@@ -427,3 +434,8 @@ is no upper limit on the score a candidate may claim. The mean of the three
 passing scores becomes the new monotonic best -- the same statistic the bar is
 set on, so the incumbent and the threshold are measured the same way. Neither raw aggregate wall time nor
 individual case regressions decide KEEP/REVERT.
+
+`inbox/` holds operator messages (`kernelforge forge-say`); the loop archives each one it reads. `directions.json`
+exists only with `--early-stop`: the direction ledger's definitions, retirements, surveyed Analysis commits and
+audits. How far each direction has been mined is not stored there; it is folded from the `iteration_result`
+events, whose `direction_id` and `lane_id` name what each candidate pursued.

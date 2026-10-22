@@ -153,6 +153,30 @@ and passing one alongside `--resume` is refused rather than silently ignored.
 | `--skill-dir <dir>` | none | A folder holding a `SKILL.md`, such as the optimization skill a kernel repository keeps. Every agent's knowledge block points at it after the packaged maps, with the folder and its repository root to resolve its paths. Repeatable; applies to this invocation only. A folder without `SKILL.md` exits 2. |
 | `--experience-id <id>` | `''` | Unique KB run identity, independent of the checkpoint experiment ID. |
 
+### Early stop
+
+Off by default: the loop runs through stalls until its budget ends. With `--early-stop` it keeps a ledger of
+optimization directions in `forge_experiments/directions.json`, and stops early, as `directions_exhausted`, only
+when all of these hold:
+- the ledger holds at least `--early-stop-min-directions` directions;
+- every one is exhausted (`--direction-exhaust-after` attempts in a row without a KEEP) or ruled infeasible;
+- the last `--early-stop-window-rounds` measured rounds gained less than `--early-stop-min-gain`;
+- no lane candidate is queued and no operator message is waiting;
+- a read-only audit agent, run once against that ledger, found no direction it lacks. Directions it does find
+  are added, and the rule waits until they are mined out too.
+
+A survey by the same agent lists the directions after each Analysis, and a planner may add one. Every plan begins
+`Direction: <id>` (or `Direction: new | <category> | <title>`), which is how a candidate is attributed. A stopped
+campaign is paused, not closed: `--resume` continues it, and stops again unless the ledger or the inbox has moved.
+
+| Option | Default | Meaning |
+|:--|:--|:--|
+| `--early-stop` / `--no-early-stop` | off | Keep the direction ledger and allow the early stop above. |
+| `--early-stop-min-directions <n>` | 10 | Directions the ledger must hold before an early stop is considered. |
+| `--early-stop-window-rounds <n>` | 3 | Measured rounds whose combined gain decides whether the campaign has gone flat. |
+| `--early-stop-min-gain <f>` | 0.02 | Gain over that window below which the campaign counts as flat. |
+| `--direction-exhaust-after <n>` | 2 | Attempts in a row without a KEEP after which a direction counts as mined out. |
+
 ### Output
 
 | Option | Default | Meaning |

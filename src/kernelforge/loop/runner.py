@@ -23,7 +23,7 @@ import textwrap
 import time
 import traceback
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -36,7 +36,11 @@ from kernelforge.tools.git import git, git_bytes
 from kernelforge.config import Config
 from kernelforge.evaluation.correctness.canonical import accept_candidate
 from kernelforge.evaluation.correctness.pipeline import run_validation_pipeline
+from kernelforge.loop.direction_ledger import DirectionLedger, direction_standings, keep_gains
+from kernelforge.loop.early_stop import EarlyStopPolicy, EarlyStopStanding, early_stop_standing, window_gain
 from kernelforge.loop.experience import ExperienceLedger
+from kernelforge.loop.operator_inbox import OperatorInbox
+from kernelforge.orchestrator.direction_claims import parse_direction_line
 from kernelforge.loop.lessons import (
     SUMMARY_MIN_SECONDS,
     UNDISPROVEN_CLAIM,
@@ -388,6 +392,13 @@ def _patch_paths(patch: str, *, cwd: str) -> list[str]:
     return sorted({path for path in paths if path})
 
 
+def _read_plan_text(path) -> str:
+    try:
+        return Path(path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
 def _operator_block(guidance: tuple[str, ...]) -> str:
     """The operator's standing messages as the first block of a session prompt, or ""."""
     if not guidance:
@@ -554,6 +565,8 @@ class IterationConfig:
     # at (none: the dashboard draws no threshold).
     anchor_label: str = "the starting kernel"
     serving_speedup: float | None = None
+    # Stop before the budget once every known direction is mined out; off keeps the loop running through stalls.
+    early_stop: EarlyStopPolicy = field(default_factory=EarlyStopPolicy)
 
     def __post_init__(self) -> None:
         # Validated here rather than at the CLI boundary alone, so a pattern can never reach the commit/delete sites
@@ -650,6 +663,8 @@ class LoopAgents:
     analysis_service: Any = None
     orchestration_service: Any = None
     supervisor_fn: Any = None
+    # Lists the campaign's directions (survey) and looks for unlisted ones before an early stop (audit).
+    direction_audit_fn: Any = None
     # Every relay profile's search actor; when set, the loop selects among them and the four above are its start actor.
     search_actors: SearchActorPool | None = None
 
@@ -713,6 +728,9 @@ class IterationResult:
     kept: bool = False  # True if change was kept, False if reverted
     commit_hash: str = ""
     agent_rationale: str = ""
+    # The fan-out lane that produced the candidate, and the ledger direction its plan named.
+    lane_id: str = ""
+    direction_id: str = ""
     # Real error tail from the first failing validation stage (for the ledger); populated on validation failure so
     # gate-off runs still record true errors.
     error_output: str = ""
@@ -818,6 +836,8 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         # and the port's own speedup when a caller supplied the anchor it was ported from.
         self.search_start_mean_case_speedup: float | None = None
         self.start_time: float = 0
+        self._direction_audit_fn = None
+        self._ledger_cache: DirectionLedger | None = None
         # Total LLM token spend for the run, populated from the UsageAccumulator passed to run() (empty when no agent
         # / no accumulator).
         self.llm_usage: dict = {}
@@ -2601,6 +2621,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             anchor_label=getattr(self.ic, "anchor_label", ""),
             serving_speedup=getattr(self.ic, "serving_speedup", None),
             usage_path=str(ledger_path(experiments_dir)) if experiments_dir else "",
+            early_stop=asdict(self.ic.early_stop) if getattr(self.ic, "early_stop", None) else None,
         )
         try:
             publish_dashboard(self.state_store.root, live)
@@ -3322,6 +3343,114 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
                 make_event("operator_message_consumed", iteration, name=message.name, text=message.text[:500])
             )
 
+    def _ledger(self) -> DirectionLedger | None:
+        """The campaign's direction ledger, kept only while early stop is on."""
+        if not self.ic.early_stop.enabled:
+            return None
+        if self._ledger_cache is None:
+            self._ledger_cache = DirectionLedger(self.state_store.root)
+        return self._ledger_cache
+
+    def _iteration_results(self) -> list[dict]:
+        return [event for event in self.state_store.read_events() if event.get("type") == "iteration_result"]
+
+    def _direction_standings(self, ledger: DirectionLedger, results: list[dict] | None = None):
+        """Each direction's standing, and each KEEP's gain, folded from the iteration events."""
+        results = self._iteration_results() if results is None else results
+        gains = keep_gains(results, self.run_state.search_start_mean_case_speedup)
+        standings = direction_standings(
+            ledger.directions(), results, exhaust_after=self.ic.early_stop.exhaust_after, gains=gains
+        )
+        return standings, gains
+
+    def _with_direction_ledger(self, context):
+        """Attach the ledger, and the rule that plans name their direction, to a planning context."""
+        ledger = self._ledger()
+        if ledger is None:
+            return context
+        standings, _ = self._direction_standings(ledger)
+        return replace(context, direction_ledger=tuple(standing.to_view() for standing in standings))
+
+    def _early_stop_standing(self) -> EarlyStopStanding | None:
+        ledger = self._ledger()
+        if ledger is None:
+            return None
+        results = self._iteration_results()
+        standings, gains = self._direction_standings(ledger, results)
+        return early_stop_standing(
+            self.ic.early_stop,
+            standings,
+            gain=window_gain(results, gains, self.ic.early_stop.window_rounds),
+            audits=ledger.audits(),
+            lane_queue_empty=not self._lane_queue,
+            inbox_pending=bool(OperatorInbox(self.ic.workspace_dir).pending()),
+        )
+
+    def _attribute_candidate(self, session_sink: dict, plan_text: str, iteration: int, *, lane_id: str = "") -> None:
+        """Record which lane produced the candidate and which ledger direction its plan names."""
+        session_sink["lane_id"] = str(lane_id or "")
+        ledger = self._ledger()
+        if ledger is not None:
+            session_sink["direction_id"] = ledger.resolve_claim(parse_direction_line(plan_text), iteration=iteration)
+
+    def _direction_payload(self, ledger: DirectionLedger, mode: str) -> dict:
+        standings, _ = self._direction_standings(ledger)
+        context = self._active_analysis_context
+        refs = context.evidence_refs if context is not None else ()
+        return {
+            "mode": mode,
+            "ledger": [
+                standing.to_view()
+                | {"hypothesis": standing.direction.hypothesis, "retired": standing.direction.retired_reason}
+                for standing in standings
+            ],
+            "analysis_reports": [ref.path for ref in refs if ref.kind in {"analysis_summary", "analysis_bundle"}],
+            "optimization_history": str(self.state_store.root / "optimization_history.md"),
+            "program": (self.ic.program_md or "")[:3000],
+            "knowledge_index": context.knowledge_index if context is not None else "",
+        }
+
+    async def _survey_directions_if_due(self, iteration: int) -> None:
+        """List the directions once per Analysis commit (once in all, without Analysis)."""
+        ledger = self._ledger()
+        if ledger is None or self._direction_audit_fn is None:
+            return
+        context = self._active_analysis_context
+        commit = (context.evidence_commit or context.analysis_commit) if context is not None else "no-analysis"
+        if ledger.surveyed(commit):
+            return
+        found = await self._direction_audit_fn(
+            "survey",
+            workspace=self.ic.workspace_dir,
+            iteration=iteration,
+            payload=self._direction_payload(ledger, "survey"),
+        )
+        if found is None:
+            return
+        added = ledger.add(found, source="survey", iteration=iteration)
+        ledger.mark_surveyed(commit)
+        self.state_store.append_event(make_event("direction_added", iteration, source="survey", added=added))
+        print(f"  [directions] survey added {len(added)}: {', '.join(added) or '-'}")
+
+    async def _audit_directions_if_due(self, iteration: int) -> None:
+        """Before an early stop may fire, look once for directions the ledger lacks."""
+        standing = self._early_stop_standing()
+        if standing is None or not standing.audit_due or self._direction_audit_fn is None:
+            return
+        ledger = self._ledger()
+        found = await self._direction_audit_fn(
+            "audit",
+            workspace=self.ic.workspace_dir,
+            iteration=iteration,
+            payload=self._direction_payload(ledger, "audit"),
+        )
+        if found is None:
+            return
+        added = ledger.add(found, source="audit", iteration=iteration)
+        ledger.record_audit(iteration=iteration, ledger_size=len(ledger.directions()), added=added)
+        self.state_store.append_event(make_event("direction_audit", iteration, added=added))
+        print(f"  [directions] audit added {len(added)}: {', '.join(added) or 'none — the campaign may stop'}")
+
     def _with_ceiling_standing(self, context):
         """Attach the roofline standing to a planning context, when a ceiling is published.
 
@@ -3913,6 +4042,8 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             turns=result.turns,
             validation_passed=result.validation_passed,
             commit_hash=result.commit_hash or None,
+            lane_id=result.lane_id or None,
+            direction_id=result.direction_id or None,
             best_after_ms=(result.wall_ms if result.kept else self.best_wall_ms),
             best_after_mean_case_speedup=(result.mean_case_speedup if result.kept else self.best_mean_case_speedup),
             is_new_best=result.kept,
@@ -4474,12 +4605,14 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         lanes: int = 1,
     ) -> tuple[Path | None, str]:
         """Run planning and durably publish every lane's plan for the round."""
-        context = self._with_operator_guidance(
-            self._with_ceiling_standing(
-                self._with_case_config_coverage(
-                    self._active_analysis_context
-                    if self._active_analysis_context is not None
-                    else self._build_orchestration_context()
+        context = self._with_direction_ledger(
+            self._with_operator_guidance(
+                self._with_ceiling_standing(
+                    self._with_case_config_coverage(
+                        self._active_analysis_context
+                        if self._active_analysis_context is not None
+                        else self._build_orchestration_context()
+                    )
                 )
             )
         )
@@ -4811,6 +4944,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         workspace_lock_held: bool = False,
     ) -> list[IterationResult]:
         """Run the loop and clean attempt-owned processes on every exit path."""
+        self._direction_audit_fn = agents.direction_audit_fn
         try:
             return await self._run_impl(
                 agents,
@@ -5314,6 +5448,15 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             self.termination_reason = "force_stop"
             print("\nFORCE STOP: .stop file detected — remove it and --resume to continue")
             return True, None
+        standing = self._early_stop_standing()
+        if standing is not None and standing.stop:
+            self.termination_reason = "directions_exhausted"
+            print(
+                f"\nDIRECTIONS EXHAUSTED at iteration {iteration}: all {standing.directions} directions are mined "
+                f"out, the last {self.ic.early_stop.window_rounds} measured rounds gained {standing.window_gain:.2%}, "
+                "and the audit found no direction the ledger lacks"
+            )
+            return True, None
         hazard: DeviceHazard | None = self.device_hazard.recheck(iteration)
         if hazard is not None and hazard.exhausted:
             self.termination_reason = "device_contended"
@@ -5736,6 +5879,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             attempt_diff = self._working_tree_diff()
             reusable_benchmark = None
             session_sink["plan"] = queued_lane.plan
+            self._attribute_candidate(session_sink, queued_lane.plan, iteration, lane_id=queued_lane.lane_id)
             self._bind_session_producer(session_sink, queued_lane.agent_profile_id)
             print(f"  [lane {queued_lane.lane_id}] measuring queued candidate")
         elif merge_diff and merge_pair is not None:
@@ -5788,6 +5932,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
                     )
                     return None
                 optimization_plan_path = str(plan_path)
+                self._attribute_candidate(session_sink, _read_plan_text(plan_path), iteration)
                 optimization_plan_executable = (
                     self._last_orchestration_plan_executable
                     if self._last_orchestration_plan_executable is not None
@@ -6264,6 +6409,8 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
                 iteration=iteration,
             )
 
+        await self._survey_directions_if_due(iteration)
+
         # Self-supervision (AVO): when supervised, a stall triggers a reviewer that injects fresh directions and
         # the loop ALWAYS CONTINUES — it never self-terminates on stall.
         await self._run_supervisor_review(
@@ -6461,6 +6608,10 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             # Build the lineage digest once per iteration — reused by BOTH the supervisor (trajectory to review) and
             # the implementer (prompt history).
             digest = self.archive.render_digest()
+
+            # Ruled on once per iteration, with the other conditions that decide whether this iteration may run at
+            # all -- and after them, so a run that was stopping anyway never touches the device.
+            await self._audit_directions_if_due(iteration)
             stop, hazard = self._stop_condition_met(iteration)
             if stop:
                 break

@@ -334,6 +334,57 @@ def _events(snapshot: dict) -> str:
     )
 
 
+_DIRECTION_STATUS = {
+    "OPEN": ("neutral", "○", "open"),
+    "ACTIVE": ("series-1", "◐", "being tried"),
+    "KEPT": ("good", "✓", "produced a KEEP"),
+    "EXHAUSTED": ("neutral", "–", "mined out"),
+    "INFEASIBLE": ("critical", "✗", "ruled out"),
+}
+
+
+def _directions_panel(snapshot: dict) -> str:
+    directions = snapshot.get("directions") or {}
+    ledger = directions.get("ledger") or []
+    if not directions:
+        return ""
+    rows = []
+    for entry in ledger:
+        role, glyph, label = _DIRECTION_STATUS.get(entry.get("status"), ("neutral", "?", "unknown"))
+        rows.append(
+            f"<tr><td>{escape(str(entry.get('id')))}</td><td>{escape(str(entry.get('title')))}</td>"
+            f"<td>{escape(str(entry.get('category') or ''))}</td>"
+            f"<td><span class='status'><span class='dot' style='background:var(--{role})'></span>{glyph} "
+            f"{escape(label)}</span></td><td class='num'>{entry.get('attempts', 0)}</td>"
+            f"<td class='num'>{entry.get('keeps', 0)}</td><td class='num'>{_fmt(entry.get('gain_pct'), '.2f')}%</td>"
+            f"<td>{escape(str(entry.get('source') or ''))}</td></tr>"
+        )
+    policy, standing = directions.get("policy") or {}, directions.get("standing") or {}
+    unmet = standing.get("unmet") or []
+    if standing.get("criteria_met"):
+        verdict = "every criterion holds: " + (
+            "an audit for missed directions runs next" if standing.get("audit_due") else "the audit found nothing new"
+        )
+    else:
+        verdict = "not yet: " + "; ".join(unmet)
+    audits = directions.get("audits") or []
+    last_audit = (
+        f"last audit at iteration {audits[-1].get('iteration')} added {len(audits[-1].get('added') or [])}"
+        if audits
+        else "no audit yet"
+    )
+    head = (
+        f"early stop needs ≥{policy.get('min_directions')} directions, all mined out or ruled out, and the last "
+        f"{policy.get('window_rounds')} measured rounds under {float(policy.get('min_gain') or 0):.0%} gain "
+        f"(now {_fmt((standing.get('window_gain') or 0) * 100, '.2f')}%). {verdict}. {last_audit}."
+    )
+    return (
+        f"<div class='card'><h2>Directions ({len(ledger)})</h2><div class='sub'>{escape(head)}</div>"
+        "<table><tr><th>id</th><th>direction</th><th>category</th><th>status</th><th class='num'>tries</th>"
+        f"<th class='num'>keeps</th><th class='num'>gain</th><th>from</th></tr>{''.join(rows)}</table></div>"
+    )
+
+
 def _inbox_panel(snapshot: dict) -> str:
     inbox = snapshot.get("inbox") or {}
     pending, active = inbox.get("pending") or [], inbox.get("active") or []
@@ -356,6 +407,7 @@ def render_dashboard(snapshot: dict) -> str:
         _score_chart(rows),
         _decision_strip(rows),
         _inbox_panel(snapshot),
+        _directions_panel(snapshot),
         _case_table(snapshot),
         _text_card("Latest supervisor ruling", snapshot.get("supervisor") or ""),
         _usage_table(snapshot),

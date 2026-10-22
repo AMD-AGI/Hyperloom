@@ -8,6 +8,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from kernelforge.orchestrator.direction_claims import DIRECTION_RULE
+
 
 _IDENTIFIER_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
 _FAILURE_KINDS = frozenset(
@@ -251,6 +253,8 @@ class OrchestrationContext:
     roofline: CampaignRoofline | None = None
     # Standing operator messages, newest first (``forge-say``).
     operator_guidance: tuple[str, ...] = ()
+    # The direction ledger's standings while early stop is on; None leaves the payload as it was.
+    direction_ledger: tuple[dict, ...] | None = None
 
     def __post_init__(self) -> None:
         _text(self.analysis_commit, "context.analysis_commit")
@@ -394,6 +398,8 @@ class OrchestrationContext:
                 ),
                 "messages_newest_first": list(self.operator_guidance),
             }
+        if self.direction_ledger is not None:
+            payload["directions"] = {"rule": DIRECTION_RULE, "ledger": list(self.direction_ledger)}
         return payload
 
 

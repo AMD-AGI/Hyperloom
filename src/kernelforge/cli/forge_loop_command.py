@@ -34,6 +34,8 @@ from kernelforge.cli.options import (
     _validate_roofline_target,
 )
 from kernelforge.knowledge.local_wiki.skills import ExternalSkill
+from kernelforge.loop.early_stop import EarlyStopPolicy
+from kernelforge.orchestrator.direction_audit import make_direction_audit_fn
 from kernelforge.option_groups import option_group
 from kernelforge.cli.pr_references import (
     PR_KB_BUDGET_SEC,
@@ -181,6 +183,19 @@ def _load_external_baseline(path: str) -> tuple[float, dict[str, float]]:
             raise click.BadParameter(f"--baseline-json case {case_id!r} must be finite and positive")
         case_times[str(case_id)] = ms
     return wall_ms, case_times
+
+
+def _directions_summary(loop_runner) -> dict:
+    """How many ledger directions sit in each status, when the run kept a ledger."""
+    ledger_of = getattr(loop_runner, "_ledger", None)
+    ledger = ledger_of() if callable(ledger_of) else None
+    if ledger is None:
+        return {}
+    standings, _ = loop_runner._direction_standings(ledger)
+    counts: dict[str, int] = {}
+    for standing in standings:
+        counts[standing.status] = counts.get(standing.status, 0) + 1
+    return {"total": len(standings), "by_status": counts}
 
 
 def _load_anchor_presentation(path: str) -> tuple[str, float | None]:
@@ -334,6 +349,11 @@ class _RunReporter:
             "agent_model": self.implementer.model,
             "agent_relay": agent_relay_summary(loop_runner.run_state),
             "llm_usage": getattr(loop_runner, "llm_usage", {}) or {},
+            "termination_reason": (
+                getattr(loop_runner, "termination_reason", "")
+                or getattr(loop_runner.run_state, "termination_reason", "")
+            ),
+            "directions": _directions_summary(loop_runner),
         }
         if self.assembly_preparation is not None:
             from kernelforge.assembly.prepare import select_result
@@ -1132,6 +1152,17 @@ class SpecialistProbeOptions:
 
 
 @dataclass(frozen=True)
+class EarlyStopOptions:
+    """When the campaign may stop before its budget: directions mined out, recent rounds flat, an audit agreeing."""
+
+    early_stop: bool
+    early_stop_min_directions: int
+    early_stop_window_rounds: int
+    early_stop_min_gain: float
+    direction_exhaust_after: int
+
+
+@dataclass(frozen=True)
 class ForgeLoopRequest:
     """Every option of one ``forge-loop`` invocation, grouped by concern."""
 
@@ -1150,6 +1181,7 @@ class ForgeLoopRequest:
     identity: TaskIdentity
     knowledge: KnowledgeOptions
     probe: SpecialistProbeOptions
+    early_stop: EarlyStopOptions
     baseline_json: str
     resume: bool
 
@@ -1503,6 +1535,41 @@ class ForgeLoopRequest:
             "back to FORGE_SPECIALIST_PROBE_SCRATCH_ROOT when unset.",
         ),
     ),
+    option_group(
+        "early_stop",
+        EarlyStopOptions,
+        click.option(
+            "--early-stop/--no-early-stop",
+            default=False,
+            help="Keep a ledger of optimization directions and stop before the budget once every one is mined "
+            "out, the last rounds gained less than --early-stop-min-gain, and an audit agent finds no direction "
+            "the ledger lacks (default off: the loop runs through stalls).",
+        ),
+        click.option(
+            "--early-stop-min-directions",
+            default=10,
+            type=click.IntRange(min=1),
+            help="Directions the ledger must hold before an early stop is considered.",
+        ),
+        click.option(
+            "--early-stop-window-rounds",
+            default=3,
+            type=click.IntRange(min=1),
+            help="Measured rounds whose combined gain decides whether the campaign has gone flat.",
+        ),
+        click.option(
+            "--early-stop-min-gain",
+            default=0.02,
+            type=click.FloatRange(min=0.0),
+            help="Gain over the window below which the campaign counts as flat (0.02 = 2%).",
+        ),
+        click.option(
+            "--direction-exhaust-after",
+            default=2,
+            type=click.IntRange(min=1),
+            help="Attempts in a row without a KEEP after which a direction counts as mined out.",
+        ),
+    ),
     click.option(
         "--baseline-json",
         default="",
@@ -1759,6 +1826,13 @@ def forge_loop(request: ForgeLoopRequest):
         iter_config.baseline_case_times = dict(external_baseline_case_times)
         iter_config.pristine_baseline_wall_ms = external_baseline_ms
         iter_config.anchor_label, iter_config.serving_speedup = _load_anchor_presentation(baseline_json)
+    iter_config.early_stop = EarlyStopPolicy(
+        enabled=request.early_stop.early_stop,
+        min_directions=request.early_stop.early_stop_min_directions,
+        window_rounds=request.early_stop.early_stop_window_rounds,
+        min_gain=request.early_stop.early_stop_min_gain,
+        exhaust_after=request.early_stop.direction_exhaust_after,
+    )
     tracker = ExperimentTracker(config.experiments_dir)
     # Published at a fixed path from the first call onwards, so a caller that never asked for --result-json, or that
     # loses this process outright, can still read what the run spent.
@@ -1982,6 +2056,13 @@ def forge_loop(request: ForgeLoopRequest):
                 analysis_service=analysis_service,
                 orchestration_service=start_bundle.orchestration_service,
                 supervisor_fn=start_bundle.supervisor_fn,
+                direction_audit_fn=(
+                    make_direction_audit_fn(
+                        config, usage=usage, min_directions=request.early_stop.early_stop_min_directions
+                    )
+                    if request.early_stop.early_stop
+                    else None
+                ),
                 search_actors=actors.loop_search_actors,
             ),
             callbacks=LoopCallbacks(
