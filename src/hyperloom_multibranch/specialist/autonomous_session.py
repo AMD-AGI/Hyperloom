@@ -58,6 +58,8 @@ AGENT_DIR = "agent"
 #: How long a measured import its judge has not judged yet counts as being judged. The judge polls every few seconds
 #: and follows a gain with its retest and then its commit; an import submitted meanwhile would be on a stale head.
 SETTLE_SECONDS = 120.0
+#: The toolbox's refusal of a delta it cannot compile, among them a launch the measurement's launcher overrides.
+LAUNCH_REFUSED = "delta_not_applicable"
 
 
 @dataclass(frozen=True)
@@ -81,24 +83,37 @@ class AutonomousSetup:
 class KeepWatch:
     """What a run knows of the agent's keeps: ``root``, the workspace's git commit every keep is read against (the
     agent may commit on top of it); ``seq``, the keeps seen; ``mark``, what the keep file last said of them; ``base``,
-    the keeps seen before the agent last started its count over; and ``pending``, the latest keep read and not
-    submitted yet."""
+    the keeps seen before the agent last started its count over; ``pending``, the latest keep read and not submitted
+    yet; and ``refused_launch``, the server arguments and environment the toolbox refused to launch, which every later
+    keep that still runs with them is imported without."""
 
     root: str
     seq: int = 0
     mark: int | str | None = None
     base: int = 0
     pending: KeptChange | None = None
+    refused_launch: tuple[str, dict[str, str]] | None = None
 
     @classmethod
     def load(cls, path: Path) -> KeepWatch:
         document = json.loads(path.read_text(encoding=ENCODING))
-        pending = document.pop("pending")
-        return cls(**document, pending=None if pending is None else KeptChange(**pending))
+        pending, refused = document.pop("pending"), document.pop("refused_launch", None)
+        return cls(
+            **document,
+            pending=None if pending is None else KeptChange(**pending),
+            refused_launch=None if refused is None else (refused[0], dict(refused[1])),
+        )
 
     def save(self, path: Path) -> None:
         pending = None if self.pending is None else asdict(self.pending)
-        document = {"root": self.root, "seq": self.seq, "mark": self.mark, "base": self.base, "pending": pending}
+        document = {
+            "root": self.root,
+            "seq": self.seq,
+            "mark": self.mark,
+            "base": self.base,
+            "pending": pending,
+            "refused_launch": self.refused_launch,
+        }
         path.write_text(json.dumps(document), encoding=ENCODING)
 
 
@@ -205,32 +220,51 @@ class AutonomousSession:
         watch.save(self._place.workspace / WATCH_FILE)
 
     async def _submit(self, manifest: AgentManifest, watch: KeepWatch) -> None:
-        """Submit the pending keep once nothing of the branch is measured or being judged, against the head then."""
+        """Submit the pending keep once nothing of the branch is measured or being judged, against the head then.
+
+        A keep whose launch the toolbox cannot compile (``delta_not_applicable`` with a config change) goes again with
+        the head's launch, its source alone: keeps are cumulative, so a launch the measurement refuses, such as a
+        variable its launcher sets itself, would otherwise refuse every keep after it."""
 
         kept = watch.pending
         if kept is None or await self._busy():
             return
-        repo, branch = self._setup.repo, self._start.branch
-        head = await repo.head(branch)
+        head = await self._setup.repo.head(self._start.branch)
+        launch = (await self._setup.repo.read_recipe(head)).launch
+        if watch.refused_launch == (kept.server_args, dict(kept.envs)):
+            kept = replace(kept, server_args=launch.server_args, envs=dict(launch.envs))
         try:
-            delta = await import_delta(
-                kept,
-                root=await repo.read_recipe(self._start.start_commit),
-                head=await repo.read_recipe(head),
-                component=self._setup.component,
-                store=repo.store_patch,
-            )
+            await self._submitted(kept, head, await self._delta(kept, head))
+        except Backpressure:
+            return
+        except RequestRejected as error:
+            alone = replace(kept, server_args=launch.server_args, envs=dict(launch.envs))
+            if error.code != LAUNCH_REFUSED or alone == kept:
+                await self._note(f"keep {kept.seq} was refused: {error.reason}")
+            else:
+                watch.refused_launch = (kept.server_args, dict(kept.envs))
+                await self._note(f"keep {kept.seq} was refused: {error.reason}; its source is imported alone")
+                await self._submit_alone(alone, head)
         except RecipeError as error:
             await self._note(f"keep {kept.seq} is no recipe change and is skipped: {error}")
-        else:
-            try:
-                await self._submitted(kept, head, delta)
-            except Backpressure:
-                return
-            except RequestRejected as error:
-                await self._note(f"keep {kept.seq} was refused: {error.reason}")
         watch.pending = None
         watch.save(self._place.workspace / WATCH_FILE)
+
+    async def _submit_alone(self, kept: KeptChange, head: str) -> None:
+        try:
+            await self._submitted(kept, head, await self._delta(kept, head))
+        except (RequestRejected, RecipeError) as error:
+            await self._note(f"keep {kept.seq}'s source alone was refused too: {error}")
+
+    async def _delta(self, kept: KeptChange, head: str) -> RecipeDelta | None:
+        repo = self._setup.repo
+        return await import_delta(
+            kept,
+            root=await repo.read_recipe(self._start.start_commit),
+            head=await repo.read_recipe(head),
+            component=self._setup.component,
+            store=repo.store_patch,
+        )
 
     async def _submitted(self, kept: KeptChange, head: str, delta: RecipeDelta | None) -> None:
         """Submit ``kept`` against ``head``; raise what the toolbox raises when it takes no request now."""

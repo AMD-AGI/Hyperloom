@@ -54,7 +54,7 @@ state.write_text(json.dumps({"keeps": [], "note": ""}))
 for step, seqs in enumerate(config["keeps"], start=1):
     time.sleep(config["gap"])
     (workspace / "vllm" / "config.py").write_text(f"max_num_seqs = {seqs}\\n")
-    (workspace / "agent-config.json").write_text(json.dumps({"args": config["args"].format(seqs=seqs), "envs": {}}))
+    (workspace / "agent-config.json").write_text(json.dumps({"args": config["args"].format(seqs=seqs), "envs": config["envs"]}))
     if config["commits"]:
         subprocess.run("git add -A && git -c user.name=a -c user.email=a@a commit -qm k", shell=True, cwd=workspace)
     state.write_text(json.dumps({"keeps": [{"decision": "KEEP"}] * step, "note": f"seqs {seqs}"}))
@@ -73,6 +73,7 @@ class Agent:
     exit: int = 0
     commits: bool = False
     args: str = "--max-num-seqs {seqs}"
+    envs: dict[str, str] = field(default_factory=dict)
     keep: object = field(default_factory=lambda: KEEPS)
     config_source: object = None
     resume: str = ""
@@ -135,10 +136,15 @@ class Toolbox:
 
     def __init__(self, notebook: LocalNotebook) -> None:
         self._notebook, self.requests, self.refusals = notebook, [], []
+        self.refused_envs: set[str] = set()
 
     async def submit_test(self, request: TestRequest) -> str:
         if self.refusals:
             raise self.refusals.pop(0)
+        if self.refused_envs & set(request.delta.config.envs):
+            names = ", ".join(sorted(self.refused_envs))
+            reason = f"the environment does not compile: the renderer dropped or changed launch variables {names}"
+            raise RequestRejected(reason, "delta_not_applicable")
         accepted = TestRequest(**{**request.__dict__, "request_id": f"r{len(self.requests) + 1}"})
         self.requests.append(accepted)
         await self._notebook.write_request(accepted)
@@ -166,7 +172,13 @@ def _manifest(workspace: str, agent: Agent) -> str:
             "commit": "c",
             "install": [],
             "config_file": "campaign.json",
-            "config": {"workspace": workspace, "commits": agent.commits, "args": agent.args, **plan},
+            "config": {
+                "workspace": workspace,
+                "commits": agent.commits,
+                "args": agent.args,
+                "envs": agent.envs,
+                **plan,
+            },
             "launch": "python3 agent.py",
             "resume": agent.resume,
             "keep": agent.keep,
@@ -416,3 +428,25 @@ async def test_a_keep_file_whose_counter_never_resolves_is_noted_once(tmp_path: 
 
     unread = [note for note in await rig.notices() if "run/state.json" in note and "lessons" in note]
     assert len(unread) == 1 and not rig.toolbox.requests
+
+
+async def test_a_keep_whose_launch_the_toolbox_refuses_is_imported_without_it_and_so_are_later_keeps(
+    tmp_path: Path,
+) -> None:
+    # The measurement's launcher sets SGLANG_USE_AITER already; an agent that sets it too keeps it in every keep after.
+    agent = Agent(args="--max-num-seqs 128", envs={"SGLANG_USE_AITER": "1"}, config_source=CONFIG_SOURCE, tail=30.0)
+    rig = await _rig(tmp_path, agent)
+    rig.toolbox.refused_envs = {"SGLANG_USE_AITER"}
+
+    await rig.session.preflight()
+    running = asyncio.create_task(rig.session.run())
+    await _until(lambda: rig.toolbox.requests, "the first keep without its launch")
+    await rig.toolbox_notebook.write_result(result("r1"))
+    await _until(lambda: len(rig.toolbox.requests) == 2, "the second keep")
+
+    assert all(not request.delta.config.envs for request in rig.toolbox.requests)
+    assert "+max_num_seqs = 512" in rig.patch(rig.toolbox.requests[1])
+    refused = [note for note in await rig.notices() if "SGLANG_USE_AITER" in note]
+    assert len(refused) == 1 and "its source is imported alone" in refused[0]
+    await rig.session.stop()
+    await asyncio.wait_for(running, 10)
