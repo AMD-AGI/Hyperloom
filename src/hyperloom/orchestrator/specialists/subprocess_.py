@@ -53,8 +53,7 @@ from hyperloom.common.llm_config import (
 from hyperloom.common.env_safety import (
     redact_file_in_place,
 )
-from hyperloom.common.run_as import RunAs, RunAsError, specialist_run_as
-from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
+from hyperloom.common.run_as import RunAsError
 from hyperloom.common.proctree import collect_tree, kill_tree
 
 from .agent_cli_config import (
@@ -64,6 +63,7 @@ from .agent_cli_config import (
     _codex_provider_resolver_overlay,
     _write_private_codex_config,
 )
+from .launch_env import apply_gpu_env, prepare_demote, resolve_launch_user
 from .dsh_launch import DshLaunchRequest, build_dsh_launch, remove_dsh_profiles, resolve_dsh_executable
 from .trace_harvest import harvest_agent_trace
 from ..actions.cancel_channel import cancel_scope_listener, current_cancel_scope
@@ -434,26 +434,6 @@ class ReapWatch:
 
 
 # Dispatcher
-def _demote_launch_kwargs(run_as: RunAs | None, request: Any, env: dict[str, str]) -> dict[str, Any]:
-    """Make the specialist's tree writable by ``run_as`` and return its ``Popen`` kwargs.
-
-    ``None`` (no ``HYPERLOOM_SPECIALIST_USER``) returns no kwargs and touches
-    nothing. The workspace is shared with the sticky bit so the child cannot
-    delete the app's own prompt and log; a worktree outside the workspace is shared as is.
-    """
-    if run_as is None:
-        return {}
-    run_as.share_tree(request.workspace, sticky=True)
-    for private in ("prompt.md", _PROCESS_LOG_NAME):
-        # The app's own files in the shared workspace stay private to it.
-        if (request.workspace / private).exists():
-            (request.workspace / private).chmod(0o600)
-    if request.worktree is not None and request.workspace not in request.worktree.parents:
-        run_as.share_tree(request.worktree)
-    run_as.apply_env(env, safe_dirs=[request.worktree] if request.worktree is not None else ())
-    return run_as.popen_kwargs()
-
-
 class SpecialistSubprocessDispatcher:
     """Spawn + reap one agent-CLI subprocess for a specialist task.
 
@@ -519,9 +499,7 @@ class SpecialistSubprocessDispatcher:
         # A requested demote that cannot be honoured fails the task: running the
         # specialist as the app user would defeat the point of asking.
         try:
-            run_as = specialist_run_as()
-            if run_as is not None and request.gpu_lease is not None:
-                raise RunAsError("the Ray GPU actor path cannot run the specialist as another user")
+            run_as = resolve_launch_user(request.gpu_lease)
         except RunAsError as exc:
             return SpecialistSubprocessResult(
                 done_payload=None,
@@ -561,31 +539,7 @@ class SpecialistSubprocessDispatcher:
                 error=f"specialist agent runtime unavailable (backend={backend or 'unresolved'}): {exc}",
             )
 
-        if request.gpu_lease is not None:
-            # Ray-managed GPU execution: Ray sets *_VISIBLE_DEVICES in
-            # the actor's worker; never let the caller env pin them (that would
-            # override Ray's card assignment). ``gpu_ids`` here is the logical
-            # 0..N-1 view the specialist sees under Ray's mask — kept only as the
-            # informational count env for specialist tooling.
-            for var in GPU_MASK_ENV_NAMES:
-                env.pop(var, None)
-            if request.gpu_ids:
-                env["INFERENCE_OPTIMIZER_SPECIALIST_GPU_IDS"] = ",".join(str(g) for g in request.gpu_ids)
-        elif request.gpu_ids:
-            visible = ",".join(str(g) for g in request.gpu_ids)
-            env["HIP_VISIBLE_DEVICES"] = visible
-            env["CUDA_VISIBLE_DEVICES"] = visible
-            env["ROCR_VISIBLE_DEVICES"] = visible
-            env["INFERENCE_OPTIMIZER_SPECIALIST_GPU_IDS"] = visible
-        else:
-            # CPU specialists: hide all GPUs and use workspace-local compiler caches.
-            for var in GPU_MASK_ENV_NAMES:
-                env[var] = ""
-            cache_root = request.workspace / ".cache"
-            env["TRITON_CACHE_DIR"] = str(cache_root / "triton")
-            env["TORCHINDUCTOR_CACHE_DIR"] = str(cache_root / "torchinductor")
-            env["AITER_JIT_DIR"] = str(cache_root / "aiter_jit")
-            env["INFERENCE_OPTIMIZER_AITER_JIT_DIR"] = str(cache_root / "aiter_jit")
+        apply_gpu_env(env, request.workspace, request.gpu_ids, request.gpu_lease)
 
         with cancel_scope_listener() as scope:
             log_fh: Any = None
@@ -673,7 +627,9 @@ class SpecialistSubprocessDispatcher:
                         pass
                     stdin_fh: Any = None
                     try:
-                        demote = await asyncio.to_thread(_demote_launch_kwargs, run_as, request, env)
+                        demote = await asyncio.to_thread(
+                            prepare_demote, run_as, request.workspace, request.worktree, env, (prompt_file, process_log)
+                        )
                         stdin_fh = prompt_file.open("rb")
                         proc = subprocess.Popen(
                             cmd,

@@ -16,6 +16,7 @@ from typing import Any
 import pytest
 
 from hyperloom.common.deadline import Deadline
+from hyperloom.common.run_as import specialist_run_as
 
 from .conftest import init_git_repo, make_fake_claude
 
@@ -26,6 +27,7 @@ from hyperloom.orchestrator.specialists.runner import (
     SpecialistRunner,
 )
 from hyperloom.orchestrator.specialists import subprocess_, wall_budget
+from hyperloom.orchestrator.specialists.launch_env import prepare_demote
 from hyperloom.orchestrator.specialists.agent_cli_config import _build_specialist_env
 from hyperloom.orchestrator.specialists.subprocess_ import (
     SpecialistSubprocessConfig,
@@ -1466,9 +1468,9 @@ def test_demote_shares_a_worktree_that_lives_outside_the_workspace(tmp_path, mon
     request.workspace.mkdir()
     request.worktree.mkdir()
     (request.workspace / "prompt.md").write_text("p", encoding="utf-8")
-    run_as = subprocess_.specialist_run_as()
+    run_as = specialist_run_as()
 
-    kwargs = subprocess_._demote_launch_kwargs(run_as, request, {})
+    kwargs = prepare_demote(run_as, request.workspace, request.worktree, {}, (request.workspace / "prompt.md",))
 
     assert request.worktree.stat().st_gid == kwargs["group"]
     assert request.worktree.stat().st_mode & 0o2070 == 0o2070
