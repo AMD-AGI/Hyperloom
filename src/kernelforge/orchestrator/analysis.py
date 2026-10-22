@@ -152,30 +152,16 @@ class AnalysisBundle:
                     f"{', '.join(artifact['available_information'])}."
                 ),
             )
-        return OrchestrationContext(
-            analysis_commit=context.analysis_commit,
-            workspace=context.workspace,
-            gpu_target=context.gpu_target,
-            objective=context.objective,
-            program_context=context.program_context,
+        # Every field not named here passes through, so a field added to the context reaches planning unchanged.
+        return replace(
+            context,
             source_map_path=str(source_map),
-            editable_sources=context.editable_sources,
             cases=self.cases,
-            knowledge_index=context.knowledge_index,
-            supervisor_guidance=context.supervisor_guidance,
-            search_mode=context.search_mode,
-            search_reason_codes=context.search_reason_codes,
-            search_objective=context.search_objective,
-            search_mode_residence_remaining=(context.search_mode_residence_remaining),
             evidence_refs=tuple(evidence_by_path.values()),
             canonical_commit=(context.canonical_commit or context.analysis_commit),
             evidence_commit=self.analysis_commit,
             evidence_stale=(self.analysis_commit != (context.canonical_commit or context.analysis_commit)),
             evidence_status=(context.evidence_status or str(self.manifest.get("status") or "published").lower()),
-            evidence_mean_case_speedup=(context.evidence_mean_case_speedup),
-            current_mean_case_speedup=context.current_mean_case_speedup,
-            cumulative_diff_path=context.cumulative_diff_path,
-            cumulative_diff_error=context.cumulative_diff_error,
         )
 
 
@@ -1237,30 +1223,14 @@ class AnalysisAgentService:
             for original in context.cases
         )
         source_map = work_root / "source_map.md"
-        return OrchestrationContext(
-            analysis_commit=context.analysis_commit,
-            workspace=context.workspace,
-            gpu_target=context.gpu_target,
-            objective=context.objective,
-            program_context=context.program_context,
+        return replace(
+            context,
             source_map_path=(str(source_map.resolve()) if source_map.is_file() else context.source_map_path),
-            editable_sources=context.editable_sources,
             cases=normalized_cases,
-            knowledge_index=context.knowledge_index,
-            supervisor_guidance=context.supervisor_guidance,
-            search_mode=context.search_mode,
-            search_reason_codes=context.search_reason_codes,
-            search_objective=context.search_objective,
-            search_mode_residence_remaining=(context.search_mode_residence_remaining),
             evidence_refs=tuple(evidence_by_path.values()),
             canonical_commit=(context.canonical_commit or context.analysis_commit),
             evidence_commit=(context.evidence_commit or context.analysis_commit),
-            evidence_stale=context.evidence_stale,
             evidence_status=(context.evidence_status or "partial_checkpoint"),
-            evidence_mean_case_speedup=(context.evidence_mean_case_speedup),
-            current_mean_case_speedup=context.current_mean_case_speedup,
-            cumulative_diff_path=context.cumulative_diff_path,
-            cumulative_diff_error=context.cumulative_diff_error,
         )
 
     def apply_published_evidence(self, context: OrchestrationContext, *, evidence_commit: str) -> OrchestrationContext:

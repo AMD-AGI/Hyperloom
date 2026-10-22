@@ -485,8 +485,7 @@ async def test_analysis_agent_publishes_multi_case_bundle(tmp_path) -> None:
         "directions.json",
     } & {Path(artifact["path"]).name for artifact in catalog["artifacts"]}
     applied = bundle.apply(context)
-    # The bundle rebuilds the context field by field; the editable set is a property of the campaign, not of the
-    # analysis, so it must survive intact.
+    # The editable set is a property of the campaign, not of the analysis, so it must survive intact.
     assert applied.editable_sources == context.editable_sources
     evidence_paths = {reference.path for reference in applied.evidence_refs}
     directions_path = next(
@@ -497,6 +496,9 @@ async def test_analysis_agent_publishes_multi_case_bundle(tmp_path) -> None:
     assert directions_path in evidence_paths
     marked = bundle.apply(replace(context, evidence_status="profiled"))
     assert marked.evidence_status == "profiled"
+    # The previous round's critic verdict is what turns a REPLACE into a challenger lane.
+    critiqued = bundle.apply(replace(context, last_critic_verdict="REPLACE", last_critic_review="lane 2 repeats 1"))
+    assert (critiqued.last_critic_verdict, critiqued.last_critic_review) == ("REPLACE", "lane 2 repeats 1")
     resumed_context = replace(
         context,
         analysis_commit="def456",
@@ -857,6 +859,7 @@ async def test_partial_checkpoint_is_exposed_as_orchestration_evidence(
     assert partial_case.bottleneck == "ORIGINAL"
     assert Path(partial_case.profile_summary_path).read_text() == "# Partial case analysis\n"
     assert "analysis_checkpoint_interpretation_only" in partial_case.flags
+    assert service.apply_checkpoint(replace(context, last_critic_verdict="REVISE")).last_critic_verdict == "REVISE"
     assert "analysis_artifact_catalog" in evidence
     catalog = json.loads(Path(evidence["analysis_artifact_catalog"].path).read_text())
     source_entry = next(item for item in catalog["artifacts"] if item["kind"] == "source_map")
