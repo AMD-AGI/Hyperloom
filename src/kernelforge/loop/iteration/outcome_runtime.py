@@ -53,6 +53,7 @@ from kernelforge.loop.run_state import (
     pin_iteration,
 )
 from kernelforge.loop.search_policy import SEARCH_MODE_EXPLOIT
+from kernelforge.orchestrator.agent import RATIONALE_MAX_CHARS
 from kernelforge.orchestrator.supervisor import latest_supervisor_ruling_path
 
 log = logging.getLogger(__name__)
@@ -270,7 +271,7 @@ class OutcomeMixin:
             # Why this candidate was tried and decided, for trajectory comparison. Every path that produces an
             # iteration names one, a placeholder when no agent ran or it gave none; only a pending KEEP recorded before
             # the field existed has none, and then the key is omitted.
-            rationale=(result.agent_rationale or "").replace("\n", " ").strip()[:500] or None,
+            rationale=(result.agent_rationale or "").replace("\n", " ").strip()[:RATIONALE_MAX_CHARS] or None,
             plan=(plan or "").strip()[:120] or None,
             # The mode this iteration actually ran under, which is the direction identity the empty-diff streak is
             # counted against.

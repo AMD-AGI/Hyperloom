@@ -53,8 +53,8 @@ _REPO_TASK_TYPES = {"repository", "image_kernel"}
 # e.g. the PORT loop).
 _DEFAULT_SESSION_TIMEOUT_SEC = 90 * 60
 _IMPLEMENTER_ROLE = "implementer"
-# The most of a rationale any reader records: the iteration_result event.
-_RATIONALE_MAX_CHARS = 500
+# The most of an iteration's rationale any record keeps.
+RATIONALE_MAX_CHARS = 500
 # Both Implementer prompts ask for the one line agent_fn records as the iteration's rationale.
 _RATIONALE_REQUEST = (
     "Just before your `PLAN:` line, output one line starting with `RATIONALE:` for the trajectory log: the direction "
@@ -866,11 +866,9 @@ Make your change(s) now.
         end_reason = _session_end_reason(gate=gate, run_result=run_result)
 
         edit_count, passed = run_result.edit_count, "-"
-        # Only the line the agent declares: a backend's text can be the whole transcript (Claude's starts with its
-        # opening remarks), and the gate's figures travel in the session sink.
+        # Only the line the agent declares: a backend's text can be the whole session, opening remarks first.
         rationale = (
-            _parse_output_tag(run_result.text or "", "RATIONALE:", _RATIONALE_MAX_CHARS, last=True)
-            or "no rationale provided"
+            _parse_output_tag(run_result.text, "RATIONALE:", RATIONALE_MAX_CHARS, last=True) or "no rationale provided"
         )
         if gate is not None:
             edit_count, passed = gate.edit_count, gate.passed

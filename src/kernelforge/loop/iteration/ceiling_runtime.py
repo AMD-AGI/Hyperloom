@@ -189,7 +189,7 @@ class CeilingMixin:
         Like the roofline target, this decides only whether to buy another round; KEEP stays a measurement against
         the incumbent.
         """
-        target = float(self.ic.target_mean_case_speedup or 0.0)
+        target = self.ic.target_mean_case_speedup
         return target > 0 and self.best_mean_case_speedup is not None and self.best_mean_case_speedup >= target
 
     def _render_roofline_progress(self) -> str:
