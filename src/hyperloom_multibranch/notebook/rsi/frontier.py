@@ -87,7 +87,7 @@ REFERENCE_BUDGET_SECONDS = 4 * HOUR
 WINDOW_TESTS = 4
 #: How many judged tests end a branch's new-branch floor; the judge's grace reads it too, so the grace never ends
 #: before the floor does.
-SETTLED_TESTS = 10
+SETTLED_TESTS = 5
 FRONTIER_V1_LABEL = "frontier-v1"
 #: A scorer's label: lower-case letters, digits and ``.``, ``_``, ``-``, its version in it, such as ``frontier-v1``.
 SCORER_LABEL = re.compile(r"[a-z][a-z0-9._-]{1,63}")

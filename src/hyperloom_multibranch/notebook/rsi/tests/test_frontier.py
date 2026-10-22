@@ -145,7 +145,7 @@ async def test_a_new_branch_without_a_commit_keeps_a_floor_until_its_tests_settl
     assert unsettled is not None and unsettled.expected_gain_pct == POLICY.new_branch_floor_pct
     assert unsettled.basis is FrontierBasis.NEW
     assert settled is not None and settled.expected_gain_pct == 0.0 and settled.basis is FrontierBasis.TREND
-    assert SETTLED_TESTS == 10
+    assert SETTLED_TESTS == 5
 
 
 async def test_the_floor_ends_with_the_judges_grace_at_the_settled_explore_tests_failed_ones_included(
