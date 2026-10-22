@@ -104,8 +104,12 @@ def test_the_cold_start_the_real_toolbox_measured_is_what_the_signals_carry_to_t
 SHARES = OpShares("c-head", "job-1", "profile-1", {"attention": 22.0, "moe_gemm": 41.5, "allreduce": 9.0})
 
 
-def test_a_refill_takes_the_judges_focus_and_else_the_largest_op_of_its_start_commit() -> None:
-    assert refill_focus(("attention", ""), 3, SHARES) == ("attention", "moe_gemm", "moe_gemm")
+def test_a_refill_takes_the_judges_focus_and_else_the_largest_ops_of_its_start_commit() -> None:
+    assert refill_focus(("attention", ""), 3, SHARES) == ("attention", "moe_gemm", "attention")
+
+
+def test_a_refill_the_judge_left_open_spreads_over_the_profile_and_wraps() -> None:
+    assert refill_focus((), 4, SHARES) == ("moe_gemm", "attention", "allreduce", "moe_gemm")
 
 
 def test_a_refill_from_a_commit_never_profiled_has_no_focus_unless_the_judge_names_one() -> None:
