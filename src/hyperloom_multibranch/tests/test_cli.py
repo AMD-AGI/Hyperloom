@@ -232,6 +232,7 @@ def test_each_autonomous_agent_is_one_agent_branch_in_order() -> None:
     [
         ["--autonomous-agent", "https://user:ghp_secret@github.com/acme/agent"],
         ["--autonomous-agent", "https://ghp_secret@github.com/acme/agent"],
+        ["--autonomous-agent", "git+https://ghp_secret@github.com/acme/agent"],
         ["--max-branches", "1", "--autonomous-agent", "/a", "--autonomous-agent", "/b"],
     ],
 )

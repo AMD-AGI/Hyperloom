@@ -263,6 +263,10 @@ def _workload_shape(args: argparse.Namespace) -> InferenceXShape | None:
     return InferenceXShape(args.isl, args.osl)
 
 
+#: Schemes whose URL user is a login name rather than a credential; any other scheme's user, or a password, is one.
+SSH_SCHEMES = frozenset({"ssh", "git+ssh", "svn+ssh"})
+
+
 def _agents(sources: list[str], free: int) -> tuple[str, ...]:
     """The agent sources, refused when one carries credentials, which come from the sandbox's environment only, or
     when there are more than the ``free`` branches the user's directions leave."""
@@ -272,8 +276,7 @@ def _agents(sources: list[str], free: int) -> tuple[str, ...]:
     for source in sources:
         scheme, found, rest = source.partition("://")
         user, at, _host = rest.split("/", 1)[0].rpartition("@")
-        # An ssh URL's user is its login name; a password, or any user of an http URL, is a credential.
-        if found and at and (":" in user or scheme.lower() in ("http", "https")):
+        if found and at and (":" in user or scheme.lower() not in SSH_SCHEMES):
             raise ValueError(f"--autonomous-agent {scheme}://... carries credentials; give them in the environment")
     return tuple(sources)
 
