@@ -982,6 +982,29 @@ def test_an_integrate_executing_in_enablement_is_graded_as_the_round(tmp_path):
     assert params["extra_envs"] == {"SGLANG_X": "1"}
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("origin", "ends_lane"), [("", True), ("eval", False)], ids=["boot", "eval"])
+async def test_an_anchor_reached_by_another_route_ends_a_boot_lane(monkeypatch, tmp_path, origin, ends_lane):
+    """A boot lane left open after the combo booted adopted a perf patch and revalidated its gain into the anchor."""
+    from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
+
+    monkeypatch.setattr(mne, "is_multi_node", lambda: False)
+    _stub_enumerate(monkeypatch, [])
+    fake = _enqueue_self(tmp_path, enablement_origin=origin)
+    assert await fake.enablement_lane._maybe_enqueue_enablement_specialist()
+
+    await fake.writeback.promote_to_shared_state(
+        "baseline",
+        {"output_throughput": 2245.0, "materialized_config": str(tmp_path / "baseline.with_envs.yaml")},
+        task=None,
+    )
+
+    assert fake.shared_state.baseline_tput == 2245.0
+    assert fake.shared_state.enablement.succeeded is ends_lane
+    assert (await fake.rounds.held() is None) is ends_lane
+    assert ("enablement" in _bind(fake, specialist_task_id="spec-perf")) is not ends_lane
+
+
 def test_the_lanes_own_integrate_keeps_the_context_its_specialist_carried(tmp_path):
     fake = _enqueue_self(tmp_path)
     fake.shared_state.enablement.launch_observation_path = "/s/reports/bringup/round-new.json"

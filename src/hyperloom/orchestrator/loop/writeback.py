@@ -67,7 +67,7 @@ from hyperloom.inference_optimizer.grid_server_args import (
     merge_cumulative_extra_server_args,
 )
 from ..kernel.geak_config import _geak_overlay_digest
-from ..state.round_store import ABANDONED, BOOTED, FAILED
+from ..state.round_store import ABANDONED, FAILED
 from ..state.task_registry import Task
 from ..actions.executors.benchmark_result import is_valid_measurement
 from ..actions.executors.integrate_patch import KEEP_STATUSES
@@ -2187,8 +2187,7 @@ class WritebackCollaborator(GeakRevalidation):
         enablement = self.shared_state.enablement
         tracked_tid = str(getattr(enablement, "revalidation_task_id", "") or "").strip()
         if not bool(getattr(enablement, "validation_pending", False)):
-            enablement.origin = ""
-            enablement.pending = False
+            await self._coord.enablement_lane.on_baseline_promoted()
             return
         if not is_revalidation:
             log.info(
@@ -2215,13 +2214,6 @@ class WritebackCollaborator(GeakRevalidation):
         floor: float,
         promoting_tid: str,
     ) -> None:
-        enablement = self.shared_state.enablement
-        enablement.succeeded = True
-        enablement.validation_pending = False
-        enablement.revalidation_task_id = ""
-        enablement.origin = ""
-        enablement.pending = False
-        await self._coord.enablement_lane.settle_enablement_round(BOOTED, reason="revalidation_promoted")
         enablement_event.record_revalidation_outcome(
             generation=generation,
             promoted=True,
@@ -2229,10 +2221,9 @@ class WritebackCollaborator(GeakRevalidation):
             accuracy=accuracy,
             accuracy_floor=floor,
         )
-        await self._coord.enablement_lane.close_lane_event(
-            outcome=enablement_event.OUTCOME_SUCCEEDED,
-            reason="revalidation promoted",
-        )
+        # This promote is the lane's terminal: the KEEP that preceded it was
+        # provisional, so the round that landed it did not close the lane.
+        await self._coord.enablement_lane.close_booted(reason="revalidation promoted")
 
     async def _rearm_enablement_after_subfloor(
         self,

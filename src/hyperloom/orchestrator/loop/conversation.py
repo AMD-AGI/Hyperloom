@@ -10,6 +10,7 @@ import time
 from operator import itemgetter
 from typing import TYPE_CHECKING, Any, Callable
 from ..bus.gpu_pool import gpus_by_task_sync
+from ..phases import dispatch_order
 from ..phases import machine_state as _phase_state
 from ..policy.projection import resource_pools_summary
 from ..specialists.in_flight import in_flight_domains
@@ -60,6 +61,8 @@ _OUTCOME_NOTES_MAX: int = 3
 _FINDINGS_PROMPT_CHARS = 24_000
 _QUESTIONS_PROMPT_CHARS = 6_000
 _INBOX_PROMPT_CHARS = 40_000
+# Task kinds that queue for the benchmark lane, in the order the backlog line lists them.
+_BENCH_LANE_KINDS = ("integrate_patch", "explore")
 
 
 def _fit_to_budget(lines: list[str], budget_chars: int) -> list[str]:
@@ -403,15 +406,23 @@ class ConversationCollaborator(CoordinatorCollaborator):
         return "\n".join(lines)
 
     def _queued_backlog_line(self) -> str:
-        """Benchmark-lane backlog: queued integrate_patch / explore tasks and untested proposals."""
+        """Benchmark-lane backlog: queued integrate_patch / explore tasks in dispatch order, and untested proposals."""
         counts = self.tasks.queued_kind_counts_sync()
         counts["untested proposals"] = len(self.shared_state.untested_proposal_rows())
-        parts = [
-            f"{counts[kind]} {kind}"
-            for kind in ("integrate_patch", "explore", "untested proposals")
-            if counts.get(kind)
-        ]
-        return "queued backlog: " + ", ".join(parts) if parts else ""
+        parts = [f"{counts[kind]} {kind}" for kind in (*_BENCH_LANE_KINDS, "untested proposals") if counts.get(kind)]
+        if not parts:
+            return ""
+        first = dispatch_order.PHASE_DISPATCH_FIRST.get(self.shared_state.phase, frozenset())
+        queued_bench = [kind for kind in _BENCH_LANE_KINDS if counts.get(kind)]
+        ahead = [kind for kind in queued_bench if kind in first]
+        behind = [kind for kind in queued_bench if kind not in first]
+        order = (
+            f" ({', '.join(ahead)} dispatches before any queued {', '.join(behind)} in this phase,"
+            " including one queued later)"
+            if ahead and behind
+            else ""
+        )
+        return "queued backlog: " + ", ".join(parts) + order
 
     def _queued_specialists_line(self) -> str:
         """Domains a queued specialist holds: a specialist delegate for one of them is refused until it finishes."""

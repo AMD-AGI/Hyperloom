@@ -1048,14 +1048,13 @@ class DispatcherCollaborator(CoordinatorCollaborator):
                 task = await self.tasks.get(task_id)
             except TaskNotFound:
                 continue
+            error = f"lease holder process died before reporting a result; task reclaimed by {reason}"
             await self._coord.writeback.handle_unpromotable_result(
                 task,
-                {
-                    "status": "failed",
-                    "error_class": "dead_holder_reaped",
-                    "error": (f"lease holder process died before reporting a result; task reclaimed by {reason}"),
-                },
+                {"status": "failed", "error_class": "dead_holder_reaped", "error": error},
             )
+            if task.kind == "specialist" and not self.owes_result(task_id):
+                await self._record_specialist_settlement(task, SubAgentResult(task_id, "failed", {}, error=error))
             log.warning(
                 "dispatcher: counted dead-holder death of task=%s kind=%s as an action failure",
                 task_id,
@@ -1143,7 +1142,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
             await gap_refresh.refresh_gaps(reason="explore_round", workload_id=workload_id)
 
     async def _record_specialist_settlement(self, task: Task, result: SubAgentResult) -> None:
-        """Record a finished specialist's done payload; always runs, to keep the ledgers coherent."""
+        """Record an ended specialist round once; the FRAMEWORK pump keys its next discovery round on this settle."""
         done_payload = result.result.get("specialist_done") or {}
         run_error = str(result.error or "")
         await self._coord.specialist_dispatch.record_specialist_result(
