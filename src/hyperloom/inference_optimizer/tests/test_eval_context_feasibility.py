@@ -103,7 +103,7 @@ class TestGradeMarksTheRoundInfeasible:
         monkeypatch.delenv("HYPERLOOM_EVAL_MAX_TOKENS", raising=False)
         return rh._grade_integrate_accuracy(
             {"accuracy": None},
-            session_dir=tmp_path,
+            baseline_accuracy=0.0,
             workspace=tmp_path,
             server_args=server_args,
         )
