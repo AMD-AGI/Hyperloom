@@ -156,7 +156,7 @@ def format_scope_line(scope: LessonScope) -> str:
 def parse_scope_line(text: str) -> LessonScope | None:
     """Recover a scope from a document, or None when it carries no scope line."""
     line = ""
-    for candidate in (text or "").splitlines():
+    for candidate in text.splitlines():
         if candidate.strip().startswith(SCOPE_PREFIX):
             line = candidate.strip()
     if not line:
@@ -173,17 +173,13 @@ def parse_scope_line(text: str) -> LessonScope | None:
             if listed != NOT_RECORDED:
                 cases = tuple(item.strip() for item in listed.split(",") if item.strip())
         elif part.startswith("held fixed "):
-            listed = part[len("held fixed ") :].strip()
-            if listed != NOT_RECORDED:
-                held = _parse_pairs(listed)
+            held = _parse_pairs(part[len("held fixed ") :])
         elif part.startswith("lane restricted"):
             lane_restricted = True
         elif part.startswith(CARRIES_NEGATIVE):
             carries_negative = True
         elif part.startswith(NO_NEGATIVE):
             carries_negative = False
-        elif part.startswith(NEGATIVE_NOT_RECORDED):
-            carries_negative = None
         elif (evidence := _disproved_evidence(part)) is not None:
             disproof = CLAIM_DISPROVED + evidence if evidence else UNDISPROVEN_CLAIM
         elif part.startswith(DISPROOF_RUN):
@@ -192,8 +188,6 @@ def parse_scope_line(text: str) -> LessonScope | None:
             disproof = UNDISPROVEN_CLAIM
         elif part.startswith(NO_FEASIBILITY_CLAIM):
             disproof = NO_FEASIBILITY_CLAIM
-        elif part.startswith(DISPROOF_NOT_RECORDED):
-            disproof = None
     return LessonScope(
         cases=cases,
         held_fixed=held,
