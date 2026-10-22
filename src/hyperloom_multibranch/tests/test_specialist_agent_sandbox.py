@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom_multibranch.specialist.agent_sandbox import TIMED_OUT, LocalAgentSandbox, session_pids
+from hyperloom_multibranch.specialist.agent_sandbox import TIMED_OUT, LocalAgentSandbox, marked_pids
 
 BASE = {
     "PATH": os.environ["PATH"],
@@ -123,7 +123,7 @@ def test_kill_reaches_a_grandchild_that_left_the_group(tmp_path: Path) -> None:
     leader, grandchild, returncode = asyncio.run(scenario())
 
     assert not _alive(grandchild)
-    assert session_pids(leader) == []
+    assert marked_pids(str(tmp_path / "sandbox")) == []
     assert returncode is not None
     assert processes.adopted[0][:2] == (leader, "b07")
 
@@ -177,11 +177,11 @@ def test_pkill_spares_its_caller_whose_command_line_matches(tmp_path: Path) -> N
     assert done.returncode == 1, done.output
 
 
-def test_pkill_and_pgrep_refuse_another_session(tmp_path: Path) -> None:
+def test_pgrep_lists_no_process_outside_the_sandbox_whatever_it_selects(tmp_path: Path) -> None:
     sandbox = _sandbox(tmp_path)
-    done = asyncio.run(sandbox.run("pgrep -s 1 sleep", tmp_path, {}, 5))
+    done = asyncio.run(sandbox.run("pgrep -s 1 . ; echo exit=$?", tmp_path, {}, 5))
 
-    assert done.returncode != 0 and "confined" in done.output
+    assert done.output.strip() == "exit=1"
 
 
 def test_killall_kills_by_name_within_the_session(tmp_path: Path) -> None:
@@ -232,3 +232,30 @@ async def test_a_command_that_ends_before_the_registry_takes_it_still_runs(tmp_p
 
     await _until(lambda: process.returncode is not None)
     assert "started" in await process.output()
+
+
+def test_a_server_started_in_a_session_of_its_own_is_still_the_sandbox_s(tmp_path: Path) -> None:
+    marker = f"server{uuid.uuid4().hex}"
+    pids = tmp_path / "pids"
+    # A Claude CLI runs each Bash command in a new session, so a server it starts leaves the agent's session.
+    serve = f"setsid {shlex.quote(sys.executable)} -c 'import time; time.sleep(100)' {marker} & echo $! > {pids}"
+
+    async def scenario() -> tuple[int, int, bool]:
+        sandbox = _sandbox(tmp_path)
+        process = await sandbox.start(f"{serve}; sleep 100", tmp_path, {})
+        await _until(lambda: pids.exists() and pids.read_text().strip())
+        server = int(pids.read_text())
+        await _until(lambda: _alive(server))
+        assert os.getsid(server) != process.popen.pid
+        stopped = await sandbox.run(f"pkill -f {marker}", tmp_path, {}, 10.0)
+        await _until(lambda: not _alive(server))
+        again = await sandbox.start(f"{serve}; sleep 100", tmp_path, {})
+        await _until(lambda: pids.exists() and int(pids.read_text()) != server)
+        second = int(pids.read_text())
+        await again.kill()
+        return stopped.returncode, second, _alive(second)
+
+    stopped, _second, alive = asyncio.run(scenario())
+
+    assert stopped == 0
+    assert not alive

@@ -3,12 +3,14 @@
 
 """A local stand-in for an autonomous branch's sandbox lease: commands run on this host, on the leased cards only.
 
-Every command leads a session of its own, and that session is the agent's whole extent: :meth:`LocalProcess.kill` ends
-every process in it, whichever process group a process moved to. The pod forbids a PID namespace, so an agent's
-``pkill``, ``pgrep`` and ``killall`` would otherwise reach the whole host; Arbor stops its server with ``docker exec C
-pkill -TERM -f sglang.launch_server``, which through the docker shim would stop MB's measurement servers too. The
-sandbox puts wrappers for them first on ``PATH`` that match only within the caller's session, and ``pkill`` and
-``killall`` spare the caller and its ancestors, as a ``docker exec`` from outside a container would. ``killall NAME``
+Every command runs with :data:`MARKER` in its environment, which every process it starts inherits, and that marker is
+the sandbox's whole extent: :meth:`LocalProcess.kill` ends every process that carries it, whichever session or process
+group a process moved to (a Claude CLI runs each of its shell commands in a session of its own, and an agent's model
+starts its servers through one). The pod forbids a PID namespace, so an agent's ``pkill``, ``pgrep`` and ``killall``
+would otherwise reach the whole host; Arbor stops its server with ``docker exec C pkill -TERM -f sglang.launch_server``,
+which through the docker shim would stop MB's measurement servers too. The sandbox puts wrappers for them first on
+``PATH`` that match only the processes carrying the caller's marker, and ``pkill`` and ``killall`` spare the caller and
+its ancestors, as a ``docker exec`` from outside a container would. ``killall NAME``
 is ``pkill -x`` on the name's first 15 characters, all the kernel keeps of a name, and takes no option but a signal and
 ``-q``: its others select by user, age or regex, which an agent confined to its own processes has no use for.
 
@@ -48,9 +50,12 @@ POLL_SECONDS = 0.1
 #: The exit code a run that timed out reports, as ``timeout(1)`` does.
 TIMED_OUT = 124
 CONFINED = ("pkill", "pgrep", "killall")
+#: The environment variable every process of a sandbox carries, set to the sandbox's root.
+MARKER = "HYPERLOOM_AGENT_SANDBOX"
 
 CONFINE_SCRIPT = """#!{python} -I
-# pkill, pgrep and killall confined to the caller's session; pkill and killall spare the caller and its ancestors.
+# pkill, pgrep and killall confined to the processes of the caller's sandbox; pkill and killall spare the caller and
+# its ancestors.
 import os, re, signal, subprocess, sys
 
 PGREP = {pgrep!r}
@@ -59,7 +64,8 @@ SELECTING = set("gGPtuUF")
 VALUED_LONG = {{"--delimiter", "--pgroup", "--group", "--parent", "--session", "--terminal", "--euid", "--uid",
                "--ns", "--nslist", "--pidfile", "--signal", "--older", "--runstates"}}
 SELECTING_LONG = {{"--pgroup", "--group", "--parent", "--terminal", "--euid", "--uid", "--ns", "--pidfile"}}
-tool, args, sid = os.path.basename(sys.argv[0]), sys.argv[1:], str(os.getsid(0))
+tool, args = os.path.basename(sys.argv[0]), sys.argv[1:]
+MARK = ("{marker}=" + os.environ["{marker}"]).encode()
 
 
 def refuse(why):
@@ -86,7 +92,7 @@ def ancestors():
     return seen
 
 
-# The session alone would select the caller's whole session, so another criterion is required.
+# The sandbox alone would select every process of it, so another criterion is required.
 def has_criteria(args):
     rest = list(args)
     while rest:
@@ -112,12 +118,26 @@ def has_criteria(args):
     return False
 
 
+def ours(pid):
+    try:
+        with open(f"/proc/{{pid}}/environ", "rb") as environ:
+            return MARK in environ.read().split(b"\\0")
+    except OSError:
+        return False
+
+
+# pgrep's lines for the selection, those of processes outside the sandbox left out.
+def found(selection):
+    done = subprocess.run([PGREP, *selection], stdout=subprocess.PIPE, text=True)
+    if done.returncode > 1:
+        sys.exit(done.returncode)
+    return [line for line in done.stdout.splitlines() if line.split()[:1] and ours(line.split()[0])]
+
+
 def matching(selection):
-    found = subprocess.run([PGREP, "-s", sid, *selection], stdout=subprocess.PIPE, text=True)
-    if found.returncode > 1:
-        sys.exit(found.returncode)
     spared = ancestors()
-    return [int(pid) for pid in found.stdout.split() if pid.isdigit() and int(pid) not in spared]
+    pids = (line.split()[0] for line in found(selection))
+    return [int(pid) for pid in pids if pid.isdigit() and int(pid) not in spared]
 
 
 def send(pids, number, echo):
@@ -133,12 +153,13 @@ def send(pids, number, echo):
     return sent
 
 
-if tool != "killall" and any(arg in ("-s", "--session") or arg.startswith("--session=") for arg in args):
-    refuse("matching is confined to the caller's session; -s is not accepted")
 if tool == "pgrep":
     if not has_criteria(args):
         refuse("give a pattern or a selection")
-    os.execv(PGREP, [PGREP, "-s", sid, *args])
+    lines = found(args)
+    for line in lines:
+        print(line)
+    sys.exit(0 if lines else 1)
 number, echo, quiet, selection = signal.SIGTERM, False, False, []
 rest = list(args)
 while rest:
@@ -178,10 +199,11 @@ sys.exit(1 if missed else 0)
 
 @dataclass
 class LocalProcess:
-    """A command started in a :class:`LocalAgentSandbox`, leading session ``popen.pid``; its output is in ``log``."""
+    """A command started in a :class:`LocalAgentSandbox` whose processes carry ``marker``; its output is in ``log``."""
 
     popen: subprocess.Popen[bytes]
     log: Path
+    marker: str
     grace_seconds: float = GRACE_SECONDS
     poll_seconds: float = POLL_SECONDS
 
@@ -193,14 +215,14 @@ class LocalProcess:
         return read_tail(self.log)
 
     async def kill(self) -> None:
-        """SIGTERM every process of the session, SIGKILL what is left after :attr:`grace_seconds`; return once none
+        """SIGTERM every process of the sandbox, SIGKILL what is left after :attr:`grace_seconds`; return once none
         is left."""
 
         until = time.monotonic() + self.grace_seconds
         termed: set[int] = set()
         while True:
             self.popen.poll()
-            pids = session_pids(self.popen.pid)
+            pids = marked_pids(self.marker)
             if not pids:
                 return
             if time.monotonic() >= until:
@@ -213,7 +235,7 @@ class LocalProcess:
 
 @dataclass
 class LocalAgentSandbox:
-    """Commands on this host, confined to ``cards`` (absolute GPU ids) and to sessions of their own, importing
+    """Commands on this host, confined to ``cards`` (absolute GPU ids) and marked as the sandbox's, importing
     ``python_path`` first; ``root`` is the sandbox's own directory, for its temporary files, logs and wrappers.
     ``processes`` adopts every command it starts for ``branch``; ``base_env`` is ``os.environ`` when ``None``."""
 
@@ -233,7 +255,7 @@ class LocalAgentSandbox:
         start = max((int(log.name.split("-", 1)[0]) for log in (self.root / LOG_DIR).glob("*-*.log")), default=0)
         self._numbers = itertools.count(start + 1)
         pgrep = shutil.which("pgrep", path=self._base().get("PATH")) or "/usr/bin/pgrep"
-        script = CONFINE_SCRIPT.format(python=sys.executable, pgrep=pgrep)
+        script = CONFINE_SCRIPT.format(python=sys.executable, pgrep=pgrep, marker=MARKER)
         for tool in CONFINED:
             wrapper = self.root / BIN_DIR / tool
             wrapper.write_text(script, encoding="utf-8")
@@ -251,11 +273,12 @@ class LocalAgentSandbox:
         merged.update(env)
         merged = {name: value for name, value in merged.items() if name not in GPU_MASK_ENV_NAMES}
         merged["ROCR_VISIBLE_DEVICES"] = ",".join(map(str, self.cards))
+        merged[MARKER] = str(self.root)
         merged["PATH"] = os.pathsep.join(filter(None, [str(self.root / BIN_DIR), merged.get("PATH")]))
         return merged
 
     async def run(self, command: str, cwd: Path, env: Mapping[str, str], timeout: float) -> CommandResult:
-        """Run ``command`` to its end or ``timeout``, at which its whole session is killed."""
+        """Run ``command`` to its end or ``timeout``, at which every process of the sandbox is killed."""
 
         process = self._spawn("run", command, cwd, env)
         until = time.monotonic() + timeout
@@ -291,24 +314,26 @@ class LocalAgentSandbox:
                 self.processes.adopt(popen.pid, branch=self.branch, argv=argv)
             except ValueError:
                 logger.warning("`%s` of %s ended before the process registry took it over", command, self.branch)
-        return LocalProcess(popen, log, self.grace_seconds, self.poll_seconds)
+        return LocalProcess(popen, log, str(self.root), self.grace_seconds, self.poll_seconds)
 
     def _base(self) -> Mapping[str, str]:
         return os.environ if self.base_env is None else self.base_env
 
 
-def session_pids(sid: int) -> list[int]:
-    """The live processes of session ``sid``; a zombie has ended and only waits for its parent to reap it."""
+def marked_pids(value: str) -> list[int]:
+    """The live processes whose environment sets :data:`MARKER` to ``value``; a zombie, which has ended and only waits
+    for its parent to reap it, shows no environment."""
 
+    mark = f"{MARKER}={value}".encode()
     pids = []
     for entry in Path("/proc").iterdir():
         if not entry.name.isdigit():
             continue
         try:
-            fields = (entry / "stat").read_text().rsplit(")", 1)[1].split()
-        except (OSError, IndexError):
+            environ = (entry / "environ").read_bytes()
+        except OSError:
             continue
-        if int(fields[3]) == sid and fields[0] not in ("Z", "X"):
+        if mark in environ.split(b"\0"):
             pids.append(int(entry.name))
     return pids
 
@@ -331,11 +356,12 @@ def _signal(pids: Iterable[int], number: int) -> None:
 
 __all__ = [
     "CONFINE_SCRIPT",
+    "MARKER",
     "GRACE_SECONDS",
     "TAIL_BYTES",
     "TIMED_OUT",
     "LocalAgentSandbox",
     "LocalProcess",
     "read_tail",
-    "session_pids",
+    "marked_pids",
 ]
