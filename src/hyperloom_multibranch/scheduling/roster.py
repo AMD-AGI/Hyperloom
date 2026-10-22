@@ -122,9 +122,10 @@ class BranchEntry:
 
 
 def specialist_open(entries: Iterable[BranchEntry]) -> bool:
-    """Whether a specialist branch among ``entries`` is admitted or running."""
+    """Whether a branch among ``entries`` whose specialist the judge steers is admitted or running; an agent's branch
+    searches by its own logic, so it does not stand for the session's specialists."""
 
-    return any(entry.counts_toward_cap for entry in entries)
+    return any(entry.counts_toward_cap and entry.origin.steered_by_judge for entry in entries)
 
 
 @dataclass(frozen=True)

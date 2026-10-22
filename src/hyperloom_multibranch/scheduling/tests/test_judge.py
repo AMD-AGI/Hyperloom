@@ -54,6 +54,7 @@ from hyperloom_multibranch.scheduling.roster import (
     BranchStop,
     RosterCaps,
     StopCause,
+    specialist_open,
 )
 from hyperloom_multibranch.scheduling.similarity import SimilarBranch
 from hyperloom_multibranch.scheduling.widening import WideningSignals
@@ -664,6 +665,15 @@ def test_the_opening_call_opens_none_by_default_once_user_branches_opened() -> N
 
     assert cap_decision(JudgeDecision(open_count=0), view).open_count == 0
     assert cap_decision(JudgeDecision(open_count=2), view).open_count == 2
+
+
+def test_the_opening_call_opens_a_specialist_branch_when_only_an_agent_s_branch_opened() -> None:
+    roster = (_entry("b01", origin=BranchOrigin.AGENT),)
+    view = _view(opening=True, roster=roster, free_slots=1, held={"b01": HoldReason.UNSTEERED})
+
+    assert cap_decision(JudgeDecision(open_count=0), view).open_count == 1
+    assert not specialist_open(roster)
+    assert "an agent's branch does not count" in " ".join(JUDGE_SYSTEM_PROMPT.split())
 
 
 def _ended(
