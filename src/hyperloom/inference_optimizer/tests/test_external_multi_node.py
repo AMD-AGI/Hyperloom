@@ -259,7 +259,7 @@ def _adopt_rayjob(monkeypatch: pytest.MonkeyPatch) -> argparse.Namespace:
     monkeypatch.setenv("INFERENCE_OPTIMIZER_MN_BACKEND", "rayjob")
     monkeypatch.setattr(mncli, "cmd_bootstrap", lambda _ns: 0)
     monkeypatch.setattr(mncli, "install_geak_on_pods_best_effort", lambda: 0)
-    monkeypatch.setattr(mn, "_replay_kernel_patches_for_multi_node", lambda _a: None)
+    monkeypatch.setattr(mn, "_restore_kept_kernel_patches", lambda: None)
     return argparse.Namespace(nodes=2, mn_backend="rayjob", mn_image=None, model="/models/test", no_kernel=True)
 
 
@@ -997,7 +997,7 @@ def test_a_genuine_benchmark_only_handoff_still_proceeds(
         monkeypatch.delenv(f"HYPERLOOM_MN_EXT_{role}_IPS", raising=False)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_MN_BACKEND", "rayjob")
     monkeypatch.setattr(mncli, "install_geak_on_pods_best_effort", lambda: 0)
-    monkeypatch.setattr(mn, "_replay_kernel_patches_for_multi_node", lambda _a: None)
+    monkeypatch.setattr(mn, "_restore_kept_kernel_patches", lambda: None)
 
     args = argparse.Namespace(nodes=2, mn_backend="rayjob", model="/models/test", no_kernel=True)
     _prepare_multi_node_state(args)
@@ -1021,12 +1021,12 @@ def test_benchmark_only_rayjob_handoff_skips_bootstrap_instead_of_aborting(
     monkeypatch.setenv("INFERENCE_OPTIMIZER_MN_BACKEND", "rayjob")
     calls: list[str] = []
     monkeypatch.setattr(mncli, "install_geak_on_pods_best_effort", lambda: calls.append("geak") or 0)
-    monkeypatch.setattr(mn, "_replay_kernel_patches_for_multi_node", lambda _a: calls.append("replay"))
+    monkeypatch.setattr(mn, "_restore_kept_kernel_patches", lambda: calls.append("restore"))
 
     args = argparse.Namespace(nodes=2, mn_backend="rayjob", model="/models/test", no_kernel=False)
     _prepare_multi_node_state(args)
 
-    assert calls == ["geak", "replay"]
+    assert calls == ["geak", "restore"]
     assert "skipping the head-pod bootstrap" in capsys.readouterr().err
 
 
@@ -1058,7 +1058,7 @@ def test_kill_inference_invalidates_the_launch_it_terminated(
     assert after["last_restart_framework"] == "sglang"
 
 
-def test_adopting_a_rayjob_bootstraps_and_replays_patches(
+def test_adopting_a_rayjob_bootstraps_and_restores_kept_patches(
     _external_env: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1071,12 +1071,12 @@ def test_adopting_a_rayjob_bootstraps_and_replays_patches(
     calls: list[str] = []
     monkeypatch.setattr(mncli, "cmd_bootstrap", lambda _ns: calls.append("bootstrap") or 0)
     monkeypatch.setattr(mncli, "install_geak_on_pods_best_effort", lambda: calls.append("geak") or 0)
-    monkeypatch.setattr(mn, "_replay_kernel_patches_for_multi_node", lambda _a: calls.append("replay"))
+    monkeypatch.setattr(mn, "_restore_kept_kernel_patches", lambda: calls.append("restore"))
 
     args = argparse.Namespace(nodes=2, mn_backend="rayjob", model="/models/test", no_kernel=False)
     _prepare_multi_node_state(args)
 
-    assert calls == ["bootstrap", "geak", "replay"]
+    assert calls == ["bootstrap", "geak", "restore"]
 
 
 def test_adopting_an_infera_cluster_skips_bootstrap_but_installs_geak(
@@ -1090,12 +1090,12 @@ def test_adopting_an_infera_cluster_skips_bootstrap_but_installs_geak(
     calls: list[str] = []
     monkeypatch.setattr(mncli, "cmd_bootstrap", lambda _ns: calls.append("bootstrap") or 0)
     monkeypatch.setattr(mncli, "install_geak_on_pods_best_effort", lambda: calls.append("geak") or 0)
-    monkeypatch.setattr(mn, "_replay_kernel_patches_for_multi_node", lambda _a: calls.append("replay"))
+    monkeypatch.setattr(mn, "_restore_kept_kernel_patches", lambda: calls.append("restore"))
 
     args = argparse.Namespace(nodes=2, mn_backend="infera", model="/models/test", no_kernel=False)
     _prepare_multi_node_state(args)
 
-    assert calls == ["geak", "replay"]
+    assert calls == ["geak", "restore"]
 
 
 def test_adopting_with_no_kernel_skips_the_geak_install(
@@ -1108,12 +1108,12 @@ def test_adopting_with_no_kernel_skips_the_geak_install(
 
     calls: list[str] = []
     monkeypatch.setattr(mncli, "install_geak_on_pods_best_effort", lambda: calls.append("geak") or 0)
-    monkeypatch.setattr(mn, "_replay_kernel_patches_for_multi_node", lambda _a: calls.append("replay"))
+    monkeypatch.setattr(mn, "_restore_kept_kernel_patches", lambda: calls.append("restore"))
 
     args = argparse.Namespace(nodes=2, mn_backend="infera", model="/models/test", no_kernel=True)
     _prepare_multi_node_state(args)
 
-    assert calls == ["replay"]
+    assert calls == ["restore"]
 
 
 def test_missing_handoff_exits_config_error_not_transient(

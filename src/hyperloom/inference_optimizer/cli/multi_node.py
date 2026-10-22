@@ -1,17 +1,14 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Multi-node helpers for the ``optimize`` CLI: cluster adoption, backend resolution, kernel-patch replay."""
+"""Multi-node helpers for the ``optimize`` CLI: cluster adoption, backend resolution, kept-kernel-patch restore."""
 
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import os
-import subprocess
 import sys
-from pathlib import Path
 
 from ..session.paths import (
     session_dir as _session_dir_resolve,
@@ -157,82 +154,25 @@ def _prepare_adopted_cluster(args: argparse.Namespace, backend: str, *, head_ip:
     if not getattr(args, "no_kernel", False):
         install_geak_on_pods_best_effort()
 
-    _replay_kernel_patches_for_multi_node(args)
+    _restore_kept_kernel_patches()
 
 
-def _replay_kernel_patches_for_multi_node(args: argparse.Namespace) -> None:
-    """Replay every applied kernel-agent patch (manifest status=applied + multinode block) onto RayJob pods."""
-    nodes = max(1, int(getattr(args, "nodes", 1) or 1))
-    if nodes < 2:
+def _restore_kept_kernel_patches() -> None:
+    """Put the session's kept kernel patches on the adopted pods before anything measures them."""
+    from hyperloom.orchestrator.kernel.kept_patch_restore import KeptPatchRestoreError, restore_kept_patches_on_pods
+
+    from ..multi_node._internal.external_state import external_has_server_control
+    from ..session.session_paths import kernel_patch_backup_roots
+
+    if not external_has_server_control():
+        print(
+            "multi-node: no server control -- skipping the kept kernel patch restore, since no restart would load it.",
+            file=sys.stderr,
+        )
         return
-    workspace_root = _session_dir_resolve() / "kernel-agent-workspace"
-    manifests: list[Path] = sorted(workspace_root.rglob("manifest.json"))
-
-    replayed = 0
-    skipped = 0
-    failed = 0
-    for mpath in manifests:
-        try:
-            data = json.loads(mpath.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            print(
-                f"WARN multi-node patch replay: skipping unreadable manifest {mpath}: {exc}",
-                file=sys.stderr,
-            )
-            skipped += 1
-            continue
-        if str(data.get("status", "")).lower() != "applied":
-            continue
-        mn = data.get("multinode") or {}
-        if not mn:
-            continue
-        target_file = data.get("target_file") or ""
-        patch_path = data.get("patch_path") or ""
-        kernel_id = data.get("kernel_id") or ""
-        backup_dir_on_pod = mn.get("backup_dir_on_pod") or "/var/kernel_patch_backups"
-        if not target_file or not patch_path:
-            skipped += 1
-            continue
-        if not Path(patch_path).is_file():
-            print(
-                f"WARN multi-node patch replay: source patch missing for "
-                f"{target_file} (manifest={mpath} patch_path={patch_path}); "
-                f"skipping",
-                file=sys.stderr,
-            )
-            skipped += 1
-            continue
-        cmd = [
-            sys.executable,
-            "-m",
-            "hyperloom",
-            "multi-node",
-            "apply-patch",
-            "--patch-file",
-            str(patch_path),
-            "--target-path",
-            str(target_file),
-            "--backup-dir",
-            str(backup_dir_on_pod),
-            "--kernel-id",
-            str(kernel_id),
-        ]
-        print(
-            f"multi-node patch replay: target={target_file} kernel_id={kernel_id!r} (from {mpath})",
-        )
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-        if proc.returncode != 0:
-            failed += 1
-            print(
-                f"WARN multi-node patch replay failed for {target_file} "
-                f"rc={proc.returncode} stderr={(proc.stderr or '')[-1000:]!r}",
-                file=sys.stderr,
-            )
-            continue
-        replayed += 1
-    if replayed or failed or skipped:
-        print(
-            f"multi-node patch replay: applied={replayed} "
-            f"skipped={skipped} failed={failed} "
-            f"(scanned {len(manifests)} manifest(s) under {workspace_root})"
-        )
+    try:
+        restored = restore_kept_patches_on_pods(kernel_patch_backup_roots(_session_dir_resolve()))
+    except KeptPatchRestoreError as exc:
+        print(f"ERROR: {exc}; the pods would serve without this session's kept kernel patches.", file=sys.stderr)
+        sys.exit(1)
+    print(f"multi-node: restored {len(restored)} kept kernel file(s) on the pods")
