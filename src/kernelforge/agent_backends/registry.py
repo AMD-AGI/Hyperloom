@@ -25,9 +25,9 @@ from kernelforge.agent_backends.base import (
 
 log = logging.getLogger(__name__)
 
-# Keeps a package-style prefix even though this module now lives in ``kernelforge.llm``: the group name is the
-# published contract third-party providers register against, and renaming it would drop every existing plugin without
-# a word -- a plugin that fails to load is recorded as one log line, not raised.
+# Keeps a package-style prefix: the group name is the published contract third-party providers register against, and
+# renaming it would drop every existing plugin without a word -- a plugin that fails to load is recorded as one log
+# line, not raised.
 PROVIDER_ENTRY_POINT_GROUP = "kernelforge.agent_providers"
 _PROVIDER_NAME = re.compile(r"^[a-z][a-z0-9_-]*$")
 

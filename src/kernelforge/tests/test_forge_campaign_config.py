@@ -23,7 +23,7 @@ from kernelforge.loop.campaign_config import (
     validate_pending_campaign_head,
 )
 from kernelforge.loop.agent_relay import AgentProfileSpec, AgentRelayPolicy
-from kernelforge.llm.git import GitError
+from kernelforge.tools.git import GitError
 
 
 def _git_workspace(tmp_path, name="workspace"):

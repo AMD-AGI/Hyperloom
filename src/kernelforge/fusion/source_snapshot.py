@@ -13,7 +13,7 @@ import time
 from pathlib import Path
 from typing import Sequence
 
-from kernelforge.llm.git import git
+from kernelforge.tools.git import git
 
 from .emit import _git_tracks, _is_fused_module_name
 

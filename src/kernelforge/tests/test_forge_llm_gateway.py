@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from hyperloom.common.llm_headers import expand_env_refs, format_custom_headers, parse_custom_headers
-from kernelforge.llm import (
+from kernelforge.agent_backends.gateway import (
     LlmGateway,
     normalize_anthropic_base_url,
     resolve_anthropic_gateway,
