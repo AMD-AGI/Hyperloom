@@ -29,9 +29,7 @@ def test_inferasim_is_not_a_benchmark_backend(monkeypatch):
     assert bb.resolve_backend_name() == "magpie"
 
 
-def test_spec_from_benchmark_parses_envs(monkeypatch):
-    monkeypatch.delenv(ib.ENV_EP, raising=False)
-    monkeypatch.delenv(ib.ENV_PP, raising=False)
+def test_spec_from_benchmark_parses_envs():
     bench = {
         "framework": "vllm",
         "model": "/models/Qwen-Qwen3-14B",
@@ -47,8 +45,7 @@ def test_spec_from_benchmark_parses_envs(monkeypatch):
     assert spec.weight_dtype == "fp8"
 
 
-def test_spec_parses_ep_from_server_args(monkeypatch):
-    monkeypatch.delenv(ib.ENV_EP, raising=False)
+def test_spec_parses_ep_from_server_args():
     bench = {
         "framework": "sglang",
         "model": "/models/gpt-oss-120b",
@@ -68,14 +65,13 @@ def test_spec_parses_ep_from_server_args(monkeypatch):
         ("--foo 1", "bf16"),  # absent
     ],
 )
-def test_spec_parses_kv_cache_dtype_from_server_args(monkeypatch, flag, expected):
+def test_spec_parses_kv_cache_dtype_from_server_args(flag, expected):
     """An explore grid changes the KV dtype by passing this flag and nothing else.
 
     The projection prices KV dtype perfectly well, so dropping the flag made a
     lever the model *can* see look like one it cannot, and scored an fp8
     candidate as bf16 -- a candidate whose whole point is halving KV traffic.
     """
-    monkeypatch.delenv(ib.ENV_KV_DTYPE, raising=False)
     spec = ib.spec_from_benchmark(
         {
             "framework": "vllm",
@@ -84,18 +80,6 @@ def test_spec_parses_kv_cache_dtype_from_server_args(monkeypatch, flag, expected
         }
     )
     assert spec.kv_cache_dtype == expected
-
-
-def test_kv_dtype_env_overrides_the_server_arg(monkeypatch):
-    monkeypatch.setenv(ib.ENV_KV_DTYPE, "bf16")
-    spec = ib.spec_from_benchmark(
-        {
-            "framework": "vllm",
-            "model": "/models/gpt-oss-120b",
-            "envs": {"TP": 8, "EXTRA_VLLM_ARGS": "--kv-cache-dtype fp8_e4m3"},
-        }
-    )
-    assert spec.kv_cache_dtype == "bf16"
 
 
 def test_max_num_seqs_caps_the_running_batch(monkeypatch):
@@ -421,7 +405,6 @@ def test_ambient_env_is_ignored_when_asked(monkeypatch):
     """Comparing two materialized configs must not let an exported CONC flatten them."""
     monkeypatch.setenv("CONC", "8")
     monkeypatch.setenv("TP", "1")
-    monkeypatch.setenv(ib.ENV_KV_DTYPE, "bf16")
     bench = {
         "framework": "vllm",
         "model": "/models/gpt-oss-120b",
@@ -429,7 +412,7 @@ def test_ambient_env_is_ignored_when_asked(monkeypatch):
     }
     ambient = ib.spec_from_benchmark(bench)
     alone = ib.spec_from_benchmark(bench, ambient=False)
-    assert (ambient.tp, ambient.conc, ambient.kv_cache_dtype) == (1, 8, "bf16")
+    assert (ambient.tp, ambient.conc) == (1, 8)
     assert (alone.tp, alone.conc, alone.kv_cache_dtype) == (8, 128, "fp8")
 
 

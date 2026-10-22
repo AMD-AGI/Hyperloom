@@ -75,9 +75,6 @@ ENV_WORKLOAD = "HYPERLOOM_INFERASIM_WORKLOAD"  # explicit InferaSim workload YAM
 ENV_MODEL = "HYPERLOOM_INFERASIM_MODEL"  # InferaSim model preset name (e.g. gpt_oss_120B)
 ENV_GPU_ARCH = "HYPERLOOM_INFERASIM_GPU_ARCH"  # part to price when the session GPU is unknown
 ENV_HBM_GB = "HYPERLOOM_INFERASIM_HBM_GB"  # per-GPU HBM capacity, GB
-ENV_EP = "HYPERLOOM_INFERASIM_EP"  # expert parallelism override
-ENV_PP = "HYPERLOOM_INFERASIM_PP"  # pipeline parallelism override
-ENV_KV_DTYPE = "HYPERLOOM_INFERASIM_KV_DTYPE"  # kv-cache dtype override
 ENV_ANCHOR = "HYPERLOOM_INFERASIM_ANCHOR"  # single GPU anchor JSON (calibration)
 ENV_ANCHOR_SCALING = "HYPERLOOM_INFERASIM_ANCHOR_SCALING"  # comma-sep TP-scaling anchors
 ENV_ANCHOR_STORE = "HYPERLOOM_INFERASIM_ANCHOR_STORE"  # dir of warmup anchors (auto-select)
@@ -376,8 +373,7 @@ def _parse_server_arg_int(server_args: str, *flags: str) -> int:
 def spec_from_benchmark(bench: dict, *, ambient: bool = True) -> ServingSpec:
     """Extract a :class:`ServingSpec` from a Magpie ``benchmark`` block.
 
-    ``ambient=False`` reads the block alone: no process env and no
-    ``HYPERLOOM_INFERASIM_*`` overrides. That is what a caller comparing two
+    ``ambient=False`` reads the block alone, without the process env. That is what a caller comparing two
     materialized configs needs, since an exported ``CONC`` would otherwise
     project every variant at the same concurrency.
     """
@@ -398,21 +394,16 @@ def spec_from_benchmark(bench: dict, *, ambient: bool = True) -> ServingSpec:
     extra_args = str(_first_env_or(envs, server_args_env_name(framework), "", ambient=ambient))
 
     tp = _as_int(_first_env_or(envs, "TP", 1, ambient=ambient), 1)
-    # EP/PP: explicit bridge env, else parse from server args, else 1.
-    ep = (
-        _as_int(override(ENV_EP), 0)
-        or _parse_server_arg_int(extra_args, "--ep-size", "--expert-parallel-size", "--moe-ep-size")
-        or 1
-    )
-    pp = _as_int(override(ENV_PP), 0) or _parse_server_arg_int(extra_args, "--pp-size", "--pipeline-parallel-size") or 1
+    # EP/PP: from the server args, else 1.
+    ep = _parse_server_arg_int(extra_args, "--ep-size", "--expert-parallel-size", "--moe-ep-size") or 1
+    pp = _parse_server_arg_int(extra_args, "--pp-size", "--pipeline-parallel-size") or 1
 
     weight_dtype = _precision_to_weight_dtype(str(bench.get("precision") or DTYPE_BF16))
-    # KV dtype: explicit bridge env wins, else the server arg the variant sets,
-    # else bf16. Reading the arg matters because an explore grid changes the KV
+    # KV dtype: the server arg the variant sets, else bf16. Reading the arg matters because an explore grid changes the KV
     # dtype by passing this flag and nothing else -- and the projection prices KV
     # dtype perfectly well, so ignoring the flag made a lever the model *can*
     # see look like one it cannot, and projected an fp8 candidate as bf16.
-    kv_dtype = str(override(ENV_KV_DTYPE) or _parse_kv_cache_dtype(extra_args) or DTYPE_BF16).lower()
+    kv_dtype = str(_parse_kv_cache_dtype(extra_args) or DTYPE_BF16).lower()
 
     conc = max(1, _as_int(_first_env_or(envs, "CONC", _DEFAULT_CONC, ambient=ambient), _DEFAULT_CONC))
     # A running batch cannot exceed the scheduler's cap on concurrent sequences,
