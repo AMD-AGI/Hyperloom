@@ -28,7 +28,7 @@ from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, W
 from hyperloom_multibranch.contracts.toolbox import RequestRejected
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.codec import encode
-from hyperloom_multibranch.notebook.knowledge.warm_start import RecipeDownloader
+from hyperloom_multibranch.notebook.knowledge.warm_start import RecipeDownloader, ReplayRefusal
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
 from hyperloom_multibranch.scheduling.budget import HardStop, SessionBudget
 from hyperloom_multibranch.scheduling.clock import Clock
@@ -38,7 +38,9 @@ from hyperloom_multibranch.scheduling.decisions import DecisionLog
 from hyperloom_multibranch.scheduling.forks import ForkDesk
 from hyperloom_multibranch.scheduling.layout import SessionLayout, create_session
 from hyperloom_multibranch.rulegate.service import BASELINE_TESTS, GateService
+from hyperloom_multibranch.scheduling import prelude as prelude_module
 from hyperloom_multibranch.scheduling.prelude import (
+    PREFLIGHT_OUT_OF_TIME,
     Prelude,
     PreludeFailed,
     PreludeResult,
@@ -404,9 +406,49 @@ async def test_the_recipe_kb_champions_for_the_profile_become_warm_start_leads_p
         12.0,
     )
     assert kb.searched[0]["match"]["hardware"] == result.profile.hardware
-    assert lead.replay is not None and lead.replay.recipe is None
+    assert lead.replay is not None and lead.replay.recipe is None and lead.refusal is None
     assert lead.replay.launch.server_args == "--enable-expert-parallel"
     assert result.champion is lead.replay
+    assert _warm_start_decision(layout) == {"leads": [lead.describe()], "unread": ""}
+
+
+async def test_a_replay_acceptance_refuses_on_the_root_stays_a_lead_named_not_replayable(tmp_path: Path) -> None:
+    layout = _layout(tmp_path)
+    budget = SessionBudget.from_hours(2.0, NOW)
+    peers = _peers(layout)
+    tuning = RequestRejected("TunableOp tunes online", "online_tuning_unsupported")
+    peers.toolbox.reject_if(lambda request: tuning if request.delta.config.server_args else None)
+
+    prelude = _prelude(layout, _registry(layout, child_with_patch(tmp_path)), peers, recipe_kb=OneChampionKB())
+    result = await prelude.root(WORKLOAD, budget, HardStop(budget, _clock()), IMAGE)
+
+    [lead] = result.warm_leads
+    assert (lead.replay, lead.refusal) == (
+        None,
+        ReplayRefusal("online_tuning_unsupported", "TunableOp tunes online"),
+    )
+    assert lead.describe().endswith("; not replayable here: online_tuning_unsupported (TunableOp tunes online)")
+    assert _warm_start_decision(layout) == {"leads": [lead.describe()], "unread": ""}
+
+
+async def test_a_replay_acceptance_has_not_answered_for_in_preludes_time_stays_offered_marked_not_checked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    layout = _layout(tmp_path)
+    budget = SessionBudget.from_hours(2.0, NOW)
+    peers = _peers(layout)
+
+    async def unanswered(request: object) -> None:
+        await asyncio.sleep(60)
+
+    monkeypatch.setattr(peers.toolbox, "check_test", unanswered)
+    monkeypatch.setattr(prelude_module, "PREFLIGHT_SECONDS", 0.01)
+    prelude = _prelude(layout, _registry(layout, child_with_patch(tmp_path)), peers, recipe_kb=OneChampionKB())
+    result = await prelude.root(WORKLOAD, budget, HardStop(budget, _clock()), IMAGE)
+
+    [lead] = result.warm_leads
+    assert (lead.refusal, lead.unchecked) == (None, PREFLIGHT_OUT_OF_TIME) and lead.replay is not None
+    assert lead.describe().endswith(f"; not checked against acceptance: {PREFLIGHT_OUT_OF_TIME}")
     assert _warm_start_decision(layout) == {"leads": [lead.describe()], "unread": ""}
 
 

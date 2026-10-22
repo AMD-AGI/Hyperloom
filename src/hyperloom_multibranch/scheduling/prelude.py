@@ -12,10 +12,13 @@ Recipe KB's champions for that profile are read as warm-start leads for the
 specialists, the best of them prepared for replay on the root's image and offered to the integrator as the session's
 champion, which EXPLORE opens on when it beats the baseline; their files are in the session's blob store; no
 Recipe KB, or none of its champions in this session's scope, gives none, and a KB that cannot be read is recorded and
-gives none either. The baseline every recorded value is anchored to is measured through the toolbox in a
-second step, once the caller has put the integration branch on the roster and given the toolbox its K: as many tests
-of the root as the rule gate asks for, from which the gate writes the baseline and its bar. The longest of those
-tests, start to finish, is how long one test of this workload takes; FINAL's reserve is never shorter.
+gives none either. Each replay is checked against the toolbox's acceptance on the root, queueing nothing: one it refuses
+stays a lead with the refusal named in place of the replay, and one acceptance has not answered for when
+:data:`PREFLIGHT_SECONDS` run out stays offered, its lead saying it was not checked. The baseline every recorded value
+is anchored to is measured through the toolbox in a second step, once the caller has put the integration branch on the
+roster and given the toolbox its K: as many tests of the root as the rule gate asks for, from which the gate writes the
+baseline and its bar. The longest of those tests, start to finish, is how long one test of this workload takes;
+FINAL's reserve is never shorter.
 
 Right after the root is committed, the toolbox is asked for the TraceLens report of the child's latest roofline
 profile, so the root has operator shares in the notebook; PRELUDE does not wait for it, and a child without a profile
@@ -58,6 +61,7 @@ from hyperloom_multibranch.contracts.toolbox import RequestRejected
 from hyperloom_multibranch.notebook.knowledge.warm_start import (
     PreparedReplay,
     RecipeDownloader,
+    ReplayRefusal,
     ReplayTarget,
     WarmLead,
     replay_leads,
@@ -102,6 +106,10 @@ PRELUDE_BRANCH = "prelude"
 #: A cancelled PRELUDE gives it at most this, and never more than half the time left before the hard stop, so CLOSE
 #: keeps the other half.
 PRELUDE_TERMINATE_GRACE_SECONDS = 120.0
+#: How long PRELUDE spends checking the warm-start replays against acceptance, all of them together.
+PREFLIGHT_SECONDS = 120.0
+#: Why a lead was not checked: acceptance had not answered for its replay when :data:`PREFLIGHT_SECONDS` ran out.
+PREFLIGHT_OUT_OF_TIME = "PRELUDE's time for the check ran out"
 BASELINE_REFUSED = "another baseline test was refused"
 #: ``--reuse-prelude`` finds an earlier session's root by this reason and reads its ``child_session`` back.
 ROOT_COMMITTED = "root committed"
@@ -301,7 +309,7 @@ class Prelude:
             )
         )
         await self._start_root_profile(root, artifacts.profile)
-        return PreludeResult(root, profile, await self._warm_start(profile, recipe), child_gpu_seconds)
+        return PreludeResult(root, profile, await self._warm_start(profile, recipe, root), child_gpu_seconds)
 
     async def _start_root_profile(self, root: str, profile: ChildProfile | None) -> None:
         """Start the toolbox's TraceLens report of the child's ``profile`` for the ``root`` commit, without waiting for
@@ -337,9 +345,9 @@ class Prelude:
         point_config = shutil.copy2(profile.point_config, target / profile.point_config.name)
         return replace(profile, trace_dir=Path(trace_dir), point_config=Path(point_config))
 
-    async def _warm_start(self, profile: SessionProfile, root: Recipe) -> tuple[WarmLead, ...]:
-        """The Recipe KB's leads for ``profile``, the best prepared for replay on ``root``; the ``PRELUDE`` decision
-        names them, or why the KB was not read."""
+    async def _warm_start(self, profile: SessionProfile, root: Recipe, root_commit: str) -> tuple[WarmLead, ...]:
+        """The Recipe KB's leads for ``profile``, the best prepared for replay on ``root`` and checked against the
+        toolbox's acceptance on ``root_commit``; the ``PRELUDE`` decision names them, or why the KB was not read."""
 
         source = self._warm_start_source
         leads: tuple[WarmLead, ...] = ()
@@ -351,9 +359,30 @@ class Prelude:
                 leads = await asyncio.to_thread(replay_leads, source.recipe_kb, profile, found, target)
             except KBStoreError as exc:
                 unread = f"{type(exc).__name__}: {exc}"
+        leads = await self._preflight(leads, root, root_commit)
         detail = {"leads": [lead.describe() for lead in leads], "unread": unread}
         self._decisions.record(Decision(DecisionKind.PRELUDE, "warm start read", INTEGRATION_BRANCH, detail))
         return leads
+
+    async def _preflight(self, leads: tuple[WarmLead, ...], root: Recipe, root_commit: str) -> tuple[WarmLead, ...]:
+        """``leads``, each replay checked against the toolbox's acceptance on ``root_commit`` within
+        :data:`PREFLIGHT_SECONDS` in all: a refusal goes on its lead, and a replay acceptance has not answered for by
+        then stays offered, its lead saying it was not checked. The check measures nothing, so it spends no GPU."""
+
+        deadline = self._clock.now() + PREFLIGHT_SECONDS
+        checked: list[WarmLead] = []
+        for lead in leads:
+            replay = lead.replay.on(root, root_commit) if lead.replay is not None else None
+            if replay is not None:
+                request = integration_test_request(TestKind.TEST, Purpose.INTEGRATION, root_commit, replay.delta)
+                try:
+                    await asyncio.wait_for(self._toolbox.check_test(request), max(0.0, deadline - self._clock.now()))
+                except RequestRejected as refused:
+                    lead = replace(lead, replay=None, refusal=ReplayRefusal(refused.code, refused.reason))
+                except asyncio.TimeoutError:
+                    lead = replace(lead, unchecked=PREFLIGHT_OUT_OF_TIME)
+            checked.append(lead)
+        return tuple(checked)
 
     async def _run_child(self, workload: Workload, budget: SessionBudget, hard_stop: HardStop) -> Path:
         try:
