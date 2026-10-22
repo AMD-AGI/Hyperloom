@@ -50,6 +50,10 @@ class LaneResult:
     diff: str = ""
     error: str = ""
     agent_profile_id: str = ""
+    # Taken while the lane copy still exists. The round deletes that copy on
+    # return, so the measuring iteration and a later process read this text
+    # from the queue rather than resuming the session.
+    lesson: str = ""
     # What this lane's teardown found, carried structured rather than folded
     # into ``error``. The two say different things to different readers: the
     # error is why THIS lane produced nothing, which costs the round one
@@ -67,6 +71,27 @@ class LaneResult:
     def contended(self) -> bool:
         """Whether this lane's teardown left the device unsafe to measure on."""
         return self.reaped is not None and self.reaped.contended
+
+    def to_dict(self) -> dict:
+        """The queue record: what a later process needs in order to measure this candidate."""
+        return {
+            "lane_id": self.lane_id,
+            "plan": self.plan,
+            "diff": self.diff,
+            "agent_profile_id": self.agent_profile_id,
+            "lesson": self.lesson,
+        }
+
+    @classmethod
+    def from_dict(cls, entry: dict) -> "LaneResult":
+        """One queued candidate. A record written before lessons were carried restores with none."""
+        return cls(
+            lane_id=str(entry["lane_id"]),
+            plan=str(entry["plan"]),
+            diff=str(entry["diff"]),
+            agent_profile_id=str(entry.get("agent_profile_id") or ""),
+            lesson=str(entry.get("lesson") or ""),
+        )
 
 
 _SERIALIZED_DRIVER = '''\
@@ -273,7 +298,7 @@ async def run_lanes(
     *,
     workspace_dir: str,
     lanes: Sequence[LanePlan],
-    session: Callable[[LanePlan, Path, Path], Awaitable[None]],
+    session: Callable[[LanePlan, Path, Path], Awaitable[str]],
     parent_dir: str,
     driver: str,
 ) -> list[LaneResult]:
@@ -309,9 +334,10 @@ async def run_lanes(
             # has to survive a lane that failed for a reason of its own -- and a session that raised is exactly the
             # lane most likely to have left something running.
             reaped: ReapReport | None = None
+            lesson = ""
             try:
                 try:
-                    await session(lane, lane_dir, serialized_driver)
+                    lesson = await session(lane, lane_dir, serialized_driver)
                 finally:
                     reaped = await _reap_lane_processes(lane_dir)
                 # Outside the guard above on purpose: a lane whose session already failed has to report why it failed,
@@ -336,6 +362,7 @@ async def run_lanes(
                 lane_id=lane.lane_id,
                 plan=lane.plan,
                 diff=diff,
+                lesson=lesson or "",
                 reaped=reaped,
             )
 

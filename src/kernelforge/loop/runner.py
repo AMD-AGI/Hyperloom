@@ -46,6 +46,7 @@ from kernelforge.loop.lessons import (
     PrReferenceNote,
     SessionEnd,
     SessionObservations,
+    SummaryOutcome,
     build_fallback_document,
     cases_named_in,
     format_outcome_line,
@@ -842,9 +843,6 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         self._last_critic_verdict = ""
         self._last_critic_review = ""
         self.monitor = None
-        # The lesson turn's resume callback, keyed by the queued candidate. lane_queue.json cannot hold it: a process
-        # that restores the queue has no session to resume, and its lesson is the machine fallback.
-        self._lane_sessions: dict[LaneResult, dict] = {}
 
     def _expire_supervisor_ruling(self) -> None:
         """Stop injecting a ruling after its stall episode ends."""
@@ -1940,7 +1938,6 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             )
         except (OSError, RuntimeError) as error:
             self._lane_queue = []
-            self._lane_sessions.clear()
             print(f"  [lanes] fan-out unavailable ({error}); falling back")
         # A recovered round that could not even republish holds nothing, and nothing was spent on it: that iteration
         # plans for itself as usual.
@@ -1949,23 +1946,25 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
     async def _fill_lane_queue(self, *, iteration: int = 0, agent_factory, lane_plans) -> None:
         """Run this round's lane sessions concurrently and queue what they wrote."""
         kernel_relative = self._workspace_path(self.ic.kernel_file)
-        sinks: dict[str, dict] = {}
 
         async def _session(
             lane: LanePlan,
             lane_dir: Path,
             serialized_driver: Path,
-        ) -> None:
+        ) -> str:
             # The session edits the lane's own copy, so it is handed that copy's kernel rather than the canonical one.
-            # The sink is how the lesson turn resumes this session once the iteration measures the lane.
+            # The record turn resumes that session now: the round deletes this copy as soon as it returns.
             sink: dict = {}
-            sinks[lane.lane_id] = sink
             call = agent_factory(str(lane_dir), str(serialized_driver))
             await call(
                 str(lane_dir / kernel_relative),
                 _lane_prompt(lane.plan, serialized_driver=serialized_driver),
                 **declared_extras(call, {"session_sink": sink}),
             )
+            lesson = await self._request_lesson(iteration, sink.get("end_reason", ""), sink.get("summarize"))
+            if not lesson:
+                print(f"  [lane {lane.lane_id}] no lesson from its session ({lesson.reason})")
+            return lesson.text
 
         results = await run_lanes(
             workspace_dir=self.ic.workspace_dir,
@@ -1979,7 +1978,10 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         for result in results:
             if result.error:
                 print(f"  [lane {result.lane_id}] session lost: {result.error}")
-        self._queue_produced_lanes(results, sinks)
+        active_profile_id = self.run_state.agent_relay.active_profile_id
+        self._lane_queue = [
+            replace(item, agent_profile_id=active_profile_id) for item in results if item.produced_candidate
+        ]
         print(f"  [lanes] {len(self._lane_queue)} of {len(results)} lanes produced a candidate")
         self._persist_lane_queue()
         # The device is not per-lane.
@@ -2042,42 +2044,6 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             return "it changes the measurement surface: " + ", ".join(protected)
         return ""
 
-    def _queue_produced_lanes(self, results: list[LaneResult], sinks: dict[str, dict]) -> None:
-        """Queue the candidates a round produced, remembering each session until its iteration measures it."""
-        active_profile_id = self.run_state.agent_relay.active_profile_id
-        queued: list[LaneResult] = []
-        sessions: dict[LaneResult, dict] = {}
-        for item in results:
-            if not item.produced_candidate:
-                continue
-            queued_item = replace(item, agent_profile_id=active_profile_id)
-            sink = sinks.get(item.lane_id)
-            if sink is not None:
-                sessions[queued_item] = sink
-            queued.append(queued_item)
-        self._lane_queue = queued
-        self._lane_sessions = sessions
-
-    def _drop_lane_session(self, lane: LaneResult) -> None:
-        """Forget a queued session that will not be measured."""
-        self._lane_sessions.pop(lane, None)
-
-    def _adopt_lane_session(self, session_sink: dict, lane: LaneResult) -> None:
-        """Copy the lane session's lesson inputs onto the iteration that measures it.
-
-        The resume callback stays in this dict. ``lane_queue.json`` is what a later process reads, and that process
-        has no session to resume: its lesson is the machine fallback ``_record_lesson`` already writes.
-        """
-        remembered = self._lane_sessions.pop(lane, None)
-        if remembered:
-            for name in ("session_started", "summarize", "end_reason", "turns", "findings", "progress_log"):
-                if name in remembered:
-                    session_sink[name] = remembered[name]
-            return
-        # The queue was restored, or the session left no sink. There is no session to resume, so the lesson turn
-        # writes the machine fallback and that file is still the reasoning.
-        session_sink["session_started"] = True
-
     def _take_lane_candidate(self) -> LaneResult | None:
         """Apply the next queued lane candidate to the canonical tree."""
         try:
@@ -2090,11 +2056,9 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             lane = self._lane_queue.pop(0)
             rejection = self._lane_rejection(lane.diff)
             if rejection:
-                self._drop_lane_session(lane)
                 print(f"  [lane {lane.lane_id}] candidate rejected: {rejection}")
                 continue
             if not self._git_apply_patch(lane.diff):
-                self._drop_lane_session(lane)
                 self._git_discard_worktree()
                 print(f"  [lane {lane.lane_id}] candidate no longer applies; dropped")
                 continue
@@ -2104,7 +2068,6 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             except ValueError as error:
                 # Take the candidate back off the tree before anything else, so the next candidate does not inherit
                 # it.
-                self._drop_lane_session(lane)
                 self._git_discard_worktree()
                 self._validate_driver_integrity(self.run_state)
                 print(f"  [lane {lane.lane_id}] candidate rejected: {error}")
@@ -4026,6 +3989,22 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             disproof=parse_disproof_marker(document),
         )
 
+    async def _request_lesson(self, iteration: int, end_reason: str, summarizer) -> SummaryOutcome:
+        """Ask the session for its record while the campaign still has time for the turn."""
+        if self._time_remaining() < SUMMARY_MIN_SECONDS:
+            # Time to produce the summary, not the loop's session-admission reserve: a campaign that can no
+            # longer admit an implementer session is resumed later, and that session reads this document.
+            return SummaryOutcome(reason="insufficient campaign time to run summarizer")
+        try:
+            return await summarize_iteration(
+                iteration=iteration,
+                end_reason=end_reason,
+                summarizer=summarizer,
+                references=PrReferenceNote(self.ic.pr_reference_labels, self.ic.pr_reference_context),
+            )
+        finally:
+            self._checkpoint_llm_usage()
+
     async def _record_lesson(
         self,
         *,
@@ -4041,40 +4020,24 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             # No agent ran this iteration (e.g. the baseline measurement path): there is no exploration to record.
             return
 
-        has_narrative = False
-        # Narrated by the resumed session itself, as opposed to machine-written by the loop below.
-        agent_narrative = False
-        summary_failure = ""
-        if self._time_remaining() < SUMMARY_MIN_SECONDS:
-            # Gate on whether there is time to PRODUCE the summary, not on the loop's session-admission reserve: a
-            # campaign that runs out of room for another implementer session is resumed later, and that session reads
-            # this document.
-            print("  [lesson] too little time left — recording outcome only")
-            summary_failure = "insufficient campaign time to run summarizer"
+        # A lane's record was taken in its round. None means this iteration ran the session itself.
+        lane_lesson = session_sink.get("lesson")
+        if lane_lesson is None:
+            record = await self._request_lesson(iteration, result.session_end_reason, session_sink.get("summarize"))
+        elif lane_lesson:
+            record = SummaryOutcome(text=lane_lesson)
         else:
-            try:
-                outcome = await summarize_iteration(
-                    store=store,
-                    iteration=iteration,
-                    end_reason=result.session_end_reason,
-                    summarizer=session_sink.get("summarize"),
-                    references=PrReferenceNote(self.ic.pr_reference_labels, self.ic.pr_reference_context),
-                )
-                has_narrative = bool(outcome)
-                agent_narrative = has_narrative
-                if has_narrative:
-                    print(f"  [lesson] recorded iter {iteration}: {len(outcome.text)} chars")
-                else:
-                    summary_failure = outcome.reason
-                    print(
-                        f"  [lesson] no summary ({outcome.reason}) — falling back to machine-observed session progress"
-                    )
-            except Exception as error:
-                summary_failure = f"{type(error).__name__}: {str(error)[:200]}"
-                log.debug("lessons: summarizer step failed", exc_info=True)
-                print(f"  [lesson] summarizer step failed ({type(error).__name__}: {error}) — falling back")
-            finally:
-                self._checkpoint_llm_usage()
+            record = SummaryOutcome(reason="the lane's session gave no record in its round")
+        if record and store.write(iteration, record.text) is None:
+            record = SummaryOutcome(reason="failed to persist lesson document")
+        has_narrative = bool(record)
+        # Narrated by the resumed session itself, as opposed to machine-written by the loop below.
+        agent_narrative = has_narrative
+        summary_failure = "" if has_narrative else record.reason
+        if has_narrative:
+            print(f"  [lesson] recorded iter {iteration}: {len(record.text)} chars")
+        else:
+            print(f"  [lesson] no summary ({record.reason}) — falling back to machine-observed session progress")
 
         if not has_narrative:
             # No session could describe what was explored, but the gate's block reasons are a real record of what the
@@ -4558,20 +4521,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
                 path.unlink(missing_ok=True)
                 return
             path.parent.mkdir(parents=True, exist_ok=True)
-            atomic_write_json(
-                path,
-                {
-                    "candidates": [
-                        {
-                            "lane_id": lane.lane_id,
-                            "plan": lane.plan,
-                            "diff": lane.diff,
-                            "agent_profile_id": lane.agent_profile_id,
-                        }
-                        for lane in self._lane_queue
-                    ]
-                },
-            )
+            atomic_write_json(path, {"candidates": [lane.to_dict() for lane in self._lane_queue]})
         except OSError as error:
             print(
                 f"  [lanes] queue not durable ({error}); the "
@@ -4584,15 +4534,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         path = self._lane_queue_path()
         try:
             record = json.loads(path.read_text(encoding="utf-8"))
-            queued = [
-                LaneResult(
-                    lane_id=str(entry["lane_id"]),
-                    plan=str(entry["plan"]),
-                    diff=str(entry["diff"]),
-                    agent_profile_id=str(entry.get("agent_profile_id") or ""),
-                )
-                for entry in record["candidates"]
-            ]
+            queued = [LaneResult.from_dict(entry) for entry in record["candidates"]]
         except (OSError, ValueError, KeyError, TypeError):
             log.debug("no readable lane queue at %s", path)
             return
@@ -4600,8 +4542,6 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         if not queued:
             return
         self._lane_queue = queued
-        # The resumed objects are new. The process that ran the sessions is gone, so none of them has a callback.
-        self._lane_sessions.clear()
         print(f"  [lanes] resuming {len(queued)} candidate(s) an earlier round bought and never measured")
 
     def _lane_plan_manifest_path(self, iteration: int) -> Path:
@@ -5708,7 +5648,8 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             reusable_benchmark = None
             session_sink["plan"] = queued_lane.plan
             self._bind_session_producer(session_sink, queued_lane.agent_profile_id)
-            self._adopt_lane_session(session_sink, queued_lane)
+            session_sink["session_started"] = True
+            session_sink["lesson"] = queued_lane.lesson
             print(f"  [lane {queued_lane.lane_id}] measuring queued candidate")
         elif merge_diff and merge_pair is not None:
             unmeasured_result = None
@@ -6196,7 +6137,6 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         # Candidates from one concurrent fan-out, spent one per iteration so each is measured and judged on its own by
         # the ordinary decision path.
         self._lane_queue: list[LaneResult] = []
-        self._lane_sessions = {}
         self._last_lane_plans: list[str] = []
         # Stacked iterations run back to back so far.
         self._merge_precedence_streak = 0

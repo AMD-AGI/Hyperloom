@@ -679,47 +679,87 @@ async def test_a_lane_is_told_to_run_the_serialized_driver(tmp_path, monkeypatch
     assert [item.plan for item in loop._lane_queue] == ["tune the prefill epilogue"]
 
 
-async def test_each_lane_keeps_its_session_until_the_iteration_measures_it(tmp_path, monkeypatch):
-    """The resume callback stays in memory, keyed by the queued candidate, and out of lane_queue.json."""
-    loop, _workspace = _reduction_loop(tmp_path, monkeypatch)
-    sinks: list[dict] = []
+def test_a_lane_records_its_lesson_while_its_copy_still_exists(tmp_path, monkeypatch):
+    """The record turn resumes the real session inside the round.
 
-    def factory(lane_dir, _serialized_driver):
-        async def agent(_kernel_file, prompt, *, session_sink):
-            session_sink["session_started"] = True
-            session_sink["summarize"] = prompt
-            session_sink["end_reason"] = "agent_stopped"
-            session_sink["turns"] = 4
-            session_sink["findings"] = "widened the loads"
-            session_sink["progress_log"] = ["edited"]
-            sinks.append(session_sink)
-            path = Path(lane_dir) / "kernel.py"
-            path.write_text(path.read_text().replace("return 1", "return 2"))
+    Moving it to after ``run_lanes`` returns deletes the lane copy first, and
+    the guard then fails the resume before the session can answer.
+    """
+    from kernelforge.cli import lanes as cli_lanes
+    from kernelforge.config import Config
+    from kernelforge.orchestrator import agent as agent_module
+    from kernelforge.tests.test_claude_resume import _FakeOptions, _backend
 
-        return agent
+    loop, workspace = _make_loop(tmp_path, monkeypatch, session_count=2)
+    loop.ic = replace(loop.ic, lanes=2)
+    _stub_measurement(monkeypatch, [2.0, 2.0])
 
-    await loop._fill_lane_queue(
-        agent_factory=factory,
-        lane_plans=["tune the prefill epilogue", "tune the decode epilogue"],
+    def create_backend(_runtime, **_kwargs):
+        async def query(prompt, options):
+            cwd = Path(options.kwargs["cwd"])
+            lane = cwd.name
+            if options.kwargs.get("resume"):
+                text = f"lane {lane} widened the loads"
+            else:
+                kernel = cwd / "kernel.py"
+                kernel.write_text(kernel.read_text().replace("return 1", "return 2"))
+                text = "PLAN: widen the loads\nSUBMIT_CANDIDATE"
+            session_id = f"sess-{lane}"
+            yield SimpleNamespace(content=[], subtype="init", session_id=session_id)
+            yield SimpleNamespace(
+                content=[SimpleNamespace(text=text)],
+                total_cost_usd=0.0,
+                subtype="success",
+                num_turns=2,
+                session_id=session_id,
+            )
+
+        backend = _backend([], {})
+        backend._query = query
+        backend._options_type = _FakeOptions
+        return backend
+
+    monkeypatch.setattr(agent_module, "create_registered_backend", create_backend)
+    config = Config(workspace=str(workspace), agent_backend="claude", agent_model="claude-test", agent_precheck=False)
+    factory = cli_lanes._make_lane_agent_factory(
+        make_agent=agent_module.make_agent_fn,
+        config=config,
+        binding=cli_lanes.LaneBinding(
+            workspace_dir=str(workspace),
+            driver=str(workspace / "driver.py"),
+            source_files=[str(workspace / "kernel.py")],
+        ),
+        setup=agent_module.ImplementerSetup(
+            agent_module.ImplementerTask(program_md="Optimize the kernel."),
+            session=agent_module.SessionOptions(agent_backend="claude"),
+        ),
     )
 
-    assert len(sinks) == 2
-    assert set(loop._lane_sessions) == set(loop._lane_queue)
-    queued = json.loads(loop._lane_queue_path().read_text(encoding="utf-8"))
-    assert "summarize" not in json.dumps(queued)
-    first = loop._lane_queue[0]
-    iteration_sink: dict = {}
-    loop._adopt_lane_session(iteration_sink, first)
-    assert iteration_sink["session_started"] is True
-    assert first.plan in iteration_sink["summarize"]
-    assert iteration_sink["end_reason"] == "agent_stopped"
-    assert iteration_sink["turns"] == 4
-    assert iteration_sink["findings"] == "widened the loads"
-    assert iteration_sink["progress_log"] == ["edited"]
-    assert first not in loop._lane_sessions
-    again: dict = {}
-    loop._adopt_lane_session(again, first)
-    assert again == {"session_started": True}
+    async def _plan(*, iteration, lanes=1, **_kwargs):
+        loop._last_lane_plans = ["tune prefill", "tune decode"]
+        plan_path = workspace / "forge_experiments" / "orchestration" / f"iter_{iteration:03d}" / "optimization_plan.md"
+        plan_path.parent.mkdir(parents=True, exist_ok=True)
+        plan_path.write_text("# Optimization plan\ntune prefill\n")
+        return plan_path, ""
+
+    monkeypatch.setattr(loop, "_run_orchestration", _plan)
+    asyncio.run(
+        loop.run(
+            runner_module.LoopAgents(
+                agent_fn=_no_change_agent,
+                agent_factory=factory,
+                orchestration_service=object(),
+                supervisor_fn=_unused_supervisor,
+            )
+        )
+    )
+
+    lessons = workspace / "forge_experiments" / "lessons"
+    first = (lessons / "iter_001.md").read_text()
+    second = (lessons / "iter_002.md").read_text()
+    assert first.startswith("lane 1 widened the loads")
+    assert second.startswith("lane 2 widened the loads")
+    assert "(no agent summary)" not in first + second
 
 
 async def test_a_fan_out_round_queues_one_candidate_per_lane(tmp_path, monkeypatch):
@@ -6858,6 +6898,48 @@ def _attach_lessons(loop, workspace):
 
 async def _fake_summarizer(_prompt: str) -> str:
     return "tried three tile shapes\n- [worse] BLOCK_N 128 | 0.94x"
+
+
+def test_record_lesson_writes_a_carried_lane_lesson_without_asking(tmp_path, monkeypatch, capsys):
+    """The lane already answered, in its round. An empty answer is the machine fallback."""
+    loop, workspace = _make_loop(tmp_path, monkeypatch)
+    store = _attach_lessons(loop, workspace)
+    asked = {"n": 0}
+
+    async def counting(_prompt: str) -> str:
+        asked["n"] += 1
+        return "should not run"
+
+    asyncio.run(
+        loop._record_lesson(
+            iteration=3,
+            result=_lesson_result(),
+            decision="REVERT_PERF",
+            session_sink={
+                "session_started": True,
+                "summarize": counting,
+                "lesson": "lane 2 widened the loads",
+            },
+        )
+    )
+    asyncio.run(
+        loop._record_lesson(
+            iteration=4,
+            result=_lesson_result(iteration=4),
+            decision="REVERT_PERF",
+            session_sink={
+                "session_started": True,
+                "summarize": counting,
+                "lesson": "",
+                "findings": "compile error: invalid cast",
+            },
+        )
+    )
+
+    assert asked["n"] == 0
+    assert store.read(3).startswith("lane 2 widened the loads")
+    assert store.read(4).startswith("(no agent summary)")
+    assert "the lane's session gave no record in its round" in capsys.readouterr().out
 
 
 def test_record_lesson_writes_narrative_and_outcome(tmp_path, monkeypatch):

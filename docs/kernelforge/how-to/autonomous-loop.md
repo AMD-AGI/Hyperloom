@@ -152,9 +152,9 @@ does not write that takeaway. After the session ends, a separate lesson turn
 records what the session explored, including the directions it kept or dropped,
 on the lines `HELD-FIXED`, `NEGATIVES`, and `DISPROOF`. The loop then appends
 the scope and outcome lines. That file is `lessons/iter_NNN.md`, and it is the
-only reasoning record. A lane gets the same turn when the iteration that
-measures it still has the session; a process that only restored the lane queue
-has no session to resume, and the lesson is the machine fallback. When the loop
+only reasoning record. A lane takes that turn at the end of its round, while
+its copy of the workspace still exists, and `lane_queue.json` carries the record
+to whichever iteration measures the lane. When the loop
 starts it hides `forge_experiments/` from git with a `forge_experiments/.gitignore`
 holding `*`, so nothing written there is committed or rejected by the workspace
 guard as a new file, whatever the workspace itself ignores.
