@@ -80,7 +80,20 @@ logger = logging.getLogger(__name__)
 EXPLORE_TICK_SECONDS = 5.0
 OPEN_CUT_REASON = "branch slots taken"
 FORK_NOT_LANDED = "the rule gate did not land the fork"
-GAVE_UP_REASON = "its specialist gave up; the branch log says why"
+
+
+def gave_up_reason(status: SpecialistStatus) -> str:
+    """Why a branch whose specialist gave up is stopped, from the counts the runtime keeps: the crashes it gave up
+    after and how many of them lost their heartbeat, or no crash at all, which leaves the sessions that found nothing
+    to test as the only way it gives up.
+
+    The counts are reported rather than the limit they crossed, which is the runtime's own to name.
+    """
+
+    if not status.crashes:
+        return "its specialist gave up: its sessions in a row found nothing to test"
+    lost = f", {status.lost} of them with a lost heartbeat" if status.lost else ""
+    return f"its specialist gave up after {status.crashes} crashes{lost}"
 
 
 @dataclass(frozen=True)
@@ -235,7 +248,7 @@ class Explorer:
     async def _merge_forever(self) -> None:
         while True:
             width = self._roster.entry(INTEGRATION_BRANCH).k
-            reports = await self._integrator.integrate_next(width)
+            reports = await self._integrator.integrate_next(width, EXPLORE_TICK_SECONDS)
             self._events.note_merges(reports)
             if not reports:
                 await self._clock.sleep(EXPLORE_TICK_SECONDS)
@@ -348,14 +361,14 @@ class Explorer:
         stopped."""
 
         states = await self._specialist_states()
-        given_up = [branch for branch, state in states.items() if state.gave_up]
+        given_up = [(branch, state) for branch, state in states.items() if state.gave_up]
         if not given_up:
             return False
         held = await self._held(states)
         stopped = False
-        for branch in given_up:
+        for branch, state in given_up:
             if held.get(branch) is not HoldReason.PENDING_CONFIRM:
-                await self._stop(branch, GAVE_UP_REASON, StopCause.GAVE_UP)
+                await self._stop(branch, gave_up_reason(state), StopCause.GAVE_UP)
                 stopped = True
         return stopped
 
@@ -426,11 +439,11 @@ def _hours_or_none(seconds: float) -> float | None:
 __all__ = [
     "EXPLORE_TICK_SECONDS",
     "FORK_NOT_LANDED",
-    "GAVE_UP_REASON",
     "OPEN_CUT_REASON",
     "ExploreWindow",
     "Explorer",
     "Steering",
+    "gave_up_reason",
     "integration_row",
     "spent_gpu_seconds",
 ]

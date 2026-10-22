@@ -169,7 +169,7 @@ from hyperloom_multibranch.toolbox.attempts import TestJob
 from hyperloom_multibranch.toolbox.tools.base import JobStatus
 from hyperloom_multibranch.specialist.directions import DIRECTIONS
 from hyperloom_multibranch.specialist.prompts import prompt_versions
-from hyperloom_multibranch.specialist.runtime import SessionCrashed
+from hyperloom_multibranch.specialist.runtime import MAX_LOSS_RESTARTS, SessionCrashed
 
 START = 1_700_000_000.0
 CONC = 16
@@ -1610,6 +1610,8 @@ async def test_a_branch_whose_specialist_gave_up_is_stopped_before_the_next_judg
     roster = json.loads(stage.layout.roster.read_text())
     [b02] = [entry for entry in roster["entries"] if entry["branch"] == "b02"]
     assert b02["stop"]["cause"] == StopCause.GAVE_UP.value
+    lost = MAX_LOSS_RESTARTS + 1
+    assert b02["stop"]["reason"].endswith(f"{lost} crashes, {lost} of them with a lost heartbeat")
 
 
 async def _loses_its_heartbeat(branch: str) -> None:

@@ -9,6 +9,7 @@ import asyncio
 import json
 import os
 import signal
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -19,6 +20,7 @@ from hyperloom.contracts.recipe import ConfigDelta, Recipe, RecipeDelta
 from hyperloom.hosted.mcp_server import MIN_TOKEN_LENGTH, McpServer, McpServerConfig
 from hyperloom.measure.compile import LocalBlobStore
 from hyperloom_multibranch.contracts.fork import AdmissionStatus, ForkRequest
+from hyperloom_multibranch.contracts.lifecycle import SpecialistStatus
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
 from hyperloom_multibranch.contracts.notebook.records import LineageEvent
 from hyperloom_multibranch.contracts.notebook.vocab import LineageKind
@@ -32,6 +34,7 @@ from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.context import SchedulerContext
 from hyperloom_multibranch.scheduling.layout import SessionLayout
 from hyperloom_multibranch.scheduling.decisions import DecisionLog
+from hyperloom_multibranch.scheduling.explore import gave_up_reason
 from hyperloom_multibranch.scheduling.forks import ForkDesk
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry
 from hyperloom_multibranch.scheduling.roster import (
@@ -61,6 +64,14 @@ SHORT_GRACE = 0.3
 JUDGE_STOP = BranchStop(StopCause.JUDGE, "no headroom", NOW - 1)
 
 _CHANGE = RecipeDelta(config=ConfigDelta(server_args="--max-num-seqs 256"))  # an explore must change something
+
+
+def test_the_stop_of_a_gave_up_branch_names_the_counts_the_runtime_kept() -> None:
+    crashed = SpecialistStatus(running=False, crashes=4, lost=0, gave_up=True, judge_failed=False)
+
+    assert gave_up_reason(crashed) == "its specialist gave up after 4 crashes"
+    assert gave_up_reason(replace(crashed, crashes=3, lost=3)).endswith("3 crashes, 3 of them with a lost heartbeat")
+    assert gave_up_reason(replace(crashed, crashes=0)).endswith("its sessions in a row found nothing to test")
 
 
 class KeepingToolbox(DownToolbox):

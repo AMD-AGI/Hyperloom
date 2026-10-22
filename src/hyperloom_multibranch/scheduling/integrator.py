@@ -7,7 +7,9 @@ Candidates are the notebook's committed specialist commits, in the order it give
 by their own gain), whatever became of the branch that made them. Each is tried once per integration head, until it
 is merged or found already on the head, except that one the rule gate measured as not stackable waits until a later
 merge changes something its own change names: see :mod:`hyperloom_multibranch.scheduling.candidates`. A round
-tests up to the integration branch's K candidates at once on the same head; the first of them, in that order, that
+tests up to the integration branch's K candidates at once on the same head, and a slot it had nothing to fill takes
+the first commit committed while it runs rather than standing idle until the round ends; the round ends its tests in
+the order it started them, and the first of them that
 may be merged is merged, and every other one that may is superseded: it gets no judgement and is tried again on the
 new head. So is a merge whose test did not measure, and one whose regression set did not run clean: the set says a
 case did not come back clean, not whether it reproduced or never ran, so it settles nothing about the candidate. A
@@ -30,6 +32,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Sequence, Set
 from dataclasses import dataclass, replace
 from functools import partial
 
@@ -47,6 +50,7 @@ from hyperloom_multibranch.contracts.toolbox import RequestRejected
 from hyperloom_multibranch.rulegate.agentx import P50_BELOW_THRESHOLD
 from hyperloom_multibranch.rulegate.inferencex import GAIN_BELOW_THRESHOLD, GAIN_NOT_CONFIRMED
 from hyperloom_multibranch.scheduling.candidates import Candidates
+from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind, DecisionLog
 from hyperloom_multibranch.scheduling.llm import Completion, CompletionFailed
 from hyperloom_multibranch.scheduling.requests import SessionChecks, integration_test_request
@@ -197,6 +201,10 @@ class _TestedMerge:
     judgement: Judgement
 
 
+#: What a merge test ends as: a report of its own, or a judged merge the round has still to conclude.
+_Tested = MergeReport | _TestedMerge
+
+
 @dataclass(frozen=True)
 class MergeRecords:
     """Where the integrator records its rounds: its notebook handle, which writes as the integrator, and the merge log."""
@@ -219,7 +227,9 @@ class Integrator:
         repo: ExperimentRepo,
         checks: SessionChecks,
         resolver: LlmPatchResolver,
+        clock: Clock,
     ) -> None:
+        self._clock = clock
         self._notebook = records.notebook
         self._repo = repo
         self._candidates = Candidates(records.notebook, repo)
@@ -230,25 +240,65 @@ class Integrator:
         self._decisions = records.merges
         self._recording: asyncio.Future[str] | None = None
 
-    async def integrate_next(self, width: int) -> tuple[MergeReport, ...]:
-        """Test up to ``width`` of the commits offered on the current head at once; ``()`` when none is offered.
+    async def integrate_next(self, width: int, tick: float) -> tuple[MergeReport, ...]:
+        """Test the commits offered on the current head, ``width`` of them at once; ``()`` when none is offered.
 
-        At most one of them is merged, so the head moves once per round.
+        A slot the round has nothing to fill takes a commit committed while it runs, looked for every ``tick`` clock
+        seconds, instead of standing idle until the round ends. The head stays where the round found it, so that
+        commit is tested on the same head as the rest. At most one commit is merged, and once one is the round starts
+        no more: the head has moved under the rest, which are offered again on the head it moved to.
+
+        A test that ends waits for the tests the round started before it, so which commit a round merges follows the
+        order the notebook offers them in rather than how long each one took to measure.
         """
 
         head = await self._repo.head(INTEGRATION_BRANCH)
-        offered = await self._candidates.offered_on(head)
-        tested = await asyncio.gather(*(self._test(candidate, head) for candidate in offered[:width]))
-        reports = []
+        running: list[asyncio.Task[_Tested]] = []
+        started: set[str] = set()
+        reports: list[MergeReport] = []
         merged = False
-        for item in tested:
-            report = item if isinstance(item, MergeReport) else await self._conclude(item, merged)
-            merged = merged or report.outcome is MergeOutcome.MERGED
-            self._decisions.record(_decision(report))
-            reports.append(report)
-        return tuple(reports)
+        try:
+            while True:
+                for commit in await self._to_test(head, 0 if merged else width - len(started), started):
+                    started.add(commit.commit_id)
+                    running.append(asyncio.create_task(self._test(commit, head)))
+                while running and running[0].done():
+                    item = running.pop(0).result()
+                    report = item if isinstance(item, MergeReport) else await self._conclude(item, merged)
+                    merged = merged or report.outcome is MergeOutcome.MERGED
+                    self._decisions.record(_decision(report))
+                    reports.append(report)
+                if not running:
+                    return tuple(reports)
+                await self._until_one_ends([task for task in running if not task.done()], tick)
+        finally:
+            for task in running:
+                task.cancel()
+            await asyncio.gather(*running, return_exceptions=True)
 
-    async def _test(self, commit: CommittedCommit, head: str) -> MergeReport | _TestedMerge:
+    async def _until_one_ends(self, running: Sequence[asyncio.Task[_Tested]], tick: float) -> None:
+        """Wait until one of ``running`` has ended, or ``tick`` clock seconds have passed, whichever comes first."""
+
+        timer = asyncio.ensure_future(self._clock.sleep(tick))
+        try:
+            await asyncio.wait([*running, timer], return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            timer.cancel()
+
+    async def _to_test(self, head: str, free: int, started: Set[str]) -> tuple[CommittedCommit, ...]:
+        """The commits to start now on ``head``: those it offers, less the ones this round has already started.
+
+        A test records its merge attempt once the toolbox has taken it, which is what stops the notebook offering it
+        again; until then it still reads as offered, so the round remembers what it started rather than racing that
+        record.
+        """
+
+        if free <= 0:
+            return ()
+        offered = await self._candidates.offered_on(head)
+        return tuple(commit for commit in offered if commit.commit_id not in started)[:free]
+
+    async def _test(self, commit: CommittedCommit, head: str) -> _Tested:
         candidate = commit.commit_id
         try:
             merge = await self._repo.merge(candidate, head)
@@ -267,9 +317,7 @@ class Integrator:
         except _Skipped as exc:
             return await self._skip(commit, head, exc.reason, MergeOutcome.CONFLICT_SKIPPED)
 
-    async def _judge(
-        self, merge: RepoMerge, delta: RecipeDelta, commit: CommittedCommit, request_id: str
-    ) -> MergeReport | _TestedMerge:
+    async def _judge(self, merge: RepoMerge, delta: RecipeDelta, commit: CommittedCommit, request_id: str) -> _Tested:
         candidate = commit.commit_id
         await self._notebook.record_merge_attempt(MergeAttempt((candidate,), merge.onto, request_id))
         tested = MergeReport(

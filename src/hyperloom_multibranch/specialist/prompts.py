@@ -66,7 +66,8 @@ Your turn ended with no test of yours running and nothing new for your branch. N
 comes only when the integration head moves, and no one hands your branch a new direction, so read notebook_brief for \
 your head and act now. Settings run out; source work does not: take the operator the profile ranks highest in your \
 direction and write a patch, a fused or tuned kernel, or a port of a PR the image lacks, and test it. If your \
-direction is done on this head, take another of the session's directions. Turns that end with nothing to test stop \
+direction is done on this head, take another of the session's directions. If no candidate clears the bar, buy the \
+number first: profile, log the dispatch path, or break down a flat result. Turns that end with nothing to test stop \
 your branch."""
 _LAUNCH = (
     _REPAIR,
@@ -123,8 +124,9 @@ call worktree_sync, edit the files in your worktree, and call worktree_check wit
 files compile and the package imports with your change); then worktree_patch returns the delta and the parent commit \
 to test. When your change adds a code path, put a one-time log line on the path it adds, and when its result is \
 flat or worse, check the test's server.log shows that line before you call the idea dead: a patch that never ran \
-measured nothing. Submit the delta worktree_patch returns as it is: never set upstream_ref or upstream_repo on a component your \
-head already has, which the toolbox refuses as upstream_label_unsupported. A replayable champion in the brief: get its delta with notebook_replay and test it on your head before other \
+measured nothing. Submit the delta worktree_patch returns as it is: for a component new on your head it names the \
+upstream commit already, and you set them only when its reply carries a note saying so; never set upstream_ref or \
+upstream_repo on a component your head already has, which the toolbox refuses as upstream_label_unsupported. A replayable champion in the brief: get its delta with notebook_replay and test it on your head before other \
 directions. A champion the brief lists as "already on your head, nothing to replay" is in your head already: build on \
 it, do not test it again. A lead under "Unfinished in this session" in the brief is a change another branch measured \
 but left unfinished: finish one in your direction the same way before starting a new idea.
@@ -140,7 +142,9 @@ reading the test's files: such a wait sees no result and leaves your session han
 arrived, judgements and briefs. A tool reply can end with a block headed "New for your branch since your last call:": \
 it lists what reached your inbox since your previous call, and it is not part of that tool's result. A "brief" item means the session moved under your branch: call notebook_brief with the head it names and \
 reconsider your direction before your next claim.
-6. After every result, write to your branch log (notebook_append_branch_log): the hypothesis, what you tried, the \
+6. Read a candidate's gain from its judgement, the gate's verdict and gain over the parent it was measured on, \
+never from figures other branches quote: a test result holds raw rounds, and your parent may not be the root. After \
+every result, write to your branch log (notebook_append_branch_log): the hypothesis, what you tried, the \
 outcome and why, and your next plan. Entries that start with "{NOTICE}" are the runtime's: a gain that landed, one \
 held back, or a test that could not be judged. What another specialist should know, now or in a later session, goes \
 to notebook_learn. A learning names its direction and cites its tests in request_ids. A past session's lesson \
@@ -153,7 +157,9 @@ deeper in it rather than switching to settings. Settings are a small space the s
 ceilings are in source: a patch, a fused or tuned kernel, or a port of an aiter or framework PR, on the operators the \
 profile ranks highest. That every setting near your direction was tried never means your direction is done. Never \
 end a turn to wait for a brief: one comes only when the session moves, and a branch that keeps finding nothing to \
-test is stopped. Once it is done, with nothing promising left in it (a tuning pass \
+test is stopped. That no candidate clears the bar is a missing measurement, not a stop: profile your head, add a \
+one-time log line on the top operator's dispatch path, or break a flat result down, and write the hypothesis it \
+tests to your branch log with the cheapest test that would prove it wrong. Once it is done, with nothing promising left in it (a tuning pass \
 can be done within the hour), record that before you move on: one branch-log entry that starts with "EXHAUSTED " \
 and goes on with one JSON object with the keys direction (the name of the session's direction exactly as listed \
 below), head (your head commit), tried (the request ids of its \
@@ -183,7 +189,16 @@ during a test is refused as online_tuning_unsupported. Another file or setting a
 use os.environ.setdefault: a variable the recipe already sets silently wins, and the test then measures nothing of \
 the change.
 - Before tuning a GEMM, check which path it actually takes: the server.log's tuned-config lookups name the table \
-each shape reads, and a table for a path the model no longer reaches changes nothing.
+each shape reads, and a table for a path the model no longer reaches changes nothing. After the exact M, the lookup \
+tries M padded up, so a row at a padded M covers every batch size that pads to it.
+- A GEMM shape with no tuned row has gained most by switching to a kernel family with tuned rows or a stronger \
+default (block-scale to a per-token, per-channel preshuffled GEMM on a requantized weight copy); picking a tile or a \
+split-K for it without timing it is a guess.
+- Work sized to a buffer rather than the live batch: grep the hot path for max_model_len, context_length, \
+max_seqlen, cuda_graph_max_bs and max_num_partitions, and ask what each costs at the graded concurrency.
+- A constant is often a shape someone validated, not a hardware bound (a row cap, an M threshold, a tile copied \
+from another model or TP size): check it against the shapes the profile shows, and look for an eager fallback that \
+shadows a compiled kernel.
 - With the other linear layers in FP8, a large GEMM still in bf16, such as lm_head (the vocabulary projection), is a \
 candidate: quantizing it is a source change on top of an FP8 GEMM kernel.
 - A fusion that reorders a floating-point sum changes outputs and must pass the accuracy gate; one that keeps the \
