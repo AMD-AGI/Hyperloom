@@ -39,6 +39,7 @@ from hyperloom.common.llm_config import (
     openai_client_kwargs,
     DEFAULT_CLAUDE_MODEL,
     DEFAULT_CODEX_MODEL,
+    DEFAULT_DEEPSEEK_HARNESS_MODEL,
     provider_model_defaults,
     resolve_forge_llm_model,
 )
@@ -538,6 +539,14 @@ def test_resolve_forge_llm_model_ignores_the_removed_forge_env():
     }
     assert resolve_forge_llm_model("claude", env=env) == "claude-orchestration"
     assert resolve_forge_llm_model("codex", env=env) == "gpt-orchestration"
+
+
+def test_the_harness_model_comes_from_dsh_model_alone():
+    """One knob: the retired provider variable no longer names the harness's model."""
+    assert resolve_forge_llm_model("deepseek", env={"DSH_MODEL": "deepseek-v4-pro"}) == "deepseek-v4-pro"
+    assert resolve_forge_llm_model("deepseek", env={"DEEPSEEK_MODEL": "deepseek-v4-pro"}) == (
+        DEFAULT_DEEPSEEK_HARNESS_MODEL
+    )
 
 
 def test_resolve_forge_llm_model_falls_back_to_orchestration_and_default():

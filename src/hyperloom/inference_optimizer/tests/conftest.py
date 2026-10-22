@@ -53,6 +53,20 @@ def _kfd_nodes_in_pci_order(monkeypatch):
     monkeypatch.setattr(gpu_power_settings, "_read_gpu_kfd_nodes", lambda: {gpu: 8 + gpu for gpu in range(16)})
 
 
+@pytest.fixture(autouse=True)
+def _no_node_power_management(monkeypatch):
+    """No test reaches a real ``amd-smi node``: the node reads as an amd-smi without the command, which records nothing.
+
+    A test of the node settings patches ``read_node_power_settings`` again with the reading it needs.
+    """
+    from hyperloom.common import gpu_power_settings
+
+    def _absent():
+        raise gpu_power_settings.GpuPowerSettingsError("amd-smi node --power-management: no node command (test)")
+
+    monkeypatch.setattr(gpu_power_settings, "read_node_power_settings", _absent)
+
+
 def enable_multi_node(monkeypatch, nodes: int = 2) -> None:
     """Put the executors in multi-node mode with a no-op per-round server restart."""
     from hyperloom.orchestrator.actions.executors import _multi_node_server_lifecycle as mnl

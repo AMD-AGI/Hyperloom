@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common.checkpoint_quant import QUARK_LAYER_CONFIG_KEYS, checkpoint_format
-from hyperloom.common.coerce import to_int
+from hyperloom.common.coerce import optional_positive_int, to_int
 
 # Single source of truth for --model (path OR HF repo id) -> local dir.
 from hyperloom.common.model_paths import resolve_local_model_dir
@@ -48,7 +48,7 @@ def _load_model_config_dict(model_path: str) -> dict | None:
         raw = cfg_path.read_text(encoding="utf-8")
     except FileNotFoundError:
         return None
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
         logging.warning("model_config_unreadable: %s (%s)", cfg_path, exc)
         return None
     try:
@@ -608,3 +608,30 @@ def _sparse_kv_block_size(model_path: str) -> int | None:
     if not isinstance(sparse, dict):
         return None
     return to_int(sparse.get("sparse_block_size"))
+
+
+# Path/architecture keyword fallbacks for model_class inference, used when the config carries no expert counts.
+_MODEL_CLASS_TEXT_KEYS = ("model_type", "attention_type", "attn_type")
+_MOE_KEYWORDS = ("moe", "mixtral", "deepseek-v2", "deepseek-v3", "deepseek-r1", "kimi", "glm-5", "glm5")
+_MLA_KEYWORDS = ("mla", "multi-head latent", "deepseek", "kimi", "glm-5", "glm5")
+_NSA_KEYWORDS = ("nsa", "native sparse attention", "glm-5", "glm5")
+
+
+def infer_model_class(model_path: str) -> str:
+    """Infer a deterministic model_class from local model metadata."""
+    raw_path = model_path.strip()
+    config = _load_model_config_dict(raw_path) or {}
+    # A multimodal checkpoint keeps the language model one level down, so the expert counts and the LM architecture
+    # live there rather than at the top; a VL wrapper would otherwise classify as dense.
+    scopes = [config, *(config[k] for k in _TEXT_SCOPE_KEYS if isinstance(config.get(k), dict))]
+    expert_keys = (*_MOE_EXPERT_KEYS, "moe_num_experts")
+    has_experts = any(optional_positive_int(s.get(k)) for s in scopes for k in expert_keys)
+    text = " ".join(
+        [raw_path.lower()]
+        + [a.lower() for s in scopes for a in _config_architectures(s)]
+        + [str(s[k]).lower() for s in scopes for k in _MODEL_CLASS_TEXT_KEYS if s.get(k)]
+    )
+    is_moe = has_experts or any(k in text for k in _MOE_KEYWORDS)
+    if is_moe and any(k in text for k in _MLA_KEYWORDS):
+        return "moe_mla_nsa" if any(k in text for k in _NSA_KEYWORDS) else "moe_mla"
+    return "moe_swa" if is_moe else "dense"
