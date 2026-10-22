@@ -34,6 +34,7 @@ from hyperloom_multibranch.scheduling.events import (
     PROFILE_EXISTS,
     PROFILE_UNAVAILABLE,
     PROFILED,
+    PROFILE_NOT_ANALYSED,
     EventKind,
     IntegrationProfiler,
     SessionEvents,
@@ -386,6 +387,45 @@ async def test_a_large_merge_profiles_the_integration_head_and_a_moved_bottlenec
     rows = _logged(log)
     assert [(row["kind"], row["reason"]) for row in rows[1:]] == [("profile", PROFILED), ("event", shifted.reason)]
     assert rows[1]["detail"]["request_id"] == request_id and rows[1]["detail"]["analysis"] == "succeeded"
+
+
+async def test_a_profile_whose_analysis_left_no_shares_is_not_a_profile_the_head_has(log: Path) -> None:
+    shares = _Shares({"c-root": _op_shares("c-root", BEFORE)})
+    toolbox = _AnalysingToolbox(shares)
+    events = _events(_Health(), log, toolbox, shares)
+    events.note_merges((_moved_onto("c-merged"),))
+    await events.detect()
+    events.hand_over()
+    await _until(lambda: toolbox.analyses)
+
+    toolbox.status = JobStatus.FAILED
+    await _until(lambda: not events.profiling)
+
+    assert not await events.detect() and events.hand_over() == ()
+    [profile] = [row for row in _logged(log) if row["kind"] == "profile"]
+    assert profile["reason"] == PROFILE_NOT_ANALYSED
+    assert (profile["detail"]["analysis"], profile["detail"]["commit"]) == ("failed", "c-merged")
+    assert "largest_op" not in profile["detail"]
+
+
+async def test_a_head_that_moved_while_a_profile_ran_is_profiled_when_that_one_ends(log: Path) -> None:
+    shares = _Shares({"c-root": _op_shares("c-root", BEFORE)})
+    toolbox = _AnalysingToolbox(shares)
+    events = _events(_Health(), log, toolbox, shares)
+    events.note_merges((_moved_onto("c-merged"),))
+    await events.detect()
+    await _until(lambda: toolbox.analyses)
+
+    events.note_merges((_moved_onto("c-next"),))
+    await events.detect()
+    toolbox.finish("c-merged", {"gemm": 55.0, "attn": 30.0})
+    await _until(lambda: not events.profiling)
+    await events.detect()
+
+    await _until(lambda: len(toolbox.requests) == 2)
+    assert [request.parent_commit for request in toolbox.requests.values()] == ["c-merged", "c-next"]
+    assert events.profiling
+    await events.stop_profiling()
 
 
 async def test_a_head_a_branch_already_profiled_is_not_profiled_again_and_is_not_an_error(log: Path) -> None:

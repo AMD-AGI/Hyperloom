@@ -63,6 +63,9 @@ ANALYSIS_POLL_SECONDS = 5.0
 PROFILE_UNAVAILABLE = "profile not available on this backend"
 HEAD_MOVED_DURING_PROFILE = "integration head moved during profiling"
 PROFILED = "integration head profiled"
+#: The PROFILE test ran, and its analysis left no op shares of that commit behind: nothing a refill can be focused on
+#: and nothing to compare a bottleneck against, so it is not a profile the head has.
+PROFILE_NOT_ANALYSED = "integration head profiled, its trace not analysed"
 PROFILE_EXISTS = "integration head already profiled"
 #: The toolbox's refusal of a test kind its backend does not run, a PROFILE on a backend that cannot profile.
 UNSUPPORTED_KIND = "unsupported_kind"
@@ -211,6 +214,7 @@ class IntegrationProfiler:
         self._records = records
         self._clock = clock
         self._task: asyncio.Future[ProfileOutcome] | None = None
+        self._waiting: tuple[str, str] | None = None
         self._shares: OpShares | None = None
         self._available = True
 
@@ -219,20 +223,32 @@ class IntegrationProfiler:
         return self._task is not None and not self._task.done()
 
     def start(self, head: str, moved_from: str) -> None:
-        """Start profiling ``head``, which the integration head moved to from ``moved_from``, unless a profile runs or
-        the backend cannot profile."""
+        """Start profiling ``head``, which the integration head moved to from ``moved_from``, unless the backend
+        cannot profile.
 
-        if self._available and not self.running:
+        A head that moves while a profile runs waits for that profile to end rather than going unprofiled: the
+        refills opened on it are focused on its own shares, and only the latest head is worth waiting for.
+        """
+
+        if not self._available:
+            return
+        if self.running:
+            self._waiting = (head, moved_from)
+        else:
             self._task = asyncio.ensure_future(self._profile(head, moved_from))
 
-    def finished(self) -> ProfileOutcome | None:
-        """The outcome of the profile that ended since the last look; ``None`` while it runs or when none ran."""
+    def take_outcome(self) -> ProfileOutcome | None:
+        """The outcome of the profile that ended since the last look, ``None`` while it runs or when none ran; a head
+        that waited for it is started in its place."""
 
         if self._task is None or not self._task.done():
             return None
         task, self._task = self._task, None
         outcome = task.result()
         self._available = self._available and outcome.available
+        waiting, self._waiting = self._waiting, None
+        if waiting is not None:
+            self.start(*waiting)
         return outcome
 
     async def stop(self) -> None:
@@ -289,10 +305,11 @@ class IntegrationProfiler:
         await self._clock.sleep(ANALYSIS_POLL_SECONDS)
         found = await self._records.op_shares(head)
         shares = found if found is not None and found.job_id == job else None
-        if shares is not None:
-            self._shares = shares
-        largest = shares.largest(1) if shares is not None else ()
-        detail.update(job_id=job, analysis=self._toolbox.tool_status(job).value, largest_op=dict(largest))
+        detail.update(job_id=job, analysis=self._toolbox.tool_status(job).value)
+        if shares is None:
+            return ProfileOutcome(PROFILE_NOT_ANALYSED, detail)
+        self._shares = shares
+        detail.update(largest_op=dict(shares.largest(1)))
         return ProfileOutcome(PROFILED, detail, bottleneck_moved(before, shares))
 
 
@@ -378,7 +395,7 @@ class SessionEvents:
         await self._profiler.stop()
 
     def _profiled(self) -> list[SessionEvent]:
-        outcome = self._profiler.finished()
+        outcome = self._profiler.take_outcome()
         if outcome is None:
             return []
         self._decisions.record(Decision(DecisionKind.PROFILE, outcome.reason, detail=outcome.detail))
@@ -406,6 +423,7 @@ __all__ = [
     "MB_BIG_GAIN_BARS",
     "MB_BOTTLENECK_SHIFT_PP",
     "PROFILED",
+    "PROFILE_NOT_ANALYSED",
     "PROFILE_EXISTS",
     "PROFILE_EXISTS_CODE",
     "PROFILE_UNAVAILABLE",
