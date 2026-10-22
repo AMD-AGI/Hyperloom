@@ -438,6 +438,16 @@ def geak_absent_backends(eval_dir: str) -> dict[str, str]:
     }
 
 
+class EnvSpecUnserializable(Exception):
+    """The accepted launch configuration could not be serialized into an env spec.
+
+    Only this failure is an ``invalid_env_spec``. Everything else the GEAK handoff
+    raises while it is built -- a native-AgentX proposal refusing an unverified Magpie
+    launch, a malformed env var, a state field that is not a number -- is a different
+    fault and propagates to the caller rather than being reported as one.
+    """
+
+
 @dataclass(frozen=True)
 class KernelExitFacts:
     """What the phase machine's KERNEL exit reads from the task queue."""
@@ -1411,7 +1421,10 @@ class KernelPhase(CoordinatorCollaborator):
     def _accepted_launch_spec(self, *, agentx: bool) -> tuple[dict[str, Any], Mapping[str, Any]]:
         state = self.shared_state
         cb = state.current_best
-        env_spec = self._coord.writeback.build_env_spec()
+        try:
+            env_spec = self._coord.writeback.build_env_spec()
+        except (OSError, TypeError, ValueError) as exc:
+            raise EnvSpecUnserializable(str(exc)) from exc
         state_measurement = state.current_best_measurement or None
         measurement = (
             state_measurement
@@ -1829,7 +1842,7 @@ class KernelPhase(CoordinatorCollaborator):
     def _open_geak_handoff(self, *, agentx: bool) -> dict[str, Any] | None:
         try:
             handoff = self._build_geak_handoff(agentx=agentx)
-        except (OSError, TypeError, ValueError) as exc:
+        except EnvSpecUnserializable as exc:
             log.exception("geak: cannot serialize the accepted launch configuration")
             recorder = self.timeline()
             if recorder is not None:
