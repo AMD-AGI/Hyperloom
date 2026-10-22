@@ -20,7 +20,6 @@ from ._enablement_config import _parse_framework_switches
 from ._grid_runner import session_grid_bounds
 from ._integrate_attempt import IntegrateAttempt
 from ._integrate_refusals import _FIX_ACCURACY_UNAVAILABLE, _derive_lane, _preflight_missing_targets
-from ._integrate_vocabulary import KEEP_STATUSES, RESULT_BENCHED
 from ._patch_artifacts import _ArtifactSpec, _resolve_artifact_specs, _validate_aiter_gemm_artifacts
 from ._patch_sources import _read_patch_texts, _resolve_patch_paths, resolved_explicit_root
 
@@ -378,9 +377,3 @@ def _kept_patch(
         "framework_root": str(attempt.framework_root or ""),
         **fields,
     }
-
-
-__all__ = [
-    "KEEP_STATUSES",
-    "RESULT_BENCHED",
-]
