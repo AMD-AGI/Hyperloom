@@ -11,9 +11,27 @@ from typing import Any
 
 from hyperloom.inference_optimizer.breakdown.stop_reasons import PATCH_RECOVERY_INCOMPLETE_STOP_REASON
 
-from ..source_snapshot import install_source_layers
+from ..actions.executors._nogit_patch import _is_git_tree
+from ..actions.executors._patch_snapshot import _git_commit_kept
+from ..source_snapshot import SourceLayerInstall, install_source_layers
 
 log = logging.getLogger(__name__)
+
+
+def _commit_installed_layers(result: SourceLayerInstall) -> list[str]:
+    """Commit the kept files on each git root so HEAD is the accepted stack; return why a root could not be.
+
+    Every candidate that follows stashes a dirty git tree before it applies, so a layer left uncommitted would be
+    benched away. A root that is not a git tree is left as installed.
+    """
+    failed = []
+    for root, rels in result.kept.items():
+        if not _is_git_tree(root):
+            continue
+        ok, note = _git_commit_kept(root, "hyperloom resume: reinstall kept source layer", rels)
+        if not ok:
+            failed.append(f"{root}: {note or 'git commit failed'}")
+    return failed
 
 
 def install_kept_source_layers(state: Any, session_dir: Path, report: dict[str, Any]) -> str | None:
@@ -29,9 +47,13 @@ def install_kept_source_layers(state: Any, session_dir: Path, report: dict[str, 
     if result.installed:
         log.warning("resume: installed %d kept source file(s) the framework tree did not hold", len(result.installed))
         report["fixes"].append({"kind": "reinstalled_source_layer", "files": list(result.installed)})
-    if not result.failed:
+    if result.failed:
+        failures, verb = result.failed, "installed on"
+    elif failures := _commit_installed_layers(result):
+        verb = "committed to"
+    else:
         return None
-    report["warnings"].append({"kind": "source_layer_install_failed", "failures": list(result.failed)})
+    report["warnings"].append({"kind": "source_layer_install_failed", "failures": list(failures)})
     state.set_stop_reason(PATCH_RECOVERY_INCOMPLETE_STOP_REASON)
     state.save(session_dir)
-    return "the kept source layer cannot be installed on the framework tree: " + "; ".join(result.failed)
+    return f"the kept source layer cannot be {verb} the framework tree: " + "; ".join(failures)

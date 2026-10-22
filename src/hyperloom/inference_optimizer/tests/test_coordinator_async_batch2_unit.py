@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -512,6 +513,124 @@ async def test_resume_halts_instead_of_building_a_tree_where_the_framework_root_
 
     assert coord.shared_state.stop_reason == PATCH_RECOVERY_INCOMPLETE_STOP_REASON
     assert not tree.exists()
+
+
+def _git(tree: Path, *args: str) -> str:
+    done = subprocess.run(
+        ["git", "-C", str(tree), "-c", "user.email=t@t", "-c", "user.name=t", *args],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return done.stdout
+
+
+def _git_framework_tree(tmp_path: Path) -> Path:
+    """A real git checkout holding stock ``envs.py`` and ``v1/mla.py``, all committed."""
+    tree = tmp_path / "vllm"
+    (tree / "v1").mkdir(parents=True)
+    (tree / "envs.py").write_text("stock envs\n", encoding="utf-8")
+    (tree / "v1" / "mla.py").write_text("stock mla\n", encoding="utf-8")
+    _git(tree, "init", "-q")
+    _git(tree, "add", "-A")
+    _git(tree, "commit", "-q", "-m", "stock")
+    return tree
+
+
+@pytest.mark.asyncio
+async def test_resume_commits_the_reinstalled_source_layer_on_a_git_tree(coord: Coordinator, tmp_path: Path) -> None:
+    tree = _git_framework_tree(tmp_path)
+    stock_head = _git(tree, "rev-parse", "HEAD").strip()
+    entry = _source_layer_entry(tmp_path, "kv_window", tree, {"envs.py": "patched envs\n", "v1/mla.py": None})
+    _resume_with_stack(coord, [entry])
+
+    await coord.writeback._resume_consistency_pass()
+
+    assert _git(tree, "status", "--porcelain") == ""
+    assert _git(tree, "rev-parse", "HEAD~1").strip() == stock_head
+    assert _git(tree, "show", "HEAD:envs.py") == "patched envs\n"
+    assert "v1/mla.py" not in _git(tree, "ls-tree", "-r", "--name-only", "HEAD")
+
+
+@pytest.mark.asyncio
+async def test_a_candidate_after_resume_still_sees_the_kept_source_layer(coord: Coordinator, tmp_path: Path) -> None:
+    from hyperloom.orchestrator.actions.executors import integrate_patch as ip
+
+    tree = _git_framework_tree(tmp_path)
+    _resume_with_stack(coord, [_source_layer_entry(tmp_path, "kv_window", tree, {"envs.py": "patched envs\n"})])
+
+    await coord.writeback._resume_consistency_pass()
+    accepted_head = ip._git_head_sha(tree)
+    stash_state, _ = ip._git_stash_if_dirty(tree)
+    (tree / "v1" / "mla.py").write_text("candidate mla\n", encoding="utf-8")
+    reverted, _ = ip._git_reset_clean(tree, accepted_head)
+
+    assert stash_state == "clean"
+    assert _git(tree, "stash", "list") == ""
+    assert reverted
+    assert (tree / "envs.py").read_text(encoding="utf-8") == "patched envs\n"
+    assert (tree / "v1" / "mla.py").read_text(encoding="utf-8") == "stock mla\n"
+
+
+@pytest.mark.asyncio
+async def test_resume_commits_a_source_layer_the_tree_holds_uncommitted(coord: Coordinator, tmp_path: Path) -> None:
+    tree = _git_framework_tree(tmp_path)
+    (tree / "envs.py").write_text("patched envs\n", encoding="utf-8")
+    _resume_with_stack(coord, [_source_layer_entry(tmp_path, "kv_window", tree, {"envs.py": "patched envs\n"})])
+
+    await coord.writeback._resume_consistency_pass()
+
+    assert _git(tree, "status", "--porcelain") == ""
+    assert _git(tree, "show", "HEAD:envs.py") == "patched envs\n"
+
+
+@pytest.mark.asyncio
+async def test_resume_adds_no_commit_when_the_git_tree_already_carries_the_source_layer(
+    coord: Coordinator, tmp_path: Path
+) -> None:
+    tree = _git_framework_tree(tmp_path)
+    _resume_with_stack(coord, [_source_layer_entry(tmp_path, "kv_window", tree, {"envs.py": "stock envs\n"})])
+    head = _git(tree, "rev-parse", "HEAD")
+
+    await coord.writeback._resume_consistency_pass()
+
+    assert _git(tree, "rev-parse", "HEAD") == head
+
+
+@pytest.mark.asyncio
+async def test_resume_halts_when_the_reinstalled_source_layer_cannot_be_committed(
+    coord: Coordinator, tmp_path: Path
+) -> None:
+    tree = _git_framework_tree(tmp_path)
+    hook = tree / ".git" / "hooks" / "pre-commit"
+    hook.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    hook.chmod(0o755)
+    _resume_with_stack(coord, [_source_layer_entry(tmp_path, "kv_window", tree, {"envs.py": "patched envs\n"})])
+
+    with pytest.raises(IntegrateRecoveryIncomplete, match="cannot be committed"):
+        await coord.writeback._resume_consistency_pass()
+
+    assert coord.shared_state.stop_reason == PATCH_RECOVERY_INCOMPLETE_STOP_REASON
+
+
+@pytest.mark.asyncio
+async def test_resume_reinstalls_on_a_root_that_is_not_a_git_tree_and_commits_nothing(
+    coord: Coordinator, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import hyperloom.orchestrator.loop.resume_source_layers as resume_layers
+
+    tree = tmp_path / "vllm"
+    tree.mkdir()
+    (tree / "envs.py").write_text("stock envs\n", encoding="utf-8")
+    monkeypatch.setattr(
+        resume_layers, "_git_commit_kept", lambda *args, **kwargs: pytest.fail("a non-git root has nothing to commit")
+    )
+    _resume_with_stack(coord, [_source_layer_entry(tmp_path, "kv_window", tree, {"envs.py": "patched envs\n"})])
+
+    await coord.writeback._resume_consistency_pass()
+
+    assert (tree / "envs.py").read_text(encoding="utf-8") == "patched envs\n"
+    assert not (tree / ".git").exists()
 
 
 @pytest.mark.asyncio

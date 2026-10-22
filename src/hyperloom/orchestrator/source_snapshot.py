@@ -127,6 +127,8 @@ class SourceLayerInstall(NamedTuple):
     failed: list[str]
     #: Variants whose source patch has no complete snapshot, so there is nothing to install or check.
     unreproducible: list[str]
+    #: Every file the kept states cover, relative to the framework root that holds it.
+    kept: dict[Path, list[str]]
 
 
 def _kept_final_states(stack: Iterable[dict[str, Any]], result: SourceLayerInstall) -> dict[Path, tuple[str, Path]]:
@@ -155,6 +157,9 @@ def _kept_final_states(stack: Iterable[dict[str, Any]], result: SourceLayerInsta
                 result.failed.append(f"{variant}: manifest names an unusable path {row!r}")
                 continue
             final[Path(root) / rel] = (str(row.get("op") or ""), snapshot_dir / _FILES / rel)
+            covered = result.kept.setdefault(Path(root), [])
+            if rel not in covered:
+                covered.append(rel)
     return final
 
 
@@ -164,7 +169,7 @@ def install_source_layers(stack: Iterable[dict[str, Any]]) -> SourceLayerInstall
     A tree that already holds the kept state is left untouched. The checks and writes run in stack order, so a
     file two patches touch ends in the last one's state.
     """
-    result = SourceLayerInstall([], [], [])
+    result = SourceLayerInstall([], [], [], {})
     for dest, (op, source) in _kept_final_states(stack, result).items():
         try:
             if op == "delete":
