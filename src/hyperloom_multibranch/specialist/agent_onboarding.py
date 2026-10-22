@@ -69,8 +69,8 @@ sys.exit(f"docker {' '.join(args[:1])}: this sandbox runs commands in place and 
 class AgentSpec:
     """What MB asks of the agent, which its config must be derived from: the workload, the metric it is judged on,
     the server arguments and environment it starts from (the root's), ``workspace``, the framework checkout it edits,
-    ``cards``, the GPUs it may use, ``seconds``, how long it may run, and ``port``, the first of the ports its servers
-    may listen on."""
+    ``cards``, the GPUs it may use, ``seconds``, how long it may run (0: until MB stops it), and ``port``, the first
+    of the ports its servers may listen on."""
 
     model: str
     framework: str
@@ -177,7 +177,7 @@ async def _attempt(
 ) -> ReadyAgent:
     checkout = agent_dir / SOURCE_DIR
     commit = await _fetch(source, checkout)
-    answer = await setup.onboard(checkout, onboarding_prompt(spec, source, commit, failures))
+    answer = await setup.onboard(checkout, onboarding_prompt(spec, source, checkout, commit, failures))
     try:
         manifest = AgentManifest.read(_json_object(answer))
     except (ManifestError, ValueError) as error:
@@ -283,20 +283,24 @@ def tail(output: str) -> str:
     return " | ".join(line.strip() for line in output.strip().splitlines()[-TAIL_LINES:])
 
 
-def onboarding_prompt(spec: AgentSpec, source: str, commit: str, failures: tuple[str, ...]) -> str:
-    """What the onboarding model is asked: read the agent's checkout and answer with its manifest for ``spec``."""
+def onboarding_prompt(spec: AgentSpec, source: str, checkout: Path, commit: str, failures: tuple[str, ...]) -> str:
+    """What the onboarding model is asked: read the agent's ``checkout`` of ``source`` and answer with its manifest for
+    ``spec``."""
 
     earlier = "\n".join(f"- {line}" for line in failures) or "- none"
-    return ONBOARDING_PROMPT.format(
-        source=source, commit=commit, spec=json.dumps(spec.to_document(), indent=2), failures=earlier
-    )
+    document = json.dumps(spec.to_document(), indent=2)
+    return ONBOARDING_PROMPT.format(source=source, checkout=checkout, commit=commit, spec=document, failures=earlier)
 
 
 ONBOARDING_PROMPT = """\
 You are onboarding a third-party LLM-serving optimization agent so it can run unattended in a sandbox. Your working
-directory is its checkout: {source} at {commit}. Read its README, its docs and its entry points before you answer.
+directory is the agent's checkout, {checkout}, a clone of {source} at {commit}. Read its README, its docs and its
+entry points before you answer. Every file the agent writes (its config, the packs or scripts the install adds, its session
+and run directories) must be in that checkout or in "workspace", never in {source}: give absolute paths under them.
 
-It will optimize this workload, and every value its config needs must come from here, not be invented:
+It will optimize this workload, and every value its config needs must come from here, not be invented. "server_args"
+and "envs" are what the root adds to a server of "model" at "tp"; the agent's own model, host, port and TP flags come
+on top of them:
 {spec}
 
 The sandbox:
@@ -306,7 +310,8 @@ The sandbox:
   C:SRC DST` as a copy, so an agent written to drive a container works when its config names any container;
 - shares the host with other servers: `pkill`, `pgrep` and `killall` reach only the agent's own processes, but turn
   off any other sweep that kills what holds GPU memory, and give the agent's servers a port no one else uses;
-- the agent edits the framework source in "workspace", in place, and launches its servers from it.
+- the agent edits the framework source in "workspace", in place, and launches its servers from it;
+- "seconds" is how long the agent may run, 0 when MB stops it: then give it a time budget it cannot reach.
 
 Answer with one JSON object and nothing else, with exactly these fields:
 - "source": "{source}", "commit": "{commit}";
@@ -319,7 +324,8 @@ Answer with one JSON object and nothing else, with exactly these fields:
   only its final state counts;
 - "config_source": {{"path": file relative to "workspace" holding the server arguments and environment the agent runs
   with, "server_args": the field of the arguments string, "envs": the field of the environment object}}, or null;
-- "summary_field": dotted path in the keep file to the agent's own words for its latest keep, "" when none;
+- "summary_field": dotted path in the keep file to the agent's own words for its latest keep (an integer step indexes
+  a list, -1 its last item), "" when none;
 - "result_dir": for an agent with no keep, the directory relative to the checkout that holds its final state, "" to
   read the workspace;
 - "needs": what it requires, from "anthropic", "openai", "network", "docker".

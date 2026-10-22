@@ -131,6 +131,7 @@ async def test_an_agent_is_fetched_onboarded_configured_installed_and_started(tm
     shim = Path(sandbox.ran[-1][2]["PATH"].split(os.pathsep)[0]) / "docker"
     assert os.access(shim, os.X_OK)
     assert '"workspace": "/ws/sglang"' in onboard.prompts[0] and str(repo) in onboard.prompts[0]
+    assert f"checkout, {ready.source_dir}, a clone" in onboard.prompts[0]
 
 
 async def test_each_failed_attempt_reaches_the_next_prompt_and_three_give_up(tmp_path: Path) -> None:
