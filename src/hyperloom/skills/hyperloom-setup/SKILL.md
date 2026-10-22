@@ -551,8 +551,8 @@ The choice selects which demo skill to load and sets
   `KERNEL_OPT_BACKEND_ORDER` unset, or write `geak`; anything that does not opt
   in means GEAK.
 - `forge` → load `hyperloom-qwen3-14b-fp8-12h-forge`, and write
-  `KERNEL_OPT_BACKEND_ORDER=forge` to `.env` so a `--resume-from` relaunch keeps
-  the same backend.
+  `KERNEL_OPT_BACKEND_ORDER=forge` to `.env`. The session records the backend
+  when it is created, so a `--resume-from` relaunch keeps it either way.
 
 `KERNEL_OPT_BACKEND_ORDER` is the only switch, and the opt-in is an **exact**
 match on `forge` after trimming whitespace and lowercasing. There is no CLI flag

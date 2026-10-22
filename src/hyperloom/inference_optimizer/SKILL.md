@@ -440,7 +440,10 @@ ledger, and judges each entry — already present, not applicable, or worth a
 bench and by which route. The pump takes that batch in the order given; it
 does not re-rank or re-audit. When discovery comes back empty its full retry
 budget, the local-exploration arm authors against profile evidence instead;
-with that off too, the source arm reports itself dry.
+with that off too, the source arm reports itself dry. An authoring round that
+comes back empty, or whose specialist never runs, counts against the source
+arm's no-KEEP streak like a reverted patch; once that streak marks the arm
+dry, the local-exploration arm stops dispatching for the cycle.
 
 Every diff lands through `integrate_patch`, with `patch_source` naming where
 it came from. KEEP commits to the live tree so the next candidate stacks on
@@ -766,6 +769,7 @@ and the operator's stated value is lost:
 | Power ceiling | `--max-power-w` | Pass any stated total power budget for the serving GPUs ("the four cards together stay under 2800 W"). A constraint like `--max-latency-ms`, for the serving frameworks (refused on `xdit` / `custom`): refuses any KEEP whose serving GPUs' summed mean power exceeds it, including one that reported no per-GPU power. |
 | Per-GPU power limit | `--max-per-gpu-power-w GPU_ID W` | Pass any stated limit for a specific card ("GPU 4 under 700 W"), once per card. GPU_ID is the physical amd-smi index. A serving card with no entry is bound only by `--max-power-w`; the limits must add up to no more than it. |
 | GPU power settings | `--gpu-power-cap-w` / `--gpu-perf-level` | Assertions by default. Only when the prompt says the cards were set to a cap or perf level; the session refuses to start if a card differs. Add `--apply-gpu-power-settings` only when the prompt asks Hyperloom to set them: it sets the cards of the integer visible-device mask for the session and restores them when it ends, and needs root. |
+| Node power management | `--node-power-management` / `--node-power-limit-w` | Always assertions (MI350 series). Only when the prompt says NPM was enabled or disabled, or a node limit was set, on the BMC; the session refuses to start if `amd-smi node -p` differs. Never set by the session. |
 | Max model len | `--max-model-len` | Optional; auto-derived from ISL+OSL+headroom when omitted. |
 | External reference GPU | `--compare-against-gpu` | `target_analysis` writes `target_analysis/target_baseline.json` for query/status metadata and `competitor_target.json` for both advisory and final-report comparisons. Without a target GPU it writes `reason="no_target_gpu_configured"` and clears the competitor target. AgentX reads accepted `current_best.total_throughput / state.tp` and `current_best.e2e_norm_intvty_p90` at `state.conc`; it does not reread raw results or recipes. Missing targets or axes remain unavailable. This is a cross-system advisory, not proof of identical measurement estimators or deployment, and never changes Objective or KEEP/REVERT. |
 | Target advisory | `--no-target-advisory` | Disable external-target hints in prompts without disabling final-report comparison. `primary_gap` uses the existing latency/throughput categories; the interactivity axis is displayed as interactivity. |
@@ -1513,7 +1517,7 @@ python3 -m hyperloom session state "$SESSION"
 ```
 
 It prints `stop_reason`, `baseline_tput`, `cumulative_gain_validated`, `current_best`,
-`last_kernel_opt`, `last_trace_analyze`, `last_conc_sweep`, `explore_last_round`,
+`last_trace_analyze`, `last_conc_sweep`, `explore_last_round`,
 `phase`, the latest orchestration and specialist Experience KB injections when
 they exist, plus the recent lifecycle events.
 

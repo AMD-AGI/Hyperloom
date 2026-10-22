@@ -78,7 +78,7 @@ lanes. Which calls it makes depends on the backend:
 ```python
 # 1. GEAK branch — the SGLang/vLLM default. One whole-pipeline e2e run, then
 #    the phase winds down to SWEEP. Nothing below this line executes.
-if geak_enabled:                      # KernelPhase.geak_enabled(): order is not exactly `forge`
+if geak_enabled:                      # KernelPhase.geak_enabled(): kernel_optimizer == "geak"
     await self._run_geak_kernel_phase(from_phase=from_phase)
     return
 
@@ -159,10 +159,14 @@ GEAK owns the KERNEL phase by default for every framework, ATOM included, and
 decides kernel strategy internally:
 
 - **Framework default**: an unset or blank `KERNEL_OPT_BACKEND_ORDER` resolves
-  through `_DEFAULT_KERNEL_PHASE_BACKEND_ORDER` in
-  `orchestrator/kernel/request_handlers.py`, which is `geak`. No framework
-  overrides it at CLI launch; ATOM's former `forge` fill-in is gone, because
-  GEAK extracts candidates from ATOM's own `prefill`/`decode` annotation spans.
+  to `geak`. No framework overrides it at CLI launch; ATOM's former `forge`
+  fill-in is gone, because GEAK extracts candidates from ATOM's own
+  `prefill`/`decode` annotation spans.
+- **Read once per session**: a fresh launch reads the variable once and records
+  the backend as `kernel_optimizer` in the session state
+  (`cli/bootstrap.py`). Every later decision, including a resumed run, reads
+  that record, so a resume keeps the backend the session started on whatever
+  the variable says in the new process.
 - **Bare-metal setup**: preserves nonempty choices with process env > `.env`
   precedence, but does not fill or persist a backend default. Existing `.env`
   assignments, including `KERNEL_OPT_BACKEND_ORDER=geak`, are not automatically

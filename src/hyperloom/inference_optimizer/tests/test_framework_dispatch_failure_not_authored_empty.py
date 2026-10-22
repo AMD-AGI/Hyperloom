@@ -8,9 +8,13 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
-from hyperloom.orchestrator.lever import LEVER_SOURCE_PATCH
+import pytest
+
+from hyperloom.orchestrator.lever import LEVER_SOURCE_PATCH, LEVER_UPSTREAM_PR
 from hyperloom.orchestrator.phases.machine_state import (
+    DEFAULT_FRAMEWORK_PLATEAU_NO_KEEP_STREAK,
     _lever_attempts,
+    _patch_lever_dry,
     _trailing_no_keep,
 )
 
@@ -87,19 +91,51 @@ def test_recovery_path_also_separates_a_failed_run(tmp_path: Path):
     assert stub.shared_state.framework_agent_phase_progress[0]["status"] == "dispatch_failed"
 
 
-def test_dispatch_failure_leaves_no_attempt_for_the_plateau_to_count(tmp_path: Path):
-    """The dispatch row settles on the progress ledger; the plateau reads attempts, and finds none."""
+@pytest.mark.parametrize(
+    ("done_payload", "run_error", "outcome"),
+    [
+        ({}, _GATE_ERROR, "dispatch_failed"),
+        ({"patches_written": [], "summary": "nothing left to remove"}, "", "author_empty"),
+    ],
+)
+def test_an_undelivered_round_counts_once_against_the_source_lever(
+    tmp_path: Path, done_payload: dict, run_error: str, outcome: str
+):
+    """A lane that cannot run, like one that finds nothing, must be able to run the source arm dry."""
 
     stub = _stub(tmp_path)
+    task = _task("local_explore:3")
 
-    stub.phase_framework._record_framework_agent_authoring_empty_outcome(
-        task=_task("local_explore:3"),
-        done_payload={},
-        run_error=_GATE_ERROR,
-    )
+    for _ in range(2):  # the bus-replay path re-delivers the same settlement
+        stub.phase_framework._record_framework_agent_authoring_empty_outcome(
+            task=task, done_payload=done_payload, run_error=run_error
+        )
 
-    assert stub.shared_state.framework_agent_phase_progress[0]["status"] == "dispatch_failed"
+    rows = _lever_attempts(stub.shared_state, LEVER_SOURCE_PATCH)
+    assert [(r["outcome"], r["adopted"], r["candidate_id"]) for r in rows] == [(outcome, False, "local_explore:3")]
+
+
+def test_an_empty_upstream_authoring_round_counts_against_the_upstream_lever(tmp_path: Path):
+    stub = _stub(tmp_path)
+    task = _task("https://github.com/org/repo/pull/7")
+    task.params["lever_kind"] = LEVER_UPSTREAM_PR
+
+    stub.phase_framework._record_framework_agent_authoring_empty_outcome(task=task, done_payload={"summary": "none"})
+
+    assert [r["outcome"] for r in _lever_attempts(stub.shared_state, LEVER_UPSTREAM_PR)] == ["author_empty"]
     assert _lever_attempts(stub.shared_state, LEVER_SOURCE_PATCH) == []
+
+
+def test_empty_rounds_alone_run_the_source_arm_dry(tmp_path: Path):
+    stub = _stub(tmp_path)
+    for i in range(DEFAULT_FRAMEWORK_PLATEAU_NO_KEEP_STREAK):
+        stub.phase_framework._record_framework_agent_authoring_empty_outcome(
+            task=_task(f"local_explore:{i}"), done_payload={}, run_error=_GATE_ERROR
+        )
+
+    dry, evidence = _patch_lever_dry(stub.shared_state, {})
+    assert dry is True
+    assert evidence["source_consecutive_no_keep"] == DEFAULT_FRAMEWORK_PLATEAU_NO_KEEP_STREAK
 
 
 def test_real_outcomes_still_trip_the_plateau():

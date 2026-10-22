@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import argparse
 import logging
-import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
@@ -75,8 +74,8 @@ def _specialist_agent_cli_config(args: argparse.Namespace) -> dict[str, Any]:
         resolve_agent_backend,
         resolve_forge_llm_model,
     )
-    from hyperloom.orchestrator.roles.claude import resolve_claude_executable
-    from hyperloom.orchestrator.specialists.subprocess_ import resolve_codex_executable, resolve_dsh_executable
+    from hyperloom.common.agent_cli import resolve_claude_executable, resolve_codex_executable
+    from hyperloom.orchestrator.specialists.subprocess_ import resolve_dsh_executable
 
     backend = resolve_agent_backend()
     config: dict[str, Any] = {"agent_backend": backend, "claude_executable": "claude"}
@@ -155,18 +154,12 @@ def _build_specialist_executor(
         )
         if generated is not None:
             mcp_config_path = str(generated)
-    # This setting controls the Claude runtime only. Codex containment is
-    # resolved independently through the canonical sandbox policy.
-    specialist_permission_mode = os.environ.get("HYPERLOOM_SPECIALIST_PERMISSION_MODE", "").strip()
-    sub_config_kwargs: dict[str, Any] = {
-        **_specialist_agent_cli_config(args),
-        "framework_source_roots": framework_source_roots,
-        "mcp_config_path": mcp_config_path,
-    }
-    if specialist_permission_mode:
-        sub_config_kwargs["permission_mode"] = specialist_permission_mode
     runner = SpecialistRunner(
-        subprocess_config=SpecialistSubprocessConfig(**sub_config_kwargs),
+        subprocess_config=SpecialistSubprocessConfig(
+            **_specialist_agent_cli_config(args),
+            framework_source_roots=framework_source_roots,
+            mcp_config_path=mcp_config_path,
+        ),
         session_dir=session_dir,
         default_max_turns=max_turns,
     )

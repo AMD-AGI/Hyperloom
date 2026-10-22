@@ -95,7 +95,7 @@ def recovery_block(state: Any) -> dict[str, Any]:
 
 
 def grading_block(state: Any) -> dict[str, Any]:
-    """The axis this session was configured to grade on, and the band it grades under.
+    """The grading mode this session started in, and the band it grades under.
 
     Prefers ``state.grading`` recorded at seed. A mapping snapshot with no
     recorded axis is absence, not the exporting process's environment. A live

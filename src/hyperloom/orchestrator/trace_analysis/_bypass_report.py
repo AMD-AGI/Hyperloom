@@ -369,9 +369,7 @@ def _candidate(idx: int, k: dict[str, Any], *, framework: str, target_platform: 
         "arithmetic_intensity": None,
         "compute_utilization_pct": None,
         "bandwidth_utilization_pct": None,
-        "rocprof_roofline": None,
         # Placeholder roofline: bound_type/AI/util above are structural defaults, NOT measured.
-        "roofline_measured": False,
         "roofline_source": _RL_PLACEHOLDER,
         "library": "",
         "backend": framework,
@@ -394,7 +392,7 @@ def _candidate(idx: int, k: dict[str, Any], *, framework: str, target_platform: 
         **shape,
     }
     if shape["shape_dispatchable"]:
-        # Analytical roofline from the operand shape and measured time; rocprof enrichment later refines it.
+        # Analytical roofline from the operand shape and measured time.
         aggregate = KernelAggregate(kc.category, shape["shapes"][0]["shape"], cand["duration_us"], cand["call_count"])
         cand.update(compute_roofline(aggregate, gpu_type=target_platform) or {})
     # Optimization ROI = GPU-time share x headroom (1 - efficiency); with no analytical efficiency it is gpu_pct.
@@ -564,7 +562,6 @@ _METRICS_COLUMNS: list[str] = [
     "compute_utilization_pct",
     "bandwidth_utilization_pct",
     "roofline_source",
-    "roofline_measured",
     "reusable_native_kernel",
     "source_file",
     "source_type",
@@ -616,7 +613,6 @@ def build_metrics_rows(candidates: dict[str, Any]) -> list[dict[str, Any]]:
                 "compute_utilization_pct": c.get("compute_utilization_pct", ""),
                 "bandwidth_utilization_pct": c.get("bandwidth_utilization_pct", ""),
                 "roofline_source": c.get("roofline_source", ""),
-                "roofline_measured": c.get("roofline_measured", ""),
                 "reusable_native_kernel": c.get("reusable_native_kernel", ""),
                 "source_file": c.get("source_file", ""),
                 "source_type": c.get("source_type", ""),
@@ -1057,10 +1053,8 @@ def build_kernel_roofline(
                 "bandwidth_utilization_pct": c["bandwidth_utilization_pct"],
                 "reusable_native_kernel": c["reusable_native_kernel"],
                 "source_file": c["source_file"],
-                "rocprof_roofline": c["rocprof_roofline"],
                 "flops_per_byte": c.get("flops_per_byte"),
                 # roofline_source is how the bound was derived.
-                "roofline_measured": c.get("roofline_measured", False),
                 "roofline_source": c.get("roofline_source", _RL_PLACEHOLDER),
             }
         )
