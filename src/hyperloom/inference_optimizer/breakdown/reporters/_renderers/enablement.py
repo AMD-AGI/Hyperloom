@@ -48,6 +48,8 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     ]
     if attempts.get("landed"):
         facts.append(f"{attempts['landed']} round(s) landed a fix.")
+    if attempts.get("validation_pending"):
+        facts.append(f"{attempts['validation_pending']} kept round(s) awaiting revalidation.")
     if attempts.get("advanced"):
         facts.append(f"{attempts['advanced']} round(s) moved the boot forward without landing one.")
     if builds.get("failed"):
@@ -65,6 +67,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
                 ("rounds", attempts.get("count")),
                 ("settled", attempts.get("settled")),
                 ("landed", attempts.get("landed")),
+                ("validation_pending", attempts.get("validation_pending") or None),
                 ("advanced", attempts.get("advanced")),
                 ("builds", builds.get("count")),
                 ("builds_failed", builds.get("failed")),
