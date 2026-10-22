@@ -571,7 +571,7 @@ def test_a_met_target_renames_a_budget_limited_sweep_exit():
         phase_started_unix=started.timestamp(),
         start_ts=started.isoformat(),
         max_minutes=60,
-        phase_budget_pct={phase_state.PHASE_SWEEP: 0.0001},
+        phase_budget_pct={phase_state.PHASE_SWEEP: 0.5},
         stop_reason="",
         closing_phase=False,
         target_reached_at="2026-09-04T00:00:00+00:00",
