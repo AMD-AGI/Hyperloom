@@ -29,30 +29,6 @@ def test_protected_status_is_independent_of_source_hints(tmp_path: Path):
     assert not is_protected_path("src/helper.cu", workspace=tmp_path)
 
 
-def test_a_declared_target_escapes_only_the_test_name_patterns(tmp_path: Path):
-    """ROCmBench keeps each kernel in the test_*.py that also holds its tests."""
-    target = "test_flashattention_fwd.py"
-
-    assert is_protected_path(target, workspace=tmp_path)
-    assert not is_protected_path(target, workspace=tmp_path, editable_paths=[target])
-    assert not is_protected_path(tmp_path / target, workspace=tmp_path, editable_paths=[tmp_path / target])
-    # Only the declared file, and never through an exact path, a protected directory or another pattern.
-    assert is_protected_path("test_other.py", workspace=tmp_path, editable_paths=[target])
-    assert is_protected_path(target, workspace=tmp_path, exact_paths=[target], editable_paths=[target])
-    assert is_protected_path("tests/test_kernel.py", workspace=tmp_path, editable_paths=["tests/test_kernel.py"])
-    for declared in ("config.yaml", "kernel_harness.py", "kernel_reference.py", "conftest.py"):
-        assert is_protected_path(declared, workspace=tmp_path, editable_paths=[declared])
-
-
-def test_the_protected_inventory_leaves_out_a_declared_target(tmp_path: Path):
-    (tmp_path / "test_kernel.py").write_text("def kernel():\n    return 1\n")
-    (tmp_path / "test_other.py").write_text("assert True\n")
-
-    inventory = protected_path_inventory(tmp_path, editable_paths=["test_kernel.py"])
-
-    assert {path.name for path in inventory} == {"test_other.py"}
-
-
 def test_tracked_editable_paths_are_all_non_protected_files(tmp_path: Path):
     _git(tmp_path, "init", "-q")
     files = {

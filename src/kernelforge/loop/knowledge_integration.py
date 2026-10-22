@@ -134,7 +134,7 @@ def _editable_workspace_paths(
     source_files: list[str] | None,
     driver: str = "",
 ) -> set[str]:
-    """Return tracked non-protected paths plus the declared kernel and source files."""
+    """Return tracked non-protected paths plus explicitly declared new files."""
 
     workspace = Path(workspace_dir).resolve()
     protected = [driver] if driver else []
@@ -143,7 +143,7 @@ def _editable_workspace_paths(
         exact_protected_paths=protected,
     )
     # Declarations are not an upper bound, but they may explicitly authorize a new implementation file that does not
-    # exist in the pristine tree yet, or a declared target named like a test (a kernel colocated with its tests).
+    # exist in the pristine tree yet.
     for raw in [kernel, *(source_files or [])]:
         path = Path(raw)
         absolute = path.resolve() if path.is_absolute() else (workspace / path).resolve()
@@ -155,7 +155,6 @@ def _editable_workspace_paths(
             relative,
             workspace=workspace,
             exact_paths=protected,
-            editable_paths=(relative,),
         ):
             allowed.add(relative)
     return allowed
