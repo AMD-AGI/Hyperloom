@@ -28,7 +28,11 @@ with open(os.environ["FAKE_RECORD"], "w") as handle:
 mode = os.environ.get("FAKE_MODE", "ok")
 if mode == "hang":
     import subprocess
-    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"])
+    usage = {{"input_tokens": 10, "output_tokens": 40}}
+    message = {{"id": "m0", "model": "{model}", "usage": usage, "content": []}}
+    print(json.dumps({{"type": "assistant", "message": message, "session_id": "s-1"}}), flush=True)
+    # A Claude CLI runs each shell command in a session of its own.
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"], start_new_session=True)
     with open(os.environ["FAKE_RECORD"] + ".child", "w") as handle:
         handle.write(str(child.pid))
     time.sleep(600)
@@ -94,7 +98,7 @@ def test_a_run_reads_and_nothing_else() -> None:
     assert argv[argv.index("--tools") + 1] == ",".join(TOOLS)
     allowed = argv[argv.index("--allowedTools") + 1].split(",")
     assert allowed == list(ALLOWED_TOOLS) and not {"Edit", "Write", "Bash"} & set(allowed)
-    assert "--strict-mcp-config" in argv and "--mcp-config" not in argv
+    assert "--strict-mcp-config" in argv and "--mcp-config" not in argv and "--restricted" in argv
     assert argv[argv.index("--permission-mode") + 1] == "dontAsk"
     assert "--model" not in onboard_argv(AgentCommand("claude", "claude"))
 
@@ -132,9 +136,12 @@ async def test_a_run_past_its_time_is_killed_with_what_it_started(tmp_path: Path
     command, env, checkout, record = _setup(tmp_path, "hang")
     child = Path(f"{record}.child")
 
-    with pytest.raises(AttemptFailed, match="did not answer within 2 s"):
-        await cli_onboard(command, env, "b07", _Usage(), seconds=2.0)(checkout, "p")
+    usage = _Usage()
 
+    with pytest.raises(AttemptFailed, match="did not answer within 2 s"):
+        await cli_onboard(command, env, "b07", usage, seconds=2.0)(checkout, "p")
+
+    assert [recorded.tokens for recorded in usage.recorded] == [TokenCounts(10, 40)]
     assert child.exists()
     for pid in (json.loads(record.read_text(encoding="utf-8"))["pid"], int(child.read_text(encoding="utf-8"))):
         with pytest.raises(ProcessLookupError):

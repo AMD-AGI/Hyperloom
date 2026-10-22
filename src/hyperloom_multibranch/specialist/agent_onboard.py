@@ -3,14 +3,14 @@
 
 """The onboarding model of an autonomous branch's preflight: one headless run of the specialist's Claude CLI.
 
-The CLI reads the agent's checkout and answers; it gets no MCP server and only the tools that read: the file tools and
-a few shell commands that print. A third-party checkout is untrusted, so nothing the CLI runs may write or execute what
-the checkout holds. Each run streams to a log of its own beside the checkout, which is what its spend is read from
-(:mod:`llm_usage`, as a specialist launch's is) and what a reader goes to when onboarding failed. A run that exits
-non-zero, outlives its timeout or answers with an error raises
+The CLI reads the agent's checkout and answers; it gets no MCP server and only the tools that read: the file tools and a
+few shell commands that print. A third-party checkout is untrusted, so nothing the CLI runs may write or execute what
+the checkout holds, nor read its settings, whose hooks would run its code. Each run streams to a log of its own beside
+the checkout, which is what its spend is read from (:mod:`llm_usage`, as a specialist launch's is) and what a reader
+goes to when onboarding failed. A run that exits non-zero, outlives its timeout or answers with an error raises
 :class:`~hyperloom_multibranch.specialist.agent_onboarding.AttemptFailed`, so it fails that attempt and the next one
-asks again; its spend is the branch's either way. Codex has no read-only headless mode this module drives, so it is
-refused.
+asks again; its spend is the branch's either way, a run cut short included. Codex has no read-only headless mode this
+module drives, so it is refused.
 """
 
 from __future__ import annotations
@@ -27,6 +27,7 @@ from hyperloom_multibranch.contracts.notebook.interfaces import UsageSink
 from hyperloom_multibranch.contracts.notebook.records import LlmUsage
 from hyperloom_multibranch.contracts.notebook.vocab import UsageSource
 from hyperloom_multibranch.specialist.agent_onboarding import ENCODING, AttemptFailed, Onboard, tail
+from hyperloom_multibranch.specialist.agent_sandbox import MARKER, marked_pids
 from hyperloom_multibranch.specialist.agent_session import AgentCommand
 from hyperloom_multibranch.specialist.llm_usage import launch_cost, launch_usage
 
@@ -72,6 +73,8 @@ def onboard_argv(command: AgentCommand) -> tuple[str, ...]:
         "dontAsk",
         # With no --mcp-config this loads no MCP server at all, not even the user's.
         "--strict-mcp-config",
+        # No settings file is read, so no hook the checkout ships runs, and no wrapper can bypass the permissions.
+        "--restricted",
         "--no-session-persistence",
     )
 
@@ -90,10 +93,8 @@ def cli_onboard(
             returncode = await asyncio.wait_for(_run(argv, checkout, env, prompt, log), seconds)
         except asyncio.TimeoutError as error:
             raise AttemptFailed(f"the onboarding CLI did not answer within {seconds:.0f} s") from error
-        used = await asyncio.to_thread(launch_usage, log)
-        if used.tokens:
-            cost = launch_cost(used.tokens, command.model)
-            await usage.record_llm_usage(LlmUsage(branch, UsageSource.SPECIALIST, cost, used.total, used.session_id))
+        finally:
+            await _record(log, branch, command.model, usage)
         result = await asyncio.to_thread(final_result, log)
         if returncode != 0:
             raise AttemptFailed(f"the onboarding CLI exited {returncode}: {tail(_text(log))}")
@@ -121,17 +122,27 @@ def final_result(log: Path) -> Mapping[str, object] | None:
     return None
 
 
+async def _record(log: Path, branch: str, model: str, usage: UsageSink) -> None:
+    """Record what the run that streamed to ``log`` used as ``branch``'s, a run cut short included."""
+
+    used = await asyncio.to_thread(launch_usage, log)
+    if used.tokens:
+        cost = launch_cost(used.tokens, model)
+        await usage.record_llm_usage(LlmUsage(branch, UsageSource.SPECIALIST, cost, used.total, used.session_id))
+
+
 async def _run(argv: tuple[str, ...], cwd: Path, env: Mapping[str, str], prompt: str, log: Path) -> int:
+    marked = {**env, MARKER: str(log)}
     with log.open("wb") as out:
         process = await asyncio.create_subprocess_exec(
-            *argv, cwd=cwd, env=dict(env), stdin=asyncio.subprocess.PIPE, stdout=out, stderr=out, start_new_session=True
+            *argv, cwd=cwd, env=marked, stdin=asyncio.subprocess.PIPE, stdout=out, stderr=out, start_new_session=True
         )
         try:
             await process.communicate(prompt.encode(ENCODING))
         finally:
-            # The CLI's shell commands run in its process group; a cancelled or timed-out run must not leave them.
+            # The CLI runs each shell command in a session of its own; a run cut short must leave none behind.
             if process.returncode is None:
-                _kill_group(process.pid)
+                _kill(marked_pids(str(log)))
                 await process.wait()
     return process.returncode or 0
 
@@ -145,11 +156,12 @@ def _text(log: Path) -> str:
     return log.read_text(encoding=ENCODING, errors="replace")
 
 
-def _kill_group(pid: int) -> None:
-    try:
-        os.killpg(pid, signal.SIGKILL)
-    except ProcessLookupError:
-        return
+def _kill(pids: list[int]) -> None:
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            continue
 
 
 __all__ = ["ALLOWED_TOOLS", "LOG_PREFIX", "ONBOARD_SECONDS", "TOOLS", "cli_onboard", "final_result", "onboard_argv"]
