@@ -277,8 +277,9 @@ def without_file(patch: str, manifest: AgentManifest) -> str:
 
     if manifest.config_source is None:
         return patch
+    path = manifest.config_source.path
     sections = patch.split("diff --git ")
-    kept = [section for section in sections[1:] if manifest.config_source.path not in section.split("\n", 1)[0]]
+    kept = [section for section in sections[1:] if section.split("\n", 1)[0] != f"a/{path} b/{path}"]
     return "".join([sections[0], *(f"diff --git {section}" for section in kept)])
 
 

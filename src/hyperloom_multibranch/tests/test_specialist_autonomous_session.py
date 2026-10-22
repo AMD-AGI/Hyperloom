@@ -22,7 +22,13 @@ from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.tests.factories import result
 from hyperloom_multibranch.specialist.agent_onboarding import AgentSpec, CommandResult, OnboardingSetup
 from hyperloom_multibranch.specialist.agent_session import BranchPlace
-from hyperloom_multibranch.specialist.autonomous_session import AGENT_DIR, AutonomousSession, AutonomousSetup
+from hyperloom_multibranch.specialist.agent_manifest import AgentManifest
+from hyperloom_multibranch.specialist.autonomous_session import (
+    AGENT_DIR,
+    AutonomousSession,
+    AutonomousSetup,
+    without_file,
+)
 from hyperloom_multibranch.specialist.judging import NOTICE
 from hyperloom_multibranch.specialist.runtime import SessionCrashed, SessionFinished, SessionStart
 from hyperloom_multibranch.tests.branch_rig import branch_rig
@@ -336,3 +342,13 @@ async def test_a_keep_made_just_before_the_agent_exits_is_imported(tmp_path: Pat
 
     with pytest.raises(SessionFinished):
         await asyncio.wait_for(running, 10)
+
+
+def test_only_the_file_the_agent_keeps_its_config_in_leaves_the_source_patch() -> None:
+    manifest = AgentManifest.read({**json.loads(_manifest("/ws", Agent())), "config_source": CONFIG_SOURCE})
+    sections = [
+        f"diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n@@ -1 +1 @@\n-x\n+y\n"
+        for path in ("agent-config.json", "vllm/agent-config.json.py")
+    ]
+
+    assert without_file("".join(sections), manifest) == sections[1]

@@ -20,6 +20,7 @@ import asyncio
 import json
 import os
 import re
+import shutil
 import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
@@ -218,6 +219,8 @@ async def _fetch(source: str, checkout: Path) -> str:
         if ref:
             checked = await _git([GIT, "checkout", "--quiet", ref], checkout)
             if checked.returncode != 0:
+                # Left in place, the clone would pass the next attempt on its default branch.
+                shutil.rmtree(checkout)
                 raise AttemptFailed(f"checking out {ref}: {tail(checked.output)}")
     head = await _git([GIT, "rev-parse", "HEAD"], checkout)
     return head.output.strip()
@@ -233,13 +236,22 @@ async def _git(argv: list[str], cwd: Path) -> CommandResult:
 
 
 def split_source(source: str) -> tuple[str, str]:
-    """``source`` as the repository and the ref after its last ``@``; the ref is ``""`` when what follows the ``@`` is
-    a host or a path, as in ``git@host:org/repo``."""
+    """``source`` as the repository and the ref after its last ``@``; the ref is ``""`` when what comes before that
+    ``@`` is no whole repository but a user, as in ``git@host:org/repo`` or ``ssh://git@host/org/repo``."""
 
     url, at, ref = source.rpartition("@")
-    if not at or not url or "/" in ref or ":" in ref:
+    if not at or not ref or ":" in ref or not _is_repository(url):
         return source, ""
     return url, ref
+
+
+def _is_repository(url: str) -> bool:
+    """Whether ``url`` names a whole repository: a path, a URL with a path past its host, or ``host:path``."""
+
+    _, scheme, rest = url.partition("://")
+    if scheme:
+        return "/" in rest
+    return url.startswith(("/", ".", "~")) or ":" in url
 
 
 def agent_env(agent_dir: Path) -> dict[str, str]:

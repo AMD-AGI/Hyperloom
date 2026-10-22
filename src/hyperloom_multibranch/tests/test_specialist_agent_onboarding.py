@@ -166,3 +166,22 @@ def test_a_source_ref_follows_its_last_at_unless_that_names_a_host() -> None:
     assert split_source("https://github.com/acme/agent@v1.2") == ("https://github.com/acme/agent", "v1.2")
     assert split_source("git@github.com:acme/agent.git") == ("git@github.com:acme/agent.git", "")
     assert split_source("/shared/agent") == ("/shared/agent", "")
+    assert split_source("https://github.com/acme/agent.git@feature/x") == (
+        "https://github.com/acme/agent.git",
+        "feature/x",
+    )
+    assert split_source("ssh://git@github.com/acme/agent.git") == ("ssh://git@github.com/acme/agent.git", "")
+    assert split_source("ssh://git@github.com/acme/agent@v1") == ("ssh://git@github.com/acme/agent", "v1")
+    assert split_source("git@github.com:acme/agent.git@v1") == ("git@github.com:acme/agent.git", "v1")
+    assert split_source("/shared/agent@feature/x") == ("/shared/agent", "feature/x")
+
+
+async def test_a_ref_that_cannot_be_checked_out_fails_every_attempt(tmp_path: Path) -> None:
+    repo = _agent_repo(tmp_path)
+    sandbox, onboard = Sandbox([Process(None)] * 3, keep="run/session.json"), Onboarder([_manifest()] * 3)
+
+    with pytest.raises(PreflightFailed) as failed:
+        await make_ready(f"{repo}@no-such-ref", SPEC, tmp_path / "agent", _setup(sandbox, onboard))
+
+    assert all("checking out no-such-ref" in reason for reason in failed.value.reasons)
+    assert not sandbox.ran
