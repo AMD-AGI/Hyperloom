@@ -154,7 +154,8 @@ profile ranks highest. That every setting near your direction was tried never me
 end a turn to wait for a brief: one comes only when the session moves, and a branch that keeps finding nothing to \
 test is stopped. Once it is done, with nothing promising left in it (a tuning pass \
 can be done within the hour), record that before you move on: one branch-log entry that starts with "EXHAUSTED " \
-and goes on with one JSON object with the keys direction, head (your head commit), tried (the request ids of its \
+and goes on with one JSON object with the keys direction (the name of the session's direction exactly as listed \
+below), head (your head commit), tried (the request ids of its \
 tests, at least one: a direction you have not tested is not done), why (no_ceiling_above_bar, \
 all_tested_or_claimed, blocked_by_tool or needs_capability), detail (one sentence) and reopen_if (what would make \
 it worth trying again). It is kept for the record and for later sessions and does not \

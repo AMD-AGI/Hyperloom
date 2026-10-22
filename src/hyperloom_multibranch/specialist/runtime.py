@@ -255,11 +255,17 @@ class SpecialistRuntime:
 
     async def _learn_exhausted(self, state: _Branch) -> None:
         """Close, on its head, each of the session's directions that ``state``'s specialist recorded exhausted."""
+        names = {direction_name(direction).lower(): direction for direction in DIRECTIONS}
         for exhausted in exhausted_records(await state.notebook.branch_log(state.name)):
-            named = exhausted.direction.strip().lower()
-            for direction in DIRECTIONS:
-                if named.startswith(direction_name(direction).lower()):
-                    self._closed.add((exhausted.head, direction))
+            direction = names.get(exhausted.direction.strip().lower())
+            if direction is None:
+                logger.warning(
+                    "an exhausted record of %s names none of the session's directions: %r",
+                    state.name,
+                    exhausted.direction,
+                )
+                continue
+            self._closed.add((exhausted.head, direction))
 
     def _least_held(self, start_commit: str) -> str:
         running = [state.task.direction for state in self._branches.values()]

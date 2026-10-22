@@ -270,6 +270,7 @@ def test_the_role_says_how_to_record_a_direction_done_on_a_head_with_every_reaso
     assert all(why.value in prompt for why in ExhaustedWhy)
     assert "does not stop your branch" in prompt
     assert "at least one: a direction you have not tested is not done" in prompt
+    assert "direction (the name of the session's direction exactly as listed below" in prompt
 
 
 def test_the_role_says_a_test_is_how_a_specialist_without_a_gpu_measures_a_candidate():
