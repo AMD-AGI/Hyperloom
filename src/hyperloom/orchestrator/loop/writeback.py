@@ -55,6 +55,7 @@ from hyperloom.inference_optimizer.breakdown.stop_reasons import (
     PATCH_RECOVERY_INCOMPLETE_STOP_REASON,
 )
 from ..phases.machine_state import PHASE_ENABLEMENT, record_lifecycle_event
+from .resume_source_layers import install_kept_source_layers
 from ..actions.stop_attribution import stopped_by_the_run_class
 from ..bringup import ARGV_INVALID
 from ..framework.artifacts import candidate_key
@@ -70,7 +71,7 @@ from ..kernel.geak_config import _geak_overlay_digest
 from ..state.round_store import ABANDONED, FAILED
 from ..state.task_registry import Task
 from ..actions.executors.benchmark_result import is_valid_measurement
-from ..actions.executors.integrate_patch import KEEP_STATUSES
+from ..actions.executors._integrate_vocabulary import KEEP_STATUSES
 from ..actions.executors._accuracy_gate import (
     BASELINE_EVAL_ACCURACY_FLOOR_KEY,
     BASELINE_EVAL_CONTRACT_FINGERPRINT_KEY,
@@ -3451,14 +3452,14 @@ class WritebackCollaborator(GeakRevalidation):
         # (1c) Combined PRELUDE replay: no benchmark verdict survived the
         # restart, so restore both Recipe and Kernel trees before continuing.
         await self._resume_recover_pending_warm_replay(report)
-        # (1d) Orphaned revalidation tasks: if enablement_validation_pending is set
-        # but the tracked revalidation task is already terminal, unstick the window
-        # so a fresh revalidation can be enqueued -- closed and charged to the
+        # (1d) Orphaned revalidation tasks: if enablement_validation_pending is set but the tracked revalidation task
+        # is already terminal, unstick the window so a fresh revalidation can be enqueued -- closed and charged to the
         # stall counter, or reopened uncharged when the run cancelled the row.
         await self._resume_recover_pending_revalidation(report)
-        # (2) Orphaned KEEPs: replay integrate_patch KEEPs
-        # that crashed before the append landed; surface ambiguous ones loudly.
+        # (2) Replay orphaned KEEPs that crashed before the append, then (2b) put the kept source patches on the tree.
         await self._resume_recover_orphaned_keeps(report)
+        if halt := install_kept_source_layers(state, self.session_dir, report):
+            raise IntegrateRecoveryIncomplete(halt)
 
         # (3) A config with no stack behind it cannot be reproduced.
         if state.current_best and not state.optimization_stack:
@@ -3526,7 +3527,7 @@ class WritebackCollaborator(GeakRevalidation):
         Returns:
             A summary ``{"reversed": [...], "failed": [...]}``.
         """
-        from ..actions.executors.integrate_patch import restore_pending_integrate
+        from ..actions.executors._patch_git import restore_pending_integrate
         from ..actions.executors.source_tree_identity import settle_replaced_tree, tree_replaced
 
         if tree_replaced(pending, gone_scope):
