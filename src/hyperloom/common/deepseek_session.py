@@ -14,7 +14,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.llm_config import LLMConfigError, resolve_openai_client_config
+from hyperloom.common.llm_config import (
+    AGENT_BACKEND_DEEPSEEK,
+    LLMConfigError,
+    resolve_forge_llm_model,
+    resolve_openai_client_config,
+)
 from hyperloom.common.reasoning_effort import DEFAULT_REASONING_EFFORT, harness_reasoning_effort
 
 #: The route the harness mounts for DeepSeek models in its own default plugin
@@ -269,7 +274,8 @@ class DeepSeekSession:
     """
 
     cwd: Path
-    model: str
+    #: Empty takes the harness model ``DSH_MODEL`` names, or the shared default.
+    model: str = ""
     #: Carried on the first message of each conversation. The harness owns its
     #: system prompt through its plugin composition and its SDK exposes no
     #: per-session field for one, so there is nowhere else to put these.
@@ -284,7 +290,8 @@ class DeepSeekSession:
     _session_id: str = field(default="", init=False, repr=False)
 
     def __post_init__(self) -> None:
-        """Resolve the workspace and the harness home before any turn runs."""
+        """Resolve the workspace, the model and the harness home before any turn runs."""
+        self.model = self.model.strip() or resolve_forge_llm_model(AGENT_BACKEND_DEEPSEEK)
         self.cwd = Path(self.cwd).expanduser().resolve()
         home = Path(self.dsh_home).expanduser() if self.dsh_home else Path.home() / ".cache" / "hyperloom" / "dsh_home"
         self.dsh_home = home.resolve()
