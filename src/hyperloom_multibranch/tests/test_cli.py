@@ -240,6 +240,16 @@ def test_an_agent_source_with_credentials_or_one_too_many_is_a_usage_error(extra
         _settings(*extra)
 
 
+@pytest.mark.parametrize("source", ["ssh://git@github.com/acme/agent.git", "git@github.com:acme/agent.git@v1"])
+def test_an_agent_source_whose_user_is_an_ssh_login_is_accepted(source: str) -> None:
+    assert _settings("--autonomous-agent", source).agents == (source,)
+
+
+def test_an_ssh_source_with_a_password_carries_credentials() -> None:
+    with pytest.raises(ValueError, match="credentials"):
+        _settings("--autonomous-agent", "ssh://git:secret@github.com/acme/agent.git")
+
+
 def _prompt_file(tmp_path: Path, name: str, text: str | bytes | None) -> str:
     """A prompt file holding ``text``; none is written for ``None``."""
 

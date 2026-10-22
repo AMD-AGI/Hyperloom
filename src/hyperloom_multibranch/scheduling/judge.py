@@ -138,7 +138,8 @@ opening batch, and the opening batch fills the slots they leave. Every specialis
 while its grace is true, until {SETTLED_TESTS} of its explore tests ended with a result, a failed one included, a
 stop or a lower K you give it is not applied, unless its specialist gave up or its judging failed.
 A branch whose steered is false runs a third-party agent the user named, by the agent's own logic, one test at a time:
-it has no grace, and no stop or K you give it is applied; weigh the slot it holds as given.
+it has no grace, and no stop or K you give it is applied, unless its judging failed: stop it then, as any branch whose
+judging failed. Otherwise weigh the slot it holds as given.
 A branch's pending_candidates are its measured candidates that beat its head by at least the bar while their confirm
 runs, each with its gain_over_head_pct. A branch with a pending candidate cannot be stopped or narrowed until its
 confirm is judged: a stop or a lower K you give it is not applied, unless its judging failed.
@@ -542,15 +543,21 @@ def cap_decision(decision: JudgeDecision, view: JudgeView) -> JudgeDecision:
 def hold_decision(
     decision: JudgeDecision, held: Mapping[str, HoldReason], roster: Iterable[BranchEntry]
 ) -> JudgeDecision:
-    """``decision`` without the stops and the lower K orders of the ``held`` branches, each named in ``held`` once;
-    ``roster`` gives the K a branch runs at now. Applying it twice changes nothing more."""
+    """``decision`` without the stops and the lower K orders of the ``held`` branches, and without any K order for a
+    branch the judge does not steer whatever holds it, each named in ``held`` once; ``roster`` gives the K a branch
+    runs at now and its origin. Applying it twice changes nothing more."""
 
-    running_k = {entry.branch: entry.k for entry in roster}
+    entries = tuple(roster)
+    running_k = {entry.branch: entry.k for entry in entries}
+    unsteered = {entry.branch for entry in entries if not entry.origin.steered_by_judge}
     refused_stops = [order for order in decision.stop if order.branch in held]
     refused_ks = [
         order
         for order in decision.k
-        if order.branch in held and (order.k < running_k[order.branch] or held[order.branch] is HoldReason.UNSTEERED)
+        if order.branch in held
+        and (
+            order.k < running_k[order.branch] or order.branch in unsteered or held[order.branch] is HoldReason.UNSTEERED
+        )
     ]
     named = {item.branch: item for item in decision.held} | {
         order.branch: HeldOrder(order.branch, held[order.branch]) for order in (*refused_stops, *refused_ks)

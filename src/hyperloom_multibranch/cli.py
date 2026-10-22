@@ -271,7 +271,9 @@ def _agents(sources: list[str], free: int) -> tuple[str, ...]:
         raise ValueError(f"--autonomous-agent is given {len(sources)} times, more than the {free} branches left")
     for source in sources:
         scheme, found, rest = source.partition("://")
-        if found and "@" in rest.split("/", 1)[0]:
+        user, at, _host = rest.split("/", 1)[0].rpartition("@")
+        # An ssh URL's user is its login name; a password, or any user of an http URL, is a credential.
+        if found and at and (":" in user or scheme.lower() in ("http", "https")):
             raise ValueError(f"--autonomous-agent {scheme}://... carries credentials; give them in the environment")
     return tuple(sources)
 

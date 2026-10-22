@@ -60,7 +60,8 @@ class BranchOrigin(str, Enum):
     @property
     def steered_by_judge(self) -> bool:
         """Whether the judge's stops and K orders apply to the branch; an agent's branch runs by the agent's own
-        logic, and only the session's stops, and the stop of a specialist that gave up, reach it."""
+        logic, and only the session's stops, the stop of a specialist that gave up and the judge's stop once its judging
+        failed reach it."""
 
         return self is not BranchOrigin.AGENT
 

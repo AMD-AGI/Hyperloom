@@ -746,13 +746,16 @@ def test_an_autonomous_branch_is_never_steered_by_the_judge_but_a_pending_confir
     held = held_branches(roster, waiting, settled, {"b04": gave_up})
 
     assert (held["b04"], held["b05"]) == (HoldReason.UNSTEERED, HoldReason.PENDING_CONFIRM)
-    decision = JudgeDecision(k=(KOrder("b04", 2),), stop=(StopOrder("b04", STOP_REASON),))
+    decision = JudgeDecision(k=(KOrder("b04", 2), KOrder("b05", 3)), stop=(StopOrder("b04", STOP_REASON),))
     applied = hold_decision(decision, held, roster)
     assert (applied.stop, applied.k) == ((), ())
-    assert [order.branch for order in applied.held] == ["b04"]
+    assert [order.branch for order in applied.held] == ["b04", "b05"]
     rows = {row["branch"]: row for row in _state(_view(roster=roster, held=held))["branches"]}
     assert rows["b04"]["steered"] is False and "steered" not in rows["b01"]
-    assert "steered is false" in " ".join(JUDGE_SYSTEM_PROMPT.split())
+    prompt = " ".join(JUDGE_SYSTEM_PROMPT.split())
+    assert "steered is false" in prompt
+    steered_line = prompt[prompt.index("steered is false") :].split(".")[0]
+    assert "unless its judging failed" in steered_line
 
 
 CANDIDATE = PendingCandidate("b01-r7", "b01-r7-confirm", "c-b01", METRIC, 116.6, 6.04321)
