@@ -35,7 +35,8 @@ ONBOARD_SECONDS = 900.0
 LOG_PREFIX = "onboard-"
 #: The built-in tools the CLI has at all; what Bash may run is :data:`ALLOWED_TOOLS`.
 TOOLS = ("Read", "Glob", "Grep", "Bash")
-#: Shell commands that only print. ``find`` is not among them: ``-delete`` and ``-exec`` write and run.
+#: Shell commands that only print. ``find`` (``-delete``, ``-exec``) and ``git log``/``git show`` (``--output``) are not
+#: among them: an option of theirs writes or runs.
 ALLOWED_TOOLS = (
     "Read",
     "Glob",
@@ -45,8 +46,6 @@ ALLOWED_TOOLS = (
     "Bash(head:*)",
     "Bash(tail:*)",
     "Bash(wc:*)",
-    "Bash(git log:*)",
-    "Bash(git show:*)",
     "Bash(git ls-files:*)",
 )
 

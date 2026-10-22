@@ -98,6 +98,8 @@ def test_a_run_reads_and_nothing_else() -> None:
     assert argv[argv.index("--tools") + 1] == ",".join(TOOLS)
     allowed = argv[argv.index("--allowedTools") + 1].split(",")
     assert allowed == list(ALLOWED_TOOLS) and not {"Edit", "Write", "Bash"} & set(allowed)
+    # git log and git show write any file with --output.
+    assert not [tool for tool in allowed if tool.startswith(("Bash(git log", "Bash(git show"))]
     assert "--strict-mcp-config" in argv and "--mcp-config" not in argv and "--restricted" in argv
     assert argv[argv.index("--permission-mode") + 1] == "dontAsk"
     assert "--model" not in onboard_argv(AgentCommand("claude", "claude"))
