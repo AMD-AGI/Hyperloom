@@ -23,6 +23,7 @@ from kernelforge.agent_backends import (
     StdioMcpServer,
     watchdog_timeout_sec,
 )
+from kernelforge.agent_backends.base import PYTHON_LAUNCH_ENV_VARS
 from kernelforge.agent_backends.session_resume import is_api_failure
 from kernelforge.knowledge.wiki_tool import KnowledgeWikiTool, require_mcp_backend, wiki_servers, wiki_tool_names
 from kernelforge.tools.process_reaping import ReapReport, reap_processes_under
@@ -79,11 +80,7 @@ _PROBE_SECTION_TITLE = "## Scratch probe ledger"
 
 # What the probe's MCP child needs from this process and would not otherwise get.
 _PROBE_CHILD_ENV_VARS = (
-    # The child's own launch: `python -m kernelforge...` from a checkout.
-    "PYTHONPATH",
-    "PYTHONHOME",
-    "VIRTUAL_ENV",
-    "CONDA_PREFIX",
+    *PYTHON_LAUNCH_ENV_VARS,
     # ROCm toolchain and runtime: without these the driver finds no compiler and no libraries.
     "ROCM_PATH",
     "HIP_PATH",

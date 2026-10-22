@@ -324,7 +324,9 @@ def _service(tmp_path, backend, *, profiling_enabled=True, **config_fields):
         (profiling / name).write_text(f"# {name}\n")
     return AnalysisAgentService(
         backend=backend,
-        config=SimpleNamespace(local_knowledge_dir=knowledge, **config_fields),
+        config=SimpleNamespace(
+            local_knowledge_dir=knowledge, **{"knowledge_wiki_root": "", "knowledge_wiki_log": "", **config_fields}
+        ),
         timeout_sec=10,
         max_turns=10,
         profiling_enabled=profiling_enabled,
