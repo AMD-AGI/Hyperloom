@@ -53,6 +53,15 @@ _REPO_TASK_TYPES = {"repository", "image_kernel"}
 # e.g. the PORT loop).
 _DEFAULT_SESSION_TIMEOUT_SEC = 90 * 60
 _IMPLEMENTER_ROLE = "implementer"
+# The most of a rationale any reader records: the iteration_result event.
+_RATIONALE_MAX_CHARS = 500
+# Both Implementer prompts ask for the one line agent_fn records as the iteration's rationale.
+_RATIONALE_REQUEST = (
+    "Just before your `PLAN:` line, output one line starting with `RATIONALE:` for the trajectory log: the direction "
+    "you chose and why, the change you made, and why you expect it to beat the current best — or, if you are stopping "
+    "without a win, why this direction is exhausted and what you would try next. Only that line is recorded with the "
+    "iteration's keep/revert decision, so make it specific enough to compare runs by."
+)
 
 # PR KB settings forwarded to the MCP child.
 _PR_KB_CHILD_ENV_VARS = (
@@ -260,8 +269,8 @@ async def _run_outer_gate_turns(gate, backend, run_spec: AgentRunSpec, run_resul
             "The canonical Forge gate rejected your current candidate. "
             "Continue the SAME optimization session: inspect the concrete "
             "failure below, edit only the allowed kernel source files, "
-            "re-run any useful checks, and finish with an updated PLAN: "
-            "line. Do not modify git state or measurement files."
+            "re-run any useful checks, and finish with updated RATIONALE: "
+            "and PLAN: lines. Do not modify git state or measurement files."
             "\n\n## Canonical gate feedback\n"
             f"{decision.get('reason', '')}"
         )
@@ -533,12 +542,8 @@ You are a GPU kernel optimization agent in an autonomous iteration loop.
 ## Your Task
 Each invocation: read the target kernel, review the recent iteration history,
 and modify it to improve performance. You MAY make multiple changes across
-several places this iteration — you are not limited to a single change. Then,
-in your final message, state your reasoning for the trajectory log: the
-direction you chose and why, the change you made, and why you expect it to beat
-the current best — or, if you are stopping without a win, why this direction is
-exhausted and what you would try next. This rationale is recorded with the
-iteration's keep/revert decision, so make it specific enough to compare runs by.
+several places this iteration — you are not limited to a single change.
+{_RATIONALE_REQUEST}
 
 ## Program (what to optimize and how)
 {program_md}
@@ -675,6 +680,7 @@ judge your kernel. It is yours to READ and to RUN; it is NOT yours to change.
   say so. An assumption about what the harness does is not a reason.
 - {workspace_hygiene_rule}
 - {deliverable_hygiene_rule}
+- {_RATIONALE_REQUEST}
 - As your VERY LAST output, after all edits/fixes are done and the kernel is in
   its final state, output one line starting with `PLAN:` — a SHORT headline
   (≤ ~12 words, one clause, plain prose, NO code/syntax) naming the optimization
@@ -860,9 +866,12 @@ Make your change(s) now.
         end_reason = _session_end_reason(gate=gate, run_result=run_result)
 
         edit_count, passed = run_result.edit_count, "-"
-        # The agent's own words, unbounded: each reader caps what it records, and the gate's figures travel in the
-        # session sink rather than in front of the reasoning.
-        rationale = run_result.text or "no rationale provided"
+        # Only the line the agent declares: a backend's text can be the whole transcript (Claude's starts with its
+        # opening remarks), and the gate's figures travel in the session sink.
+        rationale = (
+            _parse_output_tag(run_result.text or "", "RATIONALE:", _RATIONALE_MAX_CHARS, last=True)
+            or "no rationale provided"
+        )
         if gate is not None:
             edit_count, passed = gate.edit_count, gate.passed
         # One structured line per session (stdout is captured by the caller's logs) so a run's end-reason distribution
