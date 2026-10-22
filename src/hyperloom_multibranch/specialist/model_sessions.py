@@ -5,8 +5,9 @@
 
 A session has one source base, laid out from the installed packages of ``components`` when the sessions are built (a
 resumed session finds it in place), and each branch a worktree and a workspace under its directory. ``factory`` gives
-the runtime an :class:`AgentSession` per run of a branch's specialist; ``worktrees`` is what the worktree tools serve,
-so a specialist's tools and its sessions edit the same tree.
+the runtime an :class:`AgentSession` per run of a branch's specialist, and refuses a branch that runs a third-party
+agent (:func:`~hyperloom_multibranch.specialist.agent_sessions.with_agents` runs those); ``worktrees`` is what the
+worktree tools serve, so a specialist's tools and its sessions edit the same tree.
 """
 
 from __future__ import annotations
@@ -47,11 +48,17 @@ def model_sessions(
         return base.worktree(branch, branch_dir(branch) / WORKTREE_DIR)
 
     def factory(start: SessionStart) -> AgentSession:
+        if start.task.agent:
+            raise ValueError(f"branch {start.branch} runs the agent {start.task.agent}, which no specialist stands for")
         branch = start.branch
-        place = BranchPlace(worktrees(branch), notebook_for(branch), branch_dir(branch) / SESSION_DIR)
-        return AgentSession(start, setup, place)
+        return AgentSession(start, setup, branch_place(worktrees(branch), notebook_for(branch), branch_dir(branch)))
 
     return ModelSessions(factory, worktrees)
 
 
-__all__ = ["SESSION_DIR", "WORKTREE_DIR", "ModelSessions", "model_sessions"]
+def branch_place(worktree: BranchWorktree, notebook: SessionNotebook, branch_dir: Path) -> BranchPlace:
+    """Where a branch's runs work: its worktree, its notebook handle and the workspace in its directory."""
+    return BranchPlace(worktree, notebook, branch_dir / SESSION_DIR)
+
+
+__all__ = ["SESSION_DIR", "WORKTREE_DIR", "ModelSessions", "branch_place", "model_sessions"]
