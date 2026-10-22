@@ -12,17 +12,23 @@ check on the result. A report the check marks graph-collapsed gets TraceLens' de
 ``analysis.json``, which is how :func:`~hyperloom_multibranch.toolbox.tools.op_shares.degraded_reason` knows to withhold
 its shares. Without a model it takes about a minute.
 
-The splitter's workload hints (``--CONC``, ``--OSL``, ``--R``) and the steady-state mode come from the request alone. A
-specialist's request gets the hints from the profile test's own point (``toolbox/analysis.py``), not from anything the
-caller or the toolbox process says; the splitter picks its window without a hint the request lacks.
+The splitter's workload hints (``--CONC``, ``--OSL``, ``--R``), the prompt length the op shares are weighted by (``ISL``) and
+the steady-state mode come from the request alone. A specialist's request gets the hints from the profile test's own point
+(``toolbox/analysis.py``), not from anything the caller or the toolbox process says; the splitter picks its window without a
+hint the request lacks.
 
 The op shares do not come from TraceLens' ops table. Its durations are wrong on a decode window after a graph replay (the
-ROCm profiler stamps the eager kernels queued behind the replay as lasting ~9 ms each), so the shares come from the window's
-own GPU events, per kernel, summing to 100% of the window's kernel time (:mod:`~.kernel_shares`): events that overlap the
-previous event of their in-order stream are left out and counted (``excluded_events``, ``excluded_claimed_ms``), and a window
-is reported degraded, with the reason and no shares, when its kernels are missing from the trace (they fill under
-:data:`~.kernel_shares.MIN_GPU_BUSY_PERCENT` of its GPU span) or the excluded events could change the ranking. TraceLens'
-report is still run on the window, and its own check on the result still marks a graph-collapsed one degraded.
+ROCm profiler stamps the eager kernels queued behind the replay as lasting ~9 ms each), so the shares come from GPU events,
+per kernel, summing to 100% of the kernel time they are taken over (:mod:`~.kernel_shares`): events that overlap the previous
+event of their in-order stream are left out and counted (``excluded_events``, ``excluded_claimed_ms``), and a window is
+reported degraded, with the reason and no shares, when its kernels are missing from the trace (they fill under
+:data:`~.kernel_shares.MIN_GPU_BUSY_PERCENT` of its GPU span) or the excluded events could change the ranking.
+
+They are not the perf report's window's either. That window (``steady_state_mode``, ``mixed`` unless asked otherwise) is
+weighted by whatever steps it holds, and a graded wave is mostly decode, so the shares are those of the trace's decode window
+and its prefill window, weighted by the time each phase takes in a wave of the profile point's workload (:mod:`~.phase_mix`:
+``phase_fractions``, ``phase_windows``). TraceLens' report is still run on the perf report's window, and its own check on the
+result still marks a graph-collapsed one degraded.
 
 A kernel name that several modules launch (the four FlyDSL GEMMs of a layer are all ``kernel_gemm_0``) is split by the module,
 ``kernel_gemm_0 [Qwen2MLP.RowParallelLinear]`` (:mod:`~.kernel_launchers`): an eager kernel's launch call and the module frames
@@ -65,6 +71,17 @@ from hyperloom_multibranch.toolbox.tools.op_shares import (
     KERNEL_SHARES_KEY,
     OWN_DEGRADED_KEY,
 )
+from hyperloom_multibranch.toolbox.tools.phase_mix import (
+    PHASE_MODES,
+    PhaseWindow,
+    Workload,
+    graded_mix,
+    mix_fields,
+    rank_trace_reader,
+    read_phase_window,
+    split_steps,
+    write_mix_table,
+)
 
 if TYPE_CHECKING:
     from TraceLens.Agent.Analysis.utils import GraphReplayCoverage
@@ -95,6 +112,8 @@ SPLIT_HINTS = (
     ("--OSL", "split_osl", "OSL"),
     ("--R", "split_r", "RANDOM_RANGE_RATIO"),
 )
+#: The workload the request carries: the splitter's hints, and the prompt length, which only the phase weights read.
+WORKLOAD_HINTS = (*SPLIT_HINTS, ("--ISL", "split_isl", "ISL"))
 _ENCODING = "utf-8"
 #: The error class of a perf report that lacks a table the route reads.
 _INCOMPLETE = "perf_report_incomplete"
@@ -128,6 +147,10 @@ class _Run:
     @property
     def log(self) -> Path:
         return self.out_dir / "report.log"
+
+    @property
+    def split_dir(self) -> Path:
+        return self.out_dir / "trace_split"
 
 
 def _text(payload: Mapping[str, Any], *keys: str) -> str:
@@ -176,16 +199,21 @@ def split_hint(flag: str, raw: object) -> str | None:
         return None
     if not math.isfinite(value):
         return None
-    accepted = {"--CONC": value >= 1 and value.is_integer(), "--OSL": value > 0, "--R": 0 <= value <= 1}[flag]
+    accepted = {
+        "--CONC": value >= 1 and value.is_integer(),
+        "--OSL": value > 0,
+        "--ISL": value > 0,
+        "--R": 0 <= value <= 1,
+    }[flag]
     if not accepted:
         return None
     return str(int(value)) if value.is_integer() else repr(value)
 
 
 def _split_hints(payload: Mapping[str, Any]) -> dict[str, str]:
-    """The splitter hints the request carries, by request key, each as the splitter takes it."""
+    """The workload hints the request carries, by request key, each as the splitter takes it."""
     hints: dict[str, str] = {}
-    for flag, key, _ in SPLIT_HINTS:
+    for flag, key, _ in WORKLOAD_HINTS:
         raw = _text(payload, key)
         if not raw:
             continue
@@ -205,16 +233,25 @@ def _split_command(trace: Path, split_dir: Path, hints: Mapping[str, str]) -> li
     return cmd
 
 
-def _steady_state_chunk(split_dir: Path, mode: str) -> Path:
-    """The window the splitter wrote for ``mode``."""
+def _written_chunk(split_dir: Path, mode: str) -> Path | None:
+    """The window the splitter wrote for ``mode``, ``None`` when it wrote none."""
     for suffix in _CHUNK_SUFFIXES:
         found = sorted(split_dir.rglob(f"{_CHUNK_PREFIX[mode]}_*.{suffix}"))
         if found:
             return found[0]
-    written = sorted(path.name for path in split_dir.iterdir())[:8] if split_dir.is_dir() else []
-    raise _Refused(
-        "steady_state_chunk_missing", f"the splitter wrote no {mode} steady-state window under {split_dir}: {written}"
-    )
+    return None
+
+
+def _steady_state_chunk(split_dir: Path, mode: str) -> Path:
+    """The window the splitter wrote for ``mode``."""
+    chunk = _written_chunk(split_dir, mode)
+    if chunk is None:
+        written = sorted(path.name for path in split_dir.iterdir())[:8] if split_dir.is_dir() else []
+        raise _Refused(
+            "steady_state_chunk_missing",
+            f"the splitter wrote no {mode} steady-state window under {split_dir}: {written}",
+        )
+    return chunk
 
 
 def _perf_report_command(chunk: Path, run: _Run, arch: Path | None, capture: Path | None) -> list[str]:
@@ -248,6 +285,19 @@ def _kernel_window(chunk: Path, trace: Path, capture: Path | None) -> tuple[Kern
     try:
         launched = read_launched_window(chunk, capture)
         return kernel_window(launched.events, lambda: read_gpu_events(trace)), launched
+    except KernelTraceError as exc:
+        raise _Refused("kernel_trace_unreadable", str(exc)) from None
+
+
+def _phase_windows(split_dir: Path, trace: Path, capture: Path | None) -> list[PhaseWindow]:
+    """The prefill window and the decode window the splitter wrote, with their kernels (the whole rank trace is read once,
+    and only to price excluded events)."""
+    steps, reference = split_steps(split_dir), rank_trace_reader(trace)
+    try:
+        return [
+            read_phase_window(phase, _written_chunk(split_dir, mode), steps, capture, reference)
+            for phase, mode in PHASE_MODES.items()
+        ]
     except KernelTraceError as exc:
         raise _Refused("kernel_trace_unreadable", str(exc)) from None
 
@@ -329,8 +379,8 @@ def _analyse(payload: Mapping[str, Any], session_dir: Path) -> dict[str, Any]:
 
     hints = _split_hints(payload)
     trace = _analysed_trace(trace_input)
-    _sh(run, "split", _split_command(trace, run.out_dir / "trace_split", hints))
-    chunk = _steady_state_chunk(run.out_dir / "trace_split", mode)
+    _sh(run, "split", _split_command(trace, run.split_dir, hints))
+    chunk = _steady_state_chunk(run.split_dir, mode)
     capture_text = _text(payload, *_CAPTURE_KEYS)
     capture = (
         Path(capture_text).expanduser().resolve() if capture_text else discover_capture_folder(trace_input, [trace])
@@ -340,10 +390,11 @@ def _analyse(payload: Mapping[str, Any], session_dir: Path) -> dict[str, Any]:
     coverage = _graph_replay_coverage(run)
     if coverage.graph_under_recorded:
         _write_degraded_report(run, coverage)
-    kernels, launched = _kernel_window(chunk, trace, capture)
+    windows = _phase_windows(run.split_dir, trace, capture)
+    mix = graded_mix(windows, Workload.from_hints(hints))
     table = run.out_dir / KERNEL_SHARES_FILE
-    if not kernels.degraded_reason:
-        write_kernel_table(kernels, table)
+    if not mix.degraded_reason:
+        write_mix_table(mix, table)
 
     warnings = [] if arch is not None else [{"code": "gpu_arch_json_unresolved", "severity": "warning"}]
     return {
@@ -361,7 +412,7 @@ def _analyse(payload: Mapping[str, Any], session_dir: Path) -> dict[str, Any]:
         "capture_folder": str(capture or ""),
         "graph_replay_fraction": round(coverage.graph_replay_fraction, 4),
         "graph_under_recorded": coverage.graph_under_recorded,
-        **_kernel_fields(kernels, launched, table),
+        **mix_fields(windows, mix, table),
         "trace_health_warnings": warnings,
         "duration_sec": round(time.monotonic() - started, _TIME_DIGITS),
     }
@@ -388,7 +439,7 @@ async def report_handler(payload: dict, *, session_dir: Path) -> dict[str, Any]:
 __all__ = [
     "DEFAULT_PLATFORM",
     "REPORT_ROUTE",
-    "SPLIT_HINTS",
+    "WORKLOAD_HINTS",
     "report_handler",
     "split_hint",
     "with_window_shares",

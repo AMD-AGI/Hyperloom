@@ -3,8 +3,10 @@
 
 """The ``tracelens`` tool's default route runs TraceLens' split and perf report with no agent; ``agent`` still runs one.
 
-Its op shares are kernel shares of the window's raw GPU events (``data/*_gpu_events.json.gz``, real windows: see
-``test_kernel_shares.py``), not TraceLens' aten-op table, which the fake perf report here still writes.
+Its op shares are kernel shares of the raw GPU events of the trace's decode window and its prefill window, weighted by the
+time each takes in a wave of the point's workload (``data/*_gpu_events.json.gz``, real windows: see ``test_kernel_shares.py``
+and ``final_probe.py``), not those of the window the perf report runs on, nor TraceLens' aten-op table, which the fake
+perf report here still writes.
 """
 
 from __future__ import annotations
@@ -24,6 +26,7 @@ from hyperloom_multibranch.contracts.notebook.records import ToolResultPointer
 from hyperloom_multibranch.toolbox.tools import JobStatus, ToolJobs, ToolRequest, roofline, tracelens_tool
 from hyperloom_multibranch.toolbox.tools import tracelens_report as report
 from hyperloom_multibranch.toolbox.tools.op_shares import DEGRADED_NOTICE
+from hyperloom_multibranch.toolbox.tools.tests import final_probe as probe
 from hyperloom_multibranch.toolbox.tools.tests.sinks import RecordingSink
 
 DATA = Path(__file__).parent / "data"
@@ -33,21 +36,60 @@ OPS_SUMMARY = (
     "name,parent_module,total_direct_kernel_time_ms,Percentage (%)\n"
     "aten::mm,A,0.2,20.0\naten::mm,B,0.045,4.5\naten::copy_,C,0.19,19.0\naten::mul,D,0.1,10.0\n"
 )
-HINTS = {"split_conc": "4", "split_osl": "64", "split_r": "1"}
+HINTS = {"split_conc": "4", "split_osl": "64", "split_r": "1", "split_isl": "256"}
 ANALYSIS_JSON = {"report_info": {"mode": "deterministic-fallback", "trace_quality": "poor", "warnings": ["collapsed"]}}
-#: The window the fake splitter writes unless a test names another: a Qwen3-14B-FP8 root prefill step, GEMM-led.
-DEFAULT_WINDOW = "root_window"
-CK_GEMM = "ck::kernel_gemm_xdl_cshuffle_v3_multi_d_blockscale_b_preshuffle"
+#: What the fake splitter writes as the perf report's window: a Qwen3-14B-FP8 root prefill step, GEMM-led. The shares are
+#: never its own, whatever the mode that picks it.
+MIXED_WINDOW = "root_window"
+CK_GEMM = probe.CK_GEMM
+PAGED_ATTENTION = probe.PAGED_ATTENTION
+DECODE, PREFILL = "decode", "prefill"
+#: A decode step the splitter lists for a real window of the data directory that no probe excerpt stands for.
+STEP = {
+    "batch_size": 64,
+    "num_requests": 64,
+    "context_requests": 0,
+    "context_sum": 0,
+    "generation_requests": 64,
+    "generation_sum": 64,
+}
+
+
+@dataclass(frozen=True)
+class Window:
+    """A real window the fake splitter writes as a phase's, and the steps it lists for it in ``execution_details.json``."""
+
+    file: str
+    chunk: str
+    steps: tuple[dict[str, int], ...]
+
+
+PROBE_DECODE = Window(probe.DECODE_WINDOW.name, probe.DECODE_CHUNK, tuple(probe.DECODE_ENTRY[1]))
+PROBE_PREFILL = Window(probe.PREFILL_WINDOW.name, probe.PREFILL_CHUNK, tuple(probe.PREFILL_ENTRY[1]))
+
+
+def decode_of(window: str, events: str = "gpu_events") -> Window:
+    """A real window of the data directory, as the decode window of one step."""
+    return Window(f"{window}_{events}.json.gz", probe.DECODE_CHUNK, (STEP,))
 
 
 class Shell:
-    """Stands in for ``run_with_session_kill``: writes what TraceLens' splitter and perf report would, records the argv."""
+    """Stands in for ``run_with_session_kill``: writes what TraceLens' splitter and perf report would, records the argv.
+
+    The splitter writes the perf report's ``chunk`` and the ``decode`` and ``prefill`` windows (the real probe's excerpts
+    unless a test names others, ``None`` for none), with its ``execution_details.json``.
+    """
 
     def __init__(
-        self, *, chunk: str | None = CHUNK, report_rc: int = 0, window: str = DEFAULT_WINDOW, events: str = "gpu_events"
+        self,
+        *,
+        chunk: str | None = CHUNK,
+        report_rc: int = 0,
+        decode: Window | None = PROBE_DECODE,
+        prefill: Window | None = PROBE_PREFILL,
     ) -> None:
         self.commands: list[list[str]] = []
-        self._chunk, self._report_rc, self._window, self._events = chunk, report_rc, window, events
+        self._chunk, self._report_rc, self._windows = chunk, report_rc, (decode, prefill)
 
     def __call__(self, cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess:
         self.commands.append(cmd)
@@ -56,7 +98,12 @@ class Shell:
             out = Path(cmd[cmd.index("-o") + 1])
             out.mkdir(parents=True)
             if self._chunk:
-                shutil.copy(DATA / f"{self._window}_{self._events}.json.gz", out / self._chunk)
+                shutil.copy(DATA / f"{MIXED_WINDOW}_gpu_events.json.gz", out / self._chunk)
+            details = []
+            for window in filter(None, self._windows):
+                shutil.copy(DATA / window.file, out / window.chunk)
+                details.append({"output_path": str(out / window.chunk), "steps": list(window.steps)})
+            (out / "execution_details.json").write_text(json.dumps(details), encoding="utf-8")
             return subprocess.CompletedProcess(cmd, 0, "", "")
         csvs = Path(cmd[cmd.index("--output_csvs_dir") + 1])
         csvs.mkdir(parents=True)
@@ -126,30 +173,78 @@ async def _run(tmp_path: Path, params: dict[str, Any], rig: Rig) -> tuple[JobSta
     return status, sink.pointers[0], record
 
 
-async def test_by_default_no_agent_runs_and_the_pointer_carries_the_windows_kernel_shares(
+async def test_by_default_no_agent_runs_and_the_pointer_carries_the_graded_waves_kernel_shares(
     rig: Rig, tmp_path: Path
 ) -> None:
-    status, pointer, record = await _run(tmp_path, HINTS, rig)
+    """The perf report runs on the mixed window (here a GEMM-led prefill step); the shares are the decode window's and the
+    prefill window's, weighted by the time a wave of the point's workload spends in each: paged attention leads."""
+    probe.install_capture(rig.trace_input / "torch_trace" / "graph_capture_profile")
+    status, pointer, record = await _run(tmp_path, probe.GRADED, rig)
     assert status is JobStatus.SUCCEEDED and rig.agent_calls == []
-    assert max(pointer.op_shares, key=pointer.op_shares.get) == CK_GEMM and "aten::mm" not in pointer.op_shares
-    assert sum(pointer.op_shares.values()) == pytest.approx(100.0)
+    assert max(pointer.op_shares, key=pointer.op_shares.get) == PAGED_ATTENTION and "aten::mm" not in pointer.op_shares
+    assert pointer.op_shares[PAGED_ATTENTION] == pytest.approx(25.18, abs=0.01)
+    assert pointer.op_shares[f"{CK_GEMM} [Qwen2MLP.MergedColumnParallelLinear]"] == pytest.approx(18.44, abs=0.01)
+    assert 0 < len(pointer.op_shares) <= 50 and sum(pointer.op_shares.values()) == pytest.approx(100.0)
     assert (pointer.commit_id, pointer.profile_request_id) == ("c9", "r1")
+    assert DEGRADED_NOTICE not in pointer.summary and "stands for the whole wave" not in pointer.summary
     split, perf = rig.shell.commands
     assert split[split.index("-o") + 1].endswith("/tracelens/trace_split")
     assert {"--find-steady-state", "--llm-inference"} <= set(split)
-    assert [split[split.index(flag) + 1] for flag in ("--CONC", "--OSL", "--R")] == ["4", "64", "1"]
+    assert [split[split.index(flag) + 1] for flag in ("--CONC", "--OSL", "--R")] == ["64", "1024", "1"]
+    assert "--ISL" not in split  # the splitter does not take it; only the weights do
     assert perf[perf.index("--profile_json_path") + 1].endswith(CHUNK)
     assert perf[perf.index("--capture_folder") + 1].endswith("torch_trace/graph_capture_profile")
     assert perf[perf.index("--gpu_arch_json_path") + 1].endswith("MI355X.json")
     assert {"--group_by_parent_module", "--enable_pseudo_ops", "--include_call_stack"} <= set(perf)
     result = record["result"]
     assert (result["route"], result["steady_state_mode"], result["graph_under_recorded"]) == ("report", "mixed", False)
-    assert result["split_hints"] == HINTS
+    assert (result["steady_state_chunk"], result["split_hints"]) == (CHUNK, probe.GRADED)
+    assert result["phase_fractions"] == {"prefill": 0.1145, "decode": 0.8855}
+    windows = result["phase_windows"]
+    assert (windows[PREFILL]["chunk"], windows[DECODE]["chunk"]) == (probe.PREFILL_CHUNK, probe.DECODE_CHUNK)
+    assert (windows[PREFILL]["used"], windows[DECODE]["used"]) == (True, True)
     assert Path(result["ops_summary_path"]).read_text(encoding="utf-8") == OPS_SUMMARY  # copied next to result.json
     table = Path(result["kernel_shares_path"])
     assert table.parent == Path(result["ops_summary_path"]).parent.parent and table.is_file()  # copied back as well
     assert (result["excluded_events"], result["excluded_claimed_ms"], result["window_degraded_reason"]) == (0, 0.0, "")
-    assert result["window_gpu_busy_percent"] == 100.0 and DEGRADED_NOTICE not in pointer.summary
+    assert (result["phase_note"], windows[DECODE]["launcher_notes"]) == ("", [])
+
+
+async def test_the_mixed_window_the_perf_report_runs_on_is_not_where_the_shares_come_from(
+    rig: Rig, tmp_path: Path
+) -> None:
+    """The GEMM-led prefill step the fake splitter writes as the mixed window has one GEMM at 87% and no paged attention."""
+    probe.install_capture(rig.trace_input / "torch_trace" / "graph_capture_profile")
+    _, pointer, _ = await _run(tmp_path, {**probe.GRADED, "steady_state_mode": "mixed"}, rig)
+
+    assert max(pointer.op_shares, key=pointer.op_shares.get) == PAGED_ATTENTION
+    assert pointer.op_shares[PAGED_ATTENTION] > 20 and CK_GEMM not in pointer.op_shares  # the GEMMs are split by module
+    assert max(v for k, v in pointer.op_shares.items() if k.startswith(CK_GEMM)) < 25
+
+
+async def test_a_window_the_splitter_wrote_none_for_leaves_the_other_to_stand_for_the_wave_and_the_summary_says_so(
+    rig: Rig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    probe.install_capture(rig.trace_input / "torch_trace" / "graph_capture_profile")
+    monkeypatch.setattr(report, "run_with_session_kill", Shell(prefill=None))
+    status, pointer, record = await _run(tmp_path, probe.GRADED, rig)
+    assert status is JobStatus.SUCCEEDED and max(pointer.op_shares, key=pointer.op_shares.get) == PAGED_ATTENTION
+    assert pointer.op_shares[PAGED_ATTENTION] == pytest.approx(28.44, abs=0.01)  # the decode window's own share
+    assert "the decode window stands for the whole wave: the prefill window gives none" in pointer.summary
+    result = record["result"]
+    assert result["phase_fractions"] == {"prefill": 0.0, "decode": 1.0} and result["window_degraded_reason"] == ""
+    assert result["phase_windows"][PREFILL]["used"] is False and result["phase_windows"][DECODE]["used"] is True
+
+
+async def test_a_request_without_the_workload_has_no_weights_so_it_has_no_shares_and_says_why(
+    rig: Rig, tmp_path: Path
+) -> None:
+    status, pointer, record = await _run(tmp_path, {"split_conc": "64", "split_osl": "1024"}, rig)
+
+    assert status is JobStatus.SUCCEEDED and not pointer.op_shares and DEGRADED_NOTICE in pointer.summary
+    result = record["result"]
+    assert "split_conc, split_isl and split_osl" in result["window_degraded_reason"]
+    assert result["kernel_shares_path"] == "" and result["phase_fractions"] == {}
 
 
 async def test_the_splitter_hints_and_the_mode_come_from_the_request_never_from_the_toolbox_process(
@@ -159,6 +254,7 @@ async def test_the_splitter_hints_and_the_mode_come_from_the_request_never_from_
     for name, value in (
         ("CONC", "9"),
         ("OSL", "99"),
+        ("ISL", "99"),
         ("RANDOM_RANGE_RATIO", "0.5"),
         ("TRACELENS_SPLIT_CONC", "9"),
         ("INFERENCE_OPTIMIZER_STEADY_STATE_MODE", "decode_only"),
@@ -169,6 +265,7 @@ async def test_the_splitter_hints_and_the_mode_come_from_the_request_never_from_
     split, _ = rig.shell.commands
     assert not {"--CONC", "--OSL", "--R"} & set(split)
     assert record["result"]["split_hints"] == {} and record["result"]["steady_state_mode"] == "mixed"
+    assert record["result"]["phase_fractions"] == {}  # the workload is not the process's either: nothing to weight by
 
 
 @pytest.mark.parametrize(
@@ -176,8 +273,8 @@ async def test_the_splitter_hints_and_the_mode_come_from_the_request_never_from_
     [
         ({"split_conc": 8}, {"split_conc": "8"}),
         (
-            {"split_conc": "8.0", "split_osl": "128.5", "split_r": "0"},
-            {"split_conc": "8", "split_osl": "128.5", "split_r": "0"},
+            {"split_conc": "8.0", "split_osl": "128.5", "split_r": "0", "split_isl": 1024.0},
+            {"split_conc": "8", "split_osl": "128.5", "split_r": "0", "split_isl": "1024"},
         ),
         ({"split_osl": "", "split_r": None}, {}),
     ],
@@ -188,7 +285,8 @@ async def test_a_hint_is_passed_as_the_splitter_takes_it(
     status, _, record = await _run(tmp_path, params, rig)
     assert status is JobStatus.SUCCEEDED and record["result"]["split_hints"] == hints
     split, _ = rig.shell.commands
-    assert sum(flag in split for flag in ("--CONC", "--OSL", "--R")) == len(hints)
+    assert sum(flag in split for flag in ("--CONC", "--OSL", "--R")) == len(hints) - ("split_isl" in hints)
+    assert "--ISL" not in split
 
 
 @pytest.mark.parametrize(
@@ -221,8 +319,8 @@ async def test_a_request_naming_the_report_route_gets_it_whatever_else_would_hav
 ) -> None:
     if env:
         monkeypatch.setenv("HYPERLOOM_TRACE_ANALYSIS_ROUTE", env)
-    status, pointer, _ = await _run(tmp_path, params, rig)
-    assert status is JobStatus.SUCCEEDED and rig.agent_calls == [] and CK_GEMM in pointer.op_shares
+    status, pointer, _ = await _run(tmp_path, {**probe.GRADED, **params}, rig)
+    assert status is JobStatus.SUCCEEDED and rig.agent_calls == [] and PAGED_ATTENTION in pointer.op_shares
 
 
 async def test_a_graph_collapsed_report_gets_the_degraded_fallback_and_no_shares(
@@ -241,7 +339,7 @@ async def test_a_graph_collapsed_report_gets_the_degraded_fallback_and_no_shares
     )
     _module(monkeypatch, "TraceLens.Agent.Analysis.utils.deterministic_fallback", render_fallback_report=fallback)
     _module(monkeypatch, "TraceLens.Agent.Analysis.post_processing", render_analysis_json=analysis_json)
-    status, pointer, record = await _run(tmp_path, {}, rig)
+    status, pointer, record = await _run(tmp_path, probe.GRADED, rig)
     assert status is JobStatus.SUCCEEDED and not pointer.op_shares and DEGRADED_NOTICE in pointer.summary
     assert record["result"]["graph_under_recorded"] is True
     assert Path(record["result"]["analysis_md_path"]).read_text(encoding="utf-8").startswith("# Deterministic Fallback")
@@ -250,8 +348,9 @@ async def test_a_graph_collapsed_report_gets_the_degraded_fallback_and_no_shares
 async def _with_window(
     tmp_path: Path, rig: Rig, monkeypatch: pytest.MonkeyPatch, window: str, *, trace: str = ""
 ) -> Any:
-    """Run the report on the real ``window`` (and, when a test prices excluded kernels, the rank trace ``trace``)."""
-    monkeypatch.setattr(report, "run_with_session_kill", Shell(window=window))
+    """Run the report on the real ``window`` as its decode window, the splitter having written no prefill window (and,
+    when a test prices excluded kernels, the rank trace ``trace``)."""
+    monkeypatch.setattr(report, "run_with_session_kill", Shell(decode=decode_of(window), prefill=None))
     if trace:
         shutil.copy(DATA / f"{trace}_gpu_events.json.gz", rig.trace)
     return await _run(tmp_path, HINTS, rig)
@@ -268,7 +367,9 @@ async def test_a_window_whose_graph_replay_kernels_are_missing_from_the_trace_gi
     status, pointer, record = await _with_window(tmp_path, rig, monkeypatch, "b06_window")
     assert status is JobStatus.SUCCEEDED and not pointer.op_shares and not pointer.commit_id
     result = record["result"]
-    assert result["graph_under_recorded"] is False and result["window_gpu_busy_percent"] == 0.61
+    assert (
+        result["graph_under_recorded"] is False and result["phase_windows"][DECODE]["window_gpu_busy_percent"] == 0.61
+    )
     assert "0.6% of its 8.22 ms GPU span" in result["window_degraded_reason"] and result["kernel_shares_path"] == ""
     assert DEGRADED_NOTICE in pointer.summary and result["window_degraded_reason"] in pointer.summary
 
@@ -286,8 +387,9 @@ async def test_a_real_window_whose_kernels_run_one_after_another_keeps_its_kerne
 ) -> None:
     status, pointer, record = await _with_window(tmp_path, rig, monkeypatch, window)
     assert status is JobStatus.SUCCEEDED and DEGRADED_NOTICE not in pointer.summary
+    assert "the decode window stands for the whole wave" in pointer.summary
     result = record["result"]
-    assert (result["window_gpu_busy_percent"], result["excluded_events"]) == (busy, 0)
+    assert (result["phase_windows"][DECODE]["window_gpu_busy_percent"], result["excluded_events"]) == (busy, 0)
     assert result["window_degraded_reason"] == "" and max(pointer.op_shares, key=pointer.op_shares.get) == top
     assert pointer.op_shares[top] == pytest.approx(top_share, abs=0.005)
     assert sum(pointer.op_shares.values()) == pytest.approx(100.0, abs=0.01)
@@ -310,7 +412,8 @@ async def test_a_decode_window_with_eager_kernels_stamped_inside_the_graph_repla
         54.84,
         "",
     )
-    assert (result["window_kernel_ms"], result["excluded_estimated_ms"]) == (7.93, 0.027)
+    decode = result["phase_windows"][DECODE]
+    assert (decode["window_kernel_ms"], decode["excluded_estimated_ms"]) == (7.93, 0.027)
     assert list(pointer.op_shares)[:3] == [
         "kernel_gemm_0",
         "aiter::dynamic_per_token_scaled_quant_kernel",
@@ -331,7 +434,9 @@ async def _with_capture(
     if capture:
         shutil.copy(DATA / "b40_capture_execution_details.json", folder / "execution_details.json")
         shutil.copy(DATA / "b40_capture_bs64_launches.json.gz", folder / "DecodeCudaGraphRunner_bs_64_rank0.json.gz")
-    monkeypatch.setattr(report, "run_with_session_kill", Shell(window="b40_window", events="launch_events"))
+    monkeypatch.setattr(
+        report, "run_with_session_kill", Shell(decode=decode_of("b40_window", "launch_events"), prefill=None)
+    )
     shutil.copy(DATA / "b40_rank_trace_gpu_events.json.gz", rig.trace)
     return await _run(tmp_path, HINTS, rig)
 
@@ -350,12 +455,13 @@ async def test_a_decode_window_beside_its_graph_capture_names_the_four_gemms_by_
         "[Qwen3Attention.RowParallelLinear]": 5.8,
     }
     assert len(pointer.op_shares) <= 50 and sum(pointer.op_shares.values()) == pytest.approx(100.0, abs=0.01)
-    result = record["result"]
-    assert (result["launcher_labelled_kernels"], result["graph_kernels_renamed"], result["launcher_notes"]) == (
+    decode = record["result"]["phase_windows"][DECODE]
+    assert (decode["launcher_labelled_kernels"], decode["graph_kernels_renamed"], decode["launcher_notes"]) == (
         605,
         420,
         [],
     )
+    result = record["result"]
     table = Path(result["kernel_shares_path"]).read_text(encoding="utf-8").splitlines()
     assert table[1].startswith("kernel_gemm_0 [Qwen2MLP.MergedColumnParallelLinear],28.1")
 
@@ -365,9 +471,9 @@ async def test_a_decode_window_without_its_graph_capture_keeps_one_gemm_entry_an
 ) -> None:
     status, pointer, record = await _with_capture(tmp_path, rig, monkeypatch, capture=False)
     assert status is JobStatus.SUCCEEDED and pointer.op_shares["kernel_gemm_0"] == pytest.approx(44.1, abs=0.05)
-    result = record["result"]
-    assert (result["launcher_labelled_kernels"], result["graph_kernels_renamed"]) == (1, 0)  # the eager sampler's
-    assert len(result["launcher_notes"]) == 1 and "left as recorded" in result["launcher_notes"][0]
+    decode = record["result"]["phase_windows"][DECODE]
+    assert (decode["launcher_labelled_kernels"], decode["graph_kernels_renamed"]) == (1, 0)  # the eager sampler's
+    assert len(decode["launcher_notes"]) == 1 and "left as recorded" in decode["launcher_notes"][0]
 
 
 def _analysed_window(rig: Rig, tmp_path: Path, *, capture: bool = True) -> tuple[Path, Path]:
@@ -470,7 +576,8 @@ async def test_excluded_events_of_a_kernel_the_trace_never_ran_clean_degrade_the
     assert status is JobStatus.SUCCEEDED and not pointer.op_shares and not pointer.commit_id
     result = record["result"]
     assert "no undisturbed instance of " in result["window_degraded_reason"] and result["kernel_shares_path"] == ""
-    assert result["excluded_events"] == 6 and DEGRADED_NOTICE in pointer.summary
+    assert result["phase_windows"][DECODE]["excluded_events"] == 6 and DEGRADED_NOTICE in pointer.summary
+    assert result["excluded_events"] == 0  # none of them is left out of shares, there are none
 
 
 @pytest.mark.parametrize("content", [b"chunk", b""])
@@ -481,11 +588,11 @@ async def test_a_window_that_cannot_be_read_fails_the_report_it_does_not_pass_it
         def __call__(self, cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess:
             done = super().__call__(cmd, **kwargs)
             if SPLITTER in cmd:
-                (Path(cmd[cmd.index("-o") + 1]) / CHUNK).write_bytes(content)
+                (Path(cmd[cmd.index("-o") + 1]) / probe.PREFILL_CHUNK).write_bytes(content)
             return done
 
     monkeypatch.setattr(report, "run_with_session_kill", Unreadable())
-    status, pointer, record = await _run(tmp_path, HINTS, rig)
+    status, pointer, record = await _run(tmp_path, probe.GRADED, rig)
     assert status is JobStatus.FAILED and not pointer.op_shares
     assert record["result"]["error_class"] == "kernel_trace_unreadable"
 
@@ -515,6 +622,8 @@ async def test_a_perf_report_without_the_tables_the_coverage_check_reads_fails_t
         ({"split_osl": "0"}, Shell(), "invalid_split_hint"),
         ({"split_r": "1.5"}, Shell(), "invalid_split_hint"),
         ({"split_osl": "nan"}, Shell(), "invalid_split_hint"),
+        ({"split_isl": "0"}, Shell(), "invalid_split_hint"),
+        ({"split_isl": "long"}, Shell(), "invalid_split_hint"),
         ({}, Shell(chunk=None), "steady_state_chunk_missing"),
         ({}, Shell(report_rc=2), "tracelens_command_failed"),
     ],

@@ -29,7 +29,7 @@ from hyperloom_multibranch.contracts.toolbox import RequestRejected
 from hyperloom_multibranch.toolbox.tools.base import ToolRequest
 from hyperloom_multibranch.toolbox.tools.op_shares import COMMIT_PARAM, PROFILE_REQUEST_PARAM
 from hyperloom_multibranch.toolbox.tools.roofline import ROOFLINE_TOOL, TRACELENS_TOOL
-from hyperloom_multibranch.toolbox.tools.tracelens_report import REPORT_ROUTE, SPLIT_HINTS, split_hint
+from hyperloom_multibranch.toolbox.tools.tracelens_report import REPORT_ROUTE, WORKLOAD_HINTS, split_hint
 
 ANALYSIS_TOOLS = (TRACELENS_TOOL, ROOFLINE_TOOL)
 CODE_TOOL_NOT_ALLOWED = "tool_not_allowed"
@@ -44,7 +44,7 @@ TRACE_INPUT_PARAM = "trace_input"
 ANALYSIS_ROUTE_PARAM = "analysis_route"
 ROOT_PROFILE_JOB_PREFIX = "prelude:"
 TRACE_GLOB = "*.trace.json*"
-SPLIT_HINT_PARAMS = tuple(key for _, key, _ in SPLIT_HINTS)
+SPLIT_HINT_PARAMS = tuple(key for _, key, _ in WORKLOAD_HINTS)
 #: The YAML the grid runner wrote for the point a test ran, in the test's landed directory; a profile test runs one.
 POINT_CONFIG_GLOB = "variant_*/config.yaml"
 _POINT_CONFIG_MAX_BYTES = 1 << 20
@@ -133,13 +133,14 @@ def _point_envs(path: Path, root: Path) -> Mapping[str, Any]:
 
 
 def point_split_hints(point: Path, root: Path) -> dict[str, str]:
-    """The trace splitter's workload hints, by request key, read from the point YAML at ``point`` inside ``root``.
+    """The workload hints (the splitter's, and the prompt length the op shares are weighted by), by request key, read from
+    the point YAML at ``point`` inside ``root``.
 
     A point that cannot be read, a missing variable or a value the splitter would not take gives no hint for it, and the
-    splitter then picks its window without that hint.
+    splitter then picks its window without that hint (a report without the workload has no op shares to weight).
     """
     envs = _point_envs(point, root.resolve())
-    found = {key: split_hint(flag, envs[name]) for flag, key, name in SPLIT_HINTS if name in envs}
+    found = {key: split_hint(flag, envs[name]) for flag, key, name in WORKLOAD_HINTS if name in envs}
     return {key: hint for key, hint in found.items() if hint is not None}
 
 

@@ -321,7 +321,7 @@ benchmark:
     RANDOM_RANGE_RATIO: '1'
 """
 LANDED = "tests/p1/attempt-1"
-HINTS = {"split_conc": "4", "split_osl": "64", "split_r": "1"}
+HINTS = {"split_conc": "4", "split_osl": "64", "split_r": "1", "split_isl": "256"}
 
 
 async def _profile_with_points(stack: Stack, tmp_path: Path, files: dict[str, str]) -> str:
@@ -369,9 +369,21 @@ async def test_a_hint_of_the_callers_is_refused_and_cannot_replace_the_point(
         ({"variant_00_test/config.yaml": "benchmark: [not, a, mapping"}, {}),
         ({"variant_00_test/config.yaml": "benchmark:\n  envs: 7\n"}, {}),
         ({"variant_00_test/config.yaml": "- a\n- list\n"}, {}),
-        ({"variant_00_test/config.yaml": POINT.replace("    CONC: '4'\n", "")}, {"split_osl": "64", "split_r": "1"}),
         (
-            {"variant_00_test/config.yaml": POINT.replace("'4'", "many").replace("64", "0").replace("'1'", "2")},
+            {"variant_00_test/config.yaml": POINT.replace("    CONC: '4'\n", "")},
+            {"split_osl": "64", "split_r": "1", "split_isl": "256"},
+        ),
+        (
+            {"variant_00_test/config.yaml": POINT.replace("    ISL: '256'\n", "")},
+            {"split_conc": "4", "split_osl": "64", "split_r": "1"},
+        ),
+        (
+            {
+                "variant_00_test/config.yaml": POINT.replace("'4'", "many")
+                .replace("64", "0")
+                .replace("'1'", "2")
+                .replace("'256'", "-1")
+            },
             {},
         ),
         ({"variant_00_test/benchmark_sglang_1/config.yaml": POINT}, {}),  # the benchmark's own copy is not the point

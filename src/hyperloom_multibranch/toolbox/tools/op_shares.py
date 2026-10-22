@@ -4,8 +4,9 @@
 """The per-op shares of a TraceLens analysis, for the tools that run one (``tracelens``, ``roofline``).
 
 The shares come from a table of every op's share of the total GPU time. The ``report`` route of ``tracelens`` names its own
-(``kernel_shares_path``: the window's kernels, ``kernel_shares``): TraceLens' per-op durations are wrong on a decode window
-after a graph replay. So do the agent route and the roofline when their analysis names the window it ran on
+(``kernel_shares_path``: the kernels of a graded wave, the decode and prefill windows weighted by the time each takes,
+:mod:`~.phase_mix`): TraceLens' per-op durations are wrong on a decode window after a graph replay. The agent route and the
+roofline name the kernels of the one window they ran on
 (:func:`~.tracelens_report.with_window_shares`). An analysis that names none has TraceLens' ``ops_summary.csv`` (the
 ``perf_report_csvs`` folder beside the report), the complete per-op table its perf report writes deterministically from the
 trace. Neither is the
@@ -44,6 +45,8 @@ OWN_DEGRADED_KEY = "window_degraded_reason"
 KERNEL_SHARES_KEY = "kernel_shares_path"
 #: How many GPU events of the window the report route left out of its kernel shares, and the time they claim.
 EXCLUDED_EVENTS_KEY, EXCLUDED_CLAIMED_KEY = "excluded_events", "excluded_claimed_ms"
+#: What the report route says of a graded mix in which one window stands for the wave alone (``phase_mix``).
+PHASE_NOTE_KEY = "phase_note"
 DEGRADED_MODE = "deterministic-fallback"
 POOR_QUALITY = "poor"
 DEGRADED_NOTICE = "TraceLens report is degraded, so no op shares were taken from it"
@@ -132,15 +135,18 @@ def with_op_shares(output: ToolOutput, request: ToolRequest) -> ToolOutput:
         reason = degraded_reason(output.result) if commit and output.ok else ""
         return replace(output, summary=f"{output.summary} | {DEGRADED_NOTICE} ({reason})") if reason else output
     profile = str(request.params.get(PROFILE_REQUEST_PARAM) or "").strip()
-    return replace(
-        output, summary=_with_excluded_note(output), commit_id=commit, profile_request_id=profile, op_shares=shares
-    )
+    return replace(output, summary=_with_notes(output), commit_id=commit, profile_request_id=profile, op_shares=shares)
 
 
-def _with_excluded_note(output: ToolOutput) -> str:
-    """The summary, saying how many GPU events the shares leave out as misreported, when the analysis left any out."""
+def _with_notes(output: ToolOutput) -> str:
+    """The summary, saying which window stands for the wave alone and how many GPU events the shares leave out as
+    misreported, when the analysis says so."""
+    summary = output.summary
+    note = str(output.result.get(PHASE_NOTE_KEY) or "").strip()
+    if note:
+        summary = f"{summary} | {note}"
     excluded = output.result.get(EXCLUDED_EVENTS_KEY)
-    if not excluded:
-        return output.summary
-    claimed = output.result.get(EXCLUDED_CLAIMED_KEY)
-    return f"{output.summary} | {excluded} GPU events the profiler misreported (claiming {claimed} ms) are left out of the shares"
+    if excluded:
+        claimed = output.result.get(EXCLUDED_CLAIMED_KEY)
+        summary = f"{summary} | {excluded} GPU events the profiler misreported (claiming {claimed} ms) are left out of the shares"
+    return summary
