@@ -341,18 +341,6 @@ def _session_end_reason(*, gate, run_result) -> str:
     return "agent_stopped"
 
 
-def _gate_outcome_tag(gate, end_reason: str, num_turns: int | None) -> str:
-    """The gate outcome, so the outer loop's commit message records whether the session self-converged."""
-    tag = f"[gate edits={gate.edit_count} pass={gate.passed} end={end_reason}"
-    if num_turns is not None:
-        tag += f" turns={num_turns}"
-    if gate.last_mean_case_speedup is not None:
-        tag += f" mean_case_speedup={gate.last_mean_case_speedup:.6f}x"
-    if gate.last_wall_ms is not None:
-        tag += f" raw_mean={gate.last_wall_ms:.4f}ms"
-    return tag + "]"
-
-
 def _fill_session_sink(
     session_sink: dict,
     *,
@@ -872,10 +860,11 @@ Make your change(s) now.
         end_reason = _session_end_reason(gate=gate, run_result=run_result)
 
         edit_count, passed = run_result.edit_count, "-"
-        text = run_result.text or "no rationale provided"
+        # The agent's own words, unbounded: each reader caps what it records, and the gate's figures travel in the
+        # session sink rather than in front of the reasoning.
+        rationale = run_result.text or "no rationale provided"
         if gate is not None:
             edit_count, passed = gate.edit_count, gate.passed
-            text = f"{_gate_outcome_tag(gate, end_reason, num_turns)} {text}"
         # One structured line per session (stdout is captured by the caller's logs) so a run's end-reason distribution
         # is analyzable without the LLM.
         print(
@@ -901,7 +890,7 @@ Make your change(s) now.
             ),
         )
 
-        return text[:200]
+        return rationale
 
     _describe_agent_fn(agent_fn, backend, requested_backend)
     return agent_fn

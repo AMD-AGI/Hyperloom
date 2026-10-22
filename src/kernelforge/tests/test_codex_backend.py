@@ -854,7 +854,55 @@ def test_make_agent_fn_dispatches_codex_without_claude_model(
     assert "lesson" not in session
     assert session["summarize"] is None
     assert session["end_reason"] == "resume_unavailable"
-    assert rationale.startswith("[gate edits=0 pass=False end=resume_unavailable")
+    # The gate's outcome travels in the sink; the rationale is the agent's own words.
+    assert (session["edit_count"], session["gate_passed"]) == (0, False)
+    assert "[gate" not in rationale
+
+
+def test_the_implementer_rationale_comes_back_whole_with_the_gate_on(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    reasoning = (
+        "PLAN: widen the loads\n"
+        + "The profile shows the kernel bandwidth bound, so 128-bit loads should beat best. " * 5
+    )
+
+    class Backend:
+        name = "codex"
+        capabilities = AgentCapabilities()
+
+        async def run(self, spec: AgentRunSpec, usage: object = None) -> AgentRunResult:
+            return AgentRunResult(text=reasoning)
+
+    def factory(runtime, **_kwargs: object) -> Backend:
+        backend = Backend()
+        backend.runtime = runtime
+        return backend
+
+    monkeypatch.setattr(agent_module, "create_registered_backend", factory)
+    kernel = tmp_path / "kernel.py"
+    kernel.write_text("VALUE = 1\n")
+    driver = tmp_path / "forge_driver.py"
+    driver.write_text("print('allclose: True')\n")
+    _git(tmp_path, "init", "-q")
+    _git(tmp_path, "config", "user.name", "KernelForge Test")
+    _git(tmp_path, "config", "user.email", "kernelforge-test@example.invalid")
+    _git(tmp_path, "commit", "-q", "--allow-empty", "-m", "base")
+    config = Config(workspace=str(tmp_path), agent_backend="codex", agent_model="gpt-codex-test", agent_precheck=False)
+    agent_fn = agent_module.make_agent_fn(
+        config,
+        agent_module.ImplementerSetup(
+            agent_module.ImplementerTask(program_md="Optimize VALUE."),
+            measurement=agent_module.GateMeasurement(driver_script=str(driver)),
+            session=agent_module.SessionOptions(agent_backend="codex", insession_gate=True),
+        ),
+    )
+    session: dict[str, object] = {}
+
+    rationale = asyncio.run(agent_fn(str(kernel), "", session_sink=session))
+
+    # Longer than the 200 characters it used to be cut to, and with nothing in front of the agent's own words.
+    assert len(reasoning) > 400
+    assert rationale == reasoning
+    assert session["gate_passed"] is False
 
 
 @pytest.mark.parametrize(
