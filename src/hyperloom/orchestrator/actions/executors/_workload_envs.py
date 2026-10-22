@@ -97,9 +97,6 @@ log = logging.getLogger(__name__)
 _GFX942_GPU_TYPES = frozenset(board for board, (arch, _cus) in AMD_GPU_DISPATCH_IDENTITIES.items() if arch == "gfx942")
 
 
-# Value is optional so a bare, value-less flag (an operator typo, or a flag
-# left dangling at end-of-string) is stripped too rather than surviving into a
-# retry that is supposed to launch without it.
 # Profile-phase capture defaults. Trace size scales with captured decode steps;
 # an oversized capture serializes too slowly and kills the engine. 128 steps is
 # serialization-safe on a large TP=8 MoE. Tunable via
