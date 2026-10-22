@@ -25,10 +25,11 @@ artifacts too, their files downloaded from the KB into the session's blob store.
 one whose files the KB does not hold, replays its launch config only. The specialist's ``notebook_replay`` makes the
 change for its own branch head, since a gain lands only on the head it was measured against.
 
-A replay leaves the context length to the head it is made for: the champion's ``--context-length`` or
-``--max-model-len`` is dropped, and the head's, if it sets one, kept. The cap a champion was measured with is no
-optimization, and one below what this session's accuracy evaluation runs in is refused as ``context_below_eval``. A
-lead's launch arguments are listed without it for the same reason.
+A replay leaves the flags of :data:`HEAD_FLAGS` to the head it is made for: the champion's context length and
+scheduler watchdog are dropped, and the head's, if it sets them, kept. A record can carry the ones the launcher set for
+the session that measured it, and the launcher sets both again for this one when a recipe leaves them out. The cap a
+champion was measured with is no optimization, and one below what this session's accuracy evaluation runs in is refused
+as ``context_below_eval``. A lead's launch arguments are listed without them for the same reason.
 """
 
 from __future__ import annotations
@@ -77,6 +78,9 @@ log = logging.getLogger(__name__)
 
 MAX_CANDIDATES = 20
 PAGE_SIZE = 50
+#: The flags a replay leaves to the head: the context length a server serves (``--context-length`` on SGLang,
+#: ``--max-model-len`` on vLLM), and SGLang's scheduler watchdog.
+HEAD_FLAGS = (*CONTEXT_FLAGS, "--watchdog-timeout")
 #: How many of the best leads get a replay; each whole one downloads the champion's files.
 REPLAY_LEADS = 3
 #: The waits before each new ask of a read that failed transiently; one more ask follows the last wait.
@@ -161,8 +165,8 @@ class PreparedReplay:
         is the champion's already (:meth:`is_on`).
 
         A component the head has keeps the head's upstream repository and commit, as a merge keeps it: the session
-        builds it from its image, so the champion's upstream label names nothing to rebuild. The head keeps the context
-        length it serves as well.
+        builds it from its image, so the champion's upstream label names nothing to rebuild. The head keeps its flags of
+        :data:`HEAD_FLAGS` as well.
         """
 
         if self.is_on(head):
@@ -172,7 +176,7 @@ class PreparedReplay:
 
     def is_on(self, recipe: Recipe) -> bool:
         """Whether ``recipe`` is the champion's already: the same components and kernel artifacts, and the same server
-        arguments and environment whatever their order, the context length it serves aside."""
+        arguments and environment whatever their order, its flags of :data:`HEAD_FLAGS` aside."""
 
         wanted = self._wanted(recipe)
         change = diff(recipe, wanted)
@@ -185,31 +189,31 @@ class PreparedReplay:
 
     def _wanted(self, head: Recipe) -> Recipe:
         champion = self.recipe if self.recipe is not None else replace(head, launch=self.launch)
-        args = _context_of(champion.launch.server_args, head.launch.server_args)
+        args = _with_head_flags(champion.launch.server_args, head.launch.server_args)
         return replace(_on_head_upstreams(champion, head), launch=replace(champion.launch, server_args=args))
 
 
-def _context_args(server_args: str) -> tuple[str, ...]:
-    """The arguments of ``server_args`` that set the context length a server serves, each flag with its value."""
+def _head_args(server_args: str) -> tuple[str, ...]:
+    """The arguments of ``server_args`` that set a flag of :data:`HEAD_FLAGS`, each flag with its value."""
 
     parsed = tokenize_server_args_preserving_json(server_args)
     tokens = parsed[1] if parsed is not None else []
     found: list[str] = []
     for index, token in enumerate(tokens):
-        if token.partition("=")[0] not in CONTEXT_FLAGS:
+        if token.partition("=")[0] not in HEAD_FLAGS:
             continue
         value = tokens[index + 1] if "=" not in token and index + 1 < len(tokens) else ""
         found.append(f"{token} {value}" if value and not value.startswith("-") else token)
     return tuple(found)
 
 
-def _context_of(server_args: str, head_args: str) -> str:
-    """``server_args`` serving the context length ``head_args`` serve: its own context flags dropped, the head's kept."""
+def _with_head_flags(server_args: str, head_args: str) -> str:
+    """``server_args`` with the flags of :data:`HEAD_FLAGS` ``head_args`` sets: its own dropped, the head's kept."""
 
-    own, kept = _context_args(server_args), _context_args(head_args)
+    own, kept = _head_args(server_args), _head_args(head_args)
     if own == kept:
         return server_args
-    args = remove_server_args(server_args, CONTEXT_FLAGS) if own else server_args
+    args = remove_server_args(server_args, HEAD_FLAGS) if own else server_args
     return merge_server_args(args, *kept)
 
 
@@ -298,7 +302,7 @@ def lead_of(
         scope=scope.as_dict(),
         gain_pct=_number(row.get("validated_gain_pct")),
         best_throughput=_number(row.get("best_throughput")),
-        server_args=_context_of(server_args, ""),
+        server_args=_with_head_flags(server_args, ""),
         envs=envs,
         replayable=row.get("replay_material_available") is True,
         lessons=listed(map(str, row.get("lessons") or ())),
@@ -467,6 +471,7 @@ def delta_layer(delta: RecipeDelta) -> IntentLayer:
 
 
 __all__ = [
+    "HEAD_FLAGS",
     "KB_RETRY_SECONDS",
     "MAX_CANDIDATES",
     "REPLAY_LEADS",
