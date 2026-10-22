@@ -44,15 +44,7 @@ from functools import partial
 from pathlib import Path
 from typing import Any, Protocol, TypeVar
 
-from hyperloom.contracts.recipe import (
-    ConfigDelta,
-    LaunchConfig,
-    Recipe,
-    RecipeDelta,
-    RecipeError,
-    delta_between,
-    diff,
-)
+from hyperloom.contracts.recipe import LaunchConfig, Recipe, RecipeDelta, RecipeError, delta_between
 from hyperloom.inference_optimizer.grid_server_args import (
     merge_server_args,
     remove_server_args,
@@ -70,6 +62,7 @@ from hyperloom.orchestrator.knowledge.remote_recipe.models import (
 from hyperloom.orchestrator.knowledge.remote_recipe.values import knowledge_to_warm_recipe
 from hyperloom_multibranch.contracts.notebook.peers import IntentLayer
 from hyperloom_multibranch.contracts.notebook.records import REPLAY_TOOL, SessionProfile, WarmReplay
+from hyperloom_multibranch.notebook.changes import same_recipe
 from hyperloom_multibranch.notebook.knowledge.lessons import listed
 from hyperloom_multibranch.notebook.knowledge.recipe_kb import from_recipe_kb_value, overlay_ref
 from hyperloom_multibranch.notebook.knowledge.recipe_writeback import recipe_identity
@@ -175,13 +168,9 @@ class PreparedReplay:
         return WarmReplay(self.canonical_id, parent_commit, delta, delta_layer(delta), self.reason)
 
     def is_on(self, recipe: Recipe) -> bool:
-        """Whether ``recipe`` is the champion's already: the same components and kernel artifacts, and the same server
-        arguments and environment whatever their order, its flags of :data:`HEAD_FLAGS` aside."""
+        """Whether ``recipe`` is the champion's already (:func:`same_recipe`), its flags of :data:`HEAD_FLAGS` aside."""
 
-        wanted = self._wanted(recipe)
-        change = diff(recipe, wanted)
-        rest = replace(delta_between(recipe, wanted), config=ConfigDelta())
-        return not (change.args or change.envs) and rest == RecipeDelta()
+        return same_recipe(recipe, self._wanted(recipe))
 
     def describe(self) -> str:
         what = "the whole recipe" if self.recipe is not None else f"its launch config only, {self.reason}"
