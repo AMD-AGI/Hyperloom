@@ -312,13 +312,12 @@ class AuthoringRound:
         """The attempt row fields this round settles."""
         res = _as_dict(self.result)
         status = str(res.get("status") or "")
-        advanced = status == ROUND_ADVANCED or bool(res.get("advanced"))
         return {
             "attempt": int(self.attempt or 0),
             "task_id": str(self.task_id or ""),
             "settled_at": _now(),
             "status": status,
-            "advanced": advanced,
+            "advanced": status == ROUND_ADVANCED,
             "reason": str(res.get("reason") or ""),
             "landed": bool(self.succeeded),
             "validation_pending": bool(self.validation_pending),
