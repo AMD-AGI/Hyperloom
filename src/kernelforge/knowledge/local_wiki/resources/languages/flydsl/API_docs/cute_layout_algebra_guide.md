@@ -1,6 +1,7 @@
+<!-- Vendored from ROCm/FlyDSL@dd8373349:docs/cute_layout_algebra_guide.md -->
 # CuTe Layout Algebra Reference for FlyDSL
 
-> FlyDSL implements the CuTe layout algebra for AMD GPUs. This guide covers the mathematical foundations of the layout algebra and how FlyDSL exposes them through its Python API.
+FlyDSL implements the CuTe layout algebra for AMD GPUs. This guide covers the mathematical foundations of the layout algebra and how FlyDSL exposes them through its Python API.
 
 The CuTe layout algebra was introduced in the [CUTLASS](https://github.com/NVIDIA/cutlass) C++ library under BSD-3-Clause license (`include/cute/`). FlyDSL adopts the same algebraic framework — shapes, strides, coordinate mappings, products, and divides — and provides a Python API targeting AMD ROCm/HIP GPUs via MLIR.
 
@@ -80,7 +81,7 @@ coord = fx.make_coord(3, 5)
 The fundamental operation of a layout is mapping a logical coordinate to a physical index:
 
 ```
-index = crd2idx(coord, shape, stride) = dot(coord, stride)
+index = crd2idx(coord, layout) = dot(coord, stride)
 ```
 
 For a layout `L = ((S0, S1), (d0, d1))` and coordinate `(c0, c1)`:
@@ -92,7 +93,7 @@ index = c0 * d0 + c1 * d1
 The inverse operation recovers a coordinate from a linear index:
 
 ```
-coord = idx2crd(index, shape, stride)
+coord = idx2crd(index, layout)
 ```
 
 | Operation | Definition | FlyDSL API |
@@ -269,15 +270,21 @@ tA_thr = fx.slice(tA, (None, tid))
 
 **LDS allocation in FlyDSL:**
 ```python
-from flydsl.utils.smem_allocator import SmemAllocator
+import flydsl.expr as fx
 
-allocator = SmemAllocator(ctx, arch="gfx942")
-lds_gen = allocator.allocate_array(T.f16(), num_elems=128*64)
-allocator.finalize()
+# Declare the LDS storage layout as a @fx.struct of fx.Array fields ...
+@fx.struct
+class SharedStorage:
+    tile: fx.Array[fx.Float16, 128, 64]
 
-base = allocator.get_base()
-lds_ptr = lds_gen(base)
+# ... then allocate it inside the kernel and view each field as a layout.
+lds = fx.SharedAllocator().allocate(SharedStorage).peek()
+lds_tile = lds.tile.view(fx.make_layout((128, 64), (64, 1)))
 ```
+
+The compiler sizes the per-leaf static LDS global automatically (default
+``static=True``), so ``launch(smem=...)`` is normally left unset. The legacy
+``flydsl.utils.smem_allocator.SmemAllocator`` remains for un-migrated kernels.
 
 ### 5.3 Swizzling (Bank Conflict Avoidance)
 
@@ -338,7 +345,7 @@ AMD GPUs use MFMA (Matrix Fused Multiply-Add) instructions for matrix math. FlyD
 mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 4, fx.Float32))
 tiled_mma = fx.make_tiled_mma(mma_atom, fx.make_layout((2, 2, 1), (1, 2, 0)))
 
-# Block-level tensor views bA, bB, bC (e.g. after zipped_divide + slice by block)
+# Block-level tensor views bA, bB, bC (for example, after zipped_divide + slice by block)
 thr_mma = tiled_mma.thr_slice(tid)
 frag_A = thr_mma.make_fragment_A(bA)
 frag_B = thr_mma.make_fragment_B(bB)
@@ -413,7 +420,7 @@ launch(A_torch, B_torch, C_torch, ..., stream=torch.cuda.Stream())
 | Variable | Description |
 |---|---|
 | `FLYDSL_COMPILE_BACKEND=rocm` | Compile backend id |
-| `ARCH` | Target architecture (e.g., `gfx942`, `gfx950`) |
+| `ARCH` | Target architecture (for example, `gfx942`, `gfx950`) |
 | `FLYDSL_DUMP_IR=1` | Dump intermediate MLIR IR |
 | `FLYDSL_DUMP_DIR=/path` | IR dump location |
 | `COMPILE_ONLY=1` | Skip execution, compile only |
@@ -495,7 +502,7 @@ def tiledMma(A: fx.Tensor, B: fx.Tensor, C: fx.Tensor,
     gemm_kernel(A, B, C).launch(grid=(1, 1, 1), block=(256, 1, 1), stream=stream)
 ```
 
-See `examples/03-tiledMma.py` for the runnable script, and `kernels/preshuffle_gemm.py`
+See `examples/03-tiledMma.py` for the runnable script, and `kernels/gemm/preshuffle_gemm.py`
 for a production-quality GEMM implementation.
 
 ---
@@ -514,9 +521,9 @@ for a production-quality GEMM implementation.
 - `python/flydsl/expr/` — Layout algebra and expression API (`primitive.py`, `derived.py`, etc.)
 - `python/flydsl/expr/rocdl/` — ROCDL-specific operations
 - `python/flydsl/compiler/` — JIT compilation pipeline (`kernel_function.py`, `jit_function.py`)
-- `python/flydsl/utils/smem_allocator.py` — SmemAllocator
+- `python/flydsl/expr/gpu.py` — `SharedAllocator` for LDS allocation (`fx.SharedAllocator`)
+- `python/flydsl/utils/smem_allocator.py` — legacy `SmemAllocator`
 - `examples/01-vectorAdd.py` — VecAdd example with layout algebra
 - `examples/02-tiledCopy.py` — Tiled copy example
 - `examples/03-tiledMma.py` — Tiled MFMA GEMM example
-- `kernels/preshuffle_gemm.py` — Production GEMM implementation
-- `kernels/preshuffle_gemm_flyc.py` — GEMM using `@flyc.kernel` API
+- `kernels/gemm/preshuffle_gemm.py` — Production GEMM implementation

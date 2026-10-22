@@ -60,7 +60,7 @@ normal GEMM K-loop. A bound read out of a tensor is not.
 ## What to change, in order
 
 ### 1. Switch the staging path to direct-to-LDS
-Verify in the ISA that you get `global_load_lds` / `buffer_load ... lds` at 12 or 16 DWORD, not
+Verify in the ISA that you get `global_load_lds` / `buffer_load ... lds` at 12 or 16 bytes per lane, not
 `global_load_dwordx4` → `ds_write_b128`.
 
 ### 2. Set the stage count
@@ -90,7 +90,7 @@ Feeds the MFMA B operand without an explicit transpose pass. Free on gfx950.
 
 | Check | How | Pass |
 |---|---|---|
-| Direct path emitted | ISA: `global_load_lds` / `buffer_load ... lds` | present, at 12/16 DWORD |
+| Direct path emitted | ISA: `global_load_lds` / `buffer_load ... lds` | present, at 12/16 bytes per lane |
 | Pipeline exists | ISA: unrolled K-loop, `s_waitcnt` placed between stages not before every load | overlap visible |
 | Overlap achieved | `rocprof-compute` | high MFMA busy **and** HBM active, low MFMA stall |
 | Registers freed | ISA `.vgpr_count` before/after | drops (that is the occupancy win) |

@@ -3,7 +3,7 @@ title: Triton on AMD — verifying a config against the ISA
 kind: language
 lever: triton_isa_check
 gens: [gfx950]
-updated: 2026-08-28
+updated: 2026-10-19
 sources:
   - https://rocm.docs.amd.com/en/latest/how-to/llm-fine-tuning-optimization/optimizing-triton-kernel.html
   - https://github.com/triton-lang/triton/blob/main/third_party/amd/backend/compiler.py
@@ -60,10 +60,10 @@ grep "triton_gpu.shared"           dump.txt   # LDS bytes per shared layout (MLI
 
 ## 3. The occupancy boundary check
 
-1. `grep .vgpr_count` → round up to a 16-granule.
-2. `max_waves = floor(512 / round_up_16(vgpr))`.
-3. If you are **one granule over a boundary** (e.g. 176 → 2 waves), set `waves_per_eu = target+1` so
-   LLVM shaves VGPRs (176 → 160 → 3 waves). Re-dump.
+1. `grep .vgpr_count` → round up to a multiple of 8.
+2. `max_waves = min(8, floor(512 / round_up_8(vgpr)))` (8 waves per SIMD is the hardware cap).
+3. If you are **just over a boundary** (e.g. 176 → 2 waves), set `waves_per_eu = target+1` so
+   LLVM shaves VGPRs (176 → ≤168 → 3 waves). Re-dump.
 4. **If that introduced `.private_segment_fixed_size > 0`, you went too far.** Back off — a spill costs
    more than the wave buys.
 
@@ -114,4 +114,4 @@ what changed in the disassembly, you have not changed anything.
 - `AMDGCN_ENABLE_DUMP` / `ds_read_b128` / `global_load_dwordx4` / `OPTIMIZE_EPILOGUE`: https://rocm.docs.amd.com/en/latest/how-to/llm-fine-tuning-optimization/optimizing-triton-kernel.html
 - `HIPOptions` / `knobs.amd.dump_amdgcn` / `use_buffer_ops`: https://github.com/triton-lang/triton/blob/main/third_party/amd/backend/compiler.py
 - AMDGPU backend (`s_waitcnt`, buffer descriptors, resource-usage attrs): https://llvm.org/docs/AMDGPUUsage.html
-- Occupancy math (512 regs/SIMD, 16-granule): https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
+- Occupancy math on MI355X (512 regs/SIMD, VGPRs in groups of 8): https://rocm.blogs.amd.com/software-tools-optimization/occupancy-math-mi355x/README.html

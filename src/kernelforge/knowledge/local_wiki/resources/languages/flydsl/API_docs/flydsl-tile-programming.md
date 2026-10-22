@@ -16,14 +16,15 @@ allowed-tools: Read Edit Bash Grep Glob Agent
 You are **producing** a kernel — from a requirement, or by porting one from Triton — and want a
 procedure to follow in order.
 
-**Go elsewhere when:**
+**Go elsewhere when** (a path starting `skill:` is in the FlyDSL optimization skill the knowledge block
+points to, when the campaign passes one):
 
 | You want | Go to |
 |---|---|
 | To look up an op, a layout-algebra rule, or an env var | `flydsl-kernel-authoring` (the reference) |
-| To fix a kernel that runs and is wrong | `../skills/bottleneck/debug-flydsl-kernel.md` |
-| To use a kernel FlyDSL already ships | `../skills/optimize/flydsl_levers/flydsl_kernel_library.md` |
-| To make a working kernel faster | `../skills/optimize/flydsl_levers/flydsl_authoring_method.md` |
+| To fix a kernel that runs and is wrong | `skill: bottleneck/debug-flydsl-kernel.md` |
+| To use a kernel FlyDSL already ships | `skill: optimize/flydsl_levers/flydsl_kernel_library.md` |
+| To make a working kernel faster | `skill: optimize/flydsl_levers/flydsl_authoring_method.md` |
 
 **Prerequisites:** FlyDSL installed editable (`pip install -e .`), and a GPU — every step below ends
 in a real launch, because tile-programming bugs do not show up statically.
@@ -60,7 +61,7 @@ the layouts right is most of the work; the compute is usually three lines.
 ## gfx950 constants you will need
 | Fact | Value | Where it bites |
 |---|---|---|
-| LDS per workgroup | **160 KiB** | `SmemAllocator` sizing, tile-size ceilings |
+| LDS per workgroup | **160 KiB** | `SharedAllocator` sizing, tile-size ceilings |
 | LDS banks | **64** | any padding or swizzle you inherited from a 32-bank design is wrong here |
 | Wavefront | 64 lanes | thread-layout arithmetic is mod 64, not mod 32 |
 | CU count | 256 | grid sizing — query it, do not hardcode |
@@ -302,14 +303,14 @@ from flydsl.expr import range_constexpr, const_expr
 for i in range_constexpr(K):        # compile-time unrolled; i is a Python int
     ...
 
-for i in range(runtime_N):          # runtime loop; i is an ArithValue
+for i in range(runtime_N):          # runtime scf.for; i is an SSA value; bounds int or fx.Int32
+    acc = acc + x                   # names reassigned here are carried automatically
     ...
 
-# loop-carried state (software pipelining)
-start, stop, step = fx.Index(0), fx.Index(N - 1), fx.Index(1)
-for iv, state in range(start, stop, step, init=[acc_init, ...]):
+# explicit loop-carried state (software pipelining); Python-int bounds are fine
+for iv, state in range(0, N - 1, 1, init=[acc_init, ...]):
     acc = state[0]
-    results = yield [new_acc, ...]
+    results = yield [new_acc, ...]  # only yielded values are carried
 final_acc = results[0]
 
 if const_expr(USE_FAST_PATH):       # compile-time; emits no MLIR
@@ -321,55 +322,51 @@ if bid == 0:                        # runtime; rewritten to scf.IfOp
 
 The distinction that costs the most time: a `range()` induction variable **cannot index a Python
 list**, because it is an SSA value rather than an int. If you are indexing a Python-side structure,
-you need `range_constexpr`.
+you need `range_constexpr`. What each loop form carries, and which bound types it accepts, is in
+`skill: bottleneck/debug-flydsl-kernel.md` § The three loop forms.
 
 ## Step 5 — Synchronization
 ```python
 fx.gpu.barrier()             # workgroup barrier (__syncthreads equivalent)
 
-# gfx950 (CDNA4): split wait counters — prefer these
-fx.rocdl.s_wait_loadcnt(0)
-fx.rocdl.s_wait_storecnt(0)
-fx.rocdl.s_wait_dscnt(0)
+# gfx942 / gfx950: name the counters you need; an unnamed one is left unwaited
+fx.rocdl.s_waitcnt(lgkmcnt=0)                     # LDS / SMEM only
+fx.rocdl.s_waitcnt(vmcnt=4)                       # all but the 4 youngest VMEM ops
+fx.rocdl.s_waitcnt(vmcnt=0, lgkmcnt=0, expcnt=0)  # everything
 
-fx.rocdl.s_waitcnt(0)        # CDNA3-era combined counter; coarser on gfx950
-
-# scheduling hints
-fx.rocdl.sched_mfma(N)       # N MFMA before the next barrier
-fx.rocdl.sched_vmem(N)       # N VMEM reads
-fx.rocdl.sched_dsrd(N)       # N DS reads
-fx.rocdl.sched_dswr(N)       # N DS writes
+# scheduling hints: ordered groups for the scheduler, not waits
+fx.rocdl.sched_mfma(N)       # the next N MFMA
+fx.rocdl.sched_vmem(N)       # the next N VMEM reads (stores are a different class)
+fx.rocdl.sched_dsrd(N)       # the next N DS reads
+fx.rocdl.sched_dswr(N)       # the next N DS writes
 ```
 
-Use the **split counters on gfx950**. `s_waitcnt(0)` waits on everything, which serializes loads
-against LDS traffic you did not need to wait for — the single most common reason a hand-written
-pipeline shows no overlap.
+gfx950 has only `vmcnt`, `lgkmcnt` and `expcnt`. Loads and stores share `vmcnt`, so waiting for a
+load also waits for every earlier store. The split counters `s_wait_loadcnt` / `s_wait_storecnt` /
+`s_wait_dscnt` are gfx12-class instructions: `llvm-mc -mcpu=gfx950` rejects them as "not supported on
+this GPU". Avoid the positional form `s_waitcnt(N)`: it is a raw bitfield, so `s_waitcnt(8)` emits
+`s_waitcnt vmcnt(8) expcnt(0) lgkmcnt(0)` and `s_waitcnt(16)` emits `vmcnt(0) expcnt(1) lgkmcnt(0)`.
 
 Barriers must be reached by every thread in the workgroup. A barrier inside a runtime `if` deadlocks;
 hoist it out.
 
 ## Step 6 — Shared memory
 ```python
-from flydsl.utils.smem_allocator import SmemAllocator
-from flydsl.compiler.kernel_function import CompilationContext
-from flydsl._mlir import ir
-
-allocator = SmemAllocator(None, arch="gfx950", global_sym_name="smem0")
-lds_buf   = allocator.allocate_array(fx.T.f16, num_elements)
+@fx.struct
+class SharedStorage:
+    buf: fx.Array[fx.Float16, num_elements]
 
 @flyc.kernel
 def kernel_with_lds(A: fx.Tensor, ...):
-    lds_ptr = lds_buf(allocator.get_base())
-
-    lds_ptr.store(value, [idx])
+    lds = fx.SharedAllocator().allocate(SharedStorage).peek()
+    lds_buf = lds.buf.view(fx.make_layout((rows, cols), (cols, 1)))
+    # write through copy atoms or view stores, barrier, read back
     fx.gpu.barrier()
-    val = lds_ptr.load([idx])
-
-    # finalize inside the GPU module body, before launch
-    comp_ctx = CompilationContext.get_current()
-    with ir.InsertionPoint(comp_ctx.gpu_module_body):
-        allocator.finalize()
 ```
+
+`fx.SharedAllocator` over an `@fx.struct` is the v0.3.2 API (`kernels/gemm/preshuffle_gemm.py` uses it);
+the compiler sizes the static LDS global, so `launch(smem=...)` stays unset. `SmemAllocator` is legacy and
+has no `allocate_array`; use `fx.SharedAllocator`.
 
 **gfx950 LDS is 160 KiB per workgroup across 64 banks.** Both numbers matter:
 - 160 KiB means tile sizes that overflowed on CDNA3 now fit — but it also means LDS is rarely the
@@ -379,7 +376,7 @@ def kernel_with_lds(A: fx.Tensor, ...):
 
 Before adding LDS at all: it only pays when there is **cross-thread reuse**. Staging data that each
 thread reads once adds a round trip and a barrier for nothing. See
-`../skills/optimize/flydsl_levers/flydsl_authoring_method.md`.
+`skill: optimize/flydsl_levers/flydsl_authoring_method.md`.
 
 ## Step 7 — Run it
 ```bash
@@ -404,7 +401,7 @@ assert torch.allclose(Out, reference, atol=1e-5)
 | For GEMM: check with non-symmetric A and B | a symmetric input hides operand-order bugs |
 
 If it is wrong, the classification table in
-`../skills/bottleneck/debug-flydsl-kernel.md` maps the symptom to the cause. If it does not compile,
+`skill: bottleneck/debug-flydsl-kernel.md` maps the symptom to the cause. If it does not compile,
 the error → cause → fix table is in **flydsl-kernel-authoring** §10.
 
 ## Checklist
@@ -414,7 +411,7 @@ the error → cause → fix table is in **flydsl-kernel-authoring** §10.
 - [ ] `retile()` applied to every fragment before a copy touches it
 - [ ] `Constexpr[int]` for compile-time constants, `Int32` for runtime values
 - [ ] `range_constexpr()` wherever the induction variable indexes a Python structure
-- [ ] gfx950 split wait counters, not a blanket `s_waitcnt(0)`
+- [ ] Waits name their counters (`s_waitcnt(vmcnt=…, lgkmcnt=…)`), never a positional bitfield
 - [ ] LDS added only where there is real cross-thread reuse; swizzle re-derived for 64 banks
 - [ ] `torch.cuda.synchronize()` before checking results
 - [ ] Tested at a non-tile-multiple shape

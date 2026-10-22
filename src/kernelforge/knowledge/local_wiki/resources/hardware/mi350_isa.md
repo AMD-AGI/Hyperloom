@@ -26,7 +26,7 @@ What changes at the instruction level, and how to confirm the compiler actually 
 |---|---|
 | **Matrix** | + `v_mfma_scale_f32_{16x16x128,32x32x64}_f8f6f4` (E8M0 block scale) · + classic f8f6f4 FP6/FP4 · + FP16/BF16 **16×16×32, 32×32×16** · **TF32 removed** · FP64 matrix halved |
 | **FP8** | **OCP** (E4M3FN / E5M2) instead of FNUZ |
-| **Direct g→LDS** | `global_load_lds` / `buffer_load ... lds` accept **1/2/4/12/16 DWORD** (96- and 128-bit added) |
+| **Direct g→LDS** | `global_load_lds` / `buffer_load ... lds` accept **1/2/4/12/16 bytes per lane** (96- and 128-bit added) |
 | **LDS** | 160 KiB, **64 banks**, **read-with-transpose `ds`** loads, 320-DWORD alloc granularity |
 | **Carryover** | `v_smfmac_*`, `v_accvgpr_read/write_b32`, count-based `s_waitcnt`, `buffer_*` / `global_*` / `ds_*` |
 

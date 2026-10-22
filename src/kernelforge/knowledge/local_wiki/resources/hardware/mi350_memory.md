@@ -60,8 +60,8 @@ One memory instruction issues **64 lane addresses**. The hardware merges lanes f
   (`mi350_lds.md`).
 
 **Coalescing is not bank conflicts.** Coalescing is about *global* transactions across 64 lanes at
-128 B granularity; bank conflicts are about *LDS* banks within a half-wave. Separate axes, separate
-fixes.
+128 B granularity; bank conflicts are about *LDS* banks within one read phase (`mi350_lds.md`).
+Separate axes, separate fixes.
 
 ## Infinity Fabric
 

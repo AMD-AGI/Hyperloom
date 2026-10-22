@@ -2,7 +2,7 @@
 title: Common optimization methodology — index, file roles & problem-routing
 kind: index
 scope: common_methodology
-updated: 2026-08-28
+updated: 2026-10-19
 ---
 
 # Common optimization methodology — knowledge map
@@ -99,7 +99,7 @@ common_methodology/
 └── optimization/                     ← TREATMENT: cross-operator performance levers
     ├── LEVERS.md                     # section index: the top-down lever hierarchy + per-file table (load for this folder)
     ├── lever_bottleneck_class.md     # arithmetic intensity, machine balance, bottleneck→lever map, ~45–55% reality
-    ├── lever_occupancy.md            # 512 VGPR/EU, 16-granule alloc, AGPR pool, waves/EU, spilling cliff, waves_per_eu
+    ├── lever_occupancy.md            # 512 VGPR/EU, 8-granule alloc, AGPR pool, waves/EU, spilling cliff, waves_per_eu
     ├── lever_lds_banks.md            # 160 KiB LDS over 64 banks, padding vs XOR swizzle, double-buffer
     ├── lever_prefetch.md             # global_load_lds / async copy, software pipelining, num_stages, 128-bit direct-to-LDS
     ├── lever_loop_form.md            # shape-static trip count/addresses gate num_stages + async copy; data-dependent while-gather → static range + mask; the "more work, faster" trade

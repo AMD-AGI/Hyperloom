@@ -3,7 +3,7 @@ title: HIP — the authoring model, toolchain, and when to use it
 kind: language
 lever: hip_authoring_model
 gens: [gfx950]
-updated: 2026-08-28
+updated: 2026-10-19
 sources:
   - https://rocm.docs.amd.com/projects/HIP/en/latest/reference/kernel_language.html
   - https://rocm.docs.amd.com/projects/HIP/en/latest/understand/programming_model.html
@@ -34,7 +34,7 @@ or **FlyDSL** already expresses it.
 | Compute Units | **256** (8 XCD × 32) |
 | SIMDs / CU | 4 |
 | Wavefront | **64 lanes** |
-| Registers | **512 / SIMD**, granularity **16** |
+| Registers | **512 / SIMD**, granularity **8** |
 | AGPRs (MFMA accumulators) | ≤ 256 / lane, **unified pool** with VGPR |
 | SGPRs | ~102 usable / wave |
 | LDS (`__shared__`) | **160 KiB / CU**, **64 banks** × 4 B, **256 B/clk** |
@@ -106,7 +106,7 @@ That column of "full" is the whole argument for being here — and the reason it
 ## Predict occupancy before you measure
 
 ```
-occ_vgpr    = floor(512 / round_up_16(vgpr_used))            # waves/SIMD
+occ_vgpr    = min(8, floor(512 / round_up_8(vgpr_used)))     # waves/SIMD (8-wave cap)
 occ_lds     = floor(163840 / lds_bytes_per_workgroup)        # workgroups/CU  (gfx950: 160 KiB)
 occ (wg/CU) = min(floor(occ_vgpr * 4 / num_waves), occ_lds)  # 4 SIMD/CU
 ```

@@ -3,7 +3,7 @@ title: MI350X / MI355X — chip orientation, cheat sheet, peaks
 kind: hardware
 topic: overview
 gens: [gfx950]
-updated: 2026-08-28
+updated: 2026-10-19
 ---
 
 # MI350X / MI355X (gfx950) — orientation
@@ -21,9 +21,9 @@ assumes these numbers.
 | XCDs | **8**, on **2 I/O dies** | L2 is per-XCD, not global |
 | SIMDs / CU | **4** | occupancy is computed per-SIMD |
 | Wave slots | 8/SIMD → **32/CU** | hard cap |
-| Registers | **512 × 4 B per SIMD**, 16-granule | + ≤256 AGPR, unified pool |
+| Registers | **512 × 4 B per SIMD**, 8-granule | + ≤256 AGPR, unified pool |
 | LDS | **160 KiB/CU**, **64 banks**, **256 B/clk** | 2.5× capacity, 2× banks vs CDNA3 |
-| Direct global→LDS | **128 b/lane** (1/2/4/12/16 DWORD) | 4× wider than CDNA3 |
+| Direct global→LDS | **128 b/lane** (1/2/4/12/16 bytes per lane) | 4× wider than CDNA3 |
 | L2 | **per-XCD** | cross-XCD reuse is not an L2 hit |
 | Infinity Cache | **256 MiB** (MALL/L3), device-shared | the first shared level |
 | HBM3E | **288 GB**, **8.0 TB/s** | 8 stacks × 36 GB (12-Hi) |

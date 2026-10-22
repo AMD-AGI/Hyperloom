@@ -4,6 +4,9 @@ kind: hardware
 topic: lds
 gens: [gfx950]
 updated: 2026-08-28
+sources:
+  - https://rocm.blogs.amd.com/software-tools-optimization/cdna4-gemm-kernels/README.html
+  - https://github.com/nod-ai/amd-shark-ai/blob/main/docs/amdgpu_kernel_optimization_guide.md
 ---
 
 # LDS — capacity, banks, staging
@@ -20,7 +23,7 @@ drive kernel design here: **160 KiB**, **64 banks**, **128 b/lane direct-to-LDS*
 | **Bank index** | **`(byte_address / 4) mod 64`** |
 | Read bandwidth | **256 B/clk** |
 | Allocation granule | **320 DWORD** |
-| Direct global→LDS | **1 / 2 / 4 / 12 / 16 DWORD** → up to **128 b/lane** |
+| Direct global→LDS | **1 / 2 / 4 / 12 / 16 bytes per lane** (`ubyte`, `ushort`, `dword`, `dwordx3`, `dwordx4`; no `dwordx2`) → up to **128 b/lane** |
 | Read-with-transpose `ds` | **yes** |
 
 Versus earlier CDNA parts: 64 KiB → 160 KiB, 32 → 64 banks, 128 → 256 B/clk, 32 → 128 b/lane
@@ -32,7 +35,17 @@ direct-to-LDS, and read-with-transpose is new.
 
 ## Bank conflicts
 
-A wave issues LDS in **half-waves of 32 lanes**. Within a half-wave:
+A wave's LDS read is served in **phases**, and bank conflicts count only within a phase. gfx950 read
+phases, from AMD's ROCm blog "FP8 GEMM Optimization on AMD CDNA4 Architecture" and nod-ai's AMDGPU kernel
+optimization guide (URLs in `sources:`):
+
+| Read | Phases | Lanes in each phase |
+|---|---|---|
+| `ds_read_b32` | 1 | T0–T63 |
+| `ds_read_b64` | 2 | T0–T31 · T32–T63 |
+| `ds_read_b128` | 4 | {T0–3, T12–15, T20–23, T24–27} · {T32–35, T44–47, T52–55, T56–59} · {T4–7, T8–11, T16–19, T28–31} · {T36–39, T40–43, T48–51, T60–63} |
+
+Each phase covers 256 B (64 banks × 4 B). Write phases are not documented for gfx950. Within a phase:
 
 - Lanes hitting the **same address** in a bank → **broadcast, free**.
 - Lanes hitting **different addresses** in the **same bank** → **N-way conflict**, serialized into
@@ -48,8 +61,9 @@ __shared__ float tile[64][65];   // GOOD: +1 spreads the column across all banks
 float v = tile[k][threadIdx.x];
 ```
 
-What matters is **`(byte_stride / 4) mod 64`**, not the element count — the same trap fires at stride
-32 for a `[32][32]` tile of 8-byte elements.
+What matters is how many banks the stride reaches — a whole-dword stride touches only
+**`64 / gcd(byte_stride / 4, 64)`** banks — not the element count; the same trap fires at stride 32 for a
+`[32][32]` tile of 8-byte elements.
 
 Synchronization uses **`s_waitcnt lgkmcnt`** — count-based, not a fence. Wait only for the specific
 outstanding LDS/scalar ops you need, which is what makes deep prefetch overlap expressible.
@@ -57,10 +71,16 @@ outstanding LDS/scalar ops you need, which is what makes deep prefetch overlap e
 ## The two fixes
 
 ### Padding
-Choose `PAD` so `((BK+PAD) · sizeof(dtype) / 4) mod 64 != 0`. Commonly `+1` for f32, `+4`/`+8` for
-16-/8-bit — but the second constraint is **keep 16-byte alignment** so `ds_read_b128` still fires. A
-pad that removes conflicts and breaks vectorization is a net loss. Cost is a little wasted LDS, which
-the 160 KiB budget absorbs easily.
+Choose `PAD` so the row stride, counted in units of the per-lane read width (4 B for `ds_read_b32`, 8 B
+for `b64`, 16 B for `b128`), is **odd**. With one row per lane (lane `r` starts at bank
+`floor((r · stride_bytes + col_bytes) / 4) mod 64`), an odd stride keeps every gfx950 read phase
+(above) on distinct banks, for `b32`, `b64` and `b128`. `stride mod 64 != 0` is not enough: an 80-dword
+stride reaches 4 banks, and fp16 128+1 (64.5 dwords) puts lanes 0 and 1 on bank 0. The pad must also
+keep the read aligned, so one extra read-width unit is the usual choice: `+1` for f32 with `b32`, `+8`
+for bf16 or `+16` for fp8 with `ds_read_b128` on a row that is an even number of 16 B units. A pad that
+removes conflicts and breaks vectorization is a net loss. For column-wise reads such as MFMA fragments,
+the `b128` phase pattern makes padding hard to use; prefer the XOR swizzle below. Cost is a little
+wasted LDS, which the 160 KiB budget absorbs easily.
 
 ### XOR swizzle (preferred for GEMM)
 `col' = col ^ (row & mask)` — permute the column index by the row so every lane in a `ds_read`/
@@ -78,8 +98,9 @@ buffer_load_dwordx4 ... lds        ; descriptor form
 ```
 
 Two wins at once: it **frees staging registers** (the bigger effect on tiled GEMM — see
-`mi350_execution.md`) and **overlaps with compute**. gfx950 accepts 1/2/4/**12/16** DWORD; the 96- and
-128-bit forms are new. If you are emitting the 4-DWORD form you are leaving 4× on the table.
+`mi350_execution.md`) and **overlaps with compute**. gfx950 accepts 1, 2, 4, **12 and 16** bytes per lane
+(`llvm-mc -mcpu=gfx950` rejects `buffer_load_dwordx2 … lds`); the 96- and 128-bit forms are new. If you are
+emitting the 4-byte (`dword`) form you are leaving 4× on the table.
 
 ## Occupancy budget
 
@@ -117,7 +138,7 @@ constraint to fight: 3–4 double-buffer stages are affordable at typical GEMM t
 - `rocprof-compute` LDS panel: **bank-conflict rate over 64 banks**, LDS BW utilization against the
   **256 B/clk** ceiling, % stalls on LDS.
 - ISA dump: confirm `ds_read_b128`/`ds_write_b128` (not `b32`), the swizzle math, and that
-  `global_load_lds` emits the 12/16-DWORD form.
+  `global_load_lds` emits the `dwordx3`/`dwordx4` form.
 - `.lds_size` / `-Rpass-analysis=kernel-resource-usage` for the per-kernel footprint after rounding.
 - A/B the same kernel with and without the pad/swizzle — the conflict counter should collapse.
 
