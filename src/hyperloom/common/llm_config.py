@@ -166,7 +166,8 @@ AGENT_BACKEND_DEEPSEEK = "deepseek"
 #: rule between Claude and Codex. The DeepSeek Harness is reachable only this
 #: way: it returns its intents in the reply body with no schema enforcing them,
 #: so it is a route an operator asks for rather than one a credential shape can
-#: select. The harness model comes from ``DSH_MODEL``.
+#: select. The harness model comes from ``DSH_MODEL``. Quantization honours
+#: only ``deepseek``: any other value leaves it on Claude.
 AGENT_BACKEND_ENV = "INFERENCE_OPTIMIZER_AGENT_BACKEND"
 
 AGENT_BACKEND_CHOICES: tuple[str, ...] = (AGENT_BACKEND_CLAUDE, AGENT_BACKEND_CODEX, AGENT_BACKEND_DEEPSEEK)
