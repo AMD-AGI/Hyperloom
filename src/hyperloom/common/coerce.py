@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from typing import Any, TypeVar
 
@@ -98,12 +99,30 @@ def to_str_list(value: Any) -> list[str]:
     return [text] if text else []
 
 
+def first_str(*values: Any) -> str:
+    for value in values:
+        if value:
+            return str(value)
+    return ""
+
+
+def to_mapping(value: Any) -> dict[str, Any]:
+    return dict(value) if isinstance(value, Mapping) else {}
+
+
+def to_list(value: Any) -> list[Any]:
+    return list(value) if isinstance(value, (list, tuple)) else []
+
+
 __all__ = [
     "to_float",
     "to_int",
     "first_float",
     "first_int",
+    "first_str",
     "optional_positive_int",
     "to_unix",
+    "to_list",
+    "to_mapping",
     "to_str_list",
 ]
