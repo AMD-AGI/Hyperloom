@@ -15,7 +15,7 @@ from typing import Any
 
 from kernelforge.cli.lanes import LaneBinding
 from kernelforge.config import Config, resolve_agent_model
-from kernelforge.llm.gateway import (
+from kernelforge.agent_backends.gateway import (
     anthropic_environment_from_openai,
     openai_gateway_from_anthropic,
     resolve_openai_gateway,

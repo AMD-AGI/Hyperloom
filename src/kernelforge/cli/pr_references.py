@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 import click
 
 from hyperloom.common.env import env_bool
-from kernelforge.llm.git import git
+from kernelforge.tools.git import git
 
 if TYPE_CHECKING:
     # Imported lazily at runtime to keep CLI startup off the knowledge stack.

@@ -61,7 +61,7 @@ from kernelforge.agent_backends.base import (
     AgentToolPolicy,
     watchdog_timeout_sec,
 )
-from kernelforge.llm.workspace_policy import TOOL_OWNED_UNTRACKED_GLOBS
+from kernelforge.workspace.edit_policy import TOOL_OWNED_UNTRACKED_GLOBS
 from kernelforge.roofline_ceiling.contract import CeilingContractError, CeilingReport
 from kernelforge.roofline_ceiling.evidence import OBSERVED_CAMPAIGN, EvidenceBundle, KnownCases, PerformanceRun
 from kernelforge.roofline_ceiling.report import (

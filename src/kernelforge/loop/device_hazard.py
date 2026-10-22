@@ -11,7 +11,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
-from kernelforge.llm.process_reaping import device_holders, still_holding_device
+from kernelforge.tools.process_reaping import device_holders, still_holding_device
 
 log = logging.getLogger(__name__)
 

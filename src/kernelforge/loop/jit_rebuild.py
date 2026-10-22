@@ -8,7 +8,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Iterable
 
-from kernelforge.llm.git import GitError, git_bytes
+from kernelforge.tools.git import GitError, git_bytes
 from kernelforge.tools.aiter_cache import activate_aiter_cache_for_sources
 
 _CPP_EXTS = (".cu", ".cuh", ".hip", ".cpp", ".cc", ".cxx", ".c", ".h", ".hpp")

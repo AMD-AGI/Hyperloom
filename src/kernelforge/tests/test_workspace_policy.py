@@ -3,7 +3,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from kernelforge.llm.workspace_policy import (
+from kernelforge.workspace.edit_policy import (
     FORGE_LOOP_OUTPUT_DIRNAME,
     is_protected_path,
     protected_path_inventory,
