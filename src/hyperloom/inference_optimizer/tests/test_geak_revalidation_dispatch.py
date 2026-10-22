@@ -16,6 +16,7 @@ import pytest
 from hyperloom.orchestrator.actions.executors._grid_runner import GridVariant
 from hyperloom.orchestrator.actions.executors._proposal_identity import effective_fingerprint
 from hyperloom.orchestrator.actions.executors._server_lifecycle import GpuHandoff
+from hyperloom.orchestrator.actions.executors._subprocess_kill import REAP_MARK_ENV, run_with_session_kill
 from hyperloom.orchestrator.phases import machine_state as ps
 from hyperloom.orchestrator.state.shared_state import ESCALATE_HINT_SKIP_TO_SWEEP
 
@@ -937,9 +938,10 @@ def _stub_geak_runner_call(monkeypatch, outcome) -> list[str]:
     """Replace only the GEAK runner's own thread call; every other one runs.
 
     ``asyncio.to_thread`` is shared, so the phase's bus and file work travels
-    through it too — dispatching on the runner closure keeps those real. The
+    through it too — dispatching on the geak_runner launch keeps those real. The
     hand-off's GPU check reports the cards free, so the outcome does not hang
-    on what the test host's GPUs hold.
+    on what the test host's GPUs hold. The launch must mark the run, or what it
+    leaves running survives it.
 
     Returns the list the interceptions are recorded in, so a test can prove the
     phase reached the runner rather than returning at an earlier gate.
@@ -952,36 +954,14 @@ def _stub_geak_runner_call(monkeypatch, outcome) -> list[str]:
     calls: list[str] = []
 
     async def _to_thread(func, /, *args, **kwargs):
-        qualname = getattr(func, "__qualname__", "")
-        if qualname.endswith("KernelPhase._run_geak_runner"):
-            calls.append(qualname)
+        if func is run_with_session_kill and "hyperloom.orchestrator.kernel.geak_runner" in args[0]:
+            assert kwargs["env"].get(REAP_MARK_ENV)
+            calls.append("geak_runner")
             return outcome()
         return await original_to_thread(func, *args, **kwargs)
 
     monkeypatch.setattr("hyperloom.orchestrator.phases.kernel.asyncio.to_thread", _to_thread)
     return calls
-
-
-@pytest.mark.asyncio
-async def test_an_unreadable_term_grace_is_refused_before_the_runner_is_dispatched(
-    coordinator, tmp_path, monkeypatch
-) -> None:
-    """The SIGTERM grace is resolved before the dispatch that spawns the runner.
-
-    Resolved inside the dispatched call instead, the raise lands with ``Popen`` already
-    returned: nothing calls ``communicate`` or ``killpg``, so the runner -> run_e2e ->
-    vllm tree keeps the GPUs while the phase records a crash and winds down to SWEEP.
-    """
-    from hyperloom.common.env import EnvValueError
-
-    _arm_settled_candidate(coordinator, tmp_path)
-    calls = _stub_geak_runner_call(monkeypatch, lambda: subprocess.CompletedProcess(["geak_runner"], 0, "", ""))
-    monkeypatch.setenv("GEAK_TERM_GRACE_S", "3m")
-
-    with pytest.raises(EnvValueError):
-        await coordinator.phase_kernel._run_geak_kernel_phase(from_phase="KERNEL")
-
-    assert calls == []
 
 
 @pytest.mark.asyncio
