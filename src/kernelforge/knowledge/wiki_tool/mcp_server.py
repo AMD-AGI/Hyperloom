@@ -217,26 +217,12 @@ class KnowledgeWikiServer:
 
     def __init__(self, environ: dict[str, str] | None = None) -> None:
         env = os.environ if environ is None else environ
-        self.role = str(env.get(ROLE_ENV) or "").strip()
-        raw_root = str(env.get(ROOT_ENV) or "").strip()
-        raw_log = str(env.get(LOG_ENV) or "").strip()
-        self.root = Path(raw_root).resolve() if raw_root else None
-        self.log_path = Path(raw_log) if raw_log else None
-        missing = (
-            [] if self.root is None else [s for s in SCRIPTS.values() if not (self.root / "scripts" / s).is_file()]
-        )
-        if self.root is None:
-            self.unusable = f"{ROOT_ENV} is not set"
-        elif missing:
-            self.unusable = (
-                f"{self.root} is not a knowledge base checkout; missing scripts/{', scripts/'.join(missing)}"
-            )
-        else:
-            self.unusable = ""
+        # The session side names all three, after Config has checked that the root is a knowledge base checkout.
+        self.role = env[ROLE_ENV]
+        self.root = Path(env[ROOT_ENV]).resolve()
+        self.log_path = Path(env[LOG_ENV])
 
     def _log(self, record: dict[str, Any]) -> None:
-        if self.log_path is None:
-            return
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
         line = json.dumps(record, ensure_ascii=False, default=str) + "\n"
         # Lanes and specialists append to one log concurrently.
@@ -247,19 +233,15 @@ class KnowledgeWikiServer:
             finally:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
-    def _run(self, name: str, arguments: dict[str, Any]) -> tuple[int, str]:
-        if self.unusable:
-            return 2, f"The knowledge base is unavailable: {self.unusable}."
-        assert self.root is not None
+    def _run(self, name: str, argv: list[str]) -> tuple[int, str]:
         if name == GUIDE:
             guide = self.root / GUIDE_FILE
             if not guide.is_file():
                 return 3, "This knowledge base ships no usage guide; use `search` to find pages."
             return 0, guide.read_text(encoding="utf-8", errors="replace")
-        argv = [sys.executable, str(self.root / "scripts" / SCRIPTS[name]), *script_arguments(name, arguments)]
         try:
             result = subprocess.run(
-                argv,
+                [sys.executable, str(self.root / "scripts" / SCRIPTS[name]), *argv],
                 cwd=self.root,
                 env=_child_env(),
                 capture_output=True,
@@ -276,8 +258,6 @@ class KnowledgeWikiServer:
 
     def _require_inside_root(self, page_id: str) -> None:
         """Refuse a page path outside the checkout: its own script reads a path as given, so only this check holds it."""
-        if self.root is None:
-            return
         path = Path(page_id.strip())
         if path.is_absolute() or not (self.root / path).resolve().is_relative_to(self.root):
             raise InvalidParamsError("page_id must name a page inside the knowledge base")
@@ -288,12 +268,11 @@ class KnowledgeWikiServer:
             raise InvalidParamsError(f"unknown tool: {name}")
         # Every call must say why it is made; the reason is logged, never forwarded to the query script.
         reason = _text_argument(arguments, _REASON, required=True)
-        if name != GUIDE:
-            script_arguments(name, arguments)
+        argv = [] if name == GUIDE else script_arguments(name, arguments)
         if name == PAGE:
             self._require_inside_root(arguments["page_id"])
         started = time.monotonic()
-        code, output = await asyncio.to_thread(self._run, name, arguments)
+        code, output = await asyncio.to_thread(self._run, name, argv)
         text, truncated = _bounded(output)
         self._log(
             {

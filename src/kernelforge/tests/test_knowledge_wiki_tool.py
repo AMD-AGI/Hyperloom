@@ -209,14 +209,6 @@ def test_guide_returns_the_wikis_own_usage_guide(tmp_path, log):
     assert [r["results"] for r in _log(log)] == [["SKILL.md"], []]
 
 
-def test_an_unusable_checkout_answers_every_call_with_an_error(tmp_path, log):
-    srv = _server(tmp_path / "not-a-wiki", log)
-    reply = _call(srv, "search", {"query": "mfma", "reason": "start the search"})
-
-    assert reply["isError"] is True and "not a knowledge base checkout" in reply["content"][0]["text"]
-    assert _log(log)[0]["exit_code"] == 2
-
-
 def test_long_output_is_cut_and_says_so(wiki, log, monkeypatch):
     monkeypatch.setattr(server, "MAX_OUTPUT_CHARS", 40)
     reply = _call(_server(wiki, log), "grep", {"pattern": "x", "reason": "scan for a token"})
