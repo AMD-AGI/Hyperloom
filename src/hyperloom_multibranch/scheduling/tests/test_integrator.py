@@ -515,6 +515,26 @@ async def test_a_not_stackable_commit_whose_change_the_head_did_not_touch_is_not
     assert len(tried) == 1
 
 
+async def test_a_merge_test_the_candidate_failed_is_not_tried_again_on_a_head_its_change_does_not_name(
+    bench: Bench,
+) -> None:
+    apart = await _committed_elsewhere(bench, APART, 9.0)
+    bench.toolbox.script(lambda test: f"{TAG_FLAG}apart" in test.delta.config.server_args, [Fate.CANDIDATE])
+
+    rounds = [await _one(bench) for _ in range(4)]
+
+    c1, c2 = bench.commits["c1"], bench.commits["c2"]
+    assert [(report.candidate, report.outcome) for report in rounds if report is not None] == [
+        (apart, MergeOutcome.PENDING),
+        (c1, MergeOutcome.MERGED),
+        (c2, MergeOutcome.MERGED),
+    ]
+    assert rounds[0] is not None and "candidate_failed" in rounds[0].reason and "serve_flag" in rounds[0].reason
+    assert rounds[3] is None
+    tried = [test for test in bench.merge_tests().values() if f"{TAG_FLAG}apart" in test.delta.config.server_args]
+    assert len(tried) == 1
+
+
 async def test_a_round_tests_k_candidates_at_once_and_merges_the_first_improvement(bench: Bench) -> None:
     first = await bench.integrator.integrate_next(2)
     merged = await bench.repo.head(INTEGRATION_BRANCH)

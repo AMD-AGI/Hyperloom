@@ -4,12 +4,14 @@
 """Which committed specialist commits the integrator offers on an integration head.
 
 A commit is offered once per head, until it is merged or found already on the head, except where the answer it
-already has still holds. ``NOT_STACKABLE`` on a commit's latest merge is the rule gate's measured answer about that
-commit's own change against what the head held. The integration head only grows, so that answer stands until a later
-merge changes one of the things the candidate's own change names -- a server argument, an environment variable, a
-component or a kernel artifact -- and then the candidate is offered again. A merge attempt that reached no judgement,
-because its test did not measure or its regression set did not run clean, leaves its candidate ``PENDING``, and it
-comes back on the next head whatever it named. The session's base image is fixed, and
+already has still holds. An answer holds when it is about the candidate's own change rather than about the head the
+change met: ``NOT_STACKABLE`` is the rule gate's measured one, and a merge test the candidate failed is another --
+the merged recipe did not run, and a head that changes nothing the change names builds the same recipe again. The
+integration head only grows, so such an answer stands until a later merge changes one of the things the candidate's
+own change names -- a server argument, an environment variable, a component or a kernel artifact -- and then the
+candidate is offered again. A merge attempt that settled nothing comes back on the next head whatever it named: a
+test whose measurement failed, a regression set that did not run clean, a conflict, and a candidate another of the
+round's merges superseded. The session's base image is fixed, and
 :func:`~hyperloom_multibranch.repo.merge.carry` refuses a candidate that moves it, so an image is never one of the
 things a change names here.
 
@@ -25,10 +27,12 @@ answers how alike two branches' changes are.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from typing import Protocol
 
+from hyperloom.contracts.measurement import Validity
 from hyperloom.contracts.recipe import Recipe, diff
-from hyperloom_multibranch.contracts.notebook.interfaces import CommitQuery
-from hyperloom_multibranch.contracts.notebook.records import CommittedCommit
+from hyperloom_multibranch.contracts.notebook.interfaces import CommitQuery, RecordSearch
+from hyperloom_multibranch.contracts.notebook.records import CommittedCommit, MergeState
 from hyperloom_multibranch.contracts.notebook.vocab import MergeOutcome
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 
@@ -60,6 +64,10 @@ def touched(before: Recipe, after: Recipe) -> frozenset[str]:
     return frozenset(names)
 
 
+class CandidateNotebook(CommitQuery, RecordSearch, Protocol):
+    """What :class:`Candidates` reads: the committed commits, and how a candidate's last merge test ended."""
+
+
 class Candidates:
     """The committed commits the integrator offers, and the recipes it has read to decide.
 
@@ -67,7 +75,7 @@ class Candidates:
     and both sides of the overlap are changes between commits already read.
     """
 
-    def __init__(self, notebook: CommitQuery, repo: ExperimentRepo) -> None:
+    def __init__(self, notebook: CandidateNotebook, repo: ExperimentRepo) -> None:
         self._notebook = notebook
         self._repo = repo
         self._recipes: dict[str, Recipe] = {}
@@ -89,10 +97,26 @@ class Candidates:
             return True
         if last.integration_head == head or last.outcome is MergeOutcome.ALREADY_ON_HEAD:
             return False
-        if last.outcome is not MergeOutcome.NOT_STACKABLE:
+        if not await self._answered_the_change(last):
             return True
         own = await self._touched_between(commit.parent_commit, commit.commit_id)
         return bool(own & await self._touched_between(last.integration_head, head))
+
+    async def _answered_the_change(self, last: MergeState) -> bool:
+        """Whether ``last`` settled something about the candidate's own change rather than about the head it met.
+
+        A merge test the candidate failed is such an answer: what the toolbox could not run it does not run again on
+        a head that changes nothing the change names. A measurement that failed is not, and neither is a round that
+        superseded the candidate or a regression set that did not run clean -- they leave the candidate ``PENDING``
+        too.
+        """
+
+        if last.outcome is MergeOutcome.NOT_STACKABLE:
+            return True
+        if last.outcome is not MergeOutcome.PENDING:
+            return False
+        result = (await self._notebook.record(str(last.request_id))).result
+        return result is not None and result.validity is Validity.CANDIDATE_FAILED
 
     async def _touched_between(self, before: str, after: str) -> frozenset[str]:
         return touched(await self._recipe(before), await self._recipe(after))
@@ -103,4 +127,4 @@ class Candidates:
         return self._recipes[commit]
 
 
-__all__ = ["Candidates", "touched"]
+__all__ = ["CandidateNotebook", "Candidates", "touched"]
