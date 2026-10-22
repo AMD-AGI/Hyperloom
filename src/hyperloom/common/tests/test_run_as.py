@@ -214,10 +214,10 @@ def test_demoted_child_files_are_group_writable_and_a_plain_launch_keeps_the_uma
     spec = resolve_run_as(UNPRIVILEGED)
     assert spec is not None
     spec.share_tree(shared_tmp)
-    assert spec.popen_kwargs()["umask"] == 0o002
+    assert spec.popen_kwargs()["umask"] == 0o007
     out = _run_as_unprivileged(f"umask; cd {shared_tmp} && touch made")
     assert out.returncode == 0, out.stderr
-    assert out.stdout.strip() == "0002"
+    assert out.stdout.strip() == "0007"
     assert (shared_tmp / "made").stat().st_mode & stat.S_IWGRP
     # Without a demote nothing sets a umask, so a child inherits the app's own.
     plain = subprocess.run(["/bin/sh", "-c", "umask"], capture_output=True, text=True, check=True)
@@ -242,7 +242,7 @@ def test_naming_a_user_sets_the_apps_umask_and_unset_leaves_it(monkeypatch, rest
     assert os.umask(0o022) == 0o022
     monkeypatch.setenv(run_as_mod.SPECIALIST_USER_ENV, UNPRIVILEGED)
     assert specialist_run_as() is not None
-    assert os.umask(0o022) == 0o002
+    assert os.umask(0o022) == 0o007
 
 
 @needs_root
@@ -254,7 +254,7 @@ def test_files_the_app_creates_after_naming_a_user_are_group_writable(shared_tmp
     specialist_run_as()
     (shared_tmp / "rebuilt.py").write_text("x", encoding="utf-8")
     (shared_tmp / "newdir").mkdir()
-    assert stat.S_IMODE((shared_tmp / "rebuilt.py").stat().st_mode) == 0o664
+    assert stat.S_IMODE((shared_tmp / "rebuilt.py").stat().st_mode) == 0o660
     assert (shared_tmp / "rebuilt.py").stat().st_gid == spec.gid
     assert (shared_tmp / "newdir").stat().st_mode & stat.S_ISGID
     assert (shared_tmp / "newdir").stat().st_gid == spec.gid

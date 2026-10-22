@@ -37,14 +37,15 @@ SPECIALIST_USER_ENV = "HYPERLOOM_SPECIALIST_USER"
 
 # New files made by the child are group-writable, so the app (a member of the
 # specialist's group, or root) can still read and rewrite them.
-_CHILD_UMASK = 0o002
+_CHILD_UMASK = 0o007
 _GROUP_RW = stat.S_IRGRP | stat.S_IWGRP
 _GROUP_RWX_SETGID = _GROUP_RW | stat.S_IXGRP | stat.S_ISGID
 _GROUP_R = stat.S_IRGRP
 _GROUP_RX_SETGID = _GROUP_R | stat.S_IXGRP | stat.S_ISGID
-# The app's own umask once a specialist user is set: what it creates (a sync's
-# reset and apply rebuild worktree files as the app) stays group-writable.
-_APP_UMASK = 0o002
+# The app's own umask once a specialist user is set: the group may read and write,
+# others get nothing. What the app creates (a sync's reset and apply rebuild
+# worktree files as the app) stays group-writable.
+_APP_UMASK = 0o007
 
 
 class RunAsError(ValueError):
@@ -158,7 +159,7 @@ def resolve_run_as(user: str | None) -> RunAs | None:
 def specialist_run_as() -> RunAs | None:
     """Resolve ``HYPERLOOM_SPECIALIST_USER``; ``None`` (today's behaviour) when unset or blank.
 
-    When a user is named, this process's own umask becomes 0o002, so files the
+    When a user is named, this process's own umask grants its group full access and denies others (0o007), so files the
     app itself (re)creates in a specialist's worktree stay writable by the
     specialist's group. Unset leaves the umask alone.
     """
