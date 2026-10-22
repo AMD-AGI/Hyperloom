@@ -121,7 +121,9 @@ extra_server_args is one string of command-line flags; a key the delta does not 
 lists the keys it takes. For source, \
 call worktree_sync, edit the files in your worktree, and call worktree_check with the component until it passes (the \
 files compile and the package imports with your change); then worktree_patch returns the delta and the parent commit \
-to test. Submit the delta worktree_patch returns as it is: never set upstream_ref or upstream_repo on a component your \
+to test. When your change adds a code path, put a one-time log line on the path it adds, and when its result is \
+flat or worse, check the test's server.log shows that line before you call the idea dead: a patch that never ran \
+measured nothing. Submit the delta worktree_patch returns as it is: never set upstream_ref or upstream_repo on a component your \
 head already has, which the toolbox refuses as upstream_label_unsupported. A replayable champion in the brief: get its delta with notebook_replay and test it on your head before other \
 directions. A lead under "Unfinished in this session" in the brief is a change another branch measured \
 but left unfinished: finish one in your direction the same way before starting a new idea.

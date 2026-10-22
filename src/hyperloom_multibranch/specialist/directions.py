@@ -11,9 +11,11 @@ held, then the one the fewest running branches hold, the earlier one in this ord
 from __future__ import annotations
 
 DIRECTIONS = (
-    "server.log fixes: read the server.log of your branch's tests, fix every error and warning it shows, and make sure "
-    "every setting the recipe asks for is really applied, with no fallback to an eager or plain torch path; a fix is a "
-    "source patch or the setting that removes the cause.",
+    "Fast path checks: make sure every setting the recipe asks for and every patch really takes its fast path. Read "
+    "the server.log of your branch's tests for what fell back: an eager or plain torch path, CUDA graphs off, a kernel "
+    "or a feature the engine turned off. Where the log cannot tell, add a one-time log line on the path to prove it "
+    "ran. Fix the cause with a source patch or the setting that removes it; errors and warnings in the log are leads, "
+    "and untuned GEMM shapes belong to the GEMM tuning branch.",
     "GEMM tuning: from the GEMM shapes the profile shows for this workload (decode and prefill), tune the aiter and "
     "hipBLASLt GEMM configurations for those shapes, and test each tuned table as the kernel artifact put_kernel_artifact "
     "returns.",

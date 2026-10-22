@@ -123,7 +123,7 @@ def test_the_role_works_its_direction_first_and_then_moves_to_one_no_branch_cove
     assert "Your launch prompt names your branch's direction: work on it first." in prompt
     assert "dig deeper in it rather than switching to settings" in prompt
     assert "take another of the session's directions, preferring one no running branch covers" in prompt
-    assert "server.log fixes; GEMM tuning; Fusion; Server arguments and environment variables; ROCm code gaps" in prompt
+    assert "Fast path checks; GEMM tuning; Fusion; Server arguments and environment variables; ROCm code gaps" in prompt
 
 
 def test_the_role_carries_what_found_gains_on_rocm_with_examples():
@@ -240,6 +240,20 @@ def test_the_wake_and_nudge_messages_say_what_arrived_or_that_nothing_did():
     assert "nothing new for your branch" in nudge
     assert "Nothing arrives on its own" in nudge and "notebook_brief" in nudge
     assert "decides when your branch stops" not in nudge
+
+
+def test_the_fast_path_direction_proves_a_path_ran_and_leaves_untuned_gemms_to_gemm_tuning():
+    (direction,) = [text for text in DIRECTIONS if text.startswith("Fast path checks:")]
+
+    assert "a one-time log line" in direction and "eager or plain torch path" in direction
+    assert "untuned GEMM shapes belong to the GEMM tuning branch" in direction
+
+
+def test_the_role_says_a_flat_patch_is_checked_to_have_run_before_its_idea_is_dropped():
+    prompt = role_prompt(WORKLOAD)
+
+    assert "put a one-time log line on the path it adds" in prompt
+    assert "check the test's server.log shows that line before you call the idea dead" in prompt
 
 
 def test_the_role_says_a_branch_opened_on_a_focus_starts_from_that_operator():
@@ -386,7 +400,7 @@ def test_every_launch_shows_the_branch_s_direction_before_the_brief():
 def test_the_session_s_directions_are_distinct_and_lead_with_the_four_a_small_session_takes():
     assert len(set(DIRECTIONS)) == len(DIRECTIONS) == 7
     assert [text.split(":")[0] for text in DIRECTIONS[:4]] == [
-        "server.log fixes",
+        "Fast path checks",
         "GEMM tuning",
         "Fusion",
         "Server arguments and environment variables",
