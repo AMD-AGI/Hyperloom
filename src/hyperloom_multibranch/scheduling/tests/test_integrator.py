@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -51,6 +51,7 @@ from hyperloom_multibranch.notebook.tests.factories import FakeClock, intent, ju
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.decisions import DecisionKind, DecisionLog
+from hyperloom_multibranch.scheduling.explore import EXPLORE_TICK_SECONDS
 from hyperloom_multibranch.scheduling.integrator import (
     ALREADY_ON_HEAD,
     FOUNDATION_FIX_VERDICTS,
@@ -107,10 +108,28 @@ CURVES: Curves = {
 
 #: Real seconds between two looks at the toolbox while the merge it waits for is computed off the event loop.
 POLL_SECONDS = 0.01
+#: Real seconds a look waits for the round to reach the state it waits for before the test fails instead of hanging.
+WAIT_SECONDS = 5.0
 
 
 async def _instant(seconds: float) -> None:
     await asyncio.sleep(0)
+
+
+async def _poll(seconds: float) -> None:
+    """The round's wait before it looks for a newly committed commit again; the bench's merges run in real time."""
+
+    await asyncio.sleep(POLL_SECONDS)
+
+
+async def _until(ready: Callable[[], bool]) -> None:
+    """Wait for ``ready`` while the round runs on the event loop beside this look."""
+
+    async def looking() -> None:
+        while not ready():
+            await asyncio.sleep(POLL_SECONDS)
+
+    await asyncio.wait_for(looking(), WAIT_SECONDS)
 
 
 class HeldRetests(RecordingToolbox):
@@ -190,7 +209,7 @@ class Bench:
 async def _one(bench: Bench) -> MergeReport | None:
     """A round one merge wide: the report of the one candidate tried, or ``None`` when none was."""
 
-    reports = await bench.integrator.integrate_next(1)
+    reports = await bench.integrator.integrate_next(1, EXPLORE_TICK_SECONDS)
     assert len(reports) <= 1
     return reports[0] if reports else None
 
@@ -205,15 +224,15 @@ def _change(tag: str, patches: tuple[PatchRef, ...] = ()) -> RecipeDelta:
     return RecipeDelta(config=config, components=components)
 
 
-async def _commit_specialist_work(bench: Bench, invalid: bool, foundation: bool) -> None:
-    """``s1`` commits ``c1`` and ``c2``; with ``invalid``, ``c1`` also moves the base image, which no merge carries,
+async def _commit_specialist_work(bench: Bench, invalid: bool, foundation: bool, tags: tuple[str, ...]) -> None:
+    """``s1`` commits ``tags`` in turn; with ``invalid``, ``c1`` also moves the base image, which no merge carries,
     and with ``foundation`` the gate judged ``c1`` a foundation fix."""
 
     scheduler, toolbox, gate = (bench.handle(role) for role in (Role.SCHEDULER, Role.TOOLBOX, Role.GATE))
     await scheduler.record_lineage(LineageEvent(LineageKind.OPEN, "s1", from_commit=bench.root, reason="first batch"))
     await bench.repo.create_branch("s1", bench.root)
     parent = bench.root
-    for tag in ("c1", "c2"):
+    for tag in tags:
         recipe = apply(await bench.repo.read_recipe(parent), bench.deltas[tag])
         if invalid and tag == "c1":
             recipe = replace(recipe, base_image_digest="sha256:" + "1" * 64)
@@ -238,6 +257,7 @@ async def _bench(
     invalid: bool = False,
     foundation: bool = False,
     conflicting: bool = False,
+    tags: tuple[str, ...] = ("c1", "c2"),
     toolbox_type: type[RecordingToolbox] = RecordingToolbox,
     repo_type: type[GitExperimentRepo] = GitExperimentRepo,
 ) -> Bench:
@@ -261,12 +281,12 @@ async def _bench(
     resolver = LlmPatchResolver(completion, repo)
     records = MergeRecords(merger, DecisionLog(decisions, Clock(now=clock)))
     regression = FakeRegressionCheck()
-    integrator = Integrator(records, repo, SessionChecks(tests, gate, regression), resolver)
+    integrator = Integrator(records, repo, SessionChecks(tests, gate, regression), resolver, Clock(clock, _poll))
     texts = (CANDIDATE_TEXT, CONFLICTING_TEXT) if conflicting else (CANDIDATE_TEXT,)
     patches = tuple([await repo.store_patch(COMPONENT, text) for text in texts])
     deltas = {"c1": _change("c1", patches), "c2": _change("c2")}
     made = Bench(notebook, clock, repo, root, {}, deltas, toolbox, completion, integrator, decisions, regression)
-    await _commit_specialist_work(made, invalid, foundation)
+    await _commit_specialist_work(made, invalid, foundation, tags)
     return made
 
 
@@ -558,9 +578,9 @@ async def test_a_not_stackable_commit_is_not_tried_again_on_a_head_that_patched_
 
 
 async def test_a_round_tests_k_candidates_at_once_and_merges_the_first_improvement(bench: Bench) -> None:
-    first = await bench.integrator.integrate_next(2)
+    first = await bench.integrator.integrate_next(2, EXPLORE_TICK_SECONDS)
     merged = await bench.repo.head(INTEGRATION_BRANCH)
-    second = await bench.integrator.integrate_next(2)
+    second = await bench.integrator.integrate_next(2, EXPLORE_TICK_SECONDS)
 
     c1, c2 = bench.commits["c1"], bench.commits["c2"]
     assert [(r.candidate, r.onto, r.outcome, r.reason) for r in first] == [
@@ -573,7 +593,26 @@ async def test_a_round_tests_k_candidates_at_once_and_merges_the_first_improveme
     assert [(r.candidate, r.onto, r.outcome) for r in second] == [(c2, merged, MergeOutcome.MERGED)]
     head = await bench.repo.read_recipe(await bench.repo.head(INTEGRATION_BRANCH))
     assert TAG_FLAG + "c1" in head.launch.server_args and TAG_FLAG + "c2" in head.launch.server_args
-    assert await bench.integrator.integrate_next(2) == ()
+    assert await bench.integrator.integrate_next(2, EXPLORE_TICK_SECONDS) == ()
+
+
+async def test_a_commit_made_during_a_round_takes_the_slot_the_round_had_nothing_to_fill(tmp_path: Path) -> None:
+    bench = await _bench(tmp_path, tags=("c1",))
+    bench.toolbox.executor.gate.clear()
+    merging = asyncio.ensure_future(bench.integrator.integrate_next(2, EXPLORE_TICK_SECONDS))
+    await _until(lambda: len(bench.merge_tests()) == 1)
+
+    arrived = await _committed_elsewhere(bench, _change("c2"), 2.0)
+    await _until(lambda: len(bench.merge_tests()) == 2)
+    bench.toolbox.executor.gate.set()
+    reports = await merging
+
+    assert len(reports) == 2
+    assert {(report.candidate, report.onto) for report in reports} == {
+        (bench.commits["c1"], bench.root),
+        (arrived, bench.root),
+    }
+    assert {report.outcome for report in reports} == {MergeOutcome.MERGED, MergeOutcome.PENDING}
 
 
 async def _committed_elsewhere(bench: Bench, delta: RecipeDelta, gain: float) -> str:
@@ -601,7 +640,7 @@ async def test_a_merge_that_leaves_the_head_s_recipe_unchanged_is_skipped_untest
     head = await bench.repo.head(INTEGRATION_BRANCH)
     again = await _committed_again(bench)
 
-    reports = await bench.integrator.integrate_next(2)
+    reports = await bench.integrator.integrate_next(2, EXPLORE_TICK_SECONDS)
 
     [skipped] = [report for report in reports if report.candidate == again]
     assert (skipped.onto, skipped.outcome, skipped.reason) == (head, MergeOutcome.ALREADY_ON_HEAD, ALREADY_ON_HEAD)
@@ -617,15 +656,15 @@ async def test_a_merge_that_leaves_the_head_s_recipe_unchanged_is_skipped_untest
 async def test_a_commit_already_on_the_head_is_not_tried_again_when_the_head_moves(bench: Bench) -> None:
     await _one(bench)
     again = await _committed_again(bench)
-    [skipped] = await bench.integrator.integrate_next(1)
+    [skipped] = await bench.integrator.integrate_next(1, EXPLORE_TICK_SECONDS)
     head = await bench.repo.head(INTEGRATION_BRANCH)
 
-    moved = await bench.integrator.integrate_next(2)
+    moved = await bench.integrator.integrate_next(2, EXPLORE_TICK_SECONDS)
 
     assert (skipped.candidate, skipped.outcome) == (again, MergeOutcome.ALREADY_ON_HEAD)
     assert await bench.repo.head(INTEGRATION_BRANCH) != head
     assert again not in {report.candidate for report in moved}
-    assert await bench.integrator.integrate_next(2) == ()
+    assert await bench.integrator.integrate_next(2, EXPLORE_TICK_SECONDS) == ()
 
 
 async def test_commits_of_a_stopped_branch_stay_eligible(bench: Bench) -> None:
@@ -688,7 +727,7 @@ async def test_an_unresolved_patch_conflict_is_skipped_and_recorded(
 async def test_a_merge_the_recipe_contract_refuses_is_skipped_and_the_round_goes_on(tmp_path: Path) -> None:
     bench = await _bench(tmp_path, invalid=True)
 
-    reports = await bench.integrator.integrate_next(2)
+    reports = await bench.integrator.integrate_next(2, EXPLORE_TICK_SECONDS)
 
     assert [(r.candidate, r.outcome) for r in reports] == [
         (bench.commits["c1"], MergeOutcome.CONFLICT_SKIPPED),
@@ -744,7 +783,7 @@ async def test_a_candidate_naming_another_upstream_commit_is_merged_and_the_head
 async def test_a_merge_test_the_toolbox_refuses_is_skipped_and_the_round_goes_on(bench: Bench) -> None:
     bench.refuse("c1")
 
-    reports = await bench.integrator.integrate_next(2)
+    reports = await bench.integrator.integrate_next(2, EXPLORE_TICK_SECONDS)
 
     assert [(r.candidate, r.outcome) for r in reports] == [
         (bench.commits["c1"], MergeOutcome.CONFLICT_SKIPPED),
@@ -782,9 +821,8 @@ async def _cancel(task: asyncio.Task[object]) -> None:
 
 async def test_a_merge_cancelled_during_its_test_is_abandoned_and_its_test_withdrawn(bench: Bench) -> None:
     bench.toolbox.executor.gate.clear()
-    merging = asyncio.ensure_future(bench.integrator.integrate_next(1))
-    while not bench.merge_tests():
-        await asyncio.sleep(POLL_SECONDS)
+    merging = asyncio.ensure_future(bench.integrator.integrate_next(1, EXPLORE_TICK_SECONDS))
+    await _until(lambda: bool(bench.merge_tests()))
 
     await _cancel(merging)
     await bench.integrator.abandon()
@@ -799,7 +837,7 @@ async def test_a_merge_cancelled_while_it_is_retested_is_abandoned_and_its_retes
     bench = await _bench(tmp_path, toolbox_type=HeldRetests)
     held = bench.toolbox
     assert isinstance(held, HeldRetests)
-    merging = asyncio.ensure_future(bench.integrator.integrate_next(1))
+    merging = asyncio.ensure_future(bench.integrator.integrate_next(1, EXPLORE_TICK_SECONDS))
     await held.confirming.wait()
 
     await _cancel(merging)
@@ -815,7 +853,7 @@ async def test_a_merge_cancelled_while_committing_is_still_recorded(tmp_path: Pa
     repo = bench.repo
     assert isinstance(repo, HeldRepo)
     repo.committing, repo.released = asyncio.Event(), asyncio.Event()
-    merging = asyncio.ensure_future(bench.integrator.integrate_next(1))
+    merging = asyncio.ensure_future(bench.integrator.integrate_next(1, EXPLORE_TICK_SECONDS))
     await repo.committing.wait()
 
     await _cancel(merging)

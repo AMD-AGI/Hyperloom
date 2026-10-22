@@ -246,7 +246,7 @@ class Explorer:
     async def _merge_forever(self) -> None:
         while True:
             width = self._roster.entry(INTEGRATION_BRANCH).k
-            reports = await self._integrator.integrate_next(width)
+            reports = await self._integrator.integrate_next(width, EXPLORE_TICK_SECONDS)
             self._events.note_merges(reports)
             if not reports:
                 await self._clock.sleep(EXPLORE_TICK_SECONDS)

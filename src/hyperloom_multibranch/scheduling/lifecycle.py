@@ -248,7 +248,7 @@ class Session:
             context, PreludeServices(peers.repo, peers.gate, tests, peers.toolbox), warm_start=warm_start
         )
         self._integrator = Integrator(
-            MergeRecords(merger, DecisionLog(layout.merges, clock)), peers.repo, checks, resolver
+            MergeRecords(merger, DecisionLog(layout.merges, clock)), peers.repo, checks, resolver, clock
         )
         self._judge = Judge(recorded(services.judge_completion, self._notebook, UsageSource.JUDGE), layout.judge, clock)
         scorer = recorded(services.scorer_completion, self._notebook, UsageSource.SCORER)
