@@ -553,11 +553,23 @@ over through the variables below; without a hand-off `--nodes >= 2` exits 2.
 
 ### Cluster hand-off variables
 
-`HYPERLOOM_MN_EXT_SERVICE_URL` is the only variable that tells the optimizer a
-cluster is ready; the rest describe how to reach it.
+`CLAW_TOPOLOGY_FILE` is read first. The file carries `backend` (`rayjob` or
+`infera`), `nodes`, `gpus_per_node`, `service_url`, and the block of that
+backend: `ray` (`head_ip`, `dashboard_token_file`) or `infera` (`ssh_key_file`,
+`ssh_port_base`, `known_hosts_file`, `prefill_ips`, `decode_ips`, `worker_ips`).
+Credentials are file paths; the Ray Dashboard token is read from its file. A set
+variable naming a file that is unreadable, not valid JSON, of an unsupported
+schema major, or missing a required field is an error that names the file and
+the problem; Hyperloom does not fall back to the legacy variables. If legacy
+variables are also set and differ from the file, the file wins and a warning
+names the differing fields.
+
+Without `CLAW_TOPOLOGY_FILE`, `HYPERLOOM_MN_EXT_SERVICE_URL` is the only variable
+that tells the optimizer a cluster is ready; the rest describe how to reach it.
 
 | Variable | Backend | Required | Description |
 |----------|---------|----------|-------------|
+| `CLAW_TOPOLOGY_FILE` | both | No | Path to a TopologyHandoff v1 JSON file (`"schema": "claw.topology-handoff/v1"`) the platform wrote. When set (non-empty) it is the hand-off and the `HYPERLOOM_MN_EXT_*`, `INFERENCE_OPTIMIZER_MN_BACKEND`, `INFERENCE_OPTIMIZER_NODES` and `INFERENCE_OPTIMIZER_GPUS_PER_NODE` variables are not read for the fields it carries. When unset, the variables below apply unchanged. |
 | `HYPERLOOM_MN_EXT_SERVICE_URL` | both | **yes** | Benchmark frontend URL (`http(s)://…`; infera frontend typically `:8000`). Its presence triggers external mode. |
 | `HYPERLOOM_MN_EXT_SSH_KEY` | infera | **yes** | Private SSH key already authorized on the pods (the platform installs the public half at create time). |
 | `HYPERLOOM_MN_EXT_PREFILL_IPS` / `_DECODE_IPS` | infera | PD | Prefill / decode pod IPs (comma-separated) for PD-disaggregated runs. |

@@ -71,7 +71,16 @@ launches on the pods it was handed.
 ## Cluster hand-off (env-provided)
 
 `HYPERLOOM_MN_EXT_SERVICE_URL` is what marks a cluster as available: without it
-a `--nodes >= 2` run has nothing to drive and exits 2.
+(and without `CLAW_TOPOLOGY_FILE`) a `--nodes >= 2` run has nothing to drive and
+exits 2.
+
+**Topology file.** If `CLAW_TOPOLOGY_FILE` is set, it names a TopologyHandoff v1
+JSON file (`"schema": "claw.topology-handoff/v1"`) that is read instead of the env
+vars below. It carries `backend`, `nodes`, `gpus_per_node`, `service_url` and the
+`ray` or `infera` block; credentials are file paths. A file that cannot be used
+is an error naming the file (no fallback to the env vars); when both are present
+the file wins and a warning names the differing fields. Unset: the env vars apply
+unchanged.
 
 **Common (both backends)**
 

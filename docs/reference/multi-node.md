@@ -35,6 +35,17 @@ round.
 
 Without a hand-off, a `--nodes >= 2` run exits immediately with code 2.
 
+If the platform wrote a TopologyHandoff v1 file, it sets `CLAW_TOPOLOGY_FILE` to
+its path and Hyperloom reads that file instead of the variables below: `backend`,
+`nodes`, `gpus_per_node`, `service_url`, plus the `ray` block (`head_ip`,
+`dashboard_token_file`) for rayjob or the `infera` block (`ssh_key_file`,
+`ssh_port_base`, `known_hosts_file`, `prefill_ips`, `decode_ips`, `worker_ips`)
+for infera. A file that cannot be used (unreadable, not JSON, unsupported schema
+major, missing or malformed field) stops the run with an error naming the file;
+there is no silent fallback to the variables. If both are present the file wins
+and a warning names the fields that differ. With `CLAW_TOPOLOGY_FILE` unset,
+the variables below apply unchanged.
+
 The following table lists all hand-off variables.
 
 | Variable | Backend | Required | Meaning |
