@@ -8,8 +8,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role
-from hyperloom_multibranch.contracts.notebook.peers import IntentLayer, Verdict
-from hyperloom_multibranch.contracts.notebook.records import LineageEvent, MergeAttempt, Withdrawal
+from hyperloom_multibranch.contracts.notebook.peers import IntentLayer, Purpose, Verdict
+from hyperloom_multibranch.contracts.notebook.records import REPLAY_TARGET, LineageEvent, MergeAttempt, Withdrawal
 from hyperloom_multibranch.contracts.notebook.vocab import Conclusion, LineageKind, UnfinishedReason
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.local.unfinished import MAX_UNFINISHED
@@ -38,7 +38,11 @@ async def _leftovers(root: Path, clock: FakeClock) -> LocalNotebook:
         await scheduler.record_lineage(LineageEvent(LineageKind.OPEN, branch, from_commit=start, reason="refill"))
     await w.measure("s3", "u1", LANDED, delta("--sampler fused"))
     await gate.write_judgement("u1", judgement(3.0, ("u1",), recorded={METRIC: 1071.0}), Conclusion.COMMITTED, "c3")
-    await toolbox.write_request(request("m2", intent(INTEGRATION_BRANCH, "i1", "merge", "c3")))
+    await toolbox.write_request(
+        request(
+            "m2", intent(INTEGRATION_BRANCH, "i1", "merge", "c3"), delta("--sampler fused"), purpose=Purpose.INTEGRATION
+        )
+    )
     await integrator.record_merge_attempt(MergeAttempt(("c3",), "i1", request_id="m2"))
     await toolbox.write_result(result("m2"))
     unstacked = judgement(-0.5, ("m2",), verdict=Verdict.REGRESSED)
@@ -86,6 +90,51 @@ async def test_the_brief_lists_what_the_session_left_unfinished_in_order_and_dro
     assert (withdrawn.gain_pct, withdrawn.detail) == (None, "branch stopped")
     assert withdrawn.change == "add args --chunked-prefill-size 8192"
     assert len(brief.unfinished) <= MAX_UNFINISHED
+
+
+async def test_a_lead_another_branch_replayed_drops_out_and_a_withdrawn_replay_of_a_measured_change_is_none(
+    tmp_path: Path,
+) -> None:
+    root, clock = tmp_path / "notebook", FakeClock()
+    observer = await _leftovers(root, clock)
+    w = Writers(root, clock)
+    toolbox = w.as_role(Role.TOOLBOX)
+    await w.as_role(Role.SCHEDULER).record_lineage(
+        LineageEvent(LineageKind.OPEN, "s5", from_commit="c4", reason="refill")
+    )
+    await w.measure("s5", "p1", intent("s5", "c4", "rope", "replay n1 on my head"), delta("--n1"))
+    replaying = intent("s5", "c4", "gemm", "replay d1 on my head")
+    claim = await w.as_role(Role.SPECIALIST_RUNTIME, "s5").acquire(
+        replaying, delta("--fp8-gemm").fingerprint(), ttl_seconds=TTL
+    )
+    await toolbox.write_request(request("p2", replaying, delta("--fp8-gemm")))
+    await toolbox.attach_request(claim.key, "p2", ttl_seconds=TTL)
+    await toolbox.write_withdrawal(Withdrawal("p2", "branch stopped"))
+    measured_before = intent("s4", "c0", "rope", "replay n1 on my head")
+    claim = await w.as_role(Role.SPECIALIST_RUNTIME, "s4").acquire(
+        measured_before, delta("--n1").fingerprint(), ttl_seconds=TTL
+    )
+    await toolbox.write_request(request("p3", measured_before, delta("--n1")))
+    await toolbox.attach_request(claim.key, "p3", ttl_seconds=TTL)
+    await toolbox.write_withdrawal(Withdrawal("p3", "branch stopped"))
+
+    brief = await observer.startup_brief("i1")
+
+    assert [item.request_id for item in brief.unfinished] == ["u1", "d1", "x1"]
+
+
+async def test_a_lead_replayed_with_a_change_made_for_another_head_drops_out(tmp_path: Path) -> None:
+    root, clock = tmp_path / "notebook", FakeClock()
+    observer = await _leftovers(root, clock)
+    w = Writers(root, clock)
+    await w.as_role(Role.SCHEDULER).record_lineage(
+        LineageEvent(LineageKind.OPEN, "s5", from_commit="c4", reason="refill")
+    )
+    await w.measure("s5", "p4", intent("s5", "c4", REPLAY_TARGET, "u1"), delta("--sampler fused --sampler-batch 4"))
+
+    brief = await observer.startup_brief("i1")
+
+    assert [item.request_id for item in brief.unfinished] == ["n1", "d1", "x1"]
 
 
 async def test_a_running_branchs_commits_and_the_merged_ones_are_not_unfinished(tmp_path: Path) -> None:
