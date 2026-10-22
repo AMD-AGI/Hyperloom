@@ -46,6 +46,7 @@ from typing import Any, Protocol, TypeVar
 
 from hyperloom.contracts.recipe import LaunchConfig, Recipe, RecipeDelta, RecipeError, delta_between
 from hyperloom.inference_optimizer.grid_server_args import (
+    INJECTED_LAUNCH_FLAGS,
     merge_server_args,
     remove_server_args,
     tokenize_server_args_preserving_json,
@@ -72,8 +73,8 @@ log = logging.getLogger(__name__)
 MAX_CANDIDATES = 20
 PAGE_SIZE = 50
 #: The flags a replay leaves to the head: the context length a server serves (``--context-length`` on SGLang,
-#: ``--max-model-len`` on vLLM), and SGLang's scheduler watchdog.
-HEAD_FLAGS = (*CONTEXT_FLAGS, "--watchdog-timeout")
+#: ``--max-model-len`` on vLLM), and what the launch guards add for the run they launch.
+HEAD_FLAGS = tuple(dict.fromkeys((*CONTEXT_FLAGS, *INJECTED_LAUNCH_FLAGS)))
 #: How many of the best leads get a replay; each whole one downloads the champion's files.
 REPLAY_LEADS = 3
 #: The waits before each new ask of a read that failed transiently; one more ask follows the last wait.
