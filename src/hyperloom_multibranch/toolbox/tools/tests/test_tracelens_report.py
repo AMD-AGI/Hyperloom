@@ -236,6 +236,29 @@ async def test_a_window_the_splitter_wrote_none_for_leaves_the_other_to_stand_fo
     assert result["phase_windows"][PREFILL]["used"] is False and result["phase_windows"][DECODE]["used"] is True
 
 
+async def test_a_decode_window_without_graph_replay_kernels_leaves_no_shares_as_the_prefill_window_cannot_stand_for_it(
+    rig: Rig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    probe.install_capture(rig.trace_input / "torch_trace" / "graph_capture_profile")
+    starved = probe.starve_decode_window(tmp_path / "decode_without_replays.json.gz")
+    decode = Window(str(starved), probe.DECODE_CHUNK, tuple(probe.DECODE_ENTRY[1]))
+    monkeypatch.setattr(report, "run_with_session_kill", Shell(decode=decode))
+    status, pointer, record = await _run(tmp_path, probe.GRADED, rig)
+
+    assert status is JobStatus.SUCCEEDED and not pointer.op_shares and DEGRADED_NOTICE in pointer.summary
+    said = "the decode window is missing or degraded, it is 85.5% of a graded wave, so the prefill window's shares (14.5% of it)"
+    advice = "cannot stand for the wave; profile again on a build with node-by-node graph replay"
+    assert f"{said} {advice} (the decode" in pointer.summary  # the pointer's summary is cut at 400 characters
+    assert "stands for the whole wave" not in pointer.summary
+    result = record["result"]
+    assert (
+        result["window_degraded_reason"].startswith(said)
+        and "CUDA-graph replays are missing" in (result["window_degraded_reason"])
+    )
+    assert (result["kernel_shares_path"], result["phase_fractions"]) == ("", {})
+    assert (result["phase_windows"][PREFILL]["used"], result["phase_windows"][DECODE]["used"]) == (True, False)
+
+
 async def test_a_request_without_the_workload_has_no_weights_so_it_has_no_shares_and_says_why(
     rig: Rig, tmp_path: Path
 ) -> None:

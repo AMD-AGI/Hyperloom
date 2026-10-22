@@ -27,9 +27,14 @@ decode step is taken to give one token per request (no speculative decoding), an
 wave, so the step time is that stretch's.
 
 A window the splitter wrote no file for, whose kernels fail the checks of :mod:`~.kernel_shares`, or whose steps the
-splitter does not list gives no shares; the other window is then the op shares alone, and the result says so. With neither
-the shares are degraded, and so they are when both are there but the request names no ``CONC``, ``ISL`` and ``OSL`` to
-weight them by: a mix is never guessed.
+splitter does not list gives no shares. The other window then stands for the wave alone only if its phase is the larger
+part of a graded wave (``f > 0.5``) by the same fractions, taken with the step time of the window that gives no shares (a
+window whose kernels were refused has only its GPU span to say what a step takes, its kernel time being what is left of
+it); a phase that is the smaller part cannot stand for the wave, so the shares are degraded and the reason says what the
+missing window is of a wave. Where the fractions cannot be taken (no ``CONC``, ``ISL`` and ``OSL``, or the missing window
+has no step time) the other window stands alone and the result says so. With neither window the shares are degraded, and
+so they are when both are there but the request names no ``CONC``, ``ISL`` and ``OSL`` to weight them by: a mix is never
+guessed.
 """
 
 from __future__ import annotations
@@ -114,7 +119,16 @@ class PhaseWindow:
 
     @property
     def step_ms(self) -> float:
-        return self.kernels.kernel_ms / self.steps if self.kernels and self.steps else 0.0
+        """What a step of the window takes: its kernel time over its steps; its GPU span over them when its kernels were refused,
+        the kernel time being then what is left of the step."""
+        if not (self.kernels and self.steps):
+            return 0.0
+        return (self.kernels.kernel_ms if self.usable else self.kernels.span_ms) / self.steps
+
+    @property
+    def timed(self) -> bool:
+        """Whether the window says what a wave spends in its phase: it has a step time, and a prefill window its prompt tokens."""
+        return self.step_ms > 0 and (self.phase != PREFILL or self.tokens > 0)
 
     def facts(self) -> dict[str, Any]:
         """What the result says of the window."""
@@ -223,9 +237,9 @@ def wave_ms(window: PhaseWindow, workload: Workload) -> float:
     return workload.osl * window.step_ms
 
 
-def _time_fractions(usable: Sequence[PhaseWindow], workload: Workload) -> dict[str, float]:
-    """The share of a wave's time each of the ``usable`` windows' phases takes; empty when the times are not finite."""
-    times = {w.phase: wave_ms(w, workload) for w in usable}
+def _time_fractions(timed: Sequence[PhaseWindow], workload: Workload) -> dict[str, float]:
+    """The share of a wave's time each of the ``timed`` windows' phases takes; empty when the times are not finite."""
+    times = {w.phase: wave_ms(w, workload) for w in timed}
     total = math.fsum(times.values())
     return {phase: ms / total for phase, ms in times.items()} if math.isfinite(total) and total > 0 else {}
 
@@ -240,16 +254,39 @@ def _rows(usable: Sequence[PhaseWindow], weights: Mapping[str, float]) -> tuple[
     return tuple(sorted(rows, key=lambda row: (-row.percent, row.name)))
 
 
+def _stand_alone(alone: PhaseWindow, left: PhaseWindow, workload: Workload | None) -> tuple[str, str]:
+    """Whether ``alone`` may stand for the wave of ``workload`` while ``left`` gives no shares: ``(degraded reason, note)``,
+    the reason empty when it may. It may when its phase is more than half a wave by the two windows' step times, or when
+    those cannot be taken (no workload, or a window with no step time)."""
+    gone = f"the {left.phase} window gives none ({left.reason})"
+    fractions = _time_fractions([alone, left], workload) if workload and alone.timed and left.timed else {}
+    if not fractions:
+        return "", f"the {alone.phase} window stands for the whole wave: {gone}"
+    kept, lost = fractions[alone.phase], fractions[left.phase]
+    if kept > 0.5:
+        return "", f"the {alone.phase} window stands for the whole wave: {gone}, it is {lost:.1%} of a graded wave"
+    # The window's own reason comes last: the pointer's summary is cut at 400 characters, and a reason of TraceLens' checks
+    # runs to 230 of them.
+    reason = (
+        f"the {left.phase} window is missing or degraded, it is {lost:.1%} of a graded wave, so the {alone.phase} "
+        f"window's shares ({kept:.1%} of it) cannot stand for the wave; profile again on a build with node-by-node graph "
+        f"replay (the {left.phase} window: {left.reason})"
+    )
+    return reason, ""
+
+
 def graded_mix(windows: Sequence[PhaseWindow], workload: Workload | None) -> GradedMix:
-    """The graded wave's shares from the phase ``windows`` that give any; degraded when none, or the two cannot be weighted."""
+    """The graded wave's shares from the phase ``windows`` that give any; degraded when none, when the two cannot be
+    weighted, or when the one that gives shares is the smaller part of a wave."""
     usable = [w for w in windows if w.usable]
     if not usable:
         return GradedMix({}, (), "; ".join(f"the {w.phase} window: {w.reason}" for w in windows), "")
     note = ""
     if len(usable) == 1:
+        reason, note = _stand_alone(usable[0], next(w for w in windows if not w.usable), workload)
+        if reason:
+            return GradedMix({}, (), reason, "")
         weights = {usable[0].phase: 1.0}
-        left = next(w for w in windows if not w.usable)
-        note = f"the {usable[0].phase} window stands for the whole wave: the {left.phase} window gives none ({left.reason})"
     elif workload is None:
         reason = f"the request names no {CONC_KEY}, {ISL_KEY} and {OSL_KEY} to weight the prefill and decode windows by"
         return GradedMix({}, (), reason, "")

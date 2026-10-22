@@ -12,6 +12,7 @@ from __future__ import annotations
 import gzip
 import json
 import shutil
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -173,19 +174,96 @@ def test_a_window_the_splitter_wrote_none_for_leaves_the_other_alone_and_the_res
     assert mix_fields([gone, real[DECODE]], mix, split_dir / "t.csv")["phase_windows"][PREFILL]["used"] is False
 
 
-def test_a_window_whose_kernels_are_missing_from_the_trace_leaves_the_other_alone(
+def test_a_decode_window_without_its_graph_replay_kernels_cannot_leave_the_prefill_window_to_stand_for_the_wave(
     real: dict[str, PhaseWindow], split_dir: Path
 ) -> None:
-    starved = split_dir / probe.DECODE_CHUNK
-    shutil.copy(probe.DATA / "b06_window_gpu_events.json.gz", starved)  # the replay lost its kernels: 0.6% of the span
-    steps = split_steps(split_dir)
-    decode = read_phase_window(DECODE, starved, steps, None, list)
+    """The prefill window alone is 11% of a graded wave: its GEMM-led shares would put every ceiling in the brief wrong."""
+    starved = probe.starve_decode_window(split_dir / probe.DECODE_CHUNK)
+    decode = read_phase_window(DECODE, starved, split_steps(split_dir), None, list)
 
     mix = graded_mix([real[PREFILL], decode], WORKLOAD)
 
-    assert not decode.usable and "0.6% of its 8.22 ms GPU span" in decode.reason
-    assert dict(mix.fractions) == {PREFILL: 1.0, DECODE: 0.0}
-    assert "the prefill window stands for the whole wave" in mix.note and "0.6% of its 8.22 ms" in mix.note
+    assert not decode.usable and "fill 0.6% of its 41.10 ms GPU span" in decode.reason
+    assert mix.rows == () and dict(mix.fractions) == {} and mix.note == ""
+    assert mix.degraded_reason.startswith("the decode window is missing or degraded, it is 85.5% of a graded wave, so ")
+    assert "the prefill window's shares (14.5% of it) cannot stand for the wave; profile again on a build with " in (
+        mix.degraded_reason
+    )
+    assert mix.degraded_reason.endswith(f"node-by-node graph replay (the decode window: {decode.reason})")
+    assert (
+        mix_fields([real[PREFILL], decode], mix, split_dir / "t.csv")["window_degraded_reason"] == mix.degraded_reason
+    )
+
+
+def test_the_reason_gives_the_missing_windows_share_of_the_wave_from_the_real_probes_step_times(
+    real: dict[str, PhaseWindow],
+) -> None:
+    decode = replace(real[DECODE], reason="graph-replay kernels missing")
+
+    mix = graded_mix([real[PREFILL], decode], WORKLOAD)
+
+    assert mix.rows == () and dict(mix.fractions) == {}
+    assert mix.degraded_reason == (
+        "the decode window is missing or degraded, it is 88.6% of a graded wave, so the prefill window's shares (11.4% of "
+        "it) cannot stand for the wave; profile again on a build with node-by-node graph replay (the decode window: "
+        "graph-replay kernels missing)"
+    )
+
+
+def test_a_prefill_window_without_its_kernels_leaves_the_decode_window_to_stand_for_the_wave_and_the_note_says_how_much(
+    real: dict[str, PhaseWindow], split_dir: Path
+) -> None:
+    starved = split_dir / probe.PREFILL_CHUNK
+    shutil.copy(probe.DATA / "b06_window_gpu_events.json.gz", starved)  # the replay lost its kernels: 0.6% of the span
+    prefill = read_phase_window(PREFILL, starved, split_steps(split_dir), None, list)
+
+    mix = graded_mix([prefill, real[DECODE]], WORKLOAD)
+
+    assert not prefill.usable and "0.6% of its 8.22 ms GPU span" in prefill.reason
+    assert mix.degraded_reason == "" and dict(mix.fractions) == {PREFILL: 0.0, DECODE: 1.0}
+    assert "the decode window stands for the whole wave: the prefill window gives none (" in mix.note
+    assert "0.6% of its 8.22 ms" in mix.note and mix.note.endswith(", it is 0.1% of a graded wave")
+    assert {row.name: row.percent for row in mix.rows} == pytest.approx(real[DECODE].kernels.shares)  # type: ignore[union-attr]
+
+
+def test_a_degraded_prefill_window_leaves_the_decode_window_to_stand_for_a_wave_it_is_most_of(
+    real: dict[str, PhaseWindow],
+) -> None:
+    prefill = replace(real[PREFILL], reason="graph-replay kernels missing")
+
+    mix = graded_mix([prefill, real[DECODE]], WORKLOAD)
+
+    assert mix.degraded_reason == "" and dict(mix.fractions) == {PREFILL: 0.0, DECODE: 1.0}
+    assert mix.note == (
+        "the decode window stands for the whole wave: the prefill window gives none (graph-replay kernels missing), "
+        "it is 11.5% of a graded wave"  # by its span, 900.4 ms over the 895.3 ms its kernels fill
+    )
+
+
+@pytest.mark.parametrize(("osl", "stands"), [(99, True), (100, False), (101, False)])
+def test_a_window_stands_for_the_wave_only_if_its_phase_is_more_than_half_of_it(osl: int, stands: bool) -> None:
+    """Prefill is 1000 ms of the wave; decode is 10 ms x osl, so at 100 steps they are half each."""
+    prefill = _synthetic(PREFILL, steps=4, tokens=65536, step_ms=250.0, kernel="B")
+    decode = replace(_synthetic(DECODE, steps=32, tokens=0, step_ms=10.0, kernel="A"), reason="degraded")
+
+    mix = graded_mix([prefill, decode], Workload(conc=64, isl=1024, osl=osl))
+
+    assert (mix.degraded_reason == "") is stands and bool(mix.rows) is stands
+
+
+@pytest.mark.parametrize("case", ["no workload", "the missing window lists no steps", "the missing window has no file"])
+def test_where_the_missing_windows_share_of_the_wave_cannot_be_taken_the_other_stands_as_it_did(
+    real: dict[str, PhaseWindow], split_dir: Path, case: str
+) -> None:
+    starved = probe.starve_decode_window(split_dir / probe.DECODE_CHUNK)
+    steps = {probe.PREFILL_CHUNK: StepCounts(2, 32768)} if case.endswith("steps") else split_steps(split_dir)
+    decode = read_phase_window(DECODE, None if case.endswith("file") else starved, steps, None, list)
+
+    mix = graded_mix([real[PREFILL], decode], None if case == "no workload" else WORKLOAD)
+
+    assert not decode.usable and mix.degraded_reason == "" and dict(mix.fractions) == {PREFILL: 1.0, DECODE: 0.0}
+    assert mix.note.startswith("the prefill window stands for the whole wave: the decode window gives none (")
+    assert "graded wave" not in mix.note
     assert {row.name: row.percent for row in mix.rows} == pytest.approx(real[PREFILL].kernels.shares)  # type: ignore[union-attr]
 
 

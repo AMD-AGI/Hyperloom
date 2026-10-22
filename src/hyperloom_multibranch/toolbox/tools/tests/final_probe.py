@@ -15,6 +15,7 @@ prefill).
 
 from __future__ import annotations
 
+import gzip
 import json
 import shutil
 from pathlib import Path
@@ -41,3 +42,13 @@ def install_capture(folder: Path) -> None:
     folder.mkdir(parents=True, exist_ok=True)
     shutil.copy(DATA / "nodewise_capture_execution_details.json", folder / CAPTURE_MANIFEST)
     shutil.copy(DATA / "nodewise_capture_bs64_launches.json.gz", folder / "DecodeCudaGraphRunner_bs_64_rank0.json.gz")
+
+
+def starve_decode_window(target: Path) -> Path:
+    """The decode excerpt at ``target`` without the kernels of its graph replays: what a profile that did not record them
+    leaves (the host calls and the eager kernels stay, the window's kernels fill under 1% of its span)."""
+    events = json.loads(gzip.decompress(DECODE_WINDOW.read_bytes()))["traceEvents"]
+    replays = {e["args"]["correlation"] for e in events if e.get("name") == "hipGraphLaunch"}
+    kept = [e for e in events if not (e.get("cat") == "kernel" and e["args"].get("correlation") in replays)]
+    target.write_bytes(gzip.compress(json.dumps({"traceEvents": kept}).encode("utf-8")))
+    return target
