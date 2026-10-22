@@ -80,34 +80,28 @@ def verify_applied(
     if report is None:
         return ApplyVerdict("unknown", detail="log parser unavailable")
 
-    av = report.get("apply_verdict") or {}
-    hits = int(av.get("hit") or 0)
-    misses = int(av.get("miss") or 0)
-    merged = [str(m) for m in (report.get("merged_tables") or [])]
-    consulted = [str(c) for c in (report.get("consulted_tables") or [])]
+    hits = report["apply_verdict"]["hit"]
+    misses = report["apply_verdict"]["miss"]
+    merged = report["merged_tables"]
+    seen = {Path(p).name for p in (*report["consulted_tables"], *merged)}
 
-    # 1.
     wanted = [str(a) for a in (artifact_paths or []) if str(a).strip()]
-    if wanted and (consulted or merged):
-        seen = {Path(p).name for p in consulted} | {Path(m).name for m in merged}
-        canonical = {str(n).strip() for n in (runtime_table_names or []) if str(n).strip()}
-        if not (seen & (canonical or set())):
-            missing = [a for a in wanted if Path(a).name not in seen]
-            if len(missing) == len(wanted):
-                return ApplyVerdict(
-                    "not_merged",
-                    hits,
-                    misses,
-                    merged,
-                    missing,
-                    detail=(
-                        f"none of the {len(wanted)} tuned table(s) appear in what the "
-                        f"runtime consulted ({sorted(seen)}); the server loaded its "
-                        "bundled defaults"
-                    ),
-                )
+    if wanted and seen and not seen & set(runtime_table_names or ()):
+        missing = [a for a in wanted if Path(a).name not in seen]
+        if len(missing) == len(wanted):
+            return ApplyVerdict(
+                "not_merged",
+                hits,
+                misses,
+                merged,
+                missing,
+                detail=(
+                    f"none of the {len(wanted)} tuned table(s) appear in what the "
+                    f"runtime consulted ({sorted(seen)}); the server loaded its "
+                    "bundled defaults"
+                ),
+            )
 
-    # 2.
     if hits > 0:
         return ApplyVerdict(
             "served",
@@ -117,7 +111,6 @@ def verify_applied(
             detail=f"{hits} lookup(s) hit the tuned table",
         )
     if misses > 0:
-        # Misses logged and no hits.
         if hit_logging:
             return ApplyVerdict(
                 "zero_hit",
