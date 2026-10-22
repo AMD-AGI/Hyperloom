@@ -109,7 +109,13 @@ def test_search_runs_the_wiki_script_and_logs_the_role_and_returned_pages(wiki, 
     reply = _call(
         _server(wiki, log),
         "search",
-        {"query": "--help fp8", "tag": "fp8", "limit": 3, "reason": "picking the fp8 MFMA direction"},
+        {
+            "query": "--help fp8",
+            "tag": "fp8",
+            "limit": 3,
+            "reason": "picking the fp8 MFMA direction",
+            "padding": "x" * 100_000,
+        },
     )
 
     assert reply["isError"] is False
@@ -120,12 +126,8 @@ def test_search_runs_the_wiki_script_and_logs_the_role_and_returned_pages(wiki, 
     assert record["role"] == "specialist memory"
     assert record["command"] == "search"
     assert record["reason"] == "picking the fp8 MFMA direction"
-    assert record["args"] == {
-        "query": "--help fp8",
-        "tag": "fp8",
-        "limit": 3,
-        "reason": "picking the fp8 MFMA direction",
-    }
+    # Only the arguments the tool declares are recorded, and the reason once, on its own.
+    assert record["args"] == {"query": "--help fp8", "tag": "fp8", "limit": 3}
     assert record["exit_code"] == 0
     assert record["results"] == ["technique-mfma-pipelining", "pr-aiter-12"]
 
@@ -165,6 +167,10 @@ def test_returned_pages_are_read_from_both_wiki_output_formats(name, output, exp
         ("search", {"query": "x", "tag": "two words", "reason": "r"}),
         ("search", {"query": "x", "architecture": "--all", "reason": "r"}),
         ("page", {"reason": "r"}),
+        # A page path that leaves the checkout is refused; the checkout's own script would read it.
+        ("page", {"page_id": "/etc/hostname", "reason": "r"}),
+        ("page", {"page_id": "../../../etc/hostname", "reason": "r"}),
+        ("page", {"page_id": "pages/../../outside.md", "reason": "r"}),
         ("grep", {"pattern": "x", "only": "all", "reason": "r"}),
         ("nonexistent", {"reason": "r"}),
         # A call that omits or malforms its reason is refused before anything runs, on every tool.
