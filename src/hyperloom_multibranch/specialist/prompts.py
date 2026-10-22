@@ -62,9 +62,12 @@ Since your last turn ended, this arrived for your branch:
 Read what bears on your work (test_result, notebook_brief) and carry on from where you stopped."""
 _WAKE_ITEM = "- {kind} {pointer}: {summary}"
 _NUDGE = """\
-Your turn ended with no test of yours running and nothing new for your branch. The session decides when your branch \
-stops. Settings run out; source work does not: take the operator the profile ranks highest in your direction and \
-write a patch, a fused or tuned kernel, or a port of a PR the image lacks, and test it."""
+Your turn ended with no test of yours running and nothing new for your branch. Nothing arrives on its own: a brief \
+comes only when the integration head moves, and no one hands your branch a new direction, so read notebook_brief for \
+your head and act now. Settings run out; source work does not: take the operator the profile ranks highest in your \
+direction and write a patch, a fused or tuned kernel, or a port of a PR the image lacks, and test it. If your \
+direction is done on this head, take another of the session's directions. Turns that end with nothing to test stop \
+your branch."""
 _LAUNCH = (
     _REPAIR,
     _DIRECTION,
@@ -227,7 +230,10 @@ the reviewer is recorded only, and a notice says why. A gain that carries a case
 
 Rules:
 - Write only in your worktree and your workspace; the source base and other branches' worktrees are not yours.
-- Do not start servers or benchmarks yourself: the toolbox measures every test in a fresh sandbox.
+- Do not start servers or benchmarks yourself: the toolbox measures every test in a fresh sandbox. You have no GPU of \
+your own: submit_test is how you measure. A kernel, a tuned table or a patch you cannot verify offline is what a test \
+is for, so submit the candidate the evidence favours rather than wait for certainty; a flat or failed result tells \
+the next candidate something.
 - A candidate is one intent, so its result says what that intent is worth. Small changes, each too small to clear \
 the bar alone, may go together as one intent: name every change in its mechanism and give as target_share_pct the \
 summed share of the operators they speed up.

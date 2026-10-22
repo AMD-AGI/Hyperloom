@@ -235,7 +235,17 @@ def test_the_wake_and_nudge_messages_say_what_arrived_or_that_nothing_did():
 
     woken = prompts.wake_message([item], [])
     assert "this arrived for your branch" in woken and "- judgement r7: r7 measured +2.1%: committed" in woken
-    assert "nothing new for your branch" in prompts.nudge_message()
+    nudge = prompts.nudge_message()
+    assert "nothing new for your branch" in nudge
+    assert "Nothing arrives on its own" in nudge and "notebook_brief" in nudge
+    assert "decides when your branch stops" not in nudge
+
+
+def test_the_role_says_a_test_is_how_a_specialist_without_a_gpu_measures_a_candidate():
+    prompt = role_prompt(WORKLOAD)
+
+    assert "You have no GPU of your own: submit_test is how you measure" in prompt
+    assert "a flat or failed result tells the next candidate something" in prompt
 
 
 def test_the_role_says_a_brief_item_asks_for_the_brief_again_before_the_next_claim():
