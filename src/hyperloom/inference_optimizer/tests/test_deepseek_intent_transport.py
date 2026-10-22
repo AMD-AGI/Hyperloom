@@ -324,7 +324,7 @@ class _FakeHarnessError(Exception):
 def _install_fake_sdk(monkeypatch: pytest.MonkeyPatch, harness_cls: type) -> None:
     """Replace the SDK module with one whose harness class is ``harness_cls``."""
     sdk = SimpleNamespace(DeepSeekHarness=harness_cls, errors=SimpleNamespace(HarnessError=_FakeHarnessError))
-    monkeypatch.setattr(deepseek_session, "_load_harness_sdk", lambda: sdk)
+    monkeypatch.setattr(deepseek_session, "load_harness_sdk", lambda: sdk)
 
 
 def _capture_harness_kwargs(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
