@@ -9,12 +9,12 @@ import logging
 import os
 import sqlite3
 import time
+from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from hyperloom.common.timeutil import now_iso
 from hyperloom.common.visible_devices import COUNTING_VISIBLE_DEVICE_VARS, parse_device_list
-from hyperloom.orchestrator.state.task_states import TERMINAL_STATES
 
 from .storage.connection import SqliteConnection
 
@@ -29,6 +29,9 @@ _RAY_OBS_ID_BASE = 100000
 
 # Lease TTL grace over how long the holder is expected to run: a GPU agent's wall budget, or an action's expected cost.
 GPU_LEASE_TTL_GRACE = 0.1
+
+# Resolution of the ISO timestamps written to and compared against gpu_leases.
+_LEASE_TIMESPEC = "microseconds"
 
 
 def _parse_gpu_list(raw: str) -> list[int]:
@@ -115,37 +118,45 @@ class SpecialistGpuPool:
         db: SqliteConnection,
         *,
         gpu_ids: list[int] | tuple[int, ...],
+        terminal_states: Collection[str] = (),
     ):
-        """Initialize the pool over a fixed set of GPU ids."""
+        """Initialize the pool over a fixed set of GPU ids.
+
+        ``terminal_states`` is the caller's vocabulary of task states that no
+        worker can come back from; the pool only reclaims a lapsed GPU lease
+        when its holder sits in one of them. Left empty, every row keeps its
+        slot until the holder releases it.
+        """
         self.db = db
         self.gpu_ids = tuple(dict.fromkeys(int(g) for g in gpu_ids if int(g) >= 0))
+        self.terminal_states = tuple(sorted({str(s) for s in terminal_states}))
 
     @property
     def capacity(self) -> int:
         """Return the number of GPUs the pool manages."""
         return len(self.gpu_ids)
 
-    @staticmethod
-    def _blocking_gpu_rows(cur, *, min_gpu_id: int | None = None) -> dict[int, dict]:
+    def _blocking_gpu_rows(self, cur, *, min_gpu_id: int | None = None) -> dict[int, dict]:
         """gpu_leases rows still entitled to their slot, keyed by gpu_id.
 
-        A row stops blocking when its holder task is terminal (a state with no
-        outgoing transition, so no worker will come back for the slot) AND its
-        ``expires_at`` lapsed. Rows whose holder is live, or whose TTL has not
-        lapsed, keep the slot however old -- nothing heartbeats a GPU worker
-        mid-run, so raw expiry would steal slots from live holders.
+        A row stops blocking when its holder task is terminal (one of the
+        states the caller passed in, which no worker will come back from) AND
+        its ``expires_at`` lapsed. Rows whose holder is live, or whose TTL has
+        not lapsed, keep the slot however old -- nothing heartbeats a GPU
+        worker mid-run, so raw expiry would steal slots from live holders.
         """
         terminal_tasks: set[str] = set()
-        try:
-            cur.execute(
-                "SELECT task_id FROM tasks WHERE state IN (?,?,?)",
-                tuple(sorted(TERMINAL_STATES)),
-            )
-            terminal_tasks = {str(row["task_id"]) for row in cur.fetchall()}
-        except sqlite3.OperationalError as exc:
-            # Legacy DB without the tasks table: nothing terminal to judge.
-            log.debug("_blocking_gpu_rows: tasks table unavailable: %s", exc)
-        now_iso = datetime.now(timezone.utc).isoformat(timespec="microseconds")
+        if self.terminal_states:
+            try:
+                cur.execute(
+                    f"SELECT task_id FROM tasks WHERE state IN ({','.join('?' * len(self.terminal_states))})",
+                    self.terminal_states,
+                )
+                terminal_tasks = {str(row["task_id"]) for row in cur.fetchall()}
+            except sqlite3.OperationalError as exc:
+                # Legacy DB without the tasks table: nothing terminal to judge.
+                log.debug("_blocking_gpu_rows: tasks table unavailable: %s", exc)
+        now_iso = datetime.now(timezone.utc).isoformat(timespec=_LEASE_TIMESPEC)
         if min_gpu_id is None:
             cur.execute("SELECT gpu_id, task_id, expires_at FROM gpu_leases")
         else:
@@ -178,7 +189,7 @@ class SpecialistGpuPool:
         expires_iso = datetime.fromtimestamp(
             expires_ts,
             tz=timezone.utc,
-        ).isoformat(timespec="microseconds")
+        ).isoformat(timespec=_LEASE_TIMESPEC)
 
         async with self.db.transaction() as cur:
             # Same-holder/task acquire is idempotent when the existing lease already satisfies the request: same count
@@ -256,7 +267,7 @@ class SpecialistGpuPool:
         expires_iso = datetime.fromtimestamp(
             expires_ts,
             tz=timezone.utc,
-        ).isoformat(timespec="microseconds")
+        ).isoformat(timespec=_LEASE_TIMESPEC)
 
         async with self.db.transaction() as cur:
             blocking = self._blocking_gpu_rows(cur, min_gpu_id=_RAY_OBS_ID_BASE)

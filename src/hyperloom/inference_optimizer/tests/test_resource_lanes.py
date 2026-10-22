@@ -32,6 +32,7 @@ from hyperloom.orchestrator.bus.storage.schema import (
     ensure_schema,
     set_lane_capacity,
 )
+from hyperloom.orchestrator.state.task_states import TERMINAL_STATES
 
 
 @pytest.fixture
@@ -955,7 +956,7 @@ async def test_an_unexpired_lease_of_a_terminal_task_is_retained(conn, locks):
 @pytest.mark.parametrize("ray", [False, True])
 async def test_a_terminal_holders_expired_gpu_lease_frees_the_slot(conn, ray):
     """The other half of the wedge: the GPU row that outlived its terminal task."""
-    pool = SpecialistGpuPool(conn, gpu_ids=[0])
+    pool = SpecialistGpuPool(conn, gpu_ids=[0], terminal_states=TERMINAL_STATES)
     _seed_task(conn, "told", "failed")
     gpu_id = _RAY_OBS_ID_BASE if ray else 0
     conn.raw.execute(
@@ -977,7 +978,7 @@ async def test_a_terminal_holders_expired_gpu_lease_frees_the_slot(conn, ray):
 @pytest.mark.parametrize("ray", [False, True])
 async def test_a_live_holders_expired_gpu_lease_keeps_the_slot(conn, ray):
     """No heartbeat exists for a running GPU worker; raw expiry would steal it."""
-    pool = SpecialistGpuPool(conn, gpu_ids=[0])
+    pool = SpecialistGpuPool(conn, gpu_ids=[0], terminal_states=TERMINAL_STATES)
     _seed_task(conn, "trungpu", "running")
     gpu_id = _RAY_OBS_ID_BASE if ray else 0
     conn.raw.execute(
@@ -994,6 +995,20 @@ async def test_a_live_holders_expired_gpu_lease_keeps_the_slot(conn, ray):
 
     assert await acquire("next") is None
 
+
+@pytest.mark.asyncio
+async def test_a_pool_without_a_terminal_vocabulary_keeps_every_slot(conn):
+    """Terminality comes from the caller: given none, no row is ever reclaimed."""
+    pool = SpecialistGpuPool(conn, gpu_ids=[0])
+    _seed_task(conn, "tnovocab", "failed")
+    conn.raw.execute(
+        "INSERT INTO gpu_leases(gpu_id, holder_id, task_id, acquired_at, expires_at, heartbeat_at) "
+        "VALUES (?,?,?,?,?,?)",
+        (0, "tnovocab", "tnovocab", _T0, "2026-01-01T00:00:01+00:00", _T0),
+    )
+    conn.raw.commit()
+
+    assert await pool.try_acquire(count=1, holder_id="next", task_id="next") is None
 
 
 @pytest.mark.asyncio
