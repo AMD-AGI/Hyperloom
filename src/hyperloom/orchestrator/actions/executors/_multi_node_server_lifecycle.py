@@ -447,16 +447,14 @@ async def restart_server_for_round(
         with _restart_env_scope(extra_env, unset_env, torch_profiler_dir):
             from ._server_patcher import resolve_sglang_patch_set
 
-            poll_timeout_s = env_int("HYPERLOOM_MN_POLL_TIMEOUT_S", DEFAULT_HEALTH_TIMEOUT_S)
+            # Local import to keep httpx out of the single-node import path.
+            from hyperloom.inference_optimizer.multi_node.cli import cmd_restart_server, resolve_poll_timeout_s
+
+            poll_timeout_s = resolve_poll_timeout_s(DEFAULT_HEALTH_TIMEOUT_S)
             await _apply_tracelens_patch_fanout(resolve_sglang_patch_set(), torch_profiler_dir, poll_timeout_s)
 
-            # Local import to keep httpx out of the single-node import path.
-            from hyperloom.inference_optimizer.multi_node.cli import cmd_restart_server, _resolve_poll_timeout_s
-
             # Align launch-driver poll with /health wait for JIT-heavy MoE runs.
-            poll_timeout_s, health_wait_s = _health_wait_budget(
-                max(poll_timeout_s, _resolve_poll_timeout_s()), extra_server_args, pd, extra_env
-            )
+            poll_timeout_s, health_wait_s = _health_wait_budget(poll_timeout_s, extra_server_args, pd, extra_env)
             ns = _restart_namespace(round_args, extra_server_args, poll_timeout_s, pd)
             from ._multi_node_env import log_mn_banner
 
