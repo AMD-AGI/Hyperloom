@@ -32,6 +32,7 @@ from typing import Any, Mapping, NamedTuple
 
 import yaml
 
+from hyperloom.common.agentx_workload import pin_mlperf_round_concurrency
 from hyperloom.common.coerce import to_str_list
 from hyperloom.inference_optimizer.runtime_environment import prepend_launch_path
 from hyperloom.common.env import env_bool, env_flag, is_truthy
@@ -71,6 +72,7 @@ from hyperloom.inference_optimizer.grid_server_args import (
     server_args_env_name,
 )
 from hyperloom.inference_optimizer.grid_server_args import merge_server_args
+from hyperloom.inference_optimizer.grid_server_args import remove_moe_runner_backend_arg
 from hyperloom.inference_optimizer.grid_server_args import remove_server_args
 from hyperloom.inference_optimizer.grid_server_args import validate_server_args_shell_safe
 from hyperloom.inference_optimizer import framework_registry
@@ -94,11 +96,6 @@ log = logging.getLogger(__name__)
 # identity table rather than typed out beside it.
 _GFX942_GPU_TYPES = frozenset(board for board, (arch, _cus) in AMD_GPU_DISPATCH_IDENTITIES.items() if arch == "gfx942")
 
-
-# Value is optional so a bare, value-less flag (an operator typo, or a flag
-# left dangling at end-of-string) is stripped too rather than surviving into a
-# retry that is supposed to launch without it.
-_MOE_RUNNER_BACKEND_RE = re.compile(r"(?:^|\s)--moe-runner-backend(?:(?:[=\s]+)(?!--)\S+)?")
 
 # Profile-phase capture defaults. Trace size scales with captured decode steps;
 # an oversized capture serializes too slowly and kills the engine. 128 steps is
@@ -444,22 +441,6 @@ def build_agentx_workload_spec(
         }
 
     raise ValueError("Only the MLPerf client uses a Hyperloom workload spec")
-
-
-def pin_mlperf_round_concurrency(envs: dict[str, Any]) -> None:
-    """Make ``AGENTIC_CONCURRENCY`` follow this round's ``CONC``.
-
-    The client used to prefer ``AGENTIC_CONCURRENCY``, and the baseline YAML
-    carries it. A conc-sweep rung that only changes ``CONC`` would then be
-    recorded at one concurrency and measured at another.
-    """
-    from hyperloom.common.agentx_workload import is_mlperf_backend
-
-    if not is_mlperf_backend(envs):
-        return
-    conc = envs.get("CONC")
-    if conc not in (None, ""):
-        envs["AGENTIC_CONCURRENCY"] = str(conc)
 
 
 def apply_agentx_switch(
@@ -836,11 +817,6 @@ def apply_scriptable_runtime_defaults(
         )
 
 
-def _remove_moe_runner_backend_arg(args: str) -> str:
-    """Remove any existing SGLang MoE runner backend flag from an args string."""
-    return " ".join(_MOE_RUNNER_BACKEND_RE.sub(" ", str(args or "")).split())
-
-
 def _model_requires_remote_code(model_path: str | None) -> bool:
     """Return whether benchmark server/client must trust custom HF code.
 
@@ -1123,7 +1099,7 @@ def _finalize_framework_server_args(
     #    A baseline retry can still ask to strip an inherited/pinned flag that
     #    crashed the server.
     if drop_moe_runner_backend and framework_env == "EXTRA_SGLANG_ARGS":
-        resolved_server_args = _remove_moe_runner_backend_arg(resolved_server_args)
+        resolved_server_args = remove_moe_runner_backend_arg(resolved_server_args)
     # 5. vLLM/atom argparse dedup: collapse repeated single-value flags to
     #    last-wins (vLLM crashes EngineCoreProc on a duplicate); no-op for
     #    sglang.
@@ -1658,7 +1634,7 @@ def _merge_caller_overrides(
                 # For MoE backend exploration/tuning, the candidate value must
                 # replace the baseline's injected default (usually triton) rather
                 # than relying on duplicate last-wins flags.
-                existing = _remove_moe_runner_backend_arg(existing)
+                existing = remove_moe_runner_backend_arg(existing)
             envs[framework_env] = merge_server_args(existing, server_args)
     # Magpie forwards only ``benchmark.envs``, so ``--extra-env`` lands there for
     # every framework: vLLM Ray workers see MTP pins only this way.

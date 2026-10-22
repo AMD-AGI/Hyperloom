@@ -10,7 +10,6 @@ import json
 import logging as _logging
 import os
 import shlex
-import signal
 import subprocess
 import sys
 import time
@@ -61,7 +60,6 @@ from ..kernel.geak_config import (
     _accepted_config_as_variant,
     _accepted_config_controls,
 )
-from ..kernel.geak_runner import drain_killed
 from ..kernel.lane_budget import INSUFFICIENT_BUDGET
 from ..actions.executors._gpu_pin import (
     coerce_tp,
@@ -1223,6 +1221,51 @@ class KernelPhase(CoordinatorCollaborator):
         benchmark_mode = str(self.shared_state.benchmark_mode or "").strip()
         return is_agentx_mode(benchmark_mode) if benchmark_mode else agentx_enabled()
 
+    async def _launch_geak_runner(
+        self, handoff_path: Path, *, timeouts: tuple[int, int, bool], from_phase: str
+    ) -> subprocess.CompletedProcess:
+        """Run geak_runner on ``handoff_path`` under :meth:`_geak_timeouts`; raise TimeoutExpired at its kill cap.
+
+        geak_runner gives run_e2e its own SIGTERM grace to flush result.json before ``runner_timeout`` +
+        ``GEAK_FLUSH_GRACE_S``, inside the kill cap. The launch marks the run, so whatever it left running is
+        reaped when it returns, however it detached.
+        """
+        from ..actions.executors._subprocess_kill import REAP_MARK_ENV, run_with_session_kill
+
+        runner_timeout, kill_timeout, budget_known = timeouts
+        cmd = [
+            sys.executable,
+            "-m",
+            _GEAK_RUNNER_MODULE,
+            str(handoff_path),
+            str(handoff_path.parent),
+            "--timeout-s",
+            str(runner_timeout),
+        ]
+        log.info(
+            "KERNEL entry: delegating to GEAK e2e (from=%s) runner_timeout=%ds kill_timeout=%ds budget_known=%s cmd=%s",
+            from_phase or "<unknown>",
+            runner_timeout,
+            kill_timeout,
+            budget_known,
+            " ".join(cmd),
+        )
+        # GEAK must search and gate on the axis this session keeps candidates on: a kernel accepted on another
+        # axis need not move that one. geak_metric_axis owns the mapping and its rationale.
+        metric, _ = geak_metric_axis(
+            benchmark_mode=str(self.shared_state.benchmark_mode or ""),
+            grading=self.shared_state.grading or None,
+        )
+        runner_env = dict(os.environ)
+        runner_env["E2E_METRIC"] = metric
+        runner_env[REAP_MARK_ENV] = uuid.uuid4().hex
+        # Only injection point needed for the whole GEAK chain: geak_runner and run_e2e both hand their full
+        # environment to the child, so the tag reaches the Claude CLI that actually spends.
+        from hyperloom.common.llm_attribution import inject_env
+
+        inject_env(runner_env, component="geak", operation="optimize_kernel")
+        return await asyncio.to_thread(run_with_session_kill, cmd, env=runner_env, timeout=kill_timeout)
+
     async def _run_geak_kernel_phase(self, *, from_phase: str) -> None:
         """Delegate the KERNEL_AGENT phase to GEAK (one whole-pipeline e2e run)."""
         state = self.shared_state
@@ -1599,80 +1642,12 @@ class KernelPhase(CoordinatorCollaborator):
             )
             return
 
-        cmd = [
-            sys.executable,
-            "-m",
-            _GEAK_RUNNER_MODULE,
-            str(handoff_path),
-            str(out_dir),
-            "--timeout-s",
-            str(runner_timeout),
-        ]
-        log.info(
-            "KERNEL entry: delegating to GEAK e2e (from=%s) runner_timeout=%ds kill_timeout=%ds budget_known=%s cmd=%s",
-            from_phase or "<unknown>",
-            runner_timeout,
-            kill_timeout,
-            budget_known,
-            " ".join(cmd),
-        )
-
-        # Run in its own process group so a timeout can SIGTERM the whole runner -> run_e2e -> vllm/node tree (grace
-        # to flush result.json), then SIGKILL, instead of orphaning run_e2e + its servers.
-        term_grace = env_int("GEAK_TERM_GRACE_S", default=180)
-
-        # GEAK must search and gate on the axis this session keeps candidates on: a kernel accepted on another
-        # axis need not move that one. geak_metric_axis owns the mapping and its rationale.
-        _geak_e2e_metric, _ = geak_metric_axis(
-            benchmark_mode=str(state.benchmark_mode or ""),
-            grading=state.grading or None,
-        )
-
-        def _run() -> subprocess.CompletedProcess:
-            runner_env = dict(os.environ)
-            runner_env["E2E_METRIC"] = _geak_e2e_metric
-            # Only injection point needed for the whole GEAK chain: geak_runner and run_e2e both hand their full
-            # environment to the child, so the tag reaches the Claude CLI that actually spends.
-            from hyperloom.common.llm_attribution import inject_env
-
-            inject_env(runner_env, component="geak", operation="optimize_kernel")
-            p = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                env=runner_env,
-                start_new_session=True,
-            )
-
-            def _killpg(sig: int) -> None:
-                try:
-                    os.killpg(os.getpgid(p.pid), sig)
-                except (ProcessLookupError, PermissionError):
-                    # Process already exited; nothing to signal.
-                    pass
-
-            try:
-                out, err = p.communicate(timeout=kill_timeout)
-            except subprocess.TimeoutExpired:
-                _killpg(signal.SIGTERM)
-                try:
-                    out, err = p.communicate(timeout=term_grace)
-                except subprocess.TimeoutExpired:
-                    _killpg(signal.SIGKILL)
-                    out, err = drain_killed(p)
-                raise subprocess.TimeoutExpired(
-                    cmd,
-                    kill_timeout,
-                    output=out,
-                    stderr=err,
-                )
-            return subprocess.CompletedProcess(cmd, p.returncode, out, err)
-
         runner_started_at = datetime.now(timezone.utc).isoformat()
         runner_started_monotonic = time.monotonic()
         try:
-            proc = await asyncio.to_thread(_run)
+            proc = await self._launch_geak_runner(
+                handoff_path, timeouts=(runner_timeout, kill_timeout, budget_known), from_phase=from_phase
+            )
             stderr_tail = (proc.stderr or "")[-2000:]
             if proc.returncode != 0:
                 log.warning("GEAK runner rc=%s: %s", proc.returncode, stderr_tail)

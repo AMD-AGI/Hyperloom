@@ -18,6 +18,7 @@ from typing import Any
 from hyperloom.common.codex_session import CodexSessionError
 from hyperloom.common.env import is_truthy
 from hyperloom.common.jsonio import read_json
+from hyperloom.common.llm_config import AGENT_BACKEND_CHOICES
 
 from ..actions.executors._kernel_agent_tool import _run_subprocess
 
@@ -28,7 +29,7 @@ LLM_UNAVAILABLE_VERDICT = "llm_unavailable"
 # ``fusion_loop.termination_reason`` values for a run that died before the loop ran a single attempt.
 INFRA_ABORT_REASONS = frozenset({"harness_author_failed", "no_git_workspace"})
 DEFAULT_TIMEOUT_SEC = 7200
-_AGENT_BACKENDS = frozenset({"claude", "codex"})
+_AGENT_BACKENDS = frozenset(AGENT_BACKEND_CHOICES)
 
 
 def _validated_agent_backend(value: Any) -> str:
@@ -55,7 +56,7 @@ def _validated_agent_sandbox_mode(value: Any) -> str:
 def _author_env(agent_backend: str) -> dict[str, str]:
     """The environment forge-fuse runs its author under, without crossing provider shapes."""
     env = dict(os.environ)
-    if _validated_agent_backend(agent_backend) == "codex":
+    if _validated_agent_backend(agent_backend) in {"codex", "deepseek"}:
         return env
 
     from hyperloom.common import llm_config

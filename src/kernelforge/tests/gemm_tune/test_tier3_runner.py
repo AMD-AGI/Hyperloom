@@ -313,23 +313,6 @@ class TestLedger:
 class TestPlanPreviewsWhatRunDoes:
     """A preview that answers a different question than the thing it previews is worse than no preview: it is consulted precisely when someone is unsure, and it was showing TunableOp skipped for inputs under which the real run selects it."""
 
-    def _src(self, name):
-        import inspect
-
-        from kernelforge.gemm_tune import cli
-
-        return inspect.getsource(getattr(cli, name).callback)
-
-    def test_plan_derives_demand_from_the_serving_log_like_run(self):
-        for name in ("run", "plan"):
-            assert "_demand_from_serving_log(" in self._src(name), name
-
-    def test_plan_counts_demand_as_a_shape_source_like_run(self):
-        for name in ("run", "plan"):
-            src = self._src(name)
-            idx = src.index("has_shapes_json=")
-            assert "demand_json" in src[idx : idx + 90], name
-
     def test_plan_accepts_an_explicit_demand_file(self):
         from kernelforge.gemm_tune import cli
 

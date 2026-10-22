@@ -31,6 +31,37 @@ def _shape_key(row: dict[str, str], key_schema: list[str]) -> tuple:
     return tuple(str(row.get(k, "")).strip() for k in key_schema)
 
 
+def _row_violations(where: str, row: dict[str, str]) -> list[ContractViolation]:
+    """Every way one output row breaks the contract on its own."""
+    bad: list[ContractViolation] = []
+    times: dict[str, float] = {}
+    for col in REQUIRED_OUTPUT_COLUMNS[:2]:
+        raw = str(row.get(col, "")).strip()
+        try:
+            value = float(raw)
+        except ValueError:
+            bad.append(ContractViolation(where, f"{col}={raw!r} is not a number"))
+            continue
+        times[col] = value
+        if value <= 0:
+            bad.append(ContractViolation(where, f"{col}={value} is not a positive time"))
+
+    improved = str(row.get("improved", "")).strip().lower()
+    # Missing or unparseable timings are already recorded by the column checks above; there is nothing to cross-check
+    # for them.
+    d, t = times.get("default_us", 0.0), times.get("tuned_us", 0.0)
+    if improved not in ("true", "false"):
+        bad.append(ContractViolation(where, f"improved={improved!r} is not a boolean"))
+    elif d > 0 and t > 0 and (improved == "true") != (t < d):
+        # A row that claims an improvement its own numbers contradict is the cheapest possible tell that the script
+        # is not measuring what it reports, and it costs nothing to catch here.
+        bad.append(ContractViolation(where, f"improved={improved} contradicts default_us={d} tuned_us={t}"))
+
+    if "," in str(row.get("config", "")):
+        bad.append(ContractViolation(where, "config contains a comma"))
+    return bad
+
+
 def validate_output_csv(
     csv_path: Path | str,
     mandate: TunerMandate,
@@ -78,50 +109,11 @@ def validate_output_csv(
         if key in seen:
             bad.append(ContractViolation(where, f"duplicate shape {key}"))
         seen.add(key)
+        bad.extend(_row_violations(where, row))
 
-        for col in REQUIRED_OUTPUT_COLUMNS[:2]:
-            raw = str(row.get(col, "")).strip()
-            try:
-                value = float(raw)
-            except ValueError:
-                bad.append(ContractViolation(where, f"{col}={raw!r} is not a number"))
-                continue
-            if value <= 0:
-                bad.append(ContractViolation(where, f"{col}={value} is not a positive time"))
-
-        improved = str(row.get("improved", "")).strip().lower()
-        if improved not in ("true", "false"):
-            bad.append(ContractViolation(where, f"improved={improved!r} is not a boolean"))
-        else:
-            # A row that claims an improvement its own numbers contradict is the cheapest possible tell that the
-            # script is not measuring what it reports, and it costs nothing to catch here.
-            try:
-                d, t = float(row["default_us"]), float(row["tuned_us"])
-            except (KeyError, ValueError):
-                # Missing or unparseable timings are already recorded by the column checks above; there is nothing to
-                # cross-check here.
-                pass
-            else:
-                if d > 0 and t > 0 and (improved == "true") != (t < d):
-                    bad.append(
-                        ContractViolation(
-                            where,
-                            f"improved={improved} contradicts default_us={d} tuned_us={t}",
-                        )
-                    )
-
-        if "," in str(row.get("config", "")):
-            bad.append(ContractViolation(where, "config contains a comma"))
-
-    if wanted:
-        unmet = wanted - seen
-        if unmet:
-            bad.append(
-                ContractViolation(
-                    str(path),
-                    f"{len(unmet)} demanded shape(s) have no row: {sorted(unmet)[:5]}",
-                )
-            )
+    unmet = wanted - seen
+    if unmet:
+        bad.append(ContractViolation(str(path), f"{len(unmet)} demanded shape(s) have no row: {sorted(unmet)[:5]}"))
 
     if bad:
         log.warning(
