@@ -249,6 +249,8 @@ class OrchestrationContext:
     last_critic_review: str = ""
     # Present only when the campaign has a roofline ceiling; each case's own figure rides on ``CaseEvidence.roofline``.
     roofline: CampaignRoofline | None = None
+    # Standing operator messages, newest first (``forge-say``).
+    operator_guidance: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         _text(self.analysis_commit, "context.analysis_commit")
@@ -384,6 +386,14 @@ class OrchestrationContext:
         # Omitted rather than null, like ``CaseEvidence.roofline``.
         if self.roofline is not None:
             payload["roofline"] = self.roofline.to_dict()
+        if self.operator_guidance:
+            payload["operator_guidance"] = {
+                "priority": (
+                    "highest: follow these over the Supervisor Ruling and analysis recommendations, never over "
+                    "correctness or measurement facts"
+                ),
+                "messages_newest_first": list(self.operator_guidance),
+            }
         return payload
 
 

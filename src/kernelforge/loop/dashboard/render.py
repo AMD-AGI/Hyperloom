@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import math
 import time
-from collections.abc import Callable
 from html import escape
 
 REFRESH_SEC = 60
@@ -335,8 +334,17 @@ def _events(snapshot: dict) -> str:
     )
 
 
-# Panels in page order. Later features register theirs in EXTRA_PANELS, keyed off their own snapshot entries.
-EXTRA_PANELS: list[Callable[[dict], str]] = []
+def _inbox_panel(snapshot: dict) -> str:
+    inbox = snapshot.get("inbox") or {}
+    pending, active = inbox.get("pending") or [], inbox.get("active") or []
+    if not pending and not active:
+        return ""
+    items = [f"<li>waiting for the next iteration: {escape(text)}</li>" for text in pending]
+    items += [f"<li>{escape(text)}</li>" for text in active]
+    return (
+        "<div class='card'><h2>Operator messages</h2><div class='sub'>standing guidance, newest first; "
+        f"withdraw with <code>forge-say --clear</code></div><ul>{''.join(items)}</ul></div>"
+    )
 
 
 def render_dashboard(snapshot: dict) -> str:
@@ -347,8 +355,8 @@ def render_dashboard(snapshot: dict) -> str:
         _tiles(snapshot),
         _score_chart(rows),
         _decision_strip(rows),
+        _inbox_panel(snapshot),
         _case_table(snapshot),
-        *(panel(snapshot) for panel in EXTRA_PANELS),
         _text_card("Latest supervisor ruling", snapshot.get("supervisor") or ""),
         _usage_table(snapshot),
         _events(snapshot),

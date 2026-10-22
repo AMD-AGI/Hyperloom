@@ -9,6 +9,7 @@ import click
 
 from kernelforge.cli.forge_loop_command import forge_loop
 from kernelforge.cli.forge_rewrite_command import forge_rewrite
+from kernelforge.cli.forge_say_command import forge_say
 
 
 @click.group()
@@ -19,6 +20,7 @@ def main():
 
 main.add_command(forge_loop)
 main.add_command(forge_rewrite)
+main.add_command(forge_say)
 
 
 def _register_kernel_rewrite_controller() -> None:

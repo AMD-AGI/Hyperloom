@@ -161,6 +161,25 @@ and passing one alongside `--resume` is refused rather than silently ignored.
 | `--experiment-id <id>` | none | Caller-owned experiment ID, recorded for external checkpoint recovery. |
 | `--result-json <file>` | none | Write the result dict here as well as printing it. |
 
+## forge-say
+
+Leaves a message for a running (or paused) forge-loop campaign. The loop reads
+its inbox at the start of each iteration and keeps every message since the last
+`--clear` in front of the planners, the supervisor, the implementer and every
+lane, above their own rulings and never above correctness or measurement. A
+message posted mid-iteration reaches the next one. The dashboard lists pending
+and standing messages.
+
+| Option | Default | Meaning |
+|:--|:--|:--|
+| `--workspace <dir>` | required | Workspace of the campaign to message. |
+| `--clear` | off | Withdraw every earlier message instead of posting one. |
+
+```bash
+kernelforge forge-say --workspace <ws> "Focus on the M<=64 cases; leave the large ones alone."
+kernelforge forge-say --workspace <ws> --clear
+```
+
 ## forge-rewrite-by-flydsl
 
 Ports a source kernel (Triton, HIP, CUDA or C++) into an equivalent FlyDSL

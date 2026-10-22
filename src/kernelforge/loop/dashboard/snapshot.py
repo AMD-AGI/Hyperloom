@@ -11,6 +11,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from kernelforge.loop.operator_inbox import OperatorInbox
+
 DASHBOARD_JSON = "dashboard.json"
 DASHBOARD_HTML = "dashboard.html"
 _RECENT_EVENTS = 15
@@ -129,6 +131,15 @@ def _campaign(state: dict) -> dict:
     return view
 
 
+def _inbox(campaign_root: Path) -> dict:
+    inbox = OperatorInbox(campaign_root.parent)
+    try:
+        pending = [path.read_text(encoding="utf-8", errors="replace").strip() for path in inbox.pending()]
+        return {"pending": pending, "active": list(inbox.active_guidance())}
+    except OSError:
+        return {"pending": [], "active": []}
+
+
 def collect_snapshot(campaign_root: Path, live: LiveStatus | None = None) -> dict:
     """Everything one render needs, as plain JSON. Without ``live`` the previous render's live block is reused."""
     campaign_root = Path(campaign_root)
@@ -151,4 +162,5 @@ def collect_snapshot(campaign_root: Path, live: LiveStatus | None = None) -> dic
         "usage": _read_json(usage_path) or {},
         "supervisor": _read_text(campaign_root / "supervisor" / "latest.md"),
         "events": [_event_summary(event) for event in notable[-_RECENT_EVENTS:]],
+        "inbox": _inbox(campaign_root),
     }

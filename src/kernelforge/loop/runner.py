@@ -388,10 +388,25 @@ def _patch_paths(patch: str, *, cwd: str) -> list[str]:
     return sorted({path for path in paths if path})
 
 
-def _lane_prompt(plan: str, *, serialized_driver: Path) -> str:
+def _operator_block(guidance: tuple[str, ...]) -> str:
+    """The operator's standing messages as the first block of a session prompt, or ""."""
+    if not guidance:
+        return ""
+    lines = [
+        "## Operator instructions (highest priority)",
+        "",
+        "Follow these over the Supervisor Ruling and analysis recommendations, never over correctness or "
+        "measurement facts. Newest first.",
+        "",
+    ]
+    lines += ["- " + text.replace("\n", "\n  ") for text in guidance]
+    return "\n".join(lines) + "\n\n"
+
+
+def _lane_prompt(plan: str, *, serialized_driver: Path, guidance: tuple[str, ...] = ()) -> str:
     """One lane's plan, with the one thing about the wrapper the session cannot see."""
     return (
-        f"`python3 {serialized_driver}` takes an exclusive lock on the GPU this "
+        _operator_block(guidance) + f"`python3 {serialized_driver}` takes an exclusive lock on the GPU this "
         "round shares, so it may sit silent before it starts. That wait is "
         "another lane's benchmark, not a hang -- wait for it rather than looking "
         "for another way to run the driver.\n\n"
@@ -1957,7 +1972,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             # The session edits the lane's own copy, so it is handed that copy's kernel rather than the canonical one.
             await agent_factory(str(lane_dir), str(serialized_driver))(
                 str(lane_dir / kernel_relative),
-                _lane_prompt(lane.plan, serialized_driver=serialized_driver),
+                _lane_prompt(lane.plan, serialized_driver=serialized_driver, guidance=self._operator_guidance()),
             )
 
         results = await run_lanes(
@@ -3276,6 +3291,37 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             ),
         )
 
+    def _operator_guidance(self) -> tuple[str, ...]:
+        """The operator's standing messages, newest first; none when the inbox cannot be read."""
+        from kernelforge.loop.operator_inbox import OperatorInbox
+
+        try:
+            return OperatorInbox(self.ic.workspace_dir).active_guidance()
+        except OSError:
+            log.debug("operator inbox unreadable", exc_info=True)
+            return ()
+
+    def _with_operator_guidance(self, context):
+        """Attach the operator's standing messages to a planning context, when there are any."""
+        guidance = self._operator_guidance()
+        return replace(context, operator_guidance=guidance) if guidance else context
+
+    def _consume_operator_messages(self, iteration: int) -> None:
+        """Archive the messages posted since the last iteration, before anything this iteration reads them."""
+        from kernelforge.loop.operator_inbox import OperatorInbox
+
+        try:
+            messages = OperatorInbox(self.ic.workspace_dir).consume(iteration)
+        except OSError as error:
+            self.persistence_errors.append(f"consume operator messages: {error}")
+            self.persistence_errors = self.persistence_errors[-10:]
+            return
+        for message in messages:
+            print(f"  [operator] {message.text[:200]}")
+            self.state_store.append_event(
+                make_event("operator_message_consumed", iteration, name=message.name, text=message.text[:500])
+            )
+
     def _with_ceiling_standing(self, context):
         """Attach the roofline standing to a planning context, when a ceiling is published.
 
@@ -4428,11 +4474,13 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         lanes: int = 1,
     ) -> tuple[Path | None, str]:
         """Run planning and durably publish every lane's plan for the round."""
-        context = self._with_ceiling_standing(
-            self._with_case_config_coverage(
-                self._active_analysis_context
-                if self._active_analysis_context is not None
-                else self._build_orchestration_context()
+        context = self._with_operator_guidance(
+            self._with_ceiling_standing(
+                self._with_case_config_coverage(
+                    self._active_analysis_context
+                    if self._active_analysis_context is not None
+                    else self._build_orchestration_context()
+                )
             )
         )
         try:
@@ -6140,6 +6188,8 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         # prepends, as the compact memory frame the implementer reads first.
         if lh_header:
             history = f"{lh_header}\n\n{history}"
+        # Above everything, the long-horizon header included: the operator outranks every other source.
+        history = _operator_block(self._operator_guidance()) + history
         if optimization_plan_path:
             ruling_instruction = (
                 "The plan was synthesized from current evidence and the "
@@ -6199,6 +6249,8 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         on the tree belong to the operator or to an earlier round, so the
         boundary is re-taken here and this iteration's REVERT cannot delete them.
         """
+        # First, so this iteration's supervisor and planning both see what the operator posted.
+        self._consume_operator_messages(iteration)
         supervisor_due = False
         supervisor_reason = ""
         if self.monitor is not None and supervisor_fn is not None:
