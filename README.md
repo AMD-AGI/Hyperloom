@@ -18,10 +18,10 @@ SGLang, and xDiT.
 
 ## Merged upstream
 
-Hyperloom found each of these in a real optimization session on AMD Instinct GPUs. Every one was
-reviewed and re-measured by hand, then merged into vLLM or SGLang. The numbers are quoted from the
-linked PR and were measured on the upstream revision it names; the PR also carries the benchmark
-commands, the accuracy checks, and the operating points where the gain does not apply.
+Hyperloom found each of these in a real optimization session on AMD Instinct GPUs, and vLLM or
+SGLang merged it. The numbers are quoted from the linked PR and were measured on the upstream
+revision it names; the PR also carries the benchmark commands, the accuracy checks, and the
+operating points where the gain does not apply.
 
 | Upstream PR | Merged | Model / workload | GPU | Measured effect |
 |-------|------|-------|------|-------|
@@ -34,9 +34,9 @@ commands, the accuracy checks, and the operating points where the gain does not 
 | [vllm#58354](https://github.com/vllm-project/vllm/pull/58354) | 2026-10-14 | GLM-5.3-Flash, sparse-MLA metadata build | MI355X | 10.5 µs less per build call (+11–15 %), below end-to-end noise |
 | [vllm#57108](https://github.com/vllm-project/vllm/pull/57108) | 2026-10-10 | Block-FP8 checkpoint missing a weight scale | MI300X, MI325X | Correctness: a checkpoint that had served garbage (GSM8K 0.00) now fails the load and names the parameter |
 
-Nine of the 36 attributed PRs are merged as of 2026-10-22; the eight with the largest measured
+Nine of the 38 attributed PRs are merged as of 2026-10-22; the eight with the largest measured
 effect are above.
-[Merged upstream](https://github.com/AMD-AGI/Hyperloom/blob/main/docs/reference/upstream-results.md)
+[Upstream optimizations merged into vLLM and SGLang](https://github.com/AMD-AGI/Hyperloom/blob/main/docs/reference/upstream-results.md)
 has the full list, the per-row caveats, and the rule for what enters it.
 
 ## Why Hyperloom
