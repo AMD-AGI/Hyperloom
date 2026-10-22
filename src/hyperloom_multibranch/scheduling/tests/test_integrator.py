@@ -47,6 +47,7 @@ from hyperloom_multibranch.contracts.notebook.records import LineageEvent
 from hyperloom_multibranch.contracts.notebook.vocab import Conclusion, LineageKind, MergeOutcome
 from hyperloom_multibranch.contracts.toolbox import RequestRejected
 from hyperloom_multibranch.notebook import LocalNotebook
+from hyperloom_multibranch.notebook.knowledge.warm_start import PreparedReplay
 from hyperloom_multibranch.notebook.tests.factories import FakeClock, intent, judgement, request, result
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
 from hyperloom_multibranch.scheduling.clock import Clock
@@ -293,6 +294,55 @@ async def _bench(
 @pytest.fixture
 async def bench(tmp_path: Path) -> Bench:
     return await _bench(tmp_path)
+
+
+#: The Recipe KB champion PRELUDE prepares for the bench's root: ``c1``'s launch config and no whole recipe, as a
+#: lead the KB could not give the champion's files for gives. It gains the 3% ``c1`` gains on the root.
+CHAMPION = PreparedReplay("inference:champion", None, LaunchConfig(server_args=f"{ARGS['c1']} {TAG_FLAG}c1"))
+
+
+async def test_a_champion_that_improves_on_the_root_is_where_explore_opens(bench: Bench) -> None:
+    opened = await bench.integrator.replay_champion(CHAMPION, bench.root)
+
+    head = await bench.repo.head(INTEGRATION_BRANCH)
+    assert opened == head != bench.root
+    [request_id], [test] = bench.merge_tests(), bench.merge_tests().values()
+    assert (test.kind, test.branch_id, test.parent_commit) == (TestKind.TEST, INTEGRATION_BRANCH, bench.root)
+    replayed = await bench.repo.read_recipe(head)
+    assert replayed == apply(await bench.repo.read_recipe(bench.root), test.delta)
+    record = await bench.handle(Role.OBSERVER).record(request_id)
+    assert (record.conclusion, record.commit_id) == (Conclusion.MERGED, head)
+    assert record.judgement is not None and record.judgement.gain_pct == pytest.approx(3.0)
+    lineage = await bench.handle(Role.OBSERVER).lineage()
+    assert lineage.commit(head).recipe_digest == replayed.digest()
+    [logged] = bench.logged()
+    assert logged["detail"] == {
+        "champion": CHAMPION.canonical_id,
+        "onto": bench.root,
+        "request_id": request_id,
+        "merged_commit": head,
+    }
+
+
+async def test_a_champion_that_does_not_improve_leaves_explore_on_the_root(tmp_path: Path) -> None:
+    bench = await _bench(tmp_path, {**CURVES, frozenset({"c1"}): {MAIN_POINT: 950.0}})
+
+    opened = await bench.integrator.replay_champion(CHAMPION, bench.root)
+
+    assert opened == bench.root == await bench.repo.head(INTEGRATION_BRANCH)
+    [request_id] = bench.merge_tests()
+    record = await bench.handle(Role.OBSERVER).record(request_id)
+    assert (record.conclusion, record.commit_id) == (Conclusion.NOT_STACKABLE, None)
+    [logged] = bench.logged()
+    assert str(logged["reason"]).startswith("regressed")
+
+
+async def test_a_champion_the_root_carries_already_is_never_tested(bench: Bench) -> None:
+    opened = await bench.integrator.replay_champion(replace(CHAMPION, launch=ROOT_RECIPE.launch), bench.root)
+
+    assert opened == bench.root and not bench.merge_tests()
+    [logged] = bench.logged()
+    assert logged["reason"] == ALREADY_ON_HEAD
 
 
 async def test_an_improving_merge_is_tested_and_confirmed_from_the_head_then_written(bench: Bench) -> None:

@@ -143,19 +143,19 @@ class BranchControl:
         return tuple(opened)
 
     async def open_user_branches(
-        self, directions: tuple[str, ...], root_commit: str, deadline: float
+        self, directions: tuple[str, ...], start_commit: str, deadline: float
     ) -> tuple[BranchEntry, ...]:
-        """Open one :attr:`BranchOrigin.USER` branch at ``root_commit`` for each of the user's ``directions`` as
+        """Open one :attr:`BranchOrigin.USER` branch at ``start_commit`` for each of the user's ``directions`` as
         :meth:`open_branches` opens a batch, unfocused at K :data:`STARTED_K`; the roster entries issued before the
         roster first refuses one, a branch whose specialist did not start among them, already stopped."""
 
-        start = BatchStart(BranchOrigin.USER, root_commit, deadline)
+        start = BatchStart(BranchOrigin.USER, start_commit, deadline)
         opened = []
         for direction in directions:
             entry = self._issue(start, STARTED_K)
             if entry is None:
                 break
-            opened.append(await self._open(entry, root_commit, deadline, Launch(focus="", direction=direction)))
+            opened.append(await self._open(entry, start_commit, deadline, Launch(focus="", direction=direction)))
         return tuple(opened)
 
     def _issue(self, start: BatchStart, k: int) -> BranchEntry | None:

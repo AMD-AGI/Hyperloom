@@ -3,8 +3,9 @@
 
 """EXPLORE: open the opening batch, then let the judge steer the branches until the EXPLORE deadline or a soft stop.
 
-The branches the user wrote a direction for open first, from the root commit; the opening judge call then sizes the
-opening batch into the slots they leave.
+The branches the user wrote a direction for open first, from the start commit the window names -- the root, or the
+Recipe KB champion PRELUDE replayed onto it -- and so does the opening batch; the opening judge call sizes that batch
+into the slots the user branches leave. Gains are still measured from the root, which the window names apart.
 
 The loop wakes every :data:`EXPLORE_TICK_SECONDS`: it stops the repair branches that used up their time and the branches
 whose specialist gave up, once no candidate of theirs waits for its confirm, moves the forks and repairs queued on the
@@ -98,12 +99,18 @@ def gave_up_reason(status: SpecialistStatus) -> str:
 
 @dataclass(frozen=True)
 class ExploreWindow:
-    """The commit branches start from, the roofline ceiling, the clock times EXPLORE and the budget end at, the
-    session's whole budget, the GPU seconds the session's tests may use before EXPLORE ends and the dollars the
-    session's recorded LLM calls may cost (``math.inf`` for no limit, for either), the upper bound of the GPU
-    seconds the PRELUDE child used, which no limit counts, and the directions the user wrote, one user branch each."""
+    """The commit every gain is measured against, the commit the first branches start from, the roofline ceiling, the
+    clock times EXPLORE and the budget end at, the session's whole budget, the GPU seconds the session's tests may use
+    before EXPLORE ends and the dollars the session's recorded LLM calls may cost (``math.inf`` for no limit, for
+    either), the upper bound of the GPU seconds the PRELUDE child used, which no limit counts, and the directions the
+    user wrote, one user branch each.
+
+    ``root_commit`` is the session's measurement anchor and nothing moves it. ``start_commit`` is where EXPLORE opens:
+    the root, or the Recipe KB champion PRELUDE replayed onto it.
+    """
 
     root_commit: str
+    start_commit: str
     roofline_ceiling: Mapping[str, float]
     explore_end: float
     session_deadline: float
@@ -180,11 +187,16 @@ class Explorer:
         The user branches open before the opening judge call; the opening batch opens nothing more when that call
         asks for the soft stop or answers only once EXPLORE is over, and opens one branch when it fails and no
         specialist branch is open.
+
+        A start commit PRELUDE moved off the root is profiled as the head a merge moved is, so that the refills read
+        the op shares of the commit they open on rather than the root's, which PRELUDE analysed from another recipe.
         """
 
+        if window.start_commit != window.root_commit:
+            self._events.start_profiling(window.start_commit, window.root_commit)
         await self._open_users(window)
         opening = await self._ask(window, opening=True)
-        first_batch = BatchStart(BranchOrigin.FIRST_BATCH, window.root_commit, window.explore_end)
+        first_batch = BatchStart(BranchOrigin.FIRST_BATCH, window.start_commit, window.explore_end)
         if opening is None:
             await self._open_batch(0 if specialist_open(self._roster.entries()) else 1, 1, first_batch)
         elif await self._apply(opening, first_batch):
@@ -206,7 +218,7 @@ class Explorer:
 
     async def _open_users(self, window: ExploreWindow) -> None:
         if self._clock.now() < window.explore_end:
-            await self._branches.open_user_branches(window.user_directions, window.root_commit, window.explore_end)
+            await self._branches.open_user_branches(window.user_directions, window.start_commit, window.explore_end)
 
     async def _steer(self, window: ExploreWindow, merging: asyncio.Future[None]) -> SessionStopReason:
         next_judge = self._clock.now() + self._interval

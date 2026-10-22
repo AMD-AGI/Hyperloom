@@ -375,6 +375,7 @@ class Session:
             longest_root_test = await self._prelude.measure_baseline(prelude.root_commit)
         except PreludeFailed as exc:
             return SessionOutcome(SessionStopReason.PRELUDE_FAILED, None, None, str(exc))
+        start_commit = await self._replay_champion(prelude)
         await self._adopt_frontier_policy()
         sockets = await asyncio.to_thread(socket_versions)
         await self._notebook.write_manifest_fingerprint(
@@ -389,6 +390,7 @@ class Session:
         self._phase("explore", explore_end=deadlines.explore_end, final_end=deadlines.final_end)
         window = ExploreWindow(
             prelude.root_commit,
+            start_commit,
             prelude.profile.roofline_ceiling,
             deadlines.explore_end,
             budget.deadline,
@@ -405,6 +407,15 @@ class Session:
         candidates = await self._final_candidates()
         await self._stopper.end_exploration(reason)
         return await self._final(candidates, reason)
+
+    async def _replay_champion(self, prelude: PreludeResult) -> str:
+        """The commit EXPLORE opens on: the root with the Recipe KB's champion replayed onto it, where PRELUDE found
+        one and the integrator measured it better than the root, and the root itself otherwise."""
+
+        champion = prelude.champion
+        if champion is None:
+            return prelude.root_commit
+        return await self._integrator.replay_champion(champion, prelude.root_commit)
 
     async def _final_phases(self, candidates: FinalCandidates, ended: SessionStopReason) -> SessionOutcome:
         """FINAL alone over ``candidates``, inside the phases coroutine, so a failure still goes through CLOSE and

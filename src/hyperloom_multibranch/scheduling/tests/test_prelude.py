@@ -404,6 +404,7 @@ async def test_the_recipe_kb_champions_for_the_profile_become_warm_start_leads_p
     assert kb.searched[0]["match"]["hardware"] == result.profile.hardware
     assert lead.replay is not None and lead.replay.recipe is None
     assert lead.replay.launch.server_args == "--enable-expert-parallel"
+    assert result.champion is lead.replay
     assert _warm_start_decision(layout) == {"leads": [lead.describe()], "unread": ""}
 
 
@@ -420,7 +421,7 @@ async def test_without_a_readable_recipe_kb_the_session_roots_with_no_leads(
     prelude = _prelude(layout, _registry(layout, child_with_patch(tmp_path)), _peers(layout), recipe_kb=recipe_kb)
     result = await prelude.root(WORKLOAD, budget, HardStop(budget, _clock()), IMAGE)
 
-    assert result.warm_leads == ()
+    assert result.warm_leads == () and result.champion is None
     assert _warm_start_decision(layout) == {"leads": [], "unread": unread}
 
 
