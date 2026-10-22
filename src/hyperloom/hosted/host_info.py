@@ -294,8 +294,8 @@ def _http_url(value: str) -> str:
         raise ValueError("is not a valid URL") from None
     if parts.scheme not in ("http", "https") or not parts.hostname:
         raise ValueError("must be an http or https URL with a host")
-    if parts.username is not None or parts.password is not None:
-        raise ValueError("must not embed credentials")
+    if parts.username is not None or parts.password is not None or parts.query or parts.fragment:
+        raise ValueError("must not carry credentials, a query or a fragment")
     return value
 
 
@@ -323,9 +323,8 @@ def _templates(value: str) -> dict[str, object]:
         raise ValueError(f"is not valid JSON ({exc.msg} at line {exc.lineno} column {exc.colno})") from None
     if not isinstance(parsed, dict) or not parsed:
         raise ValueError("must be a non-empty JSON object")
-    for key, entry in parsed.items():
-        if not _is_template_entry(entry):
-            raise ValueError(f"entry {key!r} must be a template name or an object of template names")
+    if not all(_is_template_entry(entry) for entry in parsed.values()):
+        raise ValueError("every entry must be a template name or an object of template names")
     return parsed
 
 

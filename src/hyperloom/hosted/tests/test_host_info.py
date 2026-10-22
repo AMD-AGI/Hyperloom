@@ -144,8 +144,8 @@ def test_missing_and_malformed_inputs_are_reported_together(env):
         (Var.SANDBOX_TEMPLATES, "{not json", "is not valid JSON"),
         (Var.SANDBOX_TEMPLATES, "[]", "must be a non-empty JSON object"),
         (Var.SANDBOX_TEMPLATES, "{}", "must be a non-empty JSON object"),
-        (Var.SANDBOX_TEMPLATES, '{"runner": 8}', "must be a template name"),
-        (Var.SANDBOX_TEMPLATES, '{"runner": {"1": ""}}', "must be a template name"),
+        (Var.SANDBOX_TEMPLATES, '{"runner": 8}', "every entry must be a template name"),
+        (Var.SANDBOX_TEMPLATES, '{"runner": {"1": ""}}', "every entry must be a template name"),
         (Var.MCP_PORT, "0", "integer from 1 to 65535"),
         (Var.MCP_PORT, "65536", "integer from 1 to 65535"),
         (Var.MCP_PORT, "80.5", "integer from 1 to 65535"),
@@ -159,7 +159,9 @@ def test_missing_and_malformed_inputs_are_reported_together(env):
         (Var.RUN_CREATED_AT, "yesterday", "ISO 8601"),
         (Var.RUN_CREATED_AT, "2026-10-01T12:30:00", "UTC offset"),
         (Var.E2B_API_URL, "ftp://x", "http or https URL"),
-        (Var.E2B_API_URL, "https://user:pw@api.example.test", "must not embed credentials"),
+        (Var.E2B_API_URL, "https://user:pw@api.example.test", "must not carry credentials"),
+        (Var.E2B_API_URL, "https://api.example.test/?token=abc", "must not carry credentials"),
+        (Var.E2B_SANDBOX_URL, "https://sbx.example.test/#frag", "must not carry credentials"),
         (Var.MCP_PUBLIC_URL, "https://host:notaport", "not a valid URL"),
         (Var.INPUT_FILE, "relative.json", "absolute path"),
         (Var.INPUT_FILE, "/nonexistent/campaign.json", "not an existing file"),
@@ -252,6 +254,8 @@ def test_no_secret_value_appears_in_an_error_message(env):
     env[Var.RESULT_ARCHIVE] = "bad"
     env[Var.E2B_API_URL] = "https://user:" + _SECRETS[Var.SANDBOX_KEY_DEV] + "@api.example.test"
     env[Var.MCP_PORT] = _SECRETS[Var.MCP_TOKEN]
+    env[Var.SANDBOX_TEMPLATES] = json.dumps({_SECRETS[Var.SANDBOX_KEY_SUBRUN]: 8})
+    env[Var.MCP_PUBLIC_URL] = "https://app.example.test/?token=" + _SECRETS[Var.AWS_SESSION_TOKEN]
 
     with pytest.raises(HostInfoError) as raised:
         read_host_info(env, require=_ALL_GROUPS)
