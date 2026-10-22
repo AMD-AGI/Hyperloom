@@ -1,32 +1,38 @@
-<!--
-SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
-SPDX-License-Identifier: MIT
--->
+---
+myst:
+    html_meta:
+        "description": "Optimizations Hyperloom found or produced on AMD Instinct GPUs that vLLM or SGLang has merged, each with the end-to-end measurement of the upstream PR, and the rule and check that keep the list current."
+        "keywords": "Hyperloom, upstream, vLLM, SGLang, merged pull requests, AMD Instinct, MI300X, MI325X, MI355X, LLM inference, optimization results"
+---
+# Upstream optimizations merged into vLLM and SGLang
 
-# Merged upstream
+Optimizations Hyperloom found or produced in a real session on AMD Instinct GPUs that vLLM or SGLang
+has merged. The README carries the eight with the largest measured effect; this is the full list.
 
-Optimizations Hyperloom found in a real session on AMD Instinct GPUs that vLLM or SGLang has
-merged. The README carries the eight with the largest measured effect; this is the full list.
-
-Each row is a record of what one session produced on one workload and one GPU, not a promise about
-yours. The numbers are quoted from the end-to-end table of the linked PR and were measured on the
+Each row quotes the end-to-end measurement of the linked PR, on the model and GPU that PR tested,
+which is not always the workload the session was optimizing. The numbers were measured on the
 upstream revision that PR names, so a row says what held at merge time; later upstream work can
 move it. No micro-benchmark figure is reported here as an end-to-end gain.
 
 ## What enters this list
 
-Every PR in `vllm-project/vllm` or `sgl-project/sglang` whose body carries the
-`Found by Hyperloom` attribution **and** is merged. Attributed PRs that are still open, or that
-were closed without merging, are not listed: a change nobody upstream accepted is not evidence.
+Every PR in `vllm-project/vllm` or `sgl-project/sglang` whose body credits Hyperloom (`Found by
+Hyperloom`, `Powered by Hyperloom`, or the older `Found and validated with ROCm Hyperloom`) **and**
+is merged. Attributed PRs that are still open, or that were closed without merging, are not listed:
+a change nobody upstream accepted is not evidence.
 
-As of 2026-10-22 that is 9 of 36 attributed PRs, with 16 still open and 11 closed unmerged.
+As of 2026-10-22 that is 9 of 38 attributed PRs, with 18 still open and 11 closed unmerged.
+
+`python scripts/report_upstream_results.py` names every merged attributed PR missing from this page
+and prints the attributed, merged, open and closed counts for the line above. Set `GITHUB_TOKEN` to
+raise the GitHub search rate limit.
 
 ## Merged
 
 | Upstream PR | Merged | Model / workload | GPU | Measured effect |
 |-------|------|-------|------|-------|
 | [vllm#58539](https://github.com/vllm-project/vllm/pull/58539) | 2026-09-30 | DeepSeek-V4.1-Flash, 307 in / 23 out, TP=2 | MI355X | +53.9 % total tok/s, −37.0 % mean TTFT. At a 0.25 length ratio, where few steps carry more than four prefills, throughput and median latency are unchanged |
-| [sglang#41071](https://github.com/sgl-project/sglang/pull/41071) | 2026-10-10 | Qwen3-32B-FP8, 1024 in / 512 out, concurrency 4 | MI300X | +314 % output tok/s against the untuned Triton default, +50 % at concurrency 128. Opt-in behind a flag: CK costs about 2 GSM8K points on this model, and the cause is unresolved |
+| [sglang#41071](https://github.com/sgl-project/sglang/pull/41071) | 2026-10-10 | Qwen3-32B-FP8, 1024 in / 512 out, concurrency 4 | MI300X | +314 % output tok/s against the untuned Triton default, and +50 % at 8192 in / 1024 out, concurrency 128. Opt-in behind a flag: CK costs about 2 GSM8K points on this model, and the cause is unresolved |
 | [vllm#58897](https://github.com/vllm-project/vllm/pull/58897) | 2026-10-14 | gpt-oss-120b, 1033 in / 523 out, concurrency 61 | MI355X | +9.7 % total tok/s, −11.1 % median TPOT. The gain is in decode; TTFT is flat |
 | [vllm#58405](https://github.com/vllm-project/vllm/pull/58405) | 2026-09-30 | DeepSeek-V4-Flash, 307 in / 23 out, TP=1 | MI355X | +6.8 % total tok/s, −7.1 % mean TTFT. No regression at concurrency 96, 48 or 3 |
 | [vllm#55991](https://github.com/vllm-project/vllm/pull/55991) | 2026-09-16 | Qwen3-30B-A3B, 1024 in / 128 out | MI325X | +6.9 % throughput, +5.2 % on MI355X. Reaches any model whose per-head QK norm slices a fused QKV projection; a no-op elsewhere |
