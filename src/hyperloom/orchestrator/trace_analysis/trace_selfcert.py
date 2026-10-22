@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from statistics import median
-from typing import Any, Iterable, NamedTuple, Sequence
+from typing import Any, NamedTuple, Sequence
 
 from ._bypass_trace_reader import (
     _GRAPH_RECORDED_LAUNCH_COVERAGE_MAX,
@@ -44,23 +44,25 @@ CHUNK_QUALITY_ALTERNATE_MARGIN = 0.10
 MIN_REPEATS_DEFAULT = 3
 MIN_REPEATS_XDIT = 2
 
-#: Iteration-root patterns, verbatim from ``split_trace.main``.
-#: The primary vLLM shape wins outright; the backup list (vLLM's older shapes and
+#: Iteration-root patterns by family, verbatim from ``split_trace.main`` (the backup
+#: family's three as alternatives of one expression).
+#: The primary vLLM shape wins outright; the backup family (vLLM's older shapes and
 #: SGLang's per-step annotations) is consulted only when the primary matches
 #: nothing. Reproducing that precedence matters -- a looser or differently
 #: ordered pattern set would count steps the splitter never sees.
-_PRIMARY_ROOT_PATTERNS = (
-    re.compile(r"execute_\d+_context_\d+\(sq\d+sk\d+sqsq\d+sqsk\d+\)_generation_\d+\(sq\d+sk\d+sqsq\d+sqsk\d+\)"),
-)
-_BACKUP_ROOT_PATTERNS = (
-    re.compile(r"execute_context_\d+\(\d+\)_generation_\d+\(\d+\)"),
-    re.compile(r"execute_context_\d+\(\d+_\d+\)_generation_\d+\(\d+\)"),
-    re.compile(r"step\[(?:EXTEND|DECODE|MIXED)\b.*\]"),
-)
+_ROOT_PATTERNS = {
+    "primary": re.compile(
+        r"execute_\d+_context_\d+\(sq\d+sk\d+sqsq\d+sqsk\d+\)_generation_\d+\(sq\d+sk\d+sqsq\d+sqsk\d+\)"
+    ),
+    "backup": re.compile(
+        r"execute_context_\d+\(\d+\)_generation_\d+\(\d+\)"
+        r"|execute_context_\d+\(\d+_\d+\)_generation_\d+\(\d+\)"
+        r"|step\[(?:EXTEND|DECODE|MIXED)\b.*\]"
+    ),
+}
 _SGLANG_STEP_RE = re.compile(r"step\[(\w+)\s+bs=(\d+)(?:\s+toks=(\d+))?\]")
 _STEP_MARKER_RE = re.compile(r"(?i)profilerstep|denoise|iteration|(?:^|[^a-z])step|step(?:$|[^a-z])")
 _ROOFLINE_TASK_RE = re.compile(r"/runs/[a-z_]+/([0-9a-f]{32})/")
-_SPLIT_NAME_RE = re.compile(r"^(?P<mode>.+?)_steady_state_prefill_\d+_prefilldecode_\d+_decode_\d+_bs\d+_conc\d+_")
 
 _SCRIPTABLE_FRAMEWORKS = frozenset(("sglang", "vllm", "trtllm", "tensorrt_llm"))
 
@@ -235,82 +237,63 @@ def certify_capture_sidecars(
 # groups 6/7/8: the second pass
 
 
+def _span(ev: dict[str, Any]) -> tuple[float, float]:
+    """An X event's start and duration in microseconds; a missing or empty value reads as zero."""
+    return float(ev.get("ts") or 0.0), float(ev.get("dur") or 0.0)
+
+
 class StepPass:
     """Second-pass state: step annotations and per-step subtree attribution."""
 
     def __init__(self) -> None:
         self.steps: list[dict[str, Any]] = []
         self.root_family: str | None = None
-        self._primary_roots: list[dict[str, Any]] = []
-        self._backup_roots: list[dict[str, Any]] = []
         self.gpu_annotations: list[dict[str, Any]] = []
         self.runtime_ts: list[float] = []
         self.runtime_corr: list[Any] = []
         self.graph_corrs: set[Any] = set()
-        self.kernel_by_corr: dict[Any, list[tuple[float, float, float]]] = {}
+        self.kernel_by_corr: dict[Any, list[tuple[float, float]]] = {}
         self.cpu_op_total = 0
         self.cpu_op_with_meta = 0
 
     def scan(self, path: Path) -> list[str]:
         errors: list[str] = []
         runtime: list[tuple[float, Any]] = []
+        roots: dict[str, list[dict[str, Any]]] = {}
         fobj = _open_trace_binary(path)
         try:
             for ev in stream_events(fobj, errors=errors):
                 cat = ev.get("cat", "")
-                if cat == "cuda_runtime":
-                    args = ev.get("args") or {}
-                    corr = args.get("correlation")
-                    if corr is None:
-                        continue
+                args = ev.get("args") or {}
+                if cat == "cuda_runtime" and (corr := args.get("correlation")) is not None:
                     runtime.append((float(ev.get("ts") or 0.0), corr))
                     if "GraphLaunch" in (ev.get("name") or ""):
                         self.graph_corrs.add(corr)
-                    continue
-                if cat == "cpu_op":
-                    args = ev.get("args") or {}
+                elif cat == "cpu_op":
                     self.cpu_op_total += 1
-                    if args.get("Input Dims") or args.get("Input type"):
-                        self.cpu_op_with_meta += 1
+                    self.cpu_op_with_meta += bool(args.get("Input Dims") or args.get("Input type"))
+                elif ev.get("ph") != "X":
                     continue
-                if ev.get("ph") != "X":
-                    continue
-                if cat == "user_annotation":
+                elif cat == "user_annotation":
                     name = ev.get("name") or ""
-                    primary = any(p.match(name) for p in _PRIMARY_ROOT_PATTERNS)
-                    backup = any(p.match(name) for p in _BACKUP_ROOT_PATTERNS)
-                    if primary or backup:
-                        ts = float(ev.get("ts") or 0.0)
-                        dur = float(ev.get("dur") or 0.0)
-                        root = {"name": name, "ts": ts, "end": ts + dur, "dur_us": dur}
-                        if primary:
-                            self._primary_roots.append(root)
-                        if backup:
-                            self._backup_roots.append(root)
-                    continue
-                if cat == "gpu_user_annotation":
-                    ts = float(ev.get("ts") or 0.0)
-                    dur = float(ev.get("dur") or 0.0)
+                    family = next((family for family, pattern in _ROOT_PATTERNS.items() if pattern.match(name)), None)
+                    if family is not None:
+                        ts, dur = _span(ev)
+                        root = {"name": name, "ts": ts, "end": ts + dur, "dur_us": dur, **iter_details_from_name(name)}
+                        roots.setdefault(family, []).append(root)
+                elif cat == "gpu_user_annotation":
+                    ts, dur = _span(ev)
                     self.gpu_annotations.append({"name": ev.get("name") or "", "ts": ts, "dur": dur})
-                    continue
-                if cat == "kernel":
-                    ts = float(ev.get("ts") or 0.0)
-                    dur = float(ev.get("dur") or 0.0)
-                    corr = (ev.get("args") or {}).get("correlation")
-                    self.kernel_by_corr.setdefault(corr, []).append((ts, ts + dur, dur))
+                elif cat == "kernel":
+                    ts, dur = _span(ev)
+                    self.kernel_by_corr.setdefault(args.get("correlation"), []).append((ts, ts + dur))
         finally:
             fobj.close()
         runtime.sort(key=lambda x: x[0])
         self.runtime_ts = [t for t, _ in runtime]
         self.runtime_corr = [c for _, c in runtime]
-        if self._primary_roots:
-            roots, self.root_family = self._primary_roots, "primary"
-        elif self._backup_roots:
-            roots, self.root_family = self._backup_roots, "backup"
-        else:
-            roots, self.root_family = [], None
-        roots.sort(key=lambda s: s["ts"])
-        self.steps = [{**r, **iter_details_from_name(r["name"])} for r in roots]
+        self.root_family = next((family for family in _ROOT_PATTERNS if family in roots), None)
+        self.steps = sorted(roots.get(self.root_family, ()), key=lambda s: s["ts"])
         return errors
 
     def attribute_steps(self) -> None:
@@ -320,17 +303,14 @@ class StepPass:
             hi = bisect_right(self.runtime_ts, step["end"])
             corrs = set(self.runtime_corr[lo:hi])
             intervals: list[tuple[float, float]] = []
-            kernels = 0
             for corr in corrs:
-                for k_ts, k_end, _dur in self.kernel_by_corr.get(corr, ()):
-                    intervals.append((k_ts, k_end))
-                    kernels += 1
+                intervals.extend(self.kernel_by_corr.get(corr, ()))
             step.update(
                 {
                     "index": idx,
                     "runtime_launch_count": hi - lo,
                     "graph_launch_count": sum(1 for c in corrs if c in self.graph_corrs),
-                    "kernel_count": kernels,
+                    "kernel_count": len(intervals),
                     "gpu_busy_us": round(_union_ms(intervals) * 1000.0, 3) if intervals else 0.0,
                 }
             )
@@ -439,51 +419,6 @@ def annotation_report(sp: StepPass, *, framework: str, min_repeats: int) -> dict
     }
 
 
-def certify_chunks(chunk_files: Iterable[Path], source_kernel_corrs: set[Any]) -> list[dict[str, Any]]:
-    """Check each existing chunk for kernels it should have carried but did not."""
-    out: list[dict[str, Any]] = []
-    for path in sorted(chunk_files):
-        mode_match = _SPLIT_NAME_RE.match(path.name)
-        retained: set[Any] = set()
-        kernels = 0
-        annotation_names: set[str] = set()
-        errors: list[str] = []
-        try:
-            fobj = _open_trace_binary(path)
-        except OSError as exc:
-            out.append({"path": str(path), "error": f"{type(exc).__name__}: {exc}"})
-            continue
-        try:
-            for ev in stream_events(fobj, errors=errors):
-                cat = ev.get("cat", "")
-                if cat == "cuda_runtime":
-                    corr = (ev.get("args") or {}).get("correlation")
-                    if corr is not None:
-                        retained.add(corr)
-                elif cat == "kernel" and ev.get("ph") == "X":
-                    kernels += 1
-                elif cat == "user_annotation" and ev.get("ph") == "X":
-                    name = ev.get("name") or ""
-                    if name.startswith("step["):
-                        annotation_names.add(name)
-        finally:
-            fobj.close()
-        intersect = len(retained & source_kernel_corrs)
-        out.append(
-            {
-                "path": str(path),
-                "mode": mode_match.group("mode") if mode_match else None,
-                "annotation_name": sorted(annotation_names)[:3],
-                "kernel_count": kernels,
-                "retained_runtime_correlations": len(retained),
-                "corr_intersect_source": intersect,
-                "lost_by_correlation": kernels == 0 and intersect > 0,
-                "stream_errors": errors[:5],
-            }
-        )
-    return out
-
-
 # verdict
 
 
@@ -520,65 +455,42 @@ def build_verdict(
     a boolean cannot distinguish a trace that just missed a gate from one that missed it by an order of
     magnitude, and the two call for different responses -- but choosing the response is not this function's job.
     """
-    kernel_count = health.kernel_count
-    attributed_pct = health.attributed_pct
-    graph_under_recorded = health.graph_under_recorded
     blocking: list[str] = []
-    bypass_ok = True
-
+    warnings: list[str] = []
     # Checked before the file's own health, because it decides which file the question is even about.
-    if production_pick and (production_pick.get("kernel_count") or 0) <= 0:
+    if production_pick and production_pick["kernel_count"] <= 0:
         blocking.append(
-            f"the live resolver selects {production_pick.get('role') or 'another file'} "
-            f"'{Path(production_pick['path']).name}' from this directory, which carries "
-            f"{production_pick.get('event_total')} events and no GPU kernels, so both "
-            f"consumers see an empty trace; the source beside it recorded {kernel_count} kernels"
+            f"the live resolver selects {production_pick['role']} '{Path(production_pick['path']).name}' from this "
+            f"directory, which carries {production_pick['event_total']} events and no GPU kernels, so both "
+            f"consumers see an empty trace; the source beside it recorded {health.kernel_count} kernels"
         )
-        bypass_ok = False
-
+    elif production_pick:
+        # The resolver opens a different file, but one with GPU work in it, so the measurements here describe a
+        # different object than production would see.
+        warnings.append(
+            f"the live resolver would select {production_pick['role']} rather than the source trace; the measurements "
+            f"in this certificate describe the source ({Path(production_pick['certified_path']).name})"
+        )
     if not health.parse_ok:
         blocking.append("trace did not parse cleanly")
-        bypass_ok = False
-    if kernel_count <= 0:
+    if health.kernel_count <= 0:
         blocking.append("source recorded zero GPU kernels")
-        bypass_ok = False
     if health.capture_fragment:
         blocking.append("selected file is a CUDA-graph capture sidecar")
-        bypass_ok = False
-
-    warnings: list[str] = []
-    tracelens_ok = bypass_ok
-    if bypass_ok:
-        if not attributed_pct:
-            blocking.append("correlation chain resolves no kernel to an op")
-            tracelens_ok = False
-
-    # Only worth saying when the divergence did not already block above: the resolver opens a different file, but one
-    # with GPU work in it, so the measurements here describe a different object than production would see.
-    if production_pick and (production_pick.get("kernel_count") or 0) > 0:
-        warnings.append(
-            f"the live resolver would select "
-            f"{production_pick.get('role') or 'a different file'} rather than the source trace; "
-            f"the measurements in this certificate describe the source "
-            f"({Path(production_pick['certified_path']).name})"
-        )
-
-    usable = []
-    if bypass_ok:
-        usable.append("bypass")
-    if tracelens_ok:
-        usable.append("tracelens")
+    bypass_ok = not blocking
+    if bypass_ok and not health.attributed_pct:
+        blocking.append("correlation chain resolves no kernel to an op")
+    tracelens_ok = not blocking
 
     # Taken from the reader rather than recomputed from the raw ratio, because the ratio alone cannot tell an
     # under-recorded graph capture from a trace that never used graphs.
-    valid = graph_under_recorded is False
-    if tracelens_ok and graph_under_recorded:
+    valid = health.graph_under_recorded is False
+    if tracelens_ok and health.graph_under_recorded:
         warnings.append(
             "graph launches are under-recorded, so a decode conclusion drawn from this "
             "trace would be wrong even though the analysis runs clean"
         )
-
-    silently_wrong = "tracelens" in usable and not valid
+    silently_wrong = tracelens_ok and not valid
     # A restatement of the answers above on one ordered scale, so a fleet-wide query can rank outcomes without
     # re-deriving the precedence. ``silently_wrong`` outranks a plain warning: an analysis that runs clean and
     # concludes wrongly is worse than one that announces its own doubt.
@@ -591,7 +503,7 @@ def build_verdict(
     else:
         severity = "ok"
     return {
-        "usable_by": usable,
+        "usable_by": [consumer for consumer, ok in (("bypass", bypass_ok), ("tracelens", tracelens_ok)) if ok],
         "decode_conclusions_valid": valid,
         "silently_wrong": silently_wrong,
         "severity": severity,
@@ -600,8 +512,8 @@ def build_verdict(
         "thresholds_effective": thresholds,
         # The continuous quantities the categorical answers were derived from. Reported, never compared here.
         "measures": {
-            "kernel_count": kernel_count,
-            "attributed_pct": attributed_pct,
+            "kernel_count": health.kernel_count,
+            "attributed_pct": health.attributed_pct,
             "graph_launch_coverage": coverage.graph_launch_coverage,
             "graph_launch_coverage_max": thresholds.get("graph_launch_coverage_max"),
             "op_meta_coverage": coverage.op_meta_coverage,
@@ -613,17 +525,11 @@ def build_verdict(
 # entry point
 
 
-def certify_trace_dir(
-    trace_dir: str | Path,
-    *,
-    chunk_files: Iterable[str | Path] = (),
-    framework: str = "",
-) -> dict[str, Any]:
+def certify_trace_dir(trace_dir: str | Path, *, framework: str = "") -> dict[str, Any]:
     """Produce the self-certification record for one capture directory."""
     tdir = Path(trace_dir)
     thresholds = effective_thresholds()
-    min_repeats = MIN_REPEATS_XDIT if framework.lower() == "xdit" else MIN_REPEATS_DEFAULT
-    thresholds["min_repeats"] = min_repeats
+    thresholds["min_repeats"] = MIN_REPEATS_XDIT if framework.lower() == "xdit" else MIN_REPEATS_DEFAULT
 
     inv = inventory(tdir)
     task = _ROOFLINE_TASK_RE.search(str(tdir))
@@ -634,7 +540,7 @@ def certify_trace_dir(
         "trace_dir": str(tdir),
         "roofline_task_id": task.group(1) if task else None,
         "framework": framework or None,
-        "has_steady_state_semantics": (framework or "").lower() in _SCRIPTABLE_FRAMEWORKS if framework else None,
+        "has_steady_state_semantics": framework.lower() in _SCRIPTABLE_FRAMEWORKS if framework else None,
         "trace_dir_level": inv,
         "rank_level": [],
         "chunk_level": [],
@@ -644,7 +550,7 @@ def certify_trace_dir(
     # exactly the case where knowing what the sidecars contain matters most.
     capture_paths = [Path(c["path"]) for c in inv["candidates"] if c["role"] == "capture_sidecar"]
     if capture_paths:
-        record["trace_dir_level"]["capture_sidecar_probe"] = certify_capture_sidecars(capture_paths)
+        inv["capture_sidecar_probe"] = certify_capture_sidecars(capture_paths)
 
     selected = inv["selected_path"]
     if not selected:
@@ -676,33 +582,53 @@ def certify_trace_dir(
         record["verdict"]["blocking_reasons"] = ["no usable trace file in the directory"]
         return record
 
-    sel = Path(selected)
-
-    # When the live resolver would open a different file, measure that file too.
-    production_pick = None
     if inv["production_selected_path"] and inv["production_selected_path"] != selected:
-        probe = analyze_trace(inv["production_selected_path"], TraceAnalysisOptions(top_k=1, steady_state=False))
-        # ``analyze_trace`` reports the kernel count inside ``attribution`` and has no ``parse_ok`` key at all --
-        # parse health is the emptiness of ``stream_errors``.
-        probe_errors = probe.get("stream_errors") or []
-        production_pick = {
-            "path": inv["production_selected_path"],
-            "role": inv["production_selected_role"],
-            "certified_path": selected,
-            "kernel_count": (probe.get("attribution") or {}).get("kernel_count") or 0,
-            "event_total": probe.get("event_total"),
-            "parse_ok": not probe_errors and not probe.get("truncated"),
-            "truncated": bool(probe.get("truncated")),
-        }
-        record["trace_dir_level"]["production_pick_probe"] = production_pick
+        inv["production_pick_probe"] = _probe_production_pick(inv)
+    rank = _certify_rank(Path(selected), framework=framework, thresholds=thresholds)
+    record["rank_level"].append(rank)
+    record["verdict"] = build_verdict(
+        TraceHealth(
+            parse_ok=rank["parse"]["parse_ok"],
+            kernel_count=rank["density"]["kernel_count"],
+            capture_fragment=inv["selected_capture_fragment"],
+            attributed_pct=rank["attribution"]["attributed_pct"],
+            graph_under_recorded=rank["density"]["graph_under_recorded"],
+        ),
+        thresholds=thresholds,
+        production_pick=inv.get("production_pick_probe"),
+        coverage=CoverageMeasures(
+            rank["density"]["graph_launch_coverage"],
+            rank["attribution"]["op_meta_coverage"],
+            inv.get("capture_sidecar_probe", {}).get("op_meta_coverage"),
+        ),
+    )
+    return record
 
+
+def _probe_production_pick(inv: dict[str, Any]) -> dict[str, Any]:
+    """Measure the file the live resolver would open in place of the selected one."""
+    probe = analyze_trace(inv["production_selected_path"], TraceAnalysisOptions(top_k=1, steady_state=False))
+    # ``analyze_trace`` reports the kernel count inside ``attribution`` and has no ``parse_ok`` key at all --
+    # parse health is the emptiness of ``stream_errors``.
+    return {
+        "path": inv["production_selected_path"],
+        "role": inv["production_selected_role"],
+        "certified_path": inv["selected_path"],
+        "kernel_count": (probe.get("attribution") or {}).get("kernel_count") or 0,
+        "event_total": probe.get("event_total"),
+        "parse_ok": not probe.get("stream_errors") and not probe.get("truncated"),
+        "truncated": bool(probe.get("truncated")),
+    }
+
+
+def _certify_rank(path: Path, *, framework: str, thresholds: dict[str, Any]) -> dict[str, Any]:
+    """The rank-level row for one trace file: the shipping reader's pass, then the step pass."""
     # Pass 1: the shipping reader, whole-trace scope. Groups 1, 3, 4, 5.
-    analysis = analyze_trace(sel, TraceAnalysisOptions(top_k=1, steady_state=False, framework=framework))
+    analysis = analyze_trace(path, TraceAnalysisOptions(top_k=1, steady_state=False, framework=framework))
     # Pass 2: step structure and subtree attribution. Groups 6, 7, 8.
     sp = StepPass()
-    pass2_errors = sp.scan(sel)
+    pass2_errors = sp.scan(path)
     sp.attribute_steps()
-
     attribution = analysis.get("attribution") or {}
     coverage_block = analysis.get("graph_coverage") or {}
     timeline = analysis.get("timeline") or {}
@@ -711,31 +637,24 @@ def certify_trace_dir(
         stream_errors.append(
             f"trace aggregation truncated at safety cap ({analysis.get('truncation_reason', 'unknown')})"
         )
-
-    ann = annotation_report(sp, framework=framework, min_repeats=min_repeats)
-
     kernel_count = attribution.get("kernel_count", 0)
     graph_launch_count = coverage_block.get("graph_launch_count", 0)
     graph_with_kernels = coverage_block.get("graph_launches_with_kernels", 0)
-    coverage = _ratio(graph_with_kernels, graph_launch_count)
-
     try:
-        size = sel.stat().st_size
+        size = path.stat().st_size
     except OSError:
         size = None
-
-    rank_record = {
+    return {
         "rank": analysis.get("analyzed_rank"),
-        "path": str(sel),
+        "path": str(path),
         "parse": {
             "parse_ok": not stream_errors,
             "stream_errors": stream_errors,
             "event_total": analysis.get("event_total", 0),
             "bytes": size,
-            "gz": sel.name.lower().endswith(".gz"),
-            # Carried from the reader rather than left behind: a ratio computed over a truncated aggregation is
-            # not the same measurement as one computed over the whole trace, and until now the record gave a
-            # reader no way to tell the two apart.
+            "gz": path.name.lower().endswith(".gz"),
+            # A ratio computed over a truncated aggregation is not the same measurement as one computed over the
+            # whole trace, so the record says which one it carries.
             "aggregation_scope": analysis.get("aggregation_scope"),
             "truncated": bool(analysis.get("truncated")),
             "truncation_reason": analysis.get("truncation_reason") or "",
@@ -759,7 +678,7 @@ def certify_trace_dir(
             "graph_mode": coverage_block.get("graph_mode"),
             "graph_launch_count": graph_launch_count,
             "graph_launches_with_kernels": graph_with_kernels,
-            "graph_launch_coverage": coverage,
+            "graph_launch_coverage": _ratio(graph_with_kernels, graph_launch_count),
             "graph_under_recorded": coverage_block.get("graph_under_recorded"),
             # The boolean above is a comparison, so it travels with the number it was compared against.
             "graph_under_recorded_threshold": thresholds["graph_launch_coverage_max"],
@@ -774,27 +693,5 @@ def certify_trace_dir(
             "idle_pct_full_trace": timeline.get("idle_pct"),
             "stream_overlap": timeline.get("stream_overlap") or {},
         },
-        "annotations": ann,
+        "annotations": annotation_report(sp, framework=framework, min_repeats=thresholds["min_repeats"]),
     }
-    record["rank_level"].append(rank_record)
-
-    source_kernel_corrs = {c for c in sp.kernel_by_corr if c is not None}
-    record["chunk_level"] = certify_chunks([Path(c) for c in chunk_files], source_kernel_corrs)
-
-    record["verdict"] = build_verdict(
-        TraceHealth(
-            parse_ok=not stream_errors,
-            kernel_count=kernel_count,
-            capture_fragment=inv["selected_capture_fragment"],
-            attributed_pct=attribution.get("attributed_pct"),
-            graph_under_recorded=coverage_block.get("graph_under_recorded"),
-        ),
-        thresholds=thresholds,
-        production_pick=production_pick,
-        coverage=CoverageMeasures(
-            coverage,
-            rank_record["attribution"]["op_meta_coverage"],
-            (record["trace_dir_level"].get("capture_sidecar_probe") or {}).get("op_meta_coverage"),
-        ),
-    )
-    return record

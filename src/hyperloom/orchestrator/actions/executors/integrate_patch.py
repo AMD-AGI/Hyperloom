@@ -10,7 +10,6 @@ import csv
 import functools
 import json
 import logging
-import math
 import os
 import re
 import shlex
@@ -23,7 +22,7 @@ from collections.abc import Mapping
 from collections.abc import Iterable
 from typing import Any
 
-from hyperloom.common.coerce import to_str_list
+from hyperloom.common.coerce import to_float, to_str_list
 from hyperloom.inference_optimizer.session.session_paths import enablement_stacks_dir
 from hyperloom.common.env_safety import (
     filter_untrusted_env_mapping,
@@ -34,6 +33,7 @@ from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.breakdown.stop_reasons import PATCH_RECOVERY_INCOMPLETE_STOP_REASON
 from hyperloom.inference_optimizer.gpu_types import amd_gpu_dispatch_identity
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
+from hyperloom.inference_optimizer import framework_paths
 from hyperloom.inference_optimizer.framework_paths import (
     framework_apply_tree,
     resolve_framework_tree,
@@ -89,6 +89,8 @@ from ._accuracy_gate import (
     read_eval_probe,
 )
 from ._apply_feedback import ApplyFeedback, build_apply_feedback
+from ...enablement.recipe import keep_probe, keep_records
+from ...enablement.recipe.projections import project_launch_evidence
 from ._git import _git_head_sha, _run_git_cp
 from ._integrate_attempt import IntegrateAttempt
 from ._setup_replay import replay_setup_commands
@@ -105,15 +107,13 @@ from ._nogit_patch import (
     _is_within,
 )
 from ...enablement.lane import bind_integrate_to_lane
-from ...enablement.recipe.credentials import detect_credential_channels
-from ...enablement.recipe.projections import project_launch_evidence
+from . import _patch_snapshot
 from ._patch_snapshot import _git_commit_kept, _patch_touched_paths
 from hyperloom.inference_optimizer.canonical_fingerprint import canonical_fingerprint
 from ._grid_runner import (
     DEFAULT_KEEP_THRESHOLD_PCT,
     GridVariant,
     SessionDirField,
-    VariantResult,
     _num_gpus_for_config,
     run_grid,
     sanitize_result_dir,
@@ -166,6 +166,10 @@ PATCH_SOURCES = (PATCH_SOURCE_SPECIALIST, PATCH_SOURCE_UPSTREAM_PR)
 
 #: Verdicts that accept the candidate, so the attempt leaves it in the tree.
 KEEP_STATUSES: frozenset[str] = frozenset({"kept", "advanced", "kept_inert"})
+
+#: Set on every result the bench-and-gate stage returned, whatever its verdict:
+#: that attempt reached the bench, and no result an earlier stage returned did.
+RESULT_BENCHED = "benched"
 
 
 def resolve_patch_source(params: Mapping[str, Any]) -> str:
@@ -344,31 +348,56 @@ def _parse_framework_switches(
     *,
     params: dict[str, Any],
     done_payload: dict[str, Any] | None,
-) -> tuple[list[dict[str, Any]], list[str]]:
-    """Read the framework-rewrite switch manifest for this integration.
+    patch_paths: list[Path],
+) -> list[dict[str, Any]]:
+    """Read the framework-rewrite switch manifest this round benches with on.
 
     Looks in the task params first (an explicit dispatch), then in the
     specialist's done payload (the normal authoring path, possibly nested under
-    ``payload``).
+    ``payload``). Every rewrite in such a patch sits behind a switch that
+    defaults OFF, so the applied patch is inert and benching it as-is would
+    measure the baseline.
 
     Args:
         params: The integrate_patch task params.
         done_payload: The originating specialist's done payload, if any.
+        patch_paths: The patches this round delivers.
 
     Returns:
-        ``(switches, problems)`` from :func:`_switch_manifest.parse_manifest`;
-        ``([], [])`` when no manifest was delivered.
+        The switches to turn on; empty when no manifest was delivered or the
+        manifest gates code no patch carries.
     """
     raw = params.get(_switch_manifest.MANIFEST_KEY) or _done_field(done_payload, _switch_manifest.MANIFEST_KEY)
     if not raw:
-        return [], []
+        return []
     # Env the benchmark already defines is reserved: a "switch" colliding with it
     # would be toggled by unrelated configuration rather than by the lever.
     reserved: set[str] = set()
     for source in (params.get("base_extra_envs"), params.get("extra_envs")):
         if isinstance(source, dict):
             reserved.update(str(k).strip().upper() for k in source)
-    return _switch_manifest.parse_manifest(raw, reserved_env=reserved)
+    manifest, problems = _switch_manifest.parse_manifest(raw, reserved_env=reserved)
+    if manifest and not patch_paths:
+        # A manifest without a patch describes switches that gate code which was
+        # never delivered. Setting them would be a no-op, and registering them as
+        # levers would leave the ledger pointing at absent code.
+        problems.append(
+            f"discarded {len(manifest)} switch(es): the deliverable carries no patch, "
+            f"so there is no rewrite for them to gate"
+        )
+        manifest = []
+    if manifest:
+        log.info(
+            "integrate_patch: benching with %d framework rewrite switch(es) on\n%s",
+            len(manifest),
+            _switch_manifest.summarize(manifest, problems),
+        )
+    elif problems:
+        log.warning(
+            "integrate_patch: framework switch manifest unusable\n%s",
+            _switch_manifest.summarize(manifest, problems),
+        )
+    return manifest
 
 
 _now_iso = functools.partial(now_iso, "auto")
@@ -617,13 +646,13 @@ def _resolve_framework_root(
         # tree under optimisation into a non-candidate, and default_root cannot
         # stand in -- that is consulted only for a create-only set, which has no
         # pre-image to match.
+        session_path = Path(session_root) if session_root else None
         roots = [Path(root) for root in resolve_kernel_search_roots()]
-        candidates = [Path(session_root), *roots] if session_root else roots
         resolution = resolve_patch_apply_root(
             texts,
             explicit_root=explicit_path,
-            candidate_roots=tuple(candidates),
-            default_root=Path(session_root) if session_root else None,
+            candidate_roots=tuple(filter(None, [session_path, *roots])),
+            default_root=session_path,
         )
         if resolution.root is None:
             log.warning(
@@ -1179,6 +1208,92 @@ def _git_reset_clean(framework_root: Path, base: str, *, exclude: list[str] | No
     return cp2.returncode == 0, cp2.stderr.strip()
 
 
+def _recorded_stash_ref(framework_root: Path | None, stash_oid: str) -> str:
+    """The stash entry holding the operator's pre-candidate work, found by the oid recorded for it."""
+    if not stash_oid:
+        return ""
+    if framework_root is None:
+        raise ValueError("stash recovery root missing")
+    cp = _run_git_cp(["-C", str(framework_root), "stash", "list", "--format=%H %gd"], timeout=30.0)
+    if cp is None or cp.returncode != 0:
+        raise OSError("cannot read stash identities")
+    refs = [line.split(" ", 1)[1] for line in cp.stdout.splitlines() if line.startswith(stash_oid + " ")]
+    if len(refs) != 1:
+        raise ValueError("recorded user stash is absent or ambiguous; refusing to guess")
+    return refs[0]
+
+
+def _take_candidate_out(
+    pending: dict[str, Any],
+    recovery: dict[str, Any],
+    *,
+    framework_root: Path | None,
+    workspace: Path,
+) -> dict[str, Any]:
+    """Undo this attempt's artifact installs and patch applies, reporting what came back out."""
+    summary: dict[str, Any] = {"reversed": [], "artifacts_reverted": [], "failed": []}
+    try:
+        artifact_records: list[dict[str, Any]] = []
+        if recovery.get("artifacts_prepared"):
+            # The artifact phase commits its whole plan's preimages before it
+            # installs anything, so the witness tells "never started" apart from
+            # "started, evidence now gone".
+            artifact_records = load_prepared_records(workspace / "artifact_backups")
+            expected = {str(Path(row["target"]).resolve()) for row in pending.get("artifacts", [])}
+            if not expected <= {str(Path(row["target"]).resolve()) for row in artifact_records}:
+                raise ValueError("artifact recovery ledger does not cover the complete mutation plan")
+        # A git attempt takes no backups, so a HEAD that has moved since means the
+        # tree is no longer the one it mutated. A non-git attempt writes a preimage
+        # record before every mutation, so an absent ledger there is proof that no
+        # patch reached the tree.
+        patches = pending.get("patches")
+        base = ""
+        undo_records: list[dict[str, Any]] = []
+        if patches:
+            base = str(recovery.get("git_head", ""))
+            if base:
+                if framework_root is None or _git_head_sha(framework_root) != base:
+                    raise ValueError("framework HEAD differs from the recorded attempt base")
+            elif framework_root is not None and _is_git_tree(framework_root):
+                raise ValueError("git attempt recorded no base to restore to")
+            else:
+                undo_records = load_prepared_records(workspace / "patch_backups")
+        # Both ledgers are read and the artifacts are undone before the git sweep,
+        # which is irreversible: it has to run against a tree that already holds
+        # every preimage, and an artifact target git will not touch -- ignored, or
+        # outside this root -- has no second chance.
+        _, errors = restore_records(artifact_records)
+        if errors:
+            summary["failed"].extend(errors)
+            return summary
+        summary["artifacts_reverted"] = [row["rel_target"] for row in artifact_records]
+        if not patches:
+            return summary
+        if base:
+            # Everything still untracked here was created by this attempt: the
+            # pre-candidate auto-stash took the operator's untracked files with
+            # ``push -u``, and ``clean`` without ``-x`` leaves ignored paths (an
+            # ignored artifact target included) where they are. Only this
+            # attempt's own recovery data has to survive the sweep.
+            exclusions = (
+                ["/" + workspace.relative_to(framework_root).as_posix()]
+                if workspace.is_relative_to(framework_root)
+                else []
+            )
+            ok, error = _git_reset_clean(framework_root, base, exclude=exclusions)
+            if not ok:
+                raise OSError(error)
+        else:
+            _, errors = restore_records(undo_records)
+            if errors:
+                summary["failed"].extend(errors)
+                return summary
+        summary["reversed"] = list(reversed(patches))
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        summary["failed"].append(str(exc))
+    return summary
+
+
 def restore_pending_integrate(pending: dict[str, Any], *, keep: bool = False) -> dict[str, Any]:
     """Discharge one recorded integration's file and stash obligations, or retain them."""
     summary: dict[str, Any] = {"reversed": [], "artifacts_reverted": [], "failed": []}
@@ -1199,90 +1314,21 @@ def restore_pending_integrate(pending: dict[str, Any], *, keep: bool = False) ->
             else f"integration interrupted before stash identity was durable: {phase!r}"
         )
         return summary
-    recovery_root = recovery.get("root")
-    if not isinstance(recovery_root, str) or not Path(recovery_root).is_absolute():
+    root = recovery.get("root")
+    if not isinstance(root, str) or not Path(root).is_absolute():
         summary["failed"].append("attempt-owned recovery root missing")
         return summary
-    workspace = Path(recovery_root)
-    root_text = str(pending.get("framework_source_root") or "")
-    root = Path(root_text) if root_text else None
+    root_text = str(pending.get("framework_source_root", ""))
+    framework_root = Path(root_text) if root_text else None
     try:
-        stash_ref = ""
-        if recovery.get("stash_oid"):
-            if root is None:
-                raise ValueError("stash recovery root missing")
-            cp = _run_git_cp(["-C", str(root), "stash", "list", "--format=%H %gd"], timeout=30.0)
-            if cp is None or cp.returncode != 0:
-                raise OSError("cannot read stash identities")
-            refs = [
-                line.split(" ", 1)[1] for line in cp.stdout.splitlines() if line.startswith(recovery["stash_oid"] + " ")
-            ]
-            if len(refs) != 1:
-                raise ValueError("recorded user stash is absent or ambiguous; refusing to guess")
-            stash_ref = refs[0]
+        stash_ref = _recorded_stash_ref(framework_root, str(recovery.get("stash_oid", "")))
         if not keep and phase != "files_restored":
-            # The two ledgers are asymmetric on purpose. The artifact phase
-            # commits its whole plan's preimages and then records a witness
-            # before it installs anything, so the witness tells "never started"
-            # (nothing to undo) apart from "started, evidence now gone" (refuse
-            # loudly). The patch phase has no such witness and needs none on a
-            # non-git tree: every backup record is written before the mutation
-            # it describes, so an absent patch ledger there is proof that no
-            # patch reached the tree -- the first patch failing its dry-run
-            # leaves exactly that state, and refusing would stop the session
-            # over an untouched tree. A git attempt takes no backups at all, so
-            # the same empty ledger proves nothing and is refused below.
-            artifact_records: list[dict[str, Any]] = []
-            if recovery.get("artifacts_prepared"):
-                artifact_records = load_prepared_records(workspace / "artifact_backups")
-                expected = {str(Path(row["target"]).resolve()) for row in pending.get("artifacts", [])}
-                recorded = {str(Path(row["target"]).resolve()) for row in artifact_records}
-                if not expected <= recorded:
-                    raise ValueError("artifact recovery ledger does not cover the complete mutation plan")
-            base = str(recovery.get("git_head") or "")
-            git_attempt = bool(base) or (root is not None and _is_git_tree(root))
-            patch_records = []
-            if pending.get("patches"):
-                if git_attempt:
-                    if not base:
-                        summary["failed"].append("git attempt recorded no base to restore to")
-                        return summary
-                    if root is None or _git_head_sha(root) != base:
-                        raise ValueError("framework HEAD differs from the recorded attempt base")
-                else:
-                    patch_records = load_prepared_records(workspace / "patch_backups")
-            # Both ledgers are read and the artifacts are undone before the git
-            # sweep, which is irreversible: it has to run against a tree that
-            # already holds every preimage, and an artifact target git will not
-            # touch -- ignored, or outside this root -- has no second chance.
-            _, errors = restore_records(artifact_records)
-            if errors:
-                summary["failed"].extend(errors)
+            summary = _take_candidate_out(pending, recovery, framework_root=framework_root, workspace=Path(root))
+            if summary["failed"]:
                 return summary
-            summary["artifacts_reverted"] = [row.get("rel_target") or row["target"] for row in artifact_records]
-            if pending.get("patches"):
-                if git_attempt:
-                    # Everything still untracked here was created by this
-                    # attempt: the pre-candidate auto-stash took the operator's
-                    # untracked files with ``push -u``, and ``clean`` without
-                    # ``-x`` leaves ignored paths (an ignored artifact target
-                    # included) where they are. Only this attempt's own recovery
-                    # data has to survive the sweep.
-                    exclusions = (
-                        ["/" + workspace.relative_to(root).as_posix()] if workspace.is_relative_to(root) else []
-                    )
-                    ok, error = _git_reset_clean(root, base, exclude=exclusions)
-                    if not ok:
-                        raise OSError(error)
-                else:
-                    _, errors = restore_records(patch_records)
-                    if errors:
-                        summary["failed"].extend(errors)
-                        return summary
-                summary["reversed"] = list(reversed(pending["patches"]))
             recovery["phase"] = "files_restored"
         if stash_ref:
-            note = _git_restore_stash_if_needed(root, "stashed", stash_ref)
+            note = _git_restore_stash_if_needed(framework_root, "stashed", stash_ref)
             if note:
                 raise OSError(note)
         recovery["phase"] = "accepted" if keep else "restored"
@@ -1515,7 +1561,7 @@ def _resolve_artifact_specs(
                 if cand.exists():
                     src = cand
                     break
-        if not src.exists() or not src.resolve().is_file():
+        if not src.resolve().is_file():
             errors.append({"artifact": src_rel, "error": "source_not_found"})
             continue
         src_resolved = src.resolve()
@@ -1614,11 +1660,7 @@ def _validate_aiter_gemm_artifacts(
         invalid_target_rows = 0
         for row in target_rows:
             kernel_name = str(row.get("kernelName") or "").strip().lower()
-            try:
-                runtime_us = float(str(row.get("us") or "0").strip())
-            except ValueError:
-                runtime_us = 0.0
-            if not math.isfinite(runtime_us) or runtime_us <= 0.0 or "placeholder" in kernel_name:
+            if to_float(row.get("us"), 0.0) <= 0.0 or "placeholder" in kernel_name:
                 invalid_target_rows += 1
         if invalid_target_rows:
             errors.append(
@@ -1630,6 +1672,71 @@ def _validate_aiter_gemm_artifacts(
                 }
             )
     return errors
+
+
+def _patch_stack_by_root(enablement: Any, patch_roots: dict[str, str], applied: list[Path]) -> dict[str, list[Path]]:
+    """Group the accepted patch stack by the tree each patch applies to, in apply order.
+
+    Apply order, not the mapping's: the operation a later patch declares must
+    override an earlier one's for the same file.
+    """
+    accepted = enablement.accepted_stack(applied)
+    ordered = [patch for patch in patch_roots if patch not in set(accepted)] + accepted
+    by_root: dict[str, list[Path]] = {}
+    for patch_path in dict.fromkeys(ordered):
+        patch_root = str(patch_roots.get(patch_path) or "")
+        if patch_root:
+            by_root.setdefault(patch_root, []).append(Path(patch_path))
+    return by_root
+
+
+def _declared_stack_ops(patch_root: str, patches: list[Path], *, base_sha: str) -> dict[str, dict[str, str]]:
+    """The file operations each patch declares against ``patch_root``, per patch.
+
+    Proven, not believed: the whole stack is replayed from its base in an isolated
+    tree, over the ORDERED stack, because a patch's preimage is the tree its
+    predecessors left behind rather than this root's base or the final tree.
+    """
+    replayed = _patch_snapshot.replayed_stack_ops(Path(patch_root), patches, base_sha=base_sha)
+    if replayed is not None:
+        return replayed
+    if base_sha:
+        log.warning(
+            "integrate_patch: enablement KEEP cannot replay the stack on %s from %s; "
+            "its targets are left undeclared and the recipe is refused",
+            patch_root,
+            base_sha,
+        )
+        return {}
+    # No base commit: a framework installed from a wheel, which is the ordinary
+    # production shape. There is no "check out the base and apply" to prove, but
+    # that is not how such a root is replayed -- it is replayed by OVERLAYING the
+    # captured files, which is exactly what building an image from this recipe
+    # does. Declaring nothing here removes those files from the capture and with
+    # them the only replay path that applies, leaving the recipe unusable in the
+    # case it is most needed for.
+    #
+    # What is NOT claimed is that the patch was proven applied: there is no
+    # preimage to prove it against. Do not read an empty base_sha as the thing
+    # that withholds that claim -- the judge's base_sha refusal is gated on
+    # ``is_git``, so it never fires for a wheel root and this path can and does
+    # reach ``sufficient``. The protection that does apply is the op map itself:
+    # ``overlay_inventory_without_base`` returns None for anything it cannot
+    # PROVE, and undeclared targets are what the judge blocks on. The targets are
+    # what the overlay must contain, not evidence that the patch applied cleanly.
+    overlaid: dict[str, dict[str, str]] = {}
+    for patch in patches:
+        ops = _patch_snapshot.overlay_inventory_without_base(Path(patch_root), patch)
+        if ops is None:
+            log.warning(
+                "integrate_patch: enablement KEEP cannot resolve %s against the "
+                "base-less root %s; its targets are left undeclared",
+                patch,
+                patch_root,
+            )
+            continue
+        overlaid[str(patch)] = ops
+    return overlaid
 
 
 def _read_done_payload(workspace: Path) -> dict[str, Any] | None:
@@ -1846,6 +1953,345 @@ def _inert_keep_reason(
 
 
 @dataclass(frozen=True)
+class _Deliverable:
+    """What a specialist handed over for this round: its patches, config, artifacts and rewrite switches."""
+
+    patch_paths: list[Path]
+    config_changes: dict[str, str]
+    extra_server_args: str
+    extra_envs: dict[str, str]
+    dropped_env_overrides: list[str]
+    switch_manifest: list[dict[str, Any]]
+    artifact_specs: list[_ArtifactSpec]
+    artifact_resolve_errors: list[str]
+    artifact_runtime_errors: list[str]
+
+    @classmethod
+    def resolve(cls, attempt: IntegrateAttempt, params: dict[str, Any]) -> "_Deliverable":
+        """Resolve everything this round delivers, from the task and from the specialist's own output."""
+        specialist_workspace = attempt.specialist_workspace
+        assert specialist_workspace is not None
+        done_payload = attempt.done_payload
+        explicit_patches = params.get("patches") or None
+        patch_paths = _resolve_patch_paths(
+            specialist_workspace=specialist_workspace,
+            explicit_patches=(list(explicit_patches) if isinstance(explicit_patches, list) else None),
+            done_payload=done_payload,
+        )
+        config_changes = dict(params.get("config_changes") or {})
+        recorded = (done_payload or {}).get("config_changes")
+        if not config_changes and isinstance(recorded, dict):
+            config_changes = {str(key): str(value) for key, value in recorded.items()}
+        raw_envs = params.get("extra_envs")
+        extra_envs, unsafe = filter_untrusted_env_mapping(
+            {**config_changes, **(raw_envs if isinstance(raw_envs, dict) else {})},
+            allow_predicate=is_allowed_variant_env_key,
+        )
+        dropped = sorted(unsafe)
+        if dropped:
+            log.warning("integrate_patch: dropping unsafe env override keys: %s", ", ".join(dropped))
+        switch_manifest = _parse_framework_switches(params=params, done_payload=done_payload, patch_paths=patch_paths)
+        extra_envs.update(_switch_manifest.switch_env(switch_manifest))
+        explicit_artifacts = params.get("artifacts")
+        artifact_specs, artifact_resolve_errors = _resolve_artifact_specs(
+            specialist_workspace=specialist_workspace,
+            explicit_artifacts=(list(explicit_artifacts) if isinstance(explicit_artifacts, list) else None),
+            done_payload=done_payload,
+        )
+        raw_args = params.get("extra_server_args")
+        gpu_type = str(
+            getattr(attempt.shared_state, "gpu_type", "")
+            or params.get("gpu_type")
+            or params.get("target_platform")
+            or ""
+        ).strip()
+        return cls(
+            patch_paths=patch_paths,
+            config_changes=config_changes,
+            extra_server_args=(raw_args if isinstance(raw_args, str) and raw_args.strip() else ""),
+            extra_envs=extra_envs,
+            dropped_env_overrides=dropped,
+            switch_manifest=switch_manifest,
+            artifact_specs=artifact_specs,
+            artifact_resolve_errors=artifact_resolve_errors,
+            artifact_runtime_errors=_validate_aiter_gemm_artifacts(artifact_specs, gpu_type=gpu_type),
+        )
+
+
+def _no_patches_result(
+    attempt: IntegrateAttempt,
+    deliverable: _Deliverable,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """The verdict of a round whose deliverable would change nothing about the stack."""
+    result: dict[str, Any] = {
+        "status": "no_patches",
+        "specialist_task_id": attempt.specialist_task_id,
+        "patches_applied": [],
+        "patches_reverted": [],
+        "artifacts_applied": [],
+        "artifact_errors": deliverable.artifact_resolve_errors,
+        "reason": (
+            "neither patches, config_changes, installable artifacts, nor "
+            "allowlisted setup commands were supplied / discoverable for "
+            "this specialist task"
+        ),
+        "setup_commands_applied": attempt.setup_commands_applied,
+    }
+    if params.get("enablement"):
+        result["enablement"] = True
+    # Forward the ungrounded-patch details so framework.py can surface them in
+    # the next round's mandate. The field lives on done_payload (written by
+    # runner.py) and must be forwarded here because this is the concrete dict
+    # framework.py reads via maybe_rearm_enablement.
+    ungrounded = (attempt.done_payload or {}).get("patches_ungrounded")
+    if isinstance(ungrounded, list) and ungrounded:
+        result["patches_ungrounded"] = ungrounded
+    return result
+
+
+def _apply_failed(attempt: IntegrateAttempt, error_class: str, error: Any, **fields: Any) -> dict[str, Any]:
+    """The shape every apply-stage rejection shares: nothing landed, so nothing was taken back out."""
+    return {
+        "status": "apply_failed",
+        "error_class": error_class,
+        "error": error,
+        "specialist_task_id": attempt.specialist_task_id,
+        "patches_applied": [],
+        "patches_reverted": [],
+        **fields,
+    }
+
+
+def _reauthor_fields(
+    params: dict[str, Any],
+    patch_paths: list[Path],
+    *,
+    advisory: str = "",
+    feedback: tuple[ApplyFeedback, ...] = (),
+) -> dict[str, Any]:
+    """Everything the specialist needs to author the refused patches again."""
+    fields: dict[str, Any] = {
+        "lane": _derive_lane(params),
+        "retry_feedback": [item.to_dict() for item in feedback],
+        "prior_patches": [str(patch) for patch in patch_paths],
+    }
+    if advisory:
+        fields["advisory"] = advisory
+    if params.get("enablement"):
+        fields["enablement"] = True
+    return fields
+
+
+def _unresolved_root_rejection(explicit_root: str | None, patch_paths: list[Path]) -> dict[str, Any]:
+    """Why these patches could not be bound to a framework tree, in terms their author can act on."""
+    if not explicit_root:
+        return {
+            "error_class": "no_framework_agent_root",
+            "error": "no framework_source_root resolved; cannot apply "
+            "patches. Configure $INFERENCEX_PATH or pass "
+            "params.framework_source_root.",
+        }
+    declared_root = resolved_explicit_root(explicit_root)
+    if declared_root is None:
+        return {
+            "error_class": "framework_root_unresolved",
+            "error": f"framework_source_root {explicit_root!r} is not a readable directory",
+        }
+    if not _read_patch_texts(patch_paths):
+        return {
+            "error_class": "patch_unreadable",
+            "error": "no patch file could be read; verify paths and permissions",
+        }
+    missing_records = _preflight_missing_targets(declared_root, patch_paths)
+    if missing_records:
+        return {
+            "error_class": "patch_target_missing",
+            "error": missing_records,
+            "advisory": "patch target file(s) absent from framework_source_root "
+            f"{explicit_root}; author patches only against files "
+            "that exist in the installed framework tree.",
+        }
+    return {
+        "error_class": "patch_root_ambiguous",
+        "error": f"framework_source_root {explicit_root!r} could not be unambiguously matched to the patch targets",
+    }
+
+
+def _pending_sentinel(
+    attempt: IntegrateAttempt,
+    deliverable: _Deliverable,
+    *,
+    framework_root: Path | None,
+    recovery: dict[str, Any],
+) -> dict[str, Any]:
+    """The record of what this attempt is about to change, written before it changes anything."""
+    return {
+        "specialist_task_id": attempt.specialist_task_id,
+        "task_id": attempt.task_id,
+        "patches": [str(patch) for patch in deliverable.patch_paths],
+        "artifacts": [
+            {"target": str(spec.target), "rel_target": spec.rel_target} for spec in deliverable.artifact_specs
+        ],
+        "config_changes": dict(deliverable.config_changes),
+        "extra_server_args": deliverable.extra_server_args,
+        "extra_envs": dict(deliverable.extra_envs),
+        "framework_source_root": str(framework_root or ""),
+        "workspace": str(attempt.output_root),
+        "attempt_venv_root": attempt.attempt_venv_root,
+        "recovery": recovery,
+        "ts": _now_iso(),
+    }
+
+
+def _apply_patch_series(
+    attempt: IntegrateAttempt,
+    patch_paths: list[Path],
+    *,
+    git_head: str,
+    backup_root: Path,
+) -> tuple[list[dict[str, str]], tuple[ApplyFeedback, ...]]:
+    """Apply each delivered patch to the attempt's tree, stopping at the first one that does not land.
+
+    ``attempt.applied`` is appended to in place, so a cancellation mid-series still
+    leaves the undo able to see what reached the tree.
+    """
+    framework_root = attempt.framework_root
+    errors: list[dict[str, str]] = []
+    feedback: list[ApplyFeedback] = []
+    nogit_backups: list[dict[str, Any]] = []
+    for patch in patch_paths:
+        # ``vet_patches`` runs at authoring time inside the specialist runner, so a
+        # patch from anywhere else -- ``params.patches``, every remotely-fetched
+        # ``upstream_pr`` diff -- arrives unvetted.
+        try:
+            text = patch.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            errors.append({"patch": str(patch), "stderr": f"unreadable: {exc!r}"})
+            break
+        if not is_unified_diff(text):
+            errors.append({"patch": str(patch), "stderr": "not a unified diff"})
+            break
+        escaping = patch_escapes_tree(text)
+        if escaping is not None:
+            errors.append({"patch": str(patch), "stderr": f"path escapes tree: {escaping!r}"})
+            break
+        if git_head:
+            ok, err, fb = _git_apply_collect_feedback(framework_root, patch)
+        else:
+            ok, err, taken, fb = _apply_patch_no_git(framework_root, patch, backup_root, seq_offset=len(nogit_backups))
+            nogit_backups.extend(taken)
+        if not ok:
+            errors.append({"patch": str(patch), "stderr": err})
+            if fb is not None:
+                feedback.append(fb)
+            break
+        attempt.applied.append(patch)
+    return errors, tuple(feedback)
+
+
+def _gate_failure_reasons(
+    graded: Any,
+    delta_pct: float | None,
+    keep_threshold_pct: float,
+    *also: str,
+) -> list[str]:
+    """Everything the KEEP gate held against this measurement, in the order it was weighed."""
+    reasons: list[str] = []
+    if not graded.comparable:
+        reasons.append(f"performance comparison unavailable: {graded.degrade_reason}")
+    elif graded.graded_on_intvty and delta_pct is None:
+        reasons.append(
+            graded.veto_reason
+            or f"interactivity p50 {graded.reference:.1f}->{graded.candidate:.1f} did not clear the interactivity KEEP gate"
+        )
+    elif delta_pct is None:
+        reasons.append("no measurable throughput")
+    elif delta_pct < keep_threshold_pct:
+        reasons.append(f"throughput delta {delta_pct:+.2f}% < keep_threshold {keep_threshold_pct:.2f}%")
+    elif graded.veto_reason:
+        reasons.append(graded.veto_reason)
+    reasons.extend(reason for reason in also if reason)
+    return reasons
+
+
+def _revert_status(
+    measured: _PatchMeasurement,
+    *,
+    accuracy_blocks: bool,
+    accuracy_verdict: bool | None,
+    fix_refusals: list[str],
+) -> str:
+    """Whether the patch was rejected on its merits or only because its accuracy could not be read."""
+    tput_ok = measured.delta_pct is not None and measured.delta_pct >= measured.keep_threshold_pct
+    unreadable = accuracy_blocks and accuracy_verdict is None and tput_ok
+    return "accuracy_unavailable_reject" if unreadable or fix_refusals == [_FIX_ACCURACY_UNAVAILABLE] else "reverted"
+
+
+def _perf_revert(
+    attempt: IntegrateAttempt,
+    measured: _PatchMeasurement,
+    *,
+    status: str,
+    reason: str,
+    **fields: Any,
+) -> dict[str, Any]:
+    """The verdict of a patch that was benched and then taken back out."""
+    return {
+        "status": status,
+        "specialist_task_id": attempt.specialist_task_id,
+        "patches_applied": [],
+        "patches_reverted": [],
+        "artifacts_reverted": [],
+        **measured.envelope(),
+        "reason": reason,
+        "workspace": str(attempt.output_root),
+        **fields,
+    }
+
+
+def _kept_patch(
+    attempt: IntegrateAttempt,
+    measured: _PatchMeasurement,
+    *,
+    params: dict[str, Any],
+    **fields: Any,
+) -> dict[str, Any]:
+    """The verdict of a patch that cleared the gate and stays in the tree."""
+    return {
+        "status": "kept",
+        "specialist_task_id": attempt.specialist_task_id,
+        # Proposal ownership must survive delegated-result persistence
+        # so resume replay cannot replace it with the then-current phase.
+        "source_phase": str(params.get("source_phase") or ""),
+        "domain": str(params.get("domain") or params.get("source_domain") or ""),
+        "provenance": str(params.get("provenance") or ""),
+        "gap_canonical_id": str(params.get("gap_canonical_id") or ""),
+        "gap_layer": str(params.get("gap_layer") or ""),
+        "framework_agent_authoring": bool(params.get("framework_agent_authoring")),
+        "patches_applied": [str(patch) for patch in attempt.applied],
+        "patches_reverted": [],
+        "artifacts_applied": attempt.applied_artifacts,
+        "extra_server_args_applied": attempt.extra_server_args_applied,
+        "extra_envs_applied": attempt.extra_envs_applied,
+        **measured.envelope(),
+        "workspace": str(attempt.output_root),
+        "framework_root": str(attempt.framework_root or ""),
+        **fields,
+    }
+
+
+@dataclass(frozen=True)
+class _KbLesson:
+    """The outcome and measured deltas one framework KB record stores."""
+
+    outcome: str
+    tps_delta_pct: float
+    accuracy_delta_pct: float | None = None
+    config_fingerprint: str = ""
+
+
+@dataclass(frozen=True)
 class _PatchBench:
     """What every bench leg of one integration shares: its params, workspace, specialist and session bounds."""
 
@@ -1874,16 +2320,6 @@ class _PatchBench:
 
 
 @dataclass(frozen=True)
-class _KbLesson:
-    """The outcome and measured deltas one framework KB record stores."""
-
-    outcome: str
-    tps_delta_pct: float
-    accuracy_delta_pct: float | None = None
-    config_fingerprint: str = ""
-
-
-@dataclass(frozen=True)
 class _PatchMeasurement:
     """The benched candidate measured against its base, as a verdict reports it."""
 
@@ -1895,10 +2331,23 @@ class _PatchMeasurement:
     accuracy_pass: bool | None
     acc_delta_pct: float | None
     cfg_fingerprint: str
+    measured_against: dict[str, Any]
 
     def lesson(self, outcome: str) -> _KbLesson:
         """The KB record of this measurement under ``outcome``."""
         return _KbLesson(outcome, float(self.delta_pct or 0.0), self.acc_delta_pct, self.cfg_fingerprint)
+
+    def envelope(self) -> dict[str, Any]:
+        """How every perf verdict reports the measurement behind it."""
+        return {
+            "output_throughput": self.new_tput,
+            "delta_pct": self.delta_pct,
+            "accuracy_pass": self.accuracy_pass,
+            "base_tput": self.base_tput,
+            "measured_against": self.measured_against,
+            "keep_threshold_pct": self.keep_threshold_pct,
+            "bench_result": self.bench_result,
+        }
 
 
 class IntegratePatchExecutor:
@@ -1955,7 +2404,7 @@ class IntegratePatchExecutor:
         try:
             result = await self._stage_apply(attempt, params, extra)
             if result is None:
-                result = await self._stage_gate(attempt, params, extra)
+                result = {**await self._stage_gate(attempt, params, extra), RESULT_BENCHED: True}
         except BaseException:
             try:
                 self._finish_attempt(attempt, {"status": "cancelled"})
@@ -2007,6 +2456,32 @@ class IntegratePatchExecutor:
     # Stage helpers (called sequentially by __call__)
     # ---------------------------------------------------------------------------
 
+    def _stage_resolve_launch_only(
+        self,
+        attempt: IntegrateAttempt,
+        params: dict[str, Any],
+        shared_state: Any,
+    ) -> dict[str, Any] | None:
+        """Give a launch-only round its own scratch workspace, or refuse a round that would mutate."""
+        mutation_fields = [key for key in _LAUNCH_ONLY_MUTATION_FIELDS if params.get(key)]
+        if mutation_fields:
+            return {
+                "status": "failed",
+                "error_class": "launch_only_mutation_forbidden",
+                "error": (
+                    "enablement_launch_only accepts a pre-built runtime_override "
+                    f"but no mutation fields; received {mutation_fields}"
+                ),
+                "patches_applied": [],
+                "patches_reverted": [],
+            }
+        scratch = runs_dir(self.session_dir, "integrate_patch", attempt.task_id)
+        scratch.mkdir(parents=True, exist_ok=True)
+        attempt.specialist_task_id = attempt.task_id
+        attempt.shared_state = shared_state
+        attempt.specialist_workspace = scratch
+        return None
+
     async def _stage_resolve(
         self,
         attempt: IntegrateAttempt,
@@ -2020,6 +2495,7 @@ class IntegratePatchExecutor:
         """
         from ._multi_node_env import is_multi_node
 
+        shared_state = extra.get("shared_state") or extra.get("state")
         if is_multi_node():
             return {
                 "status": "skipped",
@@ -2036,8 +2512,6 @@ class IntegratePatchExecutor:
                     "fans out via `multi_node apply-patch`) or run single-node."
                 ),
             }
-
-        shared_state = extra.get("shared_state") or extra.get("state")
         pending = getattr(shared_state, "pending_integrate", None)
         if (
             isinstance(pending, dict)
@@ -2052,31 +2526,13 @@ class IntegratePatchExecutor:
         if shared_state is not None:
             bind_integrate_to_lane(params, shared_state, session_dir=Path(self.session_dir))
         if shared_state is not None and not params.get("accuracy_baseline"):
-            _base_acc = getattr(shared_state, "baseline_accuracy", 0.0)
-            if isinstance(_base_acc, (int, float)) and _base_acc > 0:
-                params["accuracy_baseline"] = float(_base_acc)
+            base_acc = to_float(getattr(shared_state, "baseline_accuracy", 0.0), 0.0)
+            if base_acc > 0:
+                params["accuracy_baseline"] = base_acc
 
         # Launch-only mode: pure bench of a pre-built runtime (no specialist, no Critic).
         if params.get("enablement_launch_only"):
-            mutation_fields = [key for key in _LAUNCH_ONLY_MUTATION_FIELDS if params.get(key)]
-            if mutation_fields:
-                return {
-                    "status": "failed",
-                    "error_class": "launch_only_mutation_forbidden",
-                    "error": (
-                        "enablement_launch_only accepts a pre-built runtime_override "
-                        f"but no mutation fields; received {mutation_fields}"
-                    ),
-                    "patches_applied": [],
-                    "patches_reverted": [],
-                }
-            task_id = attempt.task_id
-            scratch = runs_dir(self.session_dir, "integrate_patch", task_id)
-            scratch.mkdir(parents=True, exist_ok=True)
-            attempt.specialist_task_id = task_id
-            attempt.shared_state = shared_state
-            attempt.specialist_workspace = scratch
-            return None
+            return self._stage_resolve_launch_only(attempt, params, shared_state)
 
         # Upstream-PR mode has no specialist to look up and no specialist
         # verdict to enforce: the Critic verdict on this proposal is the gate.
@@ -2269,7 +2725,7 @@ class IntegratePatchExecutor:
                 "enablement": True,
                 "reason": f"attempt-runtime provision aborted: {exc}",
             }
-        except Exception as exc:  # noqa: BLE001 — preflight is best-effort advisory
+        except OSError as exc:
             log.warning("integrate_patch: disk preflight raised (%r); continuing", exc)
 
         adapter = get_adapter(action.framework)
@@ -2284,7 +2740,7 @@ class IntegratePatchExecutor:
 
         try:
             result = await asyncio.to_thread(_provision_and_probe)
-        except Exception as exc:
+        except (OSError, subprocess.SubprocessError) as exc:
             log.exception("integrate_patch: attempt-runtime provision raised")
             self._gc_attempt_dir(attempt_dir)
             return {
@@ -2327,11 +2783,13 @@ class IntegratePatchExecutor:
 
     @staticmethod
     def _gc_attempt_dir(attempt_dir: Path) -> None:
-        """Remove a half/failed attempt-runtime dir (best-effort)."""
+        """Remove a half/failed attempt runtime's venv and checkout, keeping its provision log (best-effort)."""
         try:
             if attempt_dir.exists():
-                shutil.rmtree(attempt_dir, ignore_errors=True)
-        except Exception:
+                for child in attempt_dir.iterdir():
+                    if child.is_dir():
+                        shutil.rmtree(child, ignore_errors=True)
+        except OSError:
             log.debug("integrate_patch: attempt-dir GC failed for %s", attempt_dir, exc_info=True)
 
     async def _stage_localize_source(self, attempt: IntegrateAttempt, params: dict[str, Any]) -> None:
@@ -2420,6 +2878,9 @@ class IntegratePatchExecutor:
         The KEEP closure alone cannot say which versions the enablement changed;
         the setup script checks the difference between the two.
         """
+        if attempt.shared_state.enablement.environment_closure_baseline:
+            return
+
         from ...enablement.recipe.keep_probe import KeepEvidence, graded_framework, probe_keep_environment
 
         closure, _assertions = await asyncio.to_thread(
@@ -2451,306 +2912,230 @@ class IntegratePatchExecutor:
         Returns an early-exit result dict on failure/no-patches/apply_only,
         or None to continue to bench+gate. Records mutations on the attempt.
         """
-        specialist_task_id = attempt.specialist_task_id
         shared_state = attempt.shared_state
-        done_payload = attempt.done_payload
-        # Before the setup commands, which are the round's first mutation: an
-        # install writes into the same trees the patches and artifacts land in.
-        is_enablement = bool(params.get("enablement"))
         # Read back what earlier rounds established before either publish point
         # below decides what this round launches with.
         inherited_args, inherited_envs = _established_enablement_config(params, shared_state)
-        for candidate in _candidate_mutation_roots(params=params, done_payload=done_payload):
+        # The HEADs are recorded first because the setup commands are the round's
+        # first mutation: an install writes into the same trees the patches land in.
+        is_enablement = bool(params.get("enablement"))
+        for candidate in _candidate_mutation_roots(params=params, done_payload=attempt.done_payload):
             _note_pre_mutation_head(attempt, candidate, enablement=is_enablement, session_dir=self.session_dir)
-        if is_enablement and not shared_state.enablement.environment_closure_baseline:
-            await self._record_closure_baseline(attempt, params)
         if is_enablement:
-            refusal = await replay_setup_commands(attempt, params=params, session_dir=self.session_dir)
-            if refusal is not None:
-                return refusal
+            await self._record_closure_baseline(attempt, params)
+            setup_refusal = await replay_setup_commands(attempt, params=params, session_dir=self.session_dir)
+            if setup_refusal is not None:
+                return setup_refusal
 
-        specialist_workspace = attempt.specialist_workspace
-        assert specialist_workspace is not None
-        explicit_patches = params.get("patches") or None
-        patch_paths = _resolve_patch_paths(
-            specialist_workspace=specialist_workspace,
-            explicit_patches=(list(explicit_patches) if isinstance(explicit_patches, list) else None),
-            done_payload=done_payload,
-        )
-        config_changes = dict(params.get("config_changes") or {})
-        if not config_changes and done_payload:
-            cc = done_payload.get("config_changes")
-            if isinstance(cc, dict):
-                config_changes = {str(k): str(v) for k, v in cc.items()}
-        proposal_extra_args_raw = params.get("extra_server_args")
-        proposal_extra_args = (
-            proposal_extra_args_raw
-            if isinstance(proposal_extra_args_raw, str) and proposal_extra_args_raw.strip()
-            else ""
-        )
-        proposal_extra_envs = dict(config_changes)
-        raw_extra_envs = params.get("extra_envs")
-        if isinstance(raw_extra_envs, dict):
-            proposal_extra_envs.update({str(k): str(v) for k, v in raw_extra_envs.items()})
-        proposal_extra_envs, _dropped = filter_untrusted_env_mapping(
-            proposal_extra_envs,
-            allow_predicate=is_allowed_variant_env_key,
-        )
-        dropped_env_overrides = sorted(_dropped)
-        if dropped_env_overrides:
-            log.warning(
-                "integrate_patch: dropping unsafe env override keys: %s",
-                ", ".join(dropped_env_overrides),
-            )
-        # Framework-rewrite switches. Every rewrite in such a patch sits behind
-        # a switch that defaults OFF, so the applied patch is inert and benching
-        # it as-is would measure the baseline. Turn the switches on for the
-        # measurement and carry the parsed manifest to the gate, which needs the
-        # dependency edges to decide between a throughput KEEP and an inert one.
-        switch_manifest, switch_problems = _parse_framework_switches(
-            params=params,
-            done_payload=done_payload,
-        )
-        if switch_manifest and not patch_paths:
-            # A manifest without a patch describes switches that gate code which
-            # was never delivered. Setting them would be a no-op, and registering
-            # them as levers would leave the ledger pointing at absent code.
-            switch_problems.append(
-                f"discarded {len(switch_manifest)} switch(es): the deliverable carries no patch, "
-                f"so there is no rewrite for them to gate"
-            )
-            switch_manifest = []
-        if switch_manifest:
-            proposal_extra_envs.update(_switch_manifest.switch_env(switch_manifest))
-            log.info(
-                "integrate_patch: benching with %d framework rewrite switch(es) on\n%s",
-                len(switch_manifest),
-                _switch_manifest.summarize(switch_manifest, switch_problems),
-            )
-        elif switch_problems:
-            log.warning(
-                "integrate_patch: framework switch manifest unusable\n%s",
-                _switch_manifest.summarize(switch_manifest, switch_problems),
-            )
-        attempt.switch_manifest = switch_manifest
-
-        explicit_artifacts = params.get("artifacts")
-        artifact_specs, artifact_resolve_errors = _resolve_artifact_specs(
-            specialist_workspace=specialist_workspace,
-            explicit_artifacts=(list(explicit_artifacts) if isinstance(explicit_artifacts, list) else None),
-            done_payload=done_payload,
-        )
-        target_gpu_type = str(
-            getattr(shared_state, "gpu_type", "") or params.get("gpu_type") or params.get("target_platform") or ""
-        ).strip()
-        artifact_runtime_errors = _validate_aiter_gemm_artifacts(
-            artifact_specs,
-            gpu_type=target_gpu_type,
-        )
-        if artifact_runtime_errors:
-            await self._maybe_write_framework_kb_record(
-                _KbLesson("rejected_apply_fail", 0.0), done_payload=done_payload, params=params, extra=extra
-            )
-            return {
-                "status": "apply_failed",
-                "error_class": "artifact_not_runtime_ready",
-                "error": artifact_runtime_errors,
-                "artifact_errors": artifact_runtime_errors,
-                "specialist_task_id": specialist_task_id,
-                "patches_applied": [],
-                "patches_reverted": [],
-                "artifacts_applied": [],
-                "reason": (
+        deliverable = _Deliverable.resolve(attempt, params)
+        attempt.switch_manifest = deliverable.switch_manifest
+        if deliverable.artifact_runtime_errors:
+            return await self._refuse_apply(
+                attempt,
+                params,
+                extra,
+                "artifact_not_runtime_ready",
+                deliverable.artifact_runtime_errors,
+                artifacts_applied=[],
+                artifact_errors=deliverable.artifact_runtime_errors,
+                reason=(
                     "AITER GEMM model-config artifacts must contain measured, "
                     "non-placeholder rows for the target GPU architecture and CU count"
                 ),
-            }
+            )
 
-        _setup_ran = bool(attempt.setup_commands_applied)
-        # A runtime this round acquired changes what the next boot executes; a
-        # re-provisioned kept one is the stack the last KEEP was already graded on.
-        acquired_runtime = bool(attempt.attempt_venv_root) and not attempt.shared_state.enablement.kept_stack_action
-        if (
-            not patch_paths
-            and not proposal_extra_args
-            and not proposal_extra_envs
-            and not artifact_specs
-            and not _setup_ran
-            and not acquired_runtime
+        if not (
+            deliverable.patch_paths
+            or deliverable.extra_server_args
+            or deliverable.extra_envs
+            or deliverable.artifact_specs
+            or attempt.setup_commands_applied
+            or (bool(attempt.attempt_venv_root) and not shared_state.enablement.kept_stack_action)
         ):
-            # Launch-only mode: skip the no-patches early-return and fall through to bench.
             if params.get("enablement_launch_only"):
-                output_root = runs_dir(self.session_dir, "integrate_patch", specialist_task_id)
+                # Launch-only mode: skip the no-patches early-return and fall through to bench.
+                output_root = runs_dir(self.session_dir, "integrate_patch", attempt.specialist_task_id)
                 output_root.mkdir(parents=True, exist_ok=True)
                 attempt.output_root = output_root
                 attempt.extra_envs_applied = dict(inherited_envs)
                 attempt.extra_server_args_applied = inherited_args
                 return None
-            _no_patches: dict[str, Any] = {
-                "status": "no_patches",
-                "specialist_task_id": specialist_task_id,
-                "patches_applied": [],
-                "patches_reverted": [],
-                "artifacts_applied": [],
-                "artifact_errors": artifact_resolve_errors,
-                "reason": (
-                    "neither patches, config_changes, installable artifacts, nor "
-                    "allowlisted setup commands were supplied / discoverable for "
-                    "this specialist task"
-                ),
-                "setup_commands_applied": attempt.setup_commands_applied,
-            }
-            if params.get("enablement"):
-                _no_patches["enablement"] = True
-            # Forward the ungrounded-patch details so framework.py can surface
-            # them in the next round's mandate.  The field lives on done_payload
-            # (written by runner.py) and must be forwarded here because
-            # _no_patches is the concrete dict framework.py reads via
-            # maybe_rearm_enablement.
-            ungrounded = (done_payload or {}).get("patches_ungrounded")
-            if isinstance(ungrounded, list) and ungrounded:
-                _no_patches["patches_ungrounded"] = ungrounded
-            return _no_patches
+            return _no_patches_result(attempt, deliverable, params)
 
         # An acquired runtime is what the boot resolves, so the shared framework
-        # tree is not what the server imports: this round's patches land in the
-        # tree it runs, and the root the specialist authored against does not
-        # describe that tree.
+        # tree is not what the server imports and the root the specialist authored
+        # against does not describe the tree this round's patches land in.
+        patch_paths = deliverable.patch_paths
         runtime_source_root = attempt.runtime_source_root
-        explicit_framework_root = runtime_source_root or str(params.get("framework_source_root") or "").strip() or None
+        explicit_root = runtime_source_root or str(params.get("framework_source_root") or "").strip() or None
         framework_root = (
             resolved_explicit_root(runtime_source_root)
             if runtime_source_root
             # Off the loop: settling a tie between matching trees runs git once per patch.
             else await asyncio.to_thread(
                 _resolve_framework_root,
-                explicit_framework_root,
+                explicit_root,
                 patch_paths=patch_paths,
-                recorded_root=_sole_patch_root(done_payload, patch_paths, specialist_workspace=specialist_workspace),
+                recorded_root=_sole_patch_root(
+                    attempt.done_payload, patch_paths, specialist_workspace=attempt.specialist_workspace
+                ),
             )
         )
         if patch_paths and framework_root is None:
-            _lane_early = _derive_lane(params)
-            if explicit_framework_root:
-                declared_root = resolved_explicit_root(explicit_framework_root)
-                if declared_root is None:
-                    _error_class = "framework_root_unresolved"
-                    _error = f"framework_source_root {explicit_framework_root!r} is not a readable directory"
-                elif not _read_patch_texts(patch_paths):
-                    _error_class = "patch_unreadable"
-                    _error = "no patch file could be read; verify paths and permissions"
-                else:
-                    missing_records = _preflight_missing_targets(declared_root, patch_paths)
-                    if missing_records:
-                        _error_class = "patch_target_missing"
-                        _error = missing_records
-                    else:
-                        _error_class = "patch_root_ambiguous"
-                        _error = (
-                            f"framework_source_root {explicit_framework_root!r} could not "
-                            "be unambiguously matched to the patch targets"
-                        )
-            else:
-                _error_class = "no_framework_agent_root"
-                _error = (
-                    "no framework_source_root resolved; cannot apply "
-                    "patches. Configure $INFERENCEX_PATH or pass "
-                    "params.framework_source_root."
-                )
-            _early: dict[str, Any] = {
-                "status": "apply_failed",
-                "error_class": _error_class,
-                "error": _error,
-                "specialist_task_id": specialist_task_id,
-                "patches_applied": [],
-                "patches_reverted": [],
-                "lane": _lane_early,
-                "retry_feedback": [],
-                "prior_patches": [str(p) for p in patch_paths],
-            }
-            if _error_class == "patch_target_missing":
-                _early["advisory"] = (
-                    "patch target file(s) absent from framework_source_root "
-                    f"{explicit_framework_root}; author patches only against files "
-                    "that exist in the installed framework tree."
-                )
+            unresolved = _apply_failed(
+                attempt,
+                **_unresolved_root_rejection(explicit_root, patch_paths),
+                **_reauthor_fields(params, patch_paths),
+            )
             # A set spanning two trees is exactly what fails root resolution here,
             # so this is the result that has to carry the reason onward.
-            if (done_payload or {}).get("patches_span_multiple_roots"):
-                _early["patches_span_multiple_roots"] = True
-            if params.get("enablement"):
-                _early["enablement"] = True
-            return _early
-
-        if patch_paths and framework_root is not None:
+            if (attempt.done_payload or {}).get("patches_span_multiple_roots"):
+                unresolved["patches_span_multiple_roots"] = True
+            return unresolved
+        if patch_paths:
             missing_records = _preflight_missing_targets(framework_root, patch_paths)
             if missing_records:
-                await self._maybe_write_framework_kb_record(
-                    _KbLesson("rejected_apply_fail", 0.0), done_payload=done_payload, params=params, extra=extra
-                )
-                _lane_missing = _derive_lane(params)
-                _missing_result: dict[str, Any] = {
-                    "status": "apply_failed",
-                    "error_class": "patch_target_missing",
-                    "error": missing_records,
-                    "advisory": (
-                        "patch target file(s) absent from framework_source_root "
+                return await self._refuse_apply(
+                    attempt,
+                    params,
+                    extra,
+                    "patch_target_missing",
+                    missing_records,
+                    **_reauthor_fields(
+                        params,
+                        patch_paths,
+                        advisory="patch target file(s) absent from framework_source_root "
                         f"{framework_root}; author patches only against files that "
                         "exist in the installed framework tree (inspect it with "
-                        "Glob/Grep before writing the diff)."
+                        "Glob/Grep before writing the diff).",
                     ),
-                    "specialist_task_id": specialist_task_id,
-                    "patches_applied": [],
-                    "patches_reverted": [],
-                    "lane": _lane_missing,
-                    "retry_feedback": [],
-                    "prior_patches": [str(p) for p in patch_paths],
-                }
-                if params.get("enablement"):
-                    _missing_result["enablement"] = True
-                return _missing_result
+                )
 
-        output_root = Path(
-            params.get("output_dir")
-            or extra.get("workspace")
-            or runs_dir(self.session_dir, "integrate_patch", attempt.task_id)
+        stash_refusal = self._begin_mutation(attempt, deliverable, params, extra, framework_root=framework_root)
+        if stash_refusal is not None:
+            return stash_refusal
+
+        recovery = attempt.pending["recovery"]
+        recovery_root = Path(recovery["root"])
+        patch_paths = self._admit_localization(attempt, framework_root, deliverable.patch_paths)
+        recovery["phase"] = "ready"
+        if shared_state is not None:
+            shared_state.save(self.session_dir)
+
+        # An artifact preimage has to describe the tree as this attempt found
+        # it, so it is taken before the patches run: a patch that creates the
+        # very file an artifact then overwrites would otherwise be recorded as
+        # pre-existing, and the recovery would leave it behind instead of
+        # deleting it. Nothing is installed here, so a failure leaves the tree
+        # exactly as the stash left it.
+        if deliverable.artifact_specs:
+            backup_errors = self._backup_artifacts(
+                deliverable.artifact_specs,
+                backup_root=recovery_root / "artifact_backups",
+            )
+            if backup_errors:
+                return await self._refuse_apply(
+                    attempt,
+                    params,
+                    extra,
+                    "artifact_backup_failed",
+                    deliverable.artifact_resolve_errors + backup_errors,
+                    artifacts_applied=[],
+                    workspace=str(attempt.output_root),
+                )
+            recovery["artifacts_prepared"] = True
+            if shared_state is not None:
+                shared_state.save(self.session_dir)
+
+        apply_errors, apply_feedback = _apply_patch_series(
+            attempt,
+            patch_paths,
+            git_head=str(recovery.get("git_head") or ""),
+            backup_root=recovery_root / "patch_backups",
         )
-        output_root.mkdir(parents=True, exist_ok=True)
+        if apply_errors:
+            return await self._refuse_apply(
+                attempt,
+                params,
+                extra,
+                "git_apply_failed",
+                apply_errors,
+                workspace=str(attempt.output_root),
+                **_reauthor_fields(params, patch_paths, feedback=apply_feedback),
+            )
 
+        if deliverable.artifact_specs:
+            applied_artifacts, artifact_apply_errors = self._apply_artifacts(
+                deliverable.artifact_specs,
+                backup_root=recovery_root / "artifact_backups",
+            )
+            attempt.applied_artifacts = applied_artifacts
+            if artifact_apply_errors:
+                return await self._refuse_apply(
+                    attempt,
+                    params,
+                    extra,
+                    "artifact_install_failed",
+                    deliverable.artifact_resolve_errors + artifact_apply_errors,
+                    artifacts_applied=[],
+                    workspace=str(attempt.output_root),
+                )
+
+        # Inherited first, this round last: inheriting is not pinning.
+        attempt.extra_server_args_applied = _merge_established_server_args(
+            inherited_args, deliverable.extra_server_args
+        )
+        attempt.extra_envs_applied = {**inherited_envs, **deliverable.extra_envs}
+        attempt.dropped_env_overrides = deliverable.dropped_env_overrides
+        if params.get("apply_only"):
+            return {
+                "status": "applied_no_bench",
+                "specialist_task_id": attempt.specialist_task_id,
+                "patches_applied": [str(patch) for patch in attempt.applied],
+                "patches_reverted": [],
+                "artifacts_applied": attempt.applied_artifacts,
+                "extra_server_args_applied": attempt.extra_server_args_applied,
+                "extra_envs_applied": attempt.extra_envs_applied,
+                "dropped_env_overrides": deliverable.dropped_env_overrides,
+                "reason": "apply_only=True; benchmark skipped",
+                "workspace": str(attempt.output_root),
+            }
+        return None
+
+    def _begin_mutation(
+        self,
+        attempt: IntegrateAttempt,
+        deliverable: _Deliverable,
+        params: dict[str, Any],
+        extra: dict[str, Any],
+        *,
+        framework_root: Path | None,
+    ) -> dict[str, Any] | None:
+        """Open this attempt's workspace and recovery evidence, then bank the operator's work.
+
+        The sentinel and the recovery record are written before any framework tree
+        mutation; the Coordinator clears the sentinel after promoting the final result.
+        """
+        shared_state = attempt.shared_state
+        task_runs = runs_dir(self.session_dir, "integrate_patch", attempt.task_id)
+        output_root = Path(params.get("output_dir") or extra.get("workspace") or task_runs)
+        output_root.mkdir(parents=True, exist_ok=True)
         attempt.output_root = output_root
         git_head = ""
         if framework_root is not None and _is_git_tree(framework_root):
             git_head = _git_head_sha(framework_root)
-            if patch_paths and not git_head:
+            if deliverable.patch_paths and not git_head:
                 # Patches on a git tree keep no per-file backups, so the recorded HEAD is their only way back.
                 raise OSError(f"cannot read the HEAD of {framework_root} to restore to")
-        recovery_parent = runs_dir(self.session_dir, "integrate_patch", attempt.task_id)
-        recovery_parent.mkdir(parents=True, exist_ok=True)
-        recovery_root = Path(tempfile.mkdtemp(prefix="recovery-", dir=recovery_parent)).resolve()
+        task_runs.mkdir(parents=True, exist_ok=True)
+        recovery_root = Path(tempfile.mkdtemp(prefix="recovery-", dir=task_runs)).resolve()
         recovery = new_recovery_record(framework_root, git_head=git_head, recovery_root=recovery_root)
-        # Write pending_integrate sentinel before any framework tree mutation.
-        # The Coordinator clears this after promoting the final result.
-        # shared_state.save() is called here (executor owns the sentinel write;
-        # the Coordinator owns state promotion on completion).
-        attempt.pending = {
-            "specialist_task_id": specialist_task_id,
-            "task_id": attempt.task_id,
-            "patches": [str(p) for p in patch_paths],
-            "artifacts": [{"target": str(s.target), "rel_target": s.rel_target} for s in artifact_specs],
-            "config_changes": dict(config_changes),
-            "extra_server_args": proposal_extra_args,
-            "extra_envs": dict(proposal_extra_envs),
-            "framework_source_root": str(framework_root or ""),
-            "workspace": str(output_root),
-            "attempt_venv_root": attempt.attempt_venv_root,
-            "recovery": recovery,
-            "ts": _now_iso(),
-        }
+        attempt.pending = _pending_sentinel(attempt, deliverable, framework_root=framework_root, recovery=recovery)
         if shared_state is not None:
             shared_state.pending_integrate = attempt.pending
             try:
                 shared_state.save(self.session_dir)
-            except Exception:
+            except OSError:
                 log.exception("integrate_patch: failed to persist pending_integrate sentinel")
 
         # Normally already recorded before the setup commands; a root that
@@ -2766,169 +3151,36 @@ class IntegratePatchExecutor:
                 framework_root,
                 stash_note,
             )
-            return {
-                "status": "apply_failed",
-                "error_class": "stash_failed",
-                "error": f"refusing to proceed: user changes could not be stashed ({stash_note})",
-                "specialist_task_id": specialist_task_id,
-                "patches_applied": [],
-                "patches_reverted": [],
-            }
+            return _apply_failed(
+                attempt,
+                "stash_failed",
+                f"refusing to proceed: user changes could not be stashed ({stash_note})",
+            )
 
         # The stash is on the stack and the tree is about to be mutated, so
         # ``__call__``'s undo has to be able to see both before anything writes.
         attempt.framework_root = framework_root
-
         if stash_state == "stashed":
             cp = _run_git_cp(["-C", str(framework_root), "rev-parse", stash_note], timeout=30.0)
             if cp is None or cp.returncode != 0:
                 raise OSError("cannot persist the exact pre-candidate stash identity")
             recovery["stash_oid"] = cp.stdout.strip()
-        patch_paths = self._admit_localization(attempt, framework_root, patch_paths)
-        recovery["phase"] = "ready"
-        if shared_state is not None:
-            shared_state.save(self.session_dir)
-        nogit_patch_backups: list[dict[str, Any]] = []
-
-        # An artifact preimage has to describe the tree as this attempt found
-        # it, so it is taken before the patches run: a patch that creates the
-        # very file an artifact then overwrites would otherwise be recorded as
-        # pre-existing, and the recovery would leave it behind instead of
-        # deleting it. Nothing is installed here, so a failure leaves the tree
-        # exactly as the stash left it.
-        if artifact_specs:
-            artifact_backup_errors = self._backup_artifacts(
-                artifact_specs,
-                backup_root=recovery_root / "artifact_backups",
-            )
-            if artifact_backup_errors:
-                await self._maybe_write_framework_kb_record(
-                    _KbLesson("rejected_apply_fail", 0.0), done_payload=done_payload, params=params, extra=extra
-                )
-                return {
-                    "status": "apply_failed",
-                    "error_class": "artifact_backup_failed",
-                    "error": artifact_resolve_errors + artifact_backup_errors,
-                    "specialist_task_id": specialist_task_id,
-                    "patches_applied": [],
-                    "patches_reverted": [],
-                    "artifacts_applied": [],
-                    "workspace": str(output_root),
-                }
-            recovery["artifacts_prepared"] = True
-            if shared_state is not None:
-                shared_state.save(self.session_dir)
-
-        applied: list[Path] = []
-        applied_artifacts: list[dict[str, Any]] = []
-        apply_errors: list[dict[str, str]] = []
-        apply_feedbacks: list[ApplyFeedback] = []
-        # ``applied`` is published by identity and appended to in place.
-        attempt.applied = applied
-        attempt.applied_artifacts = applied_artifacts
-        for patch in patch_paths:
-            # ``vet_patches`` runs at authoring time inside the specialist
-            # runner, so a patch from anywhere else -- ``params.patches``, and
-            # every remotely-fetched ``upstream_pr`` diff -- arrives unvetted.
-            try:
-                patch_text = patch.read_text(encoding="utf-8", errors="replace")
-            except OSError as exc:
-                apply_errors.append({"patch": str(patch), "stderr": f"unreadable: {exc!r}"})
-                break
-            if not is_unified_diff(patch_text):
-                apply_errors.append({"patch": str(patch), "stderr": "not a unified diff"})
-                break
-            escaping = patch_escapes_tree(patch_text)
-            if escaping is not None:
-                apply_errors.append({"patch": str(patch), "stderr": f"path escapes tree: {escaping!r}"})
-                break
-            if git_head:
-                ok, err, fb = _git_apply_collect_feedback(framework_root, patch)
-                if not ok:
-                    apply_errors.append({"patch": str(patch), "stderr": err})
-                    if fb is not None:
-                        apply_feedbacks.append(fb)
-                    break
-            else:
-                ok, err, backups, fb = _apply_patch_no_git(
-                    framework_root,
-                    patch,
-                    recovery_root / "patch_backups",
-                    seq_offset=len(nogit_patch_backups),
-                )
-                nogit_patch_backups.extend(backups)
-                if not ok:
-                    apply_errors.append({"patch": str(patch), "stderr": err})
-                    if fb is not None:
-                        apply_feedbacks.append(fb)
-                    break
-            applied.append(patch)
-
-        if apply_errors:
-            await self._maybe_write_framework_kb_record(
-                _KbLesson("rejected_apply_fail", 0.0), done_payload=done_payload, params=params, extra=extra
-            )
-            lane = _derive_lane(params)
-            base_result: dict[str, Any] = {
-                "status": "apply_failed",
-                "error_class": "git_apply_failed",
-                "error": apply_errors,
-                "specialist_task_id": specialist_task_id,
-                "patches_applied": [],
-                "patches_reverted": [],
-                "workspace": str(output_root),
-                "lane": lane,
-                "retry_feedback": [fb.to_dict() for fb in apply_feedbacks],
-                "prior_patches": [str(p) for p in patch_paths],
-            }
-            if bool(params.get("enablement")):
-                base_result["enablement"] = True
-            return base_result
-
-        if artifact_specs:
-            applied_artifacts, artifact_apply_errors = self._apply_artifacts(
-                artifact_specs,
-                backup_root=recovery_root / "artifact_backups",
-            )
-            attempt.applied_artifacts = applied_artifacts
-            if artifact_apply_errors:
-                await self._maybe_write_framework_kb_record(
-                    _KbLesson("rejected_apply_fail", 0.0), done_payload=done_payload, params=params, extra=extra
-                )
-                return {
-                    "status": "apply_failed",
-                    "error_class": "artifact_install_failed",
-                    "error": artifact_resolve_errors + artifact_apply_errors,
-                    "specialist_task_id": specialist_task_id,
-                    "patches_applied": [],
-                    "patches_reverted": [],
-                    "artifacts_applied": [],
-                    "workspace": str(output_root),
-                }
-
-        # Inherited first, this round last: inheriting is not pinning.
-        extra_server_args_applied = _merge_established_server_args(inherited_args, proposal_extra_args)
-        extra_envs_applied = {**inherited_envs, **proposal_extra_envs}
-
-        if params.get("apply_only"):
-            return {
-                "status": "applied_no_bench",
-                "specialist_task_id": specialist_task_id,
-                "patches_applied": [str(p) for p in applied],
-                "patches_reverted": [],
-                "artifacts_applied": applied_artifacts,
-                "extra_server_args_applied": extra_server_args_applied,
-                "extra_envs_applied": extra_envs_applied,
-                "dropped_env_overrides": dropped_env_overrides,
-                "reason": "apply_only=True; benchmark skipped",
-                "workspace": str(output_root),
-            }
-
-        attempt.output_root = output_root
-        attempt.extra_envs_applied = extra_envs_applied
-        attempt.extra_server_args_applied = extra_server_args_applied
-        attempt.dropped_env_overrides = dropped_env_overrides
         return None
+
+    async def _refuse_apply(
+        self,
+        attempt: IntegrateAttempt,
+        params: dict[str, Any],
+        extra: dict[str, Any],
+        error_class: str,
+        error: Any,
+        **fields: Any,
+    ) -> dict[str, Any]:
+        """Refuse the round at the apply stage, filing the lesson against the patch's PR identity."""
+        await self._maybe_write_framework_kb_record(
+            _KbLesson("rejected_apply_fail", 0.0), done_payload=attempt.done_payload, params=params, extra=extra
+        )
+        return _apply_failed(attempt, error_class, error, **fields)
 
     async def _stage_gate(
         self,
@@ -2970,7 +3222,7 @@ class IntegratePatchExecutor:
                 "reason": str(exc),
                 "workspace": str(output_root),
             }
-        except Exception as exc:  # noqa: BLE001
+        except (OSError, subprocess.SubprocessError) as exc:
             return {
                 "status": "reverted",
                 "error_class": "bench_exception",
@@ -3036,9 +3288,9 @@ class IntegratePatchExecutor:
         ``enablement_effective_config``, captured from the variant that ran: the
         materialized YAML holds only the base layer, so the revalidation baseline
         needs them to re-run the graded config.
-        When an attempt runtime was provisioned, the stack action is recorded in
-        the result (``enablement_kept_stack_action``) so it survives rearm. On
-        REVERT / non-KEEP, the attempt runtime dir is GC'd.
+        When an attempt runtime was provisioned, an accepted round (kept or
+        advanced) records it in the result (``enablement_kept_stack_action``) so
+        it survives rearm. On REVERT, the attempt runtime dir is GC'd.
 
         Every verdict carries ``framework_root`` (the source tree patches were applied
         against, needed to replay them on a fresh machine).
@@ -3048,12 +3300,11 @@ class IntegratePatchExecutor:
         output_root = attempt.output_root
         assert output_root is not None
         framework_root = attempt.framework_root
+        root_text = str(framework_root or "")
         applied = attempt.applied
         applied_artifacts = attempt.applied_artifacts
         extra_envs_applied = attempt.extra_envs_applied
         extra_server_args_applied = attempt.extra_server_args_applied
-        stack_action = attempt.stack_action
-        provision_result = attempt.provision_result
 
         from hyperloom.common.failure_signature import runnable_decision
 
@@ -3061,17 +3312,13 @@ class IntegratePatchExecutor:
         from .benchmark_result import is_valid_measurement
 
         new_tput = bench_result.get("output_throughput")
+        patches_applied = [str(patch) for patch in applied]
 
         correctness_ok, eval_provenance = enablement_correctness(params, gate_evidence)
 
-        # Both halves of the gate are the persisted observations of the two
-        # boots, read back by path; neither side re-classifies a log. A half
-        # that cannot be loaded is named on the verdict rather than re-read.
         after_loaded = load_boot_observation(bench_result.get("boot_observation_path"))
         before_loaded = load_boot_observation(params.get("enablement_before_observation_path"))
-        after_verdict = verdict_of(after_loaded.observation) if after_loaded.observation is not None else None
-        after_signature = after_verdict.signature if after_verdict is not None else None
-        bringup_evidence = {
+        evidence = {
             "before_observation": (
                 observation_summary(before_loaded.observation) if before_loaded.observation is not None else None
             ),
@@ -3082,6 +3329,7 @@ class IntegratePatchExecutor:
             ),
             "after_observation_path": after_loaded.path,
             "after_observation_degraded": after_loaded.degraded,
+            **eval_provenance,
         }
 
         # A measurement exists only where the client completed requests, so it
@@ -3100,7 +3348,7 @@ class IntegratePatchExecutor:
                 "patches_applied": [],
                 "patches_reverted": [],
                 "artifacts_reverted": [],
-                "framework_root": str(framework_root or ""),
+                "framework_root": root_text,
                 "output_throughput": new_tput,
                 "enablement": True,
                 "runnable": False,
@@ -3109,8 +3357,7 @@ class IntegratePatchExecutor:
                 "setup_commands_applied": attempt.setup_commands_applied,
                 "bench_result": bench_result,
                 "workspace": str(output_root),
-                **bringup_evidence,
-                **eval_provenance,
+                **evidence,
             }
 
         # Accepted: the boot either runs or reached a deeper wall. Both keep the
@@ -3124,35 +3371,39 @@ class IntegratePatchExecutor:
                 commit_failure,
                 "enablement progress",
                 enablement=True,
-                framework_root=str(framework_root or ""),
+                framework_root=root_text,
             )
 
         if advanced:
-            wall = after_loaded.observation.stage_failed if after_loaded.observation is not None else None
             await self._maybe_write_framework_kb_record(
                 _KbLesson("integrated", 0.0), done_payload=done_payload, params=params, extra=extra
             )
+            wall = None
+            signature = None
+            if after_loaded.observation is not None:
+                wall = after_loaded.observation.stage_failed
+                verdict = verdict_of(after_loaded.observation)
+                signature = verdict.signature if verdict is not None else None
             return {
                 "status": "advanced",
                 "specialist_task_id": specialist_task_id,
-                "patches_applied": [str(p) for p in applied],
-                # An ADVANCED round stacks its patch and never reaches the
-                # KEEP capture, so without this the tree its patch applied
-                # to is never recorded and a later KEEP binds it to that
-                # round's framework root instead. The capture proves a patch
-                # against the tree it is bound to, so a mis-binding refuses
-                # the whole recipe -- for a legitimate multi-root stack a
-                # false refusal rather than a false pass.
+                "patches_applied": patches_applied,
+                # An ADVANCED round stacks its patch and never reaches the KEEP capture,
+                # so without this the tree its patch applied to is never recorded and a
+                # later KEEP binds it to that round's framework root instead. The capture
+                # proves a patch against the tree it is bound to, so a mis-binding refuses
+                # the whole recipe -- for a legitimate multi-root stack a false refusal
+                # rather than a false pass.
                 "enablement_patch_roots": attempt.shared_state.enablement.accepted_patch_roots(
                     done_payload=done_payload,
                     applied=applied,
-                    framework_root=str(framework_root or ""),
+                    framework_root=root_text,
                 ),
                 "patches_reverted": [],
                 "artifacts_applied": applied_artifacts,
                 "extra_envs_applied": extra_envs_applied,
                 "extra_server_args_applied": extra_server_args_applied,
-                "framework_root": str(framework_root or ""),
+                "framework_root": root_text,
                 "output_throughput": new_tput,
                 "enablement": True,
                 "advanced": True,
@@ -3163,15 +3414,14 @@ class IntegratePatchExecutor:
                     f"to a new gap ({wall.name if wall is not None else 'no wall recorded'})"
                 ),
                 "setup_commands_applied": attempt.setup_commands_applied,
-                "after_signature": after_signature.to_dict() if after_signature is not None else {},
+                "after_signature": signature.to_dict() if signature is not None else {},
                 "enablement_launch_log": str(bench_result.get("error") or ""),
-                # The wall this round advanced to, for the next round's
-                # before half.
+                # The wall this round advanced to, for the next round's before half.
                 "enablement_observation_path": after_loaded.path,
-                **bringup_evidence,
                 "bench_result": bench_result,
                 "workspace": str(output_root),
-                **eval_provenance,
+                **evidence,
+                **attempt.accepted_runtime_records(),
             }
 
         provisional = correctness_ok is None
@@ -3184,12 +3434,12 @@ class IntegratePatchExecutor:
         kept_result: dict[str, Any] = {
             "status": "kept",
             "specialist_task_id": specialist_task_id,
-            "patches_applied": [str(p) for p in applied],
+            "patches_applied": patches_applied,
             "patches_reverted": [],
             "artifacts_applied": applied_artifacts,
             "extra_server_args_applied": extra_server_args_applied,
             "extra_envs_applied": extra_envs_applied,
-            "framework_root": str(framework_root or ""),
+            "framework_root": root_text,
             "output_throughput": new_tput,
             "enablement": True,
             "runnable": True,
@@ -3199,33 +3449,14 @@ class IntegratePatchExecutor:
             "setup_commands_applied": attempt.setup_commands_applied,
             "bench_result": bench_result,
             "workspace": str(output_root),
-            **bringup_evidence,
             # Base YAML only; the env/arg layers live in enablement_effective_config.
             "enablement_accepted_config_path": str(bench_result.get("materialized_config") or ""),
             # Captured from the variant this leg launched, so a revalidation
             # replays the graded configuration rather than a re-derived one.
             "enablement_effective_config": dict(bench_result.get("effective_config") or {}),
-            **eval_provenance,
+            **evidence,
         }
-        # Record the KEEP'd attempt runtime so it survives rearm and every later
-        # bench in this session re-activates it.
-        if stack_action is not None and provision_result is not None and getattr(provision_result, "ok", False):
-            # The action names a branch, a tag or an unpinned spec list; the
-            # resolved identity beside it is what makes the acquisition a
-            # rebuild path rather than a source that moves.
-            kept_result["enablement_kept_stack_action"] = {
-                **stack_action.to_state(),
-                "resolved_ref": str(getattr(provision_result, "resolved_ref", "") or ""),
-                "resolved_packages": {
-                    str(k): dict(v) for k, v in (getattr(provision_result, "resolved_packages", {}) or {}).items()
-                },
-                # The clone and the install inherit the whole process
-                # environment, so a runtime acquired over an authenticated
-                # remote replays no better than an install that was.
-                "credential_channels": detect_credential_channels(os.environ),
-            }
-            kept_result["enablement_active_runtime"] = provision_result.runtime.to_state()
-            kept_result["installed_versions"] = dict(getattr(provision_result, "installed_versions", {}) or {})
+        kept_result.update(attempt.accepted_runtime_records())
         # Snapshot a manifest of the localized closure that survives rearm, so
         # the closure is recorded and not re-fetched.
         manifest = await asyncio.to_thread(
@@ -3253,177 +3484,74 @@ class IntegratePatchExecutor:
         params: dict[str, Any],
         bench_result: dict[str, Any],
     ) -> dict[str, Any]:
-        """Capture the per-root identity, payload and assertions of this KEEP.
-
-        Every value here is read at the KEEP: the roots the resolvers bound, the
-        pre-mutation ``base_sha`` captured before the apply, the byte-exact
-        content of each declared target, and the versions observed through the
-        interpreter the accepted bench launched.
-
-        The declared set is the whole accepted stack, every earlier round's
-        patches and artifacts included, and not this round's diff. A KEEP is
-        committed and never re-applied, so the round that captures only what it
-        wrote snapshots the last round's files while the recipe still carries a
-        patch step per earlier round -- a consumer replaying that rebuilds a tree
-        missing every round but the last, and the decision certified it.
-        Inherited identity wins over this round's reading of it for the same
-        reason: ``base_sha`` has to keep naming the tree the first accepted round
-        applied to, because this round's HEAD already contains its predecessors.
-        """
-        from ...enablement.recipe.keep_probe import KeepEvidence, graded_framework, probe_keep_environment
-        from ...enablement.recipe.keep_records import (
-            accepted_stack_artifacts,
-            build_extensions_not_carried,
-            build_root_records,
-            capture_root_snapshots,
-            collect_contributions,
-            declared_targets,
-            levers_without_readers,
-        )
-        from hyperloom.inference_optimizer.framework_paths import resolve_session_framework_root
-        from ._patch_snapshot import overlay_inventory_without_base, replayed_stack_ops
-
-        specialist_task_id = attempt.specialist_task_id
-        framework_root = attempt.framework_root
-        applied = attempt.applied
-        applied_artifacts = attempt.applied_artifacts
-        done_payload = attempt.done_payload
-        provision_result = attempt.provision_result
-        root = str(framework_root or "")
+        """Capture the per-root identity, payload and assertions of this KEEP."""
+        root = str(attempt.framework_root or "")
         enablement = attempt.shared_state.enablement
         patch_roots = enablement.accepted_patch_roots(
-            done_payload=done_payload,
-            applied=applied,
+            done_payload=attempt.done_payload,
+            applied=attempt.applied,
             framework_root=root,
         )
-        # Read from the durable stack: the round lifecycle does not dispatch
-        # the base set with the round.
-        stack_artifacts = accepted_stack_artifacts(
+        # Read from the durable stack: the round lifecycle does not dispatch the
+        # base set with the round.
+        stack_artifacts = keep_records.accepted_stack_artifacts(
             inherited=enablement.kept_artifacts,
-            applied=applied_artifacts,
+            applied=attempt.applied_artifacts,
         )
-        contributions = collect_contributions(
+        contributions = keep_records.collect_contributions(
             framework_root=root,
             patch_roots=patch_roots,
             artifacts=stack_artifacts,
         )
-        git_roots = [r for r in contributions if r and _is_git_tree(Path(r))]
+        git_roots = [tree for tree in contributions if tree and _is_git_tree(Path(tree))]
         # Only what was captured before this round touched each tree, and only
         # where no earlier round already named the tree the stack applies to. A
         # root left with no sha either way keeps none, which the decision refuses
         # rather than answering with a HEAD that has moved since.
-        captured: dict[str, str] = attempt.base_sha_by_root
         inherited_sha = enablement.inherited_base_shas()
-        base_sha_by_root = {r: inherited_sha.get(r, "") or captured.get(r, "") for r in git_roots}
-        records = build_root_records(
+        captured = attempt.base_sha_by_root
+        base_sha_by_root = {tree: inherited_sha.get(tree, "") or captured.get(tree, "") for tree in git_roots}
+        records = keep_records.build_root_records(
             contributions=contributions,
             base_sha_by_root=base_sha_by_root,
             git_roots=git_roots,
-            session_framework_root=resolve_session_framework_root(),
+            session_framework_root=framework_paths.resolve_session_framework_root(),
         )
         # One classification per root: a rel path is only meaningful against the
         # tree its patch was bound to, and reading them all against this round's
-        # root would name files that root does not have.
-        #
-        # Apply order, not dict order: ``patch_roots`` is keyed by patch path and
-        # its iteration order follows how the mapping was assembled, while the
-        # operation a later patch declares must override an earlier one's for the
-        # same file.
-        ordered_patches = enablement.accepted_stack(applied)
-        # ``EnablementRound.accepted_patch_roots`` binds only patches that ARE in the accepted
-        # stack, so this normally adds nothing. It stays because the durable
-        # mapping outlives the round that wrote it: an entry for a patch no
-        # longer in ``kept_patches`` would otherwise contribute a root record
-        # with no declared target, and be refused as an uncaptured root rather
-        # than classified. First, because a position it does not have cannot
-        # override one that is known.
-        ordered_patches = [p for p in patch_roots if p not in set(ordered_patches)] + ordered_patches
-        patches_by_root: dict[str, list[Path]] = {}
-        for patch_path in dict.fromkeys(ordered_patches):
-            patch_root = str(patch_roots.get(patch_path) or "")
-            if patch_root:
-                patches_by_root.setdefault(patch_root, []).append(Path(patch_path))
+        # root would name files that root does not have. Per patch as well as per
+        # root: the decision cross-checks each patch step against the snapshot of
+        # the files that step declares, and it cannot read the diffs itself.
         targets: dict[str, dict[str, str]] = {}
-        # Per patch as well as per root: the decision cross-checks each patch step
-        # against the snapshot of the files that step declares, and it cannot read
-        # the diffs itself.
         patch_targets: dict[str, dict[str, str]] = {}
-        for patch_root, patches in patches_by_root.items():
-            root_base = str(base_sha_by_root.get(patch_root) or "")
-            # Proven, not believed: the whole stack is replayed from its base in
-            # an isolated tree and the result compared against what is about to
-            # be captured. Per root and over the ORDERED stack, because a patch's
-            # preimage is the tree its predecessors left behind, not this root's
-            # base and not the final tree.
-            replayed = replayed_stack_ops(Path(patch_root), patches, base_sha=root_base)
-            if replayed is None and root_base:
-                log.warning(
-                    "integrate_patch: enablement KEEP cannot replay the stack on %s from %s; "
-                    "its targets are left undeclared and the recipe is refused",
-                    patch_root,
-                    root_base,
-                )
-                continue
-            if replayed is None and root_base:
-                continue
-            if replayed is None:
-                # No base commit: a framework installed from a wheel, which is
-                # the ordinary production shape. There is no "check out the base
-                # and apply" to prove, but that is not how such a root is
-                # replayed -- it is replayed by OVERLAYING the captured files,
-                # which is exactly what building an image from this recipe does.
-                # Declaring nothing here removes those files from the capture
-                # and with them the only replay path that applies, leaving the
-                # recipe unusable in the case it is most needed for.
-                #
-                # What is NOT claimed is that the patch was proven applied:
-                # there is no preimage to prove it against. Do not read an
-                # empty base_sha as the thing that withholds that claim -- the
-                # judge's base_sha refusal is gated on ``is_git``, so it never
-                # fires for a wheel root and this path can and does reach
-                # ``sufficient``. The protection that does apply is the op map
-                # itself: ``overlay_inventory_without_base`` returns None for
-                # anything it cannot PROVE, and undeclared targets are what the
-                # judge blocks on. The targets are what the overlay must
-                # contain, not evidence that the patch applied cleanly.
-                replayed = {}
-                for patch in patches:
-                    ops = overlay_inventory_without_base(Path(patch_root), patch)
-                    if ops is None:
-                        log.warning(
-                            "integrate_patch: enablement KEEP cannot resolve %s against the "
-                            "base-less root %s; its targets are left undeclared",
-                            patch,
-                            patch_root,
-                        )
-                        continue
-                    replayed[str(patch)] = ops
-            for patch_path, ops in replayed.items():
+        for patch_root, patches in _patch_stack_by_root(enablement, patch_roots, attempt.applied).items():
+            base_sha = str(base_sha_by_root.get(patch_root) or "")
+            for patch_path, ops in _declared_stack_ops(patch_root, patches, base_sha=base_sha).items():
                 if not ops:
                     continue
                 patch_targets[patch_path] = ops
                 targets.setdefault(patch_root, {}).update(ops)
-        for declared_root, ops in declared_targets(
+        for declared_root, ops in keep_records.declared_targets(
             framework_root=root,
             upserted=(),
             deleted=(),
             artifacts=stack_artifacts,
         ).items():
             targets.setdefault(declared_root, {}).update(ops)
-        snapshots = capture_root_snapshots(
+        snapshots = keep_records.capture_root_snapshots(
             records=records,
             targets=targets,
             dest_root=self.session_dir / "optimization_stack" / "enablement",
             session_dir=self.session_dir,
         )
         materialized_config = str(bench_result.get("materialized_config") or "")
-        framework = graded_framework(params, materialized_config)
-        closure, assertions = probe_keep_environment(
+        framework = keep_probe.graded_framework(params, materialized_config)
+        closure, assertions = keep_probe.probe_keep_environment(
             params,
-            KeepEvidence(
+            keep_probe.KeepEvidence(
                 build_manifest=enablement.build_manifest,
-                specialist_task_id=specialist_task_id,
-                provision_result=provision_result,
+                specialist_task_id=attempt.specialist_task_id,
+                provision_result=attempt.provision_result,
             ),
             framework=framework,
             materialized_config=materialized_config,
@@ -3447,14 +3575,14 @@ class IntegratePatchExecutor:
             "enablement_launch_argv_refused": argv_refused,
             "enablement_environment_closure": closure,
             "enablement_installed_versions_at_keep": assertions,
-            "enablement_build_extensions_not_carried": build_extensions_not_carried(
+            "enablement_build_extensions_not_carried": keep_records.build_extensions_not_carried(
                 enablement,
-                framework_root,
-                specialist_task_id=specialist_task_id,
+                attempt.framework_root,
+                specialist_task_id=attempt.specialist_task_id,
             ),
-            "enablement_levers_without_readers": levers_without_readers(
+            "enablement_levers_without_readers": keep_records.levers_without_readers(
                 enablement,
-                framework_root,
+                attempt.framework_root,
                 framework=framework,
                 effective_config=bench_result.get("effective_config"),
             ),
@@ -3527,7 +3655,7 @@ class IntegratePatchExecutor:
                 },
             )
             return dict(snap) if snap else {}
-        except Exception:
+        except (OSError, ValueError, TypeError):
             log.exception("integrate_patch: localization snapshot failed")
             return {}
 
@@ -3544,13 +3672,7 @@ class IntegratePatchExecutor:
         specialist_task_id = attempt.specialist_task_id
         shared_state = attempt.shared_state
         done_payload = attempt.done_payload
-        output_root = attempt.output_root
-        assert output_root is not None
-        framework_root = attempt.framework_root
-        applied = attempt.applied
-        applied_artifacts = attempt.applied_artifacts
-        extra_envs_applied = attempt.extra_envs_applied
-        extra_server_args_applied = attempt.extra_server_args_applied
+        assert attempt.output_root is not None
         # Grade against the current live anchor, not a stale task snapshot.
         base_tput, anchor_drifted = resolve_anchor_with_drift(
             float(params.get("base_tput") or 0.0),
@@ -3563,7 +3685,6 @@ class IntegratePatchExecutor:
             )
 
         keep_threshold_pct = float(params.get("keep_threshold_pct", self.keep_threshold_pct))
-        measured_against = _measured_against(params, base_tput=base_tput)
 
         stopped = stopped_by_the_run_class(bench_result.get("error_class"))
         if stopped is not None:
@@ -3576,24 +3697,17 @@ class IntegratePatchExecutor:
                 "patches_reverted": [],
                 "artifacts_reverted": [],
                 "bench_result": bench_result,
-                "workspace": str(output_root),
+                "workspace": str(attempt.output_root),
             }
 
-        # ``new_tput`` is reported as ``output_throughput``; the KEEP gate is
-        # graded on whichever axis this session uses, both sides from one
-        # resolver. On the output axis the drift-resolved ``base_tput`` is the
-        # reference, which is what resolve_anchor_with_drift exists for.
-        new_tput = bench_result.get("output_throughput")
         graded = resolve_graded_comparison(shared_state, bench_result, keep_threshold_pct=keep_threshold_pct)
         if not graded.comparable:
             log.info("integrate_patch: performance comparison unavailable (%s)", graded.degrade_reason)
         if not graded.graded_on_intvty:
-            delta_pct = gain_pct(new_tput, base_tput)
+            delta_pct = gain_pct(bench_result.get("output_throughput"), base_tput)
         elif graded.verdict == VERDICT_KEEP:
             delta_pct = gain_pct(graded.candidate, graded.reference)
         else:
-            # A REVERT has no promotable delta; the reason travels to the
-            # ledger so the agent can tell it from a failed run.
             log.info(
                 "integrate_patch: %s intvty %.1f->%.1f tput %.1f->%.1f",
                 graded.verdict,
@@ -3606,15 +3720,11 @@ class IntegratePatchExecutor:
 
         accuracy_pass: bool | None = gate_evidence.get("accuracy_pass")
         fw_authored = bool(params.get("framework_agent_authoring") or params.get("framework_agent_candidate_id"))
-        acc_required = bool(params.get("require_accuracy_for_keep", fw_authored))
-        acc_baseline = params.get("accuracy_baseline")
-        if acc_required and not acc_baseline:
-            _ss = extra.get("shared_state") or extra.get("state")
-            if _ss is not None:
-                acc_baseline = getattr(_ss, "baseline_accuracy", None)
+        required = bool(params.get("require_accuracy_for_keep", fw_authored))
+        acc_baseline = params.get("accuracy_baseline")  # filled by _stage_resolve
         acc_block, acc_reason, acc_degraded = accuracy_keep_block(
             accuracy_pass,
-            required=acc_required,
+            required=required,
             baseline_accuracy=acc_baseline,
         )
         if acc_degraded:
@@ -3623,6 +3733,8 @@ class IntegratePatchExecutor:
                 "KEEP allowed on throughput only (task=%s)",
                 specialist_task_id,
             )
+        acc_delta_pct = _accuracy_delta_pct(gate_evidence.get("accuracy"), acc_baseline)
+
         gate_pass = (
             graded.comparable
             and delta_pct is not None
@@ -3630,13 +3742,13 @@ class IntegratePatchExecutor:
             and not graded.veto_reason
             and not acc_block
         )
-        resolves_finding = str(_done_field(done_payload, "resolves_finding") or "").strip()
+        fix_finding = str(_done_field(done_payload, "resolves_finding") or "").strip()
         fix_refusals: list[str] = []
         correctness_fix = False
-        if not gate_pass and resolves_finding:
+        if not gate_pass and fix_finding:
             fix_delta_pct = gain_pct(graded.candidate, graded.reference) if graded.graded_on_intvty else delta_pct
             fix_refusals = _correctness_fix_refusals(
-                resolves_finding,
+                fix_finding,
                 shared_state=shared_state,
                 bench_result=bench_result,
                 graded=graded,
@@ -3645,24 +3757,16 @@ class IntegratePatchExecutor:
             if not fix_refusals:
                 gate_pass = correctness_fix = True
                 delta_pct = fix_delta_pct
-        _ss_kb = extra.get("shared_state") or extra.get("state")
-        acc_delta_pct = _accuracy_delta_pct(
-            gate_evidence.get("accuracy"),
-            acc_baseline or getattr(_ss_kb, "baseline_accuracy", None),
-        )
-        cfg_fingerprint = canonical_fingerprint(
-            params.get("extra_server_args"),
-            params.get("extra_envs"),
-        )
         measured = _PatchMeasurement(
-            bench_result,
-            new_tput,
-            delta_pct,
-            base_tput,
-            keep_threshold_pct,
-            accuracy_pass,
-            acc_delta_pct,
-            cfg_fingerprint,
+            bench_result=bench_result,
+            new_tput=bench_result.get("output_throughput"),
+            delta_pct=delta_pct,
+            base_tput=base_tput,
+            keep_threshold_pct=keep_threshold_pct,
+            accuracy_pass=accuracy_pass,
+            acc_delta_pct=acc_delta_pct,
+            cfg_fingerprint=canonical_fingerprint(params.get("extra_server_args"), params.get("extra_envs")),
+            measured_against=_measured_against(params, base_tput=base_tput),
         )
 
         switch_manifest: list[dict[str, Any]] = list(attempt.switch_manifest)
@@ -3676,7 +3780,7 @@ class IntegratePatchExecutor:
         # rather than to a switch. On a live session a four-switch bundle reached
         # +65.5% and was reverted whole on the gate, discarding three switches that
         # were never implicated along with the one that was. Default-off code costs
-        # nothing to keep and explore can bisect it per lever — but only if the tree
+        # nothing to keep and explore can bisect it per lever -- but only if the tree
         # is genuinely unchanged with every switch unset, which is exactly what this
         # leg measures. An unswitched patch has no "off" state to fall back to, so
         # it still reverts without spending the leg.
@@ -3691,260 +3795,191 @@ class IntegratePatchExecutor:
             parity = await self._switch_off_parity(
                 _PatchBench.for_attempt(attempt, params), switch_manifest=switch_manifest, base_tput=base_tput
             )
-            if not parity.get("ok"):
-                # An unmeasurable parity leg reverts under its own verdict: the patch
-                # was never shown to break, so neither the log line nor the KB lesson
-                # may say that it did.
-                from ...knowledge import kb_writeback as _kb
+        if not parity.get("ok"):
+            # An unmeasurable parity leg reverts under its own verdict: the patch was
+            # never shown to break, so neither the log line nor the KB lesson may say
+            # that it did.
+            from ...knowledge import kb_writeback as _kb
 
-                inconclusive = bool(parity.get("inconclusive"))
-                error_class = "switch_off_parity_inconclusive" if inconclusive else "switch_off_parity_failed"
-                kb_outcome = (
-                    _kb.OUTCOME_REVERTED_PARITY_INCONCLUSIVE if inconclusive else _kb.OUTCOME_REVERTED_SWITCH_OFF_PARITY
-                )
-                log.warning(
-                    "integrate_patch: switch-off parity %s task=%s: %s",
-                    "INCONCLUSIVE" if inconclusive else "FAILED",
-                    specialist_task_id,
-                    parity.get("reason"),
-                )
-                await self._maybe_write_framework_kb_record(
-                    measured.lesson(kb_outcome), done_payload=done_payload, params=params, extra=extra
-                )
-                return {
-                    "status": "reverted",
-                    "error_class": error_class,
-                    "specialist_task_id": specialist_task_id,
-                    "patches_applied": [],
-                    "patches_reverted": [],
-                    "artifacts_reverted": [],
-                    "output_throughput": new_tput,
-                    "delta_pct": delta_pct,
-                    "accuracy_pass": accuracy_pass,
-                    "base_tput": base_tput,
-                    "measured_against": measured_against,
-                    "keep_threshold_pct": keep_threshold_pct,
-                    "reason": str(parity.get("reason") or "switch-off parity failed"),
-                    "switch_off_parity": parity,
-                    "bench_result": bench_result,
-                    "workspace": str(output_root),
-                }
-
-        if not gate_pass:
-            # Two-tier verdict for a framework-rewrite patch. Every rewrite in it
-            # is behind a switch that defaults OFF, so keeping the code with the
-            # switches unset changes nothing at runtime — which makes reverting
-            # it the more expensive choice. The bundle failed as a bundle, but a
-            # bundle usually mixes rewrites that pay with one that does not, and
-            # some of them are enablers that cannot pay until measured together
-            # with what they unlock. So keep the code inert, register the switches
-            # as levers, and let the explore phase find the subset that wins.
-            #
-            # A quality regression does not condemn the bundle either, for the same
-            # reason: the switches are benched together, so a moved output says
-            # "at least one of these is wrong", not "all of them are". The bundle
-            # stays inert and explore bisects it per lever — the verdict carries
-            # ``quality_unverified`` so nothing downstream mistakes it for a clean
-            # keep. What still condemns it is failing parity, handled above: code
-            # that is not inert when disabled would skew every later measurement,
-            # and that check now runs on this path too.
-            if switch_manifest and applied:
-                return await self._keep_inert_switches(attempt, measured, params=params, extra=extra, parity=parity)
-            reasons: list[str] = []
-            if not graded.comparable:
-                reasons.append(f"performance comparison unavailable: {graded.degrade_reason}")
-            elif graded.graded_on_intvty and delta_pct is None:
-                reasons.append(
-                    graded.veto_reason
-                    or f"interactivity p50 {graded.reference:.1f}->{graded.candidate:.1f} did not clear the interactivity KEEP gate"
-                )
-            elif delta_pct is None:
-                reasons.append("no measurable throughput")
-            elif delta_pct < keep_threshold_pct:
-                reasons.append(f"throughput delta {delta_pct:+.2f}% < keep_threshold {keep_threshold_pct:.2f}%")
-            elif graded.veto_reason:
-                reasons.append(graded.veto_reason)
-            if acc_block and acc_reason:
-                reasons.append(acc_reason)
-            if fix_refusals:
-                reasons.append(f"correctness fix {resolves_finding} refused: {'; '.join(fix_refusals)}")
-            _probe_reason = eval_probe_summary(gate_evidence.get("eval_probe"))
-            if _probe_reason:
-                reasons.append(_probe_reason)
-            _tput_ok = delta_pct is not None and delta_pct >= keep_threshold_pct
-            revert_status = (
-                "accuracy_unavailable_reject"
-                if (acc_block and accuracy_pass is None and _tput_ok) or fix_refusals == [_FIX_ACCURACY_UNAVAILABLE]
-                else "reverted"
+            inconclusive = bool(parity.get("inconclusive"))
+            log.warning(
+                "integrate_patch: switch-off parity %s task=%s: %s",
+                "INCONCLUSIVE" if inconclusive else "FAILED",
+                specialist_task_id,
+                parity.get("reason"),
             )
             await self._maybe_write_framework_kb_record(
-                measured.lesson("reverted_smoke_fail"), done_payload=done_payload, params=params, extra=extra
+                measured.lesson(
+                    _kb.OUTCOME_REVERTED_PARITY_INCONCLUSIVE if inconclusive else _kb.OUTCOME_REVERTED_SWITCH_OFF_PARITY
+                ),
+                done_payload=done_payload,
+                params=params,
+                extra=extra,
             )
-            return {
-                "status": revert_status,
-                "specialist_task_id": specialist_task_id,
-                "patches_applied": [],
-                "patches_reverted": [],
-                "artifacts_reverted": [],
-                "output_throughput": new_tput,
-                "delta_pct": delta_pct,
-                "accuracy_pass": accuracy_pass,
-                "base_tput": base_tput,
-                "measured_against": measured_against,
-                "keep_threshold_pct": keep_threshold_pct,
-                "reason": "; ".join(reasons) or "gate failed",
-                "bench_result": bench_result,
-                "workspace": str(output_root),
-            }
-
-        await self._maybe_write_framework_kb_record(
-            measured.lesson("integrated"), done_payload=done_payload, params=params, extra=extra
-        )
-        commit_failure, keep_committed = self._commit_accepted_work(
-            attempt, f"hyperloom KEEP {specialist_task_id} ({delta_pct:+.2f}%)"
-        )
-        if commit_failure:
-            return _uncommitted_revert(
+            return _perf_revert(
                 attempt,
-                commit_failure,
-                "KEEP",
-                output_throughput=new_tput,
-                delta_pct=delta_pct,
-                measured_against=measured_against,
-                bench_result=bench_result,
+                measured,
+                status="reverted",
+                reason=str(parity.get("reason") or "switch-off parity failed"),
+                error_class="switch_off_parity_inconclusive" if inconclusive else "switch_off_parity_failed",
+                switch_off_parity=parity,
             )
 
-        source_snapshot_dir = ""
-        source_manifest_path = ""
-        source_target_files: list[str] = []
-        source_base_sha = ""
-        source_snapshot_complete = False
-        source_import_root_val = ""
-        source_realized_patch = ""
-        source_artifacts_outside_root = 0
+        if gate_pass:
+            await self._maybe_write_framework_kb_record(
+                measured.lesson("integrated"), done_payload=done_payload, params=params, extra=extra
+            )
+            commit_failure, keep_committed = self._commit_accepted_work(
+                attempt, f"hyperloom KEEP {specialist_task_id} ({delta_pct:+.2f}%)"
+            )
+            if commit_failure:
+                return _uncommitted_revert(
+                    attempt,
+                    commit_failure,
+                    "KEEP",
+                    output_throughput=measured.new_tput,
+                    delta_pct=delta_pct,
+                    measured_against=measured.measured_against,
+                    bench_result=bench_result,
+                )
+            return _kept_patch(
+                attempt,
+                measured,
+                params=params,
+                reason=(
+                    f"correctness fix {fix_finding} verified at {_fix_axis(graded)} delta {measured.delta_pct:+.2f}%"
+                    if correctness_fix
+                    else f"throughput delta {measured.delta_pct:+.2f}% >= {measured.keep_threshold_pct:.2f}%"
+                ),
+                keep_reason=KEEP_REASON_CORRECTNESS_FIX if correctness_fix else "",
+                resolves_finding=fix_finding if correctness_fix else "",
+                # The bundle cleared the gate, so its switches join the running
+                # configuration and are registered as levers that are already on.
+                # Attribution from here is leave-one-out.
+                framework_levers=switch_manifest,
+                framework_lever_outcome=("default_on" if switch_manifest else ""),
+                switch_off_parity=parity,
+                **self._capture_source_layer(attempt, params, committed=keep_committed),
+            )
+
+        # Two-tier verdict for a framework-rewrite patch. Every rewrite in it
+        # is behind a switch that defaults OFF, so keeping the code with the
+        # switches unset changes nothing at runtime -- which makes reverting
+        # it the more expensive choice. The bundle failed as a bundle, but a
+        # bundle usually mixes rewrites that pay with one that does not, and
+        # some of them are enablers that cannot pay until measured together
+        # with what they unlock. So keep the code inert, register the switches
+        # as levers, and let the explore phase find the subset that wins.
+        #
+        # A quality regression does not condemn the bundle either, for the same
+        # reason: the switches are benched together, so a moved output says
+        # "at least one of these is wrong", not "all of them are". The bundle
+        # stays inert and explore bisects it per lever -- the verdict carries
+        # ``quality_unverified`` so nothing downstream mistakes it for a clean
+        # keep. What still condemns it is failing parity, handled above: code
+        # that is not inert when disabled would skew every later measurement,
+        # and that check now runs on this path too.
+        if switch_manifest and attempt.applied:
+            return await self._keep_inert_switches(attempt, measured, params=params, extra=extra, parity=parity)
+        await self._maybe_write_framework_kb_record(
+            measured.lesson("reverted_smoke_fail"), done_payload=done_payload, params=params, extra=extra
+        )
+        reasons = _gate_failure_reasons(
+            graded,
+            measured.delta_pct,
+            measured.keep_threshold_pct,
+            acc_reason if acc_block else "",
+            f"correctness fix {fix_finding} refused: {'; '.join(fix_refusals)}" if fix_refusals else "",
+            eval_probe_summary(gate_evidence.get("eval_probe")),
+        )
+        return _perf_revert(
+            attempt,
+            measured,
+            status=_revert_status(
+                measured, accuracy_blocks=acc_block, accuracy_verdict=accuracy_pass, fix_refusals=fix_refusals
+            ),
+            reason="; ".join(reasons) or "gate failed",
+        )
+
+    def _capture_source_layer(
+        self,
+        attempt: IntegrateAttempt,
+        params: dict[str, Any],
+        *,
+        committed: bool,
+    ) -> dict[str, Any]:
+        """Snapshot the source files this KEEP leaves in the tree, so it can be replayed elsewhere."""
+        evidence: dict[str, Any] = {
+            "source_snapshot": "",
+            "source_manifest": "",
+            "source_snapshot_complete": False,
+            "source_import_root": "",
+            "source_realized_patch": "",
+            "source_artifacts_outside_root": 0,
+            "target_files": [],
+            "base_sha": "",
+        }
+        framework_root = attempt.framework_root
+        if framework_root is None:
+            return evidence
         try:
+            from ...enablement.runtime.adapters import get_adapter
             from ...source_snapshot import MANIFEST_NAME, snapshot_source_layer
             from ._patch_snapshot import _patch_touched_paths_split, harvest_realized_diff
 
-            if framework_root is not None:
-                source_base_sha = _git_head_sha(framework_root)
-                upserted_patch, deleted_patch = _patch_touched_paths_split(framework_root, applied)
-                declared_ops = dict.fromkeys(upserted_patch, "upsert")
-                declared_ops.update(dict.fromkeys(deleted_patch, "delete"))
-                rel_paths = upserted_patch + deleted_patch
-                # An artifact installed into a sibling tree is not addressable by
-                # a rel path under this root, so it belongs to no snapshot here.
-                # The count travels so a KEEP whose gain lives outside the tree
-                # reads as a known gap rather than as a clean capture.
-                inside_root = [
-                    str(a["rel_target"])
-                    for a in (applied_artifacts or [])
-                    if isinstance(a, dict)
-                    and a.get("rel_target")
-                    and Path(str(a.get("root") or framework_root)).resolve() == framework_root.resolve()
-                ]
-                source_artifacts_outside_root = len(
-                    [
-                        a
-                        for a in (applied_artifacts or [])
-                        if isinstance(a, dict)
-                        and a.get("rel_target")
-                        and Path(str(a.get("root") or framework_root)).resolve() != framework_root.resolve()
-                    ]
+            base_sha = _git_head_sha(framework_root)
+            evidence["base_sha"] = base_sha
+            upserted, deleted = _patch_touched_paths_split(framework_root, attempt.applied)
+            declared_ops = dict.fromkeys(upserted, "upsert")
+            declared_ops.update(dict.fromkeys(deleted, "delete"))
+            # An artifact installed into a sibling tree is not addressable by a rel
+            # path under this root, so a KEEP whose gain lives outside the tree
+            # reads as a known gap rather than as a clean capture.
+            here = framework_root.resolve()
+            rel_paths = upserted + deleted
+            outside = 0
+            for entry in attempt.applied_artifacts:
+                if Path(str(entry.get("root") or framework_root)).resolve() == here:
+                    rel_paths.append(str(entry["rel_target"]))
+                else:
+                    outside += 1
+            evidence["source_artifacts_outside_root"] = outside
+            import_root = get_adapter(str(params.get("framework") or "")).source_import_root(str(framework_root))
+            evidence["source_import_root"] = import_root
+            slot = attempt.specialist_task_id or str(attempt.task_id or "keep")
+            snap = snapshot_source_layer(
+                framework_root=framework_root,
+                base_sha=base_sha,
+                rel_paths=rel_paths,
+                dest_dir=self.session_dir / "optimization_stack" / "src" / slot,
+                provenance="integrate_patch",
+                extra={"specialist_task_id": attempt.specialist_task_id},
+                declared_ops=declared_ops,
+                import_root=import_root,
+            )
+            if not snap:
+                return evidence
+            snapshot_dir = str(snap.get("snapshot_dir") or "")
+            evidence["source_snapshot"] = snapshot_dir
+            if snapshot_dir:
+                evidence["source_manifest"] = str(Path(snapshot_dir) / MANIFEST_NAME)
+            evidence["target_files"] = [
+                str(item.get("rel") or "")
+                for item in (snap.get("files") or [])
+                if isinstance(item, dict) and item.get("rel")
+            ]
+            evidence["source_snapshot_complete"] = bool(snap.get("complete"))
+            # Only harvest when a real commit landed. Without a new commit
+            # ``HEAD^..HEAD`` is the previous KEEP; harvesting it would publish that
+            # diff as this KEEP's realized change. Leaving it empty falls back to the
+            # delivered patch (realized=False), which is the honest record.
+            if committed:
+                evidence["source_realized_patch"] = harvest_realized_diff(
+                    framework_root, rel_paths, Path(snapshot_dir) / "realized.patch"
                 )
-                rel_paths += inside_root
-                from ...enablement.runtime.adapters import get_adapter
-
-                source_import_root_val = get_adapter(str(params.get("framework") or "")).source_import_root(
-                    str(framework_root)
-                )
-                dest = (
-                    self.session_dir
-                    / "optimization_stack"
-                    / "src"
-                    / (specialist_task_id or str(attempt.task_id or "keep"))
-                )
-                snap = snapshot_source_layer(
-                    framework_root=framework_root,
-                    base_sha=source_base_sha,
-                    rel_paths=rel_paths,
-                    dest_dir=dest,
-                    provenance="integrate_patch",
-                    extra={"specialist_task_id": specialist_task_id},
-                    declared_ops=declared_ops,
-                    import_root=source_import_root_val,
-                )
-                if snap:
-                    source_snapshot_dir = str(snap.get("snapshot_dir") or "")
-                    if source_snapshot_dir:
-                        source_manifest_path = str(Path(source_snapshot_dir) / MANIFEST_NAME)
-                    source_target_files = [
-                        str(item.get("rel") or "")
-                        for item in (snap.get("files") or [])
-                        if isinstance(item, dict) and item.get("rel")
-                    ]
-                    source_snapshot_complete = bool(snap.get("complete"))
-                    # Only harvest when a real commit landed. Without a new
-                    # commit ``HEAD^..HEAD`` is the previous KEEP; harvesting it
-                    # would publish that diff as this KEEP's realized change.
-                    # Leaving it empty falls back to the delivered patch
-                    # (realized=False), which is the honest record.
-                    if keep_committed:
-                        source_realized_patch = harvest_realized_diff(
-                            framework_root,
-                            rel_paths,
-                            Path(source_snapshot_dir) / "realized.patch",
-                        )
         except Exception:
             log.exception("integrate_patch: source-layer snapshot failed")
-
-        return {
-            "status": "kept",
-            "specialist_task_id": specialist_task_id,
-            # Proposal ownership must survive delegated-result persistence
-            # so resume replay cannot replace it with the then-current phase.
-            "source_phase": str(params.get("source_phase") or ""),
-            "domain": str(params.get("domain") or params.get("source_domain") or ""),
-            "provenance": str(params.get("provenance") or ""),
-            "gap_canonical_id": str(params.get("gap_canonical_id") or ""),
-            "gap_layer": str(params.get("gap_layer") or ""),
-            "framework_agent_authoring": bool(params.get("framework_agent_authoring")),
-            "patches_applied": [str(p) for p in applied],
-            "patches_reverted": [],
-            "artifacts_applied": applied_artifacts,
-            "extra_server_args_applied": extra_server_args_applied,
-            "extra_envs_applied": extra_envs_applied,
-            "output_throughput": new_tput,
-            "delta_pct": delta_pct,
-            "accuracy_pass": accuracy_pass,
-            "base_tput": base_tput,
-            "measured_against": measured_against,
-            "keep_threshold_pct": keep_threshold_pct,
-            "reason": (
-                f"correctness fix {resolves_finding} verified at {_fix_axis(graded)} delta {delta_pct:+.2f}%"
-                if correctness_fix
-                else f"throughput delta {delta_pct:+.2f}% >= {keep_threshold_pct:.2f}%"
-            ),
-            "keep_reason": KEEP_REASON_CORRECTNESS_FIX if correctness_fix else "",
-            "resolves_finding": resolves_finding if correctness_fix else "",
-            "bench_result": bench_result,
-            "workspace": str(output_root),
-            "source_snapshot": source_snapshot_dir,
-            "source_manifest": source_manifest_path,
-            "source_snapshot_complete": source_snapshot_complete,
-            "source_import_root": source_import_root_val,
-            "source_realized_patch": source_realized_patch,
-            "source_artifacts_outside_root": source_artifacts_outside_root,
-            "target_files": source_target_files,
-            "framework_root": str(framework_root or ""),
-            "base_sha": source_base_sha,
-            # The bundle cleared the gate, so its switches join the running
-            # configuration and are registered as levers that are already on.
-            # Attribution from here is leave-one-out.
-            "framework_levers": switch_manifest,
-            "framework_lever_outcome": ("default_on" if switch_manifest else ""),
-            "switch_off_parity": parity,
-        }
+        return evidence
 
     async def _switch_off_parity(
         self,
@@ -4001,7 +4036,7 @@ class IntegratePatchExecutor:
                 unset_envs=switch_names,
                 variant_suffix="-parity",
             )
-        except Exception as exc:  # noqa: BLE001 — a failed probe must not read as a pass
+        except (OSError, subprocess.SubprocessError) as exc:
             return {
                 "ran": True,
                 "ok": False,
@@ -4101,12 +4136,7 @@ class IntegratePatchExecutor:
         Returns:
             The ``kept_inert`` result envelope.
         """
-        bench_result = measured.bench_result
-        new_tput = measured.new_tput
         delta_pct = measured.delta_pct
-        base_tput = measured.base_tput
-        keep_threshold_pct = measured.keep_threshold_pct
-        accuracy_pass = measured.accuracy_pass
         switch_manifest = attempt.switch_manifest
         commit_failure, _ = self._commit_accepted_work(attempt, f"hyperloom KEEP_INERT {attempt.specialist_task_id}")
         if commit_failure:
@@ -4114,9 +4144,9 @@ class IntegratePatchExecutor:
                 attempt,
                 commit_failure,
                 "KEEP_INERT",
-                output_throughput=new_tput,
+                output_throughput=measured.new_tput,
                 delta_pct=delta_pct,
-                bench_result=bench_result,
+                bench_result=measured.bench_result,
             )
         enablers = [entry["switch"] for entry in switch_manifest if entry.get("enabler")]
         await self._maybe_write_framework_kb_record(
@@ -4129,7 +4159,7 @@ class IntegratePatchExecutor:
             "integrate_patch: KEEP_INERT task=%s delta=%s threshold=%.2f%% levers=%d enablers=%d",
             attempt.specialist_task_id,
             f"{delta_pct:+.2f}%" if delta_pct is not None else "n/a",
-            keep_threshold_pct,
+            measured.keep_threshold_pct,
             len(switch_manifest),
             len(enablers),
         )
@@ -4140,7 +4170,7 @@ class IntegratePatchExecutor:
             # that verdict does not say which one is at fault — explore bisects
             # per lever from here. The flag exists so nothing downstream reads
             # this as a clean keep.
-            "quality_unverified": accuracy_pass is False,
+            "quality_unverified": measured.accuracy_pass is False,
             "specialist_task_id": attempt.specialist_task_id,
             "patches_applied": [str(p) for p in attempt.applied],
             "patches_reverted": [],
@@ -4150,16 +4180,10 @@ class IntegratePatchExecutor:
             # on, one measured bundle at a time.
             "extra_server_args_applied": "",
             "extra_envs_applied": {},
-            "output_throughput": new_tput,
-            "delta_pct": delta_pct,
-            "accuracy_pass": accuracy_pass,
-            "base_tput": base_tput,
-            "measured_against": _measured_against(params, base_tput=base_tput),
-            "keep_threshold_pct": keep_threshold_pct,
+            **measured.envelope(),
             "reason": _inert_keep_reason(
-                delta_pct, keep_threshold_pct, len(attempt.applied), switch_manifest, enablers
+                delta_pct, measured.keep_threshold_pct, len(attempt.applied), switch_manifest, enablers
             ),
-            "bench_result": bench_result,
             "workspace": str(attempt.output_root),
             "framework_root": str(attempt.framework_root or ""),
             "framework_levers": switch_manifest,
@@ -4245,115 +4269,69 @@ class IntegratePatchExecutor:
         params: Mapping[str, Any] | None = None,
         extra: dict[str, Any],
     ) -> None:
-        """Append a JSONL record to ``lessons.jsonl`` when the patch
-        carries an upstream PR identity.
+        """Record this attempt's outcome against the patch's upstream PR identity.
 
-        No-op for other provenance or when both dedup keys (``fa_pr_url`` /
-        ``fa_pr_sha``) are missing. Write errors are logged + swallowed.
-
-        Args:
-            lesson: The outcome label to record (e.g. integrated / reverted),
-                the measured throughput delta percentage, the measured accuracy
-                delta (overrides the payload value when supplied) and the
-                content fingerprint of the applied server args / envs, recorded
-                so a retried config can be recognised.
-            done_payload: The parsed ``specialist_done.json`` payload, or
-                ``None``.
-            extra: The runner ``extra`` mapping (provides shared state /
-                session id).
+        A patch with no such identity leaves no lesson: it is a one-off edit the
+        ledger has no key to dedup future discovery against.
         """
-        outcome = lesson.outcome
-        tps_delta_pct = lesson.tps_delta_pct
-        accuracy_delta_pct = lesson.accuracy_delta_pct
-        config_fingerprint = lesson.config_fingerprint
         proposal = self._find_framework_proposal(done_payload)
         if proposal is None:
             # The upstream-PR lane carries the PR identity on the candidate
-            # rather than in a specialist's ``fa_*`` markers. Discovery dedups
-            # on this ledger, so a lane that writes none is re-benched forever.
+            # rather than in a specialist's ``fa_*`` markers.
             proposal = self._upstream_pr_kb_proposal(params or {})
             if proposal is None:
                 return
+        # Never the payload's: a payload-level ``fa_pr_*`` belongs to whichever
+        # proposal put it there, so standing it in for one this proposal omits
+        # would file the lesson under another patch's PR.
         pr_url = str(proposal.get("fa_pr_url") or "").strip()
         pr_sha = str(proposal.get("fa_pr_sha") or "").strip()
         if not pr_url and not pr_sha:
-            log.warning(
-                "integrate_patch: framework proposal lacks both fa_pr_url and fa_pr_sha; KB writeback skipped",
-            )
+            log.warning("integrate_patch: framework proposal lacks both fa_pr_url and fa_pr_sha; KB writeback skipped")
             return
-        patches_written = proposal.get("patches_written") or []
-        patch_path = ""
-        if isinstance(patches_written, list) and patches_written:
-            patch_path = str(patches_written[0])
-        session_id = ""
+        # The ``if v`` filter is what makes the merge mean "the proposal's value,
+        # or the payload's where the proposal left it empty".
+        fields = {**(done_payload or {}), **{k: v for k, v in proposal.items() if v}}
         shared_state = extra.get("shared_state") or extra.get("state")
-        if shared_state is not None:
-            session_id = str(getattr(shared_state, "recipe_kb_session_id", "") or "")
+        patches_written = to_str_list(proposal.get("patches_written"))
+        accuracy_delta_pct = lesson.accuracy_delta_pct
+        if accuracy_delta_pct is None:
+            accuracy_delta_pct = to_float(fields.get("accuracy_delta_pct"), 0.0)
         try:
             from ...knowledge.kb_writeback import FrameworkOutcome, write_framework_record
 
-            gap_keywords = proposal.get("gap_keywords") or (done_payload or {}).get("gap_keywords") or []
-            if isinstance(gap_keywords, str):
-                gap_keywords = [gap_keywords]
-            changed_files = proposal.get("changed_files") or (done_payload or {}).get("changed_files") or []
-            if isinstance(changed_files, str):
-                changed_files = [changed_files]
-            if accuracy_delta_pct is None:
-                try:
-                    accuracy_delta_pct = float(
-                        proposal.get("accuracy_delta_pct") or (done_payload or {}).get("accuracy_delta_pct") or 0.0
-                    )
-                except (TypeError, ValueError):
-                    accuracy_delta_pct = 0.0
             written = await write_framework_record(
                 FrameworkOutcome(
                     pr_url=pr_url,
                     pr_sha=pr_sha,
-                    patch_path=patch_path,
-                    outcome=outcome,
-                    tps_delta_pct=float(tps_delta_pct),
-                    session_id=session_id,
-                    framework=str(proposal.get("framework") or (done_payload or {}).get("framework") or "")
-                    .strip()
-                    .lower(),
-                    gap_canonical_id=str(
-                        proposal.get("gap_canonical_id") or (done_payload or {}).get("gap_canonical_id") or ""
-                    ).strip(),
-                    gap_keywords=[str(k).strip().lower() for k in gap_keywords if str(k).strip()],
-                    model_class=str(
-                        getattr(shared_state, "model_class", "") if shared_state is not None else ""
-                    ).strip(),
-                    gpu_type=str(getattr(shared_state, "gpu_type", "") if shared_state is not None else "").strip(),
-                    precision=str(getattr(shared_state, "precision", "") if shared_state is not None else "").strip(),
-                    applicability=config_fingerprint
-                    or str(proposal.get("applicability") or (done_payload or {}).get("applicability") or "").strip(),
-                    provenance=str(proposal.get("provenance") or (done_payload or {}).get("provenance") or "").strip(),
+                    patch_path=patches_written[0] if patches_written else "",
+                    outcome=lesson.outcome,
+                    tps_delta_pct=float(lesson.tps_delta_pct),
+                    session_id=str(getattr(shared_state, "recipe_kb_session_id", "") or ""),
+                    framework=str(fields.get("framework") or "").strip().lower(),
+                    gap_canonical_id=str(fields.get("gap_canonical_id") or "").strip(),
+                    gap_keywords=[keyword.lower() for keyword in to_str_list(fields.get("gap_keywords"))],
+                    model_class=str(getattr(shared_state, "model_class", "") or "").strip(),
+                    gpu_type=str(getattr(shared_state, "gpu_type", "") or "").strip(),
+                    precision=str(getattr(shared_state, "precision", "") or "").strip(),
+                    applicability=lesson.config_fingerprint or str(fields.get("applicability") or "").strip(),
+                    provenance=str(fields.get("provenance") or "").strip(),
                     accuracy_delta_pct=accuracy_delta_pct,
-                    changed_files=[str(f).strip() for f in changed_files if str(f).strip()],
-                    source_framework=str(
-                        proposal.get("source_framework") or (done_payload or {}).get("source_framework") or ""
-                    )
-                    .strip()
-                    .lower(),
-                    target_framework=str(
-                        proposal.get("target_framework") or (done_payload or {}).get("target_framework") or ""
-                    )
-                    .strip()
-                    .lower(),
+                    changed_files=to_str_list(fields.get("changed_files")),
+                    source_framework=str(fields.get("source_framework") or "").strip().lower(),
+                    target_framework=str(fields.get("target_framework") or "").strip().lower(),
                 )
             )
-            log.info(
-                "integrate_patch: wrote framework KB record to %s (outcome=%s pr_url=%s tps_delta=%+.2f%%)",
-                written,
-                outcome,
-                pr_url,
-                float(tps_delta_pct),
-            )
-        except Exception as exc:  # noqa: BLE001 — KB write is best-effort
-            log.warning(
-                "integrate_patch: framework KB writeback failed: %r",
-                exc,
-            )
+        except (OSError, ValueError, TypeError) as exc:
+            log.warning("integrate_patch: framework KB writeback failed: %r", exc)
+            return
+        log.info(
+            "integrate_patch: wrote framework KB record to %s (outcome=%s pr_url=%s tps_delta=%+.2f%%)",
+            written,
+            lesson.outcome,
+            pr_url,
+            float(lesson.tps_delta_pct),
+        )
 
     def _backup_artifacts(
         self,
@@ -4476,114 +4454,106 @@ class IntegratePatchExecutor:
             ``gate_evidence`` carries ``accuracy_pass`` (True / False / None)
             and ``eval_probe`` (the generation-pathology record, or ``None``).
         """
+        from ._ray_serving import maybe_serving_lease
+
         params = bench_leg.params
-        output_root = bench_leg.output_root
-        specialist_task_id = bench_leg.specialist_task_id
-        session_deadline_sec = bench_leg.session_deadline_sec
-        variant_expected_sec = bench_leg.variant_expected_sec
-        benchmark_mode = bench_leg.benchmark_mode
-        config_path = Path(params.get("config_path") or self.default_config_path or default_baseline_config())
-        if not config_path.exists():
-            raise RuntimeError(f"integrate_patch bench: config not found at {config_path}")
-        resolved_model = resolve_session_model_path(
+        gate_evidence: dict[str, Any] = {
+            "accuracy_pass": None,
+            "accuracy": None,
+            "enablement_accuracy": None,
+            "enablement_accuracy_task": "",
+            "enablement_accuracy_metric": "",
+            "eval_probe": None,
+        }
+        base_config = Path(params.get("config_path") or self.default_config_path or default_baseline_config())
+        if not base_config.exists():
+            raise RuntimeError(f"integrate_patch bench: config not found at {base_config}")
+        model_path = resolve_session_model_path(
             params=params,
             state_model_path=bench_leg.state_model_path,
             for_serving=True,
         )
-        resolved_gpu = (
-            str(params.get("gpu_type") or "").strip().lower() or os.environ.get("GPU_TYPE", "").strip().lower()
-        )
-        override_script = sanitize_script_name(params.get("benchmark_script"))
-        override_result_dir = sanitize_result_dir(params.get("result_dir"))
+        gpu_type = str(params.get("gpu_type") or "").strip().lower() or os.environ.get("GPU_TYPE", "").strip().lower()
+        benchmark_script = sanitize_script_name(params.get("benchmark_script"))
+        result_dir = sanitize_result_dir(params.get("result_dir"))
+        base_extra_args = str(params.get("base_extra_args") or "").strip()
+        args_mode = str(params.get("base_args_mode") or "append")
+        base_remove = to_str_list(params.get("base_remove_args"))
         config_path = prepare_grid_benchmark_config(
-            config_path,
-            output_root,
-            model_path=resolved_model or None,
-            gpu_type=resolved_gpu or None,
-            benchmark_script=override_script,
+            base_config,
+            bench_leg.output_root,
+            model_path=model_path or None,
+            gpu_type=gpu_type or None,
+            benchmark_script=benchmark_script,
             extra_envs=framework_run_eval_envs(params),
             remove_args=params.get("base_remove_args"),
             unset_envs=params.get("base_unset_envs"),
-            args_mode=str(params.get("base_args_mode") or "append"),
+            args_mode=args_mode,
             out_name="integrate_patch.with_envs.yaml",
         )
 
-        base_envs = dict(params.get("base_extra_envs") or {})
-        base_remove = to_str_list(params.get("base_remove_args"))
-        base_unset = to_str_list(params.get("base_unset_envs"))
-        args_mode = str(params.get("base_args_mode") or "append")
-        # The variant carries this round's own levers; run_grid composes the
-        # stack under them.
-        variant_envs = dict(extra_envs_applied)
+        envs = dict(extra_envs_applied)
         # Eval-origin enablement needs a raw accuracy for its runnable gate, so
         # RUN_EVAL=true must survive any variant overlay.
-        if bool(params.get("enablement")) and is_eval_origin(params):
-            variant_envs["RUN_EVAL"] = "true"
+        if params.get("enablement") and is_eval_origin(params):
+            envs["RUN_EVAL"] = "true"
         variant = GridVariant(
-            name=f"integrate-patch-{specialist_task_id[:8]}{variant_suffix}",
+            name=f"integrate-patch-{bench_leg.specialist_task_id[:8]}{variant_suffix}",
             extra_server_args=extra_server_args_applied,
-            extra_envs=variant_envs,
+            extra_envs=envs,
             unset_envs=to_str_list(unset_envs),
-            note=f"integrate_patch:{specialist_task_id}{variant_suffix}",
+            note=f"integrate_patch:{bench_leg.specialist_task_id}{variant_suffix}",
         )
         variant.overlay_pythonpath = params.get("overlay_pythonpath", "")
         variant.source_patches = list(params.get("source_patches", []))
-        effective_unset = list(dict.fromkeys(base_unset + list(variant.unset_envs)))
-        _rt = params.get("runtime_override")
-        if isinstance(_rt, dict) and _rt:
+        runtime_override = params.get("runtime_override")
+        if isinstance(runtime_override, dict) and runtime_override:
             # Preserve list/dict values; apply_runtime_override expects them.
-            variant.runtime_override = dict(_rt)
+            variant.runtime_override = dict(runtime_override)
 
-        # The explore grid's origin-independent guards: an authored variant is no
-        # more exempt from a known-bad multi-node lever, an operator's env pin or
-        # the operator's skip list than a proposed one. The compatibility filter
-        # is deliberately absent -- it shells out to build the framework's arg
-        # parser, and a single authored variant must not pay for that probe.
+        # The compatibility filter is deliberately absent: it shells out to build
+        # the framework's arg parser, and a single authored variant must not pay
+        # for that probe.
         grid, mn_dropped = apply_multi_node_invalid_variants([variant])
         grid, pin_dropped = apply_aiter_moe_pin_filter(grid)
         grid, skip_dropped = apply_user_skip_list(grid, skip_spec=resolve_skip_spec(params))
         if not grid:
-            rejected = (mn_dropped + pin_dropped + skip_dropped)[0]
+            rejection = (mn_dropped + pin_dropped + skip_dropped)[0]
             return (
                 {
                     "status": "skipped",
                     "error_class": "filtered_before_bench",
-                    "error": str(rejected.get("reason") or rejected.get("source") or ""),
+                    "error": str(rejection.get("reason") or rejection.get("source") or ""),
                     "workspace": "",
                     "materialized_config": str(config_path),
                 },
-                {"accuracy_pass": None, "eval_probe": None},
+                gate_evidence,
             )
 
-        # Ray-managed GPU execution: hold a serving lease
-        # (num_gpus=TP + serving_slot) for the whole run_grid so
-        # the patch benchmark serializes against other serving on the
-        # whole-machine mutex instead of colliding with a concurrently-running
-        # GPU specialist server on the same card (the observed
-        # ``reverted_smoke_fail`` root cause). ``None`` keeps the local path
-        # (multi-node / RAY_EXEC off / pytest default).
-        from ._ray_serving import maybe_serving_lease
-
+        # Ray-managed GPU execution holds the lease for the whole run_grid so the
+        # patch benchmark serializes against other serving instead of colliding
+        # with a concurrent GPU specialist server on the same card. ``None`` keeps
+        # the local path (multi-node / RAY_EXEC off / pytest default).
         serving_lease = maybe_serving_lease(num_gpus=_num_gpus_for_config(config_path))
         try:
-            results: list[VariantResult] = await run_grid(
+            results = await run_grid(
                 base_yaml_path=config_path,
-                base_extra_args=str(params.get("base_extra_args") or "").strip(),
+                base_extra_args=base_extra_args,
                 grid=grid,
-                output_root=output_root,
+                output_root=bench_leg.output_root,
                 magpie_python=params.get("magpie_python") or None,
                 keep_going_on_failure=False,
-                model_path=resolved_model or None,
-                gpu_type=resolved_gpu or None,
-                benchmark_script=override_script,
-                result_dir=override_result_dir,
+                model_path=model_path or None,
+                gpu_type=gpu_type or None,
+                benchmark_script=benchmark_script,
+                result_dir=result_dir,
                 base_args_mode=args_mode,
-                base_extra_envs=base_envs,
+                base_extra_envs=dict(params.get("base_extra_envs") or {}),
                 base_remove_args=base_remove,
-                base_unset_envs=base_unset,
+                base_unset_envs=to_str_list(params.get("base_unset_envs")),
                 serving_lease=serving_lease,
-                session_deadline_sec=session_deadline_sec,
-                variant_expected_sec=variant_expected_sec,
+                session_deadline_sec=bench_leg.session_deadline_sec,
+                variant_expected_sec=bench_leg.variant_expected_sec,
             )
         finally:
             if serving_lease is not None:
@@ -4591,115 +4561,87 @@ class IntegratePatchExecutor:
 
         bench: dict[str, Any] = {}
         if results:
-            r = results[0]
-            bench.update(
-                {
-                    **r.to_dict(),
-                    "status": r.status,
-                    "output_throughput": r.output_throughput,
-                    # ``VariantResult`` names these ``ttft_mean_ms`` / ``tpot_mean_ms``;
-                    # the emitted keys stay ``ttft_ms`` / ``itl_ms`` for the collectors.
-                    "ttft_ms": r.ttft_mean_ms,
-                    "itl_ms": r.tpot_mean_ms,
-                    # The session's constraints fail closed: a lane that drops these refuses every KEEP.
-                    **constraint_fields(r),
-                    # Benchmark dir; ``grade_accuracy`` locates accuracy artifacts here.
-                    "workspace": r.workspace or "",
-                    "error": r.error or "",
-                    "error_class": r.error_class,
-                    "nonfatal_warnings": list(r.nonfatal_warnings),
-                    # Launch evidence is the immutable proof of the server that
-                    # produced this measurement. It must survive the patch result
-                    # and current-best promotion so GEAK can verify the handoff.
-                    "launch_evidence": dict(r.launch_evidence),
-                    "launch_evidence_path": r.launch_evidence_path or "",
-                    "server_log_path": r.server_log_path or "",
-                    # Materialized config used for this bench; needed by revalidation.
-                    "materialized_config": str(config_path),
-                    # The composed stack, not the variant alone: revalidation
-                    # replays this and would otherwise boot without the base
-                    # layer. RUN_EVAL is dropped -- the replay owns its own
-                    # eval contract.
-                    "effective_config": {
-                        "extra_envs": {
-                            k: v
-                            for k, v in {**base_envs, **variant.extra_envs}.items()
-                            if k != "RUN_EVAL" and k not in effective_unset
-                        },
-                        "extra_server_args": compose_server_args(
-                            inherited_args="",
-                            base_extra_args=str(params.get("base_extra_args") or "").strip(),
-                            variant_extra_args=variant.extra_server_args,
-                            remove_args=base_remove,
-                            args_mode=args_mode,
-                        ),
-                        "remove_args": list(base_remove),
-                        "unset_envs": list(effective_unset),
-                        "args_mode": args_mode,
+            result = results[0]
+            effective_unset = list(dict.fromkeys(to_str_list(params.get("base_unset_envs")) + list(variant.unset_envs)))
+            base_envs = dict(params.get("base_extra_envs") or {})
+            bench = {
+                **result.to_dict(),
+                "status": result.status,
+                "output_throughput": result.output_throughput,
+                # ``VariantResult`` names these ``ttft_mean_ms`` / ``tpot_mean_ms``;
+                # the emitted keys stay ``ttft_ms`` / ``itl_ms`` for the collectors.
+                "ttft_ms": result.ttft_mean_ms,
+                "itl_ms": result.tpot_mean_ms,
+                # The session's constraints fail closed: a lane that drops these refuses every KEEP.
+                **constraint_fields(result),
+                # Benchmark dir; ``grade_accuracy`` locates accuracy artifacts here.
+                "workspace": result.workspace or "",
+                "error": result.error or "",
+                "error_class": result.error_class,
+                "nonfatal_warnings": list(result.nonfatal_warnings),
+                # Launch evidence is the immutable proof of the server that produced this
+                # measurement. It must survive the patch result and current-best
+                # promotion so GEAK can verify the handoff.
+                "launch_evidence": dict(result.launch_evidence),
+                "launch_evidence_path": result.launch_evidence_path or "",
+                "server_log_path": result.server_log_path or "",
+                # Materialized config used for this bench; needed by revalidation.
+                "materialized_config": str(config_path),
+                # The composed stack, not the variant alone: revalidation replays this
+                # and would otherwise boot without the base layer. RUN_EVAL is dropped --
+                # the replay owns its own eval contract.
+                "effective_config": {
+                    "extra_envs": {
+                        key: value
+                        for key, value in {**base_envs, **variant.extra_envs}.items()
+                        if key != "RUN_EVAL" and key not in effective_unset
                     },
-                }
-            )
-
-        # Classified here so the gate compares two observations produced by
-        # the same reader.
-        bench["boot_observation_path"] = self._record_bench_bringup(bench, output_root)
-
-        accuracy_pass: bool | None = None
+                    "extra_server_args": compose_server_args(
+                        inherited_args="",
+                        base_extra_args=base_extra_args,
+                        variant_extra_args=variant.extra_server_args,
+                        remove_args=base_remove,
+                        args_mode=args_mode,
+                    ),
+                    "remove_args": list(base_remove),
+                    "unset_envs": list(effective_unset),
+                    "args_mode": args_mode,
+                },
+            }
+        # Classified here so the gate compares two observations produced by the same reader.
+        bench["boot_observation_path"] = await asyncio.to_thread(self._observe_bench_boot, bench, bench_leg.output_root)
         # lm-eval writes to ``$EVAL_RESULT_DIR`` under the grid slot, not inside
         # the ``benchmark_*`` workspace. Grade from the slot so the recursive
         # search finds eval output while honoring an explicit ``result_dir``
         # override the same way the grid subprocess does.
-        eval_search_root = override_result_dir or (
-            str(Path(bench["workspace"]).parent) if bench.get("workspace") else ""
-        )
-        if bench.get("status") == "succeeded":
-            accuracy_pass = grade_accuracy(
-                eval_search_root,
-                params.get("accuracy_baseline"),
-                framework=params.get("framework") or os.environ.get("FRAMEWORK") or None,
-                benchmark_mode=benchmark_mode,
-            )
-
-        # Raw accuracy for the KB record; ``accuracy_pass`` only carries a verdict.
-        measured_accuracy: float | None = None
-        if bench.get("status") == "succeeded":
-            measured = parse_eval_results(
-                eval_search_root,
-                framework=params.get("framework") or os.environ.get("FRAMEWORK") or None,
-                benchmark_mode=benchmark_mode,
-            ).get("accuracy")
-            if isinstance(measured, (int, float)):
-                measured_accuracy = float(measured)
-
-        # Enablement path: surface the raw accuracy so the branch can apply a floor.
-        enablement_accuracy: float | None = None
-        enablement_accuracy_task = ""
-        enablement_accuracy_metric = ""
-        if bool(params.get("enablement")) and bench.get("status") == "succeeded":
-            eval_results = parse_eval_results(
-                eval_search_root,
-                framework=params.get("framework") or os.environ.get("FRAMEWORK") or None,
-                benchmark_mode=benchmark_mode,
-            )
-            acc = eval_results.get("accuracy")
-            if isinstance(acc, (int, float)):
-                enablement_accuracy = float(acc)
-            enablement_accuracy_task = str(eval_results.get("task") or "")
-            enablement_accuracy_metric = str(eval_results.get("metric") or "")
-
+        eval_search_root = result_dir or (str(Path(bench["workspace"]).parent) if bench.get("workspace") else "")
         # Guarded: an empty root would send the recursive scan over the cwd.
-        eval_probe = read_eval_probe(eval_search_root) if eval_search_root else None
+        if eval_search_root:
+            gate_evidence["eval_probe"] = read_eval_probe(eval_search_root)
+        if bench.get("status") != "succeeded":
+            return bench, gate_evidence
+        framework = params.get("framework") or os.environ.get("FRAMEWORK") or None
+        results_payload = parse_eval_results(
+            eval_search_root, framework=framework, benchmark_mode=bench_leg.benchmark_mode
+        )
+        accuracy = results_payload.get("accuracy")
+        # Raw accuracy for the KB record; ``accuracy_pass`` only carries a verdict.
+        measured = float(accuracy) if isinstance(accuracy, (int, float)) else None
+        gate_evidence["accuracy_pass"] = grade_accuracy(
+            eval_search_root,
+            params.get("accuracy_baseline"),
+            framework=framework,
+            benchmark_mode=bench_leg.benchmark_mode,
+        )
+        gate_evidence["accuracy"] = measured
+        # The enablement branch applies a floor of its own, so it needs the raw score.
+        if params.get("enablement"):
+            gate_evidence["enablement_accuracy"] = measured
+            gate_evidence["enablement_accuracy_task"] = str(results_payload.get("task") or "")
+            gate_evidence["enablement_accuracy_metric"] = str(results_payload.get("metric") or "")
+        return bench, gate_evidence
 
-        return bench, {
-            "accuracy_pass": accuracy_pass,
-            "accuracy": measured_accuracy,
-            "enablement_accuracy": enablement_accuracy,
-            "enablement_accuracy_task": enablement_accuracy_task,
-            "enablement_accuracy_metric": enablement_accuracy_metric,
-            "eval_probe": eval_probe,
-        }
-
-    def _record_bench_bringup(self, bench: dict[str, Any], output_root: Path) -> str:
+    def _observe_bench_boot(self, bench: dict[str, Any], output_root: Path) -> str:
         """Classify the server this bench ran against and persist the observation.
 
         Args:
@@ -4737,6 +4679,7 @@ __all__ = [
     "DEFAULT_KEEP_THRESHOLD_PCT",
     "IntegratePatchExecutor",
     "KEEP_STATUSES",
+    "RESULT_BENCHED",
     "_detect_p_level",
     "_git_apply",
     "_git_apply_reverse",

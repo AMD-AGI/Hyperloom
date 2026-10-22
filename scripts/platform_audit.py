@@ -292,7 +292,7 @@ def read_hwcr() -> int | None:
         with open("/dev/cpu/0/msr", "rb") as fh:
             fh.seek(0xC0010015)
             return struct.unpack("<Q", fh.read(8))[0]
-    except Exception:  # noqa: BLE001 - msr module absent or not permitted.
+    except (OSError, struct.error):  # msr module absent or not permitted
         return None
 
 

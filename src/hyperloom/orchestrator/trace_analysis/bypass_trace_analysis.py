@@ -20,6 +20,7 @@ import argparse
 import datetime as _dt
 import hashlib
 import json
+import logging
 import os
 import re
 import sys
@@ -42,6 +43,8 @@ from ._idle_gate import (
 from ._denoise_steps import count_profiler_steps, resolve_perstep_divisor
 from ._io_utils import write_text
 
+log = logging.getLogger(__name__)
+
 
 AGGREGATION_SCOPE_FULL = "full_trace"
 AGGREGATION_SCOPE_STEADY = "steady_state"
@@ -50,41 +53,6 @@ AGGREGATION_SCOPE_STEADY = "steady_state"
 def _run_stamp() -> str:
     """Return a compact UTC timestamp used to name the per-run output dir."""
     return _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-
-
-def _maybe_enrich_rocprof(
-    kernel_roofline_path: Path,
-    candidates_path: Path,
-    run_dir: Path,
-) -> dict[str, Any]:
-    """Dead rocprof-compute enrichment hook; kept only for the summary key."""
-    enrich_value = os.environ.get("HYPERLOOM_ROCPROF_ROOFLINE_ENRICH", "0").strip().lower()
-    if enrich_value not in {"1", "true", "yes", "on"}:
-        return {"status": "disabled"}
-    try:
-        from rocprof_roofline import enrich_kernel_roofline_sidecar
-
-        timeout_sec = int(os.environ.get("HYPERLOOM_ROCPROF_ROOFLINE_TIMEOUT_SEC", "1800") or 1800)
-        enrich_summary = enrich_kernel_roofline_sidecar(
-            sidecar_path=str(kernel_roofline_path),
-            candidates_path=str(candidates_path),
-            workdir=str(run_dir),
-            timeout_sec_per_kernel=timeout_sec,
-            log_fn=None,
-        )
-        print(
-            "[rocprof_enrich] "
-            f"matched={enrich_summary.get('matched', 0)} "
-            f"skipped={enrich_summary.get('skipped', 0)} "
-            f"failed={enrich_summary.get('failed', 0)} "
-            f"rows={enrich_summary.get('rows', 0)}",
-            file=sys.stderr,
-        )
-        return enrich_summary
-    except Exception as exc:  # noqa: BLE001 — enrichment must never break bypass
-        msg = f"error: {type(exc).__name__}: {exc}"
-        print(f"[rocprof_enrich] skipped: {msg}", file=sys.stderr)
-        return {"status": msg}
 
 
 def _emit_quality_warnings(analyze: dict[str, Any], warnings: list[dict[str, Any]]) -> None:
@@ -497,6 +465,7 @@ def main(argv: list[str] | None = None) -> int:
             # top_k=0 -> keep all device-kernel aggregates; candidate slicing uses top_k.
             analyze = _reader.analyze_trace(args.trace_input, _main_trace_options(args, steady_state=enable_steady))
         except Exception as exc:  # noqa: BLE001 — never abort the pipeline
+            log.warning("bypass trace analysis failed: %s", exc)
             analyze = {"status": "failed", "error": f"{type(exc).__name__}: {exc}"}
     run_meta["preflight"].update(
         {
@@ -684,7 +653,6 @@ def main(argv: list[str] | None = None) -> int:
         framework=args.framework,
         target_platform=args.target_platform,
         top_k=top_k,
-        discover_benchmarks=False,
     )
 
     analysis_md_path = bypass_dir / "analysis.md"
@@ -784,14 +752,6 @@ def main(argv: list[str] | None = None) -> int:
         kernel_candidates_path=str(candidates_path),
     )
     atomic_write_json(kernel_roofline_path, kernel_roofline, fmt=JsonFormat(sort_keys=False, ensure_ascii=False))
-
-    # Optional rocprof-compute enrichment (opt-in; enriches the sidecar in place).
-    rocprof_enrich: dict[str, Any] = (
-        {"status": "disabled"}
-        if args.dry_run
-        else _maybe_enrich_rocprof(kernel_roofline_path, candidates_path, run_dir)
-    )
-    summary["rocprof_enrich"] = rocprof_enrich
     atomic_write_json(summary_path, summary, fmt=JsonFormat(sort_keys=False, ensure_ascii=False))
 
     # Kernel-fusion opportunities: launch adjacency -> fusable clusters.
@@ -821,7 +781,8 @@ def main(argv: list[str] | None = None) -> int:
             _diff_path = run_dir / "diffusion_roofline.json"
             atomic_write_json(_diff_path, _diff_report, fmt=JsonFormat(sort_keys=False, ensure_ascii=False))
             diffusion_roofline_path = str(_diff_path)
-        except Exception:  # noqa: BLE001 - best-effort sidecar, never blocks the run
+        except Exception as exc:  # noqa: BLE001 - best-effort sidecar, never blocks the run
+            log.warning("diffusion roofline sidecar failed: %s", exc)
             diffusion_roofline_path = None
 
     # Variant-discriminating TraceShapeManifest (P0-A / WP-1).

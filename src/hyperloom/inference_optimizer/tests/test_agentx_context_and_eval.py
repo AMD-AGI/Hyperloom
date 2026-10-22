@@ -126,7 +126,7 @@ def test_sglang_context_non_sglang_untouched(native_benchmark, tmp_path, monkeyp
 
 
 def test_agentx_runs_its_own_eval_not_lmeval(native_benchmark, monkeypatch):
-    """AgentX eval is a post-hoc error-rate gate, not an lm-eval opt-out, so ``eval_disabled`` tracks --no-eval."""
+    """AgentX eval is a post-hoc error-rate gate, not lm-eval."""
     from hyperloom.inference_optimizer.cli import bootstrap
 
     monkeypatch.delenv("HYPERLOOM_BENCHMARK_CONFIG", raising=False)
@@ -134,9 +134,3 @@ def test_agentx_runs_its_own_eval_not_lmeval(native_benchmark, monkeypatch):
 
     monkeypatch.setenv("HYPERLOOM_BENCHMARK_CONFIG", str(native_benchmark))
     assert bootstrap._agentx_enabled() is True
-
-    # eval_disabled must NOT be forced on by AgentX any more.
-    import inspect
-
-    src = inspect.getsource(bootstrap)
-    assert "_agentx_enabled()" not in src.split("eval_disabled=")[1].split("\n")[0]

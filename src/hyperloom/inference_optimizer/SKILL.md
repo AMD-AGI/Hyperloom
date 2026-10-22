@@ -440,7 +440,10 @@ ledger, and judges each entry — already present, not applicable, or worth a
 bench and by which route. The pump takes that batch in the order given; it
 does not re-rank or re-audit. When discovery comes back empty its full retry
 budget, the local-exploration arm authors against profile evidence instead;
-with that off too, the source arm reports itself dry.
+with that off too, the source arm reports itself dry. An authoring round that
+comes back empty, or whose specialist never runs, counts against the source
+arm's no-KEEP streak like a reverted patch; once that streak marks the arm
+dry, the local-exploration arm stops dispatching for the cycle.
 
 Every diff lands through `integrate_patch`, with `patch_source` naming where
 it came from. KEEP commits to the live tree so the next candidate stacks on
@@ -765,7 +768,8 @@ and the operator's stated value is lost:
 | Latency SLA | `--max-latency-ms` | **Scriptable frameworks only** (`xdit`, `custom`); refused for serving, where AgentX already grades interactivity. Pass any stated ceiling on per-request latency ("must stay under 250 ms", "interactive workload"). A **constraint, not a target**: it composes with `--target-*` rather than competing, and refuses any KEEP whose mean end-to-end latency exceeds it — including one that reported no latency at all. Off when omitted, which does not lose a preference but does remove the SLA from the search. |
 | Power ceiling | `--max-power-w` | Pass any stated total power budget for the serving GPUs ("the four cards together stay under 2800 W"). A constraint like `--max-latency-ms`, for the serving frameworks (refused on `xdit` / `custom`): refuses any KEEP whose serving GPUs' summed mean power exceeds it, including one that reported no per-GPU power. |
 | Per-GPU power limit | `--max-per-gpu-power-w GPU_ID W` | Pass any stated limit for a specific card ("GPU 4 under 700 W"), once per card. GPU_ID is the physical amd-smi index. A serving card with no entry is bound only by `--max-power-w`; the limits must add up to no more than it. |
-| GPU power settings | `--gpu-power-cap-w` / `--gpu-perf-level` | Assertions, not requests. Only when the prompt says the cards were set to a cap or perf level; Hyperloom never changes them. The session refuses to start if a card differs. |
+| GPU power settings | `--gpu-power-cap-w` / `--gpu-perf-level` | Assertions by default. Only when the prompt says the cards were set to a cap or perf level; the session refuses to start if a card differs. Add `--apply-gpu-power-settings` only when the prompt asks Hyperloom to set them: it sets the cards of the integer visible-device mask for the session and restores them when it ends, and needs root. |
+| Node power management | `--node-power-management` / `--node-power-limit-w` | Always assertions (MI350 series). Only when the prompt says NPM was enabled or disabled, or a node limit was set, on the BMC; the session refuses to start if `amd-smi node -p` differs. Never set by the session. |
 | Max model len | `--max-model-len` | Optional; auto-derived from ISL+OSL+headroom when omitted. |
 | External reference GPU | `--compare-against-gpu` | `target_analysis` writes `target_analysis/target_baseline.json` for query/status metadata and `competitor_target.json` for both advisory and final-report comparisons. Without a target GPU it writes `reason="no_target_gpu_configured"` and clears the competitor target. AgentX reads accepted `current_best.total_throughput / state.tp` and `current_best.e2e_norm_intvty_p90` at `state.conc`; it does not reread raw results or recipes. Missing targets or axes remain unavailable. This is a cross-system advisory, not proof of identical measurement estimators or deployment, and never changes Objective or KEEP/REVERT. |
 | Target advisory | `--no-target-advisory` | Disable external-target hints in prompts without disabling final-report comparison. `primary_gap` uses the existing latency/throughput categories; the interactivity axis is displayed as interactivity. |
@@ -1039,7 +1043,7 @@ audit.
 ### Workload-contract reuse (baseline → explore/sweep)
 
 `baseline` materializes its YAML once with the operator's process env
-(`CONC` / `ISL` / `OSL` / `TP` / `MAX_MODEL_LEN` / `PRECISION` / `RUN_EVAL`
+(`CONC` / `ISL` / `OSL` / `TP` / `MAX_MODEL_LEN` / `PRECISION`
 / `ROCR_VISIBLE_DEVICES` + adaptive `NUM_PROMPTS` / `NUM_WARMUPS`), saves it
 as `baseline_config.with_envs.yaml`, and forwards the path as
 `task.params["config_path"]` to every `explore` / `sweep` task — so variants
@@ -1194,13 +1198,18 @@ python3 -m hyperloom optimize --gpu-type mi355x --model "$MODEL_PATH" --max-hour
 GPU_TYPE=mi300x python3 -m hyperloom optimize --model "$MODEL_PATH" --max-hours 2
 ```
 
-Accepted values: `mi300x`, `mi308x`, `mi325x`, `mi355x`. **`mi308x` and
+Accepted values: `mi300x`, `mi308x`, `mi325x`, `mi355x`, `r9700`. **`mi308x` and
 `mi325x` map to `runner_type=mi300x`** with a warning, since the GPUs share the
 same runner family and Magpie has not shipped `sglang_mi308x.sh` /
 `sglang_mi325x.sh` / `vllm_mi308x.sh` / `vllm_mi325x.sh` yet. If you
 need a true MI308X/MI325X-specific script, uncomment the `benchmark_script:`
 template in the relevant YAML and point it at your script under
 `InferenceX/benchmarks/...`.
+
+`r9700` (Radeon AI PRO R9700, gfx1201) maps to `runner_type=gfx12`, Magpie's
+`vllm_gfx12.sh`, and runs with `--framework vllm` only: pass
+`--framework vllm`, since another framework (including the default) exits
+with code 2 at launch.
 
 Do not set `HIP_VISIBLE_DEVICES` on the known ROCm stack unless the user asks;
 it can make `torch.cuda.is_available()` return false. Use
@@ -1508,7 +1517,7 @@ python3 -m hyperloom session state "$SESSION"
 ```
 
 It prints `stop_reason`, `baseline_tput`, `cumulative_gain_validated`, `current_best`,
-`last_kernel_opt`, `last_trace_analyze`, `last_conc_sweep`, `explore_last_round`,
+`last_trace_analyze`, `last_conc_sweep`, `explore_last_round`,
 `phase`, the latest orchestration and specialist Experience KB injections when
 they exist, plus the recent lifecycle events.
 

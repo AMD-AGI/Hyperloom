@@ -230,9 +230,22 @@ def test_a_wheel_runtime_with_no_site_packages_fails_to_provision(tmp_path, adap
     assert "site-packages" in result.error
 
 
+_TORCH_PROBE = ("m.version('torch')", 0, "2.11.0+rocm7.2", "")
+
+
+def _sglang_checkout(attempt: Path) -> None:
+    """What the fetch leaves behind: a checkout whose pyproject declares a ROCm extra."""
+    python_dir = attempt / "src" / "python"
+    python_dir.mkdir(parents=True)
+    (python_dir / "pyproject.toml").write_text(
+        "[project.optional-dependencies]\nsrt_hip = ['torch']\n", encoding="utf-8"
+    )
+
+
 def test_sglang_editable_provision_fetches_the_pr_head_and_records_the_clone_it_imports(tmp_path):
     """An editable install executes the clone, and its diffs are cut against the repo root."""
-    run = _FakeRun()
+    _sglang_checkout(tmp_path / "attempt")
+    run = _FakeRun(rules=[_TORCH_PROBE])
     action = SglangAdapter().build_stack_action(RuntimeRequest(ref="PR:123", packages=("transformers==4.57.1",)))
     result = SglangAdapter(run=run).provision(action, tmp_path / "attempt")
     assert result.ok is True, result.error
@@ -251,7 +264,22 @@ def test_sglang_editable_provision_fetches_the_pr_head_and_records_the_clone_it_
     assert result.runtime.source_root == str(checkout)
     assert result.runtime.pythonpath_prefix == str(checkout / "python")
     (pip,) = run.pip_calls()
-    assert pip[-3:] == ["-e", str(checkout / "python"), "transformers==4.57.1"]
+    assert pip[-3:] == ["-e", f"{checkout / 'python'}[srt_hip]", "transformers==4.57.1"]
+
+
+def test_a_failed_install_reports_pips_error_and_logs_it(tmp_path):
+    """Stderr warnings come first; the error at the end is what the result and provision.log carry."""
+    warnings = "DEPRECATION: Loading egg at /opt/venv/lib/python3.12/site-packages/x.egg is deprecated.\n" * 20
+    error = "RuntimeError: cargo is required to discover the Rust extension modules"
+    _sglang_checkout(tmp_path / "attempt")
+    run = _FakeRun(
+        rules=[("-m pip install", 1, "Obtaining file:///src/python\n", f"{warnings}{error}\n"), _TORCH_PROBE]
+    )
+    action = SglangAdapter().build_stack_action(RuntimeRequest(ref="v0.5.21"))
+    result = SglangAdapter(run=run).provision(action, tmp_path / "attempt")
+    assert result.ok is False
+    assert error in result.error
+    assert error in Path(result.log_path).read_text(encoding="utf-8")
 
 
 def test_sglang_editable_provision_reports_a_ref_it_cannot_fetch(tmp_path):
@@ -274,3 +302,45 @@ def test_verify_torch_is_rocm_true_false():
 def test_verify_vllm_rocm_true_false():
     assert ad.verify_vllm_rocm("/py", run=_FakeRun(default_rc=0)) is True
     assert ad.verify_vllm_rocm("/py", run=_FakeRun(default_rc=1)) is False
+
+
+def _raiser(exc: BaseException):
+    def raise_it(*_args, **_kwargs):
+        raise exc
+
+    return raise_it
+
+
+_VERIFIERS = {"torch": ad.verify_torch_is_rocm, "vllm": ad.verify_vllm_rocm}
+_ADAPTERS = {"vllm_provision": VllmRocmAdapter, "sglang_provision": SglangAdapter}
+
+
+def _outcome(site, failure, tmp_path, monkeypatch):
+    """Run ``site`` with ``failure`` raised underneath it."""
+    if site in _VERIFIERS:
+        return _VERIFIERS[site]("/py", run=_raiser(failure))
+    monkeypatch.setattr(ad, "create_venv", _raiser(failure))
+    result = _ADAPTERS[site](run=_FakeRun()).provision(_wheel_action(), tmp_path / "attempt")
+    return result.ok, result.error
+
+
+@pytest.mark.parametrize("site", [*_VERIFIERS, *_ADAPTERS])
+@pytest.mark.parametrize(
+    "failure",
+    [
+        OSError("no such interpreter"),
+        subprocess.CalledProcessError(1, ["python", "-m", "venv"]),
+        subprocess.TimeoutExpired(cmd="probe", timeout=1),
+    ],
+    ids=["oserror", "called-process", "timeout"],
+)
+def test_an_expected_probe_or_venv_failure_is_absorbed(tmp_path, monkeypatch, site, failure):
+    expected = False if site in _VERIFIERS else (False, f"venv setup failed: {failure!r}")
+    outcome = _outcome(site, failure, tmp_path, monkeypatch)
+    assert outcome == expected
+
+
+@pytest.mark.parametrize("site", [*_VERIFIERS, *_ADAPTERS])
+def test_an_unexpected_probe_or_venv_failure_propagates(tmp_path, monkeypatch, site):
+    with pytest.raises(TypeError, match="unexpected failure"):
+        _outcome(site, TypeError("unexpected failure"), tmp_path, monkeypatch)

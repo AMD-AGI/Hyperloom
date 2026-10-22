@@ -57,9 +57,9 @@ from hyperloom.common.workload_defaults import (
     DEFAULT_ISL,
     DEFAULT_OSL,
 )
+from hyperloom.inference_optimizer.gpu_types import gpu_runner_type
 from hyperloom.inference_optimizer.session.paths import asset_root
-from hyperloom.inference_optimizer.framework_paths import ENV_FLYDSL_EXTRA_SOURCE_DIRS
-from hyperloom.inference_optimizer.framework_paths import GENERIC_FRAMEWORK_ROOT_ENV
+from hyperloom.inference_optimizer.framework_paths import ENV_FLYDSL_EXTRA_SOURCE_DIRS, GENERIC_FRAMEWORK_ROOT_ENV
 from hyperloom.inference_optimizer.framework_paths import flydsl_extra_source_dirs
 from ._benchmark_interpreter import _resolve_probe_python
 from hyperloom.inference_optimizer.grid_server_args import (
@@ -748,7 +748,7 @@ def _operator_extra_env() -> dict[str, str]:
     """Return the ``--extra-env`` pins the CLI serialized, or ``{}``."""
     from hyperloom.common.env_safety import operator_extra_env
 
-    return operator_extra_env()
+    return {key: value for key, value in operator_extra_env().items() if key.strip().upper() != "RUN_EVAL"}
 
 
 def resolve_reference_launch() -> tuple[str, dict[str, str], dict[str, Any]]:
@@ -839,10 +839,6 @@ def apply_scriptable_runtime_defaults(
 def _remove_moe_runner_backend_arg(args: str) -> str:
     """Remove any existing SGLang MoE runner backend flag from an args string."""
     return " ".join(_MOE_RUNNER_BACKEND_RE.sub(" ", str(args or "")).split())
-
-
-# Warn once per process when the accuracy gate is disabled.
-_RUN_EVAL_DISABLED_WARN_EMITTED = False
 
 
 def _model_requires_remote_code(model_path: str | None) -> bool:
@@ -1262,7 +1258,7 @@ def materialize_config_with_envs(
     """Render a per-run Magpie YAML with caller-provided overrides.
 
     Process env wins over YAML defaults: ``MODEL_PATH`` → ``benchmark.model``;
-    ``GPU_TYPE`` → ``runner_type`` + pinned generic ``{framework}_{gpu_type}.sh``
+    GPU product → family ``runner_type`` + pinned generic ``{framework}_{runner_type}.sh``
     (so Magpie doesn't fall through to a native script hardcoding
     ``--result-dir /workspace/``); ``benchmark_script`` (pre-sanitized) re-pins
     after that; ``PRECISION`` → ``precision``; ``CONC/ISL/OSL/MAX_MODEL_LEN/TP/
@@ -1290,7 +1286,7 @@ def materialize_config_with_envs(
         args_mode: ``"append"`` (default) or ``"replace"`` for
             ``extra_server_args``.
         model_path: Model path/id; overrides ``benchmark.model`` when set.
-        gpu_type: GPU type; sets ``runner_type`` and pins the generic script.
+        gpu_type: Product or runner type; resolves ``runner_type`` and pins the generic script.
         inferencex_path: Explicit InferenceX checkout to pin into the YAML.
         benchmark_script: Pre-sanitized benchmark script name to re-pin.
         out_name: File name for the materialized YAML.
@@ -1332,15 +1328,16 @@ def materialize_config_with_envs(
     if precision:
         bench["precision"] = precision
     if gpu_type:
-        bench["runner_type"] = str(gpu_type)
+        bench["runner_type"] = gpu_runner_type(gpu_type)
         framework = str(bench.get("framework") or "").lower()
         if framework:
-            bench["benchmark_script"] = f"{framework}_{gpu_type}.sh"
+            bench["benchmark_script"] = f"{framework}_{bench['runner_type']}.sh"
         else:
             bench.pop("benchmark_script", None)
     if benchmark_script:
         bench["benchmark_script"] = str(benchmark_script)
-    envs = bench.setdefault("envs", {})
+    agentx_run = agentx_enabled() if agentx_mode is None else agentx_mode
+    envs = bench["envs"] = {k: v for k, v in (bench.get("envs") or {}).items() if agentx_run or k != "RUN_EVAL"}
     runtime_path = os.environ.get("PATH", "").strip()
     if "PATH" in envs and runtime_path:
         envs["PATH"] = runtime_path
@@ -2016,12 +2013,9 @@ def materialize_config_with_envs(
             "--trust-remote-code",
             pinned_by=("trust-remote-code",),
         )
-    # Accuracy eval (GSM8K) is ON by default; env / extra_envs may override.
-    # Disabling it removes the per-variant accuracy gate — warn loudly, never
-    # block.
+    # Accuracy eval (GSM8K) is ON unless the round passes ``extra_envs["RUN_EVAL"]`` or the workload is AgentX.
     if "RUN_EVAL" not in envs:
-        env_run_eval = os.environ.get("RUN_EVAL")
-        envs["RUN_EVAL"] = env_run_eval if env_run_eval is not None else "true"
+        envs["RUN_EVAL"] = "true"
     # Persist eval task/limit into the YAML so they become part of the
     # fingerprint-able contract and bypass_runner reads them from a stable source.
     _eval_tasks_env = os.environ.get("MAGPIE_EVAL_TASKS", "").strip()
@@ -2056,15 +2050,6 @@ def materialize_config_with_envs(
             _eval_tok_env = ""
     if _eval_tok_env and "MAGPIE_EVAL_TOKENIZED_REQUESTS" not in envs:
         envs["MAGPIE_EVAL_TOKENIZED_REQUESTS"] = _eval_tok_env
-    if not is_truthy(envs.get("RUN_EVAL", ""), default=True):
-        global _RUN_EVAL_DISABLED_WARN_EMITTED
-        if not _RUN_EVAL_DISABLED_WARN_EMITTED:
-            log.warning(
-                "RUN_EVAL is disabled: no per-variant accuracy gate, so "
-                "accuracy regressions will not be caught. Set RUN_EVAL=true "
-                "to restore the gate. This warning fires once per process."
-            )
-            _RUN_EVAL_DISABLED_WARN_EMITTED = True
     # FlyDSL folds only same-directory helpers into its JIT cache key, so a patched
     # helper one directory over is served from a stale binary. Naming the roots
     # folds their sources into the key. Only the run that applied such a patch has

@@ -5,10 +5,11 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
-from .base import REGISTRY, RenderedSection, render_section, session_of
+from .base import REGISTRY, RenderedSection, fmt_pct, render_section, session_of
 from .cross_section import GlobalFacts, build_global_facts
 from .llm_prompt import SYSTEM_PROMPT, build_user_prompt, parse_llm_response
 
@@ -28,6 +29,8 @@ from ._renderers import (
     optimizations as _r_optimizations,
     critic as _r_critic,
 )
+
+log = logging.getLogger(__name__)
 
 
 # Final report layout ``(group_title, [section_id, ...])``. ``telemetry`` is dropped.
@@ -113,6 +116,7 @@ def render_session_report(
             exec_summary_llm = parsed["executive_summary"]
             narratives = parsed["section_narratives"]
         except Exception as exc:  # noqa: BLE001
+            log.warning("LLM narration failed: %s", exc)
             llm_raw = f"<llm_error: {type(exc).__name__}: {exc}>"
 
     used_llm = llm_client is not None and not str(llm_raw).startswith("<llm_error")
@@ -202,22 +206,27 @@ def _stitch(
     return "\n".join(parts).rstrip() + "\n"
 
 
+_UNSET = "unset"
+
+
 def _deterministic_exec_summary(g: GlobalFacts) -> str:
     """Fallback exec summary when no LLM is configured / it failed; lists every data-quality flag."""
     out: list[str] = []
     out.append(
-        f"- {g.headline} (stop_reason={g.stop_reason or 'unset'}, "
-        f"elapsed={g.elapsed_minutes or 0:.0f}min, objective={g.objective})."
+        f"- {g.headline} (stop_reason={g.stop_reason or _UNSET}, "
+        f"{_elapsed_label(g)}={g.elapsed_minutes or 0:.0f}min, graded_on={g.graded_on or _UNSET}, "
+        f"stop target {g.stop_target or _UNSET})."
     )
     out.append(f"- Workload: {g.workload_summary}.")
     if g.gain_attribution_lines:
         out.append(f"- Gain attribution ({g.attribution_method}): " + "; ".join(g.gain_attribution_lines))
     else:
         out.append(f"- No measurable gain recorded ({g.attribution_method}).")
+    out.append(f"- Variants: {_variant_funnel_text(g)}.")
     funnel = g.kernel_pipeline_funnel
     out.append(
         f"- Kernel pipeline: detected={funnel['detected']} → "
-        f"recommended={funnel['recommended']} → optimized={funnel['optimized']} → "
+        f"recommended={funnel['recommended']} → attempted={funnel['attempted']} → "
         f"adopted={funnel['adopted']} (reverted={funnel['reverted']}, "
         f"rejected={funnel['rejected']}, partial={funnel['partial']})."
     )
@@ -225,6 +234,36 @@ def _deterministic_exec_summary(g: GlobalFacts) -> str:
         out.append("- Capabilities never invoked: " + ", ".join(f"`{c}`" for c in g.capabilities_not_attempted) + ".")
     out.extend(_data_quality_flag_lines(g))
     return "\n".join(out)
+
+
+def _elapsed_label(g: GlobalFacts) -> str:
+    """``elapsed(total)`` when the figure spans every leg of the session, else ``elapsed``."""
+    return "elapsed(total)" if g.elapsed_is_total else "elapsed"
+
+
+def _variant_funnel_text(g: GlobalFacts) -> str:
+    """The variant funnel as one line, shared by the executive summary and the key facts."""
+    funnel = g.variant_funnel
+    runs = funnel["bench_runs"]
+    if not runs:
+        return "none benched"
+    rate = funnel["keep_rate_pct"]
+    rate_text = f" ({rate:.1f}%)" if rate is not None else ""
+    text = (
+        f"{_count(runs, 'bench run')} over {_count(funnel['distinct'], 'distinct change')} → "
+        f"kept {funnel['kept']}{rate_text} · reverted {funnel['reverted']} · failed {funnel['failed']}"
+    )
+    shipped: list[str] = []
+    if funnel["final_stack"] is not None:
+        shipped.append(f"final stack {_count(funnel['final_stack'], 'change')}")
+    if funnel["validated_gain_pct"] is not None:
+        shipped.append(f"validated {fmt_pct(funnel['validated_gain_pct'], plus=True)}")
+    return f"{text} → {', '.join(shipped)}" if shipped else text
+
+
+def _count(n: int, noun: str) -> str:
+    """``n`` followed by ``noun``, pluralised unless ``n`` is one."""
+    return f"{n} {noun}{'' if n == 1 else 's'}"
 
 
 def _data_quality_flag_lines(g: GlobalFacts) -> list[str]:
@@ -242,14 +281,15 @@ def _render_global_facts_block(g: GlobalFacts) -> str:
     out: list[str] = []
     out.append(f"- **Headline**: {g.headline}")
     out.append(
-        f"- **Stop reason**: `{g.stop_reason or 'unset'}` · "
-        f"elapsed `{g.elapsed_minutes or 0:.1f} min` · "
-        f"objective `{g.objective}`"
+        f"- **Stop reason**: `{g.stop_reason or _UNSET}` · "
+        f"{_elapsed_label(g)} `{g.elapsed_minutes or 0:.1f} min` · "
+        f"graded on `{g.graded_on or _UNSET}` · stop target `{g.stop_target or _UNSET}`"
     )
     out.append(f"- **Workload**: {g.workload_summary}")
+    out.append(f"- **Variants**: {_variant_funnel_text(g)}")
     out.append(
         f"- **Kernel pipeline**: detected={funnel['detected']} → "
-        f"recommended={funnel['recommended']} → optimized={funnel['optimized']} → "
+        f"recommended={funnel['recommended']} → attempted={funnel['attempted']} → "
         f"adopted={funnel['adopted']} (partial={funnel['partial']}, "
         f"reverted={funnel['reverted']}, rejected={funnel['rejected']})"
     )

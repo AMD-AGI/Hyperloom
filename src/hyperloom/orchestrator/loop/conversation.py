@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, Callable
 from ..bus.gpu_pool import gpus_by_task_sync
 from ..phases import machine_state as _phase_state
 from ..policy.projection import resource_pools_summary
+from ..specialists.in_flight import in_flight_domains
 from ..roles.base import BackendTurnResult
 from ..bus.message_bus import Message
 from hyperloom.inference_optimizer.trace.conversation_trace import ConversationRecord, append_conversation
@@ -302,20 +303,17 @@ class ConversationCollaborator(CoordinatorCollaborator):
         setter = getattr(backend, "set_context_provider", None)
         if setter is None:
             return
-        try:
-            from ..roles.mcp_context_tools import ContextProvider
+        from ..roles.mcp_context_tools import ContextProvider
 
-            provider = ContextProvider(
-                shared_state=self.shared_state,
-                inbox_reader=self._context_inbox_reader,
-                analysis_reader=self._context_analysis_reader,
-                recent_outcomes_reader=self._context_recent_outcomes_reader,
-                running_tasks_reader=self._context_running_tasks_reader,
-                reference_reader=self._context_reference_reader,
-            )
-            setter(provider)
-        except Exception:
-            log.exception("Coordinator: failed to attach orchestration context tools")
+        provider = ContextProvider(
+            shared_state=self.shared_state,
+            inbox_reader=self._context_inbox_reader,
+            analysis_reader=self._context_analysis_reader,
+            recent_outcomes_reader=self._context_recent_outcomes_reader,
+            running_tasks_reader=self._context_running_tasks_reader,
+            reference_reader=self._context_reference_reader,
+        )
+        setter(provider)
 
     def _context_reference_reader(self, name: str = "") -> str:
         """Resolve a reference doc by stem; reject path traversal."""
@@ -368,7 +366,7 @@ class ConversationCollaborator(CoordinatorCollaborator):
     def _context_running_tasks_reader(self) -> str:
         """Project in-flight tasks and their held resources from three reads, not one snapshot."""
         tasks = self.tasks.running_context_sync()
-        backlog = self._queued_backlog_line()
+        backlog = "\n".join(line for line in (self._queued_backlog_line(), self._queued_specialists_line()) if line)
         if not tasks:
             return "\n".join(line for line in ("(no tasks in flight)", backlog) if line)
 
@@ -422,6 +420,15 @@ class ConversationCollaborator(CoordinatorCollaborator):
             if counts.get(kind)
         ]
         return "queued backlog: " + ", ".join(parts) if parts else ""
+
+    def _queued_specialists_line(self) -> str:
+        """Domains a queued specialist holds: a specialist delegate for one of them is refused until it finishes."""
+        held = in_flight_domains(self.tasks.queued_context_sync())
+        if not held:
+            return ""
+        return "queued specialists (each holds its domain): " + ", ".join(
+            f"{domain} task_id={task.task_id}" for domain, task in held.items()
+        )
 
     def _task_heartbeat_age_sec(self, task: "Task", *, now_unix: float) -> float | None:
         """Age of a specialist's freshest liveness file, mirroring the reaper."""
@@ -633,10 +640,7 @@ class ConversationCollaborator(CoordinatorCollaborator):
             pid = str(getattr(p, "proposal_msg_id", "") or "")
             if not pid or pid in seen:
                 continue
-            try:
-                pm = await self.bus.lookup_by_id(pid)
-            except Exception:  # noqa: BLE001 — defensive
-                pm = None
+            pm = await self.bus.lookup_by_id(pid)
             if pm is not None:
                 extra.append(pm)
                 seen.add(pid)
@@ -828,19 +832,16 @@ class ConversationCollaborator(CoordinatorCollaborator):
         return _research_hints.full_gap_summary(gap)
 
     def _current_primary_gap(self) -> str | None:
-        """Resolve latency/throughput; None when advisory is off or unavailable. Fail-soft."""
+        """Resolve latency/throughput; None when advisory is off or no competitor target is set."""
         state = self.shared_state
         if not bool(state.target_advisory_enabled):
             return None
-        try:
-            from hyperloom.inference_optimizer.baseline_comparison import research_hints as _research_hints
+        from hyperloom.inference_optimizer.baseline_comparison import research_hints as _research_hints
 
-            target = _research_hints.load_competitor_target(self.session_dir)
-            if not target:
-                return None
-            gap = _research_hints.gap_for_state(target, state)
-        except Exception:  # noqa: BLE001 — defensive
+        target = _research_hints.load_competitor_target(self.session_dir)
+        if not target:
             return None
+        gap = _research_hints.gap_for_state(target, state)
         if not isinstance(gap, dict):
             return None
         return str(gap.get("primary_gap") or "").strip() or None
@@ -916,7 +917,10 @@ class ConversationCollaborator(CoordinatorCollaborator):
         return "\n".join(lines)
 
     def _priors_match_advisory_block(self) -> str:
-        """Flag recently proposed variants aligning with proven priors / dominant external gap (advisory ordering, fail-soft)."""
+        """Flag recently proposed variants aligning with proven priors / dominant external gap (advisory ordering).
+
+        A failure is logged and the prompt goes out without this block.
+        """
         try:
             from hyperloom.inference_optimizer.baseline_comparison import research_hints as _research_hints
 
@@ -930,7 +934,8 @@ class ConversationCollaborator(CoordinatorCollaborator):
                 hints,
                 primary_gap=primary_gap,
             )
-        except Exception:  # noqa: BLE001 — defensive
+        except Exception:
+            log.exception("Coordinator: priors-match advisory failed")
             return ""
 
     def _discarded_escalate_hint_advisory_block(self) -> str:

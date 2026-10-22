@@ -1210,6 +1210,27 @@ def test_inject_explore_runtime_params_includes_baseline_accuracy():
     assert params["accuracy_baseline"] == pytest.approx(0.81)
 
 
+@pytest.mark.parametrize(
+    ("proposed", "raises_bar"),
+    [(None, False), (-5.0, False), (float("nan"), False), ("not-a-number", False), (25.0, True)],
+)
+def test_agent_keep_threshold_can_only_raise_the_session_bar(proposed, raises_bar):
+    from hyperloom.orchestrator.phases.machine_state import resolve_keep_threshold
+
+    class DummyCoordinator:
+        shared_state = SharedState()
+
+    session_pct = resolve_keep_threshold(DummyCoordinator.shared_state)
+    proposals = ProposalsCollaborator(DummyCoordinator())
+    explore: dict[str, Any] = {} if proposed is None else {"keep_threshold_pct": proposed}
+    integrate = dict(explore)
+    proposals.inject_explore_runtime_params(explore)
+    proposals.floor_keep_threshold(integrate)
+    expected = 25.0 if raises_bar else session_pct
+    assert explore["keep_threshold_pct"] == pytest.approx(expected)
+    assert integrate["keep_threshold_pct"] == pytest.approx(expected)
+
+
 @pytest.mark.asyncio
 async def test_promote_baseline_accepts_higher_rebaseline(session_dir):
     c = Coordinator(session_dir, backends=_silent_backends())
@@ -1649,28 +1670,6 @@ async def test_promote_baseline_revalidation_finalizes_when_accuracy_meets_floor
         assert c.shared_state.enablement.succeeded is True
         assert c.shared_state.enablement.validation_pending is False
         assert c.shared_state.enablement.origin == ""
-    finally:
-        await c.stop()
-
-
-@pytest.mark.asyncio
-async def test_promote_baseline_revalidation_promotes_without_accuracy_when_eval_disabled(session_dir):
-    """When the session has eval disabled, a revalidation baseline promotes on throughput alone."""
-    c = Coordinator(session_dir, backends=_silent_backends())
-    _mute_action_scoring(c)
-    try:
-        c.shared_state.eval_disabled = True
-        c.shared_state.enablement.validation_pending = True
-        c.shared_state.enablement.accuracy_floor = 0.3
-        c.shared_state.enablement.revalidation_task_id = "t-reval-noeval"
-        await c.writeback.promote_to_shared_state(
-            "baseline",
-            {"output_throughput": 900.0, "completed_requests": 8},
-            task=_mk_task("baseline", "t-reval-noeval"),
-        )
-        assert c.shared_state.baseline_tput == 900.0
-        assert c.shared_state.enablement.succeeded is True
-        assert c.shared_state.enablement.validation_pending is False
     finally:
         await c.stop()
 
@@ -2222,7 +2221,6 @@ def test_fingerprint_keys_covers_recovery_surface():
         "model_path",
         "gpu_type",
         "config_path",
-        "disable_run_eval",
     }
     assert set(_BASELINE_FINGERPRINT_KEYS) == expected
 
@@ -2763,3 +2761,16 @@ async def test_target_reached_close_still_runs_the_post_opt_roofline(session_dir
         assert ran == ["False"], f"post-opt roofline saw closing_phase={ran}"
     finally:
         await c.stop()
+
+
+def test_a_failing_proposal_outcome_record_propagates(monkeypatch) -> None:
+    from hyperloom.inference_optimizer.breakdown.recorder import phase_event
+    from hyperloom.orchestrator.loop import proposals
+
+    def _boom(**_kwargs) -> None:
+        raise RuntimeError("proposal outcome bug")
+
+    monkeypatch.setattr(phase_event, "record_proposal_outcome", _boom)
+
+    with pytest.raises(RuntimeError, match="proposal outcome bug"):
+        proposals._record_proposal_materialized("m-1", "t-1")

@@ -237,37 +237,25 @@ def _moe_dimensions(shapes: list[list[int]]) -> dict[str, int]:
     two_dimensional = [shape for shape in shapes if len(shape) == 2]
     three_dimensional = [shape for shape in shapes if len(shape) == 3]
     dimensions: dict[str, int] = {}
-    hidden = max(two_dimensional, key=lambda shape: shape[1]) if two_dimensional else None
-    if hidden is not None:
-        dimensions["M"], dimensions["K"] = hidden[0], hidden[1]
+    if two_dimensional:
+        hidden = max(two_dimensional, key=lambda shape: shape[1])
+        dimensions["M"], dimensions["K"] = hidden
         topk = next(
             (
-                shape
+                shape[1]
                 for shape in two_dimensional
                 if shape is not hidden and shape[0] == hidden[0] and 0 < shape[1] <= 64
             ),
             None,
         )
         if topk is not None:
-            dimensions["TOPK"] = topk[1]
+            dimensions["TOPK"] = topk
     if three_dimensional:
         dimensions["E"] = three_dimensional[0][0]
         hidden_size = dimensions.get("K")
-        output_size = None
-        if hidden_size is not None:
-            second_weight = next(
-                (shape for shape in three_dimensional if shape[1] == hidden_size),
-                None,
-            )
-            if second_weight is not None:
-                output_size = second_weight[2]
-            else:
-                first_weight = next(
-                    (shape for shape in three_dimensional if shape[2] == hidden_size),
-                    None,
-                )
-                if first_weight is not None:
-                    output_size = first_weight[1] // 2
+        output_size = next((shape[2] for shape in three_dimensional if shape[1] == hidden_size), None)
+        if output_size is None:
+            output_size = next((shape[1] // 2 for shape in three_dimensional if shape[2] == hidden_size), None)
         if output_size is not None:
             dimensions["N"] = output_size
     return dimensions

@@ -17,7 +17,7 @@ import pytest
 import yaml
 
 from kernelforge.assembly import prepare
-from kernelforge.loop.validation import ValidationReport, ValidationResult
+from kernelforge.evaluation.correctness.pipeline import ValidationReport, ValidationResult
 
 ASM = """.amdgcn_target "amdgcn-amd-amdhsa--gfx950"
 .text

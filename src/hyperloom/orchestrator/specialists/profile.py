@@ -119,12 +119,16 @@ def resolve_specialist_profile(
     params: dict[str, Any] | None,
     domain: "SpecialistDomain | None" = None,
 ) -> SpecialistProfile:
-    """Resolve scope/mode/bench from dispatch params, falling back to safe defaults."""
+    """Resolve scope/mode/bench from dispatch params, falling back to safe defaults.
+
+    The scope is re-inferred from the tags when it is unknown, or ``domains`` over fewer than two tags.
+    """
     p = params or {}
 
     scope = str(p.get("scope") or "").strip().lower()
-    if scope not in SCOPE_VALUES:
-        scope = _infer_scope(p)
+    inferred = _infer_scope(p)
+    if scope not in SCOPE_VALUES or (scope == SCOPE_DOMAINS and inferred != SCOPE_DOMAINS):
+        scope = inferred
 
     mode = str(p.get("mode") or "").strip().lower()
     if mode not in MODE_VALUES:

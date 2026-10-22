@@ -62,6 +62,37 @@ def named_settings(argv_text: str, framework: str) -> dict[str, list[str]]:
     return settings
 
 
+def observed_launch_after(
+    observed_config: Mapping[str, Any],
+    observed_env: Mapping[str, str],
+    opening: Mapping[str, Any],
+    now: Mapping[str, Any],
+    framework: str,
+) -> tuple[dict[str, Any], dict[str, str]]:
+    """The part of the observed launch that still describes the stack once it has moved from ``opening`` to ``now``.
+
+    The observed launch is what the server ran when the round opened. A KEEP that changed a setting, an env, a removal
+    or an unset (added or cleared) leaves the observed value of that one, and of its negated spelling, stale; every
+    other setting is still what the server runs. Both stacks are ``measured_against`` shaped, with their args
+    composed as launched, so a change of args mode alone moves nothing.
+    """
+    before = named_settings(str(opening.get("extra_server_args") or ""), framework)
+    after = named_settings(str(now.get("extra_server_args") or ""), framework)
+    stale = {name for name in before.keys() | after.keys() if before.get(name) != after.get(name)}
+    removed = set(now.get("remove_args") or ()) ^ set(opening.get("remove_args") or ())
+    stale |= named_settings(" ".join(sorted(removed)), framework).keys()
+    stale |= {_opposite_setting(name) for name in stale}
+    envs_before, envs_after = opening.get("extra_envs") or {}, now.get("extra_envs") or {}
+    stale_envs = {
+        name for name in envs_before.keys() | envs_after.keys() if envs_before.get(name) != envs_after.get(name)
+    }
+    stale_envs |= set(now.get("unset_envs") or ()) ^ set(opening.get("unset_envs") or ())
+    return (
+        {name: value for name, value in observed_config.items() if name not in stale},
+        {name: value for name, value in observed_env.items() if name not in stale_envs},
+    )
+
+
 def _opposite_setting(name: str) -> str:
     """The setting a boolean flag's negated spelling sets: ``no_x`` for ``x`` and back."""
     return name[3:] if name.startswith("no_") else f"no_{name}"

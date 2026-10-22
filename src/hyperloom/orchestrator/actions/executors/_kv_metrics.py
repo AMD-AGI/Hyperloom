@@ -44,6 +44,7 @@ Two rules run through everything below:
 
 from __future__ import annotations
 
+import http.client
 import json
 import logging
 import math
@@ -56,6 +57,8 @@ import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+import yaml
 
 
 log = logging.getLogger(__name__)
@@ -707,10 +710,8 @@ def port_from_workspace(workspace: Any) -> int | None:
         for pattern in ("*.yaml", "*/config.yaml"):
             for candidate in sorted(root.glob(pattern)):
                 try:
-                    import yaml
-
                     payload = yaml.safe_load(candidate.read_text(encoding="utf-8"))
-                except Exception:  # noqa: BLE001 - a config we cannot read is not a reason to fail a round
+                except (OSError, ValueError, yaml.YAMLError):
                     continue
                 if not isinstance(payload, dict):
                     continue
@@ -856,7 +857,7 @@ class KvMetricsPoller:
         try:
             with _OPENER.open(self.url, timeout=self.timeout_sec) as response:
                 body = response.read().decode("utf-8", "ignore")
-        except (urllib.error.URLError, OSError, ValueError) as exc:
+        except (urllib.error.URLError, http.client.HTTPException, OSError, ValueError) as exc:
             self._failures += 1
             # Both a count and a clock. On the count alone, three misses inside six seconds park the poller for the rest
             # of the round -- and an engine that has logged "ready" can still be a few seconds from accepting a request,
@@ -967,7 +968,7 @@ class AiperfProgressPoller:
         try:
             with _OPENER.open(f"{url.rstrip('/')}/api/progress", timeout=self.timeout_sec) as response:
                 payload = json.loads(response.read().decode("utf-8", "ignore"))
-        except (urllib.error.URLError, OSError, ValueError) as exc:
+        except (urllib.error.URLError, http.client.HTTPException, OSError, ValueError) as exc:
             self._failures += 1
             # Only give up on an endpoint that never worked. One that answered before and is failing now is an aiperf
             # that has exited, and the timeline already collected is still the authority for this round.
@@ -1051,7 +1052,7 @@ class KvMetricsRecorder:
     """Collects phase-tagged KV samples for one benchmark round.
 
     Owns everything stateful about collection so the watchdog loop it hangs off keeps a single call per pass and one
-    ``finally``. Like the poller, nothing here raises: a recorder that fails must cost the round nothing.
+    ``finally``. Like the poller, a failed scrape costs the round one sample: the pollers treat connection and truncated-response errors as a miss.
 
     The phase machine is driven by markers the loop already detects, plus aiperf's own phase lines under AgentX. It is
     never inferred from elapsed time, because the boundaries move by tens of minutes between rounds -- an AgentX warmup
@@ -1157,11 +1158,7 @@ class KvMetricsRecorder:
         workload = self._poll_progress()
         start_mono = time.monotonic()
         start_unix = time.time()
-        try:
-            sample = self._poller.sample()
-        except Exception:
-            log.debug("kv_metrics: sample failed", exc_info=True)
-            return None
+        sample = self._poller.sample()
         end_mono = time.monotonic()
         if sample is None:
             return None
@@ -1192,11 +1189,7 @@ class KvMetricsRecorder:
         """
         if self._progress is None:
             return None
-        try:
-            phases = self._progress.poll()
-        except Exception:
-            log.debug("kv_metrics: progress poll failed", exc_info=True)
-            return None
+        phases = self._progress.poll()
         if not phases:
             return None
         active: dict[str, Any] | None = None
@@ -1331,51 +1324,47 @@ class KvMetricsRecorder:
         """
         if self._workspace is None:
             return None
-        try:
-            export = None
-            records = []
-            for candidate in _server_metrics_exports(self._workspace):
-                records = read_aiperf_server_metrics(candidate)
-                if records:
-                    export = candidate
-                    break
-            if export is None:
-                return None
-            # Kept by time, not by phase label. aiperf covers one contiguous window -- it starts after the server is up
-            # and exits before the accuracy eval -- so a live row outside that span is a reading nothing else took,
-            # while one inside it is redundant by definition. Judging on the label instead would keep a row whose
-            # timestamp lands mid-window and let it close a counter window it has no business closing.
-            covered_from = records[0][0].ts
-            covered_to = records[-1][0].ts
-            kept = [
-                r
-                for r in self._rows
-                if isinstance(r.get("ts"), (int, float)) and not (covered_from <= r["ts"] <= covered_to)
-            ]
-            # Rebuilt from scratch so no superseded live reading survives into the counter windows below.
-            self._rows = []
-            self._first_counters = {}
-            self._last_counters = {}
-            previous_phase = self._phase
-            for sample, timing, phase in records:
-                # An unstamped record is one aiperf took before any phase began -- its baseline capture, of an idle
-                # pool. That is boot. Defaulting it to "measured" put readings of a pool under no load into the one
-                # phase allowed into a comparison: observed on a live round, where three such rows produced a measured
-                # prefix-cache delta of 34,395 describing nothing that happened.
-                self._phase = phase or "boot"
-                self._absorb(sample, timing=timing)
-            self._phase = previous_phase
-            if kept:
-                # Time order, because the counter windows below are bracketed by walking the rows in sequence.
-                self._rows = sorted([*self._rows, *kept], key=lambda r: r.get("ts") or 0.0)
-            # Adjacent phases share the reading at their boundary here too. aiperf takes its own scrape at each
-            # transition, but tags it with the phase that is ending, so without this the next phase's window would open
-            # at its first periodic sample and the increment in between would be credited to neither.
-            self._rebuild_counter_windows()
-            return str(export)
-        except Exception:
-            log.debug("kv_metrics: aiperf server metrics unavailable", exc_info=True)
+        export = None
+        records = []
+        for candidate in _server_metrics_exports(self._workspace):
+            records = read_aiperf_server_metrics(candidate)
+            if records:
+                export = candidate
+                break
+        if export is None:
             return None
+        # Kept by time, not by phase label. aiperf covers one contiguous window -- it starts after the server is up
+        # and exits before the accuracy eval -- so a live row outside that span is a reading nothing else took,
+        # while one inside it is redundant by definition. Judging on the label instead would keep a row whose
+        # timestamp lands mid-window and let it close a counter window it has no business closing.
+        covered_from = records[0][0].ts
+        covered_to = records[-1][0].ts
+        kept = [
+            r
+            for r in self._rows
+            if isinstance(r.get("ts"), (int, float)) and not (covered_from <= r["ts"] <= covered_to)
+        ]
+        # Rebuilt from scratch so no superseded live reading survives into the counter windows below.
+        self._rows = []
+        self._first_counters = {}
+        self._last_counters = {}
+        previous_phase = self._phase
+        for sample, timing, phase in records:
+            # An unstamped record is one aiperf took before any phase began -- its baseline capture, of an idle
+            # pool. That is boot. Defaulting it to "measured" put readings of a pool under no load into the one
+            # phase allowed into a comparison: observed on a live round, where three such rows produced a measured
+            # prefix-cache delta of 34,395 describing nothing that happened.
+            self._phase = phase or "boot"
+            self._absorb(sample, timing=timing)
+        self._phase = previous_phase
+        if kept:
+            # Time order, because the counter windows below are bracketed by walking the rows in sequence.
+            self._rows = sorted([*self._rows, *kept], key=lambda r: r.get("ts") or 0.0)
+        # Adjacent phases share the reading at their boundary here too. aiperf takes its own scrape at each
+        # transition, but tags it with the phase that is ending, so without this the next phase's window would open
+        # at its first periodic sample and the increment in between would be credited to neither.
+        self._rebuild_counter_windows()
+        return str(export)
 
     def _authoritative_bounds(self) -> dict[str, tuple[float, float | None]] | None:
         """Phase windows in Unix seconds, from aiperf's own stamps, or ``None`` when unusable.
@@ -1486,33 +1475,29 @@ class KvMetricsRecorder:
         """
         if self._workspace is None:
             return None
-        try:
-            from ._agentx_timeline import (
-                TIMELINE_ARTIFACT_NAME,
-                build_events,
-                correlate_rows,
-                find_profile_export,
-                parse_profile_export,
-                write_timeline,
-            )
+        from ._agentx_timeline import (
+            TIMELINE_ARTIFACT_NAME,
+            build_events,
+            correlate_rows,
+            find_profile_export,
+            parse_profile_export,
+            write_timeline,
+        )
 
-            export = find_profile_export(self._workspace)
-            if export is None:
-                return None
-            records = parse_profile_export(export)
-            if not records:
-                return None
-            events, summary = build_events(records, self._authoritative_bounds())
-            # Correlation runs over every record, so the counts on a row stay exact even when the event stream above
-            # had to be sampled.
-            summary["rows_correlated"] = correlate_rows(self._rows, records)
-            path = Path(self._workspace) / TIMELINE_ARTIFACT_NAME
-            summary["path"] = path.name if write_timeline(path, events) else None
-            summary["source"] = str(export)
-            return summary
-        except Exception:
-            log.debug("kv_metrics: workload timeline unavailable", exc_info=True)
+        export = find_profile_export(self._workspace)
+        if export is None:
             return None
+        records = parse_profile_export(export)
+        if not records:
+            return None
+        events, summary = build_events(records, self._authoritative_bounds())
+        # Correlation runs over every record, so the counts on a row stay exact even when the event stream above
+        # had to be sampled.
+        summary["rows_correlated"] = correlate_rows(self._rows, records)
+        path = Path(self._workspace) / TIMELINE_ARTIFACT_NAME
+        summary["path"] = path.name if write_timeline(path, events) else None
+        summary["source"] = str(export)
+        return summary
 
     def rows(self) -> list[dict[str, Any]]:
         """Collected rows, stride-downsampled to the row cap."""
@@ -1593,7 +1578,7 @@ class KvMetricsRecorder:
             from hyperloom.common.io import atomic_write_json
 
             atomic_write_json(Path(self._output_path), payload)
-        except Exception:
+        except (OSError, TypeError, ValueError):
             # Warning, not debug. Not failing the round is the requirement; being quiet about it is not. A round that
             # collected samples and then dropped them on the floor looks identical afterwards to one that never
             # collected any, and nobody goes looking for a file they were never told was missing.

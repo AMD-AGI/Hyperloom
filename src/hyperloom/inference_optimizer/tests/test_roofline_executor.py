@@ -335,13 +335,13 @@ async def test_profile_failed_with_trace_continues_to_trace_analyze(tmp_path):
     with p1, p2:
         result = await executor(ctx)
 
-    assert result["status"] == "succeeded"
+    assert result["status"] == "recovered"
     assert result["last_profile_trace"] == "/tmp/recovered.trace.json.gz"
-    assert result["profile_recovered"] is True
     assert result["profile_warning"]["error_class"] == "subprocess_nonzero"
     assert "Profiling is not in progress" in result["profile_warning"]["error"]
     assert state.last_profile_trace == "/tmp/recovered.trace.json.gz"
-    assert state.last_profile_status == "succeeded"
+    assert state.last_profile_status == "recovered"
+    assert state.profile_trace_usable()
     assert state.last_trace_analyze["analysis_md_path"] == str(md)
 
 
@@ -369,7 +369,7 @@ async def test_profile_failed_without_trace_never_calls_trace_analyze(tmp_path):
     assert result["status"] == "failed"
     assert result["error_class"] == "profile_failed"
     assert result["phase"] == "profile"
-    assert "profile_recovered" not in result
+    assert "profile_warning" not in result
     assert state.last_profile_trace == "/old/trace.gz"
 
 
@@ -794,7 +794,7 @@ def test_wrap_profile_ctx_creates_child_task():
     assert child.task.task_id == "t-roofline-1-profile"
     assert child.task.idempotency_key == "roofline:t-1-profile"
     assert child.task.state == "running"
-    assert child.task.params == {"base_extra_args": "--mem-fraction-static=0.92", "disable_run_eval": True}
+    assert child.task.params == {"base_extra_args": "--mem-fraction-static=0.92"}
     assert child.extra["session_dir"] == "/sess"
     assert child.lease is parent.lease
 

@@ -6,8 +6,10 @@
 from __future__ import annotations
 
 import os
+import re
+import sys
 
-from hyperloom.common.gpu_identity import AMD_GPU_DISPATCH_IDENTITIES
+from hyperloom.common.gpu_identity import AMD_GPU_DISPATCH_IDENTITIES, gfx_arch_for_gpu_type
 
 #: Derived, not typed out again: a board added to the identities table is
 #: accepted by the CLI and resolvable in the same commit. Listing it separately
@@ -24,17 +26,83 @@ _GFX_TO_RUNNER: dict[str, str] = {
     "gfx950": "mi355x",
 }
 
+_RUNNER_SUPPORTED_FRAMEWORKS = {"gfx12": frozenset({"vllm"})}
+
+_R9700 = "r9700"
+
+#: Boards whose targeted-build (compiled / AITER) path has not been validated.
+_TARGETED_BUILD_UNVALIDATED_GPU_TYPES: frozenset[str] = frozenset({_R9700})
+
+#: Boards whose GEAK handoff names the product and ISA instead of leaving them to GEAK's device probe.
+_GEAK_PINNED_IDENTITY_GPU_TYPES: frozenset[str] = frozenset({_R9700})
+
 #: Re-exported from ``hyperloom.common`` so provenance and this module cannot
 #: disagree about which arch a board dispatches to.
 _AMD_GPU_DISPATCH_IDENTITIES = AMD_GPU_DISPATCH_IDENTITIES
 
 
-def _gpu_runner_type(gpu_type: str) -> str:
+def _product_tag_matches(tag: str, text: str) -> bool:
+    """Match R9700 exactly while preserving legacy MI product matching."""
+    tag = str(tag or "").strip().upper()
+    text = str(text or "").upper()
+    if tag == "R9700":
+        return re.search(r"(?<![A-Z0-9])R9700(?![A-Z0-9])", text) is not None
+    return tag in text
+
+
+def gpu_runner_type(gpu_type: str) -> str:
     """Return the Magpie runner label for a resolved real GPU type."""
     normalized = str(gpu_type or "").strip().lower()
     if normalized in ("mi325x", "mi308x"):
         return "mi300x"
+    if normalized == _R9700:
+        return "gfx12"
     return normalized
+
+
+def targeted_build_validated(gpu_type: str) -> bool:
+    """Whether the targeted-build (compiled / AITER) path has been validated on this board."""
+    return str(gpu_type or "").strip().lower() not in _TARGETED_BUILD_UNVALIDATED_GPU_TYPES
+
+
+def geak_identity_pin(gpu_type: str) -> dict[str, str]:
+    """The ``expected_target`` / ``expected_gfx`` pair a GEAK handoff carries for this board, if any."""
+    product = str(gpu_type or "").strip().lower()
+    if product not in _GEAK_PINNED_IDENTITY_GPU_TYPES:
+        return {}
+    return {"expected_target": product, "expected_gfx": gfx_arch_for_gpu_type(product) or ""}
+
+
+def _runner_framework_error(gpu_type: str, framework: str) -> str | None:
+    """Return why a constrained runner/framework pair is unavailable."""
+    runner = gpu_runner_type(gpu_type)
+    framework = str(framework or "").strip().lower()
+    supported = _RUNNER_SUPPORTED_FRAMEWORKS.get(runner)
+    if not framework or not supported or framework in supported:
+        return None
+    return (
+        f"Magpie runner {runner!r} is currently validated only for "
+        f"{', '.join(sorted(supported))}; framework {framework!r} has no validated {runner} runner"
+    )
+
+
+def require_runner_framework(gpu_type: str, framework: str) -> None:
+    """Exit at launch when the selected runner cannot serve the framework."""
+    unsupported = _runner_framework_error(gpu_type, framework)
+    if unsupported:
+        print(f"ERROR: {unsupported}", file=sys.stderr)
+        sys.exit(2)
+
+
+def warn_family_runner(gpu_type: str, framework: str) -> None:
+    """Say when a product launches through its architecture family's Magpie runner."""
+    runner = gpu_runner_type(gpu_type)
+    if gpu_type and runner != gpu_type:
+        print(
+            f"WARN: {gpu_type} uses {runner} as Magpie runner_type (architecture-family runner; "
+            f"Magpie has no per-SKU {framework}_{gpu_type}.sh)",
+            file=sys.stderr,
+        )
 
 
 def _resolve_gpu_type(
@@ -55,7 +123,7 @@ def _resolve_gpu_type(
 
 
 def _autodetect_gpu_type() -> str | None:
-    """Return mi300x|mi308x|mi325x|mi355x or None if undetectable."""
+    """Return a canonical supported board name, or ``None`` if undetectable."""
     import subprocess
 
     try:
@@ -66,7 +134,7 @@ def _autodetect_gpu_type() -> str | None:
             timeout=5,
         ).stdout.upper()
         for tag in _PRODUCT_TAGS:
-            if tag in out:
+            if _product_tag_matches(tag, out):
                 return tag.lower()
     except (FileNotFoundError, subprocess.TimeoutExpired, PermissionError, OSError):
         # rocm-smi missing / slow / not permitted; fall through to the torch gcnArchName probe below (autodetect is
@@ -78,7 +146,7 @@ def _autodetect_gpu_type() -> str | None:
         arch = torch.cuda.get_device_properties(0).gcnArchName
         gfx = arch.split(":", 1)[0].lower()
         return _GFX_TO_RUNNER.get(gfx)
-    except Exception:  # noqa: BLE001
+    except (ImportError, OSError, RuntimeError, AssertionError, AttributeError):
         return None
 
 

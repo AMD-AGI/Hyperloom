@@ -765,6 +765,8 @@ def _default_profile_config() -> Path:
 class ProfileExecutor(BenchmarkRunExecutor):
     """Benchmark round with the torch profiler on; extracts and certifies the trace_dir."""
 
+    runs_accuracy_eval = False
+
     def __init__(
         self,
         *,
@@ -782,11 +784,9 @@ class ProfileExecutor(BenchmarkRunExecutor):
             default_timeout_sec=default_timeout_sec,
             cwd=cwd if cwd is not None else tempfile.gettempdir(),
         )
-        # Set by ``_after_materialize_config`` once the probe is armed, read after the run to aggregate the per-rank
-        # reports.
+        # Set by ``_after_materialize_config`` once the probe is armed; read after the run to merge per-rank reports.
         self._host_probe_dir: str = ""
-        # Non-empty only when arming failed, and then it carries why: an empty probe dir alone cannot say whether the
-        # probe was never asked for or could not be installed.
+        # Non-empty only when arming failed, and then says why (an empty probe dir cannot tell never-asked from failed).
         self._host_probe_status: str = ""
         # Set by ``_after_materialize_config`` from the config the run will actually execute, so the post-hoc trace
         # checks ship alongside the pre-run statement of whether their subject could have been produced.
@@ -911,7 +911,7 @@ class ProfileExecutor(BenchmarkRunExecutor):
             self._host_probe_status = f"probe_injection_failed: {exc}"
         try:
             cfg = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
-        except Exception as exc:  # noqa: BLE001
+        except (OSError, ValueError, yaml.YAMLError) as exc:
             return {
                 "status": "failed",
                 "error_class": "profile_config_unreadable",

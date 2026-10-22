@@ -24,20 +24,23 @@ from pathlib import Path
 from typing import Any, NamedTuple, NoReturn
 
 from hyperloom.common import provenance
-from hyperloom.common.env import is_truthy
+from hyperloom.common.agent_runtime_requirements import agent_runtime_requirements
 from hyperloom.common.env_safety import (
     filter_untrusted_env_mapping,
     is_allowed_dotenv_key,
     is_allowed_kernel_agent_env_key,
     is_python_package_root,
 )
+from hyperloom.common.agent_cli import resolve_claude_executable, resolve_codex_executable
 from hyperloom.common.llm_config import (
+    AGENT_BACKEND_CODEX,
     CLAUDE_OAUTH_TOKEN_ENV,
     DEFAULT_CLAUDE_MODEL,
     LEGACY_DEEPSEEK_ENV_KEYS,
     anthropic_synthesizable_key,
     deepseek_compat_env,
     has_anthropic_credential,
+    preferred_agent_backend,
     provider_model_defaults,
     with_synthesized_anthropic_keys,
 )
@@ -53,8 +56,11 @@ from hyperloom.common.provenance import (
 )
 from hyperloom.common.timeutil import now_iso
 from hyperloom.common.visible_devices import hip_mask_within_rocr
+from hyperloom.common.model_paths import resolve_serving_model_path
 
 from .. import inferencex_checkout
+from .bootstrap import parse_operator_extra_env
+from .server_args import validate_server_args
 
 from .credentials import (
     _is_stale_proxy_url,
@@ -491,14 +497,7 @@ def _load_kernel_agent_env_fallback() -> dict[str, Any]:
 
 def _ensure_python_sdks(python_exe: str, pip_extra: list[str]) -> dict[str, Any]:
     """Probe-then-install runtime-imported Python SDKs using the same interpreter that imports them."""
-    # Both agent runtimes ship by default: Hyperloom routes every LLM interaction through one of them, and a
-    # deployment may be Anthropic-only, OpenAI-only, or both.
-    candidates = (
-        ("claude_agent_sdk", "claude-agent-sdk>=0.2.110"),
-        ("openai_codex", "openai-codex>=0.144"),
-        ("openai", "openai>=1.50"),
-        ("httpx", "httpx>=0.27"),
-    )
+    candidates = agent_runtime_requirements()
     installed: list[str] = []
     already_present: list[str] = []
     for module_name, pip_spec in candidates:
@@ -1257,14 +1256,6 @@ def _resumed_session_state(args: argparse.Namespace | None) -> dict[str, Any] | 
     return state if isinstance(state, dict) else None
 
 
-def _resolved_eval_disabled(args: argparse.Namespace) -> bool:
-    """Effective ``--no-eval`` for this launch, flag or persisted."""
-    if bool(getattr(args, "no_eval", False)):
-        return True
-    state = _resumed_session_state(args)
-    return bool(state and state.get("eval_disabled"))
-
-
 def _supported_framework_names() -> tuple[str, ...]:
     """The framework names ``--framework`` accepts (the framework registry)."""
     from hyperloom.inference_optimizer import framework_registry
@@ -1356,8 +1347,6 @@ def _pin_resumed_session_args(args: argparse.Namespace | None) -> None:
 def _ensure_lm_eval_dep(
     python_exe: str,
     pip_extra: list[str],
-    *,
-    eval_disabled: bool = False,
 ) -> dict[str, Any]:
     """Probe-then-install ``lm_eval`` in python_exe when the accuracy gate is on."""
     from hyperloom.orchestrator.actions.executors._multi_node_env import is_multi_node
@@ -1369,23 +1358,6 @@ def _ensure_lm_eval_dep(
             "target": "lm_eval[api]",
             "interpreter": python_exe,
             "message": "single-node InferenceX installs lm_eval on first use",
-        }
-    if eval_disabled:
-        return {
-            "status": "skipped",
-            "skip_reason": "eval_disabled",
-            "target": "lm_eval[api]",
-            "interpreter": python_exe,
-            "message": "accuracy evaluation is disabled",
-        }
-    run_eval = os.environ.get("RUN_EVAL")
-    if not is_truthy(run_eval, default=True):
-        return {
-            "status": "skipped",
-            "skip_reason": "eval_disabled",
-            "target": "lm_eval[api]",
-            "interpreter": python_exe,
-            "message": f"RUN_EVAL={run_eval}",
         }
     missing = _probe_missing_lm_eval_deps(python_exe)
     if missing is None:
@@ -1604,7 +1576,7 @@ def _check_platform_tuning() -> dict[str, Any]:
     }
 
 
-_TRACELENS_REQUIRED_CLIS: tuple[str, ...] = ("TraceLens_generate_perf_report_pytorch_inference",)
+_TRACELENS_REQUIRED_CLIS: tuple[str, ...] = ("TraceLens_generate_perf_report_from_config",)
 
 
 def _tracelens_required_at_preflight(no_kernel: bool, enable_roofline: bool) -> bool:
@@ -1679,15 +1651,12 @@ def _check_kernel_tuning_clis() -> dict[str, Any]:
     }
 
 
-def _check_node_claude_cli() -> None:
-    """WARN-only presence check for bundled agent CLIs (node/claude/codex)."""
-    missing = [t for t in ("node", "claude", "codex") if shutil.which(t) is None]
-    if missing:
-        print(
-            f"Preflight: WARNING — CLI(s) not on PATH: {missing}. "
-            f"ClaudeBackend / CodexBackend may fall back to direct HTTP. "
-            f"Run src/hyperloom/inference_optimizer/assets/install.sh to bring them in."
-        )
+def _check_agent_cli() -> None:
+    """WARN when the CLI this deployment's specialists run cannot be resolved; launching them will fail."""
+    backend = preferred_agent_backend()
+    resolve = resolve_codex_executable if backend == AGENT_BACKEND_CODEX else resolve_claude_executable
+    if not resolve():
+        print(f"Preflight: WARNING — no {backend} CLI; specialists cannot start without it (assets/install.sh).")
 
 
 def _emit_preflight_diagnostics(
@@ -1744,7 +1713,7 @@ def _emit_preflight_diagnostics(
     diagnostics_message: str | None = None
     try:
         queue_status = _print_recipe_kb_queue_status()
-    except Exception as exc:  # noqa: BLE001 — defensive
+    except (OSError, ValueError) as exc:
         print(f"  recipe_kb_queue     = <probe_failed: {exc!r}>")
         queue_status = {
             "pending": None,
@@ -1814,15 +1783,11 @@ def _print_recipe_kb_queue_status() -> dict[str, Any]:
 
 def _ensure_eval_concurrency_compat(magpie_path: str, inferencex_path: str) -> bool:
     """Scrub the fatal ``--concurrent-requests`` eval flag from the resolved trees."""
-    try:
-        from hyperloom.orchestrator.actions.executors._magpie_patcher import (
-            ensure_eval_concurrency_compat,
-        )
+    from hyperloom.orchestrator.actions.executors._magpie_patcher import (
+        ensure_eval_concurrency_compat,
+    )
 
-        ok = ensure_eval_concurrency_compat(magpie_path or None, inferencex_path or None)
-    except Exception as exc:  # noqa: BLE001 — preflight must not die here
-        print(f"Preflight: WARNING — eval-concurrency compat patch failed to run: {exc}")
-        return False
+    ok = ensure_eval_concurrency_compat(magpie_path or None, inferencex_path or None)
     if not ok:
         print(
             "Preflight: WARNING — could not remove the redundant "
@@ -1867,15 +1832,11 @@ def _ensure_client_trust_compat(magpie_path: str) -> bool:
 
     if not is_multi_node():
         return True
-    try:
-        from hyperloom.orchestrator.actions.executors._magpie_patcher import (
-            ensure_client_trust_compat,
-        )
+    from hyperloom.orchestrator.actions.executors._magpie_patcher import (
+        ensure_client_trust_compat,
+    )
 
-        ok = ensure_client_trust_compat(magpie_path or None)
-    except Exception as exc:  # noqa: BLE001 — preflight must not die here
-        print(f"Preflight: WARNING — client trust compat patch failed to run: {exc}")
-        return False
+    ok = ensure_client_trust_compat(magpie_path or None)
     if not ok:
         print(
             "Preflight: WARNING — could not apply the custom-tokenizer trust "
@@ -1902,12 +1863,9 @@ def _begin_install_event(args: argparse.Namespace | None) -> dict[str, Any]:
             "steps": [],
         },
     }
-    try:
-        from ..session.sbd_v6 import set_pending_install_event
+    from ..session.sbd_v6 import set_pending_install_event
 
-        set_pending_install_event(args, event)
-    except Exception:
-        log.warning("failed to initialize SBD V6 install event", exc_info=True)
+    set_pending_install_event(args, event)
     return event
 
 
@@ -1959,25 +1917,21 @@ def _fail_install_step(
 def _mark_pending_install_event_failed(
     args: argparse.Namespace | None,
     exc: BaseException,
-) -> dict[str, Any] | None:
+) -> dict[str, Any]:
     """Mark an unwrapped preflight exception on the pending install event."""
-    try:
-        from ..session.sbd_v6 import pending_install_event
+    from ..session.sbd_v6 import pending_install_event
 
-        event = pending_install_event(args)
-        if event is None:
-            event = _begin_install_event(args)
-        if str(event.get("status") or "") != "failed":
-            _fail_install_step(
-                event,
-                step_id="unhandled_preflight",
-                category="check",
-                exc=exc,
-            )
-        return event
-    except Exception:
-        log.warning("failed to finalize SBD V6 install failure", exc_info=True)
-        return None
+    event = pending_install_event(args)
+    if event is None:
+        event = _begin_install_event(args)
+    if str(event.get("status") or "") != "failed":
+        _fail_install_step(
+            event,
+            step_id="unhandled_preflight",
+            category="check",
+            exc=exc,
+        )
+    return event
 
 
 def _run_install_step(
@@ -2395,6 +2349,24 @@ def _check_kernel_and_tracelens_clis(install_event: Any, args: argparse.Namespac
     )
 
 
+def _validate_explicit_server_limits(args: argparse.Namespace | None) -> None:
+    effective = argparse.Namespace(**vars(args)) if args is not None else argparse.Namespace()
+    state = _resumed_session_state(args) or {}
+    pins = parse_operator_extra_env(effective) or state.get("operator_extra_env", {})
+    if state:
+        effective.server_args = str(getattr(args, "server_args", "") or "").strip() or state.get(
+            "operator_server_args", ""
+        )
+        if getattr(args, "max_model_len", None) is None:
+            effective.max_model_len = (
+                pins["MAX_MODEL_LEN"]
+                if "MAX_MODEL_LEN" in pins
+                else state.get("max_model_len") or os.environ.get("MAX_MODEL_LEN", "").strip() or None
+            )
+    model = str(state.get("model_path") or getattr(args, "model", None) or os.environ.get("MODEL_PATH", ""))
+    validate_server_args(effective, resolve_serving_model_path(model, model_base=pins.get("HL_MODEL_BASE")))
+
+
 def _preflight(
     args: argparse.Namespace | None = None,
 ) -> tuple[str, str] | None:
@@ -2419,6 +2391,12 @@ def _preflight(
     )
     if framework_arg := getattr(args, "framework", None):
         os.environ["FRAMEWORK"] = framework_arg.strip().lower()
+    _run_install_step(
+        install_event,
+        step_id="validate_server_args",
+        category="check",
+        action=lambda: _validate_explicit_server_limits(args),
+    )
     _derive_runtime_paths()
     _restore_provider_only_mode(provider_mode, provider_snapshot)
     _run_install_step(
@@ -2542,7 +2520,6 @@ def _preflight(
         action=lambda: _ensure_lm_eval_dep(
             benchmark_python,
             pip_extra,
-            eval_disabled=_resolved_eval_disabled(args),
         ),
     )
 
@@ -2574,8 +2551,7 @@ def _preflight(
 
     inferencex_path = _prepare_inferencex(install_event, magpie_active=_magpie_backend_active)
 
-    # --- node / claude / codex CLI presence (WARN-only) ---
-    _check_node_claude_cli()
+    _check_agent_cli()
 
     _check_kernel_and_tracelens_clis(install_event, args)
 
@@ -2605,16 +2581,11 @@ def _preflight(
         ),
     )
 
-    try:
-        _finish_install_event(
-            install_event,
-            args=args,
-            runtime=PreflightRuntime(
-                benchmark_backend, benchmark_python, magpie_python, inferencex_path, resolved_urls
-            ),
-        )
-    except Exception:
-        log.warning("failed to finalize SBD V6 install event", exc_info=True)
+    _finish_install_event(
+        install_event,
+        args=args,
+        runtime=PreflightRuntime(benchmark_backend, benchmark_python, magpie_python, inferencex_path, resolved_urls),
+    )
 
     return resolved_urls
 

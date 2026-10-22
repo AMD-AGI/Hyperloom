@@ -6,9 +6,15 @@
 from __future__ import annotations
 
 import subprocess
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Mapping
+
+from packaging.requirements import Requirement
+from packaging.specifiers import SpecifierSet
+from packaging.version import Version
 
 # Injectable subprocess runner
 
@@ -124,6 +130,52 @@ def write_rocm_constraints(
     return str(constraint_path)
 
 
+# SGLang's ROCm dependency set
+
+_SGLANG_ROCM_PYPROJECT = "pyproject_other.toml"
+_SGLANG_ROCM_EXTRA_PREFIX = "srt_hip"
+
+
+def _sglang_rocm_extra(pyproject: Path, torch_version: str) -> str:
+    """The ``srt_hip*`` extra whose torch requirement admits ``torch_version``; an exact pin beats none."""
+    try:
+        import tomllib
+    except ModuleNotFoundError:
+        import tomli as tomllib  # type: ignore[no-redef]
+
+    extras = tomllib.loads(pyproject.read_text(encoding="utf-8")).get("project", {}).get("optional-dependencies", {})
+    torch = Version(torch_version)
+    fitting: list[tuple[bool, str]] = []
+    for name, reqs in extras.items():
+        if not name.startswith(_SGLANG_ROCM_EXTRA_PREFIX):
+            continue
+        spec = next((r.specifier for r in map(Requirement, reqs) if r.name == "torch"), SpecifierSet())
+        if spec.contains(torch, prereleases=True):
+            fitting.append((bool(spec), name))
+    if not fitting:
+        raise ValueError(f"no {_SGLANG_ROCM_EXTRA_PREFIX}* extra in {pyproject} admits torch {torch_version}")
+    return max(fitting)[1]
+
+
+@contextmanager
+def sglang_rocm_install_target(python_dir: Path, torch_version: str) -> Iterator[str]:
+    """Yield the pip target that installs the SGLang checkout at ``python_dir`` with its ROCm dependencies.
+
+    The checkout's ``pyproject.toml`` declares the CUDA stack; ROCm installs put
+    ``pyproject_other.toml`` in its place. The swap lasts only as long as the
+    install, because the checkout is also the tree patches are cut against.
+    """
+    pyproject = python_dir / "pyproject.toml"
+    original = pyproject.read_bytes()
+    rocm = python_dir / _SGLANG_ROCM_PYPROJECT
+    if rocm.is_file():
+        pyproject.write_bytes(rocm.read_bytes())
+    try:
+        yield f"{python_dir}[{_sglang_rocm_extra(pyproject, torch_version)}]"
+    finally:
+        pyproject.write_bytes(original)
+
+
 # ROCm toolchain alignment check
 
 
@@ -210,7 +262,7 @@ def probe_torch_abi(
         return {"torch_version": "", "hip_version": "", "python_version": "", "is_rocm": False}
     try:
         return json.loads(out)
-    except Exception:  # noqa: BLE001
+    except ValueError:
         return {"torch_version": "", "hip_version": "", "python_version": "", "is_rocm": False}
 
 
@@ -237,6 +289,7 @@ __all__ = [
     "check_rocm_toolchain_alignment",
     "probe_torch_abi",
     "run_argv",
+    "sglang_rocm_install_target",
     "sort_tags_desc",
     "write_rocm_constraints",
 ]

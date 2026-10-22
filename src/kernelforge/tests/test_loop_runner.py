@@ -64,7 +64,7 @@ from kernelforge.loop.runner import (
     IterationResult,
     WindowGain,
 )
-from kernelforge.loop.scoring import passes_keep_threshold
+from kernelforge.evaluation.scoring import passes_keep_threshold
 from kernelforge.loop.search_policy import (
     MARGINAL_GAIN_WINDOW,
     OBJECTIVE_DISCOVER_NEW_MECHANISM,
@@ -2196,6 +2196,38 @@ def test_a_resume_without_a_pending_keep_replays_each_event_exactly_once(tmp_pat
     assert planned.cumulative.iterations == 3
 
 
+def test_resume_replay_advances_the_relay_streak_only_for_the_active_profiles_search(tmp_path, monkeypatch):
+    loop, workspace = _make_loop(tmp_path, monkeypatch, resume=True)
+    store = LoopStateStore(str(workspace))
+    state = RunState(campaign_id="campaign", iteration=0, next_iteration=1, baseline_wall_ms=1.0)
+    state.agent_relay.active_profile_id = "claude"
+    store.save(state)
+    for iteration, decision, producer in (
+        (1, "REVERT_PERF", "claude"),
+        (2, "REVERT_PERF", None),
+        (3, "API_ERROR", "claude"),
+        (4, "BUILD_FAILED", "claude"),
+    ):
+        store.append_event(
+            make_event(
+                "iteration_result",
+                iteration,
+                decision=decision,
+                plan=f"attempt {iteration}",
+                wall_ms=1.1,
+                best_after_ms=1.0,
+                agent_profile_id=producer,
+            )
+        )
+    loop.state_store = store
+    loop.run_state = state
+
+    planned, _, _, _ = loop._plan_resume_recovery(state, None)
+
+    assert planned.next_iteration == 5
+    assert planned.agent_relay.active_no_improvement_streak == 2
+
+
 def test_keep_expires_active_supervisor_ruling(tmp_path, monkeypatch):
     loop, workspace = _make_loop(tmp_path, monkeypatch)
     loop.state_store = LoopStateStore(str(workspace))
@@ -2507,7 +2539,7 @@ async def test_a_non_assembly_keep_rests_on_the_driver_not_on_the_task_config(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind", ["missing", "unstable", "valid"])
 async def test_assembly_keep_requires_fresh_source_relative_numerics(tmp_path, monkeypatch, kind):
-    from kernelforge.tests.test_numerical_contract import _task, evidence
+    from kernelforge.tests.evaluation.correctness.test_numerical import _task, evidence
 
     if kind != "missing":
         _task(tmp_path, evidence(candidate_repeat_db=27 if kind == "unstable" else 45))
@@ -2534,7 +2566,7 @@ async def test_snr_pass_with_failing_assembly_acceptance_is_reverted(tmp_path, m
     backend declares rejects it. That candidate must not be kept, and the
     tolerance it broke -- not the dB figure -- has to reach the agent.
     """
-    from kernelforge.tests.test_numerical_contract import _task, evidence
+    from kernelforge.tests.evaluation.correctness.test_numerical import _task, evidence
 
     _task(tmp_path, evidence())
     tmp_path.joinpath("driver.py").write_text("raise AssertionError('normalized max err 0.02468 too high')\n")
@@ -4770,7 +4802,7 @@ def test_missing_cumulative_diff_degrades_without_forcing_refresh(
     assert all("simulated diff failure" in event["cumulative_diff_error"] for event in decisions[-3:])
 
 
-def test_analysis_refresh_event_failure_marks_persistence_degraded(
+def test_analysis_refresh_event_failure_propagates(
     tmp_path,
     monkeypatch,
 ):
@@ -4786,19 +4818,47 @@ def test_analysis_refresh_event_failure_marks_persistence_degraded(
     )
     context = loop._build_orchestration_context()
 
-    loop._record_analysis_refresh_decision(
-        context,
-        AnalysisRefreshDecision(
-            refresh=False,
-            reasons=("CURRENT_EVIDENCE",),
-            evidence_stale=False,
-            gain_since_evidence=0.0,
-        ),
-        iteration=1,
-    )
+    with pytest.raises(OSError, match="^event log unavailable$"):
+        loop._record_analysis_refresh_decision(
+            context,
+            AnalysisRefreshDecision(
+                refresh=False,
+                reasons=("CURRENT_EVIDENCE",),
+                evidence_stale=False,
+                gain_since_evidence=0.0,
+            ),
+            iteration=1,
+        )
 
-    assert loop.persistence_degraded is True
-    assert any("event log unavailable" in error for error in loop.persistence_errors)
+    assert loop.persistence_degraded is False
+    assert loop.persistence_errors == []
+
+
+def test_analysis_refresh_state_save_failure_propagates(tmp_path, monkeypatch):
+    loop, workspace = _make_loop(tmp_path, monkeypatch)
+    loop.config = SimpleNamespace(
+        experiments_dir=workspace / "forge_experiments",
+        gpu_target="gfx942",
+        local_knowledge_dir=None,
+    )
+    loop.state_store = LoopStateStore(str(workspace))
+    loop.run_state = RunState()
+    monkeypatch.setattr(loop.state_store, "save", lambda _state: (_ for _ in ()).throw(OSError("save unavailable")))
+
+    class AnalysisService:
+        profiling_enabled = True
+
+        async def ensure_bundle(self, _context, **_kwargs):
+            raise RuntimeError("bundle unavailable")
+
+        def apply_checkpoint(self, context):
+            return context
+
+    with pytest.raises(OSError, match="^save unavailable$"):
+        asyncio.run(loop._resolve_analysis_context(AnalysisService()))
+
+    assert loop.persistence_degraded is False
+    assert loop.persistence_errors == []
 
 
 def test_partial_bundle_does_not_inherit_prior_commit_evidence_refs(
@@ -7907,3 +7967,365 @@ def test_the_anti_gaming_boundary_is_stated_wherever_it_is_enforced():
         assert "are NOT gaming" in block, f"boundary not stated near: {marker}"
         assert "read the harness" in block, f"no read-before-refusing near: {marker}"
         assert "not a reason" in block, f"assumption not rejected near: {marker}"
+
+
+def _raise_os_error(message):
+    def _raise(*_args, **_kwargs):
+        raise OSError(message)
+
+    return _raise
+
+
+def test_close_round_failure_propagates(tmp_path, monkeypatch):
+    loop, workspace = _make_loop(tmp_path, monkeypatch)
+    loop.state_store = LoopStateStore(str(workspace))
+    loop.run_state = RunState()
+    loop._open_round(1, lanes=1)
+    loop._round_planning_sec = 10.0
+    monkeypatch.setattr(loop.state_store, "append_event", _raise_os_error("round event unavailable"))
+
+    with pytest.raises(OSError, match="^round event unavailable$"):
+        loop._close_round()
+
+    assert loop._round_started_at is None
+    assert loop._round_planning_sec == 0.0
+
+
+def test_baseline_case_times_save_failure_propagates(tmp_path, monkeypatch):
+    loop, workspace = _make_loop(tmp_path, monkeypatch)
+    loop.state_store = SimpleNamespace(save=_raise_os_error("baseline save unavailable"))
+    loop.run_state = RunState()
+    loop._baseline_case_times = {}
+
+    with pytest.raises(OSError, match="^baseline save unavailable$"):
+        loop._set_baseline_case_times({"case": 2.0})
+
+    assert loop._baseline_case_times == {"case": 2.0}
+    assert loop.persistence_degraded is False
+    assert loop.persistence_errors == []
+
+
+def test_scoring_state_save_failure_propagates(tmp_path, monkeypatch):
+    loop, workspace = _make_loop(tmp_path, monkeypatch)
+    loop.state_store = SimpleNamespace(save=_raise_os_error("scoring save unavailable"))
+    loop.run_state = RunState()
+
+    with pytest.raises(OSError, match="^scoring save unavailable$"):
+        loop._persist_scoring_state()
+
+    assert loop.persistence_degraded is False
+    assert loop.persistence_errors == []
+
+
+def test_search_policy_persistence_failure_propagates(tmp_path, monkeypatch):
+    loop, workspace = _make_loop(tmp_path, monkeypatch)
+    loop.state_store = LoopStateStore(str(workspace))
+    loop.run_state = RunState()
+    loop.handoff_store = runner_module.HandoffStore(str(workspace))
+    monkeypatch.setattr(loop.state_store, "append_event", _raise_os_error("policy event unavailable"))
+
+    with pytest.raises(OSError, match="^policy event unavailable$"):
+        loop._update_search_policy(1)
+
+
+def _supervisor_loop(tmp_path, monkeypatch):
+    loop, workspace = _make_loop(tmp_path, monkeypatch)
+    loop.state_store = LoopStateStore(str(workspace))
+    loop.run_state = RunState()
+    loop.monitor = SupervisionMonitor()
+    monkeypatch.setattr(loop, "_build_supervisor_evidence_context", lambda _iteration: "{}")
+
+    async def supervisor(**_kwargs):
+        return "Change the route."
+
+    return loop, supervisor
+
+
+def test_supervisor_ruling_event_failure_propagates(tmp_path, monkeypatch):
+    loop, supervisor = _supervisor_loop(tmp_path, monkeypatch)
+    real_append = loop.state_store.append_event
+
+    def append_event(event):
+        if event["type"] == "supervisor_ruling":
+            raise OSError("ruling event unavailable")
+        real_append(event)
+
+    monkeypatch.setattr(loop.state_store, "append_event", append_event)
+
+    with pytest.raises(OSError, match="^ruling event unavailable$"):
+        asyncio.run(
+            loop._run_supervisor_review(
+                supervisor,
+                iteration=3,
+                digest="digest",
+                supervisor_due=True,
+                supervisor_reason="stalled",
+            )
+        )
+
+
+def test_supervisor_intervention_save_failure_propagates(tmp_path, monkeypatch):
+    loop, supervisor = _supervisor_loop(tmp_path, monkeypatch)
+    real_save = loop.state_store.save
+    saves = []
+
+    def save(state):
+        saves.append(1)
+        if len(saves) > 1:
+            raise OSError("intervention save unavailable")
+        real_save(state)
+
+    monkeypatch.setattr(loop.state_store, "save", save)
+
+    with pytest.raises(OSError, match="^intervention save unavailable$"):
+        asyncio.run(
+            loop._run_supervisor_review(
+                supervisor,
+                iteration=3,
+                digest="digest",
+                supervisor_due=True,
+                supervisor_reason="stalled",
+            )
+        )
+
+
+def test_seed_and_hydrate_failure_propagates_on_resume(tmp_path, monkeypatch):
+    loop, workspace = _make_loop(tmp_path, monkeypatch, resume=True)
+    loop.state_store = LoopStateStore(str(workspace))
+    loop.run_state = RunState()
+    monkeypatch.setattr(loop, "_restore_scoring_state", _raise_os_error("scoring restore unavailable"))
+
+    with pytest.raises(OSError, match="^scoring restore unavailable$"):
+        loop._seed_and_hydrate_run_state()
+
+
+_GIT_FAILURES = [
+    GitError(128, ["git", "diff"], "", "fatal: bad object"),
+    subprocess.TimeoutExpired(["git", "diff"], 300.0),
+    OSError("git is not installed"),
+]
+_DISCARD_FAILURES = [RuntimeError("git clean failed: Permission denied"), *_GIT_FAILURES]
+
+
+def _failure_id(failure: BaseException) -> str:
+    return type(failure).__name__
+
+
+def _raiser(failure: BaseException):
+    def fail(*_args, **_kwargs):
+        raise failure
+
+    return fail
+
+
+def _kept_result() -> IterationResult:
+    return _lesson_result(iteration=1, kept=True, commit_hash="c0ffee", mean_case_speedup=1.1)
+
+
+def _bare_loop(tmp_path, monkeypatch, *, running: bool = False):
+    """A loop with the durable state ``run`` would have opened, before any iteration."""
+    loop, workspace = _make_loop(tmp_path, monkeypatch)
+    loop.best_publisher = runner_module.BestResultPublisher(str(workspace))
+    loop.state_store = LoopStateStore(str(workspace))
+    loop.run_state = loop.state_store.load()
+    loop.experiment = None
+    if running:
+        runner_module.start_session(loop.run_state)
+    return loop
+
+
+def _site_full_diff(tmp_path, monkeypatch, failure):
+    loop, _workspace = _make_loop(tmp_path, monkeypatch)
+    monkeypatch.setattr(runner_module, "git", _raiser(failure))
+    return loop._full_diff("c0ffee")
+
+
+def _site_publish_best(tmp_path, monkeypatch, failure):
+    loop = _bare_loop(tmp_path, monkeypatch)
+    monkeypatch.setattr(loop, "_publication_changed_files", lambda _commit: [])
+    monkeypatch.setattr(loop, "_publication_patch", lambda _commit: "")
+    monkeypatch.setattr(loop.best_publisher, "publish", _raiser(failure))
+    published = loop._publish_best_result(_kept_result(), plan="p", best_before=None)
+    return loop, published
+
+
+def _site_archive_rebuild(tmp_path, monkeypatch, failure):
+    loop, _workspace = _make_loop(tmp_path, monkeypatch)
+    loop._recovered_pending_keep = ({"plan": "recovered"}, _kept_result())
+    steps: list[str] = []
+    monkeypatch.setattr(loop, "_archive_pending_keep", _raiser(failure))
+    monkeypatch.setattr(loop, "_publish_best_result", lambda *_a, **_k: steps.append("publish"))
+    monkeypatch.setattr(loop, "_clear_pending_keep", lambda: steps.append("clear"))
+    monkeypatch.setattr(loop, "_publish_optimization_history", lambda: steps.append("history"))
+    monkeypatch.setattr(loop, "_checkpoint_llm_usage", lambda: steps.append("usage"))
+    asyncio.run(loop._finish_recovered_pending_keep())
+    return loop, steps
+
+
+def _site_terminal_stamp(tmp_path, monkeypatch, failure):
+    loop = _bare_loop(tmp_path, monkeypatch, running=True)
+    steps: list[str] = []
+    monkeypatch.setattr(loop, "_git", _raiser(failure))
+    monkeypatch.setattr(loop, "_checkpoint_llm_usage", lambda: steps.append("usage"))
+    loop._persist_terminal_state()
+    return steps
+
+
+def _fail_first_discard(loop, monkeypatch, failure: BaseException) -> None:
+    """Make the session-recovery discard fail once; the verdict's own discard runs for real."""
+    pending = [failure]
+    real_discard = loop._git_discard_worktree
+
+    def discard():
+        if pending:
+            raise pending.pop()
+        real_discard()
+
+    monkeypatch.setattr(loop, "_git_discard_worktree", discard)
+
+
+def _run_verdict(tmp_path, monkeypatch, failure, **sink_fields):
+    loop, _workspace = _make_loop(tmp_path, monkeypatch)
+    _fail_first_discard(loop, monkeypatch, failure)
+
+    async def agent(kernel_path, _history, session_sink):
+        Path(kernel_path).write_text("def kernel():\n    return 99\n")
+        session_sink.update(plan="candidate", end_reason="candidate_submitted", **sink_fields)
+        return "candidate"
+
+    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=agent, supervisor_fn=_unused_supervisor)))
+    return loop
+
+
+def _site_integrity_verdict(tmp_path, monkeypatch, failure):
+    return _run_verdict(
+        tmp_path,
+        monkeypatch,
+        failure,
+        integrity_violation=True,
+        integrity_reason="modified oracle",
+        integrity_restore=lambda: None,
+    )
+
+
+def _site_contention_verdict(tmp_path, monkeypatch, failure):
+    return _run_verdict(tmp_path, monkeypatch, failure, workspace_contention="pid(s) [4321] hold a device node")
+
+
+def _site_keep_commit(tmp_path, monkeypatch, failure):
+    loop, workspace = _make_loop(tmp_path, monkeypatch)
+
+    async def editing_agent(kernel_path, _history, session_sink):
+        session_sink["plan"] = "keep that cannot be committed"
+        Path(kernel_path).write_text("def kernel():\n    return 2\n")
+        return "verified improvement"
+
+    async def successful_iteration(iteration, plan=""):
+        return replace(_kept_result(), iteration=iteration, commit_hash="", duration_sec=0.01)
+
+    monkeypatch.setattr(loop, "run_one_iteration", successful_iteration)
+    monkeypatch.setattr(loop, "_git_commit", _raiser(failure))
+    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=editing_agent, supervisor_fn=_unused_supervisor)))
+    return loop, workspace
+
+
+@pytest.mark.parametrize(
+    "site",
+    [
+        _site_full_diff,
+        _site_publish_best,
+        _site_archive_rebuild,
+        _site_terminal_stamp,
+        _site_integrity_verdict,
+        _site_contention_verdict,
+        _site_keep_commit,
+    ],
+    ids=lambda site: site.__name__,
+)
+def test_an_unexpected_error_at_a_narrowed_handler_propagates(tmp_path, monkeypatch, site):
+    with pytest.raises(TypeError, match="^seam drifted$"):
+        site(tmp_path, monkeypatch, TypeError("seam drifted"))
+
+
+@pytest.mark.parametrize("failure", _GIT_FAILURES, ids=_failure_id)
+def test_a_failed_commit_diff_archives_an_empty_change_diff(tmp_path, monkeypatch, failure):
+    assert _site_full_diff(tmp_path, monkeypatch, failure) == ""
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [OSError("disk full"), ValueError("best manifest is ahead of iteration 1: 2"), *_GIT_FAILURES[:2]],
+    ids=_failure_id,
+)
+def test_a_failed_best_publication_degrades_persistence_instead_of_raising(tmp_path, monkeypatch, failure):
+    loop, published = _site_publish_best(tmp_path, monkeypatch, failure)
+
+    assert published is False
+    assert (loop.persistence_degraded, loop.persistence_errors) == (True, [f"publish best iteration 1: {failure}"])
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        ValueError("candidate archive conflicts with pending KEEP iteration 1"),
+        RuntimeError("failed to recover candidate archive for iteration 1"),
+        OSError("archive index not writable"),
+    ],
+    ids=_failure_id,
+)
+def test_a_failed_archive_rebuild_still_publishes_the_recovered_best(tmp_path, monkeypatch, failure):
+    loop, steps = _site_archive_rebuild(tmp_path, monkeypatch, failure)
+
+    assert (loop.persistence_degraded, loop.persistence_errors) == (
+        True,
+        [f"rebuild candidate archive iteration 1: {failure}"],
+    )
+    assert steps == ["publish", "clear", "history", "usage"]
+
+
+@pytest.mark.parametrize("failure", _GIT_FAILURES[1:], ids=_failure_id)
+def test_a_failed_terminal_stamp_does_not_skip_the_usage_checkpoint(tmp_path, monkeypatch, failure):
+    assert _site_terminal_stamp(tmp_path, monkeypatch, failure) == ["usage"]
+
+
+@pytest.mark.parametrize("failure", _DISCARD_FAILURES, ids=_failure_id)
+@pytest.mark.parametrize(
+    ("site", "summary"),
+    [
+        (
+            _site_integrity_verdict,
+            "REVERT (protected integrity violation): canonical correctness and benchmark were skipped before "
+            "executing the measurement surface. modified oracle Restoration errors: tracked candidate restore failed: ",
+        ),
+        (
+            _site_contention_verdict,
+            "REVERT (workspace contention): canonical correctness and benchmark were skipped because the session's "
+            "workspace could not be cleared. pid(s) [4321] hold a device node Candidate restore failed: ",
+        ),
+    ],
+    ids=["integrity", "contention"],
+)
+def test_a_failed_restore_is_reported_on_the_verdict(tmp_path, monkeypatch, site, summary, failure):
+    loop = site(tmp_path, monkeypatch, failure)
+
+    assert loop.results[0].validation_summary == f"{summary}{type(failure).__name__}: {failure}"
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        OSError("pending journal not writable"),
+        ValueError("verified KEEP has no candidate diff"),
+        RuntimeError("git commit did not advance HEAD"),
+        GitError(1, ["git", "commit"], "", "hook rejected commit"),
+    ],
+    ids=_failure_id,
+)
+def test_a_keep_that_cannot_be_committed_is_reverted_as_a_crash(tmp_path, monkeypatch, failure):
+    loop, workspace = _site_keep_commit(tmp_path, monkeypatch, failure)
+
+    result = loop.results[0]
+    assert (result.kept, result.validation_passed, result.crashed) == (False, False, True)
+    assert result.validation_summary == f"COMMIT FAILED: {failure}"
+    assert (workspace / "kernel.py").read_text() == "def kernel():\n    return 1\n"
+    assert not (workspace / "forge_experiments" / "pending_keep.json").exists()

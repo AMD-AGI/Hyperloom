@@ -2,12 +2,14 @@
 # SPDX-License-Identifier: MIT
 
 """Behavior-lock tests for ``SharedState.record_trace_analyze``: 15-key dict, snapshot_id wrap-on-clear, capped history
-with anchor, and swallowed history failures.
+with anchor, and history failures that reach the caller.
 """
 
 from __future__ import annotations
 
 from unittest.mock import patch
+
+import pytest
 
 from hyperloom.orchestrator.state.shared_state import (
     _ROOFLINE_SNAPSHOTS_CAP,
@@ -90,8 +92,8 @@ def test_roofline_snapshots_capped_keeps_baseline_anchor() -> None:
     assert state.roofline_snapshots[1]["snapshot_id"] == total - (_ROOFLINE_SNAPSHOTS_CAP - 1) + 1
 
 
-def test_history_block_failure_does_not_drop_canonical_write() -> None:
-    """A failure inside the history block is swallowed; ``last_trace_analyze`` is still written and no history entry is appended."""
+def test_history_block_failure_propagates_after_canonical_write() -> None:
+    """A failure inside the history block reaches the caller; ``last_trace_analyze`` is already written and no history entry is appended."""
     state = SharedState()
     _record(state, "first")
     assert len(state.roofline_snapshots) == 1
@@ -100,9 +102,10 @@ def test_history_block_failure_does_not_drop_canonical_write() -> None:
         "hyperloom.inference_optimizer.roofline_snapshot.build_roofline_snapshot",
         side_effect=RuntimeError("boom"),
     ):
-        _record(state, "second")
+        with pytest.raises(RuntimeError, match="boom"):
+            _record(state, "second")
 
-    # Canonical write survives the history-block exception.
+    # The canonical write precedes the history block.
     assert state.last_trace_analyze["roofline_snapshot_id"] == 2
     assert state.last_trace_analyze["trace_input"] == "second"
     assert state.roofline_snapshot_id == 2

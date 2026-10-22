@@ -5,14 +5,17 @@
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 from typing import Any, Callable, Iterable
 
 from hyperloom.inference_optimizer.protocol.intent import (
+    EXTEND_LEASE_MAX_SEC,
     IntentType,
     IntentValidationError,
     _PAYLOAD_REQUIRED,  # type: ignore[attr-defined]
+    validate_envelope,
 )
 from .mcp_context_tools import _resolve_sdk
 
@@ -25,11 +28,14 @@ EMIT_INTENT_TOOL_NAME = "emit_intent"
 EMIT_INTENT_TOOL_QUALIFIED = f"mcp__{MCP_SERVER_NAME}__{EMIT_INTENT_TOOL_NAME}"
 
 
-# Vocabulary a required-field name cannot carry on its own: closed value sets and the one optional dial each type
-# honours.
+# Vocabulary a required-field name cannot carry on its own: closed value sets, numeric bounds, and the optional dials
+# each type honours.
 _PAYLOAD_FIELD_NOTES: dict[IntentType, tuple[str, ...]] = {
     IntentType.REVIEW_VERDICT: ("verdict ∈ approve|reject|redirect|advise|needs_review",),
-    IntentType.EXTEND_LEASE: ("reason is optional",),
+    IntentType.EXTEND_LEASE: (
+        f"extra_sec ≤ {EXTEND_LEASE_MAX_SEC} per call, repeatable while the task runs",
+        "reason is optional",
+    ),
     IntentType.PRUNE_BRANCH: ("scope ∈ family|queued",),
     IntentType.ALERT: ("severity ∈ low|medium|high",),
 }
@@ -102,34 +108,39 @@ def build_intent_envelope_schema(allowed_intents: Iterable[IntentType]) -> dict[
     }
 
 
-EMIT_INTENT_TOOL_INPUT_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "intent_type": {
-            "type": "string",
-            "enum": [t.value for t in IntentType],
-        },
-        "payload": {
-            "type": "object",
-            "description": (
-                "Per-intent payload. Required keys per intent_type: "
-                f"{payload_contract(IntentType)}."
-                f"{constraints_sentence(IntentType)}"
-            ),
-        },
-        "__unparsedToolInput": {
-            "type": "object",
-            "description": (
-                "Internal fallback produced by the Claude Code streaming parser. Never emit this deliberately."
-            ),
-        },
-    },
-    "additionalProperties": False,
-}
-
 # No top-level required or anyOf/oneOf/allOf: the MCP layer validates against this schema before the handler runs,
 # and Claude Code's __unparsedToolInput wrapper carries neither key; the Messages API rejects top-level combinators,
 # and Claude Code can drop such a tool without an error. validate_emit_intent_input enforces both keys instead.
+def build_emit_intent_tool_input_schema(allowed_intents: Iterable[IntentType]) -> dict[str, Any]:
+    """Render one role's intent contract as the ``emit_intent`` tool input schema."""
+    ordered = _ordered_intents(allowed_intents)
+    if not ordered:
+        raise ValueError("build_emit_intent_tool_input_schema requires at least one allowed IntentType")
+    return {
+        "type": "object",
+        "properties": {
+            "intent_type": {
+                "type": "string",
+                "enum": [t.value for t in ordered],
+            },
+            "payload": {
+                "type": "object",
+                "description": (
+                    "Per-intent payload. Required keys per intent_type: "
+                    f"{payload_contract(ordered)}."
+                    f"{constraints_sentence(ordered)}"
+                ),
+            },
+            "__unparsedToolInput": {
+                "type": "object",
+                "description": (
+                    "Internal fallback produced by the Claude Code streaming parser. Never emit this deliberately."
+                ),
+            },
+        },
+        "additionalProperties": False,
+    }
+
 
 EMIT_INTENT_TOOL_DESCRIPTION = (
     "Emit ONE structured intent into the inference_optimizer system. This "
@@ -222,8 +233,23 @@ def coerce_emit_intent_input(raw_input: Any) -> dict[str, Any]:
     return coerced
 
 
-def validate_emit_intent_input(payload: dict[str, Any]) -> None:
-    """Eager single-intent validation (mirrors :func:`validate_envelope`)."""
+def validate_emit_intent_input(
+    payload: dict[str, Any],
+    *,
+    allowed_intents: frozenset[IntentType] | None = None,
+) -> None:
+    """Eager single-intent validation, by the same rule the harvest will apply.
+
+    The eager path decides only the tool ack; :func:`validate_envelope` decides
+    whether the intent survives. A rule written twice here drifts — a null
+    required field was acked ``ok`` and then dropped by the harvest, leaving the
+    agent told it succeeded with nothing to retry on — so the eager path builds
+    the one-intent envelope and defers to that function.
+
+    ``allowed_intents`` refuses a type outside the emitting role while the agent
+    can still correct it in the same turn; the PolicyGate's role rule stays the
+    authority and denies the harvested intent all the same.
+    """
     if not isinstance(payload, dict):
         raise IntentValidationError(f"emit_intent input must be an object, got {type(payload).__name__}")
     original_extra = set(payload) - _EMIT_INTENT_TOP_LEVEL_KEYS
@@ -241,21 +267,25 @@ def validate_emit_intent_input(payload: dict[str, Any]) -> None:
         intent_type = IntentType(coerced["intent_type"])
     except ValueError as exc:
         raise IntentValidationError(f"emit_intent: unknown intent_type {coerced['intent_type']!r}") from exc
-    inner = coerced["payload"]
-    if not isinstance(inner, dict):
-        raise IntentValidationError(f"emit_intent: 'payload' must be an object, got {type(inner).__name__}")
-    required = _PAYLOAD_REQUIRED.get(intent_type, ())
-    missing = [k for k in required if k not in inner]
-    if missing:
+    if allowed_intents is not None and intent_type not in allowed_intents:
         raise IntentValidationError(
-            f"emit_intent: intent_type={intent_type.value} missing required fields: {missing!r}"
+            f"emit_intent: this role cannot emit intent_type {intent_type.value!r}; "
+            f"allowed: {', '.join(t.value for t in _ordered_intents(allowed_intents))}"
         )
+    if not isinstance(coerced["payload"], dict):
+        raise IntentValidationError(
+            f"emit_intent: 'payload' must be an object, got {type(coerced['payload']).__name__}"
+        )
+    validate_envelope({"intents": [{"intent_type": coerced["intent_type"], "payload": coerced["payload"]}]})
 
 
-async def _emit_intent_handler(args: dict[str, Any]) -> dict[str, Any]:
+async def _emit_intent_handler(
+    args: dict[str, Any],
+    allowed_intents: frozenset[IntentType] | None = None,
+) -> dict[str, Any]:
     """Default handler — validate then ack; errors return is_error=True."""
     try:
-        validate_emit_intent_input(args)
+        validate_emit_intent_input(args, allowed_intents=allowed_intents)
     except IntentValidationError as exc:
         log.info("emit_intent rejected: %s", exc)
         return {
@@ -271,10 +301,17 @@ def build_emit_intent_server(
     tool_factory: Callable[..., Any] | None = None,
     server_factory: Callable[..., Any] | None = None,
     handler: Callable[[dict[str, Any]], Any] | None = None,
+    allowed_intents: Iterable[IntentType] | None = None,
 ) -> Any | None:
-    """Build the in-process MCP server config exposing ``emit_intent``."""
+    """Build the in-process MCP server config exposing ``emit_intent``.
+
+    ``allowed_intents`` scopes the tool to the emitting role: the schema offers
+    only those types and the default handler refuses any other. ``None`` offers
+    every type.
+    """
     sdk = _resolve_sdk(sdk_module)
-    handler = handler or _emit_intent_handler
+    allowed = frozenset(IntentType if allowed_intents is None else allowed_intents)
+    handler = handler or functools.partial(_emit_intent_handler, allowed_intents=allowed)
 
     if tool_factory is None:
         tool_factory = getattr(sdk, "tool", None) if sdk is not None else None
@@ -290,7 +327,7 @@ def build_emit_intent_server(
     decorator = tool_factory(
         EMIT_INTENT_TOOL_NAME,
         EMIT_INTENT_TOOL_DESCRIPTION,
-        EMIT_INTENT_TOOL_INPUT_SCHEMA,
+        build_emit_intent_tool_input_schema(allowed),
     )
     decorated = decorator(handler)
     return server_factory(MCP_SERVER_NAME, "1.0.0", [decorated])
@@ -298,11 +335,11 @@ def build_emit_intent_server(
 
 __all__ = [
     "EMIT_INTENT_TOOL_DESCRIPTION",
-    "EMIT_INTENT_TOOL_INPUT_SCHEMA",
     "EMIT_INTENT_TOOL_NAME",
     "EMIT_INTENT_TOOL_QUALIFIED",
     "MCP_SERVER_NAME",
     "build_emit_intent_server",
+    "build_emit_intent_tool_input_schema",
     "build_intent_envelope_schema",
     "coerce_emit_intent_input",
     "decode_emit_intent_input",

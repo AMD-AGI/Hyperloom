@@ -47,6 +47,7 @@ from ..actions.executors._grid_runner import (
     variant_conc,
 )
 from ..actions.executors._subprocess_kill import resolve_benchmark_timeouts, session_deadline_to_remaining_sec
+from ..actions.executors.benchmark_backend import resolve_backend
 from ..actions.cancel_channel import current_cancel_scope
 from ..actions.stop_attribution import (
     ORCHESTRATOR_CANCELLED_CLASS,
@@ -839,7 +840,7 @@ async def _sweep_one_arm_single_server(run: _SweepRun, arm: _Arm) -> None:
                 boot_variant,
                 _RungServer(
                     serving_lease=arm_lease,
-                    base_extra_envs={"MAGPIE_RUN_PHASE": "server"},
+                    base_extra_envs=dict(resolve_backend().boot_phase_envs),
                     server_lifecycle=server_lifecycle_boot,
                     server_already_ready=False,
                     warmup_before_measure=False,
@@ -900,10 +901,7 @@ async def _sweep_one_arm_single_server(run: _SweepRun, arm: _Arm) -> None:
 
         if boot_failed:
             # Ensure server is torn down before retrying at a lower CONC.
-            try:
-                teardown_lifecycle_server(pid_dir=pid_dir, framework=framework, port=port)
-            except Exception:  # noqa: BLE001
-                pass
+            teardown_lifecycle_server(pid_dir=pid_dir, framework=framework, port=port)
             failed = br or VariantResult(
                 name=boot_variant.name,
                 extra_server_args=boot_variant.extra_server_args,
@@ -1102,6 +1100,7 @@ async def _sweep_arm_option_b(
         try:
             sub = await run.run_rung(variant, _RungServer(serving_lease=serving_lease))
         except Exception as exc:  # noqa: BLE001
+            log.warning("conc_sweep option B: arm=%s variant=%s raised %r", arm_name, variant.name, exc)
             sub = [
                 VariantResult(
                     name=variant.name,
@@ -1148,7 +1147,7 @@ def _flush_conc_sweep_report(payload: dict[str, Any], session_dir: Path) -> Exce
             (payload.get("optimized") or {}).get("points") or []
         )
         _write_csv(csv_path, all_points)
-    except Exception as exc:
+    except (OSError, ValueError, csv.Error) as exc:
         log.warning("conc_sweep: _flush_conc_sweep_report failed", exc_info=True)
         return exc
     return None
@@ -1252,11 +1251,11 @@ async def run_conc_sweep(
         for_serving=True,
     )
     # Mirror the main flow (baseline/sweep/...): prefer $GPU_TYPE (cli.py canonicalizes mi325x/mi308x -> mi300x), fall
-    # back to state.gpu_type, then canonicalize through _gpu_runner_type so the selected Magpie script is a shipped
+    # back to state.gpu_type, then canonicalize through gpu_runner_type so the selected Magpie script is a shipped
     # runner (sglang_mi300x.sh), never the unshipped sglang_mi325x.sh.
-    from hyperloom.inference_optimizer.gpu_types import _gpu_runner_type
+    from hyperloom.inference_optimizer.gpu_types import gpu_runner_type
 
-    resolved_gpu = _gpu_runner_type(
+    resolved_gpu = gpu_runner_type(
         os.environ.get("GPU_TYPE", "").strip().lower() or str(getattr(state, "gpu_type", "") or "").strip().lower()
     )
     benchmark_script = state.accepted_baseline_script()

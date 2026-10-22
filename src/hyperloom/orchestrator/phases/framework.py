@@ -34,7 +34,7 @@ from hyperloom.inference_optimizer.grid_server_args import (
     merge_server_args,
     tokenize_server_args_preserving_json,
 )
-from ..actions.executors.integrate_patch import PATCH_SOURCE_UPSTREAM_PR
+from ..actions.executors.integrate_patch import PATCH_SOURCE_UPSTREAM_PR, RESULT_BENCHED
 from ..specialists.profile import is_authoring_specialist
 from hyperloom.common.framework_arm import LOCAL_EXPLORE_CANDIDATE_PREFIX
 from hyperloom.orchestrator.lever import LEVER_SOURCE_PATCH, LEVER_UPSTREAM_PR, patch_lever_kind, patch_owner_phase
@@ -611,6 +611,7 @@ def _record_source_attempt(
         },
         decision=attempt.status,
         adopted=attempt.adopted,
+        benched=bool(result.get(RESULT_BENCHED)),
         # What stood behind the adoption, on the same rule the config arm
         # writes it under: a KEEP no accuracy gate ruled on rests on
         # throughput alone, a weaker claim that must not read alike. Only
@@ -797,12 +798,7 @@ class FrameworkPhase(ProposalBench):
         recorder.record_policy(**self._framework_policy_fields())
 
     def _framework_policy_fields(self) -> dict:
-        """Resolve the ``record_policy`` fields this entry runs under.
-
-        ``force_exit_budget_pct`` is deliberately absent: no runtime path
-        resolves it today, so reporting a default would fabricate a threshold
-        the phase never applied.
-        """
+        """Resolve the ``record_policy`` fields this entry runs under."""
         state = self.shared_state
         overrides = state.plateau_overrides or {}
         if not isinstance(overrides, dict):
@@ -986,11 +982,10 @@ class FrameworkPhase(ProposalBench):
     async def _pump_framework_agent_phase(self) -> None:
         """Drive the FRAMEWORK_AGENT phase: submit candidates for review in parallel.
 
-        Up to ``research_lane_capacity`` candidates are in flight at once; landing
-        still serialises on ``workspace_mutation``. The discovery → local-explore →
-        phase-done fallback runs only once no candidate is left and none is in
-        flight. Idempotent; a discover failure flips ``framework_agent_phase_done``
-        so the phase advances rather than wedging.
+        Up to ``research_lane_capacity`` candidates are in flight at once; landing still serialises on
+        ``workspace_mutation``. The discovery → local-explore → phase-done fallback runs only once no candidate is
+        left and none is in flight; the local-explore rung is skipped once the source lever reads dry. Idempotent; a
+        discover failure flips ``framework_agent_phase_done`` so the phase advances rather than wedging.
         """
         state = self.shared_state
         if (state.phase or "").strip().upper() != _phase_state.PHASE_FRAMEWORK_AGENT:
@@ -1016,7 +1011,8 @@ class FrameworkPhase(ProposalBench):
         if await self._maybe_enqueue_candidate_discovery(reason="candidate_pool_empty"):
             state.save(self.session_dir)
             return
-        if self._framework_local_explore_arm_enabled():
+        source_dry = _phase_state.per_lever_dryness(state)[1]["source_arm_plateaued"]
+        if self._framework_local_explore_arm_enabled() and not source_dry:
             gap, keywords = self._compose_framework_local_explore_gap()
             title = (
                 f"local source exploration ({gap})"
@@ -1145,7 +1141,7 @@ class FrameworkPhase(ProposalBench):
                     state.framework_agent_specialist_candidate_map = {}
                 state.framework_agent_specialist_candidate_map[spec_tid] = cand_id
                 state.save(self.session_dir)
-        except Exception:
+        except OSError:
             log.debug("FRAMEWORK %s: specialist->candidate map write failed", label, exc_info=True)
         return spec_tid
 
@@ -1325,7 +1321,7 @@ class FrameworkPhase(ProposalBench):
             )
             try:
                 state.save(self.session_dir)
-            except Exception:
+            except OSError:
                 log.debug("authored_lane: save after cap stamp failed", exc_info=True)
             return
 
@@ -1349,7 +1345,7 @@ class FrameworkPhase(ProposalBench):
         state.apply_fail_retry_pending = pending
         try:
             state.save(self.session_dir)
-        except Exception:
+        except OSError:
             log.debug("authored_lane: save after retry-pending failed", exc_info=True)
 
     async def _enqueue_author_specialist(self, retry: AuthoringRetry) -> str:
@@ -1508,7 +1504,7 @@ class FrameworkPhase(ProposalBench):
             )
         try:
             state.save(self.session_dir)
-        except Exception:
+        except OSError:
             log.debug("drain_apply_fail: save failed", exc_info=True)
 
     @staticmethod
@@ -1573,7 +1569,7 @@ class FrameworkPhase(ProposalBench):
 
             document = _json.loads(Path(path).read_text(encoding="utf-8"))
             return summarize_for_prompt(document)
-        except Exception:
+        except (OSError, ValueError):
             log.warning("FRAMEWORK: rewrite-evidence render failed path=%s", path, exc_info=True)
             return ""
 
@@ -1614,19 +1610,15 @@ class FrameworkPhase(ProposalBench):
     def _compose_framework_local_explore_gap(self) -> tuple[str, list[str]]:
         """Compose the ``(gap, keywords)`` steering the local-exploration arm."""
         state = self.shared_state
-        try:
-            from ..actions.executors._framework_gap_composer import GapEvidence, compose_gap
+        from ..actions.executors._framework_gap_composer import GapEvidence, compose_gap
 
-            return compose_gap(
-                framework=str(state.framework or ""),
-                gpu_type=str(state.gpu_type or ""),
-                model_class=str(state.model_class or ""),
-                precision=str(state.precision or ""),
-                evidence=GapEvidence(rewrite_evidence_path=state.last_framework_rewrite_evidence or None),
-            )
-        except Exception:
-            log.debug("FRAMEWORK: local-explore gap compose failed", exc_info=True)
-            return "", []
+        return compose_gap(
+            framework=str(state.framework or ""),
+            gpu_type=str(state.gpu_type or ""),
+            model_class=str(state.model_class or ""),
+            precision=str(state.precision or ""),
+            evidence=GapEvidence(rewrite_evidence_path=state.last_framework_rewrite_evidence or None),
+        )
 
     async def _enqueue_framework_agent_local_explore_specialist(
         self,
@@ -1816,57 +1808,47 @@ class FrameworkPhase(ProposalBench):
     ) -> None:
         """Append a framework_agent_phase_done row to phase_history describing why the pump gave up."""
         state = self.shared_state
-        try:
-            from ..framework.artifacts import summarize_candidate_outcomes
+        from ..framework.artifacts import summarize_candidate_outcomes
 
-            # Classify this phase's candidate outcomes so the report / robustness can tell "discovered nothing"
-            # (empty_discovery) apart from "tested candidates but none kept" (tested_no_keep).
-            summary = summarize_candidate_outcomes(
-                state.framework_agent_phase_progress,
+        # Classify this phase's candidate outcomes so the report / robustness can tell "discovered nothing"
+        # (empty_discovery) apart from "tested candidates but none kept" (tested_no_keep).
+        summary = summarize_candidate_outcomes(state.framework_agent_phase_progress)
+        outcome_class = summary["outcome_class"]
+
+        # Consecutive empty-discovery tracking → advisory ("framework phase ineffective").
+        empty = outcome_class == "empty_discovery"
+        consecutive_empty = state.framework_consecutive_empty_discoveries + 1 if empty else 0
+        state.framework_consecutive_empty_discoveries = consecutive_empty
+
+        advisory = ""
+        if empty and consecutive_empty >= 2:
+            advisory = (
+                f"framework phase ineffective: {consecutive_empty} consecutive macro-cycles discovered zero candidates"
             )
-            outcome_class = str(summary.get("outcome_class") or "empty_discovery")
-
-            # Consecutive empty-discovery tracking → advisory ("framework phase ineffective").
-            prev_empty = int(state.framework_consecutive_empty_discoveries or 0)
-            if outcome_class == "empty_discovery":
-                consecutive_empty = prev_empty + 1
-            else:
-                consecutive_empty = 0
-            state.framework_consecutive_empty_discoveries = consecutive_empty
-
-            advisory = ""
-            if outcome_class == "empty_discovery" and consecutive_empty >= 2:
-                advisory = (
-                    f"framework phase ineffective: {consecutive_empty} consecutive "
-                    "macro-cycles discovered zero candidates"
-                )
-            elif outcome_class == "tested_no_keep":
-                advisory = (
-                    "framework phase tested candidates but none cleared the gate "
-                    f"(tested={summary.get('tested')}, keeps=0)"
-                )
-            if advisory:
-                log.warning("FRAMEWORK advisory: %s", advisory)
-
-            _phase_state.append_phase_history_event(
-                state,
-                reason=reason,
-                evidence={
-                    "event": "framework_agent_phase_done",
-                    "failure_count": int(failure_count),
-                    "empty_count": int(state.framework_agent_empty_discoveries or 0),
-                    "retry_limit": int(DISCOVER_FAILURE_RETRY_LIMIT),
-                    "batches_discovered": len(state.framework_agent_batches or []),
-                    "outcome_class": outcome_class,
-                    "candidate_outcomes": summary.get("by_status") or {},
-                    "keeps": int(summary.get("keeps") or 0),
-                    "tested": int(summary.get("tested") or 0),
-                    "consecutive_empty_discoveries": consecutive_empty,
-                    "advisory": advisory,
-                },
+        elif outcome_class == "tested_no_keep":
+            advisory = (
+                f"framework phase tested candidates but none cleared the gate (tested={summary.get('tested')}, keeps=0)"
             )
-        except Exception:  # noqa: BLE001 — defensive
-            pass
+        if advisory:
+            log.warning("FRAMEWORK advisory: %s", advisory)
+
+        _phase_state.append_phase_history_event(
+            state,
+            reason=reason,
+            evidence={
+                "event": "framework_agent_phase_done",
+                "failure_count": failure_count,
+                "empty_count": state.framework_agent_empty_discoveries,
+                "retry_limit": DISCOVER_FAILURE_RETRY_LIMIT,
+                "batches_discovered": len(state.framework_agent_batches),
+                "outcome_class": outcome_class,
+                "candidate_outcomes": summary["by_status"],
+                "keeps": summary["keeps"],
+                "tested": summary["tested"],
+                "consecutive_empty_discoveries": consecutive_empty,
+                "advisory": advisory,
+            },
+        )
 
     async def _enqueue_framework_agent_task(self, candidate: dict[str, Any]) -> None:
         """Enqueue an ``integrate_patch`` task that lands ``candidate``'s diff."""
@@ -1891,9 +1873,6 @@ class FrameworkPhase(ProposalBench):
             # Source patches require the accuracy gate for KEEP.
             "require_accuracy_for_keep": True,
             "accuracy_baseline": float(state.baseline_accuracy or 0.0),
-            # The lane templates from the shipped default config, which materializes RUN_EVAL=true and would override
-            # the session's choice.
-            "disable_run_eval": bool(state.eval_disabled),
         }
         idem = f"framework:{candidate.get('batch_id', '')}:{cand_id}"
         lanes, ttl = self._coord.dispatcher.registry_lanes_ttl("integrate_patch")
@@ -2052,7 +2031,7 @@ class FrameworkPhase(ProposalBench):
         )
         try:
             self.shared_state.save(self.session_dir)
-        except Exception:
+        except OSError:
             log.exception(
                 "save after framework_agent candidate submit failed for candidate=%s",
                 cand_id,
@@ -2152,7 +2131,7 @@ class FrameworkPhase(ProposalBench):
         )
         try:
             state.save(self.session_dir)
-        except Exception:
+        except OSError:
             log.exception(
                 "FRAMEWORK: save after progress stamp failed candidate=%s status=%s",
                 cand_id,
@@ -2317,7 +2296,7 @@ class FrameworkPhase(ProposalBench):
         )
         try:
             self.shared_state.save(self.session_dir)
-        except Exception:
+        except OSError:
             log.exception(
                 "save after re-author dispatch failed candidate=%s",
                 cand_id,
@@ -2540,24 +2519,20 @@ class FrameworkPhase(ProposalBench):
                 return True
         return False
 
-    def _record_framework_agent_dispatch_failure(
-        self,
-        *,
-        task: "Task",
-        run_error: str,
-    ) -> None:
+    def _record_framework_agent_dispatch_failure(self, *, task: "Task", run_error: str) -> None:
         """Stamp a terminal row for a candidate whose specialist never ran."""
         params = getattr(task, "params", None) or {}
         cand_id = str(params.get("framework_agent_candidate_id") or "")
         if not cand_id:
             return
+        status = "dispatch_failed"
         recorded = self._stamp_framework_progress(
             ProgressStamp(
                 candidate_id=cand_id,
                 batch_id=str(params.get("framework_batch_id") or ""),
-                status="dispatch_failed",
+                status=status,
                 rationale=run_error[:500],
-                provenance="dispatch_failed",
+                provenance=status,
                 gain_pct=0.0,
                 extra={
                     "specialist_task_id": str(getattr(task, "task_id", "") or ""),
@@ -2567,6 +2542,7 @@ class FrameworkPhase(ProposalBench):
         )
         if not recorded:
             return
+        self._record_undelivered_authoring_attempt(task=task, candidate_id=cand_id, status=status)
         log.warning(
             "FRAMEWORK: authoring specialist never delivered candidate=%s: %s",
             cand_id,
@@ -2615,13 +2591,12 @@ class FrameworkPhase(ProposalBench):
                 _spec_root = _runs_dir(_Path(self.session_dir), "specialist", _sid_arts)
                 if _resolvable_artifacts_from_done(inner, [_spec_root / "worktree", _spec_root]):
                     return
-        except Exception:
+        except (OSError, ValueError, RuntimeError):
             log.debug("FRAMEWORK: artifacts routable-check failed", exc_info=True)
         cand_id = str(params.get("framework_agent_candidate_id") or "")
         if not cand_id:
             return
         batch_id = str(params.get("framework_batch_id") or "")
-        # Map the cached audit verdict to a terminal status.
         audit = params.get("framework_audit") if isinstance(params.get("framework_audit"), dict) else {}
         sem = str((audit or {}).get("semantic_status") or "").strip().lower()
         if sem in ("already_equivalent", "already_superset"):
@@ -2647,6 +2622,7 @@ class FrameworkPhase(ProposalBench):
         )
         if not recorded:
             return
+        self._record_undelivered_authoring_attempt(task=task, candidate_id=cand_id, status=status)
         log.info(
             "FRAMEWORK: authoring specialist empty deliverable candidate=%s batch=%s status=%s",
             cand_id,
@@ -2654,14 +2630,16 @@ class FrameworkPhase(ProposalBench):
             status,
         )
 
+    def _record_undelivered_authoring_attempt(self, *, task: "Task", candidate_id: str, status: str) -> None:
+        """Charge a newly stamped round that delivered nothing to its PR lead's lever, else to the source lever."""
+        lever = LEVER_UPSTREAM_PR if patch_lever_kind(task.params) == LEVER_UPSTREAM_PR else LEVER_SOURCE_PATCH
+        record_attempt_row(self.shared_state, AttemptRow.undelivered_round(lever, status, task.task_id, candidate_id))
+
     async def _candidate_discovery_inflight(self) -> bool:
-        """True while a candidate-discovery specialist is queued or running."""
-        queued = await self.tasks.queued()
-        running = await self.tasks.running()
+        """True while a discovery round this phase dispatched, the kind ``_ingest_candidate_discovery`` harvests, is queued or running."""
         return any(
-            getattr(t, "kind", "") == "specialist"
-            and bool((getattr(t, "params", None) or {}).get("candidate_discovery"))
-            for t in (*queued, *running)
+            t.kind == "specialist" and bool((t.params or {}).get("candidate_discovery"))
+            for t in (*await self.tasks.queued(), *await self.tasks.running())
         )
 
     async def _maybe_enqueue_candidate_discovery(self, *, reason: str) -> bool:
@@ -3130,7 +3108,7 @@ class FrameworkPhase(ProposalBench):
         )
         try:
             self.shared_state.save(self.session_dir)
-        except Exception:
+        except OSError:
             log.exception("save after integrate-review autosubmit failed for task=%s", sid)
         return pending
 

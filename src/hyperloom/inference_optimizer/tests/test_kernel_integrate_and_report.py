@@ -39,6 +39,8 @@ from hyperloom.inference_optimizer.session.paths import make_session_dir
 from hyperloom.orchestrator.bus.storage import SqliteConnection
 from hyperloom.orchestrator.bus.message_bus import Message
 
+from .conftest import seed_kernel_keep
+
 
 # fixtures
 @pytest.fixture
@@ -327,7 +329,6 @@ def integrate_recipe_case(session_dir, tmp_path, monkeypatch):
     state = SharedState.load_or_init(session_dir)
     state.framework = "sglang"
     state.benchmark_mode = "synthetic"
-    state.eval_disabled = True
     state.baseline_tput = 100.0
     state.baseline_config_path = str(base_yaml)
     state.baseline_perf = {
@@ -1119,30 +1120,19 @@ def test_resolve_integrate_payload_fills_source_when_patch_path_present(
     session_dir,
     tmp_path,
 ):
-    """Queued KEEPs may pass patch_path while relying on kernel_opt_attempts for source_file."""
+    """A queued KEEP integrated by kernel_id and patch_path takes its source_file from the queued record."""
     state = SharedState.load_or_init(session_dir)
     patch_path = tmp_path / "k001_opt.cu"
     source_path = tmp_path / "gemm_moe_ck2stages.cu"
     patch_path.write_text("// optimized\n", encoding="utf-8")
     source_path.write_text("// original\n", encoding="utf-8")
-    state.last_kernel_opt = {
-        "kernel_id": "k004",
-        "best_artifact_path": "/tmp/k004_opt.cu",
-        "source_file": "/tmp/rmsnorm.cu",
-    }
-    state.kernel_opt_attempts = {
-        "k001": {
-            "last_decision": "KEEP",
-            "last_artifact_path": str(patch_path),
-            "last_source_file": str(source_path),
-        },
-    }
+    seed_kernel_keep(state, "k001", source_file=str(source_path), artifact=str(patch_path))
     state.save(session_dir)
 
-    resolved, err = krh._resolve_integrate_payload(
-        {"kernel_id": "k001", "patch_path": str(patch_path)},
-        session_dir=session_dir,
+    payload = krh._fill_integrate_defaults_from_state(
+        {"kernel_id": "k001", "patch_path": str(patch_path)}, session_dir=session_dir
     )
+    resolved, err = krh._resolve_integrate_payload(payload, session_dir=session_dir)
 
     assert err is None
     assert resolved["patch_path"] == str(patch_path)
@@ -2000,10 +1990,6 @@ async def test_integrate_handler_resolves_patch_and_target_from_state(
     target, patch_file = _write_patch_pair(tmp_path)
     state = SharedState(
         session_id=session_dir.name,
-        last_kernel_opt={
-            "kernel_id": "k006",
-            "best_artifact_path": str(patch_file),
-        },
         last_trace_analyze={
             "hot_kernels_top15": [
                 {
@@ -2014,6 +2000,7 @@ async def test_integrate_handler_resolves_patch_and_target_from_state(
             ],
         },
     )
+    seed_kernel_keep(state, "k006", artifact=str(patch_file))
     state.save(session_dir)
 
     def _fake_run(cmd, *args, **kwargs):

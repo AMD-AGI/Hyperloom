@@ -13,7 +13,8 @@ from pathlib import Path
 from typing import NoReturn
 
 from .. import framework_registry
-from .constraint_args import add_constraint_arguments, positive_watts_arg
+from .constraint_args import add_constraint_arguments
+from .gpu_power_args import add_gpu_power_arguments
 from .backends import CRITIC_PROTOCOL_CHOICES
 from .recover import RECOVER_DESCRIPTION, RECOVER_HELP, add_cleanup_confirmation_arguments
 from hyperloom.common import predictor_config
@@ -348,7 +349,7 @@ def _build_parser() -> argparse.ArgumentParser:
     opt.add_argument("--extra-env", action="append", default=[], help=argparse.SUPPRESS)
     opt.add_argument(
         "--tp",
-        type=int,
+        type=_positive_int_arg,
         default=None,
         help="Tensor parallel size. Pass `--tp N` directly from the prompt's "
         f"Environment block. Default: {DEFAULT_TP}.",
@@ -367,8 +368,8 @@ def _build_parser() -> argparse.ArgumentParser:
         type=_positive_int_arg,
         default=None,
         help="Explicit server-facing MAX_MODEL_LEN. Resolution: "
-        "--max-model-len > auto(ISL+OSL+headroom, "
-        "clamped to native context). Explicit values are preserved and "
+        "--max-model-len > $MAX_MODEL_LEN > auto(ISL+OSL+headroom, "
+        "clamped to native context). Explicit values must fit the known native context and are "
         "exported into the materialized Magpie YAML.",
     )
     opt.add_argument(
@@ -591,27 +592,7 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     add_constraint_arguments(opt)
-    opt.add_argument(
-        "--gpu-power-cap-w",
-        type=positive_watts_arg,
-        default=None,
-        help=(
-            "Declare the power cap (W) the GPUs are already set to. An assertion, not a request: the optimizer "
-            "never changes power settings, which are privileged and card-wide. Set it with "
-            "`amd-smi set --power-cap` before launch; the session refuses to start if any card it uses is at a "
-            "different cap. The observed cap is recorded whether or not this flag is passed."
-        ),
-    )
-    opt.add_argument(
-        "--gpu-perf-level",
-        type=str,
-        default=None,
-        metavar="LEVEL",
-        help=(
-            "Declare the DPM performance level the GPUs are already set to (e.g. auto, high, determinism). "
-            "An assertion like --gpu-power-cap-w: set it with `amd-smi set --perf-level` before launch."
-        ),
-    )
+    add_gpu_power_arguments(opt)
     opt.add_argument(
         "--resume-from",
         type=str,
@@ -703,16 +684,6 @@ def _build_parser() -> argparse.ArgumentParser:
         "parameter search). Useful when GEAK/GPU "
         "compile env is unavailable or you just want the "
         "quick-win parameter path. Default: kernel enabled.",
-    )
-    opt.add_argument(
-        "--no-eval",
-        action="store_true",
-        default=False,
-        help="Skip the accuracy eval everywhere. The baseline anchors on "
-        "throughput alone instead of halting on a missing accuracy "
-        "reference, and every candidate is graded on throughput only. "
-        "Useful for CI/CD tuning runs that care about performance and not "
-        "accuracy; the run is not accuracy-validated. Default: eval enabled.",
     )
     opt.add_argument(
         "--launch-info-file",

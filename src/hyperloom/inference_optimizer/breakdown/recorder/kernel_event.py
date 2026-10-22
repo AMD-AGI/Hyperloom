@@ -69,6 +69,7 @@ from .event_ids import event_id
 from .event_rows import group_rows, rows_for_event, sort_rows, wire_rows
 from .event_sink import make_sink
 from .event_timeline import EventHeader, finish_event, open_event
+from .kernel_gain import claimed_gain, lane_gain_axis, lane_gain_pct, stamp_gate_gain, stamp_rebench_gain
 from .kernel_records import (
     LEDGER_GEAK,
     SOURCE_FUSION,
@@ -239,6 +240,7 @@ __all__ = [
     "kernel_event_id",
     "make_kernel_recorder",
     "record_geak_attempts",
+    "record_integrate_axis",
     "record_integrate_verdict",
     "reject_geak_attempts",
     "record_trace_analyze_request",
@@ -335,10 +337,10 @@ def record_geak_attempts(*, event: str, journey: dict[str, Any] | None) -> None:
                 else None,
                 "e2e": {
                     "integrated": bool(e2e.get("integrated")),
-                    "e2e_gain_pct": _float_or_none(e2e.get("e2e_gain_pct")),
+                    "e2e_gain_pct": None,
                     "validated": e2e.get("validated") if isinstance(e2e.get("validated"), bool) else None,
                     "decision": _text(e2e.get("decision")),
-                    "self_reported_e2e_gain_pct": _float_or_none(e2e.get("self_reported_e2e_gain_pct")),
+                    "self_reported_e2e_gain_pct": claimed_gain(e2e),
                     "rejection_reason": _text(e2e.get("rejection_reason")),
                     "revalidation_measured_tput": _float_or_none(e2e.get("revalidation_measured_tput")),
                     "revalidation_current_best_tput": _float_or_none(e2e.get("revalidation_current_best_tput")),
@@ -383,7 +385,6 @@ def reject_geak_attempts(
                 **row,
                 "e2e": {
                     **e2e,
-                    "self_reported_e2e_gain_pct": e2e.get("e2e_gain_pct"),
                     "revalidation_measured_tput": measured_tput,
                     "revalidation_current_best_tput": current_best_tput,
                     "revalidation_provenance": provenance,
@@ -491,6 +492,21 @@ def record_integrate_verdict(
     _republish_closed_event(sink.event_id)
 
 
+def record_integrate_axis(*, macro_cycle: Any, integration_id: str, graded_objective: str) -> None:
+    """Record the axis an integrate verdict's ``gain_pct`` was graded on.
+
+    Merges onto the verdict's row by integration id; nothing is written for a
+    verdict that has no row or an axis the gate did not report.
+    """
+    axis = _text(graded_objective)
+    sink = make_sink(kernel_event_id(macro_cycle), producer=PRODUCER)
+    if not (axis and integration_id and sink.has_row(SECTION_EVENT)):
+        return
+    row = {"integration_id": str(integration_id), "graded_objective": axis}
+    sink.record(SECTION_INTEGRATE, row, row_type=ROW_INTEGRATE, natural_ids=str(integration_id))
+    _republish_closed_event(sink.event_id)
+
+
 def _write_discovered_kernels(
     sink: Any,
     snapshot: Mapping[str, Any] | None,
@@ -569,7 +585,6 @@ def _write_trace_analyze_run(
             "steady_state_trace": _text(produced.get("steady_state_trace")),
             "analysis_md_path": _text(produced.get("analysis_md_path")),
             "reusable_native_kernel_ids": [str(item) for item in _as_list(produced.get("reusable_native_kernel_ids"))],
-            "trace_validate_ref": None,
             **_analysis_detail(result),
         },
         row_type=ROW_TRACE_ANALYZE,
@@ -648,9 +663,8 @@ def _integrate_e2e(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
     """Project one kernel's integrate rows into the standing e2e sub-result.
 
     A patch can be gated more than once, so the sub-result reports the verdict
-    that stands: the last one to settle. The best gain is taken across all of
-    them, because a fault that measured nothing does not un-measure what an
-    earlier attempt did.
+    that stands: the last one to settle, with that row's own gain (``None``
+    when it measured none). Earlier measurements stay on the integrate rows.
 
     Returns:
         dict[str, Any] | None: The sub-result, or ``None`` when the kernel was
@@ -660,14 +674,15 @@ def _integrate_e2e(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
         return None
     ordered = sort_rows(rows, keys=("settled_at", "attempt_count"))
     last = ordered[-1]
-    gains = [row.get("gain_pct") for row in ordered if isinstance(row.get("gain_pct"), (int, float))]
+    gain = last.get("gain_pct")
     return {
         "integrated": str(last.get("decision") or "").upper() == "KEEP",
-        "e2e_gain_pct": max(gains) if gains else None,
+        "e2e_gain_pct": gain if isinstance(gain, (int, float)) else None,
         "validated": last.get("accuracy_pass") if isinstance(last.get("accuracy_pass"), bool) else None,
         "decision": _text(last.get("decision")),
         "patch_path": _text(last.get("patch_path")),
         "target_file": _text(last.get("target_file")),
+        "graded_objective": _text(last.get("graded_objective")) or None,
     }
 
 
@@ -694,6 +709,8 @@ _ATTEMPT_TEMPLATE: dict[str, Any] = {
     # itself, a GEAK candidate is re-benched end to end -- and state it in
     # different units, so it is normalized here rather than at every reader.
     "gain_pct": None,
+    # The instrument behind ``gain_pct``; ``None`` whenever it is.
+    "gain_axis": None,
     "compile_status": "",
     "correctness": None,
     "artifact_path": "",
@@ -762,24 +779,6 @@ _GEAK_PROMOTED = frozenset(
 _LANE_DECLINED = frozenset({"REVERT", "SKIPPED", "FAILED", "DROP", "REJECT"})
 
 
-def _lane_gain_pct(row: Mapping[str, Any]) -> float | None:
-    """The gain a forge lane measured on its own candidate, as a percentage.
-
-    A rewrite reports a ratio and a fusion or GEMM table a percentage. Both
-    are the same fact about the same kind of candidate, so the attempt carries
-    one axis and the reader is never asked which lane wrote the row before it
-    can compare two of them.
-
-    Returns:
-        float | None: The gain, or ``None`` when the lane measured none.
-    """
-    stated = _float_or_none(row.get("gain_pct"))
-    if stated is not None:
-        return stated
-    speedup = _float_or_none(row.get("speedup"))
-    return round((speedup - 1.0) * 100.0, 4) if speedup is not None else None
-
-
 def _attempt(**fields: Any) -> dict[str, Any]:
     """One normalized attempt, defaulted from the shared template."""
     row: dict[str, Any] = dict(_ATTEMPT_TEMPLATE)
@@ -797,6 +796,7 @@ def _lane_attempt(row: Mapping[str, Any]) -> dict[str, Any]:
     same thing a second way, through ``applied``.
     """
     decision = str(row.get("micro_decision") or "").upper()
+    gain = lane_gain_pct(row)
     return _attempt(
         attempt_id=_text(row.get("run_id")),
         route=ROUTE_FORGE,
@@ -812,7 +812,8 @@ def _lane_attempt(row: Mapping[str, Any]) -> dict[str, Any]:
         backend=_text(row.get("adopted_backend")),
         backends_tried=[str(item) for item in _as_list(row.get("backends_tried"))],
         speedup=_float_or_none(row.get("speedup")),
-        gain_pct=_lane_gain_pct(row),
+        gain_pct=gain,
+        gain_axis=lane_gain_axis(row, gain),
         compile_status=_text(row.get("compile_status")),
         correctness=row.get("correctness") if isinstance(row.get("correctness"), bool) else None,
         artifact_path=_text(row.get("artifact_path")),
@@ -1116,7 +1117,6 @@ class KernelEventRecorder:
         self,
         *,
         stack_depth_in: Any = None,
-        budget_remaining_sec: Any = None,
         tput_before: Any = None,
         session_baseline_tput: Any = None,
         snapshot: dict[str, Any] | None = None,
@@ -1129,7 +1129,6 @@ class KernelEventRecorder:
             {
                 "entry": {
                     "stack_depth_in": _int_or_none(stack_depth_in),
-                    "budget_remaining_sec": _float_or_none(budget_remaining_sec),
                     "roofline_snapshot_id": _int_or_none(inherited.get("roofline_snapshot_id")),
                     "roofline_snapshot_ts": _text(inherited.get("ts")),
                     "roofline_baseline_gain_at_snapshot": _float_or_none(
@@ -1480,9 +1479,7 @@ class KernelEventRecorder:
         accepted_flags: Any = None,
         accepted_envs: dict[str, Any] | None = None,
         accepted_config: dict[str, Any] | None = None,
-        cfg_hash: str = "",
         final_overlay: str = "",
-        final_overlay_digest: str = "",
         final_launch_script: str = "",
         bench_script: str = "",
         final_patch: str = "",
@@ -1498,9 +1495,7 @@ class KernelEventRecorder:
                     else _text(flags),
                     "accepted_envs": _as_dict(accepted_envs),
                     "accepted_config": _as_dict(accepted_config),
-                    "cfg_hash": _text(cfg_hash),
                     "final_overlay": _text(final_overlay),
-                    "final_overlay_digest": _text(final_overlay_digest),
                     "final_launch_script": _text(final_launch_script),
                     "bench_script": _text(bench_script),
                     "final_patch": _text(final_patch),
@@ -1726,19 +1721,6 @@ def _merge_acceptances(
     return unmatched
 
 
-def _record_gain(row: dict[str, Any], measured: Any) -> None:
-    """Put the settling instrument's gain on the attempt, if it measured one.
-
-    An instrument that ruled without producing a number does not erase one an
-    earlier, coarser instrument did produce: a gate can keep a patch on
-    accuracy alone, and the lane's own timing is still the only measurement
-    anyone took.
-    """
-    gain = _float_or_none(measured)
-    if gain is not None:
-        row["gain_pct"] = gain
-
-
 def _settle(
     attempts: list[dict[str, Any]],
     verdicts: Mapping[str, Mapping[str, Any]],
@@ -1781,7 +1763,7 @@ def _settle(
             row["settled_by"] = SETTLED_BY_REBENCH
             # The rebench is the instrument that measured this candidate, so
             # its delta is the gain, not whatever GEAK claimed for itself.
-            _record_gain(row, rebench.get("delta_pct"))
+            stamp_rebench_gain(row, rebench.get("delta_pct"))
             if decision == REBENCH_VALIDATED:
                 row["outcome"] = OUTCOME_ADOPTED
             elif decision in {REBENCH_NO_MATERIAL, REBENCH_NO_PROMOTE}:
@@ -1796,7 +1778,7 @@ def _settle(
             row["settled_by"] = SETTLED_BY_INTEGRATE
             # The gate measured the patch end to end, which outranks the lane's
             # own timing of the kernel in isolation.
-            _record_gain(row, e2e.get("e2e_gain_pct"))
+            stamp_gate_gain(row, e2e.get("e2e_gain_pct"), e2e.get("graded_objective"))
             row["outcome"] = OUTCOME_ADOPTED if gate == "KEEP" else OUTCOME_REJECTED
             continue
         if str(row.get("micro_decision") or "").upper() in _LANE_DECLINED:
@@ -1826,6 +1808,7 @@ def _delivered(attempts: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "ref": _text(row.get("attempt_id")),
             "kernel_id": _text(row.get("kernel_id")),
             "gain_pct": _float_or_none(row.get("gain_pct")),
+            "gain_axis": row.get("gain_axis"),
             "settled_by": _text(row.get("settled_by")),
         }
         for row in attempts

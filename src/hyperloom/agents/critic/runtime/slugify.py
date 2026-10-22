@@ -8,7 +8,6 @@ from __future__ import annotations
 import hashlib
 import re
 import unicodedata
-from typing import Callable
 
 from .errors import SlugifyError
 
@@ -59,7 +58,6 @@ def slugify(topic: str) -> str:
 
 def slugify_safe(
     topic: str,
-    translate_fn: Callable[[str], str] | None = None,
     *,
     fallback_prefix: str = "auto",
 ) -> str:
@@ -69,16 +67,6 @@ def slugify_safe(
     normalised = unicodedata.normalize("NFKC", topic)
     if _ascii_only(normalised):
         return slugify(topic)
-    if translate_fn is not None:
-        try:
-            translated = translate_fn(topic)
-        except Exception:  # noqa: BLE001 — fall back per contract §7.2
-            translated = None
-        if translated:
-            try:
-                return slugify(translated)
-            except SlugifyError:
-                pass
     digest = hashlib.sha256(topic.encode("utf-8")).hexdigest()[:8]
     return f"{fallback_prefix}-{digest}"
 

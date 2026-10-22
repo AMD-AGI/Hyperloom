@@ -202,8 +202,8 @@ def test_production_code_importing_test_code_fails(tmp_path: Path, source: str, 
 @pytest.mark.parametrize(
     "source",
     [
-        "from kernelforge.mcp_server.tools import test\n",
-        "import kernelforge.mcp_server.tools.test\n",
+        "from package.tools import test\n",
+        "import package.tools.test\n",
         "from pkg.sub import test_value\n",
         "from pkg.contest import x\n",
         "from pkg.testing import y\n",

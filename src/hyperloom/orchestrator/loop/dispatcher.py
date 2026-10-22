@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import collections
 import math
+import sqlite3
 import time
 from collections.abc import Awaitable, Callable, Collection
 from functools import partial
@@ -39,6 +40,7 @@ from ..policy.gate import (
     PolicyDenied,
     SPECIALIST_FROM_AGENT_PREFIX,
 )
+from ..policy.specialist_in_flight import specialist_in_flight_denial
 from ..bus.gpu_pool import (
     GPU_LEASE_TTL_GRACE,
 )
@@ -48,7 +50,7 @@ from ..bus.resource_lock import (
 )
 from .sub_agent_runner import SubAgentResult
 from ..specialists.wall_budget import limit_wall_budget_extension
-from ..state.task_registry import Task, TaskNotFound
+from ..state.task_registry import IllegalTransition, Task, TaskNotFound
 from .time_budget import (
     TIME_BUDGET_EXEMPT_ACTIONS,
     expected_action_cost_minutes,
@@ -93,14 +95,7 @@ log = _logging.getLogger(__name__)
 # closing its lease, it is what it does first.
 #
 # The enumeration above has to stay exhaustive, so a serial step the unwind takes
-# and this sum does not name has to be removed from the unwind instead. One is:
-# ``run_grid`` fires a robustness tick at each variant boundary, and a cooperative
-# stop reaches that boundary the ordinary way, so the tick would sit between
-# recording the round's row and releasing what the round held -- eight more
-# seconds, spent observing the reap this cancel just ordered. It is skipped
-# whenever the scope is already cancelled rather than budgeted for, because the
-# rows the grid has already built are what a window short by those eight seconds
-# throws away, and they are worth more than one tick.
+# and this sum does not name has to be removed from the unwind instead.
 #
 # Past this window the coroutine is cancelled anyway, and the window is only ever
 # spent when work is still unwinding: the wait ends the moment the last victim is
@@ -567,21 +562,17 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         # once per pass (a pure env-var read, zero cost). The actual slot probe
         # (serving_slot_busy()) is deferred to just before each GPU specialist
         # admit so we don't miss a serving start that happened after the pass
-        # began. Both reads are best-effort — any failure leaves the check False
-        # (no pause) so dispatch is never blocked.
+        # began.
         _ray_serving_priority_enabled = False
         _serving_slot_busy_fn = None
-        try:
-            from ..actions.executors._ray_backend import (
-                ray_serving_priority_enabled as _rsp_enabled,
-                serving_slot_busy as _ssb,
-            )
+        from ..actions.executors._ray_backend import (
+            ray_serving_priority_enabled as _rsp_enabled,
+            serving_slot_busy as _ssb,
+        )
 
-            if _rsp_enabled():
-                _ray_serving_priority_enabled = True
-                _serving_slot_busy_fn = _ssb
-        except Exception:  # noqa: BLE001 — never block dispatch on the probe
-            pass
+        if _rsp_enabled():
+            _ray_serving_priority_enabled = True
+            _serving_slot_busy_fn = _ssb
         for task in queued:
             if task.task_id in self._inflight_actions:
                 continue
@@ -634,8 +625,8 @@ class DispatcherCollaborator(CoordinatorCollaborator):
                 if needs_gpu:
                     # Probe serving-slot state immediately before admitting
                     # this GPU specialist (not once per pass) so a serving start
-                    # that races the pass does not slip through. Still best-effort:
-                    # any probe failure is treated as False (no pause).
+                    # that races the pass does not slip through. A Ray or OS error
+                    # in the probe is treated as False (no pause).
                     _immediate_pause = False
                     if _ray_serving_priority_enabled and _serving_slot_busy_fn is not None:
                         _immediate_pause = _serving_slot_busy_fn()
@@ -691,8 +682,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
                             serving_tp,
                         )
                         gpu_count = serving_tp
-                    # Iron law: kill <= gpu_lease TTL <= gpu_research_lane TTL,
-                    # measured from the same deadline carried down to the reaper.
+                    # Timed from the same deadline carried down to the reaper.
                     gpu_ttl_sec = self.gpu_lease_ttl_sec(
                         int(task.lease_ttl_sec or 0),
                         deadline=specialist_deadline,
@@ -1068,11 +1058,13 @@ class DispatcherCollaborator(CoordinatorCollaborator):
     ) -> int:
         """Single source for the GPU-specialist lease / ``gpu_research_lane`` TTL.
 
-        The iron law is ``kill ≤ gpu_lease TTL ≤ gpu_research_lane TTL`` — both the
-        GPU-pool lease (dispatch) and the lane lease (intent_router) must outlive
-        the kill the reaper performs at the specialist's deadline. A caller that
-        has already anchored that deadline passes it in, so the kill and the
-        lease are not timed from two different readings of the clock.
+        Nothing releases a lease when this TTL passes; the reaper stops the
+        specialist at its deadline. The lane expiry feeds the in-flight
+        ``lease_expires_in_sec`` countdown and ``recover --confirm-scope-gone``'s
+        liveness check, so covering the deadline keeps both from calling a lease
+        lapsed while its specialist can still run. A caller that has already
+        anchored the deadline passes it in, so the kill and the lease are timed
+        from one reading of the clock.
 
         Args:
             floor_ttl_sec: A lower bound (e.g. the registry / existing
@@ -1439,13 +1431,12 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         Returns:
             The first :class:`PolicyDenied` that fires, else ``None``.
         """
-        denied = self._phase_denial_for_action(action_name)
-        if denied is not None:
-            return denied
-        denied = self._sequence_denial_for_action(action_name)
-        if denied is not None:
-            return denied
-        return self.time_budget_denial_for_action(action_name, params=params)
+        return (
+            self._phase_denial_for_action(action_name)
+            or self._sequence_denial_for_action(action_name)
+            or specialist_in_flight_denial(action_name, params, self.tasks, self.shared_state.find_gap)
+            or self.time_budget_denial_for_action(action_name, params=params)
+        )
 
     async def _cancel_queued_task_over_budget(self, task: Task) -> bool:
         """Drop a queued task the budget can no longer fit, before it takes a lane.
@@ -1479,7 +1470,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
                 "cancelled",
                 evidence={"reason": denied.rule, "error": str(denied)},
             )
-        except Exception:
+        except (sqlite3.Error, TaskNotFound, IllegalTransition):
             log.exception(
                 "dispatcher: could not cancel over-budget task=%s kind=%s",
                 task.task_id,
@@ -1504,7 +1495,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
             },
         )
         # A cancelled conc_sweep never writes last_conc_sweep on its own, so SWEEP
-        # would idle. Stamp the skip here so the phase machine closes on sweep_done.
+        # would idle. Stamp the skip here so SWEEP can exit.
         if str(task.kind or "") == "conc_sweep":
             self._coord.phase_sweep.record_session_budget_conc_sweep_skip(denied=denied)
         return True

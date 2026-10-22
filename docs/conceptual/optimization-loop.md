@@ -252,7 +252,7 @@ unset.
 ### GPU power: measured and asserted
 
 Each round's GPU power is sampled by Hyperloom itself, with read-only
-`amd-smi metric --power --mem-usage` every 2 s, only while the round is in its
+`amd-smi metric --power --mem-usage --clock` every 2 s, only while the round is in its
 measured phase (from server ready, and from AIPerf's measured-phase line under
 AgentX, until the client exits or the eval starts). It is averaged over the
 serving cards: those in the visible-device mask that held at least 10% of VRAM
@@ -264,16 +264,141 @@ serving card or no power reading stays unmeasured. The benchmark report's
 sampler ran on: on one node it reads a single card over the whole process
 lifetime, boot and idle tail included.
 
-The optimizer never changes power settings. The power cap and DPM performance
-level decide how much of the card's throughput is available at what power, so
-they are part of the measurement contract, and setting them is privileged and
-card-wide. Set them with `amd-smi set --power-cap` / `--perf-level` before
-launch; `--gpu-power-cap-w` and `--gpu-perf-level` then assert them, the way
-`--compute-partition-mode` asserts a partition mode: the session refuses to
-start (and to resume) if a card it uses is at a different value. The observed
-cap and perf level are recorded in the platform fingerprint whether or not
-they are asserted. Neither can be checked on a multi-node session, so asserting
-one there refuses.
+The sampler also reports how the cards ran under their power cap. Each card in
+`gpu_power.json` carries its mean graphics clock over the measured phase while
+busy (`sclk_mean_mhz`; an XCD in deep sleep, below its `min_clk`, is idle time
+and left out), its clock limit (`sclk_max_mhz`, unread when the limit changed
+during the phase), and the share of the measured phase it spent held back by its
+power limit (`power_throttle_fraction`, from the `amd-smi metric --violation`
+accumulators read as each measured window opens and closes; idle stretches in
+the phase count toward that share's whole). A window whose counters could not be
+read leaves the share unread rather than counting only the windows that were:
+every card's when the read failed (counted in `throttle_query_errors`, apart
+from the power reads' `query_errors`), one card's when it was missing from
+either end or both, or its counters went back or stopped advancing, and every
+card's when the sampler was still blocked in `amd-smi` as the round closed. A
+serving card power throttled for at least 10% of the phase is listed in
+`power_throttled_gpus`, and the round logs a warning naming each such card's
+throttled share and mean clock: its throughput was set by the power cap, not by
+its clock limit. This is only reported; nothing changes the cards.
+
+The optimizer never changes power settings during a session. The power cap and
+DPM performance level decide how much of the card's throughput is available at
+what power, so they are part of the measurement contract, and setting them is
+privileged and card-wide. By default, set them with `amd-smi set --power-cap` /
+`--perf-level` before launch; `--gpu-power-cap-w` and `--gpu-perf-level` then
+assert them, the way `--compute-partition-mode` asserts a partition mode: the
+session refuses to start (and to resume) if a card it uses is at a different
+value. The observed cap and perf level are recorded in the platform
+fingerprint whether or not they are asserted. Neither can be checked on a
+multi-node session, so asserting one there refuses.
+
+Node Power Management (NPM, MI350 series) is the node-wide counterpart: when it
+is enabled, firmware holds the sum of every card's power to a node limit and
+moves power between cards, so a card's throughput also depends on what the
+other cards draw. Its state and the limit firmware enforces, as
+`amd-smi node -p` reports them, are recorded in the same record under `node`
+(left out where `amd-smi` has no `node` command, before ROCm 7.2).
+`--node-power-management enabled|disabled` and `--node-power-limit-w` assert
+them the same way, refusing a launch or resume whose node differs or cannot be
+read. They are only ever asserted: NPM is enabled and its limit set on the
+BMC, and `--apply-gpu-power-settings` never changes them. The enforced limit
+can sit below the one the BMC was asked for, since firmware clamps it to the
+node's maximum, so assert the value `amd-smi` reports.
+
+### Applying the power settings (opt-in)
+
+`--apply-gpu-power-settings` permits the session to set the declared
+`--gpu-power-cap-w` / `--gpu-perf-level` itself, once at launch, and to keep
+them for the whole session. The same read-back check then verifies them, and
+the fingerprint records them as applied by Hyperloom along with the originals.
+It needs root, as `amd-smi set` does: a launch without root refuses (exit 2)
+before it writes any power-settings record, with the cards unchanged. It also
+refuses, with nothing left changed:
+
+- without an integer `ROCR_VISIBLE_DEVICES` / `HIP_VISIBLE_DEVICES` mask. It
+  sets exactly the masked cards, never the whole host. A mask number is a ROCm
+  number, not an amd-smi index: ROCm numbers cards in KFD node order and amd-smi
+  in PCI order, and on MI300X/MI355X boards the two differ, so each masked card
+  is matched to amd-smi through the KFD node id `amd-smi list` reports, with
+  `HIP_VISIBLE_DEVICES` (or `CUDA_VISIBLE_DEVICES`) indexing into what
+  `ROCR_VISIBLE_DEVICES` left; `HSA_VISIBLE_DEVICES` and `GPU_DEVICE_ORDINAL`,
+  which ROCm ignores, are not read. The read-only assertion, the per-GPU budget
+  and the power sampler use the same translation. A mask that is set but empty,
+  is not written as plain comma-separated numbers (GPU UUIDs, spaces, `;`,
+  leading zeros, which HIP reads differently), repeats a card or names
+  one that does not exist is refused;
+- on a card not in SPX compute-partition mode: a cap is per socket, so it would
+  change the sibling partitions, which other sessions may use;
+- when the declared cap is not a whole number of watts, which `amd-smi set`
+  does not take;
+- on multi-node;
+- on a masked card `amd-smi` does not report, or whose current value cannot be
+  read, since nothing could restore it;
+- on a card that already holds more than 2 GB of VRAM before the session
+  starts (someone else's resident model, which a card-wide cap would change
+  too), or whose VRAM use cannot be read;
+- when a set fails.
+
+Only the declared settings are set, and only the settings they change are put
+back. A perf-level apply is refused before anything is set on a card that
+starts at a level a restore could not bring back: `determinism` (its clock
+soft-max is set with `amd-smi set -d`, which a level restore does not carry) and
+`manual` (its hand-tuned clock limits are reset by setting another level). A
+setting a card already has is left alone instead: neither set nor put back, so
+a card asked to stay at its level needs no refusal. A cap-only apply is allowed
+on such cards. After every restore the cards are read
+back, and that reading decides: a card not back at its recorded values is
+reported and its record kept, so the next launch warns or recovers it, while
+each card that reads back at its originals has its record cleared, even if a
+restore command failed (an apply refused for lack of privilege changed
+nothing).
+
+The originals are written to a per-card record under
+`/var/tmp/hyperloom/gpu_power_settings/` before anything is set. That path is
+host-local and fixed, whatever `HYPERLOOM_RUNTIME_DIR` or `USER_DATA_PATH` say,
+so every session on the host finds the same records. Inside a container it is
+the container's own `/var/tmp`, so mount the host's `/var/tmp/hyperloom` into
+every container that applies settings, or sessions in different containers will
+not see each other's records. Each record is stamped with the host's boot id, so
+one written before a reboot is ignored. The session holds an exclusive `flock`
+on each record until it restores the card, which keeps two sessions from setting
+the same card. A restore sets whatever a record says, as root, so the record
+directory and its parent are writable only by root, and records are readable by
+every account (for the warning below) but writable only by root; a launch with
+the flag creates both directories at mode 0755, and sets an existing one root
+owns (such as a mounted host directory) to 0755 unless other accounts can write
+it, which is refused instead. A record that is a symlink or a hard link, or a
+record or directory owned by another unprivileged account or writable by others,
+is refused rather than read. Any local account can still make a flagged launch
+refuse: by holding a lock on a card's record, which reads as a live session
+holding the card, or by creating `/var/tmp/hyperloom` first, which is then not
+root's and refused. Both fail safe, with nothing set, until an administrator
+removes them.
+
+The originals are restored when the session ends: at a stop reason, an operator
+stop, an error exit, or a SIGTERM / SIGHUP at any point after the cards were
+set, including startup and the close sequence. A stop signal during the restore
+itself is ignored so it cannot cut it short. A SIGKILL (an OOM kill, or a
+scheduler escalating after its grace period, such as Slurm's `KillWait`) cannot
+be caught: the cards stay at the applied settings, and the record is left with
+its lock free. The next launch on that host that passes the flag with those
+cards in its mask restores them before setting anything; a launch without the
+flag warns that the cards were left changed and names their original values.
+Records are judged setting by setting: a setting that still reads at the applied
+value is put back (a restore that put back the cap but not the level gets the
+level restored), while a setting the card no longer reads at (an operator put it
+back, or set a value of their own) is left alone. A setting whose reading is
+missing is not taken as moved: the launch with the flag refuses with the record
+kept and names the record file to remove once the card has been checked by hand,
+and the warning reports the card as possibly still changed. A record none of
+whose settings still reads as applied is stale: it is cleared, not restored, and
+not warned about. Give a scheduler's grace period enough time for the session to
+close. On resume the flag must be passed again, since the settings were restored
+when the previous leg exited. A resume first stops the serving
+processes its previous leg left running (a leg that was SIGKILLed leaves its
+server up), so the check for other tenants' models does not refuse on the
+session's own server.
 
 ### Power budget (constraint on KEEP)
 
@@ -419,8 +544,11 @@ look very different from Orchestration's side:
   taking a turn in it.
 - **On a GEAK win**, the same `kernel_agent` task re-measures the candidate on
   the orchestrator's own harness under the lanes it already holds, and writes
-  the headline from that measurement before it returns. KERNEL leaves once the
-  task settles, or when its phase budget runs out.
+  the headline from that measurement before it returns. A candidate whose
+  launch config, applied over `current_best`, launches what `current_best`
+  already runs, and that carries no loadable overlay, is settled as
+  `no_material` without being measured. KERNEL leaves once the task settles, or
+  when its phase budget runs out.
 - **Forge (`KERNEL_OPT_BACKEND_ORDER=forge`)**: the phase runs the deterministic
   KERNEL-entry ladder — GEMM tuning, then the fusion lane, then the kernel
   rewrite controller, which selects its own operators and publishes patches
@@ -463,12 +591,21 @@ default. See the [AgentX workflow](../how-to/optimize.md#optimize-an-agentx-work
 for supported workload controls.
 
 Results update `last_conc_sweep` and feed the final report and breakdown.
-The phase exits on `sweep_done` (or `sweep_failed`). While the sweep it
+A ladder that fails closes the phase as `sweep_failed`; one that finishes
+(`sweep_done`) loops back or closes on the reason below. While the sweep it
 enqueued is still running, SWEEP's own budget and cap wait for the budget the
 sweep was granted (plus its lease grace); the session deadline does not. A
 sweep the orchestrator cancels stops its ladder at once and records
 `cancelled`, so the phase closes on whatever ordered the cancel rather than on
 `sweep_failed`.
+
+When SWEEP does not loop back, the close names what refused the next
+macro-cycle: `target_reached`, `global_converged` (consecutive cycles without
+gain, or every direction saturated) or `time_exhausted` (less session time
+left than the reloop floor). The refusing rule is kept in the transition
+evidence as `reloop_blocked`. A run without `FRAMEWORK_AGENT` has no next
+cycle to refuse, so it closes on the ladder's own reason unless the target was
+reached.
 
 ## CLOSE
 

@@ -53,7 +53,6 @@ class EnablementRevalidation(CoordinatorCollaborator):
         params: dict[str, Any] = {
             "source": "coordinator_internal",
             "reason": ENABLEMENT_REVALIDATION_REASON,
-            "disable_run_eval": False,
             **_enablement_carrier_params(state),
         }
         benchmark_script = state.accepted_baseline_script()
@@ -73,7 +72,7 @@ class EnablementRevalidation(CoordinatorCollaborator):
             state.enablement.revalidation_task_id = task_id
             try:
                 state.save(self.session_dir)
-            except Exception:
+            except OSError:
                 log.debug("enablement revalidation: save of task_id failed", exc_info=True)
         return task_id
 
