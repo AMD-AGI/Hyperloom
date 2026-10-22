@@ -8,31 +8,47 @@ from __future__ import annotations
 import json
 import logging
 import os
-import shlex
 import time
 import traceback
 from collections.abc import Callable, Iterator, Mapping
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import Any, ClassVar
 
 from hyperloom.common.deadline import Deadline
-from hyperloom.common.coerce import to_str_list, to_unix
+from hyperloom.common.coerce import to_int, to_str_list, to_unix
 from hyperloom.common.env import env_bool
 from hyperloom.common.env_safety import redact_secret_values
+from hyperloom.common.gain_math import gain_pct, gain_pct_or_zero
 from hyperloom.common.io import atomic_write_json
+from hyperloom.common.perf_metric import (
+    AGENTX_KEEP_P50_THRESHOLD_PCT,
+    GRADED_INTVTY,
+    GRADED_INTVTY_P50,
+    GRADED_OUTPUT,
+    GradedComparison,
+    VERDICT_KEEP,
+    VERDICT_REVERT,
+    axis_of,
+    constraint_veto_reason,
+    holds_within_band,
+    incomparability_reason,
+    output_tput_of,
+    perf_snapshot_from_mapping,
+    resolve_grading_anchor_perf,
+    total_tput_of,
+)
 from hyperloom.common.timeutil import now_iso
 from hyperloom.common.jsonio import read_json_strict
 from hyperloom.common.profile_args import sanitize_profile_server_args
-
-if TYPE_CHECKING:  # import cycle: perf_metric is imported lazily at call time
-    from hyperloom.common.perf_metric import GradedComparison
+from hyperloom.inference_optimizer.grading import resolved_grading
 
 from . import kernel_decision_settings as _kernel_decision_settings
 from ._shared_state.attempt_audit import _AUDIT_ACTIONS, _KEY_METRIC_MAP
 from ._shared_state.enablement_round import EnablementRound
+from ._shared_state.phase_state import _control_fields
 
 log = logging.getLogger(__name__)
 
@@ -44,7 +60,6 @@ _DEFAULT_ATTEMPTS_HISTORY = _kernel_decision_settings._DEFAULT_ATTEMPTS_HISTORY
 _DEFAULT_HOT_KERNEL_MIN_GPU_PCT = _kernel_decision_settings._DEFAULT_HOT_KERNEL_MIN_GPU_PCT
 _MAX_INTEGRATE_FAULT_ATTEMPTS = _kernel_decision_settings._MAX_INTEGRATE_FAULT_ATTEMPTS
 resolve_hot_kernel_min_gpu_pct = _kernel_decision_settings.resolve_hot_kernel_min_gpu_pct
-resolve_kernel_opt_max_failures = _kernel_decision_settings.resolve_kernel_opt_max_failures
 
 # escalate_strategy_change hint vocabulary (closed enum; unknown hints ignored). ``skip_to_kernel`` is the
 # "exhausted the current lever" signal from FRAMEWORK_AGENT; it advances to KERNEL.
@@ -112,26 +127,6 @@ def resolve_graded_comparison(
     # ``anchor_perf``/``anchor_tput`` default to the session anchor; explore passes its own because variants stack
     # within a round. Objective and band come from ``resolved_grading``, so both are what the session was seeded
     # with rather than whatever the calling process's environment holds.
-    from hyperloom.common.gain_math import gain_pct
-    from hyperloom.common.perf_metric import (
-        AGENTX_KEEP_P50_THRESHOLD_PCT,
-        GRADED_INTVTY,
-        GRADED_INTVTY_P50,
-        GRADED_OUTPUT,
-        GradedComparison,
-        VERDICT_KEEP,
-        VERDICT_REVERT,
-        axis_of,
-        holds_within_band,
-        constraint_veto_reason,
-        incomparability_reason,
-        output_tput_of,
-        perf_snapshot_from_mapping,
-        resolve_grading_anchor_perf,
-        total_tput_of,
-    )
-    from hyperloom.inference_optimizer.grading import resolved_grading
-
     on_intvty, noise_pct = resolved_grading(state)
     # The session's constraints (latency, power) veto a candidate the gain gates would KEEP, on whichever axis graded
     # it. A candidate that already lost carries no veto, so the ledger names the gate that actually refused it.
@@ -145,25 +140,23 @@ def resolve_graded_comparison(
         else:
             ref_perf, reason = resolve_grading_anchor_perf(state)
         cand_perf = perf_snapshot_from_mapping(measurement)
-        if ref_perf and cand_perf:
-            gain = gain_pct(axis_of(cand_perf, GRADED_INTVTY_P50), axis_of(ref_perf, GRADED_INTVTY_P50))
+        if all((ref_perf, cand_perf)):
+            gain = gain_pct_or_zero(axis_of(cand_perf, GRADED_INTVTY_P50), axis_of(ref_perf, GRADED_INTVTY_P50))
             # The output guard reads the raw aggregate: the chip count divides both sides of the ratio, so the band
             # holds identically per GPU.
             gates = (
-                ("p50_gain_below_threshold", gain is not None and gain >= AGENTX_KEEP_P50_THRESHOLD_PCT),
+                ("p50_gain_below_threshold", gain >= AGENTX_KEEP_P50_THRESHOLD_PCT),
                 ("p90_regressed", holds_within_band(cand_perf, ref_perf, GRADED_INTVTY, noise_pct=noise_pct)),
                 ("output_regressed", holds_within_band(cand_perf, ref_perf, GRADED_OUTPUT, noise_pct=noise_pct)),
+                (incomparability_reason(cand_perf, ref_perf), False),
             )
-            refused = [gate for gate, held in gates if not held]
-            incomparable = incomparability_reason(cand_perf, ref_perf)
-            if incomparable:
-                refused.append(incomparable)
+            refused = [gate for gate, held in gates if gate and not held]
             sla_veto = "" if refused else constraint_veto_reason(measurement, state)
             return GradedComparison(
                 objective=GRADED_INTVTY_P50,
                 candidate=axis_of(cand_perf, GRADED_INTVTY_P50),
                 reference=axis_of(ref_perf, GRADED_INTVTY_P50),
-                verdict=VERDICT_REVERT if refused or sla_veto else VERDICT_KEEP,
+                verdict=VERDICT_REVERT if any((refused, sla_veto)) else VERDICT_KEEP,
                 tput_candidate=total_tput_of(cand_perf),
                 tput_reference=total_tput_of(ref_perf),
                 veto_reason=sla_veto,
@@ -174,23 +167,20 @@ def resolve_graded_comparison(
     if anchor_tput is not None:
         reference = float(anchor_tput)
     elif against_baseline:
-        reference = float(getattr(state, "baseline_tput", 0.0) or 0.0)
+        reference = float(getattr(state, "baseline_tput", 0.0))
     else:
         reference = resolve_grading_anchor_tput(state)
     candidate = output_tput_of(measurement)
-    gain = gain_pct(candidate, reference) if reference > 0 else None
-    if degrade_reason:
-        # The output-axis figures are diagnostic only. A degraded AgentX pair
-        # must not read as a throughput KEEP at the resolver chokepoint.
-        verdict = VERDICT_REVERT
-    else:
-        verdict = VERDICT_KEEP if gain is not None and gain >= keep_threshold_pct else VERDICT_REVERT
-    sla_veto = constraint_veto_reason(measurement, state) if verdict == VERDICT_KEEP else ""
+    # The output-axis figures are diagnostic only. A degraded AgentX pair
+    # must not read as a throughput KEEP at the resolver chokepoint.
+    gain = gain_pct(candidate, reference)
+    cleared = not degrade_reason and gain is not None and gain >= keep_threshold_pct
+    sla_veto = constraint_veto_reason(measurement, state) if cleared else ""
     return GradedComparison(
         objective=GRADED_OUTPUT,
         candidate=candidate,
         reference=reference,
-        verdict=VERDICT_REVERT if sla_veto else verdict,
+        verdict=VERDICT_KEEP if cleared and not sla_veto else VERDICT_REVERT,
         degrade_reason=degrade_reason,
         veto_reason=sla_veto,
     )
@@ -200,6 +190,18 @@ def _normalize_envs(value: Any) -> dict[str, str]:
     """Coerce an env mapping to ``str -> str``; a resumed non-dict reads as empty."""
     return {str(k): str(v) for k, v in value.items()} if isinstance(value, dict) else {}
 
+
+# Workload fields a profile task may override; the rest of the profile identity is read off the session.
+PROFILE_OVERRIDABLE_KEYS: tuple[str, ...] = (
+    "framework",
+    "precision",
+    "model_path",
+    "tp",
+    "conc",
+    "isl",
+    "osl",
+    "max_model_len",
+)
 
 # ``base_*`` task param -> the ``current_best`` field it mirrors and its normalizer.
 _STACK_BASE_FIELDS: tuple[tuple[str, str, Callable[[Any], Any]], ...] = (
@@ -265,6 +267,69 @@ _INTEGRATE_FAULT_ERROR_CLASSES = frozenset(
 # How many hot / skipped kernels ``record_trace_analyze`` keeps in the trace summary (matches the ``*_top15`` field
 # names).
 _TRACE_HOT_KERNEL_TOP_N = 15
+
+# A projected hot-kernel row carries roofline evidence when any of these is populated.
+_ROOFLINE_SIGNAL_KEYS: tuple[str, ...] = (
+    "bound_type",
+    "arithmetic_intensity",
+    "flops_per_byte",
+    "efficiency_percent",
+    "compute_utilization_pct",
+    "bandwidth_utilization_pct",
+    "suggestion",
+    "roofline_name",
+)
+
+
+def _saturation_delta(sat: dict[str, Any], prev_sat: dict[str, Any], key: str) -> float | None:
+    current, previous = sat.get(key), prev_sat.get(key)
+    if current is None or previous is None:
+        return None
+    return round(float(current) - float(previous), 2)
+
+
+def _hot_kernel_row(entry: dict[str, Any]) -> dict[str, Any]:
+    kid = entry.get("kernel_id")
+    arithmetic_intensity = entry.get("arithmetic_intensity")
+    if arithmetic_intensity is None:
+        arithmetic_intensity = entry.get("flops_per_byte")
+    efficiency_percent = entry.get("efficiency_percent")
+    if efficiency_percent is None:
+        efficiency_percent = entry.get("efficiency_pct")
+    return {
+        "kernel_id": kid,
+        "name": entry.get("name"),
+        # TraceLens kernel_category bucket ("" when absent).
+        "kernel_category": entry.get("kernel_category") or "",
+        "gpu_pct": entry.get("gpu_pct"),
+        "call_count": entry.get("call_count"),
+        "duration_us": entry.get("duration_us"),
+        "tracelens_pitem_rank": entry.get("tracelens_pitem_rank"),
+        "impact_score": entry.get("impact_score"),
+        "bottleneck": entry.get("bottleneck"),
+        "bound_type": entry.get("bound_type"),
+        "arithmetic_intensity": arithmetic_intensity,
+        "flops_per_byte": entry.get("flops_per_byte"),
+        "efficiency_percent": efficiency_percent,
+        "compute_utilization_pct": entry.get("compute_utilization_pct"),
+        "bandwidth_utilization_pct": entry.get("bandwidth_utilization_pct"),
+        "suggestion": entry.get("suggestion") or "",
+        "roofline_name": entry.get("roofline_name"),
+        "source_file": entry.get("source_file"),
+        "reusable_native_kernel": bool(entry.get("reusable_native_kernel")),
+        "kernel_contract": entry.get("kernel_contract"),
+        "is_multigpu": entry.get("is_multigpu") is True,
+        # Names the deterministic extractor the row came from.
+        "candidate_source": entry.get("candidate_source") or "",
+        "recommended_backends": entry.get("recommended_backends") or [],
+        "recommended_actions": entry.get("recommended_actions") or [],
+        # Vendor-playbook fields; see _vendor_operator_playbooks.py.
+        "patch_strategy": entry.get("patch_strategy") or "",
+        "vendor_playbook_group_id": entry.get("vendor_playbook_group_id") or "",
+        "vendor_playbook_aggregate_gpu_pct": entry.get("vendor_playbook_aggregate_gpu_pct"),
+        "vendor_playbook_min_gpu_pct_floor": entry.get("vendor_playbook_min_gpu_pct_floor"),
+    }
+
 
 # Session-level kernel-roofline report the analyzer writes for a non-close run; read back when the trace_analyze
 # envelope arrives without its payload keys.
@@ -369,8 +434,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     profile_osl: int = 0
     max_model_len: int = 0
     kernel_enabled: bool = True
-    # KERNEL-phase optimizer: "geak" (default, one-shot whole-pipeline e2e) or "native" (per-kernel loop when
-    # explicitly requested).
+    # KERNEL-phase backend, recorded once when the session is created: "geak" (default) or "forge".
     kernel_optimizer: str = "geak"
     # Snapshot of the last GEAK e2e run (result.json + final_launch.sh / bench_e2e.sh handles the SWEEP phase reuses).
     geak_result: dict[str, Any] = field(default_factory=dict)
@@ -406,8 +470,8 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     latency_budget_ms: float = 0.0
     power_budget_w: float = 0.0  # --max-power-w: total W over the serving cards; 0.0 is off. Archived, like latency.
     power_budget_per_gpu_w: dict[str, float] = field(default_factory=dict)  # --max-per-gpu-power-w {GPU id: W}
-    # The GPU power settings the session is measured under: {"declared": {power_cap_w, perf_level}, "observed":
-    # {gpu: {power_cap_w, perf_level}}}. Read at launch and asserted on resume; never set by the optimizer.
+    # GPU power settings the session is measured under: {"declared", "observed": {gpu: {power_cap_w, perf_level}}, "node"
+    # where amd-smi reports NPM, "applied" with --apply-gpu-power-settings}. Read at launch, asserted on resume.
     gpu_power_settings: dict[str, Any] = field(default_factory=dict)
     # AgentX corpus shape: written at seed from canonical constants, overwritten with measured values after every
     # AgentX measurement. Read by semantic consumers (prompts, manifest, reports) instead of the inert state.isl /
@@ -417,8 +481,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     # reported axes the summary renders.
     baseline_perf: dict[str, Any] = field(default_factory=dict)
     baseline_accuracy: float = 0.0
-    # ``--no-eval``: no accuracy eval anywhere.
-    eval_disabled: bool = False
     # Standalone baseline-arm roofline ceiling computed right after baseline lands; backs up snapshot ceiling so the
     # frontend has data even when the roofline (profile + trace_analyze) step fails.
     baseline_roofline_ceiling: dict[str, Any] = field(default_factory=dict)
@@ -498,7 +560,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     custom_specialist_only: bool = False
     # ``--extra-env NAME=VALUE`` pins.
     operator_extra_env: dict[str, str] = field(default_factory=dict)
-    # Operator-supplied custom-workload paths.
+    # Operator-supplied custom-workload paths; a promoted enablement runtime replaces framework_repo_path with its checkout.
     bypass_scripts_dir: str = ""
     framework_repo_path: str = ""
     # ``HYPERLOOM_BENCHMARK_BACKEND`` at seed time (``bypass`` for custom).
@@ -571,7 +633,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     last_profile_trace: str = ""
     # Launch evidence of the run that produced ``last_profile_trace``; its runtime findings share the trace's shapes.
     last_profile_launch_evidence_path: str = ""
-    # ``succeeded``/``failed`` for most recent profile; failed allows re-run even when last_profile_trace is non-empty.
+    # ``succeeded``/``recovered``/``failed`` for most recent profile; failed allows re-run with a last_profile_trace.
     last_profile_status: str = ""
     # Workload context captured with ``last_profile_trace``; strict matching prevents consumers from reusing runtime
     # shapes after workload changes.
@@ -665,8 +727,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     # Wall-clock instant (unix seconds) until which the ``conc_sweep`` SWEEP enqueued is entitled to run: its granted
     # budget plus the lease grace. SWEEP's own budget exits defer to it while no result has landed; 0 means no grant.
     conc_sweep_granted_until_unix: float = 0.0
-    # Most recent per-kernel optimization record.
-    last_kernel_opt: dict[str, Any] = field(default_factory=dict)
     # Most recent forge-fusion run result and its e2e integrate result; persisted so resume does not rerun a completed
     # fusion loop or lose the adoption audit.
     last_fusion: dict[str, Any] = field(default_factory=dict)
@@ -696,8 +756,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     last_action_failures: list[dict[str, Any]] = field(default_factory=list)
     # Structured per-variant failure evidence, capped and keyed by failure_id (last-wins).
     failures: list[dict[str, Any]] = field(default_factory=list)
-    # Authoritative per-kernel optimization history keyed by stable task identity.
-    kernel_opt_task_attempts: dict[str, Any] = field(default_factory=dict)
     # Immutable KEEP snapshots awaiting E2E integration, keyed by integration_id.
     pending_kernel_integrations: dict[str, Any] = field(default_factory=dict)
     # Consecutive grid-runner tasks with no new current_best; Robustness nudges Orch off the plateau. Reset on advance.
@@ -754,8 +812,8 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     rejected_kernel_ids: list[str] = field(default_factory=list)
     # Consecutive KERNEL_AGENT ticks that observed no forward motion AND no kernel-lane task in flight.
     kernel_idle_ticks: int = 0
-    # Digest of the KERNEL progress signals (attempt ledger, rejected ids, last kernel_opt, stack depth, in-flight
-    # kernel task ids) seen on the tick that opened the current idle streak.
+    # Digest of the KERNEL progress signals (integrate verdicts, queued integrations, rejected ids, stack depth,
+    # rewrite-controller result, in-flight kernel task ids) seen on the tick that opened the current idle streak.
     kernel_progress_fingerprint: str = ""
     # Unix time the current idle streak opened.
     kernel_idle_since_unix: float = 0.0
@@ -837,17 +895,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     #: comes from ``current_best`` on both sides and is therefore symmetric.
     #:
     #: ClassVar so it never serialises into state.json.
-    PROFILE_WORKLOAD_IDENTITY_KEYS: ClassVar[tuple[str, ...]] = (
-        "benchmark_mode",
-        "framework",
-        "precision",
-        "model_path",
-        "tp",
-        "conc",
-        "isl",
-        "osl",
-        "max_model_len",
-    )
+    PROFILE_WORKLOAD_IDENTITY_KEYS: ClassVar[tuple[str, ...]] = ("benchmark_mode", *PROFILE_OVERRIDABLE_KEYS)
 
     @classmethod
     def profile_workload_identity(cls, context: Any) -> dict[str, Any]:
@@ -861,93 +909,61 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         overrides: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Return the normalized workload and runtime identity for a profile trace."""
+        from hyperloom.inference_optimizer.grid_server_args import normalize_server_args
+
         params = overrides if isinstance(overrides, dict) else {}
-        context: dict[str, Any] = {}
+        workload = {
+            name: params[name] if params.get(name) not in (None, "") else getattr(self, name, "")
+            for name in PROFILE_OVERRIDABLE_KEYS
+        }
+        text = {name: str(workload[name] or "").strip() for name in ("framework", "precision", "model_path")}
+        model_path = text["model_path"]
+        if model_path:
+            path = Path(model_path).expanduser()
+            if path.exists():
+                try:
+                    model_path = str(path.resolve())
+                except OSError:
+                    log.debug(
+                        "profile workload path resolution failed for %s; keeping the unresolved path",
+                        path,
+                        exc_info=True,
+                    )
+        runtime = {name: params[name] if name in params else params.get(base) for base, name, _ in _STACK_BASE_FIELDS}
+        server_args = sanitize_profile_server_args(str(runtime["extra_server_args"] or "").strip())
+        joined_args = normalize_server_args(server_args)
+        serving_args = str(self.current_best.get("extra_server_args") or "").strip()
+        serving_envs = {
+            key: value
+            for key, value in sorted(_normalize_envs(self.current_best.get("extra_envs")).items())
+            if key.strip()
+        }
         # benchmark_mode distinguishes AgentX from synthetic traces with the
         # same CONC/TP so a synthetic trace is never reused for an AgentX session.
-        context["benchmark_mode"] = str(getattr(self, "benchmark_mode", "") or "").strip().lower()
-        for name in ("framework", "precision", "model_path"):
-            value = params.get(name)
-            if value in (None, ""):
-                value = getattr(self, name, "")
-            normalized = str(value or "").strip()
-            if name in ("framework", "precision"):
-                normalized = normalized.lower()
-            elif normalized:
-                path = Path(normalized).expanduser()
-                if path.exists():
-                    try:
-                        normalized = str(path.resolve())
-                    except OSError:
-                        log.debug(
-                            "profile workload path resolution failed for %s; keeping the unresolved path",
-                            path,
-                            exc_info=True,
-                        )
-            context[name] = normalized
-        for name in ("tp", "conc", "isl", "osl", "max_model_len"):
-            value = params.get(name)
-            if value in (None, ""):
-                value = getattr(self, name, 0)
-            try:
-                context[name] = int(value or 0)
-            except (TypeError, ValueError):
-                context[name] = 0
-        raw_server_args = (
-            params.get("extra_server_args") if "extra_server_args" in params else params.get("base_extra_args")
-        )
-        server_args = str(raw_server_args or "").strip()
-        server_args = sanitize_profile_server_args(server_args)
-        try:
-            context["server_args"] = shlex.join(shlex.split(server_args)) if server_args else ""
-        except ValueError:
-            context["server_args"] = " ".join(server_args.split())
-
-        raw_envs = params.get("extra_envs") if "extra_envs" in params else params.get("base_extra_envs")
-        if isinstance(raw_envs, dict):
-            context["extra_envs"] = {
-                str(key): str(value) for key, value in sorted(raw_envs.items(), key=lambda item: str(item[0]))
-            }
-        else:
-            context["extra_envs"] = {}
-
-        def _normalized_list(base_name: str, direct_name: str) -> list[str]:
-            raw = params.get(direct_name) if direct_name in params else params.get(base_name)
-            values = [raw] if isinstance(raw, str) else list(raw or [])
-            return sorted({str(value).strip() for value in values if str(value).strip()})
-
-        context["remove_args"] = _normalized_list("base_remove_args", "remove_args")
-        context["unset_envs"] = _normalized_list("base_unset_envs", "unset_envs")
-        args_mode = params.get("args_mode") if "args_mode" in params else params.get("base_args_mode")
-        context["args_mode"] = str(args_mode or "append").strip().lower()
-
-        raw_envs = self.current_best.get("extra_envs") or {}
-        extra_envs = (
-            {
-                str(key): str(value)
-                for key, value in sorted(raw_envs.items(), key=lambda item: str(item[0]))
-                if str(key).strip()
-            }
-            if isinstance(raw_envs, dict)
-            else {}
-        )
-        serving_config = {
-            "extra_server_args": str(self.current_best.get("extra_server_args") or "").strip(),
-            "extra_envs": extra_envs,
+        context: dict[str, Any] = {
+            "benchmark_mode": str(self.benchmark_mode).strip().lower(),
+            "framework": text["framework"].lower(),
+            "precision": text["precision"].lower(),
+            "model_path": model_path,
+            **{name: to_int(workload[name], 0) for name in ("tp", "conc", "isl", "osl", "max_model_len")},
+            "server_args": joined_args,
+            "extra_envs": dict(sorted(_normalize_envs(runtime["extra_envs"]).items())),
+            "remove_args": sorted(set(to_str_list(runtime["remove_args"]))),
+            "unset_envs": sorted(set(to_str_list(runtime["unset_envs"]))),
+            "args_mode": str(runtime["args_mode"] or "append").strip().lower(),
         }
-        if any((serving_config["extra_server_args"], extra_envs)):
-            context["serving_config"] = serving_config
+        if any((serving_args, serving_envs)):
+            context["serving_config"] = {"extra_server_args": serving_args, "extra_envs": serving_envs}
         return context
 
-    def profile_trace_matches_workload(
-        self,
-        expected: dict[str, Any] | None = None,
-    ) -> bool:
+    def profile_trace_usable(self) -> bool:
+        """Whether the latest profile left a trace; ``recovered`` was salvaged from a run that reported failure."""
+        return self.last_profile_status in {"succeeded", "recovered"}
+
+    def profile_trace_matches_workload(self, expected: dict[str, Any] | None = None) -> bool:
         """Whether the recorded profile trace is fresh for a target workload."""
-        if str(getattr(self, "last_profile_status", "") or "").strip().lower() != "succeeded":
-            return False
-        recorded = getattr(self, "last_profile_workload", None)
-        if not isinstance(recorded, dict) or not recorded:
+        recorded = self.last_profile_workload
+        if not self.profile_trace_usable() or not isinstance(recorded, dict) or not recorded:
             return False
         # Default to the *current-best* runtime identity, not the bare context: last_profile_workload is recorded with
         # the real profile params (actual server_args / extra_envs), while profile_workload_context() with no
@@ -1037,16 +1053,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         if merged_envs:
             params["base_extra_envs"] = merged_envs
 
-        for name in (
-            "framework",
-            "precision",
-            "model_path",
-            "tp",
-            "conc",
-            "isl",
-            "osl",
-            "max_model_len",
-        ):
+        for name in PROFILE_OVERRIDABLE_KEYS:
             if name in incoming:
                 params[name] = incoming[name]
         return self.profile_workload_context(params)
@@ -1098,8 +1105,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         filtered["leg_anchor_unix"] = 0.0
         if not isinstance(filtered.get("specialist_patch_verdicts"), dict):
             filtered["specialist_patch_verdicts"] = {}
-        if not isinstance(filtered.get("kernel_opt_task_attempts"), dict):
-            filtered["kernel_opt_task_attempts"] = {}
         if not isinstance(filtered.get("pending_kernel_integrations"), dict):
             filtered["pending_kernel_integrations"] = {}
         if not isinstance(filtered.get("current_best"), dict):
@@ -1139,44 +1144,29 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
 
         # winners_history: normalize persisted rows, sorted by (round_id, ts).
         wh: list[dict[str, Any]] = []
-        for source_list in (existing.get("winners_history") or [],):
-            if not isinstance(source_list, list):
+        persisted = existing.get("winners_history")
+        for entry in persisted if isinstance(persisted, list) else []:
+            if not isinstance(entry, dict):
                 continue
-            for entry in source_list:
-                if not isinstance(entry, dict):
-                    continue
-                controls: dict[str, Any] = {}
-                for key in ("remove_args", "unset_envs"):
-                    raw = entry.get(key)
-                    if isinstance(raw, str):
-                        vals = [raw.strip()] if raw.strip() else []
-                    elif isinstance(raw, (list, tuple, set)):
-                        vals = [str(v).strip() for v in raw if str(v).strip()]
-                    else:
-                        vals = []
-                    if vals:
-                        controls[key] = vals
-                mode = str(entry.get("args_mode") or "append").strip().lower()
-                if mode == "replace":
-                    controls["args_mode"] = "replace"
-                fp_val = entry.get("fingerprint") or _fp(
-                    str(entry.get("extra_server_args") or ""),
-                    dict(entry.get("extra_envs") or {}),
+            controls = _control_fields(entry)
+            fp_val = entry.get("fingerprint") or _fp(
+                str(entry.get("extra_server_args") or ""),
+                dict(entry.get("extra_envs") or {}),
+                **controls,
+            )
+            wh.append(
+                {
+                    "round_id": str(entry.get("round_id") or ""),
+                    "variant_name": str(entry.get("variant_name") or entry.get("name") or ""),
+                    "fingerprint": str(fp_val),
+                    "gain_pct": entry.get("gain_pct"),
+                    "extra_args": str(entry.get("extra_args") or entry.get("extra_server_args") or ""),
+                    "extra_envs": dict(entry.get("extra_envs") or {}),
                     **controls,
-                )
-                wh.append(
-                    {
-                        "round_id": str(entry.get("round_id") or ""),
-                        "variant_name": str(entry.get("variant_name") or entry.get("name") or ""),
-                        "fingerprint": str(fp_val),
-                        "gain_pct": entry.get("gain_pct"),
-                        "extra_args": str(entry.get("extra_args") or entry.get("extra_server_args") or ""),
-                        "extra_envs": dict(entry.get("extra_envs") or {}),
-                        **controls,
-                        "provenance": str(entry.get("provenance") or ""),
-                        "ts": str(entry.get("ts") or ""),
-                    }
-                )
+                    "provenance": str(entry.get("provenance") or ""),
+                    "ts": str(entry.get("ts") or ""),
+                }
+            )
         wh.sort(key=lambda r: (str(r.get("round_id") or ""), str(r.get("ts") or "")))
         out["winners_history"] = wh
 
@@ -1239,7 +1229,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
                     text,
                     encoding="utf-8",
                 )
-        except Exception:
+        except (OSError, ValueError):
             # Never leave a stale launcher or export a subset of the retained
             # configuration. The complete settings remain in durable state.
             try:
@@ -1257,23 +1247,20 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
 
     def _backfill_scriptable_latency(self) -> None:
         """Derive ``current_best.e2el_mean_ms`` from ``tput`` for scriptable runs."""
-        try:
-            from hyperloom.inference_optimizer import framework_registry
+        from hyperloom.inference_optimizer import framework_registry
 
-            fw = str(getattr(self, "framework", "") or "")
-            if not framework_registry.is_scriptable(fw):
-                return
-            cb = self.current_best
-            if cb.get("e2el_mean_ms") is not None:
-                return
-            tput = cb.get("tput")
-            if not isinstance(tput, (int, float)) or tput <= 0:
-                return
-            e2el = framework_registry.primary_metric_value(fw, float(tput))
-            if e2el is not None and e2el > 0:
-                cb["e2el_mean_ms"] = round(float(e2el), 4)
-        except Exception:  # noqa: BLE001 — derived backfill, never blocks save
-            pass
+        fw = str(getattr(self, "framework", "") or "")
+        if not framework_registry.is_scriptable(fw):
+            return
+        cb = self.current_best
+        if cb.get("e2el_mean_ms") is not None:
+            return
+        tput = cb.get("tput")
+        if not isinstance(tput, (int, float)) or tput <= 0:
+            return
+        e2el = framework_registry.primary_metric_value(fw, float(tput))
+        if e2el is not None and e2el > 0:
+            cb["e2el_mean_ms"] = round(float(e2el), 4)
 
     def _langfuse_status_summary(self) -> dict[str, Any]:
         """Flatten the state into an OTEL-friendly scalar status snapshot."""
@@ -1294,18 +1281,13 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
             "framework": self.framework or os.environ.get("FRAMEWORK", "") or "",
             "kb_hit": str((self.warm_start_context or {}).get("status") or ""),
         }
-        try:
-            from ..phases.machine_state import PHASE_FRAMEWORK_AGENT, phase_cumulative_seconds
+        from ..phases.machine_state import PHASE_FRAMEWORK_AGENT, phase_cumulative_seconds
 
-            session_elapsed_s = max(0.0, self.elapsed_minutes() * 60.0)
-            summary["session_elapsed_s"] = int(round(session_elapsed_s))
-            explore_elapsed_s = phase_cumulative_seconds(self, phase=PHASE_FRAMEWORK_AGENT)
-            summary["explore_elapsed_s"] = int(round(explore_elapsed_s))
-            summary["explore_ratio"] = (
-                round(explore_elapsed_s / session_elapsed_s, 4) if session_elapsed_s > 0.0 else 0.0
-            )
-        except Exception:
-            log.debug("explore runtime telemetry derivation failed", exc_info=True)
+        session_elapsed_s = max(0.0, self.elapsed_minutes() * 60.0)
+        summary["session_elapsed_s"] = int(round(session_elapsed_s))
+        explore_elapsed_s = phase_cumulative_seconds(self, phase=PHASE_FRAMEWORK_AGENT)
+        summary["explore_elapsed_s"] = int(round(explore_elapsed_s))
+        summary["explore_ratio"] = round(explore_elapsed_s / session_elapsed_s, 4) if session_elapsed_s > 0.0 else 0.0
         tput = self.current_best.get("tput")
         if isinstance(tput, (int, float)) and not isinstance(tput, bool):
             summary["current_best_tput"] = round(float(tput), 1)
@@ -1612,15 +1594,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         self.last_tick_exception = entry
         return entry
 
-    def _resolve_kernel_patch_identity(
-        self,
-        payload: dict[str, Any] | None,
-    ) -> tuple[str, str, str, str]:
-        """Forwarding shim — implementation in :mod:`._kernel_decisions`."""
-        from ..kernel import _kernel_decisions as _m
-
-        return _m._resolve_kernel_patch_identity(self, payload)
-
     def find_rejected_kernel_patch(
         self,
         payload: dict[str, Any] | None,
@@ -1666,22 +1639,19 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         return entry
 
     def _record_integrate_verdict_on_timeline(self, entry: dict[str, Any] | None) -> None:
-        """Mirror one settled integrate verdict onto the KERNEL timeline.
-
-        Args:
-            entry (dict[str, Any] | None): The attempts entry the settlement
-                produced, or ``None`` when nothing settled.
-        """
+        """Mirror one settled integrate verdict onto the KERNEL timeline."""
         if not isinstance(entry, dict):
             return
-        from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import record_integrate_verdict
+        from hyperloom.inference_optimizer.breakdown.recorder import kernel_event
 
         last = (entry.get("attempts") or [{}])[-1]
         last = last if isinstance(last, dict) else {}
         rejected = entry.get("rejected")
-        record_integrate_verdict(
-            macro_cycle=int(getattr(self, "macro_cycle", 0) or 0),
-            integration_id=str(entry.get("integration_id") or ""),
+        cycle = int(getattr(self, "macro_cycle", 0) or 0)
+        integration_id = str(entry.get("integration_id") or "")
+        kernel_event.record_integrate_verdict(
+            macro_cycle=cycle,
+            integration_id=integration_id,
             kernel_id=str(entry.get("kernel_id") or ""),
             decision=str(entry.get("last_decision") or ""),
             status=str(entry.get("last_status") or ""),
@@ -1699,9 +1669,11 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
             extra_server_args=str(entry.get("extra_server_args") or ""),
             basis=str(entry.get("basis") or ""),
             alignment_status=str(entry.get("alignment_status") or ""),
-            # Absent means attributable: every writer that cannot pin the
-            # gain on this one kernel says so explicitly.
+            # Absent means attributable; a writer that cannot pin the gain on this kernel says so.
             gain_attributed=bool(entry.get("validated", True)),
+        )
+        kernel_event.record_integrate_axis(
+            macro_cycle=cycle, integration_id=integration_id, graded_objective=str(last.get("graded_objective") or "")
         )
 
     def record_gemm_tuning(self, result: dict[str, Any]) -> None:
@@ -1730,33 +1702,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         return _m.pending_kernel_integration_records(self)
 
     @property
-    def kernel_opt_attempts(self) -> dict[str, Any]:
-        """``kernel_opt_task_attempts`` re-indexed by the trace-local kernel id."""
-        from ..kernel import _kernel_decisions as _m
-
-        return _m.index_attempts_by_kernel_id(self.kernel_opt_task_attempts)
-
-    @kernel_opt_attempts.setter
-    def kernel_opt_attempts(self, value: dict[str, Any]) -> None:
-        """Seed ``kernel_opt_task_attempts`` from an ordinal-keyed dict."""
-        from ..kernel._kernel_decisions import _stable_kernel_task_key
-
-        if not isinstance(self.kernel_opt_task_attempts, dict):
-            object.__setattr__(self, "kernel_opt_task_attempts", {})
-        for kernel_id, entry in value.items():
-            if not isinstance(entry, dict):
-                continue
-            stamped = dict(entry)
-            stamped.setdefault("current_kernel_id", str(kernel_id))
-            task_key = stamped.get("stable_task_key") or _stable_kernel_task_key(
-                task_group_key=str(stamped.get("task_group_key") or ""),
-                kernel_id=str(kernel_id),
-                source_file=str(stamped.get("last_source_file") or ""),
-            )
-            stamped.setdefault("stable_task_key", task_key)
-            self.kernel_opt_task_attempts.setdefault(task_key, stamped)
-
-    @property
     def roofline_snapshot_id(self) -> int:
         """Counter of the newest roofline snapshot, or 0 before the first one."""
         raw = (self.last_trace_analyze or {}).get("roofline_snapshot_id")
@@ -1769,14 +1714,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
 
         return _m.has_keep_pending_integrate(self)
 
-    @property
-    def kernel_opt_attempts_count(self) -> int:
-        """Forwarding shim — implementation in :mod:`._kernel_decisions`."""
-        from ..kernel import _kernel_decisions as _m
-
-        return _m.kernel_opt_attempts_count(self)
-
-    # Reusable hot kernels still owing a kernel_opt attempt.
+    # Reusable hot kernels no backend has produced a patch for yet.
     def untried_hot_reusable_kernels(
         self,
         *,
@@ -1964,32 +1902,29 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         self, framework: str, achieved_tput: float, kernel_roofline_path: Any
     ) -> tuple[float, float]:
         """Resolve the (measured e2e latency, ideal latency floor) ms pair."""
-        try:
-            from hyperloom.inference_optimizer import framework_registry
+        from hyperloom.inference_optimizer import framework_registry
 
-            if not framework_registry.is_scriptable(framework):
-                return 0.0, 0.0
-            # img/s -> per-image e2e latency (ms); the achieved metric.
-            e2e_mean_ms = float(framework_registry.primary_metric_value(framework, achieved_tput) or 0.0)
-            # Ideal per-image latency floor from the diffusion roofline sidecar.
-            roofline_ideal_ms = 0.0
-            sidecar = self._locate_diffusion_roofline_sidecar(kernel_roofline_path)
-            if sidecar is not None:
-                try:
-                    data = json.loads(sidecar.read_text(encoding="utf-8"))
-                    data = data if isinstance(data, dict) else {}
-                    # Priority: full-pipeline analytic ceiling (ms) > trace-summed per-kernel ideal (us).
-                    approach_a = data.get("analytic_ceiling")
-                    totals = data.get("totals")
-                    if isinstance(approach_a, dict) and float(approach_a.get("ideal_ms") or 0.0) > 0:
-                        roofline_ideal_ms = float(approach_a["ideal_ms"])
-                    elif isinstance(totals, dict) and float(totals.get("sigma_ideal_roofline_us") or 0.0) > 0:
-                        roofline_ideal_ms = float(totals["sigma_ideal_roofline_us"]) / 1000.0
-                except (OSError, ValueError, TypeError, json.JSONDecodeError):
-                    roofline_ideal_ms = 0.0
-            return e2e_mean_ms, roofline_ideal_ms
-        except Exception:  # noqa: BLE001 — best-effort enrichment, never blocks
+        if not framework_registry.is_scriptable(framework):
             return 0.0, 0.0
+        # img/s -> per-image e2e latency (ms); the achieved metric.
+        e2e_mean_ms = float(framework_registry.primary_metric_value(framework, achieved_tput) or 0.0)
+        # Ideal per-image latency floor from the diffusion roofline sidecar.
+        roofline_ideal_ms = 0.0
+        sidecar = self._locate_diffusion_roofline_sidecar(kernel_roofline_path)
+        if sidecar is not None:
+            try:
+                data = json.loads(sidecar.read_text(encoding="utf-8"))
+                data = data if isinstance(data, dict) else {}
+                # Priority: full-pipeline analytic ceiling (ms) > trace-summed per-kernel ideal (us).
+                approach_a = data.get("analytic_ceiling")
+                totals = data.get("totals")
+                if isinstance(approach_a, dict) and float(approach_a.get("ideal_ms") or 0.0) > 0:
+                    roofline_ideal_ms = float(approach_a["ideal_ms"])
+                elif isinstance(totals, dict) and float(totals.get("sigma_ideal_roofline_us") or 0.0) > 0:
+                    roofline_ideal_ms = float(totals["sigma_ideal_roofline_us"]) / 1000.0
+            except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                roofline_ideal_ms = 0.0
+        return e2e_mean_ms, roofline_ideal_ms
 
     def _roofline_throughput_unit(self) -> str:
         """Return the throughput unit for roofline snapshots of this workload."""
@@ -2000,25 +1935,15 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
 
     def record_baseline_roofline_ceiling(self) -> dict[str, Any]:
         """Compute a standalone baseline-arm roofline ceiling and cache it."""
-        try:
-            from hyperloom.inference_optimizer.roofline_ceiling import (
-                RooflineBreakdown,
-                compute_roofline_breakdown_from_state,
-            )
-            from hyperloom.inference_optimizer.roofline_snapshot import (
-                RooflineReading,
-                attach_perfmodel_breakdown,
-                build_roofline_snapshot,
-            )
-        except Exception:  # noqa: BLE001 — import guard, best-effort
-            return {}
+        from hyperloom.inference_optimizer.roofline_ceiling import compute_roofline_breakdown_from_state
+        from hyperloom.inference_optimizer.roofline_snapshot import (
+            RooflineReading,
+            attach_perfmodel_breakdown,
+            build_roofline_snapshot,
+        )
 
         achieved = self._resolve_baseline_achieved_tput()
-        breakdown = RooflineBreakdown(0.0, 0.0, 0.0, "unknown")
-        breakdown = compute_roofline_breakdown_from_state(
-            self,
-            arm="baseline",
-        )
+        breakdown = compute_roofline_breakdown_from_state(self, arm="baseline")
         peak_tput = float(breakdown.peak_tok_per_sec or 0.0)
         if peak_tput <= 0:
             return {}
@@ -2048,25 +1973,21 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         """Write ``last_trace_analyze`` (single writer); ``roofline_snapshot_id`` increments from the previous nested value, restarting from 1 when the cache was cleared."""
         if not isinstance(result, dict):
             return
-        trace_input = (payload or {}).get("trace_input") or (payload or {}).get("trace_dir") or ""
-        artifacts = result.get("artifact_paths") or {}
+        result = dict(result)
+        task = payload or {}
+        artifacts = result.get("artifact_paths")
         if not isinstance(artifacts, dict):
             artifacts = {}
-        candidates_path = result.get("candidates_path") or ""
-        if not candidates_path:
-            candidates_path = artifacts.get("kernel_candidates", "") or ""
-        kernel_roofline_path = result.get("kernel_roofline_path") or ""
-        if not kernel_roofline_path:
-            kernel_roofline_path = artifacts.get("kernel_roofline", "") or ""
-        disk = self._read_session_roofline_report(payload, kernel_roofline_path)
+        candidates_path = result.get("candidates_path") or artifacts.get("kernel_candidates") or ""
+        kernel_roofline_path = result.get("kernel_roofline_path") or artifacts.get("kernel_roofline") or ""
+        disk = self._read_session_roofline_report(task, kernel_roofline_path)
+        report: dict[str, Any] = {}
         if disk:
+            report = disk["payload"]
             kernel_roofline_path = kernel_roofline_path or str(disk["path"])
-            candidates_path = candidates_path or str(disk["payload"].get("kernel_candidates_path") or "")
-            if not result.get("trace_report_path"):
-                result = dict(result)
-                result["trace_report_path"] = str(disk["payload"].get("analysis_md_path") or "")
+            candidates_path = candidates_path or str(report.get("kernel_candidates_path") or "")
+            result["trace_report_path"] = result.get("trace_report_path") or str(report.get("analysis_md_path") or "")
             if not (result.get("hot_kernels") or result.get("hot_kernels_top15")):
-                result = dict(result)
                 result["hot_kernels"] = disk["kernels"]
                 log.warning(
                     "record_trace_analyze: envelope carried no hot kernels; "
@@ -2076,77 +1997,50 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
                     disk["path"],
                 )
         steady_state_trace = result.get("steady_state_trace") or artifacts.get("tracelens_steady_state_trace") or ""
-        summary, kernel_roofline, reusable_ids = self._build_hot_kernel_summaries(result, kernel_roofline_path)
+        summary, kernel_roofline, reusable_ids = self._build_hot_kernel_summaries(result)
 
         # Project skipped (non-routable) candidates so the LLM sees unoptimizable operators.
-        skipped = result.get("skipped_kernels") or []
-        skipped_summary: list[dict[str, Any]] = []
-        if isinstance(skipped, list):
-            skipped_sorted = sorted(
-                (e for e in skipped if isinstance(e, dict)),
-                key=lambda e: float(e.get("gpu_pct") or 0.0),
-                reverse=True,
-            )
-            for entry in skipped_sorted[:_TRACE_HOT_KERNEL_TOP_N]:
-                skipped_summary.append(
-                    {
-                        "kernel_id": entry.get("kernel_id"),
-                        "name": entry.get("name"),
-                        "skip_reason": entry.get("skip_reason") or "",
-                        "gpu_pct": entry.get("gpu_pct"),
-                    }
-                )
-
-        raw_warnings = result.get("trace_health_warnings") or []
-        warnings_cleaned: list[dict[str, Any]] = []
-        if isinstance(raw_warnings, list):
-            for entry in raw_warnings:
-                if isinstance(entry, dict) and entry.get("code"):
-                    warnings_cleaned.append(dict(entry))
-
+        skipped = result.get("skipped_kernels")
+        skipped_rows = sorted(
+            (e for e in skipped if isinstance(e, dict)) if isinstance(skipped, list) else (),
+            key=lambda e: float(e.get("gpu_pct") or 0.0),
+            reverse=True,
+        )
+        warning_rows = result.get("trace_health_warnings")
+        warning_rows = warning_rows if isinstance(warning_rows, list) else []
+        task_groups = result.get("task_groups")
         # Monotonic snapshot counter: read previous value + 1.
-        prev_snapshot_id = 0
-        if isinstance(self.last_trace_analyze, dict):
-            prev_raw = self.last_trace_analyze.get("roofline_snapshot_id")
-            if isinstance(prev_raw, int):
-                prev_snapshot_id = prev_raw
-        snapshot_id = prev_snapshot_id + 1
-
+        recorded = self.last_trace_analyze if isinstance(self.last_trace_analyze, dict) else {}
         analysis_md_path = result.get("trace_report_path") or ""
         analysis_md_text = ""
         if analysis_md_path:
-            try:
-                # Stored verbatim; the prompt path strips base64 data-URLs.
-                analysis_md_text = Path(analysis_md_path).read_text(
-                    encoding="utf-8",
-                    errors="replace",
-                )
-            except (OSError, ValueError):
-                analysis_md_text = ""
-
-        task_groups = result.get("task_groups") or []
-        if not isinstance(task_groups, list):
-            task_groups = []
-
-        ts_iso = now_iso()
+            # Stored verbatim; the prompt path strips base64 data-URLs.
+            with suppress(OSError, ValueError):
+                analysis_md_text = Path(analysis_md_path).read_text(encoding="utf-8", errors="replace")
         self.last_trace_analyze = {
-            "trace_input": str(trace_input),
+            "trace_input": str(task.get("trace_input") or task.get("trace_dir") or ""),
             "steady_state_trace": str(steady_state_trace),
             "candidates_path": str(candidates_path),
             "kernel_roofline_path": str(kernel_roofline_path),
             "hot_kernels_top15": summary,
             "kernel_roofline_top15": kernel_roofline,
-            "skipped_kernels_top": skipped_summary,
-            "task_groups": task_groups,
+            "skipped_kernels_top": [
+                {
+                    "kernel_id": e.get("kernel_id"),
+                    "name": e.get("name"),
+                    "skip_reason": e.get("skip_reason") or "",
+                    "gpu_pct": e.get("gpu_pct"),
+                }
+                for e in skipped_rows[:_TRACE_HOT_KERNEL_TOP_N]
+            ],
+            "task_groups": task_groups if isinstance(task_groups, list) else [],
             "reusable_native_kernel_ids": reusable_ids,
-            "trace_health_warnings": warnings_cleaned,
+            "trace_health_warnings": [dict(e) for e in warning_rows if isinstance(e, dict) and e.get("code")],
             "analysis_md_path": str(analysis_md_path),
             "analysis_md_text": analysis_md_text,
-            "roofline_snapshot_id": snapshot_id,
-            "roofline_baseline_gain_at_snapshot": float(
-                self.cumulative_gain_validated,
-            ),
-            "ts": ts_iso,
+            "roofline_snapshot_id": to_int(recorded.get("roofline_snapshot_id"), 0) + 1,
+            "roofline_baseline_gain_at_snapshot": float(self.cumulative_gain_validated),
+            "ts": now_iso(),
         }
 
         self._append_roofline_snapshot_history(payload)
@@ -2177,244 +2071,135 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     def _build_hot_kernel_summaries(
         self,
         result: dict[str, Any],
-        kernel_roofline_path: str,
     ) -> "tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]":
-        """Build ``(summary, kernel_roofline, reusable_ids)`` from the top-N hot kernels, merging the optional per-kernel rocprof roofline sidecar."""
-        hot = result.get("hot_kernels") or []
+        """Build ``(summary, kernel_roofline, reusable_ids)`` from the top-N hot kernels."""
+        hot = result.get("hot_kernels")
         summary: list[dict[str, Any]] = []
         kernel_roofline: list[dict[str, Any]] = []
         reusable_ids: list[str] = []
-        rocprof_by_kernel_id: dict[str, Any] = {}
-        if kernel_roofline_path:
-            try:
-                roofline_payload = json.loads(Path(kernel_roofline_path).read_text(encoding="utf-8"))
-                for row in roofline_payload.get("kernels") or []:
-                    if not isinstance(row, dict) or not row.get("kernel_id"):
-                        continue
-                    rocprof_by_kernel_id[str(row["kernel_id"])] = row.get("rocprof_roofline")
-            except Exception:  # noqa: BLE001 — sidecar merge is best-effort
-                rocprof_by_kernel_id = {}
         for entry in hot[:_TRACE_HOT_KERNEL_TOP_N] if isinstance(hot, list) else []:
             if not isinstance(entry, dict):
                 continue
-            kid = entry.get("kernel_id")
-            reusable = bool(entry.get("reusable_native_kernel"))
-            arithmetic_intensity = entry.get("arithmetic_intensity")
-            if arithmetic_intensity is None:
-                arithmetic_intensity = entry.get("flops_per_byte")
-            efficiency_percent = entry.get("efficiency_percent")
-            if efficiency_percent is None:
-                efficiency_percent = entry.get("efficiency_pct")
-            rocprof_roofline = entry.get("rocprof_roofline")
-            if rocprof_roofline is None and kid is not None:
-                rocprof_roofline = rocprof_by_kernel_id.get(str(kid))
-            summary_entry = {
-                "kernel_id": kid,
-                "name": entry.get("name"),
-                # TraceLens kernel_category bucket ("" when absent).
-                "kernel_category": entry.get("kernel_category") or "",
-                "gpu_pct": entry.get("gpu_pct"),
-                "tracelens_pitem_rank": entry.get("tracelens_pitem_rank"),
-                "impact_score": entry.get("impact_score"),
-                "bottleneck": entry.get("bottleneck"),
-                "bound_type": entry.get("bound_type"),
-                "arithmetic_intensity": arithmetic_intensity,
-                "flops_per_byte": entry.get("flops_per_byte"),
-                "efficiency_percent": efficiency_percent,
-                "compute_utilization_pct": entry.get("compute_utilization_pct"),
-                "bandwidth_utilization_pct": entry.get("bandwidth_utilization_pct"),
-                "suggestion": entry.get("suggestion") or "",
-                "roofline_name": entry.get("roofline_name"),
-                "rocprof_roofline": rocprof_roofline,
-                "source_file": entry.get("source_file"),
-                "reusable_native_kernel": reusable,
-                "kernel_contract": entry.get("kernel_contract"),
-                "is_multigpu": entry.get("is_multigpu") is True,
-                # Names the deterministic extractor a row came from, so a reader need not re-derive provenance from
-                # the kernel name alone.
-                "candidate_source": entry.get("candidate_source") or "",
-                "recommended_backends": entry.get("recommended_backends") or [],
-                "recommended_actions": entry.get("recommended_actions") or [],
-                # Vendor-playbook fields (mori's dispatch+combine is the first case -- see
-                # _vendor_operator_playbooks.py).
-                "patch_strategy": entry.get("patch_strategy") or "",
-                "vendor_playbook_group_id": entry.get("vendor_playbook_group_id") or "",
-                "vendor_playbook_aggregate_gpu_pct": entry.get("vendor_playbook_aggregate_gpu_pct"),
-                "vendor_playbook_min_gpu_pct_floor": entry.get("vendor_playbook_min_gpu_pct_floor"),
-            }
-            summary.append(summary_entry)
-            if any(
-                summary_entry.get(key) not in (None, "", [])
-                for key in (
-                    "bound_type",
-                    "arithmetic_intensity",
-                    "flops_per_byte",
-                    "efficiency_percent",
-                    "compute_utilization_pct",
-                    "bandwidth_utilization_pct",
-                    "suggestion",
-                    "roofline_name",
-                    "rocprof_roofline",
-                )
-            ):
-                kernel_roofline.append(dict(summary_entry))
-            if reusable and kid:
-                reusable_ids.append(str(kid))
+            row = _hot_kernel_row(entry)
+            summary.append(row)
+            if any(row.get(key) not in (None, "", []) for key in _ROOFLINE_SIGNAL_KEYS):
+                kernel_roofline.append(dict(row))
+            if row["reusable_native_kernel"] and row["kernel_id"]:
+                reusable_ids.append(str(row["kernel_id"]))
         return summary, kernel_roofline, reusable_ids
 
     def _append_roofline_snapshot_history(self, payload: dict[str, Any]) -> None:
-        """Append a compact roofline snapshot of ``last_trace_analyze`` for report-side comparison; best-effort,
-        failures never block the canonical write above.
+        """Append a compact roofline snapshot of ``last_trace_analyze`` for report-side comparison.
+
+        Runs after the canonical write above, so a failure here cannot undo it.
         """
+        from hyperloom.inference_optimizer.roofline_ceiling import compute_roofline_breakdown_from_state
+        from hyperloom.inference_optimizer.roofline_snapshot import (
+            RooflineReading,
+            attach_perfmodel_breakdown,
+            build_roofline_snapshot,
+        )
+
         latest = self.last_trace_analyze
         snapshot_id = latest["roofline_snapshot_id"]
-        ts_iso = latest["ts"]
-        analysis_md_path = latest["analysis_md_path"]
-        trace_input = latest["trace_input"]
-        kernel_roofline_path = latest["kernel_roofline_path"]
-        # Append compact history for report-side Roofline Comparison; best-effort.
-        try:
-            from hyperloom.inference_optimizer.roofline_snapshot import (
-                RooflineReading,
-                attach_perfmodel_breakdown,
-                build_roofline_snapshot,
+        analysis_md_path = str(latest["analysis_md_path"])
+        kernel_roofline_path = str(latest["kernel_roofline_path"])
+        # Resolve which arm this snapshot measures first so the ceiling is anchored to the same arm as achieved.
+        forced_arm = str((payload or {}).get("roofline_arm") or "").strip()
+        # Unknown arm values fall through to current_best inference; warn.
+        if forced_arm and forced_arm not in ("baseline", "current_best"):
+            log.warning(
+                "record_trace_analyze: ignoring unknown roofline_arm=%r; falling back to current_best inference",
+                forced_arm,
             )
+            forced_arm = ""
+        cb_tput = self.current_best.get("tput")
+        snapshot_arm = forced_arm or ("current_best" if first_positive_tput({"tput": cb_tput}) else "baseline")
+        achieved_tput = (
+            self._resolve_current_best_achieved_tput()
+            if snapshot_arm == "current_best"
+            else self._resolve_baseline_achieved_tput()
+        )
+        # Scriptable/diffusion has no tok/s decode ceiling; surface the compute-latency roofline (measured
+        # per-image e2e latency vs the ideal floor from the sidecar).
+        fw = str(getattr(self, "framework", "") or "")
+        e2e_mean_ms, roofline_ideal_ms = self._scriptable_latency_roofline(fw, achieved_tput, kernel_roofline_path)
+        history_entry = build_roofline_snapshot(
+            snapshot_id=snapshot_id,
+            ts=latest["ts"],
+            analysis_md_path=analysis_md_path,
+            reading=RooflineReading(
+                # Primary decode ceiling plus memory/compute sides (PerfModel bottom-up).
+                ceiling=compute_roofline_breakdown_from_state(self, arm=snapshot_arm),
+                achieved_tok_per_sec=achieved_tput,
+                throughput_unit=self._roofline_throughput_unit(),
+                e2e_mean_ms=e2e_mean_ms,
+                roofline_ideal_ms=roofline_ideal_ms,
+            ),
+            framework=fw,
+        )
+        # Per-op PerfModel breakdown for dashboard visualization.
+        attach_perfmodel_breakdown(history_entry, self, arm=snapshot_arm)
+        history_entry["trace_input"] = str(latest["trace_input"])
+        history_entry["macro_cycle"] = int(getattr(self, "macro_cycle", 0) or 0)
+        history_entry["analysis_md_path"] = analysis_md_path
+        # Sidecar artifact pointer for per-kernel roofline data.
+        history_entry["kernel_roofline_path"] = kernel_roofline_path
+        if not isinstance(self.roofline_snapshots, list):
+            self.roofline_snapshots = []
+        self.roofline_snapshots.append(history_entry)
+        self._record_bottleneck_saturation(history_entry, snapshot_id)
+        # R3: retire the pending switch once the top bottleneck has drifted.
+        self.maybe_clear_bottleneck_switch_on_drift(
+            str(history_entry.get("top_bottleneck") or ""),
+        )
+        if len(self.roofline_snapshots) > _ROOFLINE_SNAPSHOTS_CAP:
+            # Always keep snapshot #1 as the report's baseline anchor.
+            base = self.roofline_snapshots[0]
+            tail = self.roofline_snapshots[-(_ROOFLINE_SNAPSHOTS_CAP - 1) :]
+            self.roofline_snapshots = [base, *tail]
 
-            # Stamp decode-roofline ceiling + measured tput.
-            from hyperloom.inference_optimizer.roofline_ceiling import (
-                RooflineBreakdown,
-                compute_roofline_breakdown_from_state,
-            )
+    def _record_bottleneck_saturation(self, history_entry: dict[str, Any], snapshot_id: Any) -> None:
+        """Stamp the saturation of this snapshot's dominant direction and how it shifted since the previous cycle."""
+        from hyperloom.inference_optimizer.roofline_snapshot import direction_saturation
 
-            # Resolve which arm this snapshot measures first so the ceiling is anchored to the same arm as achieved.
-            forced_arm = str((payload or {}).get("roofline_arm") or "").strip()
-            # Unknown arm values fall through to current_best inference; warn.
-            if forced_arm and forced_arm not in ("baseline", "current_best"):
-                log.warning(
-                    "record_trace_analyze: ignoring unknown roofline_arm=%r; falling back to current_best inference",
-                    forced_arm,
-                )
-                forced_arm = ""
-            cb_tput = self.current_best.get("tput")
-            if forced_arm == "baseline":
-                snapshot_arm = "baseline"
-                achieved_tput = self._resolve_baseline_achieved_tput()
-            elif forced_arm == "current_best":
-                # Explicit tag wins: keep the optimized arm even if tput is absent.
-                snapshot_arm = "current_best"
-                achieved_tput = self._resolve_current_best_achieved_tput()
-            elif isinstance(cb_tput, (int, float)) and cb_tput > 0:
-                snapshot_arm = "current_best"
-                achieved_tput = float(cb_tput)
-            else:
-                snapshot_arm = "baseline"
-                achieved_tput = self._resolve_baseline_achieved_tput()
-            # Primary decode ceiling plus memory/compute sides (PerfModel bottom-up).
-            breakdown = RooflineBreakdown(0.0, 0.0, 0.0, "unknown")
-            breakdown = compute_roofline_breakdown_from_state(
-                self,
-                arm=snapshot_arm,
-            )
-            # Scriptable/diffusion has no tok/s decode ceiling; surface the compute-latency roofline (measured
-            # per-image e2e latency vs the ideal floor from the sidecar).
-            fw = str(getattr(self, "framework", "") or "")
-            e2e_mean_ms, roofline_ideal_ms = self._scriptable_latency_roofline(fw, achieved_tput, kernel_roofline_path)
-            history_entry = build_roofline_snapshot(
-                snapshot_id=snapshot_id,
-                ts=ts_iso,
-                analysis_md_path=str(analysis_md_path),
-                reading=RooflineReading(
-                    ceiling=breakdown,
-                    achieved_tok_per_sec=achieved_tput,
-                    throughput_unit=self._roofline_throughput_unit(),
-                    e2e_mean_ms=e2e_mean_ms,
-                    roofline_ideal_ms=roofline_ideal_ms,
-                ),
-                framework=fw,
-            )
-            # Per-op PerfModel breakdown for dashboard visualization.
-            attach_perfmodel_breakdown(history_entry, self, arm=snapshot_arm)
-            history_entry["trace_input"] = str(trace_input)
-            history_entry["macro_cycle"] = int(getattr(self, "macro_cycle", 0) or 0)
-            history_entry["analysis_md_path"] = str(analysis_md_path)
-            # Sidecar artifact pointer for per-kernel roofline data.
-            history_entry["kernel_roofline_path"] = str(kernel_roofline_path)
-            if not isinstance(self.roofline_snapshots, list):
-                self.roofline_snapshots = []
-            self.roofline_snapshots.append(history_entry)
-            try:
-                from hyperloom.inference_optimizer.roofline_snapshot import direction_saturation
-
-                sat = direction_saturation(history_entry)
-                direction = str(sat.get("direction") or "")
-                hint = sat.get("domain_hint") if isinstance(sat.get("domain_hint"), dict) else {}
-                domain_key = str(hint.get("domain") or direction or "unknown")
-                latest_cycle = int(history_entry.get("macro_cycle") or 0)
-                prev_cycle_snapshot: dict[str, Any] = {}
-                for prev in reversed(self.roofline_snapshots[:-1]):
-                    if not isinstance(prev, dict):
-                        continue
-                    try:
-                        prev_cycle = int(prev.get("macro_cycle", 0) or 0)
-                    except (TypeError, ValueError):
-                        prev_cycle = 0
-                    if prev_cycle < latest_cycle:
-                        prev_cycle_snapshot = prev
-                        break
-                if not prev_cycle_snapshot and len(self.roofline_snapshots) >= 2:
-                    prev = self.roofline_snapshots[-2]
-                    prev_cycle_snapshot = prev if isinstance(prev, dict) else {}
-                prev_sat = direction_saturation(prev_cycle_snapshot) if prev_cycle_snapshot else {}
-                if not isinstance(self.saturated_directions, dict):
-                    self.saturated_directions = {}
-                self.saturated_directions[domain_key] = {
-                    **sat,
-                    "domain": domain_key,
-                    "tag": str(hint.get("tag") or ""),
-                    "macro_cycle": latest_cycle,
-                    "snapshot_id": snapshot_id,
-                    "top_bottleneck": history_entry.get("top_bottleneck"),
-                }
-                self.bottleneck_shift = {
-                    "from": prev_sat.get("direction", "") if prev_sat else "",
-                    "to": sat.get("direction", ""),
-                    "from_domain": (prev_sat.get("domain_hint") or {}).get("domain", "") if prev_sat else "",
-                    "to_domain": domain_key,
-                    "prev_cycle": prev_cycle_snapshot.get("macro_cycle") if prev_cycle_snapshot else None,
-                    "cycle": latest_cycle,
-                    "within_delta": (
-                        round(float(sat["within_pct"]) - float(prev_sat["within_pct"]), 2)
-                        if prev_sat
-                        and isinstance(sat.get("within_pct"), (int, float))
-                        and isinstance(prev_sat.get("within_pct"), (int, float))
-                        else None
-                    ),
-                    "gap_delta": (
-                        round(float(sat["gap_pct"]) - float(prev_sat["gap_pct"]), 2)
-                        if prev_sat
-                        and isinstance(sat.get("gap_pct"), (int, float))
-                        and isinstance(prev_sat.get("gap_pct"), (int, float))
-                        else None
-                    ),
-                    "bound_kind_changed": (
-                        bool(prev_sat) and str(prev_sat.get("bound_kind") or "") != str(sat.get("bound_kind") or "")
-                    ),
-                    "current": sat,
-                    "previous": prev_sat,
-                }
-            except Exception:  # noqa: BLE001 — saturation telemetry is advisory only
-                pass
-            # R3: retire the pending switch once the top bottleneck has drifted.
-            self.maybe_clear_bottleneck_switch_on_drift(
-                str(history_entry.get("top_bottleneck") or ""),
-            )
-            if len(self.roofline_snapshots) > _ROOFLINE_SNAPSHOTS_CAP:
-                # Always keep snapshot #1 as the report's baseline anchor.
-                base = self.roofline_snapshots[0]
-                tail = self.roofline_snapshots[-(_ROOFLINE_SNAPSHOTS_CAP - 1) :]
-                self.roofline_snapshots = [base, *tail]
-        except Exception:  # noqa: BLE001 — never block record on render concerns
-            pass
+        sat = direction_saturation(history_entry)
+        hint = sat.get("domain_hint") if isinstance(sat.get("domain_hint"), dict) else {}
+        domain_key = str(hint.get("domain") or sat.get("direction") or "unknown")
+        latest_cycle = int(history_entry.get("macro_cycle") or 0)
+        prev_cycle_snapshot: dict[str, Any] = {}
+        for prev in reversed(self.roofline_snapshots[:-1]):
+            if int(prev.get("macro_cycle") or 0) < latest_cycle:
+                prev_cycle_snapshot = prev
+                break
+        if not prev_cycle_snapshot and len(self.roofline_snapshots) >= 2:
+            prev_cycle_snapshot = self.roofline_snapshots[-2]
+        prev_sat = direction_saturation(prev_cycle_snapshot) if prev_cycle_snapshot else {}
+        if not isinstance(self.saturated_directions, dict):
+            self.saturated_directions = {}
+        self.saturated_directions[domain_key] = {
+            **sat,
+            "domain": domain_key,
+            "tag": str(hint.get("tag") or ""),
+            "macro_cycle": latest_cycle,
+            "snapshot_id": snapshot_id,
+            "top_bottleneck": history_entry.get("top_bottleneck"),
+        }
+        self.bottleneck_shift = {
+            "from": prev_sat.get("direction", ""),
+            "to": sat.get("direction", ""),
+            "from_domain": (prev_sat.get("domain_hint") or {}).get("domain", ""),
+            "to_domain": domain_key,
+            "prev_cycle": prev_cycle_snapshot.get("macro_cycle"),
+            "cycle": latest_cycle,
+            "within_delta": _saturation_delta(sat, prev_sat, "within_pct"),
+            "gap_delta": _saturation_delta(sat, prev_sat, "gap_pct"),
+            "bound_kind_changed": (
+                bool(prev_sat) and str(prev_sat.get("bound_kind") or "") != str(sat.get("bound_kind") or "")
+            ),
+            "current": sat,
+            "previous": prev_sat,
+        }
 
     def record_conc_sweep(self, result: dict[str, Any]) -> None:
         """Record the concurrency sweep's completion into ``last_conc_sweep``."""
@@ -2460,8 +2245,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
             tput = float(new_tput or 0.0)
         except (TypeError, ValueError):
             tput = 0.0
-        from hyperloom.common.gain_math import gain_pct
-
         entry_gain_pct = gain_pct(tput, base)
         self.gain_per_stack_entry.append(entry_gain_pct)
         return entry_gain_pct

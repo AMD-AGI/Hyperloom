@@ -86,18 +86,14 @@ _AUTO_COMPUTE_BOUND_ENV = "HYPERLOOM_PROFILE_AUTO_COMPUTE_BOUND"
 
 
 async def _reap_session_orphans(session_dir: Path | str) -> list[int]:
-    """Reap this session's own orphaned serving processes. Never raises."""
+    """Reap this session's own orphaned serving processes."""
     from ._server_lifecycle import reap_orphaned_servers
 
     resolved = Path(session_dir)
     if resolved == Path("."):
         log.debug("roofline: no session_dir resolved; skipping orphan reap")
         return []
-    try:
-        return await asyncio.to_thread(reap_orphaned_servers, resolved)
-    except Exception:
-        log.debug("roofline: orphan reap failed", exc_info=True)
-        return []
+    return await asyncio.to_thread(reap_orphaned_servers, resolved)
 
 
 def _gpu_trace_unsupported_reason(profile_result: dict[str, Any]) -> str:
@@ -356,14 +352,11 @@ def _preflight_probe(session_dir: Path, task_id: str, *, reaped: Sequence[int]) 
 
 
 def _drain_instrumentation(executor: Any) -> dict[str, Any] | None:
-    """Take the profile executor's per-attempt instrumentation report, if it keeps one. Never raises."""
+    """Take the profile executor's per-attempt instrumentation report, if it keeps one."""
     drain = getattr(executor, "drain_instrumentation_report", None)
     if not callable(drain):
         return None
-    try:
-        report = drain()
-    except Exception as exc:  # noqa: BLE001 - evidence collection is never fatal
-        return {"error": repr(exc)}
+    report = drain()
     return report if isinstance(report, dict) else None
 
 
@@ -1180,13 +1173,14 @@ class RooflineExecutor:
         attribution_degraded: bool,
         started: float,
     ) -> dict[str, Any]:
-        """Record the pair the action concluded from, close the event as succeeded and build the result."""
+        """Record the concluded pair, close the event and build the result; ``recovered`` if the trace was salvaged."""
         profile, analysis = analysed.profile, analysed.analysis
+        status = "succeeded" if profile.warning is None else "recovered"
         trace_path = str(analysis.payload["trace_input"])
         hot = _hot_kernels(analysis.result)
         self.shared_state.last_profile_trace = trace_path
         self.shared_state.last_profile_launch_evidence_path = str(profile.result.get("launch_evidence_path") or "")
-        self.shared_state.last_profile_status = "succeeded"
+        self.shared_state.last_profile_status = status
         self.shared_state.record_profile_workload(profile.params, arm=analysis.payload["roofline_arm"])
         self.shared_state.record_trace_analyze(analysis.payload, analysis.result)
         cached = self.shared_state.last_trace_analyze or {}
@@ -1205,7 +1199,7 @@ class RooflineExecutor:
             duration_s=time.monotonic() - started,
         )
         result = {
-            "status": "succeeded",
+            "status": status,
             "executed_at_iso": _now_iso(),
             "snapshot_id": cached.get("roofline_snapshot_id"),
             "last_profile_trace": trace_path,
@@ -1216,10 +1210,8 @@ class RooflineExecutor:
             # True when trace_analyze produced 0 hot kernels because cuda-graph folding stripped per-kernel
             # attribution.
             "kernel_attribution_degraded": attribution_degraded,
+            **({"profile_warning": profile.warning} if profile.warning is not None else {}),
         }
-        if profile.warning is not None:
-            result["profile_recovered"] = True
-            result["profile_warning"] = profile.warning
         if recorder is not None:
             snapshots = self.shared_state.roofline_snapshots
             recorder.finish_succeeded(
@@ -1245,7 +1237,7 @@ class RooflineExecutor:
             record_lifecycle_event(self.shared_state, step="roofline", **event)
             if session_dir.name and session_dir.is_dir() and (session_dir / "state.json").exists():
                 self.shared_state.save(session_dir)
-        except Exception:
+        except OSError:
             log.debug("roofline: lifecycle %s emit failed", event.get("status"), exc_info=True)
 
     # Helpers (instance methods so tests can subclass / monkeypatch)
@@ -1278,8 +1270,6 @@ class RooflineExecutor:
 
         parent_task = parent_ctx.task
         params = dict(parent_task.params or {})
-        # Accuracy is gated by baseline and explore; a profile run only needs the trace.
-        params["disable_run_eval"] = True
         if disable_cuda_graph:
             from .baseline import _with_cuda_graph_disabled
 

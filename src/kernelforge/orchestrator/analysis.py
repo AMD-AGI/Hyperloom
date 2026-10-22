@@ -38,7 +38,7 @@ from kernelforge.orchestrator.analysis_session import (
     AnalysisSessionJournal,
     MAX_ANALYSIS_SESSION_ATTEMPTS,
 )
-from kernelforge.durable_io import atomic_write_text, fsync_directory, fsync_tree
+from kernelforge.tools.durable_io import atomic_write_text, fsync_directory, fsync_tree
 from kernelforge.resources import assert_sandbox_grant
 
 
@@ -61,6 +61,7 @@ _REQUIRED_BUNDLE_FILES = (
     "progress.json",
     "commands.jsonl",
 )
+_INCREMENTAL_DIFF_FILE = "incremental_diff.patch"
 
 log = logging.getLogger(__name__)
 _WRITE_TOOLS = frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit"})
@@ -272,6 +273,13 @@ def _case_directory(case_id: str) -> str:
     readable = readable or "case"
     digest = hashlib.sha256(case_id.encode()).hexdigest()[:8]
     return f"{readable}-{digest}"
+
+
+def _analysis_cases(context: OrchestrationContext) -> tuple[AnalysisCase, ...]:
+    return tuple(
+        AnalysisCase(case_id=case.case_id, directory=_case_directory(case.case_id), latency_ms=case.latency_ms)
+        for case in context.cases
+    )
 
 
 def _sha256(path: Path) -> str:
@@ -809,13 +817,7 @@ class AnalysisAgentService:
             return MAX_ANALYSIS_SESSION_ATTEMPTS
 
     def _bundle_from_published_checkpoint(
-        self,
-        published_root: Path,
-        work_root: Path,
-        identity: _BundleIdentity,
-        *,
-        requested_tier: str,
-        parent_reuse_commit: str,
+        self, published_root: Path, work_root: Path, identity: _BundleIdentity, parent_reuse_commit: str
     ) -> AnalysisBundle | None:
         """The bundle a published checkpoint already answers with, or None to run a session.
 
@@ -845,7 +847,7 @@ class AnalysisAgentService:
         )
         published = AnalysisOutcome(
             analysis_commit=context.analysis_commit,
-            requested_tier=requested_tier,
+            requested_tier="profiled" if self.profiling_enabled else "static",
             available_tier=available_tier,
             attempt=attempts,
             checkpoint_level="published",
@@ -883,47 +885,22 @@ class AnalysisAgentService:
         incremental: IncrementalAnalysisInput | None = None,
     ) -> AnalysisBundle:
         """Return a current bundle, running the Analysis Agent when absent."""
-        kernel_file = sources.kernel_file
         workspace = Path(context.workspace).resolve()
         analysis_root = workspace / "forge_experiments" / "analysis"
         final_root = analysis_root / context.analysis_commit
-        cases = tuple(
-            AnalysisCase(
-                case_id=case.case_id,
-                directory=_case_directory(case.case_id),
-                latency_ms=case.latency_ms,
-            )
-            for case in context.cases
-        )
-        resolved_sources = tuple(
-            sorted(
-                {
-                    Path(kernel_file).resolve(),
-                    *(Path(path).resolve() for path in sources.source_files),
-                }
-            )
-        )
-        driver_path = Path(sources.driver_script).resolve()
-        driver_digest = _sha256(driver_path)
-        source_digest = _source_digest(resolved_sources)
-        identity = _BundleIdentity(context, cases, driver_digest, source_digest)
         work_root = analysis_root / "work" / context.analysis_commit
-        requested_tier = "profiled" if self.profiling_enabled else "static"
+        cases = _analysis_cases(context)
+        kernel_path = Path(sources.kernel_file).resolve()
+        resolved_sources = tuple(sorted({kernel_path, *(Path(path).resolve() for path in sources.source_files)}))
+        driver_path = Path(sources.driver_script).resolve()
+        identity = _BundleIdentity(context, cases, _sha256(driver_path), _source_digest(resolved_sources))
         parent_reuse_commit = incremental.parent_commit if incremental is not None else ""
-        published_root = self._published_generation_root(final_root) if final_root.is_dir() else None
-        retry_published_bundle = False
+        published_root = self._published_generation_root(final_root)
+        retry_published_bundle = published_root is not None
         if published_root is not None:
-            reused = self._bundle_from_published_checkpoint(
-                published_root,
-                work_root,
-                identity,
-                requested_tier=requested_tier,
-                parent_reuse_commit=parent_reuse_commit,
-            )
+            reused = self._bundle_from_published_checkpoint(published_root, work_root, identity, parent_reuse_commit)
             if reused is not None:
                 return reused
-            retry_published_bundle = True
-
         session_deadline_unix = min(
             time.time() + self.timeout_sec,
             deadline_unix if deadline_unix is not None else float("inf"),
@@ -931,12 +908,58 @@ class AnalysisAgentService:
         session_timeout_sec = session_deadline_unix - time.time()
         if session_timeout_sec <= 1:
             raise AnalysisBundleError("Analysis deadline exhausted before session start")
-
         (work_root / "tools").mkdir(parents=True, exist_ok=True)
-        reference_script = self._stage_reference_profiling_script(work_root)
+        session = _AnalysisSession(
+            context,
+            work_root,
+            work_root / "request.json",
+            kernel_path,
+            driver_path,
+            resolved_sources,
+            self._stage_reference_profiling_script(work_root),
+            session_timeout_sec,
+        )
         self._initialize_framework_artifacts(work_root, context, cases)
+        incremental = self._stage_incremental_diff(analysis_root, work_root, incremental)
+        protection = _AnalysisProtection(
+            workspace=workspace,
+            staging_root=work_root,
+            protected_paths=self._protected_paths(workspace, sources),
+            deadline_monotonic=(time.monotonic() + session_timeout_sec),
+        )
+        self._stage_request(session, identity, incremental, retry_published_bundle=retry_published_bundle)
+        (work_root / "commands.jsonl").touch(exist_ok=True)
+        try:
+            workflow = AnalysisSessionJournal(
+                work_root,
+                analysis_commit=context.analysis_commit,
+                driver_digest=identity.driver_digest,
+                source_digest=identity.source_digest,
+            )
+            if retry_published_bundle:
+                workflow.reopen()
+            await self._run_analysis_session(
+                session, workflow=workflow, protection=protection, usage=usage, force_refresh=retry_published_bundle
+            )
+        except (asyncio.CancelledError, AnalysisAttemptLimitError):
+            protection.restore_and_report_changes()
+            raise
+        except Exception as error:
+            changed = protection.restore_and_report_changes()
+            raise AnalysisBundleError(
+                f"Analysis workflow failed: {type(error).__name__}: {error}; "
+                f"checkpoint={work_root}; restored inputs={changed}"
+            ) from error
+        changed = protection.restore_and_report_changes()
+        if changed:
+            raise AnalysisBundleError("Analysis Agent modified immutable inputs; restored: " + ", ".join(changed))
+        return self._publish_session_bundle(work_root, final_root, identity, workflow, incremental)
 
-        incremental_diff_path = work_root / "incremental_diff.patch"
+    def _stage_incremental_diff(
+        self, analysis_root: Path, work_root: Path, incremental: IncrementalAnalysisInput | None
+    ) -> IncrementalAnalysisInput | None:
+        """Stage the diff an incremental session reads; None once its parent bundle is no longer published."""
+        incremental_diff_path = work_root / _INCREMENTAL_DIFF_FILE
         if incremental is not None:
             parent_commit_root = (analysis_root / incremental.parent_commit).resolve()
             parent_root = self._published_generation_root(parent_commit_root)
@@ -944,38 +967,35 @@ class AnalysisAgentService:
             if parent_root is None or parent_root != expected_parent or not parent_root.is_dir():
                 # The current canonical can still be analyzed from scratch.
                 incremental = None
-                parent_reuse_commit = ""
         if incremental is not None:
             incremental_diff_path.write_text(incremental.commit_diff)
         else:
             incremental_diff_path.unlink(missing_ok=True)
+        return incremental
 
-        protected_paths = self._protected_paths(
-            workspace=workspace,
-            kernel_file=kernel_file,
-            driver_script=sources.driver_script,
-            source_files=sources.source_files,
-        )
-        protection = _AnalysisProtection(
-            workspace=workspace,
-            staging_root=work_root,
-            protected_paths=protected_paths,
-            deadline_monotonic=(time.monotonic() + session_timeout_sec),
-        )
-        request_path = work_root / "request.json"
+    def _stage_request(
+        self,
+        session: _AnalysisSession,
+        identity: _BundleIdentity,
+        incremental: IncrementalAnalysisInput | None,
+        *,
+        retry_published_bundle: bool,
+    ) -> None:
+        """Write the session's request, or check that a resumed session's durable one still answers the same inputs."""
+        incremental_diff_path = session.work_root / _INCREMENTAL_DIFF_FILE
         request_payload = {
-            "analysis_commit": context.analysis_commit,
-            "workspace": str(workspace),
-            "kernel_file": str(Path(kernel_file).resolve()),
-            "driver_script": str(driver_path),
-            "driver_digest": driver_digest,
-            "source_files": [str(path) for path in resolved_sources],
-            "source_digest": source_digest,
-            "cases": [case.to_dict() for case in cases],
-            "objective": context.objective,
+            "analysis_commit": session.context.analysis_commit,
+            "workspace": str(Path(session.context.workspace).resolve()),
+            "kernel_file": str(session.kernel_file),
+            "driver_script": str(session.driver_script),
+            "driver_digest": identity.driver_digest,
+            "source_files": [str(path) for path in session.source_files],
+            "source_digest": identity.source_digest,
+            "cases": [case.to_dict() for case in identity.cases],
+            "objective": session.context.objective,
             "analysis_profiling_enabled": self.profiling_enabled,
-            "reference_profiling_script": str(reference_script),
-            "reference_profiling_script_sha256": _sha256(reference_script),
+            "reference_profiling_script": str(session.reference_script),
+            "reference_profiling_script_sha256": _sha256(session.reference_script),
             "analysis_trigger": ("post_keep_incremental" if incremental is not None else "canonical_baseline"),
             "previous_analysis_commit": (incremental.parent_commit if incremental is not None else ""),
             "previous_analysis_bundle": (str(incremental.parent_bundle.resolve()) if incremental is not None else ""),
@@ -983,113 +1003,57 @@ class AnalysisAgentService:
             "incremental_diff_sha256": (_sha256(incremental_diff_path) if incremental is not None else ""),
             "changed_source_files": (list(incremental.changed_source_files) if incremental is not None else []),
         }
-        if request_path.is_file():
-            try:
-                durable_request = json.loads(request_path.read_text())
-                immutable_keys = {
-                    "analysis_commit",
-                    "workspace",
-                    "kernel_file",
-                    "driver_script",
-                    "driver_digest",
-                    "source_files",
-                    "source_digest",
-                    "cases",
-                    "objective",
-                }
-                if any(durable_request.get(key) != request_payload.get(key) for key in immutable_keys):
-                    raise AnalysisBundleError("durable analysis request does not match current inputs")
-                if retry_published_bundle:
-                    durable_request["analysis_profiling_enabled"] = self.profiling_enabled
-                    request_payload = durable_request
-                    _atomic_write_json(request_path, request_payload)
-                else:
-                    request_payload = durable_request
-            except json.JSONDecodeError as error:
-                raise AnalysisBundleError(f"durable analysis request is invalid: {error}") from error
-        else:
-            _atomic_write_json(request_path, request_payload)
-        (work_root / "commands.jsonl").touch(exist_ok=True)
+        if not session.request_path.is_file():
+            _atomic_write_json(session.request_path, request_payload)
+            return
         try:
-            workflow = AnalysisSessionJournal(
-                work_root,
-                analysis_commit=context.analysis_commit,
-                driver_digest=driver_digest,
-                source_digest=source_digest,
-            )
-            if retry_published_bundle:
-                workflow.reopen()
-            await self._run_analysis_session(
-                _AnalysisSession(
-                    context,
-                    work_root,
-                    request_path,
-                    Path(kernel_file).resolve(),
-                    driver_path,
-                    resolved_sources,
-                    reference_script,
-                    session_timeout_sec,
-                ),
-                workflow=workflow,
-                protection=protection,
-                usage=usage,
-                force_refresh=retry_published_bundle,
-            )
-        except asyncio.CancelledError:
-            protection.restore_and_report_changes()
-            raise
-        except AnalysisAttemptLimitError:
-            protection.restore_and_report_changes()
-            raise
-        except Exception as error:
-            changed = protection.restore_and_report_changes()
-            raise AnalysisBundleError(
-                "Analysis workflow failed: "
-                f"{type(error).__name__}: {error}; "
-                f"checkpoint={work_root}; restored inputs={changed}"
-            ) from error
+            durable_request = json.loads(session.request_path.read_text())
+        except json.JSONDecodeError as error:
+            raise AnalysisBundleError(f"durable analysis request is invalid: {error}") from error
+        immutable_keys = {
+            "analysis_commit",
+            "workspace",
+            "kernel_file",
+            "driver_script",
+            "driver_digest",
+            "source_files",
+            "source_digest",
+            "cases",
+            "objective",
+        }
+        if any(durable_request.get(key) != request_payload[key] for key in immutable_keys):
+            raise AnalysisBundleError("durable analysis request does not match current inputs")
+        if retry_published_bundle:
+            durable_request["analysis_profiling_enabled"] = self.profiling_enabled
+            _atomic_write_json(session.request_path, durable_request)
 
-        changed = protection.restore_and_report_changes()
-        if changed:
-            raise AnalysisBundleError("Analysis Agent modified immutable inputs; restored: " + ", ".join(changed))
-        self._validate_bundle(work_root, identity)
-        manifest = json.loads((work_root / "manifest.json").read_text())
-        workflow.finalize(str(manifest["status"]))
+    def _publish_session_bundle(
+        self,
+        work_root: Path,
+        final_root: Path,
+        identity: _BundleIdentity,
+        workflow: AnalysisSessionJournal,
+        incremental: IncrementalAnalysisInput | None,
+    ) -> AnalysisBundle:
+        """Publish a finished session's bundle as the commit's next generation, with the outcome it reached."""
+        staged = self._validate_bundle(work_root, identity)
+        workflow.finalize(str(staged.manifest["status"]))
         generation_root = self._publish_generation(work_root, final_root)
-        self._write_artifact_catalog(
-            generation_root,
-            workflow,
-            cases,
-            artifact_root=generation_root,
-        )
+        self._write_artifact_catalog(generation_root, workflow, identity.cases, artifact_root=generation_root)
         validated = self._validate_bundle(generation_root, identity)
-        workflow_payload = _parse_workflow_payload(
-            json.loads((generation_root / "workflow.json").read_text()),
-            analysis_commit=context.analysis_commit,
-        )
-        attempts = int(workflow_payload["session"].get("attempts", 0))
-        request_payload = _parse_request_payload(
-            json.loads((generation_root / "request.json").read_text()),
-            analysis_commit=context.analysis_commit,
-        )
-        available_tier = self._tier_label(
-            profiling_enabled=self.profiling_enabled,
-            profiled=request_payload["analysis_profiling_enabled"]
-            and bool(validated.manifest.get("completed_case_ids")),
-        )
-        return AnalysisBundle(
-            analysis_commit=validated.analysis_commit,
-            root=validated.root,
-            manifest=validated.manifest,
-            cases=validated.cases,
+        return replace(
+            validated,
             outcome=AnalysisOutcome(
-                analysis_commit=context.analysis_commit,
+                analysis_commit=identity.context.analysis_commit,
                 requested_tier="profiled" if self.profiling_enabled else "static",
-                available_tier=available_tier,
-                attempt=attempts,
+                available_tier=self._tier_label(
+                    profiling_enabled=self.profiling_enabled,
+                    profiled=bool(validated.manifest.get("completed_case_ids")),
+                ),
+                attempt=workflow.attempts,
                 checkpoint_level="published",
                 artifact_path=str(validated.root),
-                parent_reuse_commit=parent_reuse_commit,
+                parent_reuse_commit=incremental.parent_commit if incremental is not None else "",
             ),
         )
 
@@ -1108,7 +1072,7 @@ class AnalysisAgentService:
             work_root / "manifest.json",
             *(work_root / "cases" / case.directory for case in cases),
         ]
-        incremental_diff = work_root / "incremental_diff.patch"
+        incremental_diff = work_root / _INCREMENTAL_DIFF_FILE
         if incremental_diff.is_file():
             outputs.append(incremental_diff)
         return tuple(outputs)
@@ -1221,66 +1185,39 @@ class AnalysisAgentService:
         )
         return catalog_path
 
-    def apply_checkpoint(
-        self,
-        context: OrchestrationContext,
-    ) -> OrchestrationContext:
+    def apply_checkpoint(self, context: OrchestrationContext) -> OrchestrationContext:
         """Expose validated partial Analysis outputs to downstream agents."""
         work_root = (
             Path(context.workspace).resolve() / "forge_experiments" / "analysis" / "work" / context.analysis_commit
         )
-        workflow_path = work_root / "workflow.json"
-        catalog_path = work_root / "artifact_catalog.json"
-        if not workflow_path.is_file() or not catalog_path.is_file():
-            return context
         try:
-            workflow = json.loads(workflow_path.read_text())
-            catalog = json.loads(catalog_path.read_text())
-        except (OSError, TypeError, ValueError, json.JSONDecodeError):
-            return context
-        if not isinstance(workflow, dict) or not isinstance(catalog, dict):
+            workflow = json.loads((work_root / "workflow.json").read_text())
+            catalog = json.loads((work_root / "artifact_catalog.json").read_text())
+            request_payload = json.loads((work_root / "request.json").read_text())
+        except (OSError, ValueError):
             return context
         if (
-            workflow.get("analysis_commit") != context.analysis_commit
+            not isinstance(workflow, dict)
+            or not isinstance(catalog, dict)
+            or not isinstance(request_payload, dict)
+            or workflow.get("analysis_commit") != context.analysis_commit
             or catalog.get("analysis_commit") != context.analysis_commit
+            or not isinstance(request_payload.get("analysis_profiling_enabled"), bool)
+            or not isinstance(catalog.get("artifacts"), list)
         ):
             return context
-        try:
-            request_payload = json.loads((work_root / "request.json").read_text())
-        except (OSError, TypeError, ValueError, json.JSONDecodeError):
-            return context
-        if not isinstance(request_payload, dict) or not isinstance(
-            request_payload.get("analysis_profiling_enabled"),
-            bool,
-        ):
-            return context
-        static_only = request_payload["analysis_profiling_enabled"] is False
-
         evidence_by_path = {reference.path: reference for reference in context.evidence_refs}
-        artifacts = catalog.get("artifacts")
-        if not isinstance(artifacts, list):
-            return context
-        for artifact in artifacts:
+        for artifact in catalog["artifacts"]:
             if not isinstance(artifact, dict):
                 continue
             path = str(artifact.get("path") or "")
-            status = str(artifact.get("status") or "")
             information = artifact.get("available_information")
             if (
                 not path
-                or status
-                not in {
-                    "AVAILABLE",
-                    "COMPLETE",
-                    "FAILED",
-                    "SKIPPED",
-                }
+                or str(artifact.get("status")) not in {"AVAILABLE", "COMPLETE", "FAILED", "SKIPPED"}
                 or not isinstance(information, list)
+                or not Path(path).resolve().is_relative_to(work_root.resolve())
             ):
-                continue
-            try:
-                Path(path).resolve().relative_to(work_root.resolve())
-            except ValueError:
                 continue
             evidence_by_path[path] = EvidenceRef(
                 kind=str(artifact.get("kind") or "analysis_artifact"),
@@ -1291,48 +1228,14 @@ class AnalysisAgentService:
                     f"{', '.join(str(item) for item in information)}."
                 ),
             )
-
-        normalized_cases = []
-        for original in context.cases:
-            case_root = work_root / "cases" / _case_directory(original.case_id)
-            bottleneck_path = case_root / "bottleneck.json"
-            analysis_path = case_root / "analysis.md"
-            normalized_path = case_root / "normalized_metrics.json"
-            profile_root = case_root / "profile"
-            bottleneck = original.bottleneck
-            summary_path = original.profile_summary_path
-            flags = list(original.flags)
-            if static_only:
-                flags.append("analysis_static_only")
-            if bottleneck_path.is_file() and analysis_path.is_file():
-                try:
-                    payload = json.loads(bottleneck_path.read_text())
-                    bottleneck = str(payload.get("classification") or bottleneck)
-                except (OSError, TypeError, ValueError, json.JSONDecodeError):
-                    bottleneck = original.bottleneck
-                summary_path = str(analysis_path.resolve())
-                flags.append(
-                    "analysis_checkpoint_profile_interpretation"
-                    if (normalized_path.is_file() and profile_root.is_dir() and any(profile_root.iterdir()))
-                    else "analysis_checkpoint_interpretation_only"
-                )
-            elif normalized_path.is_file():
-                summary_path = str(normalized_path.resolve())
-                flags.append("analysis_checkpoint_normalized_only")
-            elif profile_root.is_dir() and any(profile_root.iterdir()):
-                summary_path = str(profile_root.resolve())
-                flags.append("analysis_checkpoint_raw_profile_only")
-            normalized_cases.append(
-                CaseEvidence(
-                    case_id=original.case_id,
-                    shape=original.shape,
-                    dtype=original.dtype,
-                    latency_ms=original.latency_ms,
-                    bottleneck=bottleneck,
-                    profile_summary_path=summary_path,
-                    flags=tuple(dict.fromkeys(flags)),
-                )
+        normalized_cases = tuple(
+            self._checkpoint_case_evidence(
+                original,
+                case_root=work_root / "cases" / _case_directory(original.case_id),
+                profiling_enabled=request_payload["analysis_profiling_enabled"],
             )
+            for original in context.cases
+        )
         source_map = work_root / "source_map.md"
         return OrchestrationContext(
             analysis_commit=context.analysis_commit,
@@ -1342,7 +1245,7 @@ class AnalysisAgentService:
             program_context=context.program_context,
             source_map_path=(str(source_map.resolve()) if source_map.is_file() else context.source_map_path),
             editable_sources=context.editable_sources,
-            cases=tuple(normalized_cases),
+            cases=normalized_cases,
             knowledge_index=context.knowledge_index,
             supervisor_guidance=context.supervisor_guidance,
             search_mode=context.search_mode,
@@ -1360,102 +1263,47 @@ class AnalysisAgentService:
             cumulative_diff_error=context.cumulative_diff_error,
         )
 
-    def apply_published_evidence(
-        self,
-        context: OrchestrationContext,
-        *,
-        evidence_commit: str,
-    ) -> OrchestrationContext:
+    def apply_published_evidence(self, context: OrchestrationContext, *, evidence_commit: str) -> OrchestrationContext:
         """Restore one published bundle as stale-safe planning evidence."""
-        commit = str(evidence_commit or "").strip()
-        if not commit:
-            return context
-        workspace = Path(context.workspace).resolve()
-        commit_root = workspace / "forge_experiments" / "analysis" / commit
+        commit_root = Path(context.workspace).resolve() / "forge_experiments" / "analysis" / evidence_commit
         root = self._published_generation_root(commit_root)
         if root is None:
             return context
         try:
-            manifest = json.loads((root / "manifest.json").read_text())
             request_payload = _parse_request_payload(
-                json.loads((root / "request.json").read_text()),
-                analysis_commit=commit,
+                json.loads((root / "request.json").read_text()), analysis_commit=evidence_commit
             )
-        except (
-            OSError,
-            TypeError,
-            ValueError,
-            json.JSONDecodeError,
-            AnalysisBundleError,
-        ):
+        except (OSError, ValueError, AnalysisBundleError):
             return context
-        if not isinstance(manifest, dict):
-            return context
-        driver_digest = str(request_payload.get("driver_digest") or "")
-        source_digest = str(request_payload.get("source_digest") or "")
-        if manifest.get("driver_digest") != driver_digest or manifest.get("source_digest") != source_digest:
-            return context
-
-        cases = tuple(
-            AnalysisCase(
-                case_id=case.case_id,
-                directory=_case_directory(case.case_id),
-                latency_ms=case.latency_ms,
-            )
-            for case in context.cases
-        )
-        validation_context = replace(
-            context,
-            analysis_commit=commit,
-            canonical_commit=(context.canonical_commit or context.analysis_commit),
+        identity = _BundleIdentity(
+            replace(context, analysis_commit=evidence_commit),
+            _analysis_cases(context),
+            str(request_payload.get("driver_digest") or ""),
+            str(request_payload.get("source_digest") or ""),
         )
         try:
-            bundle = self._validate_bundle(
-                root, _BundleIdentity(validation_context, cases, driver_digest, source_digest)
-            )
+            bundle = self._validate_bundle(root, identity)
         except AnalysisBundleError:
             return context
-
         applied = bundle.apply(context)
-        canonical_commit = context.canonical_commit or context.analysis_commit
-        stale = commit != canonical_commit
-        refs = {reference.path: reference for reference in applied.evidence_refs}
-        if stale and applied.source_map_path:
+        if applied.evidence_stale:
             source_map = Path(applied.source_map_path).resolve()
-            if source_map.is_file():
-                refs[str(source_map)] = EvidenceRef(
-                    kind="analysis_source_map",
-                    path=str(source_map),
-                    summary=(f"Source map produced with stale Analysis evidence at commit {commit}."),
-                )
-        normalized_cases = tuple(
-            replace(
-                case,
-                flags=tuple(
-                    dict.fromkeys(
-                        [
-                            *case.flags,
-                            *(["analysis_evidence_stale"] if stale else []),
-                        ]
-                    )
-                ),
+            refs = {reference.path: reference for reference in applied.evidence_refs}
+            refs[str(source_map)] = EvidenceRef(
+                kind="analysis_source_map",
+                path=str(source_map),
+                summary=f"Source map produced with stale Analysis evidence at commit {evidence_commit}.",
             )
-            for case in applied.cases
-        )
-        return replace(
-            applied,
-            source_map_path=(context.source_map_path if stale else applied.source_map_path),
-            cases=normalized_cases,
-            evidence_refs=tuple(refs.values()),
-            canonical_commit=canonical_commit,
-            evidence_commit=commit,
-            evidence_stale=stale,
-            evidence_status=context.evidence_status,
-            evidence_mean_case_speedup=(context.evidence_mean_case_speedup),
-            current_mean_case_speedup=context.current_mean_case_speedup,
-            cumulative_diff_path=context.cumulative_diff_path,
-            cumulative_diff_error=context.cumulative_diff_error,
-        )
+            applied = replace(
+                applied,
+                source_map_path=context.source_map_path,
+                cases=tuple(
+                    replace(case, flags=tuple(dict.fromkeys([*case.flags, "analysis_evidence_stale"])))
+                    for case in applied.cases
+                ),
+                evidence_refs=tuple(refs.values()),
+            )
+        return replace(applied, evidence_status=context.evidence_status)
 
     async def _run_analysis_session(
         self,
@@ -1469,14 +1317,7 @@ class AnalysisAgentService:
         context = session.context
         work_root = session.work_root
         timeout_sec = session.timeout_sec
-        cases = tuple(
-            AnalysisCase(
-                case_id=case.case_id,
-                directory=_case_directory(case.case_id),
-                latency_ms=case.latency_ms,
-            )
-            for case in context.cases
-        )
+        cases = _analysis_cases(context)
         outputs = self._session_outputs(work_root, cases)
         request = json.loads(session.request_path.read_text())
         identity = _BundleIdentity(context, cases, str(request["driver_digest"]), str(request["source_digest"]))
@@ -1792,17 +1633,11 @@ Update analysis incrementally:
         return system_prompt, json.dumps(user_payload, indent=2, sort_keys=True)
 
     @staticmethod
-    def _protected_paths(
-        *,
-        workspace: Path,
-        kernel_file: str,
-        driver_script: str,
-        source_files: list[str],
-    ) -> tuple[Path, ...]:
+    def _protected_paths(workspace: Path, sources: AnalysisSources) -> tuple[Path, ...]:
         paths = {
-            Path(kernel_file).resolve(),
-            Path(driver_script).resolve(),
-            *(Path(path).resolve() for path in source_files),
+            Path(sources.kernel_file).resolve(),
+            Path(sources.driver_script).resolve(),
+            *(Path(path).resolve() for path in sources.source_files),
         }
         result = git_bytes("ls-files", "-z", cwd=workspace, check=False)
         if result.returncode == 0:
@@ -1980,13 +1815,50 @@ Update analysis incrementally:
         )
 
     @staticmethod
+    def _checkpoint_case_evidence(original: CaseEvidence, *, case_root: Path, profiling_enabled: bool) -> CaseEvidence:
+        """A case's evidence from an unpublished checkpoint, flagged by how far the session got with it."""
+        bottleneck_path = case_root / "bottleneck.json"
+        analysis_path = case_root / "analysis.md"
+        normalized_path = case_root / "normalized_metrics.json"
+        profile_root = case_root / "profile"
+        bottleneck = original.bottleneck
+        summary_path = original.profile_summary_path
+        flags = list(original.flags)
+        if not profiling_enabled:
+            flags.append("analysis_static_only")
+        if bottleneck_path.is_file() and analysis_path.is_file():
+            case_bottleneck = AnalysisAgentService._case_bottleneck(bottleneck_path)
+            bottleneck = str(case_bottleneck.get("classification") or bottleneck)
+            summary_path = str(analysis_path.resolve())
+            flags.append(
+                "analysis_checkpoint_profile_interpretation"
+                if (normalized_path.is_file() and profile_root.is_dir() and any(profile_root.iterdir()))
+                else "analysis_checkpoint_interpretation_only"
+            )
+        elif normalized_path.is_file():
+            summary_path = str(normalized_path.resolve())
+            flags.append("analysis_checkpoint_normalized_only")
+        elif profile_root.is_dir() and any(profile_root.iterdir()):
+            summary_path = str(profile_root.resolve())
+            flags.append("analysis_checkpoint_raw_profile_only")
+        return CaseEvidence(
+            case_id=original.case_id,
+            shape=original.shape,
+            dtype=original.dtype,
+            latency_ms=original.latency_ms,
+            bottleneck=bottleneck,
+            profile_summary_path=summary_path,
+            flags=tuple(dict.fromkeys(flags)),
+        )
+
+    @staticmethod
     def _case_bottleneck(bottleneck_path: Path) -> dict:
         """The case's recorded bottleneck, or an empty one when it was not written or is unreadable."""
         if not bottleneck_path.is_file():
             return {}
         try:
             loaded = json.loads(bottleneck_path.read_text())
-        except (OSError, json.JSONDecodeError):
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
             return {}
         return loaded if isinstance(loaded, dict) else {}
 

@@ -200,3 +200,19 @@ def test_a_framework_round_lands_on_the_run_that_dispatched_it(tmp_path) -> None
     assert run["new_findings"] == ["m=8192 falls off the tile"]
     assert run["notes"] == ["ran short of budget"]
     assert run["ensemble_scores"] == {"agree": 0.8}
+
+
+def test_a_failing_round_record_propagates(monkeypatch) -> None:
+    from hyperloom.inference_optimizer.breakdown.recorder import phase_event
+
+    def _boom(_round) -> None:
+        raise RuntimeError("round record bug")
+
+    monkeypatch.setattr(phase_event, "record_specialist_round", _boom)
+    seam = _Seam(phase="KERNEL_AGENT")
+
+    with pytest.raises(RuntimeError, match="round record bug"):
+        seam._record_specialist_round_product(
+            task=_StubTask("t-10"),
+            round_entry={"round_id": "r-10", "domain": "gemm", "proposals_total": 1},
+        )

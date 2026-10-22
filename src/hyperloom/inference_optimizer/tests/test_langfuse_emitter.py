@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import sys
 import types
@@ -184,6 +185,36 @@ def test_enabled_but_sdk_missing_is_noop(tmp_path, monkeypatch):
     monkeypatch.setitem(sys.modules, "langfuse", None)
     em = lfe.LangfuseEmitter(tmp_path)
     assert em.enabled is False
+
+
+def test_sdk_import_error_other_than_missing_module_propagates(tmp_path, monkeypatch):
+    _enable_env(monkeypatch)
+    broken = types.ModuleType("langfuse")
+
+    def _explode(name):
+        raise RuntimeError("sdk is broken")
+
+    broken.__getattr__ = _explode
+    monkeypatch.setitem(sys.modules, "langfuse", broken)
+    with pytest.raises(RuntimeError, match="sdk is broken"):
+        lfe.LangfuseEmitter(tmp_path)
+
+
+def test_sdk_availability_is_false_for_a_module_without_a_spec(monkeypatch):
+    def _no_spec(_name):
+        raise ValueError("langfuse.__spec__ is None")
+
+    monkeypatch.setattr(importlib.util, "find_spec", _no_spec)
+    assert lfe._sdk_available() is False
+
+
+def test_sdk_availability_lets_an_unexpected_error_propagate(monkeypatch):
+    def _explode(_name):
+        raise RuntimeError("finder is broken")
+
+    monkeypatch.setattr(importlib.util, "find_spec", _explode)
+    with pytest.raises(RuntimeError, match="finder is broken"):
+        lfe._sdk_available()
 
 
 def test_all_gates_pass_enables(tmp_path, monkeypatch):
@@ -434,6 +465,20 @@ def test_token_and_conversation_pair_into_one_generation(tmp_path, monkeypatch):
         "cache_read_input": 7,
     }
     assert g.ended is True
+
+
+def test_record_llm_call_propagates_buffer_failure(tmp_path, monkeypatch):
+    _enable_env(monkeypatch)
+    _install_fake_sdk(monkeypatch, _FakeClient())
+    em = lfe.LangfuseEmitter(tmp_path)
+
+    def buffer_fails(*_args, **_kwargs):
+        raise RuntimeError("buffer bug")
+
+    monkeypatch.setattr(em, "_buffer", buffer_fails)
+
+    with pytest.raises(RuntimeError):
+        em.record_llm_call(_llm_row())
 
 
 def test_failed_call_emits_immediately_with_error_level(tmp_path, monkeypatch):

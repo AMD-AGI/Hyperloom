@@ -1303,6 +1303,29 @@ def test_promote_warm_replay_failed_records_outcome(tmp_path):
     assert coord.shared_state.optimization_stack == []
 
 
+def test_a_failed_replay_whose_rollback_fails_reports_only_the_rollback(tmp_path, caplog):
+    """The trees did not come back, so the account is the restore errors, not the class the task failed under."""
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
+    coord.shared_state.warm_replay_outcome = {"status": "in_flight", "expected_gain_pct": 25.0}
+    coord.phase_prelude.rollback_combined_warm = (  # type: ignore[method-assign]
+        lambda result, task: {"ok": False, "errors": ["could not restore vllm"]}
+    )
+
+    with caplog.at_level("INFO"):
+        coord.phase_prelude.promote_warm_replay(
+            {"status": "failed", "error_class": "crash", "error": "GPU OOM during prefill"},
+            task=_StubTask(),
+        )
+
+    outcome = coord.shared_state.warm_replay_outcome
+    assert outcome["status"] == "rollback_failed"
+    assert outcome["reason"] == "combined warm replay rollback failed"
+    assert outcome["rollback"]["errors"] == ["could not restore vllm"]
+    assert "error_class" not in outcome
+    assert coord.shared_state.stop_reason == "warm_replay_rollback_failed"
+    assert "warm-replay failed" not in caplog.text
+
+
 # A FAILED replay_warm_recipe must route to promote_warm_replay (which clears in_flight); otherwise PRELUDE never
 # exits.
 def test_failed_replay_is_routed_to_promote_not_unpromotable(tmp_path):
@@ -2323,6 +2346,9 @@ def test_combined_keep_retains_validated_framework_root_without_reapply(
     assert coord.shared_state.warm_replay_outcome["status"] == "reproduced"
     assert coord.shared_state.warm_replay_outcome["active_framework_root"] == str(checkout.resolve())
     assert coord.shared_state.optimization_stack[-1]["framework_source_root"] == str(checkout.resolve())
+    # A framework tree is no InferenceX checkout: resume would export it as INFERENCEX_PATH and no benchmark script
+    # could be sourced from it.
+    assert coord.shared_state.active_inferencex_path == ""
     entry = coord.shared_state.optimization_stack[-1]
     assert entry["recipe_delta"] == {
         "extra_server_args": "--recipe",
@@ -2338,6 +2364,48 @@ def test_combined_keep_retains_validated_framework_root_without_reapply(
     }
     assert coord.shared_state.current_best["extra_envs"]["KERNEL_ONLY"] == "1"
     assert coord.shared_state.warm_replay_pending == {}
+
+
+def test_promotion_records_the_inferencex_tree_among_the_promoted_trees(tmp_path):
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
+    coord.shared_state.baseline_tput = 600.0
+    coord.shared_state.warm_replay_outcome = {"expected_gain_pct": 0.0}
+    framework = tmp_path / "sglang"
+    inferencex = tmp_path / "InferenceX"
+    framework.mkdir()
+    (inferencex / "benchmarks").mkdir(parents=True)
+    (inferencex / "benchmarks" / "benchmark_lib.sh").write_text("#!/bin/bash\n")
+    coord.phase_prelude._resolve_promoted_recipe_checkout = (  # type: ignore[method-assign]
+        lambda *_args: (
+            True,
+            {
+                "status": "promoted",
+                "target_repo": str(framework),
+                "target_repos": [str(framework), str(inferencex)],
+            },
+        )
+    )
+    task = _StubTask(
+        params={
+            "baseline_tput_anchor": 600.0,
+            "required_patch_timeline": True,
+            "patches": [{"patch_file": "p.patch", "patch_content": "diff"}],
+            "extra_server_args": "--recipe",
+            "extra_envs": {},
+        }
+    )
+
+    coord.phase_prelude.promote_warm_replay(
+        {
+            "status": "succeeded",
+            "output_throughput": 612.0,
+            "warm_patches_applied": [{"patch_file": "p.patch", "status": "applied"}],
+        },
+        task=task,
+    )
+
+    assert coord.shared_state.warm_replay_outcome["active_framework_root"] == str(framework)
+    assert coord.shared_state.active_inferencex_path == str(inferencex)
 
 
 def test_checkout_promotion_failure_rejects_keep_and_rolls_kernel(tmp_path, monkeypatch):
@@ -2427,7 +2495,7 @@ def test_a_nogit_apply_counts_as_a_replayed_overlay(tmp_path):
     coord.shared_state.warm_replay_outcome = {"expected_gain_pct": 0.0}
     coord.shared_state.warm_replay_pending = {"task_id": "warm"}
     coord.phase_prelude._resolve_promoted_recipe_checkout = (  # type: ignore[method-assign]
-        lambda *_args: (True, {"status": "promoted", "target_repo": "/install"})
+        lambda *_args: (True, {"status": "promoted", "target_repo": "/install", "target_repos": ["/install"]})
     )
     task = _StubTask(
         params={
@@ -3093,3 +3161,94 @@ def test_promote_warm_replay_honours_the_power_budget(tmp_path, power_w, expecte
     assert len(coord.shared_state.optimization_stack) == stack_len
     if expected_status == "drift":
         assert outcome["reason"] == "power_budget_exceeded"
+
+
+_PREPARED_KERNEL = {
+    "status": "prepared",
+    "pending": [{"column": "attention"}],
+    "extra_envs": {"FROM": "preparation"},
+    "extra_server_args": "--from-preparation",
+}
+
+
+def test_a_current_remote_recipe_takes_its_kernel_overlay_from_the_replay_payload(tmp_path):
+    """The replay payload, not the preparation result, carries a remote recipe's launch overlay."""
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
+
+    overlay = coord.phase_prelude._warm_kernel_overlay(
+        _PREPARED_KERNEL,
+        {"kernel_config": {"extra_envs": {"FROM": "replay"}, "extra_server_args": "--from-replay"}},
+        True,
+    )
+
+    assert overlay["extra_envs"] == {"FROM": "replay"}
+    assert overlay["extra_server_args"] == "--from-replay"
+
+
+def test_a_local_recipe_takes_its_kernel_overlay_from_the_preparation(tmp_path):
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
+
+    overlay = coord.phase_prelude._warm_kernel_overlay(_PREPARED_KERNEL, {}, False)
+
+    assert overlay["extra_envs"] == {"FROM": "preparation"}
+    assert overlay["extra_server_args"] == "--from-preparation"
+
+
+def test_a_preparation_that_prepared_nothing_carries_no_overlay(tmp_path):
+    """Without pending kernels there is nothing to launch under, whatever the result says."""
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
+
+    overlay = coord.phase_prelude._warm_kernel_overlay({**_PREPARED_KERNEL, "pending": []}, {}, False)
+
+    assert overlay["extra_envs"] == {}
+    assert overlay["extra_server_args"] == ""
+
+
+def test_a_clean_kernel_preparation_failure_is_not_refused_as_dirty(tmp_path):
+    """Nothing was applied, so there is nothing to unwind and no reason to stop."""
+    coord = _make_coord(tmp_path)
+
+    refused = coord.phase_prelude._refused_dirty_warm_kernel({"status": "error", "reason": "geak said no"})
+
+    assert refused is False
+    assert coord.shared_state.stop_reason in (None, "")
+
+
+def test_a_kernel_rollback_that_fails_stops_the_run(tmp_path, monkeypatch):
+    """A tree that is neither the recipe's nor the baseline's cannot be measured on."""
+    coord = _make_coord(tmp_path)
+    coord.shared_state.warm_replay_pending = {
+        "kernel_apply_results": [{"patch": "a"}],
+        "kernel_snapshots": [{"path": "b"}],
+    }
+    monkeypatch.setattr(
+        prelude_mod,
+        "revert_warm_kernel_patches",
+        lambda *_args, **_kwargs: {"ok": False, "errors": ["could not restore kernel.py"]},
+    )
+
+    refused = coord.phase_prelude._refused_dirty_warm_kernel(
+        {"status": "rollback_failed", "reason": "apply left a patched tree"}
+    )
+
+    assert refused is True
+    assert coord.shared_state.stop_reason == "warm_replay_rollback_failed"
+    pending = coord.shared_state.warm_replay_pending
+    assert pending["status"] == "rollback_failed"
+    assert pending["rollback_errors"] == ["could not restore kernel.py"]
+
+
+def test_a_kernel_rollback_that_succeeds_refuses_without_stopping_the_run(tmp_path, monkeypatch):
+    """The tree is whole again, so the next round may still run; this replay may not."""
+    coord = _make_coord(tmp_path)
+    coord.shared_state.warm_replay_pending = {
+        "kernel_apply_results": [{"patch": "a"}],
+        "kernel_snapshots": [{"path": "b"}],
+    }
+    monkeypatch.setattr(prelude_mod, "revert_warm_kernel_patches", lambda *_a, **_k: {"ok": True, "errors": []})
+
+    refused = coord.phase_prelude._refused_dirty_warm_kernel({"status": "error", "reason": "apply left a patched tree"})
+
+    assert refused is True
+    assert coord.shared_state.stop_reason in (None, "")
+    assert coord.shared_state.warm_replay_pending == {}

@@ -13,6 +13,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from hyperloom.common.perf_metric import INTVTY_OBJECTIVES
+
 from ..base import (
     Decision,
     RenderedSection,
@@ -21,23 +23,43 @@ from ..base import (
     events_of,
     fmt_pct,
     md_kv_list,
+    measured_ms,
     outcome_of,
     register_renderer,
     session_of,
     task_config_of,
     validation_of,
 )
+from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import GEAK_DROPPED_STATUSES
 from ._agentx_metrics import graded_axes_facts, render_graded_axes
 from ._invocation import render_invocation_block
-
-# ``geak_candidate.status`` values meaning the candidate was measured but its
-# revalidation never landed, so the win was abandoned rather than judged.
-_GEAK_DROPPED_STATUSES: frozenset[str] = frozenset({"rebench_cancelled", "rebench_unavailable"})
 
 # ``geak.rebench.final_status`` values with the same meaning, but settled: the
 # rebench ran and could not produce a verdict. ``no_material`` / ``no_promote``
 # are deliberately absent — those ARE verdicts, so the candidate was judged.
 _GEAK_DROPPED_RESULT_STATUSES: frozenset[str] = frozenset({"failed", "fallback_failed"})
+
+
+def _gain_axis_note(final: dict[str, Any]) -> str:
+    """`` (<axis>)`` when the gain was measured on an interactivity axis, else nothing."""
+    axis = final.get("graded_on")
+    return f" ({axis})" if axis in INTVTY_OBJECTIVES else ""
+
+
+def _validation_gap_warnings(*, validated: bool, stack_changed: bool, gain_missing: bool) -> list[str]:
+    """Warnings for a validation that fell behind the shipped stack, or that never ran."""
+    warnings: list[str] = []
+    if validated and stack_changed:
+        warnings.append(
+            "The last whole-stack validation predates the final adoptions, so "
+            "the validated cumulative gain describes a shorter stack than the "
+            "one that shipped."
+        )
+    if gain_missing:
+        warnings.append(
+            "No validated gain is recorded while baseline/final throughput are set — no validation run completed."
+        )
+    return warnings
 
 
 def _last_geak_rebench(breakdown: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -104,8 +126,8 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     b = as_dict(outcome.get("baseline"))
     validation = validation_of(breakdown)
     session = session_of(breakdown)
-    final_tput = f.get("throughput_tok_s_per_gpu")
-    base_tput = b.get("throughput_tok_s_per_gpu")
+    final_tput = f.get("output_throughput")
+    base_tput = b.get("output_throughput")
     gain_v = f.get("gain_pct")
     val_stack_len = validation.get("validated_at_stack_len")
     val_ts = validation.get("validated_ts")
@@ -119,10 +141,6 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     revalidation_pending = bool(candidate.get("revalidation_pending"))
     candidate_status = str(candidate.get("status") or "")
     pending_awaiting = candidate_status == "awaiting_rebench"
-    # Gain is provisional when a cross-harness revalidation is pending with no confirmed validated number.
-    is_provisional = revalidation_pending and not (isinstance(gain_v, (int, float)) and gain_v > 0)
-    # Headline is unvalidated when a GEAK candidate is pending with no positive validated gain.
-    headline_unvalidated = pending_awaiting and not (isinstance(gain_v, (int, float)) and gain_v > 0)
 
     facts: list[str] = []
     warnings: list[str] = []
@@ -141,16 +159,8 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
             # For latency-based metrics, an improvement shows as a negative delta.
             note = " (negative = faster)" if framework_registry.is_scriptable(fw) else ""
             facts.append(f"Delta vs baseline: {final_v - base_v:+.2f} {_unit}{note}.")
-    if is_provisional:
-        facts.append("Cumulative gain is PENDING same-harness revalidation; no validated number exists yet.")
-        warnings.append(
-            "The recorded gain basis is PROVISIONAL and cross-harness: measured by the "
-            "delegated optimizer's harness against the orchestrator baseline, so "
-            "no gain is reported here. A same-harness full-stack rebench is "
-            "pending and will supply the validated number."
-        )
-    elif gain_v is not None and not headline_unvalidated:
-        facts.append(f"Validated cumulative gain: {fmt_pct(gain_v, plus=True)}.")
+    if gain_v is not None:
+        facts.append(f"Validated cumulative gain: {fmt_pct(gain_v, plus=True)}{_gain_axis_note(f)}.")
         decisions.append(
             Decision(
                 kind="kept" if (gain_v or 0) > 0 else "attempted",
@@ -162,7 +172,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     facts.extend(graded_axes_facts(validation.get("perf"), label="Final"))
     self_gain = candidate.get("self_reported_gain_pct")
     self_gain_str = fmt_pct(self_gain, plus=True) if isinstance(self_gain, (int, float)) else "unknown"
-    if candidate_status in _GEAK_DROPPED_STATUSES:
+    if candidate_status in GEAK_DROPPED_STATUSES:
         drop_reason = str(candidate.get("revalidation_error") or "").strip() or "reason not recorded"
         facts.append(
             f"GEAK candidate (self-reported {self_gain_str}) was DROPPED without "
@@ -210,21 +220,18 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
         facts.append("Final stack: " + " → ".join(f"`{p}`" for p in action_path))
     if extra_args:
         facts.append(f"Final extra_server_args: `{extra_args}`.")
-    if stack_changed:
-        warnings.append(
-            "The last whole-stack validation predates the final adoptions, so "
-            "the validated cumulative gain describes a shorter stack than the "
-            "one that shipped."
+    warnings.extend(
+        _validation_gap_warnings(
+            validated=val_stack_len is not None,
+            stack_changed=stack_changed,
+            gain_missing=gain_v is None and bool(final_tput or base_tput),
         )
-    if gain_v is None and not is_provisional and (final_tput or base_tput):
-        warnings.append(
-            "No validated gain is recorded while baseline/final throughput are set — no validation run completed."
-        )
+    )
 
     md_kv = md_kv_list(
         [
-            ("final_throughput_tok_s_per_gpu", final_tput),
-            ("throughput_unit", _unit or None),
+            ("final_output_throughput", final_tput),
+            ("throughput_unit", framework_registry.throughput_unit(fw) or None),
             ("validated_gain_pct", gain_v),
             ("revalidation_pending", revalidation_pending or None),
             ("geak_candidate", candidate or None),
@@ -234,7 +241,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
             ("stack_changed_after_validation", stack_changed),
             ("extra_server_args", extra_args or None),
             ("action_path", action_path or None),
-            ("ttft_mean_ms", f.get("ttft_mean_ms")),
+            ("ttft_mean_ms", measured_ms(f.get("ttft_mean_ms"))),
             ("e2el_mean_ms", f.get("e2el_mean_ms")),
             ("ttft_e2el_source", validation.get("ttft_e2el_source")),
             ("extra_envs", f.get("extra_envs") or None),
@@ -243,7 +250,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
 
     md_parts = [md_kv]
     # The axes the validation round was graded on, beside the throughput figure above. On an AgentX session the two
-    # answer different questions: the verdict was decided on these, not on ``final_throughput_tok_s_per_gpu``.
+    # answer different questions: the verdict was decided on these, not on ``final_output_throughput``.
     graded_md = render_graded_axes(validation.get("perf"))
     if graded_md:
         md_parts.append("")

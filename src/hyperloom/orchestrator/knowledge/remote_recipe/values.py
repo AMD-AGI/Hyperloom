@@ -601,72 +601,45 @@ def build_kernel_fusion_value(state: Any, files: _Files) -> dict[str, Any]:
     return {"items": [record]}
 
 
-def match_rewrite_attempt(
+def _match_queued_integration(
     integrate: Mapping[str, Any],
-    attempts: Mapping[str, Any],
+    queue: Mapping[str, Any],
 ) -> Mapping[str, Any]:
-    """Find micro evidence for an E2E-integrated stack row, strongest key first."""
-    candidates = [(str(key), raw) for key, raw in attempts.items() if isinstance(raw, Mapping)]
+    """Find the queued KEEP an E2E-integrated stack row landed, strongest key first."""
     criteria = (
-        (
-            str(integrate.get("integration_id") or ""),
-            lambda key, raw: str(raw.get("integration_id") or "") == str(integrate.get("integration_id") or ""),
-        ),
-        (
-            str(integrate.get("task_group_key") or ""),
-            lambda key, raw: str(raw.get("task_group_key") or "") == str(integrate.get("task_group_key") or ""),
-        ),
-        (
-            str(integrate.get("kernel_id") or ""),
-            lambda key, raw: (
-                str(raw.get("kernel_id") or raw.get("current_kernel_id") or key)
-                == str(integrate.get("kernel_id") or "")
-            ),
-        ),
-        (
-            str(integrate.get("patch_path") or ""),
-            lambda key, raw: (
-                str(raw.get("last_artifact_path") or raw.get("artifact_path") or "")
-                == str(integrate.get("patch_path") or "")
-            ),
-        ),
+        ("integration_id", "integration_id"),
+        ("task_group_key", "task_group_key"),
+        ("kernel_id", "kernel_id"),
+        ("patch_path", "artifact_path"),
     )
-    for expected, predicate in criteria:
+    for stack_field, queue_field in criteria:
+        expected = str(integrate.get(stack_field) or "")
         if not expected:
             continue
-        for key, raw in candidates:
-            if predicate(key, raw):
+        for raw in queue.values():
+            if str(raw.get(queue_field) or "") == expected:
                 return raw
     return {}
 
 
 def build_kernel_rewrite_value(state: Any, files: _Files) -> dict[str, Any]:
     """Build rewrite rows exclusively from E2E-integrated stack entries."""
-    attempts = getattr(state, "kernel_opt_task_attempts", {}) or getattr(state, "kernel_opt_attempts", {}) or {}
     rows: list[dict[str, Any]] = []
-    if not isinstance(attempts, Mapping):
-        attempts = {}
     integrated = [
         dict(entry)
         for entry in (getattr(state, "optimization_stack", []) or [])
         if isinstance(entry, Mapping) and str(entry.get("action") or "").lower() == "integrate"
     ]
     for entry in integrated:
-        raw = match_rewrite_attempt(entry, attempts)
-        kernel_name = str(
-            raw.get("kernel_name")
-            or raw.get("current_kernel_id")
-            or raw.get("kernel_id")
-            or entry.get("kernel_id")
-            or "unknown"
-        )
-        speedup = _number(raw.get("last_micro_speedup") or raw.get("speedup"))
+        raw = _match_queued_integration(entry, state.pending_kernel_integrations)
+        kernel_name = str(raw.get("kernel_id") or entry.get("kernel_id") or "unknown")
+        speedup = _number(raw.get("micro_speedup"))
         integration_id = str(entry.get("integration_id") or "")
         slug = hashlib.sha256(
             f"{integration_id}|{entry.get('kernel_id')}|{entry.get('patch_path')}".encode()
         ).hexdigest()[:10]
         # The integrated stack row is authoritative.
-        patch_source = entry.get("patch_path") or raw.get("last_artifact_path") or raw.get("artifact_path")
+        patch_source = entry.get("patch_path") or raw.get("artifact_path")
         patch = files.add(
             patch_source,
             category="kernel/rewrite",
@@ -680,7 +653,7 @@ def build_kernel_rewrite_value(state: Any, files: _Files) -> dict[str, Any]:
         declared = _patch_declared_targets(patch_source)
         # Recorded now or never: replay has no way back to the checkout this was measured on, and a record that cannot
         # name it cannot be replayed.
-        apply_root = str(raw.get("last_deploy_repo_root") or "").strip() or _kernel_apply_root(
+        apply_root = str(raw.get("deploy_repo_root") or "").strip() or _kernel_apply_root(
             patch_source,
             entry.get("target_file"),
             declared,
@@ -698,19 +671,9 @@ def build_kernel_rewrite_value(state: Any, files: _Files) -> dict[str, Any]:
         e2e_gain = _number(entry.get("gain_pct"))
         optimized_throughput = _number(entry.get("tput"))
         experience = files.write(
-            "\n".join(
-                (
-                    f"# Kernel rewrite: {kernel_name}",
-                    "",
-                    "- Phase: KERNEL_AGENT",
-                    "- Decision: KEEP",
-                    f"- Measured speedup: {speedup:g}x",
-                    f"- E2E gain: {e2e_gain:g}%",
-                    f"- Optimized throughput: {optimized_throughput:g}",
-                    f"- Patch: {patch or 'unavailable'}",
-                    "",
-                )
-            ),
+            f"# Kernel rewrite: {kernel_name}\n\n- Phase: KERNEL_AGENT\n- Decision: KEEP\n"
+            f"- Measured speedup: {speedup:g}x\n- E2E gain: {e2e_gain:g}%\n"
+            f"- Optimized throughput: {optimized_throughput:g}\n- Patch: {patch}\n",
             rel=f"kernel/rewrite/experience/{slug}.md",
             kind="experience",
         )
@@ -767,61 +730,10 @@ def has_new_keep(state: Any) -> bool:
     return False
 
 
-def _adopt_replayed_prior(
-    state: Any,
-    sections: Any,
-    value: dict[str, Any],
-    files: _Files,
-    stack: list[dict[str, Any]],
-) -> None:
-    """Carry forward the exact prior overlays only after replay reproduced."""
-    outcome = _mapping(getattr(state, "warm_replay_outcome", {}))
-    if str(outcome.get("status") or "") != "reproduced":
-        return
-    replayed_refs = {str(ref) for ref in (outcome.get("replayed_patch_refs") or []) if str(ref)}
-    if not replayed_refs:
-        return
-    warm_root = getattr(sections, "warm_start_dir", None)
-    if warm_root is None:
-        raise RemoteRecipeValidationError("replayed prior overlays have no warm-start artifact root")
-    warm_root = Path(warm_root)
-    recipe_path = warm_root / "recipe.json"
-    if not recipe_path.is_file():
-        raise RemoteRecipeValidationError("replayed prior overlays are missing warm-start recipe.json")
-    try:
-        import json
-
-        document = json.loads(recipe_path.read_text(encoding="utf-8"))
-        if not isinstance(document, dict):
-            raise ValueError(f"recipe.json is not a JSON object, got {type(document).__name__}")
-    except (OSError, ValueError) as exc:
-        raise RemoteRecipeValidationError(f"cannot read replayed prior recipe: {exc}") from exc
-    prior_value = _mapping(document.get("value"))
-    if not prior_value:
-        knowledge = _mapping(document.get("knowledge"))
-        prior_value = _mapping(knowledge.get("value"))
-
-    replay_index = next(
-        (index for index, entry in enumerate(stack) if str(entry.get("action") or "").lower() == "replay_warm_recipe"),
-        -1,
-    )
-    if replay_index < 0:
-        raise RemoteRecipeValidationError("replayed prior overlays have no replay_warm_recipe stack entry")
-    # The prior column already lists its overlays in replay order, so the order they are re-adopted in is the order
-    # they were replayed in.
-    candidates = [
-        str(ref) for ref in (_mapping(prior_value.get(PATCH_SECTION)).get("patches") or []) if str(ref) in replayed_refs
-    ]
-    missing_metadata = replayed_refs - set(candidates)
-    if missing_metadata:
-        raise RemoteRecipeValidationError(
-            f"successfully replayed prior overlays are absent from prior knowledge: {sorted(missing_metadata)!r}"
-        )
-
-    # Prior apply roots keyed by the prior ref, so a re-homed overlay carries forward the checkout it must be applied
-    # into.
+def _prior_apply_roots(prior_patch: Mapping[str, Any]) -> dict[str, str]:
+    """Prior apply roots keyed by the prior ref, so a re-homed overlay carries forward the checkout it applies into."""
     prior_roots: dict[str, str] = {}
-    for prov_row in _mapping(prior_value.get(PATCH_SECTION)).get("provenance") or []:
+    for prov_row in prior_patch.get("provenance") or []:
         if not isinstance(prov_row, Mapping):
             continue
         origin = prov_row.get("host_origin")
@@ -831,39 +743,87 @@ def _adopt_replayed_prior(
             root_str = str(root or "").strip()
             if str(ref) and root_str:
                 prior_roots[str(ref)] = root_str
+    return prior_roots
 
+
+def _provenance_with_apply_roots(
+    provenance: Any,
+    stack_index: int,
+    apply_roots: Mapping[str, str],
+) -> list[dict[str, Any]]:
+    """Merge ``apply_roots`` into the provenance row at ``stack_index``, creating it, and order rows by stack index."""
+    rows = [dict(row) for row in (provenance or []) if isinstance(row, Mapping)]
+    row = next((r for r in rows if r.get("stack_index") == stack_index), None)
+    if row is None:
+        row = {
+            "stack_index": stack_index,
+            "base_sha": "",
+            "complete": True,
+            "artifacts_outside_root": 0,
+            "realized": True,
+        }
+        rows.append(row)
+    origin = dict(row.get("host_origin") or {})
+    origin["apply_roots"] = {**dict(origin.get("apply_roots") or {}), **apply_roots}
+    row["host_origin"] = origin
+    rows.sort(key=lambda r: int(r.get("stack_index") or 0))
+    return rows
+
+
+def _adopt_replayed_prior(
+    state: Any,
+    sections: Any,
+    value: dict[str, Any],
+    files: _Files,
+    stack: list[dict[str, Any]],
+) -> None:
+    """Carry forward the exact prior overlays only after replay reproduced."""
+    from ..agent_kb import PatchKB
+
+    outcome = _mapping(getattr(state, "warm_replay_outcome", {}))
+    if outcome.get("status") != "reproduced":
+        return
+    replayed_refs = {str(ref) for ref in (outcome.get("replayed_patch_refs") or []) if str(ref)}
+    if not replayed_refs:
+        return
+    if sections.warm_start_dir is None:
+        raise RemoteRecipeValidationError("replayed prior overlays have no warm-start artifact root")
+    recipe_path = sections.warm_start_dir / "recipe.json"
+    if not recipe_path.is_file():
+        raise RemoteRecipeValidationError("replayed prior overlays are missing warm-start recipe.json")
+    try:
+        document = json.loads(recipe_path.read_text(encoding="utf-8"))
+        if not isinstance(document, dict):
+            raise ValueError(f"recipe.json is not a JSON object, got {type(document).__name__}")
+    except (OSError, ValueError) as exc:
+        raise RemoteRecipeValidationError(f"cannot read replayed prior recipe: {exc}") from exc
+    prior_patch = _mapping(_mapping(document.get("value")).get(PATCH_SECTION))
+
+    replay_index = next(
+        (index for index, entry in enumerate(stack) if str(entry.get("action") or "").lower() == "replay_warm_recipe"),
+        -1,
+    )
+    if replay_index < 0:
+        raise RemoteRecipeValidationError("replayed prior overlays have no replay_warm_recipe stack entry")
+    # The prior column already lists its overlays in replay order, so the order they are re-adopted in is the order
+    # they were replayed in.
+    candidates = list(
+        dict.fromkeys(str(ref) for ref in (prior_patch.get("patches") or []) if str(ref) in replayed_refs)
+    )
+    missing_metadata = replayed_refs - set(candidates)
+    if missing_metadata:
+        raise RemoteRecipeValidationError(
+            f"successfully replayed prior overlays are absent from prior knowledge: {sorted(missing_metadata)!r}"
+        )
+
+    prior_roots = _prior_apply_roots(prior_patch)
+    patch_kb = PatchKB(sections)
+    adopted: list[str] = []
     adopted_roots: dict[str, str] = {}
-    member_index = 0
-    seen: set[str] = set()
-    files_root = warm_root / "files"
-    if files_root.is_symlink():
-        raise RemoteRecipeValidationError("replayed prior files root must not be a symlink")
-    resolved_root = files_root.resolve()
-    for old_ref in candidates:
-        if old_ref in seen:
-            continue
-        seen.add(old_ref)
-        normalized_ref = validate_relative_path(old_ref)
-        source = files_root / normalized_ref
-        cursor = files_root
-        for part in Path(normalized_ref).parts:
-            cursor = cursor / part
-            if cursor.is_symlink():
-                raise RemoteRecipeValidationError(
-                    f"successfully replayed prior overlay resolves through a symlink: {old_ref!r}"
-                )
-        try:
-            source.resolve().relative_to(resolved_root)
-        except ValueError as exc:
-            raise RemoteRecipeValidationError(f"replayed prior overlay escapes files root: {old_ref!r}") from exc
-        if not source.is_file():
+    for member_index, old_ref in enumerate(candidates):
+        source = patch_kb.prior_file(old_ref)
+        if source is None:
             raise RemoteRecipeValidationError(f"successfully replayed prior overlay is missing: {old_ref!r}")
-        try:
-            source.read_bytes()
-        except OSError as exc:
-            raise RemoteRecipeValidationError(
-                f"cannot read successfully replayed prior overlay {old_ref!r}: {exc}"
-            ) from exc
         match = _OVERLAY_REF_RE.match(old_ref)
         old_name = match.group(3) if match else source.stem
         safe_name = _OVERLAY_NAME_RE.sub("-", old_name).strip("._-") or "patch"
@@ -874,38 +834,17 @@ def _adopt_replayed_prior(
             raise RemoteRecipeValidationError(
                 f"cannot adopt successfully replayed prior overlay {old_ref!r}: {exc}"
             ) from exc
-        node = _mapping(value.get(PATCH_SECTION))
-        refs = [str(ref) for ref in (node.get("patches") or []) if str(ref)]
-        if new_ref not in refs:
-            refs.append(new_ref)
-        node["patches"] = sorted(refs)
-        value[PATCH_SECTION] = node
+        adopted.append(new_ref)
         if prior_root := prior_roots.get(old_ref):
             adopted_roots[new_ref] = prior_root
-        member_index += 1
 
+    node = _mapping(value.get(PATCH_SECTION))
+    refs = [str(ref) for ref in (node.get("patches") or []) if str(ref)]
+    node["patches"] = sorted([*refs, *(ref for ref in adopted if ref not in refs)])
     # Re-home the prior apply roots onto the new refs, under the replay stack index the adopted overlays now live at.
     if adopted_roots:
-        node = _mapping(value.get(PATCH_SECTION))
-        rows = [dict(row) for row in (node.get("provenance") or []) if isinstance(row, Mapping)]
-        row = next((r for r in rows if r.get("stack_index") == replay_index), None)
-        if row is None:
-            row = {
-                "stack_index": replay_index,
-                "base_sha": "",
-                "complete": True,
-                "artifacts_outside_root": 0,
-                "realized": True,
-            }
-            rows.append(row)
-        origin = dict(row.get("host_origin") or {})
-        merged_roots = dict(origin.get("apply_roots") or {})
-        merged_roots.update(adopted_roots)
-        origin["apply_roots"] = merged_roots
-        row["host_origin"] = origin
-        rows.sort(key=lambda r: int(r.get("stack_index") or 0))
-        node["provenance"] = rows
-        value[PATCH_SECTION] = node
+        node["provenance"] = _provenance_with_apply_roots(node.get("provenance"), replay_index, adopted_roots)
+    value[PATCH_SECTION] = node
 
 
 def _remap_artifact_refs(value: Any, refs: Mapping[str, str]) -> Any:
@@ -1018,32 +957,24 @@ def _validate_patch_column(value: Mapping[str, Any]) -> None:
         seen.add(ref)
 
 
-def _is_ref_list(value: Any) -> bool:
-    """Whether ``value`` is a flat list of refs, so two producers can be unioned."""
-    return isinstance(value, list) and all(isinstance(item, str) for item in value)
-
-
 def merge_staged_sections(
-    value: dict[str, Any],
     sections: Any,
     files: "_Files",
     *,
-    only: Collection[str] | None = None,
-    required: Collection[str] | None = None,
-) -> list[str]:
-    """Merge each staged column into ``value``, adopting the files it names."""
-    merged: list[str] = []
-    required_names = set(required or ())
+    only: Collection[str],
+    required: Collection[str],
+) -> dict[str, dict[str, Any]]:
+    """Return each staged column's knowledge in draft order, adopting the files it names."""
+    merged: dict[str, dict[str, Any]] = {}
     for name in sections.sections():
-        if only is not None and name not in only:
+        if name not in only:
             continue
+        qualifier = "required " if name in required else ""
         try:
             staged = sections.staged(name)
             if staged is None:
-                qualifier = "required " if name in required_names else ""
                 raise RemoteRecipeValidationError(f"{qualifier}staged section {name!r} cannot be read")
             if not staged.knowledge:
-                qualifier = "required " if name in required_names else ""
                 raise RemoteRecipeValidationError(f"{qualifier}staged section {name!r} is empty")
             staged_files = [
                 (
@@ -1065,21 +996,30 @@ def merge_staged_sections(
                 files.validate_adoption(source, rel)
             for source, rel in staged_files:
                 files.adopt(source, rel)
-            current = value.get(name) if isinstance(value.get(name), Mapping) else {}
-            combined = dict(staged.knowledge)
-            for ref_key, before in current.items():
-                after = combined.get(ref_key, [])
-                if not _is_ref_list(before) or not _is_ref_list(after):
-                    continue
-                combined[ref_key] = list(dict.fromkeys(str(ref) for ref in [*before, *after] if str(ref)))
-            value[name] = combined
-            merged.append(name)
+            merged[name] = dict(staged.knowledge)
+        except RemoteRecipeValidationError:
+            raise
         except Exception as exc:
-            if isinstance(exc, RemoteRecipeValidationError):
-                raise
-            qualifier = "required " if name in required_names else ""
             raise RemoteRecipeValidationError(f"{qualifier}staged section {name!r} is invalid: {exc}") from exc
     return merged
+
+
+def _dropped_staged_sections(state: Any) -> list[Mapping[str, Any]]:
+    """Fail while section staging is still owed, else return the stagings dropped for missing patch sources."""
+    pending_sections = list(getattr(state, "kb_stage_outbox", []) or [])
+    blocking_sections = [
+        row for row in pending_sections if not (isinstance(row, Mapping) and row.get("missing_patch_sources"))
+    ]
+    if blocking_sections:
+        raise RemoteRecipeValidationError(
+            "required section staging is incomplete: "
+            f"{[row.get('id') for row in blocking_sections if isinstance(row, Mapping)]!r}"
+        )
+    dead_letter = getattr(state, "kb_stage_dead_letter", []) or []
+    return [
+        *pending_sections,
+        *(row for row in dead_letter if isinstance(row, Mapping) and row.get("missing_patch_sources")),
+    ]
 
 
 def build_remote_knowledge(
@@ -1093,45 +1033,20 @@ def build_remote_knowledge(
     if sections is None:
         raise RemoteRecipeValidationError("a Recipe can only be built from a staged draft")
     scope = RecipeScope.from_state(state)
-    pending_sections = list(getattr(state, "kb_stage_outbox", []) or [])
-    blocking_sections = [
-        row for row in pending_sections if not (isinstance(row, Mapping) and row.get("missing_patch_sources"))
-    ]
-    dropped_sections = [
-        row
-        for row in [
-            *pending_sections,
-            *(getattr(state, "kb_stage_dead_letter", []) or []),
-        ]
-        if isinstance(row, Mapping) and row.get("missing_patch_sources")
-    ]
-    if blocking_sections:
-        raise RemoteRecipeValidationError(
-            "required section staging is incomplete: "
-            f"{[row.get('id') for row in blocking_sections if isinstance(row, Mapping)]!r}"
-        )
+    dropped_sections = _dropped_staged_sections(state)
     root = Path(files_dir)
     root.mkdir(parents=True, exist_ok=True)
     files = _Files(root)
-    stack = [
-        {**dict(item), "__stack_index": index}
-        for index, item in enumerate(getattr(state, "optimization_stack", []) or [])
-        if isinstance(item, Mapping)
-    ]
-    dropped_entries: set[tuple[str, int]] = set()
-    for row in dropped_sections:
-        try:
-            stack_index = int(row.get("stack_index") or 0)
-        except (TypeError, ValueError):
-            continue
-        dropped_entries.add((str(row.get("owner") or "").upper(), stack_index))
+    stack = [dict(item) for item in (getattr(state, "optimization_stack", []) or []) if isinstance(item, Mapping)]
+    dropped_entries = {
+        (str(row.get("owner") or "").upper(), int(row.get("stack_index") or 0)) for row in dropped_sections
+    }
     # ``config`` and ``kernel`` are staged unconditionally just below, so only ``patch`` is conditional: a KEEP that
     # harvested overlays demands it, and a record published without them would replay a weaker stack than measured.
     required_columns = {CONFIG_SECTION, KERNEL_SECTION}
     if any(
-        (owner := str(item.get("kb_required_owner") or "").strip().upper())
-        and (owner, int(item["__stack_index"])) not in dropped_entries
-        for item in stack
+        (owner := str(item.get("kb_required_owner") or "").strip().upper()) and (owner, index) not in dropped_entries
+        for index, item in enumerate(stack)
     ):
         required_columns.add(PATCH_SECTION)
     gains = list(getattr(state, "gain_per_stack_entry", []) or [])
@@ -1142,17 +1057,11 @@ def build_remote_knowledge(
     ConfigKB(sections).stage(build_publishable_recipe_config(state))
     KernelAgentKB(sections).stage_from_state(state, kernel_optimizer=scope.kernel_optimizer)
 
-    value: dict[str, Any] = {name: {} for name in RECIPE_SECTIONS}
-    staged_sections = merge_staged_sections(
-        value,
-        sections,
-        files,
-        only=RECIPE_SECTIONS,
-        required=required_columns,
-    )
-    missing_columns = required_columns - set(staged_sections)
+    merged = merge_staged_sections(sections, files, only=RECIPE_SECTIONS, required=required_columns)
+    missing_columns = required_columns - merged.keys()
     if missing_columns:
         raise RemoteRecipeValidationError(f"required staged columns are missing: {sorted(missing_columns)!r}")
+    value: dict[str, Any] = {name: merged.get(name, {}) for name in RECIPE_SECTIONS}
     # Carrying the prior record forward runs last: it unions rows and refs into the assembled columns, so it must see
     # what staging already contributed.
     _adopt_replayed_prior(state, sections, value, files, stack)
@@ -1178,7 +1087,7 @@ def build_remote_knowledge(
                 "session_id": str(getattr(state, "recipe_kb_session_id", "") or getattr(state, "session_id", "")),
                 "generated_at": datetime.now(timezone.utc).isoformat(),
                 "optimization_stack_length": len(stack),
-                "staged_sections": staged_sections,
+                "staged_sections": list(merged),
                 "dropped_staged_sections": list(
                     dict.fromkeys(str(row.get("id") or "") for row in dropped_sections if str(row.get("id") or ""))
                 ),
@@ -1239,12 +1148,9 @@ def knowledge_to_warm_recipe(document: Mapping[str, Any]) -> dict[str, Any]:
     for ref in raw_patches:
         validate_relative_path(ref)
     session_id = str(document.get("session_id") or "")
-    interactivity_gain = _number(knowledge.get("interactivity_gain_pct"))
-    validated_gain = (
-        interactivity_gain if "interactivity_gain_pct" in knowledge else _number(knowledge.get("validated_e2e_gain"))
-    )
+    validated_gain = _number(knowledge.get("interactivity_gain_pct", knowledge.get("validated_e2e_gain")))
     view = _mapping(document.get("view"))
-    replayable = bool(view.get("replayable")) if isinstance(view.get("replayable"), bool) else True
+    replayable = view.get("replayable") is not False
     row = {
         "canonical_id": str(document.get("canonical_id") or ""),
         "best_throughput": _number(knowledge.get("optimized_throughput")),
@@ -1285,7 +1191,6 @@ __all__ = [
     "has_replay_material",
     "knowledge_to_warm_recipe",
     "has_new_keep",
-    "match_rewrite_attempt",
     "merge_staged_sections",
     "workload_shape",
 ]

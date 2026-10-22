@@ -138,3 +138,14 @@ def test_an_integration_fault_is_counted_apart_and_stays_retryable(tmp_path: Pat
     assert rows[0]["retryable"] is True
     assert rows[0]["rejected_reason"] is None
     assert rows[0]["error_class"] == "integration_failed"
+
+
+def test_the_axis_the_gate_graded_on_reaches_the_attempt_gain(tmp_path: Path) -> None:
+    _visited_kernel(macro_cycle=2)
+
+    _state(macro_cycle=2).record_kernel_integrate_result(_result(graded_objective="e2e_norm_intvty_p50"))
+
+    events = [event for event in read_timeline_events(tmp_path) if event.get("type") == "kernel"]
+    row = events[0]["ext"]["attempts"][0]
+    assert _integrate_rows(tmp_path)[0]["graded_objective"] == "e2e_norm_intvty_p50"
+    assert (row["gain_pct"], row["gain_axis"], row["settled_by"]) == (5.5, "e2e_norm_intvty_p50", "integrate")

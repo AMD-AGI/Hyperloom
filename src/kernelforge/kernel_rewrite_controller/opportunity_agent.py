@@ -33,7 +33,7 @@ from kernelforge.agent_backends.session_resume import (
     run_session_with_api_resume,
 )
 from kernelforge.config import Config
-from kernelforge.durable_io import atomic_write_text
+from kernelforge.tools.durable_io import atomic_write_text
 from kernelforge.kernel_backends.constants import KERNEL_BACKENDS
 from kernelforge.kernel_rewrite_controller.contracts import HandoffBundle
 from kernelforge.kernel_rewrite_controller.paths import ControllerLayout
@@ -231,15 +231,14 @@ class _AnalysisSession:
 
     async def resume_for_refused_staging_drafts(
         self, result: AgentRunResult
-    ) -> tuple[AgentRunResult, str | None, _ResumePublications]:
+    ) -> tuple[AgentRunResult, _ResumePublications]:
         """Drive Stop refusals from outside the provider when hooks are not executed."""
         run_result = result
         resume_publications: list[TaskPublicationResult] = []
         if self.backend.capabilities.stop_hooks or not self.backend.capabilities.resumable:
-            return run_result, None, ()
+            return run_result, ()
         if not hasattr(self.backend, "resume"):
-            return run_result, None, ()
-        resume_error: str | None = None
+            return run_result, ()
         while True:
             resume_publications.extend(
                 publish_complete_staged_tasks(self.layout, quiescent_sec=0.0, refused=self.refused)
@@ -250,7 +249,6 @@ class _AnalysisSession:
             remaining = self.deadline_monotonic - time.monotonic()
             if remaining <= 0:
                 run_result = replace(run_result, end_reason="timeout")
-                resume_error = resume_error or "opportunity analysis exceeded budget during draft recovery"
                 break
             session_id = str(run_result.session_id or "").strip()
             if not session_id:
@@ -263,21 +261,16 @@ class _AnalysisSession:
                 run_result = await self.backend.resume(resume_spec, session_id, feedback, usage=self.usage)
                 if time.monotonic() >= self.deadline_monotonic:
                     run_result = replace(run_result, end_reason="timeout")
-                    resume_error = resume_error or "opportunity analysis exceeded budget during draft recovery"
                     break
             except AgentProviderError as exc:
                 log.warning("opportunity analysis resume failed: %s", exc)
-                resume_error = f"opportunity analysis resume failed: {exc}"
                 run_result = replace(run_result, end_reason="resume_error", stderr_tail=str(exc))
                 break
-            except asyncio.CancelledError:
-                raise
             except Exception as exc:
                 log.exception("opportunity analysis resume failed")
-                resume_error = f"opportunity analysis resume failed: {type(exc).__name__}: {exc}"
                 run_result = replace(run_result, end_reason="resume_error", stderr_tail=str(exc))
                 break
-        return run_result, resume_error, tuple(resume_publications)
+        return run_result, tuple(resume_publications)
 
 
 def _ensure_agent_workspace(path: Path) -> None:
@@ -521,6 +514,11 @@ def _user_prompt(handoff: HandoffBundle, staging_root: Path) -> str:
 """
 
 
+def _by_draft(results: tuple[TaskPublicationResult, ...]) -> dict[str, TaskPublicationResult]:
+    """Key publication results by the staging draft directory each came from."""
+    return {result.source_dir.name: result for result in results}
+
+
 def _write_analysis_result(layout: ControllerLayout, result: OpportunityAnalysisResult) -> None:
     atomic_write_text(
         layout.agent_root / "analysis-result.json",
@@ -557,36 +555,9 @@ class OpportunityAnalysisAgent:
         started = time.time()
         layout.agent_staging_root.mkdir(parents=True, exist_ok=True)
         _ensure_agent_workspace(layout.agent_staging_root)
-        progress: list[str] = []
         usage = UsageAccumulator()
         tool_guard = _AnalysisToolGuard(layout.agent_staging_root)
-        spec = AgentRunSpec(
-            role="rewrite opportunity",
-            system_prompt=_system_prompt(),
-            user_prompt=_user_prompt(handoff, layout.agent_staging_root),
-            cwd=str(layout.agent_staging_root),
-            writable=True,
-            timeout_sec=self.timeout_sec,
-            additional_directories=_additional_directories(handoff),
-            protected_paths=[
-                str(handoff.root / "workload.md"),
-                str(handoff.root / "serving-context.md"),
-                str(handoff.root / "trace-evidence.md"),
-            ],
-            allow_untracked=True,
-            allow_dirty_baseline=True,
-            tool_policy=AgentToolPolicy(
-                read=True,
-                search=True,
-                write=True,
-                shell=False,
-                max_turns=self.max_turns,
-                permission_mode=os.environ.get("FORGE_PERMISSION_MODE", "acceptEdits"),
-                bare=False,
-            ),
-            hooks=tool_guard.hooks() if self.backend.capabilities.stop_hooks else None,
-            progress_log=progress,
-        )
+        spec = self._session_spec(handoff, layout, tool_guard)
 
         # Resumed rather than run bare: a provider stream that drops mid-turn leaves a live session handle, and
         # abandoning it throws away every turn already spent investigating.
@@ -614,24 +585,14 @@ class OpportunityAnalysisAgent:
                     backend_task.cancel()
                     break
                 await asyncio.wait({backend_task}, timeout=min(_PUBLISH_POLL_SEC, remaining))
-                for result in publish_complete_staged_tasks(layout, refused=refused):
-                    publications[result.source_dir.name] = result
+                publications.update(_by_draft(publish_complete_staged_tasks(layout, refused=refused)))
             if not backend_task.cancelled():
                 try:
                     agent_result = await backend_task
                     session = _AnalysisSession(self.backend, spec, tool_guard, layout, refused, deadline, usage)
-                    agent_result, resume_error, resume_publications = await session.resume_for_refused_staging_drafts(
-                        agent_result
-                    )
-                    for pub in resume_publications:
-                        publications[pub.source_dir.name] = pub
+                    agent_result, resume_publications = await session.resume_for_refused_staging_drafts(agent_result)
+                    publications.update(_by_draft(resume_publications))
                     end_reason = str(agent_result.end_reason or "").strip()
-                    if resume_error and status == ANALYSIS_STATUS_COMPLETED:
-                        if end_reason == "timeout" or "exceeded budget" in resume_error:
-                            status = ANALYSIS_STATUS_TIMED_OUT
-                        else:
-                            status = ANALYSIS_STATUS_FAILED
-                        reason = resume_error
                     if end_reason == "timeout":
                         status = ANALYSIS_STATUS_TIMED_OUT
                         reason = agent_result.stderr_tail or "opportunity analysis timed out"
@@ -656,12 +617,55 @@ class OpportunityAnalysisAgent:
                     await backend_task
             # No quiescence window here: the session has stopped, so nothing is still writing, and waiting would
             # strand a task finished moments before the deadline -- the case incremental publication exists for.
-            for result in publish_complete_staged_tasks(layout, quiescent_sec=0.0, refused=refused):
-                publications[result.source_dir.name] = result
-            if progress:
-                atomic_write_text(layout.agent_root / "progress.log", "\n".join(progress) + "\n")
+            publications.update(_by_draft(publish_complete_staged_tasks(layout, quiescent_sec=0.0, refused=refused)))
+            if spec.progress_log:
+                atomic_write_text(layout.agent_root / "progress.log", "\n".join(spec.progress_log) + "\n")
 
-        published = sum(result.published for result in publications.values())
+        outcome = self._outcome(status, reason, publications, usage, started)
+        _write_analysis_result(layout, outcome)
+        return outcome
+
+    def _session_spec(
+        self, handoff: HandoffBundle, layout: ControllerLayout, tool_guard: _AnalysisToolGuard
+    ) -> AgentRunSpec:
+        """The staging-confined session one analysis runs, logging its progress into ``progress_log``."""
+        return AgentRunSpec(
+            role="rewrite opportunity",
+            system_prompt=_system_prompt(),
+            user_prompt=_user_prompt(handoff, layout.agent_staging_root),
+            cwd=str(layout.agent_staging_root),
+            writable=True,
+            timeout_sec=self.timeout_sec,
+            additional_directories=_additional_directories(handoff),
+            protected_paths=[
+                str(handoff.root / "workload.md"),
+                str(handoff.root / "serving-context.md"),
+                str(handoff.root / "trace-evidence.md"),
+            ],
+            allow_untracked=True,
+            allow_dirty_baseline=True,
+            tool_policy=AgentToolPolicy(
+                read=True,
+                search=True,
+                write=True,
+                shell=False,
+                max_turns=self.max_turns,
+                permission_mode=os.environ.get("FORGE_PERMISSION_MODE", "acceptEdits"),
+                bare=False,
+            ),
+            hooks=tool_guard.hooks() if self.backend.capabilities.stop_hooks else None,
+            progress_log=[],
+        )
+
+    def _outcome(
+        self,
+        status: str,
+        reason: str,
+        publications: dict[str, TaskPublicationResult],
+        usage: UsageAccumulator,
+        started: float,
+    ) -> OpportunityAnalysisResult:
+        """The durable result of one finished session: how it ended, what its drafts became and what it spent."""
         rejected = tuple(
             {"draft": name, "operator_id": result.operator_id, "reason": result.reason}
             for name, result in sorted(publications.items())
@@ -672,10 +676,10 @@ class OpportunityAnalysisAgent:
         # provider call either way. ``calls == 0`` means nothing was observed,
         # which is not the same claim as zero spend.
         totals = usage.totals()
-        outcome = OpportunityAnalysisResult(
+        return OpportunityAnalysisResult(
             status=status,
             reason=reason,
-            published_task_count=published,
+            published_task_count=sum(result.published for result in publications.values()),
             rejected_task_count=len(rejected),
             rejected_tasks=rejected,
             llm_usage=totals if int(totals.get("calls") or 0) > 0 else {},
@@ -683,8 +687,6 @@ class OpportunityAnalysisAgent:
             started_at_unix=started,
             finished_at_unix=time.time(),
         )
-        _write_analysis_result(layout, outcome)
-        return outcome
 
 
 def run_opportunity_analysis(
@@ -718,6 +720,7 @@ def run_opportunity_analysis(
         )
         return asyncio.run(agent.run(handoff=handoff, layout=layout))
     except Exception as error:  # noqa: BLE001 - agent backend failure is not enumerable
+        log.warning("opportunity analysis setup failed: %s", error)
         result = OpportunityAnalysisResult(
             status=ANALYSIS_STATUS_FAILED,
             reason=f"opportunity analysis setup failed: {error}",

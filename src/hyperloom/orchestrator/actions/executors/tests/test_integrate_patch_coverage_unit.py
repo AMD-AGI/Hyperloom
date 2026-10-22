@@ -478,7 +478,7 @@ async def test_bench_exception_reverts(tmp_path, monkeypatch):
     ex = IntegratePatchExecutor(session_dir=session)
 
     async def _raise(self, *args, **kwargs):
-        raise RuntimeError("boom")
+        raise OSError("boom")
 
     monkeypatch.setattr(IntegratePatchExecutor, "_bench_patch", _raise)
     res = await ex(
@@ -682,6 +682,34 @@ async def test_kb_writeback_skips_when_no_pr_keys(tmp_path):
     ex = IntegratePatchExecutor(session_dir=tmp_path)
     payload = {"proposal_set": [{"provenance": "specialist:serving:framework"}]}
     await ex._maybe_write_framework_kb_record(ip._KbLesson("integrated", 1.0), done_payload=payload, extra={})
+
+
+@pytest.mark.asyncio
+async def test_kb_writeback_ignores_payload_level_pr_identity(tmp_path, monkeypatch):
+    """A payload-level ``fa_pr_*`` is another proposal's identity, not this one's.
+
+    The proposal that carried the patch declares no PR, so the attempt has no
+    dedup key and must leave no lesson -- filing it under the payload's key
+    would merge this patch's outcome into an unrelated PR's history.
+    """
+    writes: list[Any] = []
+
+    async def _fake_write(fields):
+        writes.append(fields)
+        return "/tmp/lessons.jsonl"
+
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.knowledge.kb_writeback.write_framework_record",
+        _fake_write,
+    )
+    ex = IntegratePatchExecutor(session_dir=tmp_path)
+    payload = {
+        "fa_pr_url": "https://example/pr/other",
+        "fa_pr_sha": "cafebabe",
+        "proposal_set": [{"provenance": "specialist:serving:framework"}],
+    }
+    await ex._maybe_write_framework_kb_record(ip._KbLesson("integrated", 1.0), done_payload=payload, extra={})
+    assert writes == []
 
 
 def test_find_framework_proposal():
@@ -1282,6 +1310,45 @@ async def test_cancel_preserves_cancellation_when_recovery_save_fails(tmp_path, 
         )
     assert (repo / "src.py").read_text().endswith("return 1\n")
     assert state.pending_integrate
+
+
+async def _apply_only_with_failing_first_save(tmp_path, error):
+    """Run an apply-only integrate whose first state save (the pending sentinel) raises ``error``."""
+    from types import SimpleNamespace
+
+    session = tmp_path / "session"
+    repo = tmp_path / "fw"
+    _init_git_repo(repo)
+    _write_workspace(session, "spec")
+    saves: list[str] = []
+
+    def save(_path):
+        saves.append(_path)
+        if len(saves) == 1:
+            raise error
+
+    state = SimpleNamespace(
+        phase="FRAMEWORK_AGENT",
+        enablement=EnablementRound(),
+        current_best={},
+        get_specialist_patch_verdict=lambda _sid: "approve",
+        save=save,
+    )
+    params = {"specialist_task_id": "spec", "framework_source_root": str(repo), "apply_only": True}
+    return await IntegratePatchExecutor(session_dir=session)(_make_ctx("task", params, {"shared_state": state}))
+
+
+@pytest.mark.asyncio
+async def test_a_failed_sentinel_write_does_not_stop_the_apply(tmp_path):
+    result = await _apply_only_with_failing_first_save(tmp_path, OSError("disk full"))
+    assert result["status"] == "applied_no_bench"
+
+
+@pytest.mark.asyncio
+async def test_a_sentinel_serialization_bug_aborts_before_the_tree_is_touched(tmp_path):
+    with pytest.raises(TypeError, match="not JSON serializable"):
+        await _apply_only_with_failing_first_save(tmp_path, TypeError("not JSON serializable"))
+    assert (tmp_path / "fw" / "src.py").read_text() == "def f():\n    return 1\n"
 
 
 @pytest.mark.asyncio

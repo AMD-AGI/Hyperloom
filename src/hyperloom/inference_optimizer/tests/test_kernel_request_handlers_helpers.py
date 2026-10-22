@@ -143,46 +143,6 @@ def test_gemm_tuning_workspace_timestamp_fallback(tmp_path: Path) -> None:
     assert out.name.startswith("request_")
 
 
-# -- _optimization_budget_minutes / wrapper timeout ----------------------- -- backend selection
-# -----------------------------------------------------
-def test_backend_order_exact_env_forge_opt_in(monkeypatch) -> None:
-    monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
-    assert krh._raw_kernel_backend_order() == ["forge"]
-
-
-def test_backend_order_defaults_to_geak_phase_owner(monkeypatch) -> None:
-    monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
-    assert krh._raw_kernel_backend_order() == ["geak"]
-
-
-def test_removed_per_kernel_ladder_stays_removed(monkeypatch) -> None:
-    monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
-    assert not hasattr(krh, "_backend_order")
-    assert not hasattr(krh, "_run_backend_ladder")
-
-
-# -- geak_selected ---------------------------------------------------------
-def test_geak_selected_from_env_order(monkeypatch) -> None:
-    monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "geak")
-    assert krh.geak_selected() is True
-
-
-def test_geak_selected_owns_phase_when_mixed(monkeypatch) -> None:
-    # Mixed values are not the exact forge opt-in, so GEAK remains the owner.
-    monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge,GEAK")
-    assert krh.geak_selected() is True
-
-
-def test_geak_selected_true_by_default(monkeypatch) -> None:
-    monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
-    assert krh.geak_selected() is True
-
-
-def test_geak_selected_false_only_for_exact_env_forge(monkeypatch) -> None:
-    monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
-    assert krh.geak_selected() is False
-
-
 # -- _artifact_paths_from_payload -----------------------------------------
 def test_artifact_paths_string_wrapped() -> None:
     assert kernel_agent_tool._artifact_paths_from_payload({"artifact_paths": "/a/b.so"}) == ["/a/b.so"]

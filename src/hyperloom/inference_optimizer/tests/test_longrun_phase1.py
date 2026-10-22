@@ -95,8 +95,17 @@ def test_sweep_closes_when_insufficient_remaining():
     st = _sweep_state(max_minutes=48 * 60, started_hours_ago=48 - 10 / 60.0)
     target, reason, evidence = ps.compute_next_phase(st)
     assert target == ps.PHASE_CLOSE
-    assert reason == "sweep_done"
+    assert reason == "time_exhausted"
+    assert evidence["terminal"] is True
     assert evidence["reloop_blocked"] == "insufficient_remaining"
+
+
+def test_a_run_without_framework_agent_closes_on_the_ladder_whatever_time_is_left():
+    """No further cycle was possible, so the clock is not why the run ended."""
+    st = _sweep_state(max_minutes=48 * 60, started_hours_ago=48 - 10 / 60.0)
+    target, reason, evidence = ps.compute_next_phase(st, flags=ps.PhaseFlags(optimize_enabled=False))
+    assert (target, reason) == (ps.PHASE_CLOSE, "sweep_done")
+    assert "terminal" not in evidence
 
 
 def test_sweep_skip_to_close_does_not_override_a_settled_conc_sweep():
@@ -113,8 +122,9 @@ def test_sweep_skip_to_close_does_not_override_a_settled_conc_sweep():
     assert nxt is not None
     target, reason, evidence = nxt
     assert target == ps.PHASE_CLOSE
-    assert reason == "sweep_done"
+    assert reason == "time_exhausted"
     assert evidence.get("sweep_status") == "skipped"
+    assert "hint" not in evidence
 
 
 def test_sweep_skip_to_close_still_escalates_when_conc_sweep_never_settled():
@@ -307,7 +317,7 @@ def test_short_bounded_run_closes_when_insufficient_remaining():
 
     target, reason, evidence = ps.compute_next_phase(st)
     assert target == ps.PHASE_CLOSE
-    assert reason == "sweep_done"
+    assert reason == "time_exhausted"
     assert "loopback" not in evidence
     assert evidence["reloop_blocked"] == "insufficient_remaining"
 
@@ -346,13 +356,6 @@ def test_long_and_unbounded_runs_are_long():
     # Unbounded (max_minutes == 0) → long.
     st_unbounded = _sweep_state(max_minutes=0, started_hours_ago=1.0)
     assert ps.is_long_run(st_unbounded) is True
-
-
-def test_sweep_closes_at_the_macro_cycle_cap():
-    st = _sweep_state(macro_cycle=ps.DEFAULT_MAX_MACRO_CYCLES - 1)
-    target, reason, ev = ps.compute_next_phase(st)
-    assert (target, reason) == (ps.PHASE_CLOSE, "global_converged")
-    assert ev["reloop_blocked"] == "max_cycles"
 
 
 # per-cycle budget window

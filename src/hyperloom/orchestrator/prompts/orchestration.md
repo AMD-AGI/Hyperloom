@@ -327,8 +327,8 @@ and observed in a `delegated_result` event or in SharedState.
 <!-- phase: SWEEP -->
 ### SWEEP — phase goal
 
-Validate `current_best` over the workload grid. Coordinator exits to CLOSE on
-`sweep_done` automatically.
+Validate `current_best` over the workload grid. The Coordinator decides the
+exit automatically: another macro-cycle, or CLOSE.
 
 <!-- phase: CLOSE -->
 ### CLOSE — phase goal
@@ -512,6 +512,8 @@ tables rebuilt and re-uploaded. Sending a scriptable pipeline to
 * **register pressure, inductor advice** → `compiler_specialist`
 * **launch latency, dispatch overhead, device sync, host-blocking /
   host-pacing GPU idle** → `system_specialist`
+* **memory-bound decode with idle compute — small batch or long context** →
+  `speculative_decoding_specialist` (serving frameworks only)
 * **uncertain / cross-cutting** → `candidate_discovery_specialist`
 
 Landing upstream work is a lever in its own right, ranked with the others
@@ -552,6 +554,12 @@ admitted against. A `bench` / enablement specialist admits against
 `serving_disjoint_gpu_pool`, which is `serving_tp` cards smaller and is `0`
 whenever serving owns every card — in that case dispatch CPU specialists, or
 use `bench` when the work genuinely needs to measure.
+
+A domain holds at most one queued or running `scope=domain` specialist,
+whatever gap each names: a second `scope=domain` delegate for it is refused
+(`specialist_domain_in_flight`) until the first finishes. Fold new evidence into
+that domain's next dispatch; the in-flight block lists the domains queued
+specialists hold. `domains` and `freeform` dispatches hold no domain.
 
 **Domain-anchored example:**
 ```

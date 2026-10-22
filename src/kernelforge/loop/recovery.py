@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from kernelforge.llm.git import git
-from kernelforge.durable_io import atomic_write_text
+from kernelforge.tools.durable_io import atomic_write_text
 from kernelforge.loop.reporting import (
     BestResultPublisher,
     KeepBundle,
@@ -19,7 +19,7 @@ from kernelforge.loop.reporting import (
     KeepScore,
     is_best_manifest,
 )
-from kernelforge.loop.scoring import warm_start_improvement_flags
+from kernelforge.evaluation.scoring import warm_start_improvement_flags
 
 
 def atomic_write_json(path: str | Path, payload: dict) -> None:
@@ -105,17 +105,14 @@ class CallerRecovery:
     result_json: str | None
 
 
-def publish_warm_start_recovery(
-    workspace_dir: str,
-    *,
-    base_commit: str,
-    warm: dict,
-    caller: CallerRecovery,
-    tracker,
-) -> dict | None:
-    """Publish a validated warm-start as a kill-recoverable local best."""
-    if warm.get("applied") is not True:
-        return None
+@dataclass(frozen=True)
+class _WarmStartMeasurements:
+    score: KeepScore
+    case_times: dict[str, float]
+    unscored_cases: list[str]
+
+
+def _warm_start_measurements(warm: dict) -> _WarmStartMeasurements:
     baseline_ms = warm.get("pristine_ms")
     best_ms = warm.get("keep_baseline_ms")
     mean_case_speedup = warm.get("mean_case_speedup")
@@ -128,25 +125,29 @@ def publish_warm_start_recovery(
         or mean_case_speedup <= 1.0
     ):
         raise ValueError("validated warm-start is missing improving measurements")
-    case_times = dict(warm.get("case_times") or {})
-    unscored_cases = list(warm.get("unscored_cases") or [])
+    baseline_ms = float(baseline_ms)
+    best_ms = float(best_ms)
+    mean_case_speedup = float(mean_case_speedup)
+    return _WarmStartMeasurements(
+        score=KeepScore(
+            baseline_wall_ms=baseline_ms,
+            best_wall_ms=best_ms,
+            mean_case_speedup=mean_case_speedup,
+            search_start_mean_case_speedup=mean_case_speedup,
+            search_start_ms=best_ms,
+        ),
+        case_times=dict(warm.get("case_times") or {}),
+        unscored_cases=list(warm.get("unscored_cases") or []),
+    )
 
+
+def _warm_start_identity(workspace_dir: str, base_commit: str, warm: dict, external_id: str) -> KeepIdentity:
+    """KeepIdentity for HEAD when it differs from ``base_commit``."""
     head = git("rev-parse", "HEAD", cwd=workspace_dir).stdout.strip()
     if not head or head == base_commit:
         raise ValueError("validated warm-start has no committed patch")
-    patch = git("diff", base_commit, head, "--", ".", cwd=workspace_dir).stdout
-    changed_files = [
-        line.strip()
-        for line in git("diff", "--name-only", base_commit, head, "--", ".", cwd=workspace_dir).stdout.splitlines()
-        if line.strip()
-    ]
-    if not patch.strip() or not changed_files:
-        raise ValueError("validated warm-start produced no publishable diff")
-
-    root = Path(workspace_dir) / "forge_experiments"
     solution = str(warm.get("solution_slug") or "warm-start")
-    external_id = caller.caller_experiment_id or caller.experience_id or "warm-start"
-    keep = KeepIdentity(
+    return KeepIdentity(
         campaign_id=f"warm-start:{solution}",
         session_index=0,
         experiment_id=external_id,
@@ -154,72 +155,115 @@ def publish_warm_start_recovery(
         commit_hash=head,
         plan=f"apply prior solution {solution}",
     )
-    score = KeepScore(
-        baseline_wall_ms=float(baseline_ms),
-        best_wall_ms=float(best_ms),
-        mean_case_speedup=float(mean_case_speedup),
-        search_start_mean_case_speedup=float(mean_case_speedup),
-        search_start_ms=float(best_ms),
-    )
-    bundle = KeepBundle(
+
+
+def _warm_start_bundle(
+    workspace_dir: str, base_commit: str, keep: KeepIdentity, measurements: _WarmStartMeasurements
+) -> KeepBundle:
+    score = measurements.score
+    patch = git("diff", base_commit, keep.commit_hash, "--", ".", cwd=workspace_dir).stdout
+    changed_files = [
+        line.strip()
+        for line in git(
+            "diff", "--name-only", base_commit, keep.commit_hash, "--", ".", cwd=workspace_dir
+        ).stdout.splitlines()
+        if line.strip()
+    ]
+    if not patch.strip() or not changed_files:
+        raise ValueError("validated warm-start produced no publishable diff")
+    return KeepBundle(
         validation_text=("validated KB warm-start passed canonical correctness"),
         benchmark={
-            "median_ms": float(best_ms),
-            "mean_case_speedup": float(mean_case_speedup),
-            "case_times": case_times,
-            "unscored_cases": unscored_cases,
+            "median_ms": score.best_wall_ms,
+            "mean_case_speedup": score.mean_case_speedup,
+            "case_times": measurements.case_times,
+            "unscored_cases": measurements.unscored_cases,
             "warm_start": True,
         },
         changed_files=changed_files,
         patch=patch,
     )
-    publication_errors: list[str] = []
+
+
+def _persist_warm_recovery(caller: CallerRecovery, tracker, checkpoint: dict, result: dict) -> dict:
+    """Write checkpoint and result-json sidecars; update persistence_* on ``result``."""
+    errors = result["persistence_errors"]
+    if caller.caller_experiment_id:
+        try:
+            tracker.set_checkpoint(caller.caller_experiment_id, checkpoint)
+        except (OSError, TypeError, ValueError) as error:
+            errors.append(f"checkpoint: {error}")
+            result["persistence_degraded"] = True
+    if caller.result_json:
+        try:
+            atomic_write_json(caller.result_json, result)
+        except (OSError, TypeError, ValueError) as error:
+            errors.append(f"result-json: {error}")
+            result["persistence_degraded"] = True
+    return result
+
+
+def publish_warm_start_recovery(
+    workspace_dir: str,
+    *,
+    base_commit: str,
+    warm: dict,
+    caller: CallerRecovery,
+    tracker,
+) -> dict | None:
+    """Publish a validated warm-start as a kill-recoverable local best."""
+    if warm.get("applied") is not True:
+        return None
+    measurements = _warm_start_measurements(warm)
+    score = measurements.score
+    external_id = caller.caller_experiment_id or caller.experience_id or "warm-start"
+    keep = _warm_start_identity(workspace_dir, base_commit, warm, external_id)
+    bundle = _warm_start_bundle(workspace_dir, base_commit, keep, measurements)
+    errors: list[str] = []
     try:
         manifest = BestResultPublisher(workspace_dir).publish(keep, score, bundle)
     except Exception as error:
         # A derived view can fail after best_result.json is already durable.
         manifest = _validated_warm_start_result(
             workspace_dir,
-            commit_hash=head,
-            baseline_ms=float(baseline_ms),
-            best_ms=float(best_ms),
-            mean_case_speedup=float(mean_case_speedup),
+            commit_hash=keep.commit_hash,
+            baseline_ms=score.baseline_wall_ms,
+            best_ms=score.best_wall_ms,
+            mean_case_speedup=score.mean_case_speedup,
         )
         if manifest is None:
             raise
-        publication_errors.append(f"derived-best-view: {error}")
-    # The manifest publish() just wrote withholds the improvement badge when the aggregate wall times contradict the
-    # score.
+        errors.append(f"derived-best-view: {error}")
+    # The manifest publish above withholds improvement when aggregate wall times contradict the case score.
     improvement = warm_start_improvement_flags(
-        pristine_ms=float(baseline_ms),
-        best_ms=float(best_ms),
-        mean_case_speedup=float(mean_case_speedup),
+        pristine_ms=score.baseline_wall_ms, best_ms=score.best_wall_ms, mean_case_speedup=score.mean_case_speedup
     )
+    scores = {
+        "baseline_ms": score.baseline_wall_ms,
+        "best_ms": score.best_wall_ms,
+        "mean_case_speedup": score.mean_case_speedup,
+        "search_start_mean_case_speedup": score.mean_case_speedup,
+    }
+    root = Path(workspace_dir) / "forge_experiments"
     checkpoint = {
         "state": "best_committed",
         "decision": "WARM_START",
         "experiment_id": external_id,
         "base_commit": base_commit,
-        "best_commit": head,
+        "best_commit": keep.commit_hash,
         "best_iteration": 0,
-        "baseline_ms": float(baseline_ms),
-        "best_ms": float(best_ms),
-        "mean_case_speedup": float(mean_case_speedup),
-        "search_start_mean_case_speedup": float(mean_case_speedup),
+        **scores,
         **improvement,
         "validation_passed": True,
         "validation_summary": "validated KB warm-start",
         "snr_db": None,
-        "case_times": case_times,
-        "unscored_cases": unscored_cases,
+        "case_times": measurements.case_times,
+        "unscored_cases": measurements.unscored_cases,
     }
     result = {
-        "baseline_ms": float(baseline_ms),
-        "best_ms": float(best_ms),
-        "mean_case_speedup": float(mean_case_speedup),
-        "search_start_mean_case_speedup": float(mean_case_speedup),
-        "case_times": case_times,
-        "unscored_cases": unscored_cases,
+        **scores,
+        "case_times": measurements.case_times,
+        "unscored_cases": measurements.unscored_cases,
         **improvement,
         "experiment_id": caller.caller_experiment_id or None,
         "campaign_id": manifest["campaign_id"],
@@ -227,31 +271,14 @@ def publish_warm_start_recovery(
         "segment_index": 0,
         "next_iteration": 1,
         "best_iteration": 0,
-        "best_commit": head,
+        "best_commit": keep.commit_hash,
         "best_manifest": str(root / "best" / "manifest.json"),
         "optimization_report": str(root / "optimization_report.md"),
         "optimization_history": str(root / "optimization_history.md"),
-        "persistence_degraded": False,
-        "persistence_errors": [],
+        "persistence_degraded": bool(errors),
+        "persistence_errors": errors,
         "iteration_count": 0,
         "kb_experience": None,
         "warm_start": True,
     }
-    persistence_errors: list[str] = list(publication_errors)
-    if caller.caller_experiment_id:
-        try:
-            tracker.set_checkpoint(caller.caller_experiment_id, checkpoint)
-        except Exception as error:  # noqa: BLE001 - collected into persistence_errors
-            persistence_errors.append(f"checkpoint: {error}")
-    if persistence_errors:
-        result["persistence_degraded"] = True
-        result["persistence_errors"] = list(persistence_errors)
-    if caller.result_json:
-        try:
-            atomic_write_json(caller.result_json, result)
-        except Exception as error:  # noqa: BLE001 - collected into persistence_errors
-            persistence_errors.append(f"result-json: {error}")
-    if persistence_errors:
-        result["persistence_degraded"] = True
-        result["persistence_errors"] = persistence_errors
-    return result
+    return _persist_warm_recovery(caller, tracker, checkpoint, result)

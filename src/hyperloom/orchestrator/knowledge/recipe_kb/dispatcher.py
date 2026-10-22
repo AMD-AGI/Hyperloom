@@ -230,10 +230,7 @@ class RecipeKB:
         close = getattr(self.local, "close", None)
         if not callable(close):
             return
-        try:
-            close()
-        except Exception:
-            log.exception("recipe_kb: local store close raised")
+        close()
 
 
 __all__ = ["RecipeKB"]

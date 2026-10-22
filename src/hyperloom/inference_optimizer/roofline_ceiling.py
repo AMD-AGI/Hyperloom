@@ -46,27 +46,26 @@ _MI355X_PEAK_TFLOPS: dict[str, float] = {
     "fp32": 157.3,
     "float32": 157.3,
 }
+#: https://www.amd.com/en/products/graphics/workstations/radeon-ai-pro/ai-9000-series/amd-radeon-ai-pro-r9700.html
+_R9700_FP16_MATRIX_TFLOPS = 191.0
+_R9700_FP8_MATRIX_TFLOPS = 383.0
+_R9700_PEAK_TFLOPS: dict[str, float] = {
+    "bf16": _R9700_FP16_MATRIX_TFLOPS,
+    "bfloat16": _R9700_FP16_MATRIX_TFLOPS,
+    "fp16": _R9700_FP16_MATRIX_TFLOPS,
+    "float16": _R9700_FP16_MATRIX_TFLOPS,
+    "fp8": _R9700_FP8_MATRIX_TFLOPS,
+    "float8_e4m3fn": _R9700_FP8_MATRIX_TFLOPS,
+    "float8_e5m2": _R9700_FP8_MATRIX_TFLOPS,
+    "fp32": 47.8,
+    "float32": 47.8,
+}
 HW_SPECS: dict[str, dict[str, Any]] = {
-    "mi300x": {
-        "hbm_gb": 192.0,
-        "hbm_bw_gbps": 5300.0,
-        "peak_tflops": _MI300X_PEAK_TFLOPS,
-    },
-    "mi308x": {
-        "hbm_gb": 192.0,
-        "hbm_bw_gbps": 5300.0,
-        "peak_tflops": _MI300X_PEAK_TFLOPS,
-    },
-    "mi325x": {
-        "hbm_gb": 256.0,
-        "hbm_bw_gbps": 6000.0,
-        "peak_tflops": _MI300X_PEAK_TFLOPS,
-    },
-    "mi355x": {
-        "hbm_gb": 288.0,
-        "hbm_bw_gbps": 8000.0,
-        "peak_tflops": _MI355X_PEAK_TFLOPS,
-    },
+    "mi300x": {"hbm_gb": 192.0, "hbm_bw_gbps": 5300.0, "peak_tflops": _MI300X_PEAK_TFLOPS},
+    "mi308x": {"hbm_gb": 192.0, "hbm_bw_gbps": 5300.0, "peak_tflops": _MI300X_PEAK_TFLOPS},
+    "mi325x": {"hbm_gb": 256.0, "hbm_bw_gbps": 6000.0, "peak_tflops": _MI300X_PEAK_TFLOPS},
+    "mi355x": {"hbm_gb": 288.0, "hbm_bw_gbps": 8000.0, "peak_tflops": _MI355X_PEAK_TFLOPS},
+    "r9700": {"hbm_gb": 32.0, "hbm_bw_gbps": 640.0, "peak_tflops": _R9700_PEAK_TFLOPS},
 }
 
 
@@ -198,22 +197,22 @@ class RuntimeWorkload:
 
 
 def _read_baseline_yaml_benchmark(state: Any) -> dict[str, Any]:
-    """Read ``benchmark`` from the materialized baseline yaml."""
-    last_bl = getattr(state, "last_baseline", None) or {}
-    if not isinstance(last_bl, dict):
-        return {}
-    extras = last_bl.get("extras") or {}
-    cfg_path = extras.get("materialized_config") if isinstance(extras, dict) else ""
+    """Read ``benchmark`` from the materialized yaml of the accepted baseline anchor.
+
+    ``last_baseline`` is the latest attempt, which may be a rejected re-baseline or, inside promotion, the
+    attempt before the one being promoted; ``baseline_config_path`` is set when an anchor is accepted.
+    """
+    cfg_path = str(getattr(state, "baseline_config_path", "") or "")
     if not cfg_path:
         return {}
-    try:
-        import yaml as _yaml  # type: ignore[reportMissingModuleSource]
+    import yaml as _yaml  # type: ignore[reportMissingModuleSource]
 
+    try:
         with open(cfg_path, "r", encoding="utf-8") as f:
             cfg = _yaml.safe_load(f) or {}
-        benchmark = cfg.get("benchmark") or {}
+        benchmark = cfg.get("benchmark") if isinstance(cfg, dict) else None
         return benchmark if isinstance(benchmark, dict) else {}
-    except Exception:  # noqa: BLE001 — yaml IO / parse is best-effort
+    except (OSError, ValueError, _yaml.YAMLError):  # an unreadable or malformed config falls back to env args
         return {}
 
 
@@ -245,10 +244,7 @@ def _server_args_from_envs(envs: dict[str, Any]) -> str:
 
 def _read_baseline_yaml_server_args(state: Any) -> str:
     """Read the runtime server args from the materialized baseline yaml."""
-    yaml_args = _server_args_from_envs(_benchmark_envs(_read_baseline_yaml_benchmark(state)))
-    if yaml_args:
-        return yaml_args
-    return _server_args_from(getattr(state, "last_baseline", None))
+    return _server_args_from_envs(_benchmark_envs(_read_baseline_yaml_benchmark(state)))
 
 
 def _server_args_env_override(entry: Any) -> str:
@@ -272,11 +268,6 @@ def _server_args_payload(entry: Any) -> str:
     return ""
 
 
-def _server_args_from(entry: Any) -> str:
-    """Extract the final server-args string from one state entry."""
-    return _server_args_env_override(entry) or _server_args_payload(entry)
-
-
 def _achieved_arm_source(state: Any) -> str:
     """Which arm the roofline ``achieved`` throughput comes from."""
     t = (getattr(state, "current_best", None) or {}).get("tput")
@@ -287,7 +278,7 @@ def _achieved_arm_source(state: Any) -> str:
 
 def _collect_runtime_server_args(state: Any, *, arm: str | None = None) -> str:
     """Server args for the arm the ceiling is actually compared against."""
-    base_args = _read_baseline_yaml_server_args(state) or _server_args_from(getattr(state, "last_baseline", None))
+    base_args = _read_baseline_yaml_server_args(state)
     resolved_arm = arm or _achieved_arm_source(state)
     if resolved_arm == "current_best":
         current_best = getattr(state, "current_best", None)
@@ -1275,29 +1266,23 @@ def compute_roofline_from_perfmodel(
     """Bottom-up decode + prefill roofline using inlined GEMM/SDPA formulas."""
     if meta is None:
         return None
-    if not meta.hidden_size or not meta.num_attention_heads:
-        return None
-    gpu_type, num_gpus, precision_tag = target.gpu_type, target.num_gpus, target.precision_tag
-    gpu_key = (gpu_type or "").strip().lower()
+    gpu_key = (target.gpu_type or "").strip().lower()
     spec = HW_SPECS_ACHIEVABLE.get(gpu_key) or HW_SPECS.get(gpu_key)
     if spec is None:
         return None
 
-    bw_gbps = spec["hbm_bw_gbps"] * max(num_gpus, 1)
-    bw_bps = bw_gbps * 1e9
-    tag = (precision_tag or "bf16").strip().lower()
-    f_peak_tflops = (_resolve_achievable_tflops(gpu_type, tag) or _resolve_peak_tflops(gpu_type, tag)) * max(
-        num_gpus, 1
-    )
+    n_gpus = max(target.num_gpus, 1)
+    bw_gbps = spec["hbm_bw_gbps"] * n_gpus
+    tag = (target.precision_tag or "bf16").strip().lower()
+    f_peak_tflops = (_resolve_achievable_tflops(gpu_key, tag) or _resolve_peak_tflops(gpu_key, tag)) * n_gpus
     if f_peak_tflops <= 0:
         return None
-    f_peak = f_peak_tflops * 1e12
     bpe = float(meta.weight_dtype_bytes or 2.0)
     # Routed-expert weights may be a distinct precision (e.g. DeepSeek-V4 fp4 experts under fp8 attention); size the
     # MoE reads with it.
     expert_bpe = float(meta.expert_weight_dtype_bytes)
     # Activations (input/output) are at least bf16 even for quantized-weight models.
-    act_bpe = max(bpe, 2.0)
+    act_bpe = _activation_kv_dtype_bytes(meta)
 
     hidden = meta.hidden_size
     ffn = meta.intermediate_size
@@ -1340,8 +1325,8 @@ def compute_roofline_from_perfmodel(
 
     def _roofline_time(fl: float, by: float) -> tuple[float, str, float, float]:
         """Roofline time for one op given its FLOPs and byte traffic."""
-        t_cmp = fl / f_peak if f_peak > 0 else 1e30
-        t_mem = by / bw_bps if bw_bps > 0 else 1e30
+        t_cmp = fl / (f_peak_tflops * 1e12)
+        t_mem = by / (bw_gbps * 1e9)
         return max(t_cmp, t_mem), "compute" if t_cmp >= t_mem else "memory", t_mem, t_cmp
 
     def _forward(batch: int, s_q: int, s_kv: int) -> tuple[float, float, float, list[OpBreakdown]]:
@@ -1370,7 +1355,7 @@ def compute_roofline_from_perfmodel(
                 )
             )
         # MoE FFN: FusedMoE formula with batch-aware coupon E_active.
-        if is_moe and n_moe_layers > 0:
+        if n_moe_layers > 0:
             # Latent-MoE decoders run the experts below the residual width.
             moe_hidden = meta.moe_hidden_size or hidden
             moe = _MoeShape(
@@ -1412,34 +1397,21 @@ def compute_roofline_from_perfmodel(
                 pct_time=0.0,
             )
         )
-        # fill pct_time
-        if total_t > 0:
-            op_rows = [_dc.replace(op, pct_time=op.time_s / total_t) for op in op_rows]
+        op_rows = [_dc.replace(op, pct_time=op.time_s / total_t) for op in op_rows]
         return total_t, total_mem_t, total_cmp_t, op_rows
 
-    isl = shape.isl
+    # Every guard above leaves positive sizes, bandwidth and peak, so every forward time below is positive.
     batch = max(shape.concurrency, 1)
-    kv_seq = max(int(isl) + int(shape.osl) // 2, 1)
-    t_dec, t_dec_mem, t_dec_cmp, ops_dec = _forward(batch, 1, kv_seq)
-    t_pre, _, _, _ = _forward(1, max(int(isl), 1), max(int(isl), 1))
-
-    decode_tok = batch / t_dec if t_dec > 0 else 0.0
-    prefill_tok = max(int(isl), 1) / t_pre if t_pre > 0 else 0.0
-    decode_mem_tok = batch / t_dec_mem if t_dec_mem > 0 else 0.0
-    decode_cmp_tok = batch / t_dec_cmp if t_dec_cmp > 0 else 0.0
-
-    # dominant bound in decode
-    bound_kind = "memory" if t_dec_mem >= t_dec_cmp else "compute"
-    if t_dec <= 0:
-        bound_kind = "unknown"
-
+    prefill_len = max(int(shape.isl), 1)
+    t_dec, t_dec_mem, t_dec_cmp, ops_dec = _forward(batch, 1, max(int(shape.isl) + int(shape.osl) // 2, 1))
+    t_pre, _, _, _ = _forward(1, prefill_len, prefill_len)
     return PerfModelBreakdown(
-        decode_tok_per_s=decode_tok,
-        prefill_tok_per_s=prefill_tok,
-        decode_mem_tok_per_s=decode_mem_tok,
-        decode_cmp_tok_per_s=decode_cmp_tok,
+        decode_tok_per_s=batch / t_dec,
+        prefill_tok_per_s=prefill_len / t_pre,
+        decode_mem_tok_per_s=batch / t_dec_mem,
+        decode_cmp_tok_per_s=batch / t_dec_cmp,
         ops=ops_dec,
-        bound_kind=bound_kind,
+        bound_kind="memory" if t_dec_mem >= t_dec_cmp else "compute",
         hbm_bw_gbps=bw_gbps,
         peak_achievable_tflops=f_peak_tflops,
     )

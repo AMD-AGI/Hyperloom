@@ -296,12 +296,12 @@ def _matches_unsafe_unified_attn_stack(
         return False
     return (
         config.get("architectures") == ["Qwen3ForCausalLM"]
-        and str(config.get("model_type") or "").lower() == "qwen3"
-        and str(config.get("torch_dtype") or "").lower() in {"bf16", "bfloat16"}
+        and str(config.get("model_type")).lower() == "qwen3"
+        and str(config.get("torch_dtype")).lower() in {"bf16", "bfloat16"}
         and config.get("head_dim") == 128
         and config.get("num_attention_heads") == 40
         and config.get("num_key_value_heads") == 8
-        and str(quant.get("quant_method") or "").lower() == "fp8"
+        and str(quant.get("quant_method")).lower() == "fp8"
     )
 
 

@@ -1039,6 +1039,44 @@ def test_install_geak_best_effort_noop_for_rayjob(tmp_path, monkeypatch):
     assert mn_cli.install_geak_on_pods_best_effort() == 0
 
 
+def test_install_geak_propagates_install_failure(monkeypatch):
+    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+
+    def install_fails(_ns):
+        raise RuntimeError("install-geak failed")
+
+    monkeypatch.setattr(mn_cli, "_load_state", lambda: {"backend": "infera"})
+    monkeypatch.setattr(mn_cli, "cmd_install_geak", install_fails)
+
+    with pytest.raises(RuntimeError, match="^install-geak failed$"):
+        mn_cli.install_geak_on_pods_best_effort()
+
+
+def test_kill_inference_for_kernel_agent_warns_on_a_command_failure(monkeypatch, capsys):
+    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+
+    def kill_fails(_ns):
+        raise RuntimeError("kill-inference failed")
+
+    monkeypatch.setattr(mn_cli, "cmd_kill_inference", kill_fails)
+
+    assert mn_cli.kill_inference_for_kernel_agent_best_effort() is None
+    err = capsys.readouterr().err
+    assert re.fullmatch(r"\[[^\]]+\] WARN kill-inference skipped: RuntimeError: kill-inference failed\n", err)
+
+
+def test_kill_inference_for_kernel_agent_propagates_an_unexpected_error(monkeypatch):
+    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+
+    def kill_has_a_bug(_ns):
+        raise KeyError("pid_file")
+
+    monkeypatch.setattr(mn_cli, "cmd_kill_inference", kill_has_a_bug)
+
+    with pytest.raises(KeyError, match="pid_file"):
+        mn_cli.kill_inference_for_kernel_agent_best_effort()
+
+
 def test_install_geak_noop_for_rayjob(tmp_path, monkeypatch):
     # GEAK SSH install is Infera-only; RayJob kernel-agent uses the Ray runtime.
     from hyperloom.inference_optimizer.multi_node import cli as mn_cli

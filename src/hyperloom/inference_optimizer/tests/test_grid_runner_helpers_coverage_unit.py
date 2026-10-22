@@ -61,6 +61,74 @@ def test_compatibility_filter_no_model_path_assumes_compatible() -> None:
     assert [v.name for v in kept] == ["moe"] and dropped == []
 
 
+# -- ungrounded_env_file_reason (env-value file grounding) ----------------
+def test_ungrounded_env_file_reason_drops_missing_config_path(tmp_path) -> None:
+    # A proposal may point a config env at an artifact no stage authored; the server would read it
+    # unconditionally and die at config load, so the variant must be dropped with a reason.
+    v = _variant("gemm", envs={"AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE": str(tmp_path / "nope.csv")})
+    reason = gr.ungrounded_env_file_reason(v.extra_envs)
+    assert reason and "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE" in reason
+    assert str(tmp_path / "nope.csv") in reason
+
+
+def test_ungrounded_env_file_reason_passes_authored_file(tmp_path) -> None:
+    csv = tmp_path / "tuned.csv"
+    csv.write_text("gfx,M,N,K,splitK\ngfx950,64,5120,5120,2\n", encoding="utf-8")
+    v = _variant("gemm", envs={"AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE": str(csv)})
+    assert gr.ungrounded_env_file_reason(v.extra_envs) is None
+
+
+def test_ungrounded_env_file_reason_accepts_colon_joined_existing_files(tmp_path) -> None:
+    # A set AITER_CONFIG_* is aiter's SET form: a `:`-joined list, each element loaded (csvs_aiter_will_load).
+    # Both files on disk is a valid variant and must not be dropped.
+    a = tmp_path / "t.csv"
+    a.write_text("gfx,M,N,K\ngfx950,1,2,3\n", encoding="utf-8")
+    b = tmp_path / "t2.csv"
+    b.write_text("gfx,M,N,K\ngfx950,4,5,6\n", encoding="utf-8")
+    v = _variant("gemm", envs={"AITER_CONFIG_GEMM_BF16": f"{a}:{b}"})
+    assert gr.ungrounded_env_file_reason(v.extra_envs) is None
+
+
+def test_ungrounded_env_file_reason_drops_colon_joined_missing_element(tmp_path) -> None:
+    a = tmp_path / "t.csv"
+    a.write_text("gfx,M,N,K\ngfx950,1,2,3\n", encoding="utf-8")
+    missing = str(tmp_path / "never_authored.csv")
+    v = _variant("gemm", envs={"AITER_CONFIG_GEMM_BF16": f"{a}:{missing}"})
+    reason = gr.ungrounded_env_file_reason(v.extra_envs)
+    assert reason and missing in reason and str(a) not in reason.split("element(s)")[1].split(" do not exist")[0]
+
+
+def test_ungrounded_env_file_reason_treats_an_unreadable_path_as_missing(monkeypatch) -> None:
+    # An unreadable parent or an overlong name makes Path.is_file() raise; the variant is dropped, the grid runs on.
+    def raise_eacces(self):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(gr.Path, "is_file", raise_eacces)
+    v = _variant("gemm", envs={"AITER_CONFIG_GEMM_BF16": "/root/private/tuned.csv"})
+    reason = gr.ungrounded_env_file_reason(v.extra_envs)
+    assert reason and "/root/private/tuned.csv" in reason
+
+
+def test_run_grid_fast_fail_drops_a_variant_whose_config_file_is_missing(tmp_path, monkeypatch) -> None:
+    # The backstop of the admission check: run_grid's fast-fail drops it before boot, whatever the framework.
+    monkeypatch.setenv("FRAMEWORK", "sglang")
+    v = _variant("gemm", envs={"AITER_CONFIG_GEMM_BF16": str(tmp_path / "never_written.csv")})
+    assert "AITER_CONFIG_GEMM_BF16" in (gr.unsupported_capability_reason(v) or "")
+
+
+def test_ungrounded_env_file_reason_noop_without_config_envs(tmp_path) -> None:
+    # Non-file envs (even under aiter-ish prefixes like the JSON-payload AITER_CONFIG) must stay untouched.
+    v = _variant(
+        "plain",
+        envs={
+            "AITER_CONFIG": '{"path": "/tmp/never_scanned.json"}',
+            "SGLANG_USE_AITER": "1",
+            "AITER_CONFIG_GEMM_A8W8": "",
+        },
+    )
+    assert gr.ungrounded_env_file_reason(v.extra_envs) is None
+
+
 # -- unsupported_capability_reason (env-flag build probe) -----------------
 def _clear_cap_cache() -> None:
     gr._CAP_PROBE_CACHE.clear()
@@ -381,7 +449,7 @@ def test_build_variant_yaml_drops_unsafe_overlay(tmp_path: Path) -> None:
 def test_shell_safe_dedupe_preserves_json_and_dedupes_other_flags() -> None:
     """JSON stays an opaque argv token while unrelated flags dedupe last-wins."""
     args = '--json-model-override-args {"rope_scaling":null} --context-length 8192 --context-length 4096'
-    out = gr._shell_safe_dedupe(args)
+    out = gr.shell_safe_dedupe(args)
     assert out == '--json-model-override-args {"rope_scaling":null} --context-length 4096'
     assert json.loads(out.split("--json-model-override-args ", 1)[1].split(" ", 1)[0]) == {"rope_scaling": None}
 
@@ -389,20 +457,20 @@ def test_shell_safe_dedupe_preserves_json_and_dedupes_other_flags() -> None:
 def test_shell_safe_dedupe_leaves_multi_value_arg_untouched() -> None:
     """Multi-token flags must not be reassembled as stray positional tokens."""
     args = "--cuda-graph-bs 1 2 4 --cuda-graph-bs 8 16"
-    out = gr._shell_safe_dedupe(args)
+    out = gr.shell_safe_dedupe(args)
     assert out == args
 
 
 def test_shell_safe_dedupe_normalizes_equals_form() -> None:
     """--flag=value and --flag value must dedupe to one (last wins)."""
-    out = gr._shell_safe_dedupe("--attention-backend=ROCM_ATTN --attention-backend ROCM_AITER_FA")
+    out = gr.shell_safe_dedupe("--attention-backend=ROCM_ATTN --attention-backend ROCM_AITER_FA")
     assert out.count("--attention-backend") == 1, out
     assert "ROCM_AITER_FA" in out, "last-wins should keep the later value"
     assert "ROCM_ATTN" not in out
 
 
 def test_shell_safe_dedupe_simple_last_wins() -> None:
-    out = gr._shell_safe_dedupe("--tp 1 --tp 8 --mem-fraction-static 0.9")
+    out = gr.shell_safe_dedupe("--tp 1 --tp 8 --mem-fraction-static 0.9")
     assert out == "--tp 8 --mem-fraction-static 0.9"
 
 

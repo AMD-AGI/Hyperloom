@@ -9,6 +9,8 @@ import json
 import time
 from pathlib import Path
 
+import pytest
+
 from kernelforge.config import Config
 from kernelforge.rewrite_by_flydsl import (
     driver_contract,
@@ -372,3 +374,113 @@ def test_invalid_invocation_spec_fails_before_starting_an_agent(
     assert result.ok is False
     assert result.failure_class == driver_preparation.INVOCATION_SPEC_INVALID
     assert "JSON object" in result.error
+
+
+def _prepare(tmp_path, driver, *, deadline_unix=None, initial_preflight=None):
+    return asyncio.run(
+        driver_preparation.prepare_rewrite_driver(
+            spec=_spec(tmp_path),
+            config=Config.from_env(
+                workspace=str(tmp_path),
+                experiments_dir=tmp_path / "experiments",
+                agent_timeout_sec=90,
+            ),
+            preparation=driver_preparation.DriverPreparation(
+                driver_path=str(driver),
+                experiments_dir=str(tmp_path / "experiments"),
+                deadline_unix=deadline_unix,
+                max_attempts=1,
+            ),
+            initial_preflight=initial_preflight,
+        )
+    )
+
+
+async def _unexpected_agent(**kwargs):
+    raise AssertionError("the agent must not run")
+
+
+@pytest.mark.parametrize(
+    ("destination", "error"),
+    [
+        ("source.py", "the driver destination collides with a kernel under validation"),
+        (
+            "forge_experiments/driver.py",
+            "the driver destination is producer-owned experiment state and cannot own the correctness gate",
+        ),
+    ],
+)
+def test_a_destination_that_cannot_own_the_gate_fails_before_agent_work(tmp_path, monkeypatch, destination, error):
+    monkeypatch.setattr(driver_preparation, "_run_agent", _unexpected_agent)
+
+    result = _prepare(tmp_path, tmp_path / destination)
+
+    assert result.ok is False
+    assert result.failure_class == driver_contract.DRIVER_NOT_INDEPENDENT
+    assert result.error == error
+    assert result.audit_dir == ""
+
+
+@pytest.mark.parametrize(
+    ("failure", "event"),
+    [
+        (asyncio.TimeoutError(), {"status": "timeout", "timeout_sec": 90}),
+        (RuntimeError("backend exploded"), {"status": "error", "type": "RuntimeError", "error": "backend exploded"}),
+    ],
+)
+def test_a_failed_authoring_session_is_audited_with_its_progress(tmp_path, monkeypatch, failure, event):
+    async def failing_agent(**kwargs):
+        kwargs["turn"].progress_log.append("tool:Read evidence")
+        raise failure
+
+    monkeypatch.setattr(driver_preparation, "_run_agent", failing_agent)
+    monkeypatch.setattr(
+        driver_preparation,
+        "preflight_rewrite_driver",
+        lambda *args, **kwargs: _failed_preflight("placeholder driver"),
+    )
+
+    result = _prepare(tmp_path, tmp_path / "rewrite_driver.py")
+
+    attempt = Path(result.audit_dir) / "attempt_01"
+    assert result.ok is False
+    assert json.loads((attempt / "agent_event.json").read_text(encoding="utf-8")) == event
+    assert (attempt / "agent_progress.txt").read_text(encoding="utf-8") == "tool:Read evidence"
+    assert (attempt / "driver_after_agent.py").is_file()
+    assert not (tmp_path / "rewrite_driver.py").exists()
+
+
+def test_an_attempt_that_deletes_the_driver_is_rejected_without_preflight(tmp_path, monkeypatch):
+    async def deleting_agent(**kwargs):
+        kwargs["turn"].stage_driver.unlink()
+        return "removed it"
+
+    def unexpected_preflight(*args, **kwargs):
+        raise AssertionError("a deleted driver must not be preflighted")
+
+    monkeypatch.setattr(driver_preparation, "_run_agent", deleting_agent)
+    monkeypatch.setattr(driver_preparation, "preflight_rewrite_driver", unexpected_preflight)
+
+    result = _prepare(tmp_path, tmp_path / "rewrite_driver.py")
+
+    assert result.ok is False
+    assert result.failure_class == driver_preparation.DRIVER_PREPARATION_FAILED
+    assert result.error == "the previous attempt deleted the required driver"
+    assert not (tmp_path / "rewrite_driver.py").exists()
+
+
+def test_preparation_past_its_deadline_reports_the_deadline_and_the_last_failure(tmp_path, monkeypatch):
+    monkeypatch.setattr(driver_preparation, "_run_agent", _unexpected_agent)
+
+    result = _prepare(
+        tmp_path,
+        tmp_path / "rewrite_driver.py",
+        deadline_unix=1.0,
+        initial_preflight=_failed_preflight("stale driver"),
+    )
+
+    assert result.ok is False
+    assert result.attempts == 0
+    assert result.failure_class == driver_preparation.DRIVER_PREPARATION_DEADLINE
+    assert result.error == "driver preparation reached its deadline; last failure: stale driver"
+    assert result.preflight is not None and result.preflight.detail == "stale driver"

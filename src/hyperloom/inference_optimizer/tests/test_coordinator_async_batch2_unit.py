@@ -21,7 +21,7 @@ from hyperloom.orchestrator.roles import (
     MockBackend,
     ScriptedPlan,
 )
-from hyperloom.orchestrator.roles.mcp_context_tools import ContextProvider
+from hyperloom.orchestrator.roles.mcp_context_tools import ContextProvider, _make_handler
 from hyperloom.inference_optimizer.session.optimization_journal import Verdict
 from hyperloom.orchestrator.actions.executors.explore import STACK_REVALIDATE_SOURCE
 from hyperloom.orchestrator.loop.coordinator import Coordinator
@@ -182,6 +182,56 @@ async def test_context_inbox_reader_with_events(coord: Coordinator) -> None:
     assert isinstance(out, str)
 
 
+@pytest.mark.asyncio
+async def test_context_inbox_reader_survives_scalar_specialist_findings(coord: Coordinator) -> None:
+    """``new_findings`` / ``residual_questions`` reach the row from the specialist's own JSON.
+
+    The schema asks for a list, but a model writes it, so a bare scalar can arrive
+    there. The inbox is rendered on every orchestration round, so a scalar that
+    raises costs the whole session, not one row, and one counted by ``len`` reports
+    the character count of a string as a finding count.
+    """
+    for findings, questions in ((5, 3), ("one finding", "is the tokenizer the bound?")):
+        await coord.bus.append_and_seq(
+            Message.new(
+                "kernel_agent",
+                "orchestration",
+                "delegated_result",
+                {
+                    "kind": "specialist",
+                    "state": "done",
+                    "result": {
+                        "specialist_done": {
+                            "summary": "fp8 kv cache holds",
+                            "new_findings": findings,
+                            "residual_questions": questions,
+                        }
+                    },
+                },
+            )
+        )
+        out = coord.conversation._context_inbox_reader()
+        assert "fp8 kv cache holds" in out
+        assert "findings=1" in out
+        assert "questions=1" in out
+
+    await coord.bus.append_and_seq(
+        Message.new(
+            "kernel_agent",
+            "orchestration",
+            "delegated_result",
+            {
+                "kind": "specialist",
+                "state": "done",
+                "result": {"specialist_done": {"new_findings": ["a", "b"], "residual_questions": ["q"]}},
+            },
+        )
+    )
+    out = coord.conversation._context_inbox_reader()
+    assert "findings=2" in out
+    assert "questions=1" in out
+
+
 # -- _context_recent_outcomes_reader ----------------------------------------
 def test_recent_outcomes_reader_empty(coord: Coordinator) -> None:
     assert coord.conversation._context_recent_outcomes_reader() == "(no recent outcomes)"
@@ -202,6 +252,7 @@ def test_recent_outcomes_reader_clamps_top_k(coord: Coordinator) -> None:
 
 
 # -- context reader failure surface -----------------------------------------
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("owner", "source", "tool"),
     [
@@ -210,7 +261,7 @@ def test_recent_outcomes_reader_clamps_top_k(coord: Coordinator) -> None:
         ("tasks", "running_context_sync", "running_tasks"),
     ],
 )
-def test_context_reader_failure_carries_traceback_to_the_log(
+async def test_context_reader_failure_carries_traceback_to_the_log(
     coord: Coordinator,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
@@ -230,10 +281,10 @@ def test_context_reader_failure_carries_traceback_to_the_log(
     )
 
     with caplog.at_level(logging.ERROR, logger="hyperloom.orchestrator.roles.mcp_context_tools"):
-        out = getattr(provider, tool)()
+        out = await _make_handler(provider, tool)({})
 
-    assert f"context tool {tool} unavailable" in out
-    assert "projection read exploded" in out
+    assert out["is_error"] is True
+    assert "projection read exploded" in out["content"][0]["text"]
     assert "Traceback (most recent call last)" in caplog.text
 
 
@@ -307,7 +358,8 @@ async def test_resume_restores_promoted_inferencex_checkout(
     tmp_path,
 ) -> None:
     active = tmp_path / "active-inferencex"
-    active.mkdir()
+    (active / "benchmarks").mkdir(parents=True)
+    (active / "benchmarks" / "benchmark_lib.sh").write_text("#!/bin/bash\n")
     coord.writeback._resumed_from["is_resume"] = True
     coord.shared_state.active_inferencex_path = str(active)
     # setenv, not delenv: delenv of an absent name arms no undo, so the value the resume pass exports below would leak
@@ -317,6 +369,28 @@ async def test_resume_restores_promoted_inferencex_checkout(
     await coord.writeback._resume_consistency_pass()
 
     assert os.environ["INFERENCEX_PATH"] == str(active)
+
+
+@pytest.mark.asyncio
+async def test_resume_does_not_export_a_framework_tree_as_the_inferencex_path(
+    coord: Coordinator,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """A state written with a framework tree as the InferenceX path must not redirect every later round to it."""
+    pinned = tmp_path / "InferenceX@pin"
+    framework = tmp_path / "sglang"
+    framework.mkdir()
+    coord.writeback._resumed_from["is_resume"] = True
+    coord.shared_state.active_inferencex_path = str(framework)
+    monkeypatch.setenv("INFERENCEX_PATH", str(pinned))
+
+    report = await coord.writeback._resume_consistency_pass()
+
+    assert os.environ["INFERENCEX_PATH"] == str(pinned)
+    assert coord.shared_state.active_inferencex_path == ""
+    assert {"kind": "active_inferencex_checkout_invalid", "path": str(framework)} in report["warnings"]
+    assert coord.shared_state.stop_reason != "active_inferencex_checkout_missing"
 
 
 @pytest.fixture
@@ -1868,7 +1942,7 @@ async def test_warm_specialist_params_rich_context(coord: Coordinator, monkeypat
 async def test_record_fact_per_task_writes_lesson(coord: Coordinator, monkeypatch) -> None:
     from hyperloom.orchestrator.state.task_registry import Task
 
-    coord.knowledge_plane = KnowledgePlane(recipe_kb=object())  # non-None -> KB amend path
+    coord.knowledge_plane = KnowledgePlane(recipe_kb=_FakeRecipeKB())  # non-None -> KB amend path
     coord.shared_state.model_name = "llama"
     coord.shared_state.gpu_type = "mi300x"
     amends: list[dict] = []
@@ -2084,6 +2158,25 @@ async def test_record_specialist_result_logs_ungrounded_patches(coord: Coordinat
 
 
 @pytest.mark.asyncio
+async def test_record_specialist_result_logs_proposals_whose_env_files_are_missing(coord: Coordinator) -> None:
+    """A proposal dropped at admission for an env file no stage wrote reaches the failure log the same way."""
+    task = _ptask("rec-spec-env", "specialist")
+    await coord.specialist_dispatch.record_specialist_result(
+        task=task,
+        done_payload={
+            "domain": "candidate_discovery_specialist",
+            "gap_canonical_id": "g1",
+            "proposal_set": [],
+            "proposals_env_ungrounded": ["proposal 'tuned-gemm': AITER_CONFIG_GEMM_BF16 points at /tmp/t.csv"],
+        },
+        source="specialist:rec-spec-env",
+    )
+    failures = [f for f in coord.shared_state.last_action_failures if f["task_id"] == "rec-spec-env"]
+    assert [f["error_class"] for f in failures] == ["proposal_env_file_missing"]
+    assert "AITER_CONFIG_GEMM_BF16" in failures[0]["error_excerpt"]
+
+
+@pytest.mark.asyncio
 async def test_record_specialist_result_no_dead_research_evidence_log(
     coord: Coordinator,
     caplog,
@@ -2162,6 +2255,9 @@ class _FakeLocal:
 class _FakeRecipeKB:
     def __init__(self) -> None:
         self.local = _FakeLocal()
+
+    def get_authoritative_recipe(self, *, canonical_id):
+        return self.local.get_recipe(canonical_id=canonical_id)
 
 
 @pytest.mark.asyncio

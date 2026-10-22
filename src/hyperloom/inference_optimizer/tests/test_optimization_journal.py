@@ -27,6 +27,8 @@ from hyperloom.inference_optimizer.session.optimization_journal import (
     Verdict,
     classify_change_kind,
     derive_journal_outcome,
+    journal_path,
+    read_journal_entries,
     summarize_change,
 )
 
@@ -154,6 +156,28 @@ def test_load_or_create_recovers_from_corrupt_file(
     )
     assert j.entries == []
     assert j.session_id == "sid-x"
+
+
+# Reading without a writer
+def test_read_journal_entries_returns_what_the_writer_flushed(session_dir: Path):
+    j = Journal.load_or_create(session_dir, Journal(session_id="s", model="m", hardware="h"))
+    j.append_entry(JournalEntry(phase="EXPLORE", iter=2, kind=KIND_PARAM, change="X", outcome=OUTCOME_REVERT, tick=7))
+    [entry] = read_journal_entries(session_dir)
+    assert (entry.phase, entry.iter, entry.change, entry.outcome, entry.tick) == ("EXPLORE", 2, "X", OUTCOME_REVERT, 7)
+
+
+def test_read_journal_entries_on_a_session_without_a_journal_creates_nothing(session_dir: Path):
+    assert read_journal_entries(session_dir) == []
+    assert not (session_dir / "reports").exists()
+
+
+def test_read_journal_entries_reports_a_corrupt_file_and_reads_empty(session_dir: Path):
+    path = journal_path(session_dir)
+    path.parent.mkdir(parents=True)
+    path.write_text("{ not json", encoding="utf-8")
+    errors: list[BaseException] = []
+    assert read_journal_entries(session_dir, on_error=errors.append) == []
+    assert len(errors) == 1
 
 
 # Journal — mutation + persistence

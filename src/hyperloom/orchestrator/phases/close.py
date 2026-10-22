@@ -6,6 +6,7 @@
 from __future__ import annotations
 import asyncio
 import hashlib
+import sqlite3
 import time
 import uuid
 from collections.abc import Awaitable
@@ -151,7 +152,7 @@ class ClosePhase(CoordinatorCollaborator):
                         "failed",
                         {"reason": "close_post_opt_roofline_timeout"},
                     )
-            except Exception:
+            except (sqlite3.Error, TaskNotFound, IllegalTransition):
                 log.debug(
                     "CLOSE step 0: failed to mark timed-out post-opt roofline task",
                     exc_info=True,
@@ -259,79 +260,77 @@ class ClosePhase(CoordinatorCollaborator):
             detail=f"task_state={getattr(result, 'state', '')} validated={validated}",
         )
 
-    def _record_close_roofline_progress(self) -> None:
+    async def _record_close_roofline_progress(self) -> None:
         """Snapshot the session's roofline progress into the close section."""
-        try:
-            state = self.shared_state
-            snapshots = state.roofline_snapshots if isinstance(state.roofline_snapshots, list) else []
-            _close_out.record_roofline_progress(
-                self.session_dir,
-                _close_out.RooflineProgress(
-                    baseline_tput=state.baseline_tput,
-                    baseline_ts=state.start_ts,
-                    optimization_stack=state.optimization_stack,
-                    latest_snapshot=snapshots[-1] if snapshots else None,
-                    current_best_tput=(state.current_best or {}).get("tput"),
-                    cumulative_gain_pct=state.cumulative_gain_validated,
-                    failure_streak=state.roofline_failure_streak,
-                ),
-            )
-        except Exception:
-            log.debug("CLOSE: roofline progress record failed", exc_info=True)
+        state = self.shared_state
+        snapshots = state.roofline_snapshots if isinstance(state.roofline_snapshots, list) else []
+        _close_out.record_roofline_progress(
+            self.session_dir,
+            _close_out.RooflineProgress(
+                baseline_tput=state.baseline_tput,
+                baseline_ts=state.start_ts,
+                optimization_stack=state.optimization_stack,
+                latest_snapshot=snapshots[-1] if snapshots else None,
+                current_best_tput=(state.current_best or {}).get("tput"),
+                cumulative_gain_pct=state.cumulative_gain_validated,
+                failure_streak=state.roofline_failure_streak,
+            ),
+        )
 
-    def _close_stack_ledger(self) -> None:
+    async def _record_close_geak_candidate(self) -> None:
+        """Snapshot the unsettled GEAK candidate into the close section."""
+        _close_out.record_geak_candidate(self.session_dir, self.shared_state.geak_pending)
+
+    async def _record_close_progress(self) -> None:
+        """Record the roofline, baseline and GEAK candidate sections, each as its own close step."""
+        await self._run_close_step("roofline_progress", self._record_close_roofline_progress())
+        await self._run_close_step("baseline_progress", self._record_close_baseline_progress())
+        await self._run_close_step("geak_candidate", self._record_close_geak_candidate())
+
+    async def _close_stack_ledger(self) -> None:
         """Settle the stack ledger's timeline event.
 
         A session that never reaches here leaves the ledger open, and finalize
         reports it interrupted -- the truthful reading, since the reconciliation
         never ran.
         """
-        try:
-            from hyperloom.inference_optimizer.breakdown.recorder import stack_event
+        from hyperloom.inference_optimizer.breakdown.recorder import stack_event
 
-            stack_event.finish()
-        except Exception:
-            log.debug("CLOSE: stack ledger close failed", exc_info=True)
+        stack_event.finish()
 
-    def _record_close_baseline_progress(self) -> None:
+    async def _record_close_baseline_progress(self) -> None:
         """Snapshot the session's baseline failure tally into the close section."""
-        try:
-            state = self.shared_state
-            _close_out.record_baseline_progress(
-                self.session_dir,
-                failure_streak=state.baseline_failure_streak,
-                total_failures=state.baseline_total_failures,
-                arg_error_streak=state.baseline_arg_error_streak,
-            )
-        except Exception:
-            log.debug("CLOSE: baseline progress record failed", exc_info=True)
+        state = self.shared_state
+        _close_out.record_baseline_progress(
+            self.session_dir,
+            failure_streak=state.baseline_failure_streak,
+            total_failures=state.baseline_total_failures,
+            arg_error_streak=state.baseline_arg_error_streak,
+        )
 
-    def _record_close_final_recipe(self) -> None:
+    async def _record_close_final_recipe(self) -> None:
         """Snapshot the configuration the session ended on into the close section."""
-        try:
-            state = self.shared_state
-            best = state.current_best
-            config = self._coord.writeback.current_best_launch_config()
-            action_path: list[str] = []
-            for entry in state.optimization_stack or []:
-                if not isinstance(entry, dict):
-                    continue
-                action = str(entry.get("action") or "")
-                variant = str(entry.get("variant_name") or "")
-                action_path.append(f"{action}:{variant}" if variant else action)
-            _close_out.record_final_recipe(
-                self.session_dir,
-                _close_out.FinalRecipe(
-                    throughput=best.get("tput"),
-                    ttft_mean_ms=best.get("ttft_mean_ms"),
-                    e2el_mean_ms=best.get("e2el_mean_ms"),
-                    action_path=action_path,
-                    extra_server_args=config.get("extra_server_args") or "",
-                    extra_envs=config.get("extra_envs") or {},
-                ),
-            )
-        except Exception:
-            log.debug("CLOSE: final recipe record failed", exc_info=True)
+        state = self.shared_state
+        best = state.current_best
+        config = self._coord.writeback.current_best_launch_config()
+        action_path: list[str] = []
+        for entry in state.optimization_stack or []:
+            if not isinstance(entry, dict):
+                continue
+            action = str(entry.get("action") or "")
+            variant = str(entry.get("variant_name") or "")
+            action_path.append(f"{action}:{variant}" if variant else action)
+        _close_out.record_final_recipe(
+            self.session_dir,
+            _close_out.FinalRecipe(
+                throughput=best.get("tput"),
+                ttft_mean_ms=best.get("ttft_mean_ms"),
+                e2el_mean_ms=best.get("e2el_mean_ms"),
+                action_path=action_path,
+                extra_server_args=config.get("extra_server_args") or "",
+                extra_envs=config.get("extra_envs") or {},
+            ),
+        )
 
     async def _run_close_step(self, step_name: str, coro: Awaitable[None]) -> None:
         """Execute one CLOSE step and record success or failure.
@@ -468,7 +467,7 @@ class ClosePhase(CoordinatorCollaborator):
             )
         else:
             await self._record_close_step(
-                "artifact_package", status="skipped", detail="no artifacts matched or dest unwritable"
+                "artifact_package", status="skipped", detail="no artifacts matched or session dir missing"
             )
         return pkg_path
 
@@ -493,12 +492,11 @@ class ClosePhase(CoordinatorCollaborator):
         # Recorded here rather than derived by the exporter: this is the first
         # moment each of these is final, and the snapshot history the exporter
         # would re-walk is capped and may have evicted what it needs.
-        self._record_close_roofline_progress()
-        self._record_close_baseline_progress()
-        self._close_stack_ledger()
+        await self._record_close_progress()
+        await self._run_close_step("stack_ledger", self._close_stack_ledger())
         # A revert leaves its adoption row standing, so what the stack ended as
         # is stated here or nowhere.
-        self._record_close_final_recipe()
+        await self._run_close_step("final_recipe", self._record_close_final_recipe())
 
         # Fact finalize (Recipe KB commit): publish before report/breakdown/Langfuse so the terminal outcome and
         # audit row are captured by the session's final telemetry.
@@ -530,7 +528,7 @@ class ClosePhase(CoordinatorCollaborator):
         self.shared_state.close_sequence_done = True
         try:
             self.shared_state.save(self.session_dir)
-        except Exception:
+        except OSError:
             log.exception(
                 "CLOSE step 5 (close_sequence_done save) failed; cli.finally will still write a safety-net breakdown"
             )
@@ -576,7 +574,7 @@ class ClosePhase(CoordinatorCollaborator):
                         "nothing; %s still carries the pre-refresh close section",
                         pkg_path,
                     )
-        except Exception:
+        except (OSError, ValueError):
             log.warning(
                 "CLOSE step 6 (close section refresh) failed; the artifact package may still carry "
                 "the pre-refresh close section",
@@ -674,7 +672,7 @@ class ClosePhase(CoordinatorCollaborator):
             self.shared_state.closing_report_task_id = task.task_id
             try:
                 self.shared_state.save(self.session_dir)
-            except Exception:
+            except OSError:
                 log.exception("internal-report: closing_report_task_id save failed")
         return task
 
@@ -832,7 +830,7 @@ class ClosePhase(CoordinatorCollaborator):
             return
         try:
             self.shared_state.save(self.session_dir)
-        except Exception:
+        except OSError:
             log.exception(
                 "close_step save failed for step=%r status=%r",
                 step,
@@ -917,7 +915,7 @@ class ClosePhase(CoordinatorCollaborator):
                     "cancelled",
                     evidence={"reason": "closing_phase"},
                 )
-        except Exception:
+        except (sqlite3.Error, TaskNotFound, IllegalTransition):
             log.exception(
                 "closing_phase: cancel of queued tasks failed (non-fatal)",
             )

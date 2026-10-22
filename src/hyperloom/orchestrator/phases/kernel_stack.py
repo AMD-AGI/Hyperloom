@@ -7,10 +7,10 @@ from __future__ import annotations
 import logging as _logging
 from collections.abc import Mapping
 from datetime import datetime, timezone
-from typing import Any, NoReturn
-from hyperloom.common.perf_metric import VERDICT_KEEP, VERDICT_REVERT
+from pathlib import Path
+from typing import Any, NamedTuple, NoReturn
+from hyperloom.common.perf_metric import GradedComparison, VERDICT_KEEP, VERDICT_REVERT
 from hyperloom.inference_optimizer.breakdown.stop_reasons import PATCH_RECOVERY_INCOMPLETE_STOP_REASON
-from ..kernel._kernel_decisions import _entry_by_kernel_id
 from ..kernel.patch_lifecycle import (
     CLEANUP_ACTION_NONE,
     CLEANUP_ACTION_REVERT,
@@ -53,6 +53,30 @@ def resolve_stack_members(record: Mapping[str, Any]) -> tuple[str, ...]:
     return members
 
 
+_STACK_IDENTITY_KEYS: tuple[str, ...] = ("kernel_id", "patch_path", "target_file")
+
+
+def _names_every_identity_field(row: Any) -> bool:
+    """Whether a row carries every field a stack member is bound by."""
+    return isinstance(row, dict) and all(
+        isinstance(row.get(key), str) and row[key].strip() for key in _STACK_IDENTITY_KEYS
+    )
+
+
+def _expected_member_identities(
+    members: tuple[str, ...],
+    identities: list[dict[str, Any]],
+) -> dict[str, tuple[str, ...]]:
+    """The identity tuple each member must match, refusing identities that do not describe ``members``."""
+    if (
+        not isinstance(identities, list)
+        or not all(_names_every_identity_field(row) for row in identities)
+        or tuple(row["kernel_id"] for row in identities) != members
+    ):
+        raise ValueError("stack member identities do not match the requested members")
+    return {row["kernel_id"]: tuple(row[key] for key in _STACK_IDENTITY_KEYS) for row in identities}
+
+
 def _matching_stack_entries(
     members: tuple[str, ...],
     entries: Mapping[str, Any],
@@ -60,24 +84,13 @@ def _matching_stack_entries(
     identities: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     """Bind members by independent patch identities before testing ledger ambiguity."""
-    identity_keys = ("kernel_id", "patch_path", "target_file")
-    if (
-        not isinstance(identities, list)
-        or any(
-            not isinstance(row, dict)
-            or any(not isinstance(row.get(key), str) or not row[key].strip() for key in identity_keys)
-            for row in identities
-        )
-        or tuple(row["kernel_id"] for row in identities) != members
-    ):
-        raise ValueError("stack member identities do not match the requested members")
-    expected = {row["kernel_id"]: tuple(row[key] for key in identity_keys) for row in identities}
+    expected = _expected_member_identities(members, identities)
     found: dict[str, dict[str, Any]] = {}
     for entry in entries.values():
         if not isinstance(entry, dict) or entry.get("kernel_id") not in members:
             continue
         kid = entry["kernel_id"]
-        if tuple(entry.get(key) for key in identity_keys) != expected[kid]:
+        if tuple(entry.get(key) for key in _STACK_IDENTITY_KEYS) != expected[kid]:
             continue
         if kid in found:
             raise ValueError(f"stack member {kid!r} matches multiple ledger entries")
@@ -95,6 +108,184 @@ def _revert_incomplete(stack_id: str) -> RuntimeError:
     return RuntimeError(f"stack {stack_id} revert incomplete; checkpoints retained for the next resume")
 
 
+class _StackIdentity(NamedTuple):
+    """What a kernel stack is: its members, their identities, and the files they touch."""
+
+    stack_id: str
+    kernel_ids: list[str]
+    identities: list[dict[str, Any]]
+    patch_paths: str
+    target_files: str
+
+
+class _StackGrade(NamedTuple):
+    """How one stacked-patch measurement graded against the session's objective."""
+
+    decision: str
+    verdict: str
+    new_tput: float
+    gain_pct: float
+    incremental_gain_pct: float
+    objective: str | None
+    degrade_reason: str
+
+
+class _StackSettlement(NamedTuple):
+    """How a validated stack was left on disk: finalized whole, or reverted whole."""
+
+    top_status: str
+    cleanup_status: str
+    cleanup_action: str
+    revert_result: dict[str, Any]
+    finalize_results: list[dict[str, Any]]
+
+
+class _StackRun(NamedTuple):
+    """The single E2E run a stack decision rests on."""
+
+    base_tput: float
+    workspace: Path
+    bench_result: Any
+    apply_results: list[dict[str, Any]]
+
+
+def _stack_identity(entries: list[dict[str, Any]]) -> _StackIdentity:
+    """Read a stack's composite identity off its ledger entries."""
+    kernel_ids = [entry["kernel_id"] for entry in entries]
+    return _StackIdentity(
+        stack_id="+".join(kernel_ids),
+        kernel_ids=kernel_ids,
+        identities=[{key: entry[key] for key in _STACK_IDENTITY_KEYS} for entry in entries],
+        patch_paths="+".join(str(entry.get("patch_path") or "") for entry in entries),
+        target_files="+".join(str(entry.get("target_file") or "") for entry in entries),
+    )
+
+
+def _graded_stack_decision(graded: GradedComparison, stack_id: str) -> str:
+    """The decision a graded stack comparison asks for, with the figures behind it."""
+    if not graded.comparable:
+        # Fail closed rather than REVERT. A stack that could not be graded on the axis the session asked
+        # for has an output-axis figure only; promoting or discarding a kernel stack on a substitute axis
+        # is a call for a human, and the revert path still leaves the tree clean either way.
+        log.info("stack-validate: %s performance comparison unavailable (%s)", stack_id, graded.degrade_reason)
+        return "NEEDS_REVIEW"
+    if graded.verdict != VERDICT_KEEP:
+        log.info(
+            "stack-validate: %s %s intvty %.1f->%.1f tput %.1f->%.1f",
+            stack_id,
+            graded.verdict,
+            graded.reference,
+            graded.candidate,
+            graded.tput_reference,
+            graded.tput_candidate,
+        )
+        return "REVERT"
+    return "KEEP"
+
+
+def _settle_kept_stack(apply_results: list[dict[str, Any]]) -> _StackSettlement:
+    """Make every patch of a kept stack permanent."""
+    from ..actions.executors._kernel_agent_tool import _maybe_finalize_kernel_patch
+
+    finalize_results = [_maybe_finalize_kernel_patch(applied) for applied in apply_results]
+    all_finalized = all(lifecycle_complete(result) for result in finalize_results)
+    revert_result: dict[str, Any] = {"status": "skipped", "reason": "KEEP decision"}
+    top_status, cleanup_status, cleanup_action = cleanup_verdict(
+        decision="KEEP",
+        revert_result=revert_result,
+        finalize_result={"status": "ok" if all_finalized else "failed"},
+        revert_required=False,
+    )
+    return _StackSettlement(top_status, cleanup_status, cleanup_action, revert_result, finalize_results)
+
+
+def _revert_whole_stack(apply_results: list[dict[str, Any]], decision: str) -> _StackSettlement:
+    """Undo every applied patch: a stack cannot be left half-applied."""
+    from ..actions.executors._kernel_agent_tool import _maybe_revert_kernel_patch
+
+    stack_reverts = [_maybe_revert_kernel_patch(applied) for applied in reversed(apply_results)]
+    all_reverted = all(lifecycle_complete(result) for result in stack_reverts)
+    top_status, cleanup_status, cleanup_action = cleanup_verdict(
+        decision=decision,
+        revert_result={"status": "ok" if all_reverted else "failed"},
+        finalize_result={"status": "skipped"},
+        revert_required=bool(apply_results),
+    )
+    revert_result = {"status": "ok" if all_reverted else "failed", "stack_reverts": stack_reverts}
+    return _StackSettlement(top_status, cleanup_status, cleanup_action, revert_result, [])
+
+
+def _stack_validation_record(
+    stack: _StackIdentity,
+    run: _StackRun,
+    grade: _StackGrade,
+    settlement: _StackSettlement,
+) -> dict[str, Any]:
+    """The integrate-shaped record one stack validation publishes."""
+    from ..kernel.request_handlers import KERNEL_STACK_VALIDATION_KEEP_THRESHOLD_PCT
+
+    bench = run.bench_result if isinstance(run.bench_result, dict) else {}
+    record: dict[str, Any] = {
+        "status": settlement.top_status,
+        "decision": grade.decision,
+        "patch_cleanup_status": settlement.cleanup_status,
+        "patch_cleanup_action": settlement.cleanup_action,
+        "kernel_id": stack.stack_id,
+        "patch_path": stack.patch_paths,
+        "target_file": stack.target_files,
+        "base_tput": run.base_tput,
+        "new_tput": grade.new_tput,
+        "gain_pct": grade.gain_pct,
+        "graded_objective": grade.objective,
+        "bench_result": run.bench_result,
+        "stack_incremental_gain_pct": grade.incremental_gain_pct,
+        "stack_incremental_keep_threshold_pct": KERNEL_STACK_VALIDATION_KEEP_THRESHOLD_PCT,
+        "graded_verdict": grade.verdict,
+        "report_path": bench.get("report_path"),
+        "workspace": bench.get("workspace") if isinstance(run.bench_result, dict) else str(run.workspace),
+        "apply_result": {"status": "ok", "stack_apply_results": run.apply_results},
+        "revert_result": settlement.revert_result,
+        "finalize_results": settlement.finalize_results,
+        "stack_kernel_ids": stack.kernel_ids,
+        "stack_validation": True,
+        "stack_member_identities": stack.identities,
+    }
+    if grade.degrade_reason:
+        record["reason"] = f"performance comparison unavailable: {grade.degrade_reason}"
+    if settlement.top_status == "failed":
+        record["error_class"] = "patch_revert_incomplete"
+        record["error"] = "Stack patch revert did not fully complete"
+    for metric in ("ttft_mean_ms", "e2el_mean_ms", "tpot_mean_ms"):
+        if metric in bench:
+            record[metric] = bench.get(metric)
+    return record
+
+
+def _abandoned_stack_record(
+    stack: _StackIdentity,
+    apply_results: list[dict[str, Any]],
+    exc: Exception,
+) -> dict[str, Any]:
+    """The record of a stack whose validation raised: whatever was applied is rolled back."""
+    from ..actions.executors._kernel_agent_tool import _maybe_revert_kernel_patch
+
+    reverts = [_maybe_revert_kernel_patch(applied) for applied in reversed(apply_results)]
+    any_failed = any(str(result.get("status") or "") not in {"ok", "skipped"} for result in reverts)
+    return {
+        "status": "failed",
+        "decision": "REVERT",
+        "patch_cleanup_status": CLEANUP_RECOVERY_REQUIRED if any_failed else CLEANUP_COMPLETE,
+        "patch_cleanup_action": CLEANUP_ACTION_REVERT if any_failed else CLEANUP_ACTION_NONE,
+        "kernel_id": stack.stack_id,
+        "error": repr(exc),
+        "apply_result": {"status": "failed", "stack_apply_results": apply_results},
+        "revert_result": {"status": "failed" if any_failed else "ok", "stack_reverts": reverts},
+        "stack_kernel_ids": stack.kernel_ids,
+        "stack_validation": True,
+        "stack_member_identities": stack.identities,
+    }
+
+
 class KernelStackPhase(CoordinatorCollaborator):
     """KERNEL_STACK phase handler: manages kernel stack revalidation and stack-level decisions."""
 
@@ -102,8 +293,21 @@ class KernelStackPhase(CoordinatorCollaborator):
         """Initialise the phase with its own in-flight integrate guard."""
         super().__init__(coordinator)
 
+    def _reject_undispatchable_integrate(self, pending: dict[str, Any]) -> None:
+        """Retire a queued integrate whose dispatch raised, so the drain loop cannot deadlock on it."""
+        state = self.shared_state
+        kid = str(pending.get("kernel_id") or "")
+        if state.rejected_kernel_ids is None:
+            state.rejected_kernel_ids = []
+        pending_task_key = str(pending.get("task_key") or "")
+        if not pending_task_key and kid not in state.rejected_kernel_ids:
+            state.rejected_kernel_ids.append(kid)
+        queued = (state.pending_kernel_integrations or {}).get(str(pending.get("integration_id") or ""))
+        if isinstance(queued, dict):
+            queued["status"] = "dispatch_failed"
+
     async def drain_pending_keep_integrates(self) -> None:
-        """Drain pending KEEP integrates inherited from KERNEL so sweep measures full current_best. Cap 10; a dispatch failure sets ``rejected_reason=integrate_dispatch_exception`` on the per-kernel and per-task_key attempt ledgers and flips the queued record to ``dispatch_failed``; only records with no ``task_key`` are also appended to ``rejected_kernel_ids``."""
+        """Drain pending KEEP integrates inherited from KERNEL so sweep measures full current_best. Cap 10; a dispatch failure flips the queued record to ``dispatch_failed``, and only records with no ``task_key`` are also appended to ``rejected_kernel_ids``."""
         from ..kernel.request_handlers import integrate_handler
 
         state = self.shared_state
@@ -123,14 +327,13 @@ class KernelStackPhase(CoordinatorCollaborator):
                 drained,
             )
             try:
-                base = float((state.current_best or {}).get("tput") or state.baseline_tput or 0.0)
                 result = await integrate_handler(
                     {
                         "kernel_id": kid,
                         "integration_id": integration_id,
                         "task_group_key": str(pending.get("task_group_key") or ""),
                         "identity_route": str(pending.get("identity_route") or ""),
-                        "base_tput": base,
+                        "base_tput": float((state.current_best or {}).get("tput") or state.baseline_tput or 0.0),
                     },
                     session_dir=self.session_dir,
                 )
@@ -138,33 +341,18 @@ class KernelStackPhase(CoordinatorCollaborator):
                     state.record_kernel_integrate_result(result)
                     if str(result.get("decision") or "").upper() == "KEEP":
                         await self._coord.writeback.record_integrate_keep(result)
-                state.save(self.session_dir)
             except Exception as exc:
                 log.exception(
                     "SWEEP entry: integrate(%s) raised %r; marking rejected to prevent drain loop deadlock",
                     kid,
                     exc,
                 )
-                if state.rejected_kernel_ids is None:
-                    state.rejected_kernel_ids = []
-                pending_task_key = str(pending.get("task_key") or "")
-                if not pending_task_key and kid not in state.rejected_kernel_ids:
-                    state.rejected_kernel_ids.append(kid)
-                attempt = _entry_by_kernel_id(state, kid)
-                if isinstance(attempt, dict):
-                    attempt["rejected_reason"] = "integrate_dispatch_exception"
-                stable_attempt = (state.kernel_opt_task_attempts or {}).get(pending_task_key)
-                if isinstance(stable_attempt, dict):
-                    stable_attempt["rejected_reason"] = "integrate_dispatch_exception"
-                queued = (state.pending_kernel_integrations or {}).get(integration_id)
-                if isinstance(queued, dict):
-                    queued["status"] = "dispatch_failed"
-                state.save(self.session_dir)
+                self._reject_undispatchable_integrate(pending)
+            state.save(self.session_dir)
             drained += 1
         if drained >= max_drain:
             log.warning(
-                "SWEEP entry: drain cap (%d) reached; remaining pending "
-                "KEEPs will be visible in summary.by_kernel as KEEP_PENDING",
+                "SWEEP entry: drain cap (%d) reached; remaining pending KEEPs stay queued",
                 max_drain,
             )
 
@@ -364,223 +552,142 @@ class KernelStackPhase(CoordinatorCollaborator):
         self.shared_state.save(self.session_dir)
         await self._finalize_stack_validation_outcome(stack, result)
 
+    def _apply_stack_patch(self, entry: dict[str, Any]) -> dict[str, Any]:
+        """Apply one member patch of a stack."""
+        from ..actions.executors._kernel_agent_tool import _maybe_apply_kernel_patch
+
+        payload = {
+            "kernel_id": entry.get("kernel_id"),
+            "patch_path": entry.get("patch_path"),
+            "target_file": entry.get("target_file"),
+        }
+        applied = _maybe_apply_kernel_patch(
+            payload,
+            session_dir=self.session_dir,
+            kernel_id=str(entry.get("kernel_id") or ""),
+        )
+        return {**applied, **payload}
+
+    async def _benchmark_stacked_patches(self, stack_id: str, workspace: Path) -> Any:
+        """Measure the session's benchmark once, with the whole stack applied."""
+        from ..actions.executors.baseline import BaselineExecutor
+        from hyperloom.inference_optimizer.breakdown.recorder.event_ids import INLINE_EVENT_PARAM
+        from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import kernel_event_id
+        from ..loop.sub_agent_runner import RunnerContext
+
+        fake_task = Task(
+            task_id=f"integrate-stack-{stack_id}",
+            kind="baseline",
+            state="running",
+            params={
+                "config_path": self.shared_state.baseline_config_path,
+                "output_dir": str(workspace),
+                "timeout_sec": 20 * 60,
+                "extra_server_args": ((self.shared_state.current_best or {}).get("extra_server_args") or ""),
+                # Synthetic kind="baseline": validates the stacked kernels against the already-anchored baseline
+                # on throughput alone.
+                "quality_ref_exempt": True,
+                # A sub-step of the KERNEL phase's own event, not a dispatched measurement, so it records into
+                # that event rather than leaving a baseline event of its own.
+                INLINE_EVENT_PARAM: kernel_event_id(int(self.shared_state.macro_cycle or 0)),
+            },
+            idempotency_key=f"integrate-stack-{stack_id}-rebaseline",
+        )
+        # Inject the live SharedState via ctx.extra (not the constructor).
+        return await BaselineExecutor(session_dir=self.session_dir)(
+            RunnerContext(
+                task=fake_task,
+                lease=None,
+                extra={"shared_state": self.shared_state},
+            )
+        )
+
+    def _grade_stacked_measurement(self, bench_result: Any, stack_id: str) -> _StackGrade:
+        """Grade a stacked-patch measurement against current_best and decide the stack's fate."""
+        # Lazy (re-)import so tests can monkeypatch it on the source module.
+        from ..actions.executors.benchmark_result import is_valid_measurement
+        from ..kernel.request_handlers import KERNEL_STACK_VALIDATION_KEEP_THRESHOLD_PCT
+
+        if not is_valid_measurement(bench_result):
+            return _StackGrade("REVERT", VERDICT_REVERT, 0.0, -100.0, -100.0, None, "")
+        base_tput = float(self.shared_state.baseline_tput or 0.0)
+        new_tput = float(bench_result.get("output_throughput") or 0.0)
+        # The stack is applied on top of current_best, so the KEEP decision is the incremental gain over
+        # current_best rather than the total gain over the baseline.
+        # The verdict is the chokepoint's: it already applies the AgentX keep-threshold floor and the
+        # throughput guard, so the stack lane must not re-derive a KEEP from the raw incremental gain.
+        graded = resolve_graded_comparison(
+            self.shared_state,
+            bench_result,
+            keep_threshold_pct=KERNEL_STACK_VALIDATION_KEEP_THRESHOLD_PCT,
+        )
+        return _StackGrade(
+            decision=_graded_stack_decision(graded, stack_id),
+            verdict=graded.verdict,
+            new_tput=new_tput,
+            gain_pct=(new_tput - base_tput) / base_tput * 100.0 if base_tput > 0 else 0.0,
+            incremental_gain_pct=(
+                (graded.candidate - graded.reference) / graded.reference * 100.0 if graded.reference > 0 else 0.0
+            ),
+            objective=graded.objective,
+            degrade_reason=graded.degrade_reason,
+        )
+
+    def _accuracy_gate_withholds_keep(self, bench_result: dict[str, Any], workspace: Path, stack_id: str) -> bool:
+        """Whether the accuracy gate refuses a stack the KEEP its throughput earned."""
+        from ..kernel.request_handlers import _grade_integrate_accuracy
+
+        accuracy_gate = _grade_integrate_accuracy(
+            bench_result,
+            baseline_accuracy=float(self.shared_state.baseline_accuracy or 0.0),
+            workspace=workspace,
+            # The args the bench server ran under, so a serving context too small to host an eval is not
+            # read as a broken eval.
+            server_args=str((self.shared_state.current_best or {}).get("extra_server_args") or ""),
+        )
+        if not accuracy_gate.get("blocked"):
+            return False
+        log.info("stack-validate: accuracy gate blocked KEEP for %s: %s", stack_id, accuracy_gate.get("reason"))
+        return True
+
     async def _run_kernel_stack_validation_e2e(
         self,
         entries: list[dict[str, Any]],
     ) -> dict[str, Any]:
         """Apply multiple kernel patches, run one E2E benchmark, then keep or revert the stack."""
-        from ..actions.executors.baseline import BaselineExecutor
-        from hyperloom.inference_optimizer.breakdown.recorder.event_ids import INLINE_EVENT_PARAM
-        from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import kernel_event_id
-
-        # Lazy (re-)import so tests can monkeypatch it on the source module.
-        from ..actions.executors.benchmark_result import is_valid_measurement
-        from ..kernel.request_handlers import (
-            KERNEL_STACK_VALIDATION_KEEP_THRESHOLD_PCT,
-            _grade_integrate_accuracy,
-        )
-        from ..actions.executors._kernel_agent_tool import (
-            _maybe_apply_kernel_patch,
-            _maybe_finalize_kernel_patch,
-            _maybe_revert_kernel_patch,
-        )
-        from ..loop.sub_agent_runner import RunnerContext
         from hyperloom.inference_optimizer.session.session_paths import unique_runs_dir
 
-        kernel_ids = [entry["kernel_id"] for entry in entries]
-        stack_id = "+".join(kernel_ids)
-        identities = [{key: entry[key] for key in ("kernel_id", "patch_path", "target_file")} for entry in entries]
+        stack = _stack_identity(entries)
         apply_results: list[dict[str, Any]] = []
         try:
             for entry in entries:
-                payload = {
-                    "kernel_id": entry.get("kernel_id"),
-                    "patch_path": entry.get("patch_path"),
-                    "target_file": entry.get("target_file"),
-                }
-                applied = _maybe_apply_kernel_patch(
-                    payload,
-                    session_dir=self.session_dir,
-                    kernel_id=str(entry.get("kernel_id") or ""),
-                )
-                applied = {**applied, **payload}
+                applied = self._apply_stack_patch(entry)
                 apply_results.append(applied)
-                self.shared_state.pending_stack_validation_apply_results = list(
-                    apply_results,
-                )
+                self.shared_state.pending_stack_validation_apply_results = list(apply_results)
                 self.shared_state.save(self.session_dir)
                 if applied.get("status") != "ok":
                     raise RuntimeError(f"stack patch apply failed for {entry.get('kernel_id')}: {applied}")
-
-            workspace = unique_runs_dir(self.session_dir, "integrate", f"integrate-stack-{stack_id}")
-            fake_task = Task(
-                task_id=f"integrate-stack-{stack_id}",
-                kind="baseline",
-                state="running",
-                params={
-                    "config_path": self.shared_state.baseline_config_path,
-                    "output_dir": str(workspace),
-                    "timeout_sec": 20 * 60,
-                    "extra_server_args": ((self.shared_state.current_best or {}).get("extra_server_args") or ""),
-                    # Synthetic kind="baseline": validates the stacked kernels against the already-anchored baseline
-                    # on throughput alone.
-                    "quality_ref_exempt": True,
-                    # A sub-step of the KERNEL phase's own event, not a dispatched measurement, so it records into
-                    # that event rather than leaving a baseline event of its own.
-                    INLINE_EVENT_PARAM: kernel_event_id(int(self.shared_state.macro_cycle or 0)),
-                },
-                idempotency_key=f"integrate-stack-{stack_id}-rebaseline",
-            )
-            # Inject the live SharedState via ctx.extra (not the constructor).
-            bench_result = await BaselineExecutor(session_dir=self.session_dir)(
-                RunnerContext(
-                    task=fake_task,
-                    lease=None,
-                    extra={"shared_state": self.shared_state},
-                )
-            )
-            graded = None
-            if not is_valid_measurement(bench_result):
-                decision = "REVERT"
-                graded_verdict = VERDICT_REVERT
-                new_tput = 0.0
-                gain_pct = -100.0
-                incremental_gain_pct = -100.0
-            else:
-                base_tput = float(self.shared_state.baseline_tput or 0.0)
-                new_tput = float(bench_result.get("output_throughput") or 0.0)
-                gain_pct = (new_tput - base_tput) / base_tput * 100.0 if base_tput > 0 else 0.0
-                # The stack is applied on top of current_best, so the KEEP decision is the incremental gain over
-                # current_best rather than the total gain over the baseline.
-                # The verdict is the chokepoint's: it already applies the AgentX keep-threshold floor and the
-                # throughput guard, so the stack lane must not re-derive a KEEP from the raw incremental gain.
-                graded = resolve_graded_comparison(
-                    self.shared_state,
-                    bench_result,
-                    keep_threshold_pct=KERNEL_STACK_VALIDATION_KEEP_THRESHOLD_PCT,
-                )
-                incremental_gain_pct = (
-                    (graded.candidate - graded.reference) / graded.reference * 100.0 if graded.reference > 0 else 0.0
-                )
-                if not graded.comparable:
-                    # Fail closed rather than REVERT. A stack that could not be graded on the axis the session asked
-                    # for has an output-axis figure only; promoting or discarding a kernel stack on a substitute axis
-                    # is a call for a human, and the revert path below still leaves the tree clean either way.
-                    log.info(
-                        "stack-validate: %s performance comparison unavailable (%s)", stack_id, graded.degrade_reason
-                    )
-                    graded_verdict = graded.verdict
-                    decision = "NEEDS_REVIEW"
-                elif graded.verdict != VERDICT_KEEP:
-                    log.info(
-                        "stack-validate: %s %s intvty %.1f->%.1f tput %.1f->%.1f",
-                        stack_id,
-                        graded.verdict,
-                        graded.reference,
-                        graded.candidate,
-                        graded.tput_reference,
-                        graded.tput_candidate,
-                    )
-                    graded_verdict = graded.verdict
-                    decision = "REVERT"
-                else:
-                    graded_verdict = graded.verdict
-                    decision = "KEEP"
-
+            workspace = unique_runs_dir(self.session_dir, "integrate", f"integrate-stack-{stack.stack_id}")
+            bench_result = await self._benchmark_stacked_patches(stack.stack_id, workspace)
+            grade = self._grade_stacked_measurement(bench_result, stack.stack_id)
             # bench_result already carries accuracy (RUN_EVAL defaults true here).
-            if decision == "KEEP" and isinstance(bench_result, dict):
-                accuracy_gate = _grade_integrate_accuracy(
-                    bench_result,
-                    session_dir=self.session_dir,
-                    workspace=workspace,
-                    # The args the bench server ran under, so a serving context too small to host an eval is not
-                    # read as a broken eval.
-                    server_args=str((self.shared_state.current_best or {}).get("extra_server_args") or ""),
-                )
-                if accuracy_gate.get("blocked"):
-                    decision = "NEEDS_REVIEW"
-                    log.info(
-                        "stack-validate: accuracy gate blocked KEEP for %s: %s",
-                        stack_id,
-                        accuracy_gate.get("reason"),
-                    )
-
-            finalize_results: list[dict[str, Any]] = []
-            stack_reverts: list[dict[str, Any]] = []
-            if decision == "KEEP":
-                for applied in apply_results:
-                    finalize_results.append(_maybe_finalize_kernel_patch(applied))
-                all_finalized = all(lifecycle_complete(fr) for fr in finalize_results)
-                revert_result: dict[str, Any] = {"status": "skipped", "reason": "KEEP decision"}
-                top_status, cs, ca = cleanup_verdict(
-                    decision=decision,
-                    revert_result=revert_result,
-                    finalize_result={"status": "ok" if all_finalized else "failed"},
-                    revert_required=False,
-                )
-            else:
-                stack_reverts = [_maybe_revert_kernel_patch(applied) for applied in reversed(apply_results)]
-                all_reverted = all(lifecycle_complete(r) for r in stack_reverts)
-                top_status, cs, ca = cleanup_verdict(
-                    decision=decision,
-                    revert_result={"status": "ok" if all_reverted else "failed"},
-                    finalize_result={"status": "skipped"},
-                    revert_required=bool(apply_results),
-                )
-                revert_result = {
-                    "status": "ok" if all_reverted else "failed",
-                    "stack_reverts": stack_reverts,
-                }
-
-            result = {
-                "status": top_status,
-                "decision": decision,
-                "patch_cleanup_status": cs,
-                "patch_cleanup_action": ca,
-                "kernel_id": stack_id,
-                "patch_path": "+".join(str(e.get("patch_path") or "") for e in entries),
-                "target_file": "+".join(str(e.get("target_file") or "") for e in entries),
-                "base_tput": float(self.shared_state.baseline_tput or 0.0),
-                "new_tput": new_tput,
-                "gain_pct": gain_pct,
-                "graded_objective": graded.objective if graded is not None else None,
-                "bench_result": bench_result,
-                "stack_incremental_gain_pct": incremental_gain_pct,
-                "stack_incremental_keep_threshold_pct": (KERNEL_STACK_VALIDATION_KEEP_THRESHOLD_PCT),
-                # A stack cannot be left half-applied, so anything short of KEEP reverts it whole.
-                "graded_verdict": graded_verdict,
-                "report_path": bench_result.get("report_path") if isinstance(bench_result, dict) else None,
-                "workspace": bench_result.get("workspace") if isinstance(bench_result, dict) else str(workspace),
-                "apply_result": {"status": "ok", "stack_apply_results": apply_results},
-                "revert_result": revert_result,
-                "finalize_results": finalize_results,
-                "stack_kernel_ids": kernel_ids,
-                "stack_validation": True,
-                "stack_member_identities": identities,
-            }
-            if graded is not None and not graded.comparable:
-                result["reason"] = f"performance comparison unavailable: {graded.degrade_reason}"
-            if top_status == "failed":
-                result["error_class"] = "patch_revert_incomplete"
-                result["error"] = "Stack patch revert did not fully complete"
-            for metric in ("ttft_mean_ms", "e2el_mean_ms", "tpot_mean_ms"):
-                if isinstance(bench_result, dict) and metric in bench_result:
-                    result[metric] = bench_result.get(metric)
-            return result
+            if (
+                grade.decision == "KEEP"
+                and isinstance(bench_result, dict)
+                and self._accuracy_gate_withholds_keep(bench_result, workspace, stack.stack_id)
+            ):
+                grade = grade._replace(decision="NEEDS_REVIEW")
+            settlement = (
+                _settle_kept_stack(apply_results)
+                if grade.decision == "KEEP"
+                else _revert_whole_stack(apply_results, grade.decision)
+            )
+            run = _StackRun(
+                base_tput=float(self.shared_state.baseline_tput or 0.0),
+                workspace=workspace,
+                bench_result=bench_result,
+                apply_results=apply_results,
+            )
+            return _stack_validation_record(stack, run, grade, settlement)
         except Exception as exc:  # noqa: BLE001
-            reverts = [_maybe_revert_kernel_patch(applied) for applied in reversed(apply_results)]
-            any_failed = any(str(r.get("status") or "") not in {"ok", "skipped"} for r in reverts)
-            revert_status = "failed" if any_failed else "ok"
-            return {
-                "status": "failed",
-                "decision": "REVERT",
-                "patch_cleanup_status": CLEANUP_RECOVERY_REQUIRED if any_failed else CLEANUP_COMPLETE,
-                "patch_cleanup_action": CLEANUP_ACTION_REVERT if any_failed else CLEANUP_ACTION_NONE,
-                "kernel_id": stack_id,
-                "error": repr(exc),
-                "apply_result": {"status": "failed", "stack_apply_results": apply_results},
-                "revert_result": {"status": revert_status, "stack_reverts": reverts},
-                "stack_kernel_ids": kernel_ids,
-                "stack_validation": True,
-                "stack_member_identities": identities,
-            }
+            return _abandoned_stack_record(stack, apply_results, exc)

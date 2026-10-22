@@ -47,17 +47,12 @@ def _donor(
     return row
 
 
-_TARGET = {
-    "target_arch_slug": "qwen2forcausallm",
-    "target_model_type": "qwen2",
-    "target_conc": 64,
-    "target_isl": 128,
-    "target_osl": 128,
-}
+_TARGET_IDENTITY = {"architectures": "qwen2forcausallm", "model_type": "qwen2"}
+_TARGET_SHAPE = {"conc": 64, "isl": 128, "osl": 128}
 
 
 def test_trustworthy_donor_accepted() -> None:
-    assert _donor_is_trustworthy(_donor(), **_TARGET) is True
+    assert _donor_is_trustworthy(_donor(), _TARGET_IDENTITY, _TARGET_SHAPE) is True
 
 
 def test_donor_identity_falls_back_to_canonical_id() -> None:
@@ -65,12 +60,11 @@ def test_donor_identity_falls_back_to_canonical_id() -> None:
     donor.pop("architectures")
     donor.pop("model_type")
 
-    assert _donor_is_trustworthy(donor, **_TARGET) is True
+    assert _donor_is_trustworthy(donor, _TARGET_IDENTITY, _TARGET_SHAPE) is True
 
 
 def test_explicit_zero_donor_confidence_is_preserved() -> None:
     context = _build_warm_start_context(
-        status="hit",
         tier="exact",
         confidence=1.0,
         canonical_id="self-cid",
@@ -109,18 +103,15 @@ class _BatchKB:
         return self._batches.pop(0) if self._batches else []
 
 
-def _find_kwargs(**over: Any) -> dict[str, Any]:
+def _find_identity(**over: Any) -> dict[str, Any]:
     base = {
-        "cid": "self-cid",
+        "canonical_id": "self-cid",
         "hardware": "mi300x",
-        "framework": "sglang",
+        "framework_name": "sglang",
         "model_type": "qwen2",
-        "arch_slug": "qwen2forcausallm",
+        "architectures": "qwen2forcausallm",
         "framework_version": "v1",
         "precision": "bf16",
-        "target_conc": 64,
-        "target_isl": 128,
-        "target_osl": 128,
     }
     base.update(over)
     return base
@@ -133,7 +124,7 @@ def test_find_config_donor_skips_untrustworthy() -> None:
             _donor(canonical_id="trusted", gain=20.0),
         ]
     )
-    donor, tier, conf = _find_config_donor(kb, **_find_kwargs())
+    donor, tier, conf = _find_config_donor(kb, _find_identity(), _TARGET_SHAPE)
     assert donor is not None
     assert donor["validated_gain_pct"] == 20.0
     assert tier == "same_arch_class"
@@ -148,10 +139,7 @@ def test_find_config_donor_queries_canonical_framework_name() -> None:
             calls.append(dict(kwargs))
             return [_donor(gain=20.0)]
 
-    donor, _tier, _confidence = _find_config_donor(
-        _CaptureKB(),
-        **_find_kwargs(),
-    )
+    donor, _tier, _confidence = _find_config_donor(_CaptureKB(), _find_identity(), _TARGET_SHAPE)
 
     assert donor is not None
     assert calls[0]["label_match"]["framework_name"] == "sglang"
@@ -160,7 +148,7 @@ def test_find_config_donor_queries_canonical_framework_name() -> None:
 
 def test_find_config_donor_returns_none_when_all_untrustworthy() -> None:
     kb = _StubKB([_donor(gain=0.0), _donor(arch=["LlamaForCausalLM"], gain=30.0)])
-    donor, tier, conf = _find_config_donor(kb, **_find_kwargs())
+    donor, tier, conf = _find_config_donor(kb, _find_identity(), _TARGET_SHAPE)
     assert donor is None
     assert tier == ""
     assert conf == 0.0
@@ -168,7 +156,7 @@ def test_find_config_donor_returns_none_when_all_untrustworthy() -> None:
 
 def test_find_config_donor_skips_self_cid() -> None:
     kb = _StubKB([_donor(gain=20.0)])
-    donor, _tier, _conf = _find_config_donor(kb, **_find_kwargs(cid="donor-cid"))
+    donor, _tier, _conf = _find_config_donor(kb, _find_identity(canonical_id="donor-cid"), _TARGET_SHAPE)
     assert donor is None
 
 
@@ -182,10 +170,8 @@ def test_find_config_donor_uses_framework_version_fallback() -> None:
 
     donor, tier, conf = _find_config_donor(
         kb,
-        **_find_kwargs(
-            hardware="mi300x",
-            framework_version="1.2.5",
-        ),
+        _find_identity(hardware="mi300x", framework_version="1.2.5"),
+        _TARGET_SHAPE,
     )
 
     assert donor is compatible
@@ -245,17 +231,9 @@ def test_remote_cascade_skips_unproven_and_wrong_structure() -> None:
     row, tier, confidence = _cascade_warm_start_search(
         kb,  # type: ignore[arg-type]
         cid="self-cid",
-        hw="mi300x",
-        framework="sglang",
-        model_type_val="qwen2",
-        architectures_val=["Qwen2ForCausalLM"],
-        arch_slug="qwen2forcausallm",
-        fw_version="v1",
-        precision="bf16",
+        identity=_find_identity(),
+        shape=_TARGET_SHAPE,
         warm_prefer=None,
-        target_conc=64,
-        target_isl=128,
-        target_osl=128,
     )
 
     assert row["canonical_id"] == "selected"
@@ -267,7 +245,6 @@ def test_remote_cascade_skips_unproven_and_wrong_structure() -> None:
     assert confidence == 0.95
     assert kb.selected == ["selected"]
     context = _build_warm_start_context(
-        status="hit",
         tier=tier,
         confidence=confidence,
         canonical_id="self-cid",

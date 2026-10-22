@@ -17,7 +17,6 @@ from hyperloom.common.visible_devices import VISIBLE_DEVICE_VARS
 from hyperloom.orchestrator.actions.executors import _geak_sweep
 from hyperloom.orchestrator.actions.executors._geak_sweep import sweep_via_geak
 from hyperloom.orchestrator.actions.executors._grid_base import coerce_extra_envs
-from hyperloom.orchestrator.kernel.attempt_summary import _backend_results_dir
 from hyperloom.orchestrator.kernel.conc_sweep import _budget_limited_without_valid_pair
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.actions.executors._gpu_pin import (
@@ -241,6 +240,45 @@ async def test_sweep_via_geak_marks_variant_failed_on_subprocess_error(
     entry = result["points"][0]
     assert entry["status"] == "failed"
     assert "cannot spawn bench process" in entry["error"]
+
+
+@pytest.mark.asyncio
+async def test_sweep_keeps_point_artifacts_and_continues_after_accuracy_parse_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bench = _bench_script(tmp_path)
+    visited: list[str] = []
+
+    def run_point(_run, out_dir, _env, _entry):
+        visited.append(out_dir.name)
+        (out_dir / "bench_summary.json").write_text(
+            json.dumps({"output_throughput_tok_s_median": 200.0}), encoding="utf-8"
+        )
+        return subprocess.CompletedProcess([], 0, "", "")
+
+    def parse_accuracy(out_dir, *, framework):
+        if out_dir.name.startswith("variant_0_"):
+            raise ValueError("invalid accuracy artifact")
+        return {"accuracy": 0.9, "source_file": "eval.json"}
+
+    monkeypatch.setattr(_geak_sweep, "_run_with_power_sampling", run_point)
+    monkeypatch.setattr(_geak_sweep, "parse_eval_results", parse_accuracy)
+    result = await sweep_via_geak(
+        result={"bench_script": str(bench), "accepted_config": {}},
+        conc_values=[1, 2],
+        isl_osl_configs=["16:16"],
+        output_root=tmp_path / "sweep",
+        variant_timeout_sec=30,
+    )
+
+    failed, succeeded = result["points"]
+    assert visited == ["variant_0_conc1_isl16_osl16", "variant_1_conc2_isl16_osl16"]
+    assert failed["status"] == "failed"
+    assert "invalid accuracy artifact" in failed["error"]
+    assert Path(failed["launch_evidence_path"]).is_file()
+    assert (Path(failed["workspace"]) / "benchmark_report.json").is_file()
+    assert succeeded["status"] == "succeeded"
+    assert result["promotion_measurement"] == succeeded
 
 
 @pytest.mark.asyncio
@@ -509,32 +547,6 @@ def test_budget_limited_without_valid_pair_paths() -> None:
         )
         is True
     )
-
-
-def test_backend_results_dir_keyed_and_single_subdir(tmp_path: Path) -> None:
-    """Resolve the results dir by session key, and via the lone-subdir fallback."""
-    from hyperloom.inference_optimizer.session.session_paths import (
-        kernel_agent_runs_root,
-    )
-
-    # Keyed by ``session_dir.name``.
-    sd = tmp_path / "sess-A"
-    runs = kernel_agent_runs_root(sd)
-    (runs / sd.name / "results").mkdir(parents=True)
-    assert _backend_results_dir(sd, "") == runs / sd.name / "results"
-
-    # Migrated-key recovery: a single subdir under the runs root.
-    sd2 = tmp_path / "sess-B"
-    runs2 = kernel_agent_runs_root(sd2)
-    (runs2 / "migrated-key" / "results").mkdir(parents=True)
-    assert _backend_results_dir(sd2, "") == runs2 / "migrated-key" / "results"
-
-    # Ambiguous (no keyed match, not exactly one subdir) -> None.
-    sd3 = tmp_path / "sess-C"
-    runs3 = kernel_agent_runs_root(sd3)
-    (runs3 / "one").mkdir(parents=True)
-    (runs3 / "two").mkdir(parents=True)
-    assert _backend_results_dir(sd3, "") is None
 
 
 def test_coerce_extra_envs_skips_malformed_tokens() -> None:

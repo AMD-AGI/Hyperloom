@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.agents.framework.sources.pr_monitor import PRMonitorError
 from hyperloom.common.bringup import BootObservation, Excerpt, LadderStage, TerminalFrame
 from hyperloom.common.failure_signature import FailureSignature
 from hyperloom.orchestrator.bringup import observation_summary
@@ -206,7 +207,7 @@ def test_build_params_feeds_ranked_candidate_refs_into_mandate(monkeypatch, tmp_
 
 
 def test_build_params_degrades_gracefully_when_discovery_raises(monkeypatch, tmp_path):
-    _stub_enumerate(monkeypatch, RuntimeError("network down"))
+    _stub_enumerate(monkeypatch, PRMonitorError("network down"))
     fake = _enqueue_self(tmp_path)
     params = fake.enablement_params.build_enablement_specialist_params(_MISSING_ARCH_LOG)
     assert params is not None
@@ -585,8 +586,33 @@ async def test_revalidation_enqueues_genuine_baseline(tmp_path):
     created = await fake.tasks.get(tid)
     assert created.kind == "baseline"
     assert created.params["config_path"] == "/runs/baseline/materialized.yaml"
-    assert created.params["disable_run_eval"] is False
     assert created.params["enablement_origin"] == "eval"
+
+
+@pytest.mark.asyncio
+async def test_revalidation_keeps_the_task_id_when_its_save_hits_an_os_error(tmp_path, monkeypatch):
+    fake = _enqueue_self(tmp_path, enablement_validation_pending=True, enablement_origin="eval")
+    monkeypatch.setattr(fake.shared_state, "save", _raise(OSError("no space left on device")))
+
+    tid = await fake.enablement_revalidation.maybe_enqueue_enablement_baseline_revalidation()
+
+    assert fake.shared_state.enablement.revalidation_task_id == tid
+
+
+@pytest.mark.asyncio
+async def test_revalidation_save_propagates_a_serialization_defect(tmp_path, monkeypatch):
+    fake = _enqueue_self(tmp_path, enablement_validation_pending=True, enablement_origin="eval")
+    monkeypatch.setattr(fake.shared_state, "save", _raise(TypeError("Object of type set is not JSON serializable")))
+
+    with pytest.raises(TypeError, match="not JSON serializable"):
+        await fake.enablement_revalidation.maybe_enqueue_enablement_baseline_revalidation()
+
+
+def _raise(error: Exception):
+    def _fail(_session_dir):
+        raise error
+
+    return _fail
 
 
 @pytest.mark.asyncio
@@ -954,6 +980,29 @@ def test_an_integrate_executing_in_enablement_is_graded_as_the_round(tmp_path):
     assert params["enablement_setup_commands"] == ["pip install deep_gemm==2.1"]
     assert FailureSignature.from_dict(params["enablement_failure_signature"]).kind == "missing_model_arch"
     assert params["extra_envs"] == {"SGLANG_X": "1"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("origin", "ends_lane"), [("", True), ("eval", False)], ids=["boot", "eval"])
+async def test_an_anchor_reached_by_another_route_ends_a_boot_lane(monkeypatch, tmp_path, origin, ends_lane):
+    """A boot lane left open after the combo booted adopted a perf patch and revalidated its gain into the anchor."""
+    from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
+
+    monkeypatch.setattr(mne, "is_multi_node", lambda: False)
+    _stub_enumerate(monkeypatch, [])
+    fake = _enqueue_self(tmp_path, enablement_origin=origin)
+    assert await fake.enablement_lane._maybe_enqueue_enablement_specialist()
+
+    await fake.writeback.promote_to_shared_state(
+        "baseline",
+        {"output_throughput": 2245.0, "materialized_config": str(tmp_path / "baseline.with_envs.yaml")},
+        task=None,
+    )
+
+    assert fake.shared_state.baseline_tput == 2245.0
+    assert fake.shared_state.enablement.succeeded is ends_lane
+    assert (await fake.rounds.held() is None) is ends_lane
+    assert ("enablement" in _bind(fake, specialist_task_id="spec-perf")) is not ends_lane
 
 
 def test_the_lanes_own_integrate_keeps_the_context_its_specialist_carried(tmp_path):

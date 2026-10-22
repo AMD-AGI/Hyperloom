@@ -26,10 +26,11 @@ from kernelforge.knowledge.kb_store.identity.implementation import (
     hash_implementation_identity,
     implementation_signature,
 )
+from kernelforge.knowledge.kb_store.identity.kernel_names import derive_kernel_names
 from kernelforge.loop.new_path_allowlist import normalize_commit_new_paths
-from kernelforge.mcp_server.tools.pmc import derive_kernel_names
-from kernelforge.durable_io import atomic_write_text
-from kernelforge.loop.scoring import DEFAULT_SNR_THRESHOLD_DB
+from kernelforge.tools.durable_io import atomic_write_text
+from kernelforge.loop.agent_relay import AgentRelayPolicy
+from kernelforge.evaluation.scoring import DEFAULT_SNR_THRESHOLD_DB
 
 
 # The trailing lookahead skips rocminfo's generic ISA names (``gfx12-generic``), listed beside the concrete target.
@@ -75,6 +76,7 @@ class CampaignConfig:
     # Paths the Implementer may CREATE and still have committed with a KEEP (see
     # ``IterationConfig.commit_new_paths``).
     commit_new_paths: list[str] = field(default_factory=list)
+    agent_relay: AgentRelayPolicy | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -117,6 +119,9 @@ class CampaignConfig:
             # hand-edited pattern the loop would read differently than its author meant is refused here rather than
             # acted on later.
             commit_new_paths=normalize_commit_new_paths(payload["commit_new_paths"]),
+            agent_relay=(
+                AgentRelayPolicy.from_dict(payload["agent_relay"]) if payload["agent_relay"] is not None else None
+            ),
         )
         if config.nproc_per_node < 1:
             raise ValueError("campaign nproc_per_node must be positive")
@@ -227,6 +232,8 @@ class CampaignConfigStore:
             raise ValueError(f"invalid campaign config: {error}") from error
         if not isinstance(payload, dict):
             raise ValueError("campaign config must be a JSON object")
+        if "agent_relay" not in payload:
+            payload["agent_relay"] = None
         return CampaignConfig.from_dict(payload)
 
     def save(
@@ -449,6 +456,38 @@ class CampaignInputs:
     nproc_per_node: int = 1
     bench_repeat: int = 1
     commit_new_paths: tuple[str, ...] = ()
+    # The Agent profiles a blockage may relay between, fixed when the campaign is created.
+    agent_relay: AgentRelayPolicy | None = None
+
+
+def _normalized_sources(workspace: Path, kernel: str, source_files: str) -> list[str]:
+    """Workspace-relative source files, kernel first, without duplicates."""
+    normalized: list[str] = []
+    for raw_path in [kernel, *parse_list(source_files)]:
+        relative = _relative_file(workspace, raw_path, "source file")
+        if relative not in normalized:
+            normalized.append(relative)
+    return normalized
+
+
+def _require_dev_branch(workspace: Path) -> str:
+    """Current non-main branch of a clean forge workspace, or raise."""
+    if _git_value(workspace, "status", "--porcelain=v1", "--untracked-files=no"):
+        raise ValueError("workspace has uncommitted tracked changes")
+    branch = _git_value(workspace, "branch", "--show-current")
+    if branch in {"", "main", "master"}:
+        raise ValueError("forge-loop requires a non-main development branch in the workspace")
+    return branch
+
+
+def _program_md_sha256(program_md_file: str | None) -> str:
+    """sha256 of an optional program.md's text, or blank when the campaign has none."""
+    if not program_md_file:
+        return ""
+    source_program = Path(program_md_file).expanduser().resolve()
+    if not source_program.is_file():
+        raise ValueError(f"program context is not a file: {source_program}")
+    return hashlib.sha256(source_program.read_text(errors="replace").encode()).hexdigest()
 
 
 def create_campaign_config(
@@ -458,56 +497,24 @@ def create_campaign_config(
     base_commit: str | None = None,
 ) -> CampaignConfig:
     """Resolve and normalize all immutable inputs for a fresh campaign."""
-    kernel, driver, program_md_file = inputs.kernel, inputs.driver, inputs.program_md_file
-    target_functions = parse_list(inputs.target_functions) or None
     workspace = Path(workspace_dir).resolve()
-    kernel_path = _relative_file(workspace, kernel, "kernel")
-    driver_path = _driver_reference(workspace, driver)
-
-    normalized_sources: list[str] = []
-    for raw_path in [kernel, *parse_list(inputs.source_files)]:
-        relative = _relative_file(workspace, raw_path, "source file")
-        if relative not in normalized_sources:
-            normalized_sources.append(relative)
-
-    dirty = _git_value(
-        workspace,
-        "status",
-        "--porcelain=v1",
-        "--untracked-files=no",
-    )
-    if dirty:
-        raise ValueError("workspace has uncommitted tracked changes")
-
-    branch = _git_value(workspace, "branch", "--show-current")
-    if not branch or branch in {"main", "master"}:
-        raise ValueError("forge-loop requires a non-main development branch in the workspace")
+    kernel_path = _relative_file(workspace, inputs.kernel, "kernel")
+    driver_path = _driver_reference(workspace, inputs.driver)
+    normalized_sources = _normalized_sources(workspace, inputs.kernel, inputs.source_files)
+    branch = _require_dev_branch(workspace)
     resolved_base_commit = (base_commit or "").strip() or _git_value(workspace, "rev-parse", "HEAD")
-    raw_source_paths = _campaign_source_paths(
-        workspace,
-        kernel_path,
-        normalized_sources,
-    )
-    pristine_sources = _read_pristine_sources(
-        workspace,
-        raw_source_paths,
-        base_commit=resolved_base_commit,
-    )
-    resolved_branch = (inputs.git_branch or "").strip() or branch
-    kernel_backend_override = (inputs.kernel_backend or "").strip()
+    raw_source_paths = _campaign_source_paths(workspace, kernel_path, normalized_sources)
+    pristine_sources = _read_pristine_sources(workspace, raw_source_paths, base_commit=resolved_base_commit)
+    backend_override = (inputs.kernel_backend or "").strip()
     resolved_kernel_backend = (
-        resolve_kernel_backend_override(kernel_backend_override)
-        if kernel_backend_override
+        resolve_kernel_backend_override(backend_override)
+        if backend_override
         else infer_kernel_backend([workspace / path for path in normalized_sources])
     )
-    resolved_targets = (
-        list(target_functions)
-        if target_functions
-        else _derive_target_functions(
-            workspace,
-            normalized_sources,
-            source_contents=pristine_sources,
-        )
+    resolved_targets = parse_list(inputs.target_functions) or _derive_target_functions(
+        workspace,
+        normalized_sources,
+        source_contents=pristine_sources,
     )
     kernel_absolute = str((workspace / kernel_path).resolve())
     resolved_framework = infer_source_owner_framework(
@@ -534,35 +541,24 @@ def create_campaign_config(
         kernel_absolute,
         target_functions=resolved_targets,
     )
-    program_md_path = ""
-    program_md_sha256 = ""
-    if program_md_file:
-        source_program = Path(program_md_file).expanduser().resolve()
-        if not source_program.is_file():
-            raise ValueError(f"program context is not a file: {source_program}")
-        program_md_path = "forge_experiments/program.md"
-        program_text = source_program.read_text(errors="replace")
-        program_md_sha256 = hashlib.sha256(program_text.encode()).hexdigest()
-
-    resolved_task_type = (inputs.task_type or "").strip() or ("repository" if len(normalized_sources) > 1 else "")
+    program_md_sha256 = _program_md_sha256(inputs.program_md_file)
     resolved_snr_threshold = float(inputs.snr_threshold)
     if not math.isfinite(resolved_snr_threshold) or resolved_snr_threshold <= 0:
         raise ValueError("SNR threshold must be a positive finite float")
-    canonical_driver = workspace / driver_path
     return CampaignConfig(
         kernel_path=kernel_path,
         driver_path=driver_path,
-        driver_sha256=hashlib.sha256(canonical_driver.read_bytes()).hexdigest(),
+        driver_sha256=hashlib.sha256((workspace / driver_path).read_bytes()).hexdigest(),
         source_files=normalized_sources,
-        program_md_path=program_md_path,
+        program_md_path="forge_experiments/program.md" if inputs.program_md_file else "",
         program_md_sha256=program_md_sha256,
         snr_threshold=resolved_snr_threshold,
         gpu_target=(inputs.gpu_target or "").strip() or detect_gpu_target(),
-        gpu_type=str("mi355x" if inputs.gpu_type is None else inputs.gpu_type).strip().lower(),
+        gpu_type=(inputs.gpu_type if inputs.gpu_type is not None else "mi355x").strip().lower(),
         kernel_backend=resolved_kernel_backend,
-        task_type=resolved_task_type,
+        task_type=(inputs.task_type or "").strip() or ("repository" if len(normalized_sources) > 1 else ""),
         target_functions=resolved_targets,
-        git_branch=resolved_branch,
+        git_branch=(inputs.git_branch or "").strip() or branch,
         base_commit=resolved_base_commit,
         framework=resolved_framework,
         operator_name=resolved_operator,
@@ -572,4 +568,5 @@ def create_campaign_config(
         nproc_per_node=max(1, int(inputs.nproc_per_node or 1)),
         bench_repeat=max(1, int(inputs.bench_repeat or 1)),
         commit_new_paths=normalize_commit_new_paths(list(inputs.commit_new_paths)),
+        agent_relay=inputs.agent_relay,
     )

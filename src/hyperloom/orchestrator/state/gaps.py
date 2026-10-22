@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 from ..collaborator import CoordinatorCollaborator
 from hyperloom.common.timeutil import now_iso
 
+from ._shared_state import gap_rows
 from .failure_evidence import UNMEASURED_OUTCOMES, failure_from_variant_outcome
 
 if TYPE_CHECKING:
@@ -25,6 +26,9 @@ __all__ = ["GapsStateMixin", "GapRefreshCollaborator"]
 # gap ledger caps; both enforced in upsert_gap.
 _GAPS_MAX_ENTRIES = 50
 _GAPS_ATTEMPTS_HISTORY = 20
+
+# Free-text gap fields an incoming row may restate; ``severity`` defaults to "medium" rather than "".
+_GAP_TEXT_FIELDS: tuple[str, ...] = ("symptom", "layer", "severity", "domain_hint", "source", "provenance")
 
 
 def _merge_gap_attempts(existing: list[Any], incoming: list[Any]) -> list[Any]:
@@ -68,23 +72,17 @@ class GapsStateMixin:
         if existing is None:
             merged: dict[str, Any] = {
                 "canonical_id": cid,
-                "symptom": str(entry.get("symptom") or ""),
-                "layer": str(entry.get("layer") or ""),
+                # ``provenance`` is an optional origin reference (PR/blog URL).
+                **{key: str(entry.get(key) or "") for key in _GAP_TEXT_FIELDS},
                 "severity": str(entry.get("severity") or "medium"),
-                "domain_hint": str(entry.get("domain_hint") or ""),
-                "source": str(entry.get("source") or ""),
-                # Optional origin reference (PR/blog URL).
-                "provenance": str(entry.get("provenance") or ""),
                 "first_seen_ts": str(entry.get("first_seen_ts") or now),
                 "last_updated_ts": now,
-                "attempts": list(entry.get("attempts") or []),
+                "attempts": list(entry.get("attempts") or [])[-_GAPS_ATTEMPTS_HISTORY:],
             }
-            if len(merged["attempts"]) > _GAPS_ATTEMPTS_HISTORY:
-                merged["attempts"] = merged["attempts"][-_GAPS_ATTEMPTS_HISTORY:]
             self.gaps.append(merged)
         else:
             # Field-wise merge: incoming non-empty values win except ``first_seen_ts``.
-            for key in ("symptom", "layer", "severity", "domain_hint", "source", "provenance"):
+            for key in _GAP_TEXT_FIELDS:
                 incoming = entry.get(key)
                 if incoming:
                     existing[key] = str(incoming)
@@ -96,16 +94,8 @@ class GapsStateMixin:
             merged = existing
         # Enforce global cap, trimming oldest after the upsert so the just-touched gap is retained.
         if len(self.gaps) > _GAPS_MAX_ENTRIES:
-            others = [g for g in self.gaps if g is not merged]
-
-            def _sort_key(g: dict[str, Any]) -> str:
-                """Sort key for gap trimming: newest-updated timestamp."""
-                return str(g.get("last_updated_ts") or g.get("first_seen_ts") or "")
-
-            others.sort(key=_sort_key)
-            keep_count = _GAPS_MAX_ENTRIES - 1
-            others = others[-keep_count:] if keep_count > 0 else []
-            self.gaps = others + [merged]
+            others = sorted((g for g in self.gaps if g is not merged), key=gap_rows.recency_key)
+            self.gaps = others[-(_GAPS_MAX_ENTRIES - 1) :] + [merged]
         return merged
 
     def append_gap_attempt(
@@ -151,27 +141,6 @@ class GapRefreshCollaborator(CoordinatorCollaborator):
             state.upsert_gap(entry)
         for entry in self._extract_gaps_from_attempts(workload_id):
             state.upsert_gap(entry)
-
-        plane = self.knowledge_plane
-        if plane is not None and hasattr(plane, "recipe_kb_traverse_issues"):
-            try:
-                traverse = getattr(plane, "recipe_kb_traverse_issues")
-                rows = traverse(
-                    model_class=getattr(state, "model_class", "") or "",
-                    gpu_type=getattr(state, "gpu_type", "") or "",
-                )
-                if isinstance(rows, list):
-                    for entry in rows:
-                        if isinstance(entry, dict):
-                            entry = dict(entry)
-                            entry.setdefault("source", "recipe_kb")
-                            state.upsert_gap(entry)
-            except Exception:
-                log.warning(
-                    "gaps refresh: recipe_kb_traverse_issues failed (reason=%s)",
-                    reason,
-                    exc_info=True,
-                )
         log.debug(
             "gaps refresh (reason=%s): %d gaps after merge",
             reason,

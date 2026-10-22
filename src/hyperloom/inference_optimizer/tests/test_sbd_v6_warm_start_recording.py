@@ -296,3 +296,22 @@ def test_finalize_closes_a_lookup_that_outlived_its_process(_bound_session):
     event = _event(_bound_session)
     assert event["status"] == EVENT_STATUS_INTERRUPTED
     assert event["ext"]["reads"]["count"] == 1
+
+
+def test_the_closing_fragment_carries_only_exported_fields(_bound_session):
+    from hyperloom.inference_optimizer.breakdown.recorder.assembler import warm_start_event_parts
+    from hyperloom.inference_optimizer.breakdown.recorder.warm_start_event import SECTION_EVENT
+
+    recorder = _recorder()
+    recorder.finish(match_status=MATCH_MISS)
+
+    rows = warm_start_event_parts(recorder.event_id)[SECTION_EVENT]
+    assert sorted({key for row in rows for key in row}) == [
+        "end_time",
+        "event_id",
+        "match_status",
+        "request",
+        "start_time",
+        "status",
+        "timeline_sequence",
+    ]

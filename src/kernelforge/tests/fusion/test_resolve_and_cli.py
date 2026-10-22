@@ -184,7 +184,7 @@ def test_explicit_agent_backend_wins_over_credential_shape(clean_agent_env, monk
     monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-key")
     provider, model = _resolve_agent_choice("codex", None)
     assert provider == "codex"
-    assert model == "gpt-5.6-sol"
+    assert model == "gpt-6-astra"
 
 
 def test_explicit_claude_wins_over_openai_credentials(clean_agent_env, monkeypatch):
@@ -310,19 +310,10 @@ def test_author_harness_is_staged_inside_worktree_then_published(tmp_path):
     staging = harness_authoring._author_harness_target(str(repo), out)
     assert Path(staging).resolve().is_relative_to(repo.resolve())
 
-    ready, reason, _deterministic = harness_authoring._prepare_author_harness(
-        staging,
-        str(out / "kernel_harness.py"),
-        inherited=False,
-    )
+    ready, reason, _deterministic = harness_authoring._prepare_author_harness(staging)
     assert ready, reason
     Path(staging).write_text("print('validated')\n", encoding="utf-8")
-    ok, reason = harness_authoring._finish_author_harness(
-        staging,
-        str(out / "kernel_harness.py"),
-        inherited=False,
-        author_ok=True,
-    )
+    ok, reason = harness_authoring._finish_author_harness(staging, str(out / "kernel_harness.py"), author_ok=True)
 
     assert ok, reason
     assert (out / "kernel_harness.py").read_text(encoding="utf-8") == "print('validated')\n"
@@ -335,23 +326,14 @@ def test_author_harness_staging_survives_running_the_harness(tmp_path):
     repo.mkdir()
     out = tmp_path / "out"
     staging = harness_authoring._author_harness_target(str(repo), out)
-    ready, reason, _deterministic = harness_authoring._prepare_author_harness(
-        staging,
-        str(out / "kernel_harness.py"),
-        inherited=False,
-    )
+    ready, reason, _deterministic = harness_authoring._prepare_author_harness(staging)
     assert ready, reason
     Path(staging).write_text("print('validated')\n", encoding="utf-8")
     cache = Path(staging).parent / "__pycache__"
     cache.mkdir()
     (cache / "kernel_harness.cpython-310.pyc").write_bytes(b"\x00bytecode")
 
-    ok, reason = harness_authoring._finish_author_harness(
-        staging,
-        str(out / "kernel_harness.py"),
-        inherited=False,
-        author_ok=True,
-    )
+    ok, reason = harness_authoring._finish_author_harness(staging, str(out / "kernel_harness.py"), author_ok=True)
 
     assert ok, reason
     assert (out / "kernel_harness.py").read_text(encoding="utf-8") == "print('validated')\n"
@@ -364,22 +346,13 @@ def test_author_harness_staging_tolerates_another_harness(tmp_path):
     repo.mkdir()
     out = tmp_path / "out"
     staging = harness_authoring._author_harness_target(str(repo), out)
-    ready, reason, _deterministic = harness_authoring._prepare_author_harness(
-        staging,
-        str(out / "kernel_harness.py"),
-        inherited=False,
-    )
+    ready, reason, _deterministic = harness_authoring._prepare_author_harness(staging)
     assert ready, reason
     Path(staging).write_text("print('validated')\n", encoding="utf-8")
     sibling = Path(staging).parent / "kernel_harness_c262b47917a2.py"
     sibling.write_text("print('other run')\n", encoding="utf-8")
 
-    ok, reason = harness_authoring._finish_author_harness(
-        staging,
-        str(out / "kernel_harness.py"),
-        inherited=False,
-        author_ok=True,
-    )
+    ok, reason = harness_authoring._finish_author_harness(staging, str(out / "kernel_harness.py"), author_ok=True)
 
     assert ok, reason
     assert (out / "kernel_harness.py").read_text(encoding="utf-8") == "print('validated')\n"
@@ -393,54 +366,16 @@ def test_author_harness_staging_still_reports_foreign_leftovers(tmp_path):
     repo.mkdir()
     out = tmp_path / "out"
     staging = harness_authoring._author_harness_target(str(repo), out)
-    ready, reason, _deterministic = harness_authoring._prepare_author_harness(
-        staging,
-        str(out / "kernel_harness.py"),
-        inherited=False,
-    )
+    ready, reason, _deterministic = harness_authoring._prepare_author_harness(staging)
     assert ready, reason
     Path(staging).write_text("print('validated')\n", encoding="utf-8")
     (Path(staging).parent / "stray.py").write_text("STRAY = True\n", encoding="utf-8")
 
-    ok, reason = harness_authoring._finish_author_harness(
-        staging,
-        str(out / "kernel_harness.py"),
-        inherited=False,
-        author_ok=True,
-    )
+    ok, reason = harness_authoring._finish_author_harness(staging, str(out / "kernel_harness.py"), author_ok=True)
 
     assert ok is False
     assert "stray.py" in reason
     assert Path(staging).parent.exists()
-
-
-def test_inherited_harness_staging_detects_author_mutation(tmp_path):
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    out = tmp_path / "out"
-    final = out / "kernel_harness.py"
-    final.parent.mkdir()
-    final.write_text("print('inherited')\n", encoding="utf-8")
-    staging = harness_authoring._author_harness_target(str(repo), out)
-    ready, reason, _deterministic = harness_authoring._prepare_author_harness(
-        staging,
-        str(final),
-        inherited=True,
-    )
-    assert ready, reason
-    Path(staging).write_text("print('mutated')\n", encoding="utf-8")
-
-    ok, reason = harness_authoring._finish_author_harness(
-        staging,
-        str(final),
-        inherited=True,
-        author_ok=True,
-    )
-
-    assert ok is False
-    assert reason == "author modified the inherited harness"
-    assert final.read_text(encoding="utf-8") == "print('inherited')\n"
-    assert not Path(staging).exists()
 
 
 def test_registered_discovery_returns_final_text_without_bare_openai(
@@ -993,11 +928,7 @@ def test_prepare_author_harness_marks_an_occupied_staging_target_deterministic(
     Path(staging).parent.mkdir(parents=True, exist_ok=True)
     Path(staging).write_text("print('left behind')\n", encoding="utf-8")
 
-    ready, reason, deterministic = harness_authoring._prepare_author_harness(
-        staging,
-        str(out / "kernel_harness.py"),
-        inherited=False,
-    )
+    ready, reason, deterministic = harness_authoring._prepare_author_harness(staging)
 
     assert ready is False
     assert "already exists" in reason
