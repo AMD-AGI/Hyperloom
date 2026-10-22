@@ -46,6 +46,8 @@ forge_experiments/
   directions/
     survey_iter_NNN.md
     audit_iter_NNN.md
+  ablation.json
+  ablation.md
 ```
 
 `dashboard.html` is a static page that reloads itself every minute. The loop re-renders it, with the
@@ -441,4 +443,7 @@ exists only with `--early-stop`: the direction ledger's definitions, retirements
 audits. How far each direction has been mined is not stored there; it is folded from the `iteration_result`
 events, whose `direction_id` and `lane_id` name what each candidate pursued. `noise_floor.json` exists only with `--paired-keep`: the A-vs-A noise floor, the pair scores it came from and
 its earlier values. The incumbent's worktree for paired timing is `<workspace>.forge-incumbent`, beside the
-workspace rather than in it.
+workspace rather than in it. `ablation.json` and `ablation.md` are written by `kernelforge forge-ablate` after the
+run: each kept change's cost to the best kernel, the all-off arm and their noise floor. A rerun reuses every arm
+already settled against the same best commit. Its worktrees, `<workspace>.forge-ablate-best` and `-variant`, are
+removed when it finishes.

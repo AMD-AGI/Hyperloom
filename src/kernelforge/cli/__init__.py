@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import click
 
+from kernelforge.cli.forge_ablate_command import forge_ablate
 from kernelforge.cli.forge_loop_command import forge_loop
 from kernelforge.cli.forge_rewrite_command import forge_rewrite
 from kernelforge.cli.forge_say_command import forge_say
@@ -21,6 +22,7 @@ def main():
 main.add_command(forge_loop)
 main.add_command(forge_rewrite)
 main.add_command(forge_say)
+main.add_command(forge_ablate)
 
 
 def _register_kernel_rewrite_controller() -> None:

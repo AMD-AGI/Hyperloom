@@ -407,6 +407,63 @@ def _directions_panel(snapshot: dict) -> str:
     )
 
 
+_ABLATION_STATUS = {
+    "required_for_correctness": ("neutral", "■", "needed for correctness"),
+    "not_separable": ("neutral", "⋈", "tangled with a later change"),
+    "driver_changed": ("warning", "⚠", "driver differs"),
+    "failed": ("critical", "✗", "bench failed"),
+    "skipped_budget": ("neutral", "…", "not reached"),
+}
+
+
+def _pct(fraction, spec: str = "+.2f") -> str:
+    return "—" if fraction is None else f"{_fmt(fraction * 100, spec)}%"
+
+
+def _ablation_verdict(arm: dict) -> tuple[str, str, str]:
+    if arm.get("status") != "measured":
+        return _ABLATION_STATUS.get(arm.get("status"), ("neutral", "?", "unknown"))
+    if arm.get("within_noise"):
+        return ("neutral", "–", "within noise")
+    if (arm.get("cost") or {}).get("mean", 0) > 0:
+        return ("good", "✓", "pays")
+    return ("warning", "⚠", "faster without it")
+
+
+def _ablation_panel(snapshot: dict) -> str:
+    ablation = snapshot.get("ablation") or {}
+    arms = ablation.get("arms") or {}
+    if not arms:
+        return ""
+    rows = []
+    for key, arm in arms.items():
+        role, glyph, label = _ablation_verdict(arm)
+        cost = arm.get("cost") or {}
+        name = "all off (the start)" if key == "all_off" else f"{key[:10]} {arm.get('title') or ''}"
+        bounds = f"{_pct(cost['lower'])} … {_pct(cost['upper'])}" if cost else "—"
+        rows.append(
+            f"<tr><td>{escape(name)}</td><td>{escape(str(arm.get('direction_id') or ''))}</td>"
+            f"<td class='num'>{_pct(arm.get('gain_when_kept'))}</td><td class='num'>{_pct(cost.get('mean'))}</td>"
+            f"<td class='num'>{escape(bounds)}</td>"
+            f"<td><span class='status'><span class='dot' style='background:var(--{role})'></span>{glyph} "
+            f"{escape(label)}</span></td></tr>"
+        )
+    head = f"best {str(ablation.get('best_commit', ''))[:12]}; noise floor {_pct(ablation.get('noise_floor'), '.2f')}"
+    if "singles_combined" in ablation:
+        head += (
+            f"; single costs combined {_pct(ablation['singles_combined'])} against all-off "
+            f"{_pct(ablation.get('all_off_cost'))}"
+        )
+    if ablation.get("completed") is False:
+        head += "; budget ran out, rerun forge-ablate for the rest"
+    return (
+        f"<div class='card'><h2>Ablation</h2><div class='sub'>{escape(head)}. Cost = how much slower the best kernel "
+        "runs without the change.</div><table><tr><th>change</th><th>direction</th><th class='num'>gain when kept</th>"
+        f"<th class='num'>cost without it</th><th class='num'>95% bounds</th><th>verdict</th></tr>{''.join(rows)}"
+        "</table></div>"
+    )
+
+
 def _inbox_panel(snapshot: dict) -> str:
     inbox = snapshot.get("inbox") or {}
     pending, active = inbox.get("pending") or [], inbox.get("active") or []
@@ -430,6 +487,7 @@ def render_dashboard(snapshot: dict) -> str:
         _decision_strip(rows),
         _inbox_panel(snapshot),
         _directions_panel(snapshot),
+        _ablation_panel(snapshot),
         _case_table(snapshot),
         _text_card("Latest supervisor ruling", snapshot.get("supervisor") or ""),
         _usage_table(snapshot),

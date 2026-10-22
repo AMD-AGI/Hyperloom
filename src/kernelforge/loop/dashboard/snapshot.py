@@ -205,4 +205,5 @@ def collect_snapshot(campaign_root: Path, live: LiveStatus | None = None) -> dic
         "inbox": _inbox(campaign_root),
         "directions": _directions(campaign_root, state, events, live_block),
         "noise_floor": _read_json(campaign_root / "noise_floor.json") or {},
+        "ablation": _read_json(campaign_root / "ablation.json") or {},
     }
