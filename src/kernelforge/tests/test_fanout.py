@@ -130,6 +130,28 @@ async def test_a_lane_of_a_worktree_workspace_gets_its_own_index(tmp_path):
     assert (workspace / "kernel.py").read_text() == "VALUE = 0\n"
 
 
+async def test_a_lane_carries_the_record_its_session_returned(tmp_path):
+    """The record is taken before the round deletes the lane copy."""
+    workspace = _workspace(tmp_path)
+
+    async def session(_lane: LanePlan, lane_dir: Path, _driver: Path) -> str:
+        (lane_dir / "kernel.py").write_text("VALUE = 1\n")
+        return "lane 1 widened the loads"
+
+    results = await run_lanes(
+        workspace_dir=str(workspace),
+        lanes=[LanePlan("1", "widen the loads")],
+        session=session,
+        parent_dir=str(tmp_path),
+        driver=DRIVER_NAME,
+    )
+
+    assert results[0].lesson == "lane 1 widened the loads"
+    assert results[0].to_dict()["lesson"] == "lane 1 widened the loads"
+    restored = LaneResult.from_dict({key: value for key, value in results[0].to_dict().items() if key != "lesson"})
+    assert restored.lesson == ""
+
+
 async def test_a_lane_of_a_detached_worktree_diffs_against_the_same_commit(tmp_path):
     """A forge worktree is often checked out detached rather than on a branch."""
     workspace = _worktree_workspace(tmp_path, detached=True)

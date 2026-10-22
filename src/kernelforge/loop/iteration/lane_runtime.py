@@ -130,7 +130,6 @@ class LaneRuntimeMixin:
             )
         except (OSError, RuntimeError) as error:
             self._lane_queue = []
-            self._lane_sessions.clear()
             print(f"  [lanes] fan-out unavailable ({error}); falling back")
         # A recovered round that could not even republish holds nothing, and nothing was spent on it: that iteration
         # plans for itself as usual.
@@ -139,23 +138,25 @@ class LaneRuntimeMixin:
     async def _fill_lane_queue(self, *, iteration: int = 0, agent_factory, lane_plans) -> None:
         """Run this round's lane sessions concurrently and queue what they wrote."""
         kernel_relative = self._workspace_path(self.ic.kernel_file)
-        sinks: dict[str, dict] = {}
 
         async def _session(
             lane: LanePlan,
             lane_dir: Path,
             serialized_driver: Path,
-        ) -> None:
+        ) -> str:
             # The session edits the lane's own copy, so it is handed that copy's kernel rather than the canonical one.
-            # The sink is how the lesson turn resumes this session once the iteration measures the lane.
+            # The record turn resumes that session now: the round deletes this copy as soon as it returns.
             sink: dict = {}
-            sinks[lane.lane_id] = sink
             call = agent_factory(str(lane_dir), str(serialized_driver))
             await call(
                 str(lane_dir / kernel_relative),
                 _lane_prompt(lane.plan, serialized_driver=serialized_driver),
                 **declared_extras(call, {"session_sink": sink}),
             )
+            lesson = await self._request_lesson(iteration, sink.get("end_reason", ""), sink.get("summarize"))
+            if not lesson:
+                print(f"  [lane {lane.lane_id}] no lesson from its session ({lesson.reason})")
+            return lesson.text
 
         results = await run_lanes(
             workspace_dir=self.ic.workspace_dir,
@@ -169,7 +170,10 @@ class LaneRuntimeMixin:
         for result in results:
             if result.error:
                 print(f"  [lane {result.lane_id}] session lost: {result.error}")
-        self._queue_produced_lanes(results, sinks)
+        active_profile_id = self.run_state.agent_relay.active_profile_id
+        self._lane_queue = [
+            replace(item, agent_profile_id=active_profile_id) for item in results if item.produced_candidate
+        ]
         print(f"  [lanes] {len(self._lane_queue)} of {len(results)} lanes produced a candidate")
         self._persist_lane_queue()
         # The device is not per-lane.
@@ -230,42 +234,6 @@ class LaneRuntimeMixin:
             return "it changes the measurement surface: " + ", ".join(protected)
         return ""
 
-    def _queue_produced_lanes(self, results: list[LaneResult], sinks: dict[str, dict]) -> None:
-        """Queue the candidates a round produced, remembering each session until its iteration measures it."""
-        active_profile_id = self.run_state.agent_relay.active_profile_id
-        queued: list[LaneResult] = []
-        sessions: dict[LaneResult, dict] = {}
-        for item in results:
-            if not item.produced_candidate:
-                continue
-            queued_item = replace(item, agent_profile_id=active_profile_id)
-            sink = sinks.get(item.lane_id)
-            if sink is not None:
-                sessions[queued_item] = sink
-            queued.append(queued_item)
-        self._lane_queue = queued
-        self._lane_sessions = sessions
-
-    def _drop_lane_session(self, lane: LaneResult) -> None:
-        """Forget a queued session that will not be measured."""
-        self._lane_sessions.pop(lane, None)
-
-    def _adopt_lane_session(self, session_sink: dict, lane: LaneResult) -> None:
-        """Copy the lane session's lesson inputs onto the iteration that measures it.
-
-        The resume callback stays in this dict. ``lane_queue.json`` is what a later process reads, and that process
-        has no session to resume: its lesson is the machine fallback ``_record_lesson`` already writes.
-        """
-        remembered = self._lane_sessions.pop(lane, None)
-        if remembered:
-            for name in ("session_started", "summarize", "end_reason", "turns", "findings", "progress_log"):
-                if name in remembered:
-                    session_sink[name] = remembered[name]
-            return
-        # The queue was restored, or the session left no sink. There is no session to resume, so the lesson turn
-        # writes the machine fallback and that file is still the reasoning.
-        session_sink["session_started"] = True
-
     def _take_lane_candidate(self) -> LaneResult | None:
         """Apply the next queued lane candidate to the canonical tree."""
         try:
@@ -278,11 +246,9 @@ class LaneRuntimeMixin:
             lane = self._lane_queue.pop(0)
             rejection = self._lane_rejection(lane.diff)
             if rejection:
-                self._drop_lane_session(lane)
                 print(f"  [lane {lane.lane_id}] candidate rejected: {rejection}")
                 continue
             if not self._git_apply_patch(lane.diff):
-                self._drop_lane_session(lane)
                 self._git_discard_worktree()
                 print(f"  [lane {lane.lane_id}] candidate no longer applies; dropped")
                 continue
@@ -292,7 +258,6 @@ class LaneRuntimeMixin:
             except ValueError as error:
                 # Take the candidate back off the tree before anything else, so the next candidate does not inherit
                 # it.
-                self._drop_lane_session(lane)
                 self._git_discard_worktree()
                 self._validate_driver_integrity(self.run_state)
                 print(f"  [lane {lane.lane_id}] candidate rejected: {error}")
@@ -489,8 +454,6 @@ class LaneRuntimeMixin:
         if not queued:
             return
         self._lane_queue = queued
-        # The resumed objects are new. The process that ran the sessions is gone, so none of them has a callback.
-        self._lane_sessions.clear()
         print(f"  [lanes] resuming {len(queued)} candidate(s) an earlier round bought and never measured")
 
     def _lane_plan_manifest_path(self, iteration: int) -> Path:

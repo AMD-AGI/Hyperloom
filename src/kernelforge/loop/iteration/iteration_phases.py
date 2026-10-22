@@ -145,7 +145,7 @@ class IterationPhasesMixin:
             reusable_benchmark = None
             session_sink["plan"] = queued_lane.plan
             self._bind_session_producer(session_sink, queued_lane.agent_profile_id)
-            self._adopt_lane_session(session_sink, queued_lane)
+            session_sink["lesson"] = queued_lane.lesson
             print(f"  [lane {queued_lane.lane_id}] measuring queued candidate")
         elif merge_diff and merge_pair is not None:
             unmeasured_result = None

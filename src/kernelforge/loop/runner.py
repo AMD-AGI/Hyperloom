@@ -27,7 +27,6 @@ from .iteration.workspace_git import WorkspaceGitMixin
 from collections.abc import Awaitable, Callable
 from kernelforge.config import Config
 from kernelforge.loop.analysis_runtime import AnalysisRuntimeMixin
-from kernelforge.loop.fanout import LaneResult
 from kernelforge.loop.handoffs import HandoffStore
 from kernelforge.loop.relay_runtime import RelayRuntimeMixin
 from kernelforge.loop.run_state import LoopStateStore
@@ -161,9 +160,6 @@ class IterationLoop(
         self._last_critic_verdict = ""
         self._last_critic_review = ""
         self.monitor = None
-        # The lesson turn's resume callback, keyed by the queued candidate. lane_queue.json cannot hold it: a process
-        # that restores the queue has no session to resume, and its lesson is the machine fallback.
-        self._lane_sessions: dict[LaneResult, dict] = {}
 
     # The one obstacle a later iteration clears on its own, and so the one the caller must not hold against the pair:
     # a tree carrying work is this iteration's accident, not a fact about two archived diffs.

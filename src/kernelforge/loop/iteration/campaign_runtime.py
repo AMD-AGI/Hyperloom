@@ -467,7 +467,6 @@ class CampaignMixin:
         # Candidates from one concurrent fan-out, spent one per iteration so each is measured and judged on its own by
         # the ordinary decision path.
         self._lane_queue: list[LaneResult] = []
-        self._lane_sessions = {}
         self._last_lane_plans: list[str] = []
         # Stacked iterations run back to back so far.
         self._merge_precedence_streak = 0

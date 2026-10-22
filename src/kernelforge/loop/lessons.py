@@ -951,13 +951,12 @@ class PrReferenceNote:
 
 async def summarize_iteration(
     *,
-    store: LessonStore,
     iteration: int,
     end_reason: str,
     summarizer,
     references: PrReferenceNote = PrReferenceNote(),
 ) -> SummaryOutcome:
-    """Ask the just-finished implementer session to write its lesson document."""
+    """Ask the just-finished implementer session for its lesson text. The caller writes it."""
     if summarizer is None:
         return SummaryOutcome(reason="provider cannot resume the session")
     prompt = build_summary_prompt(
@@ -970,8 +969,6 @@ async def summarize_iteration(
     text = (text or "").strip()
     if not text:
         return SummaryOutcome(reason="session replied with no text")
-    if store.write(iteration, text) is None:
-        return SummaryOutcome(reason="failed to persist lesson document")
     return SummaryOutcome(text=text)
 
 
