@@ -18,11 +18,11 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
-from kernelforge.llm.workspace_policy import (
+from kernelforge.workspace.edit_policy import (
     is_protected_path,
     tracked_editable_paths,
 )
-from kernelforge.llm.git import git, git_bytes
+from kernelforge.tools.git import git, git_bytes
 from kernelforge.knowledge.kb_store import warmstart_policy
 from kernelforge.knowledge.kb_store.identity.run import LoopKernel
 from kernelforge.knowledge.kb_store.identity.implementation import (

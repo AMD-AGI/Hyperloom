@@ -16,7 +16,7 @@ from pathlib import Path
 
 from hyperloom.common.unified_diff import touched_paths
 
-from kernelforge.llm.git import git_bytes
+from kernelforge.tools.git import git_bytes
 from kernelforge.evaluation.scoring import aggregate_regression_detail
 from kernelforge.tools.durable_io import atomic_write_text, fsync_directory, fsync_tree
 

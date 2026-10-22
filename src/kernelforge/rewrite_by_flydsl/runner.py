@@ -13,7 +13,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from kernelforge.llm.git import git
+from kernelforge.tools.git import git
 from kernelforge.config import Config
 from kernelforge.loop.knowledge_integration import git_checkout_branch
 from kernelforge.knowledge.kb_store.errors import (

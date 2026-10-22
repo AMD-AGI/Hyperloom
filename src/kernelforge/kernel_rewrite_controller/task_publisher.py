@@ -26,7 +26,7 @@ from kernelforge.knowledge.kb_store.identity.implementation import (
     normalize_operator_name,
 )
 from kernelforge.knowledge.kb_store.identity.kernel_recipe import KERNEL_CANONICAL_DIMENSIONS
-from kernelforge.llm.git import GitError, git
+from kernelforge.tools.git import GitError, git
 
 
 log = logging.getLogger(__name__)
