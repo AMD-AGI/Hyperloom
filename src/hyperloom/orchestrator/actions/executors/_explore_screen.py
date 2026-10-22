@@ -99,7 +99,7 @@ _KERNEL_RES = {
 
 def screen_enabled() -> bool:
     """Off unless explicitly turned on."""
-    return str(os.environ.get(ENV_ENABLED, "0")).strip().lower() in ("1", "true", "yes")
+    return str(os.environ.get(ENV_ENABLED, "0")).strip().lower() in ("1", "true", "yes", "on")
 
 
 def kernels_from_log(text: str) -> dict[str, str]:
