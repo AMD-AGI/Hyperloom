@@ -120,7 +120,7 @@ def test_lifecycle_delegates_to_bypass_backend(tmp_path, monkeypatch):
 
     # Pin the free-port picker so the port assertion is deterministic (resolve now assigns a per-session free port on
     # the common path).
-    monkeypatch.setattr(sl, "_pick_free_port", lambda: 8888)
+    monkeypatch.setattr(sl, "pick_server_port", lambda: 8888)
     info = sl.resolve_lifecycle_params(cfg_path)
     # bypass now honors the YAML lifecycle block, so a serving framework with profiling off is eligible.
     assert info["eligible"] is True
@@ -155,7 +155,7 @@ def test_lifecycle_magpie_gfx12_eligible(tmp_path, monkeypatch):
     from hyperloom.orchestrator.actions.executors import _server_lifecycle as sl
 
     monkeypatch.delenv(bb.BENCHMARK_BACKEND_ENV, raising=False)
-    monkeypatch.setattr(sl, "_pick_free_port", lambda: 8888)
+    monkeypatch.setattr(sl, "pick_server_port", lambda: 8888)
     cfg = {
         "benchmark": {
             "framework": "vllm",

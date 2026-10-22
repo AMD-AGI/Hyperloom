@@ -414,7 +414,7 @@ class TestAutoWarmupTeardown:
         # Pin the free-port picker so the teardown-port assertion is deterministic (baseline uses a per-session free
         # port).
         monkeypatch.setattr(
-            "hyperloom.orchestrator.actions.executors._server_lifecycle._pick_free_port",
+            "hyperloom.orchestrator.actions.executors._server_lifecycle.pick_server_port",
             lambda: 8888,
         )
         base = tmp_path / "base.yaml"

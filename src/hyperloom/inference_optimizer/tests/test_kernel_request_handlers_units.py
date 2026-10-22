@@ -2422,7 +2422,7 @@ class TestRunGemmTuningHandler:
                 return {"status": "succeeded"}
 
         monkeypatch.setattr(baseline_module, "BaselineExecutor", FakeBaselineExecutor)
-        monkeypatch.setattr(krh, "_pick_shape_capture_port", lambda: 19001)
+        monkeypatch.setattr(krh, "pick_server_port", lambda: 19001)
 
         result = asyncio.run(
             krh._capture_vllm_tunableop_shapes(
