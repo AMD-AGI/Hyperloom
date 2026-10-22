@@ -40,6 +40,7 @@ from kernelforge.orchestrator.wiki_batch import (
     STATUS_PENDING,
     STATUS_REFUTED,
     STATUS_SKIPPED,
+    BatchSession,
 )
 from kernelforge.tools.durable_io import atomic_write_text
 
@@ -58,7 +59,6 @@ REASON_NO_BATCH_PLAN = "NO_BATCH_PLAN"
 MAX_PLAYBOOK_ATTEMPTS = 2
 # Times the round runs its batch again after a session whose outcome says nothing about it.
 UNSETTLED_RETRIES = 1
-
 # Decision labels (``runner._decision_label`` and the loop's own labels) by what they settle about a cited item.
 DECISION_KEEP = "KEEP"
 APPLIED_DECISIONS = frozenset({DECISION_KEEP})
@@ -123,11 +123,22 @@ BATCH_SESSION_INSTRUCTIONS = (
     "This plan is one knowledge base batch: {parts} part(s), each one playbook group, implemented in this one session "
     "on the same kernel and measured once, when the session ends. Implement the parts in the order given. After each "
     "part, run the correctness check and time the cases: keep the part when it is correct and not slower than the "
-    "kernel was before it, and otherwise revert that part's edits and go on to the next part. Submit only after the "
-    "last part. End the session with these lines of its own, each entry an item id followed by why, entries "
-    "separated by `;`: [playbook:...] naming every item whose change is in the final kernel; [playbook-skip:...] "
-    "naming every item you implemented and dropped or reverted, or whose precondition proved false; and "
-    "[playbook-untried:...] naming every item you did not get to or did not finish, which stays open."
+    "kernel was before it, and otherwise revert that part's edits and go on to the next part. Leave a part out only "
+    "when its precondition proves false or it measured worse; being hard or long is not a reason. Submit only after "
+    "the last part, or at the wrap-up time the session deadline gives. End the session with these lines of its own, "
+    "each entry an item id followed by why, entries separated by `;`: [playbook:...] naming every item whose change "
+    "is in the final kernel; [playbook-skip:...] naming every item you implemented and dropped or reverted, or whose "
+    "precondition proved false, with that evidence; and [playbook-untried:...] naming every item you did not get to "
+    "by the wrap-up time, which stays open."
+)
+
+BATCH_UNFINISHED = (
+    "The batch is not finished, and {minutes} minutes remain before the wrap-up time. The kernel as it stands is "
+    "correct and faster, so keep it and continue from it with part {position} of {parts} (playbook group {group}): "
+    "{items} is neither in the kernel nor dropped with evidence. Implement it, check and time it, keep or revert it, "
+    "then go on with the parts after it. Leave an item out only as [playbook-skip:<id> <evidence>] when its "
+    "precondition proves false or it measured worse; being hard or long is not a reason. End with the [playbook:...], "
+    "[playbook-skip:...] and [playbook-untried:...] lines once every part is done or the wrap-up time is reached."
 )
 
 IMPLEMENTER_NOTE = (
@@ -411,6 +422,26 @@ def batch_plan(parts: Sequence[tuple[str, str]]) -> str:
         heading = f"## Part {index} of {len(parts)}" + (f": {label}" if label else "")
         sections.append(f"{heading}\n\n{plan.strip()}")
     return "\n\n".join(sections) + "\n"
+
+
+def batch_unfinished(batch: BatchSession, message: str | None, *, now: float) -> str:
+    """Why a batch session stopping with ``message`` as its last word must go on, or ``""`` when it may stop: past its
+    wrap-up time, with every item in the kernel or dropped, or when its last word could not be read (``None``)."""
+    if message is None or now >= batch.wrap_up_at:
+        return ""
+    cites = read_citations(latest_report(message), [item for _, items in batch.parts for item in items])
+    settled = {*cites.claimed, *cites.skipped}
+    for position, (group_id, items) in enumerate(batch.parts, start=1):
+        left = [item for item in items if item not in settled]
+        if left:
+            return BATCH_UNFINISHED.format(
+                minutes=max(1, round((batch.wrap_up_at - now) / 60)),
+                position=position,
+                parts=len(batch.parts),
+                group=group_id,
+                items=", ".join(left),
+            )
+    return ""
 
 
 def _listed(state: GuidanceState, item_ids: Sequence[str]) -> str:

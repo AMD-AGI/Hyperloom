@@ -340,6 +340,50 @@ def test_a_batch_is_one_plan_whose_parts_keep_their_order():
     )
 
 
+TWO_PART_SESSION = wiki_batch.BatchSession((("G1", ("P1", "P2")), ("G2", ("P3",))))
+
+
+def test_a_batch_session_keeps_ten_minutes_or_a_sixth_of_itself_to_wrap_up():
+    hour = TWO_PART_SESSION.timed(3600, now=1000.0)
+    assert (hour.ends_at, hour.wrap_up_at) == (4600.0, 4000.0)
+    assert TWO_PART_SESSION.timed(7200, now=0.0).wrap_up_at == 6000.0
+    assert TWO_PART_SESSION.timed(1800, now=0.0).wrap_up_at == 1200.0
+
+
+def test_a_batch_session_states_its_own_stopping_rule_and_clock():
+    session = TWO_PART_SESSION.timed(3600, now=0.0)
+
+    assert session.stop_rule("first win") == wiki_batch.BATCH_STOP_RULE
+    deadline = session.deadline_section("default", now=0.0)
+    assert "ends at 01:00 UTC, about 60 minutes from now" in deadline
+    assert "until 00:50 UTC" in deadline and "[playbook-untried:...]" in deadline
+    # Every other session keeps what it had.
+    assert wiki_batch.NO_BATCH.stop_rule("first win") == "first win"
+    assert wiki_batch.NO_BATCH.deadline_section("default", now=0.0) == "default"
+
+
+@pytest.mark.parametrize(
+    ("message", "now", "expected"),
+    [
+        ("[playbook:P1]\n[playbook-untried:P2 not reached in the session time]\n[playbook:P3]", 600.0, "part 1 of 2"),
+        ("[playbook:P3]", 600.0, "part 1 of 2"),
+        ("[playbook:P1]\n[playbook-skip:P2 slower on every case]", 600.0, "part 2 of 2"),
+        ("Done.\nSUBMIT_CANDIDATE", 600.0, "part 1 of 2"),
+        ("[playbook:P1, P3]\n[playbook-skip:P2 slower on every case]", 600.0, ""),
+        ("[playbook:P1]", 3000.0, ""),
+        (None, 600.0, ""),
+    ],
+)
+def test_a_batch_session_may_stop_only_with_every_part_done_or_dropped_or_at_its_wrap_up(message, now, expected):
+    reason = guidance.batch_unfinished(TWO_PART_SESSION.timed(3600, now=0.0), message, now=now)
+
+    if expected:
+        assert expected in reason and "40 minutes remain" in reason
+        assert "being hard or long is not a reason" in reason
+    else:
+        assert reason == ""
+
+
 def test_the_state_survives_a_round_trip_and_an_unreadable_file_starts_afresh(tmp_path):
     store = WikiGuidanceStore(tmp_path)
     state = _state_with()
@@ -600,6 +644,30 @@ def test_the_first_round_implements_its_batch_in_one_session_and_then_kernelforg
     assert [event.get("wiki_batch") for event in results] == [["G1", "G2"], None]
     assert [event["guidance_phase"] for event in results] == ["GUIDED", "FREE"]
     assert (workspace / "forge_experiments" / "wiki_guidance" / "playbook_response.md").is_file()
+
+
+def test_each_batch_session_is_given_its_parts_and_their_open_items(tmp_path, monkeypatch):
+    loop, _workspace = _guided_loop(tmp_path, monkeypatch, rounds=3)
+    service = _GuidedService(
+        [["body [playbook:P1]", "grid [playbook:P2]", "epilogue [playbook:P3]"], ["epilogue again"], ["free plan"]],
+        builds=[THREE_GROUPS],
+    )
+    monkeypatch.setattr(loop, "run_one_iteration", _measured(["KEEP", "KEEP", "KEEP"]))
+    edit = _editing_agent([], reports=["[playbook:P1, P2]\n[playbook-untried:P3 out of session time]", "[playbook:P3]"])
+    batches = []
+
+    async def agent(kernel_path, history, session_sink, batch):
+        batches.append(batch)
+        return await edit(kernel_path, history, session_sink)
+
+    _run(loop, service, agent)
+
+    # The completion round's session is given only what is still open, and a KernelForge round's session no batch.
+    assert [batch.parts for batch in batches] == [
+        (("G1", ("P1",)), ("G2", ("P2",)), ("G3", ("P3",))),
+        (("G3", ("P3",)),),
+        (),
+    ]
 
 
 def test_a_kept_batch_that_left_items_untried_gets_one_round_for_them(tmp_path, monkeypatch):
