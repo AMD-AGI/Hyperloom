@@ -9,10 +9,11 @@ group a process moved to (a Claude CLI runs each of its shell commands in a sess
 starts its servers through one). The pod forbids a PID namespace, so an agent's ``pkill``, ``pgrep`` and ``killall``
 would otherwise reach the whole host; Arbor stops its server with ``docker exec C pkill -TERM -f sglang.launch_server``,
 which through the docker shim would stop MB's measurement servers too. The sandbox puts wrappers for them first on
-``PATH`` that match only the processes carrying the caller's marker, and ``pkill`` and ``killall`` spare the caller and
-its ancestors, as a ``docker exec`` from outside a container would. ``killall NAME``
-is ``pkill -x`` on the name's first 15 characters, all the kernel keeps of a name, and takes no option but a signal and
-``-q``: its others select by user, age or regex, which an agent confined to its own processes has no use for.
+``PATH`` that match only the processes carrying the caller's marker and never the caller or its ancestors, as a ``docker
+exec`` from outside a container would not: a shell that waits with ``until ! pgrep -f X`` carries ``X`` in its own
+command line. ``killall NAME`` is ``pkill -x`` on the name's first 15 characters, all the kernel keeps of a name, and
+takes no option but a signal and ``-q``: its others select by user, age or regex, which an agent confined to its own
+processes has no use for.
 
 Output goes to a numbered log file under the sandbox's root, not to a pipe, which an agent running for hours would
 fill.
@@ -58,8 +59,7 @@ CONFINED = ("pkill", "pgrep", "killall")
 MARKER = "HYPERLOOM_AGENT_SANDBOX"
 
 CONFINE_SCRIPT = """#!{python} -I
-# pkill, pgrep and killall confined to the processes of the caller's sandbox; pkill and killall spare the caller and
-# its ancestors.
+# pkill, pgrep and killall confined to the processes of the caller's sandbox, the caller and its ancestors spared.
 import os, re, signal, subprocess, sys
 
 PGREP = {pgrep!r}
@@ -160,7 +160,8 @@ def send(pids, number, echo):
 if tool == "pgrep":
     if not has_criteria(args):
         refuse("give a pattern or a selection")
-    lines = found(args)
+    spared = {{str(pid) for pid in ancestors()}}
+    lines = [line for line in found(args) if line.split()[0] not in spared]
     for line in lines:
         print(line)
     sys.exit(0 if lines else 1)
