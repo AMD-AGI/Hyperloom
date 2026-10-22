@@ -86,6 +86,21 @@ _QUOTED_KINDS = {
     HIP_KERNEL_MISSING: log_causes.missing_hip_kernel,
     HIP_RUNTIME_ERROR: log_causes.hip_error,
 }
+#: The causes that decide a test on their own once the warmup or the accuracy round states one: the server crashed or
+#: refused to serve, or its evaluation failed. Measuring what is left would only boot a server that cannot serve; any
+#: other end (a port taken, an unnamed log, a stalled server) keeps the rounds after it, since a later round's logs can
+#: still name the cause. The names are the part of a reason before its ``: <the log's line>``.
+_DECISIVE_REASONS = frozenset(
+    {
+        HIP_RUNTIME_ERROR,
+        IMPORT_ERROR,
+        SERVE_FLAG,
+        EVAL_RUNTIME_FAILURE,
+        LM_EVAL_BAD_REQUEST_REASON,
+        PYTHON_EXCEPTION_REASON,
+        SERVER_BOOT_TIMEOUT_REASON,
+    }
+)
 _PORT_IN_USE = re.compile(r"address already in use|\[Errno 98\]", re.IGNORECASE)
 
 # Sentinel return codes of the local flow (``orchestrator/actions/executors/_subprocess_kill.py``). The names stay
@@ -177,6 +192,12 @@ def classify_test_failure(
     if returncode == SERVER_BOOT_TIMEOUT_RC:
         return _candidate(f"{SERVER_BOOT_TIMEOUT_REASON}: {detail}" if detail else SERVER_BOOT_TIMEOUT_REASON)
     return _from_unnamed_logs(text)
+
+
+def decides_test(verdict: FailureClassification) -> bool:
+    """Whether ``verdict`` names a cause that settles the test, so the rounds that are left need not run."""
+    reason = verdict.failure_reason or ""
+    return verdict.disposition is Disposition.FAILED and reason.split(":", 1)[0] in _DECISIVE_REASONS
 
 
 def _from_error_class(error_class: str) -> FailureClassification:

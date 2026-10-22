@@ -46,6 +46,7 @@ from hyperloom.measure.accuracy import read_accuracy
 from hyperloom.measure import log_causes
 from hyperloom.measure.boot_watch import BOOT_CANCEL_REASON, BootGuard, boot_limit_sec
 from hyperloom.measure.compile import CompiledEnvironment, LocalBlobStore
+from hyperloom.measure.failures import Disposition, FailureClassification, classify_test_failure, decides_test
 from hyperloom.measure.farm import FarmError, build_farm, place_farm, server_python, verify_farm
 from hyperloom.measure.framework_copies import private_framework
 from hyperloom.measure.magpie_launchers import install_launchers
@@ -506,14 +507,16 @@ async def _eval_then_measure(run: _Run, lifecycle: _Lifecycle) -> None:
 
     InferenceX's own order; the evaluation between the benches keeps the measured one from reusing the prefix cache the
     warmup left. The warmup round keeps the point's ``RUN_EVAL`` (on, as validated) and leaves the server up; when
-    the warmup failed or was stopped, nothing is measured.
+    the warmup failed or was stopped, nothing is measured, and neither when the logs of the warmup or of its evaluation
+    name a cause that settles the test (a crashed server, a refused request): the measured round would boot a server
+    that cannot serve, and the test ends with the failure those logs state.
     """
     try:
         warmup = await _grid(
             run, 0, _WARMUP, server_lifecycle=lifecycle.settings(cleanup=False), warmup_before_measure=False
         )
         run.warmup = warmup
-        if not run.add(0, warmup) or _is_failure(warmup):
+        if not run.add(0, warmup) or _is_failure(warmup) or decides_test(_ended(run).verdict):
             return
         measured = await _grid(
             run,
@@ -839,28 +842,44 @@ def _boot_timeout_detail(run: _Run, failing: list[VariantResult]) -> str:
     return f"{detail}; its log ends: {ends}" if ends else detail
 
 
-def _outcome(run: _Run) -> TestOutcome:
-    from hyperloom.measure.failures import Disposition, classify_test_failure
+@dataclass(frozen=True)
+class _Ended:
+    """How the rounds a test has run end it: the rounds, the return code and stderr they leave, and the verdict on them."""
 
-    call = run.call
+    rounds: list[RoundOutcome]
+    returncode: int
+    stderr: str
+    verdict: FailureClassification
+
+
+def _ended(run: _Run) -> _Ended:
+    """The end the test has if it stops after the results it holds, which is what ``_outcome`` reports when it does."""
     by_result = [(result, _rounds(run, point, result)) for point, result in run.results]
     rounds = [r for _, of_result in by_result for r in of_result]
     # A benchmark that served its whole protocol keeps its status when its evaluation fails, so a round's own return
     # code, not its status, says whose logs hold the cause.
     failing = [result for result, of_result in by_result if any(r.returncode != 0 for r in of_result)]
     detail = _boot_timeout_detail(run, failing)
+    notes = list(run.notes)
     if detail:
         # The guard ended the round by cancelling it; the cancellation is the symptom, the slow boot the failure.
         rounds = [
             dataclasses.replace(r, returncode=SERVER_BOOT_TIMEOUT_RC) if r.returncode == run.stopped_rc else r
             for r in rounds
         ]
-        run.notes.append(f"{BOOT_CANCEL_REASON}: {detail}")
+        notes.append(f"{BOOT_CANCEL_REASON}: {detail}")
     failed = [r for r in rounds if r.returncode != 0]
     returncode = failed[0].returncode if failed else _clean_returncode(run)
-    stderr = "\n".join([*(result.error for _, result in run.results if result.error), *run.notes])
+    stderr = "\n".join([*(result.error for _, result in run.results if result.error), *notes])
     logs = [stderr, *_failure_logs(failing)]
     verdict = classify_test_failure(returncode=returncode, logs=logs, detail=detail)
+    return _Ended(rounds, returncode, stderr, verdict)
+
+
+def _outcome(run: _Run) -> TestOutcome:
+    call = run.call
+    ended = _ended(run)
+    rounds, returncode, stderr, verdict = ended.rounds, ended.returncode, ended.stderr, ended.verdict
     summary = [
         {"point": p, "name": r.name, "status": r.status, "returncode": r.returncode, "error_class": r.error_class}
         for p, r in run.results

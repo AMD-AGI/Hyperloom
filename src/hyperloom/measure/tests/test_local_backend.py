@@ -22,7 +22,7 @@ from hyperloom.measure import local
 from hyperloom.measure.local import SUPPORTED_KINDS, LocalMeasurementBackend, TestCallRefused
 from hyperloom.measure.repro import read_verdict
 from hyperloom.measure.socket import RoundPlan, SessionFacts, TestCall
-from hyperloom.measure.tests import eval_refusal_logs
+from hyperloom.measure.tests import eval_refusal_logs, test_log_causes
 from hyperloom.measure.tests._inferencex import CLIENT, CLIENT_PATH, LIBRARY, LIBRARY_PATH, stock_checkout
 from hyperloom.orchestrator.actions.executors import (
     ORCHESTRATOR_CANCELLED_RETURNCODE,
@@ -1504,8 +1504,94 @@ def test_an_evaluation_that_fails_after_a_whole_protocol_is_classified_from_the_
 
     outcome = _run(_graded_call(tmp_path))
 
-    assert [(r.phase, r.returncode) for r in outcome.rounds] == [("warmup", 1), ("accuracy", 1), ("measure", 0)]
+    assert [c["grid"][0].name for c in grid.calls] == ["warmup"], "a refused evaluation settles the test"
+    assert [(r.phase, r.returncode) for r in outcome.rounds] == [("warmup", 1), ("accuracy", 1)]
     assert (outcome.returncode, outcome.failure_class) == (1, "unclear")
     reason = outcome.failure_reason or ""
     assert reason.startswith("lm_eval_http_400: "), "the refusal, not the session the client closed after it"
     assert "longer than the model's context length (400 tokens)" in reason
+    assert len(server.teardowns) == 1, "the server the warmup left up is reclaimed although no measured round runs"
+
+
+def _warmup_with_logs(grid: _Grid, tmp_path: Path, server_log: str, *, returncode: int) -> None:
+    """A warmup round that ran its whole protocol (so its status is ``succeeded``) and left ``server_log``."""
+    workspace = tmp_path / "ws" / "warmup"
+    workspace.mkdir(parents=True)
+    (workspace / "server.log").write_text(server_log, encoding="utf-8")
+    grid.answers.update(
+        warmup=grid.result(
+            "warmup", returncode=returncode, output_throughput=1111.0, server_log_path=str(workspace / "server.log")
+        ),
+        test=grid.result("test"),
+    )
+
+
+@pytest.mark.parametrize(
+    ("log", "failure_class", "reason"),
+    [
+        (
+            test_log_causes.ILLEGAL_ADDRESS_LOG,
+            "candidate",
+            "hip_runtime_error: Exception: Capture cuda graph failed: HIP error: an illegal memory access was encountered",
+        ),
+        (
+            test_log_causes.FASTSAFETENSORS_LOG,
+            "candidate",
+            "import_error: ImportError: Please install fastsafetensors via `pip install fastsafetensors`",
+        ),
+        (
+            test_log_causes.ARGPARSE_LOG,
+            "candidate",
+            "serve_flag: launch_server.py: error: ambiguous option: --chunked-prefill could match",
+        ),
+        (
+            test_log_causes.PYTHON_EXCEPTION_LOG,
+            "unclear",
+            "python_exception: AssertionError: M must be a multiple of 16, got 63",
+        ),
+    ],
+    ids=["hip_runtime_error", "import_error", "serve_flag", "python_exception"],
+)
+def test_a_warmup_whose_server_crashed_or_refused_to_serve_ends_the_test_with_no_measured_round(
+    grid, server, tmp_path, log, failure_class, reason
+):
+    _warmup_with_logs(grid, tmp_path, log, returncode=1)
+
+    outcome = _run(_graded_call(tmp_path))
+
+    assert [c["grid"][0].name for c in grid.calls] == ["warmup"], "no measured round boots a server that cannot serve"
+    assert [r.phase for r in outcome.rounds] == ["warmup", "accuracy"] and outcome.returncode == 1
+    assert outcome.failure_class == failure_class
+    assert (outcome.failure_reason or "").startswith(reason)
+    assert len(server.teardowns) == 1
+
+
+@pytest.mark.parametrize(
+    ("log", "failure_class", "reason"),
+    [
+        (test_log_causes.PLAIN_LOG, "unclear", "no_known_signature"),
+        ("OSError: [Errno 98] Address already in use\n", "infra", "port_in_use"),
+    ],
+    ids=["no_known_signature", "port_in_use"],
+)
+def test_a_warmup_that_failed_for_a_cause_no_log_names_keeps_the_measured_round_as_before(
+    grid, server, tmp_path, log, failure_class, reason
+):
+    _warmup_with_logs(grid, tmp_path, log, returncode=1)
+
+    outcome = _run(_graded_call(tmp_path))
+
+    assert [c["grid"][0].name for c in grid.calls] == ["warmup", "test"]
+    assert [(r.phase, r.returncode) for r in outcome.rounds] == [("warmup", 1), ("accuracy", 1), ("measure", 0)]
+    assert (outcome.failure_class, outcome.failure_reason) == (failure_class, reason)
+
+
+def test_a_warmup_whose_server_log_is_healthy_goes_on_to_the_measured_round(grid, server, tmp_path):
+    _warmup_with_logs(grid, tmp_path, test_log_causes.SERVER_LOG_WITH_BAD_REQUEST, returncode=0)
+    _lm_eval_results(Path(grid.answers["warmup"].workspace) / "eval_output", 0.64)
+
+    outcome = _run(_graded_call(tmp_path))
+
+    assert [c["grid"][0].name for c in grid.calls] == ["warmup", "test"]
+    assert [(r.phase, r.returncode) for r in outcome.rounds] == [("warmup", 0), ("accuracy", 0), ("measure", 0)]
+    assert (outcome.returncode, outcome.failure_class, outcome.failure_reason) == (0, None, None)
