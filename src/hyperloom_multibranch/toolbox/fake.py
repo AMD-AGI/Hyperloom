@@ -326,11 +326,19 @@ class FakeToolbox(RealToolbox):
 
     async def submit_test(self, request: TestRequest) -> str:
         await self._ensure_started()
+        self._refuse_rejected(request)
+        return await super().submit_test(request)
+
+    async def check_test(self, request: TestRequest) -> None:
+        await self._ensure_started()
+        self._refuse_rejected(request)
+        await super().check_test(request)
+
+    def _refuse_rejected(self, request: TestRequest) -> None:
         for check in self._rejections:
             rejection = check(request)
             if rejection is not None:
                 raise rejection
-        return await super().submit_test(request)
 
     async def cancel(self, request_id: str) -> CancelOutcome:
         await self._ensure_started()

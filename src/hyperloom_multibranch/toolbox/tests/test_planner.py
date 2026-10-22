@@ -99,6 +99,18 @@ async def test_an_accuracy_test_whose_launch_serves_less_context_than_its_evalua
     assert rig.notebook._state().requests == {} and rig.toolbox._log.entries() == []
 
 
+async def test_a_check_refuses_what_acceptance_refuses_and_accepts_nothing_either_way(tmp_path: Path) -> None:
+    rig = build(tmp_path, repo=FakeRepo(recipe_with()), planner=_planner(tmp_path))
+
+    with pytest.raises(RequestRejected) as refused:
+        await rig.toolbox.check_test(req(server_args="--context-length 2304"))
+    await rig.toolbox.check_test(req(server_args="--max-running-requests 77"))
+
+    assert refused.value.code == "context_below_eval"
+    assert rig.notebook._state().requests == {} and rig.toolbox._log.entries() == []
+    assert rig.executor.jobs == [] and not (await rig.toolbox.queue_state()).queued_by_branch
+
+
 async def test_the_minimum_context_follows_the_point_the_evaluation_runs_on(tmp_path: Path) -> None:
     rig = build(tmp_path, repo=FakeRepo(recipe_with()), planner=_planner(tmp_path))
     change = RecipeDelta(config=ConfigDelta(server_args="--context-length 2304", envs={"MAX_MODEL_LEN": "4096"}))

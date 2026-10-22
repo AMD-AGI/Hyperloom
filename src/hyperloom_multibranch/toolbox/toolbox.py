@@ -250,6 +250,18 @@ class RealToolbox:
 
     # --- beyond the interface ------------------------------------------------------------------------------------
 
+    async def check_test(self, request: TestRequest) -> None:
+        """Run acceptance on ``request`` as :meth:`submit_test` does, and accept nothing.
+
+        Raises :class:`RequestRejected` for the check that refuses it; nothing is queued, logged or written to the
+        notebook either way. The queue's own checks (branch listed, backpressure) are left out: they say when a test
+        may start, not whether it may run.
+        """
+
+        check_kind(request, self._kinds)
+        async with self._lock:
+            await self._acceptance.prepare(self._acceptance.with_required_accuracy(request))
+
     async def set_policy(self, policy: QueuePolicy) -> None:
         """The scheduler's quota and priority policy; takes effect for the next test that starts."""
 
