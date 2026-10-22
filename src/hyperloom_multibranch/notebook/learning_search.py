@@ -178,9 +178,7 @@ def words(text: str) -> set[str]:
         whole = word.rstrip(".")
         found.add(whole)
         found.update(_PARTS.split(whole))
-    return {
-        word for word in found if len(word) > 1 and word not in _STOPWORDS and not _SMALL_NUMBER.fullmatch(word)
-    }
+    return {word for word in found if len(word) > 1 and word not in _STOPWORDS and not _SMALL_NUMBER.fullmatch(word)}
 
 
 def word_overlap(mine: set[str], theirs: set[str]) -> float:
