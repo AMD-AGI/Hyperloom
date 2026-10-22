@@ -496,6 +496,28 @@ def test_a_resume_lets_the_new_leg_run_its_own_close_sequence() -> None:
     assert state.close_sequence_done is False
 
 
+def test_a_forced_resume_past_a_reached_target_keeps_optimizing() -> None:
+    """A raised --target-gain must be pursued, not sent to SWEEP on the last leg's marker (#1469)."""
+    from hyperloom.orchestrator.phases import machine_state
+
+    state = SharedState(
+        session_id="s",
+        start_ts="2026-08-01T00:00:00+00:00",
+        phase=machine_state.PHASE_KERNEL_AGENT,
+        kernel_optimizer="geak",
+        target_reached_at="2026-08-01T02:00:00+00:00",
+    )
+    flags = machine_state.PhaseFlags(kernel_enabled=True)
+    assert machine_state.compute_next_phase(state, flags=flags)[:2] == (machine_state.PHASE_SWEEP, "target_reached")
+    state.set_stop_reason("target_reached")
+
+    cb._begin_resume_leg(state)
+
+    assert state.target_reached_at == ""
+    out = machine_state.compute_next_phase(state, flags=flags)
+    assert out is None or out[1] != "target_reached"
+
+
 def test_a_killed_leg_and_a_stopped_leg_resume_with_the_same_budget() -> None:
     """No branch may read how a leg ended, because a killed leg records nothing."""
     killed = SharedState(session_id="killed", start_ts="2026-08-01T00:00:00+00:00", max_minutes=180)
