@@ -50,7 +50,7 @@ from hyperloom_multibranch.notebook.knowledge.tests.fakes import (
     experience_summary,
 )
 from hyperloom_multibranch.contracts.notebook.records import PeerReplay, WarmReplay
-from hyperloom_multibranch.notebook.knowledge.warm_start import PreparedReplay, WarmLead
+from hyperloom_multibranch.notebook.knowledge.warm_start import PreparedReplay, ReplayRefusal, WarmLead
 from hyperloom_multibranch.notebook.learning_search import LEARNINGS_LOG, RetrievalLog
 from hyperloom_multibranch.notebook.rsi.briefing import ON_HEAD, CrossSessionBriefing, SessionBriefs, TableStack
 from hyperloom_multibranch.notebook.tests.factories import FakeClock, judgement, profile, request, result
@@ -292,6 +292,28 @@ async def test_a_champion_the_start_commit_builds_on_is_named_on_the_head_and_no
         f"replay on your head with notebook_replay: its launch config only, {unpacked}"
     )
     with pytest.raises(ValueError, match="your head i1 builds on c1, which is its recipe"):
+        await briefing.warm_replay(LEAD.canonical_id)
+
+
+async def test_a_replay_preludes_check_refused_is_named_in_the_brief_and_notebook_replay_answers_with_it(
+    tmp_path: Path,
+) -> None:
+    notebook = await scripted_session(tmp_path / "notebook", FakeClock())
+    warm, repo = _champion_merged("the record holds no patch or kernel files")
+    refusal = ReplayRefusal(
+        "online_tuning_unsupported", "PYTORCH_TUNABLEOP_ENABLED=1 without PYTORCH_TUNABLEOP_TUNING=0"
+    )
+    briefing = CrossSessionBriefing(
+        notebook, warm=(dataclasses.replace(warm[0], refusal=refusal),), branch="s3", repo=repo
+    )
+
+    brief = await briefing.startup_brief("c0")
+
+    assert brief.leads[0] == (
+        "recipe: inference:older: +10.00% `--enable-expert-parallel` [older]; not replayable here: "
+        "online_tuning_unsupported (PYTORCH_TUNABLEOP_ENABLED=1 without PYTORCH_TUNABLEOP_TUNING=0)"
+    )
+    with pytest.raises(ValueError, match="is not replayable here: online_tuning_unsupported"):
         await briefing.warm_replay(LEAD.canonical_id)
 
 

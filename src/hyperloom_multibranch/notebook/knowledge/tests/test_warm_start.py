@@ -41,6 +41,7 @@ from hyperloom_multibranch.contracts.notebook.records import REPLAY_TOOL
 from hyperloom_multibranch.notebook.knowledge import warm_start
 from hyperloom_multibranch.notebook.knowledge.warm_start import (
     PreparedReplay,
+    ReplayRefusal,
     ReplayTarget,
     WarmLead,
     identity_labels,
@@ -408,3 +409,17 @@ def test_only_the_best_leads_get_a_replay_and_one_that_changes_nothing_gets_none
     assert [lead.replay is not None for lead in replayed] == [True, False, False]
     assert replayed[0].render().endswith(f"; replay on your head with {REPLAY_TOOL}: the whole recipe")
     assert replay_leads(_downloads(snapshot, tmp_path), profile(kernel_optimizer=""), leads, _target(tmp_path)) == leads
+
+
+def test_a_replay_acceptance_refuses_is_named_with_its_code_in_place_of_the_replay(
+    snapshot: NotebookSnapshot, tmp_path: Path
+) -> None:
+    found = replay(_downloads(snapshot, tmp_path), LEAD, SCOPE, _target(tmp_path))
+    refusal = ReplayRefusal("online_tuning_unsupported", "TunableOp tunes every GEMM shape " * 10)
+
+    described = replace(LEAD, replay=None, refusal=refusal).describe()
+    unchecked = replace(LEAD, replay=found, unchecked="the time ran out").describe()
+
+    assert described.startswith(f"{LEAD.summary()}; not replayable here: online_tuning_unsupported (TunableOp")
+    assert REPLAY_TOOL not in described and described.endswith("...)")
+    assert unchecked == f"{LEAD.summary()}; {found.describe()}; not checked against acceptance: the time ran out"

@@ -215,9 +215,13 @@ class CrossSessionBriefing(StartupBriefProvider):
     async def warm_replay(self, canonical_id: str) -> WarmReplay | None:
         """The change that replays the champion ``canonical_id`` on this branch's head, a gain landing only on the head
         it was measured against; ``None`` when PRELUDE prepared no replay of it, or it would change nothing there.
-        ``ValueError`` when the head is the champion's recipe already or builds on a commit that is."""
+        ``ValueError`` when PRELUDE's check of acceptance refused the replay, or the head is the champion's recipe
+        already or builds on a commit that is."""
 
-        prepared = next((lead.replay for lead in self.warm if lead.canonical_id == canonical_id), None)
+        lead = next((lead for lead in self.warm if lead.canonical_id == canonical_id), None)
+        if lead is not None and lead.refusal is not None:
+            raise ValueError(f"{canonical_id} is {lead.refusal.describe()}")
+        prepared = lead.replay if lead is not None else None
         if prepared is None or self.repo is None or not self.branch:
             return None
         head = await self.repo.head(self.branch)

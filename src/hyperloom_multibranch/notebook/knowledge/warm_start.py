@@ -30,6 +30,10 @@ scheduler watchdog are dropped, and the head's, if it sets them, kept. A record 
 the session that measured it, and the launcher sets both again for this one when a recipe leaves them out. The cap a
 champion was measured with is no optimization, and one below what this session's accuracy evaluation runs in is refused
 as ``context_below_eval``. A lead's launch arguments are listed without them for the same reason.
+
+PRELUDE checks each replay against the toolbox's acceptance on the root. A replay acceptance refuses keeps its lead, its
+:class:`ReplayRefusal` named in place of the replay, so no specialist spends a submit on it; one acceptance did not
+answer for in PRELUDE's time stays offered, its lead saying it was not checked.
 """
 
 from __future__ import annotations
@@ -80,6 +84,8 @@ HEAD_FLAGS = tuple(dict.fromkeys((*CONTEXT_FLAGS, *INJECTED_LAUNCH_FLAGS)))
 REPLAY_LEADS = 3
 #: The waits before each new ask of a read that failed transiently; one more ask follows the last wait.
 KB_RETRY_SECONDS = (2.0, 5.0, 15.0)
+#: How much of an acceptance refusal's reason a lead's line keeps.
+REFUSAL_CHARS = 160
 _UNSAFE_NAME = re.compile(r"[^A-Za-z0-9._-]+")
 _REPLAY_ERRORS = (KBStoreError, RemoteRecipeValidationError, RecipeError, BlobError, OSError, ValueError)
 _Read = TypeVar("_Read")
@@ -223,6 +229,18 @@ def _on_head_upstreams(wanted: Recipe, head: Recipe) -> Recipe:
 
 
 @dataclass(frozen=True)
+class ReplayRefusal:
+    """Why the toolbox's acceptance refuses a champion's replay on the session's root: its code, and its reason."""
+
+    code: str
+    reason: str
+
+    def describe(self) -> str:
+        reason = self.reason if len(self.reason) <= REFUSAL_CHARS else self.reason[: REFUSAL_CHARS - 3] + "..."
+        return f"not replayable here: {self.code} ({reason})"
+
+
+@dataclass(frozen=True)
 class WarmLead:
     """One Recipe KB champion in this session's scope; ``differing`` maps a dimension to (theirs, ours)."""
 
@@ -239,6 +257,8 @@ class WarmLead:
     what_failed: tuple[str, ...] = ()
     differing: Mapping[str, tuple[str, str]] = field(default_factory=dict)
     replay: PreparedReplay | None = None
+    refusal: ReplayRefusal | None = None
+    unchecked: str = ""
 
     def summary(self) -> str:
         """The champion: its id, where its scope differs from this session's, its gain, launch arguments and session."""
@@ -249,8 +269,11 @@ class WarmLead:
         return f"{self.canonical_id}{where}: {gain}{args} [{self.session_id}]"
 
     def describe(self) -> str:
+        if self.refusal is not None:
+            return f"{self.summary()}; {self.refusal.describe()}"
         replay = f"; {self.replay.describe()}" if self.replay is not None else ""
-        return f"{self.summary()}{replay}"
+        unchecked = f"; not checked against acceptance: {self.unchecked}" if self.unchecked else ""
+        return f"{self.summary()}{replay}{unchecked}"
 
     def render(self) -> str:
         return f"- {self.describe()}"
@@ -473,6 +496,7 @@ __all__ = [
     "PreparedReplay",
     "RecipeDownloader",
     "RecipeReader",
+    "ReplayRefusal",
     "ReplayTarget",
     "WarmLead",
     "candidates",
