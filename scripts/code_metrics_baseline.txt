@@ -8,7 +8,7 @@ cognitive-complexity src/hyperloom/inference_optimizer/breakdown/recorder/kernel
 cognitive-complexity src/hyperloom/inference_optimizer/breakdown/recorder/kernel_event.py::assemble_kernel_ext 50
 cognitive-complexity src/hyperloom/inference_optimizer/breakdown/recorder/kernel_event.py::record_geak_attempts 31
 cognitive-complexity src/hyperloom/inference_optimizer/breakdown/reporters/_renderers/final.py::render 31
-cognitive-complexity src/hyperloom/inference_optimizer/cli/__init__.py::_run_optimize 43
+cognitive-complexity src/hyperloom/inference_optimizer/cli/__init__.py::_run_optimize 36
 cognitive-complexity src/hyperloom/inference_optimizer/cli/model_gate.py::_detect_unsupported_model 32
 cognitive-complexity src/hyperloom/inference_optimizer/framework_paths.py::_discover_installed_framework_roots 43
 cognitive-complexity src/hyperloom/inference_optimizer/grid_server_args.py::_reserialize_json_blobs 45
