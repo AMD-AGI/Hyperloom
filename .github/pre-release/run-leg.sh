@@ -49,7 +49,7 @@
 #   container env replaces the image's PATH; without them `python3` can be a system
 #   interpreter with no framework and the image's ROCm toolchain is not found),
 #   HF_TOKEN, ANTHROPIC_CUSTOM_HEADERS (a gateway that needs a header gets it from
-#   the caller; none is assumed), INFERENCE_OPTIMIZER_SESSION_LAYOUT,
+#   the caller; none is assumed),
 #   GEAK_CLAUDE_MODEL, FORGE_CLAUDE_MODEL, OPENAI_BASE_URL, OPENAI_API_KEY,
 #   CODEX_MODEL; timing knobs LEG_SETUP_DEADLINE_S, LEG_SETUP_STALL_S,
 #   LEG_SETUP_MAX_TURNS, LEG_TURN_GAP_S, LEG_WAIT_INTERVAL_S, LEG_STALL_GRACE_S,
@@ -73,7 +73,7 @@ LEG_ID_RE='^(baremetal|docker)-(sglang|vllm|atom)(-forge)?-(3h|12h)$'
 # Mirrors SUCCESS_STOP_REASONS in hyperloom/inference_optimizer/breakdown/stop_reasons.py.
 CLEAN_STOP_REASONS="target_reached global_converged time_exhausted max_ticks sweep_done"
 # Keys copied from the caller's env into .env when set; secret ones are scrubbed on exit.
-PASSTHROUGH_KEYS="ANTHROPIC_CUSTOM_HEADERS GEAK_CLAUDE_MODEL FORGE_CLAUDE_MODEL OPENAI_BASE_URL OPENAI_API_KEY CODEX_MODEL INFERENCE_OPTIMIZER_SESSION_LAYOUT"
+PASSTHROUGH_KEYS="ANTHROPIC_CUSTOM_HEADERS GEAK_CLAUDE_MODEL FORGE_CLAUDE_MODEL OPENAI_BASE_URL OPENAI_API_KEY CODEX_MODEL"
 SECRET_KEYS="ANTHROPIC_API_KEY ANTHROPIC_CUSTOM_HEADERS OPENAI_API_KEY"
 
 log() {
