@@ -1,13 +1,14 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The GPU power-settings flags: ``--gpu-power-cap-w``, ``--gpu-perf-level`` and ``--apply-gpu-power-settings``."""
+"""The GPU power-settings flags: ``--gpu-power-cap-w``, ``--gpu-perf-level``, ``--apply-gpu-power-settings``,
+``--node-power-management`` and ``--node-power-limit-w``."""
 
 from __future__ import annotations
 
 import argparse
 
-from hyperloom.common.gpu_power_settings import PERF_LEVELS
+from hyperloom.common.gpu_power_settings import NPM_STATES, PERF_LEVELS
 
 from .constraint_args import positive_watts_arg
 
@@ -58,5 +59,27 @@ def add_gpu_power_arguments(opt: argparse._ActionsContainer) -> None:
             "applied). "
             "Must be passed "
             "again on resume."
+        ),
+    )
+    opt.add_argument(
+        "--node-power-management",
+        type=str.lower,
+        choices=NPM_STATES,
+        default=None,
+        metavar="STATE",
+        help=(
+            "Declare whether Node Power Management (MI350 series) is enabled or disabled on this node, as "
+            "`amd-smi node -p` reports it. Always an assertion: NPM is set on the BMC, never by the session, and "
+            "--apply-gpu-power-settings does not touch it. The observed state is recorded whether or not this flag "
+            "is passed."
+        ),
+    )
+    opt.add_argument(
+        "--node-power-limit-w",
+        type=positive_watts_arg,
+        default=None,
+        help=(
+            "Declare the node power limit (W) firmware enforces under NPM, as `amd-smi node -p` reports it; this can "
+            "sit below the limit the BMC was asked for. Asserted like --node-power-management."
         ),
     )

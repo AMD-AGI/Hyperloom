@@ -335,7 +335,8 @@ async def test_a_kept_round_records_the_patch_it_landed(_bound_session):
     assert len(events) == 1
     assert events[0]["status"] == "running"
     ext = _ext()
-    assert ext["attempts"]["landed"] == 1
+    assert ext["attempts"]["landed"] == 0
+    assert ext["attempts"]["validation_pending"] == 1
     row = ext["attempts"]["rows"][0]
     assert row["failure_kind"] == "missing_model_arch"
     assert row["status"] == "kept"

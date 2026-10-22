@@ -9,6 +9,10 @@ belongs to the operator before launch (``amd-smi set --power-cap`` / ``--perf-le
 ``--apply-gpu-power-settings``, the same way
 ``--compute-partition-mode`` asserts a mode rather than setting one. This module reads what the cards are at, so a
 session can record it and refuse to start when an operator's declared value did not take effect.
+
+Node Power Management (NPM, MI350 series) is the node-wide counterpart: firmware holds the sum of every card's power to
+a node limit and moves power between cards, so whether it is on and at what limit is part of the same contract. It is
+read and asserted here alongside the per-card settings; it is enabled out of band (the BMC), never by a session.
 """
 
 from __future__ import annotations
@@ -27,14 +31,19 @@ __all__ = [
     "GPU_POWER_SAMPLING_ENV",
     "GpuPowerSettingsError",
     "DeclaredPowerSettings",
+    "NODE_POWER_LIMIT_W",
+    "NPM",
+    "NPM_STATES",
     "PERF_LEVEL",
     "PERF_LEVELS",
     "PERF_LEVEL_MANUAL",
     "POWER_CAP_W",
+    "declared_node_problems",
     "declared_setting_problems",
     "gpu_power_sampling_unavailable",
     "normalize_perf_level",
     "read_gpu_power_settings",
+    "read_node_power_settings",
     "visible_gpu_indices",
 ]
 
@@ -56,7 +65,14 @@ PERF_LEVELS = (
 )
 #: The perf level an operator sets to tune a card's clocks by hand.
 PERF_LEVEL_MANUAL = "manual"
+#: The node-wide setting keys a node's reading, a declaration and a record share.
+NPM = "npm"
+NODE_POWER_LIMIT_W = "node_power_limit_w"
+#: The NPM states ``amd-smi node -p`` reports, lowercased.
+NPM_STATES = ("enabled", "disabled")
 _UNREADABLE = "unreadable"
+_WATTS = ("power_cap_w", NODE_POWER_LIMIT_W)
+_READ_TIMEOUT_SEC = 30.0
 
 #: Escape hatch for a host where running ``amd-smi`` every couple of seconds is not acceptable.
 GPU_POWER_SAMPLING_ENV = "HYPERLOOM_GPU_POWER_SAMPLING"
@@ -169,17 +185,29 @@ def _power_cap_w(limit: Any) -> float | None:
 
 @dataclass(frozen=True)
 class DeclaredPowerSettings:
-    """The GPU power settings a launch declares; ``None`` (or ``""`` for the level) for one it leaves alone."""
+    """The GPU power settings a launch declares; ``None`` (or ``""`` for a state) for one it leaves alone."""
 
     power_cap_w: float | None = None
     perf_level: str = ""
+    npm: str = ""
+    node_power_limit_w: float | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "perf_level", normalize_perf_level(self.perf_level) if self.perf_level else "")
+        object.__setattr__(self, "npm", str(self.npm).lower())
 
     def as_row(self) -> dict[str, Any]:
-        """The settings keyed as a card's reading is."""
+        """The per-card settings keyed as a card's reading is; the only ones a session may apply."""
         return {"power_cap_w": self.power_cap_w, "perf_level": self.perf_level}
+
+    def node_row(self) -> dict[str, Any]:
+        """The node-wide settings keyed as the node's reading is."""
+        return {NPM: self.npm, NODE_POWER_LIMIT_W: self.node_power_limit_w}
+
+    def as_record(self) -> dict[str, Any]:
+        """Only the settings declared, watts as floats: what the session stores and resumes from."""
+        row = {**self.as_row(), **self.node_row()}
+        return {key: float(value) if key in _WATTS else value for key, value in row.items() if value}
 
 
 def _amd_smi_json(run: Callable[..., subprocess.CompletedProcess], timeout: float, *args: str) -> Any:
@@ -203,7 +231,7 @@ def _read_gpu_kfd_nodes() -> dict[int, int]:
     Raises:
         GpuPowerSettingsError: ``amd-smi`` failed, or reported a card without its KFD node.
     """
-    rows = _gpu_rows(_amd_smi_json(subprocess.run, 30.0, "list"))
+    rows = _gpu_rows(_amd_smi_json(subprocess.run, _READ_TIMEOUT_SEC, "list"))
     nodes = {row["gpu"]: row["node_id"] for row in rows if isinstance(row.get("node_id"), int)}
     if len(nodes) != len(rows):
         raise GpuPowerSettingsError("amd-smi list reports a card without its KFD node, so its ROCm number is unknown")
@@ -213,7 +241,7 @@ def _read_gpu_kfd_nodes() -> dict[int, int]:
 def read_gpu_power_settings(
     *,
     run: Callable[..., subprocess.CompletedProcess] = subprocess.run,
-    timeout: float = 30.0,
+    timeout: float = _READ_TIMEOUT_SEC,
 ) -> dict[int, dict[str, Any]]:
     """``{gpu: {"power_cap_w": float | None, "perf_level": str}}`` for every card ``amd-smi`` lists.
 
@@ -229,6 +257,48 @@ def read_gpu_power_settings(
         entry.setdefault("power_cap_w", None)
         entry.setdefault("perf_level", "")
     return settings
+
+
+def read_node_power_settings() -> dict[str, Any]:
+    """``{"npm": "enabled" | "disabled" | "", "node_power_limit_w": float | None}`` from ``amd-smi node -p``.
+
+    The limit is the one firmware enforces, which can sit below the one the BMC was asked for.
+
+    Raises:
+        GpuPowerSettingsError: ``amd-smi`` is absent, failed (a release before ROCm 7.2 has no ``node`` command), or
+            printed something that is not its JSON.
+    """
+    return _parse_node_power(_amd_smi_json(subprocess.run, _READ_TIMEOUT_SEC, "node", "--power-management"))
+
+
+def _parse_node_power(payload: Any) -> dict[str, Any]:
+    rows = payload if isinstance(payload, list) else [payload]
+    block: dict[str, Any] = next(
+        (row["node"] for row in rows if isinstance(row, dict) and isinstance(row.get("node"), dict)), {}
+    )
+    found = block.get("power_management")
+    management: dict[str, Any] = found if isinstance(found, dict) else {}
+    status = str(management.get("status") or "").lower()
+    return {
+        NPM: status if status in NPM_STATES else "",
+        NODE_POWER_LIMIT_W: _value(management.get("limit")),
+    }
+
+
+def declared_node_problems(node: Mapping[str, Any], declared: DeclaredPowerSettings) -> list[str]:
+    """Why the node is not at the declared NPM settings; empty when it is, or when nothing is declared."""
+    npm, node_power_limit_w = declared.npm, declared.node_power_limit_w
+    problems: list[str] = []
+    if npm and node.get(NPM) != npm:
+        problems.append(f"node power management is {node.get(NPM) or _UNREADABLE!r}, declared {npm!r}")
+    if node_power_limit_w is not None:
+        limit = node.get(NODE_POWER_LIMIT_W)
+        if not isinstance(limit, (int, float)) or abs(float(limit) - float(node_power_limit_w)) > 0.5:
+            problems.append(
+                f"node power limit is {limit if limit is not None else _UNREADABLE} W, "
+                f"declared {node_power_limit_w:g} W"
+            )
+    return problems
 
 
 def declared_setting_problems(
