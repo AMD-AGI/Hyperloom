@@ -30,7 +30,7 @@ from hyperloom.contracts.recipe import LaunchConfig, RecipeDelta, RecipeError
 from hyperloom_multibranch.contracts.branch_log import BranchLogEntry, BranchLogType
 from hyperloom_multibranch.contracts.notebook.records import TestRecord
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
-from hyperloom_multibranch.contracts.toolbox import Toolbox
+from hyperloom_multibranch.contracts.toolbox import Backpressure, RequestRejected, Toolbox
 from hyperloom_multibranch.specialist.agent_import import KeptChange, KeptChangeError, import_delta, read_kept_change
 from hyperloom_multibranch.specialist.agent_manifest import AgentManifest, read_field
 from hyperloom_multibranch.specialist.agent_onboarding import (
@@ -80,12 +80,14 @@ class AutonomousSetup:
 @dataclass
 class KeepWatch:
     """What a run knows of the agent's keeps: ``root``, the workspace's git commit every keep is read against (the
-    agent may commit on top of it); ``seq``, the keeps seen; ``mark``, what the keep file last said of them; and
-    ``pending``, the latest keep read and not submitted yet."""
+    agent may commit on top of it); ``seq``, the keeps seen; ``mark``, what the keep file last said of them; ``base``,
+    the keeps seen before the agent last started its count over; and ``pending``, the latest keep read and not
+    submitted yet."""
 
     root: str
     seq: int = 0
     mark: int | str | None = None
+    base: int = 0
     pending: KeptChange | None = None
 
     @classmethod
@@ -96,7 +98,7 @@ class KeepWatch:
 
     def save(self, path: Path) -> None:
         pending = None if self.pending is None else asdict(self.pending)
-        document = {"root": self.root, "seq": self.seq, "mark": self.mark, "pending": pending}
+        document = {"root": self.root, "seq": self.seq, "mark": self.mark, "base": self.base, "pending": pending}
         path.write_text(json.dumps(document), encoding=ENCODING)
 
 
@@ -181,7 +183,9 @@ class AutonomousSession:
         mark = self._mark(manifest)
         if mark is None or mark == watch.mark:
             return
-        seq = mark if isinstance(mark, int) else watch.seq + 1
+        if isinstance(mark, int) and isinstance(watch.mark, int) and mark < watch.mark:
+            watch.base = watch.seq
+        seq = watch.base + mark if isinstance(mark, int) else watch.seq + 1
         watch.mark = mark
         if seq > watch.seq:
             await self._take(manifest, watch, seq)
@@ -212,14 +216,20 @@ class AutonomousSession:
                 store=repo.store_patch,
             )
         except RecipeError as error:
-            delta = None
             await self._note(f"keep {kept.seq} is no recipe change and is skipped: {error}")
         else:
-            await self._submitted(kept, head, delta)
+            try:
+                await self._submitted(kept, head, delta)
+            except Backpressure:
+                return
+            except RequestRejected as error:
+                await self._note(f"keep {kept.seq} was refused: {error.reason}")
         watch.pending = None
         watch.save(self._place.workspace / WATCH_FILE)
 
     async def _submitted(self, kept: KeptChange, head: str, delta: RecipeDelta | None) -> None:
+        """Submit ``kept`` against ``head``; raise what the toolbox raises when it takes no request now."""
+
         if delta is None:
             await self._note(f"keep {kept.seq} changes nothing on the branch head")
             return

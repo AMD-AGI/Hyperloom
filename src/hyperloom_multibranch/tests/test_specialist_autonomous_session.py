@@ -17,6 +17,7 @@ from hyperloom.contracts.measurement import TestRequest
 from hyperloom.contracts.recipe import ComponentPatches, LaunchConfig, Recipe
 from hyperloom.measure.compile import LocalBlobStore
 from hyperloom_multibranch.contracts.lifecycle import BranchTask
+from hyperloom_multibranch.contracts.toolbox import Backpressure, RequestRejected
 from hyperloom_multibranch.contracts.notebook import Role, Writer
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.tests.factories import result
@@ -129,12 +130,15 @@ class LocalSandbox:
 
 
 class Toolbox:
-    """Accepts each request and writes it to the notebook, so it is in flight until the test settles it."""
+    """Accepts each request and writes it to the notebook, so it is in flight until the test settles it; ``refusals``
+    are raised first, one a submit."""
 
     def __init__(self, notebook: LocalNotebook) -> None:
-        self._notebook, self.requests = notebook, []
+        self._notebook, self.requests, self.refusals = notebook, [], []
 
     async def submit_test(self, request: TestRequest) -> str:
+        if self.refusals:
+            raise self.refusals.pop(0)
         accepted = TestRequest(**{**request.__dict__, "request_id": f"r{len(self.requests) + 1}"})
         self.requests.append(accepted)
         await self._notebook.write_request(accepted)
@@ -358,3 +362,47 @@ async def test_an_agent_with_no_card_left_fails_its_preflight_before_it_is_fetch
         await rig.session.preflight()
 
     assert not rig.sandbox.started
+
+
+async def test_a_keep_the_toolbox_refuses_is_noted_and_one_it_has_no_room_for_waits(tmp_path: Path) -> None:
+    rig = await _rig(tmp_path, Agent(tail=1.0))
+    rig.toolbox.refusals = [
+        RequestRejected("online tuning is not measured", code="online_tuning_unsupported"),
+        Backpressure(BRANCH, 1, 1),
+    ]
+
+    await rig.session.preflight()
+    running = asyncio.create_task(rig.session.run())
+    await _until(lambda: rig.toolbox.requests, "the keep after the refused one")
+    await rig.toolbox_notebook.write_result(result("r1"))
+    with pytest.raises(SessionFinished):
+        await asyncio.wait_for(running, 10)
+
+    assert len([note for note in await rig.notices() if "keep 1 was refused: online tuning" in note]) == 1
+    assert "+max_num_seqs = 512" in rig.patch(rig.toolbox.requests[0])
+
+
+#: A resumed agent that starts its keep file over, as an agent relaunched from scratch does, then keeps once more.
+RESTARTS_ITS_COUNT = (
+    "python3 -c \"import json, pathlib, time; state = pathlib.Path('run/state.json'); "
+    "state.write_text(json.dumps({'keeps': []})); time.sleep(0.3); "
+    "state.write_text(json.dumps({'keeps': [{'decision': 'KEEP'}], 'note': 'after the restart'})); time.sleep(30)\""
+)
+
+
+async def test_a_keep_after_an_agent_restarted_its_count_is_a_new_keep(tmp_path: Path) -> None:
+    rig = await _rig(tmp_path, Agent(keeps=(256,), exit=3, resume=RESTARTS_ITS_COUNT))
+
+    await rig.session.preflight()
+    with pytest.raises(SessionCrashed):
+        await asyncio.wait_for(rig.session.run(), 10)
+    await rig.session.stop()
+    resumed = rig.restart()
+    running = asyncio.create_task(resumed.run())
+    await asyncio.sleep(1.0)
+    await rig.toolbox_notebook.write_result(result("r1"))
+    await _until(lambda: len(rig.toolbox.requests) == 2, "the keep after the restart")
+
+    assert any(note.startswith(f"{NOTICE} keep 2 imported") for note in await rig.notices())
+    await resumed.stop()
+    await asyncio.wait_for(running, 10)
