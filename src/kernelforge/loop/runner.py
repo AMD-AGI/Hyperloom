@@ -36,6 +36,7 @@ from kernelforge.config import Config
 from kernelforge.evaluation.correctness.canonical import accept_candidate
 from kernelforge.evaluation.correctness.pipeline import run_validation_pipeline
 from kernelforge.loop.agent_extras import declared_extras
+from kernelforge.loop.decision_labels import DecisionLabel
 from kernelforge.loop.experience import ExperienceLedger
 from kernelforge.loop.lessons import (
     SUMMARY_MIN_SECONDS,
@@ -1740,7 +1741,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             CandidateRecord(
                 iteration=iteration,
                 commit_hash=commit_hash,
-                decision="KEEP",
+                decision=DecisionLabel.KEEP.value,
                 kept=True,
                 validation_passed=True,
                 wall_ms=pending.get("wall_ms"),
@@ -2342,7 +2343,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
                 planned,
                 IterationVerdict(
                     iteration=result.iteration,
-                    decision="KEEP",
+                    decision=DecisionLabel.KEEP.value,
                     kept=True,
                     wall_ms=result.wall_ms,
                     commit_hash=result.commit_hash,
@@ -5698,7 +5699,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
                             session_end_reason="orchestration_error",
                         ),
                         frame,
-                        decision_label="ORCHESTRATION_ERROR",
+                        decision_label=DecisionLabel.ORCHESTRATION_ERROR.value,
                         on_iteration=on_iteration,
                     )
                     return None
@@ -5898,15 +5899,15 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
                 if new_files_only:
                     self._git_discard_worktree()
                 if agent_error:
-                    decision_label = "AGENT_ERROR"
+                    decision_label = DecisionLabel.AGENT_ERROR.value
                     summary = f"agent_fn error: {agent_error}"
                 elif api_failed:
-                    decision_label = "API_ERROR"
+                    decision_label = DecisionLabel.API_ERROR.value
                     summary = (
                         "LLM API never answered this Session; no candidate was attempted (not an optimization result)"
                     )
                 elif new_files_only:
-                    decision_label = "NO_CHANGES"
+                    decision_label = DecisionLabel.NO_CHANGES.value
                     summary = (
                         "NO TRACKED CHANGES: the whole candidate was in "
                         "new file(s) matching "
@@ -5917,7 +5918,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
                         "rather than measured with the next candidate."
                     )
                 else:
-                    decision_label = "NO_CHANGES"
+                    decision_label = DecisionLabel.NO_CHANGES.value
                     summary = "NO TRACKED CHANGES: agent produced no candidate diff"
                 print("  [agent] No tracked source changes; skipping candidate")
                 result = IterationResult(
@@ -6424,11 +6425,11 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
 # mean no candidate was ever measured.
 _LABELS_WITHOUT_A_MEASURED_NEGATIVE = frozenset(
     {
-        "KEEP",
-        "NO_CHANGES",
-        "API_ERROR",
-        "AGENT_ERROR",
-        "ORCHESTRATION_ERROR",
+        DecisionLabel.KEEP.value,
+        DecisionLabel.NO_CHANGES.value,
+        DecisionLabel.API_ERROR.value,
+        DecisionLabel.AGENT_ERROR.value,
+        DecisionLabel.ORCHESTRATION_ERROR.value,
     }
 )
 
@@ -6436,20 +6437,20 @@ _LABELS_WITHOUT_A_MEASURED_NEGATIVE = frozenset(
 def _decision_label(result: IterationResult) -> str:
     """The canonical keep/revert label for one finished attempt."""
     if result.integrity_violation:
-        return "REVERT_INTEGRITY"
+        return DecisionLabel.REVERT_INTEGRITY.value
     if result.workspace_contention:
-        return "REVERT_CONTENDED"
+        return DecisionLabel.REVERT_CONTENDED.value
     if result.crashed:
-        return "CRASH"
+        return DecisionLabel.CRASH.value
     if not result.validation_passed:
         if (result.validation_summary or "").startswith("BUILD FAILED"):
-            return "BUILD_FAILED"
+            return DecisionLabel.BUILD_FAILED.value
         if result.validation_outcome == "timeout":
-            return "REVERT_VALIDATION_TIMEOUT"
+            return DecisionLabel.REVERT_VALIDATION_TIMEOUT.value
         if result.validation_outcome in {"driver_error", "invalid_result"}:
-            return "REVERT_VALIDATION_ERROR"
-        return "REVERT_VALIDATION"
-    return "KEEP" if result.kept else "REVERT_PERF"
+            return DecisionLabel.REVERT_VALIDATION_ERROR.value
+        return DecisionLabel.REVERT_VALIDATION.value
+    return DecisionLabel.KEEP.value if result.kept else DecisionLabel.REVERT_PERF.value
 
 
 def _long_horizon_header(
