@@ -297,11 +297,12 @@ It will optimize this workload, and every value its config needs must come from 
 {spec}
 
 The sandbox:
-- has the session's image and framework, the GPUs in "cards" (HIP_VISIBLE_DEVICES is set), and no docker daemon. A
-  `docker` on PATH runs `docker exec [-w DIR] [-e K=V] CONTAINER CMD...` as CMD in DIR and `docker cp C:SRC DST` as a
-  copy, so an agent written to drive a container works when its config names any container;
-- must not have processes killed beyond the agent's own: turn off any sweep that kills what holds GPU memory, or
-  point it at the agent's own processes only;
+- has the session's image and framework and no docker daemon. It sees only the GPUs in "cards", numbered from 0
+  (ROCR_VISIBLE_DEVICES is set): leave HIP_VISIBLE_DEVICES, CUDA_VISIBLE_DEVICES and the agent's own GPU id settings
+  empty. A `docker` on PATH runs `docker exec [-w DIR] [-e K=V] CONTAINER CMD...` as CMD in DIR and `docker cp
+  C:SRC DST` as a copy, so an agent written to drive a container works when its config names any container;
+- shares the host with other servers: `pkill`, `pgrep` and `killall` reach only the agent's own processes, but turn
+  off any other sweep that kills what holds GPU memory, and give the agent's servers a port no one else uses;
 - the agent edits the framework source in "workspace", in place, and launches its servers from it.
 
 Answer with one JSON object and nothing else, with exactly these fields:
