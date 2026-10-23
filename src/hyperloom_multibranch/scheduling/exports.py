@@ -42,6 +42,7 @@ from hyperloom_multibranch.scheduling.dashboard import SessionDashboard
 from hyperloom_multibranch.scheduling.final import FinalChoice
 from hyperloom_multibranch.scheduling.layout import SessionLayout
 from hyperloom_multibranch.scheduling.llm import Completion
+from hyperloom_multibranch.scheduling.manifest import read_manifest
 from hyperloom_multibranch.scheduling.mb_fakes import mb_fake_close_knowledge
 
 #: The single-lineage CLOSE's status when no Recipe KB is configured.
@@ -171,7 +172,13 @@ class SessionExports:
         selection = encode(final) if final is not None else None
         stepped = knowledge_document(knowledge, scorers, curation)
         document = build_breakdown(
-            snapshot, final=chosen, selection=selection, kb_write_back=kb_write_back, knowledge=stepped
+            snapshot,
+            final=chosen,
+            selection=selection,
+            kb_write_back=kb_write_back,
+            knowledge=stepped,
+            session_dir=self._layout.root,
+            code_revision=read_manifest(self._layout.manifest).code_version.git_sha or None,
         )
         breakdown = write_breakdown(self._layout.reports, document)
         dashboard = await self._dashboard.write(queue)

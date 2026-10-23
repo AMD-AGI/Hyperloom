@@ -145,34 +145,34 @@ class BranchControl:
         return tuple(opened)
 
     async def open_user_branches(
-        self, directions: tuple[str, ...], root_commit: str, deadline: float
+        self, directions: tuple[str, ...], start_commit: str, deadline: float
     ) -> tuple[BranchEntry, ...]:
-        """Open one :attr:`BranchOrigin.USER` branch at ``root_commit`` for each of the user's ``directions`` as
+        """Open one :attr:`BranchOrigin.USER` branch at ``start_commit`` for each of the user's ``directions`` as
         :meth:`open_branches` opens a batch, unfocused at K :data:`STARTED_K`; the roster entries issued before the
         roster first refuses one, a branch whose specialist did not start among them, already stopped."""
 
         launches = tuple(Launch(focus="", direction=direction) for direction in directions)
-        return await self._open_at_root(BranchOrigin.USER, launches, root_commit, deadline)
+        return await self._open_named(BranchOrigin.USER, launches, start_commit, deadline)
 
     async def open_agent_branches(
-        self, agents: tuple[str, ...], root_commit: str, deadline: float
+        self, agents: tuple[str, ...], start_commit: str, deadline: float
     ) -> tuple[BranchEntry, ...]:
-        """Open one :attr:`BranchOrigin.AGENT` branch at ``root_commit`` for each agent source the user named, as
+        """Open one :attr:`BranchOrigin.AGENT` branch at ``start_commit`` for each agent source the user named, as
         :meth:`open_user_branches` opens the user's directions; no judge changes its K of :data:`STARTED_K`."""
 
         launches = tuple(Launch(focus="", agent=agent) for agent in agents)
-        return await self._open_at_root(BranchOrigin.AGENT, launches, root_commit, deadline)
+        return await self._open_named(BranchOrigin.AGENT, launches, start_commit, deadline)
 
-    async def _open_at_root(
-        self, origin: BranchOrigin, launches: tuple[Launch, ...], root_commit: str, deadline: float
+    async def _open_named(
+        self, origin: BranchOrigin, launches: tuple[Launch, ...], start_commit: str, deadline: float
     ) -> tuple[BranchEntry, ...]:
-        start = BatchStart(origin, root_commit, deadline)
+        start = BatchStart(origin, start_commit, deadline)
         opened = []
         for launch in launches:
             entry = self._issue(start, STARTED_K)
             if entry is None:
                 break
-            opened.append(await self._open(entry, root_commit, deadline, launch))
+            opened.append(await self._open(entry, start_commit, deadline, launch))
         return tuple(opened)
 
     def _issue(self, start: BatchStart, k: int) -> BranchEntry | None:

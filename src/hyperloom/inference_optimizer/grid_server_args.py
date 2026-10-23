@@ -582,6 +582,11 @@ _SGLANG_CONTEXT_LENGTH_FLAG = "--context-length"
 # Matches space- or equals-separated form without false-matching a longer flag.
 _SGLANG_CONTEXT_LENGTH_RE = re.compile(r"--context-length(?:[=\s]|$)")
 
+#: The flags the launch guards add when a recipe leaves them out (``inject_sglang_context_length`` and
+#: ``inject_sglang_watchdog_timeout``), sized for the run they launch; a recipe that keeps them carries that run's
+#: settings into every later one.
+INJECTED_LAUNCH_FLAGS = (_SGLANG_CONTEXT_LENGTH_FLAG, _SGLANG_WATCHDOG_FLAG)
+
 _SGLANG_ATTN_BACKEND_FLAG = "--attention-backend"
 
 _SGLANG_ATTN_BACKEND_RE = re.compile(r"--attention-backend(?:[=\s]|$)")

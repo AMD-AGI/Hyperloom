@@ -9,7 +9,8 @@ whose kept patches go to the session's blob store and which the experiment repos
 the session profile is written. What the child kept that a recipe cannot express does not fail PRELUDE: the root
 recipe names it as ``unexpressed``, and kept patches outside the framework checkout are copied to ``MB-prelude/``. The
 Recipe KB's champions for that profile are read as warm-start leads for the
-specialists, the best of them prepared for replay on the root's image, their files in the session's blob store; no
+specialists, the best of them prepared for replay on the root's image and offered to the integrator as the session's
+champion, which EXPLORE opens on when it beats the baseline; their files are in the session's blob store; no
 Recipe KB, or none of its champions in this session's scope, gives none, and a KB that cannot be read is recorded and
 gives none either. The baseline every recorded value is anchored to is measured through the toolbox in a
 second step, once the caller has put the integration branch on the roster and given the toolbox its K: as many tests
@@ -55,17 +56,18 @@ from hyperloom_multibranch.contracts.notebook.vocab import LineageKind
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import RequestRejected
 from hyperloom_multibranch.notebook.knowledge.warm_start import (
+    PreparedReplay,
     RecipeDownloader,
     ReplayTarget,
     WarmLead,
     replay_leads,
     warm_leads,
 )
-from hyperloom_multibranch.notebook.codec import decode
 from hyperloom_multibranch.scheduling.budget import BudgetExhausted, HardStop, SessionBudget
 from hyperloom_multibranch.scheduling.context import SchedulerContext
 from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind
 from hyperloom_multibranch.scheduling.layout import SessionLayout
+from hyperloom_multibranch.scheduling.manifest import read_workload
 from hyperloom_multibranch.scheduling.prelude_reader import (
     ChildProfile,
     PreludeArtifacts,
@@ -142,6 +144,13 @@ class PreludeResult:
     warm_leads: tuple[WarmLead, ...]
     child_gpu_seconds_upper_bound: float
 
+    @property
+    def champion(self) -> PreparedReplay | None:
+        """The Recipe KB's best champion for this profile that is ready to replay, if there is one: the leads come
+        exact identity first, then best gain first, and only some of them prepare a replay."""
+
+        return next((lead.replay for lead in self.warm_leads if lead.replay is not None), None)
+
 
 def prelude_argv(workload: Workload, max_hours: float, launch_info: Path) -> tuple[str, ...]:
     """The child's command line: ``hyperloom optimize`` on the interpreter this package runs on. An AgentX child is
@@ -170,7 +179,7 @@ def reused_prelude(session: Path, workload: Workload, image_digest: str) -> Reus
     earlier = SessionLayout(session)
     try:
         child = _rooted_child(earlier.decisions)
-        ran = decode(Workload, read_json_strict(earlier.manifest)["settings"]["workload"])
+        ran = read_workload(earlier.manifest)
         root = Recipe.from_document(read_json_strict(earlier.root_recipe))
     except (OSError, ValueError, KeyError, TypeError) as exc:
         raise ValueError(f"{session} holds no completed PRELUDE: {exc}") from exc

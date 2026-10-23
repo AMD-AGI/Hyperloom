@@ -6,13 +6,17 @@
 The single-lineage breakdown describes one lineage of phases. A multi-branch session is a tree of branches, so this
 export has its own schema version and its own sections:
 
-* ``metadata``: the session profile, and the manifest fingerprint of each activity.
+* ``metadata``: the session profile, the manifest fingerprint of each activity, and ``session``, the block Pulse reads
+  for both flows (the session id, the source revision the session ran on, and the Claw session, framework image and
+  node a hosted run is given). In a hosted run it also holds, as written, what the run leaves in the session directory:
+  ``plugs``, ``hosted_measurement`` and ``container_resources``, and the records ``measurement_sandboxes`` (one per
+  test, keyed by ``request_id`` as ``tests`` are) and ``specialist_resources``.
 * ``baseline``: the root's recorded values, dispersion and thresholds.
 * ``lineage``: every commit and branch, with when each was made, opened or stopped, and a commit's recipe digest when
   its writer named it.
 * ``branches`` and ``committed``: each branch's progress, and each commit with its gain and merge state.
 * ``tests``: every test record: request, result with its attempts and GPU time, judgement, conclusion, commit, times.
-* ``measurement_sandboxes``: per node, GPU model, backend and image, the tests run there, their GPU time and failed
+* ``measurement_nodes``: per node, GPU model, backend and image, the tests run there, their GPU time and failed
   attempts; ``environment_changes``: where a node's image, GPU model, power cap or partition mode moved between its
   results.
 * ``close``: the commit final selection chose and its recipe, how the scheduler chose it, and the Recipe KB
@@ -22,6 +26,8 @@ export has its own schema version and its own sections:
 
 from __future__ import annotations
 
+import json
+import os
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -34,9 +40,27 @@ from hyperloom_multibranch.contracts.notebook.records import NotebookSnapshot, T
 from hyperloom_multibranch.notebook.codec import encode
 from hyperloom_multibranch.notebook.knowledge.recipe_writeback import FinalRecipe
 
-SCHEMA_VERSION = "multibranch-1"
-EXPORTER_VERSION = "hyperloom-multibranch-breakdown-1"
+SCHEMA_VERSION = "multibranch-2"
+EXPORTER_VERSION = "hyperloom-multibranch-breakdown-2"
 FILENAME = "session_breakdown.json"
+#: The environment variables a hosted run's ``metadata.session`` reads, by key; a run Claw did not host leaves them null.
+#: ``image`` is the framework image the CampaignSpec names, which Pulse keys its leaderboard on.
+SESSION_VARIABLES = {
+    "claw_session_id": "CLAW_SESSION_ID",
+    "image": "HYPERLOOM_IMAGE",
+    "node_name": "NODE_NAME",
+}
+#: The records a hosted run appends in the session directory, by the ``metadata`` key the breakdown copies them under.
+HOSTED_RECORDS = {
+    "measurement_sandboxes": Path("hosted/measurement_sandboxes.jsonl"),
+    "specialist_resources": Path("agents/resources.jsonl"),
+}
+#: The documents a hosted run writes in the session directory, by the ``metadata`` key the breakdown copies them under.
+HOSTED_DOCUMENTS = {
+    "plugs": Path("plugs.resolved.json"),
+    "hosted_measurement": Path("hosted/measurement_stats.json"),
+    "container_resources": Path("agents/container_resources.json"),
+}
 
 
 @dataclass
@@ -85,6 +109,44 @@ def session_spend(snapshot: NotebookSnapshot) -> dict[str, object]:
     }
 
 
+def session_metadata(
+    snapshot: NotebookSnapshot, environ: Mapping[str, str], code_revision: str | None = None
+) -> dict[str, object]:
+    """The ``metadata.session`` block: the session id, the source revision the session ran on as it recorded it at
+    start, and what :data:`SESSION_VARIABLES` name; null where unset."""
+
+    session_id = snapshot.profile.session_id if snapshot.profile is not None else None
+    named = {key: environ.get(name) or None for key, name in SESSION_VARIABLES.items()}
+    return {"session_id": session_id, "code_revision": code_revision or None, **named}
+
+
+def hosted_records(session_dir: Path | None) -> dict[str, object]:
+    """What a hosted run left in ``session_dir``, as written, by its ``metadata`` key: each :data:`HOSTED_DOCUMENTS`
+    file's document, and each :data:`HOSTED_RECORDS` file's rows. A file that is not there gives no key; a document
+    that is no JSON gives none either, and a row that is no JSON, as a half-written last line is, is left out."""
+
+    if session_dir is None:
+        return {}
+    found: dict[str, object] = {}
+    for key, relative in HOSTED_DOCUMENTS.items():
+        try:
+            found[key] = json.loads((session_dir / relative).read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError):
+            continue
+    for key, relative in HOSTED_RECORDS.items():
+        path = session_dir / relative
+        if not path.is_file():
+            continue
+        rows: list[object] = []
+        for line in path.read_text(encoding="utf-8").splitlines():
+            try:
+                rows.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+        found[key] = rows
+    return found
+
+
 def _final(final: FinalRecipe | None) -> dict[str, object] | None:
     if final is None:
         return None
@@ -98,12 +160,18 @@ def build_breakdown(
     selection: Mapping[str, object] | None = None,
     kb_write_back: RemoteWriteResult | None = None,
     knowledge: Mapping[str, object] | None = None,
+    session_dir: Path | None = None,
+    environ: Mapping[str, str] | None = None,
+    code_revision: str | None = None,
 ) -> dict[str, object]:
     """The breakdown document of ``snapshot``, stamped with the time the snapshot was taken.
 
     ``final`` is the commit final selection chose; ``selection`` is how the scheduler chose it, such as its candidates
     and their measurements, as JSON-ready data. ``knowledge`` is what CLOSE's knowledge steps did, as the
     ``rsi.session`` close reports them (``KnowledgeClose.document()``); ``close`` has it only when given.
+    ``session_dir`` is where a hosted run's records are read from, and ``environ`` its variables (the process's by
+    default); ``code_revision`` is the source revision the session's manifest recorded at start, which a process that
+    exports another run's session, such as ``final-only``, does not have in its environment.
     """
 
     close: dict[str, object] = {
@@ -120,6 +188,8 @@ def build_breakdown(
         "metadata": {
             "session_profile": encode(snapshot.profile),
             "manifest_fingerprints": encode(snapshot.fingerprints),
+            "session": session_metadata(snapshot, os.environ if environ is None else environ, code_revision),
+            **hosted_records(session_dir),
         },
         "baseline": encode(snapshot.baseline),
         "lineage": encode(snapshot.lineage),
@@ -127,7 +197,7 @@ def build_breakdown(
         "spend": session_spend(snapshot),
         "committed": encode(snapshot.committed),
         "tests": encode(snapshot.records),
-        "measurement_sandboxes": encode(measurement_usage(snapshot.records)),
+        "measurement_nodes": encode(measurement_usage(snapshot.records)),
         "environment_changes": encode(snapshot.environment_changes),
         "close": close,
     }
@@ -144,10 +214,15 @@ def write_breakdown(directory: Path, breakdown: Mapping[str, object]) -> Path:
 __all__ = [
     "EXPORTER_VERSION",
     "FILENAME",
+    "HOSTED_DOCUMENTS",
+    "HOSTED_RECORDS",
     "SCHEMA_VERSION",
+    "SESSION_VARIABLES",
     "MeasurementUsage",
     "build_breakdown",
+    "hosted_records",
     "measurement_usage",
+    "session_metadata",
     "session_spend",
     "write_breakdown",
 ]

@@ -26,6 +26,10 @@ from the integration head and judged by the rule gate, and a candidate about to 
 before anything is written, so only a candidate that keeps the regression set passing reaches the integration branch
 and nothing on it is ever reverted. That candidate is an improvement, or a foundation fix the accuracy gate passed
 whatever its gain: a fix the other branches build on is worth merging even when it costs throughput.
+
+Before EXPLORE opens, :meth:`Integrator.replay_champion` carries the Recipe KB champion PRELUDE prepared onto the
+root the same way and by the same rule. It is nobody's candidate, so no merge attempt records it and the regression
+set it would run is still empty; what it leaves the integration branch at is the commit EXPLORE opens on.
 """
 
 from __future__ import annotations
@@ -43,10 +47,11 @@ from hyperloom.measure.compile import BlobError
 from hyperloom_multibranch.contracts.gate import NotMeasured
 from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Notebook
-from hyperloom_multibranch.contracts.notebook.records import CommittedCommit, MergeAttempt
+from hyperloom_multibranch.contracts.notebook.records import CommittedCommit, MergeAttempt, WarmReplay
 from hyperloom_multibranch.contracts.notebook.vocab import Conclusion, MergeOutcome
 from hyperloom_multibranch.contracts.repo import ExperimentRepo, PatchConflict, RepoMerge
 from hyperloom_multibranch.contracts.toolbox import RequestRejected
+from hyperloom_multibranch.notebook.knowledge.warm_start import PreparedReplay
 from hyperloom_multibranch.rulegate.agentx import P50_BELOW_THRESHOLD
 from hyperloom_multibranch.rulegate.inferencex import GAIN_BELOW_THRESHOLD, GAIN_NOT_CONFIRMED
 from hyperloom_multibranch.scheduling.candidates import Candidates
@@ -180,8 +185,14 @@ def not_stackable_reason(judgement: Judgement, *, foundation_fix: bool) -> str:
             return ""
         return f"a foundation fix, {judgement.verdict.value} on the integration head, refused by {', '.join(defects)}"
     if judgement.verdict is not Verdict.IMPROVED:
-        return f"{judgement.verdict.value} {judgement.gain_pct:+.2f}% on the integration head"
+        return _verdict_on_head(judgement)
     return ""
+
+
+def _verdict_on_head(judgement: Judgement) -> str:
+    """How a merge test was judged, as the merge log names it."""
+
+    return f"{judgement.verdict.value} {judgement.gain_pct:+.2f}% on the integration head"
 
 
 class _Skipped(Exception):
@@ -372,7 +383,7 @@ class Integrator:
             return replace(report, reason=failed)
         self._recording = asyncio.ensure_future(self._record_merge(report, tested.delta, judgement))
         merged = await asyncio.shield(self._recording)
-        reason = f"{judgement.verdict.value} {judgement.gain_pct:+.2f}% on the integration head"
+        reason = _verdict_on_head(judgement)
         if report.foundation_fix:
             reason = f"a foundation fix, {reason}"
         return replace(
@@ -405,6 +416,47 @@ class Integrator:
             if not written:
                 await self._repo.rewind(INTEGRATION_BRANCH, merged, tested.onto)
         return merged
+
+    async def replay_champion(self, champion: PreparedReplay, root: str) -> str:
+        """Put the Recipe KB's ``champion`` on the integration branch at ``root``; the commit EXPLORE opens on.
+
+        The champion is judged by the rule every candidate is judged by, so EXPLORE opens on it only where it
+        improved on the baseline ``root`` just anchored, and every later gain is still measured from ``root``. It is
+        no specialist's commit: nothing offered it, so no merge attempt records it, and the regression set it would
+        run is empty before EXPLORE. A champion whose recipe ``root`` carries already, whose test did not measure or
+        that the rule gate does not stack leaves the head at ``root``.
+        """
+
+        replay = champion.on(await self._repo.read_recipe(root), root)
+        if replay is None:
+            return self._record_champion(root, champion.canonical_id, ALREADY_ON_HEAD)
+        request = integration_test_request(TestKind.TEST, Purpose.INTEGRATION, root, replay.delta)
+        return await self._tests.judged(request, partial(self._stack_champion, replay))
+
+    async def _stack_champion(self, replay: WarmReplay, request_id: str) -> str:
+        root = replay.parent_commit
+        name = replay.canonical_id
+        try:
+            judgement = await self._gate.compare(request_id)
+        except NotMeasured as exc:
+            return self._record_champion(root, name, f"the replay did not measure: {exc}", request_id=request_id)
+        reason = not_stackable_reason(judgement, foundation_fix=False)
+        if reason:
+            await self._notebook.write_judgement(request_id, judgement, Conclusion.NOT_STACKABLE)
+            return self._record_champion(root, name, reason, request_id=request_id)
+        recipe = apply(await self._repo.read_recipe(root), replay.delta)
+        landed = await self._repo.commit(INTEGRATION_BRANCH, root, recipe, f"replay the Recipe KB champion {name}")
+        await self._notebook.write_judgement(request_id, judgement, Conclusion.MERGED, landed, recipe.digest())
+        return self._record_champion(root, name, _verdict_on_head(judgement), request_id=request_id, landed=landed)
+
+    def _record_champion(
+        self, onto: str, canonical_id: str, reason: str, *, request_id: str = "", landed: str = ""
+    ) -> str:
+        """Record what came of the champion in the merge log; the head it leaves the integration branch at."""
+
+        detail = {"champion": canonical_id, "onto": onto, "request_id": request_id, "merged_commit": landed}
+        self._decisions.record(Decision(DecisionKind.MERGE, reason, INTEGRATION_BRANCH, detail))
+        return landed or onto
 
     async def abandon(self) -> None:
         """After the round was cancelled: take back every integration test still running, the gate's retests

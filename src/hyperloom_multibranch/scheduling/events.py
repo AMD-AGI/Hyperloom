@@ -391,6 +391,11 @@ class SessionEvents:
         events, self._unshown = tuple(self._unshown), []
         return events
 
+    def start_profiling(self, head: str, moved_from: str) -> None:
+        """Have ``head`` profiled, as a merge that moved it off ``moved_from`` would."""
+
+        self._profiler.start(head, moved_from)
+
     async def stop_profiling(self) -> None:
         await self._profiler.stop()
 

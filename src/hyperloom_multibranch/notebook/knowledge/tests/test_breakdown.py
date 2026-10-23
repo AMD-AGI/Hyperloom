@@ -46,12 +46,45 @@ def test_the_breakdown_lays_out_the_session_tree_tests_and_measurement(snapshot:
     assert breakdown["spend"] == {"gpu_hours": 1.0, "llm_usd": 2.0, "llm_unpriced_tokens": NO_TOKENS}
     assert breakdown["environment_changes"] == []
     assert [row["request"]["request_id"] for row in breakdown["tests"]] == ["r1", "r2", "r3", "r5", "r4", "m1"]
-    assert [(row["node"], row["tests"], row["gpu_seconds"]) for row in breakdown["measurement_sandboxes"]] == [
+    assert [(row["node"], row["tests"], row["gpu_seconds"]) for row in breakdown["measurement_nodes"]] == [
         ("node-1", 5, 3000.0),
         ("node-2", 1, 600.0),
     ]
     assert breakdown["close"]["kb_write_back"]["status"] == "written"
     assert build_breakdown(snapshot)["close"] == {"final": None, "selection": {}, "kb_write_back": None}
+
+
+def test_a_hosted_run_adds_the_session_block_and_its_records_under_the_names_the_legacy_flow_uses(
+    snapshot: NotebookSnapshot, tmp_path: Path
+) -> None:
+    hosted = {
+        "CLAW_SESSION_ID": "claw-7",
+        "HYPERLOOM_CODE_REVISION": "not-this-one",
+        "HYPERLOOM_IMAGE": "rocm/sglang:x",
+    }
+    sandbox = {"request_id": "r1", "sandbox_id": "sb-1", "node_name": "node-1", "same_node": True}
+    plugs = {"profile": "default", "fingerprint": "sha256:p", "sockets": {"measure": {"impl": "hosted"}}}
+    for folder in ("hosted", "agents"):
+        (tmp_path / folder).mkdir()
+    (tmp_path / "hosted" / "measurement_sandboxes.jsonl").write_text(
+        json.dumps(sandbox) + '\n{"request_id": "r', "utf-8"
+    )
+    (tmp_path / "plugs.resolved.json").write_text(json.dumps(plugs), "utf-8")
+    (tmp_path / "agents" / "container_resources.json").write_text('{"cpu_limit": ', "utf-8")
+
+    metadata = build_breakdown(snapshot, session_dir=tmp_path, environ=hosted, code_revision="38724291b")["metadata"]
+    local = build_breakdown(snapshot, environ={})["metadata"]
+
+    assert metadata["session"] == {
+        "session_id": "sess-1",
+        "code_revision": "38724291b",
+        "claw_session_id": "claw-7",
+        "image": "rocm/sglang:x",
+        "node_name": None,
+    }
+    assert (metadata["measurement_sandboxes"], metadata["plugs"]) == ([sandbox], plugs)
+    assert not {"specialist_resources", "container_resources", "hosted_measurement"} & set(metadata)
+    assert local["session"]["claw_session_id"] is None and "measurement_sandboxes" not in local
 
 
 def test_the_spend_counts_the_tokens_of_unpriced_llm_calls_beside_the_dollars(snapshot: NotebookSnapshot) -> None:

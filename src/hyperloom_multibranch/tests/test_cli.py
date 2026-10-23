@@ -41,7 +41,8 @@ from hyperloom_multibranch.notebook.codec import encode
 from hyperloom_multibranch.notebook.rsi.archive import ARCHIVE_ENV
 from hyperloom_multibranch.scheduling.budget import MB_DEFAULT_MAX_HOURS
 from hyperloom_multibranch.scheduling.layout import SessionLayout
-from hyperloom_multibranch.scheduling.lifecycle import PersistedRun, code_version, persisted_run
+from hyperloom_multibranch.scheduling.lifecycle import PersistedRun, persisted_run
+from hyperloom_multibranch.scheduling.manifest import SessionManifest, code_version
 from hyperloom_multibranch.scheduling import local_peers
 from hyperloom_multibranch.scheduling.local_peers import AGENTX_ENV
 from hyperloom_multibranch.scheduling.peers import PeerFactory
@@ -689,16 +690,21 @@ def _ended_before_final(root: Path) -> SessionLayout:
 
 
 def _manifest(layout: SessionLayout, **fields: object) -> None:
-    _write(
-        layout.manifest,
-        {
-            "code_version": encode(code_version()),
-            "session_id": layout.session_id,
-            "settings": encode(_settings()),
-            "policy_versions": {"frontier": "default"},
-            **fields,
-        },
+    """The manifest a run of :func:`_settings` wrote, with ``fields`` written over it to damage one of them."""
+
+    settings = _settings()
+    document = encode(
+        SessionManifest(
+            code_version=code_version(),
+            session_id=layout.session_id,
+            started_at=0.0,
+            deadline=3600.0,
+            settings=settings,
+            metric=settings.workload.metric,
+            policy_versions={"frontier": "default"},
+        )
     )
+    _write(layout.manifest, {**document, **fields})
 
 
 def _write(path: Path, document: dict[str, object]) -> None:
