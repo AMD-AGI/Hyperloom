@@ -19,8 +19,6 @@ from typing import Any, Mapping
 from hyperloom.common.gpu_identity import gfx_arch_for_gpu_type
 
 PROVENANCE_VERSION = 1
-#: Tags a full shared provenance block apart from a placeholder stub.
-PROVENANCE_SOURCE = "shared_v1"
 
 # Env var priority per stack component (operator pins beat auto-detect).
 _STACK_FINGERPRINT_ENVS: dict[str, tuple[str, ...]] = {
@@ -331,7 +329,6 @@ def build_provenance(
     *,
     env: Mapping[str, str] | None = None,
     probe: bool = True,
-    source: str = PROVENANCE_SOURCE,
 ) -> dict[str, Any]:
     """Assemble the shared provenance block."""
     env = os.environ if env is None else env
@@ -347,7 +344,6 @@ def build_provenance(
     gpu_type = _arg_first(args, "gpu_type") or _env_first(env, "TARGET_GPU_TYPE", "GPU_TYPE")
 
     return {
-        "_provenance_source": source,
         "provenance_version": PROVENANCE_VERSION,
         # model identity
         "model_name": model_name,
@@ -378,7 +374,6 @@ def build_provenance(
 
 __all__ = [
     "PROVENANCE_VERSION",
-    "PROVENANCE_SOURCE",
     "RESOLVED_FRAMEWORK_ENV",
     "RESOLVED_FRAMEWORK_PYTHON_ENV",
     "build_provenance",
