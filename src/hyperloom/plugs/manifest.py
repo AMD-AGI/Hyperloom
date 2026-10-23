@@ -111,7 +111,7 @@ def _validate_entry(name: str, entry: Any, source: str) -> None:
 
 
 def load_manifest_file(path: Path | str) -> dict[str, Any]:
-    """Read and validate a manifest or override file (YAML or JSON)."""
+    """Read and validate a manifest or override file; both are JSON."""
     path = Path(path)
     return validate_document(_load_text_document(path), str(path))
 
