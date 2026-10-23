@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -51,10 +52,22 @@ from hyperloom_multibranch.notebook.knowledge.tests.fakes import (
 from hyperloom_multibranch.contracts.notebook.records import PeerReplay, WarmReplay
 from hyperloom_multibranch.notebook.knowledge.warm_start import PreparedReplay, WarmLead
 from hyperloom_multibranch.notebook.learning_search import LEARNINGS_LOG, RetrievalLog
-from hyperloom_multibranch.notebook.rsi.briefing import ON_HEAD, CrossSessionBriefing, SessionBriefs
+from hyperloom_multibranch.notebook.rsi.briefing import ON_HEAD, CrossSessionBriefing, SessionBriefs, TableStack
 from hyperloom_multibranch.notebook.tests.factories import FakeClock, judgement, profile, request, result
 from hyperloom_multibranch.notebook.tests.sessions import METRIC, SPLIT_KV, scripted_session
 from hyperloom_multibranch.notebook.tools import FOCUS_LINE
+from hyperloom_multibranch.toolbox.kernel_artifacts import mint_kernel_artifact, union_rows
+from hyperloom_multibranch.toolbox.tests.kernel_rows_cc2bf0ef import (
+    B01_HEAD,
+    B01_NEW,
+    B01_SHARED,
+    B06_NEW,
+    B09_NEW,
+    ENV,
+    SHARED,
+    csv_text,
+    install,
+)
 
 SAME = {
     "model": "deepseek-ai/DeepSeek-R1",
@@ -317,6 +330,94 @@ async def test_a_peer_replay_names_the_heads_kernel_its_change_takes_the_place_o
 
     assert replayed.replaces == (own,)
     assert replayed.layer is IntentLayer.KERNEL
+
+
+async def test_a_peer_replay_takes_the_wider_table_and_names_no_loss(tmp_path: Path) -> None:
+    root = tmp_path / "notebook"
+    notebook = await scripted_session(root, FakeClock())
+    toolbox = LocalNotebook(root, Writer(Role.TOOLBOX, "toolbox"), clock=FakeClock())
+    narrow = mint_kernel_artifact(KernelKind.GEMM, "a8w8", ENV, csv_text(SHARED))
+    wide = mint_kernel_artifact(KernelKind.GEMM, "a8w8", ENV, csv_text(SHARED, B09_NEW))
+    store = {narrow.sha256: csv_text(SHARED), wide.sha256: csv_text(SHARED, B09_NEW)}
+    await toolbox.write_request(request("r7", SPLIT_KV, RecipeDelta(add_kernels=(wide,))))
+    head = Recipe("sha256:" + "a" * 64, LaunchConfig("--max-num-seqs 128"), kernels=(narrow,))
+    tables = TableStack(lambda artifact: store[artifact.sha256])
+    briefing = CrossSessionBriefing(notebook, branch="s3", repo=_Repo({"s3": "c3"}, {"c3": head}), tables=tables)
+
+    replayed = await briefing.peer_replay("r7")
+
+    assert replayed.replaces == ()
+    assert replayed.delta.add_kernels == (wide,)
+
+
+async def test_a_peer_replay_drops_a_kernel_the_heads_wider_table_already_covers(tmp_path: Path) -> None:
+    root = tmp_path / "notebook"
+    notebook = await scripted_session(root, FakeClock())
+    toolbox = LocalNotebook(root, Writer(Role.TOOLBOX, "toolbox"), clock=FakeClock())
+    narrow = mint_kernel_artifact(KernelKind.GEMM, "a8w8", ENV, csv_text(SHARED))
+    wide = mint_kernel_artifact(KernelKind.GEMM, "a8w8", ENV, csv_text(SHARED, B09_NEW))
+    store = {narrow.sha256: csv_text(SHARED), wide.sha256: csv_text(SHARED, B09_NEW)}
+    await toolbox.write_request(request("r7", SPLIT_KV, RecipeDelta(add_kernels=(narrow,))))
+    head = Recipe("sha256:" + "a" * 64, LaunchConfig("--max-num-seqs 128"), kernels=(wide,))
+    tables = TableStack(lambda artifact: store[artifact.sha256])
+    briefing = CrossSessionBriefing(notebook, branch="s3", repo=_Repo({"s3": "c3"}, {"c3": head}), tables=tables)
+
+    with pytest.raises(ValueError, match="already has the change"):
+        await briefing.peer_replay("r7")
+
+
+async def test_a_peer_replay_unites_two_tables_each_with_rows_the_other_lacks(tmp_path: Path) -> None:
+    root = tmp_path / "notebook"
+    notebook = await scripted_session(root, FakeClock())
+    toolbox = LocalNotebook(root, Writer(Role.TOOLBOX, "toolbox"), clock=FakeClock())
+    head_data, peer_data = csv_text(SHARED, B01_NEW), csv_text(SHARED[:3], B06_NEW)
+    head_art = mint_kernel_artifact(KernelKind.GEMM, "a8w8", ENV, head_data)
+    peer = mint_kernel_artifact(KernelKind.GEMM, "a8w8", ENV, peer_data)
+    store = {head_art.sha256: head_data, peer.sha256: peer_data}
+    configs = install(tmp_path / "image")
+
+    def keep(data: bytes) -> str:
+        digest = hashlib.sha256(data).hexdigest()
+        store[digest] = data
+        return digest
+
+    await toolbox.write_request(request("r7", SPLIT_KV, RecipeDelta(add_kernels=(peer,))))
+    head = Recipe("sha256:" + "a" * 64, LaunchConfig("--max-num-seqs 128"), kernels=(head_art,))
+    tables = TableStack(lambda artifact: store[artifact.sha256], keep, configs)
+    briefing = CrossSessionBriefing(notebook, branch="s3", repo=_Repo({"s3": "c3"}, {"c3": head}), tables=tables)
+
+    replayed = await briefing.peer_replay("r7")
+
+    (united,) = replayed.delta.add_kernels
+    expected = union_rows(peer_data, head_data, ENV, configs=configs)
+    assert replayed.replaces == ()
+    assert (united.sha256, store[united.sha256]) == (hashlib.sha256(expected).hexdigest(), expected)
+
+
+async def test_a_peer_replay_keeps_naming_the_swap_when_the_tables_conflict(tmp_path: Path) -> None:
+    root = tmp_path / "notebook"
+    notebook = await scripted_session(root, FakeClock())
+    toolbox = LocalNotebook(root, Writer(Role.TOOLBOX, "toolbox"), clock=FakeClock())
+    head_data, peer_data = csv_text(SHARED, B01_HEAD), csv_text(B01_SHARED, B01_NEW)
+    head_art = mint_kernel_artifact(KernelKind.GEMM, "a8w8", ENV, head_data)
+    peer = mint_kernel_artifact(KernelKind.GEMM, "a8w8", ENV, peer_data)
+    store = {head_art.sha256: head_data, peer.sha256: peer_data}
+    configs = install(tmp_path / "image")
+
+    def keep(data: bytes) -> str:
+        digest = hashlib.sha256(data).hexdigest()
+        store[digest] = data
+        return digest
+
+    await toolbox.write_request(request("r7", SPLIT_KV, RecipeDelta(add_kernels=(peer,))))
+    head = Recipe("sha256:" + "a" * 64, LaunchConfig("--max-num-seqs 128"), kernels=(head_art,))
+    tables = TableStack(lambda artifact: store[artifact.sha256], keep, configs)
+    briefing = CrossSessionBriefing(notebook, branch="s3", repo=_Repo({"s3": "c3"}, {"c3": head}), tables=tables)
+
+    replayed = await briefing.peer_replay("r7")
+
+    assert replayed.replaces == (head_art,)
+    assert replayed.delta.add_kernels == (peer,)
 
 
 async def test_a_peer_replay_gives_a_component_new_to_the_head_the_upstream_its_test_was_made_on(

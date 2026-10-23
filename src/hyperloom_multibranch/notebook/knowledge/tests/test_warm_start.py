@@ -307,6 +307,25 @@ def test_a_champion_on_this_image_replays_its_whole_recipe_on_any_head_its_files
     assert found.on(CHAMPION, "c9") is None
 
 
+def test_a_replay_stacks_the_champions_table_over_the_heads_instead_of_replacing_it(tmp_path: Path) -> None:
+    from hyperloom_multibranch.notebook.knowledge.replay_tables import TableStack
+    from hyperloom_multibranch.toolbox.kernel_artifacts import mint_kernel_artifact
+    from hyperloom_multibranch.toolbox.tests.kernel_rows_cc2bf0ef import B09_NEW, ENV, SHARED, csv_text
+
+    narrow = mint_kernel_artifact(KernelKind.GEMM, "a8w8", ENV, csv_text(SHARED))
+    wide = mint_kernel_artifact(KernelKind.GEMM, "a8w8", ENV, csv_text(SHARED, B09_NEW))
+    store = {narrow.sha256: csv_text(SHARED), wide.sha256: csv_text(SHARED, B09_NEW)}
+    head = replace(ROOT, kernels=(narrow,))
+    champion = replace(CHAMPION, kernels=(wide,), components=ROOT.components)
+    found = PreparedReplay(EXACT_ID, champion, champion.launch)
+
+    on_head = found.on(head, "c3", TableStack(lambda artifact: store[artifact.sha256]))
+
+    assert on_head is not None
+    assert on_head.delta.add_kernels == (wide,)
+    assert apply(head, on_head.delta).kernels == (wide,)
+
+
 def test_a_replay_keeps_the_heads_upstream_for_a_component_the_head_has_and_brings_the_rest(
     snapshot: NotebookSnapshot, tmp_path: Path
 ) -> None:

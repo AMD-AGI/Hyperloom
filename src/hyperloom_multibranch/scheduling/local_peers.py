@@ -53,7 +53,7 @@ from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import SpecialistTokens
 from hyperloom_multibranch.notebook import BriefTriggers, LocalNotebook
 from hyperloom_multibranch.notebook.learning_search import LEARNINGS_LOG, RetrievalLog
-from hyperloom_multibranch.notebook.rsi.briefing import SessionBriefs
+from hyperloom_multibranch.notebook.rsi.briefing import SessionBriefs, TableStack
 from hyperloom_multibranch.notebook.rsi.lesson_recall import LessonRecall
 from hyperloom_multibranch.notebook.rsi.lessons import LessonPool
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
@@ -270,6 +270,7 @@ def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: Peer
         metric=workload.metric,
         learnings=learnings,
         repo=repo,
+        tables=TableStack(lambda artifact: setup.blobs.get(artifact.sha256), setup.blobs.put),
     )
     tool_options = SpecialistToolOptions(
         claim_ttl_seconds=CLAIM_TTL_SECONDS,

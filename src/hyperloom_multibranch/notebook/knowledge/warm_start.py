@@ -44,7 +44,7 @@ from functools import partial
 from pathlib import Path
 from typing import Any, Protocol, TypeVar
 
-from hyperloom.contracts.recipe import LaunchConfig, Recipe, RecipeDelta, RecipeError, delta_between
+from hyperloom.contracts.recipe import LaunchConfig, Recipe, RecipeDelta, RecipeError, apply, delta_between
 from hyperloom.inference_optimizer.grid_server_args import (
     INJECTED_LAUNCH_FLAGS,
     merge_server_args,
@@ -67,6 +67,7 @@ from hyperloom_multibranch.notebook.changes import same_recipe
 from hyperloom_multibranch.notebook.knowledge.lessons import listed
 from hyperloom_multibranch.notebook.knowledge.recipe_kb import from_recipe_kb_value, overlay_ref
 from hyperloom_multibranch.notebook.knowledge.recipe_writeback import recipe_identity
+from hyperloom_multibranch.notebook.knowledge.replay_tables import TableStack, stack_added_kernels
 
 log = logging.getLogger(__name__)
 
@@ -154,18 +155,22 @@ class PreparedReplay:
     launch: LaunchConfig
     reason: str = ""
 
-    def on(self, head: Recipe, parent_commit: str) -> WarmReplay | None:
+    def on(self, head: Recipe, parent_commit: str, tables: TableStack | None = None) -> WarmReplay | None:
         """The change that makes ``head``, the recipe of ``parent_commit``, into the champion's; ``None`` when ``head``
         is the champion's already (:meth:`is_on`).
 
         A component the head has keeps the head's upstream repository and commit, as a merge keeps it: the session
         builds it from its image, so the champion's upstream label names nothing to rebuild. The head keeps its flags of
-        :data:`HEAD_FLAGS` as well.
+        :data:`HEAD_FLAGS` as well. When ``tables`` is given, each kernel the champion adds in a slot the head already
+        fills is stacked over the head's table (:func:`stack_added_kernels`) instead of replacing it.
         """
 
         if self.is_on(head):
             return None
         delta = delta_between(head, self._wanted(head))
+        delta, _replaces = stack_added_kernels(delta, head, tables)
+        if apply(head, delta) == head:
+            return None
         return WarmReplay(self.canonical_id, parent_commit, delta, delta_layer(delta), self.reason)
 
     def is_on(self, recipe: Recipe) -> bool:
