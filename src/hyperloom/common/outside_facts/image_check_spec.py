@@ -20,6 +20,9 @@ a fact is still written once. A path is a value or a list of values joined with 
 about, so a path check names ``installed`` (a Python package the image must carry) or starts from an ``{env: NAME}``
 directory; a module check is anchored by the package of its module. Where the anchor is absent the check is
 unverifiable, not failed.
+
+A pack is trusted input: ``cli_accepts_flag`` runs ``python -m <module> --help`` of the module the pack names, and a flag
+named anywhere in the help text (a sentence that says it was removed included) counts as listed.
 """
 
 from __future__ import annotations

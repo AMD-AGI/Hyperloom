@@ -39,7 +39,7 @@ __all__ = [
 ]
 
 _MAX_FILE_BYTES = 16 * 1024 * 1024
-_DEFAULT_TIMEOUT_SEC = 120.0
+_DEFAULT_TIMEOUT_SEC = 90.0
 _TAIL_CHARS = 200
 _DECODE = "replace"
 #: Run in the image's own interpreter, from a neutral directory: ``find_spec`` of a top-level name imports nothing.

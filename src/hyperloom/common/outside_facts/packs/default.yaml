@@ -11,6 +11,10 @@
 #   env_default   an environment variable and the value a launch sets
 #   arg_value     reserved: no rule reads one yet, so a pack that holds one is refused
 #   kernel_table  reserved: no rule reads one yet, so a pack that holds one is refused
+# An entry may also declare image_check: checks the environment a session runs in can answer about the fact
+# (path_exists, csv_has_columns, cli_accepts_flag, source_contains, module_attr; hyperloom.common.outside_facts.
+# image_check_spec). Each carries examples.pass and examples.fail that the loader runs it against, and {ref: entry.role}
+# reads a name another entry holds. A fact with no check is reported unverifiable by the image check.
 # Every entry names its project, says why the fact exists and carries examples. A pack that fails its own examples, or
 # lacks an entry the code reads, is refused when it is loaded; nothing falls back to a default.
 version: "5"
