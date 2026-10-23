@@ -139,19 +139,6 @@ def build_session_id(model_name: str = "") -> str:
     return f"{stem}_{utc_now_compact()}_{uuid.uuid4().hex[:8]}"
 
 
-def _gpu_specialist_capacity_from_args(args: argparse.Namespace | None) -> int:
-    """Return the session-locked GPU specialist capacity."""
-    raw = getattr(args, "gpu_specialist_capacity", None) if args is not None else None
-    if raw is not None:
-        try:
-            return max(0, int(raw))
-        except (TypeError, ValueError):
-            pass
-    from hyperloom.common.visible_devices import detect_gpu_count
-
-    return detect_gpu_count()
-
-
 def _env_digits(name: str) -> int | None:
     """The env var as an ``int`` when it is all digits, else ``None``."""
     raw = os.environ.get(name, "")
@@ -219,9 +206,6 @@ def build_manifest(
         "image": _prov.get("image"),
         # Snapshotted so resume-after-redeploy can detect drift.
         "stack_fingerprint": _prov.get("stack_fingerprint") or {},
-        # Locked at session start; resume reads it back so a restart can't change concurrency semantics.
-        "research_lane_capacity": int(getattr(args, "research_lane_capacity", 1) or 1),
-        "gpu_specialist_capacity": _gpu_specialist_capacity_from_args(args),
         # Workflow identity is stamped only on a fresh manifest. Resumed
         # pre-contract sessions therefore remain honestly legacy.
         "workflow_contract_version": CURRENT_WORKFLOW_CONTRACT_VERSION,
