@@ -42,7 +42,7 @@ from pathlib import Path
 from typing import Any, Iterable, MutableMapping, Sequence
 
 from hyperloom.common.env import env_str
-from hyperloom.common.nofollow import read_text_nofollow
+from hyperloom.common.worktree_git import trusted_admin_dir
 
 SPECIALIST_USER_ENV = "HYPERLOOM_SPECIALIST_USER"
 _GIT_NAME = ".git"
@@ -132,13 +132,10 @@ class RunAs:
         gitfile = worktree / _GIT_NAME
         if not gitfile.is_file() or gitfile.is_symlink():
             return
-        first = read_text_nofollow(gitfile).strip()
-        if not first.startswith("gitdir:"):
-            raise OSError(f"refusing to share {gitfile}: not a gitdir pointer")
-        admin = Path(first.removeprefix("gitdir:").strip())
-        back = read_text_nofollow(admin / "gitdir").strip()
-        if admin.parent.name != "worktrees" or os.path.realpath(back) != os.path.realpath(gitfile):
-            raise OSError(f"refusing to share {admin}: it is not the admin dir of {worktree}")
+        try:
+            admin = trusted_admin_dir(worktree)
+        except OSError as exc:
+            raise OSError(f"refusing to share the git metadata of {worktree}: {exc}") from exc
         self.share_tree(gitfile, write=False)
         self.share_tree(admin, write=False)
         parent = admin.parent
@@ -163,22 +160,36 @@ class RunAs:
         if root.is_symlink():
             raise OSError(f"refusing to share {root}: it is a symlink")
         for path in _walk(root):
-            st = path.lstat()
-            if st.st_gid != self.gid:
-                os.chown(path, -1, self.gid, follow_symlinks=False)
+            self._share_entry(path, write=write, sticky=sticky and path == root)
+
+    def _share_entry(self, path: Path, *, write: bool, sticky: bool) -> None:
+        """Give one entry the account's group and the share modes, never through a link.
+
+        The entry is pinned with ``O_PATH | O_NOFOLLOW`` and changed through
+        that descriptor, so a name the account swaps for a link after the walk
+        listed it is left alone instead of followed.
+        """
+        fd = os.open(path, os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            st = os.fstat(fd)
             if stat.S_ISLNK(st.st_mode):
-                continue
+                return
+            proc = f"/proc/self/fd/{fd}"
+            if st.st_gid != self.gid:
+                os.chown(proc, -1, self.gid)
             if stat.S_ISDIR(st.st_mode):
                 add = _GROUP_RWX_SETGID if write else _GROUP_RX_SETGID
             else:
                 add = _GROUP_RW if write else _GROUP_R
-            if sticky and path == root:
+            if sticky:
                 add |= stat.S_ISVTX
             mode = stat.S_IMODE(st.st_mode) | add
             if not write:
                 mode &= ~stat.S_IWGRP  # read-only means the group cannot write what an earlier umask let it
             if mode != stat.S_IMODE(st.st_mode):
-                path.chmod(mode)
+                os.chmod(proc, mode)
+        finally:
+            os.close(fd)
 
 
 def _walk(root: Path) -> Iterable[Path]:

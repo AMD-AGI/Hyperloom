@@ -140,6 +140,35 @@ def _stage_transformed(source: IO[str], dir_fd: int, staged: str, transform: Cal
     return changed
 
 
+def append_text_nofollow(base: Path, rel: Sequence[str], text: str, *, mode: int = _PRIVATE_MODE) -> None:
+    """Append ``text`` to the regular file ``base/<rel...>``, creating it; refuse a symlink or a multiply linked file."""
+    *dirs, name = rel
+    dir_fd = _open_below(base, dirs, create=True)
+    try:
+        fd = os.open(name, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, mode, dir_fd=dir_fd)
+    finally:
+        os.close(dir_fd)
+    with os.fdopen(fd, "a", encoding="utf-8") as handle:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            raise OSError(errno.EINVAL, "not a plain regular file", str(Path(base, *rel)))
+        handle.write(text)
+
+
+def read_text_below_nofollow(base: Path, rel: Sequence[str]) -> str:
+    """Return the UTF-8 text of the regular file ``base/<rel...>``, opening every component without following a link."""
+    *dirs, name = rel
+    dir_fd = _open_below(base, dirs, create=False)
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=dir_fd)
+    finally:
+        os.close(dir_fd)
+    with os.fdopen(fd, "rb") as handle:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError(errno.EINVAL, "not a regular file", str(Path(base, *rel)))
+        return handle.read().decode("utf-8", errors="replace")
+
+
 def regular_files_nofollow(base: Path, subdir: str, suffixes: Sequence[str]) -> Iterator[Path]:
     """Sorted regular files ``base/subdir/*<suffix>``; nothing when ``subdir`` or an entry is a symlink."""
     try:

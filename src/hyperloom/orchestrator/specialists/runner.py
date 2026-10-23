@@ -25,7 +25,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.nofollow import write_text_nofollow
+from hyperloom.common.nofollow import append_text_nofollow, write_text_nofollow
 from hyperloom.common.io import JsonFormat, WriteOptions, atomic_write_json
 from hyperloom.common.deadline import Deadline, seconds_until
 from hyperloom.common.env_safety import BENCHMARK_SECRET_ENV_NAMES, redact_secret_values
@@ -1386,8 +1386,7 @@ class SpecialistRunner:
             sort_keys=True,
             separators=(",", ":"),
         )
-        with path.open("a", encoding="utf-8") as f:
-            f.write(line + "\n")
+        append_text_nofollow(path.parent, (path.name,), line + "\n")
 
     def _write_heartbeat(
         self,

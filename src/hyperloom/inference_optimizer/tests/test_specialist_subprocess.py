@@ -1947,3 +1947,117 @@ def test_the_dsh_trace_does_not_read_a_session_log_through_a_link(tmp_path):
     (home / "sessions" / "a").symlink_to(outside)
     trace = parse_dsh_session_trace(home)
     assert "no session log" in trace.error
+
+
+# ---- review r2: the app's own git never runs what a child planted in the worktree ----------------
+_FSMONITOR_HOOK = "#!/bin/sh\necho ran > {marker}\nprintf ''\n"
+
+
+def _plant_hostile_repo(where: Path, marker: Path) -> None:
+    """Make ``where`` a repository whose config starts a program on every index read."""
+    hook = where.parent / "hook.sh"
+    hook.write_text(_FSMONITOR_HOOK.format(marker=marker), encoding="utf-8")
+    hook.chmod(0o755)
+    subprocess.run(["git", "init", "-q", str(where)], check=True)
+    subprocess.run(["git", "-C", str(where), "config", "core.fsmonitor", str(hook)], check=True)
+    subprocess.run(["git", "-C", str(where), "config", "core.hooksPath", str(where.parent)], check=True)
+
+
+def test_the_harvest_does_not_run_a_program_a_child_planted_in_a_replaced_dot_git(tmp_path: Path):
+    base, wt = _make_git_worktree_pair(tmp_path)
+    marker = tmp_path / "executed"
+    (wt / "mod.py").write_text("new = 2\n", encoding="utf-8")
+    (wt / ".git").unlink()
+    _plant_hostile_repo(wt, marker)  # `.git` becomes a directory with its own config
+    subprocess.run(["git", "-C", str(wt), "add", "-A"], check=True, capture_output=True)
+    marker.unlink(missing_ok=True)
+    assert SpecialistSubprocessDispatcher._harvest_worktree_diff(wt) == ""
+    assert subprocess_._worktree_head(wt) == ""
+    assert not marker.exists()
+
+
+@_demote_skip
+def test_a_demoted_child_cannot_make_the_apps_git_run_its_fsmonitor(monkeypatch):
+    import shutil
+    import tempfile
+
+    base = Path(tempfile.mkdtemp(prefix="d16g."))
+    try:
+        base.chmod(0o755)
+        repo = base / "framework"
+        init_git_repo(repo)
+        workspace = base / "ws"
+        worktree, err = subprocess_._setup_worktree(repo, workspace / "worktree", "task-g")
+        assert worktree is not None, err
+        monkeypatch.setenv("HYPERLOOM_SPECIALIST_USER", _DEMOTE_USER)
+        run_as = specialist_run_as()
+        kwargs = prepare_demote(run_as, workspace, worktree, {}, ())
+        marker = base / "executed"
+        marker.write_text("", encoding="utf-8")
+        marker.unlink()
+        hook = workspace / "hook.sh"
+        hook.write_text(_FSMONITOR_HOOK.format(marker=marker), encoding="utf-8")
+        hook.chmod(0o770)
+        planted = f"""set -e
+cd {worktree}
+rm -f .git
+git init -q .
+git config core.fsmonitor {hook}
+echo '* filter=evil diff=evil' > .gitattributes
+echo changed >> mod.py
+"""
+        done = subprocess.run(
+            ["/bin/sh", "-c", planted],
+            capture_output=True,
+            text=True,
+            check=False,
+            env={
+                "PATH": os.environ["PATH"],
+                "HOME": run_as.home,
+                "GIT_CONFIG_COUNT": "1",
+                "GIT_CONFIG_KEY_0": "safe.directory",
+                "GIT_CONFIG_VALUE_0": "*",
+            },
+            **kwargs,
+        )
+        assert done.returncode == 0, done.stderr
+        assert SpecialistSubprocessDispatcher._harvest_worktree_diff(worktree) == ""
+        assert subprocess_._worktree_head(worktree) == ""
+        assert not marker.exists()
+        # The second shape: a gitfile that names an admin dir the child made itself, with a matching back pointer.
+        forged = f"""set -e
+cd {worktree}
+rm -rf .git
+mkdir -p {workspace}/fake/.git/worktrees/w
+cd {workspace}/fake && git init -q . && git config core.fsmonitor {hook}
+cd {worktree}
+echo "{worktree}/.git" > {workspace}/fake/.git/worktrees/w/gitdir
+echo "gitdir: {workspace}/fake/.git/worktrees/w" > .git
+"""
+        done = subprocess.run(
+            ["/bin/sh", "-c", forged],
+            capture_output=True,
+            text=True,
+            check=False,
+            env={
+                "PATH": os.environ["PATH"],
+                "HOME": run_as.home,
+                "GIT_CONFIG_COUNT": "1",
+                "GIT_CONFIG_KEY_0": "safe.directory",
+                "GIT_CONFIG_VALUE_0": "*",
+            },
+            **kwargs,
+        )
+        assert done.returncode == 0, done.stderr
+        assert SpecialistSubprocessDispatcher._harvest_worktree_diff(worktree) == ""
+        assert subprocess_._worktree_head(worktree) == ""
+        assert not marker.exists()
+    finally:
+        shutil.rmtree(base, ignore_errors=True)
+
+
+def test_the_harvest_still_works_on_an_untouched_worktree(tmp_path: Path):
+    base, wt = _make_git_worktree_pair(tmp_path)
+    (wt / "mod.py").write_text("new = 2\n", encoding="utf-8")
+    assert "+new = 2" in SpecialistSubprocessDispatcher._harvest_worktree_diff(wt)
+    assert len(subprocess_._worktree_head(wt)) == 40
