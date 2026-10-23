@@ -137,14 +137,15 @@ def commit_warm_replay_overlays(result: Mapping[str, Any]) -> list[str]:
 
 
 def uncommit_promoted_overlays(pending: Mapping[str, Any], root: str, pre_sha: str) -> None:
-    """Move ``root`` back to ``pre_sha`` when the promotion committed the overlays on it, leaving them for the restore.
+    """Move ``root`` back to ``pre_sha`` when the promotion committed the overlays on it, leaving them uncommitted.
 
-    The restore requires HEAD at ``pre_sha``. Only a single commit directly on ``pre_sha`` is undone; any other HEAD is
-    left for the restore to refuse.
+    The restore requires HEAD at ``pre_sha``, and a tree the replay did not write to keeps the overlays it already
+    held as uncommitted changes. Only a single commit directly on ``pre_sha`` is undone; any other HEAD is left for
+    the restore to refuse.
     """
     if not pending.get(_OVERLAYS_COMMITTED_KEY) or not pre_sha:
         return
     head = _git_head_sha(root)
     parent = _run_git_cp(["-C", root, "rev-parse", "HEAD^"], timeout=30.0)
     if head and head != pre_sha and parent is not None and parent.stdout.strip() == pre_sha:
-        _run_git_cp(["-C", root, "reset", "-q", "--soft", pre_sha], timeout=30.0)
+        _run_git_cp(["-C", root, "reset", "-q", pre_sha], timeout=30.0)

@@ -3427,3 +3427,38 @@ def test_a_resume_rolls_back_a_replay_that_died_after_committing_its_overlays(tm
     assert rollback["errors"] == []
     assert _tree_git(tree, "rev-parse", "HEAD").strip() == stock_head
     assert (tree / "python" / "sglang" / "srt" / "environ.py").read_text(encoding="utf-8") == _STOCK_ENVIRON
+
+
+def test_a_refused_replay_leaves_an_overlay_the_tree_already_held_uncommitted(tmp_path):
+    from hyperloom.orchestrator.actions.executors.baseline import _apply_warm_patches, _stamp_warm_patch_outcome
+
+    tree = _stock_sglang_tree(tmp_path / "sglang")
+    stock_head = _tree_git(tree, "rev-parse", "HEAD").strip()
+    overlay = tmp_path / "ppe.patch"
+    overlay.write_text(_PPE_OVERLAY, encoding="utf-8")
+    _tree_git(tree, "apply", str(overlay))
+    held = _tree_git(tree, "status", "--porcelain")
+    params = {
+        "baseline_tput_anchor": 600.0,
+        "required_patch_timeline": True,
+        "patches": [
+            {"patch_file": "patch/overlays/000001/00.patch", "patch_content": _PPE_OVERLAY, "framework_root": str(tree)}
+        ],
+        "extra_server_args": "--recipe",
+        "extra_envs": {},
+    }
+    workspace = tmp_path / "runs" / "replay_warm_recipe" / "warm"
+    workspace.mkdir(parents=True)
+    result = {"status": "succeeded", "output_throughput": 612.0, "workspace": str(workspace)}
+    _stamp_warm_patch_outcome(result, _apply_warm_patches(params, str(tree), workspace), params)
+    assert [p["status"] for p in result["warm_patch_result"]["patches"]] == ["present_in_dirty_worktree"]
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
+    coord.shared_state.baseline_tput = 600.0
+    coord.shared_state.warm_replay_outcome = {"expected_gain_pct": 0.0}
+    coord.shared_state.current_best = {"action": "explore", "tput": 800.0, "extra_server_args": "", "extra_envs": {}}
+
+    verdict = coord.phase_prelude.promote_warm_replay(result, task=_StubTask(params=params))
+
+    assert verdict is Verdict.REVERTED
+    assert _tree_git(tree, "rev-parse", "HEAD").strip() == stock_head
+    assert _tree_git(tree, "status", "--porcelain") == held

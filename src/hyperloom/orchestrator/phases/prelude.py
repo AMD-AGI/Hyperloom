@@ -1498,6 +1498,7 @@ class PreludePhase(CoordinatorCollaborator):
             target = str(tree.get("root") or "")
             if not target:
                 continue
+            uncommit_promoted_overlays(pending, target, str(tree.get("pre_sha") or ""))
             recipe_manifest = tree.get("snapshot_manifest")
             backups = list(tree.get("nogit_backups") or [])
             if not bool(tree.get("mutated", True)):
@@ -1508,7 +1509,6 @@ class PreludePhase(CoordinatorCollaborator):
             if not recipe_manifest and not backups:
                 restores.append({"ok": False, "errors": [f"recipe:{target}:missing_snapshot_manifest"]})
                 continue
-            uncommit_promoted_overlays(pending, target, str(tree.get("pre_sha") or ""))
             restores.append(
                 _revert_warm_patch_state(
                     target,
