@@ -22,6 +22,7 @@ import pytest
 
 from hyperloom.common.io import append_jsonl, atomic_write_json
 from hyperloom.common.owner_scope import local_owner_scope
+from hyperloom.common.rule_pack import rule_pack_identity
 from hyperloom.contracts.recipe import Recipe
 from hyperloom.measure.compile import LocalBlobStore
 from hyperloom.orchestrator.knowledge.remote_recipe import KBStoreError
@@ -173,6 +174,7 @@ def layout(tmp_path: Path) -> SessionLayout:
     layout = create_session(tmp_path / "workspace", "model", CLOCK)
     SessionManifest(
         code_version=CodeVersion("0.0", RAN_ON),
+        rule_pack=dict(rule_pack_identity()),
         session_id=layout.session_id,
         started_at=NOW,
         deadline=NOW + BUDGET_SECONDS,

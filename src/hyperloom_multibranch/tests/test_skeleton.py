@@ -31,6 +31,7 @@ import pytest
 from hyperloom.common.jsonio import read_jsonl
 from hyperloom.common.perf_metric import GRADED_INTVTY_P50, GRADED_OUTPUT
 from hyperloom.common.proctree import running
+from hyperloom.common.rule_pack import rule_pack_identity
 from hyperloom.contracts.measurement import (
     NOT_REPRODUCED,
     REPRODUCED,
@@ -590,6 +591,7 @@ async def test_a_session_runs_every_phase_and_leaves_nothing_behind(tmp_path: Pa
     assert outcome.close is not None and outcome.close.stop.clean and outcome.close.exports is not None
     manifest = json.loads(stage.layout.manifest.read_text())
     assert set(manifest["code_version"]) == {"package", "git_sha"} and manifest["metric"] == GRADED_OUTPUT
+    assert manifest["rule_pack"] == rule_pack_identity()
     judge_calls = len(stage.layout.judge.read_text().splitlines())
     spends = [_judge_state(prompt)["spend"] for prompt in _judge_prompts(stage)]
     assert [spend["scheduler_llm_usd"] for spend in spends[:2]] == [0.0, JUDGE_USD]

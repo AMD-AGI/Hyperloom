@@ -33,6 +33,7 @@ from hyperloom.common.llm_config import (
 )
 from hyperloom.common.owner_scope import local_owner_scope
 from hyperloom.common.perf_metric import GRADED_INTVTY_P50
+from hyperloom.common.rule_pack import rule_pack_identity
 from hyperloom.measure import compile as compile_module
 from hyperloom.measure.compile import PackageBase
 from hyperloom_multibranch import cli
@@ -663,6 +664,7 @@ def _manifest(layout: SessionLayout, **fields: object) -> None:
     document = encode(
         SessionManifest(
             code_version=code_version(),
+            rule_pack=dict(rule_pack_identity()),
             session_id=layout.session_id,
             started_at=0.0,
             deadline=3600.0,

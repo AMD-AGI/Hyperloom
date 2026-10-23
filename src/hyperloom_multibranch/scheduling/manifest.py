@@ -47,10 +47,14 @@ def code_version() -> CodeVersion:
 
 @dataclass(frozen=True)
 class SessionManifest:
-    """The manifest document: the build the session ran on, the window it was given, the settings it ran under, the
-    metric it optimized and the policy versions it scored with."""
+    """The manifest document: the build the session ran on, the rule pack it read, the window it was given, the
+    settings it ran under, the metric it optimized and the policy versions it scored with.
+
+    ``rule_pack`` is :func:`hyperloom.common.rule_pack.rule_pack_identity`'s version and digest, so a session's
+    prompts can be told apart from another's when the pack moves under a single build."""
 
     code_version: CodeVersion
+    rule_pack: dict[str, str]
     session_id: str
     started_at: float
     deadline: float
