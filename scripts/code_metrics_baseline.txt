@@ -840,7 +840,6 @@ module-lines src/kernelforge/loop/runner.py 6051
 module-lines src/kernelforge/loop/task_preparer.py 1299
 module-lines src/kernelforge/orchestrator/analysis.py 1952
 module-lines src/kernelforge/orchestrator/orchestration.py 1831
-nested-blocks scripts/code_metrics_design.py::_comparisons 5
 nested-blocks scripts/platform_audit_bmc.py::main 5
 nested-blocks src/hyperloom/agents/critic/runtime/in_memory_kb_client.py::_matches_metadata 5
 nested-blocks src/hyperloom/common/launch_log_evidence.py::_read_launch_record 5
