@@ -54,6 +54,7 @@ class _Runs:
         self.crashes, self.errors, self.preflight = crashes, list(errors), preflight
         self.started: list[_Run] = []
         self.preflights = 0
+        self.released: list[str] = []
 
     def __call__(self, start: SessionStart) -> "_Run":
         run = _Run(self, start)
@@ -84,6 +85,9 @@ class _Run:
 
     async def stop(self) -> None:
         self.stopped.set()
+
+    async def release(self) -> None:
+        self._runs.released.append(self.start.branch)
 
 
 class _JudgeFails(LocalNotebook):
@@ -397,6 +401,30 @@ async def test_a_session_that_cannot_be_built_or_made_ready_gives_its_specialist
     assert any(why in notice for notice in await session.notices())
     assert await runtime.status(BRANCH) == SpecialistStatus(False, 0, 0, True, False)
     await runtime.stop(BRANCH)
+
+
+@pytest.mark.parametrize("crashes", [0, 2])
+async def test_what_a_branch_s_runs_hold_is_given_back_once_when_the_branch_stops(session, crashes):
+    runs = _Runs(crashes=crashes)
+    runtime = session.runtime(runs)
+
+    await runtime.start(BRANCH, await session.repo.head(BRANCH), BranchTask(agent="https://example.com/agent.git"))
+    await _until(lambda: _true(len(runs.started) == crashes + 1), "the last run")
+    assert runs.released == []
+    await runtime.stop(BRANCH)
+
+    assert runs.released == [BRANCH]
+
+
+async def test_a_branch_whose_preflight_failed_gives_back_what_it_holds_when_it_stops(session):
+    runs = _Runs(preflight=PreflightFailed(("no card is left",)))
+    runtime = session.runtime(runs)
+
+    await runtime.start(BRANCH, await session.repo.head(BRANCH), BranchTask(agent="https://example.com/agent.git"))
+    await _until(lambda: _any_notice(session, "not started"), "the runtime to give up")
+    await runtime.stop(BRANCH)
+
+    assert runs.released == [BRANCH]
 
 
 def _idle(tested: bool = False) -> SessionIdle:

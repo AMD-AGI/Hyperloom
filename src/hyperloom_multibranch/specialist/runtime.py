@@ -20,11 +20,12 @@ ends idle, its model finding nothing to test, is no crash: the branch gets one f
 and ``MAX_IDLE_SESSIONS`` idle sessions in a row end it, a session that submitted a test starting the count again. Then
 the specialist gives up and the scheduler stops the branch, freeing its slot for a fresh branch with its own direction.
 A session that finished, a third-party agent that ended its run and whose last keep settled, ends its specialist the
-same way. Past any of these the branch keeps its judge, which settles what was already measured, and the scheduler
-stops it once nothing of it waits for a confirm; ``status`` tells it. A judge that fails is a defect of this code, not
-of the specialist: it is not restarted, and the branch's session is stopped so no candidate is measured that nothing
-would judge. Both leave a notice in the branch log. While the specialist writes a change, the runtime renews the claims
-it holds, so a claim does not lapse while a model thinks; once a test carries a claim, the toolbox renews it.
+same way. Past any of these the branch keeps its judge, which settles what was already measured, and the scheduler stops
+it once nothing of it waits for a confirm; ``status`` tells it. A judge that fails is a defect of this code, not of the
+specialist: it is not restarted, and the branch's session is stopped so no candidate is measured that nothing would
+judge. Both leave a notice in the branch log. While the specialist writes a change, the runtime renews the claims it
+holds, so a claim does not lapse while a model thinks; once a test carries a claim, the toolbox renews it. When the
+scheduler stops a branch, its last session gives back what the branch's runs held across them.
 """
 
 from __future__ import annotations
@@ -105,6 +106,9 @@ class Session(Protocol):
     async def stop(self) -> None:
         """Stop the run, more than once if need be; returns once none of its processes is left."""
 
+    async def release(self) -> None:
+        """The branch's runs are over: give back what they hold across runs, such as a sandbox's cards."""
+
 
 @dataclass(frozen=True)
 class SessionStart:
@@ -140,6 +144,7 @@ class _Branch:
     notebook: RuntimeNotebook
     k: int = 1
     session: Session | None = None
+    last: Session | None = None
     tasks: list[asyncio.Task[None]] = field(default_factory=list)
     crashes: int = 0
     lost: int = 0
@@ -214,6 +219,8 @@ class SpecialistRuntime:
         for task in others:
             task.cancel()
         await asyncio.gather(*others, return_exceptions=True)
+        if state.last is not None:
+            await state.last.release()
         await self._learn_exhausted(state)
 
     async def _supervise(self, state: _Branch) -> None:
@@ -275,12 +282,13 @@ class SpecialistRuntime:
         """The branch's next session; ``None``, its specialist given up with the reason, when it cannot be built."""
 
         try:
-            return self._sessions(start)
+            state.last = self._sessions(start)
         except Exception as error:
             logger.exception("the session of %s cannot be built", state.name)
             state.gave_up = True
             await _notice(state, f"the specialist's session cannot be built ({error}); it is not started")
             return None
+        return state.last
 
     async def _preflight(self, state: _Branch, session: Session) -> bool:
         """Make the branch's first session ready; give the specialist up, with every reason, when it cannot be: a

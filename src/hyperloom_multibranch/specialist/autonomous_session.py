@@ -174,6 +174,9 @@ class AutonomousSession:
     async def set_k(self, k: int) -> None:
         """An autonomous branch measures one import at a time, whatever K the branch has."""
 
+    async def release(self) -> None:
+        """Nothing held across runs yet."""
+
     async def stop(self) -> None:
         self._stopped.set()
         if self._process is not None:
