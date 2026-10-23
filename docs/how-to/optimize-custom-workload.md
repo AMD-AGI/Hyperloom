@@ -53,10 +53,19 @@ re-executes itself inside bubblewrap before dispatching, so every subprocess a
 run later spawns -- benchmarks, Ray actors, the Claude Code specialist -- is
 confined without a container. Default is `off`.
 
+The command's own arguments decide most binds. `optimize` binds the session
+root (`$USER_DATA_PATH`) and `--framework-path` read-write, and
+`--benchmark-scripts-dir` and a local `--model` read-only; for a workspace from
+`hyperloom script prepare`, also the script's directory, its working directory
+and the model interpreter's venv. `script prepare` binds its `--workspace`
+read-write and its script, working directory and interpreter read-only. Missing
+output directories are created. The Claude CLI is found outside the sandbox
+and bound in as `claude`.
+
 | Var | Purpose |
 |---|---|
-| `HYPERLOOM_SANDBOX_WRITABLE` | Colon-separated read-write bind roots: your session workspace, and anything else the run needs to write. |
-| `HYPERLOOM_SANDBOX_READONLY` | Colon-separated read-only bind roots: model weights, datasets, anything the run must not edit. |
+| `HYPERLOOM_SANDBOX_WRITABLE` | Colon-separated extra read-write bind roots, for outputs the arguments don't name. |
+| `HYPERLOOM_SANDBOX_READONLY` | Colon-separated extra read-only bind roots, for inputs the arguments don't name: a Hugging Face cache (set `HF_HOME` to it), datasets, weights a script loads by a fixed path. |
 
 Everything else -- the venv, a source checkout on `PYTHONPATH`, the
 interpreter's support files, `/usr /lib /lib64 /bin /sbin /etc /opt /sys`, GPU

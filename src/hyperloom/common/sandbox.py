@@ -22,6 +22,7 @@ asked to be isolated and cannot be is an error, never a silent downgrade.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 import os
 from pathlib import Path
 import shutil
@@ -75,6 +76,14 @@ _SETENV = "--setenv"
 
 class SandboxError(RuntimeError):
     """The run asked to be sandboxed and the sandbox could not be established."""
+
+
+@dataclass(frozen=True)
+class SandboxRoots:
+    """Paths a command declares from its own arguments: outputs read-write, inputs read-only."""
+
+    writable: tuple[Path, ...] = ()
+    readonly: tuple[Path, ...] = ()
 
 
 def resolve_sandbox_mode(env: Mapping[str, str] | None = None) -> str:
@@ -140,6 +149,19 @@ def interpreter_support_dir(prefix: str | None = None) -> Path | None:
     if _is_within(support, root) or any(_is_within(support, Path(r)) for r in _SYSTEM_ROOTS):
         return None
     return support
+
+
+def interpreter_roots(python: Path) -> tuple[Path, ...]:
+    """Directories another venv's interpreter needs inside the sandbox: the venv and its distribution.
+
+    ``python`` is the venv's ``bin/python``, unresolved. A system interpreter needs
+    nothing beyond the system trees, which are always bound.
+    """
+    prefix = python.parent.parent
+    if not (prefix / "pyvenv.cfg").is_file():
+        return ()
+    support = interpreter_support_dir(str(prefix))
+    return (prefix,) if support is None else (prefix, support)
 
 
 def _is_within(path: Path, parent: Path) -> bool:
@@ -327,7 +349,22 @@ def verify_sandbox_bindings(
             ) from exc
 
 
-def reexec_if_required(argv: Sequence[str] | None = None) -> None:
+def _declare_roots(roots: SandboxRoots) -> tuple[tuple[Path, ...], tuple[Path, ...]]:
+    """Merge the command's roots into the operator's, create missing outputs, and publish the result.
+
+    Publishing through the env vars lets :func:`verify_sandbox_bindings` check the
+    derived binds too, from inside the sandbox.
+    """
+    writable = tuple(dict.fromkeys((*writable_roots_from_env(), *roots.writable)))
+    readonly = tuple(dict.fromkeys((*readonly_roots_from_env(), *roots.readonly)))
+    for root in writable:
+        root.mkdir(parents=True, exist_ok=True)
+    os.environ[SANDBOX_WRITABLE_ENV] = os.pathsep.join(map(str, writable))
+    os.environ[SANDBOX_READONLY_ENV] = os.pathsep.join(map(str, readonly))
+    return writable, readonly
+
+
+def reexec_if_required(argv: Sequence[str] | None = None, roots: SandboxRoots = SandboxRoots()) -> None:
     """Re-execute this process inside the sandbox when one was asked for.
 
     Returns immediately when the mode is ``off``. When the process is already
@@ -343,6 +380,8 @@ def reexec_if_required(argv: Sequence[str] | None = None) -> None:
             every entry point: under ``python -c`` it holds only ``['-c']`` and
             the body is unrecoverable. Naming the module is exact for the
             console script, ``-m``, and an embedded caller alike.
+        roots: What the command derived from its own arguments, bound in
+            addition to the operator's ``HYPERLOOM_SANDBOX_*`` roots.
 
     Raises:
         SandboxError: A sandbox was requested and cannot be established. Never
@@ -369,11 +408,12 @@ def reexec_if_required(argv: Sequence[str] | None = None) -> None:
     venv = Path(sys.prefix)
     command = [sys.executable, "-m", "hyperloom", *(list(sys.argv[1:]) if argv is None else list(argv))]
     claude_cli = resolve_claude_executable()
+    writable, readonly = _declare_roots(roots)
     args = build_bwrap_args(
         bwrap=bwrap,
         venv=venv,
-        writable_roots=writable_roots_from_env(),
-        readonly_roots=readonly_roots_from_env(),
+        writable_roots=writable,
+        readonly_roots=readonly,
         support_dir=interpreter_support_dir(),
         package_dir=package_root(),
         claude_cli=Path(claude_cli).resolve() if claude_cli else None,

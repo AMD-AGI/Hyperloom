@@ -21,9 +21,12 @@ import shutil
 import subprocess
 import sys
 
+from hyperloom.common.sandbox import SandboxRoots, interpreter_roots
+
 from .session.paths import asset_root
 
 _HARNESS = "harness.py"
+_CONFIG = "script_workload.json"
 _IDENTITY = '''"""Optimizations for {script}; the identity until Hyperloom accepts a change."""
 
 
@@ -58,7 +61,7 @@ def _write_benchmark(benchmark: Path, module_file: Path, args: argparse.Namespac
         "timed_passes": args.timed_passes,
         "tolerance": _tolerance(args),
     }
-    (benchmark / "script_workload.json").write_text(json.dumps(config, indent=2) + "\n")
+    (benchmark / _CONFIG).write_text(json.dumps(config, indent=2) + "\n")
     scope = {"schema_version": 2, "file": str(module_file), "function": args.function}
     (benchmark / "optimization_scope.json").write_text(json.dumps(scope, indent=2) + "\n")
     entrypoint = benchmark / f"custom_{args.runner}.sh"
@@ -152,6 +155,33 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _interpreter(python: str) -> str:
+    """Absolute, unresolved: a venv's bin/python must keep naming the venv."""
+    return os.path.abspath(shutil.which(python) or python)
+
+
+def benchmark_inputs(benchmark: Path) -> tuple[Path, ...]:
+    """What a prepared benchmark's measurements read outside it: the script, its working directory, its interpreter."""
+    config = benchmark / _CONFIG
+    if not config.is_file():
+        return ()
+    workload = json.loads(config.read_text())
+    return (Path(workload["script"]).parent, Path(workload["cwd"]), *interpreter_roots(Path(workload["python"])))
+
+
+def sandbox_roots(argv: list[str]) -> SandboxRoots:
+    """What ``script prepare`` writes and reads, derived from its flags for the bwrap sandbox."""
+    if argv[:1] != ["prepare"] or {"-h", "--help"} & set(argv):
+        return SandboxRoots()
+    try:
+        args, _ = _parser().parse_known_args(argv[1:])
+    except SystemExit:
+        # A malformed command line; the strict parse inside the sandbox reports it.
+        return SandboxRoots()
+    readonly = (args.script.resolve().parent, args.cwd.resolve(), *interpreter_roots(Path(_interpreter(args.python))))
+    return SandboxRoots(writable=(args.workspace.resolve(),), readonly=readonly)
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv[:1] != ["prepare"]:
@@ -165,6 +195,6 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("--module and --function must be Python identifiers")
     if args.timed_passes < args.held_out:
         raise SystemExit("--timed-passes must be at least --held-out")
-    args.python = os.path.abspath(shutil.which(args.python) or args.python)
+    args.python = _interpreter(args.python)
     print(prepare(args))
     return 0

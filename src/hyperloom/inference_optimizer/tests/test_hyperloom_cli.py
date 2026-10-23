@@ -105,3 +105,24 @@ def test_inference_optimizer_cli_package_is_not_runnable_with_dash_m() -> None:
     )
     assert proc.returncode != 0
     assert "__main__" in proc.stderr.lower()
+
+
+def test_sandbox_roots_come_from_the_command_only_when_a_sandbox_starts(monkeypatch: pytest.MonkeyPatch) -> None:
+    from hyperloom.common.sandbox import SandboxRoots
+
+    declared = SandboxRoots(writable=(Path("/out"),))
+    seen: list[list[str]] = []
+
+    def fake_import(name: str) -> types.SimpleNamespace:
+        return types.SimpleNamespace(sandbox_roots=lambda argv: seen.append(argv) or declared)
+
+    monkeypatch.setattr(importlib, "import_module", fake_import)
+    monkeypatch.delenv("HYPERLOOM_SANDBOX_ACTIVE", raising=False)
+    monkeypatch.delenv("HYPERLOOM_SANDBOX_MODE", raising=False)
+    assert cli._sandbox_roots("optimize", ["--model", "m"]) == SandboxRoots()
+    assert seen == []
+
+    monkeypatch.setenv("HYPERLOOM_SANDBOX_MODE", "bwrap")
+    assert cli._sandbox_roots("optimize", ["--model", "m"]) == declared
+    assert seen == [["optimize", "--model", "m"]]
+    assert cli._sandbox_roots("session", ["state"]) == SandboxRoots()

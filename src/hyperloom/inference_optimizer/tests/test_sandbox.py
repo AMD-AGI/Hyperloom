@@ -20,7 +20,9 @@ from hyperloom.common.sandbox import (
     SANDBOX_READONLY_ENV,
     SANDBOX_WRITABLE_ENV,
     SandboxError,
+    SandboxRoots,
     build_bwrap_args,
+    interpreter_roots,
     interpreter_support_dir,
     is_sandboxed,
     probe_sandbox_capability,
@@ -437,3 +439,34 @@ def test_claude_resolves_by_name_inside_a_real_sandbox(tmp_path):
     )
     result = subprocess.run([*args, "sh", "-c", "claude"], capture_output=True, text=True, check=True)
     assert result.stdout.strip() == "fake-claude"
+
+
+# --- roots a command derives ----------------------------------------------------
+
+
+def test_interpreter_roots_bind_a_venv_and_its_distribution(tmp_path):
+    venv = _venv(tmp_path, str(tmp_path / "dist" / "cpython-3.12" / "bin"))
+    assert interpreter_roots(venv / "bin" / "python") == (venv, tmp_path / "dist" / "cpython-3.12")
+
+
+def test_a_system_interpreter_needs_no_roots():
+    assert interpreter_roots(Path("/usr/bin/python3")) == ()
+
+
+def test_reexec_binds_the_command_roots_and_publishes_them(monkeypatch, tmp_path):
+    monkeypatch.setenv(SANDBOX_MODE_ENV, "bwrap")
+    monkeypatch.setenv(SANDBOX_READONLY_ENV, str(tmp_path / "operator"))
+    monkeypatch.setattr("hyperloom.common.sandbox.probe_sandbox_capability", lambda *a, **k: True)
+    monkeypatch.setattr("hyperloom.common.sandbox.shutil.which", lambda _: "/usr/bin/bwrap")
+    captured = {}
+    monkeypatch.setattr("hyperloom.common.sandbox.os.execv", lambda path, argv: captured.update(argv=argv))
+    out, model = tmp_path / "workspace" / "new", tmp_path / "model"
+
+    reexec_if_required(["optimize"], roots=SandboxRoots(writable=(out,), readonly=(model,)))
+
+    joined = " ".join(captured["argv"])
+    assert f"--bind-try {out} {out}" in joined
+    assert f"--ro-bind-try {model} {model}" in joined
+    assert out.is_dir(), "a missing output root is created so the bind and its verification succeed"
+    assert writable_roots_from_env() == (out,)
+    assert readonly_roots_from_env() == (tmp_path / "operator", model)
