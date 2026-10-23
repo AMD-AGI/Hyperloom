@@ -64,13 +64,11 @@ def test_a_hosted_run_adds_the_session_block_and_its_records_under_the_names_the
     }
     sandbox = {"request_id": "r1", "sandbox_id": "sb-1", "node_name": "node-1", "same_node": True}
     plugs = {"profile": "default", "fingerprint": "sha256:p", "sockets": {"measure": {"impl": "hosted"}}}
-    for folder in ("hosted", "agents"):
-        (tmp_path / folder).mkdir()
+    (tmp_path / "hosted").mkdir()
     (tmp_path / "hosted" / "measurement_sandboxes.jsonl").write_text(
         json.dumps(sandbox) + '\n{"request_id": "r', "utf-8"
     )
     (tmp_path / "plugs.resolved.json").write_text(json.dumps(plugs), "utf-8")
-    (tmp_path / "agents" / "container_resources.json").write_text('{"cpu_limit": ', "utf-8")
 
     metadata = build_breakdown(snapshot, session_dir=tmp_path, environ=hosted, code_revision="38724291b")["metadata"]
     local = build_breakdown(snapshot, environ={})["metadata"]
@@ -85,6 +83,23 @@ def test_a_hosted_run_adds_the_session_block_and_its_records_under_the_names_the
     assert (metadata["measurement_sandboxes"], metadata["plugs"]) == ([sandbox], plugs)
     assert not {"specialist_resources", "container_resources", "hosted_measurement"} & set(metadata)
     assert local["session"]["claw_session_id"] is None and "measurement_sandboxes" not in local
+
+
+def test_the_agent_runners_samples_give_each_specialists_record_and_the_containers_last_reading(
+    snapshot: NotebookSnapshot, tmp_path: Path
+) -> None:
+    first, second = ({"kind": "specialist_resources", "task_id": task, "cpu_seconds": 9.5} for task in ("b01", "b02"))
+    early, late = ({"kind": "container_resources", "memory_peak_bytes": peak, "oom_kill": 0} for peak in (512, 2048))
+    (tmp_path / "agents").mkdir()
+    (tmp_path / "agents" / "resources.jsonl").write_text(
+        "".join(json.dumps(row) + "\n" for row in (first, early, second, late)) + '{"kind": "spec', "utf-8"
+    )
+
+    metadata = build_breakdown(snapshot, runner_dir=tmp_path, environ={})["metadata"]
+    unsampled = build_breakdown(snapshot, runner_dir=tmp_path / "elsewhere", environ={})["metadata"]
+
+    assert (metadata["specialist_resources"], metadata["container_resources"]) == ([first, second], late)
+    assert not {"specialist_resources", "container_resources"} & set(unsampled)
 
 
 def test_the_spend_counts_the_tokens_of_unpriced_llm_calls_beside_the_dollars(snapshot: NotebookSnapshot) -> None:
