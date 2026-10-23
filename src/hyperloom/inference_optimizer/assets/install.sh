@@ -1830,41 +1830,6 @@ ensure_langfuse_when_enabled() {
   fi
 }
 
-# --- 4d. Per-framework runtime deps (manifest-driven) ---
-#
-# Scriptable frameworks execute the model author's own code (HY-World-2.0 for
-# an operator's own), which imports packages no ROCm serving image ships. A framework
-# declares what it needs in assets/framework_deps/<framework>.txt, so onboarding
-# the next one is a data file rather than new code, and a framework with no
-# manifest (sglang / vllm / atom) is a no-op.
-#
-# Manifest parsing, the load-bearing refusal list and the torch-clobber
-# tripwire all live in hyperloom.inference_optimizer.framework_deps, which the
-# CLI preflight also calls, so the two passes cannot drift.
-#
-# $FRAMEWORK is normally only known at launch (--framework), not at install
-# time, which is why preflight owns the pass that covers the documented flow.
-# This one is the fast path for operators who export it before installing.
-ensure_framework_deps() {
-  if [ -z "${FRAMEWORK:-}" ]; then
-    log "framework deps: \$FRAMEWORK unset at install time; CLI preflight will handle it at launch"
-    return 0
-  fi
-  local args=(--framework "$FRAMEWORK" --python "$PYTHON" --prefix "[inference-optimizer] framework deps")
-  [ "$CHECK_ONLY" -eq 1 ] && args+=(--check-only)
-  [ "$DRY_RUN" -eq 1 ] && args+=(--dry-run)
-  # Each flag attaches with =: a bare --pip-extra would leave a dashed value
-  # unconsumed, and argparse then rejects it as an unrecognized argument.
-  if [ ${#PIP_EXTRA[@]} -gt 0 ]; then
-    local pip_flag
-    for pip_flag in "${PIP_EXTRA[@]}"; do
-      args+=("--pip-extra=${pip_flag}")
-    done
-  fi
-  "$PYTHON" -m hyperloom.inference_optimizer.framework_deps "${args[@]}" \
-    || die "framework deps for '${FRAMEWORK}' failed fatally; see the error above"
-}
-
 # --- 5. Kernel-agent tools ---
 install_kernel_agent_tools() {
   if [ "$DRY_RUN" -eq 1 ]; then
@@ -1920,7 +1885,6 @@ fi
 ensure_bench_serving_deps
 ensure_scriptable_quality_deps
 activate_vllm_image_source
-ensure_framework_deps
 install_kernel_agent_tools
 persist_vllm_image_source_env
 # rocprof-compute + pandas<3 pin runs LAST — strictly AFTER every pip-installing
