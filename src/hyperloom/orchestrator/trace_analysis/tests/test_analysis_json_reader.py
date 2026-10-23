@@ -23,7 +23,8 @@ from pathlib import Path
 
 from hyperloom.orchestrator.trace_analysis import _analysis_json as aj
 from hyperloom.orchestrator.trace_analysis import _kernel_source as ks
-from hyperloom.orchestrator.trace_analysis import tracelens_analysis as tla
+from hyperloom.orchestrator.trace_analysis import _candidate_assembly as candidate_assembly
+from hyperloom.orchestrator.trace_analysis import _kernel_classification as kernel_classification
 from hyperloom.orchestrator.trace_analysis._kernel_partition import partition_kernels
 from TraceLens.TraceUtils.kernel_source import ResolveResult, SourceLocation
 
@@ -105,7 +106,7 @@ def test_finalize_derives_gpu_pct_from_duration_when_absent():
     duration-share fallback keeps their ROI ranking non-zero without displacing
     TraceLens' pct_e2e where it is present.
     """
-    rows = tla._finalize_candidates(
+    rows = candidate_assembly._finalize_candidates(
         [
             {"name": "collective_a", "duration_us": 50.0},
             {"name": "compute_b", "duration_us": 100.0, "gpu_pct": 25.0},
@@ -123,7 +124,7 @@ def test_finalize_preserves_an_authoritative_zero_gpu_pct():
     A kernel present in the window with no measured wall-time share reads 0.0;
     replacing it with a duration-derived share would inflate its ROI ranking.
     """
-    rows = tla._finalize_candidates(
+    rows = candidate_assembly._finalize_candidates(
         [
             {"name": "idle_a", "duration_us": 100.0, "gpu_pct": 0.0},
             {"name": "collective_b", "duration_us": 50.0},
@@ -149,7 +150,7 @@ def test_finalize_stamps_kernel_category_and_carries_device_kernel_names(tmp_pat
     )
     member = _member(kernel_name=["moe_gemm", "moe_gemm_epilogue"], category="gemm")
     rows = aj.load_report_tasks(_write_report(tmp_path, [member]))
-    finalized = tla._finalize_candidates(rows)
+    finalized = candidate_assembly._finalize_candidates(rows)
     assert len(finalized) == 1
     cand = finalized[0]
     assert cand["kernel_category"] == "GEMM"
@@ -249,7 +250,7 @@ def test_non_patchable_with_source_partitions_to_skipped_with_a_source(tmp_path,
     )
     rows = aj.load_report_tasks(_write_report(tmp_path, [_member(kernel_name=["Cijk_ck"])]))
     for row in rows:
-        reusable, skip_reason = tla.classify_patchability(row)
+        reusable, skip_reason = kernel_classification.classify_patchability(row)
         row["reusable_native_kernel"] = reusable
         row["skip_reason"] = skip_reason
     routable, skipped = partition_kernels(rows, lambda c: c.get("reusable_native_kernel") is True)
@@ -269,7 +270,7 @@ def test_fail_closed_symbol_partitions_to_skipped_without_a_source(tmp_path, mon
     )
     rows = aj.load_report_tasks(_write_report(tmp_path, [_member()]))
     for row in rows:
-        reusable, skip_reason = tla.classify_patchability(row)
+        reusable, skip_reason = kernel_classification.classify_patchability(row)
         row["reusable_native_kernel"] = reusable
         row["skip_reason"] = skip_reason
     routable, skipped = partition_kernels(rows, lambda c: c.get("reusable_native_kernel") is True)

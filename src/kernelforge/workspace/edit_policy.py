@@ -10,7 +10,7 @@ import os
 from pathlib import Path
 import stat
 from typing import Iterable
-from kernelforge.llm.git import git_bytes
+from kernelforge.tools.git import git_bytes
 
 
 PROTECTED_GLOBS = (

@@ -1127,7 +1127,7 @@ def test_an_advanced_round_carries_its_base_to_the_keep_that_follows(repo: Path,
     Pins the durable ``base_sha_by_root`` write: drop it from
     ``_note_pre_mutation_head`` and this goes red.
     """
-    from hyperloom.orchestrator.actions.executors.integrate_patch import _note_pre_mutation_head
+    from hyperloom.orchestrator.actions.executors._patch_sources import _note_pre_mutation_head
 
     true_base = _git_head_sha(repo)
     state = SimpleNamespace(enablement=EnablementRound(framework_root=str(repo)))
@@ -1168,7 +1168,7 @@ def executor_keep_records(tmp_path: Path, attempt, repo: Path):
 def test_an_ordinary_patch_round_does_not_seed_the_enablement_base(repo: Path):
     """The head before an unrelated patch is not the tree the enablement stack
     applies to, so a non-enablement round must not claim the base."""
-    from hyperloom.orchestrator.actions.executors.integrate_patch import _note_pre_mutation_head
+    from hyperloom.orchestrator.actions.executors._patch_sources import _note_pre_mutation_head
 
     state = SimpleNamespace(enablement=EnablementRound())
     _note_pre_mutation_head(IntegrateAttempt(task_id=PROBE_TASK, shared_state=state), repo, enablement=False)
@@ -1176,7 +1176,7 @@ def test_an_ordinary_patch_round_does_not_seed_the_enablement_base(repo: Path):
 
 
 def test_the_recorded_base_is_never_replaced_by_a_later_reading(repo: Path):
-    from hyperloom.orchestrator.actions.executors.integrate_patch import _note_pre_mutation_head
+    from hyperloom.orchestrator.actions.executors._patch_sources import _note_pre_mutation_head
 
     state = SimpleNamespace(enablement=EnablementRound())
     _note_pre_mutation_head(IntegrateAttempt(task_id=PROBE_TASK, shared_state=state), repo, enablement=True)
@@ -1437,7 +1437,7 @@ def test_the_base_reading_is_saved_before_the_mutation_that_invalidates_it(repo:
     next thing that happens. Left for the rearm, a round that commits its patch
     and then dies resumes with the entry absent and HEAD already moved -- the
     exact state this map exists to prevent."""
-    from hyperloom.orchestrator.actions.executors.integrate_patch import _note_pre_mutation_head
+    from hyperloom.orchestrator.actions.executors._patch_sources import _note_pre_mutation_head
 
     saved: list[Path] = []
     state = SimpleNamespace(
@@ -1455,7 +1455,7 @@ def test_the_base_reading_is_saved_before_the_mutation_that_invalidates_it(repo:
 def test_a_failing_save_does_not_stop_the_round(repo: Path, tmp_path: Path):
     """A record that cannot be written is still on the in-memory state, and the
     rearm saves again; a failed write must not cost the round."""
-    from hyperloom.orchestrator.actions.executors.integrate_patch import _note_pre_mutation_head
+    from hyperloom.orchestrator.actions.executors._patch_sources import _note_pre_mutation_head
 
     def _boom(*_a, **_k):
         raise OSError("disk full")

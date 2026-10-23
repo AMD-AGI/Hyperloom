@@ -15,13 +15,13 @@ from pathlib import Path
 import pytest
 
 from hyperloom.orchestrator.actions.executors import integrate_patch as ip
+from hyperloom.orchestrator.actions.executors import _patch_artifacts as patch_artifacts
 from hyperloom.orchestrator.actions.executors._git import _git_head_sha
-from hyperloom.orchestrator.actions.executors.integrate_patch import (
-    IntegratePatchExecutor,
-)
+from hyperloom.orchestrator.actions.executors.integrate_patch import IntegratePatchExecutor
 from hyperloom.orchestrator.delivery import ledger
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
 from hyperloom.orchestrator.state.task_registry import Task
+from hyperloom.orchestrator.actions.executors import _integrate_bench as integrate_bench
 
 
 def _make_workspace(tmp_path: Path) -> Path:
@@ -51,9 +51,9 @@ def test_resolve_artifact_specs_valid(tmp_path, monkeypatch):
 
     fw = tmp_path / "framework"
     (fw / "vllm" / "configs").mkdir(parents=True)
-    monkeypatch.setattr(ip, "resolve_kernel_search_roots", lambda: [str(fw)])
+    monkeypatch.setattr(patch_artifacts, "resolve_kernel_search_roots", lambda: [str(fw)])
 
-    specs, errors = ip._resolve_artifact_specs(
+    specs, errors = patch_artifacts._resolve_artifact_specs(
         specialist_workspace=ws,
         explicit_artifacts=[
             {
@@ -81,9 +81,9 @@ def test_resolve_artifact_specs_reads_done_payload(tmp_path, monkeypatch):
     (ws / "worktree" / "a.json").write_text("{}", encoding="utf-8")
     fw = tmp_path / "framework"
     (fw / "vllm").mkdir(parents=True)
-    monkeypatch.setattr(ip, "resolve_kernel_search_roots", lambda: [str(fw)])
+    monkeypatch.setattr(patch_artifacts, "resolve_kernel_search_roots", lambda: [str(fw)])
 
-    specs, errors = ip._resolve_artifact_specs(
+    specs, errors = patch_artifacts._resolve_artifact_specs(
         specialist_workspace=ws,
         explicit_artifacts=None,
         done_payload={"artifacts_written": [{"source": "a.json", "target": "vllm/a.json"}]},
@@ -96,9 +96,9 @@ def test_resolve_artifact_specs_source_not_found(tmp_path, monkeypatch):
     ws = _make_workspace(tmp_path)
     fw = tmp_path / "framework"
     fw.mkdir()
-    monkeypatch.setattr(ip, "resolve_kernel_search_roots", lambda: [str(fw)])
+    monkeypatch.setattr(patch_artifacts, "resolve_kernel_search_roots", lambda: [str(fw)])
 
-    specs, errors = ip._resolve_artifact_specs(
+    specs, errors = patch_artifacts._resolve_artifact_specs(
         specialist_workspace=ws,
         explicit_artifacts=[{"source": "missing.json", "target": "x.json"}],
         done_payload=None,
@@ -113,9 +113,9 @@ def test_resolve_artifact_specs_source_outside_workspace(tmp_path, monkeypatch):
     outside.write_text("{}", encoding="utf-8")
     fw = tmp_path / "framework"
     fw.mkdir()
-    monkeypatch.setattr(ip, "resolve_kernel_search_roots", lambda: [str(fw)])
+    monkeypatch.setattr(patch_artifacts, "resolve_kernel_search_roots", lambda: [str(fw)])
 
-    specs, errors = ip._resolve_artifact_specs(
+    specs, errors = patch_artifacts._resolve_artifact_specs(
         specialist_workspace=ws,
         explicit_artifacts=[{"source": str(outside), "target": "x.json"}],
         done_payload=None,
@@ -129,9 +129,9 @@ def test_resolve_artifact_specs_target_escapes_root(tmp_path, monkeypatch):
     (ws / "worktree" / "a.json").write_text("{}", encoding="utf-8")
     fw = tmp_path / "framework"
     fw.mkdir()
-    monkeypatch.setattr(ip, "resolve_kernel_search_roots", lambda: [str(fw)])
+    monkeypatch.setattr(patch_artifacts, "resolve_kernel_search_roots", lambda: [str(fw)])
 
-    specs, errors = ip._resolve_artifact_specs(
+    specs, errors = patch_artifacts._resolve_artifact_specs(
         specialist_workspace=ws,
         explicit_artifacts=[{"source": "a.json", "target": "../escape.json"}],
         done_payload=None,
@@ -142,9 +142,9 @@ def test_resolve_artifact_specs_target_escapes_root(tmp_path, monkeypatch):
 
 def test_resolve_artifact_specs_missing_source_or_target(tmp_path, monkeypatch):
     ws = _make_workspace(tmp_path)
-    monkeypatch.setattr(ip, "resolve_kernel_search_roots", lambda: [str(tmp_path)])
+    monkeypatch.setattr(patch_artifacts, "resolve_kernel_search_roots", lambda: [str(tmp_path)])
 
-    specs, errors = ip._resolve_artifact_specs(
+    specs, errors = patch_artifacts._resolve_artifact_specs(
         specialist_workspace=ws,
         explicit_artifacts=[{"source": "a.json"}],
         done_payload=None,
@@ -155,13 +155,13 @@ def test_resolve_artifact_specs_missing_source_or_target(tmp_path, monkeypatch):
 
 
 # ---- _backup_artifacts / _apply_artifacts / restore round-trip ------------
-def _spec(source: Path, target: Path, rel: str) -> ip._ArtifactSpec:
+def _spec(source: Path, target: Path, rel: str) -> patch_artifacts._ArtifactSpec:
     resolved = target.resolve()
     root = Path(str(resolved)[: -len(rel)]) if rel and str(resolved).endswith(rel) else resolved.parent
-    return ip._ArtifactSpec(source=source.resolve(), target=resolved, rel_target=rel, root=root)
+    return patch_artifacts._ArtifactSpec(source=source.resolve(), target=resolved, rel_target=rel, root=root)
 
 
-def _install(tmp_path: Path, specs: list[ip._ArtifactSpec], backup_root: Path):
+def _install(tmp_path: Path, specs: list[patch_artifacts._ArtifactSpec], backup_root: Path):
     """Run the two phases in their production order and return the apply result."""
     executor = IntegratePatchExecutor(session_dir=tmp_path)
     assert executor._backup_artifacts(specs, backup_root=backup_root) == []
@@ -621,7 +621,7 @@ def test_artifact_ledger_failure_leaves_the_target_uninstallable(tmp_path, monke
     backup_root = tmp_path / "backups"
     spec = _spec(source, target, "target.json")
     executor = IntegratePatchExecutor(session_dir=tmp_path)
-    monkeypatch.setattr(ip, "append_record", lambda *_args: False)
+    monkeypatch.setattr(integrate_bench, "append_record", lambda *_args: False)
 
     assert executor._backup_artifacts([spec], backup_root=backup_root)
     assert target.read_text(encoding="utf-8") == "A"
@@ -650,9 +650,9 @@ def test_resolve_artifact_target_absolute_within_root(tmp_path, monkeypatch):
     installed aiter package dir) must resolve."""
     fw = tmp_path / "aiter"
     (fw / "configs" / "model_configs").mkdir(parents=True)
-    monkeypatch.setattr(ip, "resolve_kernel_search_roots", lambda: [str(fw)])
+    monkeypatch.setattr(patch_artifacts, "resolve_kernel_search_roots", lambda: [str(fw)])
     abs_target = str(fw / "configs" / "model_configs" / "tuned_fmoe.csv")
-    out = ip._resolve_artifact_target(abs_target)
+    out = patch_artifacts._resolve_artifact_target(abs_target)
     assert out == (
         (fw / "configs" / "model_configs" / "tuned_fmoe.csv").resolve(),
         "configs/model_configs/tuned_fmoe.csv",
@@ -664,16 +664,16 @@ def test_resolve_artifact_target_absolute_outside_roots_rejected(tmp_path, monke
     """An absolute target OUTSIDE every framework root must stay rejected."""
     fw = tmp_path / "aiter"
     (fw / "configs").mkdir(parents=True)
-    monkeypatch.setattr(ip, "resolve_kernel_search_roots", lambda: [str(fw)])
-    assert ip._resolve_artifact_target("/etc/passwd") is None
+    monkeypatch.setattr(patch_artifacts, "resolve_kernel_search_roots", lambda: [str(fw)])
+    assert patch_artifacts._resolve_artifact_target("/etc/passwd") is None
 
 
 def test_resolve_artifact_target_relative_still_works(tmp_path, monkeypatch):
     """Relative targets keep resolving under a framework search root."""
     fw = tmp_path / "aiter"
     (fw / "configs" / "model_configs").mkdir(parents=True)
-    monkeypatch.setattr(ip, "resolve_kernel_search_roots", lambda: [str(fw)])
-    out = ip._resolve_artifact_target("configs/model_configs/tuned_fmoe.csv")
+    monkeypatch.setattr(patch_artifacts, "resolve_kernel_search_roots", lambda: [str(fw)])
+    out = patch_artifacts._resolve_artifact_target("configs/model_configs/tuned_fmoe.csv")
     assert out == (
         (fw / "configs" / "model_configs" / "tuned_fmoe.csv").resolve(),
         "configs/model_configs/tuned_fmoe.csv",
@@ -692,9 +692,9 @@ def test_resolve_artifact_target_pip_root_does_not_double_the_package_name(tmp_p
     pkg = tmp_path / "dist-packages" / "vllm"
     (pkg / "model_executor" / "configs").mkdir(parents=True)
     (pkg / "__init__.py").touch()
-    monkeypatch.setattr(ip, "resolve_kernel_search_roots", lambda: [str(pkg)])
+    monkeypatch.setattr(patch_artifacts, "resolve_kernel_search_roots", lambda: [str(pkg)])
 
-    out = ip._resolve_artifact_target("vllm/model_executor/configs/E=8.json")
+    out = patch_artifacts._resolve_artifact_target("vllm/model_executor/configs/E=8.json")
     assert out is not None
     target, rel, root = out
     assert target == (pkg / "model_executor" / "configs" / "E=8.json").resolve()
@@ -707,9 +707,9 @@ def test_resolve_artifact_target_pip_root_still_joins_a_bare_target_directly(tmp
     pkg = tmp_path / "dist-packages" / "vllm"
     (pkg / "model_executor" / "configs").mkdir(parents=True)
     (pkg / "__init__.py").touch()
-    monkeypatch.setattr(ip, "resolve_kernel_search_roots", lambda: [str(pkg)])
+    monkeypatch.setattr(patch_artifacts, "resolve_kernel_search_roots", lambda: [str(pkg)])
 
-    out = ip._resolve_artifact_target("model_executor/configs/E=8.json")
+    out = patch_artifacts._resolve_artifact_target("model_executor/configs/E=8.json")
     assert out is not None
     assert out[0] == (pkg / "model_executor" / "configs" / "E=8.json").resolve()
 
@@ -718,9 +718,9 @@ def test_resolve_artifact_target_checkout_root_is_unaffected(tmp_path, monkeypat
     """A checkout has no ``__init__.py`` at its root, so only the direct join applies."""
     checkout = tmp_path / "sgl-workspace" / "vllm"
     (checkout / "vllm" / "configs").mkdir(parents=True)
-    monkeypatch.setattr(ip, "resolve_kernel_search_roots", lambda: [str(checkout)])
+    monkeypatch.setattr(patch_artifacts, "resolve_kernel_search_roots", lambda: [str(checkout)])
 
-    out = ip._resolve_artifact_target("vllm/configs/E=8.json")
+    out = patch_artifacts._resolve_artifact_target("vllm/configs/E=8.json")
     assert out is not None
     assert out[0] == (checkout / "vllm" / "configs" / "E=8.json").resolve()
 
@@ -730,8 +730,8 @@ def test_resolve_artifact_target_absolute_with_dotdot_rejected(tmp_path, monkeyp
     normalise inside a root."""
     fw = tmp_path / "aiter"
     (fw / "configs").mkdir(parents=True)
-    monkeypatch.setattr(ip, "resolve_kernel_search_roots", lambda: [str(fw)])
-    assert ip._resolve_artifact_target(str(fw / "configs" / ".." / ".." / "x.csv")) is None
+    monkeypatch.setattr(patch_artifacts, "resolve_kernel_search_roots", lambda: [str(fw)])
+    assert patch_artifacts._resolve_artifact_target(str(fw / "configs" / ".." / ".." / "x.csv")) is None
 
 
 def test_resolve_artifact_specs_absolute_target_records_relative_rel_target(tmp_path, monkeypatch):
@@ -744,9 +744,9 @@ def test_resolve_artifact_specs_absolute_target_records_relative_rel_target(tmp_
     ws = tmp_path / "ws"
     (ws / "worktree" / "artifacts").mkdir(parents=True)
     (ws / "worktree" / "artifacts" / "tuned.csv").write_text("x", encoding="utf-8")
-    monkeypatch.setattr(ip, "resolve_kernel_search_roots", lambda: [str(fw)])
+    monkeypatch.setattr(patch_artifacts, "resolve_kernel_search_roots", lambda: [str(fw)])
     abs_target = str(fw / "configs" / "model_configs" / "tuned.csv")
-    specs, errors = ip._resolve_artifact_specs(
+    specs, errors = patch_artifacts._resolve_artifact_specs(
         specialist_workspace=ws,
         explicit_artifacts=[{"source": "artifacts/tuned.csv", "target": abs_target, "kind": "k"}],
         done_payload=None,

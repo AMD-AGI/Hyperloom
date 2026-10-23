@@ -13,8 +13,8 @@ import pytest
 from kernelforge.agent_backends import claude as claude_mod
 from kernelforge.agent_backends.base import AgentRunSpec, AgentToolPolicy
 from kernelforge.agent_backends.claude import ClaudeBackend
-from kernelforge.llm.git import git
-from kernelforge.llm.process_reaping import ReapReport
+from kernelforge.tools.git import git
+from kernelforge.tools.process_reaping import ReapReport
 
 
 class _FakeOptions:

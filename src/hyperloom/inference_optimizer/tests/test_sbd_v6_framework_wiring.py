@@ -19,7 +19,7 @@ import pytest
 from hyperloom.inference_optimizer.session.optimization_journal import Verdict
 from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
 from hyperloom.inference_optimizer.session.session_binding import session_scope
-from hyperloom.orchestrator.actions.executors.integrate_patch import RESULT_BENCHED
+from hyperloom.orchestrator.actions.executors._integrate_vocabulary import RESULT_BENCHED
 from hyperloom.orchestrator.loop.coordinator import AdvisoryServices, Coordinator
 from hyperloom.orchestrator.phases.machine import Transition
 from hyperloom.orchestrator.roles.agent_role import default_role_registry

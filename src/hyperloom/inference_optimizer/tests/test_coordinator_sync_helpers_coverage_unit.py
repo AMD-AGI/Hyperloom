@@ -15,6 +15,9 @@ from hyperloom.orchestrator.roles import (
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.state.objective import TargetGainObjective
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
+from hyperloom.orchestrator.knowledge.recipe_journal import (
+    workload_kb_tags,
+)
 from hyperloom.orchestrator.loop.dispatcher import HeldLeases
 
 
@@ -560,7 +563,7 @@ def test_collect_workload_tags(coord: Coordinator, monkeypatch) -> None:
         "workload_mode": "serving",
     }
 
-    assert coord.recipe_journal._collect_workload_tags() == {
+    assert workload_kb_tags(coord.shared_state) == {
         "framework": "sglang",
         "model_class": "moe",
         "model_name": "Qwen3-32B",
@@ -591,19 +594,19 @@ def test_workload_tags_read_ep_from_the_env_only_without_a_shared_state_value(co
     ss = coord.shared_state
     ss.ep = 8
 
-    tags = coord.recipe_journal._collect_workload_tags()
+    tags = workload_kb_tags(coord.shared_state)
     assert tags["ep"] == 8
     assert tags["pp"] == 3
 
     ss.ep = 0
-    assert coord.recipe_journal._collect_workload_tags()["ep"] == 2
+    assert workload_kb_tags(coord.shared_state)["ep"] == 2
 
 
 def test_an_unparseable_or_non_positive_parallelism_env_is_not_tagged(coord: Coordinator, monkeypatch) -> None:
     monkeypatch.setenv("EP", "two")
     monkeypatch.setenv("PP", "0")
 
-    tags = coord.recipe_journal._collect_workload_tags()
+    tags = workload_kb_tags(coord.shared_state)
     assert "ep" not in tags
     assert "pp" not in tags
 
@@ -618,7 +621,7 @@ def test_workload_tags_survive_a_resumed_null_fingerprint_meta(coord: Coordinato
     ss.stack_fingerprint_meta = None
     ss.baseline_workload_extra = None
 
-    assert coord.recipe_journal._collect_workload_tags() == {"framework": "vllm"}
+    assert workload_kb_tags(coord.shared_state) == {"framework": "vllm"}
 
 
 def test_unknown_and_empty_fingerprint_entries_are_not_tagged(coord: Coordinator, monkeypatch) -> None:
@@ -634,7 +637,7 @@ def test_unknown_and_empty_fingerprint_entries_are_not_tagged(coord: Coordinator
         "image_digest": "sha256:abc",
     }
 
-    tags = coord.recipe_journal._collect_workload_tags()
+    tags = workload_kb_tags(coord.shared_state)
     assert tags == {"framework": "vllm", "image_digest": "sha256:abc"}
 
 

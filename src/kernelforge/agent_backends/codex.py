@@ -34,7 +34,7 @@ from kernelforge.agent_backends.base import (
     AgentRunSpec,
     AgentRuntimeConfig,
 )
-from kernelforge.llm import LlmGateway, resolve_openai_gateway
+from kernelforge.agent_backends.gateway import LlmGateway, resolve_openai_gateway
 from kernelforge.agent_backends.workspace_guard import WorkspaceGuard
 
 log = logging.getLogger(__name__)
