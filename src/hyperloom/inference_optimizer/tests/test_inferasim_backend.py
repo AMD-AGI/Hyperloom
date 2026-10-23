@@ -753,7 +753,7 @@ def test_the_arch_override_only_names_an_unknown_session_gpu(monkeypatch):
     ("model", "preset"),
     [
         ("deepseek-ai/DeepSeek-R1-Distill-Qwen-7B", None),
-        ("deepseek-ai/DeepSeek-R1", "deepseek_v3_671b-fp8"),
+        ("deepseek-ai/DeepSeek-R1", "deepseek_v3"),
         ("deepseek-ai/DeepSeek-V2-Lite-Chat", "deepseek_v2_lite"),
         ("MiniMaxAI/MiniMax-M2.5", "minimax_m2.5"),
     ],

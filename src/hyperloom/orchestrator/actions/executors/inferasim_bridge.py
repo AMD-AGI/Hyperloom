@@ -133,7 +133,7 @@ _MODEL_HEURISTICS: tuple[tuple[str, str], ...] = (
     # swallowed by "deepseek-v2", and R1 is the V3 architecture at 671B so it
     # resolves to the V3 config rather than a config of its own.
     ("deepseek-v2-lite", "deepseek_v2_lite"),
-    ("deepseek-r1", "deepseek_v3_671b-fp8"),
+    ("deepseek-r1", "deepseek_v3"),
     ("deepseek-v3", "deepseek_v3"),
     ("deepseek-v2", "deepseek_v2"),
     ("minimax-m2", _MINIMAX_M25),
