@@ -1,6 +1,6 @@
 """Cluster hand-off: synthesize multi-node state from the platform's topology file or HYPERLOOM_MN_EXT_* env vars.
 
-``CLAW_TOPOLOGY_FILE`` (TopologyHandoff v1, see ``topology_file``) is read first; when it is unset the legacy
+``TOPOLOGY_HANDOFF_FILE`` (TopologyHandoff v1, see ``topology_file``) is read first; when it is unset the legacy
 variables are read exactly as before.
 """
 
@@ -111,7 +111,7 @@ def external_service_url() -> str:
 
 
 def build_external_state_from_env() -> dict[str, Any]:
-    """Synthesize multi-node state from ``CLAW_TOPOLOGY_FILE`` or, without it, ``HYPERLOOM_MN_EXT_*`` env vars."""
+    """Synthesize multi-node state from ``TOPOLOGY_HANDOFF_FILE`` or, without it, ``HYPERLOOM_MN_EXT_*`` env vars."""
     get = handoff_lookup()
     url = _service_url(get)
     if not url:

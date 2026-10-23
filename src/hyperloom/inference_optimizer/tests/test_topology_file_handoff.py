@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Cluster hand-off through CLAW_TOPOLOGY_FILE (TopologyHandoff v1) versus the legacy variables."""
+"""Cluster hand-off through TOPOLOGY_HANDOFF_FILE (TopologyHandoff v1) versus the legacy variables."""
 
 from __future__ import annotations
 
@@ -39,7 +39,7 @@ def _rayjob_doc(tmp_path: Path) -> dict[str, Any]:
     token = tmp_path / "ray-token"
     token.write_text("tok-abc123", encoding="utf-8")
     return {
-        "schema": "claw.topology-handoff/v1",
+        "schema": "topology-handoff/v1",
         "backend": "rayjob",
         "nodes": 2,
         "gpus_per_node": 8,
@@ -52,7 +52,7 @@ def _infera_doc(tmp_path: Path, *, prefill: list[str], decode: list[str], worker
     known_hosts = tmp_path / "known_hosts"
     known_hosts.write_text("", encoding="utf-8")
     return {
-        "schema": "claw.topology-handoff/v1",
+        "schema": "topology-handoff/v1",
         "backend": "infera",
         "nodes": len(prefill) + len(decode) or len(worker),
         "gpus_per_node": 4,
@@ -212,14 +212,14 @@ def test_missing_file_is_an_error_naming_the_file(monkeypatch: pytest.MonkeyPatc
 def test_bad_json_is_an_error_naming_the_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _set_valid_legacy_env(monkeypatch)
     path = tmp_path / "topology.json"
-    path.write_text('{"schema": "claw.topology-handoff/v1", ', encoding="utf-8")
+    path.write_text('{"schema": "topology-handoff/v1", ', encoding="utf-8")
     monkeypatch.setenv(topo.TOPOLOGY_FILE_ENV, str(path))
     with pytest.raises(topo.TopologyHandoffError, match="not valid JSON") as caught:
         ext.build_external_state_from_env()
     assert str(path) in str(caught.value)
 
 
-@pytest.mark.parametrize("schema", ["claw.topology-handoff/v2", "claw.topology-handoff/v0", "other/v1", None])
+@pytest.mark.parametrize("schema", ["topology-handoff/v2", "topology-handoff/v0", "other/v1", "vendor.topology-handoff/v1", None])
 def test_unknown_schema_is_refused(schema: object, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _set_valid_legacy_env(monkeypatch)
     doc = _rayjob_doc(tmp_path)
@@ -229,7 +229,7 @@ def test_unknown_schema_is_refused(schema: object, monkeypatch: pytest.MonkeyPat
         doc["schema"] = schema
     path = _write(tmp_path / "topology.json", doc)
     monkeypatch.setenv(topo.TOPOLOGY_FILE_ENV, str(path))
-    expected = "unsupported schema major" if schema and schema.startswith("claw.") else "is not a claw.topology-handoff"
+    expected = "unsupported schema major" if schema and schema.startswith("topology-handoff/") else "is not a topology-handoff"
     with pytest.raises(topo.TopologyHandoffError, match=expected) as caught:
         ext.external_service_url()
     assert str(path) in str(caught.value)
@@ -237,7 +237,7 @@ def test_unknown_schema_is_refused(schema: object, monkeypatch: pytest.MonkeyPat
 
 def test_a_minor_of_the_supported_major_is_accepted(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     doc = _rayjob_doc(tmp_path)
-    doc["schema"] = "claw.topology-handoff/v1.2"
+    doc["schema"] = "topology-handoff/v1.2"
     doc["a_future_field"] = True
     assert _state_from_file(monkeypatch, _write(tmp_path / "t.json", doc))["backend"] == "rayjob"
 

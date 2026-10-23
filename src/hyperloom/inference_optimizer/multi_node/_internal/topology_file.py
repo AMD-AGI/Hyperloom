@@ -3,7 +3,7 @@
 
 """Read the cluster hand-off a platform writes as a TopologyHandoff v1 JSON file.
 
-``CLAW_TOPOLOGY_FILE`` names the file (schema string ``claw.topology-handoff/v1``).
+``TOPOLOGY_HANDOFF_FILE`` names the file (schema string ``topology-handoff/v1``).
 The file is translated into the legacy variable names (``HYPERLOOM_MN_EXT_*``,
 ``INFERENCE_OPTIMIZER_*``) so the rest of the hand-off code resolves a file and a
 set of variables through one path and the two cannot drift apart.
@@ -25,9 +25,9 @@ from typing import Any
 
 log = logging.getLogger(__name__)
 
-TOPOLOGY_FILE_ENV = "CLAW_TOPOLOGY_FILE"
+TOPOLOGY_FILE_ENV = "TOPOLOGY_HANDOFF_FILE"
 
-_SCHEMA_RE = re.compile(r"^claw\.topology-handoff/v(\d+)(?:\.\d+)*$")
+_SCHEMA_RE = re.compile(r"^topology-handoff/v(\d+)(?:\.\d+)*$")
 _SUPPORTED_MAJOR = 1
 _BACKENDS = ("rayjob", "infera")
 
@@ -74,7 +74,7 @@ _WARNED: set[tuple[str, tuple[str, ...]]] = set()
 
 
 class TopologyHandoffError(RuntimeError):
-    """``CLAW_TOPOLOGY_FILE`` names a file that cannot be used."""
+    """``TOPOLOGY_HANDOFF_FILE`` names a file that cannot be used."""
 
 
 def _fail(path: str, problem: str) -> TopologyHandoffError:
@@ -152,11 +152,11 @@ def _check_schema(path: str, doc: dict[str, Any]) -> None:
     schema = doc.get("schema")
     matched = _SCHEMA_RE.match(schema) if isinstance(schema, str) else None
     if matched is None:
-        raise _fail(path, f"schema {schema!r} is not a claw.topology-handoff/v<major> string")
+        raise _fail(path, f"schema {schema!r} is not a topology-handoff/v<major> string")
     if int(matched.group(1)) != _SUPPORTED_MAJOR:
         raise _fail(
             path,
-            f"unsupported schema major in {schema!r}; this reader handles claw.topology-handoff/v{_SUPPORTED_MAJOR}",
+            f"unsupported schema major in {schema!r}; this reader handles topology-handoff/v{_SUPPORTED_MAJOR}",
         )
 
 
@@ -221,7 +221,7 @@ def _warn_on_disagreement(path: str, overlay: dict[str, str]) -> None:
 
 
 def topology_file_overlay() -> dict[str, str] | None:
-    """Legacy-name view of ``CLAW_TOPOLOGY_FILE``, or ``None`` when the variable is unset.
+    """Legacy-name view of ``TOPOLOGY_HANDOFF_FILE``, or ``None`` when the variable is unset.
 
     Raises ``TopologyHandoffError`` when the variable is set and the file cannot be used.
     """

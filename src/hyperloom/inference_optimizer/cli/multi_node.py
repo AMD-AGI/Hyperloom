@@ -21,7 +21,7 @@ log = logging.getLogger(__name__)
 
 
 def _topology_file_overlay() -> dict[str, str] | None:
-    """The CLAW_TOPOLOGY_FILE view of the hand-off, or exit 2 naming the file when it cannot be used."""
+    """The TOPOLOGY_HANDOFF_FILE view of the hand-off, or exit 2 naming the file when it cannot be used."""
     from ..multi_node._internal.topology_file import TopologyHandoffError, topology_file_overlay
 
     try:
@@ -40,7 +40,7 @@ def _hand_off_service_url() -> str:
 
 
 def _resolve_mn_backend(args: argparse.Namespace) -> str:
-    """Multi-node backend selector: --mn-backend > $CLAW_TOPOLOGY_FILE backend > $INFERENCE_OPTIMIZER_MN_BACKEND > rayjob."""
+    """Multi-node backend selector: --mn-backend > $TOPOLOGY_HANDOFF_FILE backend > $INFERENCE_OPTIMIZER_MN_BACKEND > rayjob."""
     from_file = (_topology_file_overlay() or {}).get("INFERENCE_OPTIMIZER_MN_BACKEND", "")
     backend = (
         (getattr(args, "mn_backend", None) or "").strip()
