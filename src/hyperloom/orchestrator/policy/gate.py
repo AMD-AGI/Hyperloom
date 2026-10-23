@@ -212,7 +212,6 @@ PATH_LIKE_FIELDS: frozenset[str] = frozenset(
         "json_path",
         "md_path",
         "session_dir",
-        "backup_root",
         "manifest_path",
     }
 )

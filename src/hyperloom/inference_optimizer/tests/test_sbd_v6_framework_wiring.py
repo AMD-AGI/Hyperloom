@@ -954,7 +954,6 @@ def test_a_delegated_grid_is_a_proposal_carrying_its_read_and_relayed_citations(
         status="completed",
         prompt_block="evidence",
         rendered_refs=({"id": shown, "purpose": "representative"},),
-        warnings=(),
     )
     specialist_citation = {"id": specialist_only, "stance": "adopt", "claim": "Kept on the same model."}
     state.record_specialist_round(

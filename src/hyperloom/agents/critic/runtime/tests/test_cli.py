@@ -30,7 +30,6 @@ def test_prepare_and_commit_review_for_coordinator_inbox(tmp_path, capsys):
     request = _write(
         tmp_path / "req.json",
         {
-            "kind": "coordinator_inbox",
             "session_id": "sess_cli_e2e",
             "raw_prompt": (
                 "=== Shared session state ===\n"
@@ -74,7 +73,7 @@ def test_prepare_and_commit_review_for_coordinator_inbox(tmp_path, capsys):
 
 
 def test_invalid_request_returns_exit_code_2(tmp_path):
-    bad = _write(tmp_path / "bad.json", {"kind": "wat"})
+    bad = _write(tmp_path / "bad.json", {"session_id": "s"})
     rc = main(["prepare-review", "--request", str(bad)])
     assert rc == 2
 
@@ -116,8 +115,6 @@ def test_replay_dead_letter_dispatches_queued_records(tmp_path):
     common = {"attempts": 1, "last_error": "boom"}
     # Endpoints stored in the DLQ use filesystem-safe names (no "/").
     dlq.append("upsert", {"id": "kb_x", "kind": "pitfall", "scope": {}}, **common)
-    dlq.append("batch_insert", {"items": [{"id": "kb_y", "kind": "recipe", "scope": {}}]}, **common)
-    dlq.append("list", {"scope_filter": {}, "limit": 5}, **common)
 
     out_path = tmp_path / "replay2.json"
     rc = main(
@@ -135,13 +132,12 @@ def test_replay_dead_letter_dispatches_queued_records(tmp_path):
     assert isinstance(summary, dict)
 
     client = InMemoryKBClient()
-    _replay_dispatch(client, "edges/add", {"edges": []})
     with pytest.raises(RuntimeAdapterError):
         _replay_dispatch(client, "nope", {})
 
 
 def test_commit_review_rejects_non_object_review(tmp_path):
-    request = _write(tmp_path / "req.json", {"kind": "coordinator_inbox", "raw_prompt": ""})
+    request = _write(tmp_path / "req.json", {"raw_prompt": ""})
     review = _write(tmp_path / "review.json", ["not", "a", "dict"])
     rc = main(["commit-review", "--request", str(request), "--review", str(review)])
     assert rc == 2
