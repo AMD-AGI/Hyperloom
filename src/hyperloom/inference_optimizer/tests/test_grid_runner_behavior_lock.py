@@ -204,6 +204,71 @@ class TestVariantBoundaryReportsEveryOutcome:
         assert landed == [("c0", 1), ("c1", 2)]
 
 
+def _agentx_workspace(slot: Path, **report: object) -> Path:
+    """A ``benchmark_*`` workspace whose report is Magpie's native AgentX report, which is ``diagnostic_only`` when the
+    round profiles."""
+    ws = slot / "benchmark_sglang_20260101_000000"
+    ws.mkdir(parents=True, exist_ok=True)
+    metrics = {
+        "execution_owner": "magpie",
+        "server_launch": {"base_argv": ["python3"], "effective_argv": ["python3"], "effective_env": {}},
+        "recipe": {"tp": 1, "ep": 1, "conc": 8},
+        "throughput": {
+            "output_tokens_per_second": 280.0,
+            "total_tokens_per_second": 25000.0,
+            "duration_seconds": 3600.0,
+        },
+        "requests": {"successful": 1029, "total": 1072},
+        **report.pop("metrics", {}),
+    }
+    document = {"scenario": "agentx", "success": True, "framework": "sglang", "agentx_metrics": metrics, **report}
+    (ws / "benchmark_report.json").write_text(json.dumps(document))
+    return ws
+
+
+class TestADiagnosticAgentxRoundIsAVerdict:
+    """Magpie marks a profiled AgentX replay ``diagnostic_only`` and not publishable: it is no valid measurement, and
+    the round it ends is still a success, which ``round_succeeded`` states (the main flow's ``ProfileExecutor`` reads
+    the same field)."""
+
+    def _run(self, tmp_path, monkeypatch, **report):
+        monkeypatch.setattr(gr, "REPORT_SETTLE_SECONDS", 0.0)
+        monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "0")
+        base = tmp_path / "base.yaml"
+        _write_base_yaml(base)
+
+        def _magpie(cmd, *a, **k):
+            _agentx_workspace(Path(cmd[cmd.index("--output-dir") + 1]), **report)
+            return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+        results, _ = _run_capturing_variant_notes(
+            multi_node=False, run_side_effect=_magpie, base=base, out=tmp_path / "out"
+        )
+        return results[0]
+
+    def test_a_profiled_replay_succeeds_without_being_a_valid_measurement(self, tmp_path, monkeypatch):
+        result = self._run(
+            tmp_path,
+            monkeypatch,
+            benchmark_valid=False,
+            publishable=False,
+            metrics={"diagnostic_only": True, "profile_capture": {"status": "complete"}},
+        )
+
+        assert (result.status, result.error_class) == ("succeeded", "")
+        assert result.diagnostic_only is True and result.benchmark_valid is False
+
+    def test_a_replay_that_is_neither_valid_nor_diagnostic_still_fails(self, tmp_path, monkeypatch):
+        result = self._run(tmp_path, monkeypatch, benchmark_valid=False, publishable=False)
+
+        assert (result.status, result.error_class) == ("failed", "benchmark_report_invalid_metric")
+
+    def test_a_valid_replay_succeeds(self, tmp_path, monkeypatch):
+        result = self._run(tmp_path, monkeypatch, benchmark_valid=True, publishable=True)
+
+        assert result.status == "succeeded" and result.benchmark_valid is True and result.diagnostic_only is False
+
+
 # keep_going_on_failure asymmetry
 
 

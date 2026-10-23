@@ -38,9 +38,7 @@ from ..stop_attribution import (
     StoppedByTheRun,
 )
 from ._benchmark_runtime import apply_runtime_benchmark_overrides as apply_runtime_benchmark_overrides
-from ._benchmark_interpreter import (
-    _resolve_probe_python as _resolve_probe_python,
-)
+from ._benchmark_interpreter import _resolve_probe_python as _resolve_probe_python
 from ._subprocess_kill import (
     AGENTX_PREFLIGHT_ERROR_CLASS,
     AGENTX_PREFLIGHT_RETURNCODE,
@@ -58,6 +56,7 @@ from ._subprocess_kill import (
 from .benchmark_result import (
     extract_benchmark_measurement,
     harvest_leaked_artifacts,
+    round_succeeded,
     select_run_workspace,
     served_complete_protocol,
     snapshot_workspaces,
@@ -340,8 +339,9 @@ async def _settled_measurement(
             subprocess_started_unix=subprocess_started_unix,
         )
         attempts += 1
-        if measurement.get("valid_measurement") or time.monotonic() >= deadline:
-            if attempts > 1 and measurement.get("valid_measurement"):
+        succeeded = round_succeeded(measurement)
+        if succeeded or time.monotonic() >= deadline:
+            if attempts > 1 and succeeded:
                 log.info(
                     "grid_runner: benchmark_report became valid after %d read(s); "
                     "the report was still being written when the subprocess was reaped",
@@ -1435,7 +1435,7 @@ async def _variant_row(run: _GridRun, at: _VariantSlot, measured: _MeasuredVaria
         settle_seconds=REPORT_SETTLE_SECONDS,
     )
     outcome = _VariantOutcome(measured, report, measurement, _round_warnings(measurement, measured))
-    if measurement.get("valid_measurement"):
+    if round_succeeded(measurement):
         return _measured_row(at, outcome)
     if run.lifecycle_boot_only and measured.round.proc.returncode == 0:
         return _booted_server_row(at, outcome)
@@ -1718,7 +1718,7 @@ def _measurement_server_log_path(
         return direct
     warmup_dir = owning_slot / _WARMUP_ROUND_DIR
     try:
-        candidates = [path for path in warmup_dir.glob("*/server.log") if path.is_file()]
+        candidates = [p for d in (owning_slot, warmup_dir) for p in d.glob("*/server.log") if p.is_file()]
     except OSError:
         candidates = []
     if not candidates:

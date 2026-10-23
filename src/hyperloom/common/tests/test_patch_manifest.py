@@ -40,6 +40,17 @@ DELETE = PatchOp.DELETE
             id="delete-dev-null-destination",
         ),
         pytest.param(
+            "diff --git a/gone.bin b/gone.bin\ndeleted file mode 100644\nindex eaf36c1..0000000\n"
+            "Binary files a/gone.bin and /dev/null differ\n",
+            [PatchTarget(DELETE, "b/gone.bin")],
+            id="delete-binary-header-only",
+        ),
+        pytest.param(
+            "diff --git a/empty.txt b/empty.txt\ndeleted file mode 100644\nindex e69de29..0000000\n",
+            [PatchTarget(DELETE, "b/empty.txt")],
+            id="delete-empty-file-header-only",
+        ),
+        pytest.param(
             "diff --git a/old.py b/new.py\nsimilarity index 100%\nrename from old.py\nrename to new.py\n",
             [PatchTarget(DELETE, "a/old.py"), PatchTarget(WRITE, "b/new.py", is_new=True)],
             id="rename",
@@ -66,9 +77,25 @@ DELETE = PatchOp.DELETE
             id="chmod-only",
         ),
         pytest.param(
+            "diff --git a/my run.sh b/my run.sh\nold mode 100644\nnew mode 100755\n",
+            [PatchTarget(WRITE, "b/my run.sh", mode="0755")],
+            id="chmod-only-path-with-space",
+        ),
+        pytest.param(
             "diff --git a/img.png b/img.png\nnew file mode 100644\nGIT binary patch\nliteral 4\n",
             [PatchTarget(WRITE, "b/img.png", mode="0644", is_new=True)],
             id="binary",
+        ),
+        pytest.param(
+            'diff --git "a/d\\303\\251.bin" "b/d\\303\\251.bin"\nindex eaf36c1..f75c32a 100644\n'
+            'Binary files "a/d\\303\\251.bin" and "b/d\\303\\251.bin" differ\n',
+            [PatchTarget(WRITE, "b/dé.bin")],
+            id="binary-quoted-path",
+        ),
+        pytest.param(
+            "diff --git b in.dat b in.dat\nindex eaf36c1..f75c32a 100644\nBinary files b in.dat and b in.dat differ\n",
+            [PatchTarget(WRITE, "b in.dat")],
+            id="binary-no-prefix-path-with-space",
         ),
         pytest.param(
             'diff --git "a/my dir/f.py" "b/my dir/f.py"\n--- /dev/null\n+++ "b/my dir/f.py"\n@@ -0,0 +1 @@\n+x\n',
@@ -76,9 +103,27 @@ DELETE = PatchOp.DELETE
             id="quoted-path",
         ),
         pytest.param(
+            'diff --git "a/caf\\303\\251.py" "b/caf\\303\\251.py"\nindex 7d4290a..407de30 100644\n'
+            '--- "a/caf\\303\\251.py"\n+++ "b/caf\\303\\251.py"\n@@ -1 +1 @@\n-x = 1\n+x = 2\n',
+            [PatchTarget(WRITE, "b/café.py")],
+            id="quoted-path-octal-utf8-bytes",
+        ),
+        pytest.param(
+            'diff --git "a/né\\tx.py" "b/né\\tx.py"\nnew file mode 100644\nindex 0000000..edf0eff\n'
+            '--- /dev/null\n+++ "b/né\\tx.py"\n@@ -0,0 +1 @@\n+hi\n',
+            [PatchTarget(WRITE, "b/né\tx.py", mode="0644", is_new=True)],
+            id="quoted-path-raw-utf8-and-escaped-tab",
+        ),
+        pytest.param(
             "--- target.py\n+++ target.py\n@@ -1 +1 @@\n-a\n+b\n",
             [PatchTarget(WRITE, "target.py")],
             id="no-git-header",
+        ),
+        pytest.param(
+            "--- a/q.sql\n+++ b/q.sql\n@@ -1,2 +1,2 @@\n--- old comment\n+++ new\n select 1;\n"
+            "--- a/r.sql\n+++ b/r.sql\n@@ -1 +1 @@\n-a\n+b\n",
+            [PatchTarget(WRITE, "b/q.sql"), PatchTarget(WRITE, "b/r.sql")],
+            id="no-git-header-hunk-lines-that-read-as-headers",
         ),
     ],
 )
@@ -105,6 +150,16 @@ def test_sections_are_returned_in_diff_order():
         pytest.param("   \n", "empty patch", id="blank"),
         pytest.param("--- \n@@ -1 +1 @@\n-a\n+b\n", "cannot determine target path", id="no-target"),
         pytest.param("--- /dev/null\n+++ /dev/null\n@@ -0,0 +0,0 @@\n", "missing source path", id="dev-null-both"),
+        pytest.param(
+            'diff --git "a/\\377.py" "b/\\377.py"\n--- "a/\\377.py"\n+++ "b/\\377.py"\n@@ -1 +1 @@\n-a\n+b\n',
+            "is not valid UTF-8",
+            id="quoted-path-not-utf8",
+        ),
+        pytest.param(
+            "diff --git a/x y b/z\nold mode 100644\nnew mode 100755\n",
+            "cannot determine target path",
+            id="header-names-not-one-path",
+        ),
     ],
 )
 def test_unusable_patch_is_rejected(patch, message):

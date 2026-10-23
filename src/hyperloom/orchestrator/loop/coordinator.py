@@ -364,7 +364,7 @@ class Coordinator:
         if "_experience_kb" not in self.__dict__:
             from hyperloom.inference_optimizer.experience_kb import integration_for
 
-            self.__dict__["_experience_kb"] = integration_for(self.shared_state, self.session_dir)
+            self.__dict__["_experience_kb"] = integration_for(self.shared_state)
         return self.__dict__["_experience_kb"]
 
     @property
@@ -693,7 +693,7 @@ class Coordinator:
                     break
                 if time.monotonic() < self._backend_retry_at.get(name, 0.0):
                     continue
-                if skips_reactor_turn(name, self.shared_state):
+                if skips_reactor_turn(name, self.shared_state) or not self.conversation.admit_turn(name, time.time()):
                     continue
                 await self.await_within_session_bound(lambda n=name: self.reactor_pass(n), stage=f"reactor:{name}")
         if not self.stop_requested():
@@ -1080,10 +1080,8 @@ class Coordinator:
     async def _reactor_turn(self, agent_name: str, *, request: str = "") -> BackendTurnResult | None:
         """Body of :meth:`reactor_pass`."""
         backend = self.backends[agent_name]
-        sys_prompt = await self.conversation.load_system_prompt(agent_name)
-        prompt = await self.conversation.compose_prompt(agent_name)
-        if request:
-            prompt = f"{prompt}\n\n{request}"
+        turn = await self.conversation.compose_turn(agent_name, backend)
+        prompt = f"{turn.prompt}\n\n{request}" if request else turn.prompt
         tools = self.policy.allowed_tools_for_agent(agent_name)
         # Stamp timeline keys onto backends that self-write their trace row.
         _set_trace_ctx = getattr(backend, "set_trace_context", None)
@@ -1104,11 +1102,13 @@ class Coordinator:
                 attributes={"name": agent_name, "model": getattr(backend, "model", None)},
             ) as call_span:
                 record_prompt_snapshot(
-                    self._prompt_snapshots.observe(agent_name, prompt=prompt, system_prompt=sys_prompt, tools=tools)
+                    self._prompt_snapshots.observe(
+                        agent_name, prompt=prompt, system_prompt=turn.system_prompt, tools=tools
+                    )
                 )
                 result: BackendTurnResult = await backend.run(
                     prompt=prompt,
-                    system_prompt=sys_prompt,
+                    system_prompt=turn.system_prompt,
                     tools=tools,
                     max_turns=0,
                 )
@@ -1159,7 +1159,7 @@ class Coordinator:
         latency_ms = int((time.perf_counter() - _t0) * 1000)
         self._trace_reactor_llm_call(agent_name, result, latency_ms=latency_ms)
         # Full-trace: persist the redacted prompt+response for this turn.
-        self.conversation.record_reactor_conversation(agent_name, result)
+        self.conversation.record_reactor_conversation(agent_name, result, context=turn.context)
         with trajectory_scope(call_id=call_id, parent_span_id=call_span.span_id):
             for intent in result.intents:
                 await self.router.handle_intent(agent_name, intent)

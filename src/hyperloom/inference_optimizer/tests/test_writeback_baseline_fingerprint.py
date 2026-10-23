@@ -7,7 +7,8 @@ from __future__ import annotations
 
 import pytest
 
-from hyperloom.orchestrator.loop.writeback import WritebackCollaborator, _parse_baseline_workload_extra
+from hyperloom.orchestrator.loop._baseline_promotion import _parse_baseline_workload_extra
+from hyperloom.orchestrator.loop.writeback import WritebackCollaborator
 
 
 def test_parse_baseline_workload_extra_missing(tmp_path):

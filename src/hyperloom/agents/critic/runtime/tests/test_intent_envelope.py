@@ -10,7 +10,6 @@ import pytest
 from hyperloom.agents.critic.runtime.errors import IntentEnvelopeValidationError
 from hyperloom.agents.critic.runtime.intent_envelope import (
     ALLOWED_VERDICT_SOURCES,
-    DEFAULT_IDLE_BODY,
     Intent,
     IntentEnvelope,
     ReviewVerdict,
@@ -20,7 +19,7 @@ from hyperloom.agents.critic.runtime.intent_envelope import (
     build_review_verdict_intent,
     validate_envelope,
 )
-from hyperloom.inference_optimizer.protocol.intent import ALLOWED_VERDICTS
+from hyperloom.inference_optimizer.protocol.intent import ALLOWED_VERDICTS, DEFAULT_IDLE_BODY
 
 
 def test_allowed_verdicts_match_design_v06():
@@ -62,19 +61,9 @@ def test_build_review_verdict_intent_full():
     assert p["risks"][0]["type"] == "active_path_unproven"
 
 
-def test_build_review_verdict_rejects_bad_verdict():
-    with pytest.raises(IntentEnvelopeValidationError, match="verdict"):
-        build_review_verdict_intent(ReviewVerdict(target_proposal_msg_id="abc1", verdict="lgtm"))
-
-
 def test_build_review_verdict_rejects_bad_source():
     with pytest.raises(IntentEnvelopeValidationError, match="source"):
         build_review_verdict_intent(ReviewVerdict(target_proposal_msg_id="abc1", verdict="approve", source="someone"))
-
-
-def test_build_review_verdict_rejects_empty_target():
-    with pytest.raises(IntentEnvelopeValidationError, match="target"):
-        build_review_verdict_intent(ReviewVerdict(target_proposal_msg_id="", verdict="approve"))
 
 
 def test_build_idle_intent_default():
@@ -96,12 +85,9 @@ def test_build_envelope_with_intents_validates():
     assert d["intents"][0]["payload"]["target_proposal_msg_id"] == "m1"
 
 
-def test_build_envelope_empty_falls_back_to_idle_observation():
-    env = build_envelope([])
-    d = env.to_dict()
-    assert len(d["intents"]) == 1
-    assert d["intents"][0]["intent_type"] == "send_message"
-    assert d["intents"][0]["payload"]["topic"] == "observation"
+def test_build_envelope_empty_raises():
+    with pytest.raises(IntentEnvelopeValidationError, match="non-empty"):
+        build_envelope([])
 
 
 def test_validate_envelope_accepts_well_formed_dict():

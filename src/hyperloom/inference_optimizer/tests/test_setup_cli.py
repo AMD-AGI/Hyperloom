@@ -475,16 +475,20 @@ def test_baremetal_setup_keeps_hand_written_dual_protocol_openai_side(tmp_path: 
     assert 'OPENAI_CUSTOM_HEADERS="Ocp-Apim-Subscription-Key: deepseek-test-key"' in text
 
 
-def test_baremetal_setup_drops_openai_side_of_a_separate_provider(tmp_path: Path):
-    """A different host is a second provider, and is still scrubbed."""
+def test_baremetal_setup_keeps_both_providers_on_separate_hosts(tmp_path: Path):
+    """The setup skill's Both choice must survive the installer write-back."""
     dotenv = tmp_path / ".env"
     dotenv.write_text(
         "\n".join(
             [
+                "HYPERLOOM_RUN_MODE=baremetal",
                 "ANTHROPIC_BASE_URL=https://api.anthropic.com",
                 "ANTHROPIC_API_KEY=anthropic-test-key",
+                "CLAUDE_MODEL=claude-test-model",
                 "OPENAI_BASE_URL=https://api.openai.com/v1",
                 "OPENAI_API_KEY=openai-test-key",
+                'OPENAI_CUSTOM_HEADERS="X-Test-Key: openai-test-key"',
+                "CODEX_MODEL=codex-test-model",
             ]
         )
         + "\n",
@@ -517,8 +521,12 @@ def test_baremetal_setup_drops_openai_side_of_a_separate_provider(tmp_path: Path
 
     text = dotenv.read_text(encoding="utf-8")
     assert "ANTHROPIC_BASE_URL=https://api.anthropic.com" in text
-    assert "OPENAI_BASE_URL=" not in text
-    assert "OPENAI_API_KEY=" not in text
+    assert "ANTHROPIC_API_KEY=anthropic-test-key" in text
+    assert "CLAUDE_MODEL=claude-test-model" in text
+    assert "OPENAI_BASE_URL=https://api.openai.com/v1" in text
+    assert "OPENAI_API_KEY=openai-test-key" in text
+    assert 'OPENAI_CUSTOM_HEADERS="X-Test-Key: openai-test-key"' in text
+    assert "CODEX_MODEL=codex-test-model" in text
 
 
 def test_baremetal_setup_keeps_legacy_env_when_validation_fails(tmp_path: Path):

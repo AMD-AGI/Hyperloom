@@ -816,7 +816,7 @@ def _enter_framework_for(c, elapsed_sec: float) -> None:
 
 
 async def _phase_block(c) -> str:
-    prompt = await c.conversation.compose_prompt("orchestration")
+    prompt = (await c.conversation.compose_prompt("orchestration")).text
     return prompt.split("=== Phase ===", 1)[1]
 
 

@@ -110,10 +110,11 @@ when `--gpu-type` is omitted.
   back to the benchmark report's reading, and either power budget is refused at
   launch, since it could not be measured) and `HYPERLOOM_GPU_POWER_INTERVAL_S`
   sets its cadence (default 2 s, minimum 0.5 s).
-- **GPU power settings:** `--gpu-power-cap-w`, `--gpu-perf-level`. By default
-  asserted: set them with `amd-smi set` before launch; the session refuses to
-  start or resume if a card it uses differs, and records what the cards report
-  either way. `--apply-gpu-power-settings` lets the session set them itself on
+- **GPU power settings:** `--gpu-power-cap-w`, `--gpu-perf-level`,
+  `--gpu-sclk-max-mhz`. By default asserted: set them with `amd-smi set` before
+  launch; the session refuses to start or resume if a card it uses differs, and
+  records what the cards report either way. `--apply-gpu-power-settings` lets
+  the session set the cap and perf level itself (never the clock limit) on
   the cards of its integer visible-device mask for the whole session, and
   restore the originals when it ends; it needs root (records under
   `/var/tmp/hyperloom/gpu_power_settings/`).
@@ -121,7 +122,10 @@ when `--gpu-type` is omitted.
   (`enabled` / `disabled`), `--node-power-limit-w`. Always asserted against
   `amd-smi node -p`, never set by the session: NPM is set on the BMC. The
   session refuses to start or resume if the node differs, and records the
-  observed state and limit either way where `amd-smi` reports them.
+  observed state and limit either way where `amd-smi` reports them. With NPM
+  enabled, a session whose visible-device mask leaves any of the node's GPUs
+  out is refused; `--allow-shared-npm-node` (on every launch and resume)
+  measures anyway and records the cards left out.
 - **Cluster topology & multi-node backend:** `--nodes`, `--gpus-per-node`,
   `--gpu-type`, `--mn-backend` (`rayjob` / `infera`), `--server-args` (rayjob).
   Per-pod sizing, the pod image and pod-side env are the provisioning
@@ -809,7 +813,7 @@ The following variables configure the Critic and knowledge base components.
 |---------------------------------------|------------------------|--------------------------------------------------------------------------------------------------------------------------------------|
 | `KNOWLEDGE_STORE_MODE`                | `local`                | Exclusive Recipe backend: `local` or `remote`. Ambient KB Store or GBrain credentials do not select remote mode. |
 | `KNOWLEDGE_LOCAL_ROOT`                | `$USER_DATA_PATH/knowledge`, otherwise `~/.cache/hyperloom/knowledge` | Local Recipe/KG root. It is not used for Recipe data in remote mode. |
-| `INFERENCE_OPTIMIZER_`<br>`FA_KB_PATH` | `$USER_DATA_PATH/framework-kb`, otherwise `/workspace/hyperloom/framework-kb` | Framework KB root, holding the lessons ledger the FRAMEWORK phase reads and writes. The orchestrator's KB reader and writeback both resolve through it. The withdrawn `FRAMEWORK_AGENT_KB_DIR` is ignored with a warning naming the resolved root. On first start-up an existing partition under the legacy `$USER_DATA_PATH/kb` is copied across once; a copy that fails warns and leaves the phase to cold-start. |
+| `INFERENCE_OPTIMIZER_`<br>`FA_KB_PATH` | `$USER_DATA_PATH/framework-kb`, otherwise `/workspace/hyperloom/framework-kb` | Framework KB root, holding the lessons ledger the FRAMEWORK phase reads and writes. The orchestrator's KB reader and writeback both resolve through it. |
 | `KB_STORE_URL`                        | Local Recipe mode: `https://global.primus-safe.amd.com/knowledge-base`; remote mode: unset | Unified KB Service endpoint. Local Recipe mode uses the default only for co-hosted PR Monitor access; IR-3 disables PR Monitor without disabling local Recipe storage when the endpoint is unreachable. Remote Recipe mode requires an explicit value, selects the current Recipe View, replays its Config, Patch, and Kernel columns, then writes one final session at CLOSE. PR Monitor is available at `${KB_STORE_URL}/pr-monitor/v1` (REST/IR-3/Framework/KernelForge) and `${KB_STORE_URL}/pr-monitor/mcp/` (specialist MCP). |
 | `KB_STORE_TOKEN`                      | Unset                  | KB Store bearer token. Required when `KNOWLEDGE_STORE_MODE=remote`; transport failures during the final write are non-fatal. |
 | `KB_DRAFT_DIR`                        | Runtime-generated      | Internal remote-mode handoff where each Recipe column (`config`, `patch`, `kernel`) stages its knowledge and files before CLOSE merges them. Hyperloom creates and exports it; operators must not set it. A Recipe cannot be built without it. |
@@ -1078,6 +1082,52 @@ See [Optimize an AgentX workload](../how-to/optimize.md#optimize-an-agentx-workl
 | `SWEEP_VARIANT_TIMEOUT_SEC` | Optional | `2400` | Per-variant wall-clock timeout in seconds for GEAK-backed SWEEP runs. A malformed value raises `EnvValueError`. |
 
 ---
+
+## Plug selection
+
+Which implementation serves each plug socket (today only `events`, progress reporting) is chosen by layering, lowest
+first: the built-in `local` profile, the `plugs.resolved.json` of the session being resumed, `--plug-profile`,
+the manifest (`--manifest` or `HYPERLOOM_MANIFEST`), `HYPERLOOM_MANIFEST_OVERRIDES`, then `--plug` and `--plug-config`.
+With none of these set, a run uses the `local` profile, writes nothing to the session and prints nothing. See
+[Select plug implementations](../how-to/optimize.md#select-plug-implementations).
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `HYPERLOOM_MANIFEST` | Unset (the `local` profile) | Path of a JSON plug manifest (`"schema": "hyperloom.plugs/v1"`) laid over the profile. `--manifest` wins over it. An exported value changes which implementations every run in that shell uses, and a selection is recorded in the session and re-applied on resume. |
+| `HYPERLOOM_MANIFEST_OVERRIDES` | Unset (no overrides) | Path of a JSON file of the same shape laid over the manifest; only `--plug` and `--plug-config` win over it. Meant for a host that must adjust a run without editing the manifest. |
+
+A path that does not exist, a malformed file, an unknown socket or implementation, or a `${VAR}` that is unset and has no
+default stops the run with exit code 2 before any session is opened or changed.
+
+---
+
+## Hosted run inputs
+
+A hosted run is configured by the host that launches it. `src/hyperloom/hosted/host_info.py` is the only reader of these variables:
+it checks them once at start-up and names **every** missing or malformed variable in one error (variable names and reasons, never
+values), so a bad input stops the run before it starts. Which variables are required depends on what the run hosts; the run, state
+and input variables are always required, and a variable that is set is checked even when it is not required.
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `HYPERLOOM_INPUT_FILE` | Always | Absolute path of the campaign request file; must exist. |
+| `HYPERLOOM_RUN_ID` | Always | Run identifier, no whitespace. |
+| `HYPERLOOM_RUN_CREATED_AT` | Always | Run creation time, ISO 8601 with a UTC offset or `Z`. |
+| `HYPERLOOM_STATE_DIR` | Always | Absolute path of the run's state directory on shared storage; must exist. |
+| `HYPERLOOM_EVENTS_DIR` | No | Directory of the progress-event segments. Default `$HYPERLOOM_STATE_DIR/events`. |
+| `HYPERLOOM_MCP_PORT`<br>`HYPERLOOM_MCP_TOKEN` | When the MCP server runs (default) | Port (1 to 65535) of the run's MCP server and the token the host presents. The token is a credential. |
+| `HYPERLOOM_MCP_PUBLIC_URL` | When sub-runs call back into the run | `http(s)` URL under which sub-runs reach the run's MCP server. No credentials, query or fragment. |
+| `HYPERLOOM_SANDBOX_TEMPLATES` | When a sandbox is hosted | JSON object of template names, for example `{"runner": {"1": "t1", "8": "t8"}, "dev": "t"}`. |
+| `E2B_API_URL`<br>`E2B_SANDBOX_URL` | When a sandbox is hosted | Control-plane and data-plane `http(s)` URLs of the sandbox service, without credentials, query or fragment. |
+| `HYPERLOOM_SANDBOX_KEY_MEASUREMENT`<br>`HYPERLOOM_SANDBOX_KEY_SUBRUN`<br>`HYPERLOOM_SANDBOX_KEY_DEV` | Per hosted role | The sandbox API key of each role. Credentials. |
+| `HYPERLOOM_RESULT_ARCHIVE` | No | Unset means results are archived on the shared storage, in a directory the application chooses. Otherwise `s3://<bucket>/<prefix>`; the prefix may be empty and has no empty, `.` or `..` segment. A local path (`/x`, `file://...`) is refused: local means unset. |
+| `AWS_ACCESS_KEY_ID`<br>`AWS_SECRET_ACCESS_KEY` | When `HYPERLOOM_RESULT_ARCHIVE` is `s3://`, and always as a pair | Archive credentials. `AWS_SESSION_TOKEN`, `AWS_ENDPOINT_URL_S3` (an `http(s)` URL) and `AWS_REGION` (not a credential) are optional. |
+| `NODE_NAME`<br>`CLAW_SESSION_ID` | No | Physical node name and session id, read when set. |
+
+Once read, every host-only input above is removed from the process environment (`take_host_info`), so a child process started
+without an explicit `env=` does not inherit it; `HostInfo` holds the values and code passes them on. `NODE_NAME` and `CLAW_SESSION_ID`
+stay, because other code reads them. The sandbox keys, the MCP token and the archive credentials are held in an object that prints as
+`Secret(<redacted>)`, and are also on the credential list in `hyperloom.common.env_safety`.
 
 ## Variables intentionally not exposed
 
