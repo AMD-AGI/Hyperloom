@@ -26,8 +26,26 @@ EVENT_WARNING = "hyperloom.warning"
 #: At most one ``budget`` event per this many seconds.
 BUDGET_INTERVAL_SEC = 300.0
 
-_budget_lock = threading.Lock()
-_budget_last: float | None = None
+
+class _Throttle:
+    """Lets one call through per ``interval`` seconds, whichever thread asks."""
+
+    def __init__(self, interval: float) -> None:
+        self._interval = interval
+        self._lock = threading.Lock()
+        self.last: float | None = None
+
+    def due(self) -> bool:
+        """Whether the caller may go ahead; if so, the interval starts now."""
+        now = time.monotonic()
+        with self._lock:
+            if self.last is not None and now - self.last < self._interval:
+                return False
+            self.last = now
+            return True
+
+
+_budget = _Throttle(BUDGET_INTERVAL_SEC)
 
 
 def emit(event_type: str, data: Mapping[str, Any]) -> None:
@@ -78,12 +96,8 @@ def emit_budget(state: Any) -> bool:
     ``tokens`` and ``gpu_sec`` are null: the legacy flow does not keep a running total of either. Reports whether
     an event went out.
     """
-    global _budget_last
-    now = time.monotonic()
-    with _budget_lock:
-        if _budget_last is not None and now - _budget_last < BUDGET_INTERVAL_SEC:
-            return False
-        _budget_last = now
+    if not _budget.due():
+        return False
     emit(
         EVENT_BUDGET,
         {

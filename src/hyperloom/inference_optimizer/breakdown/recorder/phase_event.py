@@ -521,14 +521,15 @@ def _event_holding(section: str, field: str, value: str) -> str | None:
     return str(row["event_id"]) if row else None
 
 
-def _action_event(task_id: str) -> str | None:
-    """The phase event holding ``task_id``'s dispatch row, if one was recorded."""
-    return _event_holding(SECTION_ACTION, "task_id", task_id)
-
-
 def _action_row(task_id: str) -> dict[str, Any] | None:
     """The dispatch row of ``task_id``, if one was recorded."""
     return _row_holding(SECTION_ACTION, "task_id", task_id)
+
+
+def _action_event(task_id: str) -> str | None:
+    """The phase event holding ``task_id``'s dispatch row, if one was recorded."""
+    row = _action_row(task_id)
+    return str(row["event_id"]) if row else None
 
 
 def _proposal_event(proposal_msg_id: str) -> str | None:

@@ -23,12 +23,14 @@ def lazy(target: str) -> Callable[[PlugContext], object]:
     return factory
 
 
+_EVENTS = "events"
+
 #: A socket whose protocol is defined by the change that adds its first implementation uses ``object`` until then.
 _SOCKETS = (
     Socket("measurement", object, entry_point_group="hyperloom.plugs.measurement"),
     Socket("sandbox", object, entry_point_group="hyperloom.plugs.sandbox"),
     Socket("agent_runner", object, entry_point_group="hyperloom.plugs.agent_runner"),
-    Socket("events", ProgressEvents),
+    Socket(_EVENTS, ProgressEvents),
     Socket("storage", object),
     Socket("knowledge", object),
     Socket("gpu_token", object),
@@ -36,8 +38,8 @@ _SOCKETS = (
 )
 
 _IMPLEMENTATIONS = (
-    Implementation("events", "local", lazy("hyperloom.plugs.events_local:create")),
-    Implementation("events", "hosted", lazy("hyperloom.hosted.events:create")),
+    Implementation(_EVENTS, "local", lazy("hyperloom.plugs.events_local:create")),
+    Implementation(_EVENTS, "hosted", lazy("hyperloom.hosted.events:create")),
 )
 
 

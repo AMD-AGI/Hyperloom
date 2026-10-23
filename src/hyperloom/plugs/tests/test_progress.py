@@ -65,7 +65,7 @@ def _host(impl) -> PlugHost:
 
 @pytest.fixture(autouse=True)
 def _fresh_budget_clock(monkeypatch):
-    monkeypatch.setattr(progress, "_budget_last", None)
+    monkeypatch.setattr(progress._budget, "last", None)
 
 
 def _state(minutes: float) -> SimpleNamespace:

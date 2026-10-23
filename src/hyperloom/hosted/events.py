@@ -36,8 +36,9 @@ log = logging.getLogger(__name__)
 
 SEGMENT_SUFFIX = ".jsonl"
 SEGMENT_DIGITS = 10
-SEGMENT_MAX_BYTES = 4 * 1024 * 1024
-EVENT_MAX_BYTES = 16 * 1024
+_KIB = 1024
+SEGMENT_MAX_BYTES = 4 * _KIB * _KIB
+EVENT_MAX_BYTES = 16 * _KIB
 FSYNC_INTERVAL_SEC = 1.0
 SPECVERSION = "1.0"
 DATA_CONTENT_TYPE = "application/json"
@@ -135,7 +136,7 @@ class HostedProgressEvents:
 
     def _open_segment(self) -> None:
         path = self._dir / segment_name(self._segment)
-        self._fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+        self._fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o640)
         self._size = os.fstat(self._fd).st_size
 
     def _sync(self) -> None:
