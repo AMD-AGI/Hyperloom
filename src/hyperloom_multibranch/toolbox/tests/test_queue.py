@@ -50,6 +50,16 @@ def test_the_queue_hands_out_the_highest_priority_first_then_arrival_order() -> 
     assert order == ["d", "b", "e", "a", "c"]
 
 
+def test_the_cards_of_the_toolbox_lower_the_global_concurrency_but_never_raise_it() -> None:
+    queue = _queue(per_branch_k=9, global_concurrency=3)
+    for name in "abcd":
+        queue.push(_item(name))
+    assert [queue.take(parallel_limit=2).request_id, queue.take(parallel_limit=2).request_id] == ["a", "b"]  # type: ignore[union-attr]
+    assert queue.take(parallel_limit=2) is None, "two run and the cards run two"
+    assert queue.take(parallel_limit=9).request_id == "c"  # type: ignore[union-attr]
+    assert queue.take(parallel_limit=9) is None, "three run and the policy allows three"
+
+
 def test_a_branch_never_runs_more_than_k() -> None:
     queue = _queue(per_branch_k=2, global_concurrency=9)
     for name in "abcd":

@@ -30,6 +30,7 @@ from hyperloom_multibranch.contracts.notebook.interfaces import (
 )
 from hyperloom_multibranch.contracts.notebook.records import ClaimKey, Withdrawal
 from hyperloom_multibranch.contracts.toolbox import (
+    BranchLease,
     CancelOutcome,
     MeasurementCapacity,
     NodeHealth,
@@ -213,6 +214,20 @@ class RealToolbox:
         """The cards this toolbox can measure on; a toolbox with no card pool of its own reports it as unknown."""
 
         return MeasurementCapacity.unknown()
+
+    async def lease_branch_sandbox(self, branch_id: str, cards: int) -> BranchLease:
+        """Hold ``cards`` of the toolbox's cards and a working directory of their own for ``branch_id``'s agent.
+
+        The cards leave the measurement pool until :meth:`release_branch_sandbox` or :meth:`close`; see
+        :class:`~hyperloom_multibranch.contracts.toolbox.BranchLease`. A toolbox whose backend has no cards of its own
+        to lease refuses with ``unsupported_kind``; a backend that leases raises ``lease_exists`` and
+        ``lease_leaves_no_measurement`` as :class:`RequestRejected`.
+        """
+
+        raise RequestRejected("this toolbox's backend has no cards to lease", "unsupported_kind")
+
+    async def release_branch_sandbox(self, lease_id: str) -> None:
+        """Return the cards of a lease; idempotent, and safe to call from several tasks at once."""
 
     async def put_attachment(self, attachment_id: str, kind: Literal["file", "dir"], data: bytes) -> AttachmentRef:
         """Keep ``data`` in the session's blob store for a repro request to carry; see the interface."""
@@ -495,10 +510,15 @@ class RealToolbox:
 
     # --- running -------------------------------------------------------------------------------------------------
 
+    def _parallel_limit(self) -> int | None:
+        """The most tests the toolbox's own cards run at once; ``None`` for a backend that has none to count."""
+
+        return None
+
     def _pump(self) -> None:
         if self._closed:
             return
-        while (item := self._queue.take()) is not None:
+        while (item := self._queue.take(self._parallel_limit())) is not None:
             item.started_at = self._clock()
             self._tasks[item.request_id] = asyncio.create_task(self._run(item))
 

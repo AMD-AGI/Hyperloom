@@ -198,11 +198,15 @@ class WorkQueue:
             if item.state is State.RUNNING and item.branch == branch and not exempt_from_k(item.request)
         )
 
-    def take(self) -> QueuedTest | None:
-        """Mark and return the next test to run, or ``None`` when none may start now."""
+    def take(self, parallel_limit: int | None = None) -> QueuedTest | None:
+        """Mark and return the next test to run, or ``None`` when none may start now.
+
+        ``parallel_limit`` is what the toolbox's cards run at once; it lowers the policy's global concurrency.
+        """
 
         running = sum(1 for item in self._items.values() if item.state is State.RUNNING)
-        if running >= self.policy.global_concurrency:
+        cap = self.policy.global_concurrency
+        if running >= (cap if parallel_limit is None else min(cap, parallel_limit)):
             return None
         ready = [
             item

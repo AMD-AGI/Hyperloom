@@ -200,6 +200,14 @@ def test_a_toolbox_runs_out_of_cards_below_what_one_test_needs_and_never_when_it
         assert event.detail == {"usable_cards": 3, "total_cards": 8, "cards_per_test": 4}
 
 
+def test_cards_held_for_branch_sandboxes_do_not_count_as_cards_a_test_runs_on() -> None:
+    assert no_measurement_cards(MeasurementCapacity(8, 6, leased_cards=2), 4) is None
+    event = no_measurement_cards(MeasurementCapacity(8, 6, leased_cards=3), 4)
+    assert event is not None and event.kind is EventKind.NO_MEASUREMENT_CARDS
+    assert event.reason == "the toolbox can measure on 3 of its 8 cards, a test needs 4"
+    assert event.detail == {"usable_cards": 6, "total_cards": 8, "cards_per_test": 4}
+
+
 async def test_a_card_shortage_is_recorded_and_never_shown_to_the_judge(log: Path) -> None:
     toolbox = FakeToolbox()
     enough = _events(_Health(), log, toolbox, cards_per_test=8)

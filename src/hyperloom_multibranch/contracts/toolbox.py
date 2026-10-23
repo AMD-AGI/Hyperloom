@@ -21,6 +21,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 from typing import Literal, Protocol
 
 from hyperloom.contracts.measurement import PRIORITY_HIGHEST, PRIORITY_LOWEST, AttachmentRef, TestRequest
@@ -83,7 +84,7 @@ REJECTION_CODES = (
     "branch_stopped",  # the queue policy lists the branches that may submit and this one is not among them
     "speculative_context_copy_on_synthetic",  # an InferenceX candidate introduces or changes a context-copy draft
     "speculative_decoding_pinned",  # an AgentX candidate changes the draft or simulated acceptance its parent pins
-    "unsupported_kind",  # the toolbox's backend does not run this kind of test (a local backend: profile, repro)
+    "unsupported_kind",  # the toolbox's backend does not run this kind of test (a local backend: profile, repro), or has no cards to lease
     "profile_exists",  # a PROFILE of this commit and recipe is already queued, running or measured: ``existing_request_id``
     "empty_delta",  # an explore test whose delta changes nothing
     "upstream_label_unsupported",  # a delta moves the upstream_ref or upstream_repo of a component the parent has
@@ -95,6 +96,8 @@ REJECTION_CODES = (
     "attachments_unsupported",  # ``put_attachment``, ``put_kernel_artifact``: this toolbox has no blob store
     "kernel_artifact_invalid",  # ``put_kernel_artifact``: the table, target or variable cannot be loaded as given
     "kernel_variable_taken",  # ``put_kernel_artifact``: the variable already loads the table of another target
+    "lease_leaves_no_measurement",  # ``lease_branch_sandbox``: leasing would leave fewer cards than one test needs
+    "lease_exists",  # ``lease_branch_sandbox``: the branch already holds a lease
 )
 
 
@@ -157,26 +160,54 @@ class TestProgress:
 
 @dataclass(frozen=True)
 class MeasurementCapacity:
-    """How many cards the toolbox can still measure on: what the scheduler checks ``usable_cards < workload.tp`` against.
+    """How many cards the toolbox can still measure on: what the scheduler checks ``measurement_cards < workload.tp`` against.
 
     ``total_cards`` is the card pool the toolbox owns; ``usable_cards`` is the total minus the cards that are lost for
     good (a card whose holder processes were not provably gone is never leased again). Quarantining a node does not
     reduce ``usable_cards``: quarantine only widens ``avoid_nodes`` and never blocks a test. ``known`` is ``False`` for
     a toolbox that has no card pool of its own to read (both counts are then 0 and mean nothing): the caller does not
-    compare against them.
+    compare against them. ``leased_cards`` are the usable cards held for branch sandboxes
+    (``RealToolbox.lease_branch_sandbox``), which no test runs on until they are released.
     """
 
     total_cards: int
     usable_cards: int
     known: bool = True
+    leased_cards: int = 0
 
     def __post_init__(self) -> None:
         if not 0 <= self.usable_cards <= self.total_cards:
             raise ValueError(f"usable_cards {self.usable_cards} must be between 0 and total_cards {self.total_cards}")
+        if not 0 <= self.leased_cards <= self.usable_cards:
+            raise ValueError(f"leased_cards {self.leased_cards} must be between 0 and usable_cards {self.usable_cards}")
+
+    @property
+    def measurement_cards(self) -> int:
+        """The usable cards tests can run on, busy ones included: those no branch sandbox holds."""
+        return self.usable_cards - self.leased_cards
 
     @classmethod
     def unknown(cls) -> MeasurementCapacity:
         return cls(0, 0, known=False)
+
+
+@dataclass(frozen=True)
+class BranchLease:
+    """What a branch's sandbox holds from ``RealToolbox.lease_branch_sandbox`` until ``release_branch_sandbox``.
+
+    ``gpu_ids`` are absolute card ids, the ones ``HIP_VISIBLE_DEVICES`` names in ``env``. ``root`` is the lease's own
+    working directory below the toolbox's session directory; it stays after the release. ``env`` is the session image's
+    environment as a test gets it, with every credential and GPU mask taken out and ``HIP_VISIBLE_DEVICES`` set to the
+    leased cards. ``remaining_cards`` is how many cards tests can still run on with this lease held
+    (:attr:`MeasurementCapacity.measurement_cards`).
+    """
+
+    lease_id: str
+    branch_id: str
+    gpu_ids: tuple[int, ...]
+    root: Path
+    env: Mapping[str, str] = field(repr=False)
+    remaining_cards: int
 
 
 #: The scope names of MCP tokens and tools: the host (Claw's front end) and a specialist.
@@ -265,6 +296,7 @@ __all__ = [
     "SCOPE_SPECIALIST",
     "REJECTION_CODES",
     "Backpressure",
+    "BranchLease",
     "CancelOutcome",
     "MeasurementCapacity",
     "NodeHealth",
