@@ -229,7 +229,7 @@ class CrossSessionBriefing(StartupBriefProvider):
         if commit is not None:
             where = "is its recipe" if commit == head else f"builds on {commit}, which is its recipe"
             raise ValueError(f"{canonical_id} is on your head already: your head {head} {where}; build on it")
-        return prepared.on(await self.repo.read_recipe(head), head, self.stack_slot)
+        return await asyncio.to_thread(prepared.on, await self.repo.read_recipe(head), head, self.stack_slot)
 
     async def _on_line(self, snapshot: NotebookSnapshot, commit: str) -> dict[str, str]:
         """The champions PRELUDE prepared a replay of that ``commit`` is already or builds on, each with the first commit
@@ -283,7 +283,7 @@ class CrossSessionBriefing(StartupBriefProvider):
             raise ValueError(f"{request_id} tested this change on your head {head}; there is nothing to replay")
         recipe = await self.repo.read_recipe(head)
         delta = await self._with_upstreams(self.repo, request.delta, recipe, request.parent_commit)
-        delta, replaces = stack_added_kernels(delta, recipe, self.stack_slot)
+        delta, replaces = await asyncio.to_thread(stack_added_kernels, delta, recipe, self.stack_slot)
         try:
             replayed = apply(recipe, delta)
         except RecipeError as exc:

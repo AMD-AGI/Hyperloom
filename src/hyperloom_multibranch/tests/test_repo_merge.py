@@ -35,7 +35,7 @@ from hyperloom.measure.compile import (
 from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.repo import UnitedTable
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
-from hyperloom_multibranch.repo.merge import Stored, carry, wider_table
+from hyperloom_multibranch.repo.merge import Stored, carry, stack_kernel_slot, wider_table
 from hyperloom_multibranch.repo.rebase import Files
 from hyperloom_multibranch.toolbox.kernel_artifacts import mint_kernel_artifact, union_rows
 from hyperloom_multibranch.toolbox.tests.kernel_rows_cc2bf0ef import (
@@ -43,6 +43,7 @@ from hyperloom_multibranch.toolbox.tests.kernel_rows_cc2bf0ef import (
     B01_NEW,
     B01_SHARED,
     B06_NEW,
+    B09_NEW,
     ENV,
     SHARED,
     csv_text,
@@ -377,6 +378,20 @@ def test_rows_only_rows_over_a_whole_table_make_one_whole_table(configs):
     (united,) = merge.delta.add_kernels
     assert not kernel_rows_only(united)
     assert TABLES[united.sha256] == union_rows(csv_text(B06_NEW), TABLES[head.sha256], ENV, configs=configs)
+
+
+def test_a_replay_stacks_a_kernel_slot_as_the_merge_fills_it(configs):
+    """The wider table, else the union the merge makes, else ``None`` where the merge refuses the pair."""
+
+    narrow, wide = _aiter(csv_text(SHARED)), _aiter(csv_text(SHARED, B09_NEW))
+    head, theirs = _aiter(csv_text(SHARED, B01_HEAD)), _aiter(csv_text(B01_SHARED, B01_NEW))
+    stored = Stored(_applies, _table, _store, _keep, configs)
+
+    assert stack_kernel_slot(wide, narrow, stored) == stack_kernel_slot(narrow, wide, stored) == wide
+    merged = carry("i1", BASE, _filled(theirs), _filled(head), stored).delta.add_kernels
+    assert (stack_kernel_slot(theirs, head, stored),) == merged
+    refused = _rows_only("b02", "304,1,4096,4096,19.8"), _kernel("head", "304,1,4096,4096,23.1")
+    assert stack_kernel_slot(*refused, stored) is None
 
 
 def test_a_candidate_on_another_base_image_does_not_merge():
