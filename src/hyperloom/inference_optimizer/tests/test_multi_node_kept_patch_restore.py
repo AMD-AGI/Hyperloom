@@ -16,7 +16,7 @@ from hyperloom.orchestrator.actions.executors import _kernel_agent_tool as tool
 from hyperloom.orchestrator.kernel import apply_kernel_patch as akp
 from hyperloom.orchestrator.kernel import kept_patch_restore as restore
 from hyperloom.orchestrator.loop.coordinator import Coordinator
-from hyperloom.orchestrator.loop.writeback import IntegrateRecoveryIncomplete
+from hyperloom.orchestrator.loop._promote_outcome import IntegrateRecoveryIncomplete
 
 from .conftest import make_coordinator
 
