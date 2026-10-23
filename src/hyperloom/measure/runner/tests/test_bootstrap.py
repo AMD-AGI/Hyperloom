@@ -21,6 +21,7 @@ import pytest
 from hyperloom.measure.runner.bootstrap import BOOTSTRAP_SCRIPT, runner_start_command
 from hyperloom.measure.runner.tests.bootstrap_rig import (
     Rig,
+    copy_source,
     lock_text,
     make_rig,
     read_probe,
@@ -45,13 +46,6 @@ def _run(rig: Rig, work: Path, env: dict[str, str] | None = None) -> subprocess.
 
 def _status(work: Path) -> dict[str, str]:
     return json.loads((work / "out" / "status.json").read_text())
-
-
-def _source_with_lock(rig: Rig, tmp_path: Path, lock: str) -> Path:
-    source = tmp_path / "source"
-    shutil.copytree(rig.source, source)
-    (source / "requirements" / "runner.lock").write_text(lock)
-    return source
 
 
 def _venv_has(work: Path, module: str) -> bool:
@@ -106,7 +100,7 @@ def test_a_lock_that_does_not_verify_installs_nothing_and_leaves_a_status(
         text = lock_text(lock_pkg=("1.0", "0" * 64), already_pkg=("1.0", rig.already_pkg_sha256))
     else:
         text = "lock_pkg==1.0\nalready_pkg==1.0\n"  # pip checks hashes by itself only when some pin has one
-    source = _source_with_lock(rig, tmp_path, text)
+    source = copy_source(rig, tmp_path / "source", text)
     done = _run(rig, tmp_path, {"HYPERLOOM_SOURCE_DIR": str(source)})
     assert done.returncode == 2
     assert reason in done.stderr
@@ -178,8 +172,7 @@ def test_a_source_that_is_not_a_pinned_commit_or_a_checkout_is_refused(
 
 
 def test_a_runner_that_does_not_import_ends_the_start_with_a_status(rig: Rig, tmp_path: Path) -> None:
-    source = tmp_path / "source"
-    shutil.copytree(rig.source, source)
+    source = copy_source(rig, tmp_path / "source")
     main = source / "src/hyperloom/measure/runner/__main__.py"
     main.write_text("import module_that_is_not_there\n" + main.read_text())
     done = _run(rig, tmp_path, {"HYPERLOOM_SOURCE_DIR": str(source)})

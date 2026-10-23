@@ -16,13 +16,24 @@ import base64
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
-__all__ = ["PROBE_FILE", "Rig", "build_wheel", "lock_text", "make_rig", "pip_env", "read_probe", "run_script"]
+__all__ = [
+    "PROBE_FILE",
+    "Rig",
+    "build_wheel",
+    "copy_source",
+    "lock_text",
+    "make_rig",
+    "pip_env",
+    "read_probe",
+    "run_script",
+]
 
 PROBE_FILE = "probe.json"
 
@@ -95,6 +106,15 @@ class Rig:
     lock_pkg_sha256: str
     already_pkg_sha256: str
 
+    def sandbox_env(self, source: Path | None = None, scratch: str = "/work/scratch") -> dict[str, str]:
+        """The environment of a sandbox template that starts the script on this rig, below ``root`` and ``scratch``."""
+        return {
+            "HYPERLOOM_SCRATCH_DIR": scratch,
+            "HYPERLOOM_BASE_PYTHON": str(self.base_python),
+            "HYPERLOOM_SOURCE_DIR": str(source or self.source),
+            **pip_env(self.wheelhouse),
+        }
+
 
 def build_wheel(
     directory: Path, name: str, version: str, module_source: str, requires: str | None = None
@@ -139,6 +159,14 @@ def _pip_install(python: Path, wheelhouse: Path, *requirements: str) -> None:
         check=True,
         capture_output=True,
     )
+
+
+def copy_source(rig: Rig, destination: Path, lock: str | None = None) -> Path:
+    """A copy of the rig's source tree at ``destination``, with ``lock`` as its ``requirements/runner.lock`` if given."""
+    shutil.copytree(rig.source, destination)
+    if lock is not None:
+        (destination / "requirements" / "runner.lock").write_text(lock)
+    return destination
 
 
 def make_rig(root: Path) -> Rig:
@@ -190,10 +218,7 @@ def run_script(
         "TMPDIR": str(work),
         "HYPERLOOM_IN_DIR": str(work / "in"),
         "HYPERLOOM_OUT_DIR": str(work / "out"),
-        "HYPERLOOM_SCRATCH_DIR": str(work / "scratch"),
-        "HYPERLOOM_BASE_PYTHON": str(rig.base_python),
-        "HYPERLOOM_SOURCE_DIR": str(rig.source),
-        **pip_env(rig.wheelhouse),
+        **rig.sandbox_env(scratch=str(work / "scratch")),
         **(extra_env or {}),
     }
     return subprocess.run(command, env=env, capture_output=True, text=True, timeout=180, check=False)
