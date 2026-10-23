@@ -36,16 +36,21 @@ def _unreadable(error: OSError) -> str:
     "-o",
     required=True,
     type=click.Path(dir_okay=False, path_type=Path),
-    help="Where to write the JSON document.",
+    help=(
+        "Where to write the JSON document. An empty raw-logs-not-collected.log is written beside it, "
+        "replacing a file of that name already there."
+    ),
 )
 def export_runs(log_roots: tuple[Path, ...], output: Path) -> None:
     """Write every run found under the LOG_ROOT directories as one JSON document.
 
-    A run is a plain forge-loop run's forge_experiments directory. Collect the document with
-    `hyperloom-kb-collect --mapping kernelforge-v1 --document <output>`.
+    A run is a plain forge-loop run's forge_experiments directory. Beside the document it also writes
+    raw-logs-not-collected.log, empty, and truncates a file of that name already there. Every Experience links that
+    file as its raw logs: the global KB refuses a complete Experience without raw logs, and the export collects none.
+    Collect the document with `hyperloom-kb-collect --mapping kernelforge-v1 --document <output>`.
     """
 
-    from kernelforge.run_export.document import normalize
+    from kernelforge.run_export.document import NO_RAW_LOGS, normalize
     from kernelforge.run_export.forge_loop import AmbiguousOwnership
 
     try:
@@ -55,5 +60,6 @@ def export_runs(log_roots: tuple[Path, ...], output: Path) -> None:
     except OSError as error:
         raise click.ClickException(_unreadable(error)) from error
     output.parent.mkdir(parents=True, exist_ok=True)
+    (output.parent / NO_RAW_LOGS).write_bytes(b"")
     output.write_text(json.dumps(document, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     click.echo(f"wrote {len(document['runs'])} runs to {output}")

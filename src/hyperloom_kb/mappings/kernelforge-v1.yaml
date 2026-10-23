@@ -3,7 +3,8 @@ description: >-
   KernelForge forge-loop runs, one Experience per candidate kernel a run archived, so each lane of a fan-out round
   gets its own, each holding the time it was measured against, the agent's reasoning and plan, the Analysis report
   the plan was built on, the kernel it measured, and what KernelForge measured and decided; from the document
-  kernelforge export-runs writes from a run's forge_experiments directory and its forge-loop.log
+  kernelforge export-runs writes from a run's forge_experiments directory and its forge-loop.log. Each Experience
+  links one empty raw log, raw-logs-not-collected.log, which export-runs writes beside the document.
 declaration: kernelforge-run-v1
 producer:
   name: kernelforge
@@ -52,6 +53,7 @@ experience:
     candidate_wall_ms: {number: $run.candidate_wall_ms}
   reflection:
     analysis_report: {text: $run.analysis_report}
+  raw_logs: $doc.raw_logs
   provenance:
     source_ref: {text: $run.unit_id}
     extra: $run.provenance

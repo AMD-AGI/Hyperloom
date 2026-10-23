@@ -40,6 +40,7 @@ def files(tmp_path: Path) -> dict[str, Path]:
         "plan": _file(orchestration / "optimization_plan.md", "Summary: Fuse the passes.\n\n# Fuse\nOne sweep.\n"),
         "kernel": _file(tmp_path / "candidates" / "iter_001" / "softmax_kernel.py", "BLOCK = 128\n"),
         "diff": _file(tmp_path / "candidates" / "iter_001" / "change.diff", "--- a/softmax_kernel.py\n"),
+        "raw_log": _file(tmp_path / "raw-logs-not-collected.log", ""),
     }
 
 
@@ -117,7 +118,7 @@ def test_the_mapping_produces_the_packaged_kernelforge_declaration() -> None:
 def test_a_session_unit_projects_a_complete_experience(files: dict[str, Path]) -> None:
     unit = _session_unit(files)
 
-    report = collect(MAPPING, {"runs": [unit]}, dry_run=True).to_dict()
+    report = collect(MAPPING, {"runs": [unit], "raw_logs": [str(files["raw_log"])]}, dry_run=True).to_dict()
 
     assert report["skipped"] == [] and report["counts"]["collected"] == 1
     experience = report["collected"][0]["experience"]
@@ -145,7 +146,17 @@ def test_a_session_unit_projects_a_complete_experience(files: dict[str, Path]) -
     assert experience["reflection"] == {"analysis_report": ANALYSIS_REPORT}
     assert experience["provenance"]["source_ref"] == "forge_loop_triton_softmax/iteration-1"
     assert experience["provenance"]["extra"] == unit["provenance"]
-    assert "raw_logs" not in experience
+    assert (
+        experience["raw_logs"]
+        == [_ref(files["raw_log"])]
+        == [
+            {
+                "name": "raw-logs-not-collected.log",
+                "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                "bytes": 0,
+            }
+        ]
+    )
 
 
 def test_a_unit_without_an_analysis_report_projects_none(files: dict[str, Path]) -> None:
