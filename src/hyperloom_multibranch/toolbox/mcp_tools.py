@@ -160,7 +160,11 @@ _TEST_RESULT_GUIDE = (
     "the answer; failed_empty and failed_short split these by output tokens when the export says, else null with the "
     "reason), and export, the round's per-request records (aiperf's profile_export.jsonl: input length, output length "
     "and TTFT of a served request, the error of a failed one) as a path relative to the result's output_dir. A null "
-    "count was not computed; it is not zero."
+    "count was not computed; it is not zero. phases says where the test's wall time went, in the order it happened "
+    "(the sandbox starting, the environment rebuilt, the server booting, each round, the result signed and landed): "
+    "each phase's name, seconds, gpu_seconds and, for a round's phase, the measurement point it ran for; "
+    "server_boot.weights_load and its siblings are parts of server_boot. unaccounted_seconds is the part of the wall "
+    "time no phase covers, so the phases and it add up to it; both are empty or null on a result recorded without them."
 )
 _KERNEL_TUNE_GUIDE = (
     " kernel_tune: params.test_request_id names a test whose server log reports untuned GEMM shapes (aiter's 'not found "

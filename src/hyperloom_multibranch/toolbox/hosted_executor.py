@@ -28,7 +28,7 @@ import time
 from collections.abc import Callable, Mapping
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import yaml
 
@@ -36,6 +36,7 @@ from hyperloom.common.outside_facts import ENV_CONC
 from hyperloom.contracts.measurement import (
     AccuracyValue,
     FailureClass,
+    PhaseTiming,
     RoundValue,
     SandboxFacts,
     Purpose,
@@ -53,10 +54,11 @@ from hyperloom.measure.bundle import RecordedBundle, ResultRejected
 from hyperloom.measure.hosted import HostedMeasurementBackend, Reverified
 from hyperloom.measure.hosted_log import STATE_FINISHED, STATE_SENT, STATE_SUBMITTED, Record
 from hyperloom.measure.manifest import ResultManifest
+from hyperloom.measure.phases import RESULT_READ, account
 from hyperloom.measure.points import AcceptedMeasurement
 from hyperloom.measure.profile_traces import PROFILE_DIR, has_traces, is_trace_file
 from hyperloom.measure.repro import REPRO_DIR, VERDICT_FILE, ReproError, read_verdict
-from hyperloom.measure.socket import RoundOutcome, RoundPlan, TestCall, TestMeta, TestOutcome
+from hyperloom.measure.socket import MeasurementTimeout, RoundOutcome, RoundPlan, TestCall, TestMeta, TestOutcome
 from hyperloom.orchestrator.actions.executors.benchmark_result import extract_benchmark_measurement
 from hyperloom_multibranch.contracts.gate import ResultUnverified
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
@@ -95,6 +97,13 @@ _UTF8 = "utf-8"
 _NO_WARMUP = RoundPlan(warmup_rounds=0)
 _REASON_DETAIL_CHARS = 300
 _CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]+")
+
+
+class _Span(NamedTuple):
+    """The instants an attempt was started and its backend returned, on the executor's clock."""
+
+    started: float
+    returned: float
 
 
 class HostedExecutor:
@@ -138,9 +147,9 @@ class HostedExecutor:
         started = self._clock()
         try:
             outcome = await asyncio.to_thread(self._backend.run_test, call)
-        except subprocess.TimeoutExpired:
-            return self._timed_out(request_id, started)
-        result = self._result(request, accepted, call, outcome, started)
+        except subprocess.TimeoutExpired as expired:
+            return self._timed_out(request_id, started, expired)
+        result = self._result(request, accepted, call, outcome, _Span(started, self._clock()))
         result = await self._with_table_hits(result, accepted, call)
         return await self._with_request_classes(result, request, outcome, call)
 
@@ -220,7 +229,7 @@ class HostedExecutor:
     # -- the outcome -----------------------------------------------------------------------------------------------
 
     def _result(
-        self, request: TestRequest, accepted: AcceptedMeasurement, call: TestCall, outcome: TestOutcome, started: float
+        self, request: TestRequest, accepted: AcceptedMeasurement, call: TestCall, outcome: TestOutcome, span: _Span
     ) -> TestResult:
         request_id = request.request_id or ""
         failure = _failure_class_of(outcome)
@@ -238,6 +247,7 @@ class HostedExecutor:
         rounds, accuracy = _measured_values(request, accepted, outcome) if failure is None else ((), ())
         location = self._profile_location(call) if failure is None and request.kind is TestKind.PROFILE else ""
         verdict = _landed_verdict(call) if failure is None and request.kind is TestKind.REPRO else ""
+        started = span.started
         gpu_seconds = max(0.0, finished - started) * facts.gpu_count
         return TestResult(
             request_id=request_id,
@@ -255,6 +265,7 @@ class HostedExecutor:
             repro_verdict=verdict,
             nonfatal_warnings=_warnings_of(outcome.rounds) if failure is None else (),
             cold_start_seconds=boot_seconds(call.output_dir),
+            **_phase_fields(outcome.phases, span, finished, facts.gpu_count),
             **audit,
         )
 
@@ -305,11 +316,13 @@ class HostedExecutor:
                 return f"{PREFIX_CACHE_OFF_ERROR_CLASS}: {reason}"
         return ""
 
-    def _timed_out(self, request_id: str, started: float) -> TestResult:
+    def _timed_out(self, request_id: str, started: float, expired: subprocess.TimeoutExpired) -> TestResult:
         """A timeout is an unclear failure (4.5): the sandbox is read from the journal, the node is not known."""
         record = self._backend.journal.latest(request_id)
         verdict = classify_test_failure(returncode=0, timed_out=True)
         sandbox = record.sandbox_id if record is not None and record.sandbox_id else f"hosted-{request_id}"
+        finished = self._clock()
+        phases = expired.phases if isinstance(expired, MeasurementTimeout) else ()
         return TestResult(
             request_id=request_id,
             validity=Validity.CANDIDATE_FAILED,
@@ -317,7 +330,8 @@ class HostedExecutor:
             failure_reason=verdict.failure_reason,
             sandbox=SandboxFacts(sandbox_id=sandbox, backend=self._backend.name),
             started_at=started,
-            finished_at=self._clock(),
+            finished_at=finished,
+            **_phase_fields(phases, _Span(started, finished), finished, 0),
         )
 
     def _record_of(self, request_id: str, outcome: TestOutcome) -> Record | None:
@@ -340,6 +354,16 @@ class HostedExecutor:
         if manifest is not None:
             fields.update(spec_fingerprint=manifest.spec_fingerprint, surface_sha256=manifest.surface_sha256)
         return fields
+
+
+def _phase_fields(phases: tuple[PhaseTiming, ...], span: _Span, finished: float, gpus: int) -> dict[str, Any]:
+    """The ``TestResult`` fields that say where an attempt's wall time went: the backend's phases, the executor's own
+    reading of the result, and the seconds left over; none for a backend that stamped no phases."""
+    if not phases:
+        return {}
+    read = (PhaseTiming(RESULT_READ, span.returned, finished - span.returned),) if finished > span.returned else ()
+    accounted = account((*phases, *read), finished - span.started, gpus)
+    return {"phases": accounted.phases, "unaccounted_seconds": accounted.unaccounted_seconds}
 
 
 def _one_line(text: str) -> str:
