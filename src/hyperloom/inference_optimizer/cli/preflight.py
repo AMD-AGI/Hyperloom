@@ -1177,7 +1177,7 @@ def _install_pinned_lm_eval(python_exe: str, pip_extra: list[str]) -> None:
         print(f"Preflight: WARNING — pinned lm_eval via {source} failed; falling back")
 
 
-def _resumed_session_state(args: argparse.Namespace | None) -> dict[str, Any] | None:
+def _resumed_session_state(args: argparse.Namespace) -> dict[str, Any] | None:
     """The persisted ``state.json`` of the session ``--resume-from`` names, or ``None``.
 
     Preflight runs before the resume block loads the session, so anything preflight decides from a session-pinned
@@ -1240,7 +1240,7 @@ def _refuse_resume_without_state(args: argparse.Namespace) -> None:
     raise SystemExit(2)
 
 
-def _pin_resumed_session_args(args: argparse.Namespace | None) -> None:
+def _pin_resumed_session_args(args: argparse.Namespace) -> None:
     """Apply the resumed session's pinned settings to ``args`` before any preflight check reads them.
 
     A session's framework is fixed at creation, and the resume block re-exports the persisted one; without this, a
@@ -1249,8 +1249,6 @@ def _pin_resumed_session_args(args: argparse.Namespace | None) -> None:
     otherwise check one framework and run another. A kernel phase disabled at creation stays disabled, as the resume
     block also enforces, so the TraceLens requirement is judged on the same setting the run uses.
     """
-    if args is None:
-        return
     state = _resumed_session_state(args)
     if not state:
         _refuse_resume_without_state(args)
@@ -1580,7 +1578,7 @@ def _emit_preflight_diagnostics(
     *,
     magpie_python: str,
     anthropic_base_url: str,
-    args: argparse.Namespace | None = None,
+    args: argparse.Namespace,
 ) -> dict[str, Any]:
     """One canonical, grep-friendly diagnostics block at the end of preflight."""
     from hyperloom.orchestrator.actions.executors._aiter_jit import probe_aiter_jit_cache as _probe_aiter_jit_cache
@@ -1612,17 +1610,16 @@ def _emit_preflight_diagnostics(
         print(f"  ANTHROPIC_BASE_URL  = {anthropic_base_url}")
     else:
         print("  ANTHROPIC_BASE_URL  = <unset> — no LLM base URL resolved; Claude SDK will fail")
-    if args is not None:
-        kb_enabled = bool(getattr(args, "recipe_kb_enabled", True))
-        pr_enabled = bool(getattr(args, "pr_monitor_enabled", True))
-        kb_reason = getattr(args, "kb_degraded_reason", None) or "-"
-        pr_reason = getattr(args, "pr_degraded_reason", None) or "-"
-        kb_status = "OK" if kb_enabled else f"DEGRADED ({kb_reason})"
-        pr_status = "OK" if pr_enabled else f"DEGRADED ({pr_reason})"
-        print(f"  kb_status           = {kb_status}")
-        print(f"  pr_monitor_status   = {pr_status}")
-        print(f"  kb_degraded_reason  = {kb_reason}")
-        print(f"  pr_degraded_reason  = {pr_reason}")
+    kb_enabled = not bool(getattr(args, "degraded_kb", False))
+    pr_enabled = bool(getattr(args, "pr_monitor_enabled", True))
+    kb_reason = getattr(args, "kb_degraded_reason", None) or "-"
+    pr_reason = getattr(args, "pr_degraded_reason", None) or "-"
+    kb_status = "OK" if kb_enabled else f"DEGRADED ({kb_reason})"
+    pr_status = "OK" if pr_enabled else f"DEGRADED ({pr_reason})"
+    print(f"  kb_status           = {kb_status}")
+    print(f"  pr_monitor_status   = {pr_status}")
+    print(f"  kb_degraded_reason  = {kb_reason}")
+    print(f"  pr_degraded_reason  = {pr_reason}")
 
     # Surface Recipe KB offline-queue state; dead-letter pile-up signals a cold start.
     queue_status: dict[str, Any]
@@ -1901,9 +1898,9 @@ class PreflightRuntime:
     resolved_urls: tuple[str, str]
 
 
-def _finish_install_event(event: dict[str, Any], *, args: argparse.Namespace | None, runtime: PreflightRuntime) -> None:
-    no_kernel = bool(getattr(args, "no_kernel", False)) if args is not None else False
-    enable_roofline = bool(getattr(args, "enable_roofline", True)) if args is not None else True
+def _finish_install_event(event: dict[str, Any], *, args: argparse.Namespace, runtime: PreflightRuntime) -> None:
+    no_kernel = bool(getattr(args, "no_kernel", False))
+    enable_roofline = bool(getattr(args, "enable_roofline", True))
     tracelens_required = _tracelens_required_at_preflight(no_kernel, enable_roofline)
     event["ext"]["runtime_snapshot"] = {
         "benchmark_backend": runtime.benchmark_backend,
@@ -2207,7 +2204,7 @@ def _prepare_inferencex(install_event: Any, *, magpie_active: bool) -> str:
     return inferencex_path
 
 
-def _check_kernel_and_tracelens_clis(install_event: Any, args: argparse.Namespace | None) -> None:
+def _check_kernel_and_tracelens_clis(install_event: Any, args: argparse.Namespace) -> None:
     """Check the kernel-tuning and TraceLens CLIs before the Coordinator starts.
 
     A hard failure here catches launchers that skip install.sh, rather than
@@ -2215,8 +2212,8 @@ def _check_kernel_and_tracelens_clis(install_event: Any, args: argparse.Namespac
     ten hours later in trace_analyze. Both are skipped when the run asks for
     neither kernel work nor roofline.
     """
-    no_kernel = getattr(args, "no_kernel", False) if args else False
-    enable_roofline = getattr(args, "enable_roofline", True) if args else True
+    no_kernel = getattr(args, "no_kernel", False)
+    enable_roofline = getattr(args, "enable_roofline", True)
     if no_kernel:
         _record_install_step(
             install_event,
@@ -2261,8 +2258,8 @@ def _check_kernel_and_tracelens_clis(install_event: Any, args: argparse.Namespac
     )
 
 
-def _validate_explicit_server_limits(args: argparse.Namespace | None) -> None:
-    effective = argparse.Namespace(**vars(args)) if args is not None else argparse.Namespace()
+def _validate_explicit_server_limits(args: argparse.Namespace) -> None:
+    effective = argparse.Namespace(**vars(args))
     state = _resumed_session_state(args) or {}
     pins = parse_operator_extra_env(effective) or state.get("operator_extra_env", {})
     if state:
@@ -2280,7 +2277,7 @@ def _validate_explicit_server_limits(args: argparse.Namespace | None) -> None:
 
 
 def _preflight(
-    args: argparse.Namespace | None = None,
+    args: argparse.Namespace,
 ) -> tuple[str, str]:
     """Auto-install missing runtime deps and export auth aliases."""
     _pin_resumed_session_args(args)
@@ -2334,7 +2331,7 @@ def _preflight(
     from hyperloom.agents.framework.kb import prepare_kb_environment
 
     kb_withdrawn_override = bool(os.environ.get("FRAMEWORK_AGENT_KB_DIR", "").strip())
-    kb_enabled = not bool(getattr(args, "degraded_kb", False)) if args is not None else True
+    kb_enabled = not bool(getattr(args, "degraded_kb", False))
 
     def _prepare_kb_install_step() -> dict[str, Any]:
         prepare_kb_environment()
@@ -2460,18 +2457,12 @@ def _preflight(
     _check_kernel_and_tracelens_clis(install_event, args)
 
     # --- IR-3: PR Monitor reachability probe (soft degrade) ---
-    if args is not None:
-        _run_install_step(
-            install_event,
-            step_id="ir3_pr_monitor_probe",
-            category="degrade",
-            action=lambda: _run_ir3_preflight(args),
-        )
-    else:
-        _record_install_step(
-            install_event,
-            InstallStep("ir3_pr_monitor_probe", "degrade", "skipped", skip_reason="args_unavailable"),
-        )
+    _run_install_step(
+        install_event,
+        step_id="ir3_pr_monitor_probe",
+        category="degrade",
+        action=lambda: _run_ir3_preflight(args),
+    )
 
     # --- Single canonical diagnostics block ---
     _run_install_step(
@@ -2499,7 +2490,6 @@ def _run_ir3_preflight(args: argparse.Namespace) -> dict[str, Any]:
     explicit_kb = bool(getattr(args, "degraded_kb", False))
     explicit_pr = bool(getattr(args, "degraded_pr", False))
 
-    args.recipe_kb_enabled = not explicit_kb
     args.kb_degraded_reason = "explicit_flag" if explicit_kb else None
     args.pr_monitor_enabled = not explicit_pr
     args.pr_degraded_reason = "explicit_flag" if explicit_pr else None

@@ -32,7 +32,7 @@ from hyperloom.inference_optimizer.cli.parser import _build_parser
 
 @pytest.fixture
 def stub_install_steps(monkeypatch, tmp_path):
-    """Stub out heavyweight install steps so _preflight() is fast."""
+    """Stub out heavyweight install steps so _preflight(argparse.Namespace()) is fast."""
     monkeypatch.setenv("USERPROFILE", str(tmp_path))
     monkeypatch.setattr(cli_preflight, "_load_dotenv_fallback", lambda: None)
     # Stub the kernel-agent env fallback (it hard-fails when missing).
@@ -522,7 +522,7 @@ def test_preflight_expands_header_refs_to_credentials_from_legacy_deepseek_env(
     anthropic_key_var = "_".join(("ANTHROPIC", "API", "KEY"))
     monkeypatch.setenv("ANTHROPIC_CUSTOM_HEADERS", f"Ocp-Apim-Subscription-Key: ${{{anthropic_key_var}}}")
 
-    cli_preflight._preflight()
+    cli_preflight._preflight(argparse.Namespace())
 
     assert cli.os.environ["ANTHROPIC_CUSTOM_HEADERS"] == "Ocp-Apim-Subscription-Key: ds-legacy-token"
 
@@ -537,7 +537,7 @@ def test_preflight_does_not_export_a_derived_url_for_a_subscription_token(
     monkeypatch.setenv("HOME", str(tmp_path))
     _oauth_only_env(monkeypatch, base_url="")
 
-    resolved = cli_preflight._preflight()
+    resolved = cli_preflight._preflight(argparse.Namespace())
 
     # Still resolved for the decisions downstream of it...
     assert resolved[0] == "https://api.anthropic.com"
@@ -555,7 +555,7 @@ def test_preflight_still_exports_an_explicit_url_for_a_subscription_token(
     monkeypatch.setenv("HOME", str(tmp_path))
     _oauth_only_env(monkeypatch, base_url="https://gw.example/anthropic")
 
-    cli_preflight._preflight()
+    cli_preflight._preflight(argparse.Namespace())
 
     assert cli.os.environ["ANTHROPIC_BASE_URL"] == "https://gw.example/anthropic"
 
@@ -594,7 +594,7 @@ def test_preflight_resolves_urls_and_fans_out_only_the_url_alias(
         encoding="utf-8",
     )
 
-    resolved = cli_preflight._preflight()
+    resolved = cli_preflight._preflight(argparse.Namespace())
 
     # OpenAI side only: the Anthropic endpoint is left unset rather than derived.
     assert resolved == ("", "https://gateway.example/api/v1/llm-proxy/v1")
@@ -640,7 +640,7 @@ def test_preflight_keeps_explicit_provider_keys(
     ):
         monkeypatch.delenv(name, raising=False)
 
-    resolved = cli_preflight._preflight()
+    resolved = cli_preflight._preflight(argparse.Namespace())
 
     # Both base URLs are kept distinct.
     assert resolved == ("https://api.anthropic.com", "https://api.openai.com/v1")
@@ -670,7 +670,7 @@ def test_preflight_keeps_anthropic_side_supplied_by_dotenv(
 
     monkeypatch.setattr(cli_preflight, "_load_dotenv_fallback", _dotenv_supplies_anthropic_side)
 
-    resolved = cli_preflight._preflight()
+    resolved = cli_preflight._preflight(argparse.Namespace())
 
     assert resolved == ("https://gw.example.com", "https://gw.example.com/v1")
     assert cli.os.environ["_".join(("ANTHROPIC", "API", "KEY"))] == "ak-gw"
@@ -693,7 +693,7 @@ def test_preflight_rejects_half_configured_side_from_dotenv(
     monkeypatch.setattr(cli_preflight, "_load_dotenv_fallback", _dotenv_has_stale_anthropic_key)
 
     with pytest.raises(SystemExit) as excinfo:
-        cli_preflight._preflight()
+        cli_preflight._preflight(argparse.Namespace())
 
     assert excinfo.value.code == 2
 
@@ -714,7 +714,7 @@ def test_preflight_openai_only_drops_anthropic_creds_from_installer_env(
 
     monkeypatch.setattr(cli_preflight, "_load_kernel_agent_env_fallback", _stale_kernel_env_loader)
 
-    resolved = cli_preflight._preflight()
+    resolved = cli_preflight._preflight(argparse.Namespace())
 
     assert resolved == ("", "https://gateway.example/v1")
     assert "_".join(("ANTHROPIC", "API", "KEY")) not in cli.os.environ
@@ -733,7 +733,7 @@ def test_preflight_claude_config_uses_explicit_anthropic_key(
     monkeypatch.setenv("_".join(("OPENAI", "API", "KEY")), "openai-user-token")
     monkeypatch.setenv("_".join(("ANTHROPIC", "API", "KEY")), "anthropic-user-token")
 
-    cli_preflight._preflight()
+    cli_preflight._preflight(argparse.Namespace())
 
     config_text = (tmp_path / ".claude" / "config.json").read_text(encoding="utf-8")
     assert '"primaryApiKey": "anthropic-user-token"' in config_text
@@ -753,7 +753,7 @@ def test_preflight_anthropic_only_leaves_openai_protocol_aliases_unset(
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
 
-    resolved = cli_preflight._preflight()
+    resolved = cli_preflight._preflight(argparse.Namespace())
 
     # Official Anthropic is not OpenAI-compatible; only Anthropic side resolved.
     assert resolved == ("https://api.anthropic.com", "")
@@ -777,7 +777,7 @@ def test_preflight_official_anthropic_key_only_uses_default_endpoint(
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("_".join(("ANTHROPIC", "API", "KEY")), "anthropic-user-token")
 
-    resolved = cli._preflight()
+    resolved = cli._preflight(argparse.Namespace())
 
     assert resolved == ("https://api.anthropic.com", "")
     assert cli.os.environ["ANTHROPIC_BASE_URL"] == "https://api.anthropic.com"
@@ -804,7 +804,7 @@ def test_preflight_anthropic_only_ignores_stale_kernel_env_openai_fallback(
 
     monkeypatch.setattr(cli_preflight, "_load_kernel_agent_env_fallback", _stale_kernel_env_loader)
 
-    resolved = cli._preflight()
+    resolved = cli._preflight(argparse.Namespace())
 
     assert resolved == ("https://api.anthropic.com", "")
     assert cli.os.environ["ANTHROPIC_BASE_URL"] == "https://api.anthropic.com"
@@ -826,7 +826,7 @@ def test_preflight_official_openai_key_only_uses_default_endpoint(
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("_".join(("OPENAI", "API", "KEY")), "openai-user-token")
 
-    resolved = cli._preflight()
+    resolved = cli._preflight(argparse.Namespace())
 
     assert resolved == ("", "https://api.openai.com/v1")
     assert "ANTHROPIC_BASE_URL" not in cli.os.environ
@@ -843,7 +843,7 @@ def test_preflight_both_official_keys_without_urls_uses_default_endpoints(
     monkeypatch.setenv("_".join(("ANTHROPIC", "API", "KEY")), "anthropic-user-token")
     monkeypatch.setenv("_".join(("OPENAI", "API", "KEY")), "openai-user-token")
 
-    resolved = cli._preflight()
+    resolved = cli._preflight(argparse.Namespace())
 
     assert resolved == ("https://api.anthropic.com", "https://api.openai.com/v1")
     assert cli.os.environ["ANTHROPIC_BASE_URL"] == "https://api.anthropic.com"
@@ -867,7 +867,7 @@ def test_preflight_preserves_operator_geak_tunnel_url(
     monkeypatch.setenv("GEAK_BASE_URL", tunnel)
     # LLM_API_BASE left unset → should default to the gateway.
 
-    resolved = cli_preflight._preflight()
+    resolved = cli_preflight._preflight(argparse.Namespace())
 
     gateway = resolved[1]
     assert cli.os.environ["GEAK_BASE_URL"] == tunnel
@@ -893,7 +893,7 @@ def test_preflight_rewrites_stale_proxy_even_when_operator_set(
         "http://127.0.0.1:4002/api/v1/llm-proxy/v1",
     )
 
-    resolved = cli_preflight._preflight()
+    resolved = cli_preflight._preflight(argparse.Namespace())
 
     assert cli.os.environ["LLM_API_BASE"] == resolved[1]
     assert "127.0.0.1:4002" not in cli.os.environ["LLM_API_BASE"]
@@ -914,7 +914,7 @@ def test_preflight_keeps_official_anthropic_endpoint_despite_leftover_deepseek_k
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
     monkeypatch.delenv("_".join(("OPENAI", "API", "KEY")), raising=False)
 
-    cli_preflight._preflight()
+    cli_preflight._preflight(argparse.Namespace())
 
     assert cli.os.environ["ANTHROPIC_BASE_URL"] == "https://api.anthropic.com"
     assert cli.os.environ.get("OPENAI_BASE_URL", "") == ""
@@ -1005,7 +1005,7 @@ def test_preflight_anthropic_only_sets_geak_v4_claude_model(
     monkeypatch.delenv("_".join(("OPENAI", "API", "KEY")), raising=False)
     monkeypatch.delenv("GEAK_CLAUDE_MODEL", raising=False)
 
-    cli._preflight()
+    cli._preflight(argparse.Namespace())
 
     assert cli.os.environ["GEAK_CLAUDE_MODEL"] == "claude-opus-4-6"
 
@@ -1028,7 +1028,7 @@ def test_preflight_migrates_retired_deepseek_env_to_both_sides(
     monkeypatch.delenv("CLAUDE_MODEL", raising=False)
     monkeypatch.delenv("GEAK_CLAUDE_MODEL", raising=False)
 
-    cli._preflight()
+    cli._preflight(argparse.Namespace())
 
     assert cli.os.environ["ANTHROPIC_BASE_URL"] == "https://api.deepseek.com/anthropic"
     assert cli.os.environ["OPENAI_BASE_URL"] == "https://api.deepseek.com/v1"
@@ -1050,7 +1050,7 @@ def test_preflight_retired_deepseek_env_exports_claude_cli_auth_aliases(
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
     monkeypatch.delenv("_".join(("OPENAI", "API", "KEY")), raising=False)
 
-    cli._preflight()
+    cli._preflight(argparse.Namespace())
 
     assert cli.os.environ["ANTHROPIC_BASE_URL"] == "https://api.deepseek.com/anthropic"
     assert cli.os.environ["_".join(("ANTHROPIC", "API", "KEY"))] == "deepseek-token"
@@ -2363,7 +2363,7 @@ def test_preflight_does_not_clear_cached_anthropic_only_codex_follow(
     )
 
     codex_follows_before = cli._codex_model_should_follow_claude()
-    resolved = cli._preflight()
+    resolved = cli._preflight(argparse.Namespace())
     if codex_follows_before:
         args.codex_model = args.claude_model
 
@@ -2497,14 +2497,13 @@ def test_ir3_kb_ok_pr_ok(marker_path):
         side_effect=_fake_run_writes_marker(marker_path, kb_reachable=True, pr_reachable=True),
     ):
         cli_preflight._run_ir3_preflight(args)
-    assert args.recipe_kb_enabled is True
     assert args.pr_monitor_enabled is True
     assert args.kb_degraded_reason is None
     assert args.pr_degraded_reason is None
 
 
 def test_ir3_kb_probe_unreachable_does_not_auto_degrade_recipe_kb(marker_path):
-    """Recipe KB has no remote IR-3 probe; unreachable kb marker must not flip recipe_kb_enabled."""
+    """Recipe KB has no remote IR-3 probe; unreachable kb marker must not set degraded_kb."""
     args = _ns()
     with patch.object(
         cli_preflight.subprocess,
@@ -2517,7 +2516,7 @@ def test_ir3_kb_probe_unreachable_does_not_auto_degrade_recipe_kb(marker_path):
         ),
     ):
         cli_preflight._run_ir3_preflight(args)
-    assert args.recipe_kb_enabled is True
+    assert args.degraded_kb is False
     assert args.pr_monitor_enabled is True
     assert args.kb_degraded_reason is None
     assert args.pr_degraded_reason is None
@@ -2536,7 +2535,6 @@ def test_ir3_kb_explicit_flag(marker_path):
         cli_preflight._run_ir3_preflight(args)
     assert "SKIP_KB_PROBE" not in seen_env
     assert "SKIP_PR_PROBE" not in seen_env
-    assert args.recipe_kb_enabled is False
     assert args.kb_degraded_reason == "explicit_flag"
     assert args.pr_monitor_enabled is True
     assert args.pr_degraded_reason is None
@@ -2551,7 +2549,6 @@ def test_ir3_kb_401_with_token(marker_path, monkeypatch):
         side_effect=_fake_run_writes_marker(marker_path, kb_reachable=True, pr_reachable=True),
     ):
         cli_preflight._run_ir3_preflight(args)
-    assert args.recipe_kb_enabled is True
     assert args.kb_degraded_reason is None
 
 
@@ -2569,7 +2566,7 @@ def test_ir3_kb_401_missing_token_does_not_auto_degrade_recipe_kb(marker_path, m
         ),
     ):
         cli_preflight._run_ir3_preflight(args)
-    assert args.recipe_kb_enabled is True
+    assert args.degraded_kb is False
     assert args.kb_degraded_reason is None
 
 
@@ -2585,7 +2582,6 @@ def test_ir3_pr_explicit_flag_kb_ok(marker_path):
     with patch.object(cli_preflight.subprocess, "run", side_effect=_runner):
         cli_preflight._run_ir3_preflight(args)
     assert seen_env.get("SKIP_PR_PROBE") == "1"
-    assert args.recipe_kb_enabled is True
     assert args.kb_degraded_reason is None
     assert args.pr_monitor_enabled is False
     assert args.pr_degraded_reason == "explicit_flag"
@@ -2596,7 +2592,6 @@ def test_ir3_both_flags_short_circuit(marker_path):
     with patch.object(cli_preflight.subprocess, "run") as run_mock:
         cli_preflight._run_ir3_preflight(args)
         run_mock.assert_not_called()
-    assert args.recipe_kb_enabled is False
     assert args.pr_monitor_enabled is False
     assert args.kb_degraded_reason == "explicit_flag"
     assert args.pr_degraded_reason == "explicit_flag"
@@ -2620,7 +2615,6 @@ def test_ir3_preflight_does_not_inject_recipe_kb_url(marker_path, monkeypatch):
     with patch.object(cli_preflight.subprocess, "run", side_effect=_runner):
         cli_preflight._run_ir3_preflight(args)
     assert "RECIPE_KB_KB_URL" not in seen_env
-    assert args.recipe_kb_enabled is True
     assert args.kb_degraded_reason is None
 
 
@@ -2647,7 +2641,6 @@ def test_ir3_unreachable_local_default_disables_pr_monitor(marker_path, monkeypa
         outcome = cli_preflight._run_ir3_preflight(args)
 
     assert seen_env["KB_STORE_URL"] == DEFAULT_KB_STORE_URL
-    assert args.recipe_kb_enabled is True
     assert args.pr_monitor_enabled is False
     assert args.pr_degraded_reason == "ir3_auto"
     assert "HYPERLOOM_PR_MONITOR_ENABLED" not in os.environ
