@@ -86,6 +86,10 @@ _HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
 _SNIFF_BYTES = 8192
 #: Check names, as ``Problem.check`` and the report's sections carry them.
 COMMENTS, ENGLISH, TEST_IMPORTS, LITERALS = "comments", "english", "test-imports", "literals"
+BROAD_NOQA = "broad-noqa"
+#: A noqa comment naming BLE001; ``reason`` is what follows the code list.
+_BROAD_NOQA = re.compile(r"#\s*noqa:\s*(?:[A-Z]+[0-9]+\s*,\s*)*BLE001\b(?:\s*,\s*[A-Z]+[0-9]+)*(?P<reason>.*)")
+_REASON_PUNCTUATION = " \t-:#\u2014"
 #: What makes a module test code: a ``tests`` package on its path, or a ``test_`` file name.
 _TESTS, _TEST_PREFIX, _CONFTEST = "tests", "test_", "conftest"
 #: Calls that import the module their first (string) argument names.
@@ -262,6 +266,19 @@ def comment_problems(path: str, text: str, added: set[int], removed: Iterable[st
     exempt = todo_rows | {row + 1 for row in todo_rows if row + 1 in full}
     for row in sorted(added & set(comments) - exempt):
         problems += _comment_text_problems(path, row, comments[row])
+    return problems
+
+
+def broad_noqa_problems(path: str, text: str, added: set[int], removed: Iterable[str] = ()) -> list[Problem]:
+    """Refusals for each ``# noqa: BLE001`` that ``added`` puts into ``text`` without a reason on its line."""
+    _full, comments = comment_lines(text)
+    lines, moved = text.splitlines(), set(removed)
+    problems = []
+    for row in sorted(added & set(comments)):
+        match = _BROAD_NOQA.search(comments[row])
+        if match is None or match["reason"].strip(_REASON_PUNCTUATION) or lines[row - 1].strip() in moved:
+            continue
+        problems.append(Problem(BROAD_NOQA, path, row, "`# noqa: BLE001` gives no reason"))
     return problems
 
 
@@ -571,6 +588,7 @@ def run_all(root: Path, roots: Iterable[str], exclude: Iterable[str], units: Uni
             continue
         text = full.read_text(encoding=ENCODING)
         problems += comment_problems(path, text, diff.added.get(path, set()), diff.removed)
+        problems += broad_noqa_problems(path, text, diff.added.get(path, set()), diff.removed)
         if path in modules and not is_test_path(path):
             literal_paths.append((path, text))
     befores = [(p, show(root, since, p)) for p in touched if _counts_literals(p, roots, excluded)]

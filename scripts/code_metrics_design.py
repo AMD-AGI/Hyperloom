@@ -529,17 +529,25 @@ def _comparisons(tree: ast.Module) -> Iterator[tuple[ast.AST, ast.expr, ast.Cons
     """(test, subject, string) of every ``==``/``!=``, ``in`` over a display and ``case`` with a string."""
     for node in ast.walk(tree):
         if isinstance(node, ast.Match):
-            for case in node.cases:
-                for pattern in ast.walk(case.pattern):
-                    if isinstance(pattern, ast.MatchValue) and _is_string(pattern.value):
-                        yield pattern, node.subject, pattern.value
+            yield from _case_strings(node)
         elif isinstance(node, ast.Compare):
-            operands = [node.left, *node.comparators]
-            for op, left, right in zip(node.ops, operands, operands[1:], strict=False):
-                if isinstance(op, _EQUALITY):
-                    yield from ((node, b, a) for a, b in ((left, right), (right, left)) if _is_string(a))
-                elif isinstance(op, _MEMBERSHIP) and isinstance(right, _DISPLAYS):
-                    yield from ((node, left, e) for e in right.elts if _is_string(e))
+            yield from _compare_strings(node)
+
+
+def _case_strings(node: ast.Match) -> Iterator[tuple[ast.AST, ast.expr, ast.Constant]]:
+    for case in node.cases:
+        for pattern in ast.walk(case.pattern):
+            if isinstance(pattern, ast.MatchValue) and _is_string(pattern.value):
+                yield pattern, node.subject, pattern.value
+
+
+def _compare_strings(node: ast.Compare) -> Iterator[tuple[ast.AST, ast.expr, ast.Constant]]:
+    operands = [node.left, *node.comparators]
+    for op, left, right in zip(node.ops, operands, operands[1:], strict=False):
+        if isinstance(op, _EQUALITY):
+            yield from ((node, b, a) for a, b in ((left, right), (right, left)) if _is_string(a))
+        elif isinstance(op, _MEMBERSHIP) and isinstance(right, _DISPLAYS):
+            yield from ((node, left, e) for e in right.elts if _is_string(e))
 
 
 def _is_string(node: ast.expr) -> bool:

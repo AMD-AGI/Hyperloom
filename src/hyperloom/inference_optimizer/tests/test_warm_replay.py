@@ -14,6 +14,7 @@ import subprocess
 import pytest
 
 from hyperloom.orchestrator.knowledge.knowledge_plane import KnowledgePlane
+from hyperloom.inference_optimizer.session.optimization_journal import Verdict
 from hyperloom.inference_optimizer.breakdown.recorder.phase_event import is_phase_transition_row
 from hyperloom.orchestrator.actions.executors.baseline import restore_warm_kernel_snapshots
 from hyperloom.orchestrator.loop.coordinator import Coordinator
@@ -58,6 +59,7 @@ class _StubSharedState(SharedState):
                 {
                     "warm_replay_attempted": bool(self.warm_replay_attempted),
                     "warm_replay_outcome": dict(self.warm_replay_outcome or {}),
+                    "warm_replay_pending": dict(self.warm_replay_pending or {}),
                 }
             ),
             encoding="utf-8",
@@ -3280,12 +3282,9 @@ def _stock_sglang_tree(root: Path) -> Path:
     return root
 
 
-def test_a_promoted_warm_replay_patch_is_reinstalled_on_a_fresh_tree(tmp_path):
-    """The overlay a warm replay applied is part of current_best, so a resume onto a stock tree has to put it back."""
-    import shutil
-
+def _replayed_on_a_git_tree(tmp_path: Path) -> tuple[Coordinator, Path, dict, dict]:
+    """A warm replay that applied the PPE overlay to a real SGLang checkout, measured and ready to promote."""
     from hyperloom.orchestrator.actions.executors.baseline import _apply_warm_patches, _stamp_warm_patch_outcome
-    from hyperloom.orchestrator.source_snapshot import install_source_layers
 
     tree = _stock_sglang_tree(tmp_path / "sglang")
     params = {
@@ -3308,6 +3307,20 @@ def test_a_promoted_warm_replay_patch_is_reinstalled_on_a_fresh_tree(tmp_path):
     coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
     coord.shared_state.baseline_tput = 600.0
     coord.shared_state.warm_replay_outcome = {"expected_gain_pct": 0.0}
+    return coord, tree, result, params
+
+
+def _tree_git(tree: Path, *args: str) -> str:
+    return subprocess.run(["git", "-C", str(tree), *args], capture_output=True, text=True, check=True).stdout
+
+
+def test_a_promoted_warm_replay_patch_is_reinstalled_on_a_fresh_tree(tmp_path):
+    """The overlay a warm replay applied is part of current_best, so a resume onto a stock tree has to put it back."""
+    import shutil
+
+    from hyperloom.orchestrator.source_snapshot import install_source_layers
+
+    coord, tree, result, params = _replayed_on_a_git_tree(tmp_path)
 
     coord.phase_prelude.promote_warm_replay(result, task=_StubTask(params=params))
     shutil.rmtree(tree)
@@ -3320,3 +3333,132 @@ def test_a_promoted_warm_replay_patch_is_reinstalled_on_a_fresh_tree(tmp_path):
         _STOCK_ENVIRON + "SGLANG_PARALLEL_PROMPT_ENCODE = 1\n"
     )
     assert (tree / "python" / "sglang" / "srt" / "ppe.py").read_text(encoding="utf-8") == "ENABLED = True\n"
+
+
+def test_a_candidate_after_a_promoted_warm_replay_still_benches_its_overlays(tmp_path):
+    """Every integrate_patch candidate stashes a dirty tree first, so the adopted overlays have to be committed."""
+    from hyperloom.orchestrator.actions.executors._patch_git import _git_stash_if_dirty
+
+    coord, tree, result, params = _replayed_on_a_git_tree(tmp_path)
+    stock_head = _tree_git(tree, "rev-parse", "HEAD").strip()
+
+    coord.phase_prelude.promote_warm_replay(result, task=_StubTask(params=params))
+
+    assert _tree_git(tree, "rev-parse", "HEAD~1").strip() == stock_head
+    assert _git_stash_if_dirty(tree)[0] == "clean"
+    assert "SGLANG_PARALLEL_PROMPT_ENCODE = 1" in _tree_git(tree, "show", "HEAD:python/sglang/srt/environ.py")
+    assert _tree_git(tree, "show", "HEAD:python/sglang/srt/ppe.py") == "ENABLED = True\n"
+
+
+def test_a_warm_replay_the_lift_refuses_leaves_the_tree_stock(tmp_path):
+    coord, tree, result, params = _replayed_on_a_git_tree(tmp_path)
+    stock_head = _tree_git(tree, "rev-parse", "HEAD").strip()
+    coord.shared_state.current_best = {"action": "explore", "tput": 800.0, "extra_server_args": "", "extra_envs": {}}
+
+    verdict = coord.phase_prelude.promote_warm_replay(result, task=_StubTask(params=params))
+
+    assert verdict is Verdict.REVERTED
+    assert _tree_git(tree, "rev-parse", "HEAD").strip() == stock_head
+    assert _tree_git(tree, "status", "--porcelain") == ""
+    assert (tree / "python" / "sglang" / "srt" / "environ.py").read_text(encoding="utf-8") == _STOCK_ENVIRON
+
+
+def test_a_warm_replay_whose_overlays_cannot_be_committed_is_not_adopted(tmp_path):
+    coord, tree, result, params = _replayed_on_a_git_tree(tmp_path)
+    hook = tree / ".git" / "hooks" / "pre-commit"
+    hook.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    hook.chmod(0o755)
+
+    verdict = coord.phase_prelude.promote_warm_replay(result, task=_StubTask(params=params))
+
+    assert verdict is not Verdict.ADOPTED
+    assert coord.shared_state.optimization_stack == []
+    assert coord.shared_state.warm_replay_outcome["status"] == "promotion_failed"
+    assert "cannot be committed" in coord.shared_state.warm_replay_outcome["reason"]
+    assert _tree_git(tree, "status", "--porcelain") == ""
+    assert (tree / "python" / "sglang" / "srt" / "environ.py").read_text(encoding="utf-8") == _STOCK_ENVIRON
+
+
+def test_a_commit_failing_on_one_tree_leaves_every_tree_stock(tmp_path):
+    from hyperloom.orchestrator.actions.executors.baseline import _apply_warm_patches, _stamp_warm_patch_outcome
+
+    trees = [_stock_sglang_tree(tmp_path / name) for name in ("sglang", "tuning")]
+    stock_heads = [_tree_git(tree, "rev-parse", "HEAD").strip() for tree in trees]
+    params = {
+        "baseline_tput_anchor": 600.0,
+        "required_patch_timeline": True,
+        "patches": [
+            {"patch_file": f"patch/overlays/000001/0{i}.patch", "patch_content": _PPE_OVERLAY, "framework_root": str(t)}
+            for i, t in enumerate(trees)
+        ],
+        "extra_server_args": "--recipe",
+        "extra_envs": {},
+    }
+    workspace = tmp_path / "runs" / "replay_warm_recipe" / "warm"
+    workspace.mkdir(parents=True)
+    result = {"status": "succeeded", "output_throughput": 612.0, "workspace": str(workspace)}
+    _stamp_warm_patch_outcome(result, _apply_warm_patches(params, "", workspace), params)
+    hook = trees[1] / ".git" / "hooks" / "pre-commit"
+    hook.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    hook.chmod(0o755)
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
+    coord.shared_state.baseline_tput = 600.0
+    coord.shared_state.warm_replay_outcome = {"expected_gain_pct": 0.0}
+
+    coord.phase_prelude.promote_warm_replay(result, task=_StubTask(params=params))
+
+    assert coord.shared_state.warm_replay_outcome["status"] == "promotion_failed"
+    for tree, stock_head in zip(trees, stock_heads):
+        assert _tree_git(tree, "rev-parse", "HEAD").strip() == stock_head
+        assert (tree / "python" / "sglang" / "srt" / "environ.py").read_text(encoding="utf-8") == _STOCK_ENVIRON
+
+
+def test_a_resume_rolls_back_a_replay_that_died_after_committing_its_overlays(tmp_path):
+    coord, tree, result, params = _replayed_on_a_git_tree(tmp_path)
+    stock_head = _tree_git(tree, "rev-parse", "HEAD").strip()
+    coord.shared_state.warm_replay_pending = {"task_id": "warm", "recipe_patch_trees": result["warm_patch_trees"]}
+    promoted, _ = coord.phase_prelude._resolve_promoted_recipe_checkout(result, _StubTask(params=params))
+    assert promoted
+
+    persisted = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
+    coord.shared_state.warm_replay_pending = persisted["warm_replay_pending"]
+    rollback = coord.phase_prelude.rollback_combined_warm({}, None)
+
+    assert rollback["errors"] == []
+    assert _tree_git(tree, "rev-parse", "HEAD").strip() == stock_head
+    assert (tree / "python" / "sglang" / "srt" / "environ.py").read_text(encoding="utf-8") == _STOCK_ENVIRON
+
+
+def test_a_refused_replay_leaves_an_overlay_the_tree_already_held_uncommitted(tmp_path):
+    from hyperloom.orchestrator.actions.executors.baseline import _apply_warm_patches, _stamp_warm_patch_outcome
+
+    tree = _stock_sglang_tree(tmp_path / "sglang")
+    stock_head = _tree_git(tree, "rev-parse", "HEAD").strip()
+    overlay = tmp_path / "ppe.patch"
+    overlay.write_text(_PPE_OVERLAY, encoding="utf-8")
+    _tree_git(tree, "apply", str(overlay))
+    held = _tree_git(tree, "status", "--porcelain")
+    params = {
+        "baseline_tput_anchor": 600.0,
+        "required_patch_timeline": True,
+        "patches": [
+            {"patch_file": "patch/overlays/000001/00.patch", "patch_content": _PPE_OVERLAY, "framework_root": str(tree)}
+        ],
+        "extra_server_args": "--recipe",
+        "extra_envs": {},
+    }
+    workspace = tmp_path / "runs" / "replay_warm_recipe" / "warm"
+    workspace.mkdir(parents=True)
+    result = {"status": "succeeded", "output_throughput": 612.0, "workspace": str(workspace)}
+    _stamp_warm_patch_outcome(result, _apply_warm_patches(params, str(tree), workspace), params)
+    assert [p["status"] for p in result["warm_patch_result"]["patches"]] == ["present_in_dirty_worktree"]
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
+    coord.shared_state.baseline_tput = 600.0
+    coord.shared_state.warm_replay_outcome = {"expected_gain_pct": 0.0}
+    coord.shared_state.current_best = {"action": "explore", "tput": 800.0, "extra_server_args": "", "extra_envs": {}}
+
+    verdict = coord.phase_prelude.promote_warm_replay(result, task=_StubTask(params=params))
+
+    assert verdict is Verdict.REVERTED
+    assert _tree_git(tree, "rev-parse", "HEAD").strip() == stock_head
+    assert _tree_git(tree, "status", "--porcelain") == held
