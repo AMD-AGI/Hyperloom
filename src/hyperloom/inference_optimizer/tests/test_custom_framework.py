@@ -674,3 +674,52 @@ class TestCustomAdapterMeasurement:
         assert [r.output_throughput for r in results] == pytest.approx([1.29, 1.29])
         assert all(not r.error_class for r in results)
         assert not list((tmp_path / "out").glob("variant_*/abort_reason.json"))
+
+
+class TestSandboxRoots:
+    """``HYPERLOOM_SANDBOX_MODE=bwrap`` binds what a custom run names on its command line."""
+
+    def _script_workspace(self, tmp_path):
+        user, venv = tmp_path / "user", tmp_path / "model-venv"
+        (venv / "bin").mkdir(parents=True)
+        (venv / "pyvenv.cfg").write_text("home = /usr/bin\n")
+        user.mkdir()
+        (user / "run.py").write_text("")
+        return user, venv
+
+    def test_optimize_binds_outputs_writable_and_inputs_read_only(self, monkeypatch, tmp_path):
+        from hyperloom.inference_optimizer.cli import sandbox_roots
+
+        user, venv = self._script_workspace(tmp_path)
+        repo, bench, weights = tmp_path / "optimization", tmp_path / "benchmark", tmp_path / "weights"
+        for directory in (repo, bench, weights):
+            directory.mkdir()
+        config = {"script": str(user / "run.py"), "cwd": str(user), "python": str(venv / "bin" / "python")}
+        (bench / "script_workload.json").write_text(json.dumps(config))
+        monkeypatch.setenv("USER_DATA_PATH", str(tmp_path / "sessions"))
+        argv = ["optimize", "--framework", "custom", "--framework-path", str(repo)]
+        argv += ["--benchmark-scripts-dir", str(bench), "--model", str(weights)]
+
+        roots = sandbox_roots(argv)
+
+        assert roots.writable == (tmp_path / "sessions", repo)
+        assert roots.readonly == (weights, bench, user, user, venv)
+
+    def test_help_and_bad_flags_declare_nothing(self):
+        from hyperloom.common.sandbox import SandboxRoots
+        from hyperloom.inference_optimizer.cli import sandbox_roots
+
+        assert sandbox_roots(["optimize", "--help"]) == SandboxRoots()
+        assert sandbox_roots(["optimize", "--max-hours", "not-a-number"]) == SandboxRoots()
+
+    def test_script_prepare_binds_its_workspace_script_and_interpreter(self, tmp_path):
+        from hyperloom.inference_optimizer.script_workload import sandbox_roots
+
+        user, venv = self._script_workspace(tmp_path)
+        argv = ["prepare", "--workspace", str(tmp_path / "ws"), "--script", str(user / "run.py")]
+        argv += ["--cwd", str(user), "--python", str(venv / "bin" / "python"), "--rel-l2", "0.01"]
+
+        roots = sandbox_roots(argv)
+
+        assert roots.writable == (tmp_path / "ws",)
+        assert roots.readonly == (user, user, venv)
