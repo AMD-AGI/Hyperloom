@@ -19,7 +19,10 @@ DIRECTIONS = (
     "only in another branch never runs here, and the log does not say so. A fast path behind a whitelist or table "
     "keyed by the model's shape (expert count, top-k, head size) falls back silently for a shape it does not list, "
     "and a fused helper the framework already has runs only for the models that ask for it: grep where each fused "
-    "helper is called and which model files pass its switch. Fix the cause with a source patch or the "
+    "helper is called and which model files pass its switch. A model feature its config leaves off (an index or KV "
+    "shared across layers, a fused path) is set with --hf-overrides, nested under text_config for a multimodal "
+    "wrapper: read which config keys the model file reads and the published MI355X recipes for this model "
+    "(InferenceX, AMD); an approximate one must pass the accuracy gate. Fix the cause with a source patch or the "
     "setting that removes it; errors and warnings in the log are leads, and untuned GEMM shapes belong to the GEMM "
     "tuning branch.",
     "GEMM tuning: for the GEMM shapes the profile shows for this workload (decode and prefill), first check which "
@@ -30,14 +33,19 @@ DIRECTIONS = (
     "carrying the rows of a table your head already has for that variable, and test several shapes in one test "
     "rather than one shape per test.",
     "Fusion: fuse the elementwise work around the GEMMs and the attention (rmsnorm with the residual add, silu with "
-    "mul, rope) with a source patch or a kernel, starting from the operators the profile ranks highest.",
+    "mul, rope) with a source patch or a kernel, starting from the operators the profile ranks highest. Carry the "
+    "fusion to the quantize: a norm, gate or attention output that an FP8 GEMM quantizes again should write the FP8 "
+    "values and scales itself, and the all-reduce before a norm can take the residual add, the norm and the quantize "
+    "in the same kernel.",
     "Server arguments and environment variables: yours is the one branch that tests settings alone; test the settings "
     "the profile or server.log point at, not a blind sweep. Before testing a setting, grep where it is read: one with "
     "no reader on this model's path, this backend or this phase (decode or prefill) is dead, and its test measures "
     "nothing. Bound a scheduler setting (chunked or mixed prefill, prefill and decode interleaving, running-request or "
     "cache-pool caps) from server.log first: what the run loses to the steady decode rate, less the prefill tokens at "
     "the prefill rate, is all scheduling can win, and under a closed-loop client a cap above the concurrency divided "
-    "by the DP size is never reached.",
+    "by the DP size is never reached. On a multi-turn workload, compare each follow-up turn's computed prefill tokens "
+    "with its new tokens: the excess is a prefix the cache drops every turn (a trailing block a draft path discards, a "
+    "block alignment, an eviction), and recovering it beats any prefill kernel.",
     "ROCm code gaps: find the code paths where ROCm runs a slower or missing implementation where CUDA has a fast one "
     "(a fallback, a missing fused or tuned path), and port or align the CUDA implementation.",
     "Attention and decode kernels: speed up the hottest attention and decode kernels the profile shows, with a kernel "

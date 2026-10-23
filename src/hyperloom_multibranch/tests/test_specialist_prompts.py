@@ -511,3 +511,20 @@ def test_the_gemm_direction_asks_for_the_table_read_and_marks_borrowed_rows_as_u
     assert "rows borrowed from tuned tables of the same kernel family at nearby shapes are an untimed guess" in gemm
     assert "rows_only=true" in gemm
     assert "several shapes in one test" in gemm
+
+
+def test_the_role_reads_draft_acceptance_by_context_host_work_host_syncs_and_capture_sizes():
+    prompt = role_prompt(WORKLOAD)
+
+    assert "Read the accept length per context-length bucket, not only its mean" in prompt
+    assert "Compare TTFT with the prefill's GPU time in the same test" in prompt
+    assert "A GPU profile does not show host stalls: grep the per-layer hot path for .item()" in prompt
+    assert "Set graph capture sizes from the token counts the workload's steps carry" in prompt
+
+
+def test_the_directions_name_prefix_recompute_config_overrides_and_fusion_through_the_quantize():
+    fast_path, fusion, settings = DIRECTIONS[0], DIRECTIONS[2], DIRECTIONS[3]
+
+    assert "compare each follow-up turn's computed prefill tokens with its new tokens" in settings
+    assert "is set with --hf-overrides, nested under text_config for a multimodal wrapper" in fast_path
+    assert "Carry the fusion to the quantize" in fusion
