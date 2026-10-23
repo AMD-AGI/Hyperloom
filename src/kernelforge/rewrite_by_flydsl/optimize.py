@@ -40,11 +40,16 @@ _TICK_SEC = 0.1
 
 @dataclass(frozen=True)
 class OptimizeOptions:
-    """The nested forge-loop's branch, supervisor backend and Analysis timeout."""
+    """The nested forge-loop's branch, supervisor backend, Analysis timeout, search strategy and lanes.
+
+    ``search_strategy`` and ``lanes`` are ``None`` when the caller left them to forge-loop's own defaults.
+    """
 
     git_branch: str = "forge-rewrite-optimize"
     supervisor_backend: str = "codex"
     profile_timeout_sec: int = 1800
+    search_strategy: str | None = None
+    lanes: int | None = None
 
 
 @dataclass(frozen=True)
@@ -333,6 +338,10 @@ def _forge_loop_cmd(
         "--roofline-ceiling",
         "on" if request.roofline_ceiling else "off",
     ]
+    if options.search_strategy:
+        cmd += ["--search-strategy", options.search_strategy]
+    if options.lanes is not None:
+        cmd += ["--lanes", str(options.lanes)]
     if baseline_json:
         cmd += ["--baseline-json", baseline_json]
     if config.gpu_type:
