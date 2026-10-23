@@ -569,7 +569,8 @@ def run(args: argparse.Namespace, outcome: Outcome) -> int:
         outcome.touched = checks.touched_files(root, since)
     compare(findings, outcome.baseline, outcome)
     if since:
-        paths = {f.path for f in outcome.new} | {f.path for f, _ in outcome.worsened}
+        paths = {f.path for f in outcome.new if f.metric in PER_FILE}
+        paths |= {f.path for f, _ in outcome.worsened if f.metric in PER_FILE}
         paths |= {key[1] for key, _was, _now in outcome.stale if key[0] in PER_FILE}
         at_base = base_values(root, since, paths, config)
         excuse_base_backlog(outcome, at_base)
