@@ -69,7 +69,8 @@ from .bootstrap import (
     _print_final_summary,
     _print_session_skeleton,
     _reconcile_crash_count,
-    prepare_plug_host,
+    open_plug_host,
+    resolve_plug_manifest,
     warn_without_target_gpu,
     running_plug_host,
     _seed_shared_state,
@@ -2418,6 +2419,10 @@ def _settle_custom_specialist_only(args: argparse.Namespace) -> None:
 
 async def _run_optimize(args: argparse.Namespace) -> int:
     """Run the ``optimize`` subcommand end to end."""
+    # First, before anything is opened or seeded: a refused plug flag must leave nothing behind, and a refused resume
+    # must leave the session as it was (budget, stop reason and crash count untouched).
+    resume_from = getattr(args, "resume_from", None)
+    plug_manifest = resolve_plug_manifest(args, Path(resume_from).expanduser().resolve() if resume_from else None)
     nodes_resolved = _resolve_run_topology(args)
     _settle_custom_specialist_only(args)
 
@@ -2485,7 +2490,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     session_dir = session.session_dir
     session_lock = session.session_lock
     manifest = session.manifest
-    plug_host = prepare_plug_host(args, session_dir)
+    plug_host = open_plug_host(plug_manifest, session_dir)
 
     # Recipe KB T0 anchor (after seed/restore for recipe_canonical_id, before Coordinator); skipped when --degraded-kb.
     recipe_kb_client = _bootstrap_recipe_kb(

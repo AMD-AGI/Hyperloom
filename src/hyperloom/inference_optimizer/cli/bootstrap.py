@@ -27,6 +27,7 @@ from hyperloom.plugs import (
     ManifestSources,
     PlugError,
     PlugHost,
+    ResolvedManifest,
     activated,
     builtin_registry,
     resolve_manifest,
@@ -52,12 +53,12 @@ from ..model_config_utils import summarize_model_config
 log = logging.getLogger(__name__)
 
 
-def prepare_plug_host(args: argparse.Namespace, session_dir: Path) -> PlugHost:
-    """Resolve the plug manifest for this session and check it can start; exit 2 on a configuration error.
+def resolve_plug_manifest(args: argparse.Namespace, resume_dir: Path | None) -> ResolvedManifest:
+    """Resolve the plug manifest for this run and check it can start; exit 2 on a configuration error.
 
-    A run that selects nothing resolves to the built-in local profile, writes nothing to the session and prints
-    nothing. A run that selects something records the outcome in ``plugs.resolved.json``, and a resume reads
-    that file back before any flag is applied.
+    Reads and writes nothing in a session: it runs before the session is opened or seeded, so a refused flag leaves
+    nothing behind. ``resume_dir`` is the ``--resume-from`` directory, whose ``plugs.resolved.json`` is read back
+    before any flag is applied; ``None`` for a fresh run.
     """
     registry = builtin_registry()
     try:
@@ -67,14 +68,24 @@ def prepare_plug_host(args: argparse.Namespace, session_dir: Path) -> PlugHost:
             overrides_path=os.environ.get("HYPERLOOM_MANIFEST_OVERRIDES") or None,
             cli_plugs=tuple(getattr(args, "plug", None) or ()),
             cli_configs=tuple(getattr(args, "plug_config", None) or ()),
-            resumed=read_resolved(session_dir),
+            resumed=read_resolved(resume_dir) if resume_dir is not None else None,
         )
         manifest = resolve_manifest(registry, sources)
-        host = PlugHost(manifest, registry, session_dir=session_dir)
-        host.plan()
+        PlugHost(manifest, registry, session_dir=None).plan()
     except PlugError as exc:
         print(f"ERROR: plug configuration refused: {exc}", file=sys.stderr)
         sys.exit(2)
+    return manifest
+
+
+def open_plug_host(manifest: ResolvedManifest, session_dir: Path) -> PlugHost:
+    """Bind a resolved ``manifest`` to the opened session.
+
+    A run that selects nothing (the built-in local profile) writes nothing to the session and prints nothing. A run
+    that selects something records the outcome in ``plugs.resolved.json`` and prints the ``Plugs`` line.
+    """
+    host = PlugHost(manifest, builtin_registry(), session_dir=session_dir)
+    host.plan()
     if not manifest.is_builtin_default:
         write_resolved(session_dir, manifest, host.fingerprint())
         print(f"Plugs           : profile={manifest.profile} fingerprint={host.fingerprint()}")

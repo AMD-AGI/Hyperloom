@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import ast
+import asyncio
 import inspect
 import json
 from pathlib import Path
@@ -13,10 +14,15 @@ from pathlib import Path
 import pytest
 
 import hyperloom.inference_optimizer.cli as ocli
-from hyperloom.inference_optimizer.cli.bootstrap import prepare_plug_host, running_plug_host
+from hyperloom.inference_optimizer.cli.bootstrap import open_plug_host, resolve_plug_manifest, running_plug_host
 from hyperloom.inference_optimizer.cli.parser import _build_parser
 from hyperloom.plugs import PlugError, active
 from hyperloom.plugs.events_local import LocalProgressEvents
+
+
+def prepare_plug_host(args, session_dir: Path):
+    """Resolve against ``session_dir`` as a resume would, then bind the result to it."""
+    return open_plug_host(resolve_plug_manifest(args, session_dir), session_dir)
 
 
 def _args(*extra: str):
@@ -154,14 +160,57 @@ def test_a_resumed_file_naming_a_missing_implementation_stops_the_resume(tmp_pat
     assert "socket 'events' has no implementation 'ghost'" in capsys.readouterr().err
 
 
-def test_optimize_resolves_the_plugs_after_the_session_opens_and_runs_the_coordinator_inside_the_host() -> None:
+def test_optimize_resolves_the_plugs_before_any_session_is_opened_and_runs_the_coordinator_inside_the_host() -> None:
     tree = ast.parse(inspect.getsource(ocli._run_optimize))
     first_line = {}
     for node in ast.walk(tree):
         if isinstance(node, ast.Call):
             first_line.setdefault(ast.unparse(node.func), node.lineno)
-    session_opened = max(first_line["_seed_fresh_session"], first_line["_resume_session"])
-    assert session_opened < first_line["prepare_plug_host"] < first_line["_bootstrap_recipe_kb"]
+    session_opened = min(first_line["_seed_fresh_session"], first_line["_resume_session"])
+    assert first_line["resolve_plug_manifest"] < session_opened < first_line["open_plug_host"]
+    assert first_line["open_plug_host"] < first_line["_bootstrap_recipe_kb"]
     withs = [n for n in ast.walk(tree) if isinstance(n, ast.With) and "running_plug_host" in ast.unparse(n.items[0])]
     assert len(withs) == 1
     assert any("coordinator.run" in ast.unparse(c) for c in ast.walk(withs[0]) if isinstance(c, ast.Call))
+
+
+@pytest.mark.parametrize(
+    "bad", [("--plug", "warp=x"), ("--plug-profile", "no-such-profile"), ("--manifest", "/nonexistent/manifest.json")]
+)
+def test_a_refused_plug_flag_on_a_resume_leaves_the_session_byte_identical(
+    tmp_path: Path, monkeypatch, bad: tuple[str, str]
+) -> None:
+    """Each refused ``--resume-from ... --extend-hours`` used to grow the budget again and clear the stop reason."""
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    session = tmp_path / "sess"
+    session.mkdir()
+    state = SharedState(session_id="s")
+    state.stop_reason = "target_reached"
+    state.crash_count = 3
+    state.save(session)
+    before = {p.name: p.read_bytes() for p in session.rglob("*") if p.is_file()}
+
+    async def _must_not_open(*_a, **_kw):
+        raise AssertionError("the session was opened for a refused plug configuration")
+
+    monkeypatch.setattr(ocli, "_resume_session", _must_not_open)
+    monkeypatch.setattr(ocli, "_seed_fresh_session", _must_not_open)
+    args = _args(*bad, "--resume-from", str(session), "--extend-hours", "2", "--force-resume")
+    with pytest.raises(SystemExit) as exc:
+        asyncio.run(ocli._run_optimize(args))
+    assert exc.value.code == 2
+    assert {p.name: p.read_bytes() for p in session.rglob("*") if p.is_file()} == before
+
+
+def test_a_refused_plug_flag_on_a_fresh_run_creates_no_session(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+
+    async def _must_not_open(*_a, **_kw):
+        raise AssertionError("the session was seeded for a refused plug configuration")
+
+    monkeypatch.setattr(ocli, "_seed_fresh_session", _must_not_open)
+    with pytest.raises(SystemExit) as exc:
+        asyncio.run(ocli._run_optimize(_args("--plug", "warp=x")))
+    assert exc.value.code == 2
+    assert list(tmp_path.iterdir()) == []
