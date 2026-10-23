@@ -16,7 +16,7 @@ import pytest
 
 
 from hyperloom.orchestrator.actions.executors import (
-    _multi_node_server_lifecycle,
+    _multi_node_restart_settings,
     report_executor,
 )
 from hyperloom.orchestrator.roles import (
@@ -2341,7 +2341,7 @@ async def test_handle_unpromotable_non_baseline_omits_fingerprint(session_dir):
 
 
 def test_default_health_timeout_is_900s_not_1800s():
-    assert _multi_node_server_lifecycle.DEFAULT_HEALTH_TIMEOUT_S == 900
+    assert _multi_node_restart_settings.DEFAULT_HEALTH_TIMEOUT_S == 900
 
 
 # Critic auto-approve archival actions + Coordinator silent-tick early-closing.
