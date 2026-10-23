@@ -108,6 +108,13 @@ class Processes(Protocol):
     def adopt(self, pid: int, *, branch: str, argv: Sequence[str]) -> object: ...
 
 
+class DevLeaseHolder(Protocol):
+    """The session's dev sandboxes (:class:`~hyperloom_multibranch.specialist.dev_sandbox.DevLeases`), as a branch's
+    sessions give back what their branch holds."""
+
+    async def reclaim(self, branch: str, reason: str) -> None: ...
+
+
 @dataclass(frozen=True)
 class AgentCommand:
     """The agent CLI a specialist runs."""
@@ -181,7 +188,8 @@ class AgentSetup:
     ``env`` is the environment the CLI runs with, the branch's MCP token added; the session decides nothing about it.
     ``briefs(branch, head)`` rebuilds a branch's brief at the head a launch starts at; without it, every launch shows
     the brief the branch was started with. ``nudge_waits_s`` are the patiences of idle turns in a row; there are as
-    many idle turns as patiences.
+    many idle turns as patiences. ``dev_leases`` are the session's dev sandboxes, ``None`` when it lends none: a
+    branch's lease is given back when its run ends, however it ended, and when it is stopped.
     """
 
     command: AgentCommand
@@ -197,6 +205,7 @@ class AgentSetup:
     poll_seconds: float = 5.0
     nudge_waits_s: tuple[float, ...] = NUDGE_WAITS_S
     clock: Callable[[], float] = time.time
+    dev_leases: DevLeaseHolder | None = None
 
 
 class SessionNotebook(BranchLogStore, UsageSink, Inbox, Protocol):
@@ -231,14 +240,17 @@ class AgentSession:
         """Nothing to prepare: the CLI is the image's and the worktree the session's."""
 
     async def release(self) -> None:
-        """Nothing held across runs."""
+        await self._give_back_dev_lease("its branch stopped")
 
     async def run(self) -> None:
-        grant = self._setup.tokens.issue(self._start.branch, frozenset({SCOPE_SPECIALIST}))
-        self._requested = await self._branch_requests()
-        last_end = ""
-        while not self._stopped.is_set():
-            last_end = await self._session(grant, last_end)
+        try:
+            grant = self._setup.tokens.issue(self._start.branch, frozenset({SCOPE_SPECIALIST}))
+            self._requested = await self._branch_requests()
+            last_end = ""
+            while not self._stopped.is_set():
+                last_end = await self._session(grant, last_end)
+        finally:
+            await self._give_back_dev_lease("its specialist's run ended")
 
     async def set_k(self, k: int) -> None:
         self._start = replace(self._start, k=k)
@@ -250,6 +262,11 @@ class AgentSession:
         if handle is not None:
             await self._finish(handle, cancel=True)
         self._setup.tokens.revoke(self._start.branch)
+        await self._give_back_dev_lease("its specialist was stopped")
+
+    async def _give_back_dev_lease(self, reason: str) -> None:
+        if self._setup.dev_leases is not None:
+            await self._setup.dev_leases.reclaim(self._start.branch, reason)
 
     async def _session(self, grant: SpecialistGrant, last_end: str) -> str:
         """Run one CLI session to its end and say how it ended; raises :class:`SessionCrashed` when it did not work and
@@ -551,6 +568,7 @@ __all__ = [
     "AgentSession",
     "AgentSetup",
     "BranchPlace",
+    "DevLeaseHolder",
     "Processes",
     "SessionNotebook",
 ]

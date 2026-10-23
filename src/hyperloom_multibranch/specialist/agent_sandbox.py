@@ -32,7 +32,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -223,26 +223,15 @@ class LocalProcess:
         """SIGTERM every process of the sandbox, SIGKILL what is left after :attr:`grace_seconds`; return once none
         is left."""
 
-        until = time.monotonic() + self.grace_seconds
-        termed: set[int] = set()
-        while True:
-            self.popen.poll()
-            pids = marked_pids(self.marker)
-            if not pids:
-                return
-            if time.monotonic() >= until:
-                _signal(pids, signal.SIGKILL)
-            else:
-                _signal(set(pids) - termed, signal.SIGTERM)
-                termed.update(pids)
-            await asyncio.sleep(self.poll_seconds)
+        await kill_marked(self.marker, self.grace_seconds, self.poll_seconds, self.popen.poll)
 
 
 @dataclass
 class LocalAgentSandbox:
     """Commands on this host, confined to ``cards`` (absolute GPU ids) and marked as the sandbox's, importing
     ``python_path`` first; ``root`` is the sandbox's own directory, for its logs and wrappers.
-    ``processes`` adopts every command it starts for ``branch``; ``base_env`` is ``os.environ`` when ``None``."""
+    ``processes`` adopts every command it starts for ``branch``; ``base_env`` is ``os.environ`` when ``None``.
+    ``niceness`` lowers every command's CPU priority, for a sandbox whose host work must not slow the tests beside it."""
 
     cards: tuple[int, ...]
     python_path: tuple[Path, ...]
@@ -252,6 +241,7 @@ class LocalAgentSandbox:
     base_env: Mapping[str, str] | None = None
     grace_seconds: float = GRACE_SECONDS
     poll_seconds: float = POLL_SECONDS
+    niceness: int = 0
     _numbers: Iterator[int] = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -308,9 +298,19 @@ class LocalAgentSandbox:
     async def start(self, command: str, cwd: Path, env: Mapping[str, str]) -> LocalProcess:
         return self._spawn("start", command, cwd, env)
 
+    def alive(self) -> bool:
+        """Whether any process of the sandbox is left."""
+        return bool(marked_pids(str(self.root)))
+
+    async def stop(self) -> None:
+        """Kill every process of the sandbox, as :meth:`LocalProcess.kill` does."""
+        await kill_marked(str(self.root), self.grace_seconds, self.poll_seconds)
+
     def _spawn(self, kind: str, command: str, cwd: Path, env: Mapping[str, str]) -> LocalProcess:
         log = self.root / LOG_DIR / f"{next(self._numbers):04d}-{kind}.log"
         argv = ["bash", "-c", command]
+        if self.niceness:
+            argv = ["nice", "-n", str(self.niceness), *argv]
         with log.open("ab") as out:
             popen = subprocess.Popen(
                 argv,
@@ -330,6 +330,27 @@ class LocalAgentSandbox:
 
     def _base(self) -> Mapping[str, str]:
         return os.environ if self.base_env is None else self.base_env
+
+
+async def kill_marked(
+    marker: str, grace_seconds: float, poll_seconds: float, reap: Callable[[], object] = lambda: None
+) -> None:
+    """SIGTERM every process carrying ``marker``, SIGKILL what is left after ``grace_seconds``; return once none is
+    left. ``reap`` collects a child of this process that ended, which would otherwise linger as a zombie."""
+
+    until = time.monotonic() + grace_seconds
+    termed: set[int] = set()
+    while True:
+        reap()
+        pids = marked_pids(marker)
+        if not pids:
+            return
+        if time.monotonic() >= until:
+            _signal(pids, signal.SIGKILL)
+        else:
+            _signal(set(pids) - termed, signal.SIGTERM)
+            termed.update(pids)
+        await asyncio.sleep(poll_seconds)
 
 
 def marked_pids(value: str) -> list[int]:
@@ -374,6 +395,7 @@ __all__ = [
     "TIMED_OUT",
     "LocalAgentSandbox",
     "LocalProcess",
+    "kill_marked",
     "read_tail",
     "marked_pids",
 ]

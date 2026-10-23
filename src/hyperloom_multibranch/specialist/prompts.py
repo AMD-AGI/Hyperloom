@@ -290,8 +290,7 @@ the reviewer is recorded only, and a notice says why. A gain that carries a case
 
 Rules:
 - Write only in your worktree and your workspace; the source base and other branches' worktrees are not yours.
-- Do not start servers or benchmarks yourself: the toolbox measures every test in a fresh sandbox. You have no GPU of \
-your own: submit_test is how you measure. A kernel, a tuned table or a patch you cannot verify offline is what a test \
+- {{gpu_rule}} A kernel, a tuned table or a patch you cannot verify offline is what a test \
 is for, so submit the candidate the evidence favours rather than wait for certainty; a flat or failed result tells \
 the next candidate something.
 - A candidate is one intent, so its result says what that intent is worth. Small changes, each too small to clear \
@@ -301,14 +300,34 @@ summed share of the operators they speed up.
 """
 
 
-def role_prompt(workload: str, references: Mapping[str, Path] | None = None) -> str:
-    """The system prompt of every session of every specialist; ``workload`` names what the session optimizes, and
+_NO_GPU = (
+    "Do not start servers or benchmarks yourself: the toolbox measures every test in a fresh sandbox. You have no GPU "
+    "of your own: submit_test is how you measure."
+)
+_DEV_SANDBOX = (
+    "Do not start servers or benchmarks yourself outside your dev sandbox: the toolbox measures every test in a fresh "
+    "sandbox, and submit_test is how you measure. dev_sandbox_lease lends your branch a few cards for a while, when no "
+    "test waits for cards: use them to check that a kernel or a change runs and does not crash, and to time a kernel "
+    "alone (inside a CUDA graph) or pick its best tile configuration, before you pay for a full test. Results of the "
+    "dev sandbox never enter the gate: do not commit, claim or conclude on its numbers; the end-to-end gain is what "
+    "submit_test measures. dev_sandbox_run runs a command to its end; dev_sandbox_start starts a server or a longer "
+    "benchmark and dev_sandbox_read waits on its output. Commands import your worktree's source, see only the leased "
+    "cards, numbered from 0 (never set HIP_VISIBLE_DEVICES, ROCR_VISIBLE_DEVICES or CUDA_VISIBLE_DEVICES), listen "
+    "only on the ports the lease names, and write under the lease's root, never in your worktree. Release it with "
+    "dev_sandbox_release as soon as you are done: the runtime takes it back when it expires, sits idle or tests "
+    "queue for cards. When a lease is refused, submit the full test instead of waiting."
+)
+
+
+def role_prompt(workload: str, references: Mapping[str, Path] | None = None, *, dev_leases: int = 0) -> str:
+    """The system prompt of every session of every specialist; ``workload`` names what the session optimizes,
     ``references`` the reference material the session was given, each source's name and the directory it was copied
-    to."""
+    to, and ``dev_leases`` how many dev sandboxes the session lends at once (none: the specialist has no GPU)."""
     named = " ".join(workload.split())
     if not named:
         raise ValueError("a specialist's role names the workload its session optimizes")
-    role = _ROLE.format(workload=named, fake_gains=_fake_gains(), directions=_direction_names())
+    gpu_rule = _DEV_SANDBOX if dev_leases > 0 else _NO_GPU
+    role = _ROLE.format(workload=named, fake_gains=_fake_gains(), directions=_direction_names(), gpu_rule=gpu_rule)
     return role + _references(references or {})
 
 
@@ -372,7 +391,9 @@ def nudge_message() -> str:
 
 def prompt_versions() -> dict[str, str]:
     """``{prompt name: the first hex digits of the sha256 of its text}``, for the session's manifest fingerprint."""
-    role = _ROLE.format(workload="{workload}", fake_gains=_fake_gains(), directions=_direction_names())
+    role = _ROLE.format(
+        workload="{workload}", fake_gains=_fake_gains(), directions=_direction_names(), gpu_rule=_NO_GPU
+    )
     texts = {"specialist_role": role, "specialist_launch": "\n".join(_LAUNCH)}
     return {name: hashlib.sha256(text.encode()).hexdigest()[:VERSION_HEX] for name, text in texts.items()}
 
