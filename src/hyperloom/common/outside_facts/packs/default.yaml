@@ -1,0 +1,354 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+#
+# Reference copy of the rule pack: the facts about projects outside this repository that our rules and log readers
+# depend on. A session reads the pack named by HYPERLOOM_RULE_PACK, and this copy when the variable is not set, so a fact
+# that changed upstream is changed by publishing a pack, not by changing code.
+#
+# Entry kinds, a closed list in hyperloom.common.outside_facts.rule_pack:
+#   names         closed set of names, each under the role the code reads it by
+#   log_regex     a pattern for a log line; every examples.match line must match it, every examples.no_match line must not
+#   env_default   an environment variable and the value a launch sets
+#   arg_value     reserved: no rule reads one yet, so a pack that holds one is refused
+#   kernel_table  reserved: no rule reads one yet, so a pack that holds one is refused
+# Every entry names its project, says why the fact exists and carries examples. A pack that fails its own examples, or
+# lacks an entry the code reads, is refused when it is loaded; nothing falls back to a default.
+version: "4"
+facts:
+  aiter_merged_view:
+    kind: names
+    project: aiter
+    reason: >-
+      AITER_CONFIG.update_config_files writes the merged view of a variable that lists several tuned tables to this
+      directory, a literal in aiter's function body that no variable and no TMPDIR moves; two local tests that share
+      /tmp overwrite each other's merged file there.
+    names:
+      dir: /tmp/aiter_configs
+    examples:
+      - "hyperloom.measure.aiter_merge_hook: the sandbox start-up hook redirects this directory (a standalone copy of the literal, pinned to this entry by a test)"
+
+  sglang_image_layout:
+    kind: names
+    project: SGLang serving image
+    reason: >-
+      The SGLang image keeps its source checkouts (aiter, sglang, vllm, flydsl) below one workspace directory, and
+      aiter's default tuned tables below the aiter checkout.
+    names:
+      workspace: /sgl-workspace
+      aiter_configs: aiter/aiter/configs
+    examples:
+      - "hyperloom.measure.compile: IMAGE_SOURCE_ROOTS lists the workspace as a place sources are read from"
+      - "hyperloom.measure.framework.base: DEFAULT_CONFIGS is the aiter tables directory, the workspace joined with aiter_configs"
+
+  context_length_flags:
+    kind: names
+    project: SGLang, vLLM
+    reason: >-
+      The server flag that sets the context length a server serves is named by the framework that takes it; a launch that
+      serves less than the evaluation needs fails the evaluation after the cluster time is spent.
+    names:
+      sglang: --context-length
+      vllm: --max-model-len
+    examples:
+      - "hyperloom.measure.eval_context: a launch's served context is read from whichever of the two flags it carries"
+
+  python_import_errors:
+    kind: names
+    project: Python
+    reason: A failed import raises one of these two exceptions, and the log line that reports it starts with its name.
+    names:
+      import_error: ImportError
+      module_not_found_error: ModuleNotFoundError
+    examples:
+      - "hyperloom.measure.log_causes: _IMPORT_FAILURE tells a raised import error from a server's 'Ignore import error' line"
+      - "hyperloom.common.failure_signature: the missing-module and import-failure signatures"
+
+  rocr_visible_devices:
+    kind: names
+    project: ROCm (ROCr runtime)
+    reason: >-
+      The device mask a sandbox's cards are leased through; it renumbers the visible devices 0..N-1, so every reader that
+      maps a card to an ordinal goes through it.
+    names:
+      env: ROCR_VISIBLE_DEVICES
+    examples:
+      - "hyperloom.common.visible_devices: ROCR_LEVEL_VARS lists it first among the variables that mask devices"
+      - "hyperloom.measure.runner.run: the runner reads the ordinals its sandbox's mask lists"
+
+  pytorch_tunableop_env:
+    kind: names
+    project: PyTorch
+    reason: >-
+      TunableOp tunes a GEMM shape the first time a server runs it when ENABLED is 1 and TUNING is not 0, which makes the
+      measured number depend on the tuning that ran inside the measurement; the results file is named by FILENAME.
+    names:
+      enabled: PYTORCH_TUNABLEOP_ENABLED
+      tuning: PYTORCH_TUNABLEOP_TUNING
+      table: PYTORCH_TUNABLEOP_FILENAME
+    examples:
+      - "hyperloom_multibranch.toolbox.acceptance: a launch with ENABLED=1 and TUNING not 0 is refused as online tuning"
+      - "hyperloom.measure.compile: PER_DEVICE_TABLE_ENVS lists FILENAME, the table that is placed once per device ordinal"
+
+  inferencex_benchmark_envs:
+    kind: names
+    project: InferenceX
+    reason: >-
+      The names of the workload, the request and the evaluation in benchmark.envs, as InferenceX's benchmark scripts read
+      them; a renamed variable is silently ignored by the script and the point measures another workload.
+    names:
+      isl: ISL
+      osl: OSL
+      random_range_ratio: RANDOM_RANGE_RATIO
+      conc: CONC
+      run_eval: RUN_EVAL
+      num_prompts: NUM_PROMPTS
+      num_warmups: NUM_WARMUPS
+      max_model_len: MAX_MODEL_LEN
+      tp: TP
+      ep: EP
+      magpie_eval_tasks: MAGPIE_EVAL_TASKS
+      magpie_eval_limit: MAGPIE_EVAL_LIMIT
+      magpie_eval_tokenized_requests: MAGPIE_EVAL_TOKENIZED_REQUESTS
+    examples:
+      - "hyperloom.measure.surface: SURFACE_ENV_KEYS, POINT_ENV_KEYS and REQUEST_ENV_KEYS group these names by who may set them"
+      - "hyperloom.common.env_safety: BLOCKED_EXTERNAL_ENV_NAMES refuses these names in an env export from an untrusted source"
+
+  hip_graph_packet_capture:
+    kind: env_default
+    project: ROCm (HIP runtime, CLR)
+    reason: >-
+      The HIP runtime replays a captured graph from its recorded packets by default, and the ROCm profiler then records a
+      replay's kernels only when a host sync follows it; replayed node by node (0) every replay is recorded.
+    env: DEBUG_CLR_GRAPH_PACKET_CAPTURE
+    value: "0"
+    examples:
+      - "hyperloom/inference_optimizer/assets/configs/profile_sglang.yaml, profile_vllm.yaml and profile_atom.yaml: the profile launch's env block"
+
+  hip_undefined_symbol:
+    kind: log_regex
+    project: glibc (the dynamic loader), as it reports PyTorch, aiter and SGLang extensions
+    reason: A compiled extension that references a symbol nothing defines does not load; the loader names it this way.
+    pattern: undefined symbol
+    examples:
+      match:
+        - "ImportError: /sgl-workspace/sglang/python/sgl_kernel/common_ops.abi3.so: undefined symbol: _ZN3c104cuda14ExchangeDeviceEa"
+      no_match:
+        - "undefined behavior sanitizer is not enabled"
+
+  hip_no_kernel_image:
+    kind: log_regex
+    project: ROCm (HIP runtime)
+    reason: A kernel built for another GPU architecture than the device's is reported this way when it is launched.
+    pattern: no kernel image is available
+    examples:
+      match:
+        - "RuntimeError: HIP error: no kernel image is available for execution on the device"
+      no_match:
+        - "RuntimeError: HIP error: out of memory"
+
+  hip_no_binary_for_gpu:
+    kind: log_regex
+    project: ROCm (HIP runtime)
+    reason: A code object that holds no binary for the device's architecture is refused with this error name.
+    pattern: hipErrorNoBinaryForGpu
+    examples:
+      match:
+        - "hipErrorNoBinaryForGpu: Unable to find code object for all current devices"
+      no_match:
+        - "hipErrorOutOfMemory: out of memory"
+
+  hsa_status_error:
+    kind: log_regex
+    project: ROCm (ROCr runtime)
+    reason: A failed HSA call is reported with a status name that starts with this prefix.
+    pattern: HSA_STATUS_ERROR
+    examples:
+      match:
+        - "HSA_STATUS_ERROR_EXCEPTION: An HSAIL operation resulted in a hardware exception."
+      no_match:
+        - "HSA runtime initialised with status success"
+
+  hip_error_prefix:
+    kind: log_regex
+    project: ROCm (HIP runtime)
+    reason: Every HIP call that fails names its error with this prefix (hipErrorIllegalAddress, hipErrorOutOfMemory, ...).
+    pattern: hipError
+    examples:
+      match:
+        - "Search for `hipErrorIllegalAddress' in the ROCm documentation"
+      no_match:
+        - "hipcc finished with no error"
+
+  argparse_unrecognized_arguments:
+    kind: log_regex
+    project: Python (argparse)
+    reason: >-
+      argparse refuses a command line that carries a flag its parser does not define with this message; the singular and
+      the plural both occur, so it is regular-expression source.
+    pattern: unrecognized arguments?
+    examples:
+      match:
+        - "launch_server.py: error: unrecognized arguments: --enable-profile-cuda-graph"
+        - "launch_server.py: error: unrecognized argument: --enable-profile-cuda-graph"
+      no_match:
+        - "launch_server.py: error: the following arguments are required: --model-path"
+
+  argparse_invalid_choice:
+    kind: log_regex
+    project: Python (argparse)
+    reason: argparse refuses a flag value that is not one of the choices its parser lists with this message.
+    pattern: invalid choice
+    examples:
+      match:
+        - "launch_server.py: error: argument --attention-backend: invalid choice: 'fa9' (choose from 'triton', 'aiter')"
+      no_match:
+        - "launch_server.py: error: argument --tp-size: invalid int value: 'many'"
+
+  transformers_unknown_architecture:
+    kind: log_regex
+    project: Transformers
+    reason: >-
+      Transformers raises this for a checkpoint whose model_type or architecture it does not know, which a newer release
+      or the model's remote code resolves and a retry does not.
+    pattern: does not recognize this architecture
+    examples:
+      match:
+        - "but Transformers does not recognize this architecture. This could be because of an issue with the checkpoint"
+      no_match:
+        - "Transformers loaded the architecture from the checkpoint's config"
+
+  transformers_does_not_recognize:
+    kind: log_regex
+    project: Transformers
+    reason: >-
+      The first half of the same message, which names the model type that was refused; it is read for the type, so it is
+      its own fact.
+    pattern: Transformers does not recognize
+    examples:
+      match:
+        - "The checkpoint you are trying to load has model type `qwen3_5` but Transformers does not recognize this architecture."
+      no_match:
+        - "The checkpoint you are trying to load has model type `qwen3` and Transformers loads it"
+
+  aiter_log_tuned_config:
+    kind: names
+    project: aiter
+    reason: >-
+      aiter logs a tuned-table lookup that missed unconditionally, and one that hit only when this variable is a non-zero
+      integer in the server's environment; a log without it cannot tell a table that nothing read from one whose hits
+      were not logged.
+    names:
+      env: AITER_LOG_TUNED_CONFIG
+    examples:
+      - "hyperloom_multibranch.toolbox.table_hits: a table is called not exercised only when a server with this variable set logged no hit in its rows"
+      - "hyperloom_multibranch.toolbox.planner: every point it plans launches its server with this variable at 1, a baseline's and a candidate's alike"
+
+  aiter_tuned_hit:
+    kind: log_regex
+    project: aiter
+    reason: >-
+      The line aiter logs, under AITER_LOG_TUNED_CONFIG, when a GEMM lookup resolved in a tuned row. The lookup asks for
+      M and finds the row of padded_M, so the group M is the row's M and the other groups are the columns the line prints
+      of the row it found, named as the table's columns (otype is the column outdtype). The dense bf16 lines print the
+      shape's dtypes, flags, libtype and kernel name; the a8w8 lines print only cu_num and the kernel name, after a space
+      before the comma that follows the path.
+    pattern: |-
+      (?x)
+      shape (?:\s+is)? \s+ M:\d+, \s+ N:\d+, \s+ K:\d+ ,?
+      (?: \s+ dtype='(?P<dtype>[^']*)' \s+ otype='(?P<outdtype>[^']*)'
+          \s+ bias=(?P<bias>True|False), \s+ scaleAB=(?P<scaleAB>True|False)
+          , \s+ bpreshuffle=(?P<bpreshuffle>True|False) )?
+      \s+ found \s+ padded_M: \s+ (?P<M>\d+), \s+ N:(?P<N>\d+), \s+ K:(?P<K>\d+)
+      \s+ is \s+ tuned \s+ on \s+ cu_num \s+ = \s+ (?P<cu_num>\d+) \s+ in \s+ (?P<table>[^\s,!]+)
+      (?: \s* , \s+ libtype \s+ is \s+ (?P<libtype>\w+) )?
+      (?: \s* , \s+ kernel \s+ name \s+ is \s+ (?P<kernelName>[^\s!]*) )?
+    examples:
+      match:
+        - "[aiter] shape is M:4, N:6144, K:4096 dtype='torch.bfloat16' otype='torch.bfloat16' bias=False, scaleAB=False, bpreshuffle=False found padded_M: 4, N:6144, K:4096 is tuned on cu_num = 256 in /work/hl-framework-x/merged/bf16_tuned_gemm.csv, libtype is torch, kernel name is torch"
+        - "[aiter] shape is M:192, N:4096, K:4096 dtype='torch.bfloat16' otype='torch.bfloat16' bias=False, scaleAB=False, bpreshuffle=False found padded_M: 192, N:4096, K:4096 is tuned on cu_num = 256 in /work/hl-framework-x/merged/bf16_tuned_gemm.csv, libtype is torch, kernel name is native"
+        - "[aiter] shape is M:512, N:4096, K:4096 dtype='torch.bfloat16' otype='torch.bfloat16' bias=False, scaleAB=False, bpreshuffle=False found padded_M: 512, N:4096, K:4096 is tuned on cu_num = 256 in /work/hl-framework-x/merged/bf16_tuned_gemm.csv, libtype is flydsl, kernel name is flydsl_hgemm_abf16_wbf16_bf16_t128x64x64x4_ks1_w4x2x1_bias0_ktail0_gm0_pft_gfx950"
+        - "[aiter] shape is M:1392, N:4096, K:4096 dtype='torch.bfloat16' otype='torch.bfloat16' bias=False, scaleAB=False, bpreshuffle=False found padded_M: 2048, N:4096, K:4096 is tuned on cu_num = 256 in /work/hl-framework-x/merged/bf16_tuned_gemm.csv, libtype is opus, kernel name is opus_gemm_mono_tile_512x128x256x64_2x4_16x16x32_0x0x0_nooob"
+        - "[aiter] shape is M:64, N:6144, K:4096 dtype='torch.bfloat16' otype='torch.bfloat16' bias=False, scaleAB=False, bpreshuffle=False found padded_M: 64, N:6144, K:4096 is tuned on cu_num = 256 in /work/hl-framework-x/merged/bf16_tuned_gemm.csv, libtype is triton, kernel name is auto"
+        - "(Worker_TP7 pid=380239) [aiter] shape is M:16384, N:4608, K:8192 dtype='torch.bfloat16' otype='torch.bfloat16' bias=False, scaleAB=False, bpreshuffle=False found padded_M: 8192, N:4608, K:8192 is tuned on cu_num = 256 in /work/merged_tuned_dense_bf16.csv,"
+        - "[aiter] shape is M:12, N:34816, K:5120, found padded_M: 16, N:34816, K:5120 is tuned on cu_num = 256 in /work/hl-framework-x/tables/AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE/5c34e83d432c56e2/k-5c34e83d432c56e2 , kernel name is a8w8_blockscale_bpreshuffle_1x128x128_256x16x64x256_16x16_16x16_16x16x1_16x16x1_1x16x1x16_4_1x1_intrawave_v1!"
+      no_match:
+        - "[aiter] shape is M:512, N:6144, K:4096 dtype='torch.bfloat16' otype='torch.bfloat16' bias=False, scaleAB=False, bpreshuffle=False, not found tuned config in /work/hl-framework-x/merged/bf16_tuned_gemm.csv, will use default config! using torch solution:0"
+        - "[aiter] shape is M:8192, N:7168, K:5120, not found tuned config in /work/hl-framework-x/merged/a8w8_bpreshuffle_tuned_gemm.csv, will use default config!"
+
+  aiter_tuned_hit_marker:
+    kind: log_regex
+    project: aiter
+    reason: >-
+      What the aiter lines that report a lookup resolved in a tuned row have in common, whatever else they print ("is
+      tuned on cu_num", "is tuned, in", "tuned at padded_M", "found lookup M"), so a reader that parses aiter_tuned_hit
+      can tell a log with no hit from a log whose hits it cannot read (a newer aiter that words them differently). A
+      lookup that missed says "not found tuned config" and an untuned shape "untuned", which this does not match.
+    pattern: "\\btuned(?: on| at|,)|found (?:padded_M|lookup M):"
+    examples:
+      match:
+        - "[aiter] shape is M:192, N:4096, K:4096 dtype='torch.bfloat16' otype='torch.bfloat16' bias=False, scaleAB=False, bpreshuffle=False found padded_M: 192, N:4096, K:4096 is tuned on cu_num = 256 in /work/hl-framework-x/merged/bf16_tuned_gemm.csv, libtype is torch, kernel name is native"
+      no_match:
+        - "[aiter] shape is M:512, N:6144, K:4096 dtype='torch.bfloat16' otype='torch.bfloat16' bias=False, scaleAB=False, bpreshuffle=False, not found tuned config in /work/hl-framework-x/merged/bf16_tuned_gemm.csv, will use default config! using torch solution:0"
+
+  aiperf_request_export:
+    kind: names
+    project: aiperf (the replay client of an AgentX round, SemiAnalysisAI fork pinned by InferenceX)
+    reason: >-
+      aiperf writes one JSON line per request, warm-up requests included, to aiperf_artifacts/profile_export.jsonl at its
+      default export level. A line has metadata, metrics and error; error is absent for a request the client counted
+      successful and, for one it counted failed, carries the class name of the exception in its type. The client's own
+      summary counts the requests of the profiling phase only. The metrics of a failed line are at most error_isl, the
+      input token count (InferenceX asks for the server's token counts, so a request that got no reply has none), and
+      the client as released exports no output token count for it, so it cannot tell a reply it found no content in as
+      empty from short. The runner's patch of the client (aiperf_source) adds error_osl, the output and reasoning token
+      count the server reported, to the line of a reply that arrived and held nothing the client could use.
+    names:
+      dir: aiperf_artifacts
+      file: profile_export.jsonl
+      metadata: metadata
+      metrics: metrics
+      error: error
+      error_class: type
+      phase: benchmark_phase
+      profiling_phase: profiling
+      error_output_length: error_osl
+    examples:
+      - "hyperloom.measure.agentx_requests: the export of a measured round is found at <round>/aiperf_artifacts/profile_export.jsonl or one directory below the round, and a request is counted when its phase is the profiling one or absent"
+      - "hyperloom.measure.agentx_requests: a request is failed when its line has an error, and the output length of a no-content failure is read from the metrics of its line only when the line holds one"
+      - "hyperloom.measure.runner.aiperf_patch: the metric the patched client adds to the line of a no-content failure is named by this role, so the patch and the reader state it once"
+      - 'export line, a request the server answered, as the aiperf docs print it (docs/tutorials/working-with-profile-exports.md at the pinned commit; reconstructed, no real export was at hand): {"metadata": {"session_num": 45, "x_request_id": "7609a2e7-aa53-4ab1-98f4-f35ecafefd25", "x_correlation_id": "32ee4f33-cfca-4cfc-988f-79b45408b909", "conversation_id": "77aa5b0e-b305-423f-88d5-c00da1892599", "turn_index": 0, "request_start_ns": 1759813207532900363, "request_ack_ns": 1759813207650730976, "request_end_ns": 1759813207838764604, "worker_id": "worker_359d423a", "record_processor_id": "record_processor_1fa47cd7", "benchmark_phase": "profiling", "was_cancelled": false}, "metrics": {"input_sequence_length": {"value": 550, "unit": "tokens"}, "time_to_first_token": {"value": 255.88656799999998, "unit": "ms"}, "request_latency": {"value": 297.52522799999997, "unit": "ms"}, "output_token_count": {"value": 9, "unit": "tokens"}, "output_sequence_length": {"value": 9, "unit": "tokens"}}}'
+      - 'export line, a request the server refused with an HTTP status (aiohttp_client.py: code is the status, type its reason phrase), produced by the pinned client''s own parser, metric processor and export writer on a constructed reply as InferenceX runs it (server token counts, no AgentX run): {"metadata":{"session_num":5,"x_request_id":"http_error","conversation_id":"c","turn_index":0,"request_start_ns":1000000000,"request_end_ns":1100000000,"worker_id":"worker-1","record_processor_id":"processor-1","benchmark_phase":"profiling","was_cancelled":false,"context_overflow_skip":false,"agent_depth":0},"metrics":{},"error":{"code":503,"type":"Service Unavailable","message":"overloaded"}}'
+      - 'export line, a request that never reached a server (the exception''s class name is the type and cause_chain lists the chain), produced by the pinned client''s own parser, metric processor and export writer on a constructed reply as InferenceX runs it (server token counts, no AgentX run): {"metadata":{"session_num":6,"x_request_id":"unreachable","conversation_id":"c","turn_index":0,"request_start_ns":1000000000,"request_end_ns":1100000000,"worker_id":"worker-1","record_processor_id":"processor-1","benchmark_phase":"profiling","was_cancelled":false,"context_overflow_skip":false,"agent_depth":0},"metrics":{},"error":{"type":"ClientConnectorError","message":"ClientConnectorError(ConnectionKey(host=''localhost'', port=30000, is_ssl=False, ssl=True, proxy=None, proxy_auth=None, proxy_headers_hash=None), ConnectionRefusedError(111, ''Connect call failed''))","cause_chain":["ClientConnectorError","ConnectionRefusedError"]}}'
+      - 'export line of the client as released, a request the server answered with 2xx and nothing the client could use (error.type names InvalidInferenceResultError; the metrics hold the input token count the server reported and no output token count), produced by the pinned client''s own parser, metric processor and export writer on a constructed reply as InferenceX runs it (server token counts, no AgentX run): {"metadata":{"session_num":1,"x_request_id":"no_content_usage_zero","conversation_id":"c","turn_index":0,"request_start_ns":1000000000,"request_end_ns":1100000000,"worker_id":"worker-1","record_processor_id":"processor-1","benchmark_phase":"profiling","was_cancelled":false,"context_overflow_skip":false,"agent_depth":0},"metrics":{"error_isl":{"value":550,"unit":"tokens"}},"error":{"type":"InvalidInferenceResultError","message":"InvalidInferenceResultError(''Invalid inference result: No responses with actual content were received from the server (only usage/metadata, null/empty data, or [DONE] markers)'')","cause_chain":["InvalidInferenceResultError"]}}'
+      - 'export line of the client the runner patched, the same reply: error_osl is the output token count the server reported (here 0: it produced nothing), produced by the pinned client''s own parser, metric processor and export writer on a constructed reply as InferenceX runs it (server token counts, no AgentX run): {"metadata":{"session_num":1,"x_request_id":"no_content_usage_zero","conversation_id":"c","turn_index":0,"request_start_ns":1000000000,"request_end_ns":1100000000,"worker_id":"worker-1","record_processor_id":"processor-1","benchmark_phase":"profiling","was_cancelled":false,"context_overflow_skip":false,"agent_depth":0},"metrics":{"error_osl":{"value":0,"unit":"tokens"},"error_isl":{"value":550,"unit":"tokens"}},"error":{"type":"InvalidInferenceResultError","message":"InvalidInferenceResultError(''Invalid inference result: No responses with actual content were received from the server (only usage/metadata, null/empty data, or [DONE] markers)'')","cause_chain":["InvalidInferenceResultError"]}}'
+
+  aiperf_invalid_reply:
+    kind: names
+    project: aiperf (the replay client of an AgentX round, SemiAnalysisAI fork pinned by InferenceX)
+    reason: >-
+      A reply that arrived with a 2xx status and held nothing the client could use (no response with content: only usage
+      chunks, empty deltas or the [DONE] marker; or a timestamp outside its range) is converted to an error record by the
+      client, and the error is InvalidInferenceResultError. Every other error is counted as a request the server did not
+      serve (a connection error, a timeout, a cancellation, an HTTP error status or an error event in the stream); the
+      client's own exception while it processes a reply that did arrive is exported the same way and cannot be told apart.
+    names:
+      error_class: InvalidInferenceResultError
+    examples:
+      - "hyperloom.measure.agentx_requests: a failed request whose error class is this one is a no-content failure, every other failed request a transport failure"
+      - "hyperloom_multibranch.toolbox.hosted_executor: the classes a result carries for each measured round of an AgentX test are read from the export with this"
+
+  aiperf_source:
+    kind: names
+    project: aiperf (the replay client of an AgentX round, SemiAnalysisAI fork pinned by InferenceX)
+    reason: >-
+      InferenceX at the commit Hyperloom pins carries the client as the git submodule utils/aiperf, and its benchmark
+      library installs it editable into an environment made for each job, so the source of that submodule is what a round
+      runs. The released client keeps only the input token count of a reply it converts to an error record
+      (inference_result_parser.py, the branch of a parsed record that is invalid), and computes only the metrics flagged
+      error-only for an error record (output_sequence_length_metric.py holds the output length metric, which is not one).
+    names:
+      submodule: utils/aiperf
+      parser_file: src/aiperf/records/inference_result_parser.py
+      output_length_file: src/aiperf/metrics/types/output_sequence_length_metric.py
+    examples:
+      - "hyperloom.measure.runner.aiperf_patch: the runner edits these two files of the submodule before an AgentX round, so the client keeps the output token count of a no-content failure and exports it as an error-only metric"
