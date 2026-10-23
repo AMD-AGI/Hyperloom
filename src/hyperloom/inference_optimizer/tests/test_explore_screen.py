@@ -14,8 +14,8 @@ import json
 
 import pytest
 
-from hyperloom.orchestrator.actions.executors import _explore_screen
-from hyperloom.orchestrator.actions.executors._explore_screen import (
+from hyperloom.orchestrator.actions.executors.explore_prefilter import _screen as _explore_screen
+from hyperloom.orchestrator.actions.executors.explore_prefilter._screen import (
     BASELINE,
     ENV_BACKEND,
     ENV_ENABLED,

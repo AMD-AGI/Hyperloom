@@ -10,8 +10,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from hyperloom.orchestrator.actions.executors import _explore_prefilter as prefilter
-from hyperloom.orchestrator.actions.executors import _explore_reuse as reuse
+from hyperloom.orchestrator.actions.executors.explore_prefilter import _prefilter as prefilter
+from hyperloom.orchestrator.actions.executors.explore_prefilter import _reuse as reuse
 from hyperloom.orchestrator.actions.executors._grid_base import GridVariant
 
 _SESSION = {

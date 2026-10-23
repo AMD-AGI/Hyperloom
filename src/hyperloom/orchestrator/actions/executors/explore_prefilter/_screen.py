@@ -59,7 +59,7 @@ from typing import Any, Callable
 
 import yaml
 
-from ._grid_base import GridVariant
+from .._grid_base import GridVariant
 
 log = logging.getLogger(__name__)
 

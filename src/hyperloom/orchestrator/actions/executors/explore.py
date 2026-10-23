@@ -63,15 +63,15 @@ from ._accuracy_gate import (
 from . import _framework_switch_manifest as _switch_manifest
 from hyperloom.inference_optimizer.canonical_fingerprint import workload_signature
 from ._proposal_identity import effective_fingerprint, normalize_proposal
-from .measured_variants import GAIN_BELOW_THRESHOLD, MeasuredOn, measured_verdict, stack_of_measured
+from .explore_prefilter.measured_variants import GAIN_BELOW_THRESHOLD, MeasuredOn, measured_verdict, stack_of_measured
 from ._grid_base import (
     TS_FAILED,
     TS_KILLED_OVERTIME,
     TS_SKIPPED_DEDUP,
 )
 from .benchmark_result import double_run_requested
-from ._explore_prefilter import RoundContext, Stack, prefilter_variants, record_decision_round
-from ._explore_remeasure import (
+from .explore_prefilter._prefilter import RoundContext, Stack, prefilter_variants, record_decision_round
+from .explore_prefilter._remeasure import (
     STACK_REVALIDATE_SOURCE,
     _is_config_replay_variant,
     _is_noop_filter_exempt,

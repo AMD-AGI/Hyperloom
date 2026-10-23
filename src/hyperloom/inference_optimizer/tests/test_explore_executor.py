@@ -1042,8 +1042,8 @@ def test_observed_launch_after_drops_only_what_the_stack_changed():
 @pytest.mark.asyncio
 async def test_explore_projection_drops_a_variant_before_it_is_benchmarked(sub_agent_runner, tmp_path, monkeypatch):
     """A projected loser never boots; the survivor's KEEP comes from its own measurement."""
-    from hyperloom.orchestrator.actions.executors import inferasim_anchors as ia
-    from hyperloom.orchestrator.actions.executors import inferasim_bridge as ib
+    from hyperloom.orchestrator.actions.executors.explore_prefilter import inferasim_anchors as ia
+    from hyperloom.orchestrator.actions.executors.explore_prefilter import inferasim_bridge as ib
 
     sub, tr, _ = sub_agent_runner
     base = tmp_path / "base.yaml"
@@ -1215,8 +1215,8 @@ async def test_a_different_image_measures_again(sub_agent_runner, tmp_path, monk
 
 @pytest.mark.asyncio
 async def test_a_decision_round_becomes_an_inferasim_anchor(sub_agent_runner, tmp_path, monkeypatch):
-    from hyperloom.orchestrator.actions.executors import inferasim_anchors as ia
-    from hyperloom.orchestrator.actions.executors import inferasim_bridge as ib
+    from hyperloom.orchestrator.actions.executors.explore_prefilter import inferasim_anchors as ia
+    from hyperloom.orchestrator.actions.executors.explore_prefilter import inferasim_bridge as ib
 
     sub, tr, _ = sub_agent_runner
     store = tmp_path / "anchors"
@@ -4405,7 +4405,7 @@ async def test_a_stack_revalidation_measures_again(sub_agent_runner, tmp_path, m
 
 
 def test_measured_verdict_holds_only_for_the_same_workload_and_stack():
-    from hyperloom.orchestrator.actions.executors.measured_variants import (
+    from hyperloom.orchestrator.actions.executors.explore_prefilter.measured_variants import (
         MeasuredOn,
         grid_fingerprints,
         measured_verdict,

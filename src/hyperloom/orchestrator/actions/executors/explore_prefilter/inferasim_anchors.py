@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from . import inferasim_bridge as bridge
-from ._explore_reuse import LAUNCH_UNPINNED
+from ._reuse import LAUNCH_UNPINNED
 from .inferasim_bridge import (
     ATTENTION_BACKEND_FLAG,
     AnchorChoice,

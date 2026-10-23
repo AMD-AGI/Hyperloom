@@ -144,7 +144,7 @@ claude = [
 ]
 # InferaSim (Infera) serving projection for EXPLORE's projection router
 # (HYPERLOOM_EXPLORE_PROJECTION=1). Lazy-imported by
-# ``orchestrator.actions.executors.inferasim_bridge``; not needed unless the
+# ``orchestrator.actions.executors.explore_prefilter.inferasim_bridge``; not needed unless the
 # router is on. Infera is not yet on PyPI, so most deployments instead point
 # HYPERLOOM_INFERASIM_ROOT at an Infera checkout; this extra is a convenience
 # for when it is pip-installable.

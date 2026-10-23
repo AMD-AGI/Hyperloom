@@ -18,8 +18,8 @@ from pathlib import Path
 import pytest
 
 from hyperloom.orchestrator.actions.executors import benchmark_backend as bb
-from hyperloom.orchestrator.actions.executors import inferasim_anchors as ia
-from hyperloom.orchestrator.actions.executors import inferasim_bridge as ib
+from hyperloom.orchestrator.actions.executors.explore_prefilter import inferasim_anchors as ia
+from hyperloom.orchestrator.actions.executors.explore_prefilter import inferasim_bridge as ib
 
 
 def test_inferasim_is_not_a_benchmark_backend(monkeypatch):

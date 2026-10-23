@@ -7,7 +7,7 @@ Maps a Hyperloom benchmark spec (the ``benchmark`` block of a materialized
 Magpie YAML: framework/model/precision + TP/CONC/ISL/OSL envs) onto Infera's
 ``inferasim`` serving projection and returns projected throughput/latency.
 
-The only consumer is EXPLORE's projection router (:mod:`_explore_projection`),
+The only consumer is EXPLORE's projection router (:mod:`_projection`),
 which compares a variant's projection with the stack's projection to decide
 which variants are worth a real benchmark. A projected number is never
 compared with a measured one and never decides a KEEP. In particular
@@ -63,7 +63,7 @@ from typing import Any
 
 from hyperloom.inference_optimizer.framework_registry import server_args_env_name
 
-from . import _explore_reuse as reuse
+from . import _reuse as reuse
 
 # Env knobs (all optional unless noted). Documented in the module docstring and
 # the runner --help.
@@ -143,7 +143,7 @@ _MODEL_HEURISTICS: tuple[tuple[str, str], ...] = (
 
 # Bundled env-driven workload template used when only a preset name is known.
 _TEMPLATE_WORKLOAD = (
-    Path(__file__).resolve().parents[3] / "inference_optimizer" / "assets" / "inferasim" / "inferasim_workload.yaml"
+    Path(__file__).resolve().parents[4] / "inference_optimizer" / "assets" / "inferasim" / "inferasim_workload.yaml"
 )
 
 

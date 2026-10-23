@@ -7,11 +7,11 @@ Three opt-in filters run once, before the per-variant loop, against the stack
 the round opens on, in this order:
 
 1. ``HYPERLOOM_MEASUREMENT_STORE`` -- a variant whose exact launch on this
-   stack already reverted on the performance gate (:mod:`_explore_reuse`).
+   stack already reverted on the performance gate (:mod:`_reuse`).
 2. ``HYPERLOOM_EXPLORE_SCREEN`` -- a reduced-scale probe puts it decisively
-   behind the stack (:mod:`_explore_screen`).
+   behind the stack (:mod:`_screen`).
 3. ``HYPERLOOM_EXPLORE_PROJECTION`` -- InferaSim projects it decisively behind
-   the stack, or outside the top 5 (:mod:`_explore_projection`).
+   the stack, or outside the top 5 (:mod:`_projection`).
 
 Each only removes variants, as ``SKIPPED_DEDUP`` rows that are neither
 journaled nor written to the KB. None produces a number that reaches
@@ -40,12 +40,12 @@ from hyperloom.common.coerce import to_float, to_str_list
 from hyperloom.inference_optimizer.canonical_fingerprint import workload_signature
 from hyperloom.inference_optimizer.grading import resolved_grading
 
-from . import _explore_reuse as reuse
-from ._explore_projection import ProjectionRequest, projection_enabled, route_variants
-from ._explore_remeasure import _is_noop_filter_exempt
-from ._explore_screen import screen_enabled, screen_variants
-from ._grid_base import GridVariant
-from ._grid_runner import _build_variant_yaml
+from . import _reuse as reuse
+from ._projection import ProjectionRequest, projection_enabled, route_variants
+from ._remeasure import _is_noop_filter_exempt
+from ._screen import screen_enabled, screen_variants
+from .._grid_base import GridVariant
+from .._grid_runner import _build_variant_yaml
 
 log = logging.getLogger(__name__)
 

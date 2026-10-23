@@ -17,9 +17,9 @@ from pathlib import Path
 import pytest
 import yaml
 
-from hyperloom.orchestrator.actions.executors import _explore_projection as ep
-from hyperloom.orchestrator.actions.executors import inferasim_anchors as ia
-from hyperloom.orchestrator.actions.executors import inferasim_bridge as ib
+from hyperloom.orchestrator.actions.executors.explore_prefilter import _projection as ep
+from hyperloom.orchestrator.actions.executors.explore_prefilter import inferasim_anchors as ia
+from hyperloom.orchestrator.actions.executors.explore_prefilter import inferasim_bridge as ib
 from hyperloom.orchestrator.actions.executors._grid_base import GridVariant
 
 STACK_ENVS = {"TP": 8, "CONC": 64, "ISL": 1024, "OSL": 1024, "EXTRA_VLLM_ARGS": ""}

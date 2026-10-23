@@ -1,7 +1,7 @@
 # InferaSim workload template used by Hyperloom's inferasim benchmark backend.
 #
 # This is an env-driven Infera (inferasim) workload spec. The inferasim bridge
-# (hyperloom.orchestrator.actions.executors.inferasim_bridge) points
+# (hyperloom.orchestrator.actions.executors.explore_prefilter.inferasim_bridge) points
 # `inferasim inference --config` at this file and sets:
 #   INFERASIM_MODEL  - model preset name (e.g. gpt_oss_120B), from the resolved
 #                     Hyperloom model or HYPERLOOM_INFERASIM_MODEL
