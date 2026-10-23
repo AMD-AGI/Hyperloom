@@ -74,11 +74,11 @@ def enforce_custom_scope(framework: str) -> None:
     framework repo path is already exported, so an out-of-boundary campaign
     fails before spending any work rather than at the first patch apply.
     """
-    from ...framework.optimization_scope import check_patch_scope, optimization_file
+    from ...framework.optimization_scope import check_patch_scope, optimization_scope
 
     if str(framework or "").strip().lower() != "custom":
         return
-    if optimization_file() is not None:
+    if optimization_scope() is not None:
         check_patch_scope(Path(os.environ.get("FRAMEWORK_REPO_PATH", "")), [])
 
 

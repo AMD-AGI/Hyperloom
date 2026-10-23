@@ -12,17 +12,21 @@ import subprocess
 import pytest
 
 from hyperloom.orchestrator.deployment.export import export_custom_inference
-from hyperloom.orchestrator.framework.optimization_scope import check_patch_scope, optimization_file
+from hyperloom.orchestrator.framework.optimization_scope import (
+    OptimizationScope,
+    check_patch_scope,
+    optimization_scope,
+    scope_instructions,
+)
 
 
-@pytest.fixture
-def workload(tmp_path, monkeypatch):
+def _make_workload(tmp_path, monkeypatch, module: str, function: str, scope: dict):
     root, bench, session = [tmp_path / name for name in ("model", "bench", "session")]
     for directory in (root, bench, session):
         directory.mkdir()
-    hook = root / "hyperloom_optimize.py"
-    hook.write_text("def hyperloom_optimize(model):\n    return model\n")
-    (bench / "optimization_scope.json").write_text(json.dumps({"schema_version": 1, "file": str(hook)}))
+    hook = root / module
+    hook.write_text(f"def {function}(model):\n    return model\n")
+    (bench / "optimization_scope.json").write_text(json.dumps({**scope, "file": str(hook)}))
     monkeypatch.setenv("HYPERLOOM_BYPASS_SCRIPTS_DIR", str(bench))
     monkeypatch.setenv("FRAMEWORK_REPO_PATH", str(root))
     for args in (
@@ -40,13 +44,24 @@ def workload(tmp_path, monkeypatch):
     return root, hook, session, state
 
 
+@pytest.fixture
+def workload(tmp_path, monkeypatch):
+    return _make_workload(tmp_path, monkeypatch, "hyperloom_optimize.py", "hyperloom_optimize", {"schema_version": 1})
+
+
+@pytest.fixture
+def named_workload(tmp_path, monkeypatch):
+    scope = {"schema_version": 2, "function": "apply"}
+    return _make_workload(tmp_path, monkeypatch, "encoder_opt.py", "apply", scope)
+
+
 def patch(name):
     return f"diff --git a/{name} b/{name}\n--- a/{name}\n+++ b/{name}\n@@ -1 +1 @@\n-old\n+new\n"
 
 
 def test_scope_allows_hook_only(workload, tmp_path):
     root, hook, _, _ = workload
-    assert optimization_file() == hook
+    assert optimization_scope() == OptimizationScope(file=hook, function="hyperloom_optimize")
     check_patch_scope(root, [patch(hook.name)])
     for name in ("benchmark.py", "extra.py", "../transformers/model.py"):
         with pytest.raises(ValueError):
@@ -59,7 +74,7 @@ def test_launch_scope_check_accepts_the_declared_hook(workload, tmp_path):
     from hyperloom.orchestrator.actions.executors.bypass_scriptable import enforce_custom_scope
 
     root, hook, _, _ = workload
-    assert optimization_file() == hook
+    assert optimization_scope() == OptimizationScope(file=hook, function="hyperloom_optimize")
     enforce_custom_scope("custom")
     enforce_custom_scope("sglang")
 
@@ -103,6 +118,44 @@ def test_export_contains_only_module_and_metadata(workload):
     assert {p.name for p in (session / "deployment").iterdir()} == {hook.name}
     assert json.loads((session / "reports/deployment.json").read_text())["kind"] == "single_file"
     assert (session / "deployment" / hook.name).read_bytes() == hook.read_bytes()
+
+
+def test_named_module_and_function_export(named_workload):
+    _, hook, session, state = named_workload
+    state["current_best"]["extra_envs"] = {"HL_FUSE_ATTN": "1"}
+    assert optimization_scope() == OptimizationScope(file=hook, function="apply")
+    assert "define apply(model)" in scope_instructions()
+
+    result = export_custom_inference(session, state)
+
+    assert result["status"] == "exported"
+    assert result["entrypoint"] == "encoder_opt.apply"
+    assert {p.name for p in (session / "deployment").iterdir()} == {"encoder_opt.py"}
+    assert "HL_FUSE_ATTN" in (session / "deployment" / "encoder_opt.py").read_text()
+
+
+def test_export_refuses_a_module_without_its_declared_function(named_workload):
+    root, hook, session, state = named_workload
+    hook.write_text("def hyperloom_optimize(model):\n    return model\n")
+    commit = ["-c", "user.name=test", "-c", "user.email=test@local", "commit", "-qam", "rename"]
+    subprocess.run(["git", "-C", str(root), *commit], check=True)
+    result = export_custom_inference(session, state)
+    assert result["status"] != "exported"
+    assert not (session / "deployment" / hook.name).exists()
+
+
+@pytest.mark.parametrize(
+    "scope",
+    [
+        {"schema_version": 2},
+        {"schema_version": 2, "function": "not an identifier"},
+        {"schema_version": 3, "function": "apply"},
+    ],
+)
+def test_scope_refuses_an_invalid_declaration(tmp_path, monkeypatch, scope):
+    _make_workload(tmp_path, monkeypatch, "encoder_opt.py", "apply", scope)
+    with pytest.raises(ValueError, match="Invalid"):
+        optimization_scope()
 
 
 def test_dirty_source_does_not_export_as_accepted(workload):
@@ -203,7 +256,7 @@ def test_scope_refuses_symlink(workload, tmp_path):
     hook.unlink()
     hook.symlink_to(other)
     with pytest.raises(ValueError, match="regular"):
-        optimization_file()
+        optimization_scope()
 
 
 def test_specialist_inherits_scope_and_writable_cli_config(workload, monkeypatch):

@@ -176,7 +176,7 @@ def render_prelude(plan: SettingsPlan) -> str:
     return "\n".join(lines)
 
 
-def apply_settings_prelude(source: bytes, plan: SettingsPlan) -> bytes:
+def apply_settings_prelude(source: bytes, plan: SettingsPlan, function: str) -> bytes:
     """Splice the rendered settings prelude into a single-file optimization module."""
     prelude = render_prelude(plan)
     if not prelude:
@@ -200,7 +200,7 @@ def apply_settings_prelude(source: bytes, plan: SettingsPlan) -> bytes:
         new_tree = ast.parse(out)
     except SyntaxError as exc:
         raise ValueError(_PRELUDE_MODULE_ERROR) from exc
-    if not any(isinstance(node, ast.FunctionDef) and node.name == "hyperloom_optimize" for node in new_tree.body):
+    if not any(isinstance(node, ast.FunctionDef) and node.name == function for node in new_tree.body):
         raise ValueError(_PRELUDE_MODULE_ERROR)
     return out
 
@@ -211,7 +211,7 @@ def _render_import_timing_guard() -> list[str]:
         "import sys as _hl_sys",
         f"if any(_hl_m in _hl_sys.modules for _hl_m in {_IMPORT_SENSITIVE_MODULES!r}):",
         "    raise RuntimeError(",
-        "        'hyperloom_optimize imported after torch._inductor/_dynamo were already '",
+        "        'This optimization module was imported after torch._inductor/_dynamo were already '",
         "        'loaded; environment-gated settings may not take effect. Import this '",
         "        'module once, early, before any other import, in addition to the usual '",
         "        'call after model load.'",

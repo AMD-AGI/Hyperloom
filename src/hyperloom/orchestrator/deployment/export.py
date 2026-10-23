@@ -204,14 +204,14 @@ def _build(session: Path, state: dict, dest: Path) -> dict:
     if not state.get("framework_repo_path"):
         raise ValueError("Framework source root is unavailable")
     root = Path(state.get("framework_repo_path") or "")
-    from hyperloom.orchestrator.framework.optimization_scope import optimization_file
+    from hyperloom.orchestrator.framework.optimization_scope import optimization_scope
 
-    hook = optimization_file(str(state.get("bypass_scripts_dir") or ""))
-    if hook is not None:
+    scope = optimization_scope(str(state.get("bypass_scripts_dir") or ""))
+    if scope is not None:
         from .single_file import build_single_file
 
         _verify_accepted_source(state, root)
-        return build_single_file(state, root, hook, dest)
+        return build_single_file(state, root, scope, dest)
     contract = _read_contract(root)
     best = state.get("current_best") or {}
     if not best:
