@@ -293,14 +293,25 @@ It reads:
   `candidate_origin`, `session` or `lane`; and `analysis_generation`, the
   `analysis/<commit>/generation-NNN` the Analysis report comes from.
 
-An Experience carries metadata instead of raw logs: it has no `raw_logs`, and
-the files above are the only ones it links, so they are the only ones that
-go with it if it is ever pushed to a global KB. No `forge-loop.log`,
-`events.jsonl`, or other archive file does; `meta.json` goes only as the
-metadata in `provenance.extra.meta`, and of the Analysis directory only the
-report's text goes. A `forge-loop.log` is only read, by the
-run whose workspace path ends most like the kernel path it announces; one that
-fits two runs equally well stops the export.
+Every Experience has a `raw_logs` field, from the document's top-level
+`raw_logs`, and it is intentionally empty for now: it links exactly one 0-byte
+file, `raw-logs-not-collected.log`, and no run logs. The global KB refuses a
+complete Experience without raw logs (HTTP 400
+`a complete Experience requires raw_logs`), and KernelForge's run logs are not
+collected yet. `kernelforge export-runs` writes that file beside its document,
+which names it relative to itself, and collection reads a relative path from
+the document's directory, so the file has to stay beside the document or every
+candidate is skipped. A document without a top-level `raw_logs`, such as one an
+earlier `export-runs` wrote, gives Experiences without raw logs, which the
+global KB refuses: export its runs again before collecting them.
+
+Of the run's own files, an Experience links only the plan, the measured
+kernel, and the archived diff above, so they are the only ones that go with it
+to a KB. No `forge-loop.log`, `events.jsonl`, or other archive file does;
+`meta.json` goes only as the metadata in `provenance.extra.meta`, and of the
+Analysis directory only the report's text goes. A `forge-loop.log` is only
+read, by the run whose workspace path ends most like the kernel path it
+announces; one that fits two runs equally well stops the export.
 
 A unit is skipped when its logs could not be read as a run, or when it has no
 reasoning, which is always the case for a merge of two archived candidates

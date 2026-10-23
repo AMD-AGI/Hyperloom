@@ -512,10 +512,12 @@ printed to stdout wrapped in `__FORGE_ROOFLINE_CEILING_RESULT__` sentinels.
 ## export-runs
 
 Writes the runs found under one or more directories as one JSON document,
-`{"runs": [...]}`, for `hyperloom-kb-collect --mapping kernelforge-v1` (see
-{doc}`Experience collection </reference/experience-kb-collect>`). A run is a
-plain `forge-loop` run's `forge_experiments/` directory, which holds
-`campaign_config.json` and `run_state.json`. Each candidate the run archived
+`{"runs": [...], "raw_logs": ["raw-logs-not-collected.log"]}`, for
+`hyperloom-kb-collect --mapping kernelforge-v1` (see
+{doc}`Experience collection </reference/experience-kb-collect>`), and an empty
+`raw-logs-not-collected.log` beside it. A run is a plain `forge-loop` run's
+`forge_experiments/` directory, which holds `campaign_config.json` and
+`run_state.json`. Each candidate the run archived
 (`candidates/iter_NNN/`) is one entry, so each lane of a fan-out round is an
 entry of its own; a run whose `campaign_config.json` or `run_state.json` is not
 the JSON KernelForge writes, or a candidate whose `meta.json` is missing or
@@ -543,7 +545,17 @@ list a directory under the log roots or read a file it needs, such as a JSON
 record, a plan, a lesson, or a log, naming that path, or when a log fits
 two runs equally well.
 
+The document names the empty file, relative to itself, as the raw log of every
+Experience collected from it, and no run log goes with an Experience: the
+global KB refuses a complete Experience without raw logs, and KernelForge's run
+logs are not collected yet. Keep the file beside the document: collection reads
+that name from the document's directory and skips every candidate when the file
+is missing. The export empties any file of that name already there. A document
+without a top-level `raw_logs`, such as one an earlier `export-runs` wrote,
+gives Experiences the global KB refuses: export its runs again before
+collecting them.
+
 | Argument / option | Default | Meaning |
 |:--|:--|:--|
 | `LOG_ROOT...` | required | One or more directories to read runs from, in the order given. |
-| `--output <file>` / `-o` | required | Where to write the JSON document. |
+| `--output <file>` / `-o` | required | Where to write the JSON document. The empty `raw-logs-not-collected.log` is written beside it. |

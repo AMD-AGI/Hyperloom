@@ -14,11 +14,15 @@
 # lane; analysis_generation, the Analysis generation reflection.analysis_report comes from, as
 # analysis/<commit>/generation-NNN under forge_experiments; and analysis_report_omitted, why a report too long for a
 # text field is not held.
-# An Experience carries no raw logs and none of the profiler's output: the only files it links are the plan, the
-# measured kernel, and the archived diff of every file the commit touched (candidates/iter_NNN/change.diff). The diff
-# and the kernel file are different records: the diff has every file the commit touched and not the kernel's unchanged
-# lines, and the kernel file has none of the other files. The only Analysis output an Experience holds is the report
-# its plan was built on, as text. The lesson is rationale.reasoning, not a second copy under reflection.
+# Every Experience has a raw_logs field, and it is intentionally empty for now: it links one 0-byte file,
+# raw-logs-not-collected.log, which kernelforge export-runs writes beside its document. The global KB refuses a
+# complete Experience without raw logs, and KernelForge's run logs are not collected yet. raw_logs is a top-level
+# Experience field, not a field of a category, so it is not declared here and takes no part in the schema_ref. Beyond
+# it an Experience carries none of the profiler's output: the only run files it links are the plan, the measured
+# kernel, and the archived diff of every file the commit touched (candidates/iter_NNN/change.diff). The diff and the
+# kernel file are different records: the diff has every file the commit touched and not the kernel's unchanged lines,
+# and the kernel file has none of the other files. The only Analysis output an Experience holds is the report its plan
+# was built on, as text. The lesson is rationale.reasoning, not a second copy under reflection.
 # The objective and every identity field always form the repeat group, with the schema: Hyperloom groups Experiences
 # that way by itself (hyperloom_kb/query_view.py repeat_group_key) and accepts group: true only on baseline and change
 # fields, so none is declared here.

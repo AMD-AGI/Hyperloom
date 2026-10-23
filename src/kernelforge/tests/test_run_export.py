@@ -79,6 +79,11 @@ BASELINE_COMMIT = "ce146831869e122424b2a67038ae466565882a3d"
 KEPT_COMMIT = "761247d9b335287cd89902de285dbee4c0e0d96b"
 BASELINE_REPORT = "# Analysis report\n\nEach row is read twice; both passes are bound by memory bandwidth."
 KEPT_REPORT = "# Analysis report\n\nThe fused sweep reads each row once; small rows are now bound by launch latency."
+EMPTY_RAW_LOG = {
+    "name": "raw-logs-not-collected.log",
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "bytes": 0,
+}
 
 
 def _write(path: Path, content: str) -> Path:
@@ -574,18 +579,28 @@ def test_the_report_collects_as_text_and_no_analysis_file_is_linked(tmp_path: Pa
         if isinstance(value, dict)
     ]
     assert linked == ["optimization_plan.md", "softmax_kernel.py", "change.diff"]
-    assert "raw_logs" not in experience
+    assert experience["raw_logs"] == [EMPTY_RAW_LOG]
 
 
-def test_export_runs_writes_the_document(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "stale",
+    [pytest.param(None, id="new-directory"), pytest.param("a log someone left\n", id="stale-raw-log")],
+)
+def test_export_runs_writes_the_document_and_an_empty_raw_log_beside_it(tmp_path: Path, stale: str | None) -> None:
     _plain_run(tmp_path / "logs")
     output = tmp_path / "out" / "runs.json"
+    raw_log = output.parent / "raw-logs-not-collected.log"
+    if stale is not None:
+        _write(raw_log, stale)
 
     result = CliRunner().invoke(main, ["export-runs", str(tmp_path / "logs"), "--output", str(output)])
 
     assert result.exit_code == 0, result.output
     assert result.output == f"wrote 3 runs to {output}\n"
-    assert json.loads(output.read_text(encoding="utf-8")) == normalize([tmp_path / "logs"])
+    document = json.loads(output.read_text(encoding="utf-8"))
+    assert document == normalize([tmp_path / "logs"])
+    assert document["raw_logs"] == [raw_log.name]
+    assert raw_log.read_bytes() == b""
 
 
 def test_the_exported_document_collects_through_the_packaged_mapping(tmp_path: Path) -> None:
@@ -612,7 +627,7 @@ def test_the_exported_document_collects_through_the_packaged_mapping(tmp_path: P
     assert "llm_backend" not in row.experience.provenance.extra
     assert "llm_model" not in row.experience.provenance.extra
     assert row.experience.provenance.extra["meta"] == _meta(layout, 1)
-    assert row.experience.raw_logs == ()
+    assert [ref.to_dict() for ref in row.experience.raw_logs] == [EMPTY_RAW_LOG]
     assert {row.unit_id: row.reason.split(":")[0] for row in report.skipped} == {
         f"{WORKSPACE}/iteration-2": "No reasoning, which every Experience requires",
         f"{WORKSPACE}/iteration-3": "No reasoning, which every Experience requires",
@@ -645,7 +660,7 @@ def test_a_run_collects_its_lanes_with_each_lesson_as_their_reasoning(tmp_path: 
     )
     origins = [experience["provenance"]["extra"]["candidate_origin"] for experience in (session, lane)]
     assert origins == ["session", "lane"]
-    assert "raw_logs" not in session and "raw_logs" not in lane
+    assert session["raw_logs"] == lane["raw_logs"] == [EMPTY_RAW_LOG]
     assert [(row["unit_id"], row["reason"].split(":")[0]) for row in report["skipped"]] == [
         (f"{WORKSPACE}/iteration-3", "No reasoning, which every Experience requires")
     ]
