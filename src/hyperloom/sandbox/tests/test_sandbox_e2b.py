@@ -34,7 +34,7 @@ from hyperloom.sandbox.socket import (
 )
 
 KEY_DEV = "e2b_dev_key_0123456789abcdef"
-KEY_MEASUREMENT = "e2b_measurement_key_0123456789"
+KEY_MEASUREMENT = "e2b_measurement_key_000000000000"
 FAST = RetryPolicy(budget_sec=2.0, first_delay_sec=0.01, max_delay_sec=0.05)
 SANDBOX = {"templateID": "dev", "sandboxID": "sbx-1", "clientID": "c", "envdVersion": "0.10.0"}
 
