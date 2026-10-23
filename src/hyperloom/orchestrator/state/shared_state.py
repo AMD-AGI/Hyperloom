@@ -41,6 +41,7 @@ from hyperloom.common.perf_metric import (
     total_tput_of,
 )
 from hyperloom.common.timeutil import now_iso
+from hyperloom.plugs import progress as _progress
 from hyperloom.common.jsonio import read_json_strict
 from hyperloom.common.profile_args import sanitize_profile_server_args
 from hyperloom.inference_optimizer.grading import resolved_grading
@@ -1201,6 +1202,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         from hyperloom.inference_optimizer.breakdown.recorder import instrument
 
         instrument.snapshot_state_sections(session_dir, self)
+        _progress.emit_budget(elapsed_min=round(self.elapsed_minutes(), 2), max_min=float(self.max_minutes or 0))
         # Derived artifact: re-render current_setting.sh from the current best route so the operator can audit /
         # re-feed it via --reference-script.
         try:

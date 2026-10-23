@@ -1111,6 +1111,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         phase_event.record_settle(
             ActionSettlement(
                 task_id=task.task_id,
+                action=task.kind,
                 status=result.state,
                 decision=verdict.value,
                 error_class=payload.get("error_class") or result.error_class,

@@ -20,6 +20,7 @@ import yaml
 from hyperloom.common.coerce import to_float, to_str_list
 from hyperloom.common.perf_metric import constraint_fields, stamp_output_per_gpu, with_output_per_gpu
 from hyperloom.common.env import is_truthy
+from hyperloom.plugs import progress as _progress
 from hyperloom.common.launch_log_evidence import (
     launch_argv_from_log,
     observed_sglang_server_identity_from_log,
@@ -1800,6 +1801,7 @@ class WritebackCollaborator(GeakRevalidation):
             log.warning(
                 "current_best held: %s winner refused by %s (%s)", task_kind, graded.vetoed_by, graded.veto_reason
             )
+            _progress.warn("winner_vetoed", f"{task_kind} winner refused by {graded.vetoed_by}: {graded.veto_reason}")
             return True
         correctness_fix = bv.get("keep_reason") == KEEP_REASON_CORRECTNESS_FIX
         if graded.graded_on_intvty and graded.verdict != VERDICT_KEEP and not correctness_fix:
@@ -1961,6 +1963,12 @@ class WritebackCollaborator(GeakRevalidation):
         self.shared_state.current_best = current_best
         self.shared_state.working_recipe_generation = int(self.shared_state.working_recipe_generation or 0) + 1
         self._stamp_current_best_measurement(bv)
+        _progress.best_updated(
+            request.tput,
+            float(self.shared_state.baseline_tput or 0.0),
+            len(self.shared_state.optimization_stack),
+            bv.get("request_id"),
+        )
 
     def _should_run_prelude_bootstrap(self, tput: Any) -> bool:
         """Whether to enqueue the post-baseline PRELUDE bootstrap chain.

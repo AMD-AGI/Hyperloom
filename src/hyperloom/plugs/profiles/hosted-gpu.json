@@ -4,7 +4,7 @@
   "sockets": {
     "measurement": {"impl": "local"},
     "agent_runner": {"impl": "local"},
-    "events": {"impl": "hosted", "config": {"dir": "${HYPERLOOM_EVENTS_DIR}"}},
+    "events": {"impl": "hosted"},
     "gpu_token": {"impl": "local"}
   }
 }

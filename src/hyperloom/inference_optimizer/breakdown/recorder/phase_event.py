@@ -27,6 +27,8 @@ import logging
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from hyperloom.plugs import progress as _progress
+
 from .event_fields import (
     as_dict as _as_dict,
     as_list as _as_list,
@@ -422,6 +424,7 @@ def record_settle(settlement: ActionSettlement) -> None:
     """
     if not str(settlement.task_id or ""):
         return
+    _progress.candidate_settled(str(settlement.task_id), settlement.action, str(settlement.decision or ""))
     event = _action_event(str(settlement.task_id))
     if event is None:
         return
