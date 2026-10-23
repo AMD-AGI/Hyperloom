@@ -445,7 +445,7 @@ module-lines src/hyperloom/orchestrator/phases/prelude.py 2511
 module-lines src/hyperloom/orchestrator/policy/gate.py 1577
 module-lines src/hyperloom/orchestrator/prompts/prompt_builder.py 1205
 module-lines src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py 2556
-module-lines src/hyperloom/orchestrator/specialists/runner.py 1453
+module-lines src/hyperloom/orchestrator/specialists/runner.py 1451
 module-lines src/hyperloom/orchestrator/specialists/subprocess_.py 1377
 module-lines src/hyperloom/orchestrator/state/shared_state.py 2424
 module-lines src/hyperloom/orchestrator/trace_analysis/tracelens_skill_runner.py 1309
