@@ -20,6 +20,13 @@ Merged to `main` and not yet carried by a tagged release. Each entry moves
 into the [release](https://github.com/AMD-AGI/Hyperloom/releases) that ships
 it.
 
+- **Bump validated SGLang stack to 0.5.22 (ROCm 10 docker).** Updates
+  `SGLANG_REF`, `SGLANG_PRETEND_VERSION`, recommended
+  `lmsysorg/sglang-rocm:v0.5.22-rocm10-*` image tags, `models.tsv`, and the
+  quick-start `Dockerfile`. **Upgrade note:** move from
+  `v0.5.21-rocm10-mi30x|mi35x-20261008` to
+  `v0.5.22-rocm10-mi30x|mi35x-20261022` (or match `SGLANG_REF` on bare metal).
+
 - **The accuracy eval can no longer be turned off.** `--no-eval`, the
   `RUN_EVAL` process-environment override and the `disable_run_eval` task
   param are removed, and a baseline whose eval fails stops the run instead of
