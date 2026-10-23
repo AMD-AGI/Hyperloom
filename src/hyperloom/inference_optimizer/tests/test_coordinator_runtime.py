@@ -26,7 +26,8 @@ from hyperloom.orchestrator.roles import (
     ScriptedPlan,
 )
 from hyperloom.orchestrator.loop.coordinator import Coordinator, RunOptions
-from hyperloom.orchestrator.loop.writeback import _BASELINE_FINGERPRINT_KEYS, WritebackCollaborator
+from hyperloom.orchestrator.loop._baseline_promotion import _BASELINE_FINGERPRINT_KEYS
+from hyperloom.orchestrator.loop.writeback import WritebackCollaborator
 from hyperloom.orchestrator.loop.proposals import ProposalsCollaborator
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType, NoIntentEmitted
 from hyperloom.orchestrator.state.objective import TargetGainObjective

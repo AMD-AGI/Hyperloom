@@ -731,7 +731,7 @@ async def test_a_patch_without_a_manifest_still_reverts_on_a_miss(tmp_path, monk
 async def test_inert_keep_flows_into_the_lever_ledger(tmp_path, monkeypatch):
     """The writeback registers inert levers without lifting current_best."""
     from hyperloom.inference_optimizer.session.optimization_journal import Verdict
-    from hyperloom.orchestrator.loop.writeback import _PromoteOutcome
+    from hyperloom.orchestrator.loop._promote_outcome import _PromoteOutcome
 
     from .conftest import make_coordinator
 

@@ -228,7 +228,6 @@ function-args src/hyperloom/orchestrator/loop/intent_router.py::IntentRouter._ap
 function-args src/hyperloom/orchestrator/loop/intent_router.py::IntentRouter._handle_single_verdict 9
 function-args src/hyperloom/orchestrator/loop/intent_router.py::_record_critic_review 8
 function-args src/hyperloom/orchestrator/loop/intent_router.py::_record_phase_proposal_review 7
-function-args src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._stage_agent_keep 6
 function-args src/hyperloom/orchestrator/phases/machine_state.py::record_lifecycle_event 9
 function-args src/hyperloom/orchestrator/rehearsal/launch.py::ScriptedLaunchBackend.run 6
 function-args src/hyperloom/orchestrator/source_snapshot.py::snapshot_source_layer 8
@@ -475,8 +474,6 @@ function-lines src/hyperloom/orchestrator/loop/intent_router.py::IntentRouter._h
 function-lines src/hyperloom/orchestrator/loop/intent_router.py::IntentRouter.handle_delegate 79
 function-lines src/hyperloom/orchestrator/loop/proposals.py::ProposalsCollaborator.materialize_approved_proposal 61
 function-lines src/hyperloom/orchestrator/loop/sub_agent_runner.py::SubAgentRunner._execute 57
-function-lines src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._resume_recover_pending_warm_replay 75
-function-lines src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator.handle_unpromotable_result 55
 function-lines src/hyperloom/orchestrator/measurement/apply_verification.py::verify_applied 61
 function-lines src/hyperloom/orchestrator/phases/close.py::ClosePhase._maybe_run_close_post_opt_roofline 62
 function-lines src/hyperloom/orchestrator/phases/close.py::ClosePhase._revalidate_stack_for_close 62
@@ -810,7 +807,6 @@ module-lines src/hyperloom/orchestrator/knowledge/recipe_journal.py 1269
 module-lines src/hyperloom/orchestrator/loop/coordinator.py 1337
 module-lines src/hyperloom/orchestrator/loop/dispatcher.py 1453
 module-lines src/hyperloom/orchestrator/loop/intent_router.py 1409
-module-lines src/hyperloom/orchestrator/loop/writeback.py 4155
 module-lines src/hyperloom/orchestrator/phases/framework.py 3038
 module-lines src/hyperloom/orchestrator/phases/kernel.py 4102
 module-lines src/hyperloom/orchestrator/phases/machine_state.py 1994
