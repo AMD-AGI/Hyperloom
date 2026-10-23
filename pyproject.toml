@@ -255,6 +255,8 @@ hyperloom = [
     # PYTHONPATH prefix (see _framework_rewrite_evidence). Shipped so wheel
     # installs can arm it.
     "assets/host_probe/*.py",
+    # Benchmark harness copied into a script workload's benchmark directory.
+    "assets/script_workload/*.py",
     # Slurm submission bundle (see docs/install/slurm.md).
     "assets/slurm/*.sh",
     "assets/slurm/*.sbatch",

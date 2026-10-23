@@ -18,6 +18,7 @@ _COMMANDS: dict[str, tuple[str, tuple[str, ...], str]] = {
     "check": (f"{_IO}.tools.preflight_optimizer", (), "Check host readiness for a model before optimizing"),
     "optimize": (f"{_IO}.cli", ("optimize",), "Run a multi-agent optimization session"),
     "recover": (f"{_IO}.cli", ("recover",), "Rebuild the artifacts of a crashed session"),
+    "script": (f"{_IO}.script_workload", (), "Prepare a workspace that optimizes an existing model script"),
     "quantize": ("hyperloom.agents.quantization.cli", (), "Quantize a model with AMD Quark"),
     "multi-node": (f"{_IO}.multi_node.cli", (), "Operate the multi-node cluster of a session"),
 }
