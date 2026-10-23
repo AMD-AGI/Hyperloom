@@ -18,12 +18,14 @@ AMD_GPU_DISPATCH_IDENTITIES: dict[str, tuple[str, int]] = {
 #: no ``0x``. A board's name is whatever the VBIOS says (an MI355X node answers "AMD Instinct MI355 OAM"); its device id
 #: is what the silicon is. Read from the ``amdgpu.ids`` that ships with the driver, with the variants (HF, VF) listed
 #: under their board. 0x74a2 and 0x74b6 are left out on purpose: the same id is both an MI308X and, at revision A1, an
-#: MI300X, so it names no single board and the caller falls back to the name.
+#: MI300X, so it names no single board and the caller falls back to the name. So is 0x7551, the R9700 at revisions C0
+#: and C1 (R9700S) and the R9600D at C8: the R9700 lists no id and is known by its name alone.
 AMD_GPU_DEVICE_IDS: dict[str, frozenset[str]] = {
     "mi300x": frozenset({"74a1", "74a9", "74b5", "74bd"}),
     "mi308x": frozenset({"74a8"}),
     "mi325x": frozenset({"74a5", "74b9"}),
     "mi355x": frozenset({"75a3", "75b3"}),
+    "r9700": frozenset(),
 }
 
 
