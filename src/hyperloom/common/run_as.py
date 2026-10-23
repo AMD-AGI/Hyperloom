@@ -157,13 +157,15 @@ def resolve_run_as(user: str | None) -> RunAs | None:
 
 
 def specialist_run_as() -> RunAs | None:
-    """Resolve ``HYPERLOOM_SPECIALIST_USER``; ``None`` (today's behaviour) when unset or blank.
+    """Resolve ``HYPERLOOM_SPECIALIST_USER``; ``None`` (today's behaviour) when unset or blank. No side effects."""
+    return resolve_run_as(env_str(SPECIALIST_USER_ENV))
 
-    When a user is named, this process's own umask grants its group full access and denies others (0o007), so files the
-    app itself (re)creates in a specialist's worktree stay writable by the
-    specialist's group. Unset leaves the umask alone.
+
+def set_group_shared_umask() -> None:
+    """Make this process's own umask grant its group full access and others none (0o007).
+
+    A launcher calls it once it has decided to demote, so files the app itself
+    (re)creates in a specialist's worktree, such as a sync's reset and apply,
+    stay group-writable. Process-wide; never call it when no user was named.
     """
-    run_as = resolve_run_as(env_str(SPECIALIST_USER_ENV))
-    if run_as is not None:
-        os.umask(_APP_UMASK)
-    return run_as
+    os.umask(_APP_UMASK)

@@ -1371,7 +1371,7 @@ async def test_specialist_user_that_cannot_be_used_fails_the_task_without_spawni
     assert needle in (result.error or "")
 
 
-async def test_specialist_user_is_refused_on_the_ray_gpu_actor_path(tmp_path, monkeypatch):
+async def test_specialist_user_is_refused_on_the_ray_gpu_actor_path(tmp_path, monkeypatch, restore_umask):
     monkeypatch.setenv("HYPERLOOM_SPECIALIST_USER", "nobody")
     result, popen_kwargs = await _run_spawn(tmp_path, monkeypatch, gpu_lease=object())
     assert popen_kwargs == []
@@ -1495,3 +1495,23 @@ def test_demote_shares_a_worktree_that_lives_outside_the_workspace(tmp_path, mon
     assert request.worktree.stat().st_gid == kwargs["group"]
     assert request.worktree.stat().st_mode & 0o2070 == 0o2070
     assert (request.workspace / "prompt.md").stat().st_mode & 0o077 == 0
+
+
+@pytest.mark.skipif(not _account_exists(_DEMOTE_USER), reason=f"no {_DEMOTE_USER!r} account")
+async def test_a_launch_the_ray_path_refuses_leaves_the_apps_umask_alone(tmp_path, monkeypatch, restore_umask):
+    monkeypatch.setenv("HYPERLOOM_SPECIALIST_USER", _DEMOTE_USER)
+    await _run_spawn(tmp_path, monkeypatch, gpu_lease=object())
+    assert os.umask(0o022) == 0o022
+
+
+@pytest.mark.skipif(not _account_exists(_DEMOTE_USER), reason=f"no {_DEMOTE_USER!r} account")
+async def test_a_launch_that_names_a_user_sets_the_apps_umask(tmp_path, monkeypatch, restore_umask):
+    monkeypatch.setenv("HYPERLOOM_SPECIALIST_USER", _DEMOTE_USER)
+    await _run_spawn(tmp_path, monkeypatch)
+    assert os.umask(0o022) == 0o007
+
+
+async def test_a_launch_with_no_user_leaves_the_apps_umask_alone(tmp_path, monkeypatch, restore_umask):
+    monkeypatch.delenv("HYPERLOOM_SPECIALIST_USER", raising=False)
+    await _run_spawn(tmp_path, monkeypatch)
+    assert os.umask(0o022) == 0o022

@@ -8,7 +8,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Sequence
 
-from hyperloom.common.run_as import RunAs, RunAsError, specialist_run_as
+from hyperloom.common.run_as import RunAs, RunAsError, set_group_shared_umask, specialist_run_as
 from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
 
 _GPU_IDS_ENV = "INFERENCE_OPTIMIZER_SPECIALIST_GPU_IDS"
@@ -55,6 +55,8 @@ def apply_gpu_env(env: dict[str, str], workspace: Path, gpu_ids: Sequence[int], 
 def resolve_launch_user(gpu_lease: object | None) -> RunAs | None:
     """The account to run a local specialist as, or ``None`` for no change.
 
+    Naming one also sets the app's own umask (``set_group_shared_umask``).
+
     Raises:
         RunAsError: The configured user is unusable, or the specialist runs in
             a Ray actor, which cannot be started as another user.
@@ -62,6 +64,8 @@ def resolve_launch_user(gpu_lease: object | None) -> RunAs | None:
     run_as = specialist_run_as()
     if run_as is not None and gpu_lease is not None:
         raise RunAsError("the Ray GPU actor path cannot run the specialist as another user")
+    if run_as is not None:
+        set_group_shared_umask()
     return run_as
 
 

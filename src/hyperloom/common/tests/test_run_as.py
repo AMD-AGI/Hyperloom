@@ -235,23 +235,26 @@ def restore_umask() -> Iterator[None]:
         os.umask(saved)
 
 
-@pytest.mark.skipif(not _account_exists(UNPRIVILEGED), reason=f"no {UNPRIVILEGED!r} account")
-def test_naming_a_user_sets_the_apps_umask_and_unset_leaves_it(monkeypatch, restore_umask):
-    monkeypatch.delenv(run_as_mod.SPECIALIST_USER_ENV, raising=False)
-    assert specialist_run_as() is None
+def test_resolving_the_user_does_not_touch_the_umask(monkeypatch, restore_umask):
+    monkeypatch.setenv(run_as_mod.SPECIALIST_USER_ENV, UNPRIVILEGED if _account_exists(UNPRIVILEGED) else "root")
+    try:
+        specialist_run_as()
+    except RunAsError:
+        pass
     assert os.umask(0o022) == 0o022
-    monkeypatch.setenv(run_as_mod.SPECIALIST_USER_ENV, UNPRIVILEGED)
-    assert specialist_run_as() is not None
+
+
+def test_set_group_shared_umask_sets_it(restore_umask):
+    run_as_mod.set_group_shared_umask()
     assert os.umask(0o022) == 0o007
 
 
 @needs_root
-def test_files_the_app_creates_after_naming_a_user_are_group_writable(shared_tmp, monkeypatch, restore_umask):
+def test_files_the_app_creates_after_the_umask_is_set_are_group_writable(shared_tmp, restore_umask):
     spec = resolve_run_as(UNPRIVILEGED)
     assert spec is not None
     spec.share_tree(shared_tmp)
-    monkeypatch.setenv(run_as_mod.SPECIALIST_USER_ENV, UNPRIVILEGED)
-    specialist_run_as()
+    run_as_mod.set_group_shared_umask()
     (shared_tmp / "rebuilt.py").write_text("x", encoding="utf-8")
     (shared_tmp / "newdir").mkdir()
     assert stat.S_IMODE((shared_tmp / "rebuilt.py").stat().st_mode) == 0o660
