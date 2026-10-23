@@ -27,7 +27,7 @@ from hyperloom.sandbox.local import LocalSandboxProvider
 from hyperloom.sandbox.socket import SandboxUnavailable
 from hyperloom_multibranch.contracts.toolbox import BranchLease, MeasurementCapacity, RequestRejected
 
-__all__ = ["BranchLeases", "LEASE_WAIT_SECONDS"]
+__all__ = ["BranchLeases", "LEASE_WAIT_SECONDS", "refuse_unfit_cards"]
 
 #: As long as a measurement sandbox waits for its cards.
 LEASE_WAIT_SECONDS = float(DEFAULT_RUNNER_START_TIMEOUT_SEC)
@@ -138,14 +138,7 @@ class BranchLeases:
         return self._capacity().measurement_cards - cards >= self.cards_per_test
 
     def _check(self, cards: int) -> None:
-        if cards < 1:
-            raise RequestRejected(f"a lease needs at least one card, not {cards}")
-        if not self._leaves_a_test(cards):
-            raise RequestRejected(
-                f"leasing {cards} of the {self._capacity().measurement_cards} cards tests run on would leave fewer "
-                f"than the {self.cards_per_test} one test needs",
-                "lease_leaves_no_measurement",
-            )
+        refuse_unfit_cards(cards, self._capacity().measurement_cards, self.cards_per_test)
 
     def _promise(self, holder: str, cards: int) -> None:
         with self._guard:
@@ -185,6 +178,24 @@ class BranchLeases:
             if gpu_ids:
                 self._provider.pool.release(gpu_ids)
         self.on_release()
+
+
+def refuse_unfit_cards(cards: int, measuring: int, cards_per_test: int) -> None:
+    """The refusals every backend's lease shares: ``measuring`` is the cards tests can run on now.
+
+    Raises:
+        RequestRejected: ``invalid_request`` for fewer than one card, ``lease_leaves_no_measurement`` when fewer than
+            one test's cards would be left.
+    """
+
+    if cards < 1:
+        raise RequestRejected(f"a lease needs at least one card, not {cards}")
+    if measuring - cards < cards_per_test:
+        raise RequestRejected(
+            f"leasing {cards} of the {measuring} cards tests run on would leave fewer than the "
+            f"{cards_per_test} one test needs",
+            "lease_leaves_no_measurement",
+        )
 
 
 def _nothing() -> None:
