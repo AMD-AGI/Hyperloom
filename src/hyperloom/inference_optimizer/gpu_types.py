@@ -36,10 +36,6 @@ _TARGETED_BUILD_UNVALIDATED_GPU_TYPES: frozenset[str] = frozenset({_R9700})
 #: Boards whose GEAK handoff names the product and ISA instead of leaving them to GEAK's device probe.
 _GEAK_PINNED_IDENTITY_GPU_TYPES: frozenset[str] = frozenset({_R9700})
 
-#: Re-exported from ``hyperloom.common`` so provenance and this module cannot
-#: disagree about which arch a board dispatches to.
-_AMD_GPU_DISPATCH_IDENTITIES = AMD_GPU_DISPATCH_IDENTITIES
-
 
 def _product_tag_matches(tag: str, text: str) -> bool:
     """Match R9700 exactly while preserving legacy MI product matching."""
@@ -54,14 +50,25 @@ def _product_tag_matches(tag: str, text: str) -> bool:
     return tag in text
 
 
+def parse_gpu_type(text: str | None) -> str | None:
+    """Map rocm-smi / gcnArchName output, possibly mixed into other log text, to a supported board name."""
+    upper = str(text or "").upper()
+    for tag in _PRODUCT_TAGS:
+        if _product_tag_matches(tag, upper):
+            return tag.lower()
+    lower = upper.lower()
+    for gfx, board in _GFX_TO_RUNNER.items():
+        if gfx in lower:
+            return board
+    return None
+
+
 def gpu_runner_type(gpu_type: str) -> str:
     """Return the Magpie runner label for a resolved real GPU type."""
     normalized = str(gpu_type or "").strip().lower()
-    if normalized in ("mi325x", "mi308x"):
-        return "mi300x"
     if normalized == _R9700:
         return "gfx12"
-    return normalized
+    return _GFX_TO_RUNNER.get(gfx_arch_for_gpu_type(normalized) or "", normalized)
 
 
 def targeted_build_validated(gpu_type: str) -> bool:
@@ -136,10 +143,10 @@ def _autodetect_gpu_type() -> str | None:
             capture_output=True,
             text=True,
             timeout=5,
-        ).stdout.upper()
-        for tag in _PRODUCT_TAGS:
-            if _product_tag_matches(tag, out):
-                return tag.lower()
+        ).stdout
+        detected = parse_gpu_type(out)
+        if detected:
+            return detected
     except (FileNotFoundError, subprocess.TimeoutExpired, PermissionError, OSError):
         # rocm-smi missing / slow / not permitted; fall through to the torch gcnArchName probe below (autodetect is
         # best-effort).
@@ -147,9 +154,7 @@ def _autodetect_gpu_type() -> str | None:
     try:
         import torch
 
-        arch = torch.cuda.get_device_properties(0).gcnArchName
-        gfx = arch.split(":", 1)[0].lower()
-        return _GFX_TO_RUNNER.get(gfx)
+        return parse_gpu_type(str(torch.cuda.get_device_properties(0).gcnArchName))
     except (ImportError, OSError, RuntimeError, AssertionError, AttributeError):
         return None
 
@@ -171,4 +176,4 @@ def amd_gpu_dispatch_identity(gpu_type: str | None = None) -> tuple[str, int] | 
     resolved = _resolve_amd_gpu_type(gpu_type)
     if not resolved:
         return None
-    return _AMD_GPU_DISPATCH_IDENTITIES.get(resolved)
+    return AMD_GPU_DISPATCH_IDENTITIES.get(resolved)

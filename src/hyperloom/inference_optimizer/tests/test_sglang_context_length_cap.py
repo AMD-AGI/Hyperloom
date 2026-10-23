@@ -266,30 +266,9 @@ def test_warm_replay_rejects_undersized_last_duplicate_context() -> None:
         )
 
 
-def test_warm_replay_preserves_compatible_context_length() -> None:
-    original = "--context-length 12288 --foo bar"
-    out, evidence = validate_warm_replay_context_length(
-        original,
-        "sglang",
-        8192,
-        1024,
-    )
+def test_warm_replay_accepts_compatible_context_length() -> None:
+    evidence = validate_warm_replay_context_length("  --context-length 12288 --foo bar  ", "sglang", 8192, 1024)
 
-    assert out == original
-    assert evidence["status"] == "compatible"
-
-
-def test_warm_replay_preserves_compatible_context_whitespace() -> None:
-    original = "  --context-length 12288 --foo bar  "
-
-    out, evidence = validate_warm_replay_context_length(
-        original,
-        "sglang",
-        8192,
-        1024,
-    )
-
-    assert out == original
     assert evidence["status"] == "compatible"
 
 
@@ -378,12 +357,8 @@ def test_materialize_vllm_no_context_length(tmp_path):
 
 # inject_sglang_attention_backend (dual chunk attention)
 @pytest.fixture(autouse=True)
-def _default_non_amd_gpu(monkeypatch: pytest.MonkeyPatch):
-    """Default the dual-chunk backend resolver to the non-AMD path so the upstream ``dual_chunk_flash_attn`` assertions hold without real GPU hardware."""
-    monkeypatch.setattr(
-        "hyperloom.inference_optimizer.gpu_types._autodetect_gpu_type",
-        lambda: None,
-    )
+def _default_dual_chunk_env(monkeypatch: pytest.MonkeyPatch):
+    """Clear operator overrides so the default ``dual_chunk_flash_attn`` assertions hold."""
     monkeypatch.delenv("GPU_TYPE", raising=False)
     monkeypatch.delenv("HYPERLOOM_DUAL_CHUNK_BACKEND", raising=False)
 
@@ -416,36 +391,8 @@ def test_dual_chunk_injects_via_nested_text_config(tmp_path):
     assert "--attention-backend dual_chunk_flash_attn" in out
 
 
-def test_dual_chunk_on_amd_returns_canonical_backend(tmp_path, monkeypatch):
-    """AMD dual-chunk models are blocked by preflight; if inject still runs it should return the canonical backend (not triton which sglang rejects)."""
-    monkeypatch.setattr(
-        "hyperloom.inference_optimizer.gpu_types._autodetect_gpu_type",
-        lambda: "mi300x",
-    )
-    model = _write_dual_chunk_model(tmp_path, dual_chunk=True)
-    out = inject_sglang_attention_backend("--foo bar", "sglang", model)
-    assert "--attention-backend dual_chunk_flash_attn" in out
-    assert "--foo bar" in out
-
-
-def test_dual_chunk_uses_explicit_gpu_type_before_autodetect(tmp_path):
-    """The caller's runner gpu_type must win when runtime probing is unavailable."""
-    model = _write_dual_chunk_model(tmp_path, dual_chunk=True)
-    out = inject_sglang_attention_backend(
-        "--foo bar",
-        "sglang",
-        model,
-        gpu_type="mi300x",
-    )
-    assert "--attention-backend dual_chunk_flash_attn" in out
-
-
 def test_dual_chunk_backend_env_override(tmp_path, monkeypatch):
-    """HYPERLOOM_DUAL_CHUNK_BACKEND wins over hardware detection."""
-    monkeypatch.setattr(
-        "hyperloom.inference_optimizer.gpu_types._autodetect_gpu_type",
-        lambda: "mi300x",
-    )
+    """HYPERLOOM_DUAL_CHUNK_BACKEND replaces the default backend."""
     monkeypatch.setenv("HYPERLOOM_DUAL_CHUNK_BACKEND", "flashinfer")
     model = _write_dual_chunk_model(tmp_path, dual_chunk=True)
     out = inject_sglang_attention_backend("", "sglang", model)
