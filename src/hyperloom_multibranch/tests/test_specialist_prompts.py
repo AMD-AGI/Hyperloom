@@ -478,3 +478,24 @@ def test_a_launch_shows_the_latest_entries_cut_to_size_and_how_the_last_session_
     assert "[e4] result: entry 4" not in prompt and "[e5] result: entry 5" in prompt
     assert f"[e99] result (s1-17): {'x' * (ENTRY_CHARS - 3)}...\n" in prompt
     assert "Your previous session ended: the agent CLI exited 1." in prompt
+
+
+def test_the_role_checks_bandwidth_copies_and_a_flat_fusion_before_spending_tests():
+    prompt = role_prompt(WORKLOAD)
+
+    assert "each launch costs about 1.5 us on MI355X" in prompt
+    assert "2 to 4 us" not in prompt
+    assert "divide the bytes it must move per call" in prompt
+    assert "near the device's HBM bandwidth no kernel change pays" in prompt
+    assert "Count the copy, cast and elementwise kernels in a decode step" in prompt
+    assert "compare each kernel's count and time with the parent's profile" in prompt
+    assert "A speculative or MTP draft gains its accept length" in prompt
+
+
+def test_the_directions_name_shape_whitelists_unpassed_switches_and_settings_nothing_reads():
+    fast_path, settings = DIRECTIONS[0], DIRECTIONS[3]
+
+    assert "a whitelist or table keyed by the model's shape" in fast_path
+    assert "which model files pass its switch" in fast_path
+    assert "Before testing a setting, grep where it is read" in settings
+    assert "Bound a scheduler setting" in settings

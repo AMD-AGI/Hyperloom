@@ -16,7 +16,10 @@ DIRECTIONS = (
     "or a feature the engine turned off. Where the log cannot tell, add a one-time log line on the path to prove it "
     "ran. For each operator the profile ranks highest, read the branch conditions on its call path (is_cuda or is_hip, "
     "an SM, gfx or capability check, a table keyed by TP size or cu_num): a tuned constant or a fused path that sits "
-    "only in another branch never runs here, and the log does not say so. Fix the cause with a source patch or the "
+    "only in another branch never runs here, and the log does not say so. A fast path behind a whitelist or table "
+    "keyed by the model's shape (expert count, top-k, head size) falls back silently for a shape it does not list, "
+    "and a fused helper the framework already has runs only for the models that ask for it: grep where each fused "
+    "helper is called and which model files pass its switch. Fix the cause with a source patch or the "
     "setting that removes it; errors and warnings in the log are leads, and untuned GEMM shapes belong to the GEMM "
     "tuning branch.",
     "GEMM tuning: from the GEMM shapes the profile shows for this workload (decode and prefill), tune the aiter and "
@@ -26,7 +29,12 @@ DIRECTIONS = (
     "Fusion: fuse the elementwise work around the GEMMs and the attention (rmsnorm with the residual add, silu with "
     "mul, rope) with a source patch or a kernel, starting from the operators the profile ranks highest.",
     "Server arguments and environment variables: yours is the one branch that tests settings alone; test the settings "
-    "the profile or server.log point at, not a blind sweep.",
+    "the profile or server.log point at, not a blind sweep. Before testing a setting, grep where it is read: one with "
+    "no reader on this model's path, this backend or this phase (decode or prefill) is dead, and its test measures "
+    "nothing. Bound a scheduler setting (chunked or mixed prefill, prefill and decode interleaving, running-request or "
+    "cache-pool caps) from server.log first: what the run loses to the steady decode rate, less the prefill tokens at "
+    "the prefill rate, is all scheduling can win, and under a closed-loop client a cap above the concurrency divided "
+    "by the DP size is never reached.",
     "ROCm code gaps: find the code paths where ROCm runs a slower or missing implementation where CUDA has a fast one "
     "(a fallback, a missing fused or tuned path), and port or align the CUDA implementation.",
     "Attention and decode kernels: speed up the hottest attention and decode kernels the profile shows, with a kernel "
