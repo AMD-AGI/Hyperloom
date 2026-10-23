@@ -38,6 +38,7 @@ def env(tmp_path):
         Var.E2B_SANDBOX_URL: "https://sbx.example.test",
         Var.RESULT_ARCHIVE: "s3://results-bucket/hl/runs",
         Var.ARCHIVE_ENDPOINT_URL: "https://s3.example.test",
+        Var.ARCHIVE_REGION: "us-east-1",
         Var.NODE_NAME: "node-3",
         Var.CLAW_SESSION_ID: "sess-9",
         **_SECRETS,
@@ -297,3 +298,12 @@ def test_a_child_started_without_env_sees_none_of_the_removed_inputs_and_still_s
     seen = set(json.loads(out))
     assert not [name for name in host_info.HOST_ONLY_VARS if name in seen]
     assert {"NODE_NAME", "CLAW_SESSION_ID", "USER_DATA_PATH"} <= seen
+
+
+def test_the_archive_region_is_optional_read_when_set_and_removed_from_the_environment(env):
+    unset = {name: value for name, value in env.items() if name != Var.ARCHIVE_REGION}
+    assert read_host_info(unset).archive_region is None
+    assert Var.ARCHIVE_REGION in host_info.HOST_ONLY_VARS
+
+    assert take_host_info(env).archive_region == "us-east-1"
+    assert Var.ARCHIVE_REGION not in env

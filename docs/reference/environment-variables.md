@@ -1003,7 +1003,7 @@ and input variables are always required, and a variable that is set is checked e
 | `E2B_API_URL`<br>`E2B_SANDBOX_URL` | When a sandbox is hosted | Control-plane and data-plane `http(s)` URLs of the sandbox service, without credentials, query or fragment. |
 | `HYPERLOOM_SANDBOX_KEY_MEASUREMENT`<br>`HYPERLOOM_SANDBOX_KEY_SUBRUN`<br>`HYPERLOOM_SANDBOX_KEY_DEV` | Per hosted role | The sandbox API key of each role. Credentials. |
 | `HYPERLOOM_RESULT_ARCHIVE` | When results are archived | `s3://<bucket>/<prefix>`; the prefix may be empty and has no empty, `.` or `..` segment. |
-| `AWS_ACCESS_KEY_ID`<br>`AWS_SECRET_ACCESS_KEY` | When results are archived, and always as a pair | Archive credentials. `AWS_SESSION_TOKEN` is optional, and `AWS_ENDPOINT_URL_S3` (an `http(s)` URL) too. |
+| `AWS_ACCESS_KEY_ID`<br>`AWS_SECRET_ACCESS_KEY` | When results are archived, and always as a pair | Archive credentials. `AWS_SESSION_TOKEN` is optional, and so are `AWS_ENDPOINT_URL_S3` (an `http(s)` URL) and `AWS_REGION` (not a credential). |
 | `NODE_NAME`<br>`CLAW_SESSION_ID` | No | Physical node name and session id, read when set. |
 
 Once read, every host-only input above is removed from the process environment (`take_host_info`), so a child process started

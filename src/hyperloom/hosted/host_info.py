@@ -55,6 +55,7 @@ class Var:
     SANDBOX_KEY_DEV = "HYPERLOOM_SANDBOX_KEY_DEV"
     RESULT_ARCHIVE = "HYPERLOOM_RESULT_ARCHIVE"
     ARCHIVE_ENDPOINT_URL = "AWS_ENDPOINT_URL_S3"
+    ARCHIVE_REGION = "AWS_REGION"
     AWS_ACCESS_KEY_ID = "AWS_ACCESS_KEY_ID"
     AWS_SECRET_ACCESS_KEY = "AWS_SECRET_ACCESS_KEY"
     AWS_SESSION_TOKEN = "AWS_SESSION_TOKEN"
@@ -203,6 +204,7 @@ class HostInfo:
     sandbox_keys: SandboxKeys
     result_archive: ArchiveLocation | None
     archive_endpoint_url: str | None
+    archive_region: str | None
     archive_credentials: ArchiveCredentials | None
     node_name: str | None
     claw_session_id: str | None
@@ -405,6 +407,7 @@ def _build(reader: _Reader) -> HostInfo:
         sandbox_keys=_sandbox_keys(reader),
         result_archive=reader.archive(Var.RESULT_ARCHIVE),
         archive_endpoint_url=reader.url(Var.ARCHIVE_ENDPOINT_URL),
+        archive_region=reader.text(Var.ARCHIVE_REGION),
         archive_credentials=_archive_credentials(reader),
         node_name=reader.text(Var.NODE_NAME),
         claw_session_id=reader.text(Var.CLAW_SESSION_ID),
