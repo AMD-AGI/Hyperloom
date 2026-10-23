@@ -39,6 +39,7 @@ from hyperloom.common.gpu_power_settings import (
     GpuPowerSettingsError,
     normalize_perf_level,
     read_gpu_power_settings,
+    reading_matches,
     visible_gpu_indices,
 )
 
@@ -155,7 +156,7 @@ def _reads_as(got: Any, want: Any, key: str) -> bool:
     """Whether a card's reading of one setting is the given value."""
     if key == PERF_LEVEL:
         return normalize_perf_level(got) == normalize_perf_level(want)
-    return isinstance(got, (int, float)) and not isinstance(got, bool) and abs(got - want) <= 0.5
+    return reading_matches(got, want)
 
 
 def _restore_mismatches(

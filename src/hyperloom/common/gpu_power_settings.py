@@ -3,10 +3,10 @@
 
 """Read-only view of the GPU power settings a session is measured under.
 
-The power cap and the DPM performance level decide how much of a card's throughput is available and at what power, so
-they are part of the measurement contract. Nothing here changes them: setting either is privileged and card-wide, and
-belongs to the operator before launch (``amd-smi set --power-cap`` / ``--perf-level``) or to
-``--apply-gpu-power-settings``, the same way
+The power cap, the DPM performance level and the graphics clock's maximum (sclk) decide how much of a card's throughput
+is available and at what power, so they are part of the measurement contract. Nothing here changes them: setting any of
+them is privileged and card-wide, and belongs to the operator before launch (``amd-smi set --power-cap`` /
+``--perf-level`` / ``-L sclk max``) or, for the cap and level only, to ``--apply-gpu-power-settings``, the same way
 ``--compute-partition-mode`` asserts a mode rather than setting one. This module reads what the cards are at, so a
 session can record it and refuse to start when an operator's declared value did not take effect.
 
@@ -23,7 +23,7 @@ import re
 import shutil
 import subprocess  # nosec B404 - fixed read-only amd-smi invocations.
 from dataclasses import dataclass
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Iterable, Mapping
 
 from hyperloom.common.env import env_flag
 
@@ -38,9 +38,13 @@ __all__ = [
     "PERF_LEVELS",
     "PERF_LEVEL_MANUAL",
     "POWER_CAP_W",
+    "SCLK_MAX_MHZ",
     "declared_node_problems",
     "declared_setting_problems",
+    "gfx_clock_limits",
     "gpu_power_sampling_unavailable",
+    "reading_matches",
+    "single_clock_limit",
     "normalize_perf_level",
     "read_gpu_power_settings",
     "read_node_power_settings",
@@ -51,6 +55,7 @@ _PERF_LEVEL_PREFIX = "AMDSMI_DEV_PERF_LEVEL_"
 #: The setting keys a card's power settings, a declaration and a record share.
 POWER_CAP_W = "power_cap_w"
 PERF_LEVEL = "perf_level"
+SCLK_MAX_MHZ = "sclk_max_mhz"
 #: The DPM performance levels ``amd-smi set --perf-level`` accepts, lowercased.
 PERF_LEVELS = (
     "auto",
@@ -71,8 +76,11 @@ NODE_POWER_LIMIT_W = "node_power_limit_w"
 #: The NPM states ``amd-smi node -p`` reports, lowercased.
 NPM_STATES = ("enabled", "disabled")
 _UNREADABLE = "unreadable"
-_WATTS = ("power_cap_w", NODE_POWER_LIMIT_W)
+_WATTS = (POWER_CAP_W, NODE_POWER_LIMIT_W)
 _READ_TIMEOUT_SEC = 30.0
+#: How far a numeric reading may sit from the declared value and still match it.
+_READING_TOLERANCE = 0.5
+_NUMERIC_CARD_SETTINGS = ((POWER_CAP_W, "power cap", "W"), (SCLK_MAX_MHZ, "sclk max", "MHz"))
 
 #: Escape hatch for a host where running ``amd-smi`` every couple of seconds is not acceptable.
 GPU_POWER_SAMPLING_ENV = "HYPERLOOM_GPU_POWER_SAMPLING"
@@ -185,10 +193,11 @@ def _power_cap_w(limit: Any) -> float | None:
 
 @dataclass(frozen=True)
 class DeclaredPowerSettings:
-    """The GPU power settings a launch declares; ``None`` (or ``""`` for a state) for one it leaves alone."""
+    """The GPU power settings a launch declares; ``None`` (or ``""`` for a level or state) for one it leaves alone."""
 
     power_cap_w: float | None = None
     perf_level: str = ""
+    sclk_max_mhz: int | None = None
     npm: str = ""
     node_power_limit_w: float | None = None
 
@@ -197,8 +206,12 @@ class DeclaredPowerSettings:
         object.__setattr__(self, "npm", str(self.npm).lower())
 
     def as_row(self) -> dict[str, Any]:
-        """The per-card settings keyed as a card's reading is; the only ones a session may apply."""
-        return {"power_cap_w": self.power_cap_w, "perf_level": self.perf_level}
+        """The per-card settings a session may apply, keyed as a card's reading is."""
+        return {POWER_CAP_W: self.power_cap_w, PERF_LEVEL: self.perf_level}
+
+    def card_row(self) -> dict[str, Any]:
+        """Every per-card setting, keyed as a card's reading is; the clock limit is only ever asserted."""
+        return {**self.as_row(), SCLK_MAX_MHZ: self.sclk_max_mhz}
 
     def node_row(self) -> dict[str, Any]:
         """The node-wide settings keyed as the node's reading is."""
@@ -206,8 +219,43 @@ class DeclaredPowerSettings:
 
     def as_record(self) -> dict[str, Any]:
         """Only the settings declared, watts as floats: what the session stores and resumes from."""
-        row = {**self.as_row(), **self.node_row()}
+        row = {**self.card_row(), **self.node_row()}
         return {key: float(value) if key in _WATTS else value for key, value in row.items() if value}
+
+
+def gfx_clock_limits(clock: Any) -> frozenset[float]:
+    """The graphics clock's maximum limits in one card's ``amd-smi metric --clock`` block.
+
+    amd-smi prints all eight ``gfx_<n>`` slots, fills only those with an XCD behind them (a partitioned card has fewer)
+    and copies the card's one limit into each, so the limits are those the filled slots report: empty when none is
+    filled. ``max_clk`` there is the limit in force: an ``amd-smi set -L sclk max`` shows in ``metric --clock``, not in
+    ``static --clock``.
+    """
+    if not isinstance(clock, dict):
+        return frozenset()
+    return frozenset(
+        limit
+        for name, block in clock.items()
+        if str(name).startswith("gfx_")
+        and isinstance(block, dict)
+        and _value(block.get("clk")) is not None
+        and (limit := _value(block.get("max_clk"))) is not None
+    )
+
+
+def single_clock_limit(limits: Iterable[float]) -> float | None:
+    """The one graphics-clock limit the readings agree on; ``None`` when there is none, or more than one."""
+    distinct = set(limits)
+    return next(iter(distinct)) if len(distinct) == 1 else None
+
+
+def reading_matches(got: Any, want: float) -> bool:
+    """Whether a numeric reading is the declared value, within the rounding amd-smi readings carry."""
+    return (
+        isinstance(got, (int, float))
+        and not isinstance(got, bool)
+        and abs(float(got) - float(want)) <= _READING_TOLERANCE
+    )
 
 
 def _amd_smi_json(run: Callable[..., subprocess.CompletedProcess], timeout: float, *args: str) -> Any:
@@ -243,7 +291,7 @@ def read_gpu_power_settings(
     run: Callable[..., subprocess.CompletedProcess] = subprocess.run,
     timeout: float = _READ_TIMEOUT_SEC,
 ) -> dict[int, dict[str, Any]]:
-    """``{gpu: {"power_cap_w": float | None, "perf_level": str}}`` for every card ``amd-smi`` lists.
+    """``{gpu: {"power_cap_w": float | None, "perf_level": str, "sclk_max_mhz": float | None}}`` for every card listed.
 
     Raises:
         GpuPowerSettingsError: ``amd-smi`` is absent, failed, or printed something that is not its JSON.
@@ -253,9 +301,13 @@ def read_gpu_power_settings(
         settings.setdefault(row["gpu"], {})["power_cap_w"] = _power_cap_w(row.get("limit"))
     for row in _gpu_rows(_amd_smi_json(run, timeout, "metric", "--perf-level")):
         settings.setdefault(row["gpu"], {})["perf_level"] = normalize_perf_level(row.get("perf_level"))
+    for row in _gpu_rows(_amd_smi_json(run, timeout, "metric", "--clock")):
+        if row["gpu"] in settings:
+            settings[row["gpu"]][SCLK_MAX_MHZ] = single_clock_limit(gfx_clock_limits(row.get("clock")))
     for entry in settings.values():
         entry.setdefault("power_cap_w", None)
         entry.setdefault("perf_level", "")
+        entry.setdefault(SCLK_MAX_MHZ, None)
     return settings
 
 
@@ -293,7 +345,7 @@ def declared_node_problems(node: Mapping[str, Any], declared: DeclaredPowerSetti
         problems.append(f"node power management is {node.get(NPM) or _UNREADABLE!r}, declared {npm!r}")
     if node_power_limit_w is not None:
         limit = node.get(NODE_POWER_LIMIT_W)
-        if not isinstance(limit, (int, float)) or abs(float(limit) - float(node_power_limit_w)) > 0.5:
+        if not reading_matches(limit, node_power_limit_w):
             problems.append(
                 f"node power limit is {limit if limit is not None else _UNREADABLE} W, "
                 f"declared {node_power_limit_w:g} W"
@@ -302,27 +354,23 @@ def declared_node_problems(node: Mapping[str, Any], declared: DeclaredPowerSetti
 
 
 def declared_setting_problems(
-    settings: Mapping[int, Mapping[str, Any]],
-    *,
-    power_cap_w: float | None = None,
-    perf_level: str | None = None,
-    gpus: set[int] | None = None,
+    settings: Mapping[int, Mapping[str, Any]], declared: DeclaredPowerSettings, *, gpus: set[int] | None = None
 ) -> list[str]:
     """Why the cards are not at the declared settings; empty when they are, or when nothing is declared.
 
     A declared value that cannot be read counts as a mismatch: an assertion nobody verified is not a satisfied one.
     """
-    wanted_level = normalize_perf_level(perf_level) if perf_level else ""
+    wanted, wanted_level = declared.card_row(), declared.perf_level
     checked = {gpu: row for gpu, row in settings.items() if gpus is None or gpu in gpus}
-    if (power_cap_w is not None or wanted_level) and not checked:
+    if any(wanted.values()) and not checked:
         return ["no GPU the session can use was reported by amd-smi"]
     problems: list[str] = []
     for gpu, row in sorted(checked.items()):
-        if power_cap_w is not None:
-            cap = row.get("power_cap_w")
-            if not isinstance(cap, (int, float)) or abs(float(cap) - float(power_cap_w)) > 0.5:
+        for key, label, unit in _NUMERIC_CARD_SETTINGS:
+            want, got = wanted[key], row.get(key)
+            if want is not None and not reading_matches(got, want):
                 problems.append(
-                    f"GPU {gpu} power cap is {cap if cap is not None else _UNREADABLE} W, declared {power_cap_w:g} W"
+                    f"GPU {gpu} {label} is {got if got is not None else _UNREADABLE} {unit}, declared {want:g} {unit}"
                 )
         if wanted_level and row.get("perf_level") != wanted_level:
             problems.append(
