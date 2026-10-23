@@ -39,6 +39,8 @@ def env(tmp_path):
         Var.RESULT_ARCHIVE: "s3://results-bucket/hl/runs",
         Var.ARCHIVE_ENDPOINT_URL: "https://s3.example.test",
         Var.ARCHIVE_REGION: "us-east-1",
+        Var.SOURCE_REPO: "AMD-AGI/Hyperloom",
+        Var.SOURCE_SHA: "0123456789abcdef0123456789abcdef01234567",
         Var.NODE_NAME: "node-3",
         Var.CLAW_SESSION_ID: "sess-9",
         **_SECRETS,
@@ -57,6 +59,7 @@ def test_a_complete_environment_reads_into_typed_fields(env, tmp_path):
     assert info.sandbox_keys.subrun.reveal() == _SECRETS[Var.SANDBOX_KEY_SUBRUN]
     assert info.archive_credentials.session_token.reveal() == _SECRETS[Var.AWS_SESSION_TOKEN]
     assert (info.node_name, info.claw_session_id) == ("node-3", "sess-9")
+    assert (info.source_repo, info.source_sha) == ("AMD-AGI/Hyperloom", "0123456789abcdef0123456789abcdef01234567")
 
 
 def test_events_dir_defaults_under_the_state_dir_and_an_explicit_one_wins(env, tmp_path):
@@ -200,6 +203,9 @@ def test_missing_and_malformed_inputs_are_reported_together(env):
         (Var.INPUT_FILE, "/nonexistent/campaign.json", "not an existing file"),
         (Var.STATE_DIR, "/nonexistent/state", "not an existing directory"),
         (Var.MCP_TOKEN, "two words", "whitespace or control"),
+        (Var.SOURCE_SHA, "0123abc", "40-hex"),
+        (Var.SOURCE_SHA, "0123456789ABCDEF0123456789abcdef01234567", "40-hex"),
+        (Var.SOURCE_REPO, "two words", "whitespace or control"),
     ],
 )
 def test_a_malformed_input_is_refused_with_its_reason(env, name, value, reason):

@@ -60,6 +60,8 @@ class Var:
     AWS_SECRET_ACCESS_KEY = "AWS_SECRET_ACCESS_KEY"
     AWS_SESSION_TOKEN = "AWS_SESSION_TOKEN"
     GRANT_LIMITS = "HYPERLOOM_GRANT_LIMITS"
+    SOURCE_REPO = "HYPERLOOM_SOURCE_REPO"
+    SOURCE_SHA = "HYPERLOOM_SOURCE_SHA"
     NODE_NAME = "NODE_NAME"
     CLAW_SESSION_ID = "CLAW_SESSION_ID"
 
@@ -112,6 +114,7 @@ _GROUP_VARS: Mapping[HostGroup, tuple[str, ...]] = {
 DEFAULT_REQUIRE: frozenset[HostGroup] = frozenset({HostGroup.MCP})
 
 _BUCKET_RE = re.compile(r"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$")
+_COMMIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _CONTROL_OR_SPACE_RE = re.compile(r"[\s\x00-\x1f\x7f]")
 
 
@@ -218,6 +221,8 @@ class HostInfo:
     node_name: str | None
     claw_session_id: str | None
     grant_limits: GrantLimits | None = None
+    source_repo: str | None = None  # what the runner sandbox's start-up script fetches
+    source_sha: str | None = None  # full 40-hex commit id of the version this run executes
 
 
 class _Reader:
@@ -280,6 +285,9 @@ class _Reader:
     def grant_limits(self, name: str) -> GrantLimits | None:
         return self._parsed(name, _grant_limits)
 
+    def commit_sha(self, name: str) -> str | None:
+        return self._parsed(name, _commit_sha)
+
     def secret(self, name: str, *, force: bool = False) -> Secret | None:
         value = self._parsed(name, _plain_text, force=force)
         return None if value is None else Secret(value)
@@ -288,6 +296,12 @@ class _Reader:
 def _plain_text(value: str) -> str:
     if _CONTROL_OR_SPACE_RE.search(value):
         raise ValueError("must not contain whitespace or control characters")
+    return value
+
+
+def _commit_sha(value: str) -> str:
+    if not _COMMIT_SHA_RE.match(value):
+        raise ValueError("must be a full lowercase 40-hex commit id")
     return value
 
 
@@ -456,6 +470,8 @@ def _build(reader: _Reader) -> HostInfo:
         node_name=reader.text(Var.NODE_NAME),
         claw_session_id=reader.text(Var.CLAW_SESSION_ID),
         grant_limits=reader.grant_limits(Var.GRANT_LIMITS),
+        source_repo=reader.text(Var.SOURCE_REPO),
+        source_sha=reader.commit_sha(Var.SOURCE_SHA),
     )
 
 
