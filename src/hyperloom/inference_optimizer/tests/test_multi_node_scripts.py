@@ -1088,6 +1088,42 @@ def test_install_geak_noop_for_rayjob(tmp_path, monkeypatch):
     assert mn_cli.install_geak_on_pods_best_effort() == 0
 
 
+@pytest.mark.parametrize(("raw", "expected"), [(None, 42), (" ", 42), ("0", 1), ("1800", 1800)])
+def test_poll_timeout_is_the_env_value_floored_at_one_else_the_callers_default(monkeypatch, raw, expected):
+    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+
+    monkeypatch.delenv("HYPERLOOM_MN_POLL_TIMEOUT_S", raising=False)
+    if raw is not None:
+        monkeypatch.setenv("HYPERLOOM_MN_POLL_TIMEOUT_S", raw)
+
+    assert mn_cli.resolve_poll_timeout_s(42) == expected
+
+
+def test_a_malformed_poll_timeout_is_a_config_error_not_a_retry(monkeypatch, capsys):
+    """Re-running the subcommand cannot fix a typo, and the typo must not quietly become the default budget."""
+    from hyperloom.common.env import EnvValueError
+    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
+
+    class _Dashboard:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def submit_job(self, _entrypoint):
+            return "sub-1"
+
+    monkeypatch.setenv("HYPERLOOM_MN_POLL_TIMEOUT_S", "30m")
+    monkeypatch.setattr(mn_cli, "_require_state", lambda *_keys: {"head_pod_ip": "10.0.0.1"})
+    monkeypatch.setattr(mn_cli, "_ray_dashboard_client", lambda _state=None: _Dashboard())
+
+    with pytest.raises(EnvValueError, match="HYPERLOOM_MN_POLL_TIMEOUT_S"):
+        mn_cli.resolve_poll_timeout_s()
+    assert mn_cli.main(["verify"]) == mn_cli.EXIT_CONFIG_ERROR
+    assert "HYPERLOOM_MN_POLL_TIMEOUT_S='30m' is not an integer" in capsys.readouterr().err
+
+
 # infera_ssh_env_from_state isolation tests (kernel-agent GEAK SSH placement).
 
 
