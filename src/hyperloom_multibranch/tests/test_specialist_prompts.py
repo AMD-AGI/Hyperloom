@@ -538,3 +538,11 @@ def test_the_role_names_the_session_s_reference_material_only_when_it_has_some(t
     assert f"geak at {geak}" in prompt and "read-only" in prompt
     assert "name the file you used in your branch log" in prompt
     assert "Reference material for this session" not in role_prompt(WORKLOAD)
+
+
+def test_the_role_says_what_geak_s_reference_directories_hold(tmp_path):
+    prompt = role_prompt(WORKLOAD, references={"geak": tmp_path / "geak"})
+
+    assert "perf_knowledge/expert_skills/tuning" in prompt
+    assert "kernel_workflow/knowledge/learned" in prompt
+    assert "perf_knowledge" not in role_prompt(WORKLOAD, references={"notes": tmp_path / "notes"})

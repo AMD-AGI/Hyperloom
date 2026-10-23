@@ -304,10 +304,20 @@ def role_prompt(workload: str, references: Mapping[str, Path] | None = None) -> 
     return role + _references(references or {})
 
 
+#: What a well-known reference source holds, by the name a session gives it.
+_HOLDS = {
+    "geak": (
+        " (perf_knowledge/expert_skills/tuning: how to tune aiter and hipBLASLt GEMMs and kernels on ROCm; "
+        "e2e_workflow/knowledge/learned and kernel_workflow/knowledge/learned: what earlier GEAK runs learned, by "
+        "operator and model)"
+    ),
+}
+
+
 def _references(references: Mapping[str, Path]) -> str:
     if not references:
         return ""
-    listed = "; ".join(f"{name} at {path}" for name, path in sorted(references.items()))
+    listed = "; ".join(f"{name} at {path}{_HOLDS.get(name, '')}" for name, path in sorted(references.items()))
     return (
         "\nReference material for this session, read-only and copied in when it started, one directory per source: "
         f"{listed}. Before you guess at a kernel, a tuning step or a setting, read what it says about this model's "
