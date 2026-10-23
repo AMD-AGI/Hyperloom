@@ -13,8 +13,13 @@ from hyperloom.agents.critic.runtime.dead_letter import DeadLetter
 from hyperloom.agents.critic.runtime.decision_reviewer import DecisionReviewer
 from hyperloom.agents.critic.runtime.errors import KBError, KBTransportError, KBValidationError
 from hyperloom.agents.critic.runtime.in_memory_kb_client import InMemoryKBClient
+from hyperloom.agents.critic.runtime.kb_client import KBListQuery
 from hyperloom.agents.critic.runtime.kb_writer import KBWriter, WriteContext
 from hyperloom.agents.critic.runtime.session_memory import SessionMemory
+
+
+def _rows(kb: InMemoryKBClient) -> list[dict]:
+    return kb.list(KBListQuery(scope_filter={}, limit=0))["entries"]
 
 
 @pytest.fixture()
@@ -48,7 +53,7 @@ def test_write_verdict_skipped_for_advise(writer, packet_context):
         ctx=WriteContext(session_id="s1"),
     )
     assert res.status == "skipped"
-    assert kb.all_rows() == []
+    assert _rows(kb) == []
 
 
 def test_write_verdict_reject_creates_pitfall(writer, packet_context):
@@ -67,7 +72,7 @@ def test_write_verdict_reject_creates_pitfall(writer, packet_context):
         ctx=WriteContext(session_id="s1", review_id="rev_1"),
     )
     assert res.status == "ok"
-    rows = kb.all_rows()
+    rows = _rows(kb)
     assert len(rows) == 1
     assert rows[0]["kind"] == "pitfall"
     assert rows[0]["importance"] <= 0.84
@@ -87,7 +92,11 @@ def test_write_verdict_skipped_when_disabled(monkeypatch, writer, packet_context
 
 def test_write_verdict_dead_letters_on_validation_error(writer, packet_context):
     w, kb, sm, dlq = writer
-    kb.simulate_failure(endpoint="upsert", times=1, error={"code": 422})
+
+    def boom(payload):
+        raise KBValidationError("422 bad payload")
+
+    kb.upsert = boom  # type: ignore[method-assign]
     res = w.write_verdict(
         verdict={
             "verdict": "reject",
@@ -104,6 +113,7 @@ def test_write_verdict_dead_letters_on_validation_error(writer, packet_context):
     record = json.loads(line)
     assert record["endpoint"] == "upsert"
     assert "session_id" in record["context"]
+    assert res.detail["reason"] == "validation_error"
 
 
 def test_list_priors_uses_session_memory_cache(writer, packet_context):

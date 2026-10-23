@@ -12,6 +12,7 @@ import pytest
 from hyperloom.agents.critic.runtime.decision_reviewer import DecisionReviewer
 from hyperloom.agents.critic.runtime.errors import ReviewValidationError
 from hyperloom.agents.critic.runtime.in_memory_kb_client import InMemoryKBClient
+from hyperloom.agents.critic.runtime.kb_client import KBListQuery
 from hyperloom.agents.critic.runtime.kb_writer import KBWriter
 from hyperloom.agents.critic.runtime.request_models import Proposal
 from hyperloom.agents.critic.runtime.session_memory import SessionMemory
@@ -588,7 +589,7 @@ def test_commit_review_persists_to_kb_when_flagged(reviewer):
         review,
     )
     assert any(w["trigger"] == "review_verdict" for w in outcome.kb_writes)
-    assert kb.all_rows()
+    assert kb.list(KBListQuery(scope_filter={}))["entries"]
 
 
 def test_kb_priors_cache_hit_avoids_second_kb_call(reviewer):
@@ -616,7 +617,7 @@ def test_kb_priors_cache_hit_avoids_second_kb_call(reviewer):
         "  seq=1 msg_id=aaa from=orchestration topic=proposal payload={'action_name': 'kernel_opt'}\n"
     )
     rev.prepare_review(_coordinator_request(prompt, "sess_cache_e2e"))
-    kb.reset()
+    rev.kb_writer.client = InMemoryKBClient()
     bundle = rev.prepare_review(_coordinator_request(prompt, "sess_cache_e2e"))
     # KB is now empty, but the bundle still has priors from the cache hit.
     assert bundle.kb_priors_by_proposal["aaa"]

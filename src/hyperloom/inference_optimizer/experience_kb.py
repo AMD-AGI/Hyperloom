@@ -39,10 +39,6 @@ def _json_safe(value: Any) -> Any:
     return str(value)
 
 
-def _first_value(*values: Any) -> Any:
-    return next((value for value in values if value not in (None, "")), None)
-
-
 def _current_best_throughput(current_best: dict[str, Any]) -> float:
     for name in ("tput", "output_throughput"):
         throughput = current_best.get(name)
@@ -58,7 +54,6 @@ class ExperienceKBEvidence:
     status: str
     prompt_block: str
     rendered_refs: tuple[dict[str, str], ...]
-    warnings: tuple[str, ...]
     experiences: tuple[dict[str, Any], ...] = ()
 
 
@@ -81,93 +76,34 @@ class ExperienceKBIntegration:
         env: dict[str, str] | None = None,
     ) -> ExperienceKBIntegration | None:
         values = os.environ if env is None else env
-        if not str(values.get("HYPERLOOM_KB_URL") or "").strip():
-            return None
         try:
             config = RemoteConfig.from_env(values, timeout_seconds=REQUEST_TIMEOUT_SECONDS)
+            if config is None:
+                return None
             schema_ref = mapping_schema_ref()
         except (RemoteClientError, ConfigurationError, MappingError):
             log.exception("Experience service configuration is invalid; reads are disabled")
             return None
-        if config is None:
-            return None
         return cls(RemoteClient(config), Path(session_dir), schema_ref)
 
-    def _manifest_context(self) -> dict[str, Any]:
-        path = self.session_dir / "manifest.json"
-        try:
-            value = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return {}
-        if not isinstance(value, dict):
-            return {}
-        task = value.get("task_config")
-        if not isinstance(task, dict):
-            metadata = value.get("metadata")
-            task = metadata.get("task_config") if isinstance(metadata, dict) else None
-        return dict(task) if isinstance(task, dict) else {}
-
     def _context(self, state: Any, observations: dict[str, str]) -> dict[str, Any]:
-        manifest = self._manifest_context()
-        architecture = manifest.get("architecture")
-        architecture = architecture if isinstance(architecture, dict) else {}
-        architectures = architecture.get("architectures")
-        architecture_name = (
-            architectures[0] if isinstance(architectures, list) and architectures else architecture.get("architecture")
-        )
         identity_sources = {
-            "model": _first_value(
-                getattr(state, "model_name", None),
-                manifest.get("model_name"),
-            ),
-            "gpu": _first_value(
-                getattr(state, "gpu_type", None),
-                manifest.get("gpu_type"),
-            ),
-            "framework": _first_value(
-                getattr(state, "framework", None),
-                manifest.get("framework_name"),
-            ),
-            "model_type": _first_value(
-                getattr(state, "model_type", None),
-                architecture.get("model_type"),
-            ),
-            "architecture": _first_value(
-                getattr(state, "architecture", None),
-                architecture_name,
-            ),
-            "framework_version": _first_value(
-                getattr(state, "framework_version", None),
-                manifest.get("framework_version"),
-            ),
-            "precision": _first_value(
-                getattr(state, "precision", None),
-                manifest.get("precision"),
-            ),
+            "model": getattr(state, "model_name", None),
+            "gpu": getattr(state, "gpu_type", None),
+            "framework": getattr(state, "framework", None),
+            "model_type": getattr(state, "model_type", None),
+            "framework_version": getattr(state, "framework_version", None),
+            "precision": getattr(state, "precision", None),
         }
         identity = {name: _json_safe(value) for name, value in identity_sources.items() if value not in (None, "")}
         workload: dict[str, Any] = {}
-        for name in (
-            "tp",
-            "ep",
-            "conc",
-            "isl",
-            "osl",
-            "max_model_len",
-            "compute_partition_mode",
-            "partitions",
-        ):
-            value = _first_value(getattr(state, name, None), manifest.get(name))
+        for name in ("tp", "ep", "conc", "isl", "osl", "max_model_len"):
+            value = getattr(state, name, None)
             if value not in (None, ""):
                 workload[name] = _json_safe(value)
         baseline_tput = float(getattr(state, "baseline_tput", 0.0) or 0.0)
         current_best = getattr(state, "current_best", None) or {}
-        current_best_tput = float(
-            getattr(state, "current_best_tput", 0.0)
-            or getattr(state, "best_tput", 0.0)
-            or _current_best_throughput(current_best)
-            or 0.0
-        )
+        current_best_tput = _current_best_throughput(current_best)
         return {
             "identity": identity,
             "workload": workload,
@@ -234,7 +170,6 @@ class ExperienceKBIntegration:
                 status="unavailable",
                 prompt_block="",
                 rendered_refs=(),
-                warnings=("experience_kb_reads_off_for_session",),
             )
         result = self.client.read(
             ReadQuery(decision, context, schema_ref=self.schema_ref, render_budget_chars=RENDER_BUDGET_CHARS)
@@ -252,7 +187,6 @@ class ExperienceKBIntegration:
             status=result.status,
             prompt_block=result.prompt_block,
             rendered_refs=tuple(item.to_dict() for item in result.rendered_refs),
-            warnings=tuple(result.warnings),
             experiences=tuple(dict(item) for item in result.experiences),
         )
         self._by_context[context_hash] = evidence

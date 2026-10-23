@@ -8,56 +8,25 @@ from __future__ import annotations
 import copy
 import time
 import uuid
-from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from .errors import KBValidationError
 from .kb_client import KBListQuery
+from .scope_builder import normalise_scope_value, scope_key
 
 
 # ---------------------------------------------------------------------------
-def _normalise_value(value: Any) -> str:
-    """Normalise a scope value to a trimmed, lower-cased string."""
-    if value is None:
-        return ""
-    return str(value).strip().lower()
-
-
 def _normalise_scope(scope: dict[str, Any]) -> dict[str, str]:
-    """Normalise every value in a scope dict via :func:`_normalise_value`."""
-    return {k: _normalise_value(v) for k, v in scope.items()}
+    """Normalise every value in a scope dict via :func:`normalise_scope_value`."""
+    return {k: normalise_scope_value(v) for k, v in scope.items()}
 
 
 def _scope_contains(row_scope: dict[str, str], scope_filter: dict[str, Any]) -> bool:
     """Return True if ``row_scope`` matches every key/value in the filter."""
     for k, v in scope_filter.items():
-        wanted = _normalise_value(v)
+        wanted = normalise_scope_value(v)
         if row_scope.get(k, "") != wanted:
-            return False
-    return True
-
-
-def _matches_metadata(metadata: dict[str, Any], filter_obj: dict[str, Any]) -> bool:
-    """Recursive nested + array-contains matcher."""
-    for key, expected in filter_obj.items():
-        if isinstance(expected, dict):
-            sub = metadata.get(key)
-            if not isinstance(sub, dict):
-                return False
-            if not _matches_metadata(sub, expected):
-                return False
-            continue
-        if isinstance(expected, list):
-            haystack = metadata.get(key)
-            if isinstance(haystack, list):
-                # array contains: every expected item must be in haystack
-                for item in expected:
-                    if item not in haystack:
-                        return False
-                continue
-            return False
-        if metadata.get(key) != expected:
             return False
     return True
 
@@ -75,7 +44,6 @@ class _Row:
     summary: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
     edges: dict[str, list[str]] = field(default_factory=dict)
-    deleted: bool = False
     created_at: float = 0.0
     updated_at: float = 0.0
 
@@ -92,7 +60,6 @@ class _Row:
             "edges": {k: list(v) for k, v in self.edges.items()},
             "created_at": self.created_at,
             "updated_at": self.updated_at,
-            "deleted": self.deleted,
         }
 
 
@@ -108,48 +75,20 @@ class InMemoryKBClient:
         self._rows: dict[str, _Row] = {}
         self._index: dict[tuple[str, str, str], str] = {}
         self._time_fn = time_fn
-        self._failure_queue: deque[dict[str, Any]] = deque()
-
-    # Fault injection
-    def simulate_failure(
-        self,
-        *,
-        endpoint: str,
-        times: int,
-        error: dict[str, Any],
-    ) -> None:
-        """Schedule ``times`` consecutive failures for ``endpoint``."""
-        for _ in range(times):
-            self._failure_queue.append({"endpoint": endpoint, "error": error})
-
-    def _maybe_fail(self, endpoint: str) -> None:
-        """Raise a scheduled failure if the queue head targets ``endpoint``."""
-        if not self._failure_queue:
-            return
-        head = self._failure_queue[0]
-        if head["endpoint"] == endpoint:
-            self._failure_queue.popleft()
-            err = head["error"]
-            raise KBValidationError(f"{endpoint}: simulated failure {err!r}")
 
     # list
     def list(self, query: KBListQuery) -> dict[str, Any]:
-        """List rows matching a scope filter (and optional metadata filter)."""
-        self._maybe_fail("list")
+        """List rows matching a scope filter, newest first."""
         if not isinstance(query.scope_filter, dict):
             raise KBValidationError("list: scope_filter must be an object")
         out: list[_Row] = []
         for row in self._rows.values():
-            if row.deleted and not query.include_deleted:
-                continue
             if query.kind is not None and row.kind != query.kind:
                 continue
             if not _scope_contains(row.scope, query.scope_filter):
                 continue
-            if query.metadata_filter and not _matches_metadata(row.metadata, query.metadata_filter):
-                continue
             out.append(row)
-        out.sort(key=lambda r: r.updated_at, reverse=(query.sort_by == "updated_at_desc"))
+        out.sort(key=lambda r: r.updated_at, reverse=True)
         if query.limit:
             out = out[: query.limit]
         return {"entries": [r.to_dict() for r in out], "count": len(out)}
@@ -157,7 +96,6 @@ class InMemoryKBClient:
     # upsert
     def upsert(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Insert or merge a row keyed by ``(scope, kind, slug)``."""
-        self._maybe_fail("upsert")
         for f in _REQUIRED_UPSERT_FIELDS:
             if f not in payload:
                 raise KBValidationError(f"upsert: missing field {f!r}")
@@ -170,16 +108,7 @@ class InMemoryKBClient:
         edges_in = payload.get("edges") or {}
 
         warnings: list[str] = []
-        # Warn when an incoming scope value differs from its normalised form.
-        for k, v in payload["scope"].items():
-            if str(v).strip().lower() != _normalise_value(v) or _normalise_value(v) != _normalise_value(
-                payload["scope"][k]
-            ):
-                if str(v) != _normalise_value(v):
-                    warnings.append("scope_value_normalized")
-                    break
-
-        key = (json_scope_key(scope), kind, slug)
+        key = (scope_key(scope), kind, slug)
         existing_id = self._index.get(key)
         now = self._time_fn()
         if existing_id is None:
@@ -218,24 +147,8 @@ class InMemoryKBClient:
         row.updated_at = now
         return {"row": row.to_dict(), "created": False, "warnings": warnings}
 
-    # Test helpers
-    def all_rows(self) -> list[dict[str, Any]]:
-        """Return serialised copies of every stored row (test helper)."""
-        return [r.to_dict() for r in self._rows.values()]
-
-    def reset(self) -> None:
-        """Clear all rows, the unique index and any scheduled failures."""
-        self._rows.clear()
-        self._index.clear()
-        self._failure_queue.clear()
-
 
 # ---------------------------------------------------------------------------
-def json_scope_key(scope: dict[str, str]) -> str:
-    """Stable scope key used for `(scope, kind, slug)` UNIQUE."""
-    return "|".join(f"{k}={scope[k]}" for k in sorted(scope.keys()))
-
-
 def _deep_merge(base: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
     """Recursively merge ``incoming`` into a deep copy of ``base``."""
     out = copy.deepcopy(base)
@@ -247,4 +160,4 @@ def _deep_merge(base: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any
     return out
 
 
-__all__ = ["InMemoryKBClient", "json_scope_key"]
+__all__ = ["InMemoryKBClient"]

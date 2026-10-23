@@ -35,10 +35,7 @@ class KBListQuery:
 
     scope_filter: dict[str, Any]
     kind: str | None = None
-    metadata_filter: dict[str, Any] | None = None
     limit: int = 10
-    sort_by: str = "updated_at_desc"
-    include_deleted: bool = False
 
 
 class KBClient(Protocol):
@@ -79,13 +76,11 @@ class HTTPKBClient:
         body: dict[str, Any] = {
             "scope_filter": query.scope_filter,
             "limit": query.limit,
-            "sort_by": query.sort_by,
-            "include_deleted": query.include_deleted,
+            "sort_by": "updated_at_desc",
+            "include_deleted": False,
         }
         if query.kind is not None:
             body["kind"] = query.kind
-        if query.metadata_filter is not None:
-            body["metadata_filter"] = query.metadata_filter
         return self._request("/api/kb/list", body)
 
     def upsert(self, payload: dict[str, Any]) -> dict[str, Any]:

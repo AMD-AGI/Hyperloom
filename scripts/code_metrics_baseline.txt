@@ -189,7 +189,6 @@ function-args src/hyperloom/inference_optimizer/breakdown/recorder/warm_replay_e
 function-args src/hyperloom/inference_optimizer/breakdown/recorder/warm_replay_event.py::make_warm_replay_recorder 13
 function-args src/hyperloom/inference_optimizer/breakdown/recorder/warm_start_event.py::matched_block 8
 function-args src/hyperloom/inference_optimizer/grid_server_args.py::inject_sglang_context_length 6
-function-args src/hyperloom/inference_optimizer/recipe_snapshot_constants.py::canonical_labels 7
 function-args src/hyperloom/inference_optimizer/recipe_snapshot_constants.py::kb_hardware_slug 10
 function-args src/hyperloom/inference_optimizer/recipe_snapshot_constants.py::recipe_canonical_id 8
 function-args src/hyperloom/orchestrator/actions/executors/_geak_sweep.py::sweep_via_geak 10
@@ -245,7 +244,6 @@ function-lines scripts/partition_mode_sweep.py::render 52
 function-lines scripts/partition_mode_sweep.py::run_mode 57
 function-lines scripts/platform_audit_bmc.py::main 113
 function-lines src/hyperloom/agents/critic/runtime/decision_reviewer.py::DecisionReviewer._commit_coordinator_inbox 57
-function-lines src/hyperloom/agents/critic/runtime/in_memory_kb_client.py::InMemoryKBClient.upsert 54
 function-lines src/hyperloom/agents/critic/runtime/kb_writer.py::KBWriter.write_verdict 54
 function-lines src/hyperloom/agents/framework/sources/__init__.py::_run_pr_monitor 51
 function-lines src/hyperloom/agents/quantization/cli.py::_parse_args 52
@@ -303,11 +301,10 @@ function-lines src/hyperloom/inference_optimizer/cli/preflight.py::_ensure_infer
 function-lines src/hyperloom/inference_optimizer/cli/preflight.py::_ensure_lm_eval_dep 62
 function-lines src/hyperloom/inference_optimizer/cli/preflight.py::_ensure_magpie 53
 function-lines src/hyperloom/inference_optimizer/cli/preflight.py::_load_kernel_agent_env_fallback 69
-function-lines src/hyperloom/inference_optimizer/cli/preflight.py::_preflight 145
+function-lines src/hyperloom/inference_optimizer/cli/preflight.py::_preflight 136
 function-lines src/hyperloom/inference_optimizer/cli/preflight.py::_probe_rocm_build 54
 function-lines src/hyperloom/inference_optimizer/cli/preflight.py::_report_unusable_framework 62
 function-lines src/hyperloom/inference_optimizer/cli/preflight.py::_run_ir3_preflight 66
-function-lines src/hyperloom/inference_optimizer/experience_kb.py::ExperienceKBIntegration._context 77
 function-lines src/hyperloom/inference_optimizer/grid_server_args.py::validate_warm_replay_context_length 51
 function-lines src/hyperloom/inference_optimizer/multi_node/_internal/external_state.py::build_external_state_from_env 55
 function-lines src/hyperloom/inference_optimizer/multi_node/_internal/serving_probe.py::cluster_is_serving 64
@@ -794,7 +791,7 @@ module-lines src/hyperloom/inference_optimizer/breakdown/recorder/kernel_event.p
 module-lines src/hyperloom/inference_optimizer/breakdown/schema.py 2681
 module-lines src/hyperloom/inference_optimizer/cli/__init__.py 2569
 module-lines src/hyperloom/inference_optimizer/cli/model_gate.py 1759
-module-lines src/hyperloom/inference_optimizer/cli/preflight.py 2551
+module-lines src/hyperloom/inference_optimizer/cli/preflight.py 2523
 module-lines src/hyperloom/inference_optimizer/multi_node/cli.py 1804
 module-lines src/hyperloom/inference_optimizer/roofline_ceiling.py 1417
 module-lines src/hyperloom/orchestrator/actions/executors/_grid_runner.py 2045
@@ -836,7 +833,6 @@ module-lines src/kernelforge/loop/task_preparer.py 1299
 module-lines src/kernelforge/orchestrator/analysis.py 1952
 module-lines src/kernelforge/orchestrator/orchestration.py 1831
 nested-blocks scripts/platform_audit_bmc.py::main 5
-nested-blocks src/hyperloom/agents/critic/runtime/in_memory_kb_client.py::_matches_metadata 5
 nested-blocks src/hyperloom/common/launch_log_evidence.py::_read_launch_record 5
 nested-blocks src/hyperloom/common/launch_log_evidence.py::_recipe_server_env 5
 nested-blocks src/hyperloom/inference_optimizer/breakdown/recorder/kernel_event.py::_merge_acceptances 5

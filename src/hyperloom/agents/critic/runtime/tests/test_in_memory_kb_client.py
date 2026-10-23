@@ -85,62 +85,6 @@ def test_list_returns_only_matching_scope_after_normalisation():
     assert any(r["slug"] == "a-pitfall1" for r in out["entries"])
 
 
-def test_metadata_filter_supports_nested_paths():
-    kb = InMemoryKBClient()
-    kb.upsert(
-        {
-            "scope": _scope(),
-            "kind": "pitfall",
-            "slug": "deep-pitfall",
-            "importance": 0.5,
-            "metadata": {"evidence": {"packet_evidence": ["benchmark.after.gain_pct"]}},
-        }
-    )
-    out = kb.list(
-        KBListQuery(
-            scope_filter=_scope(), metadata_filter={"evidence": {"packet_evidence": ["benchmark.after.gain_pct"]}}
-        )
-    )
-    assert len(out["entries"]) == 1
-
-
-def test_metadata_filter_array_contains_subset():
-    kb = InMemoryKBClient()
-    kb.upsert(
-        {
-            "scope": _scope(),
-            "kind": "technique",
-            "slug": "tag-test",
-            "importance": 0.5,
-            "metadata": {"tags": ["dispatch", "kernel_agent", "active_path"]},
-        }
-    )
-    hit = kb.list(KBListQuery(scope_filter=_scope(), metadata_filter={"tags": ["dispatch"]}))
-    miss = kb.list(KBListQuery(scope_filter=_scope(), metadata_filter={"tags": ["nonexistent"]}))
-    assert len(hit["entries"]) == 1
-    assert miss["entries"] == []
-
-
-def test_simulate_failure_drains_one_failure_per_endpoint():
-    kb = InMemoryKBClient()
-    kb.simulate_failure(endpoint="upsert", times=2, error={"code": 503})
-    with pytest.raises(KBValidationError):
-        kb.upsert({"scope": _scope(), "kind": "pitfall", "slug": "abcdef-1", "importance": 0.5})
-    with pytest.raises(KBValidationError):
-        kb.upsert({"scope": _scope(), "kind": "pitfall", "slug": "abcdef-2", "importance": 0.5})
-    out = kb.upsert({"scope": _scope(), "kind": "pitfall", "slug": "abcdef-3", "importance": 0.5})
-    assert out["created"] is True
-
-
-def test_list_default_excludes_deleted_rows():
-    kb = InMemoryKBClient()
-    out = kb.upsert({"scope": _scope(), "kind": "pitfall", "slug": "abcdef-1", "importance": 0.5})
-    rid = out["row"]["id"]
-    kb._rows[rid].deleted = True
-    assert kb.list(KBListQuery(scope_filter=_scope()))["entries"] == []
-    assert kb.list(KBListQuery(scope_filter=_scope(), include_deleted=True))["entries"]
-
-
 def test_list_scope_value_normalisation_handles_uppercase_in_filter_too():
     kb = InMemoryKBClient()
     kb.upsert({"scope": _scope(), "kind": "pitfall", "slug": "abcdef-1", "importance": 0.5})

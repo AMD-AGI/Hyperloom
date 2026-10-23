@@ -18,6 +18,7 @@ from hyperloom.common.jsonio import read_json_strict as _common_read_json_strict
 from hyperloom.common.timeutil import now_iso
 
 from .errors import SessionMemoryError
+from .scope_builder import UNKNOWN_SCOPE_VALUES
 
 
 DEFAULT_SESSION_MEMORY_DIR = "/var/lib/critic-session-memory"
@@ -38,14 +39,12 @@ _MERGEABLE_CONTEXT_KEYS: tuple[str, ...] = (
     "session_label",
 )
 
-_MISSING_VALUES: frozenset[str] = frozenset({"", "unknown", "null", "none"})
-
 
 def _is_missing(value: Any) -> bool:
     """Return ``True`` if value should be treated as absent."""
     if value is None:
         return True
-    if isinstance(value, str) and value.strip().lower() in _MISSING_VALUES:
+    if isinstance(value, str) and value.strip().lower() in UNKNOWN_SCOPE_VALUES:
         return True
     return False
 
