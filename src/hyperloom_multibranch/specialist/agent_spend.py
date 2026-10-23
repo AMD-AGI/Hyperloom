@@ -117,7 +117,9 @@ def _messages(transcript: Path, ledger: _Ledger) -> Iterable[tuple[str, str, str
         if row.get("type") != "assistant" or not isinstance(message, Mapping):
             continue
         usage = message.get("usage")
-        if isinstance(usage, Mapping) and message.get("id"):
+        tokens = TokenCounts.from_anthropic_usage(usage) if isinstance(usage, Mapping) else TokenCounts()
+        # A row the CLI writes itself, such as a gateway error (model "<synthetic>"), used nothing and has no price.
+        if message.get("id") and tokens != TokenCounts():
             model = str(message.get("model") or "")
             yield (
                 str(row.get("sessionId") or transcript.stem),

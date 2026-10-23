@@ -65,6 +65,20 @@ async def test_the_agent_s_cli_calls_under_its_branch_are_the_branch_s_spend_eac
     )
 
 
+async def test_an_error_the_cli_writes_itself_leaves_the_session_s_real_calls_priced(tmp_path: Path) -> None:
+    config, branch_dir = tmp_path / "claude", tmp_path / "b01"
+    usage = _Usage()
+    agent = _transcript(config, branch_dir, "s-1")
+    synthetic = {"id": "e1", "model": "<synthetic>", "usage": {"input_tokens": 0, "output_tokens": 0}, "content": []}
+    error = json.dumps({"type": "assistant", "sessionId": "s-1", "message": synthetic}) + "\n"
+    agent.write_text(_message("m1", "s-1", 40) + error)
+
+    await AgentSpend(config, (branch_dir,), tmp_path / "spend.json", "b01", MODEL, usage).record()
+
+    [recorded] = usage.recorded
+    assert recorded.cost_usd == pytest.approx(price_of(AGENT_MODEL).cost_usd(TokenCounts(2, 40, 100)))
+
+
 async def test_an_agent_that_keeps_no_transcript_spends_nothing_recorded(tmp_path: Path) -> None:
     usage = _Usage()
 
