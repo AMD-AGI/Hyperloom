@@ -496,7 +496,7 @@ def test_a_synthetic_session_is_untouched_by_the_marker_check(monkeypatch):
 @pytest.fixture
 def baseline_writer(native_benchmark, monkeypatch, tmp_path):
     from hyperloom.inference_optimizer.session.optimization_journal import Verdict
-    from hyperloom.orchestrator.loop.writeback import _PromoteOutcome
+    from hyperloom.orchestrator.loop._promote_outcome import _PromoteOutcome
 
     from .conftest import make_coordinator
 
