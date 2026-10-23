@@ -10,6 +10,7 @@ pool) with the fake runner as the sandbox's command, on a two-card pool unless a
 from __future__ import annotations
 
 import asyncio
+import math
 import threading
 import time
 from collections.abc import Callable
@@ -24,7 +25,7 @@ from hyperloom.sandbox.socket import SandboxUnavailable
 from hyperloom_multibranch.contracts.notebook import Role, Writer
 from hyperloom_multibranch.contracts.toolbox import REJECTION_CODES, MeasurementCapacity, RequestRejected, WorkloadKind
 from hyperloom_multibranch.notebook import LocalNotebook
-from hyperloom_multibranch.toolbox import local_hosted
+from hyperloom_multibranch.toolbox import branch_leases, local_hosted
 from hyperloom_multibranch.toolbox.local_hosted import LocalHostedToolbox, LocalOptions, LocalSession
 from hyperloom_multibranch.toolbox.tests.helpers import IMAGE, FakeRepo, build, req
 from hyperloom_multibranch.toolbox.tests.test_card_placement import (
@@ -295,3 +296,81 @@ async def test_a_toolbox_without_cards_of_its_own_refuses_a_lease(tmp_path: Path
         await toolbox.lease_branch_sandbox("b02", 1)
     assert refused.value.code == "unsupported_kind" and "unsupported_kind" in REJECTION_CODES
     await toolbox.release_branch_sandbox("a lease that never was")
+
+
+# -- how long a lease waits ------------------------------------------------------------------------------------------
+
+
+async def _both_cards_measuring(local: Make) -> LocalHostedToolbox:
+    box = await local(a=HANG, b=HANG)
+    await box.submit_test(req("a"))
+    await box.submit_test(req("b"))
+    await _until(lambda: _running(box) == 2 and box.provider.pool.free_cards() == (), "both cards measuring")
+    return box
+
+
+async def test_a_lease_that_waits_for_nothing_is_refused_at_once_when_no_card_is_free(
+    local: Make, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    box = await _both_cards_measuring(local)
+    monkeypatch.setattr(branch_leases, "_POLL_SECONDS", 30.0)  # a lease that sleeps at all takes half a minute
+    started = time.monotonic()
+    with pytest.raises(SandboxUnavailable, match="not freed within 0 s"):
+        await asyncio.wait_for(box.lease_branch_sandbox("agent", 1, wait_sec=0), 10)
+    assert time.monotonic() - started < 5, "a lease that waits for nothing waited"
+    assert (await box.measurement_capacity()).leased_cards == 0, "the refused lease gave its promise back"
+    assert box.provider.pool.free_cards() == ()
+
+
+async def test_a_lease_that_waits_for_nothing_takes_a_card_that_is_free(local: Make) -> None:
+    box = await local(a=HANG, b=HANG)
+    lease = await asyncio.wait_for(box.lease_branch_sandbox("agent", 1, wait_sec=0), 10)
+    assert len(lease.gpu_ids) == 1 and (await box.measurement_capacity()).leased_cards == 1
+
+
+async def test_a_positive_wait_bounds_how_long_a_lease_waits(local: Make) -> None:
+    box = await _both_cards_measuring(local)
+    started = time.monotonic()
+    with pytest.raises(SandboxUnavailable, match="not freed within 0.5 s"):
+        await asyncio.wait_for(box.lease_branch_sandbox("agent", 1, wait_sec=0.5), 20)
+    waited = time.monotonic() - started
+    assert 0.4 <= waited < 10, f"waited {waited:.2f} s for a wait of 0.5 s"
+    assert (await box.measurement_capacity()).leased_cards == 0
+
+
+async def test_a_positive_wait_takes_the_cards_a_running_test_gives_back_within_it(local: Make) -> None:
+    box = await local(a=HANG, b=HANG)
+    first, _ = await box.submit_test(req("a")), await box.submit_test(req("b"))
+    await _until(lambda: _running(box) == 2 and box.provider.pool.free_cards() == (), "both cards measuring")
+    waiting = asyncio.ensure_future(box.lease_branch_sandbox("agent", 1, wait_sec=30))
+    await _until(lambda: box.leases.capacity().leased_cards == 1, "the lease promised its card")
+    await box.cancel(first)
+    assert len((await asyncio.wait_for(waiting, 30)).gpu_ids) == 1
+
+
+async def test_no_wait_given_waits_as_long_as_a_measurement_sandbox_does(
+    local: Make, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    box = await _both_cards_measuring(local)
+    monkeypatch.setattr(branch_leases, "LEASE_WAIT_SECONDS", 0.6)
+    started = time.monotonic()
+    with pytest.raises(SandboxUnavailable, match="not freed within 0.6 s"):
+        await asyncio.wait_for(box.lease_branch_sandbox("agent", 1), 20)
+    assert time.monotonic() - started >= 0.5, "a lease with no wait given did not wait"
+
+
+@pytest.mark.parametrize("wait", [-1.0, -0.001, math.nan, math.inf])
+async def test_a_wait_that_is_not_a_number_of_seconds_is_refused_before_anything_is_promised(
+    local: Make, wait: float
+) -> None:
+    box = await local(cards=2)
+    with pytest.raises(RequestRejected) as refused:
+        await box.lease_branch_sandbox("agent", 1, wait_sec=wait)
+    assert refused.value.code == "invalid_request" and "wait_sec" in refused.value.reason
+    assert (await box.measurement_capacity()).leased_cards == 0 and box.provider.pool.free_cards() == (0, 1)
+    assert len((await box.lease_branch_sandbox("agent", 1)).gpu_ids) == 1, "the refusal left no lease behind"
+
+
+@pytest.mark.parametrize("wait", [None, 0, 0.0, 12.5])
+def test_the_wait_a_lease_takes_is_the_default_for_none_and_the_given_number_otherwise(wait: float | None) -> None:
+    assert branch_leases.lease_wait(wait, 99.0) == (99.0 if wait is None else wait)

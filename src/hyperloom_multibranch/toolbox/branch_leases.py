@@ -14,6 +14,7 @@ directory: there is no PID namespace on this backend, and confining the agent's 
 from __future__ import annotations
 
 import asyncio
+import math
 import threading
 import time
 import uuid
@@ -27,7 +28,7 @@ from hyperloom.sandbox.local import LocalSandboxProvider
 from hyperloom.sandbox.socket import SandboxUnavailable
 from hyperloom_multibranch.contracts.toolbox import BranchLease, MeasurementCapacity, RequestRejected
 
-__all__ = ["BranchLeases", "LEASE_WAIT_SECONDS", "refuse_unfit_cards"]
+__all__ = ["BranchLeases", "LEASE_WAIT_SECONDS", "lease_wait", "refuse_unfit_cards"]
 
 #: As long as a measurement sandbox waits for its cards.
 LEASE_WAIT_SECONDS = float(DEFAULT_RUNNER_START_TIMEOUT_SEC)
@@ -87,23 +88,28 @@ class BranchLeases:
         with self._guard:
             self._check(cards)
 
-    async def lease(self, holder: str, cards: int, root: Path | None = None) -> BranchLease:
+    async def lease(
+        self, holder: str, cards: int, root: Path | None = None, *, wait_sec: float | None = None
+    ) -> BranchLease:
         """Hold ``cards`` cards and a working directory for ``holder``, waiting for running tests to give cards back.
 
         ``holder`` is the branch whose agent the cards are for, or ``tool:<job id>`` for a tool job; the lease says it as
         its ``branch_id``. ``root`` is the directory the lease works in, made if it is not there; one of its own below
-        the area when omitted.
+        the area when omitted. ``wait_sec`` bounds the wait for cards (:func:`lease_wait`): ``None`` is
+        :data:`LEASE_WAIT_SECONDS`, ``0`` takes only cards that are free now.
 
         Raises:
             RequestRejected: ``lease_exists`` when the holder holds a lease, ``lease_leaves_no_measurement`` when
-                fewer than one test's cards would be left, ``invalid_request`` for fewer than one card.
-            SandboxUnavailable: When the cards were not free within :data:`LEASE_WAIT_SECONDS` or the toolbox closed.
+                fewer than one test's cards would be left, ``invalid_request`` for fewer than one card or a
+                ``wait_sec`` that is negative or not a number.
+            SandboxUnavailable: When the cards were not free within the wait or the toolbox closed.
         """
 
+        wait = lease_wait(wait_sec, LEASE_WAIT_SECONDS)
         self._promise(holder, cards)
         gpu_ids: tuple[int, ...] = ()
         try:
-            gpu_ids = await self._take(cards)
+            gpu_ids = await self._take(cards, wait)
             return self._grant(holder, gpu_ids, root)
         except BaseException:
             self._forget(holder, gpu_ids)
@@ -147,15 +153,20 @@ class BranchLeases:
             self._check(cards)
             self._promised[holder] = cards
 
-    async def _take(self, cards: int) -> tuple[int, ...]:
+    async def _take(self, cards: int, wait: float) -> tuple[int, ...]:
+        """The cards, taken as soon as they are free; the pool is asked at least once, whatever ``wait`` is."""
+
         pool = self._provider.pool
-        until = time.monotonic() + LEASE_WAIT_SECONDS
-        while not self._closed and time.monotonic() < until:
+        until = time.monotonic() + wait
+        while not self._closed:
             try:
                 return pool.acquire(cards, 0.0)
             except SandboxUnavailable:
-                await asyncio.sleep(_POLL_SECONDS)
-        reason = "the toolbox is closing" if self._closed else f"not freed within {LEASE_WAIT_SECONDS:g} s"
+                left = until - time.monotonic()
+                if left <= 0:
+                    break
+                await asyncio.sleep(min(_POLL_SECONDS, left))
+        reason = "the toolbox is closing" if self._closed else f"not freed within {wait:g} s"
         raise SandboxUnavailable(f"no {cards} cards for the branch sandbox lease: {reason}")
 
     def _grant(self, holder: str, gpu_ids: tuple[int, ...], root: Path | None) -> BranchLease:
@@ -178,6 +189,22 @@ class BranchLeases:
             if gpu_ids:
                 self._provider.pool.release(gpu_ids)
         self.on_release()
+
+
+def lease_wait(wait_sec: float | None, default: float) -> float:
+    """How long a lease waits for cards: ``default`` for ``None``, else ``wait_sec``, where ``0`` waits not at all.
+
+    Every backend's lease takes the wait the same way, so a caller reads one meaning of it.
+
+    Raises:
+        RequestRejected: ``invalid_request`` for a negative wait or one that is not a finite number.
+    """
+
+    if wait_sec is None:
+        return default
+    if not math.isfinite(wait_sec) or wait_sec < 0:
+        raise RequestRejected(f"wait_sec is a finite number of seconds, not negative: {wait_sec}")
+    return float(wait_sec)
 
 
 def refuse_unfit_cards(cards: int, measuring: int, cards_per_test: int) -> None:

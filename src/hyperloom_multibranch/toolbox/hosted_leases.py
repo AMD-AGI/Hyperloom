@@ -42,7 +42,7 @@ from hyperloom.sandbox.socket import (
     SandboxUnavailable,
 )
 from hyperloom_multibranch.contracts.toolbox import BranchLease, MeasurementCapacity, RequestRejected
-from hyperloom_multibranch.toolbox.branch_leases import LEASE_WAIT_SECONDS, refuse_unfit_cards
+from hyperloom_multibranch.toolbox.branch_leases import LEASE_WAIT_SECONDS, lease_wait, refuse_unfit_cards
 
 __all__ = ["DevSession", "GrantLimits", "HostedBranchLease", "HostedBranchLeases", "LeaseTuning", "templates_by_cards"]
 
@@ -198,24 +198,29 @@ class HostedBranchLeases:
             by_sandboxes = self._grant.max_sandboxes - len(self._promised)
         return max(1, min(by_cards, by_sandboxes))
 
-    async def lease(self, branch_id: str, cards: int) -> HostedBranchLease:
+    async def lease(self, branch_id: str, cards: int, *, wait_sec: float | None = None) -> HostedBranchLease:
         """Create ``branch_id``'s ``dev`` sandbox, waiting while the grant has no room for it.
 
+        ``wait_sec`` bounds that wait (:func:`~hyperloom_multibranch.toolbox.branch_leases.lease_wait`): ``None`` is
+        :attr:`LeaseTuning.wait_sec`, ``0`` does not wait out a refusal of the quota. It does not bound the time a
+        sandbox the grant has room for takes to come up, which is :attr:`LeaseTuning.wait_sec` at least.
+
         Raises:
-            RequestRejected: ``invalid_request`` for fewer than one card or a number other than the session's,
-                ``lease_exists`` when the branch holds a lease, ``lease_leaves_no_measurement`` when fewer than one
-                test's cards or no sandbox for a test would be left.
-            SandboxUnavailable: When the quota did not clear within :attr:`LeaseTuning.wait_sec`, there is no capacity
-                or the toolbox closed.
+            RequestRejected: ``invalid_request`` for fewer than one card or a number other than the session's, or a
+                ``wait_sec`` that is negative or not a number, ``lease_exists`` when the branch holds a lease,
+                ``lease_leaves_no_measurement`` when fewer than one test's cards or no sandbox for a test would be left.
+            SandboxUnavailable: When the quota did not clear within the wait, there is no capacity or the toolbox
+                closed.
             SandboxDenied: When the service refuses the template, the key or the budget.
         """
 
+        wait = lease_wait(wait_sec, self._tuning.wait_sec)
         if cards >= 1 and cards != self._session.tp:
             raise RequestRejected(f"a dev sandbox has the session's {self._session.tp} cards, not {cards}")
         self._promise(branch_id, cards)
         made: Sandbox | None = None
         try:
-            made = await self._create(branch_id)
+            made = await self._create(branch_id, wait)
             return self._grant_lease(branch_id, made)
         except BaseException:
             self._forget(branch_id)
@@ -306,8 +311,11 @@ class HostedBranchLeases:
             self._granted[lease.lease_id] = lease
         return lease
 
-    async def _create(self, branch_id: str) -> Sandbox:
+    async def _create(self, branch_id: str, wait: float) -> Sandbox:
         """Create the sandbox with one idempotency key for every attempt, repeating a create the quota refused.
+
+        The quota's refusals are repeated for ``wait`` seconds, not at all when it is ``0``. A sandbox the grant has
+        room for may take as long to come up as the tuning allows, however short the wait for room is.
 
         A create the caller abandons (cancelled while the provider call is in flight) still ends: the sandbox it makes
         is ended when the call returns.
@@ -320,10 +328,11 @@ class HostedBranchLeases:
             RUN_ID_KEY: self._session.run_id,
             BRANCH_ID_KEY: branch_id,
         }
-        until = time.monotonic() + tuning.wait_sec
+        started = time.monotonic()
+        until, comes_up_by = started + wait, started + max(wait, tuning.wait_sec)
         delay = tuning.first_backoff_sec
         while True:
-            options = CreateOptions(wait_sec=max(until - time.monotonic(), 1.0))
+            options = CreateOptions(wait_sec=max(comes_up_by - time.monotonic(), 1.0))
             attempt = asyncio.create_task(
                 asyncio.to_thread(
                     self._provider.create,
@@ -341,7 +350,7 @@ class HostedBranchLeases:
                 raise
             except SandboxQuotaExceeded:
                 if self._closed or until - time.monotonic() <= delay:
-                    reason = _CLOSING if self._closed else f"no room in the grant within {tuning.wait_sec:g} s"
+                    reason = _CLOSING if self._closed else f"no room in the grant within {wait:g} s"
                     raise SandboxUnavailable(f"no dev sandbox for branch {branch_id!r}: {reason}") from None
                 await self._pause(delay)
                 delay = min(delay * 2, tuning.max_backoff_sec)

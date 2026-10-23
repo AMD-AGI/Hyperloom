@@ -53,13 +53,14 @@ _QUOTA = "grant_quota_exceeded: the grant has no room for another sandbox"
 
 
 class _Recorder:
-    """A provider that remembers the metadata of each create it was asked for."""
+    """A provider that remembers the metadata of each create it was asked for, and how long it was told to wait."""
 
     name = "recorder"
 
     def __init__(self, inner: E2BSandboxProvider) -> None:
         self._inner = inner
         self.creates: list[tuple[str, Mapping[str, str]]] = []
+        self.waits: list[float] = []
         self.refused = 0
 
     def create(
@@ -72,6 +73,7 @@ class _Recorder:
         options: CreateOptions = CreateOptions(),
     ) -> Sandbox:
         self.creates.append((template, dict(metadata)))
+        self.waits.append(options.wait_sec)
         try:
             return self._inner.create(template, role=role, timeout_sec=timeout_sec, metadata=metadata, options=options)
         except SandboxQuotaExceeded:
@@ -326,6 +328,69 @@ async def test_a_lease_that_the_quota_does_not_clear_for_ends_as_unavailable_and
     assert hosted.leases.capacity().leased_cards == 1
     await hosted.leases.release(first.lease_id)
     assert (await hosted.leases.lease("b03", 1)).branch_id == "b03"
+
+
+# -- how long a lease waits ------------------------------------------------------------------------------------------
+
+#: Sleeps five seconds between creates a full quota refuses, so a lease that waits at all is seen to.
+_SLOW_BACKOFF = LeaseTuning(wait_sec=60.0, first_backoff_sec=5.0, max_backoff_sec=5.0)
+
+
+async def test_a_lease_that_waits_for_nothing_is_refused_at_once_by_a_full_quota(make: Make) -> None:
+    hosted = make(gpus=8, tp=1, quota=1, tuning=_SLOW_BACKOFF)
+    first = await hosted.leases.lease("b02", 1)
+    started = time.monotonic()
+    with pytest.raises(SandboxUnavailable, match="no room in the grant within 0 s") as failed:
+        await asyncio.wait_for(hosted.leases.lease("b03", 1, wait_sec=0), 20)
+    assert time.monotonic() - started < 3, "a lease that waits for nothing waited out the quota"
+    assert not isinstance(failed.value, SandboxQuotaExceeded)
+    assert len(hosted.provider.creates) == 2 and hosted.provider.refused == 1, "one create, refused once, not repeated"
+    assert hosted.leases.capacity().leased_cards == 1, "the refused lease gave its promise back"
+    await hosted.leases.release(first.lease_id)
+    assert (await hosted.leases.lease("b03", 1, wait_sec=0)).branch_id == "b03"
+
+
+async def test_a_lease_that_waits_for_nothing_still_gives_the_sandbox_time_to_come_up(make: Make) -> None:
+    hosted = make(tuning=LeaseTuning(wait_sec=20.0, first_backoff_sec=0.02, max_backoff_sec=0.05))
+    lease = await hosted.leases.lease("b02", 2, wait_sec=0)
+    assert hosted.running() == [lease.sandbox.sandbox_id]
+    assert hosted.provider.waits and min(hosted.provider.waits) >= 19.0, "the create was given the tuning's time"
+
+
+async def test_a_positive_wait_bounds_how_long_a_lease_waits_out_the_quota(make: Make) -> None:
+    hosted = make(
+        gpus=8, tp=1, quota=1, tuning=LeaseTuning(wait_sec=60.0, first_backoff_sec=0.02, max_backoff_sec=0.05)
+    )
+    await hosted.leases.lease("b02", 1)
+    started = time.monotonic()
+    with pytest.raises(SandboxUnavailable, match="no room in the grant within 0.3 s"):
+        await asyncio.wait_for(hosted.leases.lease("b03", 1, wait_sec=0.3), 20)
+    waited = time.monotonic() - started
+    assert 0.2 <= waited < 10, f"waited {waited:.2f} s for a wait of 0.3 s"
+    assert hosted.provider.refused >= 2, "the quota was retried while the wait lasted"
+    assert hosted.leases.capacity().leased_cards == 1
+
+
+async def test_a_wait_longer_than_the_tuning_waits_that_long_for_the_quota(make: Make) -> None:
+    hosted = make(gpus=8, tp=1, quota=1, tuning=LeaseTuning(wait_sec=0.3, first_backoff_sec=0.02, max_backoff_sec=0.05))
+    first = await hosted.leases.lease("b02", 1)
+    waiting = asyncio.ensure_future(hosted.leases.lease("b03", 1, wait_sec=30))
+    await _until(lambda: hosted.provider.refused >= 3, "the second create to be refused and repeated")
+    await asyncio.sleep(0.5)  # longer than the tuning's own wait, which would have ended it
+    assert not waiting.done()
+    await hosted.leases.release(first.lease_id)
+    assert (await asyncio.wait_for(waiting, 30)).branch_id == "b03"
+
+
+@pytest.mark.parametrize("wait", [-1.0, float("nan"), float("inf")])
+async def test_a_wait_that_is_not_a_number_of_seconds_is_refused_before_anything_is_created(
+    make: Make, wait: float
+) -> None:
+    hosted = make()
+    with pytest.raises(RequestRejected) as refused:
+        await hosted.leases.lease("b02", 2, wait_sec=wait)
+    assert refused.value.code == "invalid_request" and "wait_sec" in refused.value.reason
+    assert hosted.provider.creates == [] and hosted.leases.capacity().leased_cards == 0
 
 
 # -- every exit path -------------------------------------------------------------------------------------------------

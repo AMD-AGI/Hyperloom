@@ -50,7 +50,7 @@ class LeaseBook(Protocol):
 
     def tests_at_once(self) -> int: ...
 
-    async def lease(self, holder: str, cards: int, /) -> BranchLease: ...
+    async def lease(self, holder: str, cards: int, /, *, wait_sec: float | None = None) -> BranchLease: ...
 
     def close(self) -> None: ...
 
@@ -72,12 +72,12 @@ class LeasedToolbox(RealToolbox):
             return await super().measurement_capacity()
         return self.leases.capacity()
 
-    async def lease_branch_sandbox(self, branch_id: str, cards: int) -> BranchLease:
+    async def lease_branch_sandbox(self, branch_id: str, cards: int, *, wait_sec: float | None = None) -> BranchLease:
         """Take ``cards`` cards for ``branch_id``'s agent, waiting for running tests to give them back."""
 
         if self.leases is None:
-            return await super().lease_branch_sandbox(branch_id, cards)
-        return await self.leases.lease(branch_id, cards)
+            return await super().lease_branch_sandbox(branch_id, cards, wait_sec=wait_sec)
+        return await self.leases.lease(branch_id, cards, wait_sec=wait_sec)
 
     def attach_leases(self, leases: LeaseBook) -> None:
         """Take ``leases`` as the leases on the toolbox's cards: the tests the cards they give back let run start."""

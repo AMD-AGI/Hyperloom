@@ -215,13 +215,20 @@ class RealToolbox:
 
         return MeasurementCapacity.unknown()
 
-    async def lease_branch_sandbox(self, branch_id: str, cards: int) -> BranchLease:
+    async def lease_branch_sandbox(self, branch_id: str, cards: int, *, wait_sec: float | None = None) -> BranchLease:
         """Hold ``cards`` of the toolbox's cards and a working directory of their own for ``branch_id``'s agent.
 
         The cards leave the measurement pool until :meth:`release_branch_sandbox` or :meth:`close`; see
         :class:`~hyperloom_multibranch.contracts.toolbox.BranchLease`. A toolbox whose backend has no cards of its own
         to lease refuses with ``unsupported_kind``; a backend that leases raises ``lease_exists`` and
-        ``lease_leaves_no_measurement`` as :class:`RequestRejected`.
+        ``lease_leaves_no_measurement`` as :class:`RequestRejected`, and ``invalid_request`` for fewer than one card or a
+        ``wait_sec`` below zero.
+
+        While running tests hold the cards the lease waits for them to be given back, as long as ``wait_sec`` says:
+        ``None`` as long as a measurement sandbox waits for its cards, ``0`` not at all (``SandboxUnavailable`` at once
+        when the cards are not free, and on the hosted backend no waiting out a refusal of the grant's quota either), a
+        positive value that many seconds at most. ``SandboxUnavailable`` also ends a lease the closing toolbox refused.
+        A refused lease holds nothing.
         """
 
         raise RequestRejected("this toolbox's backend has no cards to lease", "unsupported_kind")
