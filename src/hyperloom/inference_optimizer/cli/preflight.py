@@ -21,7 +21,7 @@ import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, NamedTuple, NoReturn
+from typing import Any, NoReturn
 
 from hyperloom.common import provenance
 from hyperloom.common.agent_runtime_requirements import agent_runtime_requirements
@@ -60,6 +60,7 @@ from hyperloom.common.model_paths import resolve_serving_model_path
 
 from .. import inferencex_checkout
 from .bootstrap import parse_operator_extra_env
+from .device_init import _Probe, _block_on_unverified_build, _rocm_smi_visible_gpus
 from .server_args import validate_server_args
 
 from .credentials import (
@@ -872,14 +873,6 @@ _ROCM_PROBE_TIMEOUT_SEC = 30
 _VLLM_ROCM_PROBE_TIMEOUT_SEC = 120
 
 
-class _Probe(NamedTuple):
-    """Probe outcome plus the stderr tail needed to diagnose an unclear one."""
-
-    verdict: bool | None
-    detail: str = ""
-    timed_out: bool = False
-
-
 def _rocm_evidence(framework: str) -> str:
     """Name the signal the ROCm verdict for ``framework`` rests on."""
     return "the vllm platform" if framework == "vllm" else "torch.version.hip"
@@ -941,12 +934,15 @@ def _probe_rocm_build(framework: str, python_exe: str) -> _Probe:
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         return _Probe(None, _probe_failure_detail(exc), isinstance(exc, subprocess.TimeoutExpired))
-    detail = _probe_stderr_tail(getattr(proc, "stderr", ""))
+    stderr = getattr(proc, "stderr", "")
+    detail = _probe_stderr_tail(stderr)
     if proc.returncode == 0:
         return _Probe(True, detail)
     # Absent torch (3) and a signal death (negative rc, which a broken ROCm stack can trigger on ``import torch``)
-    # both mean no verdict was reached.
-    return _Probe(False, detail) if proc.returncode == 1 else _Probe(None, detail)
+    # both mean no verdict was reached; the caller blocks on that rather than sort unclear exits into classes.
+    if proc.returncode == 1:
+        return _Probe(False, detail)
+    return _Probe(None, detail)
 
 
 def _framework_importable(framework: str, python_exe: str) -> _Probe:
@@ -982,10 +978,12 @@ def _resolve_framework_build(framework: str, interpreters: list[str]) -> tuple[s
         probe = _probe_rocm_build(framework, python_exe)
         if probe.verdict is True:
             return python_exe, probe
-        if probe.timed_out:
-            return inconclusive or (python_exe, probe)
         if probe.verdict is None:
+            # Every unclear probe blocks, so the first one is as good a report as any.
             inconclusive = inconclusive or (python_exe, probe)
+            if probe.timed_out:
+                # A wedged import costs the full budget per candidate; stop the scan at the first one.
+                return inconclusive
         else:
             refuted = refuted or (python_exe, probe)
     return inconclusive or refuted or (None, missing)
@@ -1035,7 +1033,7 @@ def _check_serving_framework(args, benchmark_python: str) -> dict[str, Any]:
         raise SystemExit(2)
     # Publish the interpreter this scan resolved to, so consumers that would otherwise re-derive it from
     # installer-written host state read the probed answer instead.
-    if found and probe.verdict is not False:
+    if found and probe.verdict is True:
         os.environ[RESOLVED_FRAMEWORK_PYTHON_ENV] = found
         os.environ[RESOLVED_FRAMEWORK_ENV] = framework
     return _report_framework_probe(framework, found, probe, interpreters)
@@ -1054,31 +1052,13 @@ def _report_framework_probe(
             "target": framework,
             "detail": {"probe_interpreter": found, "rocm_verified": True},
         }
-    if found and probe.verdict is None:
-        print(
-            f"Preflight: WARNING — {framework} is importable ({found}) but could not verify a ROCm build "
-            f"via {evidence}{_probe_detail_block(probe.detail)}"
+    if probe.verdict is None or probe.timed_out:
+        # No verdict is not "probably fine": a reworded torch message, a device failure or a wedged import all
+        # land here, and only rc 0 says the stack serving will import works. Report the evidence and stop.
+        visible, _skip_reason = _rocm_smi_visible_gpus()
+        _block_on_unverified_build(
+            framework, found, _probe_detail_block(probe.detail), visible, SKIP_FRAMEWORK_CHECK_ENV
         )
-        return {
-            "status": "warned",
-            "skip_reason": None,
-            "target": framework,
-            "message": probe.detail or "ROCm build could not be verified",
-            "detail": {"probe_interpreter": found, "rocm_verified": None},
-        }
-    if not found and probe.timed_out:
-        # A timeout proves nothing, so blocking here would fail a merely slow host.
-        print(
-            f"Preflight: WARNING — the {framework} probe timed out; proceeding without verifying it"
-            f"{_probe_detail_block(probe.detail)}"
-        )
-        return {
-            "status": "warned",
-            "skip_reason": None,
-            "target": framework,
-            "message": probe.detail or "framework probe timed out",
-            "detail": {"probe_interpreter": None, "rocm_verified": None},
-        }
     return _report_unusable_framework(framework, found, probe, interpreters)
 
 
@@ -1442,34 +1422,13 @@ def _check_gpu_visibility() -> dict[str, Any]:
             "skip_reason": "external_multi_node",
             "detail": {"visible": None, "tp_requested": None, "warn": None},
         }
-    try:
-        proc = subprocess.run(
-            ["rocm-smi", "--showid"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired, PermissionError, OSError):
+    visible, skip_reason = _rocm_smi_visible_gpus()
+    if visible is None:
         return {
             "status": "skipped",
-            "skip_reason": "rocm_smi_unavailable",
+            "skip_reason": skip_reason,
             "detail": {"visible": None, "tp_requested": None, "warn": None},
         }
-    if proc.returncode != 0:
-        return {
-            "status": "skipped",
-            "skip_reason": "rocm_smi_failed",
-            "detail": {"visible": None, "tp_requested": None, "warn": None},
-        }
-    # rocm-smi --showid emits multiple GPU[ lines per GPU; deduplicate by GPU index.
-    visible_indices: set[str] = set()
-    for line in (proc.stdout or "").splitlines():
-        stripped = line.strip()
-        if stripped.startswith("GPU["):
-            idx, _, _ = stripped[4:].partition("]")
-            if idx:
-                visible_indices.add(idx)
-    visible = len(visible_indices)
     try:
         wanted = int(os.environ.get("TP", "1") or "1")
     except ValueError:
