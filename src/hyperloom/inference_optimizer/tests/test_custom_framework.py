@@ -313,9 +313,26 @@ class TestLaunchValidation:
         assert os.environ["FRAMEWORK_REPO_PATH"] == str(repo.resolve())
         assert os.environ["HYPERLOOM_BYPASS_SCRIPTS_DIR"] == str(scripts.resolve())
 
-    @pytest.mark.parametrize("backend", ["", "magpie", "MAGPIE", "  ", "bypasss", "none"])
+    @pytest.mark.parametrize("backend", ["", "  "])
+    def test_custom_selects_bypass_when_the_backend_is_unset(self, monkeypatch, tmp_path, backend):
+        from hyperloom.inference_optimizer.cli import _apply_operator_supplied_paths
+
+        repo, scripts = tmp_path / "fw", tmp_path / "sc"
+        repo.mkdir()
+        scripts.mkdir()
+        monkeypatch.setenv("FRAMEWORK_REPO_PATH", "")
+        monkeypatch.setenv("HYPERLOOM_BYPASS_SCRIPTS_DIR", "")
+        monkeypatch.setenv("HYPERLOOM_BENCHMARK_BACKEND", backend)
+        args = self._args()
+        args.framework_path = str(repo)
+        args.benchmark_scripts_dir = str(scripts)
+
+        _apply_operator_supplied_paths(args, "custom")
+        assert os.environ["HYPERLOOM_BENCHMARK_BACKEND"] == "bypass"
+
+    @pytest.mark.parametrize("backend", ["magpie", "MAGPIE", "bypasss", "none"])
     def test_custom_refuses_a_backend_that_cannot_run_the_script(self, monkeypatch, tmp_path, backend):
-        """The default backend is Magpie, which cannot run an operator's script."""
+        """An explicit backend other than bypass cannot run an operator's script."""
         from hyperloom.inference_optimizer.cli import _apply_operator_supplied_paths
 
         repo, scripts = tmp_path / "fw", tmp_path / "sc"

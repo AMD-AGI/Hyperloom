@@ -164,14 +164,15 @@ def _apply_operator_supplied_paths(args: Any, framework: str) -> None:
             DEFAULT_BENCHMARK_BACKEND,
         )
 
-        # Matches install.sh's normalisation so the two gates agree on a value like " Bypass "; anything else,
-        # including unset, is refused.
+        # Matches install.sh's normalisation so the two gates agree on a value like " Bypass ". Unset means bypass,
+        # the only backend that can run an operator-supplied script; any other explicit value is refused.
         backend = os.environ.get(BENCHMARK_BACKEND_ENV, "").strip().lower()
-        if backend != "bypass":
-            shown = f"{backend!r}" if backend else f"unset (defaults to {DEFAULT_BENCHMARK_BACKEND!r})"
+        if not backend:
+            os.environ[BENCHMARK_BACKEND_ENV] = "bypass"
+        elif backend != "bypass":
             fatal.append(
-                f"--framework custom requires {BENCHMARK_BACKEND_ENV}=bypass; it is {shown}. "
-                "The default backend cannot run an operator-supplied script."
+                f"--framework custom requires {BENCHMARK_BACKEND_ENV}=bypass (or unset); it is {backend!r}. "
+                f"The {DEFAULT_BENCHMARK_BACKEND!r} backend cannot run an operator-supplied script."
             )
     for flag, value, env_name in (
         ("--framework-path", getattr(args, "framework_path", None), "FRAMEWORK_REPO_PATH"),
