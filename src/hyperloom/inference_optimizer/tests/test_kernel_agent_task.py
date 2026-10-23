@@ -589,22 +589,23 @@ def test_specialist_is_allowed_in_enablement_but_not_in_kernel():
 
 
 @pytest.mark.parametrize(
-    ("phase", "fingerprint", "idle_sec", "expected"),
+    ("phase", "fingerprint", "idle_sec", "turn_succeeded", "expected"),
     [
-        (ps.PHASE_KERNEL_AGENT, "fp-a", 10.0, False),
-        (ps.PHASE_KERNEL_AGENT, "fp-b", 10.0, True),
-        (ps.PHASE_KERNEL_AGENT, "fp-a", 901.0, True),
-        (ps.PHASE_SWEEP, "fp-a", 10.0, True),
+        (ps.PHASE_KERNEL_AGENT, "fp-a", 10.0, True, False),
+        (ps.PHASE_KERNEL_AGENT, "fp-a", 10.0, False, True),
+        (ps.PHASE_KERNEL_AGENT, "fp-b", 10.0, True, True),
+        (ps.PHASE_KERNEL_AGENT, "fp-a", 901.0, True, True),
+        (ps.PHASE_SWEEP, "fp-a", 10.0, True, True),
     ],
 )
 def test_orchestration_turn_in_kernel_needs_kernel_progress_or_the_heartbeat(
-    coord, phase, fingerprint, idle_sec, expected
+    coord, phase, fingerprint, idle_sec, turn_succeeded, expected
 ):
     st = coord.shared_state
     st.phase = phase
     st.kernel_progress_fingerprint = "fp-a"
     now = time.time()
-    st.agent_last_active["orchestration"] = now
+    st.agent_last_active["orchestration"] = now if turn_succeeded else now - 60.0
     assert coord.conversation.admit_turn("orchestration", now)
 
     st.kernel_progress_fingerprint = fingerprint

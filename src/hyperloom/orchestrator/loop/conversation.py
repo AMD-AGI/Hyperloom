@@ -281,8 +281,9 @@ class ConversationCollaborator(CoordinatorCollaborator):
         self.kb_last_read: ExperienceKBEvidence | None = None
         # Per-agent (seq, msg_id) of the last message its prompt rendered.
         self._rendered_cursor: dict[str, tuple[int, str]] = {}
-        # The kernel progress fingerprint at Orchestration's last admitted KERNEL turn.
+        # The kernel progress fingerprint at Orchestration's last admitted KERNEL turn, and when it was admitted.
         self._admitted_kernel_fingerprint = ""
+        self._admitted_at = 0.0
 
     async def _kb_prompt_block(self, untested_proposals: str) -> str:
         """Read shared Experience evidence once per FRAMEWORK_AGENT orchestration tick."""
@@ -662,12 +663,10 @@ class ConversationCollaborator(CoordinatorCollaborator):
             return True
         fingerprint = state.kernel_progress_fingerprint
         last_turn = state.agent_last_active.get("orchestration", 0.0)
-        if (
-            fingerprint == self._admitted_kernel_fingerprint
-            and now_unix - last_turn < _KERNEL_ORCHESTRATION_HEARTBEAT_SEC
-        ):
+        handled = fingerprint == self._admitted_kernel_fingerprint and last_turn >= self._admitted_at
+        if handled and now_unix - last_turn < _KERNEL_ORCHESTRATION_HEARTBEAT_SEC:
             return False
-        self._admitted_kernel_fingerprint = fingerprint
+        self._admitted_kernel_fingerprint, self._admitted_at = fingerprint, now_unix
         return True
 
     async def compose_turn(self, agent_name: str, backend: Any) -> TurnPrompt:
