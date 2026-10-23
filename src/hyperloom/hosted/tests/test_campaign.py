@@ -69,6 +69,7 @@ REFUSALS = [
     (_with(MINIMAL, "model", "/m"), "model must be an object"),
     (_with(MINIMAL, "model.path", _DELETE), "model.path is required"),
     (_with(MINIMAL, "model.path", "  "), "model.path must be a non-empty string"),
+    (_with(MINIMAL, "hardware.gpu_type", "\t"), "hardware.gpu_type must be a non-empty string"),
     (_with(MINIMAL, "framework.image", _DELETE), "framework.image is required"),
     (_with(MINIMAL, "framework.name", 3), "framework.name must be a non-empty string"),
     (_with(MINIMAL, "hardware.gpu_type", _DELETE), "hardware.gpu_type is required"),
@@ -113,6 +114,20 @@ def test_each_refusal_carries_its_own_message(doc, message):
     with pytest.raises(CampaignError) as raised:
         parse_campaign(doc)
     assert message in str(raised.value)
+
+
+def test_a_string_a_submitter_wrote_is_not_echoed_in_the_refusal():
+    doc = _with(MINIMAL, "launch", {"extra_env": {"HF_TOKEN": 7, "OTHER": "hf_secret_value"}})
+    with pytest.raises(CampaignError) as raised:
+        parse_campaign(doc)
+    assert "launch.extra_env must be an object of string values" in str(raised.value)
+    assert "hf_secret_value" not in str(raised.value) and "7" not in str(raised.value).split("values")[1]
+
+
+def test_an_integer_too_large_for_a_float_is_judged_not_a_crash():
+    assert parse_campaign(_with(MINIMAL, "hardware.tp", 10**400)).tp == 10**400
+    with pytest.raises(CampaignError, match="hardware.tp must be an integer >= 1"):
+        parse_campaign(_with(MINIMAL, "hardware.tp", -(10**400)))
 
 
 def test_every_problem_is_reported_at_once():

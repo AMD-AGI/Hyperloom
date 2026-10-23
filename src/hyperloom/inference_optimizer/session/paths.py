@@ -55,6 +55,9 @@ _SESSION_SKELETON: tuple[str, ...] = (
     "optimizer_runs",  # launcher stdout / pid logs
 )
 
+#: Files whose presence means a directory holds a session that was started: a fresh session is never created there.
+SESSION_FILES: tuple[str, ...] = ("manifest.json", "state.json")
+
 #: The application-private result archive, created by a hosted run beside the skeleton above (not part of it).
 ARCHIVE_DIRNAME = "archive"
 
@@ -174,6 +177,8 @@ def make_session_dir(model_name: str | os.PathLike[str] | None = None, *, target
         sd = Path(target)
         if not is_path_within(sd, ws):
             raise ValueError(f"session directory {sd} is not below the workspace {ws}")
+        if any((sd / name).exists() for name in SESSION_FILES):
+            raise ValueError(f"session directory {sd} already holds a session; resume it instead")
     elif model_name:
         basename = _sanitize_model_basename(model_name)
         sd = ws / basename / f"{utc_now_compact()}-{uuid4().hex[:8]}"
@@ -285,6 +290,7 @@ __all__ = [
     "ENV_USER_DATA_PATH",
     "PACKAGE_ROOT",
     "PRIVATE_SESSION_SUBDIRS",
+    "SESSION_FILES",
     "asset_prompt_references_dir",
     "asset_root",
     "archive_root",

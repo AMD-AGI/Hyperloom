@@ -46,6 +46,26 @@ def test_a_session_dir_that_is_not_below_the_workspace_is_refused(workspace, val
     assert "--session-dir" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize("present", [["manifest.json"], ["state.json"], ["manifest.json", "state.json"]])
+def test_a_directory_that_already_holds_a_session_is_refused_at_parse_time(workspace, present, capsys):
+    target = workspace / "m" / "s"
+    target.mkdir(parents=True)
+    for name in present:
+        (target / name).write_text("{}")
+    with pytest.raises(SystemExit) as raised:
+        _parse("--session-dir", str(target))
+    assert raised.value.code == 2 and "resume it with --resume-from" in capsys.readouterr().err
+    with pytest.raises(ValueError, match="already holds a session"):
+        paths.make_session_dir("m", target=target)
+
+
+def test_a_directory_with_only_the_launchers_files_is_accepted(workspace):
+    target = workspace / "m" / "s"
+    (target / "archive").mkdir(parents=True)
+    assert _parse("--session-dir", str(target)).session_dir == target
+    assert paths.make_session_dir("m", target=target) == target
+
+
 def test_recover_keeps_its_own_session_dir_flag(workspace, tmp_path):
     args = _build_parser().parse_args(["recover", "--session-dir", "/anywhere/at/all"])
     assert str(args.session_dir) == "/anywhere/at/all"

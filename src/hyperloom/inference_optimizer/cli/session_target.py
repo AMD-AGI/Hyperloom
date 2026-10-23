@@ -8,7 +8,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from ..session.paths import is_path_within, workspace_root
+from ..session.paths import SESSION_FILES, is_path_within, workspace_root
 
 
 def session_dir_target(value: str) -> Path:
@@ -19,6 +19,11 @@ def session_dir_target(value: str) -> Path:
         raise argparse.ArgumentTypeError(f"{value!r} is not an absolute path")
     if target.resolve() == root.resolve() or not is_path_within(target, root):
         raise argparse.ArgumentTypeError(f"{value!r} is not a directory below $USER_DATA_PATH={root}")
+    held = [name for name in SESSION_FILES if (target / name).exists()]
+    if held:
+        raise argparse.ArgumentTypeError(
+            f"{value!r} already holds a session ({', '.join(held)}); resume it with --resume-from"
+        )
     return target
 
 

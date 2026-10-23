@@ -13,21 +13,21 @@
     "model": {
       "type": "object",
       "required": ["path"],
-      "properties": {"path": {"type": "string", "minLength": 1}}
+      "properties": {"path": {"type": "string", "minLength": 1, "pattern": "\\S"}}
     },
     "framework": {
       "type": "object",
       "required": ["name", "image"],
       "properties": {
-        "name": {"type": "string", "minLength": 1},
-        "image": {"type": "string", "minLength": 1}
+        "name": {"type": "string", "minLength": 1, "pattern": "\\S"},
+        "image": {"type": "string", "minLength": 1, "pattern": "\\S"}
       }
     },
     "hardware": {
       "type": "object",
       "required": ["gpu_type", "tp"],
       "properties": {
-        "gpu_type": {"type": "string", "minLength": 1},
+        "gpu_type": {"type": "string", "minLength": 1, "pattern": "\\S"},
         "tp": {"type": "integer", "minimum": 1},
         "ep": {"type": "integer", "minimum": 1},
         "nodes": {"const": 1}
@@ -39,7 +39,7 @@
         "conc": {"type": "integer", "minimum": 1},
         "isl": {"type": "integer", "minimum": 1},
         "osl": {"type": "integer", "minimum": 1},
-        "precision": {"type": "string", "minLength": 1}
+        "precision": {"type": "string", "minLength": 1, "pattern": "\\S"}
       }
     },
     "objective": {
@@ -84,8 +84,8 @@
     "source": {
       "type": "object",
       "properties": {
-        "repo": {"type": "string", "minLength": 1},
-        "sha": {"type": "string", "minLength": 1},
+        "repo": {"type": "string", "minLength": 1, "pattern": "\\S"},
+        "sha": {"type": "string", "minLength": 1, "pattern": "\\S"},
         "kind": {"enum": ["user", "ci"]},
         "task_id": {"type": "string"}
       }

@@ -137,13 +137,17 @@ class CampaignSpec:
     source_task_id: str | None = None
 
 
+def _is_num(value: object) -> bool:
+    if isinstance(value, bool):
+        return False
+    return isinstance(value, int) or (isinstance(value, float) and math.isfinite(value))
+
+
 def _is_int(value: object) -> bool:
     """JSON Schema's integer: ``8`` and ``8.0`` both are."""
-    return _is_num(value) and float(value) == int(value)  # type: ignore[arg-type]
-
-
-def _is_num(value: object) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+    if isinstance(value, int):
+        return not isinstance(value, bool)
+    return isinstance(value, float) and math.isfinite(value) and value.is_integer()
 
 
 _DESCRIPTIONS = {
@@ -184,6 +188,14 @@ def _well_typed(field: Field, value: object) -> bool:
     return field.exclusive_minimum is None or value > field.exclusive_minimum
 
 
+_ECHOED = (Kind.INT, Kind.NUM, Kind.BOOL, Kind.ENUM)
+
+
+def _got(field: Field, value: object) -> str:
+    """What was found, for a field whose values are not free text: a string a submitter put in is never echoed."""
+    return f", got {value!r:.40}" if field.kind in _ECHOED else ""
+
+
 def _lookup(doc: Mapping[str, Any], path: str) -> tuple[bool, Any]:
     """Whether the dotted path is present, and its value."""
     section, _, key = path.rpartition(".")
@@ -210,7 +222,7 @@ def _read_fields(doc: Mapping[str, Any], problems: list[str]) -> dict[str, Any]:
             if field.required:
                 problems.append(f"{field.path} is required")
         elif not _well_typed(field, value):
-            problems.append(f"{field.path} must be {_describe(field)}, got {value!r}")
+            problems.append(f"{field.path} must be {_describe(field)}{_got(field, value)}")
         else:
             values[field.attr] = int(value) if field.kind == Kind.INT else value
     return values
