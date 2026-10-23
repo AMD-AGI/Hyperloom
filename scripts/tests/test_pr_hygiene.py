@@ -309,7 +309,8 @@ def test_cli_reference_check_moved_out_of_docs_workflow():
 
 def test_diff_coverage_step_is_pr_only_and_pinned():
     job = _workflow("tests-coverage.yml")["jobs"]["coverage"]
-    assert job["steps"][0]["with"]["fetch-depth"] == 2
+    checkout = next(s for s in job["steps"] if s.get("uses", "").startswith("actions/checkout@"))
+    assert checkout["with"]["fetch-depth"] == 2
     step = next(s for s in job["steps"] if s.get("name") == "Diff coverage (changed lines >= 80%)")
     assert "github.event_name == 'pull_request'" in step["if"]
     assert '"diff-cover==9.7.1"' in step["run"]

@@ -53,6 +53,7 @@ from ..loop.time_budget import (
     measured_baseline_runtime_sec,
 )
 from ..collaborator import CoordinatorCollaborator
+from .warm_replay_stack import replayed_patch_refs as _replayed_patch_refs, warm_replay_source_layer
 from ..knowledge.remote_recipe.sanitize import HOST_ORIGIN_KEY
 
 log = _logging.getLogger(__name__)
@@ -154,25 +155,6 @@ def _warm_recipe_history_rows(warm: Any, key: str) -> list[Any]:
         attrs = exact_history
     rows = attrs.get(key)
     return rows if isinstance(rows, list) else []
-
-
-# A unified-diff overlay that landed. ``applied_nogit`` is what a nogit apply reports when it writes; on a
-# pip-installed framework it is the only status an overlay can land under.
-_LANDED_PATCH_STATUSES = frozenset({"applied", "applied_3way", "applied_nogit", "present_in_dirty_worktree"})
-
-
-def _replayed_patch_refs(result: Mapping[str, Any], params: Mapping[str, Any]) -> list[str]:
-    required = params.get("required_patch_timeline")
-    refs: list[str] = []
-    for item in result.get("warm_patches_applied") or []:
-        if not isinstance(item, dict):
-            continue
-        if required and item.get("status") not in _LANDED_PATCH_STATUSES:
-            continue
-        ref = str(item.get("patch_file") or "")
-        if ref:
-            refs.append(ref)
-    return refs
 
 
 def _warm_patch_trees(result: Mapping[str, Any], pending: Mapping[str, Any]) -> list[Mapping[str, Any]]:
@@ -2229,7 +2211,7 @@ class PreludePhase(CoordinatorCollaborator):
             entry_extra["recipe_patch_statuses"] = list(patch_result.get("patches") or [])
         if replayed_patch_refs:
             entry_extra["replayed_patch_refs"] = replayed_patch_refs
-        return entry_extra
+        return {**entry_extra, **warm_replay_source_layer(result, self.session_dir, self.shared_state.framework)}
 
     def _warm_replay_candidate(self, result: dict, task: "Task | None", params: Mapping[str, Any]) -> dict[str, Any]:
         warm_args = str(params.get("extra_server_args") or "").strip()

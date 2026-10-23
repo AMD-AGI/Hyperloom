@@ -1315,7 +1315,7 @@ def _apply_warm_patch_sequence(
         if method in ("applied", "applied_3way", "applied_nogit"):
             tree["mutated"] = True
         applied.append({"patch_file": patch_file, "idx": str(idx), "status": method})
-        status["status"] = method
+        status.update(status=method, applied_patch=str(patch_path))
     return applied, statuses
 
 

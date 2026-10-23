@@ -1219,8 +1219,9 @@ reviewed around the markers.
 **Seen in:** PR #703 -- at head `7881d481` only `Analyze (python)` passed and ReadTheDocs
 failed, while the `Tests with Coverage` and `Lint` successes belonged to older heads and did
 not cover the later `apply_and_bench` rewrite.
-**Not a finding when:** the unreported workflows are path-filtered out by the doc-only
-`paths-ignore` contract and the diff is genuinely doc-only.
+**Not a finding when:** the diff is genuinely doc-only and the missing runs are the ones the
+doc-only contract in CONTRIBUTING.md skips (CodeQL does not start; the test shards and the
+non-ruff lint jobs are skipped while `coverage (Python 3.x)` and `ruff` still report).
 **Evidence:** `$WORK/ci.txt` for the check runs and their head, `$WORK/meta.txt` for
 `mergeable`, `$WORK/commits.txt` for what landed after the last green run.
 **Report as:** `V5: <check> passed at <old sha>, current head is <sha>; <what landed since>
