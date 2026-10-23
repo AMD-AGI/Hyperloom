@@ -74,9 +74,7 @@ def stack_added_kernels(
     return replace(delta, add_kernels=tuple(added)), tuple(replaces)
 
 
-def _stack_one(
-    wanted: KernelArtifact, current: KernelArtifact, tables: TableStack
-) -> KernelArtifact | None:
+def _stack_one(wanted: KernelArtifact, current: KernelArtifact, tables: TableStack) -> KernelArtifact | None:
     """The artifact that serves both tables, or ``None`` when the replay should keep swapping ``current`` out."""
 
     try:

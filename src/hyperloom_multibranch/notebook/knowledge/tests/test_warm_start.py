@@ -276,7 +276,11 @@ class _Downloads:
 
 def _downloads(snapshot: NotebookSnapshot, tmp_path: Path, champion: Recipe = CHAMPION) -> _Downloads:
     knowledge = knowledge_document(
-        snapshot, PROFILE, FinalRecipe("i1", champion, tmp_path, METRIC), SCOPE, {"version": "1", "digest": "sha256:" + "d" * 64}
+        snapshot,
+        PROFILE,
+        FinalRecipe("i1", champion, tmp_path, METRIC),
+        SCOPE,
+        {"version": "1", "digest": "sha256:" + "d" * 64},
     )
     files = {overlay_ref(0, 0, PATCH.path): PATCH_BYTES, TUNED.ref: TUNED_BYTES}
     return _Downloads(_envelope(EXACT_ID, "sess-1", knowledge), files)

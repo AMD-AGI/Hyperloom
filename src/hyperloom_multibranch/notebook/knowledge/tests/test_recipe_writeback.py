@@ -50,7 +50,9 @@ OVERLAY = "patch/overlays/000000/00-0001-moe.patch"
 RULE_PACK = {"version": "1", "digest": "sha256:" + "c" * 64}
 
 
-def publish_final_recipe(client: RemoteRecipeClient, snapshot: NotebookSnapshot, final: FinalRecipe, rule_pack=RULE_PACK):
+def publish_final_recipe(
+    client: RemoteRecipeClient, snapshot: NotebookSnapshot, final: FinalRecipe, rule_pack=RULE_PACK
+):
     return _publish_final_recipe(client, snapshot, final, rule_pack)
 
 

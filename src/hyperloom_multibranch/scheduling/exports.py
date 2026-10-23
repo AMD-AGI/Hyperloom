@@ -213,9 +213,7 @@ class SessionExports:
             return RemoteWriteResult(SKIPPED, "no final choice")
         rule_pack = read_manifest(self._layout.manifest).rule_pack
         try:
-            return await asyncio.to_thread(
-                publish_final_recipe, self._kb_client, snapshot, final_recipe, rule_pack
-            )
+            return await asyncio.to_thread(publish_final_recipe, self._kb_client, snapshot, final_recipe, rule_pack)
         except (RecipeError, RemoteRecipeValidationError, KBStoreError, BlobError, OSError) as exc:
             return RemoteWriteResult(KB_FAILED, f"{type(exc).__name__}: {exc}")
 
