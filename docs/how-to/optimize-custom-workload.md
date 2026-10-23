@@ -368,9 +368,9 @@ outputs = model(**inputs)
 ```
 
 Skipping the early import doesn't fail quietly. If the exported module carries
-a setting that needs to be set before torch's compiler stack is touched, it
-checks for that at import time and raises if it's already too late, rather
-than silently measuring (or shipping) a setting that never took effect.
+accepted settings, it checks at import time whether the GPU is already
+initialized or torch's compiler stack is already loaded, and raises if so,
+rather than silently shipping a setting that never took effect.
 
 Point `--framework-path` at a Git checkout tracking only
 `hyperloom_optimize.py`, initially an identity function. In the frozen benchmark
@@ -379,6 +379,37 @@ directory, declare `optimization_scope.json`:
 ```json
 {"schema_version": 1, "file": "/absolute/workspace/optimization/hyperloom_optimize.py"}
 ```
+
+Schema 2 names the function as well, so the module and function need not
+mention Hyperloom: `{"schema_version": 2, "file": ".../encoder_opt.py",
+"function": "apply"}`.
+
+### Optimize an unchanged script
+
+`hyperloom script prepare` builds such a workspace around an existing inference
+script whose only integration is importing the module first and passing its
+model through it once:
+
+```python
+from encoder_opt import apply   # first import: accepted settings land before torch reads them
+import torch
+...
+model = apply(model)
+```
+
+```bash
+hyperloom script prepare --workspace "$WS" --script encoder.py --python /path/to/model/env/python \
+  --calibrate-autocast bfloat16 -- --frames 6     # or --rel-l2 0.01; arguments after -- go to the script
+```
+
+It runs the script once with the identity module, records the calls of the
+object `apply` returns as references, and writes `benchmark/custom_gfx11.sh`.
+Each measurement then runs the script until `apply` returns, replays the
+recorded calls on fresh perturbed inputs with hidden held-out inputs mixed in,
+and compares outputs in a process that never imports the candidate. Your script
+needs no timing or validation code. Preparation refuses a script that imports
+the module after the GPU is initialized or `torch._inductor`/`torch._dynamo`
+are loaded, and warns if it imports it after `torch`, naming both lines.
 
 The normal custom entrypoint still emits the InferenceX report. A script runner
 can translate the user's final `{"latency_ms": 1.2, "validation_passed": true}`

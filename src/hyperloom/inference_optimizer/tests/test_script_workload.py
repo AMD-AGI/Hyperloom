@@ -20,8 +20,8 @@ torch = pytest.importorskip("torch")
 
 SCRIPT = textwrap.dedent(
     """
-    import torch
     from toy_opt import apply
+    import torch
 
     torch.manual_seed(0)
     model = torch.nn.Sequential(torch.nn.Linear(512, 1024), torch.nn.GELU(), torch.nn.Linear(1024, 512)).eval()
@@ -63,17 +63,38 @@ CANDIDATES = {
 }
 
 
-@pytest.fixture(scope="module")
-def workspace(tmp_path_factory):
-    user = tmp_path_factory.mktemp("user")
-    (user / "toy.py").write_text(SCRIPT)
+def _prepare(user: Path, workspace: Path, script: str) -> int:
+    (user / "toy.py").write_text(script)
     (user / "toy_opt.py").write_text("def apply(model):\n    return model\n")
-    workspace = tmp_path_factory.mktemp("campaign") / "ws"
     argv = ["prepare", "--workspace", str(workspace), "--script", str(user / "toy.py"), "--cwd", str(user)]
     argv += ["--python", sys.executable, "--rel-l2", "1e-5", "--held-out", "2", "--timed-passes", "8"]
     argv += ["--warmup-s", "0"]
-    assert script_main(argv) == 0
+    return script_main(argv)
+
+
+@pytest.fixture(scope="module")
+def workspace(tmp_path_factory):
+    workspace = tmp_path_factory.mktemp("campaign") / "ws"
+    assert _prepare(tmp_path_factory.mktemp("user"), workspace, SCRIPT) == 0
     return workspace
+
+
+def test_prepare_refuses_an_import_after_the_compiler_loaded(tmp_path):
+    late = SCRIPT.replace(
+        "from toy_opt import apply\nimport torch\n", "import torch._dynamo\nfrom toy_opt import apply\n"
+    )
+    with pytest.raises(SystemExit, match=r"toy\.py:3, after .*torch\._dynamo.*above `import torch`.*toy\.py:2"):
+        _prepare(tmp_path, tmp_path / "ws", late)
+    assert not (tmp_path / "ws" / "optimization").exists()
+    assert not (tmp_path / "ws" / "benchmark").exists()
+
+
+def test_prepare_warns_on_an_import_after_torch(tmp_path, capsys):
+    after_torch = SCRIPT.replace(
+        "from toy_opt import apply\nimport torch\n", "import torch\nfrom toy_opt import apply\n"
+    )
+    assert _prepare(tmp_path, tmp_path / "ws", after_torch) == 0
+    assert "after torch (torch is first imported at" in capsys.readouterr().err
 
 
 def _measure(workspace: Path, tmp_path: Path, candidate: str | None = None) -> dict:
@@ -96,7 +117,10 @@ def _failed(result: dict) -> set[str]:
 def test_prepare_lays_out_the_scope_and_records_once(workspace):
     scope = json.loads((workspace / "benchmark" / "optimization_scope.json").read_text())
     assert scope == {"schema_version": 2, "file": str(workspace / "optimization" / "toy_opt.py"), "function": "apply"}
-    assert sorted(p.name for p in (workspace / "benchmark" / "reference").iterdir()) == ["inputs", "references"]
+    store = workspace / "benchmark" / "reference"
+    assert sorted(p.name for p in store.iterdir()) == ["import_order.json", "inputs", "references"]
+    order = json.loads((store / "import_order.json").read_text())
+    assert (order["torch_imported"], order["gpu_initialized"], order["compiler_imported"]) == (False, False, [])
     limits = json.loads((workspace / "benchmark" / "reference" / "references" / "limits.json").read_text())
     assert limits == [1e-5] * 3
     with pytest.raises(SystemExit, match="already prepared"):
