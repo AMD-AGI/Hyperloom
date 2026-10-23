@@ -10,10 +10,11 @@ watches the agent's keep signal and reads each keep whole (:mod:`agent_import`) 
 goes on to its next candidate in the same workspace. Keeps are submitted as claimless explore tests against the branch
 head, one at a time: a keep that lands while an import is measured or judged waits, and a later keep replaces it, since
 each is cumulative. What the run knows of the keeps is kept beside the manifest, so a keep waiting at a crash is
-submitted by the run after it. The branch's judge judges the imports as it judges any branch's tests; nothing of its
-verdicts reaches the agent. An agent that exits 0 finishes the run once what it kept last settled; one that exits
-otherwise is a crash the runtime restarts it from. A session never ends idle: what the agent keeps, or does not, is its
-own business, bounded by the session's stops.
+submitted by the run after it. The agent's own LLM spend is read from its Claude CLI's transcripts (:mod:`agent_spend`)
+at each poll and once more when the run ends, and recorded as the branch's. The branch's judge judges the imports as it
+judges any branch's tests; nothing of its verdicts reaches the agent. An agent that exits 0 finishes the run once what
+it kept last settled; one that exits otherwise is a crash the runtime restarts it from. A session never ends idle: what
+the agent keeps, or does not, is its own business, bounded by the session's stops.
 """
 
 from __future__ import annotations
@@ -54,6 +55,7 @@ from hyperloom_multibranch.specialist.agent_onboarding import (
     tail,
 )
 from hyperloom_multibranch.specialist.agent_session import BranchPlace
+from hyperloom_multibranch.specialist.agent_spend import AgentSpend
 from hyperloom_multibranch.specialist.judging import NOTICE
 from hyperloom_multibranch.specialist.runtime import PreflightFailed, SessionCrashed, SessionFinished, SessionStart
 from hyperloom_multibranch.specialist.tools import sync_to_head
@@ -66,6 +68,7 @@ log = logging.getLogger(__name__)
 
 MANIFEST_FILE = "agent-manifest.json"
 LEASE_FILE = "agent-lease.json"
+SPEND_FILE = "agent-spend.json"
 #: What a run knows of the agent's keeps (:class:`KeepWatch`), so the run after a crash goes on from it.
 WATCH_FILE = "agent-watch.json"
 AGENT_DIR = "agent"
@@ -86,7 +89,8 @@ class AutonomousSetup:
     """What an autonomous branch runs on: how its agent is made ready in a sandbox, the sandbox a lease of the toolbox's
     cards gives, the spec it is given (its cards, the server arguments and environment of the commit it starts on and
     its workspace are filled in at the preflight), the toolbox the sandbox is leased from and imports are submitted to,
-    the repository they are read against, and ``component``, the framework the agent edits."""
+    the repository they are read against, ``component``, the framework the agent edits, and ``spend``, the agent's own LLM
+    spend for the directories it works under, read with the file of what was read."""
 
     onboarding: Callable[[AgentSandbox], OnboardingSetup]
     sandbox: Callable[[BranchLease], AgentSandbox]
@@ -94,6 +98,7 @@ class AutonomousSetup:
     toolbox: RealToolbox
     repo: ExperimentRepo
     component: str
+    spend: Callable[[tuple[Path, ...], Path], AgentSpend]
     poll_seconds: float = 5.0
     upstream: Callable[[str], Upstream | None] = installed_component_upstream
     settle_seconds: float = SETTLE_SECONDS
@@ -150,6 +155,7 @@ class AutonomousSession:
         self._process: AgentProcess | None = None
         self._root = LaunchConfig()
         self._unread = ""
+        self._spend_unread = False
         self._stopped = asyncio.Event()
 
     async def preflight(self) -> None:
@@ -172,13 +178,30 @@ class AutonomousSession:
         self._unread = ""
         self._root = (await self._setup.repo.read_recipe(self._start.start_commit)).launch
         watch = KeepWatch.load(self._place.workspace / WATCH_FILE)
-        while not self._stopped.is_set():
-            ended = process.returncode is not None
-            await self._observe(manifest, watch)
-            if ended:
-                await self._ended(manifest, process, watch)
-            await self._submit(manifest, watch)
-            await self._setup.sleep(self._setup.poll_seconds)
+        spend = self._setup.spend((self._place.workspace.parent, self._held().root), self._place.workspace / SPEND_FILE)
+        try:
+            while not self._stopped.is_set():
+                ended = process.returncode is not None
+                await self._observe(manifest, watch)
+                await self._record_spend(spend)
+                if ended:
+                    await self._ended(manifest, process, watch)
+                await self._submit(manifest, watch)
+                await self._setup.sleep(self._setup.poll_seconds)
+        finally:
+            await self._record_spend(spend)
+
+    async def _record_spend(self, spend: AgentSpend) -> None:
+        """Record the agent's new LLM spend; a read that fails is noted once and tried again at the next poll."""
+
+        try:
+            await spend.record()
+        except (OSError, ValueError, KeyError) as error:
+            if not self._spend_unread:
+                await self._note(f"the agent's LLM spend cannot be read, and is not recorded until it can: {error}")
+            self._spend_unread = True
+        else:
+            self._spend_unread = False
 
     async def set_k(self, k: int) -> None:
         """An autonomous branch measures one import at a time, whatever K the branch has."""

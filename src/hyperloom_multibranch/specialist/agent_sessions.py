@@ -7,7 +7,8 @@ Every agent's branch gets ports of its own: the branch first built takes the fir
 one, and a branch keeps its block for the session, a restart included. Its sandbox (:mod:`agent_sandbox`) runs on the
 cards and in the directory its preflight leases from the toolbox, with the lease's environment on top of the
 session's; its onboarding model is the specialists' CLI (:mod:`agent_onboard`) with its spend recorded in the branch's
-notebook.
+notebook, where the agent's own spend goes too, read from the transcripts of the Claude CLI's directory the session's
+environment names (:mod:`agent_spend`).
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ from hyperloom_multibranch.specialist.agent_onboard import cli_onboard
 from hyperloom_multibranch.specialist.agent_onboarding import AgentSandbox, AgentSpec, OnboardingSetup
 from hyperloom_multibranch.specialist.agent_sandbox import LocalAgentSandbox
 from hyperloom_multibranch.specialist.agent_session import AgentCommand, BranchPlace, Processes, SessionNotebook
+from hyperloom_multibranch.specialist.agent_spend import AgentSpend
 from hyperloom_multibranch.specialist.autonomous_session import AutonomousSession, AutonomousSetup
 from hyperloom_multibranch.specialist.model_sessions import ModelSessions, branch_place
 from hyperloom_multibranch.specialist.runtime import Session, SessionStart
@@ -32,6 +34,9 @@ from hyperloom_multibranch.specialist.runtime import Session, SessionStart
 if TYPE_CHECKING:
     from hyperloom_multibranch.toolbox.toolbox import RealToolbox
 
+#: Where a Claude CLI keeps its state, transcripts included, unless the environment names another directory.
+CLAUDE_CONFIG_ENV = "CLAUDE_CONFIG_DIR"
+DEFAULT_CLAUDE_CONFIG = ".claude"
 #: Ports a branch's agent may give its servers, from its spec's ``port`` on.
 PORTS_PER_AGENT = 10
 
@@ -67,7 +72,11 @@ class AgentSessions:
         def onboarding(agent_sandbox: AgentSandbox) -> OnboardingSetup:
             return OnboardingSetup(agent_sandbox, onboard)
 
-        setup = AutonomousSetup(onboarding, sandbox, spec, self.toolbox, self.repo, component)
+        def spend(roots: tuple[Path, ...], ledger: Path) -> AgentSpend:
+            config = Path(os.environ.get(CLAUDE_CONFIG_ENV) or Path.home() / DEFAULT_CLAUDE_CONFIG)
+            return AgentSpend(config, roots, ledger, branch, self.command.model, place.notebook)
+
+        setup = AutonomousSetup(onboarding, sandbox, spec, self.toolbox, self.repo, component, spend)
         return AutonomousSession(start, setup, place)
 
 

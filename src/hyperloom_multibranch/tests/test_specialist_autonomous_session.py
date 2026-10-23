@@ -30,6 +30,8 @@ from hyperloom_multibranch.specialist.autonomous_session import (
     AutonomousSetup,
     without_file,
 )
+from hyperloom_multibranch.contracts.llm_prices import TokenCounts
+from hyperloom_multibranch.specialist.agent_spend import AgentSpend, transcript_dir
 from hyperloom_multibranch.specialist.judging import NOTICE
 from hyperloom_multibranch.specialist.runtime import PreflightFailed, SessionCrashed, SessionFinished, SessionStart
 from hyperloom_multibranch.tests.branch_rig import branch_rig
@@ -109,6 +111,7 @@ class LocalSandbox:
 
     def __init__(self, logs: Path) -> None:
         self._logs, self.started, self.envs, self.leases, self.prompts = logs, [], [], [], []
+        self.usage = _Usage()
 
     async def run(self, command: str, cwd: Path, env: Mapping[str, str], timeout: float) -> CommandResult:
         done = subprocess.run(command, shell=True, cwd=cwd, env={**os.environ, **env}, capture_output=True, text=True)
@@ -205,6 +208,14 @@ def _manifest(workspace: str, agent: Agent) -> str:
     )
 
 
+class _Usage:
+    def __init__(self) -> None:
+        self.recorded: list = []
+
+    async def record_llm_usage(self, usage) -> None:
+        self.recorded.append(usage)
+
+
 @dataclass
 class Rig:
     session: AutonomousSession
@@ -248,8 +259,21 @@ async def _rig(
         return sandbox
 
     spec = AgentSpec("/models/m", "vllm", 1, "fp8", "mi355x", {}, "output_throughput", "", {}, "", (), 60.0, 31100)
+
+    def spend(roots: tuple[Path, ...], ledger: Path) -> AgentSpend:
+        return AgentSpend(tmp_path / "claude", roots, ledger, BRANCH, "claude-sonnet-5-5", sandbox.usage)
+
     setup = AutonomousSetup(
-        onboarding, sandbox_for, spec, toolbox, rig.repo, "vllm", poll_seconds=poll, settle_seconds=0.3, clock=clock
+        onboarding,
+        sandbox_for,
+        spec,
+        toolbox,
+        rig.repo,
+        "vllm",
+        spend,
+        poll_seconds=poll,
+        settle_seconds=0.3,
+        clock=clock,
     )
     place = BranchPlace(worktree, rig.notebook, tmp_path / BRANCH / "session")
     start = SessionStart(BRANCH, start_commit, 1, BranchTask(agent=str(_agent_repo(tmp_path))))
@@ -424,6 +448,24 @@ async def test_an_agent_opened_on_a_recipe_kb_champion_starts_from_its_launch(tm
     [prompt] = rig.sandbox.prompts
     assert '"server_args": "--max-num-seqs 256 --kv-cache-dtype fp8_e4m3"' in prompt
     assert '"SGLANG_USE_AITER": "1"' in prompt
+
+
+async def test_what_the_agent_s_own_cli_spends_is_recorded_as_the_branch_s(tmp_path: Path) -> None:
+    rig = await _rig(tmp_path, Agent(tail=30.0))
+    await rig.session.preflight()
+    running = asyncio.create_task(rig.session.run())
+    transcript = transcript_dir(tmp_path / "claude", tmp_path / BRANCH / "session" / "agent" / "src") / "s-1.jsonl"
+    transcript.parent.mkdir(parents=True)
+    usage = {"input_tokens": 3, "output_tokens": 50}
+    message = {"id": "m1", "model": "claude-opus-5-5", "usage": usage, "content": []}
+    transcript.write_text(json.dumps({"type": "assistant", "sessionId": "s-1", "message": message}) + "\n")
+
+    await _until(lambda: rig.sandbox.usage.recorded, "the agent's spend")
+    await rig.session.stop()
+    await asyncio.wait_for(running, 10)
+
+    [recorded] = rig.sandbox.usage.recorded
+    assert (recorded.branch, recorded.launch, recorded.tokens) == (BRANCH, "s-1", TokenCounts(3, 50))
 
 
 async def test_an_agent_whose_lease_would_leave_no_card_to_measure_fails_its_preflight(tmp_path: Path) -> None:
