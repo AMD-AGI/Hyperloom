@@ -15,11 +15,12 @@ from jsonschema import Draft202012Validator
 
 from hyperloom.measure import signing
 from hyperloom.measure.docs import DocumentError
-from hyperloom.measure.manifest import ResultManifest, encode_manifest, manifest_sha256
+from hyperloom.measure.manifest import ResultManifest, RulePackFacts, encode_manifest, manifest_sha256
 
 SCHEMA = json.loads(resources.files("hyperloom.contracts").joinpath("measurement_result.v1.schema.json").read_text())
 VALIDATOR = Draft202012Validator(SCHEMA)
 PUBLIC = signing.public_key_pem(signing.generate_private_key())
+PACK_DIGEST = "sha256:" + "ab" * 32
 
 
 def _document() -> dict[str, Any]:
@@ -39,6 +40,14 @@ def test_a_manifest_round_trips_and_passes_the_schema() -> None:
     assert manifest.request_id == document["request_id"] and manifest.total_size() == sum(
         map(len, DEFAULT_FILES.values())
     )
+
+
+def test_a_manifest_states_the_rule_pack_its_runner_read_and_one_from_an_older_runner_states_none() -> None:
+    stated = _edit(lambda d: d["runner"].update(rule_pack={"version": "2-test", "digest": PACK_DIGEST}))
+    assert list(VALIDATOR.iter_errors(stated)) == []
+    assert ResultManifest.from_document(stated).runner.rule_pack == RulePackFacts("2-test", PACK_DIGEST)
+    assert "rule_pack" not in _document()["runner"]
+    assert ResultManifest.from_document(_document()).runner.rule_pack is None
 
 
 def test_the_manifest_hash_is_the_hash_of_its_raw_bytes() -> None:
@@ -69,6 +78,13 @@ NEGATIVES: dict[str, Callable[[dict[str, Any]], None]] = {
     "dotdot path": lambda d: d["files"][0].update(path="a/../../b"),
     "reserved name": lambda d: d["files"][0].update(path="manifest.sig"),
     "backslash path": lambda d: d["files"][0].update(path="a\\b"),
+    "rule pack digest without its prefix": lambda d: d["runner"].update(
+        rule_pack={"version": "1", "digest": "ab" * 32}
+    ),
+    "rule pack without a version": lambda d: d["runner"].update(rule_pack={"digest": PACK_DIGEST}),
+    "rule pack with an unknown key": lambda d: d["runner"].update(
+        rule_pack={"version": "1", "digest": PACK_DIGEST, "path": "/x"}
+    ),
 }
 
 

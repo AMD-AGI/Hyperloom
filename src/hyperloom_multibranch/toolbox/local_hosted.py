@@ -21,6 +21,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 
+from hyperloom.common.rule_pack import rule_pack_identity
 from hyperloom.measure.archive import DirResultArchive, ResultArchive
 from hyperloom.measure.hosted import FILES_ROOT, HostedConfig, HostedMeasurementBackend
 from hyperloom.measure.hosted_log import STATE_FINISHED
@@ -28,6 +29,7 @@ from hyperloom.measure.hosted_spec import SpecContext
 from hyperloom.measure.local import SUPPORTED_KINDS
 from hyperloom.measure.framework_base import framework_envs
 from hyperloom.measure.local_templates import local_runner_template
+from hyperloom.measure.rule_pack_stage import rule_pack_envs
 from hyperloom.sandbox.local import LocalSandboxProvider
 from hyperloom.sandbox.templates import LocalTemplate
 from hyperloom_multibranch.contracts.toolbox import BranchLease, MeasurementCapacity
@@ -54,6 +56,7 @@ MAX_CARDS_PER_NODE = 8
 _SANDBOXES, _ARCHIVE, _SUBMISSIONS = "sandboxes", "archive", "toolbox/submissions.jsonl"
 _BRANCH_SANDBOXES = "branch-sandboxes"
 _FRAMEWORK = "framework"
+_RULE_PACK = "rule-pack"
 _TOOL_RESULTS = "tool-results"
 _POLL_INTERVAL_SEC = 2.0
 LEAKED_CARDS_REASON = "sandbox processes not provably gone"
@@ -257,9 +260,12 @@ class LocalOptions:
 
 
 def _runner_template(session: LocalSession, options: LocalOptions) -> LocalTemplate:
-    return local_runner_template(
+    """The runner template: ``runner_envs`` plus the variable that names the session's rule pack."""
+    template = local_runner_template(
         f"runner-{session.tp}", gpus=session.tp, python=options.python, envs=options.runner_envs
     )
+    pack = rule_pack_envs(Path(session.session_dir) / _RULE_PACK)
+    return replace(template, envs={**template.envs, **pack})
 
 
 def _provider(
@@ -322,6 +328,7 @@ def build_local_toolbox(
         run_id=session.run_id,
         spec=spec,
         runner_templates={tp: f"runner-{tp}"},
+        rule_pack_digest=rule_pack_identity()["digest"],
         archive=options.archive or DirResultArchive(directory / _ARCHIVE),
         max_parallel_tests=parallel,
         poll_interval_sec=options.poll_interval_sec,

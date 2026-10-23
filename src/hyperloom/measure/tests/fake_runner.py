@@ -39,6 +39,7 @@ from typing import Any
 
 import yaml
 
+from hyperloom.common.rule_pack import rule_pack_identity
 from hyperloom.measure import signing
 from hyperloom.measure.attachments import place_attachments, substitute
 from hyperloom.measure.repro import REPRO_DIR, find_case, run_case
@@ -78,6 +79,7 @@ def _runner_facts(key: Any, sandbox_id: str, mode: str) -> dict[str, Any]:
         "inferencex_commit": "f" * 40,
         "gpu_ids": [int(i) for i in os.environ.get("ROCR_VISIBLE_DEVICES", "").split(",") if i.strip().isdigit()],
         "ecc_delta": {"correctable": 0, "uncorrectable": 0},
+        "rule_pack": rule_pack_identity(),
     }
 
 

@@ -18,6 +18,7 @@ from pathlib import Path
 import yaml
 
 from hyperloom.common.outside_facts import ROCR_VISIBLE_DEVICES_ENV
+from hyperloom.common.rule_pack import rule_pack_identity
 from hyperloom.contracts.measurement import AttachmentRef, FailureClass
 from hyperloom.measure import signing
 from hyperloom.measure.docs import DocumentError
@@ -357,6 +358,7 @@ def _write_bundle(ctx: _Context, signed: _Signed, outcome: dict, found: _Finding
                 "magpie_commit": spec.tools.magpie,
                 "inferencex_commit": spec.tools.inferencex,
                 "gpu_ids": visible,
+                "rule_pack": rule_pack_identity(),
             },
             "platform_env_changed": list(changed),
             "timing": timing,
