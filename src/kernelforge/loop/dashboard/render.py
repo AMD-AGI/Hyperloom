@@ -442,7 +442,7 @@ def _directions_panel(snapshot: dict) -> str:
             f"<td><span class='status'><span class='dot' style='background:var(--{role})'></span>{glyph} "
             f"{escape(label)}</span></td>"
             f"<td class='num' title='{escape(str(entry.get('expected_gain_reason') or ''))}'>"
-            f"{_fmt(expected, '.1f') + '%' if expected is not None else 'unranked'}</td>"
+            f"{_fmt(expected, '.1f') + '%' if expected is not None else 'none'}</td>"
             f"<td class='num'>{entry.get('attempts', 0)}</td>"
             f"<td class='num'>{entry.get('keeps', 0)}</td><td class='num'>{_fmt(entry.get('gain_pct'), '.2f')}%</td>"
             f"<td>{escape(str(entry.get('source') or ''))}</td></tr>"
@@ -466,19 +466,13 @@ def _directions_panel(snapshot: dict) -> str:
         verdict = "Not yet: " + "; ".join(standing.get("unmet") or []) + "."
     focus = standing.get("focus") or []
     focus_text = f" Progress is flat, so plans must pursue: {', '.join(focus)}." if focus else ""
-    replans, audits = directions.get("replans") or [], directions.get("audits") or []
-    last_replan = (
-        f"Last replan at iteration {replans[-1].get('iteration')}: ranked {len(replans[-1].get('ranked') or [])}, "
-        f"retired {len(replans[-1].get('retired') or [])}, added {len(replans[-1].get('added') or [])}."
-        if replans
-        else "No replan yet."
-    )
+    audits = directions.get("audits") or []
     last_audit = (
         f"Last audit at iteration {audits[-1].get('iteration')} added {len(audits[-1].get('added') or [])}."
         if audits
         else "No audit yet."
     )
-    head = f"{rule} {now} {verdict}{focus_text} {last_replan} {last_audit}"
+    head = f"{rule} {now} {verdict}{focus_text} {last_audit}"
     return (
         f"<div class='card'><h2>Directions ({len(ledger)})</h2><div class='sub'>{escape(head)}</div>"
         "<table><tr><th>id</th><th>direction</th><th>category</th><th>status</th><th class='num'>expected</th>"

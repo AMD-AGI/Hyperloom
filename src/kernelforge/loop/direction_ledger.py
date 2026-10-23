@@ -3,9 +3,9 @@
 
 """The campaign's optimization directions, and how far each has been mined.
 
-``forge_experiments/directions.json`` holds what cannot be derived: each direction's definition, the gain a
-replan last expected from it, the ones retired with evidence, which Analysis commits have been surveyed, and the
-replans and audits run. How far a direction has been mined is folded from the ``iteration_result`` events that name
+``forge_experiments/directions.json`` holds what cannot be derived: each direction's definition, the gain it was
+expected to bring when listed, the ones retired with evidence, which Analysis commits have been surveyed, and the
+audits run. How far a direction has been mined is folded from the ``iteration_result`` events that name
 it, so a resume or an event replay can never leave the two disagreeing.
 """
 
@@ -62,7 +62,7 @@ class Direction:
     added_iteration: int = 0
     retired_reason: str = ""
     retired_iteration: int = 0
-    # The fraction its next attempt is expected to raise the best score by, and why; None until ranked.
+    # The fraction the agent that listed it expected it to raise the best score by, and why; None without one.
     priority: float | None = None
     priority_reason: str = ""
 
@@ -100,7 +100,7 @@ class DirectionStanding:
 
 
 def by_priority(standings: tuple[DirectionStanding, ...]) -> tuple[DirectionStanding, ...]:
-    """Directions still in play first, by expected gain with the unranked after; mined out and ruled out last."""
+    """Directions still in play first, by expected gain with the unestimated after; mined out and ruled out last."""
 
     def key(standing: DirectionStanding) -> tuple:
         priority = standing.direction.priority
@@ -139,7 +139,6 @@ class DirectionLedger:
             data = {}
         data.setdefault("directions", [])
         data.setdefault("surveyed_commits", [])
-        data.setdefault("replans", [])
         data.setdefault("audits", [])
         return data
 
@@ -208,20 +207,6 @@ class DirectionLedger:
                 return True
         return False
 
-    def rank(self, ranking: list[dict]) -> list[str]:
-        """Set the expected gain of each ranked direction the ledger holds; return the ids it set."""
-        by_id = {raw.get("id"): raw for raw in self._data["directions"]}
-        ranked = []
-        for entry in ranking:
-            raw, priority = by_id.get(str(entry.get("id") or "")), expected_fraction(entry)
-            if raw is None or priority is None:
-                continue
-            raw["priority"], raw["priority_reason"] = priority, str(entry.get("reason") or "").strip()
-            ranked.append(raw["id"])
-        if ranked:
-            self._save()
-        return ranked
-
     def surveyed(self, commit: str) -> bool:
         return commit in self._data["surveyed_commits"]
 
@@ -229,13 +214,6 @@ class DirectionLedger:
         if commit and commit not in self._data["surveyed_commits"]:
             self._data["surveyed_commits"].append(commit)
             self._save()
-
-    def replans(self) -> list[dict]:
-        return list(self._data["replans"])
-
-    def record_replan(self, *, iteration: int, ranked: list[str], retired: list[str], added: list[str]) -> None:
-        self._data["replans"].append({"iteration": iteration, "ranked": ranked, "retired": retired, "added": added})
-        self._save()
 
     def audits(self) -> list[dict]:
         return list(self._data["audits"])

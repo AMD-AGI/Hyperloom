@@ -178,35 +178,32 @@ a `--resume` with or without the flag continues the same campaign under the rule
 
 ### Early stop
 
-Off by default: the loop runs through stalls until its budget ends. With `--early-stop` it keeps a ranked ledger
-of optimization directions in `forge_experiments/directions.json`, and stops early, as `directions_exhausted`,
-only when all of these hold:
+Off by default: the loop runs through stalls until its budget ends. With `--early-stop` it keeps a ledger of
+optimization directions in `forge_experiments/directions.json`, and stops early, as `directions_exhausted`, only
+when all of these hold:
 - over the last `--early-stop-window-hours` of rounds that tested something, the best score gained less than
   `--early-stop-min-gain`. A round whose bench failed, or that ended in a provider or orchestration error, tested
   nothing and adds no time;
 - no direction still in play (not mined out by `--direction-exhaust-after` attempts in a row without a KEEP, not
-  retired) is expected to gain `--early-stop-priority-gain` or more, by a ranking made after the last attempt;
+  retired) was expected, when it was listed, to gain `--early-stop-priority-gain` or more; a direction listed
+  without an estimate counts as one that was;
 - no lane candidate is queued and no operator message is waiting;
 - a read-only audit agent, run once against that ledger, found no direction it lacks. Directions it does find
-  are added with their expected gain, and the rule waits until they are ranked below the bar or mined out.
+  are added with their expected gain, and the rule waits until they are below the bar or mined out.
 
-The same read-only agent maintains the ledger. A survey lists directions after each Analysis, each with an
-expected gain. A replan ranks every direction still in play by the gain its next attempt is now expected to bring,
-retires duplicates and directions the measurements have ruled out, and may add evidenced ones; it runs every
-`--direction-replan-every` attempts, whenever a direction is unranked (a planner may add one), and after every
-attempt once progress is flat. Planners see the ledger ordered by expected gain and prefer its top; once progress
-is flat, every plan must pursue a direction still expected to clear `--early-stop-priority-gain`. Every plan begins
+A survey by the same agent lists the directions after each Analysis, each with the gain it is expected to bring,
+and a planner may add one. Planners see the ledger ordered by that expected gain and prefer its top; once progress
+is flat, every plan must pursue a direction still at or above `--early-stop-priority-gain`. Every plan begins
 `Direction: <id>` (or `Direction: new | <category> | <title>`), which is how a candidate is attributed. A stopped
 campaign is paused, not closed: `--resume` continues it, and stops again unless the ledger or the inbox has moved.
 
 | Option | Default | Meaning |
 |:--|:--|:--|
-| `--early-stop` / `--no-early-stop` | off | Keep the ranked direction ledger and allow the early stop above. |
+| `--early-stop` / `--no-early-stop` | off | Keep the direction ledger and allow the early stop above. |
 | `--early-stop-window-hours <h>` | 3.0 | Hours of rounds that tested something whose combined gain decides whether the campaign has gone flat. |
 | `--early-stop-min-gain <f>` | 0.02 | Gain over that window below which the campaign counts as flat. |
-| `--early-stop-priority-gain <f>` | 0.03 | Expected gain at or above which a direction keeps a flat campaign running, and its plans pursuing it. |
+| `--early-stop-priority-gain <f>` | 0.03 | Expected gain at or above which a direction keeps a flat campaign running, and plans pursuing it. |
 | `--direction-exhaust-after <n>` | 2 | Attempts in a row without a KEEP after which a direction counts as mined out. |
-| `--direction-replan-every <n>` | 4 | Attempts after which the directions are ranked again. |
 
 ### Output
 

@@ -3543,7 +3543,6 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             },
             "analysis_reports": [ref.path for ref in refs if ref.kind in {"analysis_summary", "analysis_bundle"}],
             "optimization_history": str(self.state_store.root / "optimization_history.md"),
-            "lessons": str(self.state_store.root / "lessons"),
             "program": (self.ic.program_md or "")[:3000],
             "knowledge_index": context.knowledge_index if context is not None else "",
         }
@@ -3558,55 +3557,18 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         commit = (context.evidence_commit or context.analysis_commit) if context is not None else "no-analysis"
         if ledger.surveyed(commit):
             return
-        reply = await self._direction_audit_fn(
+        found = await self._direction_audit_fn(
             "survey",
             workspace=self.ic.workspace_dir,
             iteration=iteration,
             payload=self._direction_payload(standing, "survey"),
         )
-        if reply is None:
+        if found is None:
             return
-        added = ledger.add(list(reply.new_directions), source="survey", iteration=iteration)
+        added = ledger.add(found, source="survey", iteration=iteration)
         ledger.mark_surveyed(commit)
         self.state_store.append_event(make_event("direction_added", iteration, source="survey", added=added))
         print(f"  [directions] survey added {len(added)}: {', '.join(added) or '-'}")
-
-    async def _replan_directions_if_due(self, iteration: int) -> None:
-        """Rank the directions still in play by the gain now expected of them, when the ranking has gone stale."""
-        standing = self._early_stop_standing()
-        if standing is None or not standing.replan_reason or self._direction_audit_fn is None:
-            return
-        ledger = self._ledger()
-        reply = await self._direction_audit_fn(
-            "replan",
-            workspace=self.ic.workspace_dir,
-            iteration=iteration,
-            payload=self._direction_payload(standing, "replan"),
-        )
-        if reply is None:
-            return
-        ranked = ledger.rank(list(reply.ranking))
-        retired = [
-            str(entry["id"])
-            for entry in reply.retire
-            if ledger.retire(str(entry.get("id") or ""), reason=str(entry["reason"]).strip(), iteration=iteration)
-        ]
-        added = ledger.add(list(reply.new_directions), source="replan", iteration=iteration)
-        ledger.record_replan(iteration=iteration, ranked=ranked, retired=retired, added=added)
-        self.state_store.append_event(
-            make_event(
-                "direction_replan",
-                iteration,
-                reason=standing.replan_reason,
-                ranked=ranked,
-                retired=retired,
-                added=added,
-            )
-        )
-        print(
-            f"  [directions] replan ({standing.replan_reason}): ranked {len(ranked)}, retired "
-            f"{', '.join(retired) or 'none'}, added {', '.join(added) or 'none'}"
-        )
 
     async def _audit_directions_if_due(self, iteration: int) -> None:
         """Before an early stop may fire, look once for directions the ledger lacks."""
@@ -3614,15 +3576,15 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         if standing is None or not standing.audit_due or self._direction_audit_fn is None:
             return
         ledger = self._ledger()
-        reply = await self._direction_audit_fn(
+        found = await self._direction_audit_fn(
             "audit",
             workspace=self.ic.workspace_dir,
             iteration=iteration,
             payload=self._direction_payload(standing, "audit"),
         )
-        if reply is None:
+        if found is None:
             return
-        added = ledger.add(list(reply.new_directions), source="audit", iteration=iteration)
+        added = ledger.add(found, source="audit", iteration=iteration)
         ledger.record_audit(iteration=iteration, ledger_size=len(ledger.directions()), added=added)
         self.state_store.append_event(make_event("direction_audit", iteration, added=added))
         print(f"  [directions] audit added {len(added)}: {', '.join(added) or 'none — the campaign may stop'}")
@@ -6900,7 +6862,6 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
 
             # Ruled on once per iteration, with the other conditions that decide whether this iteration may run at
             # all -- and after them, so a run that was stopping anyway never touches the device.
-            await self._replan_directions_if_due(iteration)
             await self._audit_directions_if_due(iteration)
             stop, hazard = self._stop_condition_met(iteration)
             if stop:

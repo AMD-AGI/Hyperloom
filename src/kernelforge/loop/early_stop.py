@@ -1,12 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""When a campaign may stop before its budget, and when its directions need ranking again.
+"""When a campaign may stop before its budget.
 
 Time decides first: over the last ``window_hours`` of rounds that tested something, the best score gained less than
 ``min_gain``. Rounds that tested nothing -- a bench that failed, a provider error -- add no time to the window. Then
-the directions: none still in play is expected to gain ``priority_gain`` or more, by a ranking made after the last
-round. Then one audit, run against the ledger as it stands, finds no direction the ledger lacks.
+the directions: none still in play was expected, when it was listed, to gain ``priority_gain`` or more, and none
+lacks that estimate. Then one audit, run against the ledger as it stands, finds no direction the ledger lacks.
 """
 
 from __future__ import annotations
@@ -33,7 +33,6 @@ class EarlyStopPolicy:
     min_gain: float = 0.02
     priority_gain: float = 0.03
     exhaust_after: int = 2
-    replan_every: int = 4
 
 
 @dataclass(frozen=True)
@@ -53,7 +52,6 @@ class EarlyStopStanding:
     window: TimeWindow | None
     flat: bool
     promising: tuple[str, ...]
-    replan_reason: str
     criteria_met: bool
     audit_due: bool
     stop: bool
@@ -90,26 +88,6 @@ def time_window(
     return None
 
 
-def _replan_reason(
-    policy: EarlyStopPolicy,
-    standings: tuple[DirectionStanding, ...],
-    results: list[dict],
-    replans: list[dict],
-    *,
-    flat: bool,
-) -> str:
-    unranked = sum(standing.in_play and standing.direction.priority is None for standing in standings)
-    if unranked:
-        return f"{unranked} directions not yet ranked"
-    since = int(replans[-1]["iteration"]) if replans else 0
-    tested = sum(attempted(event) and int(event.get("iter") or 0) >= since for event in results)
-    if tested >= policy.replan_every:
-        return f"{tested} attempts since the last ranking"
-    if flat and tested:
-        return "progress is flat and an attempt has landed since the last ranking"
-    return ""
-
-
 def early_stop_standing(
     policy: EarlyStopPolicy,
     ledger: DirectionLedger,
@@ -134,7 +112,6 @@ def early_stop_standing(
         if standing.in_play
         and (standing.direction.priority is None or standing.direction.priority >= policy.priority_gain)
     )
-    replan_reason = _replan_reason(policy, standings, results, ledger.replans(), flat=flat)
     unmet = []
     if window is None:
         unmet.append(f"fewer than {policy.window_hours:g} h of rounds that tested something")
@@ -142,23 +119,19 @@ def early_stop_standing(
         unmet.append(f"the last {window.hours:.1f} h gained {window.gain:.2%}, at least {policy.min_gain:.2%}")
     if promising:
         unmet.append(
-            f"{len(promising)} directions still expected to gain {policy.priority_gain * 100:g}% or more, or unranked"
+            f"{len(promising)} directions still expected to gain {policy.priority_gain * 100:g}% or more, or with no estimate"
         )
-    if replan_reason:
-        unmet.append(f"the ranking is stale: {replan_reason}")
     if not lane_queue_empty:
         unmet.append("lane candidates still queued")
     if inbox_pending:
         unmet.append("operator messages not yet read")
     criteria_met = policy.enabled and not unmet
     # An audit counts only if it ran against the ledger as it stands now (``ledger_size`` is recorded after its
-    # own additions). One that added directions re-arms the rule: once those are ranked below the bar or mined
-    # out, audit again.
+    # own additions). One that added directions re-arms the rule: once those are below the bar or mined out,
+    # audit again.
     audits = ledger.audits()
     current = [audit for audit in audits if int(audit.get("ledger_size", -1)) == len(standings)]
     last_added = bool(current and current[-1].get("added"))
     audit_due = criteria_met and (not current or last_added)
     stop = criteria_met and bool(current) and not last_added
-    return EarlyStopStanding(
-        standings, window, flat, promising, replan_reason, criteria_met, audit_due, stop, tuple(unmet)
-    )
+    return EarlyStopStanding(standings, window, flat, promising, criteria_met, audit_due, stop, tuple(unmet))

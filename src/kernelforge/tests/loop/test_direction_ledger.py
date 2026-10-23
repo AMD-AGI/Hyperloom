@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The direction ledger and the early stop it feeds: attribution, standings, ranking, the rule, and the audit."""
+"""The direction ledger and the early stop it feeds: attribution, standings, the rule, and the audit."""
 
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ from kernelforge.loop.early_stop import EarlyStopPolicy, EarlyStopStanding, Time
 from kernelforge.loop.operator_inbox import post_message
 from kernelforge.loop.runner import IterationLoop
 from kernelforge.orchestrator.contracts import CaseEvidence, OrchestrationContext
-from kernelforge.orchestrator.direction_audit import DirectionReply, parse_reply
+from kernelforge.orchestrator.direction_audit import parse_new_directions
 from kernelforge.orchestrator.direction_claims import DirectionClaim, parse_direction_line
 
 
@@ -131,12 +131,12 @@ def test_the_window_reaches_back_over_hours_of_rounds_that_tested_something() ->
     assert time_window(results, costs, gains, 3.5) is None
 
 
-def test_the_ledger_is_ordered_by_expected_gain_with_the_unranked_and_the_spent_after(tmp_path: Path) -> None:
+def test_the_ledger_is_ordered_by_expected_gain_with_the_unestimated_and_the_spent_after(tmp_path: Path) -> None:
     ledger = DirectionLedger(tmp_path)
     ledger.add(
         [
             {"title": "low", "expected_gain_pct": 1},
-            {"title": "unranked"},
+            {"title": "unestimated"},
             {"title": "high", "expected_gain_pct": 6, "reason": "the profile shows idle CUs"},
             {"title": "spent", "expected_gain_pct": 9},
         ],
@@ -145,19 +145,18 @@ def test_the_ledger_is_ordered_by_expected_gain_with_the_unranked_and_the_spent_
     )
     results = [_event(1, "REVERT_PERF", 1.0, "spent"), _event(2, "REVERT_PERF", 1.0, "spent")]
     ordered = by_priority(direction_standings(ledger.directions(), results, exhaust_after=2))
-    assert [s.direction.id for s in ordered] == ["high", "low", "unranked", "spent"]
+    assert [s.direction.id for s in ordered] == ["high", "low", "unestimated", "spent"]
     assert ordered[0].to_view()["expected_gain_pct"] == 6.0
     assert ordered[0].to_view()["expected_gain_reason"] == "the profile shows idle CUs"
 
 
 def _flat(tmp_path: Path) -> tuple[DirectionLedger, list[dict]]:
-    """Four flat hours on two directions now mined out and ranked below the bar, ranked after the last attempt."""
+    """Four flat hours on two directions expected below the bar, both now mined out."""
     ledger = DirectionLedger(tmp_path)
     ledger.add([{"title": t, "expected_gain_pct": 1} for t in ("a", "b")], source="survey", iteration=0)
     events = []
     for iteration, direction in ((1, "a"), (2, "a"), (3, "b"), (4, "b")):
         events += [_cost(iteration, 1.0), _event(iteration, "REVERT_PERF", 1.0, direction)]
-    ledger.record_replan(iteration=5, ranked=["a", "b"], retired=[], added=[])
     return ledger, events
 
 
@@ -214,54 +213,39 @@ def test_a_direction_still_worth_the_bar_holds_the_campaign_and_once_flat_is_whe
     standing = _rule(ledger, events)
     assert standing.promising == ("c",) and standing.focus == ("c",)
     assert not standing.criteria_met
-    assert "1 directions still expected to gain 3% or more, or unranked" in standing.reasons
+    assert "1 directions still expected to gain 3% or more, or with no estimate" in standing.reasons
     # Before progress is flat the ledger only orders the plans.
     assert _rule(ledger, [*events, _cost(5, 1.0), _event(5, "KEEP", 1.05, "c")]).focus == ()
 
 
-def test_an_unranked_direction_holds_the_campaign_until_a_replan_ranks_it(tmp_path: Path) -> None:
+def test_a_direction_listed_without_an_estimate_holds_the_campaign_until_it_is_mined_out(tmp_path: Path) -> None:
     ledger, events = _flat(tmp_path)
     ledger.add([{"title": "d"}], source="planner", iteration=5)
     standing = _rule(ledger, events)
-    assert standing.replan_reason == "1 directions not yet ranked" and standing.promising == ("d",)
-    ledger.rank([{"id": "d", "expected_gain_pct": 0.5}])
+    assert standing.promising == ("d",) and standing.focus == ("d",) and not standing.criteria_met
+    for iteration in (5, 6):
+        events += [_cost(iteration, 1.0), _event(iteration, "REVERT_PERF", 1.0, "d")]
     assert _rule(ledger, events).criteria_met
 
 
-def test_a_replan_falls_due_every_few_attempts_and_after_each_flat_one(tmp_path: Path) -> None:
-    ledger, events = _flat(tmp_path)
-    assert _rule(ledger, events).replan_reason == ""
-    flat_attempt = [*events, _cost(5, 1.0), _event(5, "REVERT_PERF", 1.0, "a")]
-    assert _rule(ledger, flat_attempt).replan_reason.startswith("progress is flat")
-    growing = [*events, _cost(5, 1.0), _event(5, "KEEP", 1.2, "a")]
-    assert _rule(ledger, growing).replan_reason == ""
-    growing += [_cost(i, 1.0) for i in (6, 7, 8)] + [_event(i, "REVERT_PERF", 1.2, "a") for i in (6, 7, 8)]
-    assert _rule(ledger, growing).replan_reason == "4 attempts since the last ranking"
-
-
-def test_replies_keep_evidenced_directions_and_retirements_that_say_why(tmp_path: Path) -> None:
+def test_only_evidenced_directions_survive_a_reply(tmp_path: Path) -> None:
     (tmp_path / "report.md").write_text("evidence")
     evidence = [str(tmp_path / "report.md")]
     reply = (
         "Reasoning.\n```json\n"
         + json.dumps(
             {
-                "ranking": [{"id": "a", "expected_gain_pct": 4, "reason": "headroom"}],
-                "retire": [{"id": "b", "reason": "duplicate of a"}, {"id": "c", "reason": " "}],
                 "new_directions": [
-                    {"title": "kept", "evidence": evidence},
+                    {"title": "kept", "expected_gain_pct": 4, "evidence": evidence},
                     {"title": "dropped", "evidence": ["/no/such/file"]},
                     {"title": "", "evidence": evidence},
-                ],
+                ]
             }
         )
         + "\n```"
     )
-    parsed = parse_reply(reply, workspace=tmp_path)
-    assert [entry["title"] for entry in parsed.new_directions] == ["kept"]
-    assert [entry["id"] for entry in parsed.retire] == ["b"]
-    assert parsed.ranking == ({"id": "a", "expected_gain_pct": 4, "reason": "headroom"},)
-    assert parse_reply("no json", workspace=tmp_path) == DirectionReply()
+    assert [entry["title"] for entry in parse_new_directions(reply, workspace=tmp_path)] == ["kept"]
+    assert parse_new_directions("no json", workspace=tmp_path) == []
 
 
 def _context(**overrides) -> OrchestrationContext:
@@ -312,41 +296,8 @@ def test_a_candidate_is_attributed_to_the_direction_its_plan_names(tmp_path: Pat
     assert sink["direction_id"] == "direct-stores"
 
 
-async def test_a_replan_sets_expected_gains_retires_and_adds_and_a_failed_one_changes_nothing(tmp_path: Path) -> None:
-    (tmp_path / "report.md").write_text("evidence")
-    replies = [
-        None,
-        DirectionReply(
-            ranking=(
-                {"id": "a", "expected_gain_pct": 4, "reason": "headroom"},
-                {"id": "unknown", "expected_gain_pct": 9},
-                {"id": "b", "expected_gain_pct": "high"},
-            ),
-            retire=({"id": "b", "reason": "duplicate of a"},),
-            new_directions=({"title": "c", "expected_gain_pct": 2.5, "evidence": [str(tmp_path / "report.md")]},),
-        ),
-    ]
-
-    async def replan(mode, *, workspace, iteration, payload):
-        assert mode == "replan" and payload["mode"] == "replan"
-        return replies.pop(0)
-
-    loop = _loop(tmp_path, _direction_audit_fn=replan)
-    loop._ledger().add([{"title": "a"}, {"title": "b"}], source="survey", iteration=1)
-    loop._early_stop_standing = lambda: SimpleNamespace(replan_reason="2 directions not yet ranked")
-    await IterationLoop._replan_directions_if_due(loop, 6)
-    assert loop._ledger().replans() == [] and loop.events == []
-    await IterationLoop._replan_directions_if_due(loop, 7)
-    directions = {d.id: d for d in DirectionLedger(tmp_path / "forge_experiments").directions()}
-    assert directions["a"].priority == pytest.approx(0.04) and directions["a"].priority_reason == "headroom"
-    assert directions["b"].retired_reason == "duplicate of a" and directions["b"].priority is None
-    assert directions["c"].priority == pytest.approx(0.025) and directions["c"].source == "replan"
-    assert loop._ledger().replans() == [{"iteration": 7, "ranked": ["a"], "retired": ["b"], "added": ["c"]}]
-    assert loop.events[-1]["type"] == "direction_replan"
-
-
 async def test_an_empty_audit_is_recorded_and_a_failed_one_is_not(tmp_path: Path) -> None:
-    replies = [None, DirectionReply()]
+    replies = [None, []]
 
     async def audit(mode, *, workspace, iteration, payload):
         assert mode == "audit" and payload["mode"] == "audit"
@@ -362,7 +313,7 @@ async def test_an_empty_audit_is_recorded_and_a_failed_one_is_not(tmp_path: Path
 
 
 def test_the_loop_stops_as_directions_exhausted(tmp_path: Path) -> None:
-    standing = EarlyStopStanding((), TimeWindow(3.2, 4, 0.004), True, (), "", True, False, True, ())
+    standing = EarlyStopStanding((), TimeWindow(3.2, 4, 0.004), True, (), True, False, True, ())
     loop = _loop(
         tmp_path,
         _is_gate_met=lambda: False,
@@ -383,7 +334,7 @@ def test_a_pending_operator_message_is_seen_by_the_rule(tmp_path: Path) -> None:
     assert "operator messages not yet read" in IterationLoop._early_stop_standing(loop).reasons
 
 
-def test_the_dashboard_shows_the_ranked_ledger_and_the_rule(tmp_path: Path) -> None:
+def test_the_dashboard_shows_the_ledger_by_expected_gain_and_the_rule(tmp_path: Path) -> None:
     loop = _loop(tmp_path)
     loop._ledger().add([{"title": "Split K", "expected_gain_pct": 4}], source="survey", iteration=1)
     root = tmp_path / "forge_experiments"

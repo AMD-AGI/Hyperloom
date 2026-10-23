@@ -39,7 +39,6 @@ _NOTABLE_EVENTS = frozenset(
         "merge_attempt_result",
         "operator_message_consumed",
         "direction_added",
-        "direction_replan",
         "direction_audit",
         "null_control",
         "incumbent_tree_reset",
@@ -210,7 +209,6 @@ def _directions(campaign_root: Path, state: dict, events: list[dict], live_block
     window = standing.window
     return {
         "ledger": [entry.to_view() | {"source": entry.direction.source} for entry in standing.standings],
-        "replans": ledger.replans(),
         "audits": ledger.audits(),
         "policy": {key: value for key, value in asdict(policy).items() if key != "enabled"},
         "standing": {
@@ -219,7 +217,6 @@ def _directions(campaign_root: Path, state: dict, events: list[dict], live_block
             "flat": standing.flat,
             "promising": list(standing.promising),
             "focus": list(standing.focus),
-            "replan_reason": standing.replan_reason,
             "criteria_met": standing.criteria_met,
             "audit_due": standing.audit_due,
             "unmet": list(standing.reasons),

@@ -448,8 +448,8 @@ set on, so the incumbent and the threshold are measured the same way. Neither ra
 individual case regressions decide KEEP/REVERT.
 
 `inbox/` holds operator messages (`kernelforge forge-say`); the loop archives each one it reads. `directions.json`
-exists only with `--early-stop`: the direction ledger's definitions, the gain the last replan expected of each
-(`priority`, a fraction, with its reason), retirements, surveyed Analysis commits, replans and audits. How far each
+exists only with `--early-stop`: the direction ledger's definitions, the gain each was expected to bring when
+listed (`priority`, a fraction, with its reason), retirements, surveyed Analysis commits and audits. How far each
 direction has been mined is not stored there; it is folded from the `iteration_result` events, whose
 `direction_id` and `lane_id` name what each candidate pursued. A REVERT_PERF without `mean_case_speedup` is a
 bench that failed: it counts as no attempt, and its round adds no time to the early-stop window, which is summed
