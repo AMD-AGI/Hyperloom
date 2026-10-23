@@ -43,10 +43,7 @@ from hyperloom.orchestrator.actions.executors._patch_snapshot import (
     _commit_strip_level,
     _patch_touched_paths,
 )
-from hyperloom.orchestrator.actions.executors.integrate_patch import (
-    _git_apply,
-    _git_restore_to_head,
-)
+from hyperloom.orchestrator.actions.executors._patch_git import _git_apply, _git_restore_to_head
 from hyperloom.orchestrator.specialists.patch_safety import patch_file_targets
 
 log = logging.getLogger(__name__)

@@ -25,6 +25,9 @@ from hyperloom.orchestrator.knowledge.recipe_kb import (
     recipe_canonical_id,
 )
 from hyperloom.orchestrator.knowledge.config import KnowledgeConfig
+from hyperloom.orchestrator.knowledge.recipe_journal import (
+    recipe_attrs_from_state,
+)
 from hyperloom.inference_optimizer.breakdown.recorder import close_out as _close_out
 
 
@@ -433,7 +436,7 @@ def test_best_config_reads_stack_args_from_canonical_server_key(
         }
     ]
     ss.cumulative_gain_validated = 10.0
-    attrs = coord.recipe_journal._build_recipe_attrs_from_state()
+    attrs = recipe_attrs_from_state(coord.shared_state, coord.session_dir.name)
     assert attrs["best_config"]["extra_server_args"] == ("--page-size 32 --schedule-policy lpm"), (
         "stack-layer launch args must be read from the canonical "
         "extra_server_args key; got "
@@ -557,7 +560,7 @@ def test_session_entry_carries_throughput_date_and_actions(
     ]
     ss.cumulative_gain_validated = 7.5
     ss.cumulative_gain_validated_stack_len = 2
-    attrs = coord.recipe_journal._build_recipe_attrs_from_state()
+    attrs = recipe_attrs_from_state(coord.shared_state, coord.session_dir.name)
     sessions = attrs.get("sessions") or []
     assert sessions, "no session entry emitted"
     s = sessions[0]

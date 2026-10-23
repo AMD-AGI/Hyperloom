@@ -11,9 +11,7 @@ from typing import Any
 
 import pytest
 
-from hyperloom.orchestrator.actions.executors.integrate_patch import (
-    IntegratePatchExecutor,
-)
+from hyperloom.orchestrator.actions.executors.integrate_patch import IntegratePatchExecutor
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.policy.gate import (

@@ -18,7 +18,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-from kernelforge.llm.git import git, git_bytes
+from kernelforge.tools.git import git, git_bytes
 from kernelforge.agent_backends import (
     AgentHook,
     AgentHooks,

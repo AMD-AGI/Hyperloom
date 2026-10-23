@@ -20,10 +20,7 @@ from hyperloom.orchestrator.actions.executors._patch_snapshot import (
     _git_commit_kept,
     _patch_touched_paths,
 )
-from hyperloom.orchestrator.actions.executors.integrate_patch import (
-    _git_apply_reverse,
-    _git_restore_to_head,
-)
+from hyperloom.orchestrator.actions.executors._patch_git import _git_apply_reverse, _git_restore_to_head
 from hyperloom.orchestrator.actions.stop_attribution import StoppedByTheRun
 
 from .controller_publication import (

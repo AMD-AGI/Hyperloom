@@ -16,7 +16,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from kernelforge.llm.git import git_bytes
+from kernelforge.tools.git import git_bytes
 from kernelforge.agent_backends import (
     AgentBackend,
     AgentHook,

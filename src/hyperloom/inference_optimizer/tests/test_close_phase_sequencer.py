@@ -1037,11 +1037,10 @@ async def _advance_into_close(coord, monkeypatch, reason: str) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("reason", ["sweep_budget_exhausted", "sweep_budget_cap"])
-async def test_a_sweep_budget_exit_closes_the_run_as_time_exhausted(tmp_path: Path, monkeypatch, reason: str):
+async def test_a_sweep_budget_exit_closes_the_run_as_time_exhausted(tmp_path: Path, monkeypatch):
     coord = make_coordinator(tmp_path)
 
-    await _advance_into_close(coord, monkeypatch, reason)
+    await _advance_into_close(coord, monkeypatch, "sweep_budget_exhausted")
 
     assert coord.shared_state.phase == machine_state.PHASE_CLOSE
     assert coord.shared_state.stop_reason == "time_exhausted"

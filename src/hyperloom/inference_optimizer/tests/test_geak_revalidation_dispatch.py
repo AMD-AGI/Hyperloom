@@ -1242,6 +1242,28 @@ async def test_invalid_handoff_configuration_never_launches_geak(coordinator, mo
 
 
 @pytest.mark.asyncio
+async def test_native_geak_proxy_refusal_is_not_an_invalid_env_spec(coordinator, monkeypatch):
+    """A native-AgentX proposal refusing an unverified Magpie launch is its own fault, not a serialization one.
+
+    ``invalid_env_spec`` names exactly one failure: the accepted launch configuration could not be
+    serialized. A refusal raised further down the handoff build must reach the caller instead of being
+    relabelled as one.
+    """
+    refusal = "Native AgentX GEAK proposals require a Magpie-verified server launch"
+
+    def refuse(*_args, **_kwargs):
+        raise ValueError(refusal)
+
+    monkeypatch.setattr("hyperloom.inference_optimizer.agentx.geak_proxy.seed_native_geak_proxy", refuse)
+    coordinator.shared_state.benchmark_mode = "agentx"
+
+    with pytest.raises(ValueError, match=refusal):
+        await coordinator.phase_kernel._run_geak_kernel_phase(from_phase="EXPLORE")
+
+    assert (coordinator.shared_state.geak_result or {}).get("error_class") != "invalid_env_spec"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("config", [{"env_map": None}, {"unset_envs": ["PYTHONPATH"]}])
 async def test_invalid_config_with_real_artifact_is_rejected_before_rebench(coordinator, config):
     coordinator.shared_state.geak_result = {

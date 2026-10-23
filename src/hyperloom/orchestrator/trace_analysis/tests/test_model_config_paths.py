@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.orchestrator.trace_analysis.tracelens_analysis import _candidate_model_config_paths
+from hyperloom.orchestrator.trace_analysis._kernel_roofline import _candidate_model_config_paths
 
 _DIRECT = [Path("org/model/config.json")]
 
