@@ -14,10 +14,6 @@ from hyperloom.common.provenance import framework_distribution_version
 log = logging.getLogger(__name__)
 
 
-# No default remote URL by design: Recipe remote mode requires explicit ``KB_STORE_URL`` and ``KB_STORE_TOKEN``
-# configuration.
-
-
 # Default-slug constants for missing identity components.
 DEFAULT_MODEL_SLUG: Final[str] = "unknown_model"
 DEFAULT_HARDWARE_SLUG: Final[str] = "unknown_hw"
