@@ -539,6 +539,29 @@ def _ablation_panel(snapshot: dict) -> str:
     )
 
 
+def _delivery_panel(snapshot: dict) -> str:
+    """forge-finalize's outcome: the one commit, whether the review was kept, and what the checks read."""
+    delivery = snapshot.get("finalize") or {}
+    if not delivery.get("final_commit"):
+        return ""
+    gates, timing = delivery.get("gates") or {}, (delivery.get("gates") or {}).get("timing") or {}
+    rounds = (delivery.get("review") or {}).get("rounds") or []
+    left = [*rounds[-1].get("style", []), *rounds[-1].get("lint", {})] if rounds else []
+    verdict = "kept" if gates.get("kept") else f"not kept: {gates.get('reason', '')}"
+    timed = (
+        f"; timed beside the best in {timing['pairs']} pairs, best/reviewed {_fmt(timing['mean'])}"
+        if "mean" in timing
+        else ""
+    )
+    reports = [f"<pre>{escape(round_['report'])}</pre>" for round_ in rounds if round_.get("report")]
+    return (
+        f"<div class='card'><h2>Delivery</h2><div class='sub'>{escape(str(delivery['final_commit'])[:12])} is the "
+        f"campaign as one commit; its rounds stay on {escape(str(delivery.get('history_branch')))}. Review "
+        f"{escape(verdict)}{escape(timed)}; {len(left)} style or lint finding(s) left.</div>"
+        f"{''.join(reports)}<pre>{escape(str(delivery.get('diff_stat') or ''))}</pre></div>"
+    )
+
+
 def _ladder_table(ladder: dict) -> str:
     """Each kept version beside the one before it: what each round gained, main changes from passengers."""
     rows = []
@@ -642,6 +665,7 @@ def render_dashboard(snapshot: dict) -> str:
         _rounds_panel(snapshot),
         _directions_panel(snapshot),
         _ablation_panel(snapshot),
+        _delivery_panel(snapshot),
         _case_table(snapshot),
         _text_card("Latest supervisor ruling", snapshot.get("supervisor") or ""),
         _usage_table(snapshot),

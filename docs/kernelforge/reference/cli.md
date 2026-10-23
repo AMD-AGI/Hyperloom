@@ -295,6 +295,64 @@ forge-loop is still running, and it refuses the same tasks as `--paired-keep`.
 kernelforge forge-ablate --workspace <ws> --max-hours 3
 ```
 
+## forge-finalize
+
+Delivers a finished forge-loop campaign as one reviewed commit. Run it after
+`forge-ablate`: the ladder's verdict on each round is what the review works from.
+
+1. A review agent reads the whole delivered change (`git diff <base> HEAD` over
+   the kernel's sources) and the ladder. It removes what rounds within noise or
+   hurting added and no paying round needs, and brings the rest to the delivery
+   rules: no dead code, disabled experiment arms or probes; reuse over private
+   copies; comments in English, why rather than what, at most three lines per
+   block (docstrings included), no measured numbers, dates or change logs, at
+   most 4% of the added lines; no debug traces; no magic numbers. It may edit only
+   the kernel's sources; anything else it touches is undone and listed.
+2. After each session a style gate checks those rules mechanically over what the
+   change added (the base's own debt is not counted), and each `--lint` command
+   runs on the sources. Findings left go to the next session, up to
+   `--review-rounds`. A lint command that already failed on the starting kernel
+   is reported, not held against the review.
+3. If the review changed anything, the driver's correctness suite runs on it and
+   it is timed in pairs beside the campaign's best (extended to five pairs while a
+   slowdown is not ruled out). A reviewed kernel that fails, or whose one-sided 95%
+   upper bound of best/reviewed time sits below 1 minus the ablation's noise floor,
+   is discarded and the best is delivered as the campaign left it.
+4. The kept commits are squashed into one on the campaign's branch, authored and
+   committed by `--author`. Its message carries each round's verdict and gain from
+   the ladder, the review's report, the timing and what style or lint findings
+   remain. The per-round commits stay on the `forge-history` branch.
+
+Results go to `forge_experiments/finalize.json` and `finalize.md`, each review
+session's task and reply to `forge_experiments/finalize/review_N.md`, and the
+outcome to the dashboard. The command takes the workspace lock and refuses a
+campaign that kept nothing, one already delivered, or a workspace with
+uncommitted changes. A delivered campaign no longer resumes: its HEAD is not the
+best commit forge-loop recorded.
+
+| Option | Default | Meaning |
+|:--|:--|:--|
+| `--workspace <dir>` | required | Workspace of the campaign to deliver. |
+| `--author <'Name <email>'>` | the workspace's git identity | Author and committer of the delivered commit. |
+| `--lint <command>` | none | A check the sources must pass, run with their paths appended. Repeatable. |
+| `--review-rounds <n>` | `2` | Review sessions at most. |
+| `--pairs <n>` | `3` | Pairs timing the reviewed kernel beside the best. |
+| `--bench-timeout-sec <s>` | `900` | Timeout of one benchmark or correctness run. |
+| `--model <id>` | provider default | Model of the review agent. |
+| `--agent-backend <name>` | `auto` | Registered local Agent provider of the review agent. |
+| `--agent-cli <cmd>` | provider default | Provider executable path or command. |
+| `--agent-timeout-sec <s>` | `FORGE_AGENT_TIMEOUT_SEC` or 1800 | Timeout of one review session. |
+| `--agent-reasoning-effort <level>` | provider default | Reasoning effort of the review agent. |
+| `--agent-sandbox-mode <mode>` | `bypass` | Provider sandbox mode. |
+| `--agent-fallback-provider <name>` | `claude` | Provider to fall back to, or `none`. |
+| `--agent-precheck` / `--no-agent-precheck` | on | Provider preflight and capability probe. |
+| `--agent-options-json <json>` | none | Provider extension options as a JSON object. |
+
+```bash
+kernelforge forge-finalize --workspace <ws> --author "Name <name@example.com>" \
+  --lint "ruff check --no-fix" --lint "black --check"
+```
+
 ## forge-rewrite-by-flydsl
 
 Ports a source kernel (Triton, HIP, CUDA or C++) into an equivalent FlyDSL

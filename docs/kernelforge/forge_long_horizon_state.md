@@ -48,6 +48,10 @@ forge_experiments/
     audit_iter_NNN.md
   ablation.json
   ablation.md
+  finalize.json
+  finalize.md
+  finalize/
+    review_N.md
 ```
 
 `dashboard.html` is one self-contained page that reloads itself every minute, except while a message is
@@ -457,6 +461,8 @@ from the `round_cost` events. `noise_floor.json` exists only with `--paired-keep
 its earlier values. The incumbent's worktree for paired timing is `<workspace>.forge-incumbent`, beside the
 workspace rather than in it. `ablation.json` and `ablation.md` are written by `kernelforge forge-ablate` after the
 run: each round's gain beside the version before it (the ladder), each kept change's cost to the best kernel,
-the all-off arm and their noise floor. A rerun reuses every arm
+the all-off arm and their noise floor. `finalize.json` and `finalize.md` are written by `kernelforge forge-finalize`, which squashes
+the campaign into one reviewed commit and keeps its per-round commits on the `forge-history` branch; each review
+session is recorded in `finalize/review_N.md`. A rerun reuses every arm
 already settled against the same best commit. Its worktrees, `<workspace>.forge-ablate-best` and `-variant`, are
 removed when it finishes.
