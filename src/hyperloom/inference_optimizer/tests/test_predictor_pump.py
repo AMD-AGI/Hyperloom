@@ -289,10 +289,10 @@ async def test_an_explore_orchestration_copies_off_the_queue_is_credited_to_the_
 
 
 async def test_orchestrations_prompt_names_a_predictor_row_its_queued_grid_holds(coordinator):
-    assert "• primatune-c0-s0-r0-0 " in await coordinator.conversation.compose_prompt("orchestration")
+    assert "• primatune-c0-s0-r0-0 " in (await coordinator.conversation.compose_prompt("orchestration")).text
     await _delegate_explore(coordinator, [{"name": "kv-fp8", "extra_args": "--kv-cache-dtype fp8"}])
 
-    prompt = await coordinator.conversation.compose_prompt("orchestration")
+    prompt = (await coordinator.conversation.compose_prompt("orchestration")).text
     assert "• primatune-c0-s0-r0-0 " not in prompt
     assert "not to be copied again: primatune-c0-s0-r0-0" in prompt
 
