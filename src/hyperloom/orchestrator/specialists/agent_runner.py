@@ -370,6 +370,14 @@ class Liveness:
     lost_after_seconds: float = LOST_AFTER_SEC
 
 
+def _refuse_stale_done_paths(spec: AgentLaunchSpec) -> None:
+    stale = [str(path) for path in spec.done_paths if path.exists()]
+    if stale:
+        raise AgentConfigError(
+            f"{stale[0]} is left over from an earlier session and would end this one at once; consume it first"
+        )
+
+
 class LocalAgentRunner:
     """Run agent CLIs as local subprocesses of this process (the default implementation)."""
 
@@ -408,11 +416,7 @@ class LocalAgentRunner:
     async def launch(self, spec: AgentLaunchSpec) -> AgentHandle:
         _validate_spec(spec, self._wall())
         backend = _infer_backend(spec)
-        stale = [str(path) for path in spec.done_paths if path.exists()]
-        if stale:
-            raise AgentConfigError(
-                f"{stale[0]} is left over from an earlier session and would end this one at once; consume it first"
-            )
+        _refuse_stale_done_paths(spec)
         clear_wall_budget_extension(spec.task_id)  # an extension left by an earlier run must not move this deadline
         env = dict(spec.env)
         argv = list(spec.argv)
@@ -427,6 +431,26 @@ class LocalAgentRunner:
         except BaseException:
             self._release(claim)
             raise
+        session = self._supervised(spec, backend, proc, tokens, claim, version)
+        if spec.heartbeat_sink is not None:
+            try:
+                spec.heartbeat_sink(lambda: self._beat(session))
+            except Exception:
+                log.exception(
+                    "agent %s: heartbeat sink failed; MCP calls will not keep the session alive", spec.task_id
+                )
+        return AgentHandle(task_id=spec.task_id, pid=proc.pid, started_unix=session.started_unix, session=session)
+
+    def _supervised(
+        self,
+        spec: AgentLaunchSpec,
+        backend: str,
+        proc: Any,
+        tokens: tuple[str, ...],
+        claim: str | None,
+        version: str,
+    ) -> _Session:
+        """The live session of the CLI ``proc`` just started, sampled and supervised from now on."""
         started_mono = self._monotonic()
         started_unix = self._wall()
         session = _Session(
@@ -450,14 +474,7 @@ class LocalAgentRunner:
         session.sampler_task = asyncio.create_task(self._sample_loop(session), name=f"agent-sampler-{spec.task_id}")
         session.task = asyncio.create_task(self._supervise(session), name=f"agent-{spec.task_id}")
         session.task.add_done_callback(lambda task: self._on_supervision_done(session, task))
-        if spec.heartbeat_sink is not None:
-            try:
-                spec.heartbeat_sink(lambda: self._beat(session))
-            except Exception:
-                log.exception(
-                    "agent %s: heartbeat sink failed; MCP calls will not keep the session alive", spec.task_id
-                )
-        return AgentHandle(task_id=spec.task_id, pid=proc.pid, started_unix=started_unix, session=session)
+        return session
 
     async def poll(self, handle: AgentHandle) -> AgentStatus:
         session: _Session = handle.session
