@@ -80,13 +80,21 @@ class GitExperimentRepo:
     """Writes commits with plumbing and moves a branch by compare-and-swap on its ref.
 
     No working tree or index is involved, so writers on different branches never contend, and two writers racing on one
-    branch leave exactly one commit on it.
+    branch leave exactly one commit on it. ``aiter_configs`` is the aiter install a merge that unites two kernel tables
+    reads their shape key from, the image's when ``None``.
     """
 
-    def __init__(self, path: Path, blobs: BlobStore, locator: PackageLocator = locate_installed_package) -> None:
+    def __init__(
+        self,
+        path: Path,
+        blobs: BlobStore,
+        locator: PackageLocator = locate_installed_package,
+        aiter_configs: Path | None = None,
+    ) -> None:
         self._path = path.resolve()
         self._blobs = blobs
         self._locator = locator
+        self._aiter_configs = aiter_configs
         # An inherited GIT_* (GIT_DIR inside a hook or `git rebase --exec`) would aim every command at another
         # repository, so none reaches git and GIT_DIR names this one.
         inherited = {key: value for key, value in os.environ.items() if not key.upper().startswith("GIT_")}
@@ -127,7 +135,7 @@ class GitExperimentRepo:
         if parent is None:
             raise ValueError(f"{candidate} is the root commit; it carries no change")
         recipes = [await self.read_recipe(commit) for commit in (parent, resolved, onto)]
-        stored = Stored(self._stack_files, self._table_bytes, self._put_patch)
+        stored = Stored(self._stack_files, self._table_bytes, self._put_patch, self._blobs.put, self._aiter_configs)
         return await asyncio.to_thread(carry, onto, *recipes, stored)
 
     async def commit_integration(self, onto: str, delta: RecipeDelta, merged_from: Sequence[str]) -> str:

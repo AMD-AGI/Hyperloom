@@ -5,6 +5,7 @@ import difflib
 import hashlib
 from collections.abc import Collection
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
@@ -23,11 +24,30 @@ from hyperloom.contracts.recipe import (
     apply,
     diff,
 )
-from hyperloom.measure.compile import COMPONENT_LAYOUTS, LocalBlobStore, PackageBase, PatchApplyError, apply_patch_stack
+from hyperloom.measure.compile import (
+    COMPONENT_LAYOUTS,
+    LocalBlobStore,
+    PackageBase,
+    PatchApplyError,
+    apply_patch_stack,
+    kernel_rows_only,
+)
 from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH
+from hyperloom_multibranch.contracts.repo import UnitedTable
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
 from hyperloom_multibranch.repo.merge import Stored, carry, wider_table
 from hyperloom_multibranch.repo.rebase import Files
+from hyperloom_multibranch.toolbox.kernel_artifacts import mint_kernel_artifact, union_rows
+from hyperloom_multibranch.toolbox.tests.kernel_rows_cc2bf0ef import (
+    B01_HEAD,
+    B01_NEW,
+    B01_SHARED,
+    B06_NEW,
+    ENV,
+    SHARED,
+    csv_text,
+    install,
+)
 
 IMAGE = "rocm/vllm@sha256:" + "c" * 64
 VLLM = "https://github.com/vllm-project/vllm"
@@ -60,6 +80,26 @@ def _kernel(name: str, *rows: str) -> KernelArtifact:
 
 def _table(artifact: KernelArtifact) -> bytes:
     return TABLES[artifact.sha256]
+
+
+def _keep(data: bytes) -> str:
+    sha256 = hashlib.sha256(data).hexdigest()
+    TABLES[sha256] = data
+    return sha256
+
+
+def _aiter(data: bytes) -> KernelArtifact:
+    """A table the toolbox put on the aiter variable of run ``cc2bf0ef``'s tables."""
+
+    _keep(data)
+    return mint_kernel_artifact(KernelKind.GEMM, "a8w8", ENV, data)
+
+
+def _aiter_rows(data: bytes) -> KernelArtifact:
+    """Rows the toolbox put over the image's default table of that variable."""
+
+    _keep(data)
+    return mint_kernel_artifact(KernelKind.GEMM, "a8w8", ENV, data, rows_only=True)
 
 
 def _rows_only(name: str, *rows: str) -> KernelArtifact:
@@ -103,7 +143,7 @@ def test_the_candidates_settings_land_beside_what_the_head_changed():
     )
     ours = _changed(BASE, ConfigDelta(server_args="--enable-chunked-prefill", unset_envs=("VLLM_USE_V1",)))
 
-    merge = carry("i1", BASE, candidate, ours, Stored(_applies, _table, _store))
+    merge = carry("i1", BASE, candidate, ours, Stored(_applies, _table, _store, _keep))
 
     merged = apply(ours, merge.delta)
     assert [change.name for change in diff(candidate, merged).args] == ["--enable-chunked-prefill"]
@@ -115,7 +155,7 @@ def test_a_setting_both_sides_changed_takes_the_candidates_value_and_is_listed()
     candidate = _changed(BASE, ConfigDelta(server_args="--max-num-seqs 256"))
     ours = _changed(BASE, ConfigDelta(server_args="--max-num-seqs 192"))
 
-    merge = carry("i1", BASE, candidate, ours, Stored(_applies, _table, _store))
+    merge = carry("i1", BASE, candidate, ours, Stored(_applies, _table, _store, _keep))
 
     assert diff(candidate, apply(ours, merge.delta)).is_empty
     assert merge.config_conflicts == (ValueChange("--max-num-seqs", "192", "256"),)
@@ -124,7 +164,7 @@ def test_a_setting_both_sides_changed_takes_the_candidates_value_and_is_listed()
 def test_the_candidates_patches_stack_after_the_heads():
     candidate, ours = _changed(BASE, add_patches=(_patch("theirs"),)), _changed(BASE, add_patches=(_patch("ours"),))
 
-    merge = carry("i1", BASE, candidate, ours, Stored(_applies, _table, _store))
+    merge = carry("i1", BASE, candidate, ours, Stored(_applies, _table, _store, _keep))
 
     assert apply(ours, merge.delta).component("vllm").patches == (_patch("ours"), _patch("theirs"))
     assert merge.clean
@@ -134,7 +174,7 @@ def test_a_candidate_patch_that_does_not_apply_after_the_heads_is_left_out_and_r
     candidate = _changed(BASE, ConfigDelta(server_args="--max-num-seqs 256"), add_patches=(_patch("theirs"),))
     ours = _changed(BASE, add_patches=(_patch("ours"),))
 
-    merge = carry("i1", BASE, candidate, ours, Stored(_refuses("patch/vllm/theirs.patch"), _table, _store))
+    merge = carry("i1", BASE, candidate, ours, Stored(_refuses("patch/vllm/theirs.patch"), _table, _store, _keep))
 
     (conflict,) = merge.patch_conflicts
     assert (conflict.component, conflict.path, merge.clean) == ("vllm", "patch/vllm/theirs.patch", False)
@@ -152,7 +192,7 @@ def test_a_head_patch_the_candidate_breaks_is_dropped_and_reported():
     ours = _changed(base, add_patches=(_patch("built-on-it"),))
     check = _refuses("patch/vllm/built-on-it.patch", unless="patch/vllm/foundation.patch")
 
-    merge = carry("i1", base, candidate, ours, Stored(check, _table, _store))
+    merge = carry("i1", base, candidate, ours, Stored(check, _table, _store, _keep))
 
     assert [conflict.path for conflict in merge.patch_conflicts] == ["patch/vllm/built-on-it.patch"]
     assert apply(ours, merge.delta).component("vllm").patches == ()
@@ -162,7 +202,7 @@ def test_a_candidate_labelling_a_component_with_another_upstream_commit_still_me
     candidate = _changed(BASE, upstream_ref=MOVED, add_patches=(_patch("theirs"),))
     ours = _changed(BASE, upstream_ref=ELSEWHERE, add_patches=(_patch("ours"),))
 
-    merge = carry("i1", BASE, candidate, ours, Stored(_applies, _table, _store))
+    merge = carry("i1", BASE, candidate, ours, Stored(_applies, _table, _store, _keep))
 
     merged = apply(ours, merge.delta).component("vllm")
     assert merge.clean and merged is not None
@@ -174,7 +214,7 @@ def test_a_component_the_candidate_adds_carries_its_upstream_repo_and_commit():
     added = ComponentChange("triton", MOVED, TRITON, add_patches=(_patch("theirs"),))
     candidate = apply(BASE, RecipeDelta(components=(added,)))
 
-    merge = carry("i1", BASE, candidate, BASE, Stored(_applies, _table, _store))
+    merge = carry("i1", BASE, candidate, BASE, Stored(_applies, _table, _store, _keep))
 
     merged = apply(BASE, merge.delta).component("triton")
     assert merged is not None
@@ -185,7 +225,7 @@ def test_a_component_the_candidate_records_without_patching_it_leaves_the_merge_
     recorded = ComponentChange("triton", MOVED, TRITON)
     candidate = apply(BASE, RecipeDelta(components=(recorded,)))
 
-    merge = carry("i1", BASE, candidate, BASE, Stored(_applies, _table, _store))
+    merge = carry("i1", BASE, candidate, BASE, Stored(_applies, _table, _store, _keep))
 
     assert merge.delta.components == ()
     assert apply(BASE, merge.delta).digest() == BASE.digest()
@@ -194,7 +234,7 @@ def test_a_component_the_candidate_records_without_patching_it_leaves_the_merge_
 def test_a_kernel_slot_both_sides_filled_does_not_merge_and_a_new_one_lands():
     candidate = apply(BASE, RecipeDelta(add_kernels=(_kernel("theirs"),)))
 
-    assert apply(BASE, carry("i1", BASE, candidate, BASE, Stored(_applies, _table, _store)).delta).kernels == (
+    assert apply(BASE, carry("i1", BASE, candidate, BASE, Stored(_applies, _table, _store, _keep)).delta).kernels == (
         _kernel("theirs"),
     )
     with pytest.raises(RecipeError, match="both sides replaced the gemm kernel for moe"):
@@ -203,7 +243,7 @@ def test_a_kernel_slot_both_sides_filled_does_not_merge_and_a_new_one_lands():
             BASE,
             candidate,
             apply(BASE, RecipeDelta(add_kernels=(_kernel("ours"),))),
-            Stored(_applies, _table, _store),
+            Stored(_applies, _table, _store, _keep),
         )
 
 
@@ -214,7 +254,7 @@ def test_the_candidates_table_lands_when_it_holds_every_row_of_the_head_s():
     head = apply(BASE, RecipeDelta(add_kernels=(_kernel("head", "304,1,4096,4096,23.1", "304,8,4096,4096,31.0"),)))
     candidate = apply(BASE, RecipeDelta(add_kernels=(wider,)))
 
-    merge = carry("i1", BASE, candidate, head, Stored(_applies, _table, _store))
+    merge = carry("i1", BASE, candidate, head, Stored(_applies, _table, _store, _keep))
 
     assert apply(head, merge.delta).kernels == (wider,)
 
@@ -224,20 +264,20 @@ def test_a_table_the_head_already_holds_every_row_of_leaves_the_head_s_in_place(
     head = apply(BASE, RecipeDelta(add_kernels=(_kernel("head", "304,1,4096,4096,23.1", "304,8,4096,4096,31.0"),)))
     candidate = apply(BASE, RecipeDelta(add_kernels=(narrower,)))
 
-    merge = carry("i1", BASE, candidate, head, Stored(_applies, _table, _store))
+    merge = carry("i1", BASE, candidate, head, Stored(_applies, _table, _store, _keep))
 
     assert merge.delta.add_kernels == ()
     assert apply(head, merge.delta).kernels == head.kernels
 
 
 def test_two_tables_with_a_row_the_other_lacks_do_not_merge():
-    """The row neither side can prefer: the same shape timed differently, or two disjoint sets of shapes."""
+    """Tables no test can load name no variable to read their shapes by, so their rows are never united."""
 
     head = apply(BASE, RecipeDelta(add_kernels=(_kernel("head", "304,1,4096,4096,23.1"),)))
     candidate = apply(BASE, RecipeDelta(add_kernels=(_kernel("b06", "304,1,4096,4096,19.8", "304,8,4096,4096,31.0"),)))
 
     with pytest.raises(RecipeError, match="both sides replaced the gemm kernel for moe"):
-        carry("i1", BASE, candidate, head, Stored(_applies, _table, _store))
+        carry("i1", BASE, candidate, head, Stored(_applies, _table, _store, _keep))
 
 
 def test_tables_under_unlike_headers_do_not_merge():
@@ -248,7 +288,7 @@ def test_tables_under_unlike_headers_do_not_merge():
     TABLES[other.sha256] = b"cu_num,M,N,K,gfx,us\n304,1,4096,4096,gfx950,23.1\n"
 
     with pytest.raises(RecipeError, match="both sides replaced the gemm kernel for moe"):
-        carry("i1", BASE, apply(BASE, RecipeDelta(add_kernels=(other,))), head, Stored(_applies, _table, _store))
+        carry("i1", BASE, apply(BASE, RecipeDelta(add_kernels=(other,))), head, Stored(_applies, _table, _store, _keep))
 
 
 def test_wider_table_names_the_artifact_that_serves_both_or_none():
@@ -272,7 +312,57 @@ def test_rows_put_over_the_image_s_default_table_are_never_the_narrower_side():
 
     assert wider_table(tuned, head.kernels[0], _table) is None
     with pytest.raises(RecipeError, match="both sides replaced the gemm kernel for moe"):
-        carry("i1", BASE, candidate, head, Stored(_applies, _table, _store))
+        carry("i1", BASE, candidate, head, Stored(_applies, _table, _store, _keep))
+
+
+@pytest.fixture
+def configs(tmp_path) -> Path:
+    return install(tmp_path / "image")
+
+
+def _filled(*artifacts: KernelArtifact) -> Recipe:
+    return apply(BASE, RecipeDelta(add_kernels=artifacts))
+
+
+def test_two_tables_each_with_rows_the_other_lacks_unite_into_one_table(configs):
+    """Shapes only one side tuned, and shared shapes tuned to one row: every row of both serves in one table."""
+
+    head, theirs = _aiter(csv_text(SHARED, B01_NEW)), _aiter(csv_text(SHARED[:3], B06_NEW))
+
+    merge = carry("i1", BASE, _filled(theirs), _filled(head), Stored(_applies, _table, _store, _keep, configs))
+
+    (united,) = merge.delta.add_kernels
+    data = union_rows(TABLES[theirs.sha256], TABLES[head.sha256], ENV, configs=configs)
+    assert (united.slot, united.sha256, TABLES[united.sha256]) == (head.slot, hashlib.sha256(data).hexdigest(), data)
+    assert united.metadata == theirs.metadata and not kernel_rows_only(united)
+    assert merge.united_tables == (UnitedTable(theirs, head, united),)
+    assert apply(_filled(head), merge.delta).kernels == (united,)
+
+
+def test_a_shape_both_sides_tuned_to_other_rows_is_refused_by_name(configs):
+    head, theirs = _aiter(csv_text(SHARED, B01_HEAD)), _aiter(csv_text(B01_SHARED, B01_NEW))
+
+    with pytest.raises(RecipeError, match="both sides replaced the gemm kernel for a8w8: 2 shapes differ: ") as caught:
+        carry("i1", BASE, _filled(theirs), _filled(head), Stored(_applies, _table, _store, _keep, configs))
+
+    assert "M=64 N=34816 K=5120" in str(caught.value) and "M=64 N=5120 K=17408" in str(caught.value)
+
+
+def test_two_rows_only_sets_unite_into_a_rows_only_set(configs):
+    head, theirs = _aiter_rows(csv_text(B01_NEW)), _aiter_rows(csv_text(B06_NEW))
+
+    merge = carry("i1", BASE, _filled(theirs), _filled(head), Stored(_applies, _table, _store, _keep, configs))
+
+    (united,) = merge.delta.add_kernels
+    data = union_rows(TABLES[head.sha256], TABLES[theirs.sha256], ENV, rows_only=(True, True), configs=configs)
+    assert kernel_rows_only(united) and TABLES[united.sha256] == data
+
+
+def test_a_rows_only_set_and_a_whole_table_are_refused(configs):
+    head, theirs = _aiter(csv_text(SHARED)), _aiter_rows(csv_text(B06_NEW))
+
+    with pytest.raises(RecipeError, match="both sides replaced the gemm kernel for a8w8: the first table is rows-only"):
+        carry("i1", BASE, _filled(theirs), _filled(head), Stored(_applies, _table, _store, _keep, configs))
 
 
 def test_a_candidate_on_another_base_image_does_not_merge():
@@ -282,7 +372,7 @@ def test_a_candidate_on_another_base_image_does_not_merge():
             BASE,
             replace(BASE, base_image_digest="rocm/vllm@sha256:" + "d" * 64),
             BASE,
-            Stored(_applies, _table, _store),
+            Stored(_applies, _table, _store, _keep),
         )
 
 
@@ -354,6 +444,27 @@ async def _merged_onto(tmp_path, head_patch: str, candidate_patch: str):
     first = await _candidate(repo, "s1", root, head_patch)
     head = await repo.commit_integration(root, (await repo.merge(first, root)).delta, (first,))
     return repo, installed, head, await repo.merge(await _candidate(repo, "s2", root, candidate_patch), head)
+
+
+async def test_the_repository_keeps_a_united_table_a_checkout_writes(tmp_path, configs):
+    blobs = LocalBlobStore(tmp_path / "blobs")
+    repo = GitExperimentRepo(tmp_path / "experiments.git", blobs, aiter_configs=configs)
+    root = await repo.init_root(BASE)
+    commits = []
+    tables = [csv_text(SHARED, B01_NEW), csv_text(SHARED[:3], B06_NEW)]
+    for branch, data in zip(("s1", "s2"), tables, strict=True):
+        blobs.put(data)
+        await repo.create_branch(branch, root)
+        commits.append(await repo.commit(branch, root, _filled(_aiter(data)), branch))
+    head = await repo.commit_integration(root, (await repo.merge(commits[0], root)).delta, commits[:1])
+
+    merge = await repo.merge(commits[1], head)
+
+    (united,) = merge.united_tables
+    merged = await repo.commit_integration(head, merge.delta, commits[1:])
+    await repo.checkout(merged, tmp_path / "checkout")
+    assert (await repo.read_recipe(merged)).kernels == (united.table,)
+    assert (tmp_path / "checkout" / united.table.ref).read_bytes() == union_rows(*tables, ENV, configs=configs)
 
 
 async def test_a_patch_whose_context_the_head_moved_is_rebased_onto_it(tmp_path):

@@ -6,8 +6,8 @@
 The change is what the candidate's recipe changed from its parent's. A server argument or environment variable both
 sides changed takes the candidate's value and is listed; a kernel slot both sides filled is decided by the two tables
 when one holds every row of the other, since a target loads one table and the wider one serves every shape the
-narrower did, and refused when neither does. A component travels only for the patches it gains or loses, with its
-upstream commit where
+narrower did, and otherwise takes a new table of both tables' rows, refused when a shape is in both with other rows.
+A component travels only for the patches it gains or loses, with its upstream commit where
 those patches create a component the other side lacks: every component is built from the installed package of the
 session's fixed base image, so a recipe's upstream pin is provenance no merge can act on, and a component the
 candidate records without patching it changes nothing a test would build. The merged patch stacks are applied to the
@@ -18,8 +18,9 @@ files it touches, and is a conflict only where a line is changed by both sides.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Collection, Iterable
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 
 from hyperloom.contracts.recipe import (
     ComponentChange,
@@ -36,9 +37,15 @@ from hyperloom.contracts.recipe import (
     apply,
     diff,
 )
-from hyperloom.measure.compile import PatchApplyError, kernel_rows_only
-from hyperloom_multibranch.contracts.repo import PatchConflict, RebasedPatch, RepoMerge
+from hyperloom.measure.compile import KernelLoadError, PatchApplyError, kernel_load_env, kernel_rows_only
+from hyperloom_multibranch.contracts.repo import PatchConflict, RebasedPatch, RepoMerge, UnitedTable
 from hyperloom_multibranch.repo.rebase import Files, merge_files, patch_between
+from hyperloom_multibranch.toolbox.kernel_artifacts import (
+    KernelRowsConflict,
+    KernelRowsError,
+    mint_kernel_artifact,
+    union_rows,
+)
 
 #: Applies a component's patch stack to the installed package, and returns every file a patch of it touches and each of
 #: the given paths as the stack leaves them; raises ``PatchApplyError`` when a patch does not apply.
@@ -47,16 +54,31 @@ StackFiles = Callable[[ComponentPatches, Collection[str]], Files]
 TableBytes = Callable[[KernelArtifact], bytes]
 #: Keeps a patch file of a component, as the experiment repository's ``store_patch`` does.
 PatchStore = Callable[[str, str], PatchRef]
+#: Keeps a kernel table's bytes in the session's blob store, as the toolbox's ``put_kernel_artifact`` does.
+TableStore = Callable[[bytes], str]
+#: How many conflicting shapes a refusal names.
+_NAMED_SHAPES = 8
 
 
 @dataclass(frozen=True)
 class Stored:
     """What a merge consults beyond the three recipes: the installed packages a patch stack has to apply to, the bytes
-    behind a kernel artifact, and the store a rebased patch is kept in."""
+    behind a kernel artifact, and the stores a rebased patch and a united table are kept in. ``aiter_configs`` is the
+    aiter install a union reads a table's shape key from, the image's when ``None``."""
 
     stack_files: StackFiles
     kernel_table: TableBytes
     store_patch: PatchStore
+    store_table: TableStore
+    aiter_configs: Path | None = None
+
+
+@dataclass(frozen=True)
+class _Kernels:
+    """The kernel artifacts a merge carries, and the slots among them it fills with a union of both sides' tables."""
+
+    added: tuple[KernelArtifact, ...]
+    united: tuple[UnitedTable, ...]
 
 
 @dataclass(frozen=True)
@@ -73,10 +95,11 @@ def carry(onto: str, base: Recipe, candidate: Recipe, ours: Recipe, stored: Stor
     change = diff(base, candidate)
     if change.base_image_changed:
         raise RecipeError("the candidate changes the base image, which a session keeps")
+    kernels = _added_kernels(base, candidate, ours, stored)
     delta = RecipeDelta(
         config=_config(change),
         components=_components(base, candidate, ours),
-        add_kernels=_added_kernels(base, candidate, ours, stored.kernel_table),
+        add_kernels=kernels.added,
         remove_kernels=_removed_kernels(base, candidate, ours),
     )
     merged = apply(ours, delta)
@@ -91,6 +114,7 @@ def carry(onto: str, base: Recipe, candidate: Recipe, ours: Recipe, stored: Stor
         _config_conflicts(change, diff(base, ours)),
         settled.conflicts,
         settled.rebased,
+        kernels.united,
     )
 
 
@@ -133,14 +157,24 @@ def _component_change(name: str, base: Recipe, candidate: Recipe, ours: Recipe) 
     return ComponentChange(name, add_patches=added, remove_patches=removed)
 
 
-def _added_kernels(base: Recipe, candidate: Recipe, ours: Recipe, table: TableBytes) -> tuple[KernelArtifact, ...]:
-    added = [artifact for artifact in candidate.kernels if artifact not in base.kernels]
-    carried = [
-        artifact
-        for artifact in added
-        if _takes_slot(artifact, _in_slot(base, artifact.slot), _in_slot(ours, artifact.slot), table)
-    ]
-    return tuple(artifact for artifact in carried if artifact not in ours.kernels)
+def _added_kernels(base: Recipe, candidate: Recipe, ours: Recipe, stored: Stored) -> _Kernels:
+    """Each artifact the candidate added, in the slot it fills: it lands where no other side moved the slot, the wider
+    of two tables when one holds every row of the other, and a union of both tables' rows otherwise."""
+    carried, united = [], []
+    for artifact in (artifact for artifact in candidate.kernels if artifact not in base.kernels):
+        current = _in_slot(ours, artifact.slot)
+        if current is None or current in (_in_slot(base, artifact.slot), artifact):
+            carried.append(artifact)
+            continue
+        wider = wider_table(artifact, current, stored.kernel_table)
+        if wider is None:
+            wider = _united(artifact, current, stored)
+            united.append(UnitedTable(artifact, current, wider))
+        carried.append(wider)
+    return _Kernels(
+        tuple(artifact for artifact in carried if artifact not in ours.kernels),
+        tuple(union for union in united if union.table not in ours.kernels),
+    )
 
 
 def _removed_kernels(base: Recipe, candidate: Recipe, ours: Recipe) -> tuple[str, ...]:
@@ -177,19 +211,32 @@ def wider_table(wanted: KernelArtifact, current: KernelArtifact, table: TableByt
     return None
 
 
-def _takes_slot(
-    wanted: KernelArtifact, was: KernelArtifact | None, current: KernelArtifact | None, table: TableBytes
-) -> bool:
-    """Whether ``wanted`` lands in the slot ``current`` holds: it does when no other side moved the slot, and when its
-    table is the wider of the two. Two tables neither of which holds the other are refused, as are unlike headers.
-    """
+def _united(theirs: KernelArtifact, ours: KernelArtifact, stored: Stored) -> KernelArtifact:
+    """The rows of both tables as one table of their slot, kept in the blob store; refused when a shape is in both with
+    other rows, when the two do not load through one variable, and when they are not one kind of table."""
 
-    if current is None or current in (was, wanted):
-        return True
-    wider = wider_table(wanted, current, table)
-    if wider is None:
-        raise _both_moved(wanted.slot)
-    return wider == wanted
+    try:
+        env, other = kernel_load_env(theirs), kernel_load_env(ours)
+        flags = kernel_rows_only(theirs), kernel_rows_only(ours)
+    except KernelLoadError as error:
+        raise _both_moved(theirs.slot, str(error)) from error
+    if env != other:
+        raise _both_moved(theirs.slot, f"one table loads through {env}, the other through {other}")
+    tables = stored.kernel_table(theirs), stored.kernel_table(ours)
+    try:
+        data = union_rows(*tables, env, rows_only=flags, configs=stored.aiter_configs)
+    except KernelRowsConflict as error:
+        raise _both_moved(theirs.slot, f"{len(error.shapes)} shapes differ: {_shapes(error.shapes)}") from error
+    except KernelRowsError as error:
+        raise _both_moved(theirs.slot, str(error)) from error
+    united = mint_kernel_artifact(theirs.kind, theirs.target, env, data, rows_only=flags[0])
+    stored.store_table(data)
+    return united
+
+
+def _shapes(shapes: Sequence[Mapping[str, str]]) -> str:
+    named = "; ".join(" ".join(f"{name}={value}" for name, value in shape.items()) for shape in shapes[:_NAMED_SHAPES])
+    return named + (f"; and {len(shapes) - _NAMED_SHAPES} more" if len(shapes) > _NAMED_SHAPES else "")
 
 
 def _holds(wider: bytes, narrower: bytes) -> bool:
@@ -207,9 +254,9 @@ def _table(data: bytes) -> tuple[bytes, frozenset[bytes]]:
     return header.strip(), frozenset(line for line in body if line.strip())
 
 
-def _both_moved(slot: tuple[KernelKind, str]) -> RecipeError:
+def _both_moved(slot: tuple[KernelKind, str], reason: str = "") -> RecipeError:
     kind, target = slot
-    return RecipeError(f"both sides replaced the {kind.value} kernel for {target}")
+    return RecipeError(f"both sides replaced the {kind.value} kernel for {target}" + (f": {reason}" if reason else ""))
 
 
 def _settle(
@@ -291,4 +338,4 @@ def _without(delta: RecipeDelta, settled: _Settled) -> RecipeDelta:
     return replace(delta, components=tuple(changes))
 
 
-__all__ = ["PatchStore", "StackFiles", "Stored", "TableBytes", "carry", "wider_table"]
+__all__ = ["PatchStore", "StackFiles", "Stored", "TableBytes", "TableStore", "carry", "wider_table"]
