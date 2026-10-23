@@ -33,13 +33,15 @@ also in force).
 from __future__ import annotations
 
 import os
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Literal
 
 __all__ = [
     "COUNTING_VISIBLE_DEVICE_VARS",
     "GPU_MASK_ENV_NAMES",
     "HIP_LEVEL_VARS",
     "ROCR_LEVEL_VARS",
+    "RocmSmiProbe",
     "VISIBLE_DEVICE_VARS",
     "detect_gpu_count",
     "effective_mask_tokens",
@@ -47,6 +49,7 @@ __all__ = [
     "is_rocr_level",
     "mask_tokens",
     "parse_device_list",
+    "probe_rocm_smi_gpus",
 ]
 
 #: ROCr-level masks: these slice the device set and renumber it ``0..N-1``.
@@ -195,6 +198,52 @@ def hip_mask_within_rocr(env: Any) -> str | None:
     return ",".join(str(index) for index in range(len(visible)))
 
 
+@dataclass(frozen=True)
+class RocmSmiProbe:
+    """Outcome of one ``rocm-smi --showid`` call.
+
+    Attributes:
+        count: Distinct GPU indices listed; 0 when the probe could not run.
+        failure: ``"unavailable"`` when ``rocm-smi`` could not be executed,
+            ``"failed"`` when it exited non-zero, ``None`` when it ran.
+    """
+
+    count: int = 0
+    failure: Literal["unavailable", "failed"] | None = None
+
+
+def probe_rocm_smi_gpus() -> RocmSmiProbe:
+    """Count the GPUs ``rocm-smi --showid`` lists, keeping "could not probe" apart from "zero GPUs".
+
+    ``rocm-smi --showid`` prints several ``GPU[<index>]`` lines per device, so
+    the count is over distinct indices.
+
+    Returns:
+        The count, or the reason ``rocm-smi`` could not be read.
+    """
+    import subprocess
+
+    try:
+        proc = subprocess.run(
+            ["rocm-smi", "--showid"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return RocmSmiProbe(failure="unavailable")
+    if proc.returncode != 0:
+        return RocmSmiProbe(failure="failed")
+    indices: set[str] = set()
+    for line in (proc.stdout or "").splitlines():
+        stripped = line.strip()
+        if stripped.startswith("GPU["):
+            idx, _, _ = stripped[4:].partition("]")
+            if idx:
+                indices.add(idx)
+    return RocmSmiProbe(count=len(indices))
+
+
 def detect_gpu_count() -> int:
     """Best-effort visible-GPU count: env masks first, then ``rocm-smi``; 0 when nothing can be probed.
 
@@ -220,27 +269,7 @@ def detect_gpu_count() -> int:
         ids = [tok for tok in raw.split(",") if tok.strip() != ""]
         if ids:
             return len(ids)
-    import subprocess
-
-    try:
-        proc = subprocess.run(
-            ["rocm-smi", "--showid"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-    except (FileNotFoundError, OSError, ValueError, subprocess.TimeoutExpired):
-        return 0
-    if proc.returncode != 0:
-        return 0
-    indices: set[str] = set()
-    for line in (proc.stdout or "").splitlines():
-        stripped = line.strip()
-        if stripped.startswith("GPU["):
-            idx, _, _ = stripped[4:].partition("]")
-            if idx:
-                indices.add(idx)
-    return len(indices)
+    return probe_rocm_smi_gpus().count
 
 
 def parse_device_list(raw: Any) -> list[int]:

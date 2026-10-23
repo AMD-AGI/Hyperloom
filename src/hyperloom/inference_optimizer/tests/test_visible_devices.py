@@ -12,6 +12,8 @@ added to one cannot silently miss the other.
 
 from __future__ import annotations
 
+import subprocess
+
 import pytest
 
 from hyperloom.common.visible_devices import (
@@ -19,12 +21,14 @@ from hyperloom.common.visible_devices import (
     GPU_MASK_ENV_NAMES,
     HIP_LEVEL_VARS,
     ROCR_LEVEL_VARS,
+    RocmSmiProbe,
     VISIBLE_DEVICE_VARS,
     _UNCOUNTED_VISIBLE_DEVICE_VARS,
     effective_mask_tokens,
     is_rocr_level,
     mask_tokens,
     parse_device_list,
+    probe_rocm_smi_gpus,
 )
 
 
@@ -127,3 +131,43 @@ def test_parse_device_list_agrees_with_effective_tokens() -> None:
         tokens = effective_mask_tokens(raw)
         assert len(ids) <= len(tokens)
         assert ids == [int(t) for t in tokens if t.lstrip("-").isdigit()]
+
+
+# --------------------------------------------------------------------------- #
+# probe_rocm_smi_gpus keeps "could not probe" apart from "zero GPUs"
+# --------------------------------------------------------------------------- #
+
+
+class _SmiProc:
+    def __init__(self, returncode: int = 0, stdout: str = "") -> None:
+        self.returncode = returncode
+        self.stdout = stdout
+
+
+def test_probe_rocm_smi_counts_distinct_gpu_indices(monkeypatch: pytest.MonkeyPatch) -> None:
+    stdout = "GPU[0]\t\t: Device Name: x\nGPU[0]\t\t: Device ID: y\nGPU[1]\t\t: Device Name: x\nnoise\n"
+    monkeypatch.setattr(subprocess, "run", lambda *_a, **_k: _SmiProc(0, stdout))
+
+    assert probe_rocm_smi_gpus() == RocmSmiProbe(count=2, failure=None)
+
+
+def test_probe_rocm_smi_zero_gpus_is_not_a_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(subprocess, "run", lambda *_a, **_k: _SmiProc(0, ""))
+
+    assert probe_rocm_smi_gpus() == RocmSmiProbe(count=0, failure=None)
+
+
+@pytest.mark.parametrize("exc", [FileNotFoundError, PermissionError, subprocess.TimeoutExpired("rocm-smi", 5)])
+def test_probe_rocm_smi_reports_unavailable_when_it_cannot_run(monkeypatch: pytest.MonkeyPatch, exc) -> None:
+    def _raise(*_a, **_k):
+        raise exc
+
+    monkeypatch.setattr(subprocess, "run", _raise)
+
+    assert probe_rocm_smi_gpus() == RocmSmiProbe(count=0, failure="unavailable")
+
+
+def test_probe_rocm_smi_reports_failed_on_nonzero_exit(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(subprocess, "run", lambda *_a, **_k: _SmiProc(1, "GPU[0]\n"))
+
+    assert probe_rocm_smi_gpus() == RocmSmiProbe(count=0, failure="failed")
