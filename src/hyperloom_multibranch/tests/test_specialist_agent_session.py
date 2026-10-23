@@ -23,8 +23,10 @@ from hyperloom_multibranch.contracts.toolbox import SpecialistGrant
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.tests.factories import intent, request, result
 from hyperloom_multibranch.specialist.agent_session import (
+    CLI_SESSION_FILE,
     IDLE_TURNS,
     NUDGE_WAITS_S,
+    RESUME_CONTEXT_MAX,
     SPECIALIST_SESSION_S,
     WAITED_END,
     AgentCommand,
@@ -61,7 +63,8 @@ def _text(line: str) -> str:
 
 
 class _Runner:
-    """Launches nothing: launch ``n`` runs until the test ends it with ``end(n, status, seconds)``; ``sent`` holds
+    """Launches nothing: launch ``n`` runs until the test ends it with ``end(n, status, seconds)``, and keeps that
+    status as a real runner does; ``states`` holds the conversation record each launch found; ``sent`` holds
     the text of every message sent to a running CLI, ``beats`` counts the beats its session gave."""
 
     def __init__(self, clock: _Clock) -> None:
@@ -70,6 +73,8 @@ class _Runner:
         self.sent: list[str] = []
         self.beats = 0
         self.exits_before_send: dict[int, tuple[AgentStatus, float]] = {}
+        self.states: list[dict | None] = []
+        self.done: dict[int, AgentStatus] = {}
 
     def end(self, n: int, status: AgentStatus, seconds: float) -> None:
         self.ends[n] = (status, seconds)
@@ -77,6 +82,8 @@ class _Runner:
     async def launch(self, spec):
         self.specs.append(spec)
         self.prompts.append(_text((spec.workspace / "prompt.md").read_text()))
+        state = spec.workspace / CLI_SESSION_FILE
+        self.states.append(json.loads(state.read_text()) if state.exists() else None)
         spec.heartbeat_sink(self._beat)
         return AgentHandle(spec.task_id, FIRST_PID + len(self.specs), self.clock.now)
 
@@ -94,15 +101,20 @@ class _Runner:
         pass
 
     async def poll(self, handle):
-        ended = self.ends.pop(handle.pid - FIRST_PID, None)
+        n = handle.pid - FIRST_PID
+        if n in self.done:
+            return self.done[n]
+        ended = self.ends.pop(n, None)
         if ended is None:
             return AgentStatus("running", None, None)
         self.clock.now += ended[1]
+        self.done[n] = ended[0]
         return ended[0]
 
     async def cancel(self, handle):
         self.cancelled.append(handle.pid - FIRST_PID)
-        self.ends.setdefault(handle.pid - FIRST_PID, (AgentStatus("exited", -9, None), 0.0))
+        if handle.pid - FIRST_PID not in self.done:
+            self.ends.setdefault(handle.pid - FIRST_PID, (AgentStatus("exited", -9, None), 0.0))
 
     async def collect(self, handle):
         self.collected.append(handle.pid - FIRST_PID)
@@ -610,3 +622,225 @@ async def test_a_real_session_feeds_its_cli_the_prompt_and_the_mcp_service(tmp_p
     seen = json.loads((rig.workspace / "seen.json").read_text())
     assert seen["prompt"].startswith("Startup brief:\nleads: fp8 KV cache")
     assert (seen["mcp_config"], seen["token"]) == (True, "token-of-s1")
+
+
+_INIT = {"type": "system", "subtype": "init", "session_id": "from-the-cli"}
+CRASHED = AgentStatus("exited", 1, None, error="API Error: 529 overloaded")
+
+
+def _call(context: int) -> dict:
+    usage = {"input_tokens": 10, "cache_read_input_tokens": context - 10, "output_tokens": 5}
+    return {"type": "assistant", "message": {"id": f"m{context}", "model": "claude-sonnet-5-5", "usage": usage}}
+
+
+def _flag(argv, flag: str) -> str | None:
+    return argv[argv.index(flag) + 1] if flag in argv else None
+
+
+async def _crash_after_a_turn(rig, session, n: int, status=CRASHED, *rows) -> SessionCrashed:
+    """Run ``session`` until its launch ``n`` ended a turn, then end that launch with ``status``."""
+    running = asyncio.create_task(session.run())
+    await _until(lambda: len(rig.runner.specs) == n, f"launch {n}")
+    beats = rig.runner.beats
+    _end_turn(rig, _INIT, *(rows or (_call(50_000),)))
+    await _until(lambda: rig.runner.beats > beats, "the turn to end")
+    rig.runner.end(n, status, 3600.0)
+    with pytest.raises(SessionCrashed) as raised:
+        await asyncio.wait_for(running, 1)
+    return raised.value
+
+
+async def _next_launch(rig, n: int) -> tuple[AgentSession, asyncio.Task]:
+    session = rig.session()
+    running = asyncio.create_task(session.run())
+    await _until(lambda: len(rig.runner.specs) == n, f"launch {n}")
+    return session, running
+
+
+async def test_a_fresh_launch_names_its_conversation_and_writes_it_down_before_the_cli_starts(rig):
+    session, running = await _next_launch(rig, 1)
+    await session.stop()
+    await asyncio.wait_for(running, 1)
+
+    argv, state = rig.runner.specs[0].argv, rig.runner.states[0]
+    assert _flag(argv, "--session-id") == state["session_id"] and "--resume" not in argv
+    assert state["resumable"] is False and state["turns_done"] == 0 and state["head"] == rig.root
+    assert (rig.workspace / CLI_SESSION_FILE).stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.parametrize("status", [CRASHED, LOST], ids=["error-exit", "lost"])
+async def test_a_crashed_cli_is_resumed_by_the_next_run_with_what_arrived_while_it_was_down(rig, status):
+    await rig.toolbox_notebook.write_request(request("r1", intent(BRANCH, rig.root)))
+    crashed = await _crash_after_a_turn(rig, rig.session(), 1, status)
+    await rig.toolbox_notebook.write_result(result("r1"))
+    (rig.worktree.path / "half-done.txt").write_text("an edit the CLI made before it crashed")
+
+    session, running = await _next_launch(rig, 2)
+    await session.stop()
+    await asyncio.wait_for(running, 1)
+
+    assert crashed.resumable
+    first, resumed = rig.runner.specs
+    assert _flag(resumed.argv, "--resume") == _flag(first.argv, "--session-id")
+    assert "--session-id" not in resumed.argv
+    message = rig.runner.prompts[1]
+    assert "Startup brief" not in message and "result r1" in message
+    assert ("exited 1" if status is CRASHED else "lost") in message and "as you left it" in message
+    assert (rig.worktree.path / "half-done.txt").exists()
+
+
+async def test_a_resume_after_the_branch_head_moved_resets_the_worktree_and_says_so(rig, monkeypatch):
+    await _crash_after_a_turn(rig, rig.session(), 1)
+    monkeypatch.setattr(rig.worktree, "head", lambda: "an-older-head")
+
+    session, running = await _next_launch(rig, 2)
+    await session.stop()
+    await asyncio.wait_for(running, 1)
+
+    assert "--resume" in rig.runner.specs[1].argv
+    assert f"reset to your branch head {rig.root}" in rig.runner.prompts[1]
+
+
+async def test_an_idle_end_is_followed_by_a_fresh_conversation(rig):
+    session = rig.session(nudge_waits_s=NO_WAITS)
+    running = asyncio.create_task(session.run())
+    await _until(lambda: len(rig.runner.specs) == 1, "the launch")
+    for nudged in range(1, IDLE_TURNS):
+        _end_turn(rig, _INIT)
+        await _until(lambda n=nudged: len(rig.runner.sent) == n, f"nudge {nudged}")
+    _end_turn(rig)
+    with pytest.raises(SessionIdle):
+        await asyncio.wait_for(running, 1)
+
+    session, running = await _next_launch(rig, 2)
+    await session.stop()
+    await asyncio.wait_for(running, 1)
+
+    first, second = (spec.argv for spec in rig.runner.specs)
+    assert "--resume" not in second and _flag(second, "--session-id") != _flag(first, "--session-id")
+    assert rig.runner.prompts[1].startswith("Startup brief")
+
+
+async def test_a_session_that_ended_well_is_followed_by_a_fresh_conversation(rig):
+    session, running = await _next_launch(rig, 1)
+    _end_turn(rig, _INIT, _call(50_000))
+    await _until(lambda: rig.runner.beats > 0, "the turn to end")
+    rig.runner.end(1, EXITED_WELL, 3600.0)
+    await _until(lambda: len(rig.runner.specs) == 2, "the next launch")
+    await session.stop()
+    await asyncio.wait_for(running, 1)
+
+    first, second = (spec.argv for spec in rig.runner.specs)
+    assert "--resume" not in second and _flag(second, "--session-id") != _flag(first, "--session-id")
+
+
+_TOO_LONG = {"type": "result", "subtype": "success", "is_error": True, "result": "Prompt is too long"}
+
+
+@pytest.mark.parametrize(
+    "rows",
+    [(_call(RESUME_CONTEXT_MAX),), (_call(50_000), _TOO_LONG)],
+    ids=["past-the-context-cap", "prompt-too-long"],
+)
+async def test_a_crash_with_a_full_context_starts_fresh(rig, rows):
+    crashed = await _crash_after_a_turn(rig, rig.session(), 1, CRASHED, *rows)
+
+    session, running = await _next_launch(rig, 2)
+    await session.stop()
+    await asyncio.wait_for(running, 1)
+
+    assert not crashed.resumable
+    assert "--resume" not in rig.runner.specs[1].argv and rig.runner.prompts[1].startswith("Startup brief")
+
+
+async def test_a_crash_before_any_turn_ended_or_soon_after_a_clean_exit_starts_fresh(rig):
+    session, running = await _next_launch(rig, 1)
+    rig.runner.end(1, CRASHED, 3600.0)
+    with pytest.raises(SessionCrashed) as before_a_turn:
+        await asyncio.wait_for(running, 1)
+    session, running = await _next_launch(rig, 2)
+    _end_turn(rig, _INIT, _call(50_000))
+    await _until(lambda: rig.runner.beats > 0, "the turn to end")
+    rig.runner.end(2, EXITED_WELL, 30.0)
+    with pytest.raises(SessionCrashed) as too_soon:
+        await asyncio.wait_for(running, 1)
+
+    assert not before_a_turn.value.resumable and not too_soon.value.resumable
+    session, running = await _next_launch(rig, 3)
+    await session.stop()
+    await asyncio.wait_for(running, 1)
+    assert "--resume" not in rig.runner.specs[2].argv
+
+
+async def test_a_resume_the_cli_refuses_at_once_falls_back_to_a_fresh_session_in_the_same_run(rig):
+    await _crash_after_a_turn(rig, rig.session(), 1)
+    session = rig.session()
+    running = asyncio.create_task(session.run())
+    await _until(lambda: len(rig.runner.specs) == 2, "the resume")
+
+    refused = {"type": "result", "subtype": "error_during_execution", "is_error": True, "num_turns": 0}
+    (rig.workspace / "process.log").write_text(json.dumps(refused) + "\n")
+    rig.runner.end(2, AgentStatus("exited", 1, None), 0.5)
+    await _until(lambda: len(rig.runner.specs) == 3, "a fresh launch")
+    await session.stop()
+    await asyncio.wait_for(running, 1)
+
+    first, resumed, fresh = (spec.argv for spec in rig.runner.specs)
+    assert _flag(resumed, "--resume") == _flag(first, "--session-id") != _flag(fresh, "--session-id")
+    assert "--resume" not in fresh and rig.runner.prompts[2].startswith("Startup brief")
+    notices = [record.entry.content for record in await rig.notebook.branch_log(BRANCH)]
+    assert any(notice.startswith(NOTICE) and "a fresh session starts" in notice for notice in notices)
+
+
+async def test_a_resumed_cli_that_crashes_before_finishing_a_turn_is_not_resumed_again(rig):
+    await _crash_after_a_turn(rig, rig.session(), 1)
+    session, running = await _next_launch(rig, 2)
+    (rig.workspace / "process.log").write_text(json.dumps(_INIT) + "\n")
+    rig.runner.end(2, CRASHED, 3600.0)
+    with pytest.raises(SessionCrashed) as again:
+        await asyncio.wait_for(running, 1)
+
+    session, running = await _next_launch(rig, 3)
+    await session.stop()
+    await asyncio.wait_for(running, 1)
+
+    assert "--resume" in rig.runner.specs[1].argv and not again.value.resumable
+    assert "--resume" not in rig.runner.specs[2].argv and "--session-id" in rig.runner.specs[2].argv
+
+
+async def test_a_resumed_cli_that_finished_a_turn_may_be_resumed_again(rig):
+    await _crash_after_a_turn(rig, rig.session(), 1)
+    again = await _crash_after_a_turn(rig, rig.session(), 2)
+
+    assert again.resumable and "--resume" in rig.runner.specs[1].argv
+
+
+@pytest.mark.parametrize(
+    "stored",
+    ["{not json", json.dumps({"session_id": "a1"}), json.dumps({"session_id": 7, "resumable": True}), None],
+    ids=["not-json", "missing-fields", "wrong-types", "missing-after-a-launch"],
+)
+async def test_a_conversation_state_that_cannot_be_read_starts_fresh_with_a_warning(rig, caplog, stored):
+    rig.workspace.mkdir(parents=True)
+    (rig.workspace / "process.log").write_text(json.dumps(_INIT) + "\n")
+    if stored is not None:
+        (rig.workspace / CLI_SESSION_FILE).write_text(stored)
+
+    session, running = await _next_launch(rig, 1)
+    await session.stop()
+    await asyncio.wait_for(running, 1)
+
+    assert "--session-id" in rig.runner.specs[0].argv and "--resume" not in rig.runner.specs[0].argv
+    assert "a fresh session starts" in caplog.text
+
+
+async def test_codex_never_resumes(rig):
+    session = rig.session(command=AgentCommand("codex", "codex"))
+    running = asyncio.create_task(session.run())
+    await _until(lambda: len(rig.runner.specs) == 1, "the launch")
+    rig.runner.end(1, CRASHED, 3600.0)
+    with pytest.raises(SessionCrashed) as crashed:
+        await asyncio.wait_for(running, 1)
+
+    assert not crashed.value.resumable and not (rig.workspace / CLI_SESSION_FILE).exists()
+    assert "--session-id" not in rig.runner.specs[0].argv

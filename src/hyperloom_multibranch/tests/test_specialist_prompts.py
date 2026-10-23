@@ -243,6 +243,19 @@ def test_the_wake_and_nudge_messages_say_what_arrived_or_that_nothing_did():
     assert "decides when your branch stops" not in nudge
 
 
+def test_a_resumed_cli_hears_why_it_stopped_its_worktree_and_what_arrived_meanwhile():
+    item = InboxItem(InboxKind.RESULT, "s1", "r7", "r7 has its result", 0.0)
+    notice = _record(9, "the specialist crashed")
+
+    kept = prompts.resume_message(prompts.Resume("the agent CLI exited 1", "c3", "/wt/s1", kept=True), [item], [notice])
+    reset = prompts.resume_message(prompts.Resume("the session was lost", "c4", "/wt/s1", kept=False), [], [])
+
+    assert "the agent CLI exited 1" in kept and "same conversation" in kept
+    assert "/wt/s1 is as you left it" in kept and "- result r7: r7 has its result" in kept and "[e9]" in kept
+    assert "reset to your branch head c4" in reset and "uncommitted edits were dropped" in reset
+    assert "Nothing arrived for your branch" in reset
+
+
 def test_the_fast_path_direction_proves_a_path_ran_and_leaves_untuned_gemms_to_gemm_tuning():
     (direction,) = [text for text in DIRECTIONS if text.startswith("Fast path checks:")]
 

@@ -649,3 +649,16 @@ async def _equal(count, expected: int) -> bool:
 
 async def _any_notice(session: _Session, text: str) -> bool:
     return any(text in notice for notice in await session.notices())
+
+
+async def test_a_crash_notice_says_whether_the_conversation_is_resumed(session):
+    runs = _Runs(errors=(SessionCrashed("the agent CLI exited 1", resumable=True), RuntimeError("boom")))
+    runtime = session.runtime(runs)
+
+    await runtime.start(BRANCH, await session.repo.head(BRANCH))
+    await _until(lambda: _true(len(runs.started) == 3), "both restarts")
+
+    restarted = [notice for notice in await session.notices() if "is restarted" in notice]
+    assert ["resuming its conversation" in n for n in restarted] == [True, False]
+    assert "with a fresh session" in restarted[1]
+    await runtime.stop(BRANCH)

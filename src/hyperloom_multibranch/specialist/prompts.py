@@ -11,7 +11,8 @@ launch prompt opens with the repair a repair branch was opened for, the branch's
 the session's) and the startup brief, right after the role, then
 the branch, its head, K and the branch's latest memory, so a new session goes on where the last one stopped. A
 session whose turn ended is woken by :func:`wake_message`, with what its inbox and the runtime's notices brought, or
-by :func:`nudge_message` when nothing came and it has nothing running.
+by :func:`nudge_message` when nothing came and it has nothing running. A CLI restarted on its crashed conversation
+is told by :func:`resume_message` why it stopped, where its worktree stands and what arrived while it was down.
 :func:`prompt_versions` names the text of all of them for the session's manifest fingerprint.
 """
 
@@ -20,6 +21,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 from hyperloom.orchestrator.prompts.specialist_prompt_builder import BASH_KILL_SAFETY_PREAMBLE
@@ -70,6 +72,18 @@ direction and write a patch, a fused or tuned kernel, or a port of a PR the imag
 direction is done on this head, take another of the session's directions. If no candidate clears the bar, buy the \
 number first: profile, log the dispatch path, or break down a flat result. Turns that end with nothing to test stop \
 your branch."""
+_RESUMED = """\
+Your CLI stopped ({reason}) and was restarted on the same conversation: go on from where you stopped.
+{worktree}
+Claims you held may have lapsed meanwhile; a tool that refuses one says so.
+{arrived}"""
+_KEPT = "Your worktree {worktree} is as you left it, at your branch head {head}, uncommitted edits included."
+_RESET = (
+    "Your branch head moved while you were down: your worktree {worktree} was reset to your branch head {head}, and "
+    "its uncommitted edits were dropped."
+)
+_ARRIVED = "While you were down, this arrived for your branch:\n{items}"
+_NOTHING_ARRIVED = "Nothing arrived for your branch while you were down."
 _LAUNCH = (
     _REPAIR,
     _DIRECTION,
@@ -82,6 +96,11 @@ _LAUNCH = (
     _WAKE,
     _WAKE_ITEM,
     _NUDGE,
+    _RESUMED,
+    _KEPT,
+    _RESET,
+    _ARRIVED,
+    _NOTHING_ARRIVED,
     str(RECENT_ENTRIES),
     str(ENTRY_CHARS),
     *DIRECTIONS,
@@ -379,9 +398,31 @@ def launch_prompt(
 
 def wake_message(items: Sequence[InboxItem], notices: Sequence[BranchLogRecord]) -> str:
     """The message that wakes a specialist whose turn ended: what its inbox and the runtime's notices brought since."""
+    return _WAKE.format(items=_arrivals(items, notices))
+
+
+@dataclass(frozen=True)
+class Resume:
+    """Where a crashed CLI's conversation goes on: why it stopped, and the head its worktree is at, ``kept`` as the
+    CLI left it or reset to that head."""
+
+    reason: str
+    head: str
+    worktree: str
+    kept: bool
+
+
+def resume_message(resume: Resume, items: Sequence[InboxItem], notices: Sequence[BranchLogRecord]) -> str:
+    """The first message of a CLI restarted on its crashed conversation, in place of a launch prompt."""
+    worktree = (_KEPT if resume.kept else _RESET).format(worktree=resume.worktree, head=resume.head)
+    arrived = _ARRIVED.format(items=_arrivals(items, notices)) if items or notices else _NOTHING_ARRIVED
+    return _RESUMED.format(reason=resume.reason, worktree=worktree, arrived=arrived)
+
+
+def _arrivals(items: Sequence[InboxItem], notices: Sequence[BranchLogRecord]) -> str:
     lines = [_WAKE_ITEM.format(kind=item.kind.value, pointer=item.pointer, summary=item.summary) for item in items]
     lines += [_entry(record) for record in notices]
-    return _WAKE.format(items="\n".join(lines))
+    return "\n".join(lines)
 
 
 def nudge_message() -> str:
@@ -438,9 +479,11 @@ __all__ = [
     "ENTRY_CHARS",
     "RECENT_ENTRIES",
     "VERSION_HEX",
+    "Resume",
     "launch_prompt",
     "nudge_message",
     "prompt_versions",
+    "resume_message",
     "role_prompt",
     "wake_message",
 ]

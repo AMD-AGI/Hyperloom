@@ -4,7 +4,7 @@
 """A specialist backed by a model: agent CLI sessions launched through the AI work socket, one after another for as
 long as its branch runs.
 
-Every session starts at the branch head, with the worktree synced to it and a launch prompt built from the brief,
+Every fresh session starts at the branch head, with the worktree synced to it and a launch prompt built from the brief,
 rebuilt at that head when the setup can, and the branch log. A Claude CLI keeps its stdin open and lives across turns:
 when a turn ends, the session waits, keeping its heartbeat, until something arrives for the branch (an inbox item or a
 runtime notice) and sends it to the CLI as the next message, so the model goes on with its whole conversation. A turn
@@ -21,6 +21,15 @@ session. The session's process registry adopts every process the socket starts, 
 when this stop cannot. The spend of each turn, its logged tokens at the gateway's rates, is written to the branch's
 notebook when the turn ends and when the launch is collected, however it ended. The CLI streams of earlier launches
 stay in the workspace, numbered in launch order beside ``process.log``, which holds the current launch's only.
+
+A Claude session runs under a conversation id it is given at launch, written with what a resume needs to
+``cli_session.json`` in the workspace before the CLI starts and updated at each turn's end. A Claude CLI that exits with
+an error or is lost after its conversation finished a turn is resumed by the next run: ``--resume`` on that
+conversation, told what arrived since and whether its worktree was kept, which it is while the branch head did not move.
+An idle or a clean end, a conversation past ``RESUME_CONTEXT_MAX`` or one the model refused as too long, and a resumed
+CLI that crashes again before finishing a turn are followed by a fresh session. A resume the CLI refuses at once is
+followed by a fresh session in the same run, with a notice and no crash. A conversation record that cannot be read
+means a fresh session and a warning.
 """
 
 from __future__ import annotations
@@ -29,9 +38,11 @@ import asyncio
 import contextlib
 import json
 import logging
+import os
 import time
+import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass, field, fields, replace
+from dataclasses import asdict, dataclass, field, fields, replace
 from pathlib import Path
 from typing import Protocol
 
@@ -49,15 +60,22 @@ from hyperloom.orchestrator.specialists.agent_runner import (
     InteractiveAgentRunner,
     McpEndpoint,
 )
+from hyperloom_multibranch.contracts.branch_log import BranchLogEntry, BranchLogType
 from hyperloom_multibranch.contracts.llm_prices import TokenCounts
 from hyperloom_multibranch.contracts.notebook.interfaces import BranchLogStore, Inbox, UsageSink
-from hyperloom_multibranch.contracts.notebook.records import InboxItem, LlmUsage, NotebookSnapshot, TestRecord
+from hyperloom_multibranch.contracts.notebook.records import (
+    BranchLogRecord,
+    InboxItem,
+    LlmUsage,
+    NotebookSnapshot,
+    TestRecord,
+)
 from hyperloom_multibranch.contracts.notebook.vocab import InboxKind, UsageSource
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import SCOPE_SPECIALIST, SpecialistGrant, SpecialistTokens
 from hyperloom_multibranch.specialist.judging import NOTICE
 from hyperloom_multibranch.specialist.llm_usage import launch_cost, launch_usage
-from hyperloom_multibranch.specialist.prompts import launch_prompt, nudge_message, wake_message
+from hyperloom_multibranch.specialist.prompts import Resume, launch_prompt, nudge_message, resume_message, wake_message
 from hyperloom_multibranch.specialist.runtime import SessionCrashed, SessionIdle, SessionStart
 from hyperloom_multibranch.specialist.tools import sync_to_head
 from hyperloom_multibranch.specialist.worktree import BranchWorktree
@@ -84,11 +102,16 @@ _SILENT, _WORKED = 2, 1
 SPECIALIST_LOST_AFTER_S = 600.0
 #: How a launch that ended early to wait for its branch's test ended, as the next launch is told.
 WAITED_END = "its model ended its turn to wait for a test, which has its result now"
-PROMPT_FILE, ROLE_FILE, DONE_FILE, HEARTBEAT_FILE = (
+#: A conversation whose last call read this many tokens is not resumed: about 60% of the 1M-token window of the
+#: sessions' Claude model, past the 73k to 231k the branches of a 12-hour session peaked at, so a resume never
+#: starts close to the window and rewriting the whole conversation to the cache stays cheaper than a fresh briefing.
+RESUME_CONTEXT_MAX = 600_000
+PROMPT_FILE, ROLE_FILE, DONE_FILE, HEARTBEAT_FILE, CLI_SESSION_FILE = (
     "prompt.md",
     "system_prompt.md",
     "specialist_done.json",
     "heartbeat.json",
+    "cli_session.json",
 )
 _RUNNING = "running"
 
@@ -133,8 +156,9 @@ class AgentCommand:
         """Whether one CLI takes message after message on its stdin; codex exec reads one prompt and ends."""
         return self.backend == AGENT_BACKEND_CLAUDE
 
-    def argv(self, role_file: Path, worktree: Path) -> tuple[str, ...]:
-        """The command line; the socket adds the MCP configuration."""
+    def argv(self, role_file: Path, worktree: Path, *, session_id: str = "", resume_id: str = "") -> tuple[str, ...]:
+        """The command line; the socket adds the MCP configuration. A Claude CLI starts the conversation
+        ``session_id``, or goes on with ``resume_id``; codex takes neither."""
         if self.backend == AGENT_BACKEND_CODEX:
             model = ("-m", self.model) if self.model else ()
             bypass = "--dangerously-bypass-approvals-and-sandbox"
@@ -152,6 +176,7 @@ class AgentCommand:
             )
         model = ("--model", self.model) if self.model else ()
         role = ("--system-prompt-file", str(role_file))
+        conversation = ("--resume", resume_id) if resume_id else ("--session-id", session_id) if session_id else ()
         return (
             self.executable,
             "--print",
@@ -167,6 +192,7 @@ class AgentCommand:
             *model,
             "--add-dir",
             str(worktree),
+            *conversation,
             *self.extra_args,
         )
 
@@ -273,39 +299,174 @@ class AgentSession:
         :class:`SessionIdle` when its model kept finding nothing to test.
 
         ``last_end`` is how the previous session of this run ended, empty until one ended well."""
-        branch, worktree, clock = self._start.branch, self._place.worktree, self._setup.clock
+        launch = await self._resumed()
+        if launch is not None:
+            ended = await self._run_launch(grant, launch)
+            if ended is None:
+                return last_end
+            if not self._refused(launch, ended):
+                return await self._ended(launch, ended, last_end)
+            await self._resume_refused(launch, ended)
+        launch = await self._fresh(last_end)
+        ended = await self._run_launch(grant, launch)
+        return last_end if ended is None else await self._ended(launch, ended, last_end)
+
+    async def _fresh(self, last_end: str) -> _Launch:
+        branch, worktree = self._start.branch, self._place.worktree
         head = await sync_to_head(self._setup.repo, branch, worktree)
         recent = await self._place.notebook.branch_log(branch)
         start = await self._briefed(head)
         prompt = launch_prompt(start, head=head, worktree=str(worktree.path), recent=recent, last_end=last_end)
-        spec = await asyncio.to_thread(self._spec, grant, prompt)
-        started = clock()
+        seen = _Seen((await self._place.notebook.poll(branch)).cursor, len(recent))
+        if not self._setup.command.interactive:
+            return _Launch(prompt, seen)
+        cli = _CliState(str(uuid.uuid4()), head=head, seen_cursor=seen.cursor, logged=seen.logged)
+        return _Launch(prompt, seen, cli)
+
+    async def _resumed(self) -> _Launch | None:
+        """The launch that goes on with the conversation the last run's CLI crashed in; ``None`` when there is none.
+
+        The worktree is kept as the CLI left it while the branch head did not move, so its uncommitted edits survive;
+        the CLI is shown what arrived from where the conversation's last finished turn had seen up to."""
+        if not self._setup.command.interactive:
+            return None
+        cli = await asyncio.to_thread(self._read_cli)
+        if cli is None or not cli.resumable:
+            return None
+        branch, worktree = self._start.branch, self._place.worktree
+        head = await self._setup.repo.head(branch)
+        kept = await asyncio.to_thread(worktree.head) == head
+        if not kept:
+            head = await sync_to_head(self._setup.repo, branch, worktree)
+        seen = _Seen(cli.seen_cursor, cli.logged)
+        items, notices = await self._arrived(seen)
+        prompt = resume_message(Resume(cli.reason, head, str(worktree.path), kept=kept), items, notices)
+        cli = replace(
+            cli,
+            resumable=False,
+            resumes_in_row=cli.resumes_in_row + 1,
+            head=head,
+            seen_cursor=seen.cursor,
+            logged=seen.logged,
+        )
+        return _Launch(prompt, seen, cli, resumed=True)
+
+    async def _run_launch(self, grant: SpecialistGrant, launch: _Launch) -> _Ended | None:
+        """Run ``launch``'s CLI to its end; ``None`` when the session was stopped meanwhile."""
+        if launch.cli is not None:
+            await asyncio.to_thread(self._write_cli, launch.cli)
+        spec = await asyncio.to_thread(self._spec, grant, launch)
+        clock, started = self._setup.clock, self._setup.clock()
         self._recorded = {}
+        if self._setup.command.interactive:
+            launch.turns = TurnLog(self._place.workspace / PROCESS_LOG)
         handle = self._handle = await self._setup.runner.launch(spec)
         self._adopt(handle, spec.argv)
-        status = await self._converse(handle, len(recent))
+        status = await self._converse(handle, launch)
         if self._handle is not handle:
-            return last_end
+            return None
         self._handle = None
         await self._finish(handle, cancel=status.state != "exited")
-        seconds = clock() - started
         if self._stopped.is_set():
-            return last_end
+            return None
+        if launch.turns is not None:
+            await asyncio.to_thread(launch.turns.ended)
+        return _Ended(status, clock() - started)
+
+    async def _ended(self, launch: _Launch, ended: _Ended, last_end: str) -> str:
+        status, seconds = ended.status, ended.seconds
         failed = status.state == STATE_LOST or bool(status.returncode and not status.timed_out)
         if not failed and seconds < self._setup.min_session_seconds and await self._tests_in_flight():
             await self._until_tests_land()
             return WAITED_END
         if failed or seconds < self._setup.min_session_seconds:
-            raise SessionCrashed(_describe(status, seconds), lost=status.state == STATE_LOST, worked=bool(last_end))
+            reason = _describe(status, seconds)
+            resumable = failed and await self._keep_for_resume(launch, reason)
+            lost = status.state == STATE_LOST
+            raise SessionCrashed(reason, lost=lost, worked=bool(last_end), resumable=resumable)
         return "it reached its deadline" if status.timed_out else "its model finished its turn"
 
-    async def _converse(self, handle: AgentHandle, logged: int) -> AgentStatus:
+    async def _keep_for_resume(self, launch: _Launch, reason: str) -> bool:
+        """Mark the crashed launch's conversation for the next run to resume, when it is worth going on with: it
+        finished a turn since its last resume, and its context has room left."""
+        cli, turns = launch.cli, launch.turns
+        if cli is None or turns is None:
+            return False
+        resumable = (
+            cli.turns_done >= 1
+            and cli.resumes_in_row < 1
+            and cli.context_tokens < RESUME_CONTEXT_MAX
+            and not turns.context_exceeded
+        )
+        launch.cli = replace(cli, resumable=resumable, reason=reason)
+        await asyncio.to_thread(self._write_cli, launch.cli)
+        return resumable
+
+    def _refused(self, launch: _Launch, ended: _Ended) -> bool:
+        """Whether the CLI refused to resume the conversation at once: no conversation by that id, a record it
+        cannot load, a version that does not know the flag. It ends within seconds, before or without a turn."""
+        turns = launch.turns
+        if turns is None or ended.seconds >= self._setup.min_session_seconds:
+            return False
+        return not turns.inited or turns.refused
+
+    async def _resume_refused(self, launch: _Launch, ended: _Ended) -> None:
+        branch = self._start.branch
+        session_id = launch.cli.session_id if launch.cli is not None else ""
+        why = _describe(ended.status, ended.seconds)
+        logger.warning(
+            "the CLI of %s could not resume conversation %s (%s); a fresh session starts", branch, session_id, why
+        )
+        content = f"{NOTICE} resuming the specialist's conversation failed ({why}); a fresh session starts"
+        await self._place.notebook.append_branch_log(BranchLogEntry(branch, BranchLogType.RESULT, content))
+
+    def _read_cli(self) -> _CliState | None:
+        """The conversation the workspace's last launch ran; ``None``, with a warning, when its record is missing
+        after a launch or cannot be read."""
+        workspace = self._place.workspace
+        path = workspace / CLI_SESSION_FILE
+        try:
+            return _CliState.parse(json.loads(path.read_text(encoding="utf-8")))
+        except FileNotFoundError:
+            if (workspace / PROCESS_LOG).exists():
+                logger.warning("%s has no conversation record after a launch; a fresh session starts", workspace)
+            return None
+        except (OSError, ValueError, TypeError):
+            logger.warning("the conversation record %s cannot be read; a fresh session starts", path, exc_info=True)
+            return None
+
+    def _write_cli(self, cli: _CliState) -> None:
+        """Replace the conversation record whole, readable by its owner only: it names a conversation to resume."""
+        path = self._place.workspace / CLI_SESSION_FILE
+        path.parent.mkdir(parents=True, exist_ok=True)
+        partial = path.with_name(f".{path.name}.partial")
+        descriptor = os.open(partial, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(asdict(cli), handle)
+        partial.replace(path)
+
+    async def _turn_finished(self, launch: _Launch) -> None:
+        """Record in the conversation record a turn that finished without an error, and what the CLI had seen."""
+        cli, turns = launch.cli, launch.turns
+        if cli is None or turns is None or not turns.succeeded:
+            return
+        launch.cli = replace(
+            cli,
+            turns_done=cli.turns_done + 1,
+            resumes_in_row=0,
+            context_tokens=turns.context,
+            head=await self._setup.repo.head(self._start.branch),
+            seen_cursor=launch.seen.cursor,
+            logged=launch.seen.logged,
+        )
+        await asyncio.to_thread(self._write_cli, launch.cli)
+
+    async def _converse(self, handle: AgentHandle, launch: _Launch) -> AgentStatus:
         """Wait for the CLI to end; an interactive one whose turn ended is sent what arrived since, or a nudge, and
         raises :class:`SessionIdle` once its turns ended idle as many times in a row as it has patiences.
 
-        ``logged`` is how many branch-log entries the launch prompt was built from: notices past it are new."""
-        turns = TurnLog(self._place.workspace / PROCESS_LOG) if self._setup.command.interactive else None
-        seen = _Seen((await self._place.notebook.poll(self._start.branch)).cursor, logged)
+        ``launch.seen`` is what the launch's first message showed: what arrives past it is new."""
+        turns, seen = launch.turns, launch.seen
         waits = self._setup.nudge_waits_s
         sent = strain = quiet = 0
         while True:
@@ -313,6 +474,7 @@ class AgentSession:
             if status is not None:
                 return status
             await self._record_cost()
+            await self._turn_finished(launch)
             message = await self._wake(handle, seen, waits[min(strain // _SILENT, len(waits) - 1)])
             if message is None:
                 return await self._setup.runner.poll(handle)
@@ -333,22 +495,19 @@ class AgentSession:
         """Wait, beating the heartbeat, until something arrives for the branch, and move ``seen`` past it. An empty
         message asks for a nudge: nothing arrived while nothing of the branch ran for ``patience`` seconds. ``None``
         once the session is stopped or the CLI ended."""
-        notebook, branch, loop = self._place.notebook, self._start.branch, asyncio.get_running_loop()
+        loop = asyncio.get_running_loop()
         quiet_since: float | None = None
         while not self._stopped.is_set() and (await self._setup.runner.poll(handle)).state == _RUNNING:
             if self._beat is not None:
                 self._beat()
-            page = await notebook.poll(branch, seen.cursor)
-            log = await notebook.branch_log(branch)
-            notices = [record for record in log[seen.logged :] if record.entry.content.startswith(NOTICE)]
-            seen.cursor, seen.logged = page.cursor, len(log)
+            items, notices = await self._arrived(seen)
             shared = await self._shared_profiles()
             landed = [
                 _landed(record) for record in shared if record.request_id in seen.profiles and not record.in_flight
             ]
             seen.profiles = {record.request_id for record in shared if record.in_flight}
-            if page.items or notices or landed:
-                return wake_message((*page.items, *landed), notices)
+            if items or notices or landed:
+                return wake_message((*items, *landed), notices)
             if seen.profiles or await self._tests_in_flight():
                 quiet_since = None
             else:
@@ -358,6 +517,15 @@ class AgentSession:
             with contextlib.suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(self._stopped.wait(), self._setup.poll_seconds)
         return None
+
+    async def _arrived(self, seen: _Seen) -> tuple[Sequence[InboxItem], list[BranchLogRecord]]:
+        """The inbox items and the runtime's notices past ``seen``, which moves past them."""
+        notebook, branch = self._place.notebook, self._start.branch
+        page = await notebook.poll(branch, seen.cursor)
+        log = await notebook.branch_log(branch)
+        notices = [record for record in log[seen.logged :] if record.entry.content.startswith(NOTICE)]
+        seen.cursor, seen.logged = page.cursor, len(log)
+        return page.items, notices
 
     async def _branch_requests(self) -> frozenset[str]:
         """The branch's candidate tests: a profile measures no candidate, so it does not reset an idle count."""
@@ -411,7 +579,7 @@ class AgentSession:
             return self._start
         return replace(self._start, task=replace(self._start.task, brief=brief))
 
-    def _spec(self, grant: SpecialistGrant, prompt: str) -> AgentLaunchSpec:
+    def _spec(self, grant: SpecialistGrant, launch: _Launch) -> AgentLaunchSpec:
         setup, workspace, worktree = self._setup, self._place.workspace, self._place.worktree.path
         workspace.mkdir(parents=True, exist_ok=True)
         done = workspace / DONE_FILE
@@ -419,11 +587,14 @@ class AgentSession:
         _keep_process_log(workspace)
         role_file = workspace / ROLE_FILE
         role_file.write_bytes(setup.role.encode())
-        (workspace / PROMPT_FILE).write_bytes(setup.command.stdin(setup.role, prompt).encode())
+        (workspace / PROMPT_FILE).write_bytes(setup.command.stdin(setup.role, launch.prompt).encode())
+        cli = launch.cli
+        session_id = cli.session_id if cli is not None else ""
+        conversation = {"resume_id": session_id} if launch.resumed else {"session_id": session_id}
         return AgentLaunchSpec(
             task_id=self._start.branch,
             workspace=workspace,
-            argv=setup.command.argv(role_file, worktree),
+            argv=setup.command.argv(role_file, worktree, **conversation),
             env={**setup.env, grant.token_env: grant.token},
             cwd=worktree,
             gpus=0,
@@ -501,6 +672,53 @@ class _Seen:
     profiles: set[str] = field(default_factory=set)
 
 
+@dataclass(frozen=True)
+class _CliState:
+    """A Claude CLI's conversation as ``cli_session.json`` keeps it: its id; the turns it finished without an error,
+    and the tokens its last call read; the resumes since it last finished one; the branch head and the inbox cursor
+    and branch-log entries it had seen at its last finished turn; and whether the next run resumes it, with why it
+    crashed. ``resumable`` is set only when a launch crashed, so an idle or a clean end leaves it unset."""
+
+    session_id: str
+    turns_done: int = 0
+    context_tokens: int = 0
+    resumes_in_row: int = 0
+    head: str = ""
+    seen_cursor: str = ""
+    logged: int = 0
+    resumable: bool = False
+    reason: str = ""
+
+    @classmethod
+    def parse(cls, raw: object) -> _CliState:
+        """The record ``raw`` holds; raises :class:`ValueError` when a field is missing or of another type."""
+        if not isinstance(raw, dict) or set(raw) != {item.name for item in fields(cls)}:
+            raise ValueError(f"a conversation record has the fields of {cls.__name__}, not {raw!r}")
+        kinds = {item.name: type(item.default) for item in fields(cls) if item.name != "session_id"}
+        wrong = [name for name, kind in kinds.items() if type(raw[name]) is not kind]
+        if wrong or not isinstance(raw["session_id"], str) or not raw["session_id"]:
+            raise ValueError(f"a conversation record with fields of the wrong type: {raw!r}")
+        return cls(**raw)
+
+
+@dataclass
+class _Launch:
+    """One CLI launch: its first message, what that message showed, the conversation it runs (``None`` for codex),
+    whether it resumes that conversation, and the turns of its log once it runs."""
+
+    prompt: str
+    seen: _Seen
+    cli: _CliState | None = None
+    resumed: bool = False
+    turns: TurnLog | None = None
+
+
+@dataclass(frozen=True)
+class _Ended:
+    status: AgentStatus
+    seconds: float
+
+
 def _landed(record: TestRecord) -> InboxItem:
     request = record.request
     summary = f"the profile of your head by {request.branch} has its result; its analysis brings the op shares"
@@ -508,11 +726,17 @@ def _landed(record: TestRecord) -> InboxItem:
 
 
 class TurnLog:
-    """Counts the turns a Claude stream-json log says ended, a ``result`` row each, reading only what was appended."""
+    """Counts the turns a Claude stream-json log says ended, a ``result`` row each, reading only what was appended.
+
+    It also keeps what a resume decides on: whether the CLI said it started (``inited``), whether its last turn ended
+    without an error (``succeeded``), whether a turn erred before any model call (``refused``), whether the model
+    refused a prompt as too long (``context_exceeded``), and the tokens the last call read (``context``)."""
 
     def __init__(self, process_log: Path) -> None:
         self._path, self._offset, self._partial, self._ended = process_log, 0, b"", 0
         self._tools = self._last_tools = 0
+        self.inited = self.succeeded = self.refused = self.context_exceeded = False
+        self.context = 0
 
     def worked(self) -> bool:
         """Whether the last turn that ended called a tool."""
@@ -528,7 +752,7 @@ class TurnLog:
         self._offset += len(appended)
         *lines, self._partial = (self._partial + appended).split(b"\n")
         for line in lines:
-            if b'"result"' not in line and b'"tool_use"' not in line:
+            if not any(key in line for key in (b'"result"', b'"tool_use"', b'"init"', b'"usage"')):
                 continue
             with contextlib.suppress(json.JSONDecodeError):
                 self._read(json.loads(line))
@@ -537,13 +761,30 @@ class TurnLog:
     def _read(self, row: object) -> None:
         if not isinstance(row, dict):
             return
-        if row.get("type") == "result":
+        kind = row.get("type")
+        if kind == "system" and row.get("subtype") == "init":
+            self.inited = True
+        elif kind == "result":
             self._ended += 1
             self._last_tools, self._tools = self._tools, 0
-            return
-        content = row.get("message", {}).get("content") if row.get("type") == "assistant" else None
-        if isinstance(content, list):
-            self._tools += sum(isinstance(item, dict) and item.get("type") == "tool_use" for item in content)
+            self._result(row)
+        elif kind == "assistant" and isinstance(row.get("message"), dict):
+            message = row["message"]
+            content, usage = message.get("content"), message.get("usage")
+            if isinstance(content, list):
+                self._tools += sum(isinstance(item, dict) and item.get("type") == "tool_use" for item in content)
+            if isinstance(usage, dict):
+                read = TokenCounts.from_anthropic_usage(usage)
+                self.context = read.input + read.cache_read + read.cache_write + read.cache_write_1h
+
+    def _result(self, row: dict) -> None:
+        erred = row.get("is_error") is True or str(row.get("subtype", "")).startswith("error")
+        self.succeeded = not erred
+        self.refused = self.refused or (erred and row.get("num_turns") == 0)
+        too_long = "Prompt is too long" in str(row.get("result", "")) or "context_window" in str(
+            row.get("stop_reason", "")
+        )
+        self.context_exceeded = self.context_exceeded or (erred and too_long)
 
 
 def _less(counts: TokenCounts, earlier: TokenCounts) -> TokenCounts:
@@ -559,7 +800,9 @@ def _describe(status: AgentStatus, seconds: float) -> str:
 
 
 __all__ = [
+    "CLI_SESSION_FILE",
     "IDLE_TURNS",
+    "RESUME_CONTEXT_MAX",
     "NUDGE_WAITS_S",
     "SPECIALIST_SESSION_S",
     "MCP_SERVER",

@@ -15,7 +15,8 @@ record names done on the commit a branch starts at: a later head may open it aga
 A branch's first session is made ready once (``preflight``); one that cannot be gives the specialist up with every
 reason in a notice, and a restart does not repeat it. A session that crashes is restarted on its branch, at most
 ``MAX_RESTARTS`` times within ``RESTART_WINDOW_S``, and a lost one at most ``MAX_LOSS_RESTARTS`` times in a row with no
-session working in between: a loss takes the heartbeat timeout, so losses alone never fill the window. A session that
+session working in between: a loss takes the heartbeat timeout, so losses alone never fill the window. Whether the
+restart resumes the crashed conversation is the session's to decide; the notice only says which. A session that
 ends idle, its model finding nothing to test, is no crash: the branch gets one fresh session, briefed again at its head,
 and ``MAX_IDLE_SESSIONS`` idle sessions in a row end it, a session that submitted a test starting the count again. Then
 the specialist gives up and the scheduler stops the branch, freeing its slot for a fresh branch with its own direction.
@@ -61,12 +62,13 @@ class RuntimeNotebook(JudgeNotebook, ClaimService, Protocol):
 class SessionCrashed(RuntimeError):
     """A run of a branch's specialist ended the way no working session ends.
 
-    ``lost`` says its session lost its heartbeat; ``worked`` says an earlier session of the same run ended well.
+    ``lost`` says its session lost its heartbeat; ``worked`` says an earlier session of the same run ended well;
+    ``resumable`` says the next run goes on with the crashed session's conversation.
     """
 
-    def __init__(self, reason: str, *, lost: bool = False, worked: bool = False) -> None:
+    def __init__(self, reason: str, *, lost: bool = False, worked: bool = False, resumable: bool = False) -> None:
         super().__init__(reason)
-        self.lost, self.worked = lost, worked
+        self.lost, self.worked, self.resumable = lost, worked, resumable
 
 
 class SessionIdle(RuntimeError):
@@ -272,7 +274,7 @@ class SpecialistRuntime:
                 elif losses > MAX_LOSS_RESTARTS:
                     why = f"lost {losses} sessions in a row, none working in between"
                 else:
-                    await _notice(state, f"the specialist crashed ({error!r}) and is restarted on this branch")
+                    await _notice(state, _restarted(error))
                     continue
                 state.session, state.gave_up = None, True
                 await _notice(state, f"the specialist {why} ({error!r}); it is not restarted")
@@ -367,6 +369,12 @@ class SpecialistRuntime:
 
 async def _notice(state: _Branch, content: str) -> None:
     await state.notebook.append_branch_log(BranchLogEntry(state.name, BranchLogType.RESULT, f"{NOTICE} {content}"))
+
+
+def _restarted(error: Exception) -> str:
+    resumed = isinstance(error, SessionCrashed) and error.resumable
+    how = "resuming its conversation" if resumed else "with a fresh session"
+    return f"the specialist crashed ({error!r}) and is restarted on this branch, {how}"
 
 
 def _log_failure(task: asyncio.Task[None]) -> None:
