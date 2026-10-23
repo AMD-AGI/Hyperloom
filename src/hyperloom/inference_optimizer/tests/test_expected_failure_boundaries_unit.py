@@ -62,8 +62,10 @@ def break_import(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch):
-    for name in ("HYPERLOOM_SGLANG_SHAPE_MODE", "HYPERLOOM_RESOLVED_FRAMEWORK", "HYPERLOOM_RESOLVED_FRAMEWORK_PYTHON"):
+    for name in ("HYPERLOOM_RESOLVED_FRAMEWORK", "HYPERLOOM_RESOLVED_FRAMEWORK_PYTHON"):
         monkeypatch.delenv(name, raising=False)
+    # The pod scripts import their shipped siblings by name.
+    monkeypatch.syspath_prepend(str(_SCRIPTS))
 
 
 def _patcher(function: str, *args):
@@ -112,7 +114,7 @@ def test_apply_reports_a_failing_sglang_import(tmp_path, break_import, error, me
     break_import("sglang", error)
 
     result = _load_script("apply_tracelens_patch_multinode")._apply_on_pod(
-        tracelens_root=str(tmp_path), tracelens_internal_root=str(tmp_path), sglang_version_pin=None
+        tracelens_root=str(tmp_path), sglang_version_pin=None
     )
 
     assert (result["status"], result["error"]) == ("failed", message)

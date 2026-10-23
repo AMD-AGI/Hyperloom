@@ -28,13 +28,6 @@ def filter_forward_env(env: dict[str, str]) -> dict[str, str]:
     return out
 
 
-def assert_env_key_shapes(env: dict[str, str]) -> None:
-    """Raise ValueError when any env key is not a valid POSIX identifier."""
-    bad = [str(k) for k in env if not valid_env_key(str(k))]
-    if bad:
-        raise ValueError(f"invalid SSH env key names: {bad!r}")
-
-
 def assert_forward_env_keys(env: dict[str, str]) -> None:
     """Raise ValueError when any env key is not allowed for SSH forwarding."""
     bad = [str(k) for k in env if not is_forward_env_key_allowed(str(k))]

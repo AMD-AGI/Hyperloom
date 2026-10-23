@@ -6,13 +6,10 @@
 from __future__ import annotations
 
 import argparse
-import logging
 import os
 import sys
 
 from ..multi_node import TopologyHandoffError, topology_file_overlay
-
-log = logging.getLogger(__name__)
 
 
 def _topology_file_overlay() -> dict[str, str] | None:

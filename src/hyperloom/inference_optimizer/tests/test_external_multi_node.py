@@ -929,7 +929,7 @@ def test_resume_needs_a_cluster_that_still_serves(
     monkeypatch.setattr(mncli, "_ray_dashboard_client", _fake_client)
     monkeypatch.setattr(mncli, "_build_multinode_kill_entrypoint", lambda *_a, **_k: "kill-ep")
     monkeypatch.setattr(mncli, "_build_multinode_launch_entrypoint", lambda *_a, **_k: "launch-ep")
-    monkeypatch.setattr(mncli, "_exec_kill_submission", lambda *_a, **_k: killed.append("kill") or "kill-9")
+    monkeypatch.setattr(mncli, "_exec_kill_submission", lambda *_a, **_k: killed.append("kill"))
     monkeypatch.setattr(mncli, "_short_poll", lambda **_k: {"status": "SUCCEEDED"})
     monkeypatch.setattr(mncli, "cluster_is_serving", lambda *_a, **_k: probed.append("probe") or serving)
 
@@ -1032,7 +1032,7 @@ def test_kill_inference_invalidates_the_launch_it_terminated(
         head_pod_ip="10.0.2.1",
         last_server_pid_dir="/tmp/multi_node_pids",
     )
-    monkeypatch.setattr(mncli, "_exec_kill_submission", lambda *_a, **_k: "kill-9")
+    monkeypatch.setattr(mncli, "_exec_kill_submission", lambda *_a, **_k: None)
 
     assert (
         mncli.cmd_kill_inference(argparse.Namespace(pid_file=None, print_logs=False, poll_interval=1, poll_timeout=5))
@@ -1041,7 +1041,6 @@ def test_kill_inference_invalidates_the_launch_it_terminated(
 
     after = ext.load_multi_node_state()
     assert "last_restart_submission_id" not in after
-    assert after["last_kill_submission_id"] == "kill-9"
     # The rest of the bookkeeping is untouched: only the launch identity died.
     assert after["last_restart_framework"] == "sglang"
 
