@@ -56,10 +56,8 @@ from ..stop_attribution import (
     stopped_by_the_run_class,
     variant_budget_stop,
 )
-from ._accuracy_gate import (
-    accuracy_passed,
-    parse_eval_results,
-)
+from ._accuracy_gate import accuracy_passed
+from hyperloom.orchestrator.backends import parse_eval_results, run_grid
 from . import _framework_switch_manifest as _switch_manifest
 from hyperloom.inference_optimizer.canonical_fingerprint import workload_signature
 from ._proposal_identity import effective_fingerprint, normalize_proposal
@@ -84,7 +82,6 @@ from ._grid_runner import (
     apply_user_skip_list,
     reorder_grid_for_multi_node,
     resolve_skip_spec,
-    run_grid,
     sanitize_result_dir,
     sanitize_script_name,
     session_grid_bounds,

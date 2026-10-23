@@ -457,7 +457,7 @@ module-lines src/hyperloom/orchestrator/actions/executors/_grid_runner.py 2045
 module-lines src/hyperloom/orchestrator/actions/executors/_kv_metrics.py 1578
 module-lines src/hyperloom/orchestrator/actions/executors/_workload_envs.py 2126
 module-lines src/hyperloom/orchestrator/actions/executors/baseline.py 4048
-module-lines src/hyperloom/orchestrator/actions/executors/explore.py 1834
+module-lines src/hyperloom/orchestrator/actions/executors/explore.py 1831
 module-lines src/hyperloom/orchestrator/actions/executors/profile.py 1393
 module-lines src/hyperloom/orchestrator/actions/executors/report.py 1351
 module-lines src/hyperloom/orchestrator/actions/executors/roofline.py 1303

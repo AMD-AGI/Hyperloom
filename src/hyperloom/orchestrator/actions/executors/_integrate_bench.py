@@ -27,7 +27,8 @@ from ._accuracy_gate import (
     parse_eval_results,
     read_eval_probe,
 )
-from ._grid_runner import GridVariant, _num_gpus_for_config, run_grid, sanitize_result_dir, sanitize_script_name
+from hyperloom.orchestrator.backends import run_grid
+from ._grid_runner import GridVariant, _num_gpus_for_config, sanitize_result_dir, sanitize_script_name
 from ._grid_variant_filter import (
     apply_aiter_moe_pin_filter,
     apply_multi_node_invalid_variants,

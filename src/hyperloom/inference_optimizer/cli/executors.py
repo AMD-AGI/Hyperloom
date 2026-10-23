@@ -214,6 +214,11 @@ def _register_executors(
         session_dir: Optional session directory passed to executors.
         specialist_executor: Optional specialist executor to register.
     """
+    from hyperloom.orchestrator.backends import bind_backend_coordinator, ensure_gpu_backend
+
+    ensure_gpu_backend()
+    bind_backend_coordinator(coordinator)
+
     for kind, fn in _REAL_EXECUTORS_FULL.items():
         coordinator.sub.register_executor(kind, fn)
 

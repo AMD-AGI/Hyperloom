@@ -19,7 +19,8 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common.perf_metric import constraint_fields
-from ..actions.executors._grid_runner import GridVariant, run_grid
+from ..actions.executors._grid_runner import GridVariant
+from ..backends import run_grid
 from ..actions.executors._workload_envs import (
     default_baseline_config,
 )
