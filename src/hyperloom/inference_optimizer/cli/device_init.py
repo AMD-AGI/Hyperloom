@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Device-init detection for ``preflight``'s serving-framework probe: the flag, its stderr match, and the block."""
+"""Device state for ``preflight``'s serving-framework probe: the probe record, rocm-smi, and the block."""
 
 from __future__ import annotations
 
@@ -17,36 +17,6 @@ class _Probe(NamedTuple):
     verdict: bool | None
     detail: str = ""
     timed_out: bool = False
-    device_init_failed: bool = False
-
-
-# A probe that reached torch and then could not initialise a single device is not an unclear verdict: the serving
-# process dies on the same import. These are the messages torch raises when the ROCm/HIP runtime enumerates no
-# usable device (the ROCm build keeps torch's CUDA wording).
-_DEVICE_INIT_FAILURE_MARKERS = (
-    "no cuda gpus are available",
-    "no rocm-capable device is detected",
-    "cuda driver initialization failed",
-    "invalid device ordinal",
-)
-
-
-def _is_device_init_failure(stderr: str | None) -> bool:
-    """Whether a probe's stderr shows torch finding no usable GPU."""
-    text = (stderr or "").lower()
-    return any(marker in text for marker in _DEVICE_INIT_FAILURE_MARKERS)
-
-
-def _unclear_probe(detail: str, stderr: str | None) -> _Probe:
-    """An unclear verdict, flagged when its traceback shows torch initialising zero devices."""
-    return _Probe(None, detail, device_init_failed=_is_device_init_failure(stderr))
-
-
-def _preferred_unclear(kept: tuple[str, _Probe] | None, candidate: tuple[str, _Probe]) -> tuple[str, _Probe]:
-    """Rank unclear candidates: a reproduced device-init failure outranks a merely unclear probe, else the first."""
-    if candidate[1].device_init_failed and not (kept and kept[1].device_init_failed):
-        return candidate
-    return kept or candidate
 
 
 def _rocm_smi_visible_gpus() -> tuple[int | None, str | None]:
@@ -73,8 +43,8 @@ def _rocm_smi_visible_gpus() -> tuple[int | None, str | None]:
     return len(visible_indices), None
 
 
-def _device_visibility_contradiction(python_exe: str, visible: int | None) -> str:
-    """Name the rocm-smi-sees-N / torch-sees-none split, with the masks in force."""
+def _device_visibility_split(python_exe: str | None, visible: int | None) -> str:
+    """State what rocm-smi and the probe each saw, with the masks in force; draw no conclusion from the split."""
     masks = (
         ", ".join(
             f"{name}={os.environ[name]!r}"
@@ -84,23 +54,29 @@ def _device_visibility_contradiction(python_exe: str, visible: int | None) -> st
         or "no visible-device mask set"
     )
     seen = "rocm-smi could not be read" if visible is None else f"rocm-smi reports {visible} GPU(s)"
-    return f"{seen} while torch in {python_exe} initialises none; masks in force: {masks}."
+    probe = f"the probe in {python_exe} reached no verdict" if python_exe else "the probe reached no verdict"
+    return f"{seen} while {probe}; masks in force: {masks}."
 
 
-def _block_on_device_init(framework: str, python_exe: str, detail: str, visible: int | None, skip_env: str) -> NoReturn:
-    """Stop the run on a reproduced device-init failure, naming the traceback and the visibility contradiction."""
-    # Not "could not verify": the probe reproduced, in the very interpreter that will launch the server, the
-    # device-init failure the server dies on. No TP value, retry or config change repairs it, so the run stops
-    # here with the traceback instead of admitting a baseline that cannot start.
-    contradiction = _device_visibility_contradiction(python_exe, visible)
+def _block_on_unverified_build(
+    framework: str, python_exe: str | None, detail: str, visible: int | None, skip_env: str
+) -> NoReturn:
+    """Stop the run on a probe that reached no verdict, with its stderr and what rocm-smi saw."""
+    # Only a clean rc 0 says the stack behind ``framework`` works here; every other outcome -- a traceback, a
+    # signal death, a timeout -- is a classification this preflight cannot make, and the serving process imports
+    # the same stack. Stop with the evidence rather than guess which failures are harmless.
+    state = (
+        f"is importable ({python_exe}) but the ROCm probe there reached no verdict"
+        if python_exe
+        else "could not be probed on this host"
+    )
     print(
-        f"\nERROR: {framework} is importable ({python_exe}) but torch there cannot initialize any GPU."
-        f"{detail}\n\n"
-        f"{contradiction}\n"
-        "The serving process imports the same stack, so it would die the same way\n"
-        "before its port is up. This is a node or container device-access problem\n"
-        "(device files, ROCr init, visible-device masking or partitioning), not a\n"
-        "benchmark-configuration one; restore GPU access on this host, then retry.\n\n"
+        f"\nERROR: {framework} {state}.{detail}\n\n"
+        f"{_device_visibility_split(python_exe, visible)}\n"
+        "The serving process imports the same stack, so it would hit whatever the\n"
+        "probe hit, after the benchmark has already been set up. The probe stderr\n"
+        "above is the failure to fix; a timeout there means the import is slower\n"
+        "than the probe budget or wedged, not that it is healthy.\n\n"
         f"To proceed anyway, set {skip_env}=1.",
         file=sys.stderr,
     )

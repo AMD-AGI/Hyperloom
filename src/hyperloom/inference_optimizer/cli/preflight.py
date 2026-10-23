@@ -60,7 +60,7 @@ from hyperloom.common.model_paths import resolve_serving_model_path
 
 from .. import inferencex_checkout
 from .bootstrap import parse_operator_extra_env
-from .device_init import _Probe, _block_on_device_init, _preferred_unclear, _rocm_smi_visible_gpus, _unclear_probe
+from .device_init import _Probe, _block_on_unverified_build, _rocm_smi_visible_gpus
 from .server_args import validate_server_args
 
 from .credentials import (
@@ -939,11 +939,10 @@ def _probe_rocm_build(framework: str, python_exe: str) -> _Probe:
     if proc.returncode == 0:
         return _Probe(True, detail)
     # Absent torch (3) and a signal death (negative rc, which a broken ROCm stack can trigger on ``import torch``)
-    # both mean no verdict was reached -- unless the traceback shows torch initialising zero devices, which the
-    # server launch will reproduce verbatim.
+    # both mean no verdict was reached; the caller blocks on that rather than sort unclear exits into classes.
     if proc.returncode == 1:
         return _Probe(False, detail)
-    return _unclear_probe(detail, stderr)
+    return _Probe(None, detail)
 
 
 def _framework_importable(framework: str, python_exe: str) -> _Probe:
@@ -979,10 +978,12 @@ def _resolve_framework_build(framework: str, interpreters: list[str]) -> tuple[s
         probe = _probe_rocm_build(framework, python_exe)
         if probe.verdict is True:
             return python_exe, probe
-        if probe.timed_out:
-            return inconclusive or (python_exe, probe)
         if probe.verdict is None:
-            inconclusive = _preferred_unclear(inconclusive, (python_exe, probe))
+            # Every unclear probe blocks, so the first one is as good a report as any.
+            inconclusive = inconclusive or (python_exe, probe)
+            if probe.timed_out:
+                # A wedged import costs the full budget per candidate; stop the scan at the first one.
+                return inconclusive
         else:
             refuted = refuted or (python_exe, probe)
     return inconclusive or refuted or (None, missing)
@@ -1032,7 +1033,7 @@ def _check_serving_framework(args, benchmark_python: str) -> dict[str, Any]:
         raise SystemExit(2)
     # Publish the interpreter this scan resolved to, so consumers that would otherwise re-derive it from
     # installer-written host state read the probed answer instead.
-    if found and probe.verdict is not False:
+    if found and probe.verdict is True:
         os.environ[RESOLVED_FRAMEWORK_PYTHON_ENV] = found
         os.environ[RESOLVED_FRAMEWORK_ENV] = framework
     return _report_framework_probe(framework, found, probe, interpreters)
@@ -1051,34 +1052,13 @@ def _report_framework_probe(
             "target": framework,
             "detail": {"probe_interpreter": found, "rocm_verified": True},
         }
-    if found and probe.device_init_failed:
+    if probe.verdict is None or probe.timed_out:
+        # No verdict is not "probably fine": a reworded torch message, a device failure or a wedged import all
+        # land here, and only rc 0 says the stack serving will import works. Report the evidence and stop.
         visible, _skip_reason = _rocm_smi_visible_gpus()
-        _block_on_device_init(framework, found, _probe_detail_block(probe.detail), visible, SKIP_FRAMEWORK_CHECK_ENV)
-    if found and probe.verdict is None:
-        print(
-            f"Preflight: WARNING — {framework} is importable ({found}) but could not verify a ROCm build "
-            f"via {evidence}{_probe_detail_block(probe.detail)}"
+        _block_on_unverified_build(
+            framework, found, _probe_detail_block(probe.detail), visible, SKIP_FRAMEWORK_CHECK_ENV
         )
-        return {
-            "status": "warned",
-            "skip_reason": None,
-            "target": framework,
-            "message": probe.detail or "ROCm build could not be verified",
-            "detail": {"probe_interpreter": found, "rocm_verified": None},
-        }
-    if not found and probe.timed_out:
-        # A timeout proves nothing, so blocking here would fail a merely slow host.
-        print(
-            f"Preflight: WARNING — the {framework} probe timed out; proceeding without verifying it"
-            f"{_probe_detail_block(probe.detail)}"
-        )
-        return {
-            "status": "warned",
-            "skip_reason": None,
-            "target": framework,
-            "message": probe.detail or "framework probe timed out",
-            "detail": {"probe_interpreter": None, "rocm_verified": None},
-        }
     return _report_unusable_framework(framework, found, probe, interpreters)
 
 
