@@ -496,7 +496,6 @@ class TestIntegrateHandlerHonoursStateDefault:
                 "base_tput": 1000.0,
                 "config_path": "/tmp/base.yaml",
                 "extra_envs": {"AITER_CONFIG_FMOE": "/tmp/fmoe.csv"},
-                "budget_minutes": 1,
             },
             session_dir=session_dir,
         )

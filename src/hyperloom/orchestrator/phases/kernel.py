@@ -237,12 +237,6 @@ def _deduplicate_dispatch_rows(
     return list(best.values())
 
 
-def _per_tuner_budget_minutes() -> int:
-    from hyperloom.orchestrator.actions.executors._subprocess_kill import resolve_benchmark_timeouts
-
-    return max(1, int((resolve_benchmark_timeouts()[1] + 59) // 60))
-
-
 def _integrate_tput_and_gain(verdict: Mapping[str, Any]) -> tuple[float, float]:
     measurement = verdict.get("bench_result") or verdict
     tput = float(measurement.get("output_throughput", verdict.get("new_tput")) or 0.0)
@@ -2835,7 +2829,6 @@ class KernelPhase(CoordinatorCollaborator):
         candidate: dict[str, Any],
         *,
         config_path: str,
-        budget_minutes: int,
     ):
         """Re-measure the frozen GEMM entry recipe and tuned stack interleaved."""
         from ..kernel.request_handlers import integrate_handler
@@ -2869,7 +2862,6 @@ class KernelPhase(CoordinatorCollaborator):
                     # Measure, do not decide: the verdict comes from the pairs, so a per-round KEEP/REVERT here
                     # would be noise promoted to a decision.
                     "keep_threshold_pct": 100.0,
-                    "budget_minutes": budget_minutes,
                     "mode": "env_only",
                 },
                 session_dir=self.session_dir,
@@ -3277,7 +3269,7 @@ class KernelPhase(CoordinatorCollaborator):
         return ""
 
     def _gemm_integrate_payload(
-        self, tuner_name: str, test_envs: dict[str, str], *, base_tput: float, budget_minutes: int
+        self, tuner_name: str, test_envs: dict[str, str], *, base_tput: float
     ) -> dict[str, Any]:
         from hyperloom.common.model_paths import resolve_session_model_path
 
@@ -3292,7 +3284,6 @@ class KernelPhase(CoordinatorCollaborator):
             "extra_server_args": self._gemm_candidate_server_args(tuner_name),
             "extra_envs": test_envs,
             "keep_threshold_pct": 1.0,
-            "budget_minutes": budget_minutes,
             "mode": "env_only",
         }
 
@@ -3303,16 +3294,13 @@ class KernelPhase(CoordinatorCollaborator):
         jit_backup_dir: Path,
         *,
         base_tput: float,
-        budget_minutes: int,
     ) -> dict[str, Any] | None:
         # The integrate verdict, a row carrying ``fault``, or ``None`` when the run itself was stopped.
         from ..actions.executors._aiter_jit import drop_serving_so_for_envs, prepare_serving_so_for_csvs
         from ..state.kernel_decision_settings import _MAX_INTEGRATE_FAULT_ATTEMPTS
 
         tuner_name = cand["tuner"]
-        payload = self._gemm_integrate_payload(
-            tuner_name, test_envs, base_tput=base_tput, budget_minutes=budget_minutes
-        )
+        payload = self._gemm_integrate_payload(tuner_name, test_envs, base_tput=base_tput)
         # The native handler reloads both the recipe and grading anchor from disk.
         self.shared_state.save(self.session_dir)
 
@@ -3480,7 +3468,6 @@ class KernelPhase(CoordinatorCollaborator):
                 paired_reference,
                 deepcopy(self.shared_state.current_best),
                 config_path=paired_config_path,
-                budget_minutes=_per_tuner_budget_minutes(),
             )
             if self._coord.writeback.validate(
                 running_tput,
@@ -3533,7 +3520,6 @@ class KernelPhase(CoordinatorCollaborator):
             self._close_gemm_e2e_without_candidates(result)
             return
         running_tput = float(self.shared_state.current_best.get("tput") or self.shared_state.baseline_tput or 0.0)
-        budget_minutes = _per_tuner_budget_minutes()
         paired_reference = deepcopy(self.shared_state.current_best)
         paired_reference.setdefault("tput", running_tput)
         paired_config_path = str(self.shared_state.baseline_config_path or "")
@@ -3563,9 +3549,7 @@ class KernelPhase(CoordinatorCollaborator):
             # Merge with previously KEEP'd envs.
             test_envs = {**stacked_envs, **env}
             log.info("gemm E2E: validating tuner=%s env=%s (base_tput=%.1f)", tuner_name, cand["env_var"], running_tput)
-            verdict = await self._integrate_gemm_candidate(
-                cand, test_envs, jit_backup_dir, base_tput=running_tput, budget_minutes=budget_minutes
-            )
+            verdict = await self._integrate_gemm_candidate(cand, test_envs, jit_backup_dir, base_tput=running_tput)
             if verdict is None:
                 break
             if verdict.get("fault"):

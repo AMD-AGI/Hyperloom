@@ -724,7 +724,6 @@ class TestForgeGemmRuntimeConfigMerge:
             return {"status": "ok", "decision": "KEEP", "new_tput": 120.0, "gain_pct": 9.09}
 
         monkeypatch.setattr(krh_mod, "integrate_handler", _fake_integrate)
-        monkeypatch.setenv("INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC", "61")
         monkeypatch.setattr(
             phase,
             "_merge_gemm_candidate_with_runtime",
@@ -805,7 +804,6 @@ class TestForgeGemmRuntimeConfigMerge:
             }
 
         monkeypatch.setattr(krh_mod, "integrate_handler", _fake_integrate)
-        monkeypatch.setenv("INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC", "61")
         monkeypatch.setattr(
             phase,
             "_merge_gemm_candidate_with_runtime",
@@ -878,7 +876,6 @@ class TestForgeGemmRuntimeConfigMerge:
             return responses[len(calls) - 1]
 
         monkeypatch.setattr(krh_mod, "integrate_handler", _fake_integrate)
-        monkeypatch.setenv("INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC", "61")
         monkeypatch.setattr(
             phase,
             "_merge_gemm_candidate_with_runtime",
@@ -908,7 +905,6 @@ class TestForgeGemmRuntimeConfigMerge:
         assert calls[0]["base_tput"] == 110.0
         assert calls[0]["extra_server_args"] == "--moe-runner-backend aiter"
         assert calls[0]["extra_envs"] == {"AITER_CONFIG_FMOE": str(fmoe_candidate)}
-        assert calls[0]["budget_minutes"] == 2
         assert calls[1]["base_tput"] == 130.0
         assert calls[1]["extra_envs"] == {
             "AITER_CONFIG_FMOE": str(fmoe_candidate),
@@ -1536,7 +1532,7 @@ class TestKernelE2EMeasurementPromotion:
         monkeypatch.setenv("HYPERLOOM_GEMM_PAIRED_PAIRS", "invalid")
 
         with pytest.raises(EnvValueError, match="HYPERLOOM_GEMM_PAIRED_PAIRS"):
-            await KernelPhase(coord)._confirm_gemm_gain_paired({}, {}, config_path="", budget_minutes=1)
+            await KernelPhase(coord)._confirm_gemm_gain_paired({}, {}, config_path="")
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("second_keep", [False, True], ids=["keep-revert", "keep-keep"])
@@ -2157,30 +2153,6 @@ class TestValidateForgeGemmTuningE2E:
         assert len(faults) == 1
         assert faults[0]["reason"] == "integrate_fault:handler_exception"
         assert result["e2e_results"]["reverted"] == []
-
-    @pytest.mark.asyncio
-    async def test_gemm_validation_uses_fixed_benchmark_budget(self, tmp_path, monkeypatch):
-        coord = _coord(tmp_path, baseline_tput=100.0, framework="sglang")
-
-        monkeypatch.setenv("INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC", "7800")
-
-        captured: dict[str, object] = {}
-
-        async def _fake(payload, *, session_dir):
-            captured["budget"] = payload["budget_minutes"]
-            return {"decision": "KEEP", "new_tput": 150.0, "gain_pct": 50.0}
-
-        monkeypatch.setattr(krh_mod, "integrate_handler", _fake)
-
-        result = {
-            "recommended_env": {"X": "1"},
-            "extra_envs": {"X": "1"},
-            "requires_e2e_validation": True,
-            "candidates": [{"tuner": "dense", "env": {"X": "1"}, "best_micro_speedup": 1.1}],
-        }
-        await coord.phase_kernel._validate_gemm_tuning_e2e(result)
-
-        assert captured["budget"] == 130
 
     @pytest.mark.asyncio
     async def test_prepares_serving_so_before_e2e_and_drops_it_on_revert(self, tmp_path, monkeypatch):
