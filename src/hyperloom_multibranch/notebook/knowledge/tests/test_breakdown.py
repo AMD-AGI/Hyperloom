@@ -19,6 +19,8 @@ from hyperloom_multibranch.notebook.knowledge.breakdown import (
     EXPORTER_VERSION,
     FILENAME,
     SCHEMA_VERSION,
+    CloseOutcome,
+    SessionPlace,
     build_breakdown,
     write_breakdown,
 )
@@ -31,7 +33,7 @@ NO_TOKENS = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0, "cache_
 def test_the_breakdown_lays_out_the_session_tree_tests_and_measurement(snapshot: NotebookSnapshot) -> None:
     written = RemoteWriteResult("written", "", "inference:x", "sess-1", "optimized_throughput", 1041.0)
 
-    breakdown = build_breakdown(snapshot, kb_write_back=written)
+    breakdown = build_breakdown(snapshot, CloseOutcome(kb_write_back=written))
 
     assert (breakdown["schema_version"], breakdown["exporter_version"]) == (SCHEMA_VERSION, EXPORTER_VERSION)
     assert breakdown["metadata"]["session_profile"]["session_id"] == "sess-1"
@@ -70,8 +72,10 @@ def test_a_hosted_run_adds_the_session_block_and_its_records_under_the_names_the
     )
     (tmp_path / "plugs.resolved.json").write_text(json.dumps(plugs), "utf-8")
 
-    metadata = build_breakdown(snapshot, session_dir=tmp_path, environ=hosted, code_revision="38724291b")["metadata"]
-    local = build_breakdown(snapshot, environ={})["metadata"]
+    metadata = build_breakdown(snapshot, place=SessionPlace(tmp_path, environ=hosted, code_revision="38724291b"))[
+        "metadata"
+    ]
+    local = build_breakdown(snapshot, place=SessionPlace(environ={}))["metadata"]
 
     assert metadata["session"] == {
         "session_id": "sess-1",
@@ -95,8 +99,8 @@ def test_the_agent_runners_samples_give_each_specialists_record_and_the_containe
         "".join(json.dumps(row) + "\n" for row in (first, early, second, late)) + '{"kind": "spec', "utf-8"
     )
 
-    metadata = build_breakdown(snapshot, runner_dir=tmp_path, environ={})["metadata"]
-    unsampled = build_breakdown(snapshot, runner_dir=tmp_path / "elsewhere", environ={})["metadata"]
+    metadata = build_breakdown(snapshot, place=SessionPlace(runner_dir=tmp_path, environ={}))["metadata"]
+    unsampled = build_breakdown(snapshot, place=SessionPlace(runner_dir=tmp_path / "elsewhere", environ={}))["metadata"]
 
     assert (metadata["specialist_resources"], metadata["container_resources"]) == ([first, second], late)
     assert not {"specialist_resources", "container_resources"} & set(unsampled)
@@ -122,7 +126,7 @@ def test_the_close_section_names_the_commit_final_selection_chose_and_how(snapsh
     final = FinalRecipe("i1", FINAL_RECIPE, Path("files"), "output_tps")
     selection = {"candidates": ["i1", "c1"], "chosen": "i1", "reason": "the integration head held its gain"}
 
-    close = build_breakdown(snapshot, final=final, selection=selection)["close"]
+    close = build_breakdown(snapshot, CloseOutcome(final=final, selection=selection))["close"]
 
     assert close["final"] == {
         "commit_id": "i1",

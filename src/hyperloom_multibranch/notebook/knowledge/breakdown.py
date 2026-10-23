@@ -182,36 +182,51 @@ def _final(final: FinalRecipe | None) -> dict[str, object] | None:
     return {"commit_id": final.commit_id, "recipe_digest": final.recipe.digest(), "recipe": final.recipe.to_document()}
 
 
-def build_breakdown(
-    snapshot: NotebookSnapshot,
-    *,
-    final: FinalRecipe | None = None,
-    selection: Mapping[str, object] | None = None,
-    kb_write_back: RemoteWriteResult | None = None,
-    knowledge: Mapping[str, object] | None = None,
-    session_dir: Path | None = None,
-    runner_dir: Path | None = None,
-    environ: Mapping[str, str] | None = None,
-    code_revision: str | None = None,
-) -> dict[str, object]:
-    """The breakdown document of ``snapshot``, stamped with the time the snapshot was taken.
+@dataclass(frozen=True)
+class CloseOutcome:
+    """What CLOSE did, for the breakdown's ``close`` section.
 
     ``final`` is the commit final selection chose; ``selection`` is how the scheduler chose it, such as its candidates
     and their measurements, as JSON-ready data. ``knowledge`` is what CLOSE's knowledge steps did, as the
     ``rsi.session`` close reports them (``KnowledgeClose.document()``); ``close`` has it only when given.
+    """
+
+    final: FinalRecipe | None = None
+    selection: Mapping[str, object] | None = None
+    kb_write_back: RemoteWriteResult | None = None
+    knowledge: Mapping[str, object] | None = None
+
+
+@dataclass(frozen=True)
+class SessionPlace:
+    """Where the breakdown reads a session's other records, and what the session ran under.
+
     ``session_dir`` is where a hosted run's records are read from, ``runner_dir`` the agent runner's session directory,
     and ``environ`` the run's variables (the process's by default); ``code_revision`` is the source revision the
     session's manifest recorded at start, which a process that exports another run's session, such as ``final-only``,
     does not have in its environment.
     """
 
+    session_dir: Path | None = None
+    runner_dir: Path | None = None
+    environ: Mapping[str, str] | None = None
+    code_revision: str | None = None
+
+
+def build_breakdown(
+    snapshot: NotebookSnapshot, outcome: CloseOutcome | None = None, place: SessionPlace | None = None
+) -> dict[str, object]:
+    """The breakdown document of ``snapshot``, stamped with the time the snapshot was taken; ``outcome`` is what CLOSE
+    did and ``place`` where the session's other records are, each empty by default."""
+
+    outcome, place = outcome or CloseOutcome(), place or SessionPlace()
     close: dict[str, object] = {
-        "final": _final(final),
-        "selection": dict(selection or {}),
-        "kb_write_back": encode(kb_write_back),
+        "final": _final(outcome.final),
+        "selection": dict(outcome.selection or {}),
+        "kb_write_back": encode(outcome.kb_write_back),
     }
-    if knowledge is not None:
-        close["knowledge"] = dict(knowledge)
+    if outcome.knowledge is not None:
+        close["knowledge"] = dict(outcome.knowledge)
     return {
         "schema_version": SCHEMA_VERSION,
         "exporter_version": EXPORTER_VERSION,
@@ -219,9 +234,11 @@ def build_breakdown(
         "metadata": {
             "session_profile": encode(snapshot.profile),
             "manifest_fingerprints": encode(snapshot.fingerprints),
-            "session": session_metadata(snapshot, os.environ if environ is None else environ, code_revision),
-            **hosted_records(session_dir),
-            **agent_resources(runner_dir),
+            "session": session_metadata(
+                snapshot, os.environ if place.environ is None else place.environ, place.code_revision
+            ),
+            **hosted_records(place.session_dir),
+            **agent_resources(place.runner_dir),
         },
         "baseline": encode(snapshot.baseline),
         "lineage": encode(snapshot.lineage),
@@ -250,7 +267,9 @@ __all__ = [
     "HOSTED_RECORDS",
     "SCHEMA_VERSION",
     "SESSION_VARIABLES",
+    "CloseOutcome",
     "MeasurementUsage",
+    "SessionPlace",
     "agent_resources",
     "build_breakdown",
     "hosted_records",

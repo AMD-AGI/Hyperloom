@@ -18,7 +18,7 @@ from hyperloom_multibranch.contracts.notebook.peers import IntentLayer
 from hyperloom_multibranch.contracts.notebook.records import Learning, LearningRecord, NotebookSnapshot
 from hyperloom_multibranch.contracts.notebook.vocab import LearningKind
 from hyperloom_multibranch.notebook.knowledge import experience, learnings
-from hyperloom_multibranch.notebook.knowledge.breakdown import build_breakdown
+from hyperloom_multibranch.notebook.knowledge.breakdown import CloseOutcome, build_breakdown
 from hyperloom_multibranch.notebook.knowledge.tests.kb_service import experience_service
 from hyperloom_multibranch.notebook.rsi import session
 from hyperloom_multibranch.notebook.rsi.archive import ARCHIVE_ENV, ARCHIVED, NO_ARCHIVE, SKIPPED, TreeArchive
@@ -256,7 +256,7 @@ def test_the_breakdown_records_the_knowledge_steps_only_when_given(snapshot: Not
     counts = {"created": 2, "skipped": 0, "errors": 0}
     done = KnowledgeClose(CloseStep(WRITTEN, counts=counts), CloseStep(DISABLED, NO_KB), CloseStep(ARCHIVED))
 
-    close = build_breakdown(snapshot, knowledge=done.document())["close"]
+    close = build_breakdown(snapshot, CloseOutcome(knowledge=done.document()))["close"]
 
     assert close["knowledge"] == {
         "experiences": {"status": WRITTEN, "reason": "", "counts": counts},

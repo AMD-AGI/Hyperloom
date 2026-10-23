@@ -33,7 +33,12 @@ from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import QueueState
 from hyperloom_multibranch.notebook.codec import encode
 from hyperloom_multibranch.notebook.dashboard import DashboardFiles
-from hyperloom_multibranch.notebook.knowledge.breakdown import build_breakdown, write_breakdown
+from hyperloom_multibranch.notebook.knowledge.breakdown import (
+    CloseOutcome,
+    SessionPlace,
+    build_breakdown,
+    write_breakdown,
+)
 from hyperloom_multibranch.notebook.knowledge.recipe_writeback import SKIPPED, FinalRecipe, publish_final_recipe
 from hyperloom_multibranch.notebook.rsi.authoring import author_scorers
 from hyperloom_multibranch.notebook.rsi.lesson_curation import curate_lessons
@@ -173,13 +178,12 @@ class SessionExports:
         stepped = knowledge_document(knowledge, scorers, curation)
         document = build_breakdown(
             snapshot,
-            final=chosen,
-            selection=selection,
-            kb_write_back=kb_write_back,
-            knowledge=stepped,
-            session_dir=self._layout.root,
-            runner_dir=self._layout.logs,
-            code_revision=read_manifest(self._layout.manifest).code_version.git_sha or None,
+            CloseOutcome(chosen, selection, kb_write_back, stepped),
+            SessionPlace(
+                self._layout.root,
+                self._layout.logs,
+                code_revision=read_manifest(self._layout.manifest).code_version.git_sha or None,
+            ),
         )
         breakdown = write_breakdown(self._layout.reports, document)
         dashboard = await self._dashboard.write(queue)
