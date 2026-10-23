@@ -424,8 +424,11 @@ def record_settle(settlement: ActionSettlement) -> None:
     """
     if not str(settlement.task_id or ""):
         return
-    _progress.candidate_settled(str(settlement.task_id), settlement.action, str(settlement.decision or ""))
-    event = _action_event(str(settlement.task_id))
+    row = _action_row(str(settlement.task_id))
+    _progress.candidate_settled(
+        str(settlement.task_id), str((row or {}).get("action") or ""), str(settlement.decision or "")
+    )
+    event = str(row["event_id"]) if row else None
     if event is None:
         return
     sink = _sink(event)
@@ -502,21 +505,30 @@ def _open_segment(phase: str) -> tuple[str, int, float | None] | None:
     return best
 
 
-def _event_holding(section: str, field: str, value: str) -> str | None:
-    """The phase event whose ``section`` row has ``field == value``, if any."""
+def _row_holding(section: str, field: str, value: str) -> dict[str, Any] | None:
+    """The ``section`` row, with an event, that has ``field == value``, if any."""
     from .assembler import recorded_section
 
     for row in recorded_section(section):
-        if str(row.get(field) or "") == str(value):
-            event = str(row.get("event_id") or "")
-            if event:
-                return event
+        if str(row.get(field) or "") == str(value) and str(row.get("event_id") or ""):
+            return row
     return None
+
+
+def _event_holding(section: str, field: str, value: str) -> str | None:
+    """The phase event whose ``section`` row has ``field == value``, if any."""
+    row = _row_holding(section, field, value)
+    return str(row["event_id"]) if row else None
 
 
 def _action_event(task_id: str) -> str | None:
     """The phase event holding ``task_id``'s dispatch row, if one was recorded."""
     return _event_holding(SECTION_ACTION, "task_id", task_id)
+
+
+def _action_row(task_id: str) -> dict[str, Any] | None:
+    """The dispatch row of ``task_id``, if one was recorded."""
+    return _row_holding(SECTION_ACTION, "task_id", task_id)
 
 
 def _proposal_event(proposal_msg_id: str) -> str | None:

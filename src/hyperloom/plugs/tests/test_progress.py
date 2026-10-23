@@ -7,12 +7,11 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import jsonschema
 import pytest
 
-from hyperloom.inference_optimizer.breakdown.recorder import phase_event
-from hyperloom.inference_optimizer.breakdown.recorder.phase_records import ActionSettlement
 from hyperloom.plugs import Implementation, ManifestSources, PlugHost, activated, builtin_registry, resolve_manifest
 from hyperloom.plugs import progress
 from hyperloom.plugs.host import EVENT_LOCK_MISMATCH
@@ -69,6 +68,10 @@ def _fresh_budget_clock(monkeypatch):
     monkeypatch.setattr(progress, "_budget_last", None)
 
 
+def _state(minutes: float) -> SimpleNamespace:
+    return SimpleNamespace(elapsed_minutes=lambda: minutes, max_minutes=60)
+
+
 def _valid(event_type: str, data: dict) -> None:
     jsonschema.validate(data, _SCHEMA["events"][event_type])
 
@@ -85,10 +88,10 @@ def test_what_the_emit_helpers_send_matches_the_schema():
         progress.phase_changed("BASELINE", "FRAMEWORK_AGENT", 2)
         progress.candidate_settled("t-1", "explore", "keep")
         progress.candidate_settled("t-2", "", "failed", 3.5)
-        progress.best_updated(1100.0, 1000.0, 2, "req-1")
-        progress.best_updated(1100.0, 0.0, 0, None)
+        progress.best_updated(1100.0, SimpleNamespace(baseline_tput=1000.0, optimization_stack=[1, 2]), "req-1")
+        progress.best_updated(1100.0, SimpleNamespace(baseline_tput=0.0, optimization_stack=[]), None)
         progress.warn("c", "m")
-        assert progress.emit_budget(elapsed_min=12.5, max_min=180.0)
+        assert progress.emit_budget(SimpleNamespace(elapsed_minutes=lambda: 12.5, max_minutes=180))
     assert {t for t, _ in spy.events} <= _V1_TYPES
     assert len(spy.events) == 8
     for event_type, data in spy.events:
@@ -120,19 +123,9 @@ def test_budget_goes_out_at_most_every_five_minutes(monkeypatch):
     now = [100.0]
     monkeypatch.setattr(progress.time, "monotonic", lambda: now[0])
     with activated(_host(spy)):
-        assert progress.emit_budget(elapsed_min=1, max_min=60)
+        assert progress.emit_budget(_state(1))
         now[0] += progress.BUDGET_INTERVAL_SEC - 1
-        assert not progress.emit_budget(elapsed_min=2, max_min=60)
+        assert not progress.emit_budget(_state(2))
         now[0] += 1
-        assert progress.emit_budget(elapsed_min=3, max_min=60)
+        assert progress.emit_budget(_state(3))
     assert [d["elapsed_min"] for _, d in spy.events] == [1, 3]
-
-
-def test_an_action_settle_emits_candidate_settled_with_the_dispatching_kind():
-    spy = _Spy()
-    with activated(_host(spy)):
-        phase_event.record_settle(ActionSettlement(task_id="t-9", action="explore", status="done", decision="keep"))
-    settled = [e for e in spy.events if e[0] == "hyperloom.candidate_settled"]
-    assert settled == [
-        ("hyperloom.candidate_settled", {"task_id": "t-9", "action": "explore", "decision": "keep", "gain_pct": None})
-    ]

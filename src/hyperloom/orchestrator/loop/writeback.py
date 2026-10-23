@@ -18,7 +18,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Mapping, NamedTuple
 import yaml
 from hyperloom.common.coerce import to_float, to_str_list
-from hyperloom.common.perf_metric import constraint_fields, stamp_output_per_gpu, with_output_per_gpu
+from hyperloom.common.perf_metric import constraint_fields, graded_axes_of, stamp_output_per_gpu, with_output_per_gpu
 from hyperloom.common.env import is_truthy
 from hyperloom.plugs import progress as _progress
 from hyperloom.common.launch_log_evidence import (
@@ -771,8 +771,6 @@ def _replay_origin_fields(result: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _replayed_integrate_variant(result: Mapping[str, Any], tput: float) -> dict[str, Any] | None:
-    from hyperloom.common.perf_metric import constraint_fields, graded_axes_of
-
     specialist_task_id = str(result.get("specialist_task_id") or "")
     if not specialist_task_id:
         return None
@@ -1929,8 +1927,6 @@ class WritebackCollaborator(GeakRevalidation):
         cand_source: Mapping[str, Any],
         previous: Mapping[str, Any],
     ) -> None:
-        from hyperloom.common.perf_metric import constraint_fields, graded_axes_of
-
         bv = request.variant
         envs = dict(previous.get("extra_envs") or {})
         for key in to_str_list(bv.get("unset_envs")):
@@ -1963,12 +1959,7 @@ class WritebackCollaborator(GeakRevalidation):
         self.shared_state.current_best = current_best
         self.shared_state.working_recipe_generation = int(self.shared_state.working_recipe_generation or 0) + 1
         self._stamp_current_best_measurement(bv)
-        _progress.best_updated(
-            request.tput,
-            float(self.shared_state.baseline_tput or 0.0),
-            len(self.shared_state.optimization_stack),
-            bv.get("request_id"),
-        )
+        _progress.best_updated(request.tput, self.shared_state, bv.get("request_id"))
 
     def _should_run_prelude_bootstrap(self, tput: Any) -> bool:
         """Whether to enqueue the post-baseline PRELUDE bootstrap chain.

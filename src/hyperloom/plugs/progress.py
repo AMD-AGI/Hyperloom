@@ -56,28 +56,41 @@ def candidate_settled(task_id: str, action: str, decision: str, gain_pct: float 
     )
 
 
-def best_updated(value: float, baseline: float, patch_count: int, request_id: str | None) -> None:
-    """Emit ``hyperloom.best_updated``; ``gain_pct`` is against ``baseline`` and null without a positive one."""
-    gain = round((value / baseline - 1.0) * 100.0, 3) if baseline and baseline > 0 else None
+def best_updated(value: float, state: Any, request_id: str | None) -> None:
+    """Emit ``hyperloom.best_updated``; ``gain_pct`` is against ``state.baseline_tput``, null without a positive one."""
+    baseline = float(state.baseline_tput or 0.0)
+    gain = round((value / baseline - 1.0) * 100.0, 3) if baseline > 0 else None
     emit(
         EVENT_BEST_UPDATED,
         {
             "metric": "output_throughput",
             "value": value,
             "gain_pct": gain,
-            "patch_count": int(patch_count),
+            "patch_count": len(state.optimization_stack),
             "request_id": request_id or None,
         },
     )
 
 
-def emit_budget(*, elapsed_min: float, max_min: float, tokens: int | None = None, gpu_sec: float | None = None) -> bool:
-    """Emit ``hyperloom.budget`` unless one went out within :data:`BUDGET_INTERVAL_SEC`; report whether it did."""
+def emit_budget(state: Any) -> bool:
+    """Emit ``hyperloom.budget`` for ``state`` unless one went out within :data:`BUDGET_INTERVAL_SEC`.
+
+    ``tokens`` and ``gpu_sec`` are null: the legacy flow does not keep a running total of either. Reports whether
+    an event went out.
+    """
     global _budget_last
     now = time.monotonic()
     with _budget_lock:
         if _budget_last is not None and now - _budget_last < BUDGET_INTERVAL_SEC:
             return False
         _budget_last = now
-    emit(EVENT_BUDGET, {"elapsed_min": elapsed_min, "max_min": max_min, "tokens": tokens, "gpu_sec": gpu_sec})
+    emit(
+        EVENT_BUDGET,
+        {
+            "elapsed_min": round(state.elapsed_minutes(), 2),
+            "max_min": float(state.max_minutes or 0),
+            "tokens": None,
+            "gpu_sec": None,
+        },
+    )
     return True

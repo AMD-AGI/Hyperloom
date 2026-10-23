@@ -162,8 +162,6 @@ class ActionSettlement:
     workspace: Any = None
     settled_at: str = ""
     settled_unix: float | None = None
-    #: The action's kind, for the progress event only; the row already holds it from the dispatch.
-    action: str = ""
 
     def row(self) -> dict[str, Any]:
         """The action row fields this settlement persists as."""
