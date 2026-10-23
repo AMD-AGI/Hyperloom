@@ -310,7 +310,6 @@ def test_decision_reviewer_marks_bundle_when_breaker_open(tmp_path):
 
     bundle = rev.prepare_review(
         {
-            "kind": "coordinator_inbox",
             "session_id": "sess_breaker",
             "raw_prompt": (
                 "=== Shared session state ===\n"
@@ -332,7 +331,6 @@ def test_decision_reviewer_marks_bundle_when_kb_read_disabled(tmp_path, monkeypa
     rev = DecisionReviewer(kb_writer=writer)
     bundle = rev.prepare_review(
         {
-            "kind": "coordinator_inbox",
             "session_id": "sess_disabled",
             "raw_prompt": (
                 "=== Shared session state ===\n"
@@ -376,7 +374,6 @@ def test_breaker_reflects_per_request_failures_in_bundle(tmp_path):
     kb.fail_next("list", times=1)
     bundle = rev.prepare_review(
         {
-            "kind": "coordinator_inbox",
             "session_id": "sess_per_request",
             "raw_prompt": (
                 "=== Shared session state ===\n"

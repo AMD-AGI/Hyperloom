@@ -144,14 +144,12 @@ def _make_fake_runtime(
             request = json.loads(call.request_path.read_text(encoding="utf-8"))
             bundle = dict(judge_bundle)
             bundle.setdefault("session_id", request.get("session_id"))
-            bundle.setdefault("kind", request.get("kind"))
             call.out_path.write_text(json.dumps(bundle), encoding="utf-8")
         elif call.phase == "commit-review":
             request = json.loads(call.request_path.read_text(encoding="utf-8"))
             review = json.loads(call.review_path.read_text(encoding="utf-8"))
             envelope = _build_envelope_from_review(review, request["session_id"])
             emit = {
-                "kind": "coordinator_inbox",
                 "session_id": request["session_id"],
                 "decision_id": None,
                 "kb_writes": [],
@@ -251,7 +249,6 @@ async def test_run_writes_known_actions_into_request_options(
 ) -> None:
     runtime_calls: list[RuntimeCall] = []
     judge_bundle = {
-        "kind": "coordinator_inbox",
         "session_id": fake_session_dir.name,
         "proposals": [],
         "review_constraints": {},
@@ -280,7 +277,6 @@ async def test_run_omits_options_when_known_actions_empty(
 ) -> None:
     runtime_calls: list[RuntimeCall] = []
     judge_bundle = {
-        "kind": "coordinator_inbox",
         "session_id": fake_session_dir.name,
         "proposals": [],
         "review_constraints": {},
@@ -471,7 +467,6 @@ async def test_single_proposal_yields_matching_verdict(
     fake_session_dir: Path,
 ):
     judge_bundle = {
-        "kind": "coordinator_inbox",
         "merged_context": {"model": "Llama-3.1-8B", "framework": "sglang"},
         "missing_context": [],
         "required_context": [],
@@ -558,7 +553,6 @@ async def test_multiple_proposals_yield_one_verdict_each(
     fake_session_dir: Path,
 ):
     judge_bundle = {
-        "kind": "coordinator_inbox",
         "merged_context": {"model": "m", "framework": "sglang"},
         "proposals": [
             {
@@ -609,7 +603,6 @@ async def test_empty_proposals_yields_heartbeat_no_llm(
     fake_session_dir: Path,
 ):
     judge_bundle = {
-        "kind": "coordinator_inbox",
         "merged_context": {"model": "m", "framework": "sglang"},
         "proposals": [],
         "kb_priors_by_proposal": {},
@@ -642,7 +635,6 @@ async def test_unparseable_llm_reply_fails_the_turn(
 ):
     """Proposals were reviewed and no verdict came back — that is a failure."""
     judge_bundle = {
-        "kind": "coordinator_inbox",
         "merged_context": {"model": "m", "framework": "sglang"},
         "proposals": [
             {
@@ -672,7 +664,6 @@ async def test_unparseable_llm_reply_fails_the_turn(
 
 def _single_proposal_judge_bundle() -> dict[str, Any]:
     return {
-        "kind": "coordinator_inbox",
         "merged_context": {"model": "m", "framework": "sglang"},
         "proposals": [
             {
@@ -749,7 +740,6 @@ async def test_missing_critical_context_yields_needs_review(
     fake_session_dir: Path,
 ):
     judge_bundle = {
-        "kind": "coordinator_inbox",
         "merged_context": {},
         "proposals": [
             {
@@ -814,7 +804,6 @@ async def test_commit_review_subprocess_failure_raises(
     fake_session_dir: Path,
 ):
     judge_bundle = {
-        "kind": "coordinator_inbox",
         "merged_context": {"model": "m", "framework": "sglang"},
         "proposals": [
             {
@@ -851,7 +840,6 @@ async def test_kb_unreachable_still_emits_verdict(
     fake_session_dir: Path,
 ):
     judge_bundle = {
-        "kind": "coordinator_inbox",
         "merged_context": {"model": "m", "framework": "sglang"},
         "proposals": [
             {
@@ -933,7 +921,6 @@ async def test_per_turn_workdirs_are_isolated(
     fake_session_dir: Path,
 ):
     judge_bundle = {
-        "kind": "coordinator_inbox",
         "merged_context": {"model": "m", "framework": "sglang"},
         "proposals": [
             {
@@ -971,7 +958,6 @@ async def test_user_prompt_includes_judge_bundle_and_instructions(
     fake_session_dir: Path,
 ):
     judge_bundle = {
-        "kind": "coordinator_inbox",
         "merged_context": {"model": "m", "framework": "sglang"},
         "proposals": [
             {
@@ -1017,7 +1003,6 @@ def test_the_output_schema_asks_for_the_rule_the_verdict_rests_on():
 def _bundle_reviewing(action_name: str) -> dict[str, Any]:
     """A judge bundle whose single proposal proposes ``action_name``."""
     return {
-        "kind": "coordinator_inbox",
         "merged_context": {"model": "m", "framework": "sglang"},
         "proposals": [
             {
@@ -1117,7 +1102,6 @@ async def test_run_populates_request_context_from_manifest(
         },
     )
     judge_bundle = {
-        "kind": "coordinator_inbox",
         "merged_context": {"model": "Llama-3.1-8B-Instruct", "framework": "sglang"},
         "proposals": [
             {
@@ -1175,7 +1159,6 @@ async def test_static_context_override_wins_over_manifest(
         },
     )
     judge_bundle = {
-        "kind": "coordinator_inbox",
         "merged_context": {},
         "proposals": [],
         "kb_priors_by_proposal": {},
@@ -1213,7 +1196,6 @@ async def test_missing_manifest_falls_back_to_empty_context(
 ):
     # No manifest written: backend must not raise; request.context = {} + a WARNING is logged.
     judge_bundle = {
-        "kind": "coordinator_inbox",
         "merged_context": {},
         "proposals": [],
         "kb_priors_by_proposal": {},
@@ -1294,7 +1276,6 @@ async def test_required_context_surfaces_in_metadata(
     fake_session_dir: Path,
 ):
     judge_bundle = {
-        "kind": "coordinator_inbox",
         "merged_context": {},
         "proposals": [
             {
@@ -1610,7 +1591,6 @@ def test_build_kb_priors_trace_carries_skip_reason():
 
 def _kb_trace_judge_bundle() -> dict[str, Any]:
     return {
-        "kind": "coordinator_inbox",
         "merged_context": {"model": "m", "framework": "sglang"},
         "proposals": [
             {
@@ -1757,7 +1737,6 @@ async def test_anthropic_protocol_single_proposal_yields_verdict(
     monkeypatch: pytest.MonkeyPatch,
 ):
     judge_bundle = {
-        "kind": "coordinator_inbox",
         "merged_context": {"model": "Llama-3.1-8B", "framework": "sglang"},
         "missing_context": [],
         "required_context": [],
@@ -1829,7 +1808,6 @@ async def test_anthropic_protocol_single_proposal_yields_verdict(
 
 def _minimal_judge_bundle() -> dict[str, Any]:
     return {
-        "kind": "coordinator_inbox",
         "merged_context": {"model": "m", "framework": "sglang"},
         "proposals": [{"msg_id": "p1", "from_agent": "orchestration", "action_name": "baseline", "payload": {}}],
         "review_constraints": {},
@@ -1906,7 +1884,6 @@ async def test_critic_cache_blocks_preserve_transport_prompt(
     view = {
         key: bundle.get(key)
         for key in (
-            "kind",
             "session_id",
             "decision_id",
             "phase",
@@ -2315,7 +2292,6 @@ async def test_a_failing_iteration_record_propagates_from_the_turn(
 
     monkeypatch.setattr(critic_out, "record_critic_iteration", _boom)
     judge_bundle = {
-        "kind": "coordinator_inbox",
         "session_id": fake_session_dir.name,
         "proposals": [],
         "review_constraints": {},

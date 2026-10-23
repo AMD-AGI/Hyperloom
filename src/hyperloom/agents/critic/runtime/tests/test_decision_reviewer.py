@@ -42,7 +42,6 @@ def reviewer(tmp_path):
 
 def _coordinator_request(prompt: str, session_id: str = "sess_a") -> dict:
     return {
-        "kind": "coordinator_inbox",
         "session_id": session_id,
         "raw_prompt": prompt,
     }
@@ -60,7 +59,6 @@ _PROMPT_WITH_TWO_PROPOSALS = (
 def test_prepare_review_for_coordinator_inbox_extracts_proposals(reviewer):
     rev, kb, sm = reviewer
     bundle = rev.prepare_review(_coordinator_request(_PROMPT_WITH_TWO_PROPOSALS))
-    assert bundle.kind == "coordinator_inbox"
     assert sorted(p["msg_id"] for p in bundle.proposals) == ["aaa1", "bbb2"]
     # Context merged from shared_state.
     assert bundle.merged_context["model"] == "Qwen3-14B"
@@ -86,7 +84,6 @@ def test_prepare_review_propagates_known_actions(reviewer):
     rev, kb, sm = reviewer
     bundle = rev.prepare_review(
         {
-            "kind": "coordinator_inbox",
             "session_id": "sess_known",
             "raw_prompt": _PROMPT_WITH_TWO_PROPOSALS,
             "options": {"known_actions": ["sweep", "baseline", "validate_stack"]},

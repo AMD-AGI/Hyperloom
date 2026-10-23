@@ -135,7 +135,6 @@ def classify_proposal_action(action_name: str | None, payload: dict[str, Any] | 
 class JudgeBundle:
     """Phase-1 output. The SKILL prompts read this to produce review JSON."""
 
-    kind: str
     session_id: str
     decision_id: str | None
     phase: str = ""
@@ -153,7 +152,6 @@ class JudgeBundle:
     def to_dict(self) -> dict[str, Any]:
         """Return a deep, JSON-serialisable copy of the judge bundle."""
         return {
-            "kind": self.kind,
             "session_id": self.session_id,
             "decision_id": self.decision_id,
             "phase": self.phase,
@@ -173,7 +171,6 @@ class JudgeBundle:
 class CommitOutcome:
     """Phase-2 output."""
 
-    kind: str
     session_id: str
     decision_id: str | None
     intent_envelope: dict[str, Any] | None = None
@@ -182,7 +179,6 @@ class CommitOutcome:
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-serialisable copy of the commit outcome."""
         out = {
-            "kind": self.kind,
             "session_id": self.session_id,
             "decision_id": self.decision_id,
             "kb_writes": [dict(w) for w in self.kb_writes],
@@ -226,7 +222,6 @@ class DecisionReviewer:
         """Build the phase-1 judge bundle for a review request."""
         req = parse_request(raw_request)
         bundle = JudgeBundle(
-            kind=req.kind,
             session_id=req.session_id,
             decision_id=req.decision_id,
             phase=str(req.context.get("phase") or "").strip().upper(),
@@ -311,7 +306,6 @@ class DecisionReviewer:
             raise ReviewValidationError(f"review must be a dict, got {type(review).__name__}")
 
         outcome = CommitOutcome(
-            kind=req.kind,
             session_id=req.session_id,
             decision_id=req.decision_id,
         )

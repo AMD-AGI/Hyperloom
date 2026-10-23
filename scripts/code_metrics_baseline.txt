@@ -531,7 +531,7 @@ function-lines src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py::
 function-lines src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py::build_specialist_prompts 53
 function-lines src/hyperloom/orchestrator/roles/claude.py::ClaudeBackend.run 112
 function-lines src/hyperloom/orchestrator/roles/critic_agent.py::CriticAgentBackend.__post_init__ 51
-function-lines src/hyperloom/orchestrator/roles/critic_agent.py::CriticAgentBackend._reason 74
+function-lines src/hyperloom/orchestrator/roles/critic_agent.py::CriticAgentBackend._reason 73
 function-lines src/hyperloom/orchestrator/roles/critic_agent.py::CriticAgentBackend.run 132
 function-lines src/hyperloom/orchestrator/specialists/agent_cli_config.py::_codex_mcp_config 63
 function-lines src/hyperloom/orchestrator/specialists/dispatch.py::SpecialistDispatchCollaborator.build_specialist_round_entry 51

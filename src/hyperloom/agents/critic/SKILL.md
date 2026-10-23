@@ -72,10 +72,9 @@ python -m hyperloom.agents.critic.runtime.cli commit-review --request request.js
 Use the contents of `emit.json` as your final reply (the host will
 forward `intent_envelope` to the Coordinator).
 
-## Request Type
+## Inbox Review
 
-`request.json` always carries `kind: coordinator_inbox`; follow
-[actions/review_coordinator_inbox.md](actions/review_coordinator_inbox.md)
+Follow [actions/review_coordinator_inbox.md](actions/review_coordinator_inbox.md)
 and parse the prompt as described in
 [references/coordinator_protocol.md](references/coordinator_protocol.md).
 

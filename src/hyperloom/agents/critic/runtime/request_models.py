@@ -11,10 +11,6 @@ from typing import Any
 from .errors import RequestValidationError
 
 
-# The only request kind the Critic accepts.
-COORDINATOR_INBOX = "coordinator_inbox"
-
-
 CRITICAL_CONTEXT_KEYS: tuple[str, ...] = ("model", "framework")
 
 
@@ -53,9 +49,8 @@ class Proposal:
 # CriticRequest
 @dataclass
 class CriticRequest:
-    """Normalised Critic input."""
+    """Normalised Critic input: one Coordinator inbox prompt to review."""
 
-    kind: str
     session_id: str
     decision_id: str | None = None
     raw_prompt: str | None = None
@@ -114,16 +109,13 @@ def parse_request(raw: dict[str, Any]) -> CriticRequest:
     if not isinstance(raw, dict):
         raise RequestValidationError(f"top-level must be an object, got {type(raw).__name__}")
 
-    kind = _require_str(raw, "kind", where="request")
-    if kind != COORDINATOR_INBOX:
-        raise RequestValidationError(f"request: kind {kind!r} is not {COORDINATOR_INBOX!r}")
     session_id = _require_str(raw, "session_id", where="request")
 
     decision_id = _optional_str(raw, "decision_id", where="request")
 
     raw_prompt = _optional_str(raw, "raw_prompt", where="request")
     if not (raw_prompt and raw_prompt.strip()):
-        raise RequestValidationError("coordinator_inbox: raw_prompt must be a non-empty string")
+        raise RequestValidationError("request: raw_prompt must be a non-empty string")
 
     context = _optional_dict(raw, "context", where="request")
     options = _optional_dict(raw, "options", where="request")
@@ -142,7 +134,6 @@ def parse_request(raw: dict[str, Any]) -> CriticRequest:
         proposals.append(Proposal.from_payload(msg_id=msg_id, from_agent=from_agent, payload=payload, seq=seq))
 
     return CriticRequest(
-        kind=kind,
         session_id=session_id,
         decision_id=decision_id,
         raw_prompt=raw_prompt,
@@ -153,7 +144,6 @@ def parse_request(raw: dict[str, Any]) -> CriticRequest:
 
 
 __all__ = [
-    "COORDINATOR_INBOX",
     "CRITICAL_CONTEXT_KEYS",
     "CriticRequest",
     "Proposal",

@@ -85,7 +85,6 @@ def test_parse_request_errors() -> None:
     with pytest.raises(RequestValidationError):
         parse_request(
             {
-                "kind": "coordinator_inbox",
                 "session_id": "s1",
                 "raw_prompt": "do something",
                 "proposals": ["not-an-object"],

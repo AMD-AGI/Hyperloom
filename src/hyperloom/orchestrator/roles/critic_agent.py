@@ -574,7 +574,6 @@ class CriticAgentBackend:
         if self._trace_macro_cycle is not None:
             context["macro_cycle"] = self._trace_macro_cycle
         request: dict[str, Any] = {
-            "kind": "coordinator_inbox",
             "session_id": self.session_dir.name,
             "raw_prompt": prompt,
             "context": context,
@@ -771,7 +770,6 @@ class CriticAgentBackend:
         """Drive Codex with the judge bundle and parse a review object."""
         preamble = self._load_skill_preamble()
         bundle_view: dict[str, Any] = {
-            "kind": judge_bundle.get("kind"),
             "session_id": judge_bundle.get("session_id"),
             "decision_id": judge_bundle.get("decision_id"),
             "phase": judge_bundle.get("phase"),

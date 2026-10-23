@@ -1,7 +1,7 @@
 # Critic runtime
 
 The Critic does not need a dedicated long-running service. Each turn,
-Hyperloom's `CriticAgentBackend` writes a `coordinator_inbox` request to
+Hyperloom's `CriticAgentBackend` writes the Coordinator inbox prompt to
 `request.json`, runs `prepare-review` to build `judge_bundle.json`,
 reasons over the bundle with the Critic SKILL prompts, writes
 `review.json`, runs `commit-review`, and forwards
@@ -76,7 +76,7 @@ When developing locally without a Hyperloom session, you can drive the
 same flow by hand:
 
 ```bash
-echo '{"kind": "coordinator_inbox", ...}' > req.json
+echo '{"session_id": "local", "raw_prompt": "..."}' > req.json
 python -m hyperloom.agents.critic.runtime.cli prepare-review --request req.json --out judge.json
 # craft review.json based on judge.json + skill prompts
 python -m hyperloom.agents.critic.runtime.cli commit-review --request req.json --review review.json --out emit.json
