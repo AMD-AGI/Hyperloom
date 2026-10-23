@@ -76,7 +76,7 @@ METRICS = {
 #: complexity*), because the base branch's copy judges the commit that adds the key.
 #: A pending metric is measured only once its threshold is there, and the name leaves
 #: this tuple in the same commit as the key.
-PENDING = (FUNCTION_ARGS,)
+PENDING: tuple[str, ...] = ()
 
 #: Ruff rule -> (metric, the ruff setting that carries its threshold).
 RUFF_RULES = {
