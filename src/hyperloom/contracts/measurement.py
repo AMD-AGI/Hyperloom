@@ -44,6 +44,15 @@ TABLE_EXERCISED = "exercised"
 TABLE_NOT_EXERCISED = "not_exercised"
 TABLE_NOT_OBSERVABLE = "not_observable"
 TABLE_STATUSES = (TABLE_EXERCISED, TABLE_NOT_EXERCISED, TABLE_NOT_OBSERVABLE)
+#: The counts of ``RequestClasses`` that can each be unknown: a round whose export cannot be read has none of them.
+_REQUEST_COUNTS = (
+    "requests_total",
+    "failed_total",
+    "failed_transport",
+    "failed_no_content",
+    "failed_empty",
+    "failed_short",
+)
 
 
 class MeasurementError(ValueError):
@@ -620,6 +629,95 @@ class TableHits:
 
 
 @dataclass(frozen=True)
+class RequestClasses:
+    """The requests of one measured AgentX round that its client marked failed, counted by what the server did.
+
+    Read from the round's per-request export (aiperf's ``profile_export.jsonl``), which the signed bundle keeps:
+    ``export`` is that file's path relative to the test's ``output_dir`` (``""`` when the round left none), ``point`` the
+    round's measurement point and ``concurrency`` the load it ran at. ``requests_total`` counts the profiled requests (a
+    warm-up request is no part of the client's own error rate and none of these counts) and ``failed_total`` those the
+    client marked failed, which are exactly ``failed_transport`` (no usable answer from the server: a connection error,
+    a timeout, a cancellation or an HTTP error status) plus ``failed_no_content`` (the server answered and the client
+    found nothing in the answer to use).
+
+    ``failed_no_content`` is ``failed_empty`` (the server produced zero output tokens) plus ``failed_short`` (it
+    produced one or more and the client still counted the answer failed: the client's own decision, no threshold of
+    ours). The client's export carries no output token count for a request it counted failed, so the two are told
+    apart only when it does; otherwise both are ``None`` and ``reason`` says so.
+
+    A count that could not be computed is ``None`` and ``reason`` says why: never zero. A consumer that needs a count
+    it finds ``None`` has no answer, not an answer of "none".
+    """
+
+    point: int
+    export: str = ""
+    concurrency: int | None = None
+    requests_total: int | None = None
+    failed_total: int | None = None
+    failed_transport: int | None = None
+    failed_no_content: int | None = None
+    failed_empty: int | None = None
+    failed_short: int | None = None
+    reason: str = ""
+
+    def __post_init__(self) -> None:
+        _int(self.point, "a request class's point", minimum=0)
+        _relative_dir(self.export, "a request class's export")
+        _optional_int(self.concurrency, "a request class's concurrency", minimum=1)
+        if not isinstance(self.reason, str):
+            raise MeasurementError(f"a request class's reason must be a string, got {self.reason!r}")
+        counts = {name: getattr(self, name) for name in _REQUEST_COUNTS}
+        for name, value in counts.items():
+            _optional_int(value, name)
+        if None in counts.values() and not self.reason:
+            raise MeasurementError("a request class with a count that could not be computed says why")
+        self._check_sums()
+
+    def _check_sums(self) -> None:
+        total, failed, transport, no_content = (
+            self.requests_total,
+            self.failed_total,
+            self.failed_transport,
+            self.failed_no_content,
+        )
+        known = [value is not None for value in (total, failed, transport, no_content)]
+        if any(known) and not all(known):
+            raise MeasurementError(
+                "the requests, the failed ones and their transport and no-content parts come together"
+            )
+        if failed is not None and (failed != transport + no_content or failed > total):
+            raise MeasurementError(
+                f"{failed} failed requests of {total} are {transport} transport and {no_content} no-content failures"
+            )
+        if (self.failed_empty is None) != (self.failed_short is None):
+            raise MeasurementError("the empty and the short failures come together")
+        if self.failed_empty is not None and (
+            no_content is None or self.failed_empty + self.failed_short != no_content
+        ):
+            raise MeasurementError("the empty and short failures add up to the no-content failures")
+
+    def to_document(self) -> dict[str, object]:
+        return {
+            "point": self.point,
+            "export": self.export,
+            "concurrency": self.concurrency,
+            **{name: getattr(self, name) for name in _REQUEST_COUNTS},
+            "reason": self.reason,
+        }
+
+    @classmethod
+    def from_document(cls, document: object) -> RequestClasses:
+        f = _mapping(document, "a request class")
+        return cls(
+            point=f.get("point"),
+            export=f.get("export", ""),
+            concurrency=f.get("concurrency"),
+            reason=f.get("reason", ""),
+            **{name: f.get(name) for name in _REQUEST_COUNTS},
+        )
+
+
+@dataclass(frozen=True)
 class TestResult:
     """The final outcome of one request; ``failure_class`` is the last attempt's class and empty on success.
 
@@ -632,6 +730,9 @@ class TestResult:
     ``table_hits`` has one entry for each kernel table the test's recipe loaded, and ``runtime_findings`` says what each
     entry means in a sentence; a succeeded test that loaded none has neither. ``TableHits`` tells "the table was not
     exercised" from "the logs cannot say", which a flat result alone cannot.
+    ``request_classes`` has one entry for each measured round of an AgentX test (none for any other test): how many of
+    the round's requests its client marked failed, by what the server did, and where the round's per-request export is.
+    A document written before it existed has none, which is not a round that failed no request.
     A document written while the greedy decode pass existed may carry ``decode_outputs`` and ``decode_identity``; they
     mean nothing now and ``from_document`` leaves them out, so such a document still loads.
     """
@@ -661,6 +762,7 @@ class TestResult:
     cold_start_seconds: float | None = None
     table_hits: tuple[TableHits, ...] = ()
     runtime_findings: tuple[str, ...] = ()
+    request_classes: tuple[RequestClasses, ...] = ()
 
     def __post_init__(self) -> None:
         _text(self.request_id, "request_id")
@@ -687,6 +789,10 @@ class TestResult:
         _strings(self.runtime_findings, "runtime_findings")
         if not isinstance(self.table_hits, tuple) or not all(isinstance(t, TableHits) for t in self.table_hits):
             raise MeasurementError(f"table_hits must be a tuple of TableHits, got {self.table_hits!r}")
+        if not isinstance(self.request_classes, tuple) or not all(
+            isinstance(c, RequestClasses) for c in self.request_classes
+        ):
+            raise MeasurementError(f"request_classes must be a tuple of RequestClasses, got {self.request_classes!r}")
 
     def _check_repro_verdict(self) -> None:
         if self.repro_verdict not in ("", *REPRO_VERDICTS):
@@ -737,6 +843,7 @@ class TestResult:
             "cold_start_seconds": self.cold_start_seconds,
             "table_hits": [value.to_document() for value in self.table_hits],
             "runtime_findings": list(self.runtime_findings),
+            "request_classes": [value.to_document() for value in self.request_classes],
         }
 
     @classmethod
@@ -767,6 +874,9 @@ class TestResult:
             cold_start_seconds=f.get("cold_start_seconds"),
             table_hits=tuple(map(TableHits.from_document, _items(f.get("table_hits", ()), "table_hits"))),
             runtime_findings=tuple(_items(f.get("runtime_findings", ()), "runtime_findings")),
+            request_classes=tuple(
+                map(RequestClasses.from_document, _items(f.get("request_classes", ()), "request_classes"))
+            ),
         )
 
 
@@ -786,6 +896,7 @@ __all__ = [
     "FailureClass",
     "MeasurementError",
     "Purpose",
+    "RequestClasses",
     "RoundValue",
     "SandboxFacts",
     "TableHits",

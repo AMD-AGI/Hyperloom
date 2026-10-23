@@ -20,6 +20,16 @@ from __future__ import annotations
 from hyperloom.common.rule_pack import default_pack
 
 __all__ = [
+    "AIPERF_ERROR_CLASS_KEY",
+    "AIPERF_ERROR_KEY",
+    "AIPERF_EXPORT_DIR",
+    "AIPERF_EXPORT_FILE",
+    "AIPERF_INVALID_REPLY_ERROR",
+    "AIPERF_METADATA_KEY",
+    "AIPERF_METRICS_KEY",
+    "AIPERF_OUTPUT_LENGTH_METRIC",
+    "AIPERF_PHASE_KEY",
+    "AIPERF_PROFILING_PHASE",
     "AITER_LOG_TUNED_CONFIG_ENV",
     "AITER_MERGED_VIEW_DIR",
     "AITER_TUNED_HIT",
@@ -130,6 +140,30 @@ ENV_EP = _inferencex["ep"]
 ENV_MAGPIE_EVAL_TASKS = _inferencex["magpie_eval_tasks"]
 ENV_MAGPIE_EVAL_LIMIT = _inferencex["magpie_eval_limit"]
 ENV_MAGPIE_EVAL_TOKENIZED_REQUESTS = _inferencex["magpie_eval_tokenized_requests"]
+
+_aiperf_export = _PACK.names(
+    "aiperf_request_export",
+    "dir",
+    "file",
+    "metadata",
+    "metrics",
+    "error",
+    "error_class",
+    "phase",
+    "profiling_phase",
+    "output_length",
+)
+AIPERF_EXPORT_DIR = _aiperf_export["dir"]
+AIPERF_EXPORT_FILE = _aiperf_export["file"]
+AIPERF_METADATA_KEY = _aiperf_export["metadata"]
+AIPERF_METRICS_KEY = _aiperf_export["metrics"]
+AIPERF_ERROR_KEY = _aiperf_export["error"]
+AIPERF_ERROR_CLASS_KEY = _aiperf_export["error_class"]
+AIPERF_PHASE_KEY = _aiperf_export["phase"]
+AIPERF_PROFILING_PHASE = _aiperf_export["profiling_phase"]
+AIPERF_OUTPUT_LENGTH_METRIC = _aiperf_export["output_length"]
+
+AIPERF_INVALID_REPLY_ERROR = _PACK.names("aiperf_invalid_reply", "error_class")["error_class"]
 
 
 def spaced(phrase: str) -> str:

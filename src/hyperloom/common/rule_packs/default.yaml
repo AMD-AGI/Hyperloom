@@ -13,7 +13,7 @@
 #   kernel_table  reserved: no rule reads one yet, so a pack that holds one is refused
 # Every entry names its project, says why the fact exists and carries examples. A pack that fails its own examples, or
 # lacks an entry the code reads, is refused when it is loaded; nothing falls back to a default.
-version: "2"
+version: "3"
 facts:
   aiter_merged_view:
     kind: names
@@ -289,3 +289,46 @@ facts:
         - "[aiter] shape is M:192, N:4096, K:4096 dtype='torch.bfloat16' otype='torch.bfloat16' bias=False, scaleAB=False, bpreshuffle=False found padded_M: 192, N:4096, K:4096 is tuned on cu_num = 256 in /work/hl-framework-x/merged/bf16_tuned_gemm.csv, libtype is torch, kernel name is native"
       no_match:
         - "[aiter] shape is M:512, N:6144, K:4096 dtype='torch.bfloat16' otype='torch.bfloat16' bias=False, scaleAB=False, bpreshuffle=False, not found tuned config in /work/hl-framework-x/merged/bf16_tuned_gemm.csv, will use default config! using torch solution:0"
+
+  aiperf_request_export:
+    kind: names
+    project: aiperf (the replay client of an AgentX round, SemiAnalysisAI fork pinned by InferenceX)
+    reason: >-
+      aiperf writes one JSON line per request, warm-up requests included, to aiperf_artifacts/profile_export.jsonl at its
+      default export level. A line has metadata, metrics and error; error is absent for a request the client counted
+      successful and, for one it counted failed, carries the class name of the exception in its type. The client's own
+      summary counts the requests of the profiling phase only. A failed line holds no metric but error_isl: the output
+      token count of a failed request is not exported, so a request the client found no content in cannot be told empty
+      from short by this file alone.
+    names:
+      dir: aiperf_artifacts
+      file: profile_export.jsonl
+      metadata: metadata
+      metrics: metrics
+      error: error
+      error_class: type
+      phase: benchmark_phase
+      profiling_phase: profiling
+      output_length: output_sequence_length
+    examples:
+      - "hyperloom.measure.agentx_requests: the export of a measured round is found at <round>/aiperf_artifacts/profile_export.jsonl or one directory below the round, and a request is counted when its phase is the profiling one or absent"
+      - "hyperloom.measure.agentx_requests: a request is failed when its line has an error, and its output length is read from the metrics only when the line holds one"
+      - 'export line, a request the server answered, as the aiperf docs print it (docs/tutorials/working-with-profile-exports.md at the pinned commit; reconstructed, no real export was at hand): {"metadata": {"session_num": 45, "x_request_id": "7609a2e7-aa53-4ab1-98f4-f35ecafefd25", "x_correlation_id": "32ee4f33-cfca-4cfc-988f-79b45408b909", "conversation_id": "77aa5b0e-b305-423f-88d5-c00da1892599", "turn_index": 0, "request_start_ns": 1759813207532900363, "request_ack_ns": 1759813207650730976, "request_end_ns": 1759813207838764604, "worker_id": "worker_359d423a", "record_processor_id": "record_processor_1fa47cd7", "benchmark_phase": "profiling", "was_cancelled": false}, "metrics": {"input_sequence_length": {"value": 550, "unit": "tokens"}, "time_to_first_token": {"value": 255.88656799999998, "unit": "ms"}, "request_latency": {"value": 297.52522799999997, "unit": "ms"}, "output_token_count": {"value": 9, "unit": "tokens"}, "output_sequence_length": {"value": 9, "unit": "tokens"}}}'
+      - 'export line, a request the server refused with an HTTP status (aiohttp_client.py: code is the status, type its reason phrase); reconstructed: {"metadata": {"session_num": 80, "x_request_id": "c35e4b1b-6775-4750-b875-94cd68e5ec15", "x_correlation_id": "32ee4f33-cfca-4cfc-988f-79b45408b909", "conversation_id": "77aa5b0e-b305-423f-88d5-c00da1892599", "turn_index": 0, "request_start_ns": 1759813207532900363, "request_end_ns": 1759813207838764604, "worker_id": "worker_359d423a", "record_processor_id": "record_processor_1fa47cd7", "benchmark_phase": "profiling", "was_cancelled": false}, "metrics": {"error_isl": {"value": 550, "unit": "tokens"}}, "error": {"code": 503, "type": "Service Unavailable", "message": "server overloaded"}}'
+      - 'export line, a request that never reached a server (the exception''s class name is the type and cause_chain lists the chain); reconstructed: {"metadata": {"session_num": 80, "x_request_id": "c35e4b1b-6775-4750-b875-94cd68e5ec15", "x_correlation_id": "32ee4f33-cfca-4cfc-988f-79b45408b909", "conversation_id": "77aa5b0e-b305-423f-88d5-c00da1892599", "turn_index": 0, "request_start_ns": 1759813207532900363, "request_end_ns": 1759813207838764604, "worker_id": "worker_359d423a", "record_processor_id": "record_processor_1fa47cd7", "benchmark_phase": "profiling", "was_cancelled": false}, "metrics": {"error_isl": {"value": 550, "unit": "tokens"}}, "error": {"type": "ClientConnectorError", "message": "ClientConnectorError(ConnectionKey(host=''localhost'', port=30000, is_ssl=False, ssl=True, proxy=None, proxy_auth=None, proxy_headers_hash=None))", "cause_chain": ["ClientConnectorError", "ConnectionRefusedError"]}}'
+      - 'export line, a request the server answered with 2xx and nothing the client could use: error.type names InvalidInferenceResultError, the metrics hold only error_isl, and no output token count survives (inference_result_parser.py keeps only the input count of an invalid record); reconstructed: {"metadata": {"session_num": 80, "x_request_id": "c35e4b1b-6775-4750-b875-94cd68e5ec15", "x_correlation_id": "32ee4f33-cfca-4cfc-988f-79b45408b909", "conversation_id": "77aa5b0e-b305-423f-88d5-c00da1892599", "turn_index": 0, "request_start_ns": 1759813207532900363, "request_end_ns": 1759813207838764604, "worker_id": "worker_359d423a", "record_processor_id": "record_processor_1fa47cd7", "benchmark_phase": "profiling", "was_cancelled": false}, "metrics": {"error_isl": {"value": 550, "unit": "tokens"}}, "error": {"type": "InvalidInferenceResultError", "message": "InvalidInferenceResultError(''Invalid inference result'')", "cause_chain": ["InvalidInferenceResultError"]}}'
+
+  aiperf_invalid_reply:
+    kind: names
+    project: aiperf (the replay client of an AgentX round, SemiAnalysisAI fork pinned by InferenceX)
+    reason: >-
+      A reply that arrived with a 2xx status and held nothing the client could use (no response with content: only usage
+      chunks, empty deltas or the [DONE] marker; or a timestamp outside its range) is converted to an error record by the
+      client, and the error is InvalidInferenceResultError. Every other error is counted as a request the server did not
+      serve (a connection error, a timeout, a cancellation, an HTTP error status or an error event in the stream); the
+      client's own exception while it processes a reply that did arrive is exported the same way and cannot be told apart.
+    names:
+      error_class: InvalidInferenceResultError
+    examples:
+      - "hyperloom.measure.agentx_requests: a failed request whose error class is this one is a no-content failure, every other failed request a transport failure"
+      - "hyperloom_multibranch.toolbox.hosted_executor: the classes a result carries for each measured round of an AgentX test are read from the export with this"

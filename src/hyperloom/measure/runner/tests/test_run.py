@@ -315,6 +315,28 @@ def test_the_replay_clients_installation_in_an_agentx_workspace_is_not_part_of_t
     assert not list((tmp_path / "out" / "files").rglob(".agentx-runtime"))
 
 
+def test_the_per_request_export_of_an_agentx_round_stays_in_the_signed_output(tmp_path, env, monkeypatch):
+    lines = b'{"metadata": {"benchmark_phase": "profiling"}, "metrics": {}}\n'
+
+    def agentx(call):
+        workspace = call.output_dir / "variant_00_test" / "benchmark_sglang_1"
+        (workspace / ".agentx-runtime" / "venv").mkdir(parents=True)
+        (workspace / "aiperf_artifacts").mkdir(parents=True)
+        (workspace / "aiperf_artifacts" / "profile_export.jsonl").write_bytes(lines)
+        (workspace / "benchmark_report.json").write_text("{}")
+        return _ok(call)
+
+    monkeypatch.setattr(runner, "LocalMeasurementBackend", _Backend(agentx))
+
+    assert _go(tmp_path, env, _sheet()) == 0
+
+    manifest = ResultManifest.from_bytes((tmp_path / "out" / "manifest.json").read_bytes())
+    listed = {f.path: f for f in manifest.files}
+    export = listed["variant_00_test/benchmark_sglang_1/aiperf_artifacts/profile_export.jsonl"]
+    assert (export.size, export.sha256) == (len(lines), hashlib.sha256(lines).hexdigest())
+    assert not any(".agentx-runtime" in path for path in listed), "the installation goes, the export stays"
+
+
 def test_a_link_where_the_replay_clients_installation_belongs_is_still_refused(tmp_path, env, monkeypatch):
     def planted(call):
         (call.output_dir / ".agentx-runtime").symlink_to("/etc")

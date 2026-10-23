@@ -30,8 +30,18 @@ import hyperloom_multibranch
 from hyperloom.common import outside_facts
 from hyperloom.measure import aiter_merge_hook
 
-#: Owned names whose value is a bare ``0`` or a shell-level phrase rather than a name: too common to scan for.
-_NOT_SCANNED = frozenset({"HIP_GRAPH_PACKET_CAPTURE_NODE_BY_NODE"})
+#: Owned names whose value is a bare ``0`` or a shell-level phrase rather than a name: too common to scan for. So are
+#: the keys of aiperf's per-request export that are ordinary words (``error``, ``type``, ``metadata``, ``metrics``).
+_NOT_SCANNED = frozenset(
+    {
+        "HIP_GRAPH_PACKET_CAPTURE_NODE_BY_NODE",
+        "AIPERF_ERROR_CLASS_KEY",
+        "AIPERF_ERROR_KEY",
+        "AIPERF_METADATA_KEY",
+        "AIPERF_METRICS_KEY",
+        "AIPERF_PROFILING_PHASE",
+    }
+)
 #: The one source file allowed to hold an owned value as a literal: it runs inside a sandbox with the standard library only.
 _STANDALONE = {"hyperloom/measure/aiter_merge_hook.py": {"AITER_MERGED_VIEW_DIR"}}
 _ROOTS = (
@@ -118,7 +128,7 @@ _PROBE = textwrap.dedent(
 
     from hyperloom.common import env_safety, failure_signature, visible_devices
     from hyperloom.measure import compile as compiled
-    from hyperloom.measure import eval_context, framework_base, hosted_spec, local, log_causes, points, surface
+    from hyperloom.measure import agentx_requests, eval_context, framework_base, hosted_spec, local, log_causes, points, surface
     from hyperloom.measure.runner import run
     from hyperloom.sandbox import templates
     from hyperloom_multibranch.toolbox import acceptance, hosted_executor, mcp_tools
@@ -142,6 +152,7 @@ _PROBE = textwrap.dedent(
         "gpus": hosted_spec.gpu_count_of({"benchmark": {"envs": {"ENV_TP": "4"}}}),
         "concurrency": hosted_executor._concurrency_in("benchmark: {envs: {ENV_CONC: 7}}"),
         "visible": run._visible({"ROCR_VISIBLE_DEVICES_ENV": "0,2"}),
+        "export": list(agentx_requests._EXPORT_PATTERNS),
     }
     print(json.dumps(out))
     """
@@ -233,6 +244,14 @@ def test_rocr_mask_name_is_read_from_the_owner(probe: dict[str, Any]) -> None:
     assert "ROCR_VISIBLE_DEVICES_ENV" in probe["reserved"]
     assert probe["rocr"] == "ROCR_VISIBLE_DEVICES_ENV"
     assert probe["visible"] == [0, 2]
+
+
+def test_aiperf_export_names_are_read_from_the_owner(probe: dict[str, Any]) -> None:
+    """The per-request export of an AgentX round is looked for where the owner says the replay client writes it."""
+    assert probe["export"] == [
+        "AIPERF_EXPORT_DIR/AIPERF_EXPORT_FILE",
+        "*/AIPERF_EXPORT_DIR/AIPERF_EXPORT_FILE",
+    ]
 
 
 def test_standalone_hook_holds_the_owners_merge_directory() -> None:

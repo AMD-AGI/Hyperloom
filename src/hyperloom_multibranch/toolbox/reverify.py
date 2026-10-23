@@ -12,11 +12,17 @@ rounds and the accuracy are derived from the bundle's own files again and every 
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import fields
 
-from hyperloom.contracts.measurement import AccuracyValue, RoundValue, TestResult
+from hyperloom.contracts.measurement import AccuracyValue, RequestClasses, RoundValue, TestResult
 from hyperloom.measure.manifest import ResultManifest
 
-__all__ = ["first_hash_difference", "first_value_difference", "first_warning_difference"]
+__all__ = [
+    "first_hash_difference",
+    "first_request_classes_difference",
+    "first_value_difference",
+    "first_warning_difference",
+]
 
 _ROUND_FIELDS = ("phase", "concurrency", "completed_requests", "failed_requests")
 _HASH_FIELDS = ("spec_fingerprint", "surface_sha256")
@@ -41,6 +47,27 @@ def first_warning_difference(recorded: TestResult, derived: Sequence[str]) -> st
     """The warning list of the record when it is not the list derived from the bundle, as the field's name and both."""
     if recorded.nonfatal_warnings != tuple(derived):
         return f"nonfatal_warnings: recorded {list(recorded.nonfatal_warnings)!r}, the bundle has {list(derived)!r}"
+    return None
+
+
+def first_request_classes_difference(recorded: TestResult, derived: Sequence[RequestClasses]) -> str | None:
+    """The first field of the request classes the record holds that differs from the ones derived from the bundle.
+
+    A record that holds none is not compared: it claims nothing, and a consumer that needs the classes reads it as
+    having none.
+    """
+    held = recorded.request_classes
+    if not held:
+        return None
+    if len(held) != len(derived):
+        return f"request_classes: recorded {len(held)}, the bundle has {len(derived)}"
+    for index, (have, want) in enumerate(zip(held, derived, strict=True)):
+        for field in fields(RequestClasses):
+            if getattr(have, field.name) != getattr(want, field.name):
+                return (
+                    f"request_classes[{index}].{field.name}: recorded {getattr(have, field.name)!r}, "
+                    f"the bundle has {getattr(want, field.name)!r}"
+                )
     return None
 
 
