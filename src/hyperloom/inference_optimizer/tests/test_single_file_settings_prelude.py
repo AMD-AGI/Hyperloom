@@ -116,7 +116,9 @@ def test_render_prelude_omits_import_timing_guard_when_env_is_empty() -> None:
 
 def test_import_timing_guard_raises_only_when_inductor_or_dynamo_already_imported() -> None:
     plan = plan_settings({"TORCHINDUCTOR_MAX_AUTOTUNE": "1"})
-    module_bytes = apply_settings_prelude(b"def hyperloom_optimize(model):\n    return model\n", plan)
+    module_bytes = apply_settings_prelude(
+        b"def hyperloom_optimize(model):\n    return model\n", plan, "hyperloom_optimize"
+    )
     namespace: dict[str, object] = {"__name__": "generated_hook_under_test"}
 
     sys.modules["torch._inductor"] = types.ModuleType("torch._inductor")
@@ -129,7 +131,9 @@ def test_import_timing_guard_raises_only_when_inductor_or_dynamo_already_importe
 
 def test_import_timing_guard_does_not_raise_when_nothing_pre_imported(monkeypatch: pytest.MonkeyPatch) -> None:
     plan = plan_settings({"TORCHINDUCTOR_MAX_AUTOTUNE": "1"})
-    module_bytes = apply_settings_prelude(b"def hyperloom_optimize(model):\n    return model\n", plan)
+    module_bytes = apply_settings_prelude(
+        b"def hyperloom_optimize(model):\n    return model\n", plan, "hyperloom_optimize"
+    )
     assert "torch._inductor" not in sys.modules
     assert "torch._dynamo" not in sys.modules
     monkeypatch.delenv("TORCHINDUCTOR_MAX_AUTOTUNE", raising=False)
@@ -178,7 +182,7 @@ def test_unset_envs_emit_pop_and_never_also_set() -> None:
 def test_prelude_composes_env_and_api_together() -> None:
     plan = plan_settings({"HL_FUSE_ATTN": "1", "PYTORCH_TUNABLEOP_ENABLED": "1"})
     rendered = render_prelude(plan)
-    result = apply_settings_prelude(b"def hyperloom_optimize(model):\n    return model\n", plan)
+    result = apply_settings_prelude(b"def hyperloom_optimize(model):\n    return model\n", plan, "hyperloom_optimize")
 
     ast.parse(result)
     assert '("HL_FUSE_ATTN", "1")' in rendered
@@ -188,21 +192,23 @@ def test_prelude_composes_env_and_api_together() -> None:
 
 def test_apply_prelude_preserves_trailing_source_bytes() -> None:
     source = b"def hyperloom_optimize(model):\n    return model\n"
-    result = apply_settings_prelude(source, plan_settings({"HL_FUSE_ATTN": "1"}))
+    result = apply_settings_prelude(source, plan_settings({"HL_FUSE_ATTN": "1"}), "hyperloom_optimize")
 
     assert result.endswith(source)
 
 
 def test_apply_prelude_rejects_module_without_hook() -> None:
     with pytest.raises(ValueError, match="valid module"):
-        apply_settings_prelude(b"def other(model):\n    return model\n", plan_settings({"HL_FUSE_ATTN": "1"}))
+        apply_settings_prelude(
+            b"def other(model):\n    return model\n", plan_settings({"HL_FUSE_ATTN": "1"}), "hyperloom_optimize"
+        )
 
 
 def test_apply_prelude_inserts_after_docstring_and_future_import() -> None:
     source = (
         b'"""module doc"""\nfrom __future__ import annotations\n\ndef hyperloom_optimize(model):\n    return model\n'
     )
-    result = apply_settings_prelude(source, plan_settings({"HL_FUSE_ATTN": "1"}))
+    result = apply_settings_prelude(source, plan_settings({"HL_FUSE_ATTN": "1"}), "hyperloom_optimize")
     text = result.decode()
 
     assert text.index('"""module doc"""') < text.index("from __future__ import annotations")
