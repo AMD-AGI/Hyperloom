@@ -32,6 +32,7 @@ from kernelforge.cli.options import (
     _validate_optional_agent_provider,
     _validate_roofline_target,
     _validate_speedup_target,
+    _validate_wiki_guided,
 )
 from kernelforge.option_groups import option_group
 from kernelforge.cli.pr_references import (
@@ -156,6 +157,14 @@ def _announce_knowledge_base(config) -> None:
     knowledge_wiki = KnowledgeWikiTool.from_config(config)
     if knowledge_wiki is not None:
         print(f"  Knowledge base: {knowledge_wiki.root} (calls logged to {knowledge_wiki.log_path})")
+
+
+def _announce_wiki_guided(iter_config) -> None:
+    if iter_config.wiki_guided:
+        print(
+            "  Wiki-guided planning: on (the first round implements one knowledge base batch in one session, plus "
+            "one round for what a kept batch left untried; then planning as without the flag)"
+        )
 
 
 def _load_external_baseline(path: str) -> tuple[float, dict[str, float]]:
@@ -1138,6 +1147,7 @@ class ForgeLoopRequest:
     roofline_ceiling: CeilingSwitch
     roofline_target: float
     target_mean_case_speedup: float
+    wiki_guided: bool
     prepare_task: bool
     identity: TaskIdentity
     knowledge: KnowledgeOptions
@@ -1368,6 +1378,16 @@ class ForgeLoopRequest:
         "however much of the time budget remains. Zero (default) disables the gate; "
         "any other value at or below 1.0, a negative one included, or one that is not "
         "finite is refused. It never affects KEEP.",
+    ),
+    click.option(
+        "--wiki-guided/--no-wiki-guided",
+        default=False,
+        help="Spend the first round on one knowledge base batch (GUIDED): the directions the knowledge base and the "
+        "round's measured evidence support (plus the largest levers only the evidence supports, marked as such), "
+        "implemented in one session without a plan critic and measured once; a kept batch that left items untried "
+        "gets one more round for them. Every round after that plans as without the flag, without the knowledge "
+        "base tools, seeing a summary of what the batch settled. Needs a knowledge base "
+        "(FORGE_KNOWLEDGE_WIKI_ROOT). Off by default.",
     ),
     click.option(
         "--prepare-task/--no-prepare-task",
@@ -1737,6 +1757,7 @@ def forge_loop(request: ForgeLoopRequest):
         # The attainment of the per-shape ceiling that ends the run; the ceiling itself is estimated inside the loop.
         roofline_target=_validate_roofline_target(request.roofline_target, request.roofline_ceiling.enabled),
         target_mean_case_speedup=_validate_speedup_target(request.target_mean_case_speedup),
+        wiki_guided=_validate_wiki_guided(request.wiki_guided, config.knowledge_wiki_root),
     )
     baseline_json = request.baseline_json
     if baseline_json:
@@ -1943,6 +1964,7 @@ def forge_loop(request: ForgeLoopRequest):
     analysis_mode = "profiled" if profiling_enabled else "static-only"
     print("  Analysis Agent: " + analysis_mode)
     _announce_knowledge_base(config)
+    _announce_wiki_guided(iter_config)
     print(f"  Orchestration: enabled with parallel specialists ({', '.join(sorted(specialist_definitions))})")
     print(
         "  Plan Critic: "

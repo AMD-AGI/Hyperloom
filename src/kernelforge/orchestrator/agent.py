@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -27,6 +28,7 @@ from kernelforge.workspace.edit_policy import TOOL_OWNED_UNTRACKED_GLOBS
 from kernelforge.knowledge.pr_knowledge.agent_tools import TOOL_NAMES as PR_TOOL_NAMES
 from kernelforge.loop.insession_gate import GateMeasurement, GateScope, InSessionGate
 from kernelforge.loop.lessons import SessionEnd
+from kernelforge.orchestrator.wiki_batch import NO_BATCH, BatchSession
 from kernelforge.evaluation.scoring import (
     KEEP_MEASUREMENT_COUNT,
     KEEP_MIN_MARGIN_FRACTION,
@@ -62,6 +64,13 @@ _RATIONALE_REQUEST = (
     "without a win, why this direction is exhausted and what you would try next. Only that line is recorded with the "
     "iteration's keep/revert decision, so make it specific enough to compare runs by."
 )
+# The self-correcting session's stopping rule; a knowledge base batch session states its own in its place.
+_FIRST_WIN_RULE = """\
+4. As soon as you have the FIRST candidate that you believe is correct and
+   faster than the current best, STOP exploring. Submit it immediately to the
+   outer loop, which is the sole authority for canonical correctness, benchmark,
+   KEEP, and REVERT. Do not spend the remaining Session searching for a larger
+   gain after you already have a plausible improvement."""
 
 # PR KB settings forwarded to the MCP child.
 _PR_KB_CHILD_ENV_VARS = (
@@ -337,6 +346,8 @@ def _fill_session_sink(
     """
     # PLAN — one-sentence description of THIS iteration's FINAL modification.
     session_sink["plan"] = _parse_output_tag(run_result.text, "PLAN:", 160, last=True)
+    # The session's whole closing message; a GUIDED batch session reports what it landed in it.
+    session_sink["final_text"] = run_result.text or ""
     session_sink["session_id"] = run_result.session_id
     session_sink["summarize"] = summarize
     session_sink["end_reason"] = ending.end_reason
@@ -652,11 +663,7 @@ judge your kernel. It is yours to READ and to RUN; it is NOT yours to change.
    If correctness fails or a compile error is raised, READ the error and FIX it —
    do not stop on a broken kernel. Optimize the mean of per-case speedups,
    not raw `mean_ms`; the in-session gate computes the authoritative score.
-4. As soon as you have the FIRST candidate that you believe is correct and
-   faster than the current best, STOP exploring. Submit it immediately to the
-   outer loop, which is the sole authority for canonical correctness, benchmark,
-   KEEP, and REVERT. Do not spend the remaining Session searching for a larger
-   gain after you already have a plausible improvement.
+{_FIRST_WIN_RULE}
 5. There is NO hard edit budget — make as many changes to non-protected tracked
    implementation files as a direction needs, verifying as you go. What IS bounded is fruitless
    stopping: each time you STOP with a candidate that is correct but not faster
@@ -710,6 +717,7 @@ Never `cat` a whole file — use the Read tool.
         session_sink: dict | None = None,
         baseline_case_times: dict | None = None,
         best_mean_case_speedup: float | None = None,
+        batch: BatchSession = NO_BATCH,
     ) -> str:
         # Mark the session before entering the provider.
         progress_log: list[str] = []
@@ -735,16 +743,19 @@ Never `cat` a whole file — use the Read tool.
             else max(backend.runtime.timeout_sec, _DEFAULT_SESSION_TIMEOUT_SEC)
         )
         session_deadline_min = max(1, round(session_deadline_sec / 60))
+        started = time.time()
+        batch = batch.timed(session_deadline_sec, now=started)
 
         # Tell the session its own wall-clock bound.
-        deadline_section = (
+        deadline_section = batch.deadline_section(
             "## Session deadline\n"
             f"You have about {session_deadline_min} minutes of wall-clock for "
             "THIS session before it is cut off; a session cut off mid-turn hands "
             "off nothing. Well before then, stop improving and submit the best "
             "candidate you actually have through the clean handoff "
             "(candidate_submitted) — do not reach for a larger gain you cannot "
-            "land in time.\n"
+            "land in time.\n",
+            now=started,
         )
 
         prompt = f"""\
@@ -773,7 +784,7 @@ Make your change(s) now.
                 measurement,
                 # The declared tree, not one guessed from the driver's location: forge-fuse keeps its driver in the
                 # run's output dir, which is outside the workspace and is not a repository.
-                replace(gate_scope, kernel_file=kernel_path, workspace=configured_workspace),
+                replace(gate_scope, kernel_file=kernel_path, workspace=configured_workspace, batch=batch),
                 baseline_case_times=baseline_case_times,
                 best_mean_case_speedup=best_mean_case_speedup,
             )
@@ -781,7 +792,8 @@ Make your change(s) now.
             else None
         )
         system_prompt = (
-            gate_system_prompt + _gate_scoring_context(baseline_case_times, best_mean_case_speedup)
+            gate_system_prompt.replace(_FIRST_WIN_RULE, batch.stop_rule(_FIRST_WIN_RULE))
+            + _gate_scoring_context(baseline_case_times, best_mean_case_speedup)
             if gate is not None and gate_stop_check
             else base_system_prompt
         )

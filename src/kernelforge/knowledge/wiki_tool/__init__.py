@@ -11,6 +11,7 @@ from kernelforge.knowledge.wiki_tool.tool import (
     require_mcp_runtime,
     wiki_servers,
     wiki_tool_names,
+    withdraw_knowledge_wiki,
 )
 
 __all__ = [
@@ -21,4 +22,5 @@ __all__ = [
     "require_mcp_runtime",
     "wiki_servers",
     "wiki_tool_names",
+    "withdraw_knowledge_wiki",
 ]

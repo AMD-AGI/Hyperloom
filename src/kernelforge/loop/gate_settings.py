@@ -7,8 +7,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from kernelforge.evaluation.scoring import DEFAULT_SNR_THRESHOLD_DB
+
+if TYPE_CHECKING:
+    from kernelforge.orchestrator.wiki_batch import BatchSession
 
 # Max times the Stop hook will BLOCK a stop for an unrestored protected-harness change before it gives up, allows the
 # stop, and hands off to the outer loop's force-REVERT.
@@ -39,3 +43,5 @@ class GateScope:
     extra_protected_globs: list[str] | None = None
     extra_protected_paths: list[str] | None = None
     workspace: str | Path | None = None
+    # The knowledge base batch the session implements, which it may not stop short of before its wrap-up time.
+    batch: BatchSession | None = None
