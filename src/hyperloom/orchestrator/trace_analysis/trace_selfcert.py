@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import os
 import re
 from bisect import bisect_left, bisect_right
 from dataclasses import dataclass
@@ -30,17 +29,12 @@ from ._bypass_trace_reader import (
     stream_events,
 )
 from ._capture_shapes import is_capture_fragment
+from ._idle_gate import resolve_idle_pct_threshold
+from ._trace_gates import CHUNK_QUALITY_ALTERNATE_MARGIN, resolve_min_busy_ratio
 
 SCHEMA_VERSION = 1
 PROBE_VERSION = "selfcert-1.0.0"
 
-#: Checklist thresholds. Every one is the value the shipping consumer uses, so a
-#: certificate and the real gate cannot disagree. Overridable values are read
-#: from the environment and echoed into ``thresholds_effective``.
-IDLE_PCT_THRESHOLD_DEFAULT = 80.0
-IDLE_PCT_ENV = "HYPERLOOM_TRACELENS_IDLE_PCT_THRESHOLD"
-CHUNK_QUALITY_MIN_BUSY_RATIO = 0.05
-CHUNK_QUALITY_ALTERNATE_MARGIN = 0.10
 MIN_REPEATS_DEFAULT = 3
 MIN_REPEATS_XDIT = 2
 
@@ -96,20 +90,12 @@ def _ratio(num: float | None, den: float | None) -> float | None:
 
 
 def effective_thresholds() -> dict[str, Any]:
-    """Resolve the gate constants, honouring the environment overrides."""
-    idle = IDLE_PCT_THRESHOLD_DEFAULT
-    raw = os.environ.get(IDLE_PCT_ENV)
-    if raw:
-        try:
-            idle = float(raw)
-        except ValueError:
-            pass
+    """Resolve the thresholds the shipping gates apply, through the gates' own resolvers."""
     return {
         "graph_launch_coverage_max": _GRAPH_RECORDED_LAUNCH_COVERAGE_MAX,
-        "idle_pct_threshold": idle,
-        "idle_pct_threshold_source": "env" if raw else "default",
+        "idle_pct_threshold": resolve_idle_pct_threshold(),
         "min_repeats": MIN_REPEATS_DEFAULT,
-        "chunk_quality_min_busy_ratio": CHUNK_QUALITY_MIN_BUSY_RATIO,
+        "chunk_quality_min_busy_ratio": resolve_min_busy_ratio(),
         "chunk_quality_alternate_margin": CHUNK_QUALITY_ALTERNATE_MARGIN,
         "trace_prefix_max_chars": _MAX_TRACE_PREFIX_CHARS,
         "event_max_chars": _MAX_EVENT_CHARS,
@@ -547,7 +533,6 @@ def certify_trace_dir(trace_dir: str | Path, *, framework: str = "") -> dict[str
         "has_steady_state_semantics": framework.lower() in _SCRIPTABLE_FRAMEWORKS if framework else None,
         "trace_dir_level": inv,
         "rank_level": [],
-        "chunk_level": [],
     }
 
     # Before the early return below: a directory that produced only capture sidecars and no usable trace is

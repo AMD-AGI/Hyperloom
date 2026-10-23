@@ -37,11 +37,12 @@ from hyperloom.orchestrator.actions.executors._workload_envs import (
 )
 from hyperloom.orchestrator.actions.executors.profile import (
     ProfileExecutor,
-    _preferred_main_trace_path,
     _sanitize_profile_server_args,
     _trace_rank,
     _trace_files_for_dir,
+    _trace_size_bytes,
 )
+from hyperloom.orchestrator.trace_analysis._trace_rank import select_primary_trace
 from hyperloom.orchestrator.roles import (
     MockBackend,
     ScriptedPlan,
@@ -4157,10 +4158,9 @@ def test_agentx_primary_trace_prefers_rank_zero_over_merged(tmp_path):
     rank_zero.write_bytes(b"x" * 100)
     rank_one.write_bytes(b"rank-one")
 
-    selected = _preferred_main_trace_path(
-        trace_dir,
+    selected = select_primary_trace(
         [rank_zero_warmup, merged, rank_one, rank_zero],
-        require_single_rank=True,
+        file_size=_trace_size_bytes,
         tensor_parallel_size=2,
     )
 
@@ -4172,10 +4172,9 @@ def test_agentx_primary_trace_does_not_fall_back_to_multi_rank_merge(tmp_path):
     merged = trace_dir / "merged-177.trace.json.gz"
 
     assert (
-        _preferred_main_trace_path(
-            trace_dir,
+        select_primary_trace(
             [merged],
-            require_single_rank=True,
+            file_size=_trace_size_bytes,
             tensor_parallel_size=8,
         )
         is None
@@ -4187,10 +4186,9 @@ def test_agentx_single_unranked_trace_is_safe_without_tp_environment(tmp_path):
     trace = trace_dir / "worker.pt.trace.json.gz"
 
     assert (
-        _preferred_main_trace_path(
-            trace_dir,
+        select_primary_trace(
             [trace],
-            require_single_rank=True,
+            file_size=_trace_size_bytes,
             tensor_parallel_size=None,
         )
         == trace
@@ -4209,10 +4207,9 @@ def test_agentx_tp8_does_not_substitute_only_non_primary_trace(tmp_path, trace_n
     trace = trace_dir / trace_name
 
     assert (
-        _preferred_main_trace_path(
-            trace_dir,
+        select_primary_trace(
             [trace],
-            require_single_rank=True,
+            file_size=_trace_size_bytes,
             tensor_parallel_size=8,
         )
         is None
@@ -4224,10 +4221,9 @@ def test_agentx_tp1_can_use_single_merged_trace_as_compatibility_fallback(tmp_pa
     merged = trace_dir / "merged-177.trace.json.gz"
 
     assert (
-        _preferred_main_trace_path(
-            trace_dir,
+        select_primary_trace(
             [merged],
-            require_single_rank=True,
+            file_size=_trace_size_bytes,
             tensor_parallel_size=1,
         )
         == merged

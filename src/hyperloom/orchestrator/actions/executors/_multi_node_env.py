@@ -198,11 +198,6 @@ def infera_ssh_env_from_state() -> dict[str, str]:
     }
 
 
-def rayjob_id_from_state() -> str:
-    """Return the SaFE-allocated RayJob workload id, or ``\"\"`` if absent."""
-    return str(_read_state().get("rayjob_id") or "").strip()
-
-
 def export_ray_address_to_os() -> None:
     """Set ``RAY_ADDRESS`` from multi_node state when running multi-node optimize."""
     if not is_multi_node():
@@ -290,6 +285,5 @@ __all__ = [
     "log_mn_banner",
     "magpie_remote_env",
     "ray_gcs_address_from_state",
-    "rayjob_id_from_state",
     "resolve_kb_topology",
 ]
