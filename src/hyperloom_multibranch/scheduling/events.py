@@ -10,9 +10,8 @@ gain, and a measurement node quarantined or a node's measurement environment mov
 results' sandbox facts) may make results on either side of it compare less well. The scheduler records each event as a decision, shows it at the judge's next call and asks the judge at once;
 what to stop and what to open is the judge's decision. A quarantine never stops the session: it only widens the nodes
 the toolbox avoids, and on a single node the toolbox still measures there. What does stop it is the toolbox having
-fewer cards than one test needs to run on (``no_measurement_cards``; the usable ones no branch sandbox holds): cards it
-lost for good are never leased again, so no test, FINAL's included, could run. A toolbox that does not know its cards
-never stops the session.
+fewer usable cards than one test needs (``no_measurement_cards``): cards it lost for good are never leased again, so
+no test, FINAL's included, could run. A toolbox that does not know its cards never stops the session.
 
 A large gain is read off the merge reports alone, against the bar each merge was judged by, so it follows the bar of
 whatever metric the gate judges. A merged foundation fix moves the head whatever its gain: it changes what every
@@ -152,13 +151,13 @@ def environment_moved(change: EnvironmentChange) -> SessionEvent:
 
 
 def no_measurement_cards(capacity: MeasurementCapacity, cards_per_test: int) -> SessionEvent | None:
-    """The event of ``capacity`` holding fewer cards than the ``cards_per_test`` one test runs on, those being the usable
-    cards no branch sandbox holds; ``None`` while a test fits, or when the toolbox does not know its cards."""
+    """The event of ``capacity`` holding fewer usable cards than the ``cards_per_test`` one test needs; ``None`` while
+    a test fits, or when the toolbox does not know its cards."""
 
-    if not capacity.known or capacity.measurement_cards >= cards_per_test:
+    if not capacity.known or capacity.usable_cards >= cards_per_test:
         return None
     reason = (
-        f"the toolbox can measure on {capacity.measurement_cards} of its {capacity.total_cards} cards, "
+        f"the toolbox can measure on {capacity.usable_cards} of its {capacity.total_cards} cards, "
         f"a test needs {cards_per_test}"
     )
     detail = {
