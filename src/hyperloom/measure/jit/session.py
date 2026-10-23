@@ -12,7 +12,7 @@ and a symlink is not followed or taken (the test's own directory holds links to 
 
 The session never fails a test: whatever goes wrong with the cache is a note and a state in the report, and the test builds
 what it lacks itself. The staged contribution is published by the host after it has verified the signed result
-(:meth:`hyperloom.measure.jit_store.DirJitStore.publish`), never by the code that runs next to the server.
+(:meth:`hyperloom.measure.jit.store.DirJitStore.publish`), never by the code that runs next to the server.
 """
 
 from __future__ import annotations
@@ -26,9 +26,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from hyperloom.measure import fsafe
-from hyperloom.measure.jit_builds import BuildLog
+from hyperloom.measure.jit.builds import BuildLog
 from hyperloom.measure.jit_kinds import DISABLED, HIT, MISS, VERIFY_FAILED, CacheKind
-from hyperloom.measure.jit_store import (
+from hyperloom.measure.jit.store import (
     BLOBS_DIR,
     MANIFEST_NAME,
     MAX_SNAPSHOT_BYTES,

@@ -16,7 +16,7 @@ from pathlib import Path
 from hyperloom.measure import hosted
 
 from hyperloom.measure.jit_kinds import AITER_JIT
-from hyperloom.measure.jit_store import DirJitStore
+from hyperloom.measure.jit.store import DirJitStore
 from hyperloom.measure.returncodes import HOSTED_RESULT_REJECTED_RC
 from hyperloom.measure.tests.fake_runner import JIT_KEY, JIT_MODULE
 from hyperloom.measure.tests.test_hosted_backend import _run, rig  # noqa: F401 - the hosted suite's fixture and runner

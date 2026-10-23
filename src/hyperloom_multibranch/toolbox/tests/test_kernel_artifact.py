@@ -25,7 +25,7 @@ from hyperloom.common.outside_facts import SGLANG_IMAGE_AITER_CONFIGS
 from hyperloom.contracts.measurement import TestRequest, Validity
 from hyperloom.contracts.recipe import ConfigDelta, KernelArtifact, KernelKind, RecipeDelta, RecipeError, apply
 from hyperloom.measure.compile import LocalBlobStore, kernel_load_env
-from hyperloom.measure.framework_rows import DEFAULT_TABLE_PLACEHOLDER
+from hyperloom.measure.framework.rows import DEFAULT_TABLE_PLACEHOLDER
 from hyperloom.measure.points import AcceptedMeasurement, default_canonical
 from hyperloom.measure.tests.hosted_fixtures import spec_context
 from hyperloom.measure.tests.tunableop_table import NODE_CARDS, TUNABLEOP_ENV, TUNABLEOP_TABLE, tunableop_reads

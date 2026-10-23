@@ -10,14 +10,14 @@ are copied into the same directory and named by their copy. The merge aiter does
 tables writes the de-duplicated rows back into its sources, which are now the test's own files.
 
 A value that lists ``DEFAULT_TABLE_PLACEHOLDER`` beside a file of tuned rows (a rows-only kernel table) is the image's
-default table for that variable plus those rows; ``framework_rows`` takes the rows' shapes out of the default's copy
+default table for that variable plus those rows; ``framework.rows`` takes the rows' shapes out of the default's copy
 first, since aiter rewrites its sources and raises on a shape both carry, and the result says how many it took out.
 
 What no variable redirects is checked instead: the shared tables are hashed against the snapshot before and after the
 test, anything that differs is put back, and the result says so (``framework_base.json``, covered by the signature).
 aiter writes the merged view of a variable to ``/tmp/aiter_configs`` whatever the environment says, and local sandboxes
-share ``/tmp``; ``framework_merge`` gives the test's server a directory of its own for it instead, through a start-up hook
-on its ``PYTHONPATH``, and the result says whether the hook did its work.
+share ``/tmp``; ``framework.merge`` gives the test's server a directory of its own for it instead, through a start-up
+hook on its ``PYTHONPATH``, and the result says whether the hook did its work.
 """
 
 from __future__ import annotations
@@ -39,7 +39,7 @@ from typing import Any
 import yaml
 
 from hyperloom.measure.farm import prepend_pythonpath, server_environment
-from hyperloom.measure.framework_base import (
+from hyperloom.measure.framework.base import (
     FRAMEWORK_BASE_FILE,
     SESSION_SHA_ENV,
     SNAPSHOT_ENV,
@@ -52,9 +52,9 @@ from hyperloom.measure.framework_base import (
     shared_view,
     tree_files,
 )
-from hyperloom.measure.framework_merge import MergeView
-from hyperloom.measure.framework_rows import DEFAULT_TABLE_PLACEHOLDER, RowsOnlyRefused, lay_rows_over
-from hyperloom.measure.framework_tables import AITER_VARIABLE_PREFIX
+from hyperloom.measure.framework.merge import MergeView
+from hyperloom.measure.framework.rows import DEFAULT_TABLE_PLACEHOLDER, RowsOnlyRefused, lay_rows_over
+from hyperloom.measure.framework.tables import AITER_VARIABLE_PREFIX
 from hyperloom.measure.socket import TestCall
 
 __all__ = ["PrivateFramework", "private_framework"]

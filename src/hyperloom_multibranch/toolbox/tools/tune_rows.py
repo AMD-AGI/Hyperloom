@@ -12,8 +12,8 @@ above its limit and refuses a table whose rows carry none. This module does not 
 only when its table has the column and its own figure is a finite number within :data:`ERR_RATIO_LIMIT`. A row that fails
 or cannot be checked is returned as such, with the reason, and is never in the CSV.
 
-The CSV is keyed as aiter keys the variable's table (``framework_tables.table_key``): one row to a shape (the fastest, if
-the tuner left several), in the numeric order of the key, so the same rows are the same bytes and the same artifact
+The CSV is keyed as aiter keys the variable's table (``framework.tables.table_key``): one row to a shape (the fastest,
+if the tuner left several), in the numeric order of the key, so the same rows are the same bytes and the same artifact
 whichever branch puts them.
 """
 
@@ -27,8 +27,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from hyperloom.measure.framework_rows import cell
-from hyperloom.measure.framework_tables import read_variables, table_key
+from hyperloom.measure.framework.rows import cell
+from hyperloom.measure.framework.tables import read_variables, table_key
 from hyperloom_multibranch.toolbox.kernel_artifacts import shape_order
 
 __all__ = [

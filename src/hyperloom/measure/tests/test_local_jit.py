@@ -14,10 +14,10 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.measure.jit_builds import BuildLog
+from hyperloom.measure.jit.builds import BuildLog
 from hyperloom.measure.jit_kinds import AITER_JIT
-from hyperloom.measure.jit_session import JitCacheSession, KindPlan
-from hyperloom.measure.jit_store import DirJitStore
+from hyperloom.measure.jit.session import JitCacheSession, KindPlan
+from hyperloom.measure.jit.store import DirJitStore
 from hyperloom.measure.phases import PhaseRecorder
 from hyperloom.measure.tests.test_local_backend import (  # noqa: F401 - the module's fixtures
     _call,

@@ -19,7 +19,7 @@ import pytest
 import pytest_asyncio
 
 from hyperloom.contracts.recipe import KernelKind
-from hyperloom.measure.framework_rows import lay_rows_over
+from hyperloom.measure.framework.rows import lay_rows_over
 from hyperloom.measure.tests.hosted_fixtures import point_yaml
 from hyperloom.orchestrator.actions.executors import run_with_session_kill
 from hyperloom_multibranch.contracts.toolbox import REJECTION_CODES, MeasurementCapacity, RequestRejected

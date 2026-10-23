@@ -23,7 +23,7 @@ import yaml
 from hyperloom.contracts.recipe import ConfigDelta, KernelArtifact, KernelKind, RecipeDelta
 from hyperloom.measure import local
 from hyperloom.measure.compile import CompiledEnvironment, LocalBlobStore, PackageBase, compile_environment
-from hyperloom.measure.framework_base import framework_envs
+from hyperloom.measure.framework.base import framework_envs
 from hyperloom.measure.local import LocalMeasurementBackend
 from hyperloom.measure.points import default_canonical, generate_points
 from hyperloom.measure.socket import EnvironmentRef, RoundPlan, TestCall

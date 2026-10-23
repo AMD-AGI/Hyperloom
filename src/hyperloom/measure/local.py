@@ -48,8 +48,8 @@ from hyperloom.measure.boot_watch import BOOT_CANCEL_REASON, BootGuard, boot_lim
 from hyperloom.measure.compile import CompiledEnvironment, LocalBlobStore
 from hyperloom.measure.failures import Disposition, FailureClassification, classify_test_failure, decides_test
 from hyperloom.measure.farm import FarmError, build_farm, place_farm, server_python, verify_farm
-from hyperloom.measure.framework_copies import PrivateFramework, private_framework
-from hyperloom.measure.framework_rows import RowsOnlyRefused
+from hyperloom.measure.framework.copies import PrivateFramework, private_framework
+from hyperloom.measure.framework.rows import RowsOnlyRefused
 from hyperloom.measure.magpie_launchers import install_launchers
 from hyperloom.measure.phases import JIT_CACHE, KERNEL_TABLES, OTHER, REPRO_CASE, ROUND_COLLECT, TEARDOWN, PhaseRecorder
 from hyperloom.measure.ports import DEV_SANDBOX_PORTS, pick_port_outside_dev_sandboxes

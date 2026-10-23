@@ -34,7 +34,7 @@ from hyperloom.measure.compile import (
     locate_installed_package,
 )
 from hyperloom.measure.attachments import place_attachments, substitute
-from hyperloom.measure.framework_rows import DEFAULT_TABLE_PLACEHOLDER
+from hyperloom.measure.framework.rows import DEFAULT_TABLE_PLACEHOLDER
 from hyperloom.measure.spec import Attachment
 from hyperloom.measure.tests._recipes import IMAGE, PREFIX, git_patch, put_patch, recipe_with, sha, write_tree
 from hyperloom.measure.tests.tunableop_table import NODE_CARDS, TUNABLEOP_ENV, TUNABLEOP_TABLE, tunableop_reads

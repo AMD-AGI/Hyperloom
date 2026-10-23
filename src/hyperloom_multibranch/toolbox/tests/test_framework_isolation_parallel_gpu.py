@@ -33,8 +33,8 @@ import yaml
 
 from hyperloom.contracts.measurement import TestResult, Validity
 from hyperloom.contracts.recipe import ConfigDelta, RecipeDelta
-from hyperloom.measure.framework_base import DEFAULT_CONFIGS, FRAMEWORK_BASE_FILE, load_snapshot, tree_files
-from hyperloom.measure.framework_merge import PRIVATE, MergeView
+from hyperloom.measure.framework.base import DEFAULT_CONFIGS, FRAMEWORK_BASE_FILE, load_snapshot, tree_files
+from hyperloom.measure.framework.merge import PRIVATE, MergeView
 from hyperloom_multibranch.contracts.toolbox import CancelOutcome
 from hyperloom_multibranch.toolbox.tests.helpers import req
 from hyperloom_multibranch.toolbox.tests.test_framework_isolation_gpu import _landed

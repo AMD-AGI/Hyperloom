@@ -35,7 +35,7 @@ import yaml
 from hyperloom.contracts.measurement import Purpose, TestKind
 from hyperloom.contracts.recipe import ConfigDelta, RecipeDelta
 from hyperloom.measure import local
-from hyperloom.measure.framework_base import DEFAULT_CONFIGS, FRAMEWORK_BASE_FILE, framework_envs
+from hyperloom.measure.framework.base import DEFAULT_CONFIGS, FRAMEWORK_BASE_FILE, framework_envs
 from hyperloom.measure.local import LocalMeasurementBackend
 from hyperloom.measure.socket import TestCall
 from hyperloom.orchestrator.actions.executors import VariantResult

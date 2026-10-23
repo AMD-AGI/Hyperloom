@@ -21,7 +21,7 @@ while another binds the variable sees that binding.
 
 A table put with ``rows_only`` holds only the rows a specialist tuned, so a branch need not upload the image's own: the
 test's variable names the image's default table and then that file, and a shape in both is read from the file
-(``hyperloom.measure.framework_rows``). It binds the variable to its target like any table.
+(``hyperloom.measure.framework.rows``). It binds the variable to its target like any table.
 
 A TunableOp results file (the variable ``hyperloom.common.outside_facts.TUNABLEOP_TABLE_ENV``) is such a table too:
 PyTorch reads it from a file named after the variable's value with the device ordinal put in, so the compiler places it
@@ -50,8 +50,8 @@ from hyperloom.measure.compile import (
     kernel_load_env,
     kernel_rows_only,
 )
-from hyperloom.measure.framework_rows import cell
-from hyperloom.measure.framework_tables import read_variables, table_key
+from hyperloom.measure.framework.rows import cell
+from hyperloom.measure.framework.tables import read_variables, table_key
 from hyperloom.measure.hosted_spec import MAX_ATTACHMENT_BYTES
 from hyperloom_multibranch.contracts.toolbox import RequestRejected
 
@@ -220,7 +220,7 @@ def union_rows(
 ) -> bytes:
     """The rows of two tables for one ``AITER_CONFIG_*`` variable, as one table with one row to a shape.
 
-    A shape is what ``framework_tables.table_key`` says it is for ``env``; that reads the install's untuned sibling of
+    A shape is what ``framework.tables.table_key`` says it is for ``env``; that reads the install's untuned sibling of
     the table, so this runs where the image's aiter is reachable (``configs``, default the SGLang image's
     ``aiter/configs``, with ``jit/core.py`` beside it). A shape in both tables with the same row is kept once. The
     tables' cells are compared as aiter reads them (``64`` is ``64.0``), and the text kept is the smaller of the two.

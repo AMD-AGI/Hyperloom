@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from hyperloom.measure.jit_builds import BuildLog, scan_builds, server_logs
+from hyperloom.measure.jit.builds import BuildLog, scan_builds, server_logs
 
 # What aiter wrote in real server logs: the cpp_itfs form (a path) and the module builder's form (a bracketed md_name, in colour).
 CPP = (

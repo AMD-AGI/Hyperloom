@@ -6,7 +6,7 @@
 A local sandbox shares the image's framework install with every other local sandbox. aiter reads its tuned tables
 (``aiter/configs``) from there, and when a variable lists several tables it merges them and writes the de-duplicated
 rows back into each source file, so one test's merge changed what every later test measured. The toolbox takes a
-snapshot of the tables when the session starts; every test then reads private copies of it (``framework_copies``) and
+snapshot of the tables when the session starts; every test then reads private copies of it (``framework.copies``) and
 the shared files are only ever compared with the snapshot and, if anything changed them, put back.
 """
 
@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from hyperloom.common.outside_facts import SGLANG_IMAGE_AITER_CONFIGS
-from hyperloom.measure.framework_tables import TableVariable, read_variables
+from hyperloom.measure.framework.tables import TableVariable, read_variables
 
 __all__ = [
     "DEFAULT_CONFIGS",

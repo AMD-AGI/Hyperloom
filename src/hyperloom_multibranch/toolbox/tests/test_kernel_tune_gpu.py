@@ -27,8 +27,8 @@ from pathlib import Path
 import pytest
 
 from hyperloom.contracts.recipe import KernelKind
-from hyperloom.measure.framework_base import DEFAULT_CONFIGS
-from hyperloom.measure.framework_rows import lay_rows_over
+from hyperloom.measure.framework.base import DEFAULT_CONFIGS
+from hyperloom.measure.framework.rows import lay_rows_over
 from hyperloom.measure.tests.hosted_fixtures import spec_context
 from hyperloom_multibranch.contracts.notebook import Role, Writer
 from hyperloom_multibranch.contracts.toolbox import MeasurementCapacity, WorkloadKind

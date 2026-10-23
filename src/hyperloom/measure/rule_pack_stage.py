@@ -6,8 +6,8 @@
 A local sandbox starts from an emptied environment, so ``HYPERLOOM_RULE_PACK`` does not reach the runner on its own: a
 session that names a pack would measure with the reference one, and the digest its manifest records would not describe
 what the runner used. The toolbox therefore copies the pack it read to the session directory and names the copy in the
-environment of every sandbox template, the way ``framework_base`` snapshots the tuned tables. The copy is the bytes whose
-digest the session recorded, so a pack file edited while the session runs changes nothing for the tests that follow.
+environment of every sandbox template, the way ``framework.base`` snapshots the tuned tables. The copy is the bytes
+whose digest the session recorded, so a pack file edited while the session runs changes nothing for the tests that follow.
 
 The reference pack ships with the package, where every sandbox of the same install finds it; a session that reads it
 sets nothing.
@@ -19,7 +19,7 @@ import hashlib
 from pathlib import Path
 
 from hyperloom.common.io import WriteOptions, atomic_write_bytes
-from hyperloom.common.rule_pack import DEFAULT_PACK_PATH, PACK_ENV, RulePackError, default_pack
+from hyperloom.common.outside_facts.rule_pack import DEFAULT_PACK_PATH, PACK_ENV, RulePackError, default_pack
 
 __all__ = ["rule_pack_envs"]
 

@@ -11,7 +11,13 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.common.rule_pack import DEFAULT_PACK_PATH, PACK_ENV, RulePackIdentity, default_pack, load_pack
+from hyperloom.common.outside_facts.rule_pack import (
+    DEFAULT_PACK_PATH,
+    PACK_ENV,
+    RulePackIdentity,
+    default_pack,
+    load_pack,
+)
 
 OTHER_VERSION = "2-test"
 

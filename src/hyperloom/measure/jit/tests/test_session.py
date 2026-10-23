@@ -17,11 +17,11 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.measure import jit_session
-from hyperloom.measure.jit_builds import BuildLog, scan_builds
+from hyperloom.measure.jit import session as jit_session
+from hyperloom.measure.jit.builds import BuildLog, scan_builds
 from hyperloom.measure.jit_kinds import AITER_CPP, AITER_JIT, DISABLED, HIT, MISS, TRITON, VERIFY_FAILED
-from hyperloom.measure.jit_session import JitCacheSession, KindPlan
-from hyperloom.measure.jit_store import DirJitStore
+from hyperloom.measure.jit.session import JitCacheSession, KindPlan
+from hyperloom.measure.jit.store import DirJitStore
 
 KEY = "a" * 64
 TRITON_KEY = "b" * 64

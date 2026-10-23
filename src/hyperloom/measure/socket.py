@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, Literal, Protocol
 
 from hyperloom.contracts.measurement import AccuracyValue, AttachmentRef, FailureClass, PhaseTiming, SandboxFacts
-from hyperloom.measure.jit_session import JitCacheSession
+from hyperloom.measure.jit.session import JitCacheSession
 from hyperloom.measure.phases import PhaseRecorder
 
 __all__ = [

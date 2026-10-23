@@ -20,7 +20,7 @@ import yaml
 
 from hyperloom.common.benchmark_config import is_magpie_agentx
 from hyperloom.common.outside_facts import ROCR_VISIBLE_DEVICES_ENV
-from hyperloom.common.rule_pack import rule_pack_identity
+from hyperloom.common.outside_facts.rule_pack import rule_pack_identity
 from hyperloom.contracts.measurement import AttachmentRef, FailureClass
 from hyperloom.measure import signing
 from hyperloom.measure.docs import DocumentError
@@ -39,7 +39,7 @@ from hyperloom.measure.phases import (
     manifest_document,
 )
 from hyperloom.measure.pins import IMAGE_DIGEST_VAR
-from hyperloom.measure.jit_session import JitCacheSession
+from hyperloom.measure.jit.session import JitCacheSession
 from hyperloom.measure.runner import hardware
 from hyperloom.measure.runner.aiperf_patch import ReplayClientPatchError, patch_replay_client
 from hyperloom.measure.attachments import AttachmentError, place_attachments

@@ -5,7 +5,7 @@
 # depend on. A session reads the pack named by HYPERLOOM_RULE_PACK, and this copy when the variable is not set, so a fact
 # that changed upstream is changed by publishing a pack, not by changing code.
 #
-# Entry kinds, a closed list in hyperloom.common.rule_pack:
+# Entry kinds, a closed list in hyperloom.common.outside_facts.rule_pack:
 #   names         closed set of names, each under the role the code reads it by
 #   log_regex     a pattern for a log line; every examples.match line must match it, every examples.no_match line must not
 #   env_default   an environment variable and the value a launch sets
@@ -38,7 +38,7 @@ facts:
       aiter_configs: aiter/aiter/configs
     examples:
       - "hyperloom.measure.compile: IMAGE_SOURCE_ROOTS lists the workspace as a place sources are read from"
-      - "hyperloom.measure.framework_base: DEFAULT_CONFIGS is the aiter tables directory, the workspace joined with aiter_configs"
+      - "hyperloom.measure.framework.base: DEFAULT_CONFIGS is the aiter tables directory, the workspace joined with aiter_configs"
 
   context_length_flags:
     kind: names

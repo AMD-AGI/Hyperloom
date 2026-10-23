@@ -44,6 +44,8 @@ _NOT_SCANNED = frozenset(
 )
 #: The one source file allowed to hold an owned value as a literal: it runs inside a sandbox with the standard library only.
 _STANDALONE = {"hyperloom/measure/aiter_merge_hook.py": {"AITER_MERGED_VIEW_DIR"}}
+#: The module that binds the facts to their names: the one place that holds the values.
+_OWNER = Path(outside_facts.__file__).resolve()
 _ROOTS = (
     Path(hyperloom.__file__).parent / "measure",
     Path(hyperloom.__file__).parent / "common",
@@ -102,7 +104,7 @@ def test_no_reader_repeats_an_owned_value() -> None:
     for root in _ROOTS:
         for path in sorted(root.rglob("*.py")):
             relative = path.relative_to(root.parent.parent).as_posix()
-            if "/tests/" in relative or path.name.startswith("test_") or path.name == "outside_facts.py":
+            if "/tests/" in relative or path.name.startswith("test_") or path.resolve() == _OWNER:
                 continue
             for line, text in _strings_outside_docstrings(path):
                 for name, value in owned.items():
@@ -128,7 +130,8 @@ _PROBE = textwrap.dedent(
 
     from hyperloom.common import env_safety, failure_signature, visible_devices
     from hyperloom.measure import compile as compiled
-    from hyperloom.measure import agentx_requests, eval_context, framework_base, hosted_spec, local, log_causes, points, surface
+    from hyperloom.measure import agentx_requests, eval_context, hosted_spec, local, log_causes, points, surface
+    from hyperloom.measure.framework import base as framework_base
     from hyperloom.measure.runner import run
     from hyperloom.sandbox import templates
     from hyperloom_multibranch.toolbox import acceptance, hosted_executor, mcp_tools

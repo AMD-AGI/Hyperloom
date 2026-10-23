@@ -27,7 +27,7 @@ from hyperloom.contracts.recipe import (
     Recipe,
     RecipeDelta,
 )
-from hyperloom.measure.framework_tables import AITER_VARIABLE_PREFIX
+from hyperloom.measure.framework.tables import AITER_VARIABLE_PREFIX
 from hyperloom_multibranch.specialist.agent_manifest import ConfigSource, read_field
 from hyperloom_multibranch.specialist.worktree import Upstream
 

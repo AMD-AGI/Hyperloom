@@ -48,12 +48,12 @@ from typing import Any
 
 import yaml
 
-from hyperloom.common.rule_pack import rule_pack_identity
+from hyperloom.common.outside_facts.rule_pack import rule_pack_identity
 from hyperloom.measure import signing
 from hyperloom.measure.attachments import place_attachments, substitute
 from hyperloom.measure.repro import REPRO_DIR, find_case, run_case
 from hyperloom.measure.jit_kinds import AITER_JIT
-from hyperloom.measure.jit_store import Snapshot, StoredFile
+from hyperloom.measure.jit.store import Snapshot, StoredFile
 from hyperloom.measure.manifest import RESULT_SCHEMA, encode_manifest
 from hyperloom.measure.runner.service import Progress
 from hyperloom.measure.spec import MeasurementSpec, fingerprint, spec_sha256

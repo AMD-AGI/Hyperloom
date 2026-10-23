@@ -4,9 +4,9 @@
 """The runner's side of the shared compiled-code cache: from the instruction sheet to a session (design 4.21).
 
 The sheet fixes what the compilers build from: the image, the GPU, the patch laid over the framework, the tuned tables
-and the environment of the server. This module reads those facts, asks :mod:`hyperloom.measure.jit_key` for the key of
-each kind and hands the backend a :class:`~hyperloom.measure.jit_session.JitCacheSession`. Nothing here is a reason for a
-test to fail: a fact that cannot be read switches the kind that needs it off, with a note, and the test builds cold.
+and the environment of the server. This module reads those facts, asks :mod:`hyperloom.measure.jit.key` for the key of
+each kind and hands the backend a :class:`~hyperloom.measure.jit.session.JitCacheSession`. Nothing here is a reason
+for a test to fail: a fact that cannot be read switches the kind that needs it off, with a note, and the test builds cold.
 
 ``HYPERLOOM_JIT_CACHE`` names the cache's directory; the template mounts it read-only, and without it there is no cache.
 """
@@ -23,8 +23,8 @@ import yaml
 
 from hyperloom.common.gpu_identity import gfx_arch_for_gpu_type
 from hyperloom.measure.farm import Farm, FarmError, locate_package, server_environment, server_python
-from hyperloom.measure.jit_builds import BuildLog, scan_builds, server_logs
-from hyperloom.measure.jit_key import (
+from hyperloom.measure.jit.builds import BuildLog, scan_builds, server_logs
+from hyperloom.measure.jit.key import (
     AITER_PACKAGE,
     REBUILD_VARIABLE,
     Machine,
@@ -36,8 +36,8 @@ from hyperloom.measure.jit_key import (
     triton_key,
 )
 from hyperloom.measure.jit_kinds import AITER_CPP, AITER_JIT, TRITON, CacheKind
-from hyperloom.measure.jit_session import JitCacheSession, KindPlan
-from hyperloom.measure.jit_store import DirJitStore
+from hyperloom.measure.jit.session import JitCacheSession, KindPlan
+from hyperloom.measure.jit.store import DirJitStore
 from hyperloom.measure.round_marks import boot_parts
 from hyperloom.measure.runner.hardware import GpuFacts
 from hyperloom.measure.spec import EnvRoot, MeasurementSpec

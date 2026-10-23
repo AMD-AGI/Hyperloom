@@ -33,8 +33,8 @@ import pytest
 
 from hyperloom.contracts.measurement import TABLE_EXERCISED, TestResult, Validity
 from hyperloom.contracts.recipe import ConfigDelta, KernelArtifact, RecipeDelta
-from hyperloom.measure.framework_base import DEFAULT_CONFIGS, FRAMEWORK_BASE_FILE, load_snapshot, tree_files
-from hyperloom.measure.framework_merge import PRIVATE
+from hyperloom.measure.framework.base import DEFAULT_CONFIGS, FRAMEWORK_BASE_FILE, load_snapshot, tree_files
+from hyperloom.measure.framework.merge import PRIVATE
 from hyperloom.measure.points import default_canonical
 from hyperloom.measure.tests.hosted_fixtures import spec_context
 from hyperloom.orchestrator.actions.executors._workload_envs import default_baseline_config
