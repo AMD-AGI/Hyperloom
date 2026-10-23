@@ -672,6 +672,7 @@ class _RecordingImplementer:
         async def agent(kernel_path: str, plan: str) -> str:
             return f"{kernel_path}:{plan}"
 
+        agent.close = lambda: None
         return agent
 
 

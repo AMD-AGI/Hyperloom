@@ -395,6 +395,9 @@ class ClaudeBackend:
         self._query, self._options_type = _load_claude_sdk()
         self.fallback_reason = ""
 
+    def close(self) -> None:
+        """Every session runs in its own Claude Code process, so there is no process left to stop."""
+
     def preflight(self) -> None:
         """Validate that an explicitly configured executable is Claude CLI."""
         if not self.runtime.executable.strip():

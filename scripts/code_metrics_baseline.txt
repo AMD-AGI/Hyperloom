@@ -401,7 +401,7 @@ function-lines src/kernelforge/loop/runner.py::IterationLoop._record_iteration_o
 function-lines src/kernelforge/loop/runner.py::IterationLoop._record_lesson 124
 function-lines src/kernelforge/loop/task_preflight.py::_count_graph_replays 85
 function-lines src/kernelforge/loop/task_preparer.py::prepare_task 340
-function-lines src/kernelforge/orchestrator/agent.py::make_agent_fn 312
+function-lines src/kernelforge/orchestrator/agent.py::make_agent_fn 309
 function-lines src/kernelforge/orchestrator/agent.py::make_agent_fn.agent_fn 194
 function-lines src/kernelforge/orchestrator/analysis.py::AnalysisAgentService._prompts 227
 function-lines src/kernelforge/orchestrator/analysis.py::AnalysisAgentService._run_analysis_session 94

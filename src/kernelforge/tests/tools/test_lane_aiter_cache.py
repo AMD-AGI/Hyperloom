@@ -97,6 +97,7 @@ def _implementer_through(backend):
             )
             return plan
 
+        agent.close = backend.close
         return agent
 
     return make_agent

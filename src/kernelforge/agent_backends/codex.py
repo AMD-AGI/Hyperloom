@@ -368,6 +368,9 @@ class CodexBackend:
         self._codex_home_owner: Any = None
         self._codex_home = ""
 
+    def close(self) -> None:
+        """Every session runs in its own ``codex exec`` process, so there is no process left to stop."""
+
     def _child_environment(
         self,
         base: dict[str, str] | None = None,

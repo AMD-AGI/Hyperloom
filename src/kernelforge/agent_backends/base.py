@@ -332,6 +332,10 @@ class AgentBackend(Protocol):
         """Execute one agent session and return a normalized result."""
         raise NotImplementedError
 
+    def close(self) -> None:
+        """Release what the backend keeps alive between sessions; no session can be resumed afterwards."""
+        raise NotImplementedError
+
 
 class ResumableAgentBackend(AgentBackend, Protocol):
     """Extend an agent backend with explicit session continuation."""
