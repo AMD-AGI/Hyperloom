@@ -337,6 +337,25 @@ async def test_a_champion_that_does_not_improve_leaves_explore_on_the_root(tmp_p
     assert str(logged["reason"]).startswith("regressed")
 
 
+async def test_a_champion_the_toolbox_refuses_leaves_explore_on_the_root(bench: Bench) -> None:
+    """A refusal the PRELUDE preflight cannot foresee, such as backpressure, must not end the session before EXPLORE:
+    the champion is no specialist's work and nothing of the session needs it."""
+
+    bench.refuse("c1")
+
+    opened = await bench.integrator.replay_champion(CHAMPION, bench.root)
+
+    assert opened == bench.root == await bench.repo.head(INTEGRATION_BRANCH)
+    [logged] = bench.logged()
+    assert logged["reason"] == f"the toolbox refused the replay: {REFUSAL}"
+    assert logged["detail"] == {
+        "champion": CHAMPION.canonical_id,
+        "onto": bench.root,
+        "request_id": "",
+        "merged_commit": "",
+    }
+
+
 async def test_a_champion_the_root_carries_already_is_never_tested(bench: Bench) -> None:
     opened = await bench.integrator.replay_champion(replace(CHAMPION, launch=ROOT_RECIPE.launch), bench.root)
 
