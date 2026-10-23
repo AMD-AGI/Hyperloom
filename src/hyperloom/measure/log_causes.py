@@ -17,6 +17,18 @@ from __future__ import annotations
 
 import re
 
+from hyperloom.common.outside_facts import (
+    ARGPARSE_INVALID_CHOICE,
+    ARGPARSE_UNRECOGNIZED_ARGUMENTS_RE,
+    HIP_ERROR_PREFIX,
+    HIP_NO_BINARY_FOR_GPU,
+    HIP_NO_KERNEL_IMAGE,
+    HIP_UNDEFINED_SYMBOL,
+    HSA_STATUS_ERROR,
+    PY_IMPORT_ERROR,
+    PY_MODULE_NOT_FOUND_ERROR,
+)
+
 #: A cause line longer than this is cut, so a reason stays one readable line.
 CAUSE_CHARS = 300
 
@@ -25,9 +37,10 @@ _CONTROL = re.compile(r"[\x00-\x1f\x7f]+")
 #: ``<prog>: error: <message>``, the one shape argparse prints a refused command line in, with the messages argparse
 #: itself defines (``argparse.py``).
 _ARGPARSE = re.compile(
-    r": error: (?:ambiguous option|unrecognized arguments?|the following arguments are required"
-    r"|argument \S+:|expected (?:one|at most one|at least one|\d+) arguments?|invalid choice"
-    r"|invalid \w+ value|ignored explicit argument|one of the arguments)"
+    r": error: (?:ambiguous option|" + ARGPARSE_UNRECOGNIZED_ARGUMENTS_RE + r"|the following arguments are required"
+    r"|argument \S+:|expected (?:one|at most one|at least one|\d+) arguments?|"
+    + ARGPARSE_INVALID_CHOICE
+    + r"|invalid \w+ value|ignored explicit argument|one of the arguments)"
 )
 #: A compiler's ``file.c:3:1: error: ...`` shares the ``: error:`` with argparse and names a source location first.
 _COMPILER_DIAGNOSTIC = re.compile(r":\d+(?::\d+)?: error:")
@@ -44,17 +57,21 @@ _REFUSAL_MESSAGE = re.compile(r"API request failed|[\"']message[\"']\s*:")
 #: The exception a failed import raised, ``ImportError: message`` or ``ModuleNotFoundError: message`` after an optional
 #: log prefix. A server that skips a model whose imports fail logs ``Ignore import error when loading <module>: ...``
 #: and carries on; that line is not an exception and does not match.
-_IMPORT_FAILURE = re.compile(r"(?<![\w.])(?:[A-Za-z_]\w*\.)*(?:ImportError|ModuleNotFoundError):\s*\S")
+_IMPORT_FAILURE = re.compile(
+    r"(?<![\w.])(?:[A-Za-z_]\w*\.)*(?:" + PY_IMPORT_ERROR + "|" + PY_MODULE_NOT_FOUND_ERROR + r"):\s*\S"
+)
 
 #: What a missing compiled kernel prints: an extension that references a symbol nothing defines, or a GPU binary built for
 #: another device. Nothing else a HIP call reports belongs here.
-_MISSING_KERNEL = re.compile(r"undefined symbol|no kernel image is available|hipErrorNoBinaryForGpu|HSA_STATUS_ERROR")
+_MISSING_KERNEL = re.compile(
+    "|".join((HIP_UNDEFINED_SYMBOL, HIP_NO_KERNEL_IMAGE, HIP_NO_BINARY_FOR_GPU, HSA_STATUS_ERROR))
+)
 #: The exception a failed HIP call raised (``torch.AcceleratorError: HIP error: an illegal memory access was
 #: encountered``, ``RuntimeError: HIP runtime error: operation failed ...``), which states the fault in words. The
 #: ``HIP warning:`` a stream prints for the same fault is not it.
 _HIP_EXCEPTION = re.compile(r"\bHIP (?:runtime )?error: ")
 #: The name of the failed call, on its own line when the exception text was cut (``Search for `hipErrorIllegalAddress'``).
-_HIP_ERROR_TOKEN = re.compile(r"hipError[A-Za-z]+")
+_HIP_ERROR_TOKEN = re.compile(HIP_ERROR_PREFIX + r"[A-Za-z]+")
 
 #: ``SomeError: message`` after an optional log prefix, or a bare ``SomeError`` on a line of its own.
 _EXCEPTION_WITH_MESSAGE = re.compile(r"(?<![\w.])((?:[A-Za-z_]\w*\.)*(?:[A-Z]\w*)?(?:Error|Exception)):\s*\S")

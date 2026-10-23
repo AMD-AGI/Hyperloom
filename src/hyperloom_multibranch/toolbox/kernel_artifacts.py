@@ -18,8 +18,9 @@ A table put with ``rows_only`` holds only the rows a specialist tuned, so a bran
 test's variable names the image's default table and then that file, and a shape in both is read from the file
 (``hyperloom.measure.framework_rows``). It binds the variable to its target like any table.
 
-A TunableOp results file (``PYTORCH_TUNABLEOP_FILENAME``) is such a table too: PyTorch reads it from a file named after
-the variable's value with the device ordinal put in, so the compiler places it under the name of every ordinal.
+A TunableOp results file (the variable ``hyperloom.common.outside_facts.TUNABLEOP_TABLE_ENV``) is such a table too:
+PyTorch reads it from a file named after the variable's value with the device ordinal put in, so the compiler places it
+under the name of every ordinal.
 """
 
 from __future__ import annotations

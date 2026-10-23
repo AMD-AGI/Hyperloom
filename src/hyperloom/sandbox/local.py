@@ -22,6 +22,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
+from hyperloom.common.outside_facts import ROCR_VISIBLE_DEVICES_ENV
 from hyperloom.sandbox.gpu_pool import GpuPool
 from hyperloom.sandbox.identity import generate_signing_identity
 from hyperloom.sandbox.node import node_name
@@ -342,7 +343,7 @@ class LocalSandboxProvider:
             "HYPERLOOM_SANDBOX_ROOT": str(directory / "fs"),
         }
         if tpl.gpus:
-            envs["ROCR_VISIBLE_DEVICES"] = ",".join(str(c) for c in cards)
+            envs[ROCR_VISIBLE_DEVICES_ENV] = ",".join(str(c) for c in cards)
         if tpl.signing:
             identity = generate_signing_identity(directory / "private", self._users[True])
             meta[SIGNING_PUBLIC_KEY] = identity.public_key_pem

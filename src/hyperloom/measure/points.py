@@ -25,6 +25,16 @@ import yaml
 
 from hyperloom.common.benchmark_config import is_magpie_agentx
 from hyperloom.common.env_safety import filter_untrusted_env_mapping, is_allowed_variant_env_key
+from hyperloom.common.outside_facts import (
+    ENV_CONC,
+    ENV_EP,
+    ENV_ISL,
+    ENV_MAX_MODEL_LEN,
+    ENV_OSL,
+    ENV_RANDOM_RANGE_RATIO,
+    ENV_RUN_EVAL,
+    ENV_TP,
+)
 from hyperloom.contracts.measurement import TestKind, TestRequest
 from hyperloom.contracts.recipe import LaunchConfig, Recipe, RecipeError
 from hyperloom.inference_optimizer import framework_registry
@@ -83,13 +93,13 @@ def _render(canonical: CanonicalMeasurement, out_dir: Path, name: str, **overrid
     concurrency = None
     if canonical.agentx:
         pins = dict(options.get("extra_envs") or {})
-        concurrency = pins.pop("CONC")
+        concurrency = pins.pop(ENV_CONC)
         options["extra_envs"], _ = filter_untrusted_env_mapping(pins, allow_predicate=is_allowed_variant_env_key)
     path = materialize_benchmark_config(canonical.config_path, out_dir, out_name=name, **options)
     with path.open(encoding="utf-8") as handle:
         config = yaml.safe_load(handle) or {}
     if concurrency is not None:
-        config["benchmark"]["envs"]["CONC"] = int(concurrency)
+        config["benchmark"]["envs"][ENV_CONC] = int(concurrency)
         path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
     return config
 
@@ -115,8 +125,10 @@ def default_canonical(
 
     base = config_path or default_baseline_config()
     canonical = CanonicalMeasurement(base, MeasurementSurface({}), primary_concurrency, materialize)
-    evaluation = {} if canonical.agentx else {"RUN_EVAL": "true"}
-    config = _render(canonical, out_dir, "canonical.yaml", extra_envs={"CONC": str(primary_concurrency), **evaluation})
+    evaluation = {} if canonical.agentx else {ENV_RUN_EVAL: "true"}
+    config = _render(
+        canonical, out_dir, "canonical.yaml", extra_envs={ENV_CONC: str(primary_concurrency), **evaluation}
+    )
     return CanonicalMeasurement(base, extract_surface(config), primary_concurrency, materialize)
 
 
@@ -182,7 +194,7 @@ def generate_points(
     points = []
     for index, level in enumerate(_concurrencies(concurrency, canonical)):
         run_eval = "true" if accuracy else "false"
-        pins = {"CONC": str(level), "RUN_EVAL": run_eval}
+        pins = {ENV_CONC: str(level), ENV_RUN_EVAL: run_eval}
         reference = _reference(canonical, pins)
         name = f"point-{index}-c{level}.yaml"
         config = _render(
@@ -203,10 +215,10 @@ def generate_points(
 
 
 #: Surface fields a profile point may change: the profile run lowers its output length to fit the capture window.
-_PROFILE_SURFACE_EXEMPT = ("envs.OSL",)
+_PROFILE_SURFACE_EXEMPT = (f"envs.{ENV_OSL}",)
 #: What the profile point takes from the canonical rendering, so the profile configuration's own defaults for the
 #: workload (a different input length, another TP) cannot make it profile a workload the tests do not run.
-_PROFILE_PINNED = ("TP", "EP", "ISL", "RANDOM_RANGE_RATIO", "MAX_MODEL_LEN")
+_PROFILE_PINNED = (ENV_TP, ENV_EP, ENV_ISL, ENV_RANDOM_RANGE_RATIO, ENV_MAX_MODEL_LEN)
 
 
 def _profile_canonical(canonical: CanonicalMeasurement) -> CanonicalMeasurement:
@@ -240,7 +252,7 @@ def generate_profile_point(
     check_launch_envs([*launch.envs, *environment.envs])
     out_dir.mkdir(parents=True, exist_ok=True)
     level = canonical.primary_concurrency
-    pins = {"CONC": str(level), "RUN_EVAL": "false"}
+    pins = {ENV_CONC: str(level), ENV_RUN_EVAL: "false"}
     reference = benchmark_envs(_reference(canonical, pins))
     workload = {name: str(reference[name]) for name in _PROFILE_PINNED if reference.get(name) is not None}
     config = _render(

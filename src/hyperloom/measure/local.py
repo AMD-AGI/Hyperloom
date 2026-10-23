@@ -39,6 +39,7 @@ import yaml
 from hyperloom.common.benchmark_config import is_magpie_agentx
 from hyperloom.common.env import is_truthy
 from hyperloom.common.env_safety import filter_untrusted_env_mapping, is_allowed_variant_env_key
+from hyperloom.common.outside_facts import ENV_CONC, ENV_NUM_PROMPTS, ENV_RUN_EVAL, ROCR_VISIBLE_DEVICES_ENV
 from hyperloom.contracts.measurement import SandboxFacts
 from hyperloom.inference_optimizer import framework_registry
 from hyperloom.measure.attachments import AttachmentError, place_attachments, substitute
@@ -126,12 +127,12 @@ _PROCESS_LOCK = threading.Lock()
 #: those keys would make the check refuse the rounds that measure. ``NUM_WARMUPS`` stays the point's (Magpie takes its
 #: warmups from the concurrency). An AgentX point has no evaluation round and no prompt count; its boot round carries
 #: only what the backend says.
-_BOOT_CLIENT_ENVS = {"RUN_EVAL": "false", "NUM_PROMPTS": "1"}
+_BOOT_CLIENT_ENVS = {ENV_RUN_EVAL: "false", ENV_NUM_PROMPTS: "1"}
 #: The warmup round of a graded test, the one that evaluates (``_eval_then_measure``).
 _WARMUP = "warmup"
 #: The measured round of a graded test must not evaluate again. ``RUN_EVAL`` is one of Magpie's
 #: ``CLIENT_ONLY_REUSE_ENV_KEYS``, so the server the warmup round booted is the one this round reuses.
-_MEASURED_ENVS = {"RUN_EVAL": "false"}
+_MEASURED_ENVS = {ENV_RUN_EVAL: "false"}
 #: What ``run_grid`` writes on a point whose warmup round it discarded, with the throughput of that round.
 _WARMUP_DISCARDED = "run_grid_warmup_discarded_first"
 _WARMUP_TPUT = "warmup_round_tput"
@@ -269,7 +270,7 @@ def _validate_repro(call: TestCall) -> None:
 
 def _check_run_eval(point: Path, accuracy: bool) -> None:
     """The point must say, explicitly, whether it runs accuracy; an unset ``RUN_EVAL`` means on in the old flow."""
-    raw = _point_envs(point).get("RUN_EVAL")
+    raw = _point_envs(point).get(ENV_RUN_EVAL)
     if raw is None:
         raise TestCallRefused(f"{point} does not set RUN_EVAL; an unset value runs accuracy")
     if is_truthy(raw, default=True) != accuracy:
@@ -277,7 +278,7 @@ def _check_run_eval(point: Path, accuracy: bool) -> None:
 
 
 def _levels(points: Sequence[Path]) -> list[int]:
-    return [int(_point_envs(point).get("CONC") or 0) for point in points]
+    return [int(_point_envs(point).get(ENV_CONC) or 0) for point in points]
 
 
 def _check_sweep_levels(points: Sequence[Path]) -> None:
@@ -808,7 +809,7 @@ def _image_digest(call: TestCall) -> str | None:
 def _sandbox_facts(call: TestCall) -> SandboxFacts:
     """What this machine can state about itself without asking a device; the rest stays unset, not guessed."""
     node = node_name()
-    visible = os.environ.get("ROCR_VISIBLE_DEVICES", "")
+    visible = os.environ.get(ROCR_VISIBLE_DEVICES_ENV, "")
     gpus = tuple(int(part) for part in visible.split(",") if part.strip().isdigit())
     return SandboxFacts(
         sandbox_id=f"local-{node}-{call.task_id}",

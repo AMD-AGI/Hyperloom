@@ -52,6 +52,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from hyperloom.common.outside_facts import ENV_CONC, ENV_ISL, ENV_OSL, ENV_RANDOM_RANGE_RATIO
 from hyperloom.inference_optimizer.session import paths as session_paths
 from hyperloom.orchestrator.actions.executors import run_with_session_kill
 from hyperloom.orchestrator.trace_analysis.tracelens_arch_benchmark import resolve_arch_json_path
@@ -108,12 +109,12 @@ _PROBE_LIMIT = 8
 #: profile test's own point it is measured from (the server reads that, see ``toolbox/analysis.py``). The route reads the
 #: request only, never the process environment: a toolbox serving many branches has no workload of its own.
 SPLIT_HINTS = (
-    ("--CONC", "split_conc", "CONC"),
-    ("--OSL", "split_osl", "OSL"),
-    ("--R", "split_r", "RANDOM_RANGE_RATIO"),
+    ("--CONC", "split_conc", ENV_CONC),
+    ("--OSL", "split_osl", ENV_OSL),
+    ("--R", "split_r", ENV_RANDOM_RANGE_RATIO),
 )
 #: The workload the request carries: the splitter's hints, and the prompt length, which only the phase weights read.
-WORKLOAD_HINTS = (*SPLIT_HINTS, ("--ISL", "split_isl", "ISL"))
+WORKLOAD_HINTS = (*SPLIT_HINTS, ("--ISL", "split_isl", ENV_ISL))
 _ENCODING = "utf-8"
 #: The error class of a perf report that lacks a table the route reads.
 _INCOMPLETE = "perf_report_incomplete"

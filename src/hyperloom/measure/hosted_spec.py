@@ -24,6 +24,7 @@ from typing import Any
 import yaml
 
 from hyperloom.common.env import env_bool
+from hyperloom.common.outside_facts import ENV_TP
 from hyperloom.contracts.measurement import AttachmentRef
 from hyperloom.common.env_safety import (
     filter_untrusted_env_mapping,
@@ -119,7 +120,7 @@ def _load_yaml(path: Path) -> tuple[str, dict[str, Any]]:
 def gpu_count_of(document: Mapping[str, Any]) -> int:
     """The tensor-parallel size of a materialised point, which is how many cards its runner needs."""
     envs = (document.get("benchmark") or {}).get("envs") or {}
-    raw = envs.get("TP", 1)
+    raw = envs.get(ENV_TP, 1)
     try:
         count = int(str(raw).strip() or 1)
     except ValueError:

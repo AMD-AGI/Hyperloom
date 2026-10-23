@@ -11,6 +11,7 @@ from typing import Any
 
 import yaml
 
+from hyperloom.common.outside_facts import ROCR_VISIBLE_DEVICES_ENV
 from hyperloom.measure.attachments import substitute
 from hyperloom.measure.farm import Farm, place_farm
 from hyperloom.orchestrator.actions.executors import strip_visible_devices_from_config
@@ -56,7 +57,7 @@ def rewrite_config(yaml_text: str, out_path: Path, placement: Placement) -> Path
     bench = config.setdefault("benchmark", {})
     envs = bench.setdefault("envs", {})
     if placement.visible_devices:
-        envs["ROCR_VISIBLE_DEVICES"] = placement.visible_devices
+        envs[ROCR_VISIBLE_DEVICES_ENV] = placement.visible_devices
     if isinstance(bench.get("server_lifecycle"), dict):
         bench["server_lifecycle"]["pid_dir"] = str(placement.pid_dir)
     bench["inferencex_path"] = str(placement.inferencex_path)

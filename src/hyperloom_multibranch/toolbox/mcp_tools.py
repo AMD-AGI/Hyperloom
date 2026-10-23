@@ -38,6 +38,7 @@ import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, cast
 
+from hyperloom.common.outside_facts import TUNABLEOP_ENABLED_ENV, TUNABLEOP_TABLE_ENV, TUNABLEOP_TUNING_ENV
 from hyperloom.contracts.measurement import PRIORITY_HIGHEST, PRIORITY_LOWEST, Purpose, TestKind
 from hyperloom.contracts.measurement import TestRequest as MeasuredRequest
 from hyperloom.contracts.recipe import KernelKind
@@ -177,8 +178,8 @@ _PUT_KERNEL_ARTIFACT: dict[str, Any] = {
             "minLength": 1,
             "description": (
                 "The environment variable the service reads the table's path from: an aiter table, e.g. "
-                "AITER_CONFIG_GEMM_A8W8, or a TunableOp results file, PYTORCH_TUNABLEOP_FILENAME (the delta must also "
-                "set PYTORCH_TUNABLEOP_ENABLED=1 and PYTORCH_TUNABLEOP_TUNING=0)."
+                f"AITER_CONFIG_GEMM_A8W8, or a TunableOp results file, {TUNABLEOP_TABLE_ENV} (the delta must also "
+                f"set {TUNABLEOP_ENABLED_ENV}=1 and {TUNABLEOP_TUNING_ENV}=0)."
             ),
         },
         "content": {

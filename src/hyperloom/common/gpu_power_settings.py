@@ -19,6 +19,7 @@ import subprocess  # nosec B404 - fixed read-only amd-smi invocations.
 from typing import Any, Callable, Mapping
 
 from hyperloom.common.env import env_flag
+from hyperloom.common.outside_facts import ROCR_VISIBLE_DEVICES_ENV
 
 __all__ = [
     "GPU_POWER_SAMPLING_ENV",
@@ -60,7 +61,7 @@ def normalize_perf_level(value: Any) -> str:
 def visible_gpu_indices(env: Mapping[str, str] | None = None) -> set[int] | None:
     """Card indices the session may use, from ``ROCR_VISIBLE_DEVICES`` / ``HIP_VISIBLE_DEVICES``; ``None`` for all."""
     source = os.environ if env is None else env
-    for name in ("ROCR_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES"):
+    for name in (ROCR_VISIBLE_DEVICES_ENV, "HIP_VISIBLE_DEVICES"):
         raw = str(source.get(name) or "").strip()
         if not raw:
             continue

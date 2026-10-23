@@ -22,6 +22,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
+from hyperloom.common.outside_facts import SGLANG_IMAGE_AITER_CONFIGS
 from hyperloom.measure.framework_tables import TableVariable, read_variables
 
 __all__ = [
@@ -44,7 +45,7 @@ __all__ = [
 log = logging.getLogger(__name__)
 
 #: Where the image keeps the tuned tables aiter reads and rewrites.
-DEFAULT_CONFIGS = "/sgl-workspace/aiter/aiter/configs"
+DEFAULT_CONFIGS = SGLANG_IMAGE_AITER_CONFIGS
 #: Set on the runner template: the session's snapshot directory, and its digest (a test that finds another digest in the
 #: snapshot began on a base that is not the session's).
 SNAPSHOT_ENV = "HYPERLOOM_FRAMEWORK_SNAPSHOT"

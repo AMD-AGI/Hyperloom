@@ -32,6 +32,7 @@ from typing import Any
 
 import yaml
 
+from hyperloom.common.outside_facts import ENV_CONC
 from hyperloom.contracts.measurement import (
     AccuracyValue,
     FailureClass,
@@ -481,7 +482,7 @@ def _concurrency_of(point: Path) -> int | None:
 def _concurrency_in(text: str) -> int | None:
     try:
         document = yaml.safe_load(text) or {}
-        value = int(str(document["benchmark"]["envs"]["CONC"]))
+        value = int(str(document["benchmark"]["envs"][ENV_CONC]))
     except (ValueError, KeyError, TypeError, yaml.YAMLError):
         return None
     return value if value >= 1 else None

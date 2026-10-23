@@ -36,6 +36,7 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Literal, Protocol
 
+from hyperloom.common.outside_facts import SGLANG_IMAGE_WORKSPACE, TUNABLEOP_TABLE_ENV
 from hyperloom.contracts.measurement import AttachmentRef
 from hyperloom.contracts.recipe import (
     DIGEST_PREFIX,
@@ -64,11 +65,11 @@ LOADABLE_KERNEL_KINDS = frozenset({KernelKind.GEMM})
 #: is read as ``x0.csv`` on device 0, ``x1.csv`` on device 1; the ordinal counts the devices the process sees, so a test
 #: on N cards reads 0..N-1). A table loaded through one of them is placed under the name the variable holds and under the
 #: name of each of the ``DEVICE_ORDINALS`` of a node, so a test on any number of its cards finds its file.
-PER_DEVICE_TABLE_ENVS = frozenset({"PYTORCH_TUNABLEOP_FILENAME"})
+PER_DEVICE_TABLE_ENVS = frozenset({TUNABLEOP_TABLE_ENV})
 DEVICE_ORDINALS = range(8)
 TABLE_EXTENSION = ".csv"
 #: Directories an editable-installed source tree may live in and still count as part of the image.
-IMAGE_SOURCE_ROOTS = ("/sgl-workspace", "/opt", "/app", "/usr")
+IMAGE_SOURCE_ROOTS = (SGLANG_IMAGE_WORKSPACE, "/opt", "/app", "/usr")
 
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
