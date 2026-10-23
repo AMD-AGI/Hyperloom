@@ -25,6 +25,7 @@ from hyperloom.common.rule_pack import rule_pack_identity
 from hyperloom.measure.archive import ResultArchive
 from hyperloom.measure.hosted import HostedConfig, HostedMeasurementBackend
 from hyperloom.measure.hosted_spec import SpecContext
+from hyperloom.measure.runner.cache_layout import MANIFEST_PIN_ENV
 from hyperloom.measure.sandboxes import DEFAULT_MAX_PARALLEL_TESTS, MEASUREMENT_ROLE
 from hyperloom.sandbox.e2b import E2BSandboxProvider, RetryPolicy
 from hyperloom.sandbox.socket import Role, SandboxProvider
@@ -53,7 +54,6 @@ from hyperloom_multibranch.toolbox.toolbox import AcceptanceSetup, ToolboxTuning
 __all__ = [
     "DEV_TEMPLATES",
     "RUNNER_TEMPLATES",
-    "SOURCE_REPO_ENV",
     "SOURCE_SHA_ENV",
     "HostedOptions",
     "HostedToolbox",
@@ -63,12 +63,14 @@ __all__ = [
 
 #: The roles of the template list (``HYPERLOOM_SANDBOX_TEMPLATES``) the toolbox reads; the others are the sub-runs'.
 RUNNER_TEMPLATES, DEV_TEMPLATES = "runner", "dev"
-#: What the runner's start-up script installs from: the repository and the full commit hash. They are the runner
-#: template's accepted create environment, passed on every ``measurement`` create.
-SOURCE_REPO_ENV, SOURCE_SHA_ENV = "HYPERLOOM_SOURCE_REPO", "HYPERLOOM_SOURCE_SHA"
+#: What the runner's start-up script installs from: the full commit hash that names its entry of the runner cache. It
+#: and ``MANIFEST_PIN_ENV`` (when the host has the manifest's digest) are the runner template's accepted create
+#: environment, passed on every ``measurement`` create.
+SOURCE_SHA_ENV = "HYPERLOOM_SOURCE_SHA"
 _COMMIT = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
+_MANIFEST_DIGEST = re.compile(r"[0-9a-f]{64}")
 _GRANT_KEYS = ("max_sandboxes", "max_gpus", "gpu_hours", "max_runtime_sec")
-_REQUIRED_TEXT = ("run_id", "api_url", "sandbox_url", "measurement_key", "source_repo")
+_REQUIRED_TEXT = ("run_id", "api_url", "sandbox_url", "measurement_key")
 
 
 @dataclass(frozen=True)
@@ -84,17 +86,24 @@ class HostedToolboxInputs:
         sandbox_templates: The template list as the host gave it (``HYPERLOOM_SANDBOX_TEMPLATES``, parsed). The toolbox
             reads the roles ``runner`` and ``dev``; a role's value is one name, a list of names or a mapping whose values
             are names, and each name carries its card count as the suffix ``-g<cards>`` (``ar-01ja-runner-g8``).
-        source_repo: The repository the runner's start-up script fetches its code from (``HYPERLOOM_SOURCE_REPO``).
-        source_sha: The full lowercase commit hash it checks out (``HYPERLOOM_SOURCE_SHA``).
+        source_sha: The full lowercase commit hash that names the runner cache entry the runner's start-up script
+            installs from (``HYPERLOOM_SOURCE_SHA``).
+        source_repo: Accepted and not used: the sealed runner has no network and installs from the runner cache, so it
+            no longer fetches from a repository. The field stays so a host that still sends it builds the inputs.
         tp: The session's tensor-parallel size: the cards of one runner sandbox and of one ``dev`` lease.
         dev_key: The API key of the ``dev`` role. Without it no branch sandbox is leased. Never in ``repr`` or a log.
         grant_limits: The grant's totals, a mapping with all of ``max_sandboxes``, ``max_gpus``, ``gpu_hours`` and
             ``max_runtime_sec`` (``HYPERLOOM_GRANT_LIMITS``, parsed). Without it the toolbox cannot count the grant's
             cards: see :func:`build_hosted_toolbox`.
+        runner_cache_manifest_sha256: The SHA-256 of the manifest file of the runner cache entry, 64 lowercase hex
+            characters, as the cache builder reported it. Given, it is passed on every ``measurement`` create
+            (``HYPERLOOM_RUNNER_CACHE_MANIFEST_SHA256``) and the runner's bootstrap accepts only that manifest; without
+            it the manifest vouches only for the entry it sits in.
 
     Raises:
-        ValueError: When a text is empty, ``tp`` is below one, ``source_sha`` is not a full commit hash or the limits are
-            not a valid set; the message names the field, never a value.
+        ValueError: When a text is empty, ``tp`` is below one, ``source_sha`` is not a full commit hash,
+            ``runner_cache_manifest_sha256`` is not a SHA-256 or the limits are not a valid set; the message names the
+            field, never a value.
     """
 
     run_id: str
@@ -103,11 +112,12 @@ class HostedToolboxInputs:
     sandbox_url: str
     measurement_key: str = field(repr=False)
     sandbox_templates: Mapping[str, object]
-    source_repo: str
     source_sha: str
+    source_repo: str | None = None
     tp: int = 1
     dev_key: str | None = field(default=None, repr=False)
     grant_limits: Mapping[str, float] | None = None
+    runner_cache_manifest_sha256: str | None = None
 
     def __post_init__(self) -> None:
         for name in _REQUIRED_TEXT:
@@ -119,7 +129,21 @@ class HostedToolboxInputs:
             raise ValueError("tp must be at least 1")
         if not _COMMIT.fullmatch(self.source_sha):
             raise ValueError("source_sha is not a full lowercase commit hash")
+        pin = self.runner_cache_manifest_sha256
+        if pin is not None and not _MANIFEST_DIGEST.fullmatch(pin):
+            raise ValueError(
+                "runner_cache_manifest_sha256 is not a 64-character lowercase hex SHA-256; leave it None to accept "
+                "the manifest of the cache entry itself"
+            )
         self.grant()
+
+    def create_envs(self) -> dict[str, str]:
+        """The environment every ``measurement`` sandbox is created with: the commit that names its runner cache entry
+        and, when the host has it, the digest of the manifest it must be."""
+        envs = {SOURCE_SHA_ENV: self.source_sha}
+        if self.runner_cache_manifest_sha256 is not None:
+            envs[MANIFEST_PIN_ENV] = self.runner_cache_manifest_sha256
+        return envs
 
     def grant(self) -> GrantLimits | None:
         """The limits as :class:`GrantLimits`, or ``None`` when the host gave none."""
@@ -296,7 +320,7 @@ def build_hosted_toolbox(
         spec=spec,
         runner_templates={inputs.tp: _runner_template(inputs)},
         rule_pack_digest=rule_pack_identity()["digest"],
-        create_envs={SOURCE_REPO_ENV: inputs.source_repo, SOURCE_SHA_ENV: inputs.source_sha},
+        create_envs=inputs.create_envs(),
         archive=session_archive(options.archive, directory),
         max_parallel_tests=parallel,
         poll_interval_sec=options.poll_interval_sec,

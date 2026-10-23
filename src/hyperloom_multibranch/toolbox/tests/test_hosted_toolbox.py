@@ -4,7 +4,7 @@
 """``build_hosted_toolbox`` from plain values, over the E2B stand-in and the fake runner.
 
 The stand-in runs real envd processes behind a simulated control plane. Its runner templates are sealed and list the
-two source variables as the environment a create may pass, as the service's do. It writes no platform metadata, so the
+commit and the runner cache manifest's digest as the environment a create may pass, as the service's do. It writes no platform metadata, so the
 tests put a platform's part in front of the E2B provider: the signing key the service reports for a runner sandbox (the
 fake runner signs with it) and its node. The tests that need the stand-in skip where it cannot run (root, ``unshare``, an envd binary
 named by ``HYPERLOOM_E2B_ENVD``); the ones that only build the toolbox always run.
@@ -31,6 +31,7 @@ from hyperloom.common.rule_pack import rule_pack_identity
 from hyperloom.contracts.measurement import TestResult, Validity
 from hyperloom.measure import signing
 from hyperloom.measure.hosted_log import STATE_SENT
+from hyperloom.measure.runner.cache_layout import MANIFEST_PIN_ENV
 from hyperloom.measure.sandboxes import BRANCH_ID_KEY, PURPOSE_KEY
 from hyperloom.measure.tests.hosted_fixtures import FAKE_RUNNER, point_yaml, spec_context
 from hyperloom.measure.tests.rule_pack_fixtures import identity_of, other_pack, reading_pack  # noqa: F401
@@ -57,7 +58,6 @@ from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.toolbox import hosted_toolbox
 from hyperloom_multibranch.toolbox.hosted_leases import LEASE_PURPOSE, RUN_ID_KEY, LeaseTuning
 from hyperloom_multibranch.toolbox.hosted_toolbox import (
-    SOURCE_REPO_ENV,
     SOURCE_SHA_ENV,
     HostedOptions,
     HostedToolbox,
@@ -71,16 +71,20 @@ from hyperloom_multibranch.toolbox.toolbox import AcceptanceSetup
 from hyperloom_multibranch.toolbox.tools import TRACELENS_TOOL
 
 _RUNNERS = ("run-runner-g1", "run-runner-g2")
-_NARROW = "run-narrow-g1"  # a runner template that accepts the source repository but not its commit
+_NARROW = "run-narrow-g1"  # a runner template that accepts the commit but not the manifest pin
 _DEVS = ("run-dev-g1", "run-dev-g2")
 _SOURCE_REPO, _SOURCE_SHA = "https://source.invalid/hyperloom.git", "ab" * 20
+_MANIFEST = "cd" * 32  # the SHA-256 of the manifest file of a runner cache entry
+#: What the runner no longer reads: the repository its start-up script once fetched from. The host may still send it.
+_RETIRED_REPO_ENV = "HYPERLOOM_SOURCE_REPO"
 _GRANT = {"max_sandboxes": 8, "max_gpus": 8, "gpu_hours": 400.0, "max_runtime_sec": 7200}
 _SOURCE_FILE = "/out/source-envs.txt"
-#: The runner template's start command: note the source the sandbox was given, then start the fake runner.
+#: The runner template's start command: note the source variables the sandbox was given (whatever their names are
+#: among the ones the runner's bootstrap reads, or used to read), then start the fake runner.
 _START = (
     "/bin/sh",
     "-c",
-    f'printenv {SOURCE_REPO_ENV} {SOURCE_SHA_ENV} > {_SOURCE_FILE}; exec "$0" "$@"',
+    f'env | grep -E "^({_RETIRED_REPO_ENV}|{SOURCE_SHA_ENV}|{MANIFEST_PIN_ENV})=" | sort > {_SOURCE_FILE}; exec "$0" "$@"',
     *FAKE_RUNNER,
 )
 _NODE = "standin-node"
@@ -158,7 +162,7 @@ class Service:
 
 
 def _runner_template(
-    name: str, key_file: Path, accepted_envs: tuple[str, ...] = (SOURCE_REPO_ENV, SOURCE_SHA_ENV)
+    name: str, key_file: Path, accepted_envs: tuple[str, ...] = (SOURCE_SHA_ENV, MANIFEST_PIN_ENV)
 ) -> StandInTemplate:
     source = Path(hyperloom.__file__).resolve().parents[1]
     return StandInTemplate(
@@ -189,7 +193,7 @@ def service(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Service
     key_file.chmod(0o600)
     templates = [
         *(_runner_template(name, key_file) for name in _RUNNERS),
-        _runner_template(_NARROW, key_file, (SOURCE_REPO_ENV,)),
+        _runner_template(_NARROW, key_file, (SOURCE_SHA_ENV,)),
         *(StandInTemplate(n, "dev") for n in _DEVS),
     ]
     workdir = tmp_path / "standin"
@@ -270,6 +274,9 @@ def test_the_inputs_never_print_a_key_and_a_refusal_names_the_field_not_the_valu
     assert "m-key" not in str(refused.value)
 
 
+_NOT_A_DIGEST = "runner_cache_manifest_sha256 is not a 64-character lowercase hex SHA-256"
+
+
 @pytest.mark.parametrize(
     ("changed", "message"),
     [
@@ -277,6 +284,12 @@ def test_the_inputs_never_print_a_key_and_a_refusal_names_the_field_not_the_valu
         ({"source_sha": "main"}, "source_sha is not a full lowercase commit hash"),
         ({"source_sha": "AB" * 20}, "source_sha is not a full lowercase commit hash"),
         ({"source_sha": "ab" * 19}, "source_sha is not a full lowercase commit hash"),
+        ({"runner_cache_manifest_sha256": ""}, _NOT_A_DIGEST),
+        ({"runner_cache_manifest_sha256": "CD" * 32}, _NOT_A_DIGEST),
+        ({"runner_cache_manifest_sha256": "cd" * 31}, _NOT_A_DIGEST),
+        ({"runner_cache_manifest_sha256": "cd" * 33}, _NOT_A_DIGEST),
+        ({"runner_cache_manifest_sha256": "cg" * 32}, _NOT_A_DIGEST),
+        ({"runner_cache_manifest_sha256": _MANIFEST + "\n"}, _NOT_A_DIGEST),
         ({"grant_limits": {"max_sandboxes": 8, "max_gpus": 8}}, "grant_limits has no gpu_hours, max_runtime_sec"),
         ({"grant_limits": {**_GRANT, "max_gpus": 7.5}}, "max_gpus is not a whole number"),
         ({"grant_limits": {**_GRANT, "max_sandboxes": 0}}, "at least one sandbox"),
@@ -290,7 +303,8 @@ def test_inputs_that_cannot_describe_a_session_are_refused(
 
 
 #: What the host entry builds the inputs from: a plain dict whose keys are these names (``HostedToolboxInputs(**d)``).
-#: Fields are only ever added, and only with a default, so the required names are fixed.
+#: Fields are only ever added, and only with a default, so the required names are fixed. ``source_repo`` was required
+#: until the runner stopped fetching from a repository: a host may still send it, and one may leave it out.
 _REQUIRED_FIELDS = (
     "run_id",
     "session_dir",
@@ -298,10 +312,9 @@ _REQUIRED_FIELDS = (
     "sandbox_url",
     "measurement_key",
     "sandbox_templates",
-    "source_repo",
     "source_sha",
 )
-_OPTIONAL_FIELDS = ("tp", "dev_key", "grant_limits")
+_OPTIONAL_FIELDS = ("source_repo", "tp", "dev_key", "grant_limits", "runner_cache_manifest_sha256")
 
 
 def test_a_plain_dict_with_exactly_the_field_names_builds_the_inputs(tmp_path: Path) -> None:
@@ -317,6 +330,7 @@ def test_a_plain_dict_with_exactly_the_field_names_builds_the_inputs(tmp_path: P
         "tp": 1,
         "dev_key": "d-key",
         "grant_limits": dict(_GRANT),
+        "runner_cache_manifest_sha256": _MANIFEST,
     }
     assert set(plain) == {*_REQUIRED_FIELDS, *_OPTIONAL_FIELDS}
     inputs = HostedToolboxInputs(**plain)
@@ -325,6 +339,45 @@ def test_a_plain_dict_with_exactly_the_field_names_builds_the_inputs(tmp_path: P
     assert required == set(_REQUIRED_FIELDS) and {f.name for f in dataclasses.fields(inputs)} == set(plain)
     only_required = {name: plain[name] for name in _REQUIRED_FIELDS}
     assert HostedToolboxInputs(**only_required).dev_key is None
+
+
+@pytest.mark.parametrize(
+    "left_out",
+    [
+        ("runner_cache_manifest_sha256",),  # a host that predates the manifest pin
+        ("source_repo",),  # a host that no longer has a repository to name
+        ("source_repo", "runner_cache_manifest_sha256"),
+        _OPTIONAL_FIELDS,
+    ],
+)
+def test_a_plain_dict_without_the_newer_or_the_retired_keys_still_builds_the_inputs(
+    tmp_path: Path, left_out: tuple[str, ...]
+) -> None:
+    plain = {**vars(_inputs(None, tmp_path)), "runner_cache_manifest_sha256": _MANIFEST}
+    fewer = {name: value for name, value in plain.items() if name not in left_out}
+    assert set(left_out) < set(plain) and set(fewer) >= set(_REQUIRED_FIELDS)
+    inputs = HostedToolboxInputs(**fewer)
+    for name in left_out:
+        assert getattr(inputs, name) == {"tp": 1}.get(name), f"{name} falls back to its default"
+    pinned = {} if "runner_cache_manifest_sha256" in left_out else {MANIFEST_PIN_ENV: _MANIFEST}
+    assert inputs.create_envs() == {SOURCE_SHA_ENV: _SOURCE_SHA, **pinned}
+
+
+@pytest.mark.parametrize("source_repo", [None, "", "  ", _SOURCE_REPO])
+def test_the_source_repository_is_accepted_whatever_it_is_and_never_reaches_the_runner(
+    tmp_path: Path, source_repo: str | None
+) -> None:
+    inputs = _inputs(None, tmp_path, source_repo=source_repo)
+    assert inputs.source_repo == source_repo, "the field is kept as given"
+    assert inputs.create_envs() == {SOURCE_SHA_ENV: _SOURCE_SHA}, "and the runner is not told of it"
+    assert _toolbox(None, tmp_path, source_repo=source_repo).backend._config.create_envs == inputs.create_envs()
+
+
+def test_a_refused_manifest_digest_is_never_in_the_message(tmp_path: Path) -> None:
+    secret_looking = "XY" * 32
+    with pytest.raises(ValueError, match=_NOT_A_DIGEST) as refused:
+        _inputs(None, tmp_path, runner_cache_manifest_sha256=secret_looking)
+    assert secret_looking not in str(refused.value)
 
 
 def test_a_dict_with_one_key_more_or_one_required_key_less_is_refused(tmp_path: Path) -> None:
@@ -349,12 +402,19 @@ async def test_the_toolbox_is_built_from_the_inputs(tmp_path: Path) -> None:
     assert isinstance(toolbox, HostedToolbox)
     assert toolbox.trace_root == tmp_path / "session" and toolbox.blobs is not None
     assert type(toolbox.provider) is E2BSandboxProvider and toolbox.provider.name == "e2b"
-    assert toolbox.backend._config.create_envs == {SOURCE_REPO_ENV: _SOURCE_REPO, SOURCE_SHA_ENV: _SOURCE_SHA}
+    assert toolbox.backend._config.create_envs == {SOURCE_SHA_ENV: _SOURCE_SHA}, "no repository, no manifest pin"
     assert toolbox.backend.pool.template_for(2) == "run-runner-g2"
     assert (await toolbox.measurement_capacity()) == MeasurementCapacity(8, 8)
     assert toolbox._parallel_limit() == 4 and toolbox._queue.policy.global_concurrency == 4, "8 GPUs, TP=2"
     assert toolbox.analysis_tools == (TRACELENS_TOOL,), "kernel_tune and roofline are the local toolbox's"
     assert not toolbox.single_node
+
+
+def test_the_runner_cache_manifest_digest_is_a_create_environment_of_every_runner_sandbox(tmp_path: Path) -> None:
+    toolbox = _toolbox(None, tmp_path, runner_cache_manifest_sha256=_MANIFEST)
+    assert toolbox.backend._config.create_envs == {SOURCE_SHA_ENV: _SOURCE_SHA, MANIFEST_PIN_ENV: _MANIFEST}
+    assert MANIFEST_PIN_ENV == "HYPERLOOM_RUNNER_CACHE_MANIFEST_SHA256", "the name the runner's bootstrap reads"
+    assert toolbox.backend.pool._create_envs == toolbox.backend._config.create_envs, "the pool creates with them"
 
 
 def test_the_grants_sandboxes_and_gpus_bound_the_tests_at_once(tmp_path: Path) -> None:
@@ -439,14 +499,18 @@ async def test_a_test_is_measured_in_a_sandbox_of_the_service_and_its_result_ver
         (made,) = [c for c in service.creates if c.role == "measurement"]
         assert made.template == "run-runner-g1" and made.metadata[IDEMPOTENCY_KEY] == f"run-1:{request_id}:1"
         assert made.metadata[RUN_ID_KEY] == "run-1"
-        assert dict(made.options.envs or {}) == {SOURCE_REPO_ENV: _SOURCE_REPO, SOURCE_SHA_ENV: _SOURCE_SHA}
+        assert dict(made.options.envs or {}) == {SOURCE_SHA_ENV: _SOURCE_SHA}, "the commit alone: no repo, no pin"
         assert service.running("measurement") == [], "the sandbox ended with the test"
     finally:
         await toolbox.close()
 
 
-async def test_the_runner_sandbox_is_given_the_source_it_installs(service: Service, tmp_path: Path) -> None:
-    toolbox = _toolbox(service, tmp_path, planned=_HANG)
+@pytest.mark.parametrize("manifest", [None, _MANIFEST])
+async def test_the_runner_sandbox_is_given_the_commit_it_installs_and_the_manifest_it_must_be(
+    service: Service, tmp_path: Path, manifest: str | None
+) -> None:
+    """The host also sends a repository (``_inputs`` does): the sandbox is not given it, the bootstrap does not read it."""
+    toolbox = _toolbox(service, tmp_path, planned=_HANG, runner_cache_manifest_sha256=manifest)
     try:
         await toolbox.start()
         await toolbox.submit_test(req())
@@ -463,7 +527,26 @@ async def test_the_runner_sandbox_is_given_the_source_it_installs(service: Servi
             return True
 
         await _until(noted, "the start command's note of its environment")
-        assert seen[-1].decode().split() == [_SOURCE_REPO, _SOURCE_SHA]
+        given = dict(line.split("=", 1) for line in seen[-1].decode().splitlines())
+        pinned = {} if manifest is None else {MANIFEST_PIN_ENV: manifest}
+        assert given == {SOURCE_SHA_ENV: _SOURCE_SHA, **pinned}, f"{_RETIRED_REPO_ENV} must not be among them"
+    finally:
+        await toolbox.close()
+
+
+async def test_every_runner_sandbox_is_created_with_the_manifest_digest_when_the_host_has_one(
+    service: Service, tmp_path: Path
+) -> None:
+    toolbox = _toolbox(service, tmp_path, runner_cache_manifest_sha256=_MANIFEST)
+    try:
+        await toolbox.start()
+        first, second = await toolbox.submit_test(req()), await toolbox.submit_test(req(server_args="--other"))
+        for request_id in (first, second):
+            assert (await _result_of(toolbox, request_id)).validity is Validity.SUCCEEDED
+        made = [c for c in service.creates if c.role == "measurement"]
+        assert len(made) == 2, "one runner sandbox for each test"
+        for created in made:
+            assert dict(created.options.envs or {}) == {SOURCE_SHA_ENV: _SOURCE_SHA, MANIFEST_PIN_ENV: _MANIFEST}
     finally:
         await toolbox.close()
 
@@ -471,16 +554,34 @@ async def test_the_runner_sandbox_is_given_the_source_it_installs(service: Servi
 async def test_a_runner_template_that_does_not_list_a_create_environment_name_refuses_the_test(
     service: Service, tmp_path: Path
 ) -> None:
-    toolbox = _toolbox(service, tmp_path, sandbox_templates={"runner": _NARROW, "dev": list(_DEVS)})
+    """``_NARROW`` accepts the commit and not the manifest digest, so the host that has one is refused by name."""
+    toolbox = _toolbox(
+        service,
+        tmp_path,
+        sandbox_templates={"runner": _NARROW, "dev": list(_DEVS)},
+        runner_cache_manifest_sha256=_MANIFEST,
+    )
     try:
         await toolbox.start()
         request_id = await toolbox.submit_test(req())
         result = await _result_of(toolbox, request_id)
         assert result.validity is not Validity.SUCCEEDED and result.manifest_sha256 is None
         assert result.failure_reason is not None and "sandbox_denied" in result.failure_reason, result.failure_reason
-        assert f"env_not_allowed: template '{_NARROW}' does not accept {SOURCE_SHA_ENV}" in result.failure_reason
-        assert _SOURCE_SHA not in result.failure_reason, "the refusal names the variable, not its value"
+        assert f"env_not_allowed: template '{_NARROW}' does not accept {MANIFEST_PIN_ENV}" in result.failure_reason
+        assert _MANIFEST not in result.failure_reason, "the refusal names the variable, not its value"
         assert service.running("measurement") == [], "a refused create made no sandbox"
+    finally:
+        await toolbox.close()
+
+
+async def test_a_runner_template_that_lists_only_the_commit_runs_the_test_of_a_host_with_no_manifest_digest(
+    service: Service, tmp_path: Path
+) -> None:
+    toolbox = _toolbox(service, tmp_path, sandbox_templates={"runner": _NARROW, "dev": list(_DEVS)})
+    try:
+        await toolbox.start()
+        result = await _result_of(toolbox, await toolbox.submit_test(req()))
+        assert result.validity is Validity.SUCCEEDED, result.failure_reason
     finally:
         await toolbox.close()
 
