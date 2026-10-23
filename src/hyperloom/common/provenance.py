@@ -74,6 +74,8 @@ _IMAGE_ENVS = ("HYPERLOOM_IMAGE", "CONTAINER_IMAGE", "IMAGE")
 _CODE_REV_ENVS = ("HYPERLOOM_CODE_REVISION", "HYPERLOOM_GIT_SHA")
 
 _GFX_RE = re.compile(r"gfx\d+[a-z0-9]*", re.IGNORECASE)
+_CONTAINER_ID_RE = re.compile(r"[0-9a-f]{12,64}")
+_PID1_CGROUP = Path("/proc/1/cgroup")
 
 
 def _env_first(env: Mapping[str, str], *names: str) -> str | None:
@@ -290,8 +292,22 @@ def detect_code_revision(env: Mapping[str, str], *, probe: bool = True) -> str:
     return _env_first(env, *_CODE_REV_ENVS) or ""
 
 
+def _cgroup_container_image() -> str | None:
+    """``unknown@<12 hex>`` from the docker/containerd container id in PID 1's cgroup, else ``None``."""
+    try:
+        lines = _PID1_CGROUP.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return None
+    for line in lines:
+        if "docker" in line or "containerd" in line:
+            m = _CONTAINER_ID_RE.search(line)
+            if m:
+                return f"unknown@{m.group(0)[:12]}"
+    return None
+
+
 def detect_image(env: Mapping[str, str], *, probe: bool = True) -> str | None:
-    """Container image from env vars or (when ``probe``) known marker files."""
+    """Container image from env vars or (when ``probe``) marker files, then the container id in PID 1's cgroup."""
     val = _env_first(env, *_IMAGE_ENVS)
     if val:
         return val
@@ -301,7 +317,7 @@ def detect_image(env: Mapping[str, str], *, probe: bool = True) -> str | None:
         v = _read_first_line(Path(marker))
         if v:
             return v
-    return None
+    return _cgroup_container_image()
 
 
 def _server_args_list(args: Any, env: Mapping[str, str]) -> list[str]:
