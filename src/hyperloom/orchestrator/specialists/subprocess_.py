@@ -64,6 +64,7 @@ from .agent_cli_config import (
     _write_private_codex_config,
 )
 from .dsh_launch import DshLaunchRequest, build_dsh_launch, remove_dsh_profiles, resolve_dsh_executable
+from .reap_watch import ReapWatch, last_activity
 from .trace_harvest import harvest_agent_trace
 from ..actions.cancel_channel import cancel_scope_listener, current_cancel_scope
 from ..bringup.trees import head_commit
@@ -407,31 +408,6 @@ class SpecialistSpawn:
     progress_cb: Any = None
 
 
-@dataclass(frozen=True)
-class ReapWatch:
-    """What the reaper polls while a specialist subprocess runs.
-
-    Attributes:
-        workspace: Task workspace; supplies the ``process.log`` whose mtime is
-            the second liveness signal.
-        done_files: Candidate done-file paths to poll.
-        heartbeat_file: Heartbeat file whose mtime is one of the two activity
-            signals ORed together for the liveness check.
-        partial_files: Candidate partial-checkpoint paths polled for live
-            progress; never an exit signal.
-        progress_cb: Optional async callback for each new checkpoint.
-        task_id: Task identifier used to pick up live ``extend_lease``
-            wall-budget extensions each poll.
-    """
-
-    workspace: Path
-    done_files: tuple[Path, ...]
-    heartbeat_file: Path
-    partial_files: tuple[Path, ...] = ()
-    progress_cb: Any = None
-    task_id: str = ""
-
-
 # Dispatcher
 class SpecialistSubprocessDispatcher:
     """Spawn + reap one agent-CLI subprocess for a specialist task.
@@ -482,18 +458,6 @@ class SpecialistSubprocessDispatcher:
         prompt_file.write_text(request.user_prompt, encoding="utf-8")
         prompt_file.chmod(0o600)
         process_log = request.workspace / _PROCESS_LOG_NAME
-        # Poll worktree first (prompt-advertised path), then workspace as fallback.
-        done_candidates: list[Path] = []
-        if request.worktree is not None:
-            done_candidates.append(request.worktree / "specialist_done.json")
-        done_candidates.append(request.workspace / "specialist_done.json")
-        # Incremental checkpoint recovered as best-so-far on a budget kill; does
-        # NOT trigger reap. Same worktree-first / workspace-fallback order.
-        partial_candidates: list[Path] = []
-        if request.worktree is not None:
-            partial_candidates.append(request.worktree / "specialist_done.partial.json")
-        partial_candidates.append(request.workspace / "specialist_done.partial.json")
-        heartbeat_file = request.workspace / "heartbeat.json"
 
         # Compose a minimal env. Provider credentials are inherited by default
         # for compatibility with deployments that authenticate the agent CLI
@@ -513,7 +477,8 @@ class SpecialistSubprocessDispatcher:
         backend = ""
         try:
             backend = self._agent_backend()
-            cmd = self._build_launch(backend, request, env)
+            cmd, activity_paths = self._build_launch(backend, request, env)
+            watch = self._reap_watch(request, activity_paths)
         except SpecialistAgentUnavailableError as exc:
             # No runtime for this deployment's credential shape. Report it as the
             # task's failure rather than degrading to a CLI that cannot auth.
@@ -666,19 +631,7 @@ class SpecialistSubprocessDispatcher:
                                 log.warning("failed to close specialist prompt stdin", exc_info=True)
 
                 # Reap loop — poll done-file / exit / heartbeat staleness / deadline.
-                outcome = await self._reap_loop(
-                    proc,
-                    ReapWatch(
-                        workspace=request.workspace,
-                        done_files=tuple(done_candidates),
-                        heartbeat_file=heartbeat_file,
-                        partial_files=tuple(partial_candidates),
-                        progress_cb=request.progress_cb,
-                        task_id=request.task_id,
-                    ),
-                    deadline=request.deadline,
-                    started=proc_started,
-                )
+                outcome = await self._reap_loop(proc, watch, deadline=request.deadline, started=proc_started)
             except (CancelledError, asyncio.CancelledError):
                 try:
                     if request.gpu_lease is not None:
@@ -704,7 +657,7 @@ class SpecialistSubprocessDispatcher:
 
         # Parse done.json (best-effort) — first existing candidate.
         done_payload = None
-        for cand in done_candidates:
+        for cand in watch.done_files:
             if cand.exists():
                 done_payload = self._read_done(cand)
                 if done_payload is not None:
@@ -713,7 +666,7 @@ class SpecialistSubprocessDispatcher:
         # No final done.json — fall back to the most recent incremental partial
         # so a killed-but-productive specialist still surfaces its findings.
         if done_payload is None:
-            for cand in partial_candidates:
+            for cand in watch.partial_files:
                 if cand.exists():
                     partial = self._read_done(cand)
                     if partial is not None:
@@ -752,8 +705,13 @@ class SpecialistSubprocessDispatcher:
         )
 
     # Internals
-    def _build_launch(self, backend: str, request: SpecialistSpawn, env: dict[str, str]) -> list[str]:
-        """Build the CLI argv for ``backend``; child-only values go into ``env``."""
+    def _build_launch(
+        self, backend: str, request: SpecialistSpawn, env: dict[str, str]
+    ) -> tuple[list[str], tuple[Path, ...]]:
+        """Build the CLI argv for ``backend`` and the paths beyond ``process.log`` its activity shows in.
+
+        Child-only values go into ``env``.
+        """
         if backend == AGENT_BACKEND_DEEPSEEK:
             dsh_request = DshLaunchRequest(
                 executable=resolve_dsh_executable(self.config.dsh_executable),
@@ -765,7 +723,7 @@ class SpecialistSubprocessDispatcher:
             )
             launch = build_dsh_launch(dsh_request, env)
             env.update(launch.env_additions)
-            return launch.cmd
+            return launch.cmd, launch.activity_paths
         if backend == AGENT_BACKEND_CODEX:
             # Codex's higher-priority developer instructions live in private task-local config.
             cmd, launch_env_additions = self._build_codex_launch(
@@ -781,13 +739,28 @@ class SpecialistSubprocessDispatcher:
             # rather than a temp dir because Codex refuses to create its helper
             # binaries under /tmp and would run without its PATH aliases.
             env["CODEX_HOME"] = str(request.workspace / ".codex")
-            return cmd
+            return cmd, ()
         return self._build_claude_cmd(
             system_prompt_file=request.workspace / "system_prompt.md",
             system_prompt=request.system_prompt,
             workspace=request.workspace,
             worktree=request.worktree,
             disallowed_tools=frozenset(request.disallowed_tools),
+        ), ()
+
+    @staticmethod
+    def _reap_watch(request: SpecialistSpawn, activity_paths: tuple[Path, ...]) -> ReapWatch:
+        """What the reaper polls for ``request``: each file in the worktree first (the prompt-advertised path)."""
+        roots = (request.worktree, request.workspace) if request.worktree is not None else (request.workspace,)
+        return ReapWatch(
+            workspace=request.workspace,
+            done_files=tuple(root / "specialist_done.json" for root in roots),
+            heartbeat_file=request.workspace / "heartbeat.json",
+            activity_paths=activity_paths,
+            # Recovered as best-so-far on a budget kill; never a reap signal.
+            partial_files=tuple(root / "specialist_done.partial.json" for root in roots),
+            progress_cb=request.progress_cb,
+            task_id=request.task_id,
         )
 
     @staticmethod
@@ -1136,17 +1109,12 @@ class SpecialistSubprocessDispatcher:
                     progress_cb=watch.progress_cb,
                 )
 
-            # Liveness check: alive if EITHER heartbeat.json was refreshed OR
-            # process.log is still growing. The hard wall-clock cap below still
-            # bounds genuinely hung subprocesses.
-            for activity_file in (watch.heartbeat_file, process_log):
-                try:
-                    if not activity_file.exists():
-                        continue
-                    a_mtime = activity_file.stat().st_mtime
-                except OSError:
-                    continue
-                if max(0.0, time.time() - a_mtime) <= cfg.heartbeat_stale_seconds:
+            # Liveness check: alive if heartbeat.json was refreshed, process.log
+            # is still growing, or a launch-named activity path changed. The hard
+            # wall-clock cap below still bounds genuinely hung subprocesses.
+            for activity_path in (watch.heartbeat_file, process_log, *watch.activity_paths):
+                a_mtime = last_activity(activity_path)
+                if a_mtime is not None and max(0.0, time.time() - a_mtime) <= cfg.heartbeat_stale_seconds:
                     last_heartbeat_seen = now
                     break
 

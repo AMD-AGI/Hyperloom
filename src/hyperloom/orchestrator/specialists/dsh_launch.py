@@ -68,10 +68,15 @@ class DshLaunchRequest:
 
 @dataclass(frozen=True)
 class DshLaunch:
-    """The argv of one headless ``dsh`` run and the env values only its child sees."""
+    """The argv of one headless ``dsh`` run, the env values only its child sees, and where it shows activity.
+
+    dsh prints only its final message, so ``process.log`` stays still while it
+    works; its step records land in ``activity_paths`` instead.
+    """
 
     cmd: list[str]
     env_additions: dict[str, str]
+    activity_paths: tuple[Path, ...]
 
 
 def dsh_home(workspace: Path) -> Path:
@@ -287,7 +292,7 @@ def build_dsh_launch(request: DshLaunchRequest, base_env: Mapping[str, str]) -> 
     # The launcher consumes the first ``--`` and the headless app the second,
     # so a task that starts with ``-`` is not parsed as an option.
     cmd = [executable, "--profile", "headless", "--patch", str(patch_path), "--", "--", request.user_prompt]
-    return DshLaunch(cmd=cmd, env_additions=env_additions)
+    return DshLaunch(cmd=cmd, env_additions=env_additions, activity_paths=(home / "sessions",))
 
 
 def harvest_dsh_trace(workspace: Path) -> AgentTrace:
