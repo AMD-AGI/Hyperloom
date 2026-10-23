@@ -41,6 +41,7 @@ from hyperloom_multibranch.contracts.notebook.records import REPLAY_TOOL
 from hyperloom_multibranch.notebook.knowledge import warm_start
 from hyperloom_multibranch.notebook.knowledge.warm_start import (
     PreparedReplay,
+    ReplayRefusal,
     ReplayTarget,
     WarmLead,
     identity_labels,
@@ -113,6 +114,7 @@ def store(snapshot: NotebookSnapshot, tmp_path: Path) -> FakeRecipeStore:
         PROFILE,
         FinalRecipe("i1", Recipe("sha256:" + "a" * 64, LaunchConfig("--max-num-seqs 256")), tmp_path, METRIC),
         SCOPE,
+        {"version": "1", "digest": "sha256:" + "d" * 64},
     )
     malformed = _envelope("inference:malformed", "bad", ours, schema_version=1)
     other_scope = _envelope("inference:other-scope", "wide", ours, scope={**SCOPE.as_dict(), "conc": 128})
@@ -274,7 +276,13 @@ class _Downloads:
 
 
 def _downloads(snapshot: NotebookSnapshot, tmp_path: Path, champion: Recipe = CHAMPION) -> _Downloads:
-    knowledge = knowledge_document(snapshot, PROFILE, FinalRecipe("i1", champion, tmp_path, METRIC), SCOPE)
+    knowledge = knowledge_document(
+        snapshot,
+        PROFILE,
+        FinalRecipe("i1", champion, tmp_path, METRIC),
+        SCOPE,
+        {"version": "1", "digest": "sha256:" + "d" * 64},
+    )
     files = {overlay_ref(0, 0, PATCH.path): PATCH_BYTES, TUNED.ref: TUNED_BYTES}
     return _Downloads(_envelope(EXACT_ID, "sess-1", knowledge), files)
 
@@ -302,6 +310,25 @@ def test_a_champion_on_this_image_replays_its_whole_recipe_on_any_head_its_files
         made = apply(head, on_head.delta)
         assert (made.launch, made.components, made.kernels) == (CHAMPION.launch, CHAMPION.components, CHAMPION.kernels)
     assert found.on(CHAMPION, "c9") is None
+
+
+def test_a_replay_stacks_the_champions_table_over_the_heads_instead_of_replacing_it(tmp_path: Path) -> None:
+    from hyperloom_multibranch.repo.merge import wider_table
+    from hyperloom_multibranch.toolbox.kernel_artifacts import mint_kernel_artifact
+    from hyperloom_multibranch.toolbox.tests.kernel_rows_cc2bf0ef import B09_NEW, ENV, SHARED, csv_text
+
+    narrow = mint_kernel_artifact(KernelKind.GEMM, "a8w8", ENV, csv_text(SHARED))
+    wide = mint_kernel_artifact(KernelKind.GEMM, "a8w8", ENV, csv_text(SHARED, B09_NEW))
+    store = {narrow.sha256: csv_text(SHARED), wide.sha256: csv_text(SHARED, B09_NEW)}
+    head = replace(ROOT, kernels=(narrow,))
+    champion = replace(CHAMPION, kernels=(wide,), components=ROOT.components)
+    found = PreparedReplay(EXACT_ID, champion, champion.launch)
+
+    on_head = found.on(head, "c3", lambda wanted, current: wider_table(wanted, current, lambda a: store[a.sha256]))
+
+    assert on_head is not None
+    assert on_head.delta.add_kernels == (wide,)
+    assert apply(head, on_head.delta).kernels == (wide,)
 
 
 def test_a_replay_keeps_the_heads_upstream_for_a_component_the_head_has_and_brings_the_rest(
@@ -380,3 +407,17 @@ def test_only_the_best_leads_get_a_replay_and_one_that_changes_nothing_gets_none
     assert [lead.replay is not None for lead in replayed] == [True, False, False]
     assert replayed[0].render().endswith(f"; replay on your head with {REPLAY_TOOL}: the whole recipe")
     assert replay_leads(_downloads(snapshot, tmp_path), profile(kernel_optimizer=""), leads, _target(tmp_path)) == leads
+
+
+def test_a_replay_acceptance_refuses_is_named_with_its_code_in_place_of_the_replay(
+    snapshot: NotebookSnapshot, tmp_path: Path
+) -> None:
+    found = replay(_downloads(snapshot, tmp_path), LEAD, SCOPE, _target(tmp_path))
+    refusal = ReplayRefusal("online_tuning_unsupported", "TunableOp tunes every GEMM shape " * 10)
+
+    described = replace(LEAD, replay=None, refusal=refusal).describe()
+    unchecked = replace(LEAD, replay=found, unchecked="the time ran out").describe()
+
+    assert described.startswith(f"{LEAD.summary()}; not replayable here: online_tuning_unsupported (TunableOp")
+    assert REPLAY_TOOL not in described and described.endswith("...)")
+    assert unchecked == f"{LEAD.summary()}; {found.describe()}; not checked against acceptance: the time ran out"

@@ -31,6 +31,7 @@ def harness(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[Harness]
             pytest.skip(
                 f"needs the Claw sandbox service's policy; set {SERVICE_URL_ENV} to run it against a real service"
             )
-        build = standin_harness(tmp_path)
+        request.getfixturevalue("e2b_envd")  # skips where the stand-in cannot run, before the rig is built
+        build = standin_harness(tmp_path, request.getfixturevalue("bootstrap_rig"))
     with build as built:
         yield built

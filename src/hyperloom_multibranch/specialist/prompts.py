@@ -19,7 +19,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from pathlib import Path
 
 from hyperloom.orchestrator.prompts.specialist_prompt_builder import BASH_KILL_SAFETY_PREAMBLE
 from hyperloom_multibranch.contracts.fork import RepairRequest
@@ -171,11 +172,18 @@ stop your branch. Then take another of the session's directions, preferring one 
 
 What has found gains on ROCm before, in any direction:
 - server.log first: a backend that fell back (hipBLASLt, an eager or plain torch path, CUDA graphs off) or JIT \
-compiles on the first requests (a cold cache a startup prewarm removes) cost more than any setting gains.
+compiles on the first requests (a cold cache a startup prewarm removes) cost more than any setting gains. Compare \
+TTFT with the prefill's GPU time in the same test: on long multi-turn prompts the gap is host work, such as \
+re-tokenizing or re-rendering the whole history, that no kernel touches; cache it per segment, exact and checked \
+against the full path.
 - Kernel boundaries add up: inside a CUDA graph each launch costs about 1.5 us on MI355X, on every layer and every \
 step; a trace shows more, since the profiler adds time to each launch. Folding a small kernel (a split-K reduce, a \
 sort, a quantize, an elementwise op) into the kernel that consumes its output often gains where tuning the kernel \
 itself does not.
+- A GPU profile does not show host stalls: grep the per-layer hot path for .item(), .tolist(), .cpu(), nonzero, a \
+boolean-mask index, or a torch fallback that sizes its output from device data. Each one syncs the host on every \
+layer of every step that takes it. Take the bound from host-side metadata the scheduler already holds, and clamp \
+inside the kernel instead of checking on the host.
 - Before working on a top operator, divide the bytes it must move per call (the weights it reads, the state it reads \
 and writes) by its time: near the device's HBM bandwidth no kernel change pays whatever its share (a large \
 device-to-device copy measures about 5 TB/s on MI355X), so take the next operator.
@@ -186,7 +194,10 @@ layout change into its producer or consumer removes it.
 with the parent's profile: a new copy, or a neighbour that slowed, names what ate the gain.
 - A speculative or MTP draft gains its accept length divided by how much longer a verify step takes than a plain \
 one: read both from one test's server.log before tuning draft settings, and drop it when the verify step costs more \
-plain steps than the tokens it accepts.
+plain steps than the tokens it accepts. Read the accept length per context-length bucket, not only its mean: \
+join server.log's speculative-decoding windows with the client's per-request input lengths. A draft whose \
+acceptance falls with context gains from a bounded draft attention window or fewer draft tokens, and the target's \
+verify keeps the output exact.
 - Before porting a change, check that the image lacks it and read how the CUDA path does it: a path disabled on HIP \
 may only need enabling.
 - Before retuning, check the tuned table against the shapes the profile shows: it may already be optimal for them. \
@@ -203,12 +214,22 @@ use os.environ.setdefault: a variable the recipe already sets silently wins, and
 the change.
 - Before tuning a GEMM, check which path it actually takes: the server.log's tuned-config lookups name the table \
 each shape reads, and a table for a path the model no longer reaches changes nothing. After the exact M, the lookup \
-tries M padded up, so a row at a padded M covers every batch size that pads to it.
+tries M padded up, so a row at a padded M covers every batch size that pads to it. A test result's \
+table_hits says, per kernel table the test loaded, how many of its rows aiter read: a table marked not_exercised \
+measured nothing of its rows, so a flat result says nothing about them; fix the shapes or the path before you call \
+the table flat. When start_analysis lists the tool kernel_tune, a test whose server.log reports untuned GEMM \
+shapes can be tuned on a card of its own: start_analysis with tool "kernel_tune" and params naming that test as \
+test_request_id (or shapes of your own), then put each table's rows_csv with put_kernel_artifact and rows_only=true \
+and test them; rows marked verified=false are never put, and its microseconds are advice, the test is the \
+measurement.
 - A GEMM shape with no tuned row has gained most by switching to a kernel family with tuned rows or a stronger \
 default (block-scale to a per-token, per-channel preshuffled GEMM on a requantized weight copy); picking a tile or a \
 split-K for it without timing it is a guess.
 - Work sized to a buffer rather than the live batch: grep the hot path for max_model_len, context_length, \
-max_seqlen, cuda_graph_max_bs and max_num_partitions, and ask what each costs at the graded concurrency.
+max_seqlen, cuda_graph_max_bs and max_num_partitions, and ask what each costs at the graded concurrency. Set graph \
+capture sizes from the token counts the workload's steps carry (running requests times draft tokens plus one at \
+decode, new tokens per turn at mixed steps): a step above the largest size runs eager and stalls every decoder \
+batched with it, and a step between two sizes pads up to the next.
 - A constant is often a shape someone validated, not a hardware bound (a row cap, an M threshold, a tile copied \
 from another model or TP size): check it against the shapes the profile shows, and look for an eager fallback that \
 shadows a compiled kernel.
@@ -279,12 +300,36 @@ summed share of the operators they speed up.
 """
 
 
-def role_prompt(workload: str) -> str:
-    """The system prompt of every session of every specialist; ``workload`` names what the session optimizes."""
+def role_prompt(workload: str, references: Mapping[str, Path] | None = None) -> str:
+    """The system prompt of every session of every specialist; ``workload`` names what the session optimizes, and
+    ``references`` the reference material the session was given, each source's name and the directory it was copied
+    to."""
     named = " ".join(workload.split())
     if not named:
         raise ValueError("a specialist's role names the workload its session optimizes")
-    return _ROLE.format(workload=named, fake_gains=_fake_gains(), directions=_direction_names())
+    role = _ROLE.format(workload=named, fake_gains=_fake_gains(), directions=_direction_names())
+    return role + _references(references or {})
+
+
+#: What a well-known reference source holds, by the name a session gives it.
+_HOLDS = {
+    "geak": (
+        " (perf_knowledge/expert_skills/tuning: how to tune aiter and hipBLASLt GEMMs and kernels on ROCm; "
+        "e2e_workflow/knowledge/learned and kernel_workflow/knowledge/learned: what earlier GEAK runs learned, by "
+        "operator and model)"
+    ),
+}
+
+
+def _references(references: Mapping[str, Path]) -> str:
+    if not references:
+        return ""
+    listed = "; ".join(f"{name} at {path}{_HOLDS.get(name, '')}" for name, path in sorted(references.items()))
+    return (
+        "\nReference material for this session, read-only and copied in when it started, one directory per source: "
+        f"{listed}. Before you guess at a kernel, a tuning step or a setting, read what it says about this model's "
+        "operators and your direction, and name the file you used in your branch log.\n"
+    )
 
 
 def launch_prompt(

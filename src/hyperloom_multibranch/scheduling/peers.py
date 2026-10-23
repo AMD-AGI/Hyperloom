@@ -5,15 +5,16 @@
 
 A :data:`PeerFactory` builds the specialist lifecycle, the toolbox, the experiment repository, the rule gate's
 session service, the session's MCP service and its briefs on a :class:`PeerSetup`: the session directory, the workload the session optimizes, the scheduler's
-answer to the rule gate's branch requests, the session's process registry, its blob store and the critic that
-reviews a declared correctness fix. The specialist runtime builds its own rule gates on the branch requests; the
+answer to the rule gate's branch requests, the session's process registry, its blob store, the critic that
+reviews a declared correctness fix and the reference material the run was given. The specialist runtime builds its own rule gates on the branch requests; the
 session gate judges the tests the scheduler submits itself.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from hyperloom.measure.compile import BlobStore
@@ -66,7 +67,8 @@ class PeerSetup:
     work socket starts for it with ``processes.adopt``. The toolbox's sandboxes are its own: the session stop releases
     them by closing the toolbox. ``blobs`` holds the patch and kernel files the recipes name; the toolbox's
     environment compiler reads them from it. ``critic`` decides whether the defect a proven correctness fix removes is
-    reachable under the workload.
+    reachable under the workload. ``references`` names each directory of reference material the run was given, already
+    copied into the session, for the specialist role to send the specialists to.
     """
 
     layout: SessionLayout
@@ -75,6 +77,7 @@ class PeerSetup:
     processes: ProcessRegistry
     blobs: BlobStore
     critic: FixReviewer
+    references: Mapping[str, Path]
 
 
 PeerFactory = Callable[[PeerSetup], Peers]

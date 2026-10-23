@@ -1,8 +1,9 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""What a specialist may start from the MCP service: ``tracelens`` and ``roofline`` on its own branch's commit, those
-of them the toolbox's tool registry serves (:attr:`AnalysisStarter.analysis_tools`).
+"""What a specialist may start from the MCP service: ``tracelens`` and ``roofline`` on its own branch's commit, and
+``kernel_tune`` on the landed output of a test, those of them the toolbox's tool registry serves
+(:attr:`AnalysisStarter.analysis_tools`).
 
 The caller names the tool and its own parameters. The commit the analysis is about is never the caller's: it is the
 head of the caller's branch in the experiment repository, read here. ``profile_request_id`` is kept only when the
@@ -10,7 +11,8 @@ notebook holds a PROFILE test of that id on that commit, whichever branch asked 
 and ``submit_test`` refuses a second profile of a commit with the id of the first (``profile_exists``). The trace and
 the trace splitter's workload hints are that profile test's own: the caller names neither. The scheduler's own request,
 for the trace the PRELUDE child profiled, is built here too (:func:`root_profile_request`), its hints read from the
-child's point config by the same rule.
+child's point config by the same rule. A ``kernel_tune`` request names a test (``test_request_id``) and gets the
+directory its output landed in, resolved inside the session, from the notebook's record of it, never from the caller.
 """
 
 from __future__ import annotations
@@ -20,20 +22,20 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
-import yaml
-
-from hyperloom_multibranch.contracts.notebook.interfaces import RecordSearch
+from hyperloom_multibranch.contracts.notebook.interfaces import RecordSearch, UnknownRequest
 from hyperloom_multibranch.contracts.notebook.records import TestRecord
 from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import RequestRejected
-from hyperloom_multibranch.toolbox.tools.base import ToolRequest
+from hyperloom_multibranch.toolbox.tools.base import InvalidRequest, ToolRequest
+from hyperloom_multibranch.toolbox.tools.kernel_tune import KERNEL_TUNE_TOOL, LANDED_PARAM, TEST_PARAM, check_params
 from hyperloom_multibranch.toolbox.tools.op_shares import COMMIT_PARAM, PROFILE_REQUEST_PARAM
 from hyperloom_multibranch.toolbox.tools.roofline import ROOFLINE_TOOL, TRACELENS_TOOL
 from hyperloom_multibranch.toolbox.tools.tracelens_report import REPORT_ROUTE, WORKLOAD_HINTS, split_hint
+from hyperloom_multibranch.toolbox.tools.tune_inputs import POINT_CONFIG_GLOB, read_benchmark
 
 #: The ceiling of what a specialist may start; the toolbox serves those of them its registry holds, never more.
-ANALYSIS_TOOLS = (TRACELENS_TOOL, ROOFLINE_TOOL)
+ANALYSIS_TOOLS = (TRACELENS_TOOL, ROOFLINE_TOOL, KERNEL_TUNE_TOOL)
 CODE_TOOL_NOT_ALLOWED = "tool_not_allowed"
 CODE_SERVER_OWNED_PARAM = "server_owned_param"
 CODE_COMMIT_UNKNOWN = "commit_unknown"
@@ -42,14 +44,14 @@ CODE_PROFILE_REQUIRED = "profile_required"
 CODE_NO_EXECUTOR = "no_tool_executor"
 CODE_TOOL_UNAVAILABLE = "tool_unavailable_on_backend"
 CODE_PROFILE_WITHOUT_TRACE = "profile_without_trace"
+CODE_TEST_REQUIRED = "test_required"
+CODE_TEST_UNKNOWN = "test_unknown"
+CODE_TEST_WITHOUT_OUTPUT = "test_without_output"
 TRACE_INPUT_PARAM = "trace_input"
 ANALYSIS_ROUTE_PARAM = "analysis_route"
 ROOT_PROFILE_JOB_PREFIX = "prelude:"
 TRACE_GLOB = "*.trace.json*"
 SPLIT_HINT_PARAMS = tuple(key for _, key, _ in WORKLOAD_HINTS)
-#: The YAML the grid runner wrote for the point a test ran, in the test's landed directory; a profile test runs one.
-POINT_CONFIG_GLOB = "variant_*/config.yaml"
-_POINT_CONFIG_MAX_BYTES = 1 << 20
 
 
 class AnalysisStarter(Protocol):
@@ -130,11 +132,11 @@ def _trace_input(record: TestRecord, root: Path | None) -> str:
 def _point_envs(path: Path, root: Path) -> Mapping[str, Any]:
     """``benchmark.envs`` of the point YAML at ``path``; empty when it is not a plain file inside ``root`` that parses."""
     try:
-        if not path.resolve().is_relative_to(root) or path.stat().st_size > _POINT_CONFIG_MAX_BYTES:
+        if not path.resolve().is_relative_to(root):
             return {}
-        envs = (yaml.safe_load(path.read_text(encoding="utf-8")) or {})["benchmark"]["envs"]
-    except (OSError, ValueError, KeyError, TypeError, yaml.YAMLError):
+    except OSError:
         return {}
+    envs = read_benchmark(path).get("envs")
     return envs if isinstance(envs, Mapping) else {}
 
 
@@ -184,16 +186,19 @@ async def analysis_request(
     (see :func:`_split_hints`).
     """
     if ask.tool not in ANALYSIS_TOOLS:
-        raise RequestRejected(
-            f"a specialist starts only {' and '.join(ANALYSIS_TOOLS)} here, not {ask.tool!r}", CODE_TOOL_NOT_ALLOWED
-        )
-    owned = sorted({COMMIT_PARAM, PROFILE_REQUEST_PARAM, TRACE_INPUT_PARAM, *SPLIT_HINT_PARAMS} & set(ask.params))
+        allowed = f"{', '.join(ANALYSIS_TOOLS[:-1])} and {ANALYSIS_TOOLS[-1]}"
+        raise RequestRejected(f"a specialist starts only {allowed} here, not {ask.tool!r}", CODE_TOOL_NOT_ALLOWED)
+    owned = sorted(
+        {COMMIT_PARAM, PROFILE_REQUEST_PARAM, TRACE_INPUT_PARAM, LANDED_PARAM, *SPLIT_HINT_PARAMS} & set(ask.params)
+    )
     if owned:
         raise RequestRejected(
-            f"{', '.join(owned)} in params is set by the server (from the branch's own commit or its profile test), "
-            "not by the caller",
+            f"{', '.join(owned)} in params is set by the server (from the branch's own commit, or the test or profile "
+            "test it names), not by the caller",
             CODE_SERVER_OWNED_PARAM,
         )
+    if ask.tool == KERNEL_TUNE_TOOL:
+        return await _tune_request(records, ask, trace_root)
     if ask.tool == TRACELENS_TOOL and not ask.profile_request_id:
         raise RequestRejected(
             f"{TRACELENS_TOOL} reads the trace of a profile test: name the profile test with profile_request_id",
@@ -207,6 +212,33 @@ async def analysis_request(
         if ask.tool == TRACELENS_TOOL:
             params.update(_split_hints(record, trace_root))
     return ToolRequest(ask.tool, ask.branch, params)
+
+
+async def _tune_request(records: RecordSearch | None, ask: AnalysisAsk, root: Path | None) -> ToolRequest:
+    """The ``kernel_tune`` request: the caller's parameters and the directory the named test's output landed in.
+
+    The test must be one the notebook holds a result for with an output directory inside the session ``root``; its server
+    logs are read by the tool when it runs, with no card held, and a test that landed none is a failure of that job.
+    """
+    try:
+        check_params(ask.params)
+    except InvalidRequest as exc:
+        raise RequestRejected(str(exc)) from None
+    test_id = str(ask.params.get(TEST_PARAM) or "")
+    if not test_id:
+        raise RequestRejected(
+            f"{KERNEL_TUNE_TOOL} reads the output of a test: name it with {TEST_PARAM}", CODE_TEST_REQUIRED
+        )
+    if records is None or root is None:
+        raise RequestRejected("this toolbox cannot read the landed output of a test", CODE_TEST_WITHOUT_OUTPUT)
+    try:
+        record = await records.record(test_id)
+    except UnknownRequest:
+        raise RequestRejected(f"the notebook holds no test {test_id!r}", CODE_TEST_UNKNOWN) from None
+    landed = _in_session(record.result.output_dir, root) if record.result and record.result.output_dir else None
+    if landed is None or not landed.is_dir():
+        raise RequestRejected(f"test {test_id!r} has no landed output to read", CODE_TEST_WITHOUT_OUTPUT)
+    return ToolRequest(ask.tool, ask.branch, {**ask.params, LANDED_PARAM: str(landed)})
 
 
 def root_profile_request(root: Path | None, commit_id: str, trace_dir: Path, point_config: Path) -> ToolRequest:

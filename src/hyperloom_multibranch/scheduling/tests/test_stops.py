@@ -105,12 +105,12 @@ class Stage:
         self.decisions_file = tmp_path / "MB-decisions.jsonl"
         decisions = DecisionLog(self.decisions_file, clock)
         self.notebook = LocalNotebook(tmp_path / "notebook", Writer(Role.SCHEDULER, "scheduler"), clock=clock.now)
-        self.toolbox = toolbox_type(
-            LocalNotebook(tmp_path / "notebook", Writer(Role.TOOLBOX, "toolbox"), clock=clock.now)
-        )
         self.repo_path = tmp_path / "repo"
         self.root = ""
         self.repo = GitExperimentRepo(self.repo_path, LocalBlobStore(tmp_path / "blobs"))
+        self.toolbox = toolbox_type(
+            LocalNotebook(tmp_path / "notebook", Writer(Role.TOOLBOX, "toolbox"), clock=clock.now), repo=self.repo
+        )
         self.sessions = RecordedSessions(self.toolbox, self.repo, self.notebook, hanging=hanging)
         self.runtime = specialist_runtime(tmp_path / "notebook", self.toolbox, self.repo, self.sessions, now=clock.now)
         self.runtime.refusing = refusing

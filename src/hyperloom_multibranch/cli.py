@@ -30,7 +30,12 @@ carries credentials in its URL is a usage error. Each ``--specialist-prompt`` fi
 for one specialist: its branch opens at PRELUDE's
 root ahead of the opening batch, counted within ``--max-branches``, its specialist sees the text in every launch
 prompt, and the judge neither stops it nor lowers its K for its first judged tests; an empty or unreadable file, or
-more files than ``--max-branches``, is a usage error. A session whose toolbox has fewer
+more files than ``--max-branches``, is a usage error.
+Each ``--reference NAME=DIR`` names a directory the specialists read as reference, such as GEAK's tuning and kernel
+knowledge: it is copied to ``MB-reference/NAME`` before PRELUDE and the commit its checkout is on is recorded in the
+manifest, so every branch reads one fixed copy and the session says which. A ``DIR`` that is no readable directory
+in a git checkout, and a ``NAME`` given twice, are usage errors. A session never refreshes its copy; knowledge that
+lands after it starts is what the next session takes. A session whose toolbox has fewer
 usable cards left than one test needs ends EXPLORE with ``no_measurement_cards`` and skips FINAL. Exit codes: 0 when
 the session ran its course, its wall-clock, GPU-hour or LLM budget spent included, 1 when it failed or was stopped,
 ``no_measurement_cards`` included, 2 on a usage error. The environment and the peers a session needs are checked before
@@ -90,7 +95,11 @@ from hyperloom_multibranch.scheduling.lifecycle import (
     persisted_run,
     pinned_frontier_choice,
 )
-from hyperloom_multibranch.scheduling.llm import anthropic_completion, default_model
+from hyperloom_multibranch.scheduling.llm import (
+    MB_RESOLVER_READ_TIMEOUT_SECONDS,
+    anthropic_completion,
+    default_model,
+)
 from hyperloom_multibranch.scheduling.local_peers import (
     AGENTX_ENV,
     load_peers,
@@ -100,6 +109,7 @@ from hyperloom_multibranch.scheduling.local_peers import (
 from hyperloom_multibranch.scheduling.peers import PeerFactory, PeersUnavailable
 from hyperloom_multibranch.scheduling.prelude import reused_prelude
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry, adopting_orphans
+from hyperloom_multibranch.scheduling.reference import ReferenceSource, reference_source
 from hyperloom_multibranch.scheduling.roster import RosterCaps
 from hyperloom_multibranch.scheduling.settings import (
     FrontierPolicyMode,
@@ -147,32 +157,6 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _add_branch_options(run: argparse.ArgumentParser) -> None:
-    """The branches the user opens at the root, ahead of the opening batch."""
-
-    run.add_argument(
-        "--specialist-prompt",
-        dest="specialist_prompts",
-        action="append",
-        type=Path,
-        default=None,
-        metavar="FILE",
-        help="A direction for one specialist; repeatable, each opens one branch where EXPLORE starts, "
-        "within --max-branches.",
-    )
-    run.add_argument(
-        "--autonomous-agent",
-        dest="agents",
-        action="append",
-        default=None,
-        metavar="SOURCE",
-        help=(
-            "A third-party agent to run end to end on one branch, a git URL (URL@ref for a ref) or a local path;"
-            " repeatable, each opens one branch at the root within --max-branches."
-        ),
-    )
-
-
 def _add_run_options(run: argparse.ArgumentParser) -> None:
     run.add_argument("--model", required=True, help="Model path or id.")
     run.add_argument("--framework", required=True, help="Inference framework, e.g. vllm or sglang.")
@@ -210,7 +194,7 @@ def _add_run_options(run: argparse.ArgumentParser) -> None:
     run.add_argument(
         "--max-branches", type=int, default=DEFAULT_MAX_BRANCHES, help="Specialist branches not stopped, at most."
     )
-    _add_branch_options(run)
+    _add_specialist_input_options(run)
     run.add_argument(
         "--max-parallel-tests",
         type=int,
@@ -244,6 +228,42 @@ def _add_run_options(run: argparse.ArgumentParser) -> None:
         help="The frontier scorer the session scores with, instead of the one the calibration chooses.",
     )
     run.add_argument("-v", "--verbose", action="store_true", help="Log at debug level.")
+
+
+def _add_specialist_input_options(run: argparse.ArgumentParser) -> None:
+    """What the user gives the specialists to work from: their own directions, the third-party agents some branches
+    run, and the material they read."""
+
+    run.add_argument(
+        "--specialist-prompt",
+        dest="specialist_prompts",
+        action="append",
+        type=Path,
+        default=None,
+        metavar="FILE",
+        help="A direction for one specialist; repeatable, each opens one branch where EXPLORE starts, "
+        "within --max-branches.",
+    )
+    run.add_argument(
+        "--autonomous-agent",
+        dest="agents",
+        action="append",
+        default=None,
+        metavar="SOURCE",
+        help=(
+            "A third-party agent to run end to end on one branch, a git URL (URL@ref for a ref) or a local path;"
+            " repeatable, each opens one branch at the root within --max-branches."
+        ),
+    )
+    run.add_argument(
+        "--reference",
+        dest="references",
+        action="append",
+        default=None,
+        metavar="NAME=DIR",
+        help="A directory of reference material the specialists read; repeatable. It is copied to MB-reference/NAME"
+        " before PRELUDE, and the commit its checkout is on is recorded in the manifest.",
+    )
 
 
 def _positive(args: argparse.Namespace, names: tuple[str, ...]) -> list[str]:
@@ -297,6 +317,14 @@ def _user_directions(files: list[Path], max_branches: int) -> tuple[str, ...]:
     return tuple(directions)
 
 
+def _references(specs: list[str]) -> tuple[ReferenceSource, ...]:
+    sources = tuple(reference_source(spec) for spec in specs)
+    names = {source.name for source in sources}
+    if len(names) != len(sources):
+        raise ValueError("--reference is given one NAME twice; each names one directory under MB-reference")
+    return sources
+
+
 def settings_from(args: argparse.Namespace) -> RunSettings:
     """The run's settings; raises ValueError naming the invalid options. :class:`RosterCaps` checks the caps."""
 
@@ -340,6 +368,7 @@ def settings_from(args: argparse.Namespace) -> RunSettings:
         agents=_agents(args.agents or [], caps.max_branches - len(args.specialist_prompts or [])),
         frontier_policy=FrontierPolicyMode(args.frontier_policy),
         frontier_scorer=args.frontier_scorer,
+        references=_references(args.references or []),
     )
 
 
@@ -412,7 +441,9 @@ def session_services(recipe_kb: RemoteRecipeClient | None) -> SessionServices:
 
     model = default_model()
     judge = anthropic_completion(model, component=PROG, operation="judge")
-    resolver = anthropic_completion(model, component=PROG, operation="patch_resolve")
+    resolver = anthropic_completion(
+        model, component=PROG, operation="patch_resolve", read_seconds=MB_RESOLVER_READ_TIMEOUT_SECONDS
+    )
     critic = partial(LlmCritic, anthropic_critic(model, component=PROG))
     scorer = anthropic_completion(model, component=PROG, operation="author_scorers")
     return SessionServices(judge, resolver, recipe_kb, critic, scorer, model)

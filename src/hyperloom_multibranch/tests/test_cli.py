@@ -48,6 +48,8 @@ from hyperloom_multibranch.scheduling import local_peers
 from hyperloom_multibranch.scheduling.local_peers import AGENTX_ENV
 from hyperloom_multibranch.scheduling.peers import PeerFactory
 from hyperloom_multibranch.scheduling.processes import SCHEDULER_BRANCH, ProcessRecord
+from hyperloom_multibranch.scheduling.reference import ReferenceSource
+from hyperloom_multibranch.scheduling.tests.checkouts import knowledge_checkout
 from hyperloom_multibranch.scheduling.roster import RosterCaps
 from hyperloom_multibranch.scheduling.settings import (
     FrontierPolicyMode,
@@ -251,6 +253,32 @@ def test_an_agent_source_whose_user_is_an_ssh_login_is_accepted(source: str) -> 
 def test_an_ssh_source_with_a_password_carries_credentials() -> None:
     with pytest.raises(ValueError, match="credentials"):
         _settings("--autonomous-agent", "ssh://git:secret@github.com/acme/agent.git")
+
+
+def test_each_reference_is_a_named_directory_pinned_at_the_commit_it_was_taken_from(tmp_path: Path) -> None:
+    commit = knowledge_checkout(tmp_path / "GEAK", "gemm.md")
+
+    settings = _settings("--reference", f"geak-tuning={tmp_path / 'GEAK'}")
+
+    assert settings.references == (ReferenceSource("geak-tuning", str(tmp_path / "GEAK"), commit),)
+    assert _settings().references == ()
+
+
+def test_the_same_reference_name_twice_exits_two_before_creating_anything(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    knowledge_checkout(tmp_path / "GEAK", "gemm.md")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setenv("USER_DATA_PATH", str(workspace))
+    spec = f"geak-tuning={tmp_path / 'GEAK'}"
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["run", *WORKLOAD_ARGS, "--reference", spec, "--reference", spec])
+
+    assert exc.value.code == cli.EXIT_USAGE
+    assert "--reference is given one NAME twice" in capsys.readouterr().err
+    assert not any(workspace.iterdir())
 
 
 def _prompt_file(tmp_path: Path, name: str, text: str | bytes | None) -> str:

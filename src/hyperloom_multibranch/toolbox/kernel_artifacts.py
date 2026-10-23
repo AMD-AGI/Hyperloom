@@ -59,6 +59,7 @@ __all__ = [
     "KernelRowsUnmergeable",
     "KernelVariables",
     "mint_kernel_artifact",
+    "shape_order",
     "union_rows",
 ]
 
@@ -225,12 +226,12 @@ def union_rows(
         else:
             conflicts.append(shape)
     if conflicts:
-        raise KernelRowsConflict([dict(zip(key, shape, strict=True)) for shape in sorted(conflicts, key=_order)])
+        raise KernelRowsConflict([dict(zip(key, shape, strict=True)) for shape in sorted(conflicts, key=shape_order)])
     crlf = b"\r\n" in first and b"\r\n" in second
     out = io.StringIO()
     writer = csv.writer(out, lineterminator="\r\n" if crlf else "\n")
     writer.writerow(header)
-    writer.writerows(merged[shape] for shape in sorted(merged, key=_order))
+    writer.writerows(merged[shape] for shape in sorted(merged, key=shape_order))
     return out.getvalue().encode()
 
 
@@ -284,8 +285,9 @@ def _by_shape(
     return shapes
 
 
-def _order(shape: tuple[str, ...]) -> tuple[tuple[int, float, str], ...]:
-    """Numbers in their numeric order, then the rest as text: the same for the same shapes whatever their input order."""
+def shape_order(shape: tuple[str, ...]) -> tuple[tuple[int, float, str], ...]:
+    """The sort key of a shape (the values of its key columns): numbers in their numeric order, then the rest as text, the
+    same for the same shapes whatever their input order."""
     ordered = []
     for value in shape:
         try:

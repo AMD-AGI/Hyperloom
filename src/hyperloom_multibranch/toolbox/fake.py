@@ -29,6 +29,7 @@ from hyperloom.contracts.recipe import Recipe
 from hyperloom.measure.compile import LocalBlobStore
 from hyperloom_multibranch.contracts.notebook.interfaces import ClaimService, RecordSearch
 from hyperloom_multibranch.contracts.notebook.records import QuarantineEvent, Withdrawal
+from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import (
     CancelOutcome,
     MeasurementCapacity,
@@ -86,14 +87,24 @@ class MemoryNotebook:
 
 
 class _Repo:
-    """Every parent exists unless ``parent_exists`` says otherwise; its recipe is the empty one on the fake's image."""
+    """The repository acceptance reads a parent's recipe from.
 
-    def __init__(self, image: str, parent_exists: Callable[[str], bool] | None) -> None:
-        self._image, self._exists = image, parent_exists
+    With a ``repo`` the recipe is the one that repository holds for the commit, read as the real toolbox reads it, so a
+    parent that pins a component takes a delta of patches only; a commit the repository does not know is an unknown
+    parent. Without one every parent exists and its recipe is the empty one on the fake's image, which pins no
+    component. ``parent_exists`` narrows either: a commit it refuses is unknown.
+    """
+
+    def __init__(
+        self, image: str, parent_exists: Callable[[str], bool] | None, repo: ExperimentRepo | None = None
+    ) -> None:
+        self._image, self._exists, self._repo = image, parent_exists, repo
 
     async def read_recipe(self, commit: str) -> Recipe:
         if self._exists is not None and not self._exists(commit):
             raise KeyError(commit)
+        if self._repo is not None:
+            return await self._repo.read_recipe(commit)
         return Recipe(base_image_digest=self._image)
 
 
@@ -205,8 +216,11 @@ class FakeExecutor:
 class FakeWiring:
     """What a :class:`FakeToolbox` is connected to besides its notebook; every field is optional.
 
-    ``parent_exists`` answers whether a parent commit is known, ``log_path`` places the submit log, ``claims`` and
-    ``records`` are the notebook's claim and record ports and ``workload_kind`` is the campaign's workload.
+    ``repo`` is the experiment repository acceptance reads each parent's recipe from, as the real toolbox does; its
+    recipes must sit on ``FakeToolboxConfig.image_digest``, the active image. Without one a parent's recipe is the
+    empty one, so a delta must give a component's upstream repository and commit. ``parent_exists`` answers whether a
+    parent commit is known, ``log_path`` places the submit log, ``claims`` and ``records`` are the notebook's claim and
+    record ports and ``workload_kind`` is the campaign's workload.
     """
 
     parent_exists: Callable[[str], bool] | None = None
@@ -214,6 +228,7 @@ class FakeWiring:
     claims: ClaimService | None = None
     records: RecordSearch | None = None
     workload_kind: WorkloadKind = WorkloadKind.INFERENCEX
+    repo: ExperimentRepo | None = None
 
 
 class FakeToolbox(RealToolbox):
@@ -251,7 +266,7 @@ class FakeToolbox(RealToolbox):
             records=wiring.records,
         )
         acceptance = AcceptanceSetup(
-            _Repo(self.config.image_digest, wiring.parent_exists),
+            _Repo(self.config.image_digest, wiring.parent_exists, wiring.repo),
             _NoPlanner(),
             self.config.image_digest,
             wiring.workload_kind,
@@ -311,11 +326,19 @@ class FakeToolbox(RealToolbox):
 
     async def submit_test(self, request: TestRequest) -> str:
         await self._ensure_started()
+        self._refuse_rejected(request)
+        return await super().submit_test(request)
+
+    async def check_test(self, request: TestRequest) -> None:
+        await self._ensure_started()
+        self._refuse_rejected(request)
+        await super().check_test(request)
+
+    def _refuse_rejected(self, request: TestRequest) -> None:
         for check in self._rejections:
             rejection = check(request)
             if rejection is not None:
                 raise rejection
-        return await super().submit_test(request)
 
     async def cancel(self, request_id: str) -> CancelOutcome:
         await self._ensure_started()

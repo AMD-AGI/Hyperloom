@@ -101,7 +101,7 @@ class QueuePolicy:
 
 
 def sandbox_priority(priority: int) -> int:
-    """The three claw.io/priority tiers: 0 and 1 map to 0, 2 and 3 to 1, 4 to 2."""
+    """The three agent-sandbox.io/priority tiers: 0 and 1 map to 0, 2 and 3 to 1, 4 to 2."""
 
     return {0: 0, 1: 0, 2: 1, 3: 1, 4: 2}[priority]
 

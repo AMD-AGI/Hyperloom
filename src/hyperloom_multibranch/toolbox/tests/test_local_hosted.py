@@ -17,12 +17,15 @@ from typing import Any
 
 import pytest
 
+from hyperloom.common.rule_pack import PACK_ENV, load_pack
 from hyperloom.contracts.measurement import FailureClass, TestResult, Validity
+from hyperloom.measure.archive import DirResultArchive
 from hyperloom.measure.framework_base import FRAMEWORK_BASE_FILE, load_snapshot
 from hyperloom.measure.hosted_log import STATE_FINISHED, STATE_SENT, MeasurementJournal, Record
 from hyperloom.measure.runner.tools import ToolError, ensure_inferencex
 from hyperloom.measure.tests.framework_fixtures import make_framework
 from hyperloom.measure.tests.hosted_fixtures import spec_context
+from hyperloom.measure.tests.rule_pack_fixtures import identity_of, other_pack, reading_pack  # noqa: F401
 from hyperloom.measure.tests.test_hosted_real_runner import _git_repo, _point
 from hyperloom_multibranch.contracts.notebook import Role, Writer
 from hyperloom_multibranch.notebook import LocalNotebook
@@ -213,5 +216,87 @@ async def test_every_test_of_the_session_reads_private_copies_of_the_tables_the_
         assert landed["isolation"] == "private_copies" and landed["matches_session"] is True
         assert landed["session_sha256"] == snapshot.sha256 and landed["framework_base_changed"] is False
         assert "AITER_CONFIG_GEMM" in landed["redirected"]
+    finally:
+        await toolbox.close()
+
+
+async def test_a_session_that_names_a_rule_pack_gives_its_sandboxes_a_staged_copy_and_one_that_does_not_gives_none(
+    tmp_path: Path, reading_pack
+) -> None:
+    notebook = LocalNotebook(tmp_path / "notebook", Writer(Role.TOOLBOX, "toolbox"))
+    named = other_pack(tmp_path)
+    for pack, session in ((named, tmp_path / "named"), (None, tmp_path / "reference")):
+        reading_pack(pack)
+        toolbox = _toolbox_of(notebook, tmp_path, session, "a" * 40)
+        try:
+            env = (await toolbox.lease_branch_sandbox(f"branch-{session.name}", 1)).env
+        finally:
+            await toolbox.close()
+        if pack is None:
+            assert PACK_ENV not in env and not (session / "rule-pack").exists()
+        else:
+            staged = Path(env[PACK_ENV])
+            assert staged.parent == (session / "rule-pack").resolve() and staged != named
+            assert load_pack(staged).digest == identity_of(named)["digest"]
+
+
+async def test_every_test_of_a_session_runs_with_the_rule_pack_the_session_names(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reading_pack
+) -> None:
+    """The runner starts from an emptied environment: the pack reaches it through the template, its signed manifest
+    states the digest it read, and the backend accepted the result only because that is the session's."""
+    repo = tmp_path / "inferencex"
+    commit = _git_repo(repo)
+    _require_tool_checkout(repo, commit, tmp_path / "home", monkeypatch)
+    named = other_pack(tmp_path)
+    reading_pack(named)
+    session = tmp_path / "session"
+    notebook = LocalNotebook(tmp_path / "notebook", Writer(Role.TOOLBOX, "toolbox"))
+    toolbox = _toolbox_of(
+        notebook, tmp_path, session, commit, runner_envs={"INFERENCEX_REPO": str(repo)}, max_infra_retries=0
+    )
+    try:
+        await toolbox.start()
+        request_id = await toolbox.submit_test(req())
+        await asyncio.wait_for(toolbox.drain(), 120)
+        entry = toolbox._log.get(request_id)
+        assert entry is not None and entry.outcome is not None and "result" in entry.outcome, entry.outcome
+        result = TestResult.from_document(entry.outcome["result"])
+        assert result.manifest_sha256
+        assert toolbox.backend.journal.latest(request_id).extra["verified"] is True  # type: ignore[union-attr]
+        archived = DirResultArchive(session / "archive").bundle_path(request_id, result.manifest_sha256)
+        manifest = json.loads((archived / "manifest.json").read_text(encoding="utf-8"))
+        assert manifest["runner"]["rule_pack"] == identity_of(named)
+    finally:
+        await toolbox.close()
+
+
+async def test_a_result_of_a_runner_that_read_another_pack_than_the_session_is_not_a_measurement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reading_pack
+) -> None:
+    """The template is told another pack than the one the session read (here through ``runner_envs``): the runner
+    states what it read, and the toolbox refuses to take a result of other facts as the session's."""
+    repo = tmp_path / "inferencex"
+    commit = _git_repo(repo)
+    _require_tool_checkout(repo, commit, tmp_path / "home", monkeypatch)
+    other = other_pack(tmp_path)
+    reading_pack(None)
+    session = tmp_path / "session"
+    notebook = LocalNotebook(tmp_path / "notebook", Writer(Role.TOOLBOX, "toolbox"))
+    envs = {"INFERENCEX_REPO": str(repo), PACK_ENV: str(other)}
+    toolbox = _toolbox_of(notebook, tmp_path, session, commit, runner_envs=envs, max_infra_retries=0)
+    try:
+        await toolbox.start()
+        request_id = await toolbox.submit_test(req())
+        await asyncio.wait_for(toolbox.drain(), 120)
+        entry = toolbox._log.get(request_id)
+        assert entry is not None and entry.outcome is not None and "result" in entry.outcome, entry.outcome
+        result = TestResult.from_document(entry.outcome["result"])
+        assert result.validity is Validity.MEASUREMENT_FAILED and result.failure_class is FailureClass.INFRA
+        assert result.failure_reason and "(rule_pack_mismatch)" in result.failure_reason, result.failure_reason
+        assert identity_of(other)["digest"] in result.failure_reason
+        assert result.manifest_sha256 is None, "nothing of the refused bundle is recorded as the test's result"
+        extra = toolbox.backend.journal.latest(request_id).extra  # type: ignore[union-attr]
+        assert extra["reject"] == "rule_pack_mismatch" and "verified" not in extra
     finally:
         await toolbox.close()

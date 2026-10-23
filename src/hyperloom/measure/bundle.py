@@ -51,6 +51,7 @@ class RejectReason(str, Enum):
     SPEC_FINGERPRINT_MISMATCH = "spec_fingerprint_mismatch"
     SPEC_HASH_MISMATCH = "spec_hash_mismatch"
     SANDBOX_MISMATCH = "sandbox_mismatch"
+    RULE_PACK_MISMATCH = "rule_pack_mismatch"
     TOO_LARGE = "too_large"
     FILE_MISSING = "file_missing"
     FILE_SIZE_MISMATCH = "file_size_mismatch"
@@ -106,6 +107,8 @@ class BundleExpectation:
     ``sandbox_id`` is the sandbox the bundle was read from: a bundle signed by the right key but made in another
     sandbox is a replay and is refused. ``spec_sha256`` is the hash of the exact bytes written to ``/in/spec.json``;
     ``None`` skips that comparison and is for a caller that only holds the fingerprint (a record book entry).
+    ``rule_pack_digest`` is the digest of the rule pack the session reads: the runner must state that it read a pack
+    with that digest, or what it measured followed facts the session did not record; ``None`` skips the comparison.
     """
 
     public_key_pem: str
@@ -113,6 +116,7 @@ class BundleExpectation:
     spec_fingerprint: str
     spec_sha256: str | None
     sandbox_id: str
+    rule_pack_digest: str | None = None
 
 
 @dataclass(frozen=True)
@@ -224,6 +228,19 @@ def _check_identity(manifest: ResultManifest, fingerprint: str, expected: Bundle
         raise ResultRejected(RejectReason.SPEC_HASH_MISMATCH, "the manifest measured other spec bytes")
     if manifest.runner.sandbox_id != expected.sandbox_id:
         raise ResultRejected(RejectReason.SANDBOX_MISMATCH, "the manifest was made in another sandbox")
+    if expected.rule_pack_digest is not None:
+        _check_rule_pack(manifest, expected.rule_pack_digest)
+
+
+def _check_rule_pack(manifest: ResultManifest, session_digest: str) -> None:
+    stated = manifest.runner.rule_pack
+    if stated is None:
+        raise ResultRejected(RejectReason.RULE_PACK_MISMATCH, "the runner states no rule pack")
+    if stated.digest != session_digest:
+        raise ResultRejected(
+            RejectReason.RULE_PACK_MISMATCH,
+            f"the runner read rule pack {stated.version} ({stated.digest}), the session reads {session_digest}",
+        )
 
 
 def _read_checked(root_fd: int, relative: str, size: int, sha256: str) -> bytes:

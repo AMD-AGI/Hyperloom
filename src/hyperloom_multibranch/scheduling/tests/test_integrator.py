@@ -8,8 +8,8 @@ The root runs ``--max-num-seqs 64``; branch ``s1`` commits ``c1`` (+4%, ``vllm``
 measures follows from the tags of the recipe it builds (:data:`CURVES`). The repository applies the merged patches to
 a ``vllm`` package the bench lays out; a conflicting ``c1`` carries a second patch of the same line.
 
-The toolbox's fake reads every parent as an empty recipe, so only a merge that pins ``vllm`` in full, which a merge
-onto a head without it does, is accepted there; the root pins no component.
+The toolbox's fake reads each parent's recipe from the bench's repository, as the real toolbox does, so a merge onto a
+head that already pins ``vllm`` is accepted with a delta of patches alone; the root pins no component.
 """
 
 from __future__ import annotations
@@ -34,6 +34,8 @@ from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest
 from hyperloom.contracts.recipe import (
     ComponentChange,
     ConfigDelta,
+    KernelArtifact,
+    KernelKind,
     LaunchConfig,
     PatchRef,
     Recipe,
@@ -45,6 +47,7 @@ from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
 from hyperloom_multibranch.contracts.notebook.records import LineageEvent
 from hyperloom_multibranch.contracts.notebook.vocab import Conclusion, LineageKind, MergeOutcome
+from hyperloom_multibranch.contracts.repo import RepoMerge, UnitedTable
 from hyperloom_multibranch.contracts.toolbox import RequestRejected
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.knowledge.warm_start import PreparedReplay
@@ -55,8 +58,10 @@ from hyperloom_multibranch.scheduling.decisions import DecisionKind, DecisionLog
 from hyperloom_multibranch.scheduling.explore import EXPLORE_TICK_SECONDS
 from hyperloom_multibranch.scheduling.integrator import (
     ALREADY_ON_HEAD,
+    CONFLICT_UNRESOLVED,
     FOUNDATION_FIX_VERDICTS,
     RESOLVER_SYSTEM_PROMPT,
+    RESOLVER_UNREACHED,
     SUPERSEDED,
     Integrator,
     LlmPatchResolver,
@@ -64,7 +69,7 @@ from hyperloom_multibranch.scheduling.integrator import (
     MergeReport,
     not_stackable_reason,
 )
-from hyperloom_multibranch.scheduling.llm import CompletionFailed
+from hyperloom_multibranch.contracts.llm import CompletionFailed
 from hyperloom_multibranch.rulegate import agentx
 from hyperloom_multibranch.rulegate.service import BASELINE_TESTS
 from hyperloom_multibranch.scheduling.requests import SessionChecks, SessionTests, integration_test_request
@@ -141,10 +146,12 @@ class HeldRetests(RecordingToolbox):
         self.confirming = asyncio.Event()
 
     async def submit_test(self, request: TestRequest) -> str:
-        if request.purpose is Purpose.CONFIRM:
-            self.executor.gate.clear()
-            self.confirming.set()
-        return await super().submit_test(request)
+        if request.purpose is not Purpose.CONFIRM:
+            return await super().submit_test(request)
+        self.executor.gate.clear()
+        accepted = await super().submit_test(request)
+        self.confirming.set()
+        return accepted
 
 
 class HeldRepo(GitExperimentRepo):
@@ -271,7 +278,7 @@ async def _bench(
         LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id=root)
     )
     toolbox_notebook = LocalNotebook(notebook, Writer(Role.TOOLBOX, "toolbox"), clock=clock)
-    toolbox = toolbox_type(toolbox_notebook, recipe_effect(tmp_path / "repo", curves), accuracy)
+    toolbox = toolbox_type(toolbox_notebook, recipe_effect(tmp_path / "repo", curves), accuracy, repo=repo)
     merger = LocalNotebook(notebook, Writer(Role.INTEGRATOR, "integrator"), clock=clock)
     tests = SessionTests(toolbox, Clock(now=clock, sleep=_instant))
     gate = session_gate(LocalNotebook(notebook, Writer(Role.GATE, "gate"), clock=clock), toolbox)
@@ -704,6 +711,47 @@ async def _committed_again(bench: Bench) -> str:
     return await _committed_elsewhere(bench, RecipeDelta(config=bench.deltas["c1"].config), 5.0)
 
 
+#: The shapes the head's rows won in the united slot, as ``union_rows`` names them by their key columns.
+KEPT_SHAPES = ({"M": "1024", "N": "4096"},)
+UNITED = UnitedTable(
+    KernelArtifact(KernelKind.GEMM, "linear", "kernel/theirs.csv", "c" * 64),
+    KernelArtifact(KernelKind.GEMM, "linear", "kernel/ours.csv", "d" * 64),
+    KernelArtifact(KernelKind.GEMM, "linear", "kernel/united.csv", "e" * 64),
+    KEPT_SHAPES,
+)
+UNITED_ROW = {
+    "kind": KernelKind.GEMM.value,
+    "target": "linear",
+    "theirs": "c" * 64,
+    "ours": "d" * 64,
+    "table": "e" * 64,
+    "kept_head_shapes": [dict(shape) for shape in KEPT_SHAPES],
+}
+
+
+class UnitingRepo(GitExperimentRepo):
+    """Reports every merge as uniting one kernel slot; a test double for the union a merge makes where a table's
+    shapes can be keyed, which needs an aiter install this bench has none of."""
+
+    async def merge(self, candidate: str, onto: str) -> RepoMerge:
+        return replace(await super().merge(candidate, onto), united_tables=(UNITED,))
+
+
+async def test_a_merge_that_unites_two_kernel_tables_says_so_in_the_decision_log(tmp_path: Path) -> None:
+    bench = await _bench(tmp_path, repo_type=UnitingRepo)
+
+    merged = await _one(bench)
+    again = await _committed_again(bench)
+    reports = await bench.integrator.integrate_next(2, EXPLORE_TICK_SECONDS)
+
+    assert merged is not None and merged.outcome is MergeOutcome.MERGED
+    [skipped] = [report for report in reports if report.candidate == again]
+    assert skipped.outcome is MergeOutcome.ALREADY_ON_HEAD
+    rows = {entry["detail"]["candidate"]: entry["detail"]["united_tables"] for entry in bench.logged()}
+    assert rows[merged.candidate] == [UNITED_ROW]
+    assert rows[again] == [UNITED_ROW]
+
+
 async def test_a_merge_that_leaves_the_head_s_recipe_unchanged_is_skipped_untested(bench: Bench) -> None:
     await _one(bench)
     head = await bench.repo.head(INTEGRATION_BRANCH)
@@ -768,23 +816,29 @@ async def test_a_patch_that_does_not_apply_on_the_head_is_rewritten_before_the_m
 
 
 @pytest.mark.parametrize(
-    "scripted",
+    ("scripted", "named"),
     [
-        ScriptedCompletion(fallback=json.dumps({"patch": None})),
-        ScriptedCompletion(error=CompletionFailed("patch_resolve call failed: RuntimeError: status=529")),
+        (ScriptedCompletion(fallback=json.dumps({"patch": None})), CONFLICT_UNRESOLVED),
+        (
+            ScriptedCompletion(error=CompletionFailed("patch_resolve call failed: ReadTimeout: ")),
+            RESOLVER_UNREACHED,
+        ),
     ],
     ids=["model-declines", "call-fails"],
 )
 async def test_an_unresolved_patch_conflict_is_skipped_and_recorded(
-    tmp_path: Path, scripted: ScriptedCompletion
+    tmp_path: Path, scripted: ScriptedCompletion, named: str
 ) -> None:
+    """A conflict the model declined and one it was never asked about are both skipped, under reasons that tell them
+    apart: a timed-out call says nothing about whether the two patches can be combined."""
+
     bench = await _bench(tmp_path, conflicting=True)
     bench.completion.fallback, bench.completion.error = scripted.fallback, scripted.error
 
     report = await _one(bench)
 
     assert report is not None and report.outcome is MergeOutcome.CONFLICT_SKIPPED
-    assert "unresolved patch conflict" in report.reason and report.request_id is None
+    assert report.reason.startswith(named) and report.request_id is None
     conflicting = bench.deltas["c1"].components[0].add_patches[1]
     assert conflicting.path in report.reason
     assert await bench.outcome("c1") is MergeOutcome.CONFLICT_SKIPPED

@@ -33,16 +33,19 @@ from hyperloom.measure.compile import (
     kernel_rows_only,
 )
 from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH
-from hyperloom_multibranch.contracts.repo import UnitedTable
+from hyperloom_multibranch.contracts.repo import RepoMerge, ResolvedPatch, UnitedTable
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
-from hyperloom_multibranch.repo.merge import Stored, carry, wider_table
+from hyperloom_multibranch.repo.merge import Stored, carry, stack_kernel_slot, wider_table
 from hyperloom_multibranch.repo.rebase import Files
 from hyperloom_multibranch.toolbox.kernel_artifacts import mint_kernel_artifact, union_rows
 from hyperloom_multibranch.toolbox.tests.kernel_rows_cc2bf0ef import (
     B01_HEAD,
     B01_NEW,
     B01_SHARED,
+    B06_HEAD,
     B06_NEW,
+    B06_SHARED,
+    B09_NEW,
     ENV,
     SHARED,
     csv_text,
@@ -339,13 +342,22 @@ def test_two_tables_each_with_rows_the_other_lacks_unite_into_one_table(configs)
     assert apply(_filled(head), merge.delta).kernels == (united,)
 
 
-def test_a_shape_both_sides_tuned_to_other_rows_is_refused_by_name(configs):
+def test_a_shape_both_sides_tuned_to_other_rows_keeps_the_head_s_row_and_unites_the_rest(configs):
+    """The head's row was measured on integration; the candidate's other shapes still join it, and the shapes whose row
+    the merge kept from the head are named."""
+
     head, theirs = _aiter(csv_text(SHARED, B01_HEAD)), _aiter(csv_text(B01_SHARED, B01_NEW))
 
-    with pytest.raises(RecipeError, match="both sides replaced the gemm kernel for a8w8: 2 shapes differ: ") as caught:
-        carry("i1", BASE, _filled(theirs), _filled(head), Stored(_applies, _table, _store, _keep, configs))
+    merge = carry("i1", BASE, _filled(theirs), _filled(head), Stored(_applies, _table, _store, _keep, configs))
 
-    assert "M=64 N=34816 K=5120" in str(caught.value) and "M=64 N=5120 K=17408" in str(caught.value)
+    (united,) = merge.delta.add_kernels
+    expected = union_rows(csv_text(B01_NEW), TABLES[head.sha256], ENV, configs=configs)
+    assert TABLES[united.sha256] == expected
+    (kept_from,) = merge.united_tables
+    assert kept_from.ours == head and len(kept_from.kept_head_shapes) == 2
+    named = {" ".join(f"{k}={v}" for k, v in shape.items()) for shape in kept_from.kept_head_shapes}
+    assert any("M=64 N=34816 K=5120" in shape for shape in named)
+    assert any("M=64 N=5120 K=17408" in shape for shape in named)
 
 
 def test_two_rows_only_sets_unite_into_a_rows_only_set(configs):
@@ -358,11 +370,86 @@ def test_two_rows_only_sets_unite_into_a_rows_only_set(configs):
     assert kernel_rows_only(united) and TABLES[united.sha256] == data
 
 
-def test_a_rows_only_set_and_a_whole_table_are_refused(configs):
+def test_rows_only_rows_over_a_whole_table_make_one_whole_table(configs):
+    """Rows put over the image's table read the same over the head's whole table: the union is a whole table."""
+
     head, theirs = _aiter(csv_text(SHARED)), _aiter_rows(csv_text(B06_NEW))
 
-    with pytest.raises(RecipeError, match="both sides replaced the gemm kernel for a8w8: the first table is rows-only"):
-        carry("i1", BASE, _filled(theirs), _filled(head), Stored(_applies, _table, _store, _keep, configs))
+    merge = carry("i1", BASE, _filled(theirs), _filled(head), Stored(_applies, _table, _store, _keep, configs))
+
+    (united,) = merge.delta.add_kernels
+    assert not kernel_rows_only(united)
+    assert TABLES[united.sha256] == union_rows(csv_text(B06_NEW), TABLES[head.sha256], ENV, configs=configs)
+
+
+def test_a_replay_stacks_a_kernel_slot_as_the_merge_fills_it(configs):
+    """The wider table, else the union the merge makes, else ``None`` where the merge refuses the pair."""
+
+    narrow, wide = _aiter(csv_text(SHARED)), _aiter(csv_text(SHARED, B09_NEW))
+    head, theirs = _aiter(csv_text(SHARED, B01_HEAD)), _aiter(csv_text(B01_SHARED, B01_NEW))
+    stored = Stored(_applies, _table, _store, _keep, configs)
+
+    assert stack_kernel_slot(wide, narrow, stored) == stack_kernel_slot(narrow, wide, stored) == wide
+    merged = carry("i1", BASE, _filled(theirs), _filled(head), stored).delta.add_kernels
+    assert (stack_kernel_slot(theirs, head, stored),) == merged
+    refused = _rows_only("b02", "304,1,4096,4096,19.8"), _kernel("head", "304,1,4096,4096,23.1")
+    assert stack_kernel_slot(*refused, stored) is None
+
+
+#: ``B01_HEAD``'s shapes at another time: neither the head's row nor the candidate's.
+B01_BASE = tuple(row.replace(",0,20.0,", ",0,30.0,") for row in B01_HEAD)
+
+
+def _named(shapes) -> set[str]:
+    return {" ".join(f"{k}={shape[k]}" for k in "MNK") for shape in shapes}
+
+
+def test_a_union_of_only_the_head_s_rows_carries_no_kernel(configs):
+    """Every shape the candidate differs on the head also tuned: the head's table stays, and the kept shapes are named."""
+
+    base = _aiter(csv_text(SHARED[:2]))
+    head, theirs = _aiter(csv_text(SHARED, B01_HEAD)), _aiter(csv_text(SHARED[:2], B01_SHARED))
+
+    merge = carry("i1", _filled(base), _filled(theirs), _filled(head), Stored(_applies, _table, _store, _keep, configs))
+
+    assert merge.delta.add_kernels == ()
+    assert apply(_filled(head), merge.delta).kernels == (head,)
+    (united,) = merge.united_tables
+    assert (united.theirs, united.ours, united.table) == (theirs, head, head)
+    assert _named(united.kept_head_shapes) == {"M=64 N=34816 K=5120", "M=64 N=5120 K=17408"}
+
+
+def test_a_candidate_s_retune_of_a_row_the_head_left_as_in_base_lands(configs):
+    base = _aiter(csv_text(SHARED, B01_HEAD))
+    head, theirs = _aiter(csv_text(SHARED, B01_HEAD, B09_NEW)), _aiter(csv_text(SHARED, B01_SHARED))
+
+    merge = carry("i1", _filled(base), _filled(theirs), _filled(head), Stored(_applies, _table, _store, _keep, configs))
+
+    (united,) = merge.delta.add_kernels
+    assert TABLES[united.sha256] == union_rows(TABLES[theirs.sha256], csv_text(SHARED, B09_NEW), ENV, configs=configs)
+    assert merge.united_tables == (UnitedTable(theirs, head, united),)
+
+
+def test_only_a_shape_both_sides_moved_from_base_keeps_the_head_s_row_and_is_named(configs):
+    """The head retuned a shape the candidate left as in base, and both retuned another: the head's rows serve both,
+    and only the second is named."""
+
+    base = _aiter(csv_text(SHARED, B06_HEAD, B01_BASE))
+    head = _aiter(csv_text(SHARED, B06_SHARED, B01_HEAD))
+    theirs = _aiter(csv_text(SHARED, B06_HEAD, B01_SHARED, B01_NEW))
+
+    merge = carry("i1", _filled(base), _filled(theirs), _filled(head), Stored(_applies, _table, _store, _keep, configs))
+
+    (united,) = merge.delta.add_kernels
+    assert TABLES[united.sha256] == union_rows(csv_text(B01_NEW), TABLES[head.sha256], ENV, configs=configs)
+    (kept_from,) = merge.united_tables
+    assert _named(kept_from.kept_head_shapes) == {"M=64 N=34816 K=5120", "M=64 N=5120 K=17408"}
+
+
+def test_a_replay_keeps_the_head_s_table_where_the_union_is_its_rows(configs):
+    head, theirs = _aiter(csv_text(SHARED, B01_HEAD)), _aiter(csv_text(SHARED[:2], B01_SHARED))
+
+    assert stack_kernel_slot(theirs, head, Stored(_applies, _table, _store, _keep, configs)) == head
 
 
 def test_a_candidate_on_another_base_image_does_not_merge():
@@ -495,3 +582,56 @@ async def test_a_change_the_head_already_holds_is_not_carried_twice(tmp_path):
 
     assert merge.clean and merge.rebased_patches == ()
     assert [change.add_patches for change in merge.delta.components] == [()]
+
+
+def _blob_names(tmp_path) -> set[str]:
+    return {path.name for path in (tmp_path / "blobs").iterdir()}
+
+
+async def _applied_on(tmp_path) -> tuple[GitExperimentRepo, ComponentPatches]:
+    """A repository over an installed ``config.py`` and a stack whose one patch sets ``c``."""
+
+    repo = _repository(tmp_path, _installed(tmp_path, config="".join(_config())))
+    stored = await repo.store_patch("vllm", _edit(c="30"))
+    return repo, ComponentPatches("vllm", VLLM, PIN, (stored,))
+
+
+async def test_a_patch_that_applies_on_top_of_the_stack_has_no_apply_error(tmp_path):
+    repo, stack = await _applied_on(tmp_path)
+    before = _blob_names(tmp_path)
+
+    body = difflib.unified_diff(_config(c="30"), _config(c="30", e="50"), "a/vllm/config.py", "b/vllm/config.py")
+    on_top = "diff --git a/vllm/config.py b/vllm/config.py\n" + "".join(body)
+
+    assert await repo.apply_error(stack, on_top) is None
+    assert await repo.apply_error(stack, _edit(e="50")) is not None
+    assert _blob_names(tmp_path) == before
+
+
+async def test_a_patch_that_conflicts_with_the_stack_returns_why(tmp_path):
+    repo, stack = await _applied_on(tmp_path)
+    before = _blob_names(tmp_path)
+
+    error = await repo.apply_error(stack, _edit(c="31"))
+
+    assert error is not None and "does not apply to the installed package" in error
+    assert _blob_names(tmp_path) == before
+
+
+async def test_a_text_that_is_no_git_patch_is_an_apply_error(tmp_path):
+    repo, stack = await _applied_on(tmp_path)
+    before = _blob_names(tmp_path)
+
+    error = await repo.apply_error(stack, "set c to 31 in config.py")
+
+    assert error is not None and "not a git patch" in error
+    assert _blob_names(tmp_path) == before
+
+
+def test_a_merge_carries_no_resolved_patch_until_the_integrator_adds_one():
+    resolved = ResolvedPatch("vllm", "patch/vllm/old.patch", _patch("new"), "claude-sonnet-5-5", "v1", 2)
+
+    assert RepoMerge(PIN, RecipeDelta()).resolved_patches == ()
+    assert (resolved.component, resolved.replaces, resolved.patch) == ("vllm", "patch/vllm/old.patch", _patch("new"))
+    assert (resolved.model, resolved.prompt_version, resolved.attempts) == ("claude-sonnet-5-5", "v1", 2)
+    assert replace(RepoMerge(PIN, RecipeDelta()), resolved_patches=(resolved,)).resolved_patches == (resolved,)

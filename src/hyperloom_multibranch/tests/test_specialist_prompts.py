@@ -511,3 +511,65 @@ def test_the_gemm_direction_asks_for_the_table_read_and_marks_borrowed_rows_as_u
     assert "rows borrowed from tuned tables of the same kernel family at nearby shapes are an untimed guess" in gemm
     assert "rows_only=true" in gemm
     assert "several shapes in one test" in gemm
+
+
+def test_the_role_reads_draft_acceptance_by_context_host_work_host_syncs_and_capture_sizes():
+    prompt = role_prompt(WORKLOAD)
+
+    assert "Read the accept length per context-length bucket, not only its mean" in prompt
+    assert "Compare TTFT with the prefill's GPU time in the same test" in prompt
+    assert "A GPU profile does not show host stalls: grep the per-layer hot path for .item()" in prompt
+    assert "Set graph capture sizes from the token counts the workload's steps carry" in prompt
+
+
+def test_the_directions_name_prefix_recompute_config_overrides_and_fusion_through_the_quantize():
+    fast_path, fusion, settings = DIRECTIONS[0], DIRECTIONS[2], DIRECTIONS[3]
+
+    assert "compare each follow-up turn's computed prefill tokens with its new tokens" in settings
+    assert "is set with --hf-overrides, nested under text_config for a multimodal wrapper" in fast_path
+    assert "Carry the fusion to the quantize" in fusion
+
+
+def test_the_role_names_the_session_s_reference_material_only_when_it_has_some(tmp_path):
+    geak = tmp_path / "MB-reference" / "geak"
+
+    prompt = role_prompt(WORKLOAD, references={"geak": geak})
+
+    assert f"geak at {geak}" in prompt and "read-only" in prompt
+    assert "name the file you used in your branch log" in prompt
+    assert "Reference material for this session" not in role_prompt(WORKLOAD)
+
+
+def test_the_role_says_what_geak_s_reference_directories_hold(tmp_path):
+    prompt = role_prompt(WORKLOAD, references={"geak": tmp_path / "geak"})
+
+    assert "perf_knowledge/expert_skills/tuning" in prompt
+    assert "kernel_workflow/knowledge/learned" in prompt
+    assert "perf_knowledge" not in role_prompt(WORKLOAD, references={"notes": tmp_path / "notes"})
+
+
+def test_the_role_reads_a_table_s_hits_before_calling_it_flat():
+    prompt = role_prompt(WORKLOAD)
+
+    assert "table_hits says, per kernel table the test loaded, how many of its rows aiter read" in prompt
+    assert "a table marked not_exercised measured nothing of its rows" in prompt
+
+
+def test_the_attention_and_fusion_directions_name_the_cache_layout_and_the_epilogue():
+    (attention,) = [text for text in DIRECTIONS if text.startswith("Attention and decode kernels:")]
+    (fusion,) = [text for text in DIRECTIONS if text.startswith("Fusion:")]
+
+    assert "every kernel that writes the KV cache must write the layout the new one reads" in attention
+    assert "revise the patch your head already has for that writer instead of adding a second one" in attention
+    assert "into the GEMM epilogue that consumes it" in fusion
+    assert "profile again once a large kernel on the path got faster" in fusion
+
+
+def test_the_role_and_gemm_direction_tune_with_kernel_tune_when_it_is_served():
+    prompt = role_prompt(WORKLOAD)
+    gemm = DIRECTIONS[1]
+
+    assert 'start_analysis with tool "kernel_tune"' in prompt
+    assert "rows marked verified=false are never put" in prompt
+    assert "its microseconds are advice, the test is the measurement" in prompt
+    assert "When start_analysis lists kernel_tune, tune the untuned shapes with it" in gemm

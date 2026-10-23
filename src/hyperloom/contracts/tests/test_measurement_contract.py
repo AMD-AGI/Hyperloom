@@ -19,6 +19,10 @@ from hyperloom.contracts.measurement import (
     REPRODUCED,
     RoundValue,
     SandboxFacts,
+    TABLE_EXERCISED,
+    TABLE_NOT_EXERCISED,
+    TABLE_NOT_OBSERVABLE,
+    TableHits,
     TestKind,
     TestRequest,
     TestResult,
@@ -433,3 +437,78 @@ def test_a_document_with_a_non_string_warning_is_refused() -> None:
         TestResult.from_document({**_result().to_document(), "nonfatal_warnings": ["ok", 3]})
     with pytest.raises(MeasurementError, match="nonfatal_warnings must be a list"):
         TestResult.from_document({**_result().to_document(), "nonfatal_warnings": "oops"})
+
+
+# --- the hits of a kernel table ------------------------------------------------------------------------------------
+
+TABLE_SHA = "c" * 64
+EXERCISED = TableHits(
+    "AITER_CONFIG_GEMM_BF16", "gemm_bf16", TABLE_SHA, TABLE_EXERCISED, rows=4, rows_hit=2, hit_lines=11
+)
+NOT_EXERCISED = TableHits(
+    "AITER_CONFIG_GEMM_BF16",
+    "gemm_bf16",
+    TABLE_SHA,
+    TABLE_NOT_EXERCISED,
+    rows=4,
+    rows_hit=0,
+    hit_lines=0,
+    reason="none",
+)
+NOT_OBSERVABLE = TableHits(
+    "AITER_CONFIG_GEMM_BF16", "gemm_bf16", TABLE_SHA, TABLE_NOT_OBSERVABLE, rows=4, reason="no hit logging"
+)
+
+
+@pytest.mark.parametrize("hits", [EXERCISED, NOT_EXERCISED, NOT_OBSERVABLE], ids=lambda hits: hits.status)
+def test_the_hits_of_a_table_round_trip_and_an_unknown_count_stays_unknown(hits: TableHits) -> None:
+    again = _roundtrip(_result(table_hits=(hits,), runtime_findings=("a finding",)))
+    assert again.table_hits == (hits,) and again.runtime_findings == ("a finding",)
+    assert (again.table_hits[0].rows_hit is None) == (hits.status == TABLE_NOT_OBSERVABLE), "none is not zero"
+
+
+def test_a_document_written_before_the_table_hits_loads_with_none() -> None:
+    document = _result(table_hits=(EXERCISED,), runtime_findings=("x",)).to_document()
+    del document["table_hits"], document["runtime_findings"]
+    loaded = TestResult.from_document(document)
+    assert loaded.table_hits == () and loaded.runtime_findings == ()
+
+
+@pytest.mark.parametrize(
+    ("fields", "match"),
+    [
+        ({"status": "flat"}, "status must be one of"),
+        ({"status": TABLE_EXERCISED, "rows_hit": 0, "hit_lines": 0}, "an exercised table has at least one row hit"),
+        ({"status": TABLE_EXERCISED, "rows_hit": 5, "hit_lines": 5}, "5 rows hit of 4 rows"),
+        ({"status": TABLE_EXERCISED, "rows_hit": None, "hit_lines": None}, "counts its rows hit and its hit lines"),
+        ({"status": TABLE_NOT_EXERCISED, "rows_hit": 1, "hit_lines": 1}, "a not_exercised table has no row hit"),
+        ({"status": TABLE_NOT_EXERCISED, "rows_hit": None, "hit_lines": None}, "counts its rows hit"),
+        ({"status": TABLE_NOT_OBSERVABLE, "rows_hit": 0, "hit_lines": 0, "reason": "r"}, "has no counts and says why"),
+        ({"status": TABLE_NOT_OBSERVABLE, "reason": ""}, "has no counts and says why"),
+        (
+            {"status": TABLE_EXERCISED, "rows": -1, "rows_hit": 1, "hit_lines": 1},
+            "rows must be an integer of at least 0",
+        ),
+        ({"sha256": "not-a-sha"}, "sha256 must be a lowercase hex sha256"),
+        ({"env": " "}, "env must be a non-empty string"),
+    ],
+)
+def test_a_table_that_contradicts_its_own_status_is_refused_naming_the_contradiction(
+    fields: dict[str, object], match: str
+) -> None:
+    document = {**EXERCISED.to_document(), **fields}
+    with pytest.raises(MeasurementError, match=match):
+        TableHits.from_document(document)
+
+
+@pytest.mark.parametrize("bad", [[EXERCISED], "text", (EXERCISED.to_document(),), (None,)])
+def test_table_hits_must_be_a_tuple_of_table_hits(bad: object) -> None:
+    with pytest.raises(MeasurementError, match="table_hits must be a tuple of TableHits"):
+        _result(table_hits=bad)
+
+
+def test_runtime_findings_must_be_a_tuple_of_strings() -> None:
+    with pytest.raises(MeasurementError, match="runtime_findings must be a tuple of strings"):
+        _result(runtime_findings=("ok", 3))
+    with pytest.raises(MeasurementError, match="table_hits must be a list"):
+        TestResult.from_document({**_result().to_document(), "table_hits": "oops"})

@@ -121,11 +121,11 @@ class Bench:
         self.roster = Roster(RosterCaps(3, 2, 8), tmp_path / "MB-roster.json", clock)
         self.desk = ForkDesk(self.roster, DecisionLog(tmp_path / "MB-decisions.jsonl", clock), clock)
         self.reserved = RecordedReservations()
-        self.toolbox = RecordingToolbox(
-            LocalNotebook(tmp_path / "nb", Writer(Role.TOOLBOX, "toolbox"), clock=clock.now)
-        )
         self.repo_path = tmp_path / "repo"
         self.repo = GitExperimentRepo(self.repo_path, LocalBlobStore(tmp_path / "blobs"))
+        self.toolbox = RecordingToolbox(
+            LocalNotebook(tmp_path / "nb", Writer(Role.TOOLBOX, "toolbox"), clock=clock.now), repo=self.repo
+        )
         self.sessions = RecordedSessions(self.toolbox, self.repo, self.notebook, steps=steps)
         self.runtime = specialist_runtime(
             tmp_path / "nb", self.toolbox, self.repo, self.sessions, now=clock.now, runtime=runtime
@@ -435,7 +435,9 @@ async def test_a_repair_whose_specialist_does_not_start_is_handed_back_to_the_ga
     bench = await Bench(tmp_path).rooted()
     await bench.control.open_branches(1, 1, BatchStart(BranchOrigin.FIRST_BATCH, bench.root, OPEN_BY))
     fix = await bench.repo.commit("b01", bench.root, BASELINE, "a fix")
-    toolbox = DownToolbox(LocalNotebook(tmp_path / "nb", Writer(Role.TOOLBOX, "toolbox"), clock=CLOCK.now))
+    toolbox = DownToolbox(
+        LocalNotebook(tmp_path / "nb", Writer(Role.TOOLBOX, "toolbox"), clock=CLOCK.now), repo=bench.repo
+    )
     toolbox.down = True
     bench.control = bench.controlling(toolbox, tmp_path)
     bench.roster.open("b02", origin=BranchOrigin.REPAIR, start_commit="", k=2, from_branch="b01")
@@ -539,7 +541,9 @@ async def test_a_start_that_does_not_finish_in_time_is_withdrawn_and_the_others_
 
 async def test_a_toolbox_failing_while_a_branch_opens_fails_that_branch_alone(tmp_path: Path) -> None:
     bench = await Bench(tmp_path).rooted()
-    toolbox = DownToolbox(LocalNotebook(tmp_path / "nb", Writer(Role.TOOLBOX, "toolbox"), clock=CLOCK.now))
+    toolbox = DownToolbox(
+        LocalNotebook(tmp_path / "nb", Writer(Role.TOOLBOX, "toolbox"), clock=CLOCK.now), repo=bench.repo
+    )
     toolbox.down = True
     bench.control = bench.controlling(toolbox, tmp_path)
 

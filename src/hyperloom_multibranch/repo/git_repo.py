@@ -10,11 +10,12 @@ reads them when it builds a test's environment.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import re
 from collections.abc import Collection, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from hyperloom.contracts.recipe import (
@@ -30,7 +31,9 @@ from hyperloom.contracts.recipe import (
 from hyperloom.measure.compile import (
     COMPONENT_LAYOUTS,
     BlobStore,
+    ComponentLayout,
     PackageLocator,
+    PatchApplyError,
     UnsupportedComponentError,
     apply_patch_stack,
     locate_installed_package,
@@ -38,7 +41,7 @@ from hyperloom.measure.compile import (
 )
 from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.repo import BranchMoved, RepoMerge
-from hyperloom_multibranch.repo.merge import Stored, carry
+from hyperloom_multibranch.repo.merge import Stored, carry, stack_kernel_slot
 from hyperloom_multibranch.repo.rebase import Files
 
 RECIPE_FILE = "recipe.json"
@@ -74,6 +77,24 @@ def _ref(branch: str) -> str:
 
 def _read(path: Path) -> bytes | None:
     return path.read_bytes() if path.is_file() else None
+
+
+class _ScratchBlobs:
+    """The session's blob store for reads, keeping what a trial application writes in memory instead."""
+
+    def __init__(self, blobs: BlobStore) -> None:
+        self.root = blobs.root
+        self._blobs = blobs
+        self._kept: dict[str, bytes] = {}
+
+    def put(self, data: bytes) -> str:
+        sha256 = hashlib.sha256(data).hexdigest()
+        self._kept[sha256] = data
+        return sha256
+
+    def get(self, sha256: str) -> bytes:
+        kept = self._kept.get(sha256)
+        return self._blobs.get(sha256) if kept is None else kept
 
 
 class GitExperimentRepo:
@@ -135,8 +156,16 @@ class GitExperimentRepo:
         if parent is None:
             raise ValueError(f"{candidate} is the root commit; it carries no change")
         recipes = [await self.read_recipe(commit) for commit in (parent, resolved, onto)]
-        stored = Stored(self._stack_files, self._table_bytes, self._put_patch, self._blobs.put, self._aiter_configs)
-        return await asyncio.to_thread(carry, onto, *recipes, stored)
+        return await asyncio.to_thread(carry, onto, *recipes, self._stored())
+
+    def stack_kernel_slot(self, wanted: KernelArtifact, current: KernelArtifact) -> KernelArtifact | None:
+        """What a replay of ``wanted`` puts in the slot ``current`` fills, read and kept in the stores :meth:`merge`
+        uses (:func:`~hyperloom_multibranch.repo.merge.stack_kernel_slot`)."""
+
+        return stack_kernel_slot(wanted, current, self._stored())
+
+    def _stored(self) -> Stored:
+        return Stored(self._stack_files, self._table_bytes, self._put_patch, self._blobs.put, self._aiter_configs)
 
     async def commit_integration(self, onto: str, delta: RecipeDelta, merged_from: Sequence[str]) -> str:
         recipe = apply(await self.read_recipe(onto), delta)
@@ -152,6 +181,9 @@ class GitExperimentRepo:
 
     async def store_patch(self, component: str, text: str) -> PatchRef:
         return await asyncio.to_thread(self._put_patch, component, text)
+
+    async def apply_error(self, stack: ComponentPatches, text: str) -> str | None:
+        return await asyncio.to_thread(self._apply_error, stack, text)
 
     async def patch_text(self, commit: str, path: str) -> str:
         recipe = await self.read_recipe(commit)
@@ -173,10 +205,26 @@ class GitExperimentRepo:
         sha256 = self._blobs.put(text.encode())
         return PatchRef(f"{PATCH_ROOT}/{component}/{sha256}.patch", sha256)
 
-    def _stack_files(self, component: ComponentPatches, paths: Collection[str]) -> Files:
+    def _apply_error(self, stack: ComponentPatches, text: str) -> str | None:
+        scratch = _ScratchBlobs(self._blobs)
+        sha256 = scratch.put(text.encode())
+        patch = PatchRef(f"{PATCH_ROOT}/{stack.component}/{sha256}.patch", sha256)
+        layout = self._layout(stack)
+        try:
+            apply_patch_stack(replace(stack, patches=(*stack.patches, patch)), layout, self._locator(layout), scratch)
+        except PatchApplyError as error:
+            return str(error)
+        return None
+
+    @staticmethod
+    def _layout(component: ComponentPatches) -> ComponentLayout:
         layout = COMPONENT_LAYOUTS.get(component.component)
         if layout is None:
             raise UnsupportedComponentError(f"{component.component} has no package layout; its patches cannot apply")
+        return layout
+
+    def _stack_files(self, component: ComponentPatches, paths: Collection[str]) -> Files:
+        layout = self._layout(component)
         package = self._locator(layout)
         root = apply_patch_stack(component, layout, package, self._blobs)
         touched = [

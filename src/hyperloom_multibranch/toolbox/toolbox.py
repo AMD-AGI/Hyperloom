@@ -250,6 +250,18 @@ class RealToolbox:
 
     # --- beyond the interface ------------------------------------------------------------------------------------
 
+    async def check_test(self, request: TestRequest) -> None:
+        """Run acceptance on ``request`` as :meth:`submit_test` does, and accept nothing.
+
+        Raises :class:`RequestRejected` for the check that refuses it; nothing is queued, logged or written to the
+        notebook either way. The queue's own checks (branch listed, backpressure) are left out: they say when a test
+        may start, not whether it may run.
+        """
+
+        check_kind(request, self._kinds)
+        async with self._lock:
+            await self._acceptance.prepare(self._acceptance.with_required_accuracy(request))
+
     async def set_policy(self, policy: QueuePolicy) -> None:
         """The scheduler's quota and priority policy; takes effect for the next test that starts."""
 
@@ -358,10 +370,13 @@ class RealToolbox:
     async def submit_analysis(
         self, branch: str, tool: str, params: Mapping[str, Any], profile_request_id: str = ""
     ) -> str:
-        """Start ``tracelens`` or ``roofline`` (those of :attr:`analysis_tools`) for ``branch`` on its head commit; returns the job id at once.
+        """Start ``tracelens``, ``roofline`` or ``kernel_tune`` (those of :attr:`analysis_tools`) for ``branch``; returns the job id at once.
 
-        The commit is the head of the branch in the experiment repository, read here at submission; it is never taken
-        from ``params``. ``profile_request_id`` is kept only for a PROFILE test of that commit, whichever branch ran it.
+        The commit of ``tracelens`` and ``roofline`` is the head of the branch in the experiment repository, read here at
+        submission; it is never taken from ``params``. ``profile_request_id`` is kept only for a PROFILE test of that commit,
+        whichever branch ran it. ``kernel_tune`` reads the landed output of the test ``params`` names (the notebook's record
+        of it) and leases a card of the toolbox for the job, which ``lease_leaves_no_measurement`` refuses when the card
+        cannot be spared.
         """
 
         self._analysis_jobs(tool)

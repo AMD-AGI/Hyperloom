@@ -535,10 +535,10 @@ def test_provider_reports_the_shared_node_name(monkeypatch) -> None:
     monkeypatch.setenv("NODE_NAME", "k8s-node-7")
     with LocalSandboxProvider([LocalTemplate("dev", "dev")]) as provider:
         info = _create(provider, "dev", "dev").info()
-        assert info.metadata["claw.io/node-name"] == "k8s-node-7"
+        assert info.metadata["agent-sandbox.io/node-name"] == "k8s-node-7"
         assert _create(provider, "dev", "dev").run("echo $NODE_NAME").stdout == "k8s-node-7\n"
     monkeypatch.delenv("NODE_NAME")
     import socket
 
     with LocalSandboxProvider([LocalTemplate("dev", "dev")]) as provider:
-        assert _create(provider, "dev", "dev").info().metadata["claw.io/node-name"] == socket.gethostname()
+        assert _create(provider, "dev", "dev").info().metadata["agent-sandbox.io/node-name"] == socket.gethostname()

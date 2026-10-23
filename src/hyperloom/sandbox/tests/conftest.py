@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.measure.runner.tests.bootstrap_rig import Rig, make_rig
 from hyperloom.sandbox.tests.e2b_standin import ENVD_ENV, StandIn, StandInTemplate, unavailable_reason
 
 
@@ -35,3 +36,12 @@ def standin(e2b_envd: Path, tmp_path_factory: pytest.TempPathFactory) -> Iterato
     ]
     with StandIn(e2b_envd, tmp_path_factory.mktemp("e2b-standin"), templates) as running:
         yield running
+
+
+@pytest.fixture(scope="session")
+def bootstrap_rig(tmp_path_factory: pytest.TempPathFactory) -> Rig:
+    """What the runner's start-up script runs against in a sandbox: a base venv, a source tree and a wheelhouse.
+
+    Built once, because building it makes a venv; the stand-in's runner template binds it read-only.
+    """
+    return make_rig(tmp_path_factory.mktemp("bootstrap-rig") / "rig")

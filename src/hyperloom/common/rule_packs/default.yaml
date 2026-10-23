@@ -13,7 +13,7 @@
 #   kernel_table  reserved: no rule reads one yet, so a pack that holds one is refused
 # Every entry names its project, says why the fact exists and carries examples. A pack that fails its own examples, or
 # lacks an entry the code reads, is refused when it is loaded; nothing falls back to a default.
-version: "1"
+version: "2"
 facts:
   aiter_merged_view:
     kind: names
@@ -229,3 +229,63 @@ facts:
         - "The checkpoint you are trying to load has model type `qwen3_5` but Transformers does not recognize this architecture."
       no_match:
         - "The checkpoint you are trying to load has model type `qwen3` and Transformers loads it"
+
+  aiter_log_tuned_config:
+    kind: names
+    project: aiter
+    reason: >-
+      aiter logs a tuned-table lookup that missed unconditionally, and one that hit only when this variable is a non-zero
+      integer in the server's environment; a log without it cannot tell a table that nothing read from one whose hits
+      were not logged.
+    names:
+      env: AITER_LOG_TUNED_CONFIG
+    examples:
+      - "hyperloom_multibranch.toolbox.table_hits: a table is called not exercised only when a server with this variable set logged no hit in its rows"
+      - "hyperloom_multibranch.toolbox.planner: every point it plans launches its server with this variable at 1, a baseline's and a candidate's alike"
+
+  aiter_tuned_hit:
+    kind: log_regex
+    project: aiter
+    reason: >-
+      The line aiter logs, under AITER_LOG_TUNED_CONFIG, when a GEMM lookup resolved in a tuned row. The lookup asks for
+      M and finds the row of padded_M, so the group M is the row's M and the other groups are the columns the line prints
+      of the row it found, named as the table's columns (otype is the column outdtype). The dense bf16 lines print the
+      shape's dtypes, flags, libtype and kernel name; the a8w8 lines print only cu_num and the kernel name, after a space
+      before the comma that follows the path.
+    pattern: |-
+      (?x)
+      shape (?:\s+is)? \s+ M:\d+, \s+ N:\d+, \s+ K:\d+ ,?
+      (?: \s+ dtype='(?P<dtype>[^']*)' \s+ otype='(?P<outdtype>[^']*)'
+          \s+ bias=(?P<bias>True|False), \s+ scaleAB=(?P<scaleAB>True|False)
+          , \s+ bpreshuffle=(?P<bpreshuffle>True|False) )?
+      \s+ found \s+ padded_M: \s+ (?P<M>\d+), \s+ N:(?P<N>\d+), \s+ K:(?P<K>\d+)
+      \s+ is \s+ tuned \s+ on \s+ cu_num \s+ = \s+ (?P<cu_num>\d+) \s+ in \s+ (?P<table>[^\s,!]+)
+      (?: \s* , \s+ libtype \s+ is \s+ (?P<libtype>\w+) )?
+      (?: \s* , \s+ kernel \s+ name \s+ is \s+ (?P<kernelName>[^\s!]*) )?
+    examples:
+      match:
+        - "[aiter] shape is M:4, N:6144, K:4096 dtype='torch.bfloat16' otype='torch.bfloat16' bias=False, scaleAB=False, bpreshuffle=False found padded_M: 4, N:6144, K:4096 is tuned on cu_num = 256 in /work/hl-framework-x/merged/bf16_tuned_gemm.csv, libtype is torch, kernel name is torch"
+        - "[aiter] shape is M:192, N:4096, K:4096 dtype='torch.bfloat16' otype='torch.bfloat16' bias=False, scaleAB=False, bpreshuffle=False found padded_M: 192, N:4096, K:4096 is tuned on cu_num = 256 in /work/hl-framework-x/merged/bf16_tuned_gemm.csv, libtype is torch, kernel name is native"
+        - "[aiter] shape is M:512, N:4096, K:4096 dtype='torch.bfloat16' otype='torch.bfloat16' bias=False, scaleAB=False, bpreshuffle=False found padded_M: 512, N:4096, K:4096 is tuned on cu_num = 256 in /work/hl-framework-x/merged/bf16_tuned_gemm.csv, libtype is flydsl, kernel name is flydsl_hgemm_abf16_wbf16_bf16_t128x64x64x4_ks1_w4x2x1_bias0_ktail0_gm0_pft_gfx950"
+        - "[aiter] shape is M:1392, N:4096, K:4096 dtype='torch.bfloat16' otype='torch.bfloat16' bias=False, scaleAB=False, bpreshuffle=False found padded_M: 2048, N:4096, K:4096 is tuned on cu_num = 256 in /work/hl-framework-x/merged/bf16_tuned_gemm.csv, libtype is opus, kernel name is opus_gemm_mono_tile_512x128x256x64_2x4_16x16x32_0x0x0_nooob"
+        - "[aiter] shape is M:64, N:6144, K:4096 dtype='torch.bfloat16' otype='torch.bfloat16' bias=False, scaleAB=False, bpreshuffle=False found padded_M: 64, N:6144, K:4096 is tuned on cu_num = 256 in /work/hl-framework-x/merged/bf16_tuned_gemm.csv, libtype is triton, kernel name is auto"
+        - "(Worker_TP7 pid=380239) [aiter] shape is M:16384, N:4608, K:8192 dtype='torch.bfloat16' otype='torch.bfloat16' bias=False, scaleAB=False, bpreshuffle=False found padded_M: 8192, N:4608, K:8192 is tuned on cu_num = 256 in /work/merged_tuned_dense_bf16.csv,"
+        - "[aiter] shape is M:12, N:34816, K:5120, found padded_M: 16, N:34816, K:5120 is tuned on cu_num = 256 in /work/hl-framework-x/tables/AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE/5c34e83d432c56e2/k-5c34e83d432c56e2 , kernel name is a8w8_blockscale_bpreshuffle_1x128x128_256x16x64x256_16x16_16x16_16x16x1_16x16x1_1x16x1x16_4_1x1_intrawave_v1!"
+      no_match:
+        - "[aiter] shape is M:512, N:6144, K:4096 dtype='torch.bfloat16' otype='torch.bfloat16' bias=False, scaleAB=False, bpreshuffle=False, not found tuned config in /work/hl-framework-x/merged/bf16_tuned_gemm.csv, will use default config! using torch solution:0"
+        - "[aiter] shape is M:8192, N:7168, K:5120, not found tuned config in /work/hl-framework-x/merged/a8w8_bpreshuffle_tuned_gemm.csv, will use default config!"
+
+  aiter_tuned_hit_marker:
+    kind: log_regex
+    project: aiter
+    reason: >-
+      What the aiter lines that report a lookup resolved in a tuned row have in common, whatever else they print ("is
+      tuned on cu_num", "is tuned, in", "tuned at padded_M", "found lookup M"), so a reader that parses aiter_tuned_hit
+      can tell a log with no hit from a log whose hits it cannot read (a newer aiter that words them differently). A
+      lookup that missed says "not found tuned config" and an untuned shape "untuned", which this does not match.
+    pattern: "\\btuned(?: on| at|,)|found (?:padded_M|lookup M):"
+    examples:
+      match:
+        - "[aiter] shape is M:192, N:4096, K:4096 dtype='torch.bfloat16' otype='torch.bfloat16' bias=False, scaleAB=False, bpreshuffle=False found padded_M: 192, N:4096, K:4096 is tuned on cu_num = 256 in /work/hl-framework-x/merged/bf16_tuned_gemm.csv, libtype is torch, kernel name is native"
+      no_match:
+        - "[aiter] shape is M:512, N:6144, K:4096 dtype='torch.bfloat16' otype='torch.bfloat16' bias=False, scaleAB=False, bpreshuffle=False, not found tuned config in /work/hl-framework-x/merged/bf16_tuned_gemm.csv, will use default config! using torch solution:0"

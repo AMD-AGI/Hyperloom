@@ -20,7 +20,10 @@ from __future__ import annotations
 from hyperloom.common.rule_pack import default_pack
 
 __all__ = [
+    "AITER_LOG_TUNED_CONFIG_ENV",
     "AITER_MERGED_VIEW_DIR",
+    "AITER_TUNED_HIT",
+    "AITER_TUNED_HIT_MARKER",
     "ARGPARSE_INVALID_CHOICE",
     "ARGPARSE_UNRECOGNIZED_ARGUMENTS_RE",
     "CONTEXT_LENGTH_FLAGS",
@@ -61,6 +64,10 @@ _PACK = default_pack()
 
 _aiter = _PACK.names("aiter_merged_view", "dir")
 AITER_MERGED_VIEW_DIR = _aiter["dir"]
+
+AITER_LOG_TUNED_CONFIG_ENV = _PACK.names("aiter_log_tuned_config", "env")["env"]
+AITER_TUNED_HIT = _PACK.pattern("aiter_tuned_hit")
+AITER_TUNED_HIT_MARKER = _PACK.pattern("aiter_tuned_hit_marker")
 
 _image = _PACK.names("sglang_image_layout", "workspace", "aiter_configs")
 SGLANG_IMAGE_WORKSPACE = _image["workspace"]

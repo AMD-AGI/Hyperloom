@@ -47,7 +47,7 @@ from hyperloom_multibranch.scheduling.judge import (
     render_prompt,
 )
 from hyperloom_multibranch.scheduling.forks import PendingBranch
-from hyperloom_multibranch.scheduling.llm import CompletionFailed, CompletionReply
+from hyperloom_multibranch.contracts.llm import CompletionFailed, CompletionReply
 from hyperloom_multibranch.scheduling.roster import (
     BranchEntry,
     BranchKind,

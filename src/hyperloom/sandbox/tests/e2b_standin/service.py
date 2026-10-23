@@ -5,7 +5,7 @@
 
 It answers what the E2B SDK asks of the control plane, with the behaviour the design gives the Claw sandbox service
 that a stand-in can honestly reproduce: a key is one role and sees only the sandboxes it made; a role may use only
-its own templates; a sealed template takes no caller environment; a ``claw.io/idempotency-key`` makes a repeated create
+its own templates; a sealed template takes no caller environment; a ``agent-sandbox.io/idempotency-key`` makes a repeated create
 return the live sandbox, and refuses it with 410 once that sandbox has ended; the number of live sandboxes of a role is
 capped (429 ``grant_quota_exceeded``); a sandbox ends at its timeout. It does not enforce the sealed path policy, sign
 anything or write platform metadata: those belong to the real service.

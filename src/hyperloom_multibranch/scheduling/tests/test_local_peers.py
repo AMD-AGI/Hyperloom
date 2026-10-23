@@ -390,7 +390,15 @@ async def _peers(
     layout = create_session(tmp_path, workload.model_basename, clock)
     desk = ForkDesk(Roster(RosterCaps(1, 1, 1), layout.roster, clock), DecisionLog(layout.decisions, clock), clock)
     blobs = LocalBlobStore(layout.blobs)
-    setup = PeerSetup(layout, workload, desk, ProcessRegistry(layout.pids, clock), blobs, NoCritic())
+    setup = PeerSetup(
+        layout,
+        workload,
+        desk,
+        ProcessRegistry(layout.pids, clock),
+        blobs,
+        NoCritic(),
+        {"geak": layout.reference / "geak"},
+    )
     wired: list[SessionWiring] = []
 
     def sessions(wiring: SessionWiring) -> ModelSessions:

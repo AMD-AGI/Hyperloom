@@ -37,7 +37,7 @@ from hyperloom_multibranch.notebook.knowledge.recipe_writeback import (
     KB_METRIC,
     OBJECTIVE_SCHEMA,
     FinalRecipe,
-    publish_final_recipe,
+    publish_final_recipe as _publish_final_recipe,
     recipe_identity,
 )
 from hyperloom_multibranch.notebook.knowledge.tests.fakes import FakeRecipeStore
@@ -47,6 +47,13 @@ from hyperloom_multibranch.notebook.tests.sessions import METRIC
 PATCH = b"diff --git a/moe.py b/moe.py\n"
 KERNEL = b'{"tile": [128, 128]}\n'
 OVERLAY = "patch/overlays/000000/00-0001-moe.patch"
+RULE_PACK = {"version": "1", "digest": "sha256:" + "c" * 64}
+
+
+def publish_final_recipe(
+    client: RemoteRecipeClient, snapshot: NotebookSnapshot, final: FinalRecipe, rule_pack=RULE_PACK
+):
+    return _publish_final_recipe(client, snapshot, final, rule_pack)
 
 
 def _sha(content: bytes) -> str:
@@ -103,6 +110,7 @@ def test_a_session_past_the_champion_writes_its_recipe_files_and_lessons(
     assert knowledge["remaining_gaps"] == ["output_tps: 1041.0 is 69% of the roofline bound 1500.0"]
     provenance = knowledge["provenance"]
     assert (provenance["commit_id"], provenance["recipe_digest"]) == ("i1", final.recipe.digest())
+    assert provenance["rule_pack"] == RULE_PACK
     assert "warmup_round_seed" not in provenance
     replayed = from_recipe_kb_value(knowledge["value"], base_image_digest=provenance["base_image_digest"])
     assert replayed == final.recipe

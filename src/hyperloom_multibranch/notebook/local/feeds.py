@@ -45,7 +45,8 @@ from hyperloom_multibranch.notebook.local.segments import Entry, EntryKind
 from hyperloom_multibranch.notebook.local.state import ClaimDecision, JudgementWrite, NotebookState
 from hyperloom_multibranch.notebook.local.views import judged_since_commit, lineage_view
 
-#: How many tests judged since the last commit make a stall, unless the run entry names another number.
+#: How many tests judged since the last commit make a stall. The run entry has no setting for it, and the judge's
+#: prompt quotes the same number, so a session's specialists and its judge count a stall alike.
 STALL_TESTS = 4
 _REREAD = "read notebook_brief from {head} and reconsider the direction before the next claim"
 

@@ -327,9 +327,9 @@ def test_the_create_call_carries_the_template_lifetime_and_metadata_of_the_desig
     assert call["wait_sec"] == 3000
     assert call["envs"] is None, "a sealed template takes no caller variables"
     assert call["metadata"] == {
-        "claw.io/idempotency-key": "run-1:req-7:3",
-        "claw.io/avoid-nodes": "n1,n2",
-        "claw.io/priority": "1",
+        "agent-sandbox.io/idempotency-key": "run-1:req-7:3",
+        "agent-sandbox.io/avoid-nodes": "n1,n2",
+        "agent-sandbox.io/priority": "1",
         "hyperloom.request-id": "req-7",
         "hyperloom.purpose": "confirm",
         "hyperloom.branch-id": "b9",

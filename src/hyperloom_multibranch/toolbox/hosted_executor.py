@@ -66,6 +66,7 @@ from hyperloom_multibranch.toolbox.reverify import (
     first_value_difference,
     first_warning_difference,
 )
+from hyperloom_multibranch.toolbox.table_hits import read_table_hits, runtime_findings
 
 __all__ = ["DEFAULT_TEST_TIMEOUT_SEC", "HostedExecutor", "OUTPUTS_DIR", "TEST_SILENCE_TIMEOUT_SEC"]
 
@@ -134,7 +135,8 @@ class HostedExecutor:
             outcome = await asyncio.to_thread(self._backend.run_test, call)
         except subprocess.TimeoutExpired:
             return self._timed_out(request_id, started)
-        return self._result(request, accepted, call, outcome, started)
+        result = self._result(request, accepted, call, outcome, started)
+        return await self._with_table_hits(result, accepted, call)
 
     def withdraw(self, request_id: str) -> None:
         """End the running attempt of ``request_id``: its sandbox is closed and its cards go back to the pool."""
@@ -249,6 +251,16 @@ class HostedExecutor:
             cold_start_seconds=boot_seconds(call.output_dir),
             **audit,
         )
+
+    async def _with_table_hits(self, result: TestResult, accepted: AcceptedMeasurement, call: TestCall) -> TestResult:
+        """``result`` with how much of each kernel table its recipe loads the test's server hit; a failed test has none.
+
+        The logs are read in a worker thread: a server log of a long test is large.
+        """
+        if result.validity is not Validity.SUCCEEDED:
+            return result
+        hits = await asyncio.to_thread(read_table_hits, accepted.environment, accepted.points, Path(call.output_dir))
+        return replace(result, table_hits=hits, runtime_findings=runtime_findings(hits))
 
     def _profile_location(self, call: TestCall) -> str:
         """Where the landed traces of a profile test are, relative to the session; a profile with none is no result."""

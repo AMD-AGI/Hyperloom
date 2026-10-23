@@ -8,7 +8,9 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -66,25 +68,27 @@ class _Environment:
 
 
 def _rigs(tmp_path: Path, command: tuple[str, ...]):
+    """A factory of rigs over the runner ``command``: ``envs`` are added to the template's, ``config`` to the backend's."""
     repo = tmp_path / "inferencex"
     commit = _git_repo(repo)
-    template = LocalTemplate(
-        "runner-1",
-        "measurement",
-        command=command,
-        gpus=1,
-        sealed=True,
-        signing=True,
-        envs={"INFERENCEX_REPO": str(repo)},
-    )
     built: list[Rig] = []
 
-    def make(**spec) -> Rig:
+    def make(*, envs: Mapping[str, str] | None = None, config: Mapping[str, Any] | None = None, **spec) -> Rig:
+        template = LocalTemplate(
+            "runner-1",
+            "measurement",
+            command=command,
+            gpus=1,
+            sealed=True,
+            signing=True,
+            envs={"INFERENCEX_REPO": str(repo), **(envs or {})},
+        )
         r = make_rig(
             tmp_path,
             templates=[template],
             spec={"inferencex_commit": commit, "benchmark_backend": "bypass", **spec},
             poll_interval_sec=0.1,
+            **(config or {}),
         )
         built.append(r)
         return r

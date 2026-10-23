@@ -242,6 +242,8 @@ async def test_close_publishes_the_final_recipe_exports_and_stops_everything(
 
     assert report.exports is not None and report.exports.kb_write_back.status == "written"
     assert store.promoted is not None and store.promoted[2] == 1041.0
+    assert store.knowledge is not None
+    assert store.knowledge["provenance"]["rule_pack"] == dict(rule_pack_identity())
     recipe_files = sorted(path.read_bytes() for path in final.files_root.rglob("*") if path.is_file())
     assert sorted(store.uploads.values()) == recipe_files and not any(layout.final.iterdir())
     assert (stopper.reasons, stopper.events) == ([SessionStopReason.TIME_EXHAUSTED], [f"stop by {HARD_STOP}"])

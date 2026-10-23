@@ -20,7 +20,9 @@ commit is not.
 
 The experiment repository carries the candidate's own change onto the integration head and reports what conflicts:
 where the two set a server argument or environment variable differently the candidate's value wins, and the
-integrator records every overridden value in the decision log; a patch that does not apply where the merge puts it
+integrator records every overridden value in the decision log; where both tuned one kernel slot the merge unites the
+two tables, and that is recorded there too, since the merged recipe then loads a table neither branch measured and
+the merge test's gain is measured on it; a patch that does not apply where the merge puts it
 goes to :class:`LlmPatchResolver`, and a merge it cannot resolve is skipped and recorded. The merged change is tested
 from the integration head and judged by the rule gate, and a candidate about to be merged runs the regression set,
 before anything is written, so only a candidate that keeps the regression set passing reaches the integration branch
@@ -35,7 +37,6 @@ set it would run is still empty; what it leaves the integration branch at is the
 from __future__ import annotations
 
 import asyncio
-import logging
 from collections.abc import Sequence, Set
 from dataclasses import dataclass, replace
 from functools import partial
@@ -49,7 +50,7 @@ from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Notebook
 from hyperloom_multibranch.contracts.notebook.records import CommittedCommit, MergeAttempt, WarmReplay
 from hyperloom_multibranch.contracts.notebook.vocab import Conclusion, MergeOutcome
-from hyperloom_multibranch.contracts.repo import ExperimentRepo, PatchConflict, RepoMerge
+from hyperloom_multibranch.contracts.repo import ExperimentRepo, PatchConflict, RepoMerge, UnitedTable
 from hyperloom_multibranch.contracts.toolbox import RequestRejected
 from hyperloom_multibranch.notebook.knowledge.warm_start import PreparedReplay
 from hyperloom_multibranch.rulegate.agentx import P50_BELOW_THRESHOLD
@@ -57,14 +58,17 @@ from hyperloom_multibranch.rulegate.inferencex import GAIN_BELOW_THRESHOLD, GAIN
 from hyperloom_multibranch.scheduling.candidates import Candidates
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind, DecisionLog
-from hyperloom_multibranch.scheduling.llm import Completion, CompletionFailed
+from hyperloom_multibranch.contracts.llm import Completion, CompletionFailed
 from hyperloom_multibranch.scheduling.requests import SessionChecks, integration_test_request
-
-logger = logging.getLogger(__name__)
 
 SUPERSEDED = "superseded: another candidate of the round was merged onto this head first"
 EXPLORATION_ENDED = "exploration ended"
 ALREADY_ON_HEAD = "its change is already on the integration head"
+#: A patch the three-way rebase could not settle and the resolver's answer did not resolve either.
+CONFLICT_UNRESOLVED = "unresolved patch conflict"
+#: The same conflict, lost before any answer: the resolver could not be reached. Counted apart from
+#: :data:`CONFLICT_UNRESOLVED`, because a timed-out call says nothing about whether the patches can be combined.
+RESOLVER_UNREACHED = "the patch resolver could not be asked"
 #: The JSON key the resolver's reply carries the rewritten patch under; ``null`` means it cannot be combined.
 PATCH_KEY = "patch"
 RESOLVER_SYSTEM_PROMPT = (
@@ -80,6 +84,9 @@ RESOLVER_SYSTEM_PROMPT = (
 class MergeReport:
     """What came of one candidate on integration head ``onto``; ``config_conflicts`` took the candidate's value.
 
+    ``united_tables`` are the kernel slots the merge filled with a union of both sides' tables: the tested recipe
+    loads a table neither branch measured, and the gain below was measured on it.
+
     A merged candidate carries the gain its merge test was judged to make and the bar it was judged against;
     ``foundation_fix`` says the candidate is a foundation fix, which merges without a gain.
     """
@@ -91,6 +98,7 @@ class MergeReport:
     request_id: str | None = None
     merged_commit: str | None = None
     config_conflicts: tuple[ValueChange, ...] = ()
+    united_tables: tuple[UnitedTable, ...] = ()
     gain_pct: float | None = None
     threshold_pct: float | None = None
     foundation_fix: bool = False
@@ -108,7 +116,11 @@ class LlmPatchResolver:
         self._repo = repo
 
     async def resolve(self, merge: RepoMerge, candidate: str) -> RecipeDelta | None:
-        """``merge``'s delta with every conflicting patch rewritten and added; ``None`` when one stays unresolved."""
+        """``merge``'s delta with every conflicting patch rewritten and added; ``None`` when one stays unresolved.
+
+        A call that fails raises :class:`CompletionFailed`: a model that could not be asked is a different loss from
+        a model that answered, and the merge log names them apart.
+        """
 
         merged = apply(await self._repo.read_recipe(merge.onto), merge.delta)
         rewritten: dict[str, list[PatchRef]] = {}
@@ -125,11 +137,7 @@ class LlmPatchResolver:
 
     async def _rewrite(self, conflict: PatchConflict, merged: Recipe, candidate: str, onto: str) -> str | None:
         prompt = await self._prompt(conflict, merged, candidate, onto)
-        try:
-            reply = (await self._completion(RESOLVER_SYSTEM_PROMPT, prompt)).text
-        except CompletionFailed as exc:
-            logger.warning("patch resolver call for %s failed: %s", conflict.path, exc)
-            return None
+        reply = (await self._completion(RESOLVER_SYSTEM_PROMPT, prompt)).text
         answer = extract_last_json_with_key(reply, PATCH_KEY)
         rewritten = answer.get(PATCH_KEY) if answer is not None else None
         return rewritten if isinstance(rewritten, str) and rewritten.strip() else None
@@ -316,7 +324,9 @@ class Integrator:
             delta = await self._resolved(merge, candidate)
             onto = await self._repo.read_recipe(head)
             if apply(onto, delta).digest() == onto.digest():
-                return await self._skip(commit, head, ALREADY_ON_HEAD, MergeOutcome.ALREADY_ON_HEAD)
+                return await self._skip(
+                    commit, head, ALREADY_ON_HEAD, MergeOutcome.ALREADY_ON_HEAD, merge.united_tables
+                )
             request = integration_test_request(TestKind.TEST, Purpose.INTEGRATION, head, delta)
             return await self._tests.judged(request, partial(self._judge, merge, delta, commit))
         except RecipeError as exc:
@@ -339,6 +349,7 @@ class Integrator:
             request_id,
             None,
             merge.config_conflicts,
+            merge.united_tables,
             foundation_fix=commit.foundation_fix,
         )
         try:
@@ -355,16 +366,31 @@ class Integrator:
         conflicts = "; ".join(f"{conflict.path}: {conflict.detail}" for conflict in merge.patch_conflicts)
         try:
             delta = await self._resolver.resolve(merge, candidate)
+        except CompletionFailed as exc:
+            raise _Skipped(f"{RESOLVER_UNREACHED}: {conflicts}: {exc}") from exc
         except BlobError as exc:
-            raise _Skipped(f"unresolved patch conflict: {conflicts}: {exc}") from exc
+            raise _Skipped(f"{CONFLICT_UNRESOLVED}: {conflicts}: {exc}") from exc
         if delta is None:
-            raise _Skipped(f"unresolved patch conflict: {conflicts}")
+            raise _Skipped(f"{CONFLICT_UNRESOLVED}: {conflicts}")
         return delta
 
-    async def _skip(self, commit: CommittedCommit, head: str, reason: str, outcome: MergeOutcome) -> MergeReport:
+    async def _skip(
+        self,
+        commit: CommittedCommit,
+        head: str,
+        reason: str,
+        outcome: MergeOutcome,
+        united: tuple[UnitedTable, ...] = (),
+    ) -> MergeReport:
+        """A skipped candidate's report. ``united`` is what the merge united before the skip: a candidate whose every
+        tuned row the head already had reads as already on the head, which is true of the slot and says nothing about
+        the rows it cost, so the union is recorded even where nothing was tested."""
+
         attempt = MergeAttempt((commit.commit_id,), head, skipped_reason=reason, skipped_outcome=outcome)
         await self._notebook.record_merge_attempt(attempt)
-        return MergeReport(commit.commit_id, head, outcome, reason, foundation_fix=commit.foundation_fix)
+        return MergeReport(
+            commit.commit_id, head, outcome, reason, united_tables=united, foundation_fix=commit.foundation_fix
+        )
 
     async def _conclude(self, tested: _TestedMerge, superseded: bool) -> MergeReport:
         """A superseded candidate gets no integration judgement and runs no regression set: it stays pending and is
@@ -484,13 +510,26 @@ def _decision(report: MergeReport) -> Decision:
         "config_conflicts": [
             {"name": change.name, "before": change.before, "after": change.after} for change in report.config_conflicts
         ],
+        "united_tables": [
+            {
+                "kind": united.table.kind.value,
+                "target": united.table.target,
+                "theirs": united.theirs.sha256,
+                "ours": united.ours.sha256,
+                "table": united.table.sha256,
+                "kept_head_shapes": [dict(shape) for shape in united.kept_head_shapes],
+            }
+            for united in report.united_tables
+        ],
     }
     return Decision(DecisionKind.MERGE, report.reason, INTEGRATION_BRANCH, detail)
 
 
 __all__ = [
+    "CONFLICT_UNRESOLVED",
     "FOUNDATION_FIX_VERDICTS",
     "GAIN_ONLY_REFUSALS",
+    "RESOLVER_UNREACHED",
     "Integrator",
     "LlmPatchResolver",
     "MergeRecords",

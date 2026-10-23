@@ -46,7 +46,25 @@ class EccDelta:
 
 
 @dataclass(frozen=True)
+class RulePackFacts:
+    """The rule pack the runner read (``hyperloom.common.rule_pack.rule_pack_identity``): its own version and the digest
+    of its bytes."""
+
+    version: str
+    digest: str
+
+    @classmethod
+    def parse(cls, value: Any, path: str) -> "RulePackFacts":
+        r = Reader(value, path)
+        facts = cls(r.text("version") or "", r.text("digest", pattern=PREFIXED_SHA256_RE) or "")
+        r.done()
+        return facts
+
+
+@dataclass(frozen=True)
 class RunnerFacts:
+    """What the runner states about itself. ``rule_pack`` is absent from a manifest an older runner signed."""
+
     sandbox_id: str
     signing_key_fingerprint: str
     node_name: str | None
@@ -59,11 +77,13 @@ class RunnerFacts:
     inferencex_commit: str
     gpu_ids: tuple[int, ...]
     ecc_delta: EccDelta | None
+    rule_pack: RulePackFacts | None = None
 
     @classmethod
     def parse(cls, value: Any, path: str) -> "RunnerFacts":
         r = Reader(value, path)
         ecc = r.optional("ecc_delta")
+        pack = r.optional("rule_pack")
         facts = cls(
             sandbox_id=r.text("sandbox_id") or "",
             signing_key_fingerprint=r.text("signing_key_fingerprint", pattern=PREFIXED_SHA256_RE) or "",
@@ -77,6 +97,7 @@ class RunnerFacts:
             inferencex_commit=r.text("inferencex_commit") or "",
             gpu_ids=r.sequence("gpu_ids", _gpu_id),
             ecc_delta=None if ecc is None else EccDelta.parse(ecc, r.at("ecc_delta")),
+            rule_pack=None if pack is None else RulePackFacts.parse(pack, r.at("rule_pack")),
         )
         r.done()
         return facts

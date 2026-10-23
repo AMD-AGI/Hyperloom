@@ -74,7 +74,7 @@ class PoolClosed(RuntimeError):
 
 
 def sandbox_priority(priority: int | None) -> int:
-    """The ``claw.io/priority`` tier of a test priority: 0 and 1 map to 0, 2 and 3 to 1, 4 to 2 (4.17).
+    """The ``agent-sandbox.io/priority`` tier of a test priority: 0 and 1 map to 0, 2 and 3 to 1, 4 to 2 (4.17).
 
     A test without a priority is the lowest tier's neighbour, the default exploration priority.
     """

@@ -340,7 +340,7 @@ def test_find_pages_through_the_listing_and_filters_running_sandboxes(
 ) -> None:
     service.reply("GET", "/v2/sandboxes", (200, [_listed("sbx-b", {"k": "v"})]), headers={"x-next-token": "t2"})
     service._script[("GET", "/v2/sandboxes")].append((200, [_listed("sbx-a", {"k": "v"})], {}, 0.0))
-    found = provider.find({"claw.io/idempotency-key": "k 1", "k": "v"}, role="dev")
+    found = provider.find({"agent-sandbox.io/idempotency-key": "k 1", "k": "v"}, role="dev")
     assert [i.sandbox_id for i in found] == ["sbx-a", "sbx-b"]
     first, second = service.calls("GET", "/v2/sandboxes")
     assert first.query["state"] == ["running"]

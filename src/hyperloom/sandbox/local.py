@@ -5,7 +5,7 @@
 
 Used for development, CI, the consistency check and multi-branch MB1. It speaks
 the same socket as a hosted provider (:mod:`hyperloom.sandbox.socket`), with
-the same sealed policy, the same ``claw.io/`` metadata and one process group
+the same sealed policy, the same ``agent-sandbox.io/`` metadata and one process group
 per runner that is reaped as a tree.
 """
 
@@ -144,7 +144,7 @@ class LocalSandboxProvider:
             template: A configured template name.
             role: The caller's role; it must match the template's role.
             timeout_sec: Lifetime of the sandbox; its processes are reaped then.
-            metadata: Caller metadata; platform ``claw.io/`` keys are refused.
+            metadata: Caller metadata; platform ``agent-sandbox.io/`` keys are refused.
             options: Extra environment (``envs``; refused for a sealed template and for platform variable names) and
                 how long to wait for GPU cards (``wait_sec``).
 

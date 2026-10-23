@@ -96,7 +96,7 @@ REJECTION_CODES = (
     "attachments_unsupported",  # ``put_attachment``, ``put_kernel_artifact``: this toolbox has no blob store
     "kernel_artifact_invalid",  # ``put_kernel_artifact``: the table, target or variable cannot be loaded as given
     "kernel_variable_taken",  # ``put_kernel_artifact``: the variable already loads the table of another target
-    "lease_leaves_no_measurement",  # ``lease_branch_sandbox``: leasing would leave fewer cards than one test needs
+    "lease_leaves_no_measurement",  # ``lease_branch_sandbox``, ``start_analysis kernel_tune``: leasing would leave fewer cards than one test needs
     "lease_exists",  # ``lease_branch_sandbox``: the branch already holds a lease
 )
 
@@ -168,8 +168,9 @@ class MeasurementCapacity:
     good (a card whose holder processes were not provably gone is never leased again). Quarantining a node does not
     reduce ``usable_cards``: quarantine only widens ``avoid_nodes`` and never blocks a test. ``known`` is ``False`` for
     a toolbox that has no card pool of its own to read (both counts are then 0 and mean nothing): the caller does not
-    compare against them. ``leased_cards`` are the usable cards held for branch sandboxes
-    (``RealToolbox.lease_branch_sandbox``), which no test runs on until they are released.
+    compare against them. ``leased_cards`` are the usable cards any lease holds (branch sandboxes, through
+    ``RealToolbox.lease_branch_sandbox``, and tool jobs such as ``kernel_tune``), which no test runs on until they are
+    released.
     """
 
     total_cards: int
@@ -185,7 +186,7 @@ class MeasurementCapacity:
 
     @property
     def measurement_cards(self) -> int:
-        """The usable cards tests can run on, busy ones included: those no branch sandbox holds."""
+        """The usable cards tests can run on, busy ones included: those no lease holds."""
         return self.usable_cards - self.leased_cards
 
     @classmethod

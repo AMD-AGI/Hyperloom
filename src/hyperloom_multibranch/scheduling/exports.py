@@ -41,7 +41,7 @@ from hyperloom_multibranch.notebook.rsi.session import CloseStep, KnowledgeClose
 from hyperloom_multibranch.scheduling.dashboard import SessionDashboard
 from hyperloom_multibranch.scheduling.final import FinalChoice
 from hyperloom_multibranch.scheduling.layout import SessionLayout
-from hyperloom_multibranch.scheduling.llm import Completion
+from hyperloom_multibranch.contracts.llm import Completion
 from hyperloom_multibranch.scheduling.manifest import read_manifest
 from hyperloom_multibranch.scheduling.mb_fakes import mb_fake_close_knowledge
 
@@ -211,8 +211,9 @@ class SessionExports:
             return RemoteWriteResult(KB_DISABLED, "no Recipe KB client is configured")
         if final_recipe is None:
             return RemoteWriteResult(SKIPPED, "no final choice")
+        rule_pack = read_manifest(self._layout.manifest).rule_pack
         try:
-            return await asyncio.to_thread(publish_final_recipe, self._kb_client, snapshot, final_recipe)
+            return await asyncio.to_thread(publish_final_recipe, self._kb_client, snapshot, final_recipe, rule_pack)
         except (RecipeError, RemoteRecipeValidationError, KBStoreError, BlobError, OSError) as exc:
             return RemoteWriteResult(KB_FAILED, f"{type(exc).__name__}: {exc}")
 

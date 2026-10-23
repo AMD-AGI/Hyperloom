@@ -65,7 +65,7 @@ from hyperloom_multibranch.rulegate.service import GateNotebook, GateService, Po
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.local_peers import GATE_WRITER
-from hyperloom_multibranch.scheduling.llm import CompletionReply
+from hyperloom_multibranch.contracts.llm import CompletionReply
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry, RegisteredProcess
 from hyperloom_multibranch.specialist.judging import Judging
 from hyperloom_multibranch.specialist.runtime import RuntimePacing, SessionFactory, SessionStart, SpecialistRuntime
@@ -559,7 +559,9 @@ class RecordingToolbox(FakeToolbox):
     ``accuracy`` is the accuracy score of a change by its fingerprint, and ``conc`` the workload's conc, which a test
     whose request names none is measured at. ``log`` places the submit log, which the hosted toolbox keeps in the
     session directory, so a second toolbox over that directory hands out request ids where the first one left off;
-    without one it goes with the toolbox. ``root_profiles`` holds every :meth:`analyze_root_profile` call, which
+    without one it goes with the toolbox. ``repo`` is the bench's experiment repository, which acceptance reads each
+    parent's recipe from as the real toolbox does, so a delta onto a head that already pins a component is accepted
+    without naming its upstream again. ``root_profiles`` holds every :meth:`analyze_root_profile` call, which
     raises ``refusal`` when one is set. Not a placeholder: the fake is the toolbox owner's own, which has no
     ``analyze_root_profile`` of its own yet.
     """
@@ -571,12 +573,18 @@ class RecordingToolbox(FakeToolbox):
         accuracy: Mapping[str, float] | None = None,
         conc: int = FakeToolboxConfig.main_concurrency[0],
         log: Path | None = None,
+        *,
+        repo: ExperimentRepo,
     ):
         quiet = NoiseModel(node_bias_median=0.0, node_bias_p90=0.0, test_noise_sigma=0.0)
         config = FakeToolboxConfig(
-            noise=quiet, effect_fn=effect, accuracy_scores=dict(accuracy or {}), main_concurrency=(conc,)
+            noise=quiet,
+            effect_fn=effect,
+            accuracy_scores=dict(accuracy or {}),
+            main_concurrency=(conc,),
+            image_digest=BASE_IMAGE_DIGEST,
         )
-        super().__init__(config, notebook=notebook, wiring=FakeWiring(records=notebook, log_path=log))
+        super().__init__(config, notebook=notebook, wiring=FakeWiring(records=notebook, log_path=log, repo=repo))
         self.serving = False
         self.policies: list[QueuePolicy] = []
         self.cancelled: list[str] = []

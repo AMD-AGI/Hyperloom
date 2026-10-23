@@ -32,6 +32,7 @@ from hyperloom.measure.bundle import (
 )
 
 REPORT = "benchmark_sglang_20261005_101500/benchmark_report.json"
+PACK = {"version": "2-test", "digest": "sha256:" + "ab" * 32}
 
 
 def _reason(staging: Path, bundle, max_total_bytes: int | None = None, **overrides) -> RejectReason:
@@ -396,3 +397,33 @@ def test_placed_files_and_directories_have_fixed_modes_whatever_the_umask(bundle
         os.umask(old)
     assert (out / "server.log").stat().st_mode & 0o777 == 0o600
     assert (out / "benchmark_sglang_20261005_101500").stat().st_mode & 0o777 == 0o700
+
+
+def _stating(bundle, pack: dict[str, str]) -> None:
+    """The runner of ``bundle`` states that it read ``pack``."""
+    bundle.document["runner"]["rule_pack"] = pack
+    bundle.write_manifest()
+
+
+def test_a_result_whose_runner_read_the_sessions_rule_pack_verifies(bundle) -> None:
+    _stating(bundle, PACK)
+    verified = verify_bundle(bundle.staging, replace(verify_args(bundle), rule_pack_digest=PACK["digest"]))
+    assert verified.result.runner.rule_pack is not None and verified.result.runner.rule_pack.digest == PACK["digest"]
+    assert verify_bundle(bundle.staging, verify_args(bundle)), "a session that names no pack digest accepts any"
+
+
+def test_a_result_whose_runner_read_another_rule_pack_is_rejected_naming_both(bundle) -> None:
+    _stating(bundle, PACK)
+    session = "sha256:" + "cd" * 32
+    with pytest.raises(ResultRejected) as raised:
+        verify_bundle(bundle.staging, replace(verify_args(bundle), rule_pack_digest=session))
+    assert raised.value.reason is RejectReason.RULE_PACK_MISMATCH
+    assert PACK["version"] in raised.value.detail and PACK["digest"] in raised.value.detail
+    assert session in raised.value.detail
+
+
+def test_a_result_whose_runner_states_no_rule_pack_is_rejected_when_the_session_names_one(bundle) -> None:
+    with pytest.raises(ResultRejected) as raised:
+        verify_bundle(bundle.staging, replace(verify_args(bundle), rule_pack_digest=PACK["digest"]))
+    assert raised.value.reason is RejectReason.RULE_PACK_MISMATCH
+    assert "states no rule pack" in raised.value.detail

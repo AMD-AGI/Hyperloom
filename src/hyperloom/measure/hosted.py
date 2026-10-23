@@ -126,7 +126,9 @@ class HostedConfig:
     """Configuration of the hosted backend; defaults are those of design 4.4.4.
 
     ``allow_unsigned`` exists for the table of 4.4.4 but is refused when true: no result is ever accepted without a
-    signature that verified against the key the platform reported for its sandbox.
+    signature that verified against the key the platform reported for its sandbox. ``rule_pack_digest`` is the digest
+    of the rule pack the session reads: a result whose runner did not read a pack with that digest is rejected
+    (``rule_pack_mismatch``); ``None`` accepts any pack.
     """
 
     session_dir: Path
@@ -141,6 +143,7 @@ class HostedConfig:
     allow_unsigned: bool = False
     nodes: int = 1
     runner_version: str | None = None
+    rule_pack_digest: str | None = None
     staging_root: Path | None = None
     should_stop: Callable[[], bool] = field(default=lambda: False, compare=False)
 
@@ -581,6 +584,7 @@ class HostedMeasurementBackend:
                 spec_fingerprint=self._expected_fingerprint(attempt.spec, listed.runner.hyperloom_version),
                 spec_sha256=spec_sha256(attempt.spec_raw),
                 sandbox_id=runner.sandbox_id,
+                rule_pack_digest=self._config.rule_pack_digest,
             ),
             max_total_bytes=attempt.spec.outputs.max_total_bytes,
         )

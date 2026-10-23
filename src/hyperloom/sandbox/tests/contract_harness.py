@@ -32,6 +32,8 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.measure.runner.bootstrap import runner_start_command
+from hyperloom.measure.runner.tests.bootstrap_rig import Rig
 from hyperloom.sandbox.local import LocalSandboxProvider, LocalTemplate
 from hyperloom.sandbox.socket import CreateOptions, Role, Sandbox, SandboxError, SandboxInfo, SandboxProvider
 from hyperloom.sandbox.tests.e2b_standin import (
@@ -44,8 +46,8 @@ from hyperloom.sandbox.tests.e2b_standin import (
 
 log = logging.getLogger(__name__)
 
-#: The fake runner every sealed template of this suite starts: it waits for
-#: /in/spec.json and answers by copying it to /out/status.json.
+#: The fake runner of the local and the Claw service legs: it waits for /in/spec.json and answers by copying it to
+#: /out/status.json. The stand-in's leg starts the runner's start-up script, whose rig runner does the same.
 FAKE_RUNNER = (
     "import os,time,shutil\n"
     "root=os.environ['HYPERLOOM_SANDBOX_ROOT']\n"
@@ -136,7 +138,12 @@ def local_harness() -> Iterator[Harness]:
 
 
 @contextmanager
-def standin_harness(workdir: Path) -> Iterator[Harness]:
+def standin_harness(workdir: Path, rig: Rig) -> Iterator[Harness]:
+    """The stand-in's leg: its sealed template starts the runner's own start-up script on ``rig``.
+
+    The script builds a venv, installs the rig's hash lock and starts the rig's runner, which answers a sheet like
+    :data:`FAKE_RUNNER` does, so the suite's sealed tests also exercise the script inside a sandbox.
+    """
     from hyperloom.sandbox.e2b import E2BSandboxProvider
 
     reason = unavailable_reason(os.environ.get(ENVD_ENV))
@@ -147,9 +154,9 @@ def standin_harness(workdir: Path) -> Iterator[Harness]:
             "runner",
             "measurement",
             sealed=True,
-            start=(sys.executable, "-c", FAKE_RUNNER),
-            binds=interpreter_binds(),
-            envs={"HYPERLOOM_SANDBOX_ROOT": ""},
+            start=runner_start_command(),
+            binds=(*interpreter_binds(), str(rig.root)),
+            envs=rig.sandbox_env(),
         ),
         StandInTemplate("dev", "dev"),
         StandInTemplate("sub", "subrun"),

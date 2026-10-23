@@ -11,9 +11,10 @@ only; the notebook's search and record reads are shared across branches, as the 
 * ``submit_test``, ``test_result``, ``cancel_test`` and ``queue_state`` go through the toolbox interface;
 * ``wait_test`` blocks on one test of the branch until its record says it is over or the wait runs out, and then
   reports how far it has got (the toolbox's ``progress``);
-* ``start_analysis`` starts one of the analysis tools the toolbox serves (``tracelens``, ``roofline``: its
-  :attr:`~.analysis.AnalysisStarter.analysis_tools`, which the tool's schema and description list, no more) on the
-  branch's head commit (an :class:`~.analysis.AnalysisStarter`, the real toolbox);
+* ``start_analysis`` starts one of the analysis tools the toolbox serves (``tracelens``, ``roofline``, ``kernel_tune``:
+  its :attr:`~.analysis.AnalysisStarter.analysis_tools`, which the tool's schema and description list, no more) on the
+  branch's head commit, or on the landed output of the test ``kernel_tune`` names (an
+  :class:`~.analysis.AnalysisStarter`, the real toolbox);
 * ``poll_inbox`` reads the branch's inbox, one page at a time (:data:`POLL_INBOX_MAX_ITEMS` items at most);
 * the ``notebook_*`` tools are the notebook's own specialist tools (lookup, claim, release, search, record, branch log,
   brief), bound per call to the notebook handle of the caller's branch.
@@ -67,6 +68,7 @@ from hyperloom_multibranch.contracts.toolbox import (
 )
 from hyperloom_multibranch.notebook.tools import ERROR, notebook_tools
 from hyperloom_multibranch.toolbox.analysis import CODE_NO_EXECUTOR, AnalysisStarter
+from hyperloom_multibranch.toolbox.tools.kernel_tune import KERNEL_TUNE_TOOL
 from hyperloom_multibranch.toolbox.tools.roofline import ROOFLINE_TOOL, TRACELENS_TOOL
 
 if TYPE_CHECKING:
@@ -146,7 +148,20 @@ _SUBMIT_TEST: dict[str, Any] = {
     "required": ["kind", "purpose", "parent_commit"],
     "additionalProperties": False,
 }
-_ANALYSIS_BLURBS = {TRACELENS_TOOL: "analyse a trace", ROOFLINE_TOOL: "profile, then analyse"}
+_ANALYSIS_BLURBS = {
+    TRACELENS_TOOL: "analyse a trace",
+    ROOFLINE_TOOL: "profile, then analyse",
+    KERNEL_TUNE_TOOL: "tune GEMM shapes on one card",
+}
+_KERNEL_TUNE_GUIDE = (
+    " kernel_tune: params.test_request_id names a test whose server log reports untuned GEMM shapes (aiter's 'not found "
+    "tuned config' lines), and params.shapes, a list of {env, M, N, K, ...} (env is an AITER_CONFIG_GEMM_* variable), "
+    "tunes shapes of yours instead; params.timeout_sec bounds the tuning. It runs Forge's tuner on one card leased for the "
+    "job, so it is refused (lease_leaves_no_measurement) when no card can be spared from measurement, and its result "
+    "arrives in poll_inbox: per table, the tuned rows as a rows-only CSV for put_kernel_artifact(rows_only=true), each "
+    "row checked against the reference GEMM (a row that failed or could not be checked is listed with verified=false "
+    "and is not in the CSV). Its microseconds are advice only; a test of the rows says whether they help."
+)
 
 
 def _start_analysis_schema(served: Sequence[str]) -> dict[str, Any]:
@@ -167,7 +182,7 @@ def _start_analysis_schema(served: Sequence[str]) -> dict[str, Any]:
             "tool": tool,
             "params": {
                 "type": _OBJECT,
-                "description": "The tool's own parameters. trace_input, commit_id and profile_request_id are set by the server and refused here.",
+                "description": "The tool's own parameters. trace_input, commit_id, profile_request_id and landed_dir are set by the server and refused here.",
             },
             "profile_request_id": {
                 "type": _STRING,
@@ -186,7 +201,7 @@ def _start_analysis_description(served: Sequence[str]) -> str:
     return (
         f"Start {named} for this branch; returns the job id at once and the result arrives in poll_inbox. The commit "
         "analysed is this branch's head, set by the server; with a profile_request_id of any branch's profile test of "
-        "it the pointer carries its op shares."
+        "it the pointer carries its op shares." + (_KERNEL_TUNE_GUIDE if KERNEL_TUNE_TOOL in served else "")
     )
 
 

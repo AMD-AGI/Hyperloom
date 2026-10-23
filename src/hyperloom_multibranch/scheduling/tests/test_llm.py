@@ -15,6 +15,7 @@ import pytest
 from claude_agent_sdk import ClaudeSDKError
 
 from hyperloom.common.llm_config import AnthropicCompletionRequest, AnthropicMessageResult
+from hyperloom_multibranch.contracts.llm import CompletionFailed, CompletionReply
 from hyperloom_multibranch.contracts.llm_prices import TokenCounts, price_of
 from hyperloom_multibranch.contracts.notebook.records import LlmUsage, LlmUsageRecord
 from hyperloom_multibranch.contracts.notebook.vocab import UsageSource
@@ -45,7 +46,7 @@ async def test_the_completion_returns_the_reply_text_its_tokens_and_their_cost(m
     reply = await llm.anthropic_completion(MODEL, component="c", operation="judge")("sys", "user")
 
     tokens = TokenCounts(input=40, output=25, cache_read=900, cache_write=60)
-    assert reply == llm.CompletionReply("reply", tokens, price_of(MODEL).cost_usd(tokens))
+    assert reply == CompletionReply("reply", tokens, price_of(MODEL).cost_usd(tokens))
     assert reply.cost_usd == pytest.approx((40 * 2 + 25 * 10 + 900 * 0.1 + 60 * 2.5) / 1e6)
     (request,) = asked
     assert (request.model, request.system, list(request.messages)) == (
@@ -53,6 +54,23 @@ async def test_the_completion_returns_the_reply_text_its_tokens_and_their_cost(m
         "sys",
         [{"role": "user", "content": "user"}],
     )
+
+
+async def test_a_reply_may_take_as_long_as_the_caller_allows_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The read timeout is the caller's: a judgement is a sentence, a resolved patch is a whole unified diff."""
+
+    asked = _answering(monkeypatch, {})
+
+    await llm.anthropic_completion(MODEL, component="c", operation="judge")("sys", "user")
+    await llm.anthropic_completion(
+        MODEL, component="c", operation="patch_resolve", read_seconds=llm.MB_RESOLVER_READ_TIMEOUT_SECONDS
+    )("sys", "user")
+
+    judge, resolver = asked
+    assert judge.timeout_s == llm.MB_LLM_READ_TIMEOUT_SECONDS
+    assert resolver.timeout_s == llm.MB_RESOLVER_READ_TIMEOUT_SECONDS > llm.MB_LLM_READ_TIMEOUT_SECONDS
+    assert (judge.timeout.read, resolver.timeout.read) == (judge.timeout_s, resolver.timeout_s)
+    assert judge.timeout.connect == resolver.timeout.connect == llm.MB_LLM_CONNECT_TIMEOUT_SECONDS
 
 
 async def test_cache_writes_split_by_lifetime_are_priced_at_their_own_rates(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -78,7 +96,7 @@ async def test_a_reply_without_usable_counts_used_no_tokens(monkeypatch: pytest.
 
     reply = await llm.anthropic_completion(MODEL, component="c", operation="judge")("sys", "user")
 
-    assert reply == llm.CompletionReply("reply", TokenCounts(), 0.0)
+    assert reply == CompletionReply("reply", TokenCounts(), 0.0)
 
 
 async def test_a_model_the_price_sheet_does_not_list_replies_with_its_tokens_and_no_cost(
@@ -88,7 +106,7 @@ async def test_a_model_the_price_sheet_does_not_list_replies_with_its_tokens_and
 
     reply = await llm.anthropic_completion("glm-5-3", component="c", operation="judge")("sys", "user")
 
-    assert reply == llm.CompletionReply("reply", TokenCounts(input=40, output=25, cache_read=900), None)
+    assert reply == CompletionReply("reply", TokenCounts(input=40, output=25, cache_read=900), None)
     assert "judge runs on glm-5-3, which the price sheet does not list" in caplog.text
 
 
@@ -105,13 +123,13 @@ async def test_a_recorded_completion_writes_each_reply_s_cost_as_the_scheduler_s
     usages = _Usages()
     failing = True
 
-    async def resolver(system: str, user: str) -> llm.CompletionReply:
+    async def resolver(system: str, user: str) -> CompletionReply:
         if failing:
-            raise llm.CompletionFailed("patch_resolve call failed")
-        return llm.CompletionReply("r", TokenCounts(input=7, output=3, cache_read=50), 0.25)
+            raise CompletionFailed("patch_resolve call failed")
+        return CompletionReply("r", TokenCounts(input=7, output=3, cache_read=50), 0.25)
 
     recorded = llm.recorded(resolver, usages, UsageSource.RESOLVER)
-    with pytest.raises(llm.CompletionFailed):
+    with pytest.raises(CompletionFailed):
         await recorded("sys", "user")
     failing = False
     assert (await recorded("sys", "user")).text == "r"
@@ -137,7 +155,7 @@ async def test_every_transport_failure_is_a_completion_failure(
 
     monkeypatch.setattr(llm, "aanthropic_completion", transport)
 
-    with pytest.raises(llm.CompletionFailed, match=type(error).__name__):
+    with pytest.raises(CompletionFailed, match=type(error).__name__):
         await llm.anthropic_completion(MODEL, component="c", operation="judge")("sys", "user")
 
 
