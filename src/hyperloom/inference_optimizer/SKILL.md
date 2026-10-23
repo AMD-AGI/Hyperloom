@@ -447,8 +447,11 @@ dry, the local-exploration arm stops dispatching for the cycle.
 
 Every diff lands through `integrate_patch`, with `patch_source` naming where
 it came from. KEEP commits to the live tree so the next candidate stacks on
-top; REVERT does `git reset --hard`. Resume skips completed candidates by
-idempotency key.
+top; REVERT does `git reset --hard`. A candidate the tree already holds is not
+benchmarked: when every patch in the set reverse-applies cleanly and the round
+changes nothing else, it ends `already_present`, with that evidence on the
+result and, for a candidate with an upstream PR identity, an `already_present`
+row in the framework KB. Resume skips completed candidates by idempotency key.
 
 The phase exits when both arms are dry or when its budget is spent.
 
@@ -767,8 +770,9 @@ and the operator's stated value is lost:
 | Latency SLA | `--max-latency-ms` | **Scriptable frameworks only** (`xdit`, `custom`); refused for serving, where AgentX already grades interactivity. Pass any stated ceiling on per-request latency ("must stay under 250 ms", "interactive workload"). A **constraint, not a target**: it composes with `--target-*` rather than competing, and refuses any KEEP whose mean end-to-end latency exceeds it — including one that reported no latency at all. Off when omitted, which does not lose a preference but does remove the SLA from the search. |
 | Power ceiling | `--max-power-w` | Pass any stated total power budget for the serving GPUs ("the four cards together stay under 2800 W"). A constraint like `--max-latency-ms`, for the serving frameworks (refused on `xdit` / `custom`): refuses any KEEP whose serving GPUs' summed mean power exceeds it, including one that reported no per-GPU power. |
 | Per-GPU power limit | `--max-per-gpu-power-w GPU_ID W` | Pass any stated limit for a specific card ("GPU 4 under 700 W"), once per card. GPU_ID is the physical amd-smi index. A serving card with no entry is bound only by `--max-power-w`; the limits must add up to no more than it. |
-| GPU power settings | `--gpu-power-cap-w` / `--gpu-perf-level` | Assertions by default. Only when the prompt says the cards were set to a cap or perf level; the session refuses to start if a card differs. Add `--apply-gpu-power-settings` only when the prompt asks Hyperloom to set them: it sets the cards of the integer visible-device mask for the session and restores them when it ends, and needs root. |
+| GPU power settings | `--gpu-power-cap-w` / `--gpu-perf-level` / `--gpu-sclk-max-mhz` | Assertions by default. Only when the prompt says the cards were set to a cap, perf level or graphics-clock limit; the session refuses to start if a card differs. Add `--apply-gpu-power-settings` only when the prompt asks Hyperloom to set the cap or perf level (it never sets the clock limit): it sets the cards of the integer visible-device mask for the session and restores them when it ends, and needs root. |
 | Node power management | `--node-power-management` / `--node-power-limit-w` | Always assertions (MI350 series). Only when the prompt says NPM was enabled or disabled, or a node limit was set, on the BMC; the session refuses to start if `amd-smi node -p` differs. Never set by the session. |
+| Shared NPM node | `--allow-shared-npm-node` | With NPM enabled the session refuses to start unless its visible-device mask covers every GPU on the node. Pass it only when the prompt says to run on part of an NPM node anyway, on every launch and resume; the cards left out are recorded with the session. |
 | Max model len | `--max-model-len` | Optional; auto-derived from ISL+OSL+headroom when omitted. |
 | External reference GPU | `--compare-against-gpu` | `target_analysis` writes `target_analysis/target_baseline.json` for query/status metadata and `competitor_target.json` for both advisory and final-report comparisons. Without a target GPU it writes `reason="no_target_gpu_configured"` and clears the competitor target. AgentX reads accepted `current_best.total_throughput / state.tp` and `current_best.e2e_norm_intvty_p90` at `state.conc`; it does not reread raw results or recipes. Missing targets or axes remain unavailable. This is a cross-system advisory, not proof of identical measurement estimators or deployment, and never changes Objective or KEEP/REVERT. |
 | Target advisory | `--no-target-advisory` | Disable external-target hints in prompts without disabling final-report comparison. `primary_gap` uses the existing latency/throughput categories; the interactivity axis is displayed as interactivity. |

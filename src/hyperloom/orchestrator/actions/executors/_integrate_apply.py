@@ -27,7 +27,7 @@ from ._integrate_results import (
     _unresolved_root_rejection,
 )
 from ._nogit_patch import _is_git_tree
-from ._patch_git import _apply_patch_series, _git_stash_if_dirty
+from ._patch_git import _apply_patch_series, _git_stash_if_dirty, _PatchSeries
 from ._patch_sources import (
     _candidate_mutation_roots,
     _note_pre_mutation_head,
@@ -41,6 +41,17 @@ from .source_tree_identity import new_recovery_record
 log = logging.getLogger(__name__)
 
 
+def _changes_beyond_patches(attempt: IntegrateAttempt, deliverable: _Deliverable) -> bool:
+    """Whether the round has something to measure even when the tree already holds every patch."""
+    return bool(
+        deliverable.extra_server_args
+        or deliverable.extra_envs
+        or deliverable.artifact_specs
+        or attempt.setup_commands_applied
+        or (attempt.attempt_venv_root and not attempt.shared_state.enablement.kept_stack_action)
+    )
+
+
 class ApplyStageMixin:
     """Open the mutation window, apply the patch series to the live tree, and refuse the attempt when it does not apply."""
 
@@ -52,7 +63,7 @@ class ApplyStageMixin:
     ) -> dict[str, Any] | None:
         """Setup replay, patch/artifact apply, pending_integrate sentinel.
 
-        Returns an early-exit result dict on failure/no-patches/apply_only,
+        Returns an early-exit result dict on failure/no-patches/already_present/apply_only,
         or None to continue to bench+gate. Records mutations on the attempt.
         """
         shared_state = attempt.shared_state
@@ -87,14 +98,7 @@ class ApplyStageMixin:
                 ),
             )
 
-        if not (
-            deliverable.patch_paths
-            or deliverable.extra_server_args
-            or deliverable.extra_envs
-            or deliverable.artifact_specs
-            or attempt.setup_commands_applied
-            or (bool(attempt.attempt_venv_root) and not shared_state.enablement.kept_stack_action)
-        ):
+        if not (deliverable.patch_paths or _changes_beyond_patches(attempt, deliverable)):
             if params.get("enablement_launch_only"):
                 # Launch-only mode: skip the no-patches early-return and fall through to bench.
                 output_root = runs_dir(self.session_dir, "integrate_patch", attempt.specialist_task_id)
@@ -190,22 +194,15 @@ class ApplyStageMixin:
             if shared_state is not None:
                 shared_state.save(self.session_dir)
 
-        apply_errors, apply_feedback = _apply_patch_series(
+        series = _apply_patch_series(
             attempt,
             patch_paths,
             git_head=str(recovery.get("git_head") or ""),
             backup_root=recovery_root / "patch_backups",
         )
-        if apply_errors:
-            return await self._refuse_apply(
-                attempt,
-                params,
-                extra,
-                "git_apply_failed",
-                apply_errors,
-                workspace=str(attempt.output_root),
-                **_reauthor_fields(params, patch_paths, feedback=apply_feedback),
-            )
+        ended = await self._end_patch_series(attempt, params, extra, deliverable, series)
+        if ended is not None:
+            return ended
 
         if deliverable.artifact_specs:
             applied_artifacts, artifact_apply_errors = self._apply_artifacts(
@@ -309,6 +306,59 @@ class ApplyStageMixin:
                 raise OSError("cannot persist the exact pre-candidate stash identity")
             recovery["stash_oid"] = cp.stdout.strip()
         return None
+
+    async def _end_patch_series(
+        self,
+        attempt: IntegrateAttempt,
+        params: dict[str, Any],
+        extra: dict[str, Any],
+        deliverable: _Deliverable,
+        series: _PatchSeries,
+    ) -> dict[str, Any] | None:
+        """End the round at its patch series when a patch did not land, or when it holds nothing left to measure."""
+        if series.errors:
+            return await self._refuse_apply(
+                attempt,
+                params,
+                extra,
+                "git_apply_failed",
+                series.errors,
+                workspace=str(attempt.output_root),
+                **_reauthor_fields(params, series.patches, feedback=series.feedback),
+            )
+        if series.changed_nothing and not _changes_beyond_patches(attempt, deliverable):
+            return await self._end_already_present(attempt, params, extra, series.already_present)
+        return None
+
+    async def _end_already_present(
+        self,
+        attempt: IntegrateAttempt,
+        params: dict[str, Any],
+        extra: dict[str, Any],
+        evidence: list[dict[str, str]],
+    ) -> dict[str, Any]:
+        """End a round whose every patch the tree already holds, and that changes nothing else, without a benchmark.
+
+        The attempt's ``applied`` list is emptied, because :meth:`_finish_attempt` reports
+        that list as reverted, and nothing was applied.
+        """
+        from ...knowledge import kb_writeback as _kb
+
+        log.info("integrate_patch: the framework tree already holds this candidate; not benchmarking: %s", evidence)
+        attempt.applied.clear()
+        await self._maybe_write_framework_kb_record(
+            _KbLesson(_kb.OUTCOME_ALREADY_PRESENT, 0.0), done_payload=attempt.done_payload, params=params, extra=extra
+        )
+        result: dict[str, Any] = {
+            "status": "already_present",
+            "specialist_task_id": attempt.specialist_task_id,
+            "already_present": evidence,
+            "patches_applied": [],
+            "reason": "the framework tree already holds every change in this candidate, so there is nothing to measure",
+        }
+        if params.get("enablement"):
+            result["enablement"] = True
+        return result
 
     async def _refuse_apply(
         self,

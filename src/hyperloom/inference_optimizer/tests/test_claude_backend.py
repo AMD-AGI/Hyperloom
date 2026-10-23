@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -914,6 +915,7 @@ async def test_options_includes_system_prompt_and_max_turns():
     async def q(*, prompt, options):
         captured["options_kwargs"] = options.kwargs
         captured["prompt"] = prompt
+        captured["system_prompt_text"] = Path(options.kwargs["system_prompt"]["path"]).read_text(encoding="utf-8")
         return
         yield  # make it a generator
 
@@ -927,7 +929,8 @@ async def test_options_includes_system_prompt_and_max_turns():
     # max_turns is floored to _RAW_COMPLETION_MIN_MAX_TURNS (8) for every mode: Claude Code counts its own messages as
     # turns, so a literal max_turns=3 would trip before the model can emit an intent.
     assert captured["options_kwargs"]["max_turns"] == 8
-    assert captured["options_kwargs"]["system_prompt"] == "sys"
+    assert captured["options_kwargs"]["system_prompt"]["type"] == "file"
+    assert captured["system_prompt_text"] == "sys"
     assert "Read" in captured["options_kwargs"]["allowed_tools"]
     assert captured["options_kwargs"]["tools"] == ["Read"]
     # Output instructions appended to prompt

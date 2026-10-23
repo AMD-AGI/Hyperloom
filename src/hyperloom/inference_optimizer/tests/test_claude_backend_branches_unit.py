@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -132,7 +133,7 @@ def test_build_options_model_and_system_prompt():
     b = _backend(model="claude-x")
     opts = b._build_options(tools=["Read"], max_turns=5, system_prompt="sys")
     assert opts.kwargs["model"] == "claude-x"
-    assert opts.kwargs["system_prompt"] == "sys"
+    assert Path(opts.kwargs["system_prompt"]["path"]).read_text(encoding="utf-8") == "sys"
     assert "resume" not in opts.kwargs
 
 
