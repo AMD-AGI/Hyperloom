@@ -551,7 +551,7 @@ function-lines src/hyperloom/orchestrator/specialists/runner.py::SpecialistRunne
 function-lines src/hyperloom/orchestrator/specialists/runner.py::SpecialistRunner._run_via_subprocess 56
 function-lines src/hyperloom/orchestrator/specialists/subprocess_.py::SpecialistSubprocessDispatcher._build_codex_launch 75
 function-lines src/hyperloom/orchestrator/specialists/subprocess_.py::SpecialistSubprocessDispatcher._reap_loop 75
-function-lines src/hyperloom/orchestrator/specialists/subprocess_.py::SpecialistSubprocessDispatcher.run 229
+function-lines src/hyperloom/orchestrator/specialists/subprocess_.py::SpecialistSubprocessDispatcher.run 225
 function-lines src/hyperloom/orchestrator/state/gaps.py::GapRefreshCollaborator._extract_gaps_from_attempts 55
 function-lines src/hyperloom/orchestrator/state/shared_state.py::SharedState._append_roofline_snapshot_history 55
 function-lines src/hyperloom/orchestrator/state/shared_state.py::SharedState.current_profile_workload_context 59
