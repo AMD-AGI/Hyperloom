@@ -221,9 +221,9 @@ def _section_session_context(session: SessionContext) -> list[str]:
         ]
     lines += [
         "",
-        "Per-tick dynamic context (Phase, Mission progress, Time budget,",
-        "Shared session state, KB hints, inbox tail) is appended below the",
-        "system prompt every tick by the Coordinator.",
+        "The Coordinator supplies the session context (Shared session state, KB hints,",
+        "advisories) and the per-tick blocks (Phase, Mission progress, Time budget,",
+        "Tick, inbox tail) every tick.",
         "The Time-budget block carries `remaining=X.Xmin`.",
         "See PHASE CONTRACT below for the phase chain, per-phase allowed",
         "actions, and phase-transition rules.",

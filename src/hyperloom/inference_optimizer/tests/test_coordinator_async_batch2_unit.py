@@ -2180,7 +2180,7 @@ async def test_compose_prompt_has_no_specialist_status_block(coord: Coordinator)
         idempotency_key="visible-spec",
     )
     await coord.tasks.transition(spec.task_id, "running")
-    out = await coord.conversation.compose_prompt("orchestration")
+    out = (await coord.conversation.compose_prompt("orchestration")).text
     assert "Specialist health" not in out
     assert "stale" not in out.lower()
 
