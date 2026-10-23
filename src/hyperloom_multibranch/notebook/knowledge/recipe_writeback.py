@@ -20,6 +20,8 @@ does not rebuild what was measured, so it is skipped as well (``incomplete_recip
 The provenance names how the warmup of the measurements behind the final commit ran (``warmup_round_seed``): the seed
 run_grid noted, or ``unpatched`` when its patch did not apply. Results from before the warmup had a seed of its own
 note neither, and the key is left out: their warmup replayed the measured prompts, which reads about 3% high (#56).
+When CLOSE is handed the session's rule-pack identity (version and digest from the manifest), that pair is copied into
+provenance as ``rule_pack``; the pack itself is not read again at write-back (#110).
 """
 
 from __future__ import annotations
@@ -27,6 +29,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import tempfile
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -139,9 +142,17 @@ def _warmup_seed(snapshot: NotebookSnapshot, commit_id: str) -> dict[str, str]:
 
 
 def knowledge_document(
-    snapshot: NotebookSnapshot, profile: SessionProfile, final: FinalRecipe, scope: RecipeScope
+    snapshot: NotebookSnapshot,
+    profile: SessionProfile,
+    final: FinalRecipe,
+    scope: RecipeScope,
+    rule_pack: Mapping[str, str] | None = None,
 ) -> dict[str, object]:
-    """The record's knowledge: metrics, workload shape, ``value`` columns, experience lists and provenance."""
+    """The record's knowledge: metrics, workload shape, ``value`` columns, experience lists and provenance.
+
+    ``rule_pack`` is the session's ``{"version", "digest"}`` from the manifest; when given it is copied into
+    provenance under that name, and when absent the key is left out.
+    """
 
     metrics = _metrics(snapshot, final, scope)
     lessons = session_lessons(snapshot, final.commit_id)
@@ -168,6 +179,7 @@ def knowledge_document(
                 "runtime_snapshot": final.recipe.runtime_snapshot,
                 "generated_at": datetime.fromtimestamp(snapshot.taken_at, timezone.utc).isoformat(),
                 **_warmup_seed(snapshot, final.commit_id),
+                **({"rule_pack": dict(rule_pack)} if rule_pack else {}),
             },
         }
     )
@@ -205,11 +217,16 @@ def _checked_out(source: Path) -> bytes:
 
 
 def publish_final_recipe(
-    client: RemoteRecipeClient, snapshot: NotebookSnapshot, final: FinalRecipe
+    client: RemoteRecipeClient,
+    snapshot: NotebookSnapshot,
+    final: FinalRecipe,
+    rule_pack: Mapping[str, str] | None = None,
 ) -> RemoteWriteResult:
     """Write ``final`` when it beats the champion of its partition; the result says what was written or why not.
 
-    A refusal by the KB Store, such as a read-only token's ``write_forbidden``, is logged as an error and raised.
+    ``rule_pack`` is the session's rule-pack identity from the manifest; CLOSE copies it into provenance and does not
+    re-read the pack. A refusal by the KB Store, such as a read-only token's ``write_forbidden``, is logged as an
+    error and raised.
     """
 
     profile = snapshot.profile
@@ -224,7 +241,7 @@ def publish_final_recipe(
     commit = snapshot.lineage.commit(final.commit_id)
     if commit is not None and commit.recipe_digest not in (None, final.recipe.digest()):
         return RemoteWriteResult(SKIPPED, "recipe_digest_mismatch", canonical_id, profile.session_id)
-    knowledge = knowledge_document(snapshot, profile, final, scope)
+    knowledge = knowledge_document(snapshot, profile, final, scope, rule_pack=rule_pack)
     agentx = scope.identity_scheme == AGENTX
     metric, objective = (AGENTX_METRIC, AGENTX_OBJECTIVE_SCHEMA) if agentx else (KB_METRIC, OBJECTIVE_SCHEMA)
     with tempfile.TemporaryDirectory(prefix="hyperloom-multibranch-recipe-") as temporary:

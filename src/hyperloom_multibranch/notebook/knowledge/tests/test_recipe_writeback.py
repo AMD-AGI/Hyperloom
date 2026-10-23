@@ -104,10 +104,24 @@ def test_a_session_past_the_champion_writes_its_recipe_files_and_lessons(
     provenance = knowledge["provenance"]
     assert (provenance["commit_id"], provenance["recipe_digest"]) == ("i1", final.recipe.digest())
     assert "warmup_round_seed" not in provenance
+    assert "rule_pack" not in provenance
     replayed = from_recipe_kb_value(knowledge["value"], base_image_digest=provenance["base_image_digest"])
     assert replayed == final.recipe
     warm = knowledge_to_warm_recipe({"knowledge": knowledge, "session_id": "sess-1"})
     assert (warm["best_throughput"], warm["replay_material_available"], warm["isl"]) == (1041.0, True, 1024)
+
+
+def test_close_copies_the_session_rule_pack_into_provenance(
+    snapshot: NotebookSnapshot, final: FinalRecipe
+) -> None:
+    store = FakeRecipeStore(champion=_champion(1000.0))
+    rule_pack = {"version": "1", "digest": "sha256:" + "c" * 64}
+
+    outcome = publish_final_recipe(RemoteRecipeClient(store), snapshot, final, rule_pack=rule_pack)
+
+    assert outcome.status == "written"
+    assert store.knowledge is not None
+    assert store.knowledge["provenance"]["rule_pack"] == rule_pack
 
 
 def test_a_session_short_of_the_champion_writes_nothing(snapshot: NotebookSnapshot, final: FinalRecipe) -> None:
