@@ -1,8 +1,8 @@
 ---
 myst:
-    html_meta:
-        "description": "Optimizations Hyperloom found or produced on AMD Instinct GPUs that vLLM or SGLang has merged, each with the end-to-end measurement of the upstream PR, and the rule and check that keep the list current."
-        "keywords": "Hyperloom, upstream, vLLM, SGLang, merged pull requests, AMD Instinct, MI300X, MI325X, MI355X, LLM inference, optimization results"
+  html_meta:
+    "description": "Optimizations Hyperloom found or produced on AMD Instinct GPUs that vLLM or SGLang has merged, each with the end-to-end measurement of the upstream PR, and the rule and check that keep the list current."
+    "keywords": "Hyperloom, upstream, vLLM, SGLang, merged pull requests, AMD Instinct, MI300X, MI325X, MI355X, LLM inference, optimization results"
 ---
 # Upstream optimizations merged into vLLM and SGLang
 
@@ -21,7 +21,7 @@ Hyperloom`, `Powered by Hyperloom`, or the older `Found and validated with ROCm 
 is merged. Attributed PRs that are still open, or that were closed without merging, are not listed:
 a change nobody upstream accepted is not evidence.
 
-As of 2026-10-22 that is 9 of 38 attributed PRs, with 18 still open and 11 closed unmerged.
+As of 2026-10-23 that is 9 of 45 attributed PRs, with 25 still open and 11 closed unmerged.
 
 `python scripts/report_upstream_results.py` names every merged attributed PR missing from this page
 and prints the attributed, merged, open and closed counts for the line above. Set `GITHUB_TOKEN` to

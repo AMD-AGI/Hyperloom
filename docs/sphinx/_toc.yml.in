@@ -7,6 +7,8 @@ subtrees:
 - entries:
   - file: what-is-hyperloom.md
     title: What is Hyperloom?
+  - file: upstream-results.md
+    title: Upstream optimizations merged into vLLM and SGLang
   - file: release-notes.md
     title: Release notes
   - file: compatibility.rst
@@ -57,8 +59,6 @@ subtrees:
     title: Authentication and credentials
   - file: reference/kernel-execution-path.md
     title: Kernel optimization execution path
-  - file: reference/upstream-results.md
-    title: Upstream optimizations merged into vLLM and SGLang
   - file: reference/operations.md
     title: Operations and self-hosting
   - file: reference/upgrade.md
