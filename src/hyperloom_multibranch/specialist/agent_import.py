@@ -33,6 +33,16 @@ from hyperloom_multibranch.specialist.worktree import Upstream
 
 #: Stores a component's patch text and returns its reference, as ``ExperimentRepo.store_patch`` does.
 PatchStore = Callable[[str, str], Awaitable[PatchRef]]
+#: Keeps the kernel table text a variable loads and returns its artifact.
+TableStore = Callable[[str, str], Awaitable[KernelArtifact]]
+
+
+@dataclass(frozen=True)
+class KeepStores:
+    """Where an import keeps what a keep carries: its patches and its kernel tables."""
+
+    patch: PatchStore
+    table: TableStore
 
 
 class KeptChangeError(ValueError):
@@ -87,21 +97,17 @@ def with_tables(kept: KeptChange, owned: Path) -> KeptChange:
 
 
 async def import_delta(
-    kept: KeptChange,
-    *,
-    root: Recipe,
-    head: Recipe,
-    component: str,
-    store: PatchStore,
-    artifacts: Mapping[str, KernelArtifact] | None = None,
+    kept: KeptChange, *, root: Recipe, head: Recipe, component: str, stores: KeepStores
 ) -> RecipeDelta | None:
     """The delta that makes ``head`` the agent's state at ``kept`` on the framework ``component``; ``None`` when the
-    head already is that state. ``artifacts`` are the kernel artifacts of :attr:`KeptChange.tables`, by the variable
-    that loads each: the artifact sets its variable, so the variable is not imported as well."""
+    head already is that state. Each table of :attr:`KeptChange.tables` goes in as the artifact ``stores`` keeps it
+    as, which sets its variable, so the variable is not imported as well."""
 
-    artifacts = artifacts or {}
+    artifacts = {
+        name: await stores.table(name, kept.tables[value]) for name, value in kept.envs.items() if value in kept.tables
+    }
     change = await _source_change(
-        kept.source_patch, _patches(root, component), _patches(head, component), component, store
+        kept.source_patch, _patches(root, component), _patches(head, component), component, stores.patch
     )
     envs = {name: value for name, value in kept.envs.items() if name not in artifacts}
     config = _config_change(head.launch, replace(kept, envs=envs))
@@ -175,9 +181,11 @@ def _flags(args: str) -> set[str]:
 
 
 __all__ = [
+    "KeepStores",
     "KeptChange",
     "KeptChangeError",
     "PatchStore",
+    "TableStore",
     "added_at",
     "import_delta",
     "read_kept_change",

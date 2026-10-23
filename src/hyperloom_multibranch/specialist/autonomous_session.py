@@ -39,6 +39,7 @@ from hyperloom_multibranch.specialist.agent_import import (
     KeptChange,
     KeptChangeError,
     added_at,
+    KeepStores,
     import_delta,
     with_tables,
     read_kept_change,
@@ -368,14 +369,8 @@ class AutonomousSession:
         repo, component = self._setup.repo, self._setup.component
         recipe = await repo.read_recipe(head)
         root = await repo.read_recipe(self._start.start_commit)
-        artifacts = {
-            name: await self._kernel_artifact(name, kept.tables[value])
-            for name, value in kept.envs.items()
-            if value in kept.tables
-        }
-        delta = await import_delta(
-            kept, root=root, head=recipe, component=component, store=repo.store_patch, artifacts=artifacts
-        )
+        stores = KeepStores(repo.store_patch, self._kernel_artifact)
+        delta = await import_delta(kept, root=root, head=recipe, component=component, stores=stores)
         if delta is None or all(item.component != component for item in delta.components):
             return delta
         if any(item.component == component for item in recipe.components):

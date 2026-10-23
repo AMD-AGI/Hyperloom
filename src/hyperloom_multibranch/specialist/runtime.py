@@ -155,6 +155,29 @@ class _Branch:
     judge_failed: bool = False
 
 
+@dataclass
+class _Restarts:
+    """A branch's specialist crashes within the restart window, and its sessions lost since one last worked."""
+
+    crashes: deque[float] = field(default_factory=deque)
+    losses: int = 0
+
+    def give_up(self, error: Exception, now: float) -> str:
+        """Count the crash ``error`` at ``now``: why the specialist is not restarted, or "" when it is."""
+
+        if isinstance(error, SessionCrashed) and error.worked:
+            self.losses = 0
+        self.losses += isinstance(error, SessionCrashed) and error.lost
+        self.crashes.append(now)
+        while now - self.crashes[0] > RESTART_WINDOW_S:
+            self.crashes.popleft()
+        if len(self.crashes) > MAX_RESTARTS:
+            return f"crashed {len(self.crashes)} times in {RESTART_WINDOW_S / 60:g} minutes"
+        if self.losses > MAX_LOSS_RESTARTS:
+            return f"lost {self.losses} sessions in a row, none working in between"
+        return ""
+
+
 class SpecialistRuntime:
     """The session's :class:`~hyperloom_multibranch.contracts.lifecycle.SpecialistLifecycle`."""
 
@@ -248,8 +271,8 @@ class SpecialistRuntime:
         await self._learn_exhausted(state)
 
     async def _supervise(self, state: _Branch) -> None:
-        crashes: deque[float] = deque()
-        losses = idle = 0
+        restarts = _Restarts()
+        idle = 0
         ready = False
         while True:
             start = SessionStart(state.name, state.start_commit, state.k, state.task)
@@ -281,21 +304,10 @@ class SpecialistRuntime:
             except Exception as error:
                 logger.exception("the specialist of %s crashed", state.name)
                 await state.session.stop()
-                lost = isinstance(error, SessionCrashed) and error.lost
-                if isinstance(error, SessionCrashed) and error.worked:
-                    losses = 0
-                losses += lost
                 state.crashes += 1
-                state.lost += lost
-                now = self._pacing.clock()
-                crashes.append(now)
-                while now - crashes[0] > RESTART_WINDOW_S:
-                    crashes.popleft()
-                if len(crashes) > MAX_RESTARTS:
-                    why = f"crashed {len(crashes)} times in {RESTART_WINDOW_S / 60:g} minutes"
-                elif losses > MAX_LOSS_RESTARTS:
-                    why = f"lost {losses} sessions in a row, none working in between"
-                else:
+                state.lost += isinstance(error, SessionCrashed) and error.lost
+                why = restarts.give_up(error, self._pacing.clock())
+                if not why:
                     await _notice(state, _restarted(error))
                     continue
                 state.session, state.gave_up = None, True

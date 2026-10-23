@@ -402,53 +402,74 @@ def register_dev_sandbox_tools(
     """Register the five dev sandbox tools; ``home`` is the session's loop, which ``leases`` live on (the service
     answers each call on a loop of its own). Without it, calls run on the caller's loop."""
 
-    own = {"scopes": frozenset({SCOPE_SPECIALIST})}
-    limits = leases.limits
-    server.register(
+    for build in (_lease_tool, _run_tool, _start_tool, _read_tool, _release_tool):
+        tool = build(leases)
+        server.register(
+            tool.name,
+            description=tool.description,
+            schema=tool.schema,
+            handler=_handler(home, tool.call),
+            scopes=frozenset({SCOPE_SPECIALIST}),
+        )
+
+
+#: A dev sandbox tool's call, on the calling branch with the call's arguments.
+_DevCall = Callable[[str, dict[str, Any]], Coroutine[Any, Any, Any]]
+
+
+@dataclass(frozen=True)
+class _DevTool:
+    name: str
+    description: str
+    schema: dict[str, Any]
+    call: _DevCall
+
+
+def _lease_tool(leases: DevLeases) -> _DevTool:
+    most = leases.limits.max_s / MINUTE
+    return _DevTool(
         "dev_sandbox_lease",
-        description=(
-            "Lease cards of your own for a while, to check a change runs and time a kernel before a full test; refused "
-            "while tests wait for cards. Its results never enter the gate."
-        ),
-        schema=_schema(
+        "Lease cards of your own for a while, to check a change runs and time a kernel before a full test; refused "
+        "while tests wait for cards. Its results never enter the gate.",
+        _schema(
             {
                 "cards": {"type": _INTEGER, "minimum": 1, "description": "How many cards (1)."},
                 "minutes": {
                     "type": _NUMBER,
                     "exclusiveMinimum": 0,
-                    "description": f"How long, at most {limits.max_s / MINUTE:g} ({limits.max_s / MINUTE:g}).",
+                    "description": f"How long, at most {most:g} ({most:g}).",
                 },
             }
         ),
-        handler=_handler(home, lambda branch, a: leases.lease(branch, a.get("cards", 1), a.get("minutes", math.inf))),
-        **own,
+        lambda branch, a: leases.lease(branch, a.get("cards", 1), a.get("minutes", math.inf)),
     )
-    server.register(
+
+
+def _run_tool(leases: DevLeases) -> _DevTool:
+    run_s = leases.limits.run_s
+    return _DevTool(
         "dev_sandbox_run",
-        description=f"Run a command in your dev sandbox to its end, at most {limits.run_s:g} s; its output's last lines.",
-        schema=_schema(
-            {"command": _COMMAND, "cwd": _CWD, "timeout_s": {"type": _NUMBER}, "lines": _LINES}, ("command",)
-        ),
-        handler=_handler(
-            home,
-            lambda branch, a: leases.run(branch, a["command"], a.get("cwd"), a.get("timeout_s", limits.run_s)),
-        ),
-        **own,
+        f"Run a command in your dev sandbox to its end, at most {run_s:g} s; its output's last lines.",
+        _schema({"command": _COMMAND, "cwd": _CWD, "timeout_s": {"type": _NUMBER}, "lines": _LINES}, ("command",)),
+        lambda branch, a: leases.run(branch, a["command"], a.get("cwd"), a.get("timeout_s", run_s)),
     )
-    server.register(
+
+
+def _start_tool(leases: DevLeases) -> _DevTool:
+    return _DevTool(
         "dev_sandbox_start",
-        description="Start a command in your dev sandbox in the background (a server, a longer benchmark).",
-        schema=_schema({"command": _COMMAND, "cwd": _CWD}, ("command",)),
-        handler=_handler(home, lambda branch, a: leases.start(branch, a["command"], a.get("cwd"))),
-        **own,
+        "Start a command in your dev sandbox in the background (a server, a longer benchmark).",
+        _schema({"command": _COMMAND, "cwd": _CWD}, ("command",)),
+        lambda branch, a: leases.start(branch, a["command"], a.get("cwd")),
     )
-    server.register(
+
+
+def _read_tool(leases: DevLeases) -> _DevTool:
+    return _DevTool(
         "dev_sandbox_read",
-        description=(
-            f"Wait, at most {limits.read_s:g} s, until a started process exits or its output matches until; "
-            "its state and output's last lines."
-        ),
-        schema=_schema(
+        f"Wait, at most {leases.limits.read_s:g} s, until a started process exits or its output matches until; "
+        "its state and output's last lines.",
+        _schema(
             {
                 "process": {"type": _INTEGER, "minimum": 1},
                 "wait_s": {"type": _NUMBER, "minimum": 0},
@@ -457,23 +478,20 @@ def register_dev_sandbox_tools(
             },
             ("process",),
         ),
-        handler=_handler(
-            home, lambda branch, a: leases.read(branch, a["process"], a.get("wait_s", 0.0), a.get("until"))
-        ),
-        **own,
+        lambda branch, a: leases.read(branch, a["process"], a.get("wait_s", 0.0), a.get("until")),
     )
-    server.register(
+
+
+def _release_tool(leases: DevLeases) -> _DevTool:
+    return _DevTool(
         "dev_sandbox_release",
-        description="Kill everything in your dev sandbox and give its cards back.",
-        schema=_schema({}),
-        handler=_handler(home, lambda branch, a: leases.release(branch)),
-        **own,
+        "Kill everything in your dev sandbox and give its cards back.",
+        _schema({}),
+        lambda branch, a: leases.release(branch),
     )
 
 
-def _handler(
-    home: asyncio.AbstractEventLoop | None, call: Callable[[str, dict[str, Any]], Coroutine[Any, Any, Any]]
-) -> Callable[[dict[str, Any], CallContext], Any]:
+def _handler(home: asyncio.AbstractEventLoop | None, call: _DevCall) -> Callable[[dict[str, Any], CallContext], Any]:
     async def handle(arguments: dict[str, Any], ctx: CallContext) -> dict[str, Any]:
         done = asdict(await _at_home(home, call(ctx.principal.branch, arguments)))
         if "output" in done:
