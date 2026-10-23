@@ -880,8 +880,11 @@ def _begin_resume_leg(state: SharedState) -> str:
     transition in ``phase_history`` as a previous leg's and stops the phase
     clock charging the gap between the two legs to the phase it stopped in.
     Clears the previous leg's terminal bookkeeping: a stale ``stop_reason``
-    makes Orchestration heartbeats think the work is done, and a stale closing
-    flag resumes straight into a wind-down already finished.
+    makes Orchestration heartbeats think the work is done, a stale closing
+    flag resumes straight into a wind-down already finished, and a stale
+    ``target_reached_at`` sends the leg to SWEEP against an objective the
+    resume may have raised. The Coordinator stamps it again on the first tick
+    the restored objective holds.
 
     The wall-clock budget is untouched. Elapsed time is summed forward across
     legs, so this leg starts from whatever the session has already spent;
@@ -902,6 +905,7 @@ def _begin_resume_leg(state: SharedState) -> str:
     state.closing_started_unix = 0.0
     state.closing_report_task_id = ""
     state.close_sequence_done = False
+    state.target_reached_at = ""
     state.crash_count = 0
     state.teardown_timings_sec = {}
     state.begin_leg()

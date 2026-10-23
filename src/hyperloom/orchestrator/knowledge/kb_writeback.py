@@ -23,7 +23,7 @@ def _default_kb_root() -> Path:
 OUTCOME_INTEGRATED: str = "integrated"
 OUTCOME_REVERTED_SMOKE_FAIL: str = "reverted_smoke_fail"
 OUTCOME_REJECTED_APPLY_FAIL: str = "rejected_apply_fail"
-# Candidate skipped: semantic audit found it already in the live tree.
+# Not benchmarked: the live tree already held every change the candidate makes.
 OUTCOME_ALREADY_PRESENT: str = "already_present"
 # An env-gated rewrite whose switch-off parity leg measured a behavioural change: with every switch unset the patch
 # did not reproduce the base.

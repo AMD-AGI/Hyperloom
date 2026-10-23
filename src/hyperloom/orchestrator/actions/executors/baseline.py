@@ -1286,18 +1286,16 @@ def _apply_warm_patch_sequence(
                 from ._nogit_patch import _apply_patch_no_git
 
                 backups_so_far = tree["nogit_backups"]
-                ok, err, backups, _feedback = _apply_patch_no_git(
+                nogit_apply = _apply_patch_no_git(
                     Path(tree["root"]),
                     patch_path,
                     patch_log_dir / "patch_backups",
                     seq_offset=len(backups_so_far),
                 )
-                if not ok:
-                    raise RuntimeError(err or "nogit patch apply failed")
-                backups_so_far.extend(backups)
-                # A real apply backs up every file it writes, so an empty set is the
-                # applier reporting an overlay the tree already carried.
-                method = "applied_nogit" if backups else "already_present"
+                if not nogit_apply.ok:
+                    raise RuntimeError(nogit_apply.error or "nogit patch apply failed")
+                backups_so_far.extend(nogit_apply.backups)
+                method = "already_present" if nogit_apply.present_by else "applied_nogit"
             else:
                 method = _git_apply_overlay(
                     tree["root"],
@@ -1315,7 +1313,7 @@ def _apply_warm_patch_sequence(
         if method in ("applied", "applied_3way", "applied_nogit"):
             tree["mutated"] = True
         applied.append({"patch_file": patch_file, "idx": str(idx), "status": method})
-        status["status"] = method
+        status.update(status=method, applied_patch=str(patch_path))
     return applied, statuses
 
 

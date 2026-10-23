@@ -3252,3 +3252,71 @@ def test_a_kernel_rollback_that_succeeds_refuses_without_stopping_the_run(tmp_pa
     assert refused is True
     assert coord.shared_state.stop_reason in (None, "")
     assert coord.shared_state.warm_replay_pending == {}
+
+
+_STOCK_ENVIRON = "# sglang environ\nSGLANG_X = 0\n"
+_PPE_OVERLAY = """\
+diff --git a/python/sglang/srt/environ.py b/python/sglang/srt/environ.py
+--- a/python/sglang/srt/environ.py
++++ b/python/sglang/srt/environ.py
+@@ -1,2 +1,3 @@
+ # sglang environ
+ SGLANG_X = 0
++SGLANG_PARALLEL_PROMPT_ENCODE = 1
+diff --git a/python/sglang/srt/ppe.py b/python/sglang/srt/ppe.py
+new file mode 100644
+--- /dev/null
++++ b/python/sglang/srt/ppe.py
+@@ -0,0 +1 @@
++ENABLED = True
+"""
+
+
+def _stock_sglang_tree(root: Path) -> Path:
+    (root / "python" / "sglang" / "srt").mkdir(parents=True)
+    (root / "python" / "sglang" / "srt" / "environ.py").write_text(_STOCK_ENVIRON, encoding="utf-8")
+    for args in (["init", "-q"], ["add", "-A"], ["commit", "-q", "-m", "stock"]):
+        subprocess.run(["git", "-C", str(root), "-c", "user.email=t@t", "-c", "user.name=t", *args], check=True)
+    return root
+
+
+def test_a_promoted_warm_replay_patch_is_reinstalled_on_a_fresh_tree(tmp_path):
+    """The overlay a warm replay applied is part of current_best, so a resume onto a stock tree has to put it back."""
+    import shutil
+
+    from hyperloom.orchestrator.actions.executors.baseline import _apply_warm_patches, _stamp_warm_patch_outcome
+    from hyperloom.orchestrator.source_snapshot import install_source_layers
+
+    tree = _stock_sglang_tree(tmp_path / "sglang")
+    params = {
+        "baseline_tput_anchor": 600.0,
+        "required_patch_timeline": True,
+        "patches": [
+            {
+                "patch_file": "patch/overlays/000001/00-realized.patch",
+                "patch_content": _PPE_OVERLAY,
+                "framework_root": str(tree),
+            }
+        ],
+        "extra_server_args": "--recipe",
+        "extra_envs": {},
+    }
+    workspace = tmp_path / "runs" / "replay_warm_recipe" / "warm"
+    workspace.mkdir(parents=True)
+    result = {"status": "succeeded", "output_throughput": 612.0, "workspace": str(workspace)}
+    _stamp_warm_patch_outcome(result, _apply_warm_patches(params, str(tree), workspace), params)
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
+    coord.shared_state.baseline_tput = 600.0
+    coord.shared_state.warm_replay_outcome = {"expected_gain_pct": 0.0}
+
+    coord.phase_prelude.promote_warm_replay(result, task=_StubTask(params=params))
+    shutil.rmtree(tree)
+    _stock_sglang_tree(tree)
+    installed = install_source_layers(coord.shared_state.optimization_stack)
+
+    assert installed.failed == []
+    assert installed.unreproducible == []
+    assert (tree / "python" / "sglang" / "srt" / "environ.py").read_text(encoding="utf-8") == (
+        _STOCK_ENVIRON + "SGLANG_PARALLEL_PROMPT_ENCODE = 1\n"
+    )
+    assert (tree / "python" / "sglang" / "srt" / "ppe.py").read_text(encoding="utf-8") == "ENABLED = True\n"
