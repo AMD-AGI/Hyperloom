@@ -7,8 +7,9 @@ from kernelforge.finalize.delivery import (
     FINALIZE_JSON,
     FINALIZE_MD,
     HISTORY_BRANCH,
+    DeliveryOptions,
     FinalizeError,
     finalize_campaign,
 )
 
-__all__ = ["FINALIZE_JSON", "FINALIZE_MD", "HISTORY_BRANCH", "FinalizeError", "finalize_campaign"]
+__all__ = ["FINALIZE_JSON", "FINALIZE_MD", "HISTORY_BRANCH", "DeliveryOptions", "FinalizeError", "finalize_campaign"]

@@ -33,6 +33,13 @@ from kernelforge.cli.options import AgentRuntimeOptions, _agent_runtime_options,
     "one that already failed on the starting kernel is reported, not held against the review",
 )
 @click.option(
+    "--review-guide",
+    "guides",
+    multiple=True,
+    type=click.Path(exists=True, dir_okay=False, resolve_path=True),
+    help="A file of the kernel repository's own rules for its language, read by the review first. Repeatable",
+)
+@click.option(
     "--review-rounds",
     default=2,
     show_default=True,
@@ -58,6 +65,7 @@ def forge_finalize(
     workspace: str,
     author: str,
     lint_commands: tuple[str, ...],
+    guides: tuple[str, ...],
     review_rounds: int,
     pairs: int,
     bench_timeout_sec: int,
@@ -69,7 +77,7 @@ def forge_finalize(
     and finalize.md; the per-round commits stay on the forge-history branch.
     """
     from kernelforge.config import Config
-    from kernelforge.finalize import FINALIZE_MD, FinalizeError, finalize_campaign
+    from kernelforge.finalize import FINALIZE_MD, DeliveryOptions, FinalizeError, finalize_campaign
     from kernelforge.finalize.review import make_review_fn
     from kernelforge.loop.dashboard import publish_dashboard
     from kernelforge.loop.run_state import WorkspaceLockError
@@ -80,11 +88,14 @@ def forge_finalize(
             finalize_campaign(
                 workspace,
                 review_fn=make_review_fn(config),
-                author=author,
-                lint_commands=lint_commands,
-                review_rounds=review_rounds,
-                pairs=pairs,
-                timeout_sec=bench_timeout_sec,
+                options=DeliveryOptions(
+                    author=author,
+                    lint_commands=lint_commands,
+                    guides=guides,
+                    review_rounds=review_rounds,
+                    pairs=pairs,
+                    timeout_sec=bench_timeout_sec,
+                ),
             )
         )
     except WorkspaceLockError as error:

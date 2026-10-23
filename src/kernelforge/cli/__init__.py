@@ -9,6 +9,7 @@ import click
 
 from kernelforge.cli.forge_ablate_command import forge_ablate
 from kernelforge.cli.forge_dashboard_command import forge_dashboard
+from kernelforge.cli.forge_distill_command import forge_distill
 from kernelforge.cli.forge_finalize_command import forge_finalize
 from kernelforge.cli.forge_loop_command import forge_loop
 from kernelforge.cli.forge_rewrite_command import forge_rewrite
@@ -27,6 +28,7 @@ main.add_command(forge_say)
 main.add_command(forge_ablate)
 main.add_command(forge_dashboard)
 main.add_command(forge_finalize)
+main.add_command(forge_distill)
 
 
 def _register_kernel_rewrite_controller() -> None:

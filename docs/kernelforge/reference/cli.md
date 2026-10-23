@@ -335,6 +335,7 @@ best commit forge-loop recorded.
 | `--workspace <dir>` | required | Workspace of the campaign to deliver. |
 | `--author <'Name <email>'>` | the workspace's git identity | Author and committer of the delivered commit. |
 | `--lint <command>` | none | A check the sources must pass, run with their paths appended. Repeatable. |
+| `--review-guide <file>` | none | A file of the kernel repository's own rules for its language (for SIKL's FlyDSL kernels, its `flydsl-kernel-code-cleanup` skill), read by the review first. Repeatable. |
 | `--review-rounds <n>` | `2` | Review sessions at most. |
 | `--pairs <n>` | `3` | Pairs timing the reviewed kernel beside the best. |
 | `--bench-timeout-sec <s>` | `900` | Timeout of one benchmark or correctness run. |
@@ -352,6 +353,39 @@ best commit forge-loop recorded.
 kernelforge forge-finalize --workspace <ws> --author "Name <name@example.com>" \
   --lint "ruff check --no-fix" --lint "black --check"
 ```
+
+## forge-distill
+
+Proposes a patch to an optimization skill from what a finished campaign learned;
+it never edits the skill. Run it after `forge-ablate` and `forge-finalize`. An
+agent edits a copy of the skill from the campaign's evidence: the ladder's
+verdict on each round, each round's lesson record, the delivery review and the
+delivered change. It audits each candidate rather than copying it: general
+levers, mechanisms, pitfalls and dead ends only, not one shape's tuned
+configuration; nothing the skill already says; API and behaviour claims checked
+against the installed source, hardware claims against the ISA or compiled code;
+the campaign's own numbers marked "(field)" and given as an order of magnitude;
+no dates, campaign names or citations in the cards.
+
+It writes `knowledge_patch.diff` (applies with `git apply` from the skill's
+repository root), `distill.md` (each edit's evidence, and the candidates it
+rejected with the reason), `distill.json` and the edited copy under `skill/`.
+
+| Option | Default | Meaning |
+|:--|:--|:--|
+| `--workspace <dir>` | required | Workspace of the finished campaign. |
+| `--skill-dir <dir>` | required | The skill to propose edits to (a folder with `SKILL.md`). |
+| `--out <dir>` | `<workspace>/forge_experiments/knowledge_patch` | Where the patch, report and copy go. |
+| `--reference <dir>` | none | A source tree the curator may read to check claims. Repeatable. |
+| `--model <id>` | provider default | Model of the curator. |
+| `--agent-backend <name>` | `auto` | Registered local Agent provider of the curator. |
+| `--agent-cli <cmd>` | provider default | Provider executable path or command. |
+| `--agent-timeout-sec <s>` | `FORGE_AGENT_TIMEOUT_SEC` or 1800 | Timeout of the curator's session. |
+| `--agent-reasoning-effort <level>` | provider default | Reasoning effort of the curator. |
+| `--agent-sandbox-mode <mode>` | `bypass` | Provider sandbox mode. |
+| `--agent-fallback-provider <name>` | `claude` | Provider to fall back to, or `none`. |
+| `--agent-precheck` / `--no-agent-precheck` | on | Provider preflight and capability probe. |
+| `--agent-options-json <json>` | none | Provider extension options as a JSON object. |
 
 ## forge-rewrite-by-flydsl
 

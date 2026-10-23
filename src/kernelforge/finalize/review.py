@@ -59,6 +59,7 @@ class ReviewBrief:
     driver: str
     pricing: str
     lint_commands: tuple[str, ...]
+    guides: tuple[str, ...] = ()
     open_findings: tuple[str, ...] = ()
     round_number: int = 1
 
@@ -66,6 +67,12 @@ class ReviewBrief:
 def review_prompt(brief: ReviewBrief) -> str:
     files = " ".join(brief.files)
     lint = "\n".join(f"- `{command} {files}`" for command in brief.lint_commands) or "- none given"
+    guides = (
+        "\n\nThe kernel's repository has its own rules for this language; read them first and apply them to the "
+        "code the campaign added:\n" + "\n".join(f"- {path}" for path in brief.guides)
+        if brief.guides
+        else ""
+    )
     findings = (
         "\n\nThe previous round left these findings; fix them:\n"
         + "\n".join(f"- {line}" for line in brief.open_findings)
@@ -86,7 +93,7 @@ stays whatever its size; one with many lines for its gain may be simplified only
 4. Keep what the kernel computes: run `python {brief.driver}` to check correctness after your edits. When you are \
 done the kernel is checked again and timed beside HEAD; your edits are discarded if it is wrong or slower.
 
-{DELIVERY_RULES}
+{DELIVERY_RULES}{guides}
 
 Lint commands:
 {lint}{findings}
@@ -139,6 +146,7 @@ def make_review_fn(config: Config, *, usage=None) -> Callable[..., Awaitable[str
                         # A probe the review leaves is deleted afterwards; refusing it here would roll back the review.
                         allow_untracked=True,
                         ignored_untracked_globs=list(TOOL_OWNED_UNTRACKED_GLOBS),
+                        additional_directories=[str(Path(guide).parent) for guide in brief.guides],
                     ),
                     usage=usage,
                 ),

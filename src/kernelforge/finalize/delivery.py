@@ -18,6 +18,7 @@ import re
 import shlex
 import statistics
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 
 from kernelforge.evaluation.benchmark.paired import PairedMeasurement, measure_pairs
@@ -106,20 +107,22 @@ def _timing(measurement: PairedMeasurement, floor: float) -> dict:
     return record | {"mean": mean, "lower": lower, "upper": upper, "slower": upper < 1.0 - floor}
 
 
+@dataclass(frozen=True)
+class DeliveryOptions:
+    """How a delivery is reviewed, checked and committed."""
+
+    author: str = ""
+    lint_commands: tuple[str, ...] = ()
+    guides: tuple[str, ...] = ()
+    review_rounds: int = REVIEW_ROUNDS
+    pairs: int = PAIRED_PAIRS
+    timeout_sec: int = 900
+
+
 class _Delivery:
     """One delivery of one campaign; ``finalize.json`` says how far it got."""
 
-    def __init__(
-        self,
-        workspace: Path,
-        store: LoopStateStore,
-        *,
-        lint_commands: tuple[str, ...],
-        review_rounds: int,
-        pairs: int,
-        timeout_sec: int,
-        author: str,
-    ):
+    def __init__(self, workspace: Path, store: LoopStateStore, options: DeliveryOptions):
         self.workspace, self.root = workspace, store.root
         self.config = CampaignConfigStore(str(workspace)).load()
         self.state = store.load()
@@ -133,13 +136,7 @@ class _Delivery:
         self.driver_rel = driver.relative_to(workspace)
         self.files = tuple(self.config.source_files or [self.config.kernel_path])
         self.allowed = {*self.files, *self.config.commit_new_paths}
-        self.author = author
-        self.lint_commands, self.review_rounds, self.pairs, self.timeout = (
-            lint_commands,
-            review_rounds,
-            pairs,
-            timeout_sec,
-        )
+        self.options = options
         ablation = _read_json(self.root / ABLATION_JSON)
         self.ablation = ablation if ablation.get("best_commit") == self.best else {}
         # The best beside itself, timed by the ablation just before; without one, the fixed minimum margin.
@@ -190,7 +187,7 @@ class _Delivery:
 
     def _findings(self) -> tuple[list[str], dict[str, str]]:
         style = [str(finding) for finding in style_findings(self.workspace, self.base, list(self.files))]
-        failing = lint_failures(self.workspace, self.lint_commands, self.files)
+        failing = lint_failures(self.workspace, self.options.lint_commands, self.files)
         regressions = {command: output for command, output in failing.items() if command not in self.lint_at_base}
         return style, regressions
 
@@ -199,7 +196,7 @@ class _Delivery:
         style, lint = self._findings()
         self.report["before_review"] = {"style": style, "lint": lint, "lint_at_base": self.lint_at_base}
         rounds, open_findings = [], (*style, *(f"`{c}` fails: {o}" for c, o in lint.items()))
-        for number in range(1, self.review_rounds + 1):
+        for number in range(1, self.options.review_rounds + 1):
             brief = ReviewBrief(
                 base=self.base,
                 best=self.best,
@@ -207,7 +204,8 @@ class _Delivery:
                 files=self.files,
                 driver=str(self.driver_rel),
                 pricing=pricing_text(self.ablation),
-                lint_commands=self.lint_commands,
+                lint_commands=self.options.lint_commands,
+                guides=self.options.guides,
                 open_findings=open_findings,
                 round_number=number,
             )
@@ -236,8 +234,12 @@ class _Delivery:
         self.tree.ensure_at(self.best)
         reviewed = BenchRun(str(self.workspace / self.driver_rel), driver_args=[], repeat=1, cwd=str(self.workspace))
         best = BenchRun(str(self.tree.path / self.driver_rel), driver_args=[], repeat=1, cwd=str(self.tree.path))
-        timing = {"rng": random.Random(f"{self.best}:review"), "timeout_sec": self.timeout, "scored": self.scored}
-        measured = await measure_pairs(reviewed, best, pairs=self.pairs, **timing)
+        timing = {
+            "rng": random.Random(f"{self.best}:review"),
+            "timeout_sec": self.options.timeout_sec,
+            "scored": self.scored,
+        }
+        measured = await measure_pairs(reviewed, best, pairs=self.options.pairs, **timing)
         while not measured.failure and len(measured.pairs) < PAIRED_MAX_PAIRS:
             lower = paired_lower_bound(measured.scores)
             if lower is None or lower >= 1.0 - self.floor:
@@ -254,7 +256,7 @@ class _Delivery:
         validation = await run_validation_pipeline(
             driver_script=str(self.workspace / self.driver_rel),
             snr_threshold=self.config.snr_threshold,
-            timeout_per_stage=self.timeout,
+            timeout_per_stage=self.options.timeout_sec,
         )
         gates: dict = {"correctness": validation.summary(), "correct": validation.all_passed}
         if validation.all_passed:
@@ -295,11 +297,11 @@ class _Delivery:
         return "\n".join(lines) + "\n"
 
     def _commit_args(self) -> list[str]:
-        if not self.author:
+        if not self.options.author:
             return []
-        match = _IDENTITY.fullmatch(self.author)
+        match = _IDENTITY.fullmatch(self.options.author)
         if match is None:
-            raise FinalizeError(f"--author must read 'Name <email>', not {self.author!r}")
+            raise FinalizeError(f"--author must read 'Name <email>', not {self.options.author!r}")
         name, email = match.groups()
         return ["-c", f"user.name={name}", "-c", f"user.email={email}"]
 
@@ -329,7 +331,7 @@ class _Delivery:
     async def run(self, review_fn) -> dict:
         try:
             self.tree.ensure_at(self.base)
-            self.lint_at_base = lint_failures(self.tree.path, self.lint_commands, self.files)
+            self.lint_at_base = lint_failures(self.tree.path, self.options.lint_commands, self.files)
             await self._review(review_fn)
             await self._gate()
         finally:
@@ -339,16 +341,7 @@ class _Delivery:
         return self.report
 
 
-async def finalize_campaign(
-    workspace: str | Path,
-    *,
-    review_fn,
-    author: str = "",
-    lint_commands: tuple[str, ...] = (),
-    review_rounds: int = REVIEW_ROUNDS,
-    pairs: int = PAIRED_PAIRS,
-    timeout_sec: int = 900,
-) -> dict:
+async def finalize_campaign(workspace: str | Path, *, review_fn, options: DeliveryOptions = DeliveryOptions()) -> dict:
     """Review, check and squash the finished campaign in ``workspace``, holding its lock; return finalize.json.
 
     Raises ``WorkspaceLockError`` while forge-loop runs on it, ``FinalizeError`` when it cannot be delivered.
@@ -356,16 +349,7 @@ async def finalize_campaign(
     workspace = Path(workspace).resolve()
     store = LoopStateStore(str(workspace))
     with store.workspace_lock():
-        delivery = _Delivery(
-            workspace,
-            store,
-            lint_commands=tuple(lint_commands),
-            review_rounds=review_rounds,
-            pairs=pairs,
-            timeout_sec=timeout_sec,
-            author=author,
-        )
-        return await delivery.run(review_fn)
+        return await _Delivery(workspace, store, options).run(review_fn)
 
 
 def render_finalize_md(report: dict) -> str:

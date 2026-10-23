@@ -13,7 +13,7 @@ import pytest
 from click.testing import CliRunner
 
 from kernelforge.cli import main
-from kernelforge.finalize import HISTORY_BRANCH, FinalizeError, finalize_campaign
+from kernelforge.finalize import HISTORY_BRANCH, DeliveryOptions, FinalizeError, finalize_campaign
 from kernelforge.finalize.review import REPORT_HEADING, ReviewBrief, review_prompt
 from kernelforge.loop.dashboard import publish_dashboard
 from kernelforge.loop.campaign_config import CampaignConfigStore, CampaignInputs, create_campaign_config
@@ -106,7 +106,9 @@ async def test_the_review_is_kept_and_the_rounds_become_one_commit(tmp_path: Pat
     workspace, base, best = _campaign(tmp_path)
     briefs: list[ReviewBrief] = []
     report = await finalize_campaign(
-        workspace, review_fn=_reviewer([CLEAN], briefs), author="kyle-256 <Kyle.Zhao@amd.com>"
+        workspace,
+        review_fn=_reviewer([CLEAN], briefs),
+        options=DeliveryOptions(author="kyle-256 <Kyle.Zhao@amd.com>", guides=("/guides/cleanup.md",)),
     )
     assert report["gates"]["kept"] is True and report["gates"]["timing"]["mean"] == pytest.approx(1.0)
     assert report["review"]["rounds"][0]["stray"] == ["driver.py", "_probe.py"]
@@ -114,6 +116,7 @@ async def test_the_review_is_kept_and_the_rounds_become_one_commit(tmp_path: Pat
     # The review saw what the campaign left: notes over three lines, numbers in them, a debug print.
     assert any("[block]" in line for line in briefs[0].open_findings)
     assert any("[debug]" in line for line in briefs[0].open_findings)
+    assert briefs[0].guides == ("/guides/cleanup.md",) and "- /guides/cleanup.md" in review_prompt(briefs[0])
     assert _git(workspace, "rev-list", "--count", f"{base}..HEAD").strip() == "1"
     assert _git(workspace, "rev-parse", HISTORY_BRANCH).strip() == best
     assert _git(workspace, "log", "-1", "--format=%an <%ae>|%cn <%ce>").strip() == (
@@ -153,7 +156,9 @@ async def test_findings_left_by_a_round_go_to_the_next_and_a_failed_review_deliv
     briefs: list[ReviewBrief] = []
     still_long = HEADER + "# one\n# two\n# three\n# four\nSPEED = 0.8\nUNUSED_ARM = 1\n"
     report = await finalize_campaign(
-        workspace, review_fn=_reviewer([still_long, CLEAN], briefs), lint_commands=(f"python {lint}",)
+        workspace,
+        review_fn=_reviewer([still_long, CLEAN], briefs),
+        options=DeliveryOptions(lint_commands=(f"python {lint}",)),
     )
     assert len(briefs) == 2 and briefs[1].round_number == 2
     assert any("[block]" in line for line in briefs[1].open_findings)
