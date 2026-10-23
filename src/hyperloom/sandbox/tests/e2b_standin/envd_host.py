@@ -6,8 +6,8 @@
 ``envd`` is the process E2B puts inside a sandbox: it serves commands and files over HTTP. Here it runs as an ordinary
 root process of this machine, started under ``unshare`` and ``chroot`` so that
 
-- every sandbox sees only a tmpfs root of its own (``/work``, ``/in``, ``/out``, ``/tmp``) plus read-only binds of the
-  system directories and of whatever the template names, so one sandbox cannot read another's files;
+- every sandbox sees only a tmpfs root of its own (``/work``, ``/app/work``, ``/in``, ``/out``, ``/tmp``) plus read-only
+  binds of the system directories and of whatever the template names, so one sandbox cannot read another's files;
 - killing the process the stand-in started ends everything inside the sandbox, a ``setsid`` child included, because the
   pid namespace's init dies with it;
 - no mount ever reaches this machine's namespace, and nothing is written outside the stand-in's own directories.
@@ -35,7 +35,15 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-__all__ = ["ENVD_ENV", "EnvdHost", "RunningSandbox", "SandboxPlan", "interpreter_binds", "unavailable_reason"]
+__all__ = [
+    "ENVD_ENV",
+    "EnvdHost",
+    "RunningSandbox",
+    "SandboxPlan",
+    "interpreter_binds",
+    "unavailable_reason",
+    "without_network",
+]
 
 #: Names the environment variable that points at an envd binary (``packages/envd`` of e2b-dev/infra built with
 #: ``GOWORK=off CGO_ENABLED=0 go build``, or an official release binary).
@@ -46,7 +54,7 @@ _SYSTEM_DIRS = ("/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32")
 #: Nothing else of this machine's /etc (keys, shadow, credentials) or /dev is shown.
 _ETC_FILES = ("passwd", "group", "nsswitch.conf", "hosts", "resolv.conf", "ld.so.cache", "ld.so.conf", "ld.so.conf.d")
 _DEVICES = ("null", "zero", "full", "random", "urandom", "tty")
-_EMPTY_DIRS = ("proc", "dev", "dev/shm", "etc", "tmp", "run", "work", "in", "out", "root", "var/tmp")
+_EMPTY_DIRS = ("proc", "dev", "dev/shm", "etc", "tmp", "run", "work", "app/work", "in", "out", "root", "var/tmp")
 _PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 _MAX_LIFETIME_SEC = 7200
 _HEALTH_WAIT_SEC = 20.0
@@ -81,6 +89,16 @@ def interpreter_binds() -> tuple[str, ...]:
         path = os.path.normpath(os.path.join(os.path.dirname(path), os.readlink(path)))
         binds.append(os.path.dirname(path))
     return tuple(dict.fromkeys(binds))
+
+
+def without_network(command: Sequence[str]) -> tuple[str, ...]:
+    """``command`` run in a network namespace of its own: no interface, not even a loopback that is up, so nothing it
+    starts can open a connection.
+
+    The sandbox's ``envd`` stays in the namespace it was started in, so the data plane keeps working. A template whose
+    sandboxes have no egress (the ``measurement`` role's) wraps its start command in this.
+    """
+    return ("unshare", "--net", "--", *command)
 
 
 @dataclass(frozen=True)

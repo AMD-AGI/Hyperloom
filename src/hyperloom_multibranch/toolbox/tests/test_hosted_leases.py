@@ -150,7 +150,7 @@ async def test_the_lease_is_a_dev_sandbox_of_the_sessions_cards(make: Make) -> N
     hosted = make(tp=4)
     lease = await hosted.leases.lease("b02", 4)
     assert isinstance(lease, BranchLease)
-    assert (lease.branch_id, lease.gpu_ids, lease.root, dict(lease.env)) == ("b02", (0, 1, 2, 3), Path("/work"), {})
+    assert (lease.branch_id, lease.gpu_ids, lease.root, dict(lease.env)) == ("b02", (0, 1, 2, 3), Path("/app/work"), {})
     assert lease.template == "run-dev-g4" and lease.remaining_cards == 4
     info = lease.sandbox.info()
     assert info.template == "run-dev-g4"
@@ -160,12 +160,18 @@ async def test_the_lease_is_a_dev_sandbox_of_the_sessions_cards(make: Make) -> N
     assert hosted.provider.creates[0][0] == "run-dev-g4"
 
 
+def test_the_default_working_directory_of_a_lease_is_the_one_under_the_envd_file_root() -> None:
+    assert LeaseTuning().workdir == "/app/work"
+
+
 async def test_the_lease_hands_over_a_sandbox_that_runs_commands_and_holds_files(make: Make) -> None:
     lease = await make().leases.lease("b02", 2)
     assert lease.sandbox.run("echo hello").stdout == "hello\n"
     lease.sandbox.write_file(f"{lease.root}/note.txt", b"data")
     assert lease.sandbox.read_file(f"{lease.root}/note.txt") == b"data"
     assert lease.sandbox.list_dir(str(lease.root)) == ["note.txt"]
+    # The file API and the processes agree on the working directory: a process sees the file the API wrote.
+    assert lease.sandbox.run(f"cat {lease.root}/note.txt").stdout == "data"
 
 
 @pytest.mark.parametrize("asked", [0, -1, 1, 3, 4])

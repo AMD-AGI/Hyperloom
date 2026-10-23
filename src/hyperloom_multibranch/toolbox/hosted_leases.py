@@ -126,14 +126,15 @@ class LeaseTuning:
     """How long a lease's sandbox lives and how long and how fast a refused create is repeated.
 
     ``lifetime_sec`` is cut to the grant's ``max_runtime_sec``; ``workdir`` is the directory of the sandbox a branch
-    works in.
+    works in. A ``dev`` sandbox's envd serves files from ``/app``, so ``/app/work`` is where its file API and its
+    processes see the same files.
     """
 
     lifetime_sec: int = DEFAULT_LEASE_LIFETIME_SEC
     wait_sec: float = LEASE_WAIT_SECONDS
     first_backoff_sec: float = 0.5
     max_backoff_sec: float = 10.0
-    workdir: str = "/work"
+    workdir: str = "/app/work"
 
 
 @dataclass(frozen=True)
