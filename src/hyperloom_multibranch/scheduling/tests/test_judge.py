@@ -27,6 +27,7 @@ from hyperloom_multibranch.notebook import STALL_TESTS
 from hyperloom_multibranch.notebook.rsi.calibration import PolicyChoice
 from hyperloom_multibranch.notebook.rsi.frontier import FRONTIER_V1_LABEL, SETTLED_TESTS, FrontierPolicy
 from hyperloom_multibranch.notebook.tests.factories import intent, request, result
+from hyperloom_multibranch.scheduling.branches import REPAIR_PROTECTED_SECONDS
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.events import MB_BIG_GAIN_BARS, MB_BOTTLENECK_SHIFT_PP, EventKind, SessionEvent
 from hyperloom_multibranch.scheduling.judge import (
@@ -699,7 +700,7 @@ def test_a_specialist_branch_keeps_its_grace_until_enough_of_its_explore_tests_e
     done = [_ended(branch, n) for branch in ("b02", "b04", "b05") for n in range(1, SETTLED_TESTS)]
     integration = [_ended(INTEGRATION_BRANCH, n) for n in range(SETTLED_TESTS - 1)]
 
-    assert held_branches(roster, (), [*early, *not_ended, *failed, *done, *integration], {}) == {
+    assert held_branches(roster, (), [*early, *not_ended, *failed, *done, *integration], {}, NOW) == {
         "b01": HoldReason.GRACE,
         "b05": HoldReason.GRACE,
     }
@@ -709,22 +710,41 @@ def test_a_specialist_branch_keeps_its_grace_until_enough_of_its_explore_tests_e
 def test_a_branch_whose_specialist_is_out_of_service_has_no_grace(state: dict[str, bool]) -> None:
     status = replace(SpecialistStatus(running=False, crashes=3, lost=0, gave_up=False, judge_failed=False), **state)
 
-    assert held_branches(ROSTER, (), [], {"b01": status}) == {"b02": HoldReason.GRACE}
+    assert held_branches(ROSTER, (), [], {"b01": status}, NOW) == {"b02": HoldReason.GRACE}
 
 
-def test_every_specialist_branch_row_shows_its_grace_and_the_prompt_explains_it() -> None:
+def test_a_held_branch_row_names_why_it_is_held_and_the_prompt_explains_each_reason() -> None:
     view = _view(
-        roster=(*ROSTER, _entry("b04", origin=BranchOrigin.USER)),
-        held={"b01": HoldReason.GRACE, "b04": HoldReason.GRACE},
+        roster=(*ROSTER, _entry("b04", origin=BranchOrigin.REPAIR)),
+        held={"b01": HoldReason.GRACE, "b04": HoldReason.REPAIR},
     )
-    rows = {row["branch"]: row.get("grace") for row in _state(view)["branches"]}
+    rows = {row["branch"]: row.get("held") for row in _state(view)["branches"]}
 
-    assert rows == {INTEGRATION_BRANCH: None, "b01": True, "b02": False, "b03": False, "b04": True}
+    assert rows == {INTEGRATION_BRANCH: None, "b01": "grace", "b02": None, "b03": None, "b04": "repair"}
     prose = " ".join(JUDGE_SYSTEM_PROMPT.split())
     assert (
-        f"Every specialist branch, of any origin, has a grace: while its grace is true, until {SETTLED_TESTS} of its "
-        "explore tests ended with a result, a failed one included, a stop or a lower K you give it is not applied"
+        f"grace: a specialist branch until {SETTLED_TESTS} of its explore tests ended with a result, a failed one "
+        f"included. repair: a branch opened to fix a blocked candidate, for {REPAIR_PROTECTED_SECONDS / 60:g} minutes "
+        "from its open"
     ) in prose
+
+
+def test_a_repair_branch_is_held_for_its_protected_period_whatever_its_tests_read() -> None:
+    """The judge's grace runs out after a few tests; a numerics fix is worth more than the floor it would score at."""
+
+    roster = (_entry("b01", origin=BranchOrigin.REPAIR), _entry("b02"))
+    settled = [_ended(branch, n) for branch in ("b01", "b02") for n in range(SETTLED_TESTS)]
+    gave_up = SpecialistStatus(running=False, crashes=0, lost=0, gave_up=True, judge_failed=False)
+
+    assert held_branches(roster, (), settled, {}, REPAIR_PROTECTED_SECONDS - 1) == {"b01": HoldReason.REPAIR}
+    assert held_branches(roster, (), settled, {}, REPAIR_PROTECTED_SECONDS) == {}
+    assert held_branches(roster, (), settled, {"b01": gave_up}, 0.0) == {}
+
+
+def test_a_repair_branch_still_reads_as_held_by_its_grace_while_it_has_one() -> None:
+    roster = (_entry("b01", origin=BranchOrigin.REPAIR),)
+
+    assert held_branches(roster, (), [], {}, 0.0) == {"b01": HoldReason.GRACE}
 
 
 CANDIDATE = PendingCandidate("b01-r7", "b01-r7-confirm", "c-b01", METRIC, 116.6, 6.04321)
@@ -743,11 +763,11 @@ def test_a_branch_with_a_pending_candidate_is_held_until_its_confirm_is_judged_u
     gave_up = replace(failed, gave_up=True, judge_failed=False)
     settled = [_ended(branch, n) for branch in ("b01", "b02", "b03") for n in range(SETTLED_TESTS)]
 
-    assert held_branches(roster, progress, settled, {}) == {
+    assert held_branches(roster, progress, settled, {}, NOW) == {
         "b01": HoldReason.PENDING_CONFIRM,
         "b04": HoldReason.GRACE,
     }
-    assert held_branches(roster, progress, settled, {"b01": failed, "b04": gave_up}) == {
+    assert held_branches(roster, progress, settled, {"b01": failed, "b04": gave_up}, NOW) == {
         "b04": HoldReason.PENDING_CONFIRM
     }
 

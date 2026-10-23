@@ -74,6 +74,9 @@ STARTED_K = 1
 #: the session owner's decision (board #54); a repair that waited in the fork desk's queue counts from leaving it.
 REPAIR_BRANCH_SECONDS = 2 * 3600.0
 REPAIR_TIME_LIMIT_REASON = f"a repair branch runs at most {REPAIR_BRANCH_SECONDS / 3600:g} hours"
+#: Clock seconds from its entry into the roster for which the judge may neither stop a repair branch nor lower its K:
+#: a kernel numerics fix takes longer to show than the first few tests a new branch is scored on.
+REPAIR_PROTECTED_SECONDS = 90 * 60.0
 
 
 @dataclass(frozen=True)

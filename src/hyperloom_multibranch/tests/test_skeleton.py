@@ -1649,12 +1649,14 @@ async def test_a_user_branch_opens_first_at_the_root_and_the_judge_neither_stops
     assert all(len(runs) == 1 and runs <= set(DIRECTIONS) for runs in directions.values())
     opening, steering, *_ = [_judge_state(prompt) for prompt in _judge_prompts(stage)]
     assert opening["free_branch_slots"] == 2
-    assert [(row["origin"], row["grace"]) for row in opening["branches"] if row["branch"] == "b01"] == [("user", True)]
-    assert {row["branch"]: row.get("grace") for row in steering["branches"]} == {
+    assert [(row["origin"], row["held"]) for row in opening["branches"] if row["branch"] == "b01"] == [
+        ("user", HoldReason.GRACE.value)
+    ]
+    assert {row["branch"]: row.get("held") for row in steering["branches"]} == {
         INTEGRATION_BRANCH: None,
-        "b01": True,
-        "b02": True,
-        "b03": True,
+        "b01": HoldReason.GRACE.value,
+        "b02": HoldReason.GRACE.value,
+        "b03": HoldReason.GRACE.value,
     }
     decisions = _decisions(stage)
     [opened] = [row for row in decisions if row["kind"] == "open" and row["branch"] == "b01"]
