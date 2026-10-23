@@ -853,6 +853,7 @@ async def test_a_session_copies_the_reference_material_it_was_given_and_its_mani
     assert json.loads(stage.layout.manifest.read_text())["settings"]["references"] == [
         {"name": "geak-tuning", "path": str(knowledge), "revision": "c" * 40}
     ]
+    assert stage.setup.references == {"geak-tuning": stage.layout.reference / "geak-tuning"}
 
 
 async def test_a_pinned_scorer_is_never_a_challenger_session(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

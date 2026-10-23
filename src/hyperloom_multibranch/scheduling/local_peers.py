@@ -466,7 +466,7 @@ def model_backed_sessions(command: AgentCommand) -> SpecialistSessions:
         layout, workload = wiring.setup.layout, wiring.setup.workload
         agent = AgentSetup(
             command=command,
-            role=role_prompt(_specialist_role(workload)),
+            role=role_prompt(_specialist_role(workload), references=wiring.setup.references),
             env=build_specialist_env(),
             runner=LocalAgentRunner(
                 session_dir=layout.logs, liveness=Liveness(lost_after_seconds=SPECIALIST_LOST_AFTER_S)

@@ -208,7 +208,15 @@ class Session:
         desk = ForkDesk(self._roster, self._decisions, clock)
         blobs = LocalBlobStore(layout.blobs)
         peers = peer_factory(
-            PeerSetup(layout, settings.workload, desk, processes, blobs, services.critic(self._notebook))
+            PeerSetup(
+                layout,
+                settings.workload,
+                desk,
+                processes,
+                blobs,
+                services.critic(self._notebook),
+                {source.name: layout.reference / source.name for source in settings.references},
+            )
         )
         context = SchedulerContext(
             layout, self._roster, self._notebook, self._decisions, processes, clock, desk, peers.reserved
