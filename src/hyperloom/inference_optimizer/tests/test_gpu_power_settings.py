@@ -526,6 +526,90 @@ class TestCli:
         assert exc.value.code == 2
 
 
+class TestSharedNpmNode:
+    """With NPM enabled, the session must have every card on the node, or be allowed to share it on this run."""
+
+    def _resume(self, monkeypatch, mask, *, allow=False, npm="ENABLED", archived=None, hip=None):
+        from types import SimpleNamespace
+
+        from hyperloom.inference_optimizer.cli import gpu_power_apply
+        from hyperloom.inference_optimizer.cli.bootstrap import resume_gpu_power_settings
+
+        for name, value in (("ROCR_VISIBLE_DEVICES", mask), ("HIP_VISIBLE_DEVICES", hip)):
+            if value is None:
+                monkeypatch.delenv(name, raising=False)
+            else:
+                monkeypatch.setenv(name, value)
+        monkeypatch.setattr(gpu_power_settings, "_read_gpu_kfd_nodes", lambda: dict(_MI355X_NODES))
+        monkeypatch.setattr(gpu_power_apply, "warn_about_orphaned_cards", lambda: None)
+        cards = {gpu: {"power_cap_w": 1400.0, "perf_level": "auto"} for gpu in _MI355X_NODES}
+        monkeypatch.setattr(gpu_power_settings, "read_gpu_power_settings", lambda: cards)
+        reader = _no_node_command if npm is None else _node_reader(npm, 8000)
+        monkeypatch.setattr(gpu_power_settings, "read_node_power_settings", reader)
+        state = SimpleNamespace(gpu_power_settings=archived or {}, nodes=1, session_id="s")
+        return resume_gpu_power_settings(SimpleNamespace(allow_shared_npm_node=allow, nodes=1), state)
+
+    @pytest.mark.parametrize("mask", ["0,1,2,3,4,5,6,7", None], ids=["whole-mask", "no-mask"])
+    def test_a_session_with_the_whole_npm_node_runs(self, monkeypatch, mask):
+        """No mask counts as every card, as everywhere else, whatever the session's tensor parallelism."""
+        record, error = self._resume(monkeypatch, mask)
+        assert (error, "shared_npm_node" in record) == ("", False)
+
+    def test_part_of_an_npm_node_refuses_naming_the_cards_left_out_in_amd_smi_order(self, monkeypatch):
+        """ROCm cards 0 and 4 are amd-smi 3 and 7 on this board, so those two are the ones the session has."""
+        _, error = self._resume(monkeypatch, "0,4")
+        assert error.startswith(
+            "node power management is enabled and GPU(s) 0, 1, 2, 4, 5, 6 are outside this session: "
+        )
+        assert "pass --allow-shared-npm-node (on every launch and resume)" in error
+
+    @pytest.mark.parametrize("npm", ["DISABLED", "", None], ids=["npm-disabled", "npm-unread", "no-npm"])
+    def test_part_of_a_node_without_npm_runs(self, monkeypatch, npm):
+        assert self._resume(monkeypatch, "0", npm=npm)[1] == ""
+
+    def test_a_hip_mask_narrows_the_session_further(self, monkeypatch):
+        """HIP indexes into what ROCR left: ROCm 0 and 4, then HIP 1, leaves only amd-smi 7."""
+        _, error = self._resume(monkeypatch, "0,4", hip="1")
+        assert "GPU(s) 0, 1, 2, 3, 4, 5, 6 are outside this session" in error
+
+    def test_the_permission_measures_anyway_and_records_the_cards_left_out(self, monkeypatch):
+        record, error = self._resume(monkeypatch, "0,4", allow=True)
+        assert (error, record["shared_npm_node"]) == ("", [0, 1, 2, 4, 5, 6])
+
+    def test_a_mask_whose_cards_cannot_be_named_refuses_unless_allowed(self, monkeypatch):
+        _, error = self._resume(monkeypatch, "GPU-745a0e162570d044")
+        assert error.startswith("node power management is enabled and the cards this session uses cannot be named")
+        record, error = self._resume(monkeypatch, "GPU-745a0e162570d044", allow=True)
+        assert (error, record["shared_npm_node"]) == ("", None)
+
+    def test_a_resume_does_not_keep_the_permission(self, monkeypatch):
+        _, error = self._resume(monkeypatch, "0,1,2,3", archived={"shared_npm_node": [4, 5, 6, 7]})
+        assert "GPU(s) 4, 5, 6, 7 are outside this session" in error
+
+    def test_a_launch_passes_the_permission(self, monkeypatch):
+        from types import SimpleNamespace
+
+        from hyperloom.inference_optimizer.cli import bootstrap
+
+        seen: list[bool] = []
+        monkeypatch.delenv("ROCR_VISIBLE_DEVICES", raising=False)
+        monkeypatch.delenv("HIP_VISIBLE_DEVICES", raising=False)
+        monkeypatch.setattr(
+            bootstrap,
+            "_established_gpu_power_settings",
+            lambda declared, **kw: seen.append(kw["allow_shared_npm_node"]) or ({}, ""),
+        )
+        bootstrap.resolve_launch_gpu_power(SimpleNamespace(allow_shared_npm_node=True), nodes=1, owner="s")
+        assert seen == [True]
+
+    def test_the_flag_defaults_off(self):
+        from hyperloom.inference_optimizer.cli.parser import _build_parser
+
+        argv = ["optimize", "--model", "m", "--framework", "vllm"]
+        assert _build_parser().parse_args(argv).allow_shared_npm_node is False
+        assert _build_parser().parse_args([*argv, "--allow-shared-npm-node"]).allow_shared_npm_node is True
+
+
 def test_a_resume_re_asserts_the_archived_npm_declaration(monkeypatch):
     """A resume that omits the flag still holds the node to the state the session was measured under."""
     from types import SimpleNamespace

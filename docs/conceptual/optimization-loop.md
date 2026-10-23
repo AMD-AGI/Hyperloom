@@ -311,6 +311,20 @@ BMC, and `--apply-gpu-power-settings` never changes them. The enforced limit
 can sit below the one the BMC was asked for, since firmware clamps it to the
 node's maximum, so assert the value `amd-smi` reports.
 
+Because NPM moves power between cards, a session on part of an NPM-enabled node
+is measured against whatever runs on the rest of it. So when `amd-smi` reports
+NPM enabled, a launch or resume whose visible-device mask leaves any of the
+node's GPUs out is refused, naming the cards left out, whether or not they are
+busy at that moment: an idle neighbour at launch says nothing about the hours
+after it. A mask that is set but whose cards cannot be named is refused the same
+way. The check is on the mask: a session with no mask counts as having every
+card, as everywhere else, even if its tensor parallelism uses fewer.
+`--allow-shared-npm-node` measures anyway and records the cards left out as a
+list of amd-smi indices under `shared_npm_node` (`null` when the mask's cards
+cannot be named). Like `--apply-gpu-power-settings`, the permission is not kept:
+pass it again on resume. A node with NPM disabled, or without it, and a
+multi-node session are not checked.
+
 ### Applying the power settings (opt-in)
 
 `--apply-gpu-power-settings` permits the session to set the declared

@@ -1025,7 +1025,7 @@ async def test_orchestration_prompt_has_no_execution_checklist(session_dir):
         c.shared_state.last_profile_trace = ""
         c.shared_state.save(session_dir)
 
-        prompt = await c.conversation.compose_prompt("orchestration")
+        prompt = (await c.conversation.compose_prompt("orchestration")).text
 
         assert "Execution checklist" not in prompt
     finally:

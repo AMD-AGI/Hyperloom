@@ -93,7 +93,7 @@ automatic supervision or recovery loop:
 
 | Role | When it runs | How it keeps the run on-goal |
 |------|----------------|------------------------------|
-| **Orchestration** | Every tick | Continuous planner; mission and progress are re-seeded from the state file, not from the transcript |
+| **Orchestration** | Every tick; in KERNEL_AGENT only when kernel progress changes, or after 15 minutes without a turn | Continuous planner; mission and progress are re-seeded from the state file, not from the transcript |
 | **Critic** | Every keep-or-revert | Rules on whether a change served the mission; the learning record is written from that verdict |
 | **Specialist** | Authoring only | Ephemeral. Returns a reviewed diff, not a decision |
 

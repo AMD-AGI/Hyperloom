@@ -33,6 +33,7 @@ __all__ = [
     "DeclaredPowerSettings",
     "NODE_POWER_LIMIT_W",
     "NPM",
+    "NPM_ENABLED",
     "NPM_STATES",
     "PERF_LEVEL",
     "PERF_LEVELS",
@@ -43,6 +44,7 @@ __all__ = [
     "declared_setting_problems",
     "gfx_clock_limits",
     "gpu_power_sampling_unavailable",
+    "gpus_outside_session",
     "reading_matches",
     "single_clock_limit",
     "normalize_perf_level",
@@ -74,7 +76,8 @@ PERF_LEVEL_MANUAL = "manual"
 NPM = "npm"
 NODE_POWER_LIMIT_W = "node_power_limit_w"
 #: The NPM states ``amd-smi node -p`` reports, lowercased.
-NPM_STATES = ("enabled", "disabled")
+NPM_ENABLED = "enabled"
+NPM_STATES = (NPM_ENABLED, "disabled")
 _UNREADABLE = "unreadable"
 _WATTS = (POWER_CAP_W, NODE_POWER_LIMIT_W)
 _READ_TIMEOUT_SEC = 30.0
@@ -150,12 +153,32 @@ def visible_gpu_indices(env: Mapping[str, str] | None = None) -> set[int] | None
         GpuPowerSettingsError: a mask is set but empty, not numeric, repeats a card or names one that does not exist,
             or amd-smi cannot say which KFD node each card is.
     """
-    source = os.environ if env is None else env
-    rocr = _first_mask(source, _ROCR_MASKS)
-    hip = _first_mask(source, _HIP_MASKS)
+    rocr, hip = _masks(env)
     if rocr is None and hip is None:
         return None
-    by_node = [gpu for gpu, _ in sorted(_read_gpu_kfd_nodes().items(), key=lambda item: item[1])]
+    return _masked_cards(_read_gpu_kfd_nodes(), rocr, hip)
+
+
+def gpus_outside_session(env: Mapping[str, str] | None = None) -> list[int]:
+    """The amd-smi indices of the node's cards outside the session's visible-device masks; empty with no mask.
+
+    Raises:
+        GpuPowerSettingsError: as :func:`visible_gpu_indices`.
+    """
+    rocr, hip = _masks(env)
+    if rocr is None and hip is None:
+        return []
+    nodes = _read_gpu_kfd_nodes()
+    return sorted(set(nodes) - _masked_cards(nodes, rocr, hip))
+
+
+def _masks(env: Mapping[str, str] | None) -> tuple[list[int] | None, list[int] | None]:
+    source = os.environ if env is None else env
+    return _first_mask(source, _ROCR_MASKS), _first_mask(source, _HIP_MASKS)
+
+
+def _masked_cards(nodes: Mapping[int, int], rocr: list[int] | None, hip: list[int] | None) -> set[int]:
+    by_node = [gpu for gpu, _ in sorted(nodes.items(), key=lambda item: item[1])]
     visible = list(range(len(by_node))) if rocr is None else rocr
     if hip is not None:
         if any(index >= len(visible) for index in hip):
