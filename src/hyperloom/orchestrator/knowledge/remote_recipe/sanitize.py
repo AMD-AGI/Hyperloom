@@ -173,7 +173,7 @@ def sanitize_publish_server_args(value: str) -> str:
     The launch guards size ``INJECTED_LAUNCH_FLAGS`` for the run they launch and add them again to any later run that
     leaves them out, so a shared recipe that kept them would hand one run's context cap to every replay.
     """
-    from hyperloom.inference_optimizer.grid_server_args import INJECTED_LAUNCH_FLAGS, _reserialize_json_blobs
+    from hyperloom.inference_optimizer.grid_server_args import INJECTED_LAUNCH_FLAGS
 
     try:
         tokens = shlex.split(str(value or ""))
@@ -207,6 +207,8 @@ def sanitize_publish_server_args(value: str) -> str:
             "extra_server_args contains a whitespace-bearing value unsupported "
             "by Magpie's unquoted environment expansion"
         )
+    from hyperloom.inference_optimizer.grid_server_args import _reserialize_json_blobs
+
     return _reserialize_json_blobs(" ".join(safe))
 
 
