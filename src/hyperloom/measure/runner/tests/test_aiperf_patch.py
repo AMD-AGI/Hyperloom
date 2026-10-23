@@ -155,7 +155,8 @@ def _drive(python: str, client: Path, artifacts: Path) -> dict[str, dict]:
     )
     assert done.returncode == 0, done.stderr[-2000:]
     lines = dict(line.split("\t", 1) for line in done.stdout.splitlines() if "\t" in line)
-    assert Path(json.loads(lines.pop("module"))).is_relative_to(client), "the driver ran another copy of the client"
+    module = Path(json.loads(lines.pop("module")))
+    assert module.is_relative_to(client), "the driver ran another copy of the client"
     return {name: json.loads(raw) for name, raw in lines.items()}
 
 
