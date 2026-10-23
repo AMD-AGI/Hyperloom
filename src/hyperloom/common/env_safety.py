@@ -88,6 +88,13 @@ BENCHMARK_SECRET_ENV_NAMES: frozenset[str] = frozenset(
         "LLM_PROXY_API_KEY",
         "OPENAI_API_KEY",
         "OPENAI_CUSTOM_HEADERS",
+        # Hosted measurement: a sandbox API key per role, the application's MCP token and the path of a sealed
+        # runner's signing key. Only a name listed here is removed from a child process's environment.
+        "HYPERLOOM_MCP_TOKEN",
+        "HYPERLOOM_SANDBOX_KEY_DEV",
+        "HYPERLOOM_SANDBOX_KEY_MEASUREMENT",
+        "HYPERLOOM_SANDBOX_KEY_SUBRUN",
+        "HYPERLOOM_SIGNING_KEY_FILE",
         "AWS_ACCESS_KEY_ID",
         "AWS_SECRET_ACCESS_KEY",
         "AWS_SESSION_TOKEN",

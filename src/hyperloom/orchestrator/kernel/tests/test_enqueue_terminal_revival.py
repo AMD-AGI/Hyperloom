@@ -34,7 +34,6 @@ def _patch(kernel: str = "attn", *, micro: float = 1.0) -> SimpleNamespace:
 def _state() -> SimpleNamespace:
     return SimpleNamespace(
         pending_kernel_integrations={},
-        kernel_opt_task_attempts={},
         kernel_integrate_attempts={},
         optimization_stack=[],
         rejected_kernel_ids=[],
@@ -45,7 +44,7 @@ def _state() -> SimpleNamespace:
 def _settled(status: str, *, kernel: str = "attn", micro: float = 1.0) -> tuple[Any, str]:
     """A queue holding one sibling that already reached ``status``."""
     state = _state()
-    record = kd.enqueue_nominated_patch(state, patch=_patch(kernel, micro=micro), lane="fusion")
+    record = kd.enqueue_nominated_patch(state, patch=_patch(kernel, micro=micro))
     assert record is not None
     record["status"] = status
     return state, str(record["integration_id"])
@@ -62,7 +61,7 @@ def test_the_terminal_statuses_split_into_verdicts_and_one_fault() -> None:
 @pytest.mark.parametrize("verdict", _VERDICTS)
 def test_a_settled_verdict_is_not_revived_to_pending(verdict: str) -> None:
     state, integration_id = _settled(verdict)
-    kd.enqueue_nominated_patch(state, patch=_patch(micro=9.0), lane="fusion")
+    kd.enqueue_nominated_patch(state, patch=_patch(micro=9.0))
     assert state.pending_kernel_integrations[integration_id]["status"] == verdict
 
 
@@ -70,7 +69,7 @@ def test_a_settled_verdict_is_not_revived_to_pending(verdict: str) -> None:
 def test_a_settled_verdict_keeps_the_micro_it_was_judged_on(verdict: str) -> None:
     """evict_terminal ranks post-mortem retention by micro; a settled record's number is evidence for its verdict, not a slot for a fresh measurement."""
     state, integration_id = _settled(verdict, micro=1.2)
-    kd.enqueue_nominated_patch(state, patch=_patch(micro=9.0), lane="fusion")
+    kd.enqueue_nominated_patch(state, patch=_patch(micro=9.0))
     assert state.pending_kernel_integrations[integration_id]["micro_speedup"] == 1.2
 
 
@@ -78,14 +77,14 @@ def test_a_settled_verdict_keeps_the_micro_it_was_judged_on(verdict: str) -> Non
 def test_re_offering_a_settled_verdict_queues_nothing(verdict: str) -> None:
     """Both callers count a non-None return as a sibling queued for dispatch."""
     state, _ = _settled(verdict)
-    assert kd.enqueue_nominated_patch(state, patch=_patch(micro=9.0), lane="fusion") is None
+    assert kd.enqueue_nominated_patch(state, patch=_patch(micro=9.0)) is None
 
 
 @pytest.mark.parametrize("verdict", _VERDICTS)
 def test_re_offering_a_settled_verdict_is_logged(verdict: str, caplog: Any) -> None:
     state, _ = _settled(verdict)
     with caplog.at_level("INFO", logger=kd.log.name):
-        kd.enqueue_nominated_patch(state, patch=_patch(micro=9.0), lane="fusion")
+        kd.enqueue_nominated_patch(state, patch=_patch(micro=9.0))
     assert verdict in caplog.text and "attn_kernel" in caplog.text
 
 
@@ -95,8 +94,8 @@ def test_a_re_offered_verdict_survives_ten_cycles_as_a_verdict(verdict: str, mon
     monkeypatch.setenv("HL_KERNEL_PATCH_BUDGET", "1")
     state, integration_id = _settled(verdict, micro=1.0)
     for _ in range(10):
-        kd._ensure_kernel_task_state(state)
-        kd.enqueue_nominated_patch(state, patch=_patch(micro=9.0), lane="fusion")
+        kd._evict_settled_integrations(state)
+        kd.enqueue_nominated_patch(state, patch=_patch(micro=9.0))
     assert sorted(state.pending_kernel_integrations) == [integration_id]
     assert state.pending_kernel_integrations[integration_id]["status"] == verdict
 
@@ -107,16 +106,16 @@ def test_a_re_offered_verdict_is_still_reaped_once_over_the_cap(verdict: str, mo
     monkeypatch.setenv("HL_KERNEL_PATCH_BUDGET", "1")
     state, integration_id = _settled(verdict, micro=1.0)
     for _ in range(10):
-        kd._ensure_kernel_task_state(state)
-        kd.enqueue_nominated_patch(state, patch=_patch(micro=9.0), lane="fusion")
+        kd._evict_settled_integrations(state)
+        kd.enqueue_nominated_patch(state, patch=_patch(micro=9.0))
     # budget=1 * TERMINAL_RETENTION_MULTIPLE=2 => two stronger terminals push the re-offered record past the
     # post-mortem cap, and it is the weakest.
     survivors = []
     for filler in ("gemm", "norm"):
-        strong = kd.enqueue_nominated_patch(state, patch=_patch(filler, micro=8.0), lane="fusion")
+        strong = kd.enqueue_nominated_patch(state, patch=_patch(filler, micro=8.0))
         strong["status"] = "integrated"
         survivors.append(str(strong["integration_id"]))
-    kd._ensure_kernel_task_state(state)
+    kd._evict_settled_integrations(state)
     assert sorted(state.pending_kernel_integrations) == sorted(survivors)
     assert integration_id not in survivors
 
@@ -125,7 +124,7 @@ def test_a_re_offered_verdict_is_still_reaped_once_over_the_cap(verdict: str, mo
 def test_a_dispatch_failure_is_revived_for_another_attempt() -> None:
     """The drain crashed, so the patch never got a verdict; retrying is the point."""
     state, integration_id = _settled("dispatch_failed")
-    revived = kd.enqueue_nominated_patch(state, patch=_patch(micro=9.0), lane="fusion")
+    revived = kd.enqueue_nominated_patch(state, patch=_patch(micro=9.0))
     assert revived is not None
     assert state.pending_kernel_integrations[integration_id]["status"] == "pending"
     assert state.pending_kernel_integrations[integration_id]["micro_speedup"] == 9.0
@@ -133,7 +132,7 @@ def test_a_dispatch_failure_is_revived_for_another_attempt() -> None:
 
 def test_a_revived_dispatch_failure_reaches_the_drain_again() -> None:
     state, integration_id = _settled("dispatch_failed")
-    kd.enqueue_nominated_patch(state, patch=_patch(micro=9.0), lane="fusion")
+    kd.enqueue_nominated_patch(state, patch=_patch(micro=9.0))
     dispatched = [str(row["integration_id"]) for row in kd.pending_kernel_integration_records(state)]
     assert dispatched == [integration_id]
 
@@ -141,14 +140,14 @@ def test_a_revived_dispatch_failure_reaches_the_drain_again() -> None:
 def test_a_settled_verdict_is_held_back_by_the_pending_gate() -> None:
     """Only the status gate is under test here; the permanent ``kernel_integrate_attempts`` ledger is what really carries idempotency."""
     state, _ = _settled("rejected")
-    kd.enqueue_nominated_patch(state, patch=_patch(micro=9.0), lane="fusion")
+    kd.enqueue_nominated_patch(state, patch=_patch(micro=9.0))
     assert [str(row["integration_id"]) for row in kd.pending_kernel_integration_records(state)] == []
 
 
 # --- the live path is untouched ----------------------------------------------
 def test_a_pending_record_still_refreshes_its_mutable_fields() -> None:
     state, integration_id = _settled("pending")
-    refreshed = kd.enqueue_nominated_patch(state, patch=_patch(micro=9.0), lane="fusion")
+    refreshed = kd.enqueue_nominated_patch(state, patch=_patch(micro=9.0))
     assert refreshed is not None
     assert state.pending_kernel_integrations[integration_id]["micro_speedup"] == 9.0
     assert sorted(state.pending_kernel_integrations) == [integration_id]

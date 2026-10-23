@@ -18,7 +18,7 @@ import sys
 import threading
 import time
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, NamedTuple
 
@@ -27,7 +27,7 @@ from typing import Any, Callable, NamedTuple
 # same thing on the same signal, so it waits exactly as long.
 from hyperloom.common.env import env_flag
 from hyperloom.common.proctree import TERM_GRACE_SEC as TERM_GRACE_SECONDS
-from hyperloom.common.proctree import collect_tree, kill_tree, signal_group
+from hyperloom.common.proctree import collect_tree, kill_tree, marked_pids, signal_group
 
 from .bypass_analysis import parse_server_log_throughput
 
@@ -38,6 +38,9 @@ log = logging.getLogger(__name__)
 
 # How long the reaper waits to collect the SIGKILL'd child before giving up on it.
 _REAP_COLLECT_SECONDS: float = 1.0
+
+#: Set in a run's env, its value marks the run: whatever inherited it is reaped on every exit path, however it detached.
+REAP_MARK_ENV: str = "HYPERLOOM_REAP_MARK"
 
 # How long draining a reaped child's capture threads is given.
 _CAPTURE_DRAIN_SECONDS: float = 2.0
@@ -74,11 +77,15 @@ def kill_my_spawned_server(
     proc: subprocess.Popen | None,
     *,
     grace_seconds: float = TERM_GRACE_SECONDS,
+    mark: str = "",
 ) -> None:
-    """Tear down the entire process tree rooted at ``proc``."""
+    """Tear down the entire process tree rooted at ``proc``, and every process carrying ``mark`` in its environment."""
     if proc is None:
         return
+    marked = marked_pids(REAP_MARK_ENV, mark) if mark else []
     if proc.poll() is not None:
+        if marked:
+            kill_tree(collect_tree(marked), grace_sec=grace_seconds, confirm_sec=grace_seconds)
         return
     if os.name != "posix":
         try:
@@ -121,7 +128,7 @@ def kill_my_spawned_server(
         return
 
     try:
-        tree = collect_tree([proc.pid])
+        tree = collect_tree([proc.pid, *marked])
     except OSError as exc:
         # Every caller reaps from a ``finally:``, so an unreadable procfs has to
         # be reported rather than raised on top of whatever sent us here.
@@ -358,8 +365,8 @@ class _StreamCapture:
             return
         try:
             self._on_output()
-        except Exception:  # noqa: BLE001 - liveness reporting never breaks capture
-            pass
+        except Exception as exc:  # noqa: BLE001 - liveness reporting never breaks capture
+            log.debug("_subprocess_kill: liveness callback failed: %s", exc)
 
     def _join(self, chunks: list[str | bytes]) -> str | bytes:
         """Concatenate captured chunks using the appropriate empty separator."""
@@ -400,8 +407,8 @@ class _StreamCapture:
             else:
                 mirror.write(chunk)
             mirror.flush()
-        except Exception:  # noqa: BLE001 - logging must not break subprocess
-            pass
+        except (OSError, ValueError):
+            pass  # a closed or broken mirror stream must not stop the capture
 
 
 # Glob (relative to the watched path's directory) for nested per-run server logs Magpie writes when its wrapper
@@ -600,7 +607,7 @@ def _resolve_scan_logs(server_log_path: str) -> list[str]:
     out: list[str] = []
     candidates = [primary]
     try:
-        candidates.extend(sorted(primary.parent.glob("benchmark_*/server.log")))
+        candidates.extend(sorted(primary.parent.glob(_NESTED_SERVER_LOG_GLOB)))
     except OSError:
         pass
     for log in candidates:
@@ -631,6 +638,20 @@ class _LogScan(NamedTuple):
     saw_warmup_begin: bool = False
     saw_measured_begin: bool = False
     saw_measured_end: bool = False
+
+    def including(self, scan: "_IncrementScan", path: str, previous_offset: int) -> "_LogScan":
+        """What this pass has found once one log's increment is folded in."""
+        advanced = scan.offset > previous_offset
+        return _LogScan(
+            saw_ready=self.saw_ready or scan.saw_ready,
+            saw_progress=self.saw_progress or scan.saw_progress,
+            saw_eval_start=self.saw_eval_start or scan.saw_eval_start,
+            grew=self.grew or (advanced and scan.active),
+            child_spoke=self.child_spoke or (advanced and Path(path).name == _EVAL_LOG_NAME),
+            saw_warmup_begin=self.saw_warmup_begin or scan.saw_warmup_begin,
+            saw_measured_begin=self.saw_measured_begin or scan.saw_measured_begin,
+            saw_measured_end=self.saw_measured_end or scan.saw_measured_end,
+        )
 
 
 class _IncrementScan(NamedTuple):
@@ -670,55 +691,53 @@ def _stale_scan_log_sizes(server_log_path: str) -> dict[str, int]:
     return sizes
 
 
-def _scan_logs_increment(
-    server_log_path: str,
-    offsets: dict[str, int],
-    residuals: dict[str, str] | None = None,
-    identities: dict[str, tuple[int, int]] | None = None,
-) -> _LogScan:
-    """Scan appended bytes; replacing or truncating a watched file is not activity."""
-    saw_ready = saw_progress = saw_eval_start = grew = child_spoke = False
-    saw_warmup_begin = saw_measured_begin = saw_measured_end = False
-    for path in _resolve_scan_logs(server_log_path):
-        prev = offsets.get(path, 0)
-        if prev < 0:
-            continue
-        if identities is not None:
+@dataclass
+class _LogCursor:
+    """Where a scan of the watched logs stopped: per path, the offset, the partial line and the file identity."""
+
+    offsets: dict[str, int] = field(default_factory=dict)
+    residuals: dict[str, str] = field(default_factory=dict)
+    identities: dict[str, tuple[int, int]] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        # Pinned now, so a log an earlier round had already read is seen as replaced if it is.
+        for path in self.offsets:
+            try:
+                stat = os.stat(path)
+            except OSError:
+                continue
+            self.identities[path] = (stat.st_dev, stat.st_ino)
+
+    def open_log(self, path: str) -> bool:
+        """Begin reading ``path`` from its start, reporting whether it had not been read before."""
+        if path in self.offsets:
+            return False
+        self.offsets[path] = 0
+        return True
+
+    def advance(self, server_log_path: str) -> _LogScan:
+        """Scan the bytes every watched log gained; replacing or truncating one is not activity."""
+        found = _LogScan(False, False, False, False, False)
+        for path in _resolve_scan_logs(server_log_path):
+            prev = self.offsets.get(path, 0)
+            if prev < 0:
+                continue
             try:
                 stat = os.stat(path)
             except OSError:
                 continue
             identity = (stat.st_dev, stat.st_ino)
-            replaced = path in identities and identities[path] != identity
-            identities[path] = identity
+            replaced = path in self.identities and self.identities[path] != identity
+            self.identities[path] = identity
             if replaced or stat.st_size < prev:
-                offsets[path] = stat.st_size
-                if residuals is not None:
-                    residuals.pop(path, None)
+                self.offsets[path] = stat.st_size
+                self.residuals.pop(path, None)
                 continue
-        scan = _scan_server_log_increment(path, prev, "" if residuals is None else residuals.get(path, ""))
-        offsets[path] = scan.offset
-        if residuals is not None:
-            residuals[path] = scan.residual
-        saw_ready = saw_ready or scan.saw_ready
-        saw_progress = saw_progress or scan.saw_progress
-        saw_eval_start = saw_eval_start or scan.saw_eval_start
-        saw_warmup_begin = saw_warmup_begin or scan.saw_warmup_begin
-        saw_measured_begin = saw_measured_begin or scan.saw_measured_begin
-        saw_measured_end |= scan.saw_measured_end
-        if scan.offset > prev:
-            grew = grew or scan.active
-            child_spoke = child_spoke or Path(path).name == _EVAL_LOG_NAME
-    return _LogScan(
-        saw_ready,
-        saw_progress,
-        saw_eval_start,
-        grew,
-        child_spoke,
-        saw_warmup_begin,
-        saw_measured_begin,
-        saw_measured_end,
-    )
+            scan = _scan_server_log_increment(path, prev, self.residuals.get(path, ""))
+            self.offsets[path] = scan.offset
+            self.residuals[path] = scan.residual
+            found = found.including(scan, path, prev)
+        return found
 
 
 def _scan_server_log_increment(path: str, from_offset: int, residual: str = "") -> _IncrementScan:
@@ -897,8 +916,9 @@ def run_with_session_kill(
     on_output: Callable[[], None] | None = None,
     session_deadline_sec: float | None = None,
 ) -> subprocess.CompletedProcess:
-    """Run a subprocess in its own session and reap descendants on every exit path."""
+    """Run a subprocess in its own session and reap descendants, and what carries ``REAP_MARK_ENV``, on every exit path."""
     child_env = dict(os.environ if env is None else env)
+    mark = child_env.get(REAP_MARK_ENV, "")
     if silence_timeout_sec is not None:
         child_env["PYTHONUNBUFFERED"] = "1"
     scan_offsets = _stale_scan_log_sizes(server_log_path) if server_log_path else {}
@@ -936,11 +956,11 @@ def run_with_session_kill(
                     recorders=_build_round_recorders(server_log_path, child_env),
                 )
             except subprocess.TimeoutExpired as exc:
-                kill_my_spawned_server(proc)
+                kill_my_spawned_server(proc, mark=mark)
                 exc.output, exc.stderr = _finish_capture(capture, text=text)
                 raise
             except _ReapedByWatchdog as exc:
-                kill_my_spawned_server(proc)
+                kill_my_spawned_server(proc, mark=mark)
                 stdout, stderr = _finish_capture(capture, text=text)
                 log.log(
                     exc.log_level,
@@ -961,7 +981,7 @@ def run_with_session_kill(
                 stderr=stderr if stderr is not None else empty,
             )
     finally:
-        kill_my_spawned_server(proc)
+        kill_my_spawned_server(proc, mark=mark)
 
 
 def _finish_capture(capture: _StreamCapture | None, *, text: bool) -> tuple[str | bytes, str | bytes]:
@@ -1047,6 +1067,60 @@ class _WatchedRound:
     started_at: float | None = None
     scan_offsets: dict[str, int] | None = None
 
+    def enforce_stop_gates(self, proc: subprocess.Popen, scope: CancelScope | None, now: float, elapsed: float) -> None:
+        """Raise as soon as the session budget, an orchestrator cancellation or the round cap is spent."""
+        if self.session_deadline_sec is not None and now >= self.session_deadline_sec:
+            raise _SessionDeadlineExceeded(overrun_sec=now - self.session_deadline_sec, elapsed_sec=elapsed)
+        if scope is not None and scope.cancelled:
+            raise _OrchestratorCancelled(reason=scope.reason, elapsed_sec=elapsed)
+        if self.hard_timeout is not None and elapsed >= self.hard_timeout:
+            raise subprocess.TimeoutExpired(proc.args, self.hard_timeout)
+
+    def poll_slice_sec(self, now: float, elapsed: float, silence_remaining: float | None) -> float:
+        """How long to wait on the child before the nearest armed gate has to be re-checked."""
+        hard = None if self.hard_timeout is None else self.hard_timeout - elapsed
+        session = None if self.session_deadline_sec is None else self.session_deadline_sec - now
+        return min(sec for sec in (STOP_GATE_POLL_SECONDS, hard, session, silence_remaining) if sec is not None)
+
+
+@dataclass
+class _RoundActivity:
+    """Where a watched round's log scan stopped, when its server reported ready, and when output last arrived."""
+
+    started_at: float
+    cursor: _LogCursor
+    last_activity_at: float
+    ready: bool = False
+
+    def note_log_progress(
+        self, server_log_path: str | None, recorders: _RecorderFanout, capture: _StreamCapture | None, now: float
+    ) -> None:
+        """Advance the ready and last-output marks from the bytes the watched logs gained since the previous poll."""
+        if server_log_path:
+            scan = self.cursor.advance(server_log_path)
+            if scan.saw_ready and not self.ready:
+                self.ready, self.last_activity_at = True, now
+                stamp_server_ready(server_log_path, now - self.started_at)
+                recorders.note_phase(_READY_PHASE, now)
+            if scan.grew:
+                self.last_activity_at = now
+            recorders.note_client_phases(scan, now)
+            if capture is not None and (scan.saw_progress or scan.child_spoke):
+                capture.note_output()
+        if capture is not None and capture.last_activity_at is not None:
+            self.last_activity_at = max(self.last_activity_at, capture.last_activity_at)
+
+    def reusing_warm_server(self, server_log_path: str | None, elapsed: float) -> bool:
+        """Whether a round found no log baseline and has since run long enough to be reusing a warm server."""
+        # Telemetry only: this guess never arms the silence gate.
+        return bool(server_log_path) and not self.cursor.offsets and elapsed >= _WARM_REUSE_PROBE_AFTER_SEC
+
+    def silence_remaining_sec(self, silence_timeout_sec: float | None, now: float) -> float | None:
+        """Seconds left in the post-ready silence window, or ``None`` while that gate is unarmed."""
+        if not self.ready or silence_timeout_sec is None:
+            return None
+        return silence_timeout_sec - (now - self.last_activity_at)
+
 
 def _communicate_with_watchdog(
     proc: subprocess.Popen,
@@ -1057,28 +1131,16 @@ def _communicate_with_watchdog(
     cancel_scope: CancelScope | None = None,
 ) -> tuple[str | bytes, str | bytes]:
     """Wait for exit, enforcing cancellation, session budget and explicit round caps."""
-    hard_timeout = watched.hard_timeout
     server_log_path = watched.server_log_path
     silence_timeout_sec = watched.silence_timeout_sec
-    server_already_ready = watched.server_already_ready
-    session_deadline_sec = watched.session_deadline_sec
     start = time.monotonic() if watched.started_at is None else watched.started_at
-    offsets = {} if watched.scan_offsets is None else watched.scan_offsets
-    residuals: dict[str, str] = {}
-    identities: dict[str, tuple[int, int]] = {}
-    for path in offsets:
-        try:
-            stat = os.stat(path)
-        except OSError:
-            continue
-        identities[path] = (stat.st_dev, stat.st_ino)
-    ready_at: float | None = None
-    last_activity_at: float | None = None
+    cursor = _LogCursor(watched.scan_offsets if watched.scan_offsets is not None else {})
+    activity = _RoundActivity(started_at=start, cursor=cursor, last_activity_at=start)
     completed = False
-    if server_already_ready:
+    if watched.server_already_ready:
         recorders.note_phase(_READY_PHASE, start)
-    if server_log_path and server_already_ready:
-        stamp_server_ready(server_log_path, 0.0)
+        if server_log_path:
+            stamp_server_ready(server_log_path, 0.0)
     try:
         while True:
             # An exit already observed belongs to the child, not to an expired gate.
@@ -1088,41 +1150,15 @@ def _communicate_with_watchdog(
                 return result
             now = time.monotonic()
             elapsed = now - start
-            if session_deadline_sec is not None and now >= session_deadline_sec:
-                raise _SessionDeadlineExceeded(overrun_sec=now - session_deadline_sec, elapsed_sec=elapsed)
-            if cancel_scope is not None and cancel_scope.cancelled:
-                raise _OrchestratorCancelled(reason=cancel_scope.reason, elapsed_sec=elapsed)
-            if hard_timeout is not None and elapsed >= hard_timeout:
-                raise subprocess.TimeoutExpired(proc.args, hard_timeout)
-            if server_log_path:
-                scan = _scan_logs_increment(server_log_path, offsets, residuals, identities)
-                if scan.saw_ready and ready_at is None:
-                    ready_at = last_activity_at = now
-                    stamp_server_ready(server_log_path, elapsed)
-                    recorders.note_phase(_READY_PHASE, now)
-                if scan.grew:
-                    last_activity_at = now
-                recorders.note_client_phases(scan, now)
-                if capture is not None and (scan.saw_progress or scan.child_spoke):
-                    capture.note_output()
-            if capture is not None and capture.last_activity_at is not None:
-                last_activity_at = max(last_activity_at or start, capture.last_activity_at)
-            # This telemetry-only guess never arms the silence gate.
-            warm_reuse_probe = server_log_path and not offsets and elapsed >= _WARM_REUSE_PROBE_AFTER_SEC
-            if ready_at is not None or server_already_ready or warm_reuse_probe:
+            watched.enforce_stop_gates(proc, cancel_scope, now, elapsed)
+            activity.note_log_progress(server_log_path, recorders, capture, now)
+            server_is_live = activity.ready or watched.server_already_ready
+            if server_is_live or activity.reusing_warm_server(server_log_path, elapsed):
                 recorders.tick(now)
-            silence_remaining = None
-            if ready_at is not None and silence_timeout_sec is not None:
-                silence_remaining = silence_timeout_sec - (now - last_activity_at)
-                if silence_remaining <= 0:
-                    raise _ServerStalledDetected(grace_sec=silence_timeout_sec, elapsed_sec=elapsed)
-            slice_sec = STOP_GATE_POLL_SECONDS
-            if hard_timeout is not None:
-                slice_sec = min(slice_sec, hard_timeout - elapsed)
-            if session_deadline_sec is not None:
-                slice_sec = min(slice_sec, session_deadline_sec - now)
-            if silence_remaining is not None:
-                slice_sec = min(slice_sec, silence_remaining)
+            silence_remaining = activity.silence_remaining_sec(silence_timeout_sec, now)
+            if silence_remaining is not None and silence_remaining <= 0:
+                raise _ServerStalledDetected(grace_sec=watched.silence_timeout_sec, elapsed_sec=elapsed)
+            slice_sec = watched.poll_slice_sec(now, elapsed, silence_remaining)
             try:
                 if capture is None:
                     result = proc.communicate(timeout=max(0.0, slice_sec))

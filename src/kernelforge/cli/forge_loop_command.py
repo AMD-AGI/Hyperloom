@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import math
 import os
 import subprocess
@@ -14,11 +15,11 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Sequence
+from typing import TYPE_CHECKING, NoReturn, Sequence
 
 import click
 
-from kernelforge.cli.lanes import LaneBinding, _make_lane_agent_factory, _require_lane_provider_capabilities
+from kernelforge.cli.lanes import LaneBinding
 from kernelforge.cli.options import (
     AgentRuntimeOptions,
     CeilingSwitch,
@@ -46,6 +47,7 @@ from kernelforge.cli.publication import (
     _remote_publication_view,
     _warm_start_publication_covers,
 )
+from kernelforge.cli.relay import agent_relay_summary
 from kernelforge.cli.session_budget import _forge_session_timeout_sec, _is_long_horizon
 from kernelforge.config import Config
 from kernelforge.knowledge.kb_store.config import KnowledgeConfig
@@ -69,15 +71,17 @@ from kernelforge.loop.recovery import (
     publish_warm_start_recovery,
     rollback_unpublished_warm_start,
 )
-from kernelforge.evaluation.scoring import DEFAULT_SNR_THRESHOLD_DB, aggregate_regression_detail
+from kernelforge.evaluation.scoring import DEFAULT_SNR_THRESHOLD_DB, warm_start_improvement_flags
 from kernelforge.tracker.schema import ExperimentSubject
 
 if TYPE_CHECKING:
     from kernelforge.loop.campaign_config import CampaignConfig, CampaignConfigStore
     from kernelforge.loop.runner import IterationConfig
+    from kernelforge.loop.task_preparer import PrepareResult
     from kernelforge.roofline_ceiling.command import AnalystAgent
     from kernelforge.tracker import ExperimentTracker, UsageAccumulator
 
+log = logging.getLogger(__name__)
 
 # A high runaway backstop, not a time bound.
 FORGE_IMPLEMENTER_TURN_BACKSTOP = 2000
@@ -193,6 +197,25 @@ class _SearchAnchors:
     search_start_mean_case_speedup: float
     pristine_ms: float | None
 
+    def claims(self, *, best_ms, mean_case_speedup) -> dict:
+        """What a best measured at ``best_ms`` may report against these anchors, in the order a report carries it."""
+        improved_during_search = bool(mean_case_speedup and mean_case_speedup > self.search_start_mean_case_speedup)
+        return {
+            "baseline_ms": self.pristine_ms,
+            "pristine_baseline_ms": self.pristine_ms,
+            "search_start_ms": self.search_start_ms,
+            "best_ms": best_ms,
+            "mean_case_speedup": mean_case_speedup,
+            "search_start_mean_case_speedup": self.search_start_mean_case_speedup,
+            # KEEP is decided on the mean of per-case speedups while these are aggregate wall times, so the two can
+            # legitimately disagree by a hair.
+            **warm_start_improvement_flags(
+                pristine_ms=self.pristine_ms, best_ms=best_ms, mean_case_speedup=mean_case_speedup
+            ),
+            "incremental_improved": improved_during_search,
+            "improved_during_search": improved_during_search,
+        }
+
 
 def _search_anchors(loop_runner, *, pristine_fallback=None) -> _SearchAnchors:
     """Read the run's search-start and pristine anchors off the live runner."""
@@ -243,53 +266,32 @@ class _RunReporter:
         """Assemble the loop result dict from live runner state."""
         loop_runner = self.loop_runner
         anchors = _search_anchors(loop_runner, pristine_fallback=self.warm_start.kb_pristine_baseline_ms)
-        search_start_ms = anchors.search_start_ms
-        search_start_mean_case_speedup = anchors.search_start_mean_case_speedup
-        pristine_ms = anchors.pristine_ms
         best = getattr(loop_runner, "best_wall_ms", None)
         total_speedup = getattr(loop_runner, "best_mean_case_speedup", None)
         incremental_speedup = (
-            float(total_speedup) / float(search_start_mean_case_speedup)
-            if total_speedup and search_start_mean_case_speedup
-            else None
+            float(total_speedup) / float(anchors.search_start_mean_case_speedup) if total_speedup else None
         )
         exp_id = getattr(loop_runner.experiment, "experiment_id", None)
-        state_best = loop_runner.run_state.best
-        best_iteration = getattr(state_best, "iteration", 0)
-        best_commit = getattr(state_best, "commit_hash", "")
+        best_iteration = loop_runner.run_state.best.iteration
+        best_commit = loop_runner.run_state.best.commit_hash
         # A validated warm-start is published before IterationLoop creates a run-state best.
         if not best_commit:
             published = load_published_best(self.run.iter_config.workspace_dir) or {}
             if int(published.get("iteration", -1)) == 0:
-                pristine_ms = published.get("pristine_baseline_ms") or published.get("baseline_wall_ms") or pristine_ms
-                search_start_ms = published.get("search_start_ms") or published.get("best_wall_ms") or search_start_ms
                 best = published.get("best_wall_ms")
                 total_speedup = published.get("mean_case_speedup")
-                search_start_mean_case_speedup = (
-                    published.get("search_start_mean_case_speedup") or total_speedup or search_start_mean_case_speedup
+                anchors = _SearchAnchors(
+                    published.get("search_start_ms") or best or anchors.search_start_ms,
+                    published.get("search_start_mean_case_speedup")
+                    or total_speedup
+                    or anchors.search_start_mean_case_speedup,
+                    published.get("pristine_baseline_ms") or published.get("baseline_wall_ms") or anchors.pristine_ms,
                 )
                 incremental_speedup = 1.0
                 best_iteration = 0
                 best_commit = str(published.get("commit_hash") or "")
-        # KEEP is decided on the mean of per-case speedups while these are aggregate wall times, so the two can
-        # legitimately disagree by a hair.
-        aggregate_regression = aggregate_regression_detail(
-            baseline_ms=pristine_ms,
-            best_ms=best,
-            mean_case_speedup=total_speedup,
-        )
         result = {
-            "baseline_ms": pristine_ms,
-            "pristine_baseline_ms": pristine_ms,
-            "search_start_ms": search_start_ms,
-            "best_ms": best,
-            "mean_case_speedup": total_speedup,
-            "search_start_mean_case_speedup": (search_start_mean_case_speedup),
-            "aggregate_regression": aggregate_regression,
-            "improved": bool(total_speedup and total_speedup > 1.0) and not aggregate_regression,
-            "total_improved": bool(total_speedup and total_speedup > 1.0) and not aggregate_regression,
-            "incremental_improved": bool(total_speedup and total_speedup > search_start_mean_case_speedup),
-            "improved_during_search": bool(total_speedup and total_speedup > search_start_mean_case_speedup),
+            **anchors.claims(best_ms=best, mean_case_speedup=total_speedup),
             # Reported so a consumer can tell a faster transfer from a cheaper barrier; wall time alone cannot say
             # which one a kept kernel bought.
             "case_bandwidth": dict(getattr(loop_runner, "last_case_bandwidth", {}) or {}),
@@ -302,10 +304,7 @@ class _RunReporter:
             "next_iteration": getattr(loop_runner.run_state, "next_iteration", 1),
             "best_iteration": best_iteration,
             "best_commit": best_commit,
-            "remote_publication": _remote_publication_view(
-                self.remote_publication,
-                best_commit,
-            ),
+            "remote_publication": _remote_publication_view(self.remote_publication, best_commit),
             "best_manifest": str(self.run.campaign_store.root / "best" / "manifest.json"),
             "optimization_report": str(self.run.campaign_store.root / "optimization_report.md"),
             "optimization_history": str(self.run.campaign_store.root / "optimization_history.md"),
@@ -315,6 +314,7 @@ class _RunReporter:
             "kb_experience": kb_experience,
             "agent_backend": self.implementer.backend,
             "agent_model": self.implementer.model,
+            "agent_relay": agent_relay_summary(loop_runner.run_state),
             "llm_usage": getattr(loop_runner, "llm_usage", {}) or {},
         }
         if self.assembly_preparation is not None:
@@ -332,12 +332,12 @@ class _RunReporter:
         return result
 
     def write_result_json(self, result: dict) -> None:
-        """Persist the result dict to --result-json (best-effort; never raises)."""
+        """Persist the result dict to --result-json; a failed write is reported, not raised."""
         if not self.run.request.artifacts.result_json:
             return
         try:
             atomic_write_json(self.run.request.artifacts.result_json, result)
-        except Exception as e:  # noqa: BLE001 - a snapshot write must never break the loop
+        except (OSError, TypeError, ValueError) as e:
             print(f"  [forge-loop] result-json snapshot skipped ({e})", flush=True)
 
     def attempt_remote_publication(
@@ -374,15 +374,7 @@ class _RunReporter:
             status = write_experience_to_kb(
                 config=self.run.config,
                 loop_runner=self.loop_runner,
-                kernel=LoopKernel(
-                    kernel_path=self.run.iter_config.kernel_file,
-                    kernel_backend=self.run.campaign.kernel_backend,
-                    target_functions=self.run.iter_config.target_functions,
-                    source_files=self.run.iter_config.source_files,
-                    framework=self.run.campaign.framework,
-                    operator_name=self.run.campaign.operator_name,
-                    workspace=self.run.iter_config.workspace_dir,
-                ),
+                kernel=self.run.loop_kernel,
                 publication=ExperiencePublication(
                     base_sha=self.run.campaign.base_commit,
                     gpu_target=self.run.config.gpu_target,
@@ -396,6 +388,7 @@ class _RunReporter:
                 usage=self.run.usage,
             )
         except Exception as e:  # noqa: BLE001 - checkpoint publish must never break the loop
+            log.warning("experience KB publication failed for %s: %s", commit, e)
             status = {"written": False, "reason": f"error:{e!r}"}
         _record_remote_publication_result(
             self.remote_publication,
@@ -433,16 +426,7 @@ class _RunReporter:
         experiment = self.loop_runner.experiment
         best_commit = str(getattr(result, "commit_hash", "") or git_head(self.run.iter_config.workspace_dir))
         anchors = _search_anchors(self.loop_runner)
-        search_start_ms = anchors.search_start_ms
-        search_start_mean_case_speedup = anchors.search_start_mean_case_speedup
-        baseline_ms = anchors.pristine_ms
-        best_ms = getattr(result, "wall_ms", None)
         mean_case_speedup = getattr(result, "mean_case_speedup", None)
-        aggregate_regression = aggregate_regression_detail(
-            baseline_ms=baseline_ms,
-            best_ms=best_ms,
-            mean_case_speedup=mean_case_speedup,
-        )
         checkpoint = {
             "state": "best_committed",
             "decision": "KEEP",
@@ -452,22 +436,10 @@ class _RunReporter:
             "base_commit": self.run.campaign.base_commit,
             "best_commit": best_commit,
             "best_iteration": int(getattr(result, "iteration", 0) or 0),
-            "baseline_ms": baseline_ms,
-            "pristine_baseline_ms": baseline_ms,
-            "search_start_ms": search_start_ms,
-            "best_ms": best_ms,
-            "mean_case_speedup": mean_case_speedup,
-            "search_start_mean_case_speedup": (search_start_mean_case_speedup),
-            "aggregate_regression": aggregate_regression,
-            "improved": bool(mean_case_speedup and mean_case_speedup > 1.0) and not aggregate_regression,
-            "total_improved": bool(mean_case_speedup and mean_case_speedup > 1.0) and not aggregate_regression,
-            "incremental_improved": bool(mean_case_speedup and mean_case_speedup > search_start_mean_case_speedup),
-            "improved_during_search": bool(mean_case_speedup and mean_case_speedup > search_start_mean_case_speedup),
+            **anchors.claims(best_ms=getattr(result, "wall_ms", None), mean_case_speedup=mean_case_speedup),
             "total_speedup": mean_case_speedup,
             "incremental_speedup": (
-                float(mean_case_speedup) / float(search_start_mean_case_speedup)
-                if mean_case_speedup and search_start_mean_case_speedup
-                else None
+                float(mean_case_speedup) / float(anchors.search_start_mean_case_speedup) if mean_case_speedup else None
             ),
             "validation_passed": bool(getattr(result, "validation_passed", False)),
             "validation_summary": str(getattr(result, "validation_summary", "") or ""),
@@ -481,7 +453,7 @@ class _RunReporter:
                 # on every resumed segment.
                 if self.run.caller_experiment_id:
                     self.run.tracker.set_checkpoint(self.run.caller_experiment_id, checkpoint)
-            except Exception as e:  # noqa: BLE001 - never break the loop
+            except (OSError, ValueError, TypeError) as e:
                 print(f"  [checkpoint] skipped ({e})", flush=True)
         self.write_result_json(self.build_result(kb_experience=None))
 
@@ -504,6 +476,68 @@ class _ForgeRun:
         """The caller-owned experiment ID: an external recovery channel."""
         return (self.request.artifacts.experiment_id or "").strip()
 
+    @property
+    def loop_kernel(self) -> LoopKernel:
+        """The kernel this run optimizes, as the knowledge base identifies it."""
+        return LoopKernel(
+            kernel_path=self.iter_config.kernel_file,
+            kernel_backend=self.campaign.kernel_backend,
+            target_functions=self.iter_config.target_functions,
+            source_files=self.iter_config.source_files,
+            framework=self.campaign.framework,
+            operator_name=self.campaign.operator_name,
+            workspace=self.iter_config.workspace_dir,
+        )
+
+
+def _print_prepared_driver(prep: PrepareResult) -> None:
+    """Tell the operator what a successful preparation wrote, and what its final preflight cost."""
+    # Cap the file list: an external driver bundle can legitimately publish dozens of files, and one run
+    # scrolled ~700 cache paths through the operator's log for a 3-file change.
+    shown = prep.wrote_files[:12]
+    extra = len(prep.wrote_files) - len(shown)
+    print(
+        f"  [prepare] prepared measurement driver in {prep.attempts} attempt(s); "
+        f"wrote {', '.join(shown) or '(none)'}" + (f" (+{extra} more)" if extra > 0 else "")
+    )
+    # Telemetry only: never let a missing field break a good prep.
+    preflight_sec = getattr(prep.final_preflight, "duration_sec", 0.0) or 0.0
+    if preflight_sec:
+        stages = ", ".join(
+            f"{name}={detail['seconds']:.0f}s"
+            for name, detail in (getattr(prep.final_preflight, "details", {}) or {}).items()
+            if isinstance(detail, dict) and "seconds" in detail
+        )
+        print(f"  [prepare] preflight: {preflight_sec:.0f}s" + (f" ({stages})" if stages else ""))
+    if prep.audit_dir:
+        print(f"  [prepare] audit: {prep.audit_dir}")
+
+
+def _exit_failed_preparation(prep: PrepareResult, result_json: str | None) -> NoReturn:
+    """End the run with the reason preparation failed: on the console, in --result-json and in the stdout result."""
+    # prep.message carries the real failure reason (e.g. "driver conformed but commit didn't land"); the
+    # preflight summary can read "ok" even when prep failed downstream, so lead with prep.message and
+    # append the preflight summary as extra context.
+    detail = prep.message or (prep.final_preflight.summary() if prep.final_preflight else "")
+    if prep.message and prep.final_preflight:
+        detail = f"{prep.message} | preflight: {prep.final_preflight.summary()}"
+    disposition = "rolled back" if prep.rolled_back else "workspace preserved"
+    print(f"  [prepare] FAILED after {prep.attempts} attempt(s); {disposition}. {detail}")
+    err_result = {
+        "error": "task_preparation_failed",
+        "detail": detail,
+        "attempts": prep.attempts,
+        "rolled_back": prep.rolled_back,
+        "experiment_id": None,
+    }
+    if prep.audit_dir:
+        err_result["task_preparation_audit_dir"] = prep.audit_dir
+    err_payload = json.dumps(err_result)
+    if result_json:
+        atomic_write_json(result_json, err_result)
+    click.echo(f"__FORGE_RESULT__{err_payload}__FORGE_RESULT__")
+    sys.exit(2)
+
 
 def _prepare_measurement_driver(run: _ForgeRun, program_md: str) -> None:
     """Make the driver conform to the measurement contract, or leave with the reason it cannot.
@@ -512,27 +546,15 @@ def _prepare_measurement_driver(run: _ForgeRun, program_md: str) -> None:
     to the prep agent, and a preparation that fails ends the run rather than
     measuring against a driver nobody vouched for.
     """
-    driver = run.iter_config.driver_script
-    snr_threshold = run.iter_config.snr_threshold
-    nproc_per_node = run.iter_config.nproc_per_node
-    program_md_file = run.request.task_context.program_md_file
-    invocation_spec_file = run.request.task_context.invocation_spec_file
-    result_json = run.request.artifacts.result_json
-    deadline_unix = run.deadline.deadline_unix
-    finalize_reserve_sec = run.deadline.finalize_reserve_sec
-    usage = run.usage
+    from kernelforge.loop import task_preparer
     from kernelforge.loop.task_preflight import DriverContract
-    from kernelforge.loop.task_preparer import (
-        PreparationBudget,
-        PreparationTask,
-        declared_case_ids,
-        preflight_task,
-        prepare_task_sync,
-    )
 
+    iter_config = run.iter_config
+    invocation_spec_file = run.request.task_context.invocation_spec_file or ""
+    prep_deadline = run.deadline.deadline_unix - run.deadline.finalize_reserve_sec
     # Preparation runs the driver, so it needs the rank count before the loop that normally exports it exists.
-    if nproc_per_node > 1:
-        os.environ["FORGE_NPROC_PER_NODE"] = str(nproc_per_node)
+    if iter_config.nproc_per_node > 1:
+        os.environ["FORGE_NPROC_PER_NODE"] = str(iter_config.nproc_per_node)
     else:
         os.environ.pop("FORGE_NPROC_PER_NODE", None)
 
@@ -541,106 +563,61 @@ def _prepare_measurement_driver(run: _ForgeRun, program_md: str) -> None:
     # conforming", it just measures less than the task asks for, and accepting it here skips the only step that
     # would have repaired it.
     try:
-        expected_case_ids = declared_case_ids(invocation_spec_file)
+        expected_case_ids = task_preparer.declared_case_ids(invocation_spec_file)
     except ValueError as exc:
         # Continuing would switch the driver's case check off and spend the whole run measuring a suite the
         # operator never got to state.
         raise click.ClickException(str(exc)) from exc
-    pf = preflight_task(
-        driver=driver,
+    pf = task_preparer.preflight_task(
+        driver=iter_config.driver_script,
         contract=DriverContract(
-            snr_threshold=snr_threshold,
+            snr_threshold=iter_config.snr_threshold,
             require_graph=True,
             require_profile=True,
-            require_ranks=max(1, int(nproc_per_node or 1)),
+            require_ranks=iter_config.nproc_per_node,
             expected_case_ids=expected_case_ids,
         ),
-        deadline_unix=deadline_unix - finalize_reserve_sec,
+        deadline_unix=prep_deadline,
     )
     if pf.ok:
         print("  [prepare] task already conforms to the driver contract; skipping")
-        _persist_declared_spec(invocation_spec_file or "", driver)
-    else:
-        print(f"  [prepare] task does not conform ({pf.summary()}); invoking prep agent...")
-        # The budget that actually applies is min(wall, what the per-kernel deadline leaves), and it decides how
-        # many attempts ever start.
-        from kernelforge.loop import task_preparer as _tp
-
-        _prep_wall = min(
-            float(_tp.PREPARE_MAX_WALL_SEC),
-            max(0.0, deadline_unix - finalize_reserve_sec - time.time()),
-        )
-        print(
-            f"  [prepare] budget: wall={_prep_wall:.0f}s "
-            f"attempt_cap={_tp.PER_ATTEMPT_CAP_SEC}s "
-            f"max_attempts={_tp.PREPARE_MAX_ATTEMPTS}"
-        )
-        prep = prepare_task_sync(
-            config=run.config,
-            task=PreparationTask(
-                workspace_dir=run.iter_config.workspace_dir,
-                kernel=run.iter_config.kernel_file,
-                driver=driver,
-                program_md=program_md,
-                target_functions=run.iter_config.target_functions,
-                source_files=run.iter_config.source_files,
-                snr_threshold=snr_threshold,
-                invocation_spec_file=invocation_spec_file or "",
-                expected_case_ids=expected_case_ids,
-                read_only_files=[path for path in (program_md_file, invocation_spec_file) if path],
-                # A collective task needs a driver that launches its own ranks; the preparer cannot infer that from
-                # the kernel source.
-                nproc_per_node=nproc_per_node,
-            ),
-            # Let the default PREPARE_MAX_WALL_SEC (3000s, sized for a cold-JIT preflight) apply; prepare_task
-            # clamps it to the per-kernel deadline_unix below.
-            budget=PreparationBudget(deadline_unix=deadline_unix - finalize_reserve_sec),
-            preflight=pf,
-            usage=usage,
-        )
-        if prep.ok:
-            # Cap the file list: an external driver bundle can legitimately publish dozens of files, and one run
-            # scrolled ~700 cache paths through the operator's log for a 3-file change.
-            _shown = prep.wrote_files[:12]
-            _extra = len(prep.wrote_files) - len(_shown)
-            print(
-                f"  [prepare] prepared measurement driver in {prep.attempts} attempt(s); "
-                f"wrote {', '.join(_shown) or '(none)'}" + (f" (+{_extra} more)" if _extra > 0 else "")
-            )
-            # Telemetry only: never let a missing field break a good prep.
-            _pf_sec = getattr(prep.final_preflight, "duration_sec", 0.0) or 0.0
-            if _pf_sec:
-                _stages = ", ".join(
-                    f"{name}={detail['seconds']:.0f}s"
-                    for name, detail in (getattr(prep.final_preflight, "details", {}) or {}).items()
-                    if isinstance(detail, dict) and "seconds" in detail
-                )
-                print(f"  [prepare] preflight: {_pf_sec:.0f}s" + (f" ({_stages})" if _stages else ""))
-            if prep.audit_dir:
-                print(f"  [prepare] audit: {prep.audit_dir}")
-        else:
-            # prep.message carries the real failure reason (e.g. "driver conformed but commit didn't land"); the
-            # preflight summary can read "ok" even when prep failed downstream, so lead with prep.message and
-            # append the preflight summary as extra context.
-            detail = prep.message or (prep.final_preflight.summary() if prep.final_preflight else "")
-            if prep.message and prep.final_preflight:
-                detail = f"{prep.message} | preflight: {prep.final_preflight.summary()}"
-            disposition = "rolled back" if prep.rolled_back else "workspace preserved"
-            print(f"  [prepare] FAILED after {prep.attempts} attempt(s); {disposition}. {detail}")
-            err_result = {
-                "error": "task_preparation_failed",
-                "detail": detail,
-                "attempts": prep.attempts,
-                "rolled_back": prep.rolled_back,
-                "experiment_id": None,
-            }
-            if prep.audit_dir:
-                err_result["task_preparation_audit_dir"] = prep.audit_dir
-            err_payload = json.dumps(err_result)
-            if result_json:
-                atomic_write_json(result_json, err_result)
-            click.echo(f"__FORGE_RESULT__{err_payload}__FORGE_RESULT__")
-            sys.exit(2)
+        _persist_declared_spec(invocation_spec_file, iter_config.driver_script)
+        return
+    print(f"  [prepare] task does not conform ({pf.summary()}); invoking prep agent...")
+    # The budget that actually applies is min(wall, what the per-kernel deadline leaves), and it decides how
+    # many attempts ever start.
+    prep_wall = min(float(task_preparer.PREPARE_MAX_WALL_SEC), max(0.0, prep_deadline - time.time()))
+    print(
+        f"  [prepare] budget: wall={prep_wall:.0f}s "
+        f"attempt_cap={task_preparer.PER_ATTEMPT_CAP_SEC}s "
+        f"max_attempts={task_preparer.PREPARE_MAX_ATTEMPTS}"
+    )
+    prep = task_preparer.prepare_task_sync(
+        config=run.config,
+        task=task_preparer.PreparationTask(
+            workspace_dir=iter_config.workspace_dir,
+            kernel=iter_config.kernel_file,
+            driver=iter_config.driver_script,
+            program_md=program_md,
+            target_functions=iter_config.target_functions,
+            source_files=iter_config.source_files,
+            snr_threshold=iter_config.snr_threshold,
+            invocation_spec_file=invocation_spec_file,
+            expected_case_ids=expected_case_ids,
+            read_only_files=[path for path in (run.request.task_context.program_md_file, invocation_spec_file) if path],
+            # A collective task needs a driver that launches its own ranks; the preparer cannot infer that from
+            # the kernel source.
+            nproc_per_node=iter_config.nproc_per_node,
+        ),
+        # Let the default PREPARE_MAX_WALL_SEC (3000s, sized for a cold-JIT preflight) apply; prepare_task
+        # clamps it to the per-kernel deadline_unix below.
+        budget=task_preparer.PreparationBudget(deadline_unix=prep_deadline),
+        preflight=pf,
+        usage=run.usage,
+    )
+    if not prep.ok:
+        _exit_failed_preparation(prep, run.request.artifacts.result_json)
+    _print_prepared_driver(prep)
 
 
 def _collect_pr_kb_context(run: _ForgeRun) -> tuple[str, str]:
@@ -718,31 +695,65 @@ class _WarmStart:
     kb_reused_speedup: float | None
 
 
-def _read_kb_warm_start(run: _ForgeRun, program_md: str, kb_warmstart_enabled: bool) -> _WarmStart:
-    """Adopt the best prior solution the KB offers, so iteration 1 starts from it rather than from scratch."""
+def _publish_warm_start(run: _ForgeRun, warm: dict) -> dict:
+    """Publish an adopted warm start as the recoverable best before iteration 1, and return the verdict that stands.
+
+    A warm start that cannot be published durably is rolled back to the pristine source, and the run keeps it as a
+    reference only.
+    """
     iter_config = run.iter_config
-    config = run.config
     workspace_dir = iter_config.workspace_dir
-    kernel = iter_config.kernel_file
-    driver = iter_config.driver_script
-    kernel_backend = iter_config.kernel_backend
-    target_functions_list = iter_config.target_functions
-    source_files_list = iter_config.source_files
-    framework = run.campaign.framework
-    operator_name = run.campaign.operator_name
-    snr_threshold = iter_config.snr_threshold
-    bench_repeat = iter_config.bench_repeat
+    result_json = run.request.artifacts.result_json
+    iter_config.publication_baseline_wall_ms = warm.get("pristine_ms")
+    try:
+        published = publish_warm_start_recovery(
+            workspace_dir,
+            base_commit=run.campaign.base_commit,
+            warm=warm,
+            caller=CallerRecovery(run.caller_experiment_id, run.request.artifacts.experience_id, result_json),
+            tracker=run.tracker,
+        )
+        iter_config.warm_start_publication = dict(published)
+        if published["persistence_degraded"]:
+            print(
+                "  [warm-start] recovery publication degraded: " + "; ".join(published["persistence_errors"]),
+                flush=True,
+            )
+        print("  [warm-start] published recoverable best before iteration 1", flush=True)
+    except Exception as error:  # noqa: BLE001 - translated into a rollback below
+        try:
+            rollback_unpublished_warm_start(
+                workspace_dir, base_commit=run.campaign.base_commit, result_json=result_json
+            )
+        except Exception as rollback_error:
+            raise click.ClickException(
+                f"failed to publish validated warm-start and could not restore pristine workspace: {rollback_error}"
+            ) from rollback_error
+        mark_kb_reference_rejected(workspace_dir, int(warm.get("applied_rank") or 0), "publication_failed")
+        reference = kb_reference_program_md(workspace_dir, detect_applied=False) or warm.get(
+            "reference_program_md_addition",
+            "## Warm-start reference only\n"
+            "The prior patch could not be published durably and was "
+            "removed before optimization.",
+        )
+        iter_config.publication_baseline_wall_ms = None
+        print(
+            "  [warm-start] recovery publication failed; restored "
+            f"pristine source and continuing reference-only ({error})",
+            flush=True,
+        )
+        return {**warm, "applied": False, "keep_baseline_ms": warm.get("pristine_ms"), "program_md_addition": reference}
+    return warm
+
+
+def _read_kb_warm_start(run: _ForgeRun, program_md: str, kb_warmstart_enabled: bool) -> _WarmStart:
+    """Adopt the best prior solution the KB offers, so iteration 1 starts from it rather than from scratch.
+
+    Its experience goes into the prompt too, so the agent continues from the best-known state.
+    """
+    iter_config = run.iter_config
     resume = run.request.resume
     experience_kb = run.request.knowledge.experience_kb
-    result_json = run.request.artifacts.result_json
-    experience_id = run.request.artifacts.experience_id
-    deadline = run.deadline
-    base_sha = run.campaign.base_commit
-    caller_experiment_id = run.caller_experiment_id
-    tracker = run.tracker
-    # KB warm-start: apply the best prior solution as the starting point and inject its experience into the prompt, so
-    # the agent continues from the best-known state instead of from scratch.
-    kb_pristine_baseline_ms = None
     kb_reused_speedup = None
     warm = {
         "candidate": False,
@@ -753,96 +764,32 @@ def _read_kb_warm_start(run: _ForgeRun, program_md: str, kb_warmstart_enabled: b
         experience_kb
         and kb_warmstart_enabled
         and not resume
-        and deadline.remaining(reserve=deadline.finalize_reserve_sec) >= 600
+        and run.deadline.remaining(reserve=run.deadline.finalize_reserve_sec) >= 600
     ):
         try:
             warm = kb_warmstart(
-                config=config,
-                kernel=LoopKernel(
-                    kernel_path=kernel,
-                    kernel_backend=kernel_backend,
-                    target_functions=target_functions_list,
-                    source_files=source_files_list,
-                    framework=framework,
-                    operator_name=operator_name,
-                    workspace=workspace_dir,
+                config=run.config,
+                kernel=run.loop_kernel,
+                harness=WarmStartHarness(
+                    iter_config.driver_script,
+                    snr_threshold=iter_config.snr_threshold,
+                    bench_repeat=iter_config.bench_repeat,
                 ),
-                harness=WarmStartHarness(driver, snr_threshold=snr_threshold, bench_repeat=bench_repeat),
             )
         except WarmStartRollbackError as error:
             failure = click.ClickException(f"warm-start rollback failed; workspace may be inconsistent: {error}")
             failure.exit_code = 2
             raise failure from error
-        warm.setdefault(
-            "read_reason",
-            "hit" if warm.get("candidate") else "solution_pages_missing",
-        )
-        warm.setdefault("read_error", "")
     elif not resume and not experience_kb:
         warm["read_reason"] = "disabled"
         print("  [kb] experience KB disabled by caller")
     elif not resume:
         print("  [kb] warm-start skipped: absolute deadline reserve")
     if warm.get("candidate"):
-        kb_pristine_baseline_ms = warm.get("pristine_ms")
         if warm.get("applied"):
             # The floor this campaign starts from.
             kb_reused_speedup = warm.get("mean_case_speedup")
-            iter_config.publication_baseline_wall_ms = warm.get("pristine_ms")
-            try:
-                published = publish_warm_start_recovery(
-                    workspace_dir,
-                    base_commit=base_sha,
-                    warm=warm,
-                    caller=CallerRecovery(caller_experiment_id, experience_id, result_json),
-                    tracker=tracker,
-                )
-                if published:
-                    iter_config.warm_start_publication = dict(published)
-                if published and published.get("persistence_degraded"):
-                    print(
-                        "  [warm-start] recovery publication degraded: "
-                        + "; ".join(published.get("persistence_errors") or []),
-                        flush=True,
-                    )
-                print(
-                    "  [warm-start] published recoverable best before iteration 1",
-                    flush=True,
-                )
-            except Exception as error:  # noqa: BLE001 - translated into a rollback below
-                try:
-                    rollback_unpublished_warm_start(
-                        workspace_dir,
-                        base_commit=base_sha,
-                        result_json=result_json,
-                    )
-                except Exception as rollback_error:
-                    raise click.ClickException(
-                        "failed to publish validated warm-start and could not "
-                        f"restore pristine workspace: {rollback_error}"
-                    ) from rollback_error
-                warm["applied"] = False
-                warm["keep_baseline_ms"] = warm.get("pristine_ms")
-                mark_kb_reference_rejected(
-                    workspace_dir,
-                    int(warm.get("applied_rank") or 0),
-                    "publication_failed",
-                )
-                warm["program_md_addition"] = kb_reference_program_md(
-                    workspace_dir,
-                    detect_applied=False,
-                ) or warm.get(
-                    "reference_program_md_addition",
-                    "## Warm-start reference only\n"
-                    "The prior patch could not be published durably and was "
-                    "removed before optimization.",
-                )
-                iter_config.publication_baseline_wall_ms = None
-                print(
-                    "  [warm-start] recovery publication failed; restored "
-                    f"pristine source and continuing reference-only ({error})",
-                    flush=True,
-                )
+            warm = _publish_warm_start(run, warm)
         if warm.get("program_md_addition"):
             program_md = program_md + "\n\n" + warm["program_md_addition"]
         # Keep the pristine raw baseline immutable.
@@ -864,7 +811,7 @@ def _read_kb_warm_start(run: _ForgeRun, program_md: str, kb_warmstart_enabled: b
     return _WarmStart(
         warm=warm,
         program_md=program_md,
-        kb_pristine_baseline_ms=kb_pristine_baseline_ms,
+        kb_pristine_baseline_ms=warm.get("pristine_ms") if warm.get("candidate") else None,
         kb_reused_speedup=kb_reused_speedup,
     )
 
@@ -980,6 +927,16 @@ def _reject_incompatible_loop_options(*, producer: str) -> None:
             raise click.UsageError(f"--producer must be one of: {', '.join(sorted(KERNEL_RECIPE_PRODUCERS))}")
 
 
+def _resumed_profile_id(state_path: Path) -> str:
+    """The Agent profile a resumed campaign was running, or ``""`` for a fresh one."""
+    from kernelforge.loop.run_state import read_run_state
+
+    try:
+        return read_run_state(state_path).agent_relay.active_profile_id
+    except ValueError as error:
+        raise click.ClickException(str(error)) from error
+
+
 def _check_workspace_matches_resume(
     *,
     resume: bool,
@@ -1012,14 +969,14 @@ def _record_experiment_accounting(tracker, *, experiment_id, llm_usage: dict, kb
     try:
         if llm_usage.get("calls"):
             tracker.set_llm_usage(experiment_id, llm_usage)
-    except Exception as exc:  # noqa: BLE001 - usage accounting must not fail the run
+    except (OSError, ValueError, TypeError) as exc:
         click.echo(
             f"Warning: failed to record LLM usage for experiment {experiment_id}: {exc}",
             err=True,
         )
     try:
         tracker.set_kb_experience(experiment_id, kb_experience)
-    except Exception as exc:  # noqa: BLE001 - KB accounting must not fail the run
+    except (OSError, ValueError, TypeError) as exc:
         click.echo(
             f"Warning: failed to record KB experience for experiment {experiment_id}: {exc}",
             err=True,
@@ -1298,7 +1255,7 @@ class ForgeLoopRequest:
             default="",
             callback=_validate_optional_agent_provider,
             help="Registered provider for the AVO supervisor. Omit to follow "
-            "the effectively resolved Implementer provider, so one "
+            "the provider of the Agent profile running the search, so one "
             "--agent-backend value controls every local agent.",
         ),
         click.option(
@@ -1594,6 +1551,12 @@ def forge_loop(request: ForgeLoopRequest):
         campaign_store=campaign_store,
         has_run_artifacts=has_run_artifacts,
     )
+    from kernelforge.cli.relay import resolve_relay_policy
+
+    agent_runtime_overrides = _agent_runtime_overrides(request.agent)
+    requested_relay_policy = resolve_relay_policy(
+        Config.from_env(workspace=str(workspace), knowledge_config=knowledge_config, **agent_runtime_overrides)
+    )
 
     try:
         resolution = resolve_campaign(
@@ -1616,6 +1579,7 @@ def forge_loop(request: ForgeLoopRequest):
                 nproc_per_node=request.loop_shape.nproc_per_node,
                 bench_repeat=request.loop_shape.bench_repeat,
                 commit_new_paths=tuple(request.loop_shape.commit_new_paths),
+                agent_relay=requested_relay_policy,
             ),
             resume=resume,
             prepare_task=request.prepare_task,
@@ -1666,7 +1630,7 @@ def forge_loop(request: ForgeLoopRequest):
     ):
         if _value is not None:
             overrides[_name] = _value
-    overrides.update(_agent_runtime_overrides(request.agent))
+    overrides.update(agent_runtime_overrides)
     if gpu_target:
         os.environ["GPU_TARGET"] = gpu_target
     config = Config.from_env(
@@ -1674,6 +1638,13 @@ def forge_loop(request: ForgeLoopRequest):
         knowledge_config=knowledge_config,
         **overrides,
     )
+    from kernelforge.cli.relay import probe_agent_profiles, resolve_session_relay
+
+    try:
+        session_relay = resolve_session_relay(campaign.agent_relay, config)
+    except ValueError as error:
+        raise click.ClickException(str(error)) from error
+    startup_availability = probe_agent_profiles(session_relay, config=config, workspace=str(workspace))
     # Two roots by design: resume artifacts (run_state/candidates/best) always live under
     # <workspace>/forge_experiments (campaign_root); diagnostics and the external-recovery checkpoint go to
     # --experiments-dir when the caller supplies a distinct one (e.g. Hyperloom's output dir), else campaign_root.
@@ -1711,7 +1682,7 @@ def forge_loop(request: ForgeLoopRequest):
     from kernelforge.loop.runner import IterationConfig
     from kernelforge.tracker import ExperimentTracker, UsageAccumulator, UsageLedgerFile
     from kernelforge.loop.gate_settings import GateMeasurement
-    from kernelforge.orchestrator.agent import ImplementerSetup, ImplementerTask, SessionOptions, make_agent_fn
+    from kernelforge.orchestrator.agent import ImplementerSetup, ImplementerTask, SessionOptions
     from kernelforge.roofline_ceiling.command import AnalystAgent
 
     iter_config = IterationConfig(
@@ -1911,81 +1882,49 @@ def forge_loop(request: ForgeLoopRequest):
             insession_gate=gate_on,
         ),
     )
-    agent_fn = make_agent_fn(config, implementer_setup, usage=usage)
-    effective_implementer = getattr(
-        agent_fn,
-        "backend_name",
-        selected_runtime.provider,
-    )
-    effective_implementer_model = getattr(
-        agent_fn,
-        "backend_model",
-        selected_runtime.model,
-    )
-    print(f"  Implementer: {effective_implementer} / {effective_implementer_model}")
-
-    # Checked against the backend a lane actually resolves to, not the one that was asked for: a lane repeats the
-    # canonical session's resolution from the same runtime, so a fallback that moved the canonical session moved the
-    # lanes with it.
-    _require_lane_provider_capabilities(effective_implementer, request.loop_shape.lanes)
-
-    _lane_agent_factory = _make_lane_agent_factory(
-        make_agent=make_agent_fn,
-        config=config,
-        binding=LaneBinding(iter_config.workspace_dir, driver, source_files_list),
-        setup=implementer_setup,
-        usage=usage,
-    )
-
+    from kernelforge.cli.relay import SearchActorBuildContext, start_search_actors
     from kernelforge.orchestrator.analysis import make_analysis_agent_service
+    from kernelforge.orchestrator.orchestration import default_specialist_definitions
+
+    specialist_definitions = default_specialist_definitions()
+    actor_builder = SearchActorBuildContext(
+        config=config,
+        setup=implementer_setup,
+        lane_binding=LaneBinding(iter_config.workspace_dir, driver, source_files_list),
+        lanes=request.loop_shape.lanes,
+        program_md=program_md,
+        specialist_definitions=specialist_definitions,
+        critic_enabled=critic_enabled,
+        usage=usage,
+        supervisor_backend=request.roles.supervisor_backend,
+    )
+    try:
+        actors = start_search_actors(
+            session_relay,
+            actor_builder,
+            availability=startup_availability,
+            workspace=str(workspace),
+            resume_profile_id=_resumed_profile_id(state_path),
+        )
+    except (OSError, RuntimeError, ValueError) as error:
+        raise click.ClickException(f"Agent startup availability check failed: {error}") from error
+    start_bundle = actors.start_bundle
+    effective_implementer = start_bundle.profile.provider
+    effective_implementer_model = start_bundle.profile.model
 
     analysis_service = make_analysis_agent_service(
-        config=config,
+        config=actors.analysis_config(config),
         usage=usage,
         timeout_sec=profile_timeout_sec,
         profiling_enabled=profiling_enabled,
     )
     analysis_mode = "profiled" if profiling_enabled else "static-only"
     print("  Analysis Agent: " + analysis_mode)
-
-    from kernelforge.orchestrator.orchestration import (
-        default_specialist_definitions,
-        make_orchestration_service,
-    )
-
-    specialist_definitions = default_specialist_definitions()
-    orchestration_service = make_orchestration_service(
-        config=config,
-        usage=usage,
-        definitions=specialist_definitions,
-        enable_plan_critic=critic_enabled,
-    )
     print(f"  Orchestration: enabled with parallel specialists ({', '.join(sorted(specialist_definitions))})")
     print(
         "  Plan Critic: "
         + ("enabled (long-horizon, same backend/model)" if critic_enabled else "disabled (requires --max-hours > 2)")
     )
-
-    # AVO supervisor (always on): reviews the trajectory on a stall and injects fresh directions.
-    from kernelforge.orchestrator.supervisor import make_supervisor_fn
-
-    sup_backend = request.roles.supervisor_backend or effective_implementer
-    supervisor_fn = make_supervisor_fn(
-        program_md=program_md,
-        gpu_target=config.gpu_target,
-        backend=sup_backend,
-        usage=usage,
-        config=config,
-    )
-    # Report the backend/model resolved by the shared backend preflight.
-    eff_backend = getattr(supervisor_fn, "backend_name", sup_backend)
-    eff_model = getattr(
-        supervisor_fn,
-        "backend_model",
-        config.agent_runtime().model,
-    )
-    fell_back = f" (requested {sup_backend}, fell back)" if eff_backend != sup_backend else ""
-    print(f"  Supervisor: {eff_backend} / {eff_model}{fell_back}")
 
     reporter = _RunReporter(
         run=run,
@@ -2003,11 +1942,12 @@ def forge_loop(request: ForgeLoopRequest):
     asyncio.run(
         loop_runner.run(
             LoopAgents(
-                agent_fn=agent_fn,
-                agent_factory=_lane_agent_factory if request.loop_shape.lanes > 1 else None,
+                agent_fn=start_bundle.agent_fn,
+                agent_factory=start_bundle.agent_factory if request.loop_shape.lanes > 1 else None,
                 analysis_service=analysis_service,
-                orchestration_service=orchestration_service,
-                supervisor_fn=supervisor_fn,
+                orchestration_service=start_bundle.orchestration_service,
+                supervisor_fn=start_bundle.supervisor_fn,
+                search_actors=actors.loop_search_actors,
             ),
             callbacks=LoopCallbacks(
                 on_best_committed=_checkpoint_on_best_committed,

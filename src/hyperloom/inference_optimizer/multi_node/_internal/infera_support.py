@@ -11,9 +11,6 @@ from typing import Any
 from .server_args_safety import prepare_shell_safe_extra_args
 from .ssh_client import DEFAULT_SSH_PORT
 
-# Frontend HTTP port (SaFE common.InferaFrontendPort).
-INFERA_FRONTEND_PORT = 8000
-
 # SSH control plane: hostNetwork pods on the same node share one IP, so each GPU role binds a distinct MN_SSH_PORT
 # (decode offset by ROLE_STRIDE).
 INFERA_SSH_PORT_ROLE_STRIDE = 10
@@ -53,27 +50,21 @@ def pod_targets_from_lists(
     return out
 
 
+def role_ssh_targets(state: dict[str, Any], role: str) -> list[dict[str, Any]]:
+    """SSH targets of one GPU service role (``prefill``, ``decode`` or ``worker``) from multi_node state."""
+    return pod_targets_from_lists(
+        state.get(f"{role}_pods"),
+        state.get(f"{role}_pod_ips"),
+        default_port=int(state.get("ssh_port") or DEFAULT_SSH_PORT) + ssh_role_port_offset(role),
+        default_role=role,
+    )
+
+
 def gpu_ssh_targets_from_state(state: dict[str, Any]) -> list[dict[str, Any]]:
     """Resolve every GPU pod SSH target from multi_node state."""
-    base = int(state.get("ssh_port") or DEFAULT_SSH_PORT)
     if (state.get("pd_mode") or "").lower() == "disaggregated":
-        return pod_targets_from_lists(
-            state.get("prefill_pods"),
-            state.get("prefill_pod_ips"),
-            default_port=base,
-            default_role="prefill",
-        ) + pod_targets_from_lists(
-            state.get("decode_pods"),
-            state.get("decode_pod_ips"),
-            default_port=base + INFERA_SSH_PORT_ROLE_STRIDE,
-            default_role="decode",
-        )
-    return pod_targets_from_lists(
-        state.get("worker_pods"),
-        state.get("worker_pod_ips"),
-        default_port=base,
-        default_role="worker",
-    )
+        return role_ssh_targets(state, "prefill") + role_ssh_targets(state, "decode")
+    return role_ssh_targets(state, "worker")
 
 
 # sglang PD bootstrap rendezvous port (SaFE common.InferaBootstrapPort).
@@ -135,10 +126,6 @@ def build_node_launch_args(launch: NodeLaunch) -> str:
         _INFERA_PID_FILE,
         "--log-file",
         _INFERA_LOG_FILE,
-        "--health-port",
-        str(INFERA_FRONTEND_PORT),
-        "--health-wait-sec",
-        "0",
     ]
     ep = launch.ep
     if ep and int(ep) > 1:

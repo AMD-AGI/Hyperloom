@@ -204,9 +204,59 @@ class PrMaterialization:
     #: Which source produced them: ``explicit`` / ``checkout_head`` /
     #: ``diff_url_fallback`` / ``diff_url``.
     mode: str = ""
-    #: A terminal result dict when nothing applyable could be produced. The
+    #: A terminal result dict when no patch to apply could be produced. The
     #: caller returns it as-is rather than benching an unpatched tree.
     failure: dict[str, Any] | None = None
+
+
+def _materialize_explicit_patches(params: dict[str, Any]) -> PrMaterialization | None:
+    """Resolve the patch files the params name outright, or ``None`` when they name none."""
+    explicit_patches = params.get("patches") or None
+    if not isinstance(explicit_patches, list) or not explicit_patches:
+        return None
+    found: list[Path] = []
+    for entry in explicit_patches:
+        path = Path(str(entry))
+        if path.exists():
+            found.append(path.resolve())
+        else:
+            log.warning("upstream_pr: explicit patch %r not found", entry)
+    if not found:
+        return PrMaterialization(
+            mode="explicit",
+            failure={
+                "status": "no_patch",
+                "error_class": "explicit_patches_missing",
+                "reason": "all explicit patches were missing from disk; refusing to benchmark unpatched tree",
+                "missing_patches": [str(p) for p in explicit_patches],
+            },
+        )
+    return PrMaterialization(patches=found, mode="explicit")
+
+
+def _prefers_checkout_head(
+    candidate: dict[str, Any], params: dict[str, Any], framework_root: Path, diff_url: str
+) -> bool:
+    """Whether to build the patch by checking the PR's head out of the live repo instead of fetching its diff."""
+    apply_mode = str(params.get("apply_mode") or candidate.get("apply_mode") or "").strip().lower()
+    prefer_checkout = bool(params.get("prefer_checkout") or candidate.get("prefer_checkout"))
+    has_checkout_ref = bool(
+        str(candidate.get("head_sha") or "").strip()
+        or str(candidate.get("ref") or "").strip()
+        or bool(_pr_number_of(candidate))
+    )
+    explicit_checkout = apply_mode in {"checkout_head", "checkout-head", "checkout"} or prefer_checkout
+    if not (explicit_checkout or (not diff_url and has_checkout_ref)):
+        return False
+    # Same-repo guard: checkout-head fetches from the live origin, so a cross-repo candidate would fetch the wrong
+    # ref.
+    if _candidate_is_same_repo(candidate, framework_root):
+        return True
+    log.info(
+        "upstream_pr: candidate repo %r differs from live framework_root origin; using diff_url",
+        candidate.get("repo") or candidate.get("discovered_repo_url"),
+    )
+    return False
 
 
 def materialize_candidate_patches(
@@ -218,45 +268,12 @@ def materialize_candidate_patches(
     diff_fetch_timeout_sec: float,
 ) -> PrMaterialization:
     """Resolve an upstream-PR candidate into local patch files; a fetched diff is written to ``dest``."""
-    explicit_patches = params.get("patches") or None
-    if isinstance(explicit_patches, list) and explicit_patches:
-        found: list[Path] = []
-        for entry in explicit_patches:
-            path = Path(str(entry))
-            if path.exists():
-                found.append(path.resolve())
-            else:
-                log.warning("upstream_pr: explicit patch %r not found", entry)
-        if not found:
-            return PrMaterialization(
-                mode="explicit",
-                failure={
-                    "status": "no_patch",
-                    "error_class": "explicit_patches_missing",
-                    "reason": "all explicit patches were missing from disk; refusing to benchmark unpatched tree",
-                    "missing_patches": [str(p) for p in explicit_patches],
-                },
-            )
-        return PrMaterialization(patches=found, mode="explicit")
+    explicit = _materialize_explicit_patches(params)
+    if explicit is not None:
+        return explicit
 
     diff_url = str(candidate.get("diff_url") or "").strip()
-    apply_mode = str(params.get("apply_mode") or candidate.get("apply_mode") or "").strip().lower()
-    prefer_checkout = bool(params.get("prefer_checkout") or candidate.get("prefer_checkout"))
-    has_checkout_ref = bool(
-        str(candidate.get("head_sha") or "").strip()
-        or str(candidate.get("ref") or "").strip()
-        or bool(_pr_number_of(candidate))
-    )
-    explicit_checkout = apply_mode in {"checkout_head", "checkout-head", "checkout"} or prefer_checkout
-    use_checkout_head = explicit_checkout or (not diff_url and has_checkout_ref)
-    # Same-repo guard: checkout-head fetches from the live origin, so a cross-repo candidate would fetch the wrong
-    # ref.
-    if use_checkout_head and not _candidate_is_same_repo(candidate, framework_root):
-        log.info(
-            "upstream_pr: candidate repo %r differs from live framework_root origin; using diff_url",
-            candidate.get("repo") or candidate.get("discovered_repo_url"),
-        )
-        use_checkout_head = False
+    use_checkout_head = _prefers_checkout_head(candidate, params, framework_root, diff_url)
 
     if not diff_url and not use_checkout_head:
         return PrMaterialization(
@@ -275,7 +292,7 @@ def materialize_candidate_patches(
             timeout_sec=diff_fetch_timeout_sec * 4.0,
         )
         if not ok and diff_url:
-            # A worktree/fetch hiccup must not strand an applyable candidate.
+            # A worktree/fetch hiccup must not strand a candidate that would apply.
             log.warning("upstream_pr: checkout-head failed (%s); falling back to diff_url", err)
             mode = "diff_url_fallback"
             ok, err = _fetch_diff_to_path(diff_url, dest, timeout_sec=diff_fetch_timeout_sec)

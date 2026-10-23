@@ -12,9 +12,9 @@ import subprocess
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from kernelforge.llm.git import git
+from kernelforge.tools.git import git
 from kernelforge.kernel_backends.constants import resolve_language_dirs
-from kernelforge.orchestrator.contracts import EvidenceRef
+from kernelforge.orchestrator.contracts import CaseEvidence, EvidenceRef, OrchestrationContext
 from kernelforge.orchestrator.supervisor import latest_supervisor_ruling_path
 from kernelforge.tools.durable_io import atomic_write_text
 
@@ -120,164 +120,149 @@ class AnalysisEvidenceMixin:
 
     def _build_orchestration_context(self):
         """Build one immutable planning context from current loop evidence."""
-        from kernelforge.orchestrator.contracts import (
-            CaseEvidence,
-            EvidenceRef,
-            OrchestrationContext,
-        )
-
         workspace = Path(self.ic.workspace_dir).resolve()
         canonical_commit = self._canonical_commit()
-        analysis_state = self.run_state.analysis
-        evidence_commit = analysis_state.evidence_commit
         cumulative_diff = self._analysis_cumulative_diff(
-            evidence_commit=evidence_commit,
-            canonical_commit=canonical_commit,
+            evidence_commit=self.run_state.analysis.evidence_commit, canonical_commit=canonical_commit
         )
-        cumulative_diff_path = cumulative_diff.path
         source_map_path = Path(self.ic.kernel_file).resolve()
-
         scored_case_ids = [
             case_id for case_id in sorted(self._baseline_case_times) if case_id not in self._unscored_cases
         ]
-        if not scored_case_ids:
-            scored_case_ids = sorted(self._baseline_case_times)
         cases = tuple(
             CaseEvidence(
                 case_id=case_id,
                 latency_ms=(self._best_case_times.get(case_id) or self._baseline_case_times.get(case_id)),
             )
-            for case_id in scored_case_ids
+            for case_id in scored_case_ids or sorted(self._baseline_case_times)
         )
-
-        evidence_refs = []
-        if source_map_path.is_file():
-            evidence_refs.append(
-                EvidenceRef(
-                    kind="source_map",
-                    path=str(source_map_path),
-                    summary="Current source map or anchor source.",
-                )
-            )
-        artifact_candidates = (
-            workspace / "forge_experiments" / "candidates" / "index.jsonl",
-            workspace / "forge_experiments" / "run_state.json",
+        evidence_refs = self._orchestration_evidence_refs(
+            workspace, source_map_path, cumulative_diff.path, canonical_commit
         )
-        for path in artifact_candidates:
-            if path.is_file():
-                evidence_refs.append(
-                    EvidenceRef(
-                        kind=("candidate_archive" if path.name == "index.jsonl" else "run_state"),
-                        path=str(path.resolve()),
-                        summary=f"Current {path.stem.replace('_', ' ')} evidence.",
-                    )
-                )
-        if cumulative_diff_path:
-            evidence_refs.append(
-                EvidenceRef(
-                    kind="analysis_cumulative_diff",
-                    path=cumulative_diff_path,
-                    summary=(
-                        "Cumulative canonical source diff from the Analysis "
-                        f"evidence commit {evidence_commit} to "
-                        f"{canonical_commit}."
-                    ),
-                )
-            )
-        if getattr(self, "lessons", None) is not None:
-            lesson_iterations = self.lessons.existing_iterations()
-            if lesson_iterations:
-                latest_lesson = self.lessons.path(lesson_iterations[-1])
-                evidence_refs.extend(
-                    (
-                        EvidenceRef(
-                            kind="lesson_directory",
-                            path=str(self.lessons.root.resolve()),
-                            summary=(
-                                "Free-form Implementer session records for all "
-                                "completed iterations; historical evidence only."
-                            ),
-                        ),
-                        EvidenceRef(
-                            kind="latest_lesson",
-                            path=str(latest_lesson.resolve()),
-                            summary=(
-                                f"Latest free-form Implementer session record from iteration {lesson_iterations[-1]}."
-                            ),
-                        ),
-                    )
-                )
-        if self._supervisor_ruling:
-            supervisor_path = latest_supervisor_ruling_path(self.ic.workspace_dir)
-            if supervisor_path.is_file():
-                evidence_refs.append(
-                    EvidenceRef(
-                        kind="supervisor_guidance",
-                        path=str(supervisor_path.resolve()),
-                        summary=(
-                            "Latest free-form Supervisor Ruling. It overrides "
-                            "subjective conclusions in historical lesson records "
-                            "but not objective measurements."
-                        ),
-                    )
-                )
         knowledge_index = ""
         local_knowledge_root = getattr(self.config, "local_knowledge_dir", None)
         if local_knowledge_root:
             try:
                 from kernelforge.knowledge import build_forge_knowledge
 
-                stored = (self.ic.kernel_backend or "").strip()
-                backend = stored or self.ic.backend or ""
+                backend = self.ic.kernel_backend.strip() or self.ic.backend
                 root = Path(local_knowledge_root)
-                language = resolve_language_dirs(backend, root)
                 include_aiter = backend == "aiter" or any(
                     "aiter" in Path(source).parts for source in self._target_source_files()
                 )
                 knowledge_index = build_forge_knowledge(
                     root,
-                    language=language,
+                    language=resolve_language_dirs(backend, root),
                     include_aiter=include_aiter,
                     # The orchestration context is inlined into every specialist
                     # and analysis prompt, so the ablation has to reach it too or
                     # it only measures half the knowledge block's cost.
                     defer_all=bool(getattr(self.config, "defer_knowledge_maps", False)),
                 )
-            except Exception:
+            except OSError:
                 log.debug("failed to build orchestration knowledge index", exc_info=True)
 
-        return OrchestrationContext(
-            analysis_commit=canonical_commit,
-            workspace=str(workspace),
-            gpu_target=self.config.gpu_target,
-            objective=(
-                "Preserve correctness and complete benchmark case coverage while "
-                "maximizing equal-weight mean incumbent-to-candidate case speedup."
-            ),
-            program_context=(self.ic.program_md or f"Optimize the kernel at {self.ic.kernel_file}."),
-            source_map_path=str(source_map_path),
-            # The declared source set, verbatim and in campaign order, so the planner is told what it may edit instead
-            # of inferring it from the one path in program_context.
-            editable_sources=tuple(self._target_source_files()),
-            cases=cases,
-            knowledge_index=knowledge_index,
-            supervisor_guidance=self._supervisor_ruling,
-            last_critic_verdict=self._last_critic_verdict,
-            last_critic_review=self._last_critic_review,
-            search_mode=self.run_state.search_mode,
-            search_reason_codes=tuple(self.run_state.search_reason_codes),
-            search_objective=self.run_state.search_objective,
-            search_mode_residence_remaining=(self.run_state.search_mode_residence_remaining),
-            evidence_refs=tuple(evidence_refs),
-            canonical_commit=canonical_commit,
-            evidence_commit=evidence_commit,
-            evidence_stale=bool(evidence_commit and evidence_commit != canonical_commit),
-            evidence_status=analysis_state.evidence_status,
-            evidence_mean_case_speedup=(analysis_state.evidence_mean_case_speedup),
+        return self._with_evidence_standing(
+            OrchestrationContext(
+                analysis_commit=canonical_commit,
+                workspace=str(workspace),
+                gpu_target=self.config.gpu_target,
+                objective=(
+                    "Preserve correctness and complete benchmark case coverage while "
+                    "maximizing equal-weight mean incumbent-to-candidate case speedup."
+                ),
+                program_context=(self.ic.program_md or f"Optimize the kernel at {self.ic.kernel_file}."),
+                source_map_path=str(source_map_path),
+                # The declared source set, verbatim and in campaign order, so the planner is told what it may edit
+                # instead of inferring it from the one path in program_context.
+                editable_sources=tuple(self._target_source_files()),
+                cases=cases,
+                knowledge_index=knowledge_index,
+                supervisor_guidance=self._supervisor_ruling,
+                last_critic_verdict=self._last_critic_verdict,
+                last_critic_review=self._last_critic_review,
+                search_mode=self.run_state.search_mode,
+                search_reason_codes=tuple(self.run_state.search_reason_codes),
+                search_objective=self.run_state.search_objective,
+                search_mode_residence_remaining=(self.run_state.search_mode_residence_remaining),
+                evidence_refs=evidence_refs,
+            )
+        )
+
+    def _with_evidence_standing(self, context):
+        """``context`` with where its Analysis evidence stands against its commit: freshness, scores and diff."""
+        state = self.run_state.analysis
+        commit = context.analysis_commit
+        cumulative_diff = self._analysis_cumulative_diff(evidence_commit=state.evidence_commit, canonical_commit=commit)
+        return replace(
+            context,
+            canonical_commit=commit,
+            evidence_commit=state.evidence_commit,
+            evidence_stale=bool(state.evidence_commit and state.evidence_commit != commit),
+            evidence_status=state.evidence_status,
+            evidence_mean_case_speedup=state.evidence_mean_case_speedup,
             current_mean_case_speedup=self.best_mean_case_speedup,
-            cumulative_diff_path=cumulative_diff_path,
+            cumulative_diff_path=cumulative_diff.path,
             cumulative_diff_error=cumulative_diff.error,
         )
+
+    def _orchestration_evidence_refs(
+        self, workspace: Path, source_map_path: Path, cumulative_diff_path: str, canonical_commit: str
+    ) -> tuple[EvidenceRef, ...]:
+        """The artifacts a planning context cites as evidence, each one only while it exists."""
+        experiments = workspace / "forge_experiments"
+        refs = [
+            EvidenceRef(kind=kind, path=str(path.resolve()), summary=summary)
+            for kind, path, summary in (
+                ("source_map", source_map_path, "Current source map or anchor source."),
+                ("candidate_archive", experiments / "candidates" / "index.jsonl", "Current index evidence."),
+                ("run_state", experiments / "run_state.json", "Current run state evidence."),
+            )
+            if path.is_file()
+        ]
+        if cumulative_diff_path:
+            refs.append(
+                EvidenceRef(
+                    kind="analysis_cumulative_diff",
+                    path=cumulative_diff_path,
+                    summary=(
+                        "Cumulative canonical source diff from the Analysis evidence commit "
+                        f"{self.run_state.analysis.evidence_commit} to {canonical_commit}."
+                    ),
+                )
+            )
+        lesson_iterations = self.lessons.existing_iterations() if getattr(self, "lessons", None) is not None else []
+        if lesson_iterations:
+            refs.append(
+                EvidenceRef(
+                    kind="lesson_directory",
+                    path=str(self.lessons.root.resolve()),
+                    summary=(
+                        "Free-form Implementer session records for all completed iterations; historical evidence only."
+                    ),
+                )
+            )
+            refs.append(
+                EvidenceRef(
+                    kind="latest_lesson",
+                    path=str(self.lessons.path(lesson_iterations[-1]).resolve()),
+                    summary=f"Latest free-form Implementer session record from iteration {lesson_iterations[-1]}.",
+                )
+            )
+        if self._supervisor_ruling:
+            supervisor_path = latest_supervisor_ruling_path(self.ic.workspace_dir)
+            if supervisor_path.is_file():
+                refs.append(
+                    EvidenceRef(
+                        kind="supervisor_guidance",
+                        path=str(supervisor_path.resolve()),
+                        summary=(
+                            "Latest free-form Supervisor Ruling. It overrides subjective conclusions in historical "
+                            "lesson records but not objective measurements."
+                        ),
+                    )
+                )
+        return tuple(refs)
 
     @staticmethod
     def _looks_like_git_commit(value: str) -> bool:
@@ -394,27 +379,28 @@ class AnalysisEvidenceMixin:
         state = self.run_state.analysis
         evidence_commit = state.evidence_commit
         stale = bool(evidence_commit and evidence_commit != context.analysis_commit)
+        stale_flags = ("analysis_evidence_stale",) if stale else ()
+        attached = replace(
+            context,
+            evidence_commit=evidence_commit,
+            evidence_stale=stale,
+            evidence_status=state.evidence_status,
+            evidence_mean_case_speedup=(state.evidence_mean_case_speedup),
+        )
+        refs = {reference.path: reference for reference in context.evidence_refs}
 
         previous = self._active_analysis_context
-        previous_evidence_commit = getattr(previous, "evidence_commit", "") if previous is not None else ""
-        if previous is not None and previous_evidence_commit == evidence_commit:
+        if previous is not None and previous.evidence_commit == evidence_commit:
             current_cases = {case.case_id: case for case in context.cases}
-            cases = []
-            for old_case in previous.cases:
-                current = current_cases.get(old_case.case_id)
-                if current is None:
-                    continue
-                flags = list(old_case.flags)
-                if stale:
-                    flags.append("analysis_evidence_stale")
-                cases.append(
-                    replace(
-                        old_case,
-                        latency_ms=current.latency_ms,
-                        flags=tuple(dict.fromkeys(flags)),
-                    )
+            cases = [
+                replace(
+                    old_case,
+                    latency_ms=current_cases[old_case.case_id].latency_ms,
+                    flags=tuple(dict.fromkeys((*old_case.flags, *stale_flags))),
                 )
-            refs = {reference.path: reference for reference in context.evidence_refs}
+                for old_case in previous.cases
+                if old_case.case_id in current_cases
+            ]
             superseded_kinds = {
                 "analysis_cumulative_diff",
                 "candidate_archive",
@@ -423,14 +409,8 @@ class AnalysisEvidenceMixin:
                 "run_state",
                 "supervisor_guidance",
             }
-            refs.update(
-                {
-                    reference.path: reference
-                    for reference in previous.evidence_refs
-                    if reference.kind not in superseded_kinds
-                }
-            )
-            if stale and previous.source_map_path:
+            refs.update((ref.path, ref) for ref in previous.evidence_refs if ref.kind not in superseded_kinds)
+            if stale:
                 source_map = Path(previous.source_map_path).resolve()
                 if source_map.is_file():
                     refs[str(source_map)] = EvidenceRef(
@@ -439,37 +419,47 @@ class AnalysisEvidenceMixin:
                         summary=(f"Source map produced with the stale Analysis evidence at commit {evidence_commit}."),
                     )
             return replace(
-                context,
+                attached,
                 source_map_path=(context.source_map_path if stale else previous.source_map_path),
                 cases=tuple(cases) if cases else context.cases,
                 evidence_refs=tuple(refs.values()),
-                evidence_commit=evidence_commit,
-                evidence_stale=stale,
-                evidence_status=state.evidence_status,
-                evidence_mean_case_speedup=(state.evidence_mean_case_speedup),
             )
 
         root = self._published_analysis_bundle_root(evidence_commit)
         if root is None:
-            return replace(
-                context,
-                evidence_commit=evidence_commit,
-                evidence_stale=stale,
-                evidence_status=state.evidence_status,
-                evidence_mean_case_speedup=(state.evidence_mean_case_speedup),
-            )
-
-        refs = {reference.path: reference for reference in context.evidence_refs}
+            return attached
         root = root.resolve()
-        refs[str(root)] = EvidenceRef(
-            kind="analysis_bundle",
-            path=str(root),
-            summary=(
-                "Last published Analysis bundle. "
-                f"Measured commit: {evidence_commit}. "
-                f"Current canonical: {context.analysis_commit}."
+        refs.update(self._published_bundle_refs(root, evidence_commit, context.analysis_commit))
+        source_map = (root / "source_map.md").resolve()
+        if source_map.is_file():
+            refs[str(source_map)] = EvidenceRef(
+                kind="analysis_source_map",
+                path=str(source_map),
+                summary=(f"Source map produced with the Analysis evidence at commit {evidence_commit}."),
+            )
+        return replace(
+            attached,
+            source_map_path=(str(source_map) if source_map.is_file() and not stale else context.source_map_path),
+            cases=tuple(
+                replace(case, flags=tuple(dict.fromkeys((*case.flags, *stale_flags)))) for case in context.cases
             ),
+            evidence_refs=tuple(refs.values()),
         )
+
+    @staticmethod
+    def _published_bundle_refs(root: Path, evidence_commit: str, canonical_commit: str) -> dict[str, EvidenceRef]:
+        """References to a published bundle, its catalog, report and workflow, and each artifact it catalogues."""
+        refs = {
+            str(root): EvidenceRef(
+                kind="analysis_bundle",
+                path=str(root),
+                summary=(
+                    "Last published Analysis bundle. "
+                    f"Measured commit: {evidence_commit}. "
+                    f"Current canonical: {canonical_commit}."
+                ),
+            )
+        }
         for name, kind, summary in (
             (
                 "artifact_catalog.json",
@@ -498,17 +488,13 @@ class AnalysisEvidenceMixin:
         if catalog_path.is_file():
             try:
                 catalog = json.loads(catalog_path.read_text())
-            except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            except (OSError, ValueError):
                 catalog = {}
             for artifact in catalog.get("artifacts", []):
                 if not isinstance(artifact, dict):
                     continue
                 path = Path(str(artifact.get("path") or "")).resolve()
-                try:
-                    path.relative_to(root)
-                except ValueError:
-                    continue
-                if not path.exists():
+                if not path.is_relative_to(root) or not path.exists():
                     continue
                 refs[str(path)] = EvidenceRef(
                     kind=str(artifact.get("kind") or "analysis_artifact"),
@@ -517,38 +503,7 @@ class AnalysisEvidenceMixin:
                         f"{artifact.get('description') or 'Analysis artifact'} from evidence commit {evidence_commit}."
                     ),
                 )
-
-        source_map = (root / "source_map.md").resolve()
-        if source_map.is_file():
-            refs[str(source_map)] = EvidenceRef(
-                kind="analysis_source_map",
-                path=str(source_map),
-                summary=(f"Source map produced with the Analysis evidence at commit {evidence_commit}."),
-            )
-        stale_cases = tuple(
-            replace(
-                case,
-                flags=tuple(
-                    dict.fromkeys(
-                        [
-                            *case.flags,
-                            *(["analysis_evidence_stale"] if stale else []),
-                        ]
-                    )
-                ),
-            )
-            for case in context.cases
-        )
-        return replace(
-            context,
-            source_map_path=(str(source_map) if source_map.is_file() and not stale else context.source_map_path),
-            cases=stale_cases,
-            evidence_refs=tuple(refs.values()),
-            evidence_commit=evidence_commit,
-            evidence_stale=stale,
-            evidence_status=state.evidence_status,
-            evidence_mean_case_speedup=(state.evidence_mean_case_speedup),
-        )
+        return refs
 
     def _build_supervisor_evidence_context(self, iteration: int) -> str:
         """Serialize current profiling and search evidence for stall review."""
@@ -634,34 +589,29 @@ class AnalysisEvidenceMixin:
             f"Evidence stale: {'yes' if context.evidence_stale else 'no'}",
             f"Source map: {context.source_map_path}",
         ]
-        if context.evidence_stale:
-            if context.cumulative_diff_error:
-                lines.append(
-                    "The profiling evidence predates the current canonical and "
-                    "the cumulative diff is unavailable. Treat inherited "
-                    "measurements as historical evidence only, inspect the "
-                    "current source directly, and never present them as current."
-                )
-            else:
-                lines.append(
-                    "The profiling evidence predates the current canonical. Use "
-                    "the current timings and cumulative diff to interpret it; "
-                    "never present inherited measurements as current."
-                )
+        if context.evidence_stale and context.cumulative_diff_error:
+            lines.append(
+                "The profiling evidence predates the current canonical and "
+                "the cumulative diff is unavailable. Treat inherited "
+                "measurements as historical evidence only, inspect the "
+                "current source directly, and never present them as current."
+            )
+        elif context.evidence_stale:
+            lines.append(
+                "The profiling evidence predates the current canonical. Use "
+                "the current timings and cumulative diff to interpret it; "
+                "never present inherited measurements as current."
+            )
         if context.cumulative_diff_path:
             lines.append(f"Cumulative diff since evidence: {context.cumulative_diff_path}")
         elif context.cumulative_diff_error:
             lines.append(f"Cumulative diff unavailable: {context.cumulative_diff_error}")
         if catalog is not None:
-            lines.extend(
-                (
-                    f"Artifact catalog: {catalog.path}",
-                    (
-                        "The catalog states what every file contains, which "
-                        "information it exposes, and whether the artifact is "
-                        "COMPLETE, AVAILABLE, SKIPPED, or FAILED."
-                    ),
-                )
+            lines.append(f"Artifact catalog: {catalog.path}")
+            lines.append(
+                "The catalog states what every file contains, which "
+                "information it exposes, and whether the artifact is "
+                "COMPLETE, AVAILABLE, SKIPPED, or FAILED."
             )
         lines.extend(f"{reference.kind}: {reference.path}" for reference in analysis_refs)
         if any("analysis_static_only" in case.flags for case in context.cases):

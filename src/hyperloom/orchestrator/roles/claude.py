@@ -11,14 +11,15 @@ import importlib
 import json
 import logging
 import os
-import shutil
 import signal
+import tempfile
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 from urllib.parse import urlsplit
 
+from hyperloom.common.agent_cli import resolve_claude_executable
 from hyperloom.common.llm_config import claude_sdk_env_options
 from hyperloom.common.reasoning_effort import REASONING_EFFORT_RANK
 from hyperloom.inference_optimizer.protocol.intent import (
@@ -50,9 +51,9 @@ from hyperloom.inference_optimizer.protocol.intent import IntentType
 from .mcp_emit_intent import (
     EMIT_INTENT_TOOL_NAME,
     EMIT_INTENT_TOOL_QUALIFIED,
-    EMIT_INTENT_TOOL_INPUT_SCHEMA,
     MCP_SERVER_NAME,
     build_emit_intent_server,
+    build_emit_intent_tool_input_schema,
     coerce_emit_intent_input,
     constraints_sentence,
     decode_emit_intent_input,
@@ -299,31 +300,12 @@ _EFFORT_ENV: str = "INFERENCE_OPTIMIZER_CLAUDE_EFFORT"
 _EFFORT_ENV_ORCH: str = "INFERENCE_OPTIMIZER_CLAUDE_ORCHESTRATION_EFFORT"
 _EFFORT_ENV_KERNEL: str = "INFERENCE_OPTIMIZER_CLAUDE_KERNEL_EFFORT"
 _THINKING_ENV: str = "INFERENCE_OPTIMIZER_CLAUDE_THINKING"
-_CLI_PATH_ENV: str = "HYPERLOOM_CLAUDE_CLI_PATH"
-# The kernel-agent installer records the Claude CLI it resolved here (``kernel-agent.env.sh``).
-_INSTALLER_CLI_ENV: str = "GEAK_CLAUDE_BIN"
 
 # Per-role (env override, default effort) for :attr:`ClaudeBackend.effort_role`.
 _EFFORT_ROLES: dict[str, tuple[str, str]] = {
     "orchestration": (_EFFORT_ENV_ORCH, "medium"),
     "kernel": (_EFFORT_ENV_KERNEL, "low"),
 }
-
-
-def resolve_claude_executable() -> str:
-    """Resolve the Claude CLI Hyperloom's agents run, in-process and as subprocesses.
-
-    Order: ``$HYPERLOOM_CLAUDE_CLI_PATH`` (the operator pin), then the installer's record in ``$GEAK_CLAUDE_BIN``,
-    then ``claude`` on ``$PATH``. The installer may place the CLI outside ``$PATH`` (``~/.local/bin``).
-
-    Returns:
-        The resolved executable path, or ``""`` when none is executable.
-    """
-    for env_name in (_CLI_PATH_ENV, _INSTALLER_CLI_ENV):
-        candidate = os.environ.get(env_name, "").strip()
-        if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
-            return candidate
-    return shutil.which("claude") or ""
 
 
 def _import_sdk() -> tuple[Any, Any, Any]:
@@ -352,7 +334,7 @@ class ClaudeBackend:
     # Raw single-shot completion mode: skips the emit_intent server + suffix, disallows all tools, and returns
     # ``raw_text`` without an emitted intent.
     raw_completion: bool = False
-    # Role's allowed intent set for the output-format suffix. None = all IntentType values.
+    # Role's allowed intent set for the emit_intent tool and the output-format suffix. None = all IntentType values.
     allowed_intents: frozenset[IntentType] | None = None
     # Idle timeout for one ``run()`` call: max wall-clock gap allowed BETWEEN streamed SDK messages before the turn is
     # aborted.
@@ -379,6 +361,8 @@ class ClaudeBackend:
     name: str = "claude"
     # Which prompt modules describe a surface this backend actually has.
     transport = TRANSPORT_TOOLS
+    # The system prompt is cached across turns, so the stable session context is sent in it.
+    system_prompt_cached = True
     calls: list[dict[str, Any]] = field(default_factory=list)
     mcp_server_config: Any | None = field(default=None, init=False)
     mcp_tool_name: str | None = field(default=None, init=False)
@@ -396,6 +380,8 @@ class ClaudeBackend:
     _abandoned_turns: set[asyncio.Task[Any]] = field(default_factory=set, init=False)
     # Stops of turns whose caller was cancelled: they outlive that caller, so they are held here until they finish.
     _turn_stoppers: set[asyncio.Task[Any]] = field(default_factory=set, init=False)
+    # System prompt files: the CLI's command-line arguments are capped at 128 KiB.
+    _system_prompt_dir: tempfile.TemporaryDirectory[str] | None = field(default=None, init=False)
 
     def __post_init__(self) -> None:
         """Resolve the SDK and optionally register the ``emit_intent`` tool."""
@@ -422,8 +408,10 @@ class ClaudeBackend:
                     sdk_module=self.sdk_module,
                     tool_factory=self.mcp_tool_factory,
                     server_factory=self.mcp_server_factory,
+                    allowed_intents=self._offered_intents,
                 )
             except Exception as exc:  # noqa: BLE001
+                log.warning("emit_intent MCP setup failed: %s", exc)
                 self.calls.append({"warn": f"emit_intent MCP setup failed: {exc!r}"})
                 self._mcp_setup_error = f"{type(exc).__name__}: {exc}"
                 cfg = None
@@ -594,12 +582,16 @@ class ClaudeBackend:
         )
 
     # Internals
+    @property
+    def _offered_intents(self) -> frozenset[IntentType]:
+        """The intent types the agent is offered: the role's set, or every type when none is given."""
+        return self.allowed_intents if self.allowed_intents is not None else frozenset(IntentType)
+
     def _compose_prompt(self, prompt: str) -> str:
         """Append the emit_intent output-format suffix unless in raw mode."""
         if self.raw_completion:
             return prompt
-        intents = self.allowed_intents if self.allowed_intents is not None else frozenset(IntentType)
-        return f"{prompt}\n\n{_build_output_instructions(intents)}"
+        return f"{prompt}\n\n{_build_output_instructions(self._offered_intents)}"
 
     def set_context_provider(self, provider: ContextProvider | None) -> None:
         """Attach (or clear) the read-only context-pull MCP server."""
@@ -614,6 +606,7 @@ class ClaudeBackend:
                 server_factory=self.mcp_server_factory,
             )
         except Exception as exc:  # noqa: BLE001
+            log.warning("context tools MCP setup failed: %s", exc)
             self.calls.append({"warn": f"context tools MCP setup failed: {exc!r}"})
             self._context_server_config = None
 
@@ -623,7 +616,9 @@ class ClaudeBackend:
 
     def get_mcp_setup_diagnostic(self) -> dict[str, Any]:
         """Return the current MCP setup snapshot: what Hyperloom configured and what the CLI offered the model."""
-        schema = json.dumps(EMIT_INTENT_TOOL_INPUT_SCHEMA, sort_keys=True, separators=(",", ":"))
+        schema = json.dumps(
+            build_emit_intent_tool_input_schema(self._offered_intents), sort_keys=True, separators=(",", ":")
+        )
         diag = self.get_turn_diagnostic()
         mcp_tools = self._cli_init.get("mcp_tools")
         return {
@@ -781,13 +776,22 @@ class ClaudeBackend:
         if cli_path:
             kwargs["cli_path"] = cli_path
         if system_prompt:
-            kwargs["system_prompt"] = system_prompt
+            kwargs["system_prompt"] = self._system_prompt_file(system_prompt)
         self._apply_sdk_env_options(kwargs)
         if turn_marker:
             # options.env is merged over the inherited environment, so a marker-only dict changes nothing else.
             kwargs["env"] = {**dict(kwargs.get("env") or {}), _TURN_MARKER_ENV: turn_marker}
         self._apply_effort_options(kwargs)
         return kwargs
+
+    def _system_prompt_file(self, system_prompt: str) -> dict[str, str]:
+        """The SDK option that hands the CLI ``system_prompt`` as a file, written once per distinct text."""
+        if self._system_prompt_dir is None:
+            self._system_prompt_dir = tempfile.TemporaryDirectory(prefix="hyperloom-system-prompt-")
+        path = Path(self._system_prompt_dir.name) / f"{hashlib.sha256(system_prompt.encode()).hexdigest()}.md"
+        if not path.exists():
+            path.write_text(system_prompt, encoding="utf-8")
+        return {"type": "file", "path": str(path)}
 
     @staticmethod
     def _raw_completion_option_kwargs(disallowed_tools: list[str] | None) -> dict[str, Any]:
@@ -1056,8 +1060,8 @@ class ClaudeBackend:
             return
         try:
             await aclose()
-        except Exception:  # noqa: BLE001 — cleanup must not mask the turn result
-            pass
+        except Exception:  # cleanup must not mask the turn result
+            log.debug("claude SDK stream aclose failed", exc_info=True)
 
     @staticmethod
     def _iter_blocks(message: Any):
@@ -1173,4 +1177,4 @@ class ClaudeBackend:
         return t if isinstance(t, str) else ""
 
 
-__all__ = ["ClaudeBackend", "resolve_claude_executable"]
+__all__ = ["ClaudeBackend"]

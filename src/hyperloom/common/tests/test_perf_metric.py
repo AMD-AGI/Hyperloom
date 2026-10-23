@@ -322,6 +322,18 @@ def test_output_per_gpu_is_left_unstamped_without_a_chip_count():
         assert GRADED_OUTPUT_PER_GPU not in measurement, f"chips={chips!r} should leave the axis unstamped"
 
 
+def test_a_stamped_copy_carries_the_per_gpu_output_and_leaves_its_source_alone():
+    from hyperloom.common.perf_metric import with_output_per_gpu
+
+    source = {"output_throughput": 1120.0, "ttft_mean_ms": 100.0}
+    assert with_output_per_gpu(source, 8) == {
+        "output_throughput": 1120.0,
+        "ttft_mean_ms": 100.0,
+        "output_tput_per_gpu": 140.0,
+    }
+    assert source == {"output_throughput": 1120.0, "ttft_mean_ms": 100.0}
+
+
 def test_graded_axes_publish_the_display_figures():
     """SBD reads these through graded_axes_of, so they have to survive the projection."""
     from hyperloom.common.perf_metric import GRADED_AXIS_KEYS, GRADED_OUTPUT_PER_GPU, graded_axes_of
@@ -362,3 +374,31 @@ def test_the_comparability_inputs_are_published_axes():
     # Zero errors is a measured fact, not a missing one: coalescing it away would publish the clean round and the
     # unreported round as the same thing.
     assert axes[GRADED_ERROR_RATE] == 0.0
+
+
+def test_baseline_on_axis_reads_the_graded_axis_of_the_baseline_snapshot():
+    from types import SimpleNamespace
+
+    from hyperloom.common.perf_metric import GRADED_INTVTY_P50, baseline_on_axis
+
+    state = SimpleNamespace(baseline_tput=183.44, baseline_perf=perf_snapshot_from_mapping(_BASELINE))
+    assert baseline_on_axis(state, GRADED_INTVTY_P50) == 56.55
+    assert baseline_on_axis(state, GRADED_INTVTY) == 22.56
+
+
+def test_baseline_on_axis_reads_the_output_baseline_for_an_output_objective():
+    from types import SimpleNamespace
+
+    from hyperloom.common.perf_metric import GRADED_OUTPUT, baseline_on_axis
+
+    state = SimpleNamespace(baseline_tput=183.44, baseline_perf={})
+    assert baseline_on_axis(state, GRADED_OUTPUT) == 183.44
+
+
+def test_baseline_on_axis_is_none_when_the_axis_was_not_measured():
+    from types import SimpleNamespace
+
+    from hyperloom.common.perf_metric import GRADED_INTVTY_P50, GRADED_OUTPUT, baseline_on_axis
+
+    assert baseline_on_axis(SimpleNamespace(baseline_tput=183.44, baseline_perf={}), GRADED_INTVTY_P50) is None
+    assert baseline_on_axis(SimpleNamespace(baseline_tput=0.0, baseline_perf={}), GRADED_OUTPUT) is None

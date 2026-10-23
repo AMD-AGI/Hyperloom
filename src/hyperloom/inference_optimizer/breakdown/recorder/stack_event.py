@@ -381,7 +381,7 @@ def assemble_stack_ext(
     )
     baseline = _float_or_none(header.get("baseline_tput"))
     measured = [row for row in adoptions if _float_or_none(row.get("contribution_pct")) is not None]
-    attributed = round(sum(float(row["contribution_pct"]) for row in measured), 6) if measured else 0.0
+    attributed = round(sum(float(row["contribution_pct"]) for row in measured), 6) if measured else None
     # Not a sum: asking two figures the same question is how the ledger checks
     # itself below.
     chain_total = _last_cumulative(adoptions)
@@ -410,13 +410,17 @@ def assemble_stack_ext(
         "attributed_gain_pct": attributed,
         # Adoptions kept for a reason other than a gain (a correctness fix) are
         # not throughput wins, so this caliber leaves them out.
-        "attributed_gain_pct_excluding_fixes": round(
-            attributed - sum(float(b["total_gain_pct"]) for b in by_keep_reason.values()), 6
+        "attributed_gain_pct_excluding_fixes": (
+            round(attributed - sum(float(b["total_gain_pct"]) for b in by_keep_reason.values()), 6)
+            if attributed is not None
+            else None
         ),
         "chain_total_gain_pct": chain_total,
         # Throughput no adoption claims, the anchor having moved between two
         # measurements. An identity: the sum of the chain breaks below.
-        "unattributed_gain_pct": (round(chain_total - attributed, 6) if chain_total is not None and measured else None),
+        "unattributed_gain_pct": (
+            round(chain_total - attributed, 6) if chain_total is not None and attributed is not None else None
+        ),
         "validated_total_gain_pct": recorded_total,
         # The ledger against the one figure measured on the whole stack: the
         # parts and the whole disagreeing means one of them is wrong.

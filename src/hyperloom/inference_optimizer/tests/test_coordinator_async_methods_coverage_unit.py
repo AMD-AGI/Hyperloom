@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -391,7 +392,7 @@ async def test_compose_prompt_orchestration_with_time_budget(coord: Coordinator)
     coord._run_started_monotonic = time.monotonic() - 60.0
     coord._run_deadline = Deadline.after(600.0)
     coord.shared_state.max_minutes = 60
-    out = await coord.conversation.compose_prompt("orchestration")
+    out = (await coord.conversation.compose_prompt("orchestration")).text
     assert "SESSION_DIR=" in out
     assert "Mission progress" in out
     assert "Time budget" in out
@@ -403,7 +404,7 @@ async def test_compose_prompt_orchestration_deadline_imminent_warning(coord: Coo
     coord._run_deadline = Deadline.after(60.0)
     coord.shared_state.max_minutes = 60
     coord.shared_state.closing_phase = False
-    out = await coord.conversation.compose_prompt("orchestration")
+    out = (await coord.conversation.compose_prompt("orchestration")).text
     assert "< 5 min remaining" in out
 
 
@@ -412,7 +413,7 @@ async def test_compose_prompt_kernel(coord: Coordinator) -> None:
     coord._run_started_monotonic = time.monotonic() - 60.0
     coord._run_deadline = Deadline.after(600.0)
     coord.shared_state.max_minutes = 60
-    out_k = await coord.conversation.compose_prompt("kernel_agent")
+    out_k = (await coord.conversation.compose_prompt("kernel_agent")).text
     assert "SESSION_DIR=" in out_k
 
 
@@ -449,7 +450,7 @@ def _stub_advisories(coord: Coordinator, monkeypatch) -> list[str]:
 async def test_compose_prompt_keeps_the_orchestration_advisory_order(coord: Coordinator, monkeypatch) -> None:
     markers = _stub_advisories(coord, monkeypatch)
 
-    prompt = await coord.conversation.compose_prompt("orchestration")
+    prompt = (await coord.conversation.compose_prompt("orchestration")).text
 
     for (heading, _owner, _producer), marker in zip(_ORCHESTRATION_ADVISORIES, markers):
         assert (marker if heading is None else f"{heading}\n{marker}") in prompt
@@ -461,7 +462,7 @@ async def test_compose_prompt_keeps_the_orchestration_advisory_order(coord: Coor
 async def test_compose_prompt_withholds_every_advisory_from_a_reviewer(coord: Coordinator, monkeypatch) -> None:
     markers = _stub_advisories(coord, monkeypatch)
 
-    prompt = await coord.conversation.compose_prompt("critic")
+    prompt = (await coord.conversation.compose_prompt("critic")).text
 
     assert [marker for marker in markers if marker in prompt] == []
 
@@ -474,7 +475,7 @@ async def test_compose_prompt_drops_the_heading_of_an_advisory_that_produced_not
     _stub_advisories(coord, monkeypatch)
     monkeypatch.setattr(coord.conversation, "plateau_advisory_block", lambda: "")
 
-    prompt = await coord.conversation.compose_prompt("orchestration")
+    prompt = (await coord.conversation.compose_prompt("orchestration")).text
 
     assert "=== Plateau advisory ===" not in prompt
     # The trajectory digest is shown only on a plateau, so it goes with it.
@@ -492,11 +493,80 @@ async def test_compose_prompt_puts_the_trajectory_review_under_the_plateau_advis
     _stub_advisories(coord, monkeypatch)
     monkeypatch.setattr(trajectory_reviewer, "build_trajectory_digest", lambda *_a, **_k: "<trajectory>")
 
-    prompt = await coord.conversation.compose_prompt("orchestration")
+    prompt = (await coord.conversation.compose_prompt("orchestration")).text
 
     assert (
         "=== Plateau advisory ===\n<plateau_advisory_block>\n=== Trajectory review (advisory) ===\n<trajectory>"
     ) in prompt
+
+
+def _unreadable(message: str):
+    def _fail(*_a, **_k):
+        raise RuntimeError(message)
+
+    return _fail
+
+
+def _error_messages(caplog) -> list[str]:
+    return [r.getMessage() for r in caplog.records if r.levelname == "ERROR"]
+
+
+@pytest.mark.asyncio
+async def test_trajectory_reviewer_task_is_seeded_without_a_digest_when_the_digest_fails(
+    coord: Coordinator, monkeypatch, caplog
+) -> None:
+    from hyperloom.orchestrator.knowledge import trajectory_reviewer
+
+    created: list[dict] = []
+
+    async def _create_or_return_existing(**kwargs):
+        created.append(kwargs["params"])
+        return SimpleNamespace(task_id="t-1"), False
+
+    async def _warm(_params):
+        return None
+
+    monkeypatch.setattr(trajectory_reviewer, "build_trajectory_digest", _unreadable("journal unreadable"))
+    monkeypatch.setattr(coord.conversation, "plateau_advisory_block", lambda: "plateau")
+    monkeypatch.setattr(coord.specialist_dispatch, "warm_specialist_params", _warm)
+    monkeypatch.setattr(coord.gpu_lanes, "framework_authoring_lanes_ttl", lambda params, *, base_ttl_sec: ([], 60))
+    monkeypatch.setattr(coord.tasks, "create_or_return_existing", _create_or_return_existing)
+
+    with caplog.at_level("ERROR"):
+        await coord.phase_internal.maybe_enqueue_trajectory_reviewer()
+
+    (params,) = created
+    assert params["gap_symptom"].endswith("exhausted ones).\n(no digest)")
+    assert _error_messages(caplog) == ["Coordinator: trajectory review digest failed"]
+
+
+def test_primary_gap_lookup_failure_propagates(coord: Coordinator, monkeypatch) -> None:
+    from hyperloom.inference_optimizer.baseline_comparison import research_hints as rh
+
+    monkeypatch.setattr(rh, "load_competitor_target", _unreadable("target unreadable"))
+    coord.shared_state.target_advisory_enabled = True
+
+    with pytest.raises(RuntimeError, match="target unreadable"):
+        coord.conversation._current_primary_gap()
+
+
+@pytest.mark.parametrize("failing", ["load_hints", "load_competitor_target"])
+def test_priors_match_advisory_logs_one_failure_and_yields_no_block(
+    coord: Coordinator, monkeypatch, caplog, failing: str
+) -> None:
+    from hyperloom.inference_optimizer.baseline_comparison import research_hints as rh
+
+    monkeypatch.setattr(coord.conversation, "_recent_proposed_variants", lambda: [{"name": "v"}])
+    monkeypatch.setattr(rh, "load_hints", lambda _session_dir: {})
+    monkeypatch.setattr(rh, "load_competitor_target", lambda _session_dir: None)
+    monkeypatch.setattr(rh, failing, _unreadable("hints unreadable"))
+    coord.shared_state.target_advisory_enabled = True
+
+    with caplog.at_level("ERROR"):
+        block = coord.conversation._priors_match_advisory_block()
+
+    assert block == ""
+    assert _error_messages(caplog) == ["Coordinator: priors-match advisory failed"]
 
 
 # -- advisory blocks -------------------------------------------------------
@@ -864,7 +934,7 @@ def test_is_promotable_result_unchanged_for_reverted_integrate_patch(coord: Coor
 async def test_compose_prompt_renders_the_gap_to_the_gain_objective(coord: Coordinator) -> None:
     coord._current_objective = TargetGainObjective(target_gain_pct=20.0)
     coord.shared_state.cumulative_gain_validated = 5.0
-    text = await coord.conversation.compose_prompt("orchestration")
+    text = (await coord.conversation.compose_prompt("orchestration")).text
     assert "target_gap_pct=15.00" in text
 
 
@@ -872,7 +942,7 @@ async def test_compose_prompt_renders_the_gap_to_the_gain_objective(coord: Coord
 async def test_compose_prompt_time_only_objective_leaves_no_gap(coord: Coordinator) -> None:
     coord._current_objective = TimeOnlyObjective()
     coord.shared_state.cumulative_gain_validated = 5.0
-    text = await coord.conversation.compose_prompt("orchestration")
+    text = (await coord.conversation.compose_prompt("orchestration")).text
     assert "target_gap_pct=0.00" in text
 
 

@@ -180,11 +180,16 @@ python3 -m hyperloom optimize --gpu-type mi355x --model "$MODEL_PATH" --max-hour
 GPU_TYPE=mi300x python3 -m hyperloom optimize --model "$MODEL_PATH" --max-hours 2
 ```
 
-Accepted values: `mi300x`, `mi308x`, `mi325x`, `mi355x`. **`mi308x` and
+Accepted values: `mi300x`, `mi308x`, `mi325x`, `mi355x`, `r9700`. **`mi308x` and
 `mi325x` map to `runner_type=mi300x`** with a warning, since the GPUs share the
 same runner family and Magpie has not shipped MI308X/MI325X-specific SGLang/vLLM
 scripts yet. If you need a true MI308X/MI325X-specific script, uncomment the `benchmark_script:` template in the
 relevant YAML and point it at your script under `InferenceX/benchmarks/...`.
+
+`r9700` (Radeon AI PRO R9700, gfx1201) maps to `runner_type=gfx12`, Magpie's
+`vllm_gfx12.sh`, and runs with `--framework vllm` only: pass
+`--framework vllm`, since another framework (including the default) exits
+with code 2 at launch.
 
 Do not set `HIP_VISIBLE_DEVICES` on the known ROCm stack unless the user asks;
 it can make `torch.cuda.is_available()` return false. Use

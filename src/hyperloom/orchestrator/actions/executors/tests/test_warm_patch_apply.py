@@ -278,7 +278,7 @@ def test_no_root_is_ever_probed_for(tmp_path, output_dir, monkeypatch):
         raise AssertionError("warm replay must not probe for an apply root")
 
     monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors.integrate_patch._resolve_framework_root",
+        "hyperloom.orchestrator.actions.executors._patch_sources._resolve_framework_root",
         _fail,
     )
     _git_repo(tmp_path / "sglang", "vllm/fp8.py", "# fp8 module\noriginal = True\n")
@@ -466,7 +466,7 @@ def test_a_best_effort_timeline_reports_why_each_patch_that_failed_did(fake_repo
     applied = _apply_warm_patches(params, str(fake_repo), output_dir)
 
     round_result: dict = {}
-    _stamp_warm_patch_outcome(round_result, applied, params, "")
+    _stamp_warm_patch_outcome(round_result, applied, params)
     reported = round_result["warm_patch_result"]["patches"]
 
     assert round_result["warm_patch_result"]["required"] is False
@@ -818,6 +818,26 @@ def test_nogit_still_serves_the_legacy_list(tmp_path, output_dir):
     assert [p["status"] for p in applied] == ["applied_nogit"]
     assert "patched = True" in target.read_text()
     assert (output_dir / "warm_patches" / "patch_backups").is_dir()
+
+
+def test_nogit_replay_reports_a_patch_the_tree_already_holds_as_already_present(tmp_path, output_dir):
+    """The applier's presence check, not an empty backup set, names the patch already present."""
+    _require_patch_cli()
+    install_root = tmp_path / "dist-packages"
+    target = install_root / "vllm" / "fp8.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("# fp8 module\noriginal = True\npatched = True\n")
+    params = {
+        "patches": [{"patch_file": "vllm/fp8.py", "patch_content": VALID_PATCH}],
+        "required_patch_timeline": True,
+    }
+
+    result = _apply_warm_patches(params, str(install_root), output_dir)
+
+    assert result["status"] == "prepared"
+    assert [entry["status"] for entry in result["applied"]] == ["already_present"]
+    assert target.read_text() == "# fp8 module\noriginal = True\npatched = True\n"
+    assert result["trees"][0]["nogit_backups"] == []
 
 
 def test_nogit_apply_hands_teardown_the_backups_it_needs(tmp_path, output_dir):

@@ -229,7 +229,7 @@ def test_container_message_omits_the_container_remedy(monkeypatch, capsys):
 
 
 def test_framework_falls_back_to_env_then_default(monkeypatch):
-    """Resolution mirrors _ensure_framework_deps: args > $FRAMEWORK > default."""
+    """The framework resolves from args first, then $FRAMEWORK, then the default."""
     monkeypatch.setenv("FRAMEWORK", "xdit")
     _refuse_probe(monkeypatch)
 
@@ -250,14 +250,17 @@ def test_cuda_build_exits_even_though_importable(monkeypatch, capsys):
     assert _SKIP_ENV in err
 
 
-def test_inconclusive_rocm_probe_warns_but_proceeds(monkeypatch, capsys):
-    """A probe that cannot answer must not block an otherwise valid run."""
+def test_an_inconclusive_rocm_probe_blocks(monkeypatch, capsys):
+    """A probe that cannot answer classifies nothing: the stack serving imports stayed unverified."""
     _probe_result(monkeypatch, importable=True, rocm=None)
 
-    preflight._check_serving_framework(_args("vllm"), "/usr/bin/python3")
+    with pytest.raises(SystemExit) as excinfo:
+        preflight._check_serving_framework(_args("vllm"), "/usr/bin/python3")
 
-    out = capsys.readouterr().out
-    assert "could not verify" in out
+    assert excinfo.value.code == 2
+    err = capsys.readouterr().err
+    assert "reached no verdict" in err
+    assert _SKIP_ENV in err
 
 
 def test_rocm_build_proceeds_quietly(monkeypatch, capsys):
@@ -318,16 +321,19 @@ def test_every_importable_candidate_cuda_still_fails(isolated_vllm, monkeypatch,
     assert "NOT a ROCm build" in capsys.readouterr().err
 
 
-def test_an_inconclusive_candidate_outweighs_a_refuted_one(isolated_vllm, monkeypatch, capsys):
-    """Block only when every importable candidate is provably the wrong build."""
+def test_an_inconclusive_candidate_is_reported_before_a_refuted_one(isolated_vllm, monkeypatch, capsys):
+    """Both stop the run, but "NOT a ROCm build" is a verdict the unclear candidate never reached."""
     _probe_per_interpreter(
         monkeypatch,
         {"/usr/bin/python3": (True, False), isolated_vllm: (True, None)},
     )
 
-    preflight._check_serving_framework(_args("vllm"), "/usr/bin/python3")
+    with pytest.raises(SystemExit):
+        preflight._check_serving_framework(_args("vllm"), "/usr/bin/python3")
 
-    assert "could not verify" in capsys.readouterr().out
+    err = capsys.readouterr().err
+    assert "reached no verdict" in err
+    assert "NOT a ROCm build" not in err
 
 
 def test_probe_rocm_build_reports_tri_state(monkeypatch):
@@ -398,17 +404,125 @@ def _dying_rocm_probe(monkeypatch, stderr: str, *, returncode: int = -11) -> Non
     monkeypatch.setattr(preflight.subprocess, "run", _run)
 
 
-def test_inconclusive_warning_surfaces_the_probe_stderr_tail(monkeypatch, capsys):
+def test_the_block_surfaces_the_probe_stderr_tail(monkeypatch, capsys):
     """A broken ROCm stack is diagnosable only from the stderr the probe drops."""
     noise = [f"noise-{i}" for i in range(40)]
     _dying_rocm_probe(monkeypatch, "\n".join([*noise, "ImportError: libamdhip64.so: cannot open"]))
 
-    preflight._check_serving_framework(_args("sglang"), "/usr/bin/python3")
+    with pytest.raises(SystemExit):
+        preflight._check_serving_framework(_args("sglang"), "/usr/bin/python3")
 
-    out = capsys.readouterr().out
-    assert "could not verify" in out
-    assert "libamdhip64.so" in out
-    assert "noise-0" not in out
+    err = capsys.readouterr().err
+    assert "reached no verdict" in err
+    assert "libamdhip64.so" in err
+    assert "noise-0" not in err
+
+
+_DEVICE_INIT_TRACEBACK = (
+    "Traceback (most recent call last):\n"
+    '  File "<string>", line 7, in verdict\n'
+    "    torch._C._cuda_init()\n"
+    "RuntimeError: No CUDA GPUs are available\n"
+)
+
+
+def test_a_probe_that_died_on_device_init_blocks_the_run(monkeypatch, capsys):
+    """An exception in the probe reaches no verdict, and the server imports the very same stack."""
+    _dying_rocm_probe(monkeypatch, _DEVICE_INIT_TRACEBACK, returncode=3)
+
+    with pytest.raises(SystemExit) as excinfo:
+        preflight._check_serving_framework(_args("vllm"), "/usr/bin/python3")
+
+    assert excinfo.value.code == 2
+    err = capsys.readouterr().err
+    assert "reached no verdict" in err
+    # The traceback the baseline would otherwise only show as a dead server.
+    assert "No CUDA GPUs are available" in err
+    assert _SKIP_ENV in err
+
+
+def test_the_blocking_message_states_the_rocm_smi_split(monkeypatch, capsys):
+    """rocm-smi sees cards while the probe reached nothing: report the split, name no cause."""
+    _dying_rocm_probe(monkeypatch, _DEVICE_INIT_TRACEBACK, returncode=3)
+    monkeypatch.setattr(preflight, "_rocm_smi_visible_gpus", lambda: (8, None))
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "0,1,2,3")
+
+    with pytest.raises(SystemExit):
+        preflight._check_serving_framework(_args("vllm"), "/usr/bin/python3")
+
+    err = capsys.readouterr().err
+    assert "rocm-smi reports 8 GPU(s)" in err
+    assert "ROCR_VISIBLE_DEVICES='0,1,2,3'" in err
+    assert "device-access" not in err
+
+
+def test_an_unreadable_rocm_smi_still_blocks(monkeypatch, capsys):
+    """The split is a diagnostic extra; a missing rocm-smi must not change the verdict."""
+    _dying_rocm_probe(monkeypatch, _DEVICE_INIT_TRACEBACK, returncode=3)
+    monkeypatch.setattr(preflight, "_rocm_smi_visible_gpus", lambda: (None, "rocm_smi_unavailable"))
+
+    with pytest.raises(SystemExit) as excinfo:
+        preflight._check_serving_framework(_args("vllm"), "/usr/bin/python3")
+
+    assert excinfo.value.code == 2
+    err = capsys.readouterr().err
+    assert "rocm-smi could not be read" in err
+    assert "no visible-device mask set" in err
+
+
+def test_a_failure_with_no_device_marker_blocks_the_same_way(monkeypatch, capsys):
+    """Sorting unclear exits by what their stderr happens to say is the guess this check must not make."""
+    _dying_rocm_probe(monkeypatch, "ImportError: libamdhip64.so: cannot open shared object file")
+
+    with pytest.raises(SystemExit) as excinfo:
+        preflight._check_serving_framework(_args("sglang"), "/usr/bin/python3")
+
+    assert excinfo.value.code == 2
+    assert "reached no verdict" in capsys.readouterr().err
+
+
+def test_the_escape_hatch_still_clears_an_unverified_build(monkeypatch):
+    """The block must stay skippable, like every other framework verdict."""
+    monkeypatch.setenv(_SKIP_ENV, "1")
+    _refuse_probe(monkeypatch)
+
+    result = preflight._check_serving_framework(_args("vllm"), "/usr/bin/python3")
+
+    assert result["status"] == "skipped"
+
+
+@pytest.mark.parametrize("returncode", [3, -11])
+@pytest.mark.parametrize("stderr", [_DEVICE_INIT_TRACEBACK, "ImportError: no libhip"])
+def test_any_unclear_exit_reaches_no_verdict_whatever_it_printed(monkeypatch, returncode, stderr):
+    """A caught exception (rc 3) and a signal death both answer nothing; their stderr is evidence, not a class."""
+
+    class _Proc:
+        def __init__(self, rc, err):
+            self.returncode = rc
+            self.stdout = ""
+            self.stderr = err
+
+    monkeypatch.setattr(preflight.subprocess, "run", lambda *_a, **_k: _Proc(returncode, stderr))
+
+    probe = preflight._probe_rocm_build("vllm", "/usr/bin/python3")
+
+    assert probe.verdict is None
+    assert stderr.splitlines()[-1] in probe.detail
+
+
+def test_the_first_unclear_candidate_is_the_one_reported(isolated_vllm, monkeypatch):
+    """Every unclear candidate blocks, so there is nothing to rank: the scan keeps the first."""
+    monkeypatch.setattr(preflight, "_framework_importable", lambda _fw, _py: preflight._Probe(True))
+    probes = {
+        "/usr/bin/python3": preflight._Probe(None, "unclear"),
+        isolated_vllm: preflight._Probe(None, _DEVICE_INIT_TRACEBACK),
+    }
+    monkeypatch.setattr(preflight, "_probe_rocm_build", lambda _fw, py: probes[py])
+
+    found, probe = preflight._resolve_framework_build("vllm", ["/usr/bin/python3", isolated_vllm])
+
+    assert found == "/usr/bin/python3"
+    assert probe.verdict is None
 
 
 def test_probe_stderr_tail_is_bounded():
@@ -484,10 +598,12 @@ def test_a_probe_timeout_stops_the_interpreter_scan(monkeypatch, capsys, importa
     """Paying a timeout per candidate turned preflight into a 12-minute wait."""
 
     budget = _timing_out_probe(monkeypatch, importable=importable)
-    preflight._check_serving_framework(_args("vllm"), "/usr/bin/python3")
+
+    with pytest.raises(SystemExit):
+        preflight._check_serving_framework(_args("vllm"), "/usr/bin/python3")
 
     assert sum(budget) <= 150, f"worst-case probe budget too large: {budget}"
-    assert "timed out" in capsys.readouterr().out
+    assert "timed out" in capsys.readouterr().err
 
 
 # _in_container signals
@@ -764,26 +880,27 @@ def test_a_refuted_build_is_not_published(monkeypatch):
     assert RESOLVED_FRAMEWORK_ENV not in os.environ
 
 
-def test_a_rocm_probe_timeout_still_publishes(monkeypatch):
-    """The timeout is in the ROCm verdict, not in importability."""
-    calls: list[list[str]] = []
+def test_a_rocm_probe_timeout_publishes_nothing(monkeypatch):
+    """A probe that ran out of time verified nothing, so there is no resolved interpreter to hand on."""
 
     class _Proc:
         returncode = 0
         stdout = ""
         stderr = ""
 
-    monkeypatch.setattr(preflight.subprocess, "run", lambda cmd, *a, **k: (calls.append(list(cmd)), _Proc())[1])
+    monkeypatch.setattr(preflight.subprocess, "run", lambda cmd, *a, **k: _Proc())
     monkeypatch.setattr(
         preflight,
         "_probe_rocm_build",
         lambda _fw, _py: preflight._Probe(None, timed_out=True),
     )
 
-    preflight._check_serving_framework(_args("vllm"), "/usr/bin/python3")
+    with pytest.raises(SystemExit) as excinfo:
+        preflight._check_serving_framework(_args("vllm"), "/usr/bin/python3")
 
-    assert os.environ.get(RESOLVED_FRAMEWORK_PYTHON_ENV) == "/usr/bin/python3"
-    assert os.environ.get(RESOLVED_FRAMEWORK_ENV) == "vllm"
+    assert excinfo.value.code == 2
+    assert RESOLVED_FRAMEWORK_PYTHON_ENV not in os.environ
+    assert RESOLVED_FRAMEWORK_ENV not in os.environ
 
 
 @pytest.mark.parametrize(

@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import logging
-import math
 import time
 from dataclasses import dataclass
 from typing import Any, NamedTuple
@@ -20,8 +19,6 @@ from hyperloom.orchestrator.lever import (
     LEVER_UPSTREAM_PR,
 )
 from hyperloom.inference_optimizer.breakdown.stop_reasons import is_valid_stop_reason
-from ..kernel.patch_landing import IntegratedStack
-from ..state.kernel_decision_settings import resolve_kernel_opt_max_failures
 from ..state.shared_state import (
     ESCALATE_HINT_SKIP_TO_CLOSE,
     ESCALATE_HINT_SKIP_TO_KERNEL,
@@ -80,8 +77,6 @@ OPTIMIZATION_RESERVE_PCT: float = 0.50
 
 # Wall-clock ceiling for an unbounded run (``max_minutes`` == 0): the container lifetime.
 DEFAULT_LONGRUN_MAX_MINUTES: int = 14 * 24 * 60
-# Reference window the absolute per-phase cap applies its budget fraction to.
-PHASE_ABSOLUTE_CAP_REFERENCE_MINUTES: int = 24 * 60
 
 
 # Plateau judgment defaults (CLI --plateau-* flags); kept here for pure callers + tests.
@@ -97,9 +92,6 @@ DEFAULT_FRAMEWORK_PLATEAU_NO_KEEP_STREAK: int = 5
 
 # R1 macro-cycle reloop: SWEEP loops back to FRAMEWORK_AGENT for a new macro-cycle while budget remains and the run
 # hasn't globally converged.
-
-# Safety ceiling on macro-cycles (defense against a pathological tight loop).
-DEFAULT_MAX_MACRO_CYCLES: int = 1000
 
 # Share of a bounded session's total budget that must remain to open a cycle.
 _CYCLE_RELOOP_BUDGET_RATIO: float = 0.15
@@ -451,27 +443,6 @@ def phase_budget_remaining_seconds(
     return max(0.0, total - phase_elapsed_seconds(state, now_unix=now_unix))
 
 
-def effective_max_minutes(state: Any) -> float:
-    """Session minutes for deadline/cap math; unbounded runs use the 14-day ceiling."""
-    mm = _max_minutes(state)
-    return mm if mm > 0 else float(DEFAULT_LONGRUN_MAX_MINUTES)
-
-
-def phase_cap_seconds(state: Any) -> float | None:
-    """Absolute wall-clock ceiling (seconds) for the current phase."""
-    budget = state.phase_budget_pct
-    phase = (state.phase or "").upper()
-    if phase not in budget:
-        return None
-    pct = float(budget[phase])
-    if pct <= 0.0:
-        # Zero fraction = no wall-clock allowed, as opposed to no cap at all.
-        return 0.0
-    proportional = effective_max_minutes(state) * 60.0 * pct
-    abs_cap = math.ceil(PHASE_ABSOLUTE_CAP_REFERENCE_MINUTES * pct) * 60.0
-    return float(min(proportional, abs_cap))
-
-
 def session_remaining_seconds(
     state: Any,
     *,
@@ -523,7 +494,7 @@ def phase_status_summary(
     """Render the per-tick ``=== Phase ===`` block (≤7 lines). The mid-chain phases add a ``cycle_reloop`` line showing whether another macro-cycle is still affordable."""
     phase = (state.phase or "").strip().upper() or "UNSET"
     elapsed = int(phase_elapsed_seconds(state, now_unix=now_unix))
-    # ``remaining`` paces this entry; the absolute cap reads ``cumulative``.
+    # ``remaining`` paces this entry; ``cumulative`` totals every entry.
     cumulative = int(phase_cumulative_seconds(state, now_unix=now_unix))
     budget_pct_for_phase = state.phase_budget_pct.get(phase, 0.0)
     remaining = phase_budget_remaining_seconds(state, now_unix=now_unix)
@@ -650,29 +621,6 @@ def _controller_phase_terminal(state: Any) -> bool:
     return result_cycle == current_cycle and status in CONTROLLER_TERMINAL_STATUSES
 
 
-# Ledger subfields that change when a kernel attempt actually advances.
-_KERNEL_ATTEMPT_PROGRESS_FIELDS: tuple[str, ...] = (
-    "current_kernel_id",
-    "failure_count",
-    "integration_status",
-    "last_decision",
-    "last_source_file",
-    "last_status",
-    "rejected_reason",
-    "task_group_key",
-)
-
-# ``last_kernel_opt`` subfields that identify WHICH result is the latest one; a new result always changes at least one
-# of them.
-_LAST_KERNEL_OPT_PROGRESS_FIELDS: tuple[str, ...] = (
-    "best_artifact_path",
-    "decision",
-    "kernel_id",
-    "task_group_key",
-    "ts",
-)
-
-
 def compute_kernel_progress_fingerprint(
     state: Any,
     *,
@@ -682,27 +630,15 @@ def compute_kernel_progress_fingerprint(
     import hashlib
     import json
 
-    attempts: list[list[str]] = []
-    ledger = state.kernel_opt_task_attempts
-    if isinstance(ledger, dict):
-        for ledger_id, attempt in ledger.items():
-            if not isinstance(attempt, dict):
-                continue
-            attempts.append(
-                [str(ledger_id)] + [str(attempt.get(field, "")) for field in _KERNEL_ATTEMPT_PROGRESS_FIELDS]
-            )
-    attempts.sort()
-
-    last_opt = state.last_kernel_opt
-    last_opt = last_opt if isinstance(last_opt, dict) else {}
     stack = state.optimization_stack
     pending = state.pending_kernel_integrations
     controller = state.kernel_rewrite_controller_result
     controller = controller if isinstance(controller, dict) else {}
     payload = {
-        "attempts": attempts,
         "inflight": sorted(str(task_id) for task_id in (inflight_task_ids or ())),
-        "last_kernel_opt": [str(last_opt.get(field, "")) for field in _LAST_KERNEL_OPT_PROGRESS_FIELDS],
+        "integrate_verdicts": sorted(
+            f"{key}:{entry['attempt_count']}" for key, entry in state.kernel_integrate_attempts.items()
+        ),
         "pending_integrations": sorted(str(key) for key in pending) if isinstance(pending, dict) else [],
         "rejected": sorted(str(kid) for kid in (state.rejected_kernel_ids or [])),
         "stack_len": len(stack) if isinstance(stack, list) else 0,
@@ -717,46 +653,6 @@ def compute_kernel_progress_fingerprint(
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:32]
 
 
-class _SettledKernelWork(NamedTuple):
-    """What the session has already settled, against which a kernel attempt is judged."""
-
-    rejected_ids: set[str]
-    integrated: IntegratedStack
-
-
-def _attempt_failure_count(attempt: dict[str, Any]) -> int:
-    """The failure count an attempt reports, 0 when it reports none that reads as a number."""
-    try:
-        return int(attempt.get("failure_count") or 0)
-    except (TypeError, ValueError):
-        return 0
-
-
-def _attempt_can_still_gain(attempt: dict[str, Any], ledger_id: Any, settled: _SettledKernelWork) -> bool:
-    """Whether one kernel attempt still has a move left that could raise validated gain."""
-    kernel_id = str(attempt.get("current_kernel_id") or attempt.get("kernel_id") or ledger_id)
-    task_group_key = str(attempt.get("task_group_key") or "")
-    if settled.integrated.covers(
-        kernel_ids=(kernel_id,),
-        task_group_key=task_group_key,
-        source_file=str(attempt.get("last_source_file") or ""),
-    ):
-        return False
-    if str(attempt.get("integration_status") or "").strip().lower() in {"integrated", "rejected"}:
-        return False
-    rejected_reason = str(attempt.get("rejected_reason") or "").strip()
-    if kernel_id in settled.rejected_ids and (not task_group_key or rejected_reason):
-        return False
-    decision = str(attempt.get("last_decision") or "").strip().upper()
-    if decision == "KEEP":
-        return True
-    if decision == "REVERT" or rejected_reason:
-        return False
-    if str(attempt.get("last_status") or "").strip().lower() == "failed":
-        return 0 < _attempt_failure_count(attempt) < resolve_kernel_opt_max_failures()
-    return decision in ("", "PARTIAL", "NEEDS_REVIEW")
-
-
 def kernel_work_pending(state: Any) -> bool:
     """Return True while KERNEL has work that can still affect validated gain."""
     if state.has_keep_pending_integrate:
@@ -765,21 +661,7 @@ def kernel_work_pending(state: Any) -> bool:
     if _controller_phase_terminal(state) or _geak_phase_terminal(state):
         return False
 
-    if state.untried_hot_reusable_kernels():
-        return True
-
-    attempts = state.kernel_opt_task_attempts or {}
-    if not isinstance(attempts, dict):
-        return False
-    settled = _SettledKernelWork(
-        rejected_ids={str(kernel_id) for kernel_id in (state.rejected_kernel_ids or [])},
-        integrated=IntegratedStack.of(state.optimization_stack),
-    )
-    return any(
-        _attempt_can_still_gain(attempt, ledger_id, settled)
-        for ledger_id, attempt in attempts.items()
-        if isinstance(attempt, dict)
-    )
+    return bool(state.untried_hot_reusable_kernels())
 
 
 def measured_seconds(state: Any, field: str) -> float | None:
@@ -895,8 +777,8 @@ def _lever_attempts(state: Any, *levers: str) -> list[dict[str, Any]]:
 def _trailing_no_keep(attempts: list[dict[str, Any]]) -> int:
     """Count trailing attempts that did not adopt.
 
-    Only resolved attempts reach the ledger — a specialist that never ran and a
-    candidate its lane will retry leave nothing here to plateau on.
+    Only resolved attempts reach the ledger: a candidate its lane will retry
+    leaves nothing here to plateau on.
     """
     streak = 0
     for row in reversed(attempts):
@@ -962,7 +844,9 @@ def _patch_lever_dry(state: Any, overrides: dict[str, Any]) -> tuple[bool, dict[
 
     Source patches and upstream PRs share a supply — the discovery and authoring
     ladder — so they are judged together: a trailing run of resolved candidates
-    without an adoption, or a pump that has declared the supply exhausted.
+    without an adoption, or a pump that has declared the supply exhausted. An
+    authoring round that came back empty or never ran resolves its candidate
+    too, so a lane that cannot run dries up like one that finds nothing.
     """
     streak_floor = int(
         overrides.get("framework_no_keep_streak", DEFAULT_FRAMEWORK_PLATEAU_NO_KEEP_STREAK),
@@ -994,12 +878,14 @@ def per_lever_dryness(state: Any) -> tuple[bool, dict[str, Any]]:
     }
 
 
-#: ``reloop_blocked`` values that name the terminal SWEEP closes on. A block for
-#: any other reason keeps the ladder's own exit reason.
+_STOP_TIME_EXHAUSTED = "time_exhausted"
+
+#: SWEEP's close reason per ``reloop_blocked`` value; too little time closes as ``skip_to_close`` would.
 _RELOOP_BLOCK_TERMINALS: dict[str, str] = {
     "global_converged": "global_converged",
-    "max_cycles": "global_converged",
+    "all_directions_saturated": "global_converged",
     "target_reached": "target_reached",
+    "insufficient_remaining": _STOP_TIME_EXHAUSTED,
 }
 
 
@@ -1033,7 +919,6 @@ def _budget_predicate_inputs(
     remaining_sec = phase_budget_remaining_seconds(state, now_unix=now_unix)
     budget: dict[str, Any] = {
         "remaining_sec": remaining_sec,
-        "cap_sec": phase_cap_seconds(state),
         "entry_elapsed_sec": phase_elapsed_seconds(state, now_unix=now_unix),
         "cumulative_elapsed_sec": phase_cumulative_seconds(state, now_unix=now_unix),
         "current_balance": remaining_sec,
@@ -1091,7 +976,6 @@ def _base_workflow_predicate_inputs(
             "enablement_enabled": bool(flags.enablement_enabled),
         },
         "enablement_in_flight": bool(enablement_in_flight),
-        "phase_budget_pct": state.phase_budget_pct,
     }
 
 
@@ -1202,7 +1086,6 @@ def _sweep_predicate_inputs(
             "gain_at_cycle_start_pct": _number(state.gain_at_cycle_start) or 0.0,
             "min_gain_pct": decaying_keep_threshold_pct(cycle),
             "prior_no_gain_cycle_streak": int(state.no_gain_cycle_streak or 0),
-            "max_cycles": DEFAULT_MAX_MACRO_CYCLES,
             "no_gain_cycles": DEFAULT_GLOBAL_CONVERGENCE_NO_GAIN_CYCLES,
             "saturated_directions": saturated_facts,
             "session_remaining_sec": session_remaining_seconds(state, now_unix=now_unix),
@@ -1219,8 +1102,8 @@ def _extend_budget_to_sweep_grant(budget: dict[str, Any], state: Any, *, now_uni
     """Widen SWEEP's budget to cover the conc_sweep it granted and is still waiting on.
 
     SWEEP's only work is the sweep it enqueued on entry, whose budget is already clamped to the session clock. The
-    per-phase cap is a share of the whole session (5% of three hours is nine minutes) and would otherwise cancel that
-    sweep mid-ladder. The widened numbers are what the predicate compares, so a replay of the frozen inputs reaches
+    per-entry budget is a share of the remaining session (5% of three hours is nine minutes) and would otherwise cancel
+    that sweep mid-ladder. The widened numbers are what the predicate compares, so a replay of the frozen inputs reaches
     the same decision.
     """
     grant_left = (_number(state.conc_sweep_granted_until_unix) or 0.0) - float(now_unix)
@@ -1231,10 +1114,6 @@ def _extend_budget_to_sweep_grant(budget: dict[str, Any], state: Any, *, now_uni
         budget["remaining_sec"] = grant_left
         if "current_balance" in budget:
             budget["current_balance"] = grant_left
-    cap = _number(budget.get("cap_sec"))
-    cumulative = _number(budget.get("cumulative_elapsed_sec")) or 0.0
-    if cap is not None and cap < cumulative + grant_left:
-        budget["cap_sec"] = cumulative + grant_left
 
 
 def workflow_predicate_inputs(
@@ -1329,7 +1208,6 @@ def _budget_exit(
     budget: dict[str, Any],
     *,
     exhausted_reason: str,
-    cap_reason: str,
     evidence: dict[str, Any],
 ) -> tuple[str, dict[str, Any]] | None:
     remaining = _number(budget.get("remaining_sec"))
@@ -1342,9 +1220,6 @@ def _budget_exit(
     }
     if remaining is not None and remaining <= 0.0:
         return exhausted_reason, timing
-    cap = _number(budget.get("cap_sec"))
-    if cap is not None and cumulative >= cap:
-        return cap_reason, timing
     return None
 
 
@@ -1393,7 +1268,6 @@ def _framework_exit(inputs: dict[str, Any]) -> tuple[str, dict[str, Any]] | None
     return _budget_exit(
         dict(inputs.get("budget") or {}),
         exhausted_reason="optimize_phase_budget_exhausted",
-        cap_reason="optimize_budget_cap",
         evidence=arms,
     )
 
@@ -1448,7 +1322,6 @@ def _kernel_exit(inputs: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
     return _budget_exit(
         dict(inputs.get("budget") or {}),
         exhausted_reason="kernel_phase_budget_exhausted",
-        cap_reason="kernel_budget_cap",
         evidence={"rejected_kernel_count": int(plateau.get("rejected_kernel_count") or 0)},
     )
 
@@ -1478,7 +1351,6 @@ def _sweep_exit(inputs: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
     return _budget_exit(
         dict(inputs.get("budget") or {}),
         exhausted_reason="sweep_budget_exhausted",
-        cap_reason="sweep_budget_cap",
         evidence={"sweep_status": status} if status else {},
     )
 
@@ -1486,14 +1358,11 @@ def _sweep_exit(inputs: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
 def _reloop_block_evidence(
     facts: dict[str, Any],
     global_inputs: dict[str, Any],
-    cycle: int,
     streak: int,
 ) -> dict[str, Any]:
     """The evidence naming the rule that refuses another macro-cycle; empty when none does."""
     if str(global_inputs.get("target_reached_at") or ""):
         return {"reloop_blocked": "target_reached"}
-    if cycle + 1 >= int(facts.get("max_cycles") or 0):
-        return {"reloop_blocked": "max_cycles"}
     saturated = dict(facts.get("saturated_directions") or {})
     if saturated and all(bool(value) for value in saturated.values()):
         return {"reloop_blocked": "all_directions_saturated", "saturated_directions": sorted(saturated)}
@@ -1517,7 +1386,7 @@ def _reloop_decision(inputs: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
         "cycle_gained": gained,
         "no_gain_cycle_streak_effective": streak,
     }
-    blocked = _reloop_block_evidence(facts, dict(inputs.get("global") or {}), cycle, streak)
+    blocked = _reloop_block_evidence(facts, dict(inputs.get("global") or {}), streak)
     if blocked:
         evidence.update(blocked)
         return False, evidence
@@ -1576,7 +1445,7 @@ def _skip_to_close_reason(
     remaining = _number(global_inputs.get("session_remaining_sec"))
     if remaining is not None:
         evidence["session_remaining_seconds"] = round(remaining, 2)
-    reason = "time_exhausted" if remaining is not None and remaining < floor else "global_converged"
+    reason = _STOP_TIME_EXHAUSTED if remaining is not None and remaining < floor else "global_converged"
     # Both of those read as a normal closeout. A session that never measured a
     # baseline optimized nothing, so closing it early is a baseline failure
     # whatever budget is left. A record frozen before this fact existed carries
@@ -1630,7 +1499,7 @@ def _terminal_close_transition(
     if bool(global_inputs.get("closing_phase")):
         return _transition_result(
             PHASE_CLOSE,
-            "time_exhausted",
+            _STOP_TIME_EXHAUSTED,
             {"terminal": True, "reason_origin": "closing_phase"},
             inputs,
         )
@@ -1756,12 +1625,7 @@ def _framework_transition(
         return None
     if bool(flags.get("kernel_enabled")):
         return _transition_result(PHASE_KERNEL_AGENT, normal[0], normal[1], inputs)
-    return _transition_result(
-        PHASE_SWEEP,
-        "no_kernel_skipped",
-        {"passed_through_reason": normal[0], **normal[1]},
-        inputs,
-    )
+    return _transition_result(PHASE_SWEEP, normal[0], {**normal[1], "kernel_skipped": True}, inputs)
 
 
 def _kernel_transition(inputs: dict[str, Any]) -> tuple[str, str, dict[str, Any]] | None:
@@ -1784,14 +1648,17 @@ def _sweep_transition(
     if exit_reason == "sweep_failed":
         return _transition_result(PHASE_CLOSE, exit_reason, exit_evidence, inputs)
     reloop, reloop_evidence = _reloop_decision(inputs)
-    if reloop and bool(flags.get("framework_agent_enabled")):
+    cycles_enabled = bool(flags.get("framework_agent_enabled"))
+    if reloop and cycles_enabled:
         return _transition_result(
             PHASE_FRAMEWORK_AGENT,
             "cycle_reloop",
             {**exit_evidence, **reloop_evidence, "loopback": True},
             inputs,
         )
-    terminal_reason = _RELOOP_BLOCK_TERMINALS.get(str(reloop_evidence.get("reloop_blocked") or ""))
+    blocked = str(reloop_evidence.get("reloop_blocked") or "")
+    # Without FRAMEWORK_AGENT no further cycle was possible, so only a reached target outranks the ladder's reason.
+    terminal_reason = _RELOOP_BLOCK_TERMINALS.get(blocked) if cycles_enabled or blocked == "target_reached" else None
     if terminal_reason is not None:
         return _transition_result(
             PHASE_CLOSE,
@@ -1895,12 +1762,12 @@ def _publish_phase_boundary(boundary: _PhaseBoundary) -> None:
             "macro_cycle": int(boundary.prev_cycle or 0),
         },
     )
-    try:
-        from hyperloom.inference_optimizer.breakdown.recorder import phase_event, record_stage_reached
-        from hyperloom.inference_optimizer.breakdown.recorder.outcome_stage import PHASE_STAGES
-        from hyperloom.inference_optimizer.breakdown.recorder.phase_records import PhaseCycle, PhaseEntry, PhaseExit
-        from hyperloom.inference_optimizer.session.session_binding import bound_session
+    from hyperloom.inference_optimizer.breakdown.recorder import phase_event, record_stage_reached
+    from hyperloom.inference_optimizer.breakdown.recorder.outcome_stage import PHASE_STAGES
+    from hyperloom.inference_optimizer.breakdown.recorder.phase_records import PhaseCycle, PhaseEntry, PhaseExit
+    from hyperloom.inference_optimizer.session.session_binding import SessionNotBoundError, bound_session
 
+    try:
         # The phase itself, as a timeline event: close the span being left on
         # the exit that ended it, and open the one being entered. Recorded here
         # because here is where the two facts exist -- export could only pair
@@ -1931,8 +1798,8 @@ def _publish_phase_boundary(boundary: _PhaseBoundary) -> None:
         stage = PHASE_STAGES.get(boundary.to_phase)
         if stage:
             record_stage_reached(bound_session(), stage)
-    except Exception:  # noqa: BLE001 -- telemetry must never block phase changes
-        pass
+    except (OSError, ValueError, SessionNotBoundError):
+        pass  # phase-boundary telemetry must not block the phase change
 
 
 def record_phase_transition(
@@ -2090,7 +1957,6 @@ __all__ = [
     "PhaseFlags",
     "lifecycle_label",
     "make_lifecycle_event",
-    "DEFAULT_MAX_MACRO_CYCLES",
     "DEFAULT_GLOBAL_CONVERGENCE_NO_GAIN_CYCLES",
     "DEFAULT_LONGRUN_THRESHOLD_MINUTES",
     "is_long_run",

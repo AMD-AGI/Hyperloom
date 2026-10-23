@@ -16,7 +16,7 @@ from pathlib import Path
 
 from hyperloom.common.unified_diff import touched_paths
 
-from kernelforge.llm.git import git_bytes
+from kernelforge.tools.git import git_bytes
 from kernelforge.evaluation.scoring import aggregate_regression_detail
 from kernelforge.tools.durable_io import atomic_write_text, fsync_directory, fsync_tree
 
@@ -149,18 +149,14 @@ class BestResultPublisher:
         self,
         destination: Path,
         source_files: dict[str, bytes],
-    ) -> list[str]:
-        copied: list[str] = []
+    ) -> None:
         for raw_path, payload in source_files.items():
-            relative = Path(raw_path)
-            target = destination / relative
+            target = destination / raw_path
             target.parent.mkdir(parents=True, exist_ok=True)
             with target.open("wb") as stream:
                 stream.write(payload)
                 stream.flush()
                 os.fsync(stream.fileno())
-            copied.append(str(relative))
-        return copied
 
     def _source_files(
         self,
@@ -316,6 +312,75 @@ class BestResultPublisher:
         )
         return "\n".join(lines)
 
+    def _artifact_paths(self, version_dir: Path) -> dict[str, str]:
+        """The manifest fields that locate one stored version, relative to the campaign root."""
+        relative_dir = version_dir.relative_to(self.root)
+        return {
+            "artifact_dir": str(relative_dir),
+            "patch_path": str(relative_dir / "forge.patch"),
+            "validation_path": str(relative_dir / "validation.txt"),
+            "benchmark_path": str(relative_dir / "benchmark.json"),
+        }
+
+    def _store_version(self, expected: dict, bundle: KeepBundle, sources: dict[str, bytes]) -> dict:
+        """Reuse a stored version identical to this publication, or store it as a new immutable version."""
+        version_name = f"iter_{expected['iteration']:03d}"
+        candidates = [
+            self.best_root / version_name,
+            *sorted(self.best_root.glob(f"{version_name}.generation-*")),
+        ]
+        for candidate in candidates:
+            if not candidate.exists():
+                continue
+            candidate_expected = {**expected, **self._artifact_paths(candidate)}
+            try:
+                return self._validate_existing_bundle(
+                    candidate,
+                    expected=candidate_expected,
+                    bundle=bundle,
+                    source_files=sources,
+                )
+            except ValueError:
+                continue
+
+        version_dir = self.best_root / version_name
+        generation = 0
+        while version_dir.exists():
+            generation += 1
+            version_dir = self.best_root / f"{version_name}.generation-{generation:03d}"
+        manifest = {
+            **expected,
+            **self._artifact_paths(version_dir),
+            "published_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        temporary = Path(
+            tempfile.mkdtemp(
+                dir=str(self.best_root),
+                prefix=f".{version_name}.",
+            )
+        )
+        try:
+            self._write_text_durable(temporary / "forge.patch", bundle.patch)
+            self._write_text_durable(temporary / "validation.txt", bundle.validation_text)
+            self._write_text_durable(
+                temporary / "benchmark.json",
+                json.dumps(bundle.benchmark, indent=2, sort_keys=True) + "\n",
+            )
+            self._copy_changed_files(temporary / "files", sources)
+            self._write_text_durable(
+                temporary / "publication.json",
+                json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+            )
+            # Make the whole bundle durable before it becomes visible, then fsync the parent so the rename itself
+            # survives a crash (mirrors archive.record's fsync discipline).
+            fsync_tree(temporary)
+            os.replace(temporary, version_dir)
+            fsync_directory(self.best_root)
+        finally:
+            if temporary.exists():
+                shutil.rmtree(temporary)
+        return manifest
+
     def publish(
         self,
         keep: KeepIdentity,
@@ -327,7 +392,6 @@ class BestResultPublisher:
         """Publish one KEEP and atomically point the campaign at it."""
         iteration, baseline_wall_ms = keep.iteration, score.baseline_wall_ms
         self.best_root.mkdir(parents=True, exist_ok=True)
-        version_name = f"iter_{iteration:03d}"
         sources = self._source_files(
             bundle.changed_files,
             commit_hash=keep.commit_hash,
@@ -377,89 +441,7 @@ class BestResultPublisher:
             "snr_db": score.snr_db,
             "changed_files": list(sources),
         }
-
-        manifest: dict | None = None
-        candidates = [
-            self.best_root / version_name,
-            *sorted(self.best_root.glob(f"{version_name}.generation-*")),
-        ]
-        for candidate in candidates:
-            if not candidate.exists():
-                continue
-            relative_dir = candidate.relative_to(self.root)
-            candidate_expected = {
-                **expected,
-                "artifact_dir": str(relative_dir),
-                "patch_path": str(relative_dir / "forge.patch"),
-                "validation_path": str(relative_dir / "validation.txt"),
-                "benchmark_path": str(relative_dir / "benchmark.json"),
-            }
-            try:
-                manifest = self._validate_existing_bundle(
-                    candidate,
-                    expected=candidate_expected,
-                    bundle=bundle,
-                    source_files=sources,
-                )
-                break
-            except ValueError:
-                continue
-
-        if manifest is None:
-            base_dir = self.best_root / version_name
-            if not base_dir.exists():
-                version_dir = base_dir
-            else:
-                generation = 1
-                while True:
-                    candidate = self.best_root / (f"{version_name}.generation-{generation:03d}")
-                    if not candidate.exists():
-                        version_dir = candidate
-                        break
-                    generation += 1
-            relative_dir = version_dir.relative_to(self.root)
-            expected = {
-                **expected,
-                "artifact_dir": str(relative_dir),
-                "patch_path": str(relative_dir / "forge.patch"),
-                "validation_path": str(relative_dir / "validation.txt"),
-                "benchmark_path": str(relative_dir / "benchmark.json"),
-            }
-            manifest = {
-                **expected,
-                "published_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-            }
-            temporary = Path(
-                tempfile.mkdtemp(
-                    dir=str(self.best_root),
-                    prefix=f".{version_name}.",
-                )
-            )
-            try:
-                self._write_text_durable(temporary / "forge.patch", bundle.patch)
-                self._write_text_durable(temporary / "validation.txt", bundle.validation_text)
-                self._write_text_durable(
-                    temporary / "benchmark.json",
-                    json.dumps(bundle.benchmark, indent=2, sort_keys=True) + "\n",
-                )
-                copied = self._copy_changed_files(
-                    temporary / "files",
-                    sources,
-                )
-                if copied != list(sources):
-                    raise ValueError("changed files became unavailable during publication")
-                self._write_text_durable(
-                    temporary / "publication.json",
-                    json.dumps(manifest, indent=2, sort_keys=True) + "\n",
-                )
-                # Make the whole bundle durable before it becomes visible, then fsync the parent so the rename itself
-                # survives a crash (mirrors archive.record's fsync discipline).
-                fsync_tree(temporary)
-                os.replace(temporary, version_dir)
-                fsync_directory(self.best_root)
-            finally:
-                if temporary.exists():
-                    shutil.rmtree(temporary)
+        manifest = self._store_version(expected, bundle, sources)
 
         if self.manifest_path.is_file():
             current = self._load_json(self.manifest_path, label="best manifest")

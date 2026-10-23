@@ -239,6 +239,7 @@ def test_orchestration_prompt_never_offers_custom_specialist(phase):
 
     assert domains == (
         "serving_specialist|kernel_switch_specialist|comm_specialist|compiler_specialist|system_specialist"
+        "|speculative_decoding_specialist"
         "|candidate_discovery_specialist|research_scout_specialist|static_recon_specialist"
         "|framework_rewrite_specialist"
     )
@@ -284,6 +285,7 @@ def test_knowledge_domain_tags_do_not_include_the_custom_specialist():
         "communication",
         "compiler",
         "systems",
+        "speculative_decoding",
         "pr_intelligence",
         "research_scout",
         "static_recon",
@@ -530,21 +532,13 @@ async def test_dispatch_is_a_no_op(custom_coord, prompt, phase):
     custom_coord.router.handle_delegate.assert_not_awaited()
 
 
-@pytest.mark.parametrize("pruned", [True, False])
-async def test_dispatch_falls_back_to_research_when_patches_are_impossible(custom_coord, pruned, monkeypatch):
+async def test_dispatch_falls_back_to_research_when_patches_are_impossible(custom_coord, monkeypatch):
     import hyperloom.orchestrator.specialists.runner as runner_mod
+    from hyperloom.orchestrator.specialists.runner import NO_GIT_FRAMEWORK_SOURCE_ROOT
 
     # An installed or env-pointed framework tree on the host must not satisfy the preflight.
     monkeypatch.setattr(runner_mod, "resolve_framework_tree", lambda _framework: "")
-    state = custom_coord.shared_state
-    if pruned:
-        state.add_pruned_family("source_patch")
-        reason = "source_patch_pruned"
-    else:
-        state.framework_repo_path = ""
-        from hyperloom.orchestrator.specialists.runner import NO_GIT_FRAMEWORK_SOURCE_ROOT
-
-        reason = NO_GIT_FRAMEWORK_SOURCE_ROOT
+    custom_coord.shared_state.framework_repo_path = ""
 
     await custom_coord.specialist_dispatch.ensure_custom_specialist()
 
@@ -553,7 +547,7 @@ async def test_dispatch_falls_back_to_research_when_patches_are_impossible(custo
     custom_coord.bus.record_observation.assert_awaited_once_with(
         "coordinator",
         "observation",
-        {"kind": "custom_specialist_research_only", "reason": reason},
+        {"kind": "custom_specialist_research_only", "reason": NO_GIT_FRAMEWORK_SOURCE_ROOT},
     )
 
 
@@ -785,9 +779,9 @@ async def test_operator_work_pending(rounds, queued, expected):
 @pytest.mark.parametrize(
     ("next_phase", "held"),
     [
-        (("SWEEP", "no_kernel_skipped", {"passed_through_reason": "optimize_no_more_leverage"}), True),
+        (("SWEEP", "optimize_no_more_leverage", {"kernel_skipped": True}), True),
         (("KERNEL_AGENT", "optimize_no_more_leverage", {}), True),
-        (("SWEEP", "no_kernel_skipped", {"passed_through_reason": "optimize_phase_budget_exhausted"}), False),
+        (("SWEEP", "optimize_phase_budget_exhausted", {"kernel_skipped": True}), False),
         (("CLOSE", "time_exhausted", {"terminal": True}), False),
     ],
 )

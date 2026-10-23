@@ -20,7 +20,7 @@ from pathlib import Path
 
 from kernelforge.agent_backends.base import AgentRunSpec, AgentToolPolicy, watchdog_timeout_sec, with_writable_sandbox
 from kernelforge.agent_backends.registry import create_registered_backend
-from kernelforge.llm.git import ensure_commit_identity, git
+from kernelforge.tools.git import ensure_commit_identity, git
 from kernelforge.config import Config
 from kernelforge.loop.external_artifacts import ExternalArtifactError, ExternalArtifactTransaction
 from kernelforge.resources import resource_path
@@ -808,6 +808,7 @@ async def prepare_task(
                 starved_retry_sec = starved
                 break
             except Exception as exc:  # noqa: BLE001
+                log.warning("task preparation agent attempt %d failed: %s", attempts, exc)
                 audit.driver(f"{attempt_dir}/driver_at_exception.py")
                 driver_edited = audit.driver_edited(digest_before)
                 edited_any_attempt = edited_any_attempt or driver_edited

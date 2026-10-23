@@ -20,7 +20,6 @@ recipe audit log also carries KB writes and the mid-session reads from
 from __future__ import annotations
 
 import logging
-import time
 from collections.abc import Mapping
 from contextvars import ContextVar, Token
 from pathlib import Path
@@ -168,7 +167,6 @@ class WarmStartEventRecorder:
         self._token: Token[WarmStartEventRecorder | None] | None = None
         self._reads = 0
         self._start_time = start_time
-        self._t0 = time.monotonic()
         self._request = {
             # The identity T0 actually queried. Its hardware dimension is
             # topology-aware and resolved from the runtime environment, so
@@ -258,7 +256,6 @@ class WarmStartEventRecorder:
             "status": status,
             "match_status": found,
             "end_time": end_time,
-            "duration_sec": round(time.monotonic() - self._t0, 3),
         }
         if matched:
             payload["matched"] = dict(matched)

@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import argparse
 import logging
-import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
@@ -54,6 +53,61 @@ _REAL_EXECUTORS_FULL: dict[str, Any] = {
 }
 
 
+def _required_cli(path: str, missing: str) -> str:
+    if not path:
+        raise RuntimeError(missing)
+    return path
+
+
+def _specialist_agent_cli_config(args: argparse.Namespace) -> dict[str, Any]:
+    """The agent CLI every specialist runs on: its backend, model and executable.
+
+    Resolved once at boot so the three are chosen together and a later
+    dispatch cannot disagree with them.
+
+    Raises:
+        RuntimeError: If no runtime is found for the selected agent CLI.
+    """
+    from hyperloom.common.llm_config import (
+        AGENT_BACKEND_CODEX,
+        AGENT_BACKEND_DEEPSEEK,
+        resolve_agent_backend,
+        resolve_forge_llm_model,
+    )
+    from hyperloom.common.agent_cli import resolve_claude_executable, resolve_codex_executable
+    from hyperloom.orchestrator.specialists.subprocess_ import resolve_dsh_executable
+
+    backend = resolve_agent_backend()
+    config: dict[str, Any] = {"agent_backend": backend, "claude_executable": "claude"}
+    if backend == AGENT_BACKEND_DEEPSEEK:
+        default_model = resolve_forge_llm_model(backend)
+        config["dsh_executable"] = _required_cli(
+            resolve_dsh_executable(),
+            "INFERENCE_OPTIMIZER_AGENT_BACKEND=deepseek runs specialists on the dsh CLI, but none was "
+            "found on PATH or in the DeepSeek Harness SDK runtime. Install the 'deepseek' extra "
+            "(pip install 'hyperloom-inference_optimizer[deepseek]').",
+        )
+    elif backend == AGENT_BACKEND_CODEX:
+        default_model = str(args.codex_model).strip()
+        config["codex_executable"] = _required_cli(
+            resolve_codex_executable(),
+            "this deployment configures only the OpenAI side, so specialists must run on "
+            "the codex CLI, but no codex runtime was found. Install `codex` on PATH or "
+            "install the Codex SDK runtime (pip install 'hyperloom-inference_optimizer[llm]'). "
+            "Falling back to the claude CLI here would fail to authenticate on every "
+            "specialist task.",
+        )
+    else:
+        default_model = str(args.claude_model).strip()
+        config["claude_executable"] = _required_cli(
+            resolve_claude_executable(),
+            "specialists run on the claude CLI, but none was found in $HYPERLOOM_CLAUDE_CLI_PATH, "
+            "$GEAK_CLAUDE_BIN or on PATH. src/hyperloom/inference_optimizer/assets/install.sh puts it on PATH.",
+        )
+    config["model"] = str(getattr(args, "specialist_model", None) or "").strip() or default_model
+    return config
+
+
 def _build_specialist_executor(
     args: argparse.Namespace,
     *,
@@ -81,43 +135,11 @@ def _build_specialist_executor(
     from hyperloom.orchestrator.specialists.mcp_config import write_specialist_mcp_config
     from hyperloom.orchestrator.specialists.runner import SpecialistRunner
     from hyperloom.orchestrator.specialists.domains import DEFAULT_SPECIALIST_MAX_TURNS
-    from hyperloom.common.llm_config import AGENT_BACKEND_CODEX, preferred_agent_backend
-    from hyperloom.orchestrator.roles.claude import resolve_claude_executable
-    from hyperloom.orchestrator.specialists.subprocess_ import (
-        SpecialistSubprocessConfig,
-        resolve_codex_executable,
-    )
+    from hyperloom.orchestrator.specialists.subprocess_ import SpecialistSubprocessConfig
 
     max_turns = int(getattr(args, "specialist_max_turns", DEFAULT_SPECIALIST_MAX_TURNS) or DEFAULT_SPECIALIST_MAX_TURNS)
 
     framework_source_roots = tuple(resolve_kernel_search_roots())
-    # Resolve the agent CLI once here so the backend, its executable and its
-    # model are chosen together and a later dispatch cannot disagree with them.
-    agent_backend = preferred_agent_backend()
-    specialist_override = str(getattr(args, "specialist_model", None) or "").strip()
-    selected_model = specialist_override or (
-        str(args.codex_model).strip() if agent_backend == AGENT_BACKEND_CODEX else str(args.claude_model).strip()
-    )
-    codex_bin = ""
-    claude_bin = ""
-    if agent_backend == AGENT_BACKEND_CODEX:
-        codex_bin = resolve_codex_executable()
-        if not codex_bin:
-            raise RuntimeError(
-                "this deployment configures only the OpenAI side, so specialists must run on "
-                "the codex CLI, but no codex runtime was found. Install `codex` on PATH or "
-                "install the Codex SDK runtime (pip install 'hyperloom-inference_optimizer[llm]'). "
-                "Falling back to the claude CLI here would fail to authenticate on every "
-                "specialist task."
-            )
-    else:
-        claude_bin = resolve_claude_executable()
-        if not claude_bin:
-            raise RuntimeError(
-                "specialists run on the claude CLI, but none was found in $HYPERLOOM_CLAUDE_CLI_PATH, "
-                "$GEAK_CLAUDE_BIN or on PATH. src/hyperloom/inference_optimizer/assets/install.sh puts it on PATH."
-            )
-
     # Operator --specialist-mcp-config wins; else auto-generate one from the
     # live KnowledgePlane so the subprocess has the PR Monitor MCP wired.
     mcp_config_path: str | None = str(getattr(args, "specialist_mcp_config", "") or "") or None
@@ -132,21 +154,12 @@ def _build_specialist_executor(
         )
         if generated is not None:
             mcp_config_path = str(generated)
-    # This setting controls the Claude runtime only. Codex containment is
-    # resolved independently through the canonical sandbox policy.
-    specialist_permission_mode = os.environ.get("HYPERLOOM_SPECIALIST_PERMISSION_MODE", "").strip()
-    sub_config_kwargs: dict[str, Any] = {
-        "agent_backend": agent_backend,
-        "claude_executable": claude_bin or "claude",
-        "codex_executable": codex_bin,
-        "model": selected_model,
-        "framework_source_roots": framework_source_roots,
-        "mcp_config_path": mcp_config_path,
-    }
-    if specialist_permission_mode:
-        sub_config_kwargs["permission_mode"] = specialist_permission_mode
     runner = SpecialistRunner(
-        subprocess_config=SpecialistSubprocessConfig(**sub_config_kwargs),
+        subprocess_config=SpecialistSubprocessConfig(
+            **_specialist_agent_cli_config(args),
+            framework_source_roots=framework_source_roots,
+            mcp_config_path=mcp_config_path,
+        ),
         session_dir=session_dir,
         default_max_turns=max_turns,
     )

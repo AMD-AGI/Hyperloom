@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
+from types import ModuleType
 
 import pytest
 
@@ -324,6 +326,42 @@ class TestTheAttemptPutsTheProcessBack:
         assert workdir.is_dir()
         adapter.close()
         assert not workdir.exists()
+
+    @staticmethod
+    def _adapter_whose_cache_import_raises(monkeypatch, failure):
+        core = ModuleType("aiter.jit.core")
+
+        def unloadable(name):
+            raise failure
+
+        core.__getattr__ = unloadable
+        for name, module in (
+            ("aiter", ModuleType("aiter")),
+            ("aiter.jit", ModuleType("aiter.jit")),
+            ("aiter.jit.core", core),
+        ):
+            monkeypatch.setitem(sys.modules, name, module)
+        return dp._FusedMoeAdapter()
+
+    @pytest.mark.parametrize(
+        "failure",
+        [
+            ImportError("no module named aiter"),
+            OSError("libamdhip64.so.6: cannot open shared object file"),
+            RuntimeError("Get GPU arch from rocminfo failed: [Errno 2] No such file or directory: 'rocminfo'"),
+        ],
+        ids=lambda failure: type(failure).__name__,
+    )
+    def test_an_aiter_that_cannot_load_leaves_nothing_to_drop(self, monkeypatch, failure):
+        adapter = self._adapter_whose_cache_import_raises(monkeypatch, failure)
+        adapter.close()
+        assert not adapter._workdir.exists()
+
+    def test_an_unexpected_cache_drop_error_is_not_swallowed(self, monkeypatch):
+        adapter = self._adapter_whose_cache_import_raises(monkeypatch, TypeError("aiter config API drifted"))
+        with pytest.raises(TypeError, match="^aiter config API drifted$"):
+            adapter.close()
+        assert not adapter._workdir.exists()
 
     def test_it_works_as_a_context_manager(self, monkeypatch):
         monkeypatch.setenv("AITER_CONFIG_FMOE", "/etc/production.csv")

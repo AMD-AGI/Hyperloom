@@ -978,12 +978,13 @@ async def test_a_patch_without_switches_spends_no_parity_leg(tmp_path, monkeypat
 @pytest.mark.asyncio
 async def test_a_raising_parity_leg_does_not_read_as_a_pass(tmp_path, monkeypatch):
     """A probe that cannot run has proved nothing, so it must not wave the patch through."""
-    from hyperloom.orchestrator.actions.executors.integrate_patch import IntegratePatchExecutor, _PatchBench
+    from hyperloom.orchestrator.actions.executors._integrate_results import _PatchBench
+    from hyperloom.orchestrator.actions.executors.integrate_patch import IntegratePatchExecutor
 
     executor = IntegratePatchExecutor(session_dir=tmp_path)
 
     async def _raising_bench(*_args, **_kwargs):
-        raise RuntimeError("bench harness exploded")
+        raise OSError("bench harness exploded")
 
     monkeypatch.setattr(executor, "_bench_patch", _raising_bench)
     verdict = await executor._switch_off_parity(
@@ -997,7 +998,8 @@ async def test_a_raising_parity_leg_does_not_read_as_a_pass(tmp_path, monkeypatc
 @pytest.mark.asyncio
 async def test_parity_without_a_base_is_reported_as_not_run(tmp_path):
     """No base to compare against means the check was skipped, not that it passed."""
-    from hyperloom.orchestrator.actions.executors.integrate_patch import IntegratePatchExecutor, _PatchBench
+    from hyperloom.orchestrator.actions.executors._integrate_results import _PatchBench
+    from hyperloom.orchestrator.actions.executors.integrate_patch import IntegratePatchExecutor
 
     verdict = await IntegratePatchExecutor(session_dir=tmp_path)._switch_off_parity(
         _PatchBench(params={}, output_root=tmp_path, specialist_task_id="t"), switch_manifest=_chain(), base_tput=0.0
@@ -1009,7 +1011,8 @@ async def test_parity_without_a_base_is_reported_as_not_run(tmp_path):
 @pytest.mark.asyncio
 async def test_parity_can_be_switched_off_explicitly(tmp_path):
     """An operator debugging the harness can take the extra leg out."""
-    from hyperloom.orchestrator.actions.executors.integrate_patch import IntegratePatchExecutor, _PatchBench
+    from hyperloom.orchestrator.actions.executors._integrate_results import _PatchBench
+    from hyperloom.orchestrator.actions.executors.integrate_patch import IntegratePatchExecutor
 
     verdict = await IntegratePatchExecutor(session_dir=tmp_path)._switch_off_parity(
         _PatchBench(params={"enable_switch_off_parity": False}, output_root=tmp_path, specialist_task_id="t"),

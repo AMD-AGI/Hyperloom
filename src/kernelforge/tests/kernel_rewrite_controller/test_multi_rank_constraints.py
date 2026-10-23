@@ -13,7 +13,9 @@ budget with them.
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -232,6 +234,37 @@ def test_an_empty_mask_reports_zero_rather_than_unknown(monkeypatch) -> None:
 
     assert dispatcher._visible_gpu_count() == 0
     assert dispatcher._visible_gpu_count() != dispatcher.GPU_COUNT_UNKNOWN
+
+
+def _visible_count_with_failing_probe(monkeypatch, failure: Exception) -> int:
+    monkeypatch.delenv("HIP_VISIBLE_DEVICES", raising=False)
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+
+    def device_count():
+        raise failure
+
+    torch = ModuleType("torch")
+    torch.cuda = SimpleNamespace(device_count=device_count)
+    monkeypatch.setitem(sys.modules, "torch", torch)
+    return dispatcher._visible_gpu_count()
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        ImportError("torch is not installed"),
+        OSError("libamdhip64.so.6: cannot open shared object file"),
+        RuntimeError("no HIP driver"),
+    ],
+    ids=lambda failure: type(failure).__name__,
+)
+def test_an_expected_probe_failure_reports_an_unknown_count(monkeypatch, failure) -> None:
+    assert _visible_count_with_failing_probe(monkeypatch, failure) == dispatcher.GPU_COUNT_UNKNOWN
+
+
+def test_an_unexpected_probe_error_is_not_read_as_an_unknown_count(monkeypatch) -> None:
+    with pytest.raises(TypeError, match="^device_count signature drifted$"):
+        _visible_count_with_failing_probe(monkeypatch, TypeError("device_count signature drifted"))
 
 
 # --- the parallelism suffix ---------------------------------------------------

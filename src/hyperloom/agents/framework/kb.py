@@ -93,11 +93,11 @@ def migrate_legacy_partition_once() -> Path | None:
         if destination.exists() and any(destination.iterdir()):
             return None
         _copy_partition_atomically(source, destination)
-    except Exception:  # noqa: BLE001 — a convenience copy may not stop the run
+    except OSError:  # a convenience copy may not stop the run
         _log.warning(
             "FRAMEWORK KB: could not carry the legacy partition over from %s; continuing with "
             "whatever is at %s. The FRAMEWORK phase treats a missing ledger as a cold start, so "
-            "it may re-propose PRs it has already tried.",
+            "it may re-dispatch config levers that already lost an accuracy gate.",
             source,
             destination,
             exc_info=True,

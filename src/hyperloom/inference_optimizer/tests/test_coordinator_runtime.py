@@ -1025,7 +1025,7 @@ async def test_orchestration_prompt_has_no_execution_checklist(session_dir):
         c.shared_state.last_profile_trace = ""
         c.shared_state.save(session_dir)
 
-        prompt = await c.conversation.compose_prompt("orchestration")
+        prompt = (await c.conversation.compose_prompt("orchestration")).text
 
         assert "Execution checklist" not in prompt
     finally:
@@ -1208,6 +1208,27 @@ def test_inject_explore_runtime_params_includes_baseline_accuracy():
     params: dict[str, Any] = {}
     ProposalsCollaborator(DummyCoordinator()).inject_explore_runtime_params(params)
     assert params["accuracy_baseline"] == pytest.approx(0.81)
+
+
+@pytest.mark.parametrize(
+    ("proposed", "raises_bar"),
+    [(None, False), (-5.0, False), (float("nan"), False), ("not-a-number", False), (25.0, True)],
+)
+def test_agent_keep_threshold_can_only_raise_the_session_bar(proposed, raises_bar):
+    from hyperloom.orchestrator.phases.machine_state import resolve_keep_threshold
+
+    class DummyCoordinator:
+        shared_state = SharedState()
+
+    session_pct = resolve_keep_threshold(DummyCoordinator.shared_state)
+    proposals = ProposalsCollaborator(DummyCoordinator())
+    explore: dict[str, Any] = {} if proposed is None else {"keep_threshold_pct": proposed}
+    integrate = dict(explore)
+    proposals.inject_explore_runtime_params(explore)
+    proposals.floor_keep_threshold(integrate)
+    expected = 25.0 if raises_bar else session_pct
+    assert explore["keep_threshold_pct"] == pytest.approx(expected)
+    assert integrate["keep_threshold_pct"] == pytest.approx(expected)
 
 
 @pytest.mark.asyncio

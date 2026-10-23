@@ -18,7 +18,7 @@ from kernelforge.cli import lanes as cli_lanes
 from kernelforge.config import Config
 from kernelforge.orchestrator.agent import ImplementerSetup, ImplementerTask
 from kernelforge.loop import fanout
-from kernelforge.llm.process_reaping import ReapReport
+from kernelforge.tools.process_reaping import ReapReport
 from kernelforge.loop.fanout import (
     SERIALIZED_DRIVER_NAME,
     DeviceBenchmarkLock,

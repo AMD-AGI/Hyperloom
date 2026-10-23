@@ -70,7 +70,7 @@ def _arm_kernel_phase(st):
 
 
 def _spend_the_phase_budget(st):
-    spent = datetime.now(timezone.utc) - timedelta(hours=30)
+    spent = datetime.now(timezone.utc) - timedelta(hours=100)
     st.phase_started_ts = spent.isoformat()
     st.phase_started_unix = spent.timestamp()
 
@@ -116,6 +116,15 @@ def test_kernel_agent_is_catalogued_as_a_coordinator_internal_lane_holder():
     assert "kernel_agent" in ps.PHASE_ALLOWED_ACTIONS[ps.PHASE_KERNEL_AGENT]
     # Allowed in the phase so it survives the transition sweep, never proposable by a model.
     assert "kernel_agent" not in ps.allowed_actions_for(ps.PHASE_KERNEL_AGENT)
+
+
+@pytest.mark.parametrize(("recorded", "env", "expected"), [("geak", "forge", True), ("forge", "", False)])
+def test_the_recorded_backend_routes_kernel_whatever_the_environment_says(coord, monkeypatch, recorded, env, expected):
+    """A resumed process may carry a different environment; the session keeps the backend it started on."""
+    monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", env)
+    coord.shared_state.kernel_optimizer = recorded
+
+    assert coord.phase_kernel.geak_enabled() is expected
 
 
 @pytest.mark.asyncio
@@ -302,7 +311,7 @@ def test_kernel_agent_in_flight_never_blocks_a_budget_exit():
     transition = ps.compute_next_phase(st, kernel_work_in_flight=True)
 
     assert transition is not None
-    assert transition[1] in {"kernel_phase_budget_exhausted", "kernel_budget_cap"}
+    assert transition[1] == "kernel_phase_budget_exhausted"
     assert ps.replay_next_phase(transition[2]["predicate_inputs"]) == transition
 
 
@@ -577,3 +586,57 @@ async def test_phase_transition_drops_queued_work_the_next_phase_does_not_allow(
 def test_specialist_is_allowed_in_enablement_but_not_in_kernel():
     assert "specialist" in ps.PHASE_ALLOWED_ACTIONS[ps.PHASE_ENABLEMENT]
     assert "specialist" not in ps.PHASE_ALLOWED_ACTIONS[ps.PHASE_KERNEL_AGENT]
+
+
+@pytest.mark.parametrize(
+    ("phase", "fingerprint", "idle_sec", "turn_succeeded", "expected"),
+    [
+        (ps.PHASE_KERNEL_AGENT, "fp-a", 10.0, True, False),
+        (ps.PHASE_KERNEL_AGENT, "fp-a", 10.0, False, True),
+        (ps.PHASE_KERNEL_AGENT, "fp-b", 10.0, True, True),
+        (ps.PHASE_KERNEL_AGENT, "fp-a", 901.0, True, True),
+        (ps.PHASE_SWEEP, "fp-a", 10.0, True, True),
+    ],
+)
+def test_orchestration_turn_in_kernel_needs_kernel_progress_or_the_heartbeat(
+    coord, phase, fingerprint, idle_sec, turn_succeeded, expected
+):
+    st = coord.shared_state
+    st.phase = phase
+    st.kernel_progress_fingerprint = "fp-a"
+    now = time.time()
+    st.agent_last_active["orchestration"] = now if turn_succeeded else now - 60.0
+    assert coord.conversation.admit_turn("orchestration", now)
+
+    st.kernel_progress_fingerprint = fingerprint
+
+    assert coord.conversation.admit_turn("orchestration", now + idle_sec) is expected
+
+
+async def test_kernel_ticks_run_orchestration_only_on_admitted_turns(coord, monkeypatch):
+    c = coord
+    st = c.shared_state
+    st.phase = ps.PHASE_KERNEL_AGENT
+    st.kernel_progress_fingerprint = "fp-a"
+    turns: list[str] = []
+
+    async def _noop(*_args, **_kwargs):
+        return None
+
+    async def _turn(name, **_kwargs):
+        turns.append(name)
+        st.agent_last_active[name] = time.time()
+
+    monkeypatch.setattr(c, "reactor_pass", _turn)
+    monkeypatch.setattr(c.reconciler, "run", _noop)
+    monkeypatch.setattr(c.phase_machine, "advance_phase_if_needed", _noop)
+    monkeypatch.setattr(c.dispatcher, "pump_dispatcher_once", _noop)
+    monkeypatch.setattr(c.enablement_lane, "pump_enablement_safely", _noop)
+    c.phase_machine.pump_table = {ps.PHASE_KERNEL_AGENT: _noop}
+    c._last_maintenance_ts = time.monotonic()
+
+    await c.tick(2)
+    st.kernel_progress_fingerprint = "fp-b"
+    await c.tick(1)
+
+    assert turns == ["orchestration", "critic", "critic", "orchestration", "critic"]

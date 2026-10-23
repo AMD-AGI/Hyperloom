@@ -34,10 +34,12 @@ from kernelforge.agent_backends.base import (
     AgentRunSpec,
     AgentRuntimeConfig,
 )
-from kernelforge.llm import LlmGateway, resolve_openai_gateway
+from kernelforge.agent_backends.gateway import LlmGateway, resolve_openai_gateway
 from kernelforge.agent_backends.workspace_guard import WorkspaceGuard
 
 log = logging.getLogger(__name__)
+
+_ignored_agent_clis: set[str] = set()
 
 _TOML_BARE_KEY_RE = re.compile(r"[A-Za-z0-9_-]+")
 
@@ -243,10 +245,14 @@ def _sdk_item_dict(item: Any) -> dict[str, Any]:
     return dict(root) if isinstance(root, dict) else {}
 
 
+def _present_fields(item: dict[str, Any], *keys: str) -> dict[str, Any]:
+    """The fields among ``keys`` that one SDK item actually reports."""
+    return {key: item[key] for key in keys if key in item}
+
+
 def _normalize_sdk_result(result: Any, session_id: str) -> AgentRunResult:
     """Normalize one completed SDK turn into the shared backend result."""
     text = str(getattr(result, "final_response", "") or "").strip()
-    file_changes: list[str] = []
     tool_calls: list[tuple[str, dict[str, Any]]] = []
     findings: list[str] = []
     edit_count = 0
@@ -254,50 +260,23 @@ def _normalize_sdk_result(result: Any, session_id: str) -> AgentRunResult:
         item = _sdk_item_dict(raw_item)
         item_type = str(item.get("type") or "")
         normalized_type = item_type.replace("_", "").lower()
-        if normalized_type == "agentmessage" and not text:
-            message = item.get("text")
-            if isinstance(message, str):
-                text = message.strip()
+        if normalized_type == "agentmessage" and not text and isinstance(item.get("text"), str):
+            text = item["text"].strip()
         elif normalized_type == "commandexecution":
-            command = item.get("command") or item_type
-            metadata = {key: item[key] for key in ("exitCode", "status") if key in item}
-            tool_calls.append((str(command), metadata))
+            tool_calls.append((str(item.get("command") or item_type), _present_fields(item, "exitCode", "status")))
         elif normalized_type == "mcptoolcall":
             server = str(item.get("server") or "mcp")
             tool = str(item.get("tool") or "tool")
-            metadata = {key: item[key] for key in ("status", "error") if key in item}
-            tool_calls.append((f"{server}.{tool}", metadata))
+            tool_calls.append((f"{server}.{tool}", _present_fields(item, "status", "error")))
         elif normalized_type in {"collabagenttoolcall", "collabtoolcall"}:
-            command = item.get("tool") or "collab_agent"
-            metadata = {
-                key: item[key]
-                for key in (
-                    "status",
-                    "senderThreadId",
-                    "receiverThreadIds",
-                )
-                if key in item
-            }
-            tool_calls.append((str(command), metadata))
+            metadata = _present_fields(item, "status", "senderThreadId", "receiverThreadIds")
+            tool_calls.append((str(item.get("tool") or "collab_agent"), metadata))
         elif normalized_type == "subagentactivity":
-            command = item.get("kind") or "subagent"
-            tool_calls.append(
-                (
-                    str(command),
-                    {
-                        "agentThreadId": item.get("agentThreadId", ""),
-                    },
-                )
-            )
-        elif normalized_type == "filechange":
-            item_paths = [
-                change["path"]
-                for change in item.get("changes", ())
-                if isinstance(change, dict) and isinstance(change.get("path"), str)
-            ]
-            file_changes.extend(item_paths)
-            if item_paths:
-                edit_count += 1
+            tool_calls.append((str(item.get("kind") or "subagent"), {"agentThreadId": item.get("agentThreadId", "")}))
+        elif normalized_type == "filechange" and any(
+            isinstance(change, dict) and isinstance(change.get("path"), str) for change in item.get("changes", ())
+        ):
+            edit_count += 1
 
     # The SDK reports a provider-side failure in-band: the turn "completes" while the model never answered.
     error = getattr(result, "error", None)
@@ -318,7 +297,6 @@ def _normalize_sdk_result(result: Any, session_id: str) -> AgentRunResult:
             end_reason = "sdk_error"
         text = text or f"[session ended with SDK error: {message}]"
 
-    unique_changes = list(dict.fromkeys(file_changes))
     return AgentRunResult(
         text=text,
         subtype=subtype,
@@ -326,7 +304,6 @@ def _normalize_sdk_result(result: Any, session_id: str) -> AgentRunResult:
         end_reason=end_reason,
         session_id=session_id,
         tool_calls=tool_calls,
-        file_changes=unique_changes,
         usage=_normalize_sdk_usage(getattr(result, "usage", None)),
         findings=findings,
         edit_count=edit_count,
@@ -380,9 +357,10 @@ class CodexBackend:
         # shadow the environment.
         if isinstance(gateway, Mapping):
             gateway = LlmGateway.from_mapping(gateway) if gateway else None
-        self._configured_codex_bin = (
-            codex_bin or self.runtime.executable or os.environ.get("FORGE_AGENT_CLI", "").strip()
-        )
+        explicit_bin = codex_bin or self.runtime.executable
+        self._configured_codex_bin = explicit_bin or os.environ.get("FORGE_AGENT_CLI", "").strip()
+        # Only an explicit pin must be a Codex runtime; the variable may name another provider's CLI.
+        self._codex_bin_from_env = bool(self._configured_codex_bin) and not explicit_bin
         self.codex_bin = str(Path(self._configured_codex_bin).expanduser()) if self._configured_codex_bin else ""
         self.gateway = gateway
         self.bypass_sandbox = self.runtime.sandbox_mode == "bypass" if bypass_sandbox is None else bypass_sandbox
@@ -423,34 +401,50 @@ class CodexBackend:
             return self.gateway
         return _resolve_gateway()
 
+    def _require_executable_runtime(self) -> None:
+        if not Path(self.codex_bin).is_file() or not os.access(self.codex_bin, os.X_OK):
+            raise CodexUnavailableError(f"Codex SDK runtime is not executable: {self.codex_bin}")
+
+    def _require_codex_version(self) -> None:
+        try:
+            version = subprocess.run(
+                [self.codex_bin, "--version"],
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise CodexUnavailableError(f"Codex SDK runtime version check failed: {exc}") from exc
+        version_text = b"\n".join([version.stdout, version.stderr]).decode(errors="replace").strip()
+        if version.returncode != 0 or not re.search(
+            r"\bcodex(?:-cli)?\b",
+            version_text,
+            re.IGNORECASE,
+        ):
+            raise CodexUnavailableError(
+                f"configured SDK runtime does not appear to be Codex: "
+                f"{self.codex_bin}; --version returned {version_text!r}"
+            )
+
     def preflight(self) -> None:
         """Validate SDK runtime and gateway prerequisites without spending tokens."""
         if self._preflight_done:
             return
         sdk = _load_codex_sdk()
-        if self.codex_bin and (not Path(self.codex_bin).is_file() or not os.access(self.codex_bin, os.X_OK)):
-            raise CodexUnavailableError(f"Codex SDK runtime is not executable: {self.codex_bin}")
-        _provider_overrides(self._effective_gateway())
-        if self.codex_bin:
+        if self.codex_bin and self._codex_bin_from_env:
             try:
-                version = subprocess.run(
-                    [self.codex_bin, "--version"],
-                    capture_output=True,
-                    timeout=10,
-                    check=False,
-                )
-            except (OSError, subprocess.TimeoutExpired) as exc:
-                raise CodexUnavailableError(f"Codex SDK runtime version check failed: {exc}") from exc
-            version_text = b"\n".join([version.stdout, version.stderr]).decode(errors="replace").strip()
-            if version.returncode != 0 or not re.search(
-                r"\bcodex(?:-cli)?\b",
-                version_text,
-                re.IGNORECASE,
-            ):
-                raise CodexUnavailableError(
-                    f"configured SDK runtime does not appear to be Codex: "
-                    f"{self.codex_bin}; --version returned {version_text!r}"
-                )
+                self._require_executable_runtime()
+                self._require_codex_version()
+            except CodexUnavailableError as exc:
+                if self.codex_bin not in _ignored_agent_clis:
+                    _ignored_agent_clis.add(self.codex_bin)
+                    log.warning("ignoring FORGE_AGENT_CLI for the Codex backend; using the SDK runtime: %s", exc)
+                self.codex_bin = ""
+        if self.codex_bin:
+            self._require_executable_runtime()
+        _provider_overrides(self._effective_gateway())
+        if self.codex_bin and not self._codex_bin_from_env:
+            self._require_codex_version()
         client = None
         try:
             client = sdk.Codex(
@@ -653,6 +647,7 @@ class CodexBackend:
                 outcome["result"] = turn.run()
             except Exception as exc:  # noqa: BLE001 - SDK turn runs in a worker thread
                 outcome["error"] = exc
+                log.warning("Codex startup probe turn failed: %s", exc)
             finally:
                 completed.set()
 

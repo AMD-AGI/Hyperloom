@@ -13,16 +13,18 @@ import unittest
 import unittest.mock as mock
 
 from hyperloom.inference_optimizer.framework_paths import resolve_known_source_prefixes
-from hyperloom.orchestrator.trace_analysis.tracelens_analysis import (
+from hyperloom.orchestrator.trace_analysis._candidate_assembly import derive_kernel_category
+from hyperloom.orchestrator.trace_analysis._kernel_classification import (
     _defines_traced_triton_kernel,
-    _flydsl_kernel_params,
     _flydsl_reusable_roots,
     _looks_like_flydsl_source,
     _reusable_roots,
     classify_patchability,
-    derive_kernel_category,
-    enrich_candidates_with_runtime_metadata,
     source_type_for,
+)
+from hyperloom.orchestrator.trace_analysis._kernel_roofline import (
+    _flydsl_kernel_params,
+    enrich_candidates_with_runtime_metadata,
 )
 from hyperloom.orchestrator.trace_analysis.tracelens_skill_runner import (
     UPSTREAM_CATEGORY_TO_GEAK,
@@ -341,7 +343,6 @@ class TestFlyDSLKernelParams(unittest.TestCase):
         args = argparse.Namespace(
             framework="sglang",
             model_name="",
-            analysis_mode="inference",
             target_platform="mi355x",
         )
         flydsl_cand = {

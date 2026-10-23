@@ -161,7 +161,7 @@ class InternalTasksPhase(CoordinatorCollaborator):
             from hyperloom.inference_optimizer.baseline_comparison import research_hints as _research_hints
 
             _research_hints.write_hints_skeleton(self.session_dir)
-        except Exception:
+        except OSError:
             log.exception("research-scout: hints skeleton write failed")
         if not bool(self.shared_state.research_scout_enabled):
             return
@@ -213,24 +213,21 @@ class InternalTasksPhase(CoordinatorCollaborator):
             "scope": "domain",
             "mode": "research",
         }
-        # Seed the curated checklist + rendered prompt block; best-effort.
-        try:
-            from ..knowledge import static_recon_checklist as _src_recon
+        # Seed the curated checklist + rendered prompt block.
+        from ..knowledge import static_recon_checklist as _src_recon
 
-            _entries = _src_recon.entries_for(
-                model_class=str(state.model_class or ""),
-                gpu_type=str(state.gpu_type or ""),
-                precision=_src_recon.workload_precision(state),
-            )
-            _entries = _src_recon.filter_entries_for_model(_entries, dict(state.model_info or {}))
-            _rendered = _src_recon.render_checklist_for_prompt(_entries)
-            if _rendered:
-                params["static_recon_checklist"] = _rendered
-            _dicts = _src_recon.checklist_as_dicts(_entries)
-            if _dicts:
-                params["static_recon_checklist_entries"] = _dicts
-        except Exception:
-            log.exception("static-recon: checklist seeding failed")
+        _entries = _src_recon.entries_for(
+            model_class=str(state.model_class or ""),
+            gpu_type=str(state.gpu_type or ""),
+            precision=_src_recon.workload_precision(state),
+        )
+        _entries = _src_recon.filter_entries_for_model(_entries, dict(state.model_info or {}))
+        _rendered = _src_recon.render_checklist_for_prompt(_entries)
+        if _rendered:
+            params["static_recon_checklist"] = _rendered
+        _dicts = _src_recon.checklist_as_dicts(_entries)
+        if _dicts:
+            params["static_recon_checklist_entries"] = _dicts
         await self._coord.specialist_dispatch.warm_specialist_params(params)
         lanes, ttl = self._coord.gpu_lanes.framework_authoring_lanes_ttl(params, base_ttl_sec=1800)
         task, was_existing = await self.tasks.create_or_return_existing(
@@ -246,7 +243,7 @@ class InternalTasksPhase(CoordinatorCollaborator):
             try:
                 state.static_recon_runs = int(state.static_recon_runs or 0) + 1
                 self.shared_state.save(self.session_dir)
-            except Exception:
+            except OSError:
                 log.exception("static-recon: bookkeeping save failed")
             log.info(
                 "static-recon dispatched: task_id=%s reason=%s",
@@ -300,7 +297,8 @@ class InternalTasksPhase(CoordinatorCollaborator):
                 self.session_dir,
                 state,
             )
-        except Exception:  # noqa: BLE001 — defensive
+        except Exception:
+            log.exception("Coordinator: trajectory review digest failed")
             digest = ""
         direction, _pct = self._coord.conversation.dominant_roofline_direction()
         from hyperloom.inference_optimizer.roofline_snapshot import BOTTLENECK_DOMAIN_HINTS
@@ -361,6 +359,6 @@ class InternalTasksPhase(CoordinatorCollaborator):
         if seeded:
             try:
                 self.shared_state.save(self.session_dir)
-            except Exception:
+            except OSError:
                 log.exception("static-recon: SharedState.save after seeding failed")
         log.info("static-recon consumed: bridge_candidates_seeded=%d", seeded)

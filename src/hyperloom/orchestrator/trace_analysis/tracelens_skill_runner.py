@@ -23,6 +23,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Iterable
 
+import yaml
+from TraceLens.Agent.Analysis.utils.config_utils import check_config
+
 from hyperloom.common.codex_session import (
     CodexSessionConfig,
     CodexSessionError,
@@ -30,8 +33,11 @@ from hyperloom.common.codex_session import (
     CodexTurnRequest,
     run_codex_turn,
 )
+from hyperloom.common import llm_config
+from hyperloom.common.deepseek_task import DeepSeekTaskRequest
 from hyperloom.common.llm_config import claude_sdk_env_options
 from hyperloom.common.llm_config import DEFAULT_CLAUDE_MODEL, DEFAULT_CODEX_MODEL
+from hyperloom.inference_optimizer import framework_registry
 
 from ._capture_shapes import is_capture_dir_name
 from ._io_utils import safe_float
@@ -47,23 +53,30 @@ from ._task_group_contract import (
 _log = logging.getLogger(__name__)
 
 DEFAULT_ALLOWED_TOOLS = ["Read", "Write", "Edit", "Bash", "Task"]
+_MAX_AGENT_TURNS = 300
+
+# The run config the TraceLens skill reads.
+RUN_CONFIG_NAME = "run.yaml"
 
 # The Codex SDK has no literal Read/Write/Bash/Task tools, and this thread runs
 # without sub-agents, so the skill's tool names have to be mapped to Codex's
 # native shell and patch capabilities before the agent follows them.
-_CODEX_DEVELOPER_INSTRUCTIONS = """\
+_CODEX_RUNTIME_MAPPING = """\
 ## Codex runtime mapping
 Use shell commands to inspect, search and run files, and your native patch/edit
 capability to write them. Where the skill names Read, Write, Edit, Grep, Glob,
 Bash or Task, it describes an equivalent capability rather than a literal tool;
 carry out any sub-agent step yourself, in sequence.
-
-## System instructions
-You are a TraceLens analysis runner inside Hyperloom. Execute only the
-requested standalone analysis workflow. Use absolute paths, write artifacts
-under the requested output directory, and do not modify application source
-code.
 """
+
+# The one system prompt every runtime runs the skill under; each runtime adds only its own tool mapping.
+_TRACELENS_SYSTEM_PROMPT = (
+    "You are a TraceLens analysis runner inside Hyperloom. Execute only the requested standalone analysis workflow. "
+    "Use absolute paths, write artifacts under the requested output directory, and do not modify application "
+    "source code."
+)
+
+_CODEX_DEVELOPER_INSTRUCTIONS = f"{_CODEX_RUNTIME_MAPPING}\n## System instructions\n{_TRACELENS_SYSTEM_PROMPT}\n"
 
 
 # Per-message stream-idle timeout (seconds). The in-process Claude SDK query has
@@ -306,28 +319,56 @@ def write_local_cmd_prefix(output_dir: Path, tracelens_root: Path) -> Path:
     return prefix_path
 
 
-def infer_analysis_mode(framework: str, requested: str) -> str:
-    """Resolve the effective TraceLens analysis mode for a framework.
+def tracelens_analysis_mode(framework: str) -> str:
+    """Return the TraceLens analysis mode for ``framework``.
 
-    An explicit non-default ``requested`` mode always wins. Otherwise inference
-    frameworks (vllm/sglang/atom) default to ``"inference"`` grouping because
-    their traces share the chrome-trace shape produced by the torch profiler;
-    everything else falls back to the requested value or ``"default"``.
+    Serving frameworks (vllm/sglang/atom) produce inference-shaped traces;
+    scriptable workloads are analysed in the default mode.
 
     Args:
-        framework (str): The framework that produced the trace (e.g. ``vllm``).
-        requested (str): The caller-requested analysis mode, possibly empty or
-            ``"default"``.
+        framework (str): The framework that produced the trace.
 
     Returns:
-        str: The resolved analysis mode string.
+        str: ``"default"`` for scriptable frameworks, else ``"inference"``.
     """
-    requested = (requested or "").strip().lower()
-    if requested and requested != "default":
-        return requested
-    if (framework or "").strip().lower() in {"vllm", "sglang", "atom"}:
-        return "inference"
-    return requested or "default"
+    return "default" if framework_registry.is_scriptable(framework) else "inference"
+
+
+def write_run_config(
+    *,
+    output_dir: Path,
+    trace_path: Path,
+    platform: str,
+    analysis_mode: str,
+    capture_folder: Path | None,
+) -> Path:
+    """Write the one-job standalone run config the TraceLens skill reads.
+
+    The config is checked with TraceLens's own ``check_config`` first, so a
+    rejected config raises ``ConfigError`` here rather than inside the agent
+    session. TraceLens requires absolute string paths.
+
+    Args:
+        output_dir (Path): Directory TraceLens writes to; the config lands in it.
+        trace_path (Path): The trace to analyse.
+        platform (str): The target platform name.
+        analysis_mode (str): ``"default"`` or ``"inference"``.
+        capture_folder (Path | None): Graph-capture folder; omitted when ``None``.
+
+    Returns:
+        Path: The path of the written ``run.yaml``.
+
+    Raises:
+        ConfigError: If TraceLens rejects the config.
+    """
+    job = {"trace_path": str(trace_path.resolve()), "platform": platform}
+    if capture_folder is not None:
+        job["capture_folder"] = str(capture_folder.resolve())
+    config = {"analysis_mode": analysis_mode, "output_dir": str(output_dir.resolve()), "jobs": [job]}
+    check_config(config, "standalone")
+    config_path = output_dir / RUN_CONFIG_NAME
+    config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+    return config_path
 
 
 def discover_capture_folder(trace_input: Path, trace_files: list[Path]) -> Path | None:
@@ -375,28 +416,21 @@ def discover_capture_folder(trace_input: Path, trace_files: list[Path]) -> Path 
 
 @dataclass(frozen=True)
 class TraceLensSkillRequest:
-    """The inputs one TraceLens skill run pins in its prompt.
+    """The inputs one TraceLens skill run reads besides its ``run.yaml``.
 
     Attributes:
         skill_path: Path to the TraceLens skill file to follow.
-        trace_path: Path to the trace file to analyze.
-        output_dir: Directory where TraceLens outputs are written.
+        output_dir: Directory holding ``run.yaml`` and receiving the outputs.
         tracelens_root: The TraceLens project root.
         tracelens_internal_root: The TraceLens-internal root, ``None`` in OSS-only mode.
-        platform: The target platform string.
-        framework: The framework that produced the trace.
-        analysis_mode: The requested analysis mode (resolved internally).
-        capture_folder: Graph-capture folder for inference runs.
+        capture_folder: Graph-capture folder, read only as the Codex runner's
+            write scope; the run config already names it.
     """
 
     skill_path: Path
-    trace_path: Path
     output_dir: Path
     tracelens_root: Path
     tracelens_internal_root: Path | None
-    platform: str
-    framework: str
-    analysis_mode: str
     capture_folder: Path | None
 
 
@@ -427,14 +461,12 @@ class _StreamIdleBounds:
 
 
 def build_orchestrator_prompt(request: TraceLensSkillRequest) -> str:
-    """Prompt an agent to execute the TraceLens standalone skill.
+    """Prompt an agent to run the TraceLens standalone skill from ``run.yaml``.
 
     Provider-neutral: the same prompt drives the Claude SDK runner and the
-    Codex SDK runner.
-
-    Assembles the full natural-language instruction that pins every required
-    input (paths, platform, framework, analysis/execution mode, capture folder)
-    so the agent can run the analysis-orchestrator workflow without prompting.
+    Codex SDK runner. The trace, platform, analysis mode and capture folder
+    live only in the run config; the prompt names it and supplies the
+    execution context the skill would otherwise ask for.
 
     Args:
         request (TraceLensSkillRequest): The run's inputs.
@@ -443,54 +475,39 @@ def build_orchestrator_prompt(request: TraceLensSkillRequest) -> str:
         str: The fully assembled orchestrator prompt text.
     """
 
-    tracelens_internal_root = request.tracelens_internal_root
-    framework = request.framework
-    capture_folder = request.capture_folder
-    analysis_mode = infer_analysis_mode(framework, request.analysis_mode)
-    if analysis_mode == "inference" and capture_folder is not None:
-        exec_mode = "graph_capture"
-    elif analysis_mode == "inference":
-        exec_mode = "eager"
-    else:
-        exec_mode = "default"
-
-    internal_root_text = str(tracelens_internal_root) if tracelens_internal_root else "(not installed; OSS-only mode)"
-    tl_extension_text = "TraceLens_internal" if tracelens_internal_root else "(unset)"
-
-    comparison_scope = "standalone"
-    capture_text = str(capture_folder) if capture_folder else "N/A"
+    output_dir = request.output_dir
+    run_config = (output_dir / RUN_CONFIG_NAME).resolve()
+    internal_root_text = (
+        str(request.tracelens_internal_root) if request.tracelens_internal_root else "(not installed; OSS-only mode)"
+    )
+    tl_extension_text = "TraceLens_internal" if request.tracelens_internal_root else "(unset)"
     return f"""You are running TraceLens standalone analysis for Hyperloom.
 
 Read and follow the FULL instructions in this skill file:
 {request.skill_path}
 
-All required Step 0 inputs are already provided below. Do not ask the user any
-questions; proceed with the analysis.
+Run it from config {run_config}, standalone.
+The execution context below answers the remaining Step 0 questions.
+Do not ask the user any questions; proceed with the analysis.
 
 Execution context:
 - Environment: local
 - TraceLens root: {request.tracelens_root}
 - TraceLens-internal root: {internal_root_text}
-- Command prefix cache: {request.output_dir / "cache" / "cmd_prefix.txt"}
-- Trace file path: {request.trace_path}
-- Output directory: {request.output_dir}
-- Platform: {request.platform}
-- Framework: {framework or "unknown"}
-- Comparison scope: {comparison_scope}
-- Analysis mode: {analysis_mode}
-- Inference execution mode: {exec_mode}
-- Capture folder path: {capture_text}
 - TL_EXTENSION: {tl_extension_text}
-
+- Command prefix cache: {output_dir / "cache" / "cmd_prefix.txt"}
+- Run config: {run_config}
+- Comparison scope: standalone
+- Output directory: {output_dir}
 
 Important requirements:
-1. Use the provided command prefix cache for all shell commands.
+1. Use the provided command prefix cache for all shell commands; do not rebuild it.
 2. Run the analysis-orchestrator workflow through Step 12.
-3. If analysis_mode is inference and execution mode is graph_capture, pass the
-   capture folder to the inference perf-report CLI exactly as the skill says.
+3. Take the trace, platform, analysis mode and capture folder from the run config
+   only. If the Step 0 config check fails, stop and report its error.
 4. Write all TraceLens outputs under the output directory above.
 5. Ensure this file exists before you finish:
-   - {request.output_dir / "analysis.md"}  (TraceLens final report; REQUIRED)
+   - {output_dir / "analysis.md"}  (TraceLens final report; REQUIRED)
 6. Do not run GEAK, kernel optimization, or modify model/framework source.
 
 When complete, respond with a short summary of the artifacts you wrote.
@@ -517,19 +534,6 @@ def _import_sdk() -> tuple[Any, Any]:
     if not (hasattr(sdk, "query") and hasattr(sdk, "ClaudeAgentOptions")):
         raise RuntimeError("claude_agent_sdk missing query / ClaudeAgentOptions")
     return sdk.query, sdk.ClaudeAgentOptions
-
-
-def _should_use_codex_runner() -> bool:
-    """Return true when the Codex Agent SDK runner should run this skill.
-
-    An OpenAI-only deployment has no Claude credentials to drive the Claude
-    Agent SDK, so the Codex runner is the only one that can execute. The choice
-    itself belongs to :mod:`hyperloom.common.llm_config`, so this cannot
-    disagree with backend selection or the forge kernel_backend.
-    """
-    from hyperloom.common import llm_config  # local import: keep module import-light
-
-    return llm_config.preferred_agent_backend() == llm_config.AGENT_BACKEND_CODEX
 
 
 def _iter_message_text(message: Any) -> Iterable[str]:
@@ -645,7 +649,7 @@ async def _drive_sdk_stream(
                     try:
                         await asyncio.wait_for(aclose(), timeout=10.0)
                     except (asyncio.TimeoutError, Exception):  # noqa: BLE001
-                        pass
+                        _log.debug("tracelens: stream aclose failed", exc_info=True)
                 break
             observe(message)
             in_flight.observe(message)
@@ -656,6 +660,7 @@ async def _drive_sdk_stream(
     except Exception as exc:  # noqa: BLE001
         # SDK may error after writing artifacts; treat artifact presence as truth.
         sdk_error = f"{type(exc).__name__}: {exc}"
+        _log.warning("tracelens: claude SDK stream failed: %s", sdk_error)
         if log:
             log(f"[claude-sdk] WARNING: {sdk_error}")
     return sdk_error
@@ -712,27 +717,53 @@ async def _run_tracelens_skill_codex(
         codex_error = f"{type(exc).__name__}: {exc}"
         if run.log:
             run.log(f"[codex-sdk] WARNING: {codex_error}")
-    codex_error = codex_error or result.error
+    return _skill_result(run, runner="codex", label="Codex", raw_text=result.text, error=codex_error or result.error)
 
-    report_path = output_dir / "analysis.md"
+
+def _skill_result(run: _SkillRun, *, runner: str, label: str, raw_text: str, error: str) -> TraceLensSkillRunResult:
+    """The run's artifacts once ``analysis.md`` exists; an agent error after it landed is metadata.
+
+    Raises:
+        RuntimeError: If ``analysis.md`` was not written.
+    """
+    report_path = run.request.output_dir / "analysis.md"
     if not report_path.exists():
-        if codex_error:
-            raise RuntimeError(f"TraceLens Codex runner failed before writing {report_path}: {codex_error}")
-        raise RuntimeError(f"TraceLens Codex runner did not write {report_path}")
-
-    artifact_paths = {
-        "tracelens_agent_report": str(report_path),
-        "tracelens_cmd_prefix": str(run.prefix_path),
-    }
-    if codex_error:
-        artifact_paths["tracelens_agent_sdk_error"] = codex_error
+        if error:
+            raise RuntimeError(f"TraceLens {label} runner failed before writing {report_path}: {error}")
+        raise RuntimeError(f"TraceLens {label} runner did not write {report_path}")
+    artifact_paths = {"tracelens_agent_report": str(report_path), "tracelens_cmd_prefix": str(run.prefix_path)}
+    if error:
+        artifact_paths["tracelens_agent_sdk_error"] = error
     return TraceLensSkillRunResult(
-        output_dir=output_dir,
+        output_dir=run.request.output_dir,
         report_path=report_path,
-        runner="codex",
-        raw_text=result.text,
+        runner=runner,
+        raw_text=raw_text,
         artifact_paths=artifact_paths,
     )
+
+
+def _claude_skill_options(run: _SkillRun, model: str, bounds: _StreamIdleBounds) -> dict[str, Any]:
+    """The Claude Agent SDK options of one skill run, as keyword arguments."""
+    log = run.log
+    kwargs: dict[str, Any] = {
+        "max_turns": _MAX_AGENT_TURNS,
+        "system_prompt": _TRACELENS_SYSTEM_PROMPT,
+        "allowed_tools": DEFAULT_ALLOWED_TOOLS,
+        "stderr": lambda line: log(f"[claude-sdk] {line.rstrip()}") if log else None,
+        "model": model,
+        # Stream events time each model request of the run onto the trajectory ledger.
+        "include_partial_messages": True,
+        # Roots Bash relative paths at TraceLens; harmless in tests via FakeOptions.
+        "cwd": str(run.request.tracelens_root),
+    }
+    kwargs.update(claude_sdk_env_options(model=model, component="tracelens", operation="analyze_trace"))
+    # In print mode the CLI terminates background sub-agents still running 600s
+    # after the main turn goes quiet, before the in-flight bound applies.
+    kwargs.setdefault("env", {})["CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS"] = os.environ.get(
+        "CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS", str(int(bounds.tool * 1000))
+    )
+    return kwargs
 
 
 async def run_tracelens_skill(
@@ -746,20 +777,22 @@ async def run_tracelens_skill(
     """Execute the standalone TraceLens skill on the configured agent runtime.
 
     Prepares the command-prefix cache and orchestrator prompt, then dispatches
-    to the Codex Agent SDK when the deployment has only the OpenAI side
-    configured, and to the Claude Agent SDK otherwise. Either way the presence
+    to the agent runtime :mod:`hyperloom.common.llm_config` selects: the DeepSeek
+    Harness, the Codex Agent SDK, or the Claude Agent SDK. Either way the presence
     of ``analysis.md`` is the source of truth: a runtime error after the report
     was written is recorded as metadata rather than raised.
 
     Args:
         request (TraceLensSkillRequest): The run's inputs.
-        budget_minutes (float): Time budget for the run. The Codex path spends
-            it as the turn's wall-clock timeout (floored at 60s, matching the
-            other TraceLens subprocess timeouts); the Claude path bounds each
-            SDK message by a stream-idle timeout instead.
+        budget_minutes (float): Time budget for the run. The Codex and DeepSeek
+            Harness paths spend it as the wall-clock timeout of the whole
+            session (floored at 60s, matching the other TraceLens subprocess
+            timeouts); the Claude path bounds each SDK message by a
+            stream-idle timeout instead.
         model (str | None): Optional model override. Defaults to
             :data:`DEFAULT_CLAUDE_MODEL` on the Claude SDK path, or ``$CODEX_MODEL`` /
-            :data:`DEFAULT_CODEX_MODEL` on the Codex SDK path.
+            :data:`DEFAULT_CODEX_MODEL` on the Codex SDK path. The DeepSeek
+            Harness path ignores it: the harness session owns its model.
         sdk (SdkEntryPoints): Optional injected query factory, options class
             and Codex turn entry point (used by tests); the query factory and
             options class are imported from the SDK when ``None``, and the
@@ -783,13 +816,29 @@ async def run_tracelens_skill(
     prompt = build_orchestrator_prompt(request)
 
     resolved_model = (model or "").strip()
-    if _should_use_codex_runner() and (
-        sdk.codex_turn_runner is not None or (sdk_query_factory is None and sdk_options_cls is None)
-    ):
+    run = _SkillRun(request, prefix_path, log)
+    runner = llm_config.resolve_agent_backend()
+    no_injected_sdk = sdk_query_factory is None and sdk_options_cls is None
+    timeout_sec = max(60.0, float(budget_minutes) * 60.0)
+    if runner == llm_config.AGENT_BACKEND_DEEPSEEK and no_injected_sdk:
+        from .tracelens_deepseek import drive_tracelens_skill
+
+        session = DeepSeekTaskRequest(
+            prompt=prompt,
+            system_prompt=_TRACELENS_SYSTEM_PROMPT,
+            cwd=tracelens_root,
+            writable=True,
+            log=log,
+            timeout_sec=timeout_sec,
+        )
+        result = await drive_tracelens_skill(session, output_dir / "analysis.md")
+        return _skill_result(run, runner="deepseek", label="DeepSeek", raw_text=result.text, error=result.error)
+
+    if runner == llm_config.AGENT_BACKEND_CODEX and (sdk.codex_turn_runner is not None or no_injected_sdk):
         codex_model = resolved_model or (os.environ.get("CODEX_MODEL") or "").strip() or DEFAULT_CODEX_MODEL
         return await _run_tracelens_skill_codex(
-            _SkillRun(request, prefix_path, log),
-            CodexTurnRequest(prompt, timeout_sec=max(60.0, float(budget_minutes) * 60.0)),
+            run,
+            CodexTurnRequest(prompt, timeout_sec=timeout_sec),
             model=codex_model,
             codex_turn_runner=sdk.codex_turn_runner or run_codex_turn,
         )
@@ -802,39 +851,10 @@ async def run_tracelens_skill(
         os.environ.setdefault("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
         os.environ.setdefault("DISABLE_AUTOUPDATER", "1")
 
-    system_prompt = (
-        "You are a TraceLens analysis runner inside Hyperloom. Execute only "
-        "the requested standalone analysis workflow. Use absolute paths, "
-        "write artifacts under the requested output directory, and do not "
-        "modify application source code."
-    )
-    max_turns = 300
-    kwargs: dict[str, Any] = {
-        "max_turns": max_turns,
-        "system_prompt": system_prompt,
-        "allowed_tools": DEFAULT_ALLOWED_TOOLS,
-        "stderr": lambda line: log(f"[claude-sdk] {line.rstrip()}") if log else None,
-    }
     resolved_model = resolved_model or DEFAULT_CLAUDE_MODEL
-    kwargs["model"] = resolved_model
-    # Stream events time each model request of the run onto the trajectory ledger.
-    kwargs["include_partial_messages"] = True
-    # Roots Bash relative paths at TraceLens; harmless in tests via FakeOptions.
-    kwargs["cwd"] = str(tracelens_root)
-    kwargs.update(
-        claude_sdk_env_options(
-            model=resolved_model,
-            component="tracelens",
-            operation="analyze_trace",
-        )
-    )
     idle_timeout = _resolve_stream_idle_timeout_sec()
-    tool_idle_timeout = _resolve_tool_idle_timeout_sec(idle_timeout)
-    # In print mode the CLI terminates background sub-agents still running 600s
-    # after the main turn goes quiet, before the in-flight bound below applies.
-    kwargs.setdefault("env", {})["CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS"] = os.environ.get(
-        "CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS", str(int(tool_idle_timeout * 1000))
-    )
+    bounds = _StreamIdleBounds(idle_timeout, _resolve_tool_idle_timeout_sec(idle_timeout))
+    kwargs = _claude_skill_options(run, resolved_model, bounds)
 
     try:
         options = sdk_options_cls(**kwargs)
@@ -851,38 +871,13 @@ async def run_tracelens_skill(
     with _TrajectoryCall(resolved_model) as trajectory:
         sdk_error = await _drive_sdk_stream(
             sdk_query_factory(prompt=prompt, options=options),
-            _StreamIdleBounds(idle_timeout, tool_idle_timeout),
+            bounds,
             chunks=chunks,
             observe=trajectory.observe,
             log=log,
         )
         trajectory.finish(sdk_error)
-
-    # Final report is ``analysis.md``.
-    report_path = output_dir / "analysis.md"
-    if not report_path.exists():
-        if sdk_error:
-            raise RuntimeError(f"TraceLens SDK runner failed before writing {report_path}: {sdk_error}")
-        raise RuntimeError(f"TraceLens SDK runner did not write {report_path}")
-
-    artifact_paths = {
-        "tracelens_agent_report": str(report_path),
-        "tracelens_cmd_prefix": str(prefix_path),
-    }
-    if sdk_error:
-        artifact_paths["tracelens_agent_sdk_error"] = sdk_error
-
-    return TraceLensSkillRunResult(
-        output_dir=output_dir,
-        report_path=report_path,
-        runner="claude_agent_sdk",
-        raw_text="\n".join(chunks),
-        artifact_paths=artifact_paths,
-    )
-
-
-# Shared numeric coercion (see _io_utils.safe_float).
-_safe_float = safe_float
+    return _skill_result(run, runner="claude_agent_sdk", label="SDK", raw_text="\n".join(chunks), error=sdk_error)
 
 
 _IDLE_PCT_TABLE_RE = re.compile(
@@ -1186,6 +1181,31 @@ def _is_native_source(path: str) -> bool:
     return str(path).lower().endswith(_NATIVE_SOURCE_SUFFIXES)
 
 
+def _pitem_prose(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return one prose entry per TraceLens P-item ``(rank, title)`` named by ``rows``, P1 first.
+
+    The first row naming a P-item supplies its prose, so ``build_prompt`` renders every P-item once; an entry with
+    no rank and no prose is dropped.
+    """
+    entries: dict[tuple[int, str], dict[str, Any]] = {}
+    for row in rows:
+        rank = int(row.get("tracelens_pitem_rank") or 0)
+        title = str(row.get("tracelens_pitem_title") or "")
+        if (rank, title) in entries:
+            continue
+        entries[rank, title] = {
+            "rank": rank,
+            "title": title,
+            "identification": str(row.get("identification") or "").strip(),
+            "reasoning_for_slowdown": str(row.get("reasoning_for_slowdown") or "").strip(),
+            "resolution": str(row.get("resolution") or "").strip(),
+            "impact_low_e2e_pct": safe_float(row.get("impact_low_e2e_pct")),
+            "impact_high_e2e_pct": safe_float(row.get("impact_high_e2e_pct")),
+        }
+    ordered = sorted(entries.values(), key=lambda e: (e["rank"], e["title"]))
+    return [e for e in ordered if e["rank"] or e["identification"] or e["reasoning_for_slowdown"] or e["resolution"]]
+
+
 def aggregate_by_source_function(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Group TraceLens candidates into per-kernel ``task_group`` dicts.
 
@@ -1204,54 +1224,33 @@ def aggregate_by_source_function(candidates: list[dict[str, Any]]) -> list[dict[
         The task-group dicts. Unparseable candidates are left out for legacy
         per-kernel dispatch.
     """
-    if not candidates:
-        return []
-    # Versioned identity builder. Operation normalization keeps different
-    # kernels in one source separate while template/shape instances of one
-    # operator merge.
     groups: dict[str, dict[str, Any]] = {}
     for cand in candidates:
-        if not isinstance(cand, dict):
-            continue
         target = _resolve_source_target(cand)
         if target is None:
             continue
         operation = str(cand.get("name") or "").strip()
-        src_norm = os.path.normpath(str(target["source_path"]))
-        reported_source = src_norm
-        function_name = str(target["function_name"])
-        source_kind = "native" if _is_native_source(src_norm) else "py"
-        identity = build_operator_identity(
-            source_kind=source_kind,
-            source_path=reported_source,
-            operation=operation,
-            function_name=function_name,
-        )
-        src_norm = str(identity["source_path"])
-        norm_op = str(identity["operation"])
-        key = operator_identity_key(
-            source_kind=source_kind,
-            source_path=reported_source,
-            operation=operation,
-            function_name=function_name,
-        )
-        legacy_keys = legacy_operator_identity_keys(
-            source_kind=source_kind,
-            source_path=reported_source,
-            operation=operation,
-            function_name=function_name,
-        )
+        reported_source = os.path.normpath(str(target["source_path"]))
+        identity_args = {
+            "source_kind": "native" if _is_native_source(reported_source) else "py",
+            "source_path": reported_source,
+            "operation": operation,
+            "function_name": str(target["function_name"]),
+        }
+        identity = build_operator_identity(**identity_args)
+        key = operator_identity_key(**identity_args)
+        legacy_keys = legacy_operator_identity_keys(**identity_args)
         bucket = groups.get(key)
         if bucket is None:
-            bucket = {
+            bucket = groups[key] = {
                 "task_group_id": "",  # filled below after sorting
                 "task_group_key": key,
                 "operator_identity": identity,
                 "identity_route": "skill",
                 "legacy_task_group_keys": legacy_keys,
                 "operation": operation,
-                "operation_key": norm_op,
-                "source_path": src_norm,
+                "operation_key": str(identity["operation"]),
+                "source_path": str(identity["source_path"]),
                 "definition_line": target["definition_line"],
                 "function_name": target["function_name"],
                 "ast_resolved": bool(target.get("ast_resolved")),
@@ -1262,91 +1261,34 @@ def aggregate_by_source_function(candidates: list[dict[str, Any]]) -> list[dict[
                 "aggregate_duration_us": 0.0,
                 "aggregate_call_count": 0,
                 "aggregate_gpu_pct": 0.0,
-                # Per-P-item prose (deduped by (rank, title)) so build_prompt renders every P-item.
                 "all_pitem_prose": [],
-                "_pitem_prose_seen": set(),  # popped before return
             }
-            groups[key] = bucket
         else:
-            bucket["legacy_task_group_keys"] = list(
-                dict.fromkeys(
-                    [
-                        *(bucket.get("legacy_task_group_keys") or []),
-                        *legacy_keys,
-                    ]
-                )
-            )
+            bucket["legacy_task_group_keys"] = list(dict.fromkeys([*bucket["legacy_task_group_keys"], *legacy_keys]))
         kid = str(cand.get("kernel_id") or "") or cand.get("name") or ""
         if kid and kid not in bucket["kernel_ids"]:
             bucket["kernel_ids"].append(kid)
         bucket["rows"].append(cand)
-        # Collect P-item prose deduped by (rank, title).
-        try:
-            pitem_rank = int(cand.get("tracelens_pitem_rank") or 0)
-        except (TypeError, ValueError):
-            pitem_rank = 0
-        pitem_title = str(cand.get("tracelens_pitem_title") or "")
-        pitem_key = (pitem_rank, pitem_title)
-        if pitem_key not in bucket["_pitem_prose_seen"]:
-            bucket["_pitem_prose_seen"].add(pitem_key)
-            bucket["all_pitem_prose"].append(
-                {
-                    "rank": pitem_rank,
-                    "title": pitem_title,
-                    "identification": str(cand.get("identification") or "").strip(),
-                    "reasoning_for_slowdown": str(cand.get("reasoning_for_slowdown") or "").strip(),
-                    "resolution": str(cand.get("resolution") or "").strip(),
-                    "impact_low_e2e_pct": _safe_float(cand.get("impact_low_e2e_pct")),
-                    "impact_high_e2e_pct": _safe_float(cand.get("impact_high_e2e_pct")),
-                }
-            )
-        try:
-            bucket["aggregate_duration_us"] += float(cand.get("duration_us") or 0.0)
-        except (TypeError, ValueError):
-            # Malformed metric value; skip this contribution.
-            pass
-        try:
-            bucket["aggregate_call_count"] += int(cand.get("call_count") or 0)
-        except (TypeError, ValueError):
-            # Malformed metric value; skip this contribution.
-            pass
-        try:
-            bucket["aggregate_gpu_pct"] += float(cand.get("gpu_pct") or 0.0)
-        except (TypeError, ValueError):
-            # Malformed metric value; skip this contribution.
-            pass
+        bucket["aggregate_duration_us"] += float(cand.get("duration_us") or 0.0)
+        bucket["aggregate_call_count"] += int(cand.get("call_count") or 0)
+        bucket["aggregate_gpu_pct"] += float(cand.get("gpu_pct") or 0.0)
 
-    ordered = sorted(
-        groups.values(),
-        key=lambda g: g["aggregate_duration_us"],
-        reverse=True,
-    )
+    ordered = sorted(groups.values(), key=lambda g: g["aggregate_duration_us"], reverse=True)
     for idx, group in enumerate(ordered, start=1):
         group["task_group_id"] = f"tg{idx:03d}"
-        # Heaviest row (by duration) becomes primary; the rest are supplementary.
-        group["rows"].sort(
-            key=lambda r: float(r.get("duration_us") or 0.0),
-            reverse=True,
-        )
-        if group["rows"]:
-            primary = group["rows"][0]
-            group["primary_kernel_id"] = str(primary.get("kernel_id") or primary.get("name") or "")
+        # Prose takes rows in arrival order (first row per P-item wins); the duration sort then picks the primary.
+        group["all_pitem_prose"] = _pitem_prose(group["rows"])
+        group["rows"].sort(key=lambda r: float(r.get("duration_us") or 0.0), reverse=True)
+        primary = group["rows"][0]
+        group["primary_kernel_id"] = str(primary.get("kernel_id") or primary.get("name") or "")
         group["aggregate_duration_us"] = round(group["aggregate_duration_us"], 3)
         group["aggregate_gpu_pct"] = round(group["aggregate_gpu_pct"], 3)
-        # Sort prose by rank (P1 first); drop entirely-empty entries.
-        group["all_pitem_prose"].sort(key=lambda e: (e["rank"], e["title"]))
-        group["all_pitem_prose"] = [
-            e
-            for e in group["all_pitem_prose"]
-            if e["rank"] or e["identification"] or e["reasoning_for_slowdown"] or e["resolution"]
-        ]
-        # ``_pitem_prose_seen`` is a set (not JSON-serializable); pop before return.
-        group.pop("_pitem_prose_seen", None)
         group["shape_cases"] = build_task_group_shape_cases(group)
     return ordered
 
 
 __all__ = [
+    "RUN_CONFIG_NAME",
     "SdkEntryPoints",
     "TraceLensSkillRequest",
     "TraceLensSkillRunResult",
@@ -1359,8 +1301,9 @@ __all__ = [
     "extract_compute_pct_from_analysis_md",
     "extract_exposed_comm_pct_from_analysis_md",
     "extract_idle_pct_from_analysis_md",
-    "infer_analysis_mode",
     "normalize_upstream_category",
     "run_tracelens_skill",
+    "tracelens_analysis_mode",
     "write_local_cmd_prefix",
+    "write_run_config",
 ]

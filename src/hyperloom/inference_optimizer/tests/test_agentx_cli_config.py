@@ -292,8 +292,11 @@ def test_operator_switch_can_generate_native_workload(tmp_path, monkeypatch):
     assert "HYPERLOOM_AGENTX" not in load_benchmark(rendered)["agentx"]["launch_overrides"]["env"]
 
 
-@pytest.mark.parametrize("flag,error", [("--tp", ValueError), ("--ep", ValueError), ("--conc", SystemExit)])
-def test_nonpositive_topology_is_rejected_before_startup(flag, error):
+@pytest.mark.parametrize(
+    "flag,value,error",
+    [("--tp", "-1", SystemExit), ("--tp", "0", SystemExit), ("--ep", "-1", ValueError), ("--conc", "-1", SystemExit)],
+)
+def test_nonpositive_topology_is_rejected_before_startup(flag, value, error):
     with pytest.raises(error):
-        args = _build_parser().parse_args(["optimize", flag, "-1"])
+        args = _build_parser().parse_args(["optimize", flag, value])
         configure_benchmark(args)

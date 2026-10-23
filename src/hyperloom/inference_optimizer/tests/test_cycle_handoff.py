@@ -144,7 +144,7 @@ async def test_a_failed_handoff_turn_records_the_error_and_leaves_no_directive(s
 @pytest.mark.asyncio
 async def test_no_handoff_is_requested_when_no_further_cycle_is_feasible(session_dir):
     coord, orchestration = _sweep_coordinator(session_dir, replies=[MockTurn(raw_text=_DIRECTIVE)])
-    coord.shared_state.macro_cycle = ps.DEFAULT_MAX_MACRO_CYCLES - 1
+    coord.shared_state.saturated_directions = {"kv_cache": {"saturated": True}}
 
     await coord.phase_sweep.pump()
 

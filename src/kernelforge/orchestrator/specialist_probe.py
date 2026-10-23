@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from functools import partial
 import importlib
 import inspect
 import json
@@ -15,7 +16,7 @@ import math
 import os
 from pathlib import Path
 import time
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 from kernelforge.tools.file_lock import locked_json_state, release_lock, try_lock_exclusive
 
@@ -204,6 +205,7 @@ def probe_primitive_status() -> tuple[Any, str]:
     try:
         primitive = resolve_probe_primitive()
     except Exception as error:  # noqa: BLE001 - an unimportable seam is reported
+        log.warning("probe primitive %s could not be imported: %s", PRIMITIVE_PATH, error)
         return None, (
             f"the measurement primitive {PRIMITIVE_PATH} could not be imported: {type(error).__name__}: {error}"
         )
@@ -339,10 +341,9 @@ async def probe_variant(
     if not label or not case_id:
         raise ProbeRequestError("label and case_id must be non-empty strings")
     constants = arguments.get("constants")
-    if constants is None:
-        constants = {}
-    if not isinstance(constants, dict):
+    if constants is not None and not isinstance(constants, dict):
         raise ProbeRequestError("constants must be an object")
+    constants = constants or {}
     prefix_constants = arguments.get("prefix_constants", True)
     if not isinstance(prefix_constants, bool):
         raise ProbeRequestError("prefix_constants must be a boolean")
@@ -351,121 +352,73 @@ async def probe_variant(
     budget.refresh()
     session_remaining = sandbox.session_remaining_sec()
     configured_remaining = sandbox.budget_sec - budget.seconds_used
-    budget_remaining = probe_budget_sec(
-        configured_remaining=configured_remaining,
-        session_remaining=session_remaining,
-    )
-    base = {
-        # This ledger's own numbering: ``budget.attempts`` is the round's and skips what a sibling specialist spent.
-        "probe_index": budget.own_attempts + 1,
-        "label": label,
-        "case_id": case_id,
-        "constants": constants,
-    }
+    budget_remaining = probe_budget_sec(configured_remaining=configured_remaining, session_remaining=session_remaining)
+    # This ledger's own numbering: ``budget.attempts`` is the round's and skips what a sibling specialist spent.
+    base = {"probe_index": budget.own_attempts + 1, "label": label, "case_id": case_id, "constants": constants}
+    record = partial(_record, sandbox, budget, base)
 
     if budget.shared_error:
-        return _record(
-            sandbox,
-            budget,
-            {
-                **base,
-                "status": UNAVAILABLE,
-                "detail": f"{budget.shared_error}; nothing was measured",
-                "duration_sec": 0.0,
-            },
-        )
-
+        return record({"status": UNAVAILABLE, "detail": f"{budget.shared_error}; nothing was measured"})
     if budget.attempts >= sandbox.max_probes or configured_remaining <= 0:
         exhausted = (
             f"probe count budget of {sandbox.max_probes} is spent"
             if budget.attempts >= sandbox.max_probes
             else f"wall-clock budget of {sandbox.budget_sec:.0f}s is spent"
         )
-        return _record(
-            sandbox,
-            budget,
-            {
-                **base,
-                "status": BUDGET_EXHAUSTED,
-                "detail": (f"{exhausted} for this round; this question stays unmeasured and must be reported as such"),
-                "duration_sec": 0.0,
-            },
-        )
-
+        detail = f"{exhausted} for this round; this question stays unmeasured and must be reported as such"
+        return record({"status": BUDGET_EXHAUSTED, "detail": detail})
     # Gated on whether there is time to PRODUCE the analysis, not on a reserve of the probe's own: a session killed
     # mid-probe returns nothing at all, and the round treats that as infrastructure failure rather than as a thin
     # answer.
     if session_remaining - ANALYSIS_RESERVE_SEC <= 0 or budget_remaining <= 0:
-        return _record(
-            sandbox,
-            budget,
-            {
-                **base,
-                "status": BUDGET_EXHAUSTED,
-                "detail": (
-                    f"only {max(0.0, session_remaining):.0f}s of your session is "
-                    f"left and {ANALYSIS_RESERVE_SEC:.0f}s of it is reserved for "
-                    "writing the analysis; no further probe can run, so stop "
-                    "probing and report the remaining questions as unmeasured"
-                ),
-                "duration_sec": 0.0,
-            },
+        detail = (
+            f"only {max(0.0, session_remaining):.0f}s of your session is "
+            f"left and {ANALYSIS_RESERVE_SEC:.0f}s of it is reserved for "
+            "writing the analysis; no further probe can run, so stop "
+            "probing and report the remaining questions as unmeasured"
         )
-
+        return record({"status": BUDGET_EXHAUSTED, "detail": detail})
     primitive, unusable = probe_primitive_status()
     if primitive is None:
-        return _record(
-            sandbox,
-            budget,
-            {
-                **base,
-                "status": UNAVAILABLE,
-                "detail": f"{unusable}; nothing was measured",
-                "duration_sec": 0.0,
-            },
-        )
+        return record({"status": UNAVAILABLE, "detail": f"{unusable}; nothing was measured"})
 
     driver_raw = str(arguments.get("driver_script") or "").strip()
     if not driver_raw:
         raise ProbeRequestError("driver_script must be a non-empty string")
-    driver = Path(driver_raw)
-    if not driver.is_absolute():
-        driver = sandbox.workspace / driver
-    driver = driver.expanduser().resolve()
+    # Joining an absolute path onto the workspace yields that path, so a relative one alone is resolved against it.
+    driver = (sandbox.workspace / driver_raw).expanduser().resolve()
     if not _is_inside(driver, sandbox.workspace) or not driver.is_file():
-        return _record(
-            sandbox,
-            budget,
-            {
-                **base,
-                "status": REFUSED,
-                "driver_script": str(driver),
-                "detail": (
-                    f"{driver} is not a file inside the canonical workspace {sandbox.workspace}; nothing was measured"
-                ),
-                "duration_sec": 0.0,
-            },
-        )
+        detail = f"{driver} is not a file inside the canonical workspace {sandbox.workspace}; nothing was measured"
+        return record({"status": REFUSED, "driver_script": str(driver), "detail": detail})
     base["driver_script"] = str(driver)
+    run = partial(
+        primitive,
+        driver_script=str(driver),
+        case_id=case_id,
+        constants=dict(constants),
+        prefix_constants=prefix_constants,
+    )
+    return record(
+        await _measure_on_device(sandbox, run, arguments.get("timeout_sec"), budget_remaining, session_remaining)
+    )
 
+
+async def _measure_on_device(
+    sandbox: ProbeSandbox,
+    run: Callable[..., Awaitable[Any]],
+    requested_timeout: Any,
+    budget_remaining: float,
+    session_remaining: float,
+) -> dict[str, Any]:
+    """Time the probe while holding the device; the ledger fields of what came of it, measured or not."""
     if sandbox.device_lock is None or not sandbox.device_lock.is_file():
         missing = (
             f"{DEVICE_LOCK_ENV} names no device sentinel"
             if sandbox.device_lock is None
             else f"the device sentinel {sandbox.device_lock} does not exist"
         )
-        return _record(
-            sandbox,
-            budget,
-            {
-                **base,
-                "status": UNAVAILABLE,
-                "detail": (
-                    f"{missing}, so this probe would time the GPU while something else uses it; nothing was measured"
-                ),
-                "duration_sec": 0.0,
-            },
-        )
+        detail = f"{missing}, so this probe would time the GPU while something else uses it; nothing was measured"
+        return {"status": UNAVAILABLE, "detail": detail}
 
     started = monotonic_clock()
     # The wait is bounded by the probe's own budget, and what it costs is charged to the budget: a specialist that
@@ -473,81 +426,37 @@ async def probe_variant(
     handle = await acquire_device_lock(sandbox.device_lock, timeout_sec=budget_remaining)
     waited = monotonic_clock() - started
     if handle is None:
-        return _record(
-            sandbox,
-            budget,
-            {
-                **base,
-                "status": DEVICE_BUSY,
-                "detail": (
-                    f"the device was still held after {waited:.0f}s, which is "
-                    "this probe's whole budget; nothing was measured"
-                ),
-                "duration_sec": waited,
-            },
+        detail = (
+            f"the device was still held after {waited:.0f}s, which is this probe's whole budget; nothing was measured"
         )
+        return {"status": DEVICE_BUSY, "detail": detail, "duration_sec": waited}
 
     # The gate again, on what the wait left.
     budget_remaining -= waited
     session_remaining -= waited
     if session_remaining - ANALYSIS_RESERVE_SEC <= 0 or budget_remaining <= 0:
         release_lock(handle)
-        return _record(
-            sandbox,
-            budget,
-            {
-                **base,
-                "status": BUDGET_EXHAUSTED,
-                "detail": (
-                    f"{waited:.0f}s went on waiting for the device, which "
-                    f"leaves {max(0.0, session_remaining):.0f}s of your session "
-                    f"and {max(0.0, budget_remaining):.0f}s of this round's "
-                    "budget; nothing was measured, so report this question as "
-                    "unmeasured"
-                ),
-                "duration_sec": waited,
-            },
+        detail = (
+            f"{waited:.0f}s went on waiting for the device, which leaves {max(0.0, session_remaining):.0f}s of your "
+            f"session and {max(0.0, budget_remaining):.0f}s of this round's budget; nothing was measured, so report "
+            "this question as unmeasured"
         )
+        return {"status": BUDGET_EXHAUSTED, "detail": detail, "duration_sec": waited}
 
     timeout_sec = probe_timeout_sec(
-        budget_remaining=budget_remaining,
-        session_remaining=session_remaining,
-        requested=arguments.get("timeout_sec"),
+        budget_remaining=budget_remaining, session_remaining=session_remaining, requested=requested_timeout
     )
     try:
-        try:
-            result = await asyncio.wait_for(
-                primitive(
-                    driver_script=str(driver),
-                    case_id=case_id,
-                    constants=dict(constants),
-                    timeout_sec=timeout_sec,
-                    prefix_constants=prefix_constants,
-                ),
-                timeout=timeout_sec + PROBE_TOOL_GRACE_SEC,
-            )
-        except asyncio.TimeoutError:
-            return _record(
-                sandbox,
-                budget,
-                {
-                    **base,
-                    "status": FAILED,
-                    "detail": f"probe exceeded its {timeout_sec}s ceiling",
-                    "duration_sec": monotonic_clock() - started,
-                },
-            )
-        except Exception as error:  # noqa: BLE001 - a broken probe is a reported probe
-            return _record(
-                sandbox,
-                budget,
-                {
-                    **base,
-                    "status": FAILED,
-                    "detail": f"{type(error).__name__}: {error}",
-                    "duration_sec": monotonic_clock() - started,
-                },
-            )
+        result = await asyncio.wait_for(run(timeout_sec=timeout_sec), timeout=timeout_sec + PROBE_TOOL_GRACE_SEC)
+    except asyncio.TimeoutError:
+        failure = f"probe exceeded its {timeout_sec}s ceiling"
+        return {"status": FAILED, "detail": failure, "duration_sec": monotonic_clock() - started}
+    except Exception as error:  # noqa: BLE001 - a broken probe is a reported probe
+        return {
+            "status": FAILED,
+            "detail": f"{type(error).__name__}: {error}",
+            "duration_sec": monotonic_clock() - started,
+        }
     finally:
         release_lock(handle)
 
@@ -556,33 +465,35 @@ async def probe_variant(
     # ``case_ms`` is a failure whatever else it says.
     case_ms = payload.get("case_ms")
     succeeded = bool(payload.get("success")) and isinstance(case_ms, (int, float))
-    record = {
-        **base,
+    outcome = {
         "status": MEASURED if succeeded else FAILED,
         "detail": _detail(payload.get("message") or f"the primitive returned no measurement: {payload or result!r}"),
         "duration_sec": monotonic_clock() - started,
     }
     if succeeded:
-        record["case_ms"] = case_ms
-        record["kind"] = payload.get("kind", "")
+        outcome["case_ms"] = case_ms
+        outcome["kind"] = payload.get("kind", "")
         # ``narrowed`` false means other cases were timed too, so the cost was not one case and the reported spread is
         # not this case's; ``case_selection`` says whether the flag is what narrowed it.
-        record["narrowed"] = bool(payload.get("narrowed", True))
-        record["case_selection"] = str(payload.get("case_selection", ""))
+        outcome["narrowed"] = bool(payload.get("narrowed", True))
+        outcome["case_selection"] = str(payload.get("case_selection", ""))
         # Which overrides the source was seen to read.
         consumption = payload.get("override_consumption")
         if isinstance(consumption, dict) and consumption:
-            record["override_consumption"] = consumption
-    return _record(sandbox, budget, record)
+            outcome["override_consumption"] = consumption
+    return outcome
 
 
 def _record(
     sandbox: ProbeSandbox,
     budget: ProbeBudget,
-    record: dict[str, Any],
+    base: dict[str, Any],
+    outcome: dict[str, Any],
 ) -> dict[str, Any]:
-    """Charge one attempt to the round, persist it, and return it."""
-    budget.spend(attempts=1, seconds=float(record.get("duration_sec") or 0.0))
+    """Charge one attempt to the round, persist it, and return it; an outcome without a duration took no time."""
+    record = {**base, **outcome}
+    record.setdefault("duration_sec", 0.0)
+    budget.spend(attempts=1, seconds=float(record["duration_sec"]))
     record = {
         **record,
         "probes_remaining": max(0, sandbox.max_probes - budget.attempts),

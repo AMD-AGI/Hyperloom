@@ -53,8 +53,8 @@ throughput/measurements and pick winners. Native AgentX uses Magpie’s managed
 server/replay/profiling contract and public validity verdict; Hyperloom does not
 patch its replay scripts or parse raw AIPerf exports. Hyperloom pins Magpie to a ref that
 already copies benchmark scripts atomically upstream; `_magpie_patcher.py` applies
-install-time compatibility patches (SGLang trust, eval concurrency, client
-tokenizer hook) to the pinned scripts. See
+install-time compatibility patches (SGLang trust, eval concurrency) to the
+pinned scripts. See
 [Hyperloom optimization loop](../conceptual/optimization-loop.md) for more information.
 
 ## Magpie documentation

@@ -618,7 +618,7 @@ def test_a_pending_metric_may_lack_a_threshold_and_is_then_not_measured() -> Non
         "C901",
         "PLR1702",
     ]
-    for broken in (text.replace("nested-blocks = 5\n", ""), text.replace("nested-blocks =", "mccabe =")):
+    for broken in (text.replace("nested-blocks = 4\n", ""), text.replace("nested-blocks =", "mccabe =")):
         with pytest.raises(collect.ToolError, match="thresholds must name"):
             code_metrics.parse_config(broken)
 
@@ -1272,18 +1272,39 @@ def test_only_module_length_has_a_warning_level_in_the_dimension_table(repo: Rep
         assert any(row.startswith(f"| {metric.label} | {limit} | ") for row in rows), (metric.name, rows)
 
 
-def test_function_length_counts_def_to_last_line_and_nested_functions_alone(tmp_path: Path) -> None:
-    body = "    x = 1\n" * 77
+def test_function_length_counts_body_code_lines_and_nested_functions_alone(tmp_path: Path) -> None:
     source = (
         "@decorator\n@another\n"
-        f'def outer():\n    """Doc."""\n    # comment\n{body}'
-        "    def inner():\n" + "        y = 2\n" * 80 + "    return inner\n"
+        'def outer(\n    a,\n):\n    """Doc.\n\n    More doc.\n    """\n    # comment\n\n'
+        + "    x = 1\n" * 50
+        + '    text = """\n\n    keep\n    """\n'
+        + '    def inner():\n        """Inner doc."""\n'
+        + "        y = 2\n" * 51
+        + "    return inner\n"
     )
     units = FakeUnits(tmp_path, "src/f.py", source).units
-    got = {f.unit: (f.value, f.line) for f in collect.function_line_findings(["src/f.py"], 80, units)}
-    # outer: def line, docstring, comment, 77 lines, return: 1 + 1 + 1 + 77 + 1; inner is its own unit.
-    assert got == {"outer": (81, 3), "outer.inner": (81, 83)}
-    assert collect.function_line_findings(["src/f.py"], 81, units) == []
+    got = {f.unit: (f.value, f.line) for f in collect.function_line_findings(["src/f.py"], 50, units)}
+    # outer: 50 assignments, the string's 3 non-blank lines and the return; inner is its own unit.
+    assert got == {"outer": (54, 3), "outer.inner": (51, 66)}
+    assert collect.function_line_findings(["src/f.py"], 54, units) == []
+
+
+def test_directory_entries_count_direct_modules_and_subdirectories() -> None:
+    files = ["src/a/x.py", "src/a/y.py", "src/a/b/z.py", "src/a/b/c/w.py", "src/q.py"]
+    assert collect.directory_findings(files, 2) == [
+        collect.Finding(collect.DIRECTORY_ENTRIES, "src/a", collect.MODULE, 3, 1)
+    ]
+
+
+def test_a_directory_is_judged_when_the_change_touches_a_file_under_it() -> None:
+    outcome = code_metrics_report.Outcome(touched={"src/a/b/z.py"})
+    assert [outcome.judged(p) for p in ("src/a", "src/a/b", "src/a/b/z.py", "src/ab", "src/a/x.py")] == [
+        True,
+        True,
+        True,
+        False,
+        False,
+    ]
 
 
 @pytest.mark.skipif(shutil.which("ruff") is None or shutil.which("complexipy") is None, reason="ruff/complexipy")

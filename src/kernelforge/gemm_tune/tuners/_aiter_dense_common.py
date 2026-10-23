@@ -501,12 +501,7 @@ def _ensure_decode_m_coverage(
     return out
 
 
-def _augment_with_config_m_values(
-    csv: Path,
-    ctx: TuneContext,
-    work_dir: Path,
-    needs_q_dtype_w: bool = False,
-) -> Path:
+def _augment_with_config_m_values(csv: Path, ctx: TuneContext, work_dir: Path, needs_q_dtype_w: bool) -> Path:
     """Augment profile-derived shapes with config-derived M values."""
     try:
         lines = csv.read_text(encoding="utf-8", errors="replace").splitlines()
@@ -529,7 +524,7 @@ def _augment_with_config_m_values(
             n, k = int(parts[idx["N"]]), int(parts[idx["K"]])
             if n > 0 and k > 0:
                 profile_nk.add((n, k))
-            if m_idx is not None and m_idx < len(parts):
+            if m_idx is not None:
                 profile_m.add(int(parts[m_idx]))
         except (ValueError, IndexError):
             pass
@@ -546,28 +541,19 @@ def _augment_with_config_m_values(
     if set(all_m) == profile_m:
         return csv
 
-    q_dtype = ""
-    if needs_q_dtype_w:
-        q_dtype = _aiter_fp8_dtype_str()
-
+    q_dtype = f",{_aiter_fp8_dtype_str()}" if needs_q_dtype_w else ""
     out = work_dir / "augmented_dense.csv"
-    seen: set[tuple[int, int, int]] = set()
     with out.open("w", encoding="utf-8") as f:
         f.write("M,N,K,q_dtype_w\n" if needs_q_dtype_w else "M,N,K\n")
         for m in all_m:
             for n, k in sorted(profile_nk):
-                if (m, n, k) not in seen:
-                    seen.add((m, n, k))
-                    if needs_q_dtype_w:
-                        f.write(f"{m},{n},{k},{q_dtype}\n")
-                    else:
-                        f.write(f"{m},{n},{k}\n")
+                f.write(f"{m},{n},{k}{q_dtype}\n")
 
     log.info(
         "Augmented shapes: %d M values × %d NK pairs = %d shapes (profile had %d M values)",
         len(all_m),
         len(profile_nk),
-        len(seen),
+        len(all_m) * len(profile_nk),
         len(profile_m),
     )
     return out
@@ -866,19 +852,11 @@ def _invoke_tuner(
     aiter instead of hanging the run.
     """
     if not _tr.is_isolation_enabled():
-        cmd = _tr.with_task_timeout(
-            [
-                "python3",
-                str(invocation.script),
-                "-i",
-                str(invocation.input_csv),
-                "-o",
-                str(invocation.tuned_csv),
-                *invocation.base_args,
-            ]
-        )
         rc, stdout, stderr = run_subprocess(
-            cmd, cwd=invocation.aiter_root, timeout_s=ctx.timeout_s, log_file=invocation.work_dir / "tune.log"
+            invocation.command(),
+            cwd=invocation.aiter_root,
+            timeout_s=ctx.timeout_s,
+            log_file=invocation.work_dir / "tune.log",
         )
         return rc, stdout, stderr, None
     # Per-shape process isolation + provenance-keyed fault blocklist.
@@ -895,7 +873,6 @@ def _invoke_tuner(
         invocation,
         _tr.IsolationGuard(
             outer_timeout_s=ctx.timeout_s,
-            task_timeout_s=_tr.DEFAULT_TASK_TIMEOUT_S,
             gpu_ids=getattr(ctx, "gpu_ids", "") or "",
             blocklist=blocklist,
         ),
@@ -912,14 +889,11 @@ def _splitk_support_fn(script_key: str, ctx: TuneContext):
     """
     if os.environ.get("FORGE_SPLITK_TRIAL", "1") == "0":
         return None
-    try:
-        from ..aiter_splitk_validate import make_support_fn
+    from ..aiter_splitk_validate import make_support_fn
 
-        # Pin the in-process trial dispatch to the tuner's assigned card; on a shared node the assigned GPU
-        # may not be device 0.
-        return make_support_fn(op=script_key, gpu_ids=getattr(ctx, "gpu_ids", "") or "")
-    except Exception:  # noqa: BLE001 — fall back to the static cap
-        return None
+    # Pin the in-process trial dispatch to the tuner's assigned card; on a shared node the assigned GPU
+    # may not be device 0.
+    return make_support_fn(op=script_key, gpu_ids=getattr(ctx, "gpu_ids", "") or "")
 
 
 def _apply_splitk_cap(artifact: str, profile_csv: Path, *, script_key: str, ctx: TuneContext) -> bool:
@@ -1344,10 +1318,7 @@ def _shape_splitk_ceiling(support_fn, max_splitk: int, shape: tuple[int, int, in
     """The highest splitK this shape may ship, trialled per shape where a trial exists."""
     if support_fn is None:
         return max_splitk
-    try:
-        supported = support_fn(*shape)
-    except Exception:  # noqa: BLE001 — trial failure must not abort the cap
-        return max_splitk  # degrade to the static cap, never crash the tuner
+    supported = support_fn(*shape)
     return max_splitk if supported is None else int(supported)
 
 
@@ -1416,14 +1387,11 @@ def _cap_splitk_to_serve_safe(
             continue
         try:
             key = columns.shape_key(row)
-            maxsk = _shape_splitk_ceiling(
-                support_fn,
-                max_splitk,
-                (int(row[columns.m]), int(row[columns.n]), int(row[columns.k])),
-            )
+            shape = (int(row[columns.m]), int(row[columns.n]), int(row[columns.k]))
         except (ValueError, IndexError):
             out.append(row)
             continue
+        maxsk = _shape_splitk_ceiling(support_fn, max_splitk, shape)
         if sk <= maxsk:
             out.append(row)
             has_splitk = has_splitk or sk > 0

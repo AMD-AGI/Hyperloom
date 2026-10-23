@@ -254,10 +254,8 @@ def test_capability_table_shows_unadopted_outcomes() -> None:
         }
     )
 
-    assert "micro_only=2" in rendered.markdown_block
-    assert "pending_review=1" in rendered.markdown_block
-    assert "reverts=1" in rendered.markdown_block
-    assert "e2e_gain" in rendered.markdown_block
+    # A reverted candidate's gain is not the capability's: only adopted attempts carry e2e_gain.
+    assert "| forge | tried | 4 | 0 | micro_only=2 · pending_review=1 · reverts=1 |" in rendered.markdown_block
 
 
 # LLM narrative guard rails

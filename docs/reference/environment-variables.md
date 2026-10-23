@@ -40,6 +40,8 @@ provider-side combinations and what each one enables.
 | `OPENAI`<br>`_CUSTOM_HEADERS` | No | —    | Extra request headers for the OpenAI side. Same shape as `ANTHROPIC_CUSTOM_HEADERS`; set it whenever you set `OPENAI_BASE_URL` against a gateway that authenticates on its own header. |
 | `CLAUDE_MODEL`         | No       | Derived from `ANTHROPIC_BASE_URL` | Orchestration model id on the Anthropic side. Falls back to the endpoint default, then the project-wide `DEFAULT_CLAUDE_MODEL`. `GEAK_CLAUDE_MODEL` inherits from it, and Forge reads it directly for its Claude backend.                                                                    |
 | `CODEX_MODEL`          | No       | Derived from `OPENAI_BASE_URL`    | Model id on the OpenAI side, used by the Codex backend, including Forge running on it. Model settings are never borrowed across providers.                                                                    |
+| `INFERENCE_OPTIMIZER`<br>`_AGENT_BACKEND` | No | Ranked by credentials | Names the agent CLI for the agentic roles: `claude`, `codex` or `deepseek`. An explicit `claude` or `codex` pins the role to that CLI instead of the credential-ranked choice. The choice applies to orchestration, Forge and TraceLens; quantization honours only `deepseek`. `deepseek` (the DeepSeek Harness) is reachable only through this variable, needs the `deepseek` extra, and uses the `OPENAI_BASE_URL` / `OPENAI_API_KEY` gateway. |
+| `DSH_MODEL`            | No       | `deepseek-v4-flash`               | Model id the DeepSeek Harness runs, for every role that selects it. |
 | `GEAK_API_KEY`         | No       | —    | Internal alias, never derived from either side. GEAK runs on the Anthropic side (`ANTHROPIC_*` + `GEAK_CLAUDE_MODEL`); set this only to point GEAK elsewhere.                                                                                                                              |
 | `GEAK_BASE_URL`        | No       | —    | Internal alias, never derived from either side. Set it only to point GEAK at a different endpoint than the Anthropic side.                                                                                                                          |
 | `GEAK_CLAUDE_MODEL`   | No       | Inherits `CLAUDE_MODEL` | GEAKv4 Claude Code workflow model id.                                                                                                                                                           |
@@ -108,10 +110,22 @@ when `--gpu-type` is omitted.
   back to the benchmark report's reading, and either power budget is refused at
   launch, since it could not be measured) and `HYPERLOOM_GPU_POWER_INTERVAL_S`
   sets its cadence (default 2 s, minimum 0.5 s).
-- **GPU power settings (asserted, never set):** `--gpu-power-cap-w`,
-  `--gpu-perf-level`. Set them with `amd-smi set` before launch; the session
-  refuses to start or resume if a card it uses differs, and records what the
-  cards report either way.
+- **GPU power settings:** `--gpu-power-cap-w`, `--gpu-perf-level`,
+  `--gpu-sclk-max-mhz`. By default asserted: set them with `amd-smi set` before
+  launch; the session refuses to start or resume if a card it uses differs, and
+  records what the cards report either way. `--apply-gpu-power-settings` lets
+  the session set the cap and perf level itself (never the clock limit) on
+  the cards of its integer visible-device mask for the whole session, and
+  restore the originals when it ends; it needs root (records under
+  `/var/tmp/hyperloom/gpu_power_settings/`).
+- **Node power management (MI350 series):** `--node-power-management`
+  (`enabled` / `disabled`), `--node-power-limit-w`. Always asserted against
+  `amd-smi node -p`, never set by the session: NPM is set on the BMC. The
+  session refuses to start or resume if the node differs, and records the
+  observed state and limit either way where `amd-smi` reports them. With NPM
+  enabled, a session whose visible-device mask leaves any of the node's GPUs
+  out is refused; `--allow-shared-npm-node` (on every launch and resume)
+  measures anyway and records the cards left out.
 - **Cluster topology & multi-node backend:** `--nodes`, `--gpus-per-node`,
   `--gpu-type`, `--mn-backend` (`rayjob` / `infera`), `--server-args` (rayjob).
   Per-pod sizing, the pod image and pod-side env are the provisioning
@@ -260,16 +274,15 @@ The following variables control the kernel optimization backend ladder.
 
 | Variable                       | Default                       | Description                                                                                                                                                                                       |
 |--------------------------------|-------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `KERNEL_OPT_BACKEND_ORDER`     | Unset (resolves to `geak`) | Selects the kernel-opt backend. An unset or blank value resolves to `geak` for every framework, ATOM included; no framework overrides it at launch. Bare-metal setup preserves nonempty choices (process env > `.env`) without filling or persisting a backend default. Existing `.env` values, including `geak`, are not automatically migrated; remove that assignment and unset the shell variable to use the shared default. Slurm launchers still export `${KERNEL_OPT_BACKEND_ORDER:-geak}`. **Only an exact, case-insensitive `forge` enables the per-kernel Forge backend** (`forge_explicitly_enabled` in `common/env.py`). Despite the historical name, a comma list is not parsed: `forge,geak` stays on `geak`, as does any other nonblank value, legacy alias, or payload override. |
+| `KERNEL_OPT_BACKEND_ORDER`     | Unset (resolves to `geak`) | Selects the kernel-opt backend. An unset or blank value resolves to `geak` for every framework, ATOM included; no framework overrides it at launch. Bare-metal setup preserves nonempty choices (process env > `.env`) without filling or persisting a backend default. Existing `.env` values, including `geak`, are not automatically migrated; remove that assignment and unset the shell variable to use the shared default. Slurm launchers still export `${KERNEL_OPT_BACKEND_ORDER:-geak}`. **Only an exact, case-insensitive `forge` enables the per-kernel Forge backend** (`forge_explicitly_enabled` in `common/env.py`). Read once when a session is created and recorded as the session's `kernel_optimizer`; a resumed session keeps that backend and does not re-read the variable. Despite the historical name, a comma list is not parsed: `forge,geak` stays on `geak`, as does any other nonblank value, legacy alias, or payload override. |
 | `HYPERLOOM_GEMM_SHAPE_CAPTURE` | `1`                           | Enables automatic runtime GEMM-shape capture for eligible single-node dense vLLM Forge tuning when no explicit shape input is available. Block-FP8 first reuses shapes from the TraceLens-selected steady-state trace of a successful Roofline with exactly matching model, workload, server arguments, environment, and backend controls. Missing or stale evidence triggers the same standard Roofline/ProfileExecutor/TraceLens steady-state pipeline as a fallback. Set to `0` to preserve the no-capture path. |
 | `HYPERLOOM_GEMM_SHAPE_CAPTURE_TIMEOUT_SEC` | `1800`          | Timeout in seconds for the dense vLLM TunableOp recording benchmark. Block-FP8 fallback uses the standard Roofline/ProfileExecutor timeout. Values below `60` are clamped to `60`. |
-| `HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT` | `5.0`                     | GPU-time share a reusable hot kernel must clear to be worth a dispatch, in percent. Three readers share it and must agree, or the report explains a skip the dispatcher never made: the batch filter that selects candidates, the phase-advance gate that decides KERNEL still owes work, and the report's unattempted-reason breakdown. It was `10.0` until a 60-layer sparse-MoE decoder showed the assumption behind that number — that hot kernels concentrate — does not hold: nothing but a graph-launch wrapper reached double digits, the largest real operator sat at 9.47%, and the batch dispatcher selected nothing for six hours. Lower it when a trace's rewritable candidates cluster below the default and the operators above them are vendor binaries; a dropped candidate is reported as `below_min_gpu_pct=<value>` rather than as a failed attempt. |
+| `HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT` | `5.0`                     | GPU-time share, in percent, at which a reusable hot kernel in the latest trace still counts as owed work until some backend has produced a patch for it (queued for integration, gated end to end, landed on the stack, or published by the rewrite controller). One gate reads it: KERNEL's work-pending check, which keeps the phase from settling while such a kernel exists, and the same list is printed as `untried_hot_kernels` in the mission summary and as the report's completeness annotation. It selects nothing for dispatch; the backends choose their own targets. `HYPERLOOM_KERNEL_OPT_GATE_TOP_N` (default `5`) caps how many ranked rows the gate considers. It was `10.0` until a 60-layer sparse-MoE decoder showed the assumption behind that number — that hot kernels concentrate — does not hold: nothing but a graph-launch wrapper reached double digits and the largest real operator sat at 9.47%. |
 | `AITER_LOG_TUNED_CONFIG`       | `1` (set for every serving run) | Makes aiter log each tuned-config lookup it *hits*, not only the ones it misses. Two checks have no input without it: the GEMM demand list, which learns the shapes the runtime actually asks for (config-derived shapes covered 0.4% of them), and the apply verdict, which cannot tell "the tuned table was never read" from "it was read and did not help". A scan of 60 production logs found it set in none of them, so it is now injected by default. An operator value wins — set `0` to turn hit logging off, at the cost of both checks going inconclusive. Every miss already prints a line regardless of this setting; hit logging adds roughly one line per lookup that succeeds. |
 | `HYPERLOOM_GEMM_PAIRED_PAIRS`  | `0` (off)                     | How many interleaved baseline/tuned pairs to re-measure before a GEMM tuning KEEP is reported as confirmed. One end-to-end measurement cannot separate a gain from drift on this fleet: three rounds of a single unchanged configuration spanned 58%, and one controlled repeat moved 16%. Each pair costs two extra benchmark rounds. When `0`, the gain is still promoted — it is the best number available — but recorded as an unpaired block comparison rather than presented as a paired one. |
 | `GEAK_E2E_TIMEOUT_S` | `43200` | GEAK end-to-end timeout in seconds. Used as the fallback when no run deadline is set. A malformed value raises `EnvValueError`. |
 | `GEAK_BUDGET_MARGIN_S` | `300` | Seconds subtracted from the remaining kill budget before passing the runner timeout to GEAK, so the runner self-stops before the hard subprocess kill. A malformed value raises `EnvValueError`. |
 | `GEAK_MIN_RUN_S` | `600` | Minimum GEAK runner seconds required to attempt a run. If the remaining budget is below this, GEAK is skipped and the phase winds down to SWEEP. A malformed value raises `EnvValueError`. |
-| `GEAK_TERM_GRACE_S` | `180` | Grace period in seconds between SIGTERM and SIGKILL for the GEAK subprocess tree. A malformed value raises `EnvValueError`. |
 
 ---
 
@@ -629,6 +642,7 @@ from these benchmark limits and retain their existing contracts.
 |---|---|---|
 | `INFERENCE_OPTIMIZER_REACTOR_TURN_TIMEOUT_SEC` | `1800` | Total wall-clock limit for each reactor stage, including backend startup, streamed output, retries, backoff, and cleanup. This is independent of backend `*_CALL_TIMEOUT_SEC` settings: for streamed Claude turns those settings bound idle time between SDK messages, and activity resets that idle timer. Reaching this total limit cancels the stage and records a crash; a shorter remaining session bound still ends the stage without recording a crash. A malformed value raises `EnvValueError`; a non-positive or non-finite value falls back to the default. |
 | `INFERENCE_OPTIMIZER_CLAUDE_TURN_TIMEOUT_SEC` | `1500` | Total wall-clock limit for one Claude Agent SDK call made by the orchestration backend (reactor turns, including the SWEEP cycle-directive handoff), covering every retry and the backoff between them; tearing the CLI down afterwards adds at most 30 s. Unlike the idle bound of `INFERENCE_OPTIMIZER_CLAUDE_CALL_TIMEOUT_SEC`, the CLI's own API-retry messages do not extend it. Past it the call is cancelled, the CLI and every process it started are killed, and the turn fails as a backend error the loop retries on its next tick. |
+| `INFERENCE_OPTIMIZER_DEEPSEEK_CALL_TIMEOUT_SEC` | `300` | Wall-clock limit for one DeepSeek Harness turn made by the orchestration backend. Past it the harness runtime is closed and the next turn starts a new runtime and a new conversation. |
 
 ## TraceLens analysis budgets
 
@@ -687,7 +701,6 @@ deployments.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV` | Unset (`1`) | Specialist subprocesses inherit the limited provider credential set by default: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_CUSTOM_HEADERS`, `CLAUDE_CODE_OAUTH_TOKEN`, `OPENAI_API_KEY`, `OPENAI_CUSTOM_HEADERS`, and AWS Bedrock credential/config vars. Set to `0` only when the `claude` CLI is authenticated through its own config and env credentials must be suppressed. Unrelated secrets such as GitHub and KB tokens remain blocked. |
-| `HYPERLOOM_SPECIALIST_PERMISSION_MODE` | `bypassPermissions` | `--permission-mode` passed to the `claude` CLI for specialist subprocesses. Controls the Claude runtime approval-prompt behaviour only. Codex containment is resolved independently through `HYPERLOOM_CODEX_SANDBOX_MODE`. The default `bypassPermissions` is required for unattended operation; change only in setups where an external interactive approval flow is intended. |
 | `HL_ALLOW_DANGEROUS_AGENT_PERMISSIONS` | Unset (`0`) | Slurm carrier only. Set to `1` only in dedicated internal containers to re-enable legacy Claude/Codex approval and sandbox bypass flags. |
 
 ---
@@ -969,6 +982,34 @@ See [Optimize an AgentX workload](../how-to/optimize.md#optimize-an-agentx-workl
 | `SWEEP_VARIANT_TIMEOUT_SEC` | Optional | `2400` | Per-variant wall-clock timeout in seconds for GEAK-backed SWEEP runs. A malformed value raises `EnvValueError`. |
 
 ---
+
+## Hosted run inputs
+
+A hosted run is configured by the host that launches it. `src/hyperloom/hosted/host_info.py` is the only reader of these variables:
+it checks them once at start-up and names **every** missing or malformed variable in one error (variable names and reasons, never
+values), so a bad input stops the run before it starts. Which variables are required depends on what the run hosts; the run, state
+and input variables are always required, and a variable that is set is checked even when it is not required.
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `HYPERLOOM_INPUT_FILE` | Always | Absolute path of the campaign request file; must exist. |
+| `HYPERLOOM_RUN_ID` | Always | Run identifier, no whitespace. |
+| `HYPERLOOM_RUN_CREATED_AT` | Always | Run creation time, ISO 8601 with a UTC offset or `Z`. |
+| `HYPERLOOM_STATE_DIR` | Always | Absolute path of the run's state directory on shared storage; must exist. |
+| `HYPERLOOM_EVENTS_DIR` | No | Directory of the progress-event segments. Default `$HYPERLOOM_STATE_DIR/events`. |
+| `HYPERLOOM_MCP_PORT`<br>`HYPERLOOM_MCP_TOKEN` | When the MCP server runs (default) | Port (1 to 65535) of the run's MCP server and the token the host presents. The token is a credential. |
+| `HYPERLOOM_MCP_PUBLIC_URL` | When sub-runs call back into the run | `http(s)` URL under which sub-runs reach the run's MCP server. No credentials, query or fragment. |
+| `HYPERLOOM_SANDBOX_TEMPLATES` | When a sandbox is hosted | JSON object of template names, for example `{"runner": {"1": "t1", "8": "t8"}, "dev": "t"}`. |
+| `E2B_API_URL`<br>`E2B_SANDBOX_URL` | When a sandbox is hosted | Control-plane and data-plane `http(s)` URLs of the sandbox service, without credentials, query or fragment. |
+| `HYPERLOOM_SANDBOX_KEY_MEASUREMENT`<br>`HYPERLOOM_SANDBOX_KEY_SUBRUN`<br>`HYPERLOOM_SANDBOX_KEY_DEV` | Per hosted role | The sandbox API key of each role. Credentials. |
+| `HYPERLOOM_RESULT_ARCHIVE` | No | Unset means results are archived on the shared storage, in a directory the application chooses. Otherwise `s3://<bucket>/<prefix>`; the prefix may be empty and has no empty, `.` or `..` segment. A local path (`/x`, `file://...`) is refused: local means unset. |
+| `AWS_ACCESS_KEY_ID`<br>`AWS_SECRET_ACCESS_KEY` | When `HYPERLOOM_RESULT_ARCHIVE` is `s3://`, and always as a pair | Archive credentials. `AWS_SESSION_TOKEN`, `AWS_ENDPOINT_URL_S3` (an `http(s)` URL) and `AWS_REGION` (not a credential) are optional. |
+| `NODE_NAME`<br>`CLAW_SESSION_ID` | No | Physical node name and session id, read when set. |
+
+Once read, every host-only input above is removed from the process environment (`take_host_info`), so a child process started
+without an explicit `env=` does not inherit it; `HostInfo` holds the values and code passes them on. `NODE_NAME` and `CLAW_SESSION_ID`
+stay, because other code reads them. The sandbox keys, the MCP token and the archive credentials are held in an object that prints as
+`Secret(<redacted>)`, and are also on the credential list in `hyperloom.common.env_safety`.
 
 ## Variables intentionally not exposed
 

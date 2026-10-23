@@ -369,7 +369,7 @@ async def test_compose_prompt_orchestration_receives_failure_rows(session_dir):
                 },
             )
         )
-        prompt = await c.conversation.compose_prompt("orchestration")
+        prompt = (await c.conversation.compose_prompt("orchestration")).text
         assert "failure:" in prompt
     finally:
         await c.stop()
@@ -403,7 +403,7 @@ async def test_compose_prompt_critic_does_not_receive_failure_rows(session_dir):
                 },
             )
         )
-        prompt = await c.conversation.compose_prompt("critic")
+        prompt = (await c.conversation.compose_prompt("critic")).text
         assert "failure:" not in prompt
     finally:
         await c.stop()
