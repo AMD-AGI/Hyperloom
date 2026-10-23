@@ -136,7 +136,7 @@ class HostedProgressEvents:
 
     def _open_segment(self) -> None:
         path = self._dir / segment_name(self._segment)
-        self._fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o640)
+        self._fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
         self._size = os.fstat(self._fd).st_size
 
     def _sync(self) -> None:
