@@ -19,6 +19,8 @@ from hyperloom.common.aiter_jit_cache import (
     resolve_package_root,
     resolve_serving_context,
 )
+from hyperloom.common.gpu_identity import row_dispatches_on
+from hyperloom.inference_optimizer.gpu_types import amd_gpu_dispatch_identity
 
 log = logging.getLogger(__name__)
 
@@ -500,8 +502,13 @@ def serving_module_for_kernel(kernel_name: str, libtype: str) -> str | None:
     return None
 
 
-def csv_jit_kernel_rows(csv_path: Path) -> list[tuple[str, str]]:
-    """``(kernelName, libtype)`` rows that are linked into a serving ``module_*.so``.
+def csv_jit_kernel_rows(csv_path: Path, target: tuple[str, int] | None) -> list[tuple[str, str]]:
+    """``(kernelName, libtype)`` rows that are linked into a serving ``module_*.so`` on ``target``.
+
+    aiter's codegen compiles only the rows whose ``(gfx, cu_num)`` is the GPU it builds
+    for, so a row tuned for another GPU is never in the .so; counting it would call every
+    shared table uncovered and re-JIT its modules before each boot. A table without
+    those columns, or an unknown ``target``, keeps every row.
 
     The tables this reads ship with aiter, so their encoding and field sizes are not
     ours to assume: a BOM raises ``UnicodeDecodeError`` and an overlong field raises
@@ -510,7 +517,11 @@ def csv_jit_kernel_rows(csv_path: Path) -> list[tuple[str, str]]:
     rows: list[tuple[str, str]] = []
     try:
         with csv_path.open(newline="", encoding="utf-8") as handle:
-            for row in csv.DictReader(handle):
+            reader = csv.DictReader(handle)
+            keyed = target is not None and {"gfx", "cu_num"} <= set(reader.fieldnames or ())
+            for row in reader:
+                if keyed and not row_dispatches_on(row, target):
+                    continue
                 name = str(row.get("kernelName") or "").strip()
                 if not name:
                     continue
@@ -526,15 +537,17 @@ def csv_jit_kernel_rows(csv_path: Path) -> list[tuple[str, str]]:
     return rows
 
 
-def serving_modules_cover_csv(jit_dir: Path, modules: tuple[str, ...], csv_path: Path) -> bool:
-    """True when every JIT ``kernelName`` in the CSV appears in its serving .so.
+def serving_modules_cover_csv(
+    jit_dir: Path, modules: tuple[str, ...], csv_path: Path, target: tuple[str, int] | None
+) -> bool:
+    """True when every JIT ``kernelName`` the CSV builds for ``target`` appears in its serving .so.
 
     ``libtype=asm`` (and other non-JIT backends) names are not linked into
     ``module_*.so``. A name is looked up in the module implied by its prefix and
     ``libtype``, falling back to ``modules``. Missing .so files mean the next start
     will compile from the current CSV, so that case is treated as covered.
     """
-    rows = csv_jit_kernel_rows(csv_path)
+    rows = csv_jit_kernel_rows(csv_path, target)
     if not rows:
         return True
     blobs: dict[str, bytes | None] = {}
@@ -641,6 +654,7 @@ def prepare_serving_so_for_csvs(
     package_root, jit_build = context
     jit_dir = jit_build.parent
     configs_dir = package_root / "configs"
+    target = amd_gpu_dispatch_identity()
     modules_needed: list[str] = []
     for env_var, modules in AITER_ENV_TO_SERVING_MODULES.items():
         tuned_file_name = AITER_ENV_TO_TUNED_FILE.get(env_var, "")
@@ -649,10 +663,10 @@ def prepare_serving_so_for_csvs(
         for csv_path in csvs_aiter_will_load(configs_dir, tuned_file_name, str(envs.get(env_var) or "")):
             if not csv_path.is_file():
                 continue
-            if serving_modules_cover_csv(jit_dir, modules, csv_path):
+            if serving_modules_cover_csv(jit_dir, modules, csv_path, target):
                 continue
             modules_needed.extend(modules)
-            for name, libtype in csv_jit_kernel_rows(csv_path):
+            for name, libtype in csv_jit_kernel_rows(csv_path, target):
                 resolved = serving_module_for_kernel(name, libtype)
                 if resolved:
                     modules_needed.append(resolved)

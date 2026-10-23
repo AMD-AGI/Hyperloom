@@ -23,6 +23,7 @@ from collections.abc import Iterable
 from typing import Any
 
 from hyperloom.common.coerce import to_float, to_str_list
+from hyperloom.common.gpu_identity import row_dispatches_on
 from hyperloom.inference_optimizer.session.session_paths import enablement_stacks_dir
 from hyperloom.common.env_safety import (
     filter_untrusted_env_mapping,
@@ -1641,18 +1642,7 @@ def _validate_aiter_gemm_artifacts(
             errors.append({**base_error, "error": "invalid_aiter_gemm_csv"})
             continue
 
-        def _cu_num_matches(row: dict[str, Any]) -> bool:
-            raw = str(row.get("cu_num") or "").strip()
-            if not raw:
-                return False
-            try:
-                return int(float(raw)) == expected_cu_num
-            except ValueError:
-                return False
-
-        target_rows = [
-            row for row in rows if str(row.get("gfx") or "").strip().lower() == expected_gfx and _cu_num_matches(row)
-        ]
+        target_rows = [row for row in rows if row_dispatches_on(row, identity)]
         if not target_rows:
             errors.append({**base_error, "error": "no_target_gpu_rows"})
             continue

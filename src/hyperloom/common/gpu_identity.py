@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 #: gpu_type -> (dispatch gfx arch, compute-unit count).
 AMD_GPU_DISPATCH_IDENTITIES: dict[str, tuple[str, int]] = {
     "mi300x": ("gfx942", 304),
@@ -31,4 +33,17 @@ def is_gfx_arch(gpu_type: str | None, arch: str) -> bool:
     return bool(key) and (key == arch or gfx_arch_for_gpu_type(key) == arch)
 
 
-__all__ = ["AMD_GPU_DISPATCH_IDENTITIES", "gfx_arch_for_gpu_type", "is_gfx_arch"]
+def row_dispatches_on(row: Mapping[str, object], identity: tuple[str, int]) -> bool:
+    """Whether a tuned-table row's ``gfx`` and ``cu_num`` name ``identity``.
+
+    aiter keys its tuned GEMM tables by ``(gfx, cu_num)`` and builds and dispatches only
+    the rows of the GPU it runs on.
+    """
+    try:
+        cu_num = int(float(str(row.get("cu_num") or "").strip()))
+    except ValueError:
+        return False
+    return str(row.get("gfx") or "").strip().lower() == identity[0] and cu_num == identity[1]
+
+
+__all__ = ["AMD_GPU_DISPATCH_IDENTITIES", "gfx_arch_for_gpu_type", "is_gfx_arch", "row_dispatches_on"]
