@@ -309,6 +309,15 @@ async def test_the_brief_lists_the_start_commits_tests_first_then_the_nearest_co
     assert [item.commit_id for item in on_merge.tried] == ["c1", "c0", "c0", "c0", "c0"]
 
 
+async def test_a_brief_from_a_request_id_says_so_and_names_the_commit_its_test_was_made_on(tmp_path: Path) -> None:
+    notebook = await scripted_session(tmp_path / "notebook", FakeClock())
+
+    with pytest.raises(NotRecorded, match="that is a test's request_id, and start_commit names a commit, such as c0"):
+        await notebook.startup_brief("r1")
+    with pytest.raises(NotRecorded, match="^no commit c404$"):
+        await notebook.startup_brief("c404")
+
+
 async def test_a_failed_measurement_keeps_its_cost_frees_its_claim_and_takes_no_judgement(open_as: Open) -> None:
     runtime, toolbox = open_as(Role.SPECIALIST_RUNTIME, "s1"), open_as(Role.TOOLBOX)
     wanted = intent("s1", "c0")

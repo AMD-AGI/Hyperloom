@@ -325,6 +325,12 @@ def startup_brief(state: NotebookState, view: LineageView, start_commit: str) ->
     """
 
     if view.commit(start_commit) is None:
+        request = state.requests.get(start_commit)
+        if request is not None:
+            raise NotRecorded(
+                f"no commit {start_commit}: that is a test's request_id, and start_commit names a commit, such as "
+                f"{request.parent_commit}, the one that test was made on"
+            )
         raise NotRecorded(f"no commit {start_commit}")
     steps = _steps_from(view, start_commit)
     found = [
