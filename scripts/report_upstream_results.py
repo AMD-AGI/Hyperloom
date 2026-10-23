@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: MIT
 """Report upstream PRs that credit Hyperloom, were merged, and are missing from the results page.
 
-``docs/reference/upstream-results.md`` is where the repo claims what Hyperloom has landed upstream,
+``docs/upstream-results.md`` is where the repo claims what Hyperloom has landed upstream,
 and the README quotes its strongest rows. The measured effect in a row has to be read out of the
 PR's own end-to-end table by a human, so the page cannot be generated -- but falling behind is
 silent, and a merged optimization that never reaches the page is evidence thrown away. This names
@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 _THIS_REPO = Path(__file__).resolve().parents[1]
-_RESULTS_PAGE = Path("docs/reference/upstream-results.md")
+_RESULTS_PAGE = Path("docs/upstream-results.md")
 _UPSTREAM_REPOS = ("vllm-project/vllm", "sgl-project/sglang")
 _PULL_URL_RE = re.compile(r"github\.com/([\w.-]+/[\w.-]+)/pull/(\d+)")
 _ENCODING = "utf-8"

@@ -12,7 +12,7 @@ import pytest
 import report_upstream_results
 from report_upstream_results import MergedPull, Report, attributed, check, listed, main, merged_pulls
 
-PAGE = Path("docs/reference/upstream-results.md")
+PAGE = Path("docs/upstream-results.md")
 
 
 def _page(root: Path, body: str) -> None:
