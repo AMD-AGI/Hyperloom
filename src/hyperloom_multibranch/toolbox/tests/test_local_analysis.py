@@ -184,11 +184,12 @@ async def test_a_profile_test_without_a_trace_location_is_refused_by_name(local:
     assert "profile_without_trace" in text and local.tracelens.requests == []
 
 
-async def test_the_default_options_serve_tracelens_only(tmp_path: Path) -> None:
+async def test_the_default_options_serve_tracelens_and_the_tuner_not_roofline(tmp_path: Path) -> None:
     notebook = LocalNotebook(tmp_path / "notebook", Writer(Role.TOOLBOX, "toolbox"))
     toolbox = _toolbox(tmp_path, notebook, FakeRepo())
     try:
-        assert toolbox._tools is not None and toolbox._tools.tool_names == ("tracelens",)
+        assert toolbox._tools is not None and toolbox._tools.tool_names == ("kernel_tune", "tracelens")
+        assert toolbox.analysis_tools == ("tracelens", "kernel_tune")
     finally:
         await toolbox.close()
 

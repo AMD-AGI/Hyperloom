@@ -1,14 +1,14 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""A branch's sandbox lease on the local backend: cards out of the measurement pool and a directory of their own.
+"""A lease on the local backend: cards out of the measurement pool and a directory of their own.
 
-An autonomous branch runs its own agent, which serves its own models on cards of its own. The lease takes those cards
-from the provider's :class:`~hyperloom.sandbox.gpu_pool.GpuPool`, the pool every measurement sandbox takes its cards
-from, so a test never runs on a leased card and a leased card is never measured on. The cards are promised from the
-moment the request is checked, while it waits for running tests to give some back, so the toolbox starts no test the
-cards would not run. The lease owns only the cards and the directory: there is no PID namespace on this backend, and
-confining the agent's processes is its sandbox wrapper's job.
+An autonomous branch runs its own agent, which serves its own models on cards of its own; a tool job (``kernel_tune``)
+tunes on a card of its own. The lease takes those cards from the provider's :class:`~hyperloom.sandbox.gpu_pool.GpuPool`,
+the pool every measurement sandbox takes its cards from, so a test never runs on a leased card and a leased card is never
+measured on, whoever holds it. The cards are promised from the moment the request is checked, while it waits for running
+tests to give some back, so the toolbox starts no test the cards would not run. The lease owns only the cards and the
+directory: there is no PID namespace on this backend, and confining the agent's processes is its sandbox wrapper's job.
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ import asyncio
 import threading
 import time
 import uuid
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from types import MappingProxyType
 
@@ -36,11 +36,12 @@ _VISIBLE_DEVICES = "HIP_VISIBLE_DEVICES"
 
 
 class BranchLeases:
-    """The leases on the cards of one local provider, at most one per branch.
+    """The leases on the cards of one local provider, at most one per holder: a branch, or a tool job (``tool:<job id>``).
 
     ``area`` is the directory the leases' working directories are made in, ``cards_per_test`` the cards one test of
     the session needs, ``image_env`` the environment the session's tests start from. All state is guarded by one lock,
-    so a lease and its release may race from any task or thread: a lease's cards go back exactly once.
+    so a lease and its release may race from any task or thread: a lease's cards go back exactly once. ``on_release`` is
+    called, on the thread that released, after cards went back, so the toolbox can start the tests they now let run.
     """
 
     def __init__(
@@ -54,6 +55,7 @@ class BranchLeases:
         self._promised: dict[str, int] = {}
         self._granted: dict[str, BranchLease] = {}
         self._closed = False
+        self.on_release: Callable[[], None] = _nothing
 
     def capacity(self) -> MeasurementCapacity:
         """The provider's cards, less the ones lost for good, with the promised ones counted as leased."""
@@ -67,22 +69,44 @@ class BranchLeases:
 
         return max(1, self.capacity().measurement_cards // self.cards_per_test)
 
-    async def lease(self, branch_id: str, cards: int) -> BranchLease:
-        """Hold ``cards`` cards and a working directory for ``branch_id``, waiting for running tests to give cards back.
+    def can_lease(self, cards: int) -> bool:
+        """Whether a lease of ``cards`` would leave as many cards as one test needs, as far as the pool's size goes."""
+
+        with self._guard:
+            return self._leaves_a_test(cards)
+
+    def check(self, cards: int) -> None:
+        """Refuse, as :meth:`lease` would now, a lease of ``cards`` that would leave fewer cards than one test needs.
+
+        Nothing is held: a caller that must refuse at once, and lease when its work starts, asks first.
 
         Raises:
-            RequestRejected: ``lease_exists`` when the branch holds a lease, ``lease_leaves_no_measurement`` when
+            RequestRejected: ``lease_leaves_no_measurement``, or ``invalid_request`` for fewer than one card.
+        """
+
+        with self._guard:
+            self._check(cards)
+
+    async def lease(self, holder: str, cards: int, root: Path | None = None) -> BranchLease:
+        """Hold ``cards`` cards and a working directory for ``holder``, waiting for running tests to give cards back.
+
+        ``holder`` is the branch whose agent the cards are for, or ``tool:<job id>`` for a tool job; the lease says it as
+        its ``branch_id``. ``root`` is the directory the lease works in, made if it is not there; one of its own below
+        the area when omitted.
+
+        Raises:
+            RequestRejected: ``lease_exists`` when the holder holds a lease, ``lease_leaves_no_measurement`` when
                 fewer than one test's cards would be left, ``invalid_request`` for fewer than one card.
             SandboxUnavailable: When the cards were not free within :data:`LEASE_WAIT_SECONDS` or the toolbox closed.
         """
 
-        self._promise(branch_id, cards)
+        self._promise(holder, cards)
         gpu_ids: tuple[int, ...] = ()
         try:
             gpu_ids = await self._take(cards)
-            return self._grant(branch_id, gpu_ids)
+            return self._grant(holder, gpu_ids, root)
         except BaseException:
-            self._forget(branch_id, gpu_ids)
+            self._forget(holder, gpu_ids)
             raise
 
     def release(self, lease_id: str) -> None:
@@ -93,6 +117,8 @@ class BranchLeases:
             if lease is not None:
                 del self._promised[lease.branch_id]
                 self._provider.pool.release(lease.gpu_ids)
+        if lease is not None:
+            self.on_release()
 
     def close(self) -> None:
         """Release every lease and refuse the waiting ones their cards."""
@@ -108,20 +134,25 @@ class BranchLeases:
         usable = total - len(self._provider.quarantined)
         return MeasurementCapacity(total, usable, leased_cards=min(sum(self._promised.values()), usable))
 
-    def _promise(self, branch_id: str, cards: int) -> None:
+    def _leaves_a_test(self, cards: int) -> bool:
+        return self._capacity().measurement_cards - cards >= self.cards_per_test
+
+    def _check(self, cards: int) -> None:
         if cards < 1:
             raise RequestRejected(f"a lease needs at least one card, not {cards}")
+        if not self._leaves_a_test(cards):
+            raise RequestRejected(
+                f"leasing {cards} of the {self._capacity().measurement_cards} cards tests run on would leave fewer "
+                f"than the {self.cards_per_test} one test needs",
+                "lease_leaves_no_measurement",
+            )
+
+    def _promise(self, holder: str, cards: int) -> None:
         with self._guard:
-            if branch_id in self._promised:
-                raise RequestRejected(f"branch {branch_id!r} already holds a sandbox lease", "lease_exists")
-            measuring = self._capacity().measurement_cards
-            if measuring - cards < self.cards_per_test:
-                raise RequestRejected(
-                    f"leasing {cards} of the {measuring} cards tests run on would leave fewer than the "
-                    f"{self.cards_per_test} one test needs",
-                    "lease_leaves_no_measurement",
-                )
-            self._promised[branch_id] = cards
+            if holder in self._promised:
+                raise RequestRejected(f"{holder!r} already holds a lease", "lease_exists")
+            self._check(cards)
+            self._promised[holder] = cards
 
     async def _take(self, cards: int) -> tuple[int, ...]:
         pool = self._provider.pool
@@ -134,25 +165,30 @@ class BranchLeases:
         reason = "the toolbox is closing" if self._closed else f"not freed within {LEASE_WAIT_SECONDS:g} s"
         raise SandboxUnavailable(f"no {cards} cards for the branch sandbox lease: {reason}")
 
-    def _grant(self, branch_id: str, gpu_ids: tuple[int, ...]) -> BranchLease:
+    def _grant(self, holder: str, gpu_ids: tuple[int, ...], root: Path | None) -> BranchLease:
         lease_id = f"lease-{uuid.uuid4().hex[:12]}"
-        root = self._area / lease_id
-        root.mkdir(parents=True)
+        directory = self._area / lease_id if root is None else root
+        directory.mkdir(parents=True, exist_ok=root is not None)
         env = {**self._env, _VISIBLE_DEVICES: ",".join(map(str, gpu_ids))}
         with self._guard:
             if self._closed:
                 raise SandboxUnavailable("the toolbox is closing")
             lease = BranchLease(
-                lease_id, branch_id, gpu_ids, root, MappingProxyType(env), self._capacity().measurement_cards
+                lease_id, holder, gpu_ids, directory, MappingProxyType(env), self._capacity().measurement_cards
             )
             self._granted[lease_id] = lease
         return lease
 
-    def _forget(self, branch_id: str, gpu_ids: tuple[int, ...]) -> None:
+    def _forget(self, holder: str, gpu_ids: tuple[int, ...]) -> None:
         with self._guard:
-            del self._promised[branch_id]
+            del self._promised[holder]
             if gpu_ids:
                 self._provider.pool.release(gpu_ids)
+        self.on_release()
+
+
+def _nothing() -> None:
+    """The release hook of a holder of cards that has nothing to start when they come back."""
 
 
 def _agent_env(image_env: Mapping[str, str]) -> dict[str, str]:

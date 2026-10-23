@@ -370,10 +370,13 @@ class RealToolbox:
     async def submit_analysis(
         self, branch: str, tool: str, params: Mapping[str, Any], profile_request_id: str = ""
     ) -> str:
-        """Start ``tracelens`` or ``roofline`` (those of :attr:`analysis_tools`) for ``branch`` on its head commit; returns the job id at once.
+        """Start ``tracelens``, ``roofline`` or ``kernel_tune`` (those of :attr:`analysis_tools`) for ``branch``; returns the job id at once.
 
-        The commit is the head of the branch in the experiment repository, read here at submission; it is never taken
-        from ``params``. ``profile_request_id`` is kept only for a PROFILE test of that commit, whichever branch ran it.
+        The commit of ``tracelens`` and ``roofline`` is the head of the branch in the experiment repository, read here at
+        submission; it is never taken from ``params``. ``profile_request_id`` is kept only for a PROFILE test of that commit,
+        whichever branch ran it. ``kernel_tune`` reads the landed output of the test ``params`` names (the notebook's record
+        of it) and leases a card of the toolbox for the job, which ``lease_leaves_no_measurement`` refuses when the card
+        cannot be spared.
         """
 
         self._analysis_jobs(tool)
