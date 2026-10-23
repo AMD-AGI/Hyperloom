@@ -104,7 +104,8 @@ learnt (notebook_search, notebook_learnings, notebook_brief).
 a commit's ceilings once its operator shares are known. A profile is heavy, a full test and an analysis, and one per \
 commit serves every branch. Profile the session's root only while no brief lists ceilings for it. Profile a later \
 head only once it carries gains you committed and you need its shares to find the next bottleneck, after a change of \
-execution path (attention backend, precision format, kernel switch) or a large gain since the commit last profiled. \
+execution path (attention backend, precision format, kernel switch), after a large gain since the commit last \
+profiled, or when your branch was just split off another branch's head and no brief lists ceilings for it. \
 To profile: \
 submit_test with kind "profile", purpose "profile", your head as the parent commit and no delta. A profile refused \
 as profile_exists names the one already queued, running or measured on that commit, maybe another branch's: \

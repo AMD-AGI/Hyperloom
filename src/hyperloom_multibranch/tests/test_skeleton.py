@@ -83,7 +83,6 @@ from hyperloom_multibranch.notebook.rsi.session import FRONTIER_LOG
 from hyperloom_multibranch.notebook.rsi.similarity import TaskConditions
 from hyperloom_multibranch.notebook.tests.factories import delta, intent, request
 from hyperloom_multibranch.rulegate.critic import (
-    CriticReply,
     FixReview,
     FixReviewer,
     LlmCritic,
@@ -1127,8 +1126,10 @@ async def test_the_fix_critic_s_llm_dollars_count_against_the_llm_budget_as_the_
     stage.settings = replace(SETTINGS, max_llm_usd=SMALL_LLM_USD)
     stage.judge = ScriptedCompletion([OPENING])
 
-    async def critic_model(system: str, user: str) -> CriticReply:
-        return CriticReply(json.dumps({"reachable": True, "reason": "the workload sends it"}), JUDGE_TOKENS, LAUNCH_USD)
+    async def critic_model(system: str, user: str) -> CompletionReply:
+        return CompletionReply(
+            json.dumps({"reachable": True, "reason": "the workload sends it"}), JUDGE_TOKENS, LAUNCH_USD
+        )
 
     stage.critic = lambda usage: LlmCritic(critic_model, usage)
     fixed = Judgement(Verdict.REGRESSED, -2.0, 2.0, ("fix-1",), {GRADED_OUTPUT: 980.0}, True, fixes_correctness=True)

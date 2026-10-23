@@ -573,3 +573,7 @@ def test_the_role_and_gemm_direction_tune_with_kernel_tune_when_it_is_served():
     assert "rows marked verified=false are never put" in prompt
     assert "its microseconds are advice, the test is the measurement" in prompt
     assert "When start_analysis lists kernel_tune, tune the untuned shapes with it" in gemm
+
+
+def test_the_role_profiles_a_head_right_after_its_branch_was_split_off():
+    assert "or when your branch was just split off another branch's head" in role_prompt(WORKLOAD)

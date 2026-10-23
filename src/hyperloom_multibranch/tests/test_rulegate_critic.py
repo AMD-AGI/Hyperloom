@@ -14,11 +14,10 @@ from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
 from hyperloom_multibranch.contracts.llm_prices import TokenCounts, price_of
 from hyperloom_multibranch.contracts.notebook.records import LlmUsage
 from hyperloom_multibranch.contracts.notebook.vocab import UsageSource
+from hyperloom_multibranch.contracts.llm import CompletionFailed, CompletionReply
 from hyperloom_multibranch.rulegate.critic import (
     CRITIC_MAX_TOKENS,
     CRITIC_TIMEOUT_SECONDS,
-    CriticReply,
-    CriticUnavailable,
     CriticVerdict,
     FixReview,
     LlmCritic,
@@ -54,12 +53,12 @@ class _Model:
         self.answers = list(answers)
         self.calls: list[tuple[str, str]] = []
 
-    async def __call__(self, system: str, user: str) -> CriticReply:
+    async def __call__(self, system: str, user: str) -> CompletionReply:
         self.calls.append((system, user))
         answer = self.answers.pop(0)
         if isinstance(answer, BaseException):
             raise answer
-        return CriticReply(answer, TOKENS, COST_USD)
+        return CompletionReply(answer, TOKENS, COST_USD)
 
 
 class _Usages:
@@ -125,7 +124,7 @@ async def test_an_answer_that_is_not_exactly_the_verdict_object_is_refused_after
 
 
 async def test_a_critic_that_cannot_be_reached_refuses_the_fix_and_says_why():
-    model = _Model(CriticUnavailable("RuntimeError: status=529"), CriticUnavailable("TimeoutError: read timed out"))
+    model = _Model(CompletionFailed("RuntimeError: status=529"), CompletionFailed("TimeoutError: read timed out"))
 
     verdict = await _critic(model).review(_review())
 
@@ -147,7 +146,7 @@ async def test_no_critic_refuses_every_fix():
 async def test_a_reply_is_recorded_as_the_critic_s_spend_with_no_branch_and_a_failed_call_records_nothing():
     usages = _Usages()
 
-    await _critic(_Model(CriticUnavailable("RuntimeError: status=529"), REACHABLE), usages).review(_review())
+    await _critic(_Model(CompletionFailed("RuntimeError: status=529"), REACHABLE), usages).review(_review())
 
     assert usages.recorded == [LlmUsage("", UsageSource.CRITIC, COST_USD, TOKENS)]
 
@@ -160,7 +159,7 @@ async def test_an_unreadable_reply_is_recorded_too():
     assert usages.recorded == [LlmUsage("", UsageSource.CRITIC, COST_USD, TOKENS)] * 2
 
 
-async def _ask_anthropic(monkeypatch, transport, model: str = "claude-x") -> CriticReply:
+async def _ask_anthropic(monkeypatch, transport, model: str = "claude-x") -> CompletionReply:
     monkeypatch.setattr(llm_config, "aanthropic_completion", transport)
     return await anthropic_critic(model, component="hyperloom-mb")("the system", "the user")
 
@@ -172,7 +171,7 @@ async def test_the_anthropic_critic_asks_the_configured_model(monkeypatch):
         asked.update(request=request, component=component, operation=operation)
         return SimpleNamespace(text=REACHABLE, usage=ANTHROPIC_USAGE)
 
-    assert await _ask_anthropic(monkeypatch, transport) == CriticReply(REACHABLE, TOKENS, None)
+    assert await _ask_anthropic(monkeypatch, transport) == CompletionReply(REACHABLE, TOKENS, None)
     request = asked["request"]
     assert (request.model, request.system, asked["component"]) == ("claude-x", "the system", "hyperloom-mb")
     assert list(request.messages) == [{"role": "user", "content": "the user"}]
@@ -186,14 +185,14 @@ async def test_an_anthropic_reply_on_a_listed_model_is_priced_from_the_price_she
     reply = await _ask_anthropic(monkeypatch, transport, model="claude-opus-5-5")
 
     price = price_of("claude-opus-5-5")
-    assert price is not None and reply == CriticReply(REACHABLE, TOKENS, price.cost_usd(TOKENS))
+    assert price is not None and reply == CompletionReply(REACHABLE, TOKENS, price.cost_usd(TOKENS))
 
 
 async def test_a_failed_anthropic_call_is_a_critic_unavailable(monkeypatch):
     async def transport(*, request, env=None, component="", operation=""):
         raise RuntimeError("anthropic messages status=529")
 
-    with pytest.raises(CriticUnavailable, match="RuntimeError: anthropic messages status=529"):
+    with pytest.raises(CompletionFailed, match="RuntimeError: anthropic messages status=529"):
         await _ask_anthropic(monkeypatch, transport)
 
 
@@ -201,5 +200,5 @@ async def test_an_anthropic_call_that_times_out_in_asyncio_is_a_critic_unavailab
     async def transport(*, request, env=None, component="", operation=""):
         raise asyncio.TimeoutError
 
-    with pytest.raises(CriticUnavailable, match="TimeoutError"):
+    with pytest.raises(CompletionFailed, match="TimeoutError"):
         await _ask_anthropic(monkeypatch, transport)
