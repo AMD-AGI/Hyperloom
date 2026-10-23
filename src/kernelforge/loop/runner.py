@@ -3395,14 +3395,21 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             return False
         return standing.mean >= target
 
-    def _is_speedup_target_met(self) -> bool:
-        """Whether the incumbent's mean per-case speedup has reached the target the operator set.
+    def _stop_at_speedup_target(self, iteration: int) -> bool:
+        """End the campaign once the incumbent's mean per-case speedup reaches the target the operator set.
 
         Like the roofline target, this decides only whether to buy another round; KEEP stays a measurement against
         the incumbent.
         """
         target = self.ic.target_mean_case_speedup
-        return target > 0 and self.best_mean_case_speedup is not None and self.best_mean_case_speedup >= target
+        if target <= 0 or self.best_mean_case_speedup is None or self.best_mean_case_speedup < target:
+            return False
+        self.termination_reason = "speedup_target_met"
+        print(
+            f"\nSPEEDUP TARGET MET at iteration {iteration}: mean case speedup "
+            f"{self.best_mean_case_speedup:.6f}x, at or above the {target:.6f}x target"
+        )
+        return True
 
     def _render_roofline_progress(self) -> str:
         """One log line with the incumbent's mean attainment, or ``""`` when the campaign has no ceiling.
@@ -5262,13 +5269,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
                     f"({entry.t_current_ms:.6g} ms vs ceiling {entry.t_ideal_ms:.6g} ms)"
                 )
             return True, None
-        if self._is_speedup_target_met():
-            self.termination_reason = "speedup_target_met"
-            print(
-                f"\nSPEEDUP TARGET MET at iteration {iteration}: mean case speedup "
-                f"{self.best_mean_case_speedup:.6f}x, at or above the "
-                f"{self.ic.target_mean_case_speedup:.6f}x target"
-            )
+        if self._stop_at_speedup_target(iteration):
             return True, None
         if self.run_state.orchestration_circuit_state == ORCHESTRATION_CIRCUIT_OPEN:
             self.termination_reason = "orchestration_failed"

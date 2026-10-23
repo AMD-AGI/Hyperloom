@@ -218,21 +218,7 @@ class Config:
             )
         if not isinstance(self.agent_options, dict):
             raise ValueError("agent_options must be a dict")
-        self.knowledge_wiki_root = str(self.knowledge_wiki_root or "").strip()
-        self.knowledge_wiki_log = str(self.knowledge_wiki_log or "").strip()
-        if self.knowledge_wiki_root:
-            from kernelforge.knowledge.wiki_tool.contract import SCRIPTS
-
-            root = Path(self.knowledge_wiki_root)
-            if not root.is_absolute():
-                raise ValueError(f"knowledge_wiki_root must be an absolute path: {self.knowledge_wiki_root!r}")
-            missing = [f"scripts/{name}" for name in SCRIPTS.values() if not (root / "scripts" / name).is_file()]
-            if missing:
-                raise ValueError(
-                    f"knowledge_wiki_root {root} is not a knowledge base checkout; missing {', '.join(missing)}"
-                )
-        if self.knowledge_wiki_log and not Path(self.knowledge_wiki_log).is_absolute():
-            raise ValueError(f"knowledge_wiki_log must be an absolute path: {self.knowledge_wiki_log!r}")
+        self._normalize_knowledge_wiki_paths()
         if self.experiments_dir is None:
             self.experiments_dir = self.project_root / "experiments"
         if self.local_knowledge_dir is None:
@@ -249,6 +235,24 @@ class Config:
             # Defaults on, so the env var reads as an opt-*out*: anything that
             # is not an explicit "off" leaves the pointers in place.
             self.defer_knowledge_maps = env_flag("KERNELFORGE_DEFER_KNOWLEDGE_MAPS", default=True)
+
+    def _normalize_knowledge_wiki_paths(self) -> None:
+        """Strip the knowledge base paths, and refuse a relative one or a root that is not a knowledge base checkout."""
+        self.knowledge_wiki_root = str(self.knowledge_wiki_root or "").strip()
+        self.knowledge_wiki_log = str(self.knowledge_wiki_log or "").strip()
+        if self.knowledge_wiki_root:
+            from kernelforge.knowledge.wiki_tool.contract import SCRIPTS
+
+            root = Path(self.knowledge_wiki_root)
+            if not root.is_absolute():
+                raise ValueError(f"knowledge_wiki_root must be an absolute path: {self.knowledge_wiki_root!r}")
+            missing = [f"scripts/{name}" for name in SCRIPTS.values() if not (root / "scripts" / name).is_file()]
+            if missing:
+                raise ValueError(
+                    f"knowledge_wiki_root {root} is not a knowledge base checkout; missing {', '.join(missing)}"
+                )
+        if self.knowledge_wiki_log and not Path(self.knowledge_wiki_log).is_absolute():
+            raise ValueError(f"knowledge_wiki_log must be an absolute path: {self.knowledge_wiki_log!r}")
 
     def agent_runtime_settings(self):
         """The configured runtime settings, independent of which provider runs them."""
