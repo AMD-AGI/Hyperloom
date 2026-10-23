@@ -260,7 +260,7 @@ class TestOffloadedWorkCannotHoldTheTick:
     """Blocking work returns the loop at a known instant, whatever it is doing."""
 
     @pytest.mark.asyncio
-    async def test_work_that_outlasts_its_deadline_returns_the_default(self):
+    async def test_work_that_outlasts_its_deadline_returns_none(self):
         from hyperloom.orchestrator.loop.offload import offload
 
         released = threading.Event()
@@ -277,11 +277,10 @@ class TestOffloadedWorkCannotHoldTheTick:
             _blocks,
             deadline=Deadline.after(0.05),
             label="a call that will not return",
-            default="moved on",
         )
         released.set()
 
-        assert result == "moved on"
+        assert result is None
 
     @pytest.mark.asyncio
     async def test_work_with_a_spent_deadline_is_never_started(self):
@@ -297,10 +296,9 @@ class TestOffloadedWorkCannotHoldTheTick:
             _work,
             deadline=Deadline.after(-1.0),
             label="already too late",
-            default="skipped",
         )
 
-        assert result == "skipped"
+        assert result is None
         assert started == []
 
     @pytest.mark.asyncio
@@ -311,7 +309,7 @@ class TestOffloadedWorkCannotHoldTheTick:
             raise RuntimeError("the network went away")
 
         with pytest.raises(RuntimeError, match="the network went away"):
-            await offload(_boom, deadline=None, label="boom", default="degraded")
+            await offload(_boom, deadline=Deadline.after(5.0), label="boom")
 
 
 class TestAStopIsRecordedBeforeItIsDispatched:
