@@ -269,3 +269,34 @@ async def test_every_test_of_a_session_runs_with_the_rule_pack_the_session_names
         assert manifest["runner"]["rule_pack"] == identity_of(named)
     finally:
         await toolbox.close()
+
+
+async def test_a_result_of_a_runner_that_read_another_pack_than_the_session_is_not_a_measurement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reading_pack
+) -> None:
+    """The template is told another pack than the one the session read (here through ``runner_envs``): the runner
+    states what it read, and the toolbox refuses to take a result of other facts as the session's."""
+    repo = tmp_path / "inferencex"
+    commit = _git_repo(repo)
+    _require_tool_checkout(repo, commit, tmp_path / "home", monkeypatch)
+    other = other_pack(tmp_path)
+    reading_pack(None)
+    session = tmp_path / "session"
+    notebook = LocalNotebook(tmp_path / "notebook", Writer(Role.TOOLBOX, "toolbox"))
+    envs = {"INFERENCEX_REPO": str(repo), PACK_ENV: str(other)}
+    toolbox = _toolbox_of(notebook, tmp_path, session, commit, runner_envs=envs, max_infra_retries=0)
+    try:
+        await toolbox.start()
+        request_id = await toolbox.submit_test(req())
+        await asyncio.wait_for(toolbox.drain(), 120)
+        entry = toolbox._log.get(request_id)
+        assert entry is not None and entry.outcome is not None and "result" in entry.outcome, entry.outcome
+        result = TestResult.from_document(entry.outcome["result"])
+        assert result.validity is Validity.MEASUREMENT_FAILED and result.failure_class is FailureClass.INFRA
+        assert result.failure_reason and "(rule_pack_mismatch)" in result.failure_reason, result.failure_reason
+        assert identity_of(other)["digest"] in result.failure_reason
+        assert result.manifest_sha256 is None, "nothing of the refused bundle is recorded as the test's result"
+        extra = toolbox.backend.journal.latest(request_id).extra  # type: ignore[union-attr]
+        assert extra["reject"] == "rule_pack_mismatch" and "verified" not in extra
+    finally:
+        await toolbox.close()
