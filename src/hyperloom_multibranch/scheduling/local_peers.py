@@ -50,7 +50,7 @@ from hyperloom_multibranch.contracts.llm_prices import price_of
 from hyperloom_multibranch.contracts.notebook import Role, Writer
 from hyperloom_multibranch.contracts.notebook.interfaces import BranchLogStore, CommitQuery
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
-from hyperloom_multibranch.contracts.toolbox import SpecialistTokens, Toolbox
+from hyperloom_multibranch.contracts.toolbox import SpecialistTokens
 from hyperloom_multibranch.notebook import BriefTriggers, LocalNotebook
 from hyperloom_multibranch.notebook.learning_search import LEARNINGS_LOG, RetrievalLog
 from hyperloom_multibranch.notebook.rsi.briefing import SessionBriefs
@@ -76,6 +76,7 @@ if TYPE_CHECKING:
     from hyperloom.measure.points import CanonicalMeasurement
     from hyperloom_multibranch.specialist.agent_session import AgentCommand
     from hyperloom_multibranch.specialist.model_sessions import ModelSessions
+    from hyperloom_multibranch.toolbox.toolbox import RealToolbox
 
 logger = logging.getLogger(__name__)
 
@@ -104,7 +105,7 @@ class SessionWiring:
     tokens: SpecialistTokens
     notebooks: Callable[[str], BranchLogStore]
     briefs: SessionBriefs
-    toolbox: Toolbox
+    toolbox: RealToolbox
 
 
 #: Builds the specialist runtime's session factory, and the worktree of each branch the worktree tools serve, on a
@@ -448,13 +449,12 @@ def _specialist_role(workload: Workload) -> str:
     )
 
 
-AGENT_CARDS_ENV = "HYPERLOOM_MB_AGENT_CARDS"
 AGENT_PORT = 31100
 
 
-def model_backed_sessions(command: AgentCommand, agent_cards: tuple[int, ...] = ()) -> SpecialistSessions:
+def model_backed_sessions(command: AgentCommand) -> SpecialistSessions:
     """Sessions that run ``command`` for every branch's specialist, in a worktree of the workload's framework, and
-    each branch's third-party agent on ``agent_cards``.
+    each branch's third-party agent in a sandbox leased from the session's toolbox.
 
     The CLI runs on the main flow's allowlisted specialist environment, through a local AI work socket whose resource
     log is under ``MB-logs``; its worktrees branch off one source base at ``MB-source``, and each launch rebuilds the
@@ -529,17 +529,6 @@ def _agent_spec(workload: Workload) -> AgentSpec:
     )
 
 
-def agent_cards(env: Mapping[str, str]) -> tuple[int, ...]:
-    """The cards ``HYPERLOOM_MB_AGENT_CARDS`` sets aside for third-party agents, none of the measurement's; a local
-    stand-in for the toolbox's sandbox lease."""
-
-    cards = tuple(int(card) for card in env.get(AGENT_CARDS_ENV, "").split(",") if card.strip())
-    shared = set(cards) & set(machine_cards())
-    if shared:
-        raise PeersUnavailable(f"{AGENT_CARDS_ENV} names cards the measurements use: {sorted(shared)}")
-    return cards
-
-
 def load_peers(workload: Workload) -> PeerFactory:
     """The factory of the real peers of a session of ``workload``; raises :class:`PeersUnavailable` when this machine
     cannot run them.
@@ -550,7 +539,7 @@ def load_peers(workload: Workload) -> PeerFactory:
     host = measurement_host(os.environ, workload)
     require_framework_package(workload.framework)
     command = specialist_command(os.environ)
-    return partial(local_peers, host, model_backed_sessions(command, agent_cards(os.environ)))
+    return partial(local_peers, host, model_backed_sessions(command))
 
 
 __all__ = [

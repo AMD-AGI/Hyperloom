@@ -65,8 +65,6 @@ from hyperloom_multibranch.scheduling.local_peers import (
     SessionWiring,
     local_peers,
     machine_cards,
-    agent_cards,
-    AGENT_CARDS_ENV,
     machine_parallel_tests,
     measurement_host,
     require_framework_package,
@@ -327,17 +325,6 @@ def test_the_cards_are_the_ids_the_visible_device_mask_names(mask: str, monkeypa
     monkeypatch.setenv(mask, "6,2")
 
     assert machine_cards() == (6, 2)
-
-
-def test_the_agents_cards_are_the_ones_set_aside_and_none_of_the_measurements(monkeypatch: pytest.MonkeyPatch) -> None:
-    for name in COUNTING_VISIBLE_DEVICE_VARS:
-        monkeypatch.delenv(name, raising=False)
-    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "0")
-
-    assert agent_cards({AGENT_CARDS_ENV: "1"}) == (1,)
-    assert agent_cards({}) == ()
-    with pytest.raises(PeersUnavailable, match=r"measurements use: \[0\]"):
-        agent_cards({AGENT_CARDS_ENV: "0,1"})
 
 
 @pytest.mark.parametrize("framework", ["tensorrt-llm", "sglang"])
