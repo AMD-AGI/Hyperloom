@@ -693,7 +693,7 @@ class Coordinator:
                     break
                 if time.monotonic() < self._backend_retry_at.get(name, 0.0):
                     continue
-                if skips_reactor_turn(name, self.shared_state) or not self.conversation.admits_turn(name, time.time()):
+                if skips_reactor_turn(name, self.shared_state) or not self.conversation.admit_turn(name, time.time()):
                     continue
                 await self.await_within_session_bound(lambda n=name: self.reactor_pass(n), stage=f"reactor:{name}")
         if not self.stop_requested():

@@ -605,11 +605,11 @@ def test_orchestration_turn_in_kernel_needs_kernel_progress_or_the_heartbeat(
     st.kernel_progress_fingerprint = "fp-a"
     now = time.time()
     st.agent_last_active["orchestration"] = now
-    assert coord.conversation.admits_turn("orchestration", now)
+    assert coord.conversation.admit_turn("orchestration", now)
 
     st.kernel_progress_fingerprint = fingerprint
 
-    assert coord.conversation.admits_turn("orchestration", now + idle_sec) is expected
+    assert coord.conversation.admit_turn("orchestration", now + idle_sec) is expected
 
 
 async def test_kernel_ticks_run_orchestration_only_on_admitted_turns(coord, monkeypatch):

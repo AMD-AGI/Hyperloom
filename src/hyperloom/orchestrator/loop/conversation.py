@@ -500,7 +500,7 @@ class ConversationCollaborator(CoordinatorCollaborator):
         *,
         context: str = "",
     ) -> None:
-        """Append one ``conversations.jsonl`` row for a reactor turn; ``context`` is the prompt part the backend received as its system prompt."""
+        """Append one ``conversations.jsonl`` row for a reactor turn, with ``context`` ahead of the backend's prompt."""
         metadata = result.metadata or {}
         prompt = metadata.get("prompt")
         response = metadata.get("response")
@@ -607,7 +607,7 @@ class ConversationCollaborator(CoordinatorCollaborator):
         return sections
 
     async def compose_prompt(self, agent_name: str) -> ComposedPrompt:
-        """Compose the prompt for *agent_name*: session context, then the per-tick phase, clock and inbox tail (with canonical msg_id per inbox row)."""
+        """Compose the prompt for *agent_name*: the session context, and the per-tick blocks ending with the inbox tail."""
         context: list[str] = [f"SESSION_DIR={self.session_dir}"]
         turn: list[str] = []
 
@@ -655,16 +655,13 @@ class ConversationCollaborator(CoordinatorCollaborator):
 
         return ComposedPrompt(context="\n".join(context), turn="\n".join(turn))
 
-    def admits_turn(self, agent_name: str, now_unix: float) -> bool:
-        """Whether ``agent_name`` takes a turn this tick; Orchestration in KERNEL_AGENT needs kernel progress or the heartbeat.
-
-        The kernel pipeline holds the lanes, so Orchestration can only act once its progress fingerprint moves.
-        """
+    def admit_turn(self, agent_name: str, now_unix: float) -> bool:
+        """Whether ``agent_name`` takes a turn this tick; in KERNEL_AGENT, Orchestration waits for kernel progress or the heartbeat."""
         state = self.shared_state
-        if agent_name != "orchestration" or str(state.phase or "").upper() != _phase_state.PHASE_KERNEL_AGENT:
+        if agent_name != "orchestration" or (state.phase or "").upper() != _phase_state.PHASE_KERNEL_AGENT:
             return True
-        fingerprint = str(state.kernel_progress_fingerprint or "")
-        last_turn = float(state.agent_last_active.get("orchestration") or 0.0)
+        fingerprint = state.kernel_progress_fingerprint
+        last_turn = state.agent_last_active.get("orchestration", 0.0)
         if (
             fingerprint == self._admitted_kernel_fingerprint
             and now_unix - last_turn < _KERNEL_ORCHESTRATION_HEARTBEAT_SEC
@@ -674,7 +671,7 @@ class ConversationCollaborator(CoordinatorCollaborator):
         return True
 
     async def compose_turn(self, agent_name: str, backend: Any) -> TurnPrompt:
-        """Compose the system prompt and prompt for one turn; a backend that caches its system prompt carries the session context there."""
+        """The system prompt and prompt for one turn; a backend that caches its system prompt gets the session context in it."""
         system_prompt = await self.load_system_prompt(agent_name)
         composed = await self.compose_prompt(agent_name)
         if getattr(backend, "system_prompt_cached", False):

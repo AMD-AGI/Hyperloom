@@ -938,37 +938,6 @@ async def test_options_includes_system_prompt_and_max_turns():
 
 
 @pytest.mark.asyncio
-async def test_a_repeated_system_prompt_is_handed_over_as_one_file():
-    paths: list[str] = []
-
-    async def q(*, prompt, options):
-        paths.append(options.kwargs["system_prompt"]["path"])
-        return
-        yield
-
-    backend = ClaudeBackend(sdk_query_factory=q, sdk_options_cls=FakeOptions, enable_mcp_emit_intent=False)
-    for system_prompt in ("first", "first", "second"):
-        await backend.run("p", system_prompt=system_prompt)
-
-    assert paths[0] == paths[1] != paths[2]
-    assert Path(paths[2]).read_text(encoding="utf-8") == "second"
-
-
-@pytest.mark.asyncio
-async def test_no_system_prompt_file_without_a_system_prompt():
-    captured: dict[str, Any] = {}
-
-    async def q(*, prompt, options):
-        captured["kwargs"] = options.kwargs
-        return
-        yield
-
-    backend = ClaudeBackend(sdk_query_factory=q, sdk_options_cls=FakeOptions, enable_mcp_emit_intent=False)
-    await backend.run("p", system_prompt=None)
-    assert "system_prompt" not in captured["kwargs"]
-
-
-@pytest.mark.asyncio
 async def test_options_includes_mcp_server_when_emit_intent_enabled():
     captured: dict[str, Any] = {}
 

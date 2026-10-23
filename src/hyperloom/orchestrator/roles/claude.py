@@ -361,7 +361,7 @@ class ClaudeBackend:
     name: str = "claude"
     # Which prompt modules describe a surface this backend actually has.
     transport = TRANSPORT_TOOLS
-    # The system prompt is cached across turns, so stable session context belongs in it.
+    # The system prompt is cached across turns, so the stable session context is sent in it.
     system_prompt_cached = True
     calls: list[dict[str, Any]] = field(default_factory=list)
     mcp_server_config: Any | None = field(default=None, init=False)
@@ -380,7 +380,7 @@ class ClaudeBackend:
     _abandoned_turns: set[asyncio.Task[Any]] = field(default_factory=set, init=False)
     # Stops of turns whose caller was cancelled: they outlive that caller, so they are held here until they finish.
     _turn_stoppers: set[asyncio.Task[Any]] = field(default_factory=set, init=False)
-    # Holds the system prompt files, which the CLI reads from disk because its command-line arguments are capped at 128 KiB.
+    # System prompt files: the CLI's command-line arguments are capped at 128 KiB.
     _system_prompt_dir: tempfile.TemporaryDirectory[str] | None = field(default=None, init=False)
 
     def __post_init__(self) -> None:
