@@ -35,7 +35,9 @@ def test_the_plug_flags_default_to_nothing_selected() -> None:
 
 
 def test_the_plug_flags_parse() -> None:
-    args = _args("--profile", "hosted-gpu", "--manifest", "m.json", "--plug", "events=a", "--plug-config", "events.k=1")
+    args = _args(
+        "--plug-profile", "hosted-gpu", "--manifest", "m.json", "--plug", "events=a", "--plug-config", "events.k=1"
+    )
     assert (args.plug_profile, args.plug_manifest, args.plug, args.plug_config) == (
         "hosted-gpu",
         "m.json",
@@ -46,6 +48,19 @@ def test_the_plug_flags_parse() -> None:
 
 def test_profile_osl_still_parses_as_its_own_flag() -> None:
     assert _args("--profile-osl", "128").profile_osl == 128
+
+
+def test_the_profile_abbreviation_still_resolves_to_profile_osl() -> None:
+    """``--profile`` is no longer a flag of its own, so argparse keeps reading it as the prefix of ``--profile-osl``."""
+    args = _args("--profile", "1024")
+    assert args.profile_osl == 1024
+    assert args.plug_profile is None
+
+
+def test_plug_profile_selects_the_plug_profile_and_leaves_profile_osl_alone() -> None:
+    args = _args("--plug-profile", "local")
+    assert args.plug_profile == "local"
+    assert args.profile_osl is None
 
 
 def test_a_run_that_selects_nothing_writes_and_prints_nothing(tmp_path: Path, capsys) -> None:
@@ -97,7 +112,7 @@ def test_the_manifest_and_override_environment_variables_are_layers(tmp_path: Pa
 def test_a_profile_naming_an_unset_variable_is_refused(tmp_path: Path, capsys, monkeypatch) -> None:
     monkeypatch.delenv("HYPERLOOM_EVENTS_DIR", raising=False)
     with pytest.raises(SystemExit) as exc:
-        prepare_plug_host(_args("--profile", "hosted-cpu"), tmp_path)
+        prepare_plug_host(_args("--plug-profile", "hosted-cpu"), tmp_path)
     assert exc.value.code == 2
     assert "environment variable HYPERLOOM_EVENTS_DIR is not set" in capsys.readouterr().err
 
@@ -107,7 +122,7 @@ def test_a_profile_whose_implementations_are_not_installed_is_refused_before_any
 ) -> None:
     monkeypatch.setenv("HYPERLOOM_EVENTS_DIR", str(tmp_path))
     with pytest.raises(SystemExit) as exc:
-        prepare_plug_host(_args("--profile", "hosted-cpu"), tmp_path)
+        prepare_plug_host(_args("--plug-profile", "hosted-cpu"), tmp_path)
     assert exc.value.code == 2
     assert (
         "plug configuration refused: socket 'events' has no implementation 'hosted'; available: local"

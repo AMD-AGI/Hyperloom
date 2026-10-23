@@ -207,7 +207,7 @@ def _add_resume_arguments(opt: argparse.ArgumentParser) -> None:
 def _add_plug_arguments(opt: argparse.ArgumentParser) -> None:
     """Add the flags that select which implementation fills each plug socket; absent, every socket stays local."""
     opt.add_argument(
-        "--profile",
+        "--plug-profile",
         dest="plug_profile",
         default=None,
         metavar="NAME",
