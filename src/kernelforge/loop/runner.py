@@ -19,6 +19,7 @@ import os
 import shutil
 import signal
 import subprocess
+import sys
 import tempfile
 import textwrap
 import time
@@ -879,6 +880,8 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         # The round currently being timed, opened when an iteration is admitted and closed once the next one starts.
         self._round_started_at: float | None = None
         self._round_iteration = 0
+        # The round a lost process started and never judged, when this resume runs it again under its own number.
+        self._restarted_iteration: int | None = None
         self._round_lanes = 1
         self._round_planning_sec = 0.0
         # What the round spent in the canonical validation and benchmark, which is what prices the next round's
@@ -4783,6 +4786,9 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         lanes: int = 1,
     ) -> tuple[Path | None, str]:
         """Run planning and durably publish every lane's plan for the round."""
+        reused = self._restarted_round_plans(iteration, lanes)
+        if reused is not None:
+            return reused, ""
         context = self._with_direction_ledger(
             self._with_operator_guidance(
                 self._with_ceiling_standing(
@@ -5022,6 +5028,73 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         if started and started not in finished:
             return started
         return None
+
+    def _interrupted_diff_path(self, iteration: int) -> Path:
+        return self._orchestration_root(iteration) / "interrupted.diff"
+
+    def _set_aside_interrupted_round(self) -> None:
+        """Keep the unjudged edits a lost process left on the tree with their round, and give the tree back HEAD.
+
+        A node lost mid-round leaves the round's candidate uncommitted. Without a pending KEEP journal it was never
+        judged, so it is saved beside the round's plans for the round's rerun, which the resume refuses to start on a
+        dirty tree.
+        """
+        iteration = self._unfinished_iteration(before=sys.maxsize)
+        if iteration is None or not self._git("status", "--porcelain", "--untracked-files=no").strip():
+            return
+        patch, changed = self._candidate_changes(self._git("rev-parse", "HEAD").splitlines()[0])
+        path = self._interrupted_diff_path(iteration)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_text(path, patch)
+        self._git_discard_all_tracked_changes()
+        self.state_store.append_event(
+            make_event("interrupted_round_set_aside", iteration, diff=str(path), files=changed)
+        )
+        print(f"  [resume] iteration {iteration} was interrupted before it was judged; its changes are in {path}")
+
+    def _resume_iteration(self, archive_next: int, event_next: int) -> int:
+        """The iteration a resume opens: the round a lost process started and never judged, else the next one.
+
+        Skipping it would drop the round from the campaign's count and lose what it had paid for; a round that left
+        an archive entry got far enough to be judged, so the resume moves past it as before.
+        """
+        next_iteration = max(archive_next, event_next)
+        unfinished = self._unfinished_iteration(before=next_iteration)
+        if unfinished is None or unfinished != next_iteration - 1 or archive_next > unfinished:
+            return next_iteration
+        self._restarted_iteration = unfinished
+        self.state_store.append_event(make_event("iteration_restarted", unfinished))
+        print(f"  [resume] iteration {unfinished} started and was never judged; running it again")
+        return unfinished
+
+    def _restarted_round_plans(self, iteration: int, lanes: int) -> Path | None:
+        """The plans the interrupted run of this round bought, when the round runs again from the same commit."""
+        if iteration != self._restarted_iteration or not self._lane_plans_match_active_profile(iteration):
+            return None
+        published = self._load_lane_plans(iteration)
+        if published is None:
+            return None
+        analysis_commit, plans = published
+        if analysis_commit != self._canonical_commit() or len(plans) != lanes:
+            return None
+        self._last_lane_plans = plans
+        self._last_orchestration_plan_executable = True
+        plan_path = self._lane_plan_path(iteration, 1)
+        self._latest_optimization_plan_path = str(plan_path)
+        print(f"  [orchestration] iteration {iteration} runs again on the plan it bought before it was interrupted")
+        return plan_path
+
+    def _interrupted_round_block(self) -> str:
+        """Tell the implementer of a rerun round where its interrupted first attempt left its changes."""
+        iteration = self.run_state.iteration
+        path = self._interrupted_diff_path(iteration)
+        if iteration != self._restarted_iteration or not path.is_file():
+            return ""
+        return (
+            "## This round was interrupted once\n"
+            f"Iteration {iteration} already ran on a node that was lost before its candidate was judged. The changes it "
+            f"had made are saved in `{path}`. Reapply them if they still serve the plan, rather than starting over.\n\n"
+        )
 
     def _recoverable_lane_plans(
         self,
@@ -5353,6 +5426,8 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
                 self.ic.pristine_baseline_wall_ms = self.run_state.pristine_baseline_wall_ms
             self._restore_published_analysis_commit()
             pending = self._load_pending_keep()
+            if pending is None:
+                self._set_aside_interrupted_round()
             planned, pending_status, _, _ = self._plan_resume_recovery(
                 self.run_state,
                 pending,
@@ -5376,7 +5451,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
                 ),
                 default=1,
             )
-            self.run_state.next_iteration = max(archive_next, event_next)
+            self.run_state.next_iteration = self._resume_iteration(archive_next, event_next)
             if self.run_state.termination_reason == "orchestration_failed":
                 if self.run_state.orchestration_circuit_state != ORCHESTRATION_CIRCUIT_OPEN:
                     raise ValueError("orchestration_failed resume requires an open circuit")
@@ -6512,7 +6587,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         if lh_header:
             history = f"{lh_header}\n\n{history}"
         # Above everything, the long-horizon header included: the operator outranks every other source.
-        history = _operator_block(self._operator_guidance()) + history
+        history = _operator_block(self._operator_guidance()) + self._interrupted_round_block() + history
         if optimization_plan_path:
             ruling_instruction = (
                 "The plan was synthesized from current evidence and the "

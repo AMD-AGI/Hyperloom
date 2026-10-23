@@ -124,6 +124,12 @@ Resume is fail-closed. It requires:
 - Complete pristine per-case baseline and current best score.
 - No unexplained tracked working-tree changes.
 
+A round that started and never reported a result (its process was lost mid-round) is run again under its own
+number rather than skipped. Its uncommitted changes, which no KEEP journal claims, are saved to
+`orchestration/iter_NNN/interrupted.diff` and the tree returns to HEAD (event `interrupted_round_set_aside`); the
+rerun (event `iteration_restarted`) reuses the plans the round bought when the canonical commit has not moved, and
+its implementer is pointed at the saved changes.
+
 `pending_keep.json` is the crash journal for the narrow interval between
 canonical validation, Git commit, state publication, and archive publication.
 Resume reconciles this journal before admitting another Implementer session.

@@ -6174,7 +6174,8 @@ def test_two_loop_instances_resume_global_iteration_and_fresh_budget(tmp_path, m
     assert len(baseline_events) == 1
 
 
-def test_resume_advances_past_abruptly_started_event(tmp_path, monkeypatch):
+def test_resume_runs_again_the_round_a_lost_process_started(tmp_path, monkeypatch):
+    """A round that started and never reported a result is run again under its own number, not skipped."""
     first, workspace = _make_loop(tmp_path, monkeypatch)
     asyncio.run(first.run(runner_module.LoopAgents(agent_fn=_no_change_agent)))
     store = LoopStateStore(str(workspace))
@@ -6201,8 +6202,9 @@ def test_resume_advances_past_abruptly_started_event(tmp_path, monkeypatch):
     )
     results = asyncio.run(resumed.run(runner_module.LoopAgents(agent_fn=_no_change_agent)))
 
-    assert [result.iteration for result in results] == [interrupted_iteration + 1]
-    assert LoopStateStore(str(workspace)).load().next_iteration == (interrupted_iteration + 2)
+    assert [result.iteration for result in results] == [interrupted_iteration]
+    assert LoopStateStore(str(workspace)).load().next_iteration == (interrupted_iteration + 1)
+    assert any(event["type"] == "iteration_restarted" for event in LoopStateStore(str(workspace)).read_events())
 
 
 def test_validated_warm_start_is_immediately_recoverable_without_keep(
