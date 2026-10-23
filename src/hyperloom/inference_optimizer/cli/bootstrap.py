@@ -766,6 +766,7 @@ def _seed_shared_state(
         bypass_scripts_dir=os.environ.get("HYPERLOOM_BYPASS_SCRIPTS_DIR", "").strip(),
         framework_repo_path=os.environ.get("FRAMEWORK_REPO_PATH", "").strip(),
         benchmark_backend=os.environ.get("HYPERLOOM_BENCHMARK_BACKEND", "").strip().lower(),
+        xdit_model_name=os.environ.get("XDIT_MODEL_NAME", "").strip(),
         compute_partition=dict(compute_partition if compute_partition is not None else (published_shape() or {})),
         nodes=max(1, int(getattr(args, _NODES, 1) or 1)),
         warm_replay_enabled=not bool(getattr(args, "no_warm_replay", False)),

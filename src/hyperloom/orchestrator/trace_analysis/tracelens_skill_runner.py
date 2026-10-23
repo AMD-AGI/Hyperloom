@@ -37,8 +37,6 @@ from hyperloom.common import llm_config
 from hyperloom.common.deepseek_task import DeepSeekTaskRequest
 from hyperloom.common.llm_config import claude_sdk_env_options
 from hyperloom.common.llm_config import DEFAULT_CLAUDE_MODEL, DEFAULT_CODEX_MODEL
-from hyperloom.inference_optimizer import framework_registry
-
 from ._capture_shapes import is_capture_dir_name
 from ._io_utils import safe_float
 from ._literal_utils import LITERAL_EVAL_ERRORS as _LITERAL_EVAL_ERRORS
@@ -317,21 +315,6 @@ def write_local_cmd_prefix(output_dir: Path, tracelens_root: Path) -> Path:
         encoding="utf-8",
     )
     return prefix_path
-
-
-def tracelens_analysis_mode(framework: str) -> str:
-    """Return the TraceLens analysis mode for ``framework``.
-
-    Serving frameworks (vllm/sglang/atom) produce inference-shaped traces;
-    scriptable workloads are analysed in the default mode.
-
-    Args:
-        framework (str): The framework that produced the trace.
-
-    Returns:
-        str: ``"default"`` for scriptable frameworks, else ``"inference"``.
-    """
-    return "default" if framework_registry.is_scriptable(framework) else "inference"
 
 
 def write_run_config(
@@ -1303,7 +1286,6 @@ __all__ = [
     "extract_idle_pct_from_analysis_md",
     "normalize_upstream_category",
     "run_tracelens_skill",
-    "tracelens_analysis_mode",
     "write_local_cmd_prefix",
     "write_run_config",
 ]

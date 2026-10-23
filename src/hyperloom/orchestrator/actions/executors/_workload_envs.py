@@ -1160,6 +1160,7 @@ class _RequestWindow(NamedTuple):
     #: limit) a surviving ``max_iterations`` is rejected rather than trusted.
     vllm_profiler_cap: int
     atom_caps: _AtomTracelensCaps | None
+    xdit_profiler_args: str = ""
 
 
 def _pin_benchmark_target(
@@ -1539,6 +1540,32 @@ def _shape_request_window(bench: dict[str, Any]) -> _RequestWindow:
     # Scriptable image frameworks (xDiT diffusion) have no LLM decode steady-state
     # window, so the OSL/steady-floor math below is a serving concept they never consume.
     serves_requests = not framework_registry.is_scriptable(bench.get("framework"))
+    _xdit_extra_env = framework_registry.extra_args_env("xdit")
+    _is_xdit_profile = (
+        is_profile and str(bench.get("framework") or "").lower() == framework_registry.FRAMEWORKS["xdit"].name
+    )
+    xdit_saved_args = ""
+    if _is_xdit_profile:
+        from ._server_patcher import ensure_xdit_patched_for_tracelens
+
+        xdit_patch_attempted = _tracelens_patch_enabled()
+        xdit_patched = xdit_patch_attempted and ensure_xdit_patched_for_tracelens()
+        existing = str(envs.get(_xdit_extra_env, "")).strip()
+        if "--profile_wait" not in existing:
+            profiler_args = (
+                "--profile_wait 1 --profile_capture_phase --profile_with_stack" if xdit_patched else "--profile_wait 1"
+            )
+            envs[_xdit_extra_env] = f"{existing} {profiler_args}".strip()
+        envs["HYPERLOOM_TRACELENS_PATCH_STATUS"] = (
+            "not_attempted" if not xdit_patch_attempted else ("ok" if xdit_patched else "unavailable")
+        )
+        if xdit_patch_attempted and not xdit_patched:
+            envs["HYPERLOOM_PROFILE_DEGRADED_REASON"] = _TRACELENS_PATCH_UNAVAILABLE
+            log.warning(
+                "TraceLens runtime patch unavailable for framework=xdit; "
+                "profile will omit capture-phase flags and roofline analysis may be degraded.",
+            )
+        xdit_saved_args = str(envs.get(_xdit_extra_env, "")).strip()
     profile_num_prompts: int | None = None
     atom_caps: _AtomTracelensCaps | None = None
     vllm_flags: list[tuple[str, str]] = []
@@ -1587,7 +1614,9 @@ def _shape_request_window(bench: dict[str, Any]) -> _RequestWindow:
                 envs["NUM_PROMPTS"] = max(conc_val * factor, conc_val)
         if "NUM_WARMUPS" not in envs:
             envs["NUM_WARMUPS"] = min(conc_val, 8)
-    return _RequestWindow(isl_val, osl_val, is_profile, serves_requests, vllm_flags, vllm_cap, atom_caps)
+    return _RequestWindow(
+        isl_val, osl_val, is_profile, serves_requests, vllm_flags, vllm_cap, atom_caps, xdit_saved_args
+    )
 
 
 def _seed_reference_launch(bench: dict[str, Any], framework_env: str) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -1731,12 +1760,9 @@ def _publish_scriptable_wiring(bench: dict[str, Any], window: _RequestWindow, es
     # ``custom`` workload must not have its baseline altered by settings it
     # never declared, least of all an attention backend.
     if str(bench.get("framework") or "").strip().lower() == "xdit":
-        # The xDiT runner resolves models via MODEL_REGISTRY keys, not
-        # filesystem paths. XDIT_MODEL_ARG selects the basename ("name",
-        # registry-correct) vs the full path ("path", which fails lookup). Force
-        # it onto benchmark.envs here so per-task overrides can't break model
-        # resolution. Default "name".
-        envs["XDIT_MODEL_ARG"] = os.environ.get("XDIT_MODEL_ARG", "").strip() or "name"
+        _xdit_model_name = os.environ.get("XDIT_MODEL_NAME", "").strip()
+        if _xdit_model_name:
+            envs["XDIT_MODEL_NAME"] = _xdit_model_name
         # If set, the baked hyperloom_local_aliases map each registered name to
         # a local snapshot dir rooted at $XDIT_MODEL_ROOT/<slug>. Leave unset in
         # public/default deployments so the operator chooses the model cache
@@ -1961,6 +1987,14 @@ def _restate_profile_capture(
             )
             # The seal applies the sink-side guard to whatever is left here.
             envs[framework_env] = merge_server_args(profile_args, " ".join(restored))
+    if window.xdit_profiler_args and framework_env == framework_registry.extra_args_env("xdit"):
+        current = str(envs.get(framework_env, "")).strip()
+        if "--profile_wait" not in current:
+            log.warning(
+                "profile server args lost xDiT profiler flags (replace_args=%s); restoring.",
+                bool(replace_args),
+            )
+            envs[framework_env] = merge_server_args(current, window.xdit_profiler_args)
     if window.atom_caps is not None:
         # After extra_envs / replace_args / remove_args so TraceLens knobs
         # survive the same last-wins path as vLLM profiler bounds. Must land

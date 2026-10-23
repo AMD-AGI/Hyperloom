@@ -35,7 +35,6 @@ from ._inferencex_patcher import (
     ensure_benchmark_lib_eval_dest_patched,
     ensure_benchmark_serving_patched,
 )
-from ._xdit_patcher import verify_xdit_profiler_baked
 from .benchmark_result import round_succeeded
 from .baseline import BenchmarkRunExecutor
 
@@ -1160,9 +1159,6 @@ class ProfileExecutor(BenchmarkRunExecutor):
         from hyperloom.inference_optimizer import framework_registry
 
         if framework_registry.is_scriptable(framework):
-            if str(framework or "").strip().lower() == "xdit":
-                patchers["xdit_profiler_baked"] = verify_xdit_profiler_baked()
-                _note_instrumentation()
             return None
         inferencex_path = ""
         if isinstance(bench, dict):

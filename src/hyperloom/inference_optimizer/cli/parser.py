@@ -379,6 +379,12 @@ def _build_parser() -> argparse.ArgumentParser:
         "zero, so every candidate is rejected.",
     )
     opt.add_argument(
+        "--xdit-model-name",
+        default=None,
+        metavar="NAME",
+        help="xDiT HuggingFace repo ID (e.g., 'black-forest-labs/FLUX.2-dev'). Required for xDiT runs.",
+    )
+    opt.add_argument(
         "--nodes",
         type=int,
         default=1,
