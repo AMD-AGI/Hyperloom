@@ -256,7 +256,7 @@ function-lines src/hyperloom/inference_optimizer/cli/__init__.py::_run_optimize 
 function-lines src/hyperloom/inference_optimizer/cli/bootstrap.py::_seed_shared_state 155
 function-lines src/hyperloom/inference_optimizer/cli/model_gate.py::_preflight_context_window 123
 function-lines src/hyperloom/inference_optimizer/cli/multi_node.py::_prepare_multi_node_state 90
-function-lines src/hyperloom/inference_optimizer/cli/parser.py::_build_parser 961
+function-lines src/hyperloom/inference_optimizer/cli/parser.py::_build_parser 945
 function-lines src/hyperloom/inference_optimizer/cli/preflight.py::_preflight 203
 function-lines src/hyperloom/inference_optimizer/multi_node/cli.py::build_parser 266
 function-lines src/hyperloom/inference_optimizer/multi_node/scripts/apply_tracelens_patch_multinode.py::main 115

@@ -242,6 +242,7 @@ exclude = [
 [tool.setuptools.package-data]
 hyperloom = [
     "plugs/profiles/*.json",
+    "contracts/*.json",
     "orchestrator/prompts/*.md",
     "orchestrator/prompts/references/*.md",
 ]
