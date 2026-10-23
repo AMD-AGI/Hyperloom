@@ -51,7 +51,6 @@ async def test_the_patch_applies_to_the_skill_and_leaves_it_untouched(tmp_path: 
     brief = briefs[0]
     assert (brief.base, brief.delivered, brief.history) == (base, report["final_commit"], "forge-history")
     assert sorted(result["files"]) == ["gemm/reduction.md", "gemm/split_k.md"] and result["failed"] is False
-    assert result["added_lines"] == 3
     assert "fused reduction" not in (skill / "gemm" / "split_k.md").read_text()
     patch = (out / "knowledge_patch.diff").read_text()
     assert "b/.claude/skills/kernel-optimization/gemm/split_k.md" in patch
@@ -59,7 +58,8 @@ async def test_the_patch_applies_to_the_skill_and_leaves_it_untouched(tmp_path: 
         ["git", "-C", str(skill.parents[2]), "apply", "--check", str(out / "knowledge_patch.diff")]
     )
     assert applied.returncode == 0
-    assert "round 13 +4%" in (out / "distill.md").read_text()
+    review = (out / "distill.md").read_text()
+    assert "round 13 +4%" in review and "```diff\n" in review and "+A fused reduction beats" in review
 
 
 async def test_a_failed_curator_and_a_folder_without_a_skill(tmp_path: Path) -> None:

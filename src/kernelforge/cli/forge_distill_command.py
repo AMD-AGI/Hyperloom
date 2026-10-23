@@ -72,8 +72,6 @@ def forge_distill(
         raise click.ClickException(str(error)) from error
     if result["failed"]:
         raise click.ClickException(f"the curator failed; nothing to review in {target}")
-    click.echo(
-        f"proposed edits to {len(result['files'])} file(s), {result['added_lines']} added lines, "
-        f"not applied: {result['patch']}"
-    )
+    click.echo(Path(result["patch"]).read_text() or "No edit proposed.")
+    click.echo(f"proposed edits to {len(result['files'])} file(s), not applied: {result['patch']}")
     click.echo(f"evidence and rejected candidates: {result['report']}")

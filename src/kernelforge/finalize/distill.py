@@ -168,13 +168,6 @@ def _campaign_refs(workspace: Path) -> tuple[str, str, str]:
     return base, delivered or head, history
 
 
-def _added_lines(copy: Path) -> int:
-    """Lines the edits in ``copy`` add, new files included."""
-    _git(copy, "add", "-A")
-    rows = _git(copy, "diff", "--cached", "--numstat").stdout.splitlines()
-    return sum(int(row.split("\t")[0]) for row in rows if row.split("\t")[0].isdigit())
-
-
 def _fresh_copy(skill_dir: Path, copy: Path) -> None:
     if copy.exists():
         shutil.rmtree(copy)
@@ -209,24 +202,28 @@ async def distill_campaign(
         tuple(str(Path(r).resolve()) for r in references),
     )
     reply = await distill_fn(brief=brief)
-    added = _added_lines(copy)
+    _git(copy, "add", "-A")
     prefix = _skill_prefix(skill_dir)
     patch = _git(copy, "diff", "--cached", f"--src-prefix=a/{prefix}", f"--dst-prefix=b/{prefix}").stdout
     files = [path for path in _git(copy, "diff", "--cached", "--name-only").stdout.splitlines() if path]
     report = report_of(reply) if reply is not None else ""
     publish_report(out / PATCH_NAME, patch)
-    publish_report(
-        out / REPORT_NAME,
-        f"# Proposed skill patch\n\nFor {skill_dir}; not applied. Adds {added} lines.\n\n{report or '(no report)'}\n",
-    )
+    publish_report(out / REPORT_NAME, render_distill_md(skill_dir, report, patch))
     result = {
         "skill_dir": str(skill_dir),
         "patch": str(out / PATCH_NAME),
         "report": str(out / REPORT_NAME),
         "files": files,
-        "added_lines": added,
         "failed": reply is None,
         "apply_from": str(Path(_git(skill_dir, "rev-parse", "--show-toplevel").stdout.strip() or skill_dir)),
     }
     publish_report(out / RESULT_NAME, json.dumps(result, indent=2))
     return result
+
+
+def render_distill_md(skill_dir: Path, report: str, patch: str) -> str:
+    """What a maintainer reviews in one place: each edit's evidence, then the patch itself."""
+    diff = f"```diff\n{patch.rstrip()}\n```" if patch.strip() else "No edit proposed."
+    return (
+        f"# Proposed skill patch\n\nFor {skill_dir}; not applied.\n\n{report or '(no report)'}\n\n## Patch\n\n{diff}\n"
+    )

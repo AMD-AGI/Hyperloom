@@ -394,9 +394,10 @@ The patch is kept small enough to review: one or two lines per claim, in a list
 or table the card already has, with the mechanism and the numbers in the report
 instead.
 
-It writes `knowledge_patch.diff` (applies with `git apply` from the skill's
-repository root), `distill.md` (one line per edit with its evidence, and one per
-candidate it rejected), `distill.json` and the edited copy under `skill/`.
+It prints the patch, and writes `knowledge_patch.diff` (applies with `git apply`
+from the skill's repository root), `distill.md` (one line per edit with its
+evidence, one per candidate it rejected, then the patch itself), `distill.json`
+and the edited copy under `skill/`.
 
 | Option | Default | Meaning |
 |:--|:--|:--|
