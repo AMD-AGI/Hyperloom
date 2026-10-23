@@ -21,6 +21,7 @@ import pytest
 from hyperloom.measure.jit import store as jit_store
 from hyperloom.measure.jit_kinds import AITER_JIT, TRITON
 from hyperloom.measure.jit.store import DirJitStore, JitStoreError, Snapshot, SnapshotInvalid, StoredFile
+from hyperloom.measure.jit.tests.triton_cache import PRODUCTS, get_group
 
 KEY = "a" * 64
 OTHER_KEY = "b" * 64
@@ -376,3 +377,79 @@ def test_concurrent_publishers_of_overlapping_snapshots_leave_every_one_readable
         destination = tmp_path / f"read{number}"
         assert store.fetch(AITER_JIT, KEY, destination).snapshot is not None
     assert _blob_of(store, MODULE).read_bytes() == MODULE
+
+
+HASH_DIR = "0123456789abcdef0123456789abcdef"
+
+
+def _triton_files(group: dict[str, str]) -> dict[str, bytes]:
+    """A Triton kernel as the cache stores it: its products, and its group naming them relative to the cache directory."""
+    files = {f"{HASH_DIR}/{name}": f"{name} bytes".encode() for name in PRODUCTS}
+    files[f"{HASH_DIR}/__grp__kernel.json"] = json.dumps({"child_paths": group}).encode()
+    return files
+
+
+def test_a_stored_group_names_the_files_in_the_directory_of_the_test_that_is_given_it(store, tmp_path) -> None:
+    _publish(
+        store,
+        tmp_path,
+        _triton_files({name: f"{HASH_DIR}/{name}" for name in PRODUCTS}),
+        kind=TRITON,
+    )
+    private = tmp_path / "another" / "sandbox" / "triton"
+
+    got = store.fetch(TRITON, KEY, private)
+
+    assert got.snapshot is not None and got.problems == ()
+    found = get_group(private, HASH_DIR)
+    assert found == {name: f"{private}/{HASH_DIR}/{name}" for name in PRODUCTS}, "Triton would find the kernel"
+    assert (private / HASH_DIR / "kernel.hsaco").read_bytes() == b"kernel.hsaco bytes", (
+        "the others are copied as they are"
+    )
+
+
+def test_a_stored_group_is_checked_against_its_hash_before_any_path_is_written_into_it(store, tmp_path) -> None:
+    _publish(store, tmp_path, _triton_files({name: f"{HASH_DIR}/{name}" for name in PRODUCTS}), kind=TRITON)
+    group = json.dumps({"child_paths": {name: f"{HASH_DIR}/{name}" for name in PRODUCTS}}).encode()
+    blob = _blob_of(store, group)
+    blob.chmod(0o644)
+    blob.write_bytes(group.replace(b"kernel.ttir", b"kernel.TTIR"))  # still a group, same size, other bytes
+
+    got = store.fetch(TRITON, KEY, tmp_path / "private")
+
+    assert got.snapshot is None
+    assert any("__grp__kernel.json: the bytes are not the" in problem for problem in got.problems)
+    assert [p for p in (tmp_path / "private").rglob("*") if p.is_file()] == [], "nothing of it reaches the test"
+
+
+@pytest.mark.parametrize("path", ["/etc/passwd", f"../{HASH_DIR}/kernel.json", f"{HASH_DIR}/kernel.pkl"])
+def test_a_stored_group_that_names_a_file_outside_what_the_cache_holds_drops_the_snapshot_whole(
+    store, tmp_path, path
+) -> None:
+    _publish(store, tmp_path, _triton_files({"kernel.json": path}), kind=TRITON)
+
+    got = store.fetch(TRITON, KEY, tmp_path / "private")
+
+    assert got.snapshot is None
+    assert any(
+        "__grp__kernel.json: kernel.json: " in problem and "is not a file of the triton cache" in problem
+        for problem in got.problems
+    )
+    assert [p for p in (tmp_path / "private").rglob("*") if p.is_file()] == [], "the files that did verify go too"
+
+
+def test_a_stored_group_of_names_is_copied_as_it_is_and_triton_finds_the_kernel_in_the_new_directory(
+    store, tmp_path
+) -> None:
+    names = sorted(PRODUCTS)
+    files = {f"{HASH_DIR}/{name}": f"{name} bytes".encode() for name in PRODUCTS}
+    files[f"{HASH_DIR}/__grp__kernel.json"] = json.dumps({"child_paths": names}).encode()
+    _publish(store, tmp_path, files, kind=TRITON)
+    private = tmp_path / "another" / "triton"
+
+    got = store.fetch(TRITON, KEY, private)
+
+    assert got.snapshot is not None and got.problems == ()
+    assert get_group(private, HASH_DIR, release="current") == {
+        name: f"{private}/{HASH_DIR}/{name}" for name in PRODUCTS
+    }

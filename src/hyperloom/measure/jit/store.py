@@ -19,6 +19,9 @@ Reading proves every byte: the snapshot's own name is the hash of its bytes, it 
 for, every path is one the kind admits, and every blob is copied through descriptors that refuse symlinks while its hash
 and size are checked against the list. A snapshot that fails any of that is dropped whole, with a note, and the next
 generation is tried; the caller then builds what is missing itself, so a bad cache costs time and never a result.
+
+The one file a copy changes after it has been verified is a kind's index of the files its compiler made, which holds
+paths: the reader's directory is written into its private copy (:mod:`hyperloom.measure.jit.locations`).
 """
 
 from __future__ import annotations
@@ -35,6 +38,7 @@ from typing import Any
 from hyperloom.measure import fsafe
 from hyperloom.measure.archive import fsync_dir
 from hyperloom.measure.docs import SHA256_RE, DocumentError, Reader, canonical_json, parse_json_object, relative_path
+from hyperloom.measure.jit.locations import MAX_LOCATED_BYTES, NotPortable, localised
 from hyperloom.measure.jit_kinds import KINDS, CacheKind, kind_named
 
 __all__ = [
@@ -278,6 +282,7 @@ class DirJitStore:
                 _copy_blob(root_fd, stored, target)
                 made.append(target)
                 total += stored.size
+            _localise(snapshot, Path(dest))
         except BaseException:
             for path in made:
                 path.unlink(missing_ok=True)
@@ -403,6 +408,30 @@ def _file_sha256(path: Path) -> str | None:
         return fsafe.sha256_and_size(fd)[0]
     finally:
         os.close(fd)
+
+
+def _localise(snapshot: Snapshot, dest: Path) -> None:
+    """Write the directory ``dest`` into each copied file that names the directory it was written in. Every file was
+    verified against its hash before this runs, so what is rewritten is the stored bytes and nothing else."""
+    kind = kind_named(snapshot.kind)
+    for relative in snapshot.files:
+        if kind.locates(relative):
+            _rewrite(relative, dest, kind)
+
+
+def _rewrite(relative: str, dest: Path, kind: CacheKind) -> None:
+    descriptor = os.open(dest / relative, os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC)
+    with os.fdopen(descriptor, "r+b") as handle:
+        raw = handle.read(MAX_LOCATED_BYTES + 1)
+        try:
+            local = localised(raw, dest, kind, relative)
+        except NotPortable as exc:
+            raise SnapshotInvalid(f"{Path(relative).name}: {exc}") from None
+        handle.seek(0)
+        handle.truncate()
+        handle.write(local)
+        handle.flush()
+        os.fsync(handle.fileno())
 
 
 def _copy_blob(root_fd: int, stored: StoredFile, target: Path) -> None:

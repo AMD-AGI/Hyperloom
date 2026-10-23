@@ -10,13 +10,21 @@ import os
 import tempfile
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
 from hyperloom.measure.live_log import last_output
 
-__all__ = ["EXIT_CODES", "Progress", "RunnerFailure", "wait_for_file", "write_json_atomic", "write_status"]
+__all__ = [
+    "EXIT_CODES",
+    "Progress",
+    "RunnerFailure",
+    "join_notes",
+    "wait_for_file",
+    "write_json_atomic",
+    "write_status",
+]
 
 #: Exit code by ``error_class``; anything not listed exits 1.
 EXIT_CODES = {
@@ -27,6 +35,9 @@ EXIT_CODES = {
     "node_fault": 5,
 }
 _REFRESH_SEC = 20.0
+#: ``status.json`` keeps this many characters of its message.
+_MESSAGE_LIMIT = 2000
+_ROOM_FOR_COUNT = 40
 
 
 class RunnerFailure(Exception):
@@ -59,9 +70,29 @@ def write_json_atomic(path: Path, document: dict[str, Any]) -> None:
         raise
 
 
+def join_notes(notes: Sequence[str]) -> str:
+    """The notes of a test that succeeded as one message: whole notes from the first while they fit, then how many did not.
+
+    A message that is too long is cut at its start (the end of an error says the most), which for notes would drop the
+    first and most important ones; so the notes are cut at their end instead, in the order the runner gave them.
+    """
+    message = "; ".join(notes)
+    if len(message) <= _MESSAGE_LIMIT:
+        return message
+    kept: list[str] = []
+    for note in notes:
+        if len("; ".join([*kept, note])) + _ROOM_FOR_COUNT > _MESSAGE_LIMIT:
+            if not kept:
+                kept.append(note[: _MESSAGE_LIMIT - _ROOM_FOR_COUNT])
+            break
+        kept.append(note)
+    return "; ".join([*kept, f"{len(notes) - len(kept)} more notes left out"])
+
+
 def write_status(out_dir: Path, *, state: str, error_class: str | None = None, message: str = "") -> None:
     """Write ``status.json``; it is always the last file, so its presence says the runner has ended."""
-    write_json_atomic(out_dir / "status.json", {"state": state, "error_class": error_class, "message": message[-2000:]})
+    document = {"state": state, "error_class": error_class, "message": message[-_MESSAGE_LIMIT:]}
+    write_json_atomic(out_dir / "status.json", document)
 
 
 def wait_for_file(

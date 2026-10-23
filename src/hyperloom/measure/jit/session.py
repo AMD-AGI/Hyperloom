@@ -7,12 +7,15 @@ Before the server starts, :meth:`JitCacheSession.seed` copies the verified snaps
 test's own and :meth:`~JitCacheSession.environment` names those directories for the server; no two tests ever share a
 writable cache directory. After a successful test, :meth:`~JitCacheSession.collect` stages what the compilers added: the
 files the kind admits that the snapshot did not have, as content-addressed blobs and a list of the whole snapshot they
-extend. A file the test changed under a name the snapshot already holds is not contributed (a stored name never changes),
-and a symlink is not followed or taken (the test's own directory holds links to the image's prebuilt modules).
+extend. A file the test changed under a name the snapshot already holds, judged by its content and not by its time, is not
+contributed (a stored name never changes), and a symlink is not followed or taken (the test's own directory holds links to
+the image's prebuilt modules). A compiler's index of the files it made names the directory it was written in, so it is
+staged without that directory and given the test's own at seed time (:mod:`hyperloom.measure.jit.locations`).
 
-The session never fails a test: whatever goes wrong with the cache is a note and a state in the report, and the test builds
-what it lacks itself. The staged contribution is published by the host after it has verified the signed result
-(:meth:`hyperloom.measure.jit.store.DirJitStore.publish`), never by the code that runs next to the server.
+The session never fails a test: whatever goes wrong with the cache is a note (:mod:`hyperloom.measure.jit.notes`) and a
+state in the report, and the test builds what it lacks itself. The staged contribution is published by the host after it
+has verified the signed result (:meth:`hyperloom.measure.jit.store.DirJitStore.publish`), never by the code that runs next
+to the server.
 """
 
 from __future__ import annotations
@@ -21,12 +24,15 @@ import hashlib
 import os
 import shutil
 import uuid
-from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 
 from hyperloom.measure import fsafe
 from hyperloom.measure.jit.builds import BuildLog
+from hyperloom.measure.jit.locations import NotPortable, portable, read_located
+from hyperloom.measure.jit.notes import LISTED, SessionNotes
 from hyperloom.measure.jit_kinds import DISABLED, HIT, MISS, VERIFY_FAILED, CacheKind
 from hyperloom.measure.jit.store import (
     BLOBS_DIR,
@@ -50,6 +56,10 @@ _TMP = ".tmp-"
 _MODE = 0o600
 _DIR_MODE = 0o700
 _PREBUILT_SUFFIX = ".so"
+_CHANGED = "changed by the test; the stored bytes stay"
+_NOT_PORTABLE = "not contributed: they name files the cache does not hold"
+#: How the cache stores the bytes of a file: as they are (``None``), or with the directory they name taken out.
+_Form = Callable[[bytes], bytes]
 
 
 @dataclass(frozen=True)
@@ -117,12 +127,11 @@ class JitCacheReport:
 
 @dataclass
 class _Seeded:
-    """A kind as it stood after seeding: its snapshot, and the size and time of each file the seed copied."""
+    """A kind as it stood after seeding: the snapshot it was given, if any."""
 
     plan: KindPlan
     state: str = MISS
     snapshot: Snapshot | None = None
-    copied: dict[str, tuple[int, int]] = field(default_factory=dict)
     seed_bytes: int = 0
     contribution: Contribution | None = None
 
@@ -148,12 +157,12 @@ class JitCacheSession:
         self._private = Path(private_root)
         self._staging = Path(staging)
         self._disabled = dict(disabled or {})
-        self._notes = [f"jit cache: {name} is not used: {why}" for name, why in sorted(self._disabled.items())]
-        self._notes += [
-            f"jit cache: {plan.kind.name} is read only in this test: {plan.read_only}"
-            for plan in plans
-            if plan.read_only is not None
-        ]
+        self._notes = SessionNotes()
+        for name, why in sorted(self._disabled.items()):
+            self._notes.fact(f"jit cache: {name} is not used: {why}")
+        for plan in plans:
+            if plan.read_only is not None:
+                self._notes.problem(f"jit cache: {plan.kind.name} is read only in this test: {plan.read_only}")
 
     def environment(self) -> dict[str, str]:
         """The variables that point each compiler at this test's own directory for its kind."""
@@ -184,14 +193,16 @@ class JitCacheSession:
         except (JitStoreError, OSError) as exc:
             _clear(content)
             seeded.state = VERIFY_FAILED
-            self._notes.append(f"jit cache: {kind.name} could not be read ({type(exc).__name__}); it builds cold")
+            self._notes.problem(f"jit cache: {kind.name} could not be read ({type(exc).__name__}); it builds cold")
             return
-        self._notes.extend(f"jit cache: {problem}; ignored" for problem in fetched.problems)
+        for problem in fetched.problems[:LISTED]:
+            self._notes.problem(f"jit cache: {problem}; ignored")
+        if len(fetched.problems) > LISTED:
+            self._notes.problem(f"jit cache: {kind.name}: {len(fetched.problems) - LISTED} more snapshots were ignored")
         if fetched.snapshot is None:
             seeded.state = VERIFY_FAILED if fetched.problems else MISS
             return
         seeded.state, seeded.snapshot, seeded.seed_bytes = HIT, fetched.snapshot, fetched.bytes
-        seeded.copied = {rel: _stamp(content / rel) for rel in fetched.snapshot.files}
 
     # -- after a successful test ------------------------------------------------------------------------------------
 
@@ -203,7 +214,7 @@ class JitCacheSession:
             try:
                 seeded.contribution = self._stage(seeded)
             except (JitStoreError, OSError, fsafe.UnsafeEntry, fsafe.MissingEntry) as exc:
-                self._notes.append(
+                self._notes.problem(
                     f"jit cache: {seeded.plan.kind.name} was not contributed ({type(exc).__name__}: {exc})"
                 )
                 shutil.rmtree(self._staging / seeded.plan.kind.name, ignore_errors=True)
@@ -219,7 +230,7 @@ class JitCacheSession:
         snapshot = Snapshot(kind.name, seeded.plan.key, parent, {**seeded.files, **new})
         if snapshot.total_bytes > MAX_SNAPSHOT_BYTES:
             shutil.rmtree(directory, ignore_errors=True)
-            self._notes.append(f"jit cache: {kind.name} is over the size a snapshot may have; not contributed")
+            self._notes.fact(f"jit cache: {kind.name} is over the size a snapshot may have; not contributed")
             return None
         raw = snapshot.to_bytes()
         with open(directory / MANIFEST_NAME, "xb") as out:
@@ -236,13 +247,16 @@ class JitCacheSession:
         root_fd = fsafe.open_root(content)
         try:
             for relative in _candidates(content, kind):
-                if relative in seeded.files:
-                    if _stamp(content / relative) != seeded.copied.get(relative):
-                        self._notes.append(
-                            f"jit cache: {kind.name} {relative} was changed by the test; the stored one stays"
-                        )
+                form = _stored_form(kind, content, relative)
+                stored = seeded.files.get(relative)
+                if stored is not None:
+                    if _differs(root_fd, relative, stored, form):
+                        self._notes.tally(kind.name, _CHANGED, relative)
                     continue
-                new[relative] = _stage_file(root_fd, relative, directory / BLOBS_DIR)
+                try:
+                    new[relative] = _stage_file(root_fd, relative, directory / BLOBS_DIR, form)
+                except NotPortable:
+                    self._notes.tally(kind.name, _NOT_PORTABLE, relative)
         finally:
             os.close(root_fd)
         return new
@@ -264,12 +278,7 @@ class JitCacheSession:
             for seeded in self._kinds.values()
         ]
         kinds += [KindReport(name, None, DISABLED) for name in sorted(self._disabled)]
-        return JitCacheReport(tuple(kinds), built.builds_seen, round(built.compile_seconds, 3), tuple(self._notes))
-
-
-def _stamp(path: Path) -> tuple[int, int]:
-    info = os.stat(path, follow_symlinks=False)
-    return info.st_size, info.st_mtime_ns
+        return JitCacheReport(tuple(kinds), built.builds_seen, round(built.compile_seconds, 3), self._notes.lines())
 
 
 def _clear(content: Path) -> None:
@@ -302,15 +311,43 @@ def _candidates(content: Path, kind: CacheKind) -> list[str]:
     return found
 
 
-def _stage_file(root_fd: int, relative: str, blobs: Path) -> StoredFile:
-    """Copy one file into ``blobs`` under the hash of the bytes that were copied, so a byte that changes meanwhile is not
-    taken for the one that was hashed."""
+def _stored_form(kind: CacheKind, content: Path, relative: str) -> _Form | None:
+    """How the cache stores ``relative``: as it is, or without the directory a compiler's index of its files names."""
+    return partial(portable, root=content, kind=kind, relative=relative) if kind.locates(relative) else None
+
+
+def _stored_chunks(source: int, form: _Form | None) -> Iterator[bytes]:
+    """The bytes of an open file as the cache stores them."""
+    return fsafe.stream(source) if form is None else iter((form(read_located(source)),))
+
+
+def _differs(root_fd: int, relative: str, stored: StoredFile, form: _Form | None) -> bool:
+    """Whether the file holds other bytes than the stored one: a compiler that writes the same bytes again, as Triton does
+    for what it found, has changed nothing."""
+    source = fsafe.open_beneath(root_fd, relative)
+    try:
+        if form is None and os.fstat(source).st_size != stored.size:
+            return True
+        digest = hashlib.sha256()
+        for chunk in _stored_chunks(source, form):
+            digest.update(chunk)
+        return digest.hexdigest() != stored.sha256
+    except NotPortable:
+        return True
+    finally:
+        os.close(source)
+
+
+def _stage_file(root_fd: int, relative: str, blobs: Path, form: _Form | None) -> StoredFile:
+    """Copy one file into ``blobs`` in the form the cache stores it, under the hash of the bytes that were copied, so a
+    byte that changes meanwhile is not taken for the one that was hashed."""
     source = fsafe.open_beneath(root_fd, relative)
     digest, size = hashlib.sha256(), 0
     pending = blobs / f"{_TMP}{uuid.uuid4().hex}"
     try:
+        chunks = _stored_chunks(source, form)
         with os.fdopen(os.open(pending, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, _MODE), "wb") as out:
-            for chunk in fsafe.stream(source):
+            for chunk in chunks:
                 digest.update(chunk)
                 size += len(chunk)
                 out.write(chunk)
