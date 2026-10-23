@@ -1340,14 +1340,6 @@ class KernelPhase(CoordinatorCollaborator):
         elif gpus.unverified:
             log.warning("geak rebench: cannot confirm GPUs %s are free (%s)", cards, gpus.unverified)
 
-    def _session_is_agentx(self) -> bool:
-        """Whether this session measures the AgentX workload."""
-        from hyperloom.common.perf_metric import is_agentx_mode
-        from ..actions.executors._workload_envs import agentx_enabled
-
-        benchmark_mode = str(self.shared_state.benchmark_mode or "").strip()
-        return is_agentx_mode(benchmark_mode) if benchmark_mode else agentx_enabled()
-
     async def _launch_geak_runner(
         self, handoff_path: Path, *, timeouts: tuple[int, int, bool], from_phase: str
     ) -> subprocess.CompletedProcess:
@@ -1904,7 +1896,7 @@ class KernelPhase(CoordinatorCollaborator):
     async def _run_geak_kernel_phase(self, *, from_phase: str) -> None:
         """Delegate the KERNEL_AGENT phase to GEAK (one whole-pipeline e2e run)."""
         state = self.shared_state
-        agentx = self._session_is_agentx()
+        agentx = not _geak_rebench.geak_harness_replays_workload(state)
         handoff = self._open_geak_handoff(agentx=agentx)
         if handoff is None:
             return
