@@ -61,8 +61,8 @@ doc is the authority on where that boundary lives.
   crosses a trigger in the style guide § *Size and complexity* — the authority on the
   numbers, how to measure them, and when a long unit is fine as it stands — needs a reason
   in the PR description or a split. Editing a unit that was already over is not a demand to
-  repay its debt; adding branches or a second responsibility to it is. The three numbers
-  are review triggers, not gates, and the tree carries a backlog above all three. Above
+  repay its debt; adding branches or a second responsibility to it is. The two numbers
+  are review triggers, not gates, and the tree carries a backlog above both. Above
   them sits one ceiling — **a function this change adds, or
   whose cyclomatic complexity this change raises, may not exceed 20**; the style guide §
   *Complexity ceiling* has the measurement and the two cases it covers. Maintainability,
