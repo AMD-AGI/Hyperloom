@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import pytest
 
+from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
+from hyperloom_multibranch.contracts.notebook.vocab import BranchDriver
 from hyperloom_multibranch.notebook.rsi.replay import ReplayPolicy, cut_times, evaluate, replay
 from hyperloom_multibranch.notebook.rsi.similarity import TaskConditions
 from hyperloom_multibranch.notebook.rsi.tests.trees import HOUR, LATE_BLOOMER, TASK, branch, tree
@@ -39,6 +41,18 @@ def test_the_cap_prunes_whole_branches_and_a_cut_branch_takes_its_late_children(
     assert cut_times(searched, ReplayPolicy(0.0, 6))["late"] > 7200.0
     assert replay(searched, ReplayPolicy(1.0, 6)).gain_pct == 5.2
     assert replay(searched, ReplayPolicy(0.0, 6)).utility == pytest.approx(5.2)
+
+
+def test_a_branch_an_autonomous_agent_drives_is_never_cut_but_takes_a_slot() -> None:
+    searched = tree(
+        "t",
+        branch("agent", [(1800.0, 1.0)], driver=BranchDriver.AUTONOMOUS),
+        branch("s1", [(3600.0, 2.0)], opened_s=600.0),
+    )
+    strict = ReplayPolicy(stop_pct=5.0, branch_cap=1)
+
+    assert cut_times(searched, strict) == {INTEGRATION_BRANCH: 4 * HOUR, "agent": 4 * HOUR, "s1": 600.0}
+    assert replay(searched, strict).gain_pct == 1.0
 
 
 def test_evaluation_weighs_similar_sessions_and_counts_its_evidence() -> None:

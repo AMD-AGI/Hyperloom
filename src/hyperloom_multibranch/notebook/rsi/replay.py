@@ -7,7 +7,8 @@ A replay can only cut what a session recorded; it never invents a branch the ses
 policy, a branch opened while ``branch_cap`` others were open is pruned whole; any other branch stops at the first
 tick its gain over the last tick falls under ``stop_pct``, losing the commits after that tick and saving the rest of
 its GPU time. A branch opened from a branch after that branch was cut goes with it. The integration branch is never
-cut.
+cut, and neither is a branch an autonomous agent drives, which the judge does not steer; it still takes one of the
+slots the cap counts.
 
 The utility of a replay is the best gain its kept commits reach, plus the GPU time it saved reinvested at half the
 rate its kept time earned. Each archived session counts in proportion to its task similarity.
@@ -22,7 +23,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
-from hyperloom_multibranch.contracts.notebook.vocab import LineageKind
+from hyperloom_multibranch.contracts.notebook.vocab import BranchDriver, LineageKind
 from hyperloom_multibranch.notebook.rsi.archive import SearchTree, TreeBranch, similar_trees
 from hyperloom_multibranch.notebook.rsi.similarity import TaskConditions, effective_sessions
 
@@ -71,7 +72,7 @@ def cut_times(tree: SearchTree, policy: ReplayPolicy, tick_seconds: float = TICK
     cuts: dict[str, float] = {}
     ends = {branch.name: _natural_end(branch, tree) for branch in tree.branches}
     for branch in sorted(tree.branches, key=lambda item: item.opened_s):
-        if _is_integration(branch):
+        if _is_integration(branch) or branch.driver is BranchDriver.AUTONOMOUS:
             cuts[branch.name] = ends[branch.name]
             continue
         parent_end = ends.get(branch.parent_branch, float("inf"))
