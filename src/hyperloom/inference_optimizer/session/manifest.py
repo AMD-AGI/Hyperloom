@@ -28,19 +28,6 @@ log = logging.getLogger(__name__)
 SCHEMA_VERSION = 4
 
 
-def _git_revision() -> str:
-    """Best-effort source revision of the repo containing this package."""
-    here = Path(__file__).resolve().parent
-    rev = _git_revision_at(here)
-    if rev:
-        return rev
-    for env_var in ("HYPERLOOM_CODE_REVISION", "HYPERLOOM_GIT_SHA"):
-        val = (os.environ.get(env_var) or "").strip()
-        if val:
-            return val
-    return ""
-
-
 def _git_capture(path: Path, args: list[str]) -> str:
     """Best-effort ``git -C <path> <args>`` returning trimmed stdout."""
     try:
@@ -126,39 +113,6 @@ def _build_dependencies() -> dict[str, dict[str, str]]:
         "magpie": _describe_dep("MAGPIE_PATH"),
         "inferencex": _describe_dep("INFERENCEX_PATH"),
     }
-
-
-def _detect_image() -> str | None:
-    """Best-effort container image detection: env vars -> known mount points -> cgroup probe."""
-    for var in ("HYPERLOOM_IMAGE", "CONTAINER_IMAGE", "IMAGE"):
-        val = (os.environ.get(var) or "").strip()
-        if val:
-            return val
-    for marker in ("/etc/podinfo/image", "/etc/hyperloom-image"):
-        try:
-            p = Path(marker)
-            if p.exists():
-                txt = p.read_text(encoding="utf-8", errors="replace").strip()
-                if txt:
-                    return txt
-        except OSError:
-            continue
-    try:
-        cgroup = Path("/proc/1/cgroup")
-        if cgroup.exists():
-            for line in cgroup.read_text(encoding="utf-8", errors="replace").splitlines():
-                if "docker" not in line and "containerd" not in line:
-                    continue
-                import re as _re
-
-                m = _re.search(r"([0-9a-f]{12,64})", line)
-                if m:
-                    short = m.group(1)[:12]
-                    return f"unknown@{short}"
-    except OSError as exc:
-        # /proc/1/cgroup may be unreadable; fall through to None.
-        log.debug("cgroup-based image detection failed: %r", exc)
-    return None
 
 
 def _objective_summary(args: argparse.Namespace) -> dict[str, Any]:
@@ -258,11 +212,11 @@ def build_manifest(
         "workload": workload,
         "objective": _objective_summary(args) if args is not None else {"kind": "time_only", "value": None},
         "max_minutes": int((getattr(args, "max_hours", 0) or 0) * 60),
-        "code_revision": _git_revision(),
+        "code_revision": _prov.get("code_revision") or "",
         "dependencies": _build_dependencies(),
         "pid": os.getpid(),
         "host": platform.node() or socket.gethostname() or "",
-        "image": _detect_image(),
+        "image": _prov.get("image"),
         # Snapshotted so resume-after-redeploy can detect drift.
         "stack_fingerprint": _prov.get("stack_fingerprint") or {},
         # Locked at session start; resume reads it back so a restart can't change concurrency semantics.

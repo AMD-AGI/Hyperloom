@@ -26,7 +26,6 @@ from ._common import (
 )
 from .sessions import (
     log as log,
-    _detect_image_for_session as _detect_image_for_session,
     _close_phase_stop_reason as _close_phase_stop_reason,
     _should_use_close_stop_reason as _should_use_close_stop_reason,
     _collect_recovery as _collect_recovery,
