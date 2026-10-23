@@ -721,13 +721,16 @@ def test_generated_tokens_counts_only_what_was_actually_produced(body: object, e
     assert serving_probe.generated_tokens(body) == expected
 
 
-def test_probe_thresholds_survive_a_junk_environment(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A malformed tunable must not decide whether a cluster looks alive."""
+def test_a_junk_probe_threshold_is_a_config_error_not_a_dead_cluster(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The resume probe reads its thresholds like the post-restart wait, so a typo can neither pass as the default
+    nor make a serving cluster look dead."""
+    from hyperloom.common.env import EnvValueError
     from hyperloom.inference_optimizer.multi_node._internal import serving_probe
 
     monkeypatch.setenv("HYPERLOOM_MN_COMPLETION_PROBE_TOKENS", "lots")
 
-    assert serving_probe._int_env("HYPERLOOM_MN_COMPLETION_PROBE_TOKENS", 8) == 8
+    with pytest.raises(EnvValueError, match="HYPERLOOM_MN_COMPLETION_PROBE_TOKENS"):
+        serving_probe.cluster_is_serving(_AGGREGATED_STATE, pd_mode="aggregated", timeout_s=5)
 
 
 def _exploding_httpx(failure: BaseException) -> types.SimpleNamespace:

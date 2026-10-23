@@ -131,7 +131,7 @@ def _prepare_multi_node_state(args: argparse.Namespace) -> None:
 
 def _prepare_adopted_cluster(args: argparse.Namespace, backend: str, *, head_ip: str) -> None:
     """Make an adopted cluster usable by this session."""
-    from ..multi_node.cli import cmd_bootstrap, install_geak_on_pods_best_effort
+    from ..multi_node.cli import cmd_bootstrap, install_geak_on_pods_best_effort, resolve_poll_timeout_s
 
     if backend == "rayjob":
         if not head_ip:
@@ -148,7 +148,7 @@ def _prepare_adopted_cluster(args: argparse.Namespace, backend: str, *, head_ip:
                 poll_interval=6,
                 # Adoption runs in-process, so it is not bound by the foreground/MCP 120s ceiling; a slow head pod
                 # should not abort the run.
-                poll_timeout=int(os.environ.get("HYPERLOOM_MN_POLL_TIMEOUT_S", "600") or 600),
+                poll_timeout=resolve_poll_timeout_s(600),
             )
             rc_boot = cmd_bootstrap(ns_boot)
             if rc_boot != 0:
