@@ -7,7 +7,7 @@ cognitive-complexity src/hyperloom/inference_optimizer/baseline_comparison/infer
 cognitive-complexity src/hyperloom/inference_optimizer/breakdown/recorder/kernel_event.py::_merge_acceptances 31
 cognitive-complexity src/hyperloom/inference_optimizer/breakdown/recorder/kernel_event.py::record_geak_attempts 31
 cognitive-complexity src/hyperloom/inference_optimizer/breakdown/reporters/_renderers/final.py::render 31
-cognitive-complexity src/hyperloom/inference_optimizer/cli/__init__.py::_run_optimize 36
+cognitive-complexity src/hyperloom/inference_optimizer/cli/__init__.py::_run_optimize 35
 cognitive-complexity src/hyperloom/inference_optimizer/framework_paths.py::_discover_installed_framework_roots 43
 cognitive-complexity src/hyperloom/inference_optimizer/grid_server_args.py::dedupe_extra_server_args 34
 cognitive-complexity src/hyperloom/inference_optimizer/multi_node/scripts/kill_multinode.py::_gpu_used_mb_for_pgids 32
@@ -285,7 +285,7 @@ function-lines src/hyperloom/inference_optimizer/cli/__init__.py::_probe_llm_cat
 function-lines src/hyperloom/inference_optimizer/cli/__init__.py::_reexport_session_environment 80
 function-lines src/hyperloom/inference_optimizer/cli/__init__.py::_resolve_agent_lineup 79
 function-lines src/hyperloom/inference_optimizer/cli/__init__.py::_resolve_run_topology 64
-function-lines src/hyperloom/inference_optimizer/cli/__init__.py::_run_optimize 226
+function-lines src/hyperloom/inference_optimizer/cli/__init__.py::_run_optimize 222
 function-lines src/hyperloom/inference_optimizer/cli/__init__.py::_seed_fresh_session 51
 function-lines src/hyperloom/inference_optimizer/cli/__init__.py::_validate_and_resolve_claude_model 58
 function-lines src/hyperloom/inference_optimizer/cli/bootstrap.py::_seed_shared_state 116
@@ -296,7 +296,7 @@ function-lines src/hyperloom/inference_optimizer/cli/kb.py::_bootstrap_recipe_kb
 function-lines src/hyperloom/inference_optimizer/cli/model_gate.py::_preflight_context_window 116
 function-lines src/hyperloom/inference_optimizer/cli/model_gate.py::_preflight_model_config_compat 71
 function-lines src/hyperloom/inference_optimizer/cli/multi_node.py::_prepare_multi_node_state 76
-function-lines src/hyperloom/inference_optimizer/cli/parser.py::_build_parser 929
+function-lines src/hyperloom/inference_optimizer/cli/parser.py::_build_parser 907
 function-lines src/hyperloom/inference_optimizer/cli/preflight.py::_emit_preflight_diagnostics 65
 function-lines src/hyperloom/inference_optimizer/cli/preflight.py::_ensure_inferencex 51
 function-lines src/hyperloom/inference_optimizer/cli/preflight.py::_ensure_lm_eval_dep 62
