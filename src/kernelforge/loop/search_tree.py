@@ -302,13 +302,26 @@ def _render_node(tree: SearchTree, node: TreeNode, best: TreeNode) -> list[str]:
     return [line, *_render_attempts(tree, node, indent)]
 
 
-def render_tree_view(tree: SearchTree) -> str:
-    """The tree as the start selector reads it: every node depth-first, its attempts, and each branch's stall."""
+def _render_sources(archive_dir: str, lessons_dir: str) -> list[str]:
+    return [
+        "## Where the detail lives",
+        f"- {archive_dir}/iter_NNN/: one attempt's full kernel, change.diff, meta.json (per-case measurements) and "
+        "validation.txt, for the iteration number NNN shown below; attempts that changed nothing have none.",
+        f"- {lessons_dir}/iter_NNN.md: what that attempt's Implementer session tried, including abandoned directions.",
+        "- Every node is a git commit and every branch a git branch: `git show <commit>`, "
+        "`git diff <parent> <commit>`, `git log --oneline <branch>`.",
+        "",
+    ]
+
+
+def render_tree_view(tree: SearchTree, *, archive_dir: str, lessons_dir: str) -> str:
+    """The tree as the start selector reads it: where detail lives, every node depth-first, its attempts, branches."""
     best = tree.global_best()
     children: dict[str, list[TreeNode]] = {}
     for item in tree.nodes[1:]:
         children.setdefault(item.parent, []).append(item)
     lines = [
+        *_render_sources(archive_dir, lessons_dir),
         "## Search tree",
         f"Root branch: {tree.root_branch}. Global best: {best.commit} on {best.branch}, "
         f"mean case speedup {best.mean_case_speedup:.6f}x.",

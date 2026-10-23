@@ -27,6 +27,7 @@ from kernelforge.loop.agent_relay import (
     select_start_profile,
 )
 from kernelforge.loop.search_actors import SearchActorBundle
+from kernelforge.loop.search_tree import SearchStrategy
 
 
 def _relay_config(primary: str = "claude") -> AgentRelayConfig:
@@ -473,7 +474,7 @@ def test_relay_summary_reports_whether_a_switch_is_possible():
     ids=["resumed_profile", "primary_down"],
 )
 def test_startup_report_says_why_the_session_is_not_on_the_primary(capsys, claude_up, line):
-    from kernelforge.cli.relay import _report_search_actors
+    from kernelforge.cli.relay import _report_search_actors, blockage_fallback
 
     pool = build_search_actor_pool(
         _relay_config("claude"),
@@ -482,13 +483,13 @@ def test_startup_report_says_why_the_session_is_not_on_the_primary(capsys, claud
         bundle_factory=lambda profile: SearchActorBundle(profile=profile, agent_fn=lambda: None),
     )
 
-    _report_search_actors(pool, relay_enabled=True)
+    _report_search_actors(pool, relay_enabled=True, blockage_fallback=blockage_fallback(SearchStrategy.LINEAR))
 
     assert line in capsys.readouterr().out
 
 
 def test_startup_report_explains_a_session_without_relay_and_how_to_enable_it(capsys):
-    from kernelforge.cli.relay import _report_search_actors
+    from kernelforge.cli.relay import _report_search_actors, blockage_fallback
 
     pool = build_search_actor_pool(
         _relay_config("claude"),
@@ -497,10 +498,18 @@ def test_startup_report_explains_a_session_without_relay_and_how_to_enable_it(ca
         bundle_factory=lambda profile: SearchActorBundle(profile=profile, agent_fn=lambda: None),
     )
 
-    _report_search_actors(pool, relay_enabled=True)
+    _report_search_actors(pool, relay_enabled=True, blockage_fallback=blockage_fallback(SearchStrategy.LINEAR))
 
     out = capsys.readouterr().out
     assert "Agent profile: codex / gpt-6-astra: unavailable (codex down)" in out
     assert "Model relay: off for this session, only claude passed its startup check" in out
     assert "OPENAI_* for codex" in out
+    assert out.rstrip().endswith("until then a search blockage runs the Supervisor")
     assert "WARNING" not in out
+
+
+def test_a_tree_campaign_names_its_start_selector_not_the_supervisor_for_a_blockage():
+    from kernelforge.cli.relay import blockage_fallback
+
+    assert blockage_fallback(SearchStrategy.TREE) == "the start selector is the only change of direction"
+    assert "Supervisor" in blockage_fallback(SearchStrategy.LINEAR)

@@ -15,6 +15,29 @@ from pathlib import Path
 # No local plumbing command on a large worktree comes close to this; anything that does is stuck rather than slow.
 DEFAULT_TIMEOUT_SEC = 300.0
 
+# The subcommands that only read a repository: what an agent session may run when the loop owns every git mutation.
+READ_ONLY_GIT_SUBCOMMANDS = frozenset(
+    {
+        "blame",
+        "cat-file",
+        "describe",
+        "diff",
+        "for-each-ref",
+        "grep",
+        "help",
+        "log",
+        "ls-files",
+        "ls-tree",
+        "merge-base",
+        "name-rev",
+        "rev-parse",
+        "shortlog",
+        "show",
+        "status",
+        "version",
+    }
+)
+
 
 class GitError(subprocess.CalledProcessError):
     """A git command that exited non-zero, quoting git's own words."""

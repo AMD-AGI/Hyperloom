@@ -28,6 +28,7 @@ from kernelforge.loop.search_tree import (
     render_tree_view,
 )
 from kernelforge.orchestrator.start_selector import StartSelection
+from kernelforge.tools.durable_io import atomic_write_text
 
 _TREE_POLICY = SearchPolicyDecision(
     mode=SEARCH_MODE_EXPLOIT,
@@ -170,12 +171,14 @@ class TreeSearchRuntimeMixin:
         if tree is None:
             return
         started_at = time.time()
-        selection = await self._select_start(tree, selector)
+        view = render_tree_view(tree, archive_dir=str(self.archive.root), lessons_dir=str(self.lessons.root))
+        selection = await self._select_start(view, tree, selector)
         self._round_planning_sec += max(0.0, time.time() - started_at)
         start = selection.commit or self._fallback_start(tree)
         branch = tree.branch_headed_by(start) or tree.allocate_branch(start, iteration)
         tree.open_seat(TreeSeat(iteration, start, branch, selection.reason, selection.failure))
         self._save_search_tree()
+        self._record_selection(tree.seat, view, selection.answer)
         self._checkout_tree_branch(tree.branch(branch))
         self._seat_incumbent(tree.node(start))
         self.state_store.append_event(
@@ -192,18 +195,41 @@ class TreeSearchRuntimeMixin:
         if selection.failure:
             print(f"  [tree] start selector failed ({selection.failure}); continuing the last branch")
 
-    async def _select_start(self, tree: SearchTree, selector) -> StartSelection:
+    async def _select_start(self, view: str, tree: SearchTree, selector) -> StartSelection:
         if selector is None:
             return StartSelection(failure="no start selector is configured")
         try:
             return await selector.select(
                 workspace=self.ic.workspace_dir,
-                tree_view=render_tree_view(tree),
+                tree_view=view,
                 resolve=tree.resolve,
                 usage=self._usage,
             )
         finally:
             self._checkpoint_llm_usage()
+
+    def _record_selection(self, seat: TreeSeat, view: str, answer: str) -> None:
+        """Keep exactly what the selector was shown and what it answered, beside the seat that answer produced."""
+        record = "\n".join(
+            [
+                f"# Start selection, iteration {seat.iteration}",
+                "",
+                f"- Start: {seat.start_commit}",
+                f"- Branch: {seat.branch}",
+                f"- Fallback: {seat.selector_fallback or 'none'}",
+                "",
+                "## Tree view given to the selector",
+                "",
+                view,
+                "",
+                "## Selector answer",
+                "",
+                answer or "(no answer)",
+                "",
+            ]
+        )
+        directory = self._search_tree_store.path.parent / "tree_selection"
+        atomic_write_text(directory / f"iter_{seat.iteration:03d}.md", record)
 
     @staticmethod
     def _fallback_start(tree: SearchTree) -> str:

@@ -36,6 +36,13 @@ from kernelforge.loop.search_tree import SearchStrategy
 from kernelforge.orchestrator.agent import ImplementerSetup
 
 
+def blockage_fallback(strategy: SearchStrategy) -> str:
+    """What answers a search blockage when no other Agent profile can take the search over."""
+    if strategy is SearchStrategy.TREE:
+        return "the start selector is the only change of direction"
+    return "a search blockage runs the Supervisor"
+
+
 @dataclass
 class SearchActorBuildContext:
     """Shared campaign inputs used to construct one strict search actor per Agent profile."""
@@ -53,6 +60,10 @@ class SearchActorBuildContext:
     relay: AgentRelayConfig | None = None
     # A tree campaign changes direction through its start selector, so its actors carry no Supervisor.
     search_strategy: SearchStrategy = SearchStrategy.LINEAR
+
+    @property
+    def blockage_fallback(self) -> str:
+        return blockage_fallback(self.search_strategy)
 
     def build(self, profile: AgentProfile) -> SearchActorBundle:
         """Build and probe all profile-bound planning and implementation services."""
@@ -400,7 +411,7 @@ def start_search_actors(
             else None
         ),
     )
-    _report_search_actors(pool, relay_enabled=relay_enabled)
+    _report_search_actors(pool, relay_enabled=relay_enabled, blockage_fallback=builder.blockage_fallback)
     return SearchActorStartup(pool, relay_enabled)
 
 
@@ -410,7 +421,7 @@ def _single_profile_relay(config: Config) -> AgentRelayConfig:
     return AgentRelayConfig(primary_profile_id=profile.profile_id, profiles=(profile,))
 
 
-def _report_search_actors(pool: SearchActorPool, *, relay_enabled: bool) -> None:
+def _report_search_actors(pool: SearchActorPool, *, relay_enabled: bool, blockage_fallback: str) -> None:
     for profile_id, status in pool.availability.profiles.items():
         state = "available" if status.available else f"unavailable ({status.reason})"
         print(f"  Agent profile: {profile_id} / {status.model}: {state}")
@@ -424,7 +435,7 @@ def _report_search_actors(pool: SearchActorPool, *, relay_enabled: bool) -> None
         print(
             f"  Model relay: off for this session, only {start} passed its startup check (reasons above). "
             "Give another provider a line of its own (ANTHROPIC_* for claude, OPENAI_* for codex) or use a gateway "
-            "serving both protocols to turn it on; until then a search blockage runs the Supervisor"
+            f"serving both protocols to turn it on; until then {blockage_fallback}"
         )
 
 
