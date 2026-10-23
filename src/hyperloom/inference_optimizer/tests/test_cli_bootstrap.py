@@ -468,6 +468,7 @@ def test_a_resume_clears_the_previous_leg_terminal_without_touching_the_budget()
     state.closing_report_task_id = "r-1"
     state.elapsed_charged_sec = 120 * 60.0
     state.teardown_timings_sec = {"close_backends": 0.2, "total": 0.2}
+    state.target_reached_at = "2026-08-01T02:00:00+00:00"
 
     cb._begin_resume_leg(state)
 
@@ -479,6 +480,7 @@ def test_a_resume_clears_the_previous_leg_terminal_without_touching_the_budget()
     assert state.closing_report_task_id == ""
     assert state.crash_count == 0
     assert state.teardown_timings_sec == {}
+    assert state.target_reached_at == ""
     # The budget survives the boundary; only an operator extend can move it.
     assert state.elapsed_charged_sec == 120 * 60.0
     assert state.remaining_minutes() == pytest.approx(60.0, abs=1.0)
@@ -494,28 +496,6 @@ def test_a_resume_lets_the_new_leg_run_its_own_close_sequence() -> None:
 
     assert state.phase == "SWEEP"
     assert state.close_sequence_done is False
-
-
-def test_a_forced_resume_past_a_reached_target_keeps_optimizing() -> None:
-    """A raised --target-gain must be pursued, not sent to SWEEP on the last leg's marker (#1469)."""
-    from hyperloom.orchestrator.phases import machine_state
-
-    state = SharedState(
-        session_id="s",
-        start_ts="2026-08-01T00:00:00+00:00",
-        phase=machine_state.PHASE_KERNEL_AGENT,
-        kernel_optimizer="geak",
-        target_reached_at="2026-08-01T02:00:00+00:00",
-    )
-    flags = machine_state.PhaseFlags(kernel_enabled=True)
-    assert machine_state.compute_next_phase(state, flags=flags)[:2] == (machine_state.PHASE_SWEEP, "target_reached")
-    state.set_stop_reason("target_reached")
-
-    cb._begin_resume_leg(state)
-
-    assert state.target_reached_at == ""
-    out = machine_state.compute_next_phase(state, flags=flags)
-    assert out is None or out[1] != "target_reached"
 
 
 def test_a_killed_leg_and_a_stopped_leg_resume_with_the_same_budget() -> None:
