@@ -235,7 +235,9 @@ _PUT_KERNEL_ARTIFACT: dict[str, Any] = {
             "minLength": 1,
             "description": (
                 "The operator or shape the table serves, one path segment (letters, digits and ._=,+-); the merge "
-                "slot of the artifact: two branches that put a table of one target compete for it."
+                "slot of the artifact: two branches that put a table of one target compete for it. Optional when env "
+                "is bound already in this session: leave it out to put under the bound target, which the returned "
+                "artifact names. Required for an env no table has been put for yet (refused as target_required)."
             ),
         },
         "env": {
@@ -263,7 +265,7 @@ _PUT_KERNEL_ARTIFACT: dict[str, Any] = {
             ),
         },
     },
-    "required": ["kind", "target", "env", "content"],
+    "required": ["kind", "env", "content"],
     "additionalProperties": False,
 }
 _POLL_INBOX: dict[str, Any] = {
@@ -386,7 +388,7 @@ def _put_kernel_artifact(
         except UnicodeEncodeError as exc:
             raise InvalidParamsError("content is not UTF-8 text") from exc
         kind, rows_only = KernelKind(arguments["kind"]), arguments.get("rows_only", False)
-        call = toolbox.put_kernel_artifact(kind, arguments["target"], arguments["env"], data, rows_only)
+        call = toolbox.put_kernel_artifact(kind, arguments.get("target"), arguments["env"], data, rows_only)
         try:
             artifact = await _on(home, call)
         except RequestRejected as exc:
@@ -404,9 +406,10 @@ def _register_put_kernel_artifact(server: McpServer, toolbox: Toolbox, home: asy
             "kernel artifact to put in the add_kernels of the delta of submit_test. Put every shape of an operator "
             "in one table: a variable loads one file, so the first table put for an env, by any branch, binds the env "
             "to its target for the session. Any branch may then put its own table (new content, its own reference) "
-            "under that target; only a table of another target name for the same env is refused, as "
-            "kernel_variable_taken, and its message names the bound target. The same table put twice, by any branch, "
-            "is the same artifact. With rows_only the table is just the rows you tuned: the test reads the image's "
+            "under that target, and may leave target out to take it: the returned artifact names the bound target. "
+            "Only a table of another target name for the same env is refused, as kernel_variable_taken, and its "
+            "message names the bound target; an env no table was put for yet needs a target (target_required). The "
+            "same table put twice, by any branch, is the same artifact. With rows_only the table is just the rows you tuned: the test reads the image's "
             "default table for the env and then your rows, a shape in both from your rows, so you need not upload "
             "the default's rows."
         ),

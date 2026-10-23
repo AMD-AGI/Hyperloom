@@ -54,7 +54,7 @@ from hyperloom_multibranch.toolbox.analysis import (
 from hyperloom_multibranch.toolbox.acceptance import Acceptance, AcceptanceSetup, check_kind
 from hyperloom_multibranch.toolbox.attachments import store_attachment
 from hyperloom_multibranch.toolbox.attempts import DEFAULT_MAX_INFRA_RETRIES, AttemptRunner, Executor, TestJob
-from hyperloom_multibranch.toolbox.kernel_artifacts import KernelVariables, mint_kernel_artifact
+from hyperloom_multibranch.toolbox.kernel_artifacts import KernelVariables
 from hyperloom_multibranch.toolbox.quarantine import Quarantine
 from hyperloom_multibranch.toolbox.queue import QueuedTest, QueuePolicy, State, WorkQueue, sandbox_priority
 from hyperloom_multibranch.toolbox.submission_log import LogEntry, SubmissionLog
@@ -244,14 +244,13 @@ class RealToolbox:
         return store_attachment(self.blobs, attachment_id, kind, data)
 
     async def put_kernel_artifact(
-        self, kind: KernelKind, target: str, env: str, data: bytes, rows_only: bool = False
+        self, kind: KernelKind, target: str | None, env: str, data: bytes, rows_only: bool = False
     ) -> KernelArtifact:
         """Keep a tuned table in the session's blob store, the one the experiment repository reads; see the interface."""
 
         if self.blobs is None:
             raise RequestRejected("this toolbox has no blob store for kernel artifacts", "attachments_unsupported")
-        artifact = mint_kernel_artifact(kind, target, env, data, rows_only)
-        self._kernel_variables.bind(artifact)
+        artifact = self._kernel_variables.put(kind, target, env, data, rows_only)
         self.blobs.put(data)
         return artifact
 
