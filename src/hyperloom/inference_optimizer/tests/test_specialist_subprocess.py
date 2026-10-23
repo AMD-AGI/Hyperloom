@@ -1764,7 +1764,11 @@ def test_a_worktree_made_under_umask_007_is_readable_to_git_once_prepared(tmp_pa
             assert done.returncode == 0, (args, done.stderr)
         # Read-only: the child cannot write the admin dir it was shown.
         admin = Path((worktree / ".git").read_text(encoding="utf-8").split(":", 1)[1].strip())
-        assert admin.stat().st_mode & 0o020 == 0 or admin.stat().st_gid != run_as.gid
+        for victim in (admin / "planted", admin / "HEAD"):
+            blocked = subprocess.run(
+                ["/bin/sh", "-c", f"echo x >> {victim}"], capture_output=True, check=False, **kwargs
+            )
+            assert blocked.returncode != 0, victim
     finally:
         shutil.rmtree(base, ignore_errors=True)
 

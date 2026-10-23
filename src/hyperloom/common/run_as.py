@@ -151,6 +151,8 @@ class RunAs:
             if sticky and path == root:
                 add |= stat.S_ISVTX
             mode = stat.S_IMODE(st.st_mode) | add
+            if not write:
+                mode &= ~stat.S_IWGRP  # read-only means the group cannot write what an earlier umask let it
             if mode != stat.S_IMODE(st.st_mode):
                 path.chmod(mode)
 
