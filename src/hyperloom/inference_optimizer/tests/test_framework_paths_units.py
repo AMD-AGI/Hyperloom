@@ -13,10 +13,9 @@ import pytest
 
 from hyperloom.inference_optimizer import framework_paths as fp
 from hyperloom.inference_optimizer import framework_registry as fr
-from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
+from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE, FULL_ENABLED_ACTIONS
 from hyperloom.inference_optimizer.framework_paths import probe_framework_source_roots_for_env
 from hyperloom.orchestrator.prompts.prompt_builder import (
-    FULL_ENABLED_ACTIONS,
     build_orchestration_prompt,
     PromptAssets,
     SessionContext,

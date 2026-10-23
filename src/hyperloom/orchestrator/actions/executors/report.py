@@ -191,7 +191,7 @@ _STOP_REASON_EXPLANATIONS: dict[str, str] = {
         "window; the best validated result was preserved before exit."
     ),
     "coordinator_exception": "The coordinator loop raised an unhandled exception; the last validated result was preserved.",
-    "custom": "A caller-supplied stop condition (stop_when) fired.",
+    "custom": "A caller-supplied stop condition fired.",
     "unknown": "No specific stop reason was recorded (e.g. a terminal session was resumed); treat as unclassified.",
     "baseline_failed": "Baseline never produced a valid measurement; see the failure summary / server log.",
     "server_argv_invalid": (

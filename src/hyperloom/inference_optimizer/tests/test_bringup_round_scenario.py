@@ -12,14 +12,13 @@ from pathlib import Path
 import pytest
 
 from hyperloom.common.bringup import LadderStage
-from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
 from hyperloom.inference_optimizer.session.session_paths import reports_dir
 from hyperloom.orchestrator.actions.executors import baseline as bl
 from hyperloom.orchestrator.bringup import load_boot_observation
 from hyperloom.orchestrator.bringup import reconcile
 from hyperloom.orchestrator.bringup.reconcile import ReconcileLinks, Reconciler, ReconcileStores
 from hyperloom.orchestrator.bus.resource_lock import SqliteLeaseBackend
-from hyperloom.orchestrator.bus.storage import SqliteConnection
+from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 from hyperloom.orchestrator.bus.storage.schema import ensure_schema
 from hyperloom.orchestrator.enablement.build import EnablementBuild
 from hyperloom.orchestrator.enablement.lane import EnablementLane
@@ -176,7 +175,6 @@ def _lane(session: Path, tasks: TaskRegistry, rounds: RoundStore, launch_log: st
         run_deadline=None,
         warm_specialist_params=_noop,
         bus=types.SimpleNamespace(record_observation=_noop),
-        action_registry=ACTION_CATALOGUE,
         state=types.SimpleNamespace(pending_proposals={}),
         _read_enablement_source_context=lambda _sig: "",
         _derive_checkpoint_weight_facts=lambda _log: "",

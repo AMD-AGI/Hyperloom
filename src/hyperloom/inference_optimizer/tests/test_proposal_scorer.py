@@ -328,7 +328,7 @@ def _coord(tmp_path: Path, scorer):
     c = Coordinator.__new__(Coordinator)
     c.session_dir = tmp_path
     c.shared_state = _StubSharedState()
-    c.specialist_dispatch._proposal_scorer = scorer
+    c.proposal_scorer = scorer
     c.knowledge_plane = None
     c.bus = SimpleNamespace(record_observation=AsyncMock())
     return c

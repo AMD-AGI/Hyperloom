@@ -1079,7 +1079,7 @@ def _fail_install_step(
 def _mark_pending_install_event_failed(
     args: argparse.Namespace | None,
     exc: BaseException,
-) -> dict[str, Any]:
+) -> None:
     """Mark an unwrapped preflight exception on the pending install event."""
     from ..session.sbd_v6 import pending_install_event
 
@@ -1093,7 +1093,6 @@ def _mark_pending_install_event_failed(
             category="check",
             exc=exc,
         )
-    return event
 
 
 def _run_install_step(

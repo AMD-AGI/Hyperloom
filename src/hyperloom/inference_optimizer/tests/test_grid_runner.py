@@ -1259,11 +1259,11 @@ async def test_exported_reference_controls_reimport_requires_static_settings(tmp
     monkeypatch.setenv("FRAMEWORK", "sglang")
     if with_overlay:
         with pytest.raises(SystemExit) as exc:
-            _resolve_reference_recipe(SimpleNamespace(reference_script=str(session / "current_setting.sh")))
+            _resolve_reference_recipe(SimpleNamespace(reference_script=str(session / "current_setting.sh")), "sglang")
         assert exc.value.code == 2
         return
     args, envs, model, controls = _resolve_reference_recipe(
-        SimpleNamespace(reference_script=str(session / "current_setting.sh"))
+        SimpleNamespace(reference_script=str(session / "current_setting.sh")), "sglang"
     )
     assert "PYTHONPATH" not in envs
     assert "overlay_pythonpath" not in controls

@@ -511,7 +511,11 @@ class FrameworkPhase(_AuthoredOutcomeMixin, _CandidateDiscoveryMixin, ProposalBe
             state.save(self.session_dir)
             return
         source_dry = _phase_state.per_lever_dryness(state)[1]["source_arm_plateaued"]
-        if self.shared_state.framework_local_explore_enabled and not source_dry:
+        if (
+            self.shared_state.framework_local_explore_enabled
+            and not source_dry
+            and int(state.research_lane_capacity or 0) > 0
+        ):
             gap, keywords = self._compose_framework_local_explore_gap()
             title = (
                 f"local source exploration ({gap})"

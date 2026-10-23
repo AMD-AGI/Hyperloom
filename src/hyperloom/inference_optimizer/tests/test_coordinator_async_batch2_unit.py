@@ -2597,7 +2597,7 @@ async def test_record_specialist_result_with_scorer(coord: Coordinator) -> None:
             calls.append({"proposals": proposals, "task_id": task_id})
             return {"models": ["m1"], "ranking": [0]}
 
-    coord.specialist_dispatch._proposal_scorer = _Scorer()
+    coord.proposal_scorer = _Scorer()
     task = _ptask("rec-spec-3", "specialist")
     await coord.specialist_dispatch.record_specialist_result(
         task=task,

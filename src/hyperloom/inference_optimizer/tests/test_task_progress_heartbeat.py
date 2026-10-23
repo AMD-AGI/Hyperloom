@@ -129,10 +129,11 @@ async def test_a_heartbeat_leaves_the_running_mark_where_it_was(tmp_path, monkey
     seen: dict[str, Any] = {}
 
     async def _slow(ctx) -> dict:
-        await sub.tasks.db.execute(
-            "UPDATE tasks SET updated_at=? WHERE task_id=?",
-            (started_iso, ctx.task.task_id),
-        )
+        async with sub.tasks.db.transaction() as cur:
+            cur.execute(
+                "UPDATE tasks SET updated_at=? WHERE task_id=?",
+                (started_iso, ctx.task.task_id),
+            )
         await report_progress(unit="baseline_round", label="warmup")
         beating = await sub.tasks.get(ctx.task.task_id)
         seen["updated_at"] = beating.updated_at
@@ -163,10 +164,11 @@ async def test_an_old_running_task_keeps_its_budget_without_an_age_reclaimer(tmp
         ),
     )
     await sub.tasks.transition(task.task_id, "running")
-    await sub.tasks.db.execute(
-        "UPDATE tasks SET updated_at=? WHERE task_id=?",
-        (_iso_ago(3106), task.task_id),
-    )
+    async with sub.tasks.db.transaction() as cur:
+        cur.execute(
+            "UPDATE tasks SET updated_at=? WHERE task_id=?",
+            (_iso_ago(3106), task.task_id),
+        )
     for unit in range(3):
         await sub.tasks.record_progress(task.task_id, {"unit": "roofline_step", "index": unit})
 
@@ -193,7 +195,8 @@ async def test_dead_task_requires_local_owner_evidence(tmp_path, monkeypatch, ow
     await sub.locks.acquire_many(
         ["research_lane"], holder_id=task.task_id, task_id=task.task_id, action="explore", ttl_sec=-1
     )
-    await sub.tasks.db.execute("UPDATE leases SET owner_scope=?, pid=12345", (owner_scope,))
+    async with sub.tasks.db.transaction() as cur:
+        cur.execute("UPDATE leases SET owner_scope=?, pid=12345", (owner_scope,))
     reclaimed = await sub.tasks.reclaim_dead_running(reason="test_dead")
     if owner_scope == "test-node" and dead:
         assert reclaimed == [task.task_id]
@@ -618,10 +621,11 @@ async def test_a_cancel_arriving_while_the_rollback_runs_is_not_lost(tmp_path, m
         TaskSpec(kind="explore", params={}, idempotency_key="lost-cancel")
     )
     await sub.tasks.transition(task.task_id, "running")
-    await sub.tasks.db.execute(
-        "UPDATE tasks SET history=? WHERE task_id=?",
-        ("{ this will not parse", task.task_id),
-    )
+    async with sub.tasks.db.transaction() as cur:
+        cur.execute(
+            "UPDATE tasks SET history=? WHERE task_id=?",
+            ("{ this will not parse", task.task_id),
+        )
 
     db = sub.tasks.db
     rolling_back = threading.Event()
