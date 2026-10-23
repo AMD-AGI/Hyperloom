@@ -224,3 +224,20 @@ def test_bypass_lifecycle_ineligible_when_multi_node(tmp_path, monkeypatch):
     info = sl.resolve_lifecycle_params(cfg_path)
     assert info["eligible"] is False
     assert "multi-node" in info["reason"]
+
+
+def test_custom_selects_bypass_only_when_the_backend_is_unset(monkeypatch):
+    monkeypatch.delenv(bb.BENCHMARK_BACKEND_ENV, raising=False)
+    bb.select_bypass_for_custom("sglang")
+    assert bb.resolve_backend_name() == "magpie"
+    bb.select_bypass_for_custom(" Custom ")
+    assert bb.resolve_backend_name() == "bypass"
+    monkeypatch.setenv(bb.BENCHMARK_BACKEND_ENV, "magpie")
+    bb.select_bypass_for_custom("custom")
+    assert bb.resolve_backend_name() == "magpie", "an explicit choice is the CLI's to refuse, not to overwrite"
+
+
+def test_preflight_selects_bypass_for_custom_before_it_decides_on_magpie():
+    """An unset backend under --framework custom must not make preflight install Magpie."""
+    src = inspect.getsource(preflight_mod._preflight)
+    assert src.index("select_bypass_for_custom(") < src.index("_resolve_active_backend_name()")

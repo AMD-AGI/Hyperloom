@@ -2538,6 +2538,10 @@ def _preflight(
     )
     if framework_arg := getattr(args, "framework", None):
         os.environ["FRAMEWORK"] = framework_arg.strip().lower()
+    from hyperloom.orchestrator.actions.executors.benchmark_backend import select_bypass_for_custom
+
+    # Before the install steps below pick their interpreters and decide whether Magpie is needed.
+    select_bypass_for_custom(os.environ.get("FRAMEWORK", ""))
     _derive_runtime_paths()
     _restore_provider_only_mode(provider_mode, provider_snapshot)
     _run_install_step(
