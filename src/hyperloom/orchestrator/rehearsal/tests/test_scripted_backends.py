@@ -68,7 +68,8 @@ def test_a_clean_boot_serves_and_leaves_a_log_that_classifies_as_booted(tmp_path
 
     assert done.returncode == 0
     observed = observe_bringup(server_log=(tmp_path / "server.log").read_text(encoding="utf-8"))
-    assert observed.observation.booted
+    assert observed.observation.stage_failed is None
+    assert observed.observation.stage_reached >= LadderStage.HTTP_READY
     assert (tmp_path / "bench" / "benchmark_report.json").exists()
 
 
