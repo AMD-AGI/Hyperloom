@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+import shutil
 import subprocess
 import sys
 
@@ -12,6 +14,7 @@ import pytest
 
 from hyperloom.common.sandbox import (
     SANDBOX_ACTIVE_ENV,
+    SANDBOX_BIN,
     SANDBOX_HOME,
     SANDBOX_MODE_ENV,
     SANDBOX_READONLY_ENV,
@@ -378,3 +381,59 @@ def test_package_root_returns_none_for_a_wheel_install(monkeypatch, tmp_path):
     from hyperloom.common.sandbox import package_root
 
     assert package_root() is None
+
+
+# --- the Claude CLI ---------------------------------------------------------
+
+
+def _fake_cli(tmp_path):
+    cli = tmp_path / "home" / ".local" / "share" / "claude" / "2.0.0"
+    cli.parent.mkdir(parents=True)
+    cli.write_text("#!/bin/sh\necho fake-claude\n")
+    cli.chmod(0o755)
+    return cli
+
+
+def test_the_claude_cli_is_bound_and_first_on_path(tmp_path):
+    cli = _fake_cli(tmp_path)
+    args = _args(tmp_path, claude_cli=cli, search_path="/usr/bin:/bin")
+    joined = " ".join(args)
+    assert f"--ro-bind {cli.parent} {cli.parent}" in joined
+    assert f"--symlink {cli} {SANDBOX_BIN}/claude" in joined
+    assert f"--setenv PATH {SANDBOX_BIN}:/usr/bin:/bin" in joined
+
+
+def test_no_claude_cli_leaves_path_alone(tmp_path):
+    assert "PATH" not in _args(tmp_path)
+
+
+def test_reexec_exposes_the_resolved_claude_cli(monkeypatch, tmp_path):
+    cli = _fake_cli(tmp_path)
+    monkeypatch.setenv(SANDBOX_MODE_ENV, "bwrap")
+    monkeypatch.setenv("HYPERLOOM_CLAUDE_CLI_PATH", str(cli))
+    monkeypatch.setattr("hyperloom.common.sandbox.probe_sandbox_capability", lambda *a, **k: True)
+    monkeypatch.setattr("hyperloom.common.sandbox.shutil.which", lambda _: "/usr/bin/bwrap")
+    captured = {}
+    monkeypatch.setattr("hyperloom.common.sandbox.os.execv", lambda path, argv: captured.update(argv=argv))
+
+    reexec_if_required(["optimize"])
+
+    assert f"{cli} {SANDBOX_BIN}/claude" in " ".join(captured["argv"])
+
+
+@pytest.mark.skipif(
+    not shutil.which("bwrap") or not probe_sandbox_capability(shutil.which("bwrap") or "bwrap"),
+    reason="needs a working bwrap",
+)
+def test_claude_resolves_by_name_inside_a_real_sandbox(tmp_path):
+    """The CLI usually lives under $HOME, which the sandbox hides; it must still run as `claude`."""
+    cli = _fake_cli(tmp_path)
+    args = build_bwrap_args(
+        bwrap=shutil.which("bwrap"),
+        venv=Path(sys.prefix),
+        support_dir=interpreter_support_dir(),
+        claude_cli=cli,
+        search_path="/usr/bin:/bin",
+    )
+    result = subprocess.run([*args, "sh", "-c", "claude"], capture_output=True, text=True, check=True)
+    assert result.stdout.strip() == "fake-claude"

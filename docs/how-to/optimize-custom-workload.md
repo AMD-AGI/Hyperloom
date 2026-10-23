@@ -73,11 +73,13 @@ devices are bound in deliberately.
 
 ### Troubleshooting
 
-- **A CLI tool the sandbox launches (Claude Code, codex) is "not found."**
+- **A CLI tool the sandbox launches (codex) is "not found."**
   `HOME` is forced to an empty tmpfs, so a tool under the real `$HOME` is
   invisible unless its resolved (non-symlink) directory is also added to
   `HYPERLOOM_SANDBOX_WRITABLE`/`HYPERLOOM_SANDBOX_READONLY`, or relocated
-  outside `$HOME`.
+  outside `$HOME`. Claude Code is handled automatically: the CLI that
+  `HYPERLOOM_CLAUDE_CLI_PATH`, `GEAK_CLAUDE_BIN` or `$PATH` names outside the
+  sandbox is bound read-only and runs as `claude` inside it.
 - **`ray start`/GCS fails to bind under CI or another sandboxed/containerized
   launcher:** check that the real network interface is visible
   (`ip -4 addr show`) from wherever `hyperloom optimize` runs. bwrap shares the

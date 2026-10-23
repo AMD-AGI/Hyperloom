@@ -14,10 +14,9 @@ from typing import Any
 
 import pytest
 
-from hyperloom.common import llm_config
+from hyperloom.common import claude_cli, llm_config
 from hyperloom.common.deadline import Deadline
 
-import hyperloom.orchestrator.roles.claude as claude_role
 import hyperloom.orchestrator.specialists.subprocess_ as sp
 from hyperloom.inference_optimizer.trace import parse_usage as pu
 
@@ -493,13 +492,13 @@ def test_resolve_claude_executable_prefers_the_pin_then_the_record_then_path(
     monkeypatch.setenv("PATH", str(on_path.parent))
     monkeypatch.setenv("HYPERLOOM_CLAUDE_CLI_PATH", str(pinned))
     monkeypatch.setenv("GEAK_CLAUDE_BIN", str(recorded))
-    assert claude_role.resolve_claude_executable() == str(pinned)
+    assert claude_cli.resolve_claude_executable() == str(pinned)
 
     monkeypatch.delenv("HYPERLOOM_CLAUDE_CLI_PATH")
-    assert claude_role.resolve_claude_executable() == str(recorded)
+    assert claude_cli.resolve_claude_executable() == str(recorded)
 
     monkeypatch.delenv("GEAK_CLAUDE_BIN")
-    assert claude_role.resolve_claude_executable() == str(on_path)
+    assert claude_cli.resolve_claude_executable() == str(on_path)
 
 
 def test_resolve_claude_executable_reports_absence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -507,13 +506,13 @@ def test_resolve_claude_executable_reports_absence(tmp_path: Path, monkeypatch: 
     monkeypatch.setenv("PATH", "/nonexistent")
     monkeypatch.delenv("HYPERLOOM_CLAUDE_CLI_PATH", raising=False)
     monkeypatch.delenv("GEAK_CLAUDE_BIN", raising=False)
-    assert claude_role.resolve_claude_executable() == ""
+    assert claude_cli.resolve_claude_executable() == ""
 
     not_executable = tmp_path / "claude"
     not_executable.write_text("", encoding="utf-8")
     monkeypatch.setenv("HYPERLOOM_CLAUDE_CLI_PATH", str(not_executable))
     monkeypatch.setenv("GEAK_CLAUDE_BIN", str(not_executable))
-    assert claude_role.resolve_claude_executable() == ""
+    assert claude_cli.resolve_claude_executable() == ""
 
 
 def test_resolve_codex_executable_falls_back_to_the_sdk_runtime(

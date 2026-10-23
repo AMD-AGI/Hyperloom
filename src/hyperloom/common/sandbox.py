@@ -29,6 +29,8 @@ import subprocess
 import sys
 import tempfile
 
+from .claude_cli import resolve_claude_executable
+
 #: Selects the sandbox. ``off`` (default) keeps today's behaviour exactly.
 SANDBOX_MODE_ENV = "HYPERLOOM_SANDBOX_MODE"
 #: Set inside the sandbox. The re-exec guard, and what :func:`is_sandboxed` reads.
@@ -48,6 +50,10 @@ DEFAULT_SANDBOX_MODE = MODE_OFF
 #: would shadow the uv-managed interpreter, which lives at
 #: ``~/.local/share/uv/python/``, and the venv would stop resolving.
 SANDBOX_HOME = "/hyperloom-home"
+
+#: Prepended to ``$PATH`` inside the sandbox; holds a ``claude`` link to the CLI
+#: resolved outside, which usually lives under the now-hidden ``$HOME``.
+SANDBOX_BIN = "/hyperloom-bin"
 
 #: Read-only system trees. ``/sys`` is not optional: ROCm reads GPU topology
 #: from ``/sys/class/kfd``, and without it ``torch.cuda.device_count()`` returns
@@ -188,6 +194,8 @@ def build_bwrap_args(
     readonly_roots: Sequence[Path] = (),
     support_dir: Path | None = None,
     package_dir: Path | None = None,
+    claude_cli: Path | None = None,
+    search_path: str = "",
 ) -> list[str]:
     """Assemble the bubblewrap invocation that the re-exec runs under.
 
@@ -204,6 +212,10 @@ def build_bwrap_args(
             :func:`interpreter_support_dir`.
         package_dir: Source tree this Hyperloom was imported from, from
             :func:`package_root`, when it sits outside the venv.
+        claude_cli: The Claude CLI resolved outside the sandbox. Its directory
+            is bound read-only and it is linked as ``claude`` on a ``$PATH``
+            entry of its own, so every lookup by name finds it.
+        search_path: The caller's ``$PATH``, kept after that entry.
 
     Returns:
         Argument list up to and including ``--``; the caller appends the command.
@@ -224,6 +236,10 @@ def build_bwrap_args(
         args += [_RO_BIND_TRY, str(root), str(root)]
     for root in writable_roots:
         args += [_BIND_TRY, str(root), str(root)]
+    if claude_cli is not None:
+        args += [_RO_BIND, str(claude_cli.parent), str(claude_cli.parent)]
+        args += ["--dir", SANDBOX_BIN, "--symlink", str(claude_cli), f"{SANDBOX_BIN}/claude"]
+        args += [_SETENV, "PATH", os.pathsep.join(filter(None, (SANDBOX_BIN, search_path)))]
     # A private home, and TMPDIR pointed inside it. An inherited TMPDIR naming an
     # unbound host path is not a missing-directory error: ROCm JIT-compiles its
     # blit kernels at device init, the compiler cannot write its temporaries, and
@@ -352,6 +368,7 @@ def reexec_if_required(argv: Sequence[str] | None = None) -> None:
         )
     venv = Path(sys.prefix)
     command = [sys.executable, "-m", "hyperloom", *(list(sys.argv[1:]) if argv is None else list(argv))]
+    claude_cli = resolve_claude_executable()
     args = build_bwrap_args(
         bwrap=bwrap,
         venv=venv,
@@ -359,5 +376,7 @@ def reexec_if_required(argv: Sequence[str] | None = None) -> None:
         readonly_roots=readonly_roots_from_env(),
         support_dir=interpreter_support_dir(),
         package_dir=package_root(),
+        claude_cli=Path(claude_cli).resolve() if claude_cli else None,
+        search_path=os.environ.get("PATH", ""),
     )
     os.execv(bwrap, [*args, *command])
