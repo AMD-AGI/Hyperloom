@@ -262,11 +262,11 @@ class AttemptVerdictMixin:
             self._diff_summary(commit_hash) if commit_hash else self._diff_summary_from_diff(attempt.attempt_diff)
         )
         await self._record_lesson(
-            iteration=iteration,
             result=result,
             decision=decision_label,
             session_sink=session_sink,
             diff_summary=iteration_diff_summary,
+            lane_record=attempt.lane_record,
         )
 
         # Record this iteration into the cross-iteration experience ledger.

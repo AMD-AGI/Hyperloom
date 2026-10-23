@@ -13,9 +13,9 @@ from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
 
-from kernelforge.loop.agent_extras import declared_extras
 from kernelforge.loop.experiments_layout import LANE_PLAN_GLOB, ROUND_CONTEXT, ExperimentsLayout, lane_plan_name
-from kernelforge.loop.fanout import LanePlan, LaneResult, lane_rationale, run_lanes
+from kernelforge.loop.lessons import SummaryOutcome
+from kernelforge.loop.fanout import LanePlan, LaneResult, run_lanes
 from kernelforge.loop.iteration.iteration_types import HeldRound, IterationResult, _StagedMerge, _append_finding
 from kernelforge.loop.merge_candidates import (
     MERGE_ATTEMPT_STALL_THRESHOLD,
@@ -144,7 +144,7 @@ class LaneRuntimeMixin:
             lane: LanePlan,
             lane_dir: Path,
             serialized_driver: Path,
-        ) -> str:
+        ) -> SummaryOutcome:
             # The session edits the lane's own copy, so it is handed that copy's kernel rather than the canonical one.
             # The record turn resumes that session now: the round deletes this copy as soon as it returns.
             sink: dict = {}
@@ -152,12 +152,12 @@ class LaneRuntimeMixin:
             await call(
                 str(lane_dir / kernel_relative),
                 _lane_prompt(lane.plan, serialized_driver=serialized_driver),
-                **declared_extras(call, {"session_sink": sink}),
+                session_sink=sink,
             )
             lesson = await self._request_lesson(iteration, sink.get("end_reason", ""), sink.get("summarize"))
             if not lesson:
                 print(f"  [lane {lane.lane_id}] no lesson from its session ({lesson.reason})")
-            return lesson.text
+            return lesson
 
         results = await run_lanes(
             workspace_dir=self.ic.workspace_dir,

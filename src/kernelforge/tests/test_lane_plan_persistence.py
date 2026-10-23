@@ -14,6 +14,7 @@ from types import SimpleNamespace
 import pytest
 
 from kernelforge.loop.fanout import LaneResult
+from kernelforge.loop.lessons import SummaryOutcome
 from kernelforge.loop.run_state import LoopStateStore, RunState, make_event
 from kernelforge.loop.runner import IterationConfig, IterationLoop
 from kernelforge.orchestrator.contracts import PlanCriticOutcome
@@ -553,19 +554,18 @@ def _widen(workspace):
 def test_a_queued_lesson_outlives_the_process(tmp_path, monkeypatch):
     """The record is taken in the round, and the process that measures the lane may be a later one."""
     loop, workspace = _loop(tmp_path, monkeypatch)
-    loop._lane_queue = [
-        LaneResult(lane_id="1", plan="widen the loads", diff="patch-1", lesson="lane 1 widened the loads")
-    ]
+    record = SummaryOutcome(text="lane 1 widened the loads")
+    loop._lane_queue = [LaneResult(lane_id="1", plan="widen the loads", diff="patch-1", lesson=record)]
     loop._persist_lane_queue()
 
     later = _reopen(workspace, tmp_path, monkeypatch)
     later._restore_lane_queue()
 
-    assert [item.lesson for item in later._lane_queue] == ["lane 1 widened the loads"]
+    assert [item.lesson for item in later._lane_queue] == [record]
 
 
-def test_a_queue_written_before_lessons_were_carried_restores(tmp_path, monkeypatch):
-    """A queue file from an older process has no lesson, and it still names a candidate to measure."""
+def test_a_queue_entry_without_a_lesson_restores_with_the_reason_it_has_none(tmp_path, monkeypatch):
+    """An entry holding neither a lesson nor its reason still names a candidate to measure."""
     loop, _workspace = _loop(tmp_path, monkeypatch)
     path = loop._lane_queue_path()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -576,7 +576,9 @@ def test_a_queue_written_before_lessons_were_carried_restores(tmp_path, monkeypa
 
     loop._restore_lane_queue()
 
-    assert [(item.lane_id, item.lesson) for item in loop._lane_queue] == [("1", "")]
+    assert [(item.lane_id, item.lesson) for item in loop._lane_queue] == [
+        ("1", SummaryOutcome(reason="the lane queue held no record for this lane"))
+    ]
 
 
 def test_a_candidate_a_round_bought_outlives_the_process(tmp_path, monkeypatch):

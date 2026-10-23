@@ -14,11 +14,7 @@ log = logging.getLogger(__name__)
 
 
 def declared_extras(agent_fn: Callable[..., Any], extras: Mapping[str, Any]) -> dict[str, Any]:
-    """The entries of ``extras`` that ``agent_fn`` names as parameters; none when its signature cannot be read.
-
-    A callback opts into each optional argument by naming it, so one written before an
-    argument existed is still called the way it was written for.
-    """
+    """The entries of ``extras`` that ``agent_fn`` names as parameters; none when its signature cannot be read."""
     try:
         params = inspect.signature(agent_fn).parameters
     except (ValueError, TypeError):

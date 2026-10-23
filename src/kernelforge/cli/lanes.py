@@ -12,7 +12,6 @@ from typing import TYPE_CHECKING, Iterable
 import click
 
 from kernelforge.config import Config
-from kernelforge.loop.agent_extras import declared_extras
 
 if TYPE_CHECKING:
     from kernelforge.orchestrator.agent import ImplementerSetup
@@ -193,10 +192,8 @@ def _make_lane_agent_factory(
                 lane_dir=lane_dir,
             )
             try:
-                # The lesson turn resumes this session. An agent written before the sink existed is still called as it was.
-                extras = declared_extras(lane_agent, {"session_sink": session_sink})
                 with session_environment(lane_env):
-                    return await lane_agent(kernel_path, plan, **extras)
+                    return await lane_agent(kernel_path, plan, session_sink=session_sink)
             finally:
                 # The backend was built for this one session and nothing resumes it once the lane returns.
                 lane_agent.close()

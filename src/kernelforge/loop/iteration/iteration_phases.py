@@ -122,6 +122,7 @@ class IterationPhasesMixin:
         # sourcing an attempt leaves the iteration without one.
         optimization_plan_path = ""
         optimization_plan_executable = False
+        lane_record = None
         if hazard is not None:
             unmeasured_result = self._unmeasurable_on_a_held_device(
                 iteration=iteration,
@@ -142,7 +143,7 @@ class IterationPhasesMixin:
             reusable_benchmark = None
             session_sink["plan"] = queued_lane.plan
             self._bind_session_producer(session_sink, queued_lane.agent_profile_id)
-            session_sink["lesson"] = queued_lane.lesson
+            lane_record = queued_lane.lesson
             print(f"  [lane {queued_lane.lane_id}] measuring queued candidate")
         elif merge_diff and merge_pair is not None:
             unmeasured_result = None
@@ -263,6 +264,7 @@ class IterationPhasesMixin:
             reusable_benchmark=reusable_benchmark,
             optimization_plan_path=optimization_plan_path,
             optimization_plan_executable=optimization_plan_executable,
+            lane_record=lane_record,
         )
 
     async def _collect_session_candidate(
@@ -464,7 +466,6 @@ class IterationPhasesMixin:
             decision_label=decision_label,
         )
         await self._record_lesson(
-            iteration=iteration,
             result=result,
             decision=decision_label,
             session_sink=session_sink,

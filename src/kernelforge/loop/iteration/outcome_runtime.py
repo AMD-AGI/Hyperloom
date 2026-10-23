@@ -455,11 +455,11 @@ class OutcomeMixin:
     async def _record_lesson(
         self,
         *,
-        iteration: int,
         result: IterationResult,
         decision: str,
         session_sink: dict,
         diff_summary: str = "",
+        lane_record: SummaryOutcome | None = None,
     ) -> None:
         """Write this iteration's free-form factual session record."""
         store = getattr(self, "lessons", None)
@@ -467,14 +467,11 @@ class OutcomeMixin:
             # No agent ran this iteration (e.g. the baseline measurement path): there is no exploration to record.
             return
 
+        iteration = result.iteration
         # A lane's record was taken in its round. None means this iteration ran the session itself.
-        lane_lesson = session_sink.get("lesson")
-        if lane_lesson is None:
+        record = lane_record
+        if record is None:
             record = await self._request_lesson(iteration, result.session_end_reason, session_sink.get("summarize"))
-        elif lane_lesson:
-            record = SummaryOutcome(text=lane_lesson)
-        else:
-            record = SummaryOutcome(reason="the lane's session gave no record in its round")
         if record and store.write(iteration, record.text) is None:
             record = SummaryOutcome(reason="failed to persist lesson document")
         has_narrative = bool(record)

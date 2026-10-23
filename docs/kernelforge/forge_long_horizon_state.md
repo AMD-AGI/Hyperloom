@@ -182,10 +182,10 @@ What the round produced is published too. Its candidates are spent one per
 iteration, so a process that ends with any of them unspent -- a budget that ran
 out mid-round, not only a crash -- would otherwise throw away finished
 Implementer sessions whose lane workspaces are already deleted. `lane_queue.json`
-holds what is still owed a measurement, including the lesson the lane recorded
-in its round, is rewritten as each candidate is taken, and is read before the
-first iteration of the next process, which measures those candidates before it
-plans a new round.
+holds what is still owed a measurement, is rewritten as each candidate is taken,
+and is read before the first iteration of the next process, which measures those
+candidates before it plans a new round. Each entry carries the lesson the lane
+recorded in its round, or in `lesson_reason` why it has none.
 
 A fan-out round that ends with no candidate to measure -- because planning was
 unavailable, because only one plan came back, because the lane workspaces could
