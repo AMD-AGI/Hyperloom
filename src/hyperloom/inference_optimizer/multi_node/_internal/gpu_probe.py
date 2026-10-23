@@ -15,12 +15,9 @@ from typing import Any
 
 import httpx
 
-from ...gpu_types import (
-    _AMD_GPU_TYPES,
-    _GFX_TO_RUNNER,
-    _PRODUCT_TAGS,
-    _product_tag_matches,
-)
+from hyperloom.common.gpu_identity import board_named_in
+
+from ...gpu_types import reference_gpu_type_for_gfx
 from . import ray_dashboard, ssh_client, ssh_known_hosts
 from .external_state import build_external_state_from_env, external_service_url
 
@@ -39,18 +36,9 @@ _TERMINAL_STATUSES = {"SUCCEEDED", "FAILED", "STOPPED"}
 
 
 def _parse_gpu_type(text: str) -> str | None:
-    """Map rocm-smi / gcnArchName output to a known AMD runner type."""
-    upper = (text or "").upper()
-    for tag in _PRODUCT_TAGS:
-        if _product_tag_matches(tag, upper):
-            candidate = tag.lower()
-            if candidate in _AMD_GPU_TYPES:
-                return candidate
-    lower = (text or "").lower()
-    for gfx, runner in _GFX_TO_RUNNER.items():
-        if gfx in lower:
-            return runner
-    return None
+    """Map rocm-smi / gcnArchName output to a known AMD board."""
+    board = board_named_in(text)
+    return board.product if board else reference_gpu_type_for_gfx(text)
 
 
 def remote_autodetect_gpu_type(*, timeout_s: int = 60) -> str | None:

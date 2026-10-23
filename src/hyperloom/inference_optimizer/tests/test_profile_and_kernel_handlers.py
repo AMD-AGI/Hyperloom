@@ -88,7 +88,7 @@ def test_mi325x_keeps_real_gpu_type_but_uses_mi300x_runner(tmp_path, monkeypatch
     )
 
     assert gpu_types.gpu_runner_type("mi325x") == "mi300x"
-    assert gpu_types._GFX_TO_RUNNER.get("gfx1100") is None
+    assert gpu_types.reference_gpu_type_for_gfx("gfx1100") is None
     manifest = build_manifest(tmp_path, args=args, session_id="mi325x-session")
     state = cli_bootstrap._seed_shared_state(
         tmp_path,
