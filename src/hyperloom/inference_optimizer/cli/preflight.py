@@ -731,46 +731,6 @@ def _ensure_bench_serving_deps(python_exe: str, pip_extra: list[str]) -> dict[st
     }
 
 
-def _ensure_framework_deps(args, python_exe: str, pip_extra: list[str]) -> dict[str, Any]:
-    """Install the selected framework's declared runtime deps into python_exe."""
-    from hyperloom.inference_optimizer import framework_deps, framework_registry
-
-    framework = (
-        getattr(args, "framework", None) or os.environ.get("FRAMEWORK", "")
-    ).strip().lower() or framework_registry.DEFAULT_FRAMEWORK
-    try:
-        outcome = framework_deps.ensure(framework, python_exe=python_exe, pip_extra=tuple(pip_extra))
-    except framework_deps.TorchClobberedError as exc:
-        print(f"Preflight: FATAL {exc}", file=sys.stderr)
-        sys.exit(2)
-    # Frameworks that ship no manifest are the common case; stay quiet unless the manifest actually asked for
-    # something or was partly rejected.
-    if outcome.skipped_reason and not (outcome.refused or outcome.invalid):
-        status = "skipped"
-    else:
-        framework_deps.report(outcome, prefix="Preflight: framework deps")
-        if outcome.failed or outcome.refused or outcome.invalid:
-            status = "warned"
-        elif outcome.installed:
-            status = "applied"
-        else:
-            status = "already_present"
-    return {
-        "status": status,
-        "skip_reason": outcome.skipped_reason or None,
-        "target": framework,
-        "interpreter": python_exe,
-        "detail": {
-            "manifest": str(outcome.manifest) if outcome.manifest is not None else None,
-            "installed": list(outcome.installed),
-            "already_present": list(outcome.already_present),
-            "refused": list(outcome.refused),
-            "invalid": list(outcome.invalid),
-            "failed": list(outcome.failed),
-        },
-    }
-
-
 # Escape hatch for the serving-framework gate below, mirroring install_baremetal.sh's --skip-base-check.
 SKIP_FRAMEWORK_CHECK_ENV = "HYPERLOOM_SKIP_FRAMEWORK_CHECK"
 
@@ -1217,7 +1177,7 @@ def _install_pinned_lm_eval(python_exe: str, pip_extra: list[str]) -> None:
         print(f"Preflight: WARNING — pinned lm_eval via {source} failed; falling back")
 
 
-def _resumed_session_state(args: argparse.Namespace | None) -> dict[str, Any] | None:
+def _resumed_session_state(args: argparse.Namespace) -> dict[str, Any] | None:
     """The persisted ``state.json`` of the session ``--resume-from`` names, or ``None``.
 
     Preflight runs before the resume block loads the session, so anything preflight decides from a session-pinned
@@ -1280,7 +1240,7 @@ def _refuse_resume_without_state(args: argparse.Namespace) -> None:
     raise SystemExit(2)
 
 
-def _pin_resumed_session_args(args: argparse.Namespace | None) -> None:
+def _pin_resumed_session_args(args: argparse.Namespace) -> None:
     """Apply the resumed session's pinned settings to ``args`` before any preflight check reads them.
 
     A session's framework is fixed at creation, and the resume block re-exports the persisted one; without this, a
@@ -1289,8 +1249,6 @@ def _pin_resumed_session_args(args: argparse.Namespace | None) -> None:
     otherwise check one framework and run another. A kernel phase disabled at creation stays disabled, as the resume
     block also enforces, so the TraceLens requirement is judged on the same setting the run uses.
     """
-    if args is None:
-        return
     state = _resumed_session_state(args)
     if not state:
         _refuse_resume_without_state(args)
@@ -1619,8 +1577,8 @@ def _check_agent_cli() -> None:
 def _emit_preflight_diagnostics(
     *,
     magpie_python: str,
-    anthropic_base_url: str | None,
-    args: argparse.Namespace | None = None,
+    anthropic_base_url: str,
+    args: argparse.Namespace,
 ) -> dict[str, Any]:
     """One canonical, grep-friendly diagnostics block at the end of preflight."""
     from hyperloom.orchestrator.actions.executors._aiter_jit import probe_aiter_jit_cache as _probe_aiter_jit_cache
@@ -1648,21 +1606,17 @@ def _emit_preflight_diagnostics(
     print(f"  aiter jit cache     = {cache_line}")
     print(f"  benchmark_timeout   = {hard_timeout}s")
     print(f"  benchmark_silence   = {silence_timeout}s")
-    if anthropic_base_url:
-        print(f"  ANTHROPIC_BASE_URL  = {anthropic_base_url}")
-    else:
-        print("  ANTHROPIC_BASE_URL  = <unset> — no LLM base URL resolved; Claude SDK will fail")
-    if args is not None:
-        kb_enabled = bool(getattr(args, "recipe_kb_enabled", True))
-        pr_enabled = bool(getattr(args, "pr_monitor_enabled", True))
-        kb_reason = getattr(args, "kb_degraded_reason", None) or "-"
-        pr_reason = getattr(args, "pr_degraded_reason", None) or "-"
-        kb_status = "OK" if kb_enabled else f"DEGRADED ({kb_reason})"
-        pr_status = "OK" if pr_enabled else f"DEGRADED ({pr_reason})"
-        print(f"  kb_status           = {kb_status}")
-        print(f"  pr_monitor_status   = {pr_status}")
-        print(f"  kb_degraded_reason  = {kb_reason}")
-        print(f"  pr_degraded_reason  = {pr_reason}")
+    print(f"  ANTHROPIC_BASE_URL  = {anthropic_base_url or '<unset>'}")
+    pr_enabled = bool(getattr(args, "pr_monitor_enabled", True))
+    kb_degraded_reason = getattr(args, "kb_degraded_reason", None)
+    kb_reason = kb_degraded_reason or "-"
+    pr_reason = getattr(args, "pr_degraded_reason", None) or "-"
+    kb_status = f"DEGRADED ({kb_reason})" if kb_degraded_reason else "OK"
+    pr_status = "OK" if pr_enabled else f"DEGRADED ({pr_reason})"
+    print(f"  kb_status           = {kb_status}")
+    print(f"  pr_monitor_status   = {pr_status}")
+    print(f"  kb_degraded_reason  = {kb_reason}")
+    print(f"  pr_degraded_reason  = {pr_reason}")
 
     # Surface Recipe KB offline-queue state; dead-letter pile-up signals a cold start.
     queue_status: dict[str, Any]
@@ -1921,15 +1875,13 @@ def _run_install_step(
     return result
 
 
-def _resolved_provider_mode(resolved_urls: tuple[str, str] | None) -> str | None:
-    anthropic_url, openai_url = resolved_urls or ("", "")
+def _resolved_provider_mode(resolved_urls: tuple[str, str]) -> str:
+    anthropic_url, openai_url = resolved_urls
     if anthropic_url and openai_url:
         return "mixed"
     if anthropic_url:
         return "anthropic"
-    if openai_url:
-        return "openai"
-    return None
+    return "openai"
 
 
 @dataclass(frozen=True)
@@ -1940,12 +1892,12 @@ class PreflightRuntime:
     benchmark_python: str
     magpie_python: str
     inferencex_path: str
-    resolved_urls: tuple[str, str] | None
+    resolved_urls: tuple[str, str]
 
 
-def _finish_install_event(event: dict[str, Any], *, args: argparse.Namespace | None, runtime: PreflightRuntime) -> None:
-    no_kernel = bool(getattr(args, "no_kernel", False)) if args is not None else False
-    enable_roofline = bool(getattr(args, "enable_roofline", True)) if args is not None else True
+def _finish_install_event(event: dict[str, Any], *, args: argparse.Namespace, runtime: PreflightRuntime) -> None:
+    no_kernel = bool(getattr(args, "no_kernel", False))
+    enable_roofline = bool(getattr(args, "enable_roofline", True))
     tracelens_required = _tracelens_required_at_preflight(no_kernel, enable_roofline)
     event["ext"]["runtime_snapshot"] = {
         "benchmark_backend": runtime.benchmark_backend,
@@ -1987,16 +1939,9 @@ def _persist_install_event(args: argparse.Namespace | None, session_dir: Path) -
             log.debug("failed to persist SBD V6 install-event write warning", exc_info=exc)
 
 
-def _export_llm_endpoints() -> tuple[str, str] | None:
-    """Resolve and export the Anthropic and OpenAI base URLs, or None when neither is configured.
-
-    Explicit operator values on each side are preserved; a missing side falls
-    back to the other.
-    """
+def _export_llm_endpoints() -> tuple[str, str]:
+    """Resolve and export the Anthropic and OpenAI base URLs; at least one is non-empty after credential validation."""
     anthropic_url, openai_url = _resolve_llm_endpoints()
-    if not anthropic_url and not openai_url:
-        print("Preflight: WARNING — no LLM base URL set; Claude/Codex SDKs will fail at first call")
-        return None
     # A subscription token needs no endpoint: the Claude CLI knows where to go.
     skip_anthropic_export = (
         not os.environ.get("ANTHROPIC_BASE_URL", "").strip()
@@ -2252,7 +2197,7 @@ def _prepare_inferencex(install_event: Any, *, magpie_active: bool) -> str:
     return inferencex_path
 
 
-def _check_kernel_and_tracelens_clis(install_event: Any, args: argparse.Namespace | None) -> None:
+def _check_kernel_and_tracelens_clis(install_event: Any, args: argparse.Namespace) -> None:
     """Check the kernel-tuning and TraceLens CLIs before the Coordinator starts.
 
     A hard failure here catches launchers that skip install.sh, rather than
@@ -2260,8 +2205,8 @@ def _check_kernel_and_tracelens_clis(install_event: Any, args: argparse.Namespac
     ten hours later in trace_analyze. Both are skipped when the run asks for
     neither kernel work nor roofline.
     """
-    no_kernel = getattr(args, "no_kernel", False) if args else False
-    enable_roofline = getattr(args, "enable_roofline", True) if args else True
+    no_kernel = getattr(args, "no_kernel", False)
+    enable_roofline = getattr(args, "enable_roofline", True)
     if no_kernel:
         _record_install_step(
             install_event,
@@ -2306,8 +2251,8 @@ def _check_kernel_and_tracelens_clis(install_event: Any, args: argparse.Namespac
     )
 
 
-def _validate_explicit_server_limits(args: argparse.Namespace | None) -> None:
-    effective = argparse.Namespace(**vars(args)) if args is not None else argparse.Namespace()
+def _validate_explicit_server_limits(args: argparse.Namespace) -> None:
+    effective = argparse.Namespace(**vars(args))
     state = _resumed_session_state(args) or {}
     pins = parse_operator_extra_env(effective) or state.get("operator_extra_env", {})
     if state:
@@ -2324,9 +2269,7 @@ def _validate_explicit_server_limits(args: argparse.Namespace | None) -> None:
     validate_server_args(effective, resolve_serving_model_path(model, model_base=pins.get("HL_MODEL_BASE")))
 
 
-def _preflight(
-    args: argparse.Namespace | None = None,
-) -> tuple[str, str] | None:
+def _preflight(args: argparse.Namespace) -> tuple[str, str]:
     """Auto-install missing runtime deps and export auth aliases."""
     _pin_resumed_session_args(args)
     install_event = _begin_install_event(args)
@@ -2379,7 +2322,7 @@ def _preflight(
     from hyperloom.agents.framework.kb import prepare_kb_environment
 
     kb_withdrawn_override = bool(os.environ.get("FRAMEWORK_AGENT_KB_DIR", "").strip())
-    kb_enabled = not bool(getattr(args, "degraded_kb", False)) if args is not None else True
+    kb_enabled = not bool(getattr(args, "degraded_kb", False))
 
     def _prepare_kb_install_step() -> dict[str, Any]:
         prepare_kb_environment()
@@ -2428,8 +2371,7 @@ def _preflight(
         action=lambda: _ensure_python_sdks(sys.executable, pip_extra),
     )
 
-    # --- Resolve Anthropic + OpenAI base URLs (split entrypoints) --- Explicit operator values on each side are
-    # preserved; a missing side falls back to the other.
+    # --- Resolve Anthropic + OpenAI base URLs (split entrypoints) ---
     resolved_urls = _export_llm_endpoints()
 
     # --- ROCm env hygiene + GPU/shm sanity (defensive WARN-only) ---
@@ -2483,14 +2425,6 @@ def _preflight(
     # 1d.
     _run_install_step(
         install_event,
-        step_id="framework_deps",
-        category="install",
-        action=lambda: _ensure_framework_deps(args, benchmark_python, pip_extra),
-    )
-
-    # 1e.
-    _run_install_step(
-        install_event,
         step_id="check_serving_framework",
         category="check",
         action=lambda: _check_serving_framework(args, benchmark_python),
@@ -2513,18 +2447,12 @@ def _preflight(
     _check_kernel_and_tracelens_clis(install_event, args)
 
     # --- IR-3: PR Monitor reachability probe (soft degrade) ---
-    if args is not None:
-        _run_install_step(
-            install_event,
-            step_id="ir3_pr_monitor_probe",
-            category="degrade",
-            action=lambda: _run_ir3_preflight(args),
-        )
-    else:
-        _record_install_step(
-            install_event,
-            InstallStep("ir3_pr_monitor_probe", "degrade", "skipped", skip_reason="args_unavailable"),
-        )
+    _run_install_step(
+        install_event,
+        step_id="ir3_pr_monitor_probe",
+        category="degrade",
+        action=lambda: _run_ir3_preflight(args),
+    )
 
     # --- Single canonical diagnostics block ---
     _run_install_step(
@@ -2533,7 +2461,7 @@ def _preflight(
         category="diagnostic",
         action=lambda: _emit_preflight_diagnostics(
             magpie_python=magpie_python,
-            anthropic_base_url=(resolved_urls[0] if resolved_urls is not None else None),
+            anthropic_base_url=resolved_urls[0],
             args=args,
         ),
     )
@@ -2552,7 +2480,6 @@ def _run_ir3_preflight(args: argparse.Namespace) -> dict[str, Any]:
     explicit_kb = bool(getattr(args, "degraded_kb", False))
     explicit_pr = bool(getattr(args, "degraded_pr", False))
 
-    args.recipe_kb_enabled = not explicit_kb
     args.kb_degraded_reason = "explicit_flag" if explicit_kb else None
     args.pr_monitor_enabled = not explicit_pr
     args.pr_degraded_reason = "explicit_flag" if explicit_pr else None
