@@ -229,7 +229,7 @@ def test_container_message_omits_the_container_remedy(monkeypatch, capsys):
 
 
 def test_framework_falls_back_to_env_then_default(monkeypatch):
-    """Resolution mirrors _ensure_framework_deps: args > $FRAMEWORK > default."""
+    """The framework resolves from args first, then $FRAMEWORK, then the default."""
     monkeypatch.setenv("FRAMEWORK", "xdit")
     _refuse_probe(monkeypatch)
 
