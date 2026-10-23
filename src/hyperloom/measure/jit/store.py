@@ -65,7 +65,11 @@ _MAX_MANIFEST_BYTES = 32 * 1024**2
 _GENERATIONS_TRIED = 3
 _INCOMING = ".incoming-"
 _FILE_MODE = 0o600
-_BLOB_MODE = 0o400
+#: A stored blob is readable by every account and writable by none. The store is content-addressed and read-only by
+#: design, and another account reads it: on the hosted path the host writes it and a sandbox account reads it through a
+#: read-only mount, so owner-only (0o400) would leave that account unable to read a blob and the cache silently unused.
+#: CodeQL's py/overly-permissive-file flags the mode; the read bit for others is the intent.
+_BLOB_MODE = 0o444
 _FETCH_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
 
 
