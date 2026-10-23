@@ -22,6 +22,9 @@ from hyperloom.orchestrator.actions.executors._patch_snapshot import (
 )
 from hyperloom.orchestrator.actions.executors._patch_git import _git_apply_reverse, _git_restore_to_head
 from hyperloom.orchestrator.actions.stop_attribution import StoppedByTheRun
+from hyperloom.orchestrator.source_snapshot import MANIFEST_NAME, snapshot_source_layer
+
+from kernelforge.kernel_rewrite_controller.paths import operator_directory_name
 
 from .controller_publication import (
     ControllerPatchPublication,
@@ -212,6 +215,36 @@ def _keep_result(
         "source": _CONTROLLER_SOURCE,
         "backend": _CONTROLLER_BACKEND,
         "engine": _CONTROLLER_SOURCE,
+    }
+
+
+def _committed_source_layer(repo: Path, keep_commit: str, operator_id: str, session_dir: Path) -> dict[str, Any]:
+    """Snapshot the files the KEEP commit changed, so a resume onto a stock tree can reinstall them."""
+    handles: dict[str, Any] = {"framework_root": str(repo), "source_layer_landed": True}
+    try:
+        listing = _git_output(
+            repo, "-c", "core.quotepath=off", "diff-tree", "--no-commit-id", "--name-status", "-r", keep_commit
+        )
+        rows = [line.split("\t") for line in listing.splitlines() if "\t" in line]
+        snap = snapshot_source_layer(
+            framework_root=repo,
+            base_sha=keep_commit,
+            rel_paths=[row[-1] for row in rows],
+            dest_dir=session_dir / "optimization_stack" / "src" / operator_directory_name(operator_id),
+            provenance=_CONTROLLER_SOURCE,
+            declared_ops={row[-1]: "delete" for row in rows if row[0].startswith("D")},
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        log.warning("KEEP %s committed but its source snapshot could not be written: %s", operator_id, error)
+        return handles
+    if not snap:
+        return handles
+    return {
+        **handles,
+        "source_snapshot": snap["snapshot_dir"],
+        "source_manifest": str(Path(snap["snapshot_dir"]) / MANIFEST_NAME),
+        "source_snapshot_complete": bool(snap["complete"]),
+        "target_files": [str(row["rel"]) for row in snap["files"]],
     }
 
 
@@ -425,7 +458,10 @@ async def integrate_controller_patches(
         keep_commit: str,
     ) -> str:
         try:
-            await record_keep(_keep_result(publication, validation, keep_commit))
+            layer = _committed_source_layer(
+                publication.repo_root, keep_commit, publication.operator_id, Path(session_dir)
+            )
+            await record_keep({**_keep_result(publication, validation, keep_commit), **layer})
             shared_state.save(Path(session_dir))
         except Exception as error:  # noqa: BLE001 - KEEP is already committed to Git; record_keep runs the whole writeback
             log.warning("KEEP %s committed but recording it failed: %s", publication.operator_id, error)

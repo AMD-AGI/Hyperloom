@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import filecmp
+import logging
 import json
 import shutil
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Callable, Iterable, NamedTuple
+
+log = logging.getLogger(__name__)
 
 MANIFEST_NAME = "manifest.json"
 SCHEMA_VERSION = 2
@@ -51,6 +55,82 @@ def source_layer_reproducible(entry: dict[str, Any]) -> bool:
     if recorded is not None:
         return bool(recorded)
     return snapshot_is_complete(snapshot_dir)
+
+
+def missing_source_snapshot(entry: Mapping[str, Any]) -> bool:
+    """Whether a stack entry left a source layer on its framework tree but carries no snapshot to reinstall it from."""
+    if str(entry.get("source_snapshot") or "").strip():
+        return False
+    landed = any(
+        isinstance(row, Mapping) and str(row.get("status") or "") not in ("", "failed")
+        for row in entry.get("recipe_patch_statuses") or []
+    )
+    return bool(entry.get("source_layer_landed")) or landed
+
+
+def source_layer_handles(result: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the source-layer fields a ``source_patch`` lift must carry.
+
+    Every field here has to survive the hop from the executor result into the
+    optimization_stack entry, where ``build_env_spec`` reads it. Assembling them
+    in one place is what keeps a second lift path from forwarding a subset and
+    degrading the overlay it feeds.
+
+    Args:
+        result: An integrate_patch KEEP result.
+
+    Returns:
+        dict[str, Any]: Handles to merge into the lift. ``source_snapshot_complete``
+            is present only when the result recorded it, so entries predating the
+            field still fall back to reading their manifest.
+    """
+    handles: dict[str, Any] = {
+        "source_snapshot": result.get("source_snapshot") or "",
+        "source_manifest": result.get("source_manifest") or "",
+        "target_files": [str(path) for path in (result.get("target_files") or []) if str(path).strip()],
+        "framework_root": result.get("framework_root") or "",
+        "base_sha": result.get("base_sha") or "",
+        "source_import_root": result.get("source_import_root") or "",
+    }
+    if "source_snapshot_complete" in result:
+        handles["source_snapshot_complete"] = bool(result["source_snapshot_complete"])
+    if result.get("source_layer_landed") or result.get("patches_applied") or result.get("artifacts_applied"):
+        handles["source_layer_landed"] = True
+    return handles
+
+
+def variant_source_layer(bv: Mapping[str, Any]) -> dict[str, Any]:
+    """The source-layer fields of a winning variant that its stack entry carries."""
+    fields: dict[str, Any] = {}
+    for key in ("source_snapshot", "source_manifest", "source_import_root", "framework_root", "base_sha"):
+        value = bv.get(key)
+        if value:
+            fields[key] = str(value)
+    # Copied unconditionally: False is the meaningful value that marks a
+    # snapshot unusable, so truthiness must not drop it.
+    if "source_snapshot_complete" in bv:
+        fields["source_snapshot_complete"] = bool(bv["source_snapshot_complete"])
+    target_files = [str(path) for path in (bv.get("target_files") or []) if str(path).strip()]
+    if target_files:
+        fields["target_files"] = target_files
+    scope = str(bv.get("scope") or "").strip()
+    if scope:
+        fields["scope"] = scope
+    if bv.get("source_layer_landed"):
+        fields["source_layer_landed"] = True
+    return fields
+
+
+def report_missing_source_snapshot(entry: Mapping[str, Any], task_kind: str, variant_name: Any) -> None:
+    """Log loudly when a stack entry left a source layer on its framework tree but carries no snapshot of it."""
+    if missing_source_snapshot(entry):
+        log.error(
+            "%s %s left a source layer on %s with no source snapshot to reinstall it from; "
+            "a resume onto a stock tree benches every later candidate without it",
+            task_kind,
+            variant_name,
+            entry.get("framework_root") or "its framework tree",
+        )
 
 
 def source_layer_overlay_dir(entry: dict[str, Any]) -> str:
