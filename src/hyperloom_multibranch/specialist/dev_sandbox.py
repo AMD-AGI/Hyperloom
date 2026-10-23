@@ -33,6 +33,7 @@ from typing import Any, Protocol, TypeVar
 
 from hyperloom.hosted.mcp_server import CallContext, InvalidParamsError, McpServer, ToolError
 from hyperloom.measure.compile import COMPONENT_LAYOUTS
+from hyperloom.measure.ports import DEV_SANDBOX_PORTS
 from hyperloom.sandbox.socket import SandboxUnavailable
 from hyperloom_multibranch.contracts.branch_log import BranchLogEntry, BranchLogType
 from hyperloom_multibranch.contracts.notebook.interfaces import NotebookError
@@ -65,14 +66,12 @@ class DevLimits:
     cooldown_s: float = 600.0
     idle_s: float = 600.0
     idle_running_s: float = 900.0
-    #: The toolbox's lease waits for running tests to free cards; a lease not granted by then is refused.
-    lease_wait_s: float = 20.0
     run_s: float = 40.0
     read_s: float = 40.0
     read_poll_s: float = 0.5
     poll_s: float = 5.0
-    #: Above the autonomous agents' block (``AGENT_PORT``) and the tests' servers, which start at 8888.
-    port: int = 32100
+    #: The range the measurement's port picker never draws from.
+    port: int = DEV_SANDBOX_PORTS.start
     ports: int = 10
     niceness: int = 10
 
@@ -82,7 +81,9 @@ class LeaseSource(Protocol):
 
     async def queue_state(self) -> QueueState: ...
 
-    async def lease_branch_sandbox(self, branch_id: str, cards: int) -> BranchLease: ...
+    async def lease_branch_sandbox(
+        self, branch_id: str, cards: int, *, wait_sec: float | None = None
+    ) -> BranchLease: ...
 
     async def release_branch_sandbox(self, lease_id: str) -> None: ...
 
@@ -290,13 +291,13 @@ class DevLeases:
             raise DevRefused("cap_reached", f"the session's {self._limits.cap} dev sandbox(es) are all lent out")
 
     async def _leased(self, branch: str, cards: int) -> BranchLease:
-        wait = self._limits.lease_wait_s
+        """A dev sandbox takes only cards free now: waiting would hold cards a test is about to need."""
         try:
-            return await asyncio.wait_for(self._toolbox.lease_branch_sandbox(branch, cards), wait)
+            return await self._toolbox.lease_branch_sandbox(branch, cards, wait_sec=0)
         except RequestRejected as error:
             raise DevRefused(error.code, error.reason) from error
-        except (asyncio.TimeoutError, SandboxUnavailable) as error:
-            raise DevRefused("cards_busy", f"no {cards} card(s) came free within {wait:g} s") from error
+        except SandboxUnavailable as error:
+            raise DevRefused("cards_busy", f"no {cards} card(s) are free now") from error
 
     def _touch(self, branch: str) -> _Lease:
         held = self._held.get(branch)

@@ -12,6 +12,8 @@ import pytest
 from hyperloom.contracts.recipe import ComponentPatches, LaunchConfig, Recipe
 from hyperloom.hosted.mcp_server import InvalidParamsError, ToolError
 from hyperloom.measure.compile import PackageBase
+from hyperloom.measure.ports import DEV_SANDBOX_PORTS
+from hyperloom.sandbox.socket import SandboxUnavailable
 from hyperloom_multibranch.contracts.lifecycle import BranchTask
 from hyperloom_multibranch.contracts.toolbox import BranchLease, QueueState, RequestRejected
 from hyperloom_multibranch.specialist.agent_onboarding import CommandResult
@@ -54,7 +56,7 @@ class _Toolbox:
     async def queue_state(self) -> QueueState:
         return QueueState(queued_by_priority={2: self.queued})
 
-    async def lease_branch_sandbox(self, branch_id: str, cards: int) -> BranchLease:
+    async def lease_branch_sandbox(self, branch_id: str, cards: int, *, wait_sec: float | None = None) -> BranchLease:
         if self.refusal is not None:
             raise self.refusal
         self.leased.append((branch_id, cards))
@@ -203,16 +205,23 @@ async def test_the_toolboxs_refusal_reaches_the_specialist_and_frees_the_slot(ri
     assert rig.toolbox.leased == [(B2, 1)]
 
 
-async def test_a_lease_whose_cards_are_not_free_soon_is_refused(rig):
-    server = rig.build(limits=replace(LIMITS, lease_wait_s=0.05)).server
+async def test_a_lease_asks_the_toolbox_not_to_wait_and_is_refused_when_no_card_is_free(rig):
+    server = rig.build().server
+    waits = []
 
-    async def never(branch_id, cards):
-        await asyncio.sleep(10)
+    async def busy(branch_id, cards, *, wait_sec=None):
+        waits.append(wait_sec)
+        raise SandboxUnavailable("no card is free")
 
-    rig.toolbox.lease_branch_sandbox = never
+    rig.toolbox.lease_branch_sandbox = busy
     await _refused(server.call("dev_sandbox_lease"), "cards_busy")
+    assert waits == [0]
     rig.toolbox.lease_branch_sandbox = _Toolbox.lease_branch_sandbox.__get__(rig.toolbox)
     await server.call("dev_sandbox_lease")
+
+
+def test_the_dev_sandbox_ports_are_the_range_the_measurement_keeps_free():
+    assert DevLimits().port == DEV_SANDBOX_PORTS.start
 
 
 async def test_a_released_branch_cools_down_before_it_leases_again(rig):
