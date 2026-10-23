@@ -127,11 +127,8 @@ def test_specialist_close_forces_actor_kill_after_stop_attempt(monkeypatch, ack)
     assert lease._start_ref is None
 
 
-@pytest.mark.parametrize(
-    ("group_present", "members"),
-    [(False, []), (True, [(10, 100, "Z")]), (True, [(10, 100, "S")]), (True, [])],
-)
-def test_managed_exited_root_cannot_confirm_detached_descendants(monkeypatch, group_present, members):
+@pytest.mark.parametrize("members", [[], [(10, 100, "Z")], [(10, 100, "S")]])
+def test_managed_exited_root_cannot_confirm_detached_descendants(monkeypatch, members):
     from types import SimpleNamespace
     from hyperloom.common import proctree
 
@@ -139,7 +136,6 @@ def test_managed_exited_root_cannot_confirm_detached_descendants(monkeypatch, gr
     mgr = ManagedServerProcess()
     mgr._proc = proc
     monkeypatch.setattr(rs, "os", SimpleNamespace(name="posix"))
-    monkeypatch.setattr(proctree, "group_alive", lambda pgid: group_present)
     monkeypatch.setattr(proctree, "group_members", lambda pgid: members)
     signals = []
     monkeypatch.setattr(proctree, "signal_group", lambda *a, **kw: signals.append(a))
