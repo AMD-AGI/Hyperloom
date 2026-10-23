@@ -77,6 +77,31 @@ def _init_module(root: Path, module_file: Path, args: argparse.Namespace) -> Non
     subprocess.run([*git, "commit", "-qm", "Identity optimization module"], check=True)
 
 
+def _check_import_order(order: dict, args: argparse.Namespace) -> None:
+    """Refuse a script whose import of the module comes too late for its settings; warn on a risky one."""
+    statement = f"`from {args.module} import {args.function}`"
+    torch_site = f" (torch is first imported at {order['torch_site']})" if order["torch_site"] else ""
+    late = [*(["the GPU was initialized"] if order["gpu_initialized"] else []), *order["compiler_imported"]]
+    if late:
+        raise SystemExit(
+            f"{args.script.name} imports {args.module} at {order['module_site']}, after {' and '.join(late)}. "
+            f"Runtime settings Hyperloom accepts would not take effect when you deploy the result. "
+            f"Move {statement} above `import torch`{torch_site}."
+        )
+    if order["torch_imported"]:
+        print(
+            f"warning: {args.script.name} imports {args.module} at {order['module_site']}, after torch{torch_site}. "
+            f"The settings checked so far still apply there, but {statement} above `import torch` is safer.",
+            file=sys.stderr,
+        )
+
+
+def _record(benchmark: Path, args: argparse.Namespace) -> dict:
+    command = [args.python, "-B", str(benchmark / _HARNESS), "record"]
+    result = subprocess.run(command, check=True, stdout=subprocess.PIPE, text=True)
+    return json.loads(result.stdout.splitlines()[-1])
+
+
 def prepare(args: argparse.Namespace) -> Path:
     """Create the workspace and record the references; refuse to touch an existing one."""
     workspace = args.workspace.resolve()
@@ -85,9 +110,18 @@ def prepare(args: argparse.Namespace) -> Path:
         raise SystemExit(f"{workspace} is already prepared; references are recorded once")
     workspace.mkdir(parents=True, exist_ok=True)
     module_file = root / f"{args.module}.py"
-    _init_module(root, module_file, args)
-    _write_benchmark(benchmark, module_file, args)
-    subprocess.run([args.python, "-B", str(benchmark / _HARNESS), "record"], check=True)
+    prepared = False
+    try:
+        _init_module(root, module_file, args)
+        _write_benchmark(benchmark, module_file, args)
+        report = _record(benchmark, args)
+        _check_import_order(report["import_order"], args)
+        prepared = True
+    finally:
+        if not prepared:
+            shutil.rmtree(root, ignore_errors=True)
+            shutil.rmtree(benchmark, ignore_errors=True)
+    print(f"Recorded {report['calls']} calls; rel-L2 limits {report['rel_l2_limits']}")
     return workspace
 
 

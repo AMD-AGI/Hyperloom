@@ -42,8 +42,11 @@ import sys
 import tempfile
 import threading
 import time
+import traceback
 
-import torch
+# Imported only once the user script has started (child) or the command needs it (parent):
+# the child must observe the script's own import order, not the harness's.
+torch = None
 
 CONFIG = "script_workload.json"
 SCOPE = "optimization_scope.json"
@@ -127,15 +130,53 @@ def _synchronize():
         torch.cuda.synchronize()
 
 
+def _load_torch():
+    global torch
+    import torch as module
+
+    torch = module
+
+
+def _import_site() -> str:
+    """The innermost non-importlib, non-harness frame: the statement that triggered this import."""
+    for frame in reversed(traceback.extract_stack()):
+        if not frame.filename.startswith("<frozen") and frame.filename != __file__:
+            return f"{frame.filename}:{frame.lineno}"
+    return "unknown"
+
+
+class _ImportOrder(importlib.abc.MetaPathFinder):
+    """Note where torch was first imported; never resolves anything itself."""
+
+    def __init__(self):
+        self.torch_site = None
+
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname == "torch" and self.torch_site is None:
+            self.torch_site = _import_site()
+
+    def observe(self) -> dict:
+        """What the optimization module's settings can still reach, as of its import."""
+        loaded = sys.modules.get("torch")
+        return {
+            "module_site": _import_site(),
+            "torch_site": self.torch_site,
+            "torch_imported": loaded is not None,
+            "gpu_initialized": loaded is not None and loaded.cuda.is_initialized(),
+            "compiler_imported": [m for m in ("torch._inductor", "torch._dynamo") if m in sys.modules],
+        }
+
+
 class _CandidateFinder(importlib.abc.MetaPathFinder):
     """Resolve the optimization module to the candidate file and wrap its entry function."""
 
-    def __init__(self, name: str, path: Path, function: str, wrap):
-        self.name, self.path, self.function, self.wrap = name, path, function, wrap
+    def __init__(self, name: str, path: Path, function: str, wrap, on_import):
+        self.name, self.path, self.function, self.wrap, self.on_import = name, path, function, wrap, on_import
 
     def find_spec(self, fullname, path=None, target=None):
         if fullname != self.name:
             return None
+        self.on_import()
         spec = importlib.util.spec_from_file_location(fullname, self.path)
         original_exec = spec.loader.exec_module
 
@@ -333,11 +374,13 @@ def _measure(optimized, config: dict, inputs: Path, out: Path) -> None:
 def _wrap(mode: str, config: dict, inputs: Path, out: Path, recorders: list):
     def wrap(function):
         def recording(*args, **kwargs):
+            _load_torch()
             recorder = _Recorder(function(*args, **kwargs), config["method"], config["record_calls"])
             recorders.append(recorder)
             return recorder
 
         def measuring(*args, **kwargs):
+            _load_torch()
             _measure(function(*args, **kwargs), config, inputs, out)
             sys.stdout.flush()
             sys.stderr.flush()
@@ -362,7 +405,12 @@ def _run_script(config: dict) -> None:
 def child(mode: str, config: dict, candidate: Path, inputs: Path, out: Path) -> None:
     recorders: list[_Recorder] = []
     wrap = _wrap(mode, config, inputs, out, recorders)
-    sys.meta_path.insert(0, _CandidateFinder(config["module"], candidate, config["function"], wrap))
+    order = _ImportOrder()
+
+    def on_import():
+        (out / "import_order.json").write_text(json.dumps(order.observe()) + "\n")
+
+    sys.meta_path[:0] = [order, _CandidateFinder(config["module"], candidate, config["function"], wrap, on_import)]
     _run_script(config)
     if mode == "measure":
         raise SystemExit(f"The script exited without calling {config['module']}.{config['function']}()")
@@ -487,7 +535,8 @@ def record(directory: Path) -> dict:
         shutil.copytree(runtime / "out", store)
     limits = _limits(config["tolerance"], store / "references")
     (store / "references" / "limits.json").write_text(json.dumps(limits) + "\n")
-    return {"calls": len(limits), "rel_l2_limits": limits}
+    import_order = json.loads((store / "import_order.json").read_text())
+    return {"calls": len(limits), "rel_l2_limits": limits, "import_order": import_order}
 
 
 def _gate(errors: dict, limits: list[float], measurement: dict, timed_fraction: float) -> dict:
@@ -571,7 +620,9 @@ def main() -> None:
     if args.command == "_child":
         config = json.loads(args.config.read_text())
         child(args.mode, config, args.candidate, args.inputs, args.out)
-    elif args.command == "record":
+        return
+    _load_torch()
+    if args.command == "record":
         print(json.dumps(record(directory)))
     else:
         print(json.dumps(measure(directory, Path(os.environ["RESULT_DIR"]))))
