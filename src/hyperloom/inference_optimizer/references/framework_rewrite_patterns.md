@@ -259,6 +259,146 @@ if not (_env_on("HL_GLUE_FUSE") and hidden.dtype == query.dtype):
     hidden = hidden.to(query.dtype)
 ```
 
+### (h) `export_ahead_of_time` — compile the whole model with AOTInductor
+
+**Only in scope when the operator declared it.** `optimization_scope.json` schema 2
+carries an `aoti` block; when `enabled` is false or absent this category does not
+exist for the workload. The declaration also carries the dynamic input dimensions —
+see *The operator owns the dynamic ranges* below.
+
+**Signal.** Not a host-probe finding. This is a structural change to how the whole
+model executes: `torch.export` traces it to a graph and
+`torch._inductor.aoti_compile_and_package` compiles that to a loadable artifact,
+replacing eager dispatch for the entire forward.
+
+**Export the whole model, not a hot submodule.** Submodules that trace in isolation
+still fail in composition, because the full model reaches code paths the parts do
+not. Picking the hottest block and exporting only that is the intuitive move and it
+wastes the effort: you inherit all the tracing work later anyway, at the point where
+the unanticipated blockers appear.
+
+**Two phases, and the cheap one comes first.** Tracing fails in seconds at the first
+blocker; compilation takes minutes and only runs once tracing succeeds. Iterate phase
+1 in a **standalone scratch script** — a bare `torch.export` probe, not the
+benchmark — and only run a candidate once the model traces end to end. A tracing fix
+that is wrong is worse than one that crashes, so check numerical parity on each fix
+in isolation before combining them.
+
+#### Phase 1 — make it trace
+
+Export has no eager escape hatch, so every operation must trace. Two techniques
+cover almost everything:
+
+| blocker | fix |
+|---|---|
+| value derives from something fixed at deployment (grids, rotary tables, position offsets, sequence geometry) | compute it eagerly when the wrapper is built, `register_buffer` it; buffers trace as concrete attribute reads |
+| value is genuinely dynamic | `torch.library.custom_op` with a real implementation plus a shape-only fake kernel — the supported way to make a region opaque |
+
+Try `torch.export.export(..., strict=False)` before rewriting anything: it runs the
+Python normally and records only tensor operations, which is often enough.
+
+**A tensor built from Python literals inside `forward()` is not a constant.** It
+traces as the result of an operation, so indexing it or calling `.item()` on it still
+produces a symbolic value and the same guard failure. The value must be computed
+*outside* the traced region, not merely be constant-valued inside it. This is the
+most common wasted attempt in this phase.
+
+**Patching methods invites recursion.** Capture the original before patching, and
+make installation idempotent — installing a wrapper twice re-captures the already
+patched method as "original", which is the same bug wearing a hat.
+
+#### Phase 2 — close the gap to eager
+
+**Inductor's freezing pipeline does not run under export.** That costs three things,
+and nothing warns you about any of them:
+
+| lost | rebuild as |
+|---|---|
+| weight-cast folding | `inductor_configs={"aot_inductor.use_runtime_constant_folding": True}` |
+| stride padding | an eager pre-pass over the model's 2D weights, before tracing |
+| constant folding | eager precomputation into buffers, before tracing |
+
+```python
+# Silently does nothing on this path despite sharing torch.compile's kwarg name.
+inductor_configs={"freezing": True}
+```
+
+Weight-cast folding is usually the largest of the three when weights are stored in a
+different precision from the one they compute in. If they are already in the compute
+precision there are no casts to fold, so measure it rather than assuming it is free.
+
+**Put the compile call inside `no_grad` too, not just the export call.** Inductor
+selects its freezing compiler only when `config.freezing and not
+torch.is_grad_enabled()`, so with grad enabled the config is accepted and quietly
+dropped — presenting as "freezing didn't help" while costing the real lever.
+
+#### The operator owns the dynamic ranges
+
+The `aoti.dynamic_dims` entries are **not** suggestions and **not** a starting point
+to refine. Each bound is baked into the artifact permanently; an input outside it is
+a hard runtime failure in deployment, not a fallback. Do not widen a range to make an
+export succeed, do not narrow one because the benchmark never exercises it, and do
+not add a dimension the operator did not list — with `pin_all_others` set, every
+other dimension is static by declaration.
+
+If an export cannot satisfy a declared range, that is a finding to report, not a
+constraint to edit. A model that compiles at a fixed shape and fails dynamically is
+usually telling you about the compiler rather than the model; a targeted
+`torch._check` at the site where the awkward dimension is created often clears it.
+
+#### Traps specific to this category
+
+- **Write the package somewhere per-process.** Every candidate is a different module,
+  so a `.pt2` at a path stable across candidates means the next one measures the last
+  one's artifact — silently, with no error anywhere. The harness already runs each
+  candidate with `cwd` set to a fresh temp dir it deletes afterwards, so the safe thing
+  is also the default:
+
+  ```python
+  package_path = os.path.join(tempfile.mkdtemp(), "model.pt2")   # or relative to cwd
+  ```
+
+  Do not reach for `HYPERLOOM_CACHE_DIR` to skip the compile, and do not guard a stable
+  path with a hand-bumped version constant — that is a correctness invariant resting on
+  someone remembering.
+
+- **The accuracy gate must run against the artifact**, never against the Python model
+  that produced it. Export involves wrapper code, patched methods and custom ops, all
+  of which can be wrong in ways tracing does not catch.
+- **Parity thresholds are tensor-dependent.** A global cosine gate tuned for a small
+  well-conditioned output is the wrong instrument for raw hidden states, where a soundly
+  exported model can score ~0.94. Judge by the workload's own gate.
+- **Benchmark symmetry.** If the eager path redoes per-call host-side preprocessing
+  that the exported signature structurally cannot include, the comparison is rigged in
+  the artifact's favour. Feed both paths the same prepared tensors.
+- **Autotuning is not forbidden here, but it has crashed at runtime** after compiling
+  cleanly. It is a loud, cheap failure — try it if the search wants to, and discard the
+  candidate if it faults.
+- **A fixed Python loop unrolls.** Exporting a sampler that runs `n` denoising steps
+  emits `n` copies of the step graph. Weights stay shared constants; kernel code does
+  not. Expect long compiles and a large package, and treat that as the dominant cost.
+
+Switch discipline below applies unchanged: gate the export path behind its own
+default-off switch so the unset environment runs the original eager code.
+
+**Do not reuse a name the search is already setting as a benchmark env.** A name
+that is both a declared manifest switch and a search-lever `extra_envs` entry can
+be toggled by something other than the manifest, so integration refuses it — and
+drops the **entire** manifest, taking any valid sibling switch with it:
+
+```
+integrate_patch: framework switch manifest unusable
+  ! dropped 'HYPERLOOM_AOTI_EXPORT': already set by the benchmark
+    configuration, so the rewrite would be toggled by unrelated config
+```
+
+Observed on a real campaign, where it would have prevented the export switch from
+ever being scored. This is a different collision from the upstream-variable one in
+*Pitfalls* below: that one is about silently sharing a name with framework code,
+this one is about sharing it with the search's own levers. Pick a switch name that
+nothing else in the run sets, and check the effective benchmark config before
+settling on it.
+
 ## Cache-key recipe
 
 Every (a), (c) and (f) rewrite is a cache, and a cache with an incomplete key is

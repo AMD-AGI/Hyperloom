@@ -70,6 +70,7 @@ from hyperloom.inference_optimizer.grading import resolved_grading
 from hyperloom.orchestrator.measurement.runtime_findings import (
     CORRECTNESS_FIX_MAX_DROP_PCT,
     KEEP_REASON_CORRECTNESS_FIX,
+    KEEP_REASON_EXPORT_LANDED,
     correctness_fix_refusal,
     load_runtime_findings,
 )
@@ -1861,6 +1862,50 @@ def _inert_keep_reason(
     return "; ".join(bits)
 
 
+def _export_landing_keep(
+    *,
+    shared_state: Any,
+    graded: Any,
+    delta_pct: float | None,
+    accuracy_pass: bool | None,
+    acc_block: bool,
+) -> bool:
+    """Whether a correct-but-slower first export should KEEP anyway.
+
+    An eager configuration is not a deliverable once ``aoti.enabled`` is declared, so
+    the first export is accepted on correctness and becomes the grading anchor:
+    ``resolve_grading_anchor_tput`` prefers ``current_best`` over the baseline, so
+    phase two measures export against export with no further special casing.
+
+    Throughput is the *only* thing waived. The refusals below mirror
+    ``_correctness_fix_refusals``, the sibling carve-out: an operator's latency or
+    power budget is a declared constraint, not a preference, and an unverified or
+    incomparable measurement is not evidence that the export is correct.
+    """
+    # Imported here, not at module scope: the deployment and framework packages
+    # reach back into this one.
+    from ...deployment.single_file import module_uses_aoti
+    from ...framework.optimization_scope import aoti_config, optimization_file
+
+    if not isinstance(delta_pct, (int, float)):
+        return False
+    if not getattr(graded, "comparable", False) or getattr(graded, "veto_reason", ""):
+        return False
+    # None means no verdict was recorded, which is not the same as passing.
+    if acc_block or accuracy_pass is not True:
+        return False
+    if shared_state is None or bool(getattr(shared_state, "export_landed", False)):
+        return False
+    try:
+        config = aoti_config()
+    except ValueError:
+        return False
+    if config is None or not config.enabled:
+        return False
+    hook = optimization_file()
+    return hook is not None and module_uses_aoti(hook)
+
+
 class IntegratePatchExecutor:
     """ActionRunner for the ``integrate_patch`` action (PR-A4)."""
 
@@ -3650,6 +3695,7 @@ class IntegratePatchExecutor:
             and not graded.veto_reason
             and not acc_block
         )
+        export_landing = False
         resolves_finding = str(_done_field(done_payload, "resolves_finding") or "").strip()
         fix_refusals: list[str] = []
         correctness_fix = False
@@ -3666,6 +3712,22 @@ class IntegratePatchExecutor:
             if not fix_refusals:
                 gate_pass = correctness_fix = True
                 delta_pct = fix_delta_pct
+        # After the correctness-fix branch: a candidate that both exports and resolves a
+        # finding should be recorded as the fix, so the finding is not re-chased.
+        if not gate_pass and _export_landing_keep(
+            shared_state=shared_state,
+            graded=graded,
+            delta_pct=delta_pct,
+            accuracy_pass=accuracy_pass,
+            acc_block=acc_block,
+        ):
+            gate_pass = export_landing = True
+            log.warning(
+                "integrate_patch: accepting first ahead-of-time export at %+.2f%% (threshold %.2f%%); "
+                "later candidates grade against it",
+                delta_pct,
+                keep_threshold_pct,
+            )
         _ss_kb = extra.get("shared_state") or extra.get("state")
         acc_delta_pct = _accuracy_delta_pct(
             gate_evidence.get("accuracy"),
@@ -3974,9 +4036,14 @@ class IntegratePatchExecutor:
             "reason": (
                 f"correctness fix {resolves_finding} verified at {_fix_axis(graded)} delta {delta_pct:+.2f}%"
                 if correctness_fix
+                else f"first ahead-of-time export landed at {delta_pct:+.2f}% vs the eager baseline, "
+                f"which this workload cannot ship; later candidates are graded against this export"
+                if export_landing
                 else f"throughput delta {delta_pct:+.2f}% >= {keep_threshold_pct:.2f}%"
             ),
-            "keep_reason": KEEP_REASON_CORRECTNESS_FIX if correctness_fix else "",
+            "keep_reason": (
+                KEEP_REASON_CORRECTNESS_FIX if correctness_fix else KEEP_REASON_EXPORT_LANDED if export_landing else ""
+            ),
             "resolves_finding": resolves_finding if correctness_fix else "",
             "bench_result": bench_result,
             "workspace": str(output_root),
