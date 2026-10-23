@@ -63,15 +63,16 @@ Specialist branches explore optimizations in parallel; the integration branch me
 Each branch has K, the number of tests it may run at once. Within the hard caps you are given, decide:
 how many branches to open, each branch's K (the integration branch included), which specialist branches to stop and
 why, and whether the whole session should stop early.
-You may open branches at any call. opening is true only for the call that sizes the opening batch, which opens from
-the root commit, at least one branch unless user branches opened already (an agent's branch does not count). A
-branch opened at a later call starts from the integration head, briefed on its focus: the op it should speed up. Name
-the focus of each, or leave it out and the branch is briefed on the largest op of the integration head's latest
-profile, or on none when that head was never profiled. The opening batch is given no focus. free_branch_slots counts the branches you may open at this call having
-stopped nothing; a stop frees one more for the same answer, and branches beyond the slots left are not opened. Leaving
-a free slot unopened needs a reason; opening into it does not. pending lists the forks and repairs the rule gate asked
-for that wait for a slot, oldest first, with how long each has waited: a slot your stops free goes to them first and
-only the slots left open your branches. You do not admit them; stop a branch that is worth less than a pending one to let it start.
+You may open branches at any call. opening is true only for the call that sizes the opening batch, which opens from the
+root commit, at least one branch unless user branches opened already (an agent's branch does not count). A branch opened
+at a later call starts from the integration head, briefed on its focus: the op it should speed up. Name the focus of
+each, or leave it out and the branch is briefed on the largest op of the integration head's latest profile, or on none
+when that head was never profiled. The opening batch is given no focus. free_branch_slots counts the branches you may
+open at this call having stopped nothing; a stop frees one more for the same answer, and branches beyond the slots left
+are not opened. Leaving a free slot unopened needs a reason; opening into it does not. pending lists the forks and
+repairs the rule gate asked for that wait for a slot, oldest first, with how long each has waited: a slot your stops
+free goes to them first and only the slots left open your branches. You do not admit them; stop a branch that is worth
+less than a pending one to let it start.
 Spend the budget where the expected gain is highest: a branch whose frontier expected_gain_pct is low and that is not
 observing a slow-paying direction is a candidate to stop or to lower K; keep K where the gain is high.
 A branch's basis says what its expected gain rests on: its own trend, a prior from similar past sessions, the floor
