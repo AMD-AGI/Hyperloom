@@ -38,8 +38,8 @@ from kernelforge.tools.git import git, git_bytes
 from kernelforge.config import Config
 from kernelforge.evaluation.correctness.canonical import accept_candidate
 from kernelforge.evaluation.correctness.pipeline import run_validation_pipeline
-from kernelforge.loop.direction_ledger import DirectionLedger, direction_standings, keep_gains
-from kernelforge.loop.early_stop import EarlyStopPolicy, EarlyStopStanding, early_stop_standing, window_gain
+from kernelforge.loop.direction_ledger import DirectionLedger
+from kernelforge.loop.early_stop import EarlyStopPolicy, EarlyStopStanding, early_stop_standing
 from kernelforge.loop.experience import ExperienceLedger
 from kernelforge.loop.operator_inbox import OperatorInbox
 from kernelforge.orchestrator.direction_claims import parse_direction_line
@@ -3495,37 +3495,26 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             self._ledger_cache = DirectionLedger(self.state_store.root)
         return self._ledger_cache
 
-    def _iteration_results(self) -> list[dict]:
-        return [event for event in self.state_store.read_events() if event.get("type") == "iteration_result"]
-
-    def _direction_standings(self, ledger: DirectionLedger, results: list[dict] | None = None):
-        """Each direction's standing, and each KEEP's gain, folded from the iteration events."""
-        results = self._iteration_results() if results is None else results
-        gains = keep_gains(results, self.run_state.search_start_mean_case_speedup)
-        standings = direction_standings(
-            ledger.directions(), results, exhaust_after=self.ic.early_stop.exhaust_after, gains=gains
-        )
-        return standings, gains
-
     def _with_direction_ledger(self, context):
-        """Attach the ledger, and the rule that plans name their direction, to a planning context."""
-        ledger = self._ledger()
-        if ledger is None:
+        """Attach the ledger by expected gain, and the directions plans must pursue once progress is flat."""
+        standing = self._early_stop_standing()
+        if standing is None:
             return context
-        standings, _ = self._direction_standings(ledger)
-        return replace(context, direction_ledger=tuple(standing.to_view() for standing in standings))
+        return replace(
+            context,
+            direction_ledger=tuple(entry.to_view() for entry in standing.standings),
+            direction_focus=standing.focus,
+        )
 
     def _early_stop_standing(self) -> EarlyStopStanding | None:
         ledger = self._ledger()
         if ledger is None:
             return None
-        results = self._iteration_results()
-        standings, gains = self._direction_standings(ledger, results)
         return early_stop_standing(
             self.ic.early_stop,
-            standings,
-            gain=window_gain(results, gains, self.ic.early_stop.window_rounds),
-            audits=ledger.audits(),
+            ledger,
+            self.state_store.read_events(),
+            start_score=self.run_state.search_start_mean_case_speedup,
             lane_queue_empty=not self._lane_queue,
             inbox_pending=bool(OperatorInbox(self.ic.workspace_dir).pending()),
         )
@@ -3537,44 +3526,87 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         if ledger is not None:
             session_sink["direction_id"] = ledger.resolve_claim(parse_direction_line(plan_text), iteration=iteration)
 
-    def _direction_payload(self, ledger: DirectionLedger, mode: str) -> dict:
-        standings, _ = self._direction_standings(ledger)
+    def _direction_payload(self, standing: EarlyStopStanding, mode: str) -> dict:
         context = self._active_analysis_context
         refs = context.evidence_refs if context is not None else ()
+        window = standing.window
         return {
             "mode": mode,
             "ledger": [
-                standing.to_view()
-                | {"hypothesis": standing.direction.hypothesis, "retired": standing.direction.retired_reason}
-                for standing in standings
+                entry.to_view() | {"hypothesis": entry.direction.hypothesis, "retired": entry.direction.retired_reason}
+                for entry in standing.standings
             ],
+            "progress": {
+                "window_hours": round(window.hours, 2) if window else None,
+                "gain_pct": round(window.gain * 100, 2) if window else None,
+                "flat": standing.flat,
+            },
             "analysis_reports": [ref.path for ref in refs if ref.kind in {"analysis_summary", "analysis_bundle"}],
             "optimization_history": str(self.state_store.root / "optimization_history.md"),
+            "lessons": str(self.state_store.root / "lessons"),
             "program": (self.ic.program_md or "")[:3000],
             "knowledge_index": context.knowledge_index if context is not None else "",
         }
 
     async def _survey_directions_if_due(self, iteration: int) -> None:
         """List the directions once per Analysis commit (once in all, without Analysis)."""
-        ledger = self._ledger()
-        if ledger is None or self._direction_audit_fn is None:
+        standing = self._early_stop_standing()
+        if standing is None or self._direction_audit_fn is None:
             return
+        ledger = self._ledger()
         context = self._active_analysis_context
         commit = (context.evidence_commit or context.analysis_commit) if context is not None else "no-analysis"
         if ledger.surveyed(commit):
             return
-        found = await self._direction_audit_fn(
+        reply = await self._direction_audit_fn(
             "survey",
             workspace=self.ic.workspace_dir,
             iteration=iteration,
-            payload=self._direction_payload(ledger, "survey"),
+            payload=self._direction_payload(standing, "survey"),
         )
-        if found is None:
+        if reply is None:
             return
-        added = ledger.add(found, source="survey", iteration=iteration)
+        added = ledger.add(list(reply.new_directions), source="survey", iteration=iteration)
         ledger.mark_surveyed(commit)
         self.state_store.append_event(make_event("direction_added", iteration, source="survey", added=added))
         print(f"  [directions] survey added {len(added)}: {', '.join(added) or '-'}")
+
+    async def _replan_directions_if_due(self, iteration: int) -> None:
+        """Rank the directions still in play by the gain now expected of them, when the ranking has gone stale."""
+        standing = self._early_stop_standing()
+        if standing is None or not standing.replan_reason or self._direction_audit_fn is None:
+            return
+        ledger = self._ledger()
+        reply = await self._direction_audit_fn(
+            "replan",
+            workspace=self.ic.workspace_dir,
+            iteration=iteration,
+            payload=self._direction_payload(standing, "replan"),
+        )
+        if reply is None:
+            return
+        ranked = ledger.rank(list(reply.ranking))
+        retired = [
+            str(entry["id"])
+            for entry in reply.retire
+            if ledger.retire(str(entry.get("id") or ""), reason=str(entry["reason"]).strip(), iteration=iteration)
+        ]
+        added = ledger.add(list(reply.new_directions), source="replan", iteration=iteration)
+        ledger.record_replan(iteration=iteration, ranked=ranked, retired=retired, added=added)
+        self.state_store.append_event(
+            make_event(
+                "direction_replan",
+                iteration,
+                reason=standing.replan_reason,
+                ranked=ranked,
+                retired=retired,
+                added=added,
+            )
+        )
+        print(
+            f"  [directions] replan ({standing.replan_reason}): ranked {len(ranked)}, retired "
+            f"{', '.join(retired) or 'none'}, added {', '.join(added) or 'none'}"
+        )
 
     async def _audit_directions_if_due(self, iteration: int) -> None:
         """Before an early stop may fire, look once for directions the ledger lacks."""
@@ -3582,15 +3614,15 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         if standing is None or not standing.audit_due or self._direction_audit_fn is None:
             return
         ledger = self._ledger()
-        found = await self._direction_audit_fn(
+        reply = await self._direction_audit_fn(
             "audit",
             workspace=self.ic.workspace_dir,
             iteration=iteration,
-            payload=self._direction_payload(ledger, "audit"),
+            payload=self._direction_payload(standing, "audit"),
         )
-        if found is None:
+        if reply is None:
             return
-        added = ledger.add(found, source="audit", iteration=iteration)
+        added = ledger.add(list(reply.new_directions), source="audit", iteration=iteration)
         ledger.record_audit(iteration=iteration, ledger_size=len(ledger.directions()), added=added)
         self.state_store.append_event(make_event("direction_audit", iteration, added=added))
         print(f"  [directions] audit added {len(added)}: {', '.join(added) or 'none — the campaign may stop'}")
@@ -5705,9 +5737,9 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         if standing is not None and standing.stop:
             self.termination_reason = "directions_exhausted"
             print(
-                f"\nDIRECTIONS EXHAUSTED at iteration {iteration}: all {standing.directions} directions are mined "
-                f"out, the last {self.ic.early_stop.window_rounds} measured rounds gained {standing.window_gain:.2%}, "
-                "and the audit found no direction the ledger lacks"
+                f"\nDIRECTIONS EXHAUSTED at iteration {iteration}: the last {standing.window.hours:.1f} h of attempts "
+                f"gained {standing.window.gain:.2%}, no direction is still expected to gain "
+                f"{self.ic.early_stop.priority_gain * 100:g}% or more, and the audit found no direction the ledger lacks"
             )
             return True, None
         hazard: DeviceHazard | None = self.device_hazard.recheck(iteration)
@@ -6863,8 +6895,12 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             # the implementer (prompt history).
             digest = self.archive.render_digest()
 
+            # Close the round that just ended before the early-stop rule reads its time.
+            self._close_round()
+
             # Ruled on once per iteration, with the other conditions that decide whether this iteration may run at
             # all -- and after them, so a run that was stopping anyway never touches the device.
+            await self._replan_directions_if_due(iteration)
             await self._audit_directions_if_due(iteration)
             stop, hazard = self._stop_condition_met(iteration)
             if stop:

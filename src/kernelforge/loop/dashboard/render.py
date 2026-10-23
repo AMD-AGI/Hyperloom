@@ -435,37 +435,55 @@ def _directions_panel(snapshot: dict) -> str:
     rows = []
     for entry in ledger:
         role, glyph, label = _DIRECTION_STATUS.get(entry.get("status"), ("neutral", "?", "unknown"))
+        expected = entry.get("expected_gain_pct")
         rows.append(
             f"<tr><td>{escape(str(entry.get('id')))}</td><td>{escape(str(entry.get('title')))}</td>"
             f"<td>{escape(str(entry.get('category') or ''))}</td>"
             f"<td><span class='status'><span class='dot' style='background:var(--{role})'></span>{glyph} "
-            f"{escape(label)}</span></td><td class='num'>{entry.get('attempts', 0)}</td>"
+            f"{escape(label)}</span></td>"
+            f"<td class='num' title='{escape(str(entry.get('expected_gain_reason') or ''))}'>"
+            f"{_fmt(expected, '.1f') + '%' if expected is not None else 'unranked'}</td>"
+            f"<td class='num'>{entry.get('attempts', 0)}</td>"
             f"<td class='num'>{entry.get('keeps', 0)}</td><td class='num'>{_fmt(entry.get('gain_pct'), '.2f')}%</td>"
             f"<td>{escape(str(entry.get('source') or ''))}</td></tr>"
         )
     policy, standing = directions.get("policy") or {}, directions.get("standing") or {}
-    unmet = standing.get("unmet") or []
+    window_hours = float(policy.get("window_hours") or 0)
+    rule = (
+        f"Early stop: the last {window_hours:g} h of attempts gain under {float(policy.get('min_gain') or 0) * 100:g}%, "
+        f"no direction is still expected to gain {float(policy.get('priority_gain') or 0) * 100:g}% or more, and an "
+        "audit finds nothing new."
+    )
+    if standing.get("window_hours") is None:
+        now = f"Now: under {window_hours:g} h of attempts so far."
+    else:
+        now = f"Now: {_fmt((standing.get('window_gain') or 0) * 100, '.2f')}% over {standing['window_hours']:.1f} h."
     if standing.get("criteria_met"):
-        verdict = "every criterion holds: " + (
-            "an audit for missed directions runs next" if standing.get("audit_due") else "the audit found nothing new"
+        verdict = "Every criterion holds: " + (
+            "an audit for missed directions runs next." if standing.get("audit_due") else "the audit found nothing new."
         )
     else:
-        verdict = "not yet: " + "; ".join(unmet)
-    audits = directions.get("audits") or []
+        verdict = "Not yet: " + "; ".join(standing.get("unmet") or []) + "."
+    focus = standing.get("focus") or []
+    focus_text = f" Progress is flat, so plans must pursue: {', '.join(focus)}." if focus else ""
+    replans, audits = directions.get("replans") or [], directions.get("audits") or []
+    last_replan = (
+        f"Last replan at iteration {replans[-1].get('iteration')}: ranked {len(replans[-1].get('ranked') or [])}, "
+        f"retired {len(replans[-1].get('retired') or [])}, added {len(replans[-1].get('added') or [])}."
+        if replans
+        else "No replan yet."
+    )
     last_audit = (
-        f"last audit at iteration {audits[-1].get('iteration')} added {len(audits[-1].get('added') or [])}"
+        f"Last audit at iteration {audits[-1].get('iteration')} added {len(audits[-1].get('added') or [])}."
         if audits
-        else "no audit yet"
+        else "No audit yet."
     )
-    head = (
-        f"early stop needs ≥{policy.get('min_directions')} directions, all mined out or ruled out, and the last "
-        f"{policy.get('window_rounds')} measured rounds under {float(policy.get('min_gain') or 0):.0%} gain "
-        f"(now {_fmt((standing.get('window_gain') or 0) * 100, '.2f')}%). {verdict}. {last_audit}."
-    )
+    head = f"{rule} {now} {verdict}{focus_text} {last_replan} {last_audit}"
     return (
         f"<div class='card'><h2>Directions ({len(ledger)})</h2><div class='sub'>{escape(head)}</div>"
-        "<table><tr><th>id</th><th>direction</th><th>category</th><th>status</th><th class='num'>tries</th>"
-        f"<th class='num'>keeps</th><th class='num'>gain</th><th>from</th></tr>{''.join(rows)}</table></div>"
+        "<table><tr><th>id</th><th>direction</th><th>category</th><th>status</th><th class='num'>expected</th>"
+        "<th class='num'>tries</th><th class='num'>keeps</th><th class='num'>gain</th><th>from</th></tr>"
+        f"{''.join(rows)}</table></div>"
     )
 
 

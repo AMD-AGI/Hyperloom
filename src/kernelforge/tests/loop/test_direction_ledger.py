@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The direction ledger and the early stop it feeds: attribution, standings, the rule, and the audit."""
+"""The direction ledger and the early stop it feeds: attribution, standings, ranking, the rule, and the audit."""
 
 from __future__ import annotations
 
@@ -19,25 +19,34 @@ from kernelforge.loop.direction_ledger import (
     KEPT,
     OPEN,
     DirectionLedger,
+    by_priority,
     direction_standings,
     keep_gains,
 )
-from kernelforge.loop.early_stop import EarlyStopPolicy, EarlyStopStanding, early_stop_standing, window_gain
+from kernelforge.loop.early_stop import EarlyStopPolicy, EarlyStopStanding, TimeWindow, early_stop_standing, time_window
 from kernelforge.loop.operator_inbox import post_message
 from kernelforge.loop.runner import IterationLoop
 from kernelforge.orchestrator.contracts import CaseEvidence, OrchestrationContext
-from kernelforge.orchestrator.direction_audit import parse_new_directions
+from kernelforge.orchestrator.direction_audit import DirectionReply, parse_reply
 from kernelforge.orchestrator.direction_claims import DirectionClaim, parse_direction_line
 
 
-def _event(iteration: int, decision: str, best: float, direction: str = "") -> dict:
-    return {
+def _event(iteration: int, decision: str, best: float, direction: str = "", *, timed: bool = True) -> dict:
+    """An iteration result; ``timed`` False is a REVERT_PERF whose bench failed, which carries no score."""
+    event = {
         "type": "iteration_result",
         "iter": iteration,
         "decision": decision,
         "best_after_mean_case_speedup": best,
         "direction_id": direction or None,
     }
+    if timed and decision in {"KEEP", "REVERT_PERF"}:
+        event["mean_case_speedup"] = best
+    return event
+
+
+def _cost(iteration: int, hours: float) -> dict:
+    return {"type": "round_cost", "iter": iteration, "total_sec": hours * 3600}
 
 
 @pytest.mark.parametrize(
@@ -86,7 +95,8 @@ def test_standings_fold_from_the_events_that_name_each_direction(tmp_path: Path)
         _event(2, "KEEP", 1.10, "kept"),
         _event(3, "API_ERROR", 1.10, "exhausted"),
         _event(4, "REVERT_PERF", 1.10, "exhausted"),
-        _event(5, "BUILD_FAILED", 1.10, "exhausted"),
+        _event(5, "REVERT_PERF", 1.10, "exhausted", timed=False),
+        _event(6, "BUILD_FAILED", 1.10, "exhausted"),
     ]
     gains = keep_gains(results, 1.0)
     standings = {
@@ -99,94 +109,159 @@ def test_standings_fold_from_the_events_that_name_each_direction(tmp_path: Path)
         "exhausted": EXHAUSTED,
         "ruled-out": INFEASIBLE,
     }
-    assert standings["exhausted"].attempts == 2  # the API error tried nothing
+    # The API error and the failed bench tested nothing.
+    assert standings["exhausted"].attempts == 2
     assert standings["kept"].gain == pytest.approx(0.10)
 
 
-def test_the_window_gain_counts_only_measured_rounds() -> None:
+def test_the_window_reaches_back_over_hours_of_rounds_that_tested_something() -> None:
     results = [
-        _event(1, "KEEP", 1.10),
-        _event(2, "BUILD_FAILED", 1.10),
-        _event(3, "REVERT_PERF", 1.10),
-        _event(4, "KEEP", 1.111),
+        _event(1, "KEEP", 1.05),
+        _event(2, "KEEP", 1.10),  # a queued lane of round 1: no round of its own
+        _event(3, "REVERT_PERF", 1.10, timed=False),
+        _event(4, "API_ERROR", 1.10),
+        _event(5, "REVERT_PERF", 1.10),
     ]
+    costs = [_cost(1, 2.0), _cost(3, 5.0), _cost(4, 5.0), _cost(5, 1.0)]
     gains = keep_gains(results, 1.0)
-    assert window_gain(results, gains, 2) == pytest.approx(0.01)
-    assert window_gain(results, gains, 4) is None
+    window = time_window(results, costs, gains, 3.0)
+    assert (window.hours, window.rounds) == (3.0, 2)
+    assert window.gain == pytest.approx(0.10)
+    assert time_window(results, costs, gains, 1.0).gain == 0.0
+    assert time_window(results, costs, gains, 3.5) is None
 
 
-def _standings(tmp_path: Path, statuses_exhausted: bool = True):
+def test_the_ledger_is_ordered_by_expected_gain_with_the_unranked_and_the_spent_after(tmp_path: Path) -> None:
     ledger = DirectionLedger(tmp_path)
-    ledger.add([{"title": "a"}, {"title": "b"}], source="s", iteration=0)
-    results = [_event(1, "REVERT_PERF", 1.0, "a"), _event(2, "REVERT_PERF", 1.0, "a")]
-    if statuses_exhausted:
-        results += [_event(3, "REVERT_PERF", 1.0, "b"), _event(4, "REVERT_PERF", 1.0, "b")]
-    return direction_standings(ledger.directions(), results, exhaust_after=2)
+    ledger.add(
+        [
+            {"title": "low", "expected_gain_pct": 1},
+            {"title": "unranked"},
+            {"title": "high", "expected_gain_pct": 6, "reason": "the profile shows idle CUs"},
+            {"title": "spent", "expected_gain_pct": 9},
+        ],
+        source="survey",
+        iteration=0,
+    )
+    results = [_event(1, "REVERT_PERF", 1.0, "spent"), _event(2, "REVERT_PERF", 1.0, "spent")]
+    ordered = by_priority(direction_standings(ledger.directions(), results, exhaust_after=2))
+    assert [s.direction.id for s in ordered] == ["high", "low", "unranked", "spent"]
+    assert ordered[0].to_view()["expected_gain_pct"] == 6.0
+    assert ordered[0].to_view()["expected_gain_reason"] == "the profile shows idle CUs"
 
 
-def _rule(standings, *, gain=0.0, audits=(), queue_empty=True, inbox=False, enabled=True, min_directions=2):
-    policy = EarlyStopPolicy(enabled=enabled, min_directions=min_directions, window_rounds=2, min_gain=0.02)
+def _flat(tmp_path: Path) -> tuple[DirectionLedger, list[dict]]:
+    """Four flat hours on two directions now mined out and ranked below the bar, ranked after the last attempt."""
+    ledger = DirectionLedger(tmp_path)
+    ledger.add([{"title": t, "expected_gain_pct": 1} for t in ("a", "b")], source="survey", iteration=0)
+    events = []
+    for iteration, direction in ((1, "a"), (2, "a"), (3, "b"), (4, "b")):
+        events += [_cost(iteration, 1.0), _event(iteration, "REVERT_PERF", 1.0, direction)]
+    ledger.record_replan(iteration=5, ranked=["a", "b"], retired=[], added=[])
+    return ledger, events
+
+
+def _rule(ledger, events, *, queue_empty=True, inbox=False, **policy) -> EarlyStopStanding:
     return early_stop_standing(
-        policy, standings, gain=gain, audits=list(audits), lane_queue_empty=queue_empty, inbox_pending=inbox
+        EarlyStopPolicy(**({"enabled": True} | policy)),
+        ledger,
+        events,
+        start_score=1.0,
+        lane_queue_empty=queue_empty,
+        inbox_pending=inbox,
     )
 
 
 def test_the_rule_asks_for_an_audit_before_it_stops(tmp_path: Path) -> None:
-    standings = _standings(tmp_path)
-    first = _rule(standings)
+    ledger, events = _flat(tmp_path)
+    first = _rule(ledger, events)
     assert first.criteria_met and first.audit_due and not first.stop
-    after_empty_audit = _rule(standings, audits=[{"iteration": 5, "ledger_size": 2, "added": []}])
+    ledger.record_audit(iteration=5, ledger_size=2, added=[])
+    after_empty_audit = _rule(ledger, events)
     assert after_empty_audit.stop and not after_empty_audit.audit_due
 
 
 def test_an_audit_that_found_directions_rearms_the_rule(tmp_path: Path) -> None:
-    standings = _standings(tmp_path)
-    found = [{"iteration": 5, "ledger_size": 2, "added": ["c"]}]
-    assert _rule(standings, audits=found).audit_due and not _rule(standings, audits=found).stop
+    ledger, events = _flat(tmp_path)
+    ledger.record_audit(iteration=5, ledger_size=2, added=["c"])
+    assert _rule(ledger, events).audit_due and not _rule(ledger, events).stop
     # An audit against a smaller ledger no longer counts.
-    stale = [{"iteration": 5, "ledger_size": 1, "added": []}]
-    assert _rule(standings, audits=stale).audit_due
+    ledger, events = _flat(tmp_path / "stale")
+    ledger.record_audit(iteration=5, ledger_size=1, added=[])
+    assert _rule(ledger, events).audit_due
 
 
 @pytest.mark.parametrize(
     "overrides",
     [
         {"enabled": False},
-        {"gain": 0.05},
-        {"gain": None},
+        {"min_gain": 0.0},
+        {"window_hours": 5.0},
         {"queue_empty": False},
         {"inbox": True},
-        {"min_directions": 3},
     ],
 )
 def test_any_unmet_criterion_holds_the_campaign(tmp_path: Path, overrides: dict) -> None:
-    standing = _rule(_standings(tmp_path), audits=[{"iteration": 5, "ledger_size": 2, "added": []}], **overrides)
+    ledger, events = _flat(tmp_path)
+    ledger.record_audit(iteration=5, ledger_size=2, added=[])
+    standing = _rule(ledger, events, **overrides)
     assert not standing.stop and not standing.audit_due
 
 
-def test_a_direction_not_yet_mined_out_holds_the_campaign(tmp_path: Path) -> None:
-    standing = _rule(_standings(tmp_path, statuses_exhausted=False))
+def test_a_direction_still_worth_the_bar_holds_the_campaign_and_once_flat_is_where_plans_go(tmp_path: Path) -> None:
+    ledger, events = _flat(tmp_path)
+    ledger.add([{"title": "c", "expected_gain_pct": 5}], source="audit", iteration=5)
+    standing = _rule(ledger, events)
+    assert standing.promising == ("c",) and standing.focus == ("c",)
     assert not standing.criteria_met
-    assert "1 directions not yet exhausted" in standing.reasons
+    assert "1 directions still expected to gain 3% or more, or unranked" in standing.reasons
+    # Before progress is flat the ledger only orders the plans.
+    assert _rule(ledger, [*events, _cost(5, 1.0), _event(5, "KEEP", 1.05, "c")]).focus == ()
 
 
-def test_only_evidenced_directions_survive_an_audit_reply(tmp_path: Path) -> None:
+def test_an_unranked_direction_holds_the_campaign_until_a_replan_ranks_it(tmp_path: Path) -> None:
+    ledger, events = _flat(tmp_path)
+    ledger.add([{"title": "d"}], source="planner", iteration=5)
+    standing = _rule(ledger, events)
+    assert standing.replan_reason == "1 directions not yet ranked" and standing.promising == ("d",)
+    ledger.rank([{"id": "d", "expected_gain_pct": 0.5}])
+    assert _rule(ledger, events).criteria_met
+
+
+def test_a_replan_falls_due_every_few_attempts_and_after_each_flat_one(tmp_path: Path) -> None:
+    ledger, events = _flat(tmp_path)
+    assert _rule(ledger, events).replan_reason == ""
+    flat_attempt = [*events, _cost(5, 1.0), _event(5, "REVERT_PERF", 1.0, "a")]
+    assert _rule(ledger, flat_attempt).replan_reason.startswith("progress is flat")
+    growing = [*events, _cost(5, 1.0), _event(5, "KEEP", 1.2, "a")]
+    assert _rule(ledger, growing).replan_reason == ""
+    growing += [_cost(i, 1.0) for i in (6, 7, 8)] + [_event(i, "REVERT_PERF", 1.2, "a") for i in (6, 7, 8)]
+    assert _rule(ledger, growing).replan_reason == "4 attempts since the last ranking"
+
+
+def test_replies_keep_evidenced_directions_and_retirements_that_say_why(tmp_path: Path) -> None:
     (tmp_path / "report.md").write_text("evidence")
+    evidence = [str(tmp_path / "report.md")]
     reply = (
         "Reasoning.\n```json\n"
         + json.dumps(
             {
+                "ranking": [{"id": "a", "expected_gain_pct": 4, "reason": "headroom"}],
+                "retire": [{"id": "b", "reason": "duplicate of a"}, {"id": "c", "reason": " "}],
                 "new_directions": [
-                    {"title": "kept", "evidence": [str(tmp_path / "report.md")]},
+                    {"title": "kept", "evidence": evidence},
                     {"title": "dropped", "evidence": ["/no/such/file"]},
-                    {"title": "", "evidence": [str(tmp_path / "report.md")]},
-                ]
+                    {"title": "", "evidence": evidence},
+                ],
             }
         )
         + "\n```"
     )
-    assert [entry["title"] for entry in parse_new_directions(reply, workspace=tmp_path)] == ["kept"]
-    assert parse_new_directions("no json", workspace=tmp_path) == []
+    parsed = parse_reply(reply, workspace=tmp_path)
+    assert [entry["title"] for entry in parsed.new_directions] == ["kept"]
+    assert [entry["id"] for entry in parsed.retire] == ["b"]
+    assert parsed.ranking == ({"id": "a", "expected_gain_pct": 4, "reason": "headroom"},)
+    assert parse_reply("no json", workspace=tmp_path) == DirectionReply()
 
 
 def _context(**overrides) -> OrchestrationContext:
@@ -205,7 +280,9 @@ def _context(**overrides) -> OrchestrationContext:
 def test_planners_see_the_ledger_and_the_rule_only_with_early_stop() -> None:
     assert "directions" not in _context().to_prompt_dict()
     payload = _context(direction_ledger=()).to_prompt_dict()["directions"]
-    assert payload["ledger"] == [] and payload["rule"].startswith("Begin every plan")
+    assert payload["ledger"] == [] and payload["rule"].startswith("Begin every plan") and "focus" not in payload
+    focus = _context(direction_ledger=(), direction_focus=("c",)).to_prompt_dict()["directions"]["focus"]
+    assert focus["ids"] == ["c"] and "every plan pursues one of them" in focus["rule"]
 
 
 def _loop(tmp_path: Path, **overrides) -> SimpleNamespace:
@@ -219,6 +296,7 @@ def _loop(tmp_path: Path, **overrides) -> SimpleNamespace:
         run_state=SimpleNamespace(search_start_mean_case_speedup=1.0),
         _ledger=lambda: ledger,
         _active_analysis_context=None,
+        _direction_payload=lambda standing, mode: {"mode": mode},
         events=events,
     )
     return SimpleNamespace(**(values | overrides))
@@ -234,16 +312,48 @@ def test_a_candidate_is_attributed_to_the_direction_its_plan_names(tmp_path: Pat
     assert sink["direction_id"] == "direct-stores"
 
 
+async def test_a_replan_sets_expected_gains_retires_and_adds_and_a_failed_one_changes_nothing(tmp_path: Path) -> None:
+    (tmp_path / "report.md").write_text("evidence")
+    replies = [
+        None,
+        DirectionReply(
+            ranking=(
+                {"id": "a", "expected_gain_pct": 4, "reason": "headroom"},
+                {"id": "unknown", "expected_gain_pct": 9},
+                {"id": "b", "expected_gain_pct": "high"},
+            ),
+            retire=({"id": "b", "reason": "duplicate of a"},),
+            new_directions=({"title": "c", "expected_gain_pct": 2.5, "evidence": [str(tmp_path / "report.md")]},),
+        ),
+    ]
+
+    async def replan(mode, *, workspace, iteration, payload):
+        assert mode == "replan" and payload["mode"] == "replan"
+        return replies.pop(0)
+
+    loop = _loop(tmp_path, _direction_audit_fn=replan)
+    loop._ledger().add([{"title": "a"}, {"title": "b"}], source="survey", iteration=1)
+    loop._early_stop_standing = lambda: SimpleNamespace(replan_reason="2 directions not yet ranked")
+    await IterationLoop._replan_directions_if_due(loop, 6)
+    assert loop._ledger().replans() == [] and loop.events == []
+    await IterationLoop._replan_directions_if_due(loop, 7)
+    directions = {d.id: d for d in DirectionLedger(tmp_path / "forge_experiments").directions()}
+    assert directions["a"].priority == pytest.approx(0.04) and directions["a"].priority_reason == "headroom"
+    assert directions["b"].retired_reason == "duplicate of a" and directions["b"].priority is None
+    assert directions["c"].priority == pytest.approx(0.025) and directions["c"].source == "replan"
+    assert loop._ledger().replans() == [{"iteration": 7, "ranked": ["a"], "retired": ["b"], "added": ["c"]}]
+    assert loop.events[-1]["type"] == "direction_replan"
+
+
 async def test_an_empty_audit_is_recorded_and_a_failed_one_is_not(tmp_path: Path) -> None:
-    replies = [None, []]
+    replies = [None, DirectionReply()]
 
     async def audit(mode, *, workspace, iteration, payload):
         assert mode == "audit" and payload["mode"] == "audit"
         return replies.pop(0)
 
     loop = _loop(tmp_path, _direction_audit_fn=audit)
-    loop._early_stop_standing = lambda: EarlyStopStanding(2, 2, 0.0, True, True, False, ())
-    loop._direction_payload = lambda ledger, mode: {"mode": mode}
+    loop._early_stop_standing = lambda: SimpleNamespace(audit_due=True)
     await IterationLoop._audit_directions_if_due(loop, 7)
     assert loop._ledger().audits() == []
     await IterationLoop._audit_directions_if_due(loop, 8)
@@ -252,13 +362,14 @@ async def test_an_empty_audit_is_recorded_and_a_failed_one_is_not(tmp_path: Path
 
 
 def test_the_loop_stops_as_directions_exhausted(tmp_path: Path) -> None:
+    standing = EarlyStopStanding((), TimeWindow(3.2, 4, 0.004), True, (), "", True, False, True, ())
     loop = _loop(
         tmp_path,
         _is_gate_met=lambda: False,
         _is_roofline_target_met=lambda: False,
         _is_budget_exhausted=lambda: False,
         _is_force_stopped=lambda: False,
-        _early_stop_standing=lambda: EarlyStopStanding(10, 10, 0.004, True, False, True, ()),
+        _early_stop_standing=lambda: standing,
         termination_reason="",
     )
     loop.run_state = SimpleNamespace(orchestration_circuit_state="CLOSED")
@@ -268,18 +379,18 @@ def test_the_loop_stops_as_directions_exhausted(tmp_path: Path) -> None:
 
 def test_a_pending_operator_message_is_seen_by_the_rule(tmp_path: Path) -> None:
     loop = _loop(tmp_path, _lane_queue=[])
-    loop._direction_standings = lambda ledger, results=None: IterationLoop._direction_standings(loop, ledger, results)
-    loop._iteration_results = list
     post_message(tmp_path, "keep going")
     assert "operator messages not yet read" in IterationLoop._early_stop_standing(loop).reasons
 
 
-def test_the_dashboard_shows_the_ledger_and_the_rule(tmp_path: Path) -> None:
+def test_the_dashboard_shows_the_ranked_ledger_and_the_rule(tmp_path: Path) -> None:
     loop = _loop(tmp_path)
-    loop._ledger().add([{"title": "Split K"}], source="survey", iteration=1)
+    loop._ledger().add([{"title": "Split K", "expected_gain_pct": 4}], source="survey", iteration=1)
     root = tmp_path / "forge_experiments"
     (root / "events.jsonl").write_text(json.dumps(_event(1, "REVERT_PERF", 1.0, "split-k")) + "\n")
+    # A render of an older campaign carries thresholds the policy no longer has.
     live = LiveStatus(status="running", early_stop={"enabled": True, "min_directions": 10})
     html = publish_dashboard(root, live).read_text()
-    assert "Directions (1)" in html and "Split K" in html
-    assert "1 directions known, 10 required" in html
+    assert "Directions (1)" in html and "Split K" in html and "4.0%" in html
+    assert "Early stop: the last 3 h of attempts gain under 2%" in html
+    assert "Now: under 3 h of attempts so far." in html

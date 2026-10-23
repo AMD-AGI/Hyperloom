@@ -12,8 +12,14 @@ from dataclasses import dataclass
 DIRECTION_RULE = (
     "Begin every plan (and every lane's plan) with one line naming the direction it pursues: "
     "`Direction: <id>` for a direction in this ledger, or `Direction: new | <category> | <title>` for one it "
-    "does not list. Prefer OPEN directions, then ACTIVE and KEPT ones; an EXHAUSTED direction has failed "
-    "repeatedly since its last KEEP and needs new evidence before it is tried again."
+    "does not list. The ledger is ordered by expected_gain_pct, the gain a replan last expected from a "
+    "direction's next attempt; prefer the highest among the OPEN, ACTIVE and KEPT ones. An EXHAUSTED direction "
+    "has failed repeatedly since its last KEEP and needs new evidence before it is tried again."
+)
+
+DIRECTION_FOCUS_RULE = (
+    "The best score has barely moved over the last hours of attempts. Until these directions are tried out or "
+    "ranked below the bar, every plan pursues one of them, highest expected gain first."
 )
 
 _CLAIM_RE = re.compile(r"^\W*direction\W*:\s*(.+?)\s*$", re.IGNORECASE)

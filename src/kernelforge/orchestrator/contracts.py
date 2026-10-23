@@ -8,7 +8,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from kernelforge.orchestrator.direction_claims import DIRECTION_RULE
+from kernelforge.orchestrator.direction_claims import DIRECTION_FOCUS_RULE, DIRECTION_RULE
 
 
 _IDENTIFIER_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
@@ -253,8 +253,10 @@ class OrchestrationContext:
     roofline: CampaignRoofline | None = None
     # Standing operator messages, newest first (``forge-say``).
     operator_guidance: tuple[str, ...] = ()
-    # The direction ledger's standings while early stop is on; None leaves the payload as it was.
+    # The direction ledger's standings by expected gain while early stop is on; None leaves the payload as it was.
     direction_ledger: tuple[dict, ...] | None = None
+    # Once progress is flat, the ids of the directions still expected to clear the bar: every plan pursues one.
+    direction_focus: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         _text(self.analysis_commit, "context.analysis_commit")
@@ -400,6 +402,8 @@ class OrchestrationContext:
             }
         if self.direction_ledger is not None:
             payload["directions"] = {"rule": DIRECTION_RULE, "ledger": list(self.direction_ledger)}
+            if self.direction_focus:
+                payload["directions"]["focus"] = {"rule": DIRECTION_FOCUS_RULE, "ids": list(self.direction_focus)}
         return payload
 
 

@@ -3,10 +3,10 @@
 
 """The campaign's optimization directions, and how far each has been mined.
 
-``forge_experiments/directions.json`` holds what cannot be derived: each direction's definition, the ones retired
-with evidence, which Analysis commits have been surveyed, and the audits run. How far a direction has been mined
-is folded from the ``iteration_result`` events that name it, so a resume or an event replay can never leave the
-two disagreeing.
+``forge_experiments/directions.json`` holds what cannot be derived: each direction's definition, the gain a
+replan last expected from it, the ones retired with evidence, which Analysis commits have been surveyed, and the
+replans and audits run. How far a direction has been mined is folded from the ``iteration_result`` events that name
+it, so a resume or an event replay can never leave the two disagreeing.
 """
 
 from __future__ import annotations
@@ -39,6 +39,16 @@ ATTEMPT_DECISIONS = frozenset(
 )
 
 
+def measured(event: dict) -> bool:
+    """Whether an iteration's candidate was timed: a REVERT_PERF whose bench failed carries no score."""
+    return event.get("decision") in {"KEEP", "REVERT_PERF"} and event.get("mean_case_speedup") is not None
+
+
+def attempted(event: dict) -> bool:
+    """Whether an iteration tested its direction. A bench that failed says nothing about it, like a provider error."""
+    return event.get("decision") in ATTEMPT_DECISIONS and (event.get("decision") != "REVERT_PERF" or measured(event))
+
+
 @dataclass(frozen=True)
 class Direction:
     """One optimization direction: what it is, why it is believed, and who proposed it."""
@@ -47,12 +57,14 @@ class Direction:
     title: str
     category: str = ""
     hypothesis: str = ""
-    expected_gain: str = ""
     evidence: tuple[str, ...] = ()
     source: str = ""
     added_iteration: int = 0
     retired_reason: str = ""
     retired_iteration: int = 0
+    # The fraction its next attempt is expected to raise the best score by, and why; None until ranked.
+    priority: float | None = None
+    priority_reason: str = ""
 
 
 @dataclass(frozen=True)
@@ -76,7 +88,25 @@ class DirectionStanding:
             "keeps": self.keeps,
             "attempts_since_keep": self.attempts_since_keep,
             "gain_pct": round(self.gain * 100, 2),
+            "expected_gain_pct": round(self.direction.priority * 100, 2)
+            if self.direction.priority is not None
+            else None,
+            "expected_gain_reason": self.direction.priority_reason,
         }
+
+    @property
+    def in_play(self) -> bool:
+        return self.status not in TERMINAL
+
+
+def by_priority(standings: tuple[DirectionStanding, ...]) -> tuple[DirectionStanding, ...]:
+    """Directions still in play first, by expected gain with the unranked after; mined out and ruled out last."""
+
+    def key(standing: DirectionStanding) -> tuple:
+        priority = standing.direction.priority
+        return (not standing.in_play, priority is None, -(priority or 0.0))
+
+    return tuple(sorted(standings, key=key))
 
 
 def _slug(text: str) -> str:
@@ -85,6 +115,14 @@ def _slug(text: str) -> str:
 
 def _normalized(title: str) -> str:
     return re.sub(r"\s+", " ", title.lower()).strip()
+
+
+def expected_fraction(entry: dict) -> float | None:
+    """An agent's ``expected_gain_pct`` as a fraction, or None when it gave no non-negative number."""
+    value = entry.get("expected_gain_pct")
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+        return None
+    return float(value) / 100.0
 
 
 class DirectionLedger:
@@ -101,6 +139,7 @@ class DirectionLedger:
             data = {}
         data.setdefault("directions", [])
         data.setdefault("surveyed_commits", [])
+        data.setdefault("replans", [])
         data.setdefault("audits", [])
         return data
 
@@ -132,10 +171,11 @@ class DirectionLedger:
                 title=title,
                 category=str(seed.get("category") or "").strip(),
                 hypothesis=str(seed.get("hypothesis") or "").strip(),
-                expected_gain=str(seed.get("expected_gain") or "").strip(),
                 evidence=tuple(str(item) for item in seed.get("evidence") or ()),
                 source=source,
                 added_iteration=iteration,
+                priority=expected_fraction(seed),
+                priority_reason=str(seed.get("reason") or "").strip(),
             )
             self._data["directions"].append(asdict(direction))
             known.add(_normalized(title))
@@ -168,6 +208,20 @@ class DirectionLedger:
                 return True
         return False
 
+    def rank(self, ranking: list[dict]) -> list[str]:
+        """Set the expected gain of each ranked direction the ledger holds; return the ids it set."""
+        by_id = {raw.get("id"): raw for raw in self._data["directions"]}
+        ranked = []
+        for entry in ranking:
+            raw, priority = by_id.get(str(entry.get("id") or "")), expected_fraction(entry)
+            if raw is None or priority is None:
+                continue
+            raw["priority"], raw["priority_reason"] = priority, str(entry.get("reason") or "").strip()
+            ranked.append(raw["id"])
+        if ranked:
+            self._save()
+        return ranked
+
     def surveyed(self, commit: str) -> bool:
         return commit in self._data["surveyed_commits"]
 
@@ -175,6 +229,13 @@ class DirectionLedger:
         if commit and commit not in self._data["surveyed_commits"]:
             self._data["surveyed_commits"].append(commit)
             self._save()
+
+    def replans(self) -> list[dict]:
+        return list(self._data["replans"])
+
+    def record_replan(self, *, iteration: int, ranked: list[str], retired: list[str], added: list[str]) -> None:
+        self._data["replans"].append({"iteration": iteration, "ranked": ranked, "retired": retired, "added": added})
+        self._save()
 
     def audits(self) -> list[dict]:
         return list(self._data["audits"])
@@ -209,7 +270,7 @@ def direction_standings(
     tallies = {d.id: [0, 0, 0, 1.0] for d in directions}  # attempts, keeps, since keep, gain product
     for event in results:
         tally = tallies.get(str(event.get("direction_id") or ""))
-        if tally is None or event.get("decision") not in ATTEMPT_DECISIONS:
+        if tally is None or not attempted(event):
             continue
         tally[0] += 1
         if event.get("decision") == "KEEP":

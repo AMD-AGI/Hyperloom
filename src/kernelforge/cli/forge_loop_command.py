@@ -1163,13 +1163,14 @@ class PairedKeepOptions:
 
 @dataclass(frozen=True)
 class EarlyStopOptions:
-    """When the campaign may stop before its budget: directions mined out, recent rounds flat, an audit agreeing."""
+    """When the campaign may stop before its budget: recent hours flat, nothing promising left, an audit agreeing."""
 
     early_stop: bool
-    early_stop_min_directions: int
-    early_stop_window_rounds: int
+    early_stop_window_hours: float
     early_stop_min_gain: float
+    early_stop_priority_gain: float
     direction_exhaust_after: int
+    direction_replan_every: int
 
 
 @dataclass(frozen=True)
@@ -1552,21 +1553,17 @@ class ForgeLoopRequest:
         click.option(
             "--early-stop/--no-early-stop",
             default=False,
-            help="Keep a ledger of optimization directions and stop before the budget once every one is mined "
-            "out, the last rounds gained less than --early-stop-min-gain, and an audit agent finds no direction "
-            "the ledger lacks (default off: the loop runs through stalls).",
+            help="Keep a ranked ledger of optimization directions and stop before the budget once the last "
+            "--early-stop-window-hours of attempts gained less than --early-stop-min-gain, no direction is still "
+            "expected to gain --early-stop-priority-gain, and an audit agent finds no direction the ledger lacks "
+            "(default off: the loop runs through stalls).",
         ),
         click.option(
-            "--early-stop-min-directions",
-            default=10,
-            type=click.IntRange(min=1),
-            help="Directions the ledger must hold before an early stop is considered.",
-        ),
-        click.option(
-            "--early-stop-window-rounds",
-            default=3,
-            type=click.IntRange(min=1),
-            help="Measured rounds whose combined gain decides whether the campaign has gone flat.",
+            "--early-stop-window-hours",
+            default=3.0,
+            type=click.FloatRange(min=0.0, min_open=True),
+            help="Hours of rounds that tested something (failed benches and provider errors excluded) whose "
+            "combined gain decides whether the campaign has gone flat.",
         ),
         click.option(
             "--early-stop-min-gain",
@@ -1575,10 +1572,24 @@ class ForgeLoopRequest:
             help="Gain over the window below which the campaign counts as flat (0.02 = 2%).",
         ),
         click.option(
+            "--early-stop-priority-gain",
+            default=0.03,
+            type=click.FloatRange(min=0.0),
+            help="Expected gain at or above which a direction keeps a flat campaign running, and its plans "
+            "pursuing it (0.03 = 3%).",
+        ),
+        click.option(
             "--direction-exhaust-after",
             default=2,
             type=click.IntRange(min=1),
             help="Attempts in a row without a KEEP after which a direction counts as mined out.",
+        ),
+        click.option(
+            "--direction-replan-every",
+            default=4,
+            type=click.IntRange(min=1),
+            help="Attempts after which an agent ranks the directions again by expected gain. It also ranks them "
+            "when new ones arrive unranked, and after every attempt once progress is flat.",
         ),
     ),
     option_group(
@@ -1873,10 +1884,11 @@ def forge_loop(request: ForgeLoopRequest):
     iter_config.null_control_every = request.paired.null_control_every
     iter_config.early_stop = EarlyStopPolicy(
         enabled=request.early_stop.early_stop,
-        min_directions=request.early_stop.early_stop_min_directions,
-        window_rounds=request.early_stop.early_stop_window_rounds,
+        window_hours=request.early_stop.early_stop_window_hours,
         min_gain=request.early_stop.early_stop_min_gain,
+        priority_gain=request.early_stop.early_stop_priority_gain,
         exhaust_after=request.early_stop.direction_exhaust_after,
+        replan_every=request.early_stop.direction_replan_every,
     )
     tracker = ExperimentTracker(config.experiments_dir)
     # Published at a fixed path from the first call onwards, so a caller that never asked for --result-json, or that
@@ -2103,7 +2115,7 @@ def forge_loop(request: ForgeLoopRequest):
                 supervisor_fn=start_bundle.supervisor_fn,
                 direction_audit_fn=(
                     make_direction_audit_fn(
-                        config, usage=usage, min_directions=request.early_stop.early_stop_min_directions
+                        config, priority_gain=request.early_stop.early_stop_priority_gain, usage=usage
                     )
                     if request.early_stop.early_stop
                     else None
