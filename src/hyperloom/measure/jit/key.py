@@ -21,6 +21,23 @@ Which variables the build path reads is found in the source the test will run (:
 A framework patch can change the build context from inside the server (set a variable, patch aiter's builder); that is
 not visible in the sheet, so a patch whose text shows such a thing is made part of the key (:func:`touches_build_surface`).
 That test errs toward fewer shared entries, never toward a leak.
+
+Variables that only name a location are found by that scan and left out of the key (:func:`build_surface`), because what
+they name is where something is kept or made, never an input of what is made:
+
+* ``AITER_JIT_DIR``, ``AITER_ROOT_DIR`` and ``TRITON_CACHE_DIR`` are the cache directories themselves; the session sets
+  each of them to the test's own for every kind it caches, so the value the sheet or the runner had never reaches the server.
+* ``HOME`` and ``USERPROFILE`` are read by aiter for one purpose: to default ``AITER_ROOT_DIR`` to ``$HOME/.aiter``
+  (``csrc/cpp_itfs/utils.py``) and the user's ``jit`` directory to ``~/.aiter/jit`` (``aiter/jit/core.py``), the roots of
+  the two caches above. Every local sandbox has a home of its own, so keeping them made every test a different key and the
+  cache never hit.
+* ``TMPDIR``, ``TEMP`` and ``TMP`` are where the compiler and ninja put scratch files that are gone when the build is done,
+  and the ``XDG_*`` variables are the base directories under which a tool keeps its own per-user cache, configuration and state.
+
+What a build compiles is decided by the source, the flags and the variables that select them, all of which stay in the key.
+A tool of the image that read its configuration from one of these directories would be reading a per-sandbox accident that
+no test is meant to depend on; the key already fixes the image, and treats code the candidate itself can run as read only
+(``KindPlan.read_only``).
 """
 
 from __future__ import annotations
@@ -46,10 +63,27 @@ __all__ = [
     "triton_key",
 ]
 
-SCHEMA = 1
+#: 2: Triton's group files are stored with paths relative to the cache directory, so a snapshot of schema 1 is not read.
+SCHEMA = 2
 AITER_PACKAGE = "aiter"
-#: Variables that name where a cache lives: the test's own directories take their place, so their value never matters.
-_LOCATIONS = frozenset({"AITER_JIT_DIR", "AITER_ROOT_DIR"})
+#: Variables that only name a location, one that differs between sandboxes; the scan finds them, the surface leaves them out.
+_LOCATIONS = frozenset(
+    {
+        "AITER_JIT_DIR",
+        "AITER_ROOT_DIR",
+        "TRITON_CACHE_DIR",
+        "HOME",
+        "USERPROFILE",
+        "TMPDIR",
+        "TEMP",
+        "TMP",
+        "XDG_CACHE_HOME",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_STATE_HOME",
+        "XDG_RUNTIME_DIR",
+    }
+)
 #: Variables that change how fast or how loudly aiter builds, not what it builds.
 _NEUTRAL = frozenset(
     {"MAX_JOBS", "PREBUILD_THREAD_NUM", "AITER_JIT_VERBOSE", "AITER_LOG_MORE", AITER_LOG_TUNED_CONFIG_ENV}
@@ -181,7 +215,8 @@ def build_surface(
     names: Iterable[str], environment: Mapping[str, str], table_content: Mapping[str, str]
 ) -> BuildSurface:
     """The part of ``environment`` the build reads: a table variable by the content ``table_content`` gives for it, any
-    other variable by its value, minus the variables that do not decide what is built."""
+    other variable by its value, minus the variables that only name a location or change only speed or noise (``names`` is
+    what :func:`scan_env_names` found, which still has them)."""
     named = set(names) - _LOCATIONS - _NEUTRAL - {REBUILD_VARIABLE}
     tables = {
         name: table_content[name] for name in sorted(named) if name.startswith(_TABLE_PREFIX) and name in table_content

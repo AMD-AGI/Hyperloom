@@ -91,12 +91,53 @@ def test_the_surface_is_the_content_of_tables_and_the_value_of_the_variables_the
 
 
 @pytest.mark.parametrize(
-    "name", ["AITER_JIT_DIR", "AITER_ROOT_DIR", "MAX_JOBS", "PREBUILD_THREAD_NUM", "AITER_JIT_VERBOSE"]
+    "name",
+    [
+        "AITER_JIT_DIR",
+        "AITER_ROOT_DIR",
+        "TRITON_CACHE_DIR",
+        "HOME",
+        "USERPROFILE",
+        "TMPDIR",
+        "TEMP",
+        "TMP",
+        "XDG_CACHE_HOME",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_STATE_HOME",
+        "XDG_RUNTIME_DIR",
+        "MAX_JOBS",
+        "PREBUILD_THREAD_NUM",
+        "AITER_JIT_VERBOSE",
+    ],
 )
-def test_a_variable_that_moves_a_cache_or_changes_only_speed_or_noise_is_not_an_input(name) -> None:
+def test_a_variable_that_names_a_location_or_changes_only_speed_or_noise_is_not_an_input(name) -> None:
     surface = build_surface({name}, {name: "whatever"}, {})
 
     assert surface == BuildSurface()
+
+
+def test_two_sandboxes_that_differ_only_in_where_they_keep_things_share_a_key_and_a_build_input_still_splits_it(
+    checkout, tmp_path
+) -> None:
+    """Every local sandbox has a home and a scratch directory of its own, and aiter reads ``HOME`` (``cpp_itfs/utils.py``):
+    the scan finds it, and the key must still be the same."""
+    _write(
+        tmp_path, "csrc/cpp_itfs/utils.py", 'import os\nH = os.environ.get("HOME") or os.environ.get("USERPROFILE")\n'
+    )
+    _write(tmp_path, "csrc/ck/tmp.py", 'import os\nT = os.environ.get("TMPDIR")\nC = os.environ["XDG_CACHE_HOME"]\n')
+    names = scan_env_names([checkout])
+    assert {"HOME", "USERPROFILE", "TMPDIR", "XDG_CACHE_HOME", "ENABLE_CK"} <= names, "the discovery keeps them"
+
+    def key_of(environment: dict[str, str]) -> str:
+        return aiter_key(MACHINE, TREE, build_surface(names, environment, {}))
+
+    one = {"HOME": "/work/a/home", "TMPDIR": "/work/a/tmp", "XDG_CACHE_HOME": "/work/a/cache", "ENABLE_CK": "1"}
+    two = {"HOME": "/work/b/home", "TMPDIR": "/work/b/tmp", "XDG_CACHE_HOME": "/work/b/cache", "ENABLE_CK": "1"}
+    assert key_of(one) == key_of(two)
+    assert key_of(one) != key_of({**one, "ENABLE_CK": "0"}), (
+        "a variable that selects what is built still splits the key"
+    )
 
 
 @pytest.mark.parametrize(("value", "rebuilds"), [("1", True), ("2", True), ("0", False), ("", False), ("junk", False)])
