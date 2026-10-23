@@ -24,6 +24,7 @@ import stat
 from pathlib import Path
 from typing import IO, Callable, Iterator, Sequence
 
+_PRIVATE_MODE = 0o600
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 
 
@@ -65,7 +66,7 @@ def read_text_nofollow(path: Path | str) -> str:
     return read_bytes_nofollow(path).decode("utf-8")
 
 
-def create_nofollow(base: Path, rel: Sequence[str], *, mode: int = 0o600) -> IO[str]:
+def create_nofollow(base: Path, rel: Sequence[str], *, mode: int = _PRIVATE_MODE) -> IO[str]:
     """Create ``base/<rel...>`` fresh and return it open for text writing.
 
     Directories on the way are opened without following links and created when
@@ -84,14 +85,14 @@ def create_nofollow(base: Path, rel: Sequence[str], *, mode: int = 0o600) -> IO[
     return os.fdopen(fd, "w", encoding="utf-8")
 
 
-def write_text_nofollow(base: Path, rel: Sequence[str], text: str, *, mode: int = 0o600) -> Path:
+def write_text_nofollow(base: Path, rel: Sequence[str], text: str, *, mode: int = _PRIVATE_MODE) -> Path:
     """Write ``text`` to ``base/<rel...>`` as :func:`create_nofollow` creates it, and return the path."""
     with create_nofollow(base, rel, mode=mode) as handle:
         handle.write(text)
     return Path(base, *rel)
 
 
-def rewrite_lines_nofollow(path: Path | str, transform: Callable[[str], str], *, mode: int = 0o600) -> None:
+def rewrite_lines_nofollow(path: Path | str, transform: Callable[[str], str], *, mode: int = _PRIVATE_MODE) -> None:
     """Rewrite the regular file ``path`` line by line through ``transform``, in place, without following links.
 
     The result is staged in ``<name>.redacting`` beside the file, created fresh
@@ -109,21 +110,8 @@ def rewrite_lines_nofollow(path: Path | str, transform: Callable[[str], str], *,
             info = os.fstat(src_fd)
             if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
                 raise OSError(errno.EINVAL, "not a plain regular file", str(target))
-            with contextlib.suppress(FileNotFoundError):
-                os.unlink(staged, dir_fd=dir_fd)
-            out_fd = os.open(
-                staged, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, mode, dir_fd=dir_fd
-            )
             try:
-                changed = False
-                with os.fdopen(out_fd, "w", encoding="utf-8") as destination:
-                    for line in source:
-                        new = transform(line)
-                        changed = changed or new != line
-                        destination.write(new)
-                    destination.flush()
-                    os.fchmod(out_fd, mode)
-                if changed:
+                if _stage_transformed(source, dir_fd, staged, transform, mode):
                     os.replace(staged, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
                 else:
                     os.unlink(staged, dir_fd=dir_fd)
@@ -134,6 +122,22 @@ def rewrite_lines_nofollow(path: Path | str, transform: Callable[[str], str], *,
                 raise
     finally:
         os.close(dir_fd)
+
+
+def _stage_transformed(source: IO[str], dir_fd: int, staged: str, transform: Callable[[str], str], mode: int) -> bool:
+    """Write ``source`` through ``transform`` into a fresh ``staged``; whether any line changed."""
+    with contextlib.suppress(FileNotFoundError):
+        os.unlink(staged, dir_fd=dir_fd)
+    out_fd = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, mode, dir_fd=dir_fd)
+    changed = False
+    with os.fdopen(out_fd, "w", encoding="utf-8") as destination:
+        for line in source:
+            new = transform(line)
+            changed = changed or new != line
+            destination.write(new)
+        destination.flush()
+        os.fchmod(out_fd, mode)
+    return changed
 
 
 def regular_files_nofollow(base: Path, subdir: str, suffixes: Sequence[str]) -> Iterator[Path]:

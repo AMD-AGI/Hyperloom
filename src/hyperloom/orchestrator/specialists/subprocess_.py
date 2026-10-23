@@ -490,16 +490,7 @@ class SpecialistSubprocessDispatcher:
         request.workspace.mkdir(parents=True, exist_ok=True)
         prompt_file = request.workspace / "prompt.md"
         # A reused workspace may hold a link the previous run's account planted at this name.
-        try:
-            write_text_nofollow(request.workspace, (prompt_file.name,), request.user_prompt)
-        except OSError as exc:
-            return SpecialistSubprocessResult(
-                done_payload=None,
-                exit_code=None,
-                elapsed_seconds=0.0,
-                process_log_path=str(request.workspace / _PROCESS_LOG_NAME),
-                error=f"cannot write the specialist prompt: {exc!r}",
-            )
+        write_text_nofollow(request.workspace, (prompt_file.name,), request.user_prompt)
         process_log = request.workspace / _PROCESS_LOG_NAME
         # Poll worktree first (prompt-advertised path), then workspace as fallback.
         done_candidates: list[Path] = []
@@ -636,10 +627,10 @@ class SpecialistSubprocessDispatcher:
                     proc_started = time.monotonic()
                 else:
                     proc_started = time.monotonic()
+                    # Created fresh, never through a name the previous run's account planted; owner-only.
+                    log_fh = create_nofollow(request.workspace, (process_log.name,))
                     stdin_fh: Any = None
                     try:
-                        # Created fresh (never through a name the previous run's account planted), owner-only.
-                        log_fh = create_nofollow(request.workspace, (process_log.name,))
                         demote = await asyncio.to_thread(
                             prepare_demote, run_as, request.workspace, request.worktree, env, (prompt_file, process_log)
                         )
@@ -655,8 +646,7 @@ class SpecialistSubprocessDispatcher:
                             **demote,
                         )
                     except (FileNotFoundError, OSError) as exc:
-                        if log_fh is not None:
-                            log_fh.close()
+                        log_fh.close()
                         return SpecialistSubprocessResult(
                             done_payload=None,
                             exit_code=None,

@@ -59,7 +59,7 @@ cognitive-complexity src/kernelforge/rewrite_by_flydsl/ingest.py::discover_sourc
 cyclomatic-complexity src/hyperloom/orchestrator/kernel/conc_sweep.py::_sweep_one_arm_single_server 33
 cyclomatic-complexity src/hyperloom/orchestrator/kernel/conc_sweep.py::run_conc_sweep 26
 cyclomatic-complexity src/hyperloom/orchestrator/specialists/dispatch.py::SpecialistDispatchCollaborator.warm_specialist_params 39
-cyclomatic-complexity src/hyperloom/orchestrator/specialists/subprocess_.py::SpecialistSubprocessDispatcher.run 32
+cyclomatic-complexity src/hyperloom/orchestrator/specialists/subprocess_.py::SpecialistSubprocessDispatcher.run 31
 cyclomatic-complexity src/hyperloom/orchestrator/trace_analysis/bypass_trace_analysis.py::main 24
 cyclomatic-complexity src/hyperloom/orchestrator/trace_analysis/tracelens_analysis.py::main 44
 dead-code src/hyperloom/orchestrator/actions/executors/_grid_runner.py::SessionDirField.__get__:objtype 1
@@ -551,7 +551,7 @@ function-lines src/hyperloom/orchestrator/specialists/runner.py::SpecialistRunne
 function-lines src/hyperloom/orchestrator/specialists/runner.py::SpecialistRunner._run_via_subprocess 56
 function-lines src/hyperloom/orchestrator/specialists/subprocess_.py::SpecialistSubprocessDispatcher._build_codex_launch 75
 function-lines src/hyperloom/orchestrator/specialists/subprocess_.py::SpecialistSubprocessDispatcher._reap_loop 75
-function-lines src/hyperloom/orchestrator/specialists/subprocess_.py::SpecialistSubprocessDispatcher.run 225
+function-lines src/hyperloom/orchestrator/specialists/subprocess_.py::SpecialistSubprocessDispatcher.run 220
 function-lines src/hyperloom/orchestrator/state/gaps.py::GapRefreshCollaborator._extract_gaps_from_attempts 55
 function-lines src/hyperloom/orchestrator/state/shared_state.py::SharedState._append_roofline_snapshot_history 55
 function-lines src/hyperloom/orchestrator/state/shared_state.py::SharedState.current_profile_workload_context 59

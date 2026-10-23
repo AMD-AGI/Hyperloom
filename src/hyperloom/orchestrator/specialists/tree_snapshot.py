@@ -97,10 +97,11 @@ def snapshot_tree(tree: Path, repo: Path, *, refresh: bool) -> tuple[Path | None
                 )
                 if cp.returncode != 0:
                     return None, _failure("init", cp)
-                (repo / "info").mkdir(parents=True, exist_ok=True)
-                (repo / "info" / "exclude").write_text("".join(f"{p}\n" for p in _EXCLUDES), encoding="utf-8")
-                (repo / "info" / "exclude").chmod(0o644)
-                (repo / "info").chmod(0o755)
+                info = repo / "info"
+                info.mkdir(parents=True, exist_ok=True)
+                (info / "exclude").write_text("".join(f"{p}\n" for p in _EXCLUDES), encoding="utf-8")
+                (info / "exclude").chmod(0o644)
+                info.chmod(0o755)
             cp = _git(repo, tree, "add", "-A", "--", ".")
             if cp.returncode != 0:
                 return None, _failure("add", cp)
