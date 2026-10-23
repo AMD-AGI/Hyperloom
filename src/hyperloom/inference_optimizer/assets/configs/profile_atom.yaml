@@ -63,6 +63,13 @@ benchmark:
     #     Magpie's atom_mi*x.sh + auto-enables --profile on the
     #     InferenceX bench client. ---
     PROFILE: "1"
+    # --- Profiler: graph replays ---
+    # A HIP runtime setting, independent of the framework: by default the runtime replays a captured graph from its
+    # recorded packets and the ROCm profiler records a replay's kernels only for the replay that a host sync follows, so
+    # a decode window's shares are those of the eager ops around the replays. Replayed node by node (0) every replay is
+    # recorded, its kernels named in capture order. Measured on SGLang only (Qwen3-14B-FP8: 128 of 128 replays of a
+    # 128-step window recorded, 1 of 127 by default); not yet on ATOM.
+    DEBUG_CLR_GRAPH_PACKET_CAPTURE: "0"
 
   gpu_selection:
     auto: false                # executor pins via ROCR_VISIBLE_DEVICES at runtime
