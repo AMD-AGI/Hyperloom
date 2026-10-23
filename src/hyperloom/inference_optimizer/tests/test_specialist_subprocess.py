@@ -1822,8 +1822,10 @@ def test_the_archive_does_not_copy_an_applied_patch_the_child_replaced_with_a_li
     archive = snapshot_round(
         tmp_path, {"specialist_task_id": "t1", "patches_applied": [str(patch)], "enablement_round": 1}
     )
-    copied = (
-        [p for p in (tmp_path / "enablement").rglob("*") if p.is_file()] if (tmp_path / "enablement").exists() else []
-    )
-    assert all(p.read_text(encoding="utf-8") != "secret" for p in copied)
+    leaked = [
+        p
+        for p in tmp_path.rglob("*")
+        if p.is_file() and not p.is_symlink() and p != secret and p.read_text(encoding="utf-8") == "secret"
+    ]
+    assert leaked == []
     assert archive is not None
