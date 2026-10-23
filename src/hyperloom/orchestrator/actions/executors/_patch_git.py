@@ -6,15 +6,16 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from ...delivery.ledger import load_prepared_records, restore_records
 from ...specialists.patch_safety import is_unified_diff, patch_escapes_tree
-from ._apply_feedback import ApplyFeedback, build_apply_feedback
+from ._apply_feedback import ApplyFeedback, PatchApplyResult, PresenceCheck, build_apply_feedback
 from ._git import _git_head_sha, _run_git_cp
 from ._integrate_attempt import IntegrateAttempt
-from ._nogit_patch import _P_LEVELS, _apply_patch_no_git, _is_git_tree
+from ._nogit_patch import _P_LEVELS, _apply_patch_no_git, _is_git_tree, _reverse_probe_levels
 
 log = logging.getLogger(__name__)
 
@@ -114,11 +115,10 @@ def _git_reverse_applies_cleanly(framework_root: Path, patch_path: Path) -> bool
         patch_path: The patch file to probe.
 
     Returns:
-        ``True`` when some strip level reverse-checks cleanly.
+        ``True`` when some level :func:`._nogit_patch._reverse_probe_levels`
+        names reverse-checks cleanly.
     """
-    from ._nogit_patch import _P_LEVELS
-
-    for lvl in _P_LEVELS:
+    for lvl in _reverse_probe_levels(framework_root, patch_path):
         cp = _run_git_cp(
             ["-C", str(framework_root), "apply", "-R", f"-p{lvl}", "--check", str(patch_path)],
             timeout=120.0,
@@ -128,26 +128,34 @@ def _git_reverse_applies_cleanly(framework_root: Path, patch_path: Path) -> bool
     return False
 
 
-def _git_apply_collect_feedback(
-    framework_root: Path,
-    patch_path: Path,
-) -> "tuple[bool, str, ApplyFeedback | None]":
-    """Like :func:`_git_apply` but also returns an :class:`ApplyFeedback` on failure.
+def _git_apply_failure(
+    framework_root: Path, patch_path: Path, tried_levels: list[int], stderr: str
+) -> PatchApplyResult:
+    """A failed git apply, with the feedback a reauthoring round needs."""
+    feedback = build_apply_feedback(
+        patch_path,
+        channel="git",
+        tried_levels=tried_levels,
+        stderr=stderr,
+        framework_root=framework_root,
+    )
+    return PatchApplyResult(ok=False, error=stderr, feedback=feedback)
 
-    On success returns ``(True, "", None)``.  On failure returns
-    ``(False, stderr, ApplyFeedback)`` where *ApplyFeedback* carries the
-    stderr of every tried ``-p`` level and a source-context snippet.
+
+def _git_apply_collect_feedback(framework_root: Path, patch_path: Path) -> PatchApplyResult:
+    """Apply ``patch_path`` at the first ``-p`` level whose ``git apply --check`` passes.
+
+    With no level passing, a patch the tree already holds in full is reported
+    present. A failure carries the stderr of every tried ``-p`` level and a
+    source-context snippet.
 
     Args:
         framework_root: The git checkout to apply into.
         patch_path: The patch file to apply.
 
     Returns:
-        ``(ok, err, feedback)`` — feedback is ``None`` on success.
+        The apply's result.
     """
-    from ._nogit_patch import _P_LEVELS
-
-    # Collect per-level check stderr for the feedback record.
     tried_levels: list[int] = []
     level_stderrs: list[str] = []
     for lvl in _P_LEVELS:
@@ -156,18 +164,10 @@ def _git_apply_collect_feedback(
         if stderr_check:
             level_stderrs.append(f"-p{lvl}: {stderr_check}")
         if ok_check:
-            # Level works; now apply for real.
             ok_apply, stderr_apply = _run_git_apply(framework_root, patch_path, p_level=lvl, check_only=False)
             if ok_apply:
-                return True, "", None
-            feedback = build_apply_feedback(
-                patch_path,
-                channel="git",
-                tried_levels=tried_levels,
-                stderr=stderr_apply,
-                framework_root=framework_root,
-            )
-            return False, stderr_apply, feedback
+                return PatchApplyResult(ok=True)
+            return _git_apply_failure(framework_root, patch_path, tried_levels, stderr_apply)
 
     # A subset of a patch already applied is a no-op that ``--check`` still
     # rejects; a clean reverse check proves every hunk is in the tree.
@@ -176,16 +176,8 @@ def _git_apply_collect_feedback(
             "integrate_patch: %s is already fully applied (clean git apply -R --check); treating as a no-op",
             patch_path.name,
         )
-        return True, "", None
-    all_stderrs = "\n".join(level_stderrs)
-    feedback = build_apply_feedback(
-        patch_path,
-        channel="git",
-        tried_levels=tried_levels,
-        stderr=all_stderrs,
-        framework_root=framework_root,
-    )
-    return False, all_stderrs, feedback
+        return PatchApplyResult(ok=True, present_by=PresenceCheck.GIT_REVERSE_APPLY)
+    return _git_apply_failure(framework_root, patch_path, tried_levels, "\n".join(level_stderrs))
 
 
 def _git_apply_reverse(
@@ -225,21 +217,40 @@ def _git_apply_reverse(
     return False, f"git apply -R: no matching -p level for {patch_path}"
 
 
+@dataclass(frozen=True)
+class _PatchSeries:
+    """What applying an attempt's patch series did to its framework tree."""
+
+    patches: list[Path]
+    #: The patch that stopped the series, and why; empty when every patch landed.
+    errors: list[dict[str, str]]
+    feedback: tuple[ApplyFeedback, ...]
+    #: One ``{patch, check}`` row per patch the tree already held in full, naming the check that showed it.
+    already_present: list[dict[str, str]]
+
+    @property
+    def changed_nothing(self) -> bool:
+        """Every patch landed and the tree already held each one, so the tree is unchanged."""
+        return bool(self.patches) and len(self.already_present) == len(self.patches)
+
+
 def _apply_patch_series(
     attempt: IntegrateAttempt,
     patch_paths: list[Path],
     *,
     git_head: str,
     backup_root: Path,
-) -> tuple[list[dict[str, str]], tuple[ApplyFeedback, ...]]:
+) -> _PatchSeries:
     """Apply each delivered patch to the attempt's tree, stopping at the first one that does not land.
 
-    ``attempt.applied`` is appended to in place, so a cancellation mid-series still
-    leaves the undo able to see what reached the tree.
+    A patch the tree already holds still lands, so one subset patch inside a larger
+    series does not fail the series. ``attempt.applied`` is appended to in place, so
+    a cancellation mid-series still leaves the undo able to see what reached the tree.
     """
     framework_root = attempt.framework_root
     errors: list[dict[str, str]] = []
     feedback: list[ApplyFeedback] = []
+    already_present: list[dict[str, str]] = []
     nogit_backups: list[dict[str, Any]] = []
     for patch in patch_paths:
         # ``vet_patches`` runs at authoring time inside the specialist runner, so a
@@ -258,17 +269,19 @@ def _apply_patch_series(
             errors.append({"patch": str(patch), "stderr": f"path escapes tree: {escaping!r}"})
             break
         if git_head:
-            ok, err, fb = _git_apply_collect_feedback(framework_root, patch)
+            result = _git_apply_collect_feedback(framework_root, patch)
         else:
-            ok, err, taken, fb = _apply_patch_no_git(framework_root, patch, backup_root, seq_offset=len(nogit_backups))
-            nogit_backups.extend(taken)
-        if not ok:
-            errors.append({"patch": str(patch), "stderr": err})
-            if fb is not None:
-                feedback.append(fb)
+            result = _apply_patch_no_git(framework_root, patch, backup_root, seq_offset=len(nogit_backups))
+            nogit_backups.extend(result.backups)
+        if not result.ok:
+            errors.append({"patch": str(patch), "stderr": result.error})
+            if result.feedback is not None:
+                feedback.append(result.feedback)
             break
+        if result.present_by is not None:
+            already_present.append({"patch": str(patch), "check": result.present_by.value})
         attempt.applied.append(patch)
-    return errors, tuple(feedback)
+    return _PatchSeries(patch_paths, errors, tuple(feedback), already_present)
 
 
 def _uncommitted_revert(attempt: IntegrateAttempt, failure: str, what: str, **evidence: Any) -> dict[str, Any]:

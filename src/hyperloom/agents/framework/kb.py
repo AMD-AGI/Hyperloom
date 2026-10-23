@@ -97,7 +97,7 @@ def migrate_legacy_partition_once() -> Path | None:
         _log.warning(
             "FRAMEWORK KB: could not carry the legacy partition over from %s; continuing with "
             "whatever is at %s. The FRAMEWORK phase treats a missing ledger as a cold start, so "
-            "it may re-propose PRs it has already tried.",
+            "it may re-dispatch config levers that already lost an accuracy gate.",
             source,
             destination,
             exc_info=True,
