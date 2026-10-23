@@ -20,7 +20,6 @@ from hyperloom.inference_optimizer.breakdown.recorder.critic_out import CriticIt
 def _emit(topic: str, body: str) -> dict:
     """An emitted envelope shaped as the agent writes ``emit.json``."""
     return {
-        "kind": "coordinator_inbox",
         "kb_writes": [{"kind": "point"}],
         "intent_envelope": {"intents": [{"intent_type": "send_message", "payload": {"topic": topic, "body_md": body}}]},
     }

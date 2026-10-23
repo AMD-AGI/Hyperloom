@@ -13,8 +13,13 @@ from hyperloom.agents.critic.runtime.dead_letter import DeadLetter
 from hyperloom.agents.critic.runtime.decision_reviewer import DecisionReviewer
 from hyperloom.agents.critic.runtime.errors import KBError, KBTransportError, KBValidationError
 from hyperloom.agents.critic.runtime.in_memory_kb_client import InMemoryKBClient
-from hyperloom.agents.critic.runtime.kb_writer import KBWriter, WriteContext, slug_for_kind
+from hyperloom.agents.critic.runtime.kb_client import KBListQuery
+from hyperloom.agents.critic.runtime.kb_writer import KBWriter, WriteContext
 from hyperloom.agents.critic.runtime.session_memory import SessionMemory
+
+
+def _rows(kb: InMemoryKBClient) -> list[dict]:
+    return kb.list(KBListQuery(scope_filter={}, limit=0))["entries"]
 
 
 @pytest.fixture()
@@ -48,7 +53,7 @@ def test_write_verdict_skipped_for_advise(writer, packet_context):
         ctx=WriteContext(session_id="s1"),
     )
     assert res.status == "skipped"
-    assert kb.all_rows() == []
+    assert _rows(kb) == []
 
 
 def test_write_verdict_reject_creates_pitfall(writer, packet_context):
@@ -56,6 +61,7 @@ def test_write_verdict_reject_creates_pitfall(writer, packet_context):
     res = w.write_verdict(
         verdict={
             "verdict": "reject",
+            "topic": "active dispatch path unproven",
             "reasoning": "active dispatch path unproven for this kernel",
             "packet_evidence": ["benchmark.after.gain_pct"],
             "kb_evidence": [],
@@ -63,10 +69,10 @@ def test_write_verdict_reject_creates_pitfall(writer, packet_context):
             "risks": [{"type": "active_path_unproven", "severity": "blocker"}],
         },
         packet_context=packet_context,
-        ctx=WriteContext(session_id="s1", review_id="rev_1", topic="active dispatch path unproven"),
+        ctx=WriteContext(session_id="s1", review_id="rev_1"),
     )
     assert res.status == "ok"
-    rows = kb.all_rows()
+    rows = _rows(kb)
     assert len(rows) == 1
     assert rows[0]["kind"] == "pitfall"
     assert rows[0]["importance"] <= 0.84
@@ -86,7 +92,11 @@ def test_write_verdict_skipped_when_disabled(monkeypatch, writer, packet_context
 
 def test_write_verdict_dead_letters_on_validation_error(writer, packet_context):
     w, kb, sm, dlq = writer
-    kb.simulate_failure(endpoint="upsert", times=1, error={"code": 422})
+
+    def boom(payload):
+        raise KBValidationError("422 bad payload")
+
+    kb.upsert = boom  # type: ignore[method-assign]
     res = w.write_verdict(
         verdict={
             "verdict": "reject",
@@ -103,34 +113,7 @@ def test_write_verdict_dead_letters_on_validation_error(writer, packet_context):
     record = json.loads(line)
     assert record["endpoint"] == "upsert"
     assert "session_id" in record["context"]
-
-
-def test_write_kb_drafts_batch_inserts_and_filters_unknown_categories(writer, packet_context):
-    w, kb, _, _ = writer
-    drafts = [
-        {
-            "category": "kernel_optimization",
-            "action": "Patch fused attention kernel for Qwen3-14B on MI355X.",
-            "lesson": "Active dispatch path must be updated jointly.",
-            "tags": ["attention"],
-            "result": {"status": "KEEP", "gain_pct": 4.2},
-            "confidence": 0.9,
-        },
-        {
-            "category": "definitely_not_a_real_category",
-            "action": "x",
-        },
-    ]
-    res = w.write_kb_drafts(
-        kb_drafts=drafts,
-        packet_context=packet_context,
-        ctx=WriteContext(session_id="s1", review_id="rev_2"),
-    )
-    assert res.status == "ok"
-    assert len(kb.all_rows()) == 1
-    assert kb.all_rows()[0]["kind"] == "technique"
-    rejected = res.detail["rejected"]
-    assert rejected and rejected[0]["draft"]["category"] == "definitely_not_a_real_category"
+    assert res.detail["reason"] == "validation_error"
 
 
 def test_list_priors_uses_session_memory_cache(writer, packet_context):
@@ -194,14 +177,6 @@ class _FlakyKBClient(InMemoryKBClient):
     def upsert(self, payload):
         self._consume("upsert")
         return super().upsert(payload)
-
-    def batch_insert(self, items, *, on_conflict="upsert"):
-        self._consume("batch_insert")
-        return super().batch_insert(items, on_conflict=on_conflict)
-
-    def add_edges(self, edges):
-        self._consume("edges/add")
-        return super().add_edges(edges)
 
 
 @pytest.fixture()
@@ -302,31 +277,6 @@ def test_write_verdict_disabled_when_breaker_open(breaker_writer):
     assert res.detail["breaker"]["open"] is True
 
 
-def test_write_kb_drafts_disabled_when_breaker_open(breaker_writer):
-    w, _, _, _ = breaker_writer
-    w._unreachable_until = w._time_fn() + w._breaker_cooldown
-    res = w.write_kb_drafts(
-        kb_drafts=[
-            {
-                "category": "kernel_optimization",
-                "action": "patch the active dispatch path",
-                "lesson": "active dispatch path must stay in sync",
-                "tags": [],
-            }
-        ],
-        packet_context={
-            "framework": "sglang",
-            "model": "deepseek-r1",
-            "model_family": "deepseek",
-            "workload": "decode",
-            "precision": "fp8",
-        },
-        ctx=WriteContext(session_id="s2"),
-    )
-    assert res.status == "disabled"
-    assert res.detail["reason"] == "kb_unreachable"
-
-
 def test_write_verdict_dead_letters_then_opens_breaker(breaker_writer):
     w, kb, _, dlq = breaker_writer
     kb.fail_next("upsert", times=1)
@@ -355,12 +305,11 @@ def test_decision_reviewer_marks_bundle_when_breaker_open(tmp_path):
     sm = SessionMemory(root=tmp_path / "sm")
     kb = _FlakyKBClient()
     writer = KBWriter(kb, session_memory=sm)
-    rev = DecisionReviewer(session_memory=sm, kb_writer=writer)
+    rev = DecisionReviewer(kb_writer=writer)
     writer._unreachable_until = writer._time_fn() + writer._breaker_cooldown
 
     bundle = rev.prepare_review(
         {
-            "kind": "coordinator_inbox",
             "session_id": "sess_breaker",
             "raw_prompt": (
                 "=== Shared session state ===\n"
@@ -379,10 +328,9 @@ def test_decision_reviewer_marks_bundle_when_kb_read_disabled(tmp_path, monkeypa
     monkeypatch.setenv("KB_READ_ENABLED", "false")
     sm = SessionMemory(root=tmp_path / "sm")
     writer = KBWriter(InMemoryKBClient(), session_memory=sm)
-    rev = DecisionReviewer(session_memory=sm, kb_writer=writer)
+    rev = DecisionReviewer(kb_writer=writer)
     bundle = rev.prepare_review(
         {
-            "kind": "coordinator_inbox",
             "session_id": "sess_disabled",
             "raw_prompt": (
                 "=== Shared session state ===\n"
@@ -395,61 +343,8 @@ def test_decision_reviewer_marks_bundle_when_kb_read_disabled(tmp_path, monkeypa
     assert bundle.kb_read_skipped_reason == "kb_read_disabled"
 
 
-_VALID_DRAFT = {
-    "category": "kernel_optimization",
-    "action": "Patch fused attention kernel for the decode path.",
-    "lesson": "Active dispatch path must be updated jointly.",
-    "tags": ["attention"],
-    "result": {"status": "KEEP", "gain_pct": 4.2},
-    "confidence": 0.9,
-}
-
-
-def test_write_kb_drafts_all_rejected_returns_skipped(writer, packet_context):
-    w, kb, _, _ = writer
-    res = w.write_kb_drafts(
-        kb_drafts=[{"category": "definitely_not_real", "action": "x"}],
-        packet_context=packet_context,
-        ctx=WriteContext(session_id="s_reject"),
-    )
-    assert res.status == "skipped"
-    assert res.detail["reason"] == "all_rejected"
-    assert res.detail["rejected"]
-    assert kb.all_rows() == []
-
-
-def test_write_kb_drafts_dead_letters_on_transport_error(breaker_writer, packet_context):
-    w, kb, _, dlq = breaker_writer
-    kb.fail_next("batch_insert", times=1)
-    res = w.write_kb_drafts(
-        kb_drafts=[_VALID_DRAFT],
-        packet_context=packet_context,
-        ctx=WriteContext(session_id="s_bt", review_id="rev_bt"),
-    )
-    assert res.status == "dead_lettered"
-    assert res.detail["reason"] == "transport_error"
-    assert any(f.name.startswith("batch_insert") for f in dlq.files())
-
-
-def test_write_kb_drafts_dead_letters_on_validation_error(writer, packet_context):
-    w, kb, _, dlq = writer
-
-    def boom(items, *, on_conflict="upsert"):
-        raise KBValidationError("422 bad batch")
-
-    kb.batch_insert = boom  # type: ignore[method-assign]
-    res = w.write_kb_drafts(
-        kb_drafts=[_VALID_DRAFT],
-        packet_context=packet_context,
-        ctx=WriteContext(session_id="s_bv", review_id="rev_bv"),
-    )
-    assert res.status == "dead_lettered"
-    assert res.detail["reason"] == "validation_error"
-    assert dlq.files()
-
-
 def test_write_verdict_dead_letters_on_generic_kb_error(writer, packet_context):
-    """A bare KBError (not transport/validation) still dead-letters the upsert."""
+    """A bare KBError (not transport/validation) dead-letters the upsert as a transport error without the breaker."""
     w, kb, _, dlq = writer
 
     def boom(payload):
@@ -466,63 +361,19 @@ def test_write_verdict_dead_letters_on_generic_kb_error(writer, packet_context):
         ctx=WriteContext(session_id="s_gen", review_id="rev_gen"),
     )
     assert res.status == "dead_lettered"
-    assert dlq.files()
-
-
-def test_write_kb_drafts_dead_letters_on_generic_kb_error(writer, packet_context):
-    w, kb, _, dlq = writer
-
-    def boom(items, *, on_conflict="upsert"):
-        raise KBError("generic batch failure")
-
-    kb.batch_insert = boom  # type: ignore[method-assign]
-    res = w.write_kb_drafts(
-        kb_drafts=[_VALID_DRAFT],
-        packet_context=packet_context,
-        ctx=WriteContext(session_id="s_gb", review_id="rev_gb"),
-    )
-    assert res.status == "dead_lettered"
     assert res.detail["reason"] == "transport_error"
     assert dlq.files()
-
-
-def test_write_kb_drafts_server_params_uses_params_catalog_slug(writer, packet_context):
-    w, kb, _, _ = writer
-    res = w.write_kb_drafts(
-        kb_drafts=[
-            {
-                "category": "server_params",
-                "action": "max-running-requests",
-                "lesson": "raise concurrency ceiling for decode",
-                "tags": [],
-            }
-        ],
-        packet_context=packet_context,
-        ctx=WriteContext(session_id="s_sp", review_id="rev_sp"),
-    )
-    assert res.status == "ok"
-    rows = kb.all_rows()
-    assert rows and rows[0]["kind"] == "params_catalog"
-
-
-def test_slug_for_kind_covers_all_kinds():
-    assert slug_for_kind("params_catalog", "topic", {"action": "Max Running Requests"}) == "max-running-requests"
-    assert slug_for_kind("model_profile", "topic", {"model": "Qwen3-14B"}) == "qwen3-14b-profile"
-    assert slug_for_kind("model_profile", "topic", {"model_family": "qwen"}) == "qwen-profile"
-    assert slug_for_kind("model_profile", "fallback-topic", {}) == "fallback-topic-profile"
-    assert slug_for_kind("pitfall", "Active Path Unproven")
-    assert slug_for_kind("technique", "Fused Attention Rewrite")
+    assert w.is_kb_unreachable() is False
 
 
 def test_breaker_reflects_per_request_failures_in_bundle(tmp_path):
     sm = SessionMemory(root=tmp_path / "sm")
     kb = _FlakyKBClient()
     writer = KBWriter(kb, session_memory=sm)
-    rev = DecisionReviewer(session_memory=sm, kb_writer=writer)
+    rev = DecisionReviewer(kb_writer=writer)
     kb.fail_next("list", times=1)
     bundle = rev.prepare_review(
         {
-            "kind": "coordinator_inbox",
             "session_id": "sess_per_request",
             "raw_prompt": (
                 "=== Shared session state ===\n"
@@ -536,19 +387,12 @@ def test_breaker_reflects_per_request_failures_in_bundle(tmp_path):
     assert bundle.kb_priors_by_proposal["mmm"] == []
 
 
-def test_a_topic_that_cannot_be_slugged_is_skipped_or_rejected(writer, packet_context):
+def test_a_topic_that_cannot_be_slugged_is_skipped(writer, packet_context):
     w, _, _, _ = writer
     topic = "\ud800 lone surrogate topic"
     error = "'utf-8' codec can't encode character '\\ud800' in position 0: surrogates not allowed"
-    ctx = WriteContext(session_id="s")
 
     verdict = {"verdict": "reject", "topic": topic, "reasoning": "r", "packet_evidence": ["e"]}
-    skipped = w.write_verdict(verdict=verdict, packet_context=packet_context, ctx=ctx)
-    draft = {"category": "kernel_optimization", "action": topic}
-    rejected = w.write_kb_drafts(kb_drafts=[draft], packet_context=packet_context, ctx=ctx)
+    skipped = w.write_verdict(verdict=verdict, packet_context=packet_context, ctx=WriteContext(session_id="s"))
 
     assert skipped.to_dict() == {"status": "skipped", "detail": {"reason": "slug_failed", "error": error}}
-    assert rejected.to_dict() == {
-        "status": "skipped",
-        "detail": {"reason": "all_rejected", "rejected": [{"draft": draft, "reason": f"slug_failed: {error}"}]},
-    }

@@ -7,7 +7,7 @@ cognitive-complexity src/hyperloom/inference_optimizer/baseline_comparison/infer
 cognitive-complexity src/hyperloom/inference_optimizer/breakdown/recorder/kernel_event.py::_merge_acceptances 31
 cognitive-complexity src/hyperloom/inference_optimizer/breakdown/recorder/kernel_event.py::record_geak_attempts 31
 cognitive-complexity src/hyperloom/inference_optimizer/breakdown/reporters/_renderers/final.py::render 31
-cognitive-complexity src/hyperloom/inference_optimizer/cli/__init__.py::_run_optimize 36
+cognitive-complexity src/hyperloom/inference_optimizer/cli/__init__.py::_run_optimize 35
 cognitive-complexity src/hyperloom/inference_optimizer/framework_paths.py::_discover_installed_framework_roots 43
 cognitive-complexity src/hyperloom/inference_optimizer/grid_server_args.py::dedupe_extra_server_args 34
 cognitive-complexity src/hyperloom/inference_optimizer/multi_node/scripts/kill_multinode.py::_gpu_used_mb_for_pgids 32
@@ -191,7 +191,6 @@ function-args src/hyperloom/inference_optimizer/breakdown/recorder/warm_replay_e
 function-args src/hyperloom/inference_optimizer/breakdown/recorder/warm_replay_event.py::make_warm_replay_recorder 13
 function-args src/hyperloom/inference_optimizer/breakdown/recorder/warm_start_event.py::matched_block 8
 function-args src/hyperloom/inference_optimizer/grid_server_args.py::inject_sglang_context_length 6
-function-args src/hyperloom/inference_optimizer/recipe_snapshot_constants.py::canonical_labels 7
 function-args src/hyperloom/inference_optimizer/recipe_snapshot_constants.py::kb_hardware_slug 10
 function-args src/hyperloom/inference_optimizer/recipe_snapshot_constants.py::recipe_canonical_id 8
 function-args src/hyperloom/orchestrator/actions/executors/_geak_sweep.py::sweep_via_geak 10
@@ -229,7 +228,6 @@ function-args src/hyperloom/orchestrator/loop/intent_router.py::IntentRouter._ap
 function-args src/hyperloom/orchestrator/loop/intent_router.py::IntentRouter._handle_single_verdict 9
 function-args src/hyperloom/orchestrator/loop/intent_router.py::_record_critic_review 8
 function-args src/hyperloom/orchestrator/loop/intent_router.py::_record_phase_proposal_review 7
-function-args src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._stage_agent_keep 6
 function-args src/hyperloom/orchestrator/phases/machine_state.py::record_lifecycle_event 9
 function-args src/hyperloom/orchestrator/rehearsal/launch.py::ScriptedLaunchBackend.run 6
 function-args src/hyperloom/orchestrator/source_snapshot.py::snapshot_source_layer 8
@@ -246,12 +244,8 @@ function-args src/kernelforge/gemm_tune/router.py::select_tuners 10
 function-lines scripts/partition_mode_sweep.py::render 52
 function-lines scripts/partition_mode_sweep.py::run_mode 57
 function-lines scripts/platform_audit_bmc.py::main 113
-function-lines src/hyperloom/agents/critic/runtime/decision_reviewer.py::DecisionReviewer._commit_coordinator_inbox 58
-function-lines src/hyperloom/agents/critic/runtime/decision_reviewer.py::DecisionReviewer._commit_decision_request 62
-function-lines src/hyperloom/agents/critic/runtime/in_memory_kb_client.py::InMemoryKBClient.upsert 54
-function-lines src/hyperloom/agents/critic/runtime/kb_writer.py::KBWriter.write_kb_drafts 99
-function-lines src/hyperloom/agents/critic/runtime/kb_writer.py::KBWriter.write_verdict 55
-function-lines src/hyperloom/agents/critic/runtime/request_models.py::parse_request 58
+function-lines src/hyperloom/agents/critic/runtime/decision_reviewer.py::DecisionReviewer._commit_coordinator_inbox 57
+function-lines src/hyperloom/agents/critic/runtime/kb_writer.py::KBWriter.write_verdict 54
 function-lines src/hyperloom/agents/framework/sources/__init__.py::_run_pr_monitor 51
 function-lines src/hyperloom/agents/quantization/cli.py::_parse_args 52
 function-lines src/hyperloom/agents/quantization/driver/retry.py::quantize_via_prompt 80
@@ -290,7 +284,7 @@ function-lines src/hyperloom/inference_optimizer/cli/__init__.py::_probe_llm_cat
 function-lines src/hyperloom/inference_optimizer/cli/__init__.py::_reexport_session_environment 80
 function-lines src/hyperloom/inference_optimizer/cli/__init__.py::_resolve_agent_lineup 79
 function-lines src/hyperloom/inference_optimizer/cli/__init__.py::_resolve_run_topology 64
-function-lines src/hyperloom/inference_optimizer/cli/__init__.py::_run_optimize 226
+function-lines src/hyperloom/inference_optimizer/cli/__init__.py::_run_optimize 222
 function-lines src/hyperloom/inference_optimizer/cli/__init__.py::_seed_fresh_session 51
 function-lines src/hyperloom/inference_optimizer/cli/__init__.py::_validate_and_resolve_claude_model 58
 function-lines src/hyperloom/inference_optimizer/cli/bootstrap.py::_seed_shared_state 116
@@ -301,17 +295,16 @@ function-lines src/hyperloom/inference_optimizer/cli/kb.py::_bootstrap_recipe_kb
 function-lines src/hyperloom/inference_optimizer/cli/model_gate.py::_preflight_context_window 116
 function-lines src/hyperloom/inference_optimizer/cli/model_gate.py::_preflight_model_config_compat 71
 function-lines src/hyperloom/inference_optimizer/cli/multi_node.py::_prepare_multi_node_state 76
-function-lines src/hyperloom/inference_optimizer/cli/parser.py::_build_parser 929
+function-lines src/hyperloom/inference_optimizer/cli/parser.py::_build_parser 907
 function-lines src/hyperloom/inference_optimizer/cli/preflight.py::_emit_preflight_diagnostics 65
 function-lines src/hyperloom/inference_optimizer/cli/preflight.py::_ensure_inferencex 51
 function-lines src/hyperloom/inference_optimizer/cli/preflight.py::_ensure_lm_eval_dep 62
 function-lines src/hyperloom/inference_optimizer/cli/preflight.py::_ensure_magpie 53
 function-lines src/hyperloom/inference_optimizer/cli/preflight.py::_load_kernel_agent_env_fallback 69
-function-lines src/hyperloom/inference_optimizer/cli/preflight.py::_preflight 145
+function-lines src/hyperloom/inference_optimizer/cli/preflight.py::_preflight 136
 function-lines src/hyperloom/inference_optimizer/cli/preflight.py::_probe_rocm_build 54
 function-lines src/hyperloom/inference_optimizer/cli/preflight.py::_report_unusable_framework 62
 function-lines src/hyperloom/inference_optimizer/cli/preflight.py::_run_ir3_preflight 66
-function-lines src/hyperloom/inference_optimizer/experience_kb.py::ExperienceKBIntegration._context 77
 function-lines src/hyperloom/inference_optimizer/grid_server_args.py::validate_warm_replay_context_length 51
 function-lines src/hyperloom/inference_optimizer/multi_node/_internal/external_state.py::build_external_state_from_env 55
 function-lines src/hyperloom/inference_optimizer/multi_node/_internal/serving_probe.py::cluster_is_serving 64
@@ -481,8 +474,6 @@ function-lines src/hyperloom/orchestrator/loop/intent_router.py::IntentRouter._h
 function-lines src/hyperloom/orchestrator/loop/intent_router.py::IntentRouter.handle_delegate 79
 function-lines src/hyperloom/orchestrator/loop/proposals.py::ProposalsCollaborator.materialize_approved_proposal 61
 function-lines src/hyperloom/orchestrator/loop/sub_agent_runner.py::SubAgentRunner._execute 57
-function-lines src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._resume_recover_pending_warm_replay 75
-function-lines src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator.handle_unpromotable_result 55
 function-lines src/hyperloom/orchestrator/measurement/apply_verification.py::verify_applied 61
 function-lines src/hyperloom/orchestrator/phases/close.py::ClosePhase._maybe_run_close_post_opt_roofline 62
 function-lines src/hyperloom/orchestrator/phases/close.py::ClosePhase._revalidate_stack_for_close 62
@@ -538,7 +529,7 @@ function-lines src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py::
 function-lines src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py::build_specialist_prompts 53
 function-lines src/hyperloom/orchestrator/roles/claude.py::ClaudeBackend.run 112
 function-lines src/hyperloom/orchestrator/roles/critic_agent.py::CriticAgentBackend.__post_init__ 51
-function-lines src/hyperloom/orchestrator/roles/critic_agent.py::CriticAgentBackend._reason 75
+function-lines src/hyperloom/orchestrator/roles/critic_agent.py::CriticAgentBackend._reason 73
 function-lines src/hyperloom/orchestrator/roles/critic_agent.py::CriticAgentBackend.run 132
 function-lines src/hyperloom/orchestrator/specialists/agent_cli_config.py::_codex_mcp_config 63
 function-lines src/hyperloom/orchestrator/specialists/dispatch.py::SpecialistDispatchCollaborator.build_specialist_round_entry 51
@@ -798,7 +789,7 @@ module-lines src/hyperloom/inference_optimizer/breakdown/recorder/kernel_event.p
 module-lines src/hyperloom/inference_optimizer/breakdown/schema.py 2681
 module-lines src/hyperloom/inference_optimizer/cli/__init__.py 2569
 module-lines src/hyperloom/inference_optimizer/cli/model_gate.py 1759
-module-lines src/hyperloom/inference_optimizer/cli/preflight.py 2551
+module-lines src/hyperloom/inference_optimizer/cli/preflight.py 2523
 module-lines src/hyperloom/inference_optimizer/multi_node/cli.py 1800
 module-lines src/hyperloom/inference_optimizer/roofline_ceiling.py 1417
 module-lines src/hyperloom/orchestrator/actions/executors/_grid_runner.py 2045
@@ -816,7 +807,6 @@ module-lines src/hyperloom/orchestrator/knowledge/recipe_journal.py 1269
 module-lines src/hyperloom/orchestrator/loop/coordinator.py 1337
 module-lines src/hyperloom/orchestrator/loop/dispatcher.py 1453
 module-lines src/hyperloom/orchestrator/loop/intent_router.py 1409
-module-lines src/hyperloom/orchestrator/loop/writeback.py 4156
 module-lines src/hyperloom/orchestrator/phases/framework.py 3038
 module-lines src/hyperloom/orchestrator/phases/kernel.py 4102
 module-lines src/hyperloom/orchestrator/phases/machine_state.py 1994
@@ -840,7 +830,6 @@ module-lines src/kernelforge/loop/task_preparer.py 1299
 module-lines src/kernelforge/orchestrator/analysis.py 1952
 module-lines src/kernelforge/orchestrator/orchestration.py 1831
 nested-blocks scripts/platform_audit_bmc.py::main 5
-nested-blocks src/hyperloom/agents/critic/runtime/in_memory_kb_client.py::_matches_metadata 5
 nested-blocks src/hyperloom/common/launch_log_evidence.py::_read_launch_record 5
 nested-blocks src/hyperloom/common/launch_log_evidence.py::_recipe_server_env 5
 nested-blocks src/hyperloom/inference_optimizer/breakdown/recorder/kernel_event.py::_merge_acceptances 5

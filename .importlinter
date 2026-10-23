@@ -94,7 +94,6 @@ ignore_imports =
     hyperloom.inference_optimizer.cli.parser -> hyperloom.orchestrator.policy.gate
     hyperloom.inference_optimizer.cli.parser -> hyperloom.orchestrator.scoring.proposal_scorer
     hyperloom.inference_optimizer.cli.parser -> hyperloom.orchestrator.specialists.domains
-    hyperloom.inference_optimizer.cli.preflight -> hyperloom.agents.framework.kb
     hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._aiter_jit
     hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._inferencex_patcher
     hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._magpie_patcher
@@ -314,7 +313,6 @@ ignore_imports =
     hyperloom.inference_optimizer.cli.parser -> hyperloom.orchestrator.policy.gate
     hyperloom.inference_optimizer.cli.parser -> hyperloom.orchestrator.scoring.proposal_scorer
     hyperloom.inference_optimizer.cli.parser -> hyperloom.orchestrator.specialists.domains
-    hyperloom.inference_optimizer.cli.preflight -> hyperloom.agents.framework.kb
     hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._aiter_jit
     hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._inferencex_patcher
     hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._magpie_patcher

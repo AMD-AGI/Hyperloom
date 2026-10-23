@@ -364,7 +364,7 @@ class Coordinator:
         if "_experience_kb" not in self.__dict__:
             from hyperloom.inference_optimizer.experience_kb import integration_for
 
-            self.__dict__["_experience_kb"] = integration_for(self.shared_state, self.session_dir)
+            self.__dict__["_experience_kb"] = integration_for(self.shared_state)
         return self.__dict__["_experience_kb"]
 
     @property
