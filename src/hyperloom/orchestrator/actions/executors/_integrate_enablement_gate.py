@@ -594,8 +594,8 @@ class EnablementGateMixin:
     ) -> None:
         """Record this attempt's outcome against the patch's upstream PR identity.
 
-        A patch with no such identity leaves no lesson: it is a one-off edit the
-        ledger has no key to dedup future discovery against.
+        A patch with no such identity leaves no lesson: the ledger files every
+        lesson under a PR URL or head SHA.
         """
         proposal = self._find_framework_proposal(done_payload)
         if proposal is None:

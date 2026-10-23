@@ -16,6 +16,29 @@ SGLang, and xDiT.
 
 <p align="center"><img width="700" alt="Hyperloom architecture" src="https://raw.githubusercontent.com/AMD-AGI/Hyperloom/main/docs/images/Hyperloom_architecture.png" /></p>
 
+## Merged upstream
+
+Hyperloom found each of these in a real optimization session on AMD Instinct GPUs, and vLLM or
+SGLang merged it. The numbers are quoted from the linked PR and were measured on the upstream
+revision it names; the PR also carries the benchmark commands, the accuracy checks, and the
+operating points where the gain does not apply.
+
+| Upstream PR | Merged | Model / workload | GPU | Measured effect |
+|-------|------|-------|------|-------|
+| [vllm#58539](https://github.com/vllm-project/vllm/pull/58539) | 2026-09-30 | DeepSeek-V4.1-Flash, 307 in / 23 out, TP=2 | MI355X | +53.9 % total tok/s, −37.0 % mean TTFT |
+| [sglang#41071](https://github.com/sgl-project/sglang/pull/41071) | 2026-10-10 | Qwen3-32B-FP8, 1024 in / 512 out, concurrency 4 | MI300X | +314 % output tok/s against the untuned Triton default; opt-in behind a flag for an accuracy trade-off |
+| [vllm#58897](https://github.com/vllm-project/vllm/pull/58897) | 2026-10-14 | gpt-oss-120b, 1033 in / 523 out, concurrency 61 | MI355X | +9.7 % total tok/s, −11.1 % median TPOT |
+| [vllm#58405](https://github.com/vllm-project/vllm/pull/58405) | 2026-09-30 | DeepSeek-V4-Flash, 307 in / 23 out, TP=1 | MI355X | +6.8 % total tok/s, −7.1 % mean TTFT |
+| [vllm#55991](https://github.com/vllm-project/vllm/pull/55991) | 2026-09-16 | Qwen3-30B-A3B, 1024 in / 128 out | MI325X | +6.9 % throughput (+5.2 % on MI355X) |
+| [sglang#41229](https://github.com/sgl-project/sglang/pull/41229) | 2026-10-19 | gemma-4-26B-A4B-it, 64 ragged 32K requests, concurrency 16 | MI325X | +6 % output tok/s |
+| [vllm#58354](https://github.com/vllm-project/vllm/pull/58354) | 2026-10-14 | GLM-5.3-Flash, sparse-MLA metadata build | MI355X | 10.5 µs less per build call (+11–15 %), below end-to-end noise |
+| [vllm#57108](https://github.com/vllm-project/vllm/pull/57108) | 2026-10-10 | Block-FP8 checkpoint missing a weight scale | MI300X, MI325X | Correctness: a checkpoint that had served garbage (GSM8K 0.00) now fails the load and names the parameter |
+
+Nine of the 45 attributed PRs are merged as of 2026-10-23; the eight with the largest measured
+effect are above.
+[Upstream optimizations merged into vLLM and SGLang](https://github.com/AMD-AGI/Hyperloom/blob/main/docs/upstream-results.md)
+has the full list, the per-row caveats, and the rule for what enters it.
+
 ## Why Hyperloom
 
 Serving efficiency determines hardware capacity, latency, and operating cost.
