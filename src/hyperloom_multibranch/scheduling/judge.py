@@ -109,9 +109,10 @@ opened now needs to show a trend: the frontier's trend window, or its specialist
 starts its first tests wait through, when that is longer. cold_start is the recent sandbox cold start in seconds, or
 "unknown" until the session's first test has waited through one, and min_useful_seconds is then the trend window
 alone. When explore_remaining_seconds is below min_useful_seconds, a branch opened now is unlikely to show anything.
-toolbox_headroom is how many more tests the toolbox would start at once: the max_parallel_tests cap less the tests
-running and queued. A branch opened now makes progress only while it is above 0, and runs at its full K only while it
-is at least that K.
+toolbox_headroom is how many more tests the toolbox would start at once, less the tests running and queued: under the
+max_parallel_tests cap, and under the tests the measurement cards leave room for, which the sandbox an autonomous
+branch holds takes cards away from. A branch opened now makes progress only while it is above 0, and runs at its full
+K only while it is at least that K.
 spend is what the session has used so far. gpu_hours_used is the GPU time of every test of this session that has a
 result, a failed one and the baseline measured on the root commit included; a test taken back before its result is
 not in it, and neither are the measurements the PRELUDE run that built the root commit made on its own.

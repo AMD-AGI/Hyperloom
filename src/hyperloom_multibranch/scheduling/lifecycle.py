@@ -504,7 +504,7 @@ class Session:
             self._settings.judge_interval_seconds,
             scoring,
             self._dashboard(scoring),
-            Widening(self._toolbox, self._roster, scoring.policy),
+            Widening(self._toolbox, self._roster, scoring.policy, self._settings.workload.tp),
             self._similarity,
             self._events,
             self._lifecycle,
