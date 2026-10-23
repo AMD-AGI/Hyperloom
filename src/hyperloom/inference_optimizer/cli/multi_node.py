@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Multi-node helpers for the ``optimize`` CLI: cluster adoption, backend resolution, kept-kernel-patch restore."""
+"""Multi-node helpers for the ``optimize`` CLI: cluster adoption and backend resolution."""
 
 from __future__ import annotations
 
@@ -9,10 +9,6 @@ import argparse
 import logging
 import os
 import sys
-
-from ..session.paths import (
-    session_dir as _session_dir_resolve,
-)
 
 log = logging.getLogger(__name__)
 
@@ -153,26 +149,3 @@ def _prepare_adopted_cluster(args: argparse.Namespace, backend: str, *, head_ip:
 
     if not getattr(args, "no_kernel", False):
         install_geak_on_pods_best_effort()
-
-    _restore_kept_kernel_patches()
-
-
-def _restore_kept_kernel_patches() -> None:
-    """Put the session's kept kernel patches on the adopted pods before anything measures them."""
-    from hyperloom.orchestrator.kernel.kept_patch_restore import KeptPatchRestoreError, restore_kept_patches_on_pods
-
-    from ..multi_node._internal.external_state import external_has_server_control
-    from ..session.session_paths import kernel_patch_backup_roots
-
-    if not external_has_server_control():
-        print(
-            "multi-node: no server control -- skipping the kept kernel patch restore, since no restart would load it.",
-            file=sys.stderr,
-        )
-        return
-    try:
-        restored = restore_kept_patches_on_pods(kernel_patch_backup_roots(_session_dir_resolve()))
-    except KeptPatchRestoreError as exc:
-        print(f"ERROR: {exc}; the pods would serve without this session's kept kernel patches.", file=sys.stderr)
-        sys.exit(1)
-    print(f"multi-node: restored {len(restored)} kept kernel file(s) on the pods")

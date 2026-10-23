@@ -309,9 +309,10 @@ When `--nodes >= 2`, the optimization sandbox has no GPU. Handlers adapt:
   Revert uses `manifest.multinode.host_backup_map` to hit the same pods.
 - **Integration**: `integrate_handler` forces a full server restart after a
   successful apply so the re-baseline measures the patched modules.
-- **Adopting a cluster**: before the first measurement,
-  `restore_kept_patches_on_pods` sends every file a kept (finalized) kernel
-  patch changed, as the sandbox holds it, to every pod; the run stops if a
-  file cannot be restored. A cluster without server control (benchmark-only)
-  is left as it is, since no restart would load the files. Pods recreated
-  mid-run are not re-patched.
+- **Resuming a run**: once the resume pass has put the kept source layers back
+  on the sandbox's tree, `restore_kept_patches_on_pods` sends every file a kept
+  (finalized) kernel patch changed, as the sandbox holds it, to every pod,
+  before the first measurement; the resume halts with
+  `patch_recovery_incomplete` if a file cannot be restored. A cluster without
+  server control (benchmark-only) is left as it is, since no restart would
+  load the files. Pods recreated mid-run are not re-patched.

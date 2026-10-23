@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Put a session's kept kernel patches back on the pods of an adopted multi-node cluster."""
+"""Put a session's kept kernel patches back on the pods of its multi-node cluster."""
 
 from __future__ import annotations
 
@@ -11,11 +11,14 @@ import subprocess
 from pathlib import Path
 from typing import Any, Iterable, NamedTuple
 
+from hyperloom.inference_optimizer.multi_node import external_has_server_control
+
 from .apply_kernel_patch import (
     _MANIFEST_NAME,
     PodPatchApply,
     _dispatch_multinode_apply,
     _dispatch_multinode_finalize,
+    _is_multi_node,
     _pod_backup_dir,
     _PodFanout,
     _target_uses_aiter_jit,
@@ -42,7 +45,9 @@ def restore_kept_patches_on_pods(backup_roots: Iterable[Path]) -> list[Path]:
     A pod created after a KEEP starts from the image's sources, and nothing else
     re-sends a finalized patch. This host's tree is the reference because every
     apply and revert lands here before it fans out, so a file kept more than once
-    needs no ordering.
+    needs no ordering. A run that is not multi-node has no pods, and a cluster
+    without server control (benchmark-only) is left as it is, since no restart
+    would load the files.
 
     Args:
         backup_roots: Apply backup roots; each subdirectory holds one apply's manifest.
@@ -52,8 +57,16 @@ def restore_kept_patches_on_pods(backup_roots: Iterable[Path]) -> list[Path]:
 
     Raises:
         KeptPatchRestoreError: A manifest is unreadable, a kept file is missing on
-            this host, or the pods refused a file.
+            this host, or sending a file to the pods failed.
     """
+    if not _is_multi_node():
+        return []
+    if not external_has_server_control():
+        log.warning(
+            "no server control on the multi-node cluster: its pods keep their sources, since no restart would load "
+            "the kept kernel patches"
+        )
+        return []
     sends = _kept_file_sends(_kept_manifests(backup_roots))
     fanout = _PodFanout()
     for send in sends:
@@ -61,7 +74,7 @@ def restore_kept_patches_on_pods(backup_roots: Iterable[Path]) -> list[Path]:
             fanout.absorb(_dispatch_multinode_apply(send))
         except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
             raise KeptPatchRestoreError(
-                f"could not restore kept kernel file {send.target_file} on the pods: {exc}"
+                f"sending kept kernel file {send.target_file} to the pods failed: {exc}"
             ) from exc
     if fanout.records_by_host:
         cleanup = _dispatch_multinode_finalize(fanout.records_by_host)
