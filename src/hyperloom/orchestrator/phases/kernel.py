@@ -67,9 +67,7 @@ from ..bus.message_bus import Message
 from ..kernel.geak_config import (
     _geak_accepted_kernel_specs,
     _geak_has_accepted_kernel,
-    geak_spec_name,
-    geak_is_cand_tag,
-    geak_spec_is_env,
+    geak_acceptance_specs,
     _accepted_config_as_variant,
     _accepted_config_controls,
 )
@@ -2032,7 +2030,7 @@ class KernelPhase(CoordinatorCollaborator):
         recorder = self.timeline()
         if recorder is None:
             return
-        recorder.record_geak_claim(self.shared_state.geak_pending, specs=self._geak_acceptance_specs(result))
+        recorder.record_geak_claim(self.shared_state.geak_pending, specs=geak_acceptance_specs(result))
         recorder.record_geak_product(
             GeakProduct(
                 accepted_flags=accepted_flags,
@@ -2137,52 +2135,6 @@ class KernelPhase(CoordinatorCollaborator):
             "ts": datetime.now(timezone.utc).isoformat(),
             **matching_review(self.shared_state, result),
         }
-
-    @staticmethod
-    def _geak_acceptance_specs(result: dict[str, Any]) -> list[dict[str, Any]]:
-        """Return every GEAK acceptance, tagged with the queue that proposed it."""
-        lanes: list[tuple[str, Any]] = [
-            *(("kernelQueue", row) for row in (result.get("accepted_kernels") or [])),
-            *(("headQueue", row) for row in (result.get("accepted_heads") or [])),
-        ]
-        out: list[dict[str, Any]] = []
-        index: dict[tuple[str, str], int] = {}
-        for lane, raw in lanes:
-            if not isinstance(raw, dict):
-                continue
-            stated = raw.get("e2e_delta_pct")
-            try:
-                delta = None if stated is None or stated == "" else float(stated)
-            except (TypeError, ValueError):
-                delta = None
-            name = geak_spec_name(raw)
-            if not name:
-                continue
-            row = {**raw, "lane": lane, "alias_collapsed": False}
-            if geak_spec_is_env(raw):
-                row["kind"] = "env"
-            if delta is None:
-                # Collapsing is a claim that two rows measured the same thing, and an absent or unparseable delta is
-                # no evidence for it.
-                out.append(row)
-                continue
-            twin = (str(raw.get("op_kind") or ""), f"{delta:.4f}")
-            position = index.get(twin)
-            if position is None:
-                index[twin] = len(out)
-                out.append(row)
-                continue
-            kept = out[position]
-            kept["alias_collapsed"] = True
-            # The collapsed twin's name is the one a reader may hold, so it is
-            # carried on the survivor rather than dropped with the row.
-            aliases = {*(kept.get("aliases") or []), geak_spec_name(kept), name}
-            if geak_is_cand_tag(geak_spec_name(kept)) and not geak_is_cand_tag(name):
-                row["alias_collapsed"] = True
-                out[position] = row
-                kept = row
-            kept["aliases"] = sorted({a for a in aliases if a and a != geak_spec_name(kept)})
-        return out
 
     @staticmethod
     def _geak_stack_entry_extra(result: dict[str, Any], *, overlay_loaded: bool | None) -> dict[str, Any]:
