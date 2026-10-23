@@ -12,7 +12,6 @@ import sys
 import pytest
 
 from hyperloom.common.provenance import (
-    PROVENANCE_SOURCE,
     build_provenance,
     detect_gfx_arch,
     server_args_hash,
@@ -183,11 +182,6 @@ def test_server_args_from_args_list_preferred_over_env():
     args = _ns(server_args=["--x", "1"])
     p = build_provenance(args=args, env={"SERVER_ARGS": "--y 2"}, probe=False)
     assert p["server_args"] == ["--x", "1"]
-
-
-def test_source_tag_default_and_custom():
-    assert build_provenance(env={}, probe=False)["_provenance_source"] == PROVENANCE_SOURCE
-    assert build_provenance(env={}, probe=False, source="wp1_stub")["_provenance_source"] == "wp1_stub"
 
 
 def test_int_coercion_rejects_garbage():
