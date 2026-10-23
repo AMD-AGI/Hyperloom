@@ -609,11 +609,14 @@ def test_comment_poster_never_runs_pull_request_code() -> None:
     assert gate["name"] in poster[True]["workflow_run"]["workflows"]
 
 
-def test_a_pending_metric_may_lack_a_threshold_and_is_then_not_measured() -> None:
+def test_a_pending_metric_may_lack_a_threshold_and_is_then_not_measured(monkeypatch: pytest.MonkeyPatch) -> None:
     text = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
-    pending = collect.PENDING[0]
-    config = code_metrics.parse_config(text.replace(f"{pending} = 5\n", ""))
-    assert config is not None and pending not in config.thresholds
+    without_args = text.replace("function-args = 5\n", "")
+    with pytest.raises(collect.ToolError, match="thresholds must name"):
+        code_metrics.parse_config(without_args)
+    monkeypatch.setattr(code_metrics, "PENDING", (collect.FUNCTION_ARGS,))
+    config = code_metrics.parse_config(without_args)
+    assert config is not None and collect.FUNCTION_ARGS not in config.thresholds
     assert [code for code, (metric, _) in collect.RUFF_RULES.items() if metric in config.thresholds] == [
         "C901",
         "PLR1702",

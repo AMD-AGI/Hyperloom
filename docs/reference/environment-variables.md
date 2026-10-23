@@ -713,7 +713,7 @@ The following variables configure the Critic and knowledge base components.
 |---------------------------------------|------------------------|--------------------------------------------------------------------------------------------------------------------------------------|
 | `KNOWLEDGE_STORE_MODE`                | `local`                | Exclusive Recipe backend: `local` or `remote`. Ambient KB Store or GBrain credentials do not select remote mode. |
 | `KNOWLEDGE_LOCAL_ROOT`                | `$USER_DATA_PATH/knowledge`, otherwise `~/.cache/hyperloom/knowledge` | Local Recipe/KG root. It is not used for Recipe data in remote mode. |
-| `INFERENCE_OPTIMIZER_`<br>`FA_KB_PATH` | `$USER_DATA_PATH/framework-kb`, otherwise `/workspace/hyperloom/framework-kb` | Framework KB root, holding the lessons ledger the FRAMEWORK phase reads and writes. The orchestrator's KB reader and writeback both resolve through it. The withdrawn `FRAMEWORK_AGENT_KB_DIR` is ignored with a warning naming the resolved root. On first start-up an existing partition under the legacy `$USER_DATA_PATH/kb` is copied across once; a copy that fails warns and leaves the phase to cold-start. |
+| `INFERENCE_OPTIMIZER_`<br>`FA_KB_PATH` | `$USER_DATA_PATH/framework-kb`, otherwise `/workspace/hyperloom/framework-kb` | Framework KB root, holding the lessons ledger the FRAMEWORK phase reads and writes. The orchestrator's KB reader and writeback both resolve through it. |
 | `KB_STORE_URL`                        | Local Recipe mode: `https://global.primus-safe.amd.com/knowledge-base`; remote mode: unset | Unified KB Service endpoint. Local Recipe mode uses the default only for co-hosted PR Monitor access; IR-3 disables PR Monitor without disabling local Recipe storage when the endpoint is unreachable. Remote Recipe mode requires an explicit value, selects the current Recipe View, replays its Config, Patch, and Kernel columns, then writes one final session at CLOSE. PR Monitor is available at `${KB_STORE_URL}/pr-monitor/v1` (REST/IR-3/Framework/KernelForge) and `${KB_STORE_URL}/pr-monitor/mcp/` (specialist MCP). |
 | `KB_STORE_TOKEN`                      | Unset                  | KB Store bearer token. Required when `KNOWLEDGE_STORE_MODE=remote`; transport failures during the final write are non-fatal. |
 | `KB_DRAFT_DIR`                        | Runtime-generated      | Internal remote-mode handoff where each Recipe column (`config`, `patch`, `kernel`) stages its knowledge and files before CLOSE merges them. Hyperloom creates and exports it; operators must not set it. A Recipe cannot be built without it. |
@@ -980,6 +980,24 @@ See [Optimize an AgentX workload](../how-to/optimize.md#optimize-an-agentx-workl
 | `INFERENCE_OPTIMIZER_KERNEL_IDLE_MAX_TICKS` | Optional | `3` | Consecutive no-work KERNEL_AGENT ticks before the phase winds down to SWEEP. Values below `1` are treated as `3`. A malformed value raises `EnvValueError`. |
 | `INFERENCE_OPTIMIZER_KERNEL_IDLE_MIN_SECONDS` | Optional | `600` | Wall-clock seconds a KERNEL idle streak must last before winding down to SWEEP. Values at or below `0` are treated as `600`. A malformed value raises `EnvValueError`. |
 | `SWEEP_VARIANT_TIMEOUT_SEC` | Optional | `2400` | Per-variant wall-clock timeout in seconds for GEAK-backed SWEEP runs. A malformed value raises `EnvValueError`. |
+
+---
+
+## Plug selection
+
+Which implementation serves each plug socket (today only `events`, progress reporting) is chosen by layering, lowest
+first: the built-in `local` profile, the `plugs.resolved.json` of the session being resumed, `--plug-profile`,
+the manifest (`--manifest` or `HYPERLOOM_MANIFEST`), `HYPERLOOM_MANIFEST_OVERRIDES`, then `--plug` and `--plug-config`.
+With none of these set, a run uses the `local` profile, writes nothing to the session and prints nothing. See
+[Select plug implementations](../how-to/optimize.md#select-plug-implementations).
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `HYPERLOOM_MANIFEST` | Unset (the `local` profile) | Path of a JSON plug manifest (`"schema": "hyperloom.plugs/v1"`) laid over the profile. `--manifest` wins over it. An exported value changes which implementations every run in that shell uses, and a selection is recorded in the session and re-applied on resume. |
+| `HYPERLOOM_MANIFEST_OVERRIDES` | Unset (no overrides) | Path of a JSON file of the same shape laid over the manifest; only `--plug` and `--plug-config` win over it. Meant for a host that must adjust a run without editing the manifest. |
+
+A path that does not exist, a malformed file, an unknown socket or implementation, or a `${VAR}` that is unset and has no
+default stops the run with exit code 2 before any session is opened or changed.
 
 ---
 
