@@ -1090,8 +1090,7 @@ async def _wait_for_published_service_ready_async(settings: RestartSettings) -> 
     """Gate on the published ``service_url`` the benchmark dials, not only the reachable address :func:`_wait_for_server_health_async` proves."""
     import time as _time
 
-    timeout_s, poll_every_s = settings.published_ready_s, settings.health_poll_s
-    if timeout_s <= 0:
+    if settings.published_ready_s <= 0:
         log.info("post-restart published-service gate disabled (HYPERLOOM_MN_PUBLISHED_READY_S<=0)")
         return
 
@@ -1122,7 +1121,7 @@ async def _wait_for_published_service_ready_async(settings: RestartSettings) -> 
     log.info(
         "post-restart published-service /health wait: url=%s timeout_s=%d",
         health_url,
-        timeout_s,
+        settings.published_ready_s,
     )
     async with _httpx.AsyncClient(timeout=15.0) as client:
         while True:
@@ -1155,7 +1154,7 @@ async def _wait_for_published_service_ready_async(settings: RestartSettings) -> 
                             "completed=0 / ECONNREFUSED likely traces back to this skip.",
                             health_url,
                             dns_failures,
-                            dns_failures * poll_every_s,
+                            dns_failures * settings.health_poll_s,
                         )
                         return
                     ok_streak = 0
@@ -1164,13 +1163,13 @@ async def _wait_for_published_service_ready_async(settings: RestartSettings) -> 
                     dns_failures = 0  # reached the host: a real refuse/5xx, keep waiting
                     ok_streak = 0
                     last_err = format_exc_brief(exc, limit=120)
-            if elapsed > timeout_s:
+            if elapsed > settings.published_ready_s:
                 raise ServerRestartFailed(
-                    f"published service /health did not return 200 within {timeout_s}s "
+                    f"published service /health did not return 200 within {settings.published_ready_s}s "
                     f"(url={health_url}, last_err={last_err}); the endpoint the benchmark "
                     f"dials had no ready backend (post-restart readiness window did not close)"
                 )
-            await asyncio.sleep(poll_every_s)
+            await asyncio.sleep(settings.health_poll_s)
 
 
 __all__ = [
