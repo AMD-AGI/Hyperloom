@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Callable, Sequence
 
 from hyperloom.common.unified_diff import parse_unified_diff
+from hyperloom.inference_optimizer.session import paths
 
 from ._file_lock import best_effort_file_lock
 from ._git import _git_head_sha
@@ -539,14 +540,8 @@ def _patch_set_writes(targets: frozenset[str], parts: tuple[str, ...]) -> bool:
 
 
 def _resolve_tracelens_root(arg: Path | str | None) -> Path | None:
-    """Resolve TRACELENS_ROOT from arg → env → None; fail-soft when unset or missing on disk."""
-    if arg:
-        root = Path(arg)
-    else:
-        env = os.environ.get("TRACELENS_ROOT", "").strip()
-        if not env:
-            return None
-        root = Path(env)
+    """Resolve the TraceLens root from ``arg``, else :func:`paths.tracelens_root`; ``None`` when not on disk."""
+    root = Path(arg) if arg else paths.tracelens_root()
     return root if root.is_dir() else None
 
 

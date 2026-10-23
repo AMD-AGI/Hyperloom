@@ -4198,17 +4198,7 @@ class TestRunGemmTuningHandler:
 # _default_kernel_batch_parallel — adaptive batch fanout scaling with visible GPUs. _resolve_candidate_id /
 # _all_kernel_candidates — canonicalizes an aliased id against the full hot ∪ skipped set (no fallback).
 class TestTracelensRootResolution:
-    """TraceLens root is resolved/validated independently of inherited env."""
-
-    def test_resolve_uses_explicit_env_override(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("TRACELENS_ROOT", str(tmp_path / "tl"))
-        assert ta._resolve_tracelens_root() == tmp_path / "tl"
-
-    def test_resolve_derives_from_open_source_root_when_env_unset(self, tmp_path, monkeypatch):
-        monkeypatch.delenv("TRACELENS_ROOT", raising=False)
-        monkeypatch.setenv("HYPERLOOM_CACHE_DIR", str(tmp_path / "podlocal"))
-        expected = tmp_path / "podlocal" / "TraceLens"
-        assert ta._resolve_tracelens_root() == expected
+    """The resolved TraceLens root is validated before trace analysis uses it."""
 
     def test_root_error_none_when_present(self, tmp_path):
         tl = tmp_path / "tl"
@@ -4513,7 +4503,7 @@ class TestBuildTraceAnalyzeCmd:
             ),
             session_dir=session_dir,
             state=state,
-            workload={"precision": "mxfp8"},
+            workload={},
         )
         assert cmd[cmd.index("--model-path") + 1] == "/models/sglang-model"
         assert cmd[cmd.index("--precision") + 1] == "fp8"

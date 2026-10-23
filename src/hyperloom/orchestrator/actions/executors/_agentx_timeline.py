@@ -72,7 +72,6 @@ class RequestRecord:
     start: float
     end: float
     first_token: float | None
-    phase: str
     ok: bool
 
     def overlaps(self, window_start: float, window_end: float) -> bool:
@@ -139,7 +138,6 @@ def _record_from(payload: dict[str, Any]) -> RequestRecord | None:
         start=start,
         end=end,
         first_token=first_token,
-        phase=str(metadata.get("benchmark_phase") or ""),
         ok=payload.get("error") in (None, {}),
     )
 

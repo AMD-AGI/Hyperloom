@@ -103,10 +103,11 @@ def test_skip_when_sha_unknown(xdit_tree, monkeypatch):
         assert sp._discover_xdit_plan(tracelens) is None
 
 
-def test_skip_when_tracelens_root_missing(xdit_tree, monkeypatch):
+def test_skip_when_tracelens_root_missing(xdit_tree, monkeypatch, tmp_path):
     source, _tracelens = xdit_tree
     monkeypatch.setenv("XDIT_PATH", str(source))
     monkeypatch.delenv("TRACELENS_ROOT", raising=False)
+    monkeypatch.setenv("HYPERLOOM_CACHE_DIR", str(tmp_path / "empty-cache"))
     with patch.object(sp, "_git_head_sha", return_value=_KNOWN_SHA):
         assert sp._discover_xdit_plan(None) is None
 

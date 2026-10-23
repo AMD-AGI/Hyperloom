@@ -22,6 +22,7 @@ from ._kernel_agent_tool import (
     _shape_tool_result,
 )
 from hyperloom.common.coerce import first_text, optional_positive_int
+from hyperloom.inference_optimizer.session import paths
 from hyperloom.inference_optimizer.trace.trajectory_trace import inherited_scope_fields
 
 log = logging.getLogger(__name__)
@@ -59,20 +60,6 @@ _CANDIDATE_ENV_PREFIXES = (
 _SENSITIVE_ENV_PARTS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL")
 
 
-def _resolve_tracelens_root() -> Path:
-    """Resolve the TraceLens checkout, independent of inherited env.
-
-    Falls back to the install-script-derived pod-local path so trace analysis
-    works even when the coordinator process did not source kernel-agent.env.sh.
-
-    Returns:
-        Path: The resolved TraceLens root (may not exist yet; callers validate).
-    """
-    from hyperloom.inference_optimizer.session import paths
-
-    return paths.tracelens_root()
-
-
 def _tracelens_root_error(root: Path) -> str | None:
     """Validate that the resolved TraceLens root is a usable git checkout.
 
@@ -105,8 +92,6 @@ def _maybe_selfheal_tracelens_root(root: Path, *, log: Any = None) -> None:
     ``TRACELENS_ROOT`` override must fail fast when missing. A heal that cannot
     load or fails is logged and the caller's validation reports the error.
     """
-    from hyperloom.inference_optimizer.session import paths
-
     # The installer-managed checkout is <deps_cache_root>/TraceLens or the
     # per-revision <deps_cache_root>/TraceLens@<sha>; both are healable. An
     # explicit override elsewhere must fail fast (never auto-clone).
@@ -449,7 +434,7 @@ def _build_trace_analyze_cmd(
         cmd += _bypass_flags(state, run.analysis_mode)
 
     model_path = first_text(payload.get("model_path"), getattr(state, "model_path", ""), os.environ.get("MODEL_PATH"))
-    precision = first_text(payload.get("precision"), getattr(state, "precision", ""), workload.get("precision"))
+    precision = first_text(payload.get("precision"), getattr(state, "precision", ""))
     cmd += _optional_flags(
         ("--model-name", run.model_name),
         ("--framework", run.framework),
@@ -459,7 +444,7 @@ def _build_trace_analyze_cmd(
     )
 
     if scriptable:
-        num_denoise = optional_positive_int(payload.get("num_denoise_steps") or workload.get("num_inference_steps"))
+        num_denoise = optional_positive_int(payload.get("num_denoise_steps"))
         cmd += _optional_flags(("--num-denoise-steps", num_denoise))
     elif not is_bypass:
         cmd += _split_llm_flags(payload, workload)
@@ -735,7 +720,7 @@ async def trace_analyze_handler(
     is_bypass = analysis_route == "bypass"
     # Both routes need an importable checkout: bypass transitively imports
     # TraceLens for source-path mapping.
-    tracelens_root = _resolve_tracelens_root()
+    tracelens_root = paths.tracelens_root()
     # Self-heal when the checkout is missing or incomplete (no .git).
     if not (tracelens_root / ".git").exists():
         _maybe_selfheal_tracelens_root(tracelens_root, log=log)

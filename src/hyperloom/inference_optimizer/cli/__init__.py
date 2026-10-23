@@ -84,9 +84,7 @@ from .bootstrap import (
     resolve_model_display_name,
 )
 from hyperloom.orchestrator.actions.executors._aiter_jit import clean_stale_aiter_locks
-from hyperloom.orchestrator.actions.executors._workload_envs import (
-    agentx_enabled as _agentx_enabled,
-)
+from hyperloom.common.perf_metric import agentx_enabled as _agentx_enabled
 
 from .credentials import (
     _CLAUDE_ALLOWED_MODELS as _CLAUDE_ALLOWED_MODELS,

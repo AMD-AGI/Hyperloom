@@ -246,7 +246,7 @@ def test_what_the_preflight_reads_back_is_what_the_launch_exports(tmp_path):
     )
 
     sealed = config_server_argv(config)
-    exported = config_launch_env(config, {})[sealed.env_name]
+    exported = config_launch_env(config, {})[server_args_env_name("sglang")]
     assert sealed.text == exported
     assert sealed.argv == tuple(exported.split())
     assert "--attention-backend" in sealed.argv
@@ -256,9 +256,7 @@ def test_an_injection_never_overwrites_a_flag_the_caller_pinned():
     """The one way to add a flag leaves an operator's own spelling standing."""
     envs = {"EXTRA_VLLM_ARGS": "--block-size 128"}
 
-    assert (
-        add_server_arg_unless_pinned(envs, "vllm", "--block-size 16", pinned_by=("block-size", "block_size")) is False
-    )
+    add_server_arg_unless_pinned(envs, "vllm", "--block-size 16", pinned_by=("--block-size", "--block_size"))
     assert envs["EXTRA_VLLM_ARGS"] == "--block-size 128"
 
 
@@ -266,7 +264,7 @@ def test_an_injection_merges_onto_what_is_already_composed():
     """An unpinned flag joins the string rightmost, where last-wins reads it."""
     envs = {"EXTRA_SGLANG_ARGS": "--tp 8"}
 
-    assert add_server_arg_unless_pinned(envs, "sglang", "--trust-remote-code", pinned_by=("trust-remote-code",)) is True
+    add_server_arg_unless_pinned(envs, "sglang", "--trust-remote-code", pinned_by=("--trust-remote-code",))
     assert envs["EXTRA_SGLANG_ARGS"] == "--tp 8 --trust-remote-code"
 
 
@@ -274,7 +272,7 @@ def test_an_injection_into_an_empty_env_is_the_whole_string():
     """The first flag composed needs no separate spelling of "nothing yet"."""
     envs: dict[str, str] = {}
 
-    assert add_server_arg_unless_pinned(envs, "sglang", "--tp 8", pinned_by=("tp",)) is True
+    add_server_arg_unless_pinned(envs, "sglang", "--tp 8", pinned_by=("--tp",))
     assert envs["EXTRA_SGLANG_ARGS"] == "--tp 8"
 
 

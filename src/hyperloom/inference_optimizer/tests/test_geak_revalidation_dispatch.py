@@ -274,7 +274,8 @@ async def test_geak_launch_controls_reach_materialized_rebench(
 ) -> None:
     import yaml
 
-    from hyperloom.orchestrator.actions.executors import ExploreExecutor, explore
+    from hyperloom.orchestrator.actions.executors import explore
+    from hyperloom.orchestrator.actions.executors.explore import ExploreExecutor
     from hyperloom.orchestrator.actions.executors._grid_runner import VariantResult, _build_variant_yaml
     from hyperloom.orchestrator.state.shared_state import SharedState
 
@@ -1083,7 +1084,7 @@ async def test_internal_stack_rebench_passes_runtime_budget_to_executor(
 ) -> None:
     import time
 
-    from hyperloom.orchestrator.actions.executors import ExploreExecutor
+    from hyperloom.orchestrator.actions.executors.explore import ExploreExecutor
 
     baseline = tmp_path / "baseline.yaml"
     baseline.write_text(
@@ -1148,7 +1149,7 @@ async def test_internal_stack_rebench_preserves_baseline_script(
 ) -> None:
     import yaml
 
-    from hyperloom.orchestrator.actions.executors import ExploreExecutor
+    from hyperloom.orchestrator.actions.executors.explore import ExploreExecutor
     from hyperloom.orchestrator.actions.executors._grid_runner import VariantResult, _build_variant_yaml
 
     baseline = tmp_path / "baseline.yaml"

@@ -17,9 +17,7 @@ import pytest
 import yaml
 
 from hyperloom.orchestrator.kernel import request_handlers as krh
-from hyperloom.orchestrator.actions.executors import (
-    ReportExecutor,
-)
+from hyperloom.orchestrator.actions.executors.report import ReportExecutor
 from hyperloom.orchestrator.roles import (
     MockBackend,
     ScriptedPlan,
@@ -55,7 +53,7 @@ def session_dir(tmp_path, monkeypatch) -> Path:
     monkeypatch.setattr(
         _benchmark_interpreter,
         "_resolve_magpie_python",
-        lambda: "/usr/bin/python3",
+        lambda _env=None: "/usr/bin/python3",
     )
     return make_session_dir()
 

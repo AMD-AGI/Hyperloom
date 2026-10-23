@@ -213,9 +213,9 @@ _SERVER_METRICS_RELPATHS = (
     "*/aiperf_artifacts/server_metrics_export.json",
 )
 
-#: aiperf's ``CreditPhase`` values, mapped onto ours. It has no notion of the accuracy eval or of boot, which is why the
-#: live path still covers those.
-_CREDIT_PHASE_NAMES = {"warmup": "warmup", "profiling": "measured"}
+#: aiperf's ``CreditPhase`` values, mapped onto ours, for both the export and the progress API. It has no notion of the
+#: accuracy eval or of boot, which is why the live path and the log markers still own those.
+_AIPERF_PHASE_NAMES = {"warmup": "warmup", "profiling": "measured"}
 
 
 def families_from_aiperf_record(metrics: Any) -> ParsedFamilies:
@@ -289,7 +289,7 @@ def _phase_blocks(payload: dict[str, Any]) -> list[tuple[str, dict[str, Any], tu
     measured = payload.get("metrics")
     if isinstance(measured, dict):
         metrics_phase = str(payload.get("metrics_phase") or "").lower()
-        blocks.append((_CREDIT_PHASE_NAMES.get(metrics_phase, "measured"), measured, window(metrics_phase)))
+        blocks.append((_AIPERF_PHASE_NAMES.get(metrics_phase, "measured"), measured, window(metrics_phase)))
     return blocks
 
 
@@ -789,9 +789,7 @@ class KvMetricsPoller:
         self,
         *,
         port: int | None = None,
-        host: str = "127.0.0.1",
         config_envs: dict[str, Any] | None = None,
-        timeout_sec: float = _SCRAPE_TIMEOUT_SEC,
         workspace: Any = None,
     ) -> None:
         """Bind the poller to an endpoint without contacting it, or yet resolving it.
@@ -803,10 +801,8 @@ class KvMetricsPoller:
         self._explicit_port = int(port) if port else None
         self._config_envs = dict(config_envs or {})
         self._remote_url = resolve_metrics_url(self._config_envs)
-        self._host = host
         self._port_workspace = workspace
         self._port: int | None = None
-        self.timeout_sec = float(timeout_sec)
         self._failures = 0
         self._succeeded = False
         self._gave_up = False
@@ -825,7 +821,7 @@ class KvMetricsPoller:
         """Endpoint this poller scrapes."""
         if self._explicit_port is None and self._remote_url is not None:
             return self._remote_url
-        return f"http://{self._host}:{self.port}/metrics"
+        return f"http://127.0.0.1:{self.port}/metrics"
 
     @property
     def available(self) -> bool | None:
@@ -844,7 +840,7 @@ class KvMetricsPoller:
         if self._first_attempt_mono is None:
             self._first_attempt_mono = now
         try:
-            with _OPENER.open(self.url, timeout=self.timeout_sec) as response:
+            with _OPENER.open(self.url, timeout=_SCRAPE_TIMEOUT_SEC) as response:
                 body = response.read().decode("utf-8", "ignore")
         except (urllib.error.URLError, http.client.HTTPException, OSError, ValueError) as exc:
             self._failures += 1
@@ -884,10 +880,6 @@ class KvMetricsPoller:
 #: directory first, then one level down, matching how the watchdog resolves a nested benchmark's logs.
 _PROGRESS_ADDRESS_RELPATHS = ("aiperf_artifacts/progress_api.json", "*/aiperf_artifacts/progress_api.json")
 
-#: aiperf's phase names, mapped onto ours. It has no notion of the accuracy eval, which is why ``eval`` is not here and
-#: stays owned by the log markers.
-_AIPERF_PHASE_NAMES = {"warmup": "warmup", "profiling": "measured"}
-
 #: How far an authoritative timestamp may sit from this process's clock before it is rejected. Wide, because it is only
 #: meant to catch a clock domain that is not the Unix epoch at all -- a monotonic ``start_ns`` is off by decades, not by
 #: hours -- rather than to police skew.
@@ -916,10 +908,9 @@ class AiperfProgressPoller:
     to publish an address, and a round that cannot reach it must still produce KV metrics.
     """
 
-    def __init__(self, workspace: Any, *, timeout_sec: float = _SCRAPE_TIMEOUT_SEC) -> None:
+    def __init__(self, workspace: Any) -> None:
         """Bind to a round's directory without reading anything from it."""
         self._workspace = workspace
-        self.timeout_sec = float(timeout_sec)
         self.url: str | None = None
         self._resolved = False
         self._failures = 0
@@ -955,7 +946,7 @@ class AiperfProgressPoller:
         if url is None:
             return None
         try:
-            with _OPENER.open(f"{url.rstrip('/')}/api/progress", timeout=self.timeout_sec) as response:
+            with _OPENER.open(f"{url.rstrip('/')}/api/progress", timeout=_SCRAPE_TIMEOUT_SEC) as response:
                 payload = json.loads(response.read().decode("utf-8", "ignore"))
         except (urllib.error.URLError, http.client.HTTPException, OSError, ValueError) as exc:
             self._failures += 1
@@ -1092,11 +1083,6 @@ class KvMetricsRecorder:
         self._capacity_gb: float | None = None
         self._series_count = 0
         self._closed = False
-
-    @property
-    def phase(self) -> str:
-        """Current collection phase."""
-        return self._phase
 
     def note_phase(self, phase: str, mono: float) -> None:
         """Record a phase transition."""

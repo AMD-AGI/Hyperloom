@@ -106,7 +106,7 @@ def per_stream_footprint_gib(
 def validate_session_shape(
     *,
     declared_mode: str = "",
-    streams: int | None = None,
+    streams: int = DEFAULT_STREAMS_PER_PARTITION,
     gpu_type: str | None = None,
     model: PartitionModel = PartitionModel(),
     fanout_expected: bool = True,
@@ -114,22 +114,6 @@ def validate_session_shape(
     """Check, at launch, that this session can run in the shape it was given."""
     warnings: list[str] = []
     notes: list[str] = []
-    try:
-        requested_streams = DEFAULT_STREAMS_PER_PARTITION if streams is None else int(streams)
-    except (TypeError, ValueError):
-        requested_streams = 0
-    if requested_streams < 1:
-        # Refused rather than defaulted, and refused before the card is touched: this is a usage error about the
-        # request, not a fact about the hardware, so it needs no probe to decide and must not differ from the CLI's
-        # own verdict on the same value.
-        return ShapeVerdict(
-            refusal=(
-                f"streams per partition must be >= 1, got {streams!r}. One stream per "
-                f"partition is the floor: a partition with no stream on it measures nothing, "
-                f"and a mode is only worth setting at two."
-            ),
-        )
-    streams = requested_streams
     gpu = partition_gpu_id()
 
     layout = observe_partition(gpu, gpu_type=gpu_type)
