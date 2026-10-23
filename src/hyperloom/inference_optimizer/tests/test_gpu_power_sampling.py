@@ -13,10 +13,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from hyperloom.orchestrator.actions.executors import _subprocess_kill
+from hyperloom.orchestrator.actions.executors import _gpu_power, _subprocess_kill
 from hyperloom.orchestrator.actions.executors._gpu_power import (
     GPU_POWER_ARTIFACT_NAME,
     GpuPowerRecorder,
+    _read_node_power,
     build_gpu_power_recorder,
     parse_power_sample,
     read_measured_gpu_power,
@@ -92,6 +93,75 @@ def test_the_by_gpu_reading_names_each_serving_card_and_no_idle_one(tmp_path):
     found, by_gpu = read_measured_gpu_power_by_gpu(tmp_path)
     assert found is True
     assert by_gpu == {str(g): pytest.approx(800.0) for g in range(4)}
+
+
+def _board(root, card: int, **files: str) -> None:
+    board = root / f"card{card}" / "device" / "board"
+    board.mkdir(parents=True)
+    for name, text in {"gpuboard_temp": "", **files}.items():
+        (board / name).write_text(text)
+
+
+def test_the_node_power_is_read_from_the_npm_master_cards_board(tmp_path, monkeypatch):
+    """Every card has a board directory; only firmware's NPM master publishes the node's files in it."""
+    monkeypatch.setattr(_gpu_power, "_BOARD_GLOB", str(tmp_path / "card*" / "device" / "board"))
+    assert _read_node_power() is None
+    _board(tmp_path, 1)
+    _board(tmp_path, 57, npm_status="enabled\n", node_power="3492\n", cur_node_power_limit="2600\n")
+    assert _read_node_power() == (3492.0, 2600.0)
+    (tmp_path / "card57" / "device" / "board" / "npm_status").write_text("disabled\n")
+    assert _read_node_power() is None
+
+
+def _node_summary(tmp_path, read_node) -> dict:
+    query = _Replay(_tp4_on_eight(800.0))
+    recorder = GpuPowerRecorder(output_path=None, query=query, interval_sec=0.5, read_node=read_node)
+    recorder._interval = 0.01
+    _run_measured(recorder, query, samples=4)
+    return recorder.close()
+
+
+def test_a_node_held_at_its_npm_limit_is_reported_though_no_card_counts_it(tmp_path, caplog):
+    """Measured on MI350X: under a 2600 W node limit every card ran near 430 W against a 1000 W cap, the node read
+    above the limit, and the cards' own PPT counters moved for under 1% of the phase."""
+    out = _node_summary(tmp_path, lambda: (3492.0, 2600.0))
+    assert out["power_throttled_gpus"] == []
+    assert out["node"]["limit_w"] == 2600.0
+    assert out["node"]["limited_fraction"] == 1.0
+    assert out["node"]["avg_power_w"] == 3492.0
+    assert "held at its NPM power limit (2600.0 W) for 100% of the measured phase" in caplog.text
+
+
+def test_a_node_below_its_npm_limit_is_not_held(tmp_path, caplog):
+    out = _node_summary(tmp_path, lambda: (5200.0, 8000.0))
+    assert out["node"]["limited_fraction"] == 0.0
+    assert "NPM power limit" not in caplog.text
+
+
+def test_a_node_without_npm_has_no_node_reading(tmp_path):
+    out = _node_summary(tmp_path, lambda: None)
+    assert (out["node"], out["node_query_errors"]) == (None, 0)
+
+
+def test_the_rounds_recorder_samples_the_node(tmp_path, monkeypatch):
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/amd-smi")
+    monkeypatch.delenv("HYPERLOOM_GPU_POWER_SAMPLING", raising=False)
+    monkeypatch.setattr(_gpu_power, "_read_node_power", lambda: (8000.0, 8000.0))
+    recorder = build_gpu_power_recorder(str(tmp_path / "server.log"), {})
+    query = _Replay(_tp4_on_eight(800.0))
+    recorder._query, recorder._interval = query, 0.01
+    _run_measured(recorder, query, samples=3)
+    out = recorder.close()
+    assert out["node"]["limited_fraction"] == 1.0
+
+
+def test_a_node_read_that_fails_is_counted_and_costs_the_cards_nothing(tmp_path):
+    def _unreadable():
+        raise OSError("permission denied")
+
+    out = _node_summary(tmp_path, _unreadable)
+    assert out["node"] is None and out["node_query_errors"] > 0
+    assert out["avg_power_w"] == 800.0
 
 
 def _summary_of(tmp_path, payload, *, gpus=None) -> dict:
