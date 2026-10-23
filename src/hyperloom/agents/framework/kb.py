@@ -1,21 +1,15 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Framework PR ledger: KB root resolution, legacy-partition migration, and the ledger reader."""
+"""Framework PR ledger: KB root resolution and the ledger reader."""
 
 from __future__ import annotations
 
 import json
-import logging
 import os
-import shutil
-import uuid
 from pathlib import Path
 
 from hyperloom.inference_optimizer.session.paths import workspace_root
-
-
-_log = logging.getLogger(__name__)
 
 
 # Per-framework KB partition root under ``<KB_ROOT>/framework_optimization/``.
@@ -33,38 +27,6 @@ KB_ROOT_ENV: str = "INFERENCE_OPTIMIZER_FA_KB_PATH"
 #: Workspace subdirectory holding this KB; the recipe root is ``<workspace>/knowledge``.
 _MUTABLE_KB_DIRNAME: str = "framework-kb"
 
-#: Where the writer put this partition before it was given its own directory.
-_LEGACY_WORKSPACE_KB_DIRNAME: str = "kb"
-
-#: Withdrawn override. Only the reader honoured it, so setting it split the KB
-#: in two. ``FRAMEWORK_AGENT_ROOT`` is deliberately absent: it means "where
-#: this skill is installed", is used for other purposes, and never reached the
-#: reader anyway because no installer exports it.
-_REMOVED_KB_ROOT_ENV: str = "FRAMEWORK_AGENT_KB_DIR"
-
-
-def prepare_kb_environment() -> None:
-    """Start-up sequence for the framework KB: report the environment, then migrate."""
-    try:
-        check_kb_configuration()
-        migrate_legacy_partition_once()
-    except Exception:  # noqa: BLE001 — start-up for an advisory KB may not fail a run
-        _log.warning("FRAMEWORK KB: start-up preparation failed; continuing without it", exc_info=True)
-
-
-def check_kb_configuration() -> None:
-    """Report an environment naming a KB variable this build no longer reads."""
-    if not os.environ.get(_REMOVED_KB_ROOT_ENV, "").strip():
-        return
-    _log.warning(
-        "FRAMEWORK KB: %s is set but no longer read. It only ever redirected the reader, which is "
-        "how reads and writes came to point at different places; it is now ignored and this KB "
-        "resolves to %s. Use %s instead — that one moves both halves together.",
-        _REMOVED_KB_ROOT_ENV,
-        mutable_kb_root(),
-        KB_ROOT_ENV,
-    )
-
 
 def mutable_kb_root() -> Path:
     """Root of the KB partition this session reads and writes."""
@@ -79,58 +41,9 @@ def framework_optimization_root() -> Path:
     return mutable_kb_root() / _FRAMEWORK_OPTIMIZATION_ROOT
 
 
-def migrate_legacy_partition_once() -> Path | None:
-    """Carry the framework partition over from the legacy ``<workspace>/kb`` root."""
-    if os.environ.get(KB_ROOT_ENV, "").strip():
-        return None
-
-    source = workspace_root() / _LEGACY_WORKSPACE_KB_DIRNAME / _FRAMEWORK_OPTIMIZATION_ROOT
-    destination = framework_optimization_root()
-
-    try:
-        if not source.is_dir() or not any(source.iterdir()):
-            return None
-        if destination.exists() and any(destination.iterdir()):
-            return None
-        _copy_partition_atomically(source, destination)
-    except OSError:  # a convenience copy may not stop the run
-        _log.warning(
-            "FRAMEWORK KB: could not carry the legacy partition over from %s; continuing with "
-            "whatever is at %s. The FRAMEWORK phase treats a missing ledger as a cold start, so "
-            "it may re-dispatch config levers that already lost an accuracy gate.",
-            source,
-            destination,
-            exc_info=True,
-        )
-        return None
-
-    _log.warning(
-        "FRAMEWORK KB: migrated the legacy partition %s -> %s. The source is left in place; "
-        "remove it once the new location looks right.",
-        source,
-        destination,
-    )
-    return destination
-
-
-def _copy_partition_atomically(source: Path, destination: Path) -> None:
-    """Copy ``source`` onto a not-yet-existing ``destination`` in one visible step."""
-    root = destination.parent
-    staging = root.with_name(f"{root.name}.migrating-{os.getpid()}-{uuid.uuid4().hex[:8]}")
-    try:
-        # symlinks=True: copy links as links.
-        shutil.copytree(source, staging, symlinks=True)
-        root.mkdir(parents=True, exist_ok=True)
-        os.replace(staging, destination)
-    except BaseException:
-        shutil.rmtree(staging, ignore_errors=True)
-        raise
-
-
-def read_pr_ledger(kb_root: Path | None = None) -> list[dict]:
+def read_pr_ledger() -> list[dict]:
     """Read the framework PR outcome ledger from ``lessons.jsonl``."""
-    root = kb_root or mutable_kb_root()
-    path = root / _FRAMEWORK_OPTIMIZATION_ROOT / LESSONS_FILE
+    path = framework_optimization_root() / LESSONS_FILE
     if not path.is_file():
         return []
     out: list[dict] = []
@@ -150,6 +63,5 @@ def read_pr_ledger(kb_root: Path | None = None) -> list[dict]:
 __all__ = [
     "LESSONS_FILE",
     "framework_optimization_root",
-    "prepare_kb_environment",
     "read_pr_ledger",
 ]

@@ -2317,34 +2317,6 @@ def _preflight(args: argparse.Namespace) -> tuple[str, str]:
         detail={"exit_code": 0},
     )
 
-    # Same timing, same reason: run after the loaders so a withdrawn KB override set in ``.env`` is caught, and before
-    # any KB read happens.
-    from hyperloom.agents.framework.kb import prepare_kb_environment
-
-    kb_withdrawn_override = bool(os.environ.get("FRAMEWORK_AGENT_KB_DIR", "").strip())
-    kb_enabled = not bool(getattr(args, "degraded_kb", False))
-
-    def _prepare_kb_install_step() -> dict[str, Any]:
-        prepare_kb_environment()
-        return {
-            "status": ("skipped" if not kb_enabled else "warned" if kb_withdrawn_override else "applied"),
-            "skip_reason": "explicit_flag" if not kb_enabled else None,
-            "detail": {
-                "recipe_kb": {
-                    "enabled": kb_enabled,
-                    "reason": "explicit_flag" if not kb_enabled else None,
-                },
-                "kb_withdrawn_override": kb_withdrawn_override,
-            },
-        }
-
-    _run_install_step(
-        install_event,
-        step_id="prepare_kb_environment",
-        category="degrade",
-        action=_prepare_kb_install_step,
-    )
-
     # --- Resolve install interpreters --- Resolve the ACTIVE benchmark backend first so a bypass-only environment (no
     # Magpie / no /opt/venv) never routes installs through Magpie's interpreter.
     from hyperloom.orchestrator.actions.executors.benchmark_backend import (

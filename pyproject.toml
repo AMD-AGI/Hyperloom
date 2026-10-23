@@ -271,7 +271,7 @@ hyperloom = [
     "assets/slurm/*.sh.in",
     "references/*.md",
 ]
-# Critic LLM skill assets, mounted by the A2A / Codex chat server host.
+# Critic LLM skill assets, loaded into the Critic prompt preamble by CriticAgentBackend.
 "hyperloom.agents.critic" = [
     "SKILL.md",
     "README.md",
@@ -542,6 +542,10 @@ module-lines = 1200
 duplicated-lines = 0
 # Any vulture finding at dead-code-min-confidence counts.
 dead-code = 0
+# Entries directly in a directory: its modules and the subdirectories holding one.
+# Past 50 a reader can no longer scan the listing for the module they need;
+# group the modules into subpackages by responsibility.
+directory-entries = 50
 
 # Exact versions: the script refuses to measure with any other, because each
 # release can change what a metric counts. CI installs these same pins.
