@@ -13,7 +13,8 @@ from pathlib import Path
 from typing import NoReturn
 
 from .. import framework_registry
-from .constraint_args import add_constraint_arguments, positive_watts_arg
+from .constraint_args import add_constraint_arguments
+from .gpu_power_args import add_gpu_power_arguments
 from .backends import CRITIC_PROTOCOL_CHOICES
 from .recover import RECOVER_DESCRIPTION, RECOVER_HELP, add_cleanup_confirmation_arguments
 from hyperloom.common import predictor_config
@@ -173,6 +174,70 @@ def _add_custom_specialist_args(opt: argparse.ArgumentParser) -> None:
         help="One line (max 200 chars) describing custom_specialist in its own prompt. Requires "
         "--custom-specialist-prompt-file.",
     )
+
+
+def _add_resume_arguments(opt: argparse.ArgumentParser) -> None:
+    """The ``--resume-from`` and ``--force-resume`` flags of ``optimize``."""
+    opt.add_argument(
+        "--resume-from",
+        type=str,
+        default=None,
+        help="Per-session subdir to resume; the only way to resume a session. "
+        "Skips the SharedState seed and lets the Coordinator replay the "
+        "prior event log + state.json. Must be an absolute path under "
+        "$USER_DATA_PATH (workspace_root), which MUST stay at workspace "
+        "level (/shared/hyperloom-sessions, not the per-session subdir) so "
+        "runtime/ resolution works.",
+    )
+    opt.add_argument(
+        "--force-resume",
+        action="store_true",
+        default=False,
+        help=(
+            "Allow ``--resume-from`` to push past a terminal "
+            "``stop_reason='target_reached'``. "
+            "Without this flag the resume aborts (Issue-G guard, per "
+            "SKILL.md 'Run-time signals': that terminal requires an "
+            "operator-side workload / strategy change before resuming). "
+            "No-op without ``--resume-from``."
+        ),
+    )
+
+
+def _add_plug_arguments(opt: argparse.ArgumentParser) -> None:
+    """Add the flags that select which implementation fills each plug socket; absent, every socket stays local."""
+    opt.add_argument(
+        "--plug-profile",
+        dest="plug_profile",
+        default=None,
+        metavar="NAME",
+        help="Built-in plug profile to load (local, hosted-gpu, hosted-cpu). Without it, and without the other plug "
+        "flags, nothing changes from a plain local run.",
+    )
+    opt.add_argument(
+        "--manifest",
+        dest="plug_manifest",
+        default=None,
+        metavar="PATH",
+        help="Custom plug manifest (JSON) laid over the profile. Falls back to $HYPERLOOM_MANIFEST.",
+    )
+    for flag, dest, metavar, text in (
+        (
+            "--plug",
+            "plug",
+            "SOCKET=IMPL",
+            "Choose the implementation of one socket; repeatable. The last layer, over profile, manifest and "
+            "$HYPERLOOM_MANIFEST_OVERRIDES.",
+        ),
+        (
+            "--plug-config",
+            "plug_config",
+            "SOCKET.KEY=VALUE",
+            "Set one configuration key of a socket's implementation; repeatable. VALUE is read as JSON when it "
+            "parses as JSON, as text otherwise.",
+        ),
+    ):
+        opt.add_argument(flag, dest=dest, action="append", default=[], metavar=metavar, help=text)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -348,7 +413,7 @@ def _build_parser() -> argparse.ArgumentParser:
     opt.add_argument("--extra-env", action="append", default=[], help=argparse.SUPPRESS)
     opt.add_argument(
         "--tp",
-        type=int,
+        type=_positive_int_arg,
         default=None,
         help="Tensor parallel size. Pass `--tp N` directly from the prompt's "
         f"Environment block. Default: {DEFAULT_TP}.",
@@ -367,8 +432,8 @@ def _build_parser() -> argparse.ArgumentParser:
         type=_positive_int_arg,
         default=None,
         help="Explicit server-facing MAX_MODEL_LEN. Resolution: "
-        "--max-model-len > auto(ISL+OSL+headroom, "
-        "clamped to native context). Explicit values are preserved and "
+        "--max-model-len > $MAX_MODEL_LEN > auto(ISL+OSL+headroom, "
+        "clamped to native context). Explicit values must fit the known native context and are "
         "exported into the materialized Magpie YAML.",
     )
     opt.add_argument(
@@ -591,51 +656,9 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     add_constraint_arguments(opt)
-    opt.add_argument(
-        "--gpu-power-cap-w",
-        type=positive_watts_arg,
-        default=None,
-        help=(
-            "Declare the power cap (W) the GPUs are already set to. An assertion, not a request: the optimizer "
-            "never changes power settings, which are privileged and card-wide. Set it with "
-            "`amd-smi set --power-cap` before launch; the session refuses to start if any card it uses is at a "
-            "different cap. The observed cap is recorded whether or not this flag is passed."
-        ),
-    )
-    opt.add_argument(
-        "--gpu-perf-level",
-        type=str,
-        default=None,
-        metavar="LEVEL",
-        help=(
-            "Declare the DPM performance level the GPUs are already set to (e.g. auto, high, determinism). "
-            "An assertion like --gpu-power-cap-w: set it with `amd-smi set --perf-level` before launch."
-        ),
-    )
-    opt.add_argument(
-        "--resume-from",
-        type=str,
-        default=None,
-        help="Per-session subdir to resume; the only way to resume a session. "
-        "Skips the SharedState seed and lets the Coordinator replay the "
-        "prior event log + state.json. Must be an absolute path under "
-        "$USER_DATA_PATH (workspace_root), which MUST stay at workspace "
-        "level (/shared/hyperloom-sessions, not the per-session subdir) so "
-        "runtime/ resolution works.",
-    )
-    opt.add_argument(
-        "--force-resume",
-        action="store_true",
-        default=False,
-        help=(
-            "Allow ``--resume-from`` to push past a terminal "
-            "``stop_reason='target_reached'``. "
-            "Without this flag the resume aborts (Issue-G guard, per "
-            "SKILL.md 'Run-time signals': that terminal requires an "
-            "operator-side workload / strategy change before resuming). "
-            "No-op without ``--resume-from``."
-        ),
-    )
+    add_gpu_power_arguments(opt)
+    _add_resume_arguments(opt)
+    _add_plug_arguments(opt)
     opt.add_argument(
         "--model-class",
         type=str,

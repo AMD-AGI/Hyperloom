@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 import logging as _logging
+import sqlite3
 from dataclasses import dataclass
 from typing import Any
 
@@ -21,7 +22,6 @@ log = _logging.getLogger(__name__)
 # SWEEP budget exits end the run for lack of time; every other CLOSE transition reason is itself a stop reason.
 _BUDGET_EXIT_STOP_REASONS = {
     "sweep_budget_exhausted": "time_exhausted",
-    "sweep_budget_cap": "time_exhausted",
 }
 
 # The FRAMEWORK_AGENT exit reason for a plateau or an LLM hint; budget and terminal exits never wait.
@@ -30,8 +30,8 @@ _LEVERAGE_EXIT_REASON = "optimize_no_more_leverage"
 
 def is_leverage_exit(next_phase: tuple[str, str, dict[str, Any]]) -> bool:
     """Whether a FRAMEWORK_AGENT transition is the plateau or LLM-hint exit, the one operator work may hold."""
-    _target, reason, evidence = next_phase
-    return _LEVERAGE_EXIT_REASON in (reason, str((evidence or {}).get("passed_through_reason") or ""))
+    _target, reason, _evidence = next_phase
+    return reason == _LEVERAGE_EXIT_REASON
 
 
 @dataclass(frozen=True)
@@ -115,7 +115,7 @@ class MachinePhase(CoordinatorCollaborator):
             )
         try:
             state.save(self.session_dir)
-        except Exception:
+        except OSError:
             log.exception("Coordinator: save after phase init failed")
 
     def _reopen_a_session_that_was_left_closed(self) -> None:
@@ -299,7 +299,7 @@ class MachinePhase(CoordinatorCollaborator):
                     },
                 )
             )
-        except Exception:
+        except sqlite3.Error:
             log.exception("Coordinator: phase_transition event bus write failed")
 
     async def _fire_phase_entry(self, move: Transition) -> None:

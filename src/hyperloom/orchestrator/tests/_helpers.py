@@ -72,8 +72,8 @@ def git_commit_all(path: Path, message: str) -> None:
 
 def patch_integrate_patch_roots(monkeypatch: Any, tmp_path: Path) -> None:
     """Register common tmp_path framework repos as integrate_patch search roots."""
-    from hyperloom.orchestrator.actions.executors import integrate_patch as ip
     from hyperloom.inference_optimizer import framework_paths as fp
+    from hyperloom.orchestrator.actions.executors import _patch_artifacts, _patch_sources
 
     real = fp.resolve_kernel_search_roots
 
@@ -88,7 +88,8 @@ def patch_integrate_patch_roots(monkeypatch: Any, tmp_path: Path) -> None:
                 merged.append(root)
         return tuple(merged)
 
-    monkeypatch.setattr(ip, "resolve_kernel_search_roots", _merged)
+    for module in (_patch_sources, _patch_artifacts):
+        monkeypatch.setattr(module, "resolve_kernel_search_roots", _merged)
 
 
 def integrate_extra(params: dict[str, Any]) -> dict[str, Any]:

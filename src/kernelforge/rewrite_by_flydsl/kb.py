@@ -25,6 +25,8 @@ from kernelforge.rewrite_by_flydsl.identity import resolve_identity
 from kernelforge.rewrite_by_flydsl.measurement import FlydslMeasurement
 from kernelforge.rewrite_by_flydsl.port_loop import check_flydsl_port
 from kernelforge.knowledge.kb_store.record_store import (
+    KBStoreError,
+    RewriteRecordError,
     RewriteRecordStore,
     create_rewrite_record_store,
 )
@@ -40,17 +42,14 @@ _VALIDATION_TIMEOUT_SEC = 1800
 _BENCH_TIMEOUT_SEC = 600
 
 
-def _stage_timeout(cap_sec: int, search_deadline: float, run_deadline_sec: float | None) -> int:
+def _stage_timeout(cap_sec: int, search_deadline: float, run_deadline_sec: float) -> int:
     """Seconds one measurement stage may take without outliving the search or the run.
 
     The search budget bounds the field, not each trial, so a stage allowed to run to its own ceiling could spend the
     whole budget on the first candidate and leave the rest of the field unmeasured -- which is the opposite of what
     reading a wide field is for.
     """
-    allowance = search_deadline - time.monotonic()
-    if run_deadline_sec is not None:
-        allowance = min(allowance, run_deadline_sec)
-    return max(1, min(cap_sec, int(allowance)))
+    return max(1, min(cap_sec, int(min(search_deadline - time.monotonic(), run_deadline_sec))))
 
 
 @dataclass(frozen=True)
@@ -93,7 +92,6 @@ class _ReadPlan:
     store: RewriteRecordStore | None
     candidates: list[dict[str, Any]]
     read_reason: str
-    read_error: str
 
 
 def _sha256(path: str | Path) -> str:
@@ -126,51 +124,38 @@ def _read_top_candidates(
 ) -> _ReadPlan:
     store = create_rewrite_record_store(config)
     if store is None:
-        return _ReadPlan(None, [], "not_configured", "")
+        return _ReadPlan(None, [], "not_configured")
     gpu_type = str(config.gpu_type or "").strip()
     if not gpu_type:
-        return _ReadPlan(None, [], "missing_gpu_type", "")
-    try:
-        identity, canonical_id, _signature, _implementation = resolve_identity(
-            spec,
-            gpu=gpu_type,
-            source_text=_source_text(spec),
+        return _ReadPlan(None, [], "missing_gpu_type")
+    identity, canonical_id, _signature, _implementation = resolve_identity(
+        spec,
+        gpu=gpu_type,
+        source_text=_source_text(spec),
+    )
+    resolved = [(canonical_id, candidate) for candidate in store.candidates(canonical_id, limit=top_k)]
+    if not resolved:
+        searched = store.search_identities(identity, limit=300)
+        for fallback_id in rank_fallback_identities(identity, searched):
+            fallback = store.candidates(fallback_id, limit=top_k)
+            if fallback:
+                resolved = [(fallback_id, candidate) for candidate in fallback]
+                break
+    candidates: list[dict[str, Any]] = []
+    for candidate_canonical_id, candidate in resolved:
+        value = candidate.knowledge.get("value")
+        if not isinstance(value, dict):
+            continue
+        candidates.append(
+            {
+                "canonical_id": candidate_canonical_id,
+                "session_id": candidate.session_id,
+                "solution_slug": f"{candidate_canonical_id}/{candidate.session_id}",
+                "speedup": candidate.speedup,
+                "attrs": value,
+            }
         )
-        resolved = [(canonical_id, candidate) for candidate in store.candidates(canonical_id, limit=top_k)]
-        if not resolved:
-            searched = store.search_identities(identity, limit=300)
-            for fallback_id in rank_fallback_identities(identity, searched):
-                fallback = store.candidates(fallback_id, limit=top_k)
-                if fallback:
-                    resolved = [(fallback_id, candidate) for candidate in fallback]
-                    break
-        candidates: list[dict[str, Any]] = []
-        for candidate_canonical_id, candidate in resolved:
-            value = candidate.knowledge.get("value")
-            if not isinstance(value, dict):
-                continue
-            candidates.append(
-                {
-                    "canonical_id": candidate_canonical_id,
-                    "session_id": candidate.session_id,
-                    "solution_slug": f"{candidate_canonical_id}/{candidate.session_id}",
-                    "speedup": candidate.speedup,
-                    "attrs": value,
-                }
-            )
-        return _ReadPlan(
-            store,
-            candidates,
-            "hit" if candidates else "no_candidates",
-            "",
-        )
-    except Exception as error:  # noqa: BLE001 - KB read must cold-start
-        return _ReadPlan(
-            None,
-            [],
-            "read_error",
-            sanitize_read_error(error, secrets=_secrets(config)),
-        )
+    return _ReadPlan(store, candidates, "hit" if candidates else "no_candidates")
 
 
 def _candidate_content(plan: _ReadPlan, candidate: dict[str, Any]) -> bytes:
@@ -186,7 +171,7 @@ def _candidate_content(plan: _ReadPlan, candidate: dict[str, Any]) -> bytes:
             candidate["session_id"],
             rel_path,
         )
-    except Exception:  # noqa: BLE001 - an unreadable artifact is just a miss
+    except (KBStoreError, RewriteRecordError, OSError):
         return b""
 
 
@@ -240,12 +225,91 @@ def _reference_context(references: list[dict]) -> str:
     return "\n".join(sections)
 
 
+@dataclass
+class _Trials:
+    """The candidates one warm start tried on this task's driver.
+
+    Survivors of the whole gauntlet are kept with what the driver timed them at, so the winner is chosen after the
+    field closes, not on the way through. Rejects are kept as reference material for the port agent.
+    """
+
+    target: RewriteKbTarget
+    source_case_ms: dict[str, float]
+    stop_at_unix: float
+    search_deadline: float
+    measured: list[dict] = field(default_factory=list)
+    references: list[dict] = field(default_factory=list)
+
+    def reject(self, attempt: dict, content: bytes, reason: str) -> None:
+        attempt["reason"] = reason
+        self.references.append({**attempt, "content": content})
+
+    async def measure(self, index: int, attempt: dict, content: bytes, remaining: float) -> None:
+        """Install an admitted candidate; it survives when it passes the port gate and the suite and is scored."""
+        spec = self.target.spec
+        try:
+            Path(spec.flydsl_kernel).write_bytes(content)
+            violation = check_flydsl_port(spec)
+            if violation:
+                self.reject(attempt, content, f"flydsl_gate:{violation}")
+                return
+            validation = await run_validation_pipeline(
+                driver_script=self.target.driver_path,
+                snr_threshold=spec.snr_threshold,
+                timeout_per_stage=_stage_timeout(_VALIDATION_TIMEOUT_SEC, self.search_deadline, remaining),
+            )
+            if not validation.all_passed:
+                self.reject(attempt, content, "correctness_failed")
+                return
+            remaining = self.stop_at_unix - time.time()
+            speedup = None
+            if remaining > 0:
+                benched = driver_contract.preflight_candidate(
+                    spec,
+                    self.target.driver_path,
+                    timeout_sec=_stage_timeout(_BENCH_TIMEOUT_SEC, self.search_deadline, remaining),
+                )
+                if benched.ok:
+                    speedup = scored_speedup(benched.case_ms, self.source_case_ms)
+            if speedup is None:
+                self.reject(attempt, content, "unscorable_measurement")
+                return
+            snr = validation.results[-1].snr_db if validation.results else None
+            attempt.update(reason="measured", best_ms=benched.timing_ms, speedup=speedup)
+            self.measured.append({"index": index, "content": content, "snr_db": snr, "attempt": attempt})
+        except Exception as error:  # noqa: BLE001 - candidate becomes reference
+            self.reject(attempt, content, f"validation_error:{type(error).__name__}")
+
+    def settle(self, result: RewriteKbReadResult, original: bytes | None) -> None:
+        """Adopt the best-scoring survivor, or put the original kernel back when none survived."""
+        kernel = Path(self.target.spec.flydsl_kernel)
+        # Best scoring on this task's own driver. A survivor whose benchmark failed never reaches this list: passing
+        # correctness says the kernel computes the right answer, not that the timing behind a claim can be reproduced.
+        if self.measured:
+            winner = max(self.measured, key=lambda item: item["attempt"]["speedup"])
+            kernel.write_bytes(winner["content"])
+            outperformed = f"outperformed_by_rank_{winner['index'] + 1}"
+            for item in self.measured:
+                item["attempt"]["reason"] = "applied" if item is winner else outperformed
+            result.applied = True
+            result.read_reason = "applied"
+            result.solution_slug = winner["attempt"]["solution_slug"]
+            result.best_ms = winner["attempt"]["best_ms"]
+            result.snr_db = winner["snr_db"]
+        elif original is None:
+            kernel.unlink(missing_ok=True)
+        else:
+            kernel.write_bytes(original)
+        result.reference_context = _reference_context(self.references)
+        if result.read_reason == "hit":
+            result.read_reason = "candidates_rejected"
+
+
 async def try_flydsl_kb_warmstart(
     target: RewriteKbTarget,
     *,
     source_case_ms: dict[str, float],
-    top_k: int | None = None,
-    stop_at_unix: float | None = None,
+    stop_at_unix: float = float("inf"),
 ) -> RewriteKbReadResult:
     """Measure the admissible candidates and skip PORT with the best scoring one.
 
@@ -262,152 +326,42 @@ async def try_flydsl_kb_warmstart(
     whose implementation signature disagreed instead of refusing it.
     """
     spec = target.spec
-    driver_path = target.driver_path
     plan = _read_top_candidates(
         spec,
         target.config,
-        top_k=warmstart_policy.top_k() if top_k is None else top_k,
+        top_k=warmstart_policy.top_k(),
     )
-    result = RewriteKbReadResult(
-        read_reason=plan.read_reason,
-        read_error=plan.read_error,
-    )
+    result = RewriteKbReadResult(read_reason=plan.read_reason)
     original = Path(spec.flydsl_kernel).read_bytes() if Path(spec.flydsl_kernel).is_file() else None
-    references: list[dict] = []
-
-    # Survivors of the whole gauntlet, with what this task's driver timed them
-    # at. The winner is chosen after the field closes, not on the way through.
-    measured: list[dict] = []
-    search_deadline = time.monotonic() + warmstart_policy.budget_sec()
+    trials = _Trials(target, source_case_ms, stop_at_unix, time.monotonic() + warmstart_policy.budget_sec())
 
     for index, candidate in enumerate(plan.candidates):
-        remaining = stop_at_unix - time.time() if stop_at_unix and stop_at_unix > 0 else None
-        if remaining is not None and remaining <= 0:
+        remaining = stop_at_unix - time.time()
+        if remaining <= 0:
             result.read_reason = "deadline"
             break
+        attempt = {"solution_slug": candidate["solution_slug"], "speedup": candidate["speedup"]}
+        result.attempts.append(attempt)
         # A trial's cost scales with how slow the candidate is -- the correctness suite and the benchmark both run the
         # kernel -- so a port claiming to be orders of magnitude off the pace can spend the whole search budget on
         # itself. The claim only has to be right about the magnitude for that to be the wrong trade.
         if warmstart_policy.below_floor(candidate["speedup"]):
-            result.attempts.append(
-                {
-                    "solution_slug": candidate["solution_slug"],
-                    "speedup": candidate["speedup"],
-                    "reason": "below_claim_floor",
-                }
-            )
+            attempt["reason"] = "below_claim_floor"
             continue
         # The candidate count does not bound wall time: one trial is minutes on the heaviest kernels. Whatever has been
-        # measured already still wins below.
-        if time.monotonic() >= search_deadline:
-            result.attempts.append(
-                {
-                    "solution_slug": candidate["solution_slug"],
-                    "speedup": candidate["speedup"],
-                    "reason": "search_budget_spent",
-                }
-            )
+        # measured already still wins.
+        if time.monotonic() >= trials.search_deadline:
+            attempt["reason"] = "search_budget_spent"
             break
-        attrs = candidate["attrs"]
-        attempt = {
-            "solution_slug": candidate["solution_slug"],
-            "speedup": candidate["speedup"],
-        }
-        reason = ""
-        if attrs.get("builder_symbol") != spec.builder_symbol:
-            reason = "builder_contract_changed"
+        builder_changed = candidate["attrs"].get("builder_symbol") != spec.builder_symbol
         content = _candidate_content(plan, candidate)
-        if not reason and not content.strip():
-            reason = "missing_kernel_content"
-
-        if not reason:
-            try:
-                Path(spec.flydsl_kernel).write_bytes(content)
-                violation = check_flydsl_port(spec)
-                if violation:
-                    reason = f"flydsl_gate:{violation}"
-                else:
-                    validation = await run_validation_pipeline(
-                        driver_script=driver_path,
-                        snr_threshold=spec.snr_threshold,
-                        timeout_per_stage=_stage_timeout(
-                            _VALIDATION_TIMEOUT_SEC,
-                            search_deadline,
-                            remaining,
-                        ),
-                    )
-                    if not validation.all_passed:
-                        reason = "correctness_failed"
-                    else:
-                        remaining = stop_at_unix - time.time() if stop_at_unix and stop_at_unix > 0 else None
-                        candidate_ms = None
-                        speedup = None
-                        if remaining is None or remaining > 0:
-                            benched = driver_contract.preflight_candidate(
-                                spec,
-                                driver_path,
-                                timeout_sec=_stage_timeout(_BENCH_TIMEOUT_SEC, search_deadline, remaining),
-                            )
-                            if benched.ok:
-                                candidate_ms = benched.timing_ms
-                                speedup = scored_speedup(benched.case_ms, source_case_ms)
-                        if speedup is None:
-                            reason = "unscorable_measurement"
-                        else:
-                            snr = validation.results[-1].snr_db if validation.results else None
-                            attempt.update(reason="measured", best_ms=candidate_ms, speedup=speedup)
-                            result.attempts.append(attempt)
-                            measured.append(
-                                {
-                                    "index": index,
-                                    "candidate": candidate,
-                                    "content": content,
-                                    "ms": candidate_ms,
-                                    "speedup": speedup,
-                                    "snr_db": snr,
-                                    "attempt": attempt,
-                                }
-                            )
-                            continue
-            except Exception as error:  # noqa: BLE001 - candidate becomes reference
-                reason = f"validation_error:{type(error).__name__}"
-
-        attempt["reason"] = reason
-        result.attempts.append(attempt)
-        references.append(
-            {
-                "solution_slug": candidate["solution_slug"],
-                "speedup": candidate["speedup"],
-                "reason": reason,
-                "content": content,
-            }
-        )
-
-    if measured:
-        # Best scoring on this task's own driver. A survivor whose benchmark failed never reaches this list: passing
-        # correctness says the kernel computes the right answer, not that the timing behind a claim can be reproduced.
-        winner = max(
-            measured,
-            key=lambda item: (item["speedup"], -item["index"]),
-        )
-        Path(spec.flydsl_kernel).write_bytes(winner["content"])
-        for item in measured:
-            item["attempt"]["reason"] = "applied" if item is winner else f"outperformed_by_rank_{winner['index'] + 1}"
-        result.applied = True
-        result.read_reason = "applied"
-        result.solution_slug = winner["candidate"]["solution_slug"]
-        result.best_ms = winner["ms"]
-        result.snr_db = winner["snr_db"]
-        result.reference_context = _reference_context(references)
-        return result
-
-    if original is None:
-        Path(spec.flydsl_kernel).unlink(missing_ok=True)
-    else:
-        Path(spec.flydsl_kernel).write_bytes(original)
-    result.reference_context = _reference_context(references)
-    if plan.candidates and result.read_reason == "hit":
-        result.read_reason = "candidates_rejected"
+        if builder_changed:
+            trials.reject(attempt, content, "builder_contract_changed")
+        elif not content.strip():
+            trials.reject(attempt, content, "missing_kernel_content")
+        else:
+            await trials.measure(index, attempt, content, remaining)
+    trials.settle(result, original)
     return result
 
 
@@ -491,7 +445,7 @@ def write_flydsl_kb_solution(
             "speedup": speedup,
             "champion": promoted,
         }
-    except Exception as error:  # noqa: BLE001 - KB write never breaks rewrite
+    except (KBStoreError, RewriteRecordError, OSError, ValueError) as error:
         return {
             "written": False,
             "reason": sanitize_read_error(error, secrets=_secrets(config)),

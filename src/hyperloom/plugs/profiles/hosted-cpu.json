@@ -1,0 +1,11 @@
+{
+  "schema": "hyperloom.plugs/v1",
+  "profile": "hosted-cpu",
+  "sockets": {
+    "measurement": {"impl": "hosted"},
+    "sandbox": {"impl": "e2b"},
+    "agent_runner": {"impl": "hosted"},
+    "events": {"impl": "hosted", "config": {"dir": "${HYPERLOOM_EVENTS_DIR}"}},
+    "gpu_token": {"impl": "none"}
+  }
+}

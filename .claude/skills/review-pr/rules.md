@@ -255,7 +255,7 @@ file-shaped row would miss.
 ### X7 -- An external-component pin moves in all four places at once
 
 **Severity:** blocking
-**Fires when:** an added or deleted line matches `(VLLM|SGLANG|ATOM|AITER|TRACELENS|MAGPIE|GEAK)_(VERSION|REF|SHA|COMMIT)`, or `files.txt` touches `**/framework_deps.py`, `**/framework_registry.py`, `assets/install*.sh` or `docs/compatibility.rst`.
+**Fires when:** an added or deleted line matches `(VLLM|SGLANG|ATOM|AITER|TRACELENS|MAGPIE|GEAK)_(VERSION|REF|SHA|COMMIT)`, or `files.txt` touches `**/framework_registry.py`, `assets/install*.sh` or `docs/compatibility.rst`.
 **The rule:** A component pin lives in code, in `docs/compatibility.rst` and in the install scripts, and all three move together, stated in the description, with the platform gate travelling with the bump. The pin must be an immutable tag or commit rather than a branch name or branch head, and a commit is preferred where the compatibility doc records the tag as known-insufficient. A quoted previous value is verified against the merge base rather than taken from the description, and a fix derives from the value effective at runtime rather than from the old constant.
 **Seen in:** PR #768 -- the description's "previous value" was 120 min while `origin/main` had 130, and the fix was written against the stale constant instead of the budget actually forwarded to the child.
 **Not a finding when:** the pin is only referenced in one place in the head tree (grep confirms no compatibility-doc or install-script mention), or the bump is confined to a test fixture.
@@ -1219,8 +1219,9 @@ reviewed around the markers.
 **Seen in:** PR #703 -- at head `7881d481` only `Analyze (python)` passed and ReadTheDocs
 failed, while the `Tests with Coverage` and `Lint` successes belonged to older heads and did
 not cover the later `apply_and_bench` rewrite.
-**Not a finding when:** the unreported workflows are path-filtered out by the doc-only
-`paths-ignore` contract and the diff is genuinely doc-only.
+**Not a finding when:** the diff is genuinely doc-only and the missing runs are the ones the
+doc-only contract in CONTRIBUTING.md skips (CodeQL does not start; the test shards and the
+non-ruff lint jobs are skipped while `coverage (Python 3.x)` and `ruff` still report).
 **Evidence:** `$WORK/ci.txt` for the check runs and their head, `$WORK/meta.txt` for
 `mergeable`, `$WORK/commits.txt` for what landed after the last green run.
 **Report as:** `V5: <check> passed at <old sha>, current head is <sha>; <what landed since>

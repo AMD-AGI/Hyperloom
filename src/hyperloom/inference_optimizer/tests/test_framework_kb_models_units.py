@@ -15,7 +15,8 @@ from hyperloom.agents.framework.models import Candidate
 
 
 # kb.py
-def test_read_pr_ledger_tolerates_malformed_rows(tmp_path: Path) -> None:
+def test_read_pr_ledger_tolerates_malformed_rows(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_FA_KB_PATH", str(tmp_path))
     part = tmp_path / "framework_optimization"
     part.mkdir()
     (part / "lessons.jsonl").write_text(
@@ -27,9 +28,10 @@ def test_read_pr_ledger_tolerates_malformed_rows(tmp_path: Path) -> None:
         '{"b": 2}\n',
         encoding="utf-8",
     )
-    assert read_pr_ledger(kb_root=tmp_path) == [{"a": 1}, {"b": 2}]
+    assert read_pr_ledger() == [{"a": 1}, {"b": 2}]
     # Missing file -> empty (cold start).
-    assert read_pr_ledger(kb_root=tmp_path / "nope") == []
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_FA_KB_PATH", str(tmp_path / "nope"))
+    assert read_pr_ledger() == []
 
 
 @pytest.mark.parametrize(
@@ -48,7 +50,7 @@ def test_lessons_writer_and_reader_resolve_the_same_file(
     from hyperloom.agents.framework import kb as fa_kb
     from hyperloom.orchestrator.knowledge import kb_writeback
 
-    for name in ("USER_DATA_PATH", "INFERENCE_OPTIMIZER_FA_KB_PATH", "FRAMEWORK_AGENT_KB_DIR", "FRAMEWORK_AGENT_ROOT"):
+    for name in ("USER_DATA_PATH", "INFERENCE_OPTIMIZER_FA_KB_PATH", "FRAMEWORK_AGENT_ROOT"):
         monkeypatch.delenv(name, raising=False)
     for name, value in env.items():
         monkeypatch.setenv(name, value)
@@ -69,7 +71,6 @@ def test_framework_kb_does_not_share_a_root_with_the_recipe_kb(
 
     for name in (
         "INFERENCE_OPTIMIZER_FA_KB_PATH",
-        "FRAMEWORK_AGENT_KB_DIR",
         "KNOWLEDGE_LOCAL_ROOT",
     ):
         monkeypatch.delenv(name, raising=False)

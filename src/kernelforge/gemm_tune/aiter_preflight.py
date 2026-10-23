@@ -15,7 +15,8 @@ def serve_aiter_path() -> str | None:
         import importlib.util
 
         spec = importlib.util.find_spec("aiter")
-    except Exception:  # noqa: BLE001 - unresolvable / broken package means "no serving aiter"
+    except ValueError:
+        # A sys.modules entry without a usable __spec__ cannot be resolved to a location.
         return None
     if spec is None or not spec.origin:
         return None
@@ -55,16 +56,14 @@ def classify(serve: str | None, root: str | None, commit: str | None) -> tuple[l
 
 def _installed_aiter_version() -> str | None:
     """``<dist>==<version>`` for the installed aiter, or None."""
-    try:
-        from importlib.metadata import PackageNotFoundError, version
-    except Exception:  # noqa: BLE001 - stdlib shape differs on exotic runtimes
-        return None
+    from importlib.metadata import PackageNotFoundError, version
+
     for dist in ("amd-aiter", "aiter"):
         try:
             found = version(dist)
         except PackageNotFoundError:
             continue
-        except Exception:  # noqa: BLE001 - a broken dist-info must not break preflight
+        except (OSError, ValueError):
             return None
         if found:
             return f"{dist}=={found}"

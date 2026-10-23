@@ -2181,19 +2181,6 @@ class TestCoerceRuntimeValue:
         assert ta._coerce_runtime_value(value) == expected
 
 
-class TestBackendOrder:
-    def test_kernel_opt_backends_alias_does_not_enable_forge(self, monkeypatch):
-        monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
-        monkeypatch.delenv("CURSOR_API_KEY", raising=False)
-
-        assert krh._raw_kernel_backend_order() == ["geak"]
-
-    def test_kernel_opt_backends_alias_with_mixed_values_stays_geak_only(self, monkeypatch):
-        monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
-
-        assert krh._raw_kernel_backend_order() == ["geak"]
-
-
 class TestCandidateEnvAllowed:
     @pytest.mark.parametrize("name", ["AWS_SECRET_ACCESS_KEY", "ANTHROPIC_API_KEY"])
     def test_sensitive_env_blocked(self, name):
@@ -2573,7 +2560,8 @@ class TestRunGemmTuningHandler:
         assert "PYTORCH_TUNABLEOP_ENABLED" not in task.params["unset_envs"]
         assert captured["init"]["shared_state"] is state
 
-    def test_vllm_block_fp8_profile_capture_uses_standard_roofline(self, tmp_path, monkeypatch):
+    @pytest.mark.parametrize("roofline_status", ["succeeded", "recovered"])
+    def test_vllm_block_fp8_profile_capture_uses_standard_roofline(self, tmp_path, monkeypatch, roofline_status):
         import gzip
 
         from hyperloom.orchestrator.actions.executors import baseline as baseline_module
@@ -2602,7 +2590,7 @@ class TestRunGemmTuningHandler:
                     "PYTORCH_TUNABLEOP_ENABLED": "1",
                 },
             },
-            last_baseline={"benchmark_script": "vllm_custom.sh"},
+            baseline_benchmark_script="vllm_custom.sh",
         )
         captured: dict = {}
 
@@ -2620,7 +2608,7 @@ class TestRunGemmTuningHandler:
             async def __call__(self, ctx):
                 captured["task"] = ctx.task
                 return {
-                    "status": "succeeded",
+                    "status": roofline_status,
                     "steady_state_trace": str(steady_trace),
                 }
 
@@ -2969,8 +2957,6 @@ class TestRunGemmTuningHandler:
         )
 
     def test_explicit_tunableop_input_bypasses_vllm_shape_capture(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
-
         model = tmp_path / "model"
         model.mkdir()
         (model / "config.json").write_text(json.dumps({"hidden_size": 5120, "intermediate_size": 17408}))
@@ -3015,8 +3001,6 @@ class TestRunGemmTuningHandler:
         assert result["status"] == "ok"
 
     def test_vllm_dense_without_shapes_captures_tunableop_input(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
-
         model = tmp_path / "model"
         model.mkdir()
         (model / "config.json").write_text(
@@ -3083,8 +3067,6 @@ class TestRunGemmTuningHandler:
         assert result["status"] == "ok"
 
     def test_vllm_dense_capture_failure_stops_before_forge(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
-
         model = tmp_path / "model"
         model.mkdir()
         (model / "config.json").write_text(json.dumps({"hidden_size": 5120, "intermediate_size": 17408}))
@@ -3125,8 +3107,6 @@ class TestRunGemmTuningHandler:
 
     def test_vllm_block_fp8_reuses_roofline_trace_without_recapture(self, tmp_path, monkeypatch):
         import gzip
-
-        monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
 
         model = tmp_path / "model"
         model.mkdir()
@@ -3251,7 +3231,6 @@ class TestRunGemmTuningHandler:
 
         from hyperloom.orchestrator.actions.executors import roofline as roofline_module
 
-        monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
         model = tmp_path / "model"
         model.mkdir()
         (model / "config.json").write_text(
@@ -3596,8 +3575,6 @@ class TestRunGemmTuningHandler:
         assert reused["shape_count"] == 1
 
     def test_vllm_block_fp8_routes_profile_shapes_to_aiter(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
-
         model = tmp_path / "model"
         model.mkdir()
         (model / "config.json").write_text(
@@ -3679,7 +3656,6 @@ class TestRunGemmTuningHandler:
         assert result["status"] == "ok"
 
     def test_forge_uses_runtime_fp8_blockscale_for_aiter_backend(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
         model_dir = tmp_path / "qwen"
         model_dir.mkdir()
         state = SharedState(
@@ -3731,7 +3707,6 @@ class TestRunGemmTuningHandler:
         """run_gemm_tuning_handler appends a source-attribution audit row backfilled as a ``gemm_tuning:<engine>`` span."""
         from hyperloom.inference_optimizer.session.session_paths import gemm_tuning_steps_path
 
-        monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
         model_dir = tmp_path / "qwen"
         model_dir.mkdir()
         state = SharedState(
@@ -3781,7 +3756,6 @@ class TestRunGemmTuningHandler:
         assert "error_class" not in row["tuners_run"][0]
 
     def test_forge_uses_per_token_only_for_explicit_env(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
         model_dir = tmp_path / "qwen"
         model_dir.mkdir()
         state = SharedState(
@@ -3827,7 +3801,6 @@ class TestRunGemmTuningHandler:
 
     def test_forge_fallback_to_session_precision_when_no_quantization(self, tmp_path, monkeypatch):
         """When current_best has no --quantization, fall back to state.precision."""
-        monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
         model_dir = tmp_path / "moe"
         model_dir.mkdir()
         state = SharedState(
@@ -4303,6 +4276,27 @@ class TestTracelensRootResolution:
         assert out["status"] == "failed"
         assert out["error_class"] == "tracelens_root_missing"
 
+    def test_trace_analyze_handler_reports_missing_root_when_heal_module_cannot_import(self, tmp_path, monkeypatch):
+        # tracelens_analysis imports TraceLens from the checkout, so a vanished checkout fails the heal's own import.
+        from hyperloom.orchestrator import trace_analysis
+
+        monkeypatch.delenv("TRACELENS_ROOT", raising=False)
+        monkeypatch.setenv("HYPERLOOM_CACHE_DIR", str(tmp_path / "podlocal"))
+        monkeypatch.delattr(trace_analysis, "tracelens_analysis", raising=False)
+        monkeypatch.setitem(sys.modules, f"{trace_analysis.__name__}.tracelens_analysis", None)
+
+        out = asyncio.run(
+            ta.trace_analyze_handler(
+                {"trace_input": str(tmp_path / "trace"), "analysis_route": "agent"}, session_dir=tmp_path
+            )
+        )
+
+        assert out == {
+            "status": "failed",
+            "error_class": "tracelens_root_missing",
+            "error": ta._tracelens_root_error(tmp_path / "podlocal" / "TraceLens"),
+        }
+
     def test_trace_analyze_handler_failfast_on_incomplete_override(self, tmp_path, monkeypatch):
         # an incomplete non-default operator override (dir present, no .git) must fail fast — never adopted, never
         # auto-cloned.
@@ -4373,6 +4367,36 @@ class TestTracelensRootResolution:
         assert called["n"] == 1
         assert called["root"] == default_root
 
+    @pytest.mark.parametrize("error", [OSError("disk gone"), subprocess.TimeoutExpired(cmd="git", timeout=600)])
+    def test_selfheal_logs_an_expected_failure_and_returns(self, tmp_path, monkeypatch, error):
+        monkeypatch.setenv("HYPERLOOM_CACHE_DIR", str(tmp_path / "podlocal"))
+        default_root = tmp_path / "podlocal" / "TraceLens"
+        warnings = []
+
+        def _fail(root, *, log_path=None):
+            raise error
+
+        _stub_tracelens_analysis(monkeypatch, _fail)
+        ta._maybe_selfheal_tracelens_root(
+            default_root, log=types.SimpleNamespace(warning=lambda *a: warnings.append(a))
+        )
+
+        assert warnings == [
+            ("trace_analyze: TraceLens root %s missing; attempting self-heal", default_root),
+            ("trace_analyze: TraceLens self-heal failed: %s", error),
+        ]
+
+    def test_selfheal_lets_an_unexpected_failure_propagate(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HYPERLOOM_CACHE_DIR", str(tmp_path / "podlocal"))
+
+        def _fail(root, *, log_path=None):
+            raise RuntimeError("heal bug")
+
+        _stub_tracelens_analysis(monkeypatch, _fail)
+
+        with pytest.raises(RuntimeError, match="heal bug"):
+            ta._maybe_selfheal_tracelens_root(tmp_path / "podlocal" / "TraceLens")
+
 
 class TestBuildTraceAnalyzeCmd:
     """argv golden for ``_build_trace_analyze_cmd``: the splitter (non-scriptable) and diffusion (scriptable) surfaces, plus the bypass vs TraceLens difference."""
@@ -4420,8 +4444,6 @@ class TestBuildTraceAnalyzeCmd:
             "sglang",
             "--target-platform",
             "MI300X",
-            "--analysis-mode",
-            "inference",
             # LLM inference flag + splitter hints: payload override wins over workload metadata.
             "--split-llm-inference",
             "--split-conc",
@@ -4544,6 +4566,7 @@ class TestBuildTraceAnalyzeCmd:
         )
         assert "--require-single-rank" in cmd
         assert cmd[cmd.index("--tensor-parallel-size") + 1] == "8"
+        assert cmd[cmd.index("--analysis-mode") + 1] == "inference"
 
     def test_tracelens_cmd_carries_the_ambient_trajectory_scope(self, monkeypatch, tmp_path):
         from hyperloom.inference_optimizer.trace.trajectory_trace import trajectory_scope

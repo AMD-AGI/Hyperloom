@@ -6,10 +6,11 @@ name: Packaging
 # Validates every path-bearing declaration in ``pyproject.toml`` and the
 # contents of a real wheel build.
 #
-# Deliberately has NO ``paths-ignore``, unlike ``lint.yml`` and
-# ``tests-coverage.yml``: eight ``package-data`` globs point at ``*.md`` files,
-# so a documentation-only PR is exactly the change that can strand a
-# declaration -- and it is the change those workflows skip. setuptools ignores a
+# Deliberately runs in full on every event, unlike ``lint.yml`` and
+# ``tests-coverage.yml``, which skip their expensive jobs on a
+# documentation-only change: eight ``package-data`` globs point at ``*.md``
+# files, so a documentation-only PR is exactly the change that can strand a
+# declaration. setuptools ignores a
 # glob that matches nothing without warning, so nothing else catches it.
 on:
   # PRs run via ``pull_request``; ``push`` is scoped to ``main`` so a same-repo

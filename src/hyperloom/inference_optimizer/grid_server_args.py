@@ -88,6 +88,21 @@ def _split_args_preserving_json(text: str) -> list[str] | None:
     return [_unwrap_shell_quotes(tok) for tok in tokens]
 
 
+def _removed_token_count(tokens: list[str], index: int, removals: set[tuple[str, str | None]]) -> int:
+    """Count the tokens at *index* that *removals* deletes; 0 when the token survives."""
+    tok = tokens[index]
+    if not tok.startswith("--"):
+        return 0
+    flag, sep, value = tok.partition("=")
+    drops_flag = (flag, None) in removals
+    if sep and (drops_flag or (flag, value) in removals):
+        return 1
+    if index + 1 < len(tokens) and not tokens[index + 1].startswith("--"):
+        if drops_flag or (flag, tokens[index + 1]) in removals:
+            return 2
+    return 1 if drops_flag else 0
+
+
 def remove_server_args(server_args: str | None, remove_args: Any) -> str:
     """Remove flag specs from a server-arg string."""
     # Normalized up front as well as inside the tokenizer, so the nothing-to-remove early return below hands back the
@@ -105,8 +120,7 @@ def remove_server_args(server_args: str | None, remove_args: Any) -> str:
     if tokens is None:
         return args
 
-    remove_flags: set[str] = set()
-    remove_pairs: set[tuple[str, str | None]] = set()
+    removals: set[tuple[str, str | None]] = set()
     for spec in removes:
         spec_tokens = _split_args_preserving_json(spec)
         if spec_tokens is None:
@@ -119,34 +133,23 @@ def remove_server_args(server_args: str | None, remove_args: Any) -> str:
                 continue
             if "=" in tok:
                 flag, _, value = tok.partition("=")
-                remove_pairs.add((flag, value))
+                removals.add((flag, value))
                 i += 1
             elif i + 1 < len(spec_tokens) and not spec_tokens[i + 1].startswith("--"):
-                remove_pairs.add((tok, spec_tokens[i + 1]))
+                removals.add((tok, spec_tokens[i + 1]))
                 i += 2
             else:
-                remove_flags.add(tok)
+                removals.add((tok, None))
                 i += 1
 
     out: list[str] = []
     i = 0
     while i < len(tokens):
-        tok = tokens[i]
-        flag = tok.split("=", 1)[0] if tok.startswith("--") else ""
-        if flag and "=" in tok:
-            _flag, _, value = tok.partition("=")
-            if _flag in remove_flags or (_flag, value) in remove_pairs:
-                i += 1
-                continue
-        if flag and i + 1 < len(tokens) and not tokens[i + 1].startswith("--"):
-            value = tokens[i + 1]
-            if flag in remove_flags or (flag, value) in remove_pairs:
-                i += 2
-                continue
-        if flag and flag in remove_flags:
-            i += 1
+        dropped = _removed_token_count(tokens, i, removals)
+        if dropped:
+            i += dropped
             continue
-        out.append(tok)
+        out.append(tokens[i])
         i += 1
     # No re-serialisation on the way out: the tokens are already JSON-compacted and the non-POSIX split kept each one
     # byte-for-byte, so re-joining the survivors cannot corrupt a sibling flag.
@@ -282,6 +285,34 @@ def compact_json_server_args(
     return _reserialize_json_blobs(args)
 
 
+def _json_blob_end(args: str, start: int) -> int:
+    """Offset just past the close balancing the bracket at *start*, or ``len(args)`` when it never balances."""
+    depth = 0
+    in_str = False
+    esc = False
+    j = start
+    n = len(args)
+    while j < n:
+        c = args[j]
+        if in_str:
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == '"':
+                in_str = False
+        elif c == '"':
+            in_str = True
+        elif c in "{[":
+            depth += 1
+        elif c in "}]":
+            depth -= 1
+            if depth == 0:
+                return j + 1
+        j += 1
+    return n
+
+
 def _reserialize_json_blobs(args: str) -> str:
     """Normalize every JSON object/array while preserving invalid substrings."""
     if "{" not in args and "[" not in args:
@@ -290,55 +321,31 @@ def _reserialize_json_blobs(args: str) -> str:
     i = 0
     n = len(args)
     while i < n:
-        ch = args[i]
-        if ch in "{[":
-            # A prior shlex.join can wrap a JSON token in shell single quotes.
-            single_quote_wrapped = i > 0 and args[i - 1] == "'" and out and out[-1] == "'"
-            # Walk to the balanced close, honouring quoted strings.
-            depth = 0
-            in_str = False
-            esc = False
-            j = i
-            while j < n:
-                c = args[j]
-                if in_str:
-                    if esc:
-                        esc = False
-                    elif c == "\\":
-                        esc = True
-                    elif c == '"':
-                        in_str = False
-                elif c == '"':
-                    in_str = True
-                elif c in "{[":
-                    depth += 1
-                elif c in "}]":
-                    depth -= 1
-                    if depth == 0:
-                        j += 1
-                        break
-                j += 1
-            single_quote_wrapped = bool(single_quote_wrapped and j < n and args[j] == "'")
-            blob = args[i:j]
-            rendered: str | None = None
-            try:
-                rendered = json.dumps(json.loads(blob), separators=(",", ":"))
-            except ValueError:
-                # A prior shlex round-trip can strip the JSON double quotes, leaving an unquoted-bareword object
-                # (``{"m":"ngram"}`` -> ``{m:ngram}``) that vLLM's json.loads rejects at boot.
-                rendered = _repair_unquoted_json(blob)
-            if rendered is None:
-                # Keep both wrappers when the content is not valid/repairable.
-                out.append(blob)
-                i = j
-            else:
-                if single_quote_wrapped:
-                    out.pop()
-                out.append(rendered)
-                i = j + 1 if single_quote_wrapped else j
-        else:
-            out.append(ch)
+        if args[i] not in "{[":
+            out.append(args[i])
             i += 1
+            continue
+        j = _json_blob_end(args, i)
+        # A prior shlex.join can wrap a JSON token in shell single quotes.
+        single_quote_wrapped = bool(
+            i > 0 and args[i - 1] == "'" and out and out[-1] == "'" and j < n and args[j] == "'"
+        )
+        blob = args[i:j]
+        try:
+            rendered: str | None = json.dumps(json.loads(blob), separators=(",", ":"))
+        except ValueError:
+            # A prior shlex round-trip can strip the JSON double quotes, leaving an unquoted-bareword object
+            # (``{"m":"ngram"}`` -> ``{m:ngram}``) that vLLM's json.loads rejects at boot.
+            rendered = _repair_unquoted_json(blob)
+        if rendered is None:
+            # Keep both wrappers when the content is not valid/repairable.
+            out.append(blob)
+            i = j
+            continue
+        if single_quote_wrapped:
+            out.pop()
+        out.append(rendered)
+        i = j + 1 if single_quote_wrapped else j
     return "".join(out)
 
 
@@ -472,7 +479,7 @@ def dedup_vllm_server_args(
     return " ".join(kept)
 
 
-def _shell_safe_dedupe(args: str) -> str:
+def shell_safe_dedupe(args: str) -> str:
     """Last-wins dedupe for single-token-valued flags only."""
     if not args.strip():
         return ""
@@ -779,7 +786,19 @@ def inject_sglang_attention_backend(
 _SGLANG_MOE_RUNNER_BACKEND_FLAG = "--moe-runner-backend"
 
 # Matches space- or equals-separated form without false-matching a longer flag.
-_SGLANG_MOE_RUNNER_BACKEND_RE = re.compile(r"--moe-runner-backend(?:[=\s]|$)")
+SGLANG_MOE_RUNNER_BACKEND_RE = re.compile(r"--moe-runner-backend(?:[=\s]|$)")
+
+# Same flag with the value that follows it, so a removal takes the pair and not just the name.
+# The value is optional so a bare, value-less flag (an operator typo, or a flag left dangling at
+# end-of-string) is stripped too rather than surviving into a retry that is supposed to launch
+# without it.
+_SGLANG_MOE_RUNNER_BACKEND_PAIR_RE = re.compile(r"(?:^|\s)--moe-runner-backend(?:(?:[=\s]+)(?!--)\S+)?")
+
+
+def remove_moe_runner_backend_arg(args: str) -> str:
+    """Remove any existing SGLang MoE runner backend flag from an args string."""
+    return " ".join(_SGLANG_MOE_RUNNER_BACKEND_PAIR_RE.sub(" ", str(args or "")).split())
+
 
 # sglang MoE schemes whose ``create_moe_runner`` only builds a runner for the aiter backend (the others fall through
 # to a bare ``pass``, so the first forward pass dies on a missing ``runner``).

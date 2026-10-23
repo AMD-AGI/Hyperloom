@@ -16,7 +16,7 @@ import pytest
 
 
 from hyperloom.orchestrator.actions.executors import (
-    _multi_node_server_lifecycle,
+    _multi_node_restart_settings,
     report_executor,
 )
 from hyperloom.orchestrator.roles import (
@@ -26,7 +26,8 @@ from hyperloom.orchestrator.roles import (
     ScriptedPlan,
 )
 from hyperloom.orchestrator.loop.coordinator import Coordinator, RunOptions
-from hyperloom.orchestrator.loop.writeback import _BASELINE_FINGERPRINT_KEYS, WritebackCollaborator
+from hyperloom.orchestrator.loop._baseline_promotion import _BASELINE_FINGERPRINT_KEYS
+from hyperloom.orchestrator.loop.writeback import WritebackCollaborator
 from hyperloom.orchestrator.loop.proposals import ProposalsCollaborator
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType, NoIntentEmitted
 from hyperloom.orchestrator.state.objective import TargetGainObjective
@@ -1025,7 +1026,7 @@ async def test_orchestration_prompt_has_no_execution_checklist(session_dir):
         c.shared_state.last_profile_trace = ""
         c.shared_state.save(session_dir)
 
-        prompt = await c.conversation.compose_prompt("orchestration")
+        prompt = (await c.conversation.compose_prompt("orchestration")).text
 
         assert "Execution checklist" not in prompt
     finally:
@@ -1208,6 +1209,27 @@ def test_inject_explore_runtime_params_includes_baseline_accuracy():
     params: dict[str, Any] = {}
     ProposalsCollaborator(DummyCoordinator()).inject_explore_runtime_params(params)
     assert params["accuracy_baseline"] == pytest.approx(0.81)
+
+
+@pytest.mark.parametrize(
+    ("proposed", "raises_bar"),
+    [(None, False), (-5.0, False), (float("nan"), False), ("not-a-number", False), (25.0, True)],
+)
+def test_agent_keep_threshold_can_only_raise_the_session_bar(proposed, raises_bar):
+    from hyperloom.orchestrator.phases.machine_state import resolve_keep_threshold
+
+    class DummyCoordinator:
+        shared_state = SharedState()
+
+    session_pct = resolve_keep_threshold(DummyCoordinator.shared_state)
+    proposals = ProposalsCollaborator(DummyCoordinator())
+    explore: dict[str, Any] = {} if proposed is None else {"keep_threshold_pct": proposed}
+    integrate = dict(explore)
+    proposals.inject_explore_runtime_params(explore)
+    proposals.floor_keep_threshold(integrate)
+    expected = 25.0 if raises_bar else session_pct
+    assert explore["keep_threshold_pct"] == pytest.approx(expected)
+    assert integrate["keep_threshold_pct"] == pytest.approx(expected)
 
 
 @pytest.mark.asyncio
@@ -2320,7 +2342,7 @@ async def test_handle_unpromotable_non_baseline_omits_fingerprint(session_dir):
 
 
 def test_default_health_timeout_is_900s_not_1800s():
-    assert _multi_node_server_lifecycle.DEFAULT_HEALTH_TIMEOUT_S == 900
+    assert _multi_node_restart_settings.DEFAULT_HEALTH_TIMEOUT_S == 900
 
 
 # Critic auto-approve archival actions + Coordinator silent-tick early-closing.

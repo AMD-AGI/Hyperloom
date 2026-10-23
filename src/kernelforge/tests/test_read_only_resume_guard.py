@@ -13,7 +13,7 @@ import pytest
 
 from kernelforge.agent_backends.base import AgentRunSpec, AgentToolPolicy
 from kernelforge.agent_backends.workspace_guard import WorkspaceGuard, WorkspaceSafetyError
-from kernelforge.llm.workspace_policy import FORGE_LOOP_OUTPUT_DIRNAME
+from kernelforge.workspace.edit_policy import FORGE_LOOP_OUTPUT_DIRNAME
 
 
 @pytest.fixture

@@ -29,8 +29,8 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
-from hyperloom.common.env import env_float
-from hyperloom.common.gpu_power_settings import gpu_power_sampling_unavailable
+from hyperloom.common.env import EnvValueError, env_float
+from hyperloom.common.gpu_power_settings import gfx_clock_limits, gpu_power_sampling_unavailable, single_clock_limit
 
 log = logging.getLogger(__name__)
 
@@ -104,9 +104,7 @@ def parse_clock_sample(payload: Any) -> dict[int, tuple[float | None, frozenset[
 
     An XCD in deep sleep reports a clock below its own ``min_clk`` (tens of MHz on MI355X); that is idle time, not the
     clock the card runs at under load, so it is left out, and a card with every XCD asleep has no current clock.
-    amd-smi prints all eight ``gfx_<n>`` slots and fills only those with an XCD behind them (a partitioned card has
-    fewer), copying the card's one limit into each, so the limits are those the filled slots report: empty when none is
-    filled. Collected over a round, more than one means the limit changed during it.
+    The limits are :func:`gfx_clock_limits`; collected over a round, more than one means the limit changed during it.
     """
     rows = payload.get("gpu_data") if isinstance(payload, dict) else payload
     out: dict[int, tuple[float | None, frozenset[float]]] = {}
@@ -121,12 +119,7 @@ def parse_clock_sample(payload: Any) -> dict[int, tuple[float | None, frozenset[
             for block in blocks
             if (clk := _value(block.get("clk"))) is not None and clk >= (_value(block.get("min_clk")) or 0.0)
         ]
-        limits = frozenset(
-            limit
-            for block in blocks
-            if _value(block.get("clk")) is not None and (limit := _value(block.get("max_clk"))) is not None
-        )
-        out[row["gpu"]] = (sum(current) / len(current) if current else None, limits)
+        out[row["gpu"]] = (sum(current) / len(current) if current else None, gfx_clock_limits(row["clock"]))
     return out
 
 
@@ -166,10 +159,9 @@ def _clock_fields(
     clocks: list[float] | None, limits: set[float] | None, delta: tuple[float, float] | None
 ) -> dict[str, Any]:
     """A card's measured-phase sclk and power-throttle share; ``None`` for whatever was not read."""
-    limit = next(iter(limits)) if limits and len(limits) == 1 else None
     return {
         "sclk_mean_mhz": round(sum(clocks) / len(clocks), 1) if clocks else None,
-        "sclk_max_mhz": limit,
+        "sclk_max_mhz": single_clock_limit(limits or ()),
         "power_throttle_fraction": round(delta[1] / delta[0], 4) if delta and delta[0] > 0 else None,
     }
 
@@ -295,7 +287,8 @@ class GpuPowerRecorder:
         try:
             payload = self._query(*_SAMPLE_METRICS)
             reading = parse_power_sample(payload)
-        except Exception as exc:  # noqa: BLE001 - telemetry must not fail the round
+        except Exception as exc:
+            log.debug("gpu_power: amd-smi query failed", exc_info=True)
             with self._lock:
                 self._errors += 1
                 self._last_error = str(exc)[:200]
@@ -419,7 +412,7 @@ class GpuPowerRecorder:
             from hyperloom.common.io import atomic_write_json
 
             atomic_write_json(Path(self._output_path), payload)
-        except Exception:
+        except (OSError, TypeError, ValueError):
             log.warning("gpu_power: could not write %s", self._output_path, exc_info=True)
         return payload
 
@@ -437,21 +430,18 @@ class ServerLogPhaseDriver:
         recorder: Any,
         find_logs: Callable[[], list[str]],
         *,
-        scan: Callable[..., Any],
+        cursor: Any,
         interval_sec: float = _DEFAULT_INTERVAL_SEC,
     ) -> None:
         """Prepare a driver; nothing is read until :meth:`start`.
 
-        ``scan`` is the watchdog's own log scanner, passed in rather than imported: the watchdog module builds this
+        ``cursor`` is the watchdog's own log cursor, passed in rather than imported: the watchdog module builds this
         module's recorder, so importing it back from here would close a cycle.
         """
         self._recorder = recorder
         self._find_logs = find_logs
-        self._scan = scan
+        self._cursor = cursor
         self._interval = max(_MIN_INTERVAL_SEC, float(interval_sec))
-        self._offsets: dict[str, int] = {}
-        self._residuals: dict[str, str] = {}
-        self._identities: dict[str, tuple[int, int]] = {}
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._read_failed = False
@@ -459,10 +449,9 @@ class ServerLogPhaseDriver:
     def poll(self) -> None:
         """Read what every log appended since the last poll and move the recorder's phase on."""
         for path in self._find_logs():
-            if path not in self._offsets:
-                self._offsets[path] = 0
+            if self._cursor.open_log(path):
                 self._recorder.note_phase(_BOOT, time.monotonic())
-            scan = self._scan(path, self._offsets, self._residuals, self._identities)
+            scan = self._cursor.advance(path)
             now = time.monotonic()
             if scan.saw_ready:
                 self._recorder.note_phase("measured", now)
@@ -505,14 +494,20 @@ def build_gpu_power_recorder(server_log_path: str | None, env: dict[str, str] | 
     if not server_log_path or gpu_power_sampling_unavailable():
         return None
     try:
-        from hyperloom.common.gpu_power_settings import visible_gpu_indices
+        from hyperloom.common.gpu_power_settings import GpuPowerSettingsError, visible_gpu_indices
 
+        try:
+            gpus = visible_gpu_indices(env or {})
+        except GpuPowerSettingsError as exc:
+            # Serving cards are still found by the VRAM they hold, as on a host with no mask.
+            log.warning("gpu_power: %s; sampling every card", exc)
+            gpus = None
         return GpuPowerRecorder(
             output_path=str(Path(server_log_path).parent / GPU_POWER_ARTIFACT_NAME),
-            gpus=visible_gpu_indices(env or {}),
+            gpus=gpus,
             interval_sec=env_float(_INTERVAL_ENV, _DEFAULT_INTERVAL_SEC),
         )
-    except Exception:
+    except EnvValueError:
         log.warning("gpu_power: recorder could not be built; this round samples nothing", exc_info=True)
         return None
 

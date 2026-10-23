@@ -39,6 +39,7 @@ _CLAUDE_ALLOWED_MODELS = (
 # Codex-side counterpart, also ordered best-first.
 _CODEX_FALLBACK_MODELS = (
     DEFAULT_CODEX_MODEL,
+    "gpt-5.6-sol",
     "gpt-5.5",
     "gpt-5.4",
 )

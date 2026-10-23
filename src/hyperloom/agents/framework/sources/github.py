@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import urllib.parse
@@ -73,7 +74,7 @@ def search_perf_prs(
     try:
         with urllib.request.urlopen(req, timeout=timeout_sec) as resp:  # nosec B310 - fixed GitHub HTTPS API URL.
             data = json.loads(resp.read().decode("utf-8"))
-    except Exception:  # noqa: BLE001 - best-effort policy
+    except (OSError, http.client.HTTPException, ValueError):  # best-effort policy
         return []
     out: list[GitHubPr] = []
     for item in data.get("items") or []:
@@ -108,7 +109,7 @@ def pr_patches(repo_slug: str, number: int, *, timeout_sec: float = 30.0) -> str
                 text = resp.read().decode("utf-8", "replace")
             if text.strip():
                 return text
-        except Exception:  # noqa: BLE001 - best-effort; try the fallback URL
+        except (OSError, http.client.HTTPException, ValueError):  # best-effort; try the fallback URL
             continue
     return ""
 
@@ -125,7 +126,7 @@ def fetch_raw_file(repo_slug: str, ref: str, path: str, *, timeout_sec: float = 
     try:
         with urllib.request.urlopen(req, timeout=timeout_sec) as resp:  # nosec B310 - fixed GitHub HTTPS URL.
             return resp.read().decode("utf-8", "replace")
-    except Exception:  # noqa: BLE001 - best-effort policy
+    except (OSError, http.client.HTTPException, ValueError):  # best-effort policy
         return ""
 
 

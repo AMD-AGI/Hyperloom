@@ -419,13 +419,13 @@ def test_cycle_strategy_rows_do_not_nest_the_prior_cycles(tmp_path):
 
 
 @pytest.mark.parametrize(
-    ("macro_cycle", "target_reached_at"),
-    [(0, ""), (_ps.DEFAULT_MAX_MACRO_CYCLES - 1, ""), (0, "2026-01-01T00:00:00+00:00"), (0, " ")],
-    ids=["open", "last_cycle", "target_reached", "blank_target_reached"],
+    ("saturated", "target_reached_at"),
+    [(False, ""), (True, ""), (False, "2026-01-01T00:00:00+00:00"), (False, " ")],
+    ids=["open", "all_directions_saturated", "target_reached", "blank_target_reached"],
 )
-def test_reloop_line_and_transition_agree_at_the_cycle_limits(macro_cycle, target_reached_at):
+def test_reloop_line_and_transition_agree_at_the_cycle_limits(saturated, target_reached_at):
     s = _render_state(_ps.PHASE_SWEEP)
-    s.macro_cycle = macro_cycle
+    s.saturated_directions = {"kv_cache": {"saturated": saturated}}
     s.target_reached_at = target_reached_at
     s.last_conc_sweep = {"status": "succeeded", "summary": {"successful_pairs": 1}}
     transition = _ps.compute_next_phase(s)
@@ -508,7 +508,7 @@ def test_judge_bundle_to_dict_carries_phase():
     """The on-disk bundle records the phase, so audits are not misled."""
     from hyperloom.agents.critic.runtime.decision_reviewer import JudgeBundle
 
-    bundle = JudgeBundle(kind="coordinator_inbox", session_id="s", decision_id=None, phase="EXPLORE")
+    bundle = JudgeBundle(session_id="s", decision_id=None, phase="EXPLORE")
     assert bundle.to_dict()["phase"] == "EXPLORE"
 
 
@@ -619,17 +619,28 @@ def test_the_payload_constraints_are_rendered_separately():
     assert "extend_lease.reason is optional" in rendered
 
 
+def test_the_payload_constraints_state_the_extend_lease_step_cap():
+    """An agent asking for more than one step at a time is told the cap before the gate denies it."""
+    from hyperloom.inference_optimizer.protocol.intent import EXTEND_LEASE_MAX_SEC, IntentType
+    from hyperloom.orchestrator.roles.mcp_emit_intent import payload_constraints
+
+    rendered = payload_constraints(IntentType)
+
+    assert f"extend_lease.extra_sec ≤ {EXTEND_LEASE_MAX_SEC} per call" in rendered
+    assert "while the task runs" in rendered
+
+
 def test_both_provider_descriptions_carry_the_constraints():
     """Claude's tool description and Codex's output block say the same thing."""
     from hyperloom.inference_optimizer.protocol.intent import IntentType
     from hyperloom.orchestrator.roles.codex import build_output_instructions
     from hyperloom.orchestrator.roles.mcp_emit_intent import (
-        EMIT_INTENT_TOOL_INPUT_SCHEMA,
+        build_emit_intent_tool_input_schema,
         payload_constraints,
     )
 
     constraints = payload_constraints(IntentType)
-    claude_description = EMIT_INTENT_TOOL_INPUT_SCHEMA["properties"]["payload"]["description"]
+    claude_description = build_emit_intent_tool_input_schema(IntentType)["properties"]["payload"]["description"]
     codex_block = build_output_instructions(frozenset(IntentType))
 
     assert constraints in claude_description

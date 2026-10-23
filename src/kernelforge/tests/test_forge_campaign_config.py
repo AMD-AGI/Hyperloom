@@ -22,7 +22,8 @@ from kernelforge.loop.campaign_config import (
     resolve_kernel_backend_override,
     validate_pending_campaign_head,
 )
-from kernelforge.llm.git import GitError
+from kernelforge.loop.agent_relay import AgentProfileSpec, AgentRelayPolicy
+from kernelforge.tools.git import GitError
 
 
 def _git_workspace(tmp_path, name="workspace"):
@@ -101,6 +102,28 @@ def test_create_save_load_normalizes_and_persists_campaign(tmp_path, monkeypatch
     assert loaded.program_md_sha256 == hashlib.sha256(program.read_bytes()).hexdigest()
     assert (workspace / loaded.program_md_path).read_text() == program.read_text()
     assert store.read_program_md(loaded) == program.read_text()
+
+
+def test_campaign_persists_the_relay_policy_but_no_model(tmp_path, monkeypatch):
+    workspace, kernel, _helper, driver = _git_workspace(tmp_path)
+    monkeypatch.setenv("GPU_TARGET", "gfx950")
+    relay = AgentRelayPolicy(
+        primary_profile_id="claude",
+        profiles=(AgentProfileSpec("claude", "claude"), AgentProfileSpec("codex", "codex")),
+    )
+
+    config = create_campaign_config(
+        str(workspace),
+        CampaignInputs(kernel=str(kernel), driver=str(driver), source_files=str(kernel), agent_relay=relay),
+    )
+    store = CampaignConfigStore(str(workspace))
+    store.save(config)
+
+    assert store.load().agent_relay == relay
+    assert list(config.to_dict()["agent_relay"]["profiles"]) == [
+        {"profile_id": "claude", "provider": "claude"},
+        {"profile_id": "codex", "provider": "codex"},
+    ]
 
 
 def test_the_operator_is_settled_before_the_loop_can_rename_it(tmp_path, monkeypatch):

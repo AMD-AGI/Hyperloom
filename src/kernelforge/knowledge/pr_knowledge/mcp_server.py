@@ -1,7 +1,7 @@
-"""Stdio MCP server for upstream PR retrieval.
+"""Stdio MCP server for upstream PR retrieval and local inclusion checks.
 
 Prefixed tool names avoid collisions, and the REST client enforces request
-budgets.
+budgets. ``pr_check_inclusion`` reads local git only and needs no service.
 """
 
 from __future__ import annotations
@@ -9,10 +9,12 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from pathlib import Path
 from typing import Any
 
 from kernelforge.knowledge.pr_knowledge.agent_tools import TOOL_NAMES
 from kernelforge.knowledge.pr_knowledge.client import PRMonitorClient
+from kernelforge.knowledge.pr_knowledge.inclusion import probe_inclusion
 from kernelforge.knowledge.pr_knowledge.search import PRLifecycle, discover
 from kernelforge.knowledge.pr_knowledge.context import PRQueryContext
 from kernelforge.tools import mcp_stdio
@@ -28,6 +30,10 @@ __all__ = ["SERVER_NAME", "TOOL_DEFINITIONS", "TOOL_NAMES", "InvalidParamsError"
 # One file's diff can be enormous; cap what enters the agent's context.
 MAX_PATCH_BYTES = 20_000
 MAX_FILES_LISTED = 40
+
+# Every tool about one pull request takes its number under the same argument.
+_PR_NUMBER = "number"
+_PR_NUMBER_SCHEMA = {"type": "integer"}
 
 
 TOOL_DEFINITIONS: list[dict[str, Any]] = [
@@ -71,10 +77,10 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         "inputSchema": {
             "type": "object",
             "properties": {
-                "number": {"type": "integer"},
+                _PR_NUMBER: _PR_NUMBER_SCHEMA,
                 "repo": {"type": "string"},
             },
-            "required": ["number"],
+            "required": [_PR_NUMBER],
         },
     },
     {
@@ -87,11 +93,34 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         "inputSchema": {
             "type": "object",
             "properties": {
-                "number": {"type": "integer"},
+                _PR_NUMBER: _PR_NUMBER_SCHEMA,
                 "file_path": {"type": "string"},
                 "repo": {"type": "string"},
             },
-            "required": ["number", "file_path"],
+            "required": [_PR_NUMBER, "file_path"],
+        },
+    },
+    {
+        "name": "pr_check_inclusion",
+        "description": (
+            "Check from local git history, with no network, whether an upstream "
+            "pull request is already in a source tree. Returns inclusion, the "
+            "method that decided it and the evidence. included means a commit "
+            "reachable from the checked commit has a subject that names the PR: "
+            "a trailing (#N), as a squash merge or a cherry-pick of one writes it, "
+            "or 'Merge pull request #N from ...'. Anything else is unknown, never "
+            "absent: a backport that was edited, renamed or folded into another "
+            "commit looks like no backport at all, so look for the change itself "
+            "before treating the PR as missing."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                _PR_NUMBER: _PR_NUMBER_SCHEMA,
+                "tree": {"type": "string", "description": "A directory inside the git work tree to check."},
+                "commit": {"type": "string", "description": "Revision to check; defaults to the tree's HEAD."},
+            },
+            "required": [_PR_NUMBER, "tree"],
         },
     },
 ]
@@ -106,6 +135,14 @@ def _resolve_repo(arguments: dict[str, Any]) -> str:
     if len(parts) != 2:
         raise InvalidParamsError(f"repo must be owner/name, got {repo!r}")
     return f"{parts[0]}/{parts[1]}"
+
+
+def _pr_number(arguments: dict[str, Any]) -> int:
+    """Read the required PR number of one call."""
+    try:
+        return int(arguments[_PR_NUMBER])
+    except (KeyError, TypeError, ValueError) as error:
+        raise InvalidParamsError("number must be an integer") from error
 
 
 def _client() -> PRMonitorClient:
@@ -155,10 +192,7 @@ def _find_references(arguments: dict[str, Any]) -> dict[str, Any]:
 def _get_reference(arguments: dict[str, Any]) -> dict[str, Any]:
     """Fetch one PR's metadata, file list and distill in a single hop."""
     repo = _resolve_repo(arguments)
-    try:
-        number = int(arguments["number"])
-    except (KeyError, TypeError, ValueError) as error:
-        raise InvalidParamsError("number must be an integer") from error
+    number = _pr_number(arguments)
     detail = _client().get_pr_detail(repo, number)
     if detail is None:
         return {"repo": repo, "number": number, "reason": "not_found"}
@@ -202,10 +236,7 @@ def _get_reference(arguments: dict[str, Any]) -> dict[str, Any]:
 def _get_file_patch(arguments: dict[str, Any]) -> dict[str, Any]:
     """Fetch one file's diff, truncated to a context-safe size."""
     repo = _resolve_repo(arguments)
-    try:
-        number = int(arguments["number"])
-    except (KeyError, TypeError, ValueError) as error:
-        raise InvalidParamsError("number must be an integer") from error
+    number = _pr_number(arguments)
     file_path = str(arguments.get("file_path") or "").strip()
     if not file_path:
         raise InvalidParamsError("file_path must be a non-empty string")
@@ -231,10 +262,22 @@ def _get_file_patch(arguments: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _check_inclusion(arguments: dict[str, Any]) -> dict[str, Any]:
+    """Probe one tree's local git history for one PR; the commit defaults to the tree's HEAD."""
+    number = _pr_number(arguments)
+    tree = str(arguments.get("tree") or "").strip()
+    if not tree or not Path(tree).is_dir():
+        raise InvalidParamsError("tree must name an existing directory")
+    commit = str(arguments.get("commit") or "").strip() or "HEAD"
+    verdict = probe_inclusion(tree=Path(tree), commit=commit, number=number, merge_commit_sha=None)
+    return {"number": number, "tree": tree, "commit": commit, **verdict.to_record()}
+
+
 _HANDLERS = {
     "pr_find_references": _find_references,
     "pr_get_reference": _get_reference,
     "pr_get_file_patch": _get_file_patch,
+    "pr_check_inclusion": _check_inclusion,
 }
 
 

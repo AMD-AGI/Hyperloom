@@ -408,7 +408,7 @@ def test_recover_looks_complete_requires_breakdown_on_disk(tmp_path: Path, monke
 # inference_optimizer.cli.multi_node / multi_node commands
 
 
-def test_cli_multi_node_gc_backend_and_replay(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_cli_multi_node_backend_resolution(monkeypatch: pytest.MonkeyPatch) -> None:
     from hyperloom.inference_optimizer.cli import multi_node as mn
 
     monkeypatch.setenv("INFERENCE_OPTIMIZER_MN_BACKEND", "infera")
@@ -417,30 +417,6 @@ def test_cli_multi_node_gc_backend_and_replay(tmp_path: Path, monkeypatch: pytes
     with pytest.raises(SystemExit) as exc:
         mn._resolve_mn_backend(argparse.Namespace(mn_backend=None))
     assert exc.value.code == 2
-
-    session = tmp_path / "sess"
-    ws = session / "kernel-agent-workspace" / "attempt"
-    ws.mkdir(parents=True)
-    patch_path = ws / "change.patch"
-    patch_path.write_text("diff --git a/x b/x\n", encoding="utf-8")
-    (ws / "manifest.json").write_text(
-        json.dumps(
-            {
-                "status": "applied",
-                "target_file": "/remote/x.py",
-                "patch_path": str(patch_path),
-                "kernel_id": "kernel-a",
-                "multinode": {"backup_dir_on_pod": "/backups"},
-            }
-        ),
-        encoding="utf-8",
-    )
-    (ws / "bad.json").write_text("{", encoding="utf-8")
-    calls: list[list[str]] = []
-    monkeypatch.setattr(mn, "_session_dir_resolve", lambda: session)
-    monkeypatch.setattr(mn.subprocess, "run", lambda cmd, **kw: calls.append(cmd) or _Completed(returncode=0))
-    mn._replay_kernel_patches_for_multi_node(argparse.Namespace(nodes=2))
-    assert calls and calls[0][1:5] == ["-m", "hyperloom", "multi-node", "apply-patch"]
 
 
 def _patch_infera_state(monkeypatch: pytest.MonkeyPatch, state: dict) -> list[dict]:
@@ -998,60 +974,6 @@ def test_infera_install_timeout_failure(monkeypatch: pytest.MonkeyPatch) -> None
     assert inf.cmd_install_geak(argparse.Namespace(geak_src="/geak", poll_timeout=5, print_logs=False)) == 1
 
 
-def test_multi_node_patch_replay_skip_and_failure_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from hyperloom.inference_optimizer.cli import multi_node as mn
-
-    session = tmp_path / "sess"
-    monkeypatch.setattr(mn, "_session_dir_resolve", lambda: session)
-    mn._replay_kernel_patches_for_multi_node(argparse.Namespace(nodes=1))
-    mn._replay_kernel_patches_for_multi_node(argparse.Namespace(nodes=2))
-
-    ws = session / "kernel-agent-workspace"
-    (ws / "empty").mkdir(parents=True)
-    mn._replay_kernel_patches_for_multi_node(argparse.Namespace(nodes=2))
-
-    manifests = ws / "attempt"
-    manifests.mkdir()
-    (manifests / "manifest.json").write_text("{bad", encoding="utf-8")
-    (manifests / "skip_status" / "manifest.json").parent.mkdir()
-    (manifests / "skip_status" / "manifest.json").write_text(json.dumps({"status": "pending"}), encoding="utf-8")
-    (manifests / "skip_mn" / "manifest.json").parent.mkdir()
-    (manifests / "skip_mn" / "manifest.json").write_text(json.dumps({"status": "applied"}), encoding="utf-8")
-    (manifests / "skip_fields" / "manifest.json").parent.mkdir()
-    (manifests / "skip_fields" / "manifest.json").write_text(
-        json.dumps({"status": "applied", "multinode": {"backup_dir_on_pod": "/b"}}), encoding="utf-8"
-    )
-    (manifests / "missing_patch" / "manifest.json").parent.mkdir()
-    (manifests / "missing_patch" / "manifest.json").write_text(
-        json.dumps(
-            {
-                "status": "applied",
-                "multinode": {"backup_dir_on_pod": "/b"},
-                "target_file": "/x",
-                "patch_path": str(tmp_path / "missing.diff"),
-            }
-        ),
-        encoding="utf-8",
-    )
-    patch = tmp_path / "p.diff"
-    patch.write_text("diff", encoding="utf-8")
-    (manifests / "failed" / "manifest.json").parent.mkdir()
-    (manifests / "failed" / "manifest.json").write_text(
-        json.dumps(
-            {
-                "status": "applied",
-                "multinode": {"backup_dir_on_pod": "/b"},
-                "target_file": "/x",
-                "patch_path": str(patch),
-                "kernel_id": "k",
-            }
-        ),
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(mn.subprocess, "run", lambda *a, **kw: _Completed(returncode=5, stderr="failed patch"))
-    mn._replay_kernel_patches_for_multi_node(argparse.Namespace(nodes=2))
-
-
 # agents.framework helpers
 
 
@@ -1136,36 +1058,6 @@ def test_retry_policy_env_and_on_retry_error(monkeypatch: pytest.MonkeyPatch) ->
 
     monkeypatch.setattr(base.random, "uniform", lambda _lo, _hi: 0.25)
     assert RetryPolicy(base_delay_s=2.0, max_delay_s=3.0, multiplier=10.0, jitter_s=0.5).delay_for(2) == 3.25
-
-
-@pytest.mark.asyncio
-async def test_retry_with_backoff_swallows_on_retry_callback_error() -> None:
-    from hyperloom.orchestrator.roles.base import RetryPolicy, retry_with_backoff
-
-    calls = {"n": 0}
-    slept: list[float] = []
-
-    async def _flaky():
-        calls["n"] += 1
-        if calls["n"] == 1:
-            raise ConnectionError("transient")
-        return "ok"
-
-    async def _sleep(delay: float) -> None:
-        slept.append(delay)
-
-    def _bad_on_retry(*_args):
-        raise RuntimeError("telemetry failed")
-
-    out = await retry_with_backoff(
-        _flaky,
-        policy=RetryPolicy(max_attempts=2, base_delay_s=0.0, jitter_s=0.0),
-        retry_on=(ConnectionError,),
-        sleep=_sleep,
-        on_retry=_bad_on_retry,
-    )
-    assert out == "ok"
-    assert slept == [0.0]
 
 
 # orchestrator.roles._runtime_bridge
@@ -1433,6 +1325,23 @@ def test_gpu_type_autodetect_rocm_and_torch_fallback(monkeypatch: pytest.MonkeyP
     assert gpu_types._autodetect_gpu_type() == "mi355x"
 
     fake_torch.cuda.get_device_properties = lambda _idx: (_ for _ in ()).throw(RuntimeError("no gpu"))
+    assert gpu_types._autodetect_gpu_type() is None
+
+
+def test_gpu_type_autodetect_is_none_when_torch_cannot_load_its_library(monkeypatch: pytest.MonkeyPatch) -> None:
+    from hyperloom.inference_optimizer import gpu_types
+
+    def _rocm_missing(*_args, **_kwargs):
+        raise FileNotFoundError("rocm-smi")
+
+    def _loader_failure(fullname, path=None, target=None):
+        if fullname == "torch":
+            raise OSError("libamdhip64.so.6: cannot open shared object file")
+
+    monkeypatch.setattr(subprocess, "run", _rocm_missing)
+    monkeypatch.delitem(sys.modules, "torch", raising=False)
+    monkeypatch.setattr(sys, "meta_path", [SimpleNamespace(find_spec=_loader_failure), *sys.meta_path])
+
     assert gpu_types._autodetect_gpu_type() is None
 
 

@@ -74,7 +74,7 @@ def _final_content_snapshot(
     try:
         targets = repo_relative_manifest(Path(patch_path).read_text(encoding="utf-8", errors="replace"))
         writes = [t.path for t in targets if t.op is PatchOp.WRITE]
-    except Exception:  # noqa: BLE001 — an unreadable patch is apply's error to report.
+    except (OSError, ValueError):
         return snapshot_dir
     if not writes:
         return snapshot_dir
@@ -86,7 +86,7 @@ def _final_content_snapshot(
             repo_root=repo_root,
             snapshot_dir=Path(patch_path).parent / "integrate_snapshot",
         )
-    except Exception:
+    except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired):
         log.exception("integrate: could not materialize a final-content snapshot for %s", patch_path)
         return snapshot_dir
 
@@ -99,9 +99,9 @@ def _maybe_apply_kernel_patch(
 ) -> HandlerResult:
     """Apply a kernel patch via the kernel-agent ``apply_kernel_patch`` tool.
 
-    Resolves a backup root under the session's patches dir when none is given,
-    then delegates to the tool with rebuild / dry-run / target options pulled
-    from the payload.
+    Backs the apply up under the session's patches dir, where a multi-node
+    resume finds kept patches to restore, then delegates to the tool with
+    rebuild / dry-run / target options pulled from the payload.
 
     Args:
         payload (dict): Request payload carrying ``patch_path`` plus
@@ -121,12 +121,12 @@ def _maybe_apply_kernel_patch(
             "status": "skipped",
             "reason": "missing patch_path or target_file/source_file",
         }
-    from hyperloom.inference_optimizer.session.session_paths import fs_safe_id, patches_dir
+    from hyperloom.inference_optimizer.session.session_paths import fs_safe_id, kernel_patch_backup_root
 
     kid = str(kernel_id or payload.get("kernel_id") or "")
     # Same fold as the integrate workspace: a fusion sibling keys this dir by its
     # ``llm:<recipe>`` operator name, which ``mkdir`` rejects on some filesystems.
-    backup_root = payload.get("backup_root") or (patches_dir(session_dir, fs_safe_id(kid)) / "backup")
+    backup_root = kernel_patch_backup_root(session_dir, fs_safe_id(kid))
     # Snapshot mode: a snapshot dir of byte-exact final files lands atomically.
     snapshot_dir = str(payload.get("snapshot_dir") or "").strip() or None
     repo_root = str(payload.get("kernel_repo") or payload.get("repo") or "").strip() or None

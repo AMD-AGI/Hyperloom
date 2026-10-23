@@ -23,6 +23,7 @@ from typing import Iterable
 from hyperloom.common.env import env_flag
 from hyperloom.common.env_safety import redact_secret_env_values
 
+from ..session.optimization_journal import JOURNAL_FILENAME
 from ..session.paths import is_path_within
 from ..session.session_paths import BRINGUP_SEGMENT, ENABLEMENT_SEGMENT
 
@@ -43,7 +44,7 @@ MANIFEST_JSON_NAME = "PACKAGE_MANIFEST.json"
 MANIFEST_TXT_NAME = "PACKAGE_MANIFEST.txt"
 PACKAGE_SCHEMA_VERSION = 3
 
-# The must-ship partition: durable coordinator state, the terminal verdicts,
+# The must-ship partition: durable coordinator state, the final report,
 # and the source trees every bring-up observation was normalised against.
 # Literal relative paths, never globs.
 RESERVED_PATHS: tuple[str, ...] = (
@@ -52,7 +53,6 @@ RESERVED_PATHS: tuple[str, ...] = (
     "manifest.json",
     "session_breakdown.json",
     "reports/final.json",
-    "reports/session_terminal.json",
     f"reports/{BRINGUP_SEGMENT}/trees.json",
 )
 
@@ -63,10 +63,8 @@ PACKAGE_GLOBS: tuple[str, ...] = (
     "state.json",
     "manifest.json",
     "current_setting.sh",
-    # ── terminal verdicts ─────────────────────────────────────────────
+    # ── final report ──────────────────────────────────────────────────
     "reports/final.json",
-    "reports/session_terminal.json",
-    "reports/session_terminal.pre.json",
     # ── bring-up ladder: pinned source trees, one JSON per attempt ────
     f"reports/{BRINGUP_SEGMENT}/**",
     # ── reports/ ──────────────────────────────────────────────────────
@@ -81,7 +79,7 @@ PACKAGE_GLOBS: tuple[str, ...] = (
     # silently adopt whatever lands there next.
     f"optimization_stack/{ENABLEMENT_SEGMENT}/**",
     "reports/final.md",
-    "reports/optimization_journal.json",
+    f"reports/{JOURNAL_FILENAME}",
     "reports/kernel_optimization_summary.json",
     "reports/kernel_roofline.json",
     "reports/conc_sweep_summary.json",
@@ -647,7 +645,7 @@ def package_session_artifacts(
                 len(copied),
                 root,
             )
-        except Exception:
+        except OSError:
             log.exception("session package: loose copy failed (non-fatal)")
 
     return target

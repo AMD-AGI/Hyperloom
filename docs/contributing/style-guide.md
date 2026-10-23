@@ -64,10 +64,11 @@ ruff format --check .   # or `ruff format .` to apply
 | `DTZ` | `datetime` values carry a timezone |
 | `A` | Do not shadow builtins (`aiter`, AMD's kernel library, is allowed by name) |
 | `C4` | Comprehension and collection-call idioms (`{}` over `dict()`, no `[x for x in y]`) |
+| `B006`, `B012` | No mutable default argument (`def f(x=[])`); no `return`, `break` or `continue` inside `finally`, which discards the exception in flight |
 
 Where existing code needs the old shape for a behavioural reason — persisted naive timestamps, keyword names that mirror a stdlib signature, root-logger calls in an unconfigured CLI — the exception is a per-file ignore with that reason next to it, not a `# noqa`.
 
-**Not yet enabled:** `I` (import sorting) and `UP` (pyupgrade) are clean mechanical rewrites but touch hundreds of lines that open PRs also touch, so turning them on waits for a team decision on when to land the rewrite. `B`, `SIM` and the rest of `RUF` carry a backlog and belong behind a ratchet rather than a hard gate. New code should already follow import sorting and common bugbear patterns.
+**Not yet enabled:** `I` (import sorting) and `UP` (pyupgrade) are clean mechanical rewrites but touch hundreds of lines that open PRs also touch, so turning them on waits for a team decision on when to land the rewrite. The rest of `B`, `SIM` and the rest of `RUF` carry a backlog and belong behind a ratchet rather than a hard gate. New code should already follow import sorting and common bugbear patterns.
 
 ### Size and complexity
 
@@ -77,12 +78,13 @@ Two layers. The **gate** is the `code-metrics` CI job (`scripts/code_metrics.py`
 |-----------------|-----------|-----------------|------|
 | Cyclomatic complexity | > 20 | The [Complexity ceiling](#complexity-ceiling): twice McCabe's 10, the point where a function has more paths than a reviewer can hold while reading it | ruff `C901` |
 | Cognitive complexity | > 30 | Twice SonarSource's S3776 default of 15, the same step as the ceiling; it weights nesting, so past 30 a function has to be re-read rather than read | complexipy |
-| Function length | > 80 lines | A function past one screen; counted as below, `def` line through the last line | the script |
-| Nested block depth | > 5 | pylint `R1702` default: past five levels the innermost line depends on six conditions at once | ruff `PLR1702` |
+| Function length | > 50 lines | Lines of code in the body, counted as below: past 50 a function rarely does one thing | the script |
+| Nested block depth | > 4 | Past four levels the innermost line depends on five conditions at once | ruff `PLR1702` |
 | Parameter count | > 5 | pylint `R0913` default: past five, the call site stops reading as a sentence and the values travel together anyway — pass the object they come from, or name them in a dataclass (A8). `self`/`cls` and `*args`/`**kwargs` do not count; keyword-only parameters do | ruff `PLR0913` |
 | Module length | > 1200 lines (over 800 is a report-only warning) | Half again the 800-line review trigger; at that size a module almost always holds more than one job | the script |
 | Duplicated code | any clone of >= 100 tokens and >= 10 lines | SonarSource CPD defaults | jscpd |
 | Dead code | any finding at >= 80% confidence | vulture's recommended CI setting | vulture |
+| Directory size | > 50 entries | Past 50 a reader can no longer scan the listing for the module they need; group the modules into subpackages by responsibility. The entries are the production modules directly in the directory and its subdirectories that hold one; a directory is judged when the change touches a file under it | the script |
 
 The thresholds, the reason for each and the exact tool versions live in `pyproject.toml` under `[tool.hyperloom.code_metrics]`. The scope is all of `src` and `scripts`, minus the same vendored and shipped-example trees as Ruff's `extend-exclude`; files under a `tests/` directory are exempt from everything but duplication. Suppression comments (`# noqa` for the Ruff-measured dimensions, complexipy's ignore marker, `jscpd:ignore-start`) do not hide a unit from the gate: Ruff and complexipy run with their ignore switches, and jscpd reads copies with its markers defused. Vulture alone honours `# noqa`, because that marker belongs to Ruff: `# noqa: F401` is the sanctioned form for a side-effect import or a re-export, and Ruff's `RUF100` flags one that suppresses nothing.
 
@@ -105,16 +107,17 @@ A unit that only moved to another file keeps its baseline entry when its qualifi
 
 Editing a unit that was already over is not a demand to repay its debt — the gate only asks that it not get worse. Extracting a helper while you are in there is in scope, and the gate rewards it with an out-of-date entry to tighten; a standalone rewrite of an unrelated module is a separate PR (see [`AGENTS.md`](../../AGENTS.md) § *One concern per change*).
 
-**Checks without a baseline.** The same job runs four checks that have no backlog to carry, and the design checks below. Each of the four fails the PR on its own, and `baseline-raise` does not waive them:
+**Checks without a baseline.** The same job runs five checks that have no backlog to carry, and the design checks below. Each of the five fails the PR on its own, and `baseline-raise` does not waive them:
 
 | Check | Fails when | Scope |
 |-------|-----------|-------|
 | Comments | an added run of more than 8 consecutive full-line `#` comments; an added comment that points at a PR or issue (`#1234`, `PR 1234`, `GH-1234`, `issue #12`, a `/pull/` link) or narrates an incident (`after the outage`, a dated `incident`, `postmortem`). A comment starting with `TODO` and the line after it may link an issue, as Ruff's `TD003` asks. A comment the PR only moves, re-indents or carries through a rename is not added | added lines of `.py` files, tests included; docstrings are not comments |
+| Broad catch reason | an added `# noqa: BLE001` with no reason after the code on the same line (`except Exception:  # noqa: BLE001 - outermost CLI boundary, logged`). A line the PR only moves or re-indents is not added | added lines of `.py` files, tests included |
 | English only | a CJK character (CJK ideographs, CJK symbols and punctuation, halfwidth and fullwidth forms) | every tracked text file, and on a PR its title, body and every commit message. Test data that needs a multi-byte character uses a non-CJK one (the euro sign is three bytes in UTF-8) |
 | Production code does not import test code | a module under `src/` or `scripts/` that is not itself a test imports a `tests` package or a `test_*` module (a module merely named `test` is not test code) | the whole tree. Move what both sides need into a non-test module |
 | Repeated literals | the PR takes a string or bytes value (3+ characters) or a number (other than 0, 1, -1 and 2) from fewer than 3 occurrences in a module to 3 or more | the production modules the PR touches, counted before and after (a renamed module against the file it came from; a literal that only moved between touched modules is not added); dict keys, `x["key"]` subscripts, the key of `.get`/`.pop`/`.setdefault` and of an `in` test, keyword names, docstrings, f-string text, annotations and `__all__` do not count. Name the value once as a module-level constant |
 
-The comment and literal checks are diff-only on purpose: the history in a comment is cheap to keep out and expensive to strip later, and a whole-tree literal count would flag most modules in the tree for values nobody is changing.
+The comment, broad-catch and literal checks are diff-only on purpose: the history in a comment is cheap to keep out and expensive to strip later, a whole-tree broad-catch check would fail every PR on catches written before it, and a whole-tree literal count would flag most modules in the tree for values nobody is changing.
 
 **Design checks.** The same job also runs diff-only checks for the code-shape review rules A1 and A8-A12 (`scripts/code_metrics_design.py`). Each has its own section in the report. A1, A8 and the A12 forwarder fail the PR (the `baseline-raise` label waives them, with the reason in the description); A9, A10, A11 and the A12 single-implementation abstraction are advisory, as the A rules rate them, and are listed without failing. They judge only what the PR adds in the production modules it touches; tests (a `tests/` package, a `test_*.py` module, `conftest.py`) are exempt from all of them. A line is *added* when the diff adds it and the PR did not remove the same text elsewhere (a move, a re-indent, a renamed file); a function or class is *new* when its `def`/`class` line is added and the same file at the merge base (for a renamed file, the file it came from) had no unit of that qualified name, so editing an existing function never makes it new.
 
@@ -134,13 +137,12 @@ A10 is limited to the enum's own vocabulary on purpose: matched against every en
 
 | Unit | Trigger | Where the number comes from |
 |------|---------|-----------------------------|
-| Function length | ~60 lines | Just above the tree's 90th percentile |
 | Cyclomatic complexity | 10 | McCabe default; measurable on demand with `ruff check --select C901` |
 | Module length | ~800 lines | Roughly the tree's 90th percentile |
 
 Neither number identifies a problem on its own. A long function can be one prompt template with a complexity of 1, and a short one can carry a dozen field comparisons that still need semantic review. Crossing a trigger asks the reviewer to look for a responsibility boundary, not to assume there is one — and "this is a single template" is an accepted answer. Split when it improves ownership, data flow, or testability.
 
-**How the lines are counted:** a function spans its `def` line through its last line, decorators excluded and blank, comment and docstring lines included; a nested or `async` function is measured on its own, not folded into its parent. Module length is physical lines. Tests are exempt from the size triggers — a table-driven test that gains a case per behaviour is doing its job — though not from the duplication and boundary rules.
+**How the lines are counted:** a function counts the lines of code in its body, from its first statement through its last line; the `def` lines, decorators, and blank, comment and docstring lines do not count; a nested or `async` function is measured on its own, not folded into its parent. Module length is physical lines. Tests are exempt from the size triggers — a table-driven test that gains a case per behaviour is doing its job — though not from the duplication and boundary rules.
 
 Measure rather than argue:
 
@@ -288,7 +290,7 @@ Shell scripts live under `scripts/`, `src/hyperloom/**/assets/`, and agent tool 
 - **yamllint** uses the `relaxed` preset; line-length is disabled to avoid churn.
 - **actionlint** validates `.github/workflows/` — pin action versions (`@v7`), avoid `${{ }}` injection pitfalls.
 
-When adding a workflow that should skip on documentation-only changes, copy the **canonical `paths-ignore` list** from `CONTRIBUTING.md`.
+When adding a workflow that should skip on documentation-only changes, follow `CONTRIBUTING.md` (*CI and documentation-only changes*): a workflow whose check the `main` ruleset requires calls `code-changes.yml` and conditions its jobs; any other workflow may use the canonical `paths-ignore` list.
 
 ## Markdown and documentation
 

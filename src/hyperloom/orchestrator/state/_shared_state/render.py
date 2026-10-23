@@ -11,6 +11,7 @@ from typing import Any, NamedTuple
 
 from hyperloom.common.env import env_bool
 from hyperloom.common.prompt_safety import flatten_for_prompt as _flatten_for_prompt
+from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import GEAK_DROPPED_STATUSES
 from . import gap_rows, proposal_scores, variant_line, warm_start
 from .attempt_audit import _AUDIT_ACTIONS
 from .phase_state import GAP_SEVERITY_RANK
@@ -204,7 +205,7 @@ class _RenderMixin:
         )
 
     def to_mission_summary(self, *, now: datetime | None = None) -> str:
-        """Mission-progress block printed at the top of every tick (raw/validated gain, time vs budget, stack staleness)."""
+        """Mission-progress block of every tick's turn section (raw/validated gain, time vs budget, stack staleness)."""
         elapsed = self.elapsed_minutes(now=now)
         remaining = self.remaining_minutes(now=now)
         budget_line = (
@@ -235,7 +236,7 @@ class _RenderMixin:
         )
         if geak_pending_status == "awaiting_rebench":
             geak_pending_tag = " ⚠ geak candidate awaiting main-flow rebench — NOT in headline until validated"
-        elif geak_pending_status in {"rebench_cancelled", "rebench_unavailable"}:
+        elif geak_pending_status in GEAK_DROPPED_STATUSES:
             geak_pending_tag = f" ⚠ geak candidate dropped unvalidated ({geak_pending_status})"
         elif geak_revalidation_status in {"failed", "fallback_failed"} and not geak_in_stack:
             # A fallback rebench that also failed is the same unjudged drop; only ``no_material`` / ``no_promote`` are
@@ -253,7 +254,7 @@ class _RenderMixin:
             f"(validated_at_len={self.cumulative_gain_validated_stack_len})"
             f"{unvalidated_tag}{geak_pending_tag}",
         ]
-        # Surface reusable hot kernels still owing a kernel_opt attempt.
+        # Surface reusable hot kernels no backend has produced a patch for yet.
         untried_hot = self.untried_hot_reusable_kernels()
         if untried_hot:
             lines.append(f"untried_hot_kernels: {', '.join(untried_hot)}")
@@ -466,28 +467,6 @@ class _RenderMixin:
             rows.extend(proposal_scores.round_rows(round_row, labels))
         return "\n".join(rows)
 
-    def _format_last_kernel_opt(self) -> str:
-        """Render the latest kernel-opt outcome for prompt injection."""
-        if not self.last_kernel_opt:
-            return "(none)"
-        outcome = self.last_kernel_opt
-        kernel_id = str(outcome.get("kernel_id") or "")
-        attempts_entry = self.kernel_opt_attempts.get(kernel_id) or {}
-        history_tag = ""
-        if attempts_entry:
-            history_tag = (
-                f" history=attempts={attempts_entry.get('attempts', 0)}"
-                f"/partial={attempts_entry.get('partial_count', 0)}"
-            )
-            rejected_reason = attempts_entry.get("rejected_reason")
-            if rejected_reason:
-                history_tag += f"/retired={rejected_reason}"
-        return (
-            f"kernel_id={kernel_id or '?'} "
-            f"decision={outcome.get('decision', '?')} "
-            f"speedup={outcome.get('micro_speedup', '?')}{history_tag}"
-        )
-
     def to_prompt_summary(self) -> str:
         """Compact, human-readable snapshot for prompt injection."""
         lines = [
@@ -519,11 +498,9 @@ class _RenderMixin:
             f"analysis_md={self._format_analysis_md_full()}",
             f"params_no_promote_streak={self.params_no_promote_streak}",
             f"explore_search={self._format_search_state(self.explore_search)}",
-            f"last_kernel_opt={self._format_last_kernel_opt()}",
-            # Pending KEEPs the integrate gate will drain, plus per-kernel attempt count.
+            # Pending KEEPs the integrate gate will drain.
             (f"pending_keep_kernels={self.pending_keep_kernel_ids() or '(none)'}"),
             (f"has_keep_pending_integrate={'true' if self.has_keep_pending_integrate else 'false'}"),
-            f"kernel_opt_attempts_count={self.kernel_opt_attempts_count}",
             f"rejected_kernel_patches={self._format_rejected_kernel_patches()}",
             f"rejected_kernel_ids={self.rejected_kernel_ids or '(none)'}",
             f"last_baseline={self._format_attempt(self.last_baseline)}",
@@ -532,9 +509,7 @@ class _RenderMixin:
             f"last_explore={self._format_attempt(self.last_explore)}",
             f"attempts_history={self._format_attempts_history()}",
             f"last_action_failures={self._format_last_action_failures()}",
-            f"agent_last_active={self._format_agent_last_active()}",
             f"gain_gated_action_count={int(self.gain_gated_action_count or 0)}",
-            f"tick={int(self.tick or 0)}",
             f"macro_cycle={int(self.macro_cycle or 0)}",
             f"stop_reason={self.stop_reason or '(none)'}",
             f"closing_phase={self.closing_phase}  "
@@ -542,6 +517,10 @@ class _RenderMixin:
             f"closing_report_task_id={self.closing_report_task_id or '(none)'}",
         ]
         return "\n".join(lines)
+
+    def to_tick_summary(self) -> str:
+        """The per-tick counters of the prompt summary: the tick number and each agent's last pass."""
+        return f"tick={int(self.tick or 0)}\nagent_last_active={self._format_agent_last_active()}"
 
     def _format_agent_last_active(self) -> str:
         """Render each agent's last completed reactor pass as a relative age.

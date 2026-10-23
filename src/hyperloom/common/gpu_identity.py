@@ -11,6 +11,7 @@ AMD_GPU_DISPATCH_IDENTITIES: dict[str, tuple[str, int]] = {
     "mi308x": ("gfx942", 304),
     "mi325x": ("gfx942", 304),
     "mi355x": ("gfx950", 256),
+    "r9700": ("gfx1201", 64),
 }
 
 #: gpu_type -> the PCI device ids that ``amd-smi static --asic`` reports (``asic.device_id``) for that board, lower case,

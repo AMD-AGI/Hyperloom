@@ -5,36 +5,20 @@
 
 from __future__ import annotations
 
-import logging
 from pathlib import Path
 from typing import Any
 
 from hyperloom.inference_optimizer.session.optimization_journal import (
     OUTCOME_NO_PROMOTE,
     OUTCOME_REVERT,
-    Journal,
+    read_journal_entries,
 )
 from hyperloom.inference_optimizer.roofline_snapshot import BOTTLENECK_DOMAIN_HINTS, dominant_direction
-
-log = logging.getLogger(__name__)
 
 #: A cluster is "exhausted" once it accumulates this many non-promoting attempts.
 _EXHAUSTED_MIN_ATTEMPTS: int = 2
 #: Marginal gain (%) below which a non-promoting cluster is treated as a dead end.
 _EXHAUSTED_MAX_GAIN_PCT: float = 1.0
-
-
-def _load_journal_entries(session_dir: Path, shared_state: Any) -> list[Any]:
-    """Return journal entries (empty on miss); header fields are read-only here."""
-    journal = Journal.load_or_create(
-        session_dir,
-        Journal(
-            session_id=str(getattr(shared_state, "session_id", "") or ""),
-            model=str(getattr(shared_state, "model_name", "") or ""),
-            hardware=str(getattr(shared_state, "hardware", "") or ""),
-        ),
-    )
-    return list(getattr(journal, "entries", []) or [])
 
 
 def _exhausted_clusters(entries: list[Any]) -> list[dict[str, Any]]:
@@ -84,45 +68,40 @@ def build_trajectory_digest(
     max_directions: int = 5,
 ) -> str:
     """Render the advisory trajectory-review block; ``\"\"`` when nothing to report."""
-    try:
-        entries = _load_journal_entries(Path(session_dir), shared_state)
-        snaps = [s for s in (getattr(shared_state, "roofline_snapshots", None) or []) if isinstance(s, dict)]
-        dead = _exhausted_clusters(entries)
-        stalled = _stalled_cycle_count(shared_state)
-        if not dead and not snaps and stalled == 0:
-            return ""
-
-        lines: list[str] = []
-        validated = getattr(shared_state, "cumulative_gain_validated", None)
-        if isinstance(validated, (int, float)):
-            lines.append(f"progress: validated_gain={validated:.2f}%  stalled_cycles={stalled}")
-        elif stalled:
-            lines.append(f"progress: stalled_cycles={stalled}")
-
-        if dead:
-            lines.append("exhausted_directions (avoid re-proposing):")
-            for row in dead[:max_directions]:
-                gain = row["max_gain"]
-                gain_str = f"max_gain {gain:.2f}%" if isinstance(gain, (int, float)) else "no positive gain"
-                change = row["change"] or "(unspecified)"
-                lines.append(f"  - [{row['kind']}] {change}: {row['count']} non-promoting attempts, {gain_str}")
-
-        if snaps:
-            direction, pct = dominant_direction(snaps[-1])
-            lever = BOTTLENECK_DOMAIN_HINTS.get(direction)
-            if direction and lever:
-                lines.append(
-                    f"under-explored: dominant bottleneck={direction} "
-                    f"({pct:.1f}%) → consider {lever[0]} (tag {lever[1]})"
-                )
-
-        if not lines:
-            return ""
-        lines.append("advisory only: redirect exploration with this; it does not gate phase advance.")
-        return "\n".join(lines)
-    except Exception:
-        log.exception("trajectory_reviewer: build_trajectory_digest failed")
+    entries = read_journal_entries(Path(session_dir))
+    snaps = [s for s in (getattr(shared_state, "roofline_snapshots", None) or []) if isinstance(s, dict)]
+    dead = _exhausted_clusters(entries)
+    stalled = _stalled_cycle_count(shared_state)
+    if not dead and not snaps and stalled == 0:
         return ""
+
+    lines: list[str] = []
+    validated = getattr(shared_state, "cumulative_gain_validated", None)
+    if isinstance(validated, (int, float)):
+        lines.append(f"progress: validated_gain={validated:.2f}%  stalled_cycles={stalled}")
+    elif stalled:
+        lines.append(f"progress: stalled_cycles={stalled}")
+
+    if dead:
+        lines.append("exhausted_directions (avoid re-proposing):")
+        for row in dead[:max_directions]:
+            gain = row["max_gain"]
+            gain_str = f"max_gain {gain:.2f}%" if isinstance(gain, (int, float)) else "no positive gain"
+            change = row["change"] or "(unspecified)"
+            lines.append(f"  - [{row['kind']}] {change}: {row['count']} non-promoting attempts, {gain_str}")
+
+    if snaps:
+        direction, pct = dominant_direction(snaps[-1])
+        lever = BOTTLENECK_DOMAIN_HINTS.get(direction)
+        if direction and lever:
+            lines.append(
+                f"under-explored: dominant bottleneck={direction} ({pct:.1f}%) → consider {lever[0]} (tag {lever[1]})"
+            )
+
+    if not lines:
+        return ""
+    lines.append("advisory only: redirect exploration with this; it does not gate phase advance.")
+    return "\n".join(lines)
 
 
 __all__ = ["build_trajectory_digest"]

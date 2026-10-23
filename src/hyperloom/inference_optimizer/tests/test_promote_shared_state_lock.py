@@ -23,8 +23,10 @@ from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.inference_optimizer.session.optimization_journal import OUTCOME_NO_PROMOTE, OUTCOME_RECORDED, Verdict
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentResult
-from hyperloom.orchestrator.loop import writeback as wb
-from hyperloom.orchestrator.loop.writeback import WritebackCollaborator, _is_patch_column_keep
+from hyperloom.orchestrator.loop import _keep_patch_column as keep_patch_column
+from hyperloom.orchestrator.loop import _promote_outcome as promote_outcome
+from hyperloom.orchestrator.loop._keep_patch_column import _is_patch_column_keep
+from hyperloom.orchestrator.loop.writeback import WritebackCollaborator
 from hyperloom.orchestrator.knowledge.remote_recipe._vendor.kb_store_client import (
     KnowledgeSections,
 )
@@ -297,27 +299,29 @@ async def test_promote_explore_promoted_writes_state_and_audit(session_dir):
 
 
 @pytest.mark.asyncio
-async def test_promote_roofline_succeeded_writes_audit(session_dir):
+@pytest.mark.parametrize("status", ["succeeded", "recovered"])
+async def test_promote_roofline_with_a_trace_writes_audit(session_dir, status):
+    """A trace salvaged from a failed profile run is analysed like any other."""
     coord = _coord(session_dir)
     s = coord.shared_state
     s.baseline_tput = 100.0
+    s.roofline_failure_streak = 2
     s.last_trace_analyze = {"roofline_snapshot_id": 5, "analysis_md_path": "/tmp/a.md"}
 
     await coord.writeback.promote_to_shared_state(
         "roofline",
         {
-            "status": "succeeded",
+            "status": status,
             "snapshot_id": 5,
             "last_profile_trace": "/tmp/trace.gz",
         },
         task=_task("roofline"),
     )
 
-    # roofline resets its failure streak on a succeeded snapshot.
+    # roofline resets its failure streak on an analysed snapshot.
     assert s.roofline_failure_streak == 0
     # Audit row: promoted; snapshot_id taken from last_trace_analyze snapshot.
     assert s.last_roofline["decision"] == "promoted"
-    assert s.last_roofline["status"] == "succeeded"
     assert s.last_roofline["extras"]["snapshot_id"] == 5
 
 
@@ -586,7 +590,7 @@ async def test_integrate_nested_e2e_measurement_owns_promotion(session_dir, monk
         await coord.writeback.record_integrate_keep(result)
     else:
         await coord.writeback._promote_integrate_patch(
-            result, _task("integrate_patch"), wb._PromoteOutcome(verdict=Verdict.RECORDED)
+            result, _task("integrate_patch"), promote_outcome._PromoteOutcome(verdict=Verdict.RECORDED)
         )
 
     if vetoed:
@@ -2181,7 +2185,7 @@ class TestWritebackRequiredAxes:
         monkeypatch.setattr(stack_event, "record_validation", record)
         monkeypatch.setattr(coord.phase_kernel, "maybe_enqueue_watermark_roofline", watermark)
         candidate = self._candidate()
-        outcome = wb._PromoteOutcome(verdict=Verdict.RECORDED)
+        outcome = promote_outcome._PromoteOutcome(verdict=Verdict.RECORDED)
         if lane == "integrate":
             await coord.writeback.record_integrate_keep(
                 {
@@ -2259,7 +2263,7 @@ class TestWritebackRequiredAxes:
         await coord.writeback._promote_explore(
             {**candidate, "winners": [], "round_id": "r-incomparable-revalidation"},
             _task("explore", params={"source": "stack_revalidate"}),
-            wb._PromoteOutcome(verdict=Verdict.RECORDED),
+            promote_outcome._PromoteOutcome(verdict=Verdict.RECORDED),
         )
 
         assert _resume_pending(state) is True
@@ -2708,7 +2712,7 @@ def _keep_result(tmp_path: Path, *, import_root: str, complete: bool = True) -> 
 
 def test_source_layer_handles_carry_every_field_the_stack_entry_needs(tmp_path):
     """A lift path that forwards a subset silently degrades the GEAK overlay."""
-    handles = wb._source_layer_handles(_keep_result(tmp_path, import_root="python"))
+    handles = keep_patch_column._source_layer_handles(_keep_result(tmp_path, import_root="python"))
 
     assert handles["source_import_root"] == "python"
     assert handles["source_snapshot_complete"] is True
@@ -2720,7 +2724,7 @@ def test_source_layer_handles_carry_every_field_the_stack_entry_needs(tmp_path):
 
 def test_source_layer_handles_omit_a_completeness_the_result_never_recorded():
     """Absent must stay absent so legacy entries still read their manifest."""
-    handles = wb._source_layer_handles({"source_snapshot": "/snap"})
+    handles = keep_patch_column._source_layer_handles({"source_snapshot": "/snap"})
 
     assert "source_snapshot_complete" not in handles
 
@@ -2734,7 +2738,7 @@ def test_env_spec_hands_geak_the_import_root_not_the_snapshot_top(session_dir, t
     coord.writeback.lift_to_current_best(
         "integrate_patch",
         1200.0,
-        {"name": "patch-1", "scope": "source_patch", **wb._source_layer_handles(result)},
+        {"name": "patch-1", "scope": "source_patch", **keep_patch_column._source_layer_handles(result)},
     )
     spec = coord.writeback.build_env_spec()
 
@@ -2752,7 +2756,7 @@ def test_env_spec_overlay_stops_at_files_for_a_dist_packages_install(session_dir
     coord.writeback.lift_to_current_best(
         "integrate_patch",
         1200.0,
-        {"name": "patch-1", "scope": "source_patch", **wb._source_layer_handles(result)},
+        {"name": "patch-1", "scope": "source_patch", **keep_patch_column._source_layer_handles(result)},
     )
     spec = coord.writeback.build_env_spec()
 
@@ -2769,7 +2773,7 @@ def test_env_spec_refuses_an_incomplete_snapshot(session_dir, tmp_path):
     coord.writeback.lift_to_current_best(
         "integrate_patch",
         1200.0,
-        {"name": "patch-1", "scope": "source_patch", **wb._source_layer_handles(result)},
+        {"name": "patch-1", "scope": "source_patch", **keep_patch_column._source_layer_handles(result)},
     )
     spec = coord.writeback.build_env_spec()
 

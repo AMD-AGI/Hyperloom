@@ -45,6 +45,7 @@ from .conftest import (
     chatty_child,
     enable_multi_node,
     launches_by_round_slot,
+    make_coordinator,
 )
 
 
@@ -2616,8 +2617,79 @@ def test_classify_fast_exit_unrecognized_args():
 
 
 def test_classify_slow_failure_not_arg_error():
-    """A slow failure (>30s) with the same stderr pattern must NOT be classified as arg error — it could be a real inference crash."""
+    """A generic runtime ValueError does not establish argument validation."""
     assert _classify_subprocess_error(120.0, "ValueError: some runtime error") == "subprocess_nonzero"
+
+
+_CACHE_CONFIG_ERROR = (
+    "pydantic_core._pydantic_core.ValidationError: 1 validation error for CacheConfig\n"
+    "gpu_memory_utilization\n"
+    "Input should be less than or equal to 1 [type=less_than_equal, input_value=1.5, input_type=float]"
+)
+
+
+@pytest.mark.parametrize("elapsed", [8.0, 30.0, 31.08, 31.09, 70.74])
+def test_cache_config_validation_is_not_a_worker_crash(elapsed):
+    assert _classify_subprocess_error(elapsed, _CACHE_CONFIG_ERROR, 1) == "fast_exit_arg_error"
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (
+            "ValidationError: 1 validation error for ModelConfig\nModel architecture is not registered",
+            "subprocess_nonzero",
+        ),
+        ("ValidationError: 1 validation error for Sample\nmissing field", "subprocess_nonzero"),
+        ("CacheConfig initialized\nRuntimeError: worker process died", "subprocess_nonzero"),
+    ],
+)
+def test_cache_config_validation_preserves_other_failure_routes(error, expected):
+    assert _classify_subprocess_error(70.74, error, 1) == expected
+
+
+@pytest.mark.asyncio
+async def test_slow_cache_config_failures_reach_the_argument_error_stop(tmp_path, session_dir):
+    from hyperloom.orchestrator.phases import machine_state
+    from hyperloom.orchestrator.state.task_registry import Task
+
+    coord = make_coordinator(session_dir)
+    base = tmp_path / "base.yaml"
+    _write_yaml(base)
+    clock = _AClockOnlyThePassesMove()
+    elapsed = iter([70.74, 31.09])
+
+    def failed_run(cmd, *args, **kwargs):
+        clock.advance(next(elapsed))
+        workspace = Path(cmd[cmd.index("--output-dir") + 1]) / "benchmark_vllm_failed"
+        workspace.mkdir(parents=True)
+        (workspace / "benchmark_report.json").write_text(json.dumps({"success": False}))
+        return subprocess.CompletedProcess(cmd, 1, "", _CACHE_CONFIG_ERROR)
+
+    with (
+        _passes_time_the_executor_believes(clock),
+        patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=failed_run),
+    ):
+        for count, runtime in enumerate([70.74, 31.09], 1):
+            task = Task(
+                task_id=f"bad-cache-{count}", kind="baseline", state="running", params={}, idempotency_key=str(count)
+            )
+            ctx = _make_ctx({"output_dir": str(tmp_path / task.task_id), "timeout_sec": 600, "gpu_type": "mi300x"})
+            result = await _executor(base, tmp_path)(ctx)
+            assert result["error_class"] == "fast_exit_arg_error"
+            assert result["subprocess_runtime_sec"] == runtime
+            await coord.writeback.handle_unpromotable_result(task, result)
+            assert coord.shared_state.baseline_arg_error_streak == count
+            assert coord.shared_state.baseline_failure_streak == 0
+            assert coord.shared_state.enablement.launch_log == ""
+            assert coord.shared_state.stop_reason == ("baseline_arg_error" if count == 2 else "")
+
+    transition = machine_state.compute_next_phase(coord.shared_state)
+    assert transition is not None
+    assert transition[:2] == (
+        machine_state.PHASE_CLOSE,
+        "baseline_arg_error",
+    )
 
 
 def test_classify_fast_exit_without_pattern():

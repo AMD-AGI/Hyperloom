@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import gzip
 import json
 import logging
 import os
@@ -17,11 +16,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional, Sequence
 
+from hyperloom.common.coerce import to_float
 from kernelforge.agent_backends.base import AgentRunSpec, AgentToolPolicy, watchdog_timeout_sec
 from kernelforge.agent_backends.session_resume import is_api_failure
 from kernelforge.resources import resource_path
 
-from .diagnose import LAUNCH_BOUND_CATEGORIES, categories_in_text, categorize_kernel_name
+from .diagnose import LAUNCH_BOUND_CATEGORIES, _load_trace_events, categories_in_text, categorize_kernel_name
 from .llm_failure import (
     API_ERROR,
     DEFAULT_ATTEMPTS,
@@ -37,6 +37,7 @@ from .llm_failure import (
 )
 from .locate import (
     FrameworkInstall,
+    _compile_pass_recipe,
     _read_source,
     _unclaimable_note,
     covered_by_vllm_compile_pass,
@@ -133,21 +134,10 @@ def hot_kernels_from_trace(
     trace_path: str | Path, *, top_n: int = 15, launch_bound_only: bool = True
 ) -> list[dict[str, Any]]:
     """Top GPU kernels from a kineto trace by total-duration share."""
-    p = Path(trace_path)
-    try:
-        opener = gzip.open if (p.suffix == ".gz" or p.name.endswith(".json.gz")) else open
-        with opener(p, "rt", encoding="utf-8") as fh:
-            data = json.load(fh)
-    except (OSError, ValueError):
-        return []
-    events = data.get("traceEvents") if isinstance(data, dict) else None
-    if not isinstance(events, list):
-        return []
-
     agg: dict[str, list[float]] = {}
     total = 0.0
-    for ev in events:
-        if not isinstance(ev, dict) or ev.get("cat") != "kernel":
+    for ev in _load_trace_events(trace_path):
+        if ev.get("cat") != "kernel":
             continue
         try:
             dur = float(ev.get("dur"))
@@ -179,20 +169,6 @@ def hot_kernels_from_trace(
         )
     rows.sort(key=lambda r: r["share"], reverse=True)
     return rows[:top_n]
-
-
-def _load_trace_events(trace_path: str | Path) -> list[dict[str, Any]]:
-    path = Path(trace_path)
-    try:
-        opener = gzip.open if path.suffix == ".gz" or path.name.endswith(".json.gz") else open
-        with opener(path, "rt", encoding="utf-8") as handle:
-            payload = json.load(handle)
-    except (OSError, ValueError):
-        return []
-    events = payload.get("traceEvents") if isinstance(payload, dict) else None
-    if not isinstance(events, list):
-        return []
-    return [event for event in events if isinstance(event, dict)]
 
 
 def kernel_names_from_trace(trace_path: str | Path, *, top_n: int = 40) -> list[str]:
@@ -468,36 +444,25 @@ def existing_operator_hints_from_knowledge(
                 "kernels": list(fallback_kernel_names or []),
             }
         )
-    if not evidence_sources:
-        return []
-
     boundary_terms = [_semantic_terms(source) for source in evidence_sources]
-    boundary_terms = [terms for terms in boundary_terms if terms]
-    if not boundary_terms:
+    if not any(boundary_terms):
         return []
 
     best: dict[str, tuple[float, dict[str, Any]]] = {}
     for path, entries in _knowledge_entries(root):
         for entry in entries:
-            op_terms: set[str] = entry["operator_terms"]
-            paragraph_tokens: set[str] = entry["paragraph_tokens"]
-            score = float("-inf")
-            for terms in boundary_terms:
-                evidence_overlap = len(terms & paragraph_tokens)
-                operator_overlap = len(op_terms & terms)
-                candidate_score = operator_overlap * 100.0 + evidence_overlap * 10.0 - entry["paragraph_length"] / 500.0
-                if entry["is_declared"]:
-                    candidate_score += 500.0
-                score = max(score, candidate_score)
+            overlap = max(
+                len(entry["operator_terms"] & terms) * 100.0 + len(terms & entry["paragraph_tokens"]) * 10.0
+                for terms in boundary_terms
+            )
+            score = overlap - entry["paragraph_length"] / 500.0
+            if entry["is_declared"]:
+                score += 500.0
             if score < 20.0:
                 continue
-            try:
-                relative_path = path.relative_to(root).as_posix()
-            except ValueError:
-                relative_path = str(path)
             row = {
                 "operator": entry["operator"],
-                "path": relative_path,
+                "path": path.relative_to(root).as_posix(),
                 "evidence": entry["evidence"],
                 "score": round(score, 1),
             }
@@ -856,12 +821,16 @@ runs back-to-back on the decode path.
 
 
 def _salvage_objects(text: str) -> list[dict[str, Any]]:
-    """Recover every complete top-level ``{...}`` object from (possibly truncated) text, ignoring braces inside strings."""
+    """Recover every complete top-level ``{...}`` object from (possibly truncated) text, ignoring braces inside strings.
+
+    The object a cut left half-written comes last, once repaired, unless it repeats one already recovered.
+    """
     out: list[dict[str, Any]] = []
     depth = 0
     start = -1
     in_str = False
     esc = False
+    commas: list[int] = []
     for i, ch in enumerate(text):
         if in_str:
             if esc:
@@ -876,15 +845,20 @@ def _salvage_objects(text: str) -> list[dict[str, Any]]:
         elif ch == "{":
             if depth == 0:
                 start = i
+                commas = []
             depth += 1
-        elif ch == "}":
-            if depth > 0:
-                depth -= 1
-                if depth == 0 and start >= 0:
-                    with contextlib.suppress(json.JSONDecodeError, ValueError):
-                        obj = json.loads(text[start : i + 1])
-                        if isinstance(obj, dict):
-                            out.append(obj)
+        elif ch == "}" and depth > 0:
+            depth -= 1
+            if depth == 0:
+                with contextlib.suppress(json.JSONDecodeError, ValueError):
+                    obj = json.loads(text[start : i + 1])
+                    if isinstance(obj, dict):
+                        out.append(obj)
+        elif ch == "," and depth == 1:
+            commas.append(i - start)
+    repaired = _repair_truncated_object(text[start:], depth, in_str, commas) if depth else None
+    if repaired is not None and repaired not in out:
+        out.append(repaired)
     return out
 
 
@@ -916,9 +890,6 @@ def _extract_json_array(text: str) -> list[dict[str, Any]]:
     # Fallback: salvage complete objects from a truncated/unclosed array, then the object the cut left half-written --
     # with three quarters of responses arriving truncated, that last object is often the only one there is.
     salvaged = _salvage_objects(text)
-    repaired = _repair_truncated_object(text)
-    if repaired is not None and repaired not in salvaged:
-        salvaged.append(repaired)
     if not salvaged:
         log.warning(
             "discovery: no JSON proposals parsed from %d chars of model text; "
@@ -932,50 +903,20 @@ def _extract_json_array(text: str) -> list[dict[str, Any]]:
 _REPAIRED_REQUIRED_ANY = ("op_chain", "fusion_math")
 
 
-def _repair_truncated_object(text: str) -> dict[str, Any] | None:
-    """Recover the proposal that a cut-off response left half-written."""
-    depth = 0
-    start = -1
-    in_str = False
-    esc = False
-    boundaries: list[int] = []
-    for i, ch in enumerate(text):
-        if in_str:
-            if esc:
-                esc = False
-            elif ch == "\\":
-                esc = True
-            elif ch == '"':
-                in_str = False
-            continue
-        if ch == '"':
-            in_str = True
-        elif ch == "{":
-            if depth == 0:
-                start = i
-                boundaries = []
-            depth += 1
-        elif ch == "}":
-            if depth > 0:
-                depth -= 1
-                if depth == 0:
-                    start = -1
-                    boundaries = []
-        elif ch == "," and depth == 1:
-            boundaries.append(i)
-    if depth <= 0 or start < 0:
-        return None
+def _repair_truncated_object(fragment: str, depth: int, in_str: bool, commas: list[int]) -> dict[str, Any] | None:
+    """Recover the proposal that a cut-off response left half-written.
 
-    attempts = [text[start:] + ('"' if in_str else "") + "}" * depth]
-    attempts.extend(text[start:mark] + "}" for mark in reversed(boundaries))
+    ``fragment`` runs from the object's opening brace to the cut, with ``depth`` braces and maybe a string still
+    open; ``commas`` are the offsets of its top-level separators, where a field before the cut ends complete.
+    """
+    attempts = [fragment + ('"' if in_str else "") + "}" * depth]
+    attempts.extend(fragment[:mark] + "}" for mark in reversed(commas))
     for attempt in attempts:
         try:
             obj = json.loads(attempt)
         except (json.JSONDecodeError, ValueError):
             continue
-        if not isinstance(obj, dict) or not obj:
-            continue
-        if not str(obj.get("name") or "").strip():
+        if not isinstance(obj, dict) or not str(obj.get("name") or "").strip():
             continue
         if any(str(obj.get(key) or "").strip() for key in _REPAIRED_REQUIRED_ANY):
             return obj
@@ -1064,6 +1005,67 @@ def resolve_proposed_source_file(value: Any, in_scope_files: Sequence[str], defa
     return default
 
 
+def _proposal_edit_files(item: dict[str, Any], target: DiscoveryTarget, name: str) -> list[str]:
+    """The files a proposal wires itself into, its call site first; ``[]`` drops the proposal.
+
+    Single-file discovery maps the claimed file onto the one source file the prompt embedded. Repo scope embedded
+    nothing, so each proposal names its own files, and one whose call site does not resolve is dropped rather than
+    retargeted onto the target's source file.
+    """
+    if not target.repo_scope:
+        scope_files = [target.source_file] if target.source_file else []
+        return [resolve_proposed_source_file(item.get("source_file"), scope_files, target.source_file)]
+    call_site = resolve_repo_file(item.get("source_file"), target.repo_root)
+    if not call_site:
+        log.warning(
+            "discovery: dropping %s -- its source_file %r is not a file in %s",
+            name,
+            str(item.get("source_file") or "")[:200],
+            target.repo_root or "the framework repo",
+        )
+        return []
+    files = [call_site]
+    for value in _as_sequence(item.get("additional_files")):
+        resolved = resolve_repo_file(value, target.repo_root)
+        if not resolved:
+            log.warning(
+                "discovery: %s listed an additional file that does not resolve (%r); ignoring it",
+                name,
+                str(value)[:200],
+            )
+        elif resolved not in files:
+            files.append(resolved)
+    return files
+
+
+def _scope_gate_drops(name: str, files: list[str], terms: list[str], explicit_target: bool) -> bool:
+    """Whether the scope gate drops a proposal declaring ``terms`` that none of its edit ``files`` perform.
+
+    A fusion is wired by replacing a call site in the files the proposal claims, so one claiming ops those files do
+    not perform is unwireable no matter how good the kernel is. The files are the ones the model was shown or named,
+    never a file the chain was not claimed to be in. The gate recognizes nine coarse terms, so it can reject a
+    wireable chain; an operator-named target is kept with a warning, because discarding what was explicitly asked
+    for hides that.
+    """
+    outside = out_of_scope_terms("\n".join(_read_source(path) for path in files), terms)
+    if outside:
+        log.log(
+            logging.WARNING if explicit_target else logging.INFO,
+            "discovery: %s %s (%s not performed in %s -- the fusion crosses "
+            "a module boundary and has no wireable call site there)",
+            "keeping operator-named" if explicit_target else "dropping",
+            name,
+            ",".join(outside),
+            _file_names(files),
+        )
+    return bool(outside) and not explicit_target
+
+
+def _file_names(paths: Sequence[str]) -> str:
+    """``paths`` by file name, for a log line."""
+    return ", ".join(Path(p).name or p for p in paths)
+
+
 def parse_discovered_recipes(
     text: str,
     target: DiscoveryTarget,
@@ -1073,196 +1075,76 @@ def parse_discovered_recipes(
 ) -> list[Recipe]:
     """Convert the LLM's JSON proposals into ranked :class:`Recipe` objects.
 
-    ``explicit_target`` marks a run whose target an operator named. The scope gate
-    then warns instead of dropping: it recognizes nine coarse terms, so it can reject
-    a wireable chain, and discarding what was explicitly asked for hides that.
-
-    The scope gate judges a proposal against the source file the prompt embedded:
-    it must see the same source the model did, or it drops chains for being
-    "outside" a file they were never claimed to be in.
-
-    Repo scope replaces that file with the repository: the prompt embedded
-    nothing, so each proposal names its own files and is judged against the
-    files IT named. A proposal whose call site does not resolve is dropped rather
-    than retargeted onto the target's source file.
+    ``explicit_target``: an operator named the target, so the scope gate keeps, with a warning, what it would drop.
     """
-    model_type, framework, source_file, shapes = (
-        target.model_type,
-        target.install.framework,
-        target.source_file,
-        target.shapes,
-    )
-    repo_scope, repo_root, pass_probe = target.repo_scope, target.repo_root, target.install.pass_probe
-    runtime = resolve_target_runtime(framework, framework_root=target.install.framework_root)
-    scope_files = [p for p in [source_file] if p]
-    # The same files the prompt embedded, re-read so the scope gate below judges a proposal against exactly the source
-    # the model was shown. Repo scope embedded nothing, so there is no run-wide source text to judge against.
-    source_text = "" if repo_scope else "\n".join(_read_source(path) for path in scope_files)
+    runtime = resolve_target_runtime(target.install.framework, framework_root=target.install.framework_root)
+    measured = {category for category, share in (category_shares or {}).items() if float(share) > 0.0}
     out: list[Recipe] = []
     for i, item in enumerate(_extract_json_array(text)):
         name = str(item.get("name") or f"discovered_{i + 1}").strip()
-        try:
-            priority = float(item.get("priority"))
-        except (TypeError, ValueError):
-            priority = max(0.1, 1.0 - 0.1 * i)  # preserve LLM order when absent
-        anchors = item.get("source_anchors") or []
-        if isinstance(anchors, str):
-            anchors = [anchors]
         op_chain = str(item.get("op_chain") or "")
         fusion_math = str(item.get("fusion_math") or op_chain or "")
         # The fusion-DEFINING fields (name / op-chain / math) -- NOT the free-prose rationale or grep anchors, which
         # can mention an op in passing and would attach a category the fusion does not actually involve.
         defining_text = " ".join([name, op_chain, fusion_math])
         # What this fusion IS, as opposed to how this run described it.
-        declared = declared_ops(item)
-        traits = declared_traits(item)
-        identity_text = " ".join(declared) if declared else defining_text
-        # The gate keys on precision and variant words (quant, fp8, mla, kvcache) that no op category expresses, so it
-        # needs more than ``declared``.
-        gate_text = " ".join([*declared, *traits]) if traits else " ".join([*declared, defining_text])
-        # Recover the op categories: from the declaration when there is one, else from the prose via the fixed,
-        # model-agnostic vocabulary.
-        matched_categories = categories_in_text(identity_text)
+        declared, traits = declared_ops(item), declared_traits(item)
+        # The op categories: from the declaration when there is one, else from the prose.
+        categories = categories_in_text(" ".join(declared or [defining_text]))
         # Hallucination gate FIRST: a proposal whose ops the trace never measured has nothing to remove, and that is
         # true whether we would author it or claim a framework pass for it.
-        if category_shares and matched_categories:
-            if not any(float(category_shares.get(c, 0.0)) > 0.0 for c in matched_categories):
-                log.info(
-                    "discovery: dropping %s (proposed ops %s absent from the trace)",
-                    name,
-                    ",".join(matched_categories),
-                )
-                continue
-        # Which file(s) this proposal wires itself into. Resolved BEFORE the scope gate: under repo scope the gate has
-        # no run-wide source text and must read exactly the files this proposal named.
-        extra_files: list[str] = []
-        if repo_scope:
-            proposed_file = resolve_repo_file(item.get("source_file"), repo_root)
-            if not proposed_file:
-                log.warning(
-                    "discovery: dropping %s -- its source_file %r is not a file in %s",
-                    name,
-                    str(item.get("source_file") or "")[:200],
-                    repo_root or "the framework repo",
-                )
-                continue
-            for value in _as_sequence(item.get("additional_files")):
-                resolved = resolve_repo_file(value, repo_root)
-                if not resolved:
-                    log.warning(
-                        "discovery: %s listed an additional file that does not resolve (%r); ignoring it",
-                        name,
-                        str(value)[:200],
-                    )
-                    continue
-                if resolved != proposed_file and resolved not in extra_files:
-                    extra_files.append(resolved)
-            gate_files = [proposed_file, *extra_files]
-            scope_text = "\n".join(_read_source(path) for path in gate_files)
-        else:
-            proposed_file = resolve_proposed_source_file(item.get("source_file"), scope_files, source_file)
-            gate_files = scope_files
-            scope_text = source_text
-        # SCOPE gate: a fusion is wired by replacing a call site in the files the proposal claims, so one claiming ops
-        # that none of those files perform is unwireable no matter how good the kernel is.
-        outside = out_of_scope_terms(scope_text, [*declared, *traits])
-        if outside:
-            log.log(
-                logging.WARNING if explicit_target else logging.INFO,
-                "discovery: %s %s (%s not performed in %s -- the fusion crosses "
-                "a module boundary and has no wireable call site there)",
-                "keeping operator-named" if explicit_target else "dropping",
-                name,
-                ",".join(outside),
-                ", ".join(Path(p).name or p for p in gate_files),
-            )
-            if not explicit_target:
-                continue
-        # Compile-pass gate: never author a chain vLLM fuses at compile time.
+        if category_shares and categories and measured.isdisjoint(categories):
+            log.info("discovery: dropping %s (proposed ops %s absent from the trace)", name, ",".join(categories))
+            continue
+        edit_files = _proposal_edit_files(item, target, name)
+        if not edit_files or _scope_gate_drops(name, edit_files, [*declared, *traits], explicit_target):
+            continue
+        # Compile-pass gate: never author a chain vLLM fuses at compile time. It keys on precision and variant words
+        # (quant, fp8, mla, kvcache) that no op category expresses, so it needs more than ``declared``.
         pass_name = covered_by_vllm_compile_pass(
             matched_categories=[],
-            text=gate_text,
-            framework=framework,
+            text=" ".join([*declared, *(traits or [defining_text])]),
+            framework=target.install.framework,
         )
+        state = vllm_compile_pass_state(pass_name, probe=target.install.pass_probe, runtime=runtime)
+        if state is not None and state.enabled is True:
+            log.info("discovery: dropping %s, vLLM compile pass %s already fuses it", name, state.flag or pass_name)
+            continue  # the framework really does fuse this: authoring is a no-op
+        # Absent / undecidable / pinned off: the framework is NOT fusing this for us, so keep the proposal as
+        # authoring work and record why.
         pass_note = ""
-        if pass_name:
-            state = vllm_compile_pass_state(pass_name, probe=pass_probe, runtime=runtime)
-            if state is not None and state.enabled is True:
-                log.info(
-                    "discovery: dropping %s, vLLM compile pass %s already fuses it",
-                    name,
-                    state.flag or pass_name,
-                )
-                continue  # the framework really does fuse this: authoring is a no-op
-            if state is not None and state.claimable:
-                # Present but switched off and flippable: claim the native pass.
-                out.append(
-                    Recipe(
-                        pattern_id=f"compile_pass:{state.flag}",
-                        description=(
-                            f"vLLM implements this chain as compile pass `{state.flag}`, but "
-                            f"it is DISABLED in this install: enable the native pass instead "
-                            f"of authoring a kernel ({str(item.get('rationale') or op_chain or name)[:200]})"
-                        ),
-                        env_flag="",
-                        source_file=state.config_file,
-                        source_hints=[state.flag],
-                        fusion_math=fusion_math,
-                        eager_reference_hint="",
-                        shapes=shapes,
-                        matched_categories=matched_categories,
-                        trigger_share=priority,
-                        rocm_native=True,
-                        source_confirmed=True,
-                        already_satisfied=False,
-                        candidate_kind="compile_pass",
-                        compile_pass_flag=state.flag,
-                    )
-                )
-                continue
-            # Absent / undecidable / pinned off: the framework is NOT fusing this for us, so keep the proposal as
-            # authoring work and record why.
-            if state is not None:
-                pass_note = _unclaimable_note(state)
-                log.info("compile pass not claimed for %s: %s", name, pass_note)
+        if state is not None and not state.claimable:
+            pass_note = _unclaimable_note(state)
+            log.info("compile pass not claimed for %s: %s", name, pass_note)
         existing_operator = str(item.get("existing_operator") or "").strip()
         candidate_kind = str(item.get("candidate_kind") or "").strip().lower()
-        if candidate_kind not in {"integration", "new_fusion", "replacement"}:
-            candidate_kind = "integration" if existing_operator else "new_fusion"
         # ``integration`` is only meaningful with a named operator: the authoring prompt injects its "benchmark the
-        # existing operator first" block only when both fields are set, so an operator-less integration would claim
-        # the kind while silently skipping the constraint.
-        if candidate_kind == "integration" and not existing_operator:
-            candidate_kind = "new_fusion"
-        if proposed_file != source_file or extra_files:
-            log.info(
-                "discovery: %s wires into %s",
-                name,
-                ", ".join(Path(p).name or p for p in [proposed_file, *extra_files]),
-            )
-        out.append(
-            Recipe(
-                pattern_id=f"llm:{name}",
-                description=str(item.get("rationale") or op_chain or name)[:300],
-                env_flag=_norm_env_flag(str(item.get("env_flag") or "FUSED"), model_type),
-                source_file=proposed_file,
-                extra_files=extra_files,
-                source_hints=[str(a) for a in anchors],
-                fusion_math=fusion_math,
-                eager_reference_hint=str(item.get("eager_reference") or ""),
-                shapes=shapes,
-                matched_categories=matched_categories,
-                trigger_share=priority,
-                rocm_native=True,
-                source_confirmed=True,  # the LLM read the real source to propose it
-                already_satisfied=False,
-                candidate_kind=candidate_kind,
-                existing_operator=existing_operator,
-                compile_pass_note=pass_note,
-            )
+        # existing operator first" block only when both fields are set.
+        if candidate_kind not in {"new_fusion", "replacement"}:
+            candidate_kind = "integration" if existing_operator else "new_fusion"
+        recipe = Recipe(
+            pattern_id=f"llm:{name}",
+            description=str(item.get("rationale") or op_chain or name)[:300],
+            env_flag=_norm_env_flag(str(item.get("env_flag") or "FUSED"), target.model_type),
+            source_file=edit_files[0],
+            extra_files=edit_files[1:],
+            source_hints=[str(a) for a in _as_sequence(item.get("source_anchors") or [])],
+            fusion_math=fusion_math,
+            eager_reference_hint=str(item.get("eager_reference") or ""),
+            shapes=target.shapes,
+            matched_categories=categories,
+            trigger_share=to_float(item.get("priority"), max(0.1, 1.0 - 0.1 * i)),  # preserve LLM order when absent
+            source_confirmed=True,  # the LLM read the real source to propose it
+            candidate_kind=candidate_kind,
+            existing_operator=existing_operator,
+            compile_pass_note=pass_note,
         )
-    out.sort(key=lambda r: r.trigger_share, reverse=True)
-    return rank_recipes(out)
+        if state is not None and state.claimable:
+            recipe = _compile_pass_recipe(recipe, state, "chain", recipe.description[:200])
+        elif edit_files != [target.source_file]:
+            log.info("discovery: %s wires into %s", name, _file_names(edit_files))
+        out.append(recipe)
+    return rank_recipes(sorted(out, key=lambda r: r.trigger_share, reverse=True))
 
 
 class DiscoverySafetyError(RuntimeError):

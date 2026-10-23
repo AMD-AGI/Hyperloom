@@ -13,6 +13,7 @@ import pytest
 from click.testing import CliRunner
 
 import kernelforge.cli.forge_loop_command as forge_loop_command
+import kernelforge.cli.relay as relay_module
 import kernelforge.loop.recovery as recovery_module
 import kernelforge.orchestrator.agent as agent_module
 import kernelforge.orchestrator.analysis as analysis_module
@@ -27,6 +28,14 @@ from kernelforge.loop.campaign_config import (
     create_campaign_config,
 )
 from kernelforge.loop.experience import ExperienceLedger
+from kernelforge.loop.agent_relay import (
+    AgentAvailabilitySnapshot,
+    AgentProfileSpec,
+    AgentRelayPolicy,
+    AgentRelayState,
+    ProfileAvailability,
+    ProviderAvailability,
+)
 from kernelforge.loop.run_state import (
     SESSION_PAUSED,
     LoopStateStore,
@@ -160,6 +169,8 @@ def _install_cli_fakes(monkeypatch, tmp_path):
                     iteration=8 if resume else 4,
                     commit_hash="best-commit",
                 ),
+                agent_relay=AgentRelayState(),
+                agent_availability_snapshot=AgentAvailabilitySnapshot(),
             )
             captured["loops"].append(self)
 
@@ -201,6 +212,28 @@ def _install_cli_fakes(monkeypatch, tmp_path):
         return {"written": False, "reason": "test"}
 
     monkeypatch.setattr(forge_loop_command.Config, "from_env", staticmethod(fake_from_env))
+
+    def fake_probe_agent_profiles(relay_config, **_kwargs):
+        if relay_config is None:
+            return None
+        providers = {profile.provider: ProviderAvailability(available=True) for profile in relay_config.profiles}
+        profiles = {
+            profile.profile_id: ProfileAvailability(
+                provider=profile.provider,
+                model=profile.model,
+                provider_available=True,
+                model_available=True,
+                available=True,
+            )
+            for profile in relay_config.profiles
+        }
+        return AgentAvailabilitySnapshot(
+            checked_at="2026-10-16T08:00:00Z",
+            providers=providers,
+            profiles=profiles,
+        )
+
+    monkeypatch.setattr(relay_module, "probe_agent_profiles", fake_probe_agent_profiles)
     monkeypatch.setattr(forge_loop_command, "kb_warmstart", fake_warmstart)
     monkeypatch.setattr(
         forge_loop_command,
@@ -276,6 +309,10 @@ def _initialize_workspace(tmp_path):
     return workspace, kernel, driver
 
 
+# A checkpoint the CLI can read; the faked loop never inspects its contents.
+_RESUMABLE_RUN_STATE = json.dumps(RunState().to_dict())
+
+
 def _invoke_forge_loop(
     tmp_path,
     extra_args,
@@ -294,7 +331,7 @@ def _invoke_forge_loop(
     if existing_state or existing_config or "--resume" in extra_args:
         campaign_root = workspace / "forge_experiments"
         campaign_root.mkdir(exist_ok=True)
-        (campaign_root / "run_state.json").write_text("{}")
+        (campaign_root / "run_state.json").write_text(_RESUMABLE_RUN_STATE)
     command = [
         "forge-loop",
         "--workspace",
@@ -1052,7 +1089,7 @@ def test_resume_reuses_persisted_framework_without_inference(
     )
     store = CampaignConfigStore(str(workspace))
     store.save(campaign)
-    (store.root / "run_state.json").write_text("{}")
+    (store.root / "run_state.json").write_text(_RESUMABLE_RUN_STATE)
 
     def fail_inference(**_kwargs):
         raise AssertionError("resume must not infer framework")
@@ -1176,6 +1213,88 @@ def test_forge_loop_resume_routes_new_budget_without_warmstart(tmp_path, monkeyp
     assert captured["kb_experience"][1]["read"] == payload["kb_experience"]["read"]
 
 
+def _resume_relay_campaign(tmp_path, monkeypatch, extra_args, *, active_profile_id="", unavailable=()):
+    """Resume a campaign created with relay starting on claude, under this session's agent options."""
+    captured = _install_cli_fakes(monkeypatch, tmp_path)
+    fake_from_env = forge_loop_command.Config.from_env
+
+    def from_env(**overrides):
+        config = fake_from_env(**overrides)
+        config.agent_backend = overrides.get("agent_backend", "auto")
+        config.agent_fallback_provider = overrides.get("agent_fallback_provider", config.agent_fallback_provider)
+        return config
+
+    monkeypatch.setattr(forge_loop_command.Config, "from_env", staticmethod(from_env))
+    probed = captured.setdefault("probed_relays", [])
+
+    def probe(relay_config, **kwargs):
+        probed.append(relay_config)
+        snapshot = captured["fake_probe"](relay_config, **kwargs)
+        for profile_id in unavailable:
+            snapshot.profiles[profile_id].available = False
+            snapshot.profiles[profile_id].reason = "gateway 401"
+        return snapshot
+
+    captured["fake_probe"] = relay_module.probe_agent_profiles
+    monkeypatch.setattr(relay_module, "probe_agent_profiles", probe)
+    workspace, kernel, driver = _initialize_workspace(tmp_path)
+    policy = AgentRelayPolicy(
+        primary_profile_id="claude",
+        profiles=(AgentProfileSpec("claude", "claude"), AgentProfileSpec("codex", "codex")),
+    )
+    CampaignConfigStore(str(workspace)).save(
+        create_campaign_config(
+            str(workspace),
+            CampaignInputs(kernel=str(kernel), driver=str(driver), source_files="", agent_relay=policy),
+        )
+    )
+    campaign_root = workspace / "forge_experiments"
+    campaign_root.mkdir(exist_ok=True)
+    state = RunState()
+    state.agent_relay.active_profile_id = active_profile_id
+    (campaign_root / "run_state.json").write_text(json.dumps(state.to_dict()))
+    command = ["forge-loop", "--workspace", str(workspace), "--max-hours", "1", "--no-profiling", "--no-prepare-task"]
+    result = CliRunner().invoke(main, [*command, "--resume", *extra_args])
+    return result, probed
+
+
+def test_a_resumed_relay_campaign_runs_the_model_this_session_names(tmp_path, monkeypatch):
+    result, probed = _resume_relay_campaign(tmp_path, monkeypatch, ["--model", "claude-opus-4-8"])
+
+    assert result.exit_code == 0, result.output
+    assert probed[-1].primary_profile.model == "claude-opus-4-8"
+    assert [profile.profile_id for profile in probed[-1].profiles] == ["claude", "codex"]
+
+
+@pytest.mark.parametrize("fallback_args", [[], ["--agent-fallback-provider", "none"]], ids=["default", "disabled"])
+def test_a_resumed_relay_campaign_continues_on_its_profile_while_the_primary_is_down(
+    tmp_path, monkeypatch, fallback_args
+):
+    result, _probed = _resume_relay_campaign(
+        tmp_path, monkeypatch, fallback_args, active_profile_id="codex", unavailable=("claude",)
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "starting on profile codex" in result.output
+
+
+def test_with_no_profile_to_resume_disabled_fallback_refuses_an_unavailable_primary(tmp_path, monkeypatch):
+    result, _probed = _resume_relay_campaign(
+        tmp_path, monkeypatch, ["--agent-fallback-provider", "none"], unavailable=("claude",)
+    )
+
+    assert result.exit_code != 0
+    assert "Agent profile claude is unavailable: gateway 401; provider fallback is disabled" in result.output
+
+
+def test_a_resumed_relay_campaign_refuses_a_different_agent_backend(tmp_path, monkeypatch):
+    result, probed = _resume_relay_campaign(tmp_path, monkeypatch, ["--agent-backend", "codex"])
+
+    assert result.exit_code != 0
+    assert "model relay starts on claude; the agent backend cannot change on resume" in result.output
+    assert probed == []
+
+
 def test_forge_loop_resume_adds_existing_kb_reference_pointer(
     tmp_path,
     monkeypatch,
@@ -1187,7 +1306,7 @@ def test_forge_loop_resume_adds_existing_kb_reference_pointer(
     )
     store = CampaignConfigStore(str(workspace))
     store.save(campaign)
-    (store.root / "run_state.json").write_text("{}")
+    (store.root / "run_state.json").write_text(_RESUMABLE_RUN_STATE)
     references = store.root / "kb_references"
     reference = references / "sets" / "generation-a" / "reference_01.md"
     reference.parent.mkdir(parents=True)
@@ -1396,7 +1515,7 @@ def test_resume_rejects_missing_or_changed_program_context(
     )
     store = CampaignConfigStore(str(workspace))
     store.save(campaign, program_md=source_program.read_text())
-    (store.root / "run_state.json").write_text("{}")
+    (store.root / "run_state.json").write_text(_RESUMABLE_RUN_STATE)
     if mutation == "missing":
         store.program_path.unlink()
     else:

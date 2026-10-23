@@ -10,10 +10,10 @@ import os
 import re
 import threading
 from dataclasses import dataclass, replace
-from importlib import metadata
 from typing import Callable, Mapping
 
-from hyperloom.common.llm_config import DEFAULT_CLAUDE_MODEL, DEFAULT_CODEX_MODEL
+from hyperloom.common.entry_points import iter_entry_point_objects
+from hyperloom.common.llm_config import DEFAULT_CLAUDE_MODEL, DEFAULT_CODEX_MODEL, DEFAULT_DEEPSEEK_HARNESS_MODEL
 from hyperloom.common.reasoning_effort import DEFAULT_REASONING_EFFORT
 from kernelforge.agent_backends.base import (
     AgentBackend,
@@ -25,9 +25,9 @@ from kernelforge.agent_backends.base import (
 
 log = logging.getLogger(__name__)
 
-# Keeps a package-style prefix even though this module now lives in ``kernelforge.llm``: the group name is the
-# published contract third-party providers register against, and renaming it would drop every existing plugin without
-# a word -- a plugin that fails to load is recorded as one log line, not raised.
+# Keeps a package-style prefix: the group name is the published contract third-party providers register against, and
+# renaming it would drop every existing plugin without a word -- a plugin that fails to load is recorded as one log
+# line, not raised.
 PROVIDER_ENTRY_POINT_GROUP = "kernelforge.agent_providers"
 _PROVIDER_NAME = re.compile(r"^[a-z][a-z0-9_-]*$")
 
@@ -64,6 +64,9 @@ class AgentProvider:
     availability: Callable[[], bool] = _always_available
     credentialed: Callable[[Mapping[str, str]], bool] = _credential_unproven
     owns_model: Callable[[str], bool] = _owns_no_model
+    #: Whether :func:`select_default_agent_provider` may pick this provider on
+    #: its own. A provider that only an explicit name should reach sets False.
+    auto_selectable: bool = True
 
     def __post_init__(self) -> None:
         """Validate stable provider metadata at registration time."""
@@ -107,31 +110,24 @@ def discover_agent_providers(*, force: bool = False) -> None:
         if _plugins_loaded and not force:
             return
         _plugins_loaded = True
-        try:
-            entries = list(metadata.entry_points().select(group=PROVIDER_ENTRY_POINT_GROUP))
-        except Exception as exc:  # noqa: BLE001 - plugin discovery is optional
-            _plugin_errors["<discovery>"] = f"{type(exc).__name__}: {exc}"
-            return
-
-        for entry in entries:
+        for found in iter_entry_point_objects(PROVIDER_ENTRY_POINT_GROUP):
+            if found.error is not None:
+                _plugin_errors[found.name] = found.error
+                # The shared helper has already logged why it could not be loaded.
+                continue
             try:
-                loaded = entry.load()
-                provider = loaded() if callable(loaded) else loaded
+                provider = found.value
                 if not isinstance(provider, AgentProvider):
                     raise TypeError(
                         "entry point must resolve to AgentProvider or a zero-argument factory returning AgentProvider"
                     )
-                entry_name = normalize_provider_name(entry.name)
+                entry_name = normalize_provider_name(found.name)
                 if provider.name != entry_name:
                     raise ValueError(f"entry-point name {entry_name!r} does not match provider name {provider.name!r}")
                 register_agent_provider(provider)
-            except Exception as exc:  # noqa: BLE001 - isolate broken plugins
-                _plugin_errors[entry.name] = f"{type(exc).__name__}: {exc}"
-                log.warning(
-                    "failed to load Agent provider entry point %s: %s",
-                    entry.name,
-                    exc,
-                )
+            except (TypeError, ValueError) as exc:
+                _plugin_errors[found.name] = f"{type(exc).__name__}: {exc}"
+                log.warning("failed to load Agent provider entry point %s: %s", found.name, exc)
 
 
 def get_agent_provider(name: str) -> AgentProvider:
@@ -182,9 +178,10 @@ def select_default_agent_provider(preferred_model: str = "") -> AgentProvider:
             return bool(predicate())
         except Exception as exc:  # noqa: BLE001 - one provider must not decide the whole selection
             failures.append(f"{provider.name}: {type(exc).__name__}: {exc}")
+            log.warning("agent provider %s check failed: %s", provider.name, exc)
             return False
 
-    providers = list(_providers.values())
+    providers = [provider for provider in _providers.values() if provider.auto_selectable]
     if model:
         runnable_owners = [
             provider
@@ -325,6 +322,13 @@ def _create_codex_backend(runtime: AgentRuntimeConfig) -> AgentBackend:
     return CodexBackend(runtime=runtime)
 
 
+def _create_deepseek_backend(runtime: AgentRuntimeConfig) -> AgentBackend:
+    """Construct the built-in DeepSeek Harness backend lazily."""
+    from kernelforge.agent_backends.deepseek import DeepSeekHarnessBackend
+
+    return DeepSeekHarnessBackend(runtime=runtime)
+
+
 def _claude_available() -> bool:
     """Return whether the optional Claude SDK is installed."""
     from hyperloom.common import llm_config
@@ -337,6 +341,13 @@ def _codex_available() -> bool:
     from hyperloom.common import llm_config
 
     return llm_config.codex_agent_sdk_installed()
+
+
+def _deepseek_available() -> bool:
+    """Return whether the optional DeepSeek Harness SDK is installed."""
+    from hyperloom.common import llm_config
+
+    return llm_config.deepseek_harness_sdk_installed()
 
 
 def _claude_credentialed(env: Mapping[str, str]) -> bool:
@@ -413,6 +424,26 @@ register_agent_provider(
         availability=_codex_available,
         credentialed=_codex_credentialed,
         owns_model=_codex_owns_model,
+    )
+)
+register_agent_provider(
+    AgentProvider(
+        name="deepseek",
+        factory=_create_deepseek_backend,
+        default_model=DEFAULT_DEEPSEEK_HARNESS_MODEL,
+        capabilities=AgentCapabilities(
+            writable=True,
+            resumable=True,
+            sandbox=True,
+            probe=True,
+            requires_workspace_cwd=True,
+            session_env=True,
+            workspace_guard=True,
+        ),
+        availability=_deepseek_available,
+        # It authenticates on the same OpenAI-compatible line as Codex, so ranking it would let an installed SDK
+        # select it on a box that never asked for the harness.
+        auto_selectable=False,
     )
 )
 

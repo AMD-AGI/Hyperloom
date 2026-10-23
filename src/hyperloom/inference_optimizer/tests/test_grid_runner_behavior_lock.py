@@ -381,7 +381,10 @@ class TestVariantAbort:
     whether the grid walks on from it.
     """
 
-    def _run(self, *, keep_going, base, out, monkeypatch):
+    def _run(self, *, keep_going, tmp_path, monkeypatch):
+        monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "0")
+        base = tmp_path / "base.yaml"
+        _write_base_yaml(base)
         real_build = gr._build_variant_yaml
 
         def _fail_on_second(base_yaml_path, base_extra_args, variant, **kwargs):
@@ -403,7 +406,7 @@ class TestVariantAbort:
                     base_yaml_path=base,
                     base_extra_args="",
                     grid=[GridVariant(name="c0"), GridVariant(name="c1"), GridVariant(name="c2")],
-                    output_root=out,
+                    output_root=tmp_path / "out",
                     magpie_python=sys.executable,
                     gpu_type="mi300x",
                     keep_going_on_failure=keep_going,
@@ -411,11 +414,7 @@ class TestVariantAbort:
             )
 
     def test_abort_at_a_later_variant_stops_the_grid(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "0")
-        base = tmp_path / "base.yaml"
-        _write_base_yaml(base)
-
-        results = self._run(keep_going=False, base=base, out=tmp_path / "out", monkeypatch=monkeypatch)
+        results = self._run(keep_going=False, tmp_path=tmp_path, monkeypatch=monkeypatch)
 
         assert [r.name for r in results] == ["c0", "c1"]
         aborted = results[-1]
@@ -424,17 +423,13 @@ class TestVariantAbort:
         assert "boom" in (aborted.error or "")
         assert aborted.returncode is None
         assert aborted.workspace is None
-        markers = [
-            json.loads(p.read_text(encoding="utf-8")) for p in sorted((tmp_path / "out").glob("*/abort_reason.json"))
-        ]
-        assert [m["error_class"] for m in markers] == ["no_benchmark_workspace", "yaml_build_error"]
+        marker = json.loads(
+            (next((tmp_path / "out").glob("*_c1/abort_reason.json"))).read_text(encoding="utf-8"),
+        )
+        assert marker["error_class"] == "yaml_build_error"
 
     def test_abort_at_a_later_variant_is_walked_past(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "0")
-        base = tmp_path / "base.yaml"
-        _write_base_yaml(base)
-
-        results = self._run(keep_going=True, base=base, out=tmp_path / "out", monkeypatch=monkeypatch)
+        results = self._run(keep_going=True, tmp_path=tmp_path, monkeypatch=monkeypatch)
 
         assert [r.name for r in results] == ["c0", "c1", "c2"]
         assert [r.error_class for r in results] == [

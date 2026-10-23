@@ -82,8 +82,8 @@ def test_the_non_git_channel_records_every_backup_before_it_mutates(tmp_path: Pa
     )
     backup_root = tmp_path / "backups"
 
-    ok, err, backups, _ = _apply_patch_no_git(root, patch, backup_root)
-    assert ok, err
+    result = _apply_patch_no_git(root, patch, backup_root)
+    assert result.ok, result.error
     assert target.read_text(encoding="utf-8") == "two\n"
 
     # The record is on disk, not only in the list the caller happens to hold.
@@ -118,7 +118,7 @@ def test_a_near_miss_is_not_accepted_as_already_applied(tmp_path: Path) -> None:
 
 
 def test_a_revert_that_leaves_a_patched_file_behind_is_named(tmp_path: Path) -> None:
-    from hyperloom.orchestrator.actions.executors.integrate_patch import restore_pending_integrate
+    from hyperloom.orchestrator.actions.executors._patch_git import restore_pending_integrate
 
     root = tmp_path / "wheel"
     root.mkdir()

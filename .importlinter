@@ -78,7 +78,6 @@ ignore_imports =
     hyperloom.inference_optimizer.cli.executors -> hyperloom.orchestrator.actions.executors.profile
     hyperloom.inference_optimizer.cli.executors -> hyperloom.orchestrator.actions.executors.roofline
     hyperloom.inference_optimizer.cli.executors -> hyperloom.orchestrator.actions.executors.targeted_build_executor
-    hyperloom.inference_optimizer.cli.executors -> hyperloom.orchestrator.roles.claude
     hyperloom.inference_optimizer.cli.executors -> hyperloom.orchestrator.specialists.domains
     hyperloom.inference_optimizer.cli.executors -> hyperloom.orchestrator.specialists.mcp_config
     hyperloom.inference_optimizer.cli.executors -> hyperloom.orchestrator.specialists.runner
@@ -97,7 +96,6 @@ ignore_imports =
     hyperloom.inference_optimizer.cli.parser -> hyperloom.orchestrator.policy.gate
     hyperloom.inference_optimizer.cli.parser -> hyperloom.orchestrator.scoring.proposal_scorer
     hyperloom.inference_optimizer.cli.parser -> hyperloom.orchestrator.specialists.domains
-    hyperloom.inference_optimizer.cli.preflight -> hyperloom.agents.framework.kb
     hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._aiter_jit
     hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._inferencex_patcher
     hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._magpie_patcher
@@ -167,6 +165,7 @@ forbidden_modules =
     kernelforge.rewrite_by_flydsl
     kernelforge.roofline_ceiling
     kernelforge.tracker
+    kernelforge.workspace
 ignore_imports =
     hyperloom.**.tests.** -> **
     kernelforge.tests.** -> **
@@ -325,7 +324,6 @@ ignore_imports =
     hyperloom.inference_optimizer.cli.executors -> hyperloom.orchestrator.actions.executors.profile
     hyperloom.inference_optimizer.cli.executors -> hyperloom.orchestrator.actions.executors.roofline
     hyperloom.inference_optimizer.cli.executors -> hyperloom.orchestrator.actions.executors.targeted_build_executor
-    hyperloom.inference_optimizer.cli.executors -> hyperloom.orchestrator.roles.claude
     hyperloom.inference_optimizer.cli.executors -> hyperloom.orchestrator.specialists.domains
     hyperloom.inference_optimizer.cli.executors -> hyperloom.orchestrator.specialists.mcp_config
     hyperloom.inference_optimizer.cli.executors -> hyperloom.orchestrator.specialists.runner
@@ -344,7 +342,6 @@ ignore_imports =
     hyperloom.inference_optimizer.cli.parser -> hyperloom.orchestrator.policy.gate
     hyperloom.inference_optimizer.cli.parser -> hyperloom.orchestrator.scoring.proposal_scorer
     hyperloom.inference_optimizer.cli.parser -> hyperloom.orchestrator.specialists.domains
-    hyperloom.inference_optimizer.cli.preflight -> hyperloom.agents.framework.kb
     hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._aiter_jit
     hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._inferencex_patcher
     hyperloom.inference_optimizer.cli.preflight -> hyperloom.orchestrator.actions.executors._magpie_patcher

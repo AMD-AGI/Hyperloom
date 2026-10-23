@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import logging
 import time
@@ -22,6 +23,7 @@ log = logging.getLogger(__name__)
 
 # The canonical correctness suite's per-stage ceiling; PORT clips it to the time left before the cutoff.
 _VALIDATE_STAGE_TIMEOUT_SEC = 1800
+_RESERVE_REACHED = "PORT stopped at the 20-minute finalization reserve"
 
 
 @dataclass(frozen=True)
@@ -50,6 +52,18 @@ def _validation_error_tail(report) -> str:
     return tail[-1500:]
 
 
+class _ReserveReached(Exception):
+    """PORT stopped at its finalization reserve; ``args`` are the attempts it made and the error tail it reports."""
+
+
+def _seconds_left(stop_at_unix: float | None, attempts: int, tail: str = _RESERVE_REACHED) -> float | None:
+    """Seconds before the PORT cutoff, or None without one; raises _ReserveReached once it has passed."""
+    remaining = stop_at_unix - time.time() if stop_at_unix and stop_at_unix > 0 else None
+    if remaining is not None and remaining <= 0:
+        raise _ReserveReached(attempts, tail)
+    return remaining
+
+
 # Triton ships alongside FlyDSL in every rewrite environment, so reimplementing the op in it is a cheat available
 # whatever the source was written in.
 _BANNED_PORT_MODULES: frozenset[str] = frozenset({"triton"})
@@ -57,8 +71,6 @@ _BANNED_PORT_MODULES: frozenset[str] = frozenset({"triton"})
 
 def check_flydsl_port(spec: RewriteSpec) -> str:
     """Reject a port that is not a genuine FlyDSL rewrite. Returns \"\" if OK."""
-    import ast
-
     path = spec.flydsl_kernel
     src_stem = Path(spec.source_kernel).stem  # e.g. "softmax" for softmax.py
     forbidden = _BANNED_PORT_MODULES | {src_stem}  # + the source module (re-call cheat)
@@ -100,62 +112,45 @@ def check_flydsl_port(spec: RewriteSpec) -> str:
             "port MUST NOT call the original kernel as its implementation (that "
             "defeats the rewrite). Compute the result in FlyDSL only."
         )
+    return _dynamic_import_violation(tree, spec.flydsl_kernel_name, forbidden)
 
-    # Dynamic imports evade the static import scan above.
+
+def _dynamic_import_violation(tree: ast.AST, kernel_name: str, forbidden: frozenset[str]) -> str:
+    """Reject a dynamic import, which evades the static import scan. Returns \"\" if there is none."""
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        fn = node.func
+        fn = node.func if isinstance(node, ast.Call) else None
         is_dunder_import = isinstance(fn, ast.Name) and fn.id == "__import__"
         is_import_module = isinstance(fn, ast.Attribute) and fn.attr == "import_module"
         if not (is_dunder_import or is_import_module):
             continue
         arg = node.args[0] if node.args else None
-        if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
-            target = arg.value.split(".")[0]
-            if target in forbidden:
-                return (
-                    f"{spec.flydsl_kernel_name} dynamically imports `{arg.value}` — the "
-                    "port MUST NOT pull in the source language / source module by any "
-                    "means. Compute the result in FlyDSL only."
-                )
-        else:
+        if not (isinstance(arg, ast.Constant) and isinstance(arg.value, str)):
             return (
-                f"{spec.flydsl_kernel_name} uses a dynamic import with a non-literal "
+                f"{kernel_name} uses a dynamic import with a non-literal "
                 "target — a FlyDSL port must import FlyDSL statically and not hide what "
                 "it loads. Remove the dynamic import."
+            )
+        if arg.value.split(".")[0] in forbidden:
+            return (
+                f"{kernel_name} dynamically imports `{arg.value}` — the "
+                "port MUST NOT pull in the source language / source module by any "
+                "means. Compute the result in FlyDSL only."
             )
     return ""
 
 
-async def run_port_loop(
-    spec: RewriteSpec,
-    driver_path: str,
-    config: Config,
-    request: PortRequest = PortRequest(),
-    *,
-    usage: UsageAccumulator | None = None,
-) -> PortResult:
-    """Run the correctness-only port loop; return whether a correct port emerged."""
-    max_attempts = request.max_attempts
-    stop_at_unix = request.stop_at_unix
+def _port_agent(
+    spec: RewriteSpec, driver_path: str, config: Config, request: PortRequest, usage: UsageAccumulator | None
+):
+    """The implementer session every PORT attempt runs: only the FlyDSL kernel is editable, correctness is the gate."""
     from kernelforge.loop.gate_settings import GateMeasurement
     from kernelforge.orchestrator.agent import ImplementerSetup, ImplementerTask, SessionOptions, make_agent_fn
 
-    if stop_at_unix and stop_at_unix > 0 and time.time() >= stop_at_unix:
-        return PortResult(
-            ok=False,
-            attempts=0,
-            error_tail="PORT stopped at the 20-minute finalization reserve",
-        )
-
-    program_md = build_port_program_md(spec, driver_path)
-
-    agent_fn = make_agent_fn(
+    return make_agent_fn(
         config,
         ImplementerSetup(
             ImplementerTask(
-                program_md=program_md,
+                program_md=build_port_program_md(spec, driver_path),
                 kernel_backend_name="flydsl",
                 pre_task_context=request.pre_task_context,
                 # Only the FlyDSL kernel is editable; the kernel it ports FROM is the driver's live oracle and baseline.
@@ -173,8 +168,33 @@ async def run_port_loop(
         usage=usage,
     )
 
+
+async def _validate_port(spec: RewriteSpec, driver_path: str, stop_at_unix: float | None, attempt: int):
+    """Canonical acceptance: the driver's complete correctness suite, run within the time left before the cutoff."""
+    remaining = _seconds_left(stop_at_unix, attempt, "PORT stopped before validation at the finalization reserve")
+    stage_timeout = (
+        _VALIDATE_STAGE_TIMEOUT_SEC if remaining is None else max(1, min(_VALIDATE_STAGE_TIMEOUT_SEC, int(remaining)))
+    )
+    validation = run_validation_pipeline(
+        driver_script=driver_path, snr_threshold=spec.snr_threshold, timeout_per_stage=stage_timeout
+    )
+    try:
+        return await asyncio.wait_for(validation, timeout=remaining)
+    except asyncio.TimeoutError:
+        raise _ReserveReached(attempt, "PORT validation reached the 20-minute finalization reserve") from None
+
+
+async def run_port_loop(
+    spec: RewriteSpec,
+    driver_path: str,
+    config: Config,
+    request: PortRequest = PortRequest(),
+    *,
+    usage: UsageAccumulator | None = None,
+) -> PortResult:
+    """Run the correctness-only port loop; return whether a correct port emerged."""
     history = ""
-    last_report = None
+    tail = ""
 
     def restore_integrity(session_sink: dict) -> str:
         """Restore protected PORT inputs and return the rejection detail."""
@@ -187,124 +207,73 @@ async def run_port_loop(
             return reason + "; protected snapshot restore callback unavailable"
         try:
             restore()
-        except Exception as error:  # noqa: BLE001 - report without validating
+        except (RuntimeError, OSError) as error:
             return reason + "; protected snapshot restore failed: " + f"{type(error).__name__}: {error}"
         return reason
 
-    for attempt in range(1, max_attempts + 1):
-        remaining = stop_at_unix - time.time() if stop_at_unix and stop_at_unix > 0 else None
-        if remaining is not None and remaining <= 0:
-            return PortResult(
-                ok=False,
-                attempts=attempt - 1,
-                error_tail="PORT stopped at the 20-minute finalization reserve",
-            )
-        log.info("port attempt %d/%d for %s", attempt, max_attempts, spec.op_name)
-        sink: dict = {}
-        try:
-            session = agent_fn(spec.flydsl_kernel, history, session_sink=sink)
-            if remaining is None:
-                await session
-            else:
-                await asyncio.wait_for(session, timeout=remaining)
-        except asyncio.TimeoutError:
-            log.warning("port attempt %d reached the finalization reserve", attempt)
+    try:
+        _seconds_left(request.stop_at_unix, attempts=0)
+        agent_fn = _port_agent(spec, driver_path, config, request, usage)
+        for attempt in range(1, request.max_attempts + 1):
+            remaining = _seconds_left(request.stop_at_unix, attempts=attempt - 1)
+            log.info("port attempt %d/%d for %s", attempt, request.max_attempts, spec.op_name)
+            sink: dict = {}
+            try:
+                await asyncio.wait_for(agent_fn(spec.flydsl_kernel, history, session_sink=sink), timeout=remaining)
+            except asyncio.TimeoutError:
+                log.warning("port attempt %d reached the finalization reserve", attempt)
+                if integrity_error := restore_integrity(sink):
+                    log.warning("port attempt %d restored protected inputs after timeout: %s", attempt, integrity_error)
+                raise _ReserveReached(attempt, _RESERVE_REACHED) from None
+            except Exception as e:  # noqa: BLE001 - a session crash is one failed attempt
+                log.warning("port attempt %d: agent session error: %s", attempt, e)
+                integrity_error = restore_integrity(sink)
+                history = f"Previous attempt crashed the session: {e}\n"
+                if integrity_error:
+                    history += (
+                        "The attempt also violated protected PORT input integrity; "
+                        f"the driver/source oracle were restored: {integrity_error}\n"
+                    )
+                continue
+
             integrity_error = restore_integrity(sink)
             if integrity_error:
-                log.warning(
-                    "port attempt %d restored protected inputs after timeout: %s",
-                    attempt,
-                    integrity_error,
+                log.info("port attempt %d rejected before validation (integrity): %s", attempt, integrity_error)
+                history = (
+                    "Your PORT attempt changed protected driver/source-oracle state "
+                    "and was REJECTED before validation. The protected files were "
+                    f"restored. Modify only {spec.flydsl_kernel_name}.\n"
+                    f"{integrity_error}"
                 )
-            return PortResult(
-                ok=False,
-                attempts=attempt,
-                error_tail="PORT stopped at the 20-minute finalization reserve",
-            )
-        except Exception as e:  # noqa: BLE001 - a session crash is one failed attempt
-            log.warning("port attempt %d: agent session error: %s", attempt, e)
-            integrity_error = restore_integrity(sink)
-            history = f"Previous attempt crashed the session: {e}\n"
-            if integrity_error:
-                history += (
-                    "The attempt also violated protected PORT input integrity; "
-                    f"the driver/source oracle were restored: {integrity_error}\n"
+                continue
+
+            # FlyDSL-only gate (security/intent): a numerically-correct kernel that cheats by re-calling the source
+            # (or reimplementing in Triton) is NOT a valid rewrite.
+            flydsl_violation = check_flydsl_port(spec)
+            if flydsl_violation:
+                log.info("port attempt %d rejected (not FlyDSL): %s", attempt, flydsl_violation)
+                history = (
+                    "Your port is NOT a valid FlyDSL rewrite and was REJECTED before "
+                    "correctness was even checked:\n" + flydsl_violation + "\n"
+                    "Reimplement the operator in FlyDSL (import flydsl...) in "
+                    f"{spec.flydsl_kernel_name}; do NOT import/call the source kernel."
                 )
-            continue
+                continue
 
-        integrity_error = restore_integrity(sink)
-        if integrity_error:
-            log.info(
-                "port attempt %d rejected before validation (integrity): %s",
-                attempt,
-                integrity_error,
-            )
+            report = await _validate_port(spec, driver_path, request.stop_at_unix, attempt)
+            if report.all_passed:
+                snr = report.results[-1].snr_db
+                log.info("port succeeded on attempt %d (SNR=%s)", attempt, snr)
+                return PortResult(ok=True, attempts=attempt, snr_db=snr)
+
+            tail = _validation_error_tail(report)
+            log.info("port attempt %d not yet correct: %s", attempt, report.summary().splitlines()[-1])
             history = (
-                "Your PORT attempt changed protected driver/source-oracle state "
-                "and was REJECTED before validation. The protected files were "
-                f"restored. Modify only {spec.flydsl_kernel_name}.\n"
-                f"{integrity_error}"
+                "The FlyDSL port is NOT correct yet. Fix it to match the source "
+                "kernel's numerics. Latest validation failure:\n" + tail
             )
-            continue
+    except _ReserveReached as reached:
+        attempts, error_tail = reached.args
+        return PortResult(ok=False, attempts=attempts, error_tail=error_tail)
 
-        # FlyDSL-only gate (security/intent): a numerically-correct kernel that cheats by re-calling the source (or
-        # reimplementing in Triton) is NOT a valid rewrite.
-        flydsl_violation = check_flydsl_port(spec)
-        if flydsl_violation:
-            log.info("port attempt %d rejected (not FlyDSL): %s", attempt, flydsl_violation)
-            history = (
-                "Your port is NOT a valid FlyDSL rewrite and was REJECTED before "
-                "correctness was even checked:\n" + flydsl_violation + "\n"
-                "Reimplement the operator in FlyDSL (import flydsl...) in "
-                f"{spec.flydsl_kernel_name}; do NOT import/call the source kernel."
-            )
-            continue
-
-        # Canonical acceptance: the driver's complete correctness suite.
-        remaining = stop_at_unix - time.time() if stop_at_unix and stop_at_unix > 0 else None
-        if remaining is not None and remaining <= 0:
-            return PortResult(
-                ok=False,
-                attempts=attempt,
-                error_tail="PORT stopped before validation at the finalization reserve",
-            )
-        validation_timeout = (
-            _VALIDATE_STAGE_TIMEOUT_SEC
-            if remaining is None
-            else max(1, min(_VALIDATE_STAGE_TIMEOUT_SEC, int(remaining)))
-        )
-        validation = run_validation_pipeline(
-            driver_script=driver_path,
-            snr_threshold=spec.snr_threshold,
-            timeout_per_stage=validation_timeout,
-        )
-        try:
-            report = await validation if remaining is None else await asyncio.wait_for(validation, timeout=remaining)
-        except asyncio.TimeoutError:
-            return PortResult(
-                ok=False,
-                attempts=attempt,
-                error_tail="PORT validation reached the 20-minute finalization reserve",
-            )
-        last_report = report
-        if report.all_passed:
-            snr = report.results[-1].snr_db if report.results else None
-            log.info("port succeeded on attempt %d (SNR=%s)", attempt, snr)
-            return PortResult(ok=True, attempts=attempt, snr_db=snr)
-
-        tail = _validation_error_tail(report)
-        log.info(
-            "port attempt %d not yet correct: %s",
-            attempt,
-            report.summary().splitlines()[-1] if report.summary() else "",
-        )
-        history = (
-            "The FlyDSL port is NOT correct yet. Fix it to match the source "
-            "kernel's numerics. Latest validation failure:\n" + tail
-        )
-
-    return PortResult(
-        ok=False,
-        attempts=max_attempts,
-        error_tail=_validation_error_tail(last_report) if last_report else "",
-    )
+    return PortResult(ok=False, attempts=request.max_attempts, error_tail=tail)

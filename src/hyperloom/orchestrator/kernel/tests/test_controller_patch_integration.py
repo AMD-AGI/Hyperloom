@@ -1248,7 +1248,7 @@ async def test_controller_entry_uses_session_writeback_for_every_mode(tmp_path, 
         return integration.ControllerIntegrationSummary("completed", (), 0, 0, 0, "")
 
     monkeypatch.setattr(integration, "integrate_controller_patches", capture_callback)
-    await phase._run_kernel_rewrite_controller(tmp_path / "handoff", tmp_path / "output")
+    await phase._run_kernel_rewrite_controller(tmp_path / "handoff", tmp_path / "output", {})
 
     assert len(callbacks) == 1
     assert callbacks[0].__func__ is WritebackCollaborator.record_integrate_keep
@@ -1569,3 +1569,41 @@ async def test_a_keep_measured_below_the_anchor_does_not_lower_current_best(
     assert _git(repo, "rev-parse", "HEAD").lower() != base
     assert state.current_best["tput"] == 150.0
     assert state.optimization_stack == []
+
+
+def _git_failing_with(exc: BaseException):
+    def _fail(_repo: Path, *_args: str) -> str:
+        raise exc
+
+    return _fail
+
+
+# probe -> result when git cannot answer
+_GIT_PROBES = {
+    "head_commit": (lambda: integration._head_commit(Path("repo")), ""),
+    "tracked_at_head": (lambda: integration._tracked_at_head(Path("repo"), "first.py"), False),
+}
+
+
+@pytest.mark.parametrize("probe", list(_GIT_PROBES))
+@pytest.mark.parametrize(
+    "failure",
+    [
+        OSError("git not installed"),
+        subprocess.TimeoutExpired(cmd="git", timeout=60),
+        subprocess.CalledProcessError(128, ["git"]),
+    ],
+    ids=["oserror", "timeout", "called-process"],
+)
+def test_a_git_probe_reads_a_git_failure_as_no_answer(monkeypatch: pytest.MonkeyPatch, probe, failure) -> None:
+    monkeypatch.setattr(integration, "_git_output", _git_failing_with(failure))
+    call, expected = _GIT_PROBES[probe]
+    outcome = call()
+    assert outcome == expected
+
+
+@pytest.mark.parametrize("probe", list(_GIT_PROBES))
+def test_a_git_probe_propagates_an_unexpected_failure(monkeypatch: pytest.MonkeyPatch, probe) -> None:
+    monkeypatch.setattr(integration, "_git_output", _git_failing_with(TypeError("bad repo")))
+    with pytest.raises(TypeError, match="bad repo"):
+        _GIT_PROBES[probe][0]()

@@ -324,10 +324,64 @@ async def test_compose_prompt_emits_phase_block_for_every_role(
     c = coordinator_with_mocks
     try:
         for role in ("orchestration", "critic"):
-            prompt = await c.conversation.compose_prompt(role)
+            prompt = (await c.conversation.compose_prompt(role)).text
             assert "=== Phase ===" in prompt, f"{role}: phase block missing"
             assert "phase     : PRELUDE" in prompt, f"{role}: phase value missing"
             assert "allowed" in prompt, f"{role}: allowed-actions line missing"
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_compose_prompt_keeps_per_tick_values_out_of_the_context(coordinator_with_mocks):
+    c = coordinator_with_mocks
+    try:
+        before = await c.conversation.compose_prompt("orchestration")
+        c.shared_state.tick = int(c.shared_state.tick or 0) + 7
+        c.shared_state.agent_last_active["orchestration"] = 1.0
+        c.shared_state.phase_started_ts = "2026-01-01T00:00:00+00:00"
+        after = await c.conversation.compose_prompt("orchestration")
+
+        assert after.context == before.context
+        assert f"tick={c.shared_state.tick}" in after.turn
+        for heading in ("=== Phase ===", "=== Mission progress ===", "=== Tick ===", "=== Inbox for orchestration"):
+            assert heading in after.turn
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cached", [True, False])
+async def test_reactor_turn_hands_a_caching_backend_the_context_as_its_system_prompt(coordinator_with_mocks, cached):
+    c = coordinator_with_mocks
+    backend = c.backends["orchestration"]
+    backend.system_prompt_cached = cached
+    try:
+        composed = await c.conversation.compose_prompt("orchestration")
+        await c.reactor_pass("orchestration", request="ASK")
+        (call,) = backend.calls
+
+        assert (composed.context in call["system_prompt"]) is cached
+        assert ("=== Shared session state ===" in call["prompt"]) is not cached
+        assert "=== Phase ===" in call["prompt"]
+        assert call["prompt"].endswith("ASK")
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_conversation_row_joins_the_context_to_the_backend_prompt(coordinator_with_mocks):
+    import json
+
+    from hyperloom.inference_optimizer.session.session_paths import conversations_path
+    from hyperloom.orchestrator.roles.base import BackendTurnResult
+
+    c = coordinator_with_mocks
+    try:
+        result = BackendTurnResult(intents=[], raw_text="", metadata={"prompt": "TURN", "response": "R"})
+        c.conversation.record_reactor_conversation("orchestration", result, context="CONTEXT")
+        (row,) = [json.loads(line) for line in conversations_path(c.session_dir).read_text().splitlines()]
+        assert row["prompt"] == "CONTEXT\nTURN"
     finally:
         await c.stop()
 
@@ -349,7 +403,7 @@ async def test_compose_prompt_orchestration_renders_warm_start_when_set(
             },
         }
         c.shared_state.save(session_dir)
-        prompt = await c.conversation.compose_prompt("orchestration")
+        prompt = (await c.conversation.compose_prompt("orchestration")).text
         assert "=== Warm start (Recipe KB T0) ===" in prompt
         assert "tier=exact" in prompt
         assert "best_throughput=2100" in prompt
@@ -363,7 +417,7 @@ async def test_compose_prompt_orchestration_omits_warm_start_when_empty(
 ):
     c = coordinator_with_mocks
     try:
-        prompt = await c.conversation.compose_prompt("orchestration")
+        prompt = (await c.conversation.compose_prompt("orchestration")).text
         assert "=== Warm start" not in prompt
     finally:
         await c.stop()
@@ -378,7 +432,7 @@ async def test_compose_prompt_omits_specialist_health_block(
     """The periodic specialist block is intentionally gone (see conversation.py)."""
     c = coordinator_with_mocks
     try:
-        prompt = await c.conversation.compose_prompt(agent_name)
+        prompt = (await c.conversation.compose_prompt(agent_name)).text
         assert "Specialist health" not in prompt
         assert "stale" not in prompt.lower()
     finally:
@@ -531,6 +585,31 @@ async def test_running_tasks_reader_reports_in_flight_task(coordinator_with_mock
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("phase", "kinds", "order_note"),
+    [
+        ("FRAMEWORK_AGENT", ("explore", "integrate_patch"), "integrate_patch dispatches before any queued explore"),
+        ("FRAMEWORK_AGENT", ("explore",), None),
+        ("SWEEP", ("explore", "integrate_patch"), None),
+    ],
+)
+async def test_running_tasks_reader_states_the_backlog_dispatch_order(coordinator_with_mocks, phase, kinds, order_note):
+    """A phase that dispatches one kind first says so, since a later-queued task of that kind still runs ahead."""
+    c = coordinator_with_mocks
+    try:
+        c.shared_state.phase = phase
+        for i, kind in enumerate(kinds):
+            await c.tasks.create(kind=kind, params={}, idempotency_key=f"k-backlog-{i}")
+        out = c.conversation._context_running_tasks_reader()
+        assert "queued backlog: " in out
+        assert "dispatches before" in out if order_note else "dispatches before" not in out
+        if order_note:
+            assert order_note in out
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
 async def test_extend_lease_grows_ttl_and_lane_rows(coordinator_with_mocks):
     """extend_lease pushes out both the task TTL and every lane row it holds."""
     from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
@@ -626,13 +705,13 @@ async def test_extend_lease_does_not_regrant_elapsed_time(coordinator_with_mocks
 
 
 @pytest.mark.asyncio
-async def test_extend_lease_late_grant_keeps_new_increment_for_lanes_and_gpus(coordinator_with_mocks):
-    """A late extension must not reduce newly granted resource time to one second."""
+async def test_extend_lease_late_grant_keeps_new_increment_for_lanes(coordinator_with_mocks):
+    """A late extension must not reduce newly granted lane time to one second."""
     c = coordinator_with_mocks
     try:
         task = await c.tasks.create(
             kind="specialist",
-            params={"needs_gpu": True},
+            params={},
             idempotency_key="k-extend-late",
             requires_lanes=["research_lane"],
             lease_ttl_sec=1800,
@@ -645,18 +724,6 @@ async def test_extend_lease_late_grant_keeps_new_increment_for_lanes_and_gpus(co
             action="specialist",
             ttl_sec=1800,
         )
-        await c.db.execute(
-            "INSERT INTO gpu_leases(gpu_id, holder_id, task_id, acquired_at, expires_at, heartbeat_at) "
-            "VALUES (?,?,?,?,?,?)",
-            (
-                0,
-                f"h-gpu-{task.task_id}",
-                task.task_id,
-                "2026-01-01T00:00:00+00:00",
-                "2026-01-01T00:30:00+00:00",
-                "2026-01-01T00:00:00+00:00",
-            ),
-        )
         started_iso = datetime.fromtimestamp(time.time() - 3000, tz=timezone.utc).isoformat()
         await c.db.execute("UPDATE tasks SET updated_at=? WHERE task_id=?", (started_iso, task.task_id))
 
@@ -668,58 +735,9 @@ async def test_extend_lease_late_grant_keeps_new_increment_for_lanes_and_gpus(co
             ),
         )
 
-        lane_rows = await c.db.fetchall("SELECT expires_at FROM leases WHERE task_id=?", (task.task_id,))
-        gpu_rows = await c.db.fetchall("SELECT expires_at FROM gpu_leases WHERE task_id=?", (task.task_id,))
-        for row in [*lane_rows, *gpu_rows]:
-            expires_in = parse_iso_unix_or_zero(str(row["expires_at"])) - time.time()
-            assert 550 < expires_in < 650
-    finally:
-        await c.stop()
-
-
-@pytest.mark.asyncio
-async def test_extend_lease_reports_degraded_when_gpu_refresh_fails(coordinator_with_mocks):
-    """A swallowed GPU-refresh failure must not read as a clean extension."""
-    from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
-
-    c = coordinator_with_mocks
-    try:
-        task = await c.tasks.create(
-            kind="specialist",
-            params={"needs_gpu": True},
-            idempotency_key="k-extend-gpu-fail",
-            requires_lanes=["research_lane"],
-            lease_ttl_sec=1800,
-        )
-        await c.tasks.transition(task.task_id, "running")
-
-        async def _boom(*_a, **_kw):
-            raise RuntimeError("gpu pool down")
-
-        c.gpu_specialist_pool.extend = _boom  # type: ignore[method-assign]
-
-        recorded: list[dict] = []
-        original = c.bus.record_observation
-
-        async def _capture(agent, topic, payload):
-            recorded.append(dict(payload))
-            return await original(agent, topic, payload)
-
-        c.bus.record_observation = _capture  # type: ignore[method-assign]
-
-        await c.router.handle_intent(
-            "orchestration",
-            Intent(
-                type=IntentType.EXTEND_LEASE,
-                payload={"task_id": task.task_id, "extra_sec": 600},
-            ),
-        )
-
-        kinds = [r.get("kind") for r in recorded]
-        assert "extend_lease_degraded" in kinds
-        assert "extend_lease" not in kinds
-        degraded = next(r for r in recorded if r.get("kind") == "extend_lease_degraded")
-        assert "gpu pool down" in degraded["gpu_refresh_error"]
+        rows = await c.db.fetchall("SELECT expires_at FROM leases WHERE task_id=?", (task.task_id,))
+        expires_in = parse_iso_unix_or_zero(str(rows[0]["expires_at"])) - time.time()
+        assert 550 < expires_in < 650
     finally:
         await c.stop()
 
@@ -894,6 +912,64 @@ async def test_extend_lease_rejects_non_running_task(coordinator_with_mocks):
 
 
 @pytest.mark.asyncio
+async def test_prune_branch_on_a_catalogue_family_cancels_every_member_action(coordinator_with_mocks):
+    """The ``family=`` tag the prompt renders reaches the queued rows of every action carrying it."""
+    c = coordinator_with_mocks
+    try:
+        members = sorted(name for name, meta in ACTION_CATALOGUE.items() if meta.family == "prep")
+        assert len(members) > 1
+        queued = [await c.tasks.create(kind=kind, params={}, idempotency_key=f"k-prune-{kind}") for kind in members]
+        bystander = await c.tasks.create(kind="explore", params={}, idempotency_key="k-prune-bystander")
+        running = await c.tasks.create(kind=members[0], params={}, idempotency_key="k-prune-running")
+        await c.tasks.transition(running.task_id, "running")
+
+        await c.router.handle_intent(
+            "orchestration",
+            Intent(type=IntentType.PRUNE_BRANCH, payload={"family": "prep", "reason": "answered"}),
+        )
+
+        for task in queued:
+            assert (await c.tasks.get(task.task_id)).state == "cancelled"
+        assert (await c.tasks.get(bystander.task_id)).state == "queued"
+        assert (await c.tasks.get(running.task_id)).state == "running"
+        assert c.shared_state.is_pruned("prep")
+
+        await c.router.handle_intent(
+            "orchestration",
+            Intent(
+                type=IntentType.PROPOSE_ACTION, payload={"action_name": "target_analysis", "predicted_gain_pct": 5.0}
+            ),
+        )
+        obs = await c.bus.tail(topic="observation")
+        assert any(m.payload.get("kind") == "proposal_pruned_advisory" for m in obs)
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_prune_branch_queued_scope_on_an_action_name_drains_only_that_kind(coordinator_with_mocks):
+    """A single action name still works, and ``scope='queued'`` leaves the family usable."""
+    c = coordinator_with_mocks
+    try:
+        target = await c.tasks.create(kind="profile", params={}, idempotency_key="k-drain-profile")
+        sibling = await c.tasks.create(kind="roofline", params={}, idempotency_key="k-drain-roofline")
+
+        await c.router.handle_intent(
+            "orchestration",
+            Intent(
+                type=IntentType.PRUNE_BRANCH,
+                payload={"family": "profile", "reason": "answered", "scope": "queued"},
+            ),
+        )
+
+        assert (await c.tasks.get(target.task_id)).state == "cancelled"
+        assert (await c.tasks.get(sibling.task_id)).state == "queued"
+        assert not c.shared_state.is_pruned("profile")
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
 async def test_send_message_to_specialist_writes_inbox(coordinator_with_mocks):
     """A message addressed to a running specialist lands in its workspace inbox."""
     import json as _json
@@ -1012,47 +1088,5 @@ async def test_send_message_to_a_list_with_an_empty_name_is_denied_not_crashed(c
         denials = c.bus.inbox_context_sync("orchestration")
         kinds = [m.payload.get("kind") for m in denials if m.payload.get("kind") == "policy_denied"]
         assert kinds, "expected a policy_denied observation for the malformed recipient"
-    finally:
-        await c.stop()
-
-
-@pytest.mark.asyncio
-async def test_extend_lease_also_pushes_gpu_rows(coordinator_with_mocks):
-    """The GPU lease is extended with the lane rows so the TTL ordering holds."""
-    from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
-
-    c = coordinator_with_mocks
-    try:
-        task = await c.tasks.create(
-            kind="specialist",
-            params={"needs_gpu": True},
-            idempotency_key="k-extend-gpu",
-            requires_lanes=["research_lane"],
-            lease_ttl_sec=1800,
-        )
-        await c.tasks.transition(task.task_id, "running")
-        await c.db.execute(
-            "INSERT INTO gpu_leases(gpu_id, holder_id, task_id, acquired_at, expires_at, heartbeat_at) "
-            "VALUES (?,?,?,?,?,?)",
-            (
-                0,
-                "h-gpu",
-                task.task_id,
-                "2026-01-01T00:00:00+00:00",
-                "2026-01-01T00:30:00+00:00",
-                "2026-01-01T00:00:00+00:00",
-            ),
-        )
-
-        await c.router.handle_intent(
-            "orchestration",
-            Intent(
-                type=IntentType.EXTEND_LEASE,
-                payload={"task_id": task.task_id, "extra_sec": 600},
-            ),
-        )
-
-        rows = await c.db.fetchall("SELECT expires_at FROM gpu_leases WHERE task_id=?", (task.task_id,))
-        assert rows and rows[0]["expires_at"] > "2026-01-01T00:30:00+00:00"
     finally:
         await c.stop()

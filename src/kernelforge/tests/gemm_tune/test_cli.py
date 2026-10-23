@@ -129,6 +129,16 @@ def test_aiter_preflight_defect_propagates(tmp_path, monkeypatch):
     assert list(tmp_path.iterdir()) == []
 
 
+def test_demand_report_loader_defect_propagates(monkeypatch):
+    def _boom(_path):
+        raise RuntimeError("loader defect")
+
+    monkeypatch.setattr("kernelforge.gemm_tune.evidence.load_demand", _boom)
+
+    with pytest.raises(RuntimeError, match="^loader defect$"):
+        cli_mod._load_demand_report("demand.json")
+
+
 def test_aiter_preflight_returns_hard_problems(tmp_path, monkeypatch):
     _stub_preflight(monkeypatch, soft=["note"], hard=["MISALIGNED"])
 
@@ -207,6 +217,113 @@ def test_cli_auto_detection_failure_aborts_before_model_or_tuning(tmp_path, monk
     assert result.exit_code != 0
     assert "--gpu-type" in result.output
     assert not (output / "plan.json").exists()
+
+
+def test_plan_routes_the_same_inputs_as_run_and_run_builds_the_tuner_context(tmp_path, monkeypatch):
+    from kernelforge.gemm_tune import router as router_mod
+
+    _stub_preflight(monkeypatch)
+    model = _model_dir(tmp_path)
+    server_log = tmp_path / "server.log"
+    server_log.write_text(
+        "[aiter] shape is M:512, N:1536, K:7168, "
+        "not found tuned config in /tmp/aiter_configs/a8w8_blockscale_tuned_gemm.csv\n",
+        encoding="utf-8",
+    )
+    sources = {
+        "untuned_csv": tmp_path / "untuned.csv",
+        "moe_untuned_csv": tmp_path / "moe.csv",
+        "shapes_json": tmp_path / "shapes.json",
+        "shapes_manifest": tmp_path / "manifest.json",
+        "tunableop_input": tmp_path / "tunableop.txt",
+    }
+    for path in sources.values():
+        path.write_text("{}\n", encoding="utf-8")
+
+    selection_calls = []
+    contexts = []
+
+    def select_tuners(_profile, **kwargs):
+        selection_calls.append(kwargs)
+        return [router_mod.TunerSpec("a8w8_blockscale", skip_reason="not supported in contract test")]
+
+    def execute_tuners(_specs, ctx, _deadline):
+        contexts.append(ctx)
+        return [], []
+
+    monkeypatch.setattr(router_mod, "select_tuners", select_tuners)
+    monkeypatch.setattr(cli_mod, "_execute_tuners", execute_tuners)
+
+    common = [
+        "--model-path",
+        str(model),
+        "--framework",
+        "vllm",
+        "--precision",
+        "bf16",
+        "--gpu-type",
+        "mi300x",
+        "--kernel-signature-log",
+        str(server_log),
+        "--untuned-csv",
+        str(sources["untuned_csv"]),
+        "--tunableop-input",
+        str(sources["tunableop_input"]),
+    ]
+    output = tmp_path / "output"
+    runner = CliRunner()
+    run_result = runner.invoke(
+        gemm_tune,
+        [
+            "run",
+            *common,
+            "--shapes-json",
+            str(sources["shapes_json"]),
+            "--shapes-manifest",
+            str(sources["shapes_manifest"]),
+            "--moe-untuned-csv",
+            str(sources["moe_untuned_csv"]),
+            "--iters",
+            "7",
+            "--warmup",
+            "3",
+            "--min-improvement-pct",
+            "1.5",
+            "--skip-gpu-check",
+            "--output-dir",
+            str(output),
+        ],
+    )
+    plan_result = runner.invoke(gemm_tune, ["plan", *common])
+
+    assert run_result.exit_code == 0, run_result.output
+    assert plan_result.exit_code == 0, plan_result.output
+    assert len(selection_calls) == 2
+    run_route, plan_route = selection_calls
+    assert run_route == plan_route
+
+    assert plan_route["kernel_signature_log"] == str(server_log)
+    assert plan_route["has_untuned_csv"] is True
+    assert plan_route["has_shapes_json"] is True
+    assert plan_route["has_tunableop_input"] is True
+    assert plan_route["demand_report"] is not None
+    assert [demand["table"] for demand in plan_route["demand_report"]["demands"]] == ["a8w8_blockscale_tuned_gemm.csv"]
+
+    (ctx,) = contexts
+    assert (ctx.iters, ctx.warmup, ctx.min_improvement_pct) == (7, 3, 1.5)
+    assert {
+        "untuned_csv": ctx.untuned_csv,
+        "moe_untuned_csv": ctx.moe_untuned_csv,
+        "shapes_json": ctx.shapes_json,
+        "shapes_manifest": ctx.shapes_manifest,
+        "demand_json": ctx.demand_json,
+        "tunableop_input": ctx.tunableop_input,
+        "kernel_signature_log": ctx.kernel_signature_log,
+    } == {
+        **sources,
+        "demand_json": output / "demand.json",
+        "kernel_signature_log": server_log,
+    }
 
 
 def _run_with_ceiling(tmp_path, monkeypatch, *, routed: list, extra: list[str]) -> list[str]:

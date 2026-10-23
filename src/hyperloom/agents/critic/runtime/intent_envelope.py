@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from typing import Any, Iterable
 
 from hyperloom.inference_optimizer.protocol.intent import (
-    ALLOWED_VERDICTS,
+    DEFAULT_IDLE_BODY,
     IntentType,
     IntentValidationError,
 )
@@ -40,7 +40,6 @@ ALLOWED_VERDICT_SOURCES: frozenset[str] = frozenset(
     }
 )
 
-DEFAULT_IDLE_BODY = "ok (critic)"
 DEFAULT_ADVICE_TOPIC = "advice"
 
 
@@ -116,12 +115,8 @@ class ReviewVerdict:
 # Builders — convenience constructors used by decision_reviewer.
 def build_review_verdict_intent(review: ReviewVerdict) -> Intent:
     """Build a validated ``review_verdict`` intent."""
-    if review.verdict not in ALLOWED_VERDICTS:
-        raise IntentEnvelopeValidationError(f"verdict {review.verdict!r} not in {sorted(ALLOWED_VERDICTS)!r}")
     if review.source not in ALLOWED_VERDICT_SOURCES:
         raise IntentEnvelopeValidationError(f"source {review.source!r} not in {sorted(ALLOWED_VERDICT_SOURCES)!r}")
-    if not review.target_proposal_msg_id:
-        raise IntentEnvelopeValidationError("target_proposal_msg_id is required")
     payload: dict[str, Any] = {
         "target_proposal_msg_id": review.target_proposal_msg_id,
         "verdict": review.verdict,
@@ -157,13 +152,8 @@ def build_advice_intent(body_md: str, *, target_proposal_msg_id: str | None = No
 
 def build_envelope(intents: Iterable[Intent]) -> IntentEnvelope:
     """Wrap a non-empty iterable of intents into an envelope."""
-    materialised = list(intents)
-    if not materialised:
-        materialised = [
-            Intent(intent_type="send_message", payload={"topic": "observation", "body_md": DEFAULT_IDLE_BODY})
-        ]
     env = IntentEnvelope()
-    for intent in materialised:
+    for intent in intents:
         env.append(intent)
     # Self-check at build time.
     validate_envelope(env.to_dict())
@@ -174,7 +164,6 @@ __all__ = [
     "ALLOWED_CRITIC_INTENTS",
     "ALLOWED_VERDICT_SOURCES",
     "DEFAULT_ADVICE_TOPIC",
-    "DEFAULT_IDLE_BODY",
     "Intent",
     "IntentEnvelope",
     "ReviewVerdict",

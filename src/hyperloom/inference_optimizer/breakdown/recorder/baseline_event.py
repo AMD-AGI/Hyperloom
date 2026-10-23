@@ -221,10 +221,8 @@ def _measurement(result: Mapping[str, Any], framework: str) -> dict[str, Any]:
     decides the throughput unit.
     """
     return {
-        # Named as the V5 section names it, which is what a consumer selects on.
-        "throughput_tok_s_per_gpu": _float_or_none(result.get("output_throughput")),
-        # The name above is the serving case; an image framework measures
-        # img/s through the same key, so the unit must be stated.
+        # Whole-server output rate. An image framework measures img/s through the same key, so the unit is stated.
+        "output_throughput": _float_or_none(result.get("output_throughput")),
         "throughput_unit": framework_registry.throughput_unit(framework),
         "ttft_mean_ms": _float_or_none(result.get("ttft_mean_ms")),
         "e2el_mean_ms": _float_or_none(result.get("e2el_mean_ms")),
@@ -690,7 +688,6 @@ class BaselineEventRecorder:
                 "run_eval_disabled": bool(payload.get("run_eval_disabled")),
                 "materialized_config": str(payload.get("materialized_config") or ""),
                 "warmup_round_tput": _float_or_none(payload.get("warmup_round_tput")),
-                "convergence": _as_dict(payload.get("baseline_convergence")) or None,
                 "accuracy_stage": _as_dict(payload.get("accuracy_stage")) or None,
                 "eval_failure": _eval_failure(payload) or None,
                 "cold_anchor": dropped or None,
@@ -843,7 +840,6 @@ def assemble_baseline_actions(
                 "run_eval_disabled": bool(row.get("run_eval_disabled")),
                 "materialized_config": str(row.get("materialized_config") or ""),
                 "warmup_round_tput": row.get("warmup_round_tput"),
-                "convergence": row.get("convergence"),
                 "accuracy_stage": row.get("accuracy_stage"),
                 "eval_failure": row.get("eval_failure"),
                 "cold_anchor": row.get("cold_anchor"),

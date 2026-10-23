@@ -7,29 +7,16 @@ from __future__ import annotations
 
 import pytest
 
-from hyperloom.agents.critic.runtime.category_mapping import map_category_to_kind
 from hyperloom.agents.critic.runtime.errors import (
     IntentEnvelopeValidationError,
-    RuntimeAdapterError,
     SlugifyError,
 )
 from hyperloom.agents.critic.runtime.importance_mapping import (
     cap_importance,
-    importance_for_kb_draft,
     importance_for_verdict,
 )
 from hyperloom.agents.critic.runtime.intent_envelope import validate_envelope
 from hyperloom.agents.critic.runtime.slugify import slugify, slugify_safe
-
-
-# category_mapping
-def test_map_category_to_kind() -> None:
-    assert map_category_to_kind("pitfall") == "pitfall"
-    assert map_category_to_kind("kernel_optimization") == "technique"
-    with pytest.raises(RuntimeAdapterError):
-        map_category_to_kind(123)  # type: ignore[arg-type]
-    with pytest.raises(RuntimeAdapterError):
-        map_category_to_kind("no_such_category")
 
 
 # importance_mapping tests
@@ -40,12 +27,6 @@ def test_importance_for_verdict() -> None:
     assert importance_for_verdict(verdict="approve", confidence="low") == 0.4
     assert importance_for_verdict(verdict="approve", confidence="medium", has_measurement=True) == 0.5
     assert importance_for_verdict(verdict="approve", confidence=None) == 0.4
-
-
-def test_importance_for_kb_draft() -> None:
-    assert importance_for_kb_draft(confidence=None) == 0.5
-    assert importance_for_kb_draft(confidence=0.9) == 0.6
-    assert importance_for_kb_draft(confidence=0.5) == 0.5
 
 
 def test_cap_importance() -> None:
@@ -72,20 +53,9 @@ def test_slugify_safe_paths() -> None:
     with pytest.raises(SlugifyError):
         slugify_safe("   ")
 
-    # translate_fn that raises -> deterministic fallback.
-    def _boom(_t: str) -> str:
-        raise RuntimeError("translate failed")
-
-    out = slugify_safe("Ελληνικά θέματα", _boom, fallback_prefix="auto")
-    assert out.startswith("auto-")
-
-    # No translate_fn for non-ascii -> hash fallback.
+    # Non-ascii -> hash fallback.
     out2 = slugify_safe("Ελληνικά θέματα")
     assert out2.startswith("auto-")
-
-    # translate_fn returning too-short text -> SlugifyError caught -> fallback.
-    out3 = slugify_safe("Ελληνικά", lambda _t: "x", fallback_prefix="p")
-    assert out3.startswith("p-")
 
 
 # intent_envelope.validate_envelope

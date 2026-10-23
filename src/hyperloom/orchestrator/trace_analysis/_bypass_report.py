@@ -16,7 +16,6 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass
 from typing import Any
 
-from ._bypass_benchmark_resolver import find_benchmark_files, repo_root_from_source
 from ._bypass_classify import classify_kernel
 from ._bypass_fusion import analyze_fusion
 from ._analysis_md import AnalysisReport, render_report
@@ -163,6 +162,36 @@ def _tile_name_shape_entries(kernel_name: str, call_count: int) -> list[dict[str
     return [{"call_num": int(call_count) if call_count else 1, "shape": body}]
 
 
+def _shape_fields(k: dict[str, Any]) -> dict[str, Any]:
+    """A kernel row's candidate shape fields, from the first evidence that yields a shape: its own cpu_op dims, the
+    unambiguous same-name capture-time backfill, its launch geometry, then the tile in its Triton autotune name."""
+    count = k.get("count")
+    dtypes = k.get("op_dtypes", [])
+    entries = _trace_shape_entries(k.get("op_shapes"), dtypes, count)
+    provenance = "torch_trace"
+    if not entries and not k.get("backfill_ambiguous"):
+        backfill_dtypes = k.get("backfill_dtypes", [])
+        entries = _trace_shape_entries(k.get("backfill_shapes"), backfill_dtypes, count)
+        if entries:
+            dtypes, provenance = backfill_dtypes, "capture_backfill"
+    if not entries:
+        entries = _launch_grid_shape_entries(k.get("launch_grid"), k.get("launch_block"), count)
+        provenance = "launch_grid"
+    if not entries:
+        entries = _tile_name_shape_entries(k.get("name", ""), count)
+        provenance = "tile_name"
+    if not entries:
+        provenance = "unresolved"
+    return {
+        "shapes": entries,
+        "input_shapes": entries,
+        "input_dtypes": dtypes,
+        "shape_provenance": provenance,
+        # launch_grid / tile_name shapes are geometry, so the kernel-opt gate rejects them.
+        "shape_dispatchable": provenance in _DISPATCHABLE_SHAPE_PROVENANCE,
+    }
+
+
 def _source_type_for_op(op_name: str) -> str:
     """Best-effort source-type guess from a launching op name."""
     n = (op_name or "").lower()
@@ -194,64 +223,48 @@ def _build_task_groups(hot_kernels: list[dict[str, Any]]) -> list[dict[str, Any]
     """Group routable candidates that share an editable source into task groups."""
     buckets: dict[str, dict[str, Any]] = {}
     for c in hot_kernels:
-        if not c.get("reusable_native_kernel"):
+        src = c["source_file"].strip()
+        if not c["reusable_native_kernel"] or not src:
             continue
-        src = str(c.get("source_file") or "").strip()
-        if not src:
-            continue
-        reported_source = src
-        operation = str(c.get("name") or "")
-        function_name = operation
-        legacy_function_name = str(c.get("device_kernel_name") or operation)
-        source_kind = "native" if src.lower().endswith(_NATIVE_SOURCE_EXTS) else "py"
-        identity = build_operator_identity(
-            source_kind=source_kind,
-            source_path=reported_source,
-            operation=operation,
-            function_name=function_name,
-        )
-        src = str(identity["source_path"])
-        operation_key = str(identity["operation"])
-        key = operator_identity_key(
-            source_kind=source_kind,
-            source_path=reported_source,
-            operation=operation,
-            function_name=function_name,
-        )
+        operation = c["name"]
+        identity_args = {
+            "source_kind": "native" if src.lower().endswith(_NATIVE_SOURCE_EXTS) else "py",
+            "source_path": src,
+            "operation": operation,
+        }
+        identity = build_operator_identity(**identity_args, function_name=operation)
+        key = operator_identity_key(**identity_args, function_name=operation)
         legacy_keys = legacy_operator_identity_keys(
-            source_kind=source_kind,
-            source_path=reported_source,
-            operation=operation,
-            function_name=legacy_function_name,
+            **identity_args, function_name=c.get("device_kernel_name") or operation
         )
-        shapes = c.get("input_shapes") or []
+        shapes = c.get("input_shapes", [])
         row = {
-            "kernel_id": c.get("kernel_id", ""),
-            "name": c.get("name", ""),
+            "kernel_id": c["kernel_id"],
+            "name": operation,
             "device_kernel_name": c.get("device_kernel_name", ""),
             "shapes": shapes,
             "input_shapes": shapes,
-            "input_dtypes": c.get("input_dtypes") or [],
-            "output_shapes": c.get("output_shapes") or [],
-            "output_dtypes": c.get("output_dtypes") or [],
-            "raw_arg_spec": c.get("raw_arg_spec") or {},
-            "call_count": c.get("call_count", 0),
-            "duration_us": c.get("duration_us", 0.0),
+            "input_dtypes": c.get("input_dtypes", []),
+            "output_shapes": [],
+            "output_dtypes": [],
+            "raw_arg_spec": {},
+            "call_count": c["call_count"],
+            "duration_us": c["duration_us"],
             "percent_of_total": c.get("percent_of_total", 0.0),
-            "gpu_pct": c.get("gpu_pct", 0.0),
+            "gpu_pct": c["gpu_pct"],
             "bound_type": c.get("bound_type", ""),
         }
-        bucket = buckets.get(key)
-        if bucket is None:
-            bucket = buckets[key] = {
+        bucket = buckets.setdefault(
+            key,
+            {
                 "task_group_id": "",
                 "task_group_key": key,
                 "operator_identity": identity,
                 "identity_route": "bypass",
-                "legacy_task_group_keys": legacy_keys,
+                "legacy_task_group_keys": [],
                 "operation": operation,
-                "operation_key": operation_key,
-                "source_path": src,
+                "operation_key": identity["operation"],
+                "source_path": identity["source_path"],
                 "kernel_ids": [],
                 "primary_kernel_id": "",
                 "rows": [],
@@ -259,29 +272,20 @@ def _build_task_groups(hot_kernels: list[dict[str, Any]]) -> list[dict[str, Any]
                 "aggregate_call_count": 0,
                 "aggregate_gpu_pct": 0.0,
                 "source": "bypass",
-            }
-        else:
-            bucket["legacy_task_group_keys"] = list(
-                dict.fromkeys(
-                    [
-                        *(bucket.get("legacy_task_group_keys") or []),
-                        *legacy_keys,
-                    ]
-                )
-            )
-        if row["kernel_id"] and row["kernel_id"] not in bucket["kernel_ids"]:
-            bucket["kernel_ids"].append(row["kernel_id"])
+            },
+        )
+        bucket["legacy_task_group_keys"] = list(dict.fromkeys([*bucket["legacy_task_group_keys"], *legacy_keys]))
+        bucket["kernel_ids"].append(row["kernel_id"])
         bucket["rows"].append(row)
-        bucket["aggregate_duration_us"] += float(row["duration_us"] or 0.0)
-        bucket["aggregate_call_count"] += int(row["call_count"] or 0)
-        bucket["aggregate_gpu_pct"] += float(row["gpu_pct"] or 0.0)
+        bucket["aggregate_duration_us"] += row["duration_us"]
+        bucket["aggregate_call_count"] += row["call_count"]
+        bucket["aggregate_gpu_pct"] += row["gpu_pct"]
 
     ordered = sorted(buckets.values(), key=lambda g: g["aggregate_duration_us"], reverse=True)
     for idx, group in enumerate(ordered, start=1):
         group["task_group_id"] = f"tg{idx:03d}"
-        group["rows"].sort(key=lambda r: float(r.get("duration_us") or 0.0), reverse=True)
-        if group["rows"]:
-            group["primary_kernel_id"] = group["rows"][0]["kernel_id"]
+        group["rows"].sort(key=lambda r: r["duration_us"], reverse=True)
+        group["primary_kernel_id"] = group["rows"][0]["kernel_id"]
         group["aggregate_duration_us"] = round(group["aggregate_duration_us"], 3)
         group["aggregate_gpu_pct"] = round(group["aggregate_gpu_pct"], 3)
         group["shape_cases"] = build_task_group_shape_cases(group)
@@ -326,152 +330,91 @@ def _short_name(kernel_name: str) -> str:
     return n[:80] if n else "unknown_kernel"
 
 
+def _candidate(idx: int, k: dict[str, Any], *, framework: str, target_platform: str) -> dict[str, Any]:
+    """One top device kernel's candidate row: classification, source verdict, shape evidence, roofline and ROI."""
+    kname, op_name = k.get("name", ""), k.get("op_name", "")
+    kc = classify_kernel(kname, op_name=op_name)
+    # Native HIP-graph kernels arrive with op_name=""; op_to_source_patchable, not source presence, gates routing.
+    resolution = resolve_source_verdict(kname, kernel_file=k.get("op_kernel_file", ""), op_name=op_name)
+    location = resolution.location
+    source_file = location.source_file if location else ""
+    shape = _shape_fields(k)
+    if not kc.reusable:
+        skip_reason = kc.skip_reason
+    elif not source_file:
+        skip_reason = "source file not resolved"
+    elif not resolution.patchable:
+        skip_reason = f"non-patchable: {resolution.reason}" if resolution.reason else "non-patchable kernel"
+    elif not shape["shape_dispatchable"]:
+        skip_reason = f"shape not dispatchable (provenance={shape['shape_provenance']}); need operand dims"
+    else:
+        skip_reason = ""
+    source_type, kernel_kind = _implementation_contract(
+        op_name=op_name, source_file=source_file, trace_kernel_kind=k.get("op_kernel_backend", "")
+    )
+    cand: dict[str, Any] = {
+        "kernel_id": f"k{idx:03d}",
+        "name": op_name or _short_name(kname),
+        "kernel_category": kc.category,
+        "device_kernel_name": kname[:120],
+        "device_kernel_names": [kname[:120]],
+        "duration_us": k.get("gpu_time_us", 0.0),
+        "gpu_pct": k.get("gpu_pct", 0.0),
+        "percent_of_total": k.get("gpu_pct", 0.0),
+        "call_count": k.get("count", 0),
+        "bound_type": _UNKNOWN_BOUND,
+        "efficiency_percent": 0.0,
+        "roofline_attainment_pct": None,
+        "flops_per_byte": None,
+        "arithmetic_intensity": None,
+        "compute_utilization_pct": None,
+        "bandwidth_utilization_pct": None,
+        # Placeholder roofline: bound_type/AI/util above are structural defaults, NOT measured.
+        "roofline_source": _RL_PLACEHOLDER,
+        "library": "",
+        "backend": framework,
+        "framework": framework,
+        "source_file": source_file,
+        # None for native kernels resolved by symbol index.
+        "source_line": location.line if location else None,
+        "source_resolution_method": resolution.method,
+        "source_type": source_type,
+        "kernel_kind": kernel_kind,
+        "reusable_native_kernel": kc.reusable,
+        "skip_reason": skip_reason,
+        "identity_route": "bypass",
+        "op_to_source_patchable": resolution.patchable,
+        "op_to_source_reason": resolution.reason,
+        "op_to_source_status": "resolved" if resolution.patchable else "non_rewritable",
+        "recommended_backends": list(_REUSABLE_BACKENDS) if kc.reusable else [],
+        "benchmark_files": [],
+        "kernel_repo": "",
+        **shape,
+    }
+    if shape["shape_dispatchable"]:
+        # Analytical roofline from the operand shape and measured time.
+        aggregate = KernelAggregate(kc.category, shape["shapes"][0]["shape"], cand["duration_us"], cand["call_count"])
+        cand.update(compute_roofline(aggregate, gpu_type=target_platform) or {})
+    # Optimization ROI = GPU-time share x headroom (1 - efficiency); with no analytical efficiency it is gpu_pct.
+    cand["optimization_priority"] = round(cand["gpu_pct"] * (1.0 - cand["efficiency_percent"] / 100.0), 4)
+    # Deterministic per-kernel hint for the specialist prompt's action slot.
+    cand["suggestion"] = _build_suggestion(kc.category, cand["bound_type"])
+    cand["recommended_actions"] = [cand["suggestion"]]
+    return cand
+
+
 def build_candidates(
     analyze_out: dict[str, Any],
     *,
     framework: str,
     target_platform: str,
     top_k: int = 15,
-    discover_benchmarks: bool = False,
 ) -> dict[str, Any]:
     """Turn classified top device kernels into the candidate payload."""
-    kernels = analyze_out.get("kernels") or []
-    hot_kernels: list[dict[str, Any]] = []
-    for idx, k in enumerate(kernels[: top_k if top_k and top_k > 0 else len(kernels)], start=1):
-        kname = k.get("name", "") or ""
-        op_name = k.get("op_name", "") or ""
-        kc = classify_kernel(kname, op_name=op_name)
-        kernel_id = f"k{idx:03d}"
-        display = op_name or _short_name(kname)
-
-        # Native HIP-graph kernels arrive with op_name=""; op_to_source_patchable, not source presence, gates routing.
-        resolution = resolve_source_verdict(
-            kname,
-            kernel_file=k.get("op_kernel_file", "") or "",
-            op_name=op_name,
-        )
-        location = resolution.location
-        source_file = location.source_file if location else ""
-        source_line = location.line if location else None
-        source_method = resolution.method
-        if not kc.reusable:
-            skip_reason = kc.skip_reason
-        elif not source_file:
-            skip_reason = "source file not resolved"
-        elif not resolution.patchable:
-            skip_reason = f"non-patchable: {resolution.reason}" if resolution.reason else "non-patchable kernel"
-        else:
-            skip_reason = ""
-
-        _count = k.get("count") or 0
-        op_shapes = k.get("op_shapes") or []
-        op_dtypes = k.get("op_dtypes") or []
-        shape_entries = _trace_shape_entries(op_shapes, op_dtypes, _count)
-        shape_provenance = "torch_trace" if shape_entries else ""
-        if not shape_entries and not k.get("backfill_ambiguous"):
-            bf_shapes = k.get("backfill_shapes") or []
-            bf_dtypes = k.get("backfill_dtypes") or []
-            shape_entries = _trace_shape_entries(bf_shapes, bf_dtypes, _count)
-            if shape_entries:
-                op_dtypes = bf_dtypes
-                shape_provenance = "capture_backfill"
-        if not shape_entries:
-            shape_entries = _launch_grid_shape_entries(k.get("launch_grid"), k.get("launch_block"), _count)
-            if shape_entries:
-                shape_provenance = "launch_grid"
-        if not shape_entries:
-            shape_entries = _tile_name_shape_entries(kname, _count)
-            if shape_entries:
-                shape_provenance = "tile_name"
-        if not shape_provenance:
-            shape_provenance = "unresolved"
-
-        bench_files: list[str] = []
-        kernel_repo = ""
-        if discover_benchmarks and kc.reusable and source_file:
-            kernel_repo = repo_root_from_source(source_file)
-            bench_files = find_benchmark_files(op_name, source_file)
-        source_type, kernel_kind = _implementation_contract(
-            op_name=op_name,
-            source_file=source_file,
-            trace_kernel_kind=str(k.get("op_kernel_backend") or ""),
-        )
-
-        cand: dict[str, Any] = {
-            "kernel_id": kernel_id,
-            "name": display,
-            "kernel_category": kc.category,
-            "device_kernel_name": kname[:120],
-            "device_kernel_names": [kname[:120]],
-            "duration_us": k.get("gpu_time_us", 0.0),
-            "gpu_pct": k.get("gpu_pct", 0.0),
-            "percent_of_total": k.get("gpu_pct", 0.0),
-            "call_count": k.get("count", 0),
-            "bound_type": _UNKNOWN_BOUND,
-            "efficiency_percent": 0.0,
-            "roofline_attainment_pct": None,
-            "flops_per_byte": None,
-            "arithmetic_intensity": None,
-            "compute_utilization_pct": None,
-            "bandwidth_utilization_pct": None,
-            "rocprof_roofline": None,
-            # Placeholder roofline: bound_type/AI/util above are structural defaults, NOT measured.
-            "roofline_measured": False,
-            "roofline_source": _RL_PLACEHOLDER,
-            "library": "",
-            "backend": framework,
-            "framework": framework,
-            "source_file": source_file,
-            # None for native kernels resolved by symbol index.
-            "source_line": source_line,
-            "source_resolution_method": source_method,
-            "source_type": source_type,
-            "kernel_kind": kernel_kind,
-            "reusable_native_kernel": kc.reusable,
-            "skip_reason": skip_reason,
-            "identity_route": "bypass",
-            "op_to_source_patchable": resolution.patchable,
-            "op_to_source_reason": resolution.reason,
-            "op_to_source_status": "resolved" if resolution.patchable else "non_rewritable",
-            "recommended_backends": list(_REUSABLE_BACKENDS) if kc.reusable else [],
-            "benchmark_files": bench_files,
-            "kernel_repo": kernel_repo,
-            "shapes": shape_entries,
-            "input_shapes": shape_entries,
-            "input_dtypes": op_dtypes,
-            "shape_provenance": shape_provenance,
-            # launch_grid / tile_name shapes are geometry, so the kernel-opt gate rejects them.
-            "shape_dispatchable": shape_provenance in _DISPATCHABLE_SHAPE_PROVENANCE,
-        }
-        # Analytical roofline: derive bound_type / AI / efficiency from captured shapes + measured time for EVERY
-        # estimable kernel (rocprof enrichment later refines it to a measured roofline).
-        _roofline_shape = (
-            shape_entries[0]["shape"] if shape_entries and shape_provenance in _DISPATCHABLE_SHAPE_PROVENANCE else ""
-        )
-        aggregate = KernelAggregate(
-            category=kc.category,
-            shape_str=_roofline_shape,
-            gpu_time_us=float(cand["duration_us"] or 0.0),
-            call_count=int(cand["call_count"] or 1),
-        )
-        rl = compute_roofline(aggregate, gpu_type=target_platform)
-        if rl:
-            cand.update(rl)
-        # A reusable, patchable kernel with a resolved source but only a geometry shape (launch_grid / tile_name) is
-        # visible but not auto-dispatchable: the kernel-opt gate requires operand dims.
-        if kc.reusable and source_file and resolution.patchable and not cand["shape_dispatchable"]:
-            cand["skip_reason"] = f"shape not dispatchable (provenance={shape_provenance}); need operand dims"
-        # Optimization ROI = GPU-time share x headroom (1 - efficiency); with no analytical efficiency, headroom=1 so
-        # it degrades to gpu_pct.
-        eff = cand.get("efficiency_percent")
-        eff = float(eff) if isinstance(eff, (int, float)) else 0.0
-        headroom = 1.0 - min(max(eff, 0.0), 100.0) / 100.0
-        cand["optimization_priority"] = round(float(cand.get("gpu_pct") or 0.0) * headroom, 4)
-        # Deterministic per-kernel hint for the specialist prompt's action slot.
-        suggestion = _build_suggestion(kc.category, str(cand.get("bound_type") or ""))
-        cand["suggestion"] = suggestion
-        cand["recommended_actions"] = [suggestion]
-        hot_kernels.append(cand)
+    hot_kernels = [
+        _candidate(idx, k, framework=framework, target_platform=target_platform)
+        for idx, k in enumerate((analyze_out.get("kernels") or [])[:top_k], start=1)
+    ]
 
     # Group repeated shapes of one operator and editable source into one task; stamp that shared contract onto each
     # member.
@@ -483,14 +426,12 @@ def build_candidates(
             c["task_group"] = g
 
     # 1-based rank by optimization ROI, stamped WITHOUT reordering hot_kernels (that list stays gpu_pct-sorted).
-    for rank, c in enumerate(
-        sorted(hot_kernels, key=lambda x: x.get("optimization_priority") or 0.0, reverse=True), start=1
-    ):
+    for rank, c in enumerate(sorted(hot_kernels, key=lambda x: x["optimization_priority"], reverse=True), start=1):
         c["priority_rank"] = rank
 
-    # ``routable_kernels`` = the subset actually dispatchable to kernel-opt: reusable + resolved source that
-    # TraceLens confirms patchable + a dispatch-grade operand shape. The four-key document shape and the split are
-    # owned by the shared builder both routes call.
+    # A candidate routes to kernel-opt exactly when nothing gave it a skip reason: reusable, a source TraceLens
+    # confirms patchable, and a dispatch-grade operand shape. The four-key document shape and the split are owned by
+    # the shared builder both routes call.
     header = {
         "source": "bypass",
         "framework": framework,
@@ -498,15 +439,7 @@ def build_candidates(
         "aggregation_scope": analyze_out.get("aggregation_scope", "full_trace"),
     }
     return build_kernel_candidates_document(
-        header,
-        hot_kernels,
-        task_groups,
-        is_routable=lambda c: bool(
-            c.get("reusable_native_kernel")
-            and c.get("source_file")
-            and c.get("op_to_source_patchable")
-            and c.get("shape_dispatchable")
-        ),
+        header, hot_kernels, task_groups, is_routable=lambda c: not c["skip_reason"]
     )
 
 
@@ -629,7 +562,6 @@ _METRICS_COLUMNS: list[str] = [
     "compute_utilization_pct",
     "bandwidth_utilization_pct",
     "roofline_source",
-    "roofline_measured",
     "reusable_native_kernel",
     "source_file",
     "source_type",
@@ -681,7 +613,6 @@ def build_metrics_rows(candidates: dict[str, Any]) -> list[dict[str, Any]]:
                 "compute_utilization_pct": c.get("compute_utilization_pct", ""),
                 "bandwidth_utilization_pct": c.get("bandwidth_utilization_pct", ""),
                 "roofline_source": c.get("roofline_source", ""),
-                "roofline_measured": c.get("roofline_measured", ""),
                 "reusable_native_kernel": c.get("reusable_native_kernel", ""),
                 "source_file": c.get("source_file", ""),
                 "source_type": c.get("source_type", ""),
@@ -780,319 +711,256 @@ def render_analysis_md(
     context: BypassReportContext,
 ) -> str:
     """Render the human/downstream ``analysis.md`` report (bypass route)."""
-    framework = context.framework
-    throughput_unit = context.throughput_unit
     timeline = analyze_out.get("timeline") or {}
     attribution = analyze_out.get("attribution") or {}
-    hot = candidates.get("hot_kernels") or []
+    hot = candidates["hot_kernels"]
     rollup = _category_rollup(analyze_out)
-    top_cat = rollup[0]["category"] if rollup else "n/a"
-    scope = candidates.get("aggregation_scope", "full_trace")
-
+    scope = candidates["aggregation_scope"]
     total_ms = timeline.get("total_time_ms")
     memcpy_ms = timeline.get("gpu_memcpy_ms")
     idle_pct = timeline.get("idle_pct")
-    exec_summary = {
-        "total_gpu_time_ms": total_ms,
-        "gpu_busy_pct": timeline.get("busy_pct"),
-        "gpu_idle_pct": idle_pct,
-        "gpu_memcpy_ms": memcpy_ms,
-        "top_bottleneck_category": top_cat,
-        "attribution_pct": attribution.get("attributed_pct"),
-    }
-    # memcpy as % of total wall time for the System-Level Signals table.
-    memcpy_pct: float | None = None
-    if isinstance(memcpy_ms, (int, float)) and isinstance(total_ms, (int, float)) and total_ms:
-        memcpy_pct = float(memcpy_ms) / float(total_ms) * 100.0
-    system_signals = {
-        "idle_pct": idle_pct,
-        "exposed_comm_pct": None,  # bypass does not model exposed communication
-        "exposed_memcpy_pct": memcpy_pct,
-    }
-
-    # Top Hot Kernels rows.
-    hot_rows = [
-        {
-            "name": c.get("name"),
-            "time_us": c.get("duration_us"),
-            "gpu_pct": c.get("gpu_pct"),
-            "efficiency_percent": c.get("roofline_attainment_pct"),
-            "arithmetic_intensity": c.get("arithmetic_intensity"),
-            "bound_type": c.get("bound_type"),
-            "category": c.get("kernel_category"),
-            "source_file": c.get("source_file"),
-        }
-        for c in hot
-    ]
-
-    # One P-item per routable candidate (ranked by optimization ROI). %E2E and launcher Kernel Path are not modelled
-    # by bypass.
-    routable = [c for c in hot if c.get("reusable_native_kernel")]
-    # Auto-dispatchable == resolved source AND a dispatch-grade operand shape; a geometry-only (launch_grid/tile_name)
-    # shape does not satisfy the gate.
-    dispatchable = [c for c in routable if c.get("source_file") and c.get("shape_dispatchable")]
-    p_items = []
-    for i, c in enumerate(routable, start=1):
-        shapes = c.get("input_shapes") or c.get("shapes") or []
-        args = [str(s.get("shape")) for s in shapes if isinstance(s, dict) and s.get("shape")]
-        p_items.append(
-            {
-                "rank": c.get("priority_rank") or i,
-                "category": c.get("kernel_category"),
-                "rows": [
-                    {
-                        "name": c.get("name"),
-                        "time_us": c.get("duration_us"),
-                        "gpu_pct": c.get("gpu_pct"),
-                        "e2e_pct": None,
-                        "call_count": c.get("call_count"),
-                        "flops_per_byte": c.get("flops_per_byte"),
-                        "efficiency_percent": c.get("roofline_attainment_pct"),
-                        "bound_type": c.get("bound_type"),
-                        "args": args,
-                        "source_file": c.get("source_file"),
-                        "kernel_path": None,
-                    }
-                ],
-            }
-        )
-
+    routable = [c for c in hot if c["reusable_native_kernel"]]
     provenance = (
-        f"framework={framework or 'unknown'}, platform={context.target_platform or 'unknown'}, "
-        f"throughput_unit={throughput_unit}, aggregation_scope={scope}. "
+        f"framework={context.framework or 'unknown'}, platform={context.target_platform or 'unknown'}, "
+        f"throughput_unit={context.throughput_unit}, aggregation_scope={scope}. "
         f"Per-kernel roofline (bound/AI/efficiency) is computed analytically from captured "
         f"operand shapes + measured kernel time (roofline_source=analytical)."
     )
-
-    views = _ReportViews(hot, rollup, attribution, scope, routable, dispatchable)
-    extra = _render_bypass_extra_sections(candidates, analyze_out, context, views)
-
+    extra = [
+        *_ranking_sections(rollup, hot),
+        *_optimization_sections(candidates, routable),
+        *_detailed_analysis(hot),
+        *_appendix(context, scope, analyze_out.get("event_total", 0), attribution),
+    ]
     return render_report(
         AnalysisReport(
             route="bypass",
             model_name=context.model_name or "Workload",
             provenance_detail=provenance,
-            exec_summary=exec_summary,
-            system_signals=system_signals,
+            exec_summary={
+                "total_gpu_time_ms": total_ms,
+                "gpu_busy_pct": timeline.get("busy_pct"),
+                "gpu_idle_pct": idle_pct,
+                "gpu_memcpy_ms": memcpy_ms,
+                "top_bottleneck_category": rollup[0]["category"] if rollup else "n/a",
+                "attribution_pct": attribution.get("attributed_pct"),
+            },
+            system_signals={
+                "idle_pct": idle_pct,
+                "exposed_comm_pct": None,  # bypass does not model exposed communication
+                "exposed_memcpy_pct": memcpy_ms / total_ms * 100.0 if total_ms else None,
+            },
             idle_threshold=resolve_idle_pct_threshold(),
-            hot_kernels=hot_rows,
-            p_items=p_items,
-            extra_sections=extra,
+            hot_kernels=[_spine_row(c) for c in hot],
+            # One P-item per routable candidate, ranked by optimization ROI.
+            p_items=[
+                {"rank": c["priority_rank"], "category": c["kernel_category"], "rows": [_spine_row(c)]}
+                for c in routable
+            ],
+            extra_sections="\n".join(extra),
         )
     )
 
 
-@dataclass(frozen=True)
-class _ReportViews:
-    """The slices of one analysis the bypass report renders: hot, category rollup, attribution, scope and routing."""
+def _spine_row(c: dict[str, Any]) -> dict[str, Any]:
+    """A candidate as a row of the shared spine's Top Hot Kernels and P-item Data tables; bypass models neither %E2E
+    nor the launcher Kernel Path, so those columns stay empty."""
+    return {
+        "name": c["name"],
+        "time_us": c["duration_us"],
+        "gpu_pct": c["gpu_pct"],
+        "call_count": c["call_count"],
+        "flops_per_byte": c["flops_per_byte"],
+        "efficiency_percent": c["roofline_attainment_pct"],
+        "arithmetic_intensity": c["arithmetic_intensity"],
+        "bound_type": c["bound_type"],
+        "category": c["kernel_category"],
+        "args": [s["shape"] for s in c["input_shapes"]],
+        "source_file": c["source_file"],
+    }
 
-    hot: list[dict[str, Any]]
-    rollup: list[dict[str, Any]]
-    attribution: dict[str, Any]
-    scope: str
-    routable: list[dict[str, Any]]
-    dispatchable: list[dict[str, Any]]
+
+def _attainment(c: dict[str, Any]) -> str:
+    """A candidate's roofline attainment, or the unknown-bound dash when the roofline did not model it."""
+    value = c["roofline_attainment_pct"]
+    return _UNKNOWN_BOUND if value is None else f"{value:.1f}%"
 
 
-def _render_bypass_extra_sections(
-    candidates: dict[str, Any], analyze_out: dict[str, Any], context: BypassReportContext, views: _ReportViews
-) -> str:
-    """Render the bypass-only richer sections appended after the shared spine."""
-    metrics_csv_path, summary_csv_path = context.metrics_csv_path, context.summary_csv_path
-    hot, rollup, attribution, scope = views.hot, views.rollup, views.attribution, views.scope
-    routable, dispatchable = views.routable, views.dispatchable
-    L: list[str] = []
+def _intensity(c: dict[str, Any]) -> str:
+    """A candidate's arithmetic intensity, or the unknown-bound dash when the roofline did not model it."""
+    value = c["arithmetic_intensity"]
+    return _UNKNOWN_BOUND if value is None else f"{value:.3g}"
 
-    # Top Operations (category rollup) + analytical bound distribution.
-    L.append("## Top Operations")
-    L.append("")
+
+def _ranking_sections(rollup: list[dict[str, Any]], hot: list[dict[str, Any]]) -> list[str]:
+    """Top Operations by category with the analytical-bound split, then the Top 10 kernels by optimization priority."""
+    lines = ["## Top Operations", ""]
     if rollup:
-        L.append("| Rank | Category | GPU % | Time (ms) | Kernels |")
-        L.append("|------|----------|-------|-----------|---------|")
-        for i, r in enumerate(rollup, start=1):
-            L.append(
-                f"| {i} | {canonical_category(r['category'])} | {r['gpu_pct']} | {r['gpu_ms']} | {r['kernel_count']} |"
-            )
+        lines += [
+            "| Rank | Category | GPU % | Time (ms) | Kernels |",
+            "|------|----------|-------|-----------|---------|",
+        ]
+        lines += [
+            f"| {i} | {canonical_category(r['category'])} | {r['gpu_pct']} | {r['gpu_ms']} | {r['kernel_count']} |"
+            for i, r in enumerate(rollup, start=1)
+        ]
     else:
-        L.append("_No GPU kernels found in trace._")
-    L.append("")
-    n_compute = sum(1 for c in hot if c.get("bound_type") == "compute_bound")
-    n_memory = sum(1 for c in hot if c.get("bound_type") == "memory_bound")
-    if n_compute or n_memory:
-        L.append(f"_Analytical roofline bound: {n_compute} compute-bound, {n_memory} memory-bound hot kernel(s)._")
-        L.append("")
-
-    # Top 10 kernels by optimization ROI.
-    L.append("## Top 10 Kernels by Optimization Priority")
-    L.append("")
-    ranked = sorted(hot, key=lambda c: c.get("optimization_priority") or 0.0, reverse=True)[:10]
+        lines.append("_No GPU kernels found in trace._")
+    lines.append("")
+    bounds = Counter(c["bound_type"] for c in hot)
+    if bounds["compute_bound"] or bounds["memory_bound"]:
+        lines += [
+            f"_Analytical roofline bound: {bounds['compute_bound']} compute-bound, "
+            f"{bounds['memory_bound']} memory-bound hot kernel(s)._",
+            "",
+        ]
+    lines += ["## Top 10 Kernels by Optimization Priority", ""]
+    ranked = sorted(hot, key=lambda c: c["optimization_priority"], reverse=True)[:10]
     if ranked:
-        L.append(
+        lines += [
             "_Priority = GPU% x (1 - efficiency): high-impact, low-efficiency kernels "
-            "first. Full per-kernel metrics in the CSV linked below._"
-        )
-        L.append("")
-        L.append("| # | kernel_id | Name | Category | GPU% | Bound | AI | Eff% | Priority | Suggestion |")
-        L.append("|---|-----------|------|----------|------|-------|----|----|---------|------------|")
-        for i, c in enumerate(ranked, start=1):
-            ai = c.get("arithmetic_intensity")
-            ai_str = f"{float(ai):.3g}" if isinstance(ai, (int, float)) else "\u2014"
-            eff = c.get("roofline_attainment_pct")
-            eff_str = f"{float(eff):.1f}%" if isinstance(eff, (int, float)) else "\u2014"
-            L.append(
-                f"| {i} | `{c.get('kernel_id', '')}` | {c.get('name', '')} | {canonical_category(c.get('kernel_category', ''))} "
-                f"| {float(c.get('gpu_pct') or 0.0):.2f}% | {c.get('bound_type', '')} | {ai_str} | {eff_str} "
-                f"| {float(c.get('optimization_priority') or 0.0):.2f} | {c.get('suggestion', '')} |"
-            )
+            "first. Full per-kernel metrics in the CSV linked below._",
+            "",
+            "| # | kernel_id | Name | Category | GPU% | Bound | AI | Eff% | Priority | Suggestion |",
+            "|---|-----------|------|----------|------|-------|----|----|---------|------------|",
+        ]
+        lines += [
+            f"| {i} | `{c['kernel_id']}` | {c['name']} | {canonical_category(c['kernel_category'])} "
+            f"| {c['gpu_pct']:.2f}% | {c['bound_type']} | {_intensity(c)} | {_attainment(c)} "
+            f"| {c['optimization_priority']:.2f} | {c['suggestion']} |"
+            for i, c in enumerate(ranked, start=1)
+        ]
     else:
-        L.append("_No GPU kernels found in trace._")
-    L.append("")
+        lines.append("_No GPU kernels found in trace._")
+    lines.append("")
+    return lines
 
-    # Compute Kernel Optimizations (per-candidate insight/action/source/impact).
-    L.append("## Compute Kernel Optimizations")
-    L.append("")
+
+def _optimization_sections(candidates: dict[str, Any], routable: list[dict[str, Any]]) -> list[str]:
+    """Compute Kernel Optimizations (insight, action, source and impact per rewritable candidate), then the Task Groups
+    table and the count of non-rewritable hot kernels."""
+    lines = ["## Compute Kernel Optimizations", ""]
     if not routable:
-        L.append("_No rewritable compute-kernel candidates identified._")
-        L.append("")
+        lines += ["_No rewritable compute-kernel candidates identified._", ""]
     else:
-        with_source = [c for c in routable if c.get("source_file")]
-        L.append(
+        with_source = [c for c in routable if c["source_file"]]
+        dispatchable = [c for c in with_source if c["shape_dispatchable"]]
+        lines += [
             f"_{len(dispatchable)} of {len(routable)} rewritable candidate(s) are auto-dispatchable "
             f"(resolved editable source AND a dispatch-grade operand shape); "
             f"{len(with_source) - len(dispatchable)} have a source but only a geometry shape, "
-            f"and the rest need a source first._"
-        )
-        L.append("")
-        for i, c in enumerate(routable, start=1):
-            _cat = canonical_category(c["kernel_category"])
-            L.append(f"### P{i}: {c['name']} ({_cat})")
-            L.append("")
-            L.append(
-                f"**Insight**: {_cat} kernel consuming "
-                f"{c['gpu_pct']:.2f}% of GPU time across {c['call_count']} launches."
+            f"and the rest need a source first._",
+            "",
+        ]
+    for i, c in enumerate(routable, start=1):
+        category = canonical_category(c["kernel_category"])
+        if c["source_file"]:
+            group = c.get("task_group")
+            dispatch_note = (
+                "dispatch-grade shape"
+                if c["shape_dispatchable"]
+                else f"geometry-only shape ({c['shape_provenance']}) — NOT auto-dispatchable, needs operand dims"
             )
-            L.append("")
-            L.append(f"**Action**: {_ACTION_BY_CATEGORY.get(c['kernel_category'], _ACTION_BY_CATEGORY['Others'])}")
-            L.append("")
-            src = c.get("source_file") or ""
-            if src:
-                tg = (c.get("task_group") or {}).get("task_group_id") or ""
-                _prov = c.get("shape_provenance") or "unresolved"
-                _dispatch_note = (
-                    "dispatch-grade shape"
-                    if c.get("shape_dispatchable")
-                    else f"geometry-only shape ({_prov}) — NOT auto-dispatchable, needs operand dims"
-                )
-                L.append(
-                    f"**Source**: `{src}` (via {c.get('source_resolution_method') or 'unknown'}); "
-                    f"{_dispatch_note}" + (f"; task group `{tg}`" if tg else "") + "."
-                )
-            else:
-                L.append(
-                    "**Source**: unresolved — not auto-dispatchable (rewritable by classification, "
-                    "but no editable source was located for its launching op)."
-                )
-            L.append("")
-            bound = c.get("bound_type") or "\u2014"
-            eff = c.get("roofline_attainment_pct")
-            eff_str = f"{float(eff):.1f}%" if isinstance(eff, (int, float)) else "\u2014"
-            L.append(
-                f"**Impact**: {c['gpu_pct']:.2f}% of GPU time; bound={bound}, "
-                f"attainment={eff_str}, priority={float(c.get('optimization_priority') or 0.0):.2f} "
-                f"(roofline_source={c.get('roofline_source', 'placeholder')})."
+            source = (
+                f"**Source**: `{c['source_file']}` (via {c['source_resolution_method'] or 'unknown'}); "
+                f"{dispatch_note}" + (f"; task group `{group['task_group_id']}`" if group else "") + "."
             )
-            L.append("")
-
-    # Task Groups (source-function dispatch grouping).
-    task_groups = candidates.get("task_groups") or []
-    if task_groups:
-        L.append("## Task Groups")
-        L.append("")
-        L.append(
-            "_Repeated shapes of one rewritable operator collapse into a single dispatch with all observed cases._"
-        )
-        L.append("")
-        L.append("| Group | Source | Kernels | GPU % | Time (ms) |")
-        L.append("|-------|--------|---------|-------|-----------|")
-        for g in task_groups:
-            src_disp = (g.get("source_path", "") or "?").split("/")[-1] or "?"
-            L.append(
-                f"| {g.get('task_group_id', '')} | {src_disp} | {len(g.get('kernel_ids') or [])} "
-                f"| {g.get('aggregate_gpu_pct', 0)} | {round(float(g.get('aggregate_duration_us', 0) or 0) / 1000.0, 3)} |"
+        else:
+            source = (
+                "**Source**: unresolved — not auto-dispatchable (rewritable by classification, "
+                "but no editable source was located for its launching op)."
             )
-        L.append("")
+        lines += [
+            f"### P{i}: {c['name']} ({category})",
+            "",
+            f"**Insight**: {category} kernel consuming "
+            f"{c['gpu_pct']:.2f}% of GPU time across {c['call_count']} launches.",
+            "",
+            f"**Action**: {_ACTION_BY_CATEGORY.get(c['kernel_category'], _ACTION_BY_CATEGORY['Others'])}",
+            "",
+            source,
+            "",
+            f"**Impact**: {c['gpu_pct']:.2f}% of GPU time; bound={c['bound_type']}, attainment={_attainment(c)}, "
+            f"priority={c['optimization_priority']:.2f} (roofline_source={c['roofline_source']}).",
+            "",
+        ]
+    if candidates["task_groups"]:
+        lines += [
+            "## Task Groups",
+            "",
+            "_Repeated shapes of one rewritable operator collapse into a single dispatch with all observed cases._",
+            "",
+            "| Group | Source | Kernels | GPU % | Time (ms) |",
+            "|-------|--------|---------|-------|-----------|",
+        ]
+        lines += [
+            f"| {g['task_group_id']} | {g['source_path'].split('/')[-1] or '?'} | {len(g['kernel_ids'])} "
+            f"| {g['aggregate_gpu_pct']} | {round(g['aggregate_duration_us'] / 1000.0, 3)} |"
+            for g in candidates["task_groups"]
+        ]
+        lines.append("")
+    if candidates["skipped_kernels"]:
+        lines += [
+            f"_{len(candidates['skipped_kernels'])} hot kernel(s) are non-rewritable "
+            f"(vendor library / unresolved source) — see Detailed Analysis._",
+            "",
+        ]
+    return lines
 
-    # Non-rewritable note.
-    skipped = candidates.get("skipped_kernels") or []
-    if skipped:
-        L.append(
-            f"_{len(skipped)} hot kernel(s) are non-rewritable "
-            f"(vendor library / unresolved source) — see Detailed Analysis._"
-        )
-        L.append("")
 
-    # Detailed Analysis (per hot kernel).
-    L.append("## Detailed Analysis")
-    L.append("")
+def _detailed_analysis(hot: list[dict[str, Any]]) -> list[str]:
+    """The Detailed Analysis section: identification, data, source, roofline and suggested action per hot kernel."""
+    lines = ["## Detailed Analysis", ""]
     for c in hot:
-        L.append(f"### {c['kernel_id']}: {c['name']} ({canonical_category(c['kernel_category'])})")
-        L.append("")
-        L.append(
+        skip_note = "" if c["reusable_native_kernel"] else f", skip_reason={c['skip_reason']}"
+        source = f"`{c['source_file']}`" if c["source_file"] else "unresolved"
+        lines += [
+            f"### {c['kernel_id']}: {c['name']} ({canonical_category(c['kernel_category'])})",
+            "",
             f"**Identification:** {c['gpu_pct']:.2f}% GPU time, {c['call_count']} launches, "
-            f"reusable={c['reusable_native_kernel']}"
-            + (f", skip_reason={c['skip_reason']}" if not c["reusable_native_kernel"] else "")
-            + "."
-        )
-        L.append("")
-        L.append(f"**Data:** device kernel `{c['device_kernel_name']}`; duration {c['duration_us'] / 1000.0:.2f} ms.")
-        L.append("")
-        src = c.get("source_file") or ""
-        L.append(
-            f"**Source:** {('`' + src + '`') if src else 'unresolved'} "
-            f"(shape provenance: {c.get('shape_provenance', 'unresolved')})."
-        )
-        L.append("")
-        _eff = c.get("roofline_attainment_pct")
-        _eff_s = f"{float(_eff):.1f}%" if isinstance(_eff, (int, float)) else _UNKNOWN_BOUND
-        _ai = c.get("arithmetic_intensity")
-        _ai_s = f"{float(_ai):.3g}" if isinstance(_ai, (int, float)) else _UNKNOWN_BOUND
-        _bound = c.get("bound_type") or _UNKNOWN_BOUND
-        L.append(
-            f"**Roofline:** bound={_bound}, AI={_ai_s}, "
-            f"attainment={_eff_s}, priority={float(c.get('optimization_priority') or 0.0):.2f} "
-            f"(roofline_source={c.get('roofline_source', 'placeholder')})."
-        )
-        L.append("")
-        L.append(f"**Suggested action:** {c.get('suggestion', '')}")
-        L.append("")
+            f"reusable={c['reusable_native_kernel']}{skip_note}.",
+            "",
+            f"**Data:** device kernel `{c['device_kernel_name']}`; duration {c['duration_us'] / 1000.0:.2f} ms.",
+            "",
+            f"**Source:** {source} (shape provenance: {c['shape_provenance']}).",
+            "",
+            f"**Roofline:** bound={c['bound_type']}, AI={_intensity(c)}, attainment={_attainment(c)}, "
+            f"priority={c['optimization_priority']:.2f} (roofline_source={c['roofline_source']}).",
+            "",
+            f"**Suggested action:** {c['suggestion']}",
+            "",
+        ]
+    return lines
 
-    # Appendix.
-    L.append("## Appendix")
-    L.append("")
-    L.append(f"- Framework: {context.framework or 'unknown'}")
-    L.append(f"- Platform: {context.target_platform or 'unknown'}")
-    L.append(f"- Throughput unit: {context.throughput_unit}")
-    L.append(f"- Aggregation scope: {scope}")
-    L.append(f"- Events scanned: {analyze_out.get('event_total', 0)}")
-    L.append(
+
+def _appendix(context: BypassReportContext, scope: str, event_total: int, attribution: dict[str, Any]) -> list[str]:
+    """The Appendix (run identity, scan size, op attribution) and the links to the code-generated metric CSVs."""
+    lines = [
+        "## Appendix",
+        "",
+        f"- Framework: {context.framework or 'unknown'}",
+        f"- Platform: {context.target_platform or 'unknown'}",
+        f"- Throughput unit: {context.throughput_unit}",
+        f"- Aggregation scope: {scope}",
+        f"- Events scanned: {event_total}",
         f"- Attribution: {attribution.get('attributed_kernels', 0)}/"
         f"{attribution.get('kernel_count', 0)} kernels linked to an op "
-        f"({attribution.get('attributed_pct', 0)}% of GPU time)"
-    )
-    L.append("")
-
-    # Structured CSV export (full data; code-generated, machine-readable).
-    if metrics_csv_path or summary_csv_path:
-        L.append("## Structured Metrics (CSV)")
-        L.append("")
-        L.append("_Code-generated (no LLM). The Top-10 table above is a preview; these CSVs carry the full data._")
-        L.append("")
-        if metrics_csv_path:
-            L.append(f"- Per-kernel metrics (all hot kernels): `{metrics_csv_path}`")
-        if summary_csv_path:
-            L.append(f"- Category summary: `{summary_csv_path}`")
-        L.append("")
-    return "\n".join(L)
+        f"({attribution.get('attributed_pct', 0)}% of GPU time)",
+        "",
+    ]
+    if context.metrics_csv_path or context.summary_csv_path:
+        lines += [
+            "## Structured Metrics (CSV)",
+            "",
+            "_Code-generated (no LLM). The Top-10 table above is a preview; these CSVs carry the full data._",
+            "",
+        ]
+        if context.metrics_csv_path:
+            lines.append(f"- Per-kernel metrics (all hot kernels): `{context.metrics_csv_path}`")
+        if context.summary_csv_path:
+            lines.append(f"- Category summary: `{context.summary_csv_path}`")
+        lines.append("")
+    return lines
 
 
 def build_workload_roofline_totals(
@@ -1185,10 +1053,8 @@ def build_kernel_roofline(
                 "bandwidth_utilization_pct": c["bandwidth_utilization_pct"],
                 "reusable_native_kernel": c["reusable_native_kernel"],
                 "source_file": c["source_file"],
-                "rocprof_roofline": c["rocprof_roofline"],
                 "flops_per_byte": c.get("flops_per_byte"),
                 # roofline_source is how the bound was derived.
-                "roofline_measured": c.get("roofline_measured", False),
                 "roofline_source": c.get("roofline_source", _RL_PLACEHOLDER),
             }
         )

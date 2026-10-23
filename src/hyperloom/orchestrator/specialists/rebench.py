@@ -10,6 +10,7 @@ from hyperloom.orchestrator.actions.executors._workload_envs import prepare_grid
 import argparse
 import asyncio
 import json
+import logging
 import os
 import socket
 import sys
@@ -22,6 +23,8 @@ from ..actions.executors._grid_runner import GridVariant, run_grid
 from ..actions.executors._workload_envs import (
     default_baseline_config,
 )
+
+log = logging.getLogger(__name__)
 
 
 def _resolve_port(port: int | None) -> int:
@@ -128,6 +131,7 @@ async def run_specialist_rebench(
             server_lifecycle=server_lifecycle,
         )
     except Exception as exc:  # noqa: BLE001 — surface as a structured failure
+        log.warning("specialist rebench failed: %s", exc)
         return {
             "ok": False,
             "error": repr(exc),

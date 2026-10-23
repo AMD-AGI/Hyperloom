@@ -1,7 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""KERNEL work hands back with enough of the phase left to measure its result: GEAK and the rewrite Controller."""
+"""KERNEL work hands back with enough of the phase left to measure its result: GEAK and the rewrite Controller.
+
+GEAK's result is re-measured by an explore round measured the way the baseline was, so what GEAK hands back is that
+round and a quarter of a round to spare: both passes after a baseline that ran a warm pass, its one pass otherwise.
+The Controller hands back one measurement.
+"""
 
 from __future__ import annotations
 
@@ -18,6 +23,9 @@ PHASE_LEFT = 30000.0
 MARGIN = 300
 BOOT = 600.0
 BENCH = 5400.0
+WARM = 3600.0
+ONE_ROUND = BOOT + BENCH
+SPARE = ONE_ROUND / 4
 
 
 @pytest.fixture
@@ -40,13 +48,21 @@ def coordinator(session_dir, monkeypatch):
 
 
 @pytest.mark.parametrize("benchmark_mode", ["agentx", ""], ids=["agentx", "fixed_isl_osl"])
-def test_geak_returns_with_one_measurement_left_in_the_phase(coordinator, benchmark_mode):
+def test_after_a_single_pass_baseline_geak_returns_with_its_round_and_a_spare_quarter_left(coordinator, benchmark_mode):
     coordinator.shared_state.benchmark_mode = benchmark_mode
 
     runner, kill, budget_known = coordinator.phase_kernel._geak_timeouts()
 
-    kill_expected = int(PHASE_LEFT - (BOOT + BENCH))
+    kill_expected = int(PHASE_LEFT - (ONE_ROUND + SPARE))
     assert (runner, kill, budget_known) == (kill_expected - MARGIN, kill_expected, True)
+
+
+def test_after_a_warm_pass_geak_returns_with_both_passes_and_a_spare_quarter_left(coordinator):
+    coordinator.shared_state.baseline_warm_runtime_sec = WARM
+
+    _runner, kill, _known = coordinator.phase_kernel._geak_timeouts()
+
+    assert kill == int(PHASE_LEFT - (ONE_ROUND + WARM + SPARE))
 
 
 def test_without_a_measured_baseline_geak_holds_back_the_benchmark_hard_cap(coordinator):
@@ -60,7 +76,7 @@ def test_without_a_measured_baseline_geak_holds_back_the_benchmark_hard_cap(coor
 
 
 def test_geak_gets_no_time_when_the_measurement_alone_overruns_the_phase(coordinator, monkeypatch):
-    monkeypatch.setattr(ps, "phase_budget_remaining_seconds", lambda _state, **_kw: BOOT + BENCH - 1.0)
+    monkeypatch.setattr(ps, "phase_budget_remaining_seconds", lambda _state, **_kw: ONE_ROUND + SPARE - 1.0)
 
     runner, kill, budget_known = coordinator.phase_kernel._geak_timeouts()
 
@@ -78,7 +94,6 @@ def test_the_rewrite_controller_returns_with_one_measurement_left_in_the_phase(
 ):
     monkeypatch.setattr(ps, "phase_budget_remaining_seconds", lambda _state, **_kw: phase_left)
     monkeypatch.setattr(ps, "session_remaining_seconds", lambda _state, **_kw: SESSION_LEFT)
-    monkeypatch.setattr(ps, "phase_cap_seconds", lambda _state: None)
 
     soft, hard = coordinator.phase_kernel._kernel_rewrite_controller_timeouts()
 

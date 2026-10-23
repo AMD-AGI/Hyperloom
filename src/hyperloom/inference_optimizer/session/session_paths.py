@@ -111,15 +111,23 @@ def unique_runs_dir(session_dir: Path, action: str, task_id: str) -> Path:
     raise RuntimeError(f"unique_runs_dir: {base} still taken after {_MAX_RUNS_DIR_ATTEMPTS} suffixes")
 
 
-def kernel_agent_runs_root(session_dir: Path) -> Path:
-    """``<sd>/kernel-agent/runs/`` — the parent of all per-tool-invocation kernel-agent run dirs (keyed by tool-invocation session id beneath it)."""
-    return Path(session_dir) / "kernel-agent" / "runs"
-
-
 def patches_dir(session_dir: Path, kernel_id: str) -> Path:
     """``<sd>/patches/<kernel_id>/`` — KEEP-promoted on-disk changes: the original source backup + applied patch (REVERT restores from backup)."""
     kid = _validate_id_component(kernel_id, field="patches_dir.kernel_id")
     return Path(session_dir) / "patches" / kid
+
+
+_KERNEL_PATCH_BACKUPS: str = "backup"
+
+
+def kernel_patch_backup_root(session_dir: Path, kernel_id: str) -> Path:
+    """``<sd>/patches/<kernel_id>/backup/`` — one subdirectory per kernel-patch apply, holding its manifest and backups."""
+    return patches_dir(session_dir, kernel_id) / _KERNEL_PATCH_BACKUPS
+
+
+def kernel_patch_backup_roots(session_dir: Path) -> list[Path]:
+    """Every :func:`kernel_patch_backup_root` in the session."""
+    return sorted((Path(session_dir) / "patches").glob(f"*/{_KERNEL_PATCH_BACKUPS}"))
 
 
 # Session-breakdown record fragments (recorder write-side spool).
@@ -442,7 +450,6 @@ __all__ = [
     "proposal_task_map_path",
     "forge_steps_path",
     "gemm_tuning_steps_path",
-    "kernel_agent_runs_root",
     "llm_calls_path",
     "manifest_path",
     "patches_dir",
