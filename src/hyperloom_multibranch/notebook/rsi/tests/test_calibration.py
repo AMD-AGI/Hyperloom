@@ -11,6 +11,7 @@ import math
 import pytest
 
 from hyperloom_multibranch.contracts.notebook.records import NotebookSnapshot
+from hyperloom_multibranch.contracts.notebook.vocab import BranchDriver
 from hyperloom_multibranch.notebook.rsi import calibration
 from hyperloom_multibranch.notebook.rsi.archive import SearchTree, TreeBranch, session_start, tree_from_snapshot
 from hyperloom_multibranch.notebook.rsi.calibration import (
@@ -303,6 +304,16 @@ def test_rankings_tell_two_scorers_that_rank_the_branches_alike() -> None:
     assert len(double) == 2 * 11 and all(len(ranks) == 2 for ranks in double.values())
     assert ranked_alike(double, same) == 1.0 and ranked_alike(double, other) < 0.5
     assert ranked_alike(double, {}) == 0.0
+
+
+def test_a_branch_an_autonomous_agent_drove_is_in_no_round() -> None:
+    agent = branch("agent", [(1800.0, 5.0)], driver=BranchDriver.AUTONOMOUS)
+    sessions = tuple(_tied(n) for n in range(2))
+    joined = tuple(dataclasses.replace(item, branches=(*item.branches, agent)) for item in sessions)
+    alone = dataclasses.replace(_tied(9), branches=(*_tied(9).branches[:2], agent))
+
+    assert rankings(joined, _Prefers("a")) == rankings(sessions, _Prefers("a"))
+    assert rankings((alone,), _Prefers("a")) == {}
 
 
 def test_rank_correlation_ranks_ties_alike_and_needs_a_spread() -> None:

@@ -10,6 +10,7 @@ import math
 
 import pytest
 
+from hyperloom_multibranch.contracts.notebook.vocab import BranchDriver
 from hyperloom_multibranch.notebook.rsi.archive import SearchTree
 from hyperloom_multibranch.notebook.rsi.bandit import (
     BANDIT_LABEL,
@@ -57,6 +58,18 @@ def test_the_scale_puts_the_archives_large_steps_near_one() -> None:
 
     assert reward_scale([]) == 1.0
     assert reward_scale([searched]) == pytest.approx(1.0 / 101.0)
+
+
+def test_the_scale_leaves_out_the_steps_of_a_branch_an_autonomous_agent_drove() -> None:
+    steps = [(600.0 * step, 1.0 * step) for step in range(1, 11)]
+    # Each agent catches up with s1 in one step, so the session's best gain by then stays s1's.
+    agents = (
+        branch("agent-1", [(5400.0, 9.0)], driver=BranchDriver.AUTONOMOUS),
+        branch("agent-2", [(6000.0, 10.0)], driver=BranchDriver.AUTONOMOUS),
+    )
+    alone = tree("a", branch("s1", steps))
+
+    assert reward_scale([dataclasses.replace(alone, branches=(*alone.branches, *agents))]) == reward_scale([alone])
 
 
 def _mature(n: int) -> SearchTree:

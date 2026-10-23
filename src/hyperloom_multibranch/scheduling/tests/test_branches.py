@@ -20,7 +20,7 @@ from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
 from hyperloom_multibranch.contracts.lifecycle import BranchTask
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
 from hyperloom_multibranch.contracts.notebook.records import LineageEvent
-from hyperloom_multibranch.contracts.notebook.vocab import LineageKind
+from hyperloom_multibranch.contracts.notebook.vocab import BranchDriver, LineageKind
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.rsi.briefing import SessionBriefs
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
@@ -257,6 +257,19 @@ async def test_agent_branches_open_at_the_root_at_k_one_after_the_user_branches_
     assert bench.sessions.started["b02"] == bench.root
     rows = [json.loads(line) for line in (tmp_path / "MB-decisions.jsonl").read_text().splitlines()]
     assert ("b02", "agent branch started") in [(row["branch"], row["reason"]) for row in rows if row["kind"] == "open"]
+
+
+async def test_the_notebook_records_an_agent_branch_as_autonomous_and_a_user_branch_as_specialist(
+    tmp_path: Path,
+) -> None:
+    bench = await Bench(tmp_path).rooted()
+
+    await bench.control.open_user_branches(("Fuse the MoE gate.",), bench.root, OPEN_BY)
+    await bench.control.open_agent_branches(("https://github.com/acme/agent@v1",), bench.root, OPEN_BY)
+    await _runs_started()
+
+    drivers = {node.branch: node.driver for node in (await bench.notebook.lineage()).branches}
+    assert (drivers["b01"], drivers["b02"]) == (BranchDriver.SPECIALIST, BranchDriver.AUTONOMOUS)
 
 
 async def test_each_user_branchs_specialist_runs_on_its_own_direction_in_every_launch_and_a_judge_opened_one_on_a_built_in_one(

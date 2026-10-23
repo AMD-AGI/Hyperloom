@@ -41,7 +41,6 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Any
 
-from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.notebook.records import FrontierScore
 from hyperloom_multibranch.notebook.rsi.archive import SearchTree, TreeBranch, similar_trees
 from hyperloom_multibranch.notebook.rsi.frontier import (
@@ -339,9 +338,7 @@ def _open_at(tree: SearchTree, t_s: float) -> list[TreeBranch]:
     return [
         branch
         for branch in tree.branches
-        if branch.name != INTEGRATION_BRANCH
-        and branch.opened_s <= t_s
-        and (branch.closed_s is None or branch.closed_s > t_s)
+        if branch.steered and branch.opened_s <= t_s and (branch.closed_s is None or branch.closed_s > t_s)
     ]
 
 

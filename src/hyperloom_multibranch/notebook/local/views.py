@@ -40,6 +40,7 @@ from hyperloom_multibranch.contracts.notebook.records import (
 )
 from hyperloom_multibranch.contracts.notebook.vocab import (
     INTEGRATION_BRANCH,
+    BranchDriver,
     CommitOrigin,
     Conclusion,
     LineageKind,
@@ -64,6 +65,7 @@ class _BranchDraft:
     stop_reason: str | None = None
     stopped_at: float | None = None
     repairs: str = ""
+    driver: BranchDriver = BranchDriver.SPECIALIST
 
     def node(self) -> BranchNode:
         return BranchNode(
@@ -76,6 +78,7 @@ class _BranchDraft:
             opened_at=self.opened_at,
             stopped_at=self.stopped_at,
             repairs=self.repairs,
+            driver=self.driver,
         )
 
 
@@ -112,11 +115,17 @@ def _apply_event(
             draft.stop_reason, draft.stopped_at = event.reason, at
     elif draft is None:
         branches[event.branch] = _BranchDraft(
-            event.branch, event.kind, event.from_commit, at, event.from_branch, repairs=event.repairs
+            event.branch,
+            event.kind,
+            event.from_commit,
+            at,
+            event.from_branch,
+            repairs=event.repairs,
+            driver=event.driver,
         )
     else:
         draft.origin, draft.start_commit, draft.from_branch = event.kind, event.from_commit, event.from_branch
-        draft.repairs = event.repairs or draft.repairs
+        draft.repairs, draft.driver = event.repairs or draft.repairs, event.driver
         draft.opened_at = min(draft.opened_at, at)
 
 

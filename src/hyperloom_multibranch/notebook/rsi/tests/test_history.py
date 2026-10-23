@@ -11,6 +11,7 @@ import pytest
 
 from hyperloom_multibranch.contracts.notebook.peers import IntentLayer
 from hyperloom_multibranch.contracts.notebook.records import NotebookSnapshot
+from hyperloom_multibranch.contracts.notebook.vocab import BranchDriver
 from hyperloom_multibranch.notebook.rsi.archive import SOURCE_NOTEBOOK, SearchTree, TreeBranch, TreeDirection
 from hyperloom_multibranch.notebook.rsi.history import SoFar, Standing, history_digest, session_history
 from hyperloom_multibranch.notebook.rsi.similarity import TaskConditions, task_conditions
@@ -84,6 +85,19 @@ def test_the_digest_sums_up_pace_final_gain_branches_and_directions() -> None:
         ("moe gemm", 2, 12, 4, pytest.approx(3.0)),
         ("attention", 1, 8, 0, pytest.approx(-1.0)),
     ]
+
+
+def test_a_branch_an_autonomous_agent_drove_is_not_one_of_the_specialists_branches() -> None:
+    agent = branch(
+        "agent",
+        [(600.0, 9.0)],
+        test_times=(0.0, 300.0),
+        stop_reason="its agent gave up",
+        driver=BranchDriver.AUTONOMOUS,
+    )
+    with_agent = dataclasses.replace(WIDE, branches=(*WIDE.branches, agent))
+
+    assert history_digest([with_agent, NARROW], TASK).branches == history_digest([WIDE, NARROW], TASK).branches
 
 
 def test_the_text_keeps_whole_lines_within_its_budget() -> None:
