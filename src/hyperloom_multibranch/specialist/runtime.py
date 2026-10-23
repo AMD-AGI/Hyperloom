@@ -146,6 +146,7 @@ class _Branch:
     notebook: RuntimeNotebook
     k: int = 1
     session: Session | None = None
+    stopping: asyncio.Task[None] | None = None
     last: Session | None = None
     tasks: list[asyncio.Task[None]] = field(default_factory=list)
     crashes: int = 0
@@ -212,7 +213,28 @@ class SpecialistRuntime:
         return SpecialistStatus(running, state.crashes, state.lost, state.gave_up, state.judge_failed)
 
     async def stop(self, branch: str) -> None:
-        state = self._branches.pop(branch)
+        """Stop the branch's specialist, at most once whoever asks; a branch already stopped is left alone.
+
+        The stop runs in a task of its own that a caller who stops waiting does not cancel, as a cancelled stop would
+        leave the branch's run and what it holds behind: the next call waits for that same stop, and one that failed
+        is run again."""
+
+        state = self._branches.get(branch)
+        if state is None:
+            return
+        if state.stopping is None:
+            state.stopping = asyncio.create_task(self._stopped(state), name=f"stop of {branch}")
+        await asyncio.shield(state.stopping)
+
+    async def _stopped(self, state: _Branch) -> None:
+        try:
+            await self._stop_steps(state)
+        except BaseException:
+            state.stopping = None
+            raise
+        self._branches.pop(state.name, None)
+
+    async def _stop_steps(self, state: _Branch) -> None:
         supervisor, *others = state.tasks
         supervisor.cancel()
         await asyncio.gather(supervisor, return_exceptions=True)

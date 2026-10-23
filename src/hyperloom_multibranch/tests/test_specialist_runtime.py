@@ -55,6 +55,8 @@ class _Runs:
         self.started: list[_Run] = []
         self.preflights = 0
         self.released: list[str] = []
+        #: Set, a run's stop waits for it.
+        self.stops_after: asyncio.Event | None = None
 
     def __call__(self, start: SessionStart) -> "_Run":
         run = _Run(self, start)
@@ -84,6 +86,8 @@ class _Run:
         self.k = k
 
     async def stop(self) -> None:
+        if self._runs.stops_after is not None:
+            await self._runs.stops_after.wait()
         self.stopped.set()
 
     async def release(self) -> None:
@@ -416,6 +420,22 @@ async def test_what_a_branch_s_runs_hold_is_given_back_once_when_the_branch_stop
     assert runs.released == [BRANCH]
 
 
+async def test_a_stop_its_caller_gave_up_waiting_for_is_confirmed_by_the_next_stop(session):
+    runs = _Runs()
+    runs.stops_after = asyncio.Event()
+    runtime = session.runtime(runs)
+    await runtime.start(BRANCH, await session.repo.head(BRANCH), BranchTask(agent="https://example.com/agent.git"))
+    await _until(lambda: _true(len(runs.started) == 1), "the run")
+
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(runtime.stop(BRANCH), 0.2)
+    runs.stops_after.set()
+    await asyncio.wait_for(runtime.stop(BRANCH), 5)
+    await runtime.stop(BRANCH)
+
+    assert runs.started[0].stopped.is_set() and runs.released == [BRANCH]
+
+
 async def test_a_branch_whose_preflight_failed_gives_back_what_it_holds_when_it_stops(session):
     runs = _Runs(preflight=PreflightFailed(("no card is left",)))
     runtime = session.runtime(runs)
@@ -576,8 +596,8 @@ async def test_a_branch_has_one_specialist_and_keeps_room_for_a_test(session):
     with pytest.raises(ValueError, match="stop the branch"):
         await runtime.set_k(BRANCH, 0)
     await runtime.stop(BRANCH)
-    with pytest.raises(KeyError):
-        await runtime.stop(BRANCH)
+    await runtime.stop(BRANCH)
+    assert await runtime.status(BRANCH) is None
 
 
 async def test_the_claims_a_specialist_holds_are_renewed_until_its_branch_stops(session):
