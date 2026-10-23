@@ -52,6 +52,7 @@ from hyperloom_multibranch.notebook.knowledge.tests.fakes import (
     experience_summary,
 )
 from hyperloom_multibranch.contracts.notebook.records import PeerReplay, WarmReplay
+from hyperloom_multibranch.notebook.knowledge.reference_leads import ReferenceLead
 from hyperloom_multibranch.notebook.knowledge.warm_start import PreparedReplay, ReplayRefusal, WarmLead
 from hyperloom_multibranch.notebook.learning_search import LEARNINGS_LOG, RetrievalLog
 from hyperloom_multibranch.notebook.knowledge.replay_tables import StackSlot
@@ -163,6 +164,32 @@ async def test_the_brief_holds_this_sessions_lessons_and_both_kinds_of_recall(tm
     )
     assert brief.leads == (
         "recipe: inference:older: +10.00% `--enable-expert-parallel` [older]",
+        "prior: --block-size 16: keep +10.00% [exp-faster]",
+    )
+
+
+async def test_a_reference_launch_is_a_lead_after_the_recipe_kbs_champions_and_before_the_priors(
+    tmp_path: Path,
+) -> None:
+    notebook = await scripted_session(tmp_path / "notebook", FakeClock())
+    reference = ReferenceLead(
+        "dsr1-fp8-mi355x-vllm",
+        "benchmarks/single_node/fixed_seq_len/dsr1_fp8_mi355x_vllm.sh",
+        "deepseek-ai/DeepSeek-R1",
+        "mi355x",
+        "vllm",
+        "fp8",
+        "rocm/vllm:v0.11",
+        "ISL 1024/OSL 1024 at TP 8, conc 4-64",
+    )
+    reader = _reader(_recalled("exp-faster", "keep", 1100.0))
+    briefs = SessionBriefs(notebook, warm=(LEAD,), references=(reference,), experiences=reader, metric=METRIC)
+
+    brief = await briefs.for_branch("s3", "attention").startup_brief("c1")
+
+    assert brief.leads == (
+        "recipe: inference:older: +10.00% `--enable-expert-parallel` [older]",
+        f"reference: {reference.describe()}",
         "prior: --block-size 16: keep +10.00% [exp-faster]",
     )
 
