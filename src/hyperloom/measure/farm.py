@@ -30,6 +30,7 @@ __all__ = [
     "Farm",
     "FarmError",
     "build_farm",
+    "locate_package",
     "place_farm",
     "prepend_pythonpath",
     "server_environment",
@@ -60,7 +61,7 @@ class Farm:
     roots: tuple[EnvRoot, ...] = ()
 
 
-def _locate(import_name: str, python: str, cwd: Path) -> Path:
+def locate_package(import_name: str, python: str, cwd: Path) -> Path:
     """Where ``python`` finds the package by default (``-I``: no ``PYTHONPATH``), looked up from a neutral directory."""
     try:
         done = subprocess.run(
@@ -132,7 +133,7 @@ def build_farm(
     for root in roots:
         if root.kind != "package":
             raise FarmError(f"{root.id}: a runtime root is not supported by this runner yet")
-        base = _locate(root.import_name, python, farm_dir.parent)
+        base = locate_package(root.import_name, python, farm_dir.parent)
         _build_root(root, base, site / root.import_name, read_blob)
         built.append(root.import_name)
         rebuilt.append(root)

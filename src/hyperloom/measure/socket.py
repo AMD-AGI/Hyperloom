@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Literal, Protocol
 
 from hyperloom.contracts.measurement import AccuracyValue, AttachmentRef, FailureClass, PhaseTiming, SandboxFacts
+from hyperloom.measure.jit_session import JitCacheSession
 from hyperloom.measure.phases import PhaseRecorder
 
 __all__ = [
@@ -135,6 +136,9 @@ class TestCall:
     #: Where the backend stamps the phases of the test as it goes: a runner that has stamped its own passes its
     #: recorder, so what the backend adds follows it; a call with none gets a recorder of the backend's own.
     phases: PhaseRecorder | None = None
+    #: The shared compiled-code cache this test uses (design 4.21): the backend seeds its directories before the server
+    #: starts and stages what the compilers added once a test succeeds. ``None`` runs the test as it always did.
+    jit: JitCacheSession | None = None
 
 
 @dataclass(frozen=True)

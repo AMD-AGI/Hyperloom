@@ -44,6 +44,8 @@ from hyperloom.measure.failures import Disposition, FailureClassification, class
 from hyperloom.measure.hosted_live import LiveOutputs, finite_number
 from hyperloom.measure.hosted_log import STATE_FINISHED, STATE_SENT, STATE_SUBMITTED, MeasurementJournal, Record
 from hyperloom.measure.hosted_spec import SpecContext, SpecRefused, build_spec, split_result_dir
+from hyperloom.measure.jit_publish import publish_contributions
+from hyperloom.measure.jit_store import DirJitStore
 from hyperloom.measure.manifest import ResultManifest
 from hyperloom.measure.phases import ACQUIRED, LANDED, RUNNER_DONE, HostTimeline
 from hyperloom.measure.runner.rounds import ROUNDS_FILE, WARMUP_DIR
@@ -131,7 +133,9 @@ class HostedConfig:
     signature that verified against the key the platform reported for its sandbox. ``rule_pack_digest`` is the digest
     of the rule pack the session reads: a result whose runner did not read a pack with that digest is rejected
     (``rule_pack_mismatch``); ``None`` accepts any pack. ``create_envs`` is the environment every authoritative sandbox is
-    created with; the service's sealed runner template must accept those names (``accepted_envs``).
+    created with; the service's sealed runner template must accept those names (``accepted_envs``). ``jit_store`` is the
+    shared compiled-code cache (design 4.21): the compiled files a signed result says its test added are published to it
+    after the result is accepted; ``None`` publishes nothing.
     """
 
     session_dir: Path
@@ -149,6 +153,7 @@ class HostedConfig:
     rule_pack_digest: str | None = None
     create_envs: Mapping[str, str] = field(default_factory=dict)
     staging_root: Path | None = None
+    jit_store: DirJitStore | None = None
     should_stop: Callable[[], bool] = field(default=lambda: False, compare=False)
 
     def __post_init__(self) -> None:
@@ -573,6 +578,7 @@ class HostedMeasurementBackend:
             verified = self._read_and_verify(attempt, staging)
             location = self._archive(attempt, verified, staging)
             self._land(attempt, verified)
+            self._publish_jit(attempt, verified, staging)
             rounds = _rounds_of(verified, Path(call.output_dir))
         except ResultRejected as exc:
             outcome = _refusal(call, HOSTED_RESULT_REJECTED_RC, "result_rejected", str(exc))
@@ -587,6 +593,18 @@ class HostedMeasurementBackend:
         finally:
             shutil.rmtree(staging, ignore_errors=True)
         return self._decided(attempt, verified, location, rounds)
+
+    def _publish_jit(self, attempt: _Attempt, verified: VerifiedBundle, staging: Path) -> None:
+        """Add what the accepted result's test compiled to the shared cache; a result never fails on it."""
+        store, facts = self._config.jit_store, verified.result.jit_cache
+        if store is None or facts is None:
+            return
+        try:
+            scratch = staging / "jit"
+            scratch.mkdir()
+            publish_contributions(store, _handle(attempt.runner), facts, scratch)
+        except OSError as exc:
+            log.warning("jit cache: nothing was published (%s)", type(exc).__name__)
 
     def _staging_dir(self, attempt: _Attempt) -> Path:
         root = self._config.staging_root or Path(tempfile.gettempdir()) / "hyperloom-staging"

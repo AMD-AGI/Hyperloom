@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import importlib.metadata
 import os
@@ -38,10 +39,12 @@ from hyperloom.measure.phases import (
     manifest_document,
 )
 from hyperloom.measure.pins import IMAGE_DIGEST_VAR
+from hyperloom.measure.jit_session import JitCacheSession
 from hyperloom.measure.runner import hardware
 from hyperloom.measure.runner.aiperf_patch import ReplayClientPatchError, patch_replay_client
 from hyperloom.measure.attachments import AttachmentError, place_attachments
 from hyperloom.measure.farm import Farm, FarmError, build_farm, server_environment, server_python, verify_farm
+from hyperloom.measure.runner.jit import STAGING_DIR, ColdStart, Surroundings, build_session, cold_start
 from hyperloom.measure.runner.inventory import OutputRejected, drop_agentx_runtime, inventory, write_farm_inventory
 from hyperloom.measure.runner.platform_env import align_platform_env, take_topology
 from hyperloom.measure.runner.rewrite import Placement, rewrite_config
@@ -365,6 +368,7 @@ class _Findings:
     timing: dict
     visible: list[int]
     surface_sha256: str
+    jit_cache: dict | None = None
 
 
 def _write_bundle(ctx: _Context, signed: _Signed, outcome: dict, found: _Findings) -> None:
@@ -399,9 +403,29 @@ def _write_bundle(ctx: _Context, signed: _Signed, outcome: dict, found: _Finding
             "files": [f.to_document() for f in files],
         }
     )
+    if found.jit_cache is not None:
+        document["jit_cache"] = found.jit_cache
     manifest = encode_manifest(document)
     (ctx.out_dir / "manifest.json").write_bytes(manifest)
     (ctx.out_dir / "manifest.sig").write_text(signing.sign(manifest, key), encoding="ascii")
+
+
+def _jit_session(
+    ctx: _Context, spec: MeasurementSpec, points: list[Path], farm: Farm | None, facts
+) -> JitCacheSession | None:
+    """The test's use of the shared compiled-code cache, or ``None`` when none is configured (``measure.runner.jit``)."""
+    around = Surroundings(ctx.environ, ctx.work / "jit", ctx.out_dir / STAGING_DIR, ctx.read_blob, ctx.notes)
+    return build_session(spec, points, farm, facts[0] if facts else None, around)
+
+
+def _cold_start_timing(cold: ColdStart) -> dict[str, float]:
+    """The two parts of a start the result states beside its phases, when the server's logs gave them."""
+    timing = {}
+    if cold.logs:
+        timing["jit_compile_sec"] = round(cold.builds.compile_seconds, 3)
+    if cold.model_load_sec is not None:
+        timing["model_load_sec"] = cold.model_load_sec
+    return timing
 
 
 def _run_sheet(ctx: _Context, spec_path: Path, key, progress: Progress) -> None:
@@ -420,7 +444,8 @@ def _run_sheet(ctx: _Context, spec_path: Path, key, progress: Progress) -> None:
     points, inferencex, farm = _prepare(ctx, spec, visible)
     _patch_replay_client(ctx, points, inferencex)
     surface = _surface_sha256(spec, points)
-    call = _call(ctx, spec, points, inferencex, progress)
+    session = _jit_session(ctx, spec, points, farm, facts)
+    call = dataclasses.replace(_call(ctx, spec, points, inferencex, progress), jit=session)
     progress.phase("running")
     started = time.time()
     outcome, timed_out = _execute(call)
@@ -435,18 +460,23 @@ def _run_sheet(ctx: _Context, spec_path: Path, key, progress: Progress) -> None:
         files = inventory(ctx.files, max_total_bytes=spec.outputs.max_total_bytes)
     except OutputRejected as exc:
         raise RunnerFailure(exc.error_class, str(exc)) from exc
+    cold = cold_start(ctx.files)
+    report = None if session is None else session.report(cold.builds)
+    if report is not None:
+        ctx.notes.extend(report.notes)
     timing = {
         "runner_started_unix": ctx.started,
         "spec_received_unix": received,
         "server_ready_unix": None,
         "finished_unix": time.time(),
         "phases": manifest_document(ctx.phases.finish()),
+        **_cold_start_timing(cold),
     }
     _write_bundle(
         ctx,
         _Signed(spec, raw, key),
         _outcome_document(outcome, timed_out),
-        _Findings(files, facts, changed, timing, visible, surface),
+        _Findings(files, facts, changed, timing, visible, surface, None if report is None else report.document()),
     )
 
 

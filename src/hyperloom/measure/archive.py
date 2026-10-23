@@ -97,7 +97,7 @@ class DirResultArchive:
                 raise
         finally:
             shutil.rmtree(incoming, ignore_errors=True)
-        _fsync_dir(final.parent)
+        fsync_dir(final.parent)
         return os.fspath(final)
 
     def _same_or_conflict(self, final: Path, listing: dict[str, str]) -> str:
@@ -177,7 +177,7 @@ def _copy_listing(staging_dir: Path, incoming: Path, listing: dict[str, str]) ->
         os.close(root_fd)
 
 
-def _fsync_dir(path: Path) -> None:
+def fsync_dir(path: Path) -> None:
     fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
     try:
         os.fsync(fd)
@@ -187,4 +187,4 @@ def _fsync_dir(path: Path) -> None:
 
 def _fsync_tree(root: Path) -> None:
     for directory, _, _ in os.walk(root):
-        _fsync_dir(Path(directory))
+        fsync_dir(Path(directory))

@@ -31,6 +31,9 @@ warmup round): a warmup round and the accuracy round on one directory, the measu
 results file of ``fake_accuracy`` below the warmup's.
 ``fake_log_line: <text>`` writes a server log whose last line that is, so the runner's progress reports it as the last
 line of the live output.
+``fake_jit: true`` stages a contribution to the shared compiled-code cache (one aiter module, below ``/out/jit-cache``) and
+signs it into the manifest as a test that compiled it would; ``fake_jit_swap: true`` changes the staged list after the
+signing, as something that can write ``/out`` could.
 """
 
 from __future__ import annotations
@@ -49,6 +52,8 @@ from hyperloom.common.rule_pack import rule_pack_identity
 from hyperloom.measure import signing
 from hyperloom.measure.attachments import place_attachments, substitute
 from hyperloom.measure.repro import REPRO_DIR, find_case, run_case
+from hyperloom.measure.jit_kinds import AITER_JIT
+from hyperloom.measure.jit_store import Snapshot, StoredFile
 from hyperloom.measure.manifest import RESULT_SCHEMA, encode_manifest
 from hyperloom.measure.runner.service import Progress
 from hyperloom.measure.spec import MeasurementSpec, fingerprint, spec_sha256
@@ -199,6 +204,30 @@ def _repro_files(spec: MeasurementSpec, root: Path, out: Path) -> dict[str, byte
     return {f"{REPRO_DIR}/{p.name}": p.read_bytes() for p in sorted(directory.iterdir())}
 
 
+JIT_KEY = "a" * 64
+JIT_MODULE = b"\x7fELF the module a fake test compiled"
+
+
+def _stage_jit(out: Path) -> dict[str, Any]:
+    """Stage one aiter module as a runner does and give the ``jit_cache`` block that signs it."""
+    staged = out / "jit-cache" / AITER_JIT.name
+    sha = hashlib.sha256(JIT_MODULE).hexdigest()
+    _atomic(staged / "blobs" / sha, JIT_MODULE)
+    snapshot = Snapshot(AITER_JIT.name, JIT_KEY, None, {"module_fake.so": StoredFile(sha, len(JIT_MODULE))})
+    _atomic(staged / "manifest.json", snapshot.to_bytes())
+    contribution = {"sha256": snapshot.sha256(), "files": 1, "bytes": len(JIT_MODULE)}
+    kind = {
+        "kind": AITER_JIT.name,
+        "key": JIT_KEY,
+        "state": "miss",
+        "seed_files": 0,
+        "seed_bytes": 0,
+        "seed_snapshot": None,
+        "contribution": contribution,
+    }
+    return {"kinds": [kind], "builds_seen": 1, "jit_compile_sec": 3.0}
+
+
 def _timing(config: dict[str, Any]) -> dict[str, Any]:
     timing: dict[str, Any] = {
         "runner_started_unix": 1.0,
@@ -260,12 +289,17 @@ def _publish(out: Path, spec: MeasurementSpec, raw: bytes, config: dict[str, Any
         sandbox_root = Path(os.environ["HYPERLOOM_SANDBOX_ROOT"])
         files.update(_attached_env_files(spec, sandbox_root, out, config["fake_attached_env"]))
     manifest = _manifest(spec, raw, key, files, mode, config)
+    if config.get("fake_jit"):
+        manifest["jit_cache"] = _stage_jit(out)
     manifest_raw = encode_manifest(manifest)
     signer = signing.generate_private_key() if mode == "wrong_key" else key
     if mode == "tamper":
         original = bytearray((out / "files" / "server.log").read_bytes())
         original[0] ^= 0x01
         (out / "files" / "server.log").write_bytes(bytes(original))
+    if config.get("fake_jit_swap"):
+        staged = out / "jit-cache" / AITER_JIT.name / "manifest.json"
+        staged.write_bytes(staged.read_bytes() + b" ")
     if mode == "extra_file":
         _atomic(out / "files" / "extra.txt", b"not listed")
     if mode != "no_manifest":

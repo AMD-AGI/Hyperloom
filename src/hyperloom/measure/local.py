@@ -51,7 +51,7 @@ from hyperloom.measure.farm import FarmError, build_farm, place_farm, server_pyt
 from hyperloom.measure.framework_copies import PrivateFramework, private_framework
 from hyperloom.measure.framework_rows import RowsOnlyRefused
 from hyperloom.measure.magpie_launchers import install_launchers
-from hyperloom.measure.phases import KERNEL_TABLES, OTHER, REPRO_CASE, ROUND_COLLECT, TEARDOWN, PhaseRecorder
+from hyperloom.measure.phases import JIT_CACHE, KERNEL_TABLES, OTHER, REPRO_CASE, ROUND_COLLECT, TEARDOWN, PhaseRecorder
 from hyperloom.measure.ports import DEV_SANDBOX_PORTS, pick_port_outside_dev_sandboxes
 from hyperloom.measure.profile_client import ProfileClientError, patch_profile_client
 from hyperloom.measure.profile_traces import PROFILE_DIR, collect_traces
@@ -117,6 +117,8 @@ _TEST = "test"
 _SUPPORTED_KINDS = (_TEST, _ACCURACY, _PROFILE, _REPRO)
 #: The kinds of ``TestCall`` this backend runs; a toolbox refuses any other at acceptance.
 SUPPORTED_KINDS = _SUPPORTED_KINDS
+#: The kinds of test whose compiled code another test may be given: a profile or a repro ran under other settings.
+_CONTRIBUTING = frozenset({_TEST, _ACCURACY})
 
 #: The old flow reads the process environment, so two tests in one process would see each other's settings.
 _PROCESS_LOCK = threading.Lock()
@@ -185,12 +187,36 @@ class LocalMeasurementBackend:
         _validate(call)
         phases = PhaseRecorder() if call.phases is None else call.phases
         with _PROCESS_LOCK:
+            call = _seeded(call, phases)
             phases.begin(KERNEL_TABLES)
             run = _measure(call, phases)
         _raise_on_timeout(run)
         if run.call.kind == _PROFILE:
             _gather_traces(run)
-        return _outcome(run)
+        return _staged(_outcome(run), call, phases)
+
+
+def _seeded(call: TestCall, phases: PhaseRecorder) -> TestCall:
+    """The call with the shared compiled-code cache seeded for it: the test's own cache directories are filled from the
+    verified snapshots and the server is pointed at them (design 4.21)."""
+    if call.jit is None:
+        return call
+    phases.begin(JIT_CACHE)
+    call.jit.seed()
+    return dataclasses.replace(call, env_overrides={**call.env_overrides, **call.jit.environment()})
+
+
+def _staged(outcome: TestOutcome, call: TestCall, phases: PhaseRecorder) -> TestOutcome:
+    """Stage what the compilers added when the test succeeded and its kind may contribute; the outcome is unchanged."""
+    if (
+        call.jit is not None
+        and outcome.returncode == 0
+        and outcome.failure_class is None
+        and call.kind in _CONTRIBUTING
+    ):
+        phases.begin(JIT_CACHE)
+        call.jit.collect()
+    return outcome
 
 
 def _measure(call: TestCall, phases: PhaseRecorder) -> _Run:

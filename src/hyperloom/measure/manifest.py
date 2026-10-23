@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from hyperloom.contracts.measurement import MAX_PHASE_SECONDS, MeasurementError, PhaseTiming
+from hyperloom.measure.jit_kinds import STATES as JIT_STATES
 from hyperloom.measure.docs import (
     PREFIXED_SHA256_RE,
     SHA256_RE,
@@ -199,6 +200,79 @@ class Timing:
 
 
 @dataclass(frozen=True)
+class JitContribution:
+    """What a test staged for the shared cache of a kind: the hash of the snapshot list it extends and what was new."""
+
+    sha256: str
+    files: int
+    bytes: int
+
+    @classmethod
+    def parse(cls, value: Any, path: str) -> "JitContribution":
+        r = Reader(value, path)
+        gave = cls(
+            r.text("sha256", pattern=SHA256_RE) or "",
+            r.integer("files", minimum=0) or 0,
+            r.integer("bytes", minimum=0) or 0,
+        )
+        r.done()
+        return gave
+
+
+@dataclass(frozen=True)
+class JitKindFacts:
+    """How one kind of compiled-code cache went in a test: its key, the state it was found in and what it gave."""
+
+    kind: str
+    key: str | None
+    state: str
+    seed_files: int
+    seed_bytes: int
+    seed_snapshot: str | None
+    contribution: JitContribution | None
+
+    @classmethod
+    def parse(cls, value: Any, path: str) -> "JitKindFacts":
+        r = Reader(value, path)
+        contribution = r.optional("contribution")
+        facts = cls(
+            kind=r.text("kind") or "",
+            key=r.text("key", pattern=SHA256_RE, optional=True),
+            state=r.choice("state", JIT_STATES) or "",
+            seed_files=r.integer("seed_files", minimum=0) or 0,
+            seed_bytes=r.integer("seed_bytes", minimum=0) or 0,
+            seed_snapshot=r.text("seed_snapshot", pattern=SHA256_RE, optional=True),
+            contribution=None if contribution is None else JitContribution.parse(contribution, r.at("contribution")),
+        )
+        r.done()
+        return facts
+
+
+@dataclass(frozen=True)
+class JitCacheFacts:
+    """What the runner signs of the shared compiled-code cache: each kind, and how much aiter built while the server ran
+    (``builds_seen`` is zero when everything it needed was found built)."""
+
+    kinds: tuple[JitKindFacts, ...]
+    builds_seen: int
+    jit_compile_sec: float
+
+    @classmethod
+    def parse(cls, value: Any, path: str) -> "JitCacheFacts":
+        r = Reader(value, path)
+        facts = cls(
+            kinds=r.sequence("kinds", JitKindFacts.parse),
+            builds_seen=r.integer("builds_seen", minimum=0) or 0,
+            jit_compile_sec=r.number("jit_compile_sec", minimum=0) or 0.0,
+        )
+        r.done()
+        names = [kind.kind for kind in facts.kinds]
+        if len(set(names)) != len(names):
+            raise DocumentError(f"{path}.kinds: a kind appears twice")
+        return facts
+
+
+@dataclass(frozen=True)
 class ManifestFile:
     path: str
     size: int
@@ -232,6 +306,7 @@ class ResultManifest:
     platform_env_changed: tuple[str, ...]
     timing: Timing
     files: tuple[ManifestFile, ...]
+    jit_cache: JitCacheFacts | None = None
 
     @classmethod
     def from_document(cls, document: Any) -> "ResultManifest":
@@ -248,6 +323,7 @@ class ResultManifest:
             platform_env_changed=r.sequence("platform_env_changed", _name),
             timing=r.section("timing", Timing.parse),
             files=r.sequence("files", ManifestFile.parse),
+            jit_cache=_optional(r, "jit_cache", JitCacheFacts.parse),
         )
         r.done()
         paths = [entry.path for entry in manifest.files]
@@ -262,6 +338,11 @@ class ResultManifest:
 
     def total_size(self) -> int:
         return sum(entry.size for entry in self.files)
+
+
+def _optional(reader: Reader, key: str, parse: Any) -> Any:
+    value = reader.optional(key)
+    return None if value is None else parse(value, reader.at(key))
 
 
 def _name(value: Any, path: str) -> str:

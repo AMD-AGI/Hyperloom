@@ -33,6 +33,7 @@ __all__ = [
     "BOOT_WEIGHTS",
     "CLIENT_START",
     "ENV_REBUILD",
+    "JIT_CACHE",
     "KERNEL_TABLES",
     "LANDED",
     "MEASURED",
@@ -78,6 +79,7 @@ SHEET_WAIT = "sheet_wait"
 PREFLIGHT = "preflight"
 ENV_REBUILD = "env_rebuild"
 KERNEL_TABLES = "kernel_tables"
+JIT_CACHE = "jit_cache"
 RESULT_SIGNING = "result_signing"
 # One round.
 ROUND_SETUP = "round_setup"
@@ -105,6 +107,7 @@ PHASE_ORDER = (
     SHEET_WAIT,
     PREFLIGHT,
     ENV_REBUILD,
+    JIT_CACHE,
     KERNEL_TABLES,
     ROUND_SETUP,
     SERVER_BOOT,
