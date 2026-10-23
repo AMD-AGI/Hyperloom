@@ -12,14 +12,14 @@ import os
 import shlex
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
 from hyperloom.common.coerce import to_unix
 from hyperloom.common.env import forge_explicitly_enabled
 from hyperloom.common.gpu_partition import published_shape
-from hyperloom.common.gpu_power_settings import DeclaredPowerSettings
+from hyperloom.common.gpu_power_settings import SCLK_MAX_MHZ, DeclaredPowerSettings
 from hyperloom.common.perf_metric import is_agentx_mode
 from hyperloom.common.timeutil import now_iso
 from hyperloom.orchestrator.actions.executors._workload_envs import (
@@ -279,6 +279,7 @@ _MAX_PER_GPU_POWER_W = "max_per_gpu_power_w"
 _NODES = "nodes"
 _GPU_POWER_CAP_W = "gpu_power_cap_w"
 _GPU_PERF_LEVEL = "gpu_perf_level"
+_GPU_SCLK_MAX_MHZ = "gpu_sclk_max_mhz"
 _NODE_POWER_MANAGEMENT = "node_power_management"
 _NODE_POWER_LIMIT_W = "node_power_limit_w"
 _DECLARED = "declared"
@@ -366,6 +367,7 @@ def resolve_launch_gpu_power(args: Any, *, nodes: int, owner: str) -> dict[str, 
             DeclaredPowerSettings(
                 power_cap_w=getattr(args, _GPU_POWER_CAP_W, None),
                 perf_level=getattr(args, _GPU_PERF_LEVEL, None) or "",
+                sclk_max_mhz=getattr(args, _GPU_SCLK_MAX_MHZ, None),
                 npm=getattr(args, _NODE_POWER_MANAGEMENT, None) or "",
                 node_power_limit_w=getattr(args, _NODE_POWER_LIMIT_W, None),
             ),
@@ -394,6 +396,7 @@ def resume_gpu_power_settings(args: Any, state: Any) -> tuple[dict[str, Any], st
         DeclaredPowerSettings(
             power_cap_w=getattr(args, _GPU_POWER_CAP_W, None) or declared.get("power_cap_w"),
             perf_level=getattr(args, _GPU_PERF_LEVEL, None) or declared.get("perf_level") or "",
+            sclk_max_mhz=getattr(args, _GPU_SCLK_MAX_MHZ, None) or declared.get(SCLK_MAX_MHZ),
             npm=getattr(args, _NODE_POWER_MANAGEMENT, None) or declared.get("npm") or "",
             node_power_limit_w=getattr(args, _NODE_POWER_LIMIT_W, None) or declared.get("node_power_limit_w"),
         ),
@@ -443,13 +446,12 @@ def resolve_gpu_power_settings(
 
     ``record`` is what the session stores and the platform fingerprint shows: the declared values, what each card
     reported and, where amd-smi reports it, the node's NPM state and limit. ``error`` is non-empty when a declared value
-    does not hold, or cannot be checked, and the launch must stop. Nothing is set here: the operator sets the cap and
-    perf level with ``amd-smi set`` before launch, or ``--apply-gpu-power-settings`` set them just before this check;
-    NPM is set on the BMC.
+    does not hold, or cannot be checked, and the launch must stop. Nothing is set here: the operator sets the cap, perf
+    level and sclk limit with ``amd-smi set`` before launch, or ``--apply-gpu-power-settings`` set the cap and level
+    just before this check; NPM is set on the BMC.
     """
     from hyperloom.common.gpu_power_settings import (
         GpuPowerSettingsError,
-        declared_setting_problems,
         read_gpu_power_settings,
         visible_gpu_indices,
     )
@@ -458,13 +460,13 @@ def resolve_gpu_power_settings(
     if nodes >= 2:
         if declared:
             return {}, (
-                "--gpu-power-cap-w / --gpu-perf-level / --node-power-management / --node-power-limit-w cannot be "
-                "checked on a multi-node session: they describe the benchmark nodes' cards, which this process cannot "
-                "read, and an unverifiable assertion is not a satisfied one"
+                "--gpu-power-cap-w / --gpu-perf-level / --gpu-sclk-max-mhz / --node-power-management / "
+                "--node-power-limit-w cannot be checked on a multi-node session: they describe the benchmark nodes' "
+                "cards, which this process cannot read, and an unverifiable assertion is not a satisfied one"
             )
         return {}, ""
     # The node's settings need neither the cards' reading nor the mask, so only a card declaration refuses without them.
-    cards_declared = any(declared_settings.as_row().values())
+    cards_declared = any(declared_settings.card_row().values())
     try:
         observed = (read or read_gpu_power_settings)()
     except GpuPowerSettingsError as exc:
@@ -484,22 +486,30 @@ def resolve_gpu_power_settings(
         _DECLARED: declared,
         "observed": {str(gpu): row for gpu, row in sorted(observed.items()) if gpus is None or gpu in gpus},
     }
-    problems = declared_setting_problems(
-        observed,
-        power_cap_w=declared.get("power_cap_w"),
-        perf_level=declared.get("perf_level"),
-        gpus=gpus,
-    )
     node, node_error = _node_power_settings(declared_settings)
     if node is not None:
         record["node"] = node
-    why = (
-        "the GPUs did not take the power settings just applied"
-        if just_applied
-        else "the GPUs are not at the declared power settings (set them with amd-smi before launch)"
-    )
-    errors = [f"{why}: " + "; ".join(problems)] if problems else []
+    errors = _card_errors(observed, declared_settings, gpus=gpus, just_applied=just_applied)
     return record, "; ".join(errors + [node_error] if node_error else errors)
+
+
+def _card_errors(
+    observed: dict[int, dict[str, Any]], declared: DeclaredPowerSettings, *, gpus: set[int] | None, just_applied: bool
+) -> list[str]:
+    """Why the cards are not at the declared settings, worded for who sets each: the clock limit is never applied."""
+    from hyperloom.common.gpu_power_settings import declared_setting_problems
+
+    unset = "the GPUs are not at the declared power settings (set them with amd-smi before launch)"
+    if not just_applied:
+        problems = declared_setting_problems(observed, declared, gpus=gpus)
+        return [f"{unset}: " + "; ".join(problems)] if problems else []
+    not_taken = declared_setting_problems(observed, replace(declared, sclk_max_mhz=None), gpus=gpus)
+    asserted = declared_setting_problems(observed, DeclaredPowerSettings(sclk_max_mhz=declared.sclk_max_mhz), gpus=gpus)
+    return [
+        f"{why}: " + "; ".join(problems)
+        for why, problems in (("the GPUs did not take the power settings just applied", not_taken), (unset, asserted))
+        if problems
+    ]
 
 
 def _build_agentx_corpus_shape_seed() -> dict[str, Any]:

@@ -83,11 +83,10 @@ def _install(monkeypatch, ledger, *, observed=None, vram=None, mask=_MASK, smi=N
     return smi
 
 
-def _apply(monkeypatch, tmp_path, *, nodes=1, power_cap_w=1000.0, perf_level=None, **install_kw):
+def _apply(monkeypatch, tmp_path, *, nodes=1, power_cap_w=1000.0, perf_level=None, sclk_max_mhz=None, **install_kw):
     smi = _install(monkeypatch, tmp_path, **install_kw)
-    record = apply_declared_gpu_power_settings(
-        DeclaredPowerSettings(power_cap_w=power_cap_w, perf_level=perf_level or ""), nodes=nodes, owner="sess"
-    )
+    declared = DeclaredPowerSettings(power_cap_w=power_cap_w, perf_level=perf_level or "", sclk_max_mhz=sclk_max_mhz)
+    record = apply_declared_gpu_power_settings(declared, nodes=nodes, owner="sess")
     return record, smi
 
 
@@ -378,13 +377,24 @@ class TestApplyDeclared:
 
     @pytest.mark.parametrize(
         ("kw", "needle"),
-        [({"nodes": 2}, "multi-node"), ({"power_cap_w": None, "perf_level": None}, "needs --gpu-power-cap-w")],
+        [
+            ({"nodes": 2}, "multi-node"),
+            ({"power_cap_w": None, "perf_level": None}, "needs --gpu-power-cap-w"),
+            ({"power_cap_w": None, "sclk_max_mhz": 1500}, "needs --gpu-power-cap-w"),
+        ],
+        ids=["multi-node", "nothing", "clock-limit-only"],
     )
     def test_refusals_before_touching_anything(self, tmp_path, kw, needle, monkeypatch):
         smi = _AmdSmi()
         with pytest.raises(GpuPowerSettingsError, match=needle):
             _apply(monkeypatch, tmp_path, smi=smi, **kw)
         assert smi.calls == []
+
+    def test_a_declared_clock_limit_is_never_set(self, tmp_path, monkeypatch, guard):
+        record, smi = _apply(monkeypatch, tmp_path, sclk_max_mhz=1500)
+        assert all("-L" not in call for call in smi.calls)
+        assert record["originals"]["4"] == {"power_cap_w": 1400.0}
+        guard.run()
 
     def test_both_declared_are_both_restored(self, tmp_path, monkeypatch, guard):
         record, smi = _apply(monkeypatch, tmp_path, perf_level="determinism")
