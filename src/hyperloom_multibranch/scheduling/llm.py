@@ -1,13 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The one LLM call shape the scheduling side uses: a system and a user prompt in, the reply text, its tokens and
-what they cost out.
+"""How the scheduling side makes the :data:`~hyperloom_multibranch.contracts.llm.Completion` the contracts declare.
 
-The judge and the integrator's patch resolver take a :data:`Completion` through their constructors, so tests hand
-them a deterministic stand-in; production builds one with :func:`anthropic_completion` over ``llm_config``, priced
-from the price sheet when it lists the model. A call that fails raises :class:`CompletionFailed` whatever the transport, so the callers name
-one error. :func:`recorded` writes what each reply cost to the notebook as the scheduler's own LLM usage.
+The judge and the integrator's patch resolver take a ``Completion`` through their constructors, so tests hand them a
+deterministic stand-in; production builds one with :func:`anthropic_completion` over ``llm_config``, priced from the
+price sheet when it lists the model. :func:`recorded` writes what each reply cost to the notebook as the scheduler's
+own LLM usage.
 """
 
 from __future__ import annotations
@@ -15,8 +14,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass
+from collections.abc import Mapping
 
 from hyperloom.common.llm_config import (
     AGENT_BACKEND_CLAUDE,
@@ -26,21 +24,12 @@ from hyperloom.common.llm_config import (
     provider_model_defaults,
     resolve_forge_llm_model,
 )
+from hyperloom_multibranch.contracts.llm import Completion, CompletionFailed, CompletionReply
 from hyperloom_multibranch.contracts.llm_prices import TokenCounts, price_of
 from hyperloom_multibranch.contracts.notebook.interfaces import UsageSink
 from hyperloom_multibranch.contracts.notebook.records import LlmUsage
 from hyperloom_multibranch.contracts.notebook.vocab import UsageSource
 
-
-@dataclass(frozen=True)
-class CompletionReply:
-    text: str
-    tokens: TokenCounts
-    cost_usd: float | None
-
-
-#: ``(system, user) -> reply``; raises :class:`CompletionFailed` when the call fails.
-Completion = Callable[[str, str], Awaitable[CompletionReply]]
 
 logger = logging.getLogger(__name__)
 
@@ -49,10 +38,6 @@ COMPLETION_MAX_TOKENS = 8192
 # default 5 s read timeout ends a long reply before it arrives.
 MB_LLM_CONNECT_TIMEOUT_SECONDS = 15.0
 MB_LLM_READ_TIMEOUT_SECONDS = 120.0
-
-
-class CompletionFailed(RuntimeError):
-    """The model could not be asked or gave no reply; the caller keeps what it had."""
 
 
 def default_model() -> str:
@@ -122,9 +107,6 @@ def anthropic_completion(model: str, *, component: str, operation: str) -> Compl
 __all__ = [
     "MB_LLM_CONNECT_TIMEOUT_SECONDS",
     "MB_LLM_READ_TIMEOUT_SECONDS",
-    "Completion",
-    "CompletionFailed",
-    "CompletionReply",
     "anthropic_completion",
     "default_model",
     "recorded",

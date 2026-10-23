@@ -40,7 +40,7 @@ from hyperloom_multibranch.scheduling.branches import REPAIR_BRANCH_SECONDS, REP
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.events import MB_BIG_GAIN_BARS, MB_BOTTLENECK_SHIFT_PP, SessionEvent
 from hyperloom_multibranch.scheduling.forks import PendingBranch
-from hyperloom_multibranch.scheduling.llm import Completion, CompletionFailed
+from hyperloom_multibranch.contracts.llm import Completion, CompletionFailed
 from hyperloom_multibranch.scheduling.roster import (
     BranchEntry,
     BranchKind,

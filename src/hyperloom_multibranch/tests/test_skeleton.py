@@ -127,7 +127,7 @@ from hyperloom_multibranch.scheduling.lifecycle import (
     persisted_run,
 )
 from hyperloom_multibranch.scheduling.local_peers import workload_rule
-from hyperloom_multibranch.scheduling.llm import CompletionFailed, CompletionReply
+from hyperloom_multibranch.contracts.llm import CompletionFailed, CompletionReply
 from hyperloom_multibranch.scheduling.peers import Peers, PeerSetup
 from hyperloom_multibranch.scheduling.policy import SCHEDULING_POLICY, policy_version
 from hyperloom_multibranch.scheduling.roster import BranchOrigin, BranchStatus, RosterCaps, StopCause, final_quota

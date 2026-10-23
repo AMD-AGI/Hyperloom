@@ -65,7 +65,7 @@ from hyperloom_multibranch.rulegate.service import GateNotebook, GateService, Po
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.local_peers import GATE_WRITER
-from hyperloom_multibranch.scheduling.llm import CompletionReply
+from hyperloom_multibranch.contracts.llm import CompletionReply
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry, RegisteredProcess
 from hyperloom_multibranch.specialist.judging import Judging
 from hyperloom_multibranch.specialist.runtime import RuntimePacing, SessionFactory, SessionStart, SpecialistRuntime

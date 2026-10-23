@@ -67,7 +67,7 @@ from hyperloom_multibranch.scheduling.integrator import (
     MergeReport,
     not_stackable_reason,
 )
-from hyperloom_multibranch.scheduling.llm import CompletionFailed
+from hyperloom_multibranch.contracts.llm import CompletionFailed
 from hyperloom_multibranch.rulegate import agentx
 from hyperloom_multibranch.rulegate.service import BASELINE_TESTS
 from hyperloom_multibranch.scheduling.requests import SessionChecks, SessionTests, integration_test_request

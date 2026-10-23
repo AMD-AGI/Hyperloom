@@ -59,7 +59,7 @@ from hyperloom_multibranch.rulegate.inferencex import GAIN_BELOW_THRESHOLD, GAIN
 from hyperloom_multibranch.scheduling.candidates import Candidates
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind, DecisionLog
-from hyperloom_multibranch.scheduling.llm import Completion, CompletionFailed
+from hyperloom_multibranch.contracts.llm import Completion, CompletionFailed
 from hyperloom_multibranch.scheduling.requests import SessionChecks, integration_test_request
 
 logger = logging.getLogger(__name__)

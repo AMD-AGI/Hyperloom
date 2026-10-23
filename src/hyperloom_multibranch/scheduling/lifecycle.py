@@ -71,7 +71,8 @@ from hyperloom_multibranch.scheduling.forks import ForkDesk
 from hyperloom_multibranch.scheduling.integrator import Integrator, LlmPatchResolver, MergeRecords
 from hyperloom_multibranch.scheduling.judge import JUDGE_PROMPT_VERSION, Judge
 from hyperloom_multibranch.scheduling.layout import SessionLayout
-from hyperloom_multibranch.scheduling.llm import Completion, recorded
+from hyperloom_multibranch.contracts.llm import Completion
+from hyperloom_multibranch.scheduling.llm import recorded
 from hyperloom_multibranch.scheduling.manifest import CodeVersion, SessionManifest, code_version, read_manifest
 from hyperloom_multibranch.scheduling.peers import PeerFactory, PeerSetup
 from hyperloom_multibranch.scheduling.policy import SCHEDULING_POLICY, policy_version
