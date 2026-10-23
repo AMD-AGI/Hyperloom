@@ -738,7 +738,7 @@ function-lines src/kernelforge/loop/runner.py::IterationLoop._restore_or_begin_c
 function-lines src/kernelforge/loop/runner.py::IterationLoop._rule_on_attempt 81
 function-lines src/kernelforge/loop/runner.py::IterationLoop._run_locked 61
 function-lines src/kernelforge/loop/runner.py::IterationLoop._run_supervisor_review 69
-function-lines src/kernelforge/loop/runner.py::IterationLoop._source_attempt 148
+function-lines src/kernelforge/loop/runner.py::IterationLoop._source_attempt 142
 function-lines src/kernelforge/loop/runner.py::IterationLoop._update_search_policy 51
 function-lines src/kernelforge/loop/runner.py::IterationLoop.run_one_iteration 61
 function-lines src/kernelforge/loop/task_preflight.py::_count_graph_replays 68
@@ -746,7 +746,7 @@ function-lines src/kernelforge/loop/task_preparer.py::_commit_prepared_task 61
 function-lines src/kernelforge/loop/task_preparer.py::prepare_task 286
 function-lines src/kernelforge/loop/task_preparer_prompts.py::_build_prompt 54
 function-lines src/kernelforge/orchestrator/agent.py::make_agent_fn 263
-function-lines src/kernelforge/orchestrator/agent.py::make_agent_fn.agent_fn 142
+function-lines src/kernelforge/orchestrator/agent.py::make_agent_fn.agent_fn 140
 function-lines src/kernelforge/orchestrator/analysis.py::AnalysisAgentService._finalize_framework_artifacts 74
 function-lines src/kernelforge/orchestrator/analysis.py::AnalysisAgentService._has_valid_profile_evidence 53
 function-lines src/kernelforge/orchestrator/analysis.py::AnalysisAgentService._prompts 215
