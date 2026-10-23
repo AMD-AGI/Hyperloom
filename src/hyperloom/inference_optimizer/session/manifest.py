@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Session manifest writer — the first file written after ``make_session_dir()`` and the canonical session-resume tag (atomic write via tmp + ``os.replace``)."""
+"""Session manifest writer — the first file written after ``make_session_dir()`` and the canonical session-resume tag."""
 
 from __future__ import annotations
 
@@ -12,11 +12,11 @@ import os
 import platform
 import socket
 import subprocess
-import tempfile
 import uuid
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.io import atomic_write_json
 from hyperloom.common.provenance import build_provenance
 from hyperloom.common.timeutil import now_iso, utc_now_compact
 
@@ -249,16 +249,7 @@ def write_manifest(
     """Atomically write ``manifest.json`` under session_dir; returns the manifest dict."""
     sd = Path(session_dir)
     manifest = build_manifest(sd, args=args, session_id=session_id)
-    target = manifest_path(sd)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(prefix=".manifest.", suffix=".tmp", dir=str(target.parent))
-    os.close(fd)
-    tmp_path = Path(tmp)
-    tmp_path.write_text(
-        json.dumps(manifest, indent=2, sort_keys=True),
-        encoding="utf-8",
-    )
-    os.replace(tmp_path, target)
+    atomic_write_json(manifest_path(sd), manifest)
     # The manifest stamp is where the spawn-time image, host and pid are
     # resolved; record them now so the exporter reads a fact instead of
     # re-probing the environment of whichever process happens to export.
