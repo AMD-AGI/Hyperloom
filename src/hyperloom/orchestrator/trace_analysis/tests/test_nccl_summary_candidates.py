@@ -14,7 +14,6 @@ import unittest.mock
 from pathlib import Path
 
 from hyperloom.orchestrator.trace_analysis._nccl_summary_candidates import (
-    _itanium_components,
     _prorated_totals,
     collective_symbol,
     extract_collective_candidates,
@@ -25,24 +24,6 @@ from hyperloom.orchestrator.trace_analysis._nccl_summary_candidates import (
 AITER_2STAGE = (
     "_ZN5aiter26cross_device_reduce_2stageIDF16bLi8ELb0EEEvPNS_8RankDataES2_NS_11RankSignalsEPNS_6SignalEPT_ii"
 )
-
-
-class ItaniumParsingTests(unittest.TestCase):
-    def test_nested_symbol_splits_into_components(self) -> None:
-        self.assertEqual(
-            _itanium_components(AITER_2STAGE),
-            ["aiter", "cross_device_reduce_2stage"],
-        )
-
-    def test_non_nested_name_yields_nothing(self) -> None:
-        self.assertEqual(_itanium_components("ncclDevKernel_Generic_1"), [])
-
-    def test_truncated_length_prefix_does_not_overrun(self) -> None:
-        # Length 99 exceeds what remains, so parsing stops instead of slicing past the end of the string.
-        self.assertEqual(_itanium_components("_ZN99short"), [])
-
-    def test_zero_length_component_stops_parsing(self) -> None:
-        self.assertEqual(_itanium_components("_ZN0abc"), [])
 
 
 class CollectiveSymbolTests(unittest.TestCase):
@@ -61,6 +42,19 @@ class CollectiveSymbolTests(unittest.TestCase):
     def test_empty_name_yields_empty(self) -> None:
         self.assertEqual(collective_symbol(""), "")
         self.assertEqual(collective_symbol("   "), "")
+
+    def test_non_nested_mangled_name_yields_device_function(self) -> None:
+        self.assertEqual(collective_symbol("_Z21ncclDevKernel_Genericv"), "ncclDevKernel_Generic")
+
+    def test_demangled_signature_drops_return_type(self) -> None:
+        self.assertEqual(
+            collective_symbol("void ncclDevKernel_Generic(ncclDevKernelArgsStorage<4096ul>)"),
+            "ncclDevKernel_Generic",
+        )
+        self.assertEqual(
+            collective_symbol("void aiter::cross_device_reduce_2stage<__hip_bfloat16, 8>(aiter::RankData*, int)"),
+            "cross_device_reduce_2stage",
+        )
 
 
 def _locate_device_symbol(symbol: str, roots: list[str]) -> tuple[str, int, str] | None:
@@ -578,12 +572,11 @@ class CollectiveContractTests(unittest.TestCase):
         # A bare "reduce" match would pick torch.distributed.reduce, whose result only lands on rank 0, silently
         # voiding the parity gate.
         item = {"name": AITER_2STAGE}
-        self.enrich(item, {"TP_SIZE": 8})
+        self.enrich(item, {})
         contract = item["kernel_contract"]
         self.assertEqual(contract["kind"], "collective")
         self.assertEqual(contract["collective_op"], "all_reduce")
         self.assertEqual(contract["reference"], "torch.distributed.all_reduce")
-        self.assertEqual(contract["tp_size"], 8)
 
     def test_genuine_reduce_still_maps_to_reduce(self) -> None:
         item = {"name": "my_reduce_kernel"}

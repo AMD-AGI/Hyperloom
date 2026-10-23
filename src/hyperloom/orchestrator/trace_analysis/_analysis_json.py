@@ -31,7 +31,7 @@ from hyperloom.common.coerce import first_str, to_float
 from ._kernel_source import ResolveResult, resolve_source_verdict
 
 
-def load_report_tasks(analysis_json: str | Path, *, framework: str = "") -> list[dict[str, Any]]:
+def load_report_tasks(analysis_json: str | Path) -> list[dict[str, Any]]:
     """Read ``analysis.json`` into ordered hot-kernel candidate rows.
 
     Expands every ``compute_optimizations[]`` task's ``members[]`` into one
@@ -42,8 +42,6 @@ def load_report_tasks(analysis_json: str | Path, *, framework: str = "") -> list
 
     Args:
         analysis_json: Path to the ``analysis.json`` TraceLens wrote.
-        framework: Optional serving framework. Accepted but not yet forwarded to
-            the resolver; reserved for a future TraceLens per-call search-path filter.
 
     Returns:
         Candidate rows in TraceLens' task/member order. Empty when the file is
@@ -68,7 +66,7 @@ def load_report_tasks(analysis_json: str | Path, *, framework: str = "") -> list
             if not isinstance(member, dict):
                 continue
             candidate = _member_to_candidate(task, member)
-            _resolve_member_source(candidate, framework=framework)
+            _resolve_member_source(candidate)
             candidates.append(candidate)
     return candidates
 
@@ -116,7 +114,7 @@ def _member_to_candidate(task: dict[str, Any], member: dict[str, Any]) -> dict[s
     return candidate
 
 
-def _resolve_member_source(candidate: dict[str, Any], *, framework: str = "") -> None:
+def _resolve_member_source(candidate: dict[str, Any]) -> None:
     """Resolve the candidate's primary device symbol through TraceLens.
 
     One ``resolve_kernel_source`` call per symbol; the returned ``ResolveResult``
@@ -135,10 +133,8 @@ def _resolve_member_source(candidate: dict[str, Any], *, framework: str = "") ->
     candidate["source_line"] = location.line if location else None
     candidate["op_to_source_patchable"] = result.patchable
     candidate["op_to_source_reason"] = result.reason
-    candidate["op_to_source_status"] = "resolved" if result.patchable else "non_rewritable"
     candidate["kernel_kind"] = result.kind
     candidate["source_resolution_method"] = result.method
-    candidate["source_resolution_reason"] = result.reason
 
 
 def _shapes_with_dtypes(shapes: Any, dtypes: Any) -> list[str]:

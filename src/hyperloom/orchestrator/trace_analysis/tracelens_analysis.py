@@ -24,7 +24,6 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 from hyperloom.common.coerce import first_str
-from hyperloom.common.io import JsonFormat, atomic_write_json
 from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.framework_paths import (
     FRAMEWORK_SOURCE_PACKAGES as _FRAMEWORK_SOURCE_PACKAGES,
@@ -49,27 +48,28 @@ from TraceLens.Agent.Analysis.category_analyses.analysis_utils import perf_repor
 from TraceLens.Agent.Analysis.post_processing import render_analysis_json
 
 from ._analysis_json import load_report_tasks
+from ._capture_shapes import is_capture_fragment
 from ._io_utils import append_log
 from ._analysis_reports import OrchestratorOutcome, write_reports
 from .analysis_route import AnalysisRoute
-from ._candidate_assembly import _finalize_candidates, analyze_trace_files, write_source_resolution_artifact
+from ._candidate_assembly import _finalize_candidates, write_source_resolution_artifact
 from ._collective_candidates_inject import _inject_collective_candidates
 from ._kernel_roofline import default_roofline_fields
 from ._kernel_search import refresh_kernel_search_roots
 from ._perf_report_analysis import analyze_perf_report
-from ._run_status import RunStatus
+from ._run_status import RunStatus, new_run_meta, note_step
 from ._trace_gates import WorkloadShares, _evaluate_idle_gate_with_graph_guard, _evaluate_low_compute_gate
 from ._trace_inputs import (
     _capture_classification_root,
     _count_kernels_if_readable,
-    _is_capture_fragment,
     _trace_file_size,
     discover_trace_inputs,
 )
 from ._trace_split import TraceSplitJob, _default_workspace_path, _run_trace_split
+
+# trace_analyze heals a vanished checkout through this module's _ensure_tracelens_checkout.
 from ._tracelens_checkout import (
-    _ensure_tracelens_checkout,
-    _is_default_tracelens_root,
+    _ensure_tracelens_checkout,  # noqa: F401
     _resolve_arch_benchmark_timeout_s,
     _resolve_tracelens_model,
     _tracelens_checkout_complete,
@@ -93,36 +93,6 @@ _KERNEL_PROBE_LIMIT = 8
 #: reach hundreds of megabytes, and eight of those would turn a failure that
 #: used to take a second into one that takes minutes or exhausts memory.
 _KERNEL_PROBE_BYTE_BUDGET = 512 * 1024 * 1024
-
-
-# Candidate building keeps a broad pool; dispatch grouping owns the real budget gate.
-# Override with HYPERLOOM_KERNEL_CANDIDATES_TOP_K; non-positive means unbounded.
-_DEFAULT_KERNEL_CANDIDATES_TOP_K = 100
-
-
-def _default_top_k() -> int:
-    """Resolve the default kernel-candidate pool size.
-
-    Reads ``HYPERLOOM_KERNEL_CANDIDATES_TOP_K`` when set (``0``/negative =>
-    unbounded pool, represented internally as a very large cap), otherwise
-    falls back to :data:`_DEFAULT_KERNEL_CANDIDATES_TOP_K`.
-
-    Returns:
-        The candidate-build-time cap (a large number when unbounded).
-    """
-    raw = os.environ.get("HYPERLOOM_KERNEL_CANDIDATES_TOP_K", "").strip()
-    if not raw:
-        return _DEFAULT_KERNEL_CANDIDATES_TOP_K
-    try:
-        val = int(raw)
-    except (TypeError, ValueError):
-        return _DEFAULT_KERNEL_CANDIDATES_TOP_K
-    # 0 / negative => no build-time cap (dispatch layer owns the budget).
-    return val if val > 0 else 1_000_000
-
-
-# HIGH_IDLE_PCT_THRESHOLD_* and the idle-gate helpers now live in _idle_gate
-# (imported above) as the shared single source of truth across trace routes.
 
 
 # TRACELENS_ROOT comes from env / --tracelens-root (fail loudly if absent);
@@ -244,10 +214,6 @@ def _check_tracelens_checkout(args: argparse.Namespace, log_path: Path) -> _Trac
     # Internal extension is opt-in (non-empty --tracelens-internal-root / env).
     internal_root_arg = args.tracelens_internal_root.strip()
     tl_internal_root: Path | None = Path(internal_root_arg) if internal_root_arg else None
-    if not _tracelens_checkout_complete(tl_root) and _is_default_tracelens_root(tl_root):
-        # The installer-managed pod-local checkout can vanish mid-run;
-        # self-heal the default path. An operator override fails fast below.
-        _ensure_tracelens_checkout(tl_root, log_path=log_path)
     if not tl_root.exists():
         raise FileNotFoundError(f"TraceLens root not found: {tl_root} (set TRACELENS_ROOT or pass --tracelens-root)")
     # A dir that exists but has neither git metadata nor the TraceLens
@@ -434,7 +400,7 @@ def _agent_route_outcome(
         _record_gate_suppression(gates, warnings, log_path)
     else:
         # TraceLens owns the parse/group/prose/impact/order; render its structured analysis.json beside the md.
-        report_cands = load_report_tasks(render_analysis_json(report_path), framework=args.framework)
+        report_cands = load_report_tasks(render_analysis_json(report_path))
         raw_candidates = _inject_collective_candidates(
             skill_result.output_dir,
             report_cands,
@@ -450,7 +416,6 @@ def _agent_route_outcome(
 
 def _run_non_llm_route(
     run_config_path: Path,
-    framework: str,
     raw_trace_path: Path,
     warnings: list[dict[str, Any]],
     log_path: Path,
@@ -471,7 +436,7 @@ def _run_non_llm_route(
     if gates.suppressed:
         _record_gate_suppression(gates, warnings, log_path)
     else:
-        raw_candidates = load_report_tasks(report_path, framework=framework)
+        raw_candidates = load_report_tasks(report_path)
     return RouteOutcome(
         report_path=report_path,
         orchestrator_mode=AnalysisRoute.NON_LLM.value,
@@ -482,7 +447,7 @@ def _run_non_llm_route(
 def _reject_capture_only_input(trace_input: Path, trace_files: list[Path]) -> None:
     """Raise when every discovered trace is a CUDA-graph capture sidecar."""
     capture_root = _capture_classification_root(trace_input)
-    if all(_is_capture_fragment(p, capture_root) for p in trace_files):
+    if all(is_capture_fragment(p, capture_root) for p in trace_files):
         raise RuntimeError(
             "trace_input_capture_only: "
             f"all {len(trace_files)} trace file(s) under {trace_input} "
@@ -716,7 +681,7 @@ def main() -> int:
     status_path = run_dir / "status" / "tracelens_analysis" / f"{run_id}.json"
     artifacts: dict[str, str] = {}
     run_status = RunStatus(status_path, log_path, artifacts, run_id, started_at)
-    route_candidates: list[dict[str, Any]] | None = None
+    route_candidates: list[dict[str, Any]] = []
     route_report_path: Path | None = None
     orchestrator_mode = "inline"
     # Structured trace-health findings surfaced to the Coordinator.
@@ -725,42 +690,7 @@ def main() -> int:
     # reaching the CLI log. The caller records it on the SBD V6 roofline event as
     # the run happens, so "which file was analysed, how was the steady-state
     # window picked, which gate refused" survives without re-reading the log.
-    run_meta: dict[str, Any] = {
-        "preflight": {},
-        "split": {},
-        "selection": {},
-        "steps": [],
-        "route_ext": {},
-    }
-
-    def _note_step(
-        step_id: str,
-        *,
-        category: str,
-        status: str,
-        skip_reason: str | None = None,
-        **detail: Any,
-    ) -> None:
-        """Append one step to the run's ladder.
-
-        Args:
-            step_id: Stable step name.
-            category: Ladder phase (``preflight`` / ``install`` / ``split`` /
-                ``select`` / ``analyze`` / ``emit``).
-            status: ``ok`` / ``failed`` / ``skipped``.
-            skip_reason: Why the step did not run, when skipped.
-            **detail: Measured values for the step.
-        """
-        run_meta["steps"].append(
-            {
-                "step_id": step_id,
-                "order": len(run_meta["steps"]) + 1,
-                "category": category,
-                "status": status,
-                "skip_reason": skip_reason,
-                "detail": detail,
-            }
-        )
+    run_meta = new_run_meta()
 
     # Discovery is cached per run, so re-run it here: a process that outlives a
     # single run would otherwise keep the roots it saw when it first imported
@@ -803,7 +733,8 @@ def main() -> int:
                 "trace_file_count": len(trace_files),
             }
         )
-        _note_step(
+        note_step(
+            run_meta,
             "discover_inputs",
             category="preflight",
             status="ok",
@@ -868,7 +799,8 @@ def main() -> int:
                     "input_promoted": analysis_trace_path != trace_files[0],
                 }
             )
-            _note_step(
+            note_step(
+                run_meta,
                 "probe_gpu_kernels",
                 category="preflight",
                 status="ok" if kernel_event_count else "failed",
@@ -967,7 +899,8 @@ def main() -> int:
                     "fell_back_to_full_trace": False,
                 }
             )
-            _note_step(
+            note_step(
+                run_meta,
                 "split_trace",
                 category="split",
                 status="ok",
@@ -975,7 +908,8 @@ def main() -> int:
                 num_steps=split_meta.get("num_steps"),
                 chunks_extracted=split_meta["chunks_extracted"],
             )
-            _note_step(
+            note_step(
+                run_meta,
                 "select_chunk",
                 category="select",
                 status="ok",
@@ -1003,7 +937,8 @@ def main() -> int:
                 else discover_capture_folder(trace_input, [analysis_trace_path])
             )
             if capture_folder:
-                _note_step(
+                note_step(
+                    run_meta,
                     "discover_capture_folder",
                     category="preflight",
                     status="ok",
@@ -1016,7 +951,8 @@ def main() -> int:
                     f"capture_folder resolved: {capture_folder} (exists={capture_folder.is_dir()})",
                 )
             else:
-                _note_step(
+                note_step(
+                    run_meta,
                     "discover_capture_folder",
                     category="preflight",
                     status="skipped",
@@ -1049,9 +985,7 @@ def main() -> int:
                     artifacts.update(skill_result.artifact_paths)
                     outcome = _agent_route_outcome(skill_result, args, raw_trace_path, trace_health_warnings, log_path)
                 else:
-                    outcome = _run_non_llm_route(
-                        run_config_path, args.framework, raw_trace_path, trace_health_warnings, log_path
-                    )
+                    outcome = _run_non_llm_route(run_config_path, raw_trace_path, trace_health_warnings, log_path)
             route_report_path = outcome.report_path
             orchestrator_mode = outcome.orchestrator_mode
             route_candidates = []
@@ -1081,13 +1015,9 @@ def main() -> int:
                 log_path,
                 f"hot kernels from the {route.value} route ({len(candidates)})",
             )
-        elif args.dry_run:
-            # Dry-run only.
-            append_log(log_path, "dry-run: parsing raw trace for hot kernels")
-            candidates = analyze_trace_files(trace_files, _default_top_k())
         else:
-            # Routing signal (high idle / TraceLens failure): keep candidates
-            # empty so the Coordinator pivots to params/backends.
+            # Routing signal (high idle / TraceLens failure) or a dry run: keep
+            # candidates empty so the Coordinator pivots to params/backends.
             append_log(
                 log_path,
                 "TraceLens produced no kernel candidates; returning "
@@ -1138,24 +1068,13 @@ def main() -> int:
             # What this run saw and decided, for the caller's timeline event.
             "run_meta": run_meta,
         }
-        _note_step(
+        note_step(
+            run_meta,
             "extract_hot_kernels",
             category="emit",
             status="ok",
             hot_kernel_count=len(candidates),
             orchestrator_mode=orchestrator_mode,
-        )
-        atomic_write_json(
-            run_dir / "session_state.json",
-            {
-                "session_id": session_id,
-                "last_tool": "tracelens_analysis",
-                "last_run_id": run_id,
-                "updated_at": now_iso(timespec="auto"),
-                "model_name": args.model_name,
-                "framework": args.framework,
-            },
-            fmt=JsonFormat(trailing_newline=True),
         )
         run_status.write(
             state="succeeded",
