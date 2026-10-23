@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 from hyperloom_kb import RemoteReadResult
 
-from hyperloom.contracts.recipe import ConfigDelta, LaunchConfig, Recipe, RecipeDelta
+from hyperloom.contracts.recipe import ConfigDelta, KernelArtifact, KernelKind, LaunchConfig, Recipe, RecipeDelta
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, UnknownRequest, Writer
 from hyperloom_multibranch.contracts.notebook.peers import IntentLayer, Verdict
 from hyperloom_multibranch.contracts.notebook.records import (
@@ -289,6 +289,24 @@ async def test_another_branchs_tested_change_is_replayed_on_the_branch_head_as_i
 
     tested = RecipeDelta(config=ConfigDelta(server_args="--max-num-seqs 256"))
     assert replayed == PeerReplay("r1", "s1", "c3", tested, IntentLayer.CONFIG)
+
+
+async def test_a_peer_replay_names_the_heads_kernel_its_change_takes_the_place_of(tmp_path: Path) -> None:
+    root = tmp_path / "notebook"
+    notebook = await scripted_session(root, FakeClock())
+    toolbox = LocalNotebook(root, Writer(Role.TOOLBOX, "toolbox"), clock=FakeClock())
+    own, other, theirs = (
+        KernelArtifact(KernelKind.GEMM, target, f"kernel/gemm/{name}.csv", digit * 64)
+        for target, name, digit in (("qkv_proj", "head", "b"), ("moe", "moe", "c"), ("qkv_proj", "peer", "d"))
+    )
+    await toolbox.write_request(request("r7", SPLIT_KV, RecipeDelta(add_kernels=(theirs,))))
+    head = Recipe("sha256:" + "a" * 64, LaunchConfig("--max-num-seqs 128"), kernels=(own, other))
+    briefing = CrossSessionBriefing(notebook, branch="s3", repo=_Repo({"s3": "c3"}, {"c3": head}))
+
+    replayed = await briefing.peer_replay("r7")
+
+    assert replayed.replaces == (own,)
+    assert replayed.layer is IntentLayer.KERNEL
 
 
 async def test_a_peer_replay_says_why_when_there_is_nothing_to_replay_on_the_branch_head(tmp_path: Path) -> None:

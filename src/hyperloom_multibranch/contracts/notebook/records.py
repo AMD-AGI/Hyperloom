@@ -11,7 +11,7 @@ import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 
-from hyperloom.contracts.recipe import RecipeDelta
+from hyperloom.contracts.recipe import KernelArtifact, RecipeDelta
 from hyperloom_multibranch.contracts.llm_prices import TokenCounts
 from hyperloom_multibranch.contracts.notebook.peers import (
     BranchLogEntry,
@@ -543,7 +543,9 @@ class PeerReplay:
     """The change another branch's test ``request_id`` tried, to test on ``parent_commit``, the caller's head.
 
     It is that test's own delta, not the difference between the two heads, which would carry ``branch``'s earlier
-    commits too. ``layer`` is the deepest layer the change reaches, the one its intent claims.
+    commits too. ``layer`` is the deepest layer the change reaches, the one its intent claims. ``replaces`` are the
+    head's kernel artifacts the change's take the place of: a target loads one artifact of a kind, so the test runs
+    without them.
     """
 
     request_id: str
@@ -551,6 +553,7 @@ class PeerReplay:
     parent_commit: str
     delta: RecipeDelta
     layer: IntentLayer
+    replaces: tuple[KernelArtifact, ...] = ()
 
 
 @dataclass(frozen=True)

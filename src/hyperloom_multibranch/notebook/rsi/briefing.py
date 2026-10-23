@@ -253,9 +253,9 @@ class CrossSessionBriefing(StartupBriefProvider):
         return kept
 
     async def peer_replay(self, request_id: str) -> PeerReplay:
-        """The change another branch's test ``request_id`` tried, to test on this branch's head; ``ValueError`` says
-        why there is none: the test is this branch's own or changed nothing, was made on this head already, or this head
-        has or cannot take it."""
+        """The change another branch's test ``request_id`` tried, to test on this branch's head, with the head's kernel
+        artifacts it replaces; ``ValueError`` says why there is none: the test is this branch's own or changed nothing,
+        was made on this head already, or this head has or cannot take it."""
 
         request = (await self.notebook.record(request_id)).request
         if request.branch == self.branch:
@@ -274,7 +274,9 @@ class CrossSessionBriefing(StartupBriefProvider):
             raise ValueError(f"the change {request_id} tested no longer applies to your head {head}: {exc}") from exc
         if replayed == recipe:
             raise ValueError(f"your head {head} already has the change {request_id} tested")
-        return PeerReplay(request_id, request.branch, head, request.delta, delta_layer(request.delta))
+        added = {artifact.slot for artifact in request.delta.add_kernels}
+        replaces = tuple(item for item in recipe.kernels if item.slot in added and item not in replayed.kernels)
+        return PeerReplay(request_id, request.branch, head, request.delta, delta_layer(request.delta), replaces)
 
     async def _recall(self, snapshot: NotebookSnapshot) -> Recall | None:
         if self.experiences is None or snapshot.profile is None:

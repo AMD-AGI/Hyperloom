@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import PurePosixPath
 from typing import Any, Protocol, runtime_checkable
 
 from hyperloom.contracts.recipe import RecipeDelta, RecipeError
@@ -294,11 +295,17 @@ def render_replay(replay: WarmReplay) -> str:
 
 
 def render_peer_replay(replay: PeerReplay) -> str:
-    """How to test another branch's change on this branch's head: the intent to claim, then the change to submit."""
+    """How to test another branch's change on this branch's head: each kernel artifact of the head's it replaces, then
+    the intent to claim and the change to submit."""
 
     found = _claim_and_change(replay.request_id, replay.parent_commit, replay.layer, replay.delta)
     first = f"replay of {replay.request_id}, the change {replay.branch} tested, on your head {replay.parent_commit}"
-    return "\n".join((first, *found))
+    replaced = (
+        f"it replaces your head's {item.kind.value} kernel {PurePosixPath(item.ref).name} for {item.target}: a target "
+        f"loads one of a kind, so this tests {replay.branch}'s in place of yours, not on top of it"
+        for item in replay.replaces
+    )
+    return "\n".join((first, *replaced, *found))
 
 
 def _key(arguments: Arguments) -> ClaimKey:
