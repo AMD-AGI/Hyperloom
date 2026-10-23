@@ -22,7 +22,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from hyperloom.common.rule_pack import rule_pack_identity
-from hyperloom.measure.archive import DirResultArchive, ResultArchive
+from hyperloom.measure.archive import ResultArchive
 from hyperloom.measure.hosted import FILES_ROOT, HostedConfig, HostedMeasurementBackend
 from hyperloom.measure.hosted_log import STATE_FINISHED
 from hyperloom.measure.hosted_spec import SpecContext
@@ -32,15 +32,21 @@ from hyperloom.measure.local_templates import local_runner_template
 from hyperloom.measure.rule_pack_stage import rule_pack_envs
 from hyperloom.sandbox.local import LocalSandboxProvider
 from hyperloom.sandbox.templates import LocalTemplate
-from hyperloom_multibranch.contracts.toolbox import BranchLease, MeasurementCapacity
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.toolbox.attempts import DEFAULT_MAX_INFRA_RETRIES
 from hyperloom_multibranch.toolbox.branch_leases import BranchLeases
 from hyperloom_multibranch.toolbox.hosted_executor import DEFAULT_TEST_TIMEOUT_SEC, HostedExecutor
+from hyperloom_multibranch.toolbox.leased_toolbox import (
+    LeasedToolbox,
+    capped_policy,
+    session_archive,
+    session_stores,
+    session_tools,
+    started_backend,
+)
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
-from hyperloom_multibranch.toolbox.submission_log import SubmissionLog
-from hyperloom_multibranch.toolbox.tools import AsyncTool, ToolJobs, kernel_tune_tool, tracelens_tool
-from hyperloom_multibranch.toolbox.toolbox import AcceptanceSetup, RealToolbox, ToolboxStores, ToolboxTuning
+from hyperloom_multibranch.toolbox.tools import AsyncTool, kernel_tune_tool, tracelens_tool
+from hyperloom_multibranch.toolbox.toolbox import AcceptanceSetup, ToolboxTuning
 
 __all__ = [
     "LocalHostedToolbox",
@@ -53,11 +59,10 @@ __all__ = [
 
 #: One node serves at most eight cards, so at most ``8 / TP`` tests run at once (handover 5, item 7).
 MAX_CARDS_PER_NODE = 8
-_SANDBOXES, _ARCHIVE, _SUBMISSIONS = "sandboxes", "archive", "toolbox/submissions.jsonl"
+_SANDBOXES = "sandboxes"
 _BRANCH_SANDBOXES = "branch-sandboxes"
 _FRAMEWORK = "framework"
 _RULE_PACK = "rule-pack"
-_TOOL_RESULTS = "tool-results"
 _POLL_INTERVAL_SEC = 2.0
 LEAKED_CARDS_REASON = "sandbox processes not provably gone"
 #: The logs of a running test that show whether it still makes progress; the one written last is reported.
@@ -71,10 +76,12 @@ _CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]+")
 logger = logging.getLogger(__name__)
 
 
-class LocalHostedToolbox(RealToolbox):
+class LocalHostedToolbox(LeasedToolbox):
     """A :class:`RealToolbox` that also owns its hosted backend and local sandbox provider; ``close`` releases them.
 
-    ``sandboxes`` is the provider's directory, where a running test's live files are read for :meth:`progress`.
+    ``sandboxes`` is the provider's directory, where a running test's live files are read for :meth:`progress`. The
+    cards tests can run on are the provider's pool less the cards it lost for good (``provider.quarantined``) and the
+    leases; node quarantine does not reduce them.
     """
 
     backend: HostedMeasurementBackend
@@ -82,7 +89,6 @@ class LocalHostedToolbox(RealToolbox):
     leases: BranchLeases
     sandboxes: Path
     _reported_cards: frozenset[int] = frozenset()
-    _loop: asyncio.AbstractEventLoop | None = None
 
     @property
     def single_node(self) -> bool:
@@ -90,42 +96,12 @@ class LocalHostedToolbox(RealToolbox):
 
         return True
 
-    async def measurement_capacity(self) -> MeasurementCapacity:
-        """The provider's card pool, less the cards it lost for good (``provider.quarantined``); node quarantine does
-        not reduce it. The cards leased to branch sandboxes are in ``leased_cards``."""
-
-        return self.leases.capacity()
-
-    async def lease_branch_sandbox(self, branch_id: str, cards: int) -> BranchLease:
-        """Take ``cards`` cards from the provider's pool for ``branch_id``'s agent, waiting for running tests to
-        give them back like a measurement sandbox does; see :class:`BranchLeases`."""
-
-        return await self.leases.lease(branch_id, cards)
-
-    def attach_leases(self, leases: BranchLeases) -> None:
-        """Take ``leases`` as the leases on the provider's cards: the tests the cards they give back let run start."""
-
-        self.leases = leases
-        leases.on_release = self._pump_soon
-
-    def _pump_soon(self) -> None:
-        """Start what the cards just given back let run, on the toolbox's loop; safe from any thread, and nothing before
-        :meth:`start` or after the loop ended."""
-
-        if self._loop is not None:
-            with contextlib.suppress(RuntimeError):
-                self._loop.call_soon_threadsafe(self._pump)
-
     async def release_branch_sandbox(self, lease_id: str) -> None:
         self.leases.release(lease_id)
-
-    def _parallel_limit(self) -> int:
-        return self.leases.tests_at_once()
 
     async def start(self) -> None:
         """Start, after taking back the leaks an earlier run of this host recorded in the notebook."""
 
-        self._loop = asyncio.get_running_loop()
         await self._restore_leaked_cards()
         await super().start()
 
@@ -294,18 +270,6 @@ def _provider(
     )
 
 
-def _started(provider: LocalSandboxProvider, config: HostedConfig) -> HostedMeasurementBackend:
-    backend = HostedMeasurementBackend(provider, config)
-    backend.start()
-    return backend
-
-
-def _capped(policy: QueuePolicy | None, parallel: int) -> QueuePolicy:
-    """``policy`` with its global concurrency lowered to what the cards can run in parallel."""
-    base = policy or QueuePolicy()
-    return replace(base, global_concurrency=min(base.global_concurrency, parallel))
-
-
 def _local_tools(leases: BranchLeases, options: LocalOptions) -> Sequence[AsyncTool]:
     """What ``options`` serves: its own tools, or TraceLens and the tuner, which is served only where a card can be
     spared for it."""
@@ -351,13 +315,13 @@ def build_local_toolbox(
         spec=spec,
         runner_templates={tp: f"runner-{tp}"},
         rule_pack_digest=rule_pack_identity()["digest"],
-        archive=options.archive or DirResultArchive(directory / _ARCHIVE),
+        archive=session_archive(options.archive, directory),
         max_parallel_tests=parallel,
         poll_interval_sec=options.poll_interval_sec,
     )
     template = _runner_template(session, options)
     provider = _provider(session, cards, template, options)
-    backend = _started(provider, config)
+    backend = started_backend(provider, config)
     leases = BranchLeases(provider, directory / _BRANCH_SANDBOXES, tp, template.envs)
     executor = HostedExecutor(
         backend,
@@ -367,17 +331,13 @@ def build_local_toolbox(
         workload_kind=acceptance.workload_kind,
     )
     toolbox = LocalHostedToolbox(
-        ToolboxStores(
-            log=SubmissionLog(directory / _SUBMISSIONS, session.run_id),
-            sink=notebook,  # type: ignore[arg-type]
-            health=notebook,  # type: ignore[arg-type]
-            claims=notebook,  # type: ignore[arg-type]
-            records=notebook,  # type: ignore[arg-type]
-        ),
+        session_stores(notebook, directory, session.run_id),
         executor,
         _accepting_local_kinds(acceptance),
-        tools=ToolJobs(_local_tools(leases, options), notebook, directory / _TOOL_RESULTS),  # type: ignore[arg-type]
-        tuning=ToolboxTuning(policy=_capped(options.policy, parallel), max_infra_retries=options.max_infra_retries),
+        tools=session_tools(_local_tools(leases, options), notebook, directory),
+        tuning=ToolboxTuning(
+            policy=capped_policy(options.policy, parallel), max_infra_retries=options.max_infra_retries
+        ),
     )
     toolbox.backend, toolbox.provider, toolbox.trace_root = backend, provider, directory
     toolbox.attach_leases(leases)
