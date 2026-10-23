@@ -65,7 +65,7 @@ cyclomatic-complexity src/hyperloom/orchestrator/trace_analysis/tracelens_analys
 dead-code src/hyperloom/orchestrator/actions/executors/_grid_runner.py::SessionDirField.__get__:objtype 1
 dead-code src/kernelforge/loop/run_state.py::WorkspaceLock.__exit__:exc_value 1
 directory-entries src/hyperloom/common 57
-directory-entries src/hyperloom/orchestrator/actions/executors 83
+directory-entries src/hyperloom/orchestrator/actions/executors 84
 duplicated-lines src/hyperloom/inference_optimizer/breakdown/collectors/sessions.py 19
 duplicated-lines src/hyperloom/inference_optimizer/breakdown/recorder/recorder.py 28
 duplicated-lines src/hyperloom/inference_optimizer/multi_node/scripts/kernel_node_ops.py 13
