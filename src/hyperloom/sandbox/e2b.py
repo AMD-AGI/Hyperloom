@@ -324,7 +324,7 @@ class E2BSandboxProvider:
     ) -> Sandbox:
         """Create a sandbox and wait until the service reports it running.
 
-        The wait is bounded by ``options.wait_sec``. A metadata ``claw.io/idempotency-key`` makes a repeated create
+        The wait is bounded by ``options.wait_sec``. A metadata ``agent-sandbox.io/idempotency-key`` makes a repeated create
         (also this method's own retry after a server error) return the sandbox the service already made.
 
         Raises:

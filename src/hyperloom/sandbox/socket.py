@@ -40,14 +40,14 @@ __all__ = [
 Role = Literal["measurement", "subrun", "dev"]
 
 #: Metadata the caller writes.
-IDEMPOTENCY_KEY = "claw.io/idempotency-key"
-AVOID_NODES_KEY = "claw.io/avoid-nodes"  # comma-separated node names
-PRIORITY_KEY = "claw.io/priority"
+IDEMPOTENCY_KEY = "agent-sandbox.io/idempotency-key"
+AVOID_NODES_KEY = "agent-sandbox.io/avoid-nodes"  # comma-separated node names
+PRIORITY_KEY = "agent-sandbox.io/priority"
 
 #: Metadata only the platform writes; a caller that passes one is refused.
-NODE_NAME_KEY = "claw.io/node-name"
-SIGNING_PUBLIC_KEY = "claw.io/signing-public-key"
-SAME_NODE_KEY = "claw.io/same-node"
+NODE_NAME_KEY = "agent-sandbox.io/node-name"
+SIGNING_PUBLIC_KEY = "agent-sandbox.io/signing-public-key"
+SAME_NODE_KEY = "agent-sandbox.io/same-node"
 PLATFORM_METADATA_KEYS = frozenset({NODE_NAME_KEY, SIGNING_PUBLIC_KEY, SAME_NODE_KEY})
 
 
@@ -86,7 +86,7 @@ class SandboxInfo:
     Attributes:
         sandbox_id: The sandbox's identifier.
         template: The template it was created from.
-        metadata: Keys the caller wrote plus the platform's ``claw.io/`` keys.
+        metadata: Keys the caller wrote plus the platform's ``agent-sandbox.io/`` keys.
     """
 
     sandbox_id: str
