@@ -10,7 +10,6 @@ import json
 import logging
 import os
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
 from hyperloom.common.perf_metric import agentx_active
@@ -60,9 +59,8 @@ class ExperienceKBEvidence:
 class ExperienceKBIntegration:
     """One fail-open Experience service client and decision-context read cache."""
 
-    def __init__(self, client: Any, session_dir: Path, schema_ref: str) -> None:
+    def __init__(self, client: Any, schema_ref: str) -> None:
         self.client = client
-        self.session_dir = Path(session_dir)
         # The service may hold several schemas; a run reads the one it writes.
         self.schema_ref = schema_ref
         self._cache_tick: int | None = None
@@ -70,11 +68,7 @@ class ExperienceKBIntegration:
         self._failed_in_a_row = 0
 
     @classmethod
-    def from_env(
-        cls,
-        session_dir: str | Path,
-        env: dict[str, str] | None = None,
-    ) -> ExperienceKBIntegration | None:
+    def from_env(cls, env: dict[str, str] | None = None) -> ExperienceKBIntegration | None:
         values = os.environ if env is None else env
         try:
             config = RemoteConfig.from_env(values, timeout_seconds=REQUEST_TIMEOUT_SECONDS)
@@ -84,7 +78,7 @@ class ExperienceKBIntegration:
         except (RemoteClientError, ConfigurationError, MappingError):
             log.exception("Experience service configuration is invalid; reads are disabled")
             return None
-        return cls(RemoteClient(config), Path(session_dir), schema_ref)
+        return cls(RemoteClient(config), schema_ref)
 
     def _context(self, state: Any, observations: dict[str, str]) -> dict[str, Any]:
         identity_sources = {
@@ -219,12 +213,12 @@ def _reads_off_reason(state: Any) -> str:
     return ""
 
 
-def integration_for(state: Any, session_dir: str | Path) -> ExperienceKBIntegration | None:
+def integration_for(state: Any) -> ExperienceKBIntegration | None:
     """Build the session's Experience service integration, or None when this run must not read Experiences."""
     if reason := _reads_off_reason(state):
         log.info("Experience KB reads are off for this run: %s", reason)
         return None
-    return ExperienceKBIntegration.from_env(session_dir)
+    return ExperienceKBIntegration.from_env()
 
 
 __all__ = ["ExperienceKBEvidence", "ExperienceKBIntegration", "integration_for"]
