@@ -731,46 +731,6 @@ def _ensure_bench_serving_deps(python_exe: str, pip_extra: list[str]) -> dict[st
     }
 
 
-def _ensure_framework_deps(args, python_exe: str, pip_extra: list[str]) -> dict[str, Any]:
-    """Install the selected framework's declared runtime deps into python_exe."""
-    from hyperloom.inference_optimizer import framework_deps, framework_registry
-
-    framework = (
-        getattr(args, "framework", None) or os.environ.get("FRAMEWORK", "")
-    ).strip().lower() or framework_registry.DEFAULT_FRAMEWORK
-    try:
-        outcome = framework_deps.ensure(framework, python_exe=python_exe, pip_extra=tuple(pip_extra))
-    except framework_deps.TorchClobberedError as exc:
-        print(f"Preflight: FATAL {exc}", file=sys.stderr)
-        sys.exit(2)
-    # Frameworks that ship no manifest are the common case; stay quiet unless the manifest actually asked for
-    # something or was partly rejected.
-    if outcome.skipped_reason and not (outcome.refused or outcome.invalid):
-        status = "skipped"
-    else:
-        framework_deps.report(outcome, prefix="Preflight: framework deps")
-        if outcome.failed or outcome.refused or outcome.invalid:
-            status = "warned"
-        elif outcome.installed:
-            status = "applied"
-        else:
-            status = "already_present"
-    return {
-        "status": status,
-        "skip_reason": outcome.skipped_reason or None,
-        "target": framework,
-        "interpreter": python_exe,
-        "detail": {
-            "manifest": str(outcome.manifest) if outcome.manifest is not None else None,
-            "installed": list(outcome.installed),
-            "already_present": list(outcome.already_present),
-            "refused": list(outcome.refused),
-            "invalid": list(outcome.invalid),
-            "failed": list(outcome.failed),
-        },
-    }
-
-
 # Escape hatch for the serving-framework gate below, mirroring install_baremetal.sh's --skip-base-check.
 SKIP_FRAMEWORK_CHECK_ENV = "HYPERLOOM_SKIP_FRAMEWORK_CHECK"
 
@@ -2478,14 +2438,6 @@ def _preflight(
             benchmark_python,
             pip_extra,
         ),
-    )
-
-    # 1d.
-    _run_install_step(
-        install_event,
-        step_id="framework_deps",
-        category="install",
-        action=lambda: _ensure_framework_deps(args, benchmark_python, pip_extra),
     )
 
     # 1e.

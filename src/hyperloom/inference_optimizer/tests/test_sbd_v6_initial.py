@@ -738,7 +738,6 @@ def _stub_preflight_steps(tmp_path, monkeypatch):
     monkeypatch.setattr(preflight, "_ensure_ray", lambda *_args: None)
     monkeypatch.setattr(preflight, "_ensure_bench_serving_deps", lambda *_args: None)
     monkeypatch.setattr(preflight, "_ensure_lm_eval_dep", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(preflight, "_ensure_framework_deps", lambda *_args: None)
     monkeypatch.setattr(preflight, "_check_serving_framework", lambda *_args: None)
     monkeypatch.setattr(preflight.inferencex_checkout, "checkout_ok", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(preflight.inferencex_checkout, "head_sha", lambda *_args: "abc123")
@@ -788,7 +787,6 @@ def test_preflight_records_install_steps_in_execution_order(tmp_path, monkeypatc
         "ensure_ray",
         "ensure_bench_serving_deps",
         "ensure_lm_eval",
-        "framework_deps",
         "check_serving_framework",
         "ensure_magpie",
         "clone_inferencex",
