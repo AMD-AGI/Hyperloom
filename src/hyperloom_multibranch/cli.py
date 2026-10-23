@@ -92,7 +92,11 @@ from hyperloom_multibranch.scheduling.lifecycle import (
     persisted_run,
     pinned_frontier_choice,
 )
-from hyperloom_multibranch.scheduling.llm import anthropic_completion, default_model
+from hyperloom_multibranch.scheduling.llm import (
+    MB_RESOLVER_READ_TIMEOUT_SECONDS,
+    anthropic_completion,
+    default_model,
+)
 from hyperloom_multibranch.scheduling.local_peers import (
     AGENTX_ENV,
     load_peers,
@@ -403,7 +407,9 @@ def session_services(recipe_kb: RemoteRecipeClient | None) -> SessionServices:
 
     model = default_model()
     judge = anthropic_completion(model, component=PROG, operation="judge")
-    resolver = anthropic_completion(model, component=PROG, operation="patch_resolve")
+    resolver = anthropic_completion(
+        model, component=PROG, operation="patch_resolve", read_seconds=MB_RESOLVER_READ_TIMEOUT_SECONDS
+    )
     critic = partial(LlmCritic, anthropic_critic(model, component=PROG))
     scorer = anthropic_completion(model, component=PROG, operation="author_scorers")
     return SessionServices(judge, resolver, recipe_kb, critic, scorer, model)

@@ -37,7 +37,6 @@ set it would run is still empty; what it leaves the integration branch at is the
 from __future__ import annotations
 
 import asyncio
-import logging
 from collections.abc import Sequence, Set
 from dataclasses import dataclass, replace
 from functools import partial
@@ -62,11 +61,14 @@ from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind, D
 from hyperloom_multibranch.contracts.llm import Completion, CompletionFailed
 from hyperloom_multibranch.scheduling.requests import SessionChecks, integration_test_request
 
-logger = logging.getLogger(__name__)
-
 SUPERSEDED = "superseded: another candidate of the round was merged onto this head first"
 EXPLORATION_ENDED = "exploration ended"
 ALREADY_ON_HEAD = "its change is already on the integration head"
+#: A patch the three-way rebase could not settle and the resolver's answer did not resolve either.
+CONFLICT_UNRESOLVED = "unresolved patch conflict"
+#: The same conflict, lost before any answer: the resolver could not be reached. Counted apart from
+#: :data:`CONFLICT_UNRESOLVED`, because a timed-out call says nothing about whether the patches can be combined.
+RESOLVER_UNREACHED = "the patch resolver could not be asked"
 #: The JSON key the resolver's reply carries the rewritten patch under; ``null`` means it cannot be combined.
 PATCH_KEY = "patch"
 RESOLVER_SYSTEM_PROMPT = (
@@ -114,7 +116,11 @@ class LlmPatchResolver:
         self._repo = repo
 
     async def resolve(self, merge: RepoMerge, candidate: str) -> RecipeDelta | None:
-        """``merge``'s delta with every conflicting patch rewritten and added; ``None`` when one stays unresolved."""
+        """``merge``'s delta with every conflicting patch rewritten and added; ``None`` when one stays unresolved.
+
+        A call that fails raises :class:`CompletionFailed`: a model that could not be asked is a different loss from
+        a model that answered, and the merge log names them apart.
+        """
 
         merged = apply(await self._repo.read_recipe(merge.onto), merge.delta)
         rewritten: dict[str, list[PatchRef]] = {}
@@ -131,11 +137,7 @@ class LlmPatchResolver:
 
     async def _rewrite(self, conflict: PatchConflict, merged: Recipe, candidate: str, onto: str) -> str | None:
         prompt = await self._prompt(conflict, merged, candidate, onto)
-        try:
-            reply = (await self._completion(RESOLVER_SYSTEM_PROMPT, prompt)).text
-        except CompletionFailed as exc:
-            logger.warning("patch resolver call for %s failed: %s", conflict.path, exc)
-            return None
+        reply = (await self._completion(RESOLVER_SYSTEM_PROMPT, prompt)).text
         answer = extract_last_json_with_key(reply, PATCH_KEY)
         rewritten = answer.get(PATCH_KEY) if answer is not None else None
         return rewritten if isinstance(rewritten, str) and rewritten.strip() else None
@@ -364,10 +366,12 @@ class Integrator:
         conflicts = "; ".join(f"{conflict.path}: {conflict.detail}" for conflict in merge.patch_conflicts)
         try:
             delta = await self._resolver.resolve(merge, candidate)
+        except CompletionFailed as exc:
+            raise _Skipped(f"{RESOLVER_UNREACHED}: {conflicts}: {exc}") from exc
         except BlobError as exc:
-            raise _Skipped(f"unresolved patch conflict: {conflicts}: {exc}") from exc
+            raise _Skipped(f"{CONFLICT_UNRESOLVED}: {conflicts}: {exc}") from exc
         if delta is None:
-            raise _Skipped(f"unresolved patch conflict: {conflicts}")
+            raise _Skipped(f"{CONFLICT_UNRESOLVED}: {conflicts}")
         return delta
 
     async def _skip(
@@ -522,8 +526,10 @@ def _decision(report: MergeReport) -> Decision:
 
 
 __all__ = [
+    "CONFLICT_UNRESOLVED",
     "FOUNDATION_FIX_VERDICTS",
     "GAIN_ONLY_REFUSALS",
+    "RESOLVER_UNREACHED",
     "Integrator",
     "LlmPatchResolver",
     "MergeRecords",

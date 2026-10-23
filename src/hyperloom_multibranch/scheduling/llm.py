@@ -38,6 +38,9 @@ COMPLETION_MAX_TOKENS = 8192
 # default 5 s read timeout ends a long reply before it arrives.
 MB_LLM_CONNECT_TIMEOUT_SECONDS = 15.0
 MB_LLM_READ_TIMEOUT_SECONDS = 120.0
+# A patch resolver's reply carries a whole unified diff, which takes longer to write than a judgement: the
+# ad4ab4d9 session lost two merge candidates to the 120 s read timeout rather than to a conflict it could not settle.
+MB_RESOLVER_READ_TIMEOUT_SECONDS = 300.0
 
 
 def default_model() -> str:
@@ -73,16 +76,18 @@ def recorded(completion: Completion, notebook: UsageSink, source: UsageSource) -
     return complete
 
 
-def anthropic_completion(model: str, *, component: str, operation: str) -> Completion:
+def anthropic_completion(
+    model: str, *, component: str, operation: str, read_seconds: float = MB_LLM_READ_TIMEOUT_SECONDS
+) -> Completion:
     """A :data:`Completion` over ``llm_config``'s Anthropic transport, tagged with ``component`` and ``operation``,
     each reply priced at ``model``'s rates; a model the price sheet does not list gives replies with no cost, which
-    no dollar cap counts, and says so once here."""
+    no dollar cap counts, and says so once here. ``read_seconds`` bounds how long a reply may take to arrive."""
 
     price = price_of(model)
     if price is None:
         logger.warning("%s runs on %s, which the price sheet does not list: it records tokens only", operation, model)
     errors = _transport_errors()
-    timeout = build_http_timeout(connect=MB_LLM_CONNECT_TIMEOUT_SECONDS, read=MB_LLM_READ_TIMEOUT_SECONDS)
+    timeout = build_http_timeout(connect=MB_LLM_CONNECT_TIMEOUT_SECONDS, read=read_seconds)
 
     async def complete(system: str, user: str) -> CompletionReply:
         request = AnthropicCompletionRequest(
@@ -91,7 +96,7 @@ def anthropic_completion(model: str, *, component: str, operation: str) -> Compl
             max_tokens=COMPLETION_MAX_TOKENS,
             system=system,
             timeout=timeout,
-            timeout_s=MB_LLM_READ_TIMEOUT_SECONDS,
+            timeout_s=read_seconds,
         )
         try:
             result = await aanthropic_completion(request=request, component=component, operation=operation)
@@ -107,6 +112,7 @@ def anthropic_completion(model: str, *, component: str, operation: str) -> Compl
 __all__ = [
     "MB_LLM_CONNECT_TIMEOUT_SECONDS",
     "MB_LLM_READ_TIMEOUT_SECONDS",
+    "MB_RESOLVER_READ_TIMEOUT_SECONDS",
     "anthropic_completion",
     "default_model",
     "recorded",

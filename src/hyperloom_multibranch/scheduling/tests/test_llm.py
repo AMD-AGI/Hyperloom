@@ -56,6 +56,23 @@ async def test_the_completion_returns_the_reply_text_its_tokens_and_their_cost(m
     )
 
 
+async def test_a_reply_may_take_as_long_as_the_caller_allows_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The read timeout is the caller's: a judgement is a sentence, a resolved patch is a whole unified diff."""
+
+    asked = _answering(monkeypatch, {})
+
+    await llm.anthropic_completion(MODEL, component="c", operation="judge")("sys", "user")
+    await llm.anthropic_completion(
+        MODEL, component="c", operation="patch_resolve", read_seconds=llm.MB_RESOLVER_READ_TIMEOUT_SECONDS
+    )("sys", "user")
+
+    judge, resolver = asked
+    assert judge.timeout_s == llm.MB_LLM_READ_TIMEOUT_SECONDS
+    assert resolver.timeout_s == llm.MB_RESOLVER_READ_TIMEOUT_SECONDS > llm.MB_LLM_READ_TIMEOUT_SECONDS
+    assert (judge.timeout.read, resolver.timeout.read) == (judge.timeout_s, resolver.timeout_s)
+    assert judge.timeout.connect == resolver.timeout.connect == llm.MB_LLM_CONNECT_TIMEOUT_SECONDS
+
+
 async def test_cache_writes_split_by_lifetime_are_priced_at_their_own_rates(monkeypatch: pytest.MonkeyPatch) -> None:
     _answering(
         monkeypatch,

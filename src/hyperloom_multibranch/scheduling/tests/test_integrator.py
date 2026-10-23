@@ -58,8 +58,10 @@ from hyperloom_multibranch.scheduling.decisions import DecisionKind, DecisionLog
 from hyperloom_multibranch.scheduling.explore import EXPLORE_TICK_SECONDS
 from hyperloom_multibranch.scheduling.integrator import (
     ALREADY_ON_HEAD,
+    CONFLICT_UNRESOLVED,
     FOUNDATION_FIX_VERDICTS,
     RESOLVER_SYSTEM_PROMPT,
+    RESOLVER_UNREACHED,
     SUPERSEDED,
     Integrator,
     LlmPatchResolver,
@@ -814,23 +816,29 @@ async def test_a_patch_that_does_not_apply_on_the_head_is_rewritten_before_the_m
 
 
 @pytest.mark.parametrize(
-    "scripted",
+    ("scripted", "named"),
     [
-        ScriptedCompletion(fallback=json.dumps({"patch": None})),
-        ScriptedCompletion(error=CompletionFailed("patch_resolve call failed: RuntimeError: status=529")),
+        (ScriptedCompletion(fallback=json.dumps({"patch": None})), CONFLICT_UNRESOLVED),
+        (
+            ScriptedCompletion(error=CompletionFailed("patch_resolve call failed: ReadTimeout: ")),
+            RESOLVER_UNREACHED,
+        ),
     ],
     ids=["model-declines", "call-fails"],
 )
 async def test_an_unresolved_patch_conflict_is_skipped_and_recorded(
-    tmp_path: Path, scripted: ScriptedCompletion
+    tmp_path: Path, scripted: ScriptedCompletion, named: str
 ) -> None:
+    """A conflict the model declined and one it was never asked about are both skipped, under reasons that tell them
+    apart: a timed-out call says nothing about whether the two patches can be combined."""
+
     bench = await _bench(tmp_path, conflicting=True)
     bench.completion.fallback, bench.completion.error = scripted.fallback, scripted.error
 
     report = await _one(bench)
 
     assert report is not None and report.outcome is MergeOutcome.CONFLICT_SKIPPED
-    assert "unresolved patch conflict" in report.reason and report.request_id is None
+    assert report.reason.startswith(named) and report.request_id is None
     conflicting = bench.deltas["c1"].components[0].add_patches[1]
     assert conflicting.path in report.reason
     assert await bench.outcome("c1") is MergeOutcome.CONFLICT_SKIPPED
