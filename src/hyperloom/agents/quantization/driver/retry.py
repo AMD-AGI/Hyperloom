@@ -58,6 +58,23 @@ def _bump_counter(workspace: Path) -> int:
     return n
 
 
+#: The files an attempt ends on. Every attempt shares the workspace, and both the owed-end check and the classifier
+#: read these from it.
+_ATTEMPT_END_MARKERS = ("blocked.md", "last_phase.txt", "eval_report.json", "eval_skipped.txt")
+
+
+def _begin_retry(workspace: Path, finished_attempt: int) -> int:
+    """Archive the end markers ``finished_attempt`` left and count the retry; return the new counter.
+
+    Archiving is what lets the next attempt be judged on its own files.
+    """
+    for name in _ATTEMPT_END_MARKERS:
+        marker = workspace / name
+        if marker.is_file():
+            marker.replace(workspace / f"{name}.attempt_{finished_attempt}")
+    return _bump_counter(workspace)
+
+
 # interactive prompt
 
 
@@ -239,11 +256,10 @@ async def quantize_via_prompt(
         if not decision.retry:
             break
 
-        new_counter = _bump_counter(workspace_path)
+        new_counter = _begin_retry(workspace_path, attempt_n)
         if log:
             log(
-                f"quantization-agent: retrying after outcome={outcome} "
-                f"(counter={new_counter}/{max_requantize_attempts})"
+                f"quantization-agent: retrying after outcome={outcome} (counter={new_counter}/{max_requantize_attempts})"
             )
         attempt_n += 1
 

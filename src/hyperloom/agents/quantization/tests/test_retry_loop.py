@@ -15,7 +15,7 @@ from hyperloom.agents.quantization.driver.retry import (
     _resolve_interactive,
     quantize_via_prompt,
 )
-from hyperloom.agents.quantization.driver.runner import AttemptContext, AttemptResult
+from hyperloom.agents.quantization.driver.runner import AttemptContext, AttemptResult, _attempt_finished
 
 
 # ───────────────────────────────────────────────────────────────────────────── helpers
@@ -197,6 +197,51 @@ async def test_retry_with_hypothesis_then_recover(tmp_path, quark_root, build_wo
     assert result.assessment.recovered is True
     assert result.assessment.attempts == (OutcomeId.must_have_weights_missing, None)
     assert result.status == "success"
+
+
+@pytest.mark.asyncio
+async def test_a_retry_does_not_start_with_the_previous_attempts_end(tmp_path, quark_root, build_workspace):
+    """Every attempt shares the workspace, and an attempt's end is judged from the files in it.
+
+    Attempt 1 stops the way SKILL.md section 8 says: ``blocked.md`` plus a fix
+    hypothesis. If those end markers are still there, attempt 2 counts as
+    finished before its session does anything, so a session that stops after
+    one reply is never continued and its outcome is attempt 1's.
+    """
+
+    ws = tmp_path / "ws"
+    finished_at_start: list[bool] = []
+
+    def block_with_hypothesis(workspace: Path, attempt: int) -> str | None:
+        build_workspace(
+            workspace=workspace,
+            include_weights=False,
+            last_phase="export",
+            blocked_md="outcome_id: export_crashed\n",
+        )
+        (workspace / "fix_hypothesis_attempt_2.md").write_text("## Fix\nExport shard by shard.\n", encoding="utf-8")
+        return None
+
+    def stop_at_once(workspace: Path, attempt: int) -> str | None:
+        finished_at_start.append(_attempt_finished(workspace))
+        return None
+
+    runner = _StubRunner([block_with_hypothesis, stop_at_once])
+    result = await quantize_via_prompt(
+        "fp8 it",
+        workspace=ws,
+        quark_root=quark_root,
+        runner_fn=runner,
+        interactive=False,
+        max_requantize_attempts=1,
+    )
+
+    assert len(runner.calls) == 2
+    assert finished_at_start == [False]
+    assert result.assessment.attempts[0] == OutcomeId.export_crashed
+    assert result.assessment.attempts[1] != OutcomeId.export_crashed
+    assert "export_crashed" in (ws / "blocked.md.attempt_1").read_text(encoding="utf-8")
+    assert (ws / "last_phase.txt.attempt_1").read_text(encoding="utf-8").strip() == "export"
 
 
 @pytest.mark.asyncio

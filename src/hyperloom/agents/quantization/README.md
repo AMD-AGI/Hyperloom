@@ -129,6 +129,9 @@ can read these directly:
   retry N+1).
 - `blocked.md` — present when the SDK aborted; may carry `outcome_id: <id>`
   to short-circuit classification.
+- `<marker>.attempt_N` — attempt N's `blocked.md`, `last_phase.txt`,
+  `eval_report.json` and `eval_skipped.txt`, renamed before attempt N+1 starts
+  so that attempt is judged on its own files.
 
 ## Environment knobs
 
