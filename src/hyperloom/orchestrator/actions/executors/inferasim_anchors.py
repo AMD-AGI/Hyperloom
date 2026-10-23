@@ -28,7 +28,6 @@ import logging
 import os
 import subprocess
 import sys
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -36,6 +35,7 @@ from . import inferasim_bridge as bridge
 from ._explore_reuse import LAUNCH_UNPINNED
 from .inferasim_bridge import (
     ATTENTION_BACKEND_FLAG,
+    AnchorChoice,
     ENV_ANCHOR,
     ENV_ANCHOR_STORE,
     ENV_HARVEST,
@@ -61,26 +61,6 @@ from .inferasim_bridge import (
 )
 
 log = logging.getLogger(__name__)
-
-
-@dataclass
-class AnchorChoice:
-    """The warmup anchor selected for a candidate, plus why it was chosen.
-
-    ``regime_distance`` is the Hamming distance over InferaSim's regime-defining
-    axes (model/dtypes/attention-backend/cudagraph/aiter). Distance 0 means the
-    candidate only moves along *transport* axes (TP/EP/PP, batch, concurrency,
-    sequence lengths) and is fully reconstructable from this anchor -- i.e. no
-    new GPU benchmark is needed. A non-zero distance means the candidate changes
-    the kernel regime and warrants a fresh warmup anchor.
-    """
-
-    path: str
-    regime_distance: int
-    model: str | None = None
-    needs_warmup: bool = False
-    real_weights: bool = False
-    served: bool = False
 
 
 def select_anchor(spec: ServingSpec) -> AnchorChoice | None:

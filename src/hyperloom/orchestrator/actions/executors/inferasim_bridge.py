@@ -59,14 +59,11 @@ import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from hyperloom.inference_optimizer.framework_registry import server_args_env_name
 
 from . import _explore_reuse as reuse
-
-if TYPE_CHECKING:
-    from .inferasim_anchors import AnchorChoice
 
 # Env knobs (all optional unless noted). Documented in the module docstring and
 # the runner --help.
@@ -152,6 +149,26 @@ _TEMPLATE_WORKLOAD = (
 
 class InferasimBridgeError(RuntimeError):
     """Raised for any recoverable bridge failure (bad config, import, etc.)."""
+
+
+@dataclass
+class AnchorChoice:
+    """The warmup anchor selected for a candidate, plus why it was chosen.
+
+    ``regime_distance`` is the Hamming distance over InferaSim's regime-defining
+    axes (model/dtypes/attention-backend/cudagraph/aiter). Distance 0 means the
+    candidate only moves along *transport* axes (TP/EP/PP, batch, concurrency,
+    sequence lengths) and is fully reconstructable from this anchor -- i.e. no
+    new GPU benchmark is needed. A non-zero distance means the candidate changes
+    the kernel regime and warrants a fresh warmup anchor.
+    """
+
+    path: str
+    regime_distance: int
+    model: str | None = None
+    needs_warmup: bool = False
+    real_weights: bool = False
+    served: bool = False
 
 
 @dataclass
