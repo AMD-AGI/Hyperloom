@@ -298,6 +298,40 @@ def test_the_rewrite_offers_the_same_roofline_switch_as_forge_loop():
     assert list(rewrite.type.choices) == list(loop.type.choices) == ["on", "off"]
 
 
+@pytest.mark.parametrize(
+    ("flags", "strategy", "lanes"),
+    [([], None, None), (["--search-strategy", "tree"], "tree", None), (["--lanes", "1"], None, 1)],
+)
+def test_the_nested_loop_shape_reaches_the_rewrite(monkeypatch, tmp_path, flags, strategy, lanes):
+    """What the caller left out stays None, so the nested loop applies its own default."""
+    result, captured = _invoke_rewrite(monkeypatch, tmp_path, "--logical-op-name", flags)
+
+    assert result.exit_code == 0, result.output
+    assert captured["request"].optimize.search_strategy == strategy
+    assert captured["request"].optimize.lanes == lanes
+
+
+def test_a_tree_rewrite_with_several_lanes_is_refused_before_port(monkeypatch, tmp_path):
+    """The nested loop would refuse it too, but only after PORT had spent its share of the budget."""
+    result, captured = _invoke_rewrite(
+        monkeypatch, tmp_path, "--logical-op-name", ["--search-strategy", "tree", "--lanes", "3"]
+    )
+
+    assert result.exit_code != 0
+    assert "--search-strategy tree runs one lane per round" in result.output
+    assert captured == {}
+
+
+def test_the_rewrite_offers_the_same_loop_shape_vocabulary_as_forge_loop():
+    def param(command, name):
+        return next(p for p in command.params if p.name == name)
+
+    rewrite, loop = main.commands["forge-rewrite-by-flydsl"], main.commands["forge-loop"]
+    assert param(rewrite, "search_strategy").opts == param(loop, "search_strategy").opts == ["--search-strategy"]
+    assert list(param(rewrite, "search_strategy").type.choices) == list(param(loop, "search_strategy").type.choices)
+    assert param(rewrite, "lanes").opts == param(loop, "lanes").opts == ["--lanes"]
+
+
 def test_a_framework_outside_the_handshake_is_rejected(monkeypatch, tmp_path):
     source = tmp_path / "softmax.py"
     source.write_text("def softmax(x):\n    return x\n")

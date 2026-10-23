@@ -241,6 +241,40 @@ def test_optimize_spells_the_roofline_switch_out_for_the_nested_loop(tmp_path, m
     assert command[command.index("--roofline-ceiling") + 1] == passed
 
 
+@pytest.mark.parametrize(
+    ("options", "expected"),
+    [
+        ({}, {}),
+        ({"search_strategy": "tree"}, {"--search-strategy": "tree"}),
+        ({"search_strategy": "linear", "lanes": 1}, {"--search-strategy": "linear", "--lanes": "1"}),
+    ],
+)
+def test_optimize_passes_the_requested_loop_shape_to_the_nested_loop(tmp_path, monkeypatch, options, expected):
+    """A strategy or lane count the caller chose reaches forge-loop; one it left out stays the loop's default."""
+    captured = {}
+
+    def fake_popen(command, **_kwargs):
+        captured["command"] = command
+        return _FakeProc(["Experiment: EXP-SHAPE\n"])
+
+    monkeypatch.setattr(optimize.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(optimize, "_restore_best_kernel", lambda *a, **k: None)
+    optimize.run_optimize(
+        _spec(tmp_path),
+        "driver.py",
+        Config.from_env(workspace=str(tmp_path)),
+        optimize.OptimizeRequest(str(tmp_path), options=optimize.OptimizeOptions(**options)),
+    )
+
+    command = captured["command"]
+    for flag in ("--search-strategy", "--lanes"):
+        if flag in expected:
+            assert command.count(flag) == 1
+            assert command[command.index(flag) + 1] == expected[flag]
+        else:
+            assert flag not in command
+
+
 def test_run_rewrite_hands_the_source_timings_to_optimize(tmp_path, monkeypatch):
     """Without them every score the loop reports would divide by the port instead of the source."""
     src = tmp_path / "softmax.py"

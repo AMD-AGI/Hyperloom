@@ -32,20 +32,27 @@ class LoopShape:
     commit_new_paths: tuple[str, ...]
 
 
+def resolve_lanes(strategy: SearchStrategy, lanes: int | None) -> int:
+    """The lanes per round a campaign searching with ``strategy`` runs; ``None`` takes the strategy's default."""
+    if strategy is SearchStrategy.LINEAR:
+        return LINEAR_DEFAULT_LANES if lanes is None else lanes
+    if lanes not in (None, 1):
+        raise click.ClickException(f"--search-strategy tree runs one lane per round; drop --lanes {lanes}")
+    return 1
+
+
 def settle_loop_shape(shape: LoopShape, strategy: SearchStrategy) -> LoopShape:
     """The loop shape a campaign searching with ``strategy`` runs, refusing what that strategy cannot honour."""
     if shape.search_strategy and SearchStrategy(shape.search_strategy) is not strategy:
         raise click.ClickException(
             f"this campaign searches with --search-strategy {strategy.value}; the strategy cannot change on resume"
         )
+    lanes = resolve_lanes(strategy, shape.lanes)
     if strategy is SearchStrategy.LINEAR:
-        lanes = LINEAR_DEFAULT_LANES if shape.lanes is None else shape.lanes
         return replace(shape, lanes=lanes, merge_stacking=shape.merge_stacking is not False)
-    if shape.lanes not in (None, 1):
-        raise click.ClickException(f"--search-strategy tree runs one lane per round; drop --lanes {shape.lanes}")
     if shape.merge_stacking:
         raise click.ClickException("--search-strategy tree does not stack rejected candidates; drop --merge-stacking")
-    return replace(shape, lanes=1, merge_stacking=False)
+    return replace(shape, lanes=lanes, merge_stacking=False)
 
 
 loop_shape_options = option_group(
@@ -129,4 +136,4 @@ loop_shape_options = option_group(
 )
 
 
-__all__ = ["LINEAR_DEFAULT_LANES", "LoopShape", "loop_shape_options", "settle_loop_shape"]
+__all__ = ["LINEAR_DEFAULT_LANES", "LoopShape", "loop_shape_options", "resolve_lanes", "settle_loop_shape"]

@@ -17,10 +17,12 @@ from kernelforge.cli.options import (
     _roofline_ceiling_option,
     _validate_max_hours,
 )
+from kernelforge.cli.loop_shape import resolve_lanes
 from kernelforge.option_groups import option_group
 from kernelforge.config import Config
 from kernelforge.knowledge.kb_store.config import KnowledgeConfig
 from kernelforge.evaluation.scoring import DEFAULT_SNR_THRESHOLD_DB
+from kernelforge.loop.search_tree import SearchStrategy
 from kernelforge.rewrite_by_flydsl.optimize import OptimizeOptions
 from kernelforge.rewrite_by_flydsl.request import ApplybackSwitch, RewriteBudget, RewriteWorkspace
 
@@ -296,6 +298,20 @@ class RewriteRequest:
             type=int,
             help="OPTIMIZE: ceiling for the complete Analysis Agent workflow",
         ),
+        click.option(
+            "--search-strategy",
+            default=None,
+            type=click.Choice([strategy.value for strategy in SearchStrategy]),
+            help="OPTIMIZE: passed to the nested forge-loop unchanged; omitted, the loop uses its default "
+            "('linear'). See forge-loop --search-strategy.",
+        ),
+        click.option(
+            "--lanes",
+            default=None,
+            type=click.IntRange(min=1, max=8),
+            help="OPTIMIZE: implementer lanes per round of the nested forge-loop; omitted, the loop uses the "
+            "default of its search strategy. A tree search runs 1 and refuses any other value before PORT starts.",
+        ),
     ),
     _roofline_ceiling_option(
         "OPTIMIZE: passed to the nested forge-loop unchanged. 'off' (default) "
@@ -311,6 +327,10 @@ def forge_rewrite(request: RewriteRequest):
     import os
     import re as _re
 
+    # Refuse a loop shape the nested forge-loop would reject only after PORT has spent its budget.
+    resolve_lanes(
+        SearchStrategy(request.optimize.search_strategy or SearchStrategy.LINEAR.value), request.optimize.lanes
+    )
     overrides = {}
     if request.gpu.gpu_target:
         overrides["gpu_target"] = request.gpu.gpu_target
