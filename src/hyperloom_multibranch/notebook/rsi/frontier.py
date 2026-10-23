@@ -50,7 +50,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Protocol
 
-from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, NotRecorded
+from hyperloom_multibranch.contracts.notebook import NotRecorded
 from hyperloom_multibranch.contracts.notebook.interfaces import ProgressQuery, SnapshotQuery
 from hyperloom_multibranch.contracts.notebook.peers import IntentLayer
 from hyperloom_multibranch.contracts.notebook.records import (
@@ -171,7 +171,7 @@ def remaining_prior(
 
 
 def _specialists(branches: tuple[TreeBranch, ...]) -> list[TreeBranch]:
-    return [branch for branch in branches if branch.name != INTEGRATION_BRANCH]
+    return [branch for branch in branches if branch.steered]
 
 
 def _observing(snapshot: NotebookSnapshot, branch: str, since: float) -> bool:
@@ -502,8 +502,8 @@ def score_progress(
     policy: FrontierPolicy,
     guard: ScorerGuard | None = None,
 ) -> tuple[BranchProgress, ...]:
-    """The notebook's progress, each running specialist branch scored by ``guard``'s scorer (``frontier-v1`` without
-    one); unscored without a profile or a baseline."""
+    """The notebook's progress, each running branch the judge steers scored by ``guard``'s scorer (``frontier-v1``
+    without one); unscored without a profile or a baseline."""
 
     try:
         tree = tree_from_snapshot(snapshot, policy.metric)
@@ -511,9 +511,10 @@ def score_progress(
         return snapshot.progress
     context = ScoringContext(tree.task, history, paced(policy, tree.longest_root_test_seconds), tree)
     scoring = guard or ScorerGuard()
+    steered = {branch.name for branch in tree.branches if branch.steered}
     return tuple(
         replace(row, frontier=score_branch(snapshot, row, context, scoring))
-        if row.running and row.branch != INTEGRATION_BRANCH
+        if row.running and row.branch in steered
         else row
         for row in snapshot.progress
     )

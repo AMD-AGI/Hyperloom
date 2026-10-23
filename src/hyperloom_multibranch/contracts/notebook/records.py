@@ -27,6 +27,7 @@ from hyperloom_multibranch.contracts.notebook.peers import (
     Verdict,
 )
 from hyperloom_multibranch.contracts.notebook.vocab import (
+    BranchDriver,
     ClaimStatus,
     CommitOrigin,
     Conclusion,
@@ -184,7 +185,9 @@ class LineageEvent:
 
     ``ROOT`` records the baseline commit ``commit_id`` the integration branch starts from, and may name the digest of
     its recipe (``Recipe.digest()``); a judgement names the recipe digest of every other commit. The ``OPEN`` of a
-    repair branch names in ``repairs`` the test whose blocked gain it was opened to repair.
+    repair branch names in ``repairs`` the test whose blocked gain it was opened to repair. Only an ``OPEN`` names a
+    ``driver`` other than the specialist: an autonomous branch's, written before its agent starts, so a branch whose
+    start fails is known for one too.
     """
 
     kind: LineageKind
@@ -195,6 +198,7 @@ class LineageEvent:
     reason: str = ""
     recipe_digest: str | None = None
     repairs: str = ""
+    driver: BranchDriver = BranchDriver.SPECIALIST
 
 
 @dataclass(frozen=True)
@@ -447,6 +451,7 @@ class BranchNode:
     opened_at: float = 0.0
     stopped_at: float | None = None
     repairs: str = ""
+    driver: BranchDriver = BranchDriver.SPECIALIST
 
 
 @dataclass(frozen=True)

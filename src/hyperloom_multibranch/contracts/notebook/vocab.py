@@ -90,6 +90,14 @@ LINEAGE_WRITERS: dict[LineageKind, Role] = {
 }
 
 
+class BranchDriver(str, Enum):
+    """Who drives a branch: its specialist, whom the judge steers, or a third-party agent the user named, which runs
+    the branch end to end by its own logic."""
+
+    SPECIALIST = "specialist"
+    AUTONOMOUS = "autonomous"
+
+
 class CommitOrigin(str, Enum):
     """How a commit came to exist."""
 

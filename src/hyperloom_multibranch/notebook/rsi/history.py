@@ -23,7 +23,7 @@ from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 
-from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, NotRecorded
+from hyperloom_multibranch.contracts.notebook import NotRecorded
 from hyperloom_multibranch.contracts.notebook.peers import IntentLayer
 from hyperloom_multibranch.contracts.notebook.records import NotebookSnapshot
 from hyperloom_multibranch.contracts.notebook.vocab import CommitOrigin, LineageKind
@@ -156,7 +156,7 @@ def _quantile(pairs: Sequence[tuple[float, float]], q: float) -> float | None:
 
 
 def _specialists(tree: SearchTree) -> list[TreeBranch]:
-    return [b for b in tree.branches if b.name != INTEGRATION_BRANCH and b.origin is not LineageKind.ROOT]
+    return [b for b in tree.branches if b.steered and b.origin is not LineageKind.ROOT]
 
 
 def _best_by(tree: SearchTree, t_s: float) -> float:

@@ -50,6 +50,7 @@ from hyperloom_multibranch.contracts.notebook.records import (
     Withdrawal,
 )
 from hyperloom_multibranch.contracts.notebook.vocab import (
+    BranchDriver,
     ClaimStatus,
     Conclusion,
     DedupStatus,
@@ -198,11 +199,32 @@ async def test_each_lineage_event_has_one_writer(open_as: Open, role: Role, even
         LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH),
         LineageEvent(LineageKind.OPEN, "s1", from_commit="c0", recipe_digest=ROOT_RECIPE),
         LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id="c0", recipe_digest="sha256:c0"),
+        LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id="c0", driver=BranchDriver.AUTONOMOUS),
+        LineageEvent(LineageKind.STOP, "s1", driver=BranchDriver.AUTONOMOUS),
     ],
 )
 async def test_a_lineage_event_names_what_its_kind_needs(open_as: Open, event: LineageEvent) -> None:
     with pytest.raises(ValueError):
         await open_as(Role.SCHEDULER).record_lineage(event)
+
+
+async def test_a_branch_an_autonomous_agent_drives_is_known_from_its_open_even_when_it_stops_at_once(
+    open_as: Open,
+) -> None:
+    scheduler = open_as(Role.SCHEDULER)
+    await scheduler.record_lineage(LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id="c0"))
+    await scheduler.record_lineage(LineageEvent(LineageKind.OPEN, "b01", from_commit="c0"))
+    await scheduler.record_lineage(
+        LineageEvent(LineageKind.OPEN, "b02", from_commit="c0", driver=BranchDriver.AUTONOMOUS)
+    )
+    await scheduler.record_lineage(LineageEvent(LineageKind.STOP, "b02", reason="its agent did not start"))
+
+    drivers = {node.branch: node.driver for node in (await scheduler.lineage()).branches}
+    assert drivers == {
+        INTEGRATION_BRANCH: BranchDriver.SPECIALIST,
+        "b01": BranchDriver.SPECIALIST,
+        "b02": BranchDriver.AUTONOMOUS,
+    }
 
 
 async def test_a_commit_keeps_the_recipe_digest_it_was_recorded_with(open_as: Open) -> None:

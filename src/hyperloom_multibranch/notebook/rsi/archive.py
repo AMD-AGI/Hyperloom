@@ -28,7 +28,13 @@ from pathlib import Path
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, NotRecorded
 from hyperloom_multibranch.contracts.notebook.peers import Intent, IntentLayer, Purpose, SandboxFacts, TestKind
 from hyperloom_multibranch.contracts.notebook.records import BranchNode, LineageView, NotebookSnapshot, TestRecord
-from hyperloom_multibranch.contracts.notebook.vocab import COMMITTING, CommitOrigin, Conclusion, LineageKind
+from hyperloom_multibranch.contracts.notebook.vocab import (
+    COMMITTING,
+    BranchDriver,
+    CommitOrigin,
+    Conclusion,
+    LineageKind,
+)
 from hyperloom_multibranch.notebook.codec import decode, encode
 from hyperloom_multibranch.notebook.local.files import encode_json, publish_once
 from hyperloom_multibranch.notebook.rsi.similarity import TaskConditions, task_conditions, task_similarity
@@ -70,7 +76,8 @@ class TreeBranch:
     tried, in the order it first tried them; ``kernel_test_times`` when its kernel-layer tests were requested, which the
     frontier calibration reads the observation period off. ``measured_times`` and ``judged_times`` are when its tests
     were measured and judged, and ``ended_times`` when its explore tests got a result of any validity, as the judge's
-    grace counts them; each ``None`` in a tree archived before it was kept.
+    grace counts them; each ``None`` in a tree archived before it was kept. ``driver`` is who drove the branch; a tree
+    archived before it was kept reads as all specialist.
     """
 
     name: str
@@ -88,6 +95,14 @@ class TreeBranch:
     measured_times: tuple[float, ...] | None = None
     judged_times: tuple[float, ...] | None = None
     ended_times: tuple[float, ...] | None = None
+    driver: BranchDriver = BranchDriver.SPECIALIST
+
+    @property
+    def steered(self) -> bool:
+        """Whether the judge steered the branch, which makes it evidence for the frontier and the specialists' history:
+        neither the integration branch nor one an autonomous agent drove by its own logic."""
+
+        return self.name != INTEGRATION_BRANCH and self.driver is BranchDriver.SPECIALIST
 
     @property
     def spent_times(self) -> tuple[float, ...]:
@@ -354,6 +369,7 @@ class _TreeReading:
             measured_times=_measured_times(tests, start),
             judged_times=_judged_times(tests, start),
             ended_times=_ended_times(tests, start),
+            driver=node.driver,
         )
 
 

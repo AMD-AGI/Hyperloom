@@ -24,7 +24,6 @@ import math
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 
-from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.notebook.vocab import FrontierBasis
 from hyperloom_multibranch.notebook.rsi.archive import SearchTree, TreeBranch
 from hyperloom_multibranch.notebook.rsi.calibration import Baseline, scorer_baseline
@@ -87,7 +86,7 @@ def reward_scale(trees: Sequence[SearchTree], quantile: float = SCALE_QUANTILE) 
         step
         for tree in trees
         for branch in tree.branches
-        if branch.name != INTEGRATION_BRANCH
+        if branch.steered
         for _, step in _steps(tree, branch)
         if step > 0
     )
@@ -95,7 +94,7 @@ def reward_scale(trees: Sequence[SearchTree], quantile: float = SCALE_QUANTILE) 
 
 
 def _visits(tree: SearchTree, t_s: float) -> int:
-    return sum(branch.tests_by(t_s) for branch in tree.branches if branch.name != INTEGRATION_BRANCH)
+    return sum(branch.tests_by(t_s) for branch in tree.branches if branch.steered)
 
 
 @dataclass(frozen=True)

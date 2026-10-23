@@ -23,7 +23,7 @@ from hyperloom_multibranch.contracts.notebook.records import (
     ToolResultPointer,
     Withdrawal,
 )
-from hyperloom_multibranch.contracts.notebook.vocab import Conclusion, FrontierBasis, LineageKind
+from hyperloom_multibranch.contracts.notebook.vocab import BranchDriver, Conclusion, FrontierBasis, LineageKind
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.rsi.archive import SearchTree, TreeBranch, longest_root_test_seconds
 from hyperloom_multibranch.notebook.rsi.frontier import (
@@ -87,6 +87,22 @@ def test_a_running_specialist_branch_is_scored_and_the_others_are_not(snapshot: 
     assert (s1.components["tests"], s1.components["gpu_hours"], s1.components["observing"]) == (2.0, 1200 / 3600, 1.0)
     assert s1.components["headroom_pct"] == pytest.approx((1500.0 / 1040.0 - 1.0) * 100.0)
     assert "prior_remaining_pct" not in s1.components
+
+
+def test_a_branch_an_autonomous_agent_drives_is_not_scored_and_is_no_evidence_for_the_prior(
+    snapshot: NotebookSnapshot,
+) -> None:
+    lineage = snapshot.lineage
+    nodes = tuple(
+        dataclasses.replace(node, driver=BranchDriver.AUTONOMOUS) if node.branch == "s1" else node
+        for node in lineage.branches
+    )
+    driven = dataclasses.replace(snapshot, lineage=dataclasses.replace(lineage, branches=nodes))
+    agent = branch("agent", [(600.0, 9.0)], test_times=(0.0, 300.0, 600.0), driver=BranchDriver.AUTONOMOUS)
+    with_agent = dataclasses.replace(PAYS_LATE, branches=(*PAYS_LATE.branches, agent))
+
+    assert _scores(snapshot)["s1"] is not None and _scores(driven)["s1"] is None
+    assert remaining_prior((with_agent,), TASK, 2) == remaining_prior((PAYS_LATE,), TASK, 2)
 
 
 def test_the_history_prior_replaces_the_trend_once_enough_similar_sessions_back_it(snapshot: NotebookSnapshot) -> None:
