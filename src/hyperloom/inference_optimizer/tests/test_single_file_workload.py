@@ -181,7 +181,7 @@ def test_export_bakes_accepted_switches_into_module(workload):
     assert result["settings"]["base_sha256"] == hashlib.sha256(hook.read_bytes()).hexdigest()
 
 
-def test_export_reports_untranslatable_settings(workload):
+def test_export_ships_settings_read_at_gpu_init(workload):
     _, hook, session, state = workload
     state["current_best"]["extra_envs"] = {"PYTORCH_HIP_ALLOC_CONF": "expandable_segments:True"}
 
@@ -189,14 +189,29 @@ def test_export_reports_untranslatable_settings(workload):
 
     exported_text = (session / "deployment" / hook.name).read_text()
     assert result["status"] == "exported"
+    assert result["settings"]["applied_env"] == {"PYTORCH_HIP_ALLOC_CONF": "expandable_segments:True"}
+    assert result["settings"]["untranslated"] == []
+    assert "PYTORCH_HIP_ALLOC_CONF" in exported_text
+    assert "is_initialized()" in exported_text
+    assert result["warnings"] == []
+
+
+def test_export_reports_untranslatable_settings(workload):
+    _, hook, session, state = workload
+    state["current_best"]["extra_envs"] = {"PYTORCH_TUNABLEOP_FILENAME": "/scratch/run/tuned.csv"}
+
+    result = export_custom_inference(session, state)
+
+    exported_text = (session / "deployment" / hook.name).read_text()
+    assert result["status"] == "exported"
     assert {
-        "name": "PYTORCH_HIP_ALLOC_CONF",
-        "value": "expandable_segments:True",
-        "reason": "pre_context_init",
+        "name": "PYTORCH_TUNABLEOP_FILENAME",
+        "value": "/scratch/run/tuned.csv",
+        "reason": "unportable_absolute_path",
     } in result["settings"]["untranslated"]
-    assert "PYTORCH_HIP_ALLOC_CONF" not in exported_text
+    assert "PYTORCH_TUNABLEOP_FILENAME" not in exported_text
     assert len(result["warnings"]) == 1
-    assert "PYTORCH_HIP_ALLOC_CONF" in result["warnings"][0]
+    assert "PYTORCH_TUNABLEOP_FILENAME" in result["warnings"][0]
 
 
 def test_export_excludes_benchmark_control_envs(workload):

@@ -39,10 +39,10 @@ def test_classification_buckets() -> None:
     assert plan.applied_api == ["torch.cuda.tunable.enable(True)"]
     assert plan.applied_env["PYTORCH_TUNABLEOP_ENABLED"] == "1"
     assert plan.untranslated == [
-        {"name": "HSA_ENABLE_SDMA", "value": "0", "reason": "pre_context_init"},
         {"name": "PYTORCH_TUNABLEOP_FILENAME", "value": "/scratch/run/tuned.csv", "reason": "unportable_absolute_path"},
     ]
     assert plan.applied_env["HL_FUSE_ATTN"] == "1"
+    assert plan.applied_env["HSA_ENABLE_SDMA"] == "0"
 
 
 def test_classification_is_case_insensitive_but_preserves_original_casing() -> None:
@@ -123,10 +123,29 @@ def test_import_timing_guard_raises_only_when_inductor_or_dynamo_already_importe
 
     sys.modules["torch._inductor"] = types.ModuleType("torch._inductor")
     try:
-        with pytest.raises(RuntimeError, match="imported after torch._inductor/_dynamo"):
+        with pytest.raises(RuntimeError, match="generated_hook_under_test was imported after"):
             exec(compile(module_bytes, "<generated>", "exec"), namespace)
     finally:
         del sys.modules["torch._inductor"]
+
+
+@pytest.mark.parametrize("initialized", [True, False])
+def test_import_timing_guard_raises_once_the_gpu_is_initialized(
+    monkeypatch: pytest.MonkeyPatch, initialized: bool
+) -> None:
+    plan = plan_settings({"HSA_ENABLE_SDMA": "0"})
+    module_bytes = apply_settings_prelude(b"def apply(model):\n    return model\n", plan, "apply")
+    fake_torch = types.SimpleNamespace(cuda=types.SimpleNamespace(is_initialized=lambda: initialized))
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+    monkeypatch.delenv("HSA_ENABLE_SDMA", raising=False)
+    namespace: dict[str, object] = {"__name__": "encoder_opt"}
+
+    if initialized:
+        with pytest.raises(RuntimeError, match="Move its import above `import torch`"):
+            exec(compile(module_bytes, "<generated>", "exec"), namespace)
+    else:
+        exec(compile(module_bytes, "<generated>", "exec"), namespace)
+        assert os.environ["HSA_ENABLE_SDMA"] == "0"
 
 
 def test_import_timing_guard_does_not_raise_when_nothing_pre_imported(monkeypatch: pytest.MonkeyPatch) -> None:

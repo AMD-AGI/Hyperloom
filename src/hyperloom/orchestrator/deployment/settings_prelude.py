@@ -14,35 +14,10 @@ from typing import Any, Mapping, Sequence
 from hyperloom.common.env import is_truthy
 from hyperloom.common.env_safety import BLOCKED_EXTERNAL_ENV_NAMES, is_secret_shaped_env_name
 
-_PRE_INIT_ENV_PREFIXES = (
-    "HSA_",
-    "HIP_",
-    "ROCR_",
-    "GPU_MAX_",
-    "AMD_SERIALIZE",
-    "MIOPEN_",
-    "NCCL_",
-    "RCCL_",
-    "OMP_",
-    "MKL_",
-    "CUDA_",
-)
-_PRE_INIT_ENV_NAMES = frozenset(
-    {
-        "PYTORCH_HIP_ALLOC_CONF",
-        "PYTORCH_CUDA_ALLOC_CONF",
-        "PYTORCH_NO_HIP_MEMORY_CACHING",
-        "TORCH_BLAS_PREFER_HIPBLASLT",
-        "AMD_LOG_LEVEL",
-        "TORCH_NCCL_HIGH_PRIORITY",
-    }
-)
-
-# TORCHINDUCTOR_* vars are absent: some (e.g. CACHE_DIR) are read lazily and are safe to
-# set here; others (MAX_AUTOTUNE, FREEZING, ...) freeze the moment torch._inductor.config
-# is first imported, which can happen before this prelude runs. The single-file contract
-# covers that by importing this module early, before anything else can freeze it -- see
-# the import-timing check below for what happens when that's skipped.
+# Env settings reach torch when this module is imported before the GPU is initialized and
+# before torch._inductor/_dynamo read their config; the import-timing guard below fails
+# loudly otherwise. Variables only the process start reads (LD_*, PYTHON*) never get here:
+# they are excluded as benchmark controls.
 # PYTORCH_TUNABLEOP_RECORD_UNTUNED has no API equivalent, so it falls through to tier 1 untranslated.
 _TORCH_API_TRANSLATIONS: Mapping[str, tuple[str, Callable[[object], bool | int]]] = {
     "PYTORCH_TUNABLEOP_ENABLED": ("torch.cuda.tunable.enable", is_truthy),
@@ -52,7 +27,7 @@ _TORCH_API_TRANSLATIONS: Mapping[str, tuple[str, Callable[[object], bool | int]]
 }
 
 # Modules that freeze config from os.environ at first import -- if either is already in
-# sys.modules when the check below runs, an unprotected env setting may have been read too late.
+# sys.modules, or the GPU is already initialized, an env setting may have been read too late.
 _IMPORT_SENSITIVE_MODULES = ("torch._inductor", "torch._dynamo")
 
 _PRELUDE_MODULE_ERROR = "Settings prelude did not produce a valid module"
@@ -89,8 +64,6 @@ def plan_settings(
             # Also set the env var: torch caches it on first read, so the API call isn't always enough.
             plan.applied_api.append(_render_torch_api_call(canonical, raw_value))
             plan.applied_env[name] = value
-        elif canonical in _PRE_INIT_ENV_NAMES or canonical.startswith(_PRE_INIT_ENV_PREFIXES):
-            plan.untranslated.append({"name": name, "value": value, "reason": "pre_context_init"})
         elif isinstance(raw_value, str) and raw_value.startswith("/"):
             plan.untranslated.append({"name": name, "value": value, "reason": "unportable_absolute_path"})
         else:
@@ -209,14 +182,15 @@ def _render_import_timing_guard() -> list[str]:
     """Lines that raise if this module's first import happened too late to matter."""
     return [
         "import sys as _hl_sys",
-        f"if any(_hl_m in _hl_sys.modules for _hl_m in {_IMPORT_SENSITIVE_MODULES!r}):",
+        "_hl_torch = _hl_sys.modules.get('torch')",
+        f"if any(_hl_m in _hl_sys.modules for _hl_m in {_IMPORT_SENSITIVE_MODULES!r}) or (",
+        "    _hl_torch is not None and _hl_torch.cuda.is_initialized()",
+        "):",
         "    raise RuntimeError(",
-        "        'This optimization module was imported after torch._inductor/_dynamo were already '",
-        "        'loaded; environment-gated settings may not take effect. Import this '",
-        "        'module once, early, before any other import, in addition to the usual '",
-        "        'call after model load.'",
+        "        f'{__name__} was imported after the GPU was initialized or torch._inductor/_dynamo '",
+        "        'were loaded, so its settings cannot take effect. Move its import above `import torch`.'",
         "    )",
-        "del _hl_sys",
+        "del _hl_sys, _hl_torch",
         "",
     ]
 
