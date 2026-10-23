@@ -42,13 +42,15 @@ sha="${HYPERLOOM_SOURCE_SHA:-}"
 [[ -n "$repo" ]] || fail_final "HYPERLOOM_SOURCE_REPO is not set"
 [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || fail_final "HYPERLOOM_SOURCE_SHA must be a full 40-character commit id"
 
-case "$repo" in
-  https://* | ssh://* | git@* | file://* | /*) url="$repo" ;;
-  *)
-    [[ "$repo" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || fail_final "HYPERLOOM_SOURCE_REPO is neither OWNER/NAME nor a git URL"
-    url="https://github.com/${repo}.git"
-    ;;
-esac
+# OWNER/NAME on GitHub, or a git URL or path with a host or a root; anything else is an input error, not a network one.
+url_pattern='^(https?|ssh)://[^/[:space:]]+/[^[:space:]]+$|^git@[^:[:space:]]+:[^[:space:]]+$|^file:///[^[:space:]]+$|^/[^[:space:]]+$'
+if [[ "$repo" =~ $url_pattern ]]; then
+  url="$repo"
+elif [[ "$repo" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]]; then
+  url="https://github.com/${repo}.git"
+else
+  fail_final "HYPERLOOM_SOURCE_REPO is neither OWNER/NAME nor a git URL"
+fi
 
 cache_root="$USER_DATA_PATH/.hyperloom"
 wheel_dir="$cache_root/wheels/$sha"
