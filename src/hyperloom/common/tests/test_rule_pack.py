@@ -43,10 +43,23 @@ try:  # tomllib is stdlib from 3.11; the ``ci`` extra pins tomli for 3.10.
 except ModuleNotFoundError:  # pragma: no cover - exercised only on py3.10
     import tomli as tomllib  # type: ignore[no-redef]
 
+_AITER_TUNED_HIT = r"""(?x)
+shape (?:\s+is)? \s+ M:\d+, \s+ N:\d+, \s+ K:\d+ ,?
+(?: \s+ dtype='(?P<dtype>[^']*)' \s+ otype='(?P<outdtype>[^']*)'
+    \s+ bias=(?P<bias>True|False), \s+ scaleAB=(?P<scaleAB>True|False)
+    , \s+ bpreshuffle=(?P<bpreshuffle>True|False) )?
+\s+ found \s+ padded_M: \s+ (?P<M>\d+), \s+ N:(?P<N>\d+), \s+ K:(?P<K>\d+)
+\s+ is \s+ tuned \s+ on \s+ cu_num \s+ = \s+ (?P<cu_num>\d+) \s+ in \s+ (?P<table>[^\s,!]+)
+(?: \s* , \s+ libtype \s+ is \s+ (?P<libtype>\w+) )?
+(?: \s* , \s+ kernel \s+ name \s+ is \s+ (?P<kernelName>[^\s!]*) )?"""
+
 #: Every value ``outside_facts`` held as a literal before the pack existed. Written out, not derived from the pack or
 #: from ``outside_facts``, so that a value that moved with the pack would fail here.
 _LITERALS: dict[str, str | list[str]] = {
+    "AITER_LOG_TUNED_CONFIG_ENV": "AITER_LOG_TUNED_CONFIG",
     "AITER_MERGED_VIEW_DIR": "/tmp/aiter_configs",
+    "AITER_TUNED_HIT": _AITER_TUNED_HIT,
+    "AITER_TUNED_HIT_MARKER": r"\btuned(?: on| at|,)|found (?:padded_M|lookup M):",
     "ARGPARSE_INVALID_CHOICE": "invalid choice",
     "ARGPARSE_UNRECOGNIZED_ARGUMENTS_RE": "unrecognized arguments?",
     "CONTEXT_LENGTH_FLAGS": ["--context-length", "--max-model-len"],
@@ -130,8 +143,8 @@ def test_the_reference_pack_loads_and_passes_its_own_examples() -> None:
     pack = load_pack(DEFAULT_PACK_PATH)
     assert pack.version == "1"
     assert Counter(entry.kind for entry in pack.entries.values()) == {
-        Kind.NAMES: 7,
-        Kind.LOG_REGEX: 9,
+        Kind.NAMES: 8,
+        Kind.LOG_REGEX: 11,
         Kind.ENV_DEFAULT: 1,
     }
 
