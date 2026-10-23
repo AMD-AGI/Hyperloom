@@ -5,8 +5,9 @@
 
 from __future__ import annotations
 
-from kernelforge.fusion.author import AuthorBrief, _arch_phrase, build_author_prompt, build_multi_author_prompt
-from kernelforge.fusion.gpu_arch import canon_arch
+from hyperloom.common.gpu_identity import AMD_GPU_BOARDS
+from kernelforge.fusion.author import AuthorBrief, build_author_prompt, build_multi_author_prompt
+from kernelforge.fusion.gpu_arch import arch_phrase, canon_arch
 
 RECIPE = {
     "pattern_id": "residual_add_rmsnorm",
@@ -28,6 +29,8 @@ def test_canon_arch_folds_marketing_names_and_rejects_unknown():
     assert canon_arch("MI300X") == "gfx942"
     assert canon_arch("mi355x") == "gfx950"
     assert canon_arch("AMD Instinct MI355X") == "gfx950"
+    assert canon_arch("R9700") == "gfx1201"
+    assert canon_arch("AMD Radeon AI PRO R9700") == "gfx1201"
     # Unresolvable arch must be empty: naming the wrong ISA is worse than naming none at all.
     assert canon_arch("") == ""
     assert canon_arch("some-new-gpu") == ""
@@ -35,17 +38,18 @@ def test_canon_arch_folds_marketing_names_and_rejects_unknown():
 
 # --- prompt wording -------------------------------------------------------- #
 def test_known_archs_get_their_marketing_name():
-    assert _arch_phrase("gfx950") == "AMD MI355X (gfx950)"
-    assert _arch_phrase("gfx942") == "AMD MI300X/MI325X (gfx942)"
+    assert arch_phrase("gfx950") == "AMD MI355X (gfx950)"
+    assert arch_phrase("gfx942") == "AMD MI300X/MI308X/MI325X (gfx942)"
+    assert arch_phrase("gfx1201") == "AMD R9700 (gfx1201)"
 
 
 def test_an_unrecognised_arch_is_still_named_exactly():
-    assert _arch_phrase("gfx1201") == "an AMD GPU (gfx1201)"
+    assert arch_phrase("gfx1100") == "an AMD GPU (gfx1100)"
 
 
 def test_an_unknown_arch_says_nothing_rather_than_guessing():
-    assert _arch_phrase("") == "an AMD ROCm GPU"
-    assert "gfx" not in _arch_phrase("")
+    assert arch_phrase("") == "an AMD ROCm GPU"
+    assert "gfx" not in arch_phrase("")
 
 
 def test_the_prompt_names_the_arch_it_was_given():
@@ -69,3 +73,11 @@ def test_no_arch_leaves_no_false_target_in_the_prompt():
     assert "an AMD ROCm GPU" in prompt
     assert "gfx942" not in prompt
     assert "MI325X" not in prompt
+
+
+def test_every_board_and_its_marketing_name_resolve_to_its_arch():
+    """The arch comes from the shared board table, so a new board resolves here in the commit that adds it."""
+    for board in AMD_GPU_BOARDS.values():
+        assert canon_arch(board.product) == board.gfx, board.product
+        assert canon_arch(board.marketing_name) == board.gfx, board.marketing_name
+        assert board.product.upper() in arch_phrase(board.gfx)

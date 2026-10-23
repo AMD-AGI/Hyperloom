@@ -452,7 +452,7 @@ module-lines src/hyperloom/inference_optimizer/cli/__init__.py 2569
 module-lines src/hyperloom/inference_optimizer/cli/model_gate.py 1759
 module-lines src/hyperloom/inference_optimizer/cli/preflight.py 2645
 module-lines src/hyperloom/inference_optimizer/multi_node/cli.py 1804
-module-lines src/hyperloom/inference_optimizer/roofline_ceiling.py 1417
+module-lines src/hyperloom/inference_optimizer/roofline_ceiling.py 1389
 module-lines src/hyperloom/orchestrator/actions/executors/_grid_runner.py 2045
 module-lines src/hyperloom/orchestrator/actions/executors/_kv_metrics.py 1578
 module-lines src/hyperloom/orchestrator/actions/executors/_workload_envs.py 2126
@@ -480,7 +480,7 @@ module-lines src/hyperloom/orchestrator/specialists/runner.py 1453
 module-lines src/hyperloom/orchestrator/specialists/subprocess_.py 1386
 module-lines src/hyperloom/orchestrator/state/shared_state.py 2424
 module-lines src/hyperloom/orchestrator/trace_analysis/tracelens_skill_runner.py 1309
-module-lines src/kernelforge/fusion/author.py 1263
+module-lines src/kernelforge/fusion/author.py 1255
 module-lines src/kernelforge/fusion/command.py 1584
 module-lines src/kernelforge/fusion/discover.py 1421
 module-lines src/kernelforge/fusion/validate.py 1513
