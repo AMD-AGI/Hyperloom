@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from hyperloom.common.benchmark_config import configured_benchmark, is_magpie_agentx
+from hyperloom.common.coerce import optional_positive_float
 
 from dataclasses import dataclass
 from math import isfinite
@@ -151,18 +152,10 @@ def parse_intvty_noise_pct() -> float:
     return env_float("HYPERLOOM_PERF_NOISE_PCT", _DEFAULT_INTVTY_NOISE_PCT)
 
 
-def _positive(value: Any) -> float | None:
-    """Coerce to a strictly positive float, else None."""
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    coerced = float(value)
-    return coerced if coerced > 0 else None
-
-
 def _non_negative(value: Any) -> float | None:
     """Coerce to a float of zero or more, else None.
 
-    Zero is a measured error rate, not a missing one, so ``_positive`` would read a flawless run as unreported.
+    Zero is a measured error rate, not a missing one, so ``optional_positive_float`` would read a flawless run as unreported.
     """
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
@@ -179,13 +172,15 @@ def perf_snapshot_from_mapping(source: Mapping[str, Any] | None) -> dict[str, fl
     # non-positive coalesces to input plus output, the same fallback ``agentx.mapping`` applies.
     if not isinstance(source, Mapping):
         return None
-    intvty = _positive(source.get(GRADED_INTVTY))
-    intvty_p50 = _positive(source.get(GRADED_INTVTY_P50))
-    duration = _positive(source.get(GRADED_DURATION)) or _positive(source.get("duration"))
+    intvty = optional_positive_float(source.get(GRADED_INTVTY))
+    intvty_p50 = optional_positive_float(source.get(GRADED_INTVTY_P50))
+    duration = optional_positive_float(source.get(GRADED_DURATION)) or optional_positive_float(source.get("duration"))
     error_rate = _non_negative(source.get(GRADED_ERROR_RATE))
-    inp = _positive(source.get("input_throughput"))
-    out = _positive(source.get(GRADED_OUTPUT)) or _positive(source.get("tput"))
-    total = _positive(source.get(GRADED_TOTAL)) or _positive(source.get("total_token_throughput"))
+    inp = optional_positive_float(source.get("input_throughput"))
+    out = optional_positive_float(source.get(GRADED_OUTPUT)) or optional_positive_float(source.get("tput"))
+    total = optional_positive_float(source.get(GRADED_TOTAL)) or optional_positive_float(
+        source.get("total_token_throughput")
+    )
     if total is None and inp is not None and out is not None:
         total = inp + out
     if intvty is None or intvty_p50 is None or total is None:
@@ -198,15 +193,15 @@ def perf_snapshot_from_mapping(source: Mapping[str, Any] | None) -> dict[str, fl
     for key, value in (
         ("input_throughput", inp),
         (GRADED_OUTPUT, out),
-        ("tpot_p90_ms", _positive(source.get("tpot_p90_ms"))),
-        ("ttft_p50_ms", _positive(source.get("ttft_p50_ms"))),
-        ("ttft_p90_ms", _positive(source.get("ttft_p90_ms"))),
-        ("tpot_p50_ms", _positive(source.get("tpot_p50_ms"))),
-        (GRADED_OUTPUT_PER_GPU, _positive(source.get(GRADED_OUTPUT_PER_GPU))),
+        ("tpot_p90_ms", optional_positive_float(source.get("tpot_p90_ms"))),
+        ("ttft_p50_ms", optional_positive_float(source.get("ttft_p50_ms"))),
+        ("ttft_p90_ms", optional_positive_float(source.get("ttft_p90_ms"))),
+        ("tpot_p50_ms", optional_positive_float(source.get("tpot_p50_ms"))),
+        (GRADED_OUTPUT_PER_GPU, optional_positive_float(source.get(GRADED_OUTPUT_PER_GPU))),
         (GRADED_DURATION, duration),
         (GRADED_ERROR_RATE, error_rate),
         (GRADED_UNSERVED_REQUESTS, _non_negative(source.get(GRADED_UNSERVED_REQUESTS))),
-        (GRADED_REQUESTS_TOTAL, _positive(source.get(GRADED_REQUESTS_TOTAL))),
+        (GRADED_REQUESTS_TOTAL, optional_positive_float(source.get(GRADED_REQUESTS_TOTAL))),
     ):
         if value is not None:
             snap[key] = value
@@ -218,7 +213,9 @@ def output_tput_of(source: Mapping[str, Any] | None) -> float:
     """Output throughput from a measurement or a ``current_best``; 0.0 when absent."""
     if not isinstance(source, Mapping):
         return 0.0
-    return float(_positive(source.get(GRADED_OUTPUT)) or _positive(source.get("tput")) or 0.0)
+    return float(
+        optional_positive_float(source.get(GRADED_OUTPUT)) or optional_positive_float(source.get("tput")) or 0.0
+    )
 
 
 def axis_of(snapshot: Mapping[str, float] | None, key: str) -> float:
@@ -255,10 +252,12 @@ def graded_axes_of(source: Mapping[str, Any] | None) -> dict[str, float]:
     if not isinstance(source, Mapping):
         return {}
     axes: dict[str, float] = {}
-    intvty = _positive(source.get(GRADED_INTVTY))
+    intvty = optional_positive_float(source.get(GRADED_INTVTY))
     if intvty is not None:
         axes[GRADED_INTVTY] = intvty
-    total = _positive(source.get(GRADED_TOTAL)) or _positive(source.get("total_token_throughput"))
+    total = optional_positive_float(source.get(GRADED_TOTAL)) or optional_positive_float(
+        source.get("total_token_throughput")
+    )
     if total is not None:
         axes[GRADED_TOTAL] = total
     for key in (
@@ -271,10 +270,10 @@ def graded_axes_of(source: Mapping[str, Any] | None) -> dict[str, float]:
         GRADED_OUTPUT_PER_GPU,
         GRADED_REQUESTS_TOTAL,
     ):
-        value = _positive(source.get(key))
+        value = optional_positive_float(source.get(key))
         if value is not None:
             axes[key] = value
-    duration = _positive(source.get(GRADED_DURATION)) or _positive(source.get("duration"))
+    duration = optional_positive_float(source.get(GRADED_DURATION)) or optional_positive_float(source.get("duration"))
     if duration is not None:
         axes[GRADED_DURATION] = duration
     for key in (GRADED_ERROR_RATE, GRADED_UNSERVED_REQUESTS):
@@ -318,8 +317,8 @@ def stamp_output_per_gpu(measurement: Any, tp: Any) -> None:
     """
     if not isinstance(measurement, dict):
         return
-    chips = _positive(tp)
-    out = _positive(measurement.get(GRADED_OUTPUT)) or _positive(measurement.get("tput"))
+    chips = optional_positive_float(tp)
+    out = optional_positive_float(measurement.get(GRADED_OUTPUT)) or optional_positive_float(measurement.get("tput"))
     if chips is None or out is None:
         return
     measurement[GRADED_OUTPUT_PER_GPU] = out / chips
@@ -335,7 +334,7 @@ def with_output_per_gpu(measurement: Mapping[str, Any], tp: Any) -> dict[str, An
 def _unserved_rate_pct(side: Mapping[str, Any]) -> float | None:
     """The percentage of *side*'s requests the server left unserved; None when the side did not count them."""
     unserved = _non_negative(side.get(GRADED_UNSERVED_REQUESTS))
-    total = _positive(side.get(GRADED_REQUESTS_TOTAL))
+    total = optional_positive_float(side.get(GRADED_REQUESTS_TOTAL))
     if unserved is None or total is None:
         return None
     return _PERCENT * unserved / total

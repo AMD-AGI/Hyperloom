@@ -21,11 +21,8 @@ from hyperloom.orchestrator.actions.executors import (
 from hyperloom.inference_optimizer.canonical_fingerprint import (
     canonical_fingerprint,
 )
-from hyperloom.orchestrator.actions.executors._grid_runner import (
-    GridVariant,
-    apply_compatibility_filter,
-    GridRecipe,
-)
+from hyperloom.orchestrator.actions.executors._grid_runner import GridRecipe, GridVariant
+from hyperloom.orchestrator.actions.executors._grid_variant_filter import apply_compatibility_filter
 from hyperloom.orchestrator.actions.executors._subprocess_kill import (
     ORCHESTRATOR_CANCELLED_RETURNCODE,
     SESSION_TIME_EXHAUSTED_RETURNCODE,

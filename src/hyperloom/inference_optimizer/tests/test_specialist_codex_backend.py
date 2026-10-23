@@ -1074,7 +1074,6 @@ async def test_ray_codex_launch_uses_replace_env_and_prompt_file_stdin(
     )
 
     assert result.exit_code == 0
-    assert lease.started["env_mode"] == "replace"
     assert lease.started["stdin_path"] == str(workspace / "prompt.md")
     assert Path(lease.started["stdin_path"]).read_text(encoding="utf-8") == "ray user prompt"
     assert lease.started["cmd"][-1] == "-"

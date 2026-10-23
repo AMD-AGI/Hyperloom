@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from hyperloom.common.coerce import dict_rows, to_mapping
+from hyperloom.common.coerce import dict_rows, optional_positive_float, to_mapping
 
 from ..base import (
     Decision,
@@ -22,7 +22,6 @@ from ..base import (
     events_of,
     md_kv_list,
     md_table,
-    measured_ms,
     register_renderer,
     session_of,
     task_config_of,
@@ -105,7 +104,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     session = session_of(breakdown)
     tput = measurement.get("output_throughput")
     acc = measurement.get("accuracy")
-    ttft = measured_ms(measurement.get("ttft_mean_ms"))
+    ttft = optional_positive_float(measurement.get("ttft_mean_ms"))
     e2el = measurement.get("e2el_mean_ms")
     ttft_source = str(measurement.get("ttft_e2el_source") or "")
     # The streak this measurement was dispatched under, which is the count of

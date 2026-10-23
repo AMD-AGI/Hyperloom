@@ -227,7 +227,7 @@ def _load_materialized_workload_metadata(config_path: str) -> dict[str, Any]:
     envs = bench.get("envs") if isinstance(bench.get("envs"), dict) else {}
     framework = str(bench.get("framework") or "").strip().lower()
     # Per-framework env-name source of truth (e.g. atom reads ``EXTRA_ATOM_ARGS``).
-    from ._grid_runner import server_args_env_name
+    from hyperloom.inference_optimizer.framework_registry import server_args_env_name
 
     server_key = server_args_env_name(framework)
     server_args = str(envs.get(server_key) or "").strip()

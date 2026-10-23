@@ -3327,7 +3327,7 @@ def _replayed_on_a_git_tree(tmp_path: Path) -> tuple[Coordinator, Path, dict, di
     workspace = tmp_path / "runs" / "replay_warm_recipe" / "warm"
     workspace.mkdir(parents=True)
     result = {"status": "succeeded", "output_throughput": 612.0, "workspace": str(workspace)}
-    _stamp_warm_patch_outcome(result, _apply_warm_patches(params, str(tree), workspace), params)
+    _stamp_warm_patch_outcome(result, _apply_warm_patches(params, workspace), params)
     coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
     coord.shared_state.baseline_tput = 600.0
     coord.shared_state.warm_replay_outcome = {"expected_gain_pct": 0.0}
@@ -3421,7 +3421,7 @@ def test_a_commit_failing_on_one_tree_leaves_every_tree_stock(tmp_path):
     workspace = tmp_path / "runs" / "replay_warm_recipe" / "warm"
     workspace.mkdir(parents=True)
     result = {"status": "succeeded", "output_throughput": 612.0, "workspace": str(workspace)}
-    _stamp_warm_patch_outcome(result, _apply_warm_patches(params, "", workspace), params)
+    _stamp_warm_patch_outcome(result, _apply_warm_patches(params, workspace), params)
     hook = trees[1] / ".git" / "hooks" / "pre-commit"
     hook.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
     hook.chmod(0o755)
@@ -3474,7 +3474,7 @@ def test_a_refused_replay_leaves_an_overlay_the_tree_already_held_uncommitted(tm
     workspace = tmp_path / "runs" / "replay_warm_recipe" / "warm"
     workspace.mkdir(parents=True)
     result = {"status": "succeeded", "output_throughput": 612.0, "workspace": str(workspace)}
-    _stamp_warm_patch_outcome(result, _apply_warm_patches(params, str(tree), workspace), params)
+    _stamp_warm_patch_outcome(result, _apply_warm_patches(params, workspace), params)
     assert [p["status"] for p in result["warm_patch_result"]["patches"]] == ["present_in_dirty_worktree"]
     coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
     coord.shared_state.baseline_tput = 600.0
@@ -3509,7 +3509,7 @@ def test_a_promotion_commit_that_cannot_be_undone_fails_the_rollback(tmp_path, m
     workspace = tmp_path / "runs" / "replay_warm_recipe" / "warm"
     workspace.mkdir(parents=True)
     result = {"status": "succeeded", "output_throughput": 612.0, "workspace": str(workspace)}
-    _stamp_warm_patch_outcome(result, _apply_warm_patches(params, str(tree), workspace), params)
+    _stamp_warm_patch_outcome(result, _apply_warm_patches(params, workspace), params)
     coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
     coord.shared_state.baseline_tput = 600.0
     coord.shared_state.warm_replay_outcome = {"expected_gain_pct": 0.0}

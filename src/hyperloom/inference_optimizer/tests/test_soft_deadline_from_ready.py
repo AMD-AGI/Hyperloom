@@ -16,7 +16,6 @@ from hyperloom.orchestrator.actions.executors._subprocess_kill import (
     clear_server_ready_stamp,
     post_ready_runtime_sec,
     run_with_session_kill,
-    server_ready_unix,
 )
 
 
@@ -160,7 +159,7 @@ class TestARoundIsPricedByItsTwoParts:
             watch=RoundWatch(timeout=30, server_log_path=str(log_path), session_deadline_sec=time.monotonic() + 30.0),
         )
         assert cp.returncode == 0
-        assert server_ready_unix(str(log_path)) is not None, (
+        assert post_ready_runtime_sec(str(log_path), started_unix=0.0, runtime_sec=1.0) is not None, (
             "the boot/benchmark split was withdrawn along with the stall watchdog"
         )
 
@@ -213,7 +212,7 @@ class TestARoundIsPricedByItsTwoParts:
             [sys.executable, "-c", script, str(log_path)],
             watch=RoundWatch(timeout=30, server_log_path=str(log_path)),
         )
-        assert server_ready_unix(str(log_path)) is None
+        assert post_ready_runtime_sec(str(log_path), started_unix=0.0, runtime_sec=1.0) is None
         assert (
             post_ready_runtime_sec(
                 str(log_path),
@@ -244,12 +243,12 @@ class TestARoundIsPricedByItsTwoParts:
         log_path = tmp_path / "server.log"
         stamp = tmp_path / "server_ready_at"
         stamp.write_text(f"{time.time():.3f} 30.000\n", encoding="utf-8")
-        assert server_ready_unix(str(log_path)) is not None
+        assert post_ready_runtime_sec(str(log_path), started_unix=0.0, runtime_sec=1.0) is not None
 
         clear_server_ready_stamp(str(log_path))
 
         assert not stamp.exists()
-        assert server_ready_unix(str(log_path)) is None
+        assert post_ready_runtime_sec(str(log_path), started_unix=0.0, runtime_sec=1.0) is None
         # Idempotent: a round whose dir never had one must not fail to start.
         clear_server_ready_stamp(str(log_path))
 

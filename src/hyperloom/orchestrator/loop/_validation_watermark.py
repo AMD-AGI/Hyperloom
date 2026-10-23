@@ -9,6 +9,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Mapping
 
+from hyperloom.common.gain_math import gain_pct_or_zero
 from hyperloom.common.perf_metric import with_output_per_gpu
 
 from ..actions._recorder_trace import trace_recording_skipped
@@ -55,9 +56,7 @@ class ValidationMixin:
         if not graded.comparable:
             log.info("cumulative gain held: measurement not comparable (%s)", graded.degrade_reason)
             return False
-        validated_gain = (
-            (graded.candidate - graded.reference) / graded.reference * 100.0 if graded.reference > 0 else 0.0
-        )
+        validated_gain = gain_pct_or_zero(graded.candidate, graded.reference)
         ts = str(ts or datetime.now(timezone.utc).isoformat())
         self.shared_state.cumulative_gain_validated = float(validated_gain)
         self.shared_state.cumulative_gain_validated_ts = ts

@@ -27,6 +27,7 @@ from . import geak_rebench as _geak_rebench, machine_state as _phase_state
 from .kernel_round_budget import controller_round_stop, integrate_within_phase, measurement_round_sec, rebench_round_sec
 from hyperloom.common.coerce import first_str, to_float, to_int
 from hyperloom.common.env import env_bool, env_float, env_int
+from hyperloom.common import gain_math
 from hyperloom.inference_optimizer.session.geak_rebench_verdict import REBENCH_NO_PROMOTE
 from hyperloom.common.io import WriteOptions, atomic_write_json
 from hyperloom.common.jsonio import read_json
@@ -2098,7 +2099,7 @@ class KernelPhase(CoordinatorCollaborator):
             # Audit-only self-reported numbers (not the headline until rebench).
             "self_reported_tput": new_tput,
             "self_reported_speedup": result.get("throughput_speedup"),
-            "self_reported_gain_pct": ((new_tput - base) / base * 100.0) if (base > 0 and comparable) else None,
+            "self_reported_gain_pct": gain_math.incremental_gain_pct(new_tput, base) if comparable else None,
             # Why the gain above is a number or None, so a reader never has to
             # guess whether an absent gain means "no gain" or "not comparable".
             "workload_comparability": comparability or None,
@@ -2430,9 +2431,7 @@ class KernelPhase(CoordinatorCollaborator):
             return
         rows = [{"kernel_id": geak_spec_name(k), "spec": k} for k in specs]
 
-        rebench_gain: float | None = None
-        if baseline_tput > 0 and measured_tput > 0:
-            rebench_gain = (measured_tput - baseline_tput) / baseline_tput * 100.0
+        rebench_gain = gain_math.gain_pct(measured_tput, baseline_tput)
         # One kernel, overlay proven loaded, one measured number: the gain is attributable.
         attributable = bool(overlay_loaded) and len(rows) == 1
         am = result.get("alignment_metrics") or {}
