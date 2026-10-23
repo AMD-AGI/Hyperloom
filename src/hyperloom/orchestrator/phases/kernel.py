@@ -2917,10 +2917,8 @@ class KernelPhase(CoordinatorCollaborator):
     ) -> dict[str, Any] | None:
         """Did the tuned table reach the server's merge list and get read?"""
         csv_paths = [value for key, value in envs.items() if key.startswith("AITER_CONFIG")]
-        if not csv_paths:
+        if not csv_paths or tuner_name == "fmoe_ck":
             return None
-        if tuner_name == "fmoe_ck":
-            return self._fmoe_apply_verdict(envs, csv_paths)
         from ..kernel.gemm_shape_coverage import aiter_log_tuned_config_enabled
         from ..measurement.apply_verification import verify_applied
 
@@ -2948,98 +2946,6 @@ class KernelPhase(CoordinatorCollaborator):
             hit_logging=hit_logging,
             runtime_table_names=table_names,
         ).to_dict()
-
-    def _fmoe_apply_verdict(self, envs: dict[str, str], csv_paths: list[str]) -> dict[str, Any] | None:
-        """Apply verdict for ``fmoe_ck`` based on fused-MoE dispatch, not dense GEMM."""
-        from ..kernel.gemm_shape_coverage import (
-            aiter_log_tuned_config_enabled,
-            fmoe_tuned_config_coverage,
-            log_has_fused_moe_activity,
-            parse_aiter_fused_moe_dispatches,
-            read_latest_integrate_server_log,
-            resolve_fmoe_candidate_csv,
-            tuned_fmoe_csv_rows,
-        )
-
-        loaded = read_latest_integrate_server_log(self.session_dir, _integrate_run_name("fmoe_ck"))
-        if loaded is None:
-            log.warning(
-                "forge gemm E2E: no server.log under %s; apply verification cannot run for fmoe_ck",
-                self.session_dir / "runs" / "integrate" / _integrate_run_name("fmoe_ck"),
-            )
-            return None
-        log_text = loaded[1]
-        candidate_path = resolve_fmoe_candidate_csv(csv_paths[0])
-        dispatches = parse_aiter_fused_moe_dispatches(log_text)
-
-        def _verdict(name: str, detail: str, *, hits: int = 0, misses: int = 0, blocks: bool = False) -> dict[str, Any]:
-            attributable = bool(dispatches) and candidate_path is not None
-            return {
-                "verdict": name,
-                "hits": hits,
-                "misses": misses,
-                "blocks_keep": blocks,
-                "conclusive": blocks or hits > 0,
-                "merged_tables": [],
-                "unmerged_artifacts": [] if attributable else list(csv_paths),
-                "detail": detail,
-            }
-
-        if not dispatches:
-            if log_has_fused_moe_activity(log_text):
-                return _verdict(
-                    "fused_moe_parse_inconclusive",
-                    "server.log contains fused-MoE activity but no dispatch lines could be parsed",
-                )
-            # aiter prints a hit line only under this flag, so a zero-hit result means nothing without it.
-            if not aiter_log_tuned_config_enabled(envs):
-                return _verdict(
-                    "fused_moe_logging_disabled",
-                    "AITER_LOG_TUNED_CONFIG is off; fused-MoE dispatch attribution cannot run",
-                )
-            return _verdict(
-                "no_fused_moe_dispatch",
-                "server.log exists but contains no [aiter] [fused_moe] dispatch lines",
-                blocks=True,
-            )
-        if candidate_path is None:
-            return _verdict(
-                "candidate_csv_missing",
-                "env points at a merged fmoe CSV but the sibling bare candidate file is absent; cannot attribute "
-                "runtime kernel names to the tuner candidate",
-                misses=len(dispatches),
-            )
-
-        coverage = fmoe_tuned_config_coverage(tuned_fmoe_csv_rows(candidate_path), dispatches)
-        requested = int(coverage.get("requested") or 0)
-        covered = int(coverage.get("covered") or 0)
-        if covered > 0:
-            return _verdict(
-                "served",
-                f"{covered} fused-MoE dispatch(es) match candidate kernelName1/kernelName2 in {candidate_path.name}",
-                hits=covered,
-                misses=requested - covered,
-            )
-        if coverage.get("runtime_default"):
-            return _verdict(
-                "runtime_default_config",
-                "runtime served default heuristics; tuned candidate kernels were not selected",
-                misses=requested,
-                blocks=True,
-            )
-        if coverage.get("kernel_name_mismatch"):
-            return _verdict(
-                "kernel_name_mismatch",
-                "lookup key matched bundled rows but runtime kernelName1/kernelName2 differ from candidate_fmoe.csv",
-                misses=requested,
-                blocks=True,
-            )
-        return _verdict(
-            "no_shape_key_matched",
-            f"0 of {requested} fused-MoE dispatch(es) resolve to a candidate row",
-            misses=requested,
-            blocks=True,
-        )
 
     def _aiter_config_dirs(self) -> list[Path]:
         import importlib.util
