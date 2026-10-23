@@ -860,7 +860,7 @@ def per_round_forward_overrides() -> dict[str, Any]:
 
 def _forward_runtime_env(overrides: dict[str, Any]) -> dict[str, Any] | None:
     """Build the Ray runtime_env carrying per-round env overrides to every rank."""
-    env_vars = filter_forward_env(dict(overrides.get("set") or {}), warn_on_drop=True)
+    env_vars = filter_forward_env(dict(overrides.get("set") or {}))
     if not env_vars:
         return None
     info(f"forwarding per-round env to all ranks: {sorted(env_vars)}")

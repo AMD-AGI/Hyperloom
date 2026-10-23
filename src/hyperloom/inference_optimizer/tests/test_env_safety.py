@@ -46,7 +46,6 @@ def test_filter_forward_env_drops_bad_keys():
             "LD_PRELOAD": "/evil.so",
             "X Y": "nope",
         },
-        warn_on_drop=False,
     )
     assert out == {"MORI_FOO": "1"}
 

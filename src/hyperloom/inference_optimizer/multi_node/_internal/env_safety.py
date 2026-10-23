@@ -16,18 +16,14 @@ def is_forward_env_key_allowed(key: str) -> bool:
     return key not in BLOCKED_UNTRUSTED_ENV_NAMES
 
 
-def filter_forward_env(
-    env: dict[str, str],
-    *,
-    warn_on_drop: bool = True,
-) -> dict[str, str]:
+def filter_forward_env(env: dict[str, str]) -> dict[str, str]:
     """Drop disallowed keys from an env dict destined for SSH forwarding."""
     out: dict[str, str] = {}
     for raw_key, raw_val in env.items():
         key = str(raw_key)
         if is_forward_env_key_allowed(key):
             out[key] = str(raw_val)
-        elif warn_on_drop:
+        else:
             log.warning("dropping disallowed multi-node forward env key %r", key)
     return out
 
