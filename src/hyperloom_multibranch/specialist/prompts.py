@@ -19,7 +19,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from pathlib import Path
 
 from hyperloom.orchestrator.prompts.specialist_prompt_builder import BASH_KILL_SAFETY_PREAMBLE
 from hyperloom_multibranch.contracts.fork import RepairRequest
@@ -292,12 +293,26 @@ summed share of the operators they speed up.
 """
 
 
-def role_prompt(workload: str) -> str:
-    """The system prompt of every session of every specialist; ``workload`` names what the session optimizes."""
+def role_prompt(workload: str, references: Mapping[str, Path] | None = None) -> str:
+    """The system prompt of every session of every specialist; ``workload`` names what the session optimizes, and
+    ``references`` the reference material the session was given, each source's name and the directory it was copied
+    to."""
     named = " ".join(workload.split())
     if not named:
         raise ValueError("a specialist's role names the workload its session optimizes")
-    return _ROLE.format(workload=named, fake_gains=_fake_gains(), directions=_direction_names())
+    role = _ROLE.format(workload=named, fake_gains=_fake_gains(), directions=_direction_names())
+    return role + _references(references or {})
+
+
+def _references(references: Mapping[str, Path]) -> str:
+    if not references:
+        return ""
+    listed = "; ".join(f"{name} at {path}" for name, path in sorted(references.items()))
+    return (
+        "\nReference material for this session, read-only and copied in when it started, one directory per source: "
+        f"{listed}. Before you guess at a kernel, a tuning step or a setting, read what it says about this model's "
+        "operators and your direction, and name the file you used in your branch log.\n"
+    )
 
 
 def launch_prompt(

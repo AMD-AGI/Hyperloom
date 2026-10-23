@@ -528,3 +528,13 @@ def test_the_directions_name_prefix_recompute_config_overrides_and_fusion_throug
     assert "compare each follow-up turn's computed prefill tokens with its new tokens" in settings
     assert "is set with --hf-overrides, nested under text_config for a multimodal wrapper" in fast_path
     assert "Carry the fusion to the quantize" in fusion
+
+
+def test_the_role_names_the_session_s_reference_material_only_when_it_has_some(tmp_path):
+    geak = tmp_path / "MB-reference" / "geak"
+
+    prompt = role_prompt(WORKLOAD, references={"geak": geak})
+
+    assert f"geak at {geak}" in prompt and "read-only" in prompt
+    assert "name the file you used in your branch log" in prompt
+    assert "Reference material for this session" not in role_prompt(WORKLOAD)
