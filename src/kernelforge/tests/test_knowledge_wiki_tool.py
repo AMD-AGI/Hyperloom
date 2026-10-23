@@ -86,7 +86,7 @@ def log(tmp_path) -> Path:
 
 
 def _server(wiki: Path, log: Path, role: str = "specialist memory") -> server.KnowledgeWikiServer:
-    return server.KnowledgeWikiServer({server.ROOT_ENV: str(wiki), server.LOG_ENV: str(log), server.ROLE_ENV: role})
+    return server.KnowledgeWikiServer(root=wiki, log_path=log, role=role)
 
 
 def _call(srv: server.KnowledgeWikiServer, name: str, arguments: dict) -> dict:
