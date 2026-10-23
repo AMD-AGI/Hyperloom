@@ -57,6 +57,8 @@ from ..bringup import ARGV_INVALID
 from ..framework.artifacts import candidate_key
 from ..state._shared_state.attempt_audit import _AUDIT_ACTIONS
 from ..state.shared_state import SharedState, resolve_graded_comparison, stack_base_params
+from ..deployment.single_file import module_uses_aoti
+from ..framework.optimization_scope import aoti_config, optimization_file
 from ..bus.message_bus import Message
 from hyperloom.inference_optimizer.grid_server_args import (
     dedupe_extra_server_args,
@@ -2978,6 +2980,31 @@ class WritebackCollaborator(CoordinatorCollaborator):
             f"stash_restore_error={result.get('stash_restore_error')!r}"
         )
 
+    def _record_export_gate(self, *, kept_flag: bool) -> bool:
+        """Open the export gate once a KEEP lands whose applied module exports.
+
+        Inert unless ``aoti.enabled``. The evidence is the applied hook on disk, not
+        the patch text: only a KEEP means it was applied *and* benchmarked. The AST
+        check cannot tell an export that ran from one that was caught -- the
+        no-fallback rule in ``_aoti_instructions`` is what makes it sound.
+
+        Returns whether it mutated state, so the caller persists it. A failed attempt
+        is the one this counter exists to record, and that path has no other reason
+        to save.
+        """
+        try:
+            config = aoti_config()
+        except ValueError:
+            return False
+        if config is None or not config.enabled or self.shared_state.export_landed:
+            return False
+        hook = optimization_file()
+        if kept_flag and hook is not None and module_uses_aoti(hook):
+            self.shared_state.export_landed = True
+            return True
+        self.shared_state.export_attempts += 1
+        return True
+
     async def _promote_integrate_patch(
         self,
         result: dict,
@@ -2991,6 +3018,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
         measurement = result.get("bench_result") or result
         new_tput = measurement.get("output_throughput", result.get("output_throughput"))
         kept_flag = status == "kept" and isinstance(new_tput, (int, float)) and float(new_tput) > 0
+        export_gate_changed = self._record_export_gate(kept_flag=kept_flag)
         completed_pending = self._confirmed_integrate_completion(result, task, kept_flag=kept_flag)
         # Register framework-rewrite switches as search levers. Done for both KEEP
         # verdicts: a bundle that cleared the gate is on and gets leave-one-out
@@ -3129,7 +3157,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                     task=task,
                     include_patches=True,
                 )
-        outcome.changed = changed
+        outcome.changed = changed or export_gate_changed
 
     async def _promote_conc_sweep(
         self,

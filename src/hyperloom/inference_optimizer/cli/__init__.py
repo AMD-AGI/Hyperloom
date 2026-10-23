@@ -1206,6 +1206,46 @@ def _resume_can_disable_eval(baseline_accuracy: float) -> bool:
     return float(baseline_accuracy or 0.0) <= 0.0
 
 
+def _check_export_gate_budget(args: argparse.Namespace, phase_budget_pct: dict[str, float]) -> None:
+    """Warn when the export gate cannot afford two patch specialists.
+
+    Under ``aoti.enabled`` nothing is scored until the export lands, so the run depends
+    entirely on patch specialists, which have a 60-min floor
+    (``specialists.profile.wall_budget_base_min``). Two is the minimum that allows one
+    failure and one fix. Advisory only: the default ``--max-hours`` affords none, and a
+    short deliberate run is the operator's call to make.
+    """
+    from hyperloom.orchestrator.framework.optimization_scope import aoti_config
+    from hyperloom.orchestrator.phases.machine_state import DEFAULT_PHASE_BUDGET_PCT, PHASE_FRAMEWORK_AGENT
+    from hyperloom.orchestrator.specialists.profile import MODE_PATCH, wall_budget_base_min
+
+    try:
+        config = aoti_config()
+    except ValueError:
+        return
+    if config is None or not config.enabled:
+        return
+
+    # --extend-hours lands in session state, not args, so fold it in here or a resumed
+    # run is judged on the leg it started with.
+    hours = float(getattr(args, "max_hours", 0.0) or 0.0) + float(getattr(args, "extend_hours", 0.0) or 0.0)
+    pct = phase_budget_pct.get(PHASE_FRAMEWORK_AGENT, DEFAULT_PHASE_BUDGET_PCT.get(PHASE_FRAMEWORK_AGENT, 0.0))
+    framework_min = hours * 60.0 * float(pct)
+    specialist_min = wall_budget_base_min({"mode": MODE_PATCH})
+    if specialist_min <= 0 or framework_min // specialist_min >= 2:
+        return
+    needed_pct = min((2.0 * specialist_min) / (hours * 60.0), 1.0) if hours > 0 else 1.0
+    print(
+        f"Preflight: WARNING — aoti.enabled is declared, so nothing is scored until the export "
+        f"lands. FRAMEWORK_AGENT has {framework_min:.0f} min ({hours:g}h x {pct:.2f}) and a patch "
+        f"specialist needs {specialist_min:.0f} min, so this run affords "
+        f"{int(framework_min // specialist_min)}. Two is the minimum that allows one failure and "
+        f"one fix: --phase-budget-framework-pct {needed_pct:.2f} at this budget, or raise "
+        f"--max-hours.",
+        file=sys.stderr,
+    )
+
+
 def _build_phase_budget_pct(args: argparse.Namespace) -> dict[str, float]:
     """Map ``--*-pct`` CLI flags to a ``phase -> pct`` override dict.
 
@@ -2703,6 +2743,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         _reset_state_file(session_dir, framework=state.framework)
     # Build phase budget pct dict from CLI flags; absent values fall back to Coordinator library defaults.
     phase_budget_pct = _build_phase_budget_pct(args)
+    _check_export_gate_budget(args, phase_budget_pct)
 
     coordinator = Coordinator(
         session_dir,

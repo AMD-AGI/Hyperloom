@@ -621,6 +621,37 @@ def _print_session_skeleton(session_dir: Path) -> None:
     print("  [ok] manifest.json (written first)")
 
 
+def _print_export_gate_line(state: SharedState) -> None:
+    """Say whether the declared ahead-of-time export landed, next to the gain figure.
+
+    A landed export can still show a negative headline gain, measured against an eager
+    path this workload cannot ship. Silent unless ``aoti.enabled``.
+    """
+    from hyperloom.orchestrator.framework.optimization_scope import aoti_config
+
+    try:
+        config = aoti_config()
+    except ValueError:
+        return
+    if config is None or not config.enabled:
+        return
+    attempts = int(getattr(state, "export_attempts", 0) or 0)
+    if getattr(state, "export_landed", False):
+        gain = float(getattr(state, "cumulative_gain_validated", 0.0) or 0.0)
+        tail = (
+            "the artifact is faster than the eager path it replaces"
+            if gain > 0
+            else "it is still behind the eager path, which this workload does not ship; "
+            "optimizing the export is what further budget buys"
+        )
+        print(f"  aoti_export          : landed — {tail}")
+    else:
+        print(
+            f"  aoti_export          : ⚠ NEVER LANDED after {attempts} integrate round(s) — "
+            f"no shippable artifact was produced, whatever else this run kept"
+        )
+
+
 def _print_final_summary(
     state: SharedState,
     stop_reason: str,
@@ -656,6 +687,7 @@ def _print_final_summary(
         )
     else:
         print("  cumulative_gain_val  : 0.00% ⚠ never validated — no `explore` KEEP has landed yet")
+    _print_export_gate_line(state)
     print(f"  current_best         : {state.current_best}")
     print(f"  pruned_families      : {state.pruned_families}")
     print(f"  crash_count          : {state.crash_count}")
