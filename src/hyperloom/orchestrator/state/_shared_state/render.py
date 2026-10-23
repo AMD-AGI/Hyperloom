@@ -205,7 +205,7 @@ class _RenderMixin:
         )
 
     def to_mission_summary(self, *, now: datetime | None = None) -> str:
-        """Mission-progress block printed at the top of every tick (raw/validated gain, time vs budget, stack staleness)."""
+        """Mission-progress block of every tick's turn section (raw/validated gain, time vs budget, stack staleness)."""
         elapsed = self.elapsed_minutes(now=now)
         remaining = self.remaining_minutes(now=now)
         budget_line = (
@@ -509,9 +509,7 @@ class _RenderMixin:
             f"last_explore={self._format_attempt(self.last_explore)}",
             f"attempts_history={self._format_attempts_history()}",
             f"last_action_failures={self._format_last_action_failures()}",
-            f"agent_last_active={self._format_agent_last_active()}",
             f"gain_gated_action_count={int(self.gain_gated_action_count or 0)}",
-            f"tick={int(self.tick or 0)}",
             f"macro_cycle={int(self.macro_cycle or 0)}",
             f"stop_reason={self.stop_reason or '(none)'}",
             f"closing_phase={self.closing_phase}  "
@@ -519,6 +517,10 @@ class _RenderMixin:
             f"closing_report_task_id={self.closing_report_task_id or '(none)'}",
         ]
         return "\n".join(lines)
+
+    def to_tick_summary(self) -> str:
+        """The per-tick counters of the prompt summary: the tick number and each agent's last pass."""
+        return f"tick={int(self.tick or 0)}\nagent_last_active={self._format_agent_last_active()}"
 
     def _format_agent_last_active(self) -> str:
         """Render each agent's last completed reactor pass as a relative age.

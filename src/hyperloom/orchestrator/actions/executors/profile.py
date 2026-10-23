@@ -35,6 +35,7 @@ from ._inferencex_patcher import (
     ensure_benchmark_lib_eval_dest_patched,
     ensure_benchmark_serving_patched,
 )
+from .benchmark_result import round_succeeded
 from .baseline import BenchmarkRunExecutor
 
 
@@ -1318,8 +1319,7 @@ class ProfileExecutor(BenchmarkRunExecutor):
             result["trace_input_ready"] = True
         return result
 
-    def _measurement_succeeded(self, measurement: dict[str, Any]) -> bool:
-        return measurement.get("round_succeeded", measurement.get("valid_measurement")) is True
+    _measurement_succeeded = staticmethod(round_succeeded)
 
     async def _run_native_profile(self, ctx) -> dict[str, Any]:
         """Collect Magpie-owned captures and certify each time window separately."""

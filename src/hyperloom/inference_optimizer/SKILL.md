@@ -354,7 +354,7 @@ Exit codes (soft degrade — IR-3 never aborts launch):
 - `1` → PR Monitor unreachable. The cli auto-enables `--degraded-pr` and
   continues; `manifest.json` records `pr_degraded_reason=ir3_auto`.
 
-Recipe KB enablement is independent: `--degraded-kb` sets `recipe_kb_enabled=False`
+Recipe KB enablement is independent: `--degraded-kb` disables the Recipe KB
 (T0/T2/T3/T4 no-ops) without affecting PR Monitor.
 
 Operator opt-out: pass `--degraded-pr` to skip the PR Monitor probe (one
@@ -447,8 +447,11 @@ dry, the local-exploration arm stops dispatching for the cycle.
 
 Every diff lands through `integrate_patch`, with `patch_source` naming where
 it came from. KEEP commits to the live tree so the next candidate stacks on
-top; REVERT does `git reset --hard`. Resume skips completed candidates by
-idempotency key.
+top; REVERT does `git reset --hard`. A candidate the tree already holds is not
+benchmarked: when every patch in the set reverse-applies cleanly and the round
+changes nothing else, it ends `already_present`, with that evidence on the
+result and, for a candidate with an upstream PR identity, an `already_present`
+row in the framework KB. Resume skips completed candidates by idempotency key.
 
 The phase exits when both arms are dry or when its budget is spent.
 
@@ -768,8 +771,9 @@ and the operator's stated value is lost:
 | Latency SLA | `--max-latency-ms` | **Scriptable frameworks only** (`xdit`, `custom`); refused for serving, where AgentX already grades interactivity. Pass any stated ceiling on per-request latency ("must stay under 250 ms", "interactive workload"). A **constraint, not a target**: it composes with `--target-*` rather than competing, and refuses any KEEP whose mean end-to-end latency exceeds it — including one that reported no latency at all. Off when omitted, which does not lose a preference but does remove the SLA from the search. |
 | Power ceiling | `--max-power-w` | Pass any stated total power budget for the serving GPUs ("the four cards together stay under 2800 W"). A constraint like `--max-latency-ms`, for the serving frameworks (refused on `xdit` / `custom`): refuses any KEEP whose serving GPUs' summed mean power exceeds it, including one that reported no per-GPU power. |
 | Per-GPU power limit | `--max-per-gpu-power-w GPU_ID W` | Pass any stated limit for a specific card ("GPU 4 under 700 W"), once per card. GPU_ID is the physical amd-smi index. A serving card with no entry is bound only by `--max-power-w`; the limits must add up to no more than it. |
-| GPU power settings | `--gpu-power-cap-w` / `--gpu-perf-level` | Assertions by default. Only when the prompt says the cards were set to a cap or perf level; the session refuses to start if a card differs. Add `--apply-gpu-power-settings` only when the prompt asks Hyperloom to set them: it sets the cards of the integer visible-device mask for the session and restores them when it ends, and needs root. |
+| GPU power settings | `--gpu-power-cap-w` / `--gpu-perf-level` / `--gpu-sclk-max-mhz` | Assertions by default. Only when the prompt says the cards were set to a cap, perf level or graphics-clock limit; the session refuses to start if a card differs. Add `--apply-gpu-power-settings` only when the prompt asks Hyperloom to set the cap or perf level (it never sets the clock limit): it sets the cards of the integer visible-device mask for the session and restores them when it ends, and needs root. |
 | Node power management | `--node-power-management` / `--node-power-limit-w` | Always assertions (MI350 series). Only when the prompt says NPM was enabled or disabled, or a node limit was set, on the BMC; the session refuses to start if `amd-smi node -p` differs. Never set by the session. |
+| Shared NPM node | `--allow-shared-npm-node` | With NPM enabled the session refuses to start unless its visible-device mask covers every GPU on the node. Pass it only when the prompt says to run on part of an NPM node anyway, on every launch and resume; the cards left out are recorded with the session. |
 | Max model len | `--max-model-len` | Optional; auto-derived from ISL+OSL+headroom when omitted. |
 | External reference GPU | `--compare-against-gpu` | `target_analysis` writes `target_analysis/target_baseline.json` for query/status metadata and `competitor_target.json` for both advisory and final-report comparisons. Without a target GPU it writes `reason="no_target_gpu_configured"` and clears the competitor target. AgentX reads accepted `current_best.total_throughput / state.tp` and `current_best.e2e_norm_intvty_p90` at `state.conc`; it does not reread raw results or recipes. Missing targets or axes remain unavailable. This is a cross-system advisory, not proof of identical measurement estimators or deployment, and never changes Objective or KEEP/REVERT. |
 | Target advisory | `--no-target-advisory` | Disable external-target hints in prompts without disabling final-report comparison. `primary_gap` uses the existing latency/throughput categories; the interactivity axis is displayed as interactivity. |
@@ -777,6 +781,7 @@ and the operator's stated value is lost:
 | Env pins | `--extra-env NAME=VALUE` | Repeatable; forward **every** one verbatim as its own flag (do not drop any or fold into the `Environment:` block). The CLI persists them in `state.json` and serializes them into `$INFERENCE_OPTIMIZER_EXTRA_ENV`; a dropped pin is lost silently — e.g. a missing `SGLANG_USE_AITER=0` leaves the explore aiter-MoE filter blind. A `--resume-from` re-exports the persisted set, so re-pass them only to change the set. |
 | Operator-defined specialist | `--custom-specialist-prompt-file` + `--custom-specialist-description` | Only when the prompt asks for a specialist with its own focus. Write the operator's focus text verbatim to a file and pass its path (max 16 KiB); the description is one line (max 200 chars) describing it in its own prompt. Pass both or neither. Export `HYPERLOOM_CUSTOM_SPECIALIST_ONLY=1` before launch only when the prompt asks to run that specialist alone. The CLI refuses them (exit 2) together with `--no-framework-agent`, `--research-lane-capacity 0` or `--reset-state`. Persisted in `state.json`; a `--resume-from` keeps the stored definition, so re-pass both only to replace it, or pass `--reset-state` alone to clear it. |
 | PrimaTune predictor | `--primatune-endpoint` + `--primatune-mode` | Only when the prompt names a PrimaTune service. `active` queues its proposals for benchmarking; `shadow`, the default with an endpoint, only logs them; `off` disables an endpoint the environment exports. Not persisted: a `--resume-from` relaunch needs the flags again unless the shell exports `HYPERLOOM_PREDICTOR_ENDPOINT` / `HYPERLOOM_PREDICTOR_MODE`. See `docs/reference/primatune-predictor.md`. |
+| Plug selection | `--plug-profile` / `--manifest` / `--plug SOCKET=IMPL` / `--plug-config SOCKET.KEY=VALUE` | Only when the prompt names a plug profile, manifest or implementation; otherwise pass none and the run is a plain local run. `--plug-profile` loads a built-in profile (`local`, `hosted-gpu`, `hosted-cpu`); `--manifest` (or `$HYPERLOOM_MANIFEST`) a JSON manifest laid over it; `$HYPERLOOM_MANIFEST_OVERRIDES` a JSON file over that; `--plug` and `--plug-config` (repeatable, a JSON value is read as JSON) win over all of them. A selection is written to `$SESSION_DIR/plugs.resolved.json` and a `--resume-from` reads it back first, so re-pass the flags only to change the selection. The CLI refuses (exit 2) a socket or implementation that does not exist, a malformed manifest, an unset `${VAR}` with no default, and a damaged `plugs.resolved.json`. |
 
 ### Step 2b — Optional quantization prelude (`--quantize`)
 

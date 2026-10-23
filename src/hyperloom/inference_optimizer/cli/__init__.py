@@ -69,6 +69,10 @@ from .bootstrap import (
     _print_final_summary,
     _print_session_skeleton,
     _reconcile_crash_count,
+    open_plug_host,
+    resolve_plug_manifest,
+    warn_without_target_gpu,
+    running_plug_host,
     _seed_shared_state,
     _snapshot_system_prompts,
     agentx_state_is_stale,
@@ -645,7 +649,7 @@ def _reject_unusable_claude_model(chosen: str, *, allow_custom: bool) -> None:
 
 
 def _catalog_probe_candidates(
-    resolved_urls: tuple[str, str] | None,
+    resolved_urls: tuple[str, str],
     *,
     claude_follows_codex: bool,
 ) -> list[tuple[str, str]]:
@@ -656,9 +660,9 @@ def _catalog_probe_candidates(
     """
     anthropic_url = os.environ.get("ANTHROPIC_BASE_URL", "").strip()
     openai_url = os.environ.get("OPENAI_BASE_URL", "").strip()
-    if not anthropic_url and resolved_urls is not None:
+    if not anthropic_url:
         anthropic_url = resolved_urls[0]
-    if not openai_url and resolved_urls is not None:
+    if not openai_url:
         openai_url = resolved_urls[1]
     anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "") or os.environ.get("ANTHROPIC_AUTH_TOKEN", "")
     # OpenAI-side key only.
@@ -682,7 +686,7 @@ def _catalog_probe_candidates(
 
 
 def _probe_claude_catalog(
-    resolved_urls: tuple[str, str] | None,
+    resolved_urls: tuple[str, str],
     *,
     chosen: str,
     claude_follows_codex: bool,
@@ -723,7 +727,7 @@ def _probe_claude_catalog(
 
 def _validate_and_resolve_claude_model(
     args: argparse.Namespace,
-    resolved_urls: tuple[str, str] | None,
+    resolved_urls: tuple[str, str],
     *,
     claude_follows_codex: bool | None = None,
 ) -> set[str] | None:
@@ -802,7 +806,7 @@ def _validate_and_resolve_claude_model(
 
 def _resolve_models_for_run(
     args: argparse.Namespace,
-    resolved_urls: tuple[str, str] | None,
+    resolved_urls: tuple[str, str],
     *,
     claude_follows_codex: bool | None = None,
     codex_follows_claude: bool | None = None,
@@ -898,7 +902,7 @@ def _probe_critic_review_model(
 
 def _smoke_test_codex_model(
     args: argparse.Namespace,
-    resolved_urls: tuple[str, str] | None,
+    resolved_urls: tuple[str, str],
 ) -> None:
     """WARN-only catalog check for ``--codex-model`` on an OpenAI-only launch, where it becomes the orchestration model.
 
@@ -907,7 +911,7 @@ def _smoke_test_codex_model(
     openai_url = os.environ.get("INFERENCE_OPTIMIZER_CATALOG_PROBE_URL", "").strip()
     if not openai_url:
         openai_url = os.environ.get("OPENAI_BASE_URL", "").strip()
-    if not openai_url and resolved_urls is not None:
+    if not openai_url:
         openai_url = resolved_urls[1]
     # OpenAI-side key only.
     openai_key = os.environ.get("OPENAI_API_KEY", "")
@@ -2438,6 +2442,7 @@ def _settle_custom_specialist_only(args: argparse.Namespace) -> None:
 
 async def _run_optimize(args: argparse.Namespace) -> int:
     """Run the ``optimize`` subcommand end to end."""
+    plug_manifest = resolve_plug_manifest(args)  # first: a refused flag must leave any session as it was
     nodes_resolved = _resolve_run_topology(args)
     _settle_custom_specialist_only(args)
 
@@ -2505,6 +2510,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     session_dir = session.session_dir
     session_lock = session.session_lock
     manifest = session.manifest
+    plug_host = open_plug_host(plug_manifest, session_dir)
 
     # Recipe KB T0 anchor (after seed/restore for recipe_canonical_id, before Coordinator); skipped when --degraded-kb.
     recipe_kb_client = _bootstrap_recipe_kb(
@@ -2673,27 +2679,21 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     print(f"Tick interval   : {args.tick_interval_sec}s")
     print()
 
-    if not (getattr(args, "compare_against_gpu", None) or "").strip():
-        print(
-            "[target_analysis] no --compare-against-gpu set; will write a "
-            "marker JSON at $SESSION_DIR/target_analysis/target_baseline.json "
-            "(reason=no_target_gpu_configured) — set --compare-against-gpu "
-            "to fetch real InferenceX reference data.",
-            file=sys.stderr,
-        )
+    warn_without_target_gpu(args)
 
     stop_reason: str | None = None
     try:
-        stop_reason = await coordinator.run(
-            objective=objective,
-            options=RunOptions(
-                max_minutes=args.max_hours * 60.0,
-                tick_interval_sec=args.tick_interval_sec,
-                max_ticks=args.max_ticks,
-                install_signal_handlers=True,
-                closing_grace_sec=args.closing_grace_sec,
-            ),
-        )
+        with running_plug_host(plug_host):
+            stop_reason = await coordinator.run(
+                objective=objective,
+                options=RunOptions(
+                    max_minutes=args.max_hours * 60.0,
+                    tick_interval_sec=args.tick_interval_sec,
+                    max_ticks=args.max_ticks,
+                    install_signal_handlers=True,
+                    closing_grace_sec=args.closing_grace_sec,
+                ),
+            )
     finally:
         state = coordinator.shared_state
         effective_stop_reason = stop_reason or coordinator.stop_classification
