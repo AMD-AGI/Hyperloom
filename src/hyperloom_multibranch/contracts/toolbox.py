@@ -96,6 +96,7 @@ REJECTION_CODES = (
     "attachments_unsupported",  # ``put_attachment``, ``put_kernel_artifact``: this toolbox has no blob store
     "kernel_artifact_invalid",  # ``put_kernel_artifact``: the table, target or variable cannot be loaded as given
     "kernel_variable_taken",  # ``put_kernel_artifact``: the variable already loads the table of another target
+    "target_required",  # ``put_kernel_artifact``: no target given and the variable is bound to none yet in this session
     "lease_leaves_no_measurement",  # ``lease_branch_sandbox``, ``start_analysis kernel_tune``: leasing would leave fewer cards than one test needs
     "lease_exists",  # ``lease_branch_sandbox``: the branch already holds a lease
 )
@@ -278,19 +279,21 @@ class Toolbox(Protocol):
         """
 
     async def put_kernel_artifact(
-        self, kind: KernelKind, target: str, env: str, data: bytes, rows_only: bool = False
+        self, kind: KernelKind, target: str | None, env: str, data: bytes, rows_only: bool = False
     ) -> KernelArtifact:
         """Store the tuned table ``data`` in the session's blob store and return the artifact a delta carries.
 
         ``env`` is the variable the service reads the table's path from (``metadata["load"]``, ``via`` ``env_file``);
         ``target`` is the operator or shape the table serves, the merge slot of the artifact. The reference is minted
         from the content, ``kernel/<kind>/<target>/<sha256><ext>``, so the same table put twice, by any branch, gives
-        the same artifact. A variable loads one table of one target: the first target put for it binds it.
+        the same artifact. A variable loads one table of one target: the first target put for it binds it. ``target``
+        ``None`` is the target ``env`` is bound to (the artifact's ``target`` names it); a variable bound to none is
+        refused, since nothing says which target to bind it to.
         ``rows_only`` (an aiter table variable only) says ``data`` is just the tuned rows, which the test reads over the
         image's default table for the variable, a shape in both taken from the rows (``metadata["load"]["rows_only"]``).
         Raises
-        :class:`RequestRejected` (``kernel_artifact_invalid``, ``kernel_variable_taken``, ``attachments_unsupported``)
-        and stores nothing when the table is refused.
+        :class:`RequestRejected` (``kernel_artifact_invalid``, ``kernel_variable_taken``, ``target_required``,
+        ``attachments_unsupported``) and stores nothing when the table is refused.
         """
 
 

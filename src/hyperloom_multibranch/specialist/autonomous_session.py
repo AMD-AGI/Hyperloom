@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest
-from hyperloom.contracts.recipe import LaunchConfig, RecipeDelta, RecipeError
+from hyperloom.contracts.recipe import KernelArtifact, KernelKind, LaunchConfig, RecipeDelta, RecipeError
 from hyperloom.measure.compile import COMPONENT_LAYOUTS, locate_installed_package
 from hyperloom_multibranch.contracts.branch_log import BranchLogEntry, BranchLogType
 from hyperloom_multibranch.contracts.notebook.records import TestRecord
@@ -39,7 +39,9 @@ from hyperloom_multibranch.specialist.agent_import import (
     KeptChange,
     KeptChangeError,
     added_at,
+    KeepStores,
     import_delta,
+    with_tables,
     read_kept_change,
 )
 from hyperloom_multibranch.specialist.agent_manifest import AgentManifest, read_field
@@ -77,6 +79,8 @@ AGENT_DIR = "agent"
 SETTLE_SECONDS = 120.0
 #: The toolbox's refusal of a delta it cannot compile, among them a launch the measurement's launcher overrides.
 LAUNCH_REFUSED = "delta_not_applicable"
+#: The toolbox's refusal of a kernel table put with no target for a variable no table was put for yet.
+TARGET_REQUIRED = "target_required"
 
 
 def installed_component_upstream(component: str) -> Upstream | None:
@@ -365,13 +369,27 @@ class AutonomousSession:
         repo, component = self._setup.repo, self._setup.component
         recipe = await repo.read_recipe(head)
         root = await repo.read_recipe(self._start.start_commit)
-        delta = await import_delta(kept, root=root, head=recipe, component=component, store=repo.store_patch)
+        stores = KeepStores(repo.store_patch, self._kernel_artifact)
+        delta = await import_delta(kept, root=root, head=recipe, component=component, stores=stores)
         if delta is None or all(item.component != component for item in delta.components):
             return delta
         if any(item.component == component for item in recipe.components):
             return delta
         upstream = await asyncio.to_thread(self._setup.upstream, component)
         return delta if upstream is None else added_at(delta, recipe, upstream)
+
+    async def _kernel_artifact(self, env: str, table: str) -> KernelArtifact:
+        """The table ``env`` loads, kept in the session's blob store under the target the session bound ``env`` to, or
+        under ``env``'s own name when no table was put for it yet: the service reads one file per variable, and the
+        toolbox refuses a second target for it."""
+
+        put = self._setup.toolbox.put_kernel_artifact
+        try:
+            return await put(KernelKind.GEMM, None, env, table.encode())
+        except RequestRejected as error:
+            if error.code != TARGET_REQUIRED:
+                raise
+            return await put(KernelKind.GEMM, env.lower(), env, table.encode())
 
     async def _submitted(self, kept: KeptChange, head: str, delta: RecipeDelta | None) -> None:
         """Submit ``kept`` against ``head``; raise what the toolbox raises when it takes no request now."""
@@ -413,7 +431,8 @@ class AutonomousSession:
         source, summary = manifest.config_source, self._summary(manifest)
         if source is None:
             return KeptChange(seq, patch, self._root.server_args, dict(self._root.envs), summary)
-        return read_kept_change(seq, patch, _json(self._place.worktree.path / source.path), source, summary)
+        kept = read_kept_change(seq, patch, _json(self._place.worktree.path / source.path), source, summary)
+        return with_tables(kept, self._place.worktree.path)
 
     def _summary(self, manifest: AgentManifest) -> str:
         if manifest.keep is None or not manifest.summary_field:

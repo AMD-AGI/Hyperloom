@@ -10,6 +10,11 @@ shapes are for. The tool runs the tuner Forge has for each table (``kernelforge 
 shapes as its demand, on one card, and answers with the tuned rows of each table as a rows-only CSV that
 ``put_kernel_artifact(rows_only=true)`` takes (:mod:`.tune_rows`), each row checked against the reference GEMM.
 
+The tuner is pinned to the aiter the tests' servers run: ``AITER_ROOT_DIR`` of its process is the root of the aiter install
+whose ``configs`` the tool reads the tables' shape keys from (``serving_aiter_root``), and the job's result says so
+(``aiter``). Without a pin Forge tunes against whatever aiter it finds, which need not be the one that serves; a toolbox
+whose install cannot be found fails the job before it takes a card.
+
 The card is a lease from the pool the measurements and the branches' sandboxes take theirs from: the tool job counts in
 ``MeasurementCapacity.leased_cards`` from the moment it starts until it ends, whatever way it ends, and a job that
 would leave fewer cards than one test needs is refused (``lease_leaves_no_measurement``), so a tool job never starves
@@ -66,6 +71,7 @@ __all__ = [
     "KernelTuneTool",
     "check_params",
     "kernel_tune_tool",
+    "serving_aiter_root",
 ]
 
 KERNEL_TUNE_TOOL = "kernel_tune"
@@ -85,6 +91,9 @@ MAX_SHAPES = 64
 #: What the subprocess is given beyond the budget Forge keeps itself to, to write its report.
 _GRACE_SEC = 300
 _CARDS = 1
+#: The variable Forge reads the aiter it tunes against from, and where an aiter install keeps its tuner scripts.
+_AITER_ROOT_ENV = "AITER_ROOT_DIR"
+_AITER_SOURCE_DIR = "csrc"
 _CANCEL_REASON = "kernel_tune_cancelled"
 _SHAPE_NAMES = frozenset({"env", "M", "N", "K", "dtype", "otype", "bias", "scaleAB", "bpreshuffle"})
 _ADVICE = (
@@ -140,27 +149,54 @@ def check_params(params: Mapping[str, Any]) -> None:
 
 @dataclass(frozen=True)
 class _Plan:
-    """What a run tunes: the workload the shapes are for, and the demand of each table, most missed first."""
+    """What a run tunes: the workload the shapes are for, the demand of each table (most missed first), and the root of the
+    aiter it tunes against."""
 
     workload: ServedWorkload
     demands: tuple[Mapping[str, Any], ...]
     source: str
+    aiter_root: Path
 
 
-def _plan(landed: Path, shapes: Sequence[Mapping[str, Any]]) -> _Plan:
+def _plan(landed: Path, shapes: Sequence[Mapping[str, Any]], configs: Path) -> _Plan:
+    aiter_root = serving_aiter_root(configs)
     workload = served_workload(landed)
     demand = explicit_demand(shapes) if shapes else demand_from_logs(landed)
-    return _Plan(workload, tuple(demand["demands"]), "shapes" if shapes else "server_log")
+    return _Plan(workload, tuple(demand["demands"]), "shapes" if shapes else "server_log", aiter_root)
 
 
-def _tuner_env(cards: Sequence[int]) -> dict[str, str]:
-    """This process's environment without credentials, hooks or a mask of the visible cards, masked to ``cards``."""
+def serving_aiter_root(configs: Path) -> Path:
+    """The root of the aiter install whose ``configs`` directory is ``configs``: where its ``csrc`` (the tuner scripts) is.
+
+    ``configs`` is the install's ``aiter/configs``, the tables every test reads and the server imports ``aiter`` from, with
+    ``aiter/jit/core.py`` beside it (the file the shape keys are read from). The root is the directory around the
+    package, or its ``aiter_meta`` for a packaged install, as Forge's own search takes it.
+
+    Raises:
+        ToolFailure: When ``configs`` is not the ``configs`` of such an install.
+    """
+    package = Path(os.path.abspath(configs)).parent
+    if configs.name == "configs" and configs.is_dir() and (package / "jit" / "core.py").is_file():
+        for root in (package.parent, package.parent / "aiter_meta"):
+            if (root / _AITER_SOURCE_DIR).is_dir():
+                return root
+    raise ToolFailure(
+        f"the aiter the tests' servers run cannot be found from {str(configs)!r}: it is not the aiter/configs of an "
+        f"install with aiter/jit/core.py beside it and {_AITER_SOURCE_DIR} around it, so the tuner cannot be pinned to "
+        f"it ({_AITER_ROOT_ENV}) and is not run against whatever aiter it finds"
+    )
+
+
+def _tuner_env(cards: Sequence[int], aiter_root: Path) -> dict[str, str]:
+    """This process's environment without credentials, hooks or a mask of the visible cards, masked to ``cards`` and
+    with the tuner's aiter pinned to ``aiter_root``."""
     env = {
         name: value
         for name, value in os.environ.items()
         if name not in GPU_MASK_ENV_NAMES and not is_secret_shaped_env_name(name)
     }
     env[ROCR_VISIBLE_DEVICES_ENV] = ",".join(map(str, cards))
+    env[_AITER_ROOT_ENV] = str(aiter_root)
     return scrub_benchmark_process_env(env)
 
 
@@ -206,7 +242,7 @@ class KernelTuneTool:
 
     async def run(self, request: ToolRequest, workdir: Path) -> ToolOutput:
         params = request.params
-        plan = await asyncio.to_thread(_plan, Path(params[LANDED_PARAM]), params.get(SHAPES_PARAM) or ())
+        plan = await asyncio.to_thread(_plan, Path(params[LANDED_PARAM]), params.get(SHAPES_PARAM) or (), self._configs)
         lease = await self._lease(workdir)
         try:
             tables = await self._tune_all(plan, lease, workdir, int(params.get(TIMEOUT_PARAM, DEFAULT_TIMEOUT_SEC)))
@@ -232,12 +268,13 @@ class KernelTuneTool:
             if index >= affordable:
                 tables.append(skipped(demand, f"no time left in {TIMEOUT_PARAM} for it: {timeout} s"))
                 continue
-            tables.append(await self._tune(plan.workload, demand, lease.gpu_ids, workdir / demand["tuner"], share))
+            tables.append(await self._tune(plan, demand, lease.gpu_ids, workdir / demand["tuner"], share))
         return tables
 
     async def _tune(
-        self, workload: ServedWorkload, demand: Mapping[str, Any], cards: Sequence[int], out: Path, budget: int
+        self, plan: _Plan, demand: Mapping[str, Any], cards: Sequence[int], out: Path, budget: int
     ) -> TuneTable:
+        workload = plan.workload
         out.mkdir(parents=True, exist_ok=True)
         demand_file = write_demand_of(demand, out / "demand.json")
         cmd = forge_gemm_tuning.build_command(
@@ -256,7 +293,7 @@ class KernelTuneTool:
             }
         )
         try:
-            done = await _forge(cmd, _tuner_env(cards), budget + _GRACE_SEC)
+            done = await _forge(cmd, _tuner_env(cards, plan.aiter_root), budget + _GRACE_SEC)
         except subprocess.TimeoutExpired:
             return failed(demand, f"the tuner did not end within {budget + _GRACE_SEC} s and was stopped")
         return read_run(demand, out, done, self._configs)
@@ -274,6 +311,7 @@ def _output(plan: _Plan, lease: BranchLease, tables: list[TuneTable], test_reque
             "conc": workload.conc,
         },
         "cards": list(lease.gpu_ids),
+        "aiter": {"pinned": True, "root_dir": str(plan.aiter_root)},
         "tables": [table.document() for table in tables],
         "verification": _VERIFICATION,
         "advice": _ADVICE,

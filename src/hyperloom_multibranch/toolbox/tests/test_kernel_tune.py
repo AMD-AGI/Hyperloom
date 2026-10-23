@@ -10,6 +10,7 @@ Forge is a stand-in that answers as the tuner does (``kernel_tune_rig``), except
 from __future__ import annotations
 
 import asyncio
+import shutil
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -18,7 +19,7 @@ import pytest
 import pytest_asyncio
 
 from hyperloom.contracts.recipe import KernelKind
-from hyperloom.measure.framework_rows import lay_rows_over
+from hyperloom.measure.framework.rows import lay_rows_over
 from hyperloom.measure.tests.hosted_fixtures import point_yaml
 from hyperloom.orchestrator.actions.executors import run_with_session_kill
 from hyperloom_multibranch.contracts.toolbox import REJECTION_CODES, MeasurementCapacity, RequestRejected
@@ -279,6 +280,40 @@ async def test_the_tuner_is_asked_for_the_shapes_of_the_log_on_the_leased_card_a
     }
     assert env["ROCR_VISIBLE_DEVICES"] in {"0", "1"} and "HIP_VISIBLE_DEVICES" not in env and SECRET_ENV not in env
     assert wanted["--output-dir"].startswith(str(rig.session / "tool-results" / job))
+
+
+async def test_the_tuner_is_pinned_to_the_aiter_the_tests_serve_and_the_result_says_so(
+    make: Make, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AITER_ROOT_DIR", "/an/aiter/that/does/not/serve")
+    rig = await ready(await make(cards=2))
+    job = await rig.submit(test_request_id=TEST_ID)
+    assert await rig.finished(job) is JobStatus.SUCCEEDED
+
+    serving = str(rig.configs.parent.parent)
+    ((_, env),) = rig.forge.calls
+    assert env["AITER_ROOT_DIR"] == serving, "the root of the install whose aiter/configs the tests read"
+    assert (rig.configs.parent.parent / "csrc").is_dir() and serving != "/an/aiter/that/does/not/serve"
+    assert rig.result(job)["result"]["aiter"] == {"pinned": True, "root_dir": serving}
+
+
+@pytest.mark.parametrize("missing", ["csrc", "aiter/jit/core.py", "aiter/configs"])
+async def test_a_toolbox_whose_serving_aiter_cannot_be_found_fails_the_job_before_it_takes_a_card(
+    make: Make, missing: str
+) -> None:
+    rig = await ready(await make(cards=2))
+    absent = rig.configs.parent.parent / missing
+    if absent.is_dir():
+        shutil.rmtree(absent)
+    else:
+        absent.unlink()
+    job = await rig.submit(test_request_id=TEST_ID)
+
+    assert await rig.finished(job) is JobStatus.FAILED
+    summary = rig.result(job)["summary"]
+    assert "the aiter the tests' servers run cannot be found" in summary and "AITER_ROOT_DIR" in summary, summary
+    assert rig.forge.calls == [], "the tuner was not run against an aiter it was not pinned to"
+    assert await rig.box.measurement_capacity() == MeasurementCapacity(2, 2), "no card was taken"
 
 
 async def test_the_answer_carries_each_tables_rows_as_the_csv_put_kernel_artifact_takes(make: Make) -> None:

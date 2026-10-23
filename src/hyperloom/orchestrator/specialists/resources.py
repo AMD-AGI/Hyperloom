@@ -252,6 +252,24 @@ def _entry_blocks(entry: os.DirEntry[str]) -> tuple[int, Path | None]:
     return info.st_blocks * 512, Path(entry.path) if is_dir else None
 
 
+def _directory_blocks(directory: Path, subdirs: list[Path]) -> int:
+    """Disk bytes of the entries directly in ``directory``, and its subdirectories appended to ``subdirs``.
+
+    A directory that cannot be read, or fails part way, counts what was read before the failure.
+    """
+    total = 0
+    try:
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                size, subdir = _entry_blocks(entry)
+                total += size
+                if subdir is not None:
+                    subdirs.append(subdir)
+    except OSError:
+        pass
+    return total
+
+
 def dir_usage_bytes(path: Path) -> int | None:
     """Disk blocks used under ``path`` (symlinks not followed); ``None`` when it does not exist."""
     root = Path(path)
@@ -260,15 +278,7 @@ def dir_usage_bytes(path: Path) -> int | None:
     total = 0
     stack = [root]
     while stack:
-        try:
-            with os.scandir(stack.pop()) as entries:
-                for entry in entries:
-                    size, subdir = _entry_blocks(entry)
-                    total += size
-                    if subdir is not None:
-                        stack.append(subdir)
-        except OSError:
-            continue
+        total += _directory_blocks(stack.pop(), stack)
     return total
 
 

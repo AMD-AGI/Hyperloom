@@ -46,8 +46,8 @@ from hyperloom.contracts.measurement import (
 from hyperloom.contracts.recipe import KernelArtifact
 from hyperloom.measure.compile import BlobError, CompiledEnvironment, LocalBlobStore, kernel_load_env
 from hyperloom.measure.farm import server_environment
-from hyperloom.measure.framework_rows import cell
-from hyperloom.measure.framework_tables import AITER_VARIABLE_PREFIX
+from hyperloom.measure.framework.rows import cell
+from hyperloom.measure.framework.tables import AITER_VARIABLE_PREFIX
 
 __all__ = ["describe", "read_table_hits", "runtime_findings"]
 
@@ -59,7 +59,7 @@ _FILE_GROUP = "table"
 #: whose hits this reader knows the lines of.
 _SHAPE = ("M", "N", "K")
 #: ``tables/<variable>/<digest>/<file>``: where a test's server finds the private copy of a table the test names
-#: (``hyperloom.measure.framework_copies``). A path that does not match is another file, the merged view for one.
+#: (``hyperloom.measure.framework.copies``). A path that does not match is another file, the merged view for one.
 _PRIVATE_COPY = re.compile(rf"/tables/({AITER_VARIABLE_PREFIX}\w+)/([0-9a-f]+)/")
 _SERVER_LOGS = "server*.log"
 _UTF8 = "utf-8"

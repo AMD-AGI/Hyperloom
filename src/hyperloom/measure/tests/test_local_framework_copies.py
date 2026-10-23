@@ -28,15 +28,15 @@ import yaml
 
 from hyperloom.measure import aiter_merge_hook, local
 from hyperloom.measure.farm import server_environment
-from hyperloom.measure.framework_base import (
+from hyperloom.measure.framework.base import (
     FRAMEWORK_BASE_FILE,
     SNAPSHOT_ENV,
     framework_envs,
     load_snapshot,
     tree_files,
 )
-from hyperloom.measure.framework_copies import private_framework
-from hyperloom.measure.framework_rows import DEFAULT_TABLE_PLACEHOLDER
+from hyperloom.measure.framework.copies import private_framework
+from hyperloom.measure.framework.rows import DEFAULT_TABLE_PLACEHOLDER
 from hyperloom.measure.local import LocalMeasurementBackend, TestCallRefused
 from hyperloom.measure.socket import SessionFacts, TestCall
 from hyperloom.measure.tests.aiter_excerpts import A8W8_HEADER, A8W8_ROWS, A8W8_UNTUNED, csv_text
@@ -318,7 +318,7 @@ def test_a_file_that_cannot_be_put_back_is_reported_and_the_test_still_ran(
     def refuse(snapshot: Any, relatives: Any) -> tuple[list[str], list[str]]:
         return [], list(relatives)
 
-    monkeypatch.setattr("hyperloom.measure.framework_copies.restore", refuse)
+    monkeypatch.setattr("hyperloom.measure.framework.copies.restore", refuse)
     server.act = lambda env: (configs / SHARED_GEMM).write_text(DAMAGED, encoding="utf-8")
 
     evidence = _run(tmp_path, "t")
@@ -450,7 +450,7 @@ def test_a_hook_that_cannot_be_installed_does_not_stop_the_test_which_then_says_
     def full_disk(*args: Any, **kwargs: Any) -> None:
         raise OSError(28, "No space left on device")
 
-    monkeypatch.setattr("hyperloom.measure.framework_merge.MergeView.make", full_disk)
+    monkeypatch.setattr("hyperloom.measure.framework.merge.MergeView.make", full_disk)
     monkeypatch.setenv("PYTHONPATH", "/image/site")
 
     evidence = _run(tmp_path, "t", _point(tmp_path, PYTHONPATH="/farm/site"))

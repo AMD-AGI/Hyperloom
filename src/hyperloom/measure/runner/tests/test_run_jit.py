@@ -26,8 +26,8 @@ import yaml
 
 from hyperloom.measure import farm as farm_module
 from hyperloom.measure import local, signing
-from hyperloom.measure.jit_publish import STAGING_PATH, publish_contributions
-from hyperloom.measure.jit_store import DirJitStore
+from hyperloom.measure.jit.publish import STAGING_PATH, publish_contributions
+from hyperloom.measure.jit.store import DirJitStore
 from hyperloom.measure.manifest import JitCacheFacts, ResultManifest
 from hyperloom.measure.runner import jit as runner_jit
 from hyperloom.measure.runner.jit import JIT_CACHE_ENV

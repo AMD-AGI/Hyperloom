@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.measure.jit_key import (
+from hyperloom.measure.jit.key import (
     BuildSurface,
     Machine,
     aiter_key,

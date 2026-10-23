@@ -22,7 +22,7 @@ import pytest
 
 from hyperloom.common.io import append_jsonl, atomic_write_json
 from hyperloom.common.owner_scope import local_owner_scope
-from hyperloom.common.rule_pack import rule_pack_identity
+from hyperloom.common.outside_facts.rule_pack import rule_pack_identity
 from hyperloom.contracts.recipe import Recipe
 from hyperloom.measure.compile import LocalBlobStore
 from hyperloom.orchestrator.knowledge.remote_recipe import KBStoreError

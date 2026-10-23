@@ -17,10 +17,10 @@ from typing import Any
 
 import pytest
 
-from hyperloom.common.rule_pack import PACK_ENV, load_pack
+from hyperloom.common.outside_facts.rule_pack import PACK_ENV, load_pack
 from hyperloom.contracts.measurement import FailureClass, TestResult, Validity
 from hyperloom.measure.archive import DirResultArchive
-from hyperloom.measure.framework_base import FRAMEWORK_BASE_FILE, load_snapshot
+from hyperloom.measure.framework.base import FRAMEWORK_BASE_FILE, load_snapshot
 from hyperloom.measure.hosted_log import STATE_FINISHED, STATE_SENT, MeasurementJournal, Record
 from hyperloom.measure.live_log import last_output
 from hyperloom.measure.runner.tools import ToolError, ensure_inferencex

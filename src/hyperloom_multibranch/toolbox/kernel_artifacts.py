@@ -14,9 +14,14 @@ whichever branch, binds it to that table's target, and from then on any branch m
 target (a new content reference under the same target; no other branch's artifact changes), while a table of another
 target name for the same variable is refused. Every shape of an operator goes in one file under that target.
 
+A put may leave the target out: a variable that is bound already takes the table under its bound target (the artifact
+names it), and one that is not bound is refused as ``target_required``, since nothing says which target it is to be bound
+to. Which of the two a put gets, and the binding itself, are decided in one step under one lock, so a put that arrives
+while another binds the variable sees that binding.
+
 A table put with ``rows_only`` holds only the rows a specialist tuned, so a branch need not upload the image's own: the
 test's variable names the image's default table and then that file, and a shape in both is read from the file
-(``hyperloom.measure.framework_rows``). It binds the variable to its target like any table.
+(``hyperloom.measure.framework.rows``). It binds the variable to its target like any table.
 
 A TunableOp results file (the variable ``hyperloom.common.outside_facts.TUNABLEOP_TABLE_ENV``) is such a table too:
 PyTorch reads it from a file named after the variable's value with the device ordinal put in, so the compiler places it
@@ -30,6 +35,7 @@ import hashlib
 import io
 import math
 import re
+import threading
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -44,13 +50,14 @@ from hyperloom.measure.compile import (
     kernel_load_env,
     kernel_rows_only,
 )
-from hyperloom.measure.framework_rows import cell
-from hyperloom.measure.framework_tables import read_variables, table_key
+from hyperloom.measure.framework.rows import cell
+from hyperloom.measure.framework.tables import read_variables, table_key
 from hyperloom.measure.hosted_spec import MAX_ATTACHMENT_BYTES
 from hyperloom_multibranch.contracts.toolbox import RequestRejected
 
 __all__ = [
     "CODE_INVALID",
+    "CODE_TARGET_REQUIRED",
     "CODE_VARIABLE_TAKEN",
     "TARGET_PATTERN",
     "KernelRowsConflict",
@@ -66,6 +73,7 @@ __all__ = [
 #: What a target may be: one path segment, since the target is a directory of the reference.
 TARGET_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._=,+-]{0,127}")
 CODE_INVALID = "kernel_artifact_invalid"
+CODE_TARGET_REQUIRED = "target_required"
 CODE_VARIABLE_TAKEN = "kernel_variable_taken"
 
 
@@ -117,15 +125,43 @@ class KernelVariables:
     """The target each variable loads a table for, among the tables this toolbox has put, whichever branch put them.
 
     The binding lives as long as the toolbox (one per session), is not per branch, and is never released; the compiler
-    refuses a recipe that loads two tables on one variable.
+    refuses a recipe that loads two tables on one variable. :meth:`put` resolves the target, mints the artifact and binds
+    the variable under one lock, so no put sees a binding half made.
     """
 
     def __init__(self) -> None:
         self._bound: dict[str, tuple[KernelKind, str]] = {}
+        self._lock = threading.Lock()
 
-    def bind(self, artifact: KernelArtifact) -> None:
-        """Bind the variable of ``artifact`` to its target; refused when the variable is bound to another one."""
+    def put(
+        self, kind: KernelKind, target: str | None, env: str, data: bytes, rows_only: bool = False
+    ) -> KernelArtifact:
+        """The artifact for the table ``data`` of ``env``, and ``env`` bound to its target.
 
+        ``target`` ``None`` is the target ``env`` is bound to. Raises :class:`RequestRejected`: ``target_required`` for
+        no target when ``env`` is bound to none, ``kernel_variable_taken`` when ``env`` is bound to another target, and
+        whatever :func:`mint_kernel_artifact` refuses; a refused put binds nothing.
+        """
+
+        with self._lock:
+            artifact = mint_kernel_artifact(kind, self._target_for(env, target), env, data, rows_only)
+            self._bind(artifact)
+        return artifact
+
+    def _target_for(self, env: str, target: str | None) -> str:
+        if target is not None:
+            return target
+        held = self._bound.get(env)
+        if held is None:
+            raise RequestRejected(
+                f"no target was given and {env} is bound to none in this session: no table has been put for it yet. "
+                "Name the operator or shape the table serves as target (one path segment); that first put binds "
+                f"{env} to it for the session, and later puts may leave the target out to take the bound one",
+                CODE_TARGET_REQUIRED,
+            )
+        return held[1]
+
+    def _bind(self, artifact: KernelArtifact) -> None:
         env = kernel_load_env(artifact)
         held = self._bound.setdefault(env, artifact.slot)
         if held != artifact.slot:
@@ -184,7 +220,7 @@ def union_rows(
 ) -> bytes:
     """The rows of two tables for one ``AITER_CONFIG_*`` variable, as one table with one row to a shape.
 
-    A shape is what ``framework_tables.table_key`` says it is for ``env``; that reads the install's untuned sibling of
+    A shape is what ``framework.tables.table_key`` says it is for ``env``; that reads the install's untuned sibling of
     the table, so this runs where the image's aiter is reachable (``configs``, default the SGLang image's
     ``aiter/configs``, with ``jit/core.py`` beside it). A shape in both tables with the same row is kept once. The
     tables' cells are compared as aiter reads them (``64`` is ``64.0``), and the text kept is the smaller of the two.

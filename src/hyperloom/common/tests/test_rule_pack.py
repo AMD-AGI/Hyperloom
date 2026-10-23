@@ -29,7 +29,7 @@ import yaml
 
 import hyperloom
 from hyperloom.common import outside_facts
-from hyperloom.common.rule_pack import (
+from hyperloom.common.outside_facts.rule_pack import (
     DEFAULT_PACK_PATH,
     PACK_ENV,
     Kind,
@@ -258,7 +258,8 @@ def test_a_missing_pack_file_is_refused_naming_it(tmp_path: Path) -> None:
 _SHOW = textwrap.dedent(
     """
     import json
-    from hyperloom.common import outside_facts, rule_pack
+    from hyperloom.common import outside_facts
+    from hyperloom.common.outside_facts import rule_pack
 
     print(json.dumps({"flags": outside_facts.CONTEXT_LENGTH_FLAGS, "identity": rule_pack.rule_pack_identity()}))
     """

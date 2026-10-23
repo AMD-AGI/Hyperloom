@@ -27,7 +27,7 @@ from typing import Any
 import pytest
 
 import hyperloom
-from hyperloom.common.rule_pack import rule_pack_identity
+from hyperloom.common.outside_facts.rule_pack import rule_pack_identity
 from hyperloom.contracts.measurement import TestResult, Validity
 from hyperloom.measure import signing
 from hyperloom.measure.hosted_log import STATE_SENT

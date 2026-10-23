@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.measure.framework_base import (
+from hyperloom.measure.framework.base import (
     DEFAULT_CONFIGS,
     SESSION_SHA_ENV,
     SNAPSHOT_ENV,
@@ -24,7 +24,7 @@ from hyperloom.measure.framework_base import (
     take_snapshot,
     tree_files,
 )
-from hyperloom.measure.framework_tables import TableVariable, read_variables
+from hyperloom.measure.framework.tables import TableVariable, read_variables
 from hyperloom.measure.tests.framework_fixtures import CORE, MODELS, PRISTINE, make_framework
 
 

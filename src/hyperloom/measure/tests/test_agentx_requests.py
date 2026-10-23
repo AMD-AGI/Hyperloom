@@ -20,7 +20,7 @@ from typing import Any
 import pytest
 import yaml
 
-from hyperloom.common.rule_pack import DEFAULT_PACK_PATH
+from hyperloom.common.outside_facts.rule_pack import DEFAULT_PACK_PATH
 from hyperloom.contracts.measurement import RequestClasses
 from hyperloom.measure.agentx_requests import export_files, read_request_classes, read_round_classes
 from hyperloom.measure.socket import RoundOutcome

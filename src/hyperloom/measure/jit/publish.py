@@ -16,7 +16,7 @@ import tempfile
 from pathlib import Path
 
 from hyperloom.measure.jit_kinds import kind_named
-from hyperloom.measure.jit_store import (
+from hyperloom.measure.jit.store import (
     BLOBS_DIR,
     MANIFEST_NAME,
     DirJitStore,

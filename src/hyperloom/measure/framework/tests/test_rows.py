@@ -15,8 +15,8 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.measure.framework_rows import RowsOnlyRefused, lay_rows_over
-from hyperloom.measure.framework_tables import table_key
+from hyperloom.measure.framework.rows import RowsOnlyRefused, lay_rows_over
+from hyperloom.measure.framework.tables import table_key
 from hyperloom.measure.tests.aiter_excerpts import (
     A8W8_HEADER,
     A8W8_ROWS,

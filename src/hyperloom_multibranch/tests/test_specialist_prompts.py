@@ -372,7 +372,7 @@ def test_the_role_says_a_bound_table_variable_takes_any_branch_s_table_under_its
     prompt = role_prompt(WORKLOAD)
 
     assert "binds it to a target name for the session, not to a branch" in prompt
-    assert "put your own table under that target" in prompt
+    assert "put your own table under that target, or leave target out to use it" in prompt
 
 
 def test_the_role_gives_the_offline_route_for_a_tunableop_table():

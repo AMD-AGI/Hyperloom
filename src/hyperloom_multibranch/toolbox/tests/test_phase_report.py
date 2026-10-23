@@ -7,6 +7,7 @@ session directory's submit log."""
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -17,6 +18,10 @@ from hyperloom.contracts.measurement import PhaseTiming, TestKind, TestResult, V
 from hyperloom_multibranch.toolbox.phase_report import SUBMISSIONS, aggregate, main, read_session
 from hyperloom_multibranch.toolbox.submission_log import LogEntry, SubmissionLog
 from hyperloom_multibranch.toolbox.tests.helpers import req
+
+#: The ``src`` directory of the checkout this file is in. The command under test runs from it, so the result does not
+#: depend on which checkout the environment's editable install points at.
+_SRC = Path(__file__).resolve().parents[3]
 
 
 def _result(request_id: str, phases: list[tuple[str, float]], unaccounted: float = 0.0, gpus: int = 2) -> TestResult:
@@ -153,10 +158,12 @@ def test_the_command_can_print_the_rows_as_a_document(session: Path, capsys: pyt
 
 def test_the_command_runs_from_the_shell_on_a_session_directory(session: Path) -> None:
     done = subprocess.run(
-        [sys.executable, "-I", "-m", "hyperloom_multibranch.toolbox.phase_report", str(session)],
+        [sys.executable, "-m", "hyperloom_multibranch.toolbox.phase_report", str(session)],
         capture_output=True,
         text=True,
         check=False,
+        cwd=session,
+        env={**os.environ, "PYTHONPATH": str(_SRC)},
     )
 
     assert done.returncode == 0, done.stderr

@@ -513,6 +513,8 @@ class LocalNotebook(
                 raise ValueError(f"a merge is tested on the {INTEGRATION_BRANCH} branch; {attempt.request_id} is not")
         elif not attempt.skipped_reason:
             raise ValueError("a merge attempt without a test says why it was skipped")
+        elif attempt.resolved_patches:
+            raise ValueError("a merge skipped untested carries no model-written patch: nothing measured it")
         if attempt.skipped_outcome not in _SKIPPED_OUTCOMES:
             names = " or ".join(outcome.value for outcome in _SKIPPED_OUTCOMES)
             raise ValueError(f"a merge is skipped as {names}, not {attempt.skipped_outcome.value}")

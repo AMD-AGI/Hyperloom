@@ -270,7 +270,7 @@ hyperloom = [
     # JSON Schemas of the hosted-measurement contracts (measurement spec and result manifest).
     "contracts/*.schema.json",
     # The reference rule pack a session reads when HYPERLOOM_RULE_PACK names no other; importing outside_facts fails without it.
-    "common/rule_packs/*.yaml",
+    "common/outside_facts/packs/*.yaml",
 ]
 "hyperloom.inference_optimizer" = [
     "SKILL.md",

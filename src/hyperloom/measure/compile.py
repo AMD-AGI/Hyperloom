@@ -48,8 +48,8 @@ from hyperloom.contracts.recipe import (
     RecipeError,
     apply,
 )
-from hyperloom.measure.framework_rows import DEFAULT_TABLE_PLACEHOLDER
-from hyperloom.measure.framework_tables import AITER_VARIABLE_PREFIX
+from hyperloom.measure.framework.rows import DEFAULT_TABLE_PLACEHOLDER
+from hyperloom.measure.framework.tables import AITER_VARIABLE_PREFIX
 
 ATTACH_PLACEHOLDER = "${HL_ATTACH:%s}"
 #: ``KernelArtifact.metadata["load"] = {"via": ..., ...}`` says how the service picks an artifact up. Only one form is supported:

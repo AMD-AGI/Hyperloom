@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.common.rule_pack import DEFAULT_PACK_PATH, PACK_ENV
+from hyperloom.common.outside_facts.rule_pack import DEFAULT_PACK_PATH, PACK_ENV
 from hyperloom.measure.returncodes import HOSTED_RESULT_REJECTED_RC
 from hyperloom.measure.tests.hosted_fixtures import Rig, make_call
 from hyperloom.measure.tests.rule_pack_fixtures import identity_of, other_pack

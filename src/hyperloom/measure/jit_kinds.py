@@ -40,7 +40,8 @@ class CacheKind:
 
     ``env_var`` is set to ``<private root>/<name>`` for the server; ``content`` is the directory below that where the
     compiled products live, and ``allowed`` the pattern a path below ``content`` must fully match to be stored.
-    ``keyed_by`` says which key the kind is stored under (``aiter`` or ``triton``, see :mod:`hyperloom.measure.jit_key`).
+    ``keyed_by`` says which key the kind is stored under (``aiter`` or ``triton``, see
+    :mod:`hyperloom.measure.jit.key`).
     """
 
     name: str

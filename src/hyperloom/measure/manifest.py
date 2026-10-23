@@ -49,8 +49,8 @@ class EccDelta:
 
 @dataclass(frozen=True)
 class RulePackFacts:
-    """The rule pack the runner read (``hyperloom.common.rule_pack.rule_pack_identity``): its own version and the digest
-    of its bytes."""
+    """The rule pack the runner read (``hyperloom.common.outside_facts.rule_pack.rule_pack_identity``): its own version
+    and the digest of its bytes."""
 
     version: str
     digest: str

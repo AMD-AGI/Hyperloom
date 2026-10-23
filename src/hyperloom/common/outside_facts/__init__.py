@@ -4,12 +4,12 @@
 """Facts about projects outside this repository that more than one of our readers depends on, each stated once.
 
 aiter, SGLang, vLLM, PyTorch, the HIP runtime, argparse, Transformers and InferenceX decide these; we only repeat them.
-Their values are not written here: they are read from the rule pack (``hyperloom.common.rule_pack``), where each fact
-carries the project that owns it, the reason it exists and its examples. This module binds each fact to the name the
-readers import, so a reader in ``hyperloom.measure``, ``hyperloom.common``, ``hyperloom.sandbox`` or
-``hyperloom_multibranch.toolbox`` never holds a copy. The pack is loaded when this module is first imported, because the
-readers build module-level patterns from these values; a pack that cannot be used stops that import, naming the entry.
-The module lives in ``hyperloom.common`` because that is the one layer all of those readers may import.
+Their values are not written here: they are read from the rule pack (``hyperloom.common.outside_facts.rule_pack``),
+where each fact carries the project that owns it, the reason it exists and its examples. This package binds each fact
+to the name the readers import, so a reader in ``hyperloom.measure``, ``hyperloom.common``, ``hyperloom.sandbox`` or
+``hyperloom_multibranch.toolbox`` never holds a copy. The pack is loaded when this package is first imported, because
+the readers build module-level patterns from these values; a pack that cannot be used stops that import, naming the
+entry. The package lives in ``hyperloom.common`` because that is the one layer all of those readers may import.
 
 Two kinds of copy cannot import it and are pinned to it by a test instead: a YAML data file (``profile_*.yaml``), and a
 file that is copied into a sandbox and runs there with the standard library only (``aiter_merge_hook``).
@@ -17,7 +17,7 @@ file that is copied into a sandbox and runs there with the standard library only
 
 from __future__ import annotations
 
-from hyperloom.common.rule_pack import default_pack
+from hyperloom.common.outside_facts.rule_pack import default_pack
 
 __all__ = [
     "AIPERF_ERROR_CLASS_KEY",

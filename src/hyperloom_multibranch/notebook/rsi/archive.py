@@ -312,6 +312,51 @@ def _directions(records: Sequence[TestRecord], intents: Mapping[str, Intent]) ->
     return tuple(directions)
 
 
+@dataclass(frozen=True)
+class _TreeReading:
+    """What every branch of one session's search tree is read against: its gains off ``metric`` from the baseline
+    value ``anchor``, its times from ``start``, each branch's tests, and the intents that change a kernel."""
+
+    snapshot: NotebookSnapshot
+    metric: str
+    anchor: float
+    start: float
+    tests: Mapping[str, Sequence[TestRecord]]
+    kernel: frozenset[str]
+
+    def gain(self, commit_id: str) -> float:
+        value = self.snapshot.value_of(commit_id).get(self.metric)
+        return (value / self.anchor - 1.0) * 100.0 if value else 0.0
+
+    def branch(self, node: BranchNode) -> TreeBranch:
+        view, start, tests = self.snapshot.lineage, self.start, self.tests.get(node.branch, ())
+        return TreeBranch(
+            name=node.branch,
+            origin=node.origin,
+            parent_branch=_parent_branch(node, view),
+            opened_s=max(0.0, node.opened_at - start),
+            closed_s=None if node.stopped_at is None else node.stopped_at - start,
+            fork_gain_pct=self.gain(node.start_commit),
+            gpu_seconds=sum(record.result.gpu_seconds for record in tests if record.result is not None),
+            commits=tuple(
+                TreeCommit(commit.at - start, self.gain(commit.commit_id), commit.origin)
+                for commit in view.commits
+                if commit.branch == node.branch and commit.origin is not CommitOrigin.ROOT
+            ),
+            test_times=tuple(sorted(record.requested_at - start for record in tests)),
+            stop_reason=node.stop_reason or "",
+            directions=() if node.branch == INTEGRATION_BRANCH else _directions(tests, self.snapshot.intents),
+            kernel_test_times=tuple(
+                sorted(
+                    record.requested_at - start for record in tests if record.request.intent_fingerprint in self.kernel
+                )
+            ),
+            measured_times=_measured_times(tests, start),
+            judged_times=_judged_times(tests, start),
+            ended_times=_ended_times(tests, start),
+        )
+
+
 def tree_from_snapshot(
     snapshot: NotebookSnapshot,
     metric: str,
@@ -328,54 +373,19 @@ def tree_from_snapshot(
     if not anchor:
         raise ValueError(f"the baseline records no {metric}")
     start = session_start(snapshot)
-    view = snapshot.lineage
-
-    def gain(commit_id: str) -> float:
-        value = snapshot.value_of(commit_id).get(metric)
-        return (value / anchor - 1.0) * 100.0 if value else 0.0
-
     tests: dict[str, list[TestRecord]] = defaultdict(list)
     for record in snapshot.records:
         tests[record.request.branch].append(record)
-    kernel = {fingerprint for fingerprint, intent in snapshot.intents.items() if intent.layer is IntentLayer.KERNEL}
+    kernel = frozenset(fp for fp, intent in snapshot.intents.items() if intent.layer is IntentLayer.KERNEL)
+    reading = _TreeReading(snapshot, metric, anchor, start, tests, kernel)
     ceiling = profile.roofline_ceiling.get(metric)
-    branches = tuple(
-        TreeBranch(
-            name=node.branch,
-            origin=node.origin,
-            parent_branch=_parent_branch(node, view),
-            opened_s=max(0.0, node.opened_at - start),
-            closed_s=None if node.stopped_at is None else node.stopped_at - start,
-            fork_gain_pct=gain(node.start_commit),
-            gpu_seconds=sum(record.result.gpu_seconds for record in tests[node.branch] if record.result is not None),
-            commits=tuple(
-                TreeCommit(commit.at - start, gain(commit.commit_id), commit.origin)
-                for commit in view.commits
-                if commit.branch == node.branch and commit.origin is not CommitOrigin.ROOT
-            ),
-            test_times=tuple(sorted(record.requested_at - start for record in tests[node.branch])),
-            stop_reason=node.stop_reason or "",
-            directions=() if node.branch == INTEGRATION_BRANCH else _directions(tests[node.branch], snapshot.intents),
-            kernel_test_times=tuple(
-                sorted(
-                    record.requested_at - start
-                    for record in tests[node.branch]
-                    if record.request.intent_fingerprint in kernel
-                )
-            ),
-            measured_times=_measured_times(tests[node.branch], start),
-            judged_times=_judged_times(tests[node.branch], start),
-            ended_times=_ended_times(tests[node.branch], start),
-        )
-        for node in view.branches
-    )
     return SearchTree(
         session_id=profile.session_id,
         source=SOURCE_NOTEBOOK,
         task=task_conditions(profile, bottlenecks),
         budget_seconds=max(0.0, snapshot.taken_at - start) if budget_seconds is None else budget_seconds,
-        final_gain_pct=max((gain(commit.commit_id) for commit in view.commits), default=0.0),
-        branches=branches,
+        final_gain_pct=max((reading.gain(commit.commit_id) for commit in snapshot.lineage.commits), default=0.0),
+        branches=tuple(reading.branch(node) for node in snapshot.lineage.branches),
         noise=MeasurementNoise(
             dispersion_pct=baseline.dispersion_pct.get(metric),
             samples=len(baseline.request_ids),

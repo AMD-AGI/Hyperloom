@@ -24,15 +24,15 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from hyperloom.common.rule_pack import rule_pack_identity
+from hyperloom.common.outside_facts.rule_pack import rule_pack_identity
 from hyperloom.measure.archive import ResultArchive
 from hyperloom.measure.hosted import FILES_ROOT, HostedConfig, HostedMeasurementBackend
 from hyperloom.measure.hosted_log import STATE_FINISHED
 from hyperloom.measure.hosted_spec import SpecContext
-from hyperloom.measure.jit_store import DirJitStore
+from hyperloom.measure.jit.store import DirJitStore
 from hyperloom.measure.live_log import last_output
 from hyperloom.measure.local import SUPPORTED_KINDS
-from hyperloom.measure.framework_base import DEFAULT_CONFIGS, framework_envs
+from hyperloom.measure.framework.base import DEFAULT_CONFIGS, framework_envs
 from hyperloom.measure.local_templates import local_runner_template
 from hyperloom.measure.rule_pack_stage import rule_pack_envs
 from hyperloom.measure.runner.jit import JIT_CACHE_ENV

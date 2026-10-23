@@ -18,9 +18,9 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.measure import jit_store
+from hyperloom.measure.jit import store as jit_store
 from hyperloom.measure.jit_kinds import AITER_JIT, TRITON
-from hyperloom.measure.jit_store import DirJitStore, JitStoreError, Snapshot, SnapshotInvalid, StoredFile
+from hyperloom.measure.jit.store import DirJitStore, JitStoreError, Snapshot, SnapshotInvalid, StoredFile
 
 KEY = "a" * 64
 OTHER_KEY = "b" * 64

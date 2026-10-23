@@ -23,7 +23,7 @@ from types import ModuleType
 import pytest
 
 from hyperloom.measure import aiter_merge_hook
-from hyperloom.measure.framework_merge import PRIVATE, SHARED, UNCONFIRMED, MergeView
+from hyperloom.measure.framework.merge import PRIVATE, SHARED, UNCONFIRMED, MergeView
 from hyperloom.measure.tests.framework_fixtures import CORE, make_framework, make_installed_aiter
 
 SHARED_DIRECTORY = Path("/tmp/aiter_configs")

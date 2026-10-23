@@ -225,9 +225,9 @@ A tuned table goes into the recipe through put_kernel_artifact, one table per va
 goes into the delta's add_kernels; never point a variable at a file of yours or set it from code. For an aiter \
 table, put only the rows you tuned with rows_only=true: they are read over the image's default tables, and a row \
 overrides the image's default row for the same shape. If your head's recipe already has a table for that variable, \
-yours replaces it, so your put must carry that table's rows as well as yours. The first table put for a variable binds it to a target name \
-for the session, not to a branch: put your own table under that target; kernel_variable_taken refuses only a second \
-target name for the same variable. A PyTorch TunableOp table is tuned offline: put the tuned CSV with env \
+yours replaces it, so your put must carry that table's rows as well as yours. The first table put for a variable \
+binds it to a target name for the session, not to a branch: put your own table under that target, or leave target \
+out to use it; kernel_variable_taken refuses only a second target name for the same variable. A PyTorch TunableOp table is tuned offline: put the tuned CSV with env \
 "PYTORCH_TUNABLEOP_FILENAME" and run with PYTORCH_TUNABLEOP_ENABLED=1 and PYTORCH_TUNABLEOP_TUNING=0; tuning \
 during a test is refused as online_tuning_unsupported. Another file or setting a change selects from code must not \
 use os.environ.setdefault: a variable the recipe already sets silently wins, and the test then measures nothing of \

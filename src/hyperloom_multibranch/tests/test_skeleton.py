@@ -31,7 +31,7 @@ import pytest
 from hyperloom.common.jsonio import read_jsonl
 from hyperloom.common.perf_metric import GRADED_INTVTY_P50, GRADED_OUTPUT
 from hyperloom.common.proctree import running
-from hyperloom.common.rule_pack import rule_pack_identity
+from hyperloom.common.outside_facts.rule_pack import rule_pack_identity
 from hyperloom.contracts.measurement import (
     NOT_REPRODUCED,
     REPRODUCED,

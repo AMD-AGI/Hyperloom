@@ -33,7 +33,7 @@ from hyperloom.common.llm_config import (
 )
 from hyperloom.common.owner_scope import local_owner_scope
 from hyperloom.common.perf_metric import GRADED_INTVTY_P50
-from hyperloom.common.rule_pack import rule_pack_identity
+from hyperloom.common.outside_facts.rule_pack import rule_pack_identity
 from hyperloom.measure import compile as compile_module
 from hyperloom.measure.compile import PackageBase
 from hyperloom_multibranch import cli

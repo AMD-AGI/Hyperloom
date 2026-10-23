@@ -26,8 +26,8 @@ from typing import Any
 
 from hyperloom.contracts.recipe import ConfigDelta, KernelArtifact, RecipeDelta
 from hyperloom.contracts.measurement import TABLE_EXERCISED, TABLE_NOT_EXERCISED, TestResult, Validity
-from hyperloom.measure.framework_base import DEFAULT_CONFIGS, tree_files
-from hyperloom.measure.framework_merge import PRIVATE
+from hyperloom.measure.framework.base import DEFAULT_CONFIGS, tree_files
+from hyperloom.measure.framework.merge import PRIVATE
 from hyperloom_multibranch.toolbox.tests.integration_inputs import baseline_recipe
 from hyperloom_multibranch.toolbox.tests.integration_rig import Specialist, build_stack
 from hyperloom_multibranch.toolbox.tests.test_framework_isolation_parallel_gpu import AITER_MERGE_DIR, SHARED, VARIABLE

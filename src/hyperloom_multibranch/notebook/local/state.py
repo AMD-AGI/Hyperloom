@@ -123,7 +123,25 @@ class NotebookState:
         self.measured_at: dict[str, float] = {}
         self.withdrawn_at: dict[str, float] = {}
         self.judged_at: dict[str, float] = {}
-        handlers: dict[EntryKind, Callable[[Entry, object], None]] = {
+        self._replay(entries)
+
+    def _replay(self, entries: list[Entry]) -> None:
+        """Apply ``entries`` in order; an entry this build cannot decode is skipped with a warning."""
+
+        handlers = self._handlers()
+        for entry in entries:
+            try:
+                value = codec.decode(PAYLOADS[entry.kind], entry.detail)
+            except (KeyError, TypeError, ValueError) as exc:
+                log.warning("notebook: skipping undecodable %s entry %s: %s", entry.kind.value, entry.entry_id, exc)
+                continue
+            handlers[entry.kind](entry, value)
+            self.decoded.append((entry, value))
+
+    def _handlers(self) -> dict[EntryKind, Callable[[Entry, object], None]]:
+        """How each kind of entry changes the state."""
+
+        return {
             EntryKind.REQUEST: self._request,
             EntryKind.RESULT: self._result,
             EntryKind.WITHDRAWAL: self._withdrawal,
@@ -143,14 +161,6 @@ class NotebookState:
                 LlmUsageRecord(entry.entry_id, entry.at, value)
             ),
         }
-        for entry in entries:
-            try:
-                value = codec.decode(PAYLOADS[entry.kind], entry.detail)
-            except (KeyError, TypeError, ValueError) as exc:
-                log.warning("notebook: skipping undecodable %s entry %s: %s", entry.kind.value, entry.entry_id, exc)
-                continue
-            handlers[entry.kind](entry, value)
-            self.decoded.append((entry, value))
 
     def _request(self, entry: Entry, request: TestRequest) -> None:
         self.requests[request.request_id] = request

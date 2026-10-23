@@ -21,7 +21,9 @@ The provenance names how the warmup of the measurements behind the final commit 
 run_grid noted, or ``unpatched`` when its patch did not apply. Results from before the warmup had a seed of its own
 note neither, and the key is left out: their warmup replayed the measured prompts, which reads about 3% high (#56).
 CLOSE copies the session's rule-pack identity (version and digest from the manifest) into provenance as ``rule_pack``;
-the pack itself is not read again at write-back (#110).
+the pack itself is not read again at write-back (#110). A patch of the final recipe that a model wrote during a merge
+is listed in provenance as ``synthesized_patches``, with the patch it replaced, the model, the prompt version and the
+attempts it took (#122); ``value`` itself keeps the shape the single-lineage flow reads.
 """
 
 from __future__ import annotations
@@ -179,9 +181,31 @@ def knowledge_document(
                 "generated_at": datetime.fromtimestamp(snapshot.taken_at, timezone.utc).isoformat(),
                 "rule_pack": dict(rule_pack),
                 **_warmup_seed(snapshot, final.commit_id),
+                **_synthesized(snapshot, final.recipe),
             },
         }
     )
+
+
+def _synthesized(snapshot: NotebookSnapshot, recipe: Recipe) -> dict[str, list[dict[str, object]]]:
+    """The patches of ``recipe`` a model wrote during a merge, as provenance; nothing when no model wrote any."""
+
+    written = {resolved.patch.sha256: resolved for resolved in snapshot.resolved_patches}
+    found = [
+        {
+            "component": component.component,
+            "path": patch.path,
+            "sha256": patch.sha256,
+            "replaces": written[patch.sha256].replaces,
+            "model": written[patch.sha256].model,
+            "prompt_version": written[patch.sha256].prompt_version,
+            "attempts": written[patch.sha256].attempts,
+        }
+        for component in recipe.components
+        for patch in component.patches
+        if patch.sha256 in written
+    ]
+    return {"synthesized_patches": found} if found else {}
 
 
 def stage_files(recipe: Recipe, files_root: Path, staging: Path, blobs: BlobStore | None = None) -> list[Artifact]:

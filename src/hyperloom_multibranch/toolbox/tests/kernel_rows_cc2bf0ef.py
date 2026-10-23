@@ -106,9 +106,11 @@ def csv_text(*groups: tuple[str, ...]) -> bytes:
 
 
 def install(root: Path) -> Path:
-    """A stand-in for the image's aiter in ``root``: the ``configs`` directory (returned) and ``jit/core.py`` beside it."""
+    """A stand-in for the image's aiter in ``root``: the ``configs`` directory (returned), ``jit/core.py`` beside it and
+    ``csrc`` (where the tuner scripts are) around the package."""
     configs = root / "aiter" / "configs"
     (root / "aiter" / "jit").mkdir(parents=True)
+    (root / "csrc").mkdir()
     configs.mkdir(parents=True)
     (root / "aiter" / "jit" / "core.py").write_text(CORE, encoding="utf-8")
     (configs / "a8w8_blockscale_bpreshuffle_untuned_gemm.csv").write_text(UNTUNED, encoding="utf-8")

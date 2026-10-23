@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.measure import aiter_merge_hook
-from hyperloom.measure.framework_base import file_sha256
+from hyperloom.measure.framework.base import file_sha256
 
 __all__ = ["MergeView"]
 

@@ -44,7 +44,7 @@ from hyperloom.contracts.recipe import (
     apply,
     diff,
 )
-from hyperloom.measure.framework_rows import cell
+from hyperloom.measure.framework.rows import cell
 from hyperloom.measure.compile import KernelLoadError, PatchApplyError, kernel_load_env, kernel_rows_only
 from hyperloom_multibranch.contracts.repo import PatchConflict, RebasedPatch, ReplacedPatch, RepoMerge, UnitedTable
 from hyperloom_multibranch.repo.rebase import Files, merge_files, patch_between

@@ -235,7 +235,9 @@ _PUT_KERNEL_ARTIFACT: dict[str, Any] = {
             "minLength": 1,
             "description": (
                 "The operator or shape the table serves, one path segment (letters, digits and ._=,+-); the merge "
-                "slot of the artifact: two branches that put a table of one target compete for it."
+                "slot of the artifact: two branches that put a table of one target compete for it. Optional when env "
+                "is bound already in this session: leave it out to put under the bound target, which the returned "
+                "artifact names. Required for an env no table has been put for yet (refused as target_required)."
             ),
         },
         "env": {
@@ -263,7 +265,7 @@ _PUT_KERNEL_ARTIFACT: dict[str, Any] = {
             ),
         },
     },
-    "required": ["kind", "target", "env", "content"],
+    "required": ["kind", "env", "content"],
     "additionalProperties": False,
 }
 _POLL_INBOX: dict[str, Any] = {
@@ -386,7 +388,7 @@ def _put_kernel_artifact(
         except UnicodeEncodeError as exc:
             raise InvalidParamsError("content is not UTF-8 text") from exc
         kind, rows_only = KernelKind(arguments["kind"]), arguments.get("rows_only", False)
-        call = toolbox.put_kernel_artifact(kind, arguments["target"], arguments["env"], data, rows_only)
+        call = toolbox.put_kernel_artifact(kind, arguments.get("target"), arguments["env"], data, rows_only)
         try:
             artifact = await _on(home, call)
         except RequestRejected as exc:
@@ -404,9 +406,10 @@ def _register_put_kernel_artifact(server: McpServer, toolbox: Toolbox, home: asy
             "kernel artifact to put in the add_kernels of the delta of submit_test. Put every shape of an operator "
             "in one table: a variable loads one file, so the first table put for an env, by any branch, binds the env "
             "to its target for the session. Any branch may then put its own table (new content, its own reference) "
-            "under that target; only a table of another target name for the same env is refused, as "
-            "kernel_variable_taken, and its message names the bound target. The same table put twice, by any branch, "
-            "is the same artifact. With rows_only the table is just the rows you tuned: the test reads the image's "
+            "under that target, and may leave target out to take it: the returned artifact names the bound target. "
+            "Only a table of another target name for the same env is refused, as kernel_variable_taken, and its "
+            "message names the bound target; an env no table was put for yet needs a target (target_required). The "
+            "same table put twice, by any branch, is the same artifact. With rows_only the table is just the rows you tuned: the test reads the image's "
             "default table for the env and then your rows, a shape in both from your rows, so you need not upload "
             "the default's rows."
         ),
@@ -711,8 +714,16 @@ def register_specialist_tools(
     if toolbox_loop is None:
         with contextlib.suppress(RuntimeError):
             toolbox_loop = asyncio.get_running_loop()
-    own = {"scopes": _SPECIALIST_SCOPES}
     server.attach_reply_annotator(reply_inbox(notebooks))
+    _register_submit_test(server, toolbox, toolbox_loop)
+    _register_put_kernel_artifact(server, toolbox, toolbox_loop)
+    _register_test_queries(server, toolbox, notebooks, toolbox_loop, options)
+    _register_start_analysis(server, options.analysis, toolbox_loop)
+    _register_poll_inbox(server, notebooks)
+    _register_notebook_tools(server, notebooks, options)
+
+
+def _register_submit_test(server: McpServer, toolbox: Toolbox, home: asyncio.AbstractEventLoop | None) -> None:
     server.register(
         "submit_test",
         description=(
@@ -721,16 +732,25 @@ def register_specialist_tools(
             "request: wait_test on it, or read the commit's op shares from the notebook."
         ),
         schema=_SUBMIT_TEST,
-        handler=_submit_test(toolbox, toolbox_loop),
-        **own,
+        handler=_submit_test(toolbox, home),
+        scopes=_SPECIALIST_SCOPES,
     )
-    _register_put_kernel_artifact(server, toolbox, toolbox_loop)
+
+
+def _register_test_queries(
+    server: McpServer,
+    toolbox: Toolbox,
+    notebooks: NotebookFor,
+    home: asyncio.AbstractEventLoop | None,
+    options: SpecialistToolOptions,
+) -> None:
+    """Register the tools that read, wait for, cancel or size up the tests: ``test_result`` to ``queue_state``."""
     server.register(
         "test_result",
         description=_TEST_RESULT_GUIDE,
         schema=_REQUEST_ID,
         handler=_test_result(notebooks),
-        **own,
+        scopes=_SPECIALIST_SCOPES,
     )
     server.register(
         "wait_test",
@@ -739,31 +759,39 @@ def register_specialist_tools(
             "lands, else after wait_seconds with the test's progress; call it again to keep waiting."
         ),
         schema=_WAIT_TEST,
-        handler=_wait_test(toolbox, notebooks, toolbox_loop, options.wait_poll_seconds),
-        **own,
+        handler=_wait_test(toolbox, notebooks, home, options.wait_poll_seconds),
+        scopes=_SPECIALIST_SCOPES,
     )
     server.register(
         "cancel_test",
         description="Take back a test of this branch that has not finished.",
         schema=_REQUEST_ID,
-        handler=_cancel_test(toolbox, notebooks, toolbox_loop),
-        **own,
+        handler=_cancel_test(toolbox, notebooks, home),
+        scopes=_SPECIALIST_SCOPES,
     )
     server.register(
         "queue_state",
         description="Queue lengths by priority, running tests by branch, and the sandbox cold start time.",
         schema=_NO_ARGUMENTS,
-        handler=_queue_state(toolbox, toolbox_loop),
-        **own,
+        handler=_queue_state(toolbox, home),
+        scopes=_SPECIALIST_SCOPES,
     )
-    served = options.analysis.analysis_tools if options.analysis is not None else ()
+
+
+def _register_start_analysis(
+    server: McpServer, analysis: AnalysisStarter | None, home: asyncio.AbstractEventLoop | None
+) -> None:
+    served = analysis.analysis_tools if analysis is not None else ()
     server.register(
         "start_analysis",
         description=_start_analysis_description(served),
         schema=_start_analysis_schema(served),
-        handler=_start_analysis(options.analysis, toolbox_loop),
-        **own,
+        handler=_start_analysis(analysis, home),
+        scopes=_SPECIALIST_SCOPES,
     )
+
+
+def _register_poll_inbox(server: McpServer, notebooks: NotebookFor) -> None:
     server.register(
         _POLL_INBOX_TOOL,
         description=(
@@ -773,9 +801,8 @@ def register_specialist_tools(
         ),
         schema=_POLL_INBOX,
         handler=_poll_inbox(notebooks),
-        **own,
+        scopes=_SPECIALIST_SCOPES,
     )
-    _register_notebook_tools(server, notebooks, options)
 
 
 def _register_notebook_tools(server: McpServer, notebooks: NotebookFor, options: SpecialistToolOptions) -> None:

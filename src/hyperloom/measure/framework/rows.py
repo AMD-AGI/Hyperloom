@@ -7,7 +7,7 @@ aiter merges every file an ``AITER_CONFIG_*`` variable lists (``AITER_CONFIG.upd
 names the image's default table and a file of rows loads both with no merge of ours. What aiter does with a shape both
 files carry is no merge: it rewrites the files it was given and raises, and the server never starts. A rows-only table
 is meant to override, so the rows' shapes are taken out of the default table's copy before the test, and the test says
-how many it took out. The columns that make two rows one shape are ``framework_tables.table_key``'s.
+how many it took out. The columns that make two rows one shape are ``framework.tables.table_key``'s.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from hyperloom.measure.framework_tables import table_key
+from hyperloom.measure.framework.tables import table_key
 
 __all__ = ["DEFAULT_TABLE_PLACEHOLDER", "RowsOnlyRefused", "RowsOver", "cell", "lay_rows_over"]
 

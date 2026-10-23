@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.common.rule_pack import PACK_ENV, RulePackError, load_pack, rule_pack_identity
+from hyperloom.common.outside_facts.rule_pack import PACK_ENV, RulePackError, load_pack, rule_pack_identity
 from hyperloom.measure.rule_pack_stage import rule_pack_envs
 from hyperloom.measure.tests.rule_pack_fixtures import identity_of, other_pack, reading_pack  # noqa: F401
 

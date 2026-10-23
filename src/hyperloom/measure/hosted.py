@@ -44,8 +44,8 @@ from hyperloom.measure.failures import Disposition, FailureClassification, class
 from hyperloom.measure.hosted_live import LiveOutputs, finite_number
 from hyperloom.measure.hosted_log import STATE_FINISHED, STATE_SENT, STATE_SUBMITTED, MeasurementJournal, Record
 from hyperloom.measure.hosted_spec import SpecContext, SpecRefused, build_spec, split_result_dir
-from hyperloom.measure.jit_publish import publish_contributions
-from hyperloom.measure.jit_store import DirJitStore
+from hyperloom.measure.jit.publish import publish_contributions
+from hyperloom.measure.jit.store import DirJitStore
 from hyperloom.measure.manifest import ResultManifest
 from hyperloom.measure.phases import ACQUIRED, LANDED, RUNNER_DONE, HostTimeline
 from hyperloom.measure.runner.rounds import ROUNDS_FILE, WARMUP_DIR

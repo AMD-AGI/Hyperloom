@@ -21,7 +21,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from hyperloom.common.rule_pack import rule_pack_identity
+from hyperloom.common.outside_facts.rule_pack import rule_pack_identity
 from hyperloom.measure.archive import ResultArchive
 from hyperloom.measure.hosted import HostedConfig, HostedMeasurementBackend
 from hyperloom.measure.hosted_spec import SpecContext

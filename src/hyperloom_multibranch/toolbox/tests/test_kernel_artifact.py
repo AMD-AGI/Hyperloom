@@ -25,13 +25,13 @@ from hyperloom.common.outside_facts import SGLANG_IMAGE_AITER_CONFIGS
 from hyperloom.contracts.measurement import TestRequest, Validity
 from hyperloom.contracts.recipe import ConfigDelta, KernelArtifact, KernelKind, RecipeDelta, RecipeError, apply
 from hyperloom.measure.compile import LocalBlobStore, kernel_load_env
-from hyperloom.measure.framework_rows import DEFAULT_TABLE_PLACEHOLDER
+from hyperloom.measure.framework.rows import DEFAULT_TABLE_PLACEHOLDER
 from hyperloom.measure.points import AcceptedMeasurement, default_canonical
 from hyperloom.measure.tests.hosted_fixtures import spec_context
 from hyperloom.measure.tests.tunableop_table import NODE_CARDS, TUNABLEOP_ENV, TUNABLEOP_TABLE, tunableop_reads
 from hyperloom.orchestrator.actions.executors._workload_envs import default_baseline_config
 from hyperloom_multibranch.contracts.toolbox import REJECTION_CODES, RequestRejected
-from hyperloom_multibranch.toolbox import kernel_artifacts
+from hyperloom_multibranch.toolbox import kernel_artifacts, mcp_tools
 from hyperloom_multibranch.toolbox.kernel_artifacts import mint_kernel_artifact
 from hyperloom_multibranch.toolbox.planner import HostedPlanner
 from hyperloom_multibranch.toolbox.tests.integration_inputs import IMAGE, baseline_recipe, set_workload_environment
@@ -103,6 +103,12 @@ async def put(specialist: Specialist, **overrides: Any) -> dict[str, Any]:
     return dict(json.loads(await specialist.call("put_kernel_artifact", **arguments)))
 
 
+async def put_untargeted(specialist: Specialist, **overrides: Any) -> dict[str, Any]:
+    """A put that leaves the target out."""
+    arguments = {"kind": "gemm", "env": ENV, "content": TABLE, **overrides}
+    return dict(json.loads(await specialist.call("put_kernel_artifact", **arguments)))
+
+
 def stored(stack: Stack, text: str) -> bool:
     return (stack.blobs.root / sha(text)).exists()
 
@@ -129,7 +135,17 @@ async def run_with(stack: Stack, specialist: Specialist, artifact: dict[str, Any
 
 
 def test_the_refusals_of_the_tool_are_in_the_closed_vocabulary() -> None:
-    assert {kernel_artifacts.CODE_INVALID, kernel_artifacts.CODE_VARIABLE_TAKEN} <= set(REJECTION_CODES)
+    codes = {kernel_artifacts.CODE_INVALID, kernel_artifacts.CODE_VARIABLE_TAKEN, kernel_artifacts.CODE_TARGET_REQUIRED}
+    assert codes <= set(REJECTION_CODES)
+    assert kernel_artifacts.CODE_TARGET_REQUIRED == "target_required"
+
+
+def test_the_target_is_optional_in_the_tool_s_schema_and_the_description_says_when_it_is_not() -> None:
+    schema = mcp_tools._PUT_KERNEL_ARTIFACT
+
+    assert schema["required"] == ["kind", "env", "content"] and "target" in schema["properties"]
+    assert "Optional when env is bound already" in schema["properties"]["target"]["description"]
+    assert "target_required" in schema["properties"]["target"]["description"]
 
 
 async def test_a_put_table_is_loaded_by_the_test_from_a_file_in_its_sandbox(stack: Stack) -> None:
@@ -231,6 +247,55 @@ async def test_the_refusal_says_the_variable_is_bound_to_a_target_any_branch_may
     retry = await put(other, target=TARGET, content=OTHER_TABLE)
     assert retry["target"] == TARGET and retry["ref"] != first["ref"], "the second branch's table has its own reference"
     assert stored(stack, TABLE) and stored(stack, OTHER_TABLE), "the first branch's table is untouched"
+
+
+async def test_a_put_without_a_target_goes_under_the_target_its_variable_is_bound_to(stack: Stack) -> None:
+    first = await put(Specialist(stack, "s1"))
+    other = Specialist(stack, "s2")
+
+    second = await put_untargeted(other, content=OTHER_TABLE)
+
+    assert second["target"] == TARGET, "the artifact names the bound target"
+    assert second["ref"] == f"kernel/gemm/{TARGET}/{sha(OTHER_TABLE)}.csv" and second["ref"] != first["ref"]
+    assert second["metadata"] == {"load": {"via": "env_file", "env": ENV}}
+    assert stored(stack, TABLE) and stored(stack, OTHER_TABLE)
+    assert KernelArtifact.from_document(second).slot == (KernelKind.GEMM, TARGET), "a document a delta may carry"
+    same = await put_untargeted(Specialist(stack, "s3"), content=OTHER_TABLE)
+    assert same == second, "the same table put again, by another branch, is the same artifact"
+    message = await other.refused("put_kernel_artifact", kind="gemm", target="gemm_a8w8_small", env=ENV, content=TABLE)
+    assert "kernel_variable_taken" in message and TARGET in message, "another target is refused as before"
+
+
+async def test_a_rows_only_put_without_a_target_takes_the_bound_target_too(stack: Stack) -> None:
+    await put(Specialist(stack, "s1"))
+
+    rows = await put_untargeted(Specialist(stack, "s2"), content=OTHER_TABLE, rows_only=True)
+
+    assert rows["target"] == TARGET and rows["metadata"]["load"]["rows_only"] is True
+
+
+async def test_a_put_without_a_target_for_a_variable_no_table_was_put_for_is_refused_and_binds_nothing(
+    stack: Stack,
+) -> None:
+    s1, s2 = Specialist(stack, "s1"), Specialist(stack, "s2")
+    before = sorted(stack.blobs.root.iterdir())
+
+    message = await s1.refused("put_kernel_artifact", kind="gemm", env=ENV, content=TABLE)
+
+    assert "rejected (target_required)" in message and f"{ENV} is bound to none" in message, message
+    assert sorted(stack.blobs.root.iterdir()) == before, "a refused table is not stored"
+    elsewhere = await put(s2, target="gemm_a8w8_small", content=OTHER_TABLE)
+    assert elsewhere["target"] == "gemm_a8w8_small", "the refusal bound the variable to no target"
+    assert (await put_untargeted(s1))["target"] == "gemm_a8w8_small", "the first put with a target is the binding"
+
+
+async def test_a_put_without_a_target_binds_only_the_variable_it_names(stack: Stack) -> None:
+    s1 = Specialist(stack, "s1")
+    await put(s1)
+
+    message = await s1.refused("put_kernel_artifact", kind="gemm", env="AITER_CONFIG_GEMM_A4W4", content=TABLE)
+
+    assert "rejected (target_required)" in message and "AITER_CONFIG_GEMM_A4W4 is bound to none" in message, message
 
 
 @pytest.mark.parametrize(

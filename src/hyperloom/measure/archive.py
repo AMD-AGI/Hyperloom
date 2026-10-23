@@ -157,24 +157,28 @@ def _copy_listing(staging_dir: Path, incoming: Path, listing: dict[str, str]) ->
     root_fd = fsafe.open_root(staging_dir)
     try:
         for rel, expected in listing.items():
-            target = incoming / rel
-            target.parent.mkdir(parents=True, exist_ok=True)
-            source = fsafe.open_beneath(root_fd, rel)
-            digest = hashlib.sha256()
-            try:
-                with open(target, "xb") as out:
-                    for chunk in fsafe.stream(source):
-                        digest.update(chunk)
-                        out.write(chunk)
-                    out.flush()
-                    os.fsync(out.fileno())
-            finally:
-                os.close(source)
-            if digest.hexdigest() != expected:
-                raise ArchiveError(f"{rel} changed while it was being archived")
-            target.chmod(stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
+            _copy_verified(root_fd, rel, expected, incoming / rel)
     finally:
         os.close(root_fd)
+
+
+def _copy_verified(root_fd: int, rel: str, expected: str, target: Path) -> None:
+    """Copy ``rel`` below ``root_fd`` to a new file ``target``, refusing a copy whose bytes are not ``expected``."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    source = fsafe.open_beneath(root_fd, rel)
+    digest = hashlib.sha256()
+    try:
+        with open(target, "xb") as out:
+            for chunk in fsafe.stream(source):
+                digest.update(chunk)
+                out.write(chunk)
+            out.flush()
+            os.fsync(out.fileno())
+    finally:
+        os.close(source)
+    if digest.hexdigest() != expected:
+        raise ArchiveError(f"{rel} changed while it was being archived")
+    target.chmod(stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
 
 
 def fsync_dir(path: Path) -> None:

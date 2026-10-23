@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 
 from hyperloom.contracts.recipe import KernelArtifact, RecipeDelta
 from hyperloom_multibranch.contracts.llm_prices import TokenCounts
+from hyperloom_multibranch.contracts.repo import ResolvedPatch
 from hyperloom_multibranch.contracts.notebook.peers import (
     BranchLogEntry,
     Intent,
@@ -165,13 +166,16 @@ class DedupAnswer:
 @dataclass(frozen=True)
 class MergeAttempt:
     """The integrator merging source commits onto the integration head; without a test it was skipped untested, as
-    ``skipped_outcome`` says: it conflicted, or its change is already on the head."""
+    ``skipped_outcome`` says: it conflicted, or its change is already on the head. ``resolved_patches`` are the patches
+    a model wrote for the merge in place of conflicting ones, so the recipe they reach can say where they came from; a
+    merge skipped untested carries none."""
 
     source_commits: tuple[str, ...]
     integration_head: str
     request_id: str | None = None
     skipped_reason: str = ""
     skipped_outcome: MergeOutcome = MergeOutcome.CONFLICT_SKIPPED
+    resolved_patches: tuple[ResolvedPatch, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -683,7 +687,8 @@ def _environment_changes(records: Iterable[TestRecord]) -> tuple[EnvironmentChan
 
 @dataclass(frozen=True)
 class NotebookSnapshot:
-    """Everything the notebook held at ``taken_at``, read at once: what the RSI, the dashboard and the exports use."""
+    """Everything the notebook held at ``taken_at``, read at once: what the RSI, the dashboard and the exports use.
+    ``resolved_patches`` are the model-written patches of every merge recorded, in the order the merges were."""
 
     taken_at: float
     profile: SessionProfile | None
@@ -701,6 +706,7 @@ class NotebookSnapshot:
     learnings: tuple[LearningRecord, ...] = ()
     op_shares: Mapping[str, OpShares] = field(default_factory=dict)
     llm_usage: tuple[LlmUsageRecord, ...] = ()
+    resolved_patches: tuple[ResolvedPatch, ...] = ()
 
     @property
     def baseline(self) -> BaselineRecord | None:

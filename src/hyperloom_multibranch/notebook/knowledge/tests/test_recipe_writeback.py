@@ -30,6 +30,7 @@ from hyperloom.orchestrator.knowledge.remote_recipe import KBStoreError
 from hyperloom.orchestrator.knowledge.remote_recipe.client import RemoteRecipeClient
 from hyperloom.orchestrator.knowledge.remote_recipe.values import knowledge_to_warm_recipe
 from hyperloom_multibranch.contracts.notebook.records import NotebookSnapshot
+from hyperloom_multibranch.contracts.repo import ResolvedPatch
 from hyperloom_multibranch.notebook.knowledge.recipe_kb import from_recipe_kb_value, to_recipe_kb_value
 from hyperloom_multibranch.notebook.knowledge.recipe_writeback import (
     AGENTX_METRIC,
@@ -111,11 +112,42 @@ def test_a_session_past_the_champion_writes_its_recipe_files_and_lessons(
     provenance = knowledge["provenance"]
     assert (provenance["commit_id"], provenance["recipe_digest"]) == ("i1", final.recipe.digest())
     assert provenance["rule_pack"] == RULE_PACK
-    assert "warmup_round_seed" not in provenance
+    assert "warmup_round_seed" not in provenance and "synthesized_patches" not in provenance
     replayed = from_recipe_kb_value(knowledge["value"], base_image_digest=provenance["base_image_digest"])
     assert replayed == final.recipe
     warm = knowledge_to_warm_recipe({"knowledge": knowledge, "session_id": "sess-1"})
     assert (warm["best_throughput"], warm["replay_material_available"], warm["isl"]) == (1041.0, True, 1024)
+
+
+def test_a_patch_a_model_wrote_during_a_merge_is_named_in_the_provenance(
+    snapshot: NotebookSnapshot, final: FinalRecipe
+) -> None:
+    """The KB says which published patch no branch wrote, and leaves out a model's patch the recipe does not carry."""
+
+    store = FakeRecipeStore(champion=_champion(1000.0))
+    published = final.recipe.components[0].patches[0]
+    merged = ResolvedPatch("vllm", "patch/vllm/0000-old.patch", published, "claude-x", "resolver-3", 2)
+    dropped = ResolvedPatch(
+        "vllm", "patch/vllm/0002-other.patch", PatchRef("patch/vllm/m.patch", "d" * 64), "m", "v", 1
+    )
+
+    publish_final_recipe(
+        RemoteRecipeClient(store), dataclasses.replace(snapshot, resolved_patches=(merged, dropped)), final
+    )
+
+    assert store.knowledge is not None
+    assert store.knowledge["provenance"]["synthesized_patches"] == [
+        {
+            "component": "vllm",
+            "path": published.path,
+            "sha256": published.sha256,
+            "replaces": "patch/vllm/0000-old.patch",
+            "model": "claude-x",
+            "prompt_version": "resolver-3",
+            "attempts": 2,
+        }
+    ]
+    assert store.knowledge["value"] == to_recipe_kb_value(final.recipe)
 
 
 def test_a_session_short_of_the_champion_writes_nothing(snapshot: NotebookSnapshot, final: FinalRecipe) -> None:

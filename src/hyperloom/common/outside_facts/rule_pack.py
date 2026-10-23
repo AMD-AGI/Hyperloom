@@ -46,7 +46,7 @@ __all__ = [
 #: The session input that names the pack file.
 PACK_ENV = "HYPERLOOM_RULE_PACK"
 #: The pack a session reads when ``PACK_ENV`` is not set; it ships with the package.
-DEFAULT_PACK_PATH = Path(__file__).parent / "rule_packs" / "default.yaml"
+DEFAULT_PACK_PATH = Path(__file__).parent / "packs" / "default.yaml"
 
 
 class RulePackError(RuntimeError):
