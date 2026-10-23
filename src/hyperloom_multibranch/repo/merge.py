@@ -6,7 +6,7 @@
 The change is what the candidate's recipe changed from its parent's. A server argument or environment variable both
 sides changed takes the candidate's value and is listed; a kernel slot both sides filled is decided by the two tables
 when one holds every row of the other, since a target loads one table and the wider one serves every shape the
-narrower did, and otherwise takes a new table of both tables' rows, refused when a shape is in both with other rows.
+narrower did, and otherwise takes a new table of both tables' rows, the head's row where both tuned a shape to other rows.
 A component travels only for the patches it gains or loses, with its upstream commit where
 those patches create a component the other side lacks: every component is built from the installed package of the
 session's fixed base image, so a recipe's upstream pin is provenance no merge can act on, and a component the
@@ -18,6 +18,8 @@ files it touches, and is a conflict only where a line is changed by both sides.
 
 from __future__ import annotations
 
+import csv
+import io
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -37,6 +39,7 @@ from hyperloom.contracts.recipe import (
     apply,
     diff,
 )
+from hyperloom.measure.framework_rows import cell
 from hyperloom.measure.compile import KernelLoadError, PatchApplyError, kernel_load_env, kernel_rows_only
 from hyperloom_multibranch.contracts.repo import PatchConflict, RebasedPatch, RepoMerge, UnitedTable
 from hyperloom_multibranch.repo.rebase import Files, merge_files, patch_between
@@ -56,8 +59,6 @@ TableBytes = Callable[[KernelArtifact], bytes]
 PatchStore = Callable[[str, str], PatchRef]
 #: Keeps a kernel table's bytes in the session's blob store, as the toolbox's ``put_kernel_artifact`` does.
 TableStore = Callable[[bytes], str]
-#: How many conflicting shapes a refusal names.
-_NAMED_SHAPES = 8
 
 
 @dataclass(frozen=True)
@@ -168,12 +169,13 @@ def _added_kernels(base: Recipe, candidate: Recipe, ours: Recipe, stored: Stored
             continue
         wider = wider_table(artifact, current, stored.kernel_table)
         if wider is None:
-            wider = _united(artifact, current, stored)
-            united.append(UnitedTable(artifact, current, wider))
+            union = _united(artifact, current, stored)
+            united.append(union)
+            wider = union.table
         carried.append(wider)
     return _Kernels(
         tuple(artifact for artifact in carried if artifact not in ours.kernels),
-        tuple(union for union in united if union.table not in ours.kernels),
+        tuple(union for union in united if union.table not in ours.kernels or union.kept_head_shapes),
     )
 
 
@@ -211,32 +213,55 @@ def wider_table(wanted: KernelArtifact, current: KernelArtifact, table: TableByt
     return None
 
 
-def _united(theirs: KernelArtifact, ours: KernelArtifact, stored: Stored) -> KernelArtifact:
-    """The rows of both tables as one table of their slot, kept in the blob store; refused when a shape is in both with
-    other rows, when the two do not load through one variable, and when they are not one kind of table."""
+def _united(theirs: KernelArtifact, ours: KernelArtifact, stored: Stored) -> UnitedTable:
+    """The rows of both tables as one table of their slot, kept in the blob store. A shape both tuned to other rows
+    keeps the head's row; rows put over the image's default table read the same over a whole table, so a rows-only set
+    and a whole table make a whole table. Refused when the two do not load through one variable or are not one kind
+    of table."""
 
     try:
         env, other = kernel_load_env(theirs), kernel_load_env(ours)
-        flags = kernel_rows_only(theirs), kernel_rows_only(ours)
+        rows_only = kernel_rows_only(theirs) and kernel_rows_only(ours)
     except KernelLoadError as error:
         raise _both_moved(theirs.slot, str(error)) from error
     if env != other:
         raise _both_moved(theirs.slot, f"one table loads through {env}, the other through {other}")
     tables = stored.kernel_table(theirs), stored.kernel_table(ours)
     try:
-        data = union_rows(*tables, env, rows_only=flags, configs=stored.aiter_configs)
-    except KernelRowsConflict as error:
-        raise _both_moved(theirs.slot, f"{len(error.shapes)} shapes differ: {_shapes(error.shapes)}") from error
+        data, kept = _union_keeping_ours(*tables, env, rows_only, stored.aiter_configs)
     except KernelRowsError as error:
         raise _both_moved(theirs.slot, str(error)) from error
-    united = mint_kernel_artifact(theirs.kind, theirs.target, env, data, rows_only=flags[0])
     stored.store_table(data)
-    return united
+    return UnitedTable(
+        theirs, ours, mint_kernel_artifact(theirs.kind, theirs.target, env, data, rows_only=rows_only), kept
+    )
 
 
-def _shapes(shapes: Sequence[Mapping[str, str]]) -> str:
-    named = "; ".join(" ".join(f"{name}={value}" for name, value in shape.items()) for shape in shapes[:_NAMED_SHAPES])
-    return named + (f"; and {len(shapes) - _NAMED_SHAPES} more" if len(shapes) > _NAMED_SHAPES else "")
+def _union_keeping_ours(
+    theirs: bytes, ours: bytes, env: str, rows_only: bool, configs: Path | None
+) -> tuple[bytes, tuple[Mapping[str, str], ...]]:
+    """``union_rows`` of both tables, with the shapes both set to other rows left out of ``theirs`` first."""
+    flags = (rows_only, rows_only)
+    try:
+        return union_rows(theirs, ours, env, rows_only=flags, configs=configs), ()
+    except KernelRowsConflict as conflict:
+        kept = tuple(conflict.shapes)
+    return union_rows(_without_shapes(theirs, kept), ours, env, rows_only=flags, configs=configs), kept
+
+
+def _without_shapes(table: bytes, shapes: Sequence[Mapping[str, str]]) -> bytes:
+    """``table`` without its rows of ``shapes``, whose key cells are compared as aiter reads them."""
+    header, *rows = [record for record in csv.reader(io.StringIO(table.decode(), newline="")) if record]
+    place = {name: index for index, name in enumerate(header)}
+
+    def named(row: Sequence[str]) -> bool:
+        return any(all(cell(row[place[name]]) == value for name, value in shape.items()) for shape in shapes)
+
+    out = io.StringIO()
+    csv.writer(out, lineterminator="\r\n" if b"\r\n" in table else "\n").writerows(
+        [header, *(row for row in rows if not named(row))]
+    )
+    return out.getvalue().encode()
 
 
 def _holds(wider: bytes, narrower: bytes) -> bool:

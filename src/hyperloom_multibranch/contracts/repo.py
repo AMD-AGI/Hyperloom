@@ -9,7 +9,7 @@ the toolbox reads them to build a test's environment.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -43,11 +43,14 @@ class RebasedPatch:
 @dataclass(frozen=True)
 class UnitedTable:
     """A kernel slot both sides filled with tables neither of which holds every row of the other, carried as ``table``:
-    the rows of the candidate's ``theirs`` and the head's ``ours`` as one table, one row to a shape."""
+    the rows of the candidate's ``theirs`` and the head's ``ours`` as one table, one row to a shape. Where both tuned a
+    shape to other rows, ``table`` keeps the head's row, measured on the head already, and ``kept_head_shapes`` names
+    those shapes by their key columns."""
 
     theirs: KernelArtifact
     ours: KernelArtifact
     table: KernelArtifact
+    kept_head_shapes: tuple[Mapping[str, str], ...] = ()
 
 
 @dataclass(frozen=True)

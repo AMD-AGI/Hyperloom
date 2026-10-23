@@ -21,6 +21,7 @@ from typing import Any
 
 import pytest
 
+from hyperloom.common.outside_facts import SGLANG_IMAGE_AITER_CONFIGS
 from hyperloom.contracts.measurement import TestRequest, Validity
 from hyperloom.contracts.recipe import ConfigDelta, KernelArtifact, KernelKind, RecipeDelta, RecipeError, apply
 from hyperloom.measure.compile import LocalBlobStore, kernel_load_env
@@ -186,14 +187,19 @@ async def test_branches_that_put_the_same_table_get_one_artifact_and_merge_witho
     assert (tmp_path / "tree" / first["ref"]).read_bytes() == TABLE.encode(), "checkout reads the same blob store"
 
 
-async def test_branches_that_tune_one_target_differently_conflict_on_its_slot(stack: Stack) -> None:
+async def test_branches_that_tune_one_shape_differently_never_replace_the_head_s_row(stack: Stack) -> None:
     first = await put(Specialist(stack, "s1"))
     second = await put(Specialist(stack, "s2"), content=OTHER_TABLE)
     assert first["ref"] != second["ref"] and first["target"] == second["target"]
     heads = {"s1": await commit_with(stack, "s1", first), "s2": await commit_with(stack, "s2", second)}
 
-    with pytest.raises(RecipeError, match=f"both sides replaced the gemm kernel for {TARGET}"):
-        await stack.repo.merge(heads["s2"], heads["s1"])
+    # The rows are keyed by the image's aiter install; without one the slot cannot be united and is refused.
+    if not Path(SGLANG_IMAGE_AITER_CONFIGS).is_dir():
+        with pytest.raises(RecipeError, match=f"both sides replaced the gemm kernel for {TARGET}"):
+            await stack.repo.merge(heads["s2"], heads["s1"])
+        return
+    merge = await stack.repo.merge(heads["s2"], heads["s1"])
+    assert merge.delta.add_kernels == () and len(merge.united_tables) == 1
 
 
 async def test_a_variable_loads_one_table_so_a_second_target_for_it_is_refused(stack: Stack) -> None:

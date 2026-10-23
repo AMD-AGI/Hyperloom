@@ -339,13 +339,22 @@ def test_two_tables_each_with_rows_the_other_lacks_unite_into_one_table(configs)
     assert apply(_filled(head), merge.delta).kernels == (united,)
 
 
-def test_a_shape_both_sides_tuned_to_other_rows_is_refused_by_name(configs):
+def test_a_shape_both_sides_tuned_to_other_rows_keeps_the_head_s_row_and_unites_the_rest(configs):
+    """The head's row was measured on integration; the candidate's other shapes still join it, and the shapes whose row
+    the merge kept from the head are named."""
+
     head, theirs = _aiter(csv_text(SHARED, B01_HEAD)), _aiter(csv_text(B01_SHARED, B01_NEW))
 
-    with pytest.raises(RecipeError, match="both sides replaced the gemm kernel for a8w8: 2 shapes differ: ") as caught:
-        carry("i1", BASE, _filled(theirs), _filled(head), Stored(_applies, _table, _store, _keep, configs))
+    merge = carry("i1", BASE, _filled(theirs), _filled(head), Stored(_applies, _table, _store, _keep, configs))
 
-    assert "M=64 N=34816 K=5120" in str(caught.value) and "M=64 N=5120 K=17408" in str(caught.value)
+    (united,) = merge.delta.add_kernels
+    expected = union_rows(csv_text(B01_NEW), TABLES[head.sha256], ENV, configs=configs)
+    assert TABLES[united.sha256] == expected
+    (kept_from,) = merge.united_tables
+    assert kept_from.ours == head and len(kept_from.kept_head_shapes) == 2
+    named = {" ".join(f"{k}={v}" for k, v in shape.items()) for shape in kept_from.kept_head_shapes}
+    assert any("M=64 N=34816 K=5120" in shape for shape in named)
+    assert any("M=64 N=5120 K=17408" in shape for shape in named)
 
 
 def test_two_rows_only_sets_unite_into_a_rows_only_set(configs):
@@ -358,11 +367,16 @@ def test_two_rows_only_sets_unite_into_a_rows_only_set(configs):
     assert kernel_rows_only(united) and TABLES[united.sha256] == data
 
 
-def test_a_rows_only_set_and_a_whole_table_are_refused(configs):
+def test_rows_only_rows_over_a_whole_table_make_one_whole_table(configs):
+    """Rows put over the image's table read the same over the head's whole table: the union is a whole table."""
+
     head, theirs = _aiter(csv_text(SHARED)), _aiter_rows(csv_text(B06_NEW))
 
-    with pytest.raises(RecipeError, match="both sides replaced the gemm kernel for a8w8: the first table is rows-only"):
-        carry("i1", BASE, _filled(theirs), _filled(head), Stored(_applies, _table, _store, _keep, configs))
+    merge = carry("i1", BASE, _filled(theirs), _filled(head), Stored(_applies, _table, _store, _keep, configs))
+
+    (united,) = merge.delta.add_kernels
+    assert not kernel_rows_only(united)
+    assert TABLES[united.sha256] == union_rows(csv_text(B06_NEW), TABLES[head.sha256], ENV, configs=configs)
 
 
 def test_a_candidate_on_another_base_image_does_not_merge():
