@@ -52,6 +52,7 @@ from hyperloom.measure.framework_copies import PrivateFramework, private_framewo
 from hyperloom.measure.framework_rows import RowsOnlyRefused
 from hyperloom.measure.magpie_launchers import install_launchers
 from hyperloom.measure.phases import KERNEL_TABLES, OTHER, REPRO_CASE, ROUND_COLLECT, TEARDOWN, PhaseRecorder
+from hyperloom.measure.ports import DEV_SANDBOX_PORTS, pick_port_outside_dev_sandboxes
 from hyperloom.measure.profile_client import ProfileClientError, patch_profile_client
 from hyperloom.measure.profile_traces import PROFILE_DIR, collect_traces
 from hyperloom.measure.repro import ReproError, find_case, run_case
@@ -458,6 +459,11 @@ def _booting(run: _Run, point: int, round_args: dict[str, Any]) -> contextlib.Ab
 # --- running ------------------------------------------------------------------------------------------------------
 
 
+def _free_port() -> int:
+    """A free port, picked the way the lifecycle picks its own, but never one a dev sandbox serves on."""
+    return pick_port_outside_dev_sandboxes(lambda: assign_free_port(REUSE_PORT_DEFAULT))
+
+
 @contextlib.contextmanager
 def _free_port_for(point: Path, server_lifecycle: dict[str, Any] | None) -> Iterator[Path]:
     """The point a round runs from: with a free port of its own in ``benchmark.envs.PORT``, unless a lifecycle pins one.
@@ -466,14 +472,14 @@ def _free_port_for(point: Path, server_lifecycle: dict[str, Any] | None) -> Iter
     is not planned) has no port assigned, and its server listens on the default: two of them on one machine collide on
     it. The InferenceX script and Magpie's AgentX server both read the port from ``benchmark.envs.PORT``, so it goes
     there, into a copy: the point itself is shared by every test that runs it. The port is picked where the server is
-    launched, by the function the lifecycle picks its own with.
+    launched (``_free_port``).
     """
     if server_lifecycle is not None:
         yield point  # ``inject_lifecycle`` pins PORT in every round the lifecycle builds
         return
     config = _point_config(point)
     benchmark = config.get("benchmark") or {}
-    benchmark["envs"] = {**(benchmark.get("envs") or {}), "PORT": assign_free_port(REUSE_PORT_DEFAULT)}
+    benchmark["envs"] = {**(benchmark.get("envs") or {}), "PORT": _free_port()}
     config["benchmark"] = benchmark
     with tempfile.TemporaryDirectory(prefix="hl-port-") as work:
         pinned = Path(work) / Path(point).name
@@ -591,6 +597,11 @@ def _is_failure(result: VariantResult) -> bool:
     return result.status in {"failed", "skipped"}
 
 
+def _outside_dev_sandboxes(port: int) -> int:
+    """``port``, or another free one when the lifecycle's own pick fell in the block the dev sandboxes serve on."""
+    return _free_port() if port in DEV_SANDBOX_PORTS else port
+
+
 class _Lifecycle:
     """The persistent server one sweep arm shares: where its pid files are and which port it listens on."""
 
@@ -600,7 +611,7 @@ class _Lifecycle:
         info = resolve_lifecycle_params(run.call.points[0])
         self.pid_dir = pid_dir
         self.eligible = bool(info.get("eligible"))
-        self.port = int(info.get("port") or 0)
+        self.port = _outside_dev_sandboxes(int(info.get("port") or 0))
         self.framework = str(info.get("framework") or "")
         self.reason = str(info.get("reason") or "")
         self._phases = run.phases
