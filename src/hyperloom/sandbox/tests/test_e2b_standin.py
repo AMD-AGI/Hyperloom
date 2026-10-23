@@ -151,6 +151,60 @@ def test_keys_templates_and_sealed_environment_are_enforced(standin: StandIn) ->
     sandbox.kill()
 
 
+def test_a_template_refuses_the_create_environment_it_does_not_list() -> None:
+    """The rule itself: a sealed template lists none unless told, an open one takes any unless it lists some."""
+    sealed = StandInTemplate("s", "measurement", sealed=True)
+    listed = StandInTemplate("l", "measurement", sealed=True, accepted_envs=("REPO", "SHA"))
+    open_ = StandInTemplate("o", "dev")
+    narrow = StandInTemplate("n", "dev", accepted_envs=["ONLY"])
+    nothing = StandInTemplate("z", "dev", accepted_envs=())
+    names = ["SHA", "OTHER", "REPO"]
+    assert sealed.refused_envs(names) == ["OTHER", "REPO", "SHA"]
+    assert listed.refused_envs(names) == ["OTHER"]
+    assert open_.refused_envs(names) == []
+    assert narrow.refused_envs(["ONLY", "MORE"]) == ["MORE"]
+    assert nothing.refused_envs(["ANY"]) == ["ANY"]
+    assert listed.refused_envs([]) == sealed.refused_envs([]) == []
+
+
+def test_a_sealed_template_takes_only_the_create_environment_it_lists_and_names_the_rest(
+    e2b_envd: Path, tmp_path: Path
+) -> None:
+    start = ("/bin/sh", "-c", "printenv REPO SHA > /out/seen; sleep 600")
+    templates = [
+        StandInTemplate("listed", "measurement", sealed=True, accepted_envs=("REPO", "SHA"), start=start),
+        StandInTemplate("bare", "measurement", sealed=True),
+        StandInTemplate("narrow", "dev", accepted_envs=("ONLY",)),
+    ]
+    with StandIn(e2b_envd, tmp_path, templates) as service:
+        provider = _provider(service)
+        made = provider.create(
+            "listed",
+            role="measurement",
+            timeout_sec=60,
+            metadata={},
+            options=CreateOptions(envs={"REPO": "https://source.invalid/repo.git", "SHA": "ab" * 20}),
+        )
+        assert _wait_until(lambda: "seen" in made.list_dir("/out"), 10)
+        assert made.read_file("/out/seen").decode().split() == ["https://source.invalid/repo.git", "ab" * 20]
+        for template, role, envs, refused in (
+            ("listed", "measurement", {"REPO": "r", "SHA": "s", "TOKEN": "secret-value"}, "TOKEN"),
+            ("bare", "measurement", {"REPO": "r"}, "REPO"),
+            ("narrow", "dev", {"ONLY": "1", "MORE": "2"}, "MORE"),
+        ):
+            with pytest.raises(SandboxDenied, match=rf"env_not_allowed.*{template}.*{refused}") as denied:
+                provider.create(template, role=role, timeout_sec=60, metadata={}, options=CreateOptions(envs=envs))
+            assert "secret-value" not in str(denied.value), "the refusal names the variable, never its value"
+        assert [i.sandbox_id for i in provider.find({}, role="measurement")] == [made.sandbox_id], (
+            "a refusal makes none"
+        )
+        provider.create("bare", role="measurement", timeout_sec=60, metadata={}).kill()  # no environment: fine
+        provider.create(
+            "narrow", role="dev", timeout_sec=60, metadata={}, options=CreateOptions(envs={"ONLY": "x"})
+        ).kill()
+        made.kill()
+
+
 def test_one_idempotency_key_makes_one_sandbox_even_when_creates_race(standin: StandIn) -> None:
     provider = _provider(standin)
     before = len(standin.host.pids)

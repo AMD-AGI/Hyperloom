@@ -14,6 +14,7 @@ import pytest
 
 from hyperloom.measure import sandboxes
 from hyperloom.measure.sandboxes import (
+    RUN_ID_KEY,
     AttemptTag,
     NoRunnerTemplate,
     PoolClosed,
@@ -100,12 +101,17 @@ class _Provider:
             raise SandboxGone(sandbox_id) from None
 
     def find(self, metadata, *, role):
-        return [s.info() for s in list(self.live.values())]
+        infos = [s.info() for s in list(self.live.values())]
+        return [info for info in infos if all(info.metadata.get(k) == v for k, v in metadata.items())]
 
 
-def _pool(provider, **kwargs) -> SandboxPool:
+_THIS_RUN = {RUN_ID_KEY: "run-1"}
+
+
+def _pool(provider, create_envs=None, **kwargs) -> SandboxPool:
     run_id = kwargs.pop("run_id", "run-1")
-    return SandboxPool(provider, {1: "runner-1", 8: "runner-8"}, run_id=run_id, limits=PoolLimits(**kwargs))
+    templates = {1: "runner-1", 8: "runner-8"}
+    return SandboxPool(provider, templates, run_id=run_id, limits=PoolLimits(**kwargs), create_envs=create_envs)
 
 
 def _acquire(pool: SandboxPool, request_id: str = "req-1", attempt: int = 1, **kwargs):
@@ -277,7 +283,7 @@ def test_waiting_for_a_slot_ends_when_the_run_stops_or_the_pool_closes() -> None
 
 def test_a_sandbox_a_previous_process_left_running_keeps_its_slot_until_it_is_reattached_or_ends() -> None:
     provider = _Provider()
-    survivor = provider.create("runner-1", role="measurement", timeout_sec=10, metadata={})
+    survivor = provider.create("runner-1", role="measurement", timeout_sec=10, metadata=_THIS_RUN)
     pool = _pool(provider, max_parallel_tests=1)
     stop = threading.Event()
     threading.Timer(0.3, stop.set).start()
@@ -292,22 +298,40 @@ def test_a_sandbox_a_previous_process_left_running_keeps_its_slot_until_it_is_re
 
 def test_a_slot_frees_when_the_sandbox_that_held_it_ends() -> None:
     provider = _Provider()
-    survivor = provider.create("runner-1", role="measurement", timeout_sec=10, metadata={})
+    survivor = provider.create("runner-1", role="measurement", timeout_sec=10, metadata=_THIS_RUN)
     pool = _pool(provider, max_parallel_tests=1)
     threading.Timer(0.3, survivor.kill).start()
     runner = _acquire(pool, "new")
     assert runner.sandbox_id != survivor.sandbox_id and len(provider.live) == 1
 
 
-def test_close_closes_every_measurement_sandbox_including_one_another_process_made() -> None:
+def test_close_closes_every_measurement_sandbox_of_the_run_including_one_another_process_made() -> None:
     provider = _Provider()
     pool = _pool(provider)
     mine = _acquire(pool, "mine")
-    stray = provider.create("runner-1", role="measurement", timeout_sec=10, metadata={})
+    stray = provider.create("runner-1", role="measurement", timeout_sec=10, metadata=_THIS_RUN)
     pool.close()
     assert provider.live == {}
     assert mine.handle.killed == 1 and stray.killed == 1
     pool.close()
+
+
+def test_a_pool_neither_counts_nor_closes_the_sandboxes_of_another_run_that_its_key_sees() -> None:
+    provider = _Provider()
+    other = provider.create("runner-1", role="measurement", timeout_sec=10, metadata={RUN_ID_KEY: "run-2"})
+    unmarked = provider.create("runner-1", role="measurement", timeout_sec=10, metadata={})
+    pool = _pool(provider, max_parallel_tests=1)
+    giveup = threading.Event()
+    timer = threading.Timer(3, giveup.set)  # a pool that counted the others would wait for a slot: this ends the wait
+    timer.start()
+    try:
+        mine = _acquire(pool, "mine", stop=giveup)
+    finally:
+        timer.cancel()
+    assert pool.active == 1 and mine.metadata[RUN_ID_KEY] == "run-1", "the slot was free: the others are not this run's"
+    pool.close()
+    assert other.killed == unmarked.killed == 0 and mine.handle.killed == 1
+    assert sorted(provider.live) == sorted([other.sandbox_id, unmarked.sandbox_id])
 
 
 def test_the_create_call_carries_the_template_lifetime_and_metadata_of_the_design() -> None:
@@ -325,15 +349,30 @@ def test_the_create_call_carries_the_template_lifetime_and_metadata_of_the_desig
     assert call["template"] == "runner-1" and call["role"] == "measurement"
     assert call["timeout_sec"] == 1500, "the test's timeout plus the slack"
     assert call["wait_sec"] == 3000
-    assert call["envs"] is None, "a sealed template takes no caller variables"
+    assert call["envs"] is None, "a pool given no create environment passes none"
     assert call["metadata"] == {
         "agent-sandbox.io/idempotency-key": "run-1:req-7:3",
+        "hyperloom.run-id": "run-1",
         "agent-sandbox.io/avoid-nodes": "n1,n2",
         "agent-sandbox.io/priority": "1",
         "hyperloom.request-id": "req-7",
         "hyperloom.purpose": "confirm",
         "hyperloom.branch-id": "b9",
     }
+
+
+def test_the_create_environment_reaches_every_create_of_the_pool() -> None:
+    provider = _Provider()
+    provider.spent = {"run-1:req-1:1"}  # the first key is spent: the same attempt creates again with its next key
+    given = {"SOURCE_REPO": "https://source.invalid/repo.git", "SOURCE_SHA": "ab" * 20}
+    pool = _pool(provider, create_envs=given)
+    given["SOURCE_SHA"] = "changed after the pool was built"
+    _acquire(pool)
+    _acquire(pool, "req-2")
+    assert len(provider.calls) == 3
+    assert [call["envs"] for call in provider.calls] == [
+        {"SOURCE_REPO": given["SOURCE_REPO"], "SOURCE_SHA": "ab" * 20}
+    ] * 3
 
 
 def test_the_sandbox_never_outlives_the_run() -> None:

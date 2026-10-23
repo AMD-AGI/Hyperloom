@@ -6,8 +6,11 @@
 One test gets one fresh sandbox. :class:`SandboxPool` creates it through the ``sandbox`` socket with the ``measurement``
 key, never lets more tests run at once than ``max_parallel_tests``, hands back what the platform said about the sandbox
 (its signing public key, the node it landed on, whether the node could not be avoided), and closes everything on
-shutdown. Which runner template serves a card count, what the sandbox's lifetime is and what metadata it carries are
-decided here, so the backend never builds a ``create`` call itself.
+shutdown. Which runner template serves a card count, what the sandbox's lifetime is, what metadata it carries and what
+environment it is created with are decided here, so the backend never builds a ``create`` call itself.
+
+Every sandbox of a pool carries the run's id (``hyperloom.run-id``), and the pool finds and closes only sandboxes that
+carry it: a pool never ends a measurement sandbox of another run that the same key can see.
 """
 
 from __future__ import annotations
@@ -43,6 +46,7 @@ __all__ = [
     "MEASUREMENT_ROLE",
     "NoRunnerTemplate",
     "PoolClosed",
+    "RUN_ID_KEY",
     "RunnerSandbox",
     "SandboxPool",
     "sandbox_priority",
@@ -55,6 +59,7 @@ DEFAULT_TIMEOUT_SLACK_SEC = 900
 REQUEST_ID_KEY = "hyperloom.request-id"
 PURPOSE_KEY = "hyperloom.purpose"
 BRANCH_ID_KEY = "hyperloom.branch-id"
+RUN_ID_KEY = "hyperloom.run-id"
 _SLOT_POLL_SEC = 0.5
 #: How long a create refused for the quota waits for one of this pool's sandboxes to end before it asks again: the
 #: sandboxes that fill the quota may be another role's or another process's, and those end without telling the pool.
@@ -129,12 +134,21 @@ class SandboxPool:
     Args:
         provider: The ``sandbox`` socket implementation.
         templates: Card count to runner template name.
-        run_id: The run's id, the first part of every idempotency key.
+        run_id: The run's id, the first part of every idempotency key and the value of the ``hyperloom.run-id`` metadata
+            every sandbox of the pool carries.
         limits: The slot cap and the two waits, see :class:`PoolLimits`.
+        create_envs: The environment every sandbox is created with (``CreateOptions.envs``); a sealed template refuses
+            the names it does not accept, so the service's runner template must list them.
     """
 
     def __init__(
-        self, provider: SandboxProvider, templates: Mapping[int, str], *, run_id: str, limits: PoolLimits = PoolLimits()
+        self,
+        provider: SandboxProvider,
+        templates: Mapping[int, str],
+        *,
+        run_id: str,
+        limits: PoolLimits = PoolLimits(),
+        create_envs: Mapping[str, str] | None = None,
     ) -> None:
         max_parallel_tests = limits.max_parallel_tests
         if max_parallel_tests < 1:
@@ -144,6 +158,7 @@ class SandboxPool:
         self._provider = provider
         self._templates = {int(count): name for count, name in templates.items()}
         self._run_id = run_id
+        self._create_envs = dict(create_envs or {})
         self._max = max_parallel_tests
         self._slack = limits.timeout_slack_sec
         self._request_timeout = limits.request_timeout_sec
@@ -250,7 +265,7 @@ class SandboxPool:
         with self._cond:
             self._closed = True
             self._cond.notify_all()
-        for info in self._provider.find({}, role=MEASUREMENT_ROLE):
+        for info in self._provider.find(self._scope(), role=MEASUREMENT_ROLE):
             self.discard(info.sandbox_id)
         with self._cond:
             self._held.clear()
@@ -259,6 +274,10 @@ class SandboxPool:
 
     # -- internals ----------------------------------------------------------------------------------------------
 
+    def _scope(self) -> dict[str, str]:
+        """The metadata that makes a sandbox this run's: carried by every create, required by every find."""
+        return {RUN_ID_KEY: self._run_id}
+
     def _metadata(
         self, request_id: str, attempt: int, avoid_nodes: tuple[str, ...], meta: Mapping[str, object]
     ) -> dict[str, str]:
@@ -266,6 +285,7 @@ class SandboxPool:
             IDEMPOTENCY_KEY: self.idempotency_key(request_id, attempt),
             PRIORITY_KEY: str(sandbox_priority(_priority_of(meta))),
             REQUEST_ID_KEY: request_id,
+            **self._scope(),
         }
         if avoid_nodes:
             metadata[AVOID_NODES_KEY] = ",".join(sorted(set(avoid_nodes)))
@@ -296,7 +316,7 @@ class SandboxPool:
                     role=MEASUREMENT_ROLE,
                     timeout_sec=lifetime,
                     metadata=keyed,
-                    options=CreateOptions(wait_sec=self._request_timeout),
+                    options=CreateOptions(envs=self._create_envs or None, wait_sec=self._request_timeout),
                 )
             except SandboxGone:
                 spent += 1
@@ -339,8 +359,8 @@ class SandboxPool:
                 self._cond.wait(_SLOT_POLL_SEC)
 
     def _untracked(self, reattaching: str | None) -> int:
-        """How many running ``measurement`` sandboxes this pool does not hold."""
-        running = {info.sandbox_id for info in self._provider.find({}, role=MEASUREMENT_ROLE)}
+        """How many running ``measurement`` sandboxes of this run this pool does not hold."""
+        running = {info.sandbox_id for info in self._provider.find(self._scope(), role=MEASUREMENT_ROLE)}
         with self._cond:
             running -= self._held
         running.discard(reattaching or "")

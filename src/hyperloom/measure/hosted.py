@@ -128,7 +128,8 @@ class HostedConfig:
     ``allow_unsigned`` exists for the table of 4.4.4 but is refused when true: no result is ever accepted without a
     signature that verified against the key the platform reported for its sandbox. ``rule_pack_digest`` is the digest
     of the rule pack the session reads: a result whose runner did not read a pack with that digest is rejected
-    (``rule_pack_mismatch``); ``None`` accepts any pack.
+    (``rule_pack_mismatch``); ``None`` accepts any pack. ``create_envs`` is the environment every authoritative sandbox is
+    created with; the service's sealed runner template must accept those names (``accepted_envs``).
     """
 
     session_dir: Path
@@ -144,6 +145,7 @@ class HostedConfig:
     nodes: int = 1
     runner_version: str | None = None
     rule_pack_digest: str | None = None
+    create_envs: Mapping[str, str] = field(default_factory=dict)
     staging_root: Path | None = None
     should_stop: Callable[[], bool] = field(default=lambda: False, compare=False)
 
@@ -282,6 +284,7 @@ class HostedMeasurementBackend:
                 timeout_slack_sec=config.timeout_slack_sec,
                 request_timeout_sec=config.runner_start_timeout_sec,
             ),
+            create_envs=config.create_envs,
         )
         self._journal: MeasurementJournal | None = None
         self._stops = _Stops()

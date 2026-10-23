@@ -3,9 +3,10 @@
 
 """``build_hosted_toolbox`` from plain values, over the E2B stand-in and the fake runner.
 
-The stand-in runs real envd processes behind a simulated control plane. It writes no platform metadata, so the tests put
-a platform's part in front of the E2B provider: the signing key the service reports for a runner sandbox (the fake runner
-signs with it) and its node. The tests that need the stand-in skip where it cannot run (root, ``unshare``, an envd binary
+The stand-in runs real envd processes behind a simulated control plane. Its runner templates are sealed and list the
+two source variables as the environment a create may pass, as the service's do. It writes no platform metadata, so the
+tests put a platform's part in front of the E2B provider: the signing key the service reports for a runner sandbox (the
+fake runner signs with it) and its node. The tests that need the stand-in skip where it cannot run (root, ``unshare``, an envd binary
 named by ``HYPERLOOM_E2B_ENVD``); the ones that only build the toolbox always run.
 """
 
@@ -69,6 +70,7 @@ from hyperloom_multibranch.toolbox.toolbox import AcceptanceSetup
 from hyperloom_multibranch.toolbox.tools import TRACELENS_TOOL
 
 _RUNNERS = ("run-runner-g1", "run-runner-g2")
+_NARROW = "run-narrow-g1"  # a runner template that accepts the source repository but not its commit
 _DEVS = ("run-dev-g1", "run-dev-g2")
 _SOURCE_REPO, _SOURCE_SHA = "https://source.invalid/hyperloom.git", "ab" * 20
 _GRANT = {"max_sandboxes": 8, "max_gpus": 8, "gpu_hours": 400.0, "max_runtime_sec": 7200}
@@ -112,9 +114,9 @@ class _Reporting:
         return getattr(self._inner, name)
 
 
-class _Platform(hosted_toolbox._RunProvider):
+class _Platform(E2BSandboxProvider):
     """The toolbox's provider plus the platform's metadata on ``measurement`` sandboxes, remembering every create it is
-    asked for (before the run's id and the source are added to a measurement create)."""
+    asked for."""
 
     def __init__(self, keys: Mapping[Role, str], *, public_key: str, creates: list[Created], **service: Any) -> None:
         super().__init__(keys, **service)
@@ -154,11 +156,15 @@ class Service:
         return [info.sandbox_id for info in self.observer().find(where, role=role)]
 
 
-def _runner_template(name: str, key_file: Path) -> StandInTemplate:
+def _runner_template(
+    name: str, key_file: Path, accepted_envs: tuple[str, ...] = (SOURCE_REPO_ENV, SOURCE_SHA_ENV)
+) -> StandInTemplate:
     source = Path(hyperloom.__file__).resolve().parents[1]
     return StandInTemplate(
         name,
         "measurement",
+        sealed=True,
+        accepted_envs=accepted_envs,
         start=_START,
         binds=(*interpreter_binds(), str(source), str(key_file.parent)),
         envs={
@@ -180,14 +186,18 @@ def service(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Service
     key_file.parent.mkdir()
     key_file.write_bytes(signing.private_key_pem(key))
     key_file.chmod(0o600)
-    templates = [*(_runner_template(name, key_file) for name in _RUNNERS), *(StandInTemplate(n, "dev") for n in _DEVS)]
+    templates = [
+        *(_runner_template(name, key_file) for name in _RUNNERS),
+        _runner_template(_NARROW, key_file, (SOURCE_REPO_ENV,)),
+        *(StandInTemplate(n, "dev") for n in _DEVS),
+    ]
     workdir = tmp_path / "standin"
     workdir.mkdir()
     with ExitStack() as stack:
         standin = stack.enter_context(StandIn(Path(os.environ[ENVD_ENV]), workdir, templates))
         made = Service(standin)
         provider = functools.partial(_Platform, public_key=signing.public_key_pem(key), creates=made.creates)
-        monkeypatch.setattr(hosted_toolbox, "_RunProvider", provider)
+        monkeypatch.setattr(hosted_toolbox, "E2BSandboxProvider", provider)
         yield made
 
 
@@ -337,8 +347,8 @@ async def test_the_toolbox_is_built_from_the_inputs(tmp_path: Path) -> None:
     toolbox = _toolbox(None, tmp_path, tp=2)
     assert isinstance(toolbox, HostedToolbox)
     assert toolbox.trace_root == tmp_path / "session" and toolbox.blobs is not None
-    assert isinstance(toolbox.provider, hosted_toolbox._RunProvider)
-    assert isinstance(toolbox.provider, E2BSandboxProvider) and toolbox.provider.name == "e2b"
+    assert type(toolbox.provider) is E2BSandboxProvider and toolbox.provider.name == "e2b"
+    assert toolbox.backend._config.create_envs == {SOURCE_REPO_ENV: _SOURCE_REPO, SOURCE_SHA_ENV: _SOURCE_SHA}
     assert toolbox.backend.pool.template_for(2) == "run-runner-g2"
     assert (await toolbox.measurement_capacity()) == MeasurementCapacity(8, 8)
     assert toolbox._parallel_limit() == 4 and toolbox._queue.policy.global_concurrency == 4, "8 GPUs, TP=2"
@@ -427,6 +437,8 @@ async def test_a_test_is_measured_in_a_sandbox_of_the_service_and_its_result_ver
         assert result.sandbox.node_name == _NODE and result.sandbox.sandbox_id == record.sandbox_id
         (made,) = [c for c in service.creates if c.role == "measurement"]
         assert made.template == "run-runner-g1" and made.metadata[IDEMPOTENCY_KEY] == f"run-1:{request_id}:1"
+        assert made.metadata[RUN_ID_KEY] == "run-1"
+        assert dict(made.options.envs or {}) == {SOURCE_REPO_ENV: _SOURCE_REPO, SOURCE_SHA_ENV: _SOURCE_SHA}
         assert service.running("measurement") == [], "the sandbox ended with the test"
     finally:
         await toolbox.close()
@@ -451,6 +463,23 @@ async def test_the_runner_sandbox_is_given_the_source_it_installs(service: Servi
 
         await _until(noted, "the start command's note of its environment")
         assert seen[-1].decode().split() == [_SOURCE_REPO, _SOURCE_SHA]
+    finally:
+        await toolbox.close()
+
+
+async def test_a_runner_template_that_does_not_list_a_create_environment_name_refuses_the_test(
+    service: Service, tmp_path: Path
+) -> None:
+    toolbox = _toolbox(service, tmp_path, sandbox_templates={"runner": _NARROW, "dev": list(_DEVS)})
+    try:
+        await toolbox.start()
+        request_id = await toolbox.submit_test(req())
+        result = await _result_of(toolbox, request_id)
+        assert result.validity is not Validity.SUCCEEDED and result.manifest_sha256 is None
+        assert result.failure_reason is not None and "sandbox_denied" in result.failure_reason, result.failure_reason
+        assert f"env_not_allowed: template '{_NARROW}' does not accept {SOURCE_SHA_ENV}" in result.failure_reason
+        assert _SOURCE_SHA not in result.failure_reason, "the refusal names the variable, not its value"
+        assert service.running("measurement") == [], "a refused create made no sandbox"
     finally:
         await toolbox.close()
 

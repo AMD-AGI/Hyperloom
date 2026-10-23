@@ -18,9 +18,8 @@ from __future__ import annotations
 import asyncio
 import re
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
 
 from hyperloom.common.rule_pack import rule_pack_identity
 from hyperloom.measure.archive import ResultArchive
@@ -28,12 +27,11 @@ from hyperloom.measure.hosted import HostedConfig, HostedMeasurementBackend
 from hyperloom.measure.hosted_spec import SpecContext
 from hyperloom.measure.sandboxes import DEFAULT_MAX_PARALLEL_TESTS, MEASUREMENT_ROLE
 from hyperloom.sandbox.e2b import E2BSandboxProvider, RetryPolicy
-from hyperloom.sandbox.socket import CreateOptions, Role, Sandbox, SandboxInfo, SandboxProvider
+from hyperloom.sandbox.socket import Role, SandboxProvider
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.toolbox.attempts import DEFAULT_MAX_INFRA_RETRIES
 from hyperloom_multibranch.toolbox.hosted_executor import DEFAULT_TEST_TIMEOUT_SEC, HostedExecutor
 from hyperloom_multibranch.toolbox.hosted_leases import (
-    RUN_ID_KEY,
     DevSession,
     GrantLimits,
     HostedBranchLeases,
@@ -194,40 +192,6 @@ class HostedToolbox(LeasedToolbox):
             await asyncio.to_thread(self.backend.close)
 
 
-class _RunProvider(E2BSandboxProvider):
-    """The service as one run uses it: the run's measurement sandboxes carry its id and the runner's source.
-
-    A ``measurement`` create is told the run's id as metadata, and the source the runner's start-up script fetches as
-    its environment (the service's sealed template takes only the names it lists). ``find`` of that role is held to the
-    run's id, so the pool that closes "every measurement sandbox" closes this run's, never another run's that the same key
-    could see.
-    """
-
-    def __init__(self, keys: Mapping[Role, str], *, run_id: str, source: Mapping[str, str], **service: Any) -> None:
-        super().__init__(keys, **service)
-        self._run_id = run_id
-        self._source = dict(source)
-
-    def create(
-        self,
-        template: str,
-        *,
-        role: Role,
-        timeout_sec: int,
-        metadata: Mapping[str, str],
-        options: CreateOptions = CreateOptions(),
-    ) -> Sandbox:
-        if role == MEASUREMENT_ROLE:
-            metadata = {**metadata, RUN_ID_KEY: self._run_id}
-            options = replace(options, envs={**(options.envs or {}), **self._source})
-        return super().create(template, role=role, timeout_sec=timeout_sec, metadata=metadata, options=options)
-
-    def find(self, metadata: Mapping[str, str], *, role: Role) -> list[SandboxInfo]:
-        if role == MEASUREMENT_ROLE:
-            metadata = {**metadata, RUN_ID_KEY: self._run_id}
-        return super().find(metadata, role=role)
-
-
 def _names(templates: Mapping[str, object], role: str) -> list[str]:
     """The template names of ``role``: none when the list has no such role."""
     value = templates.get(role)
@@ -253,18 +217,11 @@ def _runner_template(inputs: HostedToolboxInputs) -> str:
     return by_cards[inputs.tp]
 
 
-def _service_provider(inputs: HostedToolboxInputs, retry: RetryPolicy) -> _RunProvider:
+def _service_provider(inputs: HostedToolboxInputs, retry: RetryPolicy) -> E2BSandboxProvider:
     keys: dict[Role, str] = {MEASUREMENT_ROLE: inputs.measurement_key}
     if inputs.dev_key is not None:
         keys["dev"] = inputs.dev_key
-    return _RunProvider(
-        keys,
-        run_id=inputs.run_id,
-        source={SOURCE_REPO_ENV: inputs.source_repo, SOURCE_SHA_ENV: inputs.source_sha},
-        api_url=inputs.api_url,
-        sandbox_url=inputs.sandbox_url,
-        retry=retry,
-    )
+    return E2BSandboxProvider(keys, api_url=inputs.api_url, sandbox_url=inputs.sandbox_url, retry=retry)
 
 
 def _leases(provider: SandboxProvider, inputs: HostedToolboxInputs, tuning: LeaseTuning) -> HostedBranchLeases | None:
@@ -330,6 +287,7 @@ def build_hosted_toolbox(
         spec=spec,
         runner_templates={inputs.tp: _runner_template(inputs)},
         rule_pack_digest=rule_pack_identity()["digest"],
+        create_envs={SOURCE_REPO_ENV: inputs.source_repo, SOURCE_SHA_ENV: inputs.source_sha},
         archive=session_archive(options.archive, directory),
         max_parallel_tests=parallel,
         poll_interval_sec=options.poll_interval_sec,

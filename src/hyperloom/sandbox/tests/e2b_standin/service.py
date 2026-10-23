@@ -5,7 +5,8 @@
 
 It answers what the E2B SDK asks of the control plane, with the behaviour the design gives the Claw sandbox service
 that a stand-in can honestly reproduce: a key is one role and sees only the sandboxes it made; a role may use only
-its own templates; a sealed template takes no caller environment; a ``agent-sandbox.io/idempotency-key`` makes a repeated create
+its own templates; a create may pass only the environment names its template accepts (``accepted_envs``, none for a
+sealed template that lists none: 403 ``env_not_allowed``); a ``agent-sandbox.io/idempotency-key`` makes a repeated create
 return the live sandbox, and refuses it with 410 once that sandbox has ended; the number of live sandboxes of a role is
 capped (429 ``grant_quota_exceeded``); a sandbox ends at its timeout. It does not enforce the sealed path policy, sign
 anything or write platform metadata: those belong to the real service.
@@ -16,7 +17,7 @@ from __future__ import annotations
 import secrets
 import threading
 import time
-from collections.abc import Mapping
+from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
@@ -43,10 +44,14 @@ class StandInTemplate:
     Attributes:
         name: The template name callers pass (it is also the template ID).
         role: The only role whose key may create it.
-        sealed: Callers may not pass environment variables. The sealed path policy itself is not enforced.
+        sealed: A sealed template accepts no caller environment unless ``accepted_envs`` lists it. The sealed path policy
+            itself is not enforced.
         start: Command started inside the sandbox when it is created (empty: none).
         binds: Host directories the sandbox sees read-only, for what ``start`` needs (an interpreter, a source tree).
         envs: Fixed environment of the start command.
+        accepted_envs: The environment names a create may pass (the design's ``accepted_envs``). ``None`` is the default
+            of the kind of template: none for a sealed one, any for an open one; a collection, even an empty one, is
+            exactly the names allowed.
     """
 
     name: str
@@ -55,6 +60,14 @@ class StandInTemplate:
     start: tuple[str, ...] = ()
     binds: tuple[str, ...] = ()
     envs: Mapping[str, str] = field(default_factory=dict)
+    accepted_envs: Collection[str] | None = None
+
+    def refused_envs(self, names: Iterable[str]) -> list[str]:
+        """The names of ``names`` that a create of this template may not pass, sorted."""
+        if self.accepted_envs is None and not self.sealed:
+            return []
+        allowed = self.accepted_envs or ()
+        return sorted(name for name in names if name not in allowed)
 
 
 @dataclass
@@ -173,7 +186,7 @@ class ControlPlane:
         """Create a sandbox, or return the live one this role's idempotency key already made.
 
         Raises:
-            ServiceError: 403 for a template the role may not use or environment a sealed template refuses, 410 for an
+            ServiceError: 403 for a template the role may not use or environment names it does not accept, 410 for an
                 idempotency key whose sandbox has ended, 429 over the role's cap, 500 when envd does not start, or the
                 injected failure.
         """
@@ -182,8 +195,9 @@ class ControlPlane:
         if template is None or template.role != role:
             raise ServiceError(403, f"template {body.get('templateID')!r} is not allowed for this key")
         envs = _strings(body.get("envVars"))
-        if envs and template.sealed:
-            raise ServiceError(403, "a sealed template does not accept caller environment variables")
+        refused = template.refused_envs(envs)
+        if refused:
+            raise ServiceError(403, f"env_not_allowed: template {template.name!r} does not accept {', '.join(refused)}")
         metadata = _strings(body.get("metadata"))
         key = (role, metadata[IDEMPOTENCY_KEY]) if IDEMPOTENCY_KEY in metadata else None
         box, earlier = self._reserve(role, template, metadata, _seconds(body.get("timeout")), key)

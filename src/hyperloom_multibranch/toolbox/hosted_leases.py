@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
 
-from hyperloom.measure.sandboxes import BRANCH_ID_KEY, PURPOSE_KEY
+from hyperloom.measure.sandboxes import BRANCH_ID_KEY, PURPOSE_KEY, RUN_ID_KEY
 from hyperloom.sandbox.socket import (
     IDEMPOTENCY_KEY,
     CreateOptions,
@@ -52,7 +52,6 @@ DEV_ROLE: Role = "dev"
 #: The value of ``hyperloom.purpose`` on a lease's sandbox, which with the run's id (``hyperloom.run-id``) is how the
 #: sandboxes of this run's leases are found again.
 LEASE_PURPOSE = "dev-lease"
-RUN_ID_KEY = "hyperloom.run-id"
 DEFAULT_LEASE_LIFETIME_SEC = 3600
 _CLOSING = "the toolbox is closing"
 _CARDS_SUFFIX = re.compile(r"-g(\d+)$")
