@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom.measure.compile import PackageBase
+from hyperloom_multibranch.contracts.toolbox import BranchLease
 from hyperloom_multibranch.specialist.agent_onboarding import AgentSpec
 from hyperloom_multibranch.specialist.agent_sessions import AgentSessions, with_agents
 from hyperloom_multibranch.specialist.autonomous_session import AutonomousSession
@@ -44,13 +45,13 @@ def test_a_branch_s_sessions_and_its_worktree_tools_share_one_worktree_on_one_so
     assert built().worktrees("s1").path == worktree.path
 
 
-def _agent_sessions(cards: tuple[int, ...]) -> AgentSessions:
+def _agent_sessions() -> AgentSessions:
     spec = AgentSpec("/models/m", "vllm", 1, "bf16", "mi355x", {}, "output_throughput", "", {}, "", (), 3600.0, 31100)
     command = AgentCommand("claude", "claude", model="claude-opus-5-5")
-    return AgentSessions(spec, cards, command, {}, object(), object(), object())
+    return AgentSessions(spec, command, {}, object(), object(), object())
 
 
-def test_a_branch_whose_task_names_an_agent_runs_it_on_cards_and_ports_of_its_own(tmp_path):
+def test_a_branch_whose_task_names_an_agent_runs_it_on_ports_of_its_own_in_the_sandbox_it_leases(tmp_path):
     package = tmp_path / "site-packages" / "vllm"
     package.mkdir(parents=True)
     (package / "config.py").write_bytes(b"max_num_seqs = 128\n")
@@ -65,7 +66,7 @@ def test_a_branch_whose_task_names_an_agent_runs_it_on_cards_and_ports_of_its_ow
         return object()
 
     sessions = model_sessions(setup, base=base, components=("vllm",), branch_dir=branch_dir, notebook_for=notebook_for)
-    built = with_agents(sessions, _agent_sessions((6, 7)), branch_dir=branch_dir, notebook_for=notebook_for)
+    built = with_agents(sessions, _agent_sessions(), branch_dir=branch_dir, notebook_for=notebook_for)
     first, second, third = (
         built.factory(SessionStart(branch, "c0", 1, BranchTask(agent="https://example.com/agent.git")))
         for branch in ("a1", "a2", "a3")
@@ -74,7 +75,11 @@ def test_a_branch_whose_task_names_an_agent_runs_it_on_cards_and_ports_of_its_ow
 
     assert all(isinstance(session, AutonomousSession) for session in (first, second, third))
     specs = [session._setup.spec for session in (first, second, third, again)]
-    assert [(spec.cards, spec.port) for spec in specs] == [((6,), 31100), ((7,), 31110), ((), 31120), ((6,), 31100)]
+    assert [spec.port for spec in specs] == [31100, 31110, 31120, 31100]
+    lease = BranchLease("lease-1", "a1", (6,), tmp_path / "lease-1", {"SGLANG_USE_AITER": "1"}, 1)
+    sandbox = first._setup.sandbox(lease)
+    assert (sandbox.cards, sandbox.root) == ((6,), lease.root)
+    assert sandbox.env({})["SGLANG_USE_AITER"] == "1"
     assert isinstance(built.factory(SessionStart("s1", "c0", 1, BranchTask("leads"))), AgentSession)
     with pytest.raises(ValueError, match="no specialist stands for"):
         sessions.factory(SessionStart("a1", "c0", 1, BranchTask(agent="https://example.com/agent.git")))

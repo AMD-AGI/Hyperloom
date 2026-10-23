@@ -3,8 +3,9 @@
 
 """A branch driven by a third-party agent that optimizes end to end by its own logic: an autonomous branch.
 
-The preflight makes the agent ready (:mod:`agent_onboarding`) and keeps its manifest in the branch's session
-directory, so a run after a crash resumes it without onboarding again. A run then watches the agent's keep signal and
+The preflight leases the branch's sandbox, its own cards, from the toolbox, makes the agent ready in it
+(:mod:`agent_onboarding`) and keeps the lease and the manifest in the branch's session directory, so a run after a
+crash resumes the agent in the same sandbox without onboarding again; the lease goes back when the branch stops. A run then watches the agent's keep signal and
 reads each keep whole (:mod:`agent_import`) the moment it shows, since the agent goes on to its next candidate in the
 same workspace. Keeps are submitted as claimless explore tests against the branch head, one at a time: a keep that
 lands while an import is measured or judged waits, and a later keep replaces it, since each is cumulative. What the run
@@ -24,6 +25,7 @@ import time
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest
 from hyperloom.contracts.recipe import LaunchConfig, RecipeDelta, RecipeError
@@ -31,7 +33,7 @@ from hyperloom.measure.compile import COMPONENT_LAYOUTS, locate_installed_packag
 from hyperloom_multibranch.contracts.branch_log import BranchLogEntry, BranchLogType
 from hyperloom_multibranch.contracts.notebook.records import TestRecord
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
-from hyperloom_multibranch.contracts.toolbox import Backpressure, RequestRejected, Toolbox
+from hyperloom_multibranch.contracts.toolbox import Backpressure, BranchLease, RequestRejected
 from hyperloom_multibranch.specialist.agent_import import (
     KeptChange,
     KeptChangeError,
@@ -42,6 +44,7 @@ from hyperloom_multibranch.specialist.agent_import import (
 from hyperloom_multibranch.specialist.agent_manifest import AgentManifest, read_field
 from hyperloom_multibranch.specialist.agent_onboarding import (
     AgentProcess,
+    AgentSandbox,
     ENCODING,
     SOURCE_DIR,
     AgentSpec,
@@ -56,9 +59,13 @@ from hyperloom_multibranch.specialist.runtime import PreflightFailed, SessionCra
 from hyperloom_multibranch.specialist.tools import sync_to_head
 from hyperloom_multibranch.specialist.worktree import Upstream, WorktreeError, installed_upstream
 
+if TYPE_CHECKING:
+    from hyperloom_multibranch.toolbox.toolbox import RealToolbox
+
 log = logging.getLogger(__name__)
 
 MANIFEST_FILE = "agent-manifest.json"
+LEASE_FILE = "agent-lease.json"
 #: What a run knows of the agent's keeps (:class:`KeepWatch`), so the run after a crash goes on from it.
 WATCH_FILE = "agent-watch.json"
 AGENT_DIR = "agent"
@@ -76,13 +83,15 @@ def installed_component_upstream(component: str) -> Upstream | None:
 
 @dataclass(frozen=True)
 class AutonomousSetup:
-    """What an autonomous branch runs on: how its agent is made ready, the spec it is given (its root's server
-    arguments and environment and its workspace are filled in at the preflight), what imports are submitted through
-    and read against, and ``component``, the framework the agent edits."""
+    """What an autonomous branch runs on: how its agent is made ready in a sandbox, the sandbox a lease of the
+    toolbox's cards gives, the spec it is given (its cards, its root's server arguments and environment and its
+    workspace are filled in at the preflight), the toolbox the sandbox is leased from and imports are submitted to,
+    the repository they are read against, and ``component``, the framework the agent edits."""
 
-    onboarding: OnboardingSetup
+    onboarding: Callable[[AgentSandbox], OnboardingSetup]
+    sandbox: Callable[[BranchLease], AgentSandbox]
     spec: AgentSpec
-    toolbox: Toolbox
+    toolbox: RealToolbox
     repo: ExperimentRepo
     component: str
     poll_seconds: float = 5.0
@@ -150,9 +159,10 @@ class AutonomousSession:
         launch = (await self._setup.repo.read_recipe(self._start.start_commit)).launch
         workspace = str(self._place.worktree.path)
         spec = replace(self._setup.spec, server_args=launch.server_args, envs=dict(launch.envs), workspace=workspace)
-        if not spec.cards:
-            raise PreflightFailed(["no GPU is left for the agent: every card the agents may lease is taken"])
-        ready = await make_ready(self._start.task.agent, spec, self._agent_dir, self._setup.onboarding)
+        lease = await self._lease(spec.tp)
+        spec = replace(spec, cards=lease.gpu_ids)
+        onboarding = self._setup.onboarding(self._setup.sandbox(lease))
+        ready = await make_ready(self._start.task.agent, spec, self._agent_dir, onboarding)
         self._manifest, self._process = ready.manifest, ready.process
         (self._place.workspace / MANIFEST_FILE).write_text(json.dumps(ready.manifest.to_document()), encoding=ENCODING)
         KeepWatch(root, mark=self._mark(ready.manifest)).save(self._place.workspace / WATCH_FILE)
@@ -175,7 +185,10 @@ class AutonomousSession:
         """An autonomous branch measures one import at a time, whatever K the branch has."""
 
     async def release(self) -> None:
-        """Nothing held across runs yet."""
+        """Give the branch's sandbox lease back, when its preflight took one."""
+
+        if (self._place.workspace / LEASE_FILE).exists():
+            await self._setup.toolbox.release_branch_sandbox(self._held().lease_id)
 
     async def stop(self) -> None:
         self._stopped.set()
@@ -190,11 +203,33 @@ class AutonomousSession:
         document = json.loads((self._place.workspace / MANIFEST_FILE).read_text(encoding=ENCODING))
         manifest = AgentManifest.read(document)
         command = manifest.resume or manifest.launch
-        sandbox = self._setup.onboarding.sandbox
+        sandbox = self._setup.sandbox(self._held())
         process = await sandbox.start(command, self._agent_dir / SOURCE_DIR, agent_env(self._agent_dir))
         self._manifest, self._process = manifest, process
         await self._note(f"the agent resumed with `{command}`")
         return manifest, process
+
+    async def _lease(self, cards: int) -> BranchLease:
+        """Lease ``cards`` for the branch's sandbox and keep the lease for :meth:`release` and a later run."""
+
+        try:
+            lease = await self._setup.toolbox.lease_branch_sandbox(self._start.branch, cards)
+        except RequestRejected as error:
+            raise PreflightFailed([f"the toolbox leased no cards for the agent's sandbox: {error}"]) from error
+        document = {
+            "lease_id": lease.lease_id,
+            "branch_id": lease.branch_id,
+            "gpu_ids": list(lease.gpu_ids),
+            "root": str(lease.root),
+            "env": dict(lease.env),
+            "remaining_cards": lease.remaining_cards,
+        }
+        (self._place.workspace / LEASE_FILE).write_text(json.dumps(document), encoding=ENCODING)
+        return lease
+
+    def _held(self) -> BranchLease:
+        document = json.loads((self._place.workspace / LEASE_FILE).read_text(encoding=ENCODING))
+        return BranchLease(**{**document, "gpu_ids": tuple(document["gpu_ids"]), "root": Path(document["root"])})
 
     async def _ended(self, manifest: AgentManifest, process: AgentProcess, watch: KeepWatch) -> None:
         """End the run of an agent that exited: a crash when it failed, else once what it kept last settled."""
@@ -375,6 +410,7 @@ def _json(path: Path) -> object:
 
 __all__ = [
     "AGENT_DIR",
+    "LEASE_FILE",
     "MANIFEST_FILE",
     "SETTLE_SECONDS",
     "WATCH_FILE",

@@ -17,7 +17,7 @@ from hyperloom.contracts.measurement import TestRequest
 from hyperloom.contracts.recipe import ComponentPatches, LaunchConfig, Recipe
 from hyperloom.measure.compile import LocalBlobStore
 from hyperloom_multibranch.contracts.lifecycle import BranchTask
-from hyperloom_multibranch.contracts.toolbox import Backpressure, RequestRejected
+from hyperloom_multibranch.contracts.toolbox import Backpressure, BranchLease, RequestRejected
 from hyperloom_multibranch.contracts.notebook import Role, Writer
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.tests.factories import result
@@ -108,7 +108,7 @@ class LocalSandbox:
     """Runs commands as local processes, each in a process group of its own."""
 
     def __init__(self, logs: Path) -> None:
-        self._logs, self.started, self.envs = logs, [], []
+        self._logs, self.started, self.envs, self.leases = logs, [], [], []
 
     async def run(self, command: str, cwd: Path, env: Mapping[str, str], timeout: float) -> CommandResult:
         done = subprocess.run(command, shell=True, cwd=cwd, env={**os.environ, **env}, capture_output=True, text=True)
@@ -137,6 +137,19 @@ class Toolbox:
     def __init__(self, notebook: LocalNotebook) -> None:
         self._notebook, self.requests, self.refusals = notebook, [], []
         self.refused_envs: set[str] = set()
+        self.leases: list[tuple[str, int]] = []
+        self.released: list[str] = []
+        self.cards_left = 1
+
+    async def lease_branch_sandbox(self, branch_id: str, cards: int) -> BranchLease:
+        if self.cards_left < cards:
+            raise RequestRejected("leasing would leave no card to measure on", "lease_leaves_no_measurement")
+        self.leases.append((branch_id, cards))
+        root = self._notebook.root.parent / "lease"
+        return BranchLease(f"L{len(self.leases)}", branch_id, (3,), root, {"HIP_VISIBLE_DEVICES": "3"}, 1)
+
+    async def release_branch_sandbox(self, lease_id: str) -> None:
+        self.released.append(lease_id)
 
     async def submit_test(self, request: TestRequest) -> str:
         if self.refusals:
@@ -208,9 +221,7 @@ class Rig:
         return self.blobs.get(change.add_patches[0].sha256).decode()
 
 
-async def _rig(
-    tmp_path: Path, agent: Agent = Agent(), *, poll: float = 0.05, clock=time.time, cards: tuple[int, ...] = (0,)
-) -> Rig:
+async def _rig(tmp_path: Path, agent: Agent = Agent(), *, poll: float = 0.05, clock=time.time) -> Rig:
     rig = await branch_rig(tmp_path, ROOT, BRANCH)
     toolbox_notebook = LocalNotebook(tmp_path / "notebook", Writer(Role.TOOLBOX, "toolbox"))
     worktree = rig.base.worktree(BRANCH, tmp_path / BRANCH / "agent-workspace")
@@ -219,10 +230,16 @@ async def _rig(
     async def onboard(checkout: Path, prompt: str) -> str:
         return _manifest(str(worktree.path), agent)
 
-    onboarding = OnboardingSetup(sandbox, onboard, start_seconds=5.0, poll_seconds=0.05)
-    spec = AgentSpec("/models/m", "vllm", 1, "fp8", "mi355x", {}, "output_throughput", "", {}, "", cards, 60.0, 31100)
+    def onboarding(agent_sandbox) -> OnboardingSetup:
+        return OnboardingSetup(agent_sandbox, onboard, start_seconds=5.0, poll_seconds=0.05)
+
+    def sandbox_for(lease: BranchLease) -> LocalSandbox:
+        sandbox.leases.append(lease)
+        return sandbox
+
+    spec = AgentSpec("/models/m", "vllm", 1, "fp8", "mi355x", {}, "output_throughput", "", {}, "", (), 60.0, 31100)
     setup = AutonomousSetup(
-        onboarding, spec, toolbox, rig.repo, "vllm", poll_seconds=poll, settle_seconds=0.3, clock=clock
+        onboarding, sandbox_for, spec, toolbox, rig.repo, "vllm", poll_seconds=poll, settle_seconds=0.3, clock=clock
     )
     place = BranchPlace(worktree, rig.notebook, tmp_path / BRANCH / "session")
     place.workspace.mkdir(parents=True)
@@ -366,13 +383,35 @@ def test_only_the_file_the_agent_keeps_its_config_in_leaves_the_source_patch() -
     assert without_file("".join(sections), manifest) == sections[1]
 
 
-async def test_an_agent_with_no_card_left_fails_its_preflight_before_it_is_fetched(tmp_path: Path) -> None:
-    rig = await _rig(tmp_path, cards=())
+async def test_an_agent_runs_on_a_lease_taken_once_for_its_branch_and_given_back_once(tmp_path: Path) -> None:
+    rig = await _rig(tmp_path, Agent(exit=3, resume="sleep 30"))
 
-    with pytest.raises(PreflightFailed, match="no GPU is left"):
+    await rig.session.preflight()
+    with pytest.raises(SessionCrashed):
+        await asyncio.wait_for(rig.session.run(), 10)
+    await rig.session.stop()
+    resumed = rig.restart()
+    running = asyncio.create_task(resumed.run())
+    await _until(lambda: len(rig.sandbox.started) == 2, "the resumed agent")
+    await resumed.stop()
+    await asyncio.wait_for(running, 10)
+    await resumed.release()
+    await resumed.release()
+
+    assert rig.toolbox.leases == [(BRANCH, 1)]
+    assert [lease.gpu_ids for lease in rig.sandbox.leases] == [(3,), (3,)]
+    assert rig.toolbox.released == ["L1", "L1"]
+
+
+async def test_an_agent_whose_lease_would_leave_no_card_to_measure_fails_its_preflight(tmp_path: Path) -> None:
+    rig = await _rig(tmp_path)
+    rig.toolbox.cards_left = 0
+
+    with pytest.raises(PreflightFailed, match="lease_leaves_no_measurement"):
         await rig.session.preflight()
+    await rig.session.release()
 
-    assert not rig.sandbox.started
+    assert not rig.sandbox.started and rig.toolbox.released == []
 
 
 async def test_a_keep_the_toolbox_refuses_is_noted_and_one_it_has_no_room_for_waits(tmp_path: Path) -> None:

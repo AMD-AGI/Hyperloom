@@ -491,7 +491,6 @@ def model_backed_sessions(command: AgentCommand, agent_cards: tuple[int, ...] = 
         )
         agents = AgentSessions(
             _agent_spec(workload),
-            agent_cards,
             command,
             agent.env,
             wiring.toolbox,
