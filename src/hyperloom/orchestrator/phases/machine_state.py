@@ -629,7 +629,7 @@ CONTROLLER_TERMINAL_STATUSES: frozenset[str] = frozenset(
 )
 
 
-def _controller_phase_terminal(state: Any) -> bool:
+def kernel_controller_settled(state: Any) -> bool:
     """Return true when this macro cycle's rewrite controller has stopped."""
     if str(state.kernel_optimizer or "").strip().lower() != "forge":
         return False
@@ -682,7 +682,7 @@ def kernel_work_pending(state: Any) -> bool:
     if state.has_keep_pending_integrate:
         return True
 
-    if _controller_phase_terminal(state) or _geak_phase_terminal(state):
+    if kernel_controller_settled(state) or _geak_phase_terminal(state):
         return False
 
     return bool(state.untried_hot_reusable_kernels())
@@ -2022,6 +2022,7 @@ __all__ = [
     "session_usable_seconds",
     "render_phase_action_bullets",
     "compute_kernel_progress_fingerprint",
+    "kernel_controller_settled",
     "kernel_work_pending",
     "make_history_row",
     "normalize_budget_pct",

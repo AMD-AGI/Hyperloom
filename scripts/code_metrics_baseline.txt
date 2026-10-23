@@ -742,7 +742,7 @@ module-lines src/hyperloom/orchestrator/knowledge/recipe_journal.py 1671
 module-lines src/hyperloom/orchestrator/loop/coordinator.py 1423
 module-lines src/hyperloom/orchestrator/loop/dispatcher.py 1503
 module-lines src/hyperloom/orchestrator/loop/intent_router.py 1409
-module-lines src/hyperloom/orchestrator/loop/writeback.py 4728
+module-lines src/hyperloom/orchestrator/loop/writeback.py 4720
 module-lines src/hyperloom/orchestrator/phases/framework.py 3139
 module-lines src/hyperloom/orchestrator/phases/kernel.py 4227
 module-lines src/hyperloom/orchestrator/phases/machine_state.py 2030

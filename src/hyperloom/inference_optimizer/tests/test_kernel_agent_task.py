@@ -196,6 +196,58 @@ async def test_resumed_entry_reuses_a_live_task_and_replaces_a_settled_one(coord
     assert requeued[0].params["from_phase"] == "resume"
 
 
+async def _next_leg(coord):
+    """Stop ``coord`` and reopen its session the way a restarted run does."""
+    from hyperloom.orchestrator.loop.coordinator import Coordinator
+    from hyperloom.orchestrator.roles import MockBackend, MockCriticBackend, ScriptedPlan
+
+    coord.shared_state.save(coord.session_dir)
+    await coord.stop()
+    leg = Coordinator(
+        coord.session_dir,
+        backends={
+            "orchestration": MockBackend(ScriptedPlan(turns=[]), name="orchestration"),
+            "critic": MockCriticBackend(),
+        },
+    )
+
+    async def _noop(*_args, **_kwargs):
+        return None
+
+    leg.phase_internal.maybe_enqueue_explore_research_scout = _noop  # type: ignore[method-assign]
+    leg.specialist_dispatch.maybe_force_stalled_domain_specialist = _noop  # type: ignore[method-assign]
+    leg.phase_internal.maybe_enqueue_trajectory_reviewer = _noop  # type: ignore[method-assign]
+    return leg
+
+
+@pytest.mark.asyncio
+async def test_a_leg_resumed_mid_forge_round_requeues_the_kernel_agent_and_stays_in_kernel(coord):
+    # The dead leg's kernel_agent is reaped on resume; without a replacement the next tick reads KERNEL as settled.
+    _arm_kernel_phase(coord.shared_state)
+    coord.shared_state.kernel_optimizer = "forge"
+    leg = await _next_leg(coord)
+    try:
+        assert leg.writeback.resumed_from["is_resume"] is True
+        await leg.writeback.replay_resume_if_needed()
+        assert [t.kind for t in await leg.tasks.queued() if t.kind == "kernel_agent"] == ["kernel_agent"]
+        await leg.phase_machine.advance_phase_if_needed()
+        assert leg.shared_state.phase == ps.PHASE_KERNEL_AGENT
+    finally:
+        await leg.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_leg_resumed_after_the_forge_round_settled_queues_no_new_round(coord):
+    _arm_kernel_phase(coord.shared_state)
+    _arm_terminal_controller(coord.shared_state)
+    leg = await _next_leg(coord)
+    try:
+        await leg.writeback.replay_resume_if_needed()
+        assert not [t for t in await leg.tasks.queued() if t.kind == "kernel_agent"]
+    finally:
+        await leg.stop()
+
+
 @pytest.mark.asyncio
 async def test_the_pump_returns_while_the_kernel_agent_task_runs(coord):
     """A pump that joined the phase's whole pipeline would freeze every tick until it returned."""
