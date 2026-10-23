@@ -13,7 +13,7 @@
 #   kernel_table  reserved: no rule reads one yet, so a pack that holds one is refused
 # Every entry names its project, says why the fact exists and carries examples. A pack that fails its own examples, or
 # lacks an entry the code reads, is refused when it is loaded; nothing falls back to a default.
-version: "1"
+version: "2"
 facts:
   aiter_merged_view:
     kind: names
@@ -241,6 +241,7 @@ facts:
       env: AITER_LOG_TUNED_CONFIG
     examples:
       - "hyperloom_multibranch.toolbox.table_hits: a table is called not exercised only when a server with this variable set logged no hit in its rows"
+      - "hyperloom_multibranch.toolbox.planner: every point it plans launches its server with this variable at 1, a baseline's and a candidate's alike"
 
   aiter_tuned_hit:
     kind: log_regex
