@@ -212,10 +212,16 @@ def bind_source_evidence(config_path: Path, patches: list[dict[str, Any]]) -> No
 
 
 def enable_profile(config_path: Path) -> None:
-    """Derive the diagnostic run without modifying the accepted YAML."""
+    """Derive the diagnostic run without modifying the accepted YAML.
+
+    The roofline reads framework step annotations, per-op input shapes and the
+    CUDA-graph capture traces. Magpie arms all three only under
+    ``detailed_annotations``, and fails the run when the runtime cannot provide them.
+    """
     config = yaml.safe_load(config_path.read_text(encoding=_ENCODING))
     profile = config["benchmark"].setdefault("profiler", {}).setdefault("torch_profiler", {})
     profile["enabled"] = True
+    profile.setdefault("detailed_annotations", True)
     config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding=_ENCODING)
 
 
