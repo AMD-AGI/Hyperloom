@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom.contracts.measurement import TestRequest
-from hyperloom.contracts.recipe import ComponentPatches, LaunchConfig, Recipe
+from hyperloom.contracts.recipe import ComponentPatches, KernelArtifact, KernelKind, LaunchConfig, Recipe
 from hyperloom.measure.compile import LocalBlobStore
 from hyperloom_multibranch.contracts.lifecycle import BranchTask
 from hyperloom_multibranch.contracts.toolbox import Backpressure, BranchLease, RequestRejected
@@ -35,6 +35,7 @@ from hyperloom_multibranch.specialist.agent_spend import AgentSpend, transcript_
 from hyperloom_multibranch.specialist.judging import NOTICE
 from hyperloom_multibranch.specialist.runtime import PreflightFailed, SessionCrashed, SessionFinished, SessionStart
 from hyperloom_multibranch.tests.branch_rig import branch_rig
+from hyperloom_multibranch.toolbox.kernel_artifacts import KernelVariables
 
 BRANCH = "a1"
 ROOT = Recipe(
@@ -45,7 +46,7 @@ ROOT = Recipe(
 
 #: An agent that, every ``gap`` seconds, writes each of ``keeps`` to its workspace's config.py and to the config it
 #: runs with, commits it when ``commits`` is set, as Arbor does, and records the keep; it ends with ``exit`` after
-#: ``tail`` more seconds.
+#: ``tail`` more seconds. With ``table`` it also writes that kernel table, for the keep, to its workspace's tuned.csv.
 AGENT = """
 import json, pathlib, subprocess, sys, time
 config = json.loads(pathlib.Path("campaign.json").read_text())
@@ -57,6 +58,8 @@ for step, seqs in enumerate(config["keeps"], start=1):
     time.sleep(config["gap"])
     (workspace / "vllm" / "config.py").write_text(f"max_num_seqs = {seqs}\\n")
     (workspace / "agent-config.json").write_text(json.dumps({"args": config["args"].format(seqs=seqs), "envs": config["envs"]}))
+    if config["table"]:
+        (workspace / "tuned.csv").write_text(config["table"].format(seqs=seqs))
     if config["commits"]:
         subprocess.run("git add -A && git -c user.name=a -c user.email=a@a commit -qm k", shell=True, cwd=workspace)
     state.write_text(json.dumps({"keeps": [{"decision": "KEEP"}] * step, "note": f"seqs {seqs}"}))
@@ -79,6 +82,7 @@ class Agent:
     keep: object = field(default_factory=lambda: KEEPS)
     config_source: object = None
     resume: str = ""
+    table: str = ""
 
 
 async def _until(condition, what: str, seconds: float = 10.0) -> None:
@@ -143,6 +147,13 @@ class Toolbox:
         self.leases: list[tuple[str, int]] = []
         self.released: list[str] = []
         self.cards_left = 1
+        self.tables: dict[str, bytes] = {}
+        self._variables = KernelVariables()
+
+    async def put_kernel_artifact(self, kind: KernelKind, target: str | None, env: str, data: bytes) -> KernelArtifact:
+        artifact = self._variables.put(kind, target, env, data)
+        self.tables[artifact.sha256] = data
+        return artifact
 
     async def lease_branch_sandbox(self, branch_id: str, cards: int) -> BranchLease:
         if self.cards_left < cards:
@@ -196,6 +207,7 @@ def _manifest(workspace: str, agent: Agent) -> str:
                 "commits": agent.commits,
                 "args": agent.args,
                 "envs": agent.envs,
+                "table": agent.table,
                 **plan,
             },
             "launch": "python3 agent.py",
@@ -576,3 +588,29 @@ async def test_a_keep_whose_launch_the_toolbox_refuses_is_imported_without_it_an
     assert len(refused) == 1 and "imported without SGLANG_USE_AITER" in refused[0]
     await rig.session.stop()
     await asyncio.wait_for(running, 10)
+
+
+@pytest.mark.parametrize("bound", ["gemm_a8w8", None], ids=["bound", "unbound"])
+async def test_a_kernel_table_the_agent_keeps_in_its_workspace_is_imported_as_the_session_s_artifact(
+    tmp_path: Path, bound: str | None
+) -> None:
+    env = "AITER_CONFIG_GEMM_A8W8"
+    table = str(tmp_path / BRANCH / "agent-workspace" / "tuned.csv")
+    agent = Agent(keeps=(256,), envs={env: table}, table="M,N,K\n{seqs},5120,5120\n", config_source=CONFIG_SOURCE)
+    rig = await _rig(tmp_path, agent)
+    if bound:
+        await rig.toolbox.put_kernel_artifact(KernelKind.GEMM, bound, env, b"M,N,K\n1,1,1\n")
+
+    await rig.session.preflight()
+    running = asyncio.create_task(rig.session.run())
+    await _until(lambda: rig.toolbox.requests, "the import")
+    Path(table).write_text("rewritten after the keep\n", encoding="utf-8")
+    await rig.toolbox_notebook.write_result(result("r1"))
+    with pytest.raises(SessionFinished):
+        await asyncio.wait_for(running, 10)
+
+    [request] = rig.toolbox.requests
+    [artifact] = request.delta.add_kernels
+    assert artifact.target == (bound or env.lower())
+    assert rig.toolbox.tables[artifact.sha256] == b"M,N,K\n256,5120,5120\n"
+    assert env not in request.delta.config.envs

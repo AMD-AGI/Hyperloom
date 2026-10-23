@@ -2,8 +2,17 @@
 # SPDX-License-Identifier: MIT
 
 import hashlib
+from pathlib import Path
 
-from hyperloom.contracts.recipe import ComponentPatches, LaunchConfig, PatchRef, Recipe, apply
+from hyperloom.contracts.recipe import (
+    ComponentPatches,
+    KernelArtifact,
+    KernelKind,
+    LaunchConfig,
+    PatchRef,
+    Recipe,
+    apply,
+)
 import pytest
 
 from hyperloom_multibranch.specialist.agent_import import (
@@ -12,6 +21,7 @@ from hyperloom_multibranch.specialist.agent_import import (
     added_at,
     import_delta,
     read_kept_change,
+    with_tables,
 )
 from hyperloom_multibranch.specialist.agent_manifest import ConfigSource
 from hyperloom_multibranch.specialist.worktree import Upstream
@@ -132,3 +142,69 @@ async def test_a_keep_of_a_component_new_on_the_head_names_the_upstream_its_pack
     assert (change.upstream_repo, change.upstream_ref) == (SGLANG, "2" * 40)
     [made] = apply(bare, delta).components
     assert (made.upstream_repo, made.upstream_ref) == (SGLANG, "2" * 40)
+
+
+TABLE_ENV = "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE"
+
+
+def _artifact(text: str, target: str = "gemm_a8w8") -> KernelArtifact:
+    sha256 = hashlib.sha256(text.encode()).hexdigest()
+    load = {"load": {"via": "env_file", "env": TABLE_ENV}}
+    return KernelArtifact(KernelKind.GEMM, target, f"kernel/gemm/{target}/{sha256}.csv", sha256, load)
+
+
+def test_a_keep_carries_the_text_of_each_table_file_of_the_agent_s_own_as_it_was_at_the_keep(tmp_path: Path) -> None:
+    owned = tmp_path / "worktree"
+    (owned / "configs").mkdir(parents=True)
+    table = owned / "configs" / "tuned.csv"
+    table.write_text("M,N,K\n64,5120,5120\n", encoding="utf-8")
+    (tmp_path / "elsewhere.csv").write_text("M,N,K\n", encoding="utf-8")
+    envs = {
+        TABLE_ENV: str(table),
+        "AITER_CONFIG_GEMM_BF16": str(tmp_path / "elsewhere.csv"),
+        "AITER_CONFIG_FMOE": "configs/tuned.csv",
+        "SGLANG_TABLE": str(table),
+    }
+
+    kept = with_tables(_kept(1, "", envs=envs), owned)
+    table.write_text("rewritten after the keep\n", encoding="utf-8")
+
+    assert kept.tables == {str(table): "M,N,K\n64,5120,5120\n"}
+
+
+async def test_a_table_the_agent_keeps_in_its_workspace_is_imported_as_a_kernel_artifact_not_a_path() -> None:
+    path = "/branches/b01/worktree/tuned.csv"
+    head = Recipe(ROOT.base_image_digest, LaunchConfig(ROOT.launch.server_args, {**ROOT.launch.envs, TABLE_ENV: path}))
+    kept = _kept(1, "", envs={**ROOT.launch.envs, TABLE_ENV: path})
+    table = _artifact("rows\n")
+
+    delta = await import_delta(
+        kept, root=ROOT, head=head, component="sglang", store=Store(), artifacts={TABLE_ENV: table}
+    )
+
+    assert delta is not None
+    made = apply(head, delta)
+    assert made.kernels == (table,)
+    assert TABLE_ENV not in made.launch.envs
+
+
+async def test_a_later_table_replaces_the_imported_one_and_a_keep_without_it_drops_it() -> None:
+    first, second = _artifact("rows A\n"), _artifact("rows A+B\n")
+    envs = {**ROOT.launch.envs, TABLE_ENV: "/w/tuned.csv"}
+    imported = await import_delta(
+        _kept(1, "", envs=envs), root=ROOT, head=ROOT, component="sglang", store=Store(), artifacts={TABLE_ENV: first}
+    )
+    assert imported is not None
+    head = apply(ROOT, imported)
+
+    replaced = await import_delta(
+        _kept(2, "", envs=envs), root=ROOT, head=head, component="sglang", store=Store(), artifacts={TABLE_ENV: second}
+    )
+    dropped = await import_delta(_kept(3, ""), root=ROOT, head=head, component="sglang", store=Store())
+    same = await import_delta(
+        _kept(4, "", envs=envs), root=ROOT, head=head, component="sglang", store=Store(), artifacts={TABLE_ENV: first}
+    )
+
+    assert replaced is not None and apply(head, replaced).kernels == (second,)
+    assert dropped is not None and apply(head, dropped).kernels == ()
+    assert same is None
