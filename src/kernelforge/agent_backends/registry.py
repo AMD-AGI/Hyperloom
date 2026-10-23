@@ -113,7 +113,7 @@ def discover_agent_providers(*, force: bool = False) -> None:
         for found in iter_entry_point_objects(PROVIDER_ENTRY_POINT_GROUP):
             if found.error is not None:
                 _plugin_errors[found.name] = found.error
-                log.warning("failed to load Agent provider entry point %s: %s", found.name, found.error)
+                # The shared helper has already logged why it could not be loaded.
                 continue
             try:
                 provider = found.value
