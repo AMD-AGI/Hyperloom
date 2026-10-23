@@ -178,7 +178,7 @@ def test_optimize_resolves_the_plugs_before_any_session_is_opened_and_runs_the_c
     "bad", [("--plug", "warp=x"), ("--plug-profile", "no-such-profile"), ("--manifest", "/nonexistent/manifest.json")]
 )
 def test_a_refused_plug_flag_on_a_resume_leaves_the_session_byte_identical(
-    tmp_path: Path, monkeypatch, bad: tuple[str, str]
+    tmp_path: Path, monkeypatch, capsys, bad: tuple[str, str]
 ) -> None:
     """Each refused ``--resume-from ... --extend-hours`` used to grow the budget again and clear the stop reason."""
     from hyperloom.orchestrator.state.shared_state import SharedState
@@ -200,10 +200,11 @@ def test_a_refused_plug_flag_on_a_resume_leaves_the_session_byte_identical(
     with pytest.raises(SystemExit) as exc:
         asyncio.run(ocli._run_optimize(args))
     assert exc.value.code == 2
+    assert "plug configuration refused" in capsys.readouterr().err
     assert {p.name: p.read_bytes() for p in session.rglob("*") if p.is_file()} == before
 
 
-def test_a_refused_plug_flag_on_a_fresh_run_creates_no_session(tmp_path: Path, monkeypatch) -> None:
+def test_a_refused_plug_flag_on_a_fresh_run_creates_no_session(tmp_path: Path, monkeypatch, capsys) -> None:
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
 
     async def _must_not_open(*_a, **_kw):
@@ -213,4 +214,5 @@ def test_a_refused_plug_flag_on_a_fresh_run_creates_no_session(tmp_path: Path, m
     with pytest.raises(SystemExit) as exc:
         asyncio.run(ocli._run_optimize(_args("--plug", "warp=x")))
     assert exc.value.code == 2
+    assert "plug configuration refused" in capsys.readouterr().err
     assert list(tmp_path.iterdir()) == []
