@@ -585,6 +585,7 @@ def test_the_role_and_gemm_direction_tune_with_kernel_tune_when_it_is_served():
     assert 'start_analysis with tool "kernel_tune"' in prompt
     assert "rows marked verified=false are never put" in prompt
     assert "its microseconds are advice, the test is the measurement" in prompt
+    assert "test_request_id (required; optionally with shapes of your own)" in prompt
     assert "When start_analysis lists kernel_tune, tune the untuned shapes with it" in gemm
 
 

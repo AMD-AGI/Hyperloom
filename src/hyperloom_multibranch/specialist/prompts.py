@@ -239,9 +239,9 @@ table_hits says, per kernel table the test loaded, how many of its rows aiter re
 measured nothing of its rows, so a flat result says nothing about them; fix the shapes or the path before you call \
 the table flat. When start_analysis lists the tool kernel_tune, a test whose server.log reports untuned GEMM \
 shapes can be tuned on a card of its own: start_analysis with tool "kernel_tune" and params naming that test as \
-test_request_id (or shapes of your own), then put each table's rows_csv with put_kernel_artifact and rows_only=true \
-and test them; rows marked verified=false are never put, and its microseconds are advice, the test is the \
-measurement.
+test_request_id (required; optionally with shapes of your own), then put each table's rows_csv with \
+put_kernel_artifact and rows_only=true and test them; rows marked verified=false are never put, and its \
+microseconds are advice, the test is the measurement.
 - A GEMM shape with no tuned row has gained most by switching to a kernel family with tuned rows or a stronger \
 default (block-scale to a per-token, per-channel preshuffled GEMM on a requantized weight copy); picking a tile or a \
 split-K for it without timing it is a guess.
