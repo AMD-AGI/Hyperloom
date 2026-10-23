@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""``common/nofollow``: the app never follows a link a less-privileged process planted."""
+"""``common/fs_utils`` (no-follow I/O): the app never follows a link a less-privileged process planted."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.common.nofollow import (
+from hyperloom.common.fs_utils import (
     read_bytes_nofollow,
     read_text_nofollow,
     regular_files_nofollow,
@@ -98,7 +98,7 @@ def test_the_base_itself_may_be_reached_through_a_link(tmp_path: Path):
 
 
 def test_rewriting_lines_never_follows_a_planted_staging_name(tmp_path):
-    from hyperloom.common.nofollow import rewrite_lines_nofollow
+    from hyperloom.common.fs_utils import rewrite_lines_nofollow
 
     victim = tmp_path / "victim"
     victim.write_text("keep", encoding="utf-8")
@@ -113,7 +113,7 @@ def test_rewriting_lines_never_follows_a_planted_staging_name(tmp_path):
 
 
 def test_rewriting_an_unchanged_file_leaves_no_staging_file_and_follows_nothing(tmp_path):
-    from hyperloom.common.nofollow import rewrite_lines_nofollow
+    from hyperloom.common.fs_utils import rewrite_lines_nofollow
 
     victim = tmp_path / "victim"
     victim.write_text("keep", encoding="utf-8")
@@ -127,7 +127,7 @@ def test_rewriting_an_unchanged_file_leaves_no_staging_file_and_follows_nothing(
 
 @pytest.mark.parametrize("kind", ["symlink", "hardlink"])
 def test_rewriting_refuses_a_link_at_the_file_itself(tmp_path, kind):
-    from hyperloom.common.nofollow import rewrite_lines_nofollow
+    from hyperloom.common.fs_utils import rewrite_lines_nofollow
 
     victim = tmp_path / "victim"
     victim.write_text("secret\n", encoding="utf-8")
@@ -143,7 +143,7 @@ def test_rewriting_refuses_a_link_at_the_file_itself(tmp_path, kind):
 
 
 def test_creating_a_file_replaces_a_planted_link_and_never_writes_through_it(tmp_path):
-    from hyperloom.common.nofollow import create_nofollow
+    from hyperloom.common.fs_utils import create_nofollow
 
     victim = tmp_path / "victim"
     victim.write_text("keep", encoding="utf-8")
@@ -153,3 +153,33 @@ def test_creating_a_file_replaces_a_planted_link_and_never_writes_through_it(tmp
     assert victim.read_text(encoding="utf-8") == "keep"
     assert (tmp_path / "process.log").read_text(encoding="utf-8") == "new"
     assert not (tmp_path / "process.log").is_symlink()
+
+
+def test_appending_refuses_a_link_and_never_writes_through_it(tmp_path):
+    from hyperloom.common.fs_utils import append_text_nofollow
+
+    victim = tmp_path / "victim"
+    victim.write_text("keep", encoding="utf-8")
+    (tmp_path / "transcript.jsonl").symlink_to(victim)
+    with pytest.raises(OSError):
+        append_text_nofollow(tmp_path, ("transcript.jsonl",), "x\n")
+    assert victim.read_text(encoding="utf-8") == "keep"
+    (tmp_path / "ok.jsonl").write_text("a\n", encoding="utf-8")
+    append_text_nofollow(tmp_path, ("ok.jsonl",), "b\n")
+    assert (tmp_path / "ok.jsonl").read_text(encoding="utf-8") == "a\nb\n"
+
+
+def test_reading_below_a_base_refuses_a_swapped_directory_or_file(tmp_path):
+    from hyperloom.common.fs_utils import read_text_below_nofollow
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "f").write_text("secret", encoding="utf-8")
+    base = tmp_path / "base"
+    base.mkdir()
+    (base / "d").symlink_to(outside)
+    (base / "g").symlink_to(outside / "f")
+    with pytest.raises(OSError):
+        read_text_below_nofollow(base, ("d", "f"))
+    with pytest.raises(OSError):
+        read_text_below_nofollow(base, ("g",))

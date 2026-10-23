@@ -389,7 +389,6 @@ ignore_imports =
     hyperloom.orchestrator.specialists.selfcheck -> hyperloom.orchestrator.enablement.runtime.build_utils
     hyperloom.orchestrator.specialists.subprocess_ -> hyperloom.orchestrator.actions.cancel_channel
     hyperloom.orchestrator.specialists.subprocess_ -> hyperloom.orchestrator.actions.executors._ray_serving
-    hyperloom.orchestrator.specialists.subprocess_ -> hyperloom.orchestrator.bringup.trees
     hyperloom.orchestrator.specialists.subprocess_ -> hyperloom.orchestrator.loop.sub_agent_runner
     hyperloom.orchestrator.state._shared_state.phase_state -> hyperloom.orchestrator.specialists.domains
     hyperloom.orchestrator.state._shared_state.render -> hyperloom.orchestrator.actions.executors._proposal_identity

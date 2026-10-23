@@ -25,7 +25,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.nofollow import append_text_nofollow, write_text_nofollow
+from hyperloom.common.fs_utils import append_text_nofollow, write_text_nofollow
 from hyperloom.common.io import JsonFormat, WriteOptions, atomic_write_json
 from hyperloom.common.deadline import Deadline, seconds_until
 from hyperloom.common.env_safety import BENCHMARK_SECRET_ENV_NAMES, redact_secret_values
@@ -1355,7 +1355,6 @@ class SpecialistRunner:
         if path is None:
             return
         text = "<!-- system_prompt -->\n" + system + "\n<!-- user_prompt -->\n" + user + "\n"
-        # The workspace is shared with the specialist's account, which can leave a link at this name.
         write_text_nofollow(path.parent, (path.name,), text)
 
     def _append_transcript(

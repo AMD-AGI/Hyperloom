@@ -12,7 +12,7 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.nofollow import read_text_nofollow
+from hyperloom.common.fs_utils import read_text_nofollow
 from hyperloom.common.github_urls import repo_slug
 from hyperloom.inference_optimizer.framework_paths import (
     framework_apply_tree,

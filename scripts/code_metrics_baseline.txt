@@ -35,7 +35,7 @@ cognitive-complexity src/hyperloom/orchestrator/roles/claude.py::ClaudeBackend._
 cognitive-complexity src/hyperloom/orchestrator/specialists/agent_cli_config.py::_codex_mcp_config 36
 cognitive-complexity src/hyperloom/orchestrator/specialists/dispatch.py::SpecialistDispatchCollaborator.warm_specialist_params 93
 cognitive-complexity src/hyperloom/orchestrator/specialists/subprocess_.py::SpecialistSubprocessDispatcher._reap_loop 47
-cognitive-complexity src/hyperloom/orchestrator/specialists/subprocess_.py::SpecialistSubprocessDispatcher.run 77
+cognitive-complexity src/hyperloom/orchestrator/specialists/subprocess_.py::SpecialistSubprocessDispatcher.run 75
 cognitive-complexity src/hyperloom/orchestrator/trace_analysis/_analysis_reports.py::write_reports 61
 cognitive-complexity src/hyperloom/orchestrator/trace_analysis/_candidate_assembly.py::_apply_vendor_operator_playbook_grouping 31
 cognitive-complexity src/hyperloom/orchestrator/trace_analysis/_kernel_roofline.py::enrich_candidates_with_runtime_metadata 48
@@ -65,7 +65,7 @@ cyclomatic-complexity src/hyperloom/orchestrator/trace_analysis/tracelens_analys
 dead-code src/hyperloom/orchestrator/actions/executors/_grid_runner.py::SessionDirField.__get__:objtype 1
 dead-code src/kernelforge/loop/run_state.py::WorkspaceLock.__exit__:exc_value 1
 directory-entries src/hyperloom/common 57
-directory-entries src/hyperloom/orchestrator/actions/executors 83
+directory-entries src/hyperloom/orchestrator/actions/executors 84
 duplicated-lines src/hyperloom/inference_optimizer/breakdown/collectors/sessions.py 19
 duplicated-lines src/hyperloom/inference_optimizer/breakdown/recorder/recorder.py 28
 duplicated-lines src/hyperloom/inference_optimizer/multi_node/scripts/kernel_node_ops.py 13
@@ -552,7 +552,7 @@ function-lines src/hyperloom/orchestrator/specialists/runner.py::SpecialistRunne
 function-lines src/hyperloom/orchestrator/specialists/runner.py::SpecialistRunner._run_via_subprocess 56
 function-lines src/hyperloom/orchestrator/specialists/subprocess_.py::SpecialistSubprocessDispatcher._build_codex_launch 75
 function-lines src/hyperloom/orchestrator/specialists/subprocess_.py::SpecialistSubprocessDispatcher._reap_loop 75
-function-lines src/hyperloom/orchestrator/specialists/subprocess_.py::SpecialistSubprocessDispatcher.run 220
+function-lines src/hyperloom/orchestrator/specialists/subprocess_.py::SpecialistSubprocessDispatcher.run 216
 function-lines src/hyperloom/orchestrator/state/gaps.py::GapRefreshCollaborator._extract_gaps_from_attempts 55
 function-lines src/hyperloom/orchestrator/state/shared_state.py::SharedState._append_roofline_snapshot_history 55
 function-lines src/hyperloom/orchestrator/state/shared_state.py::SharedState.current_profile_workload_context 59
@@ -825,7 +825,7 @@ module-lines src/hyperloom/orchestrator/policy/gate.py 1576
 module-lines src/hyperloom/orchestrator/prompts/prompt_builder.py 1205
 module-lines src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py 2556
 module-lines src/hyperloom/orchestrator/specialists/runner.py 1451
-module-lines src/hyperloom/orchestrator/specialists/subprocess_.py 1377
+module-lines src/hyperloom/orchestrator/specialists/subprocess_.py 1367
 module-lines src/hyperloom/orchestrator/state/shared_state.py 2424
 module-lines src/hyperloom/orchestrator/trace_analysis/tracelens_skill_runner.py 1309
 module-lines src/kernelforge/fusion/author.py 1263

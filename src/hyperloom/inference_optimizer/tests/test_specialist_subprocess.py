@@ -16,7 +16,8 @@ from typing import Any
 import pytest
 
 from hyperloom.common.deadline import Deadline
-from hyperloom.common.run_as import specialist_run_as
+from hyperloom.common.git_safety import worktree_head
+from hyperloom.common.env_safety import specialist_run_as
 
 from .conftest import init_git_repo, make_fake_claude
 
@@ -1607,7 +1608,7 @@ async def test_a_launch_without_the_capability_to_stop_the_child_is_refused(tmp_
 
 
 def test_the_capability_mask_names_what_is_missing():
-    from hyperloom.common.run_as import missing_capabilities
+    from hyperloom.common.env_safety import missing_capabilities
 
     assert missing_capabilities(0xFFFFFFFFFF) == []
     assert missing_capabilities(0xFFFFFFFFFF & ~(1 << 5)) == ["CAP_KILL"]
@@ -1615,7 +1616,7 @@ def test_the_capability_mask_names_what_is_missing():
 
 
 def test_the_mcp_config_is_staged_in_the_workspace_for_a_demoted_child(tmp_path: Path):
-    from hyperloom.common.run_as import RunAs
+    from hyperloom.common.env_safety import RunAs
 
     run_as = RunAs(user="u", uid=1, gid=1, groups=(1,), home="/h")
     source = tmp_path / "runtime" / "specialist_mcp.json"
@@ -1638,7 +1639,7 @@ def test_the_mcp_config_is_staged_in_the_workspace_for_a_demoted_child(tmp_path:
 
 
 def test_a_forged_gitfile_is_refused_not_shared(tmp_path: Path):
-    from hyperloom.common.run_as import RunAs
+    from hyperloom.common.env_safety import RunAs
 
     run_as = RunAs(user="u", uid=1, gid=1, groups=(1,), home="/h")
     target = tmp_path / "private"
@@ -1972,7 +1973,7 @@ def test_the_harvest_does_not_run_a_program_a_child_planted_in_a_replaced_dot_gi
     subprocess.run(["git", "-C", str(wt), "add", "-A"], check=True, capture_output=True)
     marker.unlink(missing_ok=True)
     assert SpecialistSubprocessDispatcher._harvest_worktree_diff(wt) == ""
-    assert subprocess_._worktree_head(wt) == ""
+    assert worktree_head(wt) == ""
     assert not marker.exists()
 
 
@@ -2022,7 +2023,7 @@ echo changed >> mod.py
         )
         assert done.returncode == 0, done.stderr
         assert SpecialistSubprocessDispatcher._harvest_worktree_diff(worktree) == ""
-        assert subprocess_._worktree_head(worktree) == ""
+        assert worktree_head(worktree) == ""
         assert not marker.exists()
         # The second shape: a gitfile that names an admin dir the child made itself, with a matching back pointer.
         forged = f"""set -e
@@ -2050,7 +2051,7 @@ echo "gitdir: {workspace}/fake/.git/worktrees/w" > .git
         )
         assert done.returncode == 0, done.stderr
         assert SpecialistSubprocessDispatcher._harvest_worktree_diff(worktree) == ""
-        assert subprocess_._worktree_head(worktree) == ""
+        assert worktree_head(worktree) == ""
         assert not marker.exists()
     finally:
         shutil.rmtree(base, ignore_errors=True)
@@ -2060,4 +2061,4 @@ def test_the_harvest_still_works_on_an_untouched_worktree(tmp_path: Path):
     base, wt = _make_git_worktree_pair(tmp_path)
     (wt / "mod.py").write_text("new = 2\n", encoding="utf-8")
     assert "+new = 2" in SpecialistSubprocessDispatcher._harvest_worktree_diff(wt)
-    assert len(subprocess_._worktree_head(wt)) == 40
+    assert len(worktree_head(wt)) == 40

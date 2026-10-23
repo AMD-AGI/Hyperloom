@@ -53,13 +53,13 @@ from hyperloom.common.llm_config import (
 from hyperloom.common.env_safety import (
     redact_file_in_place,
 )
-from hyperloom.common.nofollow import (
+from hyperloom.common.fs_utils import (
     create_nofollow,
     read_text_nofollow,
     regular_files_nofollow,
     write_text_nofollow,
 )
-from hyperloom.common.run_as import RunAs, RunAsError
+from hyperloom.common.env_safety import RunAs, RunAsError
 from hyperloom.common.proctree import collect_tree, kill_tree
 
 from .agent_cli_config import (
@@ -73,7 +73,7 @@ from .launch_env import apply_gpu_env, prepare_demote, resolve_launch_user, stag
 from .dsh_launch import DshLaunchRequest, build_dsh_launch, remove_dsh_profiles, resolve_dsh_executable
 from .trace_harvest import harvest_agent_trace
 from ..actions.cancel_channel import cancel_scope_listener, current_cancel_scope
-from hyperloom.common.worktree_git import app_git
+from hyperloom.common.git_safety import app_git, worktree_head
 from ..loop.sub_agent_runner import ExecutionCleanupUnconfirmed
 from .wall_budget import clear_wall_budget_extension, wall_budget_extension
 from hyperloom.inference_optimizer.trace.agent_trace import AgentTrace
@@ -218,18 +218,6 @@ def _declared_targets(done_payload: Mapping[str, Any] | None) -> tuple[str, ...]
     if not done_payload:
         return ()
     return parse_deliverable(done_payload, default_tree_id="").targets
-
-
-def _worktree_head(worktree: Path | None) -> str:
-    """The commit a linked worktree sits at, read through its trusted admin dir; ``""`` when there is none to trust."""
-    if worktree is None or not (worktree / ".git").exists():
-        return ""
-    try:
-        done = app_git(worktree, "rev-parse", "HEAD")
-    except OSError as exc:
-        log.warning("specialist: not reading the head of %s: %r", worktree, exc)
-        return ""
-    return done.stdout.strip() if done.returncode == 0 else ""
 
 
 # Worktree management
@@ -494,7 +482,7 @@ class SpecialistSubprocessDispatcher:
         clear_wall_budget_extension(request.task_id)
         # The pre-image the harvest diffs against, so it must be read before
         # the specialist can commit anything.
-        worktree_base_commit = _worktree_head(request.worktree)
+        worktree_base_commit = worktree_head(request.worktree)
         request.workspace.mkdir(parents=True, exist_ok=True)
         prompt_file = request.workspace / "prompt.md"
         # A reused workspace may hold a link the previous run's account planted at this name.

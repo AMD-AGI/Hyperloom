@@ -5,15 +5,24 @@
 
 from __future__ import annotations
 
-from hyperloom.common.nofollow import rewrite_lines_nofollow
+import grp
+import os
+import pwd
+import shutil
+import stat
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Iterable, MutableMapping, Sequence
+from hyperloom.common.env import env_str
+from hyperloom.common.git_safety import trusted_admin_dir
+from hyperloom.common.fs_utils import rewrite_lines_nofollow
+
 from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES as _GPU_MASK_ENV_NAMES
 
 import json
 import logging
-import os
 import re
 from collections.abc import Mapping
-from pathlib import Path
 
 log = logging.getLogger(__name__)
 
@@ -536,13 +545,233 @@ def redact_file_in_place(path: os.PathLike[str] | str, *, mode: int = 0o600) -> 
 
     The file sits in a directory a less-privileged account may write, so the
     redacted copy is staged and moved without following any link there
-    (:func:`hyperloom.common.nofollow.rewrite_lines_nofollow`). A failure
+    (:func:`hyperloom.common.fs_utils.rewrite_lines_nofollow`). A failure
     leaves the file as it was.
     """
     try:
         rewrite_lines_nofollow(path, redact_secret_values, mode=mode)
     except OSError:
         return
+
+
+SPECIALIST_USER_ENV = "HYPERLOOM_SPECIALIST_USER"
+_GIT_NAME = ".git"
+
+# New files made by the child are group-writable, so the app (a member of the
+# specialist's group, or root) can still read and rewrite them.
+_CHILD_UMASK = 0o007
+_GROUP_RW = stat.S_IRGRP | stat.S_IWGRP
+_GROUP_RWX_SETGID = _GROUP_RW | stat.S_IXGRP | stat.S_ISGID
+_GROUP_R = stat.S_IRGRP
+_GROUP_RX_SETGID = _GROUP_R | stat.S_IXGRP | stat.S_ISGID
+_DROP_TOOL = "setpriv"
+# What the demoted command runs under: no inheritable or ambient capability and no way to gain one by exec.
+_DROP_ARGS = ("--no-new-privs", "--inh-caps=-all", "--ambient-caps=-all", "--")
+
+
+class RunAsError(ValueError):
+    """The requested specialist user cannot be used; the launch must not proceed."""
+
+
+@dataclass(frozen=True)
+class RunAs:
+    """What a launcher needs to start a child as one named user."""
+
+    user: str
+    uid: int
+    gid: int
+    groups: tuple[int, ...]
+    home: str
+    drop_tool: str = ""
+
+    def command(self, cmd: Sequence[str]) -> list[str]:
+        """``cmd`` prefixed so that the demoted child holds no capability and can gain none.
+
+        Run as the child's first program, after the uid switch and before ``cmd``:
+        it clears the inheritable and ambient capability sets (which a non-root
+        app's CAP_SETUID/SETGID/KILL would otherwise pass on) and sets
+        ``no_new_privs``. Without a ``drop_tool`` the command is returned as it
+        is; :func:`resolve_run_as` always sets one.
+        """
+        if not self.drop_tool:
+            return list(cmd)
+        return [self.drop_tool, *_DROP_ARGS, *cmd]
+
+    def popen_kwargs(self) -> dict[str, Any]:
+        """Keyword arguments for ``subprocess.Popen`` that start the child as this user."""
+        return {
+            "user": self.uid,
+            "group": self.gid,
+            "extra_groups": list(self.groups),
+            "umask": _CHILD_UMASK,
+        }
+
+    def apply_env(self, env: MutableMapping[str, str], *, safe_dirs: Iterable[Path] = ()) -> None:
+        """Point the identity variables at this user, in place.
+
+        The app's ``HOME`` is not readable by this user. ``safe_dirs`` are
+        marked ``safe.directory`` for git (command-line scope, the only scope
+        git honours for it), because the child is not the owner of a tree the
+        app created.
+        """
+        env["HOME"] = self.home
+        env["USER"] = env["LOGNAME"] = self.user
+        if "USERNAME" in env:
+            env["USERNAME"] = self.user
+        safe = [str(p) for p in safe_dirs]
+        env["GIT_CONFIG_COUNT"] = str(len(safe))
+        for i, path in enumerate(safe):
+            env[f"GIT_CONFIG_KEY_{i}"] = "safe.directory"
+            env[f"GIT_CONFIG_VALUE_{i}"] = path
+
+    def share_worktree_git(self, worktree: Path) -> None:
+        """Let this user read the git metadata of a linked worktree, and nothing more.
+
+        ``git worktree add`` creates the ``<worktree>/.git`` gitfile and its
+        ``<repo>/.git/worktrees/<name>`` admin dir under the app's group and,
+        under a restrictive app umask, without other-read, so the child's git
+        would fail. Both are shared read-only, as is search (not write) on the
+        ``worktrees`` directory above the admin dir. A worktree with no gitfile (a snapshot)
+        needs nothing.
+
+        The gitfile sits in a tree the child can rewrite, so its ``gitdir:``
+        line is believed only when the admin dir it names points back at this
+        worktree's gitfile (the admin dir is the app's); a gitfile that lies is
+        refused with ``OSError`` rather than shared.
+        """
+        gitfile = worktree / _GIT_NAME
+        if not gitfile.is_file() or gitfile.is_symlink():
+            return
+        try:
+            admin = trusted_admin_dir(worktree)
+        except OSError as exc:
+            raise OSError(f"refusing to share the git metadata of {worktree}: {exc}") from exc
+        self.share_tree(gitfile, write=False)
+        self.share_tree(admin, write=False)
+        parent = admin.parent
+        os.chown(parent, -1, self.gid)
+        # Search, not write: a group that could rename entries here could break every other task's git.
+        parent.chmod((stat.S_IMODE(parent.stat().st_mode) | stat.S_IRGRP | stat.S_IXGRP) & ~stat.S_IWGRP)
+
+    def share_tree(self, root: Path, *, sticky: bool = False, write: bool = True) -> None:
+        """Give this user's group read-write access to everything under ``root``.
+
+        The tree stays owned by the app. Its group becomes this user's group,
+        directories get the setgid bit (new entries keep the group) and every
+        entry gets group read and write (``write=False``: group read only,
+        plus search on directories, for a tree the child only reads, such as
+        a worktree's git metadata). ``sticky`` additionally stops the child
+        deleting the app's own files in the top directory. Symlinks are
+        not followed, and a ``root`` that is itself a symlink is refused.
+        ``.git`` is left alone: the child does no git writes. Needs root or
+        membership in the group; raises ``OSError``
+        otherwise, so a launcher cannot start a child that cannot write.
+        """
+        if root.is_symlink():
+            raise OSError(f"refusing to share {root}: it is a symlink")
+        for path in _walk(root):
+            self._share_entry(path, write=write, sticky=sticky and path == root)
+
+    def _share_entry(self, path: Path, *, write: bool, sticky: bool) -> None:
+        """Give one entry the account's group and the share modes, never through a link.
+
+        The entry is pinned with ``O_PATH | O_NOFOLLOW`` and changed through
+        that descriptor, so a name the account swaps for a link after the walk
+        listed it is left alone instead of followed.
+        """
+        fd = os.open(path, os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            st = os.fstat(fd)
+            if stat.S_ISLNK(st.st_mode):
+                return
+            proc = f"/proc/self/fd/{fd}"
+            if st.st_gid != self.gid:
+                os.chown(proc, -1, self.gid)
+            if stat.S_ISDIR(st.st_mode):
+                add = _GROUP_RWX_SETGID if write else _GROUP_RX_SETGID
+            else:
+                add = _GROUP_RW if write else _GROUP_R
+            if sticky:
+                add |= stat.S_ISVTX
+            mode = stat.S_IMODE(st.st_mode) | add
+            if not write:
+                mode &= ~stat.S_IWGRP  # read-only means the group cannot write what an earlier umask let it
+            if mode != stat.S_IMODE(st.st_mode):
+                os.chmod(proc, mode)
+        finally:
+            os.close(fd)
+
+
+def _walk(root: Path) -> Iterable[Path]:
+    """``root`` and everything below it, never following a link and never entering or touching ``.git``."""
+    yield root
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        dirnames[:] = [d for d in dirnames if d != _GIT_NAME]
+        base = Path(dirpath)
+        for name in (*dirnames, *(f for f in filenames if f != _GIT_NAME)):
+            yield base / name
+
+
+def resolve_run_as(user: str | None) -> RunAs | None:
+    """Look ``user`` up now and return how to run a child as it; ``None`` for no demote.
+
+    Raises:
+        RunAsError: The user does not exist, is uid 0, is the app's own user,
+            or belongs to group 0.
+    """
+    name = (user or "").strip()
+    if not name:
+        return None
+    try:
+        entry = pwd.getpwnam(name)
+    except KeyError:
+        raise RunAsError(f"{SPECIALIST_USER_ENV}={name!r}: no such user") from None
+    if entry.pw_uid == 0:
+        raise RunAsError(f"{SPECIALIST_USER_ENV}={name!r} is uid 0; specialists must not run as root")
+    if entry.pw_uid == os.geteuid():
+        raise RunAsError(f"{SPECIALIST_USER_ENV}={name!r} is the app's own user; no boundary would exist")
+    groups = tuple(os.getgrouplist(entry.pw_name, entry.pw_gid))
+    if 0 in groups:
+        root_group = grp.getgrgid(0).gr_name
+        raise RunAsError(f"{SPECIALIST_USER_ENV}={name!r} is in group {root_group!r} (gid 0)")
+    drop_tool = shutil.which(_DROP_TOOL)
+    if drop_tool is None:
+        raise RunAsError(
+            f"{SPECIALIST_USER_ENV}={name!r}: {_DROP_TOOL} (util-linux) is needed to drop the child's capabilities"
+        )
+    return RunAs(
+        user=entry.pw_name, uid=entry.pw_uid, gid=entry.pw_gid, groups=groups, home=entry.pw_dir, drop_tool=drop_tool
+    )
+
+
+def specialist_run_as() -> RunAs | None:
+    """Resolve ``HYPERLOOM_SPECIALIST_USER``; ``None`` (today's behaviour) when unset or blank. No side effects."""
+    return resolve_run_as(env_str(SPECIALIST_USER_ENV))
+
+
+_CAPABILITIES = {"CAP_KILL": 5, "CAP_SETGID": 6, "CAP_SETUID": 7}
+
+
+def missing_capabilities(effective: int) -> list[str]:
+    """The launch capabilities absent from the effective capability bitmask ``effective``."""
+    return [name for name, bit in _CAPABILITIES.items() if not effective >> bit & 1]
+
+
+def missing_launch_capabilities() -> list[str]:
+    """Capabilities the app lacks to start, and later stop, a child that runs as another user.
+
+    ``setuid``/``setgid`` start it; ``kill`` is what lets the reap paths (deadline,
+    stale heartbeat, done file, cancel) signal a process of another uid, and
+    without it every reap ends unconfirmed. Root has all three unless they were
+    dropped, so the effective set is read, not inferred from the uid. When it
+    cannot be read, root is assumed to have them and anyone else to have none.
+    """
+    try:
+        status = Path("/proc/self/status").read_text(encoding="utf-8")
+        effective = next(int(line.split()[1], 16) for line in status.splitlines() if line.startswith("CapEff:"))
+    except (OSError, StopIteration, ValueError, IndexError):
+        return [] if os.geteuid() == 0 else list(_CAPABILITIES)
+    return missing_capabilities(effective)
 
 
 __all__ = [

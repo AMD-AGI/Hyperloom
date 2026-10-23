@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""``common/run_as``: resolve a specialist user and start a child as it."""
+"""``common/env_safety`` (run as another user): resolve a specialist user and start a child as it."""
 
 from __future__ import annotations
 
@@ -16,8 +16,8 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.common import run_as as run_as_mod
-from hyperloom.common.run_as import RunAsError, resolve_run_as, specialist_run_as
+from hyperloom.common import env_safety as run_as_mod
+from hyperloom.common.env_safety import RunAsError, resolve_run_as, specialist_run_as
 
 UNPRIVILEGED = "nobody"
 
@@ -371,3 +371,14 @@ def test_resolving_a_user_without_the_drop_tool_is_refused(monkeypatch):
     monkeypatch.setattr(run_as_mod.shutil, "which", lambda _name: None)
     with pytest.raises(RunAsError, match="setpriv"):
         resolve_run_as(UNPRIVILEGED if _account_exists(UNPRIVILEGED) else "daemon")
+
+
+def test_sharing_an_entry_that_became_a_link_changes_nothing_it_points_to(shared_tmp):
+    spec = run_as_mod.RunAs(user="x", uid=65534, gid=os.getgid(), groups=(), home="/")
+    target = shared_tmp / "target"
+    target.write_text("x", encoding="utf-8")
+    target.chmod(0o600)
+    link = shared_tmp / "link"
+    link.symlink_to(target)
+    spec._share_entry(link, write=True, sticky=False)
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600

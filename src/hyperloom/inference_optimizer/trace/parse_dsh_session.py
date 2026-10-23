@@ -13,7 +13,7 @@ from typing import Any
 
 from hyperloom.common.deepseek_session import step_usage, turn_end_failure
 from hyperloom.common.env_safety import redact_secret_values
-from hyperloom.common.nofollow import read_text_below_nofollow
+from hyperloom.common.fs_utils import read_text_below_nofollow
 
 from ._row_utils import coerce_optional_int
 from .agent_trace import AgentTrace
