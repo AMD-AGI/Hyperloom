@@ -27,11 +27,18 @@ from pathlib import Path
 
 from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest
 from hyperloom.contracts.recipe import LaunchConfig, RecipeDelta, RecipeError
+from hyperloom.measure.compile import COMPONENT_LAYOUTS, locate_installed_package
 from hyperloom_multibranch.contracts.branch_log import BranchLogEntry, BranchLogType
 from hyperloom_multibranch.contracts.notebook.records import TestRecord
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import Backpressure, RequestRejected, Toolbox
-from hyperloom_multibranch.specialist.agent_import import KeptChange, KeptChangeError, import_delta, read_kept_change
+from hyperloom_multibranch.specialist.agent_import import (
+    KeptChange,
+    KeptChangeError,
+    added_at,
+    import_delta,
+    read_kept_change,
+)
 from hyperloom_multibranch.specialist.agent_manifest import AgentManifest, read_field
 from hyperloom_multibranch.specialist.agent_onboarding import (
     AgentProcess,
@@ -47,7 +54,7 @@ from hyperloom_multibranch.specialist.agent_session import BranchPlace
 from hyperloom_multibranch.specialist.judging import NOTICE
 from hyperloom_multibranch.specialist.runtime import PreflightFailed, SessionCrashed, SessionFinished, SessionStart
 from hyperloom_multibranch.specialist.tools import sync_to_head
-from hyperloom_multibranch.specialist.worktree import WorktreeError
+from hyperloom_multibranch.specialist.worktree import Upstream, WorktreeError, installed_upstream
 
 log = logging.getLogger(__name__)
 
@@ -62,6 +69,11 @@ SETTLE_SECONDS = 120.0
 LAUNCH_REFUSED = "delta_not_applicable"
 
 
+def installed_component_upstream(component: str) -> Upstream | None:
+    """The repository and commit the image's installed ``component`` was built from, ``None`` when it names none."""
+    return installed_upstream(locate_installed_package(COMPONENT_LAYOUTS[component]))
+
+
 @dataclass(frozen=True)
 class AutonomousSetup:
     """What an autonomous branch runs on: how its agent is made ready, the spec it is given (its root's server
@@ -74,6 +86,7 @@ class AutonomousSetup:
     repo: ExperimentRepo
     component: str
     poll_seconds: float = 5.0
+    upstream: Callable[[str], Upstream | None] = installed_component_upstream
     settle_seconds: float = SETTLE_SECONDS
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
     clock: Callable[[], float] = time.time
@@ -257,14 +270,16 @@ class AutonomousSession:
             await self._note(f"keep {kept.seq}'s source alone was refused too: {error}")
 
     async def _delta(self, kept: KeptChange, head: str) -> RecipeDelta | None:
-        repo = self._setup.repo
-        return await import_delta(
-            kept,
-            root=await repo.read_recipe(self._start.start_commit),
-            head=await repo.read_recipe(head),
-            component=self._setup.component,
-            store=repo.store_patch,
-        )
+        repo, component = self._setup.repo, self._setup.component
+        recipe = await repo.read_recipe(head)
+        root = await repo.read_recipe(self._start.start_commit)
+        delta = await import_delta(kept, root=root, head=recipe, component=component, store=repo.store_patch)
+        if delta is None or all(item.component != component for item in delta.components):
+            return delta
+        if any(item.component == component for item in recipe.components):
+            return delta
+        upstream = await asyncio.to_thread(self._setup.upstream, component)
+        return delta if upstream is None else added_at(delta, recipe, upstream)
 
     async def _submitted(self, kept: KeptChange, head: str, delta: RecipeDelta | None) -> None:
         """Submit ``kept`` against ``head``; raise what the toolbox raises when it takes no request now."""

@@ -6,8 +6,15 @@ import hashlib
 from hyperloom.contracts.recipe import ComponentPatches, LaunchConfig, PatchRef, Recipe, apply
 import pytest
 
-from hyperloom_multibranch.specialist.agent_import import KeptChange, KeptChangeError, import_delta, read_kept_change
+from hyperloom_multibranch.specialist.agent_import import (
+    KeptChange,
+    KeptChangeError,
+    added_at,
+    import_delta,
+    read_kept_change,
+)
 from hyperloom_multibranch.specialist.agent_manifest import ConfigSource
+from hyperloom_multibranch.specialist.worktree import Upstream
 
 SGLANG = "https://github.com/sgl-project/sglang"
 PIN = "1" * 40
@@ -111,3 +118,17 @@ def test_a_keep_whose_config_the_source_cannot_read_is_refused_naming_the_file()
 
     with pytest.raises(KeptChangeError, match="agent/config.json"):
         read_kept_change(1, "diff\n", {"server_flags": "--tp 1"}, source, "")
+
+
+async def test_a_keep_of_a_component_new_on_the_head_names_the_upstream_its_package_was_built_from() -> None:
+    bare = Recipe("sha256:" + "d" * 64, launch=ROOT.launch)
+    upstream = Upstream(SGLANG, "2" * 40)
+
+    imported = await import_delta(_kept(1, "diff A\n"), root=bare, head=bare, component="sglang", store=Store())
+    assert imported is not None
+    delta = added_at(imported, bare, upstream)
+
+    [change] = delta.components
+    assert (change.upstream_repo, change.upstream_ref) == (SGLANG, "2" * 40)
+    [made] = apply(bare, delta).components
+    assert (made.upstream_repo, made.upstream_ref) == (SGLANG, "2" * 40)

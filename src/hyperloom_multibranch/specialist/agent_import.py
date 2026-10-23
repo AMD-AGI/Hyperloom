@@ -13,7 +13,7 @@ cumulative patch, so a keep the gate rejected is not on the head and comes back 
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from hyperloom.contracts.recipe import (
     ComponentChange,
@@ -24,6 +24,7 @@ from hyperloom.contracts.recipe import (
     RecipeDelta,
 )
 from hyperloom_multibranch.specialist.agent_manifest import ConfigSource, read_field
+from hyperloom_multibranch.specialist.worktree import Upstream
 
 #: Stores a component's patch text and returns its reference, as ``ExperimentRepo.store_patch`` does.
 PatchStore = Callable[[str, str], Awaitable[PatchRef]]
@@ -73,6 +74,20 @@ async def import_delta(
     return RecipeDelta(config=config, components=() if change is None else (change,))
 
 
+def added_at(delta: RecipeDelta, head: Recipe, upstream: Upstream) -> RecipeDelta:
+    """``delta`` with each component the ``head`` does not have yet added at ``upstream``, the repository and commit
+    its installed package was built from, which the recipe needs before it takes a patch of it."""
+
+    present = {item.component for item in head.components}
+    changes = tuple(
+        change
+        if change.component in present
+        else replace(change, upstream_repo=upstream.repo, upstream_ref=upstream.commit)
+        for change in delta.components
+    )
+    return replace(delta, components=changes)
+
+
 def _patches(recipe: Recipe, component: str) -> tuple[PatchRef, ...]:
     return next((item.patches for item in recipe.components if item.component == component), ())
 
@@ -108,4 +123,4 @@ def _flags(args: str) -> set[str]:
     return {token.split("=", 1)[0] for token in args.split() if token.startswith("--")}
 
 
-__all__ = ["KeptChange", "KeptChangeError", "PatchStore", "import_delta", "read_kept_change"]
+__all__ = ["KeptChange", "KeptChangeError", "PatchStore", "added_at", "import_delta", "read_kept_change"]
