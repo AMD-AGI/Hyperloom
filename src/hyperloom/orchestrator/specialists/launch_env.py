@@ -22,6 +22,7 @@ from .agent_cli_config import SpecialistAgentUnavailableError
 
 _GPU_IDS_ENV = "INFERENCE_OPTIMIZER_SPECIALIST_GPU_IDS"
 _AITER_JIT_ENV = "INFERENCE_OPTIMIZER_AITER_JIT_DIR"
+_MCP_FLAG = "--mcp-config"
 
 
 def apply_gpu_env(env: dict[str, str], workspace: Path, gpu_ids: Sequence[int], gpu_lease: object | None) -> None:
@@ -111,20 +112,21 @@ def prepare_demote(
     return run_as.popen_kwargs()
 
 
-def stage_mcp_config(run_as: RunAs | None, workspace: Path, source: str | None) -> str | None:
-    """A copy of the ``--mcp-config`` file in the task workspace, when the child cannot read the original.
+def stage_mcp_config(run_as: RunAs | None, workspace: Path, cmd: list[str]) -> None:
+    """Point ``--mcp-config`` in ``cmd`` at a copy the demoted child can read, in place.
 
-    The original sits in the app's runtime directory at 0600. The copy is made
-    before :func:`prepare_demote` shares the workspace, so it is readable by the
-    account; ``None`` (use the configured path) when nothing is demoted or no
-    config is set.
+    The configured file sits in the app's runtime directory at 0600. The copy
+    goes in the task workspace, and is made before :func:`prepare_demote` shares
+    that workspace, so the account can read it. Nothing changes when nothing is
+    demoted or ``cmd`` carries no ``--mcp-config``.
     """
-    if run_as is None or not source:
-        return None
+    if run_as is None or _MCP_FLAG not in cmd:
+        return
+    at = cmd.index(_MCP_FLAG) + 1
     try:
-        text = read_bytes_nofollow(source).decode("utf-8")
-        return str(write_text_nofollow(workspace, ("specialist_mcp.json",), text, mode=0o600))
+        text = read_bytes_nofollow(cmd[at]).decode("utf-8")
+        cmd[at] = str(write_text_nofollow(workspace, ("specialist_mcp.json",), text, mode=0o600))
     except (OSError, UnicodeDecodeError) as exc:
         raise SpecialistAgentUnavailableError(
-            f"cannot stage the MCP config {source} for the specialist: {exc}"
+            f"cannot stage the MCP config {cmd[at]} for the specialist: {exc}"
         ) from exc

@@ -782,14 +782,15 @@ class SpecialistSubprocessDispatcher:
             # binaries under /tmp and would run without its PATH aliases.
             env["CODEX_HOME"] = str(request.workspace / ".codex")
             return cmd
-        return self._build_claude_cmd(
+        cmd = self._build_claude_cmd(
             system_prompt_file=request.workspace / "system_prompt.md",
             system_prompt=request.system_prompt,
             workspace=request.workspace,
             worktree=request.worktree,
             disallowed_tools=frozenset(request.disallowed_tools),
-            mcp_config_path=stage_mcp_config(run_as, request.workspace, self.config.mcp_config_path),
         )
+        stage_mcp_config(run_as, request.workspace, cmd)
+        return cmd
 
     @staticmethod
     def _release_task(backend: str, request: SpecialistSpawn) -> None:
@@ -946,7 +947,6 @@ class SpecialistSubprocessDispatcher:
         workspace: Path,
         worktree: Path | None,
         disallowed_tools: frozenset[str] = frozenset(),
-        mcp_config_path: str | None = None,
     ) -> list[str]:
         """Assemble the ``claude`` CLI argv for a specialist subprocess.
 
@@ -961,7 +961,6 @@ class SpecialistSubprocessDispatcher:
             worktree (Path | None): Write-isolated worktree surfaced as the
                 first ``--add-dir`` when present.
             disallowed_tools: Tool names to remove from the available set.
-            mcp_config_path: The ``--mcp-config`` file the child can read, when it is not the configured one.
 
         Returns:
             list[str]: The full command argv to spawn.
@@ -992,8 +991,8 @@ class SpecialistSubprocessDispatcher:
         from .leaf import build_leaf_agents_json
 
         cmd.extend(["--agents", cfg.leaf_agents_json or build_leaf_agents_json()])
-        if mcp_config_path or cfg.mcp_config_path:
-            cmd.extend(["--mcp-config", mcp_config_path or cfg.mcp_config_path])
+        if cfg.mcp_config_path:
+            cmd.extend(["--mcp-config", cfg.mcp_config_path])
         for d in self._writable_dirs(workspace, worktree):
             cmd.extend(["--add-dir", d])
         if cfg.extra_claude_args:

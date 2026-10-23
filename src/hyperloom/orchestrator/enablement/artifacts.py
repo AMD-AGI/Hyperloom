@@ -35,6 +35,7 @@ if TYPE_CHECKING:
 # A patch is a few KB; anything this large is a stray build output and would eat into the archive's per-session
 # budget.
 _FILE_SIZE_LIMIT = 2 * 1024 * 1024
+_PATCHES_DIR = "patches"
 
 # Server logs routinely exceed _FILE_SIZE_LIMIT, so they are truncated rather than skipped.
 _SERVER_LOG_TAIL_LIMIT = 1024 * 1024
@@ -112,7 +113,7 @@ def snapshot_round(session_dir: str | Path, res: dict[str, Any]) -> RoundArchive
     copied: set[str] = set()
     for applied in res.get("patches_applied") or []:
         src = Path(str(applied))
-        _archive_copy(archive, ROLE_PATCH, src, round_dir / "patches" / src.name)
+        _archive_copy(archive, ROLE_PATCH, src, round_dir / _PATCHES_DIR / src.name)
         # Marked seen even when refused, so the sweep below does not retry it.
         copied.add(src.name)
 
@@ -123,8 +124,8 @@ def snapshot_round(session_dir: str | Path, res: dict[str, Any]) -> RoundArchive
     # Disk scans include rejected output: preserve evidence, not accepted patches.
     for base in (workspace, workspace / "worktree"):
         for src in (
-            *regular_files_nofollow(base, "patches", (".patch",)),
-            *regular_files_nofollow(base, "patches", (".diff",)),
+            *regular_files_nofollow(base, _PATCHES_DIR, (".patch",)),
+            *regular_files_nofollow(base, _PATCHES_DIR, (".diff",)),
         ):
             if src.name not in copied:
                 _archive_copy(

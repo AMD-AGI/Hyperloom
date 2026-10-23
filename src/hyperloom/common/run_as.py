@@ -35,6 +35,7 @@ from hyperloom.common.env import env_str
 from hyperloom.common.nofollow import read_text_nofollow
 
 SPECIALIST_USER_ENV = "HYPERLOOM_SPECIALIST_USER"
+_GIT_NAME = ".git"
 
 # New files made by the child are group-writable, so the app (a member of the
 # specialist's group, or root) can still read and rewrite them.
@@ -46,7 +47,7 @@ _GROUP_RX_SETGID = _GROUP_R | stat.S_IXGRP | stat.S_ISGID
 # The app's own umask once a specialist user is set: the group may read and write,
 # others get nothing. What the app creates (a sync's reset and apply rebuild
 # worktree files as the app) stays group-writable.
-_APP_UMASK = 0o007
+_APP_UMASK = _CHILD_UMASK
 
 
 class RunAsError(ValueError):
@@ -105,7 +106,7 @@ class RunAs:
         worktree's gitfile (the admin dir is the app's); a gitfile that lies is
         refused with ``OSError`` rather than shared.
         """
-        gitfile = worktree / ".git"
+        gitfile = worktree / _GIT_NAME
         if not gitfile.is_file() or gitfile.is_symlink():
             return
         first = read_text_nofollow(gitfile).strip()
@@ -158,9 +159,9 @@ def _walk(root: Path) -> Iterable[Path]:
     """``root`` and everything below it, never following a link and never entering or touching ``.git``."""
     yield root
     for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
-        dirnames[:] = [d for d in dirnames if d != ".git"]
+        dirnames[:] = [d for d in dirnames if d != _GIT_NAME]
         base = Path(dirpath)
-        for name in (*dirnames, *(f for f in filenames if f != ".git")):
+        for name in (*dirnames, *(f for f in filenames if f != _GIT_NAME)):
             yield base / name
 
 

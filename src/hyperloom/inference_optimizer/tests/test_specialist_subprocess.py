@@ -1627,13 +1627,17 @@ def test_the_mcp_config_is_staged_in_the_workspace_for_a_demoted_child(tmp_path:
     source.chmod(0o600)
     workspace = tmp_path / "ws"
     workspace.mkdir()
-    staged = launch_env.stage_mcp_config(run_as, workspace, str(source))
-    assert staged == str(workspace / "specialist_mcp.json")
-    assert Path(staged).read_text(encoding="utf-8") == '{"mcpServers": {}}'
-    assert launch_env.stage_mcp_config(None, workspace, str(source)) is None
-    assert launch_env.stage_mcp_config(run_as, workspace, None) is None
+    cmd = ["claude", "--mcp-config", str(source), "--print"]
+    launch_env.stage_mcp_config(run_as, workspace, cmd)
+    staged = workspace / "specialist_mcp.json"
+    assert cmd == ["claude", "--mcp-config", str(staged), "--print"]
+    assert staged.read_text(encoding="utf-8") == '{"mcpServers": {}}'
+    untouched = ["claude", "--mcp-config", str(source)]
+    launch_env.stage_mcp_config(None, workspace, untouched)
+    launch_env.stage_mcp_config(run_as, workspace, ["claude"])
+    assert untouched == ["claude", "--mcp-config", str(source)]
     with pytest.raises(subprocess_.SpecialistAgentUnavailableError):
-        launch_env.stage_mcp_config(run_as, workspace, str(tmp_path / "missing.json"))
+        launch_env.stage_mcp_config(run_as, workspace, ["claude", "--mcp-config", str(tmp_path / "missing.json")])
 
 
 def test_a_forged_gitfile_is_refused_not_shared(tmp_path: Path):
