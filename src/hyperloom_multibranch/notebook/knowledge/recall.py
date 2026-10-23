@@ -151,22 +151,27 @@ class IdentityIndex:
             while True:
                 page = cursor.export.export_page(after=cursor.after, limit=EXPORT_PAGE, schema_ref=cursor.schema_ref)
                 for item in page.items:
-                    stored = item.get("experience")
-                    if isinstance(stored, Mapping) and stored.get("id"):
-                        experience_id = str(stored["id"])
-                        self._known[experience_id] = dict(stored.get("identity") or {})
-                        change = stored.get("change")
-                        family = change.get("change_family") if isinstance(change, Mapping) else None
-                        if isinstance(family, str) and family:
-                            self._families[experience_id] = family
-                        objective = stored.get("objective")
-                        if isinstance(objective, str) and objective:
-                            self._objectives[experience_id] = objective
+                    self._remember(item.get("experience"))
                 cursor.after = page.next_cursor
                 if not page.has_more:
                     return
         except (RemoteClientError, OSError) as exc:
             log.warning("could not look Experience identities up in the export: %s", exc)
+
+    def _remember(self, stored: object) -> None:
+        """Keep one exported Experience's identity, change family and objective; one that names no id is skipped."""
+
+        if not isinstance(stored, Mapping) or not stored.get("id"):
+            return
+        experience_id = str(stored["id"])
+        self._known[experience_id] = dict(stored.get("identity") or {})
+        change = stored.get("change")
+        family = change.get("change_family") if isinstance(change, Mapping) else None
+        if isinstance(family, str) and family:
+            self._families[experience_id] = family
+        objective = stored.get("objective")
+        if isinstance(objective, str) and objective:
+            self._objectives[experience_id] = objective
 
 
 @dataclass(frozen=True)
