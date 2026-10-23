@@ -28,7 +28,7 @@ import click
 )
 @click.option(
     "--max-hours",
-    default=1.0,
+    default=2.0,
     show_default=True,
     type=click.FloatRange(min=0.0, min_open=True),
     help="Budget; changes not reached are marked skipped_budget and a rerun prices them",
@@ -41,10 +41,11 @@ import click
     help="Timeout of one benchmark or correctness run",
 )
 def forge_ablate(workspace: str, pairs: int, null_control_pairs: int, max_hours: float, bench_timeout_sec: int) -> None:
-    """Time the best kernel beside itself with each kept change reverted, and with all of them reverted.
+    """Time each kept version beside the one before it, and the best kernel beside itself with each kept change
+    reverted and with all of them reverted.
 
     Writes forge_experiments/ablation.json and ablation.md and refreshes the dashboard. A rerun keeps every
-    change already priced against the same best commit.
+    arm already priced against the same best commit.
     """
     from kernelforge.loop.ablation import ABLATION_MD, AblationError, ablate
     from kernelforge.loop.dashboard import publish_dashboard

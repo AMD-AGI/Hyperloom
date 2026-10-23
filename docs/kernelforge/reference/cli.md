@@ -255,36 +255,44 @@ kernelforge forge-dashboard --workspace <ws> --port 8765
 
 ## forge-ablate
 
-Prices each change a finished forge-loop campaign kept. Every commit from the
-campaign's base to its best is reverted on its own, in a git worktree next to
-the workspace, and the best kernel is timed in pairs beside that variant; one
-more arm (`all_off`) is the kernel the campaign started from. A variant that
-fails the driver's correctness suite is marked `required_for_correctness`
-rather than timed, a revert that conflicts with a later change `not_separable`,
-and a variant whose driver differs `driver_changed`. A change's cost is how
-much slower the best kernel runs without it, with one-sided 95% bounds, flagged
-`within noise` when the bounds reach the noise floor measured first (best beside
-best). The single costs are combined as independent speedups compose and set
-beside the all-off cost: changes that only pay together look cheap one at a
-time, and the ratio says how far the singles can be read on their own.
+Prices each change a finished forge-loop campaign kept, in two ways. The ladder
+times every kept version in pairs beside the version before it, in one
+session: what each round really gained, set beside the gain the campaign
+recorded when it kept it (that one was read against a best measured hours
+earlier). Each rung also reports its changed lines and the sign of its gain in
+every case, and a verdict: `pays`, `within noise`, or `hurts`. A round that does
+not pay is a candidate to remove before the kernel is delivered.
+
+Then every commit from the campaign's base to its best is reverted on its own,
+in a git worktree next to the workspace, and the best kernel is timed in pairs
+beside that variant; one more arm (`all_off`) is the kernel the campaign started
+from. A variant that fails the driver's correctness suite is marked
+`required_for_correctness` rather than timed, a revert that conflicts with a
+later change `not_separable`, and a variant whose driver differs
+`driver_changed`. A cost is how much slower the kernel runs without the change,
+with one-sided 95% bounds, flagged `within noise` when the bounds reach the
+noise floor measured first (best beside best). The single costs, and the
+ladder's rounds, are combined as independent speedups compose and set beside the
+all-off cost: changes that only pay together look cheap one at a time, and the
+ratio says how far the singles can be read on their own.
 
 Results go to `forge_experiments/ablation.json` and `ablation.md` after every
-arm, and to the dashboard. Changes are priced largest recorded gain first; those
-the budget does not reach are `skipped_budget`, and a rerun against the same
-best commit prices only what is not settled. The command takes the workspace
-lock, so it refuses a campaign forge-loop is still running, and it refuses the
-same tasks as `--paired-keep`.
+arm, and to the dashboard. The ladder is timed first, then the all-off arm, then
+the reverts, largest recorded gain first; what the budget does not reach is
+`skipped_budget`, and a rerun against the same best commit prices only what is
+not settled. The command takes the workspace lock, so it refuses a campaign
+forge-loop is still running, and it refuses the same tasks as `--paired-keep`.
 
 | Option | Default | Meaning |
 |:--|:--|:--|
 | `--workspace <dir>` | required | Workspace of the campaign to ablate. |
 | `--pairs <n>` | `3` | Pairs timed per arm. |
 | `--null-control-pairs <n>` | `5` | Pairs of the best kernel beside itself that set the noise floor. |
-| `--max-hours <h>` | `1.0` | Budget for the whole ablation. |
+| `--max-hours <h>` | `2.0` | Budget for the whole ablation. |
 | `--bench-timeout-sec <s>` | `900` | Timeout of one benchmark or correctness run. |
 
 ```bash
-kernelforge forge-ablate --workspace <ws> --max-hours 2
+kernelforge forge-ablate --workspace <ws> --max-hours 3
 ```
 
 ## forge-rewrite-by-flydsl

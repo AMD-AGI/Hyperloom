@@ -119,6 +119,25 @@ async def test_each_kept_change_is_priced_beside_the_best(tmp_path: Path) -> Non
     assert "Ablation" in html and "needed for correctness" in html and "tangled with a later change" in html
 
 
+async def test_the_ladder_prices_each_round_beside_the_version_before_it(tmp_path: Path) -> None:
+    workspace, (c1, c2, c3, c4) = _campaign(tmp_path)
+    report = await ablate(workspace, pairs=2, null_pairs=2)
+    ladder = report["ladder"]
+    assert list(ladder) == [c1, c2, c3, c4] and ladder[c2]["parent"] == c1
+    # Every rung is timed, even the one whose change cannot be reverted alone or fails correctness without the next.
+    assert ladder[c1]["cost"]["mean"] == pytest.approx(1.0 / 0.8 - 1)
+    assert ladder[c2]["cost"]["mean"] == pytest.approx(0.8 / 0.72 - 1)
+    assert ladder[c3]["cost"]["mean"] == pytest.approx(0.72 / 0.68 - 1)
+    assert ladder[c4]["within_noise"] is True and ladder[c4]["cost"]["mean"] == pytest.approx(0.0)
+    assert ladder[c2]["cases"] == pytest.approx({"m=16": 0.8 / 0.72 - 1, "m=8": 0.8 / 0.72 - 1})
+    assert ladder[c2]["lines"] == 2
+    assert report["ladder_combined"] == pytest.approx(1.0 / 0.68 - 1) and report["ladder_unpriced"] == 0
+    text = (workspace / "forge_experiments" / "ablation.md").read_text()
+    assert "## Round by round" in text and "- within noise: `" + c4[:12] + "`" in text
+    html = publish_dashboard(workspace / "forge_experiments").read_text()
+    assert "round, beside the version before it" in html
+
+
 async def test_a_rerun_prices_only_what_the_budget_did_not_reach(tmp_path: Path, monkeypatch) -> None:
     workspace, commits = _campaign(tmp_path)
     first = await ablate(workspace, pairs=2, null_pairs=2, max_hours=1e-9)

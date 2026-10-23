@@ -531,10 +531,35 @@ def _ablation_panel(snapshot: dict) -> str:
     if ablation.get("completed") is False:
         head += "; budget ran out, rerun forge-ablate for the rest"
     return (
-        f"<div class='card'><h2>Ablation</h2><div class='sub'>{escape(head)}. Cost = how much slower the best kernel "
-        "runs without the change.</div><table><tr><th>change</th><th>direction</th><th class='num'>gain when kept</th>"
+        f"<div class='card'><h2>Ablation</h2><div class='sub'>{escape(head)}. Cost = how much slower the kernel "
+        f"runs without the change.</div>{_ladder_table(ablation.get('ladder') or {})}"
+        "<table><tr><th>change reverted from the best</th><th>direction</th><th class='num'>gain when kept</th>"
         f"<th class='num'>cost without it</th><th class='num'>95% bounds</th><th>verdict</th></tr>{''.join(rows)}"
         "</table></div>"
+    )
+
+
+def _ladder_table(ladder: dict) -> str:
+    """Each kept version beside the one before it: what each round gained, main changes from passengers."""
+    rows = []
+    for commit, step in ladder.items():
+        role, glyph, label = _ablation_verdict(step)
+        cost = step.get("cost") or {}
+        bounds = f"{_pct(cost['lower'])} … {_pct(cost['upper'])}" if cost else "—"
+        rows.append(
+            f"<tr><td>{escape(commit[:10] + ' ' + str(step.get('title') or ''))}</td>"
+            f"<td class='num'>{escape(str(step.get('lines', '')))}</td>"
+            f"<td class='num'>{_pct(step.get('gain_when_kept'))}</td><td class='num'>{_pct(cost.get('mean'))}</td>"
+            f"<td class='num'>{escape(bounds)}</td>"
+            f"<td><span class='status'><span class='dot' style='background:var(--{role})'></span>{glyph} "
+            f"{escape(label)}</span></td></tr>"
+        )
+    if not rows:
+        return ""
+    return (
+        "<table><tr><th>round, beside the version before it</th><th class='num'>lines</th>"
+        "<th class='num'>gain when kept</th><th class='num'>gain measured</th><th class='num'>95% bounds</th>"
+        f"<th>verdict</th></tr>{''.join(rows)}</table>"
     )
 
 
