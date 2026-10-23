@@ -358,8 +358,9 @@ ignore_imports =
     hyperloom.orchestrator.enablement.revalidation -> hyperloom.orchestrator.actions.executors._accuracy_gate
     hyperloom.orchestrator.enablement.setup_script -> hyperloom.orchestrator.enablement.recipe.projections
     hyperloom.orchestrator.gpu_lanes -> hyperloom.orchestrator.specialists.profile
-    hyperloom.orchestrator.kernel.request_handlers -> hyperloom.orchestrator.loop.sub_agent_runner
-    hyperloom.orchestrator.kernel.request_handlers -> hyperloom.orchestrator.phases.machine_state
+    hyperloom.orchestrator.kernel._forge_lane_budget -> hyperloom.orchestrator.phases.machine_state
+    hyperloom.orchestrator.kernel._integrate_rebaseline -> hyperloom.orchestrator.loop.sub_agent_runner
+    hyperloom.orchestrator.kernel._shape_capture -> hyperloom.orchestrator.loop.sub_agent_runner
     hyperloom.orchestrator.knowledge.recipe_journal -> hyperloom.orchestrator.actions.executors._multi_node_env
     hyperloom.orchestrator.knowledge.recipe_kb_t0 -> hyperloom.orchestrator.actions.executors._multi_node_env
     hyperloom.orchestrator.knowledge.remote_recipe -> hyperloom.orchestrator.knowledge.agent_kb

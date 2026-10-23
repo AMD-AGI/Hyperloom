@@ -8,7 +8,7 @@ from __future__ import annotations
 
 
 from hyperloom.orchestrator.kernel import forge_gemm_tuning
-from hyperloom.orchestrator.kernel import request_handlers as krh
+from hyperloom.orchestrator.kernel import _forge_gemm_probe as forge_gemm_probe
 
 
 def _payload() -> dict:
@@ -65,7 +65,7 @@ def test_build_cmd_maps_all_options():
 
 def test_preflight_and_inner_cli_use_the_same_interpreter():
     """The readiness probe must describe the command the wrapper will run."""
-    probe = krh._forge_gemm_tune_probe_cmd()
+    probe = forge_gemm_probe._forge_gemm_tune_probe_cmd()
     inner = forge_gemm_tuning.build_command(_payload())
 
     assert probe[:4] == inner[:4]
