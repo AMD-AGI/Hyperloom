@@ -33,7 +33,7 @@ from hyperloom.measure.compile import (
     kernel_rows_only,
 )
 from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH
-from hyperloom_multibranch.contracts.repo import UnitedTable
+from hyperloom_multibranch.contracts.repo import RepoMerge, ResolvedPatch, UnitedTable
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
 from hyperloom_multibranch.repo.merge import Stored, carry, stack_kernel_slot, wider_table
 from hyperloom_multibranch.repo.rebase import Files
@@ -582,3 +582,56 @@ async def test_a_change_the_head_already_holds_is_not_carried_twice(tmp_path):
 
     assert merge.clean and merge.rebased_patches == ()
     assert [change.add_patches for change in merge.delta.components] == [()]
+
+
+def _blob_names(tmp_path) -> set[str]:
+    return {path.name for path in (tmp_path / "blobs").iterdir()}
+
+
+async def _applied_on(tmp_path) -> tuple[GitExperimentRepo, ComponentPatches]:
+    """A repository over an installed ``config.py`` and a stack whose one patch sets ``c``."""
+
+    repo = _repository(tmp_path, _installed(tmp_path, config="".join(_config())))
+    stored = await repo.store_patch("vllm", _edit(c="30"))
+    return repo, ComponentPatches("vllm", VLLM, PIN, (stored,))
+
+
+async def test_a_patch_that_applies_on_top_of_the_stack_has_no_apply_error(tmp_path):
+    repo, stack = await _applied_on(tmp_path)
+    before = _blob_names(tmp_path)
+
+    body = difflib.unified_diff(_config(c="30"), _config(c="30", e="50"), "a/vllm/config.py", "b/vllm/config.py")
+    on_top = "diff --git a/vllm/config.py b/vllm/config.py\n" + "".join(body)
+
+    assert await repo.apply_error(stack, on_top) is None
+    assert await repo.apply_error(stack, _edit(e="50")) is not None
+    assert _blob_names(tmp_path) == before
+
+
+async def test_a_patch_that_conflicts_with_the_stack_returns_why(tmp_path):
+    repo, stack = await _applied_on(tmp_path)
+    before = _blob_names(tmp_path)
+
+    error = await repo.apply_error(stack, _edit(c="31"))
+
+    assert error is not None and "does not apply to the installed package" in error
+    assert _blob_names(tmp_path) == before
+
+
+async def test_a_text_that_is_no_git_patch_is_an_apply_error(tmp_path):
+    repo, stack = await _applied_on(tmp_path)
+    before = _blob_names(tmp_path)
+
+    error = await repo.apply_error(stack, "set c to 31 in config.py")
+
+    assert error is not None and "not a git patch" in error
+    assert _blob_names(tmp_path) == before
+
+
+def test_a_merge_carries_no_resolved_patch_until_the_integrator_adds_one():
+    resolved = ResolvedPatch("vllm", "patch/vllm/old.patch", _patch("new"), "claude-sonnet-5-5", "v1", 2)
+
+    assert RepoMerge(PIN, RecipeDelta()).resolved_patches == ()
+    assert (resolved.component, resolved.replaces, resolved.patch) == ("vllm", "patch/vllm/old.patch", _patch("new"))
+    assert (resolved.model, resolved.prompt_version, resolved.attempts) == ("claude-sonnet-5-5", "v1", 2)
+    assert replace(RepoMerge(PIN, RecipeDelta()), resolved_patches=(resolved,)).resolved_patches == (resolved,)

@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-from hyperloom.contracts.recipe import KernelArtifact, PatchRef, Recipe, RecipeDelta, ValueChange
+from hyperloom.contracts.recipe import ComponentPatches, KernelArtifact, PatchRef, Recipe, RecipeDelta, ValueChange
 
 
 class BranchMoved(RuntimeError):
@@ -41,6 +41,19 @@ class RebasedPatch:
 
 
 @dataclass(frozen=True)
+class ResolvedPatch:
+    """A patch a model wrote in place of one of ``component`` that conflicted; ``replaces`` is the conflicting patch's
+    path, and ``attempts`` how many patches the model wrote until this one applied."""
+
+    component: str
+    replaces: str
+    patch: PatchRef
+    model: str
+    prompt_version: str
+    attempts: int
+
+
+@dataclass(frozen=True)
 class UnitedTable:
     """A kernel slot both sides filled with tables neither of which holds every row of the other, carried as ``table``:
     the rows of the candidate's ``theirs`` and the head's ``ours`` as one table, one row to a shape, and ``ours`` itself
@@ -64,7 +77,8 @@ class RepoMerge:
     merge puts them; ``delta`` leaves them out. ``rebased_patches`` are the candidate's patches ``delta`` carries
     rebased onto the stack before them in place of the originals. ``united_tables`` are the kernel slots both sides
     filled that ``delta`` fills with a union of their tables in place of the candidate's, or leaves at ``onto``'s table
-    where the union is its rows and a shape of the candidate's lost to the head's row.
+    where the union is its rows and a shape of the candidate's lost to the head's row. ``resolved_patches`` are the
+    patches a model wrote in place of conflicting ones that ``delta`` carries; the repository never writes them.
     """
 
     onto: str
@@ -73,6 +87,7 @@ class RepoMerge:
     patch_conflicts: tuple[PatchConflict, ...] = ()
     rebased_patches: tuple[RebasedPatch, ...] = ()
     united_tables: tuple[UnitedTable, ...] = ()
+    resolved_patches: tuple[ResolvedPatch, ...] = ()
 
     @property
     def clean(self) -> bool:
@@ -116,6 +131,10 @@ class ExperimentRepo(Protocol):
     async def store_patch(self, component: str, text: str) -> PatchRef:
         """Keep a patch file of ``component`` for a later delta to add; the same text gets the same reference."""
 
+    async def apply_error(self, stack: ComponentPatches, text: str) -> str | None:
+        """Why the patch ``text`` does not apply to the installed package after ``stack``'s patches, as the last patch of
+        that component, or ``None`` when it applies; keeps nothing."""
+
     async def patch_text(self, commit: str, path: str) -> str:
         """The patch file ``path`` of ``commit``'s recipe; ``KeyError`` when the recipe names no such patch."""
 
@@ -123,4 +142,12 @@ class ExperimentRepo(Protocol):
         """Write every patch and kernel file ``commit``'s recipe names under ``destination``, at the path it names."""
 
 
-__all__ = ["BranchMoved", "ExperimentRepo", "PatchConflict", "RebasedPatch", "RepoMerge", "UnitedTable"]
+__all__ = [
+    "BranchMoved",
+    "ExperimentRepo",
+    "PatchConflict",
+    "RebasedPatch",
+    "RepoMerge",
+    "ResolvedPatch",
+    "UnitedTable",
+]
