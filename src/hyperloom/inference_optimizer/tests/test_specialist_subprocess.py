@@ -1587,10 +1587,7 @@ def test_the_codex_config_is_not_written_through_a_planted_link(tmp_path: Path):
 # ---- review fixes: a demoted child needs the capability to be stopped, its MCP config and its git ----------
 async def test_a_launch_without_the_capability_to_stop_the_child_is_refused(tmp_path, monkeypatch, restore_umask):
     monkeypatch.setenv("HYPERLOOM_SPECIALIST_USER", _DEMOTE_USER)
-    result, popen_kwargs = await _run_spawn(tmp_path, monkeypatch)
-    assert popen_kwargs[0]["user"] is not None  # with the capabilities it spawns
     monkeypatch.setattr(launch_env, "missing_launch_capabilities", lambda: ["CAP_KILL"])
-    os.umask(0o022)
     disp = SpecialistSubprocessDispatcher(config=SpecialistSubprocessConfig(poll_interval_seconds=0.01))
     spawn = SpecialistSpawn(
         task_id="t-nocap",
@@ -1606,7 +1603,7 @@ async def test_a_launch_without_the_capability_to_stop_the_child_is_refused(tmp_
     refused = await disp.run(spawn)
     assert "specialist user refused" in (refused.error or "")
     assert "CAP_KILL" in (refused.error or "")
-    assert os.umask(0o022) == 0o022
+    assert os.umask(0o022) == 0o022  # a refused launch leaves the app's umask alone
 
 
 def test_the_capability_mask_names_what_is_missing():

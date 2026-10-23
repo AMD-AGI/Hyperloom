@@ -17,6 +17,7 @@ a failed read or write need no new branch.
 
 from __future__ import annotations
 
+import contextlib
 import errno
 import os
 import stat
@@ -32,10 +33,8 @@ def _open_below(base: Path, parts: Sequence[str], *, create: bool) -> int:
     try:
         for name in parts:
             if create:
-                try:
+                with contextlib.suppress(FileExistsError):
                     os.mkdir(name, 0o777, dir_fd=fd)
-                except FileExistsError:
-                    pass
             nxt = os.open(name, _DIR_FLAGS, dir_fd=fd)
             os.close(fd)
             fd = nxt
@@ -60,21 +59,19 @@ def read_text_nofollow(path: Path | str) -> str:
     return read_bytes_nofollow(path).decode("utf-8")
 
 
-def write_text_nofollow(base: Path, rel: Sequence[str], text: str, *, mode: int = 0o666) -> Path:
+def write_text_nofollow(base: Path, rel: Sequence[str], text: str, *, mode: int = 0o600) -> Path:
     """Write ``text`` to ``base/<rel...>``, creating missing directories, and return the path.
 
     Directories on the way are opened without following links. An existing
     entry at the final name (a symlink, a hard link, a FIFO) is unlinked, never
-    written through, and the file is created fresh with ``O_EXCL``. ``mode`` is
-    subject to the process umask, as for any new file.
+    written through, and the file is created fresh with ``O_EXCL``. ``mode`` (owner-only by
+    default) is subject to the process umask, as for any new file.
     """
     *dirs, name = rel
     dir_fd = _open_below(base, dirs, create=True)
     try:
-        try:
+        with contextlib.suppress(FileNotFoundError):
             os.unlink(name, dir_fd=dir_fd)
-        except FileNotFoundError:
-            pass
         fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, mode, dir_fd=dir_fd)
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(text)
