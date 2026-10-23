@@ -6,12 +6,18 @@
 Every test runs in a fresh local sandbox started from the shipped runner (``hyperloom.measure.local_templates``), is
 measured on cards leased from the card pool, and is accepted only as a signed bundle that verified against the key of
 that sandbox. At most ``8 / TP`` tests run at once on one node.
+
+The shared compiled-code cache (design 4.21) is off unless a directory is named: ``LocalOptions.jit_store``, or the
+``HYPERLOOM_JIT_STORE`` environment variable of the host process when the option is not given (a command line that
+builds the toolbox with the default options is switched on by exporting it). Tests then read the directory's verified snapshots before their
+server starts, and what an accepted test compiled is published to it by this host.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import sys
 import time
 from collections.abc import Iterable, Mapping, Sequence
@@ -23,11 +29,13 @@ from hyperloom.measure.archive import ResultArchive
 from hyperloom.measure.hosted import FILES_ROOT, HostedConfig, HostedMeasurementBackend
 from hyperloom.measure.hosted_log import STATE_FINISHED
 from hyperloom.measure.hosted_spec import SpecContext
+from hyperloom.measure.jit_store import DirJitStore
 from hyperloom.measure.live_log import last_output
 from hyperloom.measure.local import SUPPORTED_KINDS
 from hyperloom.measure.framework_base import DEFAULT_CONFIGS, framework_envs
 from hyperloom.measure.local_templates import local_runner_template
 from hyperloom.measure.rule_pack_stage import rule_pack_envs
+from hyperloom.measure.runner.jit import JIT_CACHE_ENV
 from hyperloom.sandbox.local import LocalSandboxProvider
 from hyperloom.sandbox.templates import LocalTemplate
 from hyperloom_multibranch.notebook import LocalNotebook
@@ -47,6 +55,7 @@ from hyperloom_multibranch.toolbox.tools import AsyncTool, kernel_tune_tool, tra
 from hyperloom_multibranch.toolbox.toolbox import AcceptanceSetup, ToolboxTuning
 
 __all__ = [
+    "JIT_STORE_ENV",
     "LocalHostedToolbox",
     "LocalOptions",
     "LocalSession",
@@ -56,6 +65,8 @@ __all__ = [
 
 #: One node serves at most eight cards, so at most ``8 / TP`` tests run at once (handover 5, item 7).
 MAX_CARDS_PER_NODE = 8
+#: The host environment variable that names the shared compiled-code cache when ``LocalOptions.jit_store`` is not given.
+JIT_STORE_ENV = "HYPERLOOM_JIT_STORE"
 _SANDBOXES = "sandboxes"
 _BRANCH_SANDBOXES = "branch-sandboxes"
 _FRAMEWORK = "framework"
@@ -197,7 +208,11 @@ class LocalOptions:
     test needs (it leases the card from the pool the branches' sandboxes lease from). Roofline profiles in the host
     process on host cards outside the card leases, so it is not offered here. ``framework_configs`` is the directory of aiter's tuned tables that every test reads private
     copies of, snapshotted below ``session_dir/framework`` as the toolbox is built: the image's when omitted, ``""`` for
-    none (the tests then share the tables).
+    none (the tests then share the tables). ``jit_store`` is the directory of the shared compiled-code cache: the
+    runners read it (``HYPERLOOM_JIT_CACHE`` in their template, which therefore wins over the same name in
+    ``runner_envs``) and this host publishes into it; ``None`` takes ``HYPERLOOM_JIT_STORE`` of the host environment,
+    and without either this host publishes nothing (a ``HYPERLOOM_JIT_CACHE`` in ``runner_envs`` alone is a cache the
+    runners only read).
     """
 
     policy: QueuePolicy | None = None
@@ -209,6 +224,17 @@ class LocalOptions:
     poll_interval_sec: float = _POLL_INTERVAL_SEC
     tools: Sequence[AsyncTool] | None = None
     framework_configs: str | None = None
+    jit_store: Path | None = None
+
+
+def jit_store_root(options: LocalOptions, environ: Mapping[str, str] | None = None) -> Path | None:
+    """The absolute directory of the shared compiled-code cache ``options`` (or ``HYPERLOOM_JIT_STORE``) names, if any.
+
+    The runner starts in a directory of its own, so a relative path is made absolute here, once.
+    """
+    source = os.environ if environ is None else environ
+    named = options.jit_store or source.get(JIT_STORE_ENV, "").strip() or None
+    return None if named is None else Path(named).expanduser().resolve()
 
 
 def _runner_template(session: LocalSession, options: LocalOptions) -> LocalTemplate:
@@ -221,10 +247,17 @@ def _runner_template(session: LocalSession, options: LocalOptions) -> LocalTempl
 
 
 def _provider(
-    session: LocalSession, cards: tuple[int, ...], template: LocalTemplate, options: LocalOptions
+    session: LocalSession,
+    cards: tuple[int, ...],
+    template: LocalTemplate,
+    options: LocalOptions,
+    jit_store: Path | None,
 ) -> LocalSandboxProvider:
+    """The provider whose runner template also carries the session's framework tables and, when on, the cache's
+    directory: neither is part of the environment the branches' own sandboxes get."""
     framework = framework_envs(Path(session.session_dir) / _FRAMEWORK, options.framework_configs)
-    template = replace(template, envs={**template.envs, **framework})
+    cache = {} if jit_store is None else {JIT_CACHE_ENV: str(jit_store)}
+    template = replace(template, envs={**template.envs, **framework, **cache})
     return LocalSandboxProvider(
         [template], gpus=cards, base_dir=Path(session.session_dir) / _SANDBOXES, hostname=session.hostname
     )
@@ -269,6 +302,7 @@ def build_local_toolbox(
 
     directory, cards, tp = Path(session.session_dir), tuple(session.cards), session.tp
     parallel = max_parallel_tests(len(cards), tp)
+    jit_root = jit_store_root(options)
     config = HostedConfig(
         session_dir=directory,
         run_id=session.run_id,
@@ -278,9 +312,10 @@ def build_local_toolbox(
         archive=session_archive(options.archive, directory),
         max_parallel_tests=parallel,
         poll_interval_sec=options.poll_interval_sec,
+        jit_store=None if jit_root is None else DirJitStore(jit_root),
     )
     template = _runner_template(session, options)
-    provider = _provider(session, cards, template, options)
+    provider = _provider(session, cards, template, options, jit_root)
     backend = started_backend(provider, config)
     leases = BranchLeases(provider, directory / _BRANCH_SANDBOXES, tp, template.envs)
     executor = HostedExecutor(
