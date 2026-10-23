@@ -13,9 +13,11 @@ import pytest
 from hyperloom.measure.tests.bundle_factory import DEFAULT_FILES, manifest_document
 from jsonschema import Draft202012Validator
 
+from hyperloom.contracts.measurement import PhaseTiming
 from hyperloom.measure import signing
 from hyperloom.measure.docs import DocumentError
 from hyperloom.measure.manifest import ResultManifest, RulePackFacts, encode_manifest, manifest_sha256
+from hyperloom.measure.phases import PhaseRecorder, manifest_document as phases_document
 
 SCHEMA = json.loads(resources.files("hyperloom.contracts").joinpath("measurement_result.v1.schema.json").read_text())
 VALIDATOR = Draft202012Validator(SCHEMA)
@@ -48,6 +50,60 @@ def test_a_manifest_states_the_rule_pack_its_runner_read_and_one_from_an_older_r
     assert ResultManifest.from_document(stated).runner.rule_pack == RulePackFacts("2-test", PACK_DIGEST)
     assert "rule_pack" not in _document()["runner"]
     assert ResultManifest.from_document(_document()).runner.rule_pack is None
+
+
+def _timed(phases: list[dict[str, Any]]) -> dict[str, Any]:
+    return _edit(lambda d: d["timing"].update(phases=phases))
+
+
+def test_a_manifest_states_the_phases_its_runner_went_through_and_one_from_an_older_runner_states_none() -> None:
+    recorder = PhaseRecorder(iter([10.0, 14.0, 20.0]).__next__)
+    recorder.begin("sheet_wait")
+    recorder.begin("server_boot", point=0)
+    stated = _timed(phases_document(recorder.finish()))
+    assert list(VALIDATOR.iter_errors(stated)) == []
+    phases = ResultManifest.from_bytes(encode_manifest(stated)).timing.phases
+    assert phases == (PhaseTiming("sheet_wait", 10.0, 4.0), PhaseTiming("server_boot", 14.0, 6.0, point=0))
+    assert "phases" not in _document()["timing"]
+    assert ResultManifest.from_document(_document()).timing.phases == ()
+
+
+PHASE = {"name": "warmup", "started_unix": 1.0, "seconds": 2.0, "point": 0}
+BAD_PHASES = {
+    "a phase of another shape": [{**PHASE, "extra": 1}],
+    "a phase with no length": [{"name": "warmup", "started_unix": 1.0}],
+    "a negative length": [{**PHASE, "seconds": -1.0}],
+    "a name that is not a token": [{**PHASE, "name": "Server Boot"}],
+    "a name with a line break": [{**PHASE, "name": "boot\nforged"}],
+    "a negative point": [{**PHASE, "point": -1}],
+    "phases that are not a list": {"warmup": 2.0},
+    "a phase that lasts years": [{**PHASE, "seconds": 1e9}],
+    "a phase that starts past the year 5000": [{**PHASE, "started_unix": 1e12}],
+    "more phases than a test can have": [PHASE] * 4097,
+}
+
+
+def test_a_manifest_whose_phases_add_up_to_more_than_a_year_is_refused_by_the_reader() -> None:
+    day = 24 * 3600
+    document = _timed([{**PHASE, "seconds": 200.0 * day}, {**PHASE, "seconds": 200.0 * day}])
+
+    with pytest.raises(DocumentError, match="add up to more than a year"):
+        ResultManifest.from_document(document)
+
+
+def test_a_manifest_may_state_its_phases_as_null_as_it_may_its_other_optional_timing() -> None:
+    document = _edit(lambda d: d["timing"].update(phases=None))
+
+    assert list(VALIDATOR.iter_errors(document)) == []
+    assert ResultManifest.from_document(document).timing.phases == ()
+
+
+@pytest.mark.parametrize("name", sorted(BAD_PHASES))
+def test_a_manifest_whose_phases_break_the_contract_is_refused_by_the_reader_and_the_schema(name: str) -> None:
+    document = _timed(BAD_PHASES[name])  # type: ignore[arg-type]
+    with pytest.raises(DocumentError):
+        ResultManifest.from_document(document)
+    assert list(VALIDATOR.iter_errors(document)) != [], "the schema accepts what the reader refuses"
 
 
 def test_the_manifest_hash_is_the_hash_of_its_raw_bytes() -> None:

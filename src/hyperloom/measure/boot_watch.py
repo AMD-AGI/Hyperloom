@@ -22,7 +22,14 @@ from typing import Any
 
 from hyperloom.orchestrator.actions.cancel_channel import CancelScope
 
-__all__ = ["BOOT_CANCEL_REASON", "BOOT_SHARE", "BootGuard", "boot_limit_sec", "boot_seconds"]
+__all__ = [
+    "BOOT_CANCEL_REASON",
+    "BOOT_SHARE",
+    "BootGuard",
+    "boot_limit_sec",
+    "boot_seconds",
+    "read_ready_stamp",
+]
 
 #: The ``reason`` the guard cancels the scope with.
 BOOT_CANCEL_REASON = "server_boot_timeout"
@@ -116,6 +123,14 @@ def boot_seconds(directory: Path) -> float | None:
         return None
     booted = [seconds for seconds in map(_booted_in, stamps) if seconds > 0.0]
     return max(booted, default=None)
+
+
+def read_ready_stamp(directory: Path) -> tuple[float, float] | None:
+    """The ``(ready_unix, boot_seconds)`` the stamp beside a round's server log records, or ``None`` when the round left
+    none or it cannot be read; ``boot_seconds`` is 0 for a round that found its server ready."""
+    stamp = directory / _READY_STAMP
+    ready = _stamped_at(stamp)
+    return (ready, _booted_in(stamp)) if ready > 0.0 else None
 
 
 def _booted_in(stamp: Path) -> float:

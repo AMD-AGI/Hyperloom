@@ -24,7 +24,6 @@ import json
 import logging
 import os
 import shutil
-import subprocess
 import sys
 import tempfile
 import threading
@@ -40,7 +39,7 @@ from hyperloom.common.benchmark_config import is_magpie_agentx
 from hyperloom.common.env import is_truthy
 from hyperloom.common.env_safety import filter_untrusted_env_mapping, is_allowed_variant_env_key
 from hyperloom.common.outside_facts import ENV_CONC, ENV_NUM_PROMPTS, ENV_RUN_EVAL, ROCR_VISIBLE_DEVICES_ENV
-from hyperloom.contracts.measurement import SandboxFacts
+from hyperloom.contracts.measurement import PhaseTiming, SandboxFacts
 from hyperloom.inference_optimizer import framework_registry
 from hyperloom.measure.attachments import AttachmentError, place_attachments, substitute
 from hyperloom.measure.accuracy import read_accuracy
@@ -52,12 +51,14 @@ from hyperloom.measure.farm import FarmError, build_farm, place_farm, server_pyt
 from hyperloom.measure.framework_copies import PrivateFramework, private_framework
 from hyperloom.measure.framework_rows import RowsOnlyRefused
 from hyperloom.measure.magpie_launchers import install_launchers
+from hyperloom.measure.phases import KERNEL_TABLES, OTHER, REPRO_CASE, ROUND_COLLECT, TEARDOWN, PhaseRecorder
 from hyperloom.measure.profile_client import ProfileClientError, patch_profile_client
 from hyperloom.measure.profile_traces import PROFILE_DIR, collect_traces
 from hyperloom.measure.repro import ReproError, find_case, run_case
 from hyperloom.measure.returncodes import HOSTED_INFRA_FAILURE_RC, SERVER_BOOT_TIMEOUT_RC
+from hyperloom.measure.round_marks import ROLE_BOOT, ROLE_MEASURE, ROLE_WARMUP, RoundShape, read_runs, round_boundaries
 from hyperloom.sandbox.node import node_name
-from hyperloom.measure.socket import RoundOutcome, TestCall, TestOutcome
+from hyperloom.measure.socket import MeasurementTimeout, RoundOutcome, TestCall, TestOutcome
 from hyperloom.measure.spec import Attachment
 from hyperloom.measure.spec import EnvRoot as SpecEnvRoot
 from hyperloom.orchestrator.actions.executors import (
@@ -161,6 +162,8 @@ class _Run:
     notes: list[str] = field(default_factory=list)
     #: Ends a round whose server is not ready in time; ``None`` when the caller owns the cancellation.
     boot: BootGuard | None = None
+    #: Where the test's phases are stamped: the caller's recorder when the call carries one, else the backend's own.
+    phases: PhaseRecorder = field(default_factory=PhaseRecorder)
 
     def add(self, point: int, result: VariantResult) -> bool:
         """Record one result; say whether the test must go on."""
@@ -179,20 +182,29 @@ class LocalMeasurementBackend:
     def run_test(self, call: TestCall) -> TestOutcome:
         """Run ``call`` to the end and return its outcome; the inference server is reclaimed when this returns."""
         _validate(call)
-        with _PROCESS_LOCK, _rebuilt_environment(call) as call, _framework_tables(call) as private:
-            call = private.call
-            if call.kind == _PROFILE:
-                _patch_profile_client(call)
-            with _test_environment(call) as unset_envs:
-                if resolve_backend().name == "magpie":
-                    install_launchers(call.points)
-                run = _Run(call, [name for name in unset_envs if name not in private.redirected])
-                with _watch_output(call), _guard_boot(run):
-                    asyncio.run(_runner_of(call)(run))
+        phases = PhaseRecorder() if call.phases is None else call.phases
+        with _PROCESS_LOCK:
+            phases.begin(KERNEL_TABLES)
+            run = _measure(call, phases)
         _raise_on_timeout(run)
-        if call.kind == _PROFILE:
+        if run.call.kind == _PROFILE:
             _gather_traces(run)
         return _outcome(run)
+
+
+def _measure(call: TestCall, phases: PhaseRecorder) -> _Run:
+    """Lay out the test's environment, run its rounds and give what they produced."""
+    with _rebuilt_environment(call) as call, _framework_tables(call) as private:
+        call = private.call
+        if call.kind == _PROFILE:
+            _patch_profile_client(call)
+        with _test_environment(call) as unset_envs:
+            if resolve_backend().name == "magpie":
+                install_launchers(call.points)
+            run = _Run(call, [name for name in unset_envs if name not in private.redirected], phases=phases)
+            with _watch_output(call), _guard_boot(run):
+                asyncio.run(_runner_of(call)(run))
+    return run
 
 
 @contextlib.contextmanager
@@ -473,6 +485,7 @@ async def _grid(run: _Run, point: int, name: str, **kwargs: Any) -> VariantResul
     """One ``run_grid`` call for the point at index ``point``."""
     call = run.call
     with _free_port_for(call.points[point], kwargs.get("server_lifecycle")) as base_yaml, _booting(run, point, kwargs):
+        started = time.time()
         results = await run_grid(
             base_yaml_path=base_yaml,
             base_extra_args="",
@@ -484,7 +497,31 @@ async def _grid(run: _Run, point: int, name: str, **kwargs: Any) -> VariantResul
             serving_lease=call.serving_lease,
             **kwargs,
         )
+        ended = time.time()
+    _stamp_round(run, point, _round_shape(run, point, name, kwargs, results[0]), (started, ended))
     return results[0]
+
+
+def _round_shape(run: _Run, point: int, name: str, kwargs: dict[str, Any], result: VariantResult) -> RoundShape:
+    """What a round's call says about it, for reading the phases off the marks it left."""
+    lifecycle = kwargs.get("server_lifecycle")
+    role = ROLE_BOOT if kwargs.get("lifecycle_boot_only") else ROLE_WARMUP if name == _WARMUP else ROLE_MEASURE
+    benchmark = _point_config(run.call.points[point]).get("benchmark") or {}
+    stays_up = lifecycle is not None and not lifecycle.get("cleanup", True)
+    return RoundShape(
+        role,
+        is_magpie_agentx(benchmark),
+        bool(kwargs.get("server_already_ready")),
+        _is_failure(result),
+        ROUND_COLLECT if stays_up else TEARDOWN,
+    )
+
+
+def _stamp_round(run: _Run, point: int, shape: RoundShape, window: tuple[float, float]) -> None:
+    """Stamp the phases of the round that ran in ``window``; what follows it is ``other`` until something stamps."""
+    for boundary in round_boundaries(window, read_runs(Path(run.call.output_dir), window), shape):
+        run.phases.begin(boundary.name, at=boundary.at, point=point)
+    run.phases.begin(OTHER, at=window[1])
 
 
 async def _single(run: _Run) -> None:
@@ -566,12 +603,15 @@ class _Lifecycle:
         self.port = int(info.get("port") or 0)
         self.framework = str(info.get("framework") or "")
         self.reason = str(info.get("reason") or "")
+        self._phases = run.phases
 
     def settings(self, *, cleanup: bool) -> dict[str, Any]:
         return {"cleanup": cleanup, "pid_dir": str(self.pid_dir), "port": self.port}
 
     def teardown(self) -> None:
+        self._phases.begin(TEARDOWN)
         teardown_lifecycle_server(pid_dir=self.pid_dir, framework=self.framework, port=self.port)
+        self._phases.begin(OTHER)
 
 
 async def _sweep(run: _Run) -> None:
@@ -671,7 +711,9 @@ async def _repro(run: _Run) -> None:
         boot = await _boot_server(run, lifecycle, 0, "repro")
         run.add(0, boot)
         if not _is_failure(boot) and run.stopped_rc is None:
+            run.phases.begin(REPRO_CASE)
             await asyncio.to_thread(_run_case, run, lifecycle.port)
+            run.phases.begin(OTHER)
     finally:
         lifecycle.teardown()
 
@@ -714,7 +756,14 @@ def _gather_traces(run: _Run) -> None:
 def _raise_on_timeout(run: _Run) -> None:
     for _, result in run.results:
         if result.error_class in _TIMEOUT_CLASSES:
-            raise subprocess.TimeoutExpired(cmd=run.call.task_id, timeout=run.call.timeout_sec, output=result.error)
+            raise MeasurementTimeout(
+                run.call.task_id, run.call.timeout_sec, output=result.error, phases=_stamped_phases(run)
+            )
+
+
+def _stamped_phases(run: _Run) -> tuple[PhaseTiming, ...]:
+    """The phases stamped so far; a recorder the backend made itself is closed first, a runner's goes on."""
+    return run.phases.finish() if run.call.phases is None else run.phases.phases
 
 
 def _result_returncode(result: VariantResult) -> int:
@@ -906,4 +955,5 @@ def _outcome(run: _Run) -> TestOutcome:
         request_id=call.task_id,
         failure_class=failure_class,
         failure_reason=verdict.failure_reason,
+        phases=_stamped_phases(run),
     )

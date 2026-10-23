@@ -45,6 +45,7 @@ from hyperloom.measure.hosted_live import LiveOutputs, finite_number
 from hyperloom.measure.hosted_log import STATE_FINISHED, STATE_SENT, STATE_SUBMITTED, MeasurementJournal, Record
 from hyperloom.measure.hosted_spec import SpecContext, SpecRefused, build_spec, split_result_dir
 from hyperloom.measure.manifest import ResultManifest
+from hyperloom.measure.phases import ACQUIRED, LANDED, RUNNER_DONE, HostTimeline
 from hyperloom.measure.runner.rounds import ROUNDS_FILE, WARMUP_DIR
 from hyperloom.measure.returncodes import (
     HOSTED_INFRA_FAILURE_RC,
@@ -64,7 +65,7 @@ from hyperloom.measure.sandboxes import (
     SandboxPool,
 )
 from hyperloom.measure.signing import SigningError, verify
-from hyperloom.measure.socket import RoundOutcome, TestCall, TestOutcome
+from hyperloom.measure.socket import MeasurementTimeout, RoundOutcome, TestCall, TestOutcome
 from hyperloom.measure.spec import MeasurementSpec, blob_input_path, fingerprint, spec_sha256
 from hyperloom.sandbox.socket import (
     Sandbox,
@@ -223,6 +224,7 @@ class _Attempt:
     runner: RunnerSandbox
     started_unix: float
     stop: threading.Event
+    timeline: HostTimeline
 
 
 def _outcome(
@@ -334,18 +336,26 @@ class HostedMeasurementBackend:
         own return code (``returncodes``). A timeout raises :class:`subprocess.TimeoutExpired`, as the local flow does.
         A withdrawn test (:meth:`withdraw`) returns the stop code once its sandbox is closed.
         """
-        journal = self.journal
         stop = self._stops.begin(call.task_id)
+        timeline = HostTimeline(self._clock)
         try:
-            previous = journal.latest(call.task_id)
-            if previous is not None and previous.state in (STATE_SUBMITTED, STATE_SENT):
-                resumed = self._resume(call, previous, stop)
-                if resumed is not None:
-                    return resumed
-            return self._fresh(call, journal.next_attempt(call.task_id), stop)
+            outcome = self._attempt(call, stop, timeline)
+        except subprocess.TimeoutExpired as exc:
+            runner = exc.phases if isinstance(exc, MeasurementTimeout) else ()
+            raise MeasurementTimeout(str(exc.cmd), exc.timeout, phases=timeline.compose(runner)) from exc
         finally:
             self._stops.end(call.task_id)
             self._live.forget(call.task_id)
+        return replace(outcome, phases=timeline.compose(outcome.phases))
+
+    def _attempt(self, call: TestCall, stop: threading.Event, timeline: HostTimeline) -> TestOutcome:
+        journal = self.journal
+        previous = journal.latest(call.task_id)
+        if previous is not None and previous.state in (STATE_SUBMITTED, STATE_SENT):
+            resumed = self._resume(call, previous, stop, timeline)
+            if resumed is not None:
+                return resumed
+        return self._fresh(call, journal.next_attempt(call.task_id), stop, timeline)
 
     def withdraw(self, request_id: str) -> None:
         """Tell the test of ``request_id`` that nobody wants its result any more; it returns at once.
@@ -358,7 +368,7 @@ class HostedMeasurementBackend:
 
     # -- a new attempt ------------------------------------------------------------------------------------------
 
-    def _fresh(self, call: TestCall, number: int, stop: threading.Event) -> TestOutcome:
+    def _fresh(self, call: TestCall, number: int, stop: threading.Event, timeline: HostTimeline) -> TestOutcome:
         try:
             spec = self._build(call)
             gpus = spec.hardware.gpu_count
@@ -371,6 +381,7 @@ class HostedMeasurementBackend:
         if isinstance(acquired, TestOutcome):
             return acquired
         runner = acquired
+        timeline.mark(ACQUIRED)
         try:
             if stop.is_set():  # told to stop while it waited for the sandbox: nothing is sent to it
                 return _refusal(call, STOPPED_RETURNCODE, STOPPED_REASON, "the test was stopped before it started")
@@ -378,7 +389,7 @@ class HostedMeasurementBackend:
                 return _refusal(
                     call, HOSTED_RESULT_REJECTED_RC, "no_signing_key", "the platform reported no signing key"
                 )
-            attempt = _Attempt(call, call.task_id, number, spec, spec.to_bytes(), runner, self._clock(), stop)
+            attempt = _Attempt(call, call.task_id, number, spec, spec.to_bytes(), runner, self._clock(), stop, timeline)
             self._submit(attempt)
             return self._finish(attempt)
         except SandboxError as exc:
@@ -435,7 +446,9 @@ class HostedMeasurementBackend:
 
     # -- a re-attached attempt ----------------------------------------------------------------------------------
 
-    def _resume(self, call: TestCall, previous: Record, stop: threading.Event) -> TestOutcome | None:
+    def _resume(
+        self, call: TestCall, previous: Record, stop: threading.Event, timeline: HostTimeline
+    ) -> TestOutcome | None:
         """Re-attach to the sandbox of an unfinished attempt; ``None`` when it is gone and a new attempt must start."""
         try:
             runner = self._pool.reattach(str(previous.sandbox_id), stop=stop)
@@ -447,6 +460,7 @@ class HostedMeasurementBackend:
                 self._pool.discard(str(previous.sandbox_id))
                 self._mark_finished(previous, {"verdict": "withdrawn"})
             return _refusal(call, STOPPED_RETURNCODE, STOPPED_REASON, "the pool is closed")
+        timeline.mark(ACQUIRED)
         try:
             try:
                 raw = self.journal.load_spec(previous.request_id, previous.attempt)
@@ -457,7 +471,7 @@ class HostedMeasurementBackend:
                     call, HOSTED_SPEC_REJECTED_RC, "resume_failed", f"the journalled sheet is unusable: {exc}"
                 )
             started = float(previous.extra.get("submitted_unix", self._clock()))
-            attempt = _Attempt(call, previous.request_id, previous.attempt, spec, raw, runner, started, stop)
+            attempt = _Attempt(call, previous.request_id, previous.attempt, spec, raw, runner, started, stop, timeline)
             if not runner.public_key_pem:
                 return _refusal(
                     call, HOSTED_RESULT_REJECTED_RC, "no_signing_key", "the platform reported no signing key"
@@ -474,14 +488,16 @@ class HostedMeasurementBackend:
 
     def _finish(self, attempt: _Attempt) -> TestOutcome:
         status = self._wait(attempt)
-        if isinstance(status, TestOutcome):
-            self._finish_record(attempt, status, {"verdict": "ended_without_result"})
-            return status
-        if status.get("state") == "succeeded":
-            outcome = self._accept(attempt)
-        else:
-            outcome = self._runner_failed(attempt, status)
-        return outcome
+        attempt.timeline.mark(RUNNER_DONE)
+        try:
+            if isinstance(status, TestOutcome):
+                self._finish_record(attempt, status, {"verdict": "ended_without_result"})
+                return status
+            if status.get("state") == "succeeded":
+                return self._accept(attempt)
+            return self._runner_failed(attempt, status)
+        finally:
+            attempt.timeline.mark(LANDED)
 
     def _wait(self, attempt: _Attempt) -> dict[str, Any] | TestOutcome:
         """Poll until the runner writes ``status.json``; a stop, a timeout or a lost sandbox ends the wait early."""
@@ -505,8 +521,10 @@ class HostedMeasurementBackend:
                 self._save_logs(handle, Path(call.output_dir))
                 return _refusal(call, STOPPED_RETURNCODE, STOPPED_REASON, "the run is stopping")
             if self._timed_out(attempt):
+                attempt.timeline.mark(RUNNER_DONE)
                 self._save_logs(handle, Path(call.output_dir))
                 self._record_end(attempt, HOSTED_INFRA_FAILURE_RC, None, "timeout", {"verdict": "timeout"})
+                attempt.timeline.mark(LANDED)
                 self._pool.release(attempt.runner)
                 raise subprocess.TimeoutExpired(cmd=f"hosted test {call.task_id}", timeout=call.timeout_sec)
             self._sleep(config.poll_interval_sec)
@@ -659,6 +677,7 @@ class HostedMeasurementBackend:
             request_id=call.task_id,
             failure_class=failure.failure_class if failure.disposition is Disposition.FAILED else None,
             failure_reason=failure.failure_reason if failure.disposition is Disposition.FAILED else None,
+            phases=result.timing.phases,
         )
         self._finish_record(
             attempt,
@@ -677,7 +696,7 @@ class HostedMeasurementBackend:
         )
         self._emit("hyperloom.measurement_finished", attempt, {"accepted": True, "returncode": out.returncode})
         if out.timed_out:
-            raise subprocess.TimeoutExpired(cmd=f"hosted test {call.task_id}", timeout=call.timeout_sec)
+            raise MeasurementTimeout(f"hosted test {call.task_id}", call.timeout_sec, phases=outcome.phases)
         return outcome
 
     # -- verifying an accepted result again -----------------------------------------------------------------------

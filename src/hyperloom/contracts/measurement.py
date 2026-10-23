@@ -28,6 +28,14 @@ PRIORITY_HIGHEST = 0
 PRIORITY_LOWEST = 4
 
 _SHA256 = re.compile(r"[0-9a-f]{64}")
+#: A phase name is lowercase words joined by ``_``; one ``.`` ties a part to the phase it splits
+#: (``server_boot.weights_load``). A runner signs the names, so they stay plain tokens readers can group by.
+_PHASE_NAME = re.compile(r"[a-z][a-z0-9_]{0,47}(\.[a-z][a-z0-9_]{0,47})?")
+#: What a phase can say of itself: no phase lasts a year or holds more than a thousand cards for it, and no unix time of
+#: one is past the year 5000. A signed manifest states phases too, and sums of them must stay finite.
+MAX_PHASE_SECONDS = 366.0 * 24 * 3600
+_MAX_CARDS = 1024
+_MAX_UNIX_TIME = 1.0e11
 _E = TypeVar("_E", bound=Enum)
 
 
@@ -719,6 +727,66 @@ class RequestClasses:
 
 
 @dataclass(frozen=True)
+class PhaseTiming:
+    """How long one phase of a test took, and where it began.
+
+    ``started_at`` is a unix time on the clock of whoever measured the phase; a result lists its phases in the order
+    they happened. ``seconds`` is the phase's length. ``gpu_seconds`` is the card time it held, its seconds times the
+    cards the test holds, counted as ``TestResult.gpu_seconds`` counts the whole test (``0.0`` where nothing has put the
+    cards on it). ``point`` is the index of the measurement point a round's phase belongs to, ``None`` for a phase of
+    the test as a whole.
+    """
+
+    name: str
+    started_at: float
+    seconds: float
+    gpu_seconds: float = 0.0
+    point: int | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.name, str) or not _PHASE_NAME.fullmatch(self.name):
+            raise MeasurementError(f"a phase name is lowercase words joined by '_', got {self.name!r}")
+        for value, what, most in (
+            (self.started_at, "start", _MAX_UNIX_TIME),
+            (self.seconds, "seconds", MAX_PHASE_SECONDS),
+            (self.gpu_seconds, "gpu_seconds", MAX_PHASE_SECONDS * _MAX_CARDS),
+        ):
+            if _number(value, f"a phase's {what}") < 0:
+                raise MeasurementError(f"a phase's {what} cannot be negative, got {value}")
+            if value > most:
+                raise MeasurementError(f"a phase's {what} cannot be more than {most:g}, got {value}")
+        _optional_int(self.point, "a phase's point")
+
+    def to_document(self) -> dict[str, object]:
+        return {
+            "name": self.name,
+            "started_at": self.started_at,
+            "seconds": self.seconds,
+            "gpu_seconds": self.gpu_seconds,
+            "point": self.point,
+        }
+
+    @classmethod
+    def from_document(cls, document: object) -> PhaseTiming:
+        f = _mapping(document, "a phase")
+        return cls(
+            name=f.get("name"),
+            started_at=f.get("started_at"),
+            seconds=f.get("seconds"),
+            gpu_seconds=f.get("gpu_seconds", 0.0),
+            point=f.get("point"),
+        )
+
+
+def _check_phases(phases: object, unaccounted: object) -> None:
+    if not isinstance(phases, tuple) or not all(isinstance(phase, PhaseTiming) for phase in phases):
+        raise MeasurementError(f"phases must be a tuple of PhaseTiming, got {phases!r}")
+    if bool(phases) != (unaccounted is not None):
+        raise MeasurementError("unaccounted_seconds is set exactly when the result has phases")
+    _optional_number(unaccounted, "unaccounted_seconds")
+
+
+@dataclass(frozen=True)
 class TestResult:
     """The final outcome of one request; ``failure_class`` is the last attempt's class and empty on success.
 
@@ -734,6 +802,12 @@ class TestResult:
     ``request_classes`` has one entry for each measured round of an AgentX test (none for any other test): how many of
     the round's requests its client marked failed, by what the server did, and where the round's per-request export is.
     A document written before it existed has none, which is not a round that failed no request.
+    ``phases`` says where the test's wall time (``finished_at`` less ``started_at``) went, as the phases that followed
+    one another (the sandbox starting, the environment rebuilt, the server booting, each round, the result signed and
+    landed), and ``unaccounted_seconds`` is the part of that no phase covers, so the phases and it add up to the wall
+    time. It is negative when the phases outrun the wall time, as the runner phases of a test this process re-attached
+    to do, and it is ``None`` exactly when the result has no phases (a document written before they existed, a result
+    no measurement made).
     A document written while the greedy decode pass existed may carry ``decode_outputs`` and ``decode_identity``; they
     mean nothing now and ``from_document`` leaves them out, so such a document still loads.
     """
@@ -764,6 +838,8 @@ class TestResult:
     table_hits: tuple[TableHits, ...] = ()
     runtime_findings: tuple[str, ...] = ()
     request_classes: tuple[RequestClasses, ...] = ()
+    phases: tuple[PhaseTiming, ...] = ()
+    unaccounted_seconds: float | None = None
 
     def __post_init__(self) -> None:
         _text(self.request_id, "request_id")
@@ -794,6 +870,7 @@ class TestResult:
             isinstance(c, RequestClasses) for c in self.request_classes
         ):
             raise MeasurementError(f"request_classes must be a tuple of RequestClasses, got {self.request_classes!r}")
+        _check_phases(self.phases, self.unaccounted_seconds)
 
     def _check_repro_verdict(self) -> None:
         if self.repro_verdict not in ("", *REPRO_VERDICTS):
@@ -845,6 +922,8 @@ class TestResult:
             "table_hits": [value.to_document() for value in self.table_hits],
             "runtime_findings": list(self.runtime_findings),
             "request_classes": [value.to_document() for value in self.request_classes],
+            "phases": [value.to_document() for value in self.phases],
+            "unaccounted_seconds": self.unaccounted_seconds,
         }
 
     @classmethod
@@ -878,6 +957,8 @@ class TestResult:
             request_classes=tuple(
                 map(RequestClasses.from_document, _items(f.get("request_classes", ()), "request_classes"))
             ),
+            phases=tuple(map(PhaseTiming.from_document, _items(f.get("phases", ()), "phases"))),
+            unaccounted_seconds=f.get("unaccounted_seconds"),
         )
 
 
@@ -895,7 +976,9 @@ __all__ = [
     "AttachmentRef",
     "Attempt",
     "FailureClass",
+    "MAX_PHASE_SECONDS",
     "MeasurementError",
+    "PhaseTiming",
     "Purpose",
     "RequestClasses",
     "RoundValue",

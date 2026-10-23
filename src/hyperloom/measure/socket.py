@@ -11,17 +11,20 @@ puts it in ``asyncio.to_thread``. When it returns, the inference server has been
 from __future__ import annotations
 
 import importlib
+import subprocess
 import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
-from hyperloom.contracts.measurement import AccuracyValue, AttachmentRef, FailureClass, SandboxFacts
+from hyperloom.contracts.measurement import AccuracyValue, AttachmentRef, FailureClass, PhaseTiming, SandboxFacts
+from hyperloom.measure.phases import PhaseRecorder
 
 __all__ = [
     "EnvironmentRef",
     "MeasurementBackend",
+    "MeasurementTimeout",
     "RoundOutcome",
     "RoundPlan",
     "SessionFacts",
@@ -129,6 +132,9 @@ class TestCall:
     #: What the request ships with it (a ``repro`` test's case). The sheet carries them; whoever runs the call has
     #: unpacked each under ``<cwd>/attach/<id>/`` (a file attachment is the file ``<cwd>/attach/<id>``).
     attachments: tuple[AttachmentRef, ...] = ()
+    #: Where the backend stamps the phases of the test as it goes: a runner that has stamped its own passes its
+    #: recorder, so what the backend adds follows it; a call with none gets a recorder of the backend's own.
+    phases: PhaseRecorder | None = None
 
 
 @dataclass(frozen=True)
@@ -151,7 +157,10 @@ class RoundOutcome:
 
 @dataclass(frozen=True)
 class TestOutcome:
-    """What a test produced; ``failure_class`` is empty on success."""
+    """What a test produced; ``failure_class`` is empty on success.
+
+    ``phases`` are the phases of the test the backend stamped, in order; a backend that stamps none leaves it empty.
+    """
 
     __test__ = False
 
@@ -163,6 +172,17 @@ class TestOutcome:
     request_id: str | None = None
     failure_class: FailureClass | Literal["infra", "unclear", "candidate"] | None = None
     failure_reason: str | None = None
+    phases: tuple[PhaseTiming, ...] = ()
+
+
+class MeasurementTimeout(subprocess.TimeoutExpired):
+    """A test that ran out of time, with the phases it went through before it did."""
+
+    def __init__(
+        self, cmd: str, timeout: float, output: str | None = None, phases: tuple[PhaseTiming, ...] = ()
+    ) -> None:
+        super().__init__(cmd, timeout, output=output)
+        self.phases = phases
 
 
 class MeasurementBackend(Protocol):

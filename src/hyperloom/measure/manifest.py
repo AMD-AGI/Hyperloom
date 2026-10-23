@@ -15,6 +15,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from hyperloom.contracts.measurement import MAX_PHASE_SECONDS, MeasurementError, PhaseTiming
 from hyperloom.measure.docs import (
     PREFIXED_SHA256_RE,
     SHA256_RE,
@@ -142,6 +143,35 @@ class Outcome:
         return outcome
 
 
+#: How many phases a manifest may state: a test of a sweep has a few dozen.
+MAX_PHASES = 4096
+
+
+def _phase(value: Any, path: str) -> PhaseTiming:
+    r = Reader(value, path)
+    started, seconds = r.number("started_unix", minimum=0) or 0.0, r.number("seconds", minimum=0) or 0.0
+    name, point = r.text("name") or "", r.integer("point", minimum=0, optional=True)
+    r.done()
+    try:
+        return PhaseTiming(name, started, seconds, point=point)
+    except MeasurementError as exc:
+        raise DocumentError(f"{path}: {exc}") from None
+
+
+def _phases(value: Any, path: str) -> tuple[PhaseTiming, ...]:
+    """The runner's phases, lengths on its own clock; a manifest an older runner signed has none."""
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        raise DocumentError(f"{path}: expected an array")
+    if len(value) > MAX_PHASES:
+        raise DocumentError(f"{path}: more than {MAX_PHASES} phases")
+    phases = tuple(_phase(item, f"{path}[{index}]") for index, item in enumerate(value))
+    if sum(phase.seconds for phase in phases) > MAX_PHASE_SECONDS:
+        raise DocumentError(f"{path}: the phases add up to more than a year")
+    return phases
+
+
 @dataclass(frozen=True)
 class Timing:
     runner_started_unix: float
@@ -150,6 +180,7 @@ class Timing:
     finished_unix: float
     jit_compile_sec: float | None = None
     model_load_sec: float | None = None
+    phases: tuple[PhaseTiming, ...] = ()
 
     @classmethod
     def parse(cls, value: Any, path: str) -> "Timing":
@@ -161,6 +192,7 @@ class Timing:
             finished_unix=r.number("finished_unix", minimum=0) or 0.0,
             jit_compile_sec=r.number("jit_compile_sec", minimum=0, optional=True),
             model_load_sec=r.number("model_load_sec", minimum=0, optional=True),
+            phases=_phases(r.optional("phases"), r.at("phases")),
         )
         r.done()
         return timing

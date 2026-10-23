@@ -25,6 +25,9 @@ runner. The steps, each of which ends the script with ``runner_start_failed`` wh
 5. ``HYPERLOOM_CODE_REVISION`` is set to the commit and the runner replaces the script. The runner's remaining
    arguments are the script's own (``--spec-wait-sec`` and so on); ``--in``, ``--out`` and ``--scratch`` come from
    ``HYPERLOOM_IN_DIR``, ``HYPERLOOM_OUT_DIR`` and ``HYPERLOOM_SCRATCH_DIR`` (``/in``, ``/out``, ``/scratch``).
+   The unix times the script began and ended go to the runner as ``HYPERLOOM_BOOTSTRAP_STARTED_UNIX`` and
+   ``HYPERLOOM_BOOTSTRAP_ENDED_UNIX`` (empty when the image's ``date`` cannot say them), so the runner can state how long
+   the sandbox spent on the script, and how long the interpreter took to reach the runner, as phases of the test.
 
 A failing step writes ``/out/status.json`` itself (``state`` failed, ``error_class`` ``runner_start_failed``, the step
 and the last of its output in ``message``) and exits 2, as the runner does when it cannot start, so the application
@@ -53,6 +56,14 @@ BASE_PY=${HYPERLOOM_BASE_PYTHON:-python3}
 VENV=$SCRATCH/hl-venv
 LOG=${TMPDIR:-/tmp}/hl-bootstrap.$$.log
 STEP=start
+
+# now: the unix time, with fractions where this image's date has them, else whole seconds, else nothing.
+now() {
+    t=$(date +%s.%N 2>/dev/null) || t=
+    case $t in '' | *[!0-9.]*) t=$(date +%s 2>/dev/null) || t= ;; esac
+    printf '%s' "$t"
+}
+STARTED=$(now)
 
 # fail RC: leave the application a status.json that says what failed, then end like a runner that could not start.
 fail() {
@@ -129,6 +140,7 @@ step lock "$VENV/bin/python" -m pip install --require-hashes --no-deps --disable
 step import "$VENV/bin/python" -c "import hyperloom.measure.runner.__main__"
 
 rm -f "$LOG"
+export HYPERLOOM_BOOTSTRAP_STARTED_UNIX=$STARTED HYPERLOOM_BOOTSTRAP_ENDED_UNIX=$(now)
 exec "$VENV/bin/python" -m hyperloom.measure.runner run --in "$IN_DIR" --out "$OUT_DIR" --scratch "$SCRATCH" "$@"
 """
 

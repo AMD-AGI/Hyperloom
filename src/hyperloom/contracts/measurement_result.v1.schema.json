@@ -267,6 +267,45 @@
             "null"
           ],
           "minimum": 0
+        },
+        "phases": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "maxItems": 4096,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "started_unix",
+              "seconds"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9_]{0,47}(\\.[a-z][a-z0-9_]{0,47})?$"
+              },
+              "started_unix": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 100000000000
+              },
+              "seconds": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 31622400
+              },
+              "point": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "minimum": 0
+              }
+            }
+          }
         }
       }
     },

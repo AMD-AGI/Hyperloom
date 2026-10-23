@@ -67,6 +67,8 @@ def main(argv=None):
         "lock_file": lock_pkg.__file__,
         "lock_origin": lock_pkg.ORIGIN,
         "revision": os.environ.get("HYPERLOOM_CODE_REVISION"),
+        "bootstrap_started": os.environ.get("HYPERLOOM_BOOTSTRAP_STARTED_UNIX"),
+        "bootstrap_ended": os.environ.get("HYPERLOOM_BOOTSTRAP_ENDED_UNIX"),
         "signing_key_env": os.environ.get("HYPERLOOM_SIGNING_KEY_FILE"),
         "runner_file": __file__,
     }

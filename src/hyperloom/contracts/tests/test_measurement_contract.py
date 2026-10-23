@@ -15,6 +15,7 @@ from hyperloom.contracts.measurement import (
     FailureClass,
     MeasurementError,
     NOT_REPRODUCED,
+    PhaseTiming,
     Purpose,
     REPRODUCED,
     RequestClasses,
@@ -294,6 +295,61 @@ def test_a_cold_start_is_a_finite_number_that_is_not_negative() -> None:
         _result(cold_start_seconds=-0.5)
     with pytest.raises(MeasurementError, match="cold_start_seconds must be a finite number"):
         _result(cold_start_seconds=float("inf"))
+
+
+PHASES = (
+    PhaseTiming("sandbox_start", 100.0, 12.5),
+    PhaseTiming("server_boot", 120.0, 82.221, gpu_seconds=82.221, point=0),
+    PhaseTiming("server_boot.weights_load", 120.0, 40.0, gpu_seconds=40.0, point=0),
+)
+
+
+def test_phases_round_trip_and_a_document_written_before_them_loads_without() -> None:
+    result = _roundtrip(_result(phases=PHASES, unaccounted_seconds=-0.25))
+    assert result.phases == PHASES and result.unaccounted_seconds == -0.25
+    document = _result().to_document()
+    del document["phases"], document["unaccounted_seconds"]
+    loaded = TestResult.from_document(document)
+    assert (loaded.phases, loaded.unaccounted_seconds) == ((), None), "no phases is not a test that took no time"
+    assert _result().to_document()["phases"] == [] and _result().to_document()["unaccounted_seconds"] is None
+
+
+def test_a_result_has_an_unaccounted_time_exactly_when_it_has_phases() -> None:
+    with pytest.raises(MeasurementError, match="unaccounted_seconds is set exactly when the result has phases"):
+        _result(phases=PHASES)
+    with pytest.raises(MeasurementError, match="unaccounted_seconds is set exactly when the result has phases"):
+        _result(unaccounted_seconds=0.0)
+    with pytest.raises(MeasurementError, match="unaccounted_seconds must be a finite number"):
+        _result(phases=PHASES, unaccounted_seconds=float("nan"))
+    with pytest.raises(MeasurementError, match="phases must be a tuple of PhaseTiming"):
+        _result(phases=({"name": "x"},), unaccounted_seconds=0.0)
+
+
+@pytest.mark.parametrize(
+    ("fields", "message"),
+    [
+        ({"name": "Server Boot"}, "a phase name is lowercase words joined by '_'"),
+        ({"name": "boot\nforged: line"}, "a phase name is lowercase words joined by '_'"),
+        ({"name": "a.b.c"}, "a phase name is lowercase words joined by '_'"),
+        ({"seconds": -1.0}, "a phase's seconds cannot be negative"),
+        ({"gpu_seconds": -1.0}, "a phase's gpu_seconds cannot be negative"),
+        ({"started_at": -1.0}, "a phase's start cannot be negative"),
+        ({"seconds": float("inf")}, "a phase's seconds must be a finite number"),
+        ({"seconds": 1e9}, "a phase's seconds cannot be more than 3.16224e\\+07"),
+        ({"started_at": 1e12}, "a phase's start cannot be more than 1e\\+11"),
+        ({"gpu_seconds": 1e15}, "a phase's gpu_seconds cannot be more than"),
+        ({"point": -1}, "a phase's point must be an integer of at least 0"),
+    ],
+)
+def test_a_phase_that_breaks_the_contract_is_refused(fields: dict[str, object], message: str) -> None:
+    document = {"name": "warmup", "started_at": 1.0, "seconds": 2.0, "gpu_seconds": 2.0, "point": 0, **fields}
+    with pytest.raises(MeasurementError, match=message):
+        PhaseTiming.from_document(document)
+
+
+def test_a_phase_document_without_card_time_or_point_loads_with_none_of_either() -> None:
+    phase = PhaseTiming.from_document({"name": "warmup", "started_at": 1.0, "seconds": 2.0})
+    assert (phase.gpu_seconds, phase.point) == (0.0, None)
 
 
 def test_a_repro_verdict_is_one_of_the_two_verdicts() -> None:

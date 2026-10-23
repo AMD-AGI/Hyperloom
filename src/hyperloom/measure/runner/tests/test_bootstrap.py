@@ -11,9 +11,11 @@ holds a module the runner needs that only it has.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import stat
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -218,3 +220,45 @@ def test_the_script_is_posix_sh_and_the_command_carries_the_runner_arguments() -
     command = runner_start_command("--spec-wait-sec", "30")
     assert command[:3] == ("/bin/sh", "-c", BOOTSTRAP_SCRIPT)
     assert command[4:] == ("--spec-wait-sec", "30")
+
+
+def _date_shim(directory: Path, body: str) -> dict[str, str]:
+    """A ``PATH`` that finds a ``date`` of the test's own first: the clock of an image whose ``date`` is not GNU's."""
+    directory.mkdir()
+    shim = directory / "date"
+    shim.write_text(f"#!/bin/sh\n{body}\n")
+    shim.chmod(shim.stat().st_mode | stat.S_IXUSR)
+    return {"PATH": f"{directory}:{os.environ['PATH']}"}
+
+
+def test_the_runner_is_told_the_unix_times_the_script_began_and_ended(rig: Rig, tmp_path: Path) -> None:
+    before = time.time()
+    done = _run(rig, tmp_path)
+    after = time.time()
+
+    assert done.returncode == 0, done.stderr
+    probe = read_probe(tmp_path / "out")
+    began, ended = float(str(probe["bootstrap_started"])), float(str(probe["bootstrap_ended"]))
+    assert before - 1.0 <= began <= ended <= after, "the script ran between this test's two readings of the clock"
+    assert ended - began > 0.1, "the venv, the lock install and the import check are the script's time"
+
+
+def test_an_image_whose_date_has_no_sub_second_form_still_says_the_seconds_the_script_began_and_ended(
+    rig: Rig, tmp_path: Path
+) -> None:
+    path = _date_shim(tmp_path / "bin", 'case "$*" in "+%s.%N") echo "1700000000.%N";; "+%s") echo 1700000000;; esac')
+
+    assert _run(rig, tmp_path, path).returncode == 0
+
+    probe = read_probe(tmp_path / "out")
+    assert (probe["bootstrap_started"], probe["bootstrap_ended"]) == ("1700000000", "1700000000")
+
+
+def test_an_image_whose_date_cannot_say_leaves_both_times_empty_and_the_runner_starts_all_the_same(
+    rig: Rig, tmp_path: Path
+) -> None:
+    done = _run(rig, tmp_path, _date_shim(tmp_path / "bin", "exit 1"))
+
+    assert done.returncode == 0, done.stderr
+    probe = read_probe(tmp_path / "out")
+    assert (probe["bootstrap_started"], probe["bootstrap_ended"]) == ("", "")

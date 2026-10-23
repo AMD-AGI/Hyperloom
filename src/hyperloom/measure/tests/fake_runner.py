@@ -20,7 +20,9 @@ attachment placement and ``run_case``) against no server, and lists the verdict 
 ``fake_attached_env: [NAME, ...]`` places the sheet's attachments as the runner does and lists, in
 ``attached_env.json``, the path each variable holds in the served YAML, the sha256 of the file there, and the sha256 of
 every file in the directory it is in (``directory``; a directory attachment beside it is left out).
-``fake_legacy_decode: true`` lists the ``decode/outputs.jsonl`` that a runner of the removed decode pass left, so a
+``fake_phases: [[name, seconds], ...]`` states those phases, back to back, in the manifest's timing (``fake_phases_at``
+is the unix time the first begins, on this fake runner's own clock: 9000 by default); a runner that states none is
+the default. ``fake_legacy_decode: true`` lists the ``decode/outputs.jsonl`` that a runner of the removed decode pass left, so a
 bundle written then can be verified again.
 ``fake_export: [line, ...]`` lists the per-request export of an AgentX round (``aiperf_artifacts/profile_export.jsonl``
 below the round's directory) with those lines.
@@ -197,7 +199,26 @@ def _repro_files(spec: MeasurementSpec, root: Path, out: Path) -> dict[str, byte
     return {f"{REPRO_DIR}/{p.name}": p.read_bytes() for p in sorted(directory.iterdir())}
 
 
-def _manifest(spec: MeasurementSpec, raw: bytes, key: Any, files: dict[str, bytes], mode: str) -> dict[str, Any]:
+def _timing(config: dict[str, Any]) -> dict[str, Any]:
+    timing: dict[str, Any] = {
+        "runner_started_unix": 1.0,
+        "spec_received_unix": 2.0,
+        "server_ready_unix": 3.0,
+        "finished_unix": 4.0,
+    }
+    at = float(config.get("fake_phases_at", 9000.0))
+    phases = []
+    for name, seconds in config.get("fake_phases") or []:
+        phases.append({"name": name, "started_unix": at, "seconds": float(seconds), "point": None})
+        at += float(seconds)
+    if phases:
+        timing["phases"] = phases
+    return timing
+
+
+def _manifest(
+    spec: MeasurementSpec, raw: bytes, key: Any, files: dict[str, bytes], mode: str, config: dict[str, Any]
+) -> dict[str, Any]:
     failing = mode in ("fail_test", "fail_unknown", "timed_out")
     document = {
         "schema": RESULT_SCHEMA,
@@ -218,12 +239,7 @@ def _manifest(spec: MeasurementSpec, raw: bytes, key: Any, files: dict[str, byte
             "stderr_tail": "ModuleNotFoundError: x" if mode == "fail_test" else "",
         },
         "platform_env_changed": [],
-        "timing": {
-            "runner_started_unix": 1.0,
-            "spec_received_unix": 2.0,
-            "server_ready_unix": 3.0,
-            "finished_unix": 4.0,
-        },
+        "timing": _timing(config),
         "files": [
             {"path": path, "size": len(data), "sha256": hashlib.sha256(data).hexdigest()}
             for path, data in sorted(files.items())
@@ -243,7 +259,7 @@ def _publish(out: Path, spec: MeasurementSpec, raw: bytes, config: dict[str, Any
     if config.get("fake_attached_env"):
         sandbox_root = Path(os.environ["HYPERLOOM_SANDBOX_ROOT"])
         files.update(_attached_env_files(spec, sandbox_root, out, config["fake_attached_env"]))
-    manifest = _manifest(spec, raw, key, files, mode)
+    manifest = _manifest(spec, raw, key, files, mode, config)
     manifest_raw = encode_manifest(manifest)
     signer = signing.generate_private_key() if mode == "wrong_key" else key
     if mode == "tamper":

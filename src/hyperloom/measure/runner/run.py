@@ -27,6 +27,16 @@ from hyperloom.measure.failures import Disposition, FailureClassification, class
 from hyperloom.measure.local import LocalMeasurementBackend, TestCallRefused
 from hyperloom.measure.magpie_launchers import install_launchers
 from hyperloom.measure.manifest import encode_manifest, RESULT_SCHEMA
+from hyperloom.measure.phases import (
+    BOOTSTRAP,
+    ENV_REBUILD,
+    PREFLIGHT,
+    RESULT_SIGNING,
+    RUNNER_START,
+    SHEET_WAIT,
+    PhaseRecorder,
+    manifest_document,
+)
 from hyperloom.measure.pins import IMAGE_DIGEST_VAR
 from hyperloom.measure.runner import hardware
 from hyperloom.measure.runner.aiperf_patch import ReplayClientPatchError, patch_replay_client
@@ -52,6 +62,9 @@ _NODE_FAULT = "node_fault"
 _FAILED = "failed"
 _FILES_DIR = "files"
 _KEY_ENV = "HYPERLOOM_SIGNING_KEY_FILE"
+#: The unix times the start-up script began and ended, which the script sets (``measure.runner.bootstrap``).
+_BOOTSTRAP_STARTED_ENV = "HYPERLOOM_BOOTSTRAP_STARTED_UNIX"
+_BOOTSTRAP_ENDED_ENV = "HYPERLOOM_BOOTSTRAP_ENDED_UNIX"
 _TIMED_OUT_RC = 124
 
 
@@ -65,6 +78,8 @@ class _Context:
     started: float
     #: Checks that could not be made on this machine; a successful run says so in ``status.json``.
     notes: list[str] = field(default_factory=list)
+    #: The phases of this run on this machine's clock; the signed result states them.
+    phases: PhaseRecorder = field(default_factory=PhaseRecorder)
 
     @property
     def files(self) -> Path:
@@ -269,6 +284,7 @@ def _call(ctx: _Context, spec: MeasurementSpec, points: list[Path], inferencex: 
         unset_envs=spec.unset_envs,
         session_facts=SessionFacts((), str(inferencex), spec.tools.magpie),
         attachments=_case_attachments(spec),
+        phases=ctx.phases,
     )
 
 
@@ -391,6 +407,7 @@ def _write_bundle(ctx: _Context, signed: _Signed, outcome: dict, found: _Finding
 def _run_sheet(ctx: _Context, spec_path: Path, key, progress: Progress) -> None:
     raw = spec_path.read_bytes()
     received = time.time()
+    ctx.phases.begin(PREFLIGHT, at=received)
     spec = _parse(raw)
     visible = _visible(ctx.environ)
     _check_model(spec.config[0].yaml, dict(spec.model_hashes))
@@ -399,6 +416,7 @@ def _run_sheet(ctx: _Context, spec_path: Path, key, progress: Progress) -> None:
     before = hardware.ecc_counts(visible)
     changed = align_platform_env(ctx.environ, spec.platform_env)
     progress.phase("preparing")
+    ctx.phases.begin(ENV_REBUILD)
     points, inferencex, farm = _prepare(ctx, spec, visible)
     _patch_replay_client(ctx, points, inferencex)
     surface = _surface_sha256(spec, points)
@@ -406,6 +424,7 @@ def _run_sheet(ctx: _Context, spec_path: Path, key, progress: Progress) -> None:
     progress.phase("running")
     started = time.time()
     outcome, timed_out = _execute(call)
+    ctx.phases.begin(RESULT_SIGNING)
     progress.phase("collecting")
     harvest_leaked_artifacts(ctx.files, subprocess_started_unix=started, leak_root=ctx.work)
     drop_agentx_runtime(ctx.files)
@@ -421,6 +440,7 @@ def _run_sheet(ctx: _Context, spec_path: Path, key, progress: Progress) -> None:
         "spec_received_unix": received,
         "server_ready_unix": None,
         "finished_unix": time.time(),
+        "phases": manifest_document(ctx.phases.finish()),
     }
     _write_bundle(
         ctx,
@@ -428,6 +448,26 @@ def _run_sheet(ctx: _Context, spec_path: Path, key, progress: Progress) -> None:
         _outcome_document(outcome, timed_out),
         _Findings(files, facts, changed, timing, visible, surface),
     )
+
+
+def _unix_time(ctx: _Context, name: str) -> float | None:
+    """The unix time the start-up script left in ``name``, when it is one this run could have started after."""
+    try:
+        said = float(ctx.environ.get(name, ""))
+    except ValueError:
+        return None
+    return said if 0.0 < said <= ctx.started else None
+
+
+def _begin_phases(ctx: _Context) -> None:
+    """Start the run's phases: the start-up script (when it said when it began and ended), the interpreter's start to this
+    point, then the wait for the sheet."""
+    began, ended = _unix_time(ctx, _BOOTSTRAP_STARTED_ENV), _unix_time(ctx, _BOOTSTRAP_ENDED_ENV)
+    if began is not None:
+        ctx.phases.begin(BOOTSTRAP, at=began)
+        if ended is not None and ended >= began:
+            ctx.phases.begin(RUNNER_START, at=ended)
+    ctx.phases.begin(SHEET_WAIT, at=ctx.started)
 
 
 def run(
@@ -445,6 +485,7 @@ def run(
     for sub in ("farm", "attach", "pids"):
         (work / sub).mkdir(parents=True, exist_ok=True)
     ctx = _Context(in_dir, out_dir, work, scratch / "cache", environ, time.time())
+    _begin_phases(ctx)
     with Progress(out_dir, files_dir=ctx.files) as progress:
         try:
             key = _load_key(environ)
