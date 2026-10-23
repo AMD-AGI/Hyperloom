@@ -151,13 +151,16 @@ class Toolbox:
     async def release_branch_sandbox(self, lease_id: str) -> None:
         self.released.append(lease_id)
 
-    async def submit_test(self, request: TestRequest) -> str:
-        if self.refusals:
-            raise self.refusals.pop(0)
+    async def check_test(self, request: TestRequest) -> None:
         if self.refused_envs & set(request.delta.config.envs):
             names = ", ".join(sorted(self.refused_envs))
             reason = f"the environment does not compile: the renderer dropped or changed launch variables {names}"
             raise RequestRejected(reason, "delta_not_applicable")
+
+    async def submit_test(self, request: TestRequest) -> str:
+        if self.refusals:
+            raise self.refusals.pop(0)
+        await self.check_test(request)
         accepted = TestRequest(**{**request.__dict__, "request_id": f"r{len(self.requests) + 1}"})
         self.requests.append(accepted)
         await self._notebook.write_request(accepted)
@@ -489,6 +492,28 @@ async def test_a_keep_file_whose_counter_never_resolves_is_noted_once(tmp_path: 
     assert len(unread) == 1 and not rig.toolbox.requests
 
 
+async def test_a_refused_variable_is_left_out_of_later_keeps_while_their_other_launch_changes_go_in(
+    tmp_path: Path,
+) -> None:
+    agent = Agent(envs={"SGLANG_USE_AITER": "1"}, config_source=CONFIG_SOURCE, tail=30.0)
+    rig = await _rig(tmp_path, agent)
+    rig.toolbox.refused_envs = {"SGLANG_USE_AITER"}
+
+    await rig.session.preflight()
+    running = asyncio.create_task(rig.session.run())
+    await _until(lambda: rig.toolbox.requests, "the first keep")
+    await rig.toolbox_notebook.write_result(result("r1"))
+    await _until(lambda: len(rig.toolbox.requests) == 2, "the second keep")
+
+    configs = [request.delta.config for request in rig.toolbox.requests]
+    assert [(config.server_args, dict(config.envs)) for config in configs] == [
+        ("--max-num-seqs 256", {}),
+        ("--max-num-seqs 512", {}),
+    ]
+    await rig.session.stop()
+    await asyncio.wait_for(running, 10)
+
+
 async def test_a_keep_whose_launch_the_toolbox_refuses_is_imported_without_it_and_so_are_later_keeps(
     tmp_path: Path,
 ) -> None:
@@ -506,6 +531,6 @@ async def test_a_keep_whose_launch_the_toolbox_refuses_is_imported_without_it_an
     assert all(not request.delta.config.envs for request in rig.toolbox.requests)
     assert "+max_num_seqs = 512" in rig.patch(rig.toolbox.requests[1])
     refused = [note for note in await rig.notices() if "SGLANG_USE_AITER" in note]
-    assert len(refused) == 1 and "its source is imported alone" in refused[0]
+    assert len(refused) == 1 and "imported without SGLANG_USE_AITER" in refused[0]
     await rig.session.stop()
     await asyncio.wait_for(running, 10)

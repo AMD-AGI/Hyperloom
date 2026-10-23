@@ -23,7 +23,7 @@ import json
 import logging
 import time
 from collections.abc import Awaitable, Callable
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -106,25 +106,23 @@ class KeepWatch:
     """What a run knows of the agent's keeps: ``root``, the workspace's git commit every keep is read against (the
     agent may commit on top of it); ``seq``, the keeps seen; ``mark``, what the keep file last said of them; ``base``,
     the keeps seen before the agent last started its count over; ``pending``, the latest keep read and not submitted
-    yet; and ``refused_launch``, the server arguments and environment the toolbox refused to launch, which every later
-    keep that still runs with them is imported without."""
+    yet; and what of the agent's launch the toolbox refused, which every later keep that still runs with it is imported
+    without: ``refused_envs``, each variable with the value refused (``None``: the variable left unset), and
+    ``refused_args``, server arguments refused as a whole."""
 
     root: str
     seq: int = 0
     mark: int | str | None = None
     base: int = 0
     pending: KeptChange | None = None
-    refused_launch: tuple[str, dict[str, str]] | None = None
+    refused_envs: dict[str, str | None] = field(default_factory=dict)
+    refused_args: str | None = None
 
     @classmethod
     def load(cls, path: Path) -> KeepWatch:
         document = json.loads(path.read_text(encoding=ENCODING))
-        pending, refused = document.pop("pending"), document.pop("refused_launch", None)
-        return cls(
-            **document,
-            pending=None if pending is None else KeptChange(**pending),
-            refused_launch=None if refused is None else (refused[0], dict(refused[1])),
-        )
+        pending = document.pop("pending")
+        return cls(**document, pending=None if pending is None else KeptChange(**pending))
 
     def save(self, path: Path) -> None:
         pending = None if self.pending is None else asdict(self.pending)
@@ -134,7 +132,8 @@ class KeepWatch:
             "mark": self.mark,
             "base": self.base,
             "pending": pending,
-            "refused_launch": self.refused_launch,
+            "refused_envs": self.refused_envs,
+            "refused_args": self.refused_args,
         }
         path.write_text(json.dumps(document), encoding=ENCODING)
 
@@ -275,39 +274,69 @@ class AutonomousSession:
     async def _submit(self, manifest: AgentManifest, watch: KeepWatch) -> None:
         """Submit the pending keep once nothing of the branch is measured or being judged, against the head then.
 
-        A keep whose launch the toolbox cannot compile (``delta_not_applicable`` with a config change) goes again with
-        the head's launch, its source alone: keeps are cumulative, so a launch the measurement refuses, such as a
-        variable its launcher sets itself, would otherwise refuse every keep after it."""
+        A keep whose launch the toolbox cannot compile (``delta_not_applicable``) goes again without the part of its
+        launch that is refused (:meth:`_narrowed`): keeps are cumulative, so a launch entry the measurement refuses,
+        such as a variable its launcher sets itself, would otherwise refuse every keep after it, and is left out of
+        them from then on."""
 
         kept = watch.pending
         if kept is None or await self._busy():
             return
         head = await self._setup.repo.head(self._start.branch)
         launch = (await self._setup.repo.read_recipe(head)).launch
-        if watch.refused_launch == (kept.server_args, dict(kept.envs)):
-            kept = replace(kept, server_args=launch.server_args, envs=dict(launch.envs))
+        kept = _without_refused(kept, launch, watch)
         try:
             await self._submitted(kept, head, await self._delta(kept, head))
         except Backpressure:
             return
         except RequestRejected as error:
-            alone = replace(kept, server_args=launch.server_args, envs=dict(launch.envs))
-            if error.code != LAUNCH_REFUSED or alone == kept:
+            narrowed = await self._narrowed(kept, launch, head, watch) if error.code == LAUNCH_REFUSED else None
+            if narrowed is None:
                 await self._note(f"keep {kept.seq} was refused: {error.reason}")
             else:
-                watch.refused_launch = (kept.server_args, dict(kept.envs))
-                await self._note(f"keep {kept.seq} was refused: {error.reason}; its source is imported alone")
-                await self._submit_alone(alone, head)
+                left_out = ", ".join([*watch.refused_envs, *(["its server arguments"] if watch.refused_args else [])])
+                await self._note(f"keep {kept.seq} was refused: {error.reason}; imported without {left_out}")
+                await self._submit_narrowed(narrowed, head)
         except RecipeError as error:
             await self._note(f"keep {kept.seq} is no recipe change and is skipped: {error}")
         watch.pending = None
         watch.save(self._place.workspace / WATCH_FILE)
 
-    async def _submit_alone(self, kept: KeptChange, head: str) -> None:
+    async def _submit_narrowed(self, kept: KeptChange, head: str) -> None:
         try:
             await self._submitted(kept, head, await self._delta(kept, head))
         except (RequestRejected, RecipeError) as error:
-            await self._note(f"keep {kept.seq}'s source alone was refused too: {error}")
+            await self._note(f"keep {kept.seq} was refused again: {error}")
+
+    async def _narrowed(self, kept: KeptChange, launch: LaunchConfig, head: str, watch: KeepWatch) -> KeptChange | None:
+        """``kept`` without the least of its launch the toolbox's acceptance takes it without, recorded in ``watch``:
+        one changed variable, then every changed variable, then its server arguments, then both; ``None`` when even
+        its source alone is refused. Each try is an acceptance check, which queues nothing."""
+
+        changed = sorted(name for name in {*kept.envs, *launch.envs} if kept.envs.get(name) != launch.envs.get(name))
+        args = () if kept.server_args == launch.server_args else (kept.server_args,)
+        tries = [((name,), ()) for name in changed] + [(tuple(changed), ()), ((), args), (tuple(changed), args)]
+        for names, refused_args in tries:
+            if not names and not refused_args:
+                continue
+            candidate = _reverted(kept, launch, names, bool(refused_args))
+            if await self._accepted(candidate, head):
+                watch.refused_envs.update({name: kept.envs.get(name) for name in names})
+                watch.refused_args = refused_args[0] if refused_args else watch.refused_args
+                return candidate
+        return None
+
+    async def _accepted(self, kept: KeptChange, head: str) -> bool:
+        try:
+            delta = await self._delta(kept, head)
+            if delta is None:
+                return False
+            await self._setup.toolbox.check_test(
+                TestRequest(TestKind.TEST, Purpose.EXPLORE, self._start.branch, head, delta)
+            )
+        except (RequestRejected, RecipeError):
+            return False
+        return True
 
     async def _delta(self, kept: KeptChange, head: str) -> RecipeDelta | None:
         repo, component = self._setup.repo, self._setup.component
@@ -385,6 +414,21 @@ class AutonomousSession:
     async def _note(self, content: str) -> None:
         entry = BranchLogEntry(self._start.branch, BranchLogType.RESULT, f"{NOTICE} {content}")
         await self._place.notebook.append_branch_log(entry)
+
+
+def _without_refused(kept: KeptChange, launch: LaunchConfig, watch: KeepWatch) -> KeptChange:
+    """``kept`` with each launch entry the toolbox refused before, and that it still runs with, set back to ``launch``'s."""
+
+    names = tuple(name for name, value in watch.refused_envs.items() if kept.envs.get(name) == value)
+    return _reverted(kept, launch, names, kept.server_args == watch.refused_args)
+
+
+def _reverted(kept: KeptChange, launch: LaunchConfig, names: tuple[str, ...], args: bool) -> KeptChange:
+    """``kept`` with the variables ``names``, and its server arguments when ``args``, as ``launch`` has them."""
+
+    envs = {name: value for name, value in kept.envs.items() if name not in names}
+    envs.update({name: launch.envs[name] for name in names if name in launch.envs})
+    return replace(kept, server_args=launch.server_args if args else kept.server_args, envs=envs)
 
 
 def _being_judged(record: TestRecord, settled_before: float) -> bool:
