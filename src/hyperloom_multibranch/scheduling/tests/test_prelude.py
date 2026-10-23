@@ -51,6 +51,7 @@ from hyperloom_multibranch.scheduling.processes import ProcessRegistry, Register
 from hyperloom_multibranch.scheduling.requests import SessionTests
 from hyperloom_multibranch.scheduling.settings import InferenceXShape, KernelOptimizer, ReusedPrelude, Workload
 from hyperloom_multibranch.scheduling.tests.peer_fakes import (
+    BASE_IMAGE_DIGEST,
     OneChampionKB,
     LAUNCH_FLAG,
     MbFakeChildRegistry,
@@ -73,7 +74,7 @@ from hyperloom_multibranch.scheduling.tests.child_sessions import (
 
 NOW = 1_000_000.0
 #: The image the fake toolbox measures on, which the root recipe must carry.
-IMAGE = FakeToolboxConfig().image_digest
+IMAGE = BASE_IMAGE_DIGEST
 STUBBORN_CHILD = ("sh", "-c", "trap '' TERM; sleep 60")
 #: Clock seconds left before the hard stop when the stubborn child's PRELUDE is cancelled.
 NEAR_HARD_STOP_SECONDS = 0.4
@@ -117,10 +118,11 @@ def _peers(layout: SessionLayout, accuracy: float | None = None) -> PreludePeers
 
     scores = {} if accuracy is None else {RecipeDelta().fingerprint(): accuracy}
     toolbox_notebook = LocalNotebook(layout.notebook, Writer(Role.TOOLBOX, "toolbox"), clock=_clock().now)
-    toolbox = RecordingToolbox(toolbox_notebook, accuracy=scores, conc=WORKLOAD.conc)
+    repo = GitExperimentRepo(layout.repo, LocalBlobStore(layout.blobs))
+    toolbox = RecordingToolbox(toolbox_notebook, accuracy=scores, conc=WORKLOAD.conc, repo=repo)
     tests = SessionTests(toolbox, Clock(now=_clock().now, sleep=_instant))
     gate = session_gate(LocalNotebook(layout.notebook, Writer(Role.GATE, "gate"), clock=_clock().now), toolbox)
-    return PreludePeers(GitExperimentRepo(layout.repo, LocalBlobStore(layout.blobs)), toolbox, tests, gate)
+    return PreludePeers(repo, toolbox, tests, gate)
 
 
 def _clock(times: list[float] | None = None) -> Clock:

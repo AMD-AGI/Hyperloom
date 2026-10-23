@@ -8,8 +8,8 @@ The root runs ``--max-num-seqs 64``; branch ``s1`` commits ``c1`` (+4%, ``vllm``
 measures follows from the tags of the recipe it builds (:data:`CURVES`). The repository applies the merged patches to
 a ``vllm`` package the bench lays out; a conflicting ``c1`` carries a second patch of the same line.
 
-The toolbox's fake reads every parent as an empty recipe, so only a merge that pins ``vllm`` in full, which a merge
-onto a head without it does, is accepted there; the root pins no component.
+The toolbox's fake reads each parent's recipe from the bench's repository, as the real toolbox does, so a merge onto a
+head that already pins ``vllm`` is accepted with a delta of patches alone; the root pins no component.
 """
 
 from __future__ import annotations
@@ -141,10 +141,12 @@ class HeldRetests(RecordingToolbox):
         self.confirming = asyncio.Event()
 
     async def submit_test(self, request: TestRequest) -> str:
-        if request.purpose is Purpose.CONFIRM:
-            self.executor.gate.clear()
-            self.confirming.set()
-        return await super().submit_test(request)
+        if request.purpose is not Purpose.CONFIRM:
+            return await super().submit_test(request)
+        self.executor.gate.clear()
+        accepted = await super().submit_test(request)
+        self.confirming.set()
+        return accepted
 
 
 class HeldRepo(GitExperimentRepo):
@@ -271,7 +273,7 @@ async def _bench(
         LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id=root)
     )
     toolbox_notebook = LocalNotebook(notebook, Writer(Role.TOOLBOX, "toolbox"), clock=clock)
-    toolbox = toolbox_type(toolbox_notebook, recipe_effect(tmp_path / "repo", curves), accuracy)
+    toolbox = toolbox_type(toolbox_notebook, recipe_effect(tmp_path / "repo", curves), accuracy, repo=repo)
     merger = LocalNotebook(notebook, Writer(Role.INTEGRATOR, "integrator"), clock=clock)
     tests = SessionTests(toolbox, Clock(now=clock, sleep=_instant))
     gate = session_gate(LocalNotebook(notebook, Writer(Role.GATE, "gate"), clock=clock), toolbox)

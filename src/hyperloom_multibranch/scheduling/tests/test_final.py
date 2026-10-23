@@ -217,7 +217,9 @@ class Bench:
         self.root = root = await self.repo.init_root(Recipe(BASE_IMAGE_DIGEST))
         scheduler = self.handle(Role.SCHEDULER)
         await scheduler.record_lineage(LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id=root))
-        self.toolbox = RecordingToolbox(self.handle(Role.TOOLBOX), recipe_effect(self.tmp_path / "repo", curves))
+        self.toolbox = RecordingToolbox(
+            self.handle(Role.TOOLBOX), recipe_effect(self.tmp_path / "repo", curves), repo=self.repo
+        )
         self.tests = SessionTests(self.toolbox, self.time.clock)
         self.gate = session_gate(self.handle(Role.GATE), self.toolbox)
         baseline = integration_test_request(TestKind.TEST, Purpose.BASELINE, root)

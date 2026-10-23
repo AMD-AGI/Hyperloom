@@ -341,12 +341,16 @@ class Stage:
         return LocalNotebook(self.layout.notebook, Writer(role, branch or role.value, branch), clock=self.time.now)
 
     def factory(self, setup: PeerSetup) -> Peers:
+        repo = self.repo_type(setup.layout.repo, setup.blobs, self.time)
         toolbox = self.toolbox_type(
-            self.handle(Role.TOOLBOX), _measured(setup.layout.repo), conc=CONC, log=setup.layout.toolbox / SUBMISSIONS
+            self.handle(Role.TOOLBOX),
+            _measured(setup.layout.repo),
+            conc=CONC,
+            log=setup.layout.toolbox / SUBMISSIONS,
+            repo=repo,
         )
         if isinstance(toolbox, StuckToolbox) and self.stuck:
             toolbox.stuck = self.stuck
-        repo = self.repo_type(setup.layout.repo, setup.blobs, self.time)
         rule = workload_rule(setup.workload, self.handle(Role.GATE))
         self.sessions = RecordedSessions(
             toolbox,
