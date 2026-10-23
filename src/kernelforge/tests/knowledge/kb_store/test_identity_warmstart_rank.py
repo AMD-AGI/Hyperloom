@@ -142,3 +142,15 @@ def test_fuzzy_ranking_never_relaxes_the_other_four_dimensions():
     ]
 
     assert rank_fallback_identities(_target(), rows) == []
+
+
+def test_a_same_isa_board_ranks_above_a_cross_isa_one_for_every_board():
+    """GPU affinity reads the arch off the shared board table, marketing-name spellings included."""
+    from hyperloom.common.gpu_identity import AMD_GPU_BOARDS
+    from kernelforge.knowledge.kb_store.identity.warmstart_rank import _gpu_affinity
+
+    for board in AMD_GPU_BOARDS.values():
+        for identifier in board.identifiers:
+            for other in AMD_GPU_BOARDS.values():
+                expected = 3 if other is board and identifier == board.product else 2 if other.gfx == board.gfx else 1
+                assert _gpu_affinity(identifier, other.product) == expected, (identifier, other.product)

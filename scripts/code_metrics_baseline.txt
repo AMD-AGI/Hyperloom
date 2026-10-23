@@ -480,7 +480,7 @@ module-lines src/hyperloom/orchestrator/specialists/runner.py 1453
 module-lines src/hyperloom/orchestrator/specialists/subprocess_.py 1386
 module-lines src/hyperloom/orchestrator/state/shared_state.py 2424
 module-lines src/hyperloom/orchestrator/trace_analysis/tracelens_skill_runner.py 1309
-module-lines src/kernelforge/fusion/author.py 1263
+module-lines src/kernelforge/fusion/author.py 1255
 module-lines src/kernelforge/fusion/command.py 1584
 module-lines src/kernelforge/fusion/discover.py 1421
 module-lines src/kernelforge/fusion/validate.py 1513

@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.gpu_identity import AMD_GPU_BOARDS, board_by_identifier
+
 from .model_analyzer import ModelProfile
 
 log = logging.getLogger(__name__)
@@ -38,19 +40,8 @@ class TunerSpec:
 # Kernel signature patterns indicating 1-stage ASM (from server log)
 _1STAGE_PATTERN = re.compile(r"using 1stage default", re.IGNORECASE)
 
-# Map known GPU type strings to their gfx architecture.
-_GPU_TYPE_TO_GFX = {
-    "mi300x": "gfx942",
-    "mi308x": "gfx942",
-    "mi325x": "gfx942",
-    "mi355x": "gfx950",
-    "amd_instinct_mi300x": "gfx942",
-    "amd_instinct_mi355x": "gfx950",
-}
-_GFX_TO_CANONICAL_GPU = {
-    "gfx942": "mi300x",
-    "gfx950": "mi355x",
-}
+# The board KB rows of an arch are recorded under.
+_GFX_TO_CANONICAL_GPU = {AMD_GPU_BOARDS[product].gfx: product for product in ("mi300x", "mi355x")}
 
 # Architectures that cannot run FP4/MXFP4 GEMM (aiter requires gfx950).
 # How many runtime lookups a table has to have missed before its owner is worth booking time for. Same number as
@@ -89,8 +80,9 @@ def resolve_gpu_type(gpu_type: str) -> str:
                 "pass --gpu-type explicitly (for example, mi300x or mi355x)."
             )
     normalized = re.sub(r"[\s-]+", "_", key)
-    if normalized in _GPU_TYPE_TO_GFX:
-        return _GFX_TO_CANONICAL_GPU.get(_GPU_TYPE_TO_GFX[normalized], normalized)
+    board = board_by_identifier(normalized)
+    if board:
+        return _GFX_TO_CANONICAL_GPU.get(board.gfx, board.product)
     return _GFX_TO_CANONICAL_GPU.get(normalized, normalized)
 
 
@@ -101,7 +93,8 @@ def _resolve_gfx_arch(gpu_type: str) -> str:
         return _detect_local_gfx_arch()
     if key.startswith("gfx"):
         return key
-    return _GPU_TYPE_TO_GFX.get(key, "")
+    board = board_by_identifier(key)
+    return board.gfx if board else ""
 
 
 def _fp4_unsupported_on(gfx_arch: str) -> bool:

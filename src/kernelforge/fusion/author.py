@@ -28,6 +28,7 @@ from kernelforge.agent_backends.base import (
 from kernelforge.agent_backends.session_resume import is_api_failure
 
 from .emit import _FUSED_MODULE_MARKERS, _FUSED_MODULE_PREFIXES, _is_fused_module_name
+from .gpu_arch import arch_phrase
 from .llm_failure import (
     DEFAULT_BASE_DELAY_SEC,
     DEFAULT_MAX_DELAY_SEC,
@@ -87,15 +88,6 @@ def proven_fusion_fewshot() -> str:
 """
 
 
-def _arch_phrase(gpu_arch: str) -> str:
-    """How to name the target GPU in a prompt."""
-    arch = (gpu_arch or "").strip().lower()
-    marketing = {"gfx950": "MI355X", "gfx942": "MI300X/MI325X"}.get(arch, "")
-    if not arch:
-        return "an AMD ROCm GPU"
-    return f"AMD {marketing} ({arch})" if marketing else f"an AMD GPU ({arch})"
-
-
 def _model_dir_block(model_path: str) -> str:
     """Name the model directory, because the alternative is that it gets searched for."""
     if not model_path:
@@ -153,7 +145,7 @@ def build_author_prompt(recipe: dict, brief: AuthorBrief) -> str:
         else ""
     )
     return f"""You are optimizing the {framework} model file for a decode-path kernel fusion on
-{_arch_phrase(gpu_arch)}, bf16 serving. Work autonomously; do not ask questions.
+{arch_phrase(gpu_arch)}, bf16 serving. Work autonomously; do not ask questions.
 
 ## Target
 - Framework source file to edit: {recipe.get("source_file") or "(resolve it under the framework model dir)"}
@@ -255,7 +247,7 @@ next to the speedup. A microbenchmark win alone is NOT sufficient to keep it.
         else ""
     )
     return f"""You are optimizing the {framework} model file `{src}` with SEVERAL decode-path
-kernel fusions on {_arch_phrase(gpu_arch)}, bf16 serving. Work autonomously; no questions.
+kernel fusions on {arch_phrase(gpu_arch)}, bf16 serving. Work autonomously; no questions.
 
 {_model_dir_block(model_path)}{trace_kernels_block(recipes[0].get("trace_kernels"))}
 ## Representative decode shapes (model config + trace)

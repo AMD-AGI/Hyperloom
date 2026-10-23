@@ -309,6 +309,9 @@ class TestGpuTypeAutoDetect:
             ("gfx950", "mi355x"),
             ("MI355X", "mi355x"),
             ("AMD-Instinct-MI355X", "mi355x"),
+            ("AMD Instinct MI325X", "mi300x"),
+            ("r9700", "r9700"),
+            ("AMD Radeon AI PRO R9700", "r9700"),
         ],
     )
     def test_public_resolver_canonicalizes_explicit_known_values(
@@ -317,6 +320,14 @@ class TestGpuTypeAutoDetect:
         expected,
     ):
         assert router.resolve_gpu_type(raw) == expected
+
+    def test_every_board_identifier_resolves_to_its_arch(self):
+        """The arch comes from the shared board table, so a new board resolves here in the commit that adds it."""
+        from hyperloom.common.gpu_identity import AMD_GPU_BOARDS
+
+        for board in AMD_GPU_BOARDS.values():
+            for identifier in board.identifiers:
+                assert router._resolve_gfx_arch(identifier) == board.gfx, identifier
 
     def test_public_resolver_fails_closed_when_detection_fails(self, monkeypatch):
         monkeypatch.setattr(router, "_detect_local_gfx_arch", lambda: "")
