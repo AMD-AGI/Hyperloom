@@ -94,7 +94,6 @@ class HostGroup(str, Enum):
     MEASUREMENT_KEY = "measurement-key"
     SUBRUN_KEY = "subrun-key"
     DEV_KEY = "dev-key"
-    ARCHIVE = "archive"
 
 
 _ALWAYS_REQUIRED: tuple[str, ...] = (Var.INPUT_FILE, Var.RUN_ID, Var.RUN_CREATED_AT, Var.STATE_DIR)
@@ -106,7 +105,6 @@ _GROUP_VARS: Mapping[HostGroup, tuple[str, ...]] = {
     HostGroup.MEASUREMENT_KEY: (Var.SANDBOX_KEY_MEASUREMENT,),
     HostGroup.SUBRUN_KEY: (Var.SANDBOX_KEY_SUBRUN,),
     HostGroup.DEV_KEY: (Var.SANDBOX_KEY_DEV,),
-    HostGroup.ARCHIVE: (Var.RESULT_ARCHIVE, Var.AWS_ACCESS_KEY_ID, Var.AWS_SECRET_ACCESS_KEY),
 }
 
 #: Required by default: the shape of the first hosted profile (run, state, input and the MCP server).
@@ -202,7 +200,7 @@ class HostInfo:
     e2b_api_url: str | None
     e2b_sandbox_url: str | None
     sandbox_keys: SandboxKeys
-    result_archive: ArchiveLocation | None
+    result_archive: ArchiveLocation | None  # None: results are archived on the shared storage
     archive_endpoint_url: str | None
     archive_region: str | None
     archive_credentials: ArchiveCredentials | None
@@ -354,7 +352,7 @@ def _is_template_entry(entry: object) -> bool:
 def _archive_location(value: str) -> ArchiveLocation:
     parts = urlsplit(value)
     if parts.scheme != "s3" or parts.query or parts.fragment:
-        raise ValueError("must be s3://<bucket>/<prefix>")
+        raise ValueError("only s3://<bucket>/<prefix> or unset (shared storage) is accepted")
     if not _BUCKET_RE.match(parts.netloc):
         raise ValueError("bucket is not a valid S3 bucket name")
     segments = PurePosixPath(parts.path).parts[1:] if parts.path else ()
@@ -378,10 +376,11 @@ def _sandbox_keys(reader: _Reader) -> SandboxKeys:
     )
 
 
-def _archive_credentials(reader: _Reader) -> ArchiveCredentials | None:
-    # The pair is all or nothing: one half set means the host meant to give credentials and got them wrong.
+def _archive_credentials(reader: _Reader, archive: ArchiveLocation | None) -> ArchiveCredentials | None:
+    # Required only for an s3:// archive.  Otherwise the pair is all or nothing: one half set means the host meant
+    # to give credentials and got them wrong.
     pair = (Var.AWS_ACCESS_KEY_ID, Var.AWS_SECRET_ACCESS_KEY)
-    force = any(reader.present(name) for name in pair)
+    force = archive is not None or any(reader.present(name) for name in pair)
     key_id, secret = (reader.secret(name, force=force) for name in pair)
     token = reader.secret(Var.AWS_SESSION_TOKEN)
     if key_id is None or secret is None:
@@ -392,6 +391,7 @@ def _archive_credentials(reader: _Reader) -> ArchiveCredentials | None:
 def _build(reader: _Reader) -> HostInfo:
     state_dir = reader.existing_dir(Var.STATE_DIR)
     events_dir = reader.path(Var.EVENTS_DIR)
+    result_archive = reader.archive(Var.RESULT_ARCHIVE)
     return HostInfo(
         input_file=reader.existing_file(Var.INPUT_FILE),  # type: ignore[arg-type]
         run_id=reader.text(Var.RUN_ID),  # type: ignore[arg-type]
@@ -405,10 +405,10 @@ def _build(reader: _Reader) -> HostInfo:
         e2b_api_url=reader.url(Var.E2B_API_URL),
         e2b_sandbox_url=reader.url(Var.E2B_SANDBOX_URL),
         sandbox_keys=_sandbox_keys(reader),
-        result_archive=reader.archive(Var.RESULT_ARCHIVE),
+        result_archive=result_archive,
         archive_endpoint_url=reader.url(Var.ARCHIVE_ENDPOINT_URL),
         archive_region=reader.text(Var.ARCHIVE_REGION),
-        archive_credentials=_archive_credentials(reader),
+        archive_credentials=_archive_credentials(reader, result_archive),
         node_name=reader.text(Var.NODE_NAME),
         claw_session_id=reader.text(Var.CLAW_SESSION_ID),
     )

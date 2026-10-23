@@ -87,19 +87,44 @@ def test_a_blank_value_counts_as_missing(env):
 
 
 def test_the_profile_decides_what_is_required(env):
-    for name in (*host_info._GROUP_VARS[HostGroup.SANDBOX], *host_info._GROUP_VARS[HostGroup.ARCHIVE]):
+    for name in host_info._GROUP_VARS[HostGroup.SANDBOX]:
         del env[name]
 
     read_host_info(env)  # default: run, state, input, MCP
 
     with pytest.raises(HostInfoError) as raised:
-        read_host_info(env, require=(HostGroup.SANDBOX, HostGroup.ARCHIVE))
-    assert set(raised.value.missing) == {
-        Var.SANDBOX_TEMPLATES,
-        Var.E2B_API_URL,
-        Var.E2B_SANDBOX_URL,
-        Var.RESULT_ARCHIVE,
-    } | ({Var.AWS_ACCESS_KEY_ID, Var.AWS_SECRET_ACCESS_KEY} - set(env))
+        read_host_info(env, require=(HostGroup.SANDBOX,))
+    assert set(raised.value.missing) == set(host_info._GROUP_VARS[HostGroup.SANDBOX])
+
+
+def test_without_a_result_archive_the_results_stay_on_shared_storage_and_no_aws_key_is_required(env):
+    for name in (Var.RESULT_ARCHIVE, Var.AWS_ACCESS_KEY_ID, Var.AWS_SECRET_ACCESS_KEY, Var.AWS_SESSION_TOKEN):
+        del env[name]
+
+    info = read_host_info(env, require=_ALL_GROUPS)
+
+    assert info.result_archive is None
+    assert info.archive_credentials is None
+
+
+def test_an_s3_archive_requires_both_aws_keys_and_names_what_is_missing(env):
+    del env[Var.AWS_ACCESS_KEY_ID], env[Var.AWS_SECRET_ACCESS_KEY]
+
+    with pytest.raises(HostInfoError) as raised:
+        read_host_info(env)
+
+    assert set(raised.value.missing) == {Var.AWS_ACCESS_KEY_ID, Var.AWS_SECRET_ACCESS_KEY}
+
+
+@pytest.mark.parametrize("value", ["file:///x", "/x", "relative/dir"])
+def test_a_local_path_is_not_a_result_archive(env, value):
+    env[Var.RESULT_ARCHIVE] = value
+
+    with pytest.raises(HostInfoError) as raised:
+        read_host_info(env)
+
+    assert set(raised.value.invalid) == {Var.RESULT_ARCHIVE}
+    assert "only s3://<bucket>/<prefix> or unset" in raised.value.invalid[Var.RESULT_ARCHIVE]
 
 
 def test_mcp_is_required_by_default_and_droppable(env):
@@ -144,12 +169,12 @@ def test_missing_and_malformed_inputs_are_reported_together(env):
         (Var.MCP_PORT, "65536", "integer from 1 to 65535"),
         (Var.MCP_PORT, "80.5", "integer from 1 to 65535"),
         (Var.MCP_PORT, "-1", "integer from 1 to 65535"),
-        (Var.RESULT_ARCHIVE, "https://b/p", "must be s3://<bucket>/<prefix>"),
+        (Var.RESULT_ARCHIVE, "https://b/p", "only s3://<bucket>/<prefix> or unset"),
         (Var.RESULT_ARCHIVE, "s3://", "bucket is not a valid"),
         (Var.RESULT_ARCHIVE, "s3://UPPER_bucket/p", "bucket is not a valid"),
         (Var.RESULT_ARCHIVE, "s3://results-bucket/a/../b", "prefix must not contain"),
         (Var.RESULT_ARCHIVE, "s3://results-bucket/a//b", "prefix must not contain"),
-        (Var.RESULT_ARCHIVE, "s3://results-bucket/p?x=1", "must be s3://<bucket>/<prefix>"),
+        (Var.RESULT_ARCHIVE, "s3://results-bucket/p?x=1", "only s3://<bucket>/<prefix> or unset"),
         (Var.RUN_CREATED_AT, "yesterday", "ISO 8601"),
         (Var.RUN_CREATED_AT, "2026-10-01T12:30:00", "UTC offset"),
         (Var.E2B_API_URL, "ftp://x", "http or https URL"),
@@ -174,8 +199,8 @@ def test_a_malformed_input_is_refused_with_its_reason(env, name, value, reason):
     assert name in str(raised.value)
 
 
-def test_half_a_credential_pair_is_refused_even_when_the_archive_is_not_required(env):
-    del env[Var.AWS_SECRET_ACCESS_KEY]
+def test_half_a_credential_pair_is_refused_even_without_an_s3_archive(env):
+    del env[Var.RESULT_ARCHIVE], env[Var.AWS_SECRET_ACCESS_KEY]
 
     with pytest.raises(HostInfoError) as raised:
         read_host_info(env)
