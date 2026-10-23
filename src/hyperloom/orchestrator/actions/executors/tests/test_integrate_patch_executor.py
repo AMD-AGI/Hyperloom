@@ -2081,11 +2081,11 @@ def test_apply_patch_no_git_rejects_path_traversal_before_apply(
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    ok, err, backups, *_ = _apply_patch_no_git(framework_root, patch_file, tmp_path / "backups")
+    result = _apply_patch_no_git(framework_root, patch_file, tmp_path / "backups")
 
-    assert ok is False
-    assert "escapes framework root" in err
-    assert backups == []
+    assert result.ok is False
+    assert "escapes framework root" in result.error
+    assert result.backups == []
     assert outside.read_text(encoding="utf-8") == "SAFE\n"
     assert len(calls) == 1
 

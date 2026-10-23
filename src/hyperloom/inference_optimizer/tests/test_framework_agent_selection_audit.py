@@ -130,6 +130,15 @@ def test_collect_framework_agent_candidate_priors(coord: Coordinator) -> None:
     assert denied["rationale"] == "off the bottleneck"
 
 
+def test_an_already_present_candidate_counts_as_tested() -> None:
+    """It reached the apply stage, so the phase summary does not read it as a discovery that found nothing."""
+    from hyperloom.orchestrator.framework.artifacts import summarize_candidate_outcomes
+
+    summary = summarize_candidate_outcomes([{"candidate_id": "c1", "status": "already_present", "kept": False}])
+    assert summary["tested"] == 1
+    assert summary["outcome_class"] == "tested_no_keep"
+
+
 # _match_framework_agent_candidate
 
 
