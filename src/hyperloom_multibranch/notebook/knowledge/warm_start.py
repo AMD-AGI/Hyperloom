@@ -6,8 +6,8 @@
 The read takes the single-lineage PRELUDE's two steps:
 
 1. ``search_identities`` finds the canonical ids that match the session on six of the seven serving dimensions,
-   labelled as ``canonical_labels`` labels them; the framework version is left free, so a recipe measured on the
-   previous release still counts.
+   labelled with the slugs of the session's own canonical id; the framework version is left free, so a recipe measured
+   on the previous release still counts.
 2. ``get_view`` reads each one's champion in exactly this session's scope.
 
 Only exact scopes are read: the KB Store does not document whether ``get_rollup`` without a scope lists a record's
@@ -55,7 +55,7 @@ from hyperloom.inference_optimizer.grid_server_args import (
     remove_server_args,
     tokenize_server_args_preserving_json,
 )
-from hyperloom.inference_optimizer.recipe_snapshot_constants import F_LABEL_FRAMEWORK_VERSION, canonical_labels
+from hyperloom.inference_optimizer.recipe_snapshot_constants import recipe_canonical_id
 from hyperloom.measure.compile import LOADABLE_KERNEL_KINDS, BlobError, BlobStore
 from hyperloom.measure.eval_context import CONTEXT_FLAGS
 from hyperloom.orchestrator.knowledge.remote_recipe.client import KBStoreError
@@ -86,6 +86,19 @@ REPLAY_LEADS = 3
 KB_RETRY_SECONDS = (2.0, 5.0, 15.0)
 #: How much of an acceptance refusal's reason a lead's line keeps.
 REFUSAL_CHARS = 160
+MODEL_LABEL = "model"
+#: The one label a lead may differ in and still be read: a recipe measured on another framework release.
+FRAMEWORK_VERSION_LABEL = "framework_version"
+#: The KB labels of a recipe identity, in the order :func:`recipe_canonical_id` writes their slugs after the scheme.
+IDENTITY_LABELS = (
+    MODEL_LABEL,
+    "hardware",
+    "framework_name",
+    "model_type",
+    "architectures",
+    FRAMEWORK_VERSION_LABEL,
+    "precision",
+)
 _UNSAFE_NAME = re.compile(r"[^A-Za-z0-9._-]+")
 _REPLAY_ERRORS = (KBStoreError, RemoteRecipeValidationError, RecipeError, BlobError, OSError, ValueError)
 _Read = TypeVar("_Read")
@@ -279,17 +292,29 @@ class WarmLead:
         return f"- {self.describe()}"
 
 
-def identity_labels(profile: SessionProfile) -> dict[str, str]:
-    """The session's seven serving dimensions, as the KB labels them."""
+def labels_of(canonical_id: str) -> dict[str, str]:
+    """The KB labels of ``canonical_id``: the slug of each serving dimension, as :func:`recipe_canonical_id` writes
+    them after its scheme. Raises ``ValueError`` when the id does not hold one slug per dimension."""
 
-    return canonical_labels(
-        model=profile.model,
-        hardware=profile.hardware,
-        framework_name=profile.framework,
-        model_type=profile.model_type,
-        architectures=list(profile.architectures),
-        framework_version=profile.framework_version,
-        precision=profile.precision,
+    _, *slugs = canonical_id.split(":")
+    if len(slugs) != len(IDENTITY_LABELS):
+        raise ValueError(f"{canonical_id!r} does not hold one slug for each of {', '.join(IDENTITY_LABELS)}")
+    return dict(zip(IDENTITY_LABELS, slugs))
+
+
+def identity_labels(profile: SessionProfile) -> dict[str, str]:
+    """The session's seven serving dimensions, as the KB labels them; ``ValueError`` as :func:`labels_of` raises it."""
+
+    return labels_of(
+        recipe_canonical_id(
+            model=profile.model,
+            hardware=profile.hardware,
+            framework_name=profile.framework,
+            model_type=profile.model_type,
+            architectures=list(profile.architectures),
+            framework_version=profile.framework_version,
+            precision=profile.precision,
+        )
     )
 
 
@@ -371,15 +396,15 @@ def _read_lead(
 def warm_leads(reader: RecipeReader, profile: SessionProfile, *, limit: int = MAX_CANDIDATES) -> tuple[WarmLead, ...]:
     """Champions of this session's scope on its task, exact identity first, then best gain first.
 
-    None when the session's scope is not one the KB files.
+    None when the session's scope is not one the KB files, or its identity names no slug per dimension.
     """
 
     try:
         _, scope = recipe_identity(profile)
-    except RemoteRecipeValidationError:
+        labels = identity_labels(profile)
+    except (RemoteRecipeValidationError, ValueError):
         return ()
-    labels = identity_labels(profile)
-    match = {key: value for key, value in labels.items() if key != F_LABEL_FRAMEWORK_VERSION}
+    match = {key: value for key, value in labels.items() if key != FRAMEWORK_VERSION_LABEL}
     found = (
         _read_lead(reader, item, scope, labels) for item in candidates(reader, scope.identity_scheme, match, limit)
     )
@@ -489,9 +514,12 @@ def delta_layer(delta: RecipeDelta) -> IntentLayer:
 
 
 __all__ = [
+    "FRAMEWORK_VERSION_LABEL",
     "HEAD_FLAGS",
+    "IDENTITY_LABELS",
     "KB_RETRY_SECONDS",
     "MAX_CANDIDATES",
+    "MODEL_LABEL",
     "REPLAY_LEADS",
     "PreparedReplay",
     "RecipeDownloader",
@@ -502,6 +530,7 @@ __all__ = [
     "candidates",
     "delta_layer",
     "identity_labels",
+    "labels_of",
     "lead_of",
     "replay",
     "replay_leads",

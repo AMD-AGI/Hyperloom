@@ -16,9 +16,10 @@ import math
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 
-from hyperloom.inference_optimizer.recipe_snapshot_constants import F_LABEL_MODEL, canonical_labels
+from hyperloom.inference_optimizer.recipe_snapshot_constants import recipe_canonical_id
 from hyperloom_multibranch.contracts.notebook.records import SessionProfile
 from hyperloom_multibranch.notebook.knowledge.experience import experience_identity
+from hyperloom_multibranch.notebook.knowledge.warm_start import MODEL_LABEL, labels_of
 
 #: The weight of a condition that changes little on its own: a framework release, expert parallelism.
 MINOR_WEIGHT = 0.5
@@ -84,8 +85,10 @@ def _cosine(left: Mapping[str, float], right: Mapping[str, float]) -> float:
 def model_name(model: str) -> str:
     """``model`` as the Recipe KB names it, so a local path, a hub id and the bare name of one model are one name."""
 
-    labels = canonical_labels(model=model, hardware="", framework_name="", framework_version="", precision="")
-    return labels[F_LABEL_MODEL]
+    labels = labels_of(
+        recipe_canonical_id(model=model, hardware="", framework_name="", framework_version="", precision="")
+    )
+    return labels[MODEL_LABEL]
 
 
 def _label(key: str, value: str) -> str:

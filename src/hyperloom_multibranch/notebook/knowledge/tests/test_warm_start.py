@@ -40,11 +40,13 @@ from hyperloom_multibranch.notebook.knowledge.tests.fakes import FakeRecipeStore
 from hyperloom_multibranch.contracts.notebook.records import REPLAY_TOOL
 from hyperloom_multibranch.notebook.knowledge import warm_start
 from hyperloom_multibranch.notebook.knowledge.warm_start import (
+    IDENTITY_LABELS,
     PreparedReplay,
     ReplayRefusal,
     ReplayTarget,
     WarmLead,
     identity_labels,
+    labels_of,
     replay,
     replay_leads,
     warm_leads,
@@ -56,6 +58,23 @@ PROFILE = profile()
 EXACT_ID, SCOPE = recipe_identity(PROFILE)
 OLDER_ID, _ = recipe_identity(profile(framework_version="0.10.0"))
 LABELS = identity_labels(PROFILE)
+
+
+def test_a_sessions_labels_are_the_slugs_of_its_canonical_id() -> None:
+    """The KB searches identities by these labels, so each must be the slug the canonical id holds for it."""
+
+    scheme, *slugs = EXACT_ID.split(":")
+    assert (scheme, list(LABELS)) == (SCOPE.identity_scheme, list(IDENTITY_LABELS))
+    assert list(LABELS.values()) == slugs
+    assert LABELS["model"] == "deepseek-r1" and LABELS["hardware"] == "mi355x"
+
+
+def test_an_identity_without_one_slug_per_dimension_has_no_labels() -> None:
+    with pytest.raises(ValueError, match="does not hold one slug"):
+        labels_of("inference:model:with:a:colon:too:many:slugs:here")
+    assert warm_leads(FakeRecipeStore(), profile(model="org/model:latest")) == ()
+
+
 IMAGE = "sha256:" + "a" * 64
 VLLM, VLLM_AT = "https://github.com/vllm-project/vllm", "1" * 40
 PATCH_BYTES, TUNED_BYTES = b"--- a/vllm/moe.py\n+++ b/vllm/moe.py\n", b"M,N,K,config\n"
