@@ -159,6 +159,7 @@ DOTENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
         "DEEPSEEK_API_KEY",
         "DEEPSEEK_BASE_URL",
         "DEEPSEEK_MODEL",
+        "DSH_MODEL",
         "FRAMEWORK",
         "GEAK_CLAUDE_MODEL",
         "HIP_PATH",
