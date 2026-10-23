@@ -2074,8 +2074,9 @@ def _resolve_target_gpu(args: argparse.Namespace, framework: str) -> None:
 
 def _create_fresh_session(args: argparse.Namespace, *, framework: str, nodes_resolved: int) -> _SessionStart:
     """Create and lock the session directory, then write its manifest, launch info and seeded state."""
-    # session_dir defaults to <workspace_root>/<model>/<UTC ts>-<rand8>/; --session-dir names it instead.
-    session_dir = make_session_dir(resolve_model_display_name(args), target=getattr(args, "session_dir", None))
+    session_dir = make_session_dir(
+        model_name=resolve_model_display_name(args), target=getattr(args, "session_dir", None)
+    )
     # Single-optimizer guard: take the lock so the contract holds uniformly and the owner pid is published for the
     # session diagnostics.
     session_lock = _acquire_session_lock_or_exit(session_dir)
