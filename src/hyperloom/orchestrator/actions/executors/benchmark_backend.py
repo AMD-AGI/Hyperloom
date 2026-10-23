@@ -15,6 +15,16 @@ DEFAULT_BENCHMARK_BACKEND = "magpie"
 KNOWN_BENCHMARK_BACKENDS = frozenset({"magpie", "bypass"})
 
 
+def select_bypass_for_custom(framework: str) -> None:
+    """Select the bypass backend for ``--framework custom`` when the operator left the backend unset.
+
+    Bypass is the only backend that can run an operator-supplied script. An explicit
+    other value is left for the CLI to refuse.
+    """
+    if str(framework or "").strip().lower() == "custom" and not (os.environ.get(BENCHMARK_BACKEND_ENV) or "").strip():
+        os.environ[BENCHMARK_BACKEND_ENV] = "bypass"
+
+
 class BenchmarkBackend(Protocol):
     """Builds the benchmark subprocess command for one benchmark run."""
 
