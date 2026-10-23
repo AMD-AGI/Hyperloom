@@ -178,6 +178,7 @@ class SessionExports:
             kb_write_back=kb_write_back,
             knowledge=stepped,
             session_dir=self._layout.root,
+            runner_dir=self._layout.logs,
             code_revision=read_manifest(self._layout.manifest).code_version.git_sha or None,
         )
         breakdown = write_breakdown(self._layout.reports, document)

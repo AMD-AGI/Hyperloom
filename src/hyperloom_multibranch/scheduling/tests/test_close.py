@@ -230,6 +230,9 @@ async def test_close_publishes_the_final_recipe_exports_and_stops_everything(
     store = FakeRecipeStore(champion={"metric": "optimized_throughput", "session_id": "older", "value": 1000.0})
     stopper = _clean()
     author, curator = ScriptedCompletion(), ScriptedCompletion()
+    reading = {"kind": "container_resources", "memory_peak_bytes": 2048, "oom_kill": 0}
+    (layout.logs / "agents").mkdir(parents=True, exist_ok=True)
+    (layout.logs / "agents" / "resources.jsonl").write_text(json.dumps(reading) + "\n", "utf-8")
 
     report = await _closer(layout, notebook, stopper, final, RemoteRecipeClient(store), author, curator).close(
         SessionStopReason.TIME_EXHAUSTED, CHOICE, "", HARD_STOP
@@ -253,6 +256,7 @@ async def test_close_publishes_the_final_recipe_exports_and_stops_everything(
     assert (knowledge["lesson_curation"]["status"], knowledge["lesson_curation"]["reason"]) == (SKIPPED, NO_LESSONS)
     assert curator.calls == [] and knowledge["lessons"]["status"] == SKIPPED
     assert breakdown["metadata"]["session"]["code_revision"] == RAN_ON
+    assert breakdown["metadata"]["container_resources"] == reading
     assert breakdown["close"]["final"]["commit_id"] == CHOSEN
     assert breakdown["close"]["selection"]["chosen"]["commit"] == CHOSEN
     assert (breakdown["close"]["selection"]["metric"], breakdown["close"]["selection"]["primary_conc"]) == (METRIC, 64)
