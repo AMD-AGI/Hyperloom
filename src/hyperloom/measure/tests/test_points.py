@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -403,3 +404,115 @@ def test_an_inferencex_point_is_what_the_inferencex_renderer_hands_magpie(canoni
     rendered = load(point)
     assert rendered == load(expected)
     assert rendered["benchmark"]["envs"]["RUN_EVAL"] == "true" and "NUM_PROMPTS" in rendered["benchmark"]["envs"]
+
+
+# --- the launcher on a cold InferenceX checkout ---------------------------------------------------------------------
+
+LAUNCHER = "sglang_mi355x.sh"
+MAGPIE_LAUNCHER = b"magpie launcher\n"
+
+
+@pytest.fixture()
+def magpie(tmp_path, monkeypatch):
+    """The Magpie the session runs, which ships the launcher; the process names no checkout of its own."""
+
+    shipped = tmp_path / "magpie" / "Magpie" / "scripts" / "benchmark"
+    shipped.mkdir(parents=True)
+    (shipped / LAUNCHER).write_bytes(MAGPIE_LAUNCHER)
+    monkeypatch.setenv("MAGPIE_PATH", str(tmp_path / "magpie"))
+    for name in ("INFERENCEX_PATH", "HYPERLOOM_BENCHMARK_BACKEND"):
+        monkeypatch.delenv(name, raising=False)
+    return shipped / LAUNCHER
+
+
+@pytest.fixture()
+def cold_checkout(tmp_path):
+    """A fresh InferenceX cache: the pinned commit does not track the launcher, so it is not in the tree yet."""
+
+    benchmarks = tmp_path / "InferenceX" / "benchmarks"
+    benchmarks.mkdir(parents=True)
+    (benchmarks / "benchmark_lib.sh").write_text("# library\n")
+    return benchmarks.parent
+
+
+def cold_canonical(tmp_path, model, checkout):
+    """The canonical measurement as a session takes it at start, on the runner type that names the launcher."""
+
+    return default_canonical(
+        tmp_path / "canonical",
+        primary_concurrency=32,
+        config_path=default_baseline_config(),
+        model_path=str(model),
+        gpu_type="mi355x",
+        inferencex_path=str(checkout),
+    )
+
+
+def magpie_first_benchmark(launcher: Path, checkout: Path) -> Path:
+    """What Magpie does when its first benchmark starts: it copies the launchers it ships into the checkout."""
+
+    placed = checkout / "benchmarks" / LAUNCHER
+    shutil.copy2(launcher, placed)
+    return placed
+
+
+def test_a_baseline_test_on_a_cold_checkout_has_the_surface_the_canonical_took_at_session_start(
+    tmp_path, model, magpie, cold_checkout, blobs
+):
+    canonical = cold_canonical(tmp_path, model, cold_checkout)
+    magpie_first_benchmark(magpie, cold_checkout)
+
+    (point,) = generate_points(environment(blobs, tmp_path), canonical, tmp_path / "points")
+
+    assert load(point)["benchmark"]["benchmark_script"] == LAUNCHER
+    assert canonical.surface.fields["benchmark_script_sha256"] == sha(MAGPIE_LAUNCHER)
+
+
+def test_the_launcher_a_candidate_changed_in_the_checkout_is_still_a_surface_mismatch(
+    tmp_path, model, magpie, cold_checkout, blobs
+):
+    canonical = cold_canonical(tmp_path, model, cold_checkout)
+    placed = magpie_first_benchmark(magpie, cold_checkout)
+    placed.write_bytes(b"magpie launcher\nexport SGLANG_FAST=1\n")
+
+    with pytest.raises(SurfaceViolation, match=rf"benchmark_script_sha256: canonical '{sha(MAGPIE_LAUNCHER)}', test '"):
+        generate_points(environment(blobs, tmp_path), canonical, tmp_path / "points")
+
+
+def test_a_launcher_that_is_nowhere_refuses_the_canonical_instead_of_recording_none(
+    tmp_path, model, magpie, cold_checkout
+):
+    magpie.unlink()
+
+    with pytest.raises(PointError, match=rf"{LAUNCHER}.*{cold_checkout.name}.*no such file"):
+        cold_canonical(tmp_path, model, cold_checkout)
+
+
+def test_a_launcher_the_pinned_commit_tracks_is_hashed_as_it_is_when_magpie_ships_none(
+    tmp_path, model, magpie, cold_checkout
+):
+    magpie.unlink()
+    (cold_checkout / "benchmarks" / LAUNCHER).write_bytes(b"tracked launcher\n")
+
+    canonical = cold_canonical(tmp_path, model, cold_checkout)
+
+    assert canonical.surface.fields["benchmark_script_sha256"] == sha(b"tracked launcher\n")
+
+
+def test_the_bypass_backend_never_has_magpie_copy_a_launcher_so_the_checkout_is_left_as_it_is(
+    tmp_path, model, magpie, cold_checkout, monkeypatch
+):
+    monkeypatch.setenv("HYPERLOOM_BENCHMARK_BACKEND", "bypass")
+
+    canonical = cold_canonical(tmp_path, model, cold_checkout)
+
+    assert canonical.surface.fields["benchmark_script_sha256"] is None
+    assert not (cold_checkout / "benchmarks" / LAUNCHER).exists()
+
+
+def test_a_checkout_with_nowhere_to_put_the_launcher_is_left_to_the_host_check(tmp_path, model, magpie):
+    """A test cannot see a launcher there either, and the host refuses a tree without the benchmark library."""
+
+    canonical = cold_canonical(tmp_path, model, tmp_path / "not-a-checkout")
+
+    assert canonical.surface.fields["benchmark_script_sha256"] is None

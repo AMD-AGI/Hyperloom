@@ -71,7 +71,8 @@ MODEL_FILE_NAMES: frozenset[str] = frozenset(
         "chat_template.jinja",
     }
 )
-_SCRIPT_FIELD = "benchmark_script_sha256"
+#: The surface field holding the hash of the benchmark script a test executes; ``None`` when no such file is found.
+SCRIPT_FIELD = "benchmark_script_sha256"
 _MODEL_FILES_FIELD = "model_files"
 
 
@@ -149,7 +150,7 @@ def extract_surface(config: Mapping[str, Any]) -> MeasurementSurface:
     fields.update({f"envs.{key}": _text(envs.get(key)) for key in SURFACE_ENV_KEYS})
     script, root = _text(bench.get("benchmark_script")), _text(bench.get("inferencex_path"))
     script_path = Path(root) / "benchmarks" / script if script and root else None
-    fields[_SCRIPT_FIELD] = _sha256_file(script_path) if script_path and script_path.is_file() else None
+    fields[SCRIPT_FIELD] = _sha256_file(script_path) if script_path and script_path.is_file() else None
     model = _text(envs.get("MODEL_PATH")) or _text(bench.get("model"))
     model_files = hash_model_files(Path(model)) if model and Path(model).is_dir() else None
     fields[_MODEL_FILES_FIELD] = json.dumps(model_files, sort_keys=True) if model_files is not None else None
@@ -206,6 +207,7 @@ __all__ = [
     "MODEL_FILE_NAMES",
     "POINT_ENV_KEYS",
     "REQUEST_ENV_KEYS",
+    "SCRIPT_FIELD",
     "SURFACE_BENCH_KEYS",
     "SURFACE_ENV_KEYS",
     "MeasurementSurface",
