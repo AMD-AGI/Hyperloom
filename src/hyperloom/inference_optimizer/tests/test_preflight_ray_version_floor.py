@@ -119,10 +119,16 @@ class _InstallRecorder:
         return subprocess.CompletedProcess(argv, code, "", "No matching distribution found")
 
 
-def _ensure_ray_with(monkeypatch, recorder: _InstallRecorder, *, version_after: str) -> dict:
+def _ensure_ray_with(
+    monkeypatch,
+    recorder: _InstallRecorder,
+    *,
+    version_after: str,
+    first_smoke_stderr: str = "ray import failed",
+) -> dict:
     smoke_results = iter(
         [
-            subprocess.CompletedProcess([], 1, "", "ray import failed"),
+            subprocess.CompletedProcess([], 1, "", first_smoke_stderr),
             subprocess.CompletedProcess([], 0, f"{version_after}\n", ""),
         ]
     )
@@ -153,3 +159,81 @@ def test_ensure_ray_falls_back_and_drops_the_click_ceiling(monkeypatch) -> None:
     ]
     assert result["version_after"] == "2.55.0"
     assert result["spec"] == "ray[default]>=2.44.1"
+
+
+def test_ensure_ray_retries_the_click_ceiling_when_the_floor_is_already_met(monkeypatch) -> None:
+    # The node already carries the pinned ray 2.44.1 with a too-new click: a
+    # bare ">=2.44.1" floor would be a no-op, so the retry must move click.
+    recorder = _InstallRecorder(pinned_install_ok=False)
+
+    result = _ensure_ray_with(
+        monkeypatch,
+        recorder,
+        version_after="2.44.1",
+        first_smoke_stderr="ray detected: 2.44.1\nclick version incompatible with Ray CLI: 8.5.0 >= 8.3.0\n",
+    )
+
+    assert recorder.install_specs == [
+        ["ray[default]==2.44.1", "click<8.3.0"],
+        ["click<8.3.0"],
+    ]
+    assert result["version_after"] == "2.44.1"
+    assert result["spec"] == "click<8.3.0"
+
+
+def test_ensure_ray_retry_asks_for_a_strictly_newer_ray_above_the_floor(monkeypatch) -> None:
+    # Ray is past the floor and past the click-gated pin: only a newer ray can
+    # repair it, and ">" cannot be satisfied by installing nothing.
+    recorder = _InstallRecorder(pinned_install_ok=False)
+
+    result = _ensure_ray_with(
+        monkeypatch,
+        recorder,
+        version_after="2.56.0",
+        first_smoke_stderr="ray detected: 2.55.0\nray CLI import failed: ImportError: boom\n",
+    )
+
+    assert recorder.install_specs[1] == ["ray[default]>2.55.0"]
+    assert result["version_after"] == "2.56.0"
+
+
+def test_ensure_ray_retry_keeps_an_overridden_click_ceiling(monkeypatch) -> None:
+    monkeypatch.setenv("RAY_CLI_CLICK_MAX_VERSION", "8.4.0")
+    recorder = _InstallRecorder(pinned_install_ok=False)
+
+    _ensure_ray_with(
+        monkeypatch,
+        recorder,
+        version_after="2.55.0",
+        first_smoke_stderr="ray detected: 2.55.0\nclick version incompatible with Ray CLI: 8.5.0 >= 8.4.0\n",
+    )
+
+    assert recorder.install_specs[1] == ["click<8.4.0"]
+
+
+def test_ensure_ray_failure_message_names_every_spec_attempted(monkeypatch) -> None:
+    recorder = _InstallRecorder(pinned_install_ok=False)
+    smoke_results = iter(
+        [
+            subprocess.CompletedProcess([], 1, "", "ray detected: 2.44.1\nclick version incompatible"),
+            subprocess.CompletedProcess([], 1, "", "click version incompatible with Ray CLI"),
+        ]
+    )
+    monkeypatch.setattr(cli_preflight, "_ray_smoke", lambda _exe, *_overrides: next(smoke_results))
+    monkeypatch.setattr(cli_preflight.subprocess, "run", recorder)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        cli_preflight._ensure_ray("/usr/bin/python3", [])
+
+    message = str(excinfo.value)
+    assert "ray[default]==2.44.1 click<8.3.0 then click<8.3.0" in message
+    assert "smoke test still failed" in message
+
+
+def test_smoke_reports_the_detected_ray_version_before_failing(tmp_path: Path) -> None:
+    site = _fake_site(tmp_path, ray_version="2.44.1", click_version="8.5.0")
+
+    result = _run_smoke(site)
+
+    assert result.returncode == 1
+    assert cli_preflight._smoke_ray_version(result) == "2.44.1"

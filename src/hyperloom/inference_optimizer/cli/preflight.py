@@ -69,6 +69,13 @@ from .credentials import (
     _sync_geak_config_base_url,
     _validate_credentials,
 )
+from .ray_smoke import (
+    _RAY_CLI_CLICK_MAX_VERSION,
+    _RAY_MIN_VERSION,
+    _RAY_SMOKE,
+    _ray_retry_specs,
+    _smoke_ray_version,
+)
 from ..session.paths import (
     DEFAULT_SESSION_DIR,
     ENV_USER_DATA_PATH,
@@ -217,8 +224,9 @@ def _restore_provider_only_mode(provider_mode: str, snapshot: dict[str, str | No
             os.environ[key] = original
 
 
+_BYTES_PER_GIB = 1024**3
 # /dev/shm threshold: below this, a launch can collide with stale vLLM/NCCL shm segments.
-_DEV_SHM_MIN_FREE_BYTES = 16 * 1024 * 1024 * 1024  # 16 GiB
+_DEV_SHM_MIN_FREE_BYTES = 16 * _BYTES_PER_GIB
 
 
 def _is_placeholder_tracelens_path(value: str) -> bool:
@@ -528,78 +536,6 @@ def _ensure_python_sdks(python_exe: str, pip_extra: list[str]) -> dict[str, Any]
     }
 
 
-# A floor rather than an exact requirement: interpreters with no 2.44.1 wheel
-# (cp314 postdates it) must be allowed to keep the newer release the
-# kernel-agent installer resolved for them.
-_RAY_MIN_VERSION = "2.44.1"
-# Only 2.44.1's CLI requires the default Click ceiling. Explicit Ray/Click
-# overrides retain the installer's requested ceiling on other releases too.
-_RAY_CLICK_PINNED_VERSION = "2.44.1"
-_RAY_CLI_CLICK_MAX_VERSION = "8.3.0"
-
-
-_RAY_SMOKE_TEMPLATE = r"""
-import importlib.metadata as md
-import re
-import sys
-
-RAY_MIN_VERSION = "__RAY_MIN_VERSION__"
-RAY_CLICK_PINNED_VERSION = "__RAY_CLICK_PINNED_VERSION__"
-RAY_CLI_CLICK_MAX_VERSION = "__RAY_CLI_CLICK_MAX_VERSION__"
-ray_version = sys.argv[1] if len(sys.argv) > 1 else ""
-click_override = sys.argv[2] if len(sys.argv) > 2 else ""
-
-def _version_tuple(version: str) -> tuple[int, int, int]:
-    parts = [int(p) for p in re.findall(r"\d+", version)[:3]]
-    parts.extend([0] * (3 - len(parts)))
-    return tuple(parts[:3])
-
-try:
-    import ray
-except Exception as exc:
-    print(f"ray import failed: {type(exc).__name__}: {exc}", file=sys.stderr)
-    raise SystemExit(1)
-
-if ray_version:
-    if ray.__version__ != ray_version:
-        print(f"ray version mismatch: {ray.__version__} != {ray_version}", file=sys.stderr)
-        raise SystemExit(1)
-elif _version_tuple(ray.__version__) < _version_tuple(RAY_MIN_VERSION):
-    print(f"ray too old: {ray.__version__} < {RAY_MIN_VERSION}", file=sys.stderr)
-    raise SystemExit(1)
-
-if ray_version or click_override or ray.__version__ == RAY_CLICK_PINNED_VERSION:
-    click_max_version = click_override or RAY_CLI_CLICK_MAX_VERSION
-    try:
-        click_version = md.version("click")
-    except md.PackageNotFoundError:
-        print("click is not installed", file=sys.stderr)
-        raise SystemExit(1)
-
-    if _version_tuple(click_version) >= _version_tuple(click_max_version):
-        print(
-            f"click version incompatible with Ray CLI: {click_version} >= {click_max_version}",
-            file=sys.stderr,
-        )
-        raise SystemExit(1)
-
-try:
-    from ray.scripts.scripts import main as _ray_cli_main  # noqa: F401
-except Exception as exc:
-    print(f"ray CLI import failed: {type(exc).__name__}: {exc}", file=sys.stderr)
-    raise SystemExit(1)
-
-print(ray.__version__)
-"""
-
-
-_RAY_SMOKE = (
-    _RAY_SMOKE_TEMPLATE.replace("__RAY_MIN_VERSION__", _RAY_MIN_VERSION)
-    .replace("__RAY_CLICK_PINNED_VERSION__", _RAY_CLICK_PINNED_VERSION)
-    .replace("__RAY_CLI_CLICK_MAX_VERSION__", _RAY_CLI_CLICK_MAX_VERSION)
-)
-
-
 def _ray_probe_env() -> dict[str, str]:
     """Ray refuses to import on ROCm when only ROCR_VISIBLE_DEVICES is set, and
     preflight clears HIP_VISIBLE_DEVICES for the benchmark path; restore a
@@ -643,14 +579,15 @@ def _ensure_ray(python_exe: str, pip_extra: list[str]) -> dict[str, Any]:
     reason = (check.stderr or check.stdout or "unknown Ray smoke failure").strip().splitlines()[-1]
     print(f"Preflight: ray/click invalid ({reason}), installing {ray_spec} + {click_spec} ...")
     specs: tuple[str, ...] = (ray_spec, click_spec)
+    attempted: list[str] = []
     install = subprocess.run(
         [python_exe, "-m", "pip", "install", "--quiet", *pip_extra, *specs],
         capture_output=True,
         text=True,
     )
     if install.returncode != 0 and not ray_version:
-        # Preserve an explicit Click ceiling; the default only guards 2.44.1.
-        specs = (f"ray[default]>={_RAY_MIN_VERSION}",) + ((click_spec,) if click_override else ())
+        attempted.append(" ".join(specs))
+        specs = _ray_retry_specs(_smoke_ray_version(check), click_spec, click_override)
         print(f"Preflight: {ray_spec} does not resolve for {python_exe}; retrying with {' '.join(specs)}")
         install = subprocess.run(
             [python_exe, "-m", "pip", "install", "--quiet", *pip_extra, *specs],
@@ -663,7 +600,8 @@ def _ensure_ray(python_exe: str, pip_extra: list[str]) -> dict[str, Any]:
     check = _ray_smoke(python_exe, ray_version, click_override)
     if check.returncode != 0:
         reason = (check.stderr or check.stdout or "unknown Ray smoke failure").strip()
-        raise RuntimeError(f"Ray install completed but smoke test still failed: {reason}")
+        tried = " then ".join([*attempted, " ".join(specs)])
+        raise RuntimeError(f"Ray install completed ({tried}) but smoke test still failed: {reason}")
     version_after = (check.stdout or "").strip() or ray_version or _RAY_MIN_VERSION
     print(f"Preflight: ray installed OK ({version_after})")
     return {
@@ -1507,9 +1445,9 @@ def _check_shm_disk() -> dict[str, Any]:
             "skip_reason": "shm_unavailable",
             "detail": {"shm_free_gib": None, "min_gib": 16},
         }
-    free_gb = usage.free / (1024**3)
+    free_gb = usage.free / _BYTES_PER_GIB
     if usage.free < _DEV_SHM_MIN_FREE_BYTES:
-        total_gb = usage.total / (1024**3)
+        total_gb = usage.total / _BYTES_PER_GIB
         print(
             f"Preflight: WARNING — /dev/shm has {free_gb:.1f} GiB free of "
             f"{total_gb:.1f} GiB total (< 16 GiB threshold). vLLM IPC + "
