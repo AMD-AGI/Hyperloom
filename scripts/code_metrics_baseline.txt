@@ -301,7 +301,6 @@ function-lines src/hyperloom/inference_optimizer/cli/model_gate.py::_preflight_m
 function-lines src/hyperloom/inference_optimizer/cli/multi_node.py::_prepare_multi_node_state 76
 function-lines src/hyperloom/inference_optimizer/cli/multi_node.py::_replay_kernel_patches_for_multi_node 73
 function-lines src/hyperloom/inference_optimizer/cli/parser.py::_build_parser 929
-function-lines src/hyperloom/inference_optimizer/cli/preflight.py::_check_gpu_visibility 61
 function-lines src/hyperloom/inference_optimizer/cli/preflight.py::_emit_preflight_diagnostics 69
 function-lines src/hyperloom/inference_optimizer/cli/preflight.py::_ensure_inferencex 51
 function-lines src/hyperloom/inference_optimizer/cli/preflight.py::_ensure_lm_eval_dep 62
@@ -821,7 +820,7 @@ module-lines src/hyperloom/orchestrator/loop/writeback.py 4156
 module-lines src/hyperloom/orchestrator/phases/framework.py 3038
 module-lines src/hyperloom/orchestrator/phases/kernel.py 4102
 module-lines src/hyperloom/orchestrator/phases/machine_state.py 1994
-module-lines src/hyperloom/orchestrator/phases/prelude.py 2504
+module-lines src/hyperloom/orchestrator/phases/prelude.py 2483
 module-lines src/hyperloom/orchestrator/policy/gate.py 1577
 module-lines src/hyperloom/orchestrator/prompts/prompt_builder.py 1205
 module-lines src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py 2556

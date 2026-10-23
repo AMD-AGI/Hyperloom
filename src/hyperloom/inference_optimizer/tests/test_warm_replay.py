@@ -2603,9 +2603,11 @@ def test_one_tree_failing_validation_rejects_the_whole_promotion(tmp_path):
 
 def test_rollback_restores_a_nogit_tree_from_its_backups(tmp_path, monkeypatch):
     """A pip-installed framework has no manifest; its backups are the way back."""
+    from hyperloom.orchestrator.phases import warm_replay_stack
+
     restored: list[list] = []
     monkeypatch.setattr(
-        prelude_mod,
+        warm_replay_stack,
         "_revert_warm_patch_state",
         lambda root, *, pre_sha="", snapshot_manifest=None, nogit_backups=None: (
             restored.append(nogit_backups) or {"ok": True, "errors": []}
@@ -3462,3 +3464,44 @@ def test_a_refused_replay_leaves_an_overlay_the_tree_already_held_uncommitted(tm
     assert verdict is Verdict.REVERTED
     assert _tree_git(tree, "rev-parse", "HEAD").strip() == stock_head
     assert _tree_git(tree, "status", "--porcelain") == held
+
+
+def test_a_promotion_commit_that_cannot_be_undone_fails_the_rollback(tmp_path, monkeypatch):
+    """A tree the replay did not write to skips the restore, so a failed undo has nothing else to catch it."""
+    from hyperloom.orchestrator.actions.executors.baseline import _apply_warm_patches, _stamp_warm_patch_outcome
+    from hyperloom.orchestrator.phases import warm_replay_stack
+
+    tree = _stock_sglang_tree(tmp_path / "sglang")
+    overlay = tmp_path / "ppe.patch"
+    overlay.write_text(_PPE_OVERLAY, encoding="utf-8")
+    _tree_git(tree, "apply", str(overlay))
+    params = {
+        "baseline_tput_anchor": 600.0,
+        "required_patch_timeline": True,
+        "patches": [
+            {"patch_file": "patch/overlays/000001/00.patch", "patch_content": _PPE_OVERLAY, "framework_root": str(tree)}
+        ],
+        "extra_server_args": "--recipe",
+        "extra_envs": {},
+    }
+    workspace = tmp_path / "runs" / "replay_warm_recipe" / "warm"
+    workspace.mkdir(parents=True)
+    result = {"status": "succeeded", "output_throughput": 612.0, "workspace": str(workspace)}
+    _stamp_warm_patch_outcome(result, _apply_warm_patches(params, str(tree), workspace), params)
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
+    coord.shared_state.baseline_tput = 600.0
+    coord.shared_state.warm_replay_outcome = {"expected_gain_pct": 0.0}
+    coord.shared_state.current_best = {"action": "explore", "tput": 800.0, "extra_server_args": "", "extra_envs": {}}
+    run_git = warm_replay_stack._run_git_cp
+
+    def _index_locked(args, **kwargs):
+        if "reset" in args:
+            (tree / ".git" / "index.lock").write_text("", encoding="utf-8")
+        return run_git(args, **kwargs)
+
+    monkeypatch.setattr(warm_replay_stack, "_run_git_cp", _index_locked)
+
+    verdict = coord.phase_prelude.promote_warm_replay(result, task=_StubTask(params=params))
+
+    assert verdict is Verdict.FAILED
+    assert coord.shared_state.warm_replay_outcome["status"] == "rollback_failed"
