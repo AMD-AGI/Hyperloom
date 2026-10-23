@@ -211,7 +211,14 @@ def test_activated_replaces_the_current_host_and_restores_the_previous_one() -> 
 def test_activated_restores_the_previous_host_when_the_body_raises() -> None:
     before = active()
     other, _ = _build([], {"a": ((), {})})
+
+    def body() -> None:
+        assert active() is other
+        raise RuntimeError("body failed")
+
     with pytest.raises(RuntimeError):
         with activated(other):
-            raise RuntimeError("body failed")
-    assert active() is before
+            body()
+    restored = active()
+    assert restored is before
+    assert restored is not other
