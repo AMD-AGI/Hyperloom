@@ -75,4 +75,5 @@ async def test_a_failed_curator_and_a_folder_without_a_skill(tmp_path: Path) -> 
 def test_the_curator_is_held_to_the_audit_rules() -> None:
     prompt = distill_prompt(DistillBrief("/copy", "/ws", "b0", "f1", "forge-history", ("/flydsl",)))
     assert "Edit nothing outside that directory" in prompt and "- /flydsl" in prompt
+    assert "not steps to run" in prompt
     assert '"(field)"' in prompt and "not knowledge" in prompt and REPORT_HEADING in prompt

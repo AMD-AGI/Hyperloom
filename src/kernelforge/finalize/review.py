@@ -81,7 +81,7 @@ def review_prompt(brief: ReviewBrief) -> str:
     )
     return f"""Review round {brief.round_number}. The campaign started from {brief.base} and kept {brief.kept_commits} \
 commit(s); HEAD ({brief.best}) is its best kernel. You may edit only: {files}. Never edit the driver \
-({brief.driver}), program.md or any other file, and run no git command that changes the index or history.
+({brief.driver}), program.md or any other file, run no git command that changes the index or history, and run no command that deletes anything outside the workspace.
 
 1. Read the whole delivered change: `git diff {brief.base} HEAD -- {files}`. Where a part's purpose is unclear, \
 `git log --reverse -p {brief.base}..HEAD -- {files}` shows the round that added it.
