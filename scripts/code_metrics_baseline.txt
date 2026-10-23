@@ -328,7 +328,6 @@ function-lines src/hyperloom/orchestrator/actions/executors/baseline.py::_apply_
 function-lines src/hyperloom/orchestrator/actions/executors/baseline.py::_apply_warm_patches 59
 function-lines src/hyperloom/orchestrator/actions/executors/benchmark_result.py::harvest_leaked_artifacts 68
 function-lines src/hyperloom/orchestrator/actions/executors/bypass_engine.py::build_server_command 80
-function-lines src/hyperloom/orchestrator/actions/executors/bypass_report.py::build_report 69
 function-lines src/hyperloom/orchestrator/actions/executors/explore.py::_ExploreRound.__init__ 66
 function-lines src/hyperloom/orchestrator/actions/executors/explore.py::_ExploreRound._graded_verdict 51
 function-lines src/hyperloom/orchestrator/actions/executors/explore.py::_ExploreRound._keep 65
@@ -713,8 +712,8 @@ module-lines src/hyperloom/orchestrator/loop/coordinator.py 1334
 module-lines src/hyperloom/orchestrator/loop/dispatcher.py 1428
 module-lines src/hyperloom/orchestrator/loop/intent_router.py 1358
 module-lines src/hyperloom/orchestrator/phases/framework.py 3046
-module-lines src/hyperloom/orchestrator/phases/kernel.py 4003
-module-lines src/hyperloom/orchestrator/phases/machine_state.py 1928
+module-lines src/hyperloom/orchestrator/phases/kernel.py 3987
+module-lines src/hyperloom/orchestrator/phases/machine_state.py 1919
 module-lines src/hyperloom/orchestrator/phases/prelude.py 2477
 module-lines src/hyperloom/orchestrator/policy/gate.py 1565
 module-lines src/hyperloom/orchestrator/prompts/prompt_builder.py 1205

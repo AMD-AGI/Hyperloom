@@ -14,7 +14,7 @@ from typing import Any
 from hyperloom.common.env_safety import redact_secret_values
 from hyperloom.common.token_usage import uncached_input_tokens
 
-from ._row_utils import coerce_optional_int
+from hyperloom.common.coerce import to_int
 
 log = logging.getLogger(__name__)
 
@@ -45,7 +45,7 @@ def reasoning_output_tokens(usage: Any) -> int | None:
     if usage is None:
         return None
     for key in _REASONING_TOKEN_KEYS:
-        value = coerce_optional_int(_field(usage, key))
+        value = to_int(_field(usage, key))
         if value is not None:
             return value
     for detail_key in _REASONING_DETAIL_KEYS:
@@ -53,7 +53,7 @@ def reasoning_output_tokens(usage: Any) -> int | None:
         if details is None:
             continue
         for key in _REASONING_TOKEN_KEYS:
-            value = coerce_optional_int(_field(details, key))
+            value = to_int(_field(details, key))
             if value is not None:
                 return value
     return None
@@ -63,7 +63,7 @@ def normalize_usage(usage: dict[str, Any] | None) -> dict[str, int | None] | Non
     """Project an arbitrary ``usage`` dict onto the canonical four keys."""
     if not isinstance(usage, dict) or not usage:
         return None
-    projected: dict[str, int | None] = {k: coerce_optional_int(usage.get(k)) for k in _TOKEN_KEYS}
+    projected: dict[str, int | None] = {k: to_int(usage.get(k)) for k in _TOKEN_KEYS}
     if all(v is None for v in projected.values()):
         return None
     return projected
@@ -160,14 +160,14 @@ def _claude_result_output_tokens(result: dict[str, Any]) -> int | None:
         for entry in per_model.values():
             if not isinstance(entry, dict):
                 continue
-            count = coerce_optional_int(entry.get("outputTokens"))
+            count = to_int(entry.get("outputTokens"))
             if count is not None:
                 total = count if total is None else total + count
         if total is not None:
             return total
     usage = result.get("usage")
     if isinstance(usage, dict):
-        return coerce_optional_int(usage.get("output_tokens"))
+        return to_int(usage.get("output_tokens"))
     return None
 
 
@@ -402,7 +402,7 @@ def _codex_usage_to_canonical(usage: Any) -> dict[str, int | None] | None:
         normalized["input_tokens"],
         normalized["cache_read_input_tokens"],
     )
-    reasoning = coerce_optional_int(usage.get(_CODEX_REASONING_TOKENS_KEY))
+    reasoning = to_int(usage.get(_CODEX_REASONING_TOKENS_KEY))
     if reasoning is not None:
         normalized[_CODEX_REASONING_TOKENS_KEY] = reasoning
     return normalized
@@ -420,7 +420,7 @@ def parse_codex_jsonl_usage(
         if not isinstance(usage, dict):
             continue
         for key, value in usage.items():
-            count = coerce_optional_int(value)
+            count = to_int(value)
             if count is not None:
                 totals[key] = totals.get(key, 0) + count
     return _codex_usage_to_canonical(totals)

@@ -18,11 +18,9 @@ from hyperloom.common.coerce import to_float
 from hyperloom.common.env import env_flag
 
 from .patch_landing import (
-    DEFAULT_PATCH_BUDGET,
     INTEGRATING_STACK_ACTIONS,
     VERDICT_STATUSES,
     IntegratedStack,
-    clamp_by_budget,
     evict_terminal,
     patch_budget,
     record_matches_task,
@@ -177,16 +175,16 @@ def enqueue_nominated_patch(state, *, patch, keep_threshold_pct: float = 3.0) ->
     return queue[integration_id]
 
 
-def _patch_budget_for(state) -> int:
+def _patch_budget_for() -> int:
     """How many sibling patches one round may land, env-overridable."""
-    return patch_budget(os.environ.get("HL_KERNEL_PATCH_BUDGET"), default=DEFAULT_PATCH_BUDGET)
+    return patch_budget(os.environ.get("HL_KERNEL_PATCH_BUDGET"))
 
 
 def _evict_settled_integrations(state) -> None:
     """Reap stale terminal records from the integration queue -- the queue's only deletion point."""
     state.pending_kernel_integrations = evict_terminal(
         state.pending_kernel_integrations,
-        budget=_patch_budget_for(state),
+        budget=_patch_budget_for(),
     )
 
 
@@ -257,8 +255,7 @@ def pending_kernel_integration_records(state) -> list[dict[str, Any]]:
             claimed_sources.add(source_file)
         deduped.append(record)
     # Cap how many siblings dispatch this round.
-    fit, _deferred = clamp_by_budget(deduped, _patch_budget_for(state))
-    return fit
+    return deduped[: _patch_budget_for()]
 
 
 def _resolve_kernel_patch_identity(payload: dict[str, Any] | None) -> tuple[str, str, str, str]:

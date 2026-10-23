@@ -26,12 +26,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.coerce import text_or_none
+from hyperloom.common.coerce import text_or_none, to_int
 from hyperloom.common.io import JsonLineFormat, append_jsonl
 from hyperloom.common.llm_request_hooks import LLMRequestRecord, add_llm_request_observer
 from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.session.session_paths import trajectory_dir
-from ._row_utils import coerce_optional_int
 from .llm_trace import VALID_COMPONENTS as _LLM_COMPONENTS
 
 log = logging.getLogger(__name__)
@@ -200,7 +199,7 @@ def _resolved_phase_tick(ctx: TrajectoryContext) -> tuple[str | None, int | None
         live_phase, live_tick = ctx.phase_tick_source()
         phase = live_phase if phase is None else phase
         tick = live_tick if tick is None else tick
-    return text_or_none(phase), coerce_optional_int(tick)
+    return text_or_none(phase), to_int(tick)
 
 
 def inherited_scope_fields() -> dict[str, Any]:

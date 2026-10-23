@@ -59,10 +59,19 @@ def test_diffusion_roofline_missing_unified_raises(tmp_path):
         dr.build_report(tmp_path, num_denoise_steps=None, top_k=5)
 
 
-def test_safe_float_non_numeric_is_zero():
-    assert dr.safe_float("not-a-number") == 0.0
-    assert dr.safe_float(None) == 0.0
-    assert dr.safe_float("12.5") == pytest.approx(12.5)
+def test_aggregate_unified_reads_a_non_finite_or_junk_cell_as_zero():
+    rows = [
+        {
+            dr.COL_NAME: "gemm",
+            dr.COL_BOUND: "COMPUTE_BOUND",
+            dr.COL_OP_COUNT: "not-a-number",
+            dr.COL_ROOFLINE_TIME: "nan",
+            dr.COL_KERNEL_TIME_SUM: "100",
+        }
+    ]
+    totals = dr.aggregate_unified(rows)
+    assert totals["sigma_ideal_roofline_us"] == 0.0
+    assert totals["kernel_roofline_efficiency"] == 0.0
 
 
 def test_aggregate_unified_memory_bound_split():
