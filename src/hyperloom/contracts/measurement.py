@@ -37,6 +37,13 @@ _FAILURE_CLASS = "failure_class"
 REPRODUCED = "reproduced"
 NOT_REPRODUCED = "not_reproduced"
 REPRO_VERDICTS = (REPRODUCED, NOT_REPRODUCED)
+#: What a test's server did with one kernel table the test loaded: some of its rows were hit, none was although hits
+#: were logged, or the logs cannot say. "Not exercised" and "not observable" are different findings: the first says the
+#: table changed nothing the test ran, the second says nothing about it.
+TABLE_EXERCISED = "exercised"
+TABLE_NOT_EXERCISED = "not_exercised"
+TABLE_NOT_OBSERVABLE = "not_observable"
+TABLE_STATUSES = (TABLE_EXERCISED, TABLE_NOT_EXERCISED, TABLE_NOT_OBSERVABLE)
 
 
 class MeasurementError(ValueError):
@@ -539,6 +546,80 @@ class Attempt:
 
 
 @dataclass(frozen=True)
+class TableHits:
+    """How much of one kernel table a test loaded its server used, read from the server's logs.
+
+    ``env`` is the variable that loaded the table and ``target`` and ``sha256`` name its artifact. ``rows`` is the
+    table's data rows (``None`` when the table is not read as rows), ``rows_hit`` how many of them aiter resolved at
+    least one lookup in, and ``hit_lines`` how many log lines said so (every tensor-parallel rank logs its own).
+
+    ``status`` is ``exercised`` (``rows_hit`` of at least one), ``not_exercised`` (the server logged its hits and none
+    was a row of this table: the table changed nothing the test ran) or ``not_observable`` (the counts are ``None``:
+    the logs cannot tell, and ``reason`` says why). A table nothing was seen to read is never reported as flat.
+    """
+
+    env: str
+    target: str
+    sha256: str
+    status: str
+    rows: int | None = None
+    rows_hit: int | None = None
+    hit_lines: int | None = None
+    reason: str = ""
+
+    def __post_init__(self) -> None:
+        _text(self.env, "a table's env")
+        _text(self.target, "a table's target")
+        _sha256(self.sha256, "a table's sha256")
+        if self.status not in TABLE_STATUSES:
+            raise MeasurementError(f"a table's status must be one of {list(TABLE_STATUSES)}, got {self.status!r}")
+        rows = _optional_int(self.rows, "a table's rows")
+        rows_hit, hit_lines = _optional_int(self.rows_hit, "rows_hit"), _optional_int(self.hit_lines, "hit_lines")
+        if not isinstance(self.reason, str):
+            raise MeasurementError(f"a table's reason must be a string, got {self.reason!r}")
+        if rows is not None and rows_hit is not None and rows_hit > rows:
+            raise MeasurementError(f"a table cannot have {rows_hit} rows hit of {rows} rows")
+        self._check_status(rows_hit, hit_lines)
+
+    def _check_status(self, rows_hit: int | None, hit_lines: int | None) -> None:
+        if self.status == TABLE_NOT_OBSERVABLE:
+            if rows_hit is not None or hit_lines is not None or not self.reason:
+                raise MeasurementError("a not_observable table has no counts and says why")
+        elif rows_hit is None or hit_lines is None:
+            raise MeasurementError(f"a {self.status} table counts its rows hit and its hit lines")
+        elif self.status == TABLE_EXERCISED and (rows_hit < 1 or hit_lines < 1):
+            raise MeasurementError("an exercised table has at least one row hit")
+        elif self.status == TABLE_NOT_EXERCISED and (rows_hit or hit_lines):
+            raise MeasurementError("a not_exercised table has no row hit")
+
+    def to_document(self) -> dict[str, object]:
+        return {
+            "env": self.env,
+            "target": self.target,
+            "sha256": self.sha256,
+            "status": self.status,
+            "rows": self.rows,
+            "rows_hit": self.rows_hit,
+            "hit_lines": self.hit_lines,
+            "reason": self.reason,
+        }
+
+    @classmethod
+    def from_document(cls, document: object) -> TableHits:
+        f = _mapping(document, "a table's hits")
+        return cls(
+            env=f.get("env"),
+            target=f.get("target"),
+            sha256=f.get("sha256"),
+            status=f.get("status"),
+            rows=f.get("rows"),
+            rows_hit=f.get("rows_hit"),
+            hit_lines=f.get("hit_lines"),
+            reason=f.get("reason", ""),
+        )
+
+
+@dataclass(frozen=True)
 class TestResult:
     """The final outcome of one request; ``failure_class`` is the last attempt's class and empty on success.
 
@@ -548,6 +629,9 @@ class TestResult:
     ran it; ``None`` when the test booted none or nothing recorded it.
     ``repro_verdict`` is the one outcome of a ``repro`` test: ``""`` for any other test, ``"reproduced"`` or
     ``"not_reproduced"`` for a repro test that ran its case to the end (``SUCCEEDED`` only).
+    ``table_hits`` has one entry for each kernel table the test's recipe loaded, and ``runtime_findings`` says what each
+    entry means in a sentence; a succeeded test that loaded none has neither. ``TableHits`` tells "the table was not
+    exercised" from "the logs cannot say", which a flat result alone cannot.
     A document written while the greedy decode pass existed may carry ``decode_outputs`` and ``decode_identity``; they
     mean nothing now and ``from_document`` leaves them out, so such a document still loads.
     """
@@ -575,6 +659,8 @@ class TestResult:
     repro_verdict: str = ""
     nonfatal_warnings: tuple[str, ...] = ()
     cold_start_seconds: float | None = None
+    table_hits: tuple[TableHits, ...] = ()
+    runtime_findings: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         _text(self.request_id, "request_id")
@@ -598,6 +684,9 @@ class TestResult:
             raise MeasurementError(f"cold_start_seconds cannot be negative, got {cold_start}")
         self._check_repro_verdict()
         _strings(self.nonfatal_warnings, "nonfatal_warnings")
+        _strings(self.runtime_findings, "runtime_findings")
+        if not isinstance(self.table_hits, tuple) or not all(isinstance(t, TableHits) for t in self.table_hits):
+            raise MeasurementError(f"table_hits must be a tuple of TableHits, got {self.table_hits!r}")
 
     def _check_repro_verdict(self) -> None:
         if self.repro_verdict not in ("", *REPRO_VERDICTS):
@@ -646,6 +735,8 @@ class TestResult:
             "repro_verdict": self.repro_verdict,
             "nonfatal_warnings": list(self.nonfatal_warnings),
             "cold_start_seconds": self.cold_start_seconds,
+            "table_hits": [value.to_document() for value in self.table_hits],
+            "runtime_findings": list(self.runtime_findings),
         }
 
     @classmethod
@@ -674,6 +765,8 @@ class TestResult:
             repro_verdict=f.get("repro_verdict", ""),
             nonfatal_warnings=tuple(_items(f.get("nonfatal_warnings", ()), "nonfatal_warnings")),
             cold_start_seconds=f.get("cold_start_seconds"),
+            table_hits=tuple(map(TableHits.from_document, _items(f.get("table_hits", ()), "table_hits"))),
+            runtime_findings=tuple(_items(f.get("runtime_findings", ()), "runtime_findings")),
         )
 
 
@@ -683,6 +776,10 @@ __all__ = [
     "PRIORITY_LOWEST",
     "REPRODUCED",
     "REPRO_VERDICTS",
+    "TABLE_EXERCISED",
+    "TABLE_NOT_EXERCISED",
+    "TABLE_NOT_OBSERVABLE",
+    "TABLE_STATUSES",
     "AccuracyValue",
     "AttachmentRef",
     "Attempt",
@@ -691,6 +788,7 @@ __all__ = [
     "Purpose",
     "RoundValue",
     "SandboxFacts",
+    "TableHits",
     "TestKind",
     "TestRequest",
     "TestResult",
