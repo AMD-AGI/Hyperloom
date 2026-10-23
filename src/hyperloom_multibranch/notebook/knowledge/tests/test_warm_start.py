@@ -113,6 +113,7 @@ def store(snapshot: NotebookSnapshot, tmp_path: Path) -> FakeRecipeStore:
         PROFILE,
         FinalRecipe("i1", Recipe("sha256:" + "a" * 64, LaunchConfig("--max-num-seqs 256")), tmp_path, METRIC),
         SCOPE,
+        {"version": "1", "digest": "sha256:" + "d" * 64},
     )
     malformed = _envelope("inference:malformed", "bad", ours, schema_version=1)
     other_scope = _envelope("inference:other-scope", "wide", ours, scope={**SCOPE.as_dict(), "conc": 128})
@@ -274,7 +275,9 @@ class _Downloads:
 
 
 def _downloads(snapshot: NotebookSnapshot, tmp_path: Path, champion: Recipe = CHAMPION) -> _Downloads:
-    knowledge = knowledge_document(snapshot, PROFILE, FinalRecipe("i1", champion, tmp_path, METRIC), SCOPE)
+    knowledge = knowledge_document(
+        snapshot, PROFILE, FinalRecipe("i1", champion, tmp_path, METRIC), SCOPE, {"version": "1", "digest": "sha256:" + "d" * 64}
+    )
     files = {overlay_ref(0, 0, PATCH.path): PATCH_BYTES, TUNED.ref: TUNED_BYTES}
     return _Downloads(_envelope(EXACT_ID, "sess-1", knowledge), files)
 
