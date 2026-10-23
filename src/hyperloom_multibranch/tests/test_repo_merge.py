@@ -1,7 +1,9 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
+import difflib
 import hashlib
+from collections.abc import Collection
 from dataclasses import replace
 
 import pytest
@@ -21,10 +23,11 @@ from hyperloom.contracts.recipe import (
     apply,
     diff,
 )
-from hyperloom.measure.compile import LocalBlobStore, PackageBase, PatchApplyError
+from hyperloom.measure.compile import COMPONENT_LAYOUTS, LocalBlobStore, PackageBase, PatchApplyError, apply_patch_stack
 from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
 from hyperloom_multibranch.repo.merge import Stored, carry, wider_table
+from hyperloom_multibranch.repo.rebase import Files
 
 IMAGE = "rocm/vllm@sha256:" + "c" * 64
 VLLM = "https://github.com/vllm-project/vllm"
@@ -71,17 +74,22 @@ def _changed(recipe: Recipe, config: ConfigDelta | None = None, **change: object
     return apply(recipe, RecipeDelta(config or ConfigDelta(), components))
 
 
-def _applies(_component: ComponentPatches) -> None:
-    return None
+def _applies(_component: ComponentPatches, _paths: Collection[str]) -> Files:
+    return {}
+
+
+def _store(component: str, text: str) -> PatchRef:
+    raise AssertionError(f"nothing of {component} is rebased: {text}")
 
 
 def _refuses(path: str, *, unless: str = ""):
     """A package ``path`` does not apply to, unless the stack also holds ``unless``."""
 
-    def check(component: ComponentPatches) -> None:
+    def check(component: ComponentPatches, _paths: Collection[str]) -> Files:
         held = {patch.path for patch in component.patches}
         if path in held and unless not in held:
             raise PatchApplyError(f"{path} does not apply to the installed package: patch failed: vllm/config.py:1")
+        return {}
 
     return check
 
@@ -95,7 +103,7 @@ def test_the_candidates_settings_land_beside_what_the_head_changed():
     )
     ours = _changed(BASE, ConfigDelta(server_args="--enable-chunked-prefill", unset_envs=("VLLM_USE_V1",)))
 
-    merge = carry("i1", BASE, candidate, ours, Stored(_applies, _table))
+    merge = carry("i1", BASE, candidate, ours, Stored(_applies, _table, _store))
 
     merged = apply(ours, merge.delta)
     assert [change.name for change in diff(candidate, merged).args] == ["--enable-chunked-prefill"]
@@ -107,7 +115,7 @@ def test_a_setting_both_sides_changed_takes_the_candidates_value_and_is_listed()
     candidate = _changed(BASE, ConfigDelta(server_args="--max-num-seqs 256"))
     ours = _changed(BASE, ConfigDelta(server_args="--max-num-seqs 192"))
 
-    merge = carry("i1", BASE, candidate, ours, Stored(_applies, _table))
+    merge = carry("i1", BASE, candidate, ours, Stored(_applies, _table, _store))
 
     assert diff(candidate, apply(ours, merge.delta)).is_empty
     assert merge.config_conflicts == (ValueChange("--max-num-seqs", "192", "256"),)
@@ -116,7 +124,7 @@ def test_a_setting_both_sides_changed_takes_the_candidates_value_and_is_listed()
 def test_the_candidates_patches_stack_after_the_heads():
     candidate, ours = _changed(BASE, add_patches=(_patch("theirs"),)), _changed(BASE, add_patches=(_patch("ours"),))
 
-    merge = carry("i1", BASE, candidate, ours, Stored(_applies, _table))
+    merge = carry("i1", BASE, candidate, ours, Stored(_applies, _table, _store))
 
     assert apply(ours, merge.delta).component("vllm").patches == (_patch("ours"), _patch("theirs"))
     assert merge.clean
@@ -126,7 +134,7 @@ def test_a_candidate_patch_that_does_not_apply_after_the_heads_is_left_out_and_r
     candidate = _changed(BASE, ConfigDelta(server_args="--max-num-seqs 256"), add_patches=(_patch("theirs"),))
     ours = _changed(BASE, add_patches=(_patch("ours"),))
 
-    merge = carry("i1", BASE, candidate, ours, Stored(_refuses("patch/vllm/theirs.patch"), _table))
+    merge = carry("i1", BASE, candidate, ours, Stored(_refuses("patch/vllm/theirs.patch"), _table, _store))
 
     (conflict,) = merge.patch_conflicts
     assert (conflict.component, conflict.path, merge.clean) == ("vllm", "patch/vllm/theirs.patch", False)
@@ -144,7 +152,7 @@ def test_a_head_patch_the_candidate_breaks_is_dropped_and_reported():
     ours = _changed(base, add_patches=(_patch("built-on-it"),))
     check = _refuses("patch/vllm/built-on-it.patch", unless="patch/vllm/foundation.patch")
 
-    merge = carry("i1", base, candidate, ours, Stored(check, _table))
+    merge = carry("i1", base, candidate, ours, Stored(check, _table, _store))
 
     assert [conflict.path for conflict in merge.patch_conflicts] == ["patch/vllm/built-on-it.patch"]
     assert apply(ours, merge.delta).component("vllm").patches == ()
@@ -154,7 +162,7 @@ def test_a_candidate_labelling_a_component_with_another_upstream_commit_still_me
     candidate = _changed(BASE, upstream_ref=MOVED, add_patches=(_patch("theirs"),))
     ours = _changed(BASE, upstream_ref=ELSEWHERE, add_patches=(_patch("ours"),))
 
-    merge = carry("i1", BASE, candidate, ours, Stored(_applies, _table))
+    merge = carry("i1", BASE, candidate, ours, Stored(_applies, _table, _store))
 
     merged = apply(ours, merge.delta).component("vllm")
     assert merge.clean and merged is not None
@@ -166,7 +174,7 @@ def test_a_component_the_candidate_adds_carries_its_upstream_repo_and_commit():
     added = ComponentChange("triton", MOVED, TRITON, add_patches=(_patch("theirs"),))
     candidate = apply(BASE, RecipeDelta(components=(added,)))
 
-    merge = carry("i1", BASE, candidate, BASE, Stored(_applies, _table))
+    merge = carry("i1", BASE, candidate, BASE, Stored(_applies, _table, _store))
 
     merged = apply(BASE, merge.delta).component("triton")
     assert merged is not None
@@ -177,7 +185,7 @@ def test_a_component_the_candidate_records_without_patching_it_leaves_the_merge_
     recorded = ComponentChange("triton", MOVED, TRITON)
     candidate = apply(BASE, RecipeDelta(components=(recorded,)))
 
-    merge = carry("i1", BASE, candidate, BASE, Stored(_applies, _table))
+    merge = carry("i1", BASE, candidate, BASE, Stored(_applies, _table, _store))
 
     assert merge.delta.components == ()
     assert apply(BASE, merge.delta).digest() == BASE.digest()
@@ -186,11 +194,17 @@ def test_a_component_the_candidate_records_without_patching_it_leaves_the_merge_
 def test_a_kernel_slot_both_sides_filled_does_not_merge_and_a_new_one_lands():
     candidate = apply(BASE, RecipeDelta(add_kernels=(_kernel("theirs"),)))
 
-    assert apply(BASE, carry("i1", BASE, candidate, BASE, Stored(_applies, _table)).delta).kernels == (
+    assert apply(BASE, carry("i1", BASE, candidate, BASE, Stored(_applies, _table, _store)).delta).kernels == (
         _kernel("theirs"),
     )
     with pytest.raises(RecipeError, match="both sides replaced the gemm kernel for moe"):
-        carry("i1", BASE, candidate, apply(BASE, RecipeDelta(add_kernels=(_kernel("ours"),))), Stored(_applies, _table))
+        carry(
+            "i1",
+            BASE,
+            candidate,
+            apply(BASE, RecipeDelta(add_kernels=(_kernel("ours"),))),
+            Stored(_applies, _table, _store),
+        )
 
 
 def test_the_candidates_table_lands_when_it_holds_every_row_of_the_head_s():
@@ -200,7 +214,7 @@ def test_the_candidates_table_lands_when_it_holds_every_row_of_the_head_s():
     head = apply(BASE, RecipeDelta(add_kernels=(_kernel("head", "304,1,4096,4096,23.1", "304,8,4096,4096,31.0"),)))
     candidate = apply(BASE, RecipeDelta(add_kernels=(wider,)))
 
-    merge = carry("i1", BASE, candidate, head, Stored(_applies, _table))
+    merge = carry("i1", BASE, candidate, head, Stored(_applies, _table, _store))
 
     assert apply(head, merge.delta).kernels == (wider,)
 
@@ -210,7 +224,7 @@ def test_a_table_the_head_already_holds_every_row_of_leaves_the_head_s_in_place(
     head = apply(BASE, RecipeDelta(add_kernels=(_kernel("head", "304,1,4096,4096,23.1", "304,8,4096,4096,31.0"),)))
     candidate = apply(BASE, RecipeDelta(add_kernels=(narrower,)))
 
-    merge = carry("i1", BASE, candidate, head, Stored(_applies, _table))
+    merge = carry("i1", BASE, candidate, head, Stored(_applies, _table, _store))
 
     assert merge.delta.add_kernels == ()
     assert apply(head, merge.delta).kernels == head.kernels
@@ -223,7 +237,7 @@ def test_two_tables_with_a_row_the_other_lacks_do_not_merge():
     candidate = apply(BASE, RecipeDelta(add_kernels=(_kernel("b06", "304,1,4096,4096,19.8", "304,8,4096,4096,31.0"),)))
 
     with pytest.raises(RecipeError, match="both sides replaced the gemm kernel for moe"):
-        carry("i1", BASE, candidate, head, Stored(_applies, _table))
+        carry("i1", BASE, candidate, head, Stored(_applies, _table, _store))
 
 
 def test_tables_under_unlike_headers_do_not_merge():
@@ -234,7 +248,7 @@ def test_tables_under_unlike_headers_do_not_merge():
     TABLES[other.sha256] = b"cu_num,M,N,K,gfx,us\n304,1,4096,4096,gfx950,23.1\n"
 
     with pytest.raises(RecipeError, match="both sides replaced the gemm kernel for moe"):
-        carry("i1", BASE, apply(BASE, RecipeDelta(add_kernels=(other,))), head, Stored(_applies, _table))
+        carry("i1", BASE, apply(BASE, RecipeDelta(add_kernels=(other,))), head, Stored(_applies, _table, _store))
 
 
 def test_wider_table_names_the_artifact_that_serves_both_or_none():
@@ -258,13 +272,17 @@ def test_rows_put_over_the_image_s_default_table_are_never_the_narrower_side():
 
     assert wider_table(tuned, head.kernels[0], _table) is None
     with pytest.raises(RecipeError, match="both sides replaced the gemm kernel for moe"):
-        carry("i1", BASE, candidate, head, Stored(_applies, _table))
+        carry("i1", BASE, candidate, head, Stored(_applies, _table, _store))
 
 
 def test_a_candidate_on_another_base_image_does_not_merge():
     with pytest.raises(RecipeError, match="base image"):
         carry(
-            "i1", BASE, replace(BASE, base_image_digest="rocm/vllm@sha256:" + "d" * 64), BASE, Stored(_applies, _table)
+            "i1",
+            BASE,
+            replace(BASE, base_image_digest="rocm/vllm@sha256:" + "d" * 64),
+            BASE,
+            Stored(_applies, _table, _store),
         )
 
 
@@ -280,15 +298,20 @@ async def _candidate(repo: GitExperimentRepo, branch: str, root: str, text: str)
     return await repo.commit(branch, root, _changed(await repo.read_recipe(root), add_patches=(stored,)), branch)
 
 
-async def test_the_repository_reports_what_does_not_apply_to_the_installed_package(tmp_path):
+def _installed(tmp_path, **files: str) -> PackageBase:
     package = tmp_path / "site-packages" / "vllm"
     package.mkdir(parents=True)
-    (package / "config.py").write_bytes(b"max_num_seqs = 128\n")
-    (package / "scheduler.py").write_bytes(b"policy = 'fcfs'\n")
-    installed = PackageBase("vllm", package, None, None)
-    repo = GitExperimentRepo(
-        tmp_path / "experiments.git", LocalBlobStore(tmp_path / "blobs"), lambda _layout: installed
-    )
+    for name, text in files.items():
+        (package / f"{name}.py").write_text(text)
+    return PackageBase("vllm", package, None, None)
+
+
+def _repository(tmp_path, installed: PackageBase) -> GitExperimentRepo:
+    return GitExperimentRepo(tmp_path / "experiments.git", LocalBlobStore(tmp_path / "blobs"), lambda _: installed)
+
+
+async def test_the_repository_reports_what_does_not_apply_to_the_installed_package(tmp_path):
+    repo = _repository(tmp_path, _installed(tmp_path, config="max_num_seqs = 128\n", scheduler="policy = 'fcfs'\n"))
     root = await repo.init_root(BASE)
     first = await _candidate(repo, "s1", root, _git_patch("config.py", "max_num_seqs = 128", "max_num_seqs = 192"))
     head = await repo.commit_integration(root, (await repo.merge(first, root)).delta, (first,))
@@ -302,6 +325,62 @@ async def test_the_repository_reports_what_does_not_apply_to_the_installed_packa
     assert conflict.component == "vllm" and "does not apply" in conflict.detail
     assert [change.add_patches for change in clashing.delta.components] == [()]
     assert beside.clean and len(apply(await repo.read_recipe(head), beside.delta).component("vllm").patches) == 2
+    assert (clashing.rebased_patches, beside.rebased_patches) == ((), ())
     with pytest.raises(ValueError, match="root commit"):
         await repo.merge(root, head)
     assert await repo.head(INTEGRATION_BRANCH) == head
+
+
+CONFIG = {name: str(value) for value, name in enumerate("abcdefgh", 1)}
+
+
+def _config(**values: str) -> list[str]:
+    return [f"{name} = {value}\n" for name, value in {**CONFIG, **values}.items()]
+
+
+def _edit(**values: str) -> str:
+    """A patch of the installed ``config.py`` setting each named line, with three lines of context as git writes."""
+
+    body = difflib.unified_diff(_config(), _config(**values), "a/vllm/config.py", "b/vllm/config.py")
+    return "diff --git a/vllm/config.py b/vllm/config.py\n" + "".join(body)
+
+
+async def _merged_onto(tmp_path, head_patch: str, candidate_patch: str):
+    """The candidate's merge onto an integration head that holds ``head_patch``, both branched from one root."""
+
+    installed = _installed(tmp_path, config="".join(_config()))
+    repo = _repository(tmp_path, installed)
+    root = await repo.init_root(BASE)
+    first = await _candidate(repo, "s1", root, head_patch)
+    head = await repo.commit_integration(root, (await repo.merge(first, root)).delta, (first,))
+    return repo, installed, head, await repo.merge(await _candidate(repo, "s2", root, candidate_patch), head)
+
+
+async def test_a_patch_whose_context_the_head_moved_is_rebased_onto_it(tmp_path):
+    """Nearby lines: the candidate's context holds a line the head changed, so it does not apply, but no line overlaps."""
+
+    repo, installed, head, merge = await _merged_onto(tmp_path, _edit(c="30"), _edit(e="50"))
+
+    (rebased,) = merge.rebased_patches
+    assert merge.clean and rebased.component == "vllm"
+    stack = (await repo.read_recipe(await repo.commit_integration(head, merge.delta, ()))).component("vllm")
+    assert stack is not None and stack.patches[-1] == rebased.patch
+    assert rebased.path not in {patch.path for patch in stack.patches}
+    blobs = LocalBlobStore(tmp_path / "blobs")
+    (entry,) = apply_patch_stack(stack, COMPONENT_LAYOUTS["vllm"], installed, blobs).entries
+    assert blobs.get(entry.blob).decode() == "".join(_config(c="30", e="50"))
+
+
+async def test_a_line_both_sides_changed_stays_a_conflict(tmp_path):
+    *_, merge = await _merged_onto(tmp_path, _edit(c="30"), _edit(c="31", e="50"))
+
+    (conflict,) = merge.patch_conflicts
+    assert "does not apply" in conflict.detail and merge.rebased_patches == ()
+    assert [change.add_patches for change in merge.delta.components] == [()]
+
+
+async def test_a_change_the_head_already_holds_is_not_carried_twice(tmp_path):
+    *_, merge = await _merged_onto(tmp_path, _edit(c="30", e="50"), _edit(e="50"))
+
+    assert merge.clean and merge.rebased_patches == ()
+    assert [change.add_patches for change in merge.delta.components] == [()]

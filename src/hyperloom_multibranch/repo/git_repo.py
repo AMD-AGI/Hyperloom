@@ -13,7 +13,7 @@ import asyncio
 import json
 import os
 import re
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -34,10 +34,12 @@ from hyperloom.measure.compile import (
     UnsupportedComponentError,
     apply_patch_stack,
     locate_installed_package,
+    patch_targets,
 )
 from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.repo import BranchMoved, RepoMerge
 from hyperloom_multibranch.repo.merge import Stored, carry
+from hyperloom_multibranch.repo.rebase import Files
 
 RECIPE_FILE = "recipe.json"
 _UPDATE_REF = "update-ref"
@@ -68,6 +70,10 @@ class _Completed:
 
 def _ref(branch: str) -> str:
     return f"refs/heads/{branch}"
+
+
+def _read(path: Path) -> bytes | None:
+    return path.read_bytes() if path.is_file() else None
 
 
 class GitExperimentRepo:
@@ -121,7 +127,7 @@ class GitExperimentRepo:
         if parent is None:
             raise ValueError(f"{candidate} is the root commit; it carries no change")
         recipes = [await self.read_recipe(commit) for commit in (parent, resolved, onto)]
-        stored = Stored(self._apply_to_package, self._table_bytes)
+        stored = Stored(self._stack_files, self._table_bytes, self._put_patch)
         return await asyncio.to_thread(carry, onto, *recipes, stored)
 
     async def commit_integration(self, onto: str, delta: RecipeDelta, merged_from: Sequence[str]) -> str:
@@ -137,8 +143,7 @@ class GitExperimentRepo:
             raise BranchMoved(f"{branch} is no longer at {commit}: {moved.err}")
 
     async def store_patch(self, component: str, text: str) -> PatchRef:
-        sha256 = await asyncio.to_thread(self._blobs.put, text.encode())
-        return PatchRef(f"{PATCH_ROOT}/{component}/{sha256}.patch", sha256)
+        return await asyncio.to_thread(self._put_patch, component, text)
 
     async def patch_text(self, commit: str, path: str) -> str:
         recipe = await self.read_recipe(commit)
@@ -156,11 +161,26 @@ class GitExperimentRepo:
     def _table_bytes(self, artifact: KernelArtifact) -> bytes:
         return self._blobs.get(artifact.sha256)
 
-    def _apply_to_package(self, component: ComponentPatches) -> None:
+    def _put_patch(self, component: str, text: str) -> PatchRef:
+        sha256 = self._blobs.put(text.encode())
+        return PatchRef(f"{PATCH_ROOT}/{component}/{sha256}.patch", sha256)
+
+    def _stack_files(self, component: ComponentPatches, paths: Collection[str]) -> Files:
         layout = COMPONENT_LAYOUTS.get(component.component)
         if layout is None:
             raise UnsupportedComponentError(f"{component.component} has no package layout; its patches cannot apply")
-        apply_patch_stack(component, layout, self._locator(layout), self._blobs)
+        package = self._locator(layout)
+        root = apply_patch_stack(component, layout, package, self._blobs)
+        touched = [
+            target
+            for patch in component.patches
+            for target in patch_targets(self._blobs.get(patch.sha256).decode(), layout.upstream_prefix, patch.path)
+        ]
+        files = {path: _read(package.path / path) for path in (*paths, *touched)}
+        files.update(
+            {entry.path: None if entry.blob is None else self._blobs.get(entry.blob) for entry in root.entries}
+        )
+        return files
 
     def _write_files(self, files: Sequence[tuple[str, str]], destination: Path) -> None:
         for path, sha256 in files:

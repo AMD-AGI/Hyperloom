@@ -12,13 +12,14 @@ those patches create a component the other side lacks: every component is built 
 session's fixed base image, so a recipe's upstream pin is provenance no merge can act on, and a component the
 candidate records without patching it changes nothing a test would build. The merged patch stacks are applied to the
 installed package as the toolbox applies them when it builds a test's environment, so a conflict shows before the
-merge test is paid for.
+merge test is paid for. A patch the candidate brings that does not apply there is rebased by a three-way merge of the
+files it touches, and is a conflict only where a line is changed by both sides.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
-from dataclasses import dataclass, replace
+from collections.abc import Callable, Collection, Iterable
+from dataclasses import dataclass, field, replace
 
 from hyperloom.contracts.recipe import (
     ComponentChange,
@@ -36,21 +37,35 @@ from hyperloom.contracts.recipe import (
     diff,
 )
 from hyperloom.measure.compile import PatchApplyError, kernel_rows_only
-from hyperloom_multibranch.contracts.repo import PatchConflict, RepoMerge
+from hyperloom_multibranch.contracts.repo import PatchConflict, RebasedPatch, RepoMerge
+from hyperloom_multibranch.repo.rebase import Files, merge_files, patch_between
 
-#: Applies a component's patch stack to the installed package; raises ``PatchApplyError`` when one does not apply.
-PatchCheck = Callable[[ComponentPatches], None]
+#: Applies a component's patch stack to the installed package, and returns every file a patch of it touches and each of
+#: the given paths as the stack leaves them; raises ``PatchApplyError`` when a patch does not apply.
+StackFiles = Callable[[ComponentPatches, Collection[str]], Files]
 #: Reads a kernel table's bytes, for the two that fill one slot.
 TableBytes = Callable[[KernelArtifact], bytes]
+#: Keeps a patch file of a component, as the experiment repository's ``store_patch`` does.
+PatchStore = Callable[[str, str], PatchRef]
 
 
 @dataclass(frozen=True)
 class Stored:
-    """What a merge consults beyond the three recipes: the installed packages a patch stack has to apply to, and the
-    bytes behind a kernel artifact."""
+    """What a merge consults beyond the three recipes: the installed packages a patch stack has to apply to, the bytes
+    behind a kernel artifact, and the store a rebased patch is kept in."""
 
-    apply_patches: PatchCheck
+    stack_files: StackFiles
     kernel_table: TableBytes
+    store_patch: PatchStore
+
+
+@dataclass(frozen=True)
+class _Settled:
+    """Where the patches of merged stacks that do not apply went: left out, rebased, or ``held`` by the stack already."""
+
+    conflicts: tuple[PatchConflict, ...] = ()
+    rebased: tuple[RebasedPatch, ...] = ()
+    held: frozenset[str] = field(default_factory=frozenset)
 
 
 def carry(onto: str, base: Recipe, candidate: Recipe, ours: Recipe, stored: Stored) -> RepoMerge:
@@ -65,12 +80,18 @@ def carry(onto: str, base: Recipe, candidate: Recipe, ours: Recipe, stored: Stor
         remove_kernels=_removed_kernels(base, candidate, ours),
     )
     merged = apply(ours, delta)
-    conflicts = [
-        conflict
-        for touched in delta.components
-        for conflict in _stack_conflicts(merged.component(touched.component), stored.apply_patches)
-    ]
-    return RepoMerge(onto, _without(delta, conflicts), _config_conflicts(change, diff(base, ours)), tuple(conflicts))
+    brought = {patch.path for touched in delta.components for patch in touched.add_patches}
+    settled = _joined(
+        _settle(merged.component(name), candidate.component(name), brought, stored)
+        for name in (touched.component for touched in delta.components)
+    )
+    return RepoMerge(
+        onto,
+        _without(delta, settled),
+        _config_conflicts(change, diff(base, ours)),
+        settled.conflicts,
+        settled.rebased,
+    )
 
 
 def _config(change: RecipeDiff) -> ConfigDelta:
@@ -191,46 +212,83 @@ def _both_moved(slot: tuple[KernelKind, str]) -> RecipeError:
     return RecipeError(f"both sides replaced the {kind.value} kernel for {target}")
 
 
-def _stack_conflicts(component: ComponentPatches | None, check: PatchCheck) -> list[PatchConflict]:
-    """The patches of ``component`` that do not apply after the ones before them that do."""
-    if component is None or not component.patches or _applies(component, check):
-        return []
+def _settle(
+    component: ComponentPatches | None, theirs: ComponentPatches | None, brought: Collection[str], stored: Stored
+) -> _Settled:
+    """Each patch of ``component`` that does not apply after the ones before it that do: rebased where the candidate
+    ``brought`` it and no line overlaps, held where the stack before it already makes its change, a conflict
+    otherwise."""
+    if component is None or not component.patches or _apply_error(component, stored.stack_files) is None:
+        return _Settled()
     applied: list[PatchRef] = []
-    conflicts = []
+    conflicts, rebased, held = [], [], set()
     for patch in component.patches:
-        try:
-            check(replace(component, patches=(*applied, patch)))
-        except PatchApplyError as error:
-            conflicts.append(PatchConflict(component.component, patch.path, str(error)))
+        stack = replace(component, patches=tuple(applied))
+        error = _apply_error(replace(stack, patches=(*applied, patch)), stored.stack_files)
+        if error is None:
+            applied.append(patch)
             continue
-        applied.append(patch)
-    return conflicts
+        text = _rebased_text(stack, theirs, patch, stored) if theirs is not None and patch.path in brought else None
+        if text is None:
+            conflicts.append(PatchConflict(component.component, patch.path, error))
+        elif text:
+            applied.append(stored.store_patch(component.component, text))
+            rebased.append(RebasedPatch(component.component, patch.path, applied[-1]))
+        else:
+            held.add(patch.path)
+    return _Settled(tuple(conflicts), tuple(rebased), frozenset(held))
 
 
-def _applies(component: ComponentPatches, check: PatchCheck) -> bool:
+def _rebased_text(stack: ComponentPatches, theirs: ComponentPatches, patch: PatchRef, stored: Stored) -> str | None:
+    """``patch``'s change from the candidate's stack before it, merged three ways into the files ``stack`` leaves, as
+    a patch over ``stack``: empty when ``stack`` already makes the change, ``None`` when a line is changed by both."""
+    index = theirs.patches.index(patch)
     try:
-        check(component)
+        changed = stored.stack_files(replace(theirs, patches=theirs.patches[: index + 1]), ())
+        original = stored.stack_files(replace(theirs, patches=theirs.patches[:index]), changed)
+        current = stored.stack_files(stack, changed)
     except PatchApplyError:
-        return False
-    return True
+        return None
+    merged = merge_files(original, current, changed)
+    return None if merged is None else patch_between(stack.component, current, merged)
 
 
-def _without(delta: RecipeDelta, conflicts: Sequence[PatchConflict]) -> RecipeDelta:
-    """``delta`` with every conflicting patch left out: not added when the candidate brings it, dropped otherwise."""
-    if not conflicts:
+def _apply_error(component: ComponentPatches, stack_files: StackFiles) -> str | None:
+    try:
+        stack_files(component, ())
+    except PatchApplyError as error:
+        return str(error)
+    return None
+
+
+def _joined(settled: Iterable[_Settled]) -> _Settled:
+    parts = list(settled)
+    return _Settled(
+        tuple(conflict for part in parts for conflict in part.conflicts),
+        tuple(rebased for part in parts for rebased in part.rebased),
+        frozenset().union(*(part.held for part in parts)),
+    )
+
+
+def _without(delta: RecipeDelta, settled: _Settled) -> RecipeDelta:
+    """``delta`` with every conflicting patch left out, not added when the candidate brings it and dropped otherwise;
+    a rebased patch in place of the candidate's, and none for one the stack already holds."""
+    if not (settled.conflicts or settled.rebased or settled.held):
         return delta
     changes = []
     for change in delta.components:
-        failed = {conflict.path for conflict in conflicts if conflict.component == change.component}
+        failed = {conflict.path for conflict in settled.conflicts if conflict.component == change.component}
+        moved = {rebased.path: rebased.patch for rebased in settled.rebased if rebased.component == change.component}
         brought = {patch.path for patch in change.add_patches}
+        kept = (patch for patch in change.add_patches if patch.path not in failed | settled.held)
         changes.append(
             replace(
                 change,
-                add_patches=tuple(patch for patch in change.add_patches if patch.path not in failed),
+                add_patches=tuple(moved.get(patch.path, patch) for patch in kept),
                 remove_patches=(*change.remove_patches, *sorted(failed - brought)),
             )
         )
     return replace(delta, components=tuple(changes))
 
 
-__all__ = ["PatchCheck", "Stored", "TableBytes", "carry", "wider_table"]
+__all__ = ["PatchStore", "StackFiles", "Stored", "TableBytes", "carry", "wider_table"]
