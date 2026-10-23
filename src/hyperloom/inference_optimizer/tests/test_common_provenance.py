@@ -274,7 +274,6 @@ def test_detect_image_none_when_absent(pid1_cgroup):
 def test_detect_image_falls_back_to_the_cgroup_container_id(pid1_cgroup, cgroup, expected):
     pid1_cgroup(cgroup)
     assert _prov.detect_image({}) == expected
-    assert _prov.detect_image({}, probe=False) is None
 
 
 def test_detect_image_from_marker(monkeypatch):
@@ -282,9 +281,11 @@ def test_detect_image_from_marker(monkeypatch):
     assert _prov.detect_image({}) == "myrepo/img:tag"
 
 
-def test_detect_image_probe_false_skips_markers(monkeypatch):
-    # probe=False must be hermetic: no marker reads even if a marker would match (else provenance becomes
+def test_detect_image_probe_false_skips_markers(monkeypatch, pid1_cgroup):
+    # probe=False must be hermetic: no marker or cgroup reads even if one would match (else provenance becomes
     # host-dependent and non-reproducible for hashing).
+    pid1_cgroup("12:devices:/docker/0123456789abcdef0123\n")
+
     def _boom(p):
         raise AssertionError("marker file must not be read when probe=False")
 

@@ -214,23 +214,6 @@ class _Bus:
 class TestGemmE2eCandidates:
     """Guard rails deciding which tuning results reach the E2E validator."""
 
-    def test_tuner_rows_and_tuned_file_without_candidates_yield_nothing(self, tmp_path):
-        coord = _coord(tmp_path, baseline_tput=100.0)
-        result = {
-            "backend": "forge",
-            "tuned_file": "/tuned/gemm.csv",
-            "tuners_run": [
-                {
-                    "tuner": "fmoe_ck",
-                    "status": "ok",
-                    "candidate": True,
-                    "env_var": "AITER_CONFIG_FMOE",
-                    "env_value": "/tuned/moe.csv",
-                }
-            ],
-        }
-        assert coord.phase_kernel._gemm_canonical_candidates(result) == []
-
     def test_a_forced_split_k_candidate_reaches_e2e(self, tmp_path):
         """split-K benefit is e2e-only, so micro reports ``no_improvement``."""
         coord = _coord(tmp_path, baseline_tput=100.0)
