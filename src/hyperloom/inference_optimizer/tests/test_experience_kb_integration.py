@@ -60,6 +60,11 @@ def _state(tick: int = 7):
         macro_cycle=2,
         session_id="session-1",
         model_name="Qwen3-8B",
+        gpu_type="mi355x",
+        tp=8,
+        conc=64,
+        isl=1024,
+        osl=128,
         phase="FRAMEWORK_AGENT",
         baseline_tput=100.0,
         current_best={"action": "explore", "tput": 112.0},
@@ -70,37 +75,9 @@ def _state(tick: int = 7):
     )
 
 
-def _write_manifest(tmp_path) -> None:
-    (tmp_path / "manifest.json").write_text(
-        json.dumps(
-            {
-                "metadata": {
-                    "task_config": {
-                        "model_name": "manifest-model",
-                        "gpu_type": "mi355x",
-                        "framework_name": "sglang",
-                        "framework_version": "0.5.18",
-                        "precision": "bf16",
-                        "architecture": {
-                            "model_type": "qwen3",
-                            "architectures": ["Qwen3ForCausalLM"],
-                        },
-                        "tp": 8,
-                        "conc": 64,
-                        "isl": 1024,
-                        "osl": 128,
-                    }
-                }
-            }
-        ),
-        encoding="utf-8",
-    )
-
-
 def test_kb_read_context_is_runtime_shaped_and_cached_per_decision(tmp_path) -> None:
-    _write_manifest(tmp_path)
     client = FakeClient()
-    integration = ExperienceKBIntegration(client, tmp_path, _SCHEMA)
+    integration = ExperienceKBIntegration(client, _SCHEMA)
     state = _state()
 
     first = integration.read_for_framework(state, untested_proposals="fp8 KV cache")
@@ -119,7 +96,6 @@ def test_kb_read_context_is_runtime_shaped_and_cached_per_decision(tmp_path) -> 
     assert decision == "Select the next framework optimization to benchmark."
     assert context["identity"]["model"] == "Qwen3-8B"
     assert context["identity"]["gpu"] == "mi355x"
-    assert context["identity"]["architecture"] == "Qwen3ForCausalLM"
     assert context["workload"] == {"tp": 8, "conc": 64, "isl": 1024, "osl": 128}
     assert context["benchmark_baseline"]["throughput"] == 100.0
     assert context["current_best"]["throughput"] == 112.0
@@ -130,9 +106,8 @@ def test_kb_read_context_is_runtime_shaped_and_cached_per_decision(tmp_path) -> 
 
 
 def test_specialist_read_context_describes_the_dispatch(tmp_path) -> None:
-    _write_manifest(tmp_path)
     client = FakeClient()
-    integration = ExperienceKBIntegration(client, tmp_path, _SCHEMA)
+    integration = ExperienceKBIntegration(client, _SCHEMA)
     params = {
         "domain": "kernel_switch_specialist",
         "gap_symptom": "VLLM_ROCM_USE_AITER defaults False",
@@ -187,7 +162,7 @@ def test_reads_speak_the_service_read_contract_through_the_real_sdk(tmp_path) ->
         return _Response()
 
     config = RemoteConfig(base_url="https://kb.example", token="service-token")
-    integration = ExperienceKBIntegration(RemoteClient(config, opener=opener), tmp_path, _SCHEMA)
+    integration = ExperienceKBIntegration(RemoteClient(config, opener=opener), _SCHEMA)
 
     evidence = integration.read_for_specialist(_state(), {"domain": "serving_specialist"})
 
@@ -222,7 +197,7 @@ def test_a_change_reaches_the_prompt_whole_as_the_service_rendered_it(tmp_path) 
             )
 
     state = SharedState(tick=3, phase="FRAMEWORK_AGENT")
-    coordinator = _kb_coordinator(tmp_path, state, ExperienceKBIntegration(_Client(), tmp_path, _SCHEMA))
+    coordinator = _kb_coordinator(tmp_path, state, ExperienceKBIntegration(_Client(), _SCHEMA))
     params = {"domain": "serving_specialist"}
 
     orchestration_block = asyncio.run(coordinator.conversation._kb_prompt_block("proposal"))
@@ -234,11 +209,11 @@ def test_a_change_reaches_the_prompt_whole_as_the_service_rendered_it(tmp_path) 
 
 
 def test_bootstrap_uses_only_service_url_and_token(tmp_path) -> None:
-    assert ExperienceKBIntegration.from_env(tmp_path, {}) is None
-    assert ExperienceKBIntegration.from_env(tmp_path, {"HYPERLOOM_KB_URL": "https://kb.example"}) is None
+    assert ExperienceKBIntegration.from_env({}) is None
+    assert ExperienceKBIntegration.from_env({"HYPERLOOM_KB_URL": "https://kb.example"}) is None
 
     env = {"HYPERLOOM_KB_URL": "https://kb.example/", "HYPERLOOM_KB_TOKEN": "service-token"}
-    integration = ExperienceKBIntegration.from_env(tmp_path, env)
+    integration = ExperienceKBIntegration.from_env(env)
 
     assert integration is not None
     assert isinstance(integration.client, RemoteClient)
@@ -267,7 +242,7 @@ def test_a_service_that_keeps_failing_reads_stops_being_read_for_the_session(tmp
                 experiences=(),
             )
 
-    integration = ExperienceKBIntegration(_Client(), tmp_path, _SCHEMA)
+    integration = ExperienceKBIntegration(_Client(), _SCHEMA)
     with caplog.at_level(logging.WARNING):
         evidence = [integration.read_for_framework(_state(tick)) for tick in range(1, 8)]
 
@@ -281,7 +256,6 @@ def test_a_service_that_keeps_failing_reads_stops_being_read_for_the_session(tmp
         "unavailable",
         "unavailable",
     ]
-    assert evidence[-1].warnings == ("experience_kb_reads_off_for_session",)
     assert caplog.text.count("Experience KB reads are off for the rest of this session") == 1
 
 
@@ -292,7 +266,6 @@ def _evidence(*experience_ids: str, tick: int = 7) -> ExperienceKBEvidence:
         status="completed",
         prompt_block="=== Relevant Experience KB ===\n" + "\n".join(experience_ids),
         rendered_refs=tuple({"id": item, "purpose": "representative"} for item in experience_ids),
-        warnings=(),
         experiences=tuple({"experience_id": item, "decision": "keep"} for item in experience_ids),
     )
 
@@ -358,7 +331,7 @@ def test_orchestration_injection_is_recorded_once_per_injected_experience_set(tm
             )
         )
     integration.evidence = ExperienceKBEvidence(
-        tick=4, read_id="read-4", status="unavailable", prompt_block="", rendered_refs=(), warnings=("offline",)
+        tick=4, read_id="read-4", status="unavailable", prompt_block="", rendered_refs=()
     )
     state.tick = 4
     assert asyncio.run(coordinator.conversation._kb_prompt_block("proposal")) == ""
@@ -457,7 +430,7 @@ def test_specialist_dispatch_reads_only_in_framework_agent_and_fails_open(tmp_pa
     asyncio.run(coordinator.specialist_dispatch.warm_specialist_params(prelude_params))
     state.phase = "FRAMEWORK_AGENT"
     integration.evidence = ExperienceKBEvidence(
-        tick=3, read_id="", status="unavailable", prompt_block="", rendered_refs=(), warnings=("offline",)
+        tick=3, read_id="", status="unavailable", prompt_block="", rendered_refs=()
     )
     offline_params = {"domain": "serving_specialist"}
     asyncio.run(coordinator.specialist_dispatch.warm_specialist_params(offline_params))
@@ -478,7 +451,7 @@ def test_a_service_that_drops_mid_response_never_stops_a_turn_or_a_dispatch(tmp_
         raise http.client.IncompleteRead(b"{", 100)
 
     client = RemoteClient(RemoteConfig("http://127.0.0.1:9", "service-token"), opener=cut_off)
-    integration = ExperienceKBIntegration(client, tmp_path, mapping_schema_ref())
+    integration = ExperienceKBIntegration(client, mapping_schema_ref())
     state = SharedState(tick=6, phase="FRAMEWORK_AGENT")
     coordinator = _kb_coordinator(tmp_path, state, integration)
     params = {"domain": "serving_specialist"}
@@ -492,9 +465,7 @@ def test_a_service_that_drops_mid_response_never_stops_a_turn_or_a_dispatch(tmp_
 
 def test_a_specialist_read_that_matched_nothing_still_travels_with_the_dispatch(tmp_path) -> None:
     state = SharedState(tick=5, phase="FRAMEWORK_AGENT")
-    empty = ExperienceKBEvidence(
-        tick=5, read_id="read-empty", status="completed", prompt_block="", rendered_refs=(), warnings=()
-    )
+    empty = ExperienceKBEvidence(tick=5, read_id="read-empty", status="completed", prompt_block="", rendered_refs=())
     integration = _Integration(empty)
     coordinator = _kb_coordinator(tmp_path, state, integration)
     params = {"domain": "serving_specialist"}
@@ -513,7 +484,7 @@ def test_an_agentx_run_reads_no_experience_since_none_of_its_own_is_published(tm
     monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
     monkeypatch.setenv("HYPERLOOM_KB_URL", "https://kb.example")
     monkeypatch.setenv("HYPERLOOM_KB_TOKEN", "service-token")
-    assert isinstance(integration_for(SharedState(phase="FRAMEWORK_AGENT"), tmp_path), ExperienceKBIntegration)
+    assert isinstance(integration_for(SharedState(phase="FRAMEWORK_AGENT")), ExperienceKBIntegration)
 
     state = SharedState(tick=4, phase="FRAMEWORK_AGENT", benchmark_mode="agentx")
     coordinator = Coordinator.__new__(Coordinator)
@@ -537,8 +508,8 @@ def test_only_a_run_graded_on_throughput_reads_throughput_experiences(tmp_path, 
     def state(objective: str) -> SharedState:
         return SharedState(phase="FRAMEWORK_AGENT", grading={"objective": objective})
 
-    assert isinstance(integration_for(state("output_throughput"), tmp_path), ExperienceKBIntegration)
-    assert integration_for(state("e2e_norm_intvty_p90"), tmp_path) is None
+    assert isinstance(integration_for(state("output_throughput")), ExperienceKBIntegration)
+    assert integration_for(state("e2e_norm_intvty_p90")) is None
 
 
 def test_proposal_exposure_only_uses_current_orchestration_tick() -> None:
@@ -548,7 +519,6 @@ def test_proposal_exposure_only_uses_current_orchestration_tick() -> None:
         status="completed",
         prompt_block="evidence",
         rendered_refs=({"id": _FIRST, "purpose": "representative"},),
-        warnings=(),
     )
     router = SimpleNamespace(
         _coord=SimpleNamespace(conversation=SimpleNamespace(kb_last_read=evidence)),
@@ -579,7 +549,6 @@ def test_a_grid_keeps_only_citations_of_experiences_its_tick_showed() -> None:
         status="completed",
         prompt_block="evidence",
         rendered_refs=({"id": _FIRST, "purpose": "representative"},),
-        warnings=(),
     )
     router = SimpleNamespace(
         _coord=SimpleNamespace(conversation=SimpleNamespace(kb_last_read=evidence)),

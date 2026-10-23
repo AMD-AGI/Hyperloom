@@ -10,6 +10,7 @@ import logging
 import socket
 import time
 import types
+from dataclasses import replace
 
 import httpx
 import pytest
@@ -17,6 +18,7 @@ import pytest
 from hyperloom.common.env import EnvValueError
 from hyperloom.inference_optimizer.multi_node._internal import external_state as ext
 from hyperloom.orchestrator.actions.executors import _multi_node_server_lifecycle as life
+from hyperloom.orchestrator.actions.executors._multi_node_restart_settings import RestartSettings
 
 
 class _FakeResp:
@@ -82,7 +84,22 @@ def _rewritten_state() -> dict[str, object]:
     }
 
 
-def test_gate_waits_out_the_post_restart_connection_refused_window(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.fixture
+def settings() -> RestartSettings:
+    """The restart settings, read before the test body swaps ``httpx`` out from under the multi-node CLI they import."""
+    return RestartSettings.from_env()
+
+
+def _gate(settings: RestartSettings, timeout_s: int = 600) -> None:
+    """Run the published-service gate with a *timeout_s* budget, polling every 5s."""
+    asyncio.run(
+        life._wait_for_published_service_ready_async(replace(settings, published_ready_s=timeout_s, health_poll_s=5))
+    )
+
+
+def test_gate_waits_out_the_post_restart_connection_refused_window(
+    monkeypatch: pytest.MonkeyPatch, settings: RestartSettings
+) -> None:
     """Refused right after a restart, then ready: the gate must wait, not fail."""
     monkeypatch.setattr(life, "_read_state", lambda: _rewritten_state())
     _fast_clock(monkeypatch)
@@ -90,30 +107,34 @@ def test_gate_waits_out_the_post_restart_connection_refused_window(monkeypatch: 
     refused = _transport_error(ConnectionRefusedError(111, "Connection refused"))
     _install_fake_httpx(monkeypatch, [refused, refused, 200, 200])
 
-    asyncio.run(life._wait_for_published_service_ready_async(timeout_s=600, poll_every_s=5))
+    _gate(settings)
 
 
-def test_gate_skips_when_the_published_name_never_resolves(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_gate_skips_when_the_published_name_never_resolves(
+    monkeypatch: pytest.MonkeyPatch, settings: RestartSettings
+) -> None:
     """Outside-cluster: the ClusterIP name is unusable, so the gate is a no-op."""
     monkeypatch.setattr(life, "_read_state", lambda: _rewritten_state())
     _fast_clock(monkeypatch)
     _install_fake_httpx(monkeypatch, [_transport_error(socket.gaierror(-2, "Name or service not known"))])
 
-    asyncio.run(life._wait_for_published_service_ready_async(timeout_s=600, poll_every_s=5))
+    _gate(settings)
 
 
-def test_gate_survives_a_transient_dns_flap_within_the_window(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_gate_survives_a_transient_dns_flap_within_the_window(
+    monkeypatch: pytest.MonkeyPatch, settings: RestartSettings
+) -> None:
     """A CoreDNS blip must not disable the gate when it is most needed."""
     monkeypatch.setattr(life, "_read_state", lambda: _rewritten_state())
     _fast_clock(monkeypatch)
     # DNS blips once, then the published endpoint answers: gate must hold + pass.
     _install_fake_httpx(monkeypatch, [_transport_error(socket.gaierror(-2, "Name or service not known")), 200, 200])
 
-    asyncio.run(life._wait_for_published_service_ready_async(timeout_s=600, poll_every_s=5))
+    _gate(settings)
 
 
 def test_gate_warns_not_infos_when_it_skips_on_an_unresolvable_name(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, settings: RestartSettings
 ) -> None:
     """Skipping the gate is a WARNING, not a silent INFO: a later completed=0 must be traceable back to this skip (the #1060 'surface it' discipline)."""
     monkeypatch.setattr(life, "_read_state", lambda: _rewritten_state())
@@ -121,7 +142,7 @@ def test_gate_warns_not_infos_when_it_skips_on_an_unresolvable_name(
     _install_fake_httpx(monkeypatch, [_transport_error(socket.gaierror(-2, "Name or service not known"))])
 
     with caplog.at_level(logging.WARNING, logger=life.log.name):
-        asyncio.run(life._wait_for_published_service_ready_async(timeout_s=600, poll_every_s=5))
+        _gate(settings)
 
     assert any("SKIPPING the published-service readiness gate" in r.message for r in caplog.records)
 
@@ -129,6 +150,7 @@ def test_gate_warns_not_infos_when_it_skips_on_an_unresolvable_name(
 def test_dns_skip_after_is_env_overridable(monkeypatch: pytest.MonkeyPatch) -> None:
     """HYPERLOOM_MN_PUBLISHED_DNS_SKIP_AFTER widens the DNS tolerance."""
     monkeypatch.setenv("HYPERLOOM_MN_PUBLISHED_DNS_SKIP_AFTER", "1")
+    settings = RestartSettings.from_env()
     monkeypatch.setattr(life, "_read_state", lambda: _rewritten_state())
     _fast_clock(monkeypatch)
     # One gaierror then 200s: skip_after=1 skips on the first failure (returns before the 200s); if the knob were
@@ -136,80 +158,86 @@ def test_dns_skip_after_is_env_overridable(monkeypatch: pytest.MonkeyPatch) -> N
     # raise/hang.
     _install_fake_httpx(monkeypatch, [_transport_error(socket.gaierror(-2, "Name or service not known"))])
 
-    asyncio.run(life._wait_for_published_service_ready_async(timeout_s=600, poll_every_s=5))
+    _gate(settings)
 
 
 @pytest.mark.parametrize(
     "raw,expected",
     [
-        (None, 4),  # unset -> default
-        ("", 4),  # empty -> default
-        ("2", 2),  # explicit
+        (None, 2),  # unset -> default
+        ("", 2),  # empty -> default
+        ("5", 5),  # explicit
         ("0", 1),  # clamped to the minimum (never a self-defeating 0)
         ("-3", 1),  # negative -> clamped
     ],
 )
-def test_env_int_clamps_to_the_minimum(monkeypatch: pytest.MonkeyPatch, raw: str | None, expected: int) -> None:
-    """_env_int floors at the minimum: one poll is the smallest streak that is still a gate."""
-    monkeypatch.delenv("HYPERLOOM_MN_TEST_KNOB", raising=False)
+def test_ok_streak_clamps_to_one_poll(monkeypatch: pytest.MonkeyPatch, raw: str | None, expected: int) -> None:
+    """The streak floors at 1: one poll is the smallest streak that is still a gate."""
+    monkeypatch.delenv("HYPERLOOM_MN_PUBLISHED_READY_OK_STREAK", raising=False)
     if raw is not None:
-        monkeypatch.setenv("HYPERLOOM_MN_TEST_KNOB", raw)
+        monkeypatch.setenv("HYPERLOOM_MN_PUBLISHED_READY_OK_STREAK", raw)
 
-    assert life._env_int("HYPERLOOM_MN_TEST_KNOB", 4, minimum=1) == expected
+    assert RestartSettings.from_env().published_ready_ok_streak == expected
 
 
 def test_an_unreadable_knob_does_not_pass_as_the_default(monkeypatch: pytest.MonkeyPatch) -> None:
     """A streak of 2 where the operator asked for 20 is a weaker gate than the one they wrote."""
     monkeypatch.setenv("HYPERLOOM_MN_PUBLISHED_READY_OK_STREAK", "lots")
     with pytest.raises(EnvValueError, match="HYPERLOOM_MN_PUBLISHED_READY_OK_STREAK"):
-        life._env_int("HYPERLOOM_MN_PUBLISHED_READY_OK_STREAK", 2)
+        RestartSettings.from_env()
 
 
-def test_gate_fails_when_a_resolvable_endpoint_never_serves(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_gate_fails_when_a_resolvable_endpoint_never_serves(
+    monkeypatch: pytest.MonkeyPatch, settings: RestartSettings
+) -> None:
     """A published endpoint that resolves but never answers is a real failure."""
     monkeypatch.setattr(life, "_read_state", lambda: _rewritten_state())
     _fast_clock(monkeypatch)
     _install_fake_httpx(monkeypatch, [_transport_error(ConnectionRefusedError(111, "Connection refused"))])
 
     with pytest.raises(life.ServerRestartFailed):
-        asyncio.run(life._wait_for_published_service_ready_async(timeout_s=30, poll_every_s=5))
+        _gate(settings, timeout_s=30)
 
 
-def test_gate_lets_a_non_transport_failure_propagate(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_gate_lets_a_non_transport_failure_propagate(
+    monkeypatch: pytest.MonkeyPatch, settings: RestartSettings
+) -> None:
     """Only httpx transport errors are polled through; anything else is a bug."""
     monkeypatch.setattr(life, "_read_state", lambda: _rewritten_state())
     _fast_clock(monkeypatch)
     _install_fake_httpx(monkeypatch, [RuntimeError("client bug"), 200, 200])
 
     with pytest.raises(RuntimeError, match="client bug"):
-        asyncio.run(life._wait_for_published_service_ready_async(timeout_s=600, poll_every_s=5))
+        _gate(settings)
 
 
-def test_gate_is_a_noop_for_infera(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_gate_is_a_noop_for_infera(monkeypatch: pytest.MonkeyPatch, settings: RestartSettings) -> None:
     """Infera's benchmark uses the reachable address; this ClusterIP gate skips."""
     state = _rewritten_state()
     state["backend"] = "infera"
     monkeypatch.setattr(life, "_read_state", lambda: state)
     # No httpx installed on purpose: the function must return before using it.
-    asyncio.run(life._wait_for_published_service_ready_async(timeout_s=600, poll_every_s=5))
+    _gate(settings)
 
 
-def test_gate_is_a_noop_without_a_rewrite(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_gate_is_a_noop_without_a_rewrite(monkeypatch: pytest.MonkeyPatch, settings: RestartSettings) -> None:
     """When reachable == published, the reachable wait already proved it."""
     monkeypatch.setattr(
         life,
         "_read_state",
         lambda: {"backend": "rayjob", "service_url": "http://svc:8888"},
     )
-    asyncio.run(life._wait_for_published_service_ready_async(timeout_s=600, poll_every_s=5))
+    _gate(settings)
 
 
-def test_gate_disabled_by_nonpositive_timeout_skips_instead_of_failing(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_gate_disabled_by_nonpositive_timeout_skips_instead_of_failing(
+    monkeypatch: pytest.MonkeyPatch, settings: RestartSettings
+) -> None:
     """timeout_s<=0 is an escape hatch: skip the gate, never fail on it."""
     monkeypatch.setattr(life, "_read_state", lambda: _rewritten_state())
 
-    asyncio.run(life._wait_for_published_service_ready_async(timeout_s=0, poll_every_s=5))
-    asyncio.run(life._wait_for_published_service_ready_async(timeout_s=-1, poll_every_s=5))
+    _gate(settings, timeout_s=0)
+    _gate(settings, timeout_s=-1)
 
 
 @pytest.mark.parametrize(
@@ -228,14 +256,14 @@ def test_published_ready_timeout_env_parse(monkeypatch: pytest.MonkeyPatch, raw:
     if raw is not None:
         monkeypatch.setenv("HYPERLOOM_MN_PUBLISHED_READY_S", raw)
 
-    assert life._published_ready_timeout_s() == expected
+    assert RestartSettings.from_env().published_ready_s == expected
 
 
 def test_an_unreadable_budget_does_not_quietly_become_the_default(monkeypatch: pytest.MonkeyPatch) -> None:
     """A budget of 300s where the operator asked for something else is a gate they did not configure."""
     monkeypatch.setenv("HYPERLOOM_MN_PUBLISHED_READY_S", "abc")
     with pytest.raises(EnvValueError, match="HYPERLOOM_MN_PUBLISHED_READY_S"):
-        life._published_ready_timeout_s()
+        RestartSettings.from_env()
 
 
 @pytest.mark.parametrize(
