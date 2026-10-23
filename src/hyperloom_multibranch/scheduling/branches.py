@@ -329,8 +329,9 @@ class BranchControl:
             self._briefs.for_branch(entry.branch, launch.focus)
         if entry.origin.cut_by_scheduler:
             reason = f"{entry.origin.value} branch" + (f" of {entry.from_branch}" if entry.from_branch else "")
+            repairs = launch.repair.judgement.request_ids[0] if launch.repair is not None else ""
             await self._notebook.record_lineage(
-                LineageEvent(LineageKind.OPEN, entry.branch, from_commit=start_commit, reason=reason)
+                LineageEvent(LineageKind.OPEN, entry.branch, from_commit=start_commit, reason=reason, repairs=repairs)
             )
             await self._repo.create_branch(entry.branch, start_commit)
         await self.push_quota()
