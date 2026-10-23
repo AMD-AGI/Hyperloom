@@ -57,6 +57,7 @@ from hyperloom_multibranch.notebook.rsi.briefing import SessionBriefs, TableStac
 from hyperloom_multibranch.notebook.rsi.lesson_recall import LessonRecall
 from hyperloom_multibranch.notebook.rsi.lessons import LessonPool
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
+from hyperloom_multibranch.repo.merge import wider_table
 from hyperloom_multibranch.rulegate.gate import RuleGate
 from hyperloom_multibranch.rulegate.regression import RegressionSet, ReproRunner
 from hyperloom_multibranch.rulegate.rules import AgentXRule, InferenceXRule, Rule
@@ -270,7 +271,7 @@ def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: Peer
         metric=workload.metric,
         learnings=learnings,
         repo=repo,
-        tables=TableStack(lambda artifact: setup.blobs.get(artifact.sha256), setup.blobs.put),
+        tables=TableStack(stack_slot=partial(wider_table, table=lambda artifact: setup.blobs.get(artifact.sha256))),
     )
     tool_options = SpecialistToolOptions(
         claim_ttl_seconds=CLAIM_TTL_SECONDS,
