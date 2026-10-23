@@ -48,10 +48,13 @@ def _archive_copy(archive: RoundArchive, role: str, src: Path, dest: Path, *, ch
 
     ``child_written``: the file lives where a demoted specialist can replace it, so a symlink is refused, not followed.
     """
-    if not src.is_file() or src.stat().st_size > _FILE_SIZE_LIMIT:
-        return
     try:
-        data = read_bytes_nofollow(src) if child_written else src.read_bytes()
+        if child_written:
+            data = read_bytes_nofollow(src, limit=_FILE_SIZE_LIMIT)
+        elif src.is_file() and src.stat().st_size <= _FILE_SIZE_LIMIT:
+            data = src.read_bytes()
+        else:
+            return
     except OSError:
         return
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -113,7 +116,7 @@ def snapshot_round(session_dir: str | Path, res: dict[str, Any]) -> RoundArchive
     copied: set[str] = set()
     for applied in res.get("patches_applied") or []:
         src = Path(str(applied))
-        _archive_copy(archive, ROLE_PATCH, src, round_dir / _PATCHES_DIR / src.name)
+        _archive_copy(archive, ROLE_PATCH, src, round_dir / _PATCHES_DIR / src.name, child_written=True)
         # Marked seen even when refused, so the sweep below does not retry it.
         copied.add(src.name)
 

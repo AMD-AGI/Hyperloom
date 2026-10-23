@@ -97,8 +97,8 @@ class RunAs:
         ``git worktree add`` creates the ``<worktree>/.git`` gitfile and its
         ``<repo>/.git/worktrees/<name>`` admin dir under the app's group and,
         once the app's umask is 007, without other-read, so the child's git
-        would fail. Both are shared read-only, as is search on the ``worktrees``
-        directory above the admin dir. A worktree with no gitfile (a snapshot)
+        would fail. Both are shared read-only, as is search (not write) on the
+        ``worktrees`` directory above the admin dir. A worktree with no gitfile (a snapshot)
         needs nothing.
 
         The gitfile sits in a tree the child can rewrite, so its ``gitdir:``
@@ -120,7 +120,8 @@ class RunAs:
         self.share_tree(admin, write=False)
         parent = admin.parent
         os.chown(parent, -1, self.gid)
-        parent.chmod(stat.S_IMODE(parent.stat().st_mode) | stat.S_IRGRP | stat.S_IXGRP)
+        # Search, not write: a group that could rename entries here could break every other task's git.
+        parent.chmod((stat.S_IMODE(parent.stat().st_mode) | stat.S_IRGRP | stat.S_IXGRP) & ~stat.S_IWGRP)
 
     def share_tree(self, root: Path, *, sticky: bool = False, write: bool = True) -> None:
         """Give this user's group read-write access to everything under ``root``.

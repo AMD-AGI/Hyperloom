@@ -1761,6 +1761,10 @@ def test_a_worktree_made_under_umask_007_is_readable_to_git_once_prepared(tmp_pa
             assert done.returncode == 0, (args, done.stderr)
         # Read-only: the child cannot write the admin dir it was shown.
         admin = Path((worktree / ".git").read_text(encoding="utf-8").split(":", 1)[1].strip())
+        # ... nor rename or add siblings in the directory above it.
+        for move in (f"mv {admin} {admin}.moved", f"touch {admin.parent}/planted"):
+            blocked = subprocess.run(["/bin/sh", "-c", move], capture_output=True, check=False, **kwargs)
+            assert blocked.returncode != 0, move
         for victim in (admin / "planted", admin / "HEAD"):
             blocked = subprocess.run(
                 ["/bin/sh", "-c", f"echo x >> {victim}"], capture_output=True, check=False, **kwargs
@@ -1794,3 +1798,32 @@ def test_the_round_archive_does_not_copy_a_file_a_child_linked_to(tmp_path: Path
     dest = tmp_path / "out" / "specialist_done.json"
     _archive_copy(_Archive(), "r", tmp_path / "specialist_done.json", dest, child_written=True)
     assert not dest.exists() and _Archive.recorded == []
+
+
+def test_a_claimed_patch_path_through_a_planted_directory_link_is_not_accepted(tmp_path: Path):
+    from hyperloom.orchestrator.specialists.runner import _resolve_claimed_patch
+
+    wt = tmp_path / "wt"
+    (wt / "real").mkdir(parents=True)
+    (wt / "real" / "a.patch").write_text("--- a/x\n+++ b/x\n", encoding="utf-8")
+    (wt / "patches").symlink_to(wt / "real")
+    assert _resolve_claimed_patch("real/a.patch", [wt]) == str(wt / "real" / "a.patch")
+    assert _resolve_claimed_patch("patches/a.patch", [wt]) is None
+    assert _resolve_claimed_patch(str(wt / "patches" / "a.patch"), [wt]) is None
+
+
+def test_the_archive_does_not_copy_an_applied_patch_the_child_replaced_with_a_link(tmp_path: Path):
+    from hyperloom.orchestrator.enablement.artifacts import snapshot_round
+
+    secret = tmp_path / "app_secret"
+    secret.write_text("secret", encoding="utf-8")
+    patch = tmp_path / "001_fix.patch"
+    patch.symlink_to(secret)
+    archive = snapshot_round(
+        tmp_path, {"specialist_task_id": "t1", "patches_applied": [str(patch)], "enablement_round": 1}
+    )
+    copied = (
+        [p for p in (tmp_path / "enablement").rglob("*") if p.is_file()] if (tmp_path / "enablement").exists() else []
+    )
+    assert all(p.read_text(encoding="utf-8") != "secret" for p in copied)
+    assert archive is not None

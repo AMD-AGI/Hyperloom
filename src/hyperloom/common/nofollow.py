@@ -44,14 +44,20 @@ def _open_below(base: Path, parts: Sequence[str], *, create: bool) -> int:
     return fd
 
 
-def read_bytes_nofollow(path: Path | str) -> bytes:
-    """Return the bytes of the regular file at ``path``; refuse a symlink, a FIFO or a device."""
+def read_bytes_nofollow(path: Path | str, *, limit: int | None = None) -> bytes:
+    """Return the bytes of the regular file at ``path``; refuse a symlink, a FIFO or a device.
+
+    ``limit``: refuse (``EFBIG``) a file longer than this many bytes, without reading past it.
+    """
     # O_NONBLOCK keeps a planted FIFO from hanging the app; regular files ignore it.
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
     with os.fdopen(fd, "rb") as handle:
         if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
             raise OSError(errno.EINVAL, "not a regular file", str(path))
-        return handle.read()
+        data = handle.read(None if limit is None else limit + 1)
+    if limit is not None and len(data) > limit:
+        raise OSError(errno.EFBIG, "file too large", str(path))
+    return data
 
 
 def read_text_nofollow(path: Path | str) -> str:
