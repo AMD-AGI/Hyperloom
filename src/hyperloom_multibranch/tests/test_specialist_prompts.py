@@ -553,3 +553,13 @@ def test_the_role_reads_a_table_s_hits_before_calling_it_flat():
 
     assert "table_hits says, per kernel table the test loaded, how many of its rows aiter read" in prompt
     assert "a table marked not_exercised measured nothing of its rows" in prompt
+
+
+def test_the_attention_and_fusion_directions_name_the_cache_layout_and_the_epilogue():
+    (attention,) = [text for text in DIRECTIONS if text.startswith("Attention and decode kernels:")]
+    (fusion,) = [text for text in DIRECTIONS if text.startswith("Fusion:")]
+
+    assert "every kernel that writes the KV cache must write the layout the new one reads" in attention
+    assert "revise the patch your head already has for that writer instead of adding a second one" in attention
+    assert "into the GEMM epilogue that consumes it" in fusion
+    assert "profile again once a large kernel on the path got faster" in fusion

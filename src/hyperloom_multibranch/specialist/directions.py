@@ -36,7 +36,8 @@ DIRECTIONS = (
     "mul, rope) with a source patch or a kernel, starting from the operators the profile ranks highest. Carry the "
     "fusion to the quantize: a norm, gate or attention output that an FP8 GEMM quantizes again should write the FP8 "
     "values and scales itself, and the all-reduce before a norm can take the residual add, the norm and the quantize "
-    "in the same kernel.",
+    "in the same kernel. Fold an activation into the GEMM epilogue that consumes it, and profile again once a large "
+    "kernel on the path got faster: the small operators' shares then grow past the bar.",
     "Server arguments and environment variables: yours is the one branch that tests settings alone; test the settings "
     "the profile or server.log point at, not a blind sweep. Before testing a setting, grep where it is read: one with "
     "no reader on this model's path, this backend or this phase (decode or prefill) is dead, and its test measures "
@@ -49,7 +50,11 @@ DIRECTIONS = (
     "ROCm code gaps: find the code paths where ROCm runs a slower or missing implementation where CUDA has a fast one "
     "(a fallback, a missing fused or tuned path), and port or align the CUDA implementation.",
     "Attention and decode kernels: speed up the hottest attention and decode kernels the profile shows, with a kernel "
-    "artifact or a source patch.",
+    "artifact or a source patch. Check which attention kernel the head runs, in server.log and the profile: a newer "
+    "kernel family (such as aiter's gluon paged attention) can read the KV cache in another layout, and then every "
+    "kernel that writes the KV cache must write the layout the new one reads (a fused norm, rope and cache-write "
+    "kernel included); a mismatch shows as an accuracy failure, not as a slowdown. Where the writer is already "
+    "patched, revise the patch your head already has for that writer instead of adding a second one.",
     "Existing PRs and patches: scan the GitHub PRs of aiter and of this session's framework (sglang, vllm or atom), "
     "merged or open, for ones on this model's architecture, its hot operators or ROCm and gfx950; check each against "
     "the version installed in the image, which can predate a merged PR, and port the ones it lacks as a patch to test. "
