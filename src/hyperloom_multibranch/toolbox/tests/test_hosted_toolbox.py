@@ -12,6 +12,7 @@ named by ``HYPERLOOM_E2B_ENVD``); the ones that only build the toolbox always ru
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import functools
 import os
 import time
@@ -275,6 +276,54 @@ def test_inputs_that_cannot_describe_a_session_are_refused(
 ) -> None:
     with pytest.raises(ValueError, match=message):
         _inputs(None, tmp_path, **changed)
+
+
+#: What the host entry builds the inputs from: a plain dict whose keys are these names (``HostedToolboxInputs(**d)``).
+#: Fields are only ever added, and only with a default, so the required names are fixed.
+_REQUIRED_FIELDS = (
+    "run_id",
+    "session_dir",
+    "api_url",
+    "sandbox_url",
+    "measurement_key",
+    "sandbox_templates",
+    "source_repo",
+    "source_sha",
+)
+_OPTIONAL_FIELDS = ("tp", "dev_key", "grant_limits")
+
+
+def test_a_plain_dict_with_exactly_the_field_names_builds_the_inputs(tmp_path: Path) -> None:
+    plain: dict[str, Any] = {
+        "run_id": "run-1",
+        "session_dir": tmp_path,
+        "api_url": "http://service.invalid",
+        "sandbox_url": "http://sandboxes.invalid",
+        "measurement_key": "m-key",
+        "sandbox_templates": {"runner": {"1": "run-runner-g1"}, "dev": "run-dev-g1"},
+        "source_repo": _SOURCE_REPO,
+        "source_sha": _SOURCE_SHA,
+        "tp": 1,
+        "dev_key": "d-key",
+        "grant_limits": dict(_GRANT),
+    }
+    assert set(plain) == {*_REQUIRED_FIELDS, *_OPTIONAL_FIELDS}
+    inputs = HostedToolboxInputs(**plain)
+    assert {name: getattr(inputs, name) for name in plain} == plain
+    required = {f.name for f in dataclasses.fields(inputs) if f.default is f.default_factory is dataclasses.MISSING}
+    assert required == set(_REQUIRED_FIELDS) and {f.name for f in dataclasses.fields(inputs)} == set(plain)
+    only_required = {name: plain[name] for name in _REQUIRED_FIELDS}
+    assert HostedToolboxInputs(**only_required).dev_key is None
+
+
+def test_a_dict_with_one_key_more_or_one_required_key_less_is_refused(tmp_path: Path) -> None:
+    plain = vars(_inputs(None, tmp_path)).copy()
+    with pytest.raises(TypeError, match="unexpected keyword argument 'extra_field'"):
+        HostedToolboxInputs(**plain, extra_field=1)
+    for name in _REQUIRED_FIELDS:
+        fewer = {key: value for key, value in plain.items() if key != name}
+        with pytest.raises(TypeError, match=rf"missing 1 required positional argument: '{name}'"):
+            HostedToolboxInputs(**fewer)
 
 
 def test_the_source_of_a_sha256_repository_is_a_commit_hash_too(tmp_path: Path) -> None:
