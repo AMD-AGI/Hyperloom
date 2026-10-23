@@ -10,6 +10,8 @@ import subprocess
 import sys
 from typing import NamedTuple, NoReturn
 
+from hyperloom.common.visible_devices import rocm_smi_gpu_count
+
 
 class _Probe(NamedTuple):
     """Probe outcome plus the stderr tail needed to diagnose an unclear one."""
@@ -22,25 +24,11 @@ class _Probe(NamedTuple):
 def _rocm_smi_visible_gpus() -> tuple[int | None, str | None]:
     """GPU count ``rocm-smi`` reports, else ``(None, skip_reason)`` when it cannot answer."""
     try:
-        proc = subprocess.run(
-            ["rocm-smi", "--showid"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired, PermissionError, OSError):
-        return None, "rocm_smi_unavailable"
-    if proc.returncode != 0:
+        return rocm_smi_gpu_count(), None
+    except subprocess.CalledProcessError:
         return None, "rocm_smi_failed"
-    # rocm-smi --showid emits multiple GPU[ lines per GPU; deduplicate by GPU index.
-    visible_indices: set[str] = set()
-    for line in (proc.stdout or "").splitlines():
-        stripped = line.strip()
-        if stripped.startswith("GPU["):
-            idx, _, _ = stripped[4:].partition("]")
-            if idx:
-                visible_indices.add(idx)
-    return len(visible_indices), None
+    except (OSError, subprocess.SubprocessError):
+        return None, "rocm_smi_unavailable"
 
 
 def _device_visibility_split(python_exe: str | None, visible: int | None) -> str:

@@ -127,6 +127,39 @@ def test_a_comment_the_change_removed_elsewhere_was_moved_not_added() -> None:
     assert got[0] == "adds a 10-line comment block (limit 8)"
 
 
+# --- Broad catch reason ----------------------------------------------------------
+
+
+BROAD_NOQA = """\
+try:
+    f()
+except Exception:  # noqa: BLE001
+    log()
+try:
+    g()
+except Exception:  # noqa: BLE001 - outermost CLI boundary, logged
+    log()
+try:
+    h()
+except Exception:  # noqa: E722, BLE001
+    log()
+try:
+    k()
+except Exception:  # noqa: BLE001
+    log()
+"""
+
+
+def test_an_added_broad_noqa_needs_a_reason_on_its_line() -> None:
+    got = [(p.check, p.line) for p in checks.broad_noqa_problems("m.py", BROAD_NOQA, {3, 7, 11})]
+    assert got == [(checks.BROAD_NOQA, 3), (checks.BROAD_NOQA, 11)]
+
+
+def test_a_broad_noqa_the_change_removed_elsewhere_was_moved_not_added() -> None:
+    removed = {"except Exception:  # noqa: BLE001"}
+    assert checks.broad_noqa_problems("m.py", BROAD_NOQA, {3, 15}, removed) == []
+
+
 # --- English only ----------------------------------------------------------------
 
 
