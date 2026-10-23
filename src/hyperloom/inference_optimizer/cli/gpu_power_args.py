@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: MIT
 
 """The GPU power-settings flags: ``--gpu-power-cap-w``, ``--gpu-perf-level``, ``--gpu-sclk-max-mhz``,
-``--apply-gpu-power-settings``, ``--node-power-management`` and ``--node-power-limit-w``."""
+``--apply-gpu-power-settings``, ``--node-power-management``, ``--node-power-limit-w`` and
+``--allow-shared-npm-node``."""
 
 from __future__ import annotations
 
@@ -88,7 +89,7 @@ def add_gpu_power_arguments(opt: argparse._ActionsContainer) -> None:
 
 
 def _add_node_power_arguments(opt: argparse._ActionsContainer) -> None:
-    """The node power management flags: assertions only, since NPM is set on the BMC."""
+    """The node power management flags: assertions, since NPM is set on the BMC, and the permission to share a node."""
     opt.add_argument(
         "--node-power-management",
         type=str.lower,
@@ -109,5 +110,15 @@ def _add_node_power_arguments(opt: argparse._ActionsContainer) -> None:
         help=(
             "Declare the node power limit (W) firmware enforces under NPM, as `amd-smi node -p` reports it; this can "
             "sit below the limit the BMC was asked for. Asserted like --node-power-management."
+        ),
+    )
+    opt.add_argument(
+        "--allow-shared-npm-node",
+        action="store_true",
+        help=(
+            "Measure on a node with Node Power Management enabled even though the session's visible-device mask "
+            "leaves some of its GPUs out. Without it such a launch is refused: firmware shares one power budget "
+            "across every card, so work on the other cards moves this session's measurements. The cards left out are "
+            "recorded with the session. Not kept: pass it again on resume."
         ),
     )

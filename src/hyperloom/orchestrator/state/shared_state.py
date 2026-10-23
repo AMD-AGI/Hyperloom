@@ -470,8 +470,8 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     latency_budget_ms: float = 0.0
     power_budget_w: float = 0.0  # --max-power-w: total W over the serving cards; 0.0 is off. Archived, like latency.
     power_budget_per_gpu_w: dict[str, float] = field(default_factory=dict)  # --max-per-gpu-power-w {GPU id: W}
-    # GPU power settings the session is measured under: {"declared", "observed": {gpu: {power_cap_w, perf_level,
-    # sclk_max_mhz}}, "node" where amd-smi reports NPM, "applied" with --apply-gpu-power-settings}. Asserted on resume.
+    # GPU power record: {"declared", "observed": {gpu: {power_cap_w, perf_level, sclk_max_mhz}}, "node" (NPM),
+    # "applied", and with --allow-shared-npm-node "shared_npm_node" (the cards left out)}. Asserted on resume.
     gpu_power_settings: dict[str, Any] = field(default_factory=dict)
     # AgentX corpus shape: written at seed from canonical constants, overwritten with measured values after every
     # AgentX measurement. Read by semantic consumers (prompts, manifest, reports) instead of the inert state.isl /

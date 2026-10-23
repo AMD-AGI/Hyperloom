@@ -122,7 +122,10 @@ when `--gpu-type` is omitted.
   (`enabled` / `disabled`), `--node-power-limit-w`. Always asserted against
   `amd-smi node -p`, never set by the session: NPM is set on the BMC. The
   session refuses to start or resume if the node differs, and records the
-  observed state and limit either way where `amd-smi` reports them.
+  observed state and limit either way where `amd-smi` reports them. With NPM
+  enabled, a session whose visible-device mask leaves any of the node's GPUs
+  out is refused; `--allow-shared-npm-node` (on every launch and resume)
+  measures anyway and records the cards left out.
 - **Cluster topology & multi-node backend:** `--nodes`, `--gpus-per-node`,
   `--gpu-type`, `--mn-backend` (`rayjob` / `infera`), `--server-args` (rayjob).
   Per-pod sizing, the pod image and pod-side env are the provisioning
