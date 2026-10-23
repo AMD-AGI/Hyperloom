@@ -33,12 +33,13 @@ exclude_type_checking_imports = True
 
 
 [importlinter:contract:hl-top-layers]
-name = hyperloom top-level layers (cli > orchestrator > agents > inference_optimizer > common)
+name = hyperloom top-level layers (cli > orchestrator > agents > contracts > inference_optimizer > common)
 type = layers
 layers =
     hyperloom.cli
     hyperloom.orchestrator
     hyperloom.agents
+    hyperloom.contracts
     hyperloom.inference_optimizer
     hyperloom.common
 # Baseline: hyperloom.inference_optimizer.cli is an entry point that lives
