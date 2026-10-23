@@ -12,6 +12,7 @@ from pathlib import Path
 
 from hyperloom.common.perf_metric import GRADED_INTVTY_P50, GRADED_OUTPUT
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
+from hyperloom_multibranch.scheduling.reference import ReferenceSource
 from hyperloom_multibranch.scheduling.roster import RosterCaps
 
 #: FINAL's sweep concs as multiples of an InferenceX workload's conc; the primary operating point is one of them.
@@ -107,7 +108,8 @@ class RunSettings:
     PRELUDE the run roots on, ``None`` when it runs a child of its own. ``user_directions`` are the directions the user
     wrote, each opening one branch where EXPLORE starts, ahead of the opening batch, within the branch cap.
     ``frontier_policy`` says how the frontier policy is chosen, and ``frontier_scorer`` names the scorer the session
-    scores with instead of choosing one, ``""`` when it chooses."""
+    scores with instead of choosing one, ``""`` when it chooses. ``references`` are the directories of reference
+    material the run copies in before its first phase, each with the commit it was taken at."""
 
     workload: Workload
     max_hours: float
@@ -119,6 +121,7 @@ class RunSettings:
     user_directions: tuple[str, ...] = ()
     frontier_policy: FrontierPolicyMode = FrontierPolicyMode.AUTO
     frontier_scorer: str = ""
+    references: tuple[ReferenceSource, ...] = ()
 
 
 __all__ = [

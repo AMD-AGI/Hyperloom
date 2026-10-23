@@ -29,6 +29,7 @@ MANIFEST_FILE = "MB-manifest.json"
 SCHEDULING_DIR = "MB-scheduling"
 PRELUDE_DIR = "MB-prelude"
 NOTEBOOK_DIR = "MB-notebook"
+REFERENCE_DIR = "MB-reference"
 REPO_DIR = "MB-repo"
 BLOBS_DIR = "MB-blobs"
 BRANCHES_DIR = "MB-branches"
@@ -62,6 +63,7 @@ SESSION_SUBDIRS: tuple[str, ...] = (
     SCHEDULING_DIR,
     PRELUDE_DIR,
     NOTEBOOK_DIR,
+    REFERENCE_DIR,
     BLOBS_DIR,
     BRANCHES_DIR,
     TOOLBOX_DIR,
@@ -98,6 +100,11 @@ class SessionLayout:
     @property
     def notebook(self) -> Path:
         return self.root / NOTEBOOK_DIR
+
+    @property
+    def reference(self) -> Path:
+        """The reference material the run was given, one directory per named source, copied in before PRELUDE."""
+        return self.root / REFERENCE_DIR
 
     @property
     def repo(self) -> Path:

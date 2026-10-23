@@ -21,6 +21,7 @@ _DIRS = (
     "MB-scheduling",
     "MB-prelude",
     "MB-notebook",
+    "MB-reference",
     "MB-blobs",
     "MB-branches",
     "MB-toolbox",

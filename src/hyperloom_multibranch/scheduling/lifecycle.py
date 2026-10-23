@@ -83,6 +83,7 @@ from hyperloom_multibranch.scheduling.prelude import (
     WarmStartSource,
 )
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry
+from hyperloom_multibranch.scheduling.reference import copy_references
 from hyperloom_multibranch.scheduling.requests import SessionChecks, SessionTests
 from hyperloom_multibranch.scheduling.roster import QUOTA_POLICY_VERSION, Roster, final_quota
 from hyperloom_multibranch.scheduling.settings import FrontierPolicyMode, RunSettings
@@ -261,11 +262,13 @@ class Session:
         """Run every phase and CLOSE; an unhandled error propagates once CLOSE has run.
 
         The scheduler records itself before the first phase, so the directory says the session is running from the
-        start and a recovery over it is refused while it is.
+        start and a recovery over it is refused while it is. The reference material the run was given is copied in
+        before the manifest, so the manifest the session writes describes a directory that already holds it.
         """
 
         budget = SessionBudget.from_hours(self._settings.max_hours, self._clock.now())
         self._processes.record_scheduler()
+        await asyncio.to_thread(copy_references, self._settings.references, self._layout.reference)
         self._write_manifest(budget, await asyncio.to_thread(code_version))
         hard_stop = HardStop(budget, self._clock)
         aborted = SessionOutcome(SessionStopReason.ABORTED, None, None, "")

@@ -131,6 +131,7 @@ from hyperloom_multibranch.scheduling.llm import CompletionFailed, CompletionRep
 from hyperloom_multibranch.scheduling.peers import Peers, PeerSetup
 from hyperloom_multibranch.scheduling.policy import SCHEDULING_POLICY, policy_version
 from hyperloom_multibranch.scheduling.roster import BranchOrigin, BranchStatus, RosterCaps, StopCause, final_quota
+from hyperloom_multibranch.scheduling.reference import ReferenceSource
 from hyperloom_multibranch.scheduling.settings import (
     FrontierPolicyMode,
     InferenceXShape,
@@ -833,6 +834,25 @@ async def test_the_manifest_names_the_lesson_pool_as_the_specialists_recall_read
 
     assert outcome.exit_code == 0 and read != ""
     assert json.loads(stage.layout.manifest.read_text())["policy_versions"][LESSONS_KEY] == read
+
+
+async def test_a_session_copies_the_reference_material_it_was_given_and_its_manifest_pins_it(tmp_path: Path) -> None:
+    knowledge = tmp_path / "GEAK" / "tuning"
+    knowledge.mkdir(parents=True)
+    (knowledge / "gemm.md").write_text("pad M to the next multiple of 64", encoding="utf-8")
+    source = ReferenceSource("geak-tuning", str(knowledge), "c" * 40)
+    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage.settings = replace(stage.settings, references=(source,))
+    _script(stage)
+
+    outcome = await stage.run()
+
+    assert outcome.exit_code == 0
+    copied = stage.layout.reference / "geak-tuning" / "gemm.md"
+    assert copied.read_text(encoding="utf-8") == "pad M to the next multiple of 64"
+    assert json.loads(stage.layout.manifest.read_text())["settings"]["references"] == [
+        {"name": "geak-tuning", "path": str(knowledge), "revision": "c" * 40}
+    ]
 
 
 async def test_a_pinned_scorer_is_never_a_challenger_session(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
