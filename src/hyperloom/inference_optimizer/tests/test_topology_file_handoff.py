@@ -447,3 +447,36 @@ def test_outside_optimize_the_file_still_supplies_the_counts(monkeypatch, tmp_pa
     """With nothing exported by a launch, the file is the source, as before."""
     state = _state_from_file(monkeypatch, _write(tmp_path / "t.json", _rayjob_doc(tmp_path)))
     assert (state["nodes"], state["gpus_per_node"]) == (2, 8)
+
+
+# ---- the CLI reaches the file through the package's own interface --------------------------------------------------
+def test_the_cli_uses_the_packages_exports_and_not_its_internal_module() -> None:
+    import inspect
+
+    import hyperloom.inference_optimizer.cli.multi_node as cli_mn
+    import hyperloom.inference_optimizer.multi_node as package
+
+    assert package.TopologyHandoffError is topo.TopologyHandoffError
+    assert package.topology_file_overlay is topo.topology_file_overlay
+    assert "_internal.topology_file" not in inspect.getsource(cli_mn)
+
+
+def test_the_service_url_check_parses_the_file_once_and_raises_the_exported_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from hyperloom.inference_optimizer.cli.multi_node import _hand_off_service_url
+    from hyperloom.inference_optimizer.multi_node import TopologyHandoffError
+
+    parsed: list[str] = []
+    real = topo._parse
+    monkeypatch.setattr(topo, "_parse", lambda path: parsed.append(path) or real(path))
+    path = _write(tmp_path / "t.json", _rayjob_doc(tmp_path))
+    monkeypatch.setenv(topo.TOPOLOGY_FILE_ENV, str(path))
+    assert _hand_off_service_url() == "http://10.0.0.12:30000"
+    assert parsed == [str(path)]
+
+    bad = tmp_path / "bad.json"
+    bad.write_text("{", encoding="utf-8")
+    monkeypatch.setenv(topo.TOPOLOGY_FILE_ENV, str(bad))
+    with pytest.raises(TopologyHandoffError, match="not valid JSON"):
+        ext.external_service_url()
