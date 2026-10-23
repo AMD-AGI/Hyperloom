@@ -17,6 +17,7 @@ from hyperloom.contracts.measurement import (
     NOT_REPRODUCED,
     Purpose,
     REPRODUCED,
+    RequestClasses,
     RoundValue,
     SandboxFacts,
     TABLE_EXERCISED,
@@ -512,3 +513,113 @@ def test_runtime_findings_must_be_a_tuple_of_strings() -> None:
         _result(runtime_findings=("ok", 3))
     with pytest.raises(MeasurementError, match="table_hits must be a list"):
         TestResult.from_document({**_result().to_document(), "table_hits": "oops"})
+
+
+# --- the failed requests of an AgentX round, by class ----------------------------------------------------------------
+
+COUNTED = RequestClasses(
+    0,
+    "p0/aiperf_artifacts/profile_export.jsonl",
+    128,
+    requests_total=100,
+    failed_total=7,
+    failed_transport=3,
+    failed_no_content=4,
+    failed_empty=1,
+    failed_short=3,
+)
+UNSPLIT = RequestClasses(
+    1,
+    "p1/aiperf_artifacts/profile_export.jsonl",
+    256,
+    requests_total=100,
+    failed_total=7,
+    failed_transport=3,
+    failed_no_content=4,
+    reason="no output token count",
+)
+NOT_COUNTED = RequestClasses(2, reason="the round left no per-request export")
+
+
+@pytest.mark.parametrize("classes", [COUNTED, UNSPLIT, NOT_COUNTED], ids=["counted", "unsplit", "not-counted"])
+def test_the_classes_of_a_rounds_failed_requests_round_trip_and_an_unknown_count_stays_unknown(
+    classes: RequestClasses,
+) -> None:
+    again = _roundtrip(_result(request_classes=(classes,)))
+    assert again.request_classes == (classes,)
+    unknown = [
+        name
+        for name, value in classes.to_document().items()
+        if name.startswith(("requests_", "failed_")) and value is None
+    ]
+    assert [getattr(again.request_classes[0], name) for name in unknown] == [None] * len(unknown), "none is not zero"
+
+
+def test_a_document_written_before_the_request_classes_loads_with_none_and_that_is_not_zero_failures() -> None:
+    document = _result(request_classes=(COUNTED,)).to_document()
+    del document["request_classes"]
+    assert TestResult.from_document(document).request_classes == ()
+
+
+def test_the_result_document_names_every_class_count_and_where_the_export_is() -> None:
+    (shown,) = _result(request_classes=(COUNTED,)).to_document()["request_classes"]
+    assert shown == {
+        "point": 0,
+        "export": "p0/aiperf_artifacts/profile_export.jsonl",
+        "concurrency": 128,
+        "requests_total": 100,
+        "failed_total": 7,
+        "failed_transport": 3,
+        "failed_no_content": 4,
+        "failed_empty": 1,
+        "failed_short": 3,
+        "reason": "",
+    }
+
+
+@pytest.mark.parametrize(
+    ("fields", "match"),
+    [
+        ({"failed_total": 8}, "8 failed requests of 100 are 3 transport and 4 no-content"),
+        ({"failed_transport": 2}, "7 failed requests of 100 are 2 transport and 4 no-content"),
+        ({"requests_total": 5}, "7 failed requests of 5 are 3 transport and 4 no-content"),
+        ({"failed_empty": 2}, "the empty and short failures add up to the no-content failures"),
+        ({"failed_short": None, "reason": "why"}, "the empty and the short failures come together"),
+        ({"requests_total": None, "reason": "why"}, "the requests, the failed ones and their .* parts come together"),
+        ({"failed_transport": -1}, "failed_transport must be an integer of at least 0"),
+        ({"failed_total": True}, "failed_total must be an integer"),
+        ({"point": -1}, "point must be an integer of at least 0"),
+        ({"concurrency": 0}, "concurrency must be an integer of at least 1"),
+        ({"export": "/abs/profile_export.jsonl"}, "export must be a relative path"),
+        ({"export": "../profile_export.jsonl"}, "export must be a relative path"),
+        ({"reason": 3}, "reason must be a string"),
+    ],
+)
+def test_classes_that_contradict_themselves_are_refused_naming_the_contradiction(
+    fields: dict[str, object], match: str
+) -> None:
+    with pytest.raises(MeasurementError, match=match):
+        RequestClasses.from_document({**COUNTED.to_document(), **fields})
+
+
+@pytest.mark.parametrize(
+    "unknown",
+    [
+        ("failed_empty", "failed_short"),
+        ("requests_total", "failed_total", "failed_transport", "failed_no_content", "failed_empty", "failed_short"),
+    ],
+    ids=["the-split", "everything"],
+)
+def test_a_count_that_could_not_be_computed_must_say_why(unknown: tuple[str, ...]) -> None:
+    document = {**COUNTED.to_document(), **dict.fromkeys(unknown), "reason": ""}
+    with pytest.raises(MeasurementError, match="a count that could not be computed says why"):
+        RequestClasses.from_document(document)
+    assert RequestClasses.from_document({**document, "reason": "why"}).reason == "why"
+
+
+@pytest.mark.parametrize("bad", [[COUNTED], "text", (COUNTED.to_document(),), (None,)])
+def test_request_classes_must_be_a_tuple_of_request_classes(bad: object) -> None:
+    with pytest.raises(MeasurementError, match="request_classes must be a tuple of RequestClasses"):
+        _result(request_classes=bad)
+    with pytest.raises(MeasurementError, match="request_classes must be a list"):
+        TestResult.from_document({**_result().to_document(), "request_classes": "oops"})

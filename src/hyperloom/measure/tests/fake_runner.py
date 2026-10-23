@@ -22,6 +22,8 @@ attachment placement and ``run_case``) against no server, and lists the verdict 
 every file in the directory it is in (``directory``; a directory attachment beside it is left out).
 ``fake_legacy_decode: true`` lists the ``decode/outputs.jsonl`` that a runner of the removed decode pass left, so a
 bundle written then can be verified again.
+``fake_export: [line, ...]`` lists the per-request export of an AgentX round (``aiperf_artifacts/profile_export.jsonl``
+below the round's directory) with those lines.
 ``fake_eval_in_warmup: true`` lays the rounds out as a graded test with a warmup leaves them (one evaluation, in the
 warmup round): a warmup round and the accuracy round on one directory, the measured round on another, and the lm-eval
 results file of ``fake_accuracy`` below the warmup's.
@@ -48,6 +50,7 @@ from hyperloom.measure.spec import MeasurementSpec, fingerprint, spec_sha256
 
 REPORT_PATH = "benchmark_fake_20261014_000000/benchmark_report.json"
 TRACE_PATH = "profile/torch_trace/rank0.pt.trace.json.gz"
+EXPORT_PATH = "benchmark_fake_20261014_000000/aiperf_artifacts/profile_export.jsonl"
 #: What a runner of the removed greedy decode pass left in a bundle: a header line, then one line per prompt.
 LEGACY_DECODE_PATH = "decode/outputs.jsonl"
 LEGACY_DECODE_IDENTITY = "sha256:0123456789abcdef|temperature=0|top_k=1"
@@ -106,6 +109,8 @@ def _write_files(out: Path, config: dict[str, Any], mode: str) -> dict[str, byte
         files[REPORT_PATH] = json.dumps(report).encode()
     if config.get("fake_trace"):
         files[TRACE_PATH] = b"fake trace bytes"
+    if "fake_export" in config:
+        files[EXPORT_PATH] = "".join(f"{line}\n" for line in config["fake_export"]).encode()
     if config.get("fake_warmup") and REPORT_PATH in files:
         files["warmup_round/benchmark_fake_20261014_000000/benchmark_report.json"] = files[REPORT_PATH]
     in_warmup = bool(config.get("fake_eval_in_warmup")) and REPORT_PATH in files

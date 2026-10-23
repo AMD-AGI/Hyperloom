@@ -30,33 +30,40 @@ class _Overlap(Exception):
     """Both sides changed one line of a file."""
 
 
-def merge_files(base: Files, ours: Files, theirs: Files) -> dict[str, bytes | None] | None:
+def merge_files(
+    base: Files, ours: Files, theirs: Files, *, theirs_wins: bool = False
+) -> dict[str, bytes | None] | None:
     """``ours`` with what ``theirs`` changed from ``base`` in each path of ``theirs``; ``None`` when a path overlaps.
 
-    ``base`` and ``ours`` hold every path of ``theirs``.
+    ``base`` and ``ours`` hold every path of ``theirs``. ``theirs_wins`` takes ``theirs``'s side of every overlap
+    instead (``git merge-file --theirs``), and of a file one side lacks: only to test whether ``theirs`` supersedes
+    what ``ours`` changed, never to rebase.
     """
     merged = dict(ours)
     try:
         for path, change in theirs.items():
-            merged[path] = _merge_file(base[path], ours[path], change)
+            merged[path] = _merge_file(base[path], ours[path], change, theirs_wins)
     except _Overlap:
         return None
     return merged
 
 
-def _merge_file(base: bytes | None, ours: bytes | None, theirs: bytes | None) -> bytes | None:
+def _merge_file(base: bytes | None, ours: bytes | None, theirs: bytes | None, theirs_wins: bool) -> bytes | None:
     if theirs in (base, ours):
         return ours
     if base == ours:
         return theirs
     if base is None or ours is None or theirs is None:
+        if theirs_wins:
+            return theirs
         raise _Overlap
+    side_flag = ["--theirs"] if theirs_wins else []
     with tempfile.TemporaryDirectory(prefix="hl-rebase-") as scratch:
         sides = [Path(scratch) / name for name in ("ours", "base", "theirs")]
         for side, data in zip(sides, (ours, base, theirs)):
             side.write_bytes(data)
         done = subprocess.run(
-            ["git", "merge-file", "-p", "--quiet", *map(str, sides)],
+            ["git", "merge-file", "-p", "--quiet", *side_flag, *map(str, sides)],
             env=_env(Path(scratch)),
             capture_output=True,
             timeout=_GIT_TIMEOUT_S,

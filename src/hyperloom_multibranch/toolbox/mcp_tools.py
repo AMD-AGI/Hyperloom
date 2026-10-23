@@ -153,6 +153,15 @@ _ANALYSIS_BLURBS = {
     ROOFLINE_TOOL: "profile, then analyse",
     KERNEL_TUNE_TOOL: "tune GEMM shapes on one card",
 }
+_TEST_RESULT_GUIDE = (
+    "The state and result of one test this branch submitted, or of any branch's profile test. An AgentX test's "
+    "request_classes has an entry for each measured round: how many requests the client marked failed, as "
+    "failed_transport (the server did not serve it) and failed_no_content (it answered and the client found nothing in "
+    "the answer; failed_empty and failed_short split these by output tokens when the export says, else null with the "
+    "reason), and export, the round's per-request records (aiperf's profile_export.jsonl: input length, output length "
+    "and TTFT of a served request, the error of a failed one) as a path relative to the result's output_dir. A null "
+    "count was not computed; it is not zero."
+)
 _KERNEL_TUNE_GUIDE = (
     " kernel_tune: params.test_request_id names a test whose server log reports untuned GEMM shapes (aiter's 'not found "
     "tuned config' lines), and params.shapes, a list of {env, M, N, K, ...} (env is an AITER_CONFIG_GEMM_* variable), "
@@ -706,7 +715,7 @@ def register_specialist_tools(
     _register_put_kernel_artifact(server, toolbox, toolbox_loop)
     server.register(
         "test_result",
-        description="The state and result of one test this branch submitted, or of any branch's profile test.",
+        description=_TEST_RESULT_GUIDE,
         schema=_REQUEST_ID,
         handler=_test_result(notebooks),
         **own,

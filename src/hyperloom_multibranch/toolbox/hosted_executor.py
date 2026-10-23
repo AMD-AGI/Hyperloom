@@ -44,6 +44,7 @@ from hyperloom.contracts.measurement import (
     TestResult,
     Validity,
 )
+from hyperloom.measure.agentx_requests import read_round_classes
 from hyperloom.measure.fake_gain import PREFIX_CACHE_OFF_ERROR_CLASS, baseline_prefix_cache_refusal
 from hyperloom.measure.failures import Disposition, classify_test_failure
 from hyperloom.measure.archive import ArchiveError
@@ -63,6 +64,7 @@ from hyperloom_multibranch.toolbox.acceptance import backend_kind
 from hyperloom_multibranch.toolbox.attempts import MeasurementRefused, TestJob
 from hyperloom_multibranch.toolbox.reverify import (
     first_hash_difference,
+    first_request_classes_difference,
     first_value_difference,
     first_warning_difference,
 )
@@ -136,7 +138,8 @@ class HostedExecutor:
         except subprocess.TimeoutExpired:
             return self._timed_out(request_id, started)
         result = self._result(request, accepted, call, outcome, started)
-        return await self._with_table_hits(result, accepted, call)
+        result = await self._with_table_hits(result, accepted, call)
+        return await self._with_request_classes(result, request, outcome, call)
 
     def withdraw(self, request_id: str) -> None:
         """End the running attempt of ``request_id``: its sandbox is closed and its cards go back to the pool."""
@@ -156,7 +159,7 @@ class HostedExecutor:
         with tempfile.TemporaryDirectory(prefix="reverify-") as scratch:
             landed = Path(scratch) / "bundle"
             derived = self._backend.reverify(result.request_id, recorded, landed)
-            return _unlike_bundle(result, derived, landed)
+            return _unlike_bundle(result, derived, landed) or _unlike_classes(result, derived, landed)
 
     async def reverify(self, result: TestResult) -> None:
         """Raise :class:`ResultUnverified` naming why ``result`` does not follow from its archived bundle, or why the
@@ -262,6 +265,24 @@ class HostedExecutor:
         hits = await asyncio.to_thread(read_table_hits, accepted.environment, accepted.points, Path(call.output_dir))
         return replace(result, table_hits=hits, runtime_findings=runtime_findings(hits))
 
+    async def _with_request_classes(
+        self, result: TestResult, request: TestRequest, outcome: TestOutcome, call: TestCall
+    ) -> TestResult:
+        """``result`` with, for each measured round of an AgentX test, how many of its requests the client marked failed
+        by class and where the round's per-request export is; any other result has none.
+
+        The exports are read in a worker thread: one holds a line for every request of a round.
+        """
+        if (
+            self._workload is not WorkloadKind.AGENTX
+            or result.validity is not Validity.SUCCEEDED
+            or request.kind in _UNMEASURED_KINDS
+        ):
+            return result
+        concurrencies = _concurrencies_of(call.points)
+        classes = await asyncio.to_thread(read_round_classes, outcome.rounds, Path(call.output_dir), concurrencies)
+        return replace(result, request_classes=classes)
+
     def _profile_location(self, call: TestCall) -> str:
         """Where the landed traces of a profile test are, relative to the session; a profile with none is no result."""
         directory = Path(call.output_dir) / PROFILE_DIR
@@ -337,6 +358,17 @@ def _unlike_bundle(result: TestResult, derived: Reverified, landed: Path) -> str
         return difference
     expected = _warnings_of(derived.rounds) if result.validity is Validity.SUCCEEDED else ()
     return first_warning_difference(result, expected)
+
+
+def _unlike_classes(result: TestResult, derived: Reverified, landed: Path) -> str | None:
+    """The first field of the request classes ``result`` records that the verified bundle's exports do not support.
+
+    A record that holds none, as every one written before the classes existed, is not checked: it makes no claim.
+    """
+    if not result.request_classes:
+        return None
+    concurrencies = tuple(_concurrency_in(text) for text in derived.point_yaml)
+    return first_request_classes_difference(result, read_round_classes(derived.rounds, landed, concurrencies))
 
 
 def _unlike_values(result: TestResult, derived: Reverified, landed: Path) -> str | None:
@@ -491,6 +523,10 @@ def _concurrency_of(point: Path) -> int | None:
         return None
 
 
+def _concurrencies_of(points: tuple[Path, ...]) -> tuple[int | None, ...]:
+    return tuple(_concurrency_of(point) for point in points)
+
+
 def _concurrency_in(text: str) -> int | None:
     try:
         document = yaml.safe_load(text) or {}
@@ -546,7 +582,7 @@ def _accuracy_values(rounds: tuple[RoundOutcome, ...], *, wanted: bool) -> tuple
 
 def _round_values(rounds: tuple[RoundOutcome, ...], points: tuple[Path, ...]) -> tuple[RoundValue, ...]:
     """One value per warmup or measured round whose report is readable and valid; the metric names are the report's."""
-    return _round_values_at(rounds, tuple(_concurrency_of(point) for point in points))
+    return _round_values_at(rounds, _concurrencies_of(points))
 
 
 def _round_values_at(rounds: tuple[RoundOutcome, ...], concurrencies: tuple[int | None, ...]) -> tuple[RoundValue, ...]:

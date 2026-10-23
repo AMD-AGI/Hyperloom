@@ -15,7 +15,9 @@ session's fixed base image, so a recipe's upstream pin is provenance no merge ca
 candidate records without patching it changes nothing a test would build. The merged patch stacks are applied to the
 installed package as the toolbox applies them when it builds a test's environment, so a conflict shows before the
 merge test is paid for. A patch the candidate brings that does not apply there is rebased by a three-way merge of the
-files it touches, and is a conflict only where a line is changed by both sides.
+files it touches. Where a line is changed by both sides, a head patch the candidate's stack does not hold is replaced
+by the candidate's patch when that patch rewrites every line the head patch changes (see ``_replacement``); otherwise
+the patch is a conflict.
 """
 
 from __future__ import annotations
@@ -44,7 +46,7 @@ from hyperloom.contracts.recipe import (
 )
 from hyperloom.measure.framework_rows import cell
 from hyperloom.measure.compile import KernelLoadError, PatchApplyError, kernel_load_env, kernel_rows_only
-from hyperloom_multibranch.contracts.repo import PatchConflict, RebasedPatch, RepoMerge, UnitedTable
+from hyperloom_multibranch.contracts.repo import PatchConflict, RebasedPatch, ReplacedPatch, RepoMerge, UnitedTable
 from hyperloom_multibranch.repo.rebase import Files, merge_files, patch_between
 from hyperloom_multibranch.toolbox.kernel_artifacts import (
     KernelRowsConflict,
@@ -68,13 +70,15 @@ TableStore = Callable[[bytes], str]
 class Stored:
     """What a merge consults beyond the three recipes: the installed packages a patch stack has to apply to, the bytes
     behind a kernel artifact, and the stores a rebased patch and a united table are kept in. ``aiter_configs`` is the
-    aiter install a union reads a table's shape key from, the image's when ``None``."""
+    aiter install a union reads a table's shape key from, the image's when ``None``. ``protected`` are the paths of
+    head patches a merge never takes out to replace them: those the integrator's foundation fixes contributed."""
 
     stack_files: StackFiles
     kernel_table: TableBytes
     store_patch: PatchStore
     store_table: TableStore
     aiter_configs: Path | None = None
+    protected: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -87,11 +91,24 @@ class _Kernels:
 
 @dataclass(frozen=True)
 class _Settled:
-    """Where the patches of merged stacks that do not apply went: left out, rebased, or ``held`` by the stack already."""
+    """Where the patches of merged stacks that do not apply went: left out, rebased, put in for the head patches they
+    replace, or ``held`` by the stack already."""
 
     conflicts: tuple[PatchConflict, ...] = ()
     rebased: tuple[RebasedPatch, ...] = ()
     held: frozenset[str] = field(default_factory=frozenset)
+    replaced: tuple[ReplacedPatch, ...] = ()
+
+
+@dataclass(frozen=True)
+class _Sides:
+    """The files a candidate's patch touches, three ways: ``original`` under the candidate's stack before it,
+    ``changed`` with it, and ``current`` under the stack it now lands on, which also holds every file that stack
+    touches."""
+
+    original: Files
+    changed: Files
+    current: Files
 
 
 def carry(onto: str, base: Recipe, candidate: Recipe, ours: Recipe, stored: Stored) -> RepoMerge:
@@ -119,6 +136,7 @@ def carry(onto: str, base: Recipe, candidate: Recipe, ours: Recipe, stored: Stor
         settled.conflicts,
         settled.rebased,
         kernels.united,
+        replaced_patches=settled.replaced,
     )
 
 
@@ -341,32 +359,45 @@ def _settle(
     component: ComponentPatches | None, theirs: ComponentPatches | None, brought: Collection[str], stored: Stored
 ) -> _Settled:
     """Each patch of ``component`` that does not apply after the ones before it that do: rebased where the candidate
-    ``brought`` it and no line overlaps, held where the stack before it already makes its change, a conflict
-    otherwise."""
+    ``brought`` it and no line overlaps, put in for the head patches it replaces where it supersedes them, held where
+    the stack before it already makes its change, a conflict otherwise."""
     if component is None or not component.patches or _apply_error(component, stored.stack_files) is None:
         return _Settled()
+    heads = frozenset(
+        patch
+        for patch in component.patches
+        if patch.path not in brought
+        and patch.path not in stored.protected
+        and (theirs is None or patch not in theirs.patches)
+    )
     applied: list[PatchRef] = []
-    conflicts, rebased, held = [], [], set()
+    conflicts, rebased, replaced, held = [], [], [], set()
     for patch in component.patches:
         stack = replace(component, patches=tuple(applied))
         error = _apply_error(replace(stack, patches=(*applied, patch)), stored.stack_files)
         if error is None:
             applied.append(patch)
             continue
-        text = _rebased_text(stack, theirs, patch, stored) if theirs is not None and patch.path in brought else None
-        if text is None:
+        sides = _sides(stack, theirs, patch, stored) if theirs is not None and patch.path in brought else None
+        text = None if sides is None else _rebased_text(stack, sides)
+        kept = _replacement(stack, sides, patch, heads, stored) if sides is not None and text is None else None
+        if kept is not None:
+            removed = tuple(head.path for head in applied if head not in kept)
+            applied = [*kept, patch]
+            replaced.append(ReplacedPatch(component.component, removed, patch))
+        elif text is None:
             conflicts.append(PatchConflict(component.component, patch.path, error))
         elif text:
             applied.append(stored.store_patch(component.component, text))
             rebased.append(RebasedPatch(component.component, patch.path, applied[-1]))
         else:
             held.add(patch.path)
-    return _Settled(tuple(conflicts), tuple(rebased), frozenset(held))
+    return _Settled(tuple(conflicts), tuple(rebased), frozenset(held), tuple(replaced))
 
 
-def _rebased_text(stack: ComponentPatches, theirs: ComponentPatches, patch: PatchRef, stored: Stored) -> str | None:
-    """``patch``'s change from the candidate's stack before it, merged three ways into the files ``stack`` leaves, as
-    a patch over ``stack``: empty when ``stack`` already makes the change, ``None`` when a line is changed by both."""
+def _sides(stack: ComponentPatches, theirs: ComponentPatches, patch: PatchRef, stored: Stored) -> _Sides | None:
+    """The files ``patch`` of the candidate's stack ``theirs`` touches, before and after it there and under ``stack``;
+    ``None`` when a stack does not apply."""
     index = theirs.patches.index(patch)
     try:
         changed = stored.stack_files(replace(theirs, patches=theirs.patches[: index + 1]), ())
@@ -374,8 +405,53 @@ def _rebased_text(stack: ComponentPatches, theirs: ComponentPatches, patch: Patc
         current = stored.stack_files(stack, changed)
     except PatchApplyError:
         return None
-    merged = merge_files(original, current, changed)
-    return None if merged is None else patch_between(stack.component, current, merged)
+    return _Sides(original, changed, current)
+
+
+def _rebased_text(stack: ComponentPatches, sides: _Sides) -> str | None:
+    """The patch's change merged three ways into the files ``stack`` leaves, as a patch over ``stack``: empty when
+    ``stack`` already makes the change, ``None`` when a line is changed by both."""
+    merged = merge_files(sides.original, sides.current, sides.changed)
+    return None if merged is None else patch_between(stack.component, sides.current, merged)
+
+
+def _replacement(
+    stack: ComponentPatches, sides: _Sides, patch: PatchRef, heads: Collection[PatchRef], stored: Stored
+) -> tuple[PatchRef, ...] | None:
+    """What is left of ``stack`` once ``patch`` replaces one of its ``heads`` (head patches the candidate's stack does
+    not hold and no foundation fix contributed), ``None`` when it replaces none.
+
+    Two branches that wrote the same lines independently cannot be merged by text, but one version can be picked by
+    measurement: the head patch X is taken out with every later patch that applies only on top of it, and ``patch``
+    goes in as it is. That is a replacement only when nothing of X survives on its own: every file must equal, byte for
+    byte, the three-way merge that takes the candidate's side of every overlap. Otherwise both changes are needed
+    together, and the patch stays a conflict for the integrator's resolver. A dependent the candidate brought or a
+    foundation fix contributed is never taken out.
+    """
+    wanted = merge_files(sides.original, sides.current, sides.changed, theirs_wins=True)
+    if wanted is None:
+        return None
+    for head in (head for head in reversed(stack.patches) if head in heads):
+        kept = _without_dependents(stack, head, stored)
+        if any(gone not in heads for gone in stack.patches if gone not in kept):
+            continue
+        try:
+            files = stored.stack_files(replace(stack, patches=(*kept, patch)), wanted)
+        except PatchApplyError:
+            continue
+        if all(files.get(path) == content for path, content in wanted.items()):
+            return kept
+    return None
+
+
+def _without_dependents(stack: ComponentPatches, head: PatchRef, stored: Stored) -> tuple[PatchRef, ...]:
+    """``stack`` without ``head`` and without each later patch that no longer applies once it is gone."""
+    index = stack.patches.index(head)
+    kept = list(stack.patches[:index])
+    for later in stack.patches[index + 1 :]:
+        if _apply_error(replace(stack, patches=(*kept, later)), stored.stack_files) is None:
+            kept.append(later)
+    return tuple(kept)
 
 
 def _apply_error(component: ComponentPatches, stack_files: StackFiles) -> str | None:
@@ -392,17 +468,20 @@ def _joined(settled: Iterable[_Settled]) -> _Settled:
         tuple(conflict for part in parts for conflict in part.conflicts),
         tuple(rebased for part in parts for rebased in part.rebased),
         frozenset().union(*(part.held for part in parts)),
+        tuple(replaced for part in parts for replaced in part.replaced),
     )
 
 
 def _without(delta: RecipeDelta, settled: _Settled) -> RecipeDelta:
     """``delta`` with every conflicting patch left out, not added when the candidate brings it and dropped otherwise;
-    a rebased patch in place of the candidate's, and none for one the stack already holds."""
-    if not (settled.conflicts or settled.rebased or settled.held):
+    a rebased patch in place of the candidate's, none for one the stack already holds, and the head patches a
+    candidate's patch replaces dropped."""
+    if not (settled.conflicts or settled.rebased or settled.held or settled.replaced):
         return delta
     changes = []
     for change in delta.components:
         failed = {conflict.path for conflict in settled.conflicts if conflict.component == change.component}
+        failed |= {path for swap in settled.replaced if swap.component == change.component for path in swap.removed}
         moved = {rebased.path: rebased.patch for rebased in settled.rebased if rebased.component == change.component}
         brought = {patch.path for patch in change.add_patches}
         kept = (patch for patch in change.add_patches if patch.path not in failed | settled.held)
