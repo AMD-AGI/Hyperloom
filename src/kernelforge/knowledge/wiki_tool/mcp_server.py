@@ -215,12 +215,10 @@ def _bounded(text: str) -> tuple[str, bool]:
 class KnowledgeWikiServer:
     """Serve the knowledge base tools for one agent session over stdio."""
 
-    def __init__(self, environ: dict[str, str] | None = None) -> None:
-        env = os.environ if environ is None else environ
-        # The session side names all three, after Config has checked that the root is a knowledge base checkout.
-        self.role = env[ROLE_ENV]
-        self.root = Path(env[ROOT_ENV]).resolve()
-        self.log_path = Path(env[LOG_ENV])
+    def __init__(self, *, root: Path, log_path: Path, role: str) -> None:
+        self.root = root.resolve()
+        self.log_path = log_path
+        self.role = role
 
     def _log(self, record: dict[str, Any]) -> None:
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -302,7 +300,11 @@ class KnowledgeWikiServer:
 
 
 async def _serve() -> None:
-    await mcp_stdio.serve(KnowledgeWikiServer().dispatch)
+    # The session side names all three, after Config has checked that the root is a knowledge base checkout.
+    server = KnowledgeWikiServer(
+        root=Path(os.environ[ROOT_ENV]), log_path=Path(os.environ[LOG_ENV]), role=os.environ[ROLE_ENV]
+    )
+    await mcp_stdio.serve(server.dispatch)
 
 
 def main() -> None:
