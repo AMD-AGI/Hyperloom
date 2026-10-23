@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any, Iterable, MutableMapping
 
 from hyperloom.common.env import env_str
+from hyperloom.common.nofollow import read_text_nofollow
 
 SPECIALIST_USER_ENV = "HYPERLOOM_SPECIALIST_USER"
 
@@ -89,14 +90,46 @@ class RunAs:
             env[f"GIT_CONFIG_KEY_{i}"] = "safe.directory"
             env[f"GIT_CONFIG_VALUE_{i}"] = path
 
+    def share_worktree_git(self, worktree: Path) -> None:
+        """Let this user read the git metadata of a linked worktree, and nothing more.
+
+        ``git worktree add`` creates the ``<worktree>/.git`` gitfile and its
+        ``<repo>/.git/worktrees/<name>`` admin dir under the app's group and,
+        once the app's umask is 007, without other-read, so the child's git
+        would fail. Both are shared read-only, as is search on the ``worktrees``
+        directory above the admin dir. A worktree with no gitfile (a snapshot)
+        needs nothing.
+
+        The gitfile sits in a tree the child can rewrite, so its ``gitdir:``
+        line is believed only when the admin dir it names points back at this
+        worktree's gitfile (the admin dir is the app's); a gitfile that lies is
+        refused with ``OSError`` rather than shared.
+        """
+        gitfile = worktree / ".git"
+        if not gitfile.is_file() or gitfile.is_symlink():
+            return
+        first = read_text_nofollow(gitfile).strip()
+        if not first.startswith("gitdir:"):
+            raise OSError(f"refusing to share {gitfile}: not a gitdir pointer")
+        admin = Path(first.removeprefix("gitdir:").strip())
+        back = read_text_nofollow(admin / "gitdir").strip()
+        if admin.parent.name != "worktrees" or os.path.realpath(back) != os.path.realpath(gitfile):
+            raise OSError(f"refusing to share {admin}: it is not the admin dir of {worktree}")
+        self.share_tree(gitfile, write=False)
+        self.share_tree(admin, write=False)
+        parent = admin.parent
+        os.chown(parent, -1, self.gid)
+        parent.chmod(stat.S_IMODE(parent.stat().st_mode) | stat.S_IRGRP | stat.S_IXGRP)
+
     def share_tree(self, root: Path, *, sticky: bool = False, write: bool = True) -> None:
         """Give this user's group read-write access to everything under ``root``.
 
         The tree stays owned by the app. Its group becomes this user's group,
         directories get the setgid bit (new entries keep the group) and every
         entry gets group read and write (``write=False``: group read only,
-        plus search on directories, for a tree the child only reads). ``sticky`` additionally stops the
-        child deleting the app's own files in the top directory. Symlinks are
+        plus search on directories, for a tree the child only reads, such as
+        a worktree's git metadata). ``sticky`` additionally stops the child
+        deleting the app's own files in the top directory. Symlinks are
         not followed, and a ``root`` that is itself a symlink is refused.
         ``.git`` is left alone: the child does no git writes. Needs root or
         membership in the group; raises ``OSError``
@@ -169,3 +202,28 @@ def set_group_shared_umask() -> None:
     stay group-writable. Process-wide; never call it when no user was named.
     """
     os.umask(_APP_UMASK)
+
+
+_CAPABILITIES = {"CAP_KILL": 5, "CAP_SETGID": 6, "CAP_SETUID": 7}
+
+
+def missing_capabilities(effective: int) -> list[str]:
+    """The launch capabilities absent from the effective capability bitmask ``effective``."""
+    return [name for name, bit in _CAPABILITIES.items() if not effective >> bit & 1]
+
+
+def missing_launch_capabilities() -> list[str]:
+    """Capabilities the app lacks to start, and later stop, a child that runs as another user.
+
+    ``setuid``/``setgid`` start it; ``kill`` is what lets the reap paths (deadline,
+    stale heartbeat, done file, cancel) signal a process of another uid, and
+    without it every reap ends unconfirmed. Root has all three unless they were
+    dropped, so the effective set is read, not inferred from the uid. When it
+    cannot be read, root is assumed to have them and anyone else to have none.
+    """
+    try:
+        status = Path("/proc/self/status").read_text(encoding="utf-8")
+        effective = next(int(line.split()[1], 16) for line in status.splitlines() if line.startswith("CapEff:"))
+    except (OSError, StopIteration, ValueError, IndexError):
+        return [] if os.geteuid() == 0 else list(_CAPABILITIES)
+    return missing_capabilities(effective)

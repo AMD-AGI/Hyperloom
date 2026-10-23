@@ -53,7 +53,8 @@ from hyperloom.common.llm_config import (
 from hyperloom.common.env_safety import (
     redact_file_in_place,
 )
-from hyperloom.common.run_as import RunAsError
+from hyperloom.common.nofollow import read_text_nofollow, regular_files_nofollow, write_text_nofollow
+from hyperloom.common.run_as import RunAs, RunAsError
 from hyperloom.common.proctree import collect_tree, kill_tree
 
 from .agent_cli_config import (
@@ -63,7 +64,7 @@ from .agent_cli_config import (
     _codex_provider_resolver_overlay,
     _write_private_codex_config,
 )
-from .launch_env import apply_gpu_env, prepare_demote, resolve_launch_user
+from .launch_env import apply_gpu_env, prepare_demote, resolve_launch_user, stage_mcp_config
 from .dsh_launch import DshLaunchRequest, build_dsh_launch, remove_dsh_profiles, resolve_dsh_executable
 from .trace_harvest import harvest_agent_trace
 from ..actions.cancel_channel import cancel_scope_listener, current_cancel_scope
@@ -260,6 +261,9 @@ def _setup_worktree(
             text=True,
             timeout=60.0,
             check=False,
+            # The ref, gitfile and admin dir git makes here must stay readable by a demoted specialist,
+            # whatever umask a launch set on the app.
+            umask=0o022,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
         return None, f"git worktree add failed to spawn: {exc!r}"
@@ -527,7 +531,7 @@ class SpecialistSubprocessDispatcher:
         backend = ""
         try:
             backend = self._agent_backend()
-            cmd = self._build_launch(backend, request, env)
+            cmd = self._build_launch(backend, request, env, run_as)
         except SpecialistAgentUnavailableError as exc:
             # No runtime for this deployment's credential shape. Report it as the
             # task's failure rather than degrading to a CLI that cannot auth.
@@ -746,7 +750,9 @@ class SpecialistSubprocessDispatcher:
         )
 
     # Internals
-    def _build_launch(self, backend: str, request: SpecialistSpawn, env: dict[str, str]) -> list[str]:
+    def _build_launch(
+        self, backend: str, request: SpecialistSpawn, env: dict[str, str], run_as: RunAs | None
+    ) -> list[str]:
         """Build the CLI argv for ``backend``; child-only values go into ``env``."""
         if backend == AGENT_BACKEND_DEEPSEEK:
             dsh_request = DshLaunchRequest(
@@ -782,6 +788,7 @@ class SpecialistSubprocessDispatcher:
             workspace=request.workspace,
             worktree=request.worktree,
             disallowed_tools=frozenset(request.disallowed_tools),
+            mcp_config_path=stage_mcp_config(run_as, request.workspace, self.config.mcp_config_path),
         )
 
     @staticmethod
@@ -939,6 +946,7 @@ class SpecialistSubprocessDispatcher:
         workspace: Path,
         worktree: Path | None,
         disallowed_tools: frozenset[str] = frozenset(),
+        mcp_config_path: str | None = None,
     ) -> list[str]:
         """Assemble the ``claude`` CLI argv for a specialist subprocess.
 
@@ -953,21 +961,12 @@ class SpecialistSubprocessDispatcher:
             worktree (Path | None): Write-isolated worktree surfaced as the
                 first ``--add-dir`` when present.
             disallowed_tools: Tool names to remove from the available set.
+            mcp_config_path: The ``--mcp-config`` file the child can read, when it is not the configured one.
 
         Returns:
             list[str]: The full command argv to spawn.
         """
-        fd = os.open(system_prompt_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                fh.write(system_prompt)
-        except BaseException:
-            try:
-                os.close(fd)
-            except OSError:
-                pass
-            raise
-        system_prompt_file.chmod(0o600)
+        write_text_nofollow(system_prompt_file.parent, (system_prompt_file.name,), system_prompt, mode=0o600)
 
         cfg = self.config
         cmd: list[str] = [
@@ -993,8 +992,8 @@ class SpecialistSubprocessDispatcher:
         from .leaf import build_leaf_agents_json
 
         cmd.extend(["--agents", cfg.leaf_agents_json or build_leaf_agents_json()])
-        if cfg.mcp_config_path:
-            cmd.extend(["--mcp-config", cfg.mcp_config_path])
+        if mcp_config_path or cfg.mcp_config_path:
+            cmd.extend(["--mcp-config", mcp_config_path or cfg.mcp_config_path])
         for d in self._writable_dirs(workspace, worktree):
             cmd.extend(["--add-dir", d])
         if cfg.extra_claude_args:
@@ -1301,22 +1300,21 @@ class SpecialistSubprocessDispatcher:
                 targets=targets,
             )
             if harvested_diff:
-                harvested = worktree / "patches" / "_worktree_diff.patch"
-                harvested.parent.mkdir(exist_ok=True)
-                harvested.write_text(harvested_diff, encoding="utf-8")
-                return [str(harvested)], {str(harvested): str(worktree_base or worktree)}
+                try:
+                    harvested = write_text_nofollow(worktree, ("patches", "_worktree_diff.patch"), harvested_diff)
+                except OSError as exc:
+                    log.warning("specialist: refusing to write the harvested patch under %s: %r", worktree, exc)
+                else:
+                    return [str(harvested)], {str(harvested): str(worktree_base or worktree)}
 
         out: list[str] = []
         for base in (worktree, workspace):
             if base is None:
                 continue
-            patches_dir = base / "patches"
-            if not patches_dir.is_dir():
-                continue
-            for ext in ("*.patch", "*.diff"):
-                for p in sorted(patches_dir.glob(ext)):
-                    if p.name != "_worktree_diff.patch":
-                        out.append(str(p))
+            for ext in (".patch", ".diff"):
+                out.extend(
+                    str(p) for p in regular_files_nofollow(base, "patches", (ext,)) if p.name != "_worktree_diff.patch"
+                )
         return out, {}
 
     @staticmethod
@@ -1338,7 +1336,7 @@ class SpecialistSubprocessDispatcher:
         if not done_file.exists():
             return None
         try:
-            data = json.loads(done_file.read_text(encoding="utf-8"))
+            data = json.loads(read_text_nofollow(done_file))
         except (OSError, json.JSONDecodeError) as exc:
             log.warning(
                 "specialist_done.json parse failed at %s: %r",

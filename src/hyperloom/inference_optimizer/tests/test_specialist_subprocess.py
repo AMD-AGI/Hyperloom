@@ -27,6 +27,7 @@ from hyperloom.orchestrator.specialists.runner import (
     SpecialistRunner,
 )
 from hyperloom.orchestrator.specialists import subprocess_, wall_budget
+from hyperloom.orchestrator.specialists import launch_env
 from hyperloom.orchestrator.specialists.launch_env import prepare_demote
 from hyperloom.orchestrator.specialists.agent_cli_config import _build_specialist_env
 from hyperloom.orchestrator.specialists.subprocess_ import (
@@ -1335,6 +1336,7 @@ async def _run_spawn(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **spawn_kw
         raise OSError("spawn refused by test")
 
     monkeypatch.setattr(subprocess_.subprocess, "Popen", _popen)
+    monkeypatch.setattr(launch_env, "missing_launch_capabilities", list)
     disp = SpecialistSubprocessDispatcher(config=SpecialistSubprocessConfig(poll_interval_seconds=0.01))
     spawn = SpecialistSpawn(
         task_id="t-user",
@@ -1515,3 +1517,205 @@ async def test_a_launch_with_no_user_leaves_the_apps_umask_alone(tmp_path, monke
     monkeypatch.delenv("HYPERLOOM_SPECIALIST_USER", raising=False)
     await _run_spawn(tmp_path, monkeypatch)
     assert os.umask(0o022) == 0o022
+
+
+# ---- review fixes: the app never follows a link the child planted ------------------------------
+def test_harvest_through_a_symlinked_patches_dir_writes_nothing_outside(tmp_path: Path):
+    base, wt = _make_git_worktree_pair(tmp_path)
+    (wt / "mod.py").write_text("new = 2\n", encoding="utf-8")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (wt / "patches").symlink_to(outside)
+    patches, _roots = SpecialistSubprocessDispatcher._collect_patches(wt, tmp_path / "ws", worktree_base=base)
+    assert patches == []
+    assert list(outside.iterdir()) == []
+
+
+def test_harvest_over_a_symlinked_patch_name_does_not_truncate_its_target(tmp_path: Path):
+    base, wt = _make_git_worktree_pair(tmp_path)
+    (wt / "mod.py").write_text("new = 2\n", encoding="utf-8")
+    victim = tmp_path / "app_state.json"
+    victim.write_text("precious", encoding="utf-8")
+    (wt / "patches").mkdir()
+    (wt / "patches" / "_worktree_diff.patch").symlink_to(victim)
+    patches, _roots = SpecialistSubprocessDispatcher._collect_patches(wt, tmp_path / "ws", worktree_base=base)
+    assert victim.read_text(encoding="utf-8") == "precious"
+    assert len(patches) == 1 and "mod.py" in Path(patches[0]).read_text(encoding="utf-8")
+
+
+def test_a_symlinked_patch_file_is_not_collected(tmp_path: Path):
+    ws = tmp_path / "ws"
+    (ws / "patches").mkdir(parents=True)
+    target = tmp_path / "secret.patch"
+    target.write_text("--- a/x\n+++ b/x\n", encoding="utf-8")
+    (ws / "patches" / "good.patch").write_text("--- a/y\n+++ b/y\n", encoding="utf-8")
+    (ws / "patches" / "link.patch").symlink_to(target)
+    patches, _roots = SpecialistSubprocessDispatcher._collect_patches(None, ws)
+    assert [Path(p).name for p in patches] == ["good.patch"]
+
+
+def test_a_symlinked_done_file_is_not_read(tmp_path: Path):
+    app_only = tmp_path / "app_only.json"
+    app_only.write_text('{"app_secret": "value"}', encoding="utf-8")
+    done = tmp_path / "specialist_done.json"
+    done.symlink_to(app_only)
+    assert SpecialistSubprocessDispatcher._read_done(done) is None
+    done.unlink()
+    done.write_text('{"summary": "ok"}', encoding="utf-8")
+    assert SpecialistSubprocessDispatcher._read_done(done) == {"summary": "ok"}
+
+
+def test_the_codex_config_is_not_written_through_a_planted_link(tmp_path: Path):
+    from hyperloom.orchestrator.specialists.agent_cli_config import _write_private_codex_config
+
+    home = tmp_path / ".codex"
+    home.mkdir()
+    victim = tmp_path / "victim"
+    victim.write_text("keep", encoding="utf-8")
+    (home / "config.toml.tmp").symlink_to(victim)
+    _write_private_codex_config(codex_home=home, developer_instructions="d", mcp_lines=[])
+    assert victim.read_text(encoding="utf-8") == "keep"
+    assert "developer_instructions" in (home / "config.toml").read_text(encoding="utf-8")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    linked = tmp_path / "linked"
+    linked.symlink_to(elsewhere)
+    with pytest.raises(OSError):
+        _write_private_codex_config(codex_home=linked, developer_instructions="d", mcp_lines=[])
+
+
+# ---- review fixes: a demoted child needs the capability to be stopped, its MCP config and its git ----------
+async def test_a_launch_without_the_capability_to_stop_the_child_is_refused(tmp_path, monkeypatch, restore_umask):
+    monkeypatch.setenv("HYPERLOOM_SPECIALIST_USER", _DEMOTE_USER)
+    result, popen_kwargs = await _run_spawn(tmp_path, monkeypatch)
+    assert popen_kwargs[0]["user"] is not None  # with the capabilities it spawns
+    monkeypatch.setattr(launch_env, "missing_launch_capabilities", lambda: ["CAP_KILL"])
+    os.umask(0o022)
+    disp = SpecialistSubprocessDispatcher(config=SpecialistSubprocessConfig(poll_interval_seconds=0.01))
+    spawn = SpecialistSpawn(
+        task_id="t-nocap",
+        workspace=tmp_path / "ws2",
+        worktree=None,
+        worktree_base=None,
+        system_prompt="sys",
+        user_prompt="usr",
+        disallowed_tools=frozenset(),
+        max_turns=1,
+        deadline=Deadline.after(5.0),
+    )
+    refused = await disp.run(spawn)
+    assert "specialist user refused" in (refused.error or "")
+    assert "CAP_KILL" in (refused.error or "")
+    assert os.umask(0o022) == 0o022
+
+
+def test_the_capability_mask_names_what_is_missing():
+    from hyperloom.common.run_as import missing_capabilities
+
+    assert missing_capabilities(0xFFFFFFFFFF) == []
+    assert missing_capabilities(0xFFFFFFFFFF & ~(1 << 5)) == ["CAP_KILL"]
+    assert missing_capabilities(0) == ["CAP_KILL", "CAP_SETGID", "CAP_SETUID"]
+
+
+def test_the_mcp_config_is_staged_in_the_workspace_for_a_demoted_child(tmp_path: Path):
+    from hyperloom.common.run_as import RunAs
+
+    run_as = RunAs(user="u", uid=1, gid=1, groups=(1,), home="/h")
+    source = tmp_path / "runtime" / "specialist_mcp.json"
+    source.parent.mkdir()
+    source.write_text('{"mcpServers": {}}', encoding="utf-8")
+    source.chmod(0o600)
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    staged = launch_env.stage_mcp_config(run_as, workspace, str(source))
+    assert staged == str(workspace / "specialist_mcp.json")
+    assert Path(staged).read_text(encoding="utf-8") == '{"mcpServers": {}}'
+    assert launch_env.stage_mcp_config(None, workspace, str(source)) is None
+    assert launch_env.stage_mcp_config(run_as, workspace, None) is None
+    with pytest.raises(subprocess_.SpecialistAgentUnavailableError):
+        launch_env.stage_mcp_config(run_as, workspace, str(tmp_path / "missing.json"))
+
+
+def test_a_forged_gitfile_is_refused_not_shared(tmp_path: Path):
+    from hyperloom.common.run_as import RunAs
+
+    run_as = RunAs(user="u", uid=1, gid=1, groups=(1,), home="/h")
+    target = tmp_path / "private"
+    target.mkdir()
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    (wt / ".git").write_text(f"gitdir: {target}\n", encoding="utf-8")
+    with pytest.raises(OSError):
+        run_as.share_worktree_git(wt)
+    (target / "gitdir").write_text(str(wt / ".git"), encoding="utf-8")  # points back, but is not under worktrees/
+    with pytest.raises(OSError):
+        run_as.share_worktree_git(wt)
+
+
+_TWO_TASK_ROLE = """#!/bin/sh
+id -u > proof_uid.txt
+while [ $# -gt 0 ]; do
+  if [ "$1" = --mcp-config ]; then cat "$2" > proof_mcp.txt 2> proof_mcp.err; echo $? > proof_mcp.rc; fi
+  shift
+done
+echo edited >> src.py
+git status --porcelain > proof_git_status.txt 2> proof_git_status.err; echo $? > proof_git_status.rc
+git diff > proof_git_diff.txt 2> proof_git_diff.err; echo $? > proof_git_diff.rc
+git log --oneline -1 > proof_git_log.txt 2> proof_git_log.err; echo $? > proof_git_log.rc
+echo '{"gap_canonical_id": "gap.test.example", "domain": "serving_specialist", "proposal_set": [],
+"patches_written": [], "summary": "demoted", "confidence": 0.5}' > specialist_done.json
+"""
+
+
+@_demote_skip
+async def test_every_demoted_specialist_gets_git_and_its_mcp_config_with_the_umask_already_007(
+    monkeypatch, restore_umask
+):
+    import shutil
+    import tempfile
+
+    base = Path(tempfile.mkdtemp(prefix="d16b."))
+    try:
+        base.chmod(0o755)
+        repo = base / "framework"
+        init_git_repo(repo)
+        os.umask(0o007)  # what the first launch leaves behind: every later worktree is made under it
+        monkeypatch.setenv("FRAMEWORK_REPO_PATH", str(repo))
+        monkeypatch.setenv("HYPERLOOM_SPECIALIST_USER", _DEMOTE_USER)
+        monkeypatch.setattr(launch_env, "missing_launch_capabilities", list)
+        role = base / "bin" / "claude"
+        role.parent.mkdir()
+        role.parent.chmod(0o755)
+        role.write_text(_TWO_TASK_ROLE, encoding="utf-8")
+        role.chmod(0o755)
+        session_dir = base / "session"
+        (session_dir / "runtime").mkdir(parents=True)
+        for parent in (session_dir, session_dir / "runs", session_dir / "runs" / "specialist"):
+            parent.mkdir(exist_ok=True)
+            parent.chmod(0o755)  # the account traverses these; the app never changes their modes
+        mcp = session_dir / "runtime" / "specialist_mcp.json"
+        mcp.write_text('{"mcpServers": {"pr_monitor": {"type": "http", "url": "http://x"}}}', encoding="utf-8")
+        mcp.chmod(0o600)
+        runner = SpecialistRunner(
+            subprocess_config=SpecialistSubprocessConfig(
+                claude_executable=str(role),
+                model="",
+                framework_source_roots=(str(repo),),
+                poll_interval_seconds=0.2,
+                mcp_config_path=str(mcp),
+            ),
+            session_dir=session_dir,
+            default_max_turns=2,
+        )
+        for task_id in ("t-one", "t-two"):
+            result = await runner.run(_make_runner_ctx(task_id))
+            worktree = session_dir / "runs" / "specialist" / task_id / "worktree"
+            proof = {p.name: p.read_text(encoding="utf-8").strip() for p in worktree.glob("proof_*")}
+            assert result.status == "succeeded", result.error
+            for tool in ("status", "diff", "log"):
+                assert proof[f"proof_git_{tool}.rc"] == "0", (task_id, tool, proof[f"proof_git_{tool}.err"])
+            assert proof["proof_mcp.rc"] == "0", (task_id, proof["proof_mcp.err"])
+            assert "pr_monitor" in proof["proof_mcp.txt"]
+        assert mcp.stat().st_mode & 0o077 == 0  # the original stays the app's
+    finally:
+        shutil.rmtree(base, ignore_errors=True)

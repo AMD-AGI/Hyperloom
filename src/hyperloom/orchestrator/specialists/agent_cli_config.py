@@ -21,6 +21,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from hyperloom.common.env import env_bool
+from hyperloom.common.nofollow import write_text_nofollow
 from hyperloom.common.env_safety import BLOCKED_CHILD_ENV_NAMES, scrub_child_process_env, valid_env_key
 from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
 
@@ -384,7 +385,12 @@ def _write_private_codex_config(
 ) -> Path:
     """Write task-local Codex configuration with private filesystem modes."""
     codex_home.mkdir(parents=True, mode=0o700, exist_ok=True)
-    codex_home.chmod(0o700)
+    # A previous run's account could own, or have replaced with a link, what is here.
+    dir_fd = os.open(codex_home, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fchmod(dir_fd, 0o700)
+    finally:
+        os.close(dir_fd)
     config_path = codex_home / "config.toml"
     lines: list[str] = []
     if developer_instructions:
@@ -395,18 +401,9 @@ def _write_private_codex_config(
             ]
         )
     lines.extend(mcp_lines)
-    temporary = config_path.with_suffix(".toml.tmp")
-    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write("\n".join(lines).rstrip() + "\n")
-    except BaseException:
-        try:
-            os.close(fd)
-        except OSError:
-            # fdopen owns and may already have closed the descriptor.
-            pass
-        raise
+    temporary = write_text_nofollow(
+        codex_home, (config_path.with_suffix(".toml.tmp").name,), "\n".join(lines).rstrip() + "\n", mode=0o600
+    )
     os.replace(temporary, config_path)
     config_path.chmod(0o600)
     return config_path

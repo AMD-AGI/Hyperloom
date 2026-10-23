@@ -8,8 +8,17 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Sequence
 
-from hyperloom.common.run_as import RunAs, RunAsError, set_group_shared_umask, specialist_run_as
+from hyperloom.common.nofollow import read_bytes_nofollow, write_text_nofollow
+from hyperloom.common.run_as import (
+    RunAs,
+    RunAsError,
+    missing_launch_capabilities,
+    set_group_shared_umask,
+    specialist_run_as,
+)
 from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES
+
+from .agent_cli_config import SpecialistAgentUnavailableError
 
 _GPU_IDS_ENV = "INFERENCE_OPTIMIZER_SPECIALIST_GPU_IDS"
 _AITER_JIT_ENV = "INFERENCE_OPTIMIZER_AITER_JIT_DIR"
@@ -59,11 +68,16 @@ def resolve_launch_user(gpu_lease: object | None) -> RunAs | None:
 
     Raises:
         RunAsError: The configured user is unusable, or the specialist runs in
-            a Ray actor, which cannot be started as another user.
+            a Ray actor, which cannot be started as another user, or the app
+            lacks CAP_SETUID, CAP_SETGID or CAP_KILL (a child it cannot signal
+            is a child it cannot stop).
     """
     run_as = specialist_run_as()
     if run_as is not None and gpu_lease is not None:
         raise RunAsError("the Ray GPU actor path cannot run the specialist as another user")
+    missing = missing_launch_capabilities() if run_as is not None else []
+    if missing:
+        raise RunAsError(f"running a specialist as another user needs root or {', '.join(missing)}")
     if run_as is not None:
         set_group_shared_umask()
     return run_as
@@ -91,5 +105,26 @@ def prepare_demote(
             private.chmod(0o600)
     if worktree is not None and workspace not in worktree.parents:
         run_as.share_tree(worktree)
+    if worktree is not None:
+        run_as.share_worktree_git(worktree)
     run_as.apply_env(env, safe_dirs=[worktree] if worktree is not None else ())
     return run_as.popen_kwargs()
+
+
+def stage_mcp_config(run_as: RunAs | None, workspace: Path, source: str | None) -> str | None:
+    """A copy of the ``--mcp-config`` file in the task workspace, when the child cannot read the original.
+
+    The original sits in the app's runtime directory at 0600. The copy is made
+    before :func:`prepare_demote` shares the workspace, so it is readable by the
+    account; ``None`` (use the configured path) when nothing is demoted or no
+    config is set.
+    """
+    if run_as is None or not source:
+        return None
+    try:
+        text = read_bytes_nofollow(source).decode("utf-8")
+        return str(write_text_nofollow(workspace, ("specialist_mcp.json",), text, mode=0o600))
+    except (OSError, UnicodeDecodeError) as exc:
+        raise SpecialistAgentUnavailableError(
+            f"cannot stage the MCP config {source} for the specialist: {exc}"
+        ) from exc
