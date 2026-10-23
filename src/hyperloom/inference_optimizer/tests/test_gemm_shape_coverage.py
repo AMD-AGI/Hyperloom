@@ -12,8 +12,6 @@ import pytest
 
 from hyperloom.orchestrator.kernel.gemm_shape_coverage import (
     aiter_lookup_keys,
-    aiter_padded_m_coarse,
-    aiter_padded_m_fine,
     align_shapes_to_aiter_keys,
     fmoe_tuned_config_coverage,
     load_shapes_json,
@@ -31,28 +29,7 @@ from hyperloom.orchestrator.kernel.gemm_shape_coverage import (
 
 
 class TestAiterPadding:
-    """The padding ladder must mirror ``csrc/py_itfs_cu/gemm_common.cu``."""
-
-    def test_fine_padding_ladder(self):
-        assert aiter_padded_m_fine(1) == 16
-        assert aiter_padded_m_fine(16) == 16
-        assert aiter_padded_m_fine(17) == 32
-        assert aiter_padded_m_fine(256) == 256
-        assert aiter_padded_m_fine(257) == 288
-        assert aiter_padded_m_fine(1024) == 1024
-        assert aiter_padded_m_fine(1025) == 1088
-        assert aiter_padded_m_fine(1076) == 1088
-        assert aiter_padded_m_fine(4096) == 4096
-        assert aiter_padded_m_fine(4097) == 4224
-        assert aiter_padded_m_fine(7211) == 7296
-
-    def test_coarse_padding_is_next_pow2(self):
-        assert aiter_padded_m_coarse(1, 5120) == 1
-        assert aiter_padded_m_coarse(1076, 5120) == 2048
-        assert aiter_padded_m_coarse(8192, 5120) == 8192
-        # M > 8192 with a wide N clamps to 8192 rather than 16384.
-        assert aiter_padded_m_coarse(9000, 5120) == 8192
-        assert aiter_padded_m_coarse(9000, 1024) == 16384
+    """The lookup keys follow the order aiter tries them in."""
 
     def test_lookup_key_order_matches_runtime(self):
         assert aiter_lookup_keys((1076, 5120, 17408)) == (

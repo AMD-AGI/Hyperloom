@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Shared dense-GEMM shape derivation from a model config."""
+"""Shared dense-GEMM shape derivation from a model config, and aiter's padded-M lookup keys."""
 
 from __future__ import annotations
 
@@ -96,6 +96,33 @@ def compute_dense_nk_shapes(geometry: DenseGeometry, tp: int) -> list[tuple[int,
             seen.add((n, k))
             out.append((n, k))
     return out
+
+
+def padded_m_gl0(m: int) -> int:
+    """aiter's ``get_padded_m(..., gl=0)``: round up to a tile multiple."""
+    m = max(1, int(m))
+    if m <= 256:
+        step = 16
+    elif m <= 1024:
+        step = 32
+    elif m <= 4096:
+        step = 64
+    else:
+        step = 128
+    return -(-m // step) * step
+
+
+def next_pow2(m: int) -> int:
+    """Round up to a power of two (aiter's ``nextPow2``)."""
+    m = max(1, int(m))
+    return 1 << (m - 1).bit_length()
+
+
+def padded_m_gl1(m: int, n: int) -> int:
+    """aiter's ``get_padded_m(..., gl=1)``, which is not a plain power of two."""
+    if int(m) > 8192 and int(n) > 4096:
+        return 8192
+    return next_pow2(m)
 
 
 _DECODE_M_GRID = (1, 4, 16, 32, 64, 128, 256)

@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from hyperloom.common.env import is_truthy
+from kernelforge.gemm_tune.dense_shapes import next_pow2, padded_m_gl0, padded_m_gl1
 from kernelforge.gemm_tune.evidence import moe_tuple
 
 # Emitted by aiter on every tuned-config lookup miss, naming the table consulted.
@@ -61,37 +62,13 @@ FMOE_INDEX_COLS = (
 _KERNEL_DESCRIPTOR_RE = re.compile(r"kernelName1='(?P<kn1>[^']*)'.*?kernelName2='(?P<kn2>[^']*)'")
 
 
-def aiter_padded_m_fine(m: int) -> int:
-    """Return aiter's ``gl=0`` padded M (fine-grained lookup key)."""
-    if m <= 256:
-        return (m + 15) // 16 * 16
-    if m <= 1024:
-        return (m + 31) // 32 * 32
-    if m <= 4096:
-        return (m + 63) // 64 * 64
-    return (m + 127) // 128 * 128
-
-
-def _next_pow2(m: int) -> int:
-    if m <= 1:
-        return 1
-    return 1 << (m - 1).bit_length()
-
-
-def aiter_padded_m_coarse(m: int, n: int) -> int:
-    """Return aiter's ``gl=1`` padded M (coarse power-of-two lookup key)."""
-    if m > 8192 and n > 4096:
-        return 8192
-    return _next_pow2(m)
-
-
 def aiter_lookup_keys(shape: Shape) -> tuple[Shape, Shape, Shape]:
     """Return the three (M, N, K) keys aiter tries, in lookup order."""
     m, n, k = shape
     return (
         (m, n, k),
-        (aiter_padded_m_fine(m), n, k),
-        (aiter_padded_m_coarse(m, n), n, k),
+        (padded_m_gl0(m), n, k),
+        (padded_m_gl1(m, n), n, k),
     )
 
 
@@ -105,7 +82,7 @@ _LADDER_MAX_M = 8192
 
 def _pow2_ladder(max_m: int) -> list[int]:
     """Return the power-of-two M rungs from 16 up to ``nextPow2(max_m)``."""
-    top = min(_LADDER_MAX_M, max(_LADDER_MIN_M, _next_pow2(max_m)))
+    top = min(_LADDER_MAX_M, max(_LADDER_MIN_M, next_pow2(max_m)))
     rungs = []
     rung = _LADDER_MIN_M
     while rung <= top:
@@ -128,7 +105,7 @@ def align_shapes_to_aiter_keys(
     ladder = _pow2_ladder(max(m for m, _, _ in observed))
 
     ladder_rows = {(m, n, k) for n, k in nk_pairs for m in ladder}
-    fine_rows = {(aiter_padded_m_fine(m), n, k) for m, n, k in observed} - ladder_rows
+    fine_rows = {(padded_m_gl0(m), n, k) for m, n, k in observed} - ladder_rows
 
     budget = max(len(nk_pairs), int(max_shapes))
     kept = set(ladder_rows)
