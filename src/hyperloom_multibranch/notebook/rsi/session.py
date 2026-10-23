@@ -10,7 +10,7 @@
   pooled lessons the session showed get their standing from what its branches did next (:mod:`rsi.lesson_close`).
   The last step writes the frontier calibration over the archived sessions like this one beside the receipts. A step
   that cannot be done says why and never stops CLOSE; :meth:`KnowledgeClose.document` is what the breakdown records
-  of the steps (``build_breakdown(..., knowledge=...)``).
+  of the steps (``CloseOutcome.knowledge`` of ``build_breakdown``).
 * :func:`session_frontier_policy` chooses its policy once the session has a profile: the calibration's recommendation
   for sessions like it, or the defaults; :func:`session_frontier_scorer` chooses the same way among the scorers of
   :mod:`rsi.scorers` too, crowning a challenger that passes the promotion gate (a 1-in-4 exploration session's pick,
